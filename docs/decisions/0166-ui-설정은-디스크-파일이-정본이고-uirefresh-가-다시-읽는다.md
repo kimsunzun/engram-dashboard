@@ -1,51 +1,51 @@
-# ADR-0166: UI 설정은 디스크 파일이 정본이고 ui.refresh 가 다시 읽는다
+# ADR-0166: UI settings are owned by the disk file, and ui.refresh re-reads it
 
-- 상태: 확정 (2026-08-21, 근거: 사용자 결정 + GUI 실측) · 부분 폐기 by ADR-0265 (결정 1과 3과 5와 7과 8과 9) · 결정 6 개정 — 사용자 결정 2026-10-07 · 새 ADR 없음: 결정 6 은 `window.setTheme` 에서는 지목한 창에만 걸린다(`theme.default` 쓰기에 걸지는 열려 있다 — TRD §5-6). 지목한 창이 테마를 못 받았으면 그 명령은 오류로 답하고, 다른 창에 국한된 배달 실패는 성공 + warn 로그다. 정본 = `docs/process/S21-storage/trd.md` §5-6
-- 관련: ADR-0149(슬롯 언마운트 금지) · ADR-0062(e-ink 의도) · ADR-0012(seam 격리) · CLAUDE.md 「LLM-우선 제어」 · `src-tauri/src/ui_settings.rs` · `src/theme/uiSettings.ts` · step-log S20 · Amended by ADR-0265 (결정 1과 3과 5와 7과 8과 9)
+- 상태: 확정 (2026-08-21, basis: user decision + GUI measurement) · 부분 폐기 by ADR-0265 (decisions 1, 3, 5, 7, 8 and 9) · decision 6 amended — user decision 2026-10-07 · no new ADR: for `window.setTheme`, decision 6 applies only to the window that was named (whether it applies to a `theme.default` write is still open — TRD §5-6). If the named window did not receive the theme, that command answers with an error, and a delivery failure confined to other windows is success + a warn log. Source of truth = `docs/process/S21-storage/trd.md` §5-6
+- 관련: ADR-0149(no slot unmount) · ADR-0062(e-ink intent) · ADR-0012(seam isolation) · CLAUDE.md 「LLM-우선 제어」 · `src-tauri/src/ui_settings.rs` · `src/theme/uiSettings.ts` · step-log S20 · Amended by ADR-0265 (decisions 1, 3, 5, 7, 8 and 9)
 
 ## 맥락
 
-표시 정책을 밖에서 바꿀 길이 없었다. 테마(`src/store/themeStore.ts`)는 **영속이 아예 없어** 앱을 껐다 켜면 무조건 `dark`로 돌아가고, 폰트·챗 표시값은 `localStorage`(키 `engram.chatStyle`, 10키 화이트리스트)라 **WebView2 프로파일 안에 있어 밖의 프로세스가 파일로 열 수 없다.** 프론트 설정용 디스크 파일은 저장소에 0건이었다.
+There was no way to change the display policy from outside. The theme (`src/store/themeStore.ts`) has **no persistence at all**, so when the app is turned off and on it unconditionally returns to `dark`, and the font and chat display values live in `localStorage` (key `engram.chatStyle`, a 10-key whitelist), so they are **inside the WebView2 profile and a process outside cannot open them as a file.** The repository had 0 disk files for frontend settings.
 
-「LLM-우선 제어」는 모든 기능이 LLM으로 제어 가능하기를 요구하는데, 표시 정책은 그 요구를 값마다 명령을 만드는 방식으로는 감당하기 어렵다 — 폰트 키만 10개다.
+「LLM-우선 제어」 requires every feature to be controllable by the LLM, and the display policy is hard to carry that requirement by creating a command per value — the font keys alone number 10.
 
-이 ADR은 그 방향의 **첫 키 하나(`theme`)짜리 파일럿**을 박는다. 다중 키 설정 파일·폰트 export는 후속이다.
+This ADR pins a **pilot with a single first key (`theme`)** in that direction. A multi-key settings file and a font export are follow-ups.
 
 ## 결정
 
-1. **설정 정본 = 디스크 파일.** `<data_dir>/ui-settings.json`, 키 `theme` ∈ `dark`|`light`|`e-ink`. `data_dir` = `engram_dashboard_discovery::default_data_dir()`(릴리스 = exe 인접, 디버그 = repo 안 `.engram-data`, 환경변수 override).
-2. **읽기 주인 = 셸(`src-tauri`).** 부팅은 프론트가 당기고(`get_ui_settings`), 갱신은 셸이 민다(`ui:settings-updated`). 두 경로가 같은 페이로드 struct 를 공유한다.
-3. **명령은 `ui.refresh` 하나.** 값마다 명령을 만들지 않는다. 파일을 고치는 것은 밖의 에이전트이고 **셸은 읽기만 한다** — 화면의 테마 토글은 인메모리로 남고 다음 refresh 가 덮는다(파일럿의 의도된 비대칭).
-4. **갱신은 값 재적용이지 재마운트가 아니다.** `data-theme` 속성 하나를 갈아끼운다.
-5. **답의 사유는 두 갈래뿐**(파일대로 / 기본값으로 접힘). 접힌 사유 다섯(없음·못 읽음·깨짐·모르는 값·상한 초과)은 로그에만 남긴다.
-6. **알림이 못 나가면 성공으로 답하지 않는다** — 오류를 돌려준다.
-7. **미지 키는 무시한다**(전방 호환).
-8. **로그에 실리는 값은 테마 이름 모양일 때만**(ASCII 영숫자 + 하이픈, ≤24바이트) + `mask_secrets` 통과분. 그 밖은 종류·길이만.
-9. **파일이 없거나 깨졌으면 `dark` 로 접고 로그만 남긴다.** `.corrupt` 사본을 만들지 않는다.
+1. **The settings source of truth = a disk file.** `<data_dir>/ui-settings.json`, key `theme` ∈ `dark`|`light`|`e-ink`. `data_dir` = `engram_dashboard_discovery::default_data_dir()` (release = next to the exe, debug = `.engram-data` inside the repo, environment-variable override).
+2. **The read owner = the shell (`src-tauri`).** At boot the frontend pulls (`get_ui_settings`), and for updates the shell pushes (`ui:settings-updated`). The two paths share the same payload struct.
+3. **There is one command, `ui.refresh`.** Do not create a command per value. The one who edits the file is an outside agent, and **the shell only reads** — the on-screen theme toggle stays in memory and the next refresh overwrites it (an intended asymmetry of the pilot).
+4. **An update is re-applying a value, not a remount.** It swaps a single `data-theme` attribute.
+5. **There are only two branches of reason in the answer** (as the file says / folded to the default). The five folding reasons (absent · unreadable · corrupt · unknown value · over the limit) are left only in the log.
+6. **If the notification cannot go out, do not answer success** — return an error.
+7. **Unknown keys are ignored** (forward compatibility).
+8. **A value is put in the log only when it has the shape of a theme name** (ASCII alphanumerics + hyphen, ≤24 bytes) + what passes `mask_secrets`. Anything else gets only the kind and length.
+9. **If the file is absent or corrupt, fold to `dark` and leave only a log.** Do not make a `.corrupt` copy.
 
 ## 거부한 대안
 
-- **명령 정본 — 값마다 명령을 만든다**(예: `ui.setFont`, `theme.set` 확장). 테마·폰트·색·여백은 **설정 성격이라 명령을 하나씩 만들 필요가 없다**(사용자 결정 2026-08-21). 폰트 키가 10개(`chatStyleStore` 화이트리스트 실측)라 명령 인자가 무거워지고, 키가 늘 때마다 어휘가 늘어난다.
-- **전면 재마운트 refresh.** 슬롯의 대화가 컴포넌트 state 이고 데몬 이력은 이미 해제돼 있어 **재마운트는 영구 소실**이다(ADR-0149 가 언마운트 금지로 못 박은 자리).
-- **데몬이 파일을 소유한다.** Step 3 이 셸의 선언·등록·인바운드 수신 경로를 이미 뚫어 놔서(`src-tauri/src/layout/commands.rs` 의 `declare_commands!` 16개 + `src-tauri/src/daemon_client/inbound.rs`) 셸이면 **신규 배선이 0**이다. 데몬이면 그 경로를 새로 판다.
-- **접힌 사유 다섯을 답에 노출한다.** 사용자 지시("사유 때문에 로직 키우지 마라", 2026-08-21). 더해서 사유를 내보내면 **호출자가 사유별로 분기해 다섯 갈래가 계약이 된다** — 로그 문구를 고치는 것과 계약을 고치는 것이 같은 무게가 된다.
-- **사유를 아예 안 싣는다**(`{theme}` 만 돌려준다). 최초 구현이 그랬고 사용자가 뒤집었다(2026-08-21) — 에이전트가 파일에 오타를 내도 **성공 응답**이 와서 자기 편집이 먹혔는지 알 수 없다. 사유가 로그 파일에만 있으면 명령을 부른 쪽에서는 안 보인다.
-- **깨진 파일을 `.corrupt` 로 밀어낸다**(명부 로더의 관례). **★기각 근거 약함 — 서술뿐★**: 설정 파일은 잃어도 복구할 것이 없다는 성질 논증이고, 정량·실측·코드 근거가 없다. 명부(`agents.json`)는 프로필·세션 id 를 담아 사본이 값어치가 있지만 이 파일은 키 하나다.
-- **로그에 값을 아예 안 싣는다**(길이 + 해시만). 오타 진단이 죽는다 — 테스트 `typo.contains("Dark")` 가 그 요구를 인코딩한다. 대신 모양 게이트로 좁혔다(결정 8).
-- **미지 키를 거부하고 기본값으로 접는다.** ★기각 근거 약함 — 서술뿐★: 이 파일럿이 다중 키 설정 파일의 첫 키라 거부하면 앞으로 키를 못 늘린다는 전방 호환 논증이고, 아직 두 번째 키가 실재하지 않는다.
+- **Command as the source of truth — create a command per value** (e.g. `ui.setFont`, extending `theme.set`). Theme, font, color and spacing are **of a settings nature, so there is no need to create a command for each one** (user decision 2026-08-21). The font keys number 10 (measured from the `chatStyleStore` whitelist), so the command arguments get heavy, and the vocabulary grows every time a key is added.
+- **A full-remount refresh.** The slot's conversation is component state and the daemon history has already been released, so **a remount is permanent loss** (the place ADR-0149 pinned as no unmount).
+- **The daemon owns the file.** Step 3 has already opened the shell's declaration, registration and inbound receive path (`declare_commands!` with 16 in `src-tauri/src/layout/commands.rs` + `src-tauri/src/daemon_client/inbound.rs`), so with the shell there is **zero new wiring**. With the daemon that path would have to be dug anew.
+- **Expose the five folding reasons in the answer.** User instruction ("사유 때문에 로직 키우지 마라" — do not grow the logic because of reasons, 2026-08-21). In addition, if the reasons are exposed, **callers branch per reason and the five branches become the contract** — changing the log wording and changing the contract become the same weight.
+- **Carry no reason at all** (return only `{theme}`). The first implementation did that and the user reversed it (2026-08-21) — even if the agent makes a typo in the file a **success response** comes back, so it cannot tell whether its own edit took. If the reason is only in the log file, the side that called the command cannot see it.
+- **Push a corrupt file aside as `.corrupt`** (the convention of the registry loader). **★Weak ground for rejection — prose only★**: it is a property argument that a settings file has nothing to recover even if lost, and has no quantitative, measured or code ground. The registry (`agents.json`) holds profiles and session ids, so a copy is worth something, but this file is a single key.
+- **Put no value in the log at all** (length + hash only). Typo diagnosis dies — the test `typo.contains("Dark")` encodes that requirement. Instead it was narrowed with a shape gate (decision 8).
+- **Reject unknown keys and fold to the default.** ★Weak ground for rejection — prose only★: this pilot is the first key of a multi-key settings file, so it is a forward-compatibility argument that rejecting would make it impossible to add keys later, and a second key does not exist yet.
 
 ## 근거
 
-- **모양 게이트에 대문자를 넣은 것은 의도**다. 테마 값 비교가 대소문자를 가리므로(`from_wire`) `Dark` 가 가장 흔한 오타다 — 소문자 전용 게이트는 차단 목적(이메일·URL·토큰)과 오타 진단을 동시에 만족시키지 못한다. 차단 대상은 `@ . / : _ 공백`이나 길이에서 걸린다.
-- **`catalog_version` 3 → 4, `since` 는 3 유지.** 답 모양도 선언이라 세대가 오르지만, `since` 는 **이름**이 들어온 세대라 움직이지 않는다(`crates/engram-dashboard-core/tests/command_alphabet.rs` 의 `catalog_version_is_per_block` 이 둘의 독립을 못 박는다).
-- **알림 실패를 삼키지 않는 이유** — `LayoutEvents` 는 삼킨다. 저쪽은 변형이 이미 일어난 뒤라 pull 로 복구되지만, **이 명령은 알림이 결과 전부**라 못 보냈으면 아무 일도 안 일어난 것이다.
-- **GUI 실측 4종 통과**(2026-08-21): 저장 테마(`light`)로 부팅 · `ui.refresh` 로 `e-ink` 전환 시 DOM 노드 41개 동일(재마운트 0) · 깨진 파일 → `dark` 무크래시 · 파일 없음 → `dark`.
-- 리뷰 5라운드(doc-aware PASS 3회 / cross-family blind FIX) — 대립 항목은 사용자 판정으로 닫았다.
+- **Putting uppercase letters in the shape gate is intentional.** The theme value comparison is case-sensitive (`from_wire`), so `Dark` is the most common typo — a lowercase-only gate cannot satisfy the blocking purpose (email · URL · token) and typo diagnosis at the same time. The blocked targets get caught on `@ . / : _ 공백` (the last being whitespace), or on length.
+- **`catalog_version` 3 → 4, `since` stays at 3.** The answer shape is also a declaration, so the generation goes up, but `since` is the generation in which the **name** came in, so it does not move (`catalog_version_is_per_block` in `crates/engram-dashboard-core/tests/command_alphabet.rs` pins the independence of the two).
+- **The reason for not swallowing a notification failure** — `LayoutEvents` swallows it. There the mutation has already happened, so it recovers by pull, but for **this command the notification is the whole result**, so if it could not be sent nothing happened.
+- **4 kinds of GUI measurement passed** (2026-08-21): boot with a saved theme (`light`) · switching to `e-ink` with `ui.refresh` leaves 41 DOM nodes identical (0 remounts) · corrupt file → `dark` with no crash · no file → `dark`.
+- 5 review rounds (doc-aware PASS 3 times / cross-family blind FIX) — the opposing items were closed by the user's decision.
 
 ## 영향 / 불변식
 
-- **`ui.refresh` 경로에 재마운트를 얹지 않는다** — 키 교체·라우터 이동·스토어 리셋 포함. 어기면 슬롯 대화가 영구 소실된다(ADR-0149).
-- **답의 사유 칸을 다섯 갈래로 늘리지 않는다** — 늘리는 순간 호출자가 사유별 분기를 짜고 그 다섯이 계약이 된다.
-- **`ThemeSource` variant 이름에 `#[serde(rename)]` 을 붙이지 않는다** — 버스 답장과 Tauri 페이로드가 같은 철자를 써야 하고, 그 일치를 재는 테스트가 기대 문자열을 손으로 박고 있다.
-- **모양 게이트를 넓히지 않는다** — 게이트를 통과한 값은 로그에 남는다. 넓히면 그만큼 샌다.
-- **알려진 잔여(고친 것으로 읽지 말 것):** 알림이 구독자 0 에 닿아도 성공으로 답한다(부팅 조회가 화면을 덮는다) · 낡은 알림이 더 새 부팅 값을 덮을 수 있다(다음 갱신에 낫는다) · 비원자적 외부 쓰기 창 · refresh 없이 파일만 바뀌면 새로 뜬 창만 새 값을 본다 · `listen()` 무응답은 재시도가 못 덮는다(타임아웃 없음) · 로그 레벨을 단언하는 하네스가 없다.
+- **Do not put a remount on the `ui.refresh` path** — including key swaps, router navigation and store resets. If breached, the slot conversation is permanently lost (ADR-0149).
+- **Do not grow the reason slot of the answer into five branches** — the moment it grows, callers write per-reason branches and those five become the contract.
+- **Do not attach `#[serde(rename)]` to the `ThemeSource` variant names** — the bus reply and the Tauri payload must use the same spelling, and the test that measures that match has the expected strings hand-written.
+- **Do not widen the shape gate** — a value that passes the gate stays in the log. Widening it leaks that much.
+- **Known residuals (do not read them as fixed):** a notification that reaches 0 subscribers still answers success (the boot query overwrites the screen) · a stale notification can overwrite a newer boot value (it heals at the next update) · a non-atomic external write window · if only the file changes without a refresh, only a newly opened window sees the new value · a `listen()` that gets no response is not covered by retry (no timeout) · there is no harness that asserts the log level.

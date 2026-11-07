@@ -1,24 +1,24 @@
-// 연결 실패 이유 알림(ADR-0134 결정 4).
+// Connection failure reason notice (ADR-0134 decision 4).
 //
-// ★왜 화면에 그리나★: 데이터 폴더에 쓸 수 없어 데몬이 못 뜨는 실패는 릴리스에서 어디에도 도달하지
-//   않았다 — 데몬은 콘솔이 없고, WebView2 릴리스 빌드엔 개발자도구가 없어 console.error 는 사용자가
-//   볼 수 없다. 그래서 사용자는 원인 없는 'down' 만 봤다.
+// ★Why draw it on screen★: a failure where the daemon cannot start because the data folder is not writable reached nowhere
+//   in release — the daemon has no console, and the WebView2 release build has no developer tools, so console.error cannot be
+//   seen by the user. So the user saw only a causeless 'down'.
 //
-// ★새 제어 표면이 아니다★: 기존 연결 상태 표면(agentClient)을 **읽기만** 한다 — window 전역 핸들을
-//   늘리지 않고 명령도 보내지 않는다(§5 LLM-우선 제어 — 제어 표면은 agentClient 하나).
+// ★Not a new control surface★: it only **reads** the existing connection state surface (agentClient) — it does not
+//   add a window global handle and sends no command (§5 LLM-first control — the control surface is the one agentClient).
 //
-// ★스스로 자리를 잡지 않는다★ — 호출부가 레이아웃을 밀지 않고 덮는 층(`NoticeOverlay`)에 얹는다(ADR-0277 — ADR-0180
-//   개정: 레이아웃은 고정이고, 덮인 자리는 ✕ 로 닫으면 된다). 그 층은 제목 줄(탭바 · 창 단추 · 끌 자리) 아래 캔버스 위쪽을
-//   덮는다(사용자 결정 2026-10-26 · T-66 — 그 전에는 TabBar 를 덮었다).
-// ★✕ 와 닫힘 기억이 load-bearing 이다★ — 띠가 덮은 자리(캔버스 위쪽)는 클릭을 못 받는다.
-//   - ✕ 가 없으면 이유가 안 지워지는 동안 덮인 캔버스 위쪽(슬롯 내용 · 분할선)이 영구히 막힌다.
-//   - 닫힘 기억이 없으면 ✕ 가 무력하다 — 상태 표면은 이유가 그대로여도 전송 상태가 바뀔 때마다 통지하므로
-//     (`ProtocolClient` 의 상태 구독) 같은 이유가 곧 다시 그려진다. 기억하는 것은 닫은 이유 문자열 하나라 다른 이유는
-//     그것과 달라서 뜨고, 기억을 푸는 것은 이유가 지워질 때(`null`)뿐이다 — A 를 닫고 B 가 뜬 뒤 A 가 다시 와도
-//     안 뜬다(아래 상태 · 구독 주석).
+// ★It does not take its own place★ — the call site puts it on the layer that covers rather than pushes the layout (`NoticeOverlay`) (ADR-0277 — ADR-0180
+//   amendment: the layout is fixed, and a covered area can be closed with ✕). That layer covers the top of the canvas below the title bar (tab bar · window buttons · draggable area)
+//   (user decision 2026-10-26 · T-66 — before that it covered the TabBar).
+// ★The ✕ and the closed memory are load-bearing★ — the area the band covers (the top of the canvas) cannot receive clicks.
+//   - Without the ✕, while the reason is not cleared the covered top of the canvas (slot content · split lines) is blocked permanently.
+//   - Without the closed memory the ✕ is powerless — the state surface notifies every time the transport state changes even if the reason is the same
+//     (the state subscription of `ProtocolClient`), so the same reason is drawn again right away. What is remembered is the single closed-reason string, so a different reason
+//     differs from it and shows, and the memory is released only when the reason is cleared (`null`) — even if A is closed, B shows, and then A comes again,
+//     it does not show (see the state · subscription comments below).
 //
-// ★상시 크롬이 아니다(ADR-0063)★: 이유가 있을 때만 그린다. 없으면 null 이라 DOM 이 비고, ADR-0063 이
-//   없앤 상시 StatusBar 를 되살리는 것이 아니다.
+// ★Not always-on chrome (ADR-0063)★: it draws only when there is a reason. With none it is null so the DOM is empty, and this
+//   does not revive the always-on StatusBar that ADR-0063 removed.
 
 import { useEffect, useState } from 'react'
 
@@ -26,18 +26,18 @@ import { agentClient } from '../../api/clientFactory'
 
 export default function ConnectionNotice() {
   const [reason, setReason] = useState<string | null>(agentClient.connectionError)
-  // 닫은 이유 자체를 기억한다 — **다른** 이유가 오면 다시 뜬다(닫기가 영구 음소거가 되면 안 된다).
+  // Remember the closed reason itself — a **different** reason shows again (closing must not become a permanent mute).
   const [dismissed, setDismissed] = useState<string | null>(null)
 
   useEffect(() => {
-    // 상태 표면은 이유가 바뀔 때도 통지한다(ProtocolClient.reportConnectionError) — 그래서 별도
-    // 구독 없이 이 하나로 충분하다.
+    // The state surface also notifies when the reason changes (ProtocolClient.reportConnectionError) — so a separate
+    // subscription is unneeded and this one is enough.
     return agentClient.onConnectionStateChange(() => {
       const next = agentClient.connectionError
       setReason(next)
-      // ★이유가 사라지면 닫힘 기억도 함께 버린다(load-bearing)★: 안 버리면 "실패 → 닫기 → 고침 →
-      //   연결됨 → 나중에 **똑같은** 문구로 재발" 에서 문자열이 같아 아무것도 안 뜬다. 같은 원인이
-      //   반복되는 것이 오히려 흔한 경우라, 닫기가 그 원인을 영구 음소거하면 안 된다.
+      // ★When the reason disappears, the closed memory is dropped too (load-bearing)★: if not dropped, in "failure → close → fix →
+      //   connected → later recurrence with the **identical** wording" the strings are equal and nothing shows. A repeat of the same cause
+      //   is in fact the common case, so closing must not permanently mute that cause.
       if (next === null) setDismissed(null)
     })
   }, [])
@@ -50,7 +50,7 @@ export default function ConnectionNotice() {
       className="flex shrink-0 items-start gap-3 border-b border-border bg-elevated px-4 py-2 text-sm text-foreground"
       style={{ borderLeft: '3px solid var(--status-danger)' }}
     >
-      {/* `wrap-anywhere` = 덮는 층의 요구(`NoticeOverlay` 의 doc) — 이유는 긴 경로를 싣는다. */}
+      {/* `wrap-anywhere` = a requirement of the covering layer (the `NoticeOverlay` doc) — the reason carries a long path. */}
       <div className="min-w-0 flex-1 wrap-anywhere">
         <span className="font-semibold">데몬에 연결하지 못했습니다.</span>{' '}
         <span className="opacity-90">{reason}</span>

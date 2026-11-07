@@ -1,5 +1,5 @@
 // ADR-0055 (FIX-3/FIX-4)
-// ★run() 자체는 손대지 않는다(await 호출부 무손실)★ — 그 계약은 registry.test.ts 가 지킨다.
+// ★run() itself is not touched (no loss at await call sites)★ — registry.test.ts guards that contract.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -39,7 +39,7 @@ describe('fireAndForget (ADR-0055 fire-and-forget 안전망)', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     register({ id: 'async.reject', title: 'r', run: () => Promise.reject(new Error('async-nope')) })
     fireAndForget('async.reject')
-    // microtask flush 를 기다려 .catch 가 돌게 한다.
+    // Wait for the microtask flush so the .catch runs.
     await Promise.resolve()
     await Promise.resolve()
     expect(warn).toHaveBeenCalled()

@@ -1,18 +1,18 @@
-//! output hot path 의 binary frame codec(설계 §1-2).
+//! Binary frame codec of the output hot path (design §1-2).
 //!
-//! 고정 헤더: `[tag:1][agent_id:16][epoch:4 BE][seq:8 BE][raw payload...]`.
-//! base64-in-JSON(33% 팽창)·serde 파싱 0 — WS binary opcode 로 그대로 전송.
-//! 멀티바이트는 빅엔디언(네트워크 바이트 오더, 모바일/타 플랫폼 정합). JS 는
-//! `DataView.getUint32(false)`/`getBigUint64(false)` 로 디코드.
+//! Fixed header: `[tag:1][agent_id:16][epoch:4 BE][seq:8 BE][raw payload...]`.
+//! No base64-in-JSON (33% inflation) and no serde parsing — sent as is on the WS binary opcode.
+//! Multi-byte values are big-endian (network byte order, consistent with mobile/other platforms). JS decodes with
+//! `DataView.getUint32(false)`/`getBigUint64(false)`.
 
 use crate::ids::AgentId;
 
-/// payload = VT 바이트 스트림(콘솔).
+/// payload = VT byte stream (console).
 pub const FRAME_TAG_TERMINAL_BYTES: u8 = 0;
 
-/// ADR-0045. payload = **self-describing 직렬화 구조화 이벤트**.
-/// codec 은 payload 스키마를 모른다(opaque 바이트) — 직렬화 형식·이벤트 타입은 daemon adapter(B7)
-/// 소관이고, 여기선 헤더만 붙이고 payload 는 그대로 실어 보낸다. tag0 과 헤더 레이아웃 동일.
+/// ADR-0045. payload = **self-describing serialized structured event**.
+/// The codec does not know the payload schema (opaque bytes) — the serialization format and event type are the daemon adapter's (B7)
+/// concern; here only the header is attached and the payload is carried as is. Same header layout as tag0.
 pub const FRAME_TAG_STRUCTURED_EVENT: u8 = 1;
 
 pub const FRAME_HEADER_LEN: usize = 1 + 16 + 4 + 8;
@@ -63,7 +63,7 @@ pub fn encode_structured_frame(agent_id: AgentId, epoch: u32, seq: u64, payload:
     encode_frame(FRAME_TAG_STRUCTURED_EVENT, agent_id, epoch, seq, payload)
 }
 
-/// 헤더 칸(tag · agent id · 화신 표식 · seq) — 페이로드를 보지 않고 읽은 것.
+/// Header fields (tag · agent id · incarnation marker · seq) — read without looking at the payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameHeader {
     pub tag: u8,
@@ -72,11 +72,11 @@ pub struct FrameHeader {
     pub seq: u64,
 }
 
-/// 헤더 칸만 읽는다 — **tag 를 가리지 않는다**. 거절은 헤더 길이가 모자랄 때(`TooShort`) 하나뿐이다.
+/// Reads only the header fields — **does not tell tags apart**. The only rejection is when the header is too short (`TooShort`).
 ///
-/// ★[`decode_frame`] 이 모르는 tag 에서 거절한 프레임도 여기서는 읽힌다(ADR-0231)★ — agent id · 화신
-/// 표식 · seq 는 tag 와 무관한 고정 자리라, 셸이 그 칸으로 같은 seq 의 [`crate::placeholder_error_frame`]
-/// 을 만들어 그 뷰의 seq 줄기에 구멍을 내지 않는다.
+/// ★A frame that [`decode_frame`] rejected on an unknown tag can still be read here (ADR-0231)★ — agent id · incarnation
+/// marker · seq are fixed positions independent of the tag, so the shell uses those fields to make a same-seq [`crate::placeholder_error_frame`]
+/// and does not punch a hole in that view's seq stream.
 // ADR-0231
 pub fn peek_frame_header(buf: &[u8]) -> Result<FrameHeader, CodecError> {
     if buf.len() < FRAME_HEADER_LEN {
@@ -102,7 +102,7 @@ pub fn peek_frame_header(buf: &[u8]) -> Result<FrameHeader, CodecError> {
     })
 }
 
-/// unknown tag(≥2)는 계속 거부해 클라 relay 가 미지원 프레임을 흘리지 않게 한다.
+/// Unknown tags (≥2) keep being rejected so the client relay does not pass on unsupported frames.
 pub fn decode_frame(buf: &[u8]) -> Result<DecodedFrame<'_>, CodecError> {
     let header = peek_frame_header(buf)?;
     if header.tag != FRAME_TAG_TERMINAL_BYTES && header.tag != FRAME_TAG_STRUCTURED_EVENT {

@@ -2,7 +2,7 @@
 import type { SplitDir } from "./SplitDir";
 
 /**
- * 한 분할 노드 — 이 분할 자신의 상자(두 자식을 합친 영역, 뷰 기준 정규화 [0,1] 경계 꼴) + 경계 좌표 `at`.
- * `at` 은 `dir` 이 `left_right` 면 x 축 값(a = 왼쪽), `top_bottom` 이면 y 축 값(a = 위)이다.
+ * One split node — this split's own box (the region of both children combined, view-normalized [0,1] boundary form) + boundary coordinate `at`.
+ * `at` is an x-axis value if `dir` is `left_right` (a = left), and a y-axis value if `top_bottom` (a = top).
  */
 export type SplitRect = { split_id: string, dir: SplitDir, x0: number, y0: number, x1: number, y1: number, at: number, };

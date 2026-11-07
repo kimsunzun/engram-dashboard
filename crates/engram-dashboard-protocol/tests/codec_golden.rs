@@ -1,5 +1,5 @@
-//! binary frame codec 의 golden(고정 바이트열) + roundtrip 회귀 테스트.
-//! wire 포맷이 의도치 않게 바뀌면(헤더 순서/엔디언/오프셋) 즉시 깨지게 한다.
+//! Golden (fixed byte sequence) + roundtrip regression tests of the binary frame codec.
+//! They break immediately if the wire format changes unintentionally (header order/endianness/offsets).
 
 use engram_dashboard_protocol::{
     decode_frame, encode_structured_frame, encode_terminal_frame, peek_frame_header, CodecError,
@@ -7,10 +7,10 @@ use engram_dashboard_protocol::{
 };
 use uuid::Uuid;
 
-/// 알려진 입력 → 정확한 바이트열. 헤더 레이아웃 `[tag][id:16][epoch:4 BE][seq:8 BE][payload]`.
+/// Known input → exact byte sequence. Header layout `[tag][id:16][epoch:4 BE][seq:8 BE][payload]`.
 #[test]
 fn golden_terminal_frame() {
-    // 결정적 UUID(16바이트 0x00..0x0f).
+    // Deterministic UUID (16 bytes 0x00..0x0f).
     let id = Uuid::from_bytes([
         0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
         0x0f,
@@ -38,7 +38,7 @@ fn golden_terminal_frame() {
 #[test]
 fn roundtrip_terminal_frame() {
     let id = Uuid::new_v4();
-    let payload: Vec<u8> = (0u8..=255).cycle().take(5000).collect(); // 4096 버퍼 경계 넘김
+    let payload: Vec<u8> = (0u8..=255).cycle().take(5000).collect(); // crosses the 4096 buffer boundary
     let frame = encode_terminal_frame(id, 42, 999_999, &payload);
 
     let decoded = decode_frame(&frame).expect("decode 성공");
@@ -73,13 +73,13 @@ fn too_short_is_error() {
 #[test]
 fn unknown_tag_is_error() {
     let mut buf = vec![0u8; FRAME_HEADER_LEN];
-    buf[0] = 0xFF; // 알 수 없는 tag
+    buf[0] = 0xFF; // unknown tag
     assert_eq!(decode_frame(&buf), Err(CodecError::UnknownTag(0xFF)));
 }
 
 // ── ADR-0045 tag1 StructuredEvent ─────────────────────────────────────────────
 
-/// tag1 golden: 헤더 레이아웃은 tag0 과 동일하고 첫 바이트만 0x01, payload 는 opaque 로 그대로 실린다.
+/// tag1 golden: the header layout is the same as tag0 with only the first byte 0x01, and the payload is carried as is, opaque.
 #[test]
 fn golden_structured_frame() {
     let id = Uuid::from_bytes([
@@ -88,7 +88,7 @@ fn golden_structured_frame() {
     ]);
     let epoch: u32 = 7;
     let seq: u64 = 0x0102_0304_0506_0708;
-    // codec 은 payload 스키마 무지 — 임의 바이트(직렬화된 이벤트를 흉내)를 그대로 통과시켜야 한다.
+    // The codec is ignorant of the payload schema — arbitrary bytes (imitating a serialized event) must pass through as is.
     let payload = br#"{"TextDelta":"hi"}"#;
 
     let frame = encode_structured_frame(id, epoch, seq, payload);
@@ -110,12 +110,12 @@ fn golden_structured_frame() {
     assert_eq!(frame.len(), FRAME_HEADER_LEN + payload.len());
 }
 
-/// tag1 encode→decode round-trip: 헤더(agent_id/epoch/seq)가 정확히 복원되고 payload 가
-/// opaque 로 **한 바이트도 손실·해석 없이** 보존되는지. codec 이 스키마를 모른다는 불변식의 핵심 검증.
+/// tag1 encode→decode round-trip: whether the header (agent_id/epoch/seq) is restored exactly and the payload is preserved
+/// opaque with **not a single byte lost or interpreted**. The core check of the invariant that the codec does not know the schema.
 #[test]
 fn roundtrip_structured_frame() {
     let id = Uuid::new_v4();
-    // 4096 버퍼 경계를 넘기고 non-UTF8/제어바이트 포함 — codec 이 내용을 건드리지 않음을 강제.
+    // Crosses the 4096 buffer boundary and includes non-UTF8/control bytes — enforces that the codec does not touch the content.
     let payload: Vec<u8> = (0u8..=255).cycle().take(5000).collect();
     let frame = encode_structured_frame(id, 42, 999_999, &payload);
 
@@ -127,18 +127,18 @@ fn roundtrip_structured_frame() {
     assert_eq!(decoded.payload, &payload[..], "payload opaque 무손실 보존");
 }
 
-/// tag≥2 는 여전히 거부(TRD §5 unknown tag). tag1 통과가 게이트를 과하게 열지 않았는지 확인.
+/// tag≥2 is still rejected (TRD §5 unknown tag). Checks that letting tag1 through did not open the gate too far.
 #[test]
 fn tag_two_is_still_unknown() {
     let mut buf = vec![0u8; FRAME_HEADER_LEN];
-    buf[0] = 2; // 아직 정의 안 된 tag
+    buf[0] = 2; // a tag not yet defined
     assert_eq!(decode_frame(&buf), Err(CodecError::UnknownTag(2)));
 }
 
-// ── 경계값·최소길이 회귀 ──────────────────────────────────────────────────────
+// ── boundary values · minimum length regression ──────────────────────────────────
 
-/// epoch/seq 극값 round-trip: BE 변환이 상한(u32::MAX / u64::MAX)에서도 무손실인지.
-/// to_be_bytes/from_be_bytes 오프셋·자릿수 실수를 경계에서 잡는다(tag0·tag1 둘 다).
+/// epoch/seq extreme round-trip: whether the BE conversion is lossless even at the upper bounds (u32::MAX / u64::MAX).
+/// Catches to_be_bytes/from_be_bytes offset and digit mistakes at the boundary (both tag0 and tag1).
 #[test]
 fn roundtrip_epoch_seq_max() {
     let id = Uuid::new_v4();
@@ -155,7 +155,7 @@ fn roundtrip_epoch_seq_max() {
     }
 }
 
-/// tag1 정확히 29바이트(헤더만, 빈 payload) encode→decode. 최소 유효 프레임 경계.
+/// tag1 exactly 29 bytes (header only, empty payload) encode→decode. The minimum valid frame boundary.
 #[test]
 fn structured_empty_payload_is_min_valid() {
     let id = Uuid::new_v4();
@@ -172,8 +172,8 @@ fn structured_empty_payload_is_min_valid() {
     assert_eq!(decoded.payload.len(), 0);
 }
 
-/// 헤더 미만 입력(0·1·28바이트)은 패닉이 아니라 TooShort 에러로 안전 반환.
-/// 특히 1바이트(tag만)·28바이트(헤더-1)에서 슬라이스 인덱싱이 패닉하지 않아야 한다.
+/// Input shorter than the header (0·1·28 bytes) is returned safely as a TooShort error, not a panic.
+/// In particular, slice indexing must not panic at 1 byte (tag only) and 28 bytes (header minus 1).
 #[test]
 fn short_inputs_return_too_short_not_panic() {
     for len in [0usize, 1, FRAME_HEADER_LEN - 1] {
@@ -186,14 +186,14 @@ fn short_inputs_return_too_short_not_panic() {
     }
 }
 
-// ── ADR-0231 헤더 칸 읽기 — tag 를 가리지 않는다 ─────────────────────────────────
+// ── ADR-0231 header field reading — does not tell tags apart ─────────────────────
 
-/// `decode_frame` 이 모르는 tag 에서 거절한 프레임도 헤더 칸은 읽힌다 — 셸이 그 seq 로 자리채움을 만든다.
+/// A frame `decode_frame` rejected on an unknown tag still has its header fields read — the shell makes a placeholder with that seq.
 #[test]
 fn peek_reads_the_header_of_an_unknown_tag_frame() {
     let id = Uuid::new_v4();
     let mut frame = encode_structured_frame(id, 9, 0x0102_0304_0506_0708, b"future");
-    frame[0] = 0x07; // 아직 정의 안 된 tag
+    frame[0] = 0x07; // a tag not yet defined
     assert_eq!(decode_frame(&frame), Err(CodecError::UnknownTag(0x07)));
     assert_eq!(
         peek_frame_header(&frame),
@@ -206,7 +206,7 @@ fn peek_reads_the_header_of_an_unknown_tag_frame() {
     );
 }
 
-/// 헤더 길이 미만은 peek 도 TooShort — seq 를 읽을 수 없어 자리채움을 못 만드는 유일한 모양이다.
+/// Shorter than the header length, peek is also TooShort — the only shape where the seq cannot be read and so no placeholder can be made.
 #[test]
 fn peek_rejects_only_short_inputs() {
     for len in [0usize, 1, FRAME_HEADER_LEN - 1] {

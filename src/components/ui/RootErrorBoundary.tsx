@@ -1,11 +1,11 @@
-// RootErrorBoundary — 슬롯 밖(탭 바·레이아웃 분기·분할 컴포넌트·페이지)의 렌더 오류가 창 전체를 지우지 않게 받는다.
+// RootErrorBoundary — catches render errors outside slots (tab bar · layout branch · split component · page) so they do not erase the whole window.
 //
-// 경계가 없으면 React 19 는 렌더 중 throw 한 번에 루트를 통째로 내려 창이 재시작 전까지 빈 화면이 된다. 슬롯
-//   안쪽 오류는 SlotErrorBoundary 가 먼저 가두므로 여기까지 오는 것은 그 밖의 오류뿐이다.
-// ★대체 표시는 라우터·스토어·테마 스토어에 기대지 않는다★ — 그중 무엇이 터진 원인일지 모른다. 색은 main.tsx 가
-//   첫 페인트 전에 :root 에 박는 CSS 변수만 쓴다.
-// ★두 버튼에 LLM 경로가 없다★ — 「LLM-우선 제어」 갭(사용자 결정 2026-09-24: 기록만). 릴리즈 빌드에선 LLM 이
-//   이 상태를 알아챌 수단도 없어, 기존 명령 목록에 `window.reload` 를 더하는 것만으로는 닫히지 않는다.
+// Without a boundary, React 19 takes down the whole root on a single throw during render and the window stays blank until restart. Errors inside a slot
+//   are contained first by SlotErrorBoundary, so only errors outside that reach here.
+// ★The fallback display does not lean on the router · store · theme store★ — we do not know which of them was the cause. For color it uses only the CSS variables main.tsx
+//   plants on :root before the first paint.
+// ★The two buttons have no LLM path★ — a 「LLM-우선 제어」 gap (user decision 2026-09-24: record only). In a release build the LLM has
+//   no means to notice this state either, so adding `window.reload` to the existing command list alone does not close it.
 
 import { Component, type ErrorInfo, type ReactNode } from 'react'
 

@@ -1,12 +1,12 @@
-// 비정상 종료 뒤 「이전 화면을 복원할까요?」 — main 창 전용 모달(TRD S21-storage §6-7 · 사용자 결정 D4).
+// 「이전 화면을 복원할까요?」 (restore the previous screen?) after an abnormal exit — a modal for the main window only (TRD S21-storage §6-7 · user decision D4).
 //
-// ★떠 있는 동안 main 을 쓸 수 없다★ — 그 아래 레이아웃은 `AppLayout` 이 `inert` 로 잠그고, 이 컴포넌트는 포커스를
-//   안으로 옮기고 Tab 을 안에 가두며 단축키 디스패처를 멈춘다(N4). 디스패처는 편집 대상(xterm · 챗 입력)을 그냥
-//   흘려보내므로 그것을 멈추는 것만으로는 그 아래 타이핑이 막히지 않는다 — 잠금 셋은 한 벌이다.
-// ★닫힘은 상태가 정한다★ — 단추를 눌렀다고 닫지 않는다. 답 뒤 다시 당긴 상태나 `restore:changed`(버스로 낸 답 포함)
-//   가 `awaiting` 이 아니게 되면 `AppLayout` 이 이것을 걷는다. 실패면 `awaiting` 그대로라 다시 답할 수 있다.
-// ★막는 것은 사람 UI 뿐이다★ — 다른 창(트리 · 팝아웃)과 LLM 버스 명령은 막지 않는다.
-// ★보여 주는 것은 버스 `restore.status` 가 싣는 것뿐이다★ — 저장 시각 · 창 수 · 탭 수.
+// ★While up, main cannot be used★ — the layout beneath is locked by `AppLayout` with `inert`, and this component moves focus
+//   inside, traps Tab inside, and stops the shortcut dispatcher (N4). The dispatcher lets edit targets (xterm · chat input)
+//   pass through, so merely stopping it does not block typing beneath — the three locks are one set.
+// ★Closing is decided by state★ — it does not close because a button was pressed. When the state pulled again after the answer or `restore:changed` (including an answer sent over the bus)
+//   is no longer `awaiting`, `AppLayout` withdraws this. On failure it stays `awaiting` so it can be answered again.
+// ★Only the human UI is blocked★ — other windows (tree · popout) and LLM bus commands are not blocked.
+// ★What it shows is only what the bus `restore.status` carries★ — save time · number of windows · number of tabs.
 
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent } from 'react'
@@ -25,12 +25,12 @@ const SAVED_AT = new Intl.DateTimeFormat('ko-KR', {
 })
 
 /**
- * 유닉스 밀리초 → 이 PC 시간대의 날짜·시각. `Date` 로 나타낼 수 없는 값(±8.64e15 밖 · 유한하지 않음)이면 `null`.
+ * Unix milliseconds → date · time in this PC's time zone. `null` for a value that cannot be represented as a `Date` (outside ±8.64e15 · not finite).
  */
 export function formatSavedAt(ms: number): string | null {
   const at = new Date(ms)
-  // ★값을 거르지 않고 넘기면 `format` 이 RangeError 를 던져 모달이 아니라 화면 전체가 오류 경계로 넘어간다★ — 셸은 사본의
-  //   `saved_at_ms` 를 u64 그대로 싣고 사본은 디스크 바이트 그대로라, 손상되거나 손으로 고친 파일이면 이 범위를 넘는다.
+  // ★If the value is passed on unfiltered `format` throws a RangeError and not the modal but the whole screen goes to the error boundary★ — the shell carries the copy's
+  //   `saved_at_ms` as a u64 as is and the copy is the disk bytes as is, so a corrupted or hand-edited file exceeds this range.
   return Number.isNaN(at.getTime()) ? null : SAVED_AT.format(at)
 }
 
@@ -38,9 +38,9 @@ const BUTTON =
   'rounded border border-border bg-surface px-3 py-1 hover:bg-background disabled:cursor-default disabled:opacity-50'
 
 interface Props {
-  /** `crash_copy === 'awaiting'` 인 상태. */
+  /** The state where `crash_copy === 'awaiting'`. */
   status: RestoreView
-  /** 답을 내고 상태를 다시 당긴 뒤 풀린다 — 실패는 reject(`RestoreClient.answer`). */
+  /** Resolves after sending the answer and pulling the state again — failure is a reject (`RestoreClient.answer`). */
   onAnswer: (accept: boolean) => Promise<unknown>
 }
 
@@ -52,14 +52,14 @@ export default function RestoreModal({ status, onAnswer }: Props) {
   const titleId = useId()
   const descId = useId()
 
-  // 커밋 직후 · 페인트 전에 멈춘다 — 그 사이의 키가 그 아래 화면을 바꾸지 않게.
+  // Stops right after commit · before paint — so keys in between do not change the screen beneath.
   useLayoutEffect(() => {
     setKeybindingsPaused(true)
     return () => setKeybindingsPaused(false)
   }, [])
 
-  // 처음 뜰 때, 그리고 답이 끝나 단추가 다시 살아날 때 포커스가 밖(body · 비활성 단추가 놓친 자리)에 있으면 데려온다.
-  // 덜 파괴적인 「이전 화면 복원」에 둔다 — Enter 한 번이 되돌릴 수 없는 거절이 되지 않게.
+  // When it first appears, and when the answer ends and the buttons come alive again, bring focus in if it is outside (body · the spot a disabled button dropped).
+  // Put it on the less destructive 「이전 화면 복원」 (restore previous screen) — so a single Enter does not become an irreversible refusal.
   useEffect(() => {
     if (busy) return
     if (!dialogRef.current?.contains(document.activeElement)) acceptRef.current?.focus()
@@ -76,7 +76,7 @@ export default function RestoreModal({ status, onAnswer }: Props) {
       .finally(() => setBusy(false))
   }
 
-  // 아래 레이아웃이 `inert` 라 Tab 이 거기로 가지는 않지만, 마지막 단추 뒤에서 웹뷰 밖으로 빠지지 않게 안에서 돌린다.
+  // The layout beneath is `inert` so Tab does not go there, but cycle inside so it does not leave the webview after the last button.
   const onKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>): void => {
     if (e.key !== 'Tab') return
     const dialog = dialogRef.current
@@ -94,15 +94,15 @@ export default function RestoreModal({ status, onAnswer }: Props) {
     }
   }
 
-  // 단추 밖을 눌러도 포커스가 body 로 떨어지지 않게 한다.
+  // Make sure pressing outside a button does not drop focus to body.
   const onMouseDown = (e: ReactMouseEvent<HTMLDivElement>): void => {
     if (!(e.target as Element).closest('button')) e.preventDefault()
   }
 
   const { windows, tabs } = status
   const savedAt = status.saved_at_ms === null ? null : formatSavedAt(status.saved_at_ms)
-  // `null` 은 묻는 동안 오지 않는 값이다 — 오면 「지운다 · 되돌릴 수 없다」 쪽으로 둔다. 남는다고 말했는데 지워지는
-  //   것이 그 반대보다 나쁘다.
+  // `null` is a value that does not come while asking — if it comes, put it on the 「지운다 · 되돌릴 수 없다」 (deletes · cannot be undone) side. Saying it stays and then deleting
+  //   is worse than the opposite.
   const warning = status.durable === false ? t('restore.rejectWarningNotSaving') : t('restore.rejectWarning')
 
   return (

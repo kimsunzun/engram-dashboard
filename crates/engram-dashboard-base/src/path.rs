@@ -1,16 +1,16 @@
 // ADR-0269
 // ADR-0270
 
-/// 사람이 친 경로의 **철자만** 고른다 — 감싼 따옴표 한 겹을 벗기고 `\` 를 `/` 로 옮긴다.
+/// Normalizes **only the spelling** of a hand-typed path — strips one layer of wrapping quotes and turns `\` into `/`.
 ///
-/// ★실재 확인이 아니다★ — 파일시스템을 보지 않는다. 없는 경로를 고쳐 주지 않고 상대경로도 그대로 둔다.
-/// ★따옴표는 **안이 빈 짝이면 벗기지 않는다**★ — 벗기면 비어 있지 않던 값이 빈 값이 되어, 부르는 쪽이
-/// 이 함수 앞에 둔 빈 값 검문을 지난 뒤에 값이 사라진다.
-/// ★한 겹만 벗긴다★ — 두 겹은 호출자가 실수로 두 번 감쌌다는 뜻이고, 그것까지 조용히 삼키면 어느 쪽이
-/// 진짜 경로인지 우리가 추측하게 된다.
-/// ★`\` → `/` 는 OS 를 가리지 않고 돈다★ — POSIX 에서는 `\` 가 파일 이름에 쓸 수 있는 글자라 그 이름을
-/// 바꿔 버린다.
-/// TODO(ADR-0230): macOS 이식 때 다시 본다.
+/// ★This is not an existence check★ — it does not look at the filesystem. It does not fix a nonexistent path and leaves relative paths as they are.
+/// ★Quotes are **not stripped if the pair is empty inside**★ — stripping would turn a value that was not empty into an empty value, so the caller's
+/// value vanishes after passing the empty-value check it placed before this function.
+/// ★Only one layer is stripped★ — two layers mean the caller wrapped by mistake twice, and silently swallowing even that would make us guess which one is
+/// the real path.
+/// ★`\` → `/` runs regardless of OS★ — on POSIX `\` is a character allowed in file names, so it
+/// changes that name.
+/// TODO(ADR-0230): look again when porting to macOS.
 pub fn normalize_spelling(raw: &str) -> String {
     let unquoted = match raw.chars().next() {
         Some(quote @ ('"' | '\'')) => raw
@@ -40,8 +40,8 @@ mod tests {
         }
     }
 
-    /// ★안 벗기는 셋★ — 짝이 안 맞는 따옴표(경로의 일부일 수 있다) · 안이 빈 짝(벗기면 빈 폴더가 된다) ·
-    /// 두 겹(어느 쪽이 진짜인지 우리가 추측하게 된다).
+    /// ★Three that are not stripped★ — a mismatched quote (it may be part of the path) · an empty pair (stripping makes an empty folder) ·
+    /// two layers (we would have to guess which is real).
     #[test]
     fn normalize_spelling_leaves_quotes_it_cannot_safely_strip() {
         assert_eq!(normalize_spelling(r#""C:/work/thing"#), r#""C:/work/thing"#);
@@ -57,14 +57,14 @@ mod tests {
         );
     }
 
-    /// 따옴표 한 글자뿐인 값은 여는 쪽과 닫는 쪽이 같은 글자라 짝이 아니다.
+    /// A value that is a single quote character is not a pair, because the opening and closing sides are the same character.
     #[test]
     fn a_lone_quote_is_left_alone() {
         assert_eq!(normalize_spelling("\""), "\"");
         assert_eq!(normalize_spelling("'"), "'");
     }
 
-    /// 벗기는 것은 양 끝의 짝뿐이다 — 안쪽 따옴표는 경로의 일부로 둔다.
+    /// Only the pair at the two ends is stripped — inner quotes are left as part of the path.
     #[test]
     fn quotes_inside_the_value_stay() {
         assert_eq!(normalize_spelling(r#"C:\a "b"\c"#), r#"C:/a "b"/c"#);

@@ -1,4 +1,4 @@
-// StateFileNotice — `state_file` 다섯 값 · 가드 ⅱ(`saves:false` · `ok`) · 닫기(사용자 결정 2026-10-05 · 2026-10-06).
+// StateFileNotice — the five `state_file` values · guard ⅱ (`saves:false` · `ok`) · close (user decision 2026-10-05 · 2026-10-06).
 
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -20,7 +20,7 @@ describe('StateFileNotice', () => {
     expect(screen.queryByRole('status')).toBeNull()
   })
 
-  // 셸 계약의 짝 — unreadable · newer 는 가드 ⅰ 이라 늘 `saves:false` 다.
+  // A pair of the shell contract — unreadable · newer are guard ⅰ so they are always `saves:false`.
   it.each<[StateFileStatus, boolean, string]>([
     ['unreadable', false, t('restore.stateFileUnreadable')],
     ['newer', false, t('restore.stateFileNewer')],
@@ -31,7 +31,7 @@ describe('StateFileNotice', () => {
     expect(screen.getByRole('status').textContent).toContain(text)
   })
 
-  // 덮는 층의 줄 계약(`NoticeOverlay` doc) — `wrap-anywhere` 를 잃으면 긴 문구가 ✕ 를 화면 밖으로 민다.
+  // The row contract of the covering layer (the `NoticeOverlay` doc) — if `wrap-anywhere` is lost, long wording pushes the ✕ off screen.
   it('줄은 불투명 바탕이고 글 칸은 아무 데서나 줄을 바꾼다', () => {
     render(<StateFileNotice stateFile="unreadable" saves={false} />)
     const row = screen.getByRole('status')
@@ -46,7 +46,7 @@ describe('StateFileNotice', () => {
     expect(text).toContain('저장하지 않')
   })
 
-  // ADR-0291: 새 버전이 저장한 파일은 손상 문구가 아니라 따로 — 떠 두지 않으므로 .corrupt 를 말하지 않는다.
+  // ADR-0291: a file saved by a newer version is separate from the corruption wording — since we do not copy it aside, we do not mention .corrupt.
   it('newer 문구는 파일 이름 · 「저장하지 않는다」 · 「그대로 둔다」를 싣고 .corrupt 를 말하지 않는다', () => {
     render(<StateFileNotice stateFile="newer" saves={false} />)
     expect(screen.getAllByRole('status')).toHaveLength(1)

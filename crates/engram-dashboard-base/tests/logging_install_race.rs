@@ -1,10 +1,10 @@
-//! subscriber 설치에 **진** 호출이 파일을 만들지도, 보존 정리를 돌리지도 않는지 본다.
+//! Checks that a call that **lost** the subscriber install neither creates a file nor runs retention cleanup.
 //!
-//! 진 호출이 파일을 먼저 열면 아무도 쓰지 않을 빈 파일이 남고, 그걸 만들며 돌린 보존 정리가 **진짜
-//! 로그 하나를 지운다** — 그 빈 파일이 상한 한 자리를 영구히 차지한다.
+//! If the losing call opened the file first, an empty file nobody writes would remain, and the retention cleanup run while making it **deletes one real
+//! log** — that empty file permanently takes one slot of the cap.
 //!
-//! ★별도 프로세스가 필요하다★: 전역 subscriber 는 프로세스당 한 번뿐이라, 남이 먼저 깐 상태를
-//! 만들려면 이 파일이 그 프로세스를 통째로 소유해야 한다.
+//! ★A separate process is needed★: the global subscriber is once per process, so to create a state where someone else installed first
+//! this file must own that process whole.
 
 use engram_dashboard_base::logging::{init_logging_with_file, LogKind};
 
@@ -13,12 +13,12 @@ fn losing_the_subscriber_install_creates_and_prunes_nothing() {
     let data_dir = std::env::temp_dir().join(format!("engram-loginstall-{}", std::process::id()));
     let logs = data_dir.join("logs");
     std::fs::create_dir_all(&logs).expect("logs dir");
-    // 상한(10)을 넘겨 둔다 — 보존 정리가 돌면 반드시 지워진다.
+    // Leave it over the cap (10) — it is certain to be deleted when retention cleanup runs.
     for i in 0..15 {
         std::fs::write(logs.join(format!("daemon-20260101-{i:06}-1.log")), "x").expect("write");
     }
 
-    // 남이 먼저 깐 subscriber.
+    // A subscriber installed first by someone else.
     tracing_subscriber::fmt().try_init().expect("선점해야");
 
     let got = init_logging_with_file(&logs, LogKind::Daemon);

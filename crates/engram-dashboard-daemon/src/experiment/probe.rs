@@ -1,28 +1,28 @@
-//! 프로브 채점 + suspected-compaction 감지 (ADR-0090 Stage 2 파일럿).
+//! Probe grading + suspected-compaction detection (ADR-0090 Stage 2 pilot).
 //!
-//! ## 핵심 불변식
-//! - **순수·결정적** — 전부 입력만의 함수다(외부 상태·시계 0).
-//! - **판정 = 지연 후에도 회상 유지**(ADR-0088) — 즉시 ack 는 성공이 아니다. `ProbeScores` 가 그 인코딩.
+//! ## Core invariants
+//! - **Pure and deterministic** — everything is a function of the input alone (0 external state or clock).
+//! - **Decision = recall holds even after a delay** (ADR-0088) — an immediate ack is not success. `ProbeScores` is that encoding.
 
 use serde::{Deserialize, Serialize};
 
-/// 프로브 응답 1건의 채점 결과. JSONL 에 그대로 실린다.
+/// Grading result of one probe response. Carried as is in the JSONL.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProbeScores {
     pub sender_recalled: bool,
-    /// 전체 uuid 는 길어 접두 회상으로 완화한 축.
+    /// An axis relaxed to prefix recall because the full uuid is long.
     pub id_prefix_recalled: bool,
     pub codeword_recalled: bool,
-    /// FINAL REPORT 프로브 전용 — 아니면 항상 false.
+    /// FINAL REPORT probe only — otherwise always false.
     pub final_count_correct: bool,
-    /// DOC-1 제목. FINAL REPORT 프로브 전용 — 아니면 항상 false.
+    /// DOC-1 title. FINAL REPORT probe only — otherwise always false.
     pub doc1_title_recalled: bool,
 }
 
-/// msg_id 접두 회상 기준 길이(선행 바이트).
+/// Length of the msg_id prefix-recall criterion (leading bytes).
 pub const ID_PREFIX_LEN: usize = 8;
 
-/// 구두점·대소문자 차이로 인한 false-negative 를 줄인다.
+/// Reduces false negatives caused by punctuation and case differences.
 fn normalize(s: &str) -> String {
     s.chars()
         .map(|c| {
@@ -35,7 +35,7 @@ fn normalize(s: &str) -> String {
         .collect()
 }
 
-/// 짧은 토큰이 다른 단어의 부분으로 우연 매칭되는 것을 막는다(예: "id" 가 "identity" 에 걸리지 않게).
+/// Prevents a short token from accidentally matching as part of another word (e.g. so "id" is not caught in "identity").
 fn contains_token_seq(haystack_norm: &str, needle: &str) -> bool {
     let needle_norm = normalize(needle);
     let needle_tokens: Vec<&str> = needle_norm.split_whitespace().collect();
@@ -48,12 +48,12 @@ fn contains_token_seq(haystack_norm: &str, needle: &str) -> bool {
         .any(|w| w == needle_tokens.as_slice())
 }
 
-/// ★왜 패턴 매칭인가(finding 11 fix)★: 단순 "정답 숫자 토큰이 응답에 있나" 는 "I received 41 documents;
-///   DOC-42 was not received"(정답 42) 같은 문장에서 42 가 문서 **참조**(DOC-42)로 등장해 false-positive
-///   를 낸다. 그래서 정답 숫자가 count 보고로 읽히는 인접(±1) 문맥을 요구한다.
+/// ★Why pattern matching (finding 11 fix)★: a plain "is the correct number token in the response" gives a false positive in a sentence like "I received 41 documents;
+///   DOC-42 was not received" (correct answer 42), where 42 appears as a document **reference** (DOC-42).
+///   So we require an adjacent (±1) context where the correct number reads as a count report.
 fn count_reported_with_cue(haystack_norm: &str, expected_count: u32) -> bool {
-    // count 명사가 여기 있는 이유: "Total documents: 42" 가 정규화로 "total documents 42" 가 돼 count
-    //   명사가 숫자 **앞**에 선다.
+    // Why the count nouns are here: "Total documents: 42" becomes "total documents 42" after normalization, so the count
+    //   noun stands **before** the number.
     const LEADING_CUES: &[&str] = &[
         "total",
         "received",
@@ -66,9 +66,9 @@ fn count_reported_with_cue(haystack_norm: &str, expected_count: u32) -> bool {
         "documents",
         "docs",
     ];
-    // "document"(단수)는 DOC-N 참조에도 나오지만, 숫자 **뒤**에 서면 count 명사 용법이라 포함한다.
+    // "document" (singular) also appears in DOC-N references, but when it stands **after** the number it is the count-noun usage so it is included.
     const TRAILING_NOUNS: &[&str] = &["documents", "docs", "document"];
-    // 숫자 **앞**에 서면 문서 참조(DOC-N)라 count 가 아니다 — 배제.
+    // When it stands **before** the number it is a document reference (DOC-N) and not a count — excluded.
     const REFERENCE_LABELS: &[&str] = &["doc", "document"];
 
     let expected = expected_count.to_string();
@@ -91,8 +91,8 @@ fn count_reported_with_cue(haystack_norm: &str, expected_count: u32) -> bool {
     false
 }
 
-/// `response` 만 에이전트 산출이고 `sender_name`·`msg_id`·`codeword`·`expected_*` 는 전부 **정답**이다.
-/// `expected_doc_count`/`expected_doc1_title` 은 `final_report` 가 false 면 무시된다.
+/// Only `response` is agent output and `sender_name`·`msg_id`·`codeword`·`expected_*` are all **answers**.
+/// `expected_doc_count`/`expected_doc1_title` are ignored if `final_report` is false.
 #[allow(clippy::too_many_arguments)]
 pub fn score_probe(
     response: &str,
@@ -108,9 +108,9 @@ pub fn score_probe(
     let sender_recalled = !sender_name.is_empty() && contains_token_seq(&norm, sender_name);
     let codeword_recalled = !codeword.is_empty() && contains_token_seq(&norm, codeword);
 
-    // ★finding 12 fix★: raw substring(`response.contains(prefix)`)은 8-hex 접두가 무관 단어 **안쪽**
-    //   (`deadbeef` in `undeadbeefed`)에 걸려 false-positive 를 냈다 — 완화 금지. 동시에 equality 가 아니라
-    //   starts_with 라, 에이전트가 전체 id(`1a2b3c4d5e`)를 써도 접두 회상이 성립한다.
+    // ★finding 12 fix★: a raw substring (`response.contains(prefix)`) gave a false positive when the 8-hex prefix landed **inside** an unrelated word
+    //   (`deadbeef` in `undeadbeefed`) — do not relax. At the same time, since it is starts_with and not equality,
+    //   prefix recall holds even if the agent writes the full id (`1a2b3c4d5e`).
     let id_prefix_recalled = if msg_id.len() >= ID_PREFIX_LEN {
         let prefix = normalize(&msg_id[..ID_PREFIX_LEN]);
         let prefix = prefix.trim();
@@ -145,13 +145,13 @@ pub fn score_probe(
 pub struct UsageSample {
     /// 0-base.
     pub turn_idx: u32,
-    /// claude usage 가 보고한 그 턴의 컨텍스트 토큰(ground truth).
+    /// The context tokens of that turn reported by claude usage (ground truth).
     pub context_tokens: u64,
-    /// 이 턴 직전에 하네스가 의도적으로 컨텍스트를 리셋했나 — 그렇다면 급감은 의심이 아니다.
+    /// Did the harness deliberately reset the context just before this turn — if so, the sharp drop is not suspicious.
     pub harness_reset: bool,
 }
 
-/// 연속 두 턴 사이 컨텍스트 토큰이 이 비율을 **넘게** 줄면 의심.
+/// Suspicious if the context tokens between two consecutive turns fall by **more than** this ratio.
 pub const COMPACTION_DROP_THRESHOLD: f64 = 0.30;
 
 pub fn real_series_from_footprints(footprints: &[u64]) -> Vec<UsageSample> {
@@ -166,13 +166,13 @@ pub fn real_series_from_footprints(footprints: &[u64]) -> Vec<UsageSample> {
         .collect()
 }
 
-/// ★finding 2 — 단일 소스 선택 계약★: 감지를 돌릴 **한 소스** 계열을 고른다. **두 계열을 절대 이어
-///   붙이지 않는다.**
+/// ★finding 2 — single-source selection contract★: choose **one source** series to run detection on. **Never join
+///   two series.**
 ///
-/// ★왜(load-bearing)★: 혼합 계열은 트랜스크립트 탭이 **처음 붙는 순간** 그 턴 값이 이전 턴의 (더 큰)
-///   추정에서 (더 작은) 실 첫 footprint 로 소스가 바뀌며 뚝 떨어졌고, 그 인위적 급감이 임계를 넘어 가짜
-///   compaction 플래그가 섰다. 단일 소스면 그 전환 자체가 없다 — 진짜 급감은 그대로 잡힌다. 이 보장이
-///   bin 안 `match` 에만 있던 시절엔 prose 로만 존재해 단위 테스트가 못 닿았다.
+/// ★Why (load-bearing)★: with a mixed series, at the **moment the transcript tap first attaches**, that turn's value dropped sharply as the source switched from the previous turn's (larger)
+///   estimate to the (smaller) real first footprint, and that artificial drop crossed the threshold and a fake
+///   compaction flag was raised. With a single source that switch itself does not exist — a real drop is still caught. When this guarantee
+///   existed only in a `match` inside the bin, it existed only as prose and unit tests could not reach it.
 pub fn select_detection_series(
     real_footprints: Option<&[u64]>,
     estimate: &[UsageSample],
@@ -183,11 +183,11 @@ pub fn select_detection_series(
     }
 }
 
-/// 반환 원소 = **급감이 관측된 (뒤쪽) 턴의 turn_idx**(prev→cur 에서 cur).
+/// Returned element = **the turn_idx of the (later) turn where the drop was observed** (cur in prev→cur).
 ///
-/// ★왜 외부 근사인가★: claude stream-json 이 compaction 을 명시 신호로 안 줄 수 있어(ADR-0090 맥락),
-///   컨텍스트 토큰이 리셋 없이 급감하면 내부 compaction 을 **의심**한다. 확증이 아니라 플래그다 —
-///   파일럿이 실제 신호(있으면)와 대조할 재료.
+/// ★Why an external approximation★: claude stream-json may not give compaction as an explicit signal (ADR-0090 context),
+///   so if context tokens drop sharply without a reset we **suspect** internal compaction. It is a flag, not confirmation —
+///   material for the pilot to cross-check against the real signal (if any).
 pub fn detect_suspected_compaction(samples: &[UsageSample]) -> Vec<u32> {
     let mut flags = Vec::new();
     for pair in samples.windows(2) {
@@ -196,7 +196,7 @@ pub fn detect_suspected_compaction(samples: &[UsageSample]) -> Vec<u32> {
         if cur.harness_reset {
             continue;
         }
-        // prev 가 0 이면 비율이 무의미하다 — 스킵.
+        // If prev is 0 the ratio is meaningless — skip.
         if prev.context_tokens == 0 {
             continue;
         }
@@ -379,7 +379,7 @@ mod tests {
         assert!(!s.doc1_title_recalled, "비-final 은 항상 false");
     }
 
-    // ── compaction 감지 ──
+    // ── compaction detection ──
 
     fn sample(idx: u32, tokens: u64, reset: bool) -> UsageSample {
         UsageSample {
@@ -391,14 +391,14 @@ mod tests {
 
     #[test]
     fn detects_sharp_drop() {
-        // 10000 → 5000 = 50% 급감(>30%) → 의심.
+        // 10000 → 5000 = a 50% drop (>30%) → suspicious.
         let samples = vec![sample(0, 10_000, false), sample(1, 5_000, false)];
         assert_eq!(detect_suspected_compaction(&samples), vec![1]);
     }
 
     #[test]
     fn ignores_small_drop() {
-        // 10000 → 8000 = 20% (<30%) → 의심 아님.
+        // 10000 → 8000 = 20% (<30%) → not suspicious.
         let samples = vec![sample(0, 10_000, false), sample(1, 8_000, false)];
         assert_eq!(detect_suspected_compaction(&samples), Vec::<u32>::new());
     }
@@ -419,9 +419,9 @@ mod tests {
     fn detects_multiple_drops() {
         let samples = vec![
             sample(0, 10_000, false),
-            sample(1, 4_000, false), // 급감 60%
-            sample(2, 4_100, false), // 소폭 증가
-            sample(3, 1_000, false), // 급감 76%
+            sample(1, 4_000, false), // 60% drop
+            sample(2, 4_100, false), // small increase
+            sample(3, 1_000, false), // 76% drop
         ];
         assert_eq!(detect_suspected_compaction(&samples), vec![1, 3]);
     }
@@ -432,7 +432,7 @@ mod tests {
         assert_eq!(detect_suspected_compaction(&samples), Vec::<u32>::new());
     }
 
-    // ── finding 2: 단일 일관 계열(real_series_from_footprints) ──
+    // ── finding 2: a single consistent series (real_series_from_footprints) ──
 
     #[test]
     fn source_transition_drop_does_not_flag_when_series_is_single_source() {
@@ -480,7 +480,7 @@ mod tests {
 
     #[test]
     fn genuine_real_series_drop_still_flags() {
-        // 48000 → 15000 = 69% 급감 → idx 2.
+        // 48000 → 15000 = a 69% drop → idx 2.
         let real_footprints = [10_000u64, 48_000, 15_000, 20_000];
         let samples = real_series_from_footprints(&real_footprints);
         assert_eq!(

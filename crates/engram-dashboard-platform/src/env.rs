@@ -1,16 +1,16 @@
-//! 프로세스 환경의 OS 규칙 — 홈 디렉터리 · 실행 파일 이름 · 지금 실행 파일 옆 실행 파일 경로 · 환경변수
-//! 이름 비교. std 만 쓴다.
+//! OS rules for the process environment: home directory, executable file name, path of an executable next to the
+//! running one, environment-variable name comparison. Uses only std.
 
 // ADR-0230
 
 use std::path::PathBuf;
 
-/// 사용자 홈 디렉터리 = 환경변수 하나 — Windows = `USERPROFILE`, 그 밖 = `HOME`. 그 변수가 없을 때만
-/// `None` 이다(빈 값은 걸러내지 않는다).
+/// The user home directory = one environment variable: Windows = `USERPROFILE`, elsewhere = `HOME`. It is
+/// `None` only when that variable is missing (an empty value is not filtered out).
 ///
-/// ★`std::env::home_dir` 로 바꾸지 말 것★ — Windows 에서 그 변수가 없으면 OS API 로 넘어가 뜻이 달라진다.
-/// Windows 에서 `HOME` 을 보지 않는 것도 지금 뜻 그대로다 — 둘 중 하나라도 바꾸면 홈 아래 폴더를 찾는
-/// 부르는 쪽이 오류 없이 다른 폴더를 본다.
+/// ★Do not swap in `std::env::home_dir`★ — on Windows, when that variable is missing it falls through to an OS API and the meaning changes.
+/// Not looking at `HOME` on Windows is also the current meaning on purpose — change either one and a caller
+/// that looks for a folder under home silently looks at a different folder, with no error.
 #[cfg(windows)]
 pub fn home_dir() -> Option<PathBuf> {
     std::env::var_os("USERPROFILE").map(PathBuf::from)
@@ -24,18 +24,18 @@ pub fn exe_file_name(stem: &str) -> String {
     format!("{stem}{}", std::env::consts::EXE_SUFFIX)
 }
 
-/// 지금 도는 실행 파일과 같은 폴더의 `stem` 실행 파일 경로 — 파일 이름은 [`exe_file_name`] 이다.
+/// Path of the `stem` executable in the same folder as the running executable — the file name comes from [`exe_file_name`].
 ///
-/// ★있는지는 보지 않는다★ — 찾은 뒤 하는 일(로그 · 다음 후보 · 걸러 내기)이 부르는 쪽마다 다르다.
-/// `None` 은 지금 실행 파일의 경로나 그 폴더를 얻지 못할 때뿐이다.
+/// ★It does not check whether the file exists★ — what to do after finding it (log, try the next candidate, filter out) differs per caller.
+/// `None` only when the path of the running executable or its folder cannot be obtained.
 // ADR-0282
 pub fn sibling_exe(stem: &str) -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     Some(exe.parent()?.join(exe_file_name(stem)))
 }
 
-/// 두 환경변수 이름이 같은 변수인가. Windows 의 환경변수 이름은 대소문자를 가리지 않는다(`Path` 와 `PATH` 는
-/// 한 변수) — 여기선 ASCII 만 접는다. 그 밖의 OS 는 정확히 같아야 같다.
+/// Are two environment-variable names the same variable? Windows environment-variable names are case-insensitive (`Path` and `PATH` are
+/// one variable) — only ASCII is folded here. On other OSes the names must match exactly.
 pub fn env_key_eq(a: &str, b: &str) -> bool {
     if cfg!(windows) {
         a.eq_ignore_ascii_case(b)

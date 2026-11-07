@@ -1,7 +1,7 @@
-// useSplitDrag 단위테스트 — 제스처 token·확정·화해·당김 타이머·허용 범위·뷰 전환(ADR-0227, TRD §2f).
-// 실물 viewStore 캐시와 실물 캔버스 보고 모듈 위에서 돈다. 동작을 흉내 내는 목은 invoke 하나다 — 확정
-//   (set_split_ratio)·당김(get_view)·캔버스 보고(report_window_canvas)가 모두 그것을 지난다. event·window 모듈은
-//   viewStore 의 import 를 풀려고 빈 껍데기로만 둔다. 구분선 콜백은 Splitter 대신 직접 부른다.
+// useSplitDrag unit test — gesture token, commit, reconcile, pull timer, allowed range, view switch (ADR-0227, TRD §2f).
+// Runs on the real viewStore cache and the real canvas-report module. The only mock that imitates behavior is invoke — commit
+//   (set_split_ratio), pull (get_view) and canvas report (report_window_canvas) all pass through it. The event and window modules
+//   are empty shells, only there to unblock viewStore's imports. Divider callbacks are called directly instead of through Splitter.
 
 import { act, cleanup, renderHook } from '@testing-library/react'
 import { Activity, StrictMode, type ReactNode, type RefObject } from 'react'
@@ -24,9 +24,9 @@ import { __resetCanvasReportForTest, getCanvasReport, submitCanvasSize } from '.
 
 const VIEW = 'v1'
 
-// sp-a: 좌우 [0,1]×[0,1] (a = s1, b = sp-b)
-// sp-b: 위아래 [a,1]×[0,1] at 0.5 (a = sp-c, b = s4)
-// sp-c: 좌우 [a,1]×[0,0.5] (a = s2, b = s3) — withC=false 면 닫혀 s2 가 그 자리를 채운다.
+// sp-a: left-right [0,1]×[0,1] (a = s1, b = sp-b)
+// sp-b: top-bottom [a,1]×[0,1] at 0.5 (a = sp-c, b = s4)
+// sp-c: left-right [a,1]×[0,0.5] (a = s2, b = s3) — with withC=false it is closed and s2 fills its place.
 function snap(version: number, p: { a?: number; cAt?: number; withC?: boolean } = {}): ViewSnapshot {
   const a = p.a ?? 0.5
   const withC = p.withC ?? true
@@ -62,7 +62,7 @@ function snap(version: number, p: { a?: number; cAt?: number; withC?: boolean } 
 
 const VIEW2 = 'v2'
 
-// 다른 뷰: 좌우 분할 하나(w-sp) — w1 | w2.
+// A different view: a single left-right split (w-sp) — w1 | w2.
 function snapV2(version: number, at = 0.5): ViewSnapshot {
   return {
     view_id: VIEW2,
@@ -81,12 +81,12 @@ function snapV2(version: number, at = 0.5): ViewSnapshot {
   }
 }
 
-/** 재사상 식과 같은 모양 — 분할 상자 `[x0,x1]` 안의 비율 `r` 의 경계. */
+/** Same shape as the remap formula — the boundary of ratio `r` inside the split box `[x0,x1]`. */
 const boundary = (x0: number, x1: number, r: number): number => x0 + (x1 - x0) * r
 
 const cached = (viewId = VIEW) => useViewStore.getState().layouts[viewId]
 
-/** 호스트 렌더 수 — 헛 디스패치가 렌더를 부르는지 잰다(StrictMode 면 두 배로 센다). */
+/** Host render count — measures whether a no-op dispatch triggers a render (StrictMode counts double). */
 let renders = 0
 
 function useHarness(rootRef: RefObject<HTMLElement | null>, viewId: string) {
@@ -152,7 +152,7 @@ function rootWithRect(width: number, height: number): HTMLElement {
   return el
 }
 
-// set_split_ratio 는 테스트가 손수 끝낸다. get_view 는 `pullReply` 를 돌려준다(프라미스면 그것이 끝날 때).
+// set_split_ratio is finished by hand in the test. get_view returns `pullReply` (when it settles, if it is a promise).
 let pendingRatio: Array<{ resolve: (v: SplitRatioApplied) => void; reject: (e: Error) => void }>
 let pullReply: ViewSnapshot | Promise<ViewSnapshot> | null
 
@@ -202,19 +202,19 @@ describe('useSplitDrag — 확정과 화해', () => {
     act(() => props(r, 'sp-a').onRelease(0.4))
     expect(ratioCalls()).toEqual([{ viewId: VIEW, splitId: 'sp-a', ratio: 0.4 }])
 
-    // 응답 전 스냅샷(규칙 3) — 나머지는 반영하되 끌린 분할은 미리보기 그대로.
+    // Snapshot before the reply (rule 3) — the rest is applied, but the dragged split keeps its preview.
     apply(snap(11))
     expect(slotX1(r, 's1')).toBe(0.4)
     await respond(0, 'Applied', 13)
     expect(slotX1(r, 's1')).toBe(0.4)
-    // 기다리는 version 미만의 스냅샷도 미리보기를 못 버린다.
+    // A snapshot below the awaited version cannot discard the preview either.
     apply(snap(12))
     expect(slotX1(r, 's1')).toBe(0.4)
 
     apply(snap(13, { a: 0.4 }))
     expect(r.result.current.slotRects).toBe(cached().slotRects)
     expect(r.result.current.splitRects).toBe(cached().splitRects)
-    // 미리보기가 정말 버려졌으면 그 뒤 스냅샷(LLM 쓰기 등)을 그대로 따른다.
+    // Once the preview is really discarded, later snapshots (LLM writes etc.) are followed as they are.
     apply(snap(14, { a: 0.6 }))
     expect(slotX1(r, 's1')).toBe(0.6)
     expect(ratioCalls()).toHaveLength(1)
@@ -230,7 +230,7 @@ describe('useSplitDrag — 확정과 화해', () => {
     await respond(0, outcome, 99, 0.5)
     expect(r.result.current.slotRects).toBe(cached().slotRects)
     expect(slotX1(r, 's1')).toBe(0.5)
-    // 스냅샷이 오지 않는 결말이라 당기지도 않는다.
+    // The outcome sends no snapshot, so no pull happens either.
     await advance(COMMIT_PULL_DELAY_MS * 4)
     expect(getViewCalls()).toBe(0)
   })
@@ -253,7 +253,7 @@ describe('useSplitDrag — 확정과 화해', () => {
     const r = mount()
     act(() => props(r, 'sp-a').onDragStart(0.4))
     act(() => props(r, 'sp-a').onRelease(0.4))
-    // 응답 전이라 미리보기를 쥔다. 스냅샷 값이 미리보기와 달라야 쥐고 있는지 보인다.
+    // Before the reply the preview is held. The snapshot value must differ from the preview to show it is held.
     apply(snap(12, { a: 0.45 }))
     expect(slotX1(r, 's1')).toBe(0.4)
 
@@ -289,7 +289,7 @@ describe('useSplitDrag — 확정과 화해', () => {
     act(() => c.onRelease(0.8))
     expect(ratioCalls()).toEqual([])
 
-    // 다른 구분선은 그대로 돈다.
+    // Other dividers keep working.
     act(() => props(r, 'sp-a').onDragStart(0.3))
     act(() => props(r, 'sp-a').onRelease(0.3))
     expect(ratioCalls()).toEqual([{ viewId: VIEW, splitId: 'sp-a', ratio: 0.3 }])
@@ -356,7 +356,7 @@ describe('useSplitDrag — 제스처 token 은 구분선마다', () => {
     expect(slotX1(r, 's1')).toBe(0.6)
   })
 
-  // 아래 셋은 한 act 안에서 부른다 — 사이에 렌더가 없어도 소유 판정이 맞아야 한다(렌더에 맞춘 ref 로는 틀린다).
+  // The three below are called in one act — ownership must be decided right even with no render between them (a ref synced to render gets it wrong).
   it('같은 틱에 B 가 미리보기를 가져가고 A 가 떼면 A 는 확정하지 않는다', () => {
     const r = mount()
     act(() => props(r, 'sp-a').onDragStart(0.3))
@@ -473,13 +473,13 @@ describe('useSplitDrag — 확정 뒤 당김(규칙 6)', () => {
     expect(vi.getTimerCount()).toBe(1)
 
     r.unmount()
-    // 당김 쪽에도 언마운트 가드가 있어 호출 수만으로는 타이머를 걷었는지 안 보인다.
+    // The pull side has an unmount guard too, so the call count alone does not show whether the timer was cleared.
     expect(vi.getTimerCount()).toBe(0)
     await advance(COMMIT_PULL_DELAY_MS * 4)
     expect(getViewCalls()).toBe(0)
   })
 
-  // 응답은 언마운트 여부로 막지 않는다 — 디스패치가 닿아도 해가 없음을 잰다(가드에 기대지 않는다).
+  // The reply is not blocked by unmount state — measures that a dispatch that lands does no harm (does not lean on the guard).
   it('확정 도중 언마운트돼도 늦은 응답은 해가 없다', async () => {
     vi.useFakeTimers()
     const err = vi.spyOn(console, 'error').mockImplementation(() => {})
@@ -542,14 +542,14 @@ describe('useSplitDrag — 뷰 전환', () => {
     act(() => props(r, 'sp-a').onRelease(0.4))
     r.rerender({ viewId: VIEW2 })
 
-    // 새 뷰의 캐시 version(5) 이 옛 응답의 version(12) 보다 낮다 — 옛 응답이 새어 들면 당김이 걸린다.
+    // The new view's cache version (5) is lower than the old reply's version (12) — if the old reply leaks in, a pull gets scheduled.
     await respond(0, 'Applied', 12)
     expect(r.result.current.slotRects).toBe(cached(VIEW2).slotRects)
     expect(vi.getTimerCount()).toBe(0)
     await advance(COMMIT_PULL_DELAY_MS * 4)
     expect(getViewCalls()).toBe(0)
 
-    // 새 뷰의 드래그는 그대로 돈다.
+    // A drag in the new view keeps working.
     act(() => props(r, 'w-sp').onDragStart(0.7))
     expect(slotX1(r, 'w1')).toBe(0.7)
     act(() => props(r, 'w-sp').onRelease(0.7))
@@ -567,12 +567,12 @@ describe('useSplitDrag — 헛 디스패치', () => {
     act(() => a.onDragStart(0.3))
     act(() => props(r, 'sp-c').onDragStart(0.8))
 
-    // 남의 token 이라 무시되는 미리보기.
+    // A preview that is ignored because the token belongs to someone else.
     let before = renders
     act(() => a.onPreview(0.35))
     expect(renders - before).toBe(0)
 
-    // 끌리는 분할이 남아 있는 스냅샷 — 캐시 변경으로 한 번만 그린다.
+    // A snapshot in which the dragged split remains — painted just once, by the cache change.
     before = renders
     apply(snap(11, { a: 0.5, cAt: 0.75 }))
     expect(renders - before).toBe(1)
@@ -616,7 +616,7 @@ describe('useSplitDrag — 허용 범위', () => {
   it('L < 2·MIN_PANE_PX 면 잠긴다', async () => {
     const r = mount()
     await reportCanvas(100, 100)
-    // sp-c 의 L = 100 × 0.5 = 50
+    // L of sp-c = 100 × 0.5 = 50
     expect(props(r, 'sp-c').range).toBeNull()
     expect(props(r, 'sp-a').range).toEqual(rangeFor(100, 1))
   })

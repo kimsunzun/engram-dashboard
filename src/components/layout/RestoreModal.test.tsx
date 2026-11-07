@@ -1,13 +1,13 @@
-// RestoreModal — main 을 덮고 입력을 막는다 · 단축키 멈춤 · 상태로만 닫힌다(TRD S21-storage §6-7 · §8 「프론트 모달」).
+// RestoreModal — it covers main and blocks input · shortcuts stop · it closes only by state (TRD S21-storage §6-7 · §8 「프론트 모달」).
 //
-// 배선 전체(AppLayout + restoreClient + 단축키 디스패처)를 가짜 IPC 위에서 돌린다 — 모달 홀로는 「main 을 막는다」를
-// 잴 수 없다(잠금은 AppLayout 의 `inert` 와 모달의 포커스 · 멈춤이 한 벌이다).
+// Run the whole wiring (AppLayout + restoreClient + the shortcut dispatcher) over a fake IPC — the modal alone cannot measure 「main 을 막는다」 (blocks main)
+// (the lock is one set: AppLayout's `inert` plus the modal's focus · stop).
 
 import { StrictMode, type ReactNode } from 'react'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 
-// 캔버스는 관심 밖 — 그 아래 입력이 잠기는지만 본다. 알림 층은 `notices` 로 받아 그 안에 그린다.
+// The canvas is out of interest — we only check whether input beneath it is locked. The notice layer is received as `notices` and drawn inside it.
 vi.mock('./WindowLayout', () => ({
   default: ({ notices }: { notices?: ReactNode }) => (
     <div data-testid="window-layout">
@@ -38,7 +38,7 @@ function mount(initial: RestoreStatusView, opts: { strict?: boolean } = {}) {
   const client = createRestoreClient(f.ipc)
   const ui = <AppLayout restore={client} />
   const r = render(opts.strict ? <StrictMode>{ui}</StrictMode> : ui)
-  // 프래그먼트의 첫 자식 = 잠기는 레이아웃 층.
+  // The first child of the fragment = the layout layer that gets locked.
   const layer = () => r.container.firstElementChild as HTMLElement
   return { f, client, layer, ...r }
 }
@@ -78,7 +78,7 @@ describe('RestoreModal — 덮고 막는다', () => {
     expect(dialog()).not.toBeNull()
     expect(layer().hasAttribute('inert')).toBe(true)
     expect(layer().contains(screen.getByTestId('under-input'))).toBe(true)
-    // 모달은 잠긴 층 밖이다 — 안에 있으면 자기도 잠긴다.
+    // The modal is outside the locked layer — if inside, it locks itself too.
     expect(layer().contains(dialog())).toBe(false)
   })
 
@@ -290,7 +290,7 @@ describe('RestoreModal — 답과 닫힘', () => {
     expect(acceptBtn().disabled).toBe(false)
     expect(rejectBtn().disabled).toBe(false)
     expect(f.calls.slice(-2)).toEqual(['invoke:restore_answer', 'invoke:restore_status'])
-    // 오류 문자열을 그대로 내보이지 않는다.
+    // Do not show the error string as is.
     expect(dialog()?.textContent).not.toContain('INTERNAL')
   })
 
@@ -299,8 +299,8 @@ describe('RestoreModal — 답과 닫힘', () => {
     await settle()
     const gate = deferred<AnswerReply>()
     f.setOnAnswer(() => gate.promise)
-    // Chromium 은 비활성이 된 단추의 포커스를 놓는다 — jsdom 은 놓지 않고 비활성 단추의 blur 도 무시하므로, 누르기 전에
-    //   손으로 떨어뜨려 「처리 중 포커스가 밖에 있다」를 만든다.
+    // Chromium releases the focus of a button that became disabled — jsdom does not, and ignores blur on a disabled button, so before pressing,
+    //   drop it by hand to create 「처리 중 포커스가 밖에 있다」 (focus is outside while processing).
     acceptBtn().blur()
     fireEvent.click(rejectBtn())
     await settle()
@@ -388,7 +388,7 @@ describe('RestoreModal — 거절 경고는 durable 로 가른다', () => {
     const text = warningText()
     expect(text).toBe(t('restore.rejectWarningNotSaving'))
     expect(text).not.toContain('되돌릴 수 없')
-    // 원인이 둘이라 파일 이름을 대지 않는다.
+    // There are two causes, so we do not name the file.
     expect(text).not.toContain('state.json')
   })
 
@@ -412,7 +412,7 @@ describe('AppLayout — 상태 파일 알림', () => {
     expect(screen.getByRole('status').textContent).toContain('state.json.corrupt')
   })
 
-  // 가드 ⅱ 는 `state_file` 이 `ok` 라 답한 뒤에 그 사실을 나르는 칸이 `saves` 하나다(가드 ⅱ 안내 — ADR-0276).
+  // For guard ⅱ, `state_file` is `ok`, so after answering, the single field that carries that fact is `saves` (guard ⅱ notice — ADR-0276).
   it.each([
     ['수락', () => acceptBtn()],
     ['거절', () => rejectBtn()],

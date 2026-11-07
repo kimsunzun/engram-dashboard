@@ -1,39 +1,39 @@
-# ADR-0095: 봉투 포맷 스위칭 구조 — 기본 colon·대체 xml (bracket 기각)
+# ADR-0095: Envelope format switching structure — colon by default, xml as the alternative (bracket rejected)
 
-- 상태: 확정 (2026-07-21, 근거: 사용자 결정 — 스파이크 실측 3종 + sonnet 스트레스 증량 동률 확인 후)
-- 관련: ADR-0086(단일 wrap point — placeholder는 "후속 스파이크가 교체" 예정 조항이었고 본 ADR이 그 이행) · ADR-0092(판정축 수용>토큰) · ADR-0093(결정4 형식 스파이크) · `crates/engram-dashboard-daemon/src/control/ingress.rs::wrap_message` · step-log S17(포맷 스파이크 1·2차, 라우팅 신뢰화, 리치-메타 가독성) · Amended by ADR-0096 (봉투 포맷 스위치 저장 위치·노출 방식 (결정 5))
+- 상태: 확정 (2026-07-21, basis: user decision — after 3 spike measurements + a sonnet stress-scale-up tie confirmation)
+- 관련: ADR-0086(single wrap point — the placeholder was a clause saying "a follow-up spike will replace it", and this ADR carries that out) · ADR-0092(decision axis acceptance > tokens) · ADR-0093(decision 4 format spike) · `crates/engram-dashboard-daemon/src/control/ingress.rs::wrap_message` · step-log S17 (format spike rounds 1 and 2, routing trust, rich-metadata readability) · Amended by ADR-0096 (where the envelope format switch is stored and how it is exposed (decision 5))
 
 ## 맥락
 
-에이전트 간 메시지는 발신자가 무양식(툴 파라미터: 받는사람·본문)으로 내고, 데몬이 `wrap_message` 단일 지점에서 봉투를 조립해 수신자 stdin에 텍스트로 꽂는다(ADR-0086). 봉투는 기계가 파싱하지 않는 **수신 모델 가독 전용 표면**이다(배달 지정은 툴 파라미터가 이미 완료). 어떤 봉투 모양이 최적인지는 ADR-0093 결정4가 후속 스파이크로 미뤄뒀고, 이번에 실측을 끝냈다.
+In an agent-to-agent message, the sender submits it without form (tool parameters: recipient, body), and the daemon assembles the envelope at the single point `wrap_message` and drives it into the recipient's stdin as text (ADR-0086). The envelope is a **surface for the receiving model to read only** that no machine parses (delivery addressing is already done by the tool parameters). Which envelope shape is best was deferred by ADR-0093 decision 4 to a follow-up spike, and the measurement is now finished.
 
 ## 결정
 
-1. **봉투 포맷은 단일 고정이 아니라 스위칭 구조** — `wrap_message` 안의 템플릿 선택으로 포맷을 갈아끼운다(발신·수신 코드 경로 무변).
-2. **일반 기본 = colon** `{sender}: {body}` (예: `alice: auth 모듈 진행 상황 알려줄래?`).
-3. **대체(스위치 대상) = xml** `<message from="{sender}">{body}</message>` — 약모델 투입·타 백엔드(gemini/로컬 등) 이상 발생·옵션 확장(그룹/cc/스레드) 시 전환을 고려한다.
-4. 채택 조건이었던 "고급모델이 스트레스(리치 메타데이터) 상황에서도 colon=xml 동일"은 실측 충족: sonnet 리치-colon 6/6 = 리치-xml 6/6(라우팅·발신자 식별·플래그 0·A측 메타 누출 1/6씩 대칭).
-5. 스위치의 저장 위치·노출 방식(전역 설정/수신자별/메타데이터 유무별)은 구현 갈림길로 이월 — 구현 슬라이스에서 사용자 결정.
+1. **The envelope format is a switching structure, not a single fixed one** — swap formats by template selection inside `wrap_message` (the send and receive code paths unchanged).
+2. **General default = colon** `{sender}: {body}` (e.g. `alice: auth 모듈 진행 상황 알려줄래?`).
+3. **Alternative (switch target) = xml** `<message from="{sender}">{body}</message>` — consider switching when a weak model is deployed, when another backend (gemini/local, etc.) shows anomalies, or when options are extended (group/cc/thread).
+4. The adoption condition, "a high-end model gives colon = xml even under stress (rich metadata)", was met by measurement: sonnet rich-colon 6/6 = rich-xml 6/6 (routing · sender identification · flags 0 · A-side metadata leak 1/6 each, symmetric).
+5. Where the switch is stored and how it is exposed (global setting / per recipient / by presence of metadata) is carried over as an implementation fork — decided by the user in the implementation slice.
 
 ## 거부한 대안
 
-- **bracket `[message from {sender} id:{id}] {body}` (기존 placeholder) 유지** — 실측에서 어중간: colon 대비 토큰 이득 없음, xml 대비 확장 보험도 없음(haiku 리치-메타에서 colon과 같이 0/2로 무너짐 — xml만 2/2 생존).
-- **uuid(msg_id)를 봉투에 노출** — 수용에 불요(스파이크 1차: 발신자 표기만으로 전 후보 수용)하고 최대 오버헤드(36B). msg_id 자체는 배달 dedup 내부용으로 유지(봉투에서만 제거).
-- **봉투 내 행동 지시문(예: "send_message로 답하라" 리마인더)** — Anthropic 공식 문서가 반증(user-메시지 내 지시는 시스템프롬프트보다 가중치 낮음) + 실측에서 sonnet이 인젝션으로 감지·차단.
-- **발신자(LLM)가 봉투를 직접 생성** — 출력 토큰(입력보다 수 배 비쌈)을 보일러플레이트에 소모 + 태그 깨짐 등 생성 오차. 데몬 결정적 조립(오차 0·입력 토큰만)을 유지.
-- **단일 고정 포맷(스위치 없음)** — gemini/로컬 등 미실측 모델에서 colon이 버틴다는 보장이 없어 확정 불가. 스위칭이 보험.
+- **Keep bracket `[message from {sender} id:{id}] {body}` (the existing placeholder)** — halfway by measurement: no token gain over colon, and no extension insurance over xml either (in haiku rich-metadata it collapsed to 0/2 along with colon — only xml survived 2/2).
+- **Expose the uuid (msg_id) in the envelope** — not needed for acceptance (spike round 1: every candidate was accepted on the sender label alone) and the largest overhead (36B). msg_id itself stays for internal delivery dedup (removed only from the envelope).
+- **An in-envelope behavior instruction (e.g. a "reply with send_message" reminder)** — refuted by the official Anthropic docs (an instruction inside a user message weighs less than the system prompt), and in measurement sonnet detected it as an injection and blocked it.
+- **The sender (an LLM) generates the envelope directly** — spends output tokens (several times costlier than input) on boilerplate + generation errors such as broken tags. Keep the daemon's deterministic assembly (zero error · input tokens only).
+- **A single fixed format (no switch)** — for unmeasured models such as gemini/local there is no guarantee that colon holds, so it cannot be finalized. Switching is the insurance.
 
 ## 근거
 
-- **수용(파싱)**: 전 포맷 0 실패 — 포맷 스파이크 1·2차 24샘플 + 리치-메타 18샘플 전부 발신자·내용 정확 파싱(발신자 오인 0·보안 플래그 0).
-- **토큰**: 고정 오버헤드 colon 2B < bracket 16B(+uuid 56B) < xml 27B(+속성) — 수용 동률이므로 판정축(ADR-0092 수용>토큰)상 colon 승.
-- **확장 보험**: haiku(약모델)가 리치 메타데이터에서 colon·bracket 0/4 vs xml 2/2 — 구조 봉투만 툴-액션 신호를 유지(방향성 증거, 셀당 n=2~3). 이게 xml을 스위치 대상으로 남기는 이유.
-- **업계**: 성숙 프레임워크는 전송 계층 구조화(봉투 불요)이고, 텍스트 주입이 필요한 곳(Claude Code 하네스)에서 Anthropic은 XML 태그 — colon은 인간 채팅 관례(학습 데이터 최다)로 최소형의 정당성.
-- **한계(정직)**: 전 실측 한국어 대화 기준·셀당 n 작음 — 에이전트 간 영어 전환(백로그) 후 재검증 예정. haiku급은 어차피 미투입 예정이라 기본 결정에 비영향.
+- **Acceptance (parsing)**: 0 failures in every format — across format spike rounds 1 and 2 (24 samples) + rich-metadata (18 samples), sender and content were all parsed correctly (sender misidentification 0 · security flags 0).
+- **Tokens**: fixed overhead colon 2B < bracket 16B (+uuid 56B) < xml 27B (+attributes) — acceptance is tied, so on the decision axis (ADR-0092 acceptance > tokens) colon wins.
+- **Extension insurance**: the haiku (weak model) on rich metadata gave colon · bracket 0/4 vs xml 2/2 — only a structured envelope keeps the tool-action signal (directional evidence, n=2~3 per cell). This is why xml stays as the switch target.
+- **Industry**: mature frameworks structure the transport layer (no envelope needed), and where text injection is needed (the Claude Code harness) Anthropic uses XML tags — colon is a human chat convention (the most frequent in training data), which justifies it as the minimal form.
+- **Limits (honestly)**: all measurements were on Korean conversation · n per cell is small — to be re-verified after the agent-to-agent switch to English (backlog). Haiku-class models are not going to be deployed anyway, so the default decision is unaffected.
 
 ## 영향 / 불변식
 
-- **단일 wrap point 불변(ADR-0086) 유지** — 스위칭도 `wrap_message` 안의 템플릿 선택일 뿐, 봉투 조립이 두 곳이 되면 안 된다.
-- `ENGRAM_WRAP_FORMAT` env는 **스파이크 전용 seam으로 존치** — 운영 스위치가 아니다. 정식 스위치(설정 기반)는 후속 구현 슬라이스.
-- 기본 템플릿을 colon으로 교체하는 코드 변경 + 프라이밍의 봉투 서술 정합은 구현 슬라이스에서 함께(코더→리뷰→QA 게이트).
-- 새 모델/백엔드 투입 시 colon 라우팅·수용을 스모크로 실측하고, 이상 시 xml 전환을 검토한다(스위칭 구조가 그 비용을 템플릿 선택 수준으로 낮춘다).
+- **The single wrap point invariant (ADR-0086) holds** — switching is just template selection inside `wrap_message`; envelope assembly must not become two places.
+- The `ENGRAM_WRAP_FORMAT` env **stays as a spike-only seam** — it is not an operational switch. The formal switch (settings-based) is a follow-up implementation slice.
+- The code change that replaces the default template with colon + aligning the envelope description in the priming go together in the implementation slice (coder → review → QA gate).
+- When a new model/backend is deployed, measure colon routing and acceptance with a smoke, and consider switching to xml on anomalies (the switching structure lowers that cost to the level of template selection).

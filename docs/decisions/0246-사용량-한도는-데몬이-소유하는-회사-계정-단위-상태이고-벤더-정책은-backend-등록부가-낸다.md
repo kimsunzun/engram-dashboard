@@ -1,21 +1,21 @@
-# ADR-0246: 사용량 한도는 데몬이 소유하는 (회사, 계정) 단위 상태이고 벤더 정책은 backend 등록부가 낸다
+# ADR-0246: The usage limit is daemon-owned per-(company, account) state, and vendor policy comes from the backend registry
 
-- 상태: 확정 (2026-09-27, 근거: 사용자 결정 + TRD §7 #1)
-- 관련: `docs/process/S21-usage-limit-slot/trd.md` §7 #1 · CLAUDE.md 「백엔드 확장」(ADR-0004) · step-log S21 사용량 한도 슬롯
+- 상태: 확정 (2026-09-27, basis: user decision + TRD §7 #1)
+- 관련: `docs/process/S21-usage-limit-slot/trd.md` §7 #1 · CLAUDE.md 「백엔드 확장」(ADR-0004) · step-log S21 usage-limit slot
 
 ## 맥락
-사용량 한도(Claude/Codex 등 벤더별 사용 가능 잔여량)를 어느 계층이 소유하고, 벤더별 지식(조회 방법·쿨타임 등)을 어디에 둘지 정해야 했다.
+We had to decide which layer owns the usage limit (the remaining usable amount per vendor, such as Claude/Codex), and where to put vendor-specific knowledge (query method, cooldown, etc.).
 
 ## 결정
-사용량 한도는 **데몬이 소유하는 `(회사, 계정)` 단위 상태**다. 벤더 정책(조회 방법·쿨타임 등)은 backend 등록부가 낸다 — 「백엔드 확장」 원칙(ADR-0004)을 그대로 따른다.
+The usage limit is **daemon-owned state per `(회사, 계정)`**. Vendor policy (query method, cooldown, etc.) comes from the backend registry — following the 「백엔드 확장」 principle (ADR-0004) as is.
 
 ## 거부한 대안
-- **에이전트별 `OutputEvent` variant** — 에이전트별·replay 대상이라 수명이 사용량과 다르다(에이전트가 죽어도 사용량 한도는 산다).
-- **셸 소유** — 여러 창이 한 계정의 사용량을 각자 따로 세게 된다(중복 조회·불일치).
-- **데몬 쪽 벤더 상수·enum** — 벤더별 지식이 데몬 코어로 새어 「백엔드 확장」 원칙을 위반한다.
+- **A per-agent `OutputEvent` variant** — it is per-agent and subject to replay, so its lifetime differs from usage (the usage limit lives on even when the agent dies).
+- **Shell ownership** — multiple windows would each count one account's usage separately (duplicate queries · mismatch).
+- **Daemon-side vendor constants · enum** — vendor-specific knowledge leaks into the daemon core, violating the 「백엔드 확장」 principle.
 
 ## 근거
 TRD §7 #1.
 
 ## 영향 / 불변식
-새 벤더가 늘어도 backend 등록부만 확장하면 흡수된다 — 데몬 코어에 벤더 이름을 하드코딩하지 않는다. 구현 커밋: `7aad8f7`(wire + 조립 + 연결 계층), `4fd426a`(리뷰 후속).
+Even when new vendors are added, extending only the backend registry absorbs them — do not hardcode vendor names in the daemon core. Implementation commits: `7aad8f7` (wire + assembly + connection layer), `4fd426a` (review follow-up).

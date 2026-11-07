@@ -1,17 +1,17 @@
-# 세션 저장/복원 + 프로필 + 자동 재시작 — 통합 설계 (3자 검증 반영)
+# Session save/restore + profile + auto-restart — integrated design (3-party verification applied)
 
-상태: **draft 개정본.** fable/Gemini/GPT 3자 검증 통합. 전제: `wezterm-failure-analysis.md`.
-판정 종합: **Spike 즉시 GO / 백엔드 코어 풀구현은 spike 후** (Gemini NO-GO, GPT "신뢰기능 보류", fable "spike #4가 성립 좌우").
-초안 대비 변경 이력: `session-restore-lld-draft.md`(원안) → 본 문서. 리뷰 전문: `s9-review-fable.md`, `session-restore-review-gemini.md`, `-gpt.md`.
+Status: **revised draft.** fable/Gemini/GPT 3-party verification integrated. Premise: `wezterm-failure-analysis.md`.
+Overall verdict: **Spike GO immediately / full backend core implementation after the spike** (Gemini NO-GO, GPT "hold the trust feature", fable "spike #4 decides whether the design holds").
+Change history against the draft: `session-restore-lld-draft.md` (original) → this document. Full reviews: `s9-review-fable.md`, `session-restore-review-gemini.md`, `-gpt.md`.
 
-## 0. 핵심 결정 — 통합이 아니라 "분리된 통제" (3자 만장일치)
+## 0. Core decision — not unification but "separated control" (3 parties unanimous)
 
-원안의 `AgentId = claude --session-id` **동일시는 폐기.** 둘은 수명이 다르다(AgentId 영구 / session_id는 손상·fork·resume실패·교체 가능). **분리:**
+The original's **identification `AgentId = claude --session-id` is discarded.** The two have different lifetimes (AgentId is permanent / session_id can be damaged, forked, fail to resume, or be replaced). **Separate them:**
 
-- `AgentId` (uuid v4) — 우리의 **불변** 키. 슬롯/프로필/추적의 유일 기준. 절대 안 바뀜.
-- `claude_session_id` (uuid v4, **가변, Optional**) — 현재 claude 세션. 초기값은 새로 생성, fallback/교체 시 갱신, 이력 보관.
+- `AgentId` (uuid v4) — our **immutable** key. The only reference for slots/profiles/tracking. Never changes.
+- `claude_session_id` (uuid v4, **mutable, Optional**) — the current claude session. The initial value is newly generated, updated on fallback/replacement, with history kept.
 
-## 1. 데이터 모델
+## 1. Data model
 
 ```rust
 struct AgentProfile {
@@ -34,15 +34,15 @@ enum AgentCommand {
 // 파일 최상단: schema_version: u32  (미래 마이그레이션)
 ```
 
-## 2. Persist (3자 — atomic 필수)
+## 2. Persist (3 parties — atomic is mandatory)
 
-- **atomic write:** `agents.json.tmp` 쓰기 → flush → `rename`(교체). 크래시 중 프로필 통째 증발 방지. **(Gemini Split-Brain / fable 필수)**
-- **load 실패 보존:** 손상 시 `agents.json.corrupt-<ts>`로 이동 후 빈 목록 시작 + 사용자 알림. 손상 위에 덮어쓰기 금지.
-- **저장 직렬화:** 호출자 다수(commands spawn/kill/rename + drain 재시작) → 단일 Mutex, lock 안에서 전체 스냅샷.
-- **last_active 디바운스:** 변경시저장에 매번 포함 금지(고빈도화). spawn/kill만 즉시.
-- 형식 JSON(수십 개 규모 충분, SQLite 기각 3자 동의).
+- **atomic write:** write `agents.json.tmp` → flush → `rename` (replace). Prevents the whole profile from evaporating during a crash. **(Gemini Split-Brain / fable required)**
+- **Preserve on load failure:** when corrupt, move it to `agents.json.corrupt-<ts>`, start with an empty list + notify the user. No overwriting on top of the corruption.
+- **Serialize saves:** many callers (commands spawn/kill/rename + drain restart) → a single Mutex, a full snapshot inside the lock.
+- **last_active debounce:** do not include it in every save-on-change (it would become high-frequency). Only spawn/kill save immediately.
+- Format JSON (enough for a few dozen; the 3 parties agree to reject SQLite).
 
-## 3. spawn (프로필 기반)
+## 3. spawn (profile-based)
 
 ```
 spawn_agent(profile, mode):
@@ -56,7 +56,7 @@ spawn_agent(profile, mode):
   PTY spawn (canonicalize(cwd), env) → 기존 PtyManager 흐름
 ```
 
-## 4. 복원 (앱 시작) — fallback은 "분리"지 "소실" 아님
+## 4. Restore (app start) — fallback is "separation", not "loss"
 
 ```
 restore_all():  // auto_restore=true 프로필만, stagger(순차+간격) — spike #9
@@ -64,109 +64,109 @@ restore_all():  // auto_restore=true 프로필만, stagger(순차+간격) — sp
     if let Claude = p.command:  spawn(p, Resume)   // Shell은 Fresh
     else: spawn(p, Fresh)
 ```
-- **fallback (resume 실패 시):** **새 uuid v4**로 Fresh 재spawn (같은 id 재사용은 already-in-use로 또 실패 — 1-b). 옛 sid → `old_session_ids`. **claude transcript는 `~/.claude/projects/`에 보존됨 → 소실 아니라 분리.**
-- **실패 감지:** spike #2/#6/#7로 신호 확정 — exit/stderr 종료 vs trust·로그인 프롬프트 Hang 구별. (Hang을 성공으로 오판 금지)
-- **UI 신호 (silent 금지, 3자 만장일치):** `agent-restore-result { id, outcome: Resumed | FreshFallback{reason} }` emit → 트리 배지(⚠) + 터미널 배너("이전 대화 복원 실패 — 새 세션. 이전 대화는 보존됨"). **모달 금지**(N개 스팸).
+- **fallback (when resume fails):** re-spawn Fresh with a **new uuid v4** (reusing the same id fails again with already-in-use — 1-b). The old sid → `old_session_ids`. **The claude transcript is preserved in `~/.claude/projects/` → not loss but separation.**
+- **Failure detection:** settle the signal with spike #2/#6/#7 — distinguish a termination with exit/stderr from a hang on the trust·login prompt. (Never mistake a hang for success)
+- **UI signal (no silent, 3 parties unanimous):** emit `agent-restore-result { id, outcome: Resumed | FreshFallback{reason} }` → a tree badge (⚠) + a terminal banner ("이전 대화 복원 실패 — 새 세션. 이전 대화는 보존됨"). **No modals** (N spam).
 
-## 5. 자동 재시작 — spike 후 활성화 (3자: 신뢰기능으로 미리 넣지 말 것)
+## 5. Auto-restart — activate after the spike (3 parties: do not put it in early as a trust feature)
 
-- **상태 판정:** exit code 휴리스틱 아님 — 백엔드 `transition()`의 status로 판정(shutdown=사용자kill→재시작 안 함). Exited{code≠0}/비정상만.
-- **재시도 사다리:** resume K회(2) → fresh 새 id 1회 → 정지 + 알림. (Poison Pill 루프 방지 — Gemini/fable)
-- **retry 리셋:** 건강 가동 N분(10) 경과 시 카운터 리셋(누적 소진 방지).
-- **인증 만료 좀비:** spike #7 — 재시작이 로그인 프롬프트에서 멈추는 것 감지 필요.
+- **Status decision:** not an exit code heuristic — decide by the backend `transition()` status (shutdown = user kill → do not restart). Only Exited{code≠0}/abnormal.
+- **Retry ladder:** resume K times (2) → fresh with a new id once → stop + notify. (Prevents the Poison Pill loop — Gemini/fable)
+- **retry reset:** reset the counter after healthy uptime of N minutes (10) (prevents cumulative exhaustion).
+- **Auth-expiry zombie:** spike #7 — must detect a restart that stalls at a login prompt.
 
-## 6. ★상태머신 충돌 — 양쪽 LLD 개정 필요 (fable 최대 누락)★
+## 6. ★State machine conflict — both LLDs need revision (fable's biggest omission)★
 
-재시작 = "같은 AgentId로 새 PtySession". 확정 백엔드 LLD에서 Exited/Killed는 **terminal**이라 충돌:
-- **구독자 승계:** 옛 PtySession `subscribers`(Arc sink)를 새 세션으로 **이주** (프론트 Channel 안 끊김, UX 최선). 또는 프론트가 status 보고 재구독. **→ 결정 필요, 백엔드 LLD §9 개정.**
-- **replay 리셋:** 새 세션 시작이므로 replay buffer 리셋(이전 출력은 끝났음 표시).
-- **프론트 상태:** `Restarting` 상태 추가 또는 Exited→Running 재진입 허용을 **frontend-integration-lld 개정**.
-→ 이 절 미정의 시 재시작이 기존 확정 설계 2개와 충돌. **코어 구현 전 양쪽 LLD 개정 선행.**
+Restart = "a new PtySession under the same AgentId". In the confirmed backend LLD, Exited/Killed are **terminal**, so this conflicts:
+- **Subscriber succession:** **migrate** the old PtySession's `subscribers` (Arc sink) to the new session (the frontend Channel does not drop, best UX). Or the frontend watches the status and resubscribes. **→ A decision is needed, revise backend LLD §9.**
+- **replay reset:** this is a new session start, so reset the replay buffer (marking that the earlier output has ended).
+- **Frontend state:** add a `Restarting` state or allow Exited→Running re-entry — **revise frontend-integration-lld**.
+→ If this section is undefined, restart conflicts with two existing confirmed designs. **Revise both LLDs before the core implementation.**
 
-## 7. Spike (3자 통합 — 코어 전 실측, fork가 성립 좌우)
+## 7. Spike (3-party integration — measure before the core, fork decides whether it holds)
 
-| # | 항목 | 출처 | 우선 |
+| # | Item | Source | Priority |
 |---|------|------|------|
-| 1 | `--session-id <uuid>` spawn 정상 / 재사용 시 append vs error | 원안 | 高 |
-| 2 | `--resume <없는/손상 uuid>` exit·stderr (fallback 신호) | 원안 | 高 |
-| 3 | `--resume` 다른 크기 PTY redraw | 원안/GPT | 中 |
-| **4** | **resume 왕복 2회 — session id 유지 vs fork** | **fable** | **최우선(성립 좌우)** |
-| 5 | `--resume <old> --session-id <new>` 조합 가능 여부 | fable | 高(되면 근본해결) |
-| 6 | 신규 cwd trust 프롬프트에 복원이 Hang | fable | 高 |
-| 7 | 로그인 만료 N개 동시 — 대기 좀비 | fable/Gemini | 中 |
-| 8 | cwd 정규화(`I:\`vs`i:\`/후행) resume 영향 | fable | 中 |
-| 9 | 동시 N spawn stagger / 동일 session-id 동시 PTY 2개 오염 | fable/Gemini | 中 |
+| 1 | `--session-id <uuid>` spawn normal / append vs error on reuse | original | High |
+| 2 | `--resume <없는/손상 uuid>` exit·stderr (fallback signal) | original | High |
+| 3 | `--resume` redraw at a different PTY size | original/GPT | Medium |
+| **4** | **Two resume round trips — session id kept vs fork** | **fable** | **Top priority (decides whether it holds)** |
+| 5 | Whether the `--resume <old> --session-id <new>` combination is possible | fable | High (a root fix if it works) |
+| 6 | Restore hangs on the trust prompt of a new cwd | fable | High |
+| 7 | N simultaneous login expirations — waiting zombies | fable/Gemini | Medium |
+| 8 | Effect of cwd normalization (`I:\` vs `i:\` / trailing) on resume | fable | Medium |
+| 9 | Stagger for N simultaneous spawns / contamination from 2 concurrent PTYs with the same session-id | fable/Gemini | Medium |
 
-서버측 세션 만료 반응(Gemini)도 #2/#7 계열로 관찰.
+Also observe the reaction to server-side session expiry (Gemini) as part of the #2/#7 family.
 
-### 7-R. Spike 실측 결과 (2026-06-11 완료 — `spike-results.md`)
-| # | 결과 |
+### 7-R. Spike measurement results (completed 2026-06-11 — `spike-results.md`)
+| # | Result |
 |---|------|
-| 1 | `--session-id <uuid>` 정상, json에 우리 uuid 반환 ✓. 재사용은 exit 1 `already in use` |
-| 2 | `--resume <없는uuid>` exit 1 `No conversation found` ✓ — fallback 신호 명확(Hang 아님) |
-| **4** | **`--resume` fork 안 함** — session id 유지 + append ✓ (**후퇴선 §8 불필요**) |
-| /clear | **새 sessionId 생성**, `sessions/<pid>.json`에서 실시간 갱신 ✓ |
-| 핵심 | **`~/.claude/sessions/<PID>.json` = {pid, sessionId, status, …}** — PID로 현재 sessionId 결정적 조회 |
-| trust | 이 환경 미발생(신뢰됨). 새 머신선 가능 — 운영 주의 |
-| 3·redraw | 경미(우리가 cols/rows 관리) |
+| 1 | `--session-id <uuid>` normal, our uuid returned in json ✓. Reuse is exit 1 `already in use` |
+| 2 | `--resume <없는uuid>` exit 1 `No conversation found` ✓ — the fallback signal is clear (not a hang) |
+| **4** | **`--resume` does not fork** — session id kept + append ✓ (**the retreat line §8 is not needed**) |
+| /clear | **Creates a new sessionId**, updated in real time in `sessions/<pid>.json` ✓ |
+| Key | **`~/.claude/sessions/<PID>.json` = {pid, sessionId, status, …}** — the current sessionId can be looked up deterministically by PID |
+| trust | Did not occur in this environment (trusted). Possible on a new machine — mind it in operation |
+| 3·redraw | Minor (we manage cols/rows) |
 
-## 8. 후퇴선 — **불필요 (spike #4로 fork 안 함 확인)**
+## 8. Retreat line — **not needed (spike #4 confirmed it does not fork)**
 
-`--resume`가 fork하지 않음이 실측됨 → "fresh-new-id 후퇴" 시나리오 자체가 발생 안 함. (단 transcript 디렉토리 최신파일 탐색으로 sid 추정하는 길은 여전히 금지 — sessions/<pid>.json이 결정적 대체.)
+Since it was measured that `--resume` does not fork, the "fresh-new-id retreat" scenario itself never occurs. (But the route of guessing the sid by finding the newest file in the transcript directory is still forbidden — sessions/<pid>.json is the deterministic replacement.)
 
-## 9. 진행 순서
+## 9. Order of progress
 
-1. ✅ Spike 실측 완료 (§7-R)
-2. 🔄 §6 상태머신 개정안 확정 → 백엔드·프론트 LLD 개정
-3. ⏳ 코어 구현 (프로필/persist/복원/재시작)
+1. ✅ Spike measurement done (§7-R)
+2. 🔄 Fix the §6 state machine revision → revise the backend and frontend LLDs
+3. ⏳ Core implementation (profile/persist/restore/restart)
 
-## 10. 방어 원칙 (wezterm 교훈 — 유지)
+## 10. Defensive principles (wezterm lesson — kept)
 
-위치 무관 AgentId / 직접 spawn 추적 / 세션ID 분리통제 / 레이아웃↔세션 분리 / 복원실패 graceful(새id fallback + 보존 명시).
+Position-independent AgentId / direct spawn tracking / separated control of the session ID / layout↔session separation / graceful restore failure (new-id fallback + explicit preservation).
 
-## 11. sid 확보 메커니즘 (spike 확정 — 최종)
+## 11. The sid acquisition mechanism (confirmed by the spike — final)
 
-**핵심: 최초는 우리가 지정(캡처 불필요), 변경 시에만 sessions/<pid>.json으로 결정적 재확보.**
+**Core: the first one is specified by us (no capture needed); only on a change do we deterministically re-acquire it from sessions/<pid>.json.**
 
-### 11-1. 최초 sid — spawn 시
-- `AgentId`(불변 키) + `claude_session_id`(초기 uuid) **둘 다 우리 생성**
-- `claude --session-id <claude_session_id>`로 spawn → **우리 지정값으로 시작.** wezterm식 "claude 생성 sid 사후 캡처" 불필요 (비결정성 원천 제거)
-- child PID 확보 (PtyManager 보유 — 휘발성 핸들, 저장 안 함)
+### 11-1. The first sid — at spawn
+- **We generate both** the `AgentId` (immutable key) + the `claude_session_id` (initial uuid)
+- Spawn with `claude --session-id <claude_session_id>` → **starts with the value we specified.** The wezterm-style "capture the claude-generated sid afterwards" is unnecessary (removes the non-determinism at its source)
+- Obtain the child PID (held by PtyManager — a volatile handle, not saved)
 
-### 11-2. sid 추적 — 실행 중 (변경 감지)
-- `~/.claude/sessions/<현재 child_pid>.json` 한 파일 watch (create/modify)
-- `sessionId`가 우리가 아는 `claude_session_id`와 달라지면(=`/clear`·fork) → `claude_session_id` 갱신, 옛 값 `old_session_ids` 이력
-- **PID 불안정 무관** — 저장하지 않고, 현재 살아있는 child PID는 PtyManager가 항상 보유 → 그때그때 조회
+### 11-2. sid tracking — while running (change detection)
+- Watch the single file `~/.claude/sessions/<현재 child_pid>.json` (create/modify)
+- If `sessionId` differs from the `claude_session_id` we know (= `/clear`·fork) → update `claude_session_id`, and keep the old value in the `old_session_ids` history
+- **PID instability is irrelevant** — we do not save it, and PtyManager always holds the currently alive child PID → look it up each time
 
-### 11-3. 복원 — 재시작/앱 시작
-- 저장된 `claude_session_id`(최신)로 `claude --resume <id>`
-- 실패(exit 1 `No conversation found`) → **새 uuid로 fresh fallback** + 옛 id 이력 + `agent-restore-result` UI 알림("새 세션, 이전 대화 보존됨")
-- 복원 후 새 child PID로 11-2 재개
+### 11-3. Restore — restart/app start
+- `claude --resume <id>` with the saved `claude_session_id` (latest)
+- Failure (exit 1 `No conversation found`) → **fresh fallback with a new uuid** + the old id history + `agent-restore-result` UI notification ("새 세션, 이전 대화 보존됨")
+- After restore, resume 11-2 with the new child PID
 
-### 11-4. 방어 (best-effort)
-- `sessions/<pid>.json`은 **비공식 내부 파일**(version 필드 존재 → 포맷 변동 가능) → 없거나 바뀌어도 **최소 "최초 지정값" 유지** → 복원 시도 → 실패 시 fallback. **어느 경우든 무손상.**
-- PID 재사용 → `startedAt`/`updatedAt`으로 우리 프로세스 검증
-- claude 버전 최신 유지 (구버전 PTY 세션 미저장 버그 — release notes 관찰)
+### 11-4. Defense (best-effort)
+- `sessions/<pid>.json` is an **unofficial internal file** (a version field exists → the format may vary) → even if it is absent or changed, **at least the "first specified value" is kept** → try restore → fallback on failure. **Either way, no damage.**
+- PID reuse → verify it is our process with `startedAt`/`updatedAt`
+- Keep the claude version up to date (an old-version bug where PTY sessions were not saved — release notes observation)
 
-## 12. 3자 최종 통합 (확정 — fable/Gemini/GPT)
+## 12. 3-party final integration (confirmed — fable/Gemini/GPT)
 
-**판정: 코어 GO / 위험구간 게이트.** 리뷰 전문: `s9-final-review-fable.md`, `session-restore-final-review-gemini.md`, `-gpt.md`.
+**Verdict: core GO / risk zones gated.** Full reviews: `s9-final-review-fable.md`, `session-restore-final-review-gemini.md`, `-gpt.md`.
 
-### 12-1. 확정 (만장일치)
-- **AgentId / claude_session_id 분리** — 실측 지지.
-- **§6 = 프론트 재구독 (구독자 승계 아님)** [fable 권고 + GPT "채널 승계 NO-GO" 일치]. 근거: 확정 LLD 최소 변경, 배너로 프론트가 어차피 재시작 인지 필요, C2(`terminal.reset`)로 검증된 idempotent 경로, 실패 가시성. **구현 키: `AgentInfo`+이벤트에 `epoch:u32`, 프론트 effect deps `[agentId, epoch]`.** 재시작은 drain 직접 말고 전용 restart 태스크.
+### 12-1. Confirmed (unanimous)
+- **AgentId / claude_session_id separation** — supported by measurement.
+- **§6 = frontend resubscribe (not subscriber succession)** [fable's recommendation + GPT's "channel succession NO-GO" agree]. Grounds: minimal change to the confirmed LLD, the frontend needs to be aware of the restart anyway for the banner, C2 (`terminal.reset`) is a verified idempotent path, failure visibility. **Implementation key: `epoch:u32` on `AgentInfo` + events, and the frontend effect deps `[agentId, epoch]`.** Restart goes to a dedicated restart task, not directly from drain.
 
-### 12-2. 구현 게이트
-- **코어 GO (즉시):** 프로필 / AgentId 분리 / spawn(`--session-id`) / atomic persist / 기본 복원(`--resume`) / sid watcher / fresh fallback
-- **게이트 (코어 후·잠정, 신뢰기능 공개 전 검증):** 자동 재시작 / terminal 상태 재진입 [GPT NO-GO 구간]
+### 12-2. Implementation gates
+- **Core GO (immediately):** profile / AgentId separation / spawn (`--session-id`) / atomic persist / basic restore (`--resume`) / sid watcher / fresh fallback
+- **Gate (after the core, provisional, verify before publishing as a trust feature):** auto-restart / re-entry from the terminal state [GPT NO-GO zone]
 
-### 12-3. 필수 수정 (3자 발견)
-1. **[Gemini 치명] cwd 정규화는 `dunce::canonicalize`** — `std::fs::canonicalize`는 Windows에서 UNC 접두사(`\\?\`)를 붙여 claude 세션 폴더명(`projects/<cwd치환>`)을 왜곡 → 터미널 직접 실행과 불일치로 복원 깨짐. dunce로 접두사 회피.
-2. **[GPT 최대위험] silent stale restore 금지** — sessions 추적 실패 시 옛 sid로 **조용히** 복원하지 말 것. 불확실하면 **명시적 fresh fallback + 알림**.
-3. **[fable] PID 불일치(shim) 우회** — PTY child PID가 shim(claude.cmd→node)이면 `sessions/<child_pid>.json`이 없을 수 있음. 그땐 `sessions/*.json`에서 **`sessionId == 우리 지정값` 스캔**(우리 sid는 유일키라 결정적). spawn 직후 self-test로 조기 감지.
-4. **[fable 보안] `profile.env` 평문 persist 금지** — env에 API 키/토큰 들어가면 `agents.json`에 평문 유출. 시크릿 저장 금지 명시 + 키 패턴 경고.
-5. **[Gemini] sessions watch 레이스** → 파일 아닌 **디렉토리 단위 watch** + 갱신 atomic.
-6. **운영:** `CLAUDE_CONFIG_DIR`로 `~/.claude` 이동 가능성 고려, `sessions/<pid>.json` version 게이트 + watcher 토글.
+### 12-3. Required fixes (found by the 3 parties)
+1. **[Gemini critical] cwd normalization with `dunce::canonicalize`** — `std::fs::canonicalize` attaches the UNC prefix (`\\?\`) on Windows and distorts the claude session folder name (`projects/<cwd치환>`) → mismatch with direct terminal execution breaks the restore. Avoid the prefix with dunce.
+2. **[GPT biggest risk] No silent stale restore** — if sessions tracking fails, do not restore **silently** with the old sid. When uncertain, **explicit fresh fallback + notification**.
+3. **[fable] Work around PID mismatch (shim)** — if the PTY child PID is a shim (claude.cmd→node), `sessions/<child_pid>.json` may not exist. Then **scan `sessions/*.json` for `sessionId == 우리 지정값`** (our sid is a unique key, so this is deterministic). Detect early with a self-test right after spawn.
+4. **[fable security] No plaintext persist of `profile.env`** — if an API key/token is in env, it leaks in plaintext to `agents.json`. State explicitly that secrets must not be saved + warn on key patterns.
+5. **[Gemini] sessions watch race** → **watch at the directory level**, not the file, + atomic updates.
+6. **Operations:** consider that `~/.claude` may be moved by `CLAUDE_CONFIG_DIR`, a `sessions/<pid>.json` version gate + a watcher toggle.
 
-### 12-4. LLD 개정 체크리스트 (코드 기획 입력)
-`s9-final-review-fable.md`의 백엔드 a~d / 프론트 e~g 7건 — 코드 기획 시 반영(§6 충돌 닫힘).
+### 12-4. LLD revision checklist (input to the code plan)
+The 7 items, backend a~d / frontend e~g, from `s9-final-review-fable.md` — reflect them in the code plan (the §6 conflict is closed).

@@ -1,13 +1,13 @@
-//! 데몬 패닉 훅(`init_logging_and_panic_hook`)의 자식 프로세스 시험(TRD S21-panic-policy §6).
+//! Child-process tests of the daemon panic hook (`init_logging_and_panic_hook`) (TRD S21-panic-policy §6).
 //!
-//! 훅은 프로세스 전역이고 표시 밖 갈래는 프로세스를 끝낸다 — 그래서 이 시험 바이너리가 자기 자신을 갈래
-//! 하나로 다시 띄우고, 훅은 그 자식에서만 건다. ★자식 몸통([`child_process_entry`])은 갈래 환경 변수가 없으면
-//! 곧장 돌아간다★ — 보통의 시험 실행에서 그 몸통이 공유 시험 프로세스에 끝내는 훅을 걸면, 그 뒤로 이 바이너리의
-//! 어느 패닉이든 시험 실행 전체를 끝낸다.
+//! The hook is process-global and the out-of-mark branch ends the process — so this test binary relaunches itself as one branch
+//! and the hook is installed only in that child. ★The child body ([`child_process_entry`]) returns at once if there is no branch environment variable★
+//! — if in an ordinary test run that body installed the ending hook in the shared test process, from then on any panic of this binary
+//! would end the whole test run.
 //!
-//! 끝냄의 종료 코드는 OS 마다 다르다(Windows = `0xC0000409` · Unix = SIGABRT 라 코드 없음). 그래서 코드를
-//! 못 박지 않고 「성공 아님 · libtest 의 보통 실패 코드(101) 아님 · 마지막 줄 없음 · 로그 파일의 사유 줄」을
-//! 함께 본다.
+//! The exit code of the ending differs by OS (Windows = `0xC0000409` · Unix = SIGABRT so no code). So instead of
+//! pinning the code, we look together at
+//! 「성공 아님 · libtest 의 보통 실패 코드(101) 아님 · 마지막 줄 없음 · 로그 파일의 사유 줄」 (not success · not libtest's usual failure code (101) · no last line · the reason line in the log file).
 // ADR-0292
 
 use std::io::{self, Read};
@@ -28,17 +28,17 @@ const CAUGHT_PREFIX: &str = "PANIC-HOOK-CHILD-CAUGHT=";
 const SURVIVED: &str = "PANIC-HOOK-CHILD-SURVIVED";
 const PROBE_THREAD: &str = "panic-hook-probe";
 
-/// 훅이 끝내지도 돌아가지도 않고 멎었다고 볼 상한.
+/// The cap after which the hook is deemed to have neither ended nor returned but stalled.
 const CHILD_LIMIT: Duration = Duration::from_secs(60);
 
-/// 자식이 끝난 뒤 그 파이프가 닫히기를 기다리는 상한 — 파이프 핸들을 물려받은 다른 프로세스가 살아 있으면
-/// 닫히지 않는다.
+/// The cap on waiting for that pipe to close after the child ended — it does not close if another process that inherited the pipe handle is
+/// still alive.
 const DRAIN_LIMIT: Duration = Duration::from_secs(10);
 
-/// 시한을 넘겨 끈 자식이 실제로 사라지기를 기다리는 상한.
+/// The cap on waiting for a child killed after the deadline to actually disappear.
 const KILL_LIMIT: Duration = Duration::from_secs(10);
 
-/// libtest 가 잡은 패닉으로 시험이 실패했을 때의 종료 코드. 훅이 끝냈다면 이 코드에 닿지 않는다.
+/// The exit code when the test failed because of a panic caught by libtest. If the hook ended the process, this code is not reached.
 const LIBTEST_FAILED: i32 = 101;
 
 #[derive(Clone, Copy, Debug)]
@@ -63,7 +63,7 @@ impl Scenario {
         }
     }
 
-    /// 갈래마다 다르게 둔다 — 로그의 사유 줄이 그 갈래의 패닉인지 가른다.
+    /// Set differently for each branch — tells whether the reason line in the log is that branch's panic.
     fn message(self) -> &'static str {
         match self {
             Scenario::ThreadOutsideAnyMark => "표시 밖 스레드 패닉",
@@ -73,8 +73,8 @@ impl Scenario {
     }
 }
 
-/// 자식 프로세스의 몸통 — 부모([`run_child`])가 `--exact` 로 이것만 고르고 갈래 · 데이터 폴더를 환경 변수로
-/// 준다. 데몬 `run()` 과 같은 함수로 로그 · 훅을 건 뒤 갈래의 패닉을 내고, 살아남으면 [`SURVIVED`] 를 찍는다.
+/// The child process body — the parent ([`run_child`]) selects only this with `--exact` and passes the branch · data folder through environment variables.
+/// It installs logging · the hook with the same function as the daemon `run()`, then raises the branch's panic, and if it survives prints [`SURVIVED`].
 #[test]
 fn child_process_entry() {
     let Ok(name) = std::env::var(SCENARIO_ENV) else {
@@ -125,7 +125,7 @@ impl Ran {
     }
 }
 
-/// 자식마다 새 데이터 폴더 — drop 이 지운다(단언이 실패해도).
+/// A new data folder per child — erased by drop (even if an assertion fails).
 struct ScratchDir(PathBuf);
 
 impl ScratchDir {
@@ -144,7 +144,7 @@ impl Drop for ScratchDir {
     }
 }
 
-/// libtest 가 [`child_process_entry`] 를 부르는 이름 = 모듈 경로에서 crate 이름을 뗀 것.
+/// The name by which libtest calls [`child_process_entry`] = the module path with the crate name stripped off.
 fn child_test_name() -> String {
     let module = module_path!().split_once("::").map_or("", |(_, rest)| rest);
     format!("{module}::child_process_entry")
@@ -186,7 +186,7 @@ fn run_child(scenario: Scenario) -> Ran {
         ])
         .env(SCENARIO_ENV, scenario.name())
         .env(DATA_DIR_ENV, &dir.0)
-        // 사유 줄(ERROR)이 부모 환경의 필터에 걸러지지 않게 · 기본 훅의 백트레이스 수집이 늦추지 않게 고정한다.
+        // Fixed so the reason line (ERROR) is not filtered by the parent environment's filter · and the default hook's backtrace collection does not delay it.
         .env("RUST_LOG", "error")
         .env("RUST_BACKTRACE", "0")
         .stdin(Stdio::null())
@@ -202,7 +202,7 @@ fn run_child(scenario: Scenario) -> Ran {
         status = child.try_wait().expect("자식 상태");
         status.is_some()
     });
-    // 시한을 넘기면 정리 결과와 무관하게 실패다 — 늦게 끝난 자식의 상태로 판정을 잇지 않는다.
+    // Exceeding the deadline is a failure regardless of the cleanup result — do not continue the decision from the state of a child that ended late.
     if !ended {
         let cleanup = match child.kill() {
             Err(e) => format!("끄기 실패: {e}"),
@@ -223,7 +223,7 @@ fn run_child(scenario: Scenario) -> Ran {
     let stdout = drained(stdout, "stdout");
     let stderr = drained(stderr, "stderr");
 
-    // 줄 머리로 찾지 않는다 — libtest 가 같은 줄에 `test <이름> ... ` 을 줄바꿈 없이 먼저 찍는다.
+    // Do not look for it at the head of the line — libtest first prints `test <이름> ... ` (name) on the same line without a line break.
     let Some(log_path) = stdout
         .split_once(LOG_PREFIX)
         .and_then(|(_, rest)| rest.lines().next())

@@ -1,7 +1,7 @@
-//! 실 Win32 창 시험 도우미 — 이 crate 의 `window` 시험만 쓴다(부르는 쪽 crate 는 Tauri 창을 쓴다).
+//! Helper for real Win32 window tests — used only by this crate's `window` tests (the calling crate uses a Tauri window).
 //!
-//! 시스템 창 클래스 `STATIC` 로 숨긴 채 화면 밖에 짓는다 — 클래스를 등록하지 않아 시험끼리 겹칠 것이 없고, 창은
-//! 지은 스레드에 묶이므로 병렬 시험이 저마다 제 창을 쓴다. 버리면 아직 있는 창을 부순다.
+//! Built hidden and off-screen with the system window class `STATIC` — no class is registered, so tests have nothing to overlap, and a window
+//! is bound to the thread that built it, so parallel tests each use their own window. Dropping it destroys the window if it is still there.
 
 use std::num::NonZeroIsize;
 
@@ -22,14 +22,14 @@ pub(crate) struct TestWindow {
 }
 
 impl TestWindow {
-    /// `tool` = 참이면 테두리 없는 도구 창(작업 표시줄 · Alt+Tab 에 안 나온다) · 거짓이면 보통 최상위 창.
+    /// `tool` = if true, a borderless tool window (does not appear in the taskbar or Alt+Tab) · if false, an ordinary top-level window.
     pub(crate) fn new(tool: bool) -> Self {
         let (ex, style) = if tool {
             (WS_EX_TOOLWINDOW, WS_POPUP)
         } else {
             (WS_EX_APPWINDOW, WS_OVERLAPPEDWINDOW)
         };
-        // SAFETY: 시스템 클래스 이름 · 값 인자뿐이다. 인스턴스 · 부모 · 메뉴 없음.
+        // SAFETY: only a system class name and value arguments. No instance, parent or menu.
         let hwnd = unsafe {
             CreateWindowExW(
                 ex,
@@ -56,7 +56,7 @@ impl TestWindow {
 
     pub(crate) fn outer(&self) -> PhysRect {
         let mut r = RECT::default();
-        // SAFETY: 이 값이 쥔 창 — 사라졌으면 실패한다.
+        // SAFETY: the window this value holds — it fails if it is gone.
         unsafe { GetWindowRect(self.hwnd, &mut r) }.expect("창 사각형");
         PhysRect {
             x: r.left,
@@ -66,12 +66,12 @@ impl TestWindow {
         }
     }
 
-    /// 같은 창을 가리키되 창을 쥐지 않는 손잡이 — 창이 사라진 뒤의 갈래를 재는 데 쓴다.
+    /// A handle that points at the same window but does not hold it — used to measure the branch after the window is gone.
     pub(crate) fn handle_only(&self) -> RawHandle {
         RawHandle(self.hwnd.0 as isize)
     }
 
-    /// 이 시험이 짓지 않은 창(다른 프로세스의 창 포함)을 쥐지 않고 가리키는 손잡이.
+    /// A handle that points at a window this test did not build (including another process's window) without holding it.
     pub(crate) fn borrowed(hwnd: HWND) -> RawHandle {
         RawHandle(hwnd.0 as isize)
     }
@@ -79,7 +79,7 @@ impl TestWindow {
 
 impl Drop for TestWindow {
     fn drop(&mut self) {
-        // SAFETY: 이 값이 지은 창 — 시험이 먼저 부쉈을 수 있어 있는지 본 뒤 부순다.
+        // SAFETY: the window this value built — the test may have destroyed it first, so check it exists before destroying.
         unsafe {
             if IsWindow(self.hwnd).as_bool() {
                 let _ = DestroyWindow(self.hwnd);
@@ -92,7 +92,7 @@ fn borrow(hwnd: isize) -> Result<WindowHandle<'static>, HandleError> {
     let raw = RawWindowHandle::Win32(Win32WindowHandle::new(
         NonZeroIsize::new(hwnd).ok_or(HandleError::Unavailable)?,
     ));
-    // SAFETY: 시험 창의 핸들 값을 그대로 싣는다 — 쓰는 쪽은 `IsWindow` 로 살아 있는지 본다.
+    // SAFETY: carries the test window's handle value as is — the user checks with `IsWindow` whether it is alive.
     Ok(unsafe { WindowHandle::borrow_raw(raw) })
 }
 
@@ -102,7 +102,7 @@ impl HasWindowHandle for TestWindow {
     }
 }
 
-/// 창을 쥐지 않는 핸들 — [`TestWindow::handle_only`].
+/// A handle that does not hold the window — [`TestWindow::handle_only`].
 pub(crate) struct RawHandle(isize);
 
 impl HasWindowHandle for RawHandle {

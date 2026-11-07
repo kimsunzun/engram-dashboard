@@ -1,5 +1,5 @@
-// TRD S26-window-chrome §7-7 의 최소 창 크기 셈 — 왼 여백 + 활성 탭 52 + `+` 상자 26 + 끌 빈 자리 42 + 번호 표식 + 단추 3 × 46 ·
-//   높이 = 보통 상태 줄 높이 34 + 칸 최소 30.
+// Minimum window size computation of TRD S26-window-chrome §7-7 — left margin + active tab 52 + `+` box 26 + empty draggable area 42 + number badge + buttons 3 × 46 ·
+//   height = normal state row height 34 + area minimum 30.
 
 import { describe, expect, it } from 'vitest'
 

@@ -1,7 +1,7 @@
-# 컴파일러 핀 — CI 와 로컬이 같은 rustc 로 돈다.
-# rustup 이 이 파일을 읽어 자동 설치·선택하므로 CI 에 버전을 또 적지 않는다(두 곳에 적으면 어긋난다).
-# 1.95.0 = 이 워크스페이스가 실측된 버전.
-# profile = "minimal" 이라 rustfmt 가 기본 포함이 아니다 → `cargo fmt --check` 게이트를 위해 명시한다.
+# Compiler pin — CI and local run on the same rustc.
+# rustup reads this file to install and select automatically, so the version is not written again in CI (written in two places, they drift apart).
+# 1.95.0 = the version this workspace was measured on.
+# With profile = "minimal", rustfmt is not included by default → it is listed explicitly for the `cargo fmt --check` gate.
 [toolchain]
 channel = "1.95.0"
 profile = "minimal"

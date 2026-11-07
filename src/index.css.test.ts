@@ -1,26 +1,26 @@
-// 전역 스타일시트 회귀 게이트 — 계층(@layer) 밖 전역 리셋 금지.
+// Global stylesheet regression gate — no global resets outside layers (@layer).
 //
-// ★왜 테스트로 막나★: CSS 캐스케이드에서 **계층 밖(unlayered) 규칙은 모든 계층 규칙을 이긴다.** 그래서
-//   `*, *::before, *::after { padding: 0; margin: 0 }` 를 계층 밖에 두면 `@layer utilities` 의 Tailwind
-//   여백 유틸(px-*·py-*·m-* 전부)이 앱 전역에서 조용히 죽는다 — 클래스는 붙어 있고 계산값만 0px 이라
-//   화면을 보지 않으면 드러나지 않고, 단위테스트는 초록으로 남는다(실발생 2026-08-18, 7개 파일 여백이
-//   0 으로 그려지고 있었다).
+// ★Why block it with a test★: in the CSS cascade, **an unlayered rule beats every layered rule.** So
+//   if `*, *::before, *::after { padding: 0; margin: 0 }` is put outside layers, the Tailwind
+//   spacing utilities of `@layer utilities` (all of px-*·py-*·m-*) quietly die app-wide — the classes are attached and only the computed value is 0px,
+//   so it does not show unless you look at the screen, and unit tests stay green (it actually happened 2026-08-18, the spacing of 7 files
+//   was being drawn as 0).
 //
-// ★리셋 자체가 필요 없다★: Tailwind preflight 가 `@layer base` 안에서 같은 리셋을 이미 적용한다
-//   (node_modules/tailwindcss/preflight.css — `*, ::after, ::before, ::backdrop, ::file-selector-button`
-//   에 box-sizing/margin/padding/border). 그래서 여기 다시 쓰면 중복이면서 우선순위만 망가뜨린다.
+// ★The reset itself is not needed★: Tailwind preflight already applies the same reset inside `@layer base`
+//   (node_modules/tailwindcss/preflight.css — box-sizing/margin/padding/border on `*, ::after, ::before, ::backdrop, ::file-selector-button`).
+//   So writing it again here is a duplicate and only breaks the priority.
 //
-// 검사 방식 = 소스 문자열. 이 파일이 지키려는 것은 "그 선언이 존재하지 않음" 이라 jsdom 렌더로는
-//   관측할 수 없다(jsdom 은 캐스케이드·계층을 계산하지 않는다).
+// Check method = source string. What this file protects is "that declaration does not exist", so it cannot
+//   be observed by a jsdom render (jsdom does not compute cascade · layers).
 
 import { describe, expect, it } from 'vitest'
 
-// ★`?raw` 로 읽는다(node:fs 아님)★: 이 프로젝트 tsconfig 에는 node 타입이 없어(@types/node 미설치)
-//   fs·process 를 쓰면 `tsc --noEmit` 게이트가 깨진다. `?raw` 는 vite/client 타입이 string 으로 선언하고
-//   Vite 가 CSS 처리 없이 원문을 그대로 준다.
+// ★Read with `?raw` (not node:fs)★: this project's tsconfig has no node types (@types/node not installed),
+//   so using fs · process breaks the `tsc --noEmit` gate. `?raw` is declared as string by the vite/client types and
+//   Vite gives the original text as is with no CSS processing.
 import cssSource from './index.css?raw'
 
-/** `@layer <이름> { ... }` 블록을 통째로 지운 나머지 = 계층 밖 규칙만 남은 텍스트. */
+/** Remainder after deleting whole `@layer <이름> { ... }` blocks = text left with only unlayered rules. */
 function unlayeredPart(css: string): string {
   let out = ''
   let i = 0
@@ -32,7 +32,7 @@ function unlayeredPart(css: string): string {
     }
     out += css.slice(i, at)
     const open = css.indexOf('{', at)
-    if (open < 0) break // `@layer a, b;` 같은 선언문 — 블록이 없으니 여기서 멈춘다.
+    if (open < 0) break // A declaration statement like `@layer a, b;` — there is no block, so stop here.
     let depth = 0
     let j = open
     for (; j < css.length; j += 1) {
@@ -51,10 +51,10 @@ describe('index.css — 계층 밖 전역 리셋 금지', () => {
   it('계층 밖에 전역 * 선택자 padding/margin 리셋이 없다', () => {
     const unlayered = unlayeredPart(cssSource)
 
-    // 주석 제거 후 검사 — 이 규약을 설명하는 주석 자체가 오탐되지 않게 한다.
+    // Check after stripping comments — so the comment explaining this convention is not itself a false positive.
     const code = unlayered.replace(/\/\*[\s\S]*?\*\//g, '')
 
-    // 전역 리셋 = `*` 로 시작하는 선택자 블록. 그 안의 padding/margin 선언만 문제 삼는다.
+    // Global reset = a selector block starting with `*`. Only the padding/margin declarations inside it are at issue.
     const globalBlocks = [...code.matchAll(/(^|[},])\s*\*[^{}]*\{([^{}]*)\}/g)].map(m => m[2])
     const offenders = globalBlocks.filter(body => /(^|;|\s)(padding|margin)\s*:/.test(body))
 
@@ -67,18 +67,18 @@ describe('index.css — 계층 밖 전역 리셋 금지', () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// xterm 스크롤바 가시성 = ScrollArea seam 과 같은 룰 (ADR-0053)
+// xterm scrollbar visibility = the same rule as the ScrollArea seam (ADR-0053)
 //
-// ★왜 소스 문자열로 재나★: jsdom 은 ::-webkit-scrollbar 캐스케이드를 계산하지 않아 렌더로는 관측이
-//   안 된다(위 게이트와 같은 사유). 지키려는 것도 "선언의 형태" 다 — thumb 색이 **스크롤 중 표식으로만**
-//   켜지는지, hover 로 되살리는 규칙이 다시 생기지 않았는지.
-// 표식을 붙이는 쪽(JS 절반)은 components/ui/nativeScrollActivity.test.ts 가 잰다.
+// ★Why measure by source string★: jsdom does not compute the ::-webkit-scrollbar cascade so it cannot be observed by
+//   rendering (same reason as the gate above). What we protect is also the "shape of the declaration" — that the thumb color turns on **only through the scrolling marker**,
+//   and that a rule reviving it on hover has not reappeared.
+// The side that attaches the marker (the JS half) is measured by components/ui/nativeScrollActivity.test.ts.
 // ─────────────────────────────────────────────────────────────────────────────
 describe('index.css — xterm 스크롤바는 스크롤 중에만 보인다', () => {
-  // 주석 제거 — 이 규약을 설명하는 주석 자체가 오탐되지 않게 한다(위 게이트와 동형).
+  // Strip comments — so the comment explaining this convention is not itself a false positive (same shape as the gate above).
   const code = cssSource.replace(/\/\*[\s\S]*?\*\//g, '')
 
-  /** `.xterm-viewport ... ::-webkit-scrollbar-thumb { ... }` 규칙 = [선택자, 본문] 목록. */
+  /** `.xterm-viewport ... ::-webkit-scrollbar-thumb { ... }` rules = list of [selector, body]. */
   const thumbRules = [...code.matchAll(/([^{}]*::-webkit-scrollbar-thumb)\s*\{([^{}]*)\}/g)]
     .map(m => ({ selector: m[1].trim(), body: m[2] }))
     .filter(r => r.selector.includes('xterm-viewport'))
@@ -88,7 +88,7 @@ describe('index.css — xterm 스크롤바는 스크롤 중에만 보인다', ()
     const ungated = thumbRules.filter(
       r => /--scrollbar-thumb/.test(r.body) && !r.selector.includes('[data-scroll-active]'),
     )
-    // 게이트 없이 색을 주면 상시 표시(= 통일 전 상태)로 되돌아간다.
+    // If a color is given without the gate, it goes back to always shown (= the state before unification).
     expect(ungated.map(r => r.selector)).toEqual([])
   })
 
@@ -108,15 +108,15 @@ describe('index.css — xterm 스크롤바는 스크롤 중에만 보인다', ()
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// xterm 이 실제로 칠하는 thumb(.slider) 두께 = seam thumb 과 같은 산식 (ADR-0053)
+// The thickness of the thumb (.slider) xterm actually paints = the same formula as the seam thumb (ADR-0053)
 //
-// ★무엇을 지키나★: 두께가 박힌 숫자가 아니라 **파생값**이라는 것. seam 의 thumb 은 트랙
-//   폭(--scrollbar-size)에서 .engram-scrollbar 의 padding 을 양쪽 뺀 만큼 칠해지고, xterm 의 .slider 는
-//   그 산식을 그대로 옮겨야 같은 두께가 된다. 숫자를 직접 박으면 토큰이 바뀔 때 둘이 조용히 갈라진다.
-// ★seam 쪽 실제 값(scroll-area.css·theme.css)과 교차 검증하지 않는 이유★: @tailwindcss/vite 가 엔트리
-//   (index.css)가 아닌 CSS 의 `?raw` 를 빈 문자열로 준다(실측). 그래서 이 파일이 볼 수 있는 것은
-//   index.css 뿐이고, 여기서는 **산식의 내부 정합**(뺀 폭 = 여백×2)까지만 잰다. fs 로 읽는 우회는 하지
-//   않는다 — @types/node 미설치라 `tsc --noEmit` 게이트가 깨진다(위 `?raw` 주석과 같은 사유).
+// ★What it protects★: that the thickness is not a hard-coded number but a **derived value**. The seam's thumb is painted at the track
+//   width (--scrollbar-size) minus the padding of .engram-scrollbar on both sides, and xterm's .slider must carry
+//   that formula over as is to get the same thickness. Hard-coding a number makes the two quietly diverge when the token changes.
+// ★Why we do not cross-check against the seam's real values (scroll-area.css·theme.css)★: @tailwindcss/vite gives the `?raw` of a CSS that is not the entry
+//   (index.css) as an empty string (measured). So all this file can see is
+//   index.css, and here we measure only up to **the formula's internal consistency** (subtracted width = margin×2). We do not take the detour of reading with fs
+//   — @types/node is not installed so the `tsc --noEmit` gate breaks (same reason as the `?raw` comment above).
 // ─────────────────────────────────────────────────────────────────────────────
 describe('index.css — xterm .slider 두께는 seam thumb 과 같은 산식', () => {
   const code = cssSource.replace(/\/\*[\s\S]*?\*\//g, '')
@@ -131,20 +131,20 @@ describe('index.css — xterm .slider 두께는 seam thumb 과 같은 산식', (
     const right = /(?:^|;|\s)right:\s*([\d.]+)px/.exec(sliderRule![1])
     expect(calc).not.toBeNull()
     expect(right).not.toBeNull()
-    // 트랙에서 뺀 폭 = 오른쪽 여백 × 2 — seam 의 `padding: 2px` 를 옮긴 관계다.
+    // Width subtracted from the track = right margin × 2 — a relationship carried over from the seam's `padding: 2px`.
     expect(Number(calc![1])).toBe(Number(right![1]) * 2)
   })
 
   it('폭·위치 선언은 !important 를 유지한다', () => {
-    // xterm JS 가 width/left 를 인라인 style 로 박으므로(verticalScrollbarSize) !important 가 빠지면
-    // 조용히 기본 14px 로 되돌아간다 — 캐스케이드 실패라 타입체크·렌더 테스트로는 안 잡힌다.
+    // xterm JS plants width/left as inline style (verticalScrollbarSize), so if !important is missing it quietly goes back to the default 14px
+    // — a cascade failure, so type checks · render tests do not catch it.
     expect(/width:[^;]*!important/.test(sliderRule![1])).toBe(true)
     expect(/left:[^;]*!important/.test(sliderRule![1])).toBe(true)
   })
 
   it('트랙(.scrollbar.vertical) 자체의 폭은 건드리지 않는다', () => {
-    // 트랙은 히트 영역이자 xterm 이 예약 폭으로 쓰는 값과 짝이라, 좁히는 것은 별개 판단 대상이다.
-    // 여기서 손대는 것은 칠하는 폭뿐이어야 한다.
+    // The track is the hit area and is paired with the value xterm uses as its reserved width, so narrowing it is a separate matter to decide.
+    // What is touched here must be only the painted width.
     const offenders = [...code.matchAll(/([^{}]*)\{([^{}]*)\}/g)]
       .map(m => ({ selector: m[1].trim(), body: m[2] }))
       .filter(r => /\.scrollbar\.vertical/.test(r.selector) && !/\.slider/.test(r.selector))
@@ -154,18 +154,18 @@ describe('index.css — xterm .slider 두께는 seam thumb 과 같은 산식', (
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 칸 틀 위치 = 셸 사각형을 CSS 로 반올림 (ADR-0227, TRD §2e)
+// Area frame position = the shell rectangle rounded in CSS (ADR-0227, TRD §2e)
 //
-// ★무엇을 지키나★: 잎은 인라인으로 `--x0 --y0 --x1 --y1` 만 싣고, 위치·크기로 바꾸는 규칙은 여기 하나뿐이다.
-//   규칙이 빠지면 칸이 전부 원점에 크기 없이 놓이고, 반올림 형태가 셸의 px 경계식과 어긋나면 셸이 계산한 칸 px 와
-//   화면이 갈라진다. jsdom 은 캐스케이드·`@supports`·`round()` 를 계산하지 않으므로 소스 문자열로 잰다(위 게이트와 같은
-//   사유). 틀에 이 클래스가 붙는지는 ViewLayoutRenderer.flat.test.tsx 가 잰다.
+// ★What it protects★: a leaf carries only `--x0 --y0 --x1 --y1` inline, and the one rule that turns them into position · size is here alone.
+//   If the rule is missing, all areas sit at the origin with no size, and if the rounding form disagrees with the shell's px boundary formula, the area px the shell computed and the
+//   screen diverge. jsdom does not compute cascade · `@supports` · `round()`, so we measure by source string (same reason as the gate above).
+//   Whether the frame gets this class is measured by ViewLayoutRenderer.flat.test.tsx.
 // ─────────────────────────────────────────────────────────────────────────────
 describe('index.css — 칸 틀 위치 규칙', () => {
   const code = cssSource.replace(/\/\*[\s\S]*?\*\//g, '')
   const SUPPORTS = '@supports (width: round(nearest, 1.5px, 1px))'
 
-  /** `from` 에서 시작하는 블록 `{ ... }` 의 안쪽과 끝 위치. */
+  /** The inside and end position of a block `{ ... }` starting at `from`. */
   function blockAt(css: string, from: number): { inner: string; end: number } {
     const open = css.indexOf('{', from)
     let depth = 0
@@ -179,7 +179,7 @@ describe('index.css — 칸 틀 위치 규칙', () => {
     throw new Error('블록이 닫히지 않았다')
   }
 
-  /** `.engram-slot-frame { ... }` 규칙들의 선언 목록(공백 정규화). */
+  /** The declaration list of the `.engram-slot-frame { ... }` rules (whitespace normalized). */
   function frameRules(css: string): string[][] {
     return [...css.matchAll(/\.engram-slot-frame\s*\{([^{}]*)\}/g)].map(m =>
       m[1]
@@ -204,7 +204,7 @@ describe('index.css — 칸 틀 위치 규칙', () => {
     ])
   })
 
-  // var() 가 섞인 선언은 계산 시점에 unset 이 되므로 같은 속성을 두 번 적는 폴백이 통하지 않는다 — @supports 로 가른다.
+  // A declaration mixed with var() becomes unset at computed-value time, so a fallback writing the same property twice does not work — separate them with @supports.
   it('round() 지원 시 규칙은 @supports 안에서 셸의 px 경계식과 같은 모양으로 반올림한다', () => {
     expect(supports).not.toBeNull()
     expect(frameRules(supports!.inner)).toEqual([

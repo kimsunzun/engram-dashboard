@@ -1,43 +1,43 @@
-# ADR-0128: 우편 채널 하드 단일화 — capability로만 갈리고 물리 배선도 교육과 등호
+# ADR-0128: Hard single channel for mail — split only by capability, and the physical wiring is also equal to the teaching
 
-- 상태: 확정 (2026-08-03, 근거: 사용자 결정 + 우편 채널 실측 2건 — 아래 근거) · 부분 폐기 by ADR-0132 (제어 CLI 우편 동사 금지 제약)
-- 관련: Amends ADR-0126 (결정 3 배선 존치) · Amends ADR-0099 (결정 2 engram-send 물리 주입) · ADR-0086(듀얼 입구 — CLI 크레덴셜 env 주입의 출처) · ADR-0094(bare-name grant·PATH 주입·최소권한) · ADR-0097(auto mode — grant NO-OP) · `crates/engram-dashboard-core/src/agent/backend/claude.rs`(168~211: env·PATH 주입) · `crates/engram-dashboard-daemon/src/control/mod.rs`(grants·provision) · step-log S18.13 · Amended by ADR-0132 (제어 CLI 우편 동사 금지 제약)
+- 상태: 확정 (2026-08-03, basis: user decision + 2 measurements of the mail channel — see the basis below) · 부분 폐기 by ADR-0132 (the constraint forbidding mail verbs in the control CLI)
+- 관련: Amends ADR-0126 (decision 3, keep the wiring) · Amends ADR-0099 (decision 2, physical injection of engram-send) · ADR-0086 (dual entry — the source of the CLI credential env injection) · ADR-0094 (bare-name grant · PATH injection · least privilege) · ADR-0097 (auto mode — grant NO-OP) · `crates/engram-dashboard-core/src/agent/backend/claude.rs` (168~211: env · PATH injection) · `crates/engram-dashboard-daemon/src/control/mod.rs` (grants · provision) · step-log S18.13 · Amended by ADR-0132 (the constraint forbidding mail verbs in the control CLI)
 
 ## 맥락
 
-ADR-0126 결정 1이 프라이밍에서 CLI 우회 교육을 걷어냈지만, 결정 3이 **물리 배선은 그대로 남겼다** — MCP 가능 스폰에도 `engram-send`가 PATH·환경변수로 주입된다. 그래서 "가르치지는 않지만 손에 쥐여준다"는 비대칭이 남았고, 그 비대칭을 관리하려고 ADR-0126은 장치 둘을 더 얹어야 했다: 결정 4의 **"교육 ⊆ 배선" 단방향 불변식**, 그리고 잔존 배선의 오용을 막는 **유일한** 장치인 결정 2의 에스컬레이션 교육(프라이밍 문장 하나).
+ADR-0126 decision 1 removed the CLI workaround teaching from the priming, but decision 3 **left the physical wiring as it was** — even for MCP-capable spawns `engram-send` is injected through the PATH and environment variables. So an asymmetry of "not taught, but put in the hand" remained, and to manage that asymmetry ADR-0126 had to add two more devices: decision 4's **"teaching ⊆ wiring" one-directional invariant**, and decision 2's escalation teaching (a single priming sentence), the **only** device preventing misuse of the remaining wiring.
 
-ADR-0126은 스스로 **미관측 2건**을 남겼다. 이번 세션에 둘 다 실측했다:
+ADR-0126 itself left **2 unobserved items**. This session measured both:
 
-- **MCP-only 교육의 발신 신뢰성** — ADR-0099의 무회귀 10/10은 *both-teaching* 조건이라 교육을 MCP 하나로 줄인 뒤의 신뢰성은 근거가 없었다.
-- **MCP가 고장났을 때의 행동** — 에스컬레이션 지시를 따르는가 · 셸에서 `engram-send`를 찾아 쓰는가 · 조용히 포기하는가. 결정 3이 배선을 남긴 이상 이 셋의 갈림이 프라이밍 문장 하나에만 걸려 있었다.
+- **Send reliability of MCP-only teaching** — ADR-0099's no-regression 10/10 was under the *both-teaching* condition, so there was no basis for the reliability after reducing the teaching to MCP alone.
+- **Behavior when MCP is broken** — does it follow the escalation instruction · find and use `engram-send` in the shell · silently give up. Since decision 3 left the wiring, the split among these three hung on a single priming sentence.
 
-첫째는 무회귀로 나왔고, 둘째는 **조작 자체가 실패**해 질문이 제기되지 못했다(근거 절). 그 실패가 오히려 결정적 사실을 드러냈다 — 채널은 권한으로 막을 수 없고 물리 배선만이 실효를 갖는다.
+The first came out as no regression, and in the second **the manipulation itself failed** so the question could not be raised (basis section). That failure rather revealed a decisive fact — a channel cannot be blocked by permission, and only the physical wiring has effect.
 
 ## 결정
 
-1. **우편 발신 채널은 백엔드 capability로만 갈린다.** MCP 가능 스폰은 MCP(`send_message`)만, MCP 미지원 백엔드는 CLI(`engram-send`)만. **런타임 스위칭·폴백 없음.**
-2. **MCP 가능 스폰에서 `engram-send` 물리 주입을 제거한다** — PATH 프리펜드 + `ENGRAM_SEND_EXE`·`ENGRAM_TOKEN`·`ENGRAM_CONTROL_URL` 환경변수. 결과적으로 **교육 집합 = 물리 배선 집합(등호)**.
-3. 따라서 ADR-0126 결정 4의 "교육 ⊆ 배선" **단방향 불변식은 등호로 축소**되고, 부등호를 지키기 위한 별도 장치가 불필요해진다.
+1. **The mail send channel is split only by backend capability.** An MCP-capable spawn gets MCP (`send_message`) only, a backend without MCP support gets CLI (`engram-send`) only. **No runtime switching or fallback.**
+2. **Remove the physical injection of `engram-send` from MCP-capable spawns** — the PATH prepend + the `ENGRAM_SEND_EXE` · `ENGRAM_TOKEN` · `ENGRAM_CONTROL_URL` environment variables. As a result, **teaching set = physical wiring set (equality)**.
+3. Therefore ADR-0126 decision 4's "teaching ⊆ wiring" **one-directional invariant shrinks to an equality**, and a separate device to keep the inequality becomes unnecessary.
 
 ## 거부한 대안
 
-- **배선 존치 (ADR-0126 결정 3 · ADR-0099 결정 2)** — 당시 유일한 명시 동기는 *"나중에 커맨드 계열과 연결할 여지를 남긴다"*(사용자 결정)였다. 그 제어 계열 채널은 이번에 **별도 쟁점으로 분리**됐고(아래 영향), 그것은 우편 동사를 갖지 않는 **별도 제어 CLI**가 될 것이므로 *우편 축에서* 이 배선을 남길 이유가 없다. 즉 기각 사유는 "동기가 틀렸다"가 아니라 "그 동기가 이 축에 속하지 않는다"다.
-- **프라이밍 문구 강화로만 막기** — 실측 (b)가 문구·권한의 강제력 부재를 보였다. 나아가 잔존 배선을 문장 하나로 지키는 구조 자체를 해소하는 편이, 그 문장을 더 세게 쓰는 것보다 낫다.
-- **우편 채널을 조작 종류별로 가르기(빈도 기준 혼용)** — 한 에이전트에 물리 표면이 둘 생겨 이 결정이 무의미해진다. 채널 통제가 물리 배선에만 걸린다는 실측 (b)와 정면으로 어긋난다.
+- **Keep the wiring (ADR-0126 decision 3 · ADR-0099 decision 2)** — the only stated motive then was *"to leave room to connect with the command family later"* (user decision). That control-family channel was **split off as a separate issue** this time (see Impact below), and it will be a **separate control CLI** that has no mail verbs, so there is no reason to keep this wiring *on the mail axis*. That is, the reason for rejection is not "the motive was wrong" but "that motive does not belong to this axis".
+- **Block only by strengthening the priming wording** — measurement (b) showed the absence of enforcement by wording or permission. Furthermore, it is better to dissolve the structure of guarding the remaining wiring with a single sentence than to write that sentence more strongly.
+- **Split the mail channel by kind of operation (mixing by frequency)** — one agent would have two physical surfaces and this decision would become meaningless. It collides head-on with measurement (b) that channel control hangs only on the physical wiring.
 
 ## 근거
 
-- **사용자 결정(2026-08-03):** 우편은 오가는 양이 많아 **토큰을 좀 더 쓰더라도 속도가 빠른 MCP**를 택한다. MCP 미지원 백엔드는 CLI.
-- **실측 (a) — MCP-only 교육 발신 신뢰성 10/10.** `roundtrip-smoke`(sonnet) 10회, 전 시행 `B_SENT=true` + `ENTRANCE=mcp`, 셸 우회 0 · 미발신 0 · 인프라 결함 0. ADR-0099의 both-teaching 10/10과 **동률** — 교육을 MCP 하나로 줄여도 신뢰성이 깎이지 않았다. (해석 주의: 배달 기록의 `entrance=cli` 행은 하네스가 심는 씨앗 메시지이지 에이전트 발신이 아니다.)
-- **실측 (b) — 조작 실패 6/6, 그 자체가 근거.** `--disallow-mcp`(MCP send **권한만** 제거, 서버·config는 부착 유지) 6회에서 에이전트가 전부 정상 발신했다(`ENTRANCE=mcp`, `delivered=true`). 에이전트 관점에서 채널은 망가지지 않았고 의도한 행동 질문은 제기되지 못했다. **권한으로는 채널을 막을 수 없다** — ADR-0097의 "auto mode에서 grant는 NO-OP"과 정합한다. 이 6회는 행동 관측으로는 **무효**이고, 채널 통제 수단에 대한 반증으로만 유효하다.
+- **User decision (2026-08-03):** mail has a large volume going back and forth, so choose **MCP, which is fast even if it uses a few more tokens**. CLI for backends without MCP support.
+- **Measurement (a) — MCP-only teaching send reliability 10/10.** `roundtrip-smoke` (sonnet) 10 runs, in every trial `B_SENT=true` + `ENTRANCE=mcp`, shell workaround 0 · no-send 0 · infrastructure defect 0. **Tied** with ADR-0099's both-teaching 10/10 — reducing the teaching to MCP alone did not cut reliability. (Interpretation caution: the `entrance=cli` rows in the delivery record are seed messages planted by the harness, not agent sends.)
+- **Measurement (b) — manipulation failed 6/6, which is itself the basis.** In 6 runs with `--disallow-mcp` (removing **only** the MCP send permission, with the server and config left attached), the agent sent normally every time (`ENTRANCE=mcp`, `delivered=true`). From the agent's point of view the channel was not broken, and the intended behavior question could not be raised. **A channel cannot be blocked by permission** — consistent with ADR-0097's "in auto mode the grant is a NO-OP". These 6 runs are **invalid** as behavior observation, and valid only as a refutation of the means of channel control.
 
 ## 영향 / 불변식
 
-- **코드 지점** — `claude.rs:168~211`(ADR-0086 CLI 크레덴셜 env 주입 + ADR-0094 PATH 프리펜드)을 MCP 가능 분기에서 제거한다. grants는 `[Mcp, Cli]` → `[Mcp]`. **불변식:** **데몬이** MCP 가능 스폰에 `engram-send` 경로(PATH·env)를 **provisioning하면** 이 결정 위반이다.
-  - **★불변식 범위 정정 (2026-08-04, 사용자 결정 — 초판 문구가 너무 넓었다)★:** 대상은 **환경 전체가 아니라 provisioning 행위**다. 초판은 *"MCP 가능 스폰의 **환경에** 경로가 존재하면 위반"* 으로 적었는데, 그러면 ① 사용자가 프로필 env에 직접 넣은 것까지 위반이 되고 ② 제어 평면이 CLI로 가면(제어 CLI가 같은 크레덴셜·PATH를 필요로 한다) 성립 자체가 불가능해진다. **사용자 결정:** 통제 수단은 **"가르치지 않는다"** 하나이며(프라이밍 2파일이 상대 채널을 이름조차 언급하지 않음 — 단위테스트로 봉인), 에이전트가 극히 낮은 확률로 우연히 바이너리를 찾아 호출하는 경우는 **감수한다**. 따라서 MCP 분기는 프로필이 넣은 크레덴셜·PATH를 **걷어내지 않고 경고도 하지 않는다**(시스템이 사용자 설정을 덮는 선례를 만들지 않는다 · PATH 문자열 판정은 대소문자·8.3 단축명·심볼릭 링크·상대경로에 취약해 오탐이 사용자 PATH 파손으로 번진다).
-  - **함의 — 이 결정의 유일한 실효 통제는 프라이밍이다.** 배선 제거는 우연 발견의 표면을 줄이지만 보장이 아니다. 그래서 프라이밍 2파일의 상호 배타성(각 파일의 상대 채널 언급 0회)을 봉인한 단위테스트가 **이 ADR의 실질 게이트**다 — 그 테스트를 약화시키면 이 결정이 무력해진다.
-- **CLI 백엔드는 무변경** — `engram-send` 바이너리와 그 경로는 MCP 미지원 백엔드에 그대로 필요하다. 이 결정은 바이너리를 없애는 것이 아니라 **MCP 스폰에 깔지 않는 것**이다.
-- **하네스 영향** — `--disallow-mcp`는 실측 (b)로 이미 무의미함이 드러났고(권한 제거는 조작이 되지 못한다), 배선 제거 후에는 그 모드가 전제하던 "두 채널 병존" 상태 자체가 사라진다. `--cli-only`는 CLI 백엔드 경로를 태우므로 유지한다.
-- **미결 — 제어 평면(스폰 등) 요청의 채널.** 이 ADR은 결정하지 않는다. 사용자 잠정 방향은 *"웬만하면 CLI"*(빈도가 낮고 별도 연결이 필요 없어 번잡하지 않다)이나 **실측 후 달라질 수 있어** 별도 쟁점으로 분리됐다. 함께 열리는 선행 결정 = **ADR-0086 least-privilege**(워커는 형제 스폰·kill 권한 없음)와 "누구에게 주느냐". **제약:** 제어 CLI를 채택하더라도 그것이 **우편 동사를 가지면 이 결정이 무너진다**(물리 표면이 둘로 늘어남).
-- **미검증 — 물리적 MCP 장애 시의 행동.** 권한이 아니라 서버·배선 수준으로 채널이 실제 끊겼을 때 에이전트가 **보고하는가 조용히 포기하는가**는 여전히 미관측이다. 배선 제거 후에는 **셸 우회 갈래가 소멸**하므로 남는 갈래는 둘뿐이고 백스톱이 없어져 이 축의 중요도가 올라간다. 유효한 측정은 grant 제거가 아니라 **물리 분리**로 설계해야 한다.
+- **Code points** — remove `claude.rs:168~211` (ADR-0086 CLI credential env injection + ADR-0094 PATH prepend) from the MCP-capable branch. grants `[Mcp, Cli]` → `[Mcp]`. **Invariant:** if **the daemon provisions** the `engram-send` path (PATH · env) to an MCP-capable spawn, this decision is violated.
+  - **★Invariant scope correction (2026-08-04, user decision — the first-edition wording was too broad)★:** the target is **the act of provisioning, not the whole environment**. The first edition wrote *"it is a violation if the path exists **in the environment** of an MCP-capable spawn"*, but then ① even what the user put directly in the profile env becomes a violation and ② if the control plane goes by CLI (the control CLI needs the same credentials · PATH) it becomes impossible to hold at all. **User decision:** the only means of control is **"do not teach it"** (the two priming files do not even mention the other channel by name — sealed by a unit test), and the case where an agent, with extremely low probability, finds and calls the binary by chance is **accepted**. Therefore the MCP branch neither strips the credentials · PATH that the profile put in nor warns about them (it does not set a precedent of the system overriding user settings · a PATH string decision is fragile to case, 8.3 short names, symbolic links and relative paths, and a false positive spreads into breaking the user's PATH).
+  - **Implication — the only effective control of this decision is the priming.** Removing the wiring reduces the surface for accidental discovery but is not a guarantee. So the unit test that sealed the mutual exclusivity of the two priming files (zero mentions of the other channel in each file) is **this ADR's real gate** — weakening that test neutralizes this decision.
+- **CLI backends unchanged** — the `engram-send` binary and its path are still needed by backends without MCP support. This decision does not remove the binary but **does not lay it on MCP spawns**.
+- **Harness impact** — `--disallow-mcp` was already shown meaningless by measurement (b) (removing the permission does not become a manipulation), and after the wiring removal the "two channels coexisting" state that mode presupposed itself disappears. `--cli-only` exercises the CLI backend path, so it stays.
+- **Open — the channel for control-plane (spawn etc.) requests.** This ADR does not decide. The user's provisional direction is *"CLI if at all possible"* (the frequency is low and no separate connection is needed, so it is not cumbersome), but **it may change after measurement**, so it was split off as a separate issue. The prerequisite decisions that open with it = **ADR-0086 least-privilege** (a worker has no permission to spawn or kill siblings) and "to whom to give it". **Constraint:** even if a control CLI is adopted, if it **has mail verbs this decision collapses** (the physical surface grows to two).
+- **Unverified — behavior under a physical MCP failure.** Whether the agent **reports or silently gives up** when the channel is really cut at the server or wiring level, not the permission level, is still unobserved. After the wiring removal the **shell workaround branch disappears**, so only two branches remain and, with no backstop, the importance of this axis rises. A valid measurement must be designed with **physical separation**, not grant removal.

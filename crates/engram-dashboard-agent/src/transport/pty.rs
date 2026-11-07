@@ -1,4 +1,4 @@
-//! PtyTransport — 콘솔 백엔드(claude/codex/gemini 공용) AgentTransport 구현.
+//! PtyTransport — the AgentTransport implementation shared by console backends (claude/codex/gemini).
 //!
 //! tauri import 0. unsafe 0.
 
@@ -23,53 +23,53 @@ use crate::types::{
     TerminalReason, TransportCaps,
 };
 
-/// 소유권 분할(fable 저수준 취합 §2): child는 Arc<Mutex>로 pump(try_wait)와 shutdown(kill+wait)이
-/// 공유한다. shutdown flag도 Arc — shutdown이 set(Release), pump 종료부가 read(Acquire).
+/// Ownership split (fable low-level roundup §2): child is shared by the pump (try_wait) and shutdown (kill+wait) as Arc<Mutex>.
+/// The shutdown flag is an Arc too — shutdown does set (Release), the pump's termination part does read (Acquire).
 pub struct PtyTransport {
-    /// master 는 watcher(자연 종료 감지)와 shutdown(kill) 둘 다 drop(take)할 수 있어 Arc 공유한다.
-    /// 둘 다 `take()` 라 멱등 — 먼저 take 한 쪽이 ConPTY 를 닫고, 나중 쪽은 None 을 본다.
+    /// master can be dropped (take) by both the watcher (natural-exit detection) and shutdown (kill), so it is shared by Arc.
+    /// Both are `take()` so it is idempotent — the side that takes first closes the ConPTY, and the later side sees None.
     master: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
-    /// ★라이터 스레드가 **소유**한다 — `start()` 에서 take 해 move 하고 그 뒤로 여기는 `None` 이다★.
+    /// ★The writer thread **owns** it — taken in `start()` and moved, and after that this is `None`★.
     ///
-    /// ★왜 공유(`Arc<Mutex<…>>`)가 아니라 소유인가★: `portable_pty` 의 writer 는 **한 번만 take 할 수
-    ///   있고**(트레이트 doc: "It is invalid to take the writer more than once" — unix 는 `bail!`, Windows
-    ///   ConPTY 는 `Option::take()`) `Send` 지만 `Sync` 가 아니다. 즉 이 핸들은 **한 스레드의 것**이라야
-    ///   하고, 그 스레드가 라이터다. stdio 쪽이 `Arc<Mutex<Option<ChildStdin>>>` 로 공유하는 것과 갈리는
-    ///   이유가 이것이다(그쪽은 `shutdown()` 의 `try_lock` 정리 규율이 핸들 공유를 요구한다).
+    /// ★Why owned and not shared (`Arc<Mutex<…>>`)★: `portable_pty`'s writer **can be taken only once**
+    ///   (trait doc: "It is invalid to take the writer more than once" — unix does `bail!`, Windows
+    ///   ConPTY does `Option::take()`) and is `Send` but not `Sync`. That is, this handle must belong to **one thread**,
+    ///   and that thread is the writer. This is why it differs from the stdio side sharing via `Arc<Mutex<Option<ChildStdin>>>`
+    ///   (there the `try_lock` cleanup discipline of `shutdown()` requires sharing the handle).
     writer: Mutex<Option<Box<dyn Write + Send>>>,
-    /// 아직 못 나간 입력. `send_input` 은 여기 넣고 **즉시** 돌아온다(모듈 = `transport::input_queue`).
+    /// Input that has not gone out yet. `send_input` puts into it and returns **immediately** (module = `transport::input_queue`).
     input: Arc<InputQueue>,
     child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
     shutdown: Arc<AtomicBool>,
     /// Set (Release) by `shutdown()` once the master has been destroyed; the pump loads it (Acquire) to
     /// know when it may stop draining — only where [`CLOSE_NEEDS_DRAIN`] holds (rule = [`run_pump`]).
     master_closed: Arc<AtomicBool>,
-    /// start()에서 take해 pump로 move. None이면 이미 시작됨.
+    /// Taken in start() and moved to the pump. If None, already started.
     reader: Mutex<Option<Box<dyn Read + Send>>>,
-    /// ★이 통로가 입력을 **받아들인** 적이 있나 — 「자식이 아직 사용자·모델 내용을 찍은 적이 없다」의
-    /// 빗장이다★.
+    /// ★Has this path ever **accepted** input — the latch of 「자식이 아직 사용자·모델 내용을 찍은 적이 없다」
+    /// (the child has not yet printed any user · model content)★.
     ///
-    /// ★오늘 이 값을 읽는 자리는 테스트뿐이다 — 그래도 지우지 말 것★: 이것이 나르는 사실은 통로만 알
-    ///   수 있고(입력 쪽과 출력 쪽을 둘 다 보는 자리가 여기뿐이다) 다시 만들 수 없다. 유일한 운영
-    ///   소비자였던 pre-input 관찰 창은 ADR-0217 로 걷혔다.
-    /// ★큐가 **받아들인** 순간 올린다 — OS 쓰기를 마친 순간이 아니다★: 지켜야 하는 사실은 큐에 들어선
-    ///   순간부터 흔들린다(라이터가 언제 쓸지는 우리가 모른다). 늦게 올리면 그 사이에 읽힌 바이트가
-    ///   「입력 전」으로 잘못 세어진다.
-    /// ★거절당한 입력으로는 **안 올린다**★ — 큐가 닫혔거나 상한을 넘겨 되돌려 보낸 바이트는 PTY 에
-    ///   한 글자도 닿지 않으므로 전제가 그대로다(상한 초과는 실제로 도달 가능한 갈래다 —
+    /// ★Today the only place reading this value is tests — still do not delete it★: the fact it carries can be known only by the path
+    ///   (this is the only place that sees both the input side and the output side) and cannot be rebuilt. The only production
+    ///   consumer, the pre-input observation window, was withdrawn by ADR-0217.
+    /// ★Raise it the moment the queue **accepts** — not the moment the OS write finishes★: the fact to be kept shakes from the moment
+    ///   it enters the queue (we do not know when the writer will write). If raised late, bytes read in between
+    ///   would be wrongly counted as 「입력 전」 (before input).
+    /// ★**Do not raise** it for rejected input★ — bytes the queue sent back because it was closed or over the cap never
+    ///   reach the PTY, so the premise stays (exceeding the cap is a branch that can actually be reached —
     ///   `tests/transport_smoke.rs`).
-    /// ★쓰기는 `Release`★ — 읽는 쪽은 `Acquire` 로 받아야 「입력을 받아들였다」와 그것을 관측하는 쪽
-    ///   사이에 순서가 선다. `Relaxed` 로 두면 그 주장이 우연한 장벽에 기대게 된다.
+    /// ★Write is `Release`★ — the reading side must receive with `Acquire` so order stands between 「입력을 받아들였다」 (input was accepted) and the side that observes it.
+    ///   If left `Relaxed`, that claim would lean on an accidental barrier.
     input_seen: Arc<AtomicBool>,
-    /// 이 통로가 띄운 프로세스 무리의 주인. ★마지막 칸으로 둔다★ — 칸은 선언 순서로 버려지므로 통로가 버려질 때
-    /// 무리가 닫히는(남은 멤버를 OS 가 끝내는) 때가 이 자리로 정해진다. 앞당겨도 되는지는 재 보지 않았고, 이 배치를
-    /// 지키는 시험은 없다.
+    /// The owner of the process group this path launched. ★Put it as the last field★ — fields are dropped in declaration order so the moment the group closes when the path is dropped
+    /// (the OS ends the remaining members) is fixed by this spot. We have not re-measured whether moving it earlier is allowed, and no test guards this
+    /// arrangement.
     group: GroupOwner,
 }
 
 impl PtyTransport {
-    /// **pump는 아직 안 띄운다**(start 에서). child_pid 를 함께 반환한다
-    /// (claude 세션 추적 부착용 — 호출자가 사용).
+    /// **The pump is not launched yet** (in start). It also returns child_pid
+    /// (for attaching claude session tracking — used by the caller).
     pub fn open(
         spec: &CommandSpec,
         cols: u16,
@@ -90,15 +90,15 @@ impl PtyTransport {
             .spawn_command(cmd)
             .map_err(|e| PtyError::SpawnFailed(format!("spawn: {e}")))?;
         let guard = ChildGuard::new(child);
-        // ★띄운 뒤 첫 실패 가능 걸음 = 무리 넣기 · 가드를 무리보다 먼저 선언한다★ — 아래 걸음이 실패하면 지역 변수가
-        //   선언 역순(무리 → 가드)으로 버려진다. 사유 = `new_group_with` doc.
+        // ★The first step that can fail after launch = putting into the group · declare the guard before the group★ — if a step below fails, the local variables are
+        //   dropped in reverse declaration order (group → guard). Reason = the `new_group_with` doc.
         let child_pid = guard.pid();
         let group = new_group_with(child_pid)?;
 
-        // slave는 spawn 후 불필요 — drop으로 FD 누수 방지(닫혀야 ConPTY EOF도 정상).
+        // The slave is unneeded after spawn — drop prevents an FD leak (it must be closed for ConPTY EOF to be normal too).
         drop(pair.slave);
 
-        // ★master를 적재하기 전에 reader/writer를 먼저 확보★.
+        // ★Secure the reader/writer first, before loading the master★.
         let reader = pair
             .master
             .try_clone_reader()
@@ -124,27 +124,27 @@ impl PtyTransport {
     }
 }
 
-/// open() 에서 분리해 둔 이유: 터미널 선언 env 의 기본값 주입 규칙이 load-bearing 이라 실제 spawn
-/// 없이 단위테스트로 직접 검증할 수 있게 한다.
+/// Why it was split out of open(): the default-value injection rule for the terminal-declaration env is load-bearing, so it is made verifiable directly in a unit test
+/// without a real spawn.
 fn build_pty_command(spec: &CommandSpec) -> CommandBuilder {
     let mut cmd = CommandBuilder::new(&spec.program);
     for a in &spec.args {
         cmd.arg(a);
     }
     cmd.cwd(&spec.cwd);
-    // ADR-0184: PTY transport 가 자식에게 터미널 정체성을 선언한다(거부한 대안 넷 = 그 ADR).
-    // 데몬은 WMI(WmiPrvSE.exe 가 부모)로 뜨므로 상속 환경이 **서비스 환경**이라 TERM·COLORTERM 이
-    //   아예 없다. portable-pty 는 상속 환경 전체(+Windows 는 HKLM/HKCU `Environment` 하이브)를
-    //   base env 로 그대로 싣지만 **TERM 을 합성하지는 않는다**(합성하는 건 unix 의 SHELL 뿐).
-    //   없으면 codex TUI 가 헤더 박스 아래 테두리와 프롬프트 배경 블록을 잃는다(실측 2026-09-08 —
-    //   이 두 변수만 주면 Windows Terminal 과 동일해진다). PTY 를 내주는 이 계층이 곧 터미널이라,
-    //   백엔드를 가리지 않고 여기서 "우리가 어떤 터미널인가"를 단언한다.
-    // ★상속값은 덮는다★ — 자식은 데몬을 띄운 무언가가 아니라 우리 xterm.js 위젯에 그린다. 상속
-    //   TERM 은 그 위젯을 서술하지 않으므로 기본값이 이긴다. 양보 대상은 프로필(spec.env)뿐이다.
-    // ADR-0049 의 env 기본값 규율을 그대로 따른다 — ★explicit-skip★: 프로필이 같은 키를 이미 주면
-    //   주입하지 않는다(병합 순서 last-wins 에 기대지 않는 결정적 방식). ★대소문자 무시★: Windows
-    //   환경변수는 대소문자 무구분이고, unix 에서는 소문자 `term` 이 `TERM` 을 덮는 대신 **둘 다**
-    //   자식 블록에 실려 나간다 — eq_ignore_ascii_case 가 그 갈래를 막는다.
+    // ADR-0184: the PTY transport declares a terminal identity to the child (the four rejected alternatives = that ADR).
+    // The daemon is launched through WMI (WmiPrvSE.exe is the parent), so the inherited environment is the **service environment** and TERM · COLORTERM
+    //   are absent altogether. portable-pty puts the whole inherited environment (+ on Windows the HKLM/HKCU `Environment` hives) as is
+    //   into the base env but **does not synthesize TERM** (the only thing it synthesizes is unix's SHELL).
+    //   Without it the codex TUI loses the lower border of the header box and the prompt background block (measured 2026-09-08 —
+    //   giving just these two variables makes it identical to Windows Terminal). This layer that hands out the PTY is the terminal itself,
+    //   so regardless of backend it asserts "what terminal we are" here.
+    // ★Inherited values are overridden★ — the child draws onto our xterm.js widget, not onto whatever launched the daemon. The inherited
+    //   TERM does not describe that widget so the default wins. The only thing it yields to is the profile (spec.env).
+    // It follows ADR-0049's env default-value discipline as is — ★explicit-skip★: if the profile already gives the same key, it does not
+    //   inject (a deterministic way that does not lean on merge-order last-wins). ★Case-insensitive★: Windows
+    //   environment variables are case-insensitive, and on unix a lowercase `term` does not override `TERM` but **both**
+    //   go out in the child block — eq_ignore_ascii_case blocks that branch.
     for (key, value) in [("TERM", "xterm-256color"), ("COLORTERM", "truecolor")] {
         if !spec.env.iter().any(|(k, _)| k.eq_ignore_ascii_case(key)) {
             cmd.env(key, value);
@@ -156,12 +156,12 @@ fn build_pty_command(spec: &CommandSpec) -> CommandBuilder {
     cmd
 }
 
-/// pump 가 **어떤 길로 끝나든** 입력 큐를 닫아 라이터 스레드를 거둔다.
+/// Closes the input queue **whichever way the pump ends** and reaps the writer thread.
 ///
-/// ★`Drop` 인 것이 요점이다★ — EOF 로 정상 종료하든 pump 본체가 panic 하든(그 갈래는 `contain` 이
-///   흡수한다) 이 자리는 반드시 지난다. codex 통로의 `ReaderExit` 와 같은 규율이고, 같은 이유로 필요하다:
-///   ★빠뜨리면 **자연 종료한 에이전트마다 라이터 스레드가 영영 남는다**★. `shutdown()` 은 reaper 경로에서
-///   불리지 않으므로 그 스레드를 깨울 다른 자리가 없고, 그 스레드는 큐와 PTY writer 핸들을 문 채 남는다.
+/// ★The point is that it is a `Drop`★ — whether it ends normally by EOF or the pump body panics (that branch is absorbed by `contain`), this
+///   spot is always passed. It is the same discipline as the codex path's `ReaderExit` and is needed for the same reason:
+///   ★if missed, **a writer thread remains forever for every naturally exited agent**★. `shutdown()` is not called from the reaper path
+///   so there is no other place to wake that thread, and it stays holding the queue and the PTY writer handle.
 struct WriterStop(Arc<InputQueue>);
 
 impl Drop for WriterStop {
@@ -170,8 +170,8 @@ impl Drop for WriterStop {
     }
 }
 
-/// B-2. pump 클로저에서 분리해 둔 이유: 이 매핑이 load-bearing(panic→Failed 전이)이라 실제 PTY
-/// child 없이 단위테스트로 직접 검증할 수 있게 한다.
+/// B-2. Why it was split out of the pump closure: this mapping is load-bearing (panic→Failed transition), so it is made verifiable directly in a unit test
+/// without a real PTY child.
 fn resolve_pump_reason(result: Result<TerminalReason, Caught>) -> TerminalReason {
     match result {
         Ok(reason) => reason,
@@ -223,26 +223,26 @@ fn run_pump(
 }
 
 impl AgentTransport for PtyTransport {
-    /// reader가 이미 take됐으면(재호출) 아무것도 안 한다.
+    /// If the reader was already taken (a re-call), it does nothing.
     fn start(&self, core: Arc<OutputCore>) {
         let reader = match self.reader.lock().expect("reader poisoned").take() {
             Some(r) => r,
             None => return,
         };
 
-        // ── 입력 라이터 스레드 ──
-        // ★아무도 join 하지 않는다★ — `core` 는 pump 핸들 하나만 들고(그 자리를 넓히는 것은 코어 변경이다),
-        //   `shutdown()` 안에서 기다리는 것은 ADR-0001 의 2 동사 계약 위반이다. 이 스레드는 큐가 닫히면
-        //   스스로 끝나고(`WriterStop` 의 `Drop` 과 `shutdown()` 이 그 둘), 매달린 `write_all` 이 있으면
-        //   kill+master drop 이 그것을 에러로 푼다. ★그래서 이 스레드가 kill 인과를 **지연시킬 수 없다**★.
-        // ★`start()` 에서 띄우는 이유(= `open()` 이 아니라)★: codex 라이터와 같은 자리에 둬 「통로를 만든
-        //   것」과 「통로를 돌리기 시작한 것」을 가른다. `start()` 전에 온 입력은 큐에 그대로 서 있다가
-        //   여기서 흘러 나간다 — 부르는 쪽이 준비 여부를 알 필요가 없다(ADR-0190 규율 1).
+        // ── Input writer thread ──
+        // ★Nobody joins it★ — `core` holds only one pump handle (widening that spot is a core change),
+        //   and waiting inside `shutdown()` violates ADR-0001's 2-verb contract. This thread ends by itself when the queue closes
+        //   (the `Drop` of `WriterStop` and `shutdown()` are those two), and if there is a hanging `write_all`,
+        //   kill+master drop releases it as an error. ★So this thread **cannot delay the kill causality**★.
+        // ★Why it is launched in `start()` (= not in `open()`)★: put in the same place as the codex writer to separate 「통로를 만든
+        //   것」 (what made the path) from 「통로를 돌리기 시작한 것」 (what started running the path). Input that came before `start()` stands in the queue as is and
+        //   flows out here — the caller need not know whether it is ready (ADR-0190 discipline 1).
         if let Some(mut writer) = self.writer.lock().expect("writer poisoned").take() {
             let queue = self.input.clone();
-            // ★라이터가 남기는 경고에 귀속을 붙이려면 여기서 id 를 넘겨야 한다★ — 그 안에서는
-            //   `core` 를 들 수 없다(스레드로 move 되는 것은 큐와 writer 뿐이다). 아래 spawn 실패
-            //   갈래가 이미 `agent = %core.id()` 로 남기는 것과 같은 필드를 쓴다.
+            // ★To attach attribution to the warnings the writer leaves, the id must be passed here★ — inside it
+            //   `core` cannot be held (only the queue and the writer are moved to the thread). It uses the same field the spawn failure
+            //   branch below already leaves as `agent = %core.id()`.
             let writer_agent = core.id();
             let spawn_result = std::thread::Builder::new()
                 .name("engram-pty-writer".into())
@@ -253,8 +253,8 @@ impl AgentTransport for PtyTransport {
                     });
                 });
             if let Err(e) = spawn_result {
-                // ★조용히 두지 않는다★: 라이터가 없으면 `send_input` 이 계속 `Ok` 를 돌려주면서 바이트는
-                //   영영 안 나간다 — 조용한 유실 그 자체다. 큐를 닫아 **그 순간부터 정직하게 거절**한다.
+                // ★Not left silent★: if there is no writer, `send_input` keeps returning `Ok` while bytes
+                //   never go out — a silent loss itself. Close the queue and **reject honestly from that moment**.
                 let reason = format!("PTY 입력 라이터 스레드 기동 실패: {e}");
                 tracing::warn!(agent = %core.id(), "{reason}");
                 self.input.close(&reason);
@@ -268,24 +268,24 @@ impl AgentTransport for PtyTransport {
         let master_closed = self.master_closed.clone();
         let writer_stop = WriterStop(self.input.clone());
 
-        // ── 자연 종료 감지 watcher(콘솔 전용 — 이 detection 은 PtyTransport 안에만 둔다) ──
-        // 문제: Windows ConPTY 는 master 가 살아있는 한 자식이 스스로 exit 해도 reader 에 EOF 를
-        //   주지 않는다. 그래서 자연 종료(cmd /c exit) 시 pump 의 blocking read 가 영원히 안 깬다
-        //   → core.finish 미호출 → reaper 신호 안 감. (kill 경로는 shutdown 이 master 를 drop 하므로
-        //   EOF 가 와서 정상.) 이를 보완: 자식 종료를 폴링 감지해 **master 를 drop** 함으로써
-        //   기존 EOF→pump break→finish→reaper 경로를 그대로 타게 한다.
+        // ── Natural-exit detection watcher (console only — this detection is kept inside PtyTransport only) ──
+        // Problem: on Windows ConPTY, as long as the master is alive, even if the child exits by itself it does not give the reader EOF.
+        //   So on natural exit (cmd /c exit) the pump's blocking read never wakes
+        //   → core.finish is not called → the reaper signal does not go. (On the kill path, shutdown drops the master so
+        //   EOF comes and it is normal.) To compensate: poll to detect child termination and **drop the master**, so that
+        //   it takes the existing EOF→pump break→finish→reaper path as is.
         //
-        // ★shutdown 플래그는 건드리지 않는다★ — set 하면 pump 가 Killed 로 전이한다. 자연 종료는
-        //   Exited{code} 로 정확히 산출돼야 status·로그가 맞으므로(ADR-0083 이후 reaper disposition 은
-        //   셧다운만 KeepAsIs·그 외 전부 KeepDisableAutoRestore 라 삭제엔 무영향이나, exit code 구분은
-        //   status/진단에 여전히 필요) watcher 는 master drop 만 한다. reason 산출은 pump 가 try_wait 의
-        //   exit code 로 한다.
+        // ★The shutdown flag is not touched★ — if set, the pump transitions to Killed. A natural exit
+        //   must be yielded exactly as Exited{code} for status · logs to be right (since ADR-0083 the reaper disposition is
+        //   KeepAsIs only for shutdown and KeepDisableAutoRestore for everything else, so deletion is unaffected, but distinguishing the exit code is
+        //   still needed for status/diagnostics), so the watcher only drops the master. The reason is produced by the pump from try_wait's
+        //   exit code.
         //
-        // ★데드락/이중 wait 안전★: WinChild::try_wait/wait/kill 은 내부 proc 핸들을 try_clone 후
-        //   외부 Mutex 를 즉시 해제하므로, watcher 가 우리 child Mutex 를 **짧게만**(try_wait 1회)
-        //   잡고 sleep 한다 → shutdown 의 child.lock()+kill+wait 와 경합해도 곧 풀려 데드락 없음.
-        //   Windows 는 좀비 reaping 이 없고 핸들 보유 = 종료코드 보존이라, watcher 의 try_wait 와
-        //   이후 pump 의 try_wait 가 같은 code 를 반복 회수해도 무해(이중 reap 문제 없음).
+        // ★Deadlock/double-wait safety★: WinChild::try_wait/wait/kill try_clone the internal proc handle and
+        //   release the outer Mutex immediately, so the watcher holds our child Mutex **only briefly** (one try_wait)
+        //   and sleeps → even if it races with shutdown's child.lock()+kill+wait it is released soon and no deadlock.
+        //   Windows has no zombie reaping and holding the handle = preserving the exit code, so it is harmless for the watcher's try_wait and
+        //   the pump's later try_wait to retrieve the same code repeatedly (no double-reap problem).
         let watcher_child = self.child.clone();
         let watcher_master = self.master.clone();
         let watcher_shutdown = self.shutdown.clone();
@@ -310,37 +310,37 @@ impl AgentTransport for PtyTransport {
                 std::thread::sleep(Duration::from_millis(50));
             })
             .expect("spawn pty watcher thread");
-        // watcher 핸들은 detach(join 하지 않음) — kill/자연종료 어느 쪽이든 곧 return 한다.
+        // The watcher handle is detached (not joined) — it returns soon either way, kill or natural exit.
         drop(watcher);
 
         let handle = std::thread::spawn(move || {
-            // ★pump 가 끝나면 라이터도 끝난다 — 이 guard 가 그 한 몸을 만든다(`WriterStop` doc).★
-            //   `contain` 바깥에 둬 정상·panic 두 갈래 모두에서 drop 이 지나게 한다.
+            // ★When the pump ends the writer ends too — this guard makes that one body (the `WriterStop` doc).★
+            //   Put outside `contain` so drop passes in both the normal and the panic branch.
             let _writer_stop = writer_stop;
-            // ── B-2: pump 본체를 contain으로 감싼다 ──
-            // pump 스레드가 panic하면(emit/read/try_wait 어디서든) 그 agent 출력이 영구 silent
-            // 정지하는데 감지·상태전이가 없었다(§5 위반). 본체를 contain으로 잡아, panic이면
-            // core.finish(Error)로 Failed 전이시켜 사용자/LLM에게 가시화한다.
+            // ── B-2: wrap the pump body with contain ──
+            // If the pump thread panics (anywhere in emit/read/try_wait) that agent's output goes permanently silent
+            // and stops, and there was no detection or state transition (a §5 violation). Catch the body with contain, and on panic
+            // make it a Failed transition with core.finish(Error) and make it visible to the user/LLM.
             //
             // UnwindSafe: what the closure captures (reader, child, shutdown, master_closed, pump_core) is
             //   not used after a panic except `pump_core`, whose finish below runs outside the mark, and the
             //   thread ends right after — so no logical invariant breaks. `AssertUnwindSafe` says so: the
             //   capture bundle (the `dyn Read` reader in particular) is not `UnwindSafe` by itself.
-            // ★캡처 목록이 **이 에이전트 전용**이라는 것이 아래 poison 범위 논증의 전제다★ — 그래서
-            //   **여러 에이전트가 공유하는 자원**(전역 명부 같은)을 이 클로저에 태워 보내면 안 된다.
-            //   그 자원의 락이 `expect` 로 풀리는 것이면 이 스레드의 panic 이 곧 다른 에이전트의
-            //   재-panic 이 된다.
-            // ★이 목록은 캡처가 바뀔 때 **함께** 고친다★ — 낡은 목록은 위 poison 범위 논증을 검증할 수
-            //   없는 문장으로 만든다.
-            // ★Mutex poison 범위(정확히)★: 아래 reason 산출의 child 락만 poison-tolerant
-            //   (`sync::lock`)하게 다룬다 — child는 이 transport(=이 agent) 전용이라 그 poison이
-            //   다른 agent로 전파되지 않는다.
-            //   단 panic이 pump_core.emit() 내부(replay/subscribers lock 보유 중)에서 터지면 그
-            //   core Mutex들은 poison되고 poison-tolerant가 아니다 → 다음에 그 락을 잡는
-            //   .expect("...poisoned")가 재-panic한다. 바로 아래 표시 밖 finish 가 replay 를 먼저 잡으므로
-            //   대개 거기서 훅이 데몬을 끝낸다. 현재 emit 경로에는 실제 panic 원이 없다(데몬 출력 sink의
-            //   send는 panic 대신 Err 반환). 그래서 core lock은 의도적으로 fail-fast(expect) 유지 —
-            //   poison은 "데이터 불일치 가능"의 신호라 무시(into_inner)하고 이어 쓰기보다 끝내는 게 안전하다.
+            // ★That the capture list is **specific to this agent** is the premise of the poison scope argument below★ — so
+            //   **resources shared by several agents** (like a global registry) must not be sent through this closure.
+            //   If that resource's lock is released by `expect`, this thread's panic becomes another agent's
+            //   re-panic.
+            // ★Fix this list **together** when the captures change★ — a stale list makes the poison scope argument above
+            //   a statement that cannot be verified.
+            // ★Mutex poison scope (precisely)★: only the child lock in the reason production below is handled poison-tolerant
+            //   (`sync::lock`) — child is specific to this transport (= this agent), so its poison
+            //   does not propagate to other agents.
+            //   However, if a panic blows up inside pump_core.emit() (while holding the replay/subscribers lock), those
+            //   core Mutexes are poisoned and not poison-tolerant → the next .expect("...poisoned")
+            //   that takes that lock re-panics. The finish outside the marker right below takes replay first, so
+            //   usually the hook ends the daemon there. There is currently no real panic source on the emit path (the daemon output sink's
+            //   send returns Err instead of panicking). So the core lock intentionally stays fail-fast (expect) —
+            //   poison is a signal of "possible data inconsistency" so ending is safer than ignoring it (into_inner) and writing on.
             // ADR-0292
             let normal_reason = contain(std::panic::AssertUnwindSafe(|| {
                 run_pump(
@@ -358,31 +358,31 @@ impl AgentTransport for PtyTransport {
                 )
             }));
 
-            // ★finalize 1회 보존★: finish 는 클로저 밖 이 한 곳에서만 불린다 — 정상 · panic 두 갈래가
-            //   reason 하나로 모이고(정상 → 클로저가 낸 reason · panic → Error), 그래도 겹쳐 불리면
-            //   OutputCore.finalized.swap(AcqRel) 이 정확히 1회만 통과시킨다(ADR-0005).
+            // ★Preserve finalize once★: finish is called only at this one place outside the closure — the normal and panic branches
+            //   converge into one reason (normal → the reason the closure produced · panic → Error), and even if they are called overlapping,
+            //   OutputCore.finalized.swap(AcqRel) lets exactly one through (ADR-0005).
             let reason = resolve_pump_reason(normal_reason);
 
-            // ADR-0292: ★finish 를 위 클로저 안으로 옮기지 말 것★ — 표시 안에서 난 finish 의 panic 은 가둬지고, 다시
-            //   부른 finish 는 finalize 게이트에 막혀 끝 전이 없는 `Running` 이 남는다(ADR-0005). 여기선 표시 밖이다.
+            // ADR-0292: ★do not move finish into the closure above★ — a panic in a finish made inside the marker is contained, and a re-called
+            //   finish is blocked by the finalize gate and leaves a `Running` with no terminal transition (ADR-0005). Here it is outside the marker.
             pump_core.finish(reason);
 
-            // G-1: 완료 신호. core.join_pump의 recv_timeout가 받는다. 수신측이 이미
-            // 사라졌어도(타임아웃 후 detach) 무시. ★panic 경로에서도 반드시 보낸다★ —
-            // contain으로 panic을 흡수했으므로 이 send에 도달한다(join_pump가 5s 안 멈춤).
+            // G-1: completion signal. Received by core.join_pump's recv_timeout. Ignored even if the receiving side
+            // has already vanished (detach after timeout). ★Always sent on the panic path too★ —
+            // contain absorbed the panic so this send is reached (join_pump does not stall past 5s).
             let _ = done_tx.send(());
         });
 
         core.attach_pump(handle, done_rx);
     }
 
-    /// 큐에 넣고 **즉시** 돌아온다 — OS 쓰기는 전담 라이터 스레드의 일이다.
+    /// Puts into the queue and returns **immediately** — the OS write is the dedicated writer thread's job.
     ///
-    /// ★계약·상한·「받아 둔 뒤의 실패」의 정본은 [`crate::transport::input_queue`] 모듈 헤더★. 여기
-    ///   되풀어 적지 않는다.
+    /// ★The source of record for the contract · cap · 「받아 둔 뒤의 실패」 (failure after being accepted) is the [`crate::transport::input_queue`] module header★. It is
+    ///   not repeated here.
     fn send_input(&self, input: InputEvent) -> Result<(), PtyError> {
         let InputEvent::Raw(bytes) = input;
-        // ★받아들인 입력만 빗장을 올린다 — 거절당한 것으로는 안 올린다★(정본 = `input_seen` 필드 doc).
+        // ★Only accepted input raises the latch — rejected input does not raise it★ (source of record = the `input_seen` field doc).
         let accepted = self.input.push(bytes);
         if accepted.is_ok() {
             self.input_seen.store(true, Ordering::Release);
@@ -408,12 +408,12 @@ impl AgentTransport for PtyTransport {
         Ok(())
     }
 
-    /// ★터미널 모드는 끊기 명령을 받지 않는다 — 터미널이 키를 직접 받는다★(사용자 결정 2026-09-28).
+    /// ★Terminal mode does not receive the interrupt command — the terminal receives keys directly★ (user decision 2026-09-28).
     ///
-    /// ★Ctrl-C(0x03)를 대신 넣지 말 것★: 통로는 턴이 도는지 모르고, claude·codex TUI 는 한가할 때 두 번째
-    ///   Ctrl-C 에 **종료할 수 있다**(가능성 높음 — codex 소스 판독 · claude 미측정, ADR-0245) — 버스
-    ///   `agent.interrupt` 가 「≠ kill — 프로세스는 산다」 계약을 깨고 에이전트를 죽일 수 있다. 끊고 싶은 사람은 터미널 슬롯에서 Esc·Ctrl-C 를 직접 치고, 그 키는 평범한 입력
-    ///   (`send_input`)으로 흐른다. 거절은 버스에서 CONFLICT 로 번역된다.
+    /// ★Do not put Ctrl-C (0x03) in on its behalf★: the path does not know whether a turn is running, and the claude · codex TUI can **exit** on a second
+    ///   Ctrl-C when idle (likely — read from the codex source · claude unmeasured, ADR-0245) — the bus
+    ///   `agent.interrupt` could break the contract 「≠ kill — 프로세스는 산다」 (≠ kill — the process lives) and kill the agent. A person who wants to interrupt types Esc · Ctrl-C directly in the terminal slot, and those keys flow as ordinary input
+    ///   (`send_input`). The rejection is translated to CONFLICT on the bus.
     // ADR-0245
     fn interrupt(&self) -> Result<(), PtyError> {
         Err(PtyError::Unsupported(
@@ -422,25 +422,25 @@ impl AgentTransport for PtyTransport {
         ))
     }
 
-    /// 자원 폐쇄 1~5단계는 **절대순서**다.
+    /// Resource closing stages 1~5 are in **absolute order**.
     // ADR-0001
     fn shutdown(&self) {
-        // 1. shutdown 신호 — pump가 종료 시 Killed로 전이하도록.
+        // 1. shutdown signal — so the pump transitions to Killed at termination.
         self.shutdown.store(true, Ordering::Release);
 
-        // 1b. 입력 큐를 닫는다 — 라이터 스레드가 이것을 보고 끝난다. ★여기서 잡는 것은 큐의 락뿐이라
-        //     매달릴 수 없다★(블로킹 쓰기 중인 라이터는 그 락을 놓고 있다 — `InputQueue::close` doc).
-        //     ★대가 = 아직 못 나간 입력은 사라진다★: 이 자식은 다음 줄에서 죽으므로 마저 써도 실패한다.
+        // 1b. Close the input queue — the writer thread sees this and ends. ★All that is taken here is the queue's lock, so
+        //     it cannot hang★ (a writer in a blocking write has released that lock — the `InputQueue::close` doc).
+        //     ★Cost = input that has not gone out yet is lost★: this child dies on the next line so writing the rest would fail anyway.
         self.input.close("에이전트를 종료했다");
 
-        // 2~3. wait 는 reap(좀비 방지). 두 번째 호출은 이미 죽었으니 Err — 무시(멱등).
+        // 2~3. wait is a reap (zombie prevention). The second call is Err since it already died — ignored (idempotent).
         {
             let mut child = self.child.lock().expect("child poisoned");
             let _ = child.kill();
             let _ = child.wait();
         }
 
-        // 4. 무리 전체 종료 → 손자 프로세스까지 → ConPTY slave 핸들 해제. 무리가 없는 OS 에서는 무동작이다.
+        // 4. Terminate the whole group → down to grandchild processes → release the ConPTY slave handle. A no-op on an OS with no group.
         let _ = self.group.terminate(1);
 
         // 5. master.take() → drop → ClosePseudoConsole → reader EOF — the core of the kill causality.
@@ -469,7 +469,7 @@ impl AgentTransport for PtyTransport {
             },
             control: ControlCaps {
                 resize: true,
-                // ADR-0245: 끊기는 터미널이 직접 받는다 — [`Self::interrupt`] 참조.
+                // ADR-0245: the terminal receives interrupt directly — see [`Self::interrupt`].
                 interrupt: false,
                 cancel: false,
                 graceful_shutdown: false,
@@ -504,7 +504,7 @@ mod tests {
         fn agent_list_updated(&self, _agents: Vec<AgentInfo>) {}
     }
 
-    // ── 터미널 선언 env(TERM/COLORTERM) ──
+    // ── Terminal declaration env (TERM/COLORTERM) ──
 
     fn spec_with_env(env: Vec<(String, String)>) -> CommandSpec {
         CommandSpec {
@@ -515,11 +515,11 @@ mod tests {
         }
     }
 
-    /// ★`get_env` 로 단언하지 말 것★ — 그건 base env(= `std::env::vars_os()` + Windows 레지스트리
-    /// 하이브)까지 조회하므로, TERM·COLORTERM 이 이미 있는 개발 셸에서는 **주입 코드를 지워도**
-    /// 통과한다(실측). `iter_extra_env_as_str` 는 호출자가 직접 넣은 항목만 돌려줘 "이 코드가
-    /// 넣었다"를 잰다. 값 sentinel 도 같은 이유 — 주변 환경이 우연히 만들 수 있는 값(`dumb` 등)을
-    /// 쓰면 프로필 우선 단언이 다시 무의미해진다.
+    /// ★Do not assert with `get_env`★ — it also queries the base env (= `std::env::vars_os()` + the Windows registry
+    /// hives), so in a dev shell where TERM · COLORTERM already exist it passes **even if the injection code is deleted**
+    /// (measured). `iter_extra_env_as_str` returns only items the caller put in directly, measuring "this code
+    /// put it in". Value sentinels are the same — using a value the surrounding environment can accidentally produce (`dumb`, etc.)
+    /// makes the profile-priority assertion meaningless again.
     fn extra_env(cmd: &CommandBuilder) -> Vec<(String, String)> {
         let mut entries: Vec<(String, String)> = cmd
             .iter_extra_env_as_str()
@@ -559,11 +559,11 @@ mod tests {
         );
     }
 
-    /// ADR-0049 대소문자 무시 규율. ★Windows 에서는 `eq_ignore_ascii_case` 를 `==` 로 되돌려도
-    /// 이 테스트가 초록이다(실측 2026-09-08)★ — `CommandBuilder` 의 내부 맵이 Windows 에선 키를
-    /// 소문자로 접어 `TERM`/`term` 이 어차피 한 항목으로 합쳐지기 때문. 갈라지는 건 unix 로,
-    /// 거기선 두 항목이 **둘 다** 자식 블록에 실려 나가 3개가 된다 — 이 단언은 그쪽 회귀망이다.
-    /// (주입 자체를 지우는 회귀는 COLORTERM 항목이 사라져 여기서도 잡힌다.)
+    /// ADR-0049 case-insensitive discipline. ★On Windows, even if `eq_ignore_ascii_case` is changed back to `==`
+    /// this test is green (measured 2026-09-08)★ — because `CommandBuilder`'s internal map on Windows folds keys to
+    /// lowercase so `TERM`/`term` merge into one entry anyway. The divergence is on unix,
+    /// where both entries go out in the child block and become 3 — this assertion is the regression net for that side.
+    /// (A regression that deletes the injection itself is caught here too, as the COLORTERM entry disappears.)
     #[test]
     fn lowercase_profile_key_suppresses_terminal_default() {
         let cmd = build_pty_command(&spec_with_env(vec![(
@@ -579,7 +579,7 @@ mod tests {
         );
     }
 
-    // ── B-2: panic contain 결과가 Error reason 으로 매핑되는지 ──
+    // ── B-2: whether the panic contain result is mapped to an Error reason ──
     #[test]
     fn resolve_pump_reason_panic_becomes_error() {
         let result = contain(std::panic::AssertUnwindSafe(|| -> TerminalReason {
@@ -598,7 +598,7 @@ mod tests {
         }
     }
 
-    // ── B-2: 정상 종료 reason 은 그대로 passthrough ──
+    // ── B-2: the normal-exit reason is passed through as is ──
     #[test]
     fn resolve_pump_reason_normal_passthrough() {
         let ok = contain(std::panic::AssertUnwindSafe(|| -> TerminalReason {
@@ -617,7 +617,7 @@ mod tests {
         ));
     }
 
-    // ── B-2: panic reason → core.finish → Failed 전이(정확히 1회) ──
+    // ── B-2: panic reason → core.finish → Failed transition (exactly once) ──
     #[test]
     fn panic_reason_finishes_core_as_failed_once() {
         let status_sink = CapturingStatusSink::new();
@@ -633,7 +633,7 @@ mod tests {
         }));
         let reason = resolve_pump_reason(panicked);
         core.finish(reason);
-        // (race 모사) 정상 EOF finish 가 뒤늦게 와도 finalize 1회로 무시.
+        // (race simulation) even if a normal EOF finish comes late, it is ignored by finalize once.
         core.finish(TerminalReason::Exited { code: Some(0) });
 
         let statuses = status_sink.statuses();
@@ -650,7 +650,7 @@ mod tests {
         assert!(matches!(core.status(), AgentStatus::Failed { .. }));
     }
 
-    // ── B-2: 한 agent 의 pump panic 이 다른 agent 로 전파되지 않음(격리) ──
+    // ── B-2: one agent's pump panic does not propagate to other agents (isolation) ──
     #[test]
     fn pump_panic_does_not_affect_other_agent() {
         let sink_a = CapturingStatusSink::new();
@@ -852,11 +852,11 @@ mod tests {
     }
 }
 
-/// [`PtyTransport::input_seen`] 빗장의 배선 — ★실 자식 프로세스를 띄운다★.
+/// The wiring of the [`PtyTransport::input_seen`] latch — ★it launches a real child process★.
 ///
-/// ★별도 모듈인 것은 `#[cfg(windows)]` 때문이다★ — `cmd.exe` 를 띄우므로 그 밖의 플랫폼에서는 성립하지
-///   않는다. 위 `mod tests` 는 프로세스를 하나도 안 띄우는 것이 그 모듈의 성질이라 섞지 않는다.
-/// ★운영 소비자가 없는데도 이 둘이 남는 사유의 정본 = 그 필드 doc★.
+/// ★It is a separate module because of `#[cfg(windows)]`★ — it launches `cmd.exe` so it does not hold on other platforms. The `mod tests` above
+///   launches no process at all as a property of that module, so they are not mixed.
+/// ★The source of record for why these two remain despite having no production consumer = that field's doc★.
 // ADR-0217
 #[cfg(all(test, windows))]
 mod input_seen_latch {
@@ -872,8 +872,8 @@ mod input_seen_latch {
         }
     }
 
-    /// ★받아들인 첫 입력이 빗장을 올린다★ — 이것이 없으면 「자식이 아직 사용자·모델 내용을 찍은 적이
-    /// 없다」를 통로가 더는 말할 수 없게 된다.
+    /// ★The first accepted input raises the latch★ — without it the path can no longer say 「자식이 아직 사용자·모델 내용을 찍은 적이
+    /// 없다」 (the child has not yet printed any user · model content).
     #[test]
     fn the_first_accepted_input_raises_the_latch() {
         let (transport, _pid) = PtyTransport::open(&echo("x"), 80, 24).expect("open");
@@ -891,12 +891,12 @@ mod input_seen_latch {
         transport.shutdown();
     }
 
-    /// ★끊기 명령은 거절되고 PTY 에 아무것도 안 쓴다★ — 0x03 이 다시 큐에 들면 한가한 TUI 를 죽일 수 있다.
+    /// ★The interrupt command is rejected and nothing is written to the PTY★ — if 0x03 entered the queue again it could kill an idle TUI.
     // ADR-0245
     #[test]
     fn interrupt_is_refused_and_writes_nothing() {
         let (transport, _pid) = PtyTransport::open(&echo("x"), 80, 24).expect("open");
-        // ★`start()` 전에 잰다★ — 라이터가 없어야 큐에 든 것이 빠지지 않아 「안 썼다」가 결정적이다.
+        // ★Measure before `start()`★ — with no writer, what is in the queue is not removed so 「안 썼다」 (did not write) is deterministic.
         assert!(
             matches!(transport.interrupt(), Err(PtyError::Unsupported(_))),
             "터미널 모드 끊기는 `Unsupported` 여야 한다"
@@ -917,12 +917,12 @@ mod input_seen_latch {
         transport.shutdown();
     }
 
-    /// ★거절당한 입력은 빗장을 올리지 않는다★ — PTY 에 한 글자도 안 닿았으므로 전제가 그대로다.
+    /// ★Rejected input does not raise the latch★ — not a single character reached the PTY so the premise stays.
     #[test]
     fn a_rejected_input_leaves_the_latch_down() {
         let (transport, _pid) = PtyTransport::open(&echo("x"), 80, 24).expect("open");
-        // ★`start()` 전에 잰다★ — 라이터가 없어야 큐가 안 빠져 상한 판정이 결정적이다(형제 스위트
-        //   `tests/transport_smoke.rs` 의 같은 규율).
+        // ★Measure before `start()`★ — with no writer, the queue is not drained so the cap decision is deterministic (the same discipline as the sibling suite
+        //   `tests/transport_smoke.rs`).
         transport
             .send_input(InputEvent::Raw(vec![b'z'; INPUT_QUEUE_MAX_BYTES + 1]))
             .expect_err("상한 초과는 거절돼야 한다");
@@ -931,7 +931,7 @@ mod input_seen_latch {
             "거절당한 입력이 빗장을 올렸다"
         );
         transport.shutdown();
-        // 큐가 닫힌 뒤의 거절도 같다.
+        // Rejection after the queue is closed is the same.
         transport
             .send_input(InputEvent::Raw(b"late".to_vec()))
             .expect_err("닫힌 큐는 거절돼야 한다");
@@ -942,23 +942,23 @@ mod input_seen_latch {
     }
 }
 
-/// ★`shutdown()` 이 **매달린 ConPTY 쓰기를 푼다**는 것을 실측으로 못 박는 자리★.
+/// ★The spot that pins by measurement that `shutdown()` **releases a hanging ConPTY write**★.
 ///
-/// ★왜 이 질문이 중요했나★: `portable-pty 0.8.1` 의 `take_writer()` 는 `Inner.writable` 을
-///   `Option::take` 하므로(win/conpty.rs) **master drop 이 그 쓰기 핸들을 닫지 않는다** — 핸들은 라이터
-///   스레드의 것이다. 아무도 그 스레드를 join 하지 않고 시한도 없으니, 만약 `shutdown()` 이 매달린 쓰기를
-///   풀지 못한다면 **죽은 에이전트마다 스레드 하나와 ConPTY 핸들 하나가 영구히 샌다.** 남은 후보는
-///   `ClosePseudoConsole` 이 conhost 쪽 읽기 끝을 닫아 주느냐 하나뿐이었고 그것은 OS 비공개 동작이라
-///   추론이 아니라 재 보는 수밖에 없었다.
-/// ★실측 결론(2026-09-18, 4/4 재현)★: **푼다.** 2MiB 를 문 채 매달린 쓰기가 `shutdown()` 이후
-///   14–17ms 만에 `ERROR_BROKEN_PIPE`(os error 109)로 풀리고 라이터가 스스로 끝난다. 그래서 누수 우려는
-///   닫혔고, 백스톱(시한·강제 핸들 닫기)을 만들지 않는다. ★이 항목이 그 결론의 회귀망이다★ — 깨지면
-///   위 누수가 되살아난 것이므로 백스톱 논의를 다시 열어야 한다.
+/// ★Why this question mattered★: `portable-pty 0.8.1`'s `take_writer()` does `Option::take` on `Inner.writable`
+///   (win/conpty.rs), so **master drop does not close that write handle** — the handle belongs to the writer
+///   thread. Nobody joins that thread and there is no deadline, so if `shutdown()` could not release a hanging write,
+///   **one thread and one ConPTY handle would leak permanently for every dead agent.** The only remaining candidate was
+///   whether `ClosePseudoConsole` closes the conhost-side read end, and that is OS-private behavior so
+///   it could not be inferred and could only be measured.
+/// ★Measured conclusion (2026-09-18, 4/4 reproduced)★: **it releases.** A write hanging while holding 2MiB is released with
+///   `ERROR_BROKEN_PIPE` (os error 109) 14–17ms after `shutdown()` and the writer ends by itself. So the leak concern is
+///   closed, and we do not build a backstop (deadline · forced handle close). ★This item is the regression net for that conclusion★ — if it breaks,
+///   the leak above has revived so the backstop discussion must be reopened.
 ///
-/// ★왜 별도 모듈인가★: 운영 `start()` 는 쓰기 클로저를 자기가 만들므로 밖에서 계측을 끼울 수 없다.
-///   대신 `writer` 를 **먼저** 꺼내 계측 클로저로 감싸 우리가 라이터를 띄우고, 그 뒤 `start()` 를 부른다
-///   — `start()` 는 `writer` 가 이미 `None` 이라 라이터 spawn 만 건너뛰고 watcher·pump 는 그대로 세우므로
-///   `shutdown()` 이 재는 인과(kill → Job terminate → master drop)는 운영과 동일하다.
+/// ★Why a separate module★: the production `start()` builds the write closure itself so instrumentation cannot be inserted from outside.
+///   Instead we take `writer` out **first**, wrap it in an instrumented closure, launch the writer ourselves, and then call `start()`
+///   — in `start()` `writer` is already `None` so only the writer spawn is skipped and the watcher · pump are set up as is, so
+///   the causality `shutdown()` measures (kill → Job terminate → master drop) is the same as production.
 #[cfg(all(test, windows))]
 mod conpty_wedge {
     use super::*;
@@ -976,7 +976,7 @@ mod conpty_wedge {
 
     #[test]
     fn shutdown_unwedges_a_blocked_conpty_write() {
-        // ping 은 콘솔 입력을 읽지 않는다 — ConPTY 입력 버퍼가 차면 우리 쪽 write 가 매달린다.
+        // ping does not read console input — if the ConPTY input buffer fills, our side's write hangs.
         let spec = CommandSpec {
             program: "cmd.exe".into(),
             args: vec![
@@ -991,8 +991,8 @@ mod conpty_wedge {
         };
         let (transport, _pid) = PtyTransport::open(&spec, 80, 24).expect("open");
 
-        // ★운영보다 **먼저** 꺼낸다★ — 이 한 줄이 계측을 가능하게 하고, 그 대가로 start() 의 라이터
-        //   spawn 이 건너뛰어진다(위 모듈 doc).
+        // ★Take it out **before** the production code does★ — this one line makes the instrumentation possible, and at that price start()'s writer
+        //   spawn is skipped (the module doc above).
         let mut writer = transport
             .writer
             .lock()
@@ -1037,7 +1037,7 @@ mod conpty_wedge {
             .send_input(InputEvent::Raw(vec![b'x'; INPUT_QUEUE_MAX_BYTES]))
             .expect("상한 이내");
 
-        // ① 실제로 매달렸나 — 이것이 참이어야 아래 판정이 공허하지 않다.
+        // ① Did it really hang — this must be true for the decision below not to be vacuous.
         let enter_deadline = Instant::now() + Duration::from_secs(5);
         while !in_write.load(Ordering::Acquire) {
             assert!(
@@ -1053,7 +1053,7 @@ mod conpty_wedge {
             outcome.lock().unwrap()
         );
 
-        // ② shutdown 이 그것을 푸는가 — 실측 14–17ms.
+        // ② Does shutdown release it — measured 14–17ms.
         let t0 = Instant::now();
         transport.shutdown();
         let deadline = t0 + Duration::from_secs(5);
@@ -1070,8 +1070,8 @@ mod conpty_wedge {
     }
 }
 
-/// 가둔 pump panic 의 끝 — ★실 자식 프로세스를 띄운다★(위 `mod tests` 는 프로세스를 안 띄우는 모듈이라 섞지 않는다).
-/// 운영 `start()` 의 pump 클로저를 그대로 돌려, 본체가 표시 안에서 돌고 `finish` 가 표시 밖에서 도는지 잰다.
+/// The end of a contained pump panic — ★it launches a real child process★ (the `mod tests` above is a module that launches no process so they are not mixed).
+/// It runs the production `start()`'s pump closure as is and measures that the body runs inside the marker and `finish` runs outside the marker.
 // ADR-0292
 #[cfg(all(test, windows))]
 mod contained_pump {

@@ -1,29 +1,29 @@
-# ★ 기본 목록 · 사용자 목록의 이름 관행 — light 조사
+# Naming practice for the ★ default list · user lists — light survey
 
-| 항목 | 값 |
+| Item | Value |
 |---|---|
-| 상태 | 조사 완료 · 결정 = 머리 「즐겨찾기」 · 기본 묶음 「기본」(사용자 2026-10-16) |
-| 날짜 | 2026-10-16 |
-| 방법 | `/research` light — 수집자 1명(검색 5회) · 메인 grounding 스팟체크 1건(언리얼 한국어 문서 WebFetch) · 적대 리뷰 없음 |
-| 질문 | 라이브러리 슬롯 왼쪽의 ★ 목록 — 처음부터 있는 기본 목록과 사용자가 만드는 목록을 무엇이라 부르나(머리 「즐겨찾기 묶음 · 이 PC」 · 기본 목록 「즐겨찾기」 가 겹친다는 지적) |
+| Status | Survey done · decision = header 「즐겨찾기」 · default bundle 「기본」 (user 2026-10-16) |
+| Date | 2026-10-16 |
+| Method | `/research` light — 1 collector (5 searches) · 1 main grounding spot check (Unreal Korean docs WebFetch) · no adversarial review |
+| Question | The ★ list at the left of the library slot — what do other apps call the default list that exists from the start versus the lists the user creates (the point that the header 「즐겨찾기 묶음 · 이 PC」 and the default list 「즐겨찾기」 overlap) |
 
-## 결론
+## Conclusion
 
-- **언리얼 Content Browser 는 둘을 따로 둔다** — 「즐겨찾기 패널(Favorites Panel)」(즐겨찾기에 추가한 에셋 목록 하나)과 「컬렉션(Collections) 패널」(사용자가 만드는 목록들 · 「컬렉션 추가 버튼」). (확실 — 메인이 한국어 공식 문서 원문 확인: https://dev.epicgames.com/documentation/ko-kr/unreal-engine/content-browser-interface-in-unreal-engine)
-- 처음부터 있는 기본 목록은 동작 이름 꼴(Spotify Liked Songs · YouTube Liked videos)이거나 임시 모음(Lightroom Quick Collection — 기본 대상 모음)이다. (EN 가능성 높음 · 한국어 표기는 미확인)
-- 한국어에서 「즐겨찾기」는 목록 하나의 이름 또는 섹션 이름으로 쓰인다(언리얼 = 패널 이름).
+- **Unreal Content Browser keeps the two separate** — the 「즐겨찾기 패널(Favorites Panel)」 (a single list of assets added to favorites) and the 「컬렉션(Collections) 패널」 (lists the user creates · the 「컬렉션 추가 버튼」). (certain — main confirmed the original text of the Korean official docs: https://dev.epicgames.com/documentation/ko-kr/unreal-engine/content-browser-interface-in-unreal-engine)
+- The default list that exists from the start is either in the form of an action name (Spotify Liked Songs · YouTube Liked videos) or a temporary collection (Lightroom Quick Collection — the default target collection). (EN likely · Korean wording unconfirmed)
+- In Korean, 「즐겨찾기」 is used as the name of a single list or the name of a section (Unreal = a panel name).
 
-## 발견
+## Findings
 
-| 앱 | 기본 목록 (EN) | 한국어 | 비고 | 확신 |
+| App | Default list (EN) | Korean | Notes | Confidence |
 |---|---|---|---|---|
-| 언리얼 | Favorites 패널 + Collections 패널 | 즐겨찾기 패널 · 컬렉션 패널 · 컬렉션 추가 버튼 | 둘이 따로 | 확실(메인 확인) |
-| Lightroom Classic | Quick Collection (기본 Target Collection) | 미확인 | 우리 「★ = 대상 묶음」과 같은 구조 | EN 확실(수집자) · KO 불확실 |
-| Spotify | Liked Songs | 미확인 | 지울 수 없음(기억) | EN 확실 · KO 불확실 |
-| YouTube | Liked videos · Watch later | 미확인 | | 불확실 |
-| Edge · Chrome | Favorites bar · Other favorites / Bookmarks bar · Other bookmarks | 미확인 | 최상위 컨테이너 | 불확실 |
-| Steam | Favorites(내장 컬렉션) | 미확인 | | 가능성 높음 |
+| Unreal | Favorites panel + Collections panel | 즐겨찾기 패널 · 컬렉션 패널 · 컬렉션 추가 버튼 | The two are separate | Certain (main confirmed) |
+| Lightroom Classic | Quick Collection (the default Target Collection) | Unconfirmed | Same structure as our 「★ = 대상 묶음」 | EN certain (collector) · KO uncertain |
+| Spotify | Liked Songs | Unconfirmed | Cannot be deleted (from memory) | EN certain · KO uncertain |
+| YouTube | Liked videos · Watch later | Unconfirmed | | Uncertain |
+| Edge · Chrome | Favorites bar · Other favorites / Bookmarks bar · Other bookmarks | Unconfirmed | Top-level containers | Uncertain |
+| Steam | Favorites (built-in collection) | Unconfirmed | | Likely |
 
-## 공백
+## Gaps
 
-Edge · Chrome · Spotify · YouTube · Lightroom · Steam 의 한국어 표기는 공식 문서로 확인하지 못했다. Apple · JetBrains 는 보지 않았다.
+The Korean wording for Edge · Chrome · Spotify · YouTube · Lightroom · Steam could not be confirmed from official docs. Apple · JetBrains were not looked at.

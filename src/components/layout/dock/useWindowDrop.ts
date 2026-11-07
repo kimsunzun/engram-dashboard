@@ -1,10 +1,10 @@
-// TRD S21-slot-docking §4-3: 창 뿌리의 끌기 받기 — 이 문서의 dragenter · dragover · dragleave · drop 과 mousemove 를
-//   `windowDrop`(정하는 곳)에 잇고 그 안내를 돌려준다. 바깥(스토어 · 탭바 기하 · Tauri)을 포트로 채우는 것도 여기다.
-// ★끌기 리스너는 `document` 의 거품 단계다★ — 에이전트 트리(react-arborist → react-dnd HTML5 백엔드)가 `window` 거품 리스너로
-//   자기 것이 아닌 dragover 의 `dropEffect` 를 `none` 으로 덮는다(TRD §4-2). 우리 끌기는 `document` 에서 끊어 거기 닿지 않게 한다 —
-//   `window` 에 달면 같은 노드의 등록 순서가 이겨 끊기가 서지 않고, `document` 캡처에서 끊으면 아래 요소의 처리기까지 못 받는다(옛
-//   HTML5 끌기 `dockDrag.ts` 의 같은 조항). 파일 · URL 놓기 막기(`fileDropGuard`)는 따로 그대로 산다 — 둘은 서로의 끌기를 보지 않는다.
-// ★mousemove 는 `window` 캡처다★ — 안내 층은 포인터를 받지 않아 「덮개 위 이동」은 그 밑 요소에 온다 · 앱 처리기가 전파를 끊어도 본다.
+// TRD S21-slot-docking §4-3: receiving drags at the window root — connects this document's dragenter · dragover · dragleave · drop and mousemove to
+//   `windowDrop` (where decisions are made) and returns its guide. Filling the outside (store · tab bar geometry · Tauri) through ports is also done here.
+// ★Drag listeners are in the `document` bubble phase★ — the agent tree (react-arborist → react-dnd HTML5 backend) overwrites the `dropEffect` of a dragover that is not its own with `none` through a `window` bubble listener
+//   (TRD §4-2). Our drag is stopped at `document` so it does not reach there —
+//   attached to `window`, the registration order of the same node wins and stopping does not hold, and stopping at `document` capture means the handlers of elements below do not receive it (the same clause of the old
+//   HTML5 drag `dockDrag.ts`). The file · URL drop block (`fileDropGuard`) lives on separately as is — the two do not look at each other's drag.
+// ★mousemove is `window` capture★ — the guide layer does not receive the pointer, so 「덮개 위 이동」 arrives at the element below it · it is seen even if an app handler stops propagation.
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useSyncExternalStore } from 'react'
 
@@ -21,11 +21,11 @@ const MOVE_LISTEN: AddEventListenerOptions = { capture: true, passive: true }
 
 export interface UseWindowDropOptions {
   label: string
-  /** 탭 캔버스 영역 — 안내 층이 덮는 그 상자. */
+  /** Tab canvas area — the box the guide layer covers. */
   canvas: () => Element | null
 }
 
-/** 이 창에 지금 그릴 끌기 안내 — `DockOverlayView` 의 `guide`. */
+/** The drag guide to draw in this window now — the `guide` of `DockOverlayView`. */
 // ADR-0296
 export function useWindowDrop(o: UseWindowDropOptions): OverlayView | null {
   const live = useRef(o)
@@ -67,7 +67,7 @@ function attach(ctl: WindowDrop): () => void {
 }
 
 function portsOf(live: { readonly current: UseWindowDropOptions }): WindowDropPorts {
-  // 스토어는 적용마다 탭 목록을 새 배열로 둔다 — 같은 배열이면 id 목록도 같은 배열을 돌려준다.
+  // The store sets the tab list to a new array on every apply — if it is the same array, the id list returns the same array too.
   let ids: { from: ViewMeta[]; tabs: string[] } | null = null
   const model = (): DropModel => {
     const w = useViewStore.getState().windows[live.current.label]
@@ -79,7 +79,7 @@ function portsOf(live: { readonly current: UseWindowDropOptions }): WindowDropPo
     app: currentAppIdentifier,
     local: localDrag,
     canvasRect: () => live.current.canvas()?.getBoundingClientRect() ?? null,
-    // `WindowLayout` 이 그리는 그 탭(`useShownTab` 과 같은 셈).
+    // The tab that `WindowLayout` draws (same computation as `useShownTab`).
     shownTab: () => {
       const m = model()
       const s = dragSource().getSnapshot()
@@ -92,7 +92,7 @@ function portsOf(live: { readonly current: UseWindowDropOptions }): WindowDropPo
     clearTimer: h => clearTimeout(h as ReturnType<typeof setTimeout>),
     watchCanvas: onResize => {
       const el = live.current.canvas()
-      // jsdom(vitest 에 setupFiles 없음)처럼 RO 가 없는 환경에선 지켜보지 않는다.
+      // In environments without RO such as jsdom (vitest has no setupFiles), it does not observe.
       if (el === null || typeof ResizeObserver === 'undefined') return () => {}
       const ro = new ResizeObserver(() => onResize())
       ro.observe(el)

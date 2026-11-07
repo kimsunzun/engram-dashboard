@@ -1,96 +1,96 @@
-# PRD — S14 모듈① 출력 평면 재설계: 출력 관리 단위 = View 독립
+# PRD — S14 module ① output-plane redesign: output management unit = independent per View
 
-**상태:** 리뷰 반영 (`/review prd full` FIX 반영) — ADR-0040 채번 대기
-**작성:** 2026-06-30
-**근거 ADR:** ADR-0035(레이아웃 권위=src-tauri) · ADR-0036(전송 중계 통일) · ADR-0037(전송 의미론 Rust 단독) · **ADR-0040(이 PRD가 낳을 결정 — 출력 단위=View 독립, 미채번)**
-**근거 리서치:** `.claude/skills/research/study-notes/20260630-multiview-relay-2layer-medium.md`(medium, cross-family) · `20260629-multi-viewer-terminal-buffer.md`(light, N1 최초 진단)
-**리뷰:** `/review prd full` = Codex(User 렌즈 blind) + opus reviewer-deep(Tester 렌즈 blind) **둘 다 FIX, BLOCK 없음** — 두 family가 "처음부터 전부 ↔ 버퍼 상한 모순"에 **독립 수렴**. 본 rev가 FIX 반영(동작 정정 + 빠진 시나리오/위험 명시).
-**연장선:** S14 모듈① T5~T7 출력 평면(fan-out)의 **단위 재설계**. T7d(GUI 실측)·박막화는 이 결정 뒤로 보류.
-
----
-
-## 1. 무엇 / 왜
-
-**배경.** S14 모듈①에서 단일 데몬 연결을 N창으로 fan-out하는 출력 평면을 만들었다(T5~T7). 그런데 같은 에이전트를 여러 View에서 볼 때 출력이 유실되는 결함이 반복 재생산됐다.
-
-**결함의 정체(구조적).** 현재 출력 관리 단위는 *"에이전트당 단일 구독 + 창별 진도 추적 + 재구독은 가장 뒤처진 창 기준 `min(render_seq)`"*다. 갓 열린 창은 min 산출에서 **누락**된다(키 미존재 vs 명시 `None`의 비대칭 — 미렌더 창이 "전체 replay"를 못 끌어낸다). 그 결과 데몬엔 앞선 창 기준 높은 seq가 가고, 새 창은 그 앞 출력을 **영구 유실**한다. 이건 특정 버그가 아니라 **"에이전트당 묶음" 단위 자체의 한계**다 — 권위 축(누가 구독하나)만 바꿔선 사라지지 않는다.
-
-> 적대 리뷰 2 family(opus FIX + Codex BLOCK)가 이 유실을 **독립 수렴**으로 확인(강한 신호). 위치: `crates/engram-dashboard-core/src/output_window_seq.rs` `min_render_seq` · 호출 `connection.rs` Subscribe after_seq.
-
-**왜 단위를 바꾸나.** 업계 표준(리서치 cross-family 수렴, 확실)은 *"콘텐츠는 중앙 단일 보관 + 진행도는 구독자별 독립 인덱스, 전송 시퀀스 ≠ 소비 진행도 분리"*다 — VS Code pty host(중계가 replay 버퍼 단일 소유, 각 renderer는 독립 cursor)·Kafka/Redis(공유 로그 + per-consumer offset)가 정석.
+**Status:** review reflected (`/review prd full` FIX reflected) — awaiting ADR-0040 numbering
+**Written:** 2026-06-30
+**Basis ADRs:** ADR-0035 (layout authority = src-tauri) · ADR-0036 (transport relay unification) · ADR-0037 (transport semantics Rust alone) · **ADR-0040 (the decision this PRD will produce — output unit = independent per View, not yet numbered)**
+**Basis research:** `.claude/skills/research/study-notes/20260630-multiview-relay-2layer-medium.md` (medium, cross-family) · `20260629-multi-viewer-terminal-buffer.md` (light, first diagnosis of N1)
+**Review:** `/review prd full` = Codex (User lens blind) + opus reviewer-deep (Tester lens blind) **both FIX, no BLOCK** — the two families **independently converged** on the contradiction "everything from the start ↔ buffer cap". This rev reflects the FIX (behavior correction + missing scenarios/risks stated).
+**Continuation:** a **unit** redesign of the S14 module ① T5~T7 output plane (fan-out). T7d (GUI measurement) · thinning are postponed until after this decision.
 
 ---
 
-## 2. 핵심 결정 (사용자 확정 — 방향)
+## 1. What / why
 
-**출력 관리 단위 = View 독립.** 중계 허브(src-tauri)가 에이전트당 출력을 **한 벌 모아 보관**(공유 버퍼)하고, 각 View(창)는 그 버퍼의 *어디까지 읽었나*(인덱스)만 **독립**으로 가진다. 데몬엔 에이전트당 **한 번만** 구독한다.
+**Background.** In S14 module ① we built an output plane that fans a single daemon connection out to N windows (T5~T7). But when the same agent is viewed in several Views, a defect where output is lost has been reproduced repeatedly.
 
-= VS Code pty host(중계 단일 버퍼) + Kafka/Redis(공유 로그 + 구독자별 offset)의 결합. 리서치가 검증한 표준 패턴과 정합.
+**The nature of the defect (structural).** The current output management unit is *"a single subscription per agent + per-window progress tracking + resubscribe based on the most-lagging window `min(render_seq)`"*. A freshly opened window is **missing** from the min computation (the asymmetry of key-absent vs explicit `None` — an unrendered window cannot elicit a "full replay"). As a result the daemon receives a high seq based on the leading window, and the new window **permanently loses** the output before that. This is not a specific bug but a **limit of the "per-agent bundle" unit itself** — it does not go away by changing only the authority axis (who subscribes).
 
-**"가장 뒤처진 창 min"의 역할 전환** — 현재: *데몬 재구독 지점*(결함 유발) → 새 모델: *클라 버퍼 보관 하한(eviction)*. 새 창은 데몬 재요청 없이 클라 버퍼에서 자기 인덱스로 채운다.
+> The adversarial review of 2 families (opus FIX + Codex BLOCK) confirmed this loss by **independent convergence** (a strong signal). Location: `crates/engram-dashboard-core/src/output_window_seq.rs` `min_render_seq` · call `connection.rs` Subscribe after_seq.
 
----
-
-## 3. 동작 명세 (사용자 결정)
-
-1. **새 창 = 기존 창과 동일.** 새 View든 첫 View든 차별 없이 — 그 에이전트 출력을 **보관 중인 범위만큼 처음부터** 전부 그린다(tail-only·한 화면만 같은 변형 없음). **"처음부터"의 정의 = 보관 하한(가장 오래된 보관 지점)** — 그보다 더 과거는 데몬도 이미 버려 어디서도 못 준다. 이는 **지금 동작과 동일**하다(기존 창도 데몬이 가진 만큼만 받았다). 출처만 데몬 재요청 → 클라 공유 버퍼로 바뀐다.
-2. **버퍼 = 데몬 무손실 범위 미러.** 클라 버퍼는 데몬이 무손실 보관하는 범위를 그대로 한 벌 들고 있다. 보관 한도는 **이중 상한(약 2MB AND 약 4096건 중 먼저 닿는 쪽)** — 1바이트 청크 폭주 방어(데몬 ReplayBuffer와 동형). 한도 초과분은 앞에서 evict해 **보관 하한이 올라간다**. 그 이상 과거는 데몬도 없으므로 **2-tier fallback 불필요**(단일 버퍼). **잘린 과거는 화면에 별도 표시 없이 그대로**(기존 동작 유지 — 사용자 결정. 위험은 §7 명기). 보관량은 창 수에 비례하지 않는다.
-3. **데몬 구독 = 에이전트당 1개.** 클라가 버퍼+인덱스를 다 가지므로 데몬에 **viewer 식별자가 새지 않는다**(프로토콜 변경 최소). 데몬은 단일 무손실 스트림만 책임진다. **단 재연결 시 데몬 Subscribe `after_seq`를 무엇으로 보낼지(클라 버퍼 최신 seq vs oldest)가 무손실의 급소 — §8 결정점 3에서 선결한다.**
-4. **과거 스크롤 중 새 출력 도착 = 터미널 관행(사용자 결정).** 위로 스크롤해 과거를 보는 중인 창은 **위치 유지**(새 출력에 강제 하단 점프 없음), 맨 아래(follow) 상태면 새 출력을 **따라간다**(auto-scroll). **창마다 독립**(View 독립 단위와 정합 — 한 창의 스크롤이 다른 창에 영향 없음).
+**Why change the unit.** The industry standard (research cross-family convergence, certain) is *"content is stored centrally once + progress is a per-subscriber independent index, transport sequence ≠ consumption progress separated"* — VS Code pty host (the relay solely owns the replay buffer, each renderer has an independent cursor) · Kafka/Redis (shared log + per-consumer offset) are the canonical form.
 
 ---
 
-## 4. 시나리오 / 엣지 (BDD식)
+## 2. Core decision (user confirmed — direction)
 
-- **멀티뷰어 동시(2~N창):** 창 A에서 에이전트를 보다 창 B를 열면 → B는 클라 버퍼에서 **보관 하한부터** 그림, A는 영향 없음, **보관 범위 내 유실 0**.
-- **새 출력 도착:** 데몬 → 클라 버퍼 append → 그 에이전트를 띄운 모든 창이 자기 인덱스부터 따라잡아 그림(§3-4 follow/위치유지 분기 적용).
-- **재시작(epoch 전환):** 새 스트림이므로 버퍼 리셋 + 모든 창 인덱스 리셋 → 새 세션 출력 처음부터, **옛 출력 잔재 0**.
-- **epoch 전환 ∩ 새 창 동시:** 재시작으로 버퍼 리셋되는 찰나 새 창이 mount → 버퍼 리셋과 새 창 인덱스 초기화 사이 **순서 보장 필요**(리셋 전 인덱스로 옛 버퍼를 읽거나, 리셋 후 빈 버퍼를 "처음부터"로 그리는 race 차단). 정확한 순서 = TRD 결정점 4.
-- **재연결 중 새 창 열기:** 연결 끊긴(reconnecting) 상태에서 새 창이 열리면 → **보존된 클라 버퍼로 즉시 렌더**(데몬 응답 대기 없음). 이게 새 모델의 핵심 개선(기존엔 데몬 재요청 의존이라 빈 화면). 수용기준 5로 검증.
-- **버퍼 wrap 직후 새 창:** ring이 막 evict한 직후 새 창 → "처음부터" = 현재 보관 하한부터(진짜 시작 아님). 사용자에겐 보관 하한부터 보임(§3-1 정의).
-- **창 닫기:** 그 창 인덱스 제거. 버퍼는 다른 창이 그 에이전트를 보는 한 유지.
-- **마지막 창 닫힘:** 그 에이전트를 보는 창 0 → 버퍼 eviction 후보(보관 하한). 정확한 시점·정책 = TRD 결정점 4.
-- **데몬 끊김/재연결:** 클라 버퍼 보존, 재구독은 에이전트당 1회(min 합산 폐기). after_seq 의미 = §8 결정점 3.
+**Output management unit = independent per View.** The relay hub (src-tauri) **collects and keeps one copy** of the output per agent (shared buffer), and each View (window) keeps only *how far it has read* (an index) of that buffer **independently**. It subscribes to the daemon **only once** per agent.
+
+= a combination of VS Code pty host (relay single buffer) + Kafka/Redis (shared log + per-subscriber offset). Consistent with the standard pattern the research verified.
+
+**Role switch of "the most-lagging window min"** — now: *the daemon resubscribe point* (causes the defect) → new model: *the client buffer retention lower bound (eviction)*. A new window fills itself from the client buffer with its own index, without re-requesting from the daemon.
 
 ---
 
-## 5. 수용 기준
+## 3. Behavior specification (user decisions)
 
-1. 같은 에이전트 **2+창 및 3+창 동시**에서 **보관 범위 내 출력 유실 0** — 새 창을 늦게 열어도 보관 하한부터 전부. (evict된 과거는 보장 범위 밖 — §3-1 정의.)
-2. **데몬 구독이 에이전트당 1개** (창 수 무관 — `rg`/로그로 확인).
-3. epoch 전환 시 모든 창이 새 세션 출력 처음부터, **옛 출력 잔재 0** (epoch ∩ 새창 race 없음).
-4. **메모리 = 에이전트당 이중 상한(`min(~2MB, ~4096건)`)** (창 수에 비례 안 함).
-5. **재연결 대기 중 새 창도 보존 버퍼로 즉시 렌더** (빈 화면 0).
-6. **화면 동일성:** 같은 에이전트의 두 창이 동일 화면을 그린다 — ANSI escape·부분 UTF-8·CR 진행바·alternate screen 보존(raw bytes replay가 깨진 시퀀스를 만들지 않음).
-7. 기존 동시성 불변식 보존 — ADR-0001(kill 2동사)·0005(finalize 1회)·0006(락 순서)·0007(epoch).
-8. `cargo test`(루트) + core `rg "use tauri"` 0 + `npm test`/`tsc` + `cdp.mjs` 실측 통과.
+1. **A new window = the same as an existing window.** Whether a new View or the first View, without discrimination — it draws all of that agent's output **from the beginning of the retained range** (no variants such as tail-only or one screen only). **Definition of "from the beginning" = the retention lower bound (the oldest retained point)** — anything older has already been discarded by the daemon too and cannot be given from anywhere. This is **identical to the current behavior** (existing windows also received only what the daemon had). Only the source changes from a daemon re-request → the client shared buffer.
+2. **Buffer = a mirror of the daemon's lossless range.** The client buffer holds, as one copy, exactly the range the daemon keeps losslessly. The retention limit is a **dual cap (about 2MB AND about 4096 entries, whichever is reached first)** — defense against a 1-byte-chunk runaway (isomorphic to the daemon's ReplayBuffer). Excess over the limit is evicted from the front and **the retention lower bound rises**. The daemon does not have anything older either, so **no 2-tier fallback is needed** (single buffer). **The truncated past is left as is, with no separate indication on screen** (existing behavior kept — user decision. Risk stated in §7). The retained amount is not proportional to the number of windows.
+3. **Daemon subscription = 1 per agent.** Since the client holds the buffer + indices, **no viewer identifier leaks to the daemon** (minimal protocol change). The daemon is responsible only for a single lossless stream. **However, what to send as the daemon Subscribe `after_seq` on reconnect (the client buffer's latest seq vs the oldest) is the crux of losslessness — settled up front at §8 decision point 3.**
+4. **New output arriving while scrolled into the past = terminal convention (user decision).** A window that is scrolled up looking at the past **keeps its position** (no forced jump to the bottom on new output); if it is at the very bottom (follow) it **follows** the new output (auto-scroll). **Independent per window** (consistent with the per-View independent unit — one window's scroll does not affect other windows).
 
 ---
 
-## 6. 거부한 대안 (한 줄씩 — ADR-0040 본문으로 이관)
+## 4. Scenarios / edges (BDD-style)
 
-- **에이전트당 단일 구독 + 창별 min 합산(현재)** — 새 창 누락 유실, 구조적 결함(2 family 독립 수렴).
-- **프론트가 직접 데몬 구독(b안)** — ADR-0035 "프론트=순수 렌더러" 위반.
-- **새 창마다 데몬 재요청** — 사용자 지적 "구조 이상", 2계층에서 불필요한 네트워크 왕복.
-- **동적 보관 + 데몬 2-tier fallback** — 클라↔데몬 동기화/eviction OSS 선례 미조사, 고비용·불확실. **단 이 거부는 §3-1을 "보관 하한부터"로 낮춘 전제 위에서만 유효** — "evict된 진짜 과거까지 전부"를 원하면 2-tier가 필요해지므로, 그 요구는 명시적 **비목표**(§7).
-
----
-
-## 7. 비목표 / 위험 / 열린 사항
-
-- **로컬 제로카피 / 환경별(모바일 원격 vs 로컬 PC) 분기 = 후속.** 데몬↔src-tauri는 로컬에서도 별도 프로세스(ADR-0029)라 경계 너머 수신 구조가 공통이고, 메모리 중복(~2MB×N)도 작아 실익이 작다. step-log "데몬화 = 원격/모바일 동일 인프라"와 정합. transport seam에서 나중 흡수(실측 후 ADR).
-- **★위험(명기): 멀티뷰 resize ∩ 단일 공유 버퍼.** 크기 다른 두 창이 같은 raw byte 버퍼를 보면, 한 창의 resize가 버퍼에 박힌 escape sequence를 다른 창에서 깨뜨릴 수 있다(PTY는 단일 cols/rows). resize 정책은 별도 열린사항이나, **"단일 공유 버퍼" 가정이 멀티-resize에서 깨질 수 있음**을 위험으로 박는다 — 나중에 viewport별 버퍼 분기가 필요해지면 §2 핵심결정을 retrofit해야 한다. TRD에서 resize 모델과 함께 재검토(두 리뷰어 공통 지적).
-- **★위험(명기): 잘린 과거 미표시.** 보관 하한 넘은 과거가 조용히 안 보이므로 사용자가 "유실"로 오인할 수 있다 — 표시는 사용자 결정으로 **비목표**(§3-2), 단 향후 UX 후보로 남긴다.
-- **멀티뷰 resize 정책**(크기 다른 창 — tmux window-size식) = 별도 열린사항(`trd.md`).
-- **영속(재시작 복원)** = 비목표.
+- **Simultaneous multi-viewer (2~N windows):** while watching an agent in window A, opening window B → B draws from the client buffer **from the retention lower bound**, A is unaffected, **0 loss within the retained range**.
+- **New output arrives:** daemon → client buffer append → every window showing that agent catches up from its own index and draws (the follow/keep-position branch of §3-4 applies).
+- **Restart (epoch transition):** it is a new stream, so buffer reset + all window index reset → the new session's output from the beginning, **0 remnants of old output**.
+- **epoch transition ∩ new window at the same time:** in the instant the buffer is reset by a restart a new window mounts → **an ordering guarantee is needed** between the buffer reset and the new window's index initialization (blocks the race of reading the old buffer with the pre-reset index, or drawing the empty post-reset buffer as "from the beginning"). The exact order = TRD decision point 4.
+- **Opening a new window during reconnect:** if a new window opens while the connection is cut (reconnecting) → **render immediately from the preserved client buffer** (no waiting for a daemon response). This is the core improvement of the new model (previously an empty screen because of the dependence on daemon re-requests). Verified by acceptance criterion 5.
+- **New window right after a buffer wrap:** a new window right after the ring just evicted → "from the beginning" = from the current retention lower bound (not the true start). To the user it appears from the retention lower bound (definition §3-1).
+- **Window close:** remove that window's index. The buffer is kept as long as another window watches that agent.
+- **Last window closed:** 0 windows watching that agent → the buffer becomes an eviction candidate (retention lower bound). The exact timing · policy = TRD decision point 4.
+- **Daemon disconnect/reconnect:** the client buffer is preserved, resubscribe once per agent (min summation discarded). The meaning of after_seq = §8 decision point 3.
 
 ---
 
-## 8. TRD로 넘길 결정점 (구현 갈림길 — 사용자 결정 + 보고)
+## 5. Acceptance criteria
 
-1. 인덱스 단위(seq) ↔ 버퍼 내 위치(바이트 오프셋) 매핑.
-2. 각 View xterm scrollback(렌더 결과) ↔ 클라 버퍼(raw bytes) 관계·중복 (화면 동일성 §5-6 직결).
-3. **[급소] 재연결 시 데몬 Subscribe `after_seq` 산출** — 클라 버퍼 최신 seq vs oldest. min의 역할 전환(데몬 재요청 지점 → 클라 eviction 하한)의 핵심이고, §3-3 "프로토콜 최소 변경" 약속이 이것에 의존한다(opus 지적: 약속이 검증보다 앞섬 → 여기서 풀어 닫는다).
-4. eviction 시점·정책 — 마지막 창 닫힘 ↔ 버퍼 폐기, epoch 리셋, **epoch ∩ 새창 순서 보장**.
-5. 현 `output_window_seq.rs`(에이전트당 min 모델) 재작업/폐기 범위.
+1. In **2+ windows and 3+ windows simultaneously** on the same agent, **0 loss of output within the retained range** — even if a new window is opened late, everything from the retention lower bound. (The evicted past is outside the guaranteed range — definition §3-1.)
+2. **The daemon subscription is 1 per agent** (regardless of window count — confirm with `rg`/logs).
+3. On an epoch transition, all windows show the new session's output from the beginning, **0 remnants of old output** (no epoch ∩ new-window race).
+4. **Memory = a dual cap per agent (`min(~2MB, ~4096건)`)** (not proportional to window count).
+5. **A new window during reconnect wait also renders immediately from the preserved buffer** (0 empty screens).
+6. **Screen identity:** two windows of the same agent draw the same screen — ANSI escapes · partial UTF-8 · CR progress bars · alternate screen preserved (raw bytes replay does not create broken sequences).
+7. Existing concurrency invariants preserved — ADR-0001 (kill 2 verbs) · 0005 (finalize once) · 0006 (lock order) · 0007 (epoch).
+8. `cargo test` (root) + core `rg "use tauri"` 0 + `npm test`/`tsc` + `cdp.mjs` measurement pass.
+
+---
+
+## 6. Rejected alternatives (one line each — moved into the ADR-0040 body)
+
+- **A single subscription per agent + per-window min summation (current)** — loss through the missing new window, a structural defect (independent convergence of 2 families).
+- **The frontend subscribing to the daemon directly (plan b)** — violates ADR-0035 "frontend = pure renderer".
+- **Re-requesting from the daemon for every new window** — the user's remark "the structure is off", an unnecessary network round trip in the 2-layer setup.
+- **Dynamic retention + daemon 2-tier fallback** — no survey of OSS precedents for client↔daemon sync/eviction, high cost · uncertain. **However this rejection is valid only on the premise of lowering §3-1 to "from the retention lower bound"** — if "everything including the truly evicted past" is wanted, 2-tier becomes necessary, so that requirement is an explicit **non-goal** (§7).
+
+---
+
+## 7. Non-goals / risks / open items
+
+- **Local zero-copy / per-environment (mobile remote vs local PC) branching = follow-up.** The daemon↔src-tauri is a separate process even locally (ADR-0029), so the receive structure across the boundary is common, and the memory duplication (~2MB×N) is small too, so the actual gain is small. Consistent with the step-log "daemonization = the same infrastructure for remote/mobile". Absorbed later at the transport seam (ADR after measurement).
+- **★Risk (stated): multi-view resize ∩ a single shared buffer.** If two windows of different sizes look at the same raw byte buffer, one window's resize can break the escape sequences embedded in the buffer in the other window (the PTY has a single cols/rows). The resize policy is a separate open item, but we record as a risk that the **"single shared buffer" assumption can break under multi-resize** — if per-viewport buffer branching becomes necessary later, the §2 core decision must be retrofitted. To be reconsidered in the TRD together with the resize model (a point both reviewers share).
+- **★Risk (stated): the truncated past is not displayed.** Since the past beyond the retention lower bound silently does not show, the user may mistake it for "loss" — displaying it is a **non-goal** by user decision (§3-2), but kept as a future UX candidate.
+- **Multi-view resize policy** (windows of different sizes — tmux window-size style) = a separate open item (`trd.md`).
+- **Persistence (restart restore)** = non-goal.
+
+---
+
+## 8. Decision points handed to the TRD (implementation forks — user decision + report)
+
+1. Mapping between the index unit (seq) ↔ the position within the buffer (byte offset).
+2. Relation · duplication between each View's xterm scrollback (render result) ↔ the client buffer (raw bytes) (directly tied to screen identity §5-6).
+3. **[Crux] Computing the daemon Subscribe `after_seq` on reconnect** — the client buffer's latest seq vs the oldest. This is the core of the role switch of min (daemon re-request point → client eviction lower bound), and the §3-3 promise of "minimal protocol change" depends on it (opus's point: the promise got ahead of the verification → resolve and close it here).
+4. Eviction timing · policy — last window closed ↔ buffer discard, epoch reset, **epoch ∩ new-window ordering guarantee**.
+5. The scope of reworking/discarding the current `output_window_seq.rs` (per-agent min model).
 </content>

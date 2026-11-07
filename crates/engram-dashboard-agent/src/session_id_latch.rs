@@ -1,35 +1,35 @@
-//! 세션 id **첫 제출 래치** — 화신 하나에 하나.
+//! The session id **first-submission latch** — one per incarnation.
 //!
-//! 입력 둘이 **둘 다** 일어난 첫 순간에 commit 포트를 한 번 부른다. 순서는 상관없다.
-//! - [`SessionIdLatch::offer`] — 이 화신의 세션 id 가 알려졌다(backend·통로는 [`SessionIdLatch::offer_sink`] 로 받는다).
-//! - [`SessionIdLatch::note_submission`] — 이 화신의 첫 사용자 턴이 상대에게 **나가기 직전**이다.
-//!   ★턴을 통로가 지는 모드(codex JSON)는 예외다★: 세션이 세지 않고, 상대가 유저 메시지를 **처음
-//!   되울린** 순간 통로가 [`SessionIdLatch::first_turn_sink`] 로 부른다 — 그 모드의 commit 은 첫 턴
-//!   **뒤**에 난다(보내고 되울림 전에 죽으면 영속이 없고 다음 활성화는 새 대화다 — 수용한 결말).
+//! Calls the commit port once at the first moment **both** of two inputs have happened. The order does not matter.
+//! - [`SessionIdLatch::offer`] — this incarnation's session id became known (the backend · path receives it through [`SessionIdLatch::offer_sink`]).
+//! - [`SessionIdLatch::note_submission`] — this incarnation's first user turn is **right before going out** to the peer.
+//!   ★The mode where the path carries the turn (codex JSON) is an exception★: the session does not count it, and the moment the peer **first
+//!   echoes** the user message the path calls it through [`SessionIdLatch::first_turn_sink`] — that mode's commit happens **after**
+//!   the first turn (if it dies after sending and before the echo there is no persistence and the next activation is a new conversation — an accepted outcome).
 //!
-//! 제출 없이 화신이 끝나면 포트는 한 번도 안 불린다 — 「저장된 id 가 있다 ⟺ 이어받을 대화가 있다」가
-//! 여기서 선다.
+//! If the incarnation ends without a submission, the port is never called — 「저장된 id 가 있다 ⟺ 이어받을 대화가 있다」 (a stored id exists ⟺ there is a conversation to resume)
+//! stands here.
 //!
-//! ## 불변식
-//! - ★포트는 화신당 많아야 한 번 불린다. 한 번 부르기 시작했으면(성공·거절·패닉 무엇으로 끝나든) 다시
-//!   부르지 않는다★. 그래서 `committed` 를 포트 호출 **전에** 세운다. 포트는 반환이 없어 결과가 래치에
-//!   돌아오지 않고, 같은 입력이면 답도 같으므로 재시도할 것이 없다.
-//! - offer 는 화신당 많아야 한 번이다(기록 포트 [`SessionIdSink`] 의 계약). 계약 밖의 둘째 offer 는 언제
-//!   오든 버린다 — commit 전이어도 첫 값이 이긴다.
-//! - ★빠른 길의 표식(`settled`)은 첫 commit 이 **돌아온 뒤에만** 선다 — 「제출이 있었다」로 세우지 말 것★:
-//!   두 제출자가 다른 스레드일 때(우편 flush · 연결의 사용자 입력) 둘째가 첫째의 commit 이 끝나기 전에 빠른
-//!   길로 빠져 첫 턴이 영속보다 먼저 나간다. settled 전의 제출은 전부 뮤텍스를 잡고 진행 중인 commit 뒤에
-//!   줄을 선다.
-//! - 래치 뮤텍스를 쥔 채 하는 외부 호출은 commit 포트 하나뿐이다(로그도 놓은 뒤에 쓴다). 락 순서 =
-//!   `래치 → 포트의 expected 칸 → profiles → 저장소 상태 칸` 단방향 — 래치를 잡는 호출자는 다른 락을 쥐지
-//!   않은 채로 부른다.
-//! - ★`catch_unwind` 를 두지 않는다★: 래치를 부르는 자리는 전부 가둠 표시 밖이라(codex 리더의 첫 턴 포트
-//!   호출은 표시를 끈다) 운영 프로세스에서 포트 패닉은 훅이 끝낸다 — 잡아도 닿지 않는 코드다(ADR-0292). 훅
-//!   없는 시험 빌드에서 포트가 패닉하면 뮤텍스에 독이 들고, 뒤이은 호출은 독 든 가드를 그대로 되찾아
-//!   (`sync::lock`) `committed` 를 보고 통과한다 — 포트를 다시 부르지 않는다.
+//! ## Invariants
+//! - ★The port is called at most once per incarnation. Once the call has started (whether it ends in success · refusal · panic), it is not
+//!   called again★. That is why `committed` is set **before** the port call. The port has no return so the result does not
+//!   come back to the latch, and the same input gives the same answer so there is nothing to retry.
+//! - offer is at most once per incarnation (the contract of the record port [`SessionIdSink`]). A second offer outside the contract is dropped whenever it
+//!   comes — even before commit the first value wins.
+//! - ★The fast-path marker (`settled`) is set **only after** the first commit has **returned** — do not set it as 「제출이 있었다」 (a submission happened)★:
+//!   when two submitters are on different threads (mail flush · a connection's user input), the second would slip onto the fast
+//!   path before the first's commit finishes and the first turn would go out before persistence. Every submission before settled takes the mutex and queues
+//!   behind the commit in progress.
+//! - The only external call made while holding the latch mutex is the commit port (logs are also written after releasing). Lock order =
+//!   `래치 → 포트의 expected 칸 → profiles → 저장소 상태 칸` one-way — a caller that takes the latch calls it holding
+//!   no other lock.
+//! - ★There is no `catch_unwind`★: every place that calls the latch is outside the containment marker (the codex reader's first-turn port
+//!   call turns the marker off), so in the production process a port panic is ended by the hook — it would be code that never gets reached even if we caught it (ADR-0292). If the port panics
+//!   in a test build without the hook, the mutex is poisoned, and the following call takes back the poisoned guard as is
+//!   (`sync::lock`), sees `committed`, and passes — it does not call the port again.
 //!
-//! backend·transport·profile 을 모른다 — uuid 해석과 「이 화신이 시작 때 본 값」 추적은 commit 포트 안
-//! (조립점) 몫이다.
+//! It knows nothing of backend · transport · profile — uuid resolution and tracking 「이 화신이 시작 때 본 값」 (the value this incarnation saw at start) belong inside the commit port
+//! (the assembly point).
 // ADR-0226
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -41,9 +41,9 @@ use crate::backend::{FirstTurnSink, SessionIdSink};
 use crate::types::AgentId;
 
 pub(crate) struct SessionIdLatch {
-    /// 로그 필드 전용.
+    /// For log fields only.
     agent: AgentId,
-    /// 로그 필드 전용 — 화신 가드는 commit 포트가 진다.
+    /// For log fields only — the incarnation guard is carried by the commit port.
     epoch: u32,
     commit: SessionIdSink,
     settled: AtomicBool,
@@ -52,7 +52,7 @@ pub(crate) struct SessionIdLatch {
 
 #[derive(Default)]
 struct LatchState {
-    /// 받았지만 제출이 아직 없어 commit 을 보류한 id.
+    /// An id that was received but whose commit is held because there is no submission yet.
     pending: Option<String>,
     submitted: bool,
     committed: bool,
@@ -75,17 +75,17 @@ impl SessionIdLatch {
         })
     }
 
-    /// backend·통로에 건네는 기록 포트 — 부르면 [`SessionIdLatch::offer`] 다.
+    /// The record port handed to the backend · path — calling it is [`SessionIdLatch::offer`].
     pub(crate) fn offer_sink(self: &Arc<Self>) -> SessionIdSink {
         let latch = Arc::clone(self);
         Arc::new(move |raw: &str| latch.offer(raw))
     }
 
-    /// 턴을 통로가 지는 모드의 통로에 건네는 첫 턴 포트 — 부르면 [`SessionIdLatch::note_submission`] 이다.
+    /// The first-turn port handed to the path in the mode where the path carries the turn — calling it is [`SessionIdLatch::note_submission`].
     ///
-    /// 그 모드는 세션이 제출을 세지 않는다. ✕ 로 거둘 수 있는 첫 입력을 보낼 때 세면 대화 없는 id 가 영속되기
-    ///   때문이다. 통로가 상대의 첫 유저 메시지 되울림에서 이 포트를 부른다.
-    // ADR-0226 · ADR-0231 · ADR-0233: 사용자 결정 — id 는 진짜가 된 때(대화에 턴이 생긴 = 첫 되울림) 영속한다.
+    /// In that mode the session does not count submissions. Counting at the time of sending a first input that can be withdrawn with ✕ would persist an id with no conversation.
+    ///   The path calls this port at the echo of the peer's first user message.
+    // ADR-0226 · ADR-0231 · ADR-0233: user decision — the id is persisted when it becomes real (the conversation has a turn = the first echo).
     pub(crate) fn first_turn_sink(self: &Arc<Self>) -> FirstTurnSink {
         let latch = Arc::clone(self);
         Arc::new(move || latch.note_submission())
@@ -104,9 +104,9 @@ impl SessionIdLatch {
         };
         drop(state);
         match outcome {
-            // ★이 줄을 지우지 말 것★: 영속 뒤에는 commit 포트의 반영 로그가 남지만, 0턴 화신에는 이 줄
-            //   말고 「id 가 왔다」를 알리는 것이 없다 — 현장 진단과 GUI 실측이 기다리는 사건이다.
-            //   id 값은 싣지 않는다.
+            // ★Do not delete this line★: after persistence the commit port's reflection log remains, but for a 0-turn incarnation nothing other than this line
+            //   announces 「id 가 왔다」 (the id has arrived) — it is the event that field diagnosis and GUI measurement wait for.
+            //   The id value is not put in.
             OfferOutcome::Held => tracing::info!(
                 agent = %self.agent,
                 epoch = self.epoch,
@@ -121,17 +121,17 @@ impl SessionIdLatch {
         }
     }
 
-    /// 첫 턴이 나가기 **직전**에 부른다. id 를 이미 받았으면 그 자리에서 commit 하고, commit 이 돌아온 뒤에
-    /// 돌아온다 — 호출자는 이 호출이 돌아온 **뒤에** 턴을 보내야 「첫 턴 전에 영속」이 선다.
-    /// ★턴을 통로가 지는 모드에서는 첫 되울림 **뒤에** 불린다([`Self::first_turn_sink`])★ — 그 모드에는
-    ///   「첫 턴 전에 영속」이 없다.
+    /// Call it **right before** the first turn goes out. If the id has already been received, it commits on the spot, and returns after commit has returned —
+    /// the caller must send the turn **after** this call returns for 「첫 턴 전에 영속」 (persist before the first turn) to hold.
+    /// ★In the mode where the path carries the turn it is called **after** the first echo ([`Self::first_turn_sink`])★ — that mode has
+    ///   no 「첫 턴 전에 영속」 (persist before the first turn).
     pub(crate) fn note_submission(&self) {
         if self.settled.load(Ordering::Acquire) {
             return;
         }
         let mut state = self.lock_state();
         if state.committed {
-            // 앞선 commit 이 돌아왔거나 패닉으로 끝났다 — 어느 쪽이든 다시 부르지 않는다.
+            // The earlier commit returned or ended in a panic — either way it is not called again.
             self.settled.store(true, Ordering::Release);
             return;
         }
@@ -160,9 +160,9 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    /// 스레드를 쓰는 항목의 모든 기다림에 거는 상한 — ★매달림 방지이지 정확성 문턱이 아니다★. 올바른
-    /// 래치는 밀리초 안에 끝나므로 이 값에 닿는 것은 회귀로 영영 안 돌아오는 경우뿐이고, 그때 시험이
-    /// 매달리는 대신 실패하게 한다.
+    /// The cap put on every wait of an item that uses threads — ★it prevents hanging, it is not a correctness threshold★. A correct
+    /// latch finishes within milliseconds, so reaching this value happens only in the regression case where it never returns, and then it makes the test
+    /// fail instead of hanging.
     const HANG_GUARD: Duration = Duration::from_secs(10);
 
     fn recording_port() -> (SessionIdSink, Arc<Mutex<Vec<String>>>) {
@@ -177,9 +177,9 @@ mod tests {
         SessionIdLatch::new(AgentId::new_v4(), 7, port)
     }
 
-    // ── 한 스레드 순서 ──
+    // ── Single-thread order ──
 
-    /// ① — 수령 포트(`offer_sink`)를 거쳐도 같은 규칙이다.
+    /// ① — the same rule holds going through the receiving port (`offer_sink`).
     #[test]
     fn an_offer_then_a_submission_commits_the_offered_id_once() {
         let (port, calls) = recording_port();
@@ -195,8 +195,8 @@ mod tests {
         assert_eq!(calls.lock().unwrap().as_slice(), ["sid-1"]);
     }
 
-    /// 첫 턴 포트(`first_turn_sink`)도 같은 제출 입력이다 — 통로가 턴을 지는 모드는 이것으로만 센다(ADR-0226
-    ///   개정). 여러 번 불려도 commit 은 한 번이다.
+    /// The first-turn port (`first_turn_sink`) is also the same submission input — the mode where the path carries the turn counts only with this (ADR-0226
+    ///   amendment). Even if called many times, commit is once.
     #[test]
     fn the_first_turn_port_is_the_submission_input_and_commits_once() {
         let (port, calls) = recording_port();
@@ -214,7 +214,7 @@ mod tests {
         assert_eq!(calls.lock().unwrap().as_slice(), ["sid-1"]);
     }
 
-    /// ② — 제출이 먼저 오면 뒤이은 offer 가 그 자리에서 commit 한다.
+    /// ② — if the submission comes first, the following offer commits on the spot.
     #[test]
     fn a_submission_then_an_offer_commits_at_the_offer() {
         let (port, calls) = recording_port();
@@ -227,7 +227,7 @@ mod tests {
         assert_eq!(calls.lock().unwrap().as_slice(), ["sid-1"]);
     }
 
-    /// ③ — 제출 없이 끝난 화신은 아무것도 영속하지 않는다.
+    /// ③ — an incarnation that ended without a submission persists nothing.
     #[test]
     fn an_offer_without_a_submission_commits_nothing() {
         let (port, calls) = recording_port();
@@ -255,7 +255,7 @@ mod tests {
         assert_eq!(calls.lock().unwrap().as_slice(), ["sid-1"]);
     }
 
-    /// ⑤ — 「포트는 화신당 많아야 한 번」의 성공 갈래. commit 뒤의 둘째 offer 는 계약 밖이라 버린다.
+    /// ⑤ — the success branch of 「포트는 화신당 많아야 한 번」 (the port at most once per incarnation). A second offer after commit is outside the contract and is dropped.
     #[test]
     fn an_offer_after_a_commit_does_not_call_the_port() {
         let (port, calls) = recording_port();
@@ -269,7 +269,7 @@ mod tests {
         assert_eq!(calls.lock().unwrap().as_slice(), ["sid-1"]);
     }
 
-    /// ⑪ — commit 전에 온 둘째 offer 도 버린다. 첫 값이 이긴다.
+    /// ⑪ — a second offer that comes before commit is dropped too. The first value wins.
     #[test]
     fn a_second_offer_before_the_commit_is_dropped_and_the_first_wins() {
         let (port, calls) = recording_port();
@@ -282,7 +282,7 @@ mod tests {
         assert_eq!(calls.lock().unwrap().as_slice(), ["sid-1"]);
     }
 
-    /// ⑧ — offer 가 없는 동안(핸드셰이크 중 · 락 회수 전)은 commit 할 것이 없어 빠른 길이 안 선다.
+    /// ⑧ — while there is no offer (during handshake · before lock recovery) there is nothing to commit so the fast path does not stand.
     #[test]
     fn submissions_without_an_offer_never_settle() {
         let (port, calls) = recording_port();
@@ -296,8 +296,8 @@ mod tests {
         assert!(!latch.settled.load(Ordering::Acquire));
     }
 
-    /// ⑩ — 「포트는 화신당 많아야 한 번」의 거절 갈래. 포트가 아무것도 적지 않고 돌아와도 래치에는 성공과
-    ///   구별되지 않으며(반환이 없다), 빠른 길이 서고 다시 부르지 않는다.
+    /// ⑩ — the refusal branch of 「포트는 화신당 많아야 한 번」 (the port at most once per incarnation). Even if the port returns writing nothing, to the latch it is indistinguishable from success
+    ///   (there is no return), and the fast path stands and it is not called again.
     #[test]
     fn a_commit_that_records_nothing_still_settles_and_is_not_retried() {
         let calls = Arc::new(AtomicUsize::new(0));
@@ -317,9 +317,9 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
-    /// ⑨ — 「포트는 화신당 많아야 한 번」의 패닉 갈래. ★훅 없는 빌드의 갈래다★ — 운영 프로세스에서는 이
-    ///   패닉을 훅이 끝내 이 갈래 자체가 없다(ADR-0292). 뮤텍스에 독이 들어도 뒤이은 호출이 멈추지 않고 포트를
-    ///   다시 부르지 않는다.
+    /// ⑨ — the panic branch of 「포트는 화신당 많아야 한 번」 (the port at most once per incarnation). ★This is a branch of builds without the hook★ — in the production process the hook ends this
+    ///   panic so this branch itself does not exist (ADR-0292). Even if the mutex is poisoned, the following call does not stall and
+    ///   does not call the port again.
     #[cfg(panic = "unwind")]
     #[test]
     fn a_commit_that_panics_is_never_called_again() {
@@ -348,9 +348,9 @@ mod tests {
         );
     }
 
-    // ── 스레드 사이 ──
+    // ── Between threads ──
 
-    /// ⑥ — offer 하나와 제출자 둘이 동시에 달려도 정확히 한 번.
+    /// ⑥ — even with one offer and two submitters running at the same time, exactly once.
     #[test]
     fn a_concurrent_offer_and_submissions_commit_exactly_once() {
         for round in 0..200 {
@@ -368,8 +368,8 @@ mod tests {
                     done_tx.send(()).expect("시험 본체");
                 })
             };
-            // 띄우는 순서를 판마다 돌린다 — 장벽을 마지막에 친 스레드가 먼저 달리는 경향이 있어, 고정
-            //   순서면 offer 가 늘 같은 자리에 서고 「offer 가 먼저」 갈래를 거의 안 탄다(실측).
+            // Rotate the launch order per run — the thread that hit the barrier last tends to run first, so with a fixed
+            //   order the offer always stands at the same spot and rarely takes the 「offer 가 먼저」 (offer first) branch (measured).
             let mut acts: [fn(&SessionIdLatch); 3] = [
                 |l| l.offer("sid-1"),
                 |l| l.note_submission(),
@@ -393,12 +393,12 @@ mod tests {
         }
     }
 
-    /// ⑦ ★빠른 길 경합의 회귀망★ — commit 이 진행 중일 때 다른 스레드의 제출은 그 commit 이 **돌아오기
-    ///   전에** 돌아오지 않는다. 돌아오면 그 스레드의 턴이 영속보다 먼저 나간다.
+    /// ⑦ ★Regression net for the fast-path race★ — while a commit is in progress, another thread's submission must not return **before
+    ///   that commit returns**. If it returns, that thread's turn goes out before persistence.
     ///
-    /// commit 포트를 채널로 붙잡아 둔다. 둘째 제출자가 붙잡힌 동안 돌아오지 않는지를 한 구간 동안 본다 —
-    ///   ★그 구간은 회귀를 잡는 창일 뿐이다★: 올바른 래치는 구간 길이와 무관하게 통과하고, 제출 표식으로
-    ///   빠른 길을 세우는 회귀는 마이크로초 안에 돌아와 걸린다.
+    /// Hold the commit port with a channel. We watch for one span whether the second submitter does not return while held —
+    ///   ★that span is only a window to catch the regression★: a correct latch passes regardless of the span length, and a regression that sets the
+    ///   fast path by the submission marker returns within microseconds and gets caught.
     #[test]
     fn a_submission_racing_an_in_flight_commit_waits_for_it_to_return() {
         let (entered_tx, entered_rx) = mpsc::channel::<()>();

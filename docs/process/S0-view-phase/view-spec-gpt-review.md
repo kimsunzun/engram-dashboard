@@ -1,56 +1,56 @@
-# GPT 검수 결과: Engram Dashboard View 사양서 (파일 첨부 방식)
+# GPT review result: Engram Dashboard View Spec (file-attachment method)
 
-**검수 일시:** 2026-06-07
-
----
-
-모델을 제가 GPT-4o로 전환할 수는 없지만, 첨부된 view-spec.md 기준으로 최신 라이브러리 상태까지 확인해 검토했습니다. 결론부터 말하면 **v2는 방향이 맞고, View MVP로는 충분히 구현 가능**합니다. 다만 **React 19 의존성 pinning, xterm 생명주기, Tauri 다중 창/도킹, PTY 계약**은 사양서에 더 박아두는 게 좋습니다.
+**Review date:** 2026-06-07
 
 ---
 
-## 1. v1 지적사항이 v2에 제대로 반영됐나요?
+I cannot switch the model to GPT-4o myself, but I reviewed the attached view-spec.md, including checking the latest state of the libraries. To give the conclusion first: **v2 is headed in the right direction and is fully implementable as a View MVP.** However, I recommend pinning down more in the spec on **React 19 dependency pinning, the xterm lifecycle, Tauri multi-window/docking, and the PTY contract**.
 
-대부분 잘 반영됐습니다. 특히 다음 변경은 적절합니다.
+---
 
-| 항목 | 판단 |
+## 1. Were the v1 findings properly reflected in v2?
+
+Most were reflected well. In particular the following changes are appropriate.
+
+| Item | Judgment |
 |---|---|
-| react-xtermjs 제거 → 직접 wrapper | 좋습니다. GPL 회피뿐 아니라 xterm 생명주기 제어에도 유리합니다. |
-| 슬롯 전환 단일클릭 → 더블클릭 | 적절합니다. 트리 선택, 우클릭 메뉴, 드래그/포커스 충돌을 줄입니다. |
-| 알림/이벤트 패널 추가 | AI 에이전트 관리 도구에는 필수에 가깝습니다. |
-| font-size / line-height CSS 변수화 | 좋습니다. 터미널·코드·Claude prose 영역을 나눠 관리할 수 있습니다. |
-| ThemeManager 단일 진입점 | 반드시 필요합니다. 창 단위 테마 전환까지 고려하면 좋은 선택입니다. |
-| resize debounce | allotment + xterm 조합에서는 필수입니다. |
-| Start / Stop / Kill 더미 컨트롤 | View 단계에서 UX 검증하기 좋습니다. |
+| Remove react-xtermjs → own wrapper | Good. It helps not only with avoiding the GPL but also with controlling the xterm lifecycle. |
+| Slot switching single-click → double-click | Appropriate. It reduces conflicts among tree selection, the right-click menu, and drag/focus. |
+| Notification/event panel added | Close to essential for an AI agent management tool. |
+| font-size / line-height as CSS variables | Good. The terminal, code and Claude prose areas can be managed separately. |
+| ThemeManager single entry point | Absolutely necessary. A good choice considering per-window theme switching. |
+| resize debounce | Mandatory for the allotment + xterm combination. |
+| Start / Stop / Kill dummy controls | Good for validating UX at the View stage. |
 
-다만 "반영 완료"라기보다는 **사양서 레벨에서 반영**된 상태입니다. 구현 검수 기준으로는 `mount/unmount cleanup`, `React StrictMode에서 xterm 중복 생성 방지`, `FitAddon.fit() 호출 조건`, `다중 창 상태 동기화`까지 acceptance criteria로 추가하는 게 좋습니다.
-
----
-
-## 2. 추가로 놓친 부분이 있나요?
-
-네. 아래는 꼭 보강하는 편이 좋습니다.
-
-**첫째, Agent / Slot / PTY의 데이터 모델 분리**가 더 명확해야 합니다. 지금 "슬롯 = 디스플레이 컨테이너, PTY 프로세스와 분리"라고 적은 건 좋지만, 실제 구현에서는 `AgentSession`, `SlotView`, `TerminalInstance`, `WindowInstance`를 분리해야 합니다. 그래야 같은 에이전트를 다른 슬롯으로 옮기거나, 팝업 창으로 분리하거나, 다시 도킹할 때 상태가 꼬이지 않습니다.
-
-**둘째, Tauri 다중 창 설계**가 부족합니다. "팝업 분리 / 다시 도킹"은 적혀 있지만, 어느 상태가 메인 프로세스에 있고 어느 상태가 WebView별 Zustand에 있는지 정해야 합니다. 추천은 **agent/session 상태 = 중앙 store**, **slot layout = window별 store**, **terminal DOM/xterm 인스턴스 = 창별 소유**입니다.
-
-**셋째, xterm.js의 가상 스크롤백 표현은 수정하는 게 좋습니다.** "보이는 행만 DOM 렌더"라고 되어 있는데, 이걸 직접 구현하려 하면 xterm 내부 buffer/renderer와 충돌할 수 있습니다. 사양에는 "xterm.js 내부 scrollback 사용, scrollback limit 설정, write batching 적용" 정도로 바꾸는 편이 안전합니다.
-
-**넷째, LinkProvider 보안 정책**이 필요합니다. 파일경로, URL, diff 클릭은 편하지만, 로컬 파일 열기·외부 URL 열기·명령 실행과 연결되면 위험합니다. 최소한 `file://` 직접 실행 금지, workspace path whitelist, URL은 외부 브라우저 confirm 또는 allowlist, diff link는 내부 라우팅만 허용 같은 규칙이 있어야 합니다.
-
-**다섯째, 키보드 UX**가 빠져 있습니다. AI 에이전트 관리 도구는 마우스보다 키보드 사용이 많을 가능성이 큽니다. 예를 들어 `Ctrl+1~4` 슬롯 포커스, `Ctrl+Shift+S` split, `Ctrl+Shift+P` command palette, `Esc` 패널 닫기, `F2` 이름 변경 정도는 초기에 잡아두면 좋습니다.
+However, it is a state of being **reflected at the spec level** rather than "reflection complete". As implementation review criteria, it is better to also add `mount/unmount cleanup`, `React StrictMode에서 xterm 중복 생성 방지` (preventing duplicate xterm creation under React StrictMode), `FitAddon.fit() 호출 조건` (the conditions for calling FitAddon.fit()), and `다중 창 상태 동기화` (multi-window state synchronization) as acceptance criteria.
 
 ---
 
-## 3. React 19 + Monaco Editor 호환성 이슈 / pinning 조합
+## 2. Is there anything else we missed?
 
-React 19 + Monaco는 가능하지만, 버전 pinning을 강하게 추천합니다.
+Yes. It is better to reinforce the following without fail.
 
-React 19 쪽에서는 새 JSX Transform이 사실상 필요하고, `ReactDOM.render`는 제거되어 `createRoot`로 가야 합니다. 공식 업그레이드 문서도 React 19 설치 시 `react`, `react-dom`, `@types/react`, `@types/react-dom`을 함께 맞추도록 안내합니다.
+**First, the data model separation of Agent / Slot / PTY** needs to be clearer. Writing "slot = display container, separate from the PTY process" is good, but in the actual implementation `AgentSession`, `SlotView`, `TerminalInstance` and `WindowInstance` must be separated. Only then does the state not get tangled when you move the same agent to another slot, detach it into a popup window, or dock it again.
 
-`@monaco-editor/react`는 현재 README에서 React 19 지원을 명시하고 있고, `Editor`, `DiffEditor`, `loader`를 제공합니다. 또한 로컬 번들 방식은 `loader.config({ monaco })`로 가능하지만, Vite에서는 Monaco worker들을 별도로 import해야 한다고 문서화되어 있습니다.
+**Second, the Tauri multi-window design** is lacking. "Pop-out detach / re-dock" is written, but you need to decide which state lives in the main process and which in the per-WebView Zustand. The recommendation is **agent/session state = central store**, **slot layout = per-window store**, **terminal DOM/xterm instance = owned per window**.
 
-**추천 조합:**
+**Third, it is better to correct the description of xterm.js virtual scrollback.** It says "only visible rows rendered in the DOM", but trying to implement this yourself can conflict with xterm's internal buffer/renderer. In the spec it is safer to change it to something like "use xterm.js's internal scrollback, set the scrollback limit, apply write batching".
+
+**Fourth, a LinkProvider security policy** is needed. Clicking file paths, URLs and diffs is convenient, but it is dangerous if connected to opening local files, opening external URLs, or running commands. At minimum there must be rules such as: no direct `file://` execution, a workspace path whitelist, external-browser confirm or allowlist for URLs, and only internal routing for diff links.
+
+**Fifth, keyboard UX** is missing. An AI agent management tool is likely to be used more with the keyboard than the mouse. For example, it is good to set up early things like `Ctrl+1~4` slot focus, `Ctrl+Shift+S` split, `Ctrl+Shift+P` command palette, `Esc` close panel, `F2` rename.
+
+---
+
+## 3. React 19 + Monaco Editor compatibility issues / pinning combination
+
+React 19 + Monaco is possible, but I strongly recommend version pinning.
+
+On the React 19 side, the new JSX Transform is effectively required, and `ReactDOM.render` was removed so you must move to `createRoot`. The official upgrade guide also instructs aligning `react`, `react-dom`, `@types/react` and `@types/react-dom` together when installing React 19.
+
+`@monaco-editor/react` currently states React 19 support in its README and provides `Editor`, `DiffEditor` and `loader`. Also, a local bundle approach is possible with `loader.config({ monaco })`, but it is documented that with Vite the Monaco workers must be imported separately.
+
+**Recommended combination:**
 
 ```json
 {
@@ -63,41 +63,41 @@ React 19 쪽에서는 새 JSX Transform이 사실상 필요하고, `ReactDOM.ren
 }
 ```
 
-단, `@monaco-editor/react`는 README와 릴리스 상태가 약간 혼재되어 있습니다. README에는 React 19 지원이 표시되어 있지만, 설치 설명에는 React 19 사용자는 `@next`를 보라고 되어 있고, GitHub 릴리스 영역에는 `v4.8.0-rc.3`가 최신 릴리스로 보입니다. 따라서 **React 19를 고정할 거면 `@monaco-editor/react@next` 또는 명시적 rc 버전으로 lockfile까지 고정**하는 편이 안전합니다.
+However, the README and the release status of `@monaco-editor/react` are somewhat mixed. The README shows React 19 support, but the install instructions tell React 19 users to look at `@next`, and in the GitHub releases area `v4.8.0-rc.3` appears as the latest release. So if you will pin React 19, it is safer to **pin `@monaco-editor/react@next` or an explicit rc version all the way down to the lockfile**.
 
-Monaco 본체는 공식 페이지 기준 최신 릴리스가 `0.55.1`로 표시됩니다. 다만 2026년에 `monaco-editor` 하위 의존성 보안 이슈를 지적한 GitHub issue도 있으므로, 실제 고정 버전은 `npm audit` 결과까지 보고 결정하는 게 좋습니다.
-
----
-
-## 4. allotment + xterm.js 직접 wrapper 조합에서 알려진 문제
-
-이 조합은 실무적으로 가능합니다. 다만 아래 문제가 자주 납니다.
-
-**첫째, xterm 생성 시점 문제**입니다. xterm은 DOM 요소에 `open()`된 뒤 크기를 계산해야 합니다. 공식 예제도 DOM에 붙인 뒤 `open()`하는 흐름입니다. `display:none`, 아직 크기 0인 pane, 접힌 pane에서 `fit()`을 호출하면 cols/rows가 잘못 계산될 수 있습니다.
-
-**둘째, resize 폭주 문제**입니다. allotment 드래그 중 `ResizeObserver`가 매우 자주 발생하고, 그때마다 `FitAddon.fit()`을 호출하면 렌더링이 버벅일 수 있습니다. 사양서의 debounce 방향은 맞습니다. 더 안전하게는 `ResizeObserver → requestAnimationFrame → debounce/throttle → visible && width>0 && height>0일 때만 fit()` 구조를 추천합니다.
-
-**셋째, React 19 StrictMode에서 중복 생성/해제 문제**입니다. 개발 모드에서 effect가 예상보다 많이 호출되며, xterm 인스턴스와 event listener가 중복될 수 있습니다. wrapper에는 반드시 `terminal.dispose()`, addon dispose, ResizeObserver disconnect, 링크 provider dispose를 넣어야 합니다.
-
-**넷째, Tauri 팝업 창으로 이동할 때 xterm 인스턴스를 그대로 옮기면 안 됩니다.** WebView/document가 달라지므로 terminal DOM을 이동시키기보다 "같은 AgentSession에 새 TerminalView를 attach"하는 구조가 안전합니다. 참고로 xterm 5.4.0 릴리스에는 multi-window app support를 돕는 `documentOverride` 옵션이 추가되었습니다.
-
-**다섯째, allotment 자체의 React 19 peer dependency 경고 가능성**이 있습니다. allotment는 React 19에서 동작 테스트가 있었다는 issue가 있지만, peer dependency가 `^17 || ^18`로 묶여 있다는 보고가 열린 상태입니다. 실제 설치 시 npm/pnpm에서 peer warning이 날 수 있으니 lockfile 기준으로 먼저 검증해야 합니다.
+For the Monaco core, the official page shows the latest release as `0.55.1`. However, there is also a GitHub issue pointing out a security issue in the `monaco-editor` sub-dependencies in 2026, so it is better to decide the actual pinned version after looking at the `npm audit` result too.
 
 ---
 
-## 5. 이 설계로 실용적인 AI 에이전트 관리 도구 구현이 가능한가요?
+## 4. Known problems with the allotment + own xterm.js wrapper combination
 
-**네, 가능합니다.** 오히려 현재 View 사양은 "WezTerm 여러 창을 사람이 직접 관리하는 방식"을 전용 UI로 대체하기에 좋은 구조입니다. Agent Tree, 동적 슬롯, xterm 터미널, 이벤트 패널, DiffEditor, 상태바의 조합도 AI 에이전트 운영 도구에 잘 맞습니다.
+This combination is feasible in practice. However, the following problems come up often.
 
-다만 MVP 범위는 이렇게 자르는 걸 추천합니다.
+**First, the xterm creation timing problem.** xterm must calculate its size after being `open()`ed on a DOM element. The official example also follows the flow of attaching to the DOM and then calling `open()`. Calling `fit()` in a `display:none` pane, a pane whose size is still 0, or a collapsed pane can compute cols/rows wrongly.
 
-- **MVP 1차**: Agent Tree, 4-slot 레이아웃, 더미 xterm 출력, 포커스 슬롯, 상태바, 이벤트 패널
-- **MVP 2차**: 직접 xterm wrapper 완성, LinkProvider, resize 안정화, 테마/폰트 즉시 반영
-- **MVP 3차**: Monaco DiffEditor 로컬 번들, diff link 클릭 → 하단 diff 패널 연동
-- **MVP 4차**: Rust PTY 연결, cols/rows resize 전달, Start/Stop/Kill 실제 연결
-- **후순위**: 팝업 창끼리 합치기, 메인 창 재도킹, 복잡한 다중 창 세션 복원
+**Second, the resize flood problem.** During an allotment drag `ResizeObserver` fires very frequently, and calling `FitAddon.fit()` every time can make rendering stutter. The spec's debounce direction is right. A safer structure is `ResizeObserver → requestAnimationFrame → debounce/throttle → visible && width>0 && height>0일 때만 fit()` (fit() only when visible and width and height are above 0).
 
-최종 판단은 **"진행해도 되는 설계"**입니다. 단, 지금 문서에 아래 4개만 추가하면 훨씬 안전해집니다.
+**Third, the duplicate create/dispose problem under React 19 StrictMode.** In development mode effects are called more often than expected, and xterm instances and event listeners can be duplicated. The wrapper must include `terminal.dispose()`, addon dispose, ResizeObserver disconnect, and link provider dispose.
+
+**Fourth, when moving to a Tauri popup window, you must not move the xterm instance as it is.** Because the WebView/document differs, a structure that "attaches a new TerminalView to the same AgentSession" is safer than moving the terminal DOM. For reference, the xterm 5.4.0 release added a `documentOverride` option to help multi-window apps.
+
+**Fifth, there is a possibility of a React 19 peer dependency warning from allotment itself.** There is an issue saying allotment was tested working on React 19, but a report that its peer dependency is bound to `^17 || ^18` remains open. A peer warning may appear in npm/pnpm on actual install, so verify with the lockfile first.
+
+---
+
+## 5. Is it possible to build a practical AI agent management tool with this design?
+
+**Yes, it is possible.** If anything, the current View spec is a good structure for replacing the "way a person manages several WezTerm windows by hand" with a dedicated UI. The combination of Agent Tree, dynamic slots, xterm terminal, event panel, DiffEditor and status bar also fits an AI agent operations tool well.
+
+However, I recommend cutting the MVP scope like this.
+
+- **MVP phase 1**: Agent Tree, 4-slot layout, dummy xterm output, focus slot, status bar, event panel
+- **MVP phase 2**: finish the own xterm wrapper, LinkProvider, resize stabilization, immediate theme/font application
+- **MVP phase 3**: Monaco DiffEditor local bundle, diff link click → bottom diff panel integration
+- **MVP phase 4**: Rust PTY connection, cols/rows resize delivery, real connection of Start/Stop/Kill
+- **Lower priority**: merging popup windows with each other, re-docking to the main window, complex multi-window session restore
+
+The final judgment is **"a design that is fine to proceed with"**. However, adding just the following 4 items to the current document makes it much safer.
 
 ```
 추가 권장 사양:
@@ -107,8 +107,8 @@ Monaco 본체는 공식 페이지 기준 최신 릴리스가 `0.55.1`로 표시�
 - LinkProvider 보안 정책: file path whitelist, external URL confirm, diff internal route only
 ```
 
-가장 큰 리스크는 UI 라이브러리 선택이 아니라 **"터미널 프로세스 상태와 슬롯 표시 상태를 얼마나 깨끗하게 분리하느냐"**입니다. 이 부분만 잘 잡으면 실용적인 AI 에이전트 대시보드로 충분히 갈 수 있습니다.
+The biggest risk is not the UI library choice but **"how cleanly you separate the terminal process state from the slot display state"**. If only this part is handled well, it can fully become a practical AI agent dashboard.
 
 ---
 
-**대화 URL:** https://chatgpt.com/c/6a2565cd-d9f4-8324-ab7d-d0a47a008af6
+**Conversation URL:** https://chatgpt.com/c/6a2565cd-d9f4-8324-ab7d-d0a47a008af6

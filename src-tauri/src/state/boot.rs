@@ -1,14 +1,14 @@
-//! 부팅 판정 — 부팅 단계(TRD S21-storage §6-5)의 ②–④([`prepare`])와 ⑤ 의 실행 표식 쓰기([`write_run_marker`]).
-//! 판정([`decide_boot`])은 순수 함수이고, 디스크는 전부 포트 [`BootFiles`] 뒤에 있다(운영 = [`FsBootFiles`]).
+//! Boot decision — ②–④ of the boot stage (TRD S21-storage §6-5) ([`prepare`]) and the run marker write of ⑤ ([`write_run_marker`]).
+//! The decision ([`decide_boot`]) is a pure function, and all of the disk is behind the port [`BootFiles`] (production = [`FsBootFiles`]).
 //!
-//! - ★어느 단계가 실패해도 계속한다★ — 부팅 단계는 `Err` 를 돌려주지 않는다(N7 · D8). 실패는 여기서 log 한다.
-//! - ★예외는 가드 하나([`Guard`] · N3)★ — 그 실행은 상태를 하나도 저장하지 않는다. 덮으면 아직 사본으로 뜨지
-//!   못했을지 모르는 크래시 화면을 잃는다.
-//! - ★답하지 않은 크래시 사본은 덮지도 지우지도 않는다(D2-6)★ — 이 판이 못 쓰는 새 판의 사본도(N6). 부팅이 사본을
-//!   지우는 것은 못 쓸 사본(떠 둔 뒤)과 답한 사본(다시 읽어 해시가 같을 때만 — N1)뿐이다.
-//! - ④ 의 결과(사본을 못 떠 서는 가드 · 못 지운 답한 사본의 해시 · 못 쓸 `state.json` 을 떠 두었나)는 ④ 가 계획에
-//!   접어 넣고, ⑤([`write_run_marker`]) · ⑥ · 기록기가 그 계획을 읽는다 — 그래서 가드 로그는 ④ 뒤에 낸다. ⑤ 의
-//!   쓰기 직전 재판정이 거절하면 ⑤ 가 같은 칸의 가드를 접어 넣는다(⑥ 은 ⑤ 뒤의 계획을 읽는다).
+//! - ★It continues whichever stage fails★ — the boot stage does not return `Err` (N7 · D8). Failures are logged here.
+//! - ★The only exception is one guard ([`Guard`] · N3)★ — that run saves no state at all. Overwriting would lose a crash screen that may not have been
+//!   copied aside yet.
+//! - ★An unanswered crash copy is neither overwritten nor deleted (D2-6)★ — including the copy of a newer version that this version cannot use (N6). What boot deletes
+//!   are only an unusable copy (after copying aside) and an answered copy (only when re-read and the hash is the same — N1).
+//! - The result of ④ (the guard that stands because a copy could not be made · the hash of an answered copy that could not be deleted · whether an unusable `state.json` was copied aside) is
+//!   folded into the plan by ④, and ⑤ ([`write_run_marker`]) · ⑥ · the writer read that plan — so the guard log is emitted after ④. If the re-decision just before ⑤'s
+//!   write rejects, ⑤ folds the guard into the same field (⑥ reads the plan after ⑤).
 
 use std::fmt;
 use std::io;
@@ -23,35 +23,35 @@ use crate::file_hooks::OS_HOOKS;
 pub const STATE_FILE: &str = "state.json";
 pub const CRASH_COPY_FILE: &str = "state.crash.json";
 
-/// 부팅 단계가 만지는 파일 — 운영은 [`FsBootFiles`].
+/// Files the boot stage touches — production is [`FsBootFiles`].
 pub trait BootFiles {
-    /// `state.json` 원문 — `file::read_file_capped` 와 같은 계약(없으면 `NotFound` · 상한 초과 · UTF-8
-    /// 아님은 `InvalidData` · 잠김은 재시도 뒤의 그 오류).
+    /// `state.json` text — same contract as `file::read_file_capped` (`NotFound` if missing · over the upper bound · not UTF-8 is
+    /// `InvalidData` · a lock gives that error after retries).
     fn read_state(&self) -> io::Result<String>;
 
-    /// `state.json` 을 `state.json.corrupt` 로 떠 둔다 — 돌려주는 값 = 사본 자리(`file::copy_aside`).
+    /// Copies `state.json` aside as `state.json.corrupt` — returned value = the copy's place (`file::copy_aside`).
     fn copy_aside_state(&self) -> io::Result<PathBuf>;
 
-    /// `state.json` 을 원자적으로 갈아끼운다 — 폴더가 없으면 만든다.
+    /// Atomically swaps `state.json` — creates the folder if it is missing.
     fn write_state(&self, text: &str) -> io::Result<()>;
 
-    /// `state.crash.json` 원문 — [`Self::read_state`] 와 같은 계약.
+    /// `state.crash.json` text — same contract as [`Self::read_state`].
     fn read_crash_copy(&self) -> io::Result<String>;
 
-    /// `state.crash.json` 을 `text` 로 원자적으로 갈아끼운다 — 폴더가 없으면 만든다.
+    /// Atomically swaps `state.crash.json` with `text` — creates the folder if it is missing.
     fn write_crash_copy(&self, text: &str) -> io::Result<()>;
 
-    /// 없으면 `NotFound`.
+    /// `NotFound` if missing.
     fn remove_crash_copy(&self) -> io::Result<()>;
 
-    /// `state.crash.json` 을 `state.crash.json.corrupt` 로 떠 둔다 — [`Self::copy_aside_state`] 와 같은 계약.
+    /// Copies `state.crash.json` aside as `state.crash.json.corrupt` — same contract as [`Self::copy_aside_state`].
     fn copy_aside_crash_copy(&self) -> io::Result<PathBuf>;
 
-    /// 상태 파일들의 남은 임시 파일을 치운다 — `file::sweep_temps` 와 같은 계약.
+    /// Sweeps leftover temporary files of the state files — same contract as `file::sweep_temps`.
     fn sweep_temps(&self) -> io::Result<Vec<(PathBuf, io::Result<()>)>>;
 }
 
-/// 운영 파일 — `<dir>\state.json` 과 그 옆. `dir` = 셸 state 폴더(배치는 P3b3 · `DataLayout`).
+/// Production files — `<dir>\state.json` and its neighbors. `dir` = the shell state folder (layout in P3b3 · `DataLayout`).
 pub struct FsBootFiles {
     dir: PathBuf,
 }
@@ -81,7 +81,7 @@ impl BootFiles for FsBootFiles {
         file::copy_aside(&self.state(), OS_HOOKS)
     }
 
-    // 셸 state 폴더는 아무도 미리 만들지 않는다 — 쓰는 쪽이 쓸 때 만든다(`file::write_atomic` · 기록기도 같다).
+    // Nobody creates the shell state folder in advance — the writer creates it when writing (`file::write_atomic` · the recorder is the same).
     fn write_state(&self, text: &str) -> io::Result<()> {
         file::write_atomic(&self.state(), text.as_bytes(), OS_HOOKS)
     }
@@ -94,8 +94,8 @@ impl BootFiles for FsBootFiles {
         file::write_atomic(&self.crash_copy(), text.as_bytes(), OS_HOOKS)
     }
 
-    // 잠김 재시도를 하지 않는다 — 못 지운 답한 사본은 기록기가 해시를 이어 받아 다시 지우고, 못 쓸 사본은 다음
-    //   부팅이 다시 지운다.
+    // No lock retries — an answered copy that could not be deleted gets its hash picked up by the recorder and is deleted again, and an unusable copy is deleted again
+    //   at the next boot.
     fn remove_crash_copy(&self) -> io::Result<()> {
         std::fs::remove_file(self.crash_copy())
     }
@@ -113,15 +113,15 @@ impl BootFiles for FsBootFiles {
     }
 }
 
-/// 상태 파일 하나(`state.json` 또는 같은 모양의 크래시 사본)를 읽은 결과.
+/// The result of reading one state file (`state.json` or a crash copy of the same shape).
 #[derive(Clone, PartialEq)]
 pub enum StateRead {
     Missing,
-    /// 내용이 아니라 읽기 자체가 실패했다(잠김 재시도 뒤 · 권한) — ★못 쓸 파일과 섞지 않는다★: 잠깐 잠긴 멀쩡한
-    /// 파일을 떠 두거나 덮지 않는다(I3).
+    /// It is not the content but the read itself that failed (after lock retries · permission) — ★not mixed with an unusable file★: a healthy
+    /// file that is briefly locked is neither copied aside nor overwritten (I3).
     IoFailed(String),
     Unusable(Unusable),
-    /// `text` = 읽은 원문 그대로 — 사본 뜨기 · 사본 해시 · 수락의 원천이 이 바이트다(디스크를 다시 읽지 않는다 —
+    /// `text` = the text read as it is — the source of copying aside · the copy hash · acceptance is these bytes (the disk is not read again —
     /// §6-5 ④ · L2).
     Usable {
         file: StateFile,
@@ -131,17 +131,17 @@ pub enum StateRead {
 }
 
 impl StateRead {
-    /// 읽기 결과 하나(`file::read_file_capped` 의 계약)를 판정한다 — 가름은 base 판정(`file::classify` ·
-    /// [`codec::STATE_SPEC`]) 하나다.
+    /// Decides one read result (the contract of `file::read_file_capped`) — the sorting is one base decision (`file::classify` ·
+    /// [`codec::STATE_SPEC`]).
     // ADR-0291
     pub fn from_read(read: io::Result<String>) -> Self {
-        // 원문은 사본 뜨기 · 해시 · 수락의 원천이라 쥔 채 판정한다 — `classify(Ok(text))` 가 하는 일이 이 `parse` 다.
+        // The text is the source of copying aside · hash · acceptance, so it decides while holding it — what `classify(Ok(text))` does is this `parse`.
         let (parsed, text) = match read {
             Ok(text) => (file::parse(&text, &codec::STATE_SPEC), text),
             Err(e) => match file::classify(Err(e), &codec::STATE_SPEC) {
                 file::Loaded::Missing => return StateRead::Missing,
                 file::Loaded::Failed(e) => return StateRead::IoFailed(e.to_string()),
-                // 읽기 오류에서 나오는 판정은 못 쓸 원문(상한 초과 · UTF-8 아님)뿐이라 원문 칸이 필요 없다.
+                // The only decisions that come from a read error are an unusable text (over the upper bound · not UTF-8), so the text field is not needed.
                 file::Loaded::Parsed(parsed) => (parsed, String::new()),
             },
         };
@@ -156,7 +156,7 @@ impl StateRead {
     }
 }
 
-// 원문(≤4 MiB)을 찍지 않는다 — 길이만.
+// Does not print the text (≤4 MiB) — only the length.
 impl fmt::Debug for StateRead {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -178,7 +178,7 @@ impl fmt::Debug for StateRead {
     }
 }
 
-/// [`decide_boot`] 의 입력 — 부팅 단계 ②가 본 것 전부.
+/// Input of [`decide_boot`] — everything boot stage ② saw.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BootInputs {
     pub state: StateRead,
@@ -187,14 +187,14 @@ pub struct BootInputs {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum BootModel {
-    /// 기본 레이아웃(ADR-0222) — 복원할 상태가 없거나 묻는다.
+    /// Default layout (ADR-0222) — there is no state to restore, or it asks.
     Default,
-    /// 조용히 복원한다(「항상 복원」).
+    /// Restores quietly (「항상 복원」).
     Restore(StateFile),
 }
 
-/// 복원할지 묻는 원문 — ⑥ 이 복원 서비스에 넘긴다. 답 없는 사본이 있으면 그 사본이고, 이 부팅이 뜨는 사본이면
-/// `state.json` 원문이다 — 뜨기에 실패해도(가드 ⅱ) 같은 원문을 메모리에서 쓴다(L2).
+/// The text that asks whether to restore — ⑥ hands it to the restore service. If there is an unanswered copy, that copy; if it is the copy this boot makes, the
+/// `state.json` text — even if copying fails (guard ⅱ) the same text is used from memory (L2).
 #[derive(Clone, PartialEq)]
 pub struct AwaitingCopy {
     pub text: String,
@@ -203,7 +203,7 @@ pub struct AwaitingCopy {
     pub file: StateFile,
 }
 
-// 원문(≤4 MiB)을 찍지 않는다 — 길이와 해시만.
+// Does not print the text (≤4 MiB) — only the length and hash.
 impl fmt::Debug for AwaitingCopy {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AwaitingCopy")
@@ -216,62 +216,62 @@ impl fmt::Debug for AwaitingCopy {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BootAction {
-    /// 못 쓸 `state.json`(손상 — 새 판 말고)을 `state.json.corrupt` 로 떠 둔다(ADR-0274) — 원본은 실행 표식
-    /// 쓰기(⑤)가 갈아끼운다. 실패해도 진행한다(D8).
+    /// Copies an unusable `state.json` (corrupt — not a newer version) aside as `state.json.corrupt` (ADR-0274) — the original is swapped by the run marker
+    /// write (⑤). Proceeds even on failure (D8).
     CopyAsideState,
-    /// 못 쓸 사본(버전 초과 말고)을 `state.crash.json.corrupt` 로 떠 둔다(ADR-0274). 실패해도 진행한다(D8).
+    /// Copies an unusable copy (not a version beyond this one) aside as `state.crash.json.corrupt` (ADR-0274). Proceeds even on failure (D8).
     CopyAsideCrashCopy,
-    /// 떠 둔 못 쓸 사본을 지운다 — ★떠 두기가 실패했으면 지우지 않는다★: 둘 곳이 없는 원본을 남겨 다음 부팅이
-    /// 다시 떠 둔다.
+    /// Deletes the unusable copy that was copied aside — ★if copying aside failed, it does not delete★: leave the original that has nowhere to go so that the next boot
+    /// copies it aside again.
     RemoveUnusableCrashCopy,
-    /// `state.json` 원문([`BootPlan::crash_copy`])을 사본으로 뜬다 — 있던 사본(답한 · 못 쓸)은 이 쓰기가 갈아끼운다.
-    /// 실패 = 가드 ⅱ.
+    /// Copies the `state.json` text ([`BootPlan::crash_copy`]) as a copy — this write swaps any existing copy (answered · unusable).
+    /// Failure = guard ⅱ.
     WriteCrashCopy,
-    /// 답한 사본을 다시 읽어(≤4 MiB) 해시가 같을 때만 지운다(N1). 못 지웠거나 답한 사본인지 모르면 해시를 넘긴다
+    /// Re-reads the answered copy (≤4 MiB) and deletes it only when the hash is the same (N1). If it could not delete, or does not know whether it is an answered copy, passes on the hash
     /// ([`BootPlan::carry_resolved`]).
     RemoveAnsweredCrashCopy { hash: String },
 }
 
-/// 이번 실행은 상태를 하나도 저장하지 않는다(N3) — 실행 표식 쓰기(⑤)를 건너뛰고 기록기를 띄우지 않으며, 종료는
-/// `Final` 없이 잠금만 놓는다(N7). 다음 부팅이 다시 판정한다(§12 R16).
+/// This run saves no state at all (N3) — skips the run marker write (⑤) and does not start the recorder, and shutdown only releases the lock
+/// without `Final` (N7). The next boot decides again (§12 R16).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Guard {
-    /// ⅰ `state.json` 을 못 읽었다(IO — 잠김 재시도 뒤). 사유 한 줄.
+    /// ⅰ Could not read `state.json` (IO — after lock retries). One line of reason.
     StateUnreadable(String),
-    /// ⅰ 과 같은 칸 — `state.json` 이 이 셸보다 새 판이 쓴 것이다(그 판). 떠 두지도 덮지도 지우지도 않는다.
-    // ADR-0291 R2: 떠 두고 덮으면 새 판이 다시 떴을 때 자기 화면 상태를 잃는다(`.corrupt` 는 아무도 읽지 않는다).
+    /// The same field as ⅰ — `state.json` was written by a version newer than this shell (that version). Neither copied aside, overwritten nor deleted.
+    // ADR-0291 R2: if copied aside and overwritten, the newer version loses its own screen state when it comes up again (nobody reads `.corrupt`).
     StateNewer { found: u64 },
-    /// ⅱ 떠야 할 사본을 못 떴다 — 쓰기 실패 · 사본 읽기 IO 실패 · 덮으면 안 되는 새 판의 사본(N6). 사유 한 줄.
+    /// ⅱ Could not make the copy that had to be made — write failure · copy read IO failure · a copy of a newer version that must not be overwritten (N6). One line of reason.
     CrashCopyNotWritten(String),
 }
 
-/// [`BootAction::CopyAsideState`] 의 결과.
+/// The result of [`BootAction::CopyAsideState`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StateAside {
     CopiedAside,
-    /// 원본은 실행 표식 쓰기(⑤)가 백업 없이 갈아끼운다(D8).
+    /// The original is swapped without a backup by the run marker write (⑤) (D8).
     NotCopied,
 }
 
 #[derive(Clone, PartialEq)]
 pub struct BootPlan {
     pub model: BootModel,
-    /// 부팅 단계 ④가 이 순서대로 한다.
+    /// Boot stage ④ does this in this order.
     pub actions: Vec<BootAction>,
-    /// `Some` = 묻는다(⑥ 의 `awaiting`). 가드 ⅱ 여도 선다.
+    /// `Some` = asks (`awaiting` of ⑥). It stands even with guard ⅱ.
     pub crash_copy: Option<AwaitingCopy>,
-    /// ⑤ 와 기록기가 이어 실을 답한 사본의 해시 — 그 사본이 디스크에 남아 있을 수 있을 때만 선다(판정 · ④).
+    /// The hash of an answered copy that ⑤ and the recorder carry on — it stands only when that copy may remain on the disk (decision · ④).
     pub carry_resolved: Option<String>,
-    /// 판정(③)이나 동작(④)이 세운다 — ⑤ 는 ④ 뒤의 값을 보고, 쓰기 직전 재판정이 거절하면 ⑤ 도 세운다.
+    /// Set by the decision (③) or an action (④) — ⑤ looks at the value after ④, and if the re-decision just before the write rejects, ⑤ sets it too.
     pub guard: Option<Guard>,
-    /// `Some` = `state.json` 이 못 쓸 파일이었다 — 떠 두기의 결과다. 동작(④)이 세운다(판정 뒤엔 아직 `None`).
+    /// `Some` = `state.json` was an unusable file — the result of copying aside. Set by an action (④) (after the decision it is still `None`).
     pub state_aside: Option<StateAside>,
-    /// 판정(③)이 읽은 `state.json` 이 쓸 수 있었으면 `Adopted` · 그 밖 `NotYet` — 기록기의 시작 값은
-    /// [`saver_claim`] 이 여기에 ⑤ 의 결과를 얹어 정한다.
+    /// `Adopted` if the `state.json` the decision (③) read was usable, `NotYet` otherwise — the recorder's start value is
+    /// decided by [`saver_claim`] adding ⑤'s result to this.
     pub claim: file::Claim,
 }
 
-// 복원할 모델(원문 ≤4 MiB 만큼의 탭 트리)을 통째로 찍지 않는다 — 창 수만.
+// Does not print the whole model to restore (a tab tree as large as the text ≤4 MiB) — only the window count.
 impl fmt::Debug for BootPlan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         struct Model<'a>(&'a BootModel);
@@ -298,22 +298,22 @@ impl fmt::Debug for BootPlan {
     }
 }
 
-/// 사본 열 — 답 없는 사본 말고는 「없음」으로 치고 `state.json` 행대로 간다(§6-5 표).
+/// Copy column — apart from an unanswered copy it is counted as 「없음」 (none) and goes by the `state.json` row (§6-5 table).
 enum CopyColumn {
     Unanswered(AwaitingCopy),
     AsAbsent(AbsentCopy),
 }
 
-/// 「없음」으로 치는 사본이 디스크에 무엇으로 있나 — 할 정리가 갈린다.
+/// What the copy counted as 「없음」 (none) is on the disk — the cleanup to do differs.
 enum AbsentCopy {
     Missing,
-    /// 읽기 IO 실패(I3).
+    /// Read IO failure (I3).
     Unread,
-    /// 새 판이 쓴 사본 — 지우지도 떠 두지도 덮지도 않는다(N6).
+    /// A copy written by a newer version — neither deleted, copied aside nor overwritten (N6).
     Newer,
-    /// 버전 초과 말고 못 쓸 파일.
+    /// An unusable file other than a version beyond this one.
     Unusable,
-    /// 해시 = `state.json` 의 `resolved_crash_copy`(I2).
+    /// Hash = `resolved_crash_copy` of `state.json` (I2).
     Answered(String),
 }
 
@@ -337,7 +337,7 @@ impl CopyColumn {
     }
 }
 
-/// §6-5 표 — 사본 열 × `state.json` 열.
+/// §6-5 table — copy column × `state.json` column.
 pub fn decide_boot(inputs: BootInputs) -> BootPlan {
     let BootInputs { state, crash_copy } = inputs;
     let mut plan = BootPlan {
@@ -354,10 +354,10 @@ pub fn decide_boot(inputs: BootInputs) -> BootPlan {
             }
         },
     };
-    // I3 는 파일마다 가른다 — 읽기 IO 실패한 파일만 떠 두지도 덮지도 지우지도 않고, 다른 파일의 동작은 그 파일의
-    //   읽기만 본다. 둘을 묶으면 사본을 못 읽은 부팅이 못 쓸 `state.json` 을 떠 두지 않은 채 ⑤ 로 덮는다.
+    // I3 decides per file — only the file whose read had an IO failure is neither copied aside, overwritten nor deleted, and the action of the other file looks only at that file's
+    //   read. If the two are bundled, a boot that could not read the copy overwrites an unusable `state.json` with ⑤ without copying it aside.
 
-    // 답했다는 사실은 읽을 수 있는 `state.json` 에만 있다 — 못 읽으면 남은 사본은 답 없는 사본이다.
+    // The fact that it was answered exists only in a readable `state.json` — if it cannot be read, the remaining copy is an unanswered copy.
     let resolved = match &state {
         StateRead::Usable { file, .. } => file.resolved_crash_copy.clone(),
         _ => None,
@@ -365,18 +365,18 @@ pub fn decide_boot(inputs: BootInputs) -> BootPlan {
 
     match &state {
         StateRead::IoFailed(reason) => plan.guard = Some(Guard::StateUnreadable(reason.clone())),
-        // 새 판이 쓴 파일은 읽기 실패와 같은 칸이다 — 떠 두지도 덮지도 않고 이번 실행은 저장하지 않는다.
+        // A file written by a newer version is in the same field as a read failure — neither copied aside nor overwritten, and this run does not save.
         // ADR-0291 R2
         StateRead::Unusable(Unusable::NewerVersion { found }) => {
             plan.guard = Some(Guard::StateNewer { found: *found })
         }
-        // 사본 열과 무관하게 떠 둔다(N6 · 사본을 못 읽었어도 — ⑤ 가 이 원본을 갈아끼운다).
+        // Copied aside regardless of the copy column (N6 · even if the copy could not be read — ⑤ swaps this original).
         StateRead::Unusable(Unusable::Corrupt(_)) => plan.actions.push(BootAction::CopyAsideState),
         StateRead::Missing | StateRead::Usable { .. } => {}
     }
 
     let copy = match CopyColumn::of(crash_copy, resolved.as_deref()) {
-        // D2-6 · D4 — `state.json` 이 무엇이든 기본 화면으로 묻고 사본은 덮지 않는다.
+        // D2-6 · D4 — whatever `state.json` is, ask with the default screen and do not overwrite the copy.
         CopyColumn::Unanswered(awaiting) => {
             plan.crash_copy = Some(awaiting);
             return plan;
@@ -386,7 +386,7 @@ pub fn decide_boot(inputs: BootInputs) -> BootPlan {
 
     match state {
         StateRead::Usable { file, .. } if file.clean_exit => plan.model = BootModel::Restore(file),
-        // D5 — 앞 실행의 화면을 사본으로 뜨고 묻는다(모양 무관).
+        // D5 — copy the previous run's screen as a copy and ask (regardless of shape).
         StateRead::Usable { file, text, .. } => {
             plan.crash_copy = Some(AwaitingCopy {
                 hash: codec::crash_copy_hash(&text),
@@ -407,7 +407,7 @@ pub fn decide_boot(inputs: BootInputs) -> BootPlan {
                 AbsentCopy::Unusable => plan
                     .actions
                     .extend([BootAction::CopyAsideCrashCopy, BootAction::WriteCrashCopy]),
-                // 답한 사본은 이 쓰기가 갈아끼운다 — 이어 실을 해시가 없다.
+                // The answered copy is swapped by this write — there is no hash to carry on.
                 AbsentCopy::Missing | AbsentCopy::Answered(_) => {
                     plan.actions.push(BootAction::WriteCrashCopy)
                 }
@@ -425,19 +425,19 @@ pub fn decide_boot(inputs: BootInputs) -> BootPlan {
         AbsentCopy::Answered(hash) => plan
             .actions
             .push(BootAction::RemoveAnsweredCrashCopy { hash }),
-        // 답한 사본이 남았는지 볼 수 없다 — 해시를 이어 싣는다. 버리면 아직 남았을지 모르는 그 사본을 다음 부팅이
-        //   답 없는 사본으로 읽고 다시 묻는다.
+        // Cannot see whether the answered copy remains — carries the hash on. If dropped, the next boot would read that copy, which may still remain, as an
+        //   unanswered copy and ask again.
         AbsentCopy::Unread => plan.carry_resolved = resolved,
         AbsentCopy::Missing | AbsentCopy::Newer => {}
     }
     plan
 }
 
-/// 부팅 단계 ②–④ — 남은 임시 파일을 쓸고, `state.json` 과 크래시 사본을 읽어 판정하고, 판정한 동작을 한다.
-/// 실패는 log 하고 계속한다.
+/// Boot stage ②–④ — sweeps leftover temporary files, reads and decides `state.json` and the crash copy, and does the action decided.
+/// Failures are logged and it continues.
 ///
-/// ★셸 실행 잠금([`super::lock::acquire`]) 뒤 · 기록기 앞에 부른다★ — 잠금 뒤라야 앞 인스턴스의 마지막 쓰기를
-/// 읽고, 기록기 앞이라야 자기 pid 의 임시 파일을 지워도 된다.
+/// ★Call it after the shell run lock ([`super::lock::acquire`]) · before the recorder★ — only after the lock does it read the previous instance's last write,
+/// and only before the recorder may it delete temporary files of its own pid.
 pub fn prepare(files: &impl BootFiles) -> BootPlan {
     sweep(files);
     let state = StateRead::from_read(files.read_state());
@@ -586,12 +586,12 @@ fn report_decode_warning(file: &str, warning: &DecodeWarning) {
     }
 }
 
-/// 부팅 단계 ④ — 동작의 결과 중 ⑤ · ⑥ · 기록기가 알아야 할 것(가드 ⅱ · 이어 실을 해시 · `state.json` 떠 두기)은
-/// `plan` 에 접어 넣는다.
+/// Boot stage ④ — of the action results, what ⑤ · ⑥ · the recorder need to know (guard ⅱ · the hash to carry on · copying `state.json` aside) is
+/// folded into `plan`.
 fn run_actions(files: &impl BootFiles, plan: &mut BootPlan) {
     let mut crash_copy_kept_aside = true;
     let replaces_crash_copy = plan.actions.contains(&BootAction::WriteCrashCopy);
-    // 복사본을 돈다 — 동작마다 `plan` 의 다른 칸을 고칠 수 있어야 한다.
+    // Iterates over a copy — each action must be able to edit a different field of `plan`.
     for action in plan.actions.clone() {
         match action {
             BootAction::CopyAsideState => {
@@ -662,7 +662,7 @@ fn run_actions(files: &impl BootFiles, plan: &mut BootPlan) {
 
 fn write_crash_copy(files: &impl BootFiles, plan: &mut BootPlan) {
     let Some(copy) = &plan.crash_copy else {
-        // 판정은 이 동작과 뜰 원문을 늘 함께 싣는다 — 닿으면 판정의 결함이다.
+        // The decision always carries this action together with the text to copy — reaching here is a defect of the decision.
         tracing::error!(
             module = "state",
             "크래시 사본을 뜰 원문이 계획에 없다 — 뜨지 못한 것으로 친다"
@@ -689,10 +689,10 @@ fn write_crash_copy(files: &impl BootFiles, plan: &mut BootPlan) {
     }
 }
 
-/// N1 — 답한 사본을 다시 읽어 해시가 같을 때만 지운다. 돌려주는 값 = 이어 실을 해시(못 지웠다 · 다시 못 읽어
-/// 답한 사본인지 모른다). 기록기의 같은 정리(`saver` 의 사본 지우기)와 같은 갈래다.
+/// N1 — re-reads the answered copy and deletes it only when the hash is the same. Returned value = the hash to carry on (could not delete · could not re-read, so does not know whether it is
+/// an answered copy). It is the same branch as the recorder's same cleanup (copy deletion of `saver`).
 ///
-/// ★읽기와 지우기 사이는 원자적이지 않다★ — 그 틈을 막는 것은 셸 실행 잠금(I1)이다.
+/// ★Between reading and deleting is not atomic★ — what covers that gap is the shell run lock (I1).
 fn remove_answered_copy(files: &impl BootFiles, hash: String) -> Option<String> {
     match files.read_crash_copy() {
         Ok(text) if codec::crash_copy_hash(&text) == hash => match files.remove_crash_copy() {
@@ -722,13 +722,13 @@ fn remove_answered_copy(files: &impl BootFiles, hash: String) -> Option<String> 
             );
             None
         }
-        // 읽기 오류의 가름은 base 판정 하나다.
+        // The sorting of read errors is one base decision.
         Err(e) => match file::classify(Err(e), &codec::STATE_SPEC) {
             file::Loaded::Missing => {
                 tracing::info!(module = "state", hash = %hash, "답한 크래시 사본이 이미 없다");
                 None
             }
-            // 답한 사본은 상한 안의 UTF-8 이었다 — 그렇지 않은 사본은 다른 사본이다.
+            // The answered copy was UTF-8 within the upper bound — a copy that is not is a different copy.
             file::Loaded::Parsed(parsed) => {
                 tracing::warn!(
                     module = "state",
@@ -754,21 +754,21 @@ fn remove_answered_copy(files: &impl BootFiles, hash: String) -> Option<String> 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MarkerOutcome {
     Written,
-    /// 가드라 쓰지 않았다.
+    /// Being a guard, it did not write.
     Guarded,
-    /// 코덱 거절 · 디스크 오류 — log 했다.
+    /// Codec rejection · disk error — logged.
     Failed,
 }
 
-/// 부팅 단계 ⑤ — 실행 표식(`clean_exit:false`)과 판정한 모델의 창들 · 이어 실을 해시를 `state.json` 에 직접 쓴다.
-/// 기록기는 아직 없다.
+/// Boot stage ⑤ — writes the run marker (`clean_exit:false`), the windows of the decided model and the hash to carry on directly into `state.json`.
+/// The recorder does not exist yet.
 ///
-/// ★④ 뒤 · 어느 창보다 먼저 부른다★ — 사본 뜨기(④)가 끝난 뒤라야 원문을 덮어도 되고, 창보다 먼저라야 조용히
-/// 복원한 화면이 창을 만들다 앱을 죽여도 다음 부팅이 비정상 종료로 읽는다(§6-5 ⑤). 실패는 log 만 하고 진행한다 —
-/// 그 실행의 크래시는 정상 종료로 읽힐 수 있다(D8 · §12 R14).
+/// ★Call it after ④ · before any window★ — only after copying aside (④) is finished may the original be overwritten, and only before windows so that even if a quietly
+/// restored screen kills the app while making a window, the next boot reads it as an abnormal exit (§6-5 ⑤). Failures are only logged and it proceeds —
+/// that run's crash may be read as a normal exit (D8 · §12 R14).
 ///
-/// ★쓰기 직전에 지금 `state.json` 을 다시 판정한다★ — 거절(새 판 · 못 읽음)이면 쓰지 않고 ③ 의 가드 ⅰ 과 같은
-/// 가드를 `plan` 에 접어 넣고 `Guarded` 다(그 실행은 저장하지 않고 ⑥ 의 `restore.status` 도 그 가드를 싣는다).
+/// ★It decides the current `state.json` again just before writing★ — if rejected (newer version · could not read), it does not write, folds the same guard as guard ⅰ of ③ into
+/// `plan` and gives `Guarded` (that run does not save, and `restore.status` of ⑥ carries that guard too).
 pub fn write_run_marker(
     files: &impl BootFiles,
     plan: &mut BootPlan,
@@ -817,15 +817,15 @@ pub fn write_run_marker(
     }
 }
 
-/// ⑤ 의 저장 직전 재판정 — 덮어도 되면 `Ok`(떠 둘 것이면 떠 둔 뒤 · 떠 두기가 실패해도 `Ok` — D8), 거절이면 ③ 의
-/// 가드 ⅰ 과 같은 칸의 가드.
-// ADR-0291 R16: ③ 의 판정을 들고 쓰지 않는다 — 그 뒤 새 판 · 못 읽는 파일로 바뀐 `state.json` 을 덮지 않는다.
+/// Re-decision just before the save of ⑤ — `Ok` if it may overwrite (if there is something to copy aside, after copying aside · `Ok` even if copying aside fails — D8), and if rejected, the guard of the same
+/// field as guard ⅰ of ③.
+// ADR-0291 R16: do not write holding the decision of ③ — do not overwrite a `state.json` that has changed into a newer version · an unreadable file since then.
 fn judge_before_marker(files: &impl BootFiles, plan: &BootPlan) -> Result<(), Guard> {
     let current = file::classify(files.read_state(), &codec::STATE_SPEC);
     match current.write_policy(plan.claim) {
         file::WritePolicy::Write => Ok(()),
-        // ④ 가 방금 이 파일을 떠 두었다(또는 떠 두다 실패했다 — D8) — 같은 부팅 순서 안이라 다시 뜨지 않는다.
-        //   그 사이 바뀐 파일은 실행 중 바깥 편집이라 지원하지 않는다(ADR-0291 C1).
+        // ④ has just copied this file aside (or failed while copying aside — D8) — it is within the same boot order, so it is not copied again.
+        //   A file changed in between is an outside edit while running and is not supported (ADR-0291 C1).
         file::WritePolicy::CopyAsideFirst if plan.state_aside.is_some() => Ok(()),
         file::WritePolicy::CopyAsideFirst => {
             copy_state_aside_before_marker(files, &current);
@@ -837,14 +837,14 @@ fn judge_before_marker(files: &impl BootFiles, plan: &BootPlan) -> Result<(), Gu
         file::WritePolicy::Refuse(file::Refused::ReadFailed) => {
             Err(Guard::StateUnreadable(match current {
                 file::Loaded::Failed(e) => e.to_string(),
-                // 판정 표는 읽기 실패에만 이 거절을 낸다.
+                // The decision table gives this rejection only for a read failure.
                 _ => "state.json 을 못 읽었다".to_string(),
             }))
         }
     }
 }
 
-/// 실패해도 진행한다 — 실행 표식이 하나뿐인 원본을 덮는다(D8 · 기록기의 같은 떠 두기와 같다).
+/// Proceeds even on failure — the run marker overwrites the only original (D8 · same as the recorder's same copying aside).
 fn copy_state_aside_before_marker(files: &impl BootFiles, current: &file::Loaded) {
     let what = match current {
         file::Loaded::Parsed(file::Parsed::Usable { .. }) => "판정 뒤 놓인 state.json",
@@ -863,9 +863,9 @@ fn copy_state_aside_before_marker(files: &impl BootFiles, current: &file::Loaded
     }
 }
 
-/// 기록기가 쥐고 시작할 [`file::Claim`] — 판정(③)이 읽은 `state.json` 이 쓸 수 있었거나 실행 표식(⑤)을 썼으면
-/// `Adopted`. 그 밖(없음 · 손상이었고 ⑤ 도 못 썼다)이면 `NotYet` 이라, 그 사이 놓인 쓸 만한 파일을 기록기의 첫
-/// 쓰기가 덮기 전에 떠 둔다.
+/// The [`file::Claim`] the recorder starts holding — `Adopted` if the `state.json` the decision (③) read was usable or the run marker (⑤) was written.
+/// Otherwise (missing · corrupt and ⑤ also could not write) it is `NotYet`, so a usable file placed in between is copied aside before the recorder's first
+/// write overwrites it.
 // ADR-0291 R8 (D14)
 pub fn saver_claim(plan: &BootPlan, marker: MarkerOutcome) -> file::Claim {
     match marker {
@@ -943,7 +943,7 @@ mod tests {
         }
     }
 
-    /// 앞앞 실행이 남긴 크래시 사본 — `state.json` 과 다른 바이트다.
+    /// A crash copy left by the run before the previous one — bytes different from `state.json`.
     fn crash_file() -> StateFile {
         StateFile {
             saved_at_ms: 7,
@@ -970,7 +970,7 @@ mod tests {
         })
     }
 
-    /// 아무 동작도 없는 계획 — 복원하는 계획은 쓸 수 있는 `state.json` 에서만 나오므로 `Adopted` 를 싣는다.
+    /// A plan with no action — a restoring plan comes only from a usable `state.json`, so it carries `Adopted`.
     fn quiet(model: BootModel) -> BootPlan {
         let claim = match model {
             BootModel::Restore(_) => file::Claim::Adopted,
@@ -1002,7 +1002,7 @@ mod tests {
         })
     }
 
-    // ── 판정표(§6-5) — 사본 열 × state.json 열 ──
+    // ── decision table (§6-5) — copy column × state.json column ──
 
     struct Row {
         name: &'static str,
@@ -1072,7 +1072,7 @@ mod tests {
         let missing = || StateRead::Missing;
         let answered = |clean| read_of(answered_state_file(clean, &crash_hash()));
         vec![
-            // ── 있음 · 답 없음 → 기본 · 덮지 않음 · 묻는다(D2-6 · D6) ──
+            // ── present · unanswered → default · not overwritten · asks (D2-6 · D6) ──
             Row::new("답 없는 사본 × state 없음", missing(), crash()).asks(crash_file()),
             Row::new("답 없는 사본 × clean_exit:true", usable(true), crash()).asks(crash_file()),
             Row::new("답 없는 사본 × clean_exit:false", usable(false), crash()).asks(crash_file()),
@@ -1091,7 +1091,7 @@ mod tests {
             Row::new("답 없는 사본 × state IO 실패(가드 ⅰ)", io(), crash())
                 .asks(crash_file())
                 .guarded(StateUnreadable),
-            // ── 있음 · 버전 초과 → 없음으로 치고 · 손대지 않는다(N6) ──
+            // ── present · version beyond this one → counted as none · not touched (N6) ──
             Row::new("버전 초과 사본 × state 없음", missing(), newer()),
             Row::new("버전 초과 사본 × clean_exit:true", usable(true), newer())
                 .restores(state_file(true)),
@@ -1106,7 +1106,7 @@ mod tests {
             Row::new("버전 초과 사본 × state IO 실패(가드 ⅰ)", io(), newer())
                 .guarded(StateUnreadable),
             Row::new("버전 초과 사본 × 버전 초과 state(가드)", newer(), newer()).guarded(StateNewer),
-            // ── 없음 ──
+            // ── none ──
             Row::new("사본 없음 × state 없음", missing(), missing()),
             Row::new("사본 없음 × clean_exit:true", usable(true), missing())
                 .restores(state_file(true)),
@@ -1127,7 +1127,7 @@ mod tests {
             )
             .guarded(StateNewer),
             Row::new("사본 없음 × state IO 실패(가드 ⅰ)", io(), missing()).guarded(StateUnreadable),
-            // ── 있음 · 답함 → 없음으로 치고 · 해시가 같을 때만 지운다(I2 · N1) ──
+            // ── present · answered → counted as none · deleted only when the hash is the same (I2 · N1) ──
             Row::new("답한 사본 × clean_exit:true", answered(true), crash())
                 .restores(answered_state_file(true, &crash_hash()))
                 .does(vec![RemoveAnsweredCrashCopy { hash: crash_hash() }]),
@@ -1138,7 +1138,7 @@ mod tests {
             )
             .does(vec![WriteCrashCopy])
             .asks(answered_state_file(false, &crash_hash())),
-            // ── 못 쓸 사본 → 떠 둔 뒤 지운다(ADR-0274) ──
+            // ── unusable copy → deleted after copying aside (ADR-0274) ──
             Row::new("못 쓸 사본 × state 없음", missing(), broken())
                 .does(vec![CopyAsideCrashCopy, RemoveUnusableCrashCopy]),
             Row::new("못 쓸 사본 × clean_exit:true", usable(true), broken())
@@ -1175,7 +1175,7 @@ mod tests {
             )
             .does(vec![CopyAsideCrashCopy, RemoveUnusableCrashCopy])
             .guarded(StateNewer),
-            // ── 사본 읽기 IO 실패 → 없음으로 치고 · 사본 쪽 동작 0(I3 — 파일마다) ──
+            // ── copy read IO failure → counted as none · zero actions on the copy side (I3 — per file) ──
             Row::new("사본 IO 실패 × state 없음", missing(), io()),
             Row::new("사본 IO 실패 × clean_exit:true", usable(true), io())
                 .restores(state_file(true)),
@@ -1261,7 +1261,7 @@ mod tests {
         }
     }
 
-    /// ADR-0291 R2: 새 판이 쓴 `state.json` 은 떠 두지 않고 가드다 — 그 판을 싣는다.
+    /// ADR-0291 R2: a `state.json` written by a newer version is not copied aside and is a guard — it carries that version.
     #[test]
     fn a_newer_state_file_guards_the_run_and_is_not_copied_aside() {
         assert_eq!(
@@ -1281,7 +1281,7 @@ mod tests {
         );
     }
 
-    // ── 읽기 결과 가르기 ──
+    // ── sorting read results ──
 
     #[test]
     fn read_errors_split_into_missing_unusable_and_io_failure() {
@@ -1322,12 +1322,12 @@ mod tests {
         );
     }
 
-    // ── 부팅 단계 ②–④ · ⑤(가짜 파일) ──
+    // ── boot stage ②–④ · ⑤ (fake files) ──
 
     #[derive(Default)]
     struct FakeFiles {
         state: RefCell<Option<io::Result<String>>>,
-        /// 사본 읽기마다 앞에서 하나씩 꺼낸다(② 의 읽기 · N1 의 다시 읽기) — 비면 `NotFound`.
+        /// Takes one from the front at every copy read (the read of ② · the re-read of N1) — `NotFound` when empty.
         crash_reads: RefCell<VecDeque<io::Result<String>>>,
         copy_aside_fails: bool,
         write_fails: bool,
@@ -1357,7 +1357,7 @@ mod tests {
             self.calls.borrow().clone()
         }
 
-        /// 쓰기 호출의 글을 떼고 이름만.
+        /// Strips the text of the write call and keeps only the name.
         fn call_names(&self) -> Vec<String> {
             self.calls()
                 .into_iter()
@@ -1391,8 +1391,8 @@ mod tests {
     }
 
     impl BootFiles for FakeFiles {
-        // 디스크처럼 읽어도 남는다 — ③ 의 읽기와 ⑤ 의 재판정이 같은 칸을 보고, 시험은 그 사이에 칸을 바꾼다.
-        //   빈 칸 = 파일 없음.
+        // Remains even when read like a disk — the read of ③ and the re-decision of ⑤ look at the same field, and the test changes the field in between.
+        //   Empty field = no file.
         fn read_state(&self) -> io::Result<String> {
             self.calls.borrow_mut().push("read".into());
             match &*self.state.borrow() {
@@ -1538,7 +1538,7 @@ mod tests {
         assert_eq!(files.calls(), ["sweep", "read", "read_crash"]);
     }
 
-    // ── 사본 뜨기(D5) ──
+    // ── copying a copy aside (D5) ──
 
     #[test]
     fn an_unclean_exit_copies_the_raw_state_bytes_before_the_marker_and_asks() {
@@ -1634,8 +1634,8 @@ mod tests {
         );
     }
 
-    /// ADR-0291 R2: 새 판이 쓴 `state.json` 은 떠 두지도 덮지도 않고 이번 실행은 저장하지 않는다 — 사본 쪽은
-    /// 사본 읽기만 본다(I3 는 파일마다).
+    /// ADR-0291 R2: a `state.json` written by a newer version is neither copied aside nor overwritten and this run does not save — the copy side
+    /// looks only at the copy read (I3 is per file).
     #[test]
     fn a_newer_state_file_is_left_alone_and_the_run_saves_nothing() {
         let files = FakeFiles::reading_both(Ok(newer_text()), vec![Ok("{".into())]);
@@ -1660,8 +1660,8 @@ mod tests {
         );
     }
 
-    /// ADR-0291 R16: ⑤ 는 ③ 의 판정을 들고 쓰지 않는다 — 그 사이 새 판 · 못 읽는 파일이 되면 떠 두지도 덮지도
-    /// 않고 ③ 의 가드 ⅰ 과 같은 칸의 가드를 계획에 싣는다(이번 실행은 저장하지 않는다).
+    /// ADR-0291 R16: ⑤ does not write holding the decision of ③ — if it becomes a newer version · an unreadable file in between, it is neither copied aside nor overwritten
+    /// and carries into the plan the guard of the same field as guard ⅰ of ③ (this run does not save).
     #[test]
     fn the_marker_never_overwrites_a_state_file_that_turned_newer_or_unreadable() {
         for (now, guard) in [
@@ -1689,8 +1689,8 @@ mod tests {
         }
     }
 
-    /// ADR-0291 R8 · R16: ③ 에 없던 파일이 ⑤ 앞에 놓였으면(손상이든 쓸 만하든 — D14) 떠 둔 뒤 쓴다. 떠 두기가
-    /// 실패해도 쓴다(D8).
+    /// ADR-0291 R8 · R16: if a file that was not in ③ was placed before ⑤ (corrupt or usable — D14), it is written after copying aside. Even if copying aside
+    /// fails, it writes (D8).
     #[test]
     fn a_state_file_placed_after_the_decision_is_copied_aside_before_the_marker() {
         for (placed, aside_fails) in [
@@ -1741,7 +1741,7 @@ mod tests {
         );
     }
 
-    // ── 답 없는 사본 · 버전 초과 사본 ──
+    // ── unanswered copy · copy of a version beyond this one ──
 
     #[test]
     fn an_unanswered_copy_is_never_overwritten_and_the_marker_still_goes_out() {
@@ -1781,7 +1781,7 @@ mod tests {
         }
     }
 
-    // ── 못 쓸 사본 ──
+    // ── unusable copy ──
 
     #[test]
     fn an_unusable_copy_is_copied_aside_then_removed() {
@@ -1824,11 +1824,11 @@ mod tests {
         );
     }
 
-    // ── state.json 떠 두기 결과 — 사본 쪽 떠 두기와 섞지 않는다 ──
+    // ── result of copying state.json aside — not mixed with the copy side's copying aside ──
 
     #[test]
     fn the_state_aside_records_only_the_state_file_copy() {
-        // (state 떠 두기 실패, 사본 떠 두기 실패) → 기대
+        // (state copy-aside failure, copy copy-aside failure) → expected
         for (state_fails, crash_fails, expected) in [
             (false, false, StateAside::CopiedAside),
             (false, true, StateAside::CopiedAside),
@@ -1904,7 +1904,7 @@ mod tests {
         assert_eq!(plan.crash_copy, Some(awaiting_of(state_file(false))));
     }
 
-    // ── 답한 사본(N1) ──
+    // ── answered copy (N1) ──
 
     fn answered_boot(crash_reads: Vec<io::Result<String>>) -> FakeFiles {
         FakeFiles::reading_both(
@@ -2032,7 +2032,7 @@ mod tests {
         assert_eq!(marker_of(&files).resolved_crash_copy, None);
     }
 
-    // ── 실행 표식(⑤) ──
+    // ── run marker (⑤) ──
 
     #[test]
     fn the_run_marker_is_an_unclean_exit_with_the_given_windows() {
@@ -2086,7 +2086,7 @@ mod tests {
         assert_eq!(outcome, MarkerOutcome::Failed);
     }
 
-    // ── 운영 파일(임시 폴더) ──
+    // ── production files (temporary folder) ──
 
     fn temp_dir(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -2150,7 +2150,7 @@ mod tests {
     fn an_unclean_state_file_on_disk_becomes_the_crash_copy_byte_for_byte() {
         let dir = temp_dir("unclean");
         std::fs::create_dir_all(&dir).unwrap();
-        // BOM · CRLF 를 섞는다 — 다시 직렬화해 뜨면 이 바이트가 사라진다.
+        // Mixes BOM · CRLF — if it were re-serialized and copied, these bytes would disappear.
         let raw = format!(
             "\u{feff}{}",
             text_of(&state_file(false)).replace('\n', "\r\n")
@@ -2255,7 +2255,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// ADR-0291 R16: ③ 뒤 ⑤ 앞에 새 판으로 바뀐 실제 파일도 그 바이트 그대로 남는다.
+    /// ADR-0291 R16: even a real file that changed into a newer version after ③ and before ⑤ stays with those bytes as they are.
     #[test]
     fn a_state_file_that_turns_newer_before_the_marker_keeps_its_bytes_on_disk() {
         let dir = temp_dir("newer-before-marker");

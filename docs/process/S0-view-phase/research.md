@@ -1,139 +1,139 @@
-# Engram 대시보드 — 기술 조사 결과
+# Engram Dashboard — Technical Research Results
 
-*2026-06-01 서브에이전트 7개 병렬 조사 (206K 토큰)*
-
----
-
-## 1. 훔칠 만한 UX 패턴
-
-**AgentHub의 FileWatcher → 반응형 트리**
-에이전트 상태를 파일로 관리하고 chokidar가 변경 감지 → Zustand store 갱신 → Tree/Panel 자동 업데이트. DB 없이 파일이 source of truth. Engram의 `orchestra.md` 기반 아키텍처와 자연스럽게 맞음.
-
-**Claude Squad의 yolo/auto-accept 모드**
-"사람 확인 없이 자동 실행" 토글. 대시보드 하단 Monaco DiffEditor의 Accept 버튼과 쌍으로 — 토글 ON이면 diff를 표시만 하고 자동 accept, OFF면 수동 리뷰 게이트.
-
-**VoltAgent의 4ms 코얼레스 패턴**
-PTY stdout을 첫 바이트 도착 후 4ms 더 모아서 한 번에 xterm에 write. burst를 하나의 chunk로 묶어 렌더링 frame drop 방지.
-
-**OpenHands의 accumulated_cost 실시간 표시**
-각 에이전트 패널 헤더에 토큰/비용 카운터. status bar에 전체 합산도 표시.
-
-**AgentsRoom의 Dynamic Island 스타일 플로팅 상태**
-항상 위에 떠 있는 글로벌 상태 위젯 (몇 개 실행 중 / 오류 있음). 대시보드 최상단 고정 바로 구현.
-
-**Composio AO의 CI 실패 → 자동 해당 에이전트 포커스**
-에러 감지 시 트리 노드 빨간색 + 자동으로 해당 패널로 포커스 이동. PTY onExit 코드가 0이 아닐 때 트리거.
+*2026-06-01, 7 subagents researching in parallel (206K tokens)*
 
 ---
 
-## 2. 기술 스택 최종 추천
+## 1. UX patterns worth stealing
 
-| 레이어 | 선택 | 이유 |
+**AgentHub's FileWatcher → reactive tree**
+Agent state is managed as files, chokidar detects changes → the Zustand store updates → Tree/Panel update automatically. No DB; the files are the source of truth. Fits naturally with Engram's `orchestra.md`-based architecture.
+
+**Claude Squad's yolo/auto-accept mode**
+A toggle for "run automatically without human confirmation". Paired with the Accept button of the Monaco DiffEditor at the bottom of the dashboard — with the toggle ON the diff is only displayed and accepted automatically; OFF is a manual review gate.
+
+**VoltAgent's 4ms coalesce pattern**
+Gather PTY stdout for another 4ms after the first byte arrives and write it to xterm at once. Bundles a burst into one chunk to prevent render frame drops.
+
+**OpenHands' real-time accumulated_cost display**
+A token/cost counter in each agent panel header. The overall total is also shown in the status bar.
+
+**AgentsRoom's Dynamic Island-style floating status**
+A global status widget that always floats on top (how many running / errors present). Implemented as a bar fixed at the very top of the dashboard.
+
+**Composio AO's CI failure → automatically focus that agent**
+On error detection, the tree node turns red and focus moves automatically to that panel. Triggered when the PTY onExit code is not 0.
+
+---
+
+## 2. Final tech stack recommendation
+
+| Layer | Choice | Reason |
 |---|---|---|
-| 데스크톱 래퍼 | Tauri v2 | 고정 |
-| UI 프레임워크 | React 19 + TypeScript | 고정 |
-| 빌드 툴 | Vite | Tauri 공식 템플릿 기본값 |
-| 스타일링 | TailwindCSS v4 + shadcn/ui | 커스텀 색상 토큰으로 에이전트 상태색 관리 |
-| 상태 관리 | **Zustand** | 3KB, FileWatcher 패턴과 자연스럽게 연동, `@tauri-store/zustand` 공식 존재 |
-| 에이전트 트리 | **react-arborist** | 가상화 기본, `openAll/closeAll` API, MIT |
-| 터미널 | @xterm/xterm + react-xtermjs | 다중 인스턴스는 `key` prop으로 격리 |
-| 패널 분할 | **allotment** | VS Code 코드베이스 파생, 동적 pane 선언형, 중첩 분할 가능 |
-| diff 에디터 | @monaco-editor/react DiffEditor | 고정. loader.config 로컬 번들 필수 |
-| PTY 관리 | **portable-pty (Rust 직접)** | 다중 인스턴스 + Windows ConPTY 안정성. tauri-plugin-pty는 단일 인스턴스만 |
-| Rust→TS 타입 | **tauri-specta** | invoke 시그니처 자동 TS 타입 생성 |
-| 패널 리사이즈 감지 | ResizeObserver (직접) | allotment onResize + fitAddon.fit() 연결 |
+| Desktop wrapper | Tauri v2 | fixed |
+| UI framework | React 19 + TypeScript | fixed |
+| Build tool | Vite | Default of the official Tauri template |
+| Styling | TailwindCSS v4 + shadcn/ui | Manage agent state colors with custom color tokens |
+| State management | **Zustand** | 3KB, works naturally with the FileWatcher pattern, an official `@tauri-store/zustand` exists |
+| Agent tree | **react-arborist** | Virtualization by default, `openAll/closeAll` API, MIT |
+| Terminal | @xterm/xterm + react-xtermjs | Isolate multiple instances with the `key` prop |
+| Panel split | **allotment** | Derived from the VS Code codebase, declarative dynamic panes, nested splits possible |
+| Diff editor | @monaco-editor/react DiffEditor | fixed. loader.config local bundling is mandatory |
+| PTY management | **portable-pty (Rust directly)** | Multiple instances + Windows ConPTY stability. tauri-plugin-pty supports a single instance only |
+| Rust→TS types | **tauri-specta** | Auto-generates TS types for invoke signatures |
+| Panel resize detection | ResizeObserver (direct) | Connects allotment onResize + fitAddon.fit() |
 
 ---
 
-## 3. 예상 구현 난이도 & 리스크
+## 3. Expected implementation difficulty & risks
 
-| 컴포넌트 | 난이도 | 주요 리스크 |
+| Component | Difficulty | Main risk |
 |---|---|---|
-| Tauri 기본 셋업 + capabilities | 낮음 | v2 ACL 파일 누락 시 invoke 전부 막힘 |
-| PTY spawn (단일) | 낮음 | Windows cwd 역슬래시 변환 누락 |
-| **PTY 다중 인스턴스 관리** | **높음** | ConPTY 동시 생성/소멸 race condition. 전역 Mutex 직렬화 필수 |
-| xterm.js React 다중 인스턴스 | 중간 | Strict Mode 2회 effect, dispose 타이밍 |
-| allotment 동적 패널 | 낮음 | pane 추가 시 FitAddon.fit() 재호출 필요 |
-| react-arborist 트리 | 낮음 | Zustand store → data prop 파생 함수 주의 |
-| Monaco DiffEditor (Tauri 내) | 중간 | CDN 로딩 차단. 로컬 번들 설정 안 하면 오프라인 빈 화면 |
-| Monaco Accept/Revert | 중간 | getLineChanges()가 마운트 직후 null. onDidUpdateDiff 이후에만 호출 가능 |
-| PTY → xterm 스트리밍 | 중간 | Channel 타입 맞추기, 4ms 코얼레스 버퍼 구현 |
-| Windows 전체 빌드 | 중간 | WebView2, ConPTY Job Object 없으면 orphan 프로세스 |
+| Basic Tauri setup + capabilities | Low | A missing v2 ACL file blocks every invoke |
+| PTY spawn (single) | Low | Missed Windows cwd backslash conversion |
+| **PTY multi-instance management** | **High** | ConPTY simultaneous create/destroy race condition. Serializing with a global Mutex is mandatory |
+| xterm.js React multi-instance | Medium | Strict Mode effect running twice, dispose timing |
+| allotment dynamic panels | Low | FitAddon.fit() must be called again when a pane is added |
+| react-arborist tree | Low | Watch the function deriving the data prop from the Zustand store |
+| Monaco DiffEditor (inside Tauri) | Medium | CDN loading is blocked. Without local bundle setup, an empty screen offline |
+| Monaco Accept/Revert | Medium | getLineChanges() is null right after mount. Callable only after onDidUpdateDiff |
+| PTY → xterm streaming | Medium | Matching the Channel type, implementing the 4ms coalesce buffer |
+| Full Windows build | Medium | WebView2, orphan processes without a ConPTY Job Object |
 
 ---
 
-## 4. 시작 순서
+## 4. Starting order
 
-**Phase 1 — 뼈대 (1~2일)**
+**Phase 1 — Skeleton (1~2 days)**
 1. `npm create tauri-app` → React + TypeScript
-2. capabilities/default.json 최소 권한
+2. capabilities/default.json minimal permissions
 3. Vite + TailwindCSS + shadcn/ui
-4. tauri-specta 설치, 더미 invoke로 타입 생성 확인
+4. Install tauri-specta, confirm type generation with a dummy invoke
 
-**Phase 2 — PTY 싱글 인스턴스 (2~3일)**
-5. `portable-pty` Cargo 의존성
-6. `pty_open` / `pty_write` / `pty_resize` / `pty_close` 커맨드 (단일 세션)
-7. xterm.js 연결, Channel 스트리밍 확인
-8. Windows cwd 역슬래시 문제 해결 확인
+**Phase 2 — Single PTY instance (2~3 days)**
+5. `portable-pty` Cargo dependency
+6. `pty_open` / `pty_write` / `pty_resize` / `pty_close` commands (single session)
+7. Connect xterm.js, confirm Channel streaming
+8. Confirm the Windows cwd backslash problem is solved
 
-**Phase 3 — 다중 PTY + 패널 (2~3일)**
-9. `HashMap<u32, Arc<Session>>` 다중 세션 구조
-10. 전역 ConPTY Mutex
-11. allotment 동적 n분할 패널
-12. 패널 추가/제거 시 PTY spawn/close 연동
+**Phase 3 — Multiple PTYs + panels (2~3 days)**
+9. `HashMap<u32, Arc<Session>>` multi-session structure
+10. Global ConPTY Mutex
+11. allotment dynamic n-way split panels
+12. Tie PTY spawn/close to panel add/remove
 
-**Phase 4 — 에이전트 트리 (1~2일)**
+**Phase 4 — Agent tree (1~2 days)**
 13. Zustand agentStore (id, name, status, ptyId)
-14. react-arborist NodeRenderer 상태별 아이콘/색상
-15. Rust `agent-status` emit → listen → store → tree 반영
+14. react-arborist NodeRenderer per-state icons/colors
+15. Rust `agent-status` emit → listen → store → tree update
 
-**Phase 5 — Monaco DiffEditor (1~2일)**
-16. `loader.config({ monaco })` 로컬 번들
-17. `vite-plugin-monaco-editor` 언어 워커 지정
-18. `onDidUpdateDiff` 이후 Accept/Revert 버튼
+**Phase 5 — Monaco DiffEditor (1~2 days)**
+16. `loader.config({ monaco })` local bundle
+17. `vite-plugin-monaco-editor` language worker specification
+18. Accept/Revert buttons after `onDidUpdateDiff`
 
-**Phase 6 — UX 마감 (1일)**
-19. 글로벌 상태 바 (실행 중 수, 오류 여부)
-20. yolo 모드 토글 (diff 자동 accept)
-21. 비정상 종료 시 트리 노드 빨간색 + 포커스 이동
+**Phase 6 — UX polish (1 day)**
+19. Global status bar (running count, error presence)
+20. yolo mode toggle (diff auto accept)
+21. On abnormal exit, tree node turns red + focus moves
 
 ---
 
-## 5. 놓치기 쉬운 함정
+## 5. Easy-to-miss pitfalls
 
-**Windows ConPTY race condition** ← 가장 위험
-`portable-pty` known issue (#356) — openpty와 drop이 겹치면 console 깨짐.
-전역 `static CONPTY_LIFECYCLE_LOCK: Mutex<()>` 로 spawn과 drop 모두 직렬화 필수.
-없으면 에이전트 2개 이상 동시 시작 시 랜덤으로 터미널 깨짐.
+**Windows ConPTY race condition** ← the most dangerous
+`portable-pty` known issue (#356) — the console breaks when openpty and drop overlap.
+Serializing both spawn and drop with a global `static CONPTY_LIFECYCLE_LOCK: Mutex<()>` is mandatory.
+Without it, the terminal breaks at random when 2 or more agents start at once.
 
 **pty_close blocking**
-Windows에서 `ClosePseudoConsole`이 conhost drain 대기로 blocking됨.
-Session drop을 별도 스레드에서 실행해야 Tauri 커맨드 스레드가 막히지 않음.
-→ `thread::spawn(move || drop(session))` 패턴.
+On Windows `ClosePseudoConsole` blocks waiting for the conhost drain.
+Session drop must run on a separate thread so the Tauri command thread is not blocked.
+→ the `thread::spawn(move || drop(session))` pattern.
 
-**cwd 슬래시**
-`CreateProcessW`는 forward-slash cwd 거부. Rust에서 `cwd.replace('/', "\\")` 필수.
+**cwd slashes**
+`CreateProcessW` rejects a forward-slash cwd. `cwd.replace('/', "\\")` is mandatory in Rust.
 
-**xterm.js Strict Mode 2회 effect**
-개발 환경에서 effect 2번 실행 → `terminal.open(container)` 두 번 호출 → 터미널 깨짐.
-`termRef.current` 존재하면 early return guard 필수.
+**xterm.js Strict Mode effect running twice**
+In development the effect runs twice → `terminal.open(container)` is called twice → the terminal breaks.
+An early-return guard is mandatory when `termRef.current` exists.
 
-**Monaco CDN 차단**
-`loader.config({ monaco })`를 App 진입점에서 즉시 실행하지 않으면 CDN 요청 시도.
-Tauri CSP가 막으면 빈 화면 + 에러 메시지 없음.
+**Monaco CDN blocking**
+If `loader.config({ monaco })` is not run immediately at the App entry point, it tries a CDN request.
+If the Tauri CSP blocks it, an empty screen and no error message.
 
 **getLineChanges() null**
-DiffEditor onMount에서 바로 호출하면 null.
-`editor.onDidUpdateDiff(() => { ... })` 이벤트 구독 후 호출해야 유효한 결과.
+Calling it right in DiffEditor onMount gives null.
+You get a valid result only if you subscribe to the `editor.onDidUpdateDiff(() => { ... })` event and call it after that.
 
-**allotment + FitAddon 연동**
-allotment 드래그 리사이즈 시 `window.resize` 이벤트 발생 안 함.
-`onVisibleChange` + `ResizeObserver`를 각 xterm 컨테이너에 붙여야 cols/rows 동기화.
-안 하면 줄바꿈 어긋남.
+**allotment + FitAddon integration**
+A `window.resize` event does not fire on an allotment drag resize.
+Attach `onVisibleChange` + `ResizeObserver` to each xterm container to sync cols/rows.
+Without it, line wrapping goes out of alignment.
 
-**Monaco 번들 크기**
-gzip 후 2~5MB. `languageWorkers: ["editorWorkerService"]`만으로 diff 뷰 동작.
-TypeScript worker 포함 시 +40%.
+**Monaco bundle size**
+2~5MB after gzip. `languageWorkers: ["editorWorkerService"]` alone makes the diff view work.
+Including the TypeScript worker adds +40%.
 
-**tauri-specta 초기 설정**
-나중에 추가하면 기존 invoke 전부 재작업. 처음부터 설정할 것.
+**tauri-specta initial setup**
+If added later, all existing invokes must be reworked. Set it up from the start.

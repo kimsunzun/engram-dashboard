@@ -1,5 +1,5 @@
-// TRD S21-slot-docking §8-2 `dragOverride`(리듀서 표 — 계기 ① ② ③ ④ · 시한 없음 · 되돌리기) · §8-3 출처 창 순서 시험
-//   (fast-check `fc.scheduler()` — `done` · invoke 응답 · `window:tabs-updated` · `layout:updated` · dragend 를 아무 순서로 섞는다).
+// TRD S21-slot-docking §8-2 `dragOverride` (reducer table — triggers ① ② ③ ④ · no deadline · revert) · §8-3 source window order test
+//   (fast-check `fc.scheduler()` — mixes `done` · invoke responses · `window:tabs-updated` · `layout:updated` · dragend in any order).
 
 import fc from 'fast-check'
 import { describe, expect, it } from 'vitest'
@@ -19,10 +19,10 @@ import {
 
 const WIN = 'main'
 const DRAG = 'drag-1'
-/** 누르기 전 활성 A · 누름이 B 를 활성으로 했다(R2). */
+/** Active A before the press · the press made B active (R2). */
 const AT_START: WindowModel = { tabs: ['A', 'B', 'C'], active: 'B' }
 
-/** 사건을 차례로 먹인다 — 마지막 상태와 낸 되돌리기의 `to` 목록. */
+/** Feed the events in turn — the last state and the list of `to` of the reverts issued. */
 function run(events: Array<[OverrideEvent, WindowModel]>, from: OverrideState = IDLE) {
   let state = from
   const reverts: string[] = []
@@ -97,15 +97,15 @@ describe('dragOverride — 푸는 계기(시한 없음)', () => {
 
   it('① done{applied} 는 탭 목록이 dragstart 때와 달라진 뒤에 푼다 — 둘 중 늦게 닿은 쪽에서', () => {
     const moved: WindowModel = { tabs: ['A', 'C'], active: 'A' }
-    // done 먼저 → 아직 그대로 → 목록 바뀜에서 풂.
+    // done first → still unchanged → released on the list change.
     let s = run([start(), out(), end('move'), done('applied')]).state
     expect(s.phase).toBe('ended')
     expect(shownTab(s, AT_START)).toBe('A')
     expect(run([tabs(moved)], s).state).toBe(IDLE)
-    // 목록 먼저(끄는 탭이 빠짐) → 그 자리에서 풂.
+    // List first (the dragged tab leaves) → released on the spot.
     s = run([start(), out(), end('move'), tabs(moved)]).state
     expect(s).toBe(IDLE)
-    // 같은 창 순서 바꿈 — 끄는 탭이 활성인 채 순서만 바뀜 → done{applied} 가 닿아야 푼다.
+    // Same-window reorder — the dragged tab stays active and only the order changes → released only when done{applied} arrives.
     const reordered: WindowModel = { tabs: ['B', 'A', 'C'], active: 'B' }
     s = run([start(), end('move'), tabs(reordered)]).state
     expect(s.phase).toBe('ended')
@@ -191,7 +191,7 @@ describe('dragOverride — 원래 선택 되돌리기(§4-6)', () => {
       const r = run([start(), out(), end('none'), done(outcome)])
       expect(r.reverts).toEqual(['A'])
       expect(r.state).toEqual({ phase: 'reverting', drag: DRAG, view: 'B', to: 'A' })
-      // 모델은 아직 누른 탭(B)이 활성이다 — 그래도 initial 을 그린다(번쩍임 없음).
+      // The model still has the pressed tab (B) active — even so, draw initial (no flash).
       expect(shownTab(r.state, AT_START)).toBe('A')
       expect(stripHeld(r.state, AT_START)).toBe(false)
     }
@@ -263,13 +263,13 @@ describe('dragOverride — 원래 선택 되돌리기(§4-6)', () => {
   })
 })
 
-// ── §8-3 순서 시험 ──────────────────────────────────────────────────────────────
+// ── §8-3 order test ──────────────────────────────────────────────────────────────
 
-/** 출처 창에 닿는 것 하나. `after` = 출처 dragend 뒤에야 생기는 것(그 dragend 가 보낸 `DragEnd` 의 결과). */
+/** One thing that reaches the source window. `after` = what arises only after the source dragend (the result of the `DragEnd` sent by that dragend). */
 interface Arrival {
   label: string
   event: OverrideEvent | null
-  /** 이것이 닿으면 그 창 스토어가 이 값이 된다(`window:tabs-updated`). */
+  /** When this arrives, that window's store becomes this value (`window:tabs-updated`). */
   model?: WindowModel
   after?: boolean
 }
@@ -277,22 +277,22 @@ interface Arrival {
 interface Scenario {
   name: string
   initial: string | null
-  /** 놓은 곳 — 커서가 자기 탭바 구역 밖이었나. */
+  /** Drop location — whether the cursor was outside its own tab bar zone. */
   out: boolean
   effect: EndEffect
   local?: boolean
   arrivals: Arrival[]
-  /** 끝 상태가 idle 이어야 하나(그물 없이 풀리는 갈래). */
+  /** Whether the end state must be idle (the branch that is released without the net). */
   releases: boolean
-  /** 끄는 탭이 그 창을 떠난다 — 바꿔 그린 뒤로 한 프레임도 끄는 탭을 그리지 않는다(②). */
+  /** The dragged tab leaves that window — after the swap redraw, the dragged tab is not drawn for even one frame (②). */
   leaves?: boolean
-  /** 같은 창 순서 바꿈 — transform 을 거둔 프레임 = 모델 순서가 바뀐 프레임(④). */
+  /** Same-window reorder — the frame that withdraws the transform = the frame where the model order changes (④). */
   reorder?: boolean
-  /** 되돌리기 수(정확히). `undefined` = ≤ 1 만 본다. */
+  /** Revert count (exact). `undefined` = check only ≤ 1. */
   reverts?: number
-  /** 되돌리기의 `switch_tab_if` 가 거절되거나 잃어 그 알림이 오지 않는다. */
+  /** The revert's `switch_tab_if` is rejected or lost so that notice does not arrive. */
   revertLost?: boolean
-  /** 바꿔 그린 뒤로 끄는 탭(B)을 한 프레임도 그리지 않는다 — 되돌리기의 번쩍임 없음(메인 결정 2026-10-20). */
+  /** After the swap redraw, the dragged tab (B) is not drawn for even one frame — no revert flash (main decision 2026-10-20). */
   noFlash?: boolean
 }
 
@@ -302,7 +302,7 @@ const doneOf = (outcome: DropOutcome, after = false): Arrival => ({
   after,
 })
 const tabsOf = (label: string, model: WindowModel, after = false): Arrival => ({ label, event: { type: 'tabs' }, model, after })
-/** 상태를 바꾸지 않는 소음 — `layout:updated` · invoke 응답(오류 아님). */
+/** Noise that does not change state — `layout:updated` · invoke response (not an error). */
 const noise = (label: string, after = false): Arrival => ({ label, event: null, after })
 
 const MOVED_OUT: WindowModel = { tabs: ['A', 'C'], active: 'A' }
@@ -450,7 +450,7 @@ interface Frame {
   model: WindowModel
 }
 
-/** 시나리오 하나를 scheduler 가 고른 순서로 돌린다 — 프레임(사건 하나를 먹인 뒤)마다 상태 · 스토어를 적는다. */
+/** Run one scenario in the order the scheduler picks — record state · store at every frame (after feeding one event). */
 async function play(sc: Scenario, s: fc.Scheduler) {
   let model = AT_START
   let state = run([[{ type: 'start', window: WIN, drag: DRAG, view: 'B', initial: sc.initial }, AT_START]]).state
@@ -467,8 +467,8 @@ async function play(sc: Scenario, s: fc.Scheduler) {
       const revert = step.revert
       if (revert !== null) {
         reverts.push(revert.to)
-        // 되돌리기의 `switch_tab_if` 왕복 — 셸에 닿은 때 그 창 활성이 아직 `expect` 면 `to` 로 바꾸고 알림이 뒤따른다.
-        //   그사이 다른 탭이 골라졌으면 셸은 아무것도 안 바꾸고 알리지 않는다.
+        // The revert's `switch_tab_if` round trip — when it reaches the shell, if that window's active is still `expect`, change it to `to` and a notice follows.
+        //   If another tab was chosen in the meantime, the shell changes nothing and does not notify.
         if (!sc.revertLost) {
           void s.schedule(Promise.resolve(), 'switch_tab_if').then(() => {
             if (model.active !== revert.expect || !model.tabs.includes(revert.to)) return
@@ -505,16 +505,16 @@ describe('dragOverride — 순서 시험(fc.scheduler)', () => {
           const { frames, reverts, state, model } = await play(sc, s)
           const where = () => `${s.report().map(r => r.label).join(' → ')}`
 
-          // ① 풀려야 하는 갈래는 끝에 풀렸다 · ③ 풀린 뒤 그리는 탭 = 모델 활성.
+          // ① The branch that must be released was released at the end · ③ the tab drawn after release = the model active.
           if (sc.releases) expect(state, where()).toBe(IDLE)
           expect(shownTab(state, model), where()).toBe(model.active)
 
-          // ② 끄는 탭이 그 창을 떠나는 갈래 — 바꿔 그린 뒤로는 한 프레임도 끄는 탭을 그리지 않는다(시한 뒤집기 없음).
+          // ② The branch where the dragged tab leaves that window — after the swap redraw, the dragged tab is not drawn for even one frame (no deadline flip).
           if (sc.leaves) {
             for (const f of frames) expect(shownTab(f.state, f.model), `${f.label} @ ${where()}`).not.toBe('B')
           }
 
-          // ④ 같은 창 순서 바꿈 — transform 은 모델 순서가 바뀐 그 프레임까지 남고, 그 프레임에 거둔다.
+          // ④ Same-window reorder — the transform stays until the frame where the model order changes, and is withdrawn on that frame.
           if (sc.reorder) {
             for (const f of frames) {
               const sameOrder = f.model.tabs.join() === AT_START.tabs.join()
@@ -522,14 +522,14 @@ describe('dragOverride — 순서 시험(fc.scheduler)', () => {
             }
           }
 
-          // 되돌리기를 기다리는 동안 끄는 탭을 그리지 않는다 — 그물(pointerdown)이 푼 뒤는 모델 활성(누른 탭)이라 뺀다.
+          // The dragged tab is not drawn while waiting for the revert — after the net (pointerdown) releases, the model active (the pressed tab) is it, so it is excluded.
           if (sc.noFlash) {
             for (const f of frames) {
               if (f.label === 'pointerdown') break
               expect(shownTab(f.state, f.model), `${f.label} @ ${where()}`).not.toBe('B')
             }
           }
-          // 되돌리기가 안 닿아도 그물(pointerdown)이 푼다 — done 이 그보다 먼저면 되돌리기를 냈고 그때까지 initial 을 그렸다.
+          // Even if the revert does not arrive, the net (pointerdown) releases — if done came before that, a revert was issued and initial was drawn until then.
           if (sc.revertLost) {
             const at = (label: string) => frames.findIndex(f => f.label === label)
             const doneFirst = at('done:ignored(DragEnd)') < at('pointerdown')
@@ -539,7 +539,7 @@ describe('dragOverride — 순서 시험(fc.scheduler)', () => {
             }
           }
 
-          // ⑤ 되돌리기는 많아야 한 번 · 갈래마다 정확한 수.
+          // ⑤ At most one revert · the exact count per branch.
           expect(reverts.length, where()).toBeLessThanOrEqual(1)
           if (sc.reverts !== undefined) expect(reverts.length, where()).toBe(sc.reverts)
         }),
@@ -581,7 +581,7 @@ describe('dragOverride — 순서 시험(fc.scheduler)', () => {
         expect(state, where()).toBe(IDLE)
         expect(model.active, where()).toBe('C')
         expect(shownTab(state, model), where()).toBe('C')
-        // 되돌리기를 냈고 C 가 그 왕복보다 먼저 닿은 갈래 — 옛 무조건 `switch_tab` 이면 A 로 덮였다.
+        // The branch where a revert was issued and C arrived before that round trip — with the old unconditional `switch_tab` it would have been overwritten with A.
         if (reverts.length === 1 && !frames.some(f => f.label === 'tabs:revert')) raced++
       }),
       { numRuns: 200 },
@@ -596,7 +596,7 @@ describe('dragOverride — 순서 시험(fc.scheduler)', () => {
       initial: 'A',
       out: true,
       effect: 'move',
-      // 받은 창의 Drop 을 잃었다 — done 은 DragEnd 의 무시뿐이다.
+      // The receiving window's Drop was lost — done is only the ignoring of DragEnd.
       arrivals: [doneOf('ignored', true), tabsOf('tabs:llm-switch', llm, true)],
       releases: true,
       reverts: 0,

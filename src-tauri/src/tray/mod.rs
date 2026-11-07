@@ -1,14 +1,14 @@
-//! tray — Tauri 통합 트레이 모듈(ADR-0026: 트레이를 앱에 통합, 2프로세스).
+//! tray — the Tauri-integrated tray module (ADR-0026: tray integrated into the app, 2 processes).
 //!
-//! ## 구조 (3층 — CLAUDE.md 「코어 격리」 · 「LLM-우선 제어」)
-//! - [`core`] — **순수**(OS/Tauri/discovery 무의존): MenuAction 의도 enum, menu_id↔action 매핑,
-//!   IconState, to_grayscale_rgba. 단위테스트 대상.
-//! - [`actions`] — **불순 공유 부수효과**: 트레이 핸들러와 command 가 같은 함수를 부르게(중복 금지).
-//!   show/hide 창, quit_app, refresh_tray_icon.
-//! - 이 파일(`mod.rs`) — Tauri 배선(불순): TrayIconBuilder, 메뉴 생성, on_menu_event 디스패치,
-//!   아이콘 두 벌 생성·보관(TrayIcons state).
+//! ## Structure (3 layers — CLAUDE.md 「코어 격리」 · 「LLM-우선 제어」)
+//! - [`core`] — **pure** (no OS/Tauri/discovery dependence): the MenuAction intent enum, menu_id↔action mapping,
+//!   IconState, to_grayscale_rgba. The target of unit tests.
+//! - [`actions`] — **impure shared side effects**: so the tray handler and the command call the same function (no duplication).
+//!   show/hide windows, quit_app, refresh_tray_icon.
+//! - This file (`mod.rs`) — Tauri wiring (impure): TrayIconBuilder, menu creation, on_menu_event dispatch,
+//!   creating·keeping the two icon sets (TrayIcons state).
 //!
-//! Windows 전용(트레이 GUI). setup() 에서 build_tray(app) 1회 호출.
+//! Windows only (tray GUI). build_tray(app) is called once in setup().
 
 pub mod actions;
 pub mod core;
@@ -27,57 +27,57 @@ use core::{IconState, MenuAction};
 
 use crate::daemon_client::stop::StopOutcome;
 
-// 컬러(데몬 alive)·회색(dead) 트레이 아이콘 두 벌. setup 에서 1회 생성해 manage(state).
+// Two tray icon sets: color (daemon alive) · gray (dead). Created once in setup and managed as state.
 //
-// ★1회 생성 후 보관(load-bearing)★: 매 갱신마다 .ico 디코드/grayscale 변환을 다시 하면 낭비라
-// setup 에서 두 벌을 만들어 들고, refresh 때는 set_icon 으로 둘 중 하나를 교체만 한다. Image<'static>
-// 은 내부 Cow 라 clone 이 저렴(set_icon 이 소유를 요구해 갱신 시 복제).
+// ★Created once and kept (load-bearing)★: redoing the .ico decode/grayscale conversion at every update is wasteful, so
+// setup makes the two sets and holds them, and on refresh set_icon only swaps one of the two. Image<'static>
+// is an internal Cow so clone is cheap (set_icon requires ownership, so it is cloned on update).
 pub struct TrayIcons {
     pub active: Image<'static>,
     pub inactive: Image<'static>,
 }
 
-// 내장 컬러 아이콘(.ico). 배포 시 경로 의존 제거 위해 컴파일에 박는다(tray-host 와 동일 방식).
+// The built-in color icon (.ico). Embedded at compile time to remove path dependence at deployment (the same way as tray-host).
 const ICON_ICO: &[u8] = include_bytes!("../../icons/icon.ico");
 
-// ensure_daemon(WMI spawn + 폴링) blocking 한계. discovery 내부 폴링 timeout 과 같은 5초.
+// The blocking limit of ensure_daemon (WMI spawn + polling). 5 seconds, the same as discovery's internal polling timeout.
 const ENSURE_TIMEOUT: Duration = Duration::from_secs(5);
 
-// 트레이 아이콘 두 벌을 생성한다. 컬러 = .ico 디코드, 회색 = 컬러 RGBA 를 grayscale 변환.
+// Create the two tray icon sets. Color = .ico decode, gray = grayscale conversion of the color RGBA.
 //
-// .ico → RGBA 디코드는 Tauri Image::from_bytes(image-ico feature)로 한다(별도 image crate 불필요).
-// 회색은 디코드한 RGBA 버퍼를 core::to_grayscale_rgba 로 변환해 Image::new_owned 로 재구성.
+// The .ico → RGBA decode is done with Tauri Image::from_bytes (image-ico feature) (no separate image crate needed).
+// For gray, the decoded RGBA buffer is converted with core::to_grayscale_rgba and rebuilt with Image::new_owned.
 fn build_icons() -> tauri::Result<TrayIcons> {
-    // image-ico feature 필요(없으면 .ico 디코드 실패).
+    // The image-ico feature is required (without it, the .ico decode fails).
     let active = Image::from_bytes(ICON_ICO)?;
     let (w, h) = (active.width(), active.height());
-    // to_grayscale_rgba 는 len==w*h*4 전제(디코드가 보장).
+    // to_grayscale_rgba assumes len==w*h*4 (guaranteed by the decode).
     let gray_rgba = core::to_grayscale_rgba(active.rgba(), w, h);
     let inactive = Image::new_owned(gray_rgba, w, h);
-    // 컬러도 owned 로 승격(Image::from_bytes 는 'static — ICON_ICO 가 'static 이라 OK, 명시 clone).
+    // Color is also promoted to owned (Image::from_bytes is 'static — OK since ICON_ICO is 'static, explicit clone).
     let active = active.to_owned();
     Ok(TrayIcons { active, inactive })
 }
 
-// 트레이를 생성·배선한다(setup 에서 1회). 아이콘 두 벌을 manage 하고, 메뉴·핸들러를 단다.
+// Create and wire the tray (once in setup). Manage the two icon sets and attach the menu · handler.
 //
-// 메뉴(순서): 데몬 켜기 / 데몬 끄기 / 부팅 시 자동 시작 / ──separator── / 완전 종료.
-// 메뉴 id 와 라벨은 core::MenuAction 에서(순수). 클릭 → action_for_menu_id → dispatch.
-// UI 보이기·숨기기는 메뉴 항목이 없다 — 보이기는 **트레이 좌클릭(단발)**(on_tray_icon_event), 숨기기는 메인 X.
+// Menu (order): daemon on / daemon off / start at boot / ──separator── / full quit.
+// Menu ids and labels come from core::MenuAction (pure). Click → action_for_menu_id → dispatch.
+// There are no menu items for UI show·hide — show is **tray left click (single)** (on_tray_icon_event), and hide is main's X.
 pub fn build_tray(app: &App) -> tauri::Result<()> {
     let icons = build_icons()?;
-    // 초기 아이콘 = 회색(데몬 상태는 setup 직후 refresh 가 확정).
+    // Initial icon = gray (the daemon state is confirmed by the refresh right after setup).
     let initial = icons.inactive.clone();
     app.manage(icons);
 
-    // ── 메뉴 항목(core 의 id/label 사용 — 순수 분리) ──────────────────────────────────
+    // ── Menu items (using core's id/label — pure separation) ──────────────────────────────────
     let handle = app.handle();
     let mi = |a: MenuAction| MenuItem::with_id(handle, a.menu_id(), a.label(), true, None::<&str>);
     let start = mi(MenuAction::StartDaemon)?;
     let stop = mi(MenuAction::StopDaemon)?;
-    // ADR-0027 §55: 자동 시작은 체크 가능 항목(CheckMenuItem). 초기 체크 = 현재 레지스트리 등록 여부.
-    // 등록 인자(--hidden, 모드 인자 없음 — ADR-0029)는 autostart 플러그인 init 에서 박았고,
-    // 여기선 활성 여부만 읽어 체크에 반영.
+    // ADR-0027 §55: autostart is a checkable item (CheckMenuItem). Initial check = whether it is currently registered in the registry.
+    // The registration argument (--hidden, no mode argument — ADR-0029) was embedded in the autostart plugin init,
+    // and here only the enabled state is read and reflected in the check.
     let autostart_action = MenuAction::ToggleAutostart;
     let autostart_checked = app.autolaunch().is_enabled().unwrap_or(false);
     let autostart = CheckMenuItem::with_id(
@@ -90,24 +90,24 @@ pub fn build_tray(app: &App) -> tauri::Result<()> {
     )?;
     let sep = PredefinedMenuItem::separator(handle)?;
     let quit = mi(MenuAction::QuitApp)?;
-    // 순서: 데몬 켜기/끄기/부팅 자동 시작/(구분선)/완전 종료 — core::ALL 과 일치.
+    // Order: daemon on/off/start at boot/(separator)/full quit — matches core::ALL.
     let menu = Menu::with_items(handle, &[&start, &stop, &autostart, &sep, &quit])?;
 
-    // 토글 시 set_checked 동기화용으로 CheckMenuItem 핸들 보관(actions::toggle_autostart 가 재조회).
+    // Keep the CheckMenuItem handle for set_checked sync on toggle (actions::toggle_autostart looks it up again).
     app.manage(AutostartCheck(autostart));
 
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(initial)
         .tooltip("Engram")
         .menu(&menu)
-        // 좌클릭에 메뉴 안 뜨게(사용자 요청). 메뉴=우클릭, 좌클릭(단발)=UI 열기(아래 on_tray_icon_event).
-        // 기본값이 true 라 명시 false. (Tauri 2.11: menu_on_left_click 은 deprecated → show_ 사용.)
+        // So the menu does not appear on left click (user request). Menu = right click, left click (single) = open UI (on_tray_icon_event below).
+        // The default is true so false is explicit. (Tauri 2.11: menu_on_left_click is deprecated → use show_.)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| dispatch_menu(app, event.id.as_ref()))
-        // 트레이 좌클릭(단발) = 모든 UI 창 되살리기(사용자 요청, ADR-0229). Left + Up(뗄 때)만 처리 —
-        // Click 은 Down·Up 둘 다 발화하므로 Up 으로 한정해 1회만(중복 표시 방지). 우클릭/Enter/Move/
-        // Leave 무시. show_main_ui 는 command·단일 인스턴스 재실행과 같은 actions 함수 공유(CLAUDE.md 「LLM-우선 제어」). 사람의
-        // 누름이라 「누름」 갈래다(TRD S26-window-chrome §6-2 「누가 어느 갈래인가」).
+        // Tray left click (single) = bring back all UI windows (user request, ADR-0229). Only Left + Up (on release) is handled —
+        // Click fires both Down and Up, so it is limited to Up to fire only once (prevents duplicate showing). Right click/Enter/Move/
+        // Leave are ignored. show_main_ui shares the same actions function as the command · single-instance relaunch (CLAUDE.md 「LLM-우선 제어」). A person's
+        // press, so it is the 「누름」 (click) branch (TRD S26-window-chrome §6-2 「누가 어느 갈래인가」).
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
@@ -127,38 +127,38 @@ pub fn build_tray(app: &App) -> tauri::Result<()> {
     Ok(())
 }
 
-// 데몬 생사 주기 옵저버(setup 에서 1회 spawn). 회색 고착 버그 해소 — 데몬이 부팅 후 외부에서
-// 뜨거나 죽어도 ≤PROBE_INTERVAL 내에 트레이 아이콘·emit 가 따라간다.
+// The periodic daemon-liveness observer (spawned once in setup). Resolves the stuck-gray bug — even if the daemon is
+// started or dies externally after boot, the tray icon · emit follow within ≤PROBE_INTERVAL.
 //
-// ★주기 probe = ADR-0028 "버스 뒤 옵저버 impl(pre-flip)"(load-bearing)★: 이 폴링은 임시 우회가
-// 아니라 **Rust 가 소유한 단일 push 소스**다. 데몬 연결(WS) 이벤트로 생사를 직접 받게 되는 flip
-// 단계에서 *probe 메커니즘*은 그 이벤트로 교체되지만, "Rust 옵저버가 변화를 감지해 트레이(네이티브)
-// 와 WebView(emit) 두 구독자에게 push" 라는 **버스/구독자 형태는 불변**이다. 프론트는 나중에
-// `daemon-status-changed` 를 구독한다(ADR-0028 단일 push 채널).
+// ★Periodic probe = ADR-0028 "observer impl behind the bus (pre-flip)" (load-bearing)★: this polling is not a temporary workaround
+// but **the single push source owned by Rust**. At the flip stage, when liveness is received directly from daemon connection (WS) events, the
+// *probe mechanism* is replaced by those events, but the **bus/subscriber shape** — "the Rust observer detects a change and pushes to two subscribers,
+// the tray (native) and the WebView (emit)" — **is unchanged**. The frontend later subscribes to
+// `daemon-status-changed` (ADR-0028 single push channel).
 //
-// ★StopOutcome 즉시확정 분기와의 분담★: 끄기 직후 회색 고착 race 는 dispatch 의
-// icon_state_for_stop_outcome(probe 우회 즉시 회색)가 막고, 이 옵저버는 그걸 **대체하지 않고 보완**한다
-// — 즉시성은 StopOutcome, 외부 변화(부팅 후 데몬 등장·크래시)는 옵저버가 ≤PROBE_INTERVAL 내 반영.
+// ★Division of labor with the StopOutcome immediate-confirm branch★: the stuck-gray race right after turn-off is blocked by dispatch's
+// icon_state_for_stop_outcome (immediate gray bypassing the probe), and this observer **complements it rather than replacing it**
+// — immediacy is StopOutcome's, and external changes (daemon appearing after boot · crash) are reflected by the observer within ≤PROBE_INTERVAL.
 //
-// 오류 격리: probe·publish 어느 것도 옵저버 스레드를 죽이지 않게 결과를 무시(에러는 내부 warn)
-// 하고 무한 루프를 돈다(panic 은 잡지 않는다 — 셸의 panic 은 훅이 곧 셸 종료로 만든다 · ADR-0292).
-// 변화 판정·중복차단·억제창은 publish_daemon_liveness(LivenessState)가 소유 — 옵저버는 probe→publish 만 한다.
-// 초기 아이콘은 build_tray refresh 가 publish 로 last 를 먼저 세팅하므로 옵저버 첫 루프가 같은 값이면
-// publish 가 자동 무시(변화 없음).
+// Error isolation: neither probe nor publish may kill the observer thread, so results are ignored (errors are internal warns)
+// and it loops forever (a panic is not caught — a panic in the shell is turned into a shell exit right away by the hook · ADR-0292).
+// Change decision · duplicate blocking · suppression window are owned by publish_daemon_liveness (LivenessState) — the observer only does probe→publish.
+// The initial icon is set by build_tray refresh with publish first setting last, so if the observer's first loop gives the same value,
+// publish automatically ignores it (no change).
 pub fn spawn_daemon_observer(app: &AppHandle) {
-    // probe 주기. 응답성(외부 변화 반영 지연)과 부하(daemon.json 읽기+PID probe) 절충 — 3초.
+    // Probe period. A compromise between responsiveness (delay in reflecting external changes) and load (daemon.json read + PID probe) — 3 seconds.
     const PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
 
     let app = app.clone();
-    // detached 백그라운드 스레드(앱 생애 내내 상주). tokio runtime 비의존(std::thread + sleep).
+    // A detached background thread (resident for the whole app lifetime). Independent of the tokio runtime (std::thread + sleep).
     std::thread::Builder::new()
         .name("engram-daemon-observer".into())
         .spawn(move || {
-            // m-4: data_dir 은 불변값(default_data_dir)이라 루프 밖에서 1회만 산출해 캐싱.
+            // m-4: data_dir is an immutable value (default_data_dir), so compute it only once outside the loop and cache it.
             let data_dir = crate::discovery::default_data_dir();
             loop {
                 let alive = crate::discovery::daemon_status(&data_dir).alive;
-                // 단일 publish 진입점으로 흘린다 — 변화 판정·억제창(M-1)·트레이 set+emit 일원화(ADR-0028).
+                // Feed it into the single publish entry point — change decision · suppression window (M-1) · tray set+emit unified (ADR-0028).
                 actions::publish_daemon_liveness(&app, alive);
                 std::thread::sleep(PROBE_INTERVAL);
             }
@@ -167,11 +167,11 @@ pub fn spawn_daemon_observer(app: &AppHandle) {
         .ok();
 }
 
-// 메뉴 클릭 id → MenuAction → 동작. 모든 동작은 actions(공유 부수효과)만 호출.
+// Menu click id → MenuAction → action. Every action calls only actions (shared side effects).
 //
-// ★데몬 켜기/끄기 = blocking → 워커(load-bearing)★: ensure/send_stop 은 WMI 폴링/WS 접속으로 수초
-// blocking. on_menu_event 는 메인 스레드라 직접 부르면 트레이·창이 그동안 얼어붙는다 → spawn_blocking
-// 워커로 보내고, 완료 후 refresh_tray_icon(메인 스레드 set_icon)으로 아이콘 갱신.
+// ★Daemon on/off = blocking → worker (load-bearing)★: ensure/send_stop block for seconds on WMI polling/WS connection.
+// on_menu_event is on the main thread, so calling it directly freezes the tray · windows meanwhile → send it to a spawn_blocking
+// worker and, on completion, update the icon with refresh_tray_icon (main-thread set_icon).
 fn dispatch_menu(app: &AppHandle, menu_id: &str) {
     let Some(action) = core::action_for_menu_id(menu_id) else {
         tracing::warn!("[tray] 알 수 없는 메뉴 id: {menu_id}");
@@ -190,23 +190,23 @@ enum DaemonOp {
     Stop,
 }
 
-// 데몬 켜기/끄기를 워커에서 실행하고 완료 후 아이콘 갱신.
+// Run daemon on/off in a worker and update the icon on completion.
 //
-// ★std::process::Command 로 데몬 직접 spawn 금지(ADR-0024 C1)★: ensure_daemon 은 내부에서 WMI
-// (Win32_Process.Create)로만 spawn 한다 — WmiPrvSE 자식이라 앱 Job(KILL_ON_JOB_CLOSE) 미상속 =
-// detached/breakaway 자동충족. 여기서 Command 직접 spawn 하면 앱 종료 시 데몬 동반 사살.
+// ★Do not spawn the daemon directly with std::process::Command (ADR-0024 C1)★: ensure_daemon spawns only via WMI
+// (Win32_Process.Create) inside — as a child of WmiPrvSE it does not inherit the app Job (KILL_ON_JOB_CLOSE) = the
+// detached/breakaway requirement is met automatically. A direct Command spawn here would kill the daemon along with the app on exit.
 fn spawn_daemon_action(app: &AppHandle, op: DaemonOp) {
     let app = app.clone();
-    // ★워커 panic 은 가드하지 않는다(의도)★: 운영 셸에선 아래 클로저의 panic 을 훅이 셸 종료로 만든다
-    // (ADR-0292) — RAII drop 가드(SignalOnDrop)로 아이콘 갱신을 되살릴 자리가 없다. 훅 없는 시험 빌드에선
-    // set/refresh 도달 전 panic 이 그 클릭의 아이콘 갱신만 빠뜨리고, 일방 발사 재발사 모델이라 다음
-    // 켜기/끄기 클릭의 probe 가 상태를 회수한다.
+    // ★A worker panic is not guarded (intentional)★: in the production shell a panic in the closure below is turned into a shell exit by the hook
+    // (ADR-0292) — there is no place for an RAII drop guard (SignalOnDrop) to revive the icon update. In a test build without the hook,
+    // a panic before reaching set/refresh only misses that click's icon update, and with the one-way fire-and-refire model the probe of the next
+    // on/off click recovers the state.
     tauri::async_runtime::spawn_blocking(move || {
         let data_dir = crate::discovery::default_data_dir();
         match op {
             DaemonOp::Start => match crate::discovery::locate_daemon_exe() {
                 Ok(exe) => {
-                    // console=false: windowless. token 은 로그 금지(discovery 가 보장).
+                    // console=false: windowless. Never log the token (discovery guarantees it).
                     match crate::discovery::ensure_daemon(&data_dir, &exe, ENSURE_TIMEOUT, false) {
                         Ok(info) => tracing::info!(
                             pid = info.pid,
@@ -221,34 +221,34 @@ fn spawn_daemon_action(app: &AppHandle, op: DaemonOp) {
             DaemonOp::Stop => match crate::daemon_client::stop::send_stop(&data_dir) {
                 Ok(outcome) => {
                     tracing::info!(?outcome, "[tray] 데몬 graceful stop 발사");
-                    // ★끄기 후 아이콘 확정은 StopOutcome 으로 분기(load-bearing — S13/M-1 race 방지)★:
-                    // DaemonClosed=꺼짐확정 → force_daemon_down. Timeout/NoTarget=불확실 → probe
-                    // 폴백(refresh_tray_icon).
+                    // ★Icon confirmation after turn-off branches on StopOutcome (load-bearing — prevents the S13/M-1 race)★:
+                    // DaemonClosed = confirmed off → force_daemon_down. Timeout/NoTarget = uncertain → probe
+                    // fallback (refresh_tray_icon).
                     if is_daemon_closed(outcome) {
                         actions::force_daemon_down(&app);
                     } else {
                         actions::refresh_tray_icon(&app);
                     }
-                    return; // Stop 은 위에서 아이콘을 확정했으니 아래 공통 refresh 를 타지 않는다.
+                    return; // Stop already confirmed the icon above, so it does not take the common refresh below.
                 }
                 Err(e) => tracing::warn!("[tray] 데몬 stop 실패: {e}"),
             },
         }
-        // Start 및 Stop 실패(Err) 폴백: probe 기반 갱신(메인 스레드 set_icon 으로 post).
-        // ★Stop 성공 경로는 위에서 return 으로 빠진다★ — StopOutcome 분기가 probe race 를 우회하므로
-        // 여기 공통 refresh(probe)를 타면 안 된다. Start 는 alive 확정에 probe 가 맞다.
+        // Start and Stop-failure (Err) fallback: probe-based update (posted to the main thread set_icon).
+        // ★The Stop success path exits above with return★ — the StopOutcome branch bypasses the probe race, so
+        // it must not take the common refresh (probe) here. For Start, a probe suits confirming alive.
         actions::refresh_tray_icon(&app);
     });
 }
 
-// [`StopOutcome`] → 끄기 후 아이콘 상태(impure 층 — `daemon_client::stop` 타입 의존).
+// [`StopOutcome`] → the icon state after turn-off (impure layer — depends on the `daemon_client::stop` type).
 //
-// ★core 가 아니라 여기 있는 이유(load-bearing)★: StopOutcome 은 WS 로 데몬을 끄는 `daemon_client::stop` 의
-// 타입이라 core.rs(tauri/discovery import 0, IconState 만 안다)에 넣으면 순수성이 깨진다. 그래서 이 매핑만
-// impure 층에 둔다.
-// - `DaemonClosed`(연결 닫힘=꺼짐 확정) → `Some(Inactive)`: 회색 확정(끄기 경로는 force_daemon_down
-//   이 이 확정 위에 death-window 억제창까지 세팅 — M-1 race 방지).
-// - `Timeout | NoTarget`(불확실/끌 데몬 없음) → `None`: 호출자가 기존 probe 폴백(refresh)을 탄다.
+// ★Why it is here and not in core (load-bearing)★: StopOutcome is the type of `daemon_client::stop`, which turns the daemon off over WS, so
+// putting it in core.rs (zero tauri/discovery imports, knows only IconState) would break purity. So only this mapping
+// is placed in the impure layer.
+// - `DaemonClosed` (connection closed = confirmed off) → `Some(Inactive)`: gray confirmed (on the turn-off path, force_daemon_down
+//   sets even the death-window suppression window on top of this confirmation — prevents the M-1 race).
+// - `Timeout | NoTarget` (uncertain/no daemon to turn off) → `None`: the caller takes the existing probe fallback (refresh).
 fn icon_state_for_stop_outcome(outcome: StopOutcome) -> Option<IconState> {
     match outcome {
         StopOutcome::DaemonClosed => Some(IconState::Inactive),
@@ -256,8 +256,8 @@ fn icon_state_for_stop_outcome(outcome: StopOutcome) -> Option<IconState> {
     }
 }
 
-// 끄기 결과가 "꺼짐 확정(DaemonClosed)"인지. 매핑(icon_state_for_stop_outcome)을 재사용해
-// 끄기 경로 분기에 쓴다 — 확정이면 force_daemon_down(회색+억제창), 아니면 probe 폴백.
+// Whether the turn-off result is "confirmed off (DaemonClosed)". Reuses the mapping (icon_state_for_stop_outcome) and
+// is used for the turn-off path branch — if confirmed, force_daemon_down (gray + suppression window), otherwise the probe fallback.
 fn is_daemon_closed(outcome: StopOutcome) -> bool {
     icon_state_for_stop_outcome(outcome).is_some()
 }
@@ -268,12 +268,12 @@ mod tests {
 
     #[test]
     fn stop_outcome_daemon_closed_forces_gray_others_fall_back() {
-        // DaemonClosed = 꺼짐 확정 → 회색(Inactive) 직접 set(probe 우회).
+        // DaemonClosed = confirmed off → set gray (Inactive) directly (bypassing the probe).
         assert_eq!(
             icon_state_for_stop_outcome(StopOutcome::DaemonClosed),
             Some(IconState::Inactive),
         );
-        // Timeout/NoTarget = 불확실 → None(호출자가 probe 폴백 refresh).
+        // Timeout/NoTarget = uncertain → None (the caller does a probe-fallback refresh).
         assert_eq!(icon_state_for_stop_outcome(StopOutcome::Timeout), None);
         assert_eq!(icon_state_for_stop_outcome(StopOutcome::NoTarget), None);
     }

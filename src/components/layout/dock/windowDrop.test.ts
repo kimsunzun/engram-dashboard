@@ -1,6 +1,6 @@
-// TRD S21-slot-docking §8-2 「훅 · 컴포넌트」의 받는 쪽 몫(정하는 곳 `windowDrop` — 받기 · 그리기 · drop 의 명령 · 지우기) ·
-//   §8-3 대상 창 순서 시험(fast-check `fc.scheduler()` — 지우는 사건(drop · 창 떠남 · 시한 · mousemove 시한)과 늦은 dragover 를
-//   섞는다). 바깥은 가짜 포트(ADR-0012) · 캔버스 · 레이아웃은 골든 「left-right halves」(캔버스 1200 × 800 · 원점 (0, 28) · 칸 1 | 칸 2).
+// TRD S21-slot-docking §8-2 the receiving side's share of 「훅 · 컴포넌트」 (where decisions are made `windowDrop` — receive · draw · drop command · clear) ·
+//   §8-3 target window order test (fast-check `fc.scheduler()` — mixes clearing events (drop · window leave · deadline · mousemove deadline) with late dragover).
+//   The outside is a fake port (ADR-0012) · canvas · layout is the golden 「left-right halves」 (canvas 1200 × 800 · origin (0, 28) · area 1 | area 2).
 
 import fc from 'fast-check'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -45,14 +45,14 @@ const SLOT_1 = '00000000-0000-0000-0000-000000000001'
 const VIEW_T: DropView = { layout: HALVES.layout, ratioMin: 0.01, ratioMax: 0.99 }
 const ROW = { x0: 0, y0: 0, x1: 600, y1: 28 }
 
-// 점(뷰포트) — 캔버스 원점 (0, 28).
+// Point (viewport) — canvas origin (0, 28).
 const OUTER_LEFT = { x: 5, y: 428 }
 const SLOT_TOP = { x: 300, y: 48 }
 const CENTRE = { x: 300, y: 428 }
 const OUTSIDE = { x: 300, y: 900 }
 const STRIP = { x: 250, y: 10 }
 
-/** 다른 창 탭바 — 머리 160 둘(T 0..160 · U 160..320). */
+/** Another window's tab bar — two heads of 160 (T 0..160 · U 160..320). */
 function otherStrip(tabs: string[] = ['T', 'U']): StripGeometry {
   return {
     left: 0,
@@ -78,9 +78,9 @@ interface Harness {
   state: State
   sends: TabDrop[]
   ports: WindowDropPorts
-  /** 지켜보는 캔버스의 크기 바뀜 알림을 낸다(`state.canvas` 를 먼저 바꾼다). */
+  /** Emits the size-change notice of the observed canvas (changes `state.canvas` first). */
   resize(): void
-  /** 지금 캔버스를 지켜보는 수. */
+  /** Number currently observing the canvas. */
   watching(): number
 }
 
@@ -183,7 +183,7 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-// ── 받기 ───────────────────────────────────────────────────────────────────────
+// ── receive ───────────────────────────────────────────────────────────────────────
 
 describe('받기 — 우리 끌기만', () => {
   it('우리 끌기의 dragenter · dragover = preventDefault → move → 끊기', () => {
@@ -222,7 +222,7 @@ describe('받기 — 우리 끌기만', () => {
   })
 })
 
-// ── 그리기 ─────────────────────────────────────────────────────────────────────
+// ── draw ─────────────────────────────────────────────────────────────────────
 
 describe('그리기 — 캔버스는 유효한 띠에서만 미리보기', () => {
   it('바깥 띠 = 붙을 사각형 + 레이아웃 틀(유효 바깥 띠 영역) · 구역 선 없음', () => {
@@ -260,7 +260,7 @@ describe('그리기 — 캔버스는 유효한 띠에서만 미리보기', () =>
       canvas: { left: c.canvas_origin.x, top: c.canvas_origin.y, width: c.canvas.w, height: c.canvas.h },
       geometry: () => null,
     })
-    // 막힌 것 = 바깥 왼쪽 · 오른쪽 · 칸 왼쪽 · 오른쪽 띠(골든 `blocked`) · 위 띠는 산다.
+    // Blocked = outer left · right · area left · right bands (golden `blocked`) · the top band survives.
     h.ctl.dragEnter(ev({ x: 600, y: 30 }, { types: [type] }))
     expect(h.ctl.getGuide()?.preview).not.toBeNull()
     for (const p of [{ x: 5, y: 428 }, { x: 1150, y: 428 }]) {
@@ -327,7 +327,7 @@ describe('그리기 — 캔버스는 유효한 띠에서만 미리보기', () =>
   })
 })
 
-// ── 끄는 동안 캔버스 크기 바뀜(ADR-0297 — 끄는 동안 창 크기를 막지 않는다) ─────────────────────────────
+// ── canvas size change during a drag (ADR-0297 — window size is not blocked during a drag) ─────────────────────────────
 
 describe('끄는 동안 캔버스 크기 바뀜 — 띠를 새 크기로 다시 센다', () => {
   it('크기가 바뀌면 dragover 없이 마지막 점으로 다시 판정해 미리보기가 새 크기를 따른다', () => {
@@ -473,11 +473,11 @@ describe('drop — 마지막 판정으로 명령 하나', () => {
   })
 })
 
-// ── 제목 줄 안 탭바 구역 ───────────────────────────────────────────────────────
+// ── tab bar zone inside the title row ───────────────────────────────────────────────────────
 
-// 사용자 결정 2026-10-26(T-66 · TRD S26-window-chrome §7-9) — 탭이 있는 곳(첫 탭 ~ `+`)만 탭바 구역. 바탕 = 첫 탭
-//   왼쪽 ~ `+` 오른 끝 × 제목 줄(위 여백 6 + 탭바 28 — `tabStrip/measure.ts` `stripZoneArea`). 제목 줄 = x 0..1200 · y 0..34 · 탭
-//   T · U(머리 160) 0..320 · `+` 320..346 · 그 오른쪽에 빈 곳 · 끌 빈 자리 · 번호 표식 · 단추(1062..1200) · 캔버스 원점 (0, 34).
+// User decision 2026-10-26 (T-66 · TRD S26-window-chrome §7-9) — only where tabs are (first tab ~ `+`) is the tab bar zone. Base = first tab
+//   left ~ `+` right end × title row (top margin 6 + tab bar 28 — `tabStrip/measure.ts` `stripZoneArea`). Title row = x 0..1200 · y 0..34 · tabs
+//   T · U (head 160) 0..320 · `+` 320..346 · to its right an empty space · empty draggable area · number badge · buttons (1062..1200) · canvas origin (0, 34).
 describe('제목 줄 안 탭바 구역 — 탭 · + 위 놓기 = 탭바 · 그 오른쪽(빈 곳 · 표식 · 단추) 위 놓기 = 새 창', () => {
   const ZONE = { x0: 0, y0: 0, x1: 346, y1: 34 }
   const titleStrip = (): StripGeometry => ({ ...otherStrip(), zoneViewport: bands.stripZone(ZONE) })
@@ -523,14 +523,14 @@ describe('제목 줄 안 탭바 구역 — 탭 · + 위 놓기 = 탭바 · 그 �
     expect([...h.sends, ...h2.sends].map(s => s.to)).toEqual([{ type: 'tab_bar', index: 1 }, NEW_WINDOW])
   })
 
-  // 사용자 결정 2026-10-26(T-66 · D-b) — 구역 밖이 된 `+` 오른쪽 밑 캔버스 위 끝 0..15 px 는 바깥 위 띠다(그 위가 더는 탭바가
-  //   아니다). 구역은 손으로 적지 않고 규칙(`stripZoneArea`)으로 짓고 띠는 실제 `windowBands` 가 센다.
+  // User decision 2026-10-26 (T-66 · D-b) — the top 0..15 px of the canvas under the right of `+`, which became outside the zone, is the outer top band (the space above it is no longer the tab
+  //   bar). The zone is built by the rule (`stripZoneArea`) rather than written by hand, and the bands are computed by the real `windowBands`.
   it('+ 오른쪽 밑 캔버스 위 끝(0..15) = 바깥 위 띠(레이아웃 전체 위로 나눔 · 미리보기) · 같은 높이의 탭 밑 = 탭바', () => {
     const strip = otherStrip()
     const m = { row: { x0: 0, y0: 6, x1: 1000, y1: 34 }, left: 0, available: 974, addWidth: 26 }
     const zoneViewport = bands.stripZone(stripZoneArea(m, strip.bounds, { top: 0, bottom: 34 }))
     const geometry = (): StripGeometry => ({ ...strip, zoneViewport })
-    // 캔버스 원점 (0, 34) — 둘 다 캔버스 y 5.
+    // Canvas origin (0, 34) — both at canvas y 5.
     const BELOW_EMPTY = { x: 600, y: 39 }
     const BELOW_TAB = { x: 100, y: 39 }
 
@@ -561,7 +561,7 @@ describe('제목 줄 안 탭바 구역 — 탭 · + 위 놓기 = 탭바 · 그 �
     expect(windowBands.mock.calls[windowBands.mock.calls.length - 1]?.[0].zone).toEqual(bands.zoneInCanvas(bands.stripZone(ZONE), { x: 0, y: 34 }))
   })
 
-  // 출처 창 — 탭 A · S · C(머리 160 · 0..480) · `+` 480..506 · S 를 끈다(잡은 점 = 머리 왼쪽에서 80).
+  // Source window — tabs A · S · C (head 160 · 0..480) · `+` 480..506 · S is dragged (grabbed point = 80 from the left of the head).
   describe('출처 창 자기 탭바', () => {
     const tabs = ['A', 'S', 'C']
     const source = (): Harness => {
@@ -603,10 +603,10 @@ describe('제목 줄 안 탭바 구역 — 탭 · + 위 놓기 = 탭바 · 그 �
   })
 })
 
-// ── 출처 창 ────────────────────────────────────────────────────────────────────
+// ── source window ────────────────────────────────────────────────────────────────────
 
 describe('출처 창 — 자기 탭바 판정 · 제자리 놓기', () => {
-  // 탭 A · S · C(머리 160 씩) · S 를 끈다 · 잡은 점 = 머리 왼쪽에서 80.
+  // Tabs A · S · C (160 heads each) · S is dragged · grabbed point = 80 from the left of the head.
   const SOURCE_TABS = ['A', 'S', 'C']
   const sourceStrip = (tabs = SOURCE_TABS): StripGeometry => ({
     left: 0,
@@ -641,7 +641,7 @@ describe('출처 창 — 자기 탭바 판정 · 제자리 놓기', () => {
     expect(second).toEqual(first)
     expect(second).not.toBe(first)
     over(h, { x: 404, y: 10 })
-    // 커서 − 잡은 80 = 324 지만 마지막 자리(탭 셋 폭 480 − 160 = 320)에서 멈춘다(`reorderAreaWidth`).
+    // Cursor − grabbed 80 = 324 but it stops at the last position (three tabs' width 480 − 160 = 320) (`reorderAreaWidth`).
     expect(h.local.getSourceStrip()).toEqual({ index: 2, left: 320, x: 404 })
     expect(h.local.getTargetMarker()).toBeNull()
     over(h, CENTRE)
@@ -669,7 +669,7 @@ describe('출처 창 — 자기 탭바 판정 · 제자리 놓기', () => {
   })
 
   it('구역을 떠나 남은 탭이 보이게 되면 그 같은 dragover 에서 남은 탭의 띠를 그린다(R15)', () => {
-    // 보이는 탭 = 출처 판정이 「구역 밖」이면 남은 탭 A · 아니면 끄는 탭 S(`dragSource` 가 그 적기에 맞춰 곧바로 바꾼다).
+    // Visible tab = the remaining tab A if the source decision is 「구역 밖」 · otherwise the dragged tab S (`dragSource` swaps immediately to match that timing).
     let local: LocalDrag | null = null
     const h = source({}, { shownTab: () => (local?.getSourceStrip() === null ? 'A' : 'S') })
     local = h.local
@@ -696,7 +696,7 @@ describe('출처 창 — 자기 탭바 판정 · 제자리 놓기', () => {
   })
 
   it('자기 탭바 순서 바꿈 = TabBar{index = drop 때 그린 순서의 끄는 탭 자리}', () => {
-    // 출처가 확정한 순서 이동(S 를 끝으로)을 탭바가 그린 뒤의 기하.
+    // Geometry after the tab bar has drawn the order move the source confirmed (S to the end).
     let tabs = SOURCE_TABS
     const h = source({ geometry: () => sourceStrip(tabs) })
     enter(h, { x: 404, y: 10 })
@@ -707,7 +707,7 @@ describe('출처 창 — 자기 탭바 판정 · 제자리 놓기', () => {
   })
 
   it('마지막 dragover 뒤 끄는 탭이 다른 창으로 갔으면(LLM) 제자리로 보지 않는다 — 보내고 제자리 표시를 적지 않는다', () => {
-    // 탭바가 아직 옛 순서를 그린 때(그림이 스토어보다 늦다) · 다시 그려 끄는 탭이 빠진 때 둘 다.
+    // Both when the tab bar still draws the old order (drawing is later than the store) · and after redrawing with the dragged tab removed.
     for (const redrawn of [false, true]) {
       let tabs = SOURCE_TABS
       const h = source({ geometry: () => sourceStrip(tabs) })
@@ -721,7 +721,7 @@ describe('출처 창 — 자기 탭바 판정 · 제자리 놓기', () => {
   })
 })
 
-// ── 지우기 ─────────────────────────────────────────────────────────────────────
+// ── clear ─────────────────────────────────────────────────────────────────────
 
 describe('지우기 — drop · 창 떠남 · dragover 없는 300 ms · mousemove 뒤 300 ms', () => {
   it('창을 떠난 dragleave(관련 대상 없음) = 안내 · 세로선을 지운다 · 요소 사이 dragleave 는 아니다', () => {
@@ -785,7 +785,7 @@ describe('지우기 — drop · 창 떠남 · dragover 없는 300 ms · mousemov
   })
 })
 
-// ── 순서 시험 ──────────────────────────────────────────────────────────────────
+// ── order test ──────────────────────────────────────────────────────────────────
 
 type Clear = 'drop' | 'leave' | 'mouse' | 'idle'
 
@@ -802,7 +802,7 @@ describe('순서 시험(fc.scheduler · 대상 창) — 지운 뒤 늦은 dragov
               fc.scheduler(),
               fc.array(fc.boolean(), { minLength: 2, maxLength: 5 }),
               async (s, kinds) => {
-                // 시한 = 스케줄러 일감 — 지우지 않은 것만 울린다(dragover 없이 그만큼 지남 = 그 일감이 먼저 돎).
+                // Deadline = scheduler job — only ones not cleared fire (that much time passing without dragover = that job runs first).
                 const ports: Partial<WindowDropPorts> = {
                   setTimer: fn => {
                     const t = { cancelled: false }
@@ -816,8 +816,8 @@ describe('순서 시험(fc.scheduler · 대상 창) — 지운 뒤 늦은 dragov
                   clearTimer: t => void ((t as { cancelled: boolean }).cancelled = true),
                 }
                 const h = harness({}, ports)
-                // 열림 = 마지막 경계가 dragenter · 닫힘 = drop · 창 떠남 · 울린 시한. 어긋남은 모아 두었다가 끝에 단언한다 —
-                //   스케줄러 일감 안에서 던지면 버린 약속의 거절로 사라진다.
+                // Open = the last boundary is dragenter · closed = drop · window leave · a fired deadline. Mismatches are collected and asserted at the end —
+                //   throwing inside a scheduler job vanishes as the rejection of a discarded promise.
                 let open = false
                 let lastOver: 'band' | 'strip' | null = null
                 const violations: string[] = []
@@ -830,7 +830,7 @@ describe('순서 시험(fc.scheduler · 대상 창) — 지운 뒤 늦은 dragov
                   if (!open) {
                     if (g !== null || marker !== null) violations.push(`${label}: 닫혔는데 안내 · 세로선이 있다`)
                   } else if (label === 'enter' || label === 'over') {
-                    // 열린 회차의 판정은 곧바로 그린다 — 시험이 빈 참으로 통과하지 않게.
+                    // The decision of an open round is drawn immediately — so the test does not pass vacuously.
                     honored++
                     const drawn = lastOver === 'band' ? (g?.preview ?? null) !== null : marker !== null
                     if (!drawn) violations.push(`${label}: 열린 회차인데 그리지 않았다`)
@@ -870,7 +870,7 @@ describe('순서 시험(fc.scheduler · 대상 창) — 지운 뒤 늦은 dragov
                 }
                 await s.waitIdle()
                 expect(violations, s.report().map(r => r.label).join(' → ')).toEqual([])
-                // 시한은 끝내 울린다 — 끝에는 늘 닫혀 있다.
+                // The deadline does fire eventually — at the end it is always closed.
                 expect(h.ctl.getGuide()).toBeNull()
                 expect(h.local.getTargetMarker()).toBeNull()
                 expect(h.sends.length).toBe(clear === 'drop' ? 1 : 0)

@@ -2,9 +2,9 @@
 import type { DropOutcome } from "./DropOutcome";
 
 /**
- * 사건 `tab_drop:done` 의 몸 — `tab_drop` 처리마다 출처 창(명령의 `from`)에 많아야 한 번. 내지 않는 것 = `duplicate` ·
- * 거절된 `drag_end` 새 창 중 그 거절 전에 같은 끌기의 `drop` 을 맡아 둔 것(그 `drop` 의 결과가 대신 간다) · 그 창이
- * 닫혔음. 적용이면 그 쓰기의 모델 알림(`layout:updated` · `window:tabs-updated`) 뒤에 온다. 같은 `drag` 에 둘이 올
- * 수 있다(무시된 `drag_end` · 맡은 것 없이 거절된 `drag_end` 새 창 뒤 이기는 `drop`) — 뒤의 것이 그 끌기의 결과다.
+ * The body of the event `tab_drop:done` — at most once to the source window (the command's `from`) per `tab_drop` processing. What is not emitted = `duplicate` ·
+ * a rejected `drag_end` new window that had parked the same drag's `drop` before that rejection (that `drop`'s result goes instead) · that window
+ * having been closed. If applied, it comes after that write's model notification (`layout:updated` · `window:tabs-updated`). Two can come for the same `drag`
+ * (after an ignored `drag_end` · a `drag_end` new window rejected with nothing parked, the winning `drop`) — the later one is that drag's result.
  */
 export type TabDropDone = { drag: string, outcome: DropOutcome, };

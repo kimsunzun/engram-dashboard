@@ -1,9 +1,9 @@
-//! 조회 한 번의 임시 폴더 — 조회기가 설정 파일을 쓰고 자식의 작업 폴더로 삼는다. 끝나면 지운다.
+//! The scratch folder of one query — the querier writes a config file in it and uses it as the child's working folder. Deleted when done.
 //!
-//! ★배타 생성이다★ — 이름은 무작위이고, 이미 있는 이름이면 그 폴더를 쓰지 않고 새 이름을 뽑는다. 자식이
-//!   믿고 읽는 파일이 이 안에 놓이므로, 남이 미리 심어 둔 폴더를 재사용하면 그 파일을 바꿔치기당한다.
-//! ★지우기 실패는 (잠김이면 짧게 다시 해 본 뒤) 무시한다★ — 남은 폴더는 받는 쪽이 기동 때 [`sweep_stale_scratch`] 로 쓸어 낸다.
-//!   (Windows 는 누가 열고 있는 파일·작업 폴더를 못 지운다 — 그래서 자식을 먼저 죽이고 기다린다.)
+//! ★It is an exclusive create★ — the name is random, and if the name already exists it does not use that folder and draws a new name. A file the child
+//!   trusts and reads is placed inside it, so reusing a folder planted in advance by someone else would let that file be swapped.
+//! ★A deletion failure is ignored (after a short retry if locked)★ — the leftover folder is swept away by the receiving side at startup with [`sweep_stale_scratch`].
+//!   (Windows cannot delete a file someone has open or a working folder — so we kill the child first and wait.)
 
 use std::fs;
 use std::io;
@@ -15,22 +15,22 @@ use uuid::Uuid;
 
 use super::ProbeError;
 
-/// 폴더 이름 = 이 접두 + uuid v4 의 32 자리 소문자 16진. 쓸기는 이 문법에 맞는 이름만 지운다 — 접두 일치로
-/// 넓히면 손으로 둔 것까지 지운다.
+/// Folder name = this prefix + 32 lowercase hex digits of a uuid v4. The sweep deletes only names that fit this grammar — widening it to a prefix match
+/// would delete even things placed by hand.
 const SCRATCH_PREFIX: &str = "probe-";
 const SCRATCH_HEX_LEN: usize = 32;
 
-/// 이름이 겹칠 때 새로 뽑는 상한. 무작위 이름이 겹치는 것은 누가 미리 심었을 때뿐이라 몇 번이면 충분하다.
+/// Upper bound on drawing anew when names collide. A random name collides only when someone planted it in advance, so a few tries are enough.
 const SCRATCH_CREATE_ATTEMPTS: usize = 8;
 
-/// 조회 한 번의 임시 폴더. drop 하면 통째로 지운다(실패는 무시).
+/// The scratch folder of one query. Deletes it whole on drop (failure is ignored).
 #[derive(Debug)]
 pub struct ScratchDir {
     path: PathBuf,
 }
 
 impl ScratchDir {
-    /// `root` 아래에 새 폴더를 배타로 만든다. `root` 가 없으면 만든다.
+    /// Creates a new folder under `root` exclusively. Creates `root` if it does not exist.
     pub fn create(root: &Path) -> Result<Self, ProbeError> {
         Self::create_named(root, || {
             format!("{SCRATCH_PREFIX}{}", Uuid::new_v4().simple())
@@ -63,15 +63,15 @@ impl ScratchDir {
     }
 }
 
-/// drop 이 지우기를 다시 해 보는 횟수와 간격 — 첫 시도 + 19 번 × 10 ms(약 200 ms).
+/// The number and interval of retries the drop makes at deleting — first try + 19 times × 10 ms (about 200 ms).
 ///
-/// 직접 자식이 끝난 직후에는 손자가 아직 작업 폴더를 쥐고 있을 수 있다 — 그때 곧바로 지우면 실패하고 몇 ms
-/// 뒤에는 된다(실측 2026-09-27, 40/40 회 · 약 5 ms 뒤 성공 — 예산 약 200 ms 의 근거. 조회기의 Job 트리
-/// 종료 기다리기(`wait_tree_gone`)와 같은 커밋 c7dcba33 에 실렸고, 그 기다리기 앞뒤 어느 쪽 측정인지는 기록이 없다).
-// ADR-0291 R14: 파일럿 2026-10-10(rustc 1.95 · NTFS) — 손자가 작업 폴더를 쥔 합성 재현은 OS 오류 32
-//   (`ERROR_SHARING_VIOLATION` — `is_busy` 가 문다)로만 실패했고 145 는 나오지 않았다. 실 조회 경로는 Job 트리가
-//   다 끝난 뒤에 폴더를 놓으므로 6/6 회 첫 시도에 지워졌다 — 그래서 판정을 넓히지 않는다. FAT/exFAT 의 삭제
-//   대기(145)는 재지 않았다 — 그렇게 남은 폴더는 기동 때 쓸기가 거둔다.
+/// Right after the direct child ends, a grandchild may still hold the working folder — deleting immediately then fails, and a few ms
+/// later it works (measured 2026-09-27, 40/40 runs · success after about 5 ms — the grounds of the budget of about 200 ms. It was carried in the same commit c7dcba33 as the querier's Job tree
+/// exit wait (`wait_tree_gone`), and there is no record of whether the measurement was before or after that wait).
+// ADR-0291 R14: pilot 2026-10-10 (rustc 1.95 · NTFS) — a synthetic reproduction with a grandchild holding the working folder failed only with OS error 32
+//   (`ERROR_SHARING_VIOLATION` — `is_busy` bites on it) and 145 never appeared. The real query path releases the folder after the Job tree has
+//   fully ended, so it was deleted on the first try 6/6 times — so we do not widen the decision. The delete-pending state (145) of FAT/exFAT
+//   was not measured — a folder left that way is reaped by the sweep at startup.
 const DELETE_RETRY: Retry = Retry {
     retries: 19,
     pause: Duration::from_millis(10),
@@ -79,7 +79,7 @@ const DELETE_RETRY: Retry = Retry {
 
 impl Drop for ScratchDir {
     fn drop(&mut self) {
-        // ADR-0291: 없는 폴더는 성공이고, 잠김 아닌 오류는 다시 하지 않는다.
+        // ADR-0291: a missing folder is success, and an error that is not a lock is not retried.
         let outcome = retry_busy(DELETE_RETRY, || match fs::remove_dir_all(&self.path) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
             other => other,
@@ -99,10 +99,10 @@ fn is_scratch_name(name: &str) -> bool {
     })
 }
 
-/// `root` 아래 남은 임시 폴더를 지운다 — 조회가 하나도 돌지 않을 때(기동 때) 부른다.
+/// Deletes the leftover scratch folders under `root` — called when no query is running at all (at startup).
 ///
-/// 지우는 것은 [`ScratchDir`] 이름 문법에 맞는 **폴더**뿐이다(파일·링크·다른 이름은 둔다). `root` 가 없으면
-/// 할 일이 없다. 실패는 로그만 남긴다 — 청소 실패로 기동을 막지 않는다.
+/// What it deletes is only **folders** that fit the [`ScratchDir`] name grammar (files · links · other names are left). If `root` does not exist
+/// there is nothing to do. A failure leaves only a log — a cleanup failure does not block startup.
 pub fn sweep_stale_scratch(root: &Path) {
     let entries = match fs::read_dir(root) {
         Ok(entries) => entries,
@@ -118,7 +118,7 @@ pub fn sweep_stale_scratch(root: &Path) {
         if !name.to_str().is_some_and(is_scratch_name) {
             continue;
         }
-        // `file_type` 은 링크를 따라가지 않는다 — 폴더 이름을 단 링크는 지우지 않는다.
+        // `file_type` does not follow links — a link carrying a folder name is not deleted.
         if !entry.file_type().is_ok_and(|t| t.is_dir()) {
             continue;
         }
@@ -197,7 +197,7 @@ mod tests {
         drop(scratch);
     }
 
-    /// 누가 안의 파일을 배타로 열고 있으면 Windows 는 그 폴더를 못 지운다 — drop 은 그 실패를 삼킨다.
+    /// Windows cannot delete the folder if someone has a file inside open exclusively — drop swallows that failure.
     #[cfg(windows)]
     #[test]
     fn drop_ignores_a_delete_failure() {
@@ -224,7 +224,7 @@ mod tests {
         fs::remove_dir_all(&path).expect("정리");
     }
 
-    /// 잠금이 drop 도중 곧 풀리면 다시 해 본 지우기가 성공한다 — 손자가 작업 폴더를 조금 늦게 놓는 경우.
+    /// If the lock is released soon during drop, the retried delete succeeds — the case where a grandchild lets go of the working folder a little late.
     #[cfg(windows)]
     #[test]
     fn drop_retries_a_delete_that_fails_only_briefly() {
@@ -256,7 +256,7 @@ mod tests {
         let stale = ScratchDir::create(root.path()).expect("생성");
         let stale_path = stale.path().to_path_buf();
         fs::write(stale_path.join("config.json"), "{}").expect("파일");
-        // 남은 폴더인 척 — drop 이 지우지 않게 값을 잊는다.
+        // Pretends to be a leftover folder — forgets the value so that drop does not delete it.
         std::mem::forget(stale);
 
         let other_dir = root.path().join("keep-me");

@@ -1,24 +1,24 @@
-// ADR-0102: 부팅 pull 용 유계 재시도(backoff) 헬퍼 — 조기 invoke 레이스의 프론트측 방어망.
+// ADR-0102: bounded retry (backoff) helper for the boot pull — the frontend-side safety net for the early invoke race.
 //
-// ★왜 필요한가★: main 창은 이벤트 복구 경로가 없다(window:tabs-updated 는 탭 *변형* 시에만 발화 —
-//   부팅 직후 정적 상태엔 안 온다). 그래서 부팅 시 list_tabs/get_view pull 이 한 번 실패하면(예: Tauri v2
-//   부팅 레이스로 managed state 가 아직 준비 전인 순간) 그걸로 끝이고 화면이 로딩 플레이스홀더에 영구
-//   고착된다. LayoutState 는 이제 pre-build manage 로 레이스가 구조적으로 사라졌지만(근본 수정), pull 은
-//   여전히 one-shot 이면 안 된다 — 다른 조기 transient(DaemonClient 등 런타임 의존 상태의 순간적 미준비,
-//   IPC 초기화 지연)에도 스스로 회복해야 한다.
+// ★Why it is needed★: the main window has no event recovery path (window:tabs-updated fires only on tab *mutation* —
+//   it does not come for the static state right after boot). So if the list_tabs/get_view pull at boot fails once (e.g. the moment managed state is
+//   not yet ready due to a Tauri v2 boot race), that is the end and the screen is permanently stuck on the loading placeholder. LayoutState now
+//   removes the race structurally with pre-build manage (the root fix), but the pull must still not be
+//   one-shot — it must recover by itself from other early transients too (a momentary not-ready state of runtime-dependent state such as DaemonClient,
+//   IPC initialization delay).
 
-/** 기본값은 부팅 pull 에 맞춘 보수적 값(짧고 몇 번만 — 부팅 UX 를 오래 막지 않음). */
+/** The defaults are conservative values fit for the boot pull (short and a few tries — do not block the boot UX for long). */
 export interface RetryOptions {
   attempts?: number
   baseDelayMs?: number
-  /** 기본 2 → 총 대기 ~1s(부팅 체감 상한). */
+  /** Default 2 → total wait ~1s (boot perceived upper bound). */
   factor?: number
   onRetry?: (err: unknown, attempt: number) => void
-  /** unmount 가드용. */
+  /** For the unmount guard. */
   isCancelled?: () => boolean
 }
 
-/** 정상 실패와 구분하는 sentinel — 호출부가 조용히 무시한다. */
+/** A sentinel to tell apart from a normal failure — the call site quietly ignores it. */
 export class RetryCancelledError extends Error {
   constructor() {
     super('retry cancelled')
@@ -29,7 +29,7 @@ export class RetryCancelledError extends Error {
 const sleep = (ms: number): Promise<void> => new Promise(res => setTimeout(res, ms))
 
 /**
- * 모든 시도가 실패하면 마지막 에러를 throw 한다 — 조용히 삼키지 않아야 호출부가 최종 실패를 표면화한다.
+ * If every attempt fails, throw the last error — it must not be swallowed silently so the call site surfaces the final failure.
  */
 export async function retryAsync<T>(fn: () => Promise<T>, opts: RetryOptions = {}): Promise<T> {
   const attempts = opts.attempts ?? 4
@@ -49,11 +49,11 @@ export async function retryAsync<T>(fn: () => Promise<T>, opts: RetryOptions = {
       await sleep(baseDelayMs * factor ** i)
     }
   }
-  // ADR-0102(FIX-4): 소진 throw 직전 취소를 재확인한다 — 마지막 시도가 실패하는 *도중* unmount 되면
-  //   위 루프 상단 가드는 이미 지났으므로 backend 에러가 그대로 throw 돼 호출부가 헛된 최종-실패를
-  //   로깅한다(unmount 는 실패가 아니다). 여기서 취소면 RetryCancelledError 로 바꿔 호출부가 조용히
-  //   무시하게 한다. ★한계★: in-flight fn()·backoff sleep 중간의 취소는 여기서 안 잡힌다(그 순간
-  //   isCancelled 전이는 다음 체크포인트까지 반영 안 됨) — 최종 시도 경계의 spurious 로그만 없앤다.
+  // ADR-0102 (FIX-4): re-check cancellation right before the exhaustion throw — if unmounted *during* the last attempt failing,
+  //   the guard at the top of the loop above has already been passed, so the backend error is thrown as is and the call site logs a pointless
+  //   final failure (unmount is not a failure). If cancelled here, turn it into RetryCancelledError so the call site quietly
+  //   ignores it. ★Limit★: cancellation in the middle of an in-flight fn() · a backoff sleep is not caught here (the isCancelled
+  //   transition at that moment is not reflected until the next checkpoint) — it only removes the spurious log at the final attempt boundary.
   if (opts.isCancelled?.()) throw new RetryCancelledError()
   throw lastErr
 }

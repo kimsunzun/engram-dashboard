@@ -1,9 +1,9 @@
-//! 줍기 관측을 사용량 서비스로 곧장 넘기는 [`StatusSink`] decorator(TRD §1-4 「줍기 경로」 · ADR-0247) — 쌓아 두지 않고
-//! 부른 스레드(출력 pump)에서 [`UsageService::observe`] 를 부른다.
+//! A [`StatusSink`] decorator that hands pickup observations straight to the usage service (TRD §1-4 「줍기 경로」 (pickup path) · ADR-0247) — without piling them up,
+//! it calls [`UsageService::observe`] on the calling thread (the output pump).
 //!
-//! ★모든 훅을 감싼 sink 로 그대로 넘긴다 — 사용량 관측도★. 훅은 기본 구현이 no-op 이라 하나를 빠뜨리면 안쪽이
-//!   그 훅을 구현해도 컴파일 에러 없이 조용히 죽는다 — 훅이 늘면 여기에도 한 줄을 더한다(`MessagingFlushSink` 와
-//!   같은 decorator 계약).
+//! ★Pass every hook through to the wrapped sink as is — usage observation too★. The hook's default implementation is a no-op so if one is missed, even if the inner one
+//!   implements that hook, it quietly dies with no compile error — when hooks grow, add one line here too (the same decorator contract as
+//!   `MessagingFlushSink`).
 
 use std::sync::Arc;
 
@@ -58,8 +58,8 @@ mod tests {
     use engram_dashboard_agent::profile::RestoreOutcome;
     use std::sync::Mutex;
 
-    /// 훅마다 받은 것을 한 줄로 적는다 — ★기본 구현에 기대지 않고 훅을 전부 손으로 구현한다★(기대면 그 훅을 안
-    /// 넘겨도 이 시험이 모른다). 훅이 늘면 여기와 아래 시험에 한 줄씩.
+    /// Write what each hook received in one line — ★implement every hook by hand without leaning on the default implementation★ (if leaning, this test would not know even if that hook were not
+    /// passed on). When hooks grow, one line each here and in the test below.
     struct Recording(Arc<Mutex<Vec<String>>>);
 
     impl Recording {

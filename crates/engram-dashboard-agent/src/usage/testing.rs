@@ -1,5 +1,5 @@
-//! 조회 시험 대역 — 대본대로 움직이는 가짜 [`ProbeSpawner`] 와 시험용 임시 루트. 벤더 조회기의 단위 시험이
-//! 실 CLI 없이 대화·시한·kill 을 재는 데 쓴다.
+//! Query test double — a fake [`ProbeSpawner`] that moves by script, and a test temp root. Used by the unit tests of vendor queriers
+//! to measure conversation · deadline · kill without a real CLI.
 //!
 //! ```ignore
 //! let root = TempRoot::new("vendor-probe");
@@ -19,16 +19,16 @@
 //! assert!(spawner.stdin_closed() && spawner.child_dropped());
 //! ```
 //!
-//! 대본의 뜻 — 실물 [`super::OsProbeSpawner`] 와 같은 규칙을 따른다:
-//!   - 마감이 이미 지난 동작은 곧바로 `Timeout` 이고 「마감 kill」로 기록된다. 한 번 끊긴 뒤에는 전부 `Timeout`.
-//!   - 「막힘」(`hang_after_lines` · `block_writes` · `never_exit`)은 **마감까지 실제로 잔다** — 그래서 막힘을
-//!     재는 시험은 짧은 마감(수백 ms)을 넘긴다. ★마감이 [`FAKE_HANG_MAX`] 보다 멀면 패닉한다★ — 조회기가
-//!     `env.deadline` 을 안 넘기고 먼 마감을 스스로 만든 것이라, 그대로 두면 시험이 멈춘다.
-//!   - 쓰기는 막힘·실패(`fail_writes`)가 아니면 늘 받아들여 기록한다(내용 검사는 시험이
-//!     [`ScriptedSpawner::written`] 으로). `close_stdin` 뒤의 쓰기는 `Io` 다. stdin 을 닫아도 대본은 그대로 간다 — 「닫으면 끝나는 자식」은 대본의
-//!     기본값(곧바로 EOF · 종료)이고, 「닫아도 안 끝나는 자식」은 막힘으로 적는다.
-//!   - 마감이 이미 지난 `spawn` 은 대본을 쓰지 않고 `Timeout` 이다(명령은 기록된다).
-//!   - 자식은 하나다 — 두 번째 `spawn` 은 패닉한다(조회 한 번에 자식 하나).
+//! The meaning of the script — it follows the same rules as the real [`super::OsProbeSpawner`]:
+//!   - An action whose deadline has already passed is immediately `Timeout` and is recorded as a 「마감 kill」 (deadline kill). Once cut, everything is `Timeout`.
+//!   - 「막힘」 (hang) (`hang_after_lines` · `block_writes` · `never_exit`) **really sleeps until the deadline** — so a test that measures a hang
+//!     supplies a short deadline (hundreds of ms). ★If the deadline is farther than [`FAKE_HANG_MAX`] it panics★ — the querier
+//!     made a far deadline itself instead of passing `env.deadline`, and left alone the test would hang.
+//!   - A write is always accepted and recorded unless it is a hang or a failure (`fail_writes`) (the test inspects the content with
+//!     [`ScriptedSpawner::written`]). A write after `close_stdin` is `Io`. The script goes on even after stdin is closed — 「닫으면 끝나는 자식」 (a child that ends when closed) is the script's
+//!     default (immediate EOF · exit), and 「닫아도 안 끝나는 자식」 (a child that does not end even when closed) is written as a hang.
+//!   - A `spawn` whose deadline has already passed does not use the script and is `Timeout` (the command is recorded).
+//!   - There is one child — a second `spawn` panics (one child per query).
 
 use std::collections::VecDeque;
 use std::fs;
@@ -41,10 +41,10 @@ use uuid::Uuid;
 
 use super::{ExitInfo, ProbeChild, ProbeCommand, ProbeError, ProbeSpawner};
 
-/// 가짜 자식이 「막힘」으로 잘 수 있는 가장 긴 시간.
+/// The longest time a fake child can sleep as a 「막힘」 (hang).
 pub(crate) const FAKE_HANG_MAX: Duration = Duration::from_secs(5);
 
-/// 시험마다 새로 만드는 임시 폴더. drop 하면 지운다.
+/// A temp folder made fresh for each test. Deleted on drop.
 pub(crate) struct TempRoot {
     path: PathBuf,
 }
@@ -85,7 +85,7 @@ enum Exit {
     Never,
 }
 
-/// 가짜 자식 하나의 대본. 기본 = 쓰기 받음 · 줄 없음 · 곧바로 stdout EOF · 종료 코드 0.
+/// The script of one fake child. Default = accepts writes · no lines · stdout EOF right away · exit code 0.
 pub(crate) struct ChildScript {
     stdout: VecDeque<Out>,
     stdout_end: StdoutEnd,
@@ -113,31 +113,31 @@ impl ChildScript {
         }
     }
 
-    /// `read_line` 이 차례로 돌려줄 줄 하나.
+    /// One line that `read_line` will return in turn.
     pub(crate) fn line(mut self, line: impl Into<String>) -> Self {
         self.stdout.push_back(Out::Line(line.into()));
         self
     }
 
-    /// 읽히는 순간에 만드는 줄 — 그때까지 조회기가 쓴 줄 전부를 받는다(요청 id 를 되돌려야 할 때).
+    /// A line made at the moment it is read — it receives all the lines the querier has written by then (when the request id has to be echoed back).
     pub(crate) fn reply(mut self, make: impl FnOnce(&[String]) -> String + Send + 'static) -> Self {
         self.stdout.push_back(Out::Reply(Box::new(make)));
         self
     }
 
-    /// 줄을 다 준 뒤 EOF 대신 마감까지 아무것도 안 준다(살아서 말이 없는 자식).
+    /// After giving all lines, instead of EOF gives nothing until the deadline (a child that is alive and silent).
     pub(crate) fn hang_after_lines(mut self) -> Self {
         self.stdout_end = StdoutEnd::Hang;
         self
     }
 
-    /// stdin 을 안 읽는 자식 — 모든 `write_line` 이 마감까지 막힌다.
+    /// A child that does not read stdin — every `write_line` blocks until the deadline.
     pub(crate) fn block_writes(mut self) -> Self {
         self.block_writes = true;
         self
     }
 
-    /// stdin 이 이미 닫힌 자식(벌써 끝난 셸 등) — 모든 `write_line` 이 곧바로 `Io` 다.
+    /// A child whose stdin is already closed (a shell that has already ended, etc.) — every `write_line` is immediately `Io`.
     pub(crate) fn fail_writes(mut self) -> Self {
         self.fail_writes = true;
         self
@@ -148,13 +148,13 @@ impl ChildScript {
         self
     }
 
-    /// 감싸는 셸이 「그런 명령 없음」으로 끝난 것처럼([`ExitInfo::looks_not_installed`]).
+    /// As if the wrapping shell ended with 「그런 명령 없음」 (no such command) ([`ExitInfo::looks_not_installed`]).
     pub(crate) fn exit_not_installed(mut self) -> Self {
         self.exit = Exit::Now(ExitInfo::new(Some(9009), true));
         self
     }
 
-    /// `wait_exit` 가 마감까지 안 돌아온다(stdout 을 닫고도 사는 자식).
+    /// `wait_exit` does not return until the deadline (a child that stays alive after stdout is closed).
     pub(crate) fn never_exit(mut self) -> Self {
         self.exit = Exit::Never;
         self
@@ -180,7 +180,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// 자식 하나를 대본대로 내주고, 받은 명령·쓰인 줄·끊김을 기록하는 가짜 스포너.
+/// A fake spawner that hands out one child per the script and records the commands received · lines written · cuts.
 pub(crate) struct ScriptedSpawner {
     script: Mutex<Option<Result<ChildScript, ProbeError>>>,
     record: Arc<Mutex<Record>>,
@@ -191,7 +191,7 @@ impl ScriptedSpawner {
         Self::with(Ok(script))
     }
 
-    /// `spawn` 이 이 오류로 실패한다(명령은 기록된다).
+    /// `spawn` fails with this error (the command is recorded).
     pub(crate) fn failing(err: ProbeError) -> Self {
         Self::with(Err(err))
     }
@@ -203,32 +203,32 @@ impl ScriptedSpawner {
         }
     }
 
-    /// 받은 기동 명세(지금까지 전부).
+    /// The startup specs received (all so far).
     pub(crate) fn commands(&self) -> Vec<ProbeCommand> {
         lock(&self.record).commands.clone()
     }
 
-    /// 조회기가 `write_line` 으로 쓴 줄(개행 없이, 쓴 차례대로).
+    /// The lines the querier wrote with `write_line` (without newlines, in the order written).
     pub(crate) fn written(&self) -> Vec<String> {
         lock(&self.record).written.clone()
     }
 
-    /// 조회기가 stdin 을 닫았나(`close_stdin`).
+    /// Whether the querier closed stdin (`close_stdin`).
     pub(crate) fn stdin_closed(&self) -> bool {
         lock(&self.record).stdin_closed
     }
 
-    /// 어느 동작이 마감에 걸려 트리 kill 이 났나.
+    /// Which action hit the deadline and caused the tree kill.
     pub(crate) fn cut_at_deadline(&self) -> bool {
         lock(&self.record).cut_at_deadline
     }
 
-    /// 조회기가 「프로그램 없음」 판정이 붙는 종료 대기(`wait_exit`)를 불렀나 — `wait_exit_code` 는 세지 않는다.
+    /// Whether the querier called the wait for exit that carries the 「프로그램 없음」 (program missing) decision (`wait_exit`) — `wait_exit_code` is not counted.
     pub(crate) fn exit_judged(&self) -> bool {
         lock(&self.record).exit_judged
     }
 
-    /// 자식이 drop 됐나(= 트리 kill + 종료 대기가 돌았다).
+    /// Whether the child was dropped (= the tree kill + wait for exit ran).
     pub(crate) fn child_dropped(&self) -> bool {
         lock(&self.record).dropped
     }
@@ -263,7 +263,7 @@ struct ScriptedChild {
 }
 
 impl ScriptedChild {
-    /// 마감 규칙 공통부 — `Some` 이면 그 오류로 곧바로 끝낸다.
+    /// The common part of the deadline rule — if `Some`, it ends right away with that error.
     fn gate(&mut self, deadline: Instant) -> Option<ProbeError> {
         if self.cut {
             return Some(ProbeError::Timeout);

@@ -1,46 +1,46 @@
-# ADR-0203: codex 화면 복원은 app-server 에 페이지로 요청한다 — rollout 파일을 읽지 않는다
+# ADR-0203: Restore the codex screen by requesting pages from the app-server — do not read rollout files
 
-- 상태: 확정 (2026-09-15, 근거: 사용자 결정 + 실 codex app-server 0.154.0 실측 + rollout 901개 전수 스캔) · 부분 폐기 by ADR-0204 (복원 이벤트가 붙는 자리)
-- 관련: ADR-0079(데몬이 claude `.jsonl` 을 읽어 버퍼에 seed) · ADR-0008(추적 파일로 기능 확장 금지) · ADR-0172(스크롤백 읽기와 기능 잠그기는 등급이 다르다) · ADR-0004(백엔드 지식 격리) · `backend/mod.rs::AgentBackend::resume_transcript_events` · Amended by ADR-0204 (복원 이벤트가 붙는 자리)
+- 상태: 확정 (2026-09-15, basis: user decision + measured against a real codex app-server 0.154.0 + a full scan of 901 rollouts) · 부분 폐기 by ADR-0204 (the spot where the restore events attach)
+- 관련: ADR-0079(the daemon reads claude `.jsonl` and seeds the buffer) · ADR-0008(no extending features through tracking files) · ADR-0172(reading scrollback and locking features are different grades) · ADR-0004(isolating backend knowledge) · `backend/mod.rs::AgentBackend::resume_transcript_events` · Amended by ADR-0204 (the spot where the restore events attach)
 
 ## 맥락
 
-이어받기가 성공해도 codex 슬롯은 **빈 화면으로 시작한다.** codex 는 복원 이벤트를 우리에게 주지 않고, 우리도 읽는 것이 없다.
+Even when resume succeeds, a codex slot **starts with an empty screen.** codex does not give us restore events, and we read nothing either.
 
-claude 는 같은 문제를 ADR-0079 로 풀었다 — `~/.claude/projects/<슬러그>/<sid>.jsonl` 을 우리가 직접 읽어 버퍼에 seed 한다. 사용자의 1차 방침은 「유지보수 비용이 없으면 claude 와 맞춘다」였고, 그래서 codex 도 rollout 파일을 직접 읽는 쪽으로 기울어 있었다.
+claude solved the same problem with ADR-0079 — we read `~/.claude/projects/<슬러그>/<sid>.jsonl` ourselves and seed the buffer. The user's first-line policy was 「유지보수 비용이 없으면 claude 와 맞춘다」 (“if there is no maintenance cost, match claude”), so codex too was leaning toward reading rollout files directly.
 
-**그 전제를 재 봤더니 깨졌다.** claude 가 싼 이유는 파일 줄 모양이 라이브 스트림 줄 모양과 **같아서** 파서를 새로 안 짰기 때문이다. codex 는 그렇지 않다.
+**When we re-measured that premise, it broke.** The reason claude is cheap is that the file's line shape is **the same as** the live stream's line shape, so no new parser was written. codex is not like that.
 
 ## 결정
 
-**codex 이력은 app-server 에 요청해서 받는다.** rollout 파일을 읽지 않는다.
+**We receive codex history by requesting it from the app-server.** We do not read rollout files.
 
-- `thread/resume` 은 `excludeTurns: true` 로 보내고, 이력은 **페이지 단위로** 따로 받는다(`thread/items/list` — 커서·limit·방향). resume 응답이 되돌려 주는 역방향 커서가 진입점이다.
-- 받은 항목은 **우리가 이미 파싱하는 타입 그대로**다. 봉투만 벗기면 기존 번역을 재사용한다.
-- 붙는 자리는 claude 와 같다 — 백엔드가 복원 이벤트를 내주고 manager 가 자식 띄우기 **전에** seed 한다(ADR-0079 의 순서 불변식 유지).
+- `thread/resume` is sent with `excludeTurns: true`, and the history is received separately **page by page** (`thread/items/list` — cursor·limit·direction). The backward cursor that the resume response returns is the entry point.
+- The received items are **exactly the types we already parse.** If we only strip the envelope, the existing translation is reused.
+- The spot where it attaches is the same as claude's — the backend hands over the restore events and the manager seeds **before** launching the child (the order invariant of ADR-0079 is kept).
 
 ## 거부한 대안
 
-- **rollout 파일을 우리가 직접 읽는다(claude 와 같은 모양)** — 사용자의 1차 선택이었고 **실측으로 기각**됐다. rollout 줄은 우리 codex 디코더 입력과 **겹치는 것이 하나도 없다**: 봉투가 JSON-RPC 가 아니고(최상위 `method` 자체가 없어 분류기가 전량 탈락시킨다), 알림 이름이 snake_case 대 slash/camel, item 종류가 PascalCase 대 camelCase. 세 층이 각각 독립으로 어긋난다. 재사용되는 것은 말단 문자열 헬퍼와 출력 타입뿐이라 **새 파서 + 새 어휘표**가 통째로 생긴다. 게다가 그 파일은 계약된 wire 가 아니라 **벤더 내부 저장 포맷**이라 바뀌면 조용히 깨진다.
-- **이력을 한 번에 전부 받는다(hydration)** — 벤더가 응답에 `deprecationNotice` 를 실어 직접 말린다: "Full-history hydration is deprecated for paginated threads; use `excludeTurns: true`, then page". 그리고 한 줄이 **최대 1.96MB**(실측)라 우리 줄 상한 4MiB 에 여유가 두 배뿐이다.
-- **그대로 둔다(빈 화면)** — 이어받기의 값어치 절반이 화면에 있다. 사용자가 명시적으로 기각.
+- **We read the rollout file directly (the same shape as claude)** — the user's first choice, and **rejected by measurement**. The rollout lines have **nothing at all in common** with our codex decoder's input: the envelope is not JSON-RPC (there is no top-level `method` at all, so the classifier drops all of it), notification names are snake_case vs slash/camel, and item kinds are PascalCase vs camelCase. The three layers each go off independently. What is reused is only the leaf string helpers and the output types, so a **new parser + a new vocabulary table** comes into being wholesale. Moreover, that file is not a contracted wire but a **vendor-internal storage format**, so it breaks silently when it changes.
+- **Receive the whole history at once (hydration)** — the vendor itself deprecates it by putting a `deprecationNotice` in the response: "Full-history hydration is deprecated for paginated threads; use `excludeTurns: true`, then page". And a single line is **up to 1.96MB** (measured), so there is only a factor of two of margin against our line cap of 4MiB.
+- **Leave it (an empty screen)** — half the value of resume is on the screen. Explicitly rejected by the user.
 
 ## 근거
 
-실 `codex app-server` 0.154.0 을 띄워 JSON-RPC 로 직접 재 봤다(2026-09-15):
+We brought up a real `codex app-server` 0.154.0 and measured directly over JSON-RPC (2026-09-15):
 
-- **`excludeTurns` 는 존중된다.** 생략·`false` 는 바이트 단위로 동일한 응답(1,259,774B, 120 items)을 주고, `true` 는 6,486B 에 `turns: []` 다. 우리 코드가 그것을 믿고 짠 것은 맞았다.
-- ★**항목 타입이 라이브와 같다**★ — 벤더 스키마에서 `item/completed` 알림·resume 응답·페이지 응답의 항목 정의 해시가 **전부 동일**(19 variants). 다른 것은 봉투뿐이다.
-- **페이지 수단이 둘 있다**(`thread/items/list`·`thread/turns/list`, 불투명 커서, `nextCursor: null` 로 정상 종료 확인).
-- 이력은 **전부 응답 안에** 있다 — resume 뒤 `item/*` 알림은 0건.
-- 크기: resume 페이로드는 디스크 rollout 의 0.25~0.4배. ★**페이징으로도 줄 크기가 안 잡힌다**★ — `limit` 은 개수를 자르지 개별 바이트를 자르지 않아서, `limit:1` 에서도 최대 페이지가 437KB 다(`commandExecution.aggregatedOutput` 하나가 그만큼).
+- **`excludeTurns` is honored.** Omitting it or `false` gives a byte-identical response (1,259,774B, 120 items), and `true` gives 6,486B with `turns: []`. Our code was right to be built trusting it.
+- ★**The item types are the same as live**★ — in the vendor schema, the item-definition hashes of the `item/completed` notification, the resume response and the page response are **all identical** (19 variants). Only the envelope differs.
+- **There are two paging means** (`thread/items/list`·`thread/turns/list`, opaque cursor, normal termination confirmed with `nextCursor: null`).
+- The history is **entirely within the response** — after resume there are 0 `item/*` notifications.
+- Size: the resume payload is 0.25~0.4 times the on-disk rollout. ★**Paging does not bound the line size either**★ — `limit` cuts the count, not individual bytes, so even at `limit:1` the largest page is 437KB (a single `commandExecution.aggregatedOutput` is that big).
 
-ADR-0008 저촉 여부도 기록으로 확인했다 — 그 금지의 대상은 `sessions/<pid>.json` 한 파일이고 취지는 「복원 정확성을 벤더 파일에 걸지 말라」다. transcript 읽기는 ADR-0079 가 정면으로 채택했고, 등급 차이는 ADR-0172 가 평문으로 적어 뒀다("스크롤백 되살리기에 읽는 것과 기능을 잠그는 것은 등급이 다르다"). 즉 **직접 읽기도 금지는 아니었고**, 이 결정은 금지가 아니라 **비용**으로 갈렸다.
+We also confirmed from records whether ADR-0008 is violated — the target of that prohibition is the one file `sessions/<pid>.json`, and its purpose is 「복원 정확성을 벤더 파일에 걸지 말라」 (“do not hang restore correctness on a vendor file”). ADR-0079 adopted transcript reading head-on, and ADR-0172 wrote the difference in grade in plain words ("reading for scrollback revival and locking features are different grades"). That is, **direct reading was not prohibited either**, and this decision was split not by prohibition but by **cost**.
 
 ## 영향 / 불변식
 
-- 백엔드 지식은 구현체 안에 남는다(ADR-0004) — manager 는 호출만 하고 페이지·커서·항목 모양을 모른다.
-- ★**화면 버퍼가 진짜 천장이다**★ — 링은 2MB/4096건이라 그보다 오래된 것은 받아도 안 실린다. 끝에서부터 그만큼만 가져오면 되고, 줄 상한을 올릴 이유가 아니다.
-- **서브에이전트 스레드는 resume 자체가 거절된다**(실측: 902개 중 93개). 이력 요청도 같은 제약을 받는다.
-- `docs/process/S21-codex-backend/trd-phase2a.md` 가 벤더 파일 읽기 셋(`state_5.sqlite`·rollout JSONL·`session_index.jsonl`)을 한 줄로 묶어 금지처럼 적어 둔 것은 **등급을 안 가른 서술**이다. 이 ADR 이 그 자리의 정본이다.
-- 이 결정은 **아직 구현되지 않았다** — 번호를 먼저 박은 것이고(워크트리 다중 운용), 구현은 별도 스텝이다.
+- Backend knowledge stays inside the implementation (ADR-0004) — the manager only calls and does not know pages·cursors·item shapes.
+- ★**The screen buffer is the real ceiling**★ — the ring is 2MB/4096 entries, so anything older than that is not carried even if received. We only need to fetch that much from the end, and it is not a reason to raise the line cap.
+- **Resume itself is rejected for subagent threads** (measured: 93 of 902). A history request is bound by the same constraint.
+- That `docs/process/S21-codex-backend/trd-phase2a.md` wrote the three vendor-file reads (`state_5.sqlite`·rollout JSONL·`session_index.jsonl`) bundled in one line as if prohibited is **a description that did not separate the grades.** This ADR is the canon for that spot.
+- This decision is **not yet implemented** — the number was fixed first (multiple worktrees in operation), and implementation is a separate step.

@@ -1,112 +1,112 @@
-# 분할 구분선·크기 정책 — 드래그 크기의 주인·최소 크기·키보드·DOM 순서 피어 서베이
+# Split divider and size policy — peer survey on who owns the dragged size · minimum size · keyboard · DOM order
 
-- 상태: 확정 조사 · **결정 = D1~D6 + R11 — 사용자 결정 2026-09-24, ADR-0227** · 날짜: 2026-09-24 · 강도: medium · 설계-결정 모드
-- 방법: 주계열(Claude) 수집자 3 갈래(드래그 크기의 주인·명령·더블클릭 / 최소 크기·창 축소·키보드 / DOM 순서·소수 픽셀) + 메인 grounding(로컬 클론 herdr `065ef9d`·tmux·orca `df7460af`·paseo 코드 원문 대조) + cross-family(codex, effort high, 웹 검색) 적대 리뷰 1 회 — 판정 **REFUTE**, 지적 12 건 전부 반영(논리 오류 1 · 범위 누락 2 · 동시성 누락 1 · 잘못된 일반화 2 · 과장 2 · 반례 누락 2 · 오귀속 1 · 단서 누락 1). 결론이 바뀐 곳: D1-B 의 비용(F1) · D5(F2) · D6(F6)
-- 확신도 범례: 확실 = 독립 출처 2개 이상 또는 코드 직접 확인 / 가능성 높음 = 단일 출처로 지지 / 불확실 = 미지지·추론
-- 선행 조사: `docs/research/split-layout-library-survey-2026-09-24.md`(평평한 렌더러를 직접 구현하기로 한 결정). 이 문서는 그 구현의 사용자 결정 D1~D6 의 근거다.
+- Status: confirmed survey · **decision = D1~D6 + R11 — user decision 2026-09-24, ADR-0227** · date: 2026-09-24 · depth: medium · design-decision mode
+- Method: 3 main-family (Claude) collector tracks (owner of the dragged size · command · double-click / minimum size · window shrink · keyboard / DOM order · fractional pixels) + main grounding (checked against the originals of local-clone code: herdr `065ef9d`, tmux, orca `df7460af`, paseo) + one cross-family (codex, effort high, web search) adversarial review — verdict **REFUTE**, all 12 findings addressed (1 logic error · 2 scope omissions · 1 concurrency omission · 2 wrong generalizations · 2 overstatements · 2 missing counterexamples · 1 misattribution · 1 missing caveat). Where the conclusion changed: the cost of D1-B (F1) · D5 (F2) · D6 (F6)
+- Confidence legend: certain = 2 or more independent sources, or direct code check / likely = supported by a single source / uncertain = unsupported or inferred
+- Prior survey: `docs/research/split-layout-library-survey-2026-09-24.md` (the decision to implement the flat renderer ourselves). This document is the basis for the user decisions D1~D6 of that implementation.
 
-## 질문
+## Questions
 
-평평한 렌더러(잎 목록 + 트리에서 계산한 위치)를 직접 구현할 때:
+When we implement the flat renderer (a list of leaves + positions computed from the tree) ourselves:
 
-- D1. 드래그로 바꾼 칸 크기를 어디에 두나(화면 vs 백엔드 트리) · 명령으로도 바꿀 수 있나
-- D2. 최소 칸 크기와 중첩 분할에서의 전파
-- D3. 키보드로 구분선 조절
-- D4. 창이 최소 합보다 작아질 때
-- D5. 구분선 더블클릭
-- D6. 잎의 DOM 순서 · 소수 픽셀 경계와 터미널
+- D1. Where do we keep the pane size changed by dragging (screen vs backend tree) · can it also be changed by a command
+- D2. Minimum pane size and its propagation in nested splits
+- D3. Adjusting the divider by keyboard
+- D4. When the window becomes smaller than the minimum sum
+- D5. Double-click on the divider
+- D6. DOM order of the leaves · fractional-pixel boundaries and the terminal
 
-## 우리 현황 (코드 확인)
+## Our current state (code checked)
 
-- 분할 트리(`id`·`dir`·`ratio`·두 자식)는 셸 백엔드가 소유하고 프론트는 스냅샷을 그린다(ADR-0035). 모든 분할은 비율 0.5 로 태어나고 비율을 바꾸는 명령은 없다(`src-tauri/src/layout/commands.rs:544-612` — TRD 초안 조사).
-- 드래그 크기는 백엔드로 되쓰지 않는다(`src/components/layout/ViewLayoutRenderer.tsx` 주석과 `docs/process/step-log.md` 2026-07-10 항목이 이를 ADR-0063 범위 밖으로 적지만, ADR-0063 본문에 그 조항은 없다 — ADR-0227 문서 리뷰 적출). ADR-0068 「영향」은 리사이즈 명령이 생기면 백엔드가 최소 칸 크기를 강제해야 한다고 적는데, 백엔드는 픽셀을 모른다.
-- 레이아웃 변경은 백엔드 이벤트로만 화면에 반영되고 낙관 갱신이 없다(`src/store/viewStore.ts` — 리뷰 지적). 스냅샷 버전 가드는 **늦게 온 이벤트**를 버릴 뿐, 동시에 들어온 두 쓰기 중 무엇이 이기는지는 정하지 않는다.
-- 평평한 렌더러에서는 비율이 곧 칸 위치 계산의 입력이라 백엔드 비율이 바뀌면 재렌더만으로 반영된다 — allotment 처럼 명령형 리사이즈 경로가 따로 필요하지 않다(설계 전제 — 선행 조사 F5).
-- 설계 원칙(CLAUDE.md 「LLM-우선 제어」): UI 가 하는 일은 LLM 도 같은 백엔드 명령으로 할 수 있어야 하고, 프론트는 제어를 소유하지 않는다.
+- The split tree (`id`·`dir`·`ratio`·two children) is owned by the shell backend, and the frontend draws the snapshot (ADR-0035). Every split is born with ratio 0.5, and there is no command that changes the ratio (`src-tauri/src/layout/commands.rs:544-612` — TRD-draft investigation).
+- Dragged sizes are not written back to the backend (the comment in `src/components/layout/ViewLayoutRenderer.tsx` and the 2026-07-10 entry of `docs/process/step-log.md` put this outside the scope of ADR-0063, but the body of ADR-0063 has no such clause — surfaced by the ADR-0227 document review). The 「영향」 (Impact) of ADR-0068 states that once a resize command exists, the backend must enforce a minimum pane size, but the backend does not know pixels.
+- Layout changes reach the screen only through backend events, and there is no optimistic update (`src/store/viewStore.ts` — review finding). The snapshot version guard only drops **late-arriving events**; it does not decide which of two writes that arrive at the same time wins.
+- In the flat renderer the ratio is directly an input to the pane position computation, so a changed backend ratio is reflected by a re-render alone — no separate imperative resize path is needed, unlike allotment (design premise — prior survey F5).
+- Design principle (CLAUDE.md 「LLM-우선 제어」 (LLM-first control)): what the UI does must also be doable by an LLM through the same backend command, and the frontend does not own control.
 
-## 발견
+## Findings
 
-### F1. 드래그 크기의 주인 — 세 계열이고, 우리와 같은 모델의 피어는 「백엔드 명령」 쪽이다 — 확실(herdr·tmux) / 가능성 높음(나머지)
+### F1. Owner of the dragged size — three families, and the peers with the same model as ours are on the 「백엔드 명령」 (backend command) side — certain (herdr·tmux) / likely (the rest)
 
-- **백엔드 명령 계열**
-  - **herdr**(이진 분할 + 방향 + 비율 — 우리와 같은 모델, 서버가 레이아웃 소유): 클라이언트가 구분선을 끄는 동안 **스크립트가 쓰는 것과 같은 API 메서드** `layout.set_split_ratio {tab_id, path, ratio}` 를 33ms 마다 보낸다(`src/client/shell/mouse.rs:1118-1143` — 원문 확인). 서버는 유한값을 검사하고 비율을 **0.1~0.9 로 제한**해 트리에 쓰고(`src/layout.rs:275-277`), 받아들일 때마다 세션 저장을 예약하고 레이아웃 전체를 담은 `layout_updated` 이벤트를 낸다(`src/app/api/layouts.rs:221-251` — 원문 확인). 세션 복원이 비율을 되살린다(`src/persist/restore.rs:826-835` — 수집자 보고).
-  - **tmux**: 마우스로 경계를 끄는 기본 바인딩이 곧 명령이다 — `bind -n MouseDrag1Border { resize-pane -M }`(`key-bindings.c:470` — 원문 확인). 크기는 서버의 레이아웃 셀에 산다.
-- **화면 소유 + 서버가 따라 맞추는 혼합 계열**: WezTerm 은 GUI 에서 분할을 조작하고 mux 서버가 분할 크기를 다시 짓는다(재접속 때 유지) — 리뷰 보고(`mux/src/tab.rs`), 원문 미대조.
-- **화면 소유 + 영속으로 베끼는 계열**: Wave(프론트 레이아웃 모델 → 드래그 끝에 확정 → 백엔드 객체로 지연 저장) · orca(DOM `style.flex` 가 정본, 직렬화 때 읽어 낸다 — `layout-serialization.ts:98-118`) · paseo(클라 스토어 `sizes[]`) · VS Code(뷰 계층, 작업공간 상태로 직렬화). 이쪽은 스크립트가 부를 크기 명령을 찾지 못했다(VS Code 의 상대 명령은 예외).
-- **크기 명령의 모양**: 상대 증감이 많다 — VS Code `workbench.action.increaseViewSize`/`decreaseViewSize` · WezTerm `wezterm cli adjust-pane-size <방향> --amount <셀>` · kitty `kitten @ resize-window` · herdr `herdr pane resize --direction --amount`. **절대 크기도 있다** — tmux `resize-pane -x/-y` 는 너비·높이를 절대값(창 대비 퍼센트 포함)으로 박고 기본 바인딩이 `-x50% -y50%` 를 쓴다(`cmd-resize-pane.c:39` · `key-bindings.c:409` — 리뷰 보고). 분할 **경로**로 비율을 박는 명령은 herdr 에서만 찾았다.
-- **★비율 제한은 최소 칸 크기를 보장하지 않는다(리뷰 지적 — 초안의 결론을 뒤집는다)★**: herdr 는 분할마다 따로 0.1~0.9 로 자르고 사각형을 반올림할 뿐 칸 최소를 강제하지 않는다(`src/layout.rs:691` 사각형 계산). 100px 칸이 10px 이 될 수 있고, 0.1 분할이 겹치면 자손이 1px 까지 준다. 즉 herdr 는 ADR-0068 의 픽셀 문제를 **푼 것이 아니라 강제하지 않은 것**이다. paseo 도 비율 0.1(`packages/app/src/stores/workspace-layout-constants.ts:1` — 원문 확인)을 짝 단위로만 건다.
-- 「화면 소유 vs 모델 소유」를 명시적으로 논한 설계 문서는 찾지 못했다 — 위 분류는 코드 모양에서 읽은 것이다.
+- **Backend-command family**
+  - **herdr** (binary split + direction + ratio — the same model as ours, the server owns the layout): while the client drags the divider, it sends `layout.set_split_ratio {tab_id, path, ratio}` every 33ms — **the same API method that scripts use** (`src/client/shell/mouse.rs:1118-1143` — original checked). The server checks that the value is finite, **clamps the ratio to 0.1~0.9**, and writes it into the tree (`src/layout.rs:275-277`); on each accepted write it schedules a session save and emits a `layout_updated` event carrying the whole layout (`src/app/api/layouts.rs:221-251` — original checked). Session restore brings the ratio back (`src/persist/restore.rs:826-835` — collector report).
+  - **tmux**: the default binding that drags a border with the mouse is itself a command — `bind -n MouseDrag1Border { resize-pane -M }` (`key-bindings.c:470` — original checked). The size lives in the server's layout cell.
+- **Mixed family — the screen owns it, and the server follows to match**: WezTerm manipulates splits in the GUI, and the mux server rebuilds the split sizes (kept on reconnect) — review report (`mux/src/tab.rs`), not checked against the original.
+- **Family where the screen owns it and copies it into persistence**: Wave (frontend layout model → confirmed at the end of the drag → lazily saved to a backend object) · orca (the DOM `style.flex` is the source of truth, read out at serialization time — `layout-serialization.ts:98-118`) · paseo (client store `sizes[]`) · VS Code (view hierarchy, serialized into the workspace state). On this side we did not find a size command that scripts could call (VS Code's relative commands are the exception).
+- **Shape of size commands**: relative increments are common — VS Code `workbench.action.increaseViewSize`/`decreaseViewSize` · WezTerm `wezterm cli adjust-pane-size <방향> --amount <셀>` · kitty `kitten @ resize-window` · herdr `herdr pane resize --direction --amount`. **Absolute sizes exist too** — tmux `resize-pane -x/-y` sets width and height as absolute values (including percent relative to the window), and the default binding uses `-x50% -y50%` (`cmd-resize-pane.c:39` · `key-bindings.c:409` — review report). A command that sets the ratio by split **path** was found only in herdr.
+- **★A ratio clamp does not guarantee a minimum pane size (review finding — it overturns the draft's conclusion)★**: herdr clamps each split separately to 0.1~0.9 and rounds the rectangles, but does not enforce a pane minimum (`src/layout.rs:691` rectangle computation). A 100px pane can become 10px, and when 0.1 splits overlap, a descendant shrinks down to 1px. That is, herdr did **not solve** the pixel problem of ADR-0068; it **did not enforce** it. paseo also applies the ratio 0.1 (`packages/app/src/stores/workspace-layout-constants.ts:1` — original checked) only per pair.
+- We found no design document that explicitly discusses 「화면 소유 vs 모델 소유」 (screen ownership vs model ownership) — the classification above is read from the shape of the code.
 
-### F2. 구분선 더블클릭 — 합의가 없다 — 가능성 높음
+### F2. Double-click on the divider — no consensus — likely
 
-- orca: 양쪽을 반반(`flex 1 1 0%`)으로(`pane-divider-drag.ts:262-274` — 원문 확인).
-- VS Code: 구분선 더블클릭은 맥락마다 다르다 — 내용에 맞춰 크기를 잡거나 사이드바를 최소로 줄인다(릴리스 노트·레이아웃 문서 — 리뷰 보고). ★초안이 근거로 든 #123953 은 반반 리셋을 **요청하는 기능 요청**이지 구현 증거가 아니다★.
-- Zed: 공간을 고르게(검색 요약 — 불확실). herdr: 칸 분할 구분선의 더블클릭 처리를 찾지 못했다(사이드바 구분선에만 있다).
-- 저장해 둔 기본 비율로 되돌리는 곳은 찾지 못했다(지금 우리 동작 = allotment `preferredSize` → 백엔드 비율로 되돌림).
+- orca: resets both sides to half and half (`flex 1 1 0%`) (`pane-divider-drag.ts:262-274` — original checked).
+- VS Code: divider double-click differs by context — it sizes to fit the content or shrinks the sidebar to its minimum (release notes·layout docs — review report). ★#123953, which the draft cited as evidence, is a **feature request** asking for a half-and-half reset, not evidence of an implementation★.
+- Zed: spreads the space evenly (search summary — uncertain). herdr: we did not find double-click handling for the pane split divider (it exists only on the sidebar divider).
+- We did not find anyone who resets to a saved default ratio (our current behavior = allotment `preferredSize` → reset to the backend ratio).
 
-### F3. 최소 칸 크기 — 대부분 「직계 두 칸만」, 하위 최소를 위로 올리는 곳은 소수다 — 확실
+### F3. Minimum pane size — most check 「직계 두 칸만」 (only the two direct panes), and few roll lower-level minimums up — certain
 
-| 도구 | 값 | 무엇을 검사하나 | 출처 |
+| Tool | Value | What it checks | Source |
 |---|---|---|---|
-| orca | 50px, 실효 `min(50, 전체/2)` | 구분선 양옆 두 칸 | `pane-divider-drag.ts:15, 244-248`(원문 확인) |
-| Wave | 40px, 어기면 이동을 **거절**(클램프 아님) | 앞뒤 두 노드 | `layoutModel.ts`(수집자 보고) |
-| paseo | 비율 0.1, 짝 최소 `min(0.1, 짝/2)` | 인접한 짝 | 위 상수 파일(원문 확인) · `resize-handle-sizes.ts` |
-| herdr | 비율 0.1~0.9, 픽셀·셀 최소 없음 | 그 노드 하나 | `src/layout.rs:276`(원문 확인) |
-| zellij | 5 셀 | 줄어드는 칸 | `tab/mod.rs:154-155`(수집자 보고) |
-| tmux | 1 셀(+테두리) · **전파** — 같은 방향 자식은 합, 다른 방향은 최대 | 하위 트리 전체 | `layout.c:421-470`(원문 확인) |
-| VS Code gridview | 가지 최소 = 축 방향 합 · 교차 축 최대 | 하위 트리 전체 | splitview/gridview(요약 경유 — 가능성 높음) |
-| Unity SplitView | 자식 최소를 재귀로 합침(축 방향 합 · 교차 축 최대) | 하위 트리 전체 | `Editor/Mono/GUI/SplitView.cs`(리뷰 보고) |
-| allotment | 30px 기본 | 자기 층 | `modern.mjs:963` |
+| orca | 50px, effective `min(50, 전체/2)` | the two panes on either side of the divider | `pane-divider-drag.ts:15, 244-248` (original checked) |
+| Wave | 40px, if violated the move is **rejected** (not clamped) | the two nodes before and after | `layoutModel.ts` (collector report) |
+| paseo | ratio 0.1, pair minimum `min(0.1, 짝/2)` | the adjacent pair | the constants file above (original checked) · `resize-handle-sizes.ts` |
+| herdr | ratio 0.1~0.9, no pixel or cell minimum | that one node only | `src/layout.rs:276` (original checked) |
+| zellij | 5 cells | the pane that shrinks | `tab/mod.rs:154-155` (collector report) |
+| tmux | 1 cell (+ border) · **propagates** — sum for children in the same direction, maximum for the other direction | the whole subtree | `layout.c:421-470` (original checked) |
+| VS Code gridview | branch minimum = sum along the axis · maximum on the cross axis | the whole subtree | splitview/gridview (via summary — likely) |
+| Unity SplitView | merges child minimums recursively (sum along the axis · maximum on the cross axis) | the whole subtree | `Editor/Mono/GUI/SplitView.cs` (review report) |
+| allotment | 30px default | its own level | `modern.mjs:963` |
 
-- 직계만 보는 방식에선 조상 구분선을 끌면 깊은 자손이 최소 아래로 눌릴 수 있다. tmux 는 줄임을 같은 방향 자식들에 한 셀씩 돌아가며 나누고 최소에 닿은 자식은 건너뛴다(`layout.c:476-521` — 수집자 보고).
+- In the direct-only approach, dragging an ancestor divider can squeeze a deep descendant below its minimum. tmux splits the reduction among the children in the same direction one cell at a time in turn, and skips a child that has reached its minimum (`layout.c:476-521` — collector report).
 
-### F4. 창이 최소 합보다 작을 때 — 조사한 범위에선 칸을 숨기는 곳이 없었다 — 가능성 높음
+### F4. When the window is smaller than the minimum sum — within what we surveyed, no one hides panes — likely
 
-- tmux: 레이아웃을 최소보다 줄이지 않고 창 밖으로 잘라 그린다(`layout.c:604-629` 주석). VS Code splitview: 칸마다 최소로 클램프하고 스크롤바. orca·paseo: 최소를 `짝/2` 로 낮춰 칸이 최소 아래로 줄어든다(orca 주석 「음수 flex 를 막으려고」 — 원문 확인). paseo 복원: `칸 수 × 0.1 > 1` 이면 균등 분배로 떨어진다.
-- ★zellij·Wave·herdr·WezTerm 은 조사하지 못했다 — 「아무도 숨기지 않는다」로 일반화하지 말 것★.
+- tmux: does not shrink the layout below the minimum and draws it clipped beyond the window (comment at `layout.c:604-629`). VS Code splitview: clamps each pane to its minimum and shows a scrollbar. orca·paseo: lower the minimum to `짝/2`, so panes shrink below the minimum (orca comment 「음수 flex 를 막으려고」 (to prevent a negative flex) — original checked). paseo restore: if `칸 수 × 0.1 > 1`, it falls back to an even distribution.
+- ★zellij·Wave·herdr·WezTerm were not surveyed — do not generalize to 「아무도 숨기지 않는다」 (nobody hides them)★.
 
-### F5. 키보드 조절 — 표준 초안이 있으나 터미널 피어는 구분선이 아니라 「포커스 칸 리사이즈 명령」으로 한다 — 가능성 높음
+### F5. Keyboard adjustment — a standard draft exists, but terminal peers do it with a 「포커스 칸 리사이즈 명령」 (focused-pane resize command), not through the divider — likely
 
-- 표준: WAI-ARIA APG 「Window Splitter」 — 포커스 받는 `role="separator"` · `aria-valuenow/min/max` · 화살표로 이동, Enter 접기/펴기, Home/End(선택), F6 칸 순환(선택). ★APG 가 스스로 **검토 미완료** 패턴이라고 적는다★(리뷰 보고). react-resizable-panels 가 구현한다(화살표 5% — 2차 출처).
-- 터미널 피어(orca·Wave·paseo·herdr·tmux·zellij)는 구분선에 키보드 포커스를 주지 않는다. paseo 는 `role="separator"` 만 달고 키 처리가 없다(`resize-handle.tsx:261-271` — 수집자 보고). herdr 는 포커스 칸에서 화살표 방향으로 가장 가까운 분할을 찾아 비율에 ±를 더하는 **명령**을 둔다(`src/layout.rs:279-304` — 수집자 보고).
-- 「크기 명령이 있으면 키보드 접근성이 충족된다」는 우리 UI 에서 따로 보여야 할 주장이다 — 피어의 관행일 뿐 동등성 증명이 아니다(리뷰 지적).
-- 끌어서 접기(snap)는 범용 UI 라이브러리(VS Code splitview·allotment·react-resizable-panels)에만 있고 터미널 피어엔 없다.
+- Standard: WAI-ARIA APG 「Window Splitter」 — a focusable `role="separator"` · `aria-valuenow/min/max` · arrows to move, Enter to collapse/expand, Home/End (optional), F6 to cycle panes (optional). ★APG itself states that this is a pattern with **review not completed**★ (review report). react-resizable-panels implements it (arrows 5% — secondary source).
+- Terminal peers (orca·Wave·paseo·herdr·tmux·zellij) do not give the divider keyboard focus. paseo only attaches `role="separator"` and has no key handling (`resize-handle.tsx:261-271` — collector report). herdr has a **command** that finds the nearest split in the arrow direction from the focused pane and adds ± to its ratio (`src/layout.rs:279-304` — collector report).
+- 「크기 명령이 있으면 키보드 접근성이 충족된다」 (if a size command exists, keyboard accessibility is satisfied) is a claim that has to be shown separately in our UI — it is only a peer practice, not a proof of equivalence (review finding).
+- Drag-to-collapse (snap) exists only in general-purpose UI libraries (VS Code splitview·allotment·react-resizable-panels), and not in terminal peers.
 
-### F6. DOM 순서와 소수 픽셀
+### F6. DOM order and fractional pixels
 
-- **DOM 순서 — 터미널 상태 보존과 접근성이 맞바뀐다 — 확실**: react-mosaic 은 key 순(레이아웃 무관)이고, 그 대가로 Tab·스크린리더 순서가 화면이 아니라 key 를 따른다고 스스로 적는다(`MosaicRoot.tsx:57-63` — 원문 확인). Wave TileLayout 은 트리 경로 순(= 화면 순)이라 레이아웃이 바뀌면 노드가 움직인다(수집자 보고). **DOM 이동의 부작용이 실재한다**: orca 는 터미널 컨테이너를 옮기면 브라우저가 `scrollTop` 을 지우고, 한도 근처에서 Chromium 이 가장 오래된 WebGL 컨텍스트를 `contextlost` 없이 죽인다고 적고 두 단계 복원·WebGL 재부착을 한다(`pane-split-scroll.ts:83-93` — 원문 확인). 일반 이동은 포커스도 잃는다(Chrome 133+ `moveBefore()` 는 보존 — Chrome 블로그). 단 **크기만 바뀌는 드래그는 어느 순서 정책에서도 노드를 옮기지 않는다** — 이동은 트리 모양이 바뀔 때만 생긴다.
-  - 정리: id 순은 **터미널 노드가 절대 안 움직여** 위 부작용을 원천 차단한다. 대가는 포커스·스크린리더 순서가 화면 순서와 다르다는 것이고, 그것은 `tabindex`·`aria-flowto`·방향 포커스 명령 같은 별도 수단으로 메워야 한다.
-- **소수 픽셀 — 가능성 높음**: VS Code splitview·dockview 는 크기를 `Math.round` 한 정수 px 로 누적해 `left/top` 을 px 로 단다(요약 경유). orca 는 fit 판정용 측정값을 반올림해 「소수 떨림이 리사이즈로 읽히지 않게」 한다(`pane-fit-client-size.ts:1-13` — 원문 확인). FitAddon 은 계산된 크기를 정수로 자르고 셀 수를 내림한다(설치본 `@xterm/addon-fit`) — 소수 크기는 조용히 잘린다. CSS `round()` 는 Chrome/Edge 125+ 지원(caniuse — WebView2 는 Edge 버전을 따른다). ★초안이 근거로 든 xterm.js #3584 는 「세로 리사이즈 중 너비가 바뀐다」는 보고라 소수 경계 → 열 흔들림의 증거가 아니다(리뷰 지적 — 뺐다)★. **칸 위치가 반 픽셀일 때 WebGL 글자가 흐려지는지를 직접 잇는 증거는 없다 — 실측 몫.**
+- **DOM order — terminal state preservation and accessibility trade off against each other — certain**: react-mosaic is in key order (independent of layout), and states itself that, at that cost, Tab and screen-reader order follow the key rather than the screen (`MosaicRoot.tsx:57-63` — original checked). Wave TileLayout is in tree-path order (= screen order), so nodes move when the layout changes (collector report). **The side effects of a DOM move are real**: orca writes that when a terminal container is moved, the browser clears `scrollTop`, and near the limit Chromium kills the oldest WebGL context without `contextlost`, and it does a two-step restore and WebGL re-attach (`pane-split-scroll.ts:83-93` — original checked). An ordinary move also loses focus (Chrome 133+ `moveBefore()` preserves it — Chrome blog). However, **a drag that only changes sizes moves no node under any order policy** — a move happens only when the tree shape changes.
+  - Summary: id order **never moves terminal nodes**, so it blocks the side effects above at the source. The cost is that focus and screen-reader order differ from screen order, and that has to be filled by separate means such as `tabindex`, `aria-flowto` and a directional focus command.
+- **Fractional pixels — likely**: VS Code splitview and dockview accumulate sizes as integer px with `Math.round` and attach `left/top` in px (via summary). orca rounds the measured value used for fit decisions so that 「소수 떨림이 리사이즈로 읽히지 않게」 (fractional jitter is not read as a resize) (`pane-fit-client-size.ts:1-13` — original checked). FitAddon truncates the computed size to an integer and rounds the cell count down (installed `@xterm/addon-fit`) — a fractional size is silently cut off. CSS `round()` is supported in Chrome/Edge 125+ (caniuse — WebView2 follows the Edge version). ★xterm.js #3584, which the draft cited as evidence, is a report that 「세로 리사이즈 중 너비가 바뀐다」 (the width changes during a vertical resize), so it is not evidence of fractional boundary → column wobble (review finding — removed)★. **There is no evidence that directly links a half-pixel pane position to blurry WebGL text — that is for measurement.**
 
-## 선택지 (제약 적합도)
+## Options (fit to constraints)
 
-제약: ⓐ LLM-우선 제어(UI 가 하는 일은 같은 백엔드 명령으로) ⓑ 백엔드가 트리 정본 ⓒ 이번 교체 범위 ⓓ 피어 근거
+Constraints: ⓐ LLM-first control (what the UI does goes through the same backend command) ⓑ the backend is the source of truth for the tree ⓒ scope of this replacement ⓓ peer basis
 
-| 결정 | 선택지 | ⓐ | ⓑ | ⓒ | ⓓ |
+| Decision | Option | ⓐ | ⓑ | ⓒ | ⓓ |
 |---|---|---|---|---|---|
-| D1 | A. 화면 전용 덮어쓰기(분할 id 키) | ✕(현상 유지) | ✕ 화면·백엔드 비율이 갈린다 | ○ 작다 | Wave·orca·paseo·VS Code |
-| D1 | B. 드래그 → 백엔드 비율 명령(herdr 모양) | ○ | ○ | △ 아래 설계 요구 | herdr·tmux |
-| D2 | 직계 두 칸만(평평한 최소) | — | — | ○ | 다수(orca·Wave·paseo·herdr·allotment) |
-| D2 | 하위 최소를 위로 전파(합·최대) | — | — | △ 알고리즘 | tmux·VS Code·Unity |
-| D3 | 구분선 키보드 없음 · 크기 명령(LLM·후일 키 바인딩) | ○ | — | ○ | 터미널 피어 |
-| D3 | APG 구분선 포커스 | — | — | △ | react-resizable-panels |
-| D5 | 반반 | — | — | ○ | orca |
-| D5 | 백엔드 비율로 되돌림(현행) | — | — | ○ | 없음 |
-| D5 | 더블클릭 동작 없음 | — | — | ○ | herdr(칸 구분선) |
-| D6 | id 순 + 순서 보정 없음 | — | — | ○ | react-mosaic |
-| D6 | 화면 순 | — | — | △ DOM 이동 부작용 | Wave |
+| D1 | A. screen-only override (keyed by split id) | ✕ (status quo) | ✕ screen and backend ratios diverge | ○ small | Wave·orca·paseo·VS Code |
+| D1 | B. drag → backend ratio command (herdr shape) | ○ | ○ | △ design requirements below | herdr·tmux |
+| D2 | only the two direct panes (flat minimum) | — | — | ○ | most (orca·Wave·paseo·herdr·allotment) |
+| D2 | roll lower-level minimums up (sum·maximum) | — | — | △ algorithm | tmux·VS Code·Unity |
+| D3 | no divider keyboard · size command (LLM · later key binding) | ○ | — | ○ | terminal peers |
+| D3 | APG divider focus | — | — | △ | react-resizable-panels |
+| D5 | half and half | — | — | ○ | orca |
+| D5 | reset to the backend ratio (current) | — | — | ○ | none |
+| D5 | no double-click behavior | — | — | ○ | herdr (pane divider) |
+| D6 | id order + no order correction | — | — | ○ | react-mosaic |
+| D6 | screen order | — | — | △ DOM-move side effects | Wave |
 
-### D1-B 를 고를 때 함께 정해야 하는 것 (리뷰 지적 — 초안의 「명령 하나 + 비율 제한」은 과소평가였다)
+### What must be decided together when choosing D1-B (review finding — the draft's 「명령 하나 + 비율 제한」 (one command + ratio clamp) was an underestimate)
 
-1. **미리보기와 확정** — 드래그 중엔 화면이 로컬로 미리 보여 주고, 백엔드엔 드래그 끝에 한 번(Wave 모양) 또는 스로틀로(herdr 33ms) 쓴다. 백엔드 왕복만으로 그리면 드래그가 끊겨 보일 수 있다(왕복 지연·이벤트 수·매 갱신의 터미널 fit·PTY 리사이즈 비용은 실측 전).
-2. **최소 크기는 두 층** — 픽셀 최소는 픽셀을 아는 화면이 드래그 중에 강제하고, 백엔드는 비율 제한만 건다. 그러면 LLM 이 명령으로 박은 비율은 깊은 칸을 최소 아래로 누를 수 있다 — 그걸 허용할지(herdr) 백엔드가 칸 수 기반으로 더 막을지 정한다.
-3. **동시 쓰기** — 사용자 드래그와 LLM 명령이 같은 분할에 겹치면 백엔드 도착 순서의 마지막 쓰기가 이긴다(기본). 드래그 중 미리보기와 들어온 백엔드 값의 화해 규칙이 필요하다.
-4. **되돌리기(undo)** — 레이아웃에 undo 가 없다. 드래그를 한 단위로 묶는 문제는 이번엔 생기지 않는다(확정이 드래그 끝 한 번이면).
-5. **팝아웃·다중 창** — 분할은 뷰 하나에 속하고 뷰는 창 하나가 소유하므로 대상 지정은 `view + split id` 로 충분하다(추론).
+1. **Preview and commit** — during the drag the screen shows a local preview, and the backend is written once at the end of the drag (Wave shape) or by throttling (herdr 33ms). Drawing only from backend round trips may make the drag look choppy (round-trip latency · number of events · the terminal fit and PTY resize cost of every update are not yet measured).
+2. **Minimum size has two layers** — the pixel minimum is enforced during the drag by the screen, which knows pixels, and the backend applies only the ratio clamp. Then a ratio that an LLM sets by command can squeeze a deep pane below its minimum — decide whether to allow that (herdr) or have the backend block it further based on pane counts.
+3. **Concurrent writes** — when a user drag and an LLM command overlap on the same split, the last write in backend arrival order wins (default). A reconciliation rule is needed between the preview during the drag and the incoming backend value.
+4. **Undo** — the layout has no undo. The problem of grouping a drag into one unit does not arise this time (if the commit is once at the end of the drag).
+5. **Popout · multiple windows** — a split belongs to one view and a view is owned by one window, so addressing by `view + split id` is enough (inference).
 
-## 쟁점·한계
+## Open issues and limits
 
-- 리뷰 판정 REFUTE 의 지적은 전부 근거를 달고 있어 반영했다 — 남은 contested 항목은 없다.
-- Wave·VS Code·Zed·WezTerm·Unity·react-mosaic 의 일부는 웹 요약이나 리뷰어 보고로만 읽었다(원문 미대조).
-- 창 축소 동작은 zellij·Wave·herdr·WezTerm 을 조사하지 못했다.
-- 반 픽셀 위치의 WebGL 글자 흐림, D1-B 의 드래그 체감은 GUI 실측 몫.
+- Every finding of the review verdict REFUTE carried evidence, so all were addressed — no contested items remain.
+- Parts of Wave·VS Code·Zed·WezTerm·Unity·react-mosaic were read only through web summaries or reviewer reports (not checked against the originals).
+- The window-shrink behavior of zellij·Wave·herdr·WezTerm was not surveyed.
+- WebGL text blur at half-pixel positions and the drag feel of D1-B are for GUI measurement.

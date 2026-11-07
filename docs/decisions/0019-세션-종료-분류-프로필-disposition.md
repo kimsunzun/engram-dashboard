@@ -1,49 +1,49 @@
-# ADR-0019: 세션 종료 분류 — 의도는 "행동 지점"에서, 프로필 disposition으로 죽음/예약/복원 가름
+# ADR-0019: Session end classification — intent is decided at the "point of action", the profile disposition separates death/reserved/restore
 
-- 상태: 확정 (2026-06-16, dashboard4 세션 — 사용자 결정)
-- 관련: ADR-0016(수명 모델 — restart_policy 런타임 해석 **일부 폐기**), ADR-0017(죽음 정의 — **구체화**), ADR-0001(kill 2동사), ADR-0005(finalize 1회), ADR-0015(데몬 persist) · Amended by ADR-0083 (유저 kill·정상 exit(code0) → 프로필 삭제 조항 폐지: 모든 종료는 프로필 시체 보존(KeepDisableAutoRestore), 자동 삭제 없음 — 삭제는 명시적 사용자 명령으로만) · Amended by ADR-0084 (apply_disposition epoch-guard 추가 — stale reap 이 재활성화된 산 세션을 auto_restore=false 로 강등 못 하게(reaped msg.epoch 가 현재 세션 epoch 와 일치할 때만 적용). 재활성화(resume)는 맵 교체이므로 epoch bump(ADR-0007 재확인).) · Amends ADR-0016 (restart=Always 런타임 해석)
-- 범위: claude 세션이 "끝났을 때" 무엇을 죽음으로 보고, 프로필을 지울지 남길지, 어떻게 복원할지. 진행중 죽음과 부팅 복원을 분리한다.
+- 상태: 확정 (2026-06-16, dashboard4 session — user decision)
+- 관련: ADR-0016(lifetime model — the runtime interpretation of restart_policy **partly discarded**), ADR-0017(death definition — **made concrete**), ADR-0001(kill 2 verbs), ADR-0005(finalize once), ADR-0015(daemon persist) · Amended by ADR-0083 (the clause "user kill · normal exit (code0) → profile deletion" removed: every end preserves the profile corpse (KeepDisableAutoRestore), no automatic deletion — deletion only by an explicit user command) · Amended by ADR-0084 (apply_disposition epoch-guard added — so a stale reap cannot demote a re-activated live session to auto_restore=false (applied only when the reaped msg.epoch matches the current session epoch). Re-activation (resume) is a map replacement, so the epoch is bumped (ADR-0007 reconfirmed).) · Amends ADR-0016 (the runtime interpretation of restart=Always)
+- Scope: when a claude session "has ended", what counts as death, whether to delete or keep the profile, and how to restore it. Separate in-progress death from boot restore.
 
 ## 맥락
-세션이 끝나는 경로가 여럿이다 — 유저 kill / claude `/exit` / 크래시 / 데몬 강제종료. 이를 **종료를 관측(exit 신호)해서만 분류하면** 데몬 셧다운의 Job-kill이 유저 kill로 오분류되는 등 섞인다. 또 ADR-0016은 "런타임 재시작(restart_policy Always)"과 "부팅 복원"을 한 덩어리로 다뤘는데, 둘은 다른 로직이다.
+There are several paths by which a session ends — user kill / claude `/exit` / a crash / a forced daemon termination. If we **classify only by observing the end (the exit signal)**, they get mixed, for example the Job-kill of a daemon shutdown is misclassified as a user kill. Also ADR-0016 treated "runtime restart (restart_policy Always)" and "boot restore" as one lump, but they are different logic.
 
 ## 결정
-**원칙: 의도는 종료를 관측해 추론하지 않고, 종료를 일으킨 "행동 지점"에서 정한다.** 4채널로 분리:
+**Principle: intent is not inferred by observing the end; it is decided at the "point of action" that caused the end.** Split into four channels:
 
-| 종료 원인 | 감지 | 죽음? | 세션 | 프로필 | auto_restore |
+| End cause | Detection | Death? | Session | Profile | auto_restore |
 |---|---|---|---|---|---|
-| 유저 kill (UI/LLM 커맨드) | 커맨드 핸들러에서 의도 태깅 | 죽음 | 정리 | **삭제** | — |
-| claude `/exit` (정상, exit 0) | PTY EOF + `Exited{0}`, 우리 kill 아님 | 죽음 | 정리(터미널 같이 종료) | **삭제** | — |
-| claude 크래시 (exit≠0/signal) | PTY EOF + 비정상 | 아님(사고) | 정리 | **유지** | →false (예약 복귀) |
-| 데몬/앱 강제종료·리부팅 | 데몬 셧다운 = death 기록 안 함 | 아님 | (데몬과 함께 끊김) | **유지** | 그대로 true → 부팅 복원 |
+| User kill (UI/LLM command) | intent tagged in the command handler | death | cleaned up | **deleted** | — |
+| claude `/exit` (normal, exit 0) | PTY EOF + `Exited{0}`, not our kill | death | cleaned up (the terminal ends together) | **deleted** | — |
+| claude crash (exit≠0/signal) | PTY EOF + abnormal | not death (an accident) | cleaned up | **kept** | →false (back to reserved) |
+| Daemon/app forced termination · reboot | daemon shutdown = no death recorded | not death | (cut off together with the daemon) | **kept** | stays true → boot restore |
 
-1. **핵심 규칙 = 프로필 disposition.** 의도된 종료(유저 kill·`/exit`)=세션 정리+**프로필 삭제**(완전 제거). 비의도(크래시·강제종료)=세션 정리+**프로필 유지**.
-2. **크래시 → 예약(대기)로 복귀**(auto_restore=false). **런타임 자동 재시작 없음** — 사람이 수동 재실행. (즉시 `대기`로 보임.)
-3. **auto_restore = "지금 떠 있어야 하는가".** 예약(깡통)=false, **활성화 시 true로**(강제종료 후 부팅 복원 대상이 되게), 크래시 복귀=false.
-4. **데몬 셧다운은 자식 종료를 per-agent 죽음으로 기록 안 함**(shutting-down suppress). 그래서 강제종료된 running 들은 auto_restore=true 그대로 남아 **부팅 복원**된다. ↔ 크래시는 데몬이 살아있어 reaper가 돌아 auto_restore=false로 떨어뜨린다 → 두 경우가 "reaper가 돌았나"로 자연 구분.
-5. **런타임 죽음 ≠ 부팅 복원** — 로직 분리. 부팅 복원은 ADR-0016 §부팅 복원(저장된 auto_restore=true를 1회 되살림) 유지.
-6. **감지 = PTY EOF(현행).** `cmd /c claude` 구조라 claude 종료(=/exit·크래시) → cmd도 종료 → master reader EOF → pump finish. 별도 child watcher 불필요.
+1. **The core rule = the profile disposition.** An intended end (user kill · `/exit`) = clean up the session + **delete the profile** (remove it completely). An unintended end (crash · forced termination) = clean up the session + **keep the profile**.
+2. **A crash → back to reserved (waiting)** (auto_restore=false). **No runtime auto-restart** — a human re-runs it manually. (It immediately shows as `대기` (waiting).)
+3. **auto_restore = "should it be up right now".** Reserved (empty shell) = false, **true on activation** (so it becomes a boot-restore target after a forced termination), a crash return = false.
+4. **A daemon shutdown does not record the termination of its children as a per-agent death** (shutting-down suppress). So the running ones that were forcibly terminated stay at auto_restore=true and are **restored at boot**. ↔ On a crash the daemon is alive, so the reaper runs and drops auto_restore to false → the two cases are naturally distinguished by "did the reaper run".
+5. **Runtime death ≠ boot restore** — separate logic. Boot restore keeps ADR-0016 §boot restore (revive the saved auto_restore=true ones once).
+6. **Detection = PTY EOF (current).** With the `cmd /c claude` structure, claude ending (= /exit · crash) → cmd ends too → master reader EOF → pump finish. No separate child watcher is needed.
 
-## 거부 / 대체한 것
-- **ADR-0016 restart_policy=Always를 "런타임 자동재시작"으로 본 해석 → 폐기.** 런타임 자동재시작은 없다. 크래시는 예약 복귀(수동 재실행). "죽으면 되살린다"는 **부팅 복원** 맥락으로 한정. (ADR-0016 §결정 3의 런타임 의미만 supersede, 부팅 복원·가드 카운터·Failed 영속은 추후 재검토 — 이 ADR은 종료 분류에 집중.)
-- **exit 신호만 관측해 분류** — 데몬 셧다운 Job-kill을 유저 kill로 오분류. 그래서 의도는 source(커맨드 핸들러/셧다운 경로)에서 태깅.
-- **cmd /k(좀비 터미널)** — ADR-0017 유지(거부).
+## Rejected / replaced
+- **The interpretation of ADR-0016 restart_policy=Always as "runtime auto-restart" → discarded.** There is no runtime auto-restart. A crash goes back to reserved (manual re-run). "If it dies, revive it" is limited to the **boot restore** context. (Only the runtime meaning of ADR-0016 §decision 3 is superseded; boot restore, the guard counter and Failed persistence are to be reviewed later — this ADR focuses on end classification.)
+- **Classify by observing only the exit signal** — it misclassifies the Job-kill of a daemon shutdown as a user kill. So intent is tagged at the source (command handler/shutdown path).
+- **cmd /k (zombie terminal)** — ADR-0017 stands (rejected).
 
 ## 영향 / 불변식
-- **ADR-0001(kill 2동사)·ADR-0005(finalize 1회) 무변경** — reaper는 기존 done 신호(`OutputCore.finish`→done_tx)를 **소비**해 sessions 맵에서 빼고 disposition을 적용할 뿐, kill 인과·finalize 횟수를 바꾸지 않는다.
-- **유저 kill = 프로필 삭제**로 ADR-0016의 "kill≠삭제, pause 없음"을 이 모델에선 "kill=완전 종료=삭제"로 구체화(pause 없음은 유지 — 잠깐 안 쓰면 idle).
-- "restart"(의도적 재시작 = 프로필 유지하고 재spawn)는 kill(삭제)과 **다른 별도 커맨드**로 둘 수 있다 — 필요 시 추후.
+- **ADR-0001 (kill 2 verbs) and ADR-0005 (finalize once) are unchanged** — the reaper only **consumes** the existing done signal (`OutputCore.finish` → done_tx), removes the session from the sessions map and applies the disposition; it does not change the kill causality or the finalize count.
+- **User kill = profile deletion**, so ADR-0016's "kill ≠ deletion, no pause" becomes "kill = full end = deletion" in this model (no pause is kept — if it is not used for a while, it idles).
+- A "restart" (an intentional restart = keep the profile and re-spawn) can be a **separate command** from kill (deletion) — later, if needed.
 
-## 구현 정밀화 (consult 교차검증 `20260616-215346`, judge 최신뢰=GPT → TRD `reaper-trd.md`)
-reaper 동시성 설계를 GPT·Gemini·Claude 블라인드 교차검증. 종합 결과 두 가지를 결정에 추가:
-1. **의도(intent)는 finish 순간 snapshot.** reaper가 reap 시점에 intent를 live로 읽으면 "크래시로 죽은 뒤 reaper 처리 전 유저가 kill→크래시를 유저kill로 오분류→프로필 삭제(데이터 손실)" race가 생긴다(GPT 단독 적출, Gemini·Claude 놓침). 그래서 pump가 finish 승자일 때 intent·shutting_down을 **그 순간 snapshot해 종료 이벤트(ReapMsg)에 담아** 발행하고, reaper는 그 frozen 값으로 판정한다.
-2. **reap 전 epoch 일치 검증(ADR-0007 재사용).** 단일 supervisor + `sessions.remove()` Some-승자로 idempotency를 보장하되, 늦게 도착한 옛 done이 같은 AgentId로 재spawn된 새 세션을 오삭제하지 않게 remove 전에 epoch를 비교한다(GPT·Claude 포함, Gemini 누락→좀비화 버그). 새 RunId 타입 신설 대신 기존 epoch 재사용.
+## Implementation refinement (consult cross-validation `20260616-215346`, judge top trust = GPT → TRD `reaper-trd.md`)
+The reaper concurrency design was blind cross-validated by GPT, Gemini and Claude. The synthesis added two things to the decision:
+1. **Intent is a snapshot at the moment of finish.** If the reaper reads intent live at reap time, a race appears: "after a crash, before the reaper handles it, the user kills → the crash is misclassified as a user kill → profile deleted (data loss)" (singled out by GPT alone; Gemini and Claude missed it). So when the pump is the finish winner, it **snapshots intent and shutting_down at that moment, puts them in the end event (ReapMsg)** and emits it, and the reaper decides from those frozen values.
+2. **Verify the epoch match before reaping (reusing ADR-0007).** A single supervisor + the `sessions.remove()` Some-winner guarantees idempotency, but we compare the epoch before the remove so that a late-arriving old done does not wrongly delete a new session re-spawned under the same AgentId (included by GPT and Claude; omitted by Gemini → a zombification bug). The existing epoch is reused instead of introducing a new RunId type.
 
-세부 인터페이스·흐름·테스트는 `docs/process/S12-daemonization/reaper-trd.md`.
+For the detailed interfaces, flow and tests see `docs/process/S12-daemonization/reaper-trd.md`.
 
-## 후속 (reviewer-deep 적출 — 데몬화 전 해결, 지금은 블로커 아님)
-구현 후 reviewer-deep 검수에서 나온, 지금 단계엔 잠복이나 **데몬화(S12)·자동재시작(OnCrash) 도입 전 반드시 못 박을 것**:
-1. **`shutting_down` 수명.** 현재 `shutdown_all`이 set한 뒤 false로 되돌리는 경로가 없다. AgentManager가 프로세스 수명과 1:1이면 무해하나, **데몬 상주 모델**(ADR-0013 tmux식)에서 shutdown_all이 "이 클라 정리"로 의미가 바뀌면 한 번 set된 플래그가 이후 모든 종료를 KeepAsIs(disposition 스킵)로 만든다. 데몬화 전 "manager 1회용 vs 재사용" 정책을 ADR로 확정.
-2. **status 오분류(Killed vs Exited).** 유저 kill인데 watcher가 shutdown 플래그 set보다 먼저 child 죽음을 봐 master를 drop하면 pump가 `Exited{code}`로 status를 낼 수 있다. **disposition은 intent 우선이라 안전**(영향 0)하나, `RestartPolicy::OnCrash` 자동재시작이 status를 입력으로 쓰는 순간 분기가 틀어진다. OnCrash 도입 시 reason/status 분기에 intent를 반영할 것.
-3. **watcher 단일화.** 자연종료 감지 watcher가 세션당 스레드(50ms 폴링)다 — reaper는 단일 supervisor인데 비대칭. 다중세션 확장성 위해 watcher도 단일 폴링 스레드로 합칠 것(장기).
-4. **reaper 테스트 커버리지 갭.** epoch race(옛 ReapMsg가 재spawn된 새 세션 오삭제 방지)·idempotency가 unit decide + 구조 보장만 있고 통합 실측이 없다 — reap_one 수정 시 회귀 그물 보강 필요.
+## Follow-ups (raised by reviewer-deep — resolve before daemonization, not a blocker now)
+Items from the post-implementation reviewer-deep inspection that are latent at this stage, but **must be pinned down before daemonization (S12) · introducing auto-restart (OnCrash)**:
+1. **`shutting_down` lifetime.** Currently there is no path that sets it back to false after `shutdown_all` sets it. If AgentManager is 1:1 with the process lifetime this is harmless, but in the **daemon-resident model** (ADR-0013, tmux style), if shutdown_all changes meaning to "clean up this client", a flag set once turns every later end into KeepAsIs (skipping the disposition). Before daemonization, settle the policy "manager single-use vs reused" in an ADR.
+2. **Status misclassification (Killed vs Exited).** If it is a user kill but the watcher sees the child's death before the shutdown flag is set and drops the master, the pump may report the status as `Exited{code}`. **The disposition is safe because intent takes priority** (zero impact), but the moment `RestartPolicy::OnCrash` auto-restart uses status as an input, the branch goes wrong. When introducing OnCrash, reflect intent in the reason/status branch.
+3. **Unify the watchers.** The natural-exit detection watcher is a thread per session (50ms polling) — asymmetric with the reaper being a single supervisor. For multi-session scalability, merge the watchers into a single polling thread as well (long term).
+4. **Reaper test coverage gap.** The epoch race (preventing an old ReapMsg from wrongly deleting a re-spawned new session) and idempotency have only unit decide + structural guarantees and no integration measurement — the regression net needs reinforcing when reap_one is modified.

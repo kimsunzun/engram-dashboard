@@ -1,21 +1,21 @@
-// SlotUnavailableVeil — "타겟한 에이전트가 지금 없다" 를 세 슬롯(터미널·DOM·리치)과 잎(LayoutLeaf — 기억 없는,
-//   즉 그 잎이 지금 그 에이전트의 마운트 기억을 쥐고 있지 않은 — 마운트한 적이 없거나 재배정 때 기억을 버린 —
-//   슬롯 · TRD S21-storage §6-8)이 **한 벌로** 그리는 막. 잎은 슬롯
-//   컴포넌트를 띄우지 않을 때만 그리므로 넷이 한 칸에 겹치지 않는다.
+// SlotUnavailableVeil — the curtain that the three slots (terminal · DOM · rich) and the leaf (LayoutLeaf — a slot with no memory,
+//   that is, one where the leaf does not now hold that agent's mount memory — never mounted it or dropped the memory on reassignment ·
+//   TRD S21-storage §6-8) draw **as one set** for "the targeted agent is not there now". The leaf draws only when it does not put up the slot
+//   component, so the four never overlap in one area.
 // ADR-0280
 //
-// ★내용은 지우지 않는다(ADR-0148 결정 2·3, 사용자 결정)★: 대화든 터미널 화면이든 그 시점 모습을 그대로
-//   두고, 반투명 막으로 덮어 흐리게 만든 뒤 가운데에 심볼 하나만 얹는다. 화면을 비우면 "돌아오면 이어서
-//   볼 것" 이 사라진다. 부재를 세 갈래로 가르는 상위 판정은 ADR-0149.
+// ★Content is not erased (ADR-0148 decisions 2·3, user decision)★: whether conversation or terminal screen, it is left as it
+//   was at that moment, covered with a translucent curtain to blur it, and only a single symbol is laid at the center. Emptying the screen loses
+//   "what to read on resuming when it returns". The upper-level decision that splits absence into three branches is ADR-0149.
 //
-// ★문구를 넣지 않는다(사용자 결정 2026-08-20)★: 옛 터미널·DOM 슬롯은 대기/종료/`Failed: <메시지>` 를
-//   글로 적었는데, 그러면 같은 사실을 슬롯마다 다른 문장으로 말하게 되고 데몬 재기동처럼 판정이 흔들리는
-//   구간에서 "종료됨" 같은 단정이 그대로 남는다. 심볼 하나면 그 단정을 하지 않는다. 실패 사유가 필요하다는
-//   것이 드러나면 그때 되살린다 — 지금 미리 자리를 만들지 않는다.
+// ★No text is put in (user decision 2026-08-20)★: the old terminal·DOM slots wrote waiting/exit/`Failed: <메시지>` as
+//   text, but then the same fact is told in a different sentence per slot, and in spans where the decision wavers like a daemon restart an assertion
+//   like "종료됨" (ended) stays as it is. A single symbol makes no such assertion. If a need for the failure reason shows up,
+//   it is revived then — we do not make a place for it in advance now.
 //
-// ★컴포넌트 하나로 두는 이유★: 그리는 쪽마다 각자 그리면 "같은 조건에 같은 모습" 이 규약으로만 남는다.
-//   조건(부재 판정)은 그리는 쪽이 자기 데이터로 계산하고(잎은 명부·프로필 목록과 기억 유무로), 그 결과를
-//   이 한 자리가 그린다.
+// ★Why it is a single component★: if each drawing side draws on its own, "the same look for the same condition" survives only as a convention.
+//   The condition (absent decision) is computed by the drawing side from its own data (the leaf from the registry·profile list and memory presence), and this
+//   one place draws the result.
 
 import { PowerOff } from 'lucide-react'
 
@@ -23,9 +23,9 @@ import type { ViewPhase } from '../../api/agentClient'
 
 interface SlotUnavailableVeilProps {
   /**
-   * 구독이 마지막으로 알린 국면(아직 아무 통지도 못 받았으면 생략). 그리는 모습은 이 값으로 바뀌지 않고
-   * **관측 표면(cdp·테스트)에서 부재의 근거를 가르는 데만** 쓴다 — 대기(`detached`)와 재요청 소진
-   * (`error`)은 사용자에게 같은 그림이지만 자동화에는 다른 사실이다.
+   * The phase the subscription last announced (omitted if no notification has been received yet). The look it draws does not change with this value, and it is used
+   * **only on the observation surface (cdp · tests) to tell the basis of absence apart** — waiting (`detached`) and re-request exhaustion
+   * (`error`) are the same picture to the user but different facts to automation.
    */
   phase?: ViewPhase | null
 }
@@ -35,11 +35,11 @@ export function SlotUnavailableVeil({ phase }: SlotUnavailableVeilProps) {
     <div
       data-slot-dead="1"
       data-slot-phase={phase ?? undefined}
-      // 옛 관측 표면 유지 — "붙을 에이전트를 기다리는 중" 만 참(`error` 는 아니다).
+      // Keeps the old observation surface — only "waiting for an agent to attach" is true (`error` is not).
       data-slot-detached={phase === 'detached' ? '1' : undefined}
       aria-hidden
-      // pointer-events-none — 조작을 통과시킨다(ADR-0226 사용자 결정 2026-09-24).
-      // 죽은 에이전트로 가는 입력은 막이 아니라 각 슬롯 가드가 막는다(ADR-0165).
+      // pointer-events-none — lets operation through (ADR-0226 user decision 2026-09-24).
+      // Input to a dead agent is blocked not by the curtain but by each slot's guard (ADR-0165).
       className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center bg-background/70"
     >
       <PowerOff className="size-10 text-muted" />

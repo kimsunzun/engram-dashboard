@@ -1,15 +1,15 @@
-# TRD — 패닉 정책 구현: 좁은 가둠 · 즉시 종료 훅 · unwind 전환 (S21)
+# TRD — Panic policy implementation: narrow containment · immediate-exit hook · unwind switch (S21)
 
-> **상태: 11판 개정 4(2026-10-12 · 사용자 결정 A) · 구현 U1~U5 착지(2026-10-12 — 커밋은 step-log).** 사용자 결정 전부 끝(§3) · `/review trd full` 3 라운드 끝(1 = FIX · FIX → 2 = blind PASS · doc-aware FIX → 3 = doc-aware PASS · 마지막 경미 1 건 반영). 개정 2(리뷰 1) = `usage.get` 을 가둠에서 뺌(허용 목록 둘) · 표시 끔 원시와 그 자리 넷 · 「표시 범위 ⊆ catch 클로저」 불변식 · U3 확인 거리. 개정 3(리뷰 2) = 허용 목록에 「효과 없음」 조건 · 표시를 끄지 않는 것에 Idle 합침 더함. 개정 4 = 펌프 패닉 때 명시 종료를 걷고 기존 정리 경로 + 시험(사용자 결정 A — §4-2).
-> **철회 — ADR-0293(2026-10-12):** 명령 쪽 가둠(§4-2 B1 — 허용 목록 읽기 명령 둘)을 걷었다. 가두는 자리는 에이전트 쪽 넷(A1~A4)뿐이고 버스 명령 실행 구간은 가두지 않는다. 이 문서의 허용 목록 · B1 · 명령의 `INTERNAL` 접기 · 「읽기 명령 둘」 · 「다섯 자리」 서술은 이력이다(§0 ① · §1 · §3 (마) · §4-2 · §4-3 · §4-6 ① · ② · §5 U2 · §7 · §8 — 찾는 법 = `rg "허용 목록|B1|INTERNAL|다섯" docs/process/S21-panic-policy/trd.md`).
-> **이력:** 10판 = `git show a722a879:docs/process/S21-panic-policy/trd.md`(종료 꼬리 · 감시 스레드 · 결정 (다)(바)(바′)(라′) · 컴파일 가드는 새 방향에서 무효) · 11판 초안 = `bedda3f3`((가) 락 오염 · (나) 여러 걸음 구간 · 요청 쪽 입구 R1~R7 — 사용자 결정 ② 로 걷힘).
-> **틀:** ADR-0288 · ADR-0290 + 사용자 결정 2026-10-10 · 2026-10-11~12 · 2026-10-12 ②(§1). ★세 ADR(0288 ~ 0290)은 브랜치 `origin/v0.3.3/feat/panic-policy` 에만 있다★ — 이 TRD 를 커밋하기 전에 그 브랜치를 들여야 링크가 선다. 구현 ADR = ADR-0292(예정).
-> **대체하는 옛 기록:** `docs/process/S20-command-bus/trd.md` §4 ⑨ 「릴리즈 `panic = "abort"` 유지」. 그 절의 규약(명령 핸들러는 값으로 실패한다)은 산다.
-> **표기:** 실측 = 트리 `743530fb`(코드는 10판이 잰 `2c25cdd` 와 같다 — 그 사이 커밋은 문서뿐). 경로의 `crates/engram-dashboard-` 는 줄여 `agent/` · `daemon/` · `base/` 처럼 쓴다. 「표시」 = 「가두는 중」 표시(§4-3). 「가안」 = 이름 · 모양 미확정. 확신도 표기가 없으면 확실이다.
+> **Status: edition 11, revision 4 (2026-10-12 · user decision A) · implementation U1~U5 landed (2026-10-12 — commits are in the step-log).** All user decisions done (§3) · `/review trd full` round 3 done (1 = FIX · FIX → 2 = blind PASS · doc-aware FIX → 3 = doc-aware PASS · the last minor item applied). Revision 2 (review 1) = removed `usage.get` from containment (the allowlist has two entries) · the mark-off primitive and its four places · the invariant 「표시 범위 ⊆ catch 클로저」 · U3 things to verify. Revision 3 (review 2) = added the condition 「효과 없음」 to the allowlist · added Idle coalescing to the things that do not turn the mark off. Revision 4 = on a pump panic, dropped the explicit kill and use the existing cleanup path + a test (user decision A — §4-2).
+> **Withdrawn — ADR-0293 (2026-10-12):** the command-side containment (§4-2 B1 — the two allowlisted read commands) was withdrawn. The only contained places are the four on the agent side (A1~A4); the bus command execution span is not contained. The allowlist · B1 · the command's `INTERNAL` fold · 「읽기 명령 둘」 · 「다섯 자리」 wording in this document is history (§0 ① · §1 · §3 (마) · §4-2 · §4-3 · §4-6 ① · ② · §5 U2 · §7 · §8 — to find them: `rg "허용 목록|B1|INTERNAL|다섯" docs/process/S21-panic-policy/trd.md`).
+> **History:** edition 10 = `git show a722a879:docs/process/S21-panic-policy/trd.md` (shutdown tail · watchdog thread · decisions (다)(바)(바′)(라′) · the compile guard is void under the new direction) · edition 11 draft = `bedda3f3` ((가) lock poisoning · (나) multi-step spans · request-side entries R1~R7 — withdrawn by user decision ②).
+> **Frame:** ADR-0288 · ADR-0290 + user decisions 2026-10-10 · 2026-10-11~12 · 2026-10-12 ② (§1). ★The three ADRs (0288 ~ 0290) exist only on branch `origin/v0.3.3/feat/panic-policy`★ — bring that branch in before committing this TRD, or the links will not resolve. The implementation ADR = ADR-0292 (planned).
+> **Replaces the old record:** `docs/process/S20-command-bus/trd.md` §4 ⑨ 「릴리즈 `panic = "abort"` 유지」. The convention of that section (a command handler fails by value) stays.
+> **Notation:** measured = tree `743530fb` (the code is the same as `2c25cdd`, which edition 10 measured — the commits in between are docs only). `crates/engram-dashboard-` in paths is shortened to `agent/` · `daemon/` · `base/` and so on. 「표시」 = the 「가두는 중」 mark (§4-3). 「가안」 = name · shape not final. Where no confidence label is given, it is certain.
 
 ---
 
-## 0. 결론
+## 0. Conclusion
 
 ```
 ① 가두는 것은 둘뿐이다 — 에이전트 하나만 섬기는 펌프 셋 · 라이터, 그리고 허용 목록의 읽기 명령 둘
@@ -23,119 +23,119 @@
 
 ---
 
-## 1. 정해진 틀
+## 1. The settled frame
 
-| 출처 | 내용 | 이 TRD |
+| Source | Content | This TRD |
 |---|---|---|
-| ADR-0288 결정 1 · 2 | 요청 하나 · 에이전트 하나의 패닉은 그것만 실패 | **좁힘**(사용자 결정 ②) — 요청은 읽기 명령 둘 · 에이전트는 펌프 · 라이터만(§4-2) |
-| ADR-0288 결정 3 · ADR-0290 결정 2 | 공유 상태 패닉 · 가두지 못한 패닉 = 훅이 기존 정상 종료 경로를 당긴다 | **개정** — 사유 로그 → 즉시 종료(§4-4) |
-| ADR-0288 결정 4 | Rust abort(이중 패닉 등) = 그냥 죽음 · 에이전트는 Job 이 정리 | 유지 |
-| 사용자 결정 2026-10-10 | unwind 범위 = 워크스페이스 전체(데몬 · 셸 · CLI) · 셸에도 같은 훅 | 유지 — 셸은 훅만(§4-5) |
-| 사용자 결정 2026-10-11~12 | 가두지 못한 패닉 = 즉시 종료(「복잡하게 할 필요없음」) · TRD · 구현은 큰 덩어리로 | 유지 |
-| 사용자 결정 ② 2026-10-12 | 가둠은 상태를 안 바꾸거나 격리된 단위만 — 상태를 바꾸는 것은 가두지 않는다 | 이 개정 — 락 오염 정책 · 여러 걸음 구간 장치가 필요 없어졌다 |
+| ADR-0288 decisions 1 · 2 | A panic in one request · one agent fails only that one | **Narrowed** (user decision ②) — requests: two read commands · agents: pumps and writers only (§4-2) |
+| ADR-0288 decision 3 · ADR-0290 decision 2 | Shared-state panic · uncontained panic = the hook pulls the existing normal-shutdown path | **Revised** — log the reason → exit immediately (§4-4) |
+| ADR-0288 decision 4 | Rust abort (double panic etc.) = just dies · agents are cleaned up by the Job | Kept |
+| User decision 2026-10-10 | unwind scope = the whole workspace (daemon · shell · CLI) · the same hook in the shell | Kept — the shell gets the hook only (§4-5) |
+| User decision 2026-10-11~12 | uncontained panic = exit immediately (「복잡하게 할 필요없음」) · TRD · implementation in large chunks | Kept |
+| User decision ② 2026-10-12 | Containment is only for units that do not change state or are isolated — units that change state are not contained | This revision — the lock-poisoning policy · the multi-step span device are no longer needed |
 
-- **근거(`docs/research/panic-practice-peers-2026-10-12.md`):** 「가두지 못한 패닉 = 끝」은 흔한 모양이다(tikv · materialize · zed · zellij — 결론 1). 가두는 범위는 대개 좁다 — rust-analyzer 는 읽기 전용 요청만 가두고 상태를 바꾸는 처리는 「isn't guarded by `catch_unwind`」로 둔다(그 저장소 `crates/rust-analyzer/src/handlers/dispatch.rs:34-44` — 결론 2). 「표시 + 표시 밖이면 훅이 끝냄」은 materialize 에 선례가 있다 — 스레드별 카운터 `CATCHING_UNWIND` · 그 밖이면 abort(`src/ore/src/panic.rs` — 결론 3). 상태를 바꾸는 쪽을 안 가두면 락 오염 규칙이 필요 없다(결론 4 · rust-analyzer 의 풀이).
-- **따라 사라진 요구:** ADR-0290 「영향」의 「정상 종료 경로는 오염된 공유 락에서도 끝까지 가야 한다」는 패닉 종료가 그 경로를 탔기 때문이었다. 이제 패닉은 그 경로를 안 탄다 — StopDaemon 자체의 오염 내성은 범위 밖(§7).
+- **Basis (`docs/research/panic-practice-peers-2026-10-12.md`):** 「가두지 못한 패닉 = 끝」 is a common shape (tikv · materialize · zed · zellij — conclusion 1). The contained range is usually narrow — rust-analyzer contains only read-only requests and leaves state-changing handling 「isn't guarded by `catch_unwind`」 (its repo `crates/rust-analyzer/src/handlers/dispatch.rs:34-44` — conclusion 2). 「표시 + 표시 밖이면 훅이 끝냄」 has a precedent in materialize — a per-thread counter `CATCHING_UNWIND` · abort if outside it (`src/ore/src/panic.rs` — conclusion 3). If the state-changing side is not contained, no lock-poisoning rule is needed (conclusion 4 · rust-analyzer's solution).
+- **Requirements that went away with it:** the statement in the 「영향」 of ADR-0290, 「정상 종료 경로는 오염된 공유 락에서도 끝까지 가야 한다」, existed because the panic exit took that path. The panic no longer takes that path — poisoning tolerance of StopDaemon itself is out of scope (§7).
 
 ---
 
-## 2. 현황 (실측)
+## 2. Current state (measured)
 
-- **프로필:** `Cargo.toml:39-44` `[profile.release]` — `panic = "abort"`(`:40`). 워크스페이스 유일이라 데몬 · 셸 · CLI 가 함께 바뀐다. debug · 시험 빌드는 이미 unwind 다.
-- **훅:** 데몬에만 있다 — `daemon/src/lib.rs:129-151`(로그 + 이전 훅) · 설치 `:458`(로깅 초기화 `:453` 뒤) · 부르는 곳은 운영 `daemon/src/main.rs:13` 하나라 시험 서버에는 훅이 없다. 셸 · CLI 에는 없다. std 의 훅은 **패닉한 스레드에서, 되감기 전에** 돈다.
-- **로그 자기교착(알려진 미수정):** 로그 파일 Mutex 를 쥔 채 패닉하면 훅의 로그가 자기를 기다린다 — `base/src/logging/mod.rs:110-115`.
-- **이미 있는 가둠:** 펌프 셋(`agent/src/transport/pty.rs:298` · `stdio.rs:241` · `agent/src/backend/codex/transport.rs:4018`) · 라이터(`agent/src/transport/input_queue.rs:288`) · 버스 명령 본문 `guard_panic`(`command/src/route.rs:20` — 모든 blocking 핸들러를 감싼다 `command/src/table.rs:339`). 배포판은 abort 라 지금 하나도 잡지 않는다. 펌프의 끝(`finish`)은 catch **밖**에서 돈다(`pty.rs:342` · `stdio.rs:308` · `codex/transport.rs:4021`).
-- **데몬 명령 본문은 동기로 돈다:** 데몬 자기 명령(`agent.*` · `usage.*`)은 입구가 어디든(버스 1단계 blocking `daemon/src/command_delivery.rs:1361` · `/control/agent` · `/control/call`) `call_daemon_command`(`daemon/src/control/commands.rs:163`)를 지나고, 그 안의 `drive_to_completion`(`:250`)이 future 를 `now_or_never` 로 **부른 스레드에서** 끝낸다 — `guard_panic` 은 그 blocking 스레드에서 동기로 돈다.
-- **`Read` 선언과 실제:** 데몬 `Read` 명령은 셋이다(`agent/src/commands.rs:212` `agent.list` · `:297` `agent.listQueuedInputs` · `:344` `usage.get`). 그러나 `usage.get` 은 조회를 띄운다(`:334-337`) — 사용량 책이 `in_flight` 를 세우고(`daemon/src/usage_service/book.rs:279-282`) 합류자를 붙이고 구독자 전부에게 내고 조회 스레드 · CLI 를 띄운다(`daemon/src/usage_service/mod.rs:341-386`). 효과 값은 이미 「id 를 붙들어 재실행을 막을까」를 가르는 계약이다(`daemon/src/control/commands.rs:286-291`).
-- **Job:** 펌프의 자식은 뿌리 `cmd /c` 이고 실제 CLI 는 그 아래다(ADR-0262 K1) — CLI 를 끝내는 것은 Job 이다: 통로가 쥔 무리 주인(`agent/src/transport/pty.rs:62` · `stdio.rs:88` · `codex/transport.rs:1399`)이 Job 을 `KILL_ON_JOB_CLOSE` 로 만들고(`platform/src/group/windows.rs:153`) 그 drop 이 Job 을 닫는다(`:601`). reaper 는 세션 `Arc` 를 놓을 뿐이다(`agent/src/reaper.rs:65-70` — 다른 보유자는 이어받기 판정의 잠깐 ≤ ~100ms).
-- **abort 전제 기록:** 코드 57줄 · 30파일 + ADR 일곱 + TRD 여럿 — 목록과 정규식은 10판 §2-8.
-- **CLI:** 단일 스레드(`cli/src` 에 스레드 · tokio 없음). **종료 코드:** 운영 코드에 프로세스 종료 코드를 판정하는 곳이 없다.
-
----
-
-## 3. 사용자 결정 (2026-10-12 — 전부 끝)
-
-> (가) · (나)는 사용자 결정 ②로 없어졌고, (라) 셸은 ②로 S1(훅만 · 셸 패닉 = 즉시 종료)로 정해졌다(§4-5). (마) · (사)는 권고안대로 정했다 — 아래 표 · 절은 그 근거로 남긴다. 펌프 패닉 때 CLI 끝내기는 리뷰어 대립을 사용자가 정했다(§4-2).
-
-| 묶음 | 결정 | 사용자 말 |
-|---|---|---|
-| (마) 가둔 에이전트 패닉의 고지 모양 | **N2a 지금 표면** — 화면은 `Failed` · 입력 거절 그대로 · 자세한 것은 로그(§4-4 훅은 표시와 무관하게 로그한다) | 「그냥 내부에서 대되 로그는 남겨지는건 맞지?」 |
-| (사) 끝내기 수단 | **`std::process::abort`** | 「추천으로해」 |
-| 펌프 패닉 때 CLI 끝내기 | **A 기존 정리 경로** — 명시 종료 없음 · 시험으로 확인 · 실패하면 B | 「A안」 |
-
-### (마) 가둔 에이전트 패닉의 고지
-
-버스 명령은 정해져 있다 — `INTERNAL` 「command handler panicked: …」(ADR-0159). 남은 것은 에이전트 쪽이다.
-
-| 안 | 사용자 · LLM 이 보는 것 | 비용 |
-|---|---|---|
-| **N2a 지금 표면(권고)** | 펌프 = 그 에이전트 `Failed`(「pump panicked: …」) · 라이터 = 입력 거절 사유 | 0 |
-| N2b 띠 알림 더함 | 위 + 띠 「에이전트 X 가 내부 오류로 멈췄다」 | 새 고지 장치(ADR-0288 이 미룬 무리) |
-
-- 권고 N2a — 새 화면 장치가 없다. 즉시 종료는 지금의 「데몬 꺼짐」과 같게 보인다(사유 안내 없음 — 미룬 장치).
-
-### (사) 끝내기 수단
-
-| 안 | 결과 | 비용 |
-|---|---|---|
-| **abort — `std::process::abort`(권고)** | 오늘 배포판과 같은 끝(Windows 종료 코드 `0xC0000409` — `command/src/testing.rs:25-27` 의 실측 주석) | 새 코드 0 · std 뿐 · 전환 전후 겉모습이 같다 |
-| 자기 `TerminateProcess`(코드 101) | DLL 분리 알림 없이 끝 · 종료 코드를 고를 수 있다 | platform 도우미 하나(OS 코드 — ADR-0266) · 훅에 주입 · 배포판 종료 코드가 101 로 바뀐다 |
-| `process::exit(101)`(권고 안 함) | — | `ExitProcess` 가 다른 스레드를 먼저 끝낸 뒤 DLL 분리 알림을 돌아 거기서 멎을 수 있다(MS 문서 순서 · 가능성 높음 · 실측 아님) |
-
-- 두 안에 대한 Windows 오류 보고(WER)의 반응이 다른지는 모른다(불확실) — abort 쪽은 오늘과 같다.
+- **Profile:** `Cargo.toml:39-44` `[profile.release]` — `panic = "abort"` (`:40`). It is the only one in the workspace, so the daemon · shell · CLI change together. The debug · test builds are already unwind.
+- **Hook:** only the daemon has one — `daemon/src/lib.rs:129-151` (log + previous hook) · installed at `:458` (after logging init `:453`) · the only caller is production `daemon/src/main.rs:13`, so the test server has no hook. The shell and CLI have none. The std hook runs **on the panicking thread, before unwinding**.
+- **Log self-deadlock (known, unfixed):** if a thread panics while holding the log file Mutex, the hook's log waits on itself — `base/src/logging/mod.rs:110-115`.
+- **Containment that already exists:** three pumps (`agent/src/transport/pty.rs:298` · `stdio.rs:241` · `agent/src/backend/codex/transport.rs:4018`) · the writer (`agent/src/transport/input_queue.rs:288`) · the bus command body `guard_panic` (`command/src/route.rs:20` — it wraps every blocking handler `command/src/table.rs:339`). The deployed build is abort, so none of them catches anything now. The pump's end (`finish`) runs **outside** the catch (`pty.rs:342` · `stdio.rs:308` · `codex/transport.rs:4021`).
+- **Daemon command bodies run synchronously:** the daemon's own commands (`agent.*` · `usage.*`), wherever the entry is (bus stage-1 blocking `daemon/src/command_delivery.rs:1361` · `/control/agent` · `/control/call`), pass through `call_daemon_command` (`daemon/src/control/commands.rs:163`), and the `drive_to_completion` inside it (`:250`) finishes the future with `now_or_never` **on the calling thread** — `guard_panic` runs synchronously on that blocking thread.
+- **`Read` declaration versus reality:** the daemon has three `Read` commands (`agent/src/commands.rs:212` `agent.list` · `:297` `agent.listQueuedInputs` · `:344` `usage.get`). But `usage.get` starts a lookup (`:334-337`) — the usage book sets `in_flight` (`daemon/src/usage_service/book.rs:279-282`), attaches joiners, emits to all subscribers, and starts a lookup thread · CLI (`daemon/src/usage_service/mod.rs:341-386`). The effect value is already the contract that decides 「id 를 붙들어 재실행을 막을까」 (`daemon/src/control/commands.rs:286-291`).
+- **Job:** the pump's child is the root `cmd /c` and the real CLI is below it (ADR-0262 K1) — it is the Job that ends the CLI: the group owner held by the channel (`agent/src/transport/pty.rs:62` · `stdio.rs:88` · `codex/transport.rs:1399`) creates the Job with `KILL_ON_JOB_CLOSE` (`platform/src/group/windows.rs:153`) and its drop closes the Job (`:601`). The reaper only releases the session `Arc` (`agent/src/reaper.rs:65-70` — other holders exist only for the brief takeover decision, ≤ ~100ms).
+- **Record of abort assumptions:** 57 lines of code · 30 files + seven ADRs + several TRDs — the list and the regex are in edition 10 §2-8.
+- **CLI:** single-threaded (no threads · tokio in `cli/src`). **Exit code:** no place in production code decides on a process exit code.
 
 ---
 
-## 4. 설계
+## 3. User decisions (2026-10-12 — all done)
 
-### 4-1. 가둠 기준
+> (가) · (나) were removed by user decision ②, and (라) the shell was settled by ② as S1 (hook only · shell panic = exit immediately) (§4-5). (마) · (사) were decided as recommended — the table · section below stay as their basis. For ending the CLI on a pump panic, the user decided between the reviewers' opposing positions (§4-2).
 
-넷이 모두 설 때만 가둔다. 하나라도 빠지면 가두지 않는다 → 즉시 종료.
+| Group | Decision | User's words |
+|---|---|---|
+| (마) How a contained agent panic is announced | **N2a current surface** — the screen shows `Failed` · input is rejected as before · details go to the log (§4-4 the hook logs regardless of the mark) | 「그냥 내부에서 대되 로그는 남겨지는건 맞지?」 |
+| (사) Means of exit | **`std::process::abort`** | 「추천으로해」 |
+| Ending the CLI on a pump panic | **A existing cleanup path** — no explicit kill · confirm with a test · if it fails, B | 「A안」 |
 
-1. 그 일 단위의 **가장 바깥 입구**다.
-2. **실패를 알릴 길**이 있다(`Failed` 상태 · 오류 답 — (마)).
-3. 그 단위가 **상태를 바꾸지 않거나, 자기만의 상태만** 바꾼다. 공유 상태를 바꾸는 단위는 가두지 않는다(사용자 결정 ②) — 가둔 단위 안의 공유 상태 호출은 표시를 끈다(§4-2 표시 끔).
-4. 그 단위를 버린 뒤 **나머지가 멀쩡**하다(매달리는 스레드 · 살아남는 자식 · 차오르는 파이프가 남지 않는다).
+### (마) Announcing a contained agent panic
 
-### 4-2. 가둠 표
+The bus command is already fixed — `INTERNAL` 「command handler panicked: …」 (ADR-0159). What is left is the agent side.
 
-| # | 자리 | 단위 | 실패 알림 | 할 일 |
+| Option | What the user · LLM sees | Cost |
+|---|---|---|
+| **N2a current surface (recommended)** | pump = that agent `Failed` (「pump panicked: …」) · writer = input rejection reason | 0 |
+| N2b add a strip notice | the above + strip 「에이전트 X 가 내부 오류로 멈췄다」 | a new notice mechanism (the bundle ADR-0288 deferred) |
+
+- Recommendation N2a — no new screen mechanism. An immediate exit looks the same as today's 「데몬 꺼짐」 (no reason is shown — a deferred mechanism).
+
+### (사) Means of exit
+
+| Option | Result | Cost |
+|---|---|---|
+| **abort — `std::process::abort` (recommended)** | The same end as today's deployed build (Windows exit code `0xC0000409` — the measured comment at `command/src/testing.rs:25-27`) | zero new code · std only · looks the same before and after the switch |
+| own `TerminateProcess` (code 101) | Ends without DLL-detach notifications · the exit code can be chosen | one platform helper (OS code — ADR-0266) · injected into the hook · the deployed build's exit code changes to 101 |
+| `process::exit(101)` (not recommended) | — | `ExitProcess` ends the other threads first and then runs the DLL-detach notifications, where it may hang (MS docs order · likely · not measured) |
+
+- Whether Windows Error Reporting (WER) reacts differently to the two options is unknown (uncertain) — the abort side is the same as today.
+
+---
+
+## 4. Design
+
+### 4-1. Containment criteria
+
+Contain only when all four hold. If any one is missing, do not contain → exit immediately.
+
+1. It is the **outermost entry** of that unit of work.
+2. There is a **way to report the failure** (`Failed` state · error reply — (마)).
+3. The unit **does not change state, or changes only its own state**. A unit that changes shared state is not contained (user decision ②) — a shared-state call inside a contained unit turns the mark off (§4-2 mark-off).
+4. After that unit is discarded, **the rest is sound** (no dangling thread · surviving child · filling pipe is left).
+
+### 4-2. Containment table
+
+| # | Place | Unit | Failure notice | To do |
 |---|---|---|---|---|
-| A1 | PTY 펌프(`agent/src/transport/pty.rs:298` · 스레드 `:269`) | 에이전트 하나 | `Failed` | 지금의 `catch_unwind` 를 `contain` 으로 바꾼다 |
-| A2 | stdio 펌프(`agent/src/transport/stdio.rs:241`) | 에이전트 하나 | `Failed` | 같음 |
-| A3 | codex 리더 펌프(`agent/src/backend/codex/transport.rs:4018` · 스레드 `:4017`) | 에이전트 하나 | `Failed` | 같음 |
-| A4 | 라이터 `input_queue::drain`(`agent/src/transport/input_queue.rs:288` — PTY · stdio 라이터 스레드가 부른다 `pty.rs:208` · `stdio.rs:208`) | 그 에이전트의 입력 | 큐 닫힘 · 입력 거절 사유(`:273-279`) | `catch_unwind` → `contain` |
-| B1 **철회 — ADR-0293** | ~~허용 목록 명령 본문 — `agent.list` · `agent.listQueuedInputs`~~ — 걷었다: 버스 명령 실행 구간은 가두지 않는다(이 줄 나머지 칸은 이력) | 명령 하나 | `INTERNAL` | `call_daemon_command` 의 표 호출 + 본문 몰기(`CommandTable::call` + `drive_to_completion` — `daemon/src/control/commands.rs` `call_and_drive`)를 `contain` 으로 감싼다 — 이름이 허용 목록에 있을 때만 · 인자 검사(`check_args` · `admit_input`)는 표시 밖(U2 리뷰 1 라운드에서 표 호출까지 넓혔다) |
+| A1 | PTY pump (`agent/src/transport/pty.rs:298` · thread `:269`) | one agent | `Failed` | replace the current `catch_unwind` with `contain` |
+| A2 | stdio pump (`agent/src/transport/stdio.rs:241`) | one agent | `Failed` | same |
+| A3 | codex reader pump (`agent/src/backend/codex/transport.rs:4018` · thread `:4017`) | one agent | `Failed` | same |
+| A4 | writer `input_queue::drain` (`agent/src/transport/input_queue.rs:288` — called by the PTY · stdio writer threads `pty.rs:208` · `stdio.rs:208`) | that agent's input | queue closed · input rejection reason (`:273-279`) | `catch_unwind` → `contain` |
+| B1 **withdrawn — ADR-0293** | ~~allowlisted command body — `agent.list` · `agent.listQueuedInputs`~~ — withdrawn: the bus command execution span is not contained (the remaining cells of this row are history) | one command | `INTERNAL` | wrap the table call + body drive of `call_daemon_command` (`CommandTable::call` + `drive_to_completion` — `call_and_drive` in `daemon/src/control/commands.rs`) in `contain` — only when the name is in the allowlist · argument checks (`check_args` · `admit_input`) are outside the mark (U2 review round 1 widened it to include the table call) |
 
-- **[철회 — ADR-0293 · 이 항목과 다음 항목은 이력]** **B1 = 이름 허용 목록이지 효과 술어가 아니다.** `usage.get` 은 `Read` 로 선언됐지만 공유 사용량 책을 바꾼다(§2) — 가두면 판정(`Start`) 뒤 패닉이 `in_flight` 를 영영 남긴다. `effect == Read` 로 가르면 앞으로 더해지는 `Read` 명령이 말없이 가둬진다. 목록은 데몬 쪽 상수 하나이고, 시험이 그 목록을 못 박는다(§5 U2). ★목록에 드는 조건 = 본문에 효과가 없을 것★ — 아래 B1 의 얇은 구간 접기가 `INTERNAL`(「확실히 실패」)인 것은 두 본문이 아무것도 바꾸지 않아서다. 본문 뒤 패닉은 일의 일부가 적용됐을 수 있어 `OUTCOME_UNKNOWN` 이라는 것이 1단계의 규칙이다(`daemon/src/command_delivery.rs:1387-1391` · `fold_local` `:1401`). 효과가 있는 명령을 목록에 넣으려면 그 접기부터 다시 정한다.
-- **[철회 — ADR-0293]** **B1 의 범위:** 표시가 명령 본문을 부르는 한 자리에 서므로 같은 명령이 제어 HTTP(`/control/agent` · `/control/call`)로 와도 본문은 같이 가둬진다. 그 HTTP 처리기 자체 · 다른 명령 · 2단계 전달(`daemon/src/command_delivery.rs:1820` 의 `route`)은 표시 밖이다. 처리기 패닉은 안쪽 `guard_panic` 이 먼저 `INTERNAL` 로 답하고, 그 바깥 얇은 구간(`now_or_never` 기계)의 패닉은 우리 `contain` 이 같은 `INTERNAL` 로 접는다 — 그래서 표시와 잡는 자리 사이에 빈틈이 없다. 이것은 1단계 경로의 셋째 그물이라 `command_delivery.rs:1397` 의 「세 번째 그물을 세우지 않는다」 주석을 U2 에서 고친다.
-- **펌프 패닉 때 CLI 끝내기(A1~A3) — 명시 종료 없음:** 패닉 갈래는 `finish` 만 부른다. CLI 는 기존 길로 끝난다 — `finish` → `Failed` → reaper 가 세션을 뺀다 → 마지막 `Arc` drop → 통로 drop → 무리 주인 drop → `KILL_ON_JOB_CLOSE`(§2). ★리뷰어 대립(blind = 명시 종료 / doc-aware = 기존 정리 경로로 충분) → 사용자 결정 A(2026-10-12): 기존 경로 · 시험으로 확인 · 실패 시 B★. U4 가 펌프 종류마다 잰다. **B(시험이 실패할 때만):** platform `GroupRef::terminate` 를 더해 패닉 갈래에서 무리를 끄고, ADR-0199 의 「통로는 죽이지 않는다」(`codex/transport.rs:118-125`)에서 그 갈래를 뺀다.
+- **[Withdrawn — ADR-0293 · this item and the next are history]** **B1 = a name allowlist, not an effect predicate.** `usage.get` is declared `Read` but changes the shared usage book (§2) — if contained, a panic after the decision (`Start`) leaves `in_flight` set forever. If we split by `effect == Read`, any `Read` command added later would be contained silently. The list is one daemon-side constant, and a test pins that list (§5 U2). ★The condition for being on the list = the body has no effect★ — the thin-span fold below for B1 is `INTERNAL` (「확실히 실패」) because the two bodies change nothing. The stage-1 rule is that a panic after the body may have applied part of the work, so it is `OUTCOME_UNKNOWN` (`daemon/src/command_delivery.rs:1387-1391` · `fold_local` `:1401`). To put a command with effects on the list, decide that fold again first.
+- **[Withdrawn — ADR-0293]** **Scope of B1:** the mark stands at the one place that calls the command body, so even when the same command arrives over control HTTP (`/control/agent` · `/control/call`), its body is contained in the same way. That HTTP handler itself · other commands · stage-2 delivery (`route` at `daemon/src/command_delivery.rs:1820`) are outside the mark. For a handler panic, the inner `guard_panic` answers `INTERNAL` first, and a panic in the thin outer span (the `now_or_never` machinery) is folded to the same `INTERNAL` by our `contain` — so there is no gap between the mark and the catching place. This is the third net on the stage-1 path, so U2 fixes the comment 「세 번째 그물을 세우지 않는다」 at `command_delivery.rs:1397`.
+- **Ending the CLI on a pump panic (A1~A3) — no explicit kill:** the panic branch calls only `finish`. The CLI ends by the existing path — `finish` → `Failed` → the reaper removes the session → last `Arc` drop → channel drop → group owner drop → `KILL_ON_JOB_CLOSE` (§2). ★Reviewers disagreed (blind = explicit kill / doc-aware = the existing cleanup path is enough) → user decision A (2026-10-12): existing path · confirm with a test · B if it fails★. U4 measures it for each pump kind. **B (only if the test fails):** add platform `GroupRef::terminate` to kill the group in the panic branch, and remove that branch from ADR-0199's 「통로는 죽이지 않는다」 (`codex/transport.rs:118-125`).
 
-**표시 끔(`uncontained`) — 가둔 코드가 부르는 공유 상태 고침:** 그 안 패닉 = 즉시 종료.
+**Mark-off (`uncontained`) — shared-state mutations called from contained code:** a panic inside = exit immediately.
 
-| # | 자리 | 닿는 곳 |
+| # | Place | What it reaches |
 |---|---|---|
-| a | codex 리더의 첫 턴 포트 호출(`codex/transport.rs:3671` — `witness_first_turn` `:3641`) | 래치 commit(`agent/src/manager.rs:589-612`) → `ProfileRegistry::commit_session_id`(`agent/src/profile.rs:853`) — 공유 프로필 표 |
-| b | `OutputCore::report_usage` 안 한 곳(`agent/src/output_core.rs:393-397` — stdio · codex 펌프가 부른다 `stdio.rs:262` · `:286` · `codex/transport.rs:3707` · `:3818`) | `UsageService::observe`(`daemon/src/usage_service/observe.rs:40-41` → `mod.rs:204`) — 계정 단위 공유 책 |
-| c | 라이터의 덩이 뒤 부를 것(`input_queue.rs:298-309` — 그 안쪽 catch 째) | claude 잔여물 정리 `written`(`agent/src/backend/claude/leftover.rs:1857-1872`) — 문 `GateCell` 을 고친다 |
-| d | claude decoder 의 문 여닫기(`agent/src/backend/claude/mod.rs:1200-1204` — A2 안) | `GateCell` 의 `open_turn` · `deliver` · `close_turn`(`leftover.rs:1927-1956`) |
+| a | the codex reader's first-turn port call (`codex/transport.rs:3671` — `witness_first_turn` `:3641`) | latch commit (`agent/src/manager.rs:589-612`) → `ProfileRegistry::commit_session_id` (`agent/src/profile.rs:853`) — the shared profile table |
+| b | one place inside `OutputCore::report_usage` (`agent/src/output_core.rs:393-397` — called by the stdio · codex pumps `stdio.rs:262` · `:286` · `codex/transport.rs:3707` · `:3818`) | `UsageService::observe` (`daemon/src/usage_service/observe.rs:40-41` → `mod.rs:204`) — a book shared per account |
+| c | what the writer calls after a chunk (`input_queue.rs:298-309` — inside that inner catch) | claude leftover cleanup `written` (`agent/src/backend/claude/leftover.rs:1857-1872`) — it modifies the door `GateCell` |
+| d | the claude decoder's door open/close (`agent/src/backend/claude/mod.rs:1200-1204` — inside A2) | `open_turn` · `deliver` · `close_turn` of `GateCell` (`leftover.rs:1927-1956`) |
 
-- c · d 의 까닭: 잔여물 정리(ADR-0262)는 막 둘이 abort 에 기댄다(그 ADR 의 K7) — 가두면 그 전제가 깨진다. c 의 안쪽 catch 는 운영에서 닿지 않게 된다(시험 빌드엔 훅이 없어 산다).
-- **표시를 끄지 않는 것:** 펌프의 `emit` 이 부르는 여러 에이전트 공유 자리 — 턴 관측 표 · 대기 목록 표(`agent/src/turn.rs:94` · `agent/src/inputs_pending.rs:21` — `output_core.rs:432`) · 턴 끝 · 목록 비움 통지가 닿는 Idle 합침(`IdleCoalescer::claim` `daemon/src/messaging_host.rs:384-389`) — 은 임계 구역이 그 에이전트 항목 하나의 평범한 `HashMap` 조작이라 패닉원이 없다(리뷰 확인).
+- Reason for c · d: leftover cleanup (ADR-0262) has two guards that rely on abort (K7 of that ADR) — containing would break that premise. The inner catch of c becomes unreachable in production (it stays alive in the test build, which has no hook).
+- **What does not turn the mark off:** the places shared by several agents that the pump's `emit` calls — the turn observation table · the pending list table (`agent/src/turn.rs:94` · `agent/src/inputs_pending.rs:21` — `output_core.rs:432`) · the Idle coalescing that the turn-end · list-clear notices reach (`IdleCoalescer::claim` `daemon/src/messaging_host.rs:384-389`) — have no panic source, because the critical section is a plain `HashMap` operation on that one agent's entry (review confirmed).
 
-**가두지 않는 것(= 즉시 종료):** WS 명령 처리기 몸통 · 떼어 낸 명령 태스크(`daemon/src/agent_conn.rs:314` · `:375` · `:336` — 기본은 상태를 바꾼다고 본다 · 읽기 전용 WS 명령이 확인되면 그때 더한다) · 활성화(`daemon/src/connection_core.rs:1366` · `:1760`) · 허용 목록 밖 버스 명령(`usage.get` 포함) · 제어 HTTP · MCP 도구(`daemon/src/control/mcp_server.rs`) · codex 라이터와 그 세션 id 기록(`record_session_id` `codex/transport.rs:2393` · 그 catch `:2420` — `writer_loop` `:2484` 가 `:2521` 에서 부른다 · 위 a 와 다른 길) · PTY 감시 · stderr 배수 · claude 잔여물 정리 스레드 · 메시징 배달 · reaper · sweep · 세션 추적 · 사용량 · accept 루프 · 메인 future · net · rmcp · hyper 내부 · 셸 전부. 이 자리의 기존 `catch_unwind`(reaper `agent/src/reaper.rs:208` 등)는 운영에서 닿지 않는 코드가 되지만 시험 빌드에는 훅이 없어 살아 있으므로 걷지 않는다(§4-6 ②). ★예외 — 데몬 sweep(`daemon/src/lib.rs` 6.6)의 catch 는 시험 빌드에서도 닿지 않아 걷었다★: 그 태스크는 훅을 먼저 거는 `run()` 만 띄우고 시험 서버는 띄우지 않는다(U4-C 리뷰 확인 · 사용자 결정 2026-10-12).
+**What is not contained (= exit immediately):** WS command handler bodies · detached command tasks (`daemon/src/agent_conn.rs:314` · `:375` · `:336` — by default they are assumed to change state · if a read-only WS command is confirmed, add it then) · activation (`daemon/src/connection_core.rs:1366` · `:1760`) · bus commands outside the allowlist (including `usage.get`) · control HTTP · MCP tools (`daemon/src/control/mcp_server.rs`) · the codex writer and its session-id recording (`record_session_id` `codex/transport.rs:2393` · its catch `:2420` — `writer_loop` `:2484` calls it at `:2521` · a different path from a above) · PTY watch · stderr drain · claude leftover cleanup thread · messaging delivery · reaper · sweep · session tracking · usage · accept loop · main future · net · rmcp · hyper internals · the whole shell. The existing `catch_unwind` at these places (reaper `agent/src/reaper.rs:208` etc.) becomes code that production never reaches, but the test build has no hook and it stays alive, so it is not removed (§4-6 ②). ★Exception — the catch of the daemon sweep (`daemon/src/lib.rs` 6.6) is not reached even in the test build, so it was removed★: that task is started only by `run()`, which installs the hook first, and the test server does not start it (U4-C review confirmed · user decision 2026-10-12).
 
-### 4-3. 표시 — base 새 입주자 `panic`(가안)
+### 4-3. The mark — new base resident `panic` (tentative)
 
-- 스레드 지역 깊이 하나(const `Cell` · `try_with` — 스레드 해체 중에도 읽힌다 · 못 읽으면 「표시 없음」).
-- 원시(이름 가안): `contain(f) -> Result<T, Caught>`(깊이 올림과 catch 를 한 몸으로) · `uncontained(f)`(그 안에서 깊이 0 · 끝나면 되돌림) · 페이로드 → 문장(지금 사본 일곱 — 10판 §2-2).
-- ★**불변식 — 표시 범위 ⊆ 그것을 잡는 catch 클로저.**★ 스레드 머리에 따로 선 깊이 가드는 두지 않는다. 펌프의 `finish` 는 catch 밖(§2)이라 표시 없이 돈다 — 표시된 채 `finish` 가 패닉하면 잡을 이가 없어 그 에이전트가 끝 전이 없이 `Running` 으로 남고 CLI 도 산다(ADR-0005 · ADR-0290).
-- **비동기 표시는 두지 않는다** — 가두는 자리가 전부 동기다(A1~A4 = 전용 스레드 · B1 = blocking 스레드). 나중에 async 자리를 가두면 스레드 지역 표시는 틀린다 — 그때 materialize 의 태스크 지역 표시(`CATCHING_UNWIND_ASYNC` · 그 저장소 `src/ore/src/future.rs`)를 더한다.
-- **표시는 스레드를 따라가지 않는다** — 가둔 단위가 띄운 스레드 · 태스크는 표시 밖이다(= 즉시 종료 · 안전한 쪽).
-- **왜 표시가 있어야 하나** — 훅이 `catch_unwind` 보다 먼저 돈다(§2). 표시 없이 「잡히지 않은 패닉 = 종료」 훅을 걸면 가두려던 패닉까지 끝낸다.
-- 입주 조건(ADR-0269): 소비자 agent · 데몬 · 셸 + 페이로드 사본 · 도메인 지식 0 · 다른 입주자 무참조 — 게이트 ③ 정규식(CLAUDE.md 「빌드·검증 명령」 · `ci.yml` 사본)에 `panic` 을 더한다. command crate 는 base 를 못 부르므로(의존 0) B1 의 표시는 부르는 쪽(데몬)이 세운다.
+- One thread-local depth (const `Cell` · `try_with` — readable even while the thread is being torn down · if it cannot be read, 「표시 없음」).
+- Primitives (tentative names): `contain(f) -> Result<T, Caught>` (raises the depth and catches in one body) · `uncontained(f)` (depth 0 inside it · restored when it ends) · payload → sentence (seven copies now — edition 10 §2-2).
+- ★**Invariant — mark range ⊆ the catch closure that catches it.**★ No separate depth guard stands at the thread head. The pump's `finish` is outside the catch (§2), so it runs without the mark — if `finish` panics while marked, nothing can catch it, so that agent stays `Running` with no end transition and the CLI stays alive (ADR-0005 · ADR-0290).
+- **No async mark** — every containment place is synchronous (A1~A4 = dedicated threads · B1 = a blocking thread). If an async place is contained later, a thread-local mark is wrong — then add materialize's task-local mark (`CATCHING_UNWIND_ASYNC` · its repo `src/ore/src/future.rs`).
+- **The mark does not follow threads** — a thread · task started by a contained unit is outside the mark (= exit immediately · the safe side).
+- **Why the mark is needed** — the hook runs before `catch_unwind` (§2). If we install an 「잡히지 않은 패닉 = 종료」 hook without the mark, it ends even the panics we meant to contain.
+- Residency conditions (ADR-0269): consumers agent · daemon · shell + payload copy · zero domain knowledge · references no other resident — add `panic` to the gate ③ regex (CLAUDE.md 「빌드·검증 명령」 · copy in `ci.yml`). The command crate cannot call base (zero dependency), so the mark for B1 is set up by the caller (the daemon).
 
-### 4-4. 훅 — 데몬 · 셸이 같은 것을 설치
+### 4-4. The hook — the daemon · shell install the same one
 
 ```
 패닉 → 훅(패닉한 스레드 · 되감기 전)
@@ -144,83 +144,83 @@
   ③ 표시가 없으면 std::process::abort((사))
 ```
 
-- 훅 몸통은 base `panic`(가안)에 두고 끝내기를 인자로 받는다(시험이 프로세스를 죽이지 않게). 설치 = 데몬 지금 자리(`daemon/src/lib.rs:458`) · 셸 `run()` 머리(`src-tauri/src/lib.rs:28` · `Builder` 앞 — 셸 로깅 초기화가 그 뒤 `src-tauri/src/state/boot_plugin.rs:89` 라 그 앞 패닉은 사유 줄 없이 끝난다).
-- **훅은 표시와 무관하게 로그한다** — 표시 밖 갈래가 어차피 로그하므로 자기교착(§2)은 로그 쪽에서 닫아야 하고, 닫고 나면 표시 안에서 조용히 할 까닭이 없다. 패닉 자리(파일 · 줄)는 훅에서만 보이므로 `guard_panic` 처럼 잡고 로그하지 않는 자리의 기록도 이렇게 남는다. 가두는 자리는 패닉을 다시 로그하지 않고 실패 표면만 낸다.
-- **자기교착은 로그 쪽에서 닫는다** — base `logging` 파일 싱크에 스레드 지역 「이 스레드가 파일에 쓰는 중」 표지를 두고, 섰으면 그 줄을 버린다. 다른 스레드가 파일 락을 쥔 채 멎은 경우는 패닉 중인 스레드만 `try_lock` 을 짧게(상한 100 ms) 되풀이하다 그 줄을 버린다(U1 리뷰 1 라운드 — 평상시 쓰기는 그대로 기다린다). 나머지는 §7.
+- The hook body lives in base `panic` (tentative) and takes the exit as an argument (so tests do not kill the process). Installed at the daemon's current place (`daemon/src/lib.rs:458`) · at the head of the shell's `run()` (`src-tauri/src/lib.rs:28` · before `Builder` — shell logging init comes after that at `src-tauri/src/state/boot_plugin.rs:89`, so a panic before it ends without a reason line).
+- **The hook logs regardless of the mark** — the branch outside the mark logs anyway, so the self-deadlock (§2) must be closed on the log side, and once it is closed there is no reason to stay quiet inside the mark. The panic location (file · line) is visible only in the hook, so places that catch and do not log, such as `guard_panic`, are also recorded this way. A containment place does not log the panic again and only produces the failure surface.
+- **The self-deadlock is closed on the log side** — put a thread-local 「이 스레드가 파일에 쓰는 중」 flag in the base `logging` file sink, and drop that line when it is set. If another thread stopped while holding the file lock, only the panicking thread repeats a short `try_lock` (cap 100 ms) and then drops that line (U1 review round 1 — normal writes still wait as before). The rest is in §7.
 
-### 4-5. 셸 · CLI · 이어질 단계
+### 4-5. Shell · CLI · later stages
 
-- **셸 = 훅만(사용자 결정 ② 로 정해짐).** 셸의 어떤 패닉이든 사유 로그 → 셸 즉시 종료 — 오늘과 같다. 데몬 · 에이전트는 계속 · 다음 셸 실행은 비정상 종료 복원을 묻는다. 셸의 `Read` 명령(`src-tauri/src/layout/commands.rs`)도 가두지 않는다(셸 버스 입구 `src-tauri/src/daemon_client/inbound.rs:217`). ★훅이 있어야 오늘과 같다★ — 훅 없이 unwind 로 바꾸면 배경 스레드 패닉이 그 스레드만 조용히 죽인다.
-- **CLI = 훅 없음.** 단일 스레드라 unwind 면 main 패닉이 곧 프로세스 끝(종료 코드 101 · 기본 훅 stderr) — 오늘 abort 와 겉으로 같다(가능성 높음).
-- 다음 단계가 transport crate(`crates/engram-dashboard-transport`)를 셸 연결 층에 붙이며 새 연결 · 펌프 태스크를 들인다 — 그 태스크는 들어올 때 §4-1 기준을 따른다(셸 쪽이면 가두지 않는다).
+- **Shell = hook only (settled by user decision ②).** Any shell panic → log the reason → shell exits immediately — the same as today. The daemon · agents continue · the next shell launch asks about abnormal-exit restore. The shell's `Read` commands (`src-tauri/src/layout/commands.rs`) are not contained either (shell bus entry `src-tauri/src/daemon_client/inbound.rs:217`). ★The hook must exist for it to be the same as today★ — if we switch to unwind without the hook, a background-thread panic silently kills only that thread.
+- **CLI = no hook.** It is single-threaded, so under unwind a main panic is the end of the process (exit code 101 · default hook stderr) — outwardly the same as today's abort (likely).
+- The next stage attaches the transport crate (`crates/engram-dashboard-transport`) to the shell connection layer and brings in new connection · pump tasks — those tasks follow the §4-1 criteria when they arrive (if on the shell side, they are not contained).
 
-### 4-6. 확인 · 감사 거리 (결정 아님 — U4)
+### 4-6. Things to verify · audit (not decisions — U4)
 
-1. **[철회 — ADR-0293 · B1 과 함께 걷혔다 — U4-C 의 감사 결과(두 본문 모두 상태를 안 바꾼다)는 그 ADR 의 근거로 남았다]** **허용 목록 두 명령의 본문이 정말 상태를 바꾸지 않는가** — 한 번 본다. 선언은 계약이고 어긋남을 코드가 못 잡는다(`daemon/src/control/commands.rs:286-291`).
-2. **abort 전제 감사** — 표시 밖 코드는 「패닉 = 프로세스 끝」이 그대로 참이다(훅이 끝낸다). 전제가 무너지는 것은 가두는 다섯 자리의 몸통과 그 몸통이 되감기 때 도는 `Drop` 뿐이다. 볼 것:
-   - base `sync` 계약 3(`base/src/sync.rs:10-11` — 「운영 빌드는 오염에 닿지 않는다」) — 펌프가 `sync` 로 락을 되찾으므로(`pty.rs:322` 등) 다시 쓴다.
-   - **출력 코어의 오염 길** — `emit` 은 `replay` 를 쥔 채 적고(`agent/src/output_core.rs:422-429` · 목록 사건의 `.expect("한 줄 이상")` `:614` 도 그 안이다) 거기서 난 패닉은 `replay` 를 오염시킨다 → 표시 없는 `finish` 의 `replay.lock().expect`(`:692`)가 다시 패닉해 데몬이 끝난다(안전한 쪽).
-   - **틀리게 되는 주석**(U4-C `c9d15023` 에서 고쳤다 — 이 항목의 줄 번호는 그 전 기준) — `pty.rs:283-297` 의 「(b) 그 재-panic 은 연결 task 안이라 tokio 가 그 task 만 격리」는 훅이 들어오면 거짓이다. 「release=abort」 정규식으로는 안 잡히므로 따로 적는다. 같은 부류 — `agent/src/reaper.rs:65-70` 의 「즉 자식 프로세스는 이미 죽어 있다」는 사용자 결정 A 아래 펌프 패닉 경로에서 거짓이다(그 경로는 CLI 가 산 채 reaper 에 닿고, 세션 해제가 Job 을 닫아 끝낸다) — U4 에서 고쳐 쓴다.
-   - 「release=abort」를 글자 그대로 적은 주석 · 로그 문장(예: `daemon/src/messaging_host.rs:769` — 지금 `:770`)은 「표시 밖 패닉 = 즉시 종료」로 고친다(U4-C `c9d15023` 에서 고쳤다).
-   - ADR-0262 K7 · 메시징 커널의 되돌림 `Drop` 은 가두지 않는 코드(또는 표시 끔 c · d)에서 돌아 전제가 그대로 참이다 — 범위 밖.
+1. **[Withdrawn — ADR-0293 · withdrawn together with B1 — the U4-C audit result (neither body changes state) remains as that ADR's basis]** **Do the bodies of the two allowlisted commands really not change state** — look once. The declaration is a contract and the code cannot catch a mismatch (`daemon/src/control/commands.rs:286-291`).
+2. **Audit of the abort assumption** — for code outside the mark, 「패닉 = 프로세스 끝」 stays true (the hook ends it). The assumption breaks only for the bodies of the five containment places and the `Drop`s that run during their unwinding. To look at:
+   - base `sync` contract 3 (`base/src/sync.rs:10-11` — 「운영 빌드는 오염에 닿지 않는다」) — the pump regains locks through `sync` (`pty.rs:322` etc.), so rewrite it.
+   - **The poisoning path of the output core** — `emit` writes while holding `replay` (`agent/src/output_core.rs:422-429` · the `.expect("한 줄 이상")` of the list event `:614` is also inside it), and a panic there poisons `replay` → the `replay.lock().expect` (`:692`) in `finish`, which runs without the mark, panics again and the daemon ends (the safe side).
+   - **Comments that become wrong** (fixed in U4-C `c9d15023` — the line numbers of this item are from before that) — the 「(b) 그 재-panic 은 연결 task 안이라 tokio 가 그 task 만 격리」 at `pty.rs:283-297` becomes false once the hook arrives. The 「release=abort」 regex does not catch it, so it is listed separately. Same kind — the 「즉 자식 프로세스는 이미 죽어 있다」 at `agent/src/reaper.rs:65-70` is false on the pump-panic path under user decision A (that path reaches the reaper with the CLI alive, and releasing the session closes the Job and ends it) — rewrite it in U4.
+   - Comments · log sentences that literally write 「release=abort」 (e.g. `daemon/src/messaging_host.rs:769` — now `:770`) are rewritten to 「표시 밖 패닉 = 즉시 종료」 (fixed in U4-C `c9d15023`).
+   - ADR-0262 K7 · the rollback `Drop` of the messaging kernel runs in uncontained code (or mark-off c · d), so the assumption stays true — out of scope.
 
-### 4-7. 프로필 전환
+### 4-7. Profile switch
 
-`Cargo.toml:40` `panic = "abort"` 한 줄을 지운다(기본 unwind). 앞 단위가 전부 abort 아래 무동작이라 되돌림 = 이 한 줄. 그래서 「abort 면 빌드를 멈추는」 컴파일 가드는 두지 않는다. 실행 파일 크기 변화를 이 단위에서 잰다(ADR-0288 「영향」이 재지 않았다고 적었다). ★단 되돌리면 U4 가 고쳐 쓴 주석 중 가둔 자리 서술(「실패로 접힌다」)이 배포판에서 다시 거짓이 된다 — 찾는 법 = `rg "ADR-0292" crates src-tauri/src`★(U4-C 리뷰 권고).
+Delete the one line `panic = "abort"` at `Cargo.toml:40` (the default is unwind). Since all earlier units do nothing under abort, the rollback = this one line. So no compile guard that 「abort 면 빌드를 멈추는」 is put in. The executable size change is measured in this unit (ADR-0288 「영향」 wrote that it was not measured). ★But if rolled back, the descriptions of contained places in the comments U4 rewrote (「실패로 접힌다」) become false again in the deployed build — to find them: `rg "ADR-0292" crates src-tauri/src`★ (U4-C review recommendation).
 
 ---
 
-## 5. 단위
+## 5. Units
 
-| 단위 | 바뀌는 것 | 배포판(abort) | 검증 |
+| Unit | What changes | Deployed build (abort) | Verification |
 |---|---|---|---|
-| U1 원시 | base `panic`(`contain` · `uncontained` · 페이로드 문장 · 훅 몸통 — 아무도 안 부름) · `logging` 재진입 표지 · 게이트 ③ 이름 | 같다 | base 단위 시험 — 깊이 증감 · 중첩 · 되감기 뒤 복귀 · `uncontained` 안 깊이 0 과 복귀 · 훅 판정(끝내기 주입) · 재진입 표지 |
-| U2 가두는 자리 | §4-2 — A1~A4 를 `contain` 으로 · 표시 끔 a~d · B1 + 허용 목록 상수 · `command_delivery.rs:1397` 주석 | 같다(catch 가 안 잡고 패닉 갈래에 닿지 않는다) | 기존 펌프 · 라이터 패닉 시험이 그대로 초록 · `finish` 가 표시 없이 도는지 · a~d 안 깊이 0 · **허용 목록 시험**(목록 = 정확히 둘 · 둘 다 표에 있고 `Read` · 두 본문 안에서 표시가 서고 그 밖 명령에선 안 선다) |
-| U3 훅 | 데몬 훅을 base 훅으로 바꾼다 · 셸에 설치 | 같다(로그 → abort) | 자식 프로세스 시험(§6). ★확인 거리★ — debug 데몬은 이때부터 tokio 가 격리하던 패닉에 끝난다: 종료 중 타이머 poll(`daemon/src/usage_service/mod.rs:320-322`) · 연결 태스크의 `debug_assert`(`daemon/src/agent_conn.rs:108`) 등. `/qa full` · `stop_smoke` 가 흔들릴 수 있어 그 둘을 먼저 돌려 본다(시험 서버엔 훅이 없어 단위 시험은 그대로) |
-| U4 확인 · 감사 | §4-6 둘 — 고칠 자리 · 주석 · 로그 문장 | 같다 | **CLI 정리 실프로세스 시험** — 펌프 종류마다(PTY · stdio · codex) 가둔 펌프 패닉 뒤 CLI 프로세스 트리 전체(뿌리 `cmd /c` 만이 아니라)가 상한 시간 안에 사라지는지(§4-2 A — 실패하면 B) · 고친 자리마다 되감기 시험 |
-| U5 전환 | `Cargo.toml:40` 한 줄 | **unwind** | release 빌드 + `/qa full`(실 창 · 실 데몬 정상 동작) · 크기 |
+| U1 primitives | base `panic` (`contain` · `uncontained` · payload sentence · hook body — nobody calls it) · `logging` re-entry flag · gate ③ name | same | base unit tests — depth increment/decrement · nesting · return after unwinding · depth 0 and return inside `uncontained` · hook decision (exit injected) · re-entry flag |
+| U2 containment places | §4-2 — A1~A4 to `contain` · mark-off a~d · B1 + allowlist constant · the comment at `command_delivery.rs:1397` | same (the catch catches nothing and the panic branch is not reached) | the existing pump · writer panic tests stay green · `finish` runs without the mark · depth 0 inside a~d · **allowlist test** (the list = exactly two · both are in the table and `Read` · the mark stands inside the two bodies and not for other commands) |
+| U3 hook | replace the daemon hook with the base hook · install in the shell | same (log → abort) | child-process test (§6). ★Things to verify★ — from here the debug daemon ends on panics that tokio used to isolate: the timer poll during shutdown (`daemon/src/usage_service/mod.rs:320-322`) · the `debug_assert` in a connection task (`daemon/src/agent_conn.rs:108`) etc. `/qa full` · `stop_smoke` may become shaky, so run those two first (the test server has no hook, so unit tests are unchanged) |
+| U4 verify · audit | the two items of §4-6 — places to fix · comments · log sentences | same | **CLI cleanup real-process test** — for each pump kind (PTY · stdio · codex), after a contained pump panic, whether the whole CLI process tree (not only the root `cmd /c`) disappears within the time limit (§4-2 A — B if it fails) · an unwinding test for every place fixed |
+| U5 switch | one line `Cargo.toml:40` | **unwind** | release build + `/qa full` (real window · real daemon work normally) · size |
 
-- **순서 고정:** U2 가 U3 보다 앞(뒤집히면 debug 에서 지금 가둬지던 펌프 패닉이 데몬을 끈다) · U4 가 U5 보다 앞. U2 의 agent 몫 · daemon 몫은 파일이 안 겹쳐 나란히 갈 수 있다.
-- 어느 단위 뒤에 멈춰도 빌드 · 회귀가 초록이고 배포판은 오늘과 같다(위 「배포판」 칸).
-
----
-
-## 6. 시험 전략
-
-- **훅은 프로세스 전역이고, 표시 밖 갈래는 프로세스를 끝낸다** — 그래서 둘로 나눈다.
-  - **프로세스 안:** 훅 몸통을 끝내기 주입으로 부른다(U1). 전역 훅을 실제로 갈아 끼우는 시험은 한 자물쇠로 줄 세운다 — `command/src/testing.rs:8-30` `with_quiet_panic_hook` 꼴(되돌리기는 `Drop` 이 아니라 잡은 뒤).
-  - **자식 프로세스:** 시험 바이너리가 자기 자신을 환경 변수 하나와 `--exact <시험 이름>` 으로 다시 띄운다. 자식은 실제 훅을 설치하고 (a) 표시 밖 패닉 · `uncontained` 안 패닉 → 부모가 「성공 아님으로 끝남 + 로그 파일의 사유 줄」 (b) `contain` 안 패닉 → 「계속 돎」을 본다. 저장소에 이 꼴의 선례는 없다(새 꼴). 데몬 crate 에 둔다 — 그 crate 시험 줄은 이미 `--test-threads=4` 를 붙인다(CLAUDE.md 「병렬은 테스트 바이너리마다」).
-- 가두는 자리의 시험은 debug 에서 돈다 — 시험 빌드는 이미 unwind 라 U2 부터 바로 잰다.
-- **배포판의 패닉 길 자체는 cargo 시험으로 못 잰다** — 시험 · 벤치 타깃은 프로필의 `panic` 설정을 무시한다(가능성 높음 — Cargo 문서). unwind 로 바뀐 뒤엔 debug 와 같은 코드라 debug 자식 프로세스 시험으로 갈음하고, U5 는 release 정상 동작 실측만 한다.
+- **Fixed order:** U2 before U3 (if reversed, a pump panic that is contained now in debug would end the daemon) · U4 before U5. The agent part and the daemon part of U2 touch different files, so they can run side by side.
+- Stopping after any unit leaves the build · regression green and the deployed build the same as today (the 「배포판」 column above).
 
 ---
 
-## 7. 남는 것 · 범위 밖
+## 6. Test strategy
 
-**사용자 결정 ② 가 받은 값:** 상태를 바꾸는 요청 · 활성화 · `usage.get` 의 버그 = 데몬 즉시 종료(에이전트 전부 끝남 · 다음 기동이 이어받음). 지금 배포판과 같다.
-
-**받는 잔여:**
-
-- **허용 목록 명령의 본문이 나중에 상태를 바꾸게 고쳐지면** 그대로 가둬진다 — 허용 목록 시험은 이름만 못 박는다. 목록 상수 옆 주석이 그 계약을 적는다.
-- **가둔 펌프의 오염 연쇄** — 출력 코어 락을 쥔 채 난 패닉은 표시 없는 `finish` 에서 데몬 종료로 번진다(§4-6 ②). 안전한 쪽이라 받는다.
-- **팬아웃 seq 구멍** — 가둔 펌프가 `fan_out`(`agent/src/output_core.rs:351`) 가운데서 패닉하면 남은 구독자는 그 seq 를 못 받는다 → 기존 replay 회복 길로 돈다(그 에이전트는 어차피 `Failed`).
-- **Windows 밖의 CLI 끝내기(결정 A)** — 무리 주인이 무동작이라 가둔 펌프 패닉 뒤 CLI 가 산 채 남을 가능성이 높다(미측정 — U4 시험 `agent/tests/pump_panic_cli_cleanup.rs` 는 Windows 에서만 잰다). 같은 부류가 `agent/src/backend/codex/transport.rs` 헤더 「비-Windows 에는 손자를 거두는 수단이 없다」에 이미 적혀 있다. 언제 다룰지는 정하지 않았다.
-- **훅의 로그가 멎는 경우** — 패닉한 스레드가 tracing 내부 락(reload · `EnvFilter`)을 쥔 채 나면 훅이 멎는다(오늘 훅과 같다) · 다른 스레드가 stdout 층이나 tracing 내부 락을 쥔 채 멎으면 훅도 기다린다(파일 싱크는 §4-4 의 상한으로 닫았다).
-- **로그 초기화가 통째로 실패한 경우** — 데이터 폴더는 쓸 수 있는데(못 쓰면 데몬이 기동 1단계 `ensure_data_dir_writable` 에서 멈춘다) 그 `logs` 도 `%TEMP%` 폴백도 못 열면 표시 밖 패닉이 파일에 사유 줄을 남기지 못한 채 데몬을 끝낸다(stdout · stderr 뿐 — 셸이 띄운 데몬엔 남는 곳이 없다). 배포판은 오늘도 같다(abort). 닫으려면 기동 정책(예: 로그 자리 없이는 뜨지 않음)이 필요한데, ★사용자 결정(2026-10-12)으로 두지 않는다★ — 그 드문 환경에서 데몬이 아예 안 뜨는 쪽이 사유를 못 남기는 것보다 피해가 크고, 데이터 폴더 문제의 대부분은 셸의 기동 전 점검(ADR-0135)이 먼저 잡는다.
-- **Rust abort 갈래** — 이중 패닉 · 소멸자를 벗어난 패닉 · FFI 건넘 · 셸 WebView2 COM 콜백(미검) = ADR-0288 결정 4.
-- **표시 누락 · 표시 끔 누락** — 새 가둠 자리가 표시 없이 들어오면 즉시 종료(안전한 쪽). 가둔 코드가 새로 공유 상태를 고치게 되면서 표시 끔을 빠뜨리면 그 반쯤 바뀐 상태가 남는다 — 리뷰가 본다.
-- **부팅 중 결정적 패닉의 재기동 고리 · 셸 즉시 종료 뒤 트레이 아이콘이 마우스를 올릴 때까지 남음(추론)** — 오늘 abort 와 같다.
-
-**넓힐 때:** 가두지 않는 자리를 가두려면 §4-1 넷을 다시 대 본다. 트리거 = 로그의 사유 줄에 그 자리가 실제로 나올 때. 상태를 바꾸는 자리를 가두는 날 락 오염 정책 · 여러 걸음 구간 장치(11판 초안 (가)(나) — `git show bedda3f3:docs/process/S21-panic-policy/trd.md`)가 다시 필요해진다.
-
-**범위 밖:**
-
-- 정상 종료(StopDaemon · 트레이 「데몬 끄기」)의 오염 내성 · 종료 시간 제한 · T-52 — 패닉이 그 길을 타지 않는다.
-- ADR-0288 이 미룬 장치 — 셸 사유 고지 · 다음 부팅의 패닉 표시 · 셸 자동 재기동 · 에이전트 PTY 를 데몬 밖 프로세스로(거부됨).
+- **The hook is process-global, and the branch outside the mark ends the process** — so split into two.
+  - **In-process:** call the hook body with an injected exit (U1). A test that actually swaps the global hook is serialized by one lock — in the shape of `with_quiet_panic_hook` at `command/src/testing.rs:8-30` (restore after catching, not in `Drop`).
+  - **Child process:** the test binary re-launches itself with one environment variable and `--exact <시험 이름>`. The child installs the real hook and (a) panic outside the mark · panic inside `uncontained` → the parent sees 「성공 아님으로 끝남 + 로그 파일의 사유 줄」 (b) panic inside `contain` → sees 「계속 돎」. The repository has no precedent of this shape (a new shape). Put it in the daemon crate — that crate's test line already adds `--test-threads=4` (CLAUDE.md 「병렬은 테스트 바이너리마다」).
+- Tests of the containment places run in debug — the test build is already unwind, so measure right from U2.
+- **The deployed build's panic path itself cannot be measured by a cargo test** — test · bench targets ignore the profile's `panic` setting (likely — Cargo docs). After the switch to unwind it is the same code as debug, so the debug child-process test stands in for it, and U5 only measures normal release operation.
 
 ---
 
-## 8. ADR · 문서 후속
+## 7. What remains · out of scope
 
-- **ADR-0292(예정)** — `/adr supersede --mode partial` 로 ADR-0288 결정 1 · 2(가둠을 좁힌다 — 사용자 결정 ②) · 결정 3 과 ADR-0290 결정 2(가두지 못한 패닉 = 사유 로그 → 즉시 종료 · 정상 종료 경로를 당기지 않는다)를 개정한다. 본문 = 가둠 기준(§4-1) · 가둠 표 · 허용 목록 · 표시 끔 · 펌프 패닉 때 CLI 는 기존 정리 경로(§4-2 — 결정 A · 시험 실패 시 B) · 표시 불변식 · 훅 모양 · §3 답 셋 · S20 TRD §4 ⑨ 프로필 결정의 대체 · 근거 조사(§1). 시점 = U1 앞. 전제 = ADR-0288 ~ 0290 이 이 브랜치에 들어와 있을 것.
-- base `sync` 헤더 계약 3 · CLAUDE.md 「빌드·검증 명령」의 base 게이트 ③ 줄 · step-log 한 줄 — 해당 단위와 같은 변경에서.
+**Value accepted by user decision ②:** a bug in a state-changing request · activation · `usage.get` = the daemon exits immediately (all agents end · the next start takes over). The same as the current deployed build.
+
+**Residuals accepted:**
+
+- **If the body of an allowlisted command is later changed to change state**, it is contained as is — the allowlist test pins only the names. The comment next to the list constant states that contract.
+- **Poisoning chain of a contained pump** — a panic while holding the output core lock spreads to a daemon exit at `finish`, which runs without the mark (§4-6 ②). Accepted because it is the safe side.
+- **Fan-out seq hole** — if a contained pump panics in the middle of `fan_out` (`agent/src/output_core.rs:351`), the remaining subscribers do not receive that seq → they go through the existing replay recovery path (that agent is `Failed` anyway).
+- **Ending the CLI outside Windows (decision A)** — the group owner does nothing there, so the CLI is likely to stay alive after a contained pump panic (not measured — the U4 test `agent/tests/pump_panic_cli_cleanup.rs` measures only on Windows). The same kind is already written in the header of `agent/src/backend/codex/transport.rs`, 「비-Windows 에는 손자를 거두는 수단이 없다」. When to handle it is not decided.
+- **Cases where the hook's log stops** — if the panicking thread holds a tracing internal lock (reload · `EnvFilter`), the hook stops (same as today's hook) · if another thread stops while holding the stdout layer or a tracing internal lock, the hook waits too (the file sink is closed by the cap in §4-4).
+- **When log initialization fails entirely** — if the data folder is writable (if not, the daemon stops at startup stage 1 `ensure_data_dir_writable`) but neither its `logs` nor the `%TEMP%` fallback can be opened, a panic outside the mark ends the daemon without leaving a reason line in a file (only stdout · stderr — a daemon launched by the shell has nowhere to leave it). The deployed build is the same today (abort). Closing it needs a startup policy (e.g. do not start without a log place), but ★by user decision (2026-10-12) it is not put in★ — in that rare environment, a daemon that does not start at all does more harm than failing to leave a reason, and most data-folder problems are caught first by the shell's pre-start check (ADR-0135).
+- **Rust abort branches** — double panic · a panic escaping a destructor · crossing FFI · shell WebView2 COM callbacks (unchecked) = ADR-0288 decision 4.
+- **Missing mark · missing mark-off** — if a new containment place enters without the mark, it exits immediately (the safe side). If contained code newly changes shared state and the mark-off is forgotten, that half-changed state remains — review watches for it.
+- **Restart loop on a deterministic panic during boot · the tray icon staying until the mouse hovers after an immediate shell exit (inference)** — the same as today's abort.
+
+**When widening:** to contain a place that is not contained, re-check the four in §4-1. Trigger = that place actually appears in the log's reason lines. On the day a state-changing place is contained, the lock-poisoning policy · the multi-step span device (edition 11 draft (가)(나) — `git show bedda3f3:docs/process/S21-panic-policy/trd.md`) are needed again.
+
+**Out of scope:**
+
+- Poisoning tolerance of the normal shutdown (StopDaemon · tray 「데몬 끄기」) · shutdown time limit · T-52 — the panic does not take that path.
+- The mechanisms ADR-0288 deferred — shell reason notice · panic indication on the next boot · shell auto-restart · agent PTY as a process outside the daemon (rejected).
+
+---
+
+## 8. ADR · document follow-ups
+
+- **ADR-0292 (planned)** — use `/adr supersede --mode partial` to revise ADR-0288 decisions 1 · 2 (narrow containment — user decision ②) · decision 3 and ADR-0290 decision 2 (uncontained panic = log the reason → exit immediately · do not pull the normal shutdown path). Body = containment criteria (§4-1) · containment table · allowlist · mark-off · on a pump panic the CLI uses the existing cleanup path (§4-2 — decision A · B if the test fails) · mark invariant · hook shape · the three answers of §3 · replacement of the profile decision of S20 TRD §4 ⑨ · research basis (§1). Timing = before U1. Precondition = ADR-0288 ~ 0290 are on this branch.
+- base `sync` header contract 3 · the base gate ③ line of CLAUDE.md 「빌드·검증 명령」 · one step-log line — in the same change as the relevant unit.

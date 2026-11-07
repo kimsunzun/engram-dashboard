@@ -1,5 +1,5 @@
-// TRD S21-slot-docking §4-2 · §4-3: 웹뷰 안 훅 사이 상태 `localDrag` — 칸마다 바뀔 때만 알림 · 제자리 놓기 표시는 한 번만
-//   가져감 · 탭바 기하는 마지막 등록이 읽힘.
+// TRD S21-slot-docking §4-2 · §4-3: the state between hooks inside a webview `localDrag` — notifies only on change per field · the in-place drop mark is taken
+//   only once · the tab bar geometry is read from the last registration.
 
 import { act, renderHook } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'

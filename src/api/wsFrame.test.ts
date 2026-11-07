@@ -1,6 +1,6 @@
-// 옛 daemonClient.test 의 decodeOutputFrame describe 를 이관(Stage 4a — daemonClient 삭제).
-// wsTransport.test 의 "binary frame → output" 한 케이스로는 못 잡는 엣지(tag!=0/헤더미만/대문자
-// 정규화/빈 payload)를 순수 함수 단위로 보존한다.
+// Migrated the decodeOutputFrame describe of the old daemonClient.test (Stage 4a — daemonClient deleted).
+// Preserves, as pure-function units, the edges that the one case "binary frame → output" in wsTransport.test cannot catch (tag!=0 / shorter than the header / uppercase
+// normalization / empty payload).
 
 import { describe, expect, it } from 'vitest'
 
@@ -13,7 +13,7 @@ import {
   placeholderErrorPayload,
 } from './wsFrame'
 
-// ── binary frame 빌더(codec.rs 와 동일 포맷: [tag:1][agentId:16][epoch:4 BE][seq:8 BE][payload]) ──
+// ── binary frame builder (same format as codec.rs: [tag:1][agentId:16][epoch:4 BE][seq:8 BE][payload]) ──
 const FRAME_HEADER_LEN = 29
 function uuidToBytes(uuid: string): Uint8Array {
   const hex = uuid.replace(/-/g, '')
@@ -70,7 +70,7 @@ describe('decodeOutputFrame', () => {
   })
 
   it('tag1(StructuredEvent) 프레임 디코드: tag=1 + payload(JSON 바이트) 그대로 추출', () => {
-    // S15/ADR-0045: tag1 = 구조화 이벤트. codec 은 payload 를 opaque 로 넘긴다(JSON 해석은 소비자 몫).
+    // S15/ADR-0045: tag1 = structured event. The codec passes the payload through as opaque (JSON interpretation is the consumer's job).
     const json = '{"type":"TextDelta","text":"hi","turn_id":null,"message_id":null}'
     const payload = new TextEncoder().encode(json)
     const buf = buildFrame({ tag: 1, agentId: AGENT, epoch: 2, seq: 5, payload })
@@ -89,16 +89,16 @@ describe('decodeOutputFrame', () => {
   })
 
   it('tag=255(ADR-0046 replay 경계 마커)는 조용히 skip(null) — 던지지 않음, 전방 호환(M0)', () => {
-    // src-tauri 가 흘리는 마커 프레임 규격: [tag=255][agentId:16][epoch:4][gen:8 BE][flags:1][replay_from:8 BE]
-    //   = 38바이트. decodeOutputFrame 은 마커를 소비하지 않으므로(M2) 미지 tag 를 예외 없이 null 로 버려야
-    //   한다. 길이가 헤더(29) 이상이어도 tag 게이트에서 걸러진다(payload 로 오해 금지).
+    // Marker frame spec src-tauri sends: [tag=255][agentId:16][epoch:4][gen:8 BE][flags:1][replay_from:8 BE]
+    //   = 38 bytes. decodeOutputFrame does not consume markers (M2), so it must drop an unknown tag as null without an exception.
+    //   Even if the length is at least the header (29), it is filtered at the tag gate (do not mistake it for a payload).
     const marker = new ArrayBuffer(1 + 16 + 4 + 8 + 1 + 8)
     const view = new DataView(marker)
     view.setUint8(0, 255)
     const idBytes = uuidToBytes(AGENT)
     for (let i = 0; i < 16; i++) view.setUint8(1 + i, idBytes[i])
     view.setUint32(17, 3, false) // epoch
-    // gen · flags · replay_from 은 decodeOutputFrame 이 안 읽는다 — tag 게이트에서 이미 null.
+    // decodeOutputFrame does not read gen · flags · replay_from — already null at the tag gate.
     expect(() => decodeOutputFrame(marker)).not.toThrow()
     expect(decodeOutputFrame(marker)).toBeNull()
   })
@@ -111,7 +111,7 @@ describe('decodeOutputFrame', () => {
   })
 })
 
-// ── ADR-0231: 자리채움 — 모르는 tag 프레임의 seq 를 비우지 않는다 ──────────────────────────
+// ── ADR-0231: placeholder — do not leave the seq of an unknown-tag frame empty ──────────────────────────
 describe('peekFrameHeader · 자리채움', () => {
   it('머리는 tag 를 가리지 않고 읽는다 · 머리보다 짧으면 null', () => {
     const buf = buildFrame({ tag: 7, agentId: AGENT, epoch: 3, seq: 42, payload: new Uint8Array([1, 2]) })
@@ -129,7 +129,7 @@ describe('peekFrameHeader · 자리채움', () => {
   })
 })
 
-// ── replay 경계 마커(src-tauri replay_flight 가 합성하는 38바이트 — ADR-0046 · ADR-0226 bit2 · ADR-0231 머리) ──
+// ── replay boundary marker (the 38 bytes src-tauri replay_flight synthesizes — ADR-0046 · ADR-0226 bit2 · ADR-0231 head) ──
 const MARKER_LEN = 38
 function buildMarker(opts: {
   epoch: number
@@ -169,7 +169,7 @@ describe('decodeReplayMarker', () => {
     })
   })
 
-  // 표식을 안 싣는 옛 셸·데몬 경로 = bit2 없음. 그때는 표식 도입 전 동작(첫 화면)이 나와야 한다.
+  // An old shell/daemon path that carries no marker = no bit2. Then the pre-marker behavior (first screen) must come out.
   it.each([0x00, 0x01, 0x02, 0x03])('bit2 가 없으면(flags=%i) 이어받기 아님', (flags) => {
     expect(decodeReplayMarker(buildMarker({ epoch: 1, gen: 1n, flags }))?.continuesConversation).toBe(
       false,
@@ -182,13 +182,13 @@ describe('decodeReplayMarker', () => {
     expect(decodeReplayMarker(buildMarker({ epoch: 1, gen: 1n, flags: 0x04, length: 30 }))).toBeNull()
   })
 
-  // ADR-0231: flush 시작점 = max(마지막+1, replay 머리). 칸 자리(30..38 BE)가 어긋나면 머리가 엉뚱한 값이 돼
-  //   뷰가 이력을 건너뛰거나 영영 오지 않을 seq 를 기다린다.
+  // ADR-0231: flush start point = max(last+1, replay head). If the field position (30..38 BE) is off, the head becomes a wrong value and
+  //   the view skips history or waits for a seq that will never come.
   it('replay 머리(30..38 BE)를 seq 와 같은 number 로 읽고 flags 와 섞이지 않는다', () => {
     expect(
       decodeReplayMarker(buildMarker({ epoch: 9, gen: 3n, flags: 0x07, replayFrom: 40n })),
     ).toMatchObject({ gen: 3n, truncated: true, failed: true, continuesConversation: true, replayFrom: 40 })
-    // 상위 바이트까지 BE 로 — 2^32 를 넘는 seq 도 그대로.
+    // Up to the high bytes in BE — a seq beyond 2^32 comes through as is.
     expect(
       decodeReplayMarker(buildMarker({ epoch: 9, gen: 3n, flags: 0, replayFrom: 0x1_0000_0002n }))
         ?.replayFrom,

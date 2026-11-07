@@ -1,12 +1,12 @@
-//! 대상 풀기(TRD S28 §5-2) — LLM 명령이 id · 에이전트 · 공간 낱말로 고른 대상을 지금 모델의 (창, 탭, 칸)으로 푼다.
+//! Resolving the target (TRD S28 §5-2) — resolves a target that an LLM command picked by id · agent · spatial word into (window, tab, area) of the current model.
 //!
-//! ★적용 서비스가 바꾸는 그 락 안에서 부른다★ — 풀고 나서 락을 놓았다가 다시 잡아 적용하면, 그 사이 다른 명령 ·
-//! 마우스가 그 에이전트를 옮겼을 때 엉뚱한 탭 · 칸을 바꾼다. 그래서 모델(`ViewManager`)을 읽기만 하고 락을 모른다.
+//! ★Call it inside the same lock that the apply service changes under★ — if you resolve, release the lock, and take it again to apply, another command ·
+//! the mouse may have moved that agent in between and the wrong tab · area gets changed. So it only reads the model (`ViewManager`) and knows nothing of locks.
 //!
-//! 에이전트 **이름** → id 는 여기 몫이 아니다 — 데몬 명부의 해석기 하나가 푼다(ADR-0132 · 규칙 §1-2). 여기 오는
-//! 에이전트는 이미 id 다. 셸의 이름 장부(`agent_names`)는 후보 · 배치 줄을 보여 주는 데만 쓴다.
+//! Resolving an agent **name** → id is not its job — a single resolver of the daemon registry resolves it (ADR-0132 · rule §1-2). The
+//! agent that arrives here is already an id. The shell's name ledger (`agent_names`) is used only to show the candidate · placement lines.
 //!
-//! 순서(후보 · 줄)는 `window.list` 와 같은 창 번호 순 → 탭 줄 순 → 트리 전위 순이다.
+//! Order (candidates · lines) is the same as `window.list`: window number order → tab row order → tree pre-order.
 // ADR-0307
 
 use uuid::Uuid;
@@ -19,32 +19,32 @@ use super::spatial::{resolve_spatial, SpatialToken};
 use super::tree;
 use super::types::{SlotContent, View};
 
-/// 후보 · 이름 목록의 상한(규칙 §1-3 — 다음 호출 한 번에 고칠 만큼만).
+/// Upper bound of the candidate · name lists (rule §1-3 — only as many as can be fixed in one next call).
 pub const MAX_CANDIDATES: usize = 5;
 
-/// 붙는 몫을 셀 크기를 모를 때(웹뷰가 아직 캔버스를 안 알림)의 몫(TRD S28 §4-2 · §11-2).
+/// The share used when the size of the area to compute the attach share from is unknown (the webview has not reported the canvas yet) (TRD S28 §4-2 · §11-2).
 pub const UNMEASURED_SHARE: f64 = 0.5;
 
-/// 명령이 고른 대상. 에이전트 갈래의 id 는 데몬이 푼 것이고, 칸의 에이전트 id 와 UUID 값으로 견준다(철자 무관).
+/// The target a command picked. The id in the agent branch is one the daemon resolved, and it is compared with the area's agent id by UUID value (spelling does not matter).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
-    /// id 로 준 탭.
+    /// Tab given by id.
     Tab(ViewId),
-    /// 그 에이전트가 든 탭 — 한 탭 안 여러 칸에 떠 있어도 그 탭 하나다. 여러 탭이면 모호하다.
+    /// The tab holding that agent — even if it appears in several areas of one tab it is that one tab. If several tabs, it is ambiguous.
     TabOf(Uuid),
-    /// id 로 준 칸 — `view` 를 주면 그 탭의 칸이어야 한다.
+    /// Area given by id — if `view` is given, it must be an area of that tab.
     Slot { view: Option<ViewId>, slot: Uuid },
-    /// 그 에이전트가 든 칸 — 여러 칸이면(같은 탭 안이어도) 모호하다.
+    /// The area holding that agent — if several areas (even within the same tab), it is ambiguous.
     SlotOf(Uuid),
-    /// 창 `window`(label — 창 인자는 부르는 쪽이 이미 풀었다 · `None` = main)의 보이는 탭에서 낱말이 집는 칸
-    /// (`slot.resolveSpatial` 과 같은 규칙 · ADR-0068).
+    /// The area a word picks in the visible tab of window `window` (label — the caller has already resolved the window argument · `None` = main)
+    /// (same rule as `slot.resolveSpatial` · ADR-0068).
     At {
         token: SpatialToken,
         window: Option<WindowLabel>,
     },
 }
 
-/// 푼 대상. `slot` = 칸을 고르는 대상(`Slot` · `SlotOf` · `At`)이면 그 칸, 탭을 고르는 대상이면 `None`.
+/// The resolved target. `slot` = that area if the target picks an area (`Slot` · `SlotOf` · `At`), `None` if the target picks a tab.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Located {
     pub window: WindowLabel,
@@ -52,7 +52,7 @@ pub struct Located {
     pub slot: Option<Uuid>,
 }
 
-/// 에이전트가 떠 있는 칸 하나 — 모호 후보 · [`agent_places`] 의 한 줄. `tab_index` = 그 창 탭 줄 자리(0 부터).
+/// One area where an agent is shown — a candidate for ambiguity · one line of [`agent_places`]. `tab_index` = its position in that window's tab row (from 0).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Place {
     pub window: WindowLabel,
@@ -63,7 +63,7 @@ pub struct Place {
     pub slot: Uuid,
 }
 
-/// 대상을 어떤 말로 골랐나 — 버스 오류 코드를 가르는 데 쓴다(TRD S28 §5-2 · §5-3).
+/// By what words the target was picked — used to tell bus error codes apart (TRD S28 §5-2 · §5-3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TargetBy {
     Id,
@@ -71,8 +71,8 @@ pub enum TargetBy {
     Spatial,
 }
 
-/// 대상을 못 풀었다 — 모델은 그대로다. 문구 = 한국어 사유 + 괄호 속 종류 낱말(`DockError` 와 같은 꼴). 후보는
-/// 문구에 넣지 않는다 — [`Self::candidates`] 로 꺼내 부르는 쪽이 붙인다.
+/// The target could not be resolved — the model is unchanged. Message = Korean reason + kind word in parentheses (same shape as `DockError`). Candidates are
+/// not put into the message — the caller takes them out with [`Self::candidates`] and appends them.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum LocateError {
     #[error("탭 없음: {0} (TabNotFound)")]
@@ -81,16 +81,16 @@ pub enum LocateError {
     SlotNotFound(Uuid),
     #[error("칸 {slot} 은 탭 {tab} 소속이 아님 (SlotNotInTab)")]
     SlotNotInTab { slot: Uuid, tab: ViewId },
-    /// 그 에이전트가 어느 칸에도 없다. `shown` = 지금 칸에 떠 있는 에이전트의 표시 이름(장부에 없으면 id) —
-    /// [`MAX_CANDIDATES`] 개까지.
+    /// That agent is in no area. `shown` = display names of the agents currently shown in areas (the id if not in the ledger) —
+    /// up to [`MAX_CANDIDATES`].
     #[error("에이전트 {agent} 가 어느 칸에도 없음 (AgentNotShown)")]
     AgentNotShown { agent: Uuid, shown: Vec<String> },
-    /// 그 에이전트가 여러 칸(탭을 고르는 대상이면 여러 탭)에 떠 있다. `places` = 그 칸 전부.
+    /// That agent is shown in several areas (several tabs if the target picks a tab). `places` = all those areas.
     #[error("에이전트 {agent} 가 여러 곳에 떠 있음 (AgentAmbiguous)")]
     AgentAmbiguous { agent: Uuid, places: Vec<Place> },
     #[error("창 없음: {0} (WindowNotFound)")]
     WindowNotFound(WindowLabel),
-    /// 낱말이 그 창의 보이는 탭에서 칸을 못 집었다(그 방향에 이웃이 없다 등).
+    /// The word did not pick an area in that window's visible tab (no neighbor in that direction, etc.).
     #[error("'{}' 이 창 {window} 에서 칸을 못 집음 (NoSlotAt)", .token.as_str())]
     NoSlotAt {
         token: SpatialToken,
@@ -111,16 +111,16 @@ impl LocateError {
         }
     }
 
-    /// 다음 호출 한 번에 고칠 단서(영어 — 버스 문구 끝 `— candidates: …` 에 그대로 붙인다 · TRD S28 §5-3). 없는 이름
-    /// = 떠 있는 에이전트 이름 · 모호 = 그 칸들의 `slot_id` · 든 탭(`in_tab=` — 탭 id 인자 `tab` 과 헷갈리지 않게) · 창.
-    /// [`MAX_CANDIDATES`] 개까지, 그 밖의 오류는 빈 목록.
-    /// 칸 id 의 머리는 `slot_id=` 다 — 다른 인자 이름이면 [`Self::candidates_as`].
+    /// A hint to fix it in one next call (English — attached as is to the end of the bus message `— candidates: …` · TRD S28 §5-3). Unknown name
+    /// = names of the agents that are shown · ambiguous = the `slot_id` of those areas · tab held (`in_tab=` — so it is not confused with the tab id argument `tab`) · window.
+    /// Up to [`MAX_CANDIDATES`]; other errors give an empty list.
+    /// The head of an area id is `slot_id=` — for another argument name use [`Self::candidates_as`].
     pub fn candidates(&self) -> Vec<String> {
         self.candidates_as("slot_id")
     }
 
-    /// [`Self::candidates`] 와 같되 모호 후보의 칸 id 머리를 `key=` 로 단다 — 그 값을 넘길 인자 이름(`slot_id` ·
-    /// `beside_slot`)을 쓰면 다음 호출이 그대로 옮겨 적는다.
+    /// Same as [`Self::candidates`] but sets the head of the area id of an ambiguity candidate to `key=` — if you use the argument name that will receive that value (`slot_id` ·
+    /// `beside_slot`), the next call copies it over as is.
     pub fn candidates_as(&self, key: &str) -> Vec<String> {
         match self {
             LocateError::AgentNotShown { shown, .. } => {
@@ -141,7 +141,7 @@ impl LocateError {
     }
 }
 
-/// `target` 을 지금 모델에서 푼다 — 창 탭 목록에 든 탭만 본다(창에 아직 안 든 임시 탭은 대상이 아니다).
+/// Resolve `target` in the current model — only tabs in the window's tab list are looked at (a temporary tab not yet in a window is not a target).
 // ADR-0307
 pub fn locate(mgr: &ViewManager, target: &Target) -> Result<Located, LocateError> {
     match target {
@@ -222,7 +222,7 @@ pub fn locate(mgr: &ViewManager, target: &Target) -> Result<Located, LocateError
     }
 }
 
-// 자리가 하나로 모이면 그 첫 자리, 없으면 `AgentNotShown`, 갈리면 `AgentAmbiguous`. `same` = 같은 대상으로 칠 두 자리.
+// If places gather into one, its first place; if none, `AgentNotShown`; if they split, `AgentAmbiguous`. `same` = two places counted as the same target.
 fn one_or_ambiguous<'p>(
     mgr: &ViewManager,
     agent: Uuid,
@@ -243,7 +243,7 @@ fn one_or_ambiguous<'p>(
     }
 }
 
-/// 에이전트 `agent` 가 떠 있는 칸 전부 — 창 번호 순 → 탭 줄 순 → 트리 전위 순.
+/// All areas where agent `agent` is shown — window number order → tab row order → tree pre-order.
 pub fn agent_places(mgr: &ViewManager, agent: Uuid) -> Vec<Place> {
     let mut out = Vec::new();
     for (label, w) in windows_in_order(mgr) {
@@ -266,7 +266,7 @@ pub fn agent_places(mgr: &ViewManager, agent: Uuid) -> Vec<Place> {
     out
 }
 
-/// 지금 칸에 떠 있는 에이전트의 표시 이름(장부에 없으면 그 id) — 겹침 없이 `max` 개까지 · 순서는 모듈 머리.
+/// Display names of the agents currently shown in areas (the id if not in the ledger) — up to `max` without duplicates · order per the module header.
 pub fn shown_agents(mgr: &ViewManager, max: usize) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for (_, w) in windows_in_order(mgr) {
@@ -289,11 +289,11 @@ pub fn shown_agents(mgr: &ViewManager, max: usize) -> Vec<String> {
     out
 }
 
-/// 이음새 도킹의 기본 몫 — 마우스와 같은 공식 [`bands::attach_share`](원래 크기 = 출처 탭 창의 캔버스 · 칸 = 대상 칸
-/// px 틀, `Outer` 면 대상 창 캔버스 전체). 어느 캔버스든 모르거나 대상 칸이 없으면 [`UNMEASURED_SHARE`].
+/// Default share for seam docking — the same formula as the mouse, [`bands::attach_share`] (original size = canvas of the source tab's window · area = target area
+/// px frame, or the whole target window canvas for `Outer`). If either canvas is unknown or there is no target area, [`UNMEASURED_SHARE`].
 ///
-/// ★마우스와 다르다★: 마우스의 원래 크기는 웹이 잰 끌기 크기(원본 창이 최대화면 복원 크기)이고 모델에는 그 입력이
-/// 없어 캔버스로 갈음한다(TRD S28 §4-2 · §11-6).
+/// ★Differs from the mouse★: the mouse's original size is the drag size measured by the web (the restored size if the source window is maximized), and the model has
+/// no such input, so the canvas stands in (TRD S28 §4-2 · §11-6).
 pub fn seam_share(
     mgr: &ViewManager,
     source: ViewId,
@@ -338,14 +338,14 @@ fn canvas_of(mgr: &ViewManager, view: ViewId) -> Option<CanvasPx> {
         .and_then(|w| w.canvas)
 }
 
-/// 모델의 창 — 창 번호 순(`window.list` 와 같다).
+/// Windows of the model — in window number order (same as `window.list`).
 pub(crate) fn windows_in_order(mgr: &ViewManager) -> Vec<(&WindowLabel, &WindowTabs)> {
     let mut windows: Vec<_> = mgr.windows.iter().collect();
     windows.sort_by_key(|(_, w)| w.number);
     windows
 }
 
-/// 창 `w` 의 탭 — (탭 줄 자리, 탭). View 가 없는 항목은 건너뛴다(불변식 1 이 서면 없다).
+/// Tabs of window `w` — (position in the tab row, tab). Entries with no View are skipped (there are none if invariant 1 holds).
 pub(crate) fn tabs_of<'m>(
     mgr: &'m ViewManager,
     w: &'m WindowTabs,
@@ -363,7 +363,7 @@ fn holds(content: &SlotContent, agent: Uuid) -> bool {
         .is_some_and(|id| id == agent)
 }
 
-// `view` 를 탭으로 가진 창 — View · 소유 쌍 · 탭 목록이 다 서야 한다(`ViewManager` 의 도킹 판정과 같은 규칙).
+// The window that has `view` as a tab — the View · owner pair · tab list must all hold (same rule as the docking decision of `ViewManager`).
 fn tab_window(mgr: &ViewManager, view: ViewId) -> Option<WindowLabel> {
     if !mgr.views.contains_key(&view) {
         return None;
@@ -376,7 +376,7 @@ fn tab_window(mgr: &ViewManager, view: ViewId) -> Option<WindowLabel> {
         .then(|| label.clone())
 }
 
-// 칸 `slot` 이 든 탭(창 탭 목록에 든 것만) — (창, 탭).
+// The tab holding area `slot` (only those in a window's tab list) — (window, tab).
 fn slot_home(mgr: &ViewManager, slot: Uuid) -> Option<(WindowLabel, ViewId)> {
     windows_in_order(mgr).into_iter().find_map(|(label, w)| {
         tabs_of(mgr, w)

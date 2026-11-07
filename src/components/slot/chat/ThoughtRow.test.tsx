@@ -1,15 +1,15 @@
-// ★FIX-1 회귀 안전망★: 펼친 추론 박스의 높이 상한(max-h-200px)이 Radix Viewport(=실제 스크롤 노드)에
-//   얹혀야 한다(Root 아님). Root 에만 얹으면 Viewport(height:100%)가 비확정 부모에 대해 auto 로 풀려 콘텐츠
-//   높이로 자라고 Root overflow-hidden 이 잘라 스크롤로 닿지 못한다(원 버그). 실제 스크롤 거동(휠/드래그로
-//   마지막 줄 도달)은 레이아웃 엔진 의존이라 jsdom 불가 — cdp 실측(수동 검증). 여기선 max-h 가 붙는 DOM
-//   노드(Viewport vs Root)만 단언한다.
+// ★FIX-1 regression safety net★: the height cap of the expanded reasoning box (max-h-200px) must sit on the Radix Viewport (= the real scroll node)
+//   (not the Root). If it sits only on the Root, the Viewport (height:100%) resolves to auto against an indefinite parent, grows to the content
+//   height, and the Root overflow-hidden cuts it so scrolling cannot reach it (the original bug). Real scroll behavior (reaching the
+//   last line by wheel/drag) depends on the layout engine so jsdom cannot — cdp measurement (manual check). Here we assert only which DOM
+//   node (Viewport vs Root) carries max-h.
 
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { ThoughtRow } from './ThoughtRow'
 
-// jsdom 은 ResizeObserver 를 제공하지 않는다 — Radix ScrollArea 내부가 참조하므로 no-op stub.
+// jsdom does not provide ResizeObserver — the Radix ScrollArea internals refer to it, so a no-op stub.
 globalThis.ResizeObserver ||= class {
   observe() {}
   unobserve() {}

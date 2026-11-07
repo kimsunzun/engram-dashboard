@@ -3,33 +3,33 @@ import type { CrashCopyStatus } from "./CrashCopyStatus";
 import type { StateFileStatus } from "./StateFileStatus";
 
 /**
- * `restore_status` · `restore.status` 의 답. `saved_at_ms` · `windows` · `tabs` · `durable` 은 `Awaiting` 일 때만
- * 값이고 그 밖은 `null` 이다. `saves` · `state_file` 은 크래시 사본과 무관하게 늘 값이고, 부팅 단계 ⑥ 이 정한 뒤
- * 그 실행 내내 바뀌지 않는다(답해도 · 되돌려도).
+ * The answer for `restore_status` · `restore.status`. `saved_at_ms` · `windows` · `tabs` · `durable` are values only when `Awaiting`
+ * and `null` otherwise. `saves` · `state_file` are always values regardless of the crash copy, and after boot step 6 decides them they do not change
+ * throughout that run (even when answered · even when rolled back).
  */
 export type RestoreStatusView = { crash_copy: CrashCopyStatus, 
 /**
- * 사본을 적은 시각 — 유닉스 밀리초.
+ * The time the copy was written — Unix milliseconds.
  */
 saved_at_ms: number | null, 
 /**
- * 사본의 창 수 — main + 팝아웃([`AnswerReply::restored_windows`] 와 같은 셈).
+ * The number of windows in the copy — main + popouts (counted the same as [`AnswerReply::restored_windows`]).
  */
 windows: number | null, 
 /**
- * 사본의 모든 창의 탭 수 합.
+ * The sum of tab counts of all windows in the copy.
  */
 tabs: number | null, 
 /**
- * 묻는 동안의 [`Self::saves`] 와 같은 값이다 — `true` = 가드가 아니다: 답(수락 · 거절)을 디스크에 붙이고 사본을
- * 지우려 한다(성공은 보장하지 않는다 — 실제로 붙었는지는 [`AnswerReply::durable`] 이 말한다). `false` = 가드다:
- * 답해도 크래시 때 화면이 디스크에 남아(사본 또는 정상 종료 표시 없는 `state.json`) 다음 부팅이 다시 묻는다.
+ * The same value as [`Self::saves`] while asking — `true` = not a guard: it tries to attach the answer (accept · decline) to disk and delete the copy
+ * (success is not guaranteed — whether it actually attached is told by [`AnswerReply::durable`]). `false` = a guard:
+ * even if answered, the crash-time screen stays on disk (a copy or a `state.json` without a clean-exit mark) and the next boot asks again.
  */
 durable: boolean | null, 
 /**
- * 이 실행이 화면 상태를 저장하나 — 부팅 가드(TRD §6-5 ③)로 정한다. `true` = 가드가 아니다: 기록기를 띄우려
- * 한다(띄우기 · 쓰기 성공은 보장하지 않는다 — ⑦ 에서 기록기를 못 띄운 실행도 `true` 다). `false` = 가드다: 이
- * 실행은 화면 상태를 하나도 저장하지 않고 다음 부팅이 다시 판정한다 — 가드 ⅰ(`state_file` 이 `Unreadable` ·
- * `Newer`) · 가드 ⅱ(떠야 할 크래시 사본을 못 떴다 — `state_file` 은 `Ok` 다).
+ * Whether this run saves screen state — decided by the boot guard (TRD §6-5 ③). `true` = not a guard: it tries to start the recorder
+ * (starting · writing is not guaranteed to succeed — a run where the recorder could not be started at ⑦ is also `true`). `false` = a guard: this
+ * run saves no screen state at all and the next boot decides again — guard i (`state_file` is `Unreadable` ·
+ * `Newer`) · guard ii (the crash copy that should have been made could not be — `state_file` is `Ok`).
  */
 saves: boolean, state_file: StateFileStatus, };

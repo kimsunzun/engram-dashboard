@@ -1,10 +1,10 @@
-# 모듈 5 — pty/manager.rs 브리핑 (담당: dco23, Opus)
+# Module 5 — pty/manager.rs briefing (owner: dco23, Opus)
 
-발신: ed12 (매니저)
-근거: `docs/backend-lld-stage1.md` §5 (PtyManager), §6 (kill 시퀀스), §10 (락순서), 자원소유표.
-**Phase 1 마지막 모듈. 모든 모듈의 결합부**다. session/drain/windows/types를 전부 묶는다.
+From: ed12 (manager)
+Source: `docs/backend-lld-stage1.md` §5 (PtyManager), §6 (kill sequence), §10 (lock order), the resource ownership table.
+**The last module of Phase 1. It is the coupling point of all modules.** It ties session/drain/windows/types together.
 
-## 구조체 (§5)
+## Struct (§5)
 
 ```rust
 pub struct PtyManager {
@@ -13,7 +13,7 @@ pub struct PtyManager {
 }
 ```
 
-## 메서드 (§5 시그니처 그대로)
+## Methods (§5 signatures as written)
 
 new / spawn_agent / subscribe / unsubscribe / write_stdin / resize / kill_agent / list_agents / get_snapshot / shutdown_all
 
@@ -36,7 +36,7 @@ new / spawn_agent / subscribe / unsubscribe / write_stdin / resize / kill_agent 
 10. return AgentInfo
 ```
 
-### kill_agent(&self, agent_id) -> Result<(), PtyError>  ★§6 6단계 그대로★
+### kill_agent(&self, agent_id) -> Result<(), PtyError>  ★§6 six steps as written★
 
 ```
 0. sessions.read() 로 Arc<PtySession> clone, read lock 즉시 해제   (§10 규칙1)
@@ -52,32 +52,32 @@ new / spawn_agent / subscribe / unsubscribe / write_stdin / resize / kill_agent 
 8. self.status_sink.agent_list_updated(self.list_agents())
 ```
 
-> **상태 알림 책임 분담 (중복 호출 금지):**
-> - 개별 상태 전이(`status_changed`, Killed/Exited)는 **drain thread가 단독** 호출(transition에서). kill_agent는 호출하지 않는다.
-> - 목록 변경(`agent_list_updated`)은 **manager가** spawn/kill 끝에 호출.
+> **Division of responsibility for status notifications (no duplicate calls):**
+> - Individual state transitions (`status_changed`, Killed/Exited) are called **by the drain thread alone** (in transition). kill_agent does not call it.
+> - List changes (`agent_list_updated`) are called **by the manager** at the end of spawn/kill.
 
-### 나머지
+### The rest
 
-- **subscribe/unsubscribe**: sessions.read()로 session 찾아 `session.subscribe(sink)` / `session.unsubscribe(sink_id)` 위임. (C4 로직은 session.rs에 이미 있음)
-- **write_stdin**: session 찾아 `session.writer.lock().write_all(data)`.
-- **resize**: session 찾아 `session.master.lock()`에 resize + `session.cols/rows` atomic 갱신.
-- **list_agents**: sessions.read() 순회 → Vec<AgentInfo> (각 session의 status/cols/rows snapshot).
+- **subscribe/unsubscribe**: look up the session with sessions.read() and delegate to `session.subscribe(sink)` / `session.unsubscribe(sink_id)`. (The C4 logic is already in session.rs)
+- **write_stdin**: look up the session and `session.writer.lock().write_all(data)`.
+- **resize**: look up the session, resize on `session.master.lock()` + update the `session.cols/rows` atomics.
+- **list_agents**: iterate sessions.read() → Vec<AgentInfo> (a snapshot of each session's status/cols/rows).
 - **get_snapshot**: session.replay.lock().snapshot().
-- **shutdown_all**: 모든 agent_id에 kill_agent 호출(또는 동등 정리). 앱 종료 경로.
+- **shutdown_all**: call kill_agent on every agent_id (or an equivalent cleanup). The app exit path.
 
-## 불변 규칙 (리뷰 필수)
+## Invariants (mandatory for review)
 
-- **락순서 §10 규칙1**: `sessions` RwLock은 조회용 — Arc clone 뜨고 **즉시 해제**한 뒤 session 내부 lock 취득. sessions lock 보유 중 session 내부 lock 취득 금지.
-- kill_agent의 6단계 순서 절대 변경 금지(spike로 검증된 순서). 특히 master.take()는 4(Job terminate) 이후 5.
-- tauri import 0. (status_sink는 trait, AppHandle 아님)
-- 에러: 없는 agent_id → PtyError. lock poison → expect(fail-fast, D-3 정책).
+- **Lock order §10 rule 1**: the `sessions` RwLock is for lookup only — clone the Arc and **release immediately**, then acquire the session's inner locks. Never acquire a session inner lock while holding the sessions lock.
+- Never change the order of kill_agent's six steps (the order verified by the spike). In particular master.take() comes at 5, after 4 (Job terminate).
+- Zero tauri imports. (status_sink is a trait, not AppHandle)
+- Errors: a nonexistent agent_id → PtyError. Lock poison → expect (fail-fast, D-3 policy).
 
-## 코드 품질
+## Code quality
 
-- spawn_agent/kill_agent 각 단계에 *왜* 한국어 주석 (특히 reader 확보 타이밍, master.take 위치, 알림 분담).
-- **완료 전 cargo fmt 필수** → fmt --check 통과. cargo build 통과 (이제 dead_code 경고 대부분 해소될 것).
+- A Korean comment on *why* at each step of spawn_agent/kill_agent (especially when the reader is obtained, where master.take is, the split of notifications).
+- **Run cargo fmt before finishing** → fmt --check passes. cargo build passes (most dead_code warnings should be gone now).
 
-## 보고
+## Report
 
 `orch 12 "⟁dco23 manager.rs 완료 — spawn/kill(6단계)/subscribe위임/resize/shutdown_all, fmt/build OK, dead_code 경고 N건"`
-PtySession::new의 PtySessionInit 필드가 session.rs 정의와 안 맞으면 맞춰서 조정(같은 작성자니 일관되게). 막히면 30분 내 중간보고.
+If the PtySessionInit fields of PtySession::new do not match the session.rs definition, adjust them to match (same author, so keep it consistent). If stuck, send an interim report within 30 minutes.

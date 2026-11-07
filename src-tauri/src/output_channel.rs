@@ -1,43 +1,43 @@
-//! window Channel registry + 무상태 통과 send 헬퍼 (ADR-0046 — 미러 버퍼 제거, view-direct replay).
+//! window Channel registry + stateless pass-through send helper (ADR-0046 — mirror buffer removed, view-direct replay).
 //!
-//! ## 역할
-//! src-tauri 는 더는 데몬 ring 을 미러하지 않는다(ADR-0046).
+//! ## Role
+//! src-tauri no longer mirrors the daemon ring (ADR-0046).
 //!
-//! ## ★raw byte 함정(spike §7)★
-//! 출력 프레임은 `Channel<tauri::ipc::Response>` 로 운반한다 — `Channel<Vec<u8>>`/`Channel<&[u8]>` 는
-//! blanket `impl<T:Serialize> IpcResponse` 가 JSON 배열로 직렬화해 바이트가 샌다. 반드시
-//! `Response::new(bytes)` 로 실어 raw 로 보낸다.
+//! ## ★raw byte pitfall (spike §7)★
+//! Output frames are carried by `Channel<tauri::ipc::Response>` — `Channel<Vec<u8>>`/`Channel<&[u8]>` get
+//! serialized as a JSON array by the blanket `impl<T:Serialize> IpcResponse` and the bytes leak. Always
+//! carry it with `Response::new(bytes)` and send it raw.
 //!
-//! ## ★동시성/락 규율(ADR-0006, load-bearing)★
-//! `std::sync::Mutex` 다(tokio Mutex 아님). connection task(tokio)가 핫패스에서 registry lock→send 하는데
-//! 락 보유 중 `.await` 가 **없다**(`Channel::send` 는 동기). 락은 짧게 잡았다 즉시 푼다. registry 락
-//! 하나뿐이라 순서 역전 데드락 표면이 0이다.
+//! ## ★Concurrency/lock discipline (ADR-0006, load-bearing)★
+//! It is `std::sync::Mutex` (not tokio Mutex). The connection task (tokio) does registry lock→send on the hot path, and
+//! there is **no** `.await` while the lock is held (`Channel::send` is synchronous). The lock is taken briefly and released at once. With the registry lock
+//! being the only one, the lock-order-inversion deadlock surface is 0.
 //!
-//! ## ★poison 은 되찾는다 — 락을 쥐는 자리 셋 모두(ADR-0231)★
-//! 프레임 통과([`send_to_windows`]) · 창 등록([`register_window`]) · 창 정리([`unregister_window`])가 모두
-//! `PoisonError::into_inner` 로 락을 되찾는다. 이 명부는 label → Channel 핸들 map 이라 중간에 난 panic 이
-//! 남길 반쪽 상태가 없다. ★건너뛰면 멈춘다★ — 뷰는 seq 구멍 뒤를 시한 없이 붙들므로 통과 자리가 프레임을
-//! 버리면 그 뷰가 멈추고, poison 은 풀리지 않아 다시 붙어도 다음 프레임부터 또 건너뛴다. 통과 자리만
-//! 되찾으면 프레임은 흐르는데 새 창·다시 연 창이 등록을 못 해 출력을 영영 못 받는다(poison 은 락에 서므로
-//! 셋 모두에 선다). 선례 = `view_commands.rs` 의 같은 처분.
-//! 되찾을 때 warn 한 번을 남기고 poison 표시를 지운다([`lock_registry`]) — 통과 자리는 프레임마다 불리므로
-//! 표시를 남겨 두면 같은 경고가 프레임마다 되풀이된다.
+//! ## ★Recover from poison — at all three places that hold the lock (ADR-0231)★
+//! Frame pass-through ([`send_to_windows`]) · window registration ([`register_window`]) · window cleanup ([`unregister_window`]) all
+//! recover the lock with `PoisonError::into_inner`. This registry is a label → Channel handle map, so there is no half state a panic in the middle
+//! could leave. ★Skipping stalls it★ — a view holds behind a seq hole with no deadline, so if the pass-through place drops a frame, that view stalls,
+//! and poison does not clear, so even after re-attaching it skips again from the next frame. If only the pass-through place recovers, frames flow,
+//! but a new window · reopened window cannot register and never receives output (poison stands on the lock, so it stands at
+//! all three). Precedent = the same handling in `view_commands.rs`.
+//! When recovering, it leaves one warn and clears the poison mark ([`lock_registry`]) — the pass-through place is called per frame, so
+//! if the mark were left, the same warning would repeat every frame.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::output_router::WindowLabel;
 
-/// 창 mount 시 `subscribe_output` invoke 가 insert, dead window(send Err) 감지 시 connection task 가
-/// remove 한다. connection task 와 Tauri command 양쪽이 `Arc` 로 공유 → app-level manage.
+/// At window mount the `subscribe_output` invoke inserts, and when a dead window (send Err) is detected the connection task
+/// removes it. Shared by both the connection task and the Tauri command through `Arc` → app-level manage.
 pub type WindowChannelRegistry =
     Arc<Mutex<HashMap<WindowLabel, tauri::ipc::Channel<tauri::ipc::Response>>>>;
 
 type RegistryMap = HashMap<WindowLabel, tauri::ipc::Channel<tauri::ipc::Response>>;
 
-// ADR-0231: poison 을 되찾되 poisoning 한 번에 warn 한 번 — `clear_poison` 으로 다음 호출이 같은 경고를
-//   되풀이하지 않게 한다(모듈 헤더). 두 스레드가 같은 순간 poison 을 보면 경고가 둘일 수 있다 — 무해.
-// ADR-0275: base `sync` 를 쓰지 않는다 — 그쪽은 독을 걷지 않는다. 독을 걷는 이 자기 도우미가 ADR-0231 의 계약이다.
+// ADR-0231: recover the poison but warn once per poisoning — `clear_poison` keeps the next call from
+//   repeating the same warning (module header). If two threads see the poison at the same moment there may be two warnings — harmless.
+// ADR-0275: do not use the base `sync` — that one does not clear the poison. This own helper that clears the poison is the contract of ADR-0231.
 fn lock_registry(registry: &WindowChannelRegistry) -> MutexGuard<'_, RegistryMap> {
     registry.lock().unwrap_or_else(|e| {
         tracing::warn!("출력 Channel 명부 락이 poisoned — 되찾아 계속 쓴다");
@@ -46,26 +46,26 @@ fn lock_registry(registry: &WindowChannelRegistry) -> MutexGuard<'_, RegistryMap
     })
 }
 
-/// ★무상태 통과 fan-out(ADR-0046)★. `bytes`(원본 binary frame 또는 replay 경계 마커)를 `labels`
-/// (= `router.targets(agent)`) 중 **registry 에 실제 등록된** 창 Channel 로 그대로 보낸다. 미러/cursor 없음
-/// — 데몬이 보낸 그대로 통과시키고, 진도/dedup 판정은 전부 웹뷰 뷰 단위가 한다(진도 상태 유일 거처 = 뷰).
+/// ★Stateless pass-through fan-out (ADR-0046)★. Sends `bytes` (the original binary frame or a replay boundary marker) as they are to the window Channels among `labels`
+/// (= `router.targets(agent)`) that are **actually registered in the registry**. No mirror/cursor
+/// — it passes through exactly what the daemon sent, and all progress/dedup decisions are made per webview view (the only home of progress state = the view).
 ///
-/// ## ★ADR-0006 락 규율(load-bearing)★
-/// registry 락을 한 번 잡아 (a) 등록된 각 label 로 `Channel::send`(동기 — `.await` 0) (b) send Err 인
-/// dead label 을 같은 lock 안에서 remove 한다(소멸 webview 는 send 가 Err — spike §7 D6, 절대 unwrap 금지).
-/// 미등록 label(미mount 창)은 조용히 skip — 그 창은 mount 시 자기 뷰가 replay 를 재요청한다(뷰 주도).
+/// ## ★ADR-0006 lock discipline (load-bearing)★
+/// Take the registry lock once and (a) `Channel::send` to each registered label (synchronous — `.await` 0) (b) remove, inside the same lock, the
+/// dead labels whose send is Err (send to a destroyed webview is Err — spike §7 D6, never unwrap).
+/// An unregistered label (a window not yet mounted) is silently skipped — when that window mounts, its own view re-requests the replay (view-driven).
 ///
-/// ## ★bytes 소유★
-/// `Response::new` 는 `Vec<u8>` 소유가 필요하다. 한 frame 을 여러 창에 fan-out 하므로 창당 `to_vec()`
-/// 로 복제해 싣는다(대개 창 1개라 복제 1회). marker/frame 공통 경로 — 마커도 binary frame 과 **같은 이
-/// 함수**로 흘려 Channel 순서를 보존한다(app.emit 경유 금지 — 순서 붕괴, ADR-0046).
+/// ## ★bytes ownership★
+/// `Response::new` needs an owned `Vec<u8>`. A frame is fanned out to several windows, so it is
+/// copied with `to_vec()` per window (usually one window, so one copy). Common path for marker/frame — a marker also flows through **this same
+/// function** as a binary frame to preserve Channel order (no going through app.emit — order collapse, ADR-0046).
 pub fn send_to_windows(registry: &WindowChannelRegistry, labels: &[WindowLabel], bytes: &[u8]) {
     if labels.is_empty() {
         return;
     }
     let mut dead: Vec<WindowLabel> = Vec::new();
     {
-        // ADR-0231: poison 이어도 이 프레임을 건너뛰지 않는다(모듈 헤더).
+        // ADR-0231: even if poisoned, this frame is not skipped (module header).
         let mut reg = lock_registry(registry);
         for label in labels {
             if let Some(channel) = reg.get(label) {
@@ -86,8 +86,8 @@ pub fn send_to_windows(registry: &WindowChannelRegistry, labels: &[WindowLabel],
     }
 }
 
-/// 창의 출력 Channel 을 등록한다. 같은 label 재등록(창 reload)은 덮어쓴다(옛 Channel 은 drop — 이미 죽은
-/// webview 라 무해). poison 이어도 되찾아 등록한다(모듈 헤더 — ADR-0231).
+/// Registers a window's output Channel. Re-registering the same label (window reload) overwrites (the old Channel is dropped — harmless since it is an already dead
+/// webview). Even if poisoned, it recovers and registers (module header — ADR-0231).
 pub fn register_window(
     registry: &WindowChannelRegistry,
     label: WindowLabel,
@@ -96,15 +96,15 @@ pub fn register_window(
     lock_registry(registry).insert(label, channel);
 }
 
-/// 창의 출력 Channel 을 뺀다(누수 방지 — 죽은 webview Channel 이 남지 않게). poison 이어도 되찾아 뺀다(모듈
-/// 헤더 — ADR-0231).
+/// Removes a window's output Channel (to prevent leaks — so no dead webview Channel remains). Even if poisoned, it recovers and removes (module
+/// header — ADR-0231).
 pub fn unregister_window(registry: &WindowChannelRegistry, label: &str) {
     lock_registry(registry).remove(label);
 }
 
 #[cfg(test)]
 mod tests {
-    //! TRD §7-1 「셸 중계」 행의 poison 항목 — 락을 쥐는 자리 셋이 poison 을 되찾아 제 일을 한다.
+    //! Poison item of the TRD §7-1 「셸 중계」 row — the three places that hold the lock recover the poison and do their job.
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
@@ -112,7 +112,7 @@ mod tests {
 
     use super::*;
 
-    // 받은 raw 바이트를 적재하는 Channel — 실 webview 없이 `Channel::send` 의 결말을 본다.
+    // A Channel that stores the raw bytes it receives — see the outcome of `Channel::send` without a real webview.
     fn recording_channel() -> (Channel<Response>, Arc<Mutex<Vec<Vec<u8>>>>) {
         let got = Arc::new(Mutex::new(Vec::new()));
         let sink = got.clone();

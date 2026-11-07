@@ -18,9 +18,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 #   0xC0000139 로 죽는다. 매니페스트로 닫을 수 있는 구멍이 아니니 **호출 형태로 피한다** — 이 패키지의
 #   lib 유닛테스트를 도는 유일하게 올바른 명령은 `cargo test -p engram-dashboard --test lib_unit` 이다.
 test = false
-# ★doctest 는 `test` 와 **독립 필드**다★ — 위 `test = false` 로 같이 꺼지지 않는다(기본값 true, 게다가
-#   crate-type 에 rlib 이 남아 있어 대상 자격도 그대로다). 그래서 여기서 따로 끈다. 끄는 근거 = 이
-#   패키지엔 doctest 가 없다(코드펜스 2곳 전부 ```text — `src/daemon_client/lifecycle.rs:9,14`).
+# ★doctest is a field **independent** of `test`★ — the `test = false` above does not turn it off (it defaults to true,
+#   and the rlib crate-type keeps the target eligible), so it is turned off here. Why off = this package has no
+#   doctest (no code fence in its doc comments).
 doctest = false
 
 # lib 유닛테스트(`mod tests`, src/** 전역)의 실제 실행 타깃. 위 `[lib] test = false` 의 짝이라
@@ -81,19 +81,10 @@ engram-dashboard-base = { path = "../crates/engram-dashboard-base" }
 #   ★새 서드파티가 아니다★ — 이 crate 는 워크스페이스 의존 0 이고, 여기 적기 전에도 agent 를 타고 이미
 #   이 셸의 의존 그래프에 링크돼 있었다(직접 간선만 는다).
 engram-dashboard-command = { path = "../crates/engram-dashboard-command" }
-# discovery: daemon.json 공유 계약(DaemonInfo) + PROTOCOL_VERSION.
+# discovery: daemon.json 공유 계약(DaemonInfo) + PROTOCOL_VERSION · 데몬 WS 첫 프레임(`handshake::AuthFrame`).
+#   ★데몬의 네트워크 행 crate(`engram-dashboard-net`)를 되살리지 말 것★ — 그 간선이 나르던 것은 첫 프레임
+#   하나였고 그 모양은 protocol 로 왔다(ADR-0310 결정 9). 벽 = CI `shell gate 3`(셸 운영 그래프에 net 0줄).
 engram-dashboard-protocol = { path = "../crates/engram-dashboard-protocol" }
-# ADR-0129 0-4: 데몬 WS 핸드셰이크 프레임(`auth::AuthFrame`) — 이 셸이 첫 프레임으로 보낸다(daemon_client
-#   재연결 경로). ★에이전트 호스팅이 아니다★(ADR-0029 불변) — 네트워크 lib 은 WS 살림만 담고
-#   `AgentManager` 를 모른다. 이 셸이 쓰는 조합(기본 feature)으로는 워크스페이스 의존이 0 이다(`server` 를
-#   켜면 {platform, protocol} — net `Cargo.toml` `[features]`).
-#   ★feature 를 켜지 않는다 — 쓰는 건 `auth::AuthFrame` 뿐이다★(`rg engram_dashboard_net src/` →
-#   daemon_client/connection.rs · daemon_client/stop.rs · daemon_client/tests.rs, 셋 다 그 타입 하나). net 의 기본 feature
-#   는 비어 있어 그 타입만 나오고, WS **서버** 행은 여기서 안 쓰므로 `server` 를 적지 않는다.
-#   ★이쪽은 의존 트리가 줄지 않는다★ — 이 셸은 자기 몫으로 tokio·tokio-tungstenite·futures-util 을 이미
-#   직접 지고 있다(아래 T1 블록). 그래도 안 켜는 이유는 **의도 표시**다: 나중에 이 셸이 async 를 걷어내도
-#   net 간선이 그것을 되돌려 놓지 않는다. 기본을 비워 둔 근거는 net `Cargo.toml` 의 `[features]` 주석.
-engram-dashboard-net = { path = "../crates/engram-dashboard-net" }
 # ADR-0266: OS 층 — 이 셸의 OS 일은 전부 여기서 온다.
 #   데몬 찾기 · 띄우기 · 끄기(`crate::discovery`) — PID 생존 판정(`process::pid_alive_with_start_time`) · 데몬 exe 의
 #   경로 · 파일 이름(`env::sibling_exe` · `env::exe_file_name` — `locate_daemon_exe`) · Job 밖에서 띄우기
@@ -105,6 +96,12 @@ engram-dashboard-net = { path = "../crates/engram-dashboard-net" }
 #   ★`windows` 를 이 셸에 직접 되살리지 말 것★ — OS crate 운영 의존은 platform 하나에만 둔다(CI `platform gate 5`).
 #   ★운영 의존에서 `test-support` 를 켜지 않는다★(CI `platform gate 3` — 시험 기능은 아래 dev 재선언에서만).
 engram-dashboard-platform = { path = "../crates/engram-dashboard-platform" }
+# Reusable transport lib (ADR-0177) — the shell's daemon link (`daemon_client::link`) is built on it (TRD S21 trd-3 §6-2
+#   U2 · ADR-0310). `ws` = the real-socket dialer. Not a new third-party package set: tokio · futures-util ·
+#   tokio-tungstenite 0.26 are already in this graph.
+#   ★Never turn on `test-support` here★ — the harness is for tests only (dev re-declaration below). Wall = CI
+#   `shell gate 5` (0 lines of that feature in this package's normal · build graph).
+engram-dashboard-transport = { path = "../crates/engram-dashboard-transport", features = ["ws"] }
 # 동기 WS 클라이언트 — graceful 데몬 끄기(`daemon_client::stop` 의 일방 발사)만 쓴다. 3-2(transport 셸 부착)가 그
 #   클라이언트를 다시 쓰며 걷는다(ADR-0271 결정 5). 새 패키지가 아니다 — 아래 `tokio-tungstenite` 가 같은 판을 이미 문다.
 tungstenite = "0.26"
@@ -114,26 +111,24 @@ tauri-plugin-autostart = "2"
 #   ADR-0029에서 제거했던 async/WS 관련 deps를 복원한다. 버전은 daemon crate와 정렬(ADR-0036).
 # 데몬: tokio 1 / tokio-tungstenite 0.26 / futures-util 0.3 / serde_json 1 (Cargo.toml 실측).
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
-# 비동기 WS 클라이언트 — 데몬 WS 서버(ws.rs)와 동일 라이브러리(버전 정렬).
-tokio-tungstenite = "0.26"
-# SplitSink/SplitStream + StreamExt::next + SinkExt::send — WS read/write 분리에 필수.
+# `BoxFuture` — the boxed futures of the link dialer and the connection driver.
 futures-util = "0.3"
-serde_json = "1"
+# `raw_value` = 명령 칸 원문을 푸는 끝자락(ADR-0272 결정 4) — protocol 이 같은 판에 이미 켠다(새 패키지 없음).
+serde_json = { version = "1", features = ["raw_value"] }
 # OutputRouter 핫패스 lock-free snapshot (spike §2 FIX-F6). 데몬에 없으므로 최신 1.x 안정 버전.
 arc-swap = "1"
 
 [dev-dependencies]
-# T2(S14 모듈①) 격리 하네스: 실 데몬 없이 DaemonClient 핸드셰이크를 검증한다. daemon crate 의
-#   start_test_server(in-process WS 서버)를 재사용해 connect→Auth→Hello→connected 를 실제 서버로 단언.
-#   그 함수는 데몬 기능 `test-support` 뒤에 있어 여기서 켠다(ADR-0286 — 운영 그래프엔 데몬이 없다).
-#   데이터 폴더의 같은 경로 시험과 쓰기 확인 경합 시험(`discovery`)도 이 간선으로 데몬 정본(`data_dir`)을 부른다 —
-#   이 간선을 걷거나 좁히는 날 그 두 시험의 자리를 다시 정한다(ADR-0271 결정 4).
-engram-dashboard-daemon = { path = "../crates/engram-dashboard-daemon", features = ["test-support"] }
-# 핸드셰이크 mock WS 서버(첫 송신 프레임=Auth 단언)에서 서버측 accept/Auth 응답을 직접 흉내낸다.
+# The daemon crate for tests only (ADR-0286 — the release graph has no daemon): the data-folder same-path test and the
+#   write-check race test (`discovery`) call the daemon's canonical `data_dir` through this edge, and `layout_commands`
+#   reads the daemon's command delivery deadline. The day this edge goes or narrows, those tests move (ADR-0271
+#   decision 4). No daemon feature: nothing here uses its in-process test server (`test-support`).
+engram-dashboard-daemon = { path = "../crates/engram-dashboard-daemon" }
+# The daemon side of the production-transport test (a real ws accept — `daemon_client::connection::tests`). Tests
+#   only: no shell code outside tests uses it (the real-socket dialer comes from the transport's `ws` feature).
 tokio-tungstenite = "0.26"
-# T4(S14 모듈①) 재연결 백오프 테스트: tokio::time::pause()/advance() 로 가짜 시계를 돌려
-#   지수 백오프(500ms→10s MAX5)를 실벽시계 없이 결정론적으로 검증한다(ADR-0038 — 매직 sleep 금지).
-#   ★dev 전용★: 운영 빌드엔 test-util 이 안 들어간다(시계 제어는 테스트에서만).
+# `test-util` = paused tokio time (`tokio::time::pause` / `advance`) — timer tests (the usage shrink timer and others)
+#   run on it instead of the wall clock (ADR-0038 — no magic sleeps). ★Dev only★: release builds get no `test-util`.
 tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread", "time", "sync", "net"] }
 # feature-only 재선언 — WMI 플래그 진단 시험(`real_wmi_spawn_flag_matrix` · `#[ignore]`)이 거절 코드를 오류로
 #   올리지 않는 원시 호출(`spawn::wmi_create_raw`)을 쓴다. 기능 요청이 dev 그래프에만 있어 운영 바이너리엔
@@ -142,6 +137,10 @@ tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread", "
 #   합쳐진다★ — 데몬 `Cargo.toml` 「운영 빌드 주의」의 self-dev-dependency 와 같은 위험군이고, 위 게이트는 그 꼴을
 #   못 본다(해석된 그래프만 읽는다 — `ci.yml` 같은 스텝 주석의 「한계」). 배포용 빌드는 그렇게 짓지 않는다.
 engram-dashboard-platform = { path = "../crates/engram-dashboard-platform", features = ["test-support"] }
+# Feature re-declaration — the link tests drive `daemon_client::link` over the transport's in-memory harness
+#   (`MemoryNetwork` · `ManualClock`). The request stays in the dev graph, so release binaries do not get it
+#   (CI `shell gate 5` checks the resolved normal graph; the `--all-targets` caveat above applies the same way).
+engram-dashboard-transport = { path = "../crates/engram-dashboard-transport", features = ["test-support", "ws"] }
 # 실 데몬 graceful 끄기 왕복 시험(`tests/stop_smoke.rs` · `#[ignore]`)의 임시 데이터 폴더 격리.
 tempfile = "3"
 # feature-only 재선언 — 도킹 골든(`src/layout/bands_golden.json`)을 비트 단위로 읽는다. 이 기능이 없으면 serde_json 이

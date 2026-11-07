@@ -1,46 +1,46 @@
-# Engram 문서 시스템 (documentation-system)
+# Engram Documentation System (documentation-system)
 
-- 상태: **living** (git이 이력 — 파일 내 변경이력 섹션 안 둠) · 갱신: 만지는 사람이 boy-scout
-- 이 문서 = "engram 문서들이 **개발 플로우 어디에 어떻게 박히나**"의 지도. 문서·설계 작업 전 `../README.md`(허브)와 이 문서를 본다.
-- 근거: `../research/documentation-architecture-research-2026-06-24.md` (업계 관행 조사).
+- Status: **living** (git is the history — no change-history section inside the file) · Update: whoever touches it, boy-scout
+- This document = a map of "**where and how the engram documents fit into the development flow**". Before doing document or design work, read `../README.md` (the hub) and this document.
+- Basis: `../research/documentation-architecture-research-2026-06-24.md` (industry practice survey).
 
-## 1. 개발 플로우가 척추다
+## 1. The development flow is the spine
 
-전체 개발 흐름의 **정의는 `../../CLAUDE.md`** 「개발 순서」와 `/engram-implement` 스킬(PRD→TRD→리뷰→코딩→코드 리뷰→QA→커밋)에 있다. **여기 다시 적지 않는다(SSoT).** 이 문서는 그 흐름 *위에 문서를 얹는 레이어*다.
+The **definition** of the whole development flow is in `../../CLAUDE.md` 「개발 순서」 and the `/engram-implement` skill (PRD→TRD→review→coding→code review→QA→commit). **It is not rewritten here (SSoT).** This document is a *layer that puts documents on top of* that flow.
 
-## 2. 단계별 — 산출 문서 · 게이트 · 기록
+## 2. By stage — output documents · gates · records
 
-| 단계 | 산출 문서 | 검증 게이트 | 기록 |
+| Stage | Output documents | Verification gate | Record |
 |---|---|---|---|
-| **리서치** | `research/` 보고서(+`status:`) | research 내부 교차검증 | step-log |
-| **결정(PRD)** | PRD(`process/S<n>-<슬러그>/prd.md`) + **ADR**(왜 + 거부한 대안) | 사용자 승인 | step-log + `/engram-adr` |
-| **설계(TRD)** | TRD(`process/S<n>-<슬러그>/trd.md`) + 설계 ADR | `/engram-review`(PRD+TRD) → 사용자 확인 | step-log + `/engram-adr` |
-| **구현** | 코드 + 테스트 + `// ADR-` 앵커 | `/engram-review code` → `/engram-qa` | step-log |
+| **Research** | `research/` report (+`status:`) | cross-verification inside research | step-log |
+| **Decision (PRD)** | PRD (`process/S<n>-<슬러그>/prd.md`) + **ADR** (why + rejected alternatives) | user approval | step-log + `/engram-adr` |
+| **Design (TRD)** | TRD (`process/S<n>-<슬러그>/trd.md`) + design ADR | `/engram-review` (PRD+TRD) → user confirmation | step-log + `/engram-adr` |
+| **Implementation** | code + tests + `// ADR-` anchors | `/engram-review code` → `/engram-qa` | step-log |
 
-- **ADR은 한 단계 전용이 아니다** — 굵은 결정이 날 때마다(PRD·TRD 양쪽) 쓴다.
-- **step-log**(`process/step-log.md`)는 전 단계에서 *언제/무엇*을 남긴다(타임라인 단일 출처).
-- **reference**(`reference/`)는 흐름 옆에서 코드 동기 캐논으로 갱신된다(컨벤션 등).
-- **핸드오프**(`/engram-handoff`)는 일회성 세션 인계 도구다 — **문서 아키텍처 밖, 기록 안 남김.**
+- **An ADR is not dedicated to one stage** — write one whenever a major decision is made (in both PRD and TRD).
+- The **step-log** (`process/step-log.md`) records *when/what* at every stage (the single source of the timeline).
+- **reference** (`reference/`) is updated alongside the flow as code-synchronized canon (conventions, etc.).
+- **Handoff** (`/engram-handoff`) is a one-off session handover tool — **outside the document architecture, leaves no record.**
 
-## 3. 불변식 (이것만 지키면 나머진 유연)
+## 3. Invariants (keep only these and the rest stays flexible)
 
-- **SSoT** — 복사 말고 링크. 중복 = stale 비용.
-- **고아 금지** — 새 문서는 발견 체인(`README.md`·`tracking.md`·코드 앵커) 중 하나에 반드시 연결.
-- **soft + hard** — 문서(의도·이유, soft) + 도구(lint/test/CI, hard) 짝. 불변식은 hard로도 박는다.
-- **수명** — 불변·누적(ADR·step-log) vs living(README·reference, git이 이력). design/research는 승인·freeze 후 snapshot.
+- **SSoT** — link, do not copy. Duplication = stale cost.
+- **No orphans** — a new document must connect to at least one link in the discovery chain (`README.md` · `tracking.md` · code anchor).
+- **soft + hard** — pair documents (intent and reason, soft) with tools (lint/test/CI, hard). Pin invariants down in the hard form too.
+- **Lifetime** — immutable and cumulative (ADR · step-log) vs living (README · reference, git is the history). design/research become a snapshot after approval and freeze.
 
-## 4. 자동화 맵 (무엇이 자동, 무엇이 수동)
+## 4. Automation map (what is automatic, what is manual)
 
-| 노드 | 도구 | 상태 |
+| Node | Tool | Status |
 |---|---|---|
-| 리서치 | `/engram-research` | ✅ |
-| ADR(채번·양방향·인덱스·lint) | `/engram-adr`(전역 스킬 — 스크립트 내장, 바인딩 = `.claude/skill-bindings/adr.md`) | ✅ |
-| 단계 게이트 | `/engram-review`(단계 인자) · `/engram-qa` | ✅ |
-| step-log 기록 | (수동) | 수동 |
-| 문서 lint/CI(고아·링크·freshness) | — | 나중 (hard 보강) |
+| Research | `/engram-research` | ✅ |
+| ADR (numbering · two-way links · index · lint) | `/engram-adr` (global skill — scripts built in, binding = `.claude/skill-bindings/adr.md`) | ✅ |
+| Stage gate | `/engram-review` (stage argument) · `/engram-qa` | ✅ |
+| step-log recording | (manual) | manual |
+| Document lint/CI (orphans · links · freshness) | — | later (hard reinforcement) |
 
-스킬(research/implement/review/qa/adr)이 이미 흐름의 **산출·게이트 자리에 박혀** 있다. 빈 칸은 step-log(수동)뿐.
+The skills (research/implement/review/qa/adr) are already **placed at the output and gate spots** of the flow. The only blank is the step-log (manual).
 
-## 5. 어디에 넣나 / 무슨 문서가 있나
+## 5. Where to put things / what documents exist
 
-타입·배치·"새 내용 어디에"는 **`../README.md`가 정본** — 여기 복붙하지 않는다(SSoT). 이 문서는 *플로우 매핑*만 담당하고, 배치 규약은 허브를 본다.
+Type, placement and "where does new content go" have **`../README.md` as the canonical source** — do not copy-paste them here (SSoT). This document covers only the *flow mapping*; for placement rules see the hub.

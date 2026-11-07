@@ -1,20 +1,20 @@
-# ADR-0251: usage 버스 명령은 agent 블록에 선언하고 동기 포트와 blocking_handler 로 꽂는다
+# ADR-0251: usage bus commands are declared in the agent block and plugged in with a sync port and blocking_handler
 
-- 상태: 확정 (2026-09-27, 근거: TRD §7 #7)
-- 관련: TRD §7 #7 · ADR-0155(결정 1 — 어휘는 생산자 옆에서 선언) · `command` crate · step-log S21
+- 상태: 확정 (2026-09-27, basis: TRD §7 #7)
+- 관련: TRD §7 #7 · ADR-0155(decision 1 — the vocabulary is declared next to its producer) · `command` crate · step-log S21
 
 ## 맥락
-`usage.get`·`usage.refresh` 같은 버스 명령을 어디에 선언하고 어떤 핸들러 형태로 꽂을지 정해야 했다.
+We had to decide where to declare bus commands such as `usage.get` · `usage.refresh` and in what handler form to plug them in.
 
 ## 결정
-`usage.*` 명령은 **agent 블록에 선언**한다(생산자 옆 — ADR-0155 결정 1 재확인). 핸들러는 **동기 포트 + `blocking_handler`**로 꽂는다.
+`usage.*` commands are **declared in the agent block** (next to the producer — a reconfirmation of ADR-0155 decision 1). The handler is plugged in with a **sync port + `blocking_handler`**.
 
 ## 거부한 대안
-- **데몬 자기 블록 + 표 합성** — 선언·라우팅·핸들러 세 표면에 합성을 새로 깔아야 한다.
-- **async 핸들러** — 데몬 입구가 결과를 `OUTCOME_UNKNOWN`으로 만든다(응답 모델이 동기 완료를 전제한다).
+- **The daemon's own block + table composition** — composition would have to be newly laid on three surfaces: declaration · routing · handler.
+- **An async handler** — the daemon entrance turns the result into `OUTCOME_UNKNOWN` (the response model assumes synchronous completion).
 
 ## 근거
 TRD §7 #7.
 
 ## 영향 / 불변식
-command crate 의 "생산자 옆에서 선언" 불변식(ADR-0155)이 `usage.*` 명령에도 그대로 적용된다. 구현 커밋: `56776d6`, `c68b885`.
+The command crate's "declare next to the producer" invariant (ADR-0155) applies to the `usage.*` commands as is. Implementation commits: `56776d6`, `c68b885`.

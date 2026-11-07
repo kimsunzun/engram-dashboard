@@ -1,5 +1,5 @@
-// latestValueReporter 단위테스트 — 한 번에 하나 · 마지막 값이 덮음 · 같은 값 안 보냄 · 관측이 낡은 값을 거둠 · 재시도 · 떼기 ·
-//   디바운스. 캔버스 크기 보고의 흐름은 `WindowLayout.test.tsx` 가 잰다.
+// latestValueReporter unit test — one at a time · the last value overwrites · the same value is not sent · an observation withdraws a stale value · retry · detach ·
+//   debounce. The flow of canvas size reporting is measured by `WindowLayout.test.tsx`.
 
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 
@@ -20,7 +20,7 @@ let rep: LatestValueReporter<V>
 
 const sentNs = (): number[] => send.mock.calls.map(c => c[0].n)
 
-/** 다음 send 하나를 시험이 손수 끝낸다. */
+/** The test finishes the next single send by hand. */
 function holdSend(): { finish: () => void; fail: (e: unknown) => void } {
   const h = { finish: () => {}, fail: (_e: unknown) => {} }
   send.mockImplementationOnce(
@@ -113,7 +113,7 @@ describe('LatestValueReporter', () => {
     expect(err).toHaveBeenCalledTimes(1)
     expect(err).toHaveBeenCalledWith('[test] report(1) 최종 실패(재시도 소진):', expect.any(Error))
 
-    // 실패한 값은 lastSent 가 아니므로 같은 값이라도 다시 나간다.
+    // A failed value is not lastSent, so even the same value goes out again.
     send.mockReset()
     send.mockImplementation(async () => undefined)
     rep.submit(v(1))

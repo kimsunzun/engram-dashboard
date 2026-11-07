@@ -1,18 +1,18 @@
-// ADR-0239: 채팅 도구 묶음의 펼침 상태 — 슬롯마다 사람 · LLM 이 고른 값만 담는다(고르지 않은 묶음은 접힌다).
-//   프론트 전용 · 인메모리라 웹뷰 새로고침에 초기화된다(레이아웃과 같은 수준 — CLAUDE.md 「LLM-우선 제어」).
-//   ★재구독 · replay 는 지우지 않는다★ — 묶음 키가 replay 뒤에도 같아서(`components/slot/chat/toolRuns.ts`) 고른 값이
-//   그대로 다시 붙는다. 비우는 것은 에이전트가 바뀔 때(`bind`)와 새 화신으로 대화가 비워질 때(`clear`)뿐이다.
-//   ★묶임 = 그 슬롯의 대화 뷰가 이 창에 지금 마운트돼 있다★ — 대화 뷰(RichSlot)가 마운트 효과에서 `bind` 를 부르고 그
-//   정리(cleanup)에서 돌려받은 해제 함수를 부른다. 마운트되지 않은 슬롯에는 `setOpen` 이 `false` 로 답해, 뷰가 없는
-//   슬롯에 command 가 성공으로 답하지 않는다(ADR-0167 — 형제 `slot.scrollToBottom` 의 손잡이 명부도 마운트 해제에 뺀다).
-//   ★펼침을 바꾸는 길은 `setOpen` 하나다★ — 사람 토글도 LLM command `chat.toolGroup.setExpanded`(`commands/chatCommands.ts`)도
-//   이것으로만 바꾼다. 두 번째 상태 경로를 만들지 말 것(CLAUDE.md 「LLM-우선 제어」).
+// ADR-0239: expand state of chat tool groups — holds only the value a human · the LLM picked per slot (a group not picked is collapsed).
+//   Frontend-only · in-memory so it resets on a webview refresh (same level as layout — CLAUDE.md 「LLM-우선 제어」).
+//   ★Resubscribe · replay do not clear it★ — the group key is the same after replay (`components/slot/chat/toolRuns.ts`) so the picked value
+//   is reattached as is. Only a change of agent (`bind`) and the conversation being cleared for a new incarnation (`clear`) empty it.
+//   ★Bound = that slot's conversation view is currently mounted in this window★ — the conversation view (RichSlot) calls `bind` in its mount effect and calls the
+//   release function it got back in its cleanup. For a slot that is not mounted, `setOpen` answers `false`, so a command does not answer success for a
+//   slot with no view (ADR-0167 — the sibling `slot.scrollToBottom`'s handle registry is also removed on unmount).
+//   ★The one path that changes expansion is `setOpen`★ — both the human toggle and the LLM command `chat.toolGroup.setExpanded` (`commands/chatCommands.ts`)
+//   change it only through this. Do not make a second state path (CLAUDE.md 「LLM-우선 제어」).
 
 import { create } from 'zustand'
 
 /**
- * 한 슬롯의 칸 — `open` = 묶음 키 → 고른 펼침(키가 없으면 그 묶음은 접힌다) · `mount` = 지금 묶임의 표식(`null` =
- * 마운트되지 않음 — 고른 값은 남아 다시 마운트될 때 그대로 붙는다).
+ * One slot's entry — `open` = group key → picked expansion (if there is no key that group is collapsed) · `mount` = marker of the current binding (`null` =
+ * not mounted — the picked value stays and is reattached as is when mounted again).
  */
 export interface ToolGroupSlot {
   agentId: string
@@ -23,29 +23,29 @@ export interface ToolGroupSlot {
 export interface ToolGroupState {
   bySlot: Record<string, ToolGroupSlot>
   /**
-   * 슬롯의 대화 뷰가 마운트됐다 — 칸이 다른 에이전트의 것이면 고른 값을 비우고, 같은 에이전트면 그대로 둔다.
-   * @returns 해제 함수 — 마운트 해제(정리)에서 부른다. 고른 값은 남기고 묶임만 푼다. 두 번 불러도 · 그 뒤 새 `bind` 가
-   *   있었어도 해가 없다(새 묶임을 풀지 않는다).
+   * A slot's conversation view was mounted — if the entry belongs to another agent, empty the picked values; if the same agent, leave them.
+   * @returns a release function — call it on unmount (cleanup). It keeps the picked values and releases only the binding. Calling it twice, or after a new `bind`
+   *   happened, does no harm (it does not release the new binding).
    */
   bind(slotId: string, agentId: string): () => void
   /**
-   * 그 슬롯의 고른 값을 비운다(묶임은 남는다). 새 화신으로 대화가 비워질 때만 부른다 — 재구독 · replay 에서 부르면
-   * 사람이 고른 펼침이 사라진다.
+   * Empty that slot's picked values (the binding stays). Call it only when the conversation is cleared for a new incarnation — calling it on resubscribe · replay
+   * makes the expansion a human picked disappear.
    */
   clear(slotId: string): void
   /**
-   * @returns 적용했나 — 그 슬롯이 지금 묶여 있지 않으면(한 번도 안 묶였거나 해제됐다) `false` 이고 아무것도 적지 않는다.
-   *   TRD S21-chat-ux §4-4 의 `void` 를 넓힌 것이다 — command 가 이 값으로 「이 창에 그 뷰가 없다」를 가른다.
+   * @returns whether it was applied — `false` if that slot is not bound now (never bound or released) and nothing is written.
+   *   This widens the `void` of TRD S21-chat-ux §4-4 — the command uses this value to tell 「이 창에 그 뷰가 없다」 (this window has no such view).
    */
   setOpen(slotId: string, key: string, open: boolean): boolean
 }
 
-// 슬롯 id · 묶음 키는 밖(LLM)에서도 온다 — `in` · 맨 인덱스로 읽으면 `'constructor'` 같은 프로토타입 이름이 칸으로 읽힌다.
+// Slot id · group key also come from outside (the LLM) — reading with `in` · a bare index would read a prototype name like `'constructor'` as an entry.
 function own<T>(record: Record<string, T>, key: string): T | undefined {
   return Object.prototype.hasOwnProperty.call(record, key) ? record[key] : undefined
 }
 
-/** 사람 · LLM 이 고른 펼침 — `undefined` = 고른 값이 없다(`slotId` 가 없을 때도). */
+/** The expansion a human · the LLM picked — `undefined` = no picked value (also when there is no `slotId`). */
 export function chosenOpen(
   state: Pick<ToolGroupState, 'bySlot'>,
   slotId: string | undefined,
@@ -56,14 +56,14 @@ export function chosenOpen(
   return slot === undefined ? undefined : own(slot.open, key)
 }
 
-/** 묶음이 지금 다 펼쳐져 있나 — 고른 값이 있으면 그것(펼침 · 접힘 둘 다), 없으면 접힘. */
+/** Is the group fully expanded now — if there is a picked value, that (both expanded · collapsed); otherwise collapsed. */
 export function effectiveOpen(state: Pick<ToolGroupState, 'bySlot'>, slotId: string | undefined, key: string): boolean {
-  // ADR-0263 결정 1: 도는 묶음도 통째로 펼치지 않는다(Claude Code 관례) — 고른 값이 없으면 도는 동안 마지막 호출 한 줄만
-  //   보인다(`ToolGroupRow`). ★도는 꼬리 묶음을 통째로 자동 펼치지 말 것★ — 턴이 끝나는 순간 접히며 그 높이만큼 대화가 튄다.
+  // ADR-0263 decision 1: a running group is not expanded in full either (Claude Code convention) — with no picked value, only the last call's one line is
+  //   shown while running (`ToolGroupRow`). ★Do not auto-expand a running tail group in full★ — it collapses the moment the turn ends and the conversation jumps by that height.
   return chosenOpen(state, slotId, key) ?? false
 }
 
-// 묶임마다 새 표식 — 해제 함수가 자기 묶임일 때만 풀게 한다(StrictMode 의 마운트 · 정리 · 마운트, 늦은 정리).
+// A new marker per binding — so a release function releases only when it is its own binding (StrictMode's mount · cleanup · mount, late cleanup).
 let lastMount = 0
 
 export const useToolGroupStore = create<ToolGroupState>((set, get) => ({

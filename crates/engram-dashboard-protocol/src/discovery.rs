@@ -1,44 +1,46 @@
-//! 데몬 발견(discovery) 공유 계약 — daemon.json 의 내용.
+//! Daemon discovery shared contract — the contents of daemon.json.
 //!
-//! 두 프로세스의 공유 계약이라 protocol 에 둔다:
-//!   - daemon 이 이 구조체를 **기록**한다(portfile::write_in_place).
-//!   - src-tauri 셸(또는 외부 클라)이 **읽어** 데몬에 붙는다(discovery::ensure_daemon).
+//! It sits in protocol because it is a shared contract between two processes:
+//!   - the daemon **writes** this struct (portfile::write_in_place).
+//!   - the src-tauri shell (or an external client) **reads** it to attach to the daemon (discovery::ensure_daemon).
 //!
-//! ★교체가 원자적이지 않다(ADR-0135)★: daemon.json 은 단일 인스턴스 잠금 파일을 겸해 데몬이 붙잡고
-//! 있으므로 임시 파일 + rename 으로 갈아끼울 수 없고, 데몬은 제자리에 쓴다. 읽는 쪽은 **부분적으로
-//! 쓰인 내용**을 볼 수 있으니 파싱 실패를 손상이 아니라 "아직 준비 안 됨"으로 다뤄야 한다.
+//! ★Replacement is not atomic (ADR-0135)★: daemon.json doubles as the single-instance lock file and is held by the daemon,
+//! so it cannot be swapped with a temp file + rename, and the daemon writes in place. The reading side can see **partially
+//! written content**, so it must treat a parse failure not as corruption but as "not ready yet".
 //!
-//! ★ts-rs export 안 함★: 프론트가 직접 안 읽는 Rust 전용 IPC 파일이다(daemon.json 은
-//! 백엔드 두 프로세스 사이에서만 흐른다). 그래서 serde 만 달고 TS 바인딩은 만들지 않는다.
+//! ★No ts-rs export★: it is a Rust-only IPC file that the frontend does not read directly (daemon.json flows
+//! only between the two backend processes). So it carries serde only and makes no TS binding.
 //!
-//! **보안:** `token` 은 이 파일에만 둔다.
+//! **Security:** `token` is kept in this file only.
 
 use serde::{Deserialize, Serialize};
+
+use crate::Secret;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DaemonInfo {
     pub pid: u32,
-    /// 항상 "127.0.0.1"(로컬 전용 바인드).
+    /// Always "127.0.0.1" (local-only bind).
     pub host: String,
-    /// 데몬이 실제로 바인드한 포트(랜덤).
+    /// The port the daemon actually bound (random).
     pub port: u16,
-    /// 접속 토큰(256-bit hex 64자). 로그 금지.
-    pub token: String,
+    /// Connection token (256-bit, 64 hex chars). No logging — `Debug` masks it, but a value taken out with [`Secret::expose`] cannot be masked.
+    pub token: Secret,
     pub protocol_version: u32,
-    /// 데몬 프로세스의 시작시각(Windows GetProcessTimes 의 creation FILETIME 을 u64 로:
-    /// 1601-01-01 UTC 부터 100나노초 간격 수). PID 재사용을 구분해 liveness 를 정확히 판정한다
-    /// (PID 살아있음 AND creation time 일치). 0=미상.
+    /// The daemon process's start time (Windows GetProcessTimes' creation FILETIME as a u64:
+    /// the number of 100-nanosecond intervals since 1601-01-01 UTC). It tells PID reuse apart so liveness is decided exactly
+    /// (PID alive AND creation time matches). 0 = unknown.
     ///
-    /// ★wire 호환★: append 필드라 옛 reader 는 무시한다. 단, 옛 daemon.json(필드 없음)도
-    /// 파싱돼야 하므로 `#[serde(default)]`(없으면 0). default=0 은 "미상"으로 취급해 liveness 가
-    /// PID 단독 생존으로 보수 판정한다(살아있는 데몬을 잘못 stale 로 몰지 않게).
+    /// ★wire compatibility★: it is an appended field, so old readers ignore it. But an old daemon.json (no field) must also
+    /// parse, hence `#[serde(default)]` (0 if absent). default=0 is treated as "unknown", so liveness conservatively decides by
+    /// PID survival alone (so a living daemon is not wrongly declared stale).
     #[serde(default)]
     pub start_time: u64,
 }
 
 impl DaemonInfo {
-    /// 파일 IO 와 분리한 **순수 함수** —
-    /// 호출자가 읽은 bytes 를 넘겨 테스트 가능하게 한다(파일시스템 불필요).
+    /// A **pure function** separated from file IO —
+    /// the caller passes the bytes it read, making it testable (no filesystem needed).
     pub fn parse(bytes: &[u8]) -> Result<Self, serde_json::Error> {
         serde_json::from_slice(bytes)
     }
@@ -57,7 +59,7 @@ mod tests {
             pid: 4242,
             host: "127.0.0.1".into(),
             port: 51234,
-            token: "b".repeat(64),
+            token: Secret::new("b".repeat(64)),
             protocol_version: 1,
             start_time: 133_000_000_000_000_000,
         }
@@ -78,7 +80,29 @@ mod tests {
         let info = DaemonInfo::parse(json).expect("valid json should parse");
         assert_eq!(info.pid, 7);
         assert_eq!(info.port, 9);
-        assert_eq!(info.token, "deadbeef");
+        assert_eq!(info.token.expose(), "deadbeef");
+    }
+
+    #[test]
+    fn token_is_written_as_a_bare_string() {
+        let json = serde_json::to_string(&sample()).unwrap();
+        let want = format!(
+            r#"{{"pid":4242,"host":"127.0.0.1","port":51234,"token":"{}","protocol_version":1,"start_time":133000000000000000}}"#,
+            "b".repeat(64)
+        );
+        assert_eq!(json, want);
+    }
+
+    #[test]
+    fn debug_does_not_carry_the_token() {
+        let info = sample();
+        for shown in [format!("{info:?}"), format!("{info:#?}")] {
+            assert!(
+                !shown.contains(info.token.expose()),
+                "Debug 가 토큰을 찍었다: {shown}"
+            );
+            assert!(shown.contains("51234"), "가린 것은 토큰뿐: {shown}");
+        }
     }
 
     #[test]

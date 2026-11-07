@@ -1,10 +1,10 @@
-//! ② 격리 통합테스트 — StdioTransport(파이프 자식) + OutputCore 신경로를 manager 없이 직접 단언.
+//! ② Isolated integration test — directly asserts the StdioTransport (pipe child) + OutputCore new path without a manager.
 //!
-//! json 모드(ADR-0044)가 쓰는 transport. 실 claude 없이(격리 — ADR-0012) cmd.exe 가짜 자식으로
-//! 검증한다. 실 프로세스를 spawn 하지만 가볍고 전역 경합이 없다.
+//! The transport that json mode (ADR-0044) uses. Verified with a cmd.exe fake child, without a real claude (isolation — ADR-0012).
+//! It spawns a real process but is light and has no global contention.
 //!
-//! ★Windows 전용★: 픽스처가 cmd.exe 기반이라 이 파일은 Windows 에서만 컴파일·실행한다
-//!   (프로젝트는 Windows/WebView2 전제).
+//! ★Windows only★: the fixture is cmd.exe-based, so this file compiles and runs only on Windows
+//!   (the project assumes Windows/WebView2).
 #![cfg(windows)]
 
 use std::path::PathBuf;
@@ -23,7 +23,7 @@ use engram_dashboard_agent::types::{
 use engram_dashboard_agent::usage::{UsageObservation, UsageSource, UsageVendorKey, WindowObs};
 use engram_dashboard_base::testing::wait_until;
 
-// ── RecordingSink: (seq, bytes) 바이트 + 구조화 이벤트 태그 누적 ─────────────────────
+// ── RecordingSink: accumulates (seq, bytes) bytes + structured event tags ─────────────────
 #[derive(Clone)]
 struct RecordingSink {
     id: SinkId,
@@ -90,7 +90,7 @@ fn event_tag(e: &OutputEvent) -> String {
     }
 }
 
-// ── RecordingStatusSink: terminal 전이 횟수(finalize 1회 검증) + 사용량 관측 ─────────────
+// ── RecordingStatusSink: count of terminal transitions (verifies finalize once) + usage observations ─────────────
 #[derive(Clone)]
 struct RecordingStatusSink {
     statuses: Arc<Mutex<Vec<AgentStatus>>>,
@@ -145,7 +145,7 @@ fn spec(program: &str, args: &[&str]) -> CommandSpec {
 #[test]
 fn stdio_stdout_pump_and_finalize_once() {
     let id = Uuid::new_v4();
-    // structured 인자는 이 pump 테스트와 무관 — json 경로(true)로 open(caps 만 영향).
+    // The structured argument is irrelevant to this pump test — open with the json path (true) (affects only caps).
     let (transport, _pid) =
         StdioTransport::open(&spec("cmd.exe", &["/c", "echo OUT-MARKER"]), true, None)
             .expect("open");
@@ -198,8 +198,8 @@ fn stdio_stdout_pump_and_finalize_once() {
 #[test]
 fn stdio_stderr_not_in_output_stream() {
     let id = Uuid::new_v4();
-    // 단일 인자 복합 명령: cmd 가 바깥 따옴표를 벗기고 `echo OUT& echo ERR 1>&2` 로 실행한다
-    // (echo 의 stdout 을 stderr 로 리다이렉트). 마커는 ASCII 라 로케일 무관.
+    // A single-argument compound command: cmd strips the outer quotes and runs it as `echo OUT& echo ERR 1>&2`
+    // (redirecting echo's stdout to stderr). The markers are ASCII, so locale-independent.
     let (transport, _pid) = StdioTransport::open(
         &spec("cmd.exe", &["/c", "echo OUT-MARKER& echo ERR-MARKER 1>&2"]),
         true,
@@ -223,7 +223,7 @@ fn stdio_stderr_not_in_output_stream() {
         wait_until(Duration::from_secs(5), || out.contains("OUT-MARKER")),
         "5s 내 stdout 마커 미수신"
     );
-    // 종료까지 대기해 stderr 도 다 흘렀을 시점 확보.
+    // Wait for exit to secure a point at which stderr has also been fully drained.
     assert!(
         wait_until(Duration::from_secs(5), || matches!(
             core.status(),
@@ -232,7 +232,7 @@ fn stdio_stderr_not_in_output_stream() {
         "종료 미도달"
     );
     core.join_pump(Duration::from_secs(5));
-    // 여유 대기(stderr drain 스레드가 끝날 시간).
+    // Spare wait (time for the stderr drain thread to finish).
     std::thread::sleep(Duration::from_millis(200));
 
     assert!(out.contains("OUT-MARKER"), "stdout 마커는 출력에 있어야 함");
@@ -243,7 +243,7 @@ fn stdio_stderr_not_in_output_stream() {
     );
 }
 
-/// cmd.exe(무인자, 파이프 stdin)는 stdin 을 안 닫으면 명령 대기로 계속 살아 있다 → 장수 자식.
+/// cmd.exe (no arguments, pipe stdin) stays alive waiting for commands unless stdin is closed → a long-lived child.
 #[test]
 fn stdio_stdin_reaches_child_then_shutdown_kills() {
     let id = Uuid::new_v4();
@@ -293,9 +293,9 @@ fn stdio_stdin_reaches_child_then_shutdown_kills() {
     );
 }
 
-// ── S15 B3: decoder 배선(pump→core) ─────────────────────────────────────────────
+// ── S15 B3: decoder wiring (pump→core) ───────────────────────────────────────────────
 
-/// 실 파싱 없이 **pump 가 decoder.decode/flush 를 실제로 호출하는지**만 검증하는 fake decoder.
+/// A fake decoder that verifies only **whether the pump actually calls decoder.decode/flush**, without real parsing.
 struct FakeDecoder {
     total_bytes: Arc<Mutex<usize>>,
 }
@@ -393,7 +393,7 @@ fn stdio_decoder_flush_skipped_on_shutdown_kill() {
     let out = RecordingSink::new();
     core.subscribe(Arc::new(out.clone()));
 
-    // 무인자 cmd 는 배너가 없을 수 있어, stdin echo 로 stdout 을 확실히 유도한다.
+    // A cmd with no arguments may have no banner, so stdin echo is used to surely induce stdout.
     transport
         .send_input(InputEvent::Raw(b"echo kill-route-probe\r\n".to_vec()))
         .expect("send_input");
@@ -417,11 +417,11 @@ fn stdio_decoder_flush_skipped_on_shutdown_kill() {
     );
 }
 
-/// 실 프로세스 pump 경로로 ClaudeStreamDecoder 배선을 증명한다 — 트레이트 위임 자체는
-///   `backend::output_decoder` 단위테스트가 별도 커버하므로 여기서 다시 보지 않는다.
+/// Proves the ClaudeStreamDecoder wiring through the real-process pump path — the trait delegation itself is
+///   covered separately by the `backend::output_decoder` unit tests, so it is not looked at again here.
 ///
-/// ※ NDJSON 라인엔 `"` 가 많아 `cmd /c echo <json>` 은 Rust arg 인용(`"` escape)이 얽혀 바이트가
-///   깨진다 → 대신 임시 파일에 NDJSON 을 쓰고 `cmd /c type <path>` 로 흘린다(경로엔 특수문자 없음).
+/// ※ NDJSON lines have many `"` so `cmd /c echo <json>` gets tangled with Rust arg quoting (`"` escape) and the bytes
+///   break → instead write the NDJSON to a temp file and stream it with `cmd /c type <path>` (the path has no special characters).
 #[test]
 fn stdio_real_claude_decoder_emits_structured_event() {
     use engram_dashboard_agent::backend::claude::ClaudeStreamDecoder;
@@ -484,7 +484,7 @@ fn stdio_real_claude_decoder_emits_structured_event() {
     assert!(!out.has_bytes(), "구조화 경로에 콘솔 바이트 누출");
 }
 
-// ── 사용량 줍기: pump 가 디코더의 관측을 상태 sink 로 넘긴다 ────────────────────────────
+// ── Usage pickup: the pump passes the decoder's observations to the status sink ──────────────
 
 fn observation(pct: f64) -> UsageObservation {
     UsageObservation {
@@ -501,7 +501,7 @@ fn observation(pct: f64) -> UsageObservation {
     }
 }
 
-/// `decode` 마다 10 %, `flush` 에서 20 % 관측을 쌓는 디코더 — pump 가 두 자리 모두에서 비우는지 잰다.
+/// A decoder that accumulates a 10 % observation per `decode` and a 20 % observation at `flush` — measures whether the pump drains at both places.
 struct UsageEmittingDecoder {
     pending: Vec<UsageObservation>,
 }
@@ -567,8 +567,8 @@ fn stdio_pump_forwards_usage_after_decode_and_flush() {
     );
 }
 
-/// 실 `ClaudeStreamDecoder` 로 한 바퀴 — `rate_limit_event` 줄이 출력 이벤트 없이 sink 의 관측이 된다.
-/// (NDJSON 을 임시 파일로 흘리는 사유 = `stdio_real_claude_decoder_emits_structured_event`)
+/// One round with the real `ClaudeStreamDecoder` — a `rate_limit_event` line becomes an observation at the sink with no output event.
+/// (The reason for streaming NDJSON through a temp file = `stdio_real_claude_decoder_emits_structured_event`)
 #[test]
 fn stdio_real_claude_decoder_reports_rate_limit_usage() {
     use engram_dashboard_agent::backend::claude::ClaudeStreamDecoder;

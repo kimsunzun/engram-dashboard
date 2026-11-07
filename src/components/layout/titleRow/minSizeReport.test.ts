@@ -1,5 +1,5 @@
-// TRD S26-window-chrome §7-7 의 최소 창 크기 보고 — 한 번에 하나 · 마지막 값만 · 같은 값 안 보냄 · 실패 뒤 다시 맡음 · 답 없는
-//   시도의 시한 · 보낼 때마다 새 순번(`seq`) · 페이지마다 `epoch` · 첫 화면 알림이 기다리는 끝(상한 포함). invoke 는 가짜다.
+// Minimum window size report of TRD S26-window-chrome §7-7 — one at a time · only the last value · the same value is not sent · hand over again after a failure · deadline of an attempt
+//   with no answer · a new sequence number (`seq`) on every send · `epoch` per page · the end the first-screen notice waits for (including the cap). invoke is fake.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -14,7 +14,7 @@ import {
   reportMinWindowSize,
 } from './minSizeReport'
 
-// `retryAsync` 기본의 첫 backoff — 시한에 놓인 시도 뒤 다음 차례는 이만큼 더 늦게 나간다.
+// The first backoff of the `retryAsync` default — after an attempt released at the deadline, the next turn goes out this much later.
 const FIRST_BACKOFF_MS = 150
 
 interface SentArgs {
@@ -31,7 +31,7 @@ const flush = async (): Promise<void> => {
   for (let i = 0; i < 20; i++) await Promise.resolve()
 }
 
-/** 다음 보고 하나를 붙든다 — 돌려준 함수가 답한다(`fail` 이면 거절). */
+/** Holds the next report — the returned function answers (rejects if `fail`). */
 function holdNext(): (fail?: boolean) => Promise<void> {
   let answer: (fail: boolean) => void = () => {}
   invokeMock.mockImplementationOnce(
@@ -43,7 +43,7 @@ function holdNext(): (fail?: boolean) => Promise<void> {
   }
 }
 
-// 이 페이지의 `performance.timeOrigin` 을 갈아 끼운다 — `afterEach` 가 원래 속성으로 돌린다.
+// Swaps in this page's `performance.timeOrigin` — `afterEach` restores the original property.
 const ownTimeOrigin = Object.getOwnPropertyDescriptor(performance, 'timeOrigin')
 function setTimeOrigin(ms: number): void {
   Object.defineProperty(performance, 'timeOrigin', { value: ms, configurable: true })
@@ -169,7 +169,7 @@ describe('reportMinWindowSize', () => {
     await vi.advanceTimersByTimeAsync(MIN_SIZE_ATTEMPT_TIMEOUT_MS * 10)
     expect(sent()).toHaveLength(2)
 
-    // 늦은 286 이 「닿음」으로 적혔으면 이 보고를 건너뛴다.
+    // If the late 286 was recorded as 「닿음」, this report is skipped.
     reportMinWindowSize({ width: 286, height: 64 })
     await vi.advanceTimersByTimeAsync(0)
     expect(sent()).toEqual([
@@ -189,7 +189,7 @@ describe('reportMinWindowSize', () => {
     const lateSecond = holdNext()
     reportMinWindowSize({ width: 288, height: 64 })
     reportMinWindowSize({ width: 295, height: 64 })
-    // 286 이 시한에 놓이고 295 가 나간다(288 은 밀렸다) — 그 295 도 시한에 놓여 다시 나간다.
+    // 286 is released at the deadline and 295 goes out (288 was pushed out) — that 295 is also released at the deadline and goes out again.
     await vi.advanceTimersByTimeAsync(MIN_SIZE_ATTEMPT_TIMEOUT_MS + FIRST_BACKOFF_MS)
     await vi.advanceTimersByTimeAsync(MIN_SIZE_ATTEMPT_TIMEOUT_MS + FIRST_BACKOFF_MS)
     expect(sent()).toEqual([
@@ -204,7 +204,7 @@ describe('reportMinWindowSize', () => {
     await vi.advanceTimersByTimeAsync(MIN_SIZE_ATTEMPT_TIMEOUT_MS * 10)
     expect(sent()).toHaveLength(3)
 
-    // 「닿음」 = 순번 3 의 295 그대로 — 늦은 순번 1 의 286 으로 되돌아갔으면 이 보고를 건너뛴다.
+    // 「닿음」 = exactly 295 of sequence 3 — if it went back to 286 of the late sequence 1, this report is skipped.
     reportMinWindowSize({ width: 286, height: 64 })
     await vi.advanceTimersByTimeAsync(0)
     expect(sent()).toHaveLength(4)

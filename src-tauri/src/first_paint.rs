@@ -1,43 +1,43 @@
-//! 창을 첫 화면까지 숨긴다 — main · 팝아웃은 숨긴 채 짓고([`hold_window`]), 페이지가 실제 첫 화면(탭바 + 활성 탭)을
-//! 그렸다고 알리면(`webview_painted` · `src/theme/firstPaint.ts`) 창을 보인다. 사용자 결정(2026-10-19): 창은 내용과
-//! 함께 뜬다 — 틀을 먼저 띄우지 않는다(네이티브 틀은 걷힐 예정이다).
+//! Hide a window until its first paint — main · pop-outs are built hidden ([`hold_window`]), and when the page reports it has drawn the actual first screen (tab bar + active tab)
+//! (`webview_painted` · `src/theme/firstPaint.ts`), the window is shown. User decision (2026-10-19): the window appears together with its content —
+//! the frame is not shown first (the native frame is due to be removed).
 //!
-//! - ★웹뷰는 숨기지 않는다 — 숨긴 창 안에서 그리게 둔다★: 숨긴 웹뷰(`Webview::hide`)를 다시 보이는 순간 WebView2 가 아직
-//!   그리지 않은 면을 한 번 보였다(사용자 관측 2026-10-19 「창이 뜨고 좀 있다가 깜박임」).
-//! - ★창을 보이는 것은 올린 창 하나에 한 번뿐이다★ — 알림과 [`FALLBACK_REVEAL`] 중 먼저 온 쪽. 올림이 없는 창(`--hidden`
-//!   부팅의 main · 맡기기 전 예열 창 · 이미 보인 창의 다시 읽기)의 알림은 아무 일도 하지 않는다.
-//! - ★보일지는 메인 스레드에서, 보이기 바로 앞에 정한다★ — 알림 · 시한 · 복원은 올린 차례만 실어 메인 스레드로 넘기고,
-//!   넘긴 일이 돌 때 그 차례의 올림이 남아 있으면 빼내고 보인다([`FirstPaintGate::release`]). 넘기기 전에 빼내면, 넘긴
-//!   뒤 · 돌기 전에 메인 스레드의 숨기기(`--hidden` 부팅 setup 끝 · 트레이 숨기기)가 거둘 것을 못 찾고 넘긴 일이 숨긴 창을
-//!   보인다. 보이는 법은 셋이다 — 지어서 올린 창 · 복원 창은 [`crate::state::placement::show_placed`](보일 때 활성화 ·
-//!   최대화 바람이 참이면 보통 크기 틀 없이 최대화로 보인다), 창 포트가 포커스 없이 새로 지은 창(I30)과 맡긴 예열 창은
-//!   숨긴 채 z 만 맨 위로 올린 뒤 보인다(맡긴 창만 아래 조건에서 활성화한다 — [`new_window_show`]). ★셋 다 보인 뒤 적어 둔
-//!   최대화 바람을 입힌다★(`state::placement::apply_deferred_maximize` — 대기 창에 온 창 상태 명령이 그 바람을 적는다 ·
-//!   TRD S26-window-chrome §5-2). 빠진 길이 있으면 그 바람이 홀로 남아 그 창의 자리 기록이 멈춘다.
-//! - 창 상태 명령은 [`is_held`] 로 그 창이 이 문에 올려져 있는지 본다 — 올려진 창은 드러내지 않는다(그 문이 보인다).
-//! - 런타임 복원 수락의 팝아웃은 보일지가 모델에 넣은 뒤에 정해져 둘로 나눠 올린다 — 지을 때는 알림만 받아 두고
-//!   ([`hold_window_unarmed`]) 보이기로 정하면 보인다([`reveal_held`] — 알림이 이미 왔으면 곧바로, 아니면 알림 · 시한에).
-//!   시한은 보이기로 정한 때부터 잰다 — 정하기 전에 보이면 되돌릴 수도 있는 창이 드러난다. 보이는 법은 지을 때 올린
-//!   창과 같다 — 활성화한다.
-//! - 맡긴 예열 창(TRD S21-slot-docking §3-9)도 둘로 나눠 올린다 — 맡길 때 예열 창 풀이 알림만 받아 두는 올림을 걸고
-//!   ([`SparePaintGate`]) 확정 ③ 이 그 올림이 남아 있을 때만 보이기로 정한다([`reveal_if_held`] — 시한은 여기부터).
-//!   ★그 항목은 그 맡김의 채택 번호를 실은 알림만 받는다★(I26) — 번호가 없거나 다른 알림은 채택 전 틀(대기 페이지 ·
-//!   `bootFailed`)이 보낸 것이라, 따르면 그 틀이 곧바로 보인다. ③ 전에 받아 둔 알림도 같은 번호일 때만 ③ 이 곧바로
-//!   보인다. 번호는 이 길만 본다 — 지어서 올린 창과 복원 길은 번호가 있든 없든 알림을 받는다. ★맡긴 창이 보이면
-//!   (알림 · 시한 어느 쪽이든) 예열 창 풀의 다시 짓기 완료를 부른다★(`SpareState::on_shown` — 그 밖의 완료 = 창
-//!   `Destroyed` · 안전 시한).
-//! - ★명부 락은 잎이다★ — 쥔 채 로그 · 창 호출 · 다른 락을 하지 않는다. 예열 창 풀이 자기 락을 쥔 채 올림을 걸고
-//!   거둔다(차례 = 레이아웃 → 풀 → 첫 화면 문 — `crate::spare::SpareState`).
-//! - ★숨기기는 올림을 거둔다([`cancel_hold`])★ — 트레이 숨기기 경로(`tray::actions::hide_main_ui` — ADR-0229)와 복원의
-//!   숨긴 채 두기가 부른다. 거두지 않으면 숨긴 뒤 오는 알림 · 시한이 창을 다시 보인다: `--hidden` 부팅이면 main 은
-//!   트레이에 둔 채 팝아웃만 뜨고(전경까지 가져가고), 사용량 관심은 그 창을 숨은 것으로 둔다. 트레이 보이기도 거둔다 —
-//!   그 보이기가 창을 보이고 창 사이 차례(main 이 마지막 · 맨 앞)를 정한다. 창이 사라질 때도 거둔다(`Destroyed`) — 보이기로
-//!   정하지 않은 창은 시한이 없어 그 밖에 거둘 곳이 없다.
-//! - 숨긴 채 짓는 까닭이 하나 더 있다 — tao 0.35.3 은 보이는 창의 보이기를 창 만들기(`init`) 끝에서 하는데 창 바탕을
-//!   칠하는 서브클래스(`WM_ERASEBKGND`)는 그 뒤에 달아, 첫 프레임 안쪽이 칠해지지 않은 채 창 뒤가 비쳤다(사용자 영상
-//!   2026-10-19 · `platform_impl/windows/window.rs` — 소스 독해). 지은 뒤의 보이기는 바탕색으로 지운다.
-//! - 숨은 동안 페이지가 실제로 그리는지(WebView2 가 부모 창 숨김을 가림으로 보고 그리기를 멈추는지)는 [미검 — GUI]. 멈추면
-//!   보인 직후 한순간 바탕색이다.
+//! - ★The webview is not hidden — let it draw inside the hidden window★: when a hidden webview (`Webview::hide`) was shown again, WebView2 once showed a surface it had not yet
+//!   drawn (user observation 2026-10-19 「창이 뜨고 좀 있다가 깜박임」).
+//! - ★A window is shown only once per window put under hold★ — whichever comes first of the notification and [`FALLBACK_REVEAL`]. A notification for a window with no hold (main of a `--hidden`
+//!   boot · a prewarmed window before entrusting · a reload of an already shown window) does nothing.
+//! - ★Whether to show is decided on the main thread, right before showing★ — a notification · deadline · restore carries only the hold's ticket to the main thread,
+//!   and when the handed-over job runs, if the hold of that ticket remains, it is taken out and shown ([`FirstPaintGate::release`]). If taken out before handing over, then
+//!   after the hand-over · before it runs, the main thread's hide (the end of `--hidden` boot setup · tray hide) finds nothing to withdraw and the handed-over job shows
+//!   a hidden window. There are three ways of showing — a built-and-held window · a restore window use [`crate::state::placement::show_placed`] (activated when shown ·
+//!   if the maximize wish is true, shown maximized without a normal-size frame), and a window the window port newly built without focus (I30) and an entrusted prewarmed window are
+//!   shown after raising only z to the top while hidden (only the entrusted window is activated under the condition below — [`new_window_show`]). ★In all three, after showing, the
+//!   recorded maximize wish is applied★ (`state::placement::apply_deferred_maximize` — a window-state command that came to a waiting window records that wish ·
+//!   TRD S26-window-chrome §5-2). If a path is missing, that wish is left alone and that window's place recording stops.
+//! - A window-state command checks with [`is_held`] whether that window is held at this gate — a held window is not revealed (that gate shows it).
+//! - A pop-out of runtime restore acceptance has its whether-to-show decided after it enters the model, so it is held in two stages — when built it only keeps the notification
+//!   ([`hold_window_unarmed`]), and when decided to show, it is shown ([`reveal_held`] — immediately if the notification has already come, otherwise at the notification · deadline).
+//!   The deadline is measured from when it was decided to show — if shown before deciding, a window that might still be reverted is revealed. The way of showing is the same as a window
+//!   built and held at build time — it activates.
+//! - An entrusted prewarmed window (TRD S21-slot-docking §3-9) is also held in two stages — at entrusting, the prewarmed window pool puts up a hold that only keeps the notification
+//!   ([`SparePaintGate`]), and commit ③ decides to show only if that hold remains ([`reveal_if_held`] — the deadline starts here).
+//!   ★That entry accepts only a notification that carries the adoption number of that claim★ (I26) — a notification with no number or a different number is one sent by the pre-adoption frame (waiting page ·
+//!   `bootFailed`), and obeying it would show that frame at once. A notification kept before ③ is also shown by ③ immediately only if it has the same number. The number
+//!   is looked at only on this path — a built-and-held window and the restore path accept a notification with or without a number. ★If the entrusted window is shown
+//!   (by either notification or deadline), the prewarmed window pool's rebuild completion is called★ (`SpareState::on_shown` — other completions = window
+//!   `Destroyed` · safety deadline).
+//! - ★The registry lock is a leaf★ — while holding it, no logging · window call · other locks. The prewarmed window pool puts up and withdraws holds while holding its own lock
+//!   (order = layout → pool → first-paint gate — `crate::spare::SpareState`).
+//! - ★Hiding withdraws the hold ([`cancel_hold`])★ — the tray hide path (`tray::actions::hide_main_ui` — ADR-0229) and restore's
+//!   keep-hidden call it. If not withdrawn, a notification · deadline arriving after hiding shows the window again: in a `--hidden` boot, main stays
+//!   in the tray while only the pop-out appears (and even takes the foreground), and usage interest treats that window as hidden. Tray show withdraws it too —
+//!   that show shows the window and decides the order among windows (main last · frontmost). It is also withdrawn when a window disappears (`Destroyed`) — a window
+//!   not decided to show has no deadline, so there is no other place to withdraw it.
+//! - There is one more reason for building hidden — tao 0.35.3 shows a visible window at the end of window creation (`init`), but the subclass that
+//!   paints the window background (`WM_ERASEBKGND`) is attached after that, so the first frame's inside was unpainted and what was behind the window showed through (user video
+//!   2026-10-19 · `platform_impl/windows/window.rs` — source reading). A show after building erases with the background color.
+//! - Whether the page actually draws while hidden (whether WebView2 sees the parent window's hiding as occlusion and stops drawing) is [unverified — GUI]. If it stops,
+//!   the background color shows for a moment right after being shown.
 // ADR-0299
 
 use std::collections::HashMap;
@@ -48,14 +48,14 @@ use std::time::{Duration, Instant};
 use engram_dashboard_base::sync;
 use tauri::{AppHandle, Manager, WebviewWindow};
 
-/// 첫 화면 알림을 기다리는 상한 — 넘으면 알림 없이 보인다. 덮는 것 = 페이지 읽기 · 번들 실행 · 첫 마운트 · 탭 목록과 활성
-/// 탭 레이아웃 조회. 값은 실측이 아니라 「넘으면 깨진 것으로 본다」는 판단이다(개발 서버로 띄운 창은 0.8~1.1 s — 사용자
-/// 관측 2026-10-19). 넘으면 첫 화면 전에 보인다.
-// ADR-0305 — 첫 화면 전 실패
+/// The upper bound on waiting for the first-paint notification — if exceeded, it is shown without a notification. What it covers = page load · bundle execution · first mount · tab list and active
+/// tab layout query. The value is not measured but a judgment of 「넘으면 깨진 것으로 본다」 (if exceeded, treat it as broken) (a window launched with the dev server takes 0.8~1.1 s — user
+/// observation 2026-10-19). If exceeded, it is shown before first paint.
+// ADR-0305 — failure before first paint
 pub(crate) const FALLBACK_REVEAL: Duration = Duration::from_millis(1500);
 
-/// 보이기를 기다리는 숨긴 창의 명부 — label → 올린 상태. 보이기는 메인 스레드에서 그 차례의 항목을 빼낸 쪽 하나만 한다
-/// (모듈 머리). 셸에 하나다(빌더에서 manage — 창을 만드는 어느 자리보다 먼저 있어야 한다).
+/// The registry of hidden windows waiting to be shown — label → held state. Showing is done on the main thread by the one side that takes out that ticket's entry
+/// (module head). It is one per shell (managed in the builder — it must exist before any place that creates a window).
 #[derive(Default)]
 pub(crate) struct FirstPaintGate {
     held: Mutex<HashMap<String, Hold>>,
@@ -64,34 +64,34 @@ pub(crate) struct FirstPaintGate {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Hold {
-    /// 알림 또는 시한에 보인다. `ticket` = 올린 차례 — 올릴 때마다 새로 뽑아(명부 전체에서 단조) 넘긴 보이기는 자기
-    /// 차례일 때만 빼낸다. 거둔 뒤 다시 올린 창을 옛 일이 보이지 않게 한다. `since` = 올린 때(로그 `held_ms`) · `opened` =
-    /// 창 포트가 그 창을 열기 시작한 때(로그 `reveal_ms` — 창 포트 밖에서 올린 창은 `None`).
+    /// Shown at the notification or the deadline. `ticket` = the hold's ticket — drawn fresh at every hold (monotonic across the whole registry), and a handed-over show takes out
+    /// only when it is its own ticket. This keeps an old job from showing a window that was withdrawn and then held again. `since` = when held (log `held_ms`) · `opened` =
+    /// when the window port began opening that window (log `reveal_ms` — `None` for a window held outside the window port).
     Armed {
         ticket: u64,
         reveal: Reveal,
         since: Instant,
         opened: Option<Instant>,
     },
-    /// 알림만 받아 둔다 — 보일지는 [`FirstPaintGate::arm`](복원) · [`FirstPaintGate::arm_adopted`](확정 ③)가 정한다.
+    /// Only keeps the notification — whether to show is decided by [`FirstPaintGate::arm`] (restore) · [`FirstPaintGate::arm_adopted`] (commit ③).
     Unarmed { painted: Painted },
 }
 
-/// 올린 항목이 받는 알림과 보이는 법.
+/// The notification a held entry accepts and how it is shown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Reveal {
-    /// 지어서 올린 창 · 복원 창 — 번호를 보지 않고 어느 알림이든 받는다. 보일 때 활성화한다.
+    /// A built-and-held window · a restore window — accepts any notification without looking at the number. Activated when shown.
     Placed,
-    /// 창 포트가 포커스 없이 새로 지은 창(I30) — 번호를 보지 않는다. 숨긴 채 z 만 올리고 활성화 없이 보인다.
+    /// A window the window port newly built without focus (I30) — does not look at the number. Raises only z while hidden and is shown without activation.
     Raised,
-    /// 맡긴 예열 창(확정 ③) — 채택 번호 `generation` 을 실은 알림만 받는다(I26). `activate` = 그 맡김이 활성으로
-    /// 열렸다(I5).
+    /// An entrusted prewarmed window (commit ③) — accepts only a notification that carries adoption number `generation` (I26). `activate` = that claim
+    /// was opened as active (I5).
     Adopted { generation: u32, activate: bool },
 }
 
-/// 받아 두는 항목에 온 알림 — 복원 길([`FirstPaintGate::arm`])은 `Numberless` 와 `Generation` 을 둘 다 「알림 옴」으로
-/// 보고, 확정 ③([`FirstPaintGate::arm_adopted`])은 그 채택 번호의 `Generation` 만 본다. 참 · 거짓 하나로 뭉치면 복원
-/// 창이 알림을 잃거나(번호를 요구하면) 채택 전 틀이 곧바로 보인다(번호를 안 보면).
+/// A notification that came to a keeping entry — the restore path ([`FirstPaintGate::arm`]) sees both `Numberless` and `Generation` as 「알림 옴」 (notification arrived),
+/// and commit ③ ([`FirstPaintGate::arm_adopted`]) sees only the `Generation` of that adoption number. If lumped into one true/false, either the restore
+/// window loses the notification (if a number is required) or the pre-adoption frame is shown at once (if the number is not looked at).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Painted {
     Not,
@@ -99,29 +99,29 @@ enum Painted {
     Generation(u32),
 }
 
-/// [`FirstPaintGate::arm`] · [`FirstPaintGate::arm_adopted`] 의 답 — 둘 다 그 창을 이 차례로 올렸다.
+/// The answer of [`FirstPaintGate::arm`] · [`FirstPaintGate::arm_adopted`] — both put that window under hold with this ticket.
 #[derive(Debug, PartialEq, Eq)]
 enum Arm {
-    /// 알림이 이미 왔다 — 지금 보이기를 넘긴다.
+    /// The notification has already come — hand over the show now.
     Painted(u64),
-    /// 알림 또는 시한을 기다린다.
+    /// Wait for the notification or the deadline.
     Waiting(u64),
 }
 
-/// [`FirstPaintGate::painted`] 의 답.
+/// The answer of [`FirstPaintGate::painted`].
 #[derive(Debug, PartialEq, Eq)]
 enum Signal {
-    /// 올린 항목이 받았다 — 이 차례로 보이기를 넘긴다.
+    /// A held entry received it — hand over the show with this ticket.
     Release(u64),
-    /// 받아 두는 항목에 적었다.
+    /// Recorded in the keeping entry.
     Recorded,
-    /// 맡긴 예열 창 항목이 번호가 다른(없는) 알림을 버렸다(I26).
+    /// The entrusted prewarmed window's entry discarded a notification with a different (absent) number (I26).
     Mismatch { expected: u32, got: Option<u32> },
-    /// 그 label 의 항목이 없다.
+    /// There is no entry for that label.
     Ignored,
 }
 
-/// [`FirstPaintGate::release`] 가 빼낸 항목.
+/// The entry taken out by [`FirstPaintGate::release`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Released {
     reveal: Reveal,
@@ -153,8 +153,8 @@ impl FirstPaintGate {
         ticket
     }
 
-    // 이미 올림이 있으면 그대로 둔다 — 덮으면 그 창에 이미 받아 둔 첫 화면 알림을 잃어, 뒤의 `arm` · `arm_adopted` 가
-    //   곧바로 보이지 못하고 시한을 기다린다(트레이 보이기의 다시 걸기 — `spare::SpareState::on_tray_show`).
+    // If a hold already exists, leave it as is — overwriting loses the first-paint notification already kept for that window, so the later `arm` · `arm_adopted` cannot
+    //   show immediately and wait for the deadline (re-arming at tray show — `spare::SpareState::on_tray_show`).
     fn hold_unarmed(&self, label: &str) {
         sync::lock(&self.held)
             .entry(label.to_owned())
@@ -163,7 +163,7 @@ impl FirstPaintGate {
             });
     }
 
-    // 명부에 없는 창(거둔 창 포함)도 지금부터 기다린다 — 그 전에 온 알림은 남아 있지 않아 시한에 보인다.
+    // A window not in the registry (including a withdrawn window) is also waited for from now — a notification that came before that is not kept, so it is shown at the deadline.
     fn arm(&self, label: &str) -> Arm {
         let ticket = self.ticket();
         let since = Instant::now();
@@ -188,7 +188,7 @@ impl FirstPaintGate {
         }
     }
 
-    // 항목이 없으면(거뒀다) 아무것도 하지 않는다 — `arm` 처럼 지금부터 기다리면 UI 숨기기가 거둔 창을 되살린다.
+    // If there is no entry (withdrawn), do nothing — if it waited from now like `arm`, a UI hide would revive the withdrawn window.
     fn arm_adopted(
         &self,
         label: &str,
@@ -254,8 +254,8 @@ impl FirstPaintGate {
                 }
             }
             Hold::Unarmed { painted } => {
-                // 번호 없는 알림은 받아 둔 번호를 지우지 않는다 — 늦게 처리된 채택 전 틀의 알림이 같은 번호로 ③ 전에
-                //   닿은 알림을 덮으면 ③ 이 곧바로 보이지 못하고 시한을 기다린다.
+                // A notification with no number does not erase a kept number — if a late-handled notification of the pre-adoption frame overwrote a notification that arrived before ③ with the same number,
+                //   ③ could not show immediately and would wait for the deadline.
                 match generation {
                     Some(got) => *painted = Painted::Generation(got),
                     None if *painted == Painted::Not => *painted = Painted::Numberless,
@@ -266,8 +266,8 @@ impl FirstPaintGate {
         }
     }
 
-    // 넘기기 전에 본다 — 빼낸 차례는 다시 오지 않아(차례는 단조) 「없다」는 넘긴 뒤에도 그대로다. 「있다」는 넘긴 일이
-    //   다시 정한다([`Self::release`]).
+    // Looked at before handing over — a taken-out ticket never comes again (tickets are monotonic), so 「없다」 (absent) stays the same even after handing over. 「있다」 (present) is
+    //   decided again by the handed-over job ([`Self::release`]).
     fn is_waiting(&self, label: &str, ticket: u64) -> bool {
         matches!(
             sync::lock(&self.held).get(label),
@@ -275,8 +275,8 @@ impl FirstPaintGate {
         )
     }
 
-    /// 넘긴 보이기가 메인 스레드에서 돌 때 정한다 — 그 창이 이 차례로 올린 채 남아 있으면 빼내고 돌려준다(보인다).
-    /// `None` = 이미 보였거나 거뒀거나 다시 올렸다.
+    /// Decided when the handed-over show runs on the main thread — if that window remains held with this ticket, take it out and return it (it is shown).
+    /// `None` = already shown or withdrawn or held again.
     fn release(&self, label: &str, ticket: u64) -> Option<Released> {
         let mut held = sync::lock(&self.held);
         match held.get(label).copied() {
@@ -306,8 +306,8 @@ impl FirstPaintGate {
     }
 }
 
-/// 예열 창 풀이 쥐는 첫 화면 문 손잡이(`crate::spare::PaintGate` — I17 · I26). 빌더에서 풀보다 먼저 만들고, 확정 ③ 의
-/// 보이기를 넘길 앱 손잡이는 setup 이 [`Self::attach`] 로 꽂는다 — 그 전에는 창이 없어 맡길 것도 없다.
+/// The first-paint gate handle the prewarmed window pool holds (`crate::spare::PaintGate` — I17 · I26). It is made in the builder before the pool, and the app handle
+/// to which commit ③'s show is handed over is plugged in by setup with [`Self::attach`] — before that there is no window, so nothing to entrust.
 pub(crate) struct SparePaintGate {
     gate: Arc<FirstPaintGate>,
     app: OnceLock<AppHandle>,
@@ -321,13 +321,13 @@ impl SparePaintGate {
         }
     }
 
-    /// 앱 손잡이를 꽂는다 — 한 번만 듣는다(둘째부터는 무시).
+    /// Plug in the app handle — listened to only once (from the second on, ignored).
     pub(crate) fn attach(&self, app: AppHandle) {
         let _ = self.app.set(app);
     }
 }
 
-// `hold_unarmed` · `cancel` 은 풀 락 안에서 불린다 — 명부의 잎 락만 잡는다(모듈 머리).
+// `hold_unarmed` · `cancel` are called inside the pool lock — they take only the registry's leaf lock (module head).
 impl crate::spare::PaintGate for SparePaintGate {
     fn hold_unarmed(&self, label: &str) {
         self.gate.hold_unarmed(label);
@@ -347,7 +347,7 @@ impl crate::spare::PaintGate for SparePaintGate {
         if let Some(app) = self.app.get() {
             return reveal_if_held(app, &self.gate, label, generation, activate, opened);
         }
-        // 「거둬졌다」와 같이 다룬다 — 숨긴 채 모델 창이 되고 다음 트레이 보이기가 보인다.
+        // Treated the same as 「거둬졌다」 (was withdrawn) — it becomes a model window while hidden and the next tray show shows it.
         self.gate.cancel(label);
         tracing::warn!(
             module = "first_paint",
@@ -364,9 +364,9 @@ fn gate(app: &AppHandle) -> Option<Arc<FirstPaintGate>> {
         .map(|gate| gate.inner().clone())
 }
 
-/// 숨긴 채 지은 창을 첫 화면 알림(또는 [`FALLBACK_REVEAL`])에 보이도록 올린다 — 보일 때 활성화한다. ★창은 숨은 채여야
-/// 하고 자리 · 미룬 최대화를 이미 입혔어야 한다★ — 보이기가 그 자리 그대로 보인다. 명부가 등록돼 있지 않으면 곧바로
-/// 보인다(보일 길이 없는 숨은 창을 만들지 않는다).
+/// Put a window built hidden under hold so that it is shown at the first-paint notification (or [`FALLBACK_REVEAL`]) — activated when shown. ★The window must be hidden
+/// and its place · deferred maximize must already be applied★ — the show appears at that place as it is. If the registry is not registered, it is shown
+/// right away (a hidden window with no way to be shown is not made).
 pub(crate) fn hold_window(window: &WebviewWindow) {
     let Some(gate) = gate(window.app_handle()) else {
         tracing::warn!(
@@ -381,9 +381,9 @@ pub(crate) fn hold_window(window: &WebviewWindow) {
     reveal_when_overdue_on_main_thread(window.app_handle(), gate, window.label(), ticket);
 }
 
-/// [`hold_window`] 의 창 포트 판 — 창 포트가 새로 지은 팝아웃. `focused` = 포커스를 받으며 지었다(보일 때 활성화 —
-/// [`hold_window`] 와 같다) · `false` = 포커스 없이 지었다(숨긴 채 z 만 올리고 활성화 없이 보인다 — I30). `opened` = 창
-/// 포트가 그 창을 열기 시작한 때(보임 로그 `reveal_ms`).
+/// The window-port edition of [`hold_window`] — a pop-out newly built by the window port. `focused` = built while receiving focus (activated when shown —
+/// the same as [`hold_window`]) · `false` = built without focus (raises only z while hidden and is shown without activation — I30). `opened` = when the window
+/// port began opening that window (the show log `reveal_ms`).
 // ADR-0299
 pub(crate) fn hold_built(window: &WebviewWindow, focused: bool, opened: Instant) {
     let reveal = if focused {
@@ -404,19 +404,19 @@ pub(crate) fn hold_built(window: &WebviewWindow, focused: bool, opened: Instant)
     reveal_when_overdue_on_main_thread(window.app_handle(), gate, window.label(), ticket);
 }
 
-/// 숨긴 채 지은 창의 첫 화면 알림을 받아 두기만 한다 — 보일지는 뒤에 [`reveal_held`](보인다) · [`cancel_hold`](숨긴 채
-/// 둔다)가 정한다. 정할 때까지 알림도 시한도 창을 보이지 않는다. ★그 창에 이미 올림이 있으면 그대로 둔다★ — 이미 보이기로
-/// 정한(armed) 올림도 그대로라, 그 창은 이 호출 뒤에도 알림 · 시한에 보인다(받아 둔 알림도 지우지 않는다). 명부가 등록돼
-/// 있지 않으면 아무것도 하지 않는다(그때 [`reveal_held`] 가 곧바로 보인다).
+/// Only keeps the first-paint notification of a window built hidden — whether to show is decided later by [`reveal_held`] (it is shown) · [`cancel_hold`] (it is kept
+/// hidden). Until decided, neither the notification nor the deadline shows the window. ★If that window already has a hold, leave it as is★ — a hold already decided to show
+/// (armed) also stays, so that window is shown at the notification · deadline even after this call (a kept notification is not erased either). If the registry is not registered,
+/// nothing is done (then [`reveal_held`] shows it immediately).
 pub(crate) fn hold_window_unarmed(window: &WebviewWindow) {
     if let Some(gate) = gate(window.app_handle()) {
         gate.hold_unarmed(window.label());
     }
 }
 
-/// 그 창을 첫 화면에 보이기로 정한다 — 알림이 이미 왔으면 곧바로, 아니면 알림 또는 지금부터 [`FALLBACK_REVEAL`] 에
-/// 보인다 — 보일 때 활성화한다. 받아 두지 않은 창(거둔 창 포함)도 지금부터 기다린다. 어느 스레드에서 불러도 된다(보이기는
-/// 메인 스레드로 넘긴다).
+/// Decide to show that window at first paint — immediately if the notification has already come, otherwise it is shown at the notification or at [`FALLBACK_REVEAL`] from now
+/// — activated when shown. A window that was not kept (including a withdrawn window) is also waited for from now. It may be called from any thread (the show
+/// is handed to the main thread).
 pub(crate) fn reveal_held(app: &AppHandle, label: &str) {
     let Some(gate) = gate(app) else {
         tracing::warn!(
@@ -435,7 +435,7 @@ pub(crate) fn reveal_held(app: &AppHandle, label: &str) {
     }
 }
 
-// 확정 ③(TRD S21-slot-docking §3-9 「`committed`」) — `true` = 남은 올림을 올렸다. 어느 스레드에서 불러도 된다.
+// Commit ③ (TRD S21-slot-docking §3-9 「`committed`」) — `true` = the remaining hold was put up. It may be called from any thread.
 fn reveal_if_held(
     app: &AppHandle,
     gate: &Arc<FirstPaintGate>,
@@ -457,8 +457,8 @@ fn reveal_if_held(
     }
 }
 
-/// 그 창의 올림을 거둔다 — 뒤에 오는 첫 화면 알림 · 시한과 이미 넘긴 보이기가 그 창을 보이지 않는다. 올린 적 없는 창이면
-/// 아무 일도 하지 않는다. 숨기기 · 트레이 보이기 경로가 그 창마다 부른다(모듈 머리).
+/// Withdraw that window's hold — a first-paint notification · deadline coming later and an already handed-over show will not show that window. If the window was never held,
+/// nothing is done. The hide · tray show paths call it for each window (module head).
 pub(crate) fn cancel_hold(app: &AppHandle, label: &str) {
     if gate(app).is_some_and(|gate| gate.cancel(label)) {
         tracing::debug!(
@@ -469,15 +469,15 @@ pub(crate) fn cancel_hold(app: &AppHandle, label: &str) {
     }
 }
 
-/// 그 창이 지금 이 문에 올려져 있나 — 보이기로 정한 올림이든 알림만 받아 두는 올림이든 참이다(둘 다 보일지를 이 문 ·
-/// 그 주인이 정한다). 명부가 등록돼 있지 않으면 거짓. 순간값이다 — 메인 스레드 밖에서 읽으면 읽은 뒤 · 쓰기 전에 그 문의
-/// 보이기가 지나갈 수 있다(TRD S26-window-chrome §5-2 — 창 상태 명령은 메인 스레드 일 하나 안에서 읽는다).
+/// Is that window held at this gate now — true both for a hold decided to show and for a hold that only keeps the notification (in both, this gate ·
+/// its owner decides whether to show). False if the registry is not registered. It is a momentary value — if read off the main thread, this gate's show can pass
+/// after the read · before the write (TRD S26-window-chrome §5-2 — a window-state command reads inside a single main-thread job).
 pub(crate) fn is_held(app: &AppHandle, label: &str) -> bool {
     gate(app).is_some_and(|gate| gate.is_held(label))
 }
 
-/// 그 창의 첫 화면 알림 — `generation` = 알림이 실은 채택 번호. 올린 창이면 보이고(받아 두기만 하는 창이면 받아 둔다 ·
-/// 맡긴 예열 창은 그 채택 번호의 알림만 받는다), 아니면 아무 일도 하지 않는다.
+/// That window's first-paint notification — `generation` = the adoption number the notification carries. If it is a held window it is shown (if it is a window that only keeps, it is kept ·
+/// an entrusted prewarmed window accepts only a notification of that adoption number), otherwise nothing is done.
 pub(crate) fn reveal_painted(window: &WebviewWindow, generation: Option<u32>) {
     let app = window.app_handle();
     let Some(gate) = gate(app) else {
@@ -497,7 +497,7 @@ pub(crate) fn reveal_painted(window: &WebviewWindow, generation: Option<u32>) {
     }
 }
 
-/// 넘긴 보이기를 무엇이 정했나 — 로그 몫.
+/// What decided the handed-over show — the log's share.
 #[derive(Debug, Clone, Copy)]
 enum Cause {
     Painted,
@@ -506,7 +506,7 @@ enum Cause {
 }
 
 impl Cause {
-    // `via` · `reveal_ms` = 예열 창과 새로 짓기의 열기 → 보임 지연을 견주는 재료(TRD S21-slot-docking §3-9 「로그」 · M14).
+    // `via` · `reveal_ms` = material to compare the open → visible delay of a prewarmed window and a fresh build (TRD S21-slot-docking §3-9 「로그」 · M14).
     // ADR-0299
     fn log(self, label: &str, released: &Released) {
         let held_ms = crate::spare::elapsed_ms(released.since);
@@ -600,7 +600,7 @@ fn release_on_main_thread(
     });
 }
 
-// `decide` 는 메인 스레드에서 보이기 바로 앞에 돈다(모듈 머리) — `None` = 보이지 않는다.
+// `decide` runs on the main thread right before showing (module head) — `None` = not shown.
 fn reveal_on_main_thread(
     app: &AppHandle,
     label: &str,
@@ -628,7 +628,7 @@ fn reveal_on_main_thread(
     }
 }
 
-// 메인 스레드에서 부른다(모듈 머리).
+// Called on the main thread (module head).
 fn show_as(window: &WebviewWindow, reveal: Reveal) {
     match reveal {
         Reveal::Placed => crate::state::placement::show_placed(&window.as_ref().window()),
@@ -637,8 +637,8 @@ fn show_as(window: &WebviewWindow, reveal: Reveal) {
     }
 }
 
-// 맡긴 창 보이기(TRD S21-slot-docking §3-9 「보이는 차례」) — 전경 판정은 보이기 바로 앞이다. 보인 뒤(못 보였어도)
-//   다시 짓기 완료를 부른다 — 알림 · 시한 둘 다 여기로 온다.
+// Show of an entrusted window (TRD S21-slot-docking §3-9 「보이는 차례」) — the foreground decision is right before showing. After showing (even if it could not be shown),
+//   it calls rebuild completion — both the notification · deadline come here.
 // ADR-0299
 fn show_adopted(window: &WebviewWindow, activate: bool) {
     let app = window.app_handle();
@@ -647,12 +647,12 @@ fn show_adopted(window: &WebviewWindow, activate: bool) {
     crate::commands::spare::on_adopted_window_shown(app, window.label());
 }
 
-// ⓐ 숨긴 채 z 만 맨 위로 → ⓑ 보이기 · 적어 둔 최대화 바람 입히기 → ⓒ 활성화(`activate` 일 때만). ⓐ 를 ⓑ 앞에 둔다 — 오래
-//   숨은 창이 옛 z 자리에서 한 프레임도 보이지 않게(I29). ★ⓑ 는 Tauri `show()` 다★ — 날 Win32 로 보이면 tao 보임 깃발이
-//   거짓으로 남아 트레이 숨기기가 아무것도 하지 않는다(`commands::spare` 의 예열 창 짓기 머리). 포커스 없이 지은 창이라
-//   tao 는 활성화하지 않고 보인다. ⓐ 만으로 남의 앱 전경 창 위에 서는지 · 숨긴 채 올린 z 가 ⓑ 뒤에도 남는지는
-//   [미측 — M22]. 바람 입히기의 `SW_MAXIMIZE` · `SW_RESTORE` 는 활성화를 겸한다 — 포커스 없이 지은 창에 바람이 있으면
-//   그 입히기가 전경을 옮기는지는 [미측 — TRD S26-window-chrome §10-5 「숨은 창 보이기의 전경」].
+// ⓐ raise only z to the top while hidden → ⓑ show · apply the recorded maximize wish → ⓒ activate (only for `activate`). ⓐ is placed before ⓑ — so a long-
+//   hidden window is not seen even for one frame at its old z place (I29). ★ⓑ is Tauri `show()`★ — if shown with raw Win32, the tao visibility flag stays
+//   false and tray hide does nothing (the prewarmed-window building head of `commands::spare`). It is a window built without focus, so
+//   tao shows it without activating. Whether ⓐ alone puts it above another app's foreground window · whether the z raised while hidden remains after ⓑ is
+//   [unmeasured — M22]. `SW_MAXIMIZE` · `SW_RESTORE` of applying the wish double as activation — whether, if a window built without focus has a wish,
+//   that applying moves the foreground is [unmeasured — TRD S26-window-chrome §10-5 「숨은 창 보이기의 전경」].
 // ADR-0299
 fn raise_and_show(window: &WebviewWindow, activate: bool) {
     let label = window.label();
@@ -671,8 +671,8 @@ fn raise_and_show(window: &WebviewWindow, activate: bool) {
     }
 }
 
-/// 활성화 없이 그 창의 z 만 그 띠의 맨 위로 — 숨은 창은 숨은 채다(platform `place_window(.., ZOrder::Top, show: false,
-/// activate: false)` · I29). 실패는 로그로만 남긴다. ★메인 스레드에서 부른다★(platform `window` 머리 「스레드」).
+/// Raise only that window's z to the top of its band without activation — a hidden window stays hidden (platform `place_window(.., ZOrder::Top, show: false,
+/// activate: false)` · I29). A failure is only logged. ★Called on the main thread★ (platform `window` head 「스레드」 (threads)).
 // ADR-0299
 pub(crate) fn raise_without_activation(window: &tauri::Window) {
     let label = window.label();
@@ -683,7 +683,7 @@ pub(crate) fn raise_without_activation(window: &tauri::Window) {
         false,
         false,
     ) {
-        // 올리기가 돌았는지가 M22 진단 재료다 — 이 OS 에 수단이 없는 것만 조용히 둔다.
+        // Whether the raise ran is M22 diagnostic material — only the absence of means on this OS is left quiet.
         match e {
             engram_dashboard_platform::window::WindowError::Unsupported => {
                 tracing::debug!(module = "first_paint", label, error = %e, "창의 z 를 올리지 못하고 넘어간다");
@@ -696,18 +696,18 @@ pub(crate) fn raise_without_activation(window: &tauri::Window) {
     }
 }
 
-/// 새 창(맡긴 예열 창 · 창 포트가 새로 지은 창)의 보이기 — 둘 다 숨긴 채 z 를 맨 위로 올린 뒤 보인다(I29).
+/// Show of a new window (an entrusted prewarmed window · a window the window port newly built) — both are shown after raising z to the top while hidden (I29).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NewWindowShow {
-    /// 포커스를 그대로 둔다(사용자 결정 2026-10-21 「포커스 뺏지말고, 순서만 위로올려.」).
+    /// Leaves focus as it is (user decision 2026-10-21 「포커스 뺏지말고, 순서만 위로올려.」).
     Raise,
-    /// 보이며 활성화한다 — 맡긴 창은 보인 뒤 포커스를 주고, 새로 짓는 창은 포커스를 받으며 짓는다.
+    /// Activates when shown — an entrusted window is given focus after being shown, and a newly built window is built while receiving focus.
     RaiseAndActivate,
 }
 
-/// 활성화는 그 요청이 활성으로 열렸고(`activate`) 지금 전경이 우리 프로세스일 때만이다(I5 · I30) — 전경이 남의 것일 때
-/// 활성화하면 tao 가 가짜 Alt 로 포커스를 빼앗는다(`state::placement` 의 `foreground_is_ours` 머리). 맡긴 창은 보이기
-/// 바로 앞에, 새로 짓는 창은 열 때 정한다.
+/// Activation is only when that request was opened as active (`activate`) and the foreground is now our process (I5 · I30) — if activated while the foreground is someone else's,
+/// tao steals focus with a fake Alt (head of `foreground_is_ours` in `state::placement`). For an entrusted window it is decided right before
+/// showing, and for a newly built window at open.
 pub(crate) fn new_window_show(activate: bool, foreground_is_ours: bool) -> NewWindowShow {
     if activate && foreground_is_ours {
         NewWindowShow::RaiseAndActivate
@@ -733,7 +733,7 @@ mod tests {
         gate.release(label, ticket).map(|released| released.reveal)
     }
 
-    // ── 명부 ──
+    // ── registry ──
 
     #[test]
     fn the_painted_signal_reveals_a_held_window_once() {
@@ -793,7 +793,7 @@ mod tests {
         );
     }
 
-    // ── 넘긴 보이기 — 정하기는 넘긴 일이 돌 때다 ──
+    // ── handed-over show — the decision is made when the handed-over job runs ──
 
     #[test]
     fn a_window_hidden_after_the_deadline_queued_its_reveal_stays_hidden() {
@@ -853,7 +853,7 @@ mod tests {
         assert!(gate.release("slot-popup-1", again).is_some());
     }
 
-    // ── 거두기(숨기기 · 트레이 보이기) ──
+    // ── withdrawing (hide · tray show) ──
 
     #[test]
     fn cancelling_a_window_that_was_not_held_does_nothing() {
@@ -861,7 +861,7 @@ mod tests {
         assert!(!gate.cancel("main"));
     }
 
-    // ── 받아 두기(런타임 복원) ──
+    // ── keeping (runtime restore) ──
 
     #[test]
     fn an_unarmed_window_is_not_revealed_by_the_signal_and_arming_after_it_reveals_at_once() {
@@ -921,7 +921,7 @@ mod tests {
         assert!(gate.release("slot-popup-1", ticket).is_some());
     }
 
-    // ── 맡긴 예열 창(확정 ③ · I17 · I26) ──
+    // ── entrusted prewarmed window (commit ③ · I17 · I26) ──
 
     #[test]
     fn revealing_a_label_without_a_hold_does_nothing() {
@@ -1081,7 +1081,7 @@ mod tests {
         ));
     }
 
-    // 거두지 않은 채 다시 건 올림(트레이 보이기의 다시 걸기)은 이미 받아 둔 알림을 지우지 않는다.
+    // A hold put up again without being withdrawn (re-arming at tray show) does not erase a notification already kept.
     #[test]
     fn holding_again_keeps_a_notice_already_received() {
         let gate = FirstPaintGate::default();
@@ -1094,7 +1094,7 @@ mod tests {
         ));
     }
 
-    // ── 맡긴 창 보이기의 갈래(I5 · I30) ──
+    // ── branches of showing an entrusted window (I5 · I30) ──
 
     #[test]
     fn a_new_window_is_activated_only_when_asked_active_and_the_foreground_is_ours() {
@@ -1112,7 +1112,7 @@ mod tests {
         }
     }
 
-    // 창 포트가 포커스 없이 새로 지은 창(I30) — 번호를 보지 않고 받으며, 올리기만 하는 보이기로 빠진다.
+    // A window the window port newly built without focus (I30) — accepted without looking at the number, and it falls into the raise-only show.
     #[test]
     fn a_window_built_without_focus_takes_any_signal_and_is_raised_without_activation() {
         let gate = FirstPaintGate::default();
@@ -1131,7 +1131,7 @@ mod tests {
         }
     }
 
-    // 맡긴 창의 열기 때가 ③ 의 항목을 거쳐 보임 로그까지 간다(`reveal_ms`).
+    // The entrusted window's open time goes through the ③ entry to the show log (`reveal_ms`).
     #[test]
     fn the_open_time_of_an_adopted_window_reaches_its_release() {
         let gate = FirstPaintGate::default();
@@ -1156,7 +1156,7 @@ mod tests {
         ));
     }
 
-    // ── 풀의 손잡이 ──
+    // ── the pool's handle ──
 
     #[test]
     fn the_pool_handle_holds_and_cancels_on_the_shared_gate() {
@@ -1177,7 +1177,7 @@ mod tests {
         assert_eq!(gate.painted("slot-popup-1", Some(1)), Signal::Ignored);
     }
 
-    // ── 시한 ──
+    // ── deadline ──
 
     fn counter() -> (Arc<Mutex<u32>>, impl FnOnce()) {
         let queued = Arc::new(Mutex::new(0));

@@ -1,77 +1,77 @@
-# codex 세션 id 회수 — 터미널 모드 resume 을 위한 기법 선택과 기계적 계약 (측정 서베이)
+# Recovering the codex session id — technique choice and mechanical contract for terminal-mode resume (measurement survey)
 
-| 항목 | 값 |
+| Item | Value |
 |---|---|
-| **상태** | **2 패스 문서** — §1~§9 = 사후 전사본(적대 리뷰 2인 반영) · **§10 = 2차 직접 측정**(적대 리뷰 2인 반영) |
-| **날짜** | 2026-09-19. **§1~§9 는 그 직전 세션의 측정을 전사**했고, **§10 은 이 문서가 직접 잰 것**이다 |
-| **방법** | 조사 3갈래(기법 분석 · 피어 서베이 · 표준) + **codex-cli 0.155.0 직접 측정 3회**(1차) + ★**11회 기동(2차 — §10)**★ |
-| **★절별로 성격이 다르다★** | ★**§1~§9 는 새 측정을 한 줄도 하지 않았다**★ — **출처 둘**(직전 세션 핸드오프 + 커밋 `75bdfda` 본문)의 전사·구조화다. ★**그러나 §10 은 다르다 — 실 PTY 에 TUI 를 띄워 직접 쟀다**★(홈 사본 전용 · 실 `~/.codex` md5 불변 확인). **머리말만 읽고 §10 을 전사본으로 깎아 읽지 말 것.** |
-| **확신도 범례** | ★**실측**★ = codex-cli 0.155.0 을 **직접 돌려** 확인(§1~§9 = 직전 세션이, §10 = 이 문서가) · **선례 독해** = 피어 소스·주석 읽기 · **미측정** = 안 했음(§7 · §10-5) · **미검 전사** = 출처를 못 대는 전사 |
-| **왜 이 조사를 했나** | codex 를 터미널 모드로 띄우면 재기동 후 대화가 안 이어진다 — 이어받을 식별자를 **codex 가 스스로 발급**하고 터미널 경로엔 그것을 **받을 창구가 없었다** |
+| **Status** | **Two-pass document** — §1~§9 = after-the-fact transcription (two adversarial reviewers' input folded in) · **§10 = second-pass direct measurement** (two adversarial reviewers' input folded in) |
+| **Date** | 2026-09-19. **§1~§9 transcribe the previous session's measurements**, and **§10 is what this document measured directly** |
+| **Method** | Three survey tracks (technique analysis · peer survey · standards) + **three direct measurements on codex-cli 0.155.0** (first pass) + ★**11 launches (second pass — §10)**★ |
+| **★The sections differ in nature★** | ★**§1~§9 did not take a single new measurement**★ — they are a transcription and structuring of **two sources** (the previous session's handoff + the body of commit `75bdfda`). ★**§10 is different — it launched the TUI on a real PTY and measured directly**★ (home copy only · real `~/.codex` md5 confirmed unchanged). **Do not read §10 down to a transcription on the strength of the preamble alone.** |
+| **Confidence legend** | ★**Measured**★ = confirmed by **running** codex-cli 0.155.0 **directly** (§1~§9 = by the previous session, §10 = by this document) · **precedent reading** = reading peer source and comments · **unmeasured** = not done (§7 · §10-5) · **unverified transcription** = a transcription that cannot cite its source |
+| **Why this survey** | Launch codex in terminal mode and the conversation does not continue after a restart — **codex issues the identifier to resume from by itself**, and the terminal path had **no endpoint to receive it** |
 
-> ★**먼저 읽을 것 — 이 문서의 값어치는 「실측」 라벨에 있다**★
+> ★**Read this first — this document's value lies in the 「실측」 label**★
 >
-> ★**codex 벤더 문서는 hook 개념만 적고, 아래의 기계적 계약(`trusted_hash`·`hooks.state`·저장 위치·무언 스킵·비대화형 신뢰 부여)을 한 줄도 적지 않는다.**★ 그래서 §2~§4 의 「실측」 표시는 장식이 아니라 **재현 비용의 표시**다 — 다시 재려면 측정 하나에 **10~16분 + 워커 15만 토큰**이다(실측 3회 = 145k·149k·170k, 조사 3갈래 = 177k·159k·136k).
+> ★**The codex vendor docs describe only the hook concept, and do not write a single line about the mechanical contract below (`trusted_hash` · `hooks.state` · storage location · silent skip · non-interactive trust grant).**★ So the 「실측」 marks in §2~§4 are not decoration but **a mark of reproduction cost** — re-measuring costs **10~16 minutes + 150k worker tokens** per measurement (three measurements = 145k·149k·170k, three survey tracks = 177k·159k·136k).
 >
-> 그 세션은 이 조사를 **보고서로 남기지 못했고 핸드오프가 유일한 기록이었다.** 이 파일이 그 기록의 정본이다.
+> That session **could not leave this survey as a report, and the handoff was the only record.** This file is the canonical source of that record.
 
 ---
 
-## 0. 결론과 범위
+## 0. Conclusion and scope
 
-**질문:** 감독자(우리 데몬)가 codex 세션 id 를 어떻게 회수해서 **터미널 모드** 세션을 resume 하나.
+**Question:** how does the supervisor (our daemon) recover the codex session id to resume a **terminal-mode** session.
 
-**답 = codex 의 `SessionStart` 훅이 우리 CLI 를 부르고, 그 CLI 가 stdin JSON 의 `session_id` 를 우리에게 되돌려 보낸다.** 감독자는 자기 상관 토큰을 **env 로 심어** 두고 훅 프로세스가 그것을 지고 돌아온다 — codex 가 훅에 env 를 하나도 주입하지 않고 **순수 상속**하기 때문에 성립한다(§2-2).
+**Answer = codex's `SessionStart` hook calls our CLI, and that CLI sends the `session_id` from the stdin JSON back to us.** The supervisor **plants its own correlation token in env**, and the hook process carries it back — this holds because codex injects no env at all into the hook and **purely inherits** (§2-2).
 
-★**이 절이 한때 「세 경로 중 둘에서만 재 봤다」로 적혀 있었다 — §10 이 그 공백을 닫았다.**★ 1차는 `codex exec`·`codex app-server` 둘만 쟀고 TUI 경로가 비어 있었는데, **2차(§10)가 실 PTY 로 그 경로를 직접 몰았다.**
+★**This section once said 「세 경로 중 둘에서만 재 봤다」 — §10 closed that gap.**★ The first pass measured only `codex exec` and `codex app-server`, leaving the TUI path empty, and **the second pass (§10) drove that path directly on a real PTY.**
 
-**확정 조건 넷 중 셋이 닫혔다**:
+**Three of the four conditions for confirmation are closed**:
 
-1. ~~TUI 경로에서 `SessionStart` 훅이 **실제로 발화하나**~~ → ★**닫힘**★(§10-1.4 — 승인 뒤 첫 턴에 발화)
-2. ~~그 stdin 페이로드가 **7필드 그대로인가**~~ → ★**닫힘**★(§10-1.4 에 페이로드 원문)
-3. ~~신뢰 심사 화면을 **통과해 승인이 영속하나**~~ → ★**닫힘**★(§10-1.2 — 키가 launch 간 안정적이고 재기동 시 무프롬프트 `trusted`)
-4. **그래서 우리 데몬이 실제로 번호를 받나 — 우리 배선까지 포함한 end-to-end** → ★**아직 안 했다. 이것 하나만 남았다.**★ 측정은 전부 별도 하네스로 했고 우리 코드가 그 계약을 타는 것은 못 봤다.
+1. ~~Does the `SessionStart` hook **actually fire** on the TUI path~~ → ★**closed**★ (§10-1.4 — fires on the first turn after approval)
+2. ~~Is that stdin payload **exactly the 7 fields**~~ → ★**closed**★ (§10-1.4 has the payload verbatim)
+3. ~~Does approval **persist through the trust-review screen**~~ → ★**closed**★ (§10-1.2 — the key is stable across launches and on restart it is `trusted` without a prompt)
+4. **So does our daemon actually receive the id — end-to-end including our wiring** → ★**Not done yet. This one alone remains.**★ Every measurement used a separate harness, and we have not seen our code ride that contract.
 
-★**그 답을 고른 축은 기법의 성공률이 아니라 「못 찾았을 때 무슨 일이 일어나나」다**★ — §1 이 그 축이고, 이 보고서에서 **가장 먼저 읽어야 할 절**이다.
+★**The axis that picked that answer is not the technique's success rate but 「못 찾았을 때 무슨 일이 일어나나」**★ — §1 is that axis, and it is the **section to read first** in this report.
 
-★**단 실제로 지은 것은 그 기법 범주의 온전한 실물이 아니다 — 오귀속을 절반만 막는다**★. 원인·빈 칸 창의 범위·오늘 있는 방어 한 줄의 정본 = §1 의 「축을 절반만 닫는다」 · 남은 위험으로서의 상태 = §7.
+★**But what we actually built is not the full form of that technique category — it prevents misattribution only halfway**★. The cause, the extent of the empty-slot window, and the one line of defense that exists today are canonical in §1 "it closes the axis only halfway" · the state as a remaining risk = §7.
 
-### 무엇을 측정했고 무엇을 안 했나
+### What was measured and what was not
 
-| 측정 경로 | 상태 |
+| Measured path | Status |
 |---|---|
-| `codex exec` | ★실측★ — 훅 발화·타이밍·페이로드·신뢰 |
-| `codex app-server` | ★실측★ — 훅 발화·타이밍·`thread/start` 와의 id 동일성·신뢰 부여 왕복 |
-| **TUI(터미널) 경로** | ★**실측(2차 · §10)**★ — 심사 화면·승인·발화·`session_id`·resume·중복 `-c` 우선순위까지. **남은 것은 위 4번(우리 배선 end-to-end) 하나** |
+| `codex exec` | ★Measured★ — hook firing · timing · payload · trust |
+| `codex app-server` | ★Measured★ — hook firing · timing · id identity with `thread/start` · trust-grant round trip |
+| **TUI (terminal) path** | ★**Measured (second pass · §10)**★ — review screen · approval · firing · `session_id` · resume · even the precedence of duplicate `-c`. **What remains is the one item 4 above (our wiring end-to-end)** |
 
-- **우리 쪽 배선은 실 codex 로 주행한 적이 없다** — 즉 §2 는 **codex 의 계약**에 대한 실측이고, **우리 코드가 그 계약을 실제로 타는 것**은 아직 안 봤다. 왜 배선할 대상이 없었나(= 커밋 경계) = §9.
-- 착지한 코드의 정본은 커밋 `75bdfda` 본문이고 여기 되풀지 않는다.
+- **Our side's wiring has never been run against a real codex** — that is, §2 is a measurement of **codex's contract**, and we have not yet seen **our code actually ride that contract**. Why there was nothing to wire to (= the commit boundary) = §9.
+- The canonical source for the landed code is the body of commit `75bdfda`, and it is not repeated here.
 
 ---
 
-## 1. ★결정 축 — 위험한 것은 기법이 아니라 「못 찾았을 때 하나 고르는 tie-break」다★
+## 1. ★The deciding axis — what is dangerous is not the technique but 「못 찾았을 때 하나 고르는 tie-break」★
 
-★**`가장 최근 mtime`·`첫 매치` 류의 규칙이 붙는 순간, 그 기법은 not-found 를 wrong-found 로 변환한다. 그리고 그 변환은 전부 조용하다.**★ 최악 시나리오 — **새 대화가 「resumed」로 보고되는 것** — 는 정확히 이 경로로만 생긴다. 기법의 평균 정확도가 아니라 **실패 모드의 소리 크기**가 판정축이다.
+★**The moment a rule like `가장 최근 mtime` or `첫 매치` attaches, that technique converts not-found into wrong-found. And that conversion is entirely silent.**★ The worst scenario — **a new conversation reported as 「resumed」** — arises exactly and only by this path. The deciding axis is not a technique's average accuracy but **the loudness of its failure mode**.
 
-**오귀속이 구조적으로 불가능한 기법은 둘뿐이고, 둘 다 추론이 아니라 전파(propagation)다:**
+**Only two techniques make misattribution structurally impossible, and both are propagation, not inference:**
 
-1. **감독자가 id 를 선발급해 주입한다**(claude 방식) — ★**codex 엔 그 플래그가 없다(독립 2회 확인)**★.
-2. ★**감독자가 상관 토큰을 env 로 심고, 자식의 훅이 그것을 되돌려 보낸다**★ — **W3C Trace Context 가 같은 답이다.** 우리가 고른 것이 이것이다.
+1. **The supervisor pre-issues the id and injects it** (the claude way) — ★**codex has no such flag (confirmed twice, independently)**★.
+2. ★**The supervisor plants a correlation token in env, and the child's hook sends it back**★ — **W3C Trace Context gives the same answer.** This is what we chose.
 
-### ★★단 우리가 실제로 지은 것은 ②의 온전한 실물이 아니다 — 축을 절반만 닫는다★★
+### ★★But what we actually built is not the full form of ② — it closes the axis only halfway★★
 
-**범주 ②가 오귀속 불가인 것은 「토큰이 그 세션 하나만 가리킬 때」의 이야기다.** 우리가 심는 토큰은 그 조건을 만족하지 않는다 — ★**에이전트마다 하나인 제어 평면 토큰이고**(`ENGRAM_TOKEN`, ADR-0086 · 심는 자리 = `crates/engram-dashboard-agent/src/backend/mod.rs:102` 의 `inject_cli_entrance`) **env 는 자식에게 자동 상속된다.**★ 그래서 **에이전트가 하위 에이전트를 띄우면 그 하위 세션의 훅도 글자 그대로 같은 토큰으로 보고한다.**
+**Category ② being immune to misattribution is a statement about 「토큰이 그 세션 하나만 가리킬 때」.** The token we plant does not satisfy that condition — ★**it is a control-plane token that is one per agent** (`ENGRAM_TOKEN`, ADR-0086 · planted at `inject_cli_entrance` in `crates/engram-dashboard-agent/src/backend/mod.rs:102`) **and env is inherited by children automatically.**★ So **when an agent launches a sub-agent, that sub-session's hook also reports with literally the same token.**
 
-★**부모와 자식을 가를 수단이 없다**★ — 토큰도 env 도 같고, **실측 7필드 페이로드에 계보를 말하는 칸이 없다**(§2-2). ★**성숙 피어(herdr)가 정확히 이 목적으로 읽는 `CODEX_THREAD_ID` 가 0.155.0 에 없다**★(§2-2) — 그래서 그 수단을 베끼지 못했다.
+★**There is no means to tell parent from child**★ — the token and env are the same, and **the measured 7-field payload has no field that speaks of lineage** (§2-2). ★**`CODEX_THREAD_ID`, which the mature peer (herdr) reads for exactly this purpose, does not exist in 0.155.0**★ (§2-2) — so we could not copy that means.
 
-**오늘 이 축에 쓰는 방어는 「이미 찬 칸을 덮지 않는다」 한 줄뿐이고, 그것이 막는 것은 칸이 찬 *뒤*에 오는 보고다.** ★**칸이 빈 동안에는 먼저 닿은 쪽이 이긴다**★ — 자식의 훅이 부모보다 먼저 닿으면 **자식의 세션 id 가 부모 칸에 앉고**, 그 뒤 부모가 거절된다.
+**The only defense we use on this axis today is the one line 「이미 찬 칸을 덮지 않는다」 and what it blocks is a report that arrives *after* the slot is filled.** ★**While the slot is empty, whoever arrives first wins**★ — if the child's hook arrives before the parent's, **the child's session id sits in the parent's slot**, and the parent is then rejected.
 
-- ★**그 빈 칸 창은 화신마다 한 번씩 열린다**★ — Fresh 스폰이 그 칸을 반납하기 때문이다. (반납이 없으면 창은 한 번뿐이지만 **2회차 화신부터 정상 재시작마다 거절 로그가 찍혀 진짜 중첩 사고를 가린다** — 신호를 살리는 쪽을 골랐다.)
-- ★**app-server 모드에는 그 창이 사실상 없다**★ — 훅이 **첫 `turn/start` 16ms 뒤**에 뜨므로 **통로 sink 가 언제나 먼저 칸을 채우고**, 훅이 싣고 오는 값은 그 thread id 와 **같은 값**이다(§2-2). 즉 그 모드의 훅 보고는 늘 「이미 같은 값」으로 끝난다. ★**창이 실재하는 것은 터미널 경로다.**★
+- ★**That empty-slot window opens once per incarnation**★ — because a Fresh spawn returns that slot. (Without the return, the window would open only once, but **from the second incarnation on every normal restart prints a rejection log, which hides a real nesting accident** — we chose the side that keeps the signal alive.)
+- ★**In app-server mode that window is practically absent**★ — the hook fires **16ms after the first `turn/start`**, so **the channel sink always fills the slot first**, and the value the hook carries is the **same value** as that thread id (§2-2). That is, in that mode the hook's report always ends as 「이미 같은 값」. ★**The window is real on the terminal path.**★
 
-★**아래 순위는 그대로 옳다 — 그것은 기법 *범주*의 순위다.**★ 바뀌는 것은 **범주에서 우리 구현으로 내려오는 한 걸음**이다: ②는 일반적으로 오귀속 불가이지만, **우리가 심은 구체적 토큰은 그 성질을 물려받지 못한다.** 근거 정본 = `crates/engram-dashboard-daemon/src/control/hook.rs` 헤더(위협 모델·거부한 수단·창의 범위가 거기 있다).
+★**The ranking below is still correct — it is a ranking of technique *categories*.**★ What changes is **one step down from the category to our implementation**: ② is generally immune to misattribution, but **the concrete token we planted does not inherit that property.** Canonical grounds = the header of `crates/engram-dashboard-daemon/src/control/hook.rs` (the threat model, the rejected means and the extent of the window are there).
 
-### 조용/시끄러움 순위 (안전한 순 — 시끄러운 쪽이 안전하다)
+### Quiet/loud ranking (safest first — the louder side is the safer)
 
 ```
 미지원 선언  >  id 선발급  >  ★훅 + 상관 토큰★  >  구조화 서버 모드
@@ -81,192 +81,192 @@
 
 ---
 
-## 2. ★실측 — codex-cli 0.155.0(`codex exec`·`codex app-server` 두 경로)★
+## 2. ★Measured — codex-cli 0.155.0 (the two paths `codex exec` and `codex app-server`)★
 
-### 2-1. 훅 발화와 신뢰
+### 2-1. Hook firing and trust
 
-- **훅을 실행 인자(`-c hooks.SessionStart=[…]`)로만 넘기면 파서는 받아들이지만 실행되지 않는다.** ★**완전 침묵으로 스킵된다**★ — 오류·프롬프트·로그 전부 없고 **종료코드 0**. `RUST_LOG=codex_hooks=trace` 까지 켜도 **한 줄 안 남는다**. **막는 것은 신뢰(trust)다.**
-- `--dangerously-bypass-hook-trust` 를 붙이면 실행된다(**2회 재현**). ★**단 그 인자는 root/`exec` 에만 있고 `codex app-server` 는 받지 않는다**★ — 붙이면 `error: unexpected argument` 로 죽는다.
-- **신뢰 영속 위치 = `$CODEX_HOME/config.toml`:**
+- **If you pass the hook only as an execution argument (`-c hooks.SessionStart=[…]`), the parser accepts it but it does not run.** ★**It is skipped in complete silence**★ — no error, prompt or log at all, and **exit code 0**. Even with `RUST_LOG=codex_hooks=trace` on, **not a single line is left**. **What blocks it is trust.**
+- It runs if you add `--dangerously-bypass-hook-trust` (**reproduced twice**). ★**But that argument exists only on root/`exec`, and `codex app-server` does not accept it**★ — adding it kills it with `error: unexpected argument`.
+- **Where trust persists = `$CODEX_HOME/config.toml`:**
 
   ```toml
   [hooks.state.'<sourcePath>:<event_snake>:<group_index>:<handler_index>']
   trusted_hash = "sha256:<hex>"
   ```
 
-  ★**키는 훅 슬롯 단위다**★ — 훅 하나를 고치면 그 하나만 `modified` 가 되지만, **배열 순서를 바꾸거나 앞 항목을 지우면 뒤 슬롯의 키가 밀려 신뢰가 풀린다.**
-- ★**신뢰 부여는 프로그램으로 된다(왕복 실측 확인)**★: app-server 로 `hooks/list` → 각 훅의 `key`·`currentHash`·`trustStatus` 수신 → `config/batchWrite` 로 `hooks.state` upsert(`mergeStrategy:"upsert"`, `reloadUserConfig:true`) → `untrusted` → `trusted`. ★**새 프로세스에서도 유지된다**★. `-c` 로 주입한 훅도 같은 방식으로 신뢰가 붙는다.
-- ★**해시를 직접 계산하지 말 것**★ — 재현은 가능하나(정규화 JSON 의 sha256), **선례(orca)가 codex 릴리스마다 깨져 자체 계산을 버리고 RPC 경로로 갈아탔다**(선례 독해). 그 시행착오를 건너뛴다.
-- ★**신뢰 상태를 `-c` 로 주입하는 것은 실패했다**★ — 키에 콜론·백슬래시가 섞여서다. **파일로 넣어야 한다.**
-- ★**`exec`·`app-server` 는 심사를 묻지 않고 무언 스킵한다**★ — **이 절반은 실측이다**(두 모드를 직접 돌렸다).
-- **그 심사 프롬프트가 TUI 에만 뜬다는 쪽은 선례 독해이고, 그 출처 파일조차 이 문서가 열어 보지 않았다.** 근거로 적힌 `tui/src/startup_hooks_review.rs` 는 **이 저장소의 경로가 아니라 codex 자기 소스 트리**의 것이다 — 저장소는 `openai/codex`(이 저장소가 이미 그 상류를 그 이름으로 인용하고, 같은 트리를 `codex-rs/<crate>/src/…` 꼴로 적는 선례가 있다 — `docs/reference/backend-capabilities.md`), ★**리비전은 못 박힌 것이 없다**★(가진 앵커는 측정에 쓴 `codex-cli 0.155.0` 하나이고, 그 npm 배포물에는 Rust 소스가 없다). 그래서 이 한 줄은 한때 **미검 전사**였다. ★**§10 이 그것을 실측으로 갈음했다**★ — TUI 에서 심사 화면을 실제로 봤고(§10-3 에 문구 원문), `exec`·`app-server` 의 무언 스킵은 바로 위 줄이 이미 쟀으므로 **둘이 짝을 이뤄 닫힌다.** ★**소스 리비전을 여는 재확인은 더 이상 필요 없다 — 그 비용(측정 하나에 10~16분 + 15만 토큰)을 쓰러 가지 말 것.**★
-- `trustStatus` 어휘 = `trusted` / `untrusted` / `modified` / `managed`.
+  ★**The key is per hook slot**★ — changing one hook makes only that one `modified`, but **reordering the array or deleting an earlier entry shifts the keys of later slots and releases the trust.**
+- ★**Granting trust can be done programmatically (round trip confirmed by measurement)**★: via app-server, `hooks/list` → receive each hook's `key`·`currentHash`·`trustStatus` → `config/batchWrite` upserts `hooks.state` (`mergeStrategy:"upsert"`, `reloadUserConfig:true`) → `untrusted` → `trusted`. ★**It persists in a new process too**★. A hook injected with `-c` gets trust the same way.
+- ★**Do not compute the hash yourself**★ — it can be reproduced (sha256 of normalized JSON), but **the precedent (orca) broke on every codex release, dropped its own computation and moved to the RPC path** (precedent reading). Skip that trial and error.
+- ★**Injecting the trust state with `-c` failed**★ — because the key mixes colons and backslashes. **It has to go in as a file.**
+- ★**`exec` and `app-server` do not ask for review and silently skip**★ — **this half is measured** (we ran both modes directly).
+- **The claim that the review prompt appears only in the TUI is precedent reading, and this document did not even open the source file behind it.** The cited `tui/src/startup_hooks_review.rs` belongs to **codex's own source tree, not a path in this repository** — the repository is `openai/codex` (this repository already cites that upstream by that name and has a precedent of writing the same tree as `codex-rs/<crate>/src/…` — `docs/reference/backend-capabilities.md`), ★**no revision is pinned**★ (the only anchor we have is the `codex-cli 0.155.0` used for measurement, and its npm distribution has no Rust source). So this one line was once an **unverified transcription**. ★**§10 replaced it with measurement**★ — we actually saw the review screen in the TUI (§10-3 has the wording verbatim), and the silent skip of `exec` and `app-server` was already measured by the line just above, so **the two close as a pair.** ★**A re-check that opens the source revision is no longer needed — do not go spend that cost (10~16 minutes + 150k tokens per measurement).**★
+- `trustStatus` vocabulary = `trusted` / `untrusted` / `modified` / `managed`.
 
-### 2-2. 훅이 언제 뜨고 무엇을 주나
+### 2-2. When the hook fires and what it gives
 
-- **`codex exec`**: 세션 생성 직후, ★**사용자 프롬프트가 대화에 실리기 0.13초 전**★에 뜬다. **두 표본에서 간격이 동일** → **훅을 동기로 기다린 뒤 프롬프트를 넣는 구조**다.
-- ★**`codex app-server` 도 뜬다**★ — 단 `thread/start` 가 아니라 ★**첫 `turn/start` 16ms 뒤**★다. **스레드만 열고 턴을 안 돌리면 안 뜬다.**
-- ★★**app-server 에서 훅의 `session_id` == `thread/start` 응답의 `thread.id`(같은 값 실측)**★★ — 두 경로가 **같은 칸에 같은 값**을 쓴다. 다만 **통로 sink 가 언제나 먼저 도착한다.**
-- `thread/resume` 뒤 **첫 턴도 뜨고** `source` 가 `resume` 이다(신규는 `startup`).
-- **app-server 는 `hook/started`·`hook/completed` 를 프로토콜로 내보낸다** → 외부 레코더 없이 발화·타이밍을 잴 수 있다(§8).
-- ★**stdin 페이로드 = 정확히 7필드**★(verbatim):
+- **`codex exec`**: fires right after session creation, ★**0.13 seconds before the user prompt is put into the conversation**★. **The interval is identical in two samples** → the structure is **wait for the hook synchronously, then insert the prompt.**
+- ★**`codex app-server` fires too**★ — but not at `thread/start`, ★**16ms after the first `turn/start`**★. **If you only open a thread and run no turn, it does not fire.**
+- ★★**In app-server, the hook's `session_id` == the `thread.id` in the `thread/start` response (same value, measured)**★★ — the two paths write **the same value into the same slot**. Only **the channel sink always arrives first.**
+- The **first turn after `thread/resume` fires too** and `source` is `resume` (a new one is `startup`).
+- **app-server emits `hook/started` and `hook/completed` in the protocol** → firing and timing can be measured without an external recorder (§8).
+- ★**stdin payload = exactly 7 fields**★ (verbatim):
 
   ```
   session_id · transcript_path · cwd · hook_event_name · model · permission_mode · source
   ```
 
-  ★**467바이트, 개행 없음**★. ★**argv 는 비어 있다 — 전달은 stdin 단독**★. `.cmd` 직접 지정으로 뜬다(**셸 래핑 불필요**). **훅 프로세스 cwd = 세션 cwd.**
-- ★**그 467 을 쓰기 전에 읽을 것 — 저장소에 페이로드 크기를 말하는 수가 셋이고 셋이 다르다**★:
-  - ① **467바이트** — 이 줄(그 세션이 본 실 페이로드).
-  - ② **「300 바이트 미만」** — stdin 상한 상수의 주석(`crates/engram-dashboard-daemon/src/bin/engram.rs` 의 `HOOK_STDIN_CAP`).
-  - ③ **211바이트** — 같은 파일 시험 상수 `MEASURED_HOOK_PAYLOAD`(직접 셌다).
+  ★**467 bytes, no newline**★. ★**argv is empty — delivery is stdin alone**★. It fires when `.cmd` is specified directly (**no shell wrapping needed**). **Hook process cwd = session cwd.**
+- ★**Before you use that 467, read this — the repository has three numbers speaking of payload size, and all three differ**★:
+  - ① **467 bytes** — this line (the real payload that session saw).
+  - ② **「300 바이트 미만」** — the comment on the stdin cap constant (`HOOK_STDIN_CAP` in `crates/engram-dashboard-daemon/src/bin/engram.rs`).
+  - ③ **211 bytes** — the test constant `MEASURED_HOOK_PAYLOAD` in the same file (counted directly).
 
-  ③은 두 경로 칸을 `C:/x/y.jsonl`·`C:/x` 로 **줄여 적은 변형**이다 — 그 상수가 말하는 「실측된 페이로드 그대로」는 **칸 구성**을 뜻하고 길이를 뜻하지 않는다. 실 페이로드는 rollout 절대경로와 세션 cwd 를 싣고 JSON 이 역슬래시를 겹치므로 그 두 칸이 수백 바이트를 먹는다. ★**②는 ①·③ 어느 쪽과도 맞지 않는다**★(③보다 크고 ①보다 작다) — **그 줄이 어느 표본을 보고 쓰였는지는 규명하지 않았다**(이 패스는 재측정 0 · 그래서 그 주석을 고치지도 않았다 — 안 재고 고치면 미검 수치가 미검 수치로 바뀔 뿐이다).
-  ★**버퍼를 재는 자리에서 셋 중 하나를 골라 집지 말 것**★ — 판정에 필요한 사실은 **셋 다 64 KiB 상한의 1% 미만**이라는 것 하나이고, 그 상한의 근거는 크기가 아니라 「이 stdin 은 상대가 채운다」다(그 상수 doc).
-- ★**codex 는 훅 프로세스에 자기 env 를 하나도 주입하지 않는다 — 순수 상속이다**★. **그래서 우리가 심은 `ENGRAM_TOKEN` 이 그대로 도달하고, 훅이 `/control/hook` 에 내미는 bearer 가 바로 그 토큰이다**(ADR-0086 · 심는 자리 = `backend/mod.rs:102`). ★**이 한 줄이 §1 기법 ②를 성립시키는 근거이면서 동시에 그 기법의 구멍이다**★ — 같은 상속이 **하위 에이전트의 훅에게도** 같은 토큰을 준다(§1 의 「축을 절반만 닫는다」).
-- ★**`CODEX_THREAD_ID` 는 0.155.0 에 존재하지 않는다**★(**바이너리 전체 문자열 0건**). **herdr 의 codex 훅이 그것으로 중첩을 가르는데, 그 가드를 베끼면 항상 미설정으로 읽힌다.**
-- **codex 훅 이벤트 어휘**(herdr 설치 코드에서 — 선례 독해): `SessionStart` · `UserPromptSubmit` · `PreToolUse` · `Stop` · `PermissionRequest`. **herdr 도 지금은 `SessionStart` 하나만 쓴다**(나머지는 옛 항목을 지우는 코드만 남았다).
+  ③ is **a variant that abbreviates** the two path fields to `C:/x/y.jsonl` and `C:/x` — the 「실측된 페이로드 그대로」 that constant speaks of means the **field composition**, not the length. The real payload carries the rollout absolute path and the session cwd, and JSON doubles the backslashes, so those two fields eat several hundred bytes. ★**② matches neither ① nor ③**★ (larger than ③ and smaller than ①) — **which sample that line was written from has not been established** (this pass did zero re-measurement · so it did not fix that comment either — fixing without measuring merely turns one unverified number into another).
+  ★**Do not pick one of the three at the spot where you size the buffer**★ — the fact the decision needs is just that **all three are under 1% of the 64 KiB cap**, and the ground of that cap is not size but 「이 stdin 은 상대가 채운다」 (that constant's doc).
+- ★**codex injects none of its own env into the hook process — it is pure inheritance**★. **So the `ENGRAM_TOKEN` we planted arrives as is, and the bearer the hook presents to `/control/hook` is exactly that token** (ADR-0086 · planted at `backend/mod.rs:102`). ★**This one line is both the ground that makes §1 technique ② hold and the hole in that technique**★ — the same inheritance gives the same token **to a sub-agent's hook too** (§1 "it closes the axis only halfway").
+- ★**`CODEX_THREAD_ID` does not exist in 0.155.0**★ (**zero hits in the binary's full strings**). **herdr's codex hook uses it to tell nesting apart, and if you copy that guard it always reads as unset.**
+- **codex hook event vocabulary** (from herdr's install code — precedent reading): `SessionStart` · `UserPromptSubmit` · `PreToolUse` · `Stop` · `PermissionRequest`. **herdr too now uses only `SessionStart`** (for the rest only code that deletes old entries remains).
 
 ---
 
-## 3. 실행 인자로 넘어가는 것 / 안 넘어가는 것
+## 3. What passes through execution arguments / what does not
 
-**판별법 = `codex -c '<키>=<값>' --strict-config app-server --stdio < /dev/null`** — ★**가짜 키는 `unknown configuration field` 로 죽으므로 대조군이 성립한다**★. 이것이 이 표를 관측이 아니라 **시험**으로 만든다.
+**Discrimination method = `codex -c '<키>=<값>' --strict-config app-server --stdio < /dev/null`** — ★**a fake key dies with `unknown configuration field`, so a control group holds**★. This is what makes this table a **test** rather than an observation.
 
-| 넘기려는 것 | 결과 |
+| What we try to pass | Result |
 |---|---|
-| `model_instructions_file=<경로>` | ✅ **된다**(없는 경로를 주니 **실제로 읽으러 가 실패**) |
-| `project_doc_max_bytes=<수>` | ✅ 된다 |
-| `features.hooks=true` | ✅ 된다 (단 `features list` 에 `hooks stable true` — **기본 켜져 있어 불필요**) |
-| `hooks.<이벤트>=[{hooks=[{type="command",command="…"}]}]` | ✅ ★**인라인으로 넘어간다**★(훅 표가 이벤트 이름으로 열려 있다) |
-| `skills.include_instructions` · `skills.max_context_tokens` · `skills.bundled` | ✅ 된다 |
-| **`skills_root` / `skills.root` / `skills.dir` …** | ❌ ★**그런 키가 없다**★. `SkillsConfig` 필드는 `bundled`·`include_instructions`·`max_context_tokens`·`config` — **위치 노브가 없다** |
-| `--config <파일>` | ❌ ★**그런 플래그가 없다**★ |
+| `model_instructions_file=<경로>` | ✅ **works** (given a nonexistent path, it **actually went to read it and failed**) |
+| `project_doc_max_bytes=<수>` | ✅ works |
+| `features.hooks=true` | ✅ works (but `features list` shows `hooks stable true` — **on by default, so unnecessary**) |
+| `hooks.<이벤트>=[{hooks=[{type="command",command="…"}]}]` | ✅ ★**passes inline**★ (the hook table is open by event name) |
+| `skills.include_instructions` · `skills.max_context_tokens` · `skills.bundled` | ✅ works |
+| **`skills_root` / `skills.root` / `skills.dir` …** | ❌ ★**no such key**★. The `SkillsConfig` fields are `bundled`·`include_instructions`·`max_context_tokens`·`config` — **there is no location knob** |
+| `--config <파일>` | ❌ ★**no such flag**★ |
 
-### 판별력에 대한 두 경고
+### Two warnings about discriminating power
 
-- ★**`codex doctor` 로 `-c` 키 유효성을 검증하려 하지 말 것**★ — **가짜 키도 통과한다(판별력 0)**. 위 `--strict-config` + `app-server --stdio < /dev/null` 조합만이 판별 경로다.
-- ★**`--strict-config` 의 수용은 약하다**★ — **타입은 검증하나**(문자열을 배열 자리에 주면 죽는다) ★**matcher 그룹 내 미지 키는 통과한다**★. 즉 "**파서가 받아들였다**"에 실을 무게가 작다 — 위 표의 ✅ 중 실제 동작까지 본 것은 `model_instructions_file`(읽으러 갔다)과 훅 인라인(발화했다)뿐이다.
+- ★**Do not try to validate `-c` key validity with `codex doctor`**★ — **a fake key passes too (discriminating power zero)**. Only the `--strict-config` + `app-server --stdio < /dev/null` combination above is a discrimination path.
+- ★**`--strict-config` acceptance is weak**★ — **it validates types** (giving a string where an array goes kills it) but ★**an unknown key inside a matcher group passes**★. That is, little weight should rest on "**the parser accepted it**" — of the ✅ rows above, only `model_instructions_file` (it went to read) and the inline hook (it fired) were seen to actually behave.
 
 ### `CODEX_HOME`
 
-- ★**`CODEX_HOME` 환경변수로 홈을 통째로 옮길 수 있다(실측)**★ — **그 프로세스에만 적용되고 사용자 본인 codex 는 원래 홈을 쓴다.**
-- ★**단 인증도 같이 옮겨간다**★ — 빈 홈에서 「자격증명 없음」. (이 성질이 §8 의 무료 측정 트릭을 만든다.)
-- **스킬 위치가 홈 아래 `.codex/skills` 고정**이므로, **스킬을 우리가 공급하려면 이 경로뿐이다.**
+- ★**The `CODEX_HOME` environment variable can move the whole home (measured)**★ — **it applies to that process only, and the user's own codex keeps using the original home.**
+- ★**But auth moves with it**★ — in an empty home, 「자격증명 없음」. (This property creates §8's free measurement trick.)
+- **The skill location is fixed at `.codex/skills` under the home**, so **if we supply skills ourselves, this is the only path.**
 
 ---
 
-## 4. 저장 구조 (터미널 모드)
+## 4. Storage structure (terminal mode)
 
-- **`codex resume [SESSION_ID]` 실재.** `--last`(피커 생략) · `--all`(cwd 필터 해제) · 인자 없으면 **TUI 피커**. **비-TUI 짝 = `codex exec resume`.**
-- ★**`codex continue` 는 0.155.0 에 없다**★ — **웹 자료와 어긋난다.**
-- ★**세션을 LIST 하는 명령이 없다**★ — `resume` 피커는 **순수 TUI** 이고 `--json` 이 없다. **기계가 읽을 수 있는 것은 전부 비문서 파일/DB 직접 읽기다.**
-- **저장은 두 곳이 짝:**
-  - rollout JSONL — `~/.codex/sessions/<Y>/<M>/<D>/rollout-<로컬시각>-<uuid>.jsonl`, **첫 줄 `session_meta` 에 id·cwd**
-  - `state_5.sqlite` 의 **`threads` 테이블** — `id`·`rollout_path`·`created_at`·`cwd`·`title`·`name`·`originator`
-  - **`codex doctor` 가 두 저장소의 짝을 스스로 점검한다.**
-- ★**포맷이 이행 중이다**★ — `threads.history_mode` 가 **legacy/paginated 혼재**, `codex migrate-rollouts` 존재(둘 다 실측). ★**파일을 직접 읽는 길로 가면 이 이행에 물린다**★ — §1 의 최하위 기법이 기술적으로도 불안정하다는 두 번째 사유다. **그 판정은 이 두 사실만으로 선다.**
-  - ★**「관련 버그 다수 열림」은 이 문서가 출처를 못 댄다**★ — 이슈 트래커 지식이라 실측도 선례 독해도 아니고 §7 의 미측정도 아니다. 범례의 **미검 전사** 칸이 그 자리다 — 결론에 무게를 싣지 말 것이고, 확인하려면 `openai/codex` 이슈를 직접 볼 것.
-- **`originator`/`source` 가 실행 주체를 가른다:** `codex-tui`/`cli` · `codex_exec`/`exec` · `Claude Code`·`engram-dashboard`/`vscode`.
+- **`codex resume [SESSION_ID]` exists.** `--last` (skip the picker) · `--all` (drop the cwd filter) · with no argument the **TUI picker**. **Non-TUI counterpart = `codex exec resume`.**
+- ★**`codex continue` does not exist in 0.155.0**★ — **it disagrees with web sources.**
+- ★**There is no command that LISTs sessions**★ — the `resume` picker is **pure TUI** and has no `--json`. **Everything a machine can read is direct reading of undocumented files/DB.**
+- **Storage is a pair of two places:**
+  - rollout JSONL — `~/.codex/sessions/<Y>/<M>/<D>/rollout-<로컬시각>-<uuid>.jsonl`, **id and cwd in the first-line `session_meta`**
+  - the **`threads` table** of `state_5.sqlite` — `id`·`rollout_path`·`created_at`·`cwd`·`title`·`name`·`originator`
+  - **`codex doctor` checks the pairing of the two stores by itself.**
+- ★**The format is mid-transition**★ — `threads.history_mode` is a **mix of legacy/paginated**, and `codex migrate-rollouts` exists (both measured). ★**Going the direct-file-reading route gets you bitten by this transition**★ — this is the second reason the lowest technique in §1 is technically unstable too. **That decision stands on these two facts alone.**
+  - ★**「관련 버그 다수 열림」 — this document cannot cite a source for it**★ — it is issue-tracker knowledge, so it is neither measured nor precedent reading, nor an unmeasured item of §7. The legend's **unverified transcription** slot is its place — do not put weight on the conclusion, and to confirm, look at the `openai/codex` issues directly.
+- **`originator`/`source` tell the executing party apart:** `codex-tui`/`cli` · `codex_exec`/`exec` · `Claude Code`·`engram-dashboard`/`vscode`.
 
-### ★내부 모순 하나 — 해소하지 않고 남긴다★
+### ★One internal contradiction — left unresolved★
 
-**`codex exec` 에서 rollout 파일은 기동 0.7초 후 생긴다**(실측). ★**한때 「첫 턴에 생긴다(5s·23s 지연)」로 적혀 있던 관측은 `exec` 에서 재현되지 않았다**★. **TUI 경로였을 가능성 — 미규명.** 두 관측 중 어느 쪽이 어느 조건의 것인지 확정하지 못했으므로 **둘 다 남긴다.**
+**On `codex exec` the rollout file appears 0.7 seconds after launch** (measured). ★**The observation once written as 「첫 턴에 생긴다(5s·23s 지연)」 did not reproduce on `exec`**★. **It may have been the TUI path — not established.** We could not determine which of the two observations belongs to which condition, so **we keep both.**
 
 ---
 
-## 5. 피어 서베이
+## 5. Peer survey
 
-| 피어 | 무엇을 하나 | 이 문제에 대한 선례 값 |
+| Peer | What it does | Precedent value for this problem |
 |---|---|---|
-| **herdr** | **에이전트를 전부 PTY 로 돌리고**, codex 엔 `SessionStart` **훅 하나만** 설치해 stdin 페이로드에서 `session_id` 를 받아 소켓(POSIX)·CLI 재진입(Windows)으로 되돌려 보낸다. 파일 스캔·화면에서 id 읽기 **0줄** | ★**긍정 선례다 — 아래 「못 받는다」는 서술은 2026-09-19 클론 정독으로 반증됐다**★. 신뢰를 자동화하지 않는 것은 맞지만(`trusted_hash` 0건), **id 는 훅으로 정상 수신한다** — 심사 화면을 「막힘」 상태로 띄워 **사람이 한 번 승인하게** 넘길 뿐이다. 실패는 전부 조용하다(복원 시 에이전트를 아예 안 살리고 옛 화면만 깔아 둔다 — ★그쪽은 베끼지 말 것★) |
-| **orca** ★가장 가까움★ | **app-server RPC 로 신뢰 부여(주 경로)** + 자체 해시 폴백 + 심사 화면 **인식**(스크래핑). 주석에 `Codex 0.129+ gates each hook on a trusted_hash` | ★**긍정 선례 — 출처 검증 실패 시 resume 인자를 떼고 깨끗한 새 세션으로 띄운 뒤 사용자에게 고지한다**★. **계정 교차 resume 사고를 겪고 넣었다.** ★**우리가 원하는 정확한 행동 형태다**★. **단 「심사 화면 스크래핑 = 안전망」은 과했다**(2026-09-19 정독) — 화면 매치는 **막힘 분류 전용**이고 키 입력을 되쓰지 않는다 |
-| **octoally** | **유일하게 화면을 긁는다.** ★**첫 매치 무조건 채택 · 검증 0**★. 파일 탐색 폴백까지 달아 놨다 | ★**부정 선례** — 폴백의 존재가 「긁기만으로 부족했다」는 자백★. §1 의 최하위 기법의 실물 |
-| **멀티플렉서**(wezterm·zellij·tmux) | 세션 생존 + 클라이언트 재부착 | ★**이 문제를 안 푼다**★ — **터미널을 복원하지 에이전트 세션을 복원하지 않는다** |
+| **herdr** | **Runs every agent on a PTY**, installs **only one `SessionStart` hook** for codex, receives `session_id` from the stdin payload and sends it back through a socket (POSIX) or CLI re-entry (Windows). **Zero lines** of file scanning or reading the id off the screen | ★**A positive precedent — the statement below that it 「못 받는다」 was refuted by a close reading of the clone on 2026-09-19**★. It is true that it does not automate trust (`trusted_hash` zero hits), but **it receives the id normally through the hook** — it merely shows the review screen in a 「막힘」 state and **hands it to a human to approve once**. Every failure is silent (on restore it does not revive the agent at all and just lays down the old screen — ★do not copy that side★) |
+| **orca** ★closest★ | **Grants trust through app-server RPC (main path)** + its own hash fallback + **recognition** of the review screen (scraping). A comment reads `Codex 0.129+ gates each hook on a trusted_hash` | ★**A positive precedent — when provenance verification fails, it strips the resume argument, launches a clean new session and notifies the user**★. **It added this after suffering a cross-account resume accident.** ★**This is the exact behavior shape we want**★. **But 「심사 화면 스크래핑 = 안전망」 was overstated** (close reading 2026-09-19) — the screen match is **only for classifying blocked** and does not send key input back |
+| **octoally** | **The only one that scrapes the screen.** ★**Adopts the first match unconditionally · zero verification**★. It even attached a file-search fallback | ★**A negative precedent** — the existence of the fallback is a confession that 「긁기만으로 부족했다」★. The real instance of the lowest technique in §1 |
+| **Multiplexers** (wezterm·zellij·tmux) | Session survival + client re-attach | ★**They do not solve this problem**★ — **they restore the terminal, not the agent session** |
 
-**자체 해시 계산에 대한 orca 의 교훈은 §2-1 에 있다** — 주 경로를 RPC 로 갈아탄 것이 그 선례의 핵심이고, 우리는 폴백조차 만들지 않는다.
-
----
-
-## 6. 표준 근거
-
-★**RFC 9413**(IAB, *Maintaining Robust Protocols*)★ 이 「**모호한 입력을 추론된 의도로 처리하라**」는 해석을 **정면으로 거부한다.** 우리 상황에 가장 정확히 들어맞는 표준 문서다 — §1 의 tie-break 금지가 우리 취향이 아니라 **표준 문서가 이미 쓴 입장**이라는 뜻이다.
-
-(§1 의 기법 ②가 **W3C Trace Context** 와 같은 답이라는 것도 같은 성질의 근거다 — 상관 토큰을 부모가 심고 자식이 되돌리는 형태가 **이미 표준화된 모양**이다.)
+**orca's lesson about computing the hash yourself is in §2-1** — moving the main path to RPC is the heart of that precedent, and we will not build even a fallback.
 
 ---
 
-## 7. ★미측정 · 남은 위험★
+## 6. Standards ground
 
-- ~~★**TUI(터미널) 경로의 훅 발화는 미측정**★~~ → ★**§10 이 닫았다**★(실 PTY 로 심사 화면·승인·발화·`session_id` 까지). **이 절의 이 줄을 근거로 「가장 큰 공백」을 다시 열지 말 것.** ★**단 그 자리를 물려받은 잔여가 있다 — 아래 「우리 쪽 훅 배선」 줄이 그것이고, 지금은 그쪽이 가장 큰 공백이다.**★
-- **codex 훅이 세션당 1회인지 미확정** — 깨끗한 2턴 실험을 못 했다.
-- **`thread/fork`·compaction·sub-agent 스레드의 발화 여부·`source` 값 미측정** — ★단 `startup`/`resume` 두 값은 §10-8 이 쟀다★(fork 는 여전히 미측정).
-- ★**§4 의 rollout 생성 시점 모순 미규명**★ — **열린 항목으로 유지한다.** 두 관측의 값과 조건, 그리고 어느 쪽이 어느 경로의 것인지 못 정했다는 사실은 §4 「내부 모순 하나」가 진다.
-- **우리 쪽 훅 배선을 실 codex 로 주행한 적 없음**(§0 · 그 경계의 사유 = §9).
-- ★★**중첩 세션이 부모 칸을 차지할 수 있다 — 설계로 남은 구멍이다(미해소)**★★ — 원인·빈 칸 창의 범위·오늘 있는 방어 한 줄의 정본은 §1 의 「축을 절반만 닫는다」이고 여기 되풀지 않는다. **이 절이 지는 것은 「그래서 언제 닫히나」다: 부모와 자식을 가를 수단이 생기기 전에는 닫히지 않는다** — 오늘 그 수단이 없는 것이 바로 원인이기 때문이다. 코드 쪽 서술 정본 = `crates/engram-dashboard-daemon/src/control/hook.rs` 헤더.
+★**RFC 9413** (IAB, *Maintaining Robust Protocols*)★ **flatly rejects** the reading 「**모호한 입력을 추론된 의도로 처리하라**」. It is the standards document that fits our situation most exactly — meaning the tie-break ban in §1 is not our taste but **a position a standards document has already taken**.
 
-### 이 조사에서 나온 do-not (실제로 겪은 것만)
-
-1. ★**`--dangerously-bypass-hook-trust` 를 app-server 에 넘기지 말 것**★ — **인자 오류로 죽는다.** 그리고 **상시 사용도 권하지 않는다** — 사용자 본인 훅까지 무검증 실행 + ★**`--json` 스트림에 `type:"error"` item 2건을 섞어 넣어 파서 오탐을 만든다**★.
-2. ★**훅 신뢰 해시를 직접 계산하지 말 것**★ — 선례가 릴리스마다 깨져 RPC 로 갈아탔다.
-3. ★**herdr 의 `CODEX_THREAD_ID` 중첩 가드를 베끼지 말 것**★ — 0.155.0 에 그 변수가 없어 **항상 미설정으로 읽힌다.**
-4. ★**codex 세션 id 를 파일에서 「가장 최근 것」으로 고르지 말 것**★ — **못 찾음을 잘못 찾음으로 바꾸고, 조용하다**(§1).
-5. **`codex doctor` 로 `-c` 키 유효성을 검증하려 하지 말 것** — 판별력 0(§3).
+(That technique ② in §1 is the same answer as **W3C Trace Context** is ground of the same nature — the form where the parent plants the correlation token and the child returns it is **an already-standardized shape**.)
 
 ---
 
-## 8. ★다시 잴 때 싸게 재는 법★
+## 7. ★Unmeasured · remaining risks★
 
-같은 부류를 다시 측정해야 할 때의 순서다. 그 세션이 **비싸게 배운 것**이라 여기 남긴다.
+- ~~★**Hook firing on the TUI (terminal) path is unmeasured**★~~ → ★**§10 closed it**★ (review screen, approval, firing and `session_id` on a real PTY). **Do not reopen 「가장 큰 공백」 on the strength of this line in this section.** ★**But a remainder inherited that spot — the line 「우리 쪽 훅 배선」 below is it, and that is now the biggest gap.**★
+- **Unconfirmed whether a codex hook fires once per session** — we could not run a clean two-turn experiment.
+- **Whether `thread/fork`, compaction and sub-agent threads fire, and their `source` values, are unmeasured** — ★but the two values `startup`/`resume` were measured by §10-8★ (fork is still unmeasured).
+- ★**The rollout-creation-time contradiction in §4 is not established**★ — **kept as an open item.** The values and conditions of the two observations, and the fact that we could not decide which belongs to which path, are carried by §4 "One internal contradiction".
+- **Our side's hook wiring has never been run against a real codex** (§0 · the reason for that boundary = §9).
+- ★★**A nested session can occupy the parent's slot — a hole left by design (unresolved)**★★ — the cause, the extent of the empty-slot window and the one line of defense that exists today are canonical in §1 "it closes the axis only halfway" and are not repeated here. **What this section carries is 「그래서 언제 닫히나」: not before a means to tell parent from child exists** — because the absence of that means today is exactly the cause. Canonical code-side description = the header of `crates/engram-dashboard-daemon/src/control/hook.rs`.
 
-1. ★**`hooks/list` 를 먼저 불러라**★ — `trustStatus`·`currentHash`·`key` 가 한 번에 나와 ★**무언 스킵과 미발화가 즉시 갈린다**★. **레코더 컨트롤을 세우는 것보다 이것이 먼저다.**
-2. **app-server 는 `hook/started`·`hook/completed` 를 프로토콜로 내보낸다** → ★**외부 레코더 없이 발화·타이밍을 잰다.**★
-3. ★**쿼터 안 쓰고 재는 법**★ — `CODEX_HOME` 을 **빈 폴더**로 돌리면 auth 가 없어 턴이 **401 로 죽는데, 훅은 그 앞에서 발화한다.** 이 트릭으로 `turn/start` 까지 **무료로** 측정했다.
-4. ★**「바이너리가 뭘 출력하나」는 문자열 파기보다 tty 한 번 띄우는 쪽이 압도적으로 싸다**★ — **307MB 문자열 고고학에 왕복 6회를 쓰고도 미검으로 끝났다.**
+### Do-nots that came out of this survey (only what was actually experienced)
+
+1. ★**Do not pass `--dangerously-bypass-hook-trust` to app-server**★ — **it dies with an argument error.** And **we do not recommend permanent use either** — it runs even the user's own hooks without verification + ★**mixes two `type:"error"` items into the `--json` stream and causes parser false positives**★.
+2. ★**Do not compute the hook trust hash yourself**★ — the precedent broke on every release and moved to RPC.
+3. ★**Do not copy herdr's `CODEX_THREAD_ID` nesting guard**★ — 0.155.0 has no such variable, so **it always reads as unset.**
+4. ★**Do not pick a codex session id from files as 「가장 최근 것」**★ — **it turns not-found into wrong-found, and it is silent** (§1).
+5. **Do not try to validate `-c` key validity with `codex doctor`** — discriminating power zero (§3).
 
 ---
 
-## 9. 연결
+## 8. ★How to measure cheaply when measuring again★
 
-- **착지한 코드의 정본 = 커밋 `75bdfda`**(`S21: feat(agent,daemon): codex 에 제어 평면 입구를 열고 훅 세션 id 수신을 세운다`) 본문. 이 보고서는 **왜 훅인가 + codex 의 계약**을 지고, 그 커밋은 **무엇을 세웠나**를 진다.
-- ★**그 커밋에 훅 등록은 없다 — 받을 창구만 세웠다.**★ 이것은 미완이 아니라 **의도된 경계**다.
-- **후속 단계의 계획·순서·리뷰 미수(未收) 항목은 그 세션 핸드오프가 진다** — 여기 되풀지 않는다.
-- ★**그 세션은 「1단계에 대한 ADR 이 없다」를 부채로 남겼다**★ — `supports_control_channel` 뒤집기 · 새 제어 라우트 · 「어떤 갈래로도 exit 0」 정책 · 「빈 칸에만 쓴다」 규칙이 전부 **거부한 대안이 있는 비자명 결정**이라서다. **그 부채가 그 뒤에 닫혔는지는 이 문서가 확인하지 않았다**(출처 둘 밖이다) — 결정 인덱스를 볼 것.
+The order for when the same class needs measuring again. It is left here because that session **learned it expensively**.
+
+1. ★**Call `hooks/list` first**★ — `trustStatus`·`currentHash`·`key` come out at once and ★**silent skip and non-firing are told apart immediately**★. **This comes before setting up a recorder control.**
+2. **app-server emits `hook/started` and `hook/completed` in the protocol** → ★**firing and timing are measured without an external recorder.**★
+3. ★**How to measure without using quota**★ — point `CODEX_HOME` at an **empty folder**: with no auth the turn **dies with 401, but the hook fires before that.** With this trick we measured even through `turn/start` **for free**.
+4. ★**For 「바이너리가 뭘 출력하나」 launching a tty once is overwhelmingly cheaper than digging strings**★ — **we spent 6 round trips on 307MB string archaeology and still ended unverified.**
 
 ---
 
-## 10. ★2차 실측 — TUI 신뢰 경로 (2026-09-19, codex-cli 0.155.0)★
+## 9. Links
 
-> §7 이 남긴 **「TUI 경로 미측정」**을 닫는다. 1차(§2~§4)가 `codex exec`·`app-server` 두 경로만 쟀던 것과 달리, 이 절은 **실 PTY 에 TUI 를 띄워** 심사 프롬프트를 직접 몰았다. **11 회 기동 · 전 구간 홈 사본**이고 실 `~/.codex/config.toml` 은 md5 대조로 **불변 확인**(기동 전후 양쪽).
+- **Canonical source for the landed code = the body of commit `75bdfda`** (`S21: feat(agent,daemon): codex 에 제어 평면 입구를 열고 훅 세션 id 수신을 세운다`). This report carries **why a hook + codex's contract**, and that commit carries **what was built**.
+- ★**That commit has no hook registration — it only built the endpoint to receive.**★ This is not unfinished but **an intended boundary**.
+- **The plan, order and unreceived review items of the follow-up stage are carried by that session's handoff** — not repeated here.
+- ★**That session left 「1단계에 대한 ADR 이 없다」 as a debt**★ — because the `supports_control_channel` flip · the new control route · the 「어떤 갈래로도 exit 0」 policy · the 「빈 칸에만 쓴다」 rule are all **non-obvious decisions with rejected alternatives**. **Whether that debt was closed afterwards, this document did not confirm** (outside the two sources) — look at the decision index.
 
-### 10-1. 결론 여섯 (전부 실측)
+---
 
-1. ★**`-c` 로 넘긴 훅도 TUI 심사를 거쳐 신뢰를 받고, 그 뒤 정상 발화한다**★ — config.toml 에 훅 항목이 **하나도 없는** 홈에서 `-c hooks.SessionStart=[…]` 만으로 프롬프트가 뜨고, 승인하면 첫 턴에 훅이 돌며 페이로드에 `session_id` 가 실린다. **§2-1 의 「`-c` 훅은 완전 침묵으로 스킵된다」는 여전히 참이고, 막던 것이 신뢰였다는 그 절의 판정도 참이다** — 신뢰를 주면 그대로 돈다.
-   - ★**단 신뢰를 얻는 길에 사용자 `config.toml` 쓰기를 피하는 방법은 없다**★. 등록은 안 건드려도 **승인 순간 codex 자신이** `[hooks.state.'…:session_start:0:0'] trusted_hash` 를 거기 쓴다. 우리가 쓰는 것이 아니라 codex 가 쓰지만, **파일은 바뀐다.**
-2. ★**신뢰 키는 launch 간 안정적이다**★ — `-c` 훅의 키에 든 `<session-flags>` 는 **리터럴 자리표시자**이고 경로도 회차 id 도 아니다. 같은 `-c` 로 다시 띄우면 **프롬프트 없이 `trusted`**. 즉 `-c` 경로는 「평생 재승인」이 아니다.
-3. **해시는 훅 *정의*를 덮지 *출처 경로*를 안 덮는다** — 같은 정의를 파일로 등록하든 `-c` 로 넘기든 `currentHash` 가 동일했다. 명령 문자열이 바뀌면 `modified` 로 떨어져 재프롬프트한다(↔ **고정 래퍼 경로가 필요한 이유가 이것이다**).
-4. **승인은 그 대화부터 유효하다** — 승인 시점에는 훅이 돌지 않는다(신뢰만 즉시 기록되고 `sessions/` 는 아직 없다). **첫 턴에 한 번 발화**하며 그 `session_id` 가 TUI 가 찍는 `codex resume` id 와 같다. ★**따라서 「첫 대화는 이어받기 불가」 라는 고지는 필요 없다**★ — 설계 단계에서 우려했던 제약이 실재하지 않는다.
-5. ★**「끄기가 영구 저장된다」는 실패 모드는 존재하지 않는다**★ — 3번 선택지 `Continue without trusting (hooks won't run)` 는 **세션 한정**이고 config 에 아무것도 안 쓴다. ESC 도 동일. 재기동하면 다시 묻는다. TUI 어디에도 영구 비활성 토글이 없고, `HookTrustStatus` 어휘(`managed|untrusted|trusted|modified`)에 **거부 전용 상태가 없다**. §7 이 「가장 무섭다」고 적었던 갈래가 닫혔다.
-6. ★**`--dangerously-bypass-hook-trust` 는 탈락이다**★ — 동작은 한다(프롬프트를 건너뛰고 훅이 돌며 신뢰를 안 쓴다. `BYPASS_HOOK_TRUST` env·`bypass_hook_trust` 키도 있다). 그러나 **전역이라 사용자 자신의 미심사 훅까지 함께 무심사 실행된다**(미끼 훅 둘로 실측 — 둘 다 실행됐다). **우리가 끝까지 소유하는 홈이 아니면 쓸 수 없다.**
+## 10. ★Second-pass measurement — the TUI trust path (2026-09-19, codex-cli 0.155.0)★
 
-### 10-2. 승인 키 시퀀스 (실측)
+> Closes the **「TUI 경로 미측정」** that §7 left. Unlike the first pass (§2~§4), which measured only the two paths `codex exec` and `app-server`, this section **launched the TUI on a real PTY** and drove the review prompt directly. **11 launches · home copy throughout**, and the real `~/.codex/config.toml` was **confirmed unchanged** by md5 comparison (both before and after launch).
 
-**다섯 번의 분리된 쓰기**, 순서대로:
+### 10-1. Six conclusions (all measured)
 
-| # | 바이트 | 뜻 |
+1. ★**A hook passed with `-c` also goes through the TUI review, receives trust, and then fires normally**★ — in a home whose config.toml has **no hook entry at all**, `-c hooks.SessionStart=[…]` alone brings up the prompt, and on approval the hook runs on the first turn with `session_id` in the payload. **§2-1's 「`-c` 훅은 완전 침묵으로 스킵된다」 is still true, and that section's decision that trust was what blocked it is also true** — give it trust and it runs as is.
+   - ★**But there is no way to get trust that avoids writing the user's `config.toml`**★. Even if we do not touch registration, **at the moment of approval codex itself** writes `[hooks.state.'…:session_start:0:0'] trusted_hash` there. It is codex that writes, not us, but **the file changes.**
+2. ★**The trust key is stable across launches**★ — the `<session-flags>` in a `-c` hook's key is a **literal placeholder**, and is neither a path nor a per-run id. Launch again with the same `-c` and it is **`trusted` with no prompt**. That is, the `-c` path is not 「평생 재승인」.
+3. **The hash covers the hook *definition* and does not cover the *source path*** — whether the same definition was registered as a file or passed with `-c`, `currentHash` was identical. If the command string changes it drops to `modified` and re-prompts (↔ **this is why a fixed wrapper path is needed**).
+4. **Approval takes effect from that conversation on** — the hook does not run at approval time (only trust is recorded immediately and `sessions/` does not exist yet). **It fires once on the first turn**, and that `session_id` equals the `codex resume` id the TUI prints. ★**So the notice 「첫 대화는 이어받기 불가」 is not needed**★ — the constraint we worried about at design time does not actually exist.
+5. ★**The failure mode 「끄기가 영구 저장된다」 does not exist**★ — option 3, `Continue without trusting (hooks won't run)`, is **session-scoped** and writes nothing to config. ESC is the same. Restart and it asks again. There is no permanent-disable toggle anywhere in the TUI, and the `HookTrustStatus` vocabulary (`managed|untrusted|trusted|modified`) has **no reject-only state**. The branch §7 called 「가장 무섭다」 is closed.
+6. ★**`--dangerously-bypass-hook-trust` is out**★ — it works (it skips the prompt, the hook runs, and it writes no trust. There are also a `BYPASS_HOOK_TRUST` env and a `bypass_hook_trust` key). But **it is global, so the user's own unreviewed hooks run unreviewed along with it** (measured with two decoy hooks — both ran). **It cannot be used unless the home is one we own to the end.**
+
+### 10-2. Approval key sequence (measured)
+
+**Five separate writes**, in order:
+
+| # | Bytes | Meaning |
 |---|---|---|
-| 1 | `0x0D` | 1번 `Review hooks` 확정(**이미 선택돼 있다 — 화살표를 먼저 보내지 말 것**) |
-| 2 | `0x0D` | SessionStart 상세 목록 진입(Hook 1 펼침) |
-| 3 | `0x1B 0x5B 0x42` (`ESC [ B`) | 아래 행으로 펼침 이동 — 행 수만큼 반복 |
-| 4 | `0x74` (`t`) | ★**펼쳐진 훅 하나만** 신뢰★ |
-| 5 | `0x1B` | 개요로 복귀 |
+| 1 | `0x0D` | Confirm 1, `Review hooks` (**already selected — do not send an arrow first**) |
+| 2 | `0x0D` | Enter the SessionStart detail list (Hook 1 expands) |
+| 3 | `0x1B 0x5B 0x42` (`ESC [ B`) | Move the expansion to the row below — repeat for the number of rows |
+| 4 | `0x74` (`t`) | ★Trust **only the one expanded hook**★ |
+| 5 | `0x1B` | Return to the overview |
 
-- ★**간격이 필수다**★ — 한 번에 몰아 쓰면 **아무것도 안 먹는다**(실측: 둘 다 `untrusted` 로 끝났다). **300ms 간격은 성공**이 실측됐고 0ms 는 실패다. 그 사이는 이분하지 않았다. 이 저장소의 `SUBMIT_PACING` 이 겨냥하는 것과 같은 성질이다.
-- ★**개요 화면의 `t` 는 「전부 신뢰」다 — 상세 화면의 `t` 만 단수다**★. 개요에서 누르면 사용자 자기 훅까지 신뢰된다.
-- ★**Down 횟수를 세지 말 것**★ — 실측에서 사용자 config.toml 훅이 먼저, 우리 것이 나중에 왔는데 **그 순서는 보장되지 않는다**. 우리 행은 화면의 `Source    Session flags - …` 줄로 **식별**한다(그 줄이 우리 것에만 있다). 행 이동은 **Down/Up 뿐** — Tab 과 Right 는 아무 일도 안 한다.
-- 성공 신호: 상세 행이 `Trust     Trusted` 로 · 헤더 수가 감소 · 푸터가 `Press t to trust; esc to go back` → `Press space or enter to toggle; esc to go back`. ★**그래도 판정은 `hooks/list` 로 구조적으로 한다**★.
+- ★**The spacing is mandatory**★ — write them all at once and **nothing registers** (measured: both ended `untrusted`). **A 300ms interval was measured to succeed** and 0ms fails. We did not bisect in between. It is the same nature as what this repository's `SUBMIT_PACING` targets.
+- ★**On the overview screen `t` means 「전부 신뢰」 — only `t` on the detail screen is singular**★. Pressed on the overview, it trusts even the user's own hooks.
+- ★**Do not count Down presses**★ — in measurement the user's config.toml hook came first and ours later, but **that order is not guaranteed**. We **identify** our row by the `Source    Session flags - …` line on screen (that line exists only on ours). Row movement is **Down/Up only** — Tab and Right do nothing.
+- Success signals: the detail row becomes `Trust     Trusted` · the header count decreases · the footer goes from `Press t to trust; esc to go back` to `Press space or enter to toggle; esc to go back`. ★**Even so, the decision is made structurally with `hooks/list`**★.
 
-### 10-3. 화면 문구 원문 (ANSI 제거 · 상자문자 없음 · 커서 행 외 앞 공백 둘)
+### 10-3. Screen wording verbatim (ANSI stripped · no box characters · two leading spaces except on the cursor row)
 
 ```
   Hooks need review
@@ -280,11 +280,11 @@
   Press enter to confirm or esc to go back
 ```
 
-- 복수형도 실측됐다 — `2 hooks are new or changed.` · `2 hooks need review before they can run.`
-- 상세 행: `Trust     New hook - review required` · `Trust     Modified since last trusted - review required` · `Trusted`.
-- **탐지 앵커** = `^\s*Hooks need review\s*$` 뒤 2줄 안에 `^\s*\d+ hooks? (?:is|are) new or changed\.` — **둘째 줄이 신규·변경 양쪽에서 같다**(변경 케이스로 확인).
+- The plural was measured too — `2 hooks are new or changed.` · `2 hooks need review before they can run.`
+- Detail rows: `Trust     New hook - review required` · `Trust     Modified since last trusted - review required` · `Trusted`.
+- **Detection anchor** = `^\s*Hooks need review\s*$` followed within 2 lines by `^\s*\d+ hooks? (?:is|are) new or changed\.` — **the second line is the same for new and changed** (confirmed with the changed case).
 
-### 10-4. 파서가 받은 config 형태
+### 10-4. The config shape the parser accepted
 
 ```toml
 [[hooks.SessionStart]]
@@ -293,35 +293,35 @@ type = "command"
 command = 'C:\path\to\probe.cmd'
 ```
 
-`command` 는 문자열 하나다(스키마에 `commandWindows` 도 있다). `.cmd` 파일은 argv[0] 로 정상 스폰된다.
+`command` is a single string (the schema also has `commandWindows`). A `.cmd` file spawns normally as argv[0].
 
-### 10-6. ★훅 명령은 인자를 받는다 — 래퍼 파일이 필요하다는 전제가 틀렸다★ (실측)
+### 10-6. ★A hook command takes arguments — the premise that a wrapper file is needed was wrong★ (measured)
 
-- ★**`command` 문자열은 프로그램 + 인자로 쪼개진다**★ — codex 는 **첫 공백 구분 토큰을 프로그램으로 잡아 직접 스폰하고**(셸을 안 거친다) 나머지를 **따옴표를 인식하며** 인자로 나눈다. 그래서 `"<경로>\engram.exe hook session-start"` 한 문자열이 그대로 성립한다. ★**즉 사용자 기기에 래퍼 스크립트를 설치할 이유가 없다**★ — 스키마에 `args` 배열은 없고(`ConfiguredHookHandler.oneOf[0]`), `commandWindows` 는 인자 운반체가 아니라 OS별 대체 문자열이다.
-- ★**대신 제약 하나 — 프로그램 경로에 공백이 있으면 실패한다**★. 따옴표를 씌워도 안 되고 안 씌워도 안 된다. **우회 = 8.3 단축 경로**(`C:\PROGRA~1\…`)가 실측으로 돈다. **인자 쪽은** 따옴표를 씌우면 공백을 포함해도 한 토큰으로 도착한다.
-  - 그래서 우리 구현은 **공백이 있으면 `GetShortPathNameW` 로 바꾸고, 그래도 공백이 남으면(8.3 꺼진 볼륨은 원본을 「성공」으로 돌려준다) 등록을 건너뛰고 경고만 남긴다.**
-- **잘못된 명령은 조용히 죽지 않는다** — TUI 에 `• Hook failed` / `└ hook exited with code 1` 이 훅마다 한 줄씩 뜬다. ★**침묵하는 것은 「신뢰 안 됨」 쪽뿐이다**★ — 둘을 헷갈리지 말 것. app-server 쪽에도 `HookErrorInfo`·`HookCompletedNotification` 이 있어 비-TUI 클라이언트도 실패를 본다.
-- **env 는 순수 상속이다** — `-c` 로 등록한 훅에서도 codex 가 제 변수를 하나도 안 넣는다(우리가 codex 프로세스에 심은 것만 내려온다). 세션 자료는 전부 **stdin** 으로 온다.
+- ★**The `command` string is split into program + arguments**★ — codex **takes the first whitespace-separated token as the program and spawns it directly** (it does not go through a shell) and splits the rest into arguments **while recognizing quotes**. So a single string `"<경로>\engram.exe hook session-start"` holds as is. ★**That is, there is no reason to install a wrapper script on the user's machine**★ — the schema has no `args` array (`ConfiguredHookHandler.oneOf[0]`), and `commandWindows` is not a carrier of arguments but a per-OS substitute string.
+- ★**Instead one constraint — it fails if the program path has a space**★. Wrapping it in quotes does not work, and not wrapping it does not work. **Workaround = the 8.3 short path** (`C:\PROGRA~1\…`) was measured to work. **On the argument side**, if you wrap it in quotes it arrives as one token even with spaces in it.
+  - So our implementation **swaps in `GetShortPathNameW` when there is a space, and if a space still remains (a volume with 8.3 off returns the original as 「성공」) it skips registration and only leaves a warning.**
+- **A wrong command does not die silently** — in the TUI `• Hook failed` / `└ hook exited with code 1` appears, one line per hook. ★**Only the 「신뢰 안 됨」 side is silent**★ — do not confuse the two. On the app-server side `HookErrorInfo` and `HookCompletedNotification` exist too, so non-TUI clients also see the failure.
+- **Env is pure inheritance** — even for a hook registered with `-c`, codex puts in none of its own variables (only what we planted into the codex process comes down). All session data arrives by **stdin**.
 
-### 10-7. ★중복 `-c` 는 뒤가 이긴다 — 순서가 곧 결함이다★ (실측)
+### 10-7. ★With a duplicate `-c` the later one wins — the order is itself the defect★ (measured)
 
-- 같은 키를 `-c` 로 두 번 주면 **병합도 오류도 없고 둘째가 이긴다**(`hooks/list` 에 항목 하나, 실행도 둘째 것만).
-- ★**그리고 빈 배열이 최악이다**★ — `-c hooks.SessionStart=[]` 를 둘째로 주면 `hooks/list` 가 **빈 배열**을 돌려주고 **심사 프롬프트조차 안 뜨며** 턴은 정상으로 돈다. 즉 **아무 신호 없이 훅이 통째로 사라진다.**
-- **귀결:** 우리 override 는 **사용자 passthrough 뒤에** 놓아야 이긴다. ★한때 「override 를 passthrough 앞에 둔다」로 짜여 있었고 그것이 결함이었다 — 되돌리지 말 것.★ 대신 사용자가 같은 키를 주면 **우리가 덮었다는 경고를 남긴다**(조용한 덮어쓰기 금지).
+- Give the same key with `-c` twice and there is **neither merge nor error, and the second wins** (one entry in `hooks/list`, and only the second one runs).
+- ★**And an empty array is the worst**★ — give `-c hooks.SessionStart=[]` second and `hooks/list` returns an **empty array**, **not even the review prompt appears**, and the turn runs normally. That is, **the hooks vanish wholesale with no signal at all.**
+- **Consequence:** our override has to be placed **after the user passthrough** to win. ★It was once built as 「override 를 passthrough 앞에 둔다」 and that was the defect — do not revert it.★ Instead, if the user gives the same key, **we leave a warning that we overrode it** (no silent overwriting).
 
-### 10-8. ★`codex resume <id>` 는 id 를 유지한다★ (실측 — 설계 전제였다)
+### 10-8. ★`codex resume <id>` keeps the id★ (measured — it was a design premise)
 
-- 새 세션이 S 를 보고(`source:"startup"`)한 뒤 `codex resume S` 로 다시 띄우면 **같은 S** 를 보고한다(`source:"resume"`). **반복 resume 에도 안 흔들린다.** rollout 파일도 **S 의 원본 하나**에 계속 덧붙는다(세션 셋 뒤에도 `.jsonl` 이 하나뿐).
-- ★**그래서 우려했던 두 꼬리가 둘 다 없다**★ — ① 매 resume 마다 「찬 칸 충돌」 경고가 찍히는 일 ② 프로필이 옛 id 를 붙들어 두 번째 이후 대화가 조용히 버려지는 일. 훅 보고는 언제나 **「이미 같은 값」**으로 끝난다.
-- ★**`source` 가 판별자다**★ — `startup` 과 `resume` 을 가른다. `session_id` 와 같은 stdin JSON 에 들어 있어 한 번 파싱으로 둘 다 얻는다. **fork 가 무엇을 보고하는지는 안 봤다.**
+- After a new session reports S (`source:"startup"`), launching again with `codex resume S` reports **the same S** (`source:"resume"`). **It does not waver across repeated resumes.** The rollout file also keeps appending to **the one original of S** (after three sessions there is still only one `.jsonl`).
+- ★**So both tails we worried about are absent**★ — ① a 「찬 칸 충돌」 warning printed on every resume ② the profile holding on to an old id so that conversations from the second onward are silently discarded. The hook report always ends as **「이미 같은 값」**.
+- ★**`source` is the discriminator**★ — it tells `startup` and `resume` apart. It is in the same stdin JSON as `session_id`, so one parse yields both. **We did not look at what fork reports.**
 
-### 10-9. 생성한 override 가 실제 argv 경로를 견디나 (실측)
+### 10-9. Does the generated override survive the real argv path (measured)
 
-운영 스폰은 codex 를 직접 exec 하지 않고 **`cmd.exe /c` 를 거치며 PATH 의 `codex` 는 `.cmd` shim** 이다. 그 왕복으로 띄워도 `hooks/list` 가 **명령 문자열을 그대로** 돌려준다(`errors: []`). 역슬래시·대괄호·양쪽 따옴표가 전부 살아남고 TOML 이 작은따옴표를 리터럴로 먹는다. ★**직접 호출로만 확인하고 이 왕복을 안 본 채 넘어가지 말 것**★ — 같은 파일이 그 경로에서 `%VAR%` 가 뭉개지는 것을 이미 기록해 두고 있다.
+The operational spawn does not exec codex directly but **goes through `cmd.exe /c`, and `codex` on PATH is a `.cmd` shim**. Even launched through that round trip, `hooks/list` returns **the command string as is** (`errors: []`). Backslashes, brackets and both kinds of quotes all survive, and TOML takes the single quotes as literal. ★**Do not move on having confirmed only by direct invocation without looking at this round trip**★ — the same file already records `%VAR%` being mangled on that path.
 
-### 10-5. 이 절이 안 잰 것
+### 10-5. What this section did not measure
 
-- ★**§0 확정 조건 4 — 우리 데몬까지의 end-to-end. 이 절도 그것은 안 쟀다**★(측정은 전부 별도 하네스였고 우리 코드가 계약을 타는 것은 못 봤다). §10 이 셋을 닫았어도 **이 하나는 남는다** — §7 의 「우리 쪽 훅 배선」 줄과 같은 것을 가리킨다.
-- `managed` 신뢰 상태(MDM·plugin 출처가 필요하다) · plugin 출처 훅이 다르게 묻는지 · **fork 가 보고하는 `source` 값**
-- 0~300ms 사이의 실제 하한
-- **증거 파일 45 종은 세션 임시 폴더에 났다** — 그 폴더는 세션과 함께 사라진다. 살려 둔 사본 = `I:\Engram_Workspace\codex-hook-trust-evidence-2026-09-19\`(repo 밖·미추적이라 **다른 PC 엔 없다**). 재현이 필요하면 §8 의 싸게 재는 법 + 10-2 의 시퀀스로 다시 잰다.
+- ★**§0 condition of confirmation 4 — end-to-end through to our daemon. This section did not measure it either**★ (every measurement used a separate harness and we did not see our code ride the contract). Even though §10 closed three, **this one remains** — it points at the same thing as §7's 「우리 쪽 훅 배선」 line.
+- The `managed` trust state (needs an MDM or plugin source) · whether a plugin-sourced hook is asked about differently · **the `source` value fork reports**
+- The real lower bound between 0 and 300ms
+- **The 45 evidence files landed in the session temp folder** — that folder disappears with the session. The preserved copy = `I:\Engram_Workspace\codex-hook-trust-evidence-2026-09-19\` (outside the repo · untracked, so **it is not on other PCs**). If reproduction is needed, measure again using §8's cheap measurement + the sequence in 10-2.

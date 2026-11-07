@@ -111,7 +111,9 @@ use engram_dashboard_protocol::AgentEvent;
 use tokio::sync::{oneshot, watch};
 
 use crate::command_roster::CommandRoster;
-use crate::connection_core::{event_json, sanitize_for_log, sanitize_within};
+use crate::connection_core::{
+    envelope_to_wire, event_json, reply_from_wire, reply_to_wire, sanitize_for_log, sanitize_within,
+};
 
 /// 물어본 연결이 이미 떠났을 때의 문구 — 이 답장도 갈 곳이 없다(그 연결이 사라졌다).
 const CALLER_ALREADY_GONE: &str = "the calling connection went away before the envelope was sent";
@@ -1152,7 +1154,11 @@ impl CommandLink for OwnerLink<'_> {
                 format!("the owner of '{name}' went away while the envelope was being handed over"),
             )),
             Some(sink) => {
-                let written = match event_json(&AgentEvent::CommandRequest { envelope: env }) {
+                // ADR-0272: 원문 칸으로 다시 싼다 — 중계가 고친 인자(ADR-0308)가 이 바이트에 실린다.
+                let packet = envelope_to_wire(&env)
+                    .ok()
+                    .and_then(|envelope| event_json(&AgentEvent::CommandRequest { envelope }));
+                let written = match packet {
                     // 큐 포화·닫힘 — 봉투는 나가지 못했지만 큐는 비워질 수 있어 같은 id 재질의가 쓸모 있다.
                     Some(text) => sink.try_send(Frame::Text(text)).map_err(|_| {
                         no_retry(
@@ -2125,8 +2131,16 @@ fn send_reply(roster: &CommandRoster, origin: ConnId, name: &str, mut reply: Com
         );
         return;
     };
-    let Some(text) = event_json(&AgentEvent::CommandReply { reply }) else {
-        // `event_json` 이 이미 error! 를 남겼다 — 여기서 한 줄 더 내면 같은 사건이 두 번 적힌다.
+    // ADR-0272: 원문 칸으로 싼다 — 위에서 내린 재시도 지시가 이 바이트에 실린다.
+    let packet = match reply_to_wire(&reply) {
+        Ok(reply) => event_json(&AgentEvent::CommandReply { reply }),
+        Err(e) => {
+            tracing::error!(conn = origin, %request_id, %name, "명령 답장을 원문 칸으로 싸지 못했다: {e}");
+            None
+        }
+    };
+    let Some(text) = packet else {
+        // 두 실패 모두 이미 error! 를 남겼다(`event_json` · 위 갈래) — 여기서 한 줄 더 내면 같은 사건이 두 번 적힌다.
         return;
     };
     // ★이 실패를 조용히 삼키지 않는다★: 이것은 그 `request_id` 의 **유일한** 답장이고, 결말은 이미 자리를
@@ -2632,7 +2646,17 @@ impl FrameSink for ReplyCatcher {
             return Err(FrameError);
         };
         let reply = match serde_json::from_str::<AgentEvent>(&text) {
-            Ok(AgentEvent::CommandReply { reply }) => reply,
+            // 이 출구에 오는 답장은 이 데몬이 `send_reply` 로 싼 것이라 늘 풀린다 — 못 풀리면 우리 쪽 결함이다.
+            Ok(AgentEvent::CommandReply { reply }) => match reply_from_wire(&reply) {
+                Ok(reply) => reply,
+                Err(e) => {
+                    tracing::error!(
+                        entrance = ENTRANCE_CONTROL,
+                        "제어 라우트 왕복의 답장을 풀 수 없다 — 이 데몬이 싼 답장이 깨졌다: {e}"
+                    );
+                    return Err(FrameError);
+                }
+            },
             _ => {
                 tracing::error!(
                     entrance = ENTRANCE_CONTROL,
@@ -2952,6 +2976,7 @@ pub(crate) mod tests {
 
         match next_event(&mut caller_inbox).await {
             AgentEvent::CommandReply { reply } => {
+                let reply = opened_reply(&reply);
                 assert_eq!(reply.request_id, request_id);
                 assert_eq!(reply.outcome, Ok(json!({ "agents": [] })));
             }
@@ -3028,6 +3053,7 @@ pub(crate) mod tests {
 
         match event_from(caller_inbox.try_recv().expect("답장 한 장")) {
             AgentEvent::CommandReply { reply } => {
+                let reply = opened_reply(&reply);
                 let err = reply.outcome.expect_err("계약 위반");
                 assert_eq!(err.code(), ErrorCode::Internal);
             }
@@ -3071,6 +3097,7 @@ pub(crate) mod tests {
 
         match next_event(&mut caller_inbox).await {
             AgentEvent::CommandReply { reply } => {
+                let reply = opened_reply(&reply);
                 let err = reply.outcome.expect_err("실패 답장");
                 assert_eq!(err.code(), ErrorCode::NotFound);
                 assert!(err.message().contains("ghost"), "{}", err.message());
@@ -3111,6 +3138,7 @@ pub(crate) mod tests {
 
             match next_event(&mut caller_inbox).await {
                 AgentEvent::CommandReply { reply } => {
+                    let reply = opened_reply(&reply);
                     let err = reply.outcome.expect_err("마감은 실패 답장이다");
                     assert_eq!(err.code(), ErrorCode::Timeout);
                     assert_eq!(err.retry(), RetryMode::Never);
@@ -3169,6 +3197,7 @@ pub(crate) mod tests {
 
         match next_event(&mut caller_inbox).await {
             AgentEvent::CommandReply { reply } => {
+                let reply = opened_reply(&reply);
                 assert_eq!(
                     reply.outcome,
                     Ok(json!({ "ok": true })),
@@ -3234,6 +3263,7 @@ pub(crate) mod tests {
 
             match next_event(&mut caller_inbox).await {
                 AgentEvent::CommandReply { reply } => {
+                    let reply = opened_reply(&reply);
                     let err = reply.outcome.expect_err("다시 돌리지 않는다");
                     assert_eq!(err.code(), ErrorCode::OutcomeUnknown);
                     assert!(
@@ -3316,6 +3346,7 @@ pub(crate) mod tests {
 
             match next_event(&mut caller_inbox).await {
                 AgentEvent::CommandReply { reply } => {
+                    let reply = opened_reply(&reply);
                     let err = reply.outcome.expect_err("다시 돌리지 않는다");
                     assert_eq!(err.code(), ErrorCode::AlreadyApplied);
                     assert_eq!(err.retry(), RetryMode::Never);
@@ -3463,6 +3494,7 @@ pub(crate) mod tests {
 
         match next_event(&mut caller_inbox).await {
             AgentEvent::CommandReply { reply } => {
+                let reply = opened_reply(&reply);
                 assert_eq!(
                     reply.outcome,
                     Ok(json!({ "ok": true })),
@@ -3652,6 +3684,7 @@ pub(crate) mod tests {
 
             match next_event(&mut caller_inbox).await {
                 AgentEvent::CommandReply { reply } => {
+                    let reply = opened_reply(&reply);
                     let err = reply.outcome.expect_err("상한 거절");
                     assert_eq!(err.code(), ErrorCode::Conflict);
                     assert!(
@@ -3740,6 +3773,7 @@ pub(crate) mod tests {
 
         match event_from(caller_inbox.try_recv().expect("답장 한 장")) {
             AgentEvent::CommandReply { reply } => {
+                let reply = opened_reply(&reply);
                 let err = reply.outcome.expect_err("죽은 본문");
                 // 적용됐는지 알 수 없다 — `INTERNAL` 로 접으면 「확실히 실패했다」는 오보가 된다.
                 assert_eq!(err.code(), ErrorCode::OutcomeUnknown);
@@ -3919,6 +3953,7 @@ pub(crate) mod tests {
 
         match next_event(&mut owner_inbox).await {
             AgentEvent::CommandRequest { envelope } => {
+                let envelope = opened(&envelope);
                 assert_eq!(envelope.request_id, request_id, "id 는 전 구간 동일");
                 assert_eq!(
                     envelope.owner,
@@ -3948,6 +3983,7 @@ pub(crate) mod tests {
 
         match next_event(&mut caller_inbox).await {
             AgentEvent::CommandReply { reply } => {
+                let reply = opened_reply(&reply);
                 assert_eq!(reply.request_id, request_id);
                 assert_eq!(reply.outcome, Ok(json!({ "tab": 4 })), "주인의 결말 그대로");
             }
@@ -3975,6 +4011,7 @@ pub(crate) mod tests {
 
         match next_event(&mut caller_inbox).await {
             AgentEvent::CommandReply { reply } => {
+                let reply = opened_reply(&reply);
                 assert_eq!(reply.request_id, request_id);
                 let err = reply.outcome.expect_err("주인이 없다");
                 assert_eq!(err.code(), ErrorCode::UnknownCommand);
@@ -4005,6 +4042,7 @@ pub(crate) mod tests {
 
         match next_event(&mut caller_inbox).await {
             AgentEvent::CommandReply { reply } => {
+                let reply = opened_reply(&reply);
                 assert_eq!(reply.request_id, request_id);
                 let err = reply.outcome.expect_err("닿는 길이 없다");
                 assert_eq!(err.code(), ErrorCode::OutcomeUnknown);
@@ -4056,6 +4094,7 @@ pub(crate) mod tests {
 
         match next_event(&mut caller_inbox).await {
             AgentEvent::CommandReply { reply } => {
+                let reply = opened_reply(&reply);
                 assert_eq!(reply.request_id, request_id);
                 let err = reply.outcome.expect_err("마감 초과");
                 assert_eq!(err.code(), ErrorCode::Timeout);
@@ -4217,6 +4256,7 @@ pub(crate) mod tests {
     ) -> CommandError {
         let err = match next_event(caller_inbox).await {
             AgentEvent::CommandReply { reply } => {
+                let reply = opened_reply(&reply);
                 assert_eq!(reply.request_id, request_id);
                 reply.outcome.expect_err("풀리지 않았다")
             }
@@ -4258,6 +4298,7 @@ pub(crate) mod tests {
 
         match next_event(&mut owner_inbox).await {
             AgentEvent::CommandRequest { envelope } => {
+                let envelope = opened(&envelope);
                 assert_eq!(envelope.request_id, request_id);
                 assert_eq!(
                     envelope.args,
@@ -4422,6 +4463,7 @@ pub(crate) mod tests {
 
         match next_event(&mut owner_inbox).await {
             AgentEvent::CommandRequest { envelope } => {
+                let envelope = opened(&envelope);
                 assert_eq!(envelope.args, args, "그대로 통과");
             }
             other => panic!("주인은 CommandRequest 를 받는다: {other:?}"),
@@ -4465,6 +4507,7 @@ pub(crate) mod tests {
 
         match next_event(&mut caller_inbox).await {
             AgentEvent::CommandReply { reply } => {
+                let reply = opened_reply(&reply);
                 assert_eq!(reply.request_id, request_id);
                 let err = reply.outcome.expect_err("마감 초과");
                 assert_eq!(err.code(), ErrorCode::Timeout, "코드는 정산한 쪽 그대로");
@@ -4519,7 +4562,7 @@ pub(crate) mod tests {
         finished(round_trip).await;
 
         let err = match next_event(&mut caller_inbox).await {
-            AgentEvent::CommandReply { reply } => reply.outcome.expect_err("종료"),
+            AgentEvent::CommandReply { reply } => opened_reply(&reply).outcome.expect_err("종료"),
             other => panic!("CommandReply 여야 함: {other:?}"),
         };
         assert_eq!(err.code(), ErrorCode::OutcomeUnknown);
@@ -4661,6 +4704,7 @@ pub(crate) mod tests {
         finished(round_trip(env)).await;
         let err = match next_event(&mut caller_inbox).await {
             AgentEvent::CommandReply { reply } => {
+                let reply = opened_reply(&reply);
                 assert_eq!(reply.request_id, request_id);
                 reply.outcome.expect_err("넘쳤다")
             }
@@ -4710,7 +4754,7 @@ pub(crate) mod tests {
         resolving_settles_at(&deliveries, 0).await;
         let after = round_trip(marked());
         let envelope = match next_event(&mut owner_inbox).await {
-            AgentEvent::CommandRequest { envelope } => envelope,
+            AgentEvent::CommandRequest { envelope } => opened(&envelope),
             other => panic!("주인은 CommandRequest 를 받는다: {other:?}"),
         };
         assert_eq!(envelope.args["agent"], json!(lead.to_string()));
@@ -4873,6 +4917,7 @@ pub(crate) mod tests {
 
         match next_event(&mut caller_inbox).await {
             AgentEvent::CommandReply { reply } => {
+                let reply = opened_reply(&reply);
                 assert_eq!(reply.request_id, request_id);
                 assert_eq!(reply.outcome, Ok(json!({ "tab": 4 })));
             }
@@ -4916,6 +4961,7 @@ pub(crate) mod tests {
 
         match next_event(&mut second_inbox).await {
             AgentEvent::CommandReply { reply } => {
+                let reply = opened_reply(&reply);
                 assert_eq!(reply.request_id, request_id);
                 assert_eq!(
                     reply.outcome.expect_err("남의 왕복이 쥔 키").code(),
@@ -4991,6 +5037,7 @@ pub(crate) mod tests {
         finished(a).await;
         match next_event(&mut caller_inbox).await {
             AgentEvent::CommandReply { reply } => {
+                let reply = opened_reply(&reply);
                 assert_eq!(reply.outcome, Ok(json!({ "tab": 4 })), "주인의 결말 그대로")
             }
             other => panic!("CommandReply 여야 함: {other:?}"),
@@ -5084,6 +5131,7 @@ pub(crate) mod tests {
 
         match next_event(&mut caller_inbox).await {
             AgentEvent::CommandReply { reply } => {
+                let reply = opened_reply(&reply);
                 assert_eq!(
                     reply.outcome.expect_err("딴 요청이 같은 키를 썼다").code(),
                     ErrorCode::RequestIdConflict,
@@ -5104,6 +5152,7 @@ pub(crate) mod tests {
         finished(a).await;
         match next_event(&mut caller_inbox).await {
             AgentEvent::CommandReply { reply } => {
+                let reply = opened_reply(&reply);
                 assert_eq!(
                     reply.outcome,
                     Ok(json!({ "tab": 4 })),
@@ -5159,6 +5208,7 @@ pub(crate) mod tests {
         finished(a).await;
         match next_event(&mut caller_inbox).await {
             AgentEvent::CommandReply { reply } => {
+                let reply = opened_reply(&reply);
                 assert_eq!(
                     reply.outcome.expect_err("첫 시도는 마감").code(),
                     ErrorCode::Timeout
@@ -5174,6 +5224,7 @@ pub(crate) mod tests {
         finished(b).await;
         match next_event(&mut caller_inbox).await {
             AgentEvent::CommandReply { reply } => {
+                let reply = opened_reply(&reply);
                 assert_eq!(
                     reply.outcome,
                     Ok(json!({ "tab": 4 })),
@@ -5221,6 +5272,7 @@ pub(crate) mod tests {
 
         match next_event(&mut second_inbox).await {
             AgentEvent::CommandReply { reply } => {
+                let reply = opened_reply(&reply);
                 let err = reply
                     .outcome
                     .expect_err("남의 자리가 아직 그 키를 쥐고 있다");
@@ -5264,6 +5316,7 @@ pub(crate) mod tests {
 
         match next_event(&mut caller_inbox).await {
             AgentEvent::CommandReply { reply } => {
+                let reply = opened_reply(&reply);
                 assert_eq!(reply.request_id, request_id);
                 let err = reply.outcome.expect_err("데몬이 내려가는 중");
                 assert_eq!(
@@ -5409,6 +5462,7 @@ pub(crate) mod tests {
         finished(round_trip).await;
         match next_event(&mut caller_inbox).await {
             AgentEvent::CommandReply { reply } => {
+                let reply = opened_reply(&reply);
                 assert_eq!(reply.request_id, request_id);
                 let err = reply.outcome.expect_err("종료");
                 assert_eq!(
@@ -5734,9 +5788,19 @@ pub(crate) mod tests {
             .expect("호출 태스크")
     }
 
+    /// 주인에게 나간 패킷의 원문 봉투 칸을 푼다 — 데몬이 다시 싼 봉투는 늘 풀린다(ADR-0272).
+    fn opened(raw: &serde_json::value::RawValue) -> CommandEnvelope {
+        crate::connection_core::envelope_from_wire(raw).expect("데몬이 다시 싼 봉투는 풀린다")
+    }
+
+    /// 호출자에게 나간 답장 패킷의 원문 칸을 푼다 — 데몬이 싼 답장은 늘 풀린다(ADR-0272).
+    fn opened_reply(raw: &serde_json::value::RawValue) -> CommandReply {
+        reply_from_wire(raw).expect("데몬이 싼 답장은 풀린다")
+    }
+
     async fn envelope_from(inbox: &mut mpsc::Receiver<Frame>) -> CommandEnvelope {
         match next_event(inbox).await {
-            AgentEvent::CommandRequest { envelope } => envelope,
+            AgentEvent::CommandRequest { envelope } => opened(&envelope),
             other => panic!("봉투가 와야: {other:?}"),
         }
     }

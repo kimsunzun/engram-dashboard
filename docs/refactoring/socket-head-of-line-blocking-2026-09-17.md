@@ -1,28 +1,28 @@
-# 소켓 수신이 활성화 결말을 기다린다 — 네트워크 리팩토링에 넘기는 관측
+# Socket receive waits for the activation outcome — an observation handed to the network refactoring
 
-**작성 = 2026-09-17 · 출처 = S21 codex 백엔드 세션(브랜치 `v0.3.0/feat/codex-backend`)**
-**성격 = 구조 부채 계측. 결정이 아니다** — 이 세션은 「점수정하지 않고 소켓 리팩토링에 편입한다」까지만 정했다(사용자 결정 2026-09-17).
-
----
-
-## 한 줄
-
-**에이전트 하나를 활성화하는 동안 그 클라이언트의 나머지 명령이 소켓에서 읽히지도 않는다.** 다른 에이전트에 보낸 입력도, 죽이기도, 다른 활성화도 전부 그 뒤에 선다.
+**Written = 2026-09-17 · source = the S21 codex backend session (branch `v0.3.0/feat/codex-backend`)**
+**Nature = structural-debt measurement. Not a decision** — this session decided only up to 「점수정하지 않고 소켓 리팩토링에 편입한다」 (user decision 2026-09-17).
 
 ---
 
-## 증상
+## In one line
 
-대시보드 창의 모든 에이전트가 데몬과 **소켓 하나**를 공유한다 — "창이 몇 개든 데몬엔 연결 1개"(`src-tauri/src/daemon_client/mod.rs:3`, ADR-0036).
+**While one agent is being activated, the rest of that client's commands are not even read from the socket.** Input sent to another agent, a kill, another activation — all of them queue behind it.
 
-| 시각 | 사용자 | 실제 |
+---
+
+## Symptom
+
+Every agent in the dashboard window shares **one socket** with the daemon — "however many windows there are, the daemon has 1 connection" (`src-tauri/src/daemon_client/mod.rs:3`, ADR-0036).
+
+| Time | User | Actual |
 |---|---|---|
-| 0.0s | 에이전트 A 활성화 | 핸드셰이크 시작 |
-| 0.3s | 에이전트 **B** 슬롯에 입력 + 엔터 | 프레임이 소켓에 도착했으나 **읽히지 않음** |
-| 2.2s | — | A 활성화 완료 |
-| 2.2s | B 입력이 그제서야 들어감 | 밀린 프레임 처리 |
+| 0.0s | Activates agent A | Handshake starts |
+| 0.3s | Types input + Enter in the slot of agent **B** | The frame reached the socket but was **not read** |
+| 2.2s | — | A's activation completes |
+| 2.2s | B's input only now goes in | The backed-up frame is processed |
 
-A 프로세스와 B 프로세스는 서로 무관하다. 막히는 것은 **클라 ↔ 데몬 구간 하나**다.
+Process A and process B are unrelated to each other. What is blocked is **the one client ↔ daemon segment**.
 
 ```
 대시보드 앱 ──[WS 소켓 1개]── 데몬 ──┬── A 프로세스 (codex)
@@ -31,107 +31,107 @@ A 프로세스와 B 프로세스는 서로 무관하다. 막히는 것은 **클�
 
 ---
 
-## 인과 — 코드 세 지점
+## Causation — three places in the code
 
-1. **`crates/engram-dashboard-net/src/ws.rs:553`**(루프 시작 `:537`) — 수신 루프가 프레임 하나의 처리를 `await` 한 **뒤에야** 다음 프레임을 읽는다.
+1. **`crates/engram-dashboard-net/src/ws.rs:553`** (loop start `:537`) — the receive loop reads the next frame only **after** it has `await`ed the processing of one frame.
    ```rust
    while let Some(item) = incoming.next().await {
        ...
        Message::Text(text) => {
            if handler.on_text(conn_id, &text, &frames).await == ConnFlow::Close {
    ```
-2. **`crates/engram-dashboard-net/src/frame_port.rs:93`** — 그 순차성이 포트 **계약**으로 명문화돼 있다: "`on_connect` → (`on_text` | `on_binary`)\* → `on_disconnect`".
-3. **`crates/engram-dashboard-daemon/src/connection_core.rs:1222`** — 활성화 명령의 처리가 에이전트 핸드셰이크 **결말까지** 기다린다.
+2. **`crates/engram-dashboard-net/src/frame_port.rs:93`** — that sequentiality is written down as the port **contract**: "`on_connect` → (`on_text` | `on_binary`)\* → `on_disconnect`".
+3. **`crates/engram-dashboard-daemon/src/connection_core.rs:1222`** — handling of the activation command waits **until the outcome** of the agent handshake.
    ```rust
    let started = tokio::task::spawn_blocking(move || {
        mgr.activate_profile(&profile_for_task, mode)
    }).await
    ```
-   주석의 사유: "연결을 선언하는 통로에서는 모드와 무관하게 결말까지 기다린다(**ADR-0201** — 예전엔 Fresh 가 즉시 반환이었다)".
+   The reason in the comment: "on the path that declares a connection, we wait for the outcome regardless of mode (**ADR-0201** — Fresh used to return immediately)".
 
-★**셋이 곱해져야 증상이 된다**★ — 순차 수신은 원래 있었고, codex 활성화가 그 자리를 오래 점유하는 첫 손님이 되며 드러났다.
+★**Only when all three multiply together does it become the symptom**★ — sequential receive was there from the start, and it showed up when codex activation became the first guest to occupy that spot for a long time.
 
-### 대기의 실제 상한 = 15초 (무한이 아니다 — 무한이 될 뻔했다)
+### The actual upper bound of the wait = 15 seconds (not infinite — it nearly became infinite)
 
-★**「응답이 영영 안 오면 영영 대기인가」의 답은 「15초」이고, 그 값이 있는 이유가 정확히 「없으면 무한」이다**★.
+★**The answer to 「응답이 영영 안 오면 영영 대기인가」 is 「15초」, and the reason that value exists is exactly 「없으면 무한」**★.
 
-- `crates/engram-dashboard-agent/src/manager.rs:70` — `LINK_RESOLUTION_BACKSTOP = 15s`. 그 주석: "codex 의 핸드셰이크 상한은 **응답 대기**에만 걸리고 **쓰기**에는 안 걸린다 — 상대가 우리 stdin 을 읽지 않으면 `write_all` 이 파이프 backpressure 로 무한히 매달리고 (…) 이 백스톱이 없으면 `activate_profile` 이 **영원히** 블록한다(**데몬의 async dispatch 워커 하나가 통째로 묶인다**)."
-- 주석은 그 값을 「판정」이 아니라 ★「포기」★라 부른다 — 닿으면 실패로 확정하고 teardown 을 걸어, 매달려 있던 쓰기까지 그 kill 로 함께 푼다.
-- **그래서 대기 상한 두 개를 갈라 읽어야 한다**: 응답이 늦는 경로 ≈ **11초**(핸드셰이크 예산 10초 + 초과 두 번) · 응답이 아예 안 오고 쓰기까지 매달리는 경로 = **15초**(이 백스톱). ★**「최악 11초」는 틀린 요약이다**★.
-- ★**주석이 이미 이 문서의 증상을 알고 있다**★ — "데몬의 async dispatch 워커 하나가 통째로 묶인다"가 그것이다. 즉 인라인 대기의 대가는 인지된 채로 들어왔고, 백스톱은 그것을 **유계로 만들 뿐 없애지 않는다**.
-
----
-
-## 고치는 데 쓸 재료는 이미 있다
-
-- **모든 명령이 `request_id`를 싣는다**(`crates/engram-dashboard-protocol/src/messages.rs` — `AgentCommand` 각 variant).
-- **클라에 그 번호로 응답을 짝짓는 대기자 표가 있다**(회귀망 = 셸 패키지 통합 타깃 `daemon_client_pending`. 겹친 `request_id`가 연결 태스크를 패닉시키지 않고 옛 대기자가 오류로 깨어나며 새 요청이 그 번호를 승계함을 잰다).
-
-★**그래서 응답을 프레임 처리 안에서 동기로 만들어야 할 구조적 이유가 없다**★ — 상관(correlation)은 위치가 아니라 번호로 이미 서 있다.
+- `crates/engram-dashboard-agent/src/manager.rs:70` — `LINK_RESOLUTION_BACKSTOP = 15s`. Its comment: "codex's handshake limit applies only to **waiting for the response** and not to **writing** — if the peer does not read our stdin, `write_all` hangs forever on pipe backpressure (…) and without this backstop `activate_profile` blocks **forever** (**one async dispatch worker of the daemon is tied up entirely**)."
+- The comment calls that value not 「판정」 (a decision) but ★「포기」 (giving up)★ — when it is reached, it settles the outcome as failure and starts teardown, and that kill also frees the write that was hanging.
+- **So the two wait limits must be read apart**: the path where the response is late ≈ **11 seconds** (handshake budget 10 seconds + two overruns) · the path where no response comes at all and the write also hangs = **15 seconds** (this backstop). ★**「최악 11초」 (worst case 11 seconds) is a wrong summary**★.
+- ★**The comment already knows this document's symptom**★ — "one async dispatch worker of the daemon is tied up entirely" is it. That is, the cost of the inline wait came in with full awareness, and the backstop only **bounds it, it does not remove it**.
 
 ---
 
-## ★직렬 처리는 안전장치가 아니다★
+## The material for the fix is already there
 
-점수정(활성화는 그대로 두고 kill 프레임만 앞질러 처리)이 검토됐고, 그것을 떠받치던 가정이 **「직렬이라 이중 스폰이 안 난다」**였다. 그 가정은 거짓이다 — 가드 주석이 직접 부정한다(`crates/engram-dashboard-agent/src/manager.rs:1107`):
+- **Every command carries a `request_id`** (`crates/engram-dashboard-protocol/src/messages.rs` — each `AgentCommand` variant).
+- **The client has a waiter table that pairs responses by that number** (regression net = the shell package integration target `daemon_client_pending`. It measures that an overlapping `request_id` does not panic the connection task, that the old waiter wakes with an error, and that the new request inherits the number).
 
-> "같은 id 를 **서로 다른 연결**이 동시에 SpawnProfile 하면 둘 다 이 검사와 `activate_profile` 의 pre-check 를 통과해 double-spawn 이 날 수 있다(데몬 명령 처리는 **연결당 직렬일 뿐 연결 간엔 아니다** — 각 연결이 제 read_task 에서 dispatch 를 await 한다). 이 window 는 ADR-0082 이전부터 있던 **선재(pre-existing) 레이스**이며 이번 변경이 도입하지도 닫지도 않았다(후속 과제로 flag)."
-
-즉 순차 수신은 **한 연결 안에서 창을 좁힐 뿐**이고, 이중 스폰은 이미 열려 있다. 수신을 비동기로 풀어도 **없던 구멍이 새로 생기는 것이 아니라 이미 있는 구멍이 넓어질 뿐**이다 — 그 가드는 어차피 명시적으로 세워야 한다.
-
----
-
-## 리팩토링 때 볼 지점
-
-1. `ws.rs:553` — 처리 완료를 기다린 뒤 다음 프레임을 읽는 수신 루프. 이것을 푸는 것이 본체다.
-2. `frame_port.rs:93` — 순차성이 포트 계약에 박혀 있다. 계약을 고칠지, 예외를 뚫을지가 갈림길이다.
-3. `connection_core.rs:1222` — 활성화 결말을 기다리는 dispatch. ADR-0201이 그렇게 만들었으므로 **되돌리려면 그 ADR을 다시 열어야 한다**(즉시 반환으로 되돌리는 것이 아니라, 결말 보고를 `request_id` 경로로 옮기는 모양이 될 것 — 이 문장은 추론이다).
-4. `manager.rs:1107` — 이중 스폰 가드. 직렬에 기대던 부분을 명시적으로 세운다(ADR-0082 미해결 건).
+★**So there is no structural reason the response has to be made synchronous inside frame processing**★ — correlation already stands on the number, not on position.
 
 ---
 
-## 검증 상태
+## ★Serial processing is not a safety device★
 
-| 항목 | 상태 |
+The quick fix (leave activation as it is and process only the kill frame ahead of it) was considered, and the assumption that propped it up was **「직렬이라 이중 스폰이 안 난다」 (it is serial, so no double spawn happens)**. That assumption is false — the guard's comment denies it directly (`crates/engram-dashboard-agent/src/manager.rs:1107`):
+
+> "If **different connections** SpawnProfile the same id at the same time, both can pass this check and the pre-check of `activate_profile`, and a double-spawn can happen (daemon command handling is **serial only per connection, not across connections** — each connection awaits dispatch in its own read_task). This window is a **pre-existing race** from before ADR-0082, and this change neither introduces nor closes it (flagged as a follow-up task)."
+
+That is, sequential receive **only narrows the window within one connection**, and double spawn is already open. Even if receive is made asynchronous, **no hole that did not exist is created — an existing hole just gets wider** — and that guard has to be built explicitly anyway.
+
+---
+
+## Points to look at in the refactoring
+
+1. `ws.rs:553` — the receive loop that waits for processing to finish before reading the next frame. Loosening this is the main body.
+2. `frame_port.rs:93` — the sequentiality is baked into the port contract. Whether to fix the contract or punch an exception through it is the fork.
+3. `connection_core.rs:1222` — the dispatch that waits for the activation outcome. ADR-0201 made it so, so **to reverse it, that ADR has to be reopened** (it would not be a revert to immediate return, but a shape that moves the outcome report onto the `request_id` path — this sentence is inference).
+4. `manager.rs:1107` — the double-spawn guard. Build explicitly the part that relied on serial processing (the unresolved item of ADR-0082).
+
+---
+
+## Verification status
+
+| Item | Status |
 |---|---|
-| 소켓 하나 공유 · 순차 수신 · 활성화 인라인 대기 | **코드로 확인**(위 파일:라인) |
-| 이중 스폰 레이스가 연결 간에 열려 있음 | **코드 주석이 명시**(선재, ADR-0082) |
-| codex 재활성화 ~2.2초 | **GUI 실측**(2026-09-16 기록) |
-| 응답이 늦는 경로 ~11초 | ★**코드를 읽어 도출 — 실측한 적 없다**★. 요청 둘 사이에 예산 0 검사가 없어 시한 초과가 두 번 난다(한때 10.5초로 적힌 것은 틀린 값) |
-| **대기 상한 15초** | **코드로 확인**(`manager.rs:70` 백스톱). ★이것이 진짜 상한이고 11초가 아니다★ — 쓰기가 매달리는 경로는 핸드셰이크 상한에 안 걸린다 |
-| 활성화 중 다른 명령이 실제로 밀리는 것 | ★**GUI로 재지 않았다**★ — 코드 경로로만 도출 |
-| claude 백엔드 활성화가 같은 대기를 만드는가 | **안 봤다** |
+| One shared socket · sequential receive · inline wait on activation | **Confirmed in code** (file:line above) |
+| The double-spawn race is open across connections | **Stated by a code comment** (pre-existing, ADR-0082) |
+| codex re-activation ~2.2 seconds | **Measured in the GUI** (recorded 2026-09-16) |
+| Path where the response is late ~11 seconds | ★**Derived by reading the code — never measured**★. There is no zero-budget check between the two requests, so the deadline overruns twice (the 10.5 seconds that was once written is a wrong value) |
+| **Wait upper bound 15 seconds** | **Confirmed in code** (`manager.rs:70` backstop). ★This is the real upper bound, not 11 seconds★ — the path where the write hangs is not covered by the handshake limit |
+| Other commands actually being delayed during activation | ★**Not measured in the GUI**★ — derived only from the code path |
+| Whether the claude backend's activation creates the same wait | **Not looked at** |
 
 ---
 
-## ★transport crate 작업 범위에 지금은 없다 (2026-09-17 확인)★
+## ★It is not in the transport crate's work scope right now (confirmed 2026-09-17)★
 
-「어차피 소켓 리팩토링에서 같이 처리된다」는 **오늘 기준 성립하지 않는다.** 진행 중인 `S21-transport-crate` 작업은 이 건을 다루지 않을 뿐 아니라 **범위에서 명시적으로 뺐다.**
+「어차피 소켓 리팩토링에서 같이 처리된다」 (it gets handled together in the socket refactoring anyway) **does not hold as of today.** The in-progress `S21-transport-crate` work not only does not cover this item, it **explicitly left it out of scope.**
 
-- **헌장이 기존 `net` 을 안 뜯는다고 못 박았다** — ADR-0177 결정 1: "★**기존 `net` 을 이번 작업에서 뜯지 않는다**★". 그런데 수신 루프(`ws.rs:553`)와 포트 계약(`frame_port.rs:93`)이 바로 그 `net` 안에 있다.
-- **데몬 쪽 적용은 뒤 단계다** — `docs/process/S21-transport-crate/trd.md` §10 「안 하는 것」: "데몬 쪽 적용 | 붙이는 순서 ④". 그 브랜치 핸드오프의 「정지 조건」도 "**`net` crate 를 수정하려 할 때** → 범위 밖이다"로 적는다.
-- **활성화·`connection_core`·ADR-0201 은 그 작업의 어느 문서에도 없다**(grep 0건). ADR-0177~0183 은 2026-09-04~06 이라 ADR-0201 보다 앞선다.
-- **`request_id` 는 그 작업에도 있지만 축이 다르다** — 클라 쪽 대기자 표(ADR-0177 결정 3/4·0181·0183)로만 다루고, 「데몬 핸들러가 동기로 답하지 않아도 된다」는 논거로는 쓰이지 않는다.
-- **가장 가까운 항목은 거부된 대안인데 축이 다르다** — ADR-0177 「거부한 대안」의 "제어 전용 큐 / 제어 전용 소켓 — ★단일 소켓 위에서는 보장이 불가능하다★"는 **쓰기(write)가 막히는** 경우를 논한다. 우리 쪽 리더가 우리 쪽 핸들러를 기다리는 이 건은 다루지 않는다.
+- **The charter nails down that the existing `net` is not torn apart** — ADR-0177 decision 1: "★**This work does not tear apart the existing `net`**★". But the receive loop (`ws.rs:553`) and the port contract (`frame_port.rs:93`) are inside exactly that `net`.
+- **Applying it on the daemon side is a later stage** — `docs/process/S21-transport-crate/trd.md` §10 「안 하는 것」: "Applying it on the daemon side | attach order ④". The 「정지 조건」 of that branch's handoff also writes "**when about to modify the `net` crate** → out of scope".
+- **Activation · `connection_core` · ADR-0201 appear in none of that work's documents** (grep 0 hits). ADR-0177~0183 are from 2026-09-04~06, so they predate ADR-0201.
+- **`request_id` is in that work too, but on a different axis** — it is treated only as the client-side waiter table (ADR-0177 decisions 3/4 · 0181 · 0183), and is not used for the argument 「데몬 핸들러가 동기로 답하지 않아도 된다」.
+- **The closest item is a rejected alternative, but on a different axis** — in ADR-0177 「거부한 대안」, "control-only queue / control-only socket — ★guarantee is impossible on a single socket★" discusses the case where **writes are blocked**. It does not cover this case, where our reader waits for our handler.
 
-**추론(라벨)** — 단계 ④가 실제로 붙으면 그 crate의 수신 모양이 증상을 **덤으로** 흡수할 수는 있다. `crates/engram-dashboard-transport/src/lib.rs:26`이 `Inbound::recv`를 "유일한 수신 표면"으로 두고 유계 큐로 받으므로 읽기와 처리가 분리된다. **단 문서 어디에도 그런 말이 없고**, 막는 `await`는 transport가 아니라 데몬 dispatch에 있다.
+**Inference (label)** — once stage ④ is actually attached, the receive shape of that crate could absorb the symptom **as a side effect**. `crates/engram-dashboard-transport/src/lib.rs:26` makes `Inbound::recv` the "only receive surface" and receives into a bounded queue, so reading and processing are separated. **But no document says so**, and the blocking `await` is in the daemon dispatch, not in the transport.
 
-**등록할 자리(그쪽 관례 기준):** ① `docs/process/S21-transport-crate/trd.md` §12 「열린 질문」 — 이미 단계 ④ 항목을 같은 방식으로 세워 두는 절이다. ② `docs/tracking.md` — 가장 가까운 이웃이 T-32(데몬 쪽 직렬화 공백).
-
----
-
-## ★같은 저장소가 이미 두 번 이 패턴을 피했다★
-
-이 형태는 이 저장소에서 처음 나온 것이 아니다. **두 번 이름 붙여 피했고, 활성화 경로에서만 그대로 하고 있다.**
-
-- **ADR-0081:29** — "연결당 순차 dispatch head-of-line 블록 방지". 릴레이 경로에서 액터 **밖으로 spawn** 해 풀었다.
-- **ADR-0142:16** — "`spawn_blocking` 핸들을 인라인 await 하지 않고 … **그 자리에서 await 하는 것이 곧 head-of-line blocking 이므로**". 우편 배달 경로.
-
-`connection_core.rs:1222`가 하는 일이 정확히 후자가 금지한 그것이다 — `spawn_blocking(...).await` 인라인. ★**즉 이 건은 새 설계 판단이 아니라 이미 내려진 판단이 한 경로에만 적용되지 않은 것으로 읽을 수 있다**★(이 문장은 해석이다 — ADR-0201이 그 대기를 의도적으로 들였으므로, 두 결정이 부딪히는 자리인지 아니면 축이 다른지는 확인이 필요하다).
+**Where to register it (by that side's convention):** ① `docs/process/S21-transport-crate/trd.md` §12 「열린 질문」 — the section that already holds the stage ④ item in the same way. ② `docs/tracking.md` — the closest neighbor is T-32 (the daemon-side serialization gap).
 
 ---
 
-## 연결
+## ★The same repository has already avoided this pattern twice★
 
-- 출처 세션의 결정 목록 2번 「활성화 중 취소가 뒤에 줄 선다(~11초)」가 이 문서로 이관됐다.
-- 관련 ADR = **0201**(활성화 결말까지 기다리게 만든 결정) · **0082**(이중 스폰 레이스, 미해결) · **0036**(연결 1개).
+This shape did not first appear in this repository. **It has been named and avoided twice, and only the activation path is still doing it.**
+
+- **ADR-0081:29** — "preventing per-connection sequential dispatch head-of-line blocking". On the relay path it was loosened by spawning **outside** the actor.
+- **ADR-0142:16** — "do not await the `spawn_blocking` handle inline … **because awaiting it right there is itself head-of-line blocking**". The mail delivery path.
+
+What `connection_core.rs:1222` does is exactly what the latter forbids — `spawn_blocking(...).await` inline. ★**So this item can be read not as a new design judgment but as a judgment already made that was not applied to just one path**★ (this sentence is interpretation — ADR-0201 introduced that wait deliberately, so whether this is a place where the two decisions collide or they are on different axes needs checking).
+
+---
+
+## Links
+
+- Decision-list item 2 of the source session, 「활성화 중 취소가 뒤에 줄 선다(~11초)」, was moved over to this document.
+- Related ADRs = **0201** (the decision that made activation wait for the outcome) · **0082** (double-spawn race, unresolved) · **0036** (one connection).

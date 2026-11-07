@@ -1,12 +1,12 @@
-// TRD S26-window-chrome §7-3: 보이는 창 번호 표식 — 글자 = 번호만. ★누르는 요소가 아니다★ — `pointer-events: none` 이라 누름이
-//   부모(제목 줄 — 끌 자리)로 가고, Tab 순서 밖이다(`tabIndex` 없음). 폭은 자리 수만큼 넓어지고 자르지 않는다(`metrics.ts`).
-// 화면 낭독기에서는 감춘다 — 맨 「1」 만 읽혀 뜻이 없고, 창 정체는 OS 제목(「<탭> - Engram:<n>」 · §4-4)이 나른다.
+// TRD S26-window-chrome §7-3: the visible window number badge — text = number only. ★It is not a pressable element★ — `pointer-events: none` so a press goes to
+//   the parent (the title row — draggable area), and it is outside the Tab order (no `tabIndex`). The width grows with the number of digits and is not clipped (`metrics.ts`).
+// It is hidden from screen readers — a bare 「1」 alone is read with no meaning, and the window identity is carried by the OS title (「<탭> - Engram:<n>」 · §4-4).
 
 import type { CSSProperties, Ref } from 'react'
 
 import { MARKER_MIN_W, MARKER_PAD, SURFACE_TOP, TAB_BAR_H } from './metrics'
 
-/** `ref` = 표식 요소 — 제목 줄이 그 폭을 재 최소 창 폭에 싣는다(§7-7). */
+/** `ref` = the badge element — the title row measures its width and includes it in the minimum window width (§7-7). */
 export default function NumberMarker({ n, ref }: { n: number; ref?: Ref<HTMLSpanElement> }) {
   return (
     <span ref={ref} data-testid="window-number" aria-hidden style={MARKER}>
@@ -15,7 +15,7 @@ export default function NumberMarker({ n, ref }: { n: number; ref?: Ref<HTMLSpan
   )
 }
 
-// 탭바와 같은 칸(바닥에 붙은 탭바 높이 · 아래 1px 선 · 위 `SURFACE_TOP`)에 글자를 세워 탭 글자와 가운데 높이를 맞춘다.
+// Stand the text in the same area as the tab bar (tab bar height at the bottom · 1px line below · `SURFACE_TOP` above) to match the vertical center with the tab text.
 const MARKER: CSSProperties = {
   flex: '0 0 auto',
   alignSelf: 'flex-end',

@@ -1,6 +1,6 @@
-// 회사 아이콘 — 사용량 슬롯의 작은 표시가 회사 이름 대신 그린다(사용자 결정 2026-09-29).
-// ★모양은 자리표시다★ — 실제 모양은 확정 전이라 도형만 이 파일에 모아 둔다. 색은 테마 토큰(`--usage-vendor-*`)이
-//   정하고 도형은 `currentColor` 로 칠한다(SVG 표현 속성은 `var()` 를 받지 않는다).
+// Company icon — the small display of the usage slot draws it instead of the company name (user decision 2026-09-29).
+// ★The shapes are placeholders★ — the real shapes are not yet decided, so only the figures are gathered in this file. Color is
+//   set by the theme tokens (`--usage-vendor-*`) and figures are painted with `currentColor` (SVG presentation attributes do not accept `var()`).
 
 import type { HTMLAttributes } from 'react'
 
@@ -52,8 +52,8 @@ function Shape({ vendor }: { vendor: AgentBackendKind }) {
 }
 
 /**
- * `label` = 보조기술 이름이자 툴팁(`role="img"`). `null` = 장식 — 옆에 이름 글자가 있거나 숨은 측정 사본이라 역할·이름을
- * 싣지 않는다.
+ * `label` = the assistive tech name and also the tooltip (`role="img"`). `null` = decoration — there is a name text next to it or it is a hidden measurement copy, so role · name are not
+ * carried.
  */
 export default function VendorIcon({
   vendor,

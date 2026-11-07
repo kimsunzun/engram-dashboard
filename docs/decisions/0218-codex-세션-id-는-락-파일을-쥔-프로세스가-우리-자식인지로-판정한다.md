@@ -1,52 +1,52 @@
-# ADR-0218: codex 세션 id 는 락 파일을 쥔 프로세스가 우리 자식인지로 판정한다
+# ADR-0218: The codex session id is decided by whether the process holding the lock file is our child
 
-- 상태: 확정 (2026-09-21, 근거: 실측 — 아래 「근거」) · 부분 폐기 by ADR-0226 (결정 6 값 정책) · 부분 폐기 by ADR-0266 (결정 11의 플랫폼 질의 거처)
-- 관련: Amends ADR-0217 (회수 채널을 락 파일 홀더 PID 로 교체) · ADR-0185(codex 는 id 를 발급하지 않는다) · ADR-0203(벤더 저장 포맷을 읽지 않는다) · ADR-0208 · ADR-0210 · ADR-0004(백엔드 지식 격리) · ADR-0175(`base` 입주 조건) · `crates/engram-dashboard-agent/src/backend/codex/mod.rs` · `crates/engram-dashboard-agent/src/platform` · step-log S21 · Amended by ADR-0226 (결정 6 값 정책) · Amended by ADR-0266 (결정 11의 플랫폼 질의 거처)
+- 상태: 확정 (2026-09-21, basis: measured — see 「근거」 below) · 부분 폐기 by ADR-0226 (decision 6 value policy) · 부분 폐기 by ADR-0266 (the home of the platform query in decision 11)
+- 관련: Amends ADR-0217 (recovery channel replaced with the lock-file holder PID) · ADR-0185 (codex does not issue an id) · ADR-0203 (vendor storage formats are not read) · ADR-0208 · ADR-0210 · ADR-0004 (isolating backend knowledge) · ADR-0175 (`base` move-in condition) · `crates/engram-dashboard-agent/src/backend/codex/mod.rs` · `crates/engram-dashboard-agent/src/platform` · step-log S21 · Amended by ADR-0226 (decision 6 value policy) · Amended by ADR-0266 (the home of the platform query in decision 11)
 
 ## 맥락
 
-ADR-0217 은 회수 채널로 **MCP `tools/call` 의 `_meta`** 를 골랐다. 그 채널이 id 를 준다는 것은 실측이고 지금도 사실이다. ★**문제는 커버리지다**★ — 방아쇠가 「첫 도구 호출」이라, **codex 를 띄우고 몇 마디 나눈 뒤 닫는 세션은 id 를 못 받는다.** 사용자가 그 시나리오를 짚었고("안녕 한 다음에 종료하면 저장이 안 된다는 거 아냐"), 그것은 **상태줄 방식보다 나빠지는 구간**이다 — 상태줄은 그 경우에도 잡았다.
+ADR-0217 chose the **MCP `tools/call` `_meta`** as the recovery channel. That this channel gives the id is measured and still true. ★**The problem is coverage**★ — the trigger is 「첫 도구 호출」 (the first tool call), so **a session that launches codex, exchanges a few words and then closes does not get an id.** The user pointed at that scenario ("안녕 한 다음에 종료하면 저장이 안 된다는 거 아냐" — so if I say hello and then quit, it doesn't get saved?), and it is **an interval worse than the status-line approach** — the status line caught that case too.
 
-그 갭을 메우려고 「첫 턴 관측 후 기록 조회」를 설계하던 중, 저장소 전수 훑기에서 ★**우리 자식 프로세스에 직접 묶이는 키**★ 가 나왔다. 그러면 갭이 사라지는 것은 물론 **턴도 도구 호출도 필요 없어진다.**
+While designing 「첫 턴 관측 후 기록 조회」 (a record lookup after observing the first turn) to fill that gap, a full sweep of the storage turned up ★**a key tied directly to our child process**★. With that, not only does the gap disappear, but **neither a turn nor a tool call is needed anymore.**
 
 ## 결정
 
-1. **회수 정본 = 락 파일의 소유 프로세스가 우리 자식인지 묻는다.** `~/.codex/thread-writer-locks/*.lock` 을 훑고, 각 파일에 대해 **Windows Restart Manager** 로 그 파일을 쥔 프로세스를 물어, **우리가 띄운 자식의 PID 와 일치하는** 파일을 고른다. ★**그 파일 이름이 곧 스레드 id 다.**★ 파일은 0바이트이므로 **내용을 읽지 않는다 — 이름과 홀더만 본다.**
-2. ★**PID 하나로 판정하지 않는다 — 프로세스 시작시각(FILETIME)까지 일치해야 한다.**★ PID 는 재사용되므로 PID 단독은 남의 프로세스를 우리 것으로 볼 수 있다. 두 값이 함께 맞아야 채택한다.
-3. **후보가 정확히 하나일 때만 채택한다.** 0 개면 아직 안 생긴 것이니 계속 기다리고, **2 개 이상이면 거절한다**(추측하지 않는다). ★한 codex 프로세스가 락을 둘 이상 쥘 수 있는지는 미측정★ — 그래서 거절 조항을 둔다.
-4. **기다림은 창이 아니라 폴링이다.** 상한 시각을 추정하지 않는다 — 잡을 때까지 폴링하고, **잡으면 즉시 멈추고**, **자식이 죽으면 멈춘다**. ADR-0217 이 기각한 「시간창」의 상한 부재 문제가 여기서는 성립하지 않는다: 판정이 시각이 아니라 **소유권**이라 오래 기다려도 오검출이 늘지 않는다.
-5. **fresh 화신에서만 돈다.** resume 화신은 우리가 id 를 인자로 넘기므로 회수할 것이 없다(ADR-0217 결정 8 승계).
-6. **쓰기 경로는 ADR-0217 결정 6·7 을 그대로 승계한다** — `ProfileRegistry::observe_session_id` 의 화신 가드를 타고, 값 정책은 덮어쓰기.
-7. ★**MCP `_meta` 채널(ADR-0217 결정 1)은 채택하지 않는다**★ — 이 결정이 그 커버리지를 전부 덮으므로 두 번째 기계장치를 두지 않는다. 그 채널이 실재한다는 측정은 유효하고, 락 경로가 죽으면 되살릴 후보로 남는다.
-8. **`originator` 표식(ADR-0217 결정 4)은 남긴다** — 이미 구현됐고 값이 싸며, 진단과 후속 대조에 쓴다. **회수 경로가 그것에 의존하지는 않는다.**
-9. **최후 수단 = `developer_instructions` 에 고유 토큰.** 우리가 이미 에이전트마다 한 줄을 넘기고 있고 그 텍스트가 기록에 **그대로** 남는 것을 실측했다. ★**이번에 만들지 않는다**★ — 락 경로가 업스트림 변경으로 죽었을 때 여는 예비 경로다.
-10. **Windows 전용이다.** Restart Manager 는 Win32 API 이고 다른 OS 에는 이 경로가 없다. 실패 모드는 **「못 받음」**이지 오검출이 아니다.
-11. **모듈 경계:** 「이 파일을 누가 쥐고 있나」는 도메인 지식이 0 인 플랫폼 질문이므로 **agent crate 의 `platform`** 에 둔다. **락 디렉터리의 위치와 파일명이 곧 id 라는 지식은 codex 고유**이므로 `backend/codex` 안에 둔다(ADR-0004). ★`base` 로 내리지 않는다★ — 소비자가 하나뿐이라 입주 조건 ①을 못 채운다(ADR-0175).
+1. **Recovery source of record = ask whether the process owning the lock file is our child.** Sweep `~/.codex/thread-writer-locks/*.lock`, and for each file ask **the Windows Restart Manager** which process holds that file, and pick the file **whose holder matches the PID of the child we launched.** ★**That file's name is the thread id.**★ The file is 0 bytes, so **its content is not read — only the name and the holder are looked at.**
+2. ★**It is not decided by PID alone — the process start time (FILETIME) must match too.**★ PIDs are reused, so PID alone can take someone else's process for ours. It is adopted only when both values match together.
+3. **It is adopted only when there is exactly one candidate.** With 0 candidates it has not appeared yet, so we keep waiting, and **with 2 or more it is rejected** (we do not guess). ★Whether one codex process can hold more than one lock is unmeasured★ — so the rejection clause is there.
+4. **The waiting is polling, not a window.** We do not estimate an upper time limit — we poll until captured, **stop immediately once captured**, and **stop when the child dies**. The no-upper-bound problem of the 「시간창」 (time window) that ADR-0217 rejected does not hold here: the decision is not by time but by **ownership**, so waiting long does not increase false detections.
+5. **It runs only for a fresh incarnation.** A resume incarnation has nothing to recover, because we pass the id as an argument (inherits ADR-0217 decision 8).
+6. **The write path inherits ADR-0217 decisions 6 and 7 as is** — it rides the incarnation guard of `ProfileRegistry::observe_session_id`, and the value policy is overwriting.
+7. ★**The MCP `_meta` channel (ADR-0217 decision 1) is not adopted**★ — this decision covers all of that coverage, so we do not keep a second machinery. The measurement that the channel exists is still valid, and it stays as a candidate to revive if the lock path dies.
+8. **The `originator` marker (ADR-0217 decision 4) is kept** — it is already implemented and cheap, and is used for diagnosis and later cross-checking. **The recovery path does not depend on it.**
+9. **Last resort = a unique token in `developer_instructions`.** We already pass one line per agent, and we measured that the text is left in the record **as is**. ★**Not built this time**★ — it is a reserve path to open when the lock path dies from an upstream change.
+10. **Windows only.** The Restart Manager is a Win32 API, and other OSes do not have this path. The failure mode is **「못 받음」** (not received), not a false detection.
+11. **Module boundary:** 「이 파일을 누가 쥐고 있나」 (who is holding this file) is a platform question with zero domain knowledge, so it goes in **the agent crate's `platform`**. **The knowledge of the lock directory's location and that the file name is the id is specific to codex**, so it goes inside `backend/codex` (ADR-0004). ★It is not pushed down to `base`★ — there is only one consumer, so it fails move-in condition ① (ADR-0175).
 
 ## 거부한 대안
 
-- ★**MCP `_meta` 단독(ADR-0217 결정 1)**★ — 채널은 실재하고 짝짓기도 필요 없다. ★**기각 = 커버리지**★: 방아쇠가 첫 **도구 호출**이라 대화만 하고 닫는 세션을 잃는다. 그 손실은 교체 전(상태줄)보다 나쁜 구간을 만든다.
-- **지시서로 첫 턴에 도구를 부르게 해 갭을 줄인다** — 값은 싸다. 기각 = **보장이 아니다**. 모델이 지시를 따르지 않으면 그만이고, 승인 프롬프트도 한 번 붙는다.
-- **첫 턴을 관측한 뒤 app-server 에 `thread/list` 를 물어 `originator` 로 대조** — 이 ADR 직전까지의 설계였다. 기각 = **덩치와 의존**: 질의를 위해 `codex app-server` 프로세스를 띄워 JSON-RPC 왕복을 해야 하고, **첫 턴 전에는 아무것도 못 찾는다**. 락 경로는 턴 없이도 되고 프로세스도 안 띄운다.
-- **`logs_2.sqlite` 의 `process_uuid = pid:<PID>:<uuid>` 로 대조** — ★실측으로 실재를 확인했다★(우리 PID 로 필터하면 우리 스레드가 나왔다). 기각 = **셋이 겹친다**: TUI 경로만 쓰고(`codex exec` 는 한 줄도 안 남긴다) · 한 프로세스가 내부용 스레드 id 를 여러 개 남겨 `state_5.threads` 와 교집합을 내야 하나로 좁혀지고 · 크기 예산으로 오래된 행이 **정리된다**. 같은 PID 결속을 **sqlite 스키마 의존 없이** 얻는 길이 있으므로 쓰지 않는다. 교차검증 후보로만 남긴다.
-- **`originator` 대조 단독(ADR-0217 결정 4 를 회수 경로로 승격)** — 기각 = **위조 가능**하고(누구나 그 env 를 설정할 수 있다) 조회에 app-server 가 필요하다. 표식으로는 남기되 판정 근거로 쓰지 않는다.
-- **시간창(ADR-0217 이 이미 기각)** — 상한 부재. 이 결정은 시각이 아니라 소유권으로 판정하므로 같은 문제가 없다.
-- **훅 복원(herdr 방식)** — ADR-0217 의 기각을 승계한다(약 1,900줄 복원 + 사용자 홈에 파일).
+- ★**MCP `_meta` alone (ADR-0217 decision 1)**★ — the channel exists and no pairing is needed. ★**Rejected = coverage**★: the trigger is the first **tool call**, so sessions that only converse and close are lost. That loss creates an interval worse than before the replacement (the status line).
+- **Reduce the gap by having the instruction sheet make the model call a tool on the first turn** — the value is cheap. Rejected = **it is not a guarantee**. If the model does not follow the instruction, that is the end of it, and an approval prompt is attached once as well.
+- **After observing the first turn, ask the app-server for `thread/list` and match by `originator`** — this was the design up to just before this ADR. Rejected = **bulk and dependency**: for the query we have to launch a `codex app-server` process and do a JSON-RPC round trip, and **before the first turn nothing can be found**. The lock path works without a turn and does not launch a process.
+- **Match by `process_uuid = pid:<PID>:<uuid>` in `logs_2.sqlite`** — ★its existence was confirmed by measurement★ (filtering by our PID gave our thread). Rejected = **three things overlap**: it only works on the TUI path (`codex exec` leaves not a single line) · one process leaves several internal thread ids, so it narrows to one only by intersecting with `state_5.threads` · and old rows are **purged** by the size budget. There is a way to get the same PID binding **without depending on the sqlite schema**, so we do not use it. It stays only as a cross-check candidate.
+- **Match by `originator` alone (promote ADR-0217 decision 4 to the recovery path)** — rejected = it is **forgeable** (anyone can set that env) and the lookup needs the app-server. It stays as a marker but is not used as the basis for the decision.
+- **Time window (already rejected by ADR-0217)** — no upper bound. This decision decides by ownership and not by time, so it does not have the same problem.
+- **Restore the hook (the herdr way)** — inherits ADR-0217's rejection (about 1,900 lines restored + a file in the user's home).
 
 ## 근거
 
-- ★**Restart Manager 실측 (2026-09-21)**★ — 스크래치패드에 세운 작은 Rust 프로브로 확인했다(이 환경은 PowerShell P/Invoke 가 막혀 있어 컴파일된 exe 로 재야 한다). 락 파일 하나를 물었더니 `HOLDER pid=6124 app="codex.exe" startTime=134344468098866343` 이 나왔고, 그 값이 `Get-Process -Id 6124` 의 시작시각 FILETIME 과 **정확히 일치**했다 — 결정 2 의 근거다. **홀더는 codex.exe 자신**이고 자식이나 래퍼가 아니다. 둘째 표본으로 기존 사용자 세션의 락이 `pid=1284` 를 돌려줬다. **관리자 권한은 필요 없다.**
-- ★**죽은 락과 산 락이 구분된다**★ — 소유 프로세스를 죽인 뒤 같은 파일을 물으면 `needed=0` 이 나온다. 그래서 **쌓여 있는 옛 락이 후보를 오염시키지 않는다**(codex 자신도 기동 때 죽은 락을 쓸어낸다 — 별도 관측 2회).
-- **락은 기동 직후 생긴다** — 스폰→생성 지연 실측 4회 = 0.735 · 0.879 · 0.907 · 1.891초. **첫 턴 이전**이다. 재현되지 않은 21초 사례가 하나 있는데, ★결정 4 의 폴링이 그 불확실성을 무해하게 만든다★(판정이 시각이 아니라 소유권이므로 오래 기다려도 오검출이 늘지 않는다).
-- **기록 쪽에는 PID 가 없다** — rollout JSONL · `state_5.threads` 40개 칼럼 · `sandbox.*.log` 어디에도 pid·ppid·tty·host·명령줄·환경변수가 없다(전수 훑기). 그래서 **디스크 기록을 읽는 길로는 이 결속을 만들 수 없다** — OS 에 묻는 이 경로가 유일하다.
-- **`developer_instructions` 는 그대로 저장된다** — 심어 둔 `ENGRAM_AGENT_MARKER_7f3a2b` 가 rollout 의 사용자 입력 항목에 verbatim 으로 남았다(결정 9 의 근거). 단 sqlite 쪽에는 안 간다.
-- ★**미측정으로 남는 것**★ — ① **한 codex 프로세스가 락을 둘 이상 쥐는 경우가 있는지**(결정 3 의 거절 조항이 그 자리를 지킨다) ② `codex exec` 가 writer 락을 만드는지(우리 경로는 TUI 라 당장은 무관) ③ 락 디렉터리 이름·배치가 업스트림에서 얼마나 안정적인지 — **문서화되지 않은 배치라 바뀌면 조용히 못 잡는다**(실패 = 못 받음).
+- ★**Restart Manager measured (2026-09-21)**★ — confirmed with a small Rust probe set up in the scratchpad (this environment has PowerShell P/Invoke blocked, so it has to be measured with a compiled exe). Asking about one lock file gave `HOLDER pid=6124 app="codex.exe" startTime=134344468098866343`, and that value **exactly matched** the start-time FILETIME of `Get-Process -Id 6124` — the basis for decision 2. **The holder is codex.exe itself**, not a child or a wrapper. As a second sample, the lock of an existing user session returned `pid=1284`. **Administrator privilege is not needed.**
+- ★**Dead locks and live locks are distinguished**★ — after killing the owning process, asking about the same file gives `needed=0`. So **old locks piled up do not contaminate the candidates** (codex itself also sweeps dead locks at startup — observed 2 times separately).
+- **The lock appears right after startup** — spawn→creation delay measured over 4 runs = 0.735 · 0.879 · 0.907 · 1.891 seconds. It is **before the first turn**. There is one 21-second case that was not reproduced, and ★the polling of decision 4 makes that uncertainty harmless★ (the decision is by ownership and not by time, so waiting long does not increase false detections).
+- **The record side has no PID** — nowhere in the rollout JSONL · the 40 columns of `state_5.threads` · `sandbox.*.log` are there a pid, ppid, tty, host, command line, or environment variables (full sweep). So **this binding cannot be built through reading the on-disk records** — this path of asking the OS is the only one.
+- **`developer_instructions` is stored as is** — the planted `ENGRAM_AGENT_MARKER_7f3a2b` was left verbatim in the user-input item of the rollout (the basis for decision 9). But it does not go to the sqlite side.
+- ★**What remains unmeasured**★ — ① **whether there are cases where one codex process holds more than one lock** (the rejection clause of decision 3 guards that spot) ② whether `codex exec` creates a writer lock (our path is the TUI, so it does not matter for now) ③ how stable the lock directory name and layout are upstream — **it is an undocumented layout, so if it changes, we silently fail to capture** (failure = not received).
 
 ## 영향 / 불변식
 
-- **ADR-0217 결정 1·4·9 가 개정된다** — 회수 채널이 MCP `_meta` 에서 이 경로로 바뀌고, `originator` 는 표식으로만 남으며(결정 8), 「도구를 안 부르면 못 받는다」는 알려진 갭이 **사라진다**. ADR-0217 의 결정 3(상태줄 제거)·5(엔드포인트 조건)·6·7·8 은 그대로 살아 있다.
-- ★**새 불변식: 판정은 PID 와 시작시각 둘 다 일치해야 한다**★ — 어느 하나만으로 채택하면 PID 재사용으로 남의 스레드를 우리 손잡이에 적는다. 그 고장은 조용하고, 다음 재개가 남의 대화를 연다.
-- ★**새 불변식: 후보가 둘 이상이면 채택하지 않는다**★ — 추측 금지. 못 받는 것이 잘못 받는 것보다 낫다(ADR-0203·0216 승계).
-- **ADR-0203 과의 관계** — 벤더 저장소의 **파일 내용을 읽지 않는다**. 읽는 것은 디렉터리 목록과 파일 이름이고, 소유권은 OS 에 묻는다. 그럼에도 **벤더 배치에 대한 의존이 새로 생기는 것은 사실**이므로 여기 명시한다 — 후속 세션이 「저장 포맷을 읽는다」로 넓히려 하면 그때는 ADR-0203 을 다시 열어야 한다.
-- **모듈 경계(결정 11)를 어기면** 플랫폼 질의에 codex 지식이 섞이거나(ADR-0004 위반) 소비자 하나뿐인 코드가 바닥 crate 로 내려간다(ADR-0175 입주 조건 위반).
-- **Windows 밖에서는 이 경로가 없다** — 다른 OS 를 지원하게 되면 그 자리에서 결정 9(예비 경로)를 열거나 새 결정을 세운다.
+- **ADR-0217 decisions 1, 4, 9 are amended** — the recovery channel changes from the MCP `_meta` to this path, `originator` remains only as a marker (decision 8), and the known gap 「도구를 안 부르면 못 받는다」 (if no tool is called, it is not received) **disappears**. ADR-0217's decisions 3 (status-line removal), 5 (endpoint condition), 6, 7, 8 stay alive as they are.
+- ★**New invariant: the decision requires both PID and start time to match**★ — if adopted on only one of them, PID reuse writes someone else's thread into our handle. That failure is silent, and the next resume opens someone else's conversation.
+- ★**New invariant: it is not adopted if there are two or more candidates**★ — no guessing. Not receiving is better than receiving wrongly (inherits ADR-0203·0216).
+- **Relation to ADR-0203** — it **does not read the file content** of the vendor store. What it reads is the directory listing and the file names, and ownership is asked of the OS. Even so, it is true that **a dependency on the vendor layout is newly created**, so it is stated explicitly here — if a later session tries to widen it to 「저장 포맷을 읽는다」 (reads the storage format), ADR-0203 has to be reopened at that point.
+- **If the module boundary (decision 11) is violated**, either codex knowledge gets mixed into the platform query (violating ADR-0004) or code with only one consumer gets pushed down to the bottom crate (violating the ADR-0175 move-in condition).
+- **Outside Windows this path does not exist** — if other OSes come to be supported, open decision 9 (the reserve path) at that point or set up a new decision.

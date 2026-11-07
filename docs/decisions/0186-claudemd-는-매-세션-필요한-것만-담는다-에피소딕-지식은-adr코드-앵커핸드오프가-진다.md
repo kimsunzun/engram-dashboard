@@ -1,59 +1,59 @@
-# ADR-0186: CLAUDE.md 는 매 세션 필요한 것만 담는다 — 에피소딕 지식은 ADR·코드 앵커·핸드오프가 진다
+# ADR-0186: CLAUDE.md holds only what every session needs — episodic knowledge is carried by ADRs, code anchors and handoffs
 
-- 상태: 확정 (2026-09-09, 근거: 사용자 결정 — 「이거 이번에만 필요하고 다음번엔 필요 없는 거 아님?」)
-- 관련: Amends ADR-0185 (원칙 문서 두 곳 조항) · CLAUDE.md 서문(「기조만 담는다 · 상태는 docs 에서 본다」) · ADR-0197(주제별 상세 문서 — 아래 「영향」의 정본 분담) · ADR-0008(추적 파일 확장 금지의 평문 소재) · ADR-0082(fresh fallback 폐지)
+- 상태: 확정 (2026-09-09, basis: user decision — 「이거 이번에만 필요하고 다음번엔 필요 없는 거 아님?」)
+- 관련: Amends ADR-0185 (the clauses in two principle documents) · the CLAUDE.md preface (「기조만 담는다 · 상태는 docs 에서 본다」) · ADR-0197 (per-topic detail documents — the split of canonical sources in 「영향」 below) · ADR-0008 (the plain-text home of the ban on extending the tracking file) · ADR-0082 (fresh fallback abolished)
 
 ## 맥락
-ADR-0185 결정 3 이 「원칙 문서 두 곳(CLAUDE.md 「세션 복원」 · architecture-overview)의 첫 문장을 고친다」였고, 그 CLAUDE.md 문장을 어떻게 쓸지가 적대 리뷰 2라운드에서 갈렸다(cut-advocate 「그 절 자신이 되올리기를 금하므로 지워라」 vs load-bearing 수호 「문구를 고쳐 남겨라」).
+ADR-0185 decision 3 was 「원칙 문서 두 곳(CLAUDE.md 「세션 복원」 · architecture-overview)의 첫 문장을 고친다」 (fix the first sentence of two principle documents: the CLAUDE.md section on session restore and architecture-overview), and how to write that CLAUDE.md sentence split the adversarial review in round 2 (cut-advocate 「그 절 자신이 되올리기를 금하므로 지워라」 vs load-bearing defender 「문구를 고쳐 남겨라」).
 
-**사용자가 그 쟁점을 무효화하는 질문을 냈다:** 「이게 CLAUDE.md 에 있어야 되냐? 이번에만 필요하고 다음번엔 필요 없는 거 아님?」 — 다투던 축(문장을 어떻게 쓰나)이 아니라 **그릇이 맞나**가 문제였다.
+**The user asked a question that voids that dispute:** 「이게 CLAUDE.md 에 있어야 되냐? 이번에만 필요하고 다음번엔 필요 없는 거 아님?」 — the issue was not the axis being argued over (how to write the sentence) but **whether the container is right**.
 
-**CLAUDE.md 는 매 세션 자동 로드된다.** 그 비용은 resume 을 건드리지 않는 세션에도 똑같이 청구된다.
+**CLAUDE.md is loaded automatically every session.** Its cost is charged equally to sessions that never touch resume.
 
-★**그리고 이 절은 커지고 있었다 — 실측**★: `git show c8c7c7d~1:CLAUDE.md` 의 「세션 복원」 절 = **754 바이트**였는데, ADR-0185 를 반영한 커밋 `c8c7c7d` 가 그것을 **1304 바이트로 늘렸다**(codex 발급 서술 + 배선 트랩 추가). 즉 이 ADR 이 지우는 것은 오래된 유산이 아니라 **직전 커밋이 키운 것**이고, 그 성장 자체가 그릇이 틀렸다는 신호였다.
+★**And this section had been growing — measured**★: the 「세션 복원」 section in `git show c8c7c7d~1:CLAUDE.md` was **754 bytes**, and the commit `c8c7c7d` that reflected ADR-0185 **grew it to 1304 bytes** (adding the codex issuing description + the wiring trap). So what this ADR deletes is not an old legacy but **what the previous commit grew**, and that growth itself was a signal that the container was wrong.
 
 ## 결정
-1. ★**CLAUDE.md 수록 판정 기준 = 「매 세션이 필요한가」**★. 「규칙이냐 사실 서술이냐」가 아니다 — 규칙이어도 *그 코드를 만질 때만* 필요하면 CLAUDE.md 가 아니다. 그릇 배분:
-   - **이 작업만 필요** → 핸드오프 · 그 단계 TRD
-   - **그 코드 만질 때만 필요** → ADR + 코드 `// ADR-` 앵커 + 회귀 테스트
-   - **매 세션 필요** → CLAUDE.md
-2. **「세션 복원」 절을 CLAUDE.md 에서 통째 삭제한다** — 지운 분량은 **HEAD(`c8c7c7d`) 기준 1304 바이트**(헤딩 포함). 파일은 54202 → 53203 바이트가 된다.
-3. **CLAUDE.md 를 가리키던 참조는 정본으로 돌려세운다** — 그 참조들이 CLAUDE.md 를 향하고 있던 것 자체가 잘못된 조준이었다.
+1. ★**The criterion for inclusion in CLAUDE.md = 「매 세션이 필요한가」 (does every session need it)**★. It is not 「규칙이냐 사실 서술이냐」 (is it a rule or a statement of fact) — even a rule is not for CLAUDE.md if it is needed *only when touching that code*. The allocation of containers:
+   - **Needed only by this task** → handoff · that phase's TRD
+   - **Needed only when touching that code** → ADR + a `// ADR-` anchor in the code + a regression test
+   - **Needed every session** → CLAUDE.md
+2. **Delete the 「세션 복원」 section from CLAUDE.md in full** — the amount removed is **1304 bytes at HEAD (`c8c7c7d`)** (heading included). The file goes from 54202 to 53203 bytes.
+3. **References that pointed at CLAUDE.md are turned toward the canonical source** — that those references pointed at CLAUDE.md was itself a wrong aim.
 
 ## 거부한 대안
-- **1304 바이트 원문 유지** — 리뷰 2라운드가 같은 항목을 계속 1순위로 냈고, 무엇보다 절 **자신이** 「매핑 근거·예외·혼동쌍은 여기 되올리지 않는다」고 적어 두고서 그 셋을 다 담고 있었다.
-- **약 480 바이트로 축약**(금지 2개 + 되올리기 금지만 남김) — 「규칙만 남긴다」 기준의 결과물이고 **오늘 워킹트리에서 실제로 한 번 그 모양까지 갔다(커밋된 적은 없다)**. 기준이 틀려서 버렸다: 남긴 금지 둘조차 *resume 을 만질 때만* 필요하다.
-- **약 200 바이트 포인터 한 줄로 축소** — 세션이 한때 이것을 권했고 사유는 「들어오는 참조 5곳이 빈 이름을 가리킨다」였다. ★그것은 절을 남길 이유가 아니라 **참조를 고칠 이유**다★(결정 3). 포인터를 남기면 「CLAUDE.md 가 이 주제의 입구」라는 잘못된 조준이 영구화된다.
-- **그릇 판정을 「기능이냐 규약이냐」로 하기** — 세션이 처음 쓴 기준이다. fresh fallback 부활 금지는 분명 규약인데도 CLAUDE.md 자리값을 하지 않는다. 축이 성질이 아니라 **빈도**임을 이 반례가 보여 준다.
+- **Keep the 1304-byte original** — review round 2 kept putting the same item at priority 1, and above all the section **itself** had written 「매핑 근거·예외·혼동쌍은 여기 되올리지 않는다」 while containing all three.
+- **Shorten to about 480 bytes** (leaving only 2 bans + the ban on re-raising) — this is the product of the 「규칙만 남긴다」 (keep only the rules) criterion, and **today it actually went as far as that shape once in the working tree (it was never committed)**. We discarded it because the criterion was wrong: even the two bans that remained are needed *only when touching resume*.
+- **Reduce to a pointer line of about 200 bytes** — the session once recommended this, and the reason was 「들어오는 참조 5곳이 빈 이름을 가리킨다」. ★That is not a reason to keep the section but **a reason to fix the references**★ (decision 3). Leaving a pointer makes permanent the wrong aim that 「CLAUDE.md 가 이 주제의 입구」 (CLAUDE.md is the entrance to this topic).
+- **Deciding the container by 「기능이냐 규약이냐」 (feature or convention)** — this was the criterion the session first wrote. The ban on reviving fresh fallback is clearly a convention, yet it does not earn a place in CLAUDE.md. This counterexample shows that the axis is not nature but **frequency**.
 
 ## 근거
-### 지운 것마다 살아 있는 집 (전수 — 다음 세션이 재현할 수 있게 file:line 을 박는다)
-| # | 지운 서술 | 살아 있는 집 |
+### Every deleted item has a living home (exhaustive — we pin file:line so the next session can reproduce it)
+| # | The deleted statement | The living home |
 |---|---|---|
-| 1 | 불변식(저장된 backend sid 단독 의존 · 발급 주체는 백엔드) | `docs/reference/architecture-overview.md:321` |
-| 2 | ★금지: 추적 파일로 **기능 확장 금지**★ | **`docs/decisions/0008-세션복원-sid-통제.md:22`**(평문 금지) · 등급 사실은 `crates/engram-dashboard-agent/src/session_tracker.rs` 헤더 |
-| 3 | 경고: 발급 주체를 불변식에 넣지 말 것 | `architecture-overview.md:321` (★코드 앵커 없음 — 아래 「영향」의 미충족★) |
-| 4 | 사실: claude 발급/무손실 · codex 발급받음 | `architecture-overview.md:321` |
-| 5 | 트랩: 배선 없음 · wire 표식 0 · 입구가 `needs_session()` 미확인 | `architecture-overview.md:323-325`(더 자세하다) |
-| 6 | ★금지: fresh fallback 부활 금지★ | `architecture-overview.md:328` + **회귀 테스트 `activate_resume_early_exit_ends_failed_no_fresh_fallback`**(`crates/engram-dashboard-agent/tests/activation.rs` — 줄번호 아닌 이름으로 찾는다) |
-| 7 | 혼동쌍: 종점은 `Failed` 아니라 `Exited` | `architecture-overview.md:329` · `ADR-0082` 상태줄 · ADR 인덱스 0082 행 |
-| 8 | 되올리기 금지 | **이 ADR 결정 1 로 일반 규칙 승격**(옛 절과 함께 사라졌다) |
+| 1 | Invariant (depends solely on the stored backend sid · the issuer is the backend) | `docs/reference/architecture-overview.md:321` |
+| 2 | ★Ban: **no feature extension** through the tracking file★ | **`docs/decisions/0008-세션복원-sid-통제.md:22`** (plain-text ban) · the grade fact is in the `crates/engram-dashboard-agent/src/session_tracker.rs` header |
+| 3 | Warning: do not put the issuer into the invariant | `architecture-overview.md:321` (★no code anchor — unmet, see 「영향」 below★) |
+| 4 | Fact: claude issues / lossless · codex is issued | `architecture-overview.md:321` |
+| 5 | Trap: no wiring · 0 wire markers · the entrances do not check `needs_session()` | `architecture-overview.md:323-325` (more detailed) |
+| 6 | ★Ban: no reviving fresh fallback★ | `architecture-overview.md:328` + **regression test `activate_resume_early_exit_ends_failed_no_fresh_fallback`** (`crates/engram-dashboard-agent/tests/activation.rs` — find it by name, not by line number) |
+| 7 | Confusable pair: the endpoint is `Exited`, not `Failed` | `architecture-overview.md:329` · the `ADR-0082` status line · the ADR index row for 0082 |
+| 8 | Ban on re-raising | **Promoted to a general rule by decision 1 of this ADR** (it went away together with the old section) |
 
-★**「전부 architecture-overview 에 있다」는 거짓이다**★ — 2·6 의 금지 평문과 8 은 AO 에 없다. 그래서 위 표가 집을 **문서별로** 적는다. 세션이 한때 「7개 주장 전부 AO 실재」로 적었던 것은 *금지*가 아니라 *사실*을 grep 한 결과였다.
+★**「전부 architecture-overview 에 있다」 (It is all in architecture-overview) is false**★ — the plain-text bans of 2 and 6, and 8, are not in AO. That is why the table above writes the homes **per document**. What the session once wrote as 「7개 주장 전부 AO 실재」 (all 7 claims exist in AO) was the result of grepping *facts*, not *bans*.
 
-### 삭제해도 되는 이유
-- **금지 6 은 문장이 아니라 테스트가 진다** — 누가 fresh fallback 을 되살리면 그 테스트가 빨개진다. 문장은 무시할 수 있지만 빨간 테스트는 못 무시한다.
-- **금지 2 의 평문은 ADR-0008 에 있다** — ★`session_tracker.rs` 헤더의 「그뿐이다」를 그 근거로 읽지 말 것★: 그것은 *모듈이 무엇을 소유하나*를 닫는 말이고, 그 파일이 적는 금지는 더 좁다(「정확성의 1차 근거로 삼지 말 것」).
-- **어제 이 불변식을 표면화한 것은 CLAUDE.md 가 아니라 핸드오프였다** — 직전 `latest.md` 가 「우리 「세션 복원」 원칙은 …글자 그대로면 안 맞는다」를 적어 뒀다(`git diff` 제거 줄로 확인). ★단 이 증거가 받치는 것은 「핸드오프가 표면화했다」이고 「CLAUDE.md 가 기여하지 않았다」까지는 아니다★ — 그 핸드오프 문구는 `ADR-0008:19` 표현과도 일치한다.
-- **정량 근거 하나는 repo 밖 값이다** — 「CLAUDE.md 가 매 세션 약 25k 토큰」은 사용자 터미널의 `/context` 값이고 저장소 산출물로 재현할 수 없다. 재현 가능한 것은 파일 크기(위 결정 2)뿐이다.
+### Why deleting is fine
+- **Ban 6 is carried by a test, not a sentence** — if someone revives fresh fallback, that test turns red. A sentence can be ignored, but a red test cannot.
+- **The plain text of ban 2 is in ADR-0008** — ★do not read the 「그뿐이다」 in the `session_tracker.rs` header as its ground★: that closes the question of *what the module owns*, and the ban that file writes is narrower (「정확성의 1차 근거로 삼지 말 것」).
+- **What surfaced this invariant yesterday was not CLAUDE.md but the handoff** — the previous `latest.md` had written 「우리 「세션 복원」 원칙은 …글자 그대로면 안 맞는다」 (confirmed by the removed lines of `git diff`). ★But what this evidence supports is 「핸드오프가 표면화했다」 (the handoff surfaced it), not 「CLAUDE.md 가 기여하지 않았다」 (CLAUDE.md did not contribute)★ — that handoff wording also matches the phrasing at `ADR-0008:19`.
+- **One quantitative ground is a value from outside the repo** — 「CLAUDE.md 가 매 세션 약 25k 토큰」 (CLAUDE.md is about 25k tokens every session) is the `/context` value in the user's terminal and cannot be reproduced from repository artifacts. What is reproducible is only the file size (decision 2 above).
 
 ## 영향 / 불변식
-- ★**CLAUDE.md 에 새 절을 세울 땐 「매 세션 필요한가」를 먼저 통과시킨다**★. 통과 못 하면 ADR + 코드 앵커(+ 가능하면 회귀 테스트)로 보낸다.
-- ★**정본 분담 — ADR-0197 와 충돌하지 않게 읽을 것**★: ADR-0197 는 「조감도에 상세를 밀어 넣는다」를 기각하고 주제별 상세를 `docs/reference/structure/<주제>.md` 로 못박았다. 이 ADR 이 `architecture-overview` 를 정본이라 부르는 범위는 **resume/활성화 축의 불변식·상태 매핑**이고, **백엔드별 표는 그대로 `structure/agent-backend.md` 몫**이다. 그래서 이번 변경은 그 파일에 이 축의 포인터를 함께 달았다 — 안 달면 더 새 문서가 개정 전 불변식으로 이 축을 설명한다.
-- ★**이 ADR 이 세운 그릇 배분이 자기가 옮긴 내용에 대해 아직 미충족이다**★ — `rg "ADR-0185|ADR-0186" crates/ src/ src-tauri/` = **0줄**. 즉 발급 주체 중립 불변식은 지금 **ADR + 문서**만 갖고 있고 **코드 앵커도 회귀 테스트도 없다.** CLAUDE.md 「설계 결정 기록」이 이름한 두 발견 표면 중 앵커 쪽이 비어 있다는 뜻이고, 채우는 것은 Phase 2 몫이다(ADR-0185 「영향」의 같은 항목).
-- **남는 갭 둘.**
-  - **설계 문서 표면** — 회귀 테스트는 *구현*을 잡고 *제안*은 못 잡는다. 다음 세션이 TRD 에 「resume 실패하면 새로 파자」를 쓰면 빨개지는 것이 없다.
-  - **앵커 부재**(위 항목) — 코드를 만지는 세션이 개정된 불변식을 만날 표면이 문서뿐이다.
-  이 ADR 은 **둘 다 닫지 않는다.**
-- **claude·codex 런타임 동작은 한 줄도 바뀌지 않는다** — 문서 배치 결정이다. ADR-0185 의 결정 1·2 는 그대로 유효하고, 이 ADR 이 개정한 것은 **결정 3 의 「CLAUDE.md 도 고친다」 절반**뿐이다.
-- ★**남은 전체 스윕은 이 ADR 의 범위가 아니다**★ — 같은 기준을 CLAUDE.md 전체에 돌리면 여러 절이 같은 판정을 받는다. **가장 가까운 사례는 삭제된 절의 부모인 「핵심 불변식」**(kill 인과 · finalize 1회 · 락 순서 · 등록 순서)이다 — 그 열 줄도 전부 「그 코드 만질 때만 필요」다. 그 다음이 「백엔드 모듈 맵」·「빌드·검증 명령」. 별건으로 세운다.
+- ★**Before setting up a new section in CLAUDE.md, run it through 「매 세션 필요한가」 (does every session need it) first**★. If it does not pass, send it to an ADR + a code anchor (+ a regression test if possible).
+- ★**The split of canonical sources — read it so it does not conflict with ADR-0197**★: ADR-0197 rejected 「조감도에 상세를 밀어 넣는다」 (push detail into the overview) and pinned per-topic detail to `docs/reference/structure/<주제>.md`. The scope in which this ADR calls `architecture-overview` canonical is **the invariants and state mapping of the resume/activation axis**, and **the per-backend table remains the share of `structure/agent-backend.md`**. So this change also attached a pointer for this axis to that file — if not attached, a newer document explains this axis with the pre-revision invariant.
+- ★**The container allocation this ADR set up is still unmet for the content it moved**★ — `rg "ADR-0185|ADR-0186" crates/ src/ src-tauri/` = **0 lines**. That is, the issuer-neutral invariant now has **only an ADR + documents**, and **neither a code anchor nor a regression test.** This means that, of the two discovery surfaces named by CLAUDE.md 「설계 결정 기록」, the anchor side is empty, and filling it is Phase 2's share (the same item in ADR-0185 「영향」).
+- **Two gaps remain.**
+  - **The design document surface** — a regression test catches an *implementation* and cannot catch a *proposal*. If the next session writes 「resume 실패하면 새로 파자」 in a TRD, nothing turns red.
+  - **Missing anchor** (the item above) — the only surface where a session touching the code meets the revised invariant is the documents.
+  This ADR **closes neither.**
+- **The claude and codex runtime behavior does not change by even one line** — it is a decision about document placement. Decisions 1 and 2 of ADR-0185 remain valid, and what this ADR amended is **only the 「CLAUDE.md 도 고친다」 (CLAUDE.md is fixed too) half of decision 3**.
+- ★**The remaining full sweep is out of this ADR's scope**★ — running the same criterion over the whole of CLAUDE.md gives several sections the same verdict. **The closest case is 「핵심 불변식」, the parent of the deleted section** (kill causality · finalize once · lock order · registration order) — those ten lines are also all 「그 코드 만질 때만 필요」 (needed only when touching that code). Next come 「백엔드 모듈 맵」 and 「빌드·검증 명령」. They are set up as a separate item.

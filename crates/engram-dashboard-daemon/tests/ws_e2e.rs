@@ -21,10 +21,10 @@ use engram_dashboard_agent::types::InputOrigin;
 use engram_dashboard_daemon::{
     start_test_server, start_test_server_with_keepalive, KeepaliveConfig, TestServerHandle,
 };
-use engram_dashboard_net::auth::AuthFrame;
+use engram_dashboard_protocol::handshake::AuthFrame;
 use engram_dashboard_protocol::{
     decode_frame, AgentBackendKind as WireBackendKind, AgentCommand as WireCommand, AgentEvent,
-    AgentOutputFormat as WireOutputFormat, RequestId, SubscribeAction, PROTOCOL_VERSION,
+    AgentOutputFormat as WireOutputFormat, RequestId, Secret, SubscribeAction, PROTOCOL_VERSION,
 };
 
 use futures_util::{SinkExt, StreamExt};
@@ -66,12 +66,12 @@ impl Client {
         client
     }
 
-    /// ★핸드셰이크는 명령이 아니다(ADR-0129 0-4)★ — 모양이 네트워크 lib
-    /// 소유라 `send`(명령 전용)를 못 탄다. 첫 프레임(정상 인증)과 2차 프레임(case21 의 프로토콜 위반)이
+    /// ★핸드셰이크는 명령이 아니다(ADR-0129 0-4)★ — 따로 된 프레임 타입(protocol `handshake`)이라
+    /// `send`(명령 전용)를 못 탄다. 첫 프레임(정상 인증)과 2차 프레임(case21 의 프로토콜 위반)이
     /// **같은 바이트**여야 하므로 두 자리가 이 헬퍼 하나를 공유한다.
     async fn send_auth(&mut self, token: &str) {
         let auth = AuthFrame::Auth {
-            token: token.to_string(),
+            token: Secret::new(token),
             protocol_version: PROTOCOL_VERSION,
         };
         let text = serde_json::to_string(&auth).unwrap();
@@ -604,14 +604,19 @@ async fn case02_auth_wrong_token_closes() {
     server.shutdown().await;
 }
 
-// ── 케이스 3: auth 타임아웃(첫 frame 미전송) → 서버가 close ──────────────────────────
+// ── Case 3: auth timeout (no first frame) → the server closes after AUTH_TIMEOUT ──────────────────────
 #[tokio::test]
 async fn case03_auth_timeout_closes() {
     let server = start_test_server().await.unwrap();
     let mut c = Client::connect_raw(server.port).await;
+    // Still open well past the old 1 s window, then closed once the 15 s window passes.
     assert!(
-        c.expect_closed().await,
-        "auth frame 미전송이면 1s 후 닫혀야 함"
+        !c.expect_closed_within(Duration::from_secs(3)).await,
+        "a connection without an auth frame must stay open for AUTH_TIMEOUT, not close at once"
+    );
+    assert!(
+        c.expect_closed_within(Duration::from_secs(20)).await,
+        "a connection without an auth frame must close once AUTH_TIMEOUT passes"
     );
     server.shutdown().await;
 }
@@ -2595,7 +2600,7 @@ mod real_process {
             pid: dead_pid,
             host: "127.0.0.1".into(),
             port: 59999,
-            token: "d".repeat(64),
+            token: Secret::new("d".repeat(64)),
             protocol_version: PROTOCOL_VERSION,
             // ADR-0134 이후 stale 판정은 **진단 로그용**이라 이 값이 기동 여부를 가르지 않는다 —
             //   덮어쓸 권한은 폴더 잠금에서 나온다. 값은 "죽은 pid + 불일치 생성시각"이라는 현실적인
@@ -2630,7 +2635,7 @@ mod real_process {
             "새 데몬은 유효 start_time 을 기록해야"
         );
         assert_ne!(
-            fresh.token,
+            fresh.token.expose(),
             "d".repeat(64),
             "새 데몬은 새 토큰을 발행해야(stale 토큰 유지 금지)"
         );

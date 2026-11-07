@@ -1,5 +1,5 @@
-# S29 — 우편 내부 키를 이름에서 id 로
+# S29 — Mail internal keys: from name to id
 
-메시징(우편)의 대기 우편함 · 기록이 수신자를 정규 이름으로 키잉하는 것을 에이전트 id 로 바꾼다. 가장자리 주소(사람 · LLM 이 쓰는 표시 이름)는 그대로 이름이다(ADR-0101). 이름 키를 고른 ADR-0114 · 0115 · 0120 을 부분 개정한다.
+Change the messaging (mail) pending mailbox and records from keying the recipient by canonical name to keying it by agent id. The edge address (the display name that people and the LLM use) stays the name (ADR-0101). Partially amends ADR-0114, 0115 and 0120, which chose the name key.
 
-- 타임라인 = `docs/process/step-log.md` 의 `## S29`
+- Timeline = `## S29` in `docs/process/step-log.md`

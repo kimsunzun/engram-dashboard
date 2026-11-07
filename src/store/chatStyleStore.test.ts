@@ -1,5 +1,5 @@
-// chatStyleStore — 셸 설정 `chat.style.*` 이 :root CSS 변수에 닿는가 · 화이트리스트 밖은 막히는가 · 저장소를
-//   건드리지 않는가(ADR-0265). 설정 클라이언트는 실물에 가짜 IPC 를 꽂는다.
+// chatStyleStore — whether the shell setting `chat.style.*` reaches the :root CSS variables · whether anything outside the whitelist is blocked · whether it does not
+//   touch storage (ADR-0265). The settings client plugs a fake IPC into the real one.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -11,9 +11,9 @@ import {
   type ChatStyleKey,
 } from './chatStyleStore'
 
-// theme.css 원문을 런타임에 읽는다(vitest=Node). 프론트 tsconfig 는 DOM 전용(@types/node 없음)이고
-//   vitest 는 .css 를 빈 모듈로 처리해 `?raw`/glob 이 빈 문자열이라, Node fs 로 직접 읽는다. 여기 필요한
-//   Node 심볼만 최소 ambient 선언(전역 @types/node 의존 회피 — 이 테스트 파일 스코프 한정).
+// Reads the theme.css source at runtime (vitest=Node). The frontend tsconfig is DOM-only (no @types/node) and
+//   vitest treats .css as an empty module so `?raw`/glob is an empty string, so we read it directly with Node fs. Only the Node symbols needed here are declared as a minimal ambient
+//   (avoiding a dependency on global @types/node — scoped to this test file only).
 declare function require(id: string): { readFileSync(p: string, enc: string): string }
 declare const process: { cwd(): string }
 
@@ -21,7 +21,7 @@ function rootVar(name: string): string {
   return document.documentElement.style.getPropertyValue(name).trim()
 }
 
-/** 알림 한 통을 시험이 직접 밀 수 있는 클라이언트 — 당기기 답은 비어 있다. */
+/** A client where the test can push one notice directly — the pull answer is empty. */
 function harness() {
   let handler: ((payload: unknown) => void) | undefined
   let rev = 0
@@ -95,8 +95,8 @@ describe('chatStyleStore — 적용자', () => {
     expect(rootVar('--chat-line-height')).toBe('1.8')
   })
 
-  // ★style 속성이 비었는지로 재지 말 것★ — 프로토타입 키가 통과하면 변수 이름 자리에 함수 · 객체가 들어가
-  //   setProperty 가 조용히 아무것도 안 남겨, 가드를 `in` 으로 약하게 해도 그 단언은 초록이다. 호출 자체를 센다.
+  // ★Do not measure by whether the style attribute is empty★ — if a prototype key passes, a function · object goes in the variable name slot and
+  //   setProperty quietly leaves nothing, so even if the guard is weakened to `in` that assertion stays green. Count the calls themselves.
   it('화이트리스트 밖 키 · 챗 스타일이 아닌 키 · 프로토타입 키는 setProperty 를 한 번도 부르지 않는다', async () => {
     const h = await installed()
     const setProperty = vi.spyOn(document.documentElement.style, 'setProperty')
@@ -155,9 +155,9 @@ describe('chatStyleStore — 쓰기는 셸 설정으로', () => {
   })
 })
 
-// ── 화이트리스트 ↔ theme.css fallback ─────────────
-//   첫 페인트는 theme.css `:root` 의 `--chat-*` 가 맡는다. 적용자가 칠하는 변수 집합과 그 선언 집합이 같은지만
-//   본다 — 값(셸 스키마 표의 기본값과 같은가)은 재지 않는다(ADR-0265 「U2 의 대가」).
+// ── Whitelist ↔ theme.css fallback ─────────────
+//   The first paint is handled by `--chat-*` in theme.css `:root`. We only check that the set of variables the applier paints and the set of those declarations are the same
+//   — the values (whether they match the defaults in the shell schema table) are not measured (ADR-0265 「U2 의 대가」 (U2's cost)).
 describe('chatStyleStore 화이트리스트 ↔ theme.css', () => {
   const KEYS: ChatStyleKey[] = [
     'railRowPt',
@@ -182,7 +182,7 @@ describe('chatStyleStore 화이트리스트 ↔ theme.css', () => {
       .sort()
 
     const css = require('node:fs').readFileSync(`${process.cwd()}/src/styles/theme.css`, 'utf8')
-    // 주석 안의 변수명 인용(`--chat-rail-row-pt(커플링)` 등)을 선언으로 세지 않게 주석부터 걷는다.
+    // Strip the comments first so a variable-name citation inside a comment (`--chat-rail-row-pt(커플링)` etc.) is not counted as a declaration.
     const declared = Array.from(
       css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/(--chat-[a-z0-9-]+)\s*:/g),
       (m: RegExpMatchArray) => m[1],

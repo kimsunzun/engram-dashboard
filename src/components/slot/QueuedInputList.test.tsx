@@ -1,7 +1,7 @@
-// ADR-0231: 대기 입력 목록의 그리기 규칙 — 머리줄 없음 · 열린 항목 전부(취소 대기 포함) · 3 + 「외 N개」(눌러 펼침) ·
-//   툴팁 전문 · ✕ 는 넘기지 않은 항목에(Tab 으로 닿는 버튼) · 취소 답을 기다리는 동안 ✕ 잠김 · 넘긴 항목과
-//   못 뺐다는 답이 온 항목은 ✕ 없음 ·
-//   ✕ 는 명령을 디스패치할 뿐 스스로 감추지 않는다.
+// ADR-0231: drawing rules of the queued-input list — no head line · all open items (including cancel-pending) · 3 + 「외 N개」 (N more; click to expand) ·
+//   full text in tooltip · ✕ on items not yet handed over (a button reachable with Tab) · ✕ locked while waiting for a cancel reply · no ✕ on handed-over items and
+//   on items whose reply said it could not be removed ·
+//   ✕ only dispatches the command and never hides itself.
 
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -44,7 +44,7 @@ describe('QueuedInputList(ADR-0231)', () => {
     expect(container.firstChild).toBeNull()
   })
 
-  // ADR-0231 · ADR-0235 — ✕ 는 명부가 뺐다고 확인한 뒤에만 행을 뺀다(미리 감추지 않는다).
+  // ADR-0231 · ADR-0235 — ✕ removes the row only after the registry confirms it was removed (it does not hide in advance).
   it('취소 대기도 그린다 — 답을 기다리는 동안 ✕ 가 잠긴다', () => {
     render(<QueuedInputList agentId={AGENT} entries={[waiting('A'), cancelling('B'), waiting('C')]} />)
     expect(shownIds()).toEqual(['A', 'B', 'C'])
@@ -143,7 +143,7 @@ describe('QueuedInputList(ADR-0231)', () => {
     expect(shownIds()).toEqual(['A', 'B'])
   })
 
-  // ADR-0237: 누른 버튼이 잠기거나 사라져도 포커스가 문서로 떨어지지 않는다 — 칸의 Esc 가 칸 루트에 닿아야 한다.
+  // ADR-0237: even if the pressed button locks or disappears, focus does not drop to the document — the area's Esc must reach the area root.
   it('✕ · 「외 N개」 를 누르면 버튼이 쥔 포커스가 칸 컨테이너(tabindex -1)로 옮겨 간다', () => {
     const entries = ['A', 'B', 'C', 'D'].map((id) => waiting(id))
     render(

@@ -1,22 +1,22 @@
-//! 사용량 책 — 벤더 칸마다의 순수 상태기(TRD §1-4). 스레드·락·시계·I/O·발행이 없다: 부르는 쪽이 시각
-//! ([`Now`])을 넘기고 무엇이 바뀌었는지·무엇을 할지(조회 시작·발행·잠)를 돌려받는다. 잠그는 것·조회를 띄우는
-//! 것·발행하는 것은 서비스 몫이다.
+//! Usage book — a pure state machine per vendor cell (TRD §1-4). It has no threads, locks, clocks, I/O or emission: the caller passes the time
+//! ([`Now`]) and gets back what changed and what to do (start a query · emit · sleep). Locking, launching queries
+//! and emitting are the service's share.
 //!
-//! ★revision 은 보이는 것이 바뀔 때만 오른다(§3 #49)★ — 스냅숏이 싣는 값(창 %·리셋·만료 · 모델별 · plan ·
-//!   상태 · detail) 또는 다음 자동 조회 기한. 같은 값을 다시 주워 나이만 새로워진 것은 바뀜이 아니다. 예외 = 조회
-//!   시작·끝은 늘 오른다(`in_flight` 가 바뀐다).
-//! ★시각만 흘러 생기는 바뀜(만료 래치 · 거절 끝 → 조회 실패)은 [`UsageBook::eval_time`] 이 칸에 새기고 그때
-//!   revision 이 오른다★ — ★스냅숏을 뜨기 전에 이것을 부르는 것은 부르는 쪽(서비스)의 의무다★. 줍기 적용·조회
-//!   끝·[`UsageBook::plan_tick`]·발행 한 장([`UsageBook::broadcast_sheet`]·[`UsageBook::coalesce_passive`])은 스스로
-//!   부른다.
-//! ★빚 — revision 이 오르면 그 칸은 구독자 전부에게 한 번 발행할 빚을 진다★(줍기 값의 바뀜 = 합칠 수 있는 빚 ·
-//!   그 밖(래치·거절 끝 — 줍기 적용 안에서 선 것도 · 조회 시작·끝) = 곧바로 갚을 빚). ★빚을 갚는 것은 구독자
-//!   전부에게 가는 발행뿐이다★ — [`UsageBook::broadcast_sheet`] · [`Coalesce::PublishNow`] · [`TickPlan::publish`]
-//!   가 갚음과 한 장 뜨기를 한 호출에서 한다(락을 다시 잡아 갚으면 그 사이 선 빚이 안 실린 채 지워진다). 구독 추가의
-//!   첫 한 장(`eval_time` + `snapshot`)은 그 연결에만 가므로 갚지 않는다 — 깨운 스케줄러가 전부에게 낸다(새 연결엔
-//!   한 장이 겹친다). ★그래서 서비스가 발행을 빠뜨려도 구독된 칸이면 다음 [`UsageBook::plan_tick`] 이 갚는다★.
-//! ★무엇을 받아도 패닉하지 않는다★ — 책을 부르는 자리는 전부 가둠 표시 밖이라 패닉 = 데몬 즉시 종료다(훅 ·
-//! ADR-0292). 시각 산술은 전부 포화·checked 다.
+//! ★revision rises only when something visible changes (§3 #49)★ — the values a snapshot carries (window % · reset · expiry · per model · plan ·
+//!   status · detail) or the next automatic query deadline. Picking up the same value again so only its age is fresher is not a change. Exception = query
+//!   start and end always raise it (`in_flight` changes).
+//! ★Changes that arise merely from time passing (expiry latch · refusal end → query failure) are stamped onto the cell by [`UsageBook::eval_time`] and the
+//!   revision rises then★ — ★calling this before taking a snapshot is the duty of the caller (the service)★. Pickup application · query
+//!   end · [`UsageBook::plan_tick`] · the emission sheet ([`UsageBook::broadcast_sheet`] · [`UsageBook::coalesce_passive`]) call it
+//!   themselves.
+//! ★Debt — once revision rises, that cell owes one emission to all subscribers★ (a change in a pickup value = a coalescible debt ·
+//!   anything else (latch · refusal end — including those that stood inside a pickup application · query start and end) = a debt to repay at once). ★The only thing that repays a debt is an emission to all
+//!   subscribers★ — [`UsageBook::broadcast_sheet`] · [`Coalesce::PublishNow`] · [`TickPlan::publish`]
+//!   repay and take a sheet in one call (if the lock is retaken to repay, a debt that stood in between is erased without being carried). The
+//!   first sheet of a subscription add (`eval_time` + `snapshot`) goes only to that connection so it does not repay — the woken scheduler emits to all (a new connection
+//!   gets one overlapping sheet). ★So even if the service misses an emission, for a subscribed cell the next [`UsageBook::plan_tick`] repays it★.
+//! ★It does not panic whatever it receives★ — every place that calls the book is outside the containment mark so a panic = immediate daemon exit (hook ·
+//! ADR-0292). All time arithmetic is saturating/checked.
 
 use std::time::Duration;
 
@@ -32,41 +32,41 @@ use serde::de::value::{Error as ValueError, StrDeserializer};
 use serde::de::IntoDeserializer;
 use serde::Deserialize;
 
-/// 거절 대기 — 상류가 쓸 만한 대기를 안 줬을 때(없음·0)(D4).
+/// Refusal wait — when upstream gave no usable wait (none · 0) (D4).
 pub const REJECT_FALLBACK: Duration = Duration::from_secs(5 * 60);
-/// 거절 대기 상한 — 상류가 준 대기를 여기서 자른다(§3 #37).
+/// Refusal wait cap — the wait upstream gave is cut here (§3 #37).
 pub const REJECT_MAX: Duration = Duration::from_secs(24 * 60 * 60);
-/// 두 `resets_at` 이 이 안이면 같은 리셋이다 — 경계 포함(60초 차 = 같음 · 61초 차 = 다름, §3 #46).
+/// If two `resets_at` are within this, it is the same reset — boundary inclusive (60 s apart = same · 61 s apart = different, §3 #46).
 pub const RESET_SAME_TOLERANCE: Duration = Duration::from_secs(60);
-/// 모델별 창을 한 관측에서 받는 상한 — 줍기는 pump 스레드에서 곧장 돈다. 넘는 것은 앞에서부터 이만큼만 받는다.
+/// The cap on per-model windows accepted from one observation — pickup runs straight on the pump thread. Anything over is accepted only up to this many from the front.
 pub const MODEL_SCOPED_MAX: usize = 16;
-/// 줍기 발행을 칸마다 이 창으로 합친다(§3 #60) — 줍기 변화만이다. 조회 시작·끝·래치는 곧바로 나간다.
-/// 출처 규칙이 아니다 — 스트림 입구([`UsageBook::apply_passive`])로 몰려 드는 바뀜의 빈도 제어다(§3 #88).
+/// Coalesce pickup emission per cell over this window (§3 #60) — pickup changes only. Query start, end and latches go out at once.
+/// It is not a source rule — it is frequency control of the changes crowding into the stream entrance ([`UsageBook::apply_passive`]) (§3 #88).
 pub const USAGE_PUBLISH_COALESCE: Duration = Duration::from_secs(1);
-/// 스케줄러 잠 상한(§3 #58) — 대기 타이머가 절전을 안 셀 수 있고 리셋은 벽시계라, 복귀·시계 이동 뒤 늦음을
-/// 여기로 묶는다.
+/// Scheduler sleep cap (§3 #58) — the wait timer may not count sleep and the reset is wall clock, so lateness after resume or a clock shift
+/// is bounded here.
 pub const SCHEDULE_MAX_SLEEP: Duration = Duration::from_secs(60);
 
-/// [`super::clock::UsageClock`] 을 한 번 읽은 값 — `mono` = 그 시계 기점부터의 단조 경과, `wall` = epoch 초.
+/// The value of reading [`super::clock::UsageClock`] once — `mono` = monotonic elapsed since that clock's origin, `wall` = epoch seconds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Now {
     pub mono: Duration,
     pub wall: i64,
 }
 
-/// [`UsageBook::apply_passive`] 의 결과. `changed` 면 revision 이 올랐다 · `next_auto_changed` 면 스케줄러를
-/// 깨울 일이다(D12 — `changed` 도 함께 선다).
+/// The result of [`UsageBook::apply_passive`]. If `changed`, revision rose · if `next_auto_changed`, the scheduler must be
+/// woken (D12 — `changed` also stands with it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PassiveApplied {
     pub changed: bool,
     pub next_auto_changed: bool,
 }
 
-/// 요청 종류(§1-4 요청 표). `Refresh` = ⟳ — 쿨타임을 무시하되 거절은 못 넘는다(D11).
+/// Request kind (§1-4 request table). `Refresh` = ⟳ — ignores the cooldown but cannot get past a refusal (D11).
 ///
-/// ★`Refresh` 에 최소 간격을 두지 않는다(사용자 결정 2026-09-29)★ — 조회가 막 끝난 직후의 ⟳ 도 새 조회다.
-///   남는 제동은 거절 기한(R24)과 진행 중 합류뿐이다 — 피어 다수에 수동 간격이 없고(예외·미확인 =
-///   `docs/research/usage-manual-refresh-peers-2026-09-29.md`), 상류가 막으면 부르는 쪽이 스스로 줄인다.
+/// ★`Refresh` has no minimum interval (user decision 2026-09-29)★ — a ⟳ right after a query just ended is also a new query.
+///   The only brakes left are the refusal deadline (R24) and joining an in-flight one — most peers have no manual interval (exceptions · unconfirmed =
+///   `docs/research/usage-manual-refresh-peers-2026-09-29.md`), and if upstream blocks, the caller throttles itself.
 // ADR-0258
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestKind {
@@ -74,43 +74,43 @@ pub enum RequestKind {
     Refresh,
 }
 
-/// [`UsageBook::judge`] 의 판정.
+/// The decision of [`UsageBook::judge`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Judgment {
-    /// 조회 없이 지금 캐시로 답한다 — 기한 전 `Get`.
+    /// Answer from the current cache without a query — a `Get` before the deadline.
     Cached,
-    /// 거절 기한 전의 `Refresh` — 조회를 내보내지 않는다(R24).
+    /// A `Refresh` before the refusal deadline — does not send out a query (R24).
     Rejected,
-    /// 진행 중인 조회가 있다 — 그 끝을 기다린다.
+    /// There is a query in flight — wait for its end.
     Join,
-    /// ★책이 이미 `in_flight` 를 세우고 revision 을 올렸다★([`UsageBook::begin_probe`] 와 같다) — 부르는 쪽은
-    /// [`UsageBook::broadcast_sheet`] 로 발행하고 조회를 띄운다. 끝은 반드시 [`UsageBook::finish_probe`] 로
-    /// 닫는다 — 안 닫으면 그 칸은 영영 진행 중이다.
+    /// ★The book has already set `in_flight` and raised revision★ (same as [`UsageBook::begin_probe`]) — the caller
+    /// emits with [`UsageBook::broadcast_sheet`] and launches the query. The end must be closed with [`UsageBook::finish_probe`]
+    /// — if not closed, that cell stays in flight forever.
     Start,
 }
 
-/// [`UsageBook::coalesce_passive`] 의 결과.
+/// The result of [`UsageBook::coalesce_passive`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum Coalesce {
-    /// 지금 그 칸의 구독자 전부에게 보낼 한 장 — 책은 빚을 갚은 것으로 적었다.
+    /// One sheet to send to all of that cell's subscribers now — the book recorded the debt as repaid.
     PublishNow(UsageLimitSnapshot),
-    /// 지금 보낼 한 장이 없다 — 부르는 쪽은 스케줄러를 깨운다. 빚이 남았으면 [`UsageBook::plan_tick`] 이 합침
-    /// 기한에 그때의 한 장을 낸다.
+    /// There is no sheet to send now — the caller wakes the scheduler. If a debt remains, [`UsageBook::plan_tick`] emits the sheet of that moment
+    /// at the coalescing deadline.
     Deferred,
 }
 
-/// [`UsageBook::plan_tick`] 의 결과. 두 목록의 순서 = 칸을 만든 순서.
+/// The result of [`UsageBook::plan_tick`]. The order of both lists = the order the cells were made.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TickPlan {
-    /// 시작한 조회 — 책이 이미 `in_flight` 를 세웠다([`Judgment::Start`] 와 같은 책임이 따른다).
+    /// Queries started — the book has already set `in_flight` (the same duty follows as [`Judgment::Start`]).
     pub start: Vec<UsageKey>,
-    /// 지금 그 칸의 구독자 전부에게 보낼 한 장들(키 = 명부에서 대상을 찾을 칸) — 책은 빚을 갚은 것으로 적었다.
+    /// Sheets to send to all of that cell's subscribers now (key = the cell to find the target in the registry) — the book recorded the debt as repaid.
     pub publish: Vec<(UsageKey, UsageLimitSnapshot)>,
-    /// 다음 깰 때까지 — `0 < sleep ≤ SCHEDULE_MAX_SLEEP`.
+    /// Until the next wake — `0 < sleep ≤ SCHEDULE_MAX_SLEEP`.
     pub sleep: Duration,
 }
 
-// 손으로 쓴다 — 파생하면 잠이 0 이라 그대로 기다리는 구동부가 돈다.
+// Written by hand — if derived, a driver that waits as is with sleep 0 would spin.
 impl Default for TickPlan {
     fn default() -> Self {
         Self {
@@ -121,14 +121,14 @@ impl Default for TickPlan {
     }
 }
 
-/// 칸마다 하나. 키 목록은 만들 때 고정된다.
+/// One per cell. The key list is fixed at construction.
 pub struct UsageBook {
     cells: Vec<Cell>,
 }
 
 impl UsageBook {
-    /// 받은 벤더마다 기본 계정 칸 하나 — 같은 벤더가 두 번 오면 앞의 것만 본다. ★wire 벤더로 못 바꾸는 낱말은
-    /// 등록하지 않는다(warn 한 번)★ — 그래서 등록된 칸은 늘 스냅숏을 뜨고, 그 벤더는 모든 메서드에 모르는 키다.
+    /// One default-account cell per vendor received — if the same vendor comes twice only the first is seen. ★A word that cannot be turned into a wire vendor
+    /// is not registered (one warn)★ — so a registered cell always takes a snapshot, and that vendor is an unknown key to every method.
     pub fn new(vendors: &[(UsageVendorKey, UsagePolicy)]) -> Self {
         let mut cells: Vec<Cell> = Vec::with_capacity(vendors.len());
         let mut seen: Vec<UsageVendorKey> = Vec::with_capacity(vendors.len());
@@ -144,7 +144,7 @@ impl UsageBook {
         Self { cells }
     }
 
-    /// 만든 순서.
+    /// Order made.
     pub fn keys(&self) -> Vec<UsageKey> {
         self.cells.iter().map(|cell| cell.key.clone()).collect()
     }
@@ -157,17 +157,17 @@ impl UsageBook {
         self.cell(key).map(|cell| cell.in_flight)
     }
 
-    /// 다음 자동 조회의 `mono` 기한(R29) = `max(max(last_query, fresh_reset) + cooldown, reject_until)` —
-    /// 기준점이 없으면 `reject_until`, 그것도 없으면 `now.mono`(= 지금 기한). 진행 중인지는 보지 않는다.
-    /// `None` = 모르는 키.
+    /// The `mono` deadline of the next automatic query (R29) = `max(max(last_query, fresh_reset) + cooldown, reject_until)` —
+    /// `reject_until` if there is no reference point, and if not even that, `now.mono` (= the deadline is now). It does not look at whether one is in flight.
+    /// `None` = unknown key.
     pub fn next_auto(&self, key: &UsageKey, now: Now) -> Option<Duration> {
         self.cell(key).map(|cell| cell.next_auto(now))
     }
 
-    /// 줍기(pump) 입구 — 관측 한 건의 값을 조회 성공과 같은 병합으로 합친다(R16·D12 · 출처를 가르지 않는다).
-    /// ★같은 것은 값 병합뿐이다★ — 조회 끝만 하는 일(거절 기한 지움 · `last_query` 기준점 · D12 표시 지움 · 성공의
-    /// `Ready`/`Unavailable` 접기)은 여기 없다. 값의 바뀜은 합칠 수 있는 빚이다([`UsageBook::coalesce_passive`]).
-    /// 칸 = 관측의 벤더 + 기본 계정. 모르는 벤더면 아무것도 안 한다.
+    /// Pickup (pump) entrance — merges the value of one observation with the same merge as a query success (R16·D12 · does not distinguish the source).
+    /// ★Only the value merge is the same★ — things only query end does (clearing the refusal deadline · the `last_query` reference point · clearing the D12 mark · folding success into
+    /// `Ready`/`Unavailable`) are not here. A change in value is a coalescible debt ([`UsageBook::coalesce_passive`]).
+    /// Cell = the observation's vendor + the default account. If the vendor is unknown it does nothing.
     pub fn apply_passive(&mut self, obs: &UsageObservation, now: Now) -> PassiveApplied {
         let account = UsageAccountKey::default();
         let Some(cell) = self
@@ -183,7 +183,7 @@ impl UsageBook {
         let after = cell.visible(now);
         let changed = !before.same(&after);
         if changed {
-            // 합칠 수 있는 것은 줍기 값의 바뀜뿐이다 — 같은 호출이 새긴 래치·거절 끝은 곧바로 나간다.
+            // Only a change in pickup value can be coalesced — latches and refusal ends stamped by the same call go out at once.
             cell.bump_owing(if latched {
                 Owed::Now
             } else {
@@ -196,7 +196,7 @@ impl UsageBook {
         }
     }
 
-    /// 조회 시작 — `in_flight` 를 세우고 revision +1. 모르는 키이거나 이미 진행 중이면 `false`(아무것도 안 바뀜).
+    /// Query start — set `in_flight` and revision +1. `false` if the key is unknown or one is already in flight (nothing changes).
     pub fn begin_probe(&mut self, key: &UsageKey) -> bool {
         match self.cell_mut(key) {
             Some(cell) if !cell.in_flight => {
@@ -207,11 +207,11 @@ impl UsageBook {
         }
     }
 
-    /// 조회 끝(성공·한도 정보 없음·실패 — 시한 초과 포함). 성공의 값은 줍기와 같은 한 길로 합친다 — 안 실린
-    /// 창은 들고 있던 값 그대로다. 성공은 `Ready`(한도 정보 없음이면 창을 비우고 `Unavailable`) · 실패는 값을
-    /// 건드리지 않고 그 실패 상태로 접는다. `last_query = now.mono` 가 새 기준점이 된다(D12 의 새로 들어옴도
-    /// 여기서 지운다). 성공(한도 정보 없음 포함)은 거절 기한을 지운다. 진행 중이 아니었어도 적용하고, revision
-    /// 은 늘 +1 이다. 모르는 키면 아무것도 안 한다.
+    /// Query end (success · no limit info · failure — including timeout). The success value is merged through the same single path as pickup — a window
+    /// not carried keeps the value it held. Success becomes `Ready` (if no limit info, empty the windows and `Unavailable`) · failure
+    /// leaves the values untouched and folds into that failure state. `last_query = now.mono` becomes the new reference point (the D12 newly-arrived mark is
+    /// also cleared here). Success (including no limit info) clears the refusal deadline. It applies even if none was in flight, and revision
+    /// is always +1. If the key is unknown it does nothing.
     pub fn finish_probe(
         &mut self,
         key: &UsageKey,
@@ -229,13 +229,13 @@ impl UsageBook {
         cell.fresh_five_hour = false;
         cell.fresh_weekly = false;
         cell.in_flight = false;
-        // 상류가 이미 지난 리셋을 줬으면 받은 자리에서 만료로 보인다 — 어차피 오르는 revision 에 싣는다.
+        // If upstream gave an already-past reset, it shows as expired at the point received — carried in the revision that rises anyway.
         cell.eval_time(now);
         cell.bump();
     }
 
-    /// 시각만 흘러 생기는 바뀜을 칸에 새긴다 — 만료 래치(R32: `resets_at <= now.wall` 인 창마다 한 번) · 거절 끝
-    /// (`reject_until <= now.mono` 인 `Rejected` → `Failed`, detail 유지 — R31). 새긴 것이 있으면 revision +1 과 `true`.
+    /// Stamp changes that arise merely from time passing onto the cell — the expiry latch (R32: once per window with `resets_at <= now.wall`) · refusal end
+    /// (`Rejected` → `Failed` where `reject_until <= now.mono`, detail kept — R31). If anything was stamped, revision +1 and `true`.
     pub fn eval_time(&mut self, key: &UsageKey, now: Now) -> bool {
         let Some(cell) = self.cell_mut(key) else {
             return false;
@@ -247,15 +247,15 @@ impl UsageBook {
         changed
     }
 
-    /// `now` 기준 wire 한 장 — 빚을 갚지 않는다(구독 첫 한 장은 이것으로 뜬다). `None` = 모르는 키.
-    /// ★먼저 [`UsageBook::eval_time`] 을 부른다★ — 안 불러도 끝난 거절은 조회 실패로 보이지만, 그 바뀜은 revision
-    /// 에 없다.
+    /// One wire sheet as of `now` — does not repay debt (the first sheet of a subscription is taken with this). `None` = unknown key.
+    /// ★Call [`UsageBook::eval_time`] first★ — even if not called, an ended refusal shows as a query failure, but that change is not in
+    /// the revision.
     pub fn snapshot(&self, key: &UsageKey, now: Now) -> Option<UsageLimitSnapshot> {
         self.cell(key).map(|cell| cell.sheet(now))
     }
 
-    /// 그 칸의 구독자 전부에게 보낼 한 장 — 조회 시작·끝 · 요청 때 래치의 발행. `eval_time`(바뀌면 revision +1)
-    /// → 빚 갚음(직전 발행 = `now`) → 스냅숏을 한 호출에서 한다(머리 「빚」). `None` = 모르는 키.
+    /// One sheet to send to all of that cell's subscribers — emission on query start · end · a latch at request time. `eval_time` (revision +1 if changed)
+    /// → repay debt (previous emission = `now`) → snapshot, all in one call (header 「빚」). `None` = unknown key.
     pub fn broadcast_sheet(&mut self, key: &UsageKey, now: Now) -> Option<UsageLimitSnapshot> {
         let cell = self.cell_mut(key)?;
         if cell.eval_time(now) {
@@ -264,12 +264,12 @@ impl UsageBook {
         Some(cell.discharge(now))
     }
 
-    /// 요청 하나의 판정 — §1-4 요청 표를 **위 행부터 차례로** 본다: ① `Get` 이고 `now < next_auto` → 캐시
-    /// ② `Refresh` 이고 `now < reject_until` → 거절 ③ 그 밖 → 진행 중이면 합류, 아니면 시작. ★합류는 ③ 에만
-    /// 있다★ — 진행 중이어도 앞 두 행에 걸리면 그 행으로 답한다. `None` = 모르는 키(아무것도 안 바뀐다).
+    /// The decision for one request — look at the §1-4 request table **row by row from the top**: ① `Get` and `now < next_auto` → cache
+    /// ② `Refresh` and `now < reject_until` → refusal ③ otherwise → join if in flight, else start. ★Joining exists only
+    /// in ③★ — even if in flight, if it hits the first two rows it answers with that row. `None` = unknown key (nothing changes).
     ///
-    /// 판정은 [`UsageBook::eval_time`] 이 새기는 것(래치·거절 끝)을 읽지 않는다 — 부르는 쪽이 판정 전에 그것을
-    /// 부르는 것은(요청 도착 행) 그 바뀜을 발행하려는 것이지 판정을 바꾸려는 것이 아니다.
+    /// The decision does not read what [`UsageBook::eval_time`] stamps (latches · refusal end) — when the caller calls it before deciding
+    /// (the request-arrival row) it is to emit that change, not to change the decision.
     pub fn judge(&mut self, key: &UsageKey, kind: RequestKind, now: Now) -> Option<Judgment> {
         let cell = self.cell_mut(key)?;
         let judgment = match kind {
@@ -286,10 +286,10 @@ impl UsageBook {
         Some(judgment)
     }
 
-    /// 줍기가 칸을 바꾼 뒤(`PassiveApplied.changed`) 같은 `now` 로 부른다 — 줍기만 합친다(§3 #60). 곧바로 갚을
-    /// 빚(래치·거절 끝·조회 시작·끝 등)이 있으면 `PublishNow` · 합칠 수 있는 빚뿐이면 직전 발행이 없거나
-    /// [`USAGE_PUBLISH_COALESCE`] 이상 지났을 때 `PublishNow`, 아니면 `Deferred` · 빚이 없으면 `Deferred`.
-    /// `None` = 모르는 키.
+    /// Called with the same `now` after pickup changed a cell (`PassiveApplied.changed`) — coalesces pickup only (§3 #60). If there is a debt to repay at once
+    /// (latch · refusal end · query start/end etc.) `PublishNow` · if only coalescible debt, `PublishNow` when there is no previous emission or
+    /// [`USAGE_PUBLISH_COALESCE`] or more has passed, else `Deferred` · if no debt `Deferred`.
+    /// `None` = unknown key.
     pub fn coalesce_passive(&mut self, key: &UsageKey, now: Now) -> Option<Coalesce> {
         let cell = self.cell_mut(key)?;
         Some(if cell.owes_at(now.mono) {
@@ -299,18 +299,18 @@ impl UsageBook {
         })
     }
 
-    /// 스케줄러 한 번(§1-4 「스케줄러 깸」 · §3 #58·#85). 구독된 칸마다: [`UsageBook::eval_time`] → 진행 중 아님 ∧
-    /// `now ≥ next_auto` 면 조회 시작(요청 경로와 같은 시작 — 뒤이은 요청은 합류한다) → 곧바로 갚을 빚이 있거나
-    /// 합칠 수 있는 빚의 합침 기한이 찼으면 빚을 갚고 그 한 장을 `publish` 에 싣는다. ★서비스가 발행을 빠뜨린
-    /// 빚도 여기서 갚는다★ — 구독된 칸이면 늦어도 다음 깸(≤ [`SCHEDULE_MAX_SLEEP`])에 닿는다.
+    /// One scheduler pass (§1-4 「스케줄러 깸」 (scheduler wake) · §3 #58·#85). For each subscribed cell: [`UsageBook::eval_time`] → not in flight ∧
+    /// `now ≥ next_auto` starts a query (the same start as the request path — a later request joins) → if there is a debt to repay at once or
+    /// the coalescing deadline of a coalescible debt is reached, repay the debt and carry that sheet in `publish`. ★A debt the service missed
+    /// emitting is also repaid here★ — for a subscribed cell it is reached by the next wake at the latest (≤ [`SCHEDULE_MAX_SLEEP`]).
     ///
-    /// `sleep` = 구독된 칸의 `next_auto`(진행 중이면 뺀다) · 안 선 래치의 `resets_at`(벽시계 차) · `Rejected` 칸의
-    /// `reject_until` · 합칠 빚의 합침 기한 중 가장 이른 것까지, 상한 [`SCHEDULE_MAX_SLEEP`]. ★찬 기한은 이 한
-    /// 번에 전부 처리하므로 `sleep` 은 0 이 아니다★. 구독된 칸이 없으면 시작도 기한도 없다(상한 잠).
+    /// `sleep` = until the earliest of the subscribed cells' `next_auto` (excluded if in flight) · the `resets_at` of a latch not yet stood (wall-clock difference) · the `Rejected` cell's
+    /// `reject_until` · the coalescing deadline of a coalescible debt, capped at [`SCHEDULE_MAX_SLEEP`]. ★Since a reached deadline is all handled in this one
+    /// pass, `sleep` is not 0★. If there is no subscribed cell there is neither a start nor a deadline (cap sleep).
     ///
-    /// ★구독 밖 칸은 건너뛸 뿐 빚을 건드리지 않는다★ — `subscribed` 는 명부 락 아래 뜬 사본이라 낡을 수 있다:
-    /// 방금 구독한 연결이 받을 발행을 낡은 사본이 지우면 안 된다. 남은 빚은 나중에 한 장이 겹쳐 나갈 뿐이다
-    /// (revision 이 가른다). `subscribed` 의 중복·모르는 벤더는 무시한다.
+    /// ★A cell outside any subscription is only skipped and its debt is not touched★ — `subscribed` is a copy taken under the registry lock so it may be stale:
+    /// a stale copy must not erase an emission that a just-subscribed connection should receive. The remaining debt merely goes out later as an overlapping sheet
+    /// (revision tells them apart). Duplicates and unknown vendors in `subscribed` are ignored.
     pub fn plan_tick<'a>(
         &mut self,
         subscribed: impl IntoIterator<Item = &'a UsageVendorKey>,
@@ -348,8 +348,8 @@ impl UsageBook {
     }
 }
 
-/// 칸이 쥔 상태. 비정상 다섯은 모두 detail 을 든다(§1-4 「실패 추적」) — `Rejected` 가 끝나 `Failed` 로 보여도
-/// 그대로다. 창 값을 싣는 관측은 어느 상태든 `Ready` 로 되돌린다([`Cell::merge`]).
+/// The state a cell holds. All five abnormal ones carry detail (§1-4 「실패 추적」 (failure trace)) — even when a `Rejected` ends and shows as `Failed`
+/// it stays. An observation carrying window values returns any state to `Ready` ([`Cell::merge`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CellState {
     Ready,
@@ -360,13 +360,13 @@ enum CellState {
     Rejected(UsageDetail),
 }
 
-/// 칸이 구독자 전부에게 진 발행 빚(머리 「빚」). 선언 순서가 크기다 — 겹치면 큰 쪽이 남는다.
+/// The emission debt a cell owes all subscribers (header 「빚」). Declaration order is size — when overlapping the larger one remains.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Owed {
     None,
-    /// 줍기 값의 바뀜뿐이다 — 직전 발행 뒤 [`USAGE_PUBLISH_COALESCE`] 가 지나면 갚는다.
+    /// Only a change in pickup value — repaid once [`USAGE_PUBLISH_COALESCE`] has passed since the previous emission.
     Coalescable,
-    /// 곧바로 갚는다.
+    /// Repaid at once.
     Now,
 }
 
@@ -376,23 +376,23 @@ struct Cell {
     wire_vendor: AgentBackendKind,
     five_hour: Option<Window>,
     weekly: Option<Window>,
-    /// 라벨 순(같은 라벨끼리는 받은 순) — 받을 때 정렬해 두어 상류의 나열 순서가 바뀜으로 읽히지 않게.
+    /// In label order (same labels in received order) — sorted on receipt so the upstream's listing order is not read as a change.
     model_scoped: Vec<(String, Window)>,
     plan: Option<String>,
     state: CellState,
     last_query: Option<Duration>,
-    /// D12 — 두 창에 새 `used_pct` 가 다 실려 쿨타임 기점이 다시 선 `mono`.
+    /// D12 — the `mono` at which both windows carried a new `used_pct` and the cooldown reference point stood again.
     fresh_reset: Option<Duration>,
-    /// ★상태와 따로 산다★ — 값이 와서 `Ready` 로 보여도 이 기한 전에는 자동 조회도 ⟳ 도 안 나간다(R24).
-    /// ★메모리에만 둔다★ — 데몬 재시작 너머로 들고 가지 않아 재시작한 데몬은 거절 기한 없이 시작한다.
+    /// ★Lives separately from the state★ — even if a value arrives and shows as `Ready`, neither an automatic query nor ⟳ goes out before this deadline (R24).
+    /// ★Kept in memory only★ — not carried across a daemon restart, so a restarted daemon starts without a refusal deadline.
     // ADR-0284
     reject_until: Option<Duration>,
-    /// D12 — 지금 기준점 뒤로 `used_pct` 가 실려 온 창(§3 #4 — 리셋만 온 창은 안 센다).
+    /// D12 — windows for which `used_pct` came in after the current reference point (§3 #4 — a window with only a reset is not counted).
     fresh_five_hour: bool,
     fresh_weekly: bool,
     in_flight: bool,
     revision: u64,
-    /// 발행 빚과 합침 기점(§3 #60) — 보이는 것이 아니다(revision 밖). `last_publish` = 마지막으로 빚을 갚은 `mono`.
+    /// Emission debt and coalescing reference point (§3 #60) — not something visible (outside revision). `last_publish` = the `mono` when the debt was last repaid.
     owed: Owed,
     last_publish: Option<Duration>,
 }
@@ -437,9 +437,9 @@ impl Cell {
         self.bump();
     }
 
-    /// 빚을 갚고 그 한 장을 뜬다 — 빚이 없어도 뜬다(겹친 한 장은 revision 이 가른다).
+    /// Repay the debt and take that sheet — it is taken even with no debt (an overlapping sheet is told apart by revision).
     fn discharge(&mut self, now: Now) -> UsageLimitSnapshot {
-        // 늦게 읽은 시각으로 불려도 되감지 않는다 — 되감으면 합침 창이 앞당겨져 1초 안에 두 번 나간다.
+        // Do not rewind even if called with a late-read time — rewinding would pull the coalescing window earlier and emit twice within 1 second.
         self.last_publish = Some(
             self.last_publish
                 .map_or(now.mono, |last| last.max(now.mono)),
@@ -456,21 +456,21 @@ impl Cell {
         }
     }
 
-    /// 직전 발행 뒤 합침 창이 닫히는 `mono` — 발행한 적이 없으면 0(= 이미 닫혔다).
+    /// The `mono` at which the coalescing window closes after the previous emission — 0 if never emitted (= already closed).
     fn coalesce_deadline(&self) -> Duration {
         self.last_publish.map_or(Duration::ZERO, |last| {
             last.saturating_add(USAGE_PUBLISH_COALESCE)
         })
     }
 
-    /// [`UsageBook::plan_tick`] 의 칸 몫 — 이 칸의 가장 이른 다음 기한까지 남은 시간. 찬 기한은 부르는 쪽이 이미
-    /// 처리했으므로 앞에 남은 기한만 센다 — 그래서 0 을 내지 않는다. 기한이 없으면 `None`.
+    /// This cell's share of [`UsageBook::plan_tick`] — the time left until this cell's earliest next deadline. A reached deadline was already
+    /// handled by the caller so only deadlines still ahead are counted — hence it does not yield 0. `None` if there is no deadline.
     fn next_wake(&self, now: Now) -> Option<Duration> {
         let ahead = |deadline: Duration| deadline.checked_sub(now.mono).filter(|d| !d.is_zero());
         let auto = (!self.in_flight)
             .then(|| self.next_auto(now))
             .and_then(ahead);
-        // 벽시계 차를 그대로 잠으로 쓴다 — `mono` 에 더했다 빼면 `mono` 끝에서 포화해 0 이 된다.
+        // Use the wall-clock difference as the sleep as is — adding it to `mono` and subtracting would saturate at the end of `mono` and become 0.
         let reset = self
             .windows()
             .filter(|window| !window.expired)
@@ -501,7 +501,7 @@ impl Cell {
                 let due = reference.saturating_add(self.policy.cooldown);
                 self.reject_until.map_or(due, |until| due.max(until))
             }
-            // 거절은 조회 끝에서만 서므로 기준점 없이 오지 않는다 — 와도 거절 끝 전에 조회하지 않게 둔 방어다.
+            // A refusal is set only at the end of a query so it does not come without a reference point — this is a defense so that even if it did, no query happens before the refusal end.
             None => self.reject_until.unwrap_or(now.mono),
         }
     }
@@ -519,9 +519,9 @@ impl Cell {
         }
     }
 
-    /// 관측 하나의 값을 합친다 — 줍기·조회 성공 공통의 한 길. 실린 창·칸은 덮고 안 실린 것은 둔다
-    /// (`model_scoped`·`plan` 은 실리면 통째로 바꾼다). ★창 값(% 또는 리셋)을 하나라도 실으면 어느 상태에서든
-    /// `Ready` 다★ — 값이 온다는 것이 정상의 증거다(§3 #52). 거절 기한은 건드리지 않는다.
+    /// Merge the value of one observation — the one path common to pickup and query success. Carried windows/fields overwrite and uncarried ones stay
+    /// (`model_scoped` and `plan` are replaced whole if carried). ★If even one window value (% or reset) is carried, it is
+    /// `Ready` in any state★ — values coming in is the proof of normal (§3 #52). The refusal deadline is not touched.
     // ADR-0256
     fn merge(&mut self, obs: &UsageObservation, now: Now) {
         if let Some(window) = obs.five_hour {
@@ -547,11 +547,11 @@ impl Cell {
     }
 
     fn apply_success(&mut self, obs: &UsageObservation, now: Now) {
-        // 상류가 답을 줬으니 거절은 끝났다 — 남겨 두면 지난 기한이 다음 자동 조회를 붙든다.
+        // Upstream has given an answer so the refusal is over — if left, a past deadline would hold the next automatic query.
         self.reject_until = None;
         self.merge(obs, now);
         self.state = match &obs.limits_unavailable {
-            // 계정에 대한 답이다 — wire 규칙 「`Unavailable` 은 값을 싣지 않는다」.
+            // It is an answer about the account — wire rule 「`Unavailable` 은 값을 싣지 않는다」 (Unavailable carries no values).
             Some(detail) => {
                 self.five_hour = None;
                 self.weekly = None;
@@ -565,7 +565,7 @@ impl Cell {
     fn apply_failure(&mut self, failure: ProbeFailure, mono: Duration) {
         let ProbeFailure { error, detail } = failure;
         let detail = detail.unwrap_or_else(|| kind_only(&error));
-        // 와일드카드를 두지 않는다 — 분류가 늘면 여기서 컴파일이 멈춰 보이는 상태를 정하게 한다.
+        // No wildcard — when the classification grows, compilation stops here and makes us decide the visible state.
         self.state = match error {
             ProbeError::NotInstalled => CellState::NotInstalled(detail),
             ProbeError::Unauthenticated => CellState::NeedsLogin(detail),
@@ -582,7 +582,7 @@ impl Cell {
         };
     }
 
-    /// [`UsageBook::eval_time`] 의 칸 몫 — revision 은 부르는 쪽이 올린다. 한 창에서 멈추지 않고 전부 본다.
+    /// This cell's share of [`UsageBook::eval_time`] — revision is raised by the caller. It looks at all windows without stopping at one.
     fn eval_time(&mut self, now: Now) -> bool {
         let mut changed = false;
         for window in self
@@ -642,7 +642,7 @@ impl Cell {
                 detail: Some(wire_detail(detail)),
             },
             CellState::Failed(detail) => failed(detail),
-            // 끝난 거절 → 조회 실패는 `eval_time` 이 새긴다. 이 갈래는 그것을 거르고 뜬 스냅숏의 폴백이다.
+            // An ended refusal → query failure is stamped by `eval_time`. This branch is the fallback for a snapshot taken without it.
             CellState::Rejected(detail) => match self.reject_until {
                 Some(until) if until > now.mono => UsageVendorState::Rejected {
                     retry_in_secs: ceil_secs(until - now.mono),
@@ -654,7 +654,7 @@ impl Cell {
     }
 }
 
-/// 바뀜 판정용 사본 — 스냅숏이 보이는 것 전부에서 나이(`Window::observed`)만 뺀다.
+/// A copy for change decisions — everything the snapshot makes visible, minus only the age (`Window::observed`).
 struct Visible {
     five_hour: Option<Window>,
     weekly: Option<Window>,
@@ -693,15 +693,15 @@ impl Visible {
 struct Window {
     used_pct: Option<f64>,
     resets_at: Option<i64>,
-    /// 만료 래치(R32) — `wall >= resets_at` 을 한 번 보면 서고, 이 창의 새 값(`used_pct`)만 내린다. 벽시계가
-    /// 되감겨도 안 내린다. % 는 지우지 않는다 — 가리는 것은 받는 쪽이다.
+    /// Expiry latch (R32) — stands once `wall >= resets_at` is seen, and lowers only this window's new-value mark (`used_pct`). It is not lowered even if the wall clock
+    /// rewinds. The % is not erased — hiding it is the receiving side's job.
     expired: bool,
-    /// 이 값을 관측한 `mono` — 나이의 기점.
+    /// The `mono` at which this value was observed — the origin of the age.
     observed: Duration,
 }
 
 impl Window {
-    /// 두 칸 다 없으면 `None` — 값이 없는 창을 두지 않는다.
+    /// `None` if both fields are absent — no window without a value is kept.
     fn observed(obs: WindowObs, mono: Duration) -> Option<Self> {
         let obs = ingest(obs);
         (obs.used_pct.is_some() || obs.resets_at.is_some()).then_some(Self {
@@ -739,7 +739,7 @@ impl Window {
     }
 }
 
-/// 받는 자리의 정규화 — 0 이하 리셋은 없는 것으로 읽는다(wire 가 못 싣는 값이 칸에 들면 보이지 않는 바뀜이 된다).
+/// Normalization at the receiving spot — a reset of 0 or below is read as absent (a value the wire cannot carry entering a cell becomes an invisible change).
 fn ingest(obs: WindowObs) -> WindowObs {
     WindowObs {
         resets_at: obs.resets_at.filter(|&at| at > 0),
@@ -747,11 +747,11 @@ fn ingest(obs: WindowObs) -> WindowObs {
     }
 }
 
-/// [`merge_window`] 가 그 창의 D12 「새로 들어옴」에 한 일.
+/// What [`merge_window`] did to that window's D12 「새로 들어옴」 (newly arrived).
 enum Fresh {
-    /// `used_pct` 가 실렸다 — 선다.
+    /// `used_pct` was carried — stands.
     Carried,
-    /// 바뀐 리셋이 % 를 지웠다 — 앞서 선 것도 내린다(지운 % 로 쿨타임을 초기화하지 않게).
+    /// A changed reset erased the % — also lower what stood earlier (so the cooldown is not reset by an erased %).
     Cleared,
     Untouched,
 }
@@ -766,7 +766,7 @@ impl Fresh {
     }
 }
 
-/// 실린 창 하나를 들고 있던 창에 합친다(§1-4 「줍기 관측」 · §3 #3·#46) — 줍기·조회 공통.
+/// Merge one carried window into the window held (§1-4 「줍기 관측」 (pickup observation) · §3 #3·#46) — common to pickup and query.
 fn merge_window(slot: &mut Option<Window>, obs: WindowObs, now: Now) -> Fresh {
     let obs = ingest(obs);
     let carried = if obs.used_pct.is_some() {
@@ -784,14 +784,14 @@ fn merge_window(slot: &mut Option<Window>, obs: WindowObs, now: Now) -> Fresh {
             window.used_pct = Some(pct);
             window.expired = false;
             window.observed = now.mono;
-            // 리셋이 지난 뒤 온 % 는 새 창의 값이고 그 창의 리셋은 모른다(R32 「새 값이 올 때까지」) — 지난 리셋을
-            // 남기면 받은 자리에서 다시 만료로 보인다.
+            // A % that comes after the reset has passed is the value of a new window and that window's reset is unknown (R32 「새 값이 올 때까지」 (until a new value comes)) — if the past reset is
+            // kept it would show as expired again at the point received.
             if new.is_none() && kept.is_some_and(|at| at <= now.wall) {
                 window.resets_at = None;
             }
         }
         (None, Some(old), Some(new)) if old.abs_diff(new) > RESET_SAME_TOLERANCE.as_secs() => {
-            // 새 창의 옛 % 는 틀린 값이다. 남는 값은 이 관측의 리셋뿐이라 나이도 이 관측 것이다.
+            // The old % of a new window is a wrong value. The only value that remains is this observation's reset, so the age is also this observation's.
             window.used_pct = None;
             window.observed = now.mono;
             fresh = Fresh::Cleared;
@@ -804,11 +804,11 @@ fn merge_window(slot: &mut Option<Window>, obs: WindowObs, now: Now) -> Fresh {
     fresh
 }
 
-/// 목록 전량 교체용 — `Some` 은 합치지 않고 통째로 바꾼다(`UsageObservation` 계약).
+/// For whole-list replacement — `Some` is not merged but replaced whole (the `UsageObservation` contract).
 fn scoped_windows(list: &[ScopedWindowObs], mono: Duration) -> Vec<(String, Window)> {
     if list.len() > MODEL_SCOPED_MAX {
-        // 지금 생산자 둘은 상한만큼만 싣는다 — 여기 걸리면 생산자 쪽이 어긋난 것이다(타입이 상한을 선언하지는
-        // 않는다).
+        // The two current producers carry only up to the cap — if this is hit, the producer side is off (the type does not
+        // declare the cap).
         tracing::warn!(
             received = list.len(),
             kept = MODEL_SCOPED_MAX,
@@ -826,7 +826,7 @@ fn scoped_windows(list: &[ScopedWindowObs], mono: Duration) -> Vec<(String, Wind
     windows
 }
 
-/// 받는 자리([`ingest`] · [`MODEL_SCOPED_MAX`])를 거친 뒤에도 창 값이 남는가 — 버려질 값은 안 센다.
+/// Does a window value remain even after passing the receiving spot ([`ingest`] · [`MODEL_SCOPED_MAX`]) — values to be discarded are not counted.
 fn carries_value(obs: &UsageObservation) -> bool {
     let has = |w: WindowObs| {
         let w = ingest(w);
@@ -841,7 +841,7 @@ fn carries_value(obs: &UsageObservation) -> bool {
             .any(|scoped| has(scoped.window))
 }
 
-/// NaN 끼리도 같다고 본다 — 생산자는 유한수를 약속하지만, 어기면 같은 값이 올 때마다 바뀜으로 읽힌다.
+/// NaN is also seen as equal to NaN — producers promise finite numbers, but if broken the same value would read as a change every time it comes.
 fn same_pct(a: Option<f64>, b: Option<f64>) -> bool {
     match (a, b) {
         (Some(a), Some(b)) => a == b || a.to_bits() == b.to_bits(),
@@ -855,7 +855,7 @@ fn reject_deadline(mono: Duration, retry_after: Option<Duration>) -> Duration {
         Some(wait) if !wait.is_zero() => wait.min(REJECT_MAX),
         _ => REJECT_FALLBACK,
     };
-    // 넘치면 끝까지 거절로 둔다 — 넘침을 거절 없음으로 읽으면 상류를 곧바로 다시 두드린다.
+    // If it overflows, leave it as a refusal to the end — reading overflow as no refusal would immediately hammer upstream again.
     mono.checked_add(wait).unwrap_or(Duration::MAX)
 }
 
@@ -867,7 +867,7 @@ fn kind_only(error: &ProbeError) -> UsageDetail {
     }
 }
 
-/// 올림 — 거절 중에는 0 초로 안 보인다.
+/// Round up — during a refusal it does not show as 0 seconds.
 fn ceil_secs(d: Duration) -> u64 {
     d.as_secs().saturating_add(u64::from(d.subsec_nanos() > 0))
 }
@@ -880,7 +880,7 @@ fn wire_detail(detail: &UsageDetail) -> UsageStateDetail {
     }
 }
 
-/// 조회기 낱말 → wire 벤더(§1-6 키 변환) — 벤더 match 없이 wire 역직렬화에 맡긴다(대소문자는 그쪽이 접는다).
+/// Prober word → wire vendor (§1-6 key conversion) — leave it to wire deserialization without a vendor match (it folds case).
 // ADR-0004
 pub(crate) fn wire_vendor(vendor: UsageVendorKey) -> Option<AgentBackendKind> {
     let word: StrDeserializer<'_, ValueError> = vendor.as_str().into_deserializer();
@@ -907,7 +907,7 @@ mod tests {
     const H: i64 = 3_600;
     const T0: i64 = 1_900_000_000;
 
-    // 조회기 키로만 칸을 만든다 — 시험에도 벤더 리터럴을 두지 않는다.
+    // Make cells only from prober keys — do not put vendor literals in tests either.
     fn key(i: usize) -> UsageKey {
         UsageKey {
             vendor: usage_probes()[i].key(),
@@ -1003,7 +1003,7 @@ mod tests {
         window.as_ref().expect("창").expired
     }
 
-    /// 상태 태그 낱말(wire `kind`).
+    /// State tag word (wire `kind`).
     fn tag(state: &UsageVendorState) -> String {
         serde_json::to_value(state).expect("직렬화")["kind"]
             .as_str()
@@ -1030,7 +1030,7 @@ mod tests {
         }
     }
 
-    /// 두 창 40%·10% 를 조회로 받아 둔 책(mono 100 · 리셋은 한참 뒤).
+    /// A book that took both windows 40% · 10% by query (mono 100 · the reset is far later).
     fn seeded() -> UsageBook {
         let mut b = book();
         succeed(
@@ -1046,7 +1046,7 @@ mod tests {
         b
     }
 
-    // ── 병합(R16·§3 #3·#46·#88) ──
+    // ── Merge (R16·§3 #3·#46·#88) ──
 
     #[test]
     fn passive_keeps_windows_it_does_not_carry() {
@@ -1083,7 +1083,7 @@ mod tests {
         succeed(&mut b, 0, full, at(100, T0));
         let held = snap(&b, 0, at(200, T0));
 
-        // null 창 · 빠진 창 · 빠진 목록 · 빠진 plan — 줍기와 같이 전부 그대로다.
+        // A null window · missing window · missing list · missing plan — all stay as is, same as pickup.
         succeed(&mut b, 0, active(0, w(None, None), None), at(200, T0));
         let s = snap(&b, 0, at(200, T0));
         assert_eq!(
@@ -1097,7 +1097,7 @@ mod tests {
         );
         assert_eq!(s.state, UsageVendorState::Ready);
 
-        // 실린 창만 덮는다.
+        // Only the carried window overwrites.
         succeed(&mut b, 0, active(0, None, w(Some(12.0), None)), at(300, T0));
         let s = snap(&b, 0, at(300, T0));
         assert_eq!(
@@ -1256,7 +1256,7 @@ mod tests {
         );
         assert_eq!(b.next_auto(&key(0), at(300, T0)), Some(secs(300) + cd));
 
-        // 초기화했으니 다음 둘이 다시 모여야 한다.
+        // It was reset, so the next two must gather again.
         b.apply_passive(&passive(0, w(Some(42.0), None), None), at(400, T0));
         assert_eq!(b.next_auto(&key(0), at(400, T0)), Some(secs(300) + cd));
     }
@@ -1338,7 +1338,7 @@ mod tests {
         assert_eq!(snap(&b, 0, at(200, T0)).state, UsageVendorState::Ready);
     }
 
-    // ── 상태(R22·R31·§3 #52) ──
+    // ── State (R22·R31·§3 #52) ──
 
     #[test]
     fn failure_keeps_values_and_folds_by_error() {
@@ -1429,7 +1429,7 @@ mod tests {
             Some(secs(1_000) + cooldown(0))
         );
 
-        // plan 을 안 실은 답은 들고 있던 plan 을 둔다.
+        // An answer that carries no plan keeps the plan it held.
         let mut no_plan = active(0, None, None);
         no_plan.limits_unavailable = Some(rich_detail());
         succeed(&mut b, 0, no_plan, at(2_000, T0));
@@ -1461,7 +1461,7 @@ mod tests {
 
     #[test]
     fn unavailable_turns_ready_on_any_window_value() {
-        // 창 값이 없는 관측(plan 만 · 값 없는 모델별 창)은 상태를 안 바꾼다 — plan 은 합친다.
+        // An observation with no window values (plan only · a per-model window without a value) does not change the state — the plan is merged.
         let mut b = unavailable();
         let mut no_value = passive(0, w(None, None), None);
         no_value.plan = Some("plan-a".to_owned());
@@ -1473,7 +1473,7 @@ mod tests {
         assert_eq!((s.five_hour, s.weekly), (None, None));
         assert!(s.model_scoped.is_empty());
 
-        // 리셋만 실려도 값이다.
+        // Even a carried reset alone is a value.
         let applied = b.apply_passive(&passive(0, w(None, Some(T0 + H)), None), at(300, T0));
         assert!(applied.changed);
         let s = snap(&b, 0, at(300, T0));
@@ -1483,7 +1483,7 @@ mod tests {
             (None, Some((T0 + H) as u64))
         );
 
-        // % 도 · 모델별 창의 값도 · 조회 성공도 같다.
+        // The same goes for a % · a per-model window's value · a query success.
         let mut b = unavailable();
         assert!(
             b.apply_passive(&passive(0, None, w(Some(7.0), None)), at(200, T0))
@@ -1537,7 +1537,7 @@ mod tests {
             );
         }
 
-        // 끝난 거절(`Failed` 로 새겨진 뒤)도 같다.
+        // The same goes for an ended refusal (after it was stamped as `Failed`).
         let mut b = seeded();
         fail(&mut b, 0, rate_limited(Some(secs(90))), at(200, T0));
         assert!(b.eval_time(&key(0), at(290, T0)));
@@ -1555,7 +1555,7 @@ mod tests {
         b.apply_passive(&passive(0, w(Some(41.0), None), None), at(150, T0));
         assert_eq!(snap(&b, 0, at(150, T0)).state, UsageVendorState::Ready);
 
-        // 기한은 그대로 산다 — ⟳ 거절도 · 다음 자동 기한도.
+        // The deadlines live on as they are — both the ⟳ refusal and the next automatic deadline.
         assert_eq!(reject_until(&b, 0), Some(until));
         let before_end = Now {
             mono: until - Duration::from_millis(1),
@@ -1568,7 +1568,7 @@ mod tests {
         assert!(b.next_auto(&key(0), before_end) >= Some(until));
         assert!(tick(&mut b, &[0], before_end).start.is_empty());
 
-        // 거절 끝은 `Ready` 를 조회 실패로 되돌리지 않는다 — 새길 것도 발행할 것도 없다.
+        // A refusal end does not turn `Ready` back into a query failure — there is nothing to stamp or emit.
         let end = Now {
             mono: until,
             wall: T0,
@@ -1664,7 +1664,7 @@ mod tests {
         succeed(&mut b, 0, unavailable, at(100, T0));
         assert_eq!(tag(&snap(&b, 0, at(100, T0)).state), "Unavailable");
 
-        // 다음 시도 = 다음 자동 기한까지 — 지나면 0 에서 멈춘다.
+        // Next attempt = until the next automatic deadline — stops at 0 once past.
         let mut b = book();
         fail(&mut b, 0, ProbeError::Timeout.into(), at(100, T0));
         let due = secs(100) + cooldown(0);
@@ -1732,14 +1732,14 @@ mod tests {
             );
         }
 
-        // 거절이 아닌 실패는 기한을 안 건드린다.
+        // A failure that is not a refusal does not touch the deadline.
         let mut b = book();
         fail(&mut b, 0, rate_limited(Some(secs(90))), at(100, T0));
         fail(&mut b, 0, ProbeError::Timeout.into(), at(150, T0));
         assert_eq!(reject_until(&b, 0), Some(secs(190)));
     }
 
-    // ── 래치(R32·§3 #29) ──
+    // ── Latch (R32·§3 #29) ──
 
     #[test]
     fn latch_sets_once_after_reset_and_survives_a_wall_rewind() {
@@ -1760,7 +1760,7 @@ mod tests {
         assert!(!b.eval_time(&key(0), at(40, r + 5)), "한 번만 선다");
         assert_eq!(b.revision(&key(0)), Some(rev + 1));
 
-        // 벽시계가 되감겨도 유지 · % 는 지우지 않는다.
+        // Kept even if the wall clock rewinds · the % is not erased.
         assert!(!b.eval_time(&key(0), at(50, T0)));
         let s = snap(&b, 0, at(50, T0));
         assert!(expired(&s.five_hour));
@@ -1798,7 +1798,7 @@ mod tests {
             "줍기 % 가 내린다"
         );
 
-        // 조회 성공도 내린다.
+        // A query success also lowers it.
         assert!(b.eval_time(&key(0), at(60, r + 5 * H)));
         succeed(
             &mut b,
@@ -1808,7 +1808,7 @@ mod tests {
         );
         assert!(!expired(&snap(&b, 0, at(70, r + 5 * H)).five_hour));
 
-        // 조회 성공이라도 그 창을 안 실었으면(null · 빠짐) 래치는 그대로다 — 풀면 옛 % 가 되살아난다.
+        // Even on a query success, if that window was not carried (null · missing) the latch stays — releasing it would revive the old %.
         let later = r + 10 * H;
         assert!(b.eval_time(&key(0), at(80, later)));
         succeed(
@@ -1836,7 +1836,7 @@ mod tests {
         assert!(expired(&s.weekly));
         assert!(s.model_scoped[0].window.expired);
 
-        // 이미 지난 리셋을 받으면 받은 자리에서 만료다 — 줍기도 조회도.
+        // If an already-past reset is received it is expired at the point received — for both pickup and query.
         let mut b = book();
         succeed(
             &mut b,
@@ -1860,7 +1860,7 @@ mod tests {
         assert!(b.apply_passive(&o, at(10, T0)).changed);
         assert_eq!(b.revision(&key(0)), Some(1));
 
-        // 같은 값을 다시 주우면 나이만 새로워진다.
+        // Picking up the same value again only makes the age fresher.
         assert_eq!(snap(&b, 0, at(70, T0)).five_hour.expect("창").age_secs, 60);
         assert!(!b.apply_passive(&o, at(70, T0)).changed);
         assert_eq!(b.revision(&key(0)), Some(1));
@@ -1885,7 +1885,7 @@ mod tests {
             !b.apply_passive(&passive(0, w(Some(40.0), None), None), at(300, T0))
                 .changed
         );
-        // 값은 그대로지만 두 창이 다 새로 들어와 기한이 옮는다(D12).
+        // The values are the same but both windows came in new so the deadline moves (D12).
         let applied = b.apply_passive(&passive(0, None, w(Some(10.0), None)), at(400, T0));
         assert_eq!(
             applied,
@@ -1915,7 +1915,7 @@ mod tests {
             (b.revision(&key(0)), b.in_flight(&key(0))),
             (Some(2), Some(false))
         );
-        // 같은 결과여도 끝은 오른다 · 진행 중이 아니어도 적용한다.
+        // Even with the same result the end rises · it applies even if not in flight.
         b.finish_probe(&key(0), Ok(o), at(10, T0));
         assert_eq!(b.revision(&key(0)), Some(3));
     }
@@ -1957,7 +1957,7 @@ mod tests {
         }
     }
 
-    // ── 스냅숏(§1-6) ──
+    // ── Snapshot (§1-6) ──
 
     #[test]
     fn snapshot_carries_the_key_and_window_fields() {
@@ -2031,7 +2031,7 @@ mod tests {
     #[test]
     fn extreme_values_do_not_panic() {
         let mut b = book();
-        // 리셋 끝값 — 0 이하는 없는 것으로 받는다 · 두 끝의 차도 넘치지 않는다.
+        // Reset boundary values — 0 or below is taken as absent · the difference between the two ends also does not overflow.
         succeed(
             &mut b,
             0,
@@ -2060,7 +2060,7 @@ mod tests {
         b.eval_time(&key(0), at(3, i64::MAX));
         b.eval_time(&key(0), at(4, i64::MIN));
 
-        // 단조 시간 끝값 — 거절 기한·다음 자동·나이가 포화한다.
+        // Monotonic time boundary values — the refusal deadline · next automatic · age saturate.
         let mut b = book();
         let edge = Now {
             mono: Duration::MAX,
@@ -2077,7 +2077,7 @@ mod tests {
             .into(),
             edge,
         );
-        // 포화한 기한 = 지금이라 받은 자리에서 조회 실패로 새겨진다.
+        // A saturated deadline = now, so it is stamped as a query failure at the point received.
         let s = snap(&b, 0, edge);
         assert!(
             matches!(
@@ -2090,7 +2090,7 @@ mod tests {
             "{:?}",
             s.state
         );
-        // 되돌아간 시각 — 나이는 0, 새긴 상태는 그대로다.
+        // A time that went backwards — the age is 0 and the stamped state stays.
         let s = snap(&b, 0, at(0, T0));
         assert_eq!(s.five_hour.expect("창").age_secs, 0);
         assert!(
@@ -2099,14 +2099,14 @@ mod tests {
             s.state
         );
 
-        // 유한수 약속을 어긴 % — 같은 NaN 이 거듭 와도 바뀜이 아니다.
+        // A % that broke the finite-number promise — even if the same NaN keeps coming it is not a change.
         let mut b = book();
         let nan = passive(0, w(Some(f64::NAN), None), None);
         assert!(b.apply_passive(&nan, at(0, T0)).changed);
         assert!(!b.apply_passive(&nan, at(1, T0)).changed);
     }
 
-    // ── 리뷰 1회차 보정 ──
+    // ── Review round 1 corrections ──
 
     #[test]
     fn rejection_ending_is_written_once_by_eval_time_and_keeps_detail() {
@@ -2163,7 +2163,7 @@ mod tests {
             mono: secs(100) + REJECT_FALLBACK,
             wall: T0,
         };
-        // 창 값이 없는 줍기 — 바뀜은 거절 끝뿐이다.
+        // A pickup with no window values — the only change is the refusal end.
         let mut plan_only = passive(0, None, None);
         plan_only.plan = Some("plan-a".to_owned());
         assert!(b.apply_passive(&plan_only, end).changed);
@@ -2223,7 +2223,7 @@ mod tests {
         assert_eq!(s.five_hour, None, "리셋만 있던 창은 안 선다");
         assert_eq!((pct(&s.weekly), reset(&s.weekly)), (Some(3.0), None));
 
-        // 들고 있는 리셋을 0 이하 관측이 지우지도 바꾸지도 않는다.
+        // An observation of 0 or below neither erases nor changes the reset held.
         b.apply_passive(&passive(0, None, w(None, Some(T0 + H))), at(30, T0));
         let rev = b.revision(&key(0));
         assert!(
@@ -2298,7 +2298,7 @@ mod tests {
         assert_eq!(loud.len(), 1, "{loud:?}");
         assert_eq!(snap(&b, 0, at(20, T0)).model_scoped.len(), MODEL_SCOPED_MAX);
 
-        // 버린 칸의 값은 정상의 증거로도 안 센다.
+        // The value of a discarded entry is not counted even as proof of normal.
         let mut b = unavailable();
         let mut beyond = passive(0, None, None);
         beyond.model_scoped = Some(
@@ -2332,7 +2332,7 @@ mod tests {
             (Some(3.0), None, false)
         );
 
-        // 리셋 전에 온 % 는 들고 있던 리셋을 지킨다.
+        // A % that came before the reset protects the reset held.
         let mut b = book();
         succeed(
             &mut b,
@@ -2348,7 +2348,7 @@ mod tests {
     fn a_cleared_pct_no_longer_counts_as_fresh() {
         let mut b = seeded();
         b.apply_passive(&passive(0, w(Some(41.0), None), None), at(200, T0));
-        // 바뀐 리셋이 5시간 창의 % 를 지운다 — 앞서 선 새로 들어옴도 내린다.
+        // A changed reset erases the 5-hour window's % — also lowers the newly-arrived mark that stood earlier.
         b.apply_passive(&passive(0, w(None, Some(T0 + 10 * H)), None), at(250, T0));
         let applied = b.apply_passive(&passive(0, None, w(Some(11.0), None)), at(300, T0));
         assert!(!applied.next_auto_changed);
@@ -2365,7 +2365,7 @@ mod tests {
         }
     }
 
-    /// [`seeded`] + 시험 산술의 전제 — 조회 끝(mono 100) 뒤 몇 분 안에는 다음 자동 기한이 오지 않는다.
+    /// The premise of [`seeded`] + test arithmetic — within a few minutes after the query end (mono 100) the next automatic deadline does not come.
     fn settled() -> UsageBook {
         assert!(
             cooldown(0) > secs(300) + SCHEDULE_MAX_SLEEP,
@@ -2382,7 +2382,7 @@ mod tests {
         ProbeError::RateLimited { retry_after }.into()
     }
 
-    /// 스케줄러 한 번 + 불변식: 잠 ∈ (0, 상한] · 같은 순간 다시 돌면 할 일이 없다(0 초 잠 되풀이 없음).
+    /// One scheduler pass + invariants: sleep ∈ (0, cap] · running again at the same moment finds nothing to do (no 0-second sleep repetition).
     fn tick(b: &mut UsageBook, subscribed: &[usize], now: Now) -> TickPlan {
         let vendors: Vec<UsageVendorKey> = subscribed.iter().map(|&i| key(i).vendor).collect();
         let plan = b.plan_tick(&vendors, now);
@@ -2402,7 +2402,7 @@ mod tests {
         plan
     }
 
-    // ── 판정(§1-4 요청 표) ──
+    // ── Decision (§1-4 request table) ──
 
     #[test]
     fn get_before_the_deadline_is_cached_and_starts_nothing() {
@@ -2429,7 +2429,7 @@ mod tests {
             (rev.map(|r| r + 1), Some(true))
         );
 
-        // 기준점이 없으면 지금이 기한이다.
+        // If there is no reference point, now is the deadline.
         let mut b = book();
         assert_eq!(
             judge(&mut b, 0, RequestKind::Get, at(0, T0)),
@@ -2488,7 +2488,7 @@ mod tests {
         assert_eq!(judge(&mut b, 0, RequestKind::Get, ended), Judgment::Start);
     }
 
-    /// ★최소 간격이 없다(사용자 결정 2026-09-29)★ — 조회 끝과 같은 순간의 ⟳ 도 새 조회다.
+    /// ★There is no minimum interval (user decision 2026-09-29)★ — a ⟳ at the same moment as the query end is also a new query.
     #[test]
     fn refresh_ignores_the_cooldown_and_starts_right_after_a_finished_probe() {
         let mut b = settled();
@@ -2518,7 +2518,7 @@ mod tests {
 
     #[test]
     fn refresh_during_a_rejection_is_rejected_until_it_ends() {
-        // 과거 시각은 `Duration` 으로 0 으로만 올 수 있다 — 그 몫이 `Some(0)` 칸이다.
+        // A past time can only be raised to 0 by `Duration` — that share is the `Some(0)` cell.
         let cases = [
             (None, REJECT_FALLBACK),
             (Some(Duration::ZERO), REJECT_FALLBACK),
@@ -2619,7 +2619,7 @@ mod tests {
         );
         assert_eq!(b.revision(&key(0)), rev, "합류는 아무것도 안 바꾼다");
 
-        // 표 순서 그대로 — 진행 중이어도 기한 전 `Get` 은 캐시다. ⟳ 는 직전 조회가 막 끝났어도 합류한다.
+        // Exactly in table order — even when in flight, a `Get` before the deadline is the cache. ⟳ joins even if the previous query just ended.
         let mut b = settled();
         assert!(b.begin_probe(&key(0)));
         assert_eq!(
@@ -2638,9 +2638,9 @@ mod tests {
         assert_eq!(b.judge(&stranger, RequestKind::Get, at(0, T0)), None);
     }
 
-    // ── 줍기 합침(§3 #60) ──
+    // ── Pickup coalescing (§3 #60) ──
 
-    /// 5시간 창 % 만 바꾸는 줍기 + 합침 — D12 초기화가 안 서게 한 창만 싣는다.
+    /// A pickup that changes only the 5-hour window % + coalescing — carries just one window so the D12 reset does not stand.
     fn passive_pct(b: &mut UsageBook, pct: f64, now: Now) -> Option<Coalesce> {
         assert!(
             b.apply_passive(&passive(0, w(Some(pct), None), None), now)
@@ -2701,7 +2701,7 @@ mod tests {
             passive_pct(&mut b, 51.0, at_ms(200_300, T0)),
             Some(Coalesce::Deferred)
         );
-        // 조회 끝 발행이 먼저 나간다 — 그 한 장이 미뤄 둔 값을 싣는다.
+        // The query-end emission goes out first — that one sheet carries the value that was held back.
         let sheet = b
             .broadcast_sheet(&key(0), at_ms(200_500, T0))
             .expect("한 장");
@@ -2713,7 +2713,7 @@ mod tests {
             "대기가 없으니 합침 기한도 없다"
         );
 
-        // 창은 그 발행부터 다시 잰다.
+        // The window is measured again from that emission.
         assert_eq!(
             passive_pct(&mut b, 52.0, at_ms(201_200, T0)),
             Some(Coalesce::Deferred)
@@ -2723,7 +2723,7 @@ mod tests {
             Duration::from_millis(300)
         );
 
-        // 늦게 읽은 시각은 직전 발행을 되감지 않는다.
+        // A late-read time does not rewind the previous emission.
         b.broadcast_sheet(&key(0), at_ms(203_000, T0));
         b.broadcast_sheet(&key(0), at_ms(202_000, T0));
         assert_eq!(
@@ -2755,12 +2755,12 @@ mod tests {
             "바뀐 게 없으면 revision 그대로"
         );
 
-        // 표시도 했다 — 1초 안의 줍기는 미뤄진다.
+        // It was marked too — a pickup within 1 second is deferred.
         assert_eq!(
             passive_pct(&mut b, 60.0, at_ms(200_400, T0 + 5 * H)),
             Some(Coalesce::Deferred)
         );
-        // 미뤄 둔 값을 싣고 갚는다 — 그 뒤 빚이 없으면 합침 입구도 보낼 것이 없다.
+        // Carry the value that was held back and repay — if no debt remains after that, the coalescing entrance has nothing to send either.
         let sheet = b
             .broadcast_sheet(&key(0), at_ms(200_500, T0 + 5 * H))
             .expect("한 장");
@@ -2780,7 +2780,7 @@ mod tests {
             let mut b = settled();
             fail(&mut b, 0, rate_limited(Some(REJECT_MAX)), at(110, T0));
             b.broadcast_sheet(&key(0), at(200, T0));
-            // 5시간 창의 리셋(T0 + 5H)을 지난 벽시계면 같은 호출이 래치를 새긴다.
+            // If the wall clock is past the 5-hour window's reset (T0 + 5H), the same call stamps the latch.
             let wall = if latches { T0 + 5 * H } else { T0 };
             let now = at_ms(200_300, wall);
             let applied = b.apply_passive(&passive(0, None, w(Some(11.0), None)), now);
@@ -2811,14 +2811,14 @@ mod tests {
     fn a_passive_that_latches_is_owed_at_once_even_inside_the_window() {
         let mut b = settled();
         passive_pct(&mut b, 50.0, at(200, T0));
-        // 값만 바뀐 줍기는 합친다.
+        // A pickup that changed only a value is coalesced.
         let calm = at_ms(200_300, T0);
         assert!(
             b.apply_passive(&passive(0, None, w(Some(11.0), None)), calm)
                 .changed
         );
         assert_eq!(b.coalesce_passive(&key(0), calm), Some(Coalesce::Deferred));
-        // 같은 호출이 5시간 창의 리셋을 지나 래치를 새기면 곧바로 갚는다.
+        // If the same call passes the 5-hour window's reset and stamps a latch, it repays at once.
         let latched = at_ms(200_600, T0 + 5 * H);
         assert!(
             b.apply_passive(&passive(0, None, w(Some(12.0), None)), latched)
@@ -2861,7 +2861,7 @@ mod tests {
             "판정 시작의 빚"
         );
 
-        // 갚은 빚은 다시 안 나간다.
+        // A repaid debt does not go out again.
         b.broadcast_sheet(&key(0), at(41, T0));
         assert!(tick(&mut b, &[0], at(41, T0)).publish.is_empty());
     }
@@ -2870,7 +2870,7 @@ mod tests {
     fn a_first_sheet_latch_is_still_owed_to_every_subscriber() {
         let mut b = settled();
         tick(&mut b, &[0], at(100, T0));
-        // 구독 추가의 첫 한 장 = eval_time + snapshot — 그 연결에만 가므로 빚을 안 갚는다.
+        // The first sheet of a subscription add = eval_time + snapshot — it goes only to that connection so it does not repay the debt.
         let now = at(200, T0 + 5 * H);
         assert!(b.eval_time(&key(0), now));
         let first_sheet = snap(&b, 0, now);
@@ -2969,7 +2969,7 @@ mod tests {
         assert_eq!(pct(&plan.publish[0].1.five_hour), Some(55.0));
     }
 
-    // ── 스케줄러(`plan_tick`) ──
+    // ── Scheduler (`plan_tick`) ──
 
     #[test]
     fn a_due_subscribed_vendor_starts_one_probe_and_requests_join_it() {
@@ -2995,7 +2995,7 @@ mod tests {
             Judgment::Join
         );
 
-        // 요청이 먼저 시작했으면 스케줄러가 다시 시작하지 않는다.
+        // If a request started first, the scheduler does not start again.
         let mut b = book();
         assert_eq!(
             judge(&mut b, 0, RequestKind::Get, at(0, T0)),
@@ -3024,7 +3024,7 @@ mod tests {
         assert!(plan.start.is_empty());
         assert_eq!(plan.sleep, SCHEDULE_MAX_SLEEP);
 
-        // 조회 끝 → 다음 기한으로 깬다.
+        // Query end → wake at the next deadline.
         b.finish_probe(&key(0), Ok(active(0, None, None)), past_due);
         let almost = Now {
             mono: past_due.mono + cooldown(0) - secs(7),
@@ -3127,7 +3127,7 @@ mod tests {
         );
         assert_eq!(b.in_flight(&key(1)), Some(false), "기한이 지난 칸도 조회 0");
 
-        // 구독 밖이어도 대기는 남는다 — 구독 사본이 낡았을 수 있다. 구독된 뒤 한 장이 나간다.
+        // Even outside a subscription the wait remains — the subscription copy may be stale. After being subscribed, one sheet goes out.
         let later = at(202, T0);
         let plan = tick(&mut b, &[0], later);
         assert_eq!(plan.publish, vec![(key(0), snap(&b, 0, later))]);

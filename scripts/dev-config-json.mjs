@@ -1,35 +1,35 @@
 #!/usr/bin/env node
-// scripts/dev-config-json.mjs — dev 오버레이(`src-tauri/tauri.dev.conf.json`)를 한 줄 JSON 으로 찍는다.
-// 소비자 = `scripts/build-client-shell.mjs`(그 값을 `TAURI_CONFIG` 로 담아 `cargo build -p
-// engram-dashboard` 에 흘린다). 사람이 손으로 값을 볼 때만 CLI 로 직접 실행한다.
+// scripts/dev-config-json.mjs — prints the dev overlay (`src-tauri/tauri.dev.conf.json`) as one-line JSON.
+// Consumer = `scripts/build-client-shell.mjs` (it puts that value into `TAURI_CONFIG` and feeds it to `cargo build -p
+// engram-dashboard`). Run it directly from the CLI only when a person wants to see the value by hand.
 //
-// ★유효한 JSON 이라는 것만으로 통과시키지 않는다(느슨하게 되돌리지 마라)★: 소비자가 볼 수 있는 실패
-//   신호는 "stdout 이 비었나" 하나뿐이라, 구조만 멀쩡하고 identifier 가 없는 값(`{}`)을 흘리면 tauri 는
-//   release identifier 를 그대로 쓰고 소비자는 성공으로 읽는다 — 이 헬퍼가 막으려는 바로 그 사고가
-//   한 층 위로 옮겨갈 뿐이다. 그래서 여기서 **불변식 자체**를 본다: identifier 가 있고, 그것이
-//   release(`src-tauri/tauri.conf.json`)와 다르다. 리터럴을 여기 박지 않으므로 양쪽 파일이 정본으로
-//   남는다.
+// ★Do not pass it just because it is valid JSON (do not loosen this back)★: the only failure
+//   signal the consumer can see is "is stdout empty", so if a value with a sound structure but no identifier (`{}`) leaked through, tauri would use the
+//   release identifier as is and the consumer would read it as success — the very accident this helper tries to prevent
+//   just moves up one layer. So here we check **the invariant itself**: an identifier exists, and it
+//   differs from the release one (`src-tauri/tauri.conf.json`). No literal is hard-coded here, so both files
+//   stay canonical.
 //
-// ADR-0137 — 오버레이 파일이 dev identifier 의 단일 출처다. 호출부가 그 문자열을 복제하지 않게 하려고
-//   이 헬퍼를 둔다(복제하면 한쪽만 고쳐져 조용히 어긋난다).
-// ★값은 파일 경로가 아니라 인라인 JSON 이어야 한다★: 받는 쪽이 `serde_json::from_str` 로 파싱한 뒤
-//   config 에 merge 한다(실측 — tauri-build 2.6.3 `src/lib.rs:487`, tauri-codegen 2.6.3
-//   `src/lib.rs:83`). 둘 다 `cargo:rerun-if-env-changed=TAURI_CONFIG` 를 선언해 값이 생기거나 바뀌거나
-//   사라지면 재빌드된다.
-// ★실패하면 stdout 에 아무것도 쓰지 않고 종료한다(되살리지 마라)★: 호출부는 stdout 이 비었는지로
-//   실패를 판정해 빌드를 중단한다. 여기서 기본값을 대신 찍으면 release identifier 로 조용히 돌아가고,
-//   그 증상은 빌드에도 런타임에도 안 보인다 — 릴리즈 앱이 떠 있을 때만 dev 앱이 창 없이 즉시 죽는다.
+// ADR-0137 — the overlay file is the single source of the dev identifier. This helper exists so that call sites do not duplicate that string
+//   (if duplicated, only one side gets fixed and they silently drift apart).
+// ★The value must be inline JSON, not a file path★: the receiving side parses it with `serde_json::from_str` and then merges it into
+//   the config (measured — tauri-build 2.6.3 `src/lib.rs:487`, tauri-codegen 2.6.3
+//   `src/lib.rs:83`). Both declare `cargo:rerun-if-env-changed=TAURI_CONFIG`, so a rebuild happens when the value appears, changes or
+//   disappears.
+// ★On failure it writes nothing to stdout and exits (do not revive it)★: the call site decides failure by whether stdout is empty
+//   and aborts the build. If a default were printed here instead, it would silently return to the release identifier,
+//   and that symptom shows neither in the build nor at runtime — only while a release app is running does the dev app die at once with no window.
 import { readFileSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-// cwd 가 아니라 이 파일 기준으로 잡는다 — 호출부의 cwd 를 전제하지 않는다.
+// Resolved relative to this file, not the cwd — it does not assume the caller's cwd.
 const DEV_CONFIG_PATH = fileURLToPath(new URL('../src-tauri/tauri.dev.conf.json', import.meta.url))
 const RELEASE_CONFIG_PATH = fileURLToPath(new URL('../src-tauri/tauri.conf.json', import.meta.url))
 
-// 입력은 JSONC 다 — `//` 주석이 있고, 그 주석 본문에도 `//` 가 들어 있다(URL·`windows.rs:67` 같은 경로).
-// 게다가 `"$schema"` 는 `//` 를 품은 진짜 JSON 문자열 값이다. 그래서 "`//` 뒤를 자른다" 식 스트리퍼는
-// 파일을 깨뜨린다 — 문자열 안/밖과 이스케이프를 추적해야 한다.
-// 후행 쉼표는 일부러 처리하지 않는다 — JSONC 를 더 흉내 내는 대신 JSON.parse 가 시끄럽게 실패하게 둔다.
+// The input is JSONC — it has `//` comments, and the comment bodies themselves contain `//` (URLs, paths like `windows.rs:67`).
+// On top of that, `"$schema"` is a real JSON string value that holds `//`. So a "cut after `//`" style stripper
+// breaks the file — it must track inside/outside of strings and escapes.
+// Trailing commas are deliberately not handled — instead of imitating JSONC further, we let JSON.parse fail loudly.
 export function stripJsonComments(text) {
   let out = ''
   let i = 0
@@ -54,15 +54,15 @@ export function stripJsonComments(text) {
       continue
     }
     if (c === '/' && text[i + 1] === '/') {
-      // 줄바꿈은 남긴다 — 뒤따르는 줄이 앞줄에 붙지 않게.
+      // Line breaks are kept — so the following line does not stick to the previous one.
       while (i < text.length && text[i] !== '\n') i += 1
       continue
     }
     if (c === '/' && text[i + 1] === '*') {
       i += 2
       while (i < text.length && !(text[i] === '*' && text[i + 1] === '/')) i += 1
-      // 닫히지 않은 블록 주석은 조용히 "끝까지 주석"으로 삼키면 안 된다 — `{}/*` 같은 잘린 파일이
-      // `{}` 로 깨끗이 파싱돼 내용 없는 오버레이가 유효한 값 행세를 한다.
+      // An unclosed block comment must not be silently swallowed as "a comment to the end" — a truncated file like `{}/*`
+      // would parse cleanly as `{}` and an overlay with no content would pose as a valid value.
       if (i >= text.length) throw new Error('닫히지 않은 블록 주석(`/*`)')
       i += 2
       continue
@@ -82,12 +82,12 @@ function readIdentifier(configPath) {
   return { parsed, id }
 }
 
-// 파싱까지 하는 이유 = 깨진 오버레이를 여기서 죽이기 위해서다. 그대로 흘리면 cargo 가 build script 안에서
-// 죽고, 그 에러는 identifier 와 무관해 보인다.
-// 계약: 성공하면 `{ json, devId, releaseId }`. json = `TAURI_CONFIG` 에 넣을 인라인 JSON 한 줄이고,
-//   두 id 는 빌드 산출물을 대조하는 쪽(`build-client-shell.mjs`)이 쓴다. 실패는 전부 throw 이며
-//   반환값으로 신호하지 않는다 — 호출부가 부분 성공을 볼 수 없어야 한다.
-// 두 경로 인자는 대조군 주입용(테스트) — 기본값이 실제 설정 파일 둘이다.
+// The reason it parses too = to kill a broken overlay here. If passed through as is, cargo would die inside the build script,
+// and that error looks unrelated to the identifier.
+// Contract: on success `{ json, devId, releaseId }`. json = the one-line inline JSON to put into `TAURI_CONFIG`, and
+//   the two ids are used by the side that verifies the build artifact (`build-client-shell.mjs`). Every failure is a throw and
+//   is never signaled through a return value — the call site must not be able to see a partial success.
+// The two path arguments are for injecting controls (tests) — the defaults are the two real config files.
 export function readDevConfig(configPath = DEV_CONFIG_PATH, releaseConfigPath = RELEASE_CONFIG_PATH) {
   const { parsed, id: devId } = readIdentifier(configPath)
   const { id: releaseId } = readIdentifier(releaseConfigPath)
@@ -109,7 +109,7 @@ if (invokedAsMain) {
   try {
     process.stdout.write(readDevConfigJson() + '\n')
   } catch (err) {
-    // 읽기 실패와 불변식 위반을 한 메시지로 묶는다 — 호출부엔 어차피 "값이 없다" 하나로 도착한다.
+    // Folds read failure and invariant violation into one message — to the call site it arrives as "there is no value" either way.
     process.stderr.write(`dev-config-json: ${DEV_CONFIG_PATH} 를 쓸 수 없습니다 - ${err.message}\n`)
     process.exit(1)
   }

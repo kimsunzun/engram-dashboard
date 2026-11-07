@@ -1,23 +1,23 @@
-//! autostart 커맨드 — §5 LLM/cdp 제어 표면.
+//! autostart command — §5 LLM/cdp control surface.
 //!
-//! ## 무엇 (ADR-0027 §53~55, ADR-0029)
-//! - `set_autostart`/`get_autostart`: 부팅 자동 시작(레지스트리 Run, Windows) 토글/조회. 트레이
-//!   CheckMenuItem 과 **같은 상태**(autolaunch() State)를 만진다 — 두 조작 주체(사람 트레이 클릭 /
-//!   LLM invoke)가 같은 레지스트리 키를 본다.
+//! ## What (ADR-0027 §53~55, ADR-0029)
+//! - `set_autostart`/`get_autostart`: toggle/query start at boot (registry Run, Windows). Touches the **same state**
+//!   (autolaunch() State) as the tray CheckMenuItem — the two acting parties (a human's tray click / an
+//!   LLM invoke) see the same registry key.
 //!
-//! ADR-0029: 모드 개념 제거(embedded/daemon 통일). 옛 `set_mode`(모드 self-relaunch 전환)는 삭제됐다.
+//! ADR-0029: the mode concept was removed (embedded/daemon unified). The old `set_mode` (mode self-relaunch switch) was deleted.
 
 use tauri_plugin_autostart::ManagerExt;
 
-// autolaunch() State 는 init() 등록 시의 args(`--hidden`)로 레지스트리 Run 엔트리를 구성한다 —
-// enable=등록, disable=삭제.
+// The autolaunch() State builds the registry Run entry from the args given at init() registration (`--hidden`) —
+// enable=register, disable=delete.
 #[tauri::command]
 pub fn set_autostart(app: tauri::AppHandle, enable: bool) -> Result<(), String> {
     let mgr = app.autolaunch();
     if enable { mgr.enable() } else { mgr.disable() }.map_err(|e| e.to_string())
 }
 
-// 부팅 자동 시작 활성 여부 조회(레지스트리 Run 엔트리 존재).
+// Query whether start at boot is active (whether the registry Run entry exists).
 #[tauri::command]
 pub fn get_autostart(app: tauri::AppHandle) -> Result<bool, String> {
     app.autolaunch().is_enabled().map_err(|e| e.to_string())

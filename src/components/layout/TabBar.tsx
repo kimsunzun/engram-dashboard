@@ -1,19 +1,19 @@
-// TabBar — 한 창(label)의 탭 목록 + 활성 탭 표시 + [+] 새 탭 + 탭별 닫기 + 이름 인라인 편집(ADR-0057, §7-2).
+// TabBar — one window's (label) tab list + active-tab marker + [+] new tab + per-tab close + inline name edit (ADR-0057, §7-2).
 //
-// ★§5 손발/두뇌 분리★: 사람 조작(탭 전환/추가/닫기/이름변경)은 viewStore 액션(switchTab/createTab/closeTab/
-// renameTab)만 부른다 — LLM(window.__engramCmd)이 같은 command 를 흔드는 것과 물리적으로
-// 동일 표면. 실제 상태 변경은 백엔드 ViewManager(권위)가 하고 window:tabs-updated emit 으로 반영된다(낙관 갱신 X).
+// ★§5 hands/brain split★: human actions (tab switch/add/close/rename) call only the viewStore actions (switchTab/createTab/closeTab/
+// renameTab) — physically the same
+// surface as the LLM (window.__engramCmd) driving the same commands. The real state change is made by the backend ViewManager (authority) and reflected through the window:tabs-updated emit (no optimistic update).
 //
-// ★탭 끌기(TRD S21-slot-docking §4-2 · §4-4) = 머리가 OS(HTML5) 끌기 출처 · `tabStrip/useTabDragSource`★ — 탭바 하나에 훅
-//   하나. 그리기 규칙:
-//   - 줄(`tab-strip-row`)에는 머리와 `+` 만 둔다(`measure.ts` 가 줄 폭 − `+` 폭을 잰다). 다른 창 끌기의 세로선은 그 줄 위에
-//     겹쳐 그리고 그때만 있다.
-//   - 머리 폭 · 숨김 = `stripBounds` · 자리 = 절대 x(`translateX`). 자기 탭바 구역 안에서 끄는 동안의 순서 이동은 transform 만
-//     바꾼다 — 끄는 머리는 커서를 따르고 이웃은 확정한 순서의 자리로 비켜난다(`DragSourceSnapshot.motion`). ★끄는 머리는 숨김이어도
-//     그린다★ — 출처 노드를 떼면 그 끌기의 dragend 가 오지 않는다.
-//   - 머리 DOM 순서(= 탭 키 · 화면 낭독 순서)는 쉴 때 보이는 순서로 맞추고, 누름 · 끌기 · 놓은 뒤 자리 전환 · 이름 편집 동안은
-//     이미 그린 순서를 지킨다 — React 가 요소를 옮기면(떼었다 다시 붙임) 진행 중인 CSS 전환이 끊겨 이웃 · 끄는 탭이
-//     미끄러지지 않고 튀고(WebView2 실측 아님), 편집 중인 이름 입력은 포커스를 잃으며, 끄는 머리면 OS 끌기가 끊긴다.
+// ★Tab drag (TRD S21-slot-docking §4-2 · §4-4) = the head is the OS (HTML5) drag source · `tabStrip/useTabDragSource`★ — one hook
+//   per tab bar. Drawing rules:
+//   - The row (`tab-strip-row`) holds only the heads and `+` (`measure.ts` measures row width − `+` width). The vertical line for a drag from another window
+//     is drawn over that row and exists only then.
+//   - Head width · hidden = `stripBounds` · position = absolute x (`translateX`). While dragging inside its own tab bar zone, the order move changes only
+//     the transform — the dragged head follows the cursor and neighbors step aside to their positions in the confirmed order (`DragSourceSnapshot.motion`). ★The dragged head is
+//     drawn even when hidden★ — if the source node is detached, that drag's dragend never arrives.
+//   - The head DOM order (= tab key · screen reader order) matches the visible order at rest, and during press · drag · the position transition after drop · name edit
+//     it keeps the order already drawn — if React moves an element (detach and reattach), the CSS transition in progress is cut, so neighbors · the dragged tab
+//     jump instead of sliding (not measured on WebView2), the name input being edited loses focus, and for the dragged head the OS drag breaks.
 
 import {
   useEffect,
@@ -38,16 +38,16 @@ import { dragProps, useBlurOnDragRegionPress } from './titleRow/dragRegion'
 import { SURFACE_TOP, TAB_BAR_H } from './titleRow/metrics'
 
 interface TabBarProps {
-  /** 이 탭바가 속한 창 label(main·slot-popup-N). */
+  /** Label of the window this tab bar belongs to (main·slot-popup-N). */
   label: string
   tabs: ViewMeta[]
-  /** 모델 활성 탭 — `null` = 없음(대기 모드의 빈 틀). */
+  /** The model's active tab — `null` = none (the empty frame in waiting mode). */
   active: string | null
   onSwitch: (viewId: string) => void
   onCreate: () => void
   onClose: (viewId: string) => void
   onRename: (viewId: string, name: string) => void
-  /** 이 창의 탭 캔버스 영역 — 끌기 크기의 크롬(뷰포트 − 캔버스) 재기. 없으면 크롬 0 으로 친다. */
+  /** This window's tab canvas area — measures the chrome of the drag size (viewport − canvas). Without it, chrome is taken as 0. */
   canvas?: () => Element | null
   /** `UseTabDragSourceOptions.pullFrame`. */
   pullFrame?: boolean
@@ -55,7 +55,7 @@ interface TabBarProps {
   titleRow?: RefObject<HTMLElement | null>
 }
 
-/** 그릴 머리 하나 — `x` = 탭바 줄 왼쪽 기준 CSS px. */
+/** One head to draw — `x` = CSS px from the left of the tab bar row. */
 interface DrawnHead {
   id: string
   x: number
@@ -63,7 +63,7 @@ interface DrawnHead {
   transition: string
 }
 
-// TODO(U7c): 닫기 모드(R26 · `closingMode.layoutAvailable`)를 이으면 이 값이 그 고정 폭이 된다 — 훅과 그리기가 같은 값을 받는다.
+// TODO(U7c): once close mode (R26 · `closingMode.layoutAvailable`) is wired in, this value becomes that fixed width — the hook and the drawing receive the same value.
 const WIDTH_CAP: number | null = null
 
 // ADR-0295
@@ -81,17 +81,17 @@ export default function TabBar({
 }: TabBarProps) {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
-  // ★안정 ref★: input 에 매 렌더 새 콜백 ref 를 걸면 React 가 매번 재부착 → select() 가 매 키입력마다
-  //   실행돼 방금 친 글자를 다시 전체선택 → 다음 글자가 통째로 덮어써진다("New"→"w"). 안정 ref + effect 로
-  //   편집 진입(editingId 변화) 시점에만 정확히 1회 select() 하게 고정한다.
+  // ★Stable ref★: if a new callback ref is attached to the input on every render, React re-attaches it each time → select() runs
+  //   on every keystroke and selects the whole text again → the next character overwrites everything ("New"→"w"). A stable ref + effect
+  //   fix it so select() runs exactly once, only when edit is entered (editingId changes).
   const inputRef = useRef<HTMLInputElement>(null)
   useEffect(() => {
     if (editingId !== null) inputRef.current?.select()
   }, [editingId])
 
-  // 편집을 연 때의 이름 — 확정은 지금 이름이 아니라 이것과 견준다. 편집 중 LLM 이 이름을 바꾸거나 자동 이름이 따라 바뀌어도
-  //   손대지 않은 칸이 옛 이름을 써 넣지 않는다. 확정 글자(`draft.trim()`)와 견주므로 다듬어 둔다 — 앞뒤 공백이 붙은
-  //   이름에서 손대지 않은 칸이 다듬은 글자를 「바뀐 글자」로 보내 자동 이름을 굳히거나 LLM 이 바꾼 이름을 덮지 않게.
+  // The name at the moment the edit was opened — commit compares against this, not the current name. Even if the LLM renames during the edit or an auto name changes,
+  //   an untouched field does not write back the old name. It is compared with the committed text (`draft.trim()`), so it is trimmed — so that for a
+  //   name with surrounding whitespace, an untouched field does not send the trimmed text as a 「바뀐 글자」, which would lock in an auto name or overwrite a name the LLM changed.
   const seed = useRef('')
   const beginEdit = (tab: ViewMeta) => {
     seed.current = tab.name.trim()
@@ -99,29 +99,29 @@ export default function TabBar({
     setDraft(tab.name)
   }
   const cancelEdit = () => setEditingId(null)
-  // 마지막 머리 누름이 활성으로 바꾼 탭(바꾸지 않은 누름 = `null`) — 좁은 비활성 머리는 닫기 버튼이 없어, 그 탭의 닫기
-  //   버튼은 그 누름 뒤 넓어진 머리에 커서 밑으로 생겼을 수 있다.
+  // The tab that the last head press turned active (a press that changed nothing = `null`) — a narrow inactive head has no close button, so that tab's close
+  //   button may have appeared under the cursor on the head widened after that press.
   const activatedBy = useRef<string | null>(null)
-  // Enter 뒤 input 이 빠지며 나는 blur 는 React 에 닿지 않는다 — React 19 는 commit 동안 이벤트 배달을 끄고
-  //   (react-dom `prepareForCommit` 의 `_enabled=false`), 그 뒤의 blur 는 루트 리스너에 닿지 않는 떨어진 노드에 난다.
-  //   첫 줄의 `editingId` 확인은 그래도 commitEdit 이 두 번 불릴 때 onRename 이 두 번 나가지 않게 하는 덧막이다.
-  // `deliberate` = Enter. 같은 글자는 Enter 로만 보낸다 — 자동 이름 탭(`named` 거짓)을 그 글자 그대로 Enter 로 확정하면 그
-  //   이름을 정한 것이고(TRD S26-window-chrome §3-1), 포커스 잃음 · 덮인 이웃 누름은 확정할 뜻이 아니라 바뀐 글자만 보낸다 —
-  //   보내면 편집만 열었다 닫은 자동 이름이 굳는다. 정한 이름 탭의 같은 글자는 바꿀 것이 없다.
+  // The blur that fires when the input is removed after Enter does not reach React — React 19 turns off event delivery during commit
+  //   (`_enabled=false` in react-dom `prepareForCommit`), and a later blur fires on a detached node that does not reach the root listener.
+  //   The `editingId` check on the first line is still a safeguard so that onRename is not sent twice when commitEdit is called twice.
+  // `deliberate` = Enter. The same text is sent only by Enter — committing an auto-named tab (`named` false) with that text unchanged via Enter means
+  //   the user chose that name (TRD S26-window-chrome §3-1), while focus loss · a press on a covered neighbor are not meant to commit and send only changed text —
+  //   otherwise opening and closing an edit alone would lock in an auto name. For a tab with a chosen name, the same text has nothing to change.
   const commitEdit = (tab: ViewMeta, deliberate: boolean) => {
     if (editingId !== tab.id) return
     const trimmed = draft.trim()
     if (trimmed.length > 0 && (trimmed !== seed.current || (deliberate && !tab.named))) onRename(tab.id, trimmed)
     setEditingId(null)
   }
-  // 창 끌 자리 = 탭 줄 빈 곳 · 제목 줄 · 끌 빈 자리 — 그 누름에도 편집이 끝난다(확정 규칙은 onBlur 그대로).
+  // Window draggable area = empty part of the tab strip · title row · empty draggable area — a press there also ends the edit (the commit rule stays as in onBlur).
   useBlurOnDragRegionPress(editingId !== null, inputRef)
 
   const rowRef = useRef<HTMLDivElement>(null)
   const addRef = useRef<HTMLButtonElement>(null)
   const available = useStripAvailable(rowRef, addRef)
   const ids = useMemo(() => tabs.map(tab => tab.id), [tabs])
-  // 편집 중인 탭이 모델에서 빠지면(닫힘 · 다른 창으로 옮김) 편집도 끝낸다 — 남은 `editingId` 는 머리 DOM 순서 맞추기를 막는다.
+  // If the tab being edited leaves the model (closed · moved to another window), the edit also ends — a leftover `editingId` blocks matching the head DOM order.
   useEffect(() => {
     if (editingId !== null && !ids.includes(editingId)) setEditingId(null)
   }, [editingId, ids])
@@ -141,7 +141,7 @@ export default function TabBar({
   const { snapshot } = source
   const model = { tabs: ids, active }
   const mine = snapshot.window === label
-  // 칠하는 활성 = 이 창 캔버스가 보이는 탭(R15 남은 탭 · 되돌리기를 기다리는 탭 포함 — `WindowLayout` 과 같은 값).
+  // The painted active = the tab whose canvas this window shows (including the R15 remaining tab · the tab waiting to be reverted — same value as `WindowLayout`).
   const shown = mine ? shownTab(snapshot.override, model) : active
   const motion = mine && stripHeld(snapshot.override, model) ? snapshot.motion : null
   const dragged =
@@ -160,9 +160,9 @@ export default function TabBar({
   useLayoutEffect(() => {
     source.drawn.current = { order, bounds, available }
   })
-  // 끌기 밖에도 자리 전환 속성은 `transform` 그대로 두고 시간만 0 이다 — CSS Transitions 규칙으로는 시간만 바뀌면 진행 중인
-  //   전환(놓은 뒤 자리로 가는 끄는 탭 · 이웃)이 끝까지 가고, 속성을 걷으면 그 자리에서 끊긴다(WebView2 실측 — M-run 1부 C2).
-  //   끌기가 풀리는 그 그림까지는 시간을 둔다 — 취소 · 거절로 모델 순서로 돌아가는 머리가 미끄러져 간다.
+  // Outside a drag too, the position-transition property stays `transform` and only the duration is 0 — by CSS Transitions rules, if only the duration changes, a transition in
+  //   progress (the dragged tab · neighbors going to their position after drop) runs to the end, while removing the property cuts it on the spot (measured on WebView2 — M-run part 1 C2).
+  //   Keep the duration until the frame where the drag is released — heads returning to the model order after cancel · rejection slide there.
   const dragOwned = mine && snapshot.override.phase !== 'idle'
   const wasDragOwned = useRef(false)
   useLayoutEffect(() => {
@@ -184,11 +184,11 @@ export default function TabBar({
           : targets[i]
     if (x === null) return
     let w = bounds.tabs[i].x1 - bounds.tabs[i].x0
-    // 이름 편집 중인 머리는 표준 폭으로 넓혀 이웃 위에 그린다 — 좁은 머리에서는 머리 내용 칸의 `overflow: hidden` 안에 이름 칸 ·
-    //   입력 칸이 모자랐다(실측 — 옛 ≈ 11 px 닫기 버튼 때 머리 42 · 62 · 86 px 에서 0 · 19 · 43 px · 22 px 원으로는 다시 재지
-    //   않았다). 오른쪽 끝이 쓸 수 있는 폭을 넘지 않게 왼쪽으로 당기되 줄 왼쪽 끝(0)에서 멈춘다 — 쓸 수 있는 폭이 표준 폭보다
-    //   좁으면 머리가 0..160 으로 그 폭을 넘어 `+` 를 덮을 수 있고, 숨은 탭이 있어 `+` 가 쓸 수 있는 폭 안쪽에 서면 `+` 일부를
-    //   덮을 수 있다. 덮인 이웃 머리의 누름 = `coveredHead`.
+    // A head being name-edited is widened to the standard width and drawn over its neighbors — in a narrow head, the name field ·
+    //   input field did not fit inside the `overflow: hidden` of the head content area (measured — with the old ≈ 11 px close button, at head widths 42 · 62 · 86 px they came to 0 · 19 · 43 px · it was not
+    //   re-measured with the 22 px circle). Pull it left so the right end does not exceed the usable width, but stop at the left end of the row (0) — if the usable width is
+    //   narrower than the standard width, the head can run 0..160 past that width and cover `+`, and if hidden tabs put `+` inside the usable width, it can
+    //   cover part of `+`. A press on a covered neighbor head = `coveredHead`.
     if (motion === null && id === editingId && w < TAB_STANDARD_W) {
       w = TAB_STANDARD_W
       if (available !== null) x = Math.max(0, Math.min(x, available - w))
@@ -196,7 +196,7 @@ export default function TabBar({
     const following = motion !== null && i === at && !motion.settled
     heads.push({ id, x, w, transition: following ? 'none' : slide })
   })
-  // `+` 자리 — 탭바 구역의 오른 끝(`stripZoneArea`)과 같은 값이다.
+  // `+` position — the same value as the right end of the tab bar zone (`stripZoneArea`).
   const end = tabsEnd(bounds)
   const marker = useLocalDrag(s => s.targetMarker)
 
@@ -213,8 +213,8 @@ export default function TabBar({
     activatedBy.current = switching ? view : null
     if (switching) onSwitch(view)
   }
-  // 이름 편집 중 넓힌 머리(`id`)가 덮은 자리의 누름은 그 밑 머리의 누름이다 — 돌리지 않으면 덮인 이웃은 편집을 끝내기
-  //   전까지 눌리지 않는다. 넓히기 전 자기 자리 안 · 밑에 머리가 없는 곳(`+` · 빈 줄)이면 `null`.
+  // A press in the area covered by the head (`id`) widened during name edit is a press on the head under it — if not passed on, a covered neighbor cannot be pressed until
+  //   the edit ends. `null` where there is no head under its own pre-widening area (`+` · empty row).
   const coveredHead = (id: string, clientX: number): string | null => {
     const row = rowRef.current
     if (motion !== null || row === null) return null
@@ -225,19 +225,19 @@ export default function TabBar({
     return j < 0 ? null : order[j]
   }
 
-  // 순서 이동을 거둔 뒤에도 자리로 가는 동안 이웃 위에 그린다 — 다음 끌기까지 둔다(겹치지 않으면 차이가 없다).
+  // Even after the order move is withdrawn, it is drawn over neighbors while going to its position — kept until the next drag (no difference when they do not overlap).
   const lastDragged = useRef<string | null>(null)
   useLayoutEffect(() => {
     if (motion !== null) lastDragged.current = motion.view
   })
   const topId = motion?.view ?? lastDragged.current
 
-  // 순서 이동을 그리는 동안은 맴돎을 칠하지 않는다 — 누른 순간의 맴돎이 비켜나는 머리에 남아 보인다(OS 끌기 동안 머리의 들고
-  //   남이 오는지는 미검 — TRD §2-4 · M11).
+  // While an order move is drawn, hover is not painted — the hover from the press moment stays visible on a head that steps aside (whether the head
+  //   lifts up during an OS drag is untested — TRD §2-4 · M11).
   const [hovered, setHovered] = useState<string | null>(null)
   const activeId = shown
   const lit = (id: string) => id === activeId || (motion === null && id === hovered)
-  // 맴돎이 끝난 지 `SEPARATOR_FADE_MS` 안의 머리 — 그 양옆 구분선만 서서히 되살아난다(`SEPARATOR_FADE_MS` 머리 주석).
+  // A head within `SEPARATOR_FADE_MS` of its hover ending — only the separators on both its sides come back gradually (`SEPARATOR_FADE_MS` head comment).
   const [hoverEnding, setHoverEnding] = useState<ReadonlySet<string>>(() => new Set())
   const hoverEndTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>())
   useEffect(() => {
@@ -260,13 +260,13 @@ export default function TabBar({
       }, SEPARATOR_FADE_MS),
     )
   }
-  // 왼쪽 가에 구분선을 두는 머리 — 그린 이웃과의 사이마다 하나. 보이는 것은 양쪽 어느 머리도 활성 · 맴돎이 아닐 때만이고,
-  //   그 밖에는 사라진다(떼지 않는다 — 다시 나타날 때 서서히 나타나는 전환이 보여야 한다)(Chrome).
+  // The head that puts a separator on its left edge — one between each pair of drawn neighbors. It is visible only when neither head on either side is active · hovered,
+  //   and otherwise it disappears (not removed — the transition of fading in must show when it reappears) (Chrome).
   const leftNeighbour = new Map(heads.slice(1).map((h, k) => [h.id, heads[k].id]))
   const separatorShown = (id: string) => !lit(leftNeighbour.get(id)!) && !lit(id)
   const separatorFadesIn = (id: string) => hoverEnding.has(id) || hoverEnding.has(leftNeighbour.get(id)!)
-  // 마지막 그린 머리의 오른쪽 가에도 하나 — 없으면 마지막 비활성 머리의 × 와 + 가 붙어 보였다(ADR-0298 결정 4).
-  //   머리 안쪽에 걸어 줄 폭 · + 자리는 그대로다. 보임 · 서서히 = 그 머리 하나만 본다.
+  // One on the right edge of the last drawn head too — without it, the × of the last inactive head and + looked stuck together (ADR-0298 decision 4).
+  //   It hangs inside the head, so the row width · + position stay the same. Visible · fading = looks at that one head only.
   const trailingId = heads.length > 0 ? heads[heads.length - 1].id : null
 
   return (
@@ -277,22 +277,22 @@ export default function TabBar({
         display: 'flex',
         alignItems: 'stretch',
         height: TAB_BAR_H,
-        // 제목 줄에서 탭바만 줄어든다 — 줄이 좁아지면 잰 폭(`useStripAvailable`)이 줄어 탭이 먼저 준다(TRD S26-window-chrome §7-1).
+        // In the title row only the tab bar shrinks — when the row narrows, the measured width (`useStripAvailable`) shrinks and tabs shrink first (TRD S26-window-chrome §7-1).
         flex: '1 1 0px',
         minWidth: 0,
-        // 덧막이 — 줄이 머리 · `+` 보다 좁아도 그 오른쪽(끌 빈 자리 · 번호 표식 · 창 단추) 위에 그리지 않는다. 가로만 자른다 —
-        //   `hidden` 은 세로도 잘라 탭바 아래 1px 선 위에 걸친 활성 면 · 날개(`bottom: -1`)를 지운다.
+        // Safeguard — even when the row is narrower than the heads · `+`, nothing is drawn over what is to its right (empty draggable area · number badge · window buttons). Clip horizontally only —
+        //   `hidden` also clips vertically and would erase the active surface · flare (`bottom: -1`) that straddle the 1px line under the tab bar.
         overflowX: 'clip',
-        // ★면 규칙 = 활성 탭은 내용과 같은 면(`--tab-active-bg`)이라 아래 캔버스로 이어지고, 바(`--tab-bar-bg`)는 내용과
-        //   밝기가 다른 면★ — Chrome 꼴(사용자 결정 2026-10-19 · 값은 테마마다 `styles/theme.css`). 라이트 · e-ink = 바가 내용보다
-        //   한 칸 눌린 면 · 다크 = 바가 내용보다 밝아 활성 탭이 가장 어둡다(Zed Ayu Dark 꼴 — ADR-0298 결정 1).
-        //   ☞ 활성 탭이 바보다 어두운 배치는 「활성 탭이 구멍처럼 읽힌다」로 되돌린 적이 있고(사용자 판단 2026-08-23) 그 판단은
-        //   라이트 · e-ink 에 남는다 — 다크는 ADR-0298 이 그것을 뒤집었다(바가 #000 이면 활성이 안 보였다). `--text` 를
-        //   섞어 바를 띄우는 안은 바가 트리 패널과 따로 노는 회색 띠가 돼 되돌렸다(사용자 판단 2026-08-23).
+        // ★Surface rule = the active tab shares the surface of the content (`--tab-active-bg`), so it continues into the canvas below, while the bar (`--tab-bar-bg`) is a surface whose
+        //   brightness differs from the content★ — Chrome style (user decision 2026-10-19 · values per theme in `styles/theme.css`). Light · e-ink = the bar is a surface
+        //   one step darker than the content · dark = the bar is lighter than the content so the active tab is the darkest (Zed Ayu Dark style — ADR-0298 decision 1).
+        //   ☞ A layout with the active tab darker than the bar was reverted as 「활성 탭이 구멍처럼 읽힌다」 (user judgment 2026-08-23), and that judgment
+        //   stays for light · e-ink — for dark, ADR-0298 reversed it (with a #000 bar the active tab was invisible). The option of mixing in `--text`
+        //   to lift the bar became a gray band at odds with the tree panel, so it was reverted (user judgment 2026-08-23).
         background: 'var(--tab-bar-bg)',
-        // 바 아래 1px 선 — 활성 면 · 날개가 덮은 자리만 끊긴다. 선이 바와 내용을 가르는 것은 e-ink 뿐이고 다크 · 라이트는 면
-        //   밝기 차가 가르므로 투명이다(선 자리는 남아 줄 높이는 그대로). 테두리를 지우면 줄 높이가 1px 늘어 활성 면의
-        //   `bottom: -1` 도 함께 고친다.
+        // 1px line under the bar — broken only where the active surface · flare covers it. Only in e-ink does the line separate bar and content; in dark · light the surface
+        //   brightness difference separates them, so it is transparent (the line's space remains so the row height is unchanged). If the border is removed the row height grows by 1px, so the active surface's
+        //   `bottom: -1` must be fixed together.
         borderBottom: '1px solid var(--tab-bar-edge)',
         fontFamily: 'var(--font-ui)',
         fontSize: '12px',
@@ -302,21 +302,21 @@ export default function TabBar({
       <div
         ref={rowRef}
         data-testid="tab-strip-row"
-        // 탭 사이 · 마지막 탭 뒤 빈 곳 = 창 끌 자리(자기 자신만 — 머리 · `+` 는 아니다 · TRD S26-window-chrome §7-2).
+        // Empty space between tabs · after the last tab = window draggable area (itself only — not the heads · `+` · TRD S26-window-chrome §7-2).
         {...dragProps()}
         style={{ position: 'relative', flex: '1 1 0', minWidth: 0 }}
       >
         {domOrder.map(id => {
           const head = headById.get(id)!
-          // `placeAt` 은 모델에 없는 끄는 탭도 줄에 넣는다 — 그 머리는 이름 없이 자리 · 폭만 그린다. 순서 이동은 끄기 시작의 탭 목록이
-          //   모델과 같을 때만 그려(`stripHeld`) 지금은 닿지 않는 것으로 보인다(미검).
+          // `placeAt` also puts a dragged tab that is not in the model into the row — that head draws only position · width, without a name. The order move is drawn only when the tab list at drag start
+          //   equals the model (`stripHeld`), so for now it appears unreachable (untested).
           const tab = metaById.get(id) ?? { id, name: '', named: false }
           const isActive = id === activeId
           const editing = editingId === id
-          // 이름 · × 는 한 전경색 — 활성 · 맴돎이면 `--tab-text`(= `--text` · ADR-0298 결정 8). 한 전경색은 Chrome 꼴이고(`tab.cc`
-          //   — 탭 제목과 닫기 단추에 같은 전경색), 맴돎 → `--text` 는 우리 선택이다(Chrome 은 맴돎 전경색을 따로 둔다 —
-          //   `kColorTabForegroundInactiveHoverFrameActive` · `tab_style.cc`). 두 토큰은 창이 앞 창이 아닐 때 제목 줄이 흐림으로
-          //   갈아 끼운다(`styles/theme.css` · TRD S26-window-chrome §7-5).
+          // Name · × share one foreground color — when active · hovered, `--tab-text` (= `--text` · ADR-0298 decision 8). One foreground color is Chrome style (`tab.cc`
+          //   — same foreground for tab title and close button), and hover → `--text` is our choice (Chrome keeps a separate hover foreground —
+          //   `kColorTabForegroundInactiveHoverFrameActive` · `tab_style.cc`). The two tokens are swapped by the title row for the dimmed look
+          //   when the window is not the front window (`styles/theme.css` · TRD S26-window-chrome §7-5).
           const fg = lit(id) ? 'var(--tab-text)' : 'var(--tab-text-inactive)'
           return (
             <div
@@ -325,11 +325,11 @@ export default function TabBar({
               data-view-id={id}
               data-active={isActive ? 'true' : 'false'}
               draggable={source.draggable(id)}
-              // 누름은 캡처 단계에서 적는다 — 닫기 버튼이 거품을 끊어도 그 자리에서 시작한 끌기를 가를 수 있고, 전환(아래 거품
-              //   처리기)보다 먼저라 누르기 전 활성이 그 끌기의 `initial` 이 된다.
+              // The press is recorded in the capture phase — even if the close button stops bubbling, a drag started there can be told apart, and since it comes before the switch (the bubble
+              //   handler below), the active tab before the press becomes that drag's `initial`.
               onPointerDownCapture={e => source.onPointerDown(e, id)}
-              // 누르는 순간 활성(TRD §2-3 ①). 편집 중인 머리의 누름은 끌기 후보가 아니고, 덮인 이웃 자리의 누름은 편집을 확정하고
-              //   그 이웃으로 전환만 한다.
+              // Active at the moment of press (TRD §2-3 ①). A press on a head being edited is not a drag candidate, and a press on a covered neighbor's area commits the edit and
+              //   only switches to that neighbor.
               onPointerDown={e => {
                 if (editing) {
                   const inInput = e.target instanceof Element && e.target.closest('input') !== null
@@ -343,7 +343,7 @@ export default function TabBar({
               }}
               onDragStart={e => source.onDragStart(e, id)}
               onDragEnd={e => source.onDragEnd(e, id)}
-              // 머리 어디든(이름 칸 폭이 0 인 좁은 활성 머리 포함) — 닫기 버튼 위는 그 버튼이 닫지 않는 클릭일 때만.
+              // Anywhere on the head (including a narrow active head whose name field width is 0) — over the close button only when it is a click that button does not close.
               onDoubleClick={e => {
                 if (editing) return
                 if (e.target instanceof Element && e.target.closest('button') !== null && activatedBy.current !== id) return
@@ -365,9 +365,9 @@ export default function TabBar({
                 color: fg,
               }}
             >
-              {/* 면 · 날개 · 구분선은 그리기만 한다(`pointer-events: none`) — 머리 상자(누름 · 잡기 판정)는 그대로이고 날개가 이웃
-                  머리 위로 삐져도 그 자리의 누름은 이웃 것이다. ★accent 밑줄을 되살리지 말 것★ — 2px 파란 줄이 프레임에서 가장
-                  튀어 "고대비"의 주범이었다(사용자 판단 2026-08-23, Orca 대조). */}
+              {/* The surface · flare · separator only draw (`pointer-events: none`) — the head box (press · grab decision) is unchanged, and even if a flare sticks out over a neighbor
+                  head, a press there belongs to the neighbor. ★Do not bring back the accent underline★ — the 2px blue line stood out most in the frame and was the main culprit
+                  of the "high contrast" (user judgment 2026-08-23, compared with Orca). */}
               {isActive ? (
                 <>
                   <span aria-hidden data-testid="tab-surface" style={ACTIVE_SURFACE} />
@@ -375,7 +375,7 @@ export default function TabBar({
                   <span aria-hidden data-testid="tab-flare-right" style={FLARE_RIGHT} />
                 </>
               ) : editing ? (
-                // 넓힌 편집 머리가 덮은 이웃 글자가 비쳐 보이지 않게 가린다.
+                // Hide it so the neighbor's text covered by the widened edit head does not show through.
                 <span aria-hidden style={EDIT_COVER} />
               ) : (
                 lit(id) && <span aria-hidden data-testid="tab-hover" style={HOVER_SURFACE} />
@@ -401,21 +401,21 @@ export default function TabBar({
                     data-view-id={id}
                     value={draft}
                     autoFocus
-                    // 여기 인라인 콜백 ref 로 select() 하면 매 렌더 재실행돼 타이핑이 깨진다(FIX 1).
+                    // Calling select() from an inline callback ref here would rerun on every render and break typing (FIX 1).
                     ref={inputRef}
                     onChange={e => setDraft(e.target.value)}
                     onKeyDown={e => {
-                      // ★버블 차단★: 편집 중 키가 전역 키바인딩으로 새면 안 된다.
+                      // ★Bubble block★: a key during editing must not leak into the global key bindings.
                       e.stopPropagation()
                       if (e.key === 'Enter') commitEdit(tab, true)
                       else if (e.key === 'Escape') cancelEdit()
                     }}
                     onBlur={() => commitEdit(tab, false)}
                     style={{
-                      // ★내용 폭에 맞춤★: field-sizing:content 로 input 이 draft 텍스트 폭만큼만 차지한다
-                      //   (기본 input 은 size 속성 폭 ~160px 고정이라 짧은 이름에도 넓게 벌어짐). 브라우저가
-                      //   실제 글자 폭을 측정하므로 CJK·비례폰트도 정확. WebView2(Chromium 123+) 지원.
-                      //   minWidth 로 빈/한글자 때 너무 좁아지는 것만 방어, maxWidth 는 상한.
+                      // ★Fit to content width★: with field-sizing:content the input takes only the width of the draft text
+                      //   (a default input is fixed at the size attribute width ~160px, so it spreads wide even for a short name). The browser
+                      //   measures the actual glyph width, so CJK · proportional fonts are exact too. Supported by WebView2 (Chromium 123+).
+                      //   minWidth only guards against being too narrow when empty / one character, maxWidth is the upper limit.
                       fieldSizing: 'content',
                       minWidth: '3ch',
                       maxWidth: '160px',
@@ -436,22 +436,22 @@ export default function TabBar({
                     {tab.name}
                   </span>
                 )}
-                {/* Chrome 처럼 활성 최소 폭보다 좁은 비활성 머리는 닫기 버튼을 감춘다(`layout.ts` `TAB_MIN_ACTIVE_W`). */}
+                {/* Like Chrome, an inactive head narrower than the active minimum width hides the close button (`layout.ts` `TAB_MIN_ACTIVE_W`). */}
                 {(isActive || head.w >= TAB_MIN_ACTIVE_W) && (
                   <button
                     type="button"
                     aria-label={t('tab.close', { name: tab.name })}
                     data-testid="tab-close"
-                    // 닫기 버튼 누름은 머리 누름(전환 · 끌기)이 아니다.
+                    // A close button press is not a head press (switch · drag).
                     onPointerDown={e => e.stopPropagation()}
-                    // 이름 편집 중인 탭의 닫기 버튼은 누름에 입력 칸 포커스를 뺏지 않는다 — 뺏으면 blur 의 확정으로 머리가 다시
-                    //   그려져(넓힌 머리는 줄고 · 입력 칸 바로 뒤의 버튼은 머리 오른쪽 끝으로 간다) 버튼이 커서 밑에서 빠지고 그
-                    //   클릭은 닫지 못한다. 다른 탭의 닫기 버튼 누름은 그대로 편집을 확정한다.
+                    // The close button of the tab being name-edited does not take input field focus on press — if it did, the blur commit would redraw the head
+                    //   (the widened head shrinks · the button right after the input field moves to the head's right end), the button would slip out from under the cursor, and that
+                    //   click could not close. A press on another tab's close button commits the edit as usual.
                     onMouseDown={editing ? e => e.preventDefault() : undefined}
                     onClick={e => {
-                      // 같은 연속 클릭(detail ≥ 2)에서 앞 누름이 이 탭을 활성으로 만들어 이 버튼이 커서 밑에 막 생겼다 — 닫지 않는다
-                      //   (좁은 탭바의 비활성 머리 더블클릭이 탭을 닫았다 4/7 — M-run 1부 이상 3). 연속 클릭으로 닫다가 밀려 온
-                      //   다음 탭의 닫기 버튼은 그대로 닫는다.
+                      // In the same run of clicks (detail ≥ 2), the earlier press made this tab active and this button just appeared under the cursor — do not close
+                      //   (double-clicking an inactive head in a narrow tab bar closed the tab 4/7 — M-run part 1 anomaly 3). The close button of the
+                      //   next tab pushed in while closing by repeated clicks does close.
                       if (e.detail >= 2 && activatedBy.current === id) return
                       activatedBy.current = null
                       onClose(id)
@@ -491,14 +491,14 @@ export default function TabBar({
   )
 }
 
-// 닫기 · `+` 단추 = `TAB_BUTTON_SIZE`(22) px 원 안의 13 px 아이콘(ADR-0298 결정 5 · 사용자 결정 2026-10-21). `+` 원 = Chrome
-//   `tab_strip_control_button.cc` `kButtonSize` 28 을 머리 높이 비율 28/34 로 줄인 자리(셈은 ≈ 23 — 22 는 사용자 결정). × 원 =
-//   같은 22 — Chrome 닫기 단추의 보이는 크기(맴돎 모양 = `layout_constants.cc` `kTabCloseButtonSize` 16 dp · `tab.cc`
-//   #545-548)보다 크게 둔 사용자 결정이라 Chrome 비율로 줄이지 말 것. 아이콘 둘 = Chrome `tab_strip_control_button.cc`
-//   `kIconSize` 16 × 28/34 ≈ 13. 맴돎 원 = Chrome 잉크 드롭 하이라이트 불투명도 0.16(`--tab-button-hover-bg`).
+// Close · `+` buttons = a 13 px icon inside a `TAB_BUTTON_SIZE`(22) px circle (ADR-0298 decision 5 · user decision 2026-10-21). `+` circle = Chrome
+//   `tab_strip_control_button.cc` `kButtonSize` 28 scaled by the head-height ratio 28/34 (the calculation is ≈ 23 — 22 is the user's decision). × circle =
+//   the same 22 — a user decision to make it larger than the visible size of Chrome's close button (hover shape = `layout_constants.cc` `kTabCloseButtonSize` 16 dp · `tab.cc`
+//   #545-548), so do not shrink it by the Chrome ratio. Both icons = Chrome `tab_strip_control_button.cc`
+//   `kIconSize` 16 × 28/34 ≈ 13. Hover circle = Chrome ink drop highlight opacity 0.16 (`--tab-button-hover-bg`).
 const BUTTON_ICON = 13
-// ★클래스 이름은 통째 글자로 둔다★ — Tailwind 는 소스 글자를 훑어 클래스를 만들므로 조각을 이어 붙이면 생기지 않는다. 맴돎
-//   색을 인라인 `background` 로 두지 말 것 — 인라인이 클래스를 이겨 맴돎 원이 사라진다.
+// ★Keep class names as whole strings★ — Tailwind scans source text to generate classes, so joining fragments produces none. Do not put the hover
+//   color in inline `background` — inline beats the class and the hover circle disappears.
 const BUTTON_HOVER = 'bg-transparent hover:bg-[var(--tab-button-hover-bg)]'
 const ADD_HOVER = 'group-hover/add:bg-[var(--tab-button-hover-bg)]'
 
@@ -515,8 +515,8 @@ const CLOSE_STYLE: CSSProperties = {
   cursor: 'pointer',
 }
 
-// 가로 여백(margin)을 두지 말 것 — 쓸 수 있는 폭은 줄 폭 − `+` 테두리 상자 폭이다(`measure.ts`). 원 앞 틈은 그래서 margin
-//   이 아니라 왼 패딩이다(상자 = 틈 4 + 원 22). 맴돎 원은 상자가 아니라 안의 원에만 칠한다(Tailwind `group-hover/add`).
+// Do not add horizontal margin — the usable width is row width − the `+` border box width (`measure.ts`). The gap before the circle is therefore left padding, not margin
+//   (box = gap 4 + circle 22). The hover circle is painted only on the circle inside, not on the box (Tailwind `group-hover/add`).
 const ADD_STYLE: CSSProperties = {
   position: 'absolute',
   top: SURFACE_TOP,
@@ -526,7 +526,7 @@ const ADD_STYLE: CSSProperties = {
   alignItems: 'center',
   background: 'transparent',
   border: 'none',
-  // × 의 쉴 때 회색과 같은 토큰.
+  // Same token as the resting gray of ×.
   color: 'var(--tab-text-inactive)',
   cursor: 'pointer',
   padding: `0 0 0 ${TAB_ADD_GAP}px`,
@@ -543,24 +543,24 @@ const ADD_CIRCLE: CSSProperties = {
 
 const REDUCED_MOTION = '(prefers-reduced-motion: reduce)'
 
-/** Chrome 의 풍부한 애니메이션 꺼짐 — 비켜남 시간 0(`reorderGeometry.slideMs`). */
+/** Chrome's rich animations off — step-aside time 0 (`reorderGeometry.slideMs`). */
 function reducedMotion(): boolean {
   return typeof window.matchMedia === 'function' && window.matchMedia(REDUCED_MOTION).matches
 }
 
-/** `ids` 에서 `view` 를 빼고 그 목록의 `index` 자리에 끼운 순서(범위 밖은 가까운 끝). */
+/** The order made by removing `view` from `ids` and inserting it at position `index` of that list (out of range = the nearest end). */
 function placeAt(ids: readonly string[], view: string, index: number): string[] {
   const others = ids.filter(id => id !== view)
   const k = Math.min(Math.max(index, 0), others.length)
   return [...others.slice(0, k), view, ...others.slice(k)]
 }
 
-// 활성 탭 모양 = Chrome 그대로(PRD R27 · ADR-0295 결정 1 · Chromium `tab_style.cc` `GetTopCornerRadius` ·
-//   `GetBottomCornerRadius`) — 위 모서리 반지름과 아래 바깥 날개 반지름은 다른 값이다.
+// Active tab shape = exactly Chrome (PRD R27 · ADR-0295 decision 1 · Chromium `tab_style.cc` `GetTopCornerRadius` ·
+//   `GetBottomCornerRadius`) — the top corner radius and the bottom outer flare radius are different values.
 const CORNER_RADIUS = 10
 const FLARE_RADIUS = 12
 
-// 날개(`FLARE_*`)가 머리 밖으로 삐지므로 머리 자신은 `overflow: hidden` 을 두지 않는다 — 자르기는 이 내용 칸이 진다.
+// The flare (`FLARE_*`) sticks out of the head, so the head itself has no `overflow: hidden` — clipping is done by this content area.
 const HEAD_CONTENT: CSSProperties = {
   position: 'absolute',
   top: SURFACE_TOP,
@@ -576,7 +576,7 @@ const HEAD_CONTENT: CSSProperties = {
   whiteSpace: 'nowrap',
 }
 
-// `bottom: -1` = 바 아래 테두리(1px)까지 덮어 내용과 끊김 없이 이어진다.
+// `bottom: -1` = also covers the border (1px) under the bar so it joins the content without a break.
 const ACTIVE_SURFACE: CSSProperties = {
   position: 'absolute',
   top: SURFACE_TOP,
@@ -588,7 +588,7 @@ const ACTIVE_SURFACE: CSSProperties = {
   pointerEvents: 'none',
 }
 
-// 활성 면 아래 두 모서리의 오목한 날개 — 머리 밖 반지름 폭 정사각형에서 바깥 위 모서리를 중심으로 한 원 밖만 칠한다.
+// Concave flares at the two bottom corners of the active surface — in a square of the outside-radius width outside the head, paint only outside the circle centered on the outer top corner.
 const flare = (side: 'left' | 'right'): CSSProperties => ({
   position: 'absolute',
   bottom: -1,
@@ -602,7 +602,7 @@ const flare = (side: 'left' | 'right'): CSSProperties => ({
 const FLARE_LEFT = flare('left')
 const FLARE_RIGHT = flare('right')
 
-// 아래 2px 은 비워 둔다 — 맴돎 면이 옆 활성 탭의 날개를 덮지 않는다.
+// Leave the bottom 2px empty — so the hover surface does not cover the flare of the neighboring active tab.
 const HOVER_SURFACE: CSSProperties = {
   position: 'absolute',
   top: SURFACE_TOP,
@@ -621,8 +621,8 @@ const EDIT_COVER: CSSProperties = {
   pointerEvents: 'none',
 }
 
-// 다른 창 끌기의 끼울 자리 — VS Code 의 2 px 세로선(TRD §4-3 · W13 · U2 ② 양쪽 머리 끝에 1 px 씩 걸친다). x = 탭바 좌표
-//   (`localDrag` `targetMarker` — 그 창 뿌리 dragover 가 적는다).
+// Insertion position for a drag from another window — VS Code's 2 px vertical line (TRD §4-3 · W13 · U2 ② straddling the ends of both heads by 1 px each). x = tab bar coordinates
+//   (`localDrag` `targetMarker` — written by that window's root dragover).
 const MARKER_W = 2
 const MARKER_STYLE: CSSProperties = {
   position: 'absolute',
@@ -635,22 +635,22 @@ const MARKER_STYLE: CSSProperties = {
   zIndex: 3,
 }
 
-// 구분선 = Chrome 꼴(PRD R27 · Chromium `tab_style.cc` `kSeparator*` · `horizontal_tab_style_views.cc`
-//   `GetSeparatorBounds`) — 좌우 여백 2 · 둥글기 = 두께의 반 · 위아래 = 머리 높이 가운데는 그대로이고, ★두께 1 · 높이 13 은
-//   ADR-0298 결정 3★(두께 = Chrome 의 2 보다 얇게 · 높이 = Chrome 탭 34 대 구분선 16 의 비율을 우리 머리 28 에). 여백 ·
-//   두께 · 여백 칸을 이웃 머리와의 경계 가운데에 건다 — Chrome 은 그 칸을 탭끼리 겹친 자리(18)에 두는데 우리 머리는 겹치지
-//   않는다(`tabStrip/layout.ts` 머리).
+// Separator = Chrome style (PRD R27 · Chromium `tab_style.cc` `kSeparator*` · `horizontal_tab_style_views.cc`
+//   `GetSeparatorBounds`) — side margin 2 · rounding = half the thickness · top and bottom = the center of the head height unchanged, and ★thickness 1 · height 13 is
+//   ADR-0298 decision 3★ (thickness = thinner than Chrome's 2 · height = the Chrome ratio of tab 34 to separator 16 applied to our head 28). The margin ·
+//   thickness · margin area is hung at the middle of the boundary with the neighbor head — Chrome puts that area in the region where tabs overlap (18), but our heads do not
+//   overlap (`tabStrip/layout.ts` head).
 const SEPARATOR_W = 1
 const SEPARATOR_H = 13
 const SEPARATOR_MARGIN = 2
 const SEPARATOR_SLOT = SEPARATOR_MARGIN + SEPARATOR_W + SEPARATOR_MARGIN
-// 사라지기 · 나타나기 = Chrome 소스 그대로(PRD R27 · Q23) — 배경이 보이는 탭(활성 ·
-//   맴돎) 옆 구분선은 곧바로 사라진다(맴돎 값을 보간하기 전에 0 을 낸다 — `horizontal_tab_style_views.cc`
-//   `GetSeparatorOpacity`). 서서히는 되살아나기만이고 그것도 맴돎이 끝난 머리 양옆뿐이다 — 구분선 불투명도 = 1 − 그 머리의
-//   맴돎 값이라(`GetHoverInterpolatedSeparatorOpacity`) 맴돎 값이 내려가는 동안(`glow_hover_controller.h` 기본 200 ms ·
-//   꺼질 때 `Tween::EASE_IN`) 나타난다. 활성이 옮아 되살아나는 구분선은 곧바로 나타난다.
+// Disappearing · appearing = exactly Chrome source (PRD R27 · Q23) — the separator next to a tab whose background is visible (active ·
+//   hovered) disappears immediately (0 is produced before interpolating the hover value — `horizontal_tab_style_views.cc`
+//   `GetSeparatorOpacity`). Fading is only for coming back, and only on both sides of a head whose hover has ended — separator opacity = 1 − that head's
+//   hover value (`GetHoverInterpolatedSeparatorOpacity`), so it appears while the hover value falls (`glow_hover_controller.h` default 200 ms ·
+//   `Tween::EASE_IN` when turning off). A separator that comes back because the active tab moved appears immediately.
 const SEPARATOR_FADE_MS = 200
-// `Tween::EASE_IN` `t²`(tween.cc#37-38)을 CSS 로 — `EASE_OUT_CSS` 와 같은 꼴.
+// `Tween::EASE_IN` `t²` (tween.cc#37-38) in CSS — the same form as `EASE_OUT_CSS`.
 const EASE_IN_CSS = 'cubic-bezier(0.3333, 0, 0.6667, 0.3333)'
 const SEPARATOR_SLOT_STYLE: CSSProperties = {
   position: 'absolute',
@@ -678,9 +678,9 @@ const separatorStyle = (shown: boolean, fadesIn: boolean): CSSProperties => ({
 })
 
 /**
- * 머리들이 쓸 수 있는 폭(줄 폭 − `+` 폭 — 훅이 끌기 때 재는 것과 같은 식) — 줄 크기가 바뀔 때마다 다시 잰다. 줄 높이가 0 이면
- * 레이아웃이 없다(재기 전 · jsdom · `display: none`) — `null` = 제한 없음. ★폭 0 은 잰 값이다★ — 창이 제목 줄의 최소 폭보다
- * 좁으면 줄 폭이 0 이 되고, 그때 `null` 로 치면 머리가 다 표준 폭으로 서서 끌 빈 자리 · 번호 표식 · 창 단추를 덮는다.
+ * Width the heads can use (row width − `+` width — the same formula the hook measures at drag time) — re-measured every time the row size changes. If the row height is 0,
+ * there is no layout (before measuring · jsdom · `display: none`) — `null` = no limit. ★Width 0 is a measured value★ — if the window is
+ * narrower than the title row's minimum width, the row width becomes 0, and treating that as `null` would stand every head at the standard width and cover the empty draggable area · number badge · window buttons.
  */
 function useStripAvailable(
   row: RefObject<HTMLElement | null>,
@@ -704,8 +704,8 @@ function useStripAvailable(
 }
 
 /**
- * 머리 DOM 순서(머리 주석 「DOM 순서」) — 쉴 때는 보이는 순서(`visual`), 그 밖에는 이미 그린 머리를 제자리에 두고 새 머리를
- * 끝에 붙인다. 쉰다 = 이름 편집이 없고, 끌기 훅이 누름을 놓았고(`engaged`), 그 뒤로 탭바의 전환이 다 끝났다.
+ * Head DOM order (head comment 「DOM 순서」) — at rest it is the visible order (`visual`); otherwise the heads already drawn stay in place and a new head is
+ * appended at the end. At rest = no name edit, the drag hook has released the press (`engaged`), and after that all the tab bar's transitions have ended.
  */
 function useDomOrder(
   visual: string[],
@@ -713,7 +713,7 @@ function useDomOrder(
   editing: boolean,
   row: RefObject<HTMLElement | null>,
 ): string[] {
-  // 끌기 훅이 누름을 쥐면 `false` · 놓고 전환까지 끝나 맞출 때가 되면 `true`.
+  // `false` while the drag hook holds the press · `true` once it is released and transitions have finished and it is time to match.
   const [synced, setSynced] = useState(true)
   const committed = useRef<string[]>([])
 
@@ -726,16 +726,16 @@ function useDomOrder(
     let live = true
     const step = (): void => {
       if (!live) return
-      // `getAnimations` 는 스타일을 먼저 갱신해 방금 그린 자리 전환까지 센다(Web Animations 규정 · WebView2 실측 아님). 끝나고
-      //   채움으로 남은 것은 `finished` 가 이미 풀려 있어 세면 기다림이 제자리를 돈다. jsdom 에는 없다(= 전환 없음).
+      // `getAnimations` updates styles first, so it also counts the position transition just drawn (Web Animations spec · not measured on WebView2). One that ended and
+      //   remains as fill has `finished` already resolved, so counting it makes the wait spin in place. jsdom has none (= no transition).
       const running = (row.current?.getAnimations?.({ subtree: true }) ?? []).filter(
         a => a.playState === 'running' || a.pending,
       )
       if (running.length === 0) setSynced(true)
       else void Promise.allSettled(running.map(a => a.finished)).then(step)
     }
-    // 뗌에 이은 click 이 간 뒤에 맞춘다 — 그 사이 머리를 옮기면(떼었다 다시 붙임) click 이 머리에 안 가 더블클릭 이름 바꾸기가
-    //   깨질 수 있다(WebView2 실측 아님).
+    // Match after the click following the release has gone — if heads are moved in between (detach and reattach), the click may not reach the head and double-click rename
+    //   may break (not measured on WebView2).
     const timer = setTimeout(step, 0)
     return () => {
       live = false

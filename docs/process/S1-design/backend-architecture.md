@@ -1,31 +1,31 @@
-# Engram Dashboard — Rust 백엔드 설계 최종본
+# Engram Dashboard — Rust Backend Design, Final
 
-**작성일:** 2026-06-08  
-**기반:** draft + GPT 검토 반영
+**Written:** 2026-06-08  
+**Based on:** draft + GPT review reflected
 
 ---
 
-## 기술 선택
+## Technology choices
 
-| 항목 | 선택 | 이유 |
+| Item | Choice | Reason |
 |---|---|---|
-| PTY | `portable-pty` crate | 크로스플랫폼 (Windows ConPTY / Unix PTY), 진짜 PTY |
-| 프레임워크 | Tauri v2 | 이미 사용 중 |
-| PTY 출력 전달 | Tauri v2 **Channel** | 고빈도 스트리밍에 적합 (emit_all 비권장) |
-| 저빈도 상태 알림 | Tauri **Event** | agent list/status 변경 등 |
-| 세션 관리 | `Arc<Mutex<HashMap>>` | 멀티 PTY 동시 관리 |
+| PTY | `portable-pty` crate | Cross-platform (Windows ConPTY / Unix PTY), a real PTY |
+| Framework | Tauri v2 | Already in use |
+| PTY output delivery | Tauri v2 **Channel** | Suited to high-frequency streaming (emit_all not recommended) |
+| Low-frequency state notification | Tauri **Event** | agent list/status changes, etc. |
+| Session management | `Arc<Mutex<HashMap>>` | Manages multiple PTYs at once |
 
 ---
 
-## 에이전트 모델
+## Agent model
 
-- **에이전트 = Claude Code 세션 = PTY 프로세스 1개**
-- 같은 폴더에 여러 세션 가능 → 트리에서 폴더(부모) / 세션(자식 리프)
+- **Agent = Claude Code session = 1 PTY process**
+- Multiple sessions are possible in the same folder → in the tree, folder (parent) / session (child leaf)
 - `AgentId` (UUID) ↔ `PtySession` 1:1
 
 ---
 
-## Rust 핵심 구조
+## Rust core structures
 
 ### AgentStatus
 
@@ -64,35 +64,35 @@ pub struct PtyManager {
 }
 ```
 
-**Mutex 전략:**
-- 전역 `sessions` lock → lookup까지만 (clone Arc 후 즉시 해제)
-- 각 session 내 `writer` lock → stdin I/O 전용
-- blocking I/O는 전역 lock 밖에서 수행 (다른 agent 차단 방지)
+**Mutex strategy:**
+- The global `sessions` lock → only up to the lookup (released immediately after cloning the Arc)
+- The `writer` lock inside each session → dedicated to stdin I/O
+- Blocking I/O is performed outside the global lock (to avoid blocking other agents)
 
 ---
 
 ## Tauri Commands (invoke)
 
-| 커맨드 | 인자 | 반환 | 동작 |
+| Command | Arguments | Returns | Behavior |
 |---|---|---|---|
-| `spawn_agent` | `cwd: String` | `AgentInfo` | PTY 생성 + Claude Code 실행 |
-| `subscribe_agent_output` | `agent_id`, `channel: Channel<PtyEvent>` | - | PTY 출력 구독 등록 + replay 전송 |
-| `write_stdin` | `agent_id`, `data: String` | - | PTY stdin 전달 |
-| `resize_pty` | `agent_id`, `cols: u16`, `rows: u16` | - | PTY 크기 변경 |
-| `kill_agent` | `agent_id` | - | PTY + 자식 프로세스 종료 |
-| `get_agents` | - | `Vec<AgentInfo>` | 전체 세션 목록 |
-| `get_agent_snapshot` | `agent_id` | `Vec<PtyChunk>` | replay buffer 조회 |
+| `spawn_agent` | `cwd: String` | `AgentInfo` | Create the PTY + run Claude Code |
+| `subscribe_agent_output` | `agent_id`, `channel: Channel<PtyEvent>` | - | Register the PTY output subscription + send the replay |
+| `write_stdin` | `agent_id`, `data: String` | - | Deliver to PTY stdin |
+| `resize_pty` | `agent_id`, `cols: u16`, `rows: u16` | - | Change the PTY size |
+| `kill_agent` | `agent_id` | - | Terminate the PTY + child process |
+| `get_agents` | - | `Vec<AgentInfo>` | Full session list |
+| `get_agent_snapshot` | `agent_id` | `Vec<PtyChunk>` | Query the replay buffer |
 
-## Tauri Events (emit) — 저빈도만
+## Tauri Events (emit) — low-frequency only
 
-| 이벤트 | payload | 용도 |
+| Event | payload | Purpose |
 |---|---|---|
-| `agent-status-changed` | `{ id, status }` | 모든 창 AgentTree 업데이트 |
-| `agent-list-updated` | `Vec<AgentInfo>` | 에이전트 목록 변경 시 |
+| `agent-status-changed` | `{ id, status }` | Update the AgentTree in all windows |
+| `agent-list-updated` | `Vec<AgentInfo>` | When the agent list changes |
 
 ---
 
-## PTY 출력 흐름 (Channel 기반)
+## PTY output flow (Channel-based)
 
 ```
 Claude Code 실행
@@ -106,13 +106,13 @@ Claude Code 실행
   → xterm.js write(data) (8~16ms batch)
 ```
 
-**왜 Channel인가:**
-- Tauri event는 JSON 직렬화 + 전체 창 broadcast → 고빈도 스트리밍 부적합
-- Channel은 특정 구독자에게 직접 전달, 바이너리 가능
+**Why Channel:**
+- A Tauri event is JSON serialization + broadcast to all windows → unsuited to high-frequency streaming
+- A Channel delivers directly to a specific subscriber, binary possible
 
 ---
 
-## 멀티 창 fanout
+## Multi-window fanout
 
 ```
 메인 창 ──── subscribe_agent_output(agentA, ch1) ──┐
@@ -120,11 +120,11 @@ Claude Code 실행
                                                    └─→ drain thread → 둘 다에 send
 ```
 
-각 창은 원하는 agent를 명시적으로 구독. 창 닫힐 때 channel drop → subscriber 자동 제거.
+Each window explicitly subscribes to the agent it wants. When a window closes, the channel is dropped → the subscriber is removed automatically.
 
 ---
 
-## 후발 창 attach (replay)
+## Late-window attach (replay)
 
 ```
 새 팝업 창이 agentA에 subscribe_agent_output 호출
@@ -134,7 +134,7 @@ Claude Code 실행
 
 ---
 
-## 프론트엔드 변경 포인트
+## Frontend change points
 
 ### agentStore.ts
 
@@ -168,7 +168,7 @@ terminal.onData((data) => {
 })
 ```
 
-### resize 동기화
+### resize sync
 
 ```ts
 const resizeObserver = new ResizeObserver(debounce(() => {
@@ -179,39 +179,39 @@ const resizeObserver = new ResizeObserver(debounce(() => {
 
 ---
 
-## Windows ConPTY 주의사항
+## Windows ConPTY notes
 
-- Windows 10 1809 (October 2018 Update) 이상 필수
-- `portable-pty` 버전 고정 후 Windows 실기기 smoke test 필수
-- drain thread 필수 (Microsoft ConPTY 권장 사항 — 별도 thread에서 I/O)
-- VT sequence 그대로 xterm.js 전달 (직접 파싱 금지)
-- 릴리즈 빌드 콘솔 창 숨김: `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]`
-
----
-
-## 보안
-
-- `spawn_agent`: cwd canonicalize + workspace root 밖 거부
-- 실행 binary 고정 (사용자 임의 지정 불가)
-- 로그 API key masking
+- Windows 10 1809 (October 2018 Update) or later is required
+- After pinning the `portable-pty` version, a smoke test on a real Windows machine is mandatory
+- A drain thread is mandatory (Microsoft ConPTY recommendation — I/O on a separate thread)
+- Pass VT sequences to xterm.js as they are (no direct parsing)
+- Hide the console window in release builds: `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]`
 
 ---
 
-## 구현 순서
+## Security
 
-1. Rust PTY spawn + drain thread + Channel 기반 구독
+- `spawn_agent`: canonicalize cwd + reject outside the workspace root
+- Fixed executable binary (the user cannot specify an arbitrary one)
+- Mask API keys in logs
+
+---
+
+## Implementation order
+
+1. Rust PTY spawn + drain thread + Channel-based subscription
 2. `get_agents` / `spawn_agent` / `kill_agent`
-3. `subscribe_agent_output` → xterm.js Channel 연결
+3. `subscribe_agent_output` → connect the xterm.js Channel
 4. `write_stdin` + `resize_pty`
-5. `agent-status-changed` 이벤트 → AgentTree 실시간 업데이트
-6. replay buffer (후발 attach)
+5. `agent-status-changed` event → real-time AgentTree update
+6. replay buffer (late attach)
 
 ---
 
-## 검토 요청 사항
+## Review requests
 
-1. `portable-pty`가 Tauri v2 + Windows 환경에서 실전 사용 가능한가? 알려진 이슈?
-2. Tauri v2 Channel 기반 PTY 스트리밍 — 이 설계에서 놓친 pitfall?
-3. drain thread + replay buffer + subscriber 관리 구조의 개선 포인트?
-4. xterm.js ↔ Tauri v2 Channel 연동 주의사항?
-5. 전체 구조에서 놓친 것, 더 개선할 설계 포인트?
+1. Is `portable-pty` usable in practice with Tauri v2 + Windows? Known issues?
+2. Tauri v2 Channel-based PTY streaming — any pitfalls missed in this design?
+3. Improvement points for the drain thread + replay buffer + subscriber management structure?
+4. Cautions for connecting xterm.js ↔ Tauri v2 Channel?
+5. Anything missed in the overall structure, or design points that can be improved further?

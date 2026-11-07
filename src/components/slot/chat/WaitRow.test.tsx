@@ -1,5 +1,5 @@
-// 대기 표시 줄 시험 — 늘 서 있는 고정 높이 줄 · 표시는 streaming 동안만 · 경과 초의 정체성(사용자 결정 2026-10-01 ·
-//   ADR-0244 「중단하는 중」).
+// Wait indicator row test — an always-present fixed-height row · the indicator only while streaming · identity of elapsed seconds (user decision 2026-10-01 ·
+//   ADR-0244 「중단하는 중」 (interrupting)).
 
 import { act, cleanup, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -47,7 +47,7 @@ describe('WaitStrip — 자리', () => {
   })
 })
 
-// ── ADR-0244: 끊기를 보낸 뒤 「중단하는 중」 ──────────────────────────────────────
+// ── ADR-0244: 「중단하는 중」 (interrupting) after sending an interrupt ──────────────────────────────────────
 describe('WaitStrip — 중단하는 중(ADR-0244)', () => {
   it('interrupting 이면 Wait 대신 CircleStop + 「중단하는 중…」 을 그린다', () => {
     const { container } = render(<WaitStrip streaming interrupting />)

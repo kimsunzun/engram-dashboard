@@ -1,5 +1,5 @@
-// factory 는 모듈 로드 시점에 싱글톤(agentClient)을 만든다 → 각 케이스마다 vi.resetModules 후
-// dynamic import 로 격리한다. @tauri-apps/api/core 는 mock(인스턴스화 시점엔 invoke 호출 안 함).
+// The factory creates the singleton (agentClient) at module load → isolate each case with vi.resetModules and then
+// a dynamic import. @tauri-apps/api/core is mocked (invoke is not called at instantiation time).
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -54,7 +54,7 @@ describe('clientFactory (daemon-only)', () => {
     expect(core.invoke).not.toHaveBeenCalled()
   })
 
-  // ── ADR-0021: DaemonControl 노출(항상 실제 구현) ──────────────────────────────────
+  // ── ADR-0021: DaemonControl exposure (always the real implementation) ──────────────────────────────────
   it('getDaemonControl → DaemonDaemonControl(실제) + window.__ENGRAM_DAEMON__ 노출', async () => {
     const factory = await import('./clientFactory')
     const { DaemonDaemonControl } = await import('./daemonControl')

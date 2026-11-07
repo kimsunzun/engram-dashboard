@@ -2,16 +2,16 @@
 import type { SettingItem } from "./SettingItem";
 
 /**
- * `settings_get` 의 답이자 `settings:changed` 알림의 짐 — 알림이면 `items` 는 바뀐 키만이다.
+ * The answer of `settings_get` and the payload of the `settings:changed` notification — for a notification `items` holds only the changed keys.
  *
- * ★받는 쪽은 **키마다** `rev` 로 적용한다★ — 항목은 그 키를 처음 보거나, 그 키에 마지막으로 적용한 `rev`
- * 보다 클 때 적용한다. ★처음 보는 키는 그대로 적용한다★ — 셸을 띄운 직후의 답은 `rev` 0 이라, 「0 보다
- * 클 때」로 비교하면 첫 값을 버린다. `settings_get` 답도 항목마다 답의 `rev` 로 같은 규칙을 탄다: 답을
- * 통째로 버리면 그 답에만 있는 키를 잃고, 통째로 적용하면 먼저 도착한 새 알림을 옛 값으로 덮는다. 알림끼리는
- * `rev` 순서로 나간다.
+ * ★The receiver applies **per key** by `rev`★ — an item is applied when it is the first time seeing that key, or when it is greater than the `rev`
+ * last applied to that key. ★A key seen for the first time is applied as is★ — the answer right after the shell starts has `rev` 0, so comparing with 「0 보다
+ * 클 때」(when greater than 0) would drop the first value. The `settings_get` answer also follows the same rule per item with the answer's `rev`: if the answer
+ * is dropped as a whole, keys only in that answer are lost, and if applied as a whole, a new notification that arrived earlier is overwritten with the old value. Notifications go out among themselves
+ * in `rev` order.
  */
 export type SettingsSnapshot = { rev: number, 
 /**
- * 표 순서.
+ * Table order.
  */
 items: Array<SettingItem>, };

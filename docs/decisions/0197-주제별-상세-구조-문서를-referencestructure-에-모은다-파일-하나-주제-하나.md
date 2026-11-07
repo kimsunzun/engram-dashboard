@@ -1,62 +1,62 @@
-# ADR-0197: 주제별 상세 구조 문서를 reference/structure/ 에 모은다 — 파일 하나 = 주제 하나
+# ADR-0197: Collect per-topic detailed structure documents in reference/structure/ — one file = one topic
 
-- 상태: 확정 (2026-09-08, 근거: 사용자 결정 — 재사용 부품이 필요하다)
-- 관련: ADR-0034(문서 아키텍처 — 이 결정은 그 frame 아래 새 문서 종류를 하나 더한다) · `docs/README.md` 「고아 금지」 · `docs/reference/structure/` · 첫 입주자 = `docs/reference/structure/agent-backend.md`
+- 상태: 확정 (2026-09-08, basis: user decision — reusable parts are needed)
+- 관련: ADR-0034(document architecture — this decision adds one more document kind under that frame) · `docs/README.md` 「고아 금지」 · `docs/reference/structure/` · first occupant = `docs/reference/structure/agent-backend.md`
 
-> 채번 이력: 원래 `ADR-0179` 로 채번됐으나 병렬 브랜치가 같은 번호를 먼저(2026-09-04) 쓴 것이 머지 시점에 드러나 `0197` 로 옮겼다. 2026-09-14 이전 기록(핸드오프 history 등)에서 이 결정을 가리키는 `ADR-0179` 는 이 문서를 뜻한다.
+> Numbering history: it was originally numbered `ADR-0179`, but at merge time it came to light that a parallel branch had used the same number first (2026-09-04), so it was moved to `0197`. In records from before 2026-09-14 (handoff history and so on), an `ADR-0179` that points at this decision means this document.
 
 ## 맥락
 
-브리핑을 만들 때마다 같은 구조를 **다시 설명하고 다시 그렸다.** codex 백엔드 Phase 1 브리핑이 그랬고, 다음에 gemini 백엔드를 할 때도 codex 구조를 옆에 놓고 견주며 설명해야 한다. 즉 필요한 것은 한 번 쓰고 버리는 브리핑이 아니라 **주제 단위로 쌓아 두고 꺼내 쓰는 부품**이다.
+Every time we made a briefing, we **explained and drew the same structure again.** The codex backend Phase 1 briefing was like that, and the next time we do the gemini backend, we will again have to explain it by laying the codex structure beside it and comparing. That is, what is needed is not a briefing written once and thrown away but **parts that are stacked per topic and taken out for use.**
 
-기존 두 자리는 그 역할을 못 한다.
+The two existing places cannot play that role.
 
-- **조감도(`docs/reference/architecture-overview.md`)** 는 이름 그대로 전체를 한 장으로 보는 문서다. 주제별 상세를 여기 밀어 넣으면 조감도가 조감도이기를 그친다.
-- **스텝 폴더(`docs/process/SN-*/`)** 는 그 스텝이 무엇을 어떻게 정했나의 **동결 스냅샷**이다(ADR-0034 수명 불변식: design/research 는 승인·freeze 후 snapshot). 재사용 부품을 여기 두면 낡은 채로 인용된다.
+- **The bird's-eye view (`docs/reference/architecture-overview.md`)** is, as its name says, a document that shows the whole on one sheet. If we push per-topic detail into it, the bird's-eye view stops being a bird's-eye view.
+- **Step folders (`docs/process/SN-*/`)** are **frozen snapshots** of what that step decided and how (ADR-0034 lifetime invariant: design/research become a snapshot after approval·freeze). If we put reusable parts here, they get cited while stale.
 
 ## 결정
 
-**`docs/reference/structure/<주제>.md` — 주제 하나 = 파일 하나.** 진화형 캐논이라 제자리 수정한다(`reference/` 수명).
+**`docs/reference/structure/<주제>.md` — one topic = one file.** It is an evolving canon, so it is edited in place (the `reference/` lifetime).
 
-- ★**독자는 사용자다 — 이 폴더는 「실시간 설명 문서」다**★(사용자 결정 2026-09-08). `step-log`·TRD 는 세션이 읽는 문서이고 사용자는 보지 않는다. 그래서 이 폴더의 글은 **설명체**로 쓴다 — 다만 늘어놓지 않는다(사용자 지시: 「너무 내용 늘어놓지말고 설명해줘」). 절마다 짧은 설명 + 그림·표 + 앵커.
-- **완성본을 겨누지 않는다.** 물어볼 때마다 답을 여기 적어 넣고, 아직 안 한 것·미검도 함께 싣는다. 제대로 정리하는 것은 **사용자가 요청할 때** 한다. 그래서 「부채는 캐논에서 빼고 추적 문서로」 같은 분리를 두지 않는다 — 한 곳에서 답이 되는 것이 이 문서의 목적이다.
-- **전달본은 HTML이고 「그 당시 문서」다**(사용자 결정 2026-09-08) — 같은 mermaid 소스로 굽되 **구조가 바뀔 때마다 갱신하지 않는다.** 디테일과 최신은 md 가 갖고, HTML 은 그 시점의 개략 설명이다. 갱신 의무를 지우면 「전달본이 낡았다」가 결함이 아니라 사실 서술이 된다.
-- ★**기록은 repo 의 파일이다 — 발행 링크가 아니다.**★ 아티팩트 URL 은 휘발한다(실발생: S21 브리핑 링크가 계정 조회 불가로 죽었다). 그래서 HTML 파일을 repo 에 커밋하고, 링크는 그때그때의 편의로만 쓴다. 문서 안에 발행 URL 을 정본처럼 적지 않는다.
+- ★**The reader is the user — this folder is a 「실시간 설명 문서」 (“live explanation document”)**★ (user decision 2026-09-08). `step-log` and TRDs are documents that sessions read, and the user does not look at them. So the writing in this folder is **in an explanatory style** — but it does not just list things (user instruction: 「너무 내용 늘어놓지말고 설명해줘」 (“don't line up so much content, explain it”)). Each section is a short explanation + a figure·table + an anchor.
+- **We do not aim at a finished version.** Each time we are asked, we write the answer in here, and we also include what is not yet done and what is unverified. Putting it in proper order is done **when the user asks**. So we do not make a split like 「부채는 캐논에서 빼고 추적 문서로」 (“take debts out of the canon and into a tracking document”) — the purpose of this document is that one place gives the answer.
+- **The delivery copy is HTML and is 「그 당시 문서」 (“a document of its time”)** (user decision 2026-09-08) — it is baked from the same mermaid sources, but **it is not updated every time the structure changes.** Detail and the latest live in the md, and the HTML is a rough explanation as of that moment. Once the duty to update is removed, 「전달본이 낡았다」 (“the delivery copy is stale”) becomes a statement of fact, not a defect.
+- ★**The record is a file in the repo — not a publication link.**★ Artifact URLs evaporate (it actually happened: the S21 briefing link died because the account could not be looked up). So we commit the HTML file to the repo, and use links only as a convenience of the moment. We do not write a publication URL in a document as if it were canonical.
 
-- ★**단위는 「주제」이고, 주제는 벤더가 아니라 확장 축이다.**★ 그래서 첫 입주자는 `codex-backend.md` 가 아니라 **`agent-backend.md`** 이고, **셋째 백엔드는 파일이 아니라 열 하나가 는다**(사용자 결정 2026-09-08). 이 저장소의 계약 시험대가 이미 그 규칙으로 지어져 있어(백엔드마다 같은 질문표의 열이 는다) 문서를 같은 규칙에 맞춘 것이다.
-- **그래서 파일 안이 두 층이다** — ⓐ 백엔드 중립 척추(그림: 두 제스처·스폰 사슬·렌더 분기·닫힌 문 — 어느 백엔드든 타는 배관) ⓑ 백엔드별 칸(표: argv·capability 선언·LLM 창구 정책·wire 변형). 새 백엔드는 ⓑ 에 열 하나를 더하고 ⓐ 는 건드리지 않는다.
-- **서브시스템이 아닌 횡단 주제도 같은 층에 든다**(예: 렌더 분기·LLM 창구) — 다만 그 주제가 어느 축의 일부이면 그 축의 파일 안 절로 둔다. 파일을 늘리는 기준은 **축이 다른가**다.
-- **그림 소스는 mermaid 하나로 단일화한다.** mermaid 는 `.md` 렌더 뷰에서도, 아티팩트 HTML 의 `<pre class="mermaid">` 에서도 같은 소스로 렌더된다 — 그래서 브리핑·덱은 그림을 **다시 그리지 않고 소스를 그대로 가져간다**. 재사용이 성립하는 지점이 여기다.
-- ★**근거 앵커는 파일·심볼 이름까지만 적고 줄번호를 적지 않는다.**★ 재사용되는 그림에 줄번호가 붙으면 인용될 때마다 낡는다.
-- **각 파일은 기준 스탬프를 머리에 둔다**(브랜치·읽은 시점·범위) — 낡음이 보이게.
-- **조감도와 스텝 문서는 이 폴더를 가리키고 베끼지 않는다**(ADR-0034 SSoT). 조감도는 조감도로 남는다.
-- **폴더 이름은 `structure`** — 그림·표·argv·capability 선언을 한 낱말로 덮고, `architecture-overview.md` 와 층이 갈린다.
+- ★**The unit is 「주제」 (“topic”), and the topic is an extension axis, not a vendor.**★ So the first occupant is **`agent-backend.md`**, not `codex-backend.md`, and **a third backend adds one column, not a file** (user decision 2026-09-08). This repository's contract test bench is already built on that rule (a column grows per backend on the same question table), and we fitted the documents to the same rule.
+- **So the inside of a file has two layers** — ⓐ a backend-neutral spine (figures: the two gestures · the spawn chain · the render branch · the closed doors — plumbing that any backend rides) ⓑ per-backend cells (tables: argv · capability declarations · LLM endpoint policy · wire variants). A new backend adds one column to ⓑ and does not touch ⓐ.
+- **Cross-cutting topics that are not subsystems also belong in the same layer** (e.g. the render branch · the LLM endpoint) — but if the topic is part of some axis, it is kept as a section inside that axis's file. The criterion for adding a file is **whether the axis is different**.
+- **The figure source is unified to a single mermaid.** mermaid renders from the same source both in the `.md` render view and in `<pre class="mermaid">` of the artifact HTML — so briefings and decks **take the source as it is, without redrawing the figures**. This is the point where reuse holds.
+- ★**Evidence anchors give only the file and symbol names and do not give line numbers.**★ If line numbers are attached to a reused figure, it goes stale each time it is cited.
+- **Each file puts a baseline stamp at its head** (branch · time of reading · scope) — so that staleness is visible.
+- **The bird's-eye view and step documents point at this folder and do not copy it** (ADR-0034 SSoT). The bird's-eye view remains a bird's-eye view.
+- **The folder name is `structure`** — it covers figures · tables · argv · capability declarations in one word, and its layer is distinct from `architecture-overview.md`.
 
 ## 거부한 대안
 
-- **조감도(`architecture-overview.md`)에 상세를 밀어 넣는다** — 사용자 기각: 「오버뷰는 말그대로 전체를 보는건데 거기다 하나하나 다 넣게? 그럼 오버뷰 의미가 있음?」. 실측 보강: 그 문서는 이미 838줄·mermaid 20장인데 codex 언급은 두 줄뿐이고, 그중 seam 표가 「`AgentCommand` 에 variant 자체가 없다」로 **이미 거짓**이다(Phase 1 이 뒤집었다). 상세를 더 얹는 방향은 이 문서가 낡는 속도만 올린다. **덧붙는 충돌:** 그 문서는 rot 방지를 위해 **일부러 줄번호를 안 박는다**(그 문서 머리글) — 줄번호로 지은 상세 그림이 갈 자리가 아니다.
-- **TRD 인라인 유지 — 스텝 폴더의 TRD 안에 상세 그림을 계속 둔다** — 실측 기각: `docs/process/S21-codex-backend/trd.md` §2.5 의 그림 7장은 `file.rs:line` 앵커로 지은 2026-09-07 판독본인데, **착지 하루 만에 낡았다**(`CodexBackend 미배선`·`backend/claude.rs` 평면 파일로 그려져 있으나 실제는 폴더 분할 + dispatch 표에 배선됨). 동결 스냅샷으로는 옳고 **재사용 부품으로는 못 쓴다**.
-- **스텝 폴더에 재사용 부품을 붙인다** — 사용자 기각: 「스탭이나 그런곳 붙이기는 애매함」. 수명이 안 맞는다(ADR-0034: 불변·누적 vs living).
-- **폴더 이름 `diagrams/`** — 사용자 기각: 「근데 다이어그램만 있을게 아닐수도 있는데」. 실증: 첫 입주자에 capability 선언 표·argv 템플릿·wire 계약 표가 함께 들어가고, 그 셋이 그림보다 정보량이 많다. 표가 하나 들어오는 순간 폴더 이름이 거짓이 된다.
-- **폴더 이름 `subsystems/`** — 백엔드 같은 덩어리엔 맞지만 「렌더 분기」·「닫힌 문 셋」처럼 서브시스템이 아닌 횡단 주제가 들어갈 자리가 없다.
-- **폴더 이름 `topics/`** — 무엇이 들어와도 안 깨지지만 이름이 아무 말도 하지 않는다. `reference/` 아래는 전부 「주제」다.
-- **벤더별 파일 하나씩**(`codex-backend.md` · `gemini-backend.md` · …) — 사용자 기각: 「나중에 제미나이 붙일때 또 따로 하지말고 문서 구조 통합하면 되는거잖아」. 벤더마다 파일을 세우면 **중립 척추가 벤더 수만큼 복제**되고(두 제스처·스폰 사슬·렌더 분기·닫힌 문은 어느 백엔드든 같다) 그중 하나만 고쳐질 때 어느 사본이 맞는지 알 수 없게 된다. 축 하나에 열을 늘리는 쪽은 복제가 0 이다.
-- **이름에 「아키텍처」를 쓴다** — 사용자 기각: 「아키텍처라고 하기에는 기술문서 같은 느낌이고」. 조감도와 이름이 겹쳐 층도 흐려진다.
-- **부채·미검을 캐논에서 빼고 추적 문서로 보낸다**(리뷰의 cut 렌즈 안, 메인이 제안) — 사용자 기각: 「이것저것 다 넣으면됨 · 실시간 설명문서라고 생각하면됨」. 가르면 사용자가 같은 질문을 두 문서에 걸쳐 물어야 하고, 이 폴더의 존재 이유(한 곳에서 답이 된다)가 깨진다. **거부한 반대편 렌즈**(load-bearing 수호)는 「`ADR 0건` 은 시점 수치가 아니라 정책 항목」이라며 존치를 요구했고, 사용자 결정이 그쪽과 같은 방향이다.
+- **Push the detail into the bird's-eye view (`architecture-overview.md`)** — rejected by the user: 「오버뷰는 말그대로 전체를 보는건데 거기다 하나하나 다 넣게? 그럼 오버뷰 의미가 있음?」 (“the overview is literally for seeing the whole, and you'd put every single thing in there? Then does the overview mean anything?”). Measured reinforcement: that document is already 838 lines and 20 mermaid figures, yet mentions codex in only two lines, and of those the seam table is **already false** with 「`AgentCommand` 에 variant 자체가 없다」 (“AgentCommand has no variant at all”) (Phase 1 overturned it). Adding more detail only raises the speed at which this document goes stale. **An added conflict:** that document **deliberately does not put in line numbers** to prevent rot (the head text of that document) — it is not a place for a detailed figure built on line numbers.
+- **Keep it inline in the TRD — keep leaving the detailed figures inside the TRD in the step folder** — rejected by measurement: the 7 figures in `docs/process/S21-codex-backend/trd.md` §2.5 are a 2026-09-07 reading built on `file.rs:line` anchors, and they **went stale one day after landing** (they are drawn as `CodexBackend 미배선` and a flat file `backend/claude.rs`, but the reality is a folder split + wired into the dispatch table). Right as a frozen snapshot, and **unusable as a reusable part**.
+- **Attach the reusable parts to the step folder** — rejected by the user: 「스탭이나 그런곳 붙이기는 애매함」 (“attaching it to a step or such is awkward”). The lifetimes do not match (ADR-0034: immutable·cumulative vs living).
+- **Folder name `diagrams/`** — rejected by the user: 「근데 다이어그램만 있을게 아닐수도 있는데」 (“but it may not be only diagrams”). Proof: the first occupant contains together a capability declaration table · argv templates · a wire contract table, and those three carry more information than the figures. The moment one table comes in, the folder name becomes false.
+- **Folder name `subsystems/`** — fits a chunk like a backend, but there is no place for cross-cutting topics that are not subsystems, like 「렌더 분기」 (“the render branch”) and 「닫힌 문 셋」 (“the three closed doors”).
+- **Folder name `topics/`** — nothing that comes in would break it, but the name says nothing. Everything under `reference/` is a 「주제」 (“topic”).
+- **One file per vendor** (`codex-backend.md` · `gemini-backend.md` · …) — rejected by the user: 「나중에 제미나이 붙일때 또 따로 하지말고 문서 구조 통합하면 되는거잖아」 (“when we attach gemini later, we shouldn't do it separately again, we can just unify the document structure, right”). If a file is set up per vendor, **the neutral spine is duplicated as many times as there are vendors** (the two gestures · the spawn chain · the render branch · the closed doors are the same for any backend), and when only one of them is fixed it becomes impossible to tell which copy is right. Growing columns on one axis has zero duplication.
+- **Use 「아키텍처」 (architecture) in the name** — rejected by the user: 「아키텍처라고 하기에는 기술문서 같은 느낌이고」 (“calling it architecture feels like a technical document”). The name overlaps with the bird's-eye view and the layers also blur.
+- **Take debts and unverified items out of the canon and send them to a tracking document** (the cut-lens proposal from the review, proposed by the main agent) — rejected by the user: 「이것저것 다 넣으면됨 · 실시간 설명문서라고 생각하면됨」 (“just put everything in · think of it as a live explanation document”). If we split, the user has to ask the same question across two documents, and the reason this folder exists (one place gives the answer) is broken. **The opposing lens we rejected** (guarding what is load-bearing) demanded keeping it, saying 「`ADR 0건` 은 시점 수치가 아니라 정책 항목」 (“"zero ADRs" is not a point-in-time figure but a policy item”), and the user's decision goes in the same direction as that.
 
 ## 근거
 
-- **재사용 요구가 사용자 발화에서 왔다** — 「매번 새로 설명하는것보다 중간중간 내용 다음으면서 재활용하면 되잖아」 + 「나중에 제미나이 할때도 옆에도 붙여서 할거라서 독립주제여야 되는거잖아」. 단위가 주제여야 하는 이유가 여기서 나온다.
-- **낡음의 실측이 두 건 있다** — ① TRD §2.5 그림 7장이 착지 하루 만에 앵커·라벨이 틀어졌다 ② 조감도의 codex 두 줄 중 하나가 이미 거짓이다. 「줄번호 금지 + 기준 스탬프」는 이 두 건에 대한 처방이다.
-- **폴더명 선택지는 실물 트리로 견줘 사용자가 골랐다**(2026-09-08) — `structure` / `diagrams` / `subsystems` / `topics` 넷을 각각의 입주 예시와 함께 올렸다.
+- **The reuse requirement came from the user's own words** — 「매번 새로 설명하는것보다 중간중간 내용 다음으면서 재활용하면 되잖아」 (“rather than explaining anew every time, we can recycle it while refining the content along the way”) + 「나중에 제미나이 할때도 옆에도 붙여서 할거라서 독립주제여야 되는거잖아」 (“when we do gemini later we'll attach it beside, so it has to be an independent topic, right”). This is where the reason the unit must be a topic comes from.
+- **There are two measurements of staleness** — ① the 7 figures in TRD §2.5 had their anchors and labels go off one day after landing ② one of the two codex lines in the bird's-eye view is already false. 「줄번호 금지 + 기준 스탬프」 (“No line numbers + a baseline stamp”) is the prescription for these two.
+- **The folder-name options were compared on a real tree and the user chose** (2026-09-08) — we put up the four, `structure` / `diagrams` / `subsystems` / `topics`, each with its example occupants.
 
 ## 영향 / 불변식
 
-- **새 문서는 `docs/README.md` 발견 체인에 등재한다**(고아 금지 — ADR-0034). 단 그 파일은 손으로 베낀 목록을 금하므로 **폴더 안 파일을 열거하지 않고** `ls docs/reference/structure/` 를 가리킨다.
-- **흐름은 `docs/process/step-log.md` 에 남긴다**(*언제·무엇* — CLAUDE.md 「기록 분리」). ADR 등재만으로는 이 폴더가 언제 생겼는지가 어디에도 없다.
-- **조감도에서 이 폴더로 내려가는 포인터를 둔다** — 「전체 그림 → 조감도, 주제별 상세 → `reference/structure/`」의 왕복이 성립해야 SSoT(복사 말고 링크)가 실효한다. ★단방향으로 두면 조감도만 읽는 세션이 상세의 존재를 모른다.★
-- ★**이 폴더의 앵커에 줄번호를 쓰면 위반이다.**★ 어기면 인용된 그림이 조용히 낡아, 다음 세션이 없는 줄을 열고 근거 없이 코드를 만난다.
-- **조감도는 조감도로 유지한다** — 주제별 상세를 `architecture-overview.md` 로 되올리면 이 결정이 무효화된다.
-- **TRD §2.5 는 그 자리에 남는다**(동결 스냅샷). 승격은 「줄번호를 떼고 다시 그리는 것」이고 파일 이동이 아니다.
-- **셋째 백엔드는 파일 하나가 늘 뿐이다** — `gemini-backend.md`. 폴더 구조를 다시 정하지 않는다.
-- **게이트는 없다** — 이 결정을 지키는 것은 사람과 리뷰뿐이다(줄번호 금지를 기계로 재는 검사를 두지 않았다). 자동화가 필요해지면 그때 별건으로 정한다.
+- **A new document is registered in the `docs/README.md` discovery chain** (no orphans — ADR-0034). But since that file forbids a hand-copied list, it **does not enumerate the files in the folder** and points at `ls docs/reference/structure/`.
+- **The flow is left in `docs/process/step-log.md`** (*when·what* — CLAUDE.md 「기록 분리」). With the ADR entry alone, there is nowhere that says when this folder came to be.
+- **We put a pointer going down from the bird's-eye view to this folder** — the round trip of 「전체 그림 → 조감도, 주제별 상세 → `reference/structure/`」 (“whole picture → bird's-eye view, per-topic detail → reference/structure/”) has to hold for the SSoT (link, don't copy) to take effect. ★If it is left one-way, a session that reads only the bird's-eye view does not know the detail exists.★
+- ★**Using line numbers in this folder's anchors is a violation.**★ If violated, cited figures quietly go stale, and the next session opens a line that is not there and meets code without grounds.
+- **The bird's-eye view is kept as a bird's-eye view** — returning per-topic detail to `architecture-overview.md` invalidates this decision.
+- **TRD §2.5 stays where it is** (a frozen snapshot). Promotion is 「줄번호를 떼고 다시 그리는 것」 (“removing the line numbers and redrawing”), not moving the file.
+- **A third backend is only one more file** — `gemini-backend.md`. We do not decide the folder structure again.
+- **There is no gate** — what keeps this decision is only people and review (we did not put in a check that measures the no-line-numbers rule by machine). If automation becomes necessary, we decide it then as a separate matter.

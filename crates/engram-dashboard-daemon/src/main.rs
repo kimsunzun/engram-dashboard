@@ -1,11 +1,11 @@
-//! engram-dashboard-daemon — 데몬 진입점(thin).
+//! engram-dashboard-daemon — daemon entry point (thin).
 
-// ★콘솔 가시성 — 빌드모드 의존(왜 cfg_attr 인가)★:
-//   릴리즈만 windows 서브시스템(콘솔 창 없음). 디버그는 속성을 안 붙여 **콘솔 앱**으로 둔다 →
-//   discovery 가 WMI 로 데몬을 띄울 때 콘솔 창이 함께 떠 데몬 로그(RUST_LOG)를 그 창에서 본다(개발 편의).
-//   discovery WMI(Win32_Process.Create)는 CREATE_NO_WINDOW 를 RV=21 로 거부해(ADR-0021 실측) **콘솔 앱을
-//   windowless 로 못 만든다**. 그래서 릴리즈의 "창 없음"은 이 서브시스템 속성으로만 달성된다(WMI 플래그 X).
-//   사용자 결정(2026-06-19): 디버그=창 있이(로그), 릴리즈=창 없이.
+// ★Console visibility — depends on build mode (why cfg_attr)★:
+//   Only release uses the windows subsystem (no console window). Debug attaches no attribute and stays a **console app** →
+//   when discovery launches the daemon via WMI a console window comes up with it so daemon logs (RUST_LOG) can be seen in that window (dev convenience).
+//   discovery WMI (Win32_Process.Create) rejects CREATE_NO_WINDOW with RV=21 (measured in ADR-0021) so it **cannot make a console app
+//   windowless**. So release's "no window" is achieved only by this subsystem attribute (not a WMI flag).
+//   User decision (2026-06-19): debug = with window (logs), release = without window.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 #[tokio::main]

@@ -1,34 +1,34 @@
-# 상세 칸 섹션 순서 관행 — 내용 · 위치 · 참조 (2026-10-18)
+# Section-order practice in a detail pane — content · location · references (2026-10-18)
 
-| 항목 | 값 |
+| Item | Value |
 |---|---|
-| **상태** | 조사 완료 · **결정됨 2026-10-19** — 오른쪽 칸 · 상세 카드 모두 제목 → 위치(제목 밑 짧은 한 줄) → 내용(미리 보기 · 설명 · 이유 …) → 참조(맨 아래)(사용자 「변수가 작은 짧은 줄이 위에 오는 게 좋다」 — PRD R15) |
-| **방법** | `/research` light — 수집자 1(웹 검색 6회 · 스니펫 위주) + 메인 grounding(Finder · Obsidian 원문 확인) |
-| **질문** | 항목을 고르면 나오는 상세 칸에서 ① 경로를 제목 밑에 붙이나 메타 묶음에 넣나 ② 길이가 들쭉날쭉한 목록(참조 · 백링크)을 맨 아래 두는 규칙이 있나 ③ 디자인 지침에 순서 규칙이 있나 |
+| **Status** | Survey done · **decided 2026-10-19** — in both the right pane and the detail card: title → location (a short single line under the title) → content (preview · description · reason …) → references (at the very bottom) (user 「변수가 작은 짧은 줄이 위에 오는 게 좋다」 — PRD R15) |
+| **Method** | `/research` light — 1 collector (6 web searches · mostly snippets) + main grounding (original text of Finder · Obsidian confirmed) |
+| **Question** | In the detail pane that appears when an item is selected: ① is the path attached under the title or put in a metadata group ② is there a rule of putting lists of uneven length (references · backlinks) at the very bottom ③ do design guidelines have an ordering rule |
 
-## 결론
+## Conclusion
 
-- **정해진 규칙은 없다**(가능성 높음 — Apple HIG · Fluent · Material · NN/g 에서 상세 칸 순서 규칙을 찾지 못함. 못 찾은 것이지 없다는 증명은 아니다).
-- **약한 패턴 둘:**
-  1. **경로는 메타데이터 묶음 안, 위쪽** — Finder 「정보 가져오기」 는 머리(이름 · 아이콘 · 크기 · 수정일) 바로 다음 「일반」 묶음 안에 「위치(Where)」 를 두고, 미리 보기는 한참 아래(「다음으로 열기」 뒤)다(확실 — 원문 확인). Google Drive 상세 칸도 「위치」 를 상세 탭의 필드로 둔다(불확실 — 제3자 블로그).
-  2. **참조 목록은 맨 아래** — Obsidian 은 백링크(링크된 언급 · 링크 안 된 언급)를 노트 하단에 둘 수 있다. 단 기본값은 오른쪽 사이드바 탭이다(확실 — 공식 도움말).
-- 언리얼은 참조를 상세 칸 섹션이 아니라 따로 된 창(Reference Viewer)으로 본다(가능성 높음) — 순서 근거로 쓰지 않는다.
-- NN/g 점진적 공개(중요한 것을 먼저 보이고 나머지는 요청 시)는 일반 원칙이라 「내용 먼저」 를 약하게 받칠 뿐 경로 · 참조 자리를 말하지 않는다(스니펫 — 원문 미확인).
+- **There is no established rule** (likely — no rule on detail-pane order was found in Apple HIG · Fluent · Material · NN/g. This means it was not found, not a proof that none exists).
+- **Two weak patterns:**
+  1. **The path goes inside the metadata group, near the top** — Finder's 「정보 가져오기」 (Get Info) puts 「위치(Where)」 inside the 「일반」 (General) group right after the header (name · icon · size · modified date), and the preview is far below (after 「다음으로 열기」) (certain — original text confirmed). The Google Drive detail pane also puts 「위치」 as a field of the details tab (uncertain — third-party blog).
+  2. **The reference list goes at the very bottom** — Obsidian can place backlinks (linked mentions · unlinked mentions) at the bottom of the note. However the default is a right sidebar tab (certain — official help).
+- Unreal views references not as a detail-pane section but in a separate window (Reference Viewer) (likely) — not used as grounds for the order.
+- NN/g progressive disclosure (show what matters first and the rest on request) is a general principle, so it only weakly supports 「내용 먼저」 and says nothing about the place of the path or references (snippet — original text unchecked).
 
-## 피어
+## Peers
 
-| 피어 | 블록 순서 | 경로 자리 | 출처 | 확신도 |
+| Peer | Block order | Path position | Source | Confidence |
 |---|---|---|---|---|
-| macOS Finder 정보 가져오기 | 머리 → 일반 → 추가 정보 → 이름 및 확장자 → 설명 → 다음으로 열기 → 미리 보기 → 공유 및 권한 | 「일반」 안 「위치」 — 전체 경로 | https://eclecticlight.co/2026/06/09/reading-the-finders-get-info-dialog/ | 확실(메인이 원문 확인) |
-| Obsidian 백링크 | 노트 본문 → 링크된 언급 → 링크 안 된 언급(하단 표시 선택 시) · 기본 = 오른쪽 사이드바 | 해당 없음 | https://obsidian.md/help/plugins/backlinks | 확실(메인이 원문 확인) |
-| Google Drive 상세 칸 | 상세 · 활동 탭 — 상세 탭에 「위치」 필드(폴더 링크) · 미리 보기와의 순서 미확인 | 상세 탭의 필드 | https://alicekeeler.com/2016/08/30/google-docs-find-document-details/ | 불확실 |
-| Unreal 콘텐츠 브라우저 | 참조 = 따로 된 Reference Viewer 창 | 미확인 | https://dev.epicgames.com/documentation/en-us/unreal-engine/reference-viewer-in-unreal-engine | 불확실 |
-| Windows 탐색기 세부 정보 칸 · Unity · Adobe Bridge · Figma · Notion · VS Code/JetBrains · OneDrive · Dropbox | 찾지 못함 | — | — | 모름 |
+| macOS Finder Get Info | header → 일반 (General) → 추가 정보 (More Info) → 이름 및 확장자 (Name & Extension) → 설명 (Comments) → 다음으로 열기 (Open with) → 미리 보기 (Preview) → 공유 및 권한 (Sharing & Permissions) | 「위치」 (Where) inside 「일반」 — the full path | https://eclecticlight.co/2026/06/09/reading-the-finders-get-info-dialog/ | Certain (main confirmed the original text) |
+| Obsidian backlinks | note body → linked mentions → unlinked mentions (when bottom display is selected) · default = right sidebar | Not applicable | https://obsidian.md/help/plugins/backlinks | Certain (main confirmed the original text) |
+| Google Drive detail pane | Details · Activity tabs — a 「위치」 field in the details tab (folder link) · order relative to the preview unconfirmed | A field of the details tab | https://alicekeeler.com/2016/08/30/google-docs-find-document-details/ | Uncertain |
+| Unreal Content Browser | References = a separate Reference Viewer window | Unconfirmed | https://dev.epicgames.com/documentation/en-us/unreal-engine/reference-viewer-in-unreal-engine | Uncertain |
+| Windows Explorer details pane · Unity · Adobe Bridge · Figma · Notion · VS Code/JetBrains · OneDrive · Dropbox | Not found | — | — | Unknown |
 
-## 우리에게
+## For us
 
-지금 브리핑 그림 = 내용(미리 보기 · 설명 · 이유) → 위치 → 참조. 두 약한 패턴을 따르면 **제목 → 위치 → 내용 → 참조**(경로를 머리 쪽 메타로 올리고 참조는 맨 아래 그대로)가 된다. 규칙이 아니라 선례 둘이라 사용자 결정.
+The current briefing layout = content (preview · description · reason) → location → references. Following the two weak patterns gives **title → location → content → references** (the path is raised to metadata near the header and references stay at the very bottom). It is two precedents, not a rule, so it is a user decision.
 
-## 한계 · 공백
+## Limits · gaps
 
-- light — 적대 리뷰 없음 · 대부분 검색 스니펫. Windows 세부 정보 칸 · Figma · Fluent · Material 원문은 보지 않았다.
+- light — no adversarial review · mostly search snippets. The original texts of the Windows details pane · Figma · Fluent · Material were not looked at.

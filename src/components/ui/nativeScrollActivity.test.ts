@@ -1,16 +1,16 @@
-// nativeScrollActivity — "스크롤 중에만 스크롤바" 규칙의 상태 절반(표식) 검증.
+// nativeScrollActivity — verification of the state half (marker) of the "scrollbar only while scrolling" rule.
 //
-// ★여기서 재는 것★: 표식이 **무엇에 반응해 붙고 언제 떨어지나**. 그게 사용자가 지적한 차이(터미널은
-//   화면 hover 만으로 스크롤바가 보였다)의 본체이고, 지연이 seam(ScrollArea)과 같은 상수인지도 함께 잰다.
-// ★여기서 못 재는 것★: thumb 이 실제로 칠해지는지(jsdom 은 ::-webkit-scrollbar 캐스케이드를 계산하지
-//   않는다) — CSS 쪽은 index.css.test.ts 의 소스 게이트 + cdp 실측이 맡는다.
+// ★What is measured here★: **what the marker attaches in response to and when it comes off**. That is the core of the difference the user pointed out (the terminal
+//   showed the scrollbar on screen hover alone), and we also measure that the delay is the same constant as the seam (ScrollArea).
+// ★What cannot be measured here★: whether the thumb is actually painted (jsdom does not compute the ::-webkit-scrollbar cascade)
+//   — the CSS side is covered by the source gate in index.css.test.ts + cdp measurement.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { installNativeScrollActivity, SCROLL_ACTIVE_ATTR } from './nativeScrollActivity'
 import { SCROLL_HIDE_DELAY_MS } from './scroll-area'
 
-/** xterm 이 만드는 구조(.xterm > .xterm-viewport)를 최소로 재현한다. */
+/** Reproduce at minimum the structure xterm makes (.xterm > .xterm-viewport). */
 function mountViewport(): HTMLDivElement {
   const term = document.createElement('div')
   term.className = 'xterm'
@@ -86,7 +86,7 @@ describe('installNativeScrollActivity (ADR-0053: seam 밖 네이티브 스크롤
 
     dispose?.()
     dispose = null
-    // 해제 시점에 붙어 있던 표식이 남으면 스크롤바가 상시 표시로 굳는다.
+    // If a marker attached at teardown time remains, the scrollbar hardens into always shown.
     expect(vp.hasAttribute(SCROLL_ACTIVE_ATTR)).toBe(false)
 
     vp.dispatchEvent(new Event('scroll'))

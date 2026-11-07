@@ -1,57 +1,57 @@
 #!/usr/bin/env pwsh
-# scripts/build-release.ps1 — ADR-0100 릴리즈 패키징(portable-folder-only).
+# scripts/build-release.ps1 — ADR-0100 release packaging (portable-folder-only).
 #
-# ★ADR-0100 불변식 (이 스크립트가 소유한다) — co-location★
-#   릴리즈는 인스톨러/사이드카가 아니라 "한 폴더에 필요한 것만" 형태로 배포한다. 세 exe 와 prompts/ 가
-#   **반드시 같은 디렉토리(release/)에 동거**해야 런타임이 서로를 찾는다:
-#     - 실행되는 앱(engram-dashboard.exe)은 형제 engram-dashboard-daemon.exe 를 spawn 한다.
-#     - 데몬은 형제 engram.exe(제어 평면 CLI)를 locate_send_exe(current_exe().parent())로 찾는다(ADR-0086 F1).
-#       ★그 파일명의 정본은 agent 의 CLI_EXE_NAME★ — 아래 manifest 는 그 값을 손으로 복사한 것이다.
-#       어긋남은 보통 요란하게 깨진다: [[bin]] 개명이면 아래 빌드 단계의 --bin 인자가 실패하고, 상수만
-#       어긋나면 CI 의 배송-파일명 가드 테스트(crates/engram-dashboard-cli/tests/engram_cli.rs)가 빨개진다.
-#       ★단 하나 조용한 구멍이 있다 — cargo 산출 디렉토리의 stale 파일★: 이 스크립트는 target/release 를
-#       청소하지 않으므로, 옛 이름의 exe 가 남아 있는 상태에서 아래 manifest 만 그 옛 이름으로 고치면
-#       존재 검사도 tripwire 도 통과하고 **그 stale 바이너리가 그대로 패키징된다**(빌드가 그 파일을
-#       갱신하지 않았는데도). manifest 를 고칠 땐 산출 디렉토리를 함께 확인할 것.
-#     - 데몬은 프라이밍 prompts/agent-priming.md 를 find_install_root 기준으로 상대해석한다(ADR-0092).
-#       그 규칙은 빌드 모드와 무관하게 exe 의 조상에서 .git·[workspace] 마커를 찾는다 — 체크아웃 밖에
-#       조립한 릴리즈 폴더면 마커가 없어 install_root = exe 디렉토리이고, launch\빌드.bat 의 launch\release
-#       처럼 체크아웃 안이면 그 체크아웃 루트라 배포 폴더가 아니라 저장소의 prompts/ 를 읽는다.
-#     - 데몬은 `engram help` 화면 본문 prompts/engram-help.md 를 **같은 앵커**로 요청마다 읽어 /control/help
-#       로 낸다(ADR-0092 계열 외부화 · ADR-0285 — engram.exe 는 화면을 데몬에 청할 뿐 이 파일을 읽지 않는다).
-#       ★사본은 없다★ — 이 파일이 빠진 배포판은 모든 help 호출이 반려(INTERNAL)로 답한다. 아래 tripwire 는
-#       그 실패가 배포 뒤 에이전트 앞이 아니라 배포 전에 나게 하는 장치다.
-#   따라서 manifest(이 스크립트의 EXPECTED_*)가 곧 "무엇을 배송하는가"의 단일 출처다. manifest 를 바꾸면
-#   위 동거 불변식이 깨지지 않는지 반드시 재검토한다. tauri.conf.json 은 건드리지 않는다(정식 번들은 유예).
+# ★ADR-0100 invariant (this script owns it) — co-location★
+#   A release ships not as an installer/sidecar but as "only what is needed in one folder". The three exes and prompts/
+#   **must live together in the same directory (release/)** so that they can find each other at runtime:
+#     - The running app (engram-dashboard.exe) spawns the sibling engram-dashboard-daemon.exe.
+#     - The daemon finds the sibling engram.exe (control-plane CLI) with locate_send_exe(current_exe().parent()) (ADR-0086 F1).
+#       ★The source of truth for that file name is the agent's CLI_EXE_NAME★ — the manifest below is a hand copy of that value.
+#       A mismatch usually breaks loudly: if the [[bin]] is renamed, the --bin argument of the build step below fails, and if only the constant
+#       drifts, CI's shipped-file-name guard test (crates/engram-dashboard-cli/tests/engram_cli.rs) goes red.
+#       ★But there is one quiet hole — stale files in the cargo output directory★: this script does not
+#       clean target/release, so if an exe with the old name is left over and you fix only the manifest below to that old name,
+#       both the existence check and the tripwire pass and **that stale binary gets packaged as is** (even though the build did not
+#       update that file). When you fix the manifest, check the output directory too.
+#     - The daemon resolves the priming file prompts/agent-priming.md relative to find_install_root (ADR-0092).
+#       That rule looks for .git·[workspace] markers among the exe's ancestors regardless of build mode — for a release folder assembled
+#       outside the checkout there is no marker, so install_root = the exe directory, and for one inside a checkout like launch\release of launch\빌드.bat,
+#       it is that checkout's root, so it reads the repository's prompts/ rather than the distribution folder's.
+#     - The daemon reads prompts/engram-help.md, the body of the `engram help` screen, with the **same anchor** on every request and serves it as /control/help
+#       (ADR-0092-family externalization · ADR-0285 — engram.exe only asks the daemon for the screen and does not read this file).
+#       ★There is no copy★ — in a distribution missing this file, every help call is answered with a bounce (INTERNAL). The tripwire below is the
+#       device that makes that failure happen before shipping, not in front of an agent after.
+#   So the manifest (EXPECTED_* in this script) is the single source of "what do we ship". When you change the manifest,
+#   always re-check that the co-location invariant above is not broken. tauri.conf.json is left untouched (formal bundling is deferred).
 #
-# 사용: 프로젝트 루트 어디서든 `pwsh scripts/build-release.ps1`. cwd 무관(경로는 스크립트 위치 기준).
-#   -OutDir 로 조립 위치를 지정하면 repo 밖으로도 산출 가능(테스트 편의 — local\ 런처가 사용).
+# Usage: `pwsh scripts/build-release.ps1` from anywhere in the project root. cwd does not matter (paths are relative to the script location).
+#   If -OutDir sets the assembly location, output can go outside the repo too (for test convenience — used by the local\ launcher).
 
-# param() 은 스크립트의 첫 실행문이어야 한다(주석·빈 줄은 앞서도 됨) — 이 아래에 어떤 문도 오면 파싱 실패.
+# param() must be the first executable statement of the script (comments and blank lines may precede it) — any statement placed above it fails parsing.
 param([string]$OutDir = '')
 
 $ErrorActionPreference = 'Stop'
 
-# ── 경로 앵커 (cwd 불신 — 스크립트 자기 위치 기준으로 프로젝트 루트를 잡는다) ─────────────
+# ── Path anchor (do not trust cwd — find the project root relative to the script's own location) ─────────────
 $ScriptDir   = $PSScriptRoot                              # <root>/scripts
 $ProjectRoot = Split-Path -Parent $ScriptDir             # <root>
-# 조립 산출물(clean 재생성). -OutDir 로 조립 위치를 repo 밖으로도 돌릴 수 있게 파라미터화한다.
-#   미지정 시 기존 repo 루트 release/ 하위호환(bare 호출은 종전과 동일 동작).
-#   GetFullPath 2-arg 오버로드로 상대경로는 caller cwd 기준 절대화한다 — Resolve-Path 는 아직 없는 경로에서
-#   throw 하지만 release 디렉토리는 이 시점에 없을 수 있으므로 쓰지 않는다.
+# Assembly output (clean regeneration). Parameterized with -OutDir so assembly can also run outside the repo.
+#   When unspecified, falls back to the old repo-root release/ (a bare call behaves as before).
+#   The GetFullPath 2-arg overload makes a relative path absolute against the caller cwd — Resolve-Path throws on a path that does not exist yet,
+#   and the release directory may not exist at this point, so it is not used.
 if (-not [string]::IsNullOrWhiteSpace($OutDir)) {
     $ReleaseDir = [System.IO.Path]::GetFullPath($OutDir, (Get-Location).Path)
 } else {
     $ReleaseDir = Join-Path $ProjectRoot 'release'
 }
 $PromptsSrc  = Join-Path $ProjectRoot 'prompts'
-# $TargetRel(cargo 산출 release 디렉토리)은 하드코딩하지 않는다 — 아래에서 cargo metadata 로 실측 확정(FIX-2).
+# $TargetRel (the cargo output release directory) is not hardcoded — it is fixed below by measuring with cargo metadata (FIX-2).
 
-# ── manifest: 릴리즈 폴더에 들어가는 정확한 집합(단일 출처). exe = target/release 에서, prompt = prompts/ 에서, doc = (0) 단계 산출에서. ──
+# ── manifest: the exact set that goes into the release folder (single source). exe = from target/release, prompt = from prompts/, doc = from the step (0) output. ──
 $ExpectedExes    = @('engram-dashboard.exe', 'engram-dashboard-daemon.exe', 'engram.exe')
 $ExpectedPrompts = @('agent-priming.md', 'engram-help.md')
-# ADR-0294 · ADR-0100: 서드파티 라이선스 고지 — 런타임은 읽지 않으므로 위 동거 불변식과 무관하고, exe 옆 최상위에 함께
-#   싣기만 한다(manifest tripwire 는 다른 항목과 같이 본다). 저장소에 두지 않는다 — 아래 (0) 단계가 빌드마다 새로 만든다.
+# ADR-0294 · ADR-0100: third-party license notices — the runtime does not read them, so they are unrelated to the co-location invariant above, and are only
+#   shipped at the top level next to the exes (the manifest tripwire sees them together with the other items). Not kept in the repository — step (0) below regenerates them on every build.
 $NoticeName      = 'THIRD_PARTY_LICENSES.txt'
 $ExpectedDocs    = @($NoticeName)
 
@@ -60,10 +60,10 @@ function Fail([string]$msg) {
     exit 1
 }
 
-# 빌드 단계마다 종료코드를 직접 확인한다($LASTEXITCODE — 네이티브 exe 는 $ErrorActionPreference 로 안 잡힘).
-# FIX-4: $LASTEXITCODE 를 블록 진입 전에 0 으로 리셋한다. 이 게이트는 "블록이 네이티브 exe 로 끝난다"는
-#   암묵 불변식에 의존한다 — 만약 미래에 어떤 step-block 이 PowerShell cmdlet 으로 끝나면 이전 네이티브
-#   exit code 가 그대로 남아 오탐/누락이 생긴다. 리셋으로 stale exit code 계승을 원천봉쇄한다.
+# Check the exit code directly at every build step ($LASTEXITCODE — native exes are not caught by $ErrorActionPreference).
+# FIX-4: reset $LASTEXITCODE to 0 before entering the block. This gate depends on the implicit invariant that "the block ends with a native exe" —
+#   if some step-block ever ends with a PowerShell cmdlet, the previous native
+#   exit code stays and causes false positives/misses. The reset shuts out inheriting a stale exit code at the source.
 function Invoke-Step([string]$label, [scriptblock]$block) {
     Write-Host "[build-release] $label ..." -ForegroundColor Cyan
     $global:LASTEXITCODE = 0
@@ -74,18 +74,18 @@ function Invoke-Step([string]$label, [scriptblock]$block) {
 Write-Host "[build-release] ADR-0100 portable release 조립 시작 — root=$ProjectRoot" -ForegroundColor Green
 Write-Host "[build-release] 조립 위치(release dir) = $ReleaseDir" -ForegroundColor Green
 
-# 안전 가드: $ReleaseDir 는 아래 (b) 단계에서 Remove-Item -Recurse -Force 로 통째 지운다 — -OutDir 가 이제
-#   caller 제공 경로라 드라이브 루트나 프로젝트 루트로 실수하면 그 폴더가 통째로 날아간다. 파국적 값(드라이브
-#   루트·ProjectRoot)만 거부하고 정상 하위폴더는 그대로 통과시킨다(신뢰된 로컬 사용에 마찰 없음).
+# Safety guard: $ReleaseDir is deleted wholesale with Remove-Item -Recurse -Force in step (b) below — -OutDir is now a
+#   caller-supplied path, so a mistake with a drive root or the project root would blow that folder away. Only catastrophic values (drive
+#   root · ProjectRoot) are rejected and normal subfolders pass through untouched (no friction for trusted local use).
 if ($ReleaseDir -eq [System.IO.Path]::GetPathRoot($ReleaseDir) -or $ReleaseDir -eq $ProjectRoot) {
     Fail "위험한 -OutDir: '$ReleaseDir' — 드라이브 루트/프로젝트 루트는 clean 재생성(재귀 삭제) 대상이 될 수 없다"
 }
 
-# ── cargo 산출 디렉토리 실측 (FIX-2: 가정 금지) ──────────────────────────────────────────────
-#   `target/release` 는 기본값일 뿐 — CARGO_TARGET_DIR / .cargo/config.toml build.target-dir 이
-#   출력을 딴 데로 돌릴 수 있다. 하드코딩하면 그런 환경에서 "가정 경로의 낡은 exe"가 존재 검사를 통과해
-#   최신 빌드는 다른 곳에 떨어진 채 stale 바이너리가 조용히 배송된다. cargo metadata 는 이 리디렉션을
-#   존중하므로 target_directory 를 실측해 확정한다.
+# ── Measure the cargo output directory (FIX-2: no assuming) ──────────────────────────────────────────────
+#   `target/release` is only the default — CARGO_TARGET_DIR / .cargo/config.toml build.target-dir can
+#   redirect the output elsewhere. If hardcoded, in such an environment a "stale exe at the assumed path" passes the existence check,
+#   the latest build lands elsewhere, and the stale binary is shipped quietly. cargo metadata respects this redirection,
+#   so target_directory is measured and fixed.
 $metaJson = & cargo metadata --format-version 1 --no-deps --manifest-path (Join-Path $ProjectRoot 'Cargo.toml')
 if ($LASTEXITCODE -ne 0) { Fail "cargo metadata 실패 (exit $LASTEXITCODE)" }
 try {
@@ -96,9 +96,9 @@ try {
 $TargetDir = $meta.target_directory
 if ([string]::IsNullOrWhiteSpace($TargetDir)) { Fail 'cargo metadata 에 target_directory 가 없다' }
 
-# CARGO_BUILD_TARGET(비-호스트 triple) 이 걸려 있으면 release 디렉토리가 target/<triple>/release 로 바뀐다.
-#   metadata 의 target_directory 는 이 하위 triple 세그먼트를 포함하지 않으므로 조용히 stale 을 배송하지
-#   않도록 명시적으로 끼워 넣는다. (--target 플래그로 넘기는 경로는 이 스크립트가 쓰지 않으므로 env 만 본다.)
+# If CARGO_BUILD_TARGET (a non-host triple) is set, the release directory becomes target/<triple>/release.
+#   The target_directory in metadata does not include this triple segment, so it is inserted explicitly so that a stale binary
+#   is not quietly shipped. (This script does not pass a --target flag, so it looks only at the env.)
 $BuildTargetTriple = $env:CARGO_BUILD_TARGET
 if (-not [string]::IsNullOrWhiteSpace($BuildTargetTriple)) {
     Write-Host "[build-release] CARGO_BUILD_TARGET=$BuildTargetTriple 감지 — release 경로에 triple 세그먼트 반영" -ForegroundColor Yellow
@@ -108,11 +108,11 @@ if (-not [string]::IsNullOrWhiteSpace($BuildTargetTriple)) {
 }
 Write-Host "[build-release] cargo target release dir = $TargetRel" -ForegroundColor Gray
 
-# ── (0) 서드파티 고지 생성 — 긴 빌드보다 먼저 (ADR-0294) ────────────────────────────────────
-#   허용 밖 라이선스 · 본문 없는 패키지 같은 실패가 수십 분 빌드 뒤가 아니라 여기서 멈춘다. 전제(cargo-about ·
-#   `npm ci` 를 마친 node_modules)와 실패 조건의 정본은 생성기 헤더다. CI 는 같은 생성기를 push 마다 gates 잡에서도 돌린다.
-#   산출은 cargo 산출 디렉토리 아래(저장소 밖 · 빌드마다 새로). ★지난 판을 먼저 지운다★ — 생성이 그 파일을 고치지
-#   못한 채 끝나도 낡은 고지가 존재 검사를 통과해 배송되지 않게(아래 exe 의 stale 구멍과 같은 부류).
+# ── (0) Generate third-party notices — before the long build (ADR-0294) ────────────────────────────────────
+#   Failures such as a license outside the allowed set or a package with no license text stop here, not after a build of tens of minutes. The prerequisites (cargo-about and
+#   node_modules after `npm ci`) and the failure conditions are defined in the generator's header. CI runs the same generator on every push in the gates job too.
+#   The output goes under the cargo output directory (outside the repository · fresh on every build). ★Delete the previous edition first★ — so that even if generation ends
+#   without having updated that file, a stale notice does not pass the existence check and ship (the same kind as the stale hole for exes below).
 $DocsSrc    = Join-Path $TargetDir 'third-party-licenses'
 $NoticeFile = Join-Path $DocsSrc $NoticeName
 if (Test-Path -LiteralPath $NoticeFile) { Remove-Item -Force -LiteralPath $NoticeFile }
@@ -120,42 +120,42 @@ Invoke-Step 'generate third-party notice (gen-third-party-licenses.mjs)' {
     & node (Join-Path $ScriptDir 'gen-third-party-licenses.mjs') $NoticeFile
 }
 
-# ── (a) UI 앱: Tauri CLI production 빌드로 dist/ 를 embed (FIX-5, ADR-0100) ──────────────────
-#   ★프로덕션 컨텍스트 불변식★: 순수 `cargo build --release -p engram-dashboard`(구 Option A)는 Tauri 를
-#   프로덕션 컨텍스트로 넣지 못한다 — 그 exe 는 frontendDist 를 embed 하지 않고 devUrl(http://localhost:1420)을
-#   로드해, 릴리즈로 실행하면 dev 서버 부재로 "connection refused" 화면만 뜨고 데몬이 뜨지 않는다.
-#   프로덕션 컨텍스트·frontendDist embed·beforeBuildCommand 실행은 오직 Tauri CLI(`tauri build`)만 한다.
-#   그래서 Option B: `npm run tauri -- build --no-bundle`(= tauri build --no-bundle) 로 컴파일한다.
-#     - tauri build 가 tauri.conf.json 의 beforeBuildCommand(`npm run build`)를 스스로 실행해 dist/ 를
-#       먼저 굽고 그 뒤 frontendDist(../dist)를 exe 에 embed 한다 → 별도 npm run build 단계는 불필요(제거).
-#     - --no-bundle: exe 만 컴파일하고 MSI/NSIS 인스톨러 번들링은 건너뛴다(portable-folder 배포이므로).
-#   ★--all-targets 금지★(daemon 단계 참조)는 tauri build 엔 해당 없음 — CLI 가 UI 앱 crate 만 컴파일한다.
-# FIX-1: npm 은 cargo 처럼 --manifest-path 앵커가 없어 CALLER cwd 에서 돌면 엉뚱한 패키지를 빌드한다.
-#   Push/Pop-Location 으로 작업 디렉토리를 $ProjectRoot 에 고정해 tauri.conf.json 을 확실히 집게 한다.
+# ── (a) UI app: embed dist/ with a Tauri CLI production build (FIX-5, ADR-0100) ──────────────────
+#   ★Production context invariant★: plain `cargo build --release -p engram-dashboard` (the old Option A) cannot put Tauri into
+#   the production context — that exe does not embed frontendDist and loads devUrl (http://localhost:1420),
+#   so when run as a release it shows only a "connection refused" screen for lack of a dev server, and the daemon does not start.
+#   Only the Tauri CLI (`tauri build`) does the production context, the frontendDist embed and the beforeBuildCommand run.
+#   So Option B: compile with `npm run tauri -- build --no-bundle` (= tauri build --no-bundle).
+#     - tauri build itself runs the beforeBuildCommand (`npm run build`) from tauri.conf.json to bake dist/
+#       first and then embeds frontendDist (../dist) into the exe → a separate npm run build step is unnecessary (removed).
+#     - --no-bundle: compiles only the exe and skips MSI/NSIS installer bundling (because this is a portable-folder distribution).
+#   ★--all-targets forbidden★ (see the daemon step) does not apply to tauri build — the CLI compiles only the UI app crate.
+# FIX-1: unlike cargo, npm has no --manifest-path anchor, so run from the CALLER cwd it builds the wrong package.
+#   Push/Pop-Location pins the working directory to $ProjectRoot so that tauri.conf.json is picked up for certain.
 Invoke-Step 'tauri build UI app (npm run tauri -- build --no-bundle)' {
     Push-Location $ProjectRoot
     try { & npm run tauri -- build --no-bundle } finally { Pop-Location }
 }
-# tauri build 가 beforeBuildCommand 로 프론트를 굽고 embed 했는지 sanity 확인 — dist/index.html 부재면
-#   frontendDist embed 가 일어나지 않았다는 신호(빈 프론트 exe 배송 위험).
+# Sanity check that tauri build baked and embedded the frontend via beforeBuildCommand — if dist/index.html is absent it is a sign that
+#   the frontendDist embed did not happen (risk of shipping an exe with an empty frontend).
 if (-not (Test-Path (Join-Path $ProjectRoot 'dist\index.html'))) {
     Fail 'dist/index.html 부재 — tauri build 의 beforeBuildCommand(프론트 빌드)가 산출물을 안 만들었다(embed 실패 위험)'
 }
 
-# ── (a) 릴리즈 바이너리: 데몬 + CLI ─────────────────────────────────────────────────────────
-#   데몬과 CLI 는 UI 앱과 별개인 **패키지 둘**(engram-dashboard-daemon · engram-dashboard-cli — ADR-0273)
-#    — tauri build 는 이들을 빌드하지 않으므로 별도 컴파일한다.
-#   **명시 --bin** 으로만 빌드(측정 전용 bin(saturation-pilot/priming-smoke/roundtrip-smoke)은
-#    required-features=test-harness 로 이미 릴리즈 그래프에서 제외되지만, 명시 --bin 으로 유입 가능성 봉쇄).
-#   ★--all-targets 금지★: daemon crate 의 self-dev-dependency(test-harness · test-support) 유니피케이션으로
-#    yield-seam hook 이 운영 바이너리에 박힐 수 있고, 그 호출의 데몬 lib 은 in-process 테스트 서버까지 품고
-#    지어진다(Cargo.toml 경고 · ADR-0286). 아래 명령은 --all-targets 를 쓰지 않는다.
-#   ★두 호출을 한 Invoke-Step 블록에 넣지 말 것★: Invoke-Step 은 블록이 끝난 뒤 $LASTEXITCODE 를 한 번만
-#    본다 — 앞 호출의 실패를 뒤 호출의 성공이 덮고, 아래 존재 검사는 이전 빌드가 남긴 낡은 exe 를 받아들인다.
-#    한 cargo 호출(-p 둘)로 합치지도 않는다 — 배송하는 engram.exe 는 CLI 패키지 자기 그래프(`-p engram-dashboard-cli`
-#    단독 시험이 재는 그것)로 지어야 하는데, 한 호출이면 기능이 합쳐져 데몬의 기능 집합으로 지어진다. 두 빌드는
-#    해시 없는 같은 산출 파일(target\release\engram.exe)을 쓴다 — 그래서 이 스크립트가 묶는 target\release 를 쓰는
-#    rebuild-run-release.bat 도 같은 꼴로 가르고, 묶이지 않는 target\debug 만 쓰는 rebuild-run-debug.bat 은 한 호출이다.
+# ── (a) Release binaries: daemon + CLI ─────────────────────────────────────────────────────────
+#   The daemon and the CLI are **two packages** separate from the UI app (engram-dashboard-daemon · engram-dashboard-cli — ADR-0273)
+#    — tauri build does not build them, so they are compiled separately.
+#   Build only with an **explicit --bin** (the measurement-only bins (saturation-pilot/priming-smoke/roundtrip-smoke)
+#    are already excluded from the release graph by required-features=test-harness, but an explicit --bin shuts out any chance of them flowing in).
+#   ★--all-targets forbidden★: through the unification of the daemon crate's self-dev-dependency (test-harness · test-support), the
+#    yield-seam hook can get baked into the operational binary, and the daemon lib of that call is built holding even the in-process test server
+#    (Cargo.toml warning · ADR-0286). The commands below do not use --all-targets.
+#   ★Do not put the two calls in one Invoke-Step block★: Invoke-Step looks at $LASTEXITCODE only once after the block ends
+#    — the success of the later call covers up the failure of the earlier one, and the existence check below accepts a stale exe left by a previous build.
+#    Nor are they merged into one cargo call (two -p) — the shipped engram.exe must be built with the CLI package's own graph (the one
+#    that `-p engram-dashboard-cli` alone measures in tests), but with one call the features merge and it is built with the daemon's feature set. The two builds
+#    write the same hash-less output file (target\release\engram.exe) — so rebuild-run-release.bat, which uses the target\release this script packages from,
+#    is split the same way, and rebuild-run-debug.bat, which uses only target\debug (not packaged), is one call.
 Invoke-Step 'cargo build daemon (engram-dashboard-daemon)' {
     & cargo build --release --manifest-path (Join-Path $ProjectRoot 'Cargo.toml') `
         -p engram-dashboard-daemon --bin engram-dashboard-daemon
@@ -165,7 +165,7 @@ Invoke-Step 'cargo build cli (engram-dashboard-cli)' {
         -p engram-dashboard-cli --bin engram
 }
 
-# ── 산출 exe 위치 확정(가정 금지 — 실제 파일 존재 확인) ───────────────────────────────────
+# ── Confirm output exe locations (no assuming — check that the actual files exist) ───────────────────────────────────
 foreach ($exe in $ExpectedExes) {
     $p = Join-Path $TargetRel $exe
     if (-not (Test-Path $p)) { Fail "빌드 산출 exe 부재: $p (빌드가 이 바이너리를 안 만들었다)" }
@@ -179,30 +179,30 @@ foreach ($doc in $ExpectedDocs) {
     if (-not (Test-Path $p)) { Fail "고지 산출 부재: $p ((0) 단계가 이 파일을 안 만들었다)" }
 }
 
-# ── (b) release/ clean 재생성 ────────────────────────────────────────────────────────────
+# ── (b) release/ clean regeneration ────────────────────────────────────────────────────────────
 #
-# ★지우기 전에 막는다(load-bearing)★: Remove-Item -Recurse 는 **중간에 멈출 수 있다**. 앱이 그 폴더에서
-#   돌고 있으면 데몬이 data\daemon\run\daemon.json 을 붙잡고 있어(ADR-0135 — 삭제 공유 없음) 삭제가
-#   거부되는데, 실측상 그 전에 이미 명부가 지워졌다(명부가 data\agents.json 이던 배치에서 잰 것이다 —
-#   지금 자리 data\daemon\state\ 로는 다시 재지 않았다). 결과 = 에이전트 명부만 날아가고 빌드는 시작도
-#   못 한 채 raw PowerShell 오류. `launch\빌드.bat` 은 taskkill 을 하지 않고 `launch\실행.bat` 이 같은
-#   폴더에서 앱을 띄우므로 "돌려보고 다시 빌드"가 평범한 진입 경로다.
-#   ★데이터를 몰래 보존하는 것으로 고치지 말 것★: clean 재생성이 데이터를 함께 지우는 것은 ADR 이
-#   의도한 동작이다. 여기서 고치는 것은 **중간에 멈추는 것**뿐이라, 손대기 전에 거부한다.
+# ★Block before deleting (load-bearing)★: Remove-Item -Recurse **can stop midway**. If the app is
+#   running from that folder, the daemon holds data\daemon\run\daemon.json (ADR-0135 — no delete sharing), so the deletion is
+#   refused, but by measurement the registry had already been deleted before that (measured in the layout where the registry was data\agents.json —
+#   not re-measured at the current location data\daemon\state\). Result = only the agent registry is lost, and the build cannot even
+#   start, with a raw PowerShell error. `launch\빌드.bat` does not taskkill and `launch\실행.bat` launches the app from the same
+#   folder, so "run it, then build again" is an ordinary entry path.
+#   ★Do not fix this by quietly preserving data★: the clean regeneration deleting data with it is the behavior the ADR
+#   intended. What is fixed here is only **stopping midway**, so it is refused before anything is touched.
 if (Test-Path $ReleaseDir) {
     $locked = @()
     foreach ($f in @(Get-ChildItem -Force -Recurse -File -Path $ReleaseDir -ErrorAction SilentlyContinue)) {
         try {
-            # 쓰기 접근 + 공유 없음 = "이 파일을 지울 수 있나"에 가장 가까운 질문.
+            # Write access + no sharing = the closest question to "can this file be deleted".
             $h = [System.IO.File]::Open($f.FullName, 'Open', 'ReadWrite', 'None')
             $h.Close()
         } catch {
-            # ★공유 위반만 센다★: 읽기 전용 속성·권한 거부(UnauthorizedAccessException)는 여기 걸려도
-            #   Remove-Item -Force 가 지운다 — 그걸 "다른 프로세스가 쓰고 있다"고 보고하면 멀쩡한 빌드를
-            #   엉뚱한 이유로 막는다. 검사 도중 사라진 파일(FileNotFoundException)도 막을 이유가 없다.
-            # ★InnerException 을 풀어야 한다(실측)★: PowerShell 은 .NET **메서드**가 던진 예외를
-            #   MethodInvocationException 으로 감싸므로 `$_.Exception -is [IOException]` 은 공유 위반에도
-            #   거짓이다 — 풀지 않으면 이 가드가 아무것도 못 잡는다.
+            # ★Count only sharing violations★: read-only attributes and permission denials (UnauthorizedAccessException) caught here are
+            #   still deleted by Remove-Item -Force — reporting those as "another process is using it" blocks a perfectly good build
+            #   for the wrong reason. A file that vanished during the check (FileNotFoundException) is no reason to block either.
+            # ★InnerException must be unwrapped (measured)★: PowerShell wraps an exception thrown by a .NET **method** in
+            #   MethodInvocationException, so `$_.Exception -is [IOException]` is false even for a sharing violation —
+            #   without unwrapping, this guard catches nothing.
             $ex = $_.Exception
             while ($ex -and -not ($ex -is [System.IO.IOException]) -and $ex.InnerException) {
                 $ex = $ex.InnerException
@@ -223,16 +223,16 @@ New-Item -ItemType Directory -Path $ReleaseDir | Out-Null
 $ReleasePrompts = Join-Path $ReleaseDir 'prompts'
 New-Item -ItemType Directory -Path $ReleasePrompts | Out-Null
 
-# ── (c) manifest 그대로만 복사(그 외 아무것도) ───────────────────────────────────────────
+# ── (c) Copy only the manifest (nothing else) ───────────────────────────────────────────
 foreach ($exe in $ExpectedExes)    { Copy-Item (Join-Path $TargetRel $exe) $ReleaseDir }
 foreach ($md in $ExpectedPrompts)  { Copy-Item (Join-Path $PromptsSrc $md) $ReleasePrompts }
 foreach ($doc in $ExpectedDocs)    { Copy-Item (Join-Path $DocsSrc $doc) $ReleaseDir }
 
-# ── (d) manifest 검증(tripwire): release/ 가 정확히 기대 집합인지 — 부족/여분 모두 실패 ───────
+# ── (d) Verify the manifest (tripwire): whether release/ is exactly the expected set — both missing and extra fail ───────
 $errors = @()
 
-# 최상위: 정확히 $ExpectedExes + $ExpectedDocs 파일 + prompts/ 디렉토리 하나. 그 외 파일·디렉토리는 stray.
-# FIX-3: -Force 로 숨김/시스템 항목까지 열거해야 tripwire 의 엄격성이 실제로 성립한다(숨은 stray 회피 방지).
+# Top level: exactly the $ExpectedExes + $ExpectedDocs files + one prompts/ directory. Any other file or directory is a stray.
+# FIX-3: only enumerating hidden/system items too with -Force makes the tripwire's strictness actually hold (prevents evading it with a hidden stray).
 $topFiles = @(Get-ChildItem -Force -File      -Path $ReleaseDir | ForEach-Object Name)
 $topDirs  = @(Get-ChildItem -Force -Directory -Path $ReleaseDir | ForEach-Object Name)
 $ExpectedTopFiles = @($ExpectedExes + $ExpectedDocs)
@@ -248,8 +248,8 @@ foreach ($d in $topDirs) {
 }
 if ($topDirs -notcontains 'prompts') { $errors += '누락(top dir): prompts/' }
 
-# prompts/: 정확히 $ExpectedPrompts 의 .md 만, 하위 디렉토리 없음. ★개수를 여기 세지 않는다★ — 세던 숫자는
-#   manifest 가 늘 때마다 뒤처진다(실제로 뒤처졌다). 정본은 위 $ExpectedPrompts 배열 자체다.
+# prompts/: exactly the .md files of $ExpectedPrompts, no subdirectories. ★Do not count them here★ — a number that was counted
+#   falls behind every time the manifest grows (it actually did). The source of truth is the $ExpectedPrompts array above itself.
 if (Test-Path $ReleasePrompts) {
     $pFiles = @(Get-ChildItem -Force -File      -Path $ReleasePrompts | ForEach-Object Name)
     $pDirs  = @(Get-ChildItem -Force -Directory -Path $ReleasePrompts | ForEach-Object Name)
@@ -268,7 +268,7 @@ if ($errors.Count -gt 0) {
     exit 1
 }
 
-# ── 성공 요약 ────────────────────────────────────────────────────────────────────────────
+# ── Success summary ────────────────────────────────────────────────────────────────────────────
 Write-Host ''
 Write-Host "[build-release] OK — release/ manifest 일치 (ADR-0100 co-location 유지)" -ForegroundColor Green
 Write-Host "  위치: $ReleaseDir" -ForegroundColor Green

@@ -1,27 +1,25 @@
-//! 연결 태스크가 **프론트로 내는 알림**의 seam — 실물은 `AppHandle::emit`, 하네스는 기록형 가짜 또는 no-op.
+//! The seam for the connection driver's **notices to the frontend** — real = `AppHandle::emit`, harness = a recording
+//! fake or a no-op.
 //!
-//! ★이 파일의 존재 이유가 그 한 줄이다★(ADR-0012 · 형제 seam = [`super::inbound::ViewCommandPort`]):
-//! `connection.rs` 가 `AppHandle` 을 쥐던 유일한 사유는 emit 이었는데, 실물 `AppHandle`(= `AppHandle<Wry>`)
-//! 은 창 없이 못 세운다 — `tauri::test::mock_app()` 이 주는 것은 `MockRuntime` 이라 타입이 다르고,
-//! 클라이언트를 `R: Runtime` 로 일반화하면 `AppHandle` 을 이름으로 적는 커맨드 시그니처 전부로 번진다.
-//! 그래서 **emit 만** 포트로 끊는다. 그 대가로 연결 태스크는 소켓만 있으면 서고, 하네스가 실코드로
-//! 핸드셰이크·재연결·pending 왕복을 잰다.
-//! 형제 포트 = [`super::refusal`](명령 거절 OS 박스) · [`super::AgentNamesSink`](탭 이름 장부) — 둘 다 이 포트를
-//! 넓히지 않고 따로 끊었다(넓히기 금지 = 아래 [`DaemonEvents`] doc).
+//! ★That one line is why this file exists★ (ADR-0012 · sibling seam = [`super::inbound::ViewCommandPort`]): the only
+//! reason a connection driver held an `AppHandle` was emitting, and a real `AppHandle` (= `AppHandle<Wry>`) cannot be
+//! built without a window — `tauri::test::mock_app()` gives a `MockRuntime`, a different type, and making the client
+//! generic over `R: Runtime` spreads to every command signature that names `AppHandle`. So **only the emits** are cut
+//! into a port. In return the driver stands on a socket (or a memory link) alone, and the harness measures handshake,
+//! reconnect and round trips on the real code.
+//! Sibling ports = [`super::refusal`] (command refusal OS box) · [`super::AgentNamesSink`] (tab name book) — both cut
+//! separately rather than widening this port (no widening = the [`DaemonEvents`] doc below).
 //!
-//! ★포트가 재는 것과 안 재는 것★: 이 포트는 **연결 태스크가 프론트에 무엇을 알리나**를 끊을 뿐,
-//! 그 알림이 실제로 창에 닿는지는 재지 않는다 — 그건 실 `AppHandle` 몫이고, 그것을 하네스에 세우는
-//! 값이 바로 위 문단의 그 값이다(`R: Runtime` 일반화가 커맨드 시그니처 전부로 번진다). ★불가능이
-//! 아니라 **치르지 않기로 한 대가**다★.
-//! ★꽂는 자리는 `super::DaemonClient::new_with_events` 다★ — 기록형 가짜를 그리로 넣으면 **무엇이
-//! 어떤 순서로 발화되나**를 실 소켓 왕복 위에서 단언할 수 있다(`tests.rs` 의
-//! `recording_events_capture_connected_then_broadcasts` 가 그 하나다). 나머지 발화는 여전히 무검증이고,
-//! 늘리는 자리는 그 테스트 옆이다 — 주입점이 없던 시절처럼 "열 방법이 없다" 는 아니다.
+//! ★What the port measures and what it does not★: it cuts **what the driver tells the frontend**, not whether that
+//! notice reaches a window — that is the real `AppHandle`'s share, and standing it up in the harness costs exactly the
+//! price in the paragraph above. ★Not impossible — a price chosen not to pay★.
+//! ★Plug a recording fake in through the client's test constructor★ (`new_on_link`) to assert **what fires in which
+//! order** over a round trip on a memory network.
 //!
-//! ## 이름 규약
-//! Tauri 이벤트 **이름**(`"agent-list-updated"` 등)은 어댑터가 소유한다 — `crate::layout::LayoutEvents` /
-//! `crate::commands::layout::TauriEvents` 짝과 같은 가름이다. 호출부(`connection.rs`)는 **무슨 일이
-//! 일어났나**만 말하고, 그것이 어떤 이벤트 이름으로 나가는지는 모른다.
+//! ## Naming rule
+//! Tauri event **names** (`"agent-list-updated"` etc.) belong to the adapter — the same split as the
+//! `crate::layout::LayoutEvents` / `crate::commands::layout::TauriEvents` pair. The caller (the driver) says only
+//! **what happened**, not which event name it goes out as.
 // ADR-0012
 
 use engram_dashboard_protocol::{
@@ -184,7 +182,7 @@ impl DaemonEvents for TauriEmitter {
 /// 알림을 버리는 조립 — ★하네스 전용이다★.
 ///
 /// ★버리는 것이 계약이다★(이걸 꽂은 하네스는 emit 내용을 재지 않는다 — 발화를 재려면 기록형 가짜를
-/// `super::DaemonClient::new_with_events` 로 넣는다). 알림 유실은 연결·재연결·명령 왕복 어느 불변식도
+/// `super::DaemonClient::new_on_link` 로 넣는다). 알림 유실은 연결·재연결·명령 왕복 어느 불변식도
 /// 건드리지 않는다: 프론트 알림은 **단방향 통지**이고 연결 태스크는 그 성공 여부를 읽지 않는다(실물
 /// 어댑터도 `Err` 를 삼킨다).
 ///
@@ -217,7 +215,7 @@ mod tests {
     use engram_dashboard_protocol::{AgentBackendKind, UsageVendorState};
 
     // ★웹뷰 계약 = snake_case 세 칸★ — 받는 쪽(`src/api/tauriTransport.ts` 의 `usage-limits-updated` 수신)이 이
-    //   이름으로 읽는다. 셸 캐시 pull 반환의 칸 이름 시험(`tests.rs`)과 짝이다.
+    //   이름으로 읽는다. 셸 캐시 pull 반환의 칸 이름 시험(`connection/tests.rs`)과 짝이다.
     #[test]
     fn usage_limits_updated_payload_keys_are_the_webview_contract() {
         let snapshot = UsageLimitSnapshot {
@@ -253,5 +251,16 @@ mod tests {
         assert_eq!(wire["labels"], serde_json::json!(["main"]));
         assert_eq!(wire["socket_epoch"], 7);
         assert_eq!(wire["snapshot"]["revision"], 3);
+    }
+
+    // ── 프론트 계약 문자열 고정 ──────────────────────────────────────────────────────────
+    // 어휘를 enum 으로 올린 뒤에도 **나가는 바이트는 그대로여야 한다** — 이 세 값은
+    // `src/api/tauriTransport.ts` 의 `applyConnectionState` 가 그대로 비교하는 것이고(`commands::discovery` 의
+    // 상태 조회도 같은 어휘를 낸다), 하나만 어긋나도 컴파일은 통과한 채 화면이 조용히 멈춘다.
+    #[test]
+    fn connection_state_event_strings_are_the_frontend_contract() {
+        assert_eq!(ConnectionStateEvent::Connected.as_str(), "connected");
+        assert_eq!(ConnectionStateEvent::Reconnecting.as_str(), "reconnecting");
+        assert_eq!(ConnectionStateEvent::Down.as_str(), "down");
     }
 }

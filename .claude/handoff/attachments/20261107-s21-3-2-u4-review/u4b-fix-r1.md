@@ -1,0 +1,18 @@
+# U4b — review round 1 (main → coder)
+
+Review = full (lead + codex). Verdict PASS (no must; production behaviour unchanged, moved code byte-identical, gates pass). Main chose these recommendations. Snapshot reviewed = tree `776cb8ad0003570d3dd907195c3e54d8b9840acf`. If an item is wrong, reject it with evidence instead of implementing.
+
+## Implement
+R1. **ADR-0195 shell adapter test is missing** (TRD fate table + memo item 8 require it). `command_round_trips_and_their_failures_read_as_the_shell_texts` covers only the never-connected case (`registry.get` → `None`, `connection.rs` ~505). No driver test calls `send_command` while the peer exists but is not live; deleting `require_live(peer.peer_state()).map_err(Local)?;` (~509) makes a backoff caller get `UNSENT_ON_DISCONNECT` instead of `NOT_CONNECTED` and no test fails. Add (or extend `a_close_during_the_reconnect_backoff…`): after a loss, wait for Backoff; `send_command` returns `NOT_CONNECTED` at once; after the redial + Hello, the new endpoint receives no frame from that command. Confirm by local mutation (remove the line, see it fail, restore).
+R2. **`handshake_times_out_when_server_silent` was retired but its named covering tests only check the deadline is passed into the `Handshake` action** (transport `machine.rs`). No supervisor-level test has a dial land, Hello never arrive, and the attempt fail at the deadline. Add a small transport test of exactly that (memory network + manual clock: dial succeeds, no Hello, advance past the connect/handshake deadline → `ConnectFailed` with the handshake-timeout cause, then Backoff), or name a real existing covering test if you find one. Update your fate list accordingly.
+R3. **`src-tauri/Cargo.toml` ~121-125**: the daemon dev-dependency's `test-support` feature comment overclaims ("stays on for the daemon's test helpers") — nothing in `src-tauri` uses it now. Drop the feature if unused (dev-only; check gate 1/5 still pass), else reword.
+R4. **Dead code**: `protocol_state::{PendingMap, take_pending, drain_pending}` (only their own tests use them; no crate depends on `engram-dashboard`) — delete them and their tests; fix the stale claims at `protocol_state.rs` ~1/~332 and `mod.rs` ~5. `ConnectionState::Connecting` (never constructed): keep it only if the frontend/IPC vocabulary needs it (`commands/discovery.rs` folds it to "down") — your call, report.
+R5. **Refusal test synchronization** (`connection/tests.rs` ~3248): it reconnects right after submitting the duplicate refusal, so the final assertion can pass without that refusal being processed. Add an observable completion barrier before reconnecting.
+R6. **Visibility**: `link/errors.rs` `UNSENT_ON_DISCONNECT` / `SENT_OUTCOME_UNKNOWN` back to `pub(crate)` if only the crate uses them (`SEND_FAILED_PREFIX` stays `pub` for the integration test).
+R7. Record the uncovered branch `write_refresh_subscribe` → `Err` → ⟳ not sent as a known residue next to the driver's other residues (comment) — no test required.
+
+## Not for you
+Wording items (stale comments in `mod.rs` ~158/~165, `usage_interest.rs` ~31/~256, `link/endpoint.rs` ~1/~134, `frame_relay.rs` ~22, `docs/reference/logging-conventions.md` ~60, provenance comments, the 120-column line at `connection.rs` ~1461) — main fixes them at the end. Do not edit them unless your change makes them wrong.
+
+## Report
+Overwrite `R\coder-report.md` (R = scratch `u4b` folder): per item R1–R7 → done/rejected (evidence); files; tests (commands, counts per target incl. transport, name diff vs base `31919dcb`); gates; self-check. Same rules as the original brief (no commit, no subagents, don't touch `I:\Engram\apps\engram-dashboard-wt4`).

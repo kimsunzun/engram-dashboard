@@ -1,191 +1,191 @@
-# 모듈·라이브러리 분할 — 이점과 분할 기준 (업계 관행 조사)
+# Splitting modules and libraries — benefits and split criteria (industry practice survey)
 
-- **상태:** medium tier · 3갈래 병렬 수집 → 메인 grounding → cross-family 적대 리뷰 **완료**
-- ★**읽는 순서 주의**★ — 아래 본문(§1~§7)은 리뷰 **전** 합성이다. **§9 「적대 리뷰 결과」가 본문 여러 줄을 정정·폐기한다** — 본문을 인용하기 전에 §9 를 먼저 볼 것.
-- **조사일:** 2026-08-26
-- ★★**선행 조사와 겹친다 — 먼저 그것을 읽을 것**★★ — [`crate-granularity-survey-2026-08-17.md`](crate-granularity-survey-2026-08-17.md) 가 **같은 질문**(「소형 crate 분할이 옳은 방향인가」)을 같은 tier·같은 방법(medium + cross-family 적대 리뷰)으로 이미 다뤘다. **이 세션은 그 존재를 조사 착수 시점에 몰랐고**(수집자에게도 알리지 않았다) 세션 말미에 발견했다. 두 보고서의 관계:
-  - **선행 조사가 더 권위 있는 지점 = 판정 기준.** 그쪽 결론은 「크기」·「방향 강제」가 아니라 **「독립적으로 쓸 수 있는가」**이고, 그것이 유일하게 발견된 권위 있는 산업 가이드의 기준이라고 적는다. 그리고 우리가 근거로 삼던 전제 둘(**「방향 강제엔 crate밖에 없다」**·**「두 번째 소비자가 있어야 한다」**)이 그 조사에서 무너졌다고 판정했다. ★이 문서 §1·§3 의 「재사용(소비자 둘)」·「의존 방향 강제」 항목은 그 판정과 정면으로 만난다 — 재대조 없이 인용하지 말 것★.
-  - **이 문서가 새로 더하는 것** = ① TS·JS 축 전체(선행은 Rust 전용) ② 일반 문헌(Parnas·Martin·Google SWE ch.21·Nx·DORA) ③ 비용 축의 실증 정리 ④ 적대 리뷰 15건 적출(§9).
-  - **미해소:** 두 조사의 기준을 하나로 합치는 작업은 하지 않았다. 다음 세션이 굵은 결정에 쓰려면 **둘을 나란히 놓고 대조하는 것이 선결**이다.
-- **방법:** 갈래별 수집자 1명(일반론 / Rust / TS·JS), 각 8~12회 검색. 메인이 load-bearing 클레임의 claim↔source 함의를 외부 검증.
-- **확신도 범례:** **확실** = grounding 지지 + 독립 교차확증 · **가능성 높음** = grounding 지지, 단일 출처 · **불확실** = 미지지 또는 원문 미도달 → 보류
-- **범위 밖:** 우리 저장소의 결정(ADR)은 수집자에게 주지 않았다 — 일반 관행이 우리 결정에 앵커링되지 않게 하려고 분리했다. 적용은 이 문서 밖에서 한다.
-
----
-
-## 한 줄 결론
-
-**분할을 정당화하는 이점 목록은 짧고, 대부분의 이점은 「경계」에서 오지 「별도 유닛」에서 오지 않는다.** 별도 유닛이 있어야만 얻는 것은 넷 정도다 — 독립 배포·릴리스 단위 / 도구가 세는 캐시·영향범위 단위 / 언어가 강제하는 비순환 / 외부 소비자에게 게시. 그 밖의 것(정보 은닉·이해가능성·병렬 작업·격리 테스트·소유권)은 유닛 안 경계로도 얻는다.
+- **Status:** medium tier · 3 parallel collection tracks → main grounding → cross-family adversarial review **done**
+- ★**Note on reading order**★ — the body below (§1–§7) is the synthesis from **before** the review. **§9 "Adversarial review results" corrects or discards several lines of the body** — read §9 first before quoting the body.
+- **Survey date:** 2026-08-26
+- ★★**Overlaps with an earlier survey — read that one first**★★ — [`crate-granularity-survey-2026-08-17.md`](crate-granularity-survey-2026-08-17.md) has already covered **the same question** (「소형 crate 분할이 옳은 방향인가」 — is splitting into small crates the right direction) at the same tier with the same method (medium + cross-family adversarial review). **This session did not know it existed when the survey started** (the collectors were not told either) and found it at the end of the session. How the two reports relate:
+  - **Where the earlier survey is more authoritative = the decision criterion.** Its conclusion is not 「크기」 (size) or 「방향 강제」 (direction enforcement) but **「독립적으로 쓸 수 있는가」** (can it be used independently), and it records that as the criterion of the only authoritative industry guide that was found. It also decided that two premises we had been relying on (**「방향 강제엔 crate밖에 없다」** (only a crate can enforce direction) · **「두 번째 소비자가 있어야 한다」** (there must be a second consumer)) collapsed in that survey. ★The items 「재사용(소비자 둘)」 (reuse (two consumers)) and 「의존 방향 강제」 (dependency direction enforcement) in §1 and §3 of this document collide head-on with that decision — do not quote them without re-checking★.
+  - **What this document newly adds** = ① the entire TS·JS axis (the earlier one is Rust-only) ② general literature (Parnas·Martin·Google SWE ch.21·Nx·DORA) ③ an empirical summary of the cost axis ④ 15 findings extracted by adversarial review (§9).
+  - **Unresolved:** merging the criteria of the two surveys into one was not done. For the next session to use it for a big decision, **putting the two side by side and cross-checking them is a prerequisite**.
+- **Method:** one collector per track (general theory / Rust / TS·JS), 8–12 searches each. The main session externally verified the claim↔source implications of the load-bearing claims. **Quotations:** the Korean source gives most outside quotes only in Korean; those are back-translated here and marked (back-translated) — they are not the original wording. Quotes whose original English the source itself gives (the grounding section, or English in the source) are verbatim.
+- **Confidence legend:** **certain** = supported by grounding + independent cross-confirmation · **likely** = supported by grounding, single source · **uncertain** = unsupported or primary text not reached → on hold
+- **Out of scope:** our repository's decisions (ADRs) were not given to the collectors — they were separated so that general practice would not be anchored to our decisions. Applying it is done outside this document.
 
 ---
 
-## 1. 분할이 사 오는 것 — 「별도 유닛이 필요한가」로 가른 표
+## One-line conclusion
 
-| 주장되는 이점 | 제시한 쪽 | 별도 유닛이 필요한가 | 확신도 |
+**The list of benefits that justify splitting is short, and most benefits come from 「경계」 (boundaries), not from 「별도 유닛」 (separate units).** What you get only with a separate unit is about four things — an independent deployment/release unit / a unit that tools count for caching and affected scope / acyclicity enforced by the language / publishing to external consumers. The rest (information hiding · comprehensibility · parallel work · isolated testing · ownership) can also be obtained with boundaries inside a unit.
+
+---
+
+## 1. What splitting buys — a table sorted by 「별도 유닛이 필요한가」 (is a separate unit needed)
+
+| Claimed benefit | Who put it forward | Is a separate unit needed | Confidence |
 |---|---|---|---|
-| 정보 은닉 — 변경이 번지지 않음 | Parnas 1972 | **아니오** — 기준은 인터페이스이고, 그가 말한 모듈은 작업 배정 단위다 | 불확실 (원문 미도달 — 아래 grounding) |
-| 병렬 개발·이해가능성 | Parnas 1972 | **아니오** — 안정된 인터페이스 + 소유권이면 된다 | 불확실 (같은 사유) |
-| 재사용 | R.C. Martin, REP — "재사용의 단위는 릴리스의 단위다" | **예** — 재사용을 릴리스 단위에 명시적으로 묶은 유일한 원칙 | 가능성 높음 |
-| 독립 배포 | Sam Newman (서비스 분리 3사유 중 하나) | **예** (정의상) | 가능성 높음 |
-| 독립 스케일링·장애 격리·기술 이종성 | Grzybek (아키텍처 드라이버 표) | **예** | 가능성 높음 |
-| 빌드·컴파일 시간 | matklad · Anderson(TiKV) · Feldera | **예**, 단 조건부 — 그래프가 **넓어져야** 한다. matklad: "체인 같은 그래프가 됐다면 얻는 게 많지 않다" | 확실 (인용 원문 확인) |
-| 의존 방향 강제 | matklad — "crate 의 가장 중요한 성질은 그것이 (이행적으로) 의존하지 **않는** crate 가 무엇인가다" | **부분** — crate 면 컴파일러가 세고, 가시성·린트·아키텍처 테스트로도 선다 | 확실 (인용 원문 확인) |
-| 캐시·영향범위(affected) 단위 | Nx · Turborepo | **예**, 단 「도구가 인식하는 프로젝트」면 되고 레지스트리 게시는 불필요 | 확실 |
-| 격리 테스트 | 널리 주장됨 | **아니오** — seam·DI 문제다. 패키지가 필요하다는 권위 출처 못 찾음 | 불확실 |
-| 팀 소유권 경계 | MacCormack–Baldwin–Rusnak · Newman | **아니오** — 디렉터리 소유권으로 된다. 측정된 것은 조직 결합↔설계 모듈성이지 산출물 형태가 아니다 | 가능성 높음 |
-| 옵션 가치(독립 실험·교체 가능성) | Baldwin & Clark, *Design Rules* | **아니오** — 값은 은닉도·실험비용·가시성에서 나오고 포장 형태가 아니다 | 가능성 높음 |
+| Information hiding — changes do not spread | Parnas 1972 | **No** — the criterion is the interface, and the module he spoke of is a unit of work assignment | uncertain (primary text not reached — see grounding below) |
+| Parallel development · comprehensibility | Parnas 1972 | **No** — a stable interface + ownership is enough | uncertain (same reason) |
+| Reuse | R.C. Martin, REP — "the unit of reuse is the unit of release" (back-translated) | **Yes** — the only principle that explicitly ties reuse to the release unit | likely |
+| Independent deployment | Sam Newman (one of the 3 reasons for splitting a service) | **Yes** (by definition) | likely |
+| Independent scaling · failure isolation · technology heterogeneity | Grzybek (architecture-driver table) | **Yes** | likely |
+| Build·compile time | matklad · Anderson (TiKV) · Feldera | **Yes**, but conditional — the graph must **get wider**. matklad: "if you ended up with a graph like the first one, you are not winning much" (a chain-like graph) | certain (quoted text checked) |
+| Dependency direction enforcement | matklad — "the most important property of a crate is which crates it doesn't (transitively) depend on" | **Partial** — with a crate the compiler counts it, and it also stands through visibility·lint·architecture tests | certain (quoted text checked) |
+| Cache·affected-scope unit | Nx · Turborepo | **Yes**, but being a 「도구가 인식하는 프로젝트」 (a project the tool recognizes) is enough and publishing to a registry is not needed | certain |
+| Isolated testing | widely claimed | **No** — it is a seam·DI problem. No authoritative source found saying a package is needed | uncertain |
+| Team ownership boundary | MacCormack–Baldwin–Rusnak · Newman | **No** — directory ownership does it. What was measured is organizational coupling ↔ design modularity, not the shape of the artifact | likely |
+| Option value (independent experimentation · swappability) | Baldwin & Clark, *Design Rules* | **No** — the value comes from hiding, experiment cost and visibility, not from the packaging form | likely |
 
-## 2. 분할 비용 — 이쪽이 이점보다 문서화가 잘 돼 있다
+## 2. Cost of splitting — this side is better documented than the benefits
 
-- ★**의존성 관리 세금이 소스 관리 세금을 대체한다**★ — *Software Engineering at Google* ch.21: "다른 조건이 같다면, 의존성 관리 문제보다 소스 관리 문제를 택하라." 바로 앞 문장: "소스 관리 문제는 의존성 관리 문제보다 생각하기 훨씬 쉽고 다루는 비용도 훨씬 싸다." **확실**(원문 직접 확인) https://abseil.io/resources/swe-book/html/ch21.html
-- **SemVer 는 양쪽으로 어긋난다** — 과다 제약(안 쓰는 API 변경도 major) + 과소 보호(Hyrum's Law: 관측 가능한 모든 동작에 누군가 의존한다). 같은 장에서 "이론상 구현 세부만 바꾸는 patch 가 '안전'하다는 것은 Google 의 Hyrum's Law 경험과 정면으로 어긋난다". **확실**(직접 확인)
-- **다이아몬드 의존** — 같은 장: "C++ 는 일반 빌드에서 다이아몬드 의존에 거의 무관용이며, 임의의 버그와 미정의 동작을 부를 가능성이 매우 높다." **확실**(직접 확인)
-- **API 표면 확대 / 내부 가시성 상실** — 경계를 넘기면 내부가 공개가 된다. **확실**(언어 메커니즘) / 이것을 주된 비용으로 명명한 권위 출처는 못 찾음
-- **횡단 리팩터가 어려워진다** — 순환이 불법이 되므로 상호 참조가 필요한 분할은 재설계를 요구한다. **가능성 높음**
-- **재사용 가능하게 만드는 것 자체의 비용** — Glass *Facts and Fallacies* Fact 18: 재사용 컴포넌트는 단일 용도보다 약 **3배** 어렵고, 일반화 전에 **3개** 실사용처를 봐야 한다(Biggerstaff 의 rule of three). **가능성 높음**(2차 출처)
-- **분할이 *배포 단위*일 때의 런타임·통신 비용** — Prime Video 가 분산 검출기를 한 프로세스로 합쳐 인프라 비용 약 90% 절감을 보고. **주장이 있었다는 것은 확실 / 일반화는 불확실** — 한 컴포넌트가 모듈러 모놀리스로 옮긴 사례이고 Amazon 이 마이크로서비스를 버린 것이 아니다.
+- ★**The dependency-management tax replaces the source-control tax**★ — *Software Engineering at Google* ch.21: "all else being equal, prefer source control problems over dependency management problems." (back-translated) The sentence just before: "source control problems are much easier to think about and much cheaper to deal with than dependency management problems." (back-translated) **Certain** (primary text checked directly) https://abseil.io/resources/swe-book/html/ch21.html
+- **SemVer is off in both directions** — over-constraining (a change to an unused API is also a major) + under-protecting (Hyrum's Law: someone depends on every observable behavior). In the same chapter, "in theory, a patch that changes only implementation details is 'safe' — this is directly at odds with Google's experience of Hyrum's Law" (back-translated). **Certain** (checked directly)
+- **Diamond dependency** — the same chapter: "C++ has nearly zero tolerance for diamond dependencies in a normal build, and it is very likely to cause arbitrary bugs and undefined behavior." (back-translated) **Certain** (checked directly)
+- **API surface growth / loss of internal visibility** — once you cross a boundary, internals become public. **Certain** (language mechanism) / no authoritative source found that names this as the main cost
+- **Cross-cutting refactoring gets harder** — cycles become illegal, so a split that needs mutual references requires a redesign. **Likely**
+- **The cost of making something reusable itself** — Glass *Facts and Fallacies* Fact 18: a reusable component is about **3 times** harder than a single-use one, and you must see **3** real uses before generalizing (Biggerstaff's rule of three). **Likely** (secondary source)
+- **Runtime and communication cost when the split is a *deployment unit*** — Prime Video reported cutting infrastructure cost by about 90% by merging a distributed detector into one process. **That the claim was made is certain / generalizing it is uncertain** — it is a case of one component moving to a modular monolith, and it is not that Amazon abandoned microservices.
 
-## 3. 이름 붙은 분할 기준
+## 3. Named split criteria
 
-- **Parnas (1972)** — 바뀔 법한 *설계 결정*을 따라 쪼개고 최소 인터페이스 뒤에 숨긴다. 처리 단계(flowchart)별 분해를 명시적으로 기각. *(원문 미도달 — 확신도 불확실)*
-- **R.C. Martin — 컴포넌트 응집 삼각형** — REP(재사용 단위 = 릴리스 단위) · CCP(같이 바뀌는 것은 같이) · CRP(같이 재사용되는 것은 같이). REP·CCP 는 컴포넌트를 **크게**, CRP 는 **작게** 밀며, Martin 자신이 규칙이 아니라 **긴장 다이어그램**이라고 규정한다. **가능성 높음**
-- **Sam Newman** — 서비스 분리를 정당화하는 셋: 독립 배포 가능성 · 데이터 격리 · 조직 구조 반영. 그리고 모듈러 모놀리스가 "많은 조직에 훌륭한 선택"이라고 말한다. **가능성 높음**
-- **matklad** — crate 그래프를 **깊게가 아니라 넓게**. 설계 질문은 "이 crate 가 무엇에 의존하지 *않아야* 하나". 대규모 워크스페이스는 **10k~1M LOC 까지 평평한 `crates/`**, 계층은 crate 100개(대략 100만 줄) 넘어서야. **확실**(인용 직접 확인)
-- **Nx (공식) — 가장 날카로운 기준: "테스트가 발목을 잡으면 쪼갠다."** 원문: "Split when tests slow you down. A project whose test suite dominates CI, while most changes only touch a slice of it, is the clearest split candidate." 그리고 "프로젝트가 세분화될수록 `nx affected` 와 계산 캐시가 더 효과적이다." 소유권 축도 명시: "두 팀이 같은 프로젝트를 계속 고치면 경계와 리뷰 배정이 흐려진다." **확실**(직접 확인) https://nx.dev/docs/kb/project-size
-- **Glass/Biggerstaff rule of three** — 실사용처 셋이 생기기 전에는 재사용 단위로 일반화하지 않는다. **가능성 높음**
-- **DORA (구조가 아니라 성과 기준)** — 팀이 의존 대상과 무관하게 온디맨드 배포할 수 있는가, 공유 통합 환경 없이 테스트할 수 있는가. **확실**
-- **Baldwin & Clark** — 순 옵션가치(기술 잠재력 × 독립 실험 비용 × 모듈 가시성) − 모듈 아키텍처 비용 > 0 일 때. **확실**(방법으로서) / 라이브러리 경계에 실제로 적용한 사례는 불확실
+- **Parnas (1972)** — split along *design decisions* that are likely to change and hide them behind a minimal interface. He explicitly rejects decomposition by processing step (flowchart). *(primary text not reached — confidence uncertain)*
+- **R.C. Martin — component cohesion triangle** — REP (unit of reuse = unit of release) · CCP (things that change together go together) · CRP (things reused together go together). REP·CCP push components **bigger**, CRP pushes them **smaller**, and Martin himself defines it not as rules but as a **tension diagram**. **Likely**
+- **Sam Newman** — three things that justify splitting a service: independent deployability · data isolation · reflecting the organizational structure. And he says a modular monolith is "a great choice for many organizations" (back-translated). **Likely**
+- **matklad** — make the crate graph **wide, not deep**. The design question is "what should this crate *not* depend on" (back-translated). For large workspaces, **a flat `crates/` up to 10k–1M LOC**, layers only beyond 100 crates (roughly a million lines). **Certain** (quote checked directly)
+- **Nx (official) — the sharpest criterion: "split when tests slow you down."** Original text: "Split when tests slow you down. A project whose test suite dominates CI, while most changes only touch a slice of it, is the clearest split candidate." And "the more granular the projects, the more effective `nx affected` and the computation cache are." (back-translated) It also states the ownership axis: "if two teams keep editing the same project, boundaries and review assignment blur." (back-translated) **Certain** (checked directly) https://nx.dev/docs/kb/project-size
+- **Glass/Biggerstaff rule of three** — do not generalize into a reuse unit before there are three real uses. **Likely**
+- **DORA (an outcome criterion, not a structure criterion)** — can a team deploy on demand regardless of what it depends on, can it test without a shared integration environment. **Certain**
+- **Baldwin & Clark** — when net option value (technical potential × cost of independent experimentation × module visibility) − module architecture cost > 0. **Certain** (as a method) / cases of actually applying it to a library boundary are uncertain
 
-## 4. Rust 특수 사정 — 컴파일 시간 주장은 정밀하게
+## 4. Rust specifics — be precise about the compile-time claim
 
-- **crate 는 (재)컴파일 단위이자 Cargo 병렬화 단위다.** "Rust 에서 컴파일 단위는 *crate* 이며 여러 파일로 구성된다"(Brian Anderson, TiKV/PingCAP). **확실**
-- ★**그런데 「쪼개면 빨라진다」는 조건부이고, 가장 많이 인용되는 반례가 그 주장을 대중화한 같은 글에서 나온다**★ — Anderson: "병렬성 증가로 기대한 이득은 downstream monomorphization, 제네릭 중복, LTO 같은 다른 요인에 자주 지워진다." **확실**(인용)
-- **한 crate 가 백엔드에서 완전 직렬은 아니다** — rustc 는 crate 를 codegen unit 으로 쪼개 LLVM 에 병렬로 넘긴다(기본 최대 16, incremental 최대 256). nnethercote 실측: `codegen-units=1` 9.7s vs 16 CGU 4.5s, 대신 CGU 가 적으면 바이너리가 작고 코드 품질이 좋다. **확실**(그 글 기준 실측)
-- **pipelined compilation**(Rust 1.38, 2019-09) — 의존 crate 의 `.rmeta` 가 나오는 즉시 후속 crate 가 시작. 공식 주장 **10~20% 개선**. **확실**
-- **제네릭이 많으면 쪼개도 안 준다** — "제네릭은 인스턴스화될 때만 번역되므로, crate 크기가 병렬화에 완벽히 균등해도 제네릭 타입은 crate 그래프의 후반까지 번역되지 않는다"(Anderson). 잎/바이너리 crate 가 그 일을 흡수한다. **확실**
-- **crate 경계가 유일하게 사 오는 강제** = **비순환**. 한 crate 안 모듈은 순환해도 컴파일되지만 패키지 그래프는 비순환이어야 한다. **확실**
-- **가시성은 계층적이지 방향성이 아니다** — `pub(crate)`·`pub(in path)` 는 *어디서 보이나*를 제한하지만 "B 는 A 를 부르되 A 는 B 를 절대 못 부른다"를 말할 수 없다. 그래서 "방향 강제"는 컴파일러를 강제자로 쓰고 싶다면 **타당한** 분할 사유다. **가능성 높음**(수집자의 해석 — 이 형태로 말한 1차 출처 없음)
-- **crate 경계 ≠ API 경계** — rust-analyzer 아키텍처 문서는 일부 crate 를 "이 crate 들은 api 경계가 아니며 앞으로도 아니다"라고 명시한다. 쪼개는 것만으로 안정 인터페이스를 사는 게 아니다. **확실**
-- **분할 비용(Rust)** — 크로스 crate 인라인 상실(`#[inline]` 이나 LTO 로만 회복) · monomorphization 중복 · **feature unification**(워크스페이스 멤버 간에는 회피 안 되고, 피하려면 별도 cargo 호출) · **orphan rule**(trait 과 타입이 다른 crate 면 제3 crate 가 impl 못 함 → newtype 우회) · dev-dependency·통합테스트 타깃 중복. **확실~가능성 높음**
-- **실제 사례는 양방향이다** — Bevy 는 잡동사니 기반 crate(`bevy_core`)를 **도메인 crate 들로 해체**했다("이 crate 는 기본적으로 유틸리티 crate 인데, 우리는 그것을 피하고 싶다"). Tokio 는 반대로 `tokio-*` 여러 crate 를 feature flag 를 가진 하나로 **합쳤다**(유지 부담·의존 정합성·사용자가 느끼는 bloat·릴리스 비용). **확실**
-- **가장 큰 측정 사례는 비전형** — Feldera 가 생성된 crate 하나를 1,106개로 쪼개 1617s → 150s. 저자들 스스로 이 형태가 "대부분의 Rust 프로젝트에는 비실용적"이라고 말한다. **주장은 확실 / 일반화는 불확실**
+- **A crate is the unit of (re)compilation and of Cargo parallelization.** "In Rust the compilation unit is the *crate*, which consists of multiple files" (back-translated) (Brian Anderson, TiKV/PingCAP). **Certain**
+- ★**But 「쪼개면 빨라진다」 (splitting makes it faster) is conditional, and the most-cited counterexample comes from the same article that popularized the claim**★ — Anderson: "the gains expected from increased parallelism are often erased by other factors such as downstream monomorphization, generic duplication and LTO." (back-translated) **Certain** (quote)
+- **One crate is not fully serial in the backend** — rustc splits a crate into codegen units and hands them to LLVM in parallel (default max 16, incremental max 256). nnethercote's measurement: `codegen-units=1` 9.7s vs 16 CGUs 4.5s, but fewer CGUs give a smaller binary and better code quality. **Certain** (measurement as given in that article)
+- **Pipelined compilation** (Rust 1.38, 2019-09) — a dependent crate starts as soon as the `.rmeta` of the crate it depends on is out. Official claim of a **10–20% improvement**. **Certain**
+- **With many generics, splitting does not reduce it** — "generics are translated only when instantiated, so even if crate sizes were perfectly even for parallelization, generic types are not translated until late in the crate graph" (back-translated) (Anderson). Leaf/binary crates absorb that work. **Certain**
+- **The only enforcement a crate boundary buys** = **acyclicity**. Modules inside one crate compile even if they are cyclic, but the package graph must be acyclic. **Certain**
+- **Visibility is hierarchical, not directional** — `pub(crate)`·`pub(in path)` restrict *where it is visible* but cannot say "B may call A but A must never call B". So "direction enforcement" is a **valid** reason to split if you want to use the compiler as the enforcer. **Likely** (the collector's interpretation — no primary source says it in this form)
+- **A crate boundary ≠ an API boundary** — the rust-analyzer architecture document states for some crates, "these crates are not API boundaries and never will be" (back-translated). Splitting alone does not buy a stable interface. **Certain**
+- **Cost of splitting (Rust)** — loss of cross-crate inlining (recovered only with `#[inline]` or LTO) · monomorphization duplication · **feature unification** (not avoidable among workspace members, and avoiding it takes a separate cargo invocation) · **orphan rule** (if the trait and the type are in different crates, a third crate cannot impl → newtype workaround) · duplicated dev-dependency·integration-test targets. **Certain to likely**
+- **Real cases go both ways** — Bevy **dismantled** a grab-bag base crate (`bevy_core`) **into domain crates** ("this crate is basically a utility crate and we want to avoid that" (back-translated)). Tokio, in the opposite direction, **merged** several `tokio-*` crates into one with feature flags (maintenance burden · dependency consistency · bloat users feel · release cost). **Certain**
+- **The largest measured case is atypical** — Feldera split one generated crate into 1,106 and went from 1617s to 150s. The authors themselves say this shape is "impractical for most Rust projects" (back-translated). **The claim is certain / generalizing it is uncertain**
 
-## 5. TS·JS 특수 사정 — 「패키지로 쪼개면 강제된다」는 거짓
+## 5. TS·JS specifics — 「패키지로 쪼개면 강제된다」 (splitting into packages enforces it) is false
 
-- ★**핵심**★ — Node.js 공식 문서, `exports` 필드: "`exports` 필드가 정의되면 패키지의 모든 서브경로가 캡슐화되어 importer 에게 더는 노출되지 않는다." 이어서 **"이것은 강한 캡슐화가 아니다 — `require('/path/to/node_modules/pkg/subpath.js')` 처럼 절대 서브경로를 직접 require 하면 여전히 `subpath.js` 를 로드한다."** 문서가 기술하는 강제 지점은 **지정자 해석 단계의 오류 발생뿐**이다. **확실**(원문 직접 확인) https://nodejs.org/api/packages.html
-- **우회 경로 셋** — ① 상대·절대 파일 경로 ② TypeScript `moduleResolution: node10` 은 `exports` 를 아예 지원하지 않음 ③ **`paths` 별칭이 매치되면 상대 해석으로 진행돼 `exports` 처리가 일어나지 않는다** — 즉 흔한 모노레포 `paths` 설정이 타입체크에서 `exports` 강제를 조용히 끈다. **확실**
-- **도구들이 스스로 증명한다** — Nx `@nx/enforce-module-boundaries` 와 `turbo boundaries`(실험적)가 존재하는 이유는 **패키지 분할만으로는 안 막혔기 때문**이다. Turborepo RFC 유지보수자: "코드가 같은 파일시스템에 있으니 패키지 루트에서 `../../` 로 쉽게 나갈 수 있다." **확실**
-- **패키지 없이 얻는 경계 강제** — `good-fences`(디렉터리별 `fence.json`: 외부에서 닿을 수 있는 것·소비 가능한 태그·허용 의존) · `dependency-cruiser` · `eslint-plugin-boundaries` · **TypeScript project references**(핸드북 예제가 형제 디렉터리를 참조하고, 목표에 "컴포넌트 간 논리적 분리 강제"가 적혀 있다 — 참조 대상이 npm 패키지일 필요가 없다. `composite` 프로젝트는 파일 목록 밖 소스를 TS6307 로 거부하지만 오탐이 잦은 시끄러운 게이트다). **확실~가능성 높음**
-- **패키지·프로젝트여야 얻는 것** — 게시·독립 버전 · **캐시·affected 세분도**(Nx: 세분화될수록 효과적, affected 오탐도 줄어든다) · 캐시 무효화 정합성(Turborepo: `../../` 로 나가면 캐시가 추적 못 하는 의존이 생긴다) · 독립 CI 범위 · 패키지별 의존 격리. **확실**
-- **분할 비용(TS)** — phantom dependency(선언 안 한 의존이 hoist 덕에 "동작"함) · NPM doppelganger(같은 의존의 중복 설치 → 싱글턴·타입 동일성 충돌) · 버전 skew · 내부 패키지의 소스 배포 vs 사전 컴파일 선택(후자는 모든 개발 루프에 빌드·watch 를 더한다) · project reference 유지비 · 중첩 패키지 미지원 · 횡단 리팩터·탐색 비용 · `declarationMap` 없으면 go-to-definition 이 `.d.ts` 로 착지. **확실~가능성 높음**
+- ★**Key point**★ — Node.js official docs, the `exports` field: "when the `exports` field is defined, all subpaths of the package are encapsulated and no longer available to importers." (back-translated) It goes on: **"this is not a strong encapsulation — directly requiring an absolute subpath such as `require('/path/to/node_modules/pkg/subpath.js')` still loads `subpath.js`."** (back-translated) The only enforcement point the docs describe is **an error raised at the specifier resolution step**. **Certain** (primary text checked directly) https://nodejs.org/api/packages.html
+- **Three bypass routes** — ① relative·absolute file paths ② TypeScript `moduleResolution: node10` does not support `exports` at all ③ **when a `paths` alias matches, resolution proceeds as a relative one and `exports` processing does not happen** — that is, the common monorepo `paths` setting silently turns off `exports` enforcement in type checking. **Certain**
+- **The tools prove it themselves** — the reason Nx `@nx/enforce-module-boundaries` and `turbo boundaries` (experimental) exist is that **splitting into packages alone did not block it**. Turborepo RFC maintainer: "since the code is on the same filesystem, you can easily leave the package root with `../../`." (back-translated) **Certain**
+- **Boundary enforcement without packages** — `good-fences` (a `fence.json` per directory: what is reachable from outside · consumable tags · allowed dependencies) · `dependency-cruiser` · `eslint-plugin-boundaries` · **TypeScript project references** (the handbook example references a sibling directory, and its goals include "enforce logical separation between components" (back-translated) — the referenced thing does not have to be an npm package. A `composite` project rejects sources outside its file list with TS6307, but it is a noisy gate with frequent false positives). **Certain to likely**
+- **What you get only as a package·project** — publishing · independent versions · **cache·affected granularity** (Nx: the more granular the more effective, and affected false positives also drop) · cache-invalidation consistency (Turborepo: if you leave with `../../`, there are dependencies the cache cannot track) · independent CI scope · per-package dependency isolation. **Certain**
+- **Cost of splitting (TS)** — phantom dependency (an undeclared dependency "works" thanks to hoisting) · NPM doppelganger (duplicate install of the same dependency → singleton·type-identity conflicts) · version skew · the choice for internal packages between shipping source and precompiling (the latter adds build·watch to every dev loop) · project-reference upkeep · no support for nested packages · cross-cutting refactoring·navigation cost · without `declarationMap`, go-to-definition lands on `.d.ts`. **Certain to likely**
 
-## 6. 반대 입장 (steel-man)
+## 6. The opposing position (steel-man)
 
-- **Fowler, MonolithFirst (2015)** — 성공한 마이크로서비스 사례는 거의 다 모놀리스에서 쪼개져 나왔고, 마이크로서비스-우선으로 지은 시스템은 "심각한 곤란"을 겪었다. 별개 개념으로 **microservice premium** — 복잡도가 낮은 앱에서는 모놀리식 설계가 유리해지는 실비용. **확실**
-- **반대의 반대** — Stefan Tilkov: 목표가 마이크로서비스라면 모놀리스로 시작하지 말라(추출이 생각보다 어렵다). **가능성 높음**
-- **Sandi Metz, The Wrong Abstraction (2016)** — "중복은 잘못된 추상보다 훨씬 싸다." 처방은 각 호출처에 **되붙여 넣고**(re-inline) 그 호출처가 안 쓰는 것을 지운 뒤 다시 추출. ★**명시적으로 의견이며 데이터가 없다**★. **확실**(그 글에 데이터가 없다는 점)
-- **Google 제도적 반대 — One Version Rule** — 개발자에게 버전 *선택권이 없어야* 한다. 위반은 머지 전략 논쟁·다이아몬드 의존·작업 유실을 낳는다. 내부 버전 라이브러리에 대한 직접적 반대 논거다. **확실**
-- **Rust 쪽** — 모듈 추가·제거가 패키지 추가·제거보다 싸다 · 한 crate 안 모듈은 순환 가능 · 결국 "편의성과 컴파일 속도의 트레이드오프". Yoshua Wuyts 가 crate 수준 캡슐화를 워크스페이스 절차 없이 얻으려고 "inline crates" 를 제안하는 것 자체가 분할 마찰의 증거. **확실**
-- **TS 쪽** — `good-fences` 가 단일 TypeScript 프로젝트 안에서 디렉터리별 공개 표면과 인바운드 허용목록을 제공한다(패키지 캡슐화의 절반은 패키지 없이 얻는다). 그리고 **분할 후에 얻는 강제도 결국 린트 모양**이다(Nx·Turborepo 둘 다 분할 *위에* 린터를 얹는다). **확실 / 후자는 수집자 추론**
+- **Fowler, MonolithFirst (2015)** — almost all successful microservice cases were split out of a monolith, and systems built microservice-first ran into "serious trouble" (back-translated). As a separate concept, the **microservice premium** — the real cost that makes a monolithic design more favorable in apps of low complexity. **Certain**
+- **The opposition to the opposition** — Stefan Tilkov: if microservices are the goal, do not start with a monolith (extraction is harder than it seems). **Likely**
+- **Sandi Metz, The Wrong Abstraction (2016)** — "duplication is far cheaper than the wrong abstraction." (back-translated) The prescription is to **paste back** (re-inline) into each call site, delete what that call site does not use, and then extract again. ★**It is explicitly an opinion and has no data**★. **Certain** (that the article has no data)
+- **Google's institutional opposition — the One Version Rule** — developers must have *no choice* of version. Violations lead to merge-strategy debates, diamond dependencies and lost work. It is a direct argument against internally versioned libraries. **Certain**
+- **On the Rust side** — adding·removing a module is cheaper than adding·removing a package · modules in one crate can be cyclic · ultimately "a trade-off between convenience and compile speed" (back-translated). That Yoshua Wuyts proposes "inline crates" to get crate-level encapsulation without workspace procedure is itself evidence of split friction. **Certain**
+- **On the TS side** — `good-fences` provides a per-directory public surface and an inbound allowlist inside a single TypeScript project (half of package encapsulation is obtained without a package). And **the enforcement you get after splitting is in the end lint-shaped** (Nx and Turborepo both put a linter *on top of* the split). **Certain / the latter is the collector's inference**
 
-## 7. 실측된 것과 의견인 것
+## 7. What was measured and what is opinion
 
-- **측정(피어리뷰):** MacCormack, Baldwin & Rusnak, *Research Policy* 41(8), 2012 — 매칭된 제품 쌍. 느슨히 결합된 조직이 유의하게 더 모듈러한 설계를 냈고, 한 컴포넌트의 설계 변경이 다른 컴포넌트로 전파될 가능성 차이가 **최대 6배**. **가능성 높음 — 수치 불일치 있음**(아래 grounding)
-- **측정(설문·통계):** DORA — 느슨히 결합된 아키텍처가 지속적 배포의 가장 강한 예측 변수 중 하나이고, 기술 선택과 명시적으로 분리한다("메인프레임으로도 달성 가능하고, 최신 유행 기술로도 실패 가능하다"). **확실**
-- **측정(실무·단일 사례):** Feldera 1617s→150s · rustc CGU 9.7s vs 4.5s · Rust 1.38 pipelining 10~20%. **수치 보고는 확실 / 일반화는 불확실**
-- **약하게 성립:** 결합도·응집도가 *그* 모듈화 동인이라는 통설 — 연구가 의문을 제기한다. **가능성 높음**
-- **성립 안 됨:** 마이크로서비스의 이점 — SLR 들이 실증 근거가 매우 제한적이라고 보고. **가능성 높음**
-- **의견뿐:** Metz · premature abstraction 계열 · Fowler MonolithFirst(스스로 일화 기반) · Grzybek 드라이버 표. **확실**
-
----
-
-## grounding 결과 (메인 외부 검증)
-
-**지지 — 원문에서 직접 확인(4건):**
-1. *SWE at Google* ch.21 인용 셋(source control 우선 · SemVer/Hyrum · C++ 다이아몬드) — 문구 일치. 다만 원문은 "nearly zero tolerance"이고 수집자는 "almost no tolerance"로 옮겼다(의미 동일, 문구 아님).
-2. matklad 인용 둘 + caveat — 문구 일치("The most important property of a crate is which crates it doesn't (transitively) depend on." · "if you ended up with a graph like the first one, you are not winning much.").
-3. Node.js `exports` "**not a strong encapsulation**" + 절대경로 우회 예시 — 문구 일치. 프론트 결론의 핵심이라 직접 확인했다.
-4. Nx "Split when tests slow you down." + affected·캐시 세분도 + 소유권 축 + 반대 논거("Related code should be close together") — 문구 일치.
-
-**미지지·보류(1건):** **Parnas 1972 원문에 도달하지 못했다** — 3개 호스트 시도(MIT 연결 거부 · TU/e PDF 가 텍스트로 변환 안 됨 · acolyer 403) + 로컬 PDF 렌더 실패(poppler 미설치). 그래서 「모듈 = 작업 배정 단위」와 이점 목록은 **2차 요약과 모델 기억에 의존한다 → 불확실로 강등**. ★이것이 「대부분의 이점은 별도 유닛을 요구하지 않는다」는 결론의 첫 근거라서, 이 문서에서 가장 약한 다리다.★
-
-**수치 불일치(1건):** MacCormack 논문의 전파 가능성 배수가 **6배 vs 8배**로 갈린다. 도메인 한정 검색(dash.harvard·hbs)은 6배, 일반 검색 요약은 8배. 원문 abstract 는 403/405 로 막혔다. → **6배를 채택하되 불일치를 명시**한다.
-
-**오귀속 강등(1건):** 수집자가 "corrode/matklad" 공동으로 붙인 컴파일 시간 2m22s→26s 수치는 **matklad 원문에 없다**(그 글의 숫자는 CI 8분·목표 10분). corrode 쪽은 미확인 → **이 문서에서 그 수치를 쓰지 않는다.**
-
-**출처 편향 주의(수집자 자기신고):** corrode.dev 는 워크스페이스 분할의 단점을 하나도 열거하지 않아 옹호 문서로 취급했고, Nx·Turborepo 문서는 패키지 경계 쪽에 이해관계가 있는 벤더 문서다.
-
-## 쟁점·한계·공백
-
-- **Parnas 원문 미검** — 위 참조. 재확인 없이 이 문서의 결론 1을 인용하지 말 것.
-- **「한 큰 crate + incremental」 대 「쪼갠 워크스페이스」의 동일 코드베이스 A/B 측정이 없다.** Feldera 는 생성 코드고 Anderson 은 메커니즘만 준다. Rust 컴파일 시간 절의 가장 큰 증거 공백.
-- **rustc 병렬 프런트엔드의 현재(2026) 상태 모름** — 2023-11 나이틀리 opt-in 발표만 확인. 안정화·기본값 여부는 미확인.
-- **워크스페이스 feature unification opt-out 의 안정화 여부 모름.**
-- **"폴더 + 경계 린트로 버티다 X 지점에서 쪼갠다" 를 명시한 이름 있는 엔지니어의 1차 출처를 못 찾았다** — 패턴은 여럿이 주장하지만 귀속 가능한 형태가 아니었다.
-- **DDD bounded context 를 분할 기준으로 다룬 문헌(Evans·Vernon)을 안 봤다** — 수집자가 스스로 "가장 큰 누락 축"으로 지목했다.
-- **보안·blast radius 를 분할 축으로 다룬 권위 출처를 못 찾았다.**
-- **Nx 문서 일부·Turborepo JIT vs 사전컴파일 비교 페이지가 렌더되지 않아** 해당 트레이드오프는 미검.
+- **Measured (peer-reviewed):** MacCormack, Baldwin & Rusnak, *Research Policy* 41(8), 2012 — matched product pairs. Loosely coupled organizations produced significantly more modular designs, and the difference in the likelihood that a design change in one component propagates to another is **up to 6 times**. **Likely — with a numeric discrepancy** (see grounding below)
+- **Measured (survey·statistics):** DORA — a loosely coupled architecture is one of the strongest predictors of continuous delivery, and it is explicitly separated from technology choice ("achievable with a mainframe, and can fail with the latest fashionable technology" (back-translated)). **Certain**
+- **Measured (practice·single case):** Feldera 1617s→150s · rustc CGU 9.7s vs 4.5s · Rust 1.38 pipelining 10–20%. **Reporting the numbers is certain / generalizing is uncertain**
+- **Weakly holds:** the conventional wisdom that coupling·cohesion is *the* driver of modularization — research raises doubts. **Likely**
+- **Does not hold:** the benefits of microservices — SLRs report that the empirical evidence is very limited. **Likely**
+- **Opinion only:** Metz · the premature-abstraction family · Fowler MonolithFirst (anecdote-based by its own account) · the Grzybek driver table. **Certain**
 
 ---
 
-## 9. 적대 리뷰 결과 (cross-family · codex, effort=high, web_search on)
+## Grounding results (main-session external verification)
 
-리뷰어 판정: **"전반적 건전성 낮음 — 개별 인용은 대체로 정확하나 load-bearing 결론 여럿이 1차 자료 반례로 반박된다."** 적출 15건. 아래는 메인이 각 건을 검증해 채택·기각·조정한 결과다(리뷰어 판정을 그대로 옮기지 않는다).
+**Supported — checked directly in the primary text (4):**
+1. The three *SWE at Google* ch.21 quotes (source control first · SemVer/Hyrum · C++ diamond) — wording matches. However, the original says "nearly zero tolerance" and the collector rendered it "almost no tolerance" (same meaning, not same wording).
+2. Two matklad quotes + caveat — wording matches ("The most important property of a crate is which crates it doesn't (transitively) depend on." · "if you ended up with a graph like the first one, you are not winning much.").
+3. Node.js `exports` "**not a strong encapsulation**" + the absolute-path bypass example — wording matches. It is the core of the front-end conclusion, so it was checked directly.
+4. Nx "Split when tests slow you down." + affected·cache granularity + the ownership axis + the counter-argument ("Related code should be close together") — wording matches.
 
-### 채택 — 본문을 정정한다
+**Unsupported·on hold (1):** **The primary text of Parnas 1972 was not reached** — 3 hosts tried (MIT connection refused · the TU/e PDF could not be converted to text · acolyer 403) + local PDF rendering failed (poppler not installed). So 「모듈 = 작업 배정 단위」 (module = unit of work assignment) and the benefit list **rely on secondary summaries and model memory → downgraded to uncertain**. ★This is the first basis for the conclusion 「대부분의 이점은 별도 유닛을 요구하지 않는다」 (most benefits do not require a separate unit), so it is the weakest bridge in this document.★
 
-**A. §1 표에서 「독립 스케일링·장애 격리·기술 이종성」 세 줄을 폐기한다.** (심각도 높음 · 논리 오류)
-그 셋은 **out-of-process 서비스 경계**의 성질이고 라이브러리 분할로는 생기지 않는다. Grzybek·Newman 의 드라이버 표는 마이크로서비스 논의이므로 lib 분할 질문에 그대로 끌어오면 범주 오류다. → **lib 분할 질문에서 이 축은 아예 빠진다.**
+**Numeric discrepancy (1):** the propagation-likelihood multiplier in the MacCormack paper splits into **6x vs 8x**. Domain-restricted search (dash.harvard·hbs) says 6x, general search summaries say 8x. The primary abstract was blocked with 403/405. → **Adopt 6x but state the discrepancy.**
 
-**B. ★가장 큰 정정 — §2 의 첫 항목(SWE at Google ch.21)은 모노레포 내부 분할에 거의 걸리지 않는다.★** (심각도 높음 · 과장)
-메인 재확인(원문 직접): 그 장은 경계를 **"우리 조직이 이 하위 프로젝트의 개발·업데이트·관리를 통제하는가"** 로 정의하고, "회사의 모든 팀이 **별도 저장소**·목표·개발 관행을 가지면 그 상호작용은 소스 관리보다 의존성 관리에 가까워진다", 그리고 "(가상의) 단일 저장소를 가진 큰 조직은 **소스 관리 정책으로 훨씬 더 멀리 확장할 수 있다 — 이것이 Google 의 방식**"이라고 말한다. 즉 그 인용은 **모노레포 vs 멀티레포**를 가르는 말이고, **한 모노레포 안에서 crate 를 쪼개는 것의 비용 근거가 아니다.** 버전도 릴리스도 없으므로 의존성 관리 세금이 발생하지 않는다. → **「쪼개지 말라」쪽 논거에서 이 항목을 뺀다.**
+**Downgrade for misattribution (1):** the compile-time figure 2m22s→26s that the collector attributed jointly to "corrode/matklad" is **not in the matklad original** (the numbers in that article are CI 8 minutes · target 10 minutes). The corrode side is unchecked → **this document does not use that figure.**
 
-**C. §5 의 TS 판정 문구를 좁힌다.** (심각도 높음 · 과장)
-"패키지로 쪼개도 경계가 강제되지 않는다"는 너무 절대적이다. 같은 Node 문서가 **미수출 bare subpath 는 `ERR_PACKAGE_PATH_NOT_EXPORTED` 로 거부**하며 `exports` 가 도구·SemVer 에 신뢰 가능한 패키지 인터페이스 보장을 준다고 말한다. → 정확한 명제: **bare specifier 축에서는 강제되고, 상대·절대 경로 축에서는 안 된다.** 실무 결론(린트가 필요하다)은 유지된다 — 근거는 Turborepo 유지보수자의 "같은 파일시스템이라 패키지 루트에서 `../../` 로 쉽게 나갈 수 있다".
+**Source-bias caution (collector's self-report):** corrode.dev enumerates none of the downsides of workspace splitting, so it was treated as an advocacy document, and the Nx·Turborepo docs are vendor documents with a stake in package boundaries.
 
-**D. crate · Cargo package · workspace 를 구분한다.** (심각도 높음 · 논리 오류)
-본문이 셋을 뭉갰다. 정확히는 — **가시성·컴파일·coherence 는 crate 에**, **매니페스트·버전·publish·resolver 선택은 package/workspace 에** 귀속된다. 한 package 는 여러 target(=crate)을 가질 수 있다.
+## Disputes · limits · gaps
 
-**E. 「강제 분할」 축이 빠졌다 — Rust 에는 언어가 crate 분리를 요구하는 경우가 있다.** (심각도 높음 · 누락)
-proc-macro 는 `proc-macro` crate 에만 정의할 수 있고 정의한 crate 안에서는 쓸 수 없다. `#![no_std]` 는 crate 전체에 걸린다 — 부분 no_std 가 필요하면 쪼개야 한다. → **§1 표에 「언어가 강제」 행을 추가한다.**
+- **Parnas primary text unchecked** — see above. Do not quote conclusion 1 of this document without re-checking.
+- **There is no A/B measurement on the same codebase of 「한 큰 crate + incremental」 (one big crate + incremental) versus 「쪼갠 워크스페이스」 (a split workspace).** Feldera is generated code and Anderson gives only the mechanism. The biggest evidence gap in the Rust compile-time section.
+- **The current (2026) state of the rustc parallel front end is unknown** — only the 2023-11 nightly opt-in announcement was confirmed. Whether it is stabilized or the default is unchecked.
+- **Whether the workspace feature-unification opt-out is stabilized is unknown.**
+- **No primary source was found from a named engineer who states "hold with folders + boundary lint and split at point X"** — several people claim the pattern, but not in an attributable form.
+- **Literature that treats the DDD bounded context as a split criterion (Evans·Vernon) was not looked at** — the collector itself pointed to it as "the biggest missing axis".
+- **No authoritative source was found that treats security·blast radius as a split axis.**
+- **Parts of the Nx docs and the Turborepo JIT vs precompile comparison page did not render**, so that trade-off is unchecked.
 
-**F. 비순환 강제의 범위를 좁힌다.** (심각도 중간 · confident-wrong)
-메인 재확인(Cargo 문서 원문): "**보통 resolver 는 그래프의 순환을 허용하지 않지만, dev-dependencies 에 대해서는 허용한다.**" → 정확한 명제: **프로덕션 의존 그래프의 비순환**만 컴파일러·resolver 가 강제한다.
+---
 
-**G. 「독립 CI 범위」는 패키지 고유 이점이 아니다.** (심각도 중간 · confident-wrong)
-CI 는 패키지 메타데이터 없이 **디렉터리 경로 필터**로 워크플로를 고를 수 있다. → §5 의 패키지-전용 이득 목록에서 이 항목을 뺀다. (남는 것은 도구의 캐시·affected 세분도이고, 그건 "도구가 인식하는 프로젝트" 단위를 요구한다.)
+## 9. Adversarial review results (cross-family · codex, effort=high, web_search on)
 
-**H. 크로스 crate 인라인 문구를 고친다.** (심각도 중간 · confident-wrong)
-"`#[inline]` 이나 LTO 로만 회복된다"는 과하다. **제네릭 함수는 소비 crate 에서 monomorphize 되므로 본문이 이미 인라인 가능**하고, 현 rustc 에는 속성 없는 단순 함수의 크로스 crate 인라인 가능성을 추론하는 경로도 있다. `#[inline]` 자체도 보장이 아니라 힌트다.
+Reviewer's verdict: **"Overall soundness is low — individual quotes are mostly accurate, but several load-bearing conclusions are refuted by primary-source counterexamples."** 15 findings extracted. Below is the result of the main session verifying each one and adopting, rejecting or adjusting it (the reviewer's verdict is not transcribed as is).
 
-**I. feature unification 문구를 고친다.** (심각도 중간 · 과장)
-"워크스페이스 멤버 간에는 피할 수 없다"는 과하다. resolver 2 가 일부 축(target·build·proc-macro·dev)을 이미 피하고, **nightly `-Z feature-unification`** 이 package 별 모드로 한 호출 안에서 서로 다른 feature set 을 중복 빌드할 수 있다. (stable 여부는 여전히 미확인.)
+### Adopted — the body is corrected
 
-**J. Rust 분할 비용에 inherent impl 제약이 빠졌다.** (심각도 중간 · 누락)
-inherent `impl` 은 **그 nominal type 이 정의된 crate 안에** 있어야 한다. 타입을 별도 crate 로 옮기면 소비 crate 에서 메서드를 직접 더할 수 없고 trait·자유 함수·newtype 으로 재설계해야 한다. ★우리 케이스에 직접 걸린다 — `layout/types.rs` 를 crate 로 옮기면 셸이 그 타입들에 inherent 메서드를 못 붙인다.★
+**A. In the §1 table, discard the three rows 「독립 스케일링·장애 격리·기술 이종성」 (independent scaling · failure isolation · technology heterogeneity).** (severity high · logic error)
+Those three are properties of an **out-of-process service boundary** and do not arise from splitting a library. The Grzybek·Newman driver tables are about microservices, so pulling them as is into the lib-split question is a category error. → **For the lib-split question this axis drops out entirely.**
 
-**K. Nx 기준의 비구조적 대안이 빠졌다.** (심각도 중간 · 누락)
-테스트 병목은 분할 신호이지만 유일한 대응이 아니다 — Nx 자체 task 분해, Jest `--shard`·변경분 실행이 있다.
+**B. ★The biggest correction — the first item of §2 (SWE at Google ch.21) hardly applies to splitting inside a monorepo.★** (severity high · overstatement)
+Main-session re-check (primary text directly): that chapter defines the boundary as **"does our organization control the development, updating and management of this sub-project"** (back-translated), and says "if every team in the company has a **separate repository**, goals and development practices, their interaction is closer to dependency management than to source control" (back-translated), and "a large organization with a (hypothetical) single repository **can scale much further with source-control policy — this is Google's way**" (back-translated). That is, the quote is a statement that separates **monorepo vs multirepo**, and it is **not cost evidence for splitting crates inside one monorepo.** There are no versions and no releases, so the dependency-management tax does not arise. → **Remove this item from the 「쪼개지 말라」 ("do not split") side of the argument.**
 
-**L. pipelining 수치를 한정한다.** (심각도 낮음 · 과장)
-Rust 1.38 의 10~20% 는 **일부 crate 그래프의 optimized clean build** 에 한정된 보고이고, 단일 crate 에는 효과가 없으며 일부 그래프에서는 개선이 없다고 발표가 명시한다.
+**C. Narrow the wording of the TS verdict in §5.** (severity high · overstatement)
+"Even splitting into packages does not enforce the boundary" is too absolute. The same Node doc says an **unexported bare subpath is rejected with `ERR_PACKAGE_PATH_NOT_EXPORTED`** and that `exports` gives tools and SemVer a trustworthy package interface guarantee. → The accurate proposition: **it is enforced on the bare-specifier axis and not on the relative·absolute-path axis.** The practical conclusion (lint is needed) stands — the basis is the Turborepo maintainer's "same filesystem, so you can easily leave the package root with `../../`" (back-translated).
 
-### 조정 — 리뷰어 지적을 좁혀서 채택
+**D. Distinguish crate · Cargo package · workspace.** (severity high · logic error)
+The body blurred the three. Precisely — **visibility·compilation·coherence belong to the crate**, **manifest·version·publish·resolver choice belong to the package/workspace**. One package can have several targets (= crates).
 
-**M. "외부 소비자에게 게시하려면 별도 패키지"** — 리뷰어는 confident-wrong(심각도 높음)으로 봤다. **부분 채택:** 한 패키지가 subpath exports 로 여러 외부 entry point 를 낼 수 있다는 것은 맞다. 그러나 리뷰어 자신이 "독립 버전·설치는 별도 패키지가 필요하다"고 인정하므로, 원 명제를 **「독립 버전·릴리스 케이던스」**로 좁히면 성립한다. 심각도는 문구 정밀도 수준으로 내린다.
+**E. The 「강제 분할」 (forced split) axis is missing — in Rust there are cases where the language requires crate separation.** (severity high · omission)
+A proc-macro can be defined only in a `proc-macro` crate and cannot be used inside the crate that defines it. `#![no_std]` applies to the whole crate — if you need partial no_std you must split. → **Add a 「언어가 강제」 (enforced by the language) row to the §1 table.**
 
-**N. Parnas — 전제는 해소, 추론은 내 것으로 라벨링.** 리뷰어가 원문에 도달해 확인해 줬다: Parnas 는 module 을 **subprogram 이 아니라 responsibility assignment** 로 정의하고 기대효과 셋(개발 기간 단축·유연성·이해가능성)을 실제로 열거한다 → **grounding 미검이 지지로 해소됐다.** 다만 그가 folder 경계와 compilation/package 경계를 **비교하지는 않으므로**, "따라서 유닛 안 경계로 충분하다"는 **내 추론**이다. 그렇게 라벨링한다.
+**F. Narrow the scope of acyclicity enforcement.** (severity medium · confident-wrong)
+Main-session re-check (Cargo docs primary text): "**the resolver generally does not allow cycles in the graph, but it does allow them for dev-dependencies.**" (back-translated) → The accurate proposition: **only the acyclicity of the production dependency graph** is enforced by the compiler·resolver.
 
-### 리뷰가 해소해 준 미결 둘
+**G. 「독립 CI 범위」 (independent CI scope) is not a package-specific benefit.** (severity medium · confident-wrong)
+CI can pick workflows with a **directory path filter** without package metadata. → Remove this item from the package-only benefit list in §5. (What remains is the tool's cache·affected granularity, and that requires a "project the tool recognizes" unit.)
 
-- **MacCormack 6배 vs 8배 = 버전 차이였다.** HBS 워킹페이퍼(08-039)가 8배, 최종 *Research Policy* 2012 판이 6배. → 본문의 6배 채택이 옳다. **확실**로 승격.
-- **2m22s → 26.63s 수치는 실재하나 crate 분할 사례가 아니다** — clap·lalrpop·regex 같은 무거운 의존성을 교체해 의존 105→22 로 줄인 사례다. → 이 수치를 쓰지 않기로 한 판단이 옳았다.
+**H. Fix the cross-crate inlining wording.** (severity medium · confident-wrong)
+"Recovered only by `#[inline]` or LTO" is too strong. **A generic function is monomorphized in the consuming crate, so its body can already be inlined**, and the current rustc also has a path that infers cross-crate inlinability for simple functions without the attribute. `#[inline]` itself is a hint, not a guarantee.
 
-### 순 효과
+**I. Fix the feature unification wording.** (severity medium · overstatement)
+"Not avoidable among workspace members" is too strong. resolver 2 already avoids some axes (target·build·proc-macro·dev), and **nightly `-Z feature-unification`** can build different feature sets in duplicate within one invocation in a per-package mode. (Whether it is stable is still unchecked.)
 
-**결론의 방향은 바뀌지 않는다** — 「별도 유닛이 있어야만 얻는 것은 짧은 목록이고 대부분은 유닛 안 경계로 얻는다」는 유지된다. 바뀐 것은 **그 목록의 내용과 반대 논거의 무게**다:
+**J. The inherent impl constraint is missing from the Rust cost of splitting.** (severity medium · omission)
+An inherent `impl` must be **in the crate where that nominal type is defined**. If you move a type to a separate crate, the consuming crate cannot add methods directly and must redesign with traits·free functions·newtypes. ★It bears directly on our case — if `layout/types.rs` is moved into a crate, the shell cannot attach inherent methods to those types.★
 
-- 목록에서 **빠지는 것** = 독립 스케일링·장애 격리·기술 이종성(서비스 축) · 독립 CI 범위(경로 필터로 됨)
-- 목록에 **들어오는 것** = 언어가 강제하는 경우(proc-macro · crate 단위 속성)
-- 목록에서 **좁혀지는 것** = 비순환(프로덕션 의존만) · 게시(독립 버전·릴리스 케이던스로) · 빌드 시간(그래프가 넓어질 때만, 단일 crate 엔 무효)
-- ★**반대 논거가 하나 약해졌다**★ — 모노레포 내부 분할에 의존성 관리 세금은 거의 걸리지 않는다(위 B). 그래서 「쪼개지 말라」의 근거는 **구체적 언어 비용**(pub 표면 · inherent impl · orphan rule · 생성물 게이트 이사)과 **기준 미달**(소비자 수 · 테스트 병목 · 그래프 너비) 쪽으로 옮겨간다.
+**K. The non-structural alternatives to the Nx criterion are missing.** (severity medium · omission)
+A test bottleneck is a signal to split, but it is not the only response — there are Nx's own task decomposition, and Jest `--shard` and changed-only runs.
+
+**L. Qualify the pipelining figure.** (severity low · overstatement)
+The 10–20% of Rust 1.38 is a report limited to **the optimized clean build of some crate graphs**, and the announcement states explicitly that it has no effect on a single crate and no improvement on some graphs.
+
+### Adjusted — adopted in a narrowed form
+
+**M. "To publish to external consumers, a separate package"** — the reviewer saw it as confident-wrong (severity high). **Partially adopted:** it is true that one package can offer several external entry points through subpath exports. But the reviewer himself admits "independent versions·installation need a separate package", so if the original proposition is narrowed to **「독립 버전·릴리스 케이던스」** (independent version · release cadence) it holds. The severity is lowered to the level of wording precision.
+
+**N. Parnas — the premise is resolved, the inference is labeled as mine.** The reviewer reached the primary text and confirmed: Parnas defines a module as a **responsibility assignment, not a subprogram**, and actually lists three expected effects (shorter development time · flexibility · comprehensibility) → **the grounding "unchecked" is resolved into supported.** However, since he **does not compare** folder boundaries with compilation/package boundaries, "therefore a boundary inside a unit is enough" is **my inference**. It is labeled as such.
+
+### Two open items the review resolved
+
+- **MacCormack 6x vs 8x = a version difference.** The HBS working paper (08-039) says 8x, the final *Research Policy* 2012 edition says 6x. → Adopting 6x in the body is correct. Promoted to **certain**.
+- **The 2m22s → 26.63s figure is real but is not a crate-split case** — it is a case of replacing heavy dependencies such as clap·lalrpop·regex, reducing dependencies from 105→22. → The judgment not to use this figure was right.
+
+### Net effect
+
+**The direction of the conclusion does not change** — 「별도 유닛이 있어야만 얻는 것은 짧은 목록이고 대부분은 유닛 안 경계로 얻는다」 (what you get only with a separate unit is a short list and most is obtained with boundaries inside a unit) stands. What changed is **the contents of that list and the weight of the counter-argument**:
+
+- **Dropping out of** the list = independent scaling·failure isolation·technology heterogeneity (the service axis) · independent CI scope (a path filter does it)
+- **Coming into** the list = cases enforced by the language (proc-macro · crate-level attributes)
+- **Narrowed in** the list = acyclicity (production dependencies only) · publishing (to independent version·release cadence) · build time (only when the graph gets wider, no effect on a single crate)
+- ★**One counter-argument got weaker**★ — the dependency-management tax hardly applies to splitting inside a monorepo (B above). So the basis for 「쪼개지 말라」 ("do not split") shifts toward **concrete language costs** (pub surface · inherent impl · orphan rule · moving the generated-output gate) and **failing the criteria** (number of consumers · test bottleneck · graph width).

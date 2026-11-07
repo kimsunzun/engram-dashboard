@@ -1,88 +1,88 @@
-# 셸(`src-tauri`) crate 분리 경계 실측 — 2026-08-23
+# Measured crate-split boundary of the shell (`src-tauri`) — 2026-08-23
 
-- **성격:** 선행조사(실측). **결정 아님** — 분리 여부·모양은 사용자가 정한다(2026-08-23 시점 미결: 사용자가 구조를 검토 중).
-- **출처 질문:** "백엔드는 분리했는데 왜 셸은 안 됐나. 쪼갤 수 있으면 쪼개고 아니면 합치면 될 듯"(사용자, 2026-08-23).
-- **관련:** `../tracking.md` T-27(이 조사가 그 「미결 ①」의 재료다) · ADR-0151(분리 판정 기준) · ADR-0035(레이아웃 권위가 셸에 있다) · ADR-0012(모듈 격리) · `../research/crate-granularity-survey-2026-08-17.md`(ADR-0151 배경 조사).
+- **Nature:** preliminary survey (measured). **Not a decision** — whether to split and in what shape is up to the user (undecided as of 2026-08-23: the user is reviewing the structure).
+- **Source question:** "백엔드는 분리했는데 왜 셸은 안 됐나. 쪼갤 수 있으면 쪼개고 아니면 합치면 될 듯" (user, 2026-08-23) (the backend was split, so why not the shell? split it if it can be split, otherwise merge it).
+- **Related:** `../tracking.md` T-27 (this survey is the material for its 「미결 ①」) · ADR-0151 (split decision criteria) · ADR-0035 (layout authority lives in the shell) · ADR-0012 (module isolation) · `../research/crate-granularity-survey-2026-08-17.md` (background survey for ADR-0151).
 
-## 결론
+## Conclusion
 
-**경계는 이미 서 있다.** 이 조사가 세운 게 아니라, 누군가 Tauri 의존을 걷어내는 작업을 이미 해놓고 **패키지만 옮기지 않은 상태**다.
+**The boundary already stands.** This survey did not set it up; someone had already done the work of stripping out the Tauri dependency and left **only the package unmoved**.
 
-- 셸 실코드 **10,637줄 중 8,286줄(78%)이 Tauri import 0**.
-- 그 8,286줄은 **순환 없는 일직선**이고, 어댑터 층을 거꾸로 참조하는 곳이 **하나도 없다**.
-- Tauri에 실제로 묶인 것은 **2,351줄**(클릭 핸들러·트레이·부팅 배선)뿐이다.
+- Of **10,637 lines** of real shell code, **8,286 lines (78%) have zero Tauri imports**.
+- Those 8,286 lines are a **straight line with no cycles**, and there is **not a single place** that references the adapter layer backwards.
+- What is actually tied to Tauri is only **2,351 lines** (click handlers · tray · boot wiring).
 
-**즉 「쪼갤 수 있나」는 이미 답이 나와 있고, 남은 것은 「어떤 모양으로」다.**
+**So the answer to 「쪼갤 수 있나」 (can it be split) is already out, and what is left is 「어떤 모양으로」 (in what shape).**
 
-## ★동기가 바뀌었다 — 기존 테스트는 근거가 아니다★
+## ★The motive changed (동기가 바뀌었다) — the existing tests are not the grounds★
 
-**사용자 결정 2026-08-23: 기존 테스트 파일에 미련을 갖지 않는다. 분리 가능한 단위에 초점을 맞춘다.**
+**User decision 2026-08-23: 기존 테스트 파일에 미련을 갖지 않는다. 분리 가능한 단위에 초점을 맞춘다.** (Do not cling to the existing test files. Focus on the units that can be split.)
 
-이것이 T-27의 프레이밍과 갈리는 지점이므로 명시한다. T-27은 "작성돼 있으나 아무도 돌리지 않는다"를 문제로 든다 — 셸 소스 안에 테스트 **209개**가 있고 전부 실행되지 않는다(계측은 아래 §부록). 그 프레임에서는 「그 209개를 살린다」가 분리 동기가 되고, 값싼 대안(CI에 컴파일 전용 스텝 한 줄 추가)이 경쟁 선택지로 올라온다.
+I state this explicitly because it is where this part departs from T-27's framing. T-27 names "written but nobody runs them" as the problem — there are **209** tests inside the shell source and none of them execute (the measurement is in the appendix below). In that frame, 「그 209개를 살린다」 (revive those 209) becomes the motive for the split, and a cheap alternative (adding one compile-only step line to CI) comes up as a competing option.
 
-> ★**사실 정정(2026-08-24) — 이 절의 사실 전제는 무너졌다. 단 위 사용자 결정은 그대로 선다.**★
-> 「전부 실행되지 않는다」는 더 이상 참이 아니다. `[lib] test = false` + `[[test]] name = "lib_unit"`(`path = "src/lib.rs"`) + `build.rs`의 `cargo:rustc-link-arg-tests=` 로 Windows manifest가 테스트 exe에도 링크되면서, 그 단위 스위트는 `cargo test -p engram-dashboard --test lib_unit` 으로 **돈다**(결정·거부한 대안 = ADR-0174). ~~217건 중~~(★건수를 적은 것 자체가 실수였다 — 하루 만에 낡았다★) 대부분이 초록이고 남은 실패는 **전부 `daemon_client::tests::` 한 축**이다 — 수치·CI 등재 상태의 정본은 CLAUDE.md 「빌드·검증 명령」의 `lib_unit` 줄이고 여기 베끼지 않는다. 그 실패는 제품 결함이 아니라 선재 하네스 부패다(`daemon_client::start_connection` 의 `app: None` 단락 — 커밋 `ffcd766` 이래. 운영 경로는 `app: Some` 이라 무영향). CI에는 그 실패 때문에 **스위트 전체가** 아직 등재되지 않았다.
-> 즉 **「살릴 그물이 없다」던 조건이 바뀌었다** — 그물은 지금 로컬에서 돌고 있고 대부분 초록이다. ~~**그렇다고 위 결정을 이 문서가 뒤집지 않는다**: 버릴지 말지는 사용자 결정 사안이고, 여기서는 그 결정이 이제 **무너진 전제 위에 서 있다는 사실만** 드러내 둔다(같은 긴장이 `docs/tracking.md` T-27에도 있다).~~ → ★**귀속 정정(2026-08-24) — 아래 블록**★: 무너진 것은 **사용자 결정의 전제**가 아니라 **이 문서가 그 결정을 옮겨 적은 말**이다. 「버릴지 말지」라는 긴장 자체를 이 문서가 만들었다.
+> ★**Factual correction (2026-08-24) — the factual premise of this section has collapsed. But the user decision above still stands.**★
+> 「전부 실행되지 않는다」 (none of them execute) is no longer true. With `[lib] test = false` + `[[test]] name = "lib_unit"` (`path = "src/lib.rs"`) + `cargo:rustc-link-arg-tests=` in `build.rs`, the Windows manifest is now linked into the test exe too, and that unit suite **runs** with `cargo test -p engram-dashboard --test lib_unit` (decision · rejected alternatives = ADR-0174). ~~Out of 217~~ (★writing the count at all was a mistake — it went stale in a day★) most are green, and the remaining failures are **all on one axis, `daemon_client::tests::`** — the canonical source for the numbers and the CI registration status is the `lib_unit` line of CLAUDE.md 「빌드·검증 명령」, and it is not copied here. Those failures are not a product defect but pre-existing harness rot (the `app: None` short-circuit in `daemon_client::start_connection` — since commit `ffcd766`. The production path is `app: Some`, so it is unaffected). Because of those failures, **the whole suite** is not yet registered in CI.
+> That is, **the condition of 「살릴 그물이 없다」 (there is no net to revive) has changed** — the net now runs locally and is mostly green. ~~**That said, this document does not overturn the decision above**: whether to throw it away is the user's decision, and here we only reveal **the fact that the decision now stands on a collapsed premise** (the same tension exists in `docs/tracking.md` T-27).~~ → ★**Attribution correction (2026-08-24) — the block below**★: what collapsed is not **the premise of the user's decision** but **the words in which this document transcribed that decision**. This document itself created the tension of 「버릴지 말지」 (whether to throw away or not).
 
-> ★**귀속 정정(2026-08-24) — 위 인용 한 줄은 그대로 맞다. 틀린 것은 이 문서가 그것을 다시 적은 말이다.**★
-> 사용자가 실제로 한 말은 **이 절 첫머리의 굵은 인용 한 줄이 전부다**(위 「사용자 결정 2026-08-23: …」). 그것은 **우선순위 진술**이다 — "기존 테스트 파일에 분리 동기를 두지 않는다". 그런데 이 문서(와 `../tracking.md` T-27)는 그것을 **「209개를 버린다」는 처분 결정**으로 바꿔 적고, 그 센 판본을 뒤 결론들의 **전제**로 썼다. ★**사용자가 그런 적 없다고 명시적으로 부인했다(2026-08-24, 축자: "내가 언제 버린다고 했어?")**★ — 즉 「폐기·처분」은 **세션의 의역**이지 사용자 결정이 아니다.
-> ★**우선순위 진술은 처분 명령이 아니다**★ — "거기에 동기를 두지 않는다"와 "그것을 버린다"는 다른 말이고, 후자는 아무도 결정한 적이 없다. **209개를 어떻게 할지는 지금도 미결이다**(그 한 줄은 그것을 정하지 않는다). ★여기서 대신 정하지 않는다★.
-> **게다가 그 사이 사실도 반대로 갔다:** 그 스위트는 지금 돌고(ADR-0174), **남은 실패를 고치는 작업이 사용자 승인 아래 진행 중이다**(연결 태스크의 발화를 포트 뒤로 빼 `app: None` 단락을 없애는 모양 — 갭·결정권의 정본은 `../tracking.md` T-27). 즉 「버려지는 테스트」라는 프레이밍은 **전제도 사실도** 서지 않는다.
-> **아래에서 「버리므로」·「폐기됐다」로 적힌 자리는 전부 이 의역에서 나왔다** — 각 자리에 정정을 달았고, 지우지는 않았다(무엇을 믿고 그렇게 결론냈는지가 기록의 값어치다).
+> ★**Attribution correction (2026-08-24) — the one quoted line above is correct as it is. What is wrong is the words in which this document wrote it again.**★
+> What the user actually said is **all in the one bold quoted line at the head of this section** (「사용자 결정 2026-08-23: …」 above). It is a **priority statement** — "do not put the split motive on the existing test files". But this document (and `../tracking.md` T-27) rewrote it as a **disposal decision, 「209개를 버린다」 (throw the 209 away)**, and used that stronger version as the **premise** of the later conclusions. ★**The user explicitly denied ever saying that (2026-08-24, verbatim: "내가 언제 버린다고 했어?")**★ — that is, 「폐기·처분」 (discard · disposal) is **the session's paraphrase**, not the user's decision.
+> ★**A priority statement is not a disposal order**★ — "do not put the motive there" and "throw it away" are different statements, and nobody has ever decided the latter. **What to do with the 209 is still undecided** (that one line does not settle it). ★We do not decide it here on anyone's behalf★.
+> **On top of that, the facts went the opposite way in the meantime:** that suite now runs (ADR-0174), and **work to fix the remaining failures is under way with the user's approval** (in the shape of moving the connection task's emission behind a port to remove the `app: None` short-circuit — the canonical source for the gap and the decision authority is `../tracking.md` T-27). That is, the framing of 「버려지는 테스트」 (tests being thrown away) stands on **neither the premise nor the facts**.
+> **Every place below that is written as 「버리므로」 or 「폐기됐다」 came from this paraphrase** — each place got a correction attached, and nothing was deleted (what it believed when it reached that conclusion is the value of the record).
 
-> ★**후속 사실 정정(2026-08-24, 위 두 블록보다 뒤) — 그 블록들이 「아직」으로 적어 둔 것이 다 닫혔다.**★
-> 남아 있던 실패는 **전부 고쳐졌다.** 그래서 둘이 함께 움직였다: ① CI 가 그 단위 스위트를 **통째로** 돈다(빨간 건을 피하려고 내보내기 테스트만 고르던 이름 필터가 걷혔다) ② 워크스페이스 회귀도 `--exclude engram-dashboard` 를 걷어 **이 패키지를 함께 돈다**. 즉 셸 로직은 이제 로컬·CI 양쪽의 자동 회귀망 안이다.
-> ★**그러니 아래에서 「알려진 실패가 남아 있다」·「CI 미등재」·「수리가 진행 중이다」로 읽히는 자리는 전부 이 시점 이전의 기록이다**★ — 지우지 않고 남긴다(이 조사가 무엇을 보고 판단했는지가 기록의 값어치다). ★건수는 여기 적지 않는다 — 정본 = CLAUDE.md 「빌드·검증 명령」의 `lib_unit` 줄★. 남은 갭과 결정권은 `../tracking.md` T-27 이고, 그쪽도 같은 날 범위가 좁아졌다(검증 공백은 닫혔고 남은 것은 분리 모양 결정과 옛 테스트의 처분).
+> ★**Follow-up factual correction (2026-08-24, later than the two blocks above) — everything those blocks wrote as 「아직」 (not yet) has closed.**★
+> The remaining failures have **all been fixed.** So two things moved together: ① CI runs that unit suite **as a whole** (the name filter that picked only the export tests to avoid the red ones is gone) ② the workspace regression also dropped `--exclude engram-dashboard` and **runs this package too**. That is, shell logic is now inside the automatic regression net both locally and in CI.
+> ★**So every place below that reads as 「알려진 실패가 남아 있다」, 「CI 미등재」 or 「수리가 진행 중이다」 is a record from before this point**★ — we leave them without deleting (what this survey saw when it judged is the value of the record). ★No count is written here — canonical source = the `lib_unit` line of CLAUDE.md 「빌드·검증 명령」★. The remaining gap and the decision authority are in `../tracking.md` T-27, and its scope also narrowed the same day (the verification gap is closed, and what remains is the split-shape decision and the disposal of the old tests).
 
-~~**그 동기는 폐기됐다.** 209개를 버리기로 했으므로:~~ → ★**귀속 정정(2026-08-24)**★ — **폐기된 것이 아니라 분리 동기에서 내려놨을 뿐이다.** 실제 결정은 "기존 테스트 파일에 미련을 갖지 않는다 = 거기에 분리 동기를 두지 않는다"이고, **209개의 처분은 결정된 바 없다.** 그래서 아래 항들의 지위가 갈린다:
+~~**That motive has been discarded.** Since we decided to throw the 209 away:~~ → ★**Attribution correction (2026-08-24)**★ — **it was not discarded; it was only set down as a split motive.** The actual decision is "기존 테스트 파일에 미련을 갖지 않는다" = do not put the split motive on them, and **no disposal of the 209 has been decided.** So the status of the items below splits:
 
-- ~~**컴파일 전용 게이트 승격은 근거가 사라졌다** — 그 스텝의 값어치는 「이미 쓴 209개를 그물로 쓴다」가 전부였다. (T-27의 「미결 ③」(옛 「필요한 것 ②」 후단) = `cargo check --all-targets` 게이트 승격도 같이 근거를 잃는다.)~~
-  - → ★**귀속 정정(2026-08-24) — 이 결론은 의역 위에 서 있었다.**★ "209개를 버리므로 값어치가 0"이라는 논증은 **사용자가 하지 않은 말**을 전제로 했으므로 그대로는 성립하지 않는다. 그 스텝이 원래 노리던 값어치(「이미 쓴 209개를 그물로 쓴다」)는 **살아 있다** — 다만 축자 결정을 정직하게 읽으면 그것을 *분리의 동기로* 세우지 않을 뿐이다. **게이트 자체의 값어치와 분리의 동기는 별개 질문이고, 이 문서가 둘을 붙여 놨던 것이 오류다.**
-  - ★**그리고 별개 사유가 하나 새로 생겼다 — 그것은 판단을 요구한다**★: 그 스위트는 이제 `--test lib_unit` 으로 **실제로 실행된다**(ADR-0174). 컴파일 전용 게이트는 *실행되는* 스위트의 값싼 **대용**이었으므로, 실행이 가능해진 지금 대용의 값어치가 얼마나 남는지는 **다시 재야 한다.** ★이 문서는 그 판단을 하지 않는다★ — 게이트를 세울지·실행 스위트를 CI에 얹을지는 사용자 결정이고 아직 열려 있다.
-- **남는 분리 동기는 둘이다:**
-  1. **앞으로 쓸 테스트가 평범하게 돌고** 워크스페이스 회귀에 자동으로 실린다(지금은 셸에 뭘 넣어도 같은 사각지대에 들어간다).
-  2. **의존 방향이 컴파일러로 강제된다** — 지금 셸 안은 어느 모듈이 어느 모듈이든 부를 수 있다.
+- ~~**The grounds for promoting a compile-only gate are gone** — the entire value of that step was 「이미 쓴 209개를 그물로 쓴다」 (use the 209 already written as a net). (T-27's 「미결 ③」 (the old latter half of 「필요한 것 ②」) = promoting `cargo check --all-targets` to a gate also loses its grounds with it.)~~
+  - → ★**Attribution correction (2026-08-24) — this conclusion stood on the paraphrase.**★ The argument "the 209 are thrown away, so the value is 0" assumed **words the user did not say**, so it does not hold as it is. The value that step originally aimed at (「이미 쓴 209개를 그물로 쓴다」) is **alive** — only that, reading the verbatim decision honestly, we do not set it up *as the motive for the split*. **The value of the gate itself and the motive for the split are separate questions, and this document having glued the two together was the error.**
+  - ★**And one separate reason has newly appeared — it calls for a judgment**★: that suite now **actually executes** with `--test lib_unit` (ADR-0174). The compile-only gate was a cheap **stand-in** for a suite that *executes*, so now that execution is possible, how much value the stand-in has left **has to be measured again.** ★This document does not make that judgment★ — whether to set up the gate or to put the executing suite on CI is the user's decision and is still open.
+- **Two split motives remain:**
+  1. **Tests written from now on run normally** and are automatically carried in the workspace regression (today anything put into the shell falls into the same blind spot).
+  2. **The dependency direction is enforced by the compiler** — today inside the shell any module can call any module.
 
-> ★**사실 정정(2026-08-24) — 동기 1의 전제가 사라졌다.**★ 그 사각지대는 셸 패키지가 워크스페이스 회귀에서 **빠져 있다는 것**이었는데, 그 제외가 걷혔다(위 「후속 사실 정정」). 앞으로 `src-tauri/src/**` 에 쓰는 `#[cfg(test)]` 는 **분리하지 않아도** `lib_unit` 을 타고 워크스페이스 회귀·CI 에 실린다. 그래서 남는 분리 동기는 사실상 **2 하나**다. ★분리 여부·모양은 여전히 사용자 결정이고 이 문서가 정하지 않는다★.
+> ★**Factual correction (2026-08-24) — the premise of motive 1 is gone.**★ That blind spot was the shell package being **left out** of the workspace regression, and that exclusion has been lifted (「후속 사실 정정」 (follow-up factual correction) above). A `#[cfg(test)]` written in `src-tauri/src/**` from now on rides `lib_unit` into the workspace regression and CI **even without splitting**. So the split motive that remains is in effect **motive 2 alone**. ★Whether to split and in what shape is still the user's decision and this document does not decide it★.
 
-~~★209개가 현재 컴파일되는지는 **확인하지 않았다**★~~ → ★**답이 나왔다(2026-08-24)**★: 컴파일될 뿐 아니라 **실행된다** — `--test lib_unit` 으로 전부 돈다(★건수는 여기 적지 않는다 — 정본 = CLAUDE.md 「빌드·검증 명령」의 `lib_unit` 줄. 이 자리에 박아 뒀던 숫자가 하루 만에 낡았다★). ~~남은 실패는 하네스 부패 한 축(`app: None` 단락)에서 나오고 제품 결함이 아니다.~~ → ★**정정(2026-08-24, 같은 날 뒤): 그 실패도 전부 고쳐졌고 알려진 실패는 남아 있지 않다**★(위 「후속 사실 정정」). ~~**버리기로 한 결정은 사용자 것이라 여기서 되돌리지 않는다**~~ → ★**귀속 정정(2026-08-24)**★: **「버리기로 한 결정」은 없었다**(위 §귀속 정정 블록). 되돌릴 사용자 결정이 아니라 걷어낼 세션 의역이다. — 다만 「상태를 모른다」를 근거로 삼는 논증이 더 이상 성립하지 않는다는 것은 그대로 맞다.
+~~★Whether the 209 currently compile was **not checked**★~~ → ★**An answer has come (2026-08-24)**★: they not only compile but **execute** — they all run with `--test lib_unit` (★no count is written here — canonical source = the `lib_unit` line of CLAUDE.md 「빌드·검증 명령」. The number that had been pinned in this place went stale in a day★). ~~The remaining failures come from one axis of harness rot (the `app: None` short-circuit) and are not a product defect.~~ → ★**Correction (2026-08-24, later the same day): those failures have also all been fixed and no known failure remains**★ (「후속 사실 정정」 above). ~~**The decision to throw them away is the user's, so we do not reverse it here**~~ → ★**Attribution correction (2026-08-24)**★: **there was no 「버리기로 한 결정」 (decision to throw them away)** (the §Attribution correction block above). It is not a user decision to reverse but a session paraphrase to strip out. — Only that an argument that takes 「상태를 모른다」 (we do not know the status) as its grounds no longer holds is still correct.
 
-## 실측 — 판정선은 「Tauri import가 실제로 있나」
+## Measurement — the deciding line is 「Tauri import가 실제로 있나」
 
-★주석은 세지 않는다★. `layout/`에 붙은 "tauri" 글자는 **전부 주석이었다** — 느슨한 텍스트 검색으로는 92건이 잡히는데 실제 import는 0줄이다. 코어 격리 게이트가 `^\s*use tauri` 라인 앵커를 쓰는 이유와 같다(CLAUDE.md 「빌드·검증 명령」 — "import 라인 앵커라 주석 자기인용이 오탐되지 않는다").
+★Comments are not counted★. Every "tauri" string attached to `layout/` **was in a comment** — a loose text search catches 92 hits, yet the actual imports are 0 lines. It is the same reason the core-isolation gate uses the line anchor `^\s*use tauri` (CLAUDE.md 「빌드·검증 명령」 — "since it is an import-line anchor, a comment quoting itself is not a false positive").
 
-재현 명령(셸 패키지 루트 `src-tauri/`에서):
+Reproduction command (from the shell package root `src-tauri/`):
 
 ```
 for d in layout daemon_client commands tray; do echo "--- $d/"; grep -rn "^\s*use tauri" $d --include="*.rs"; done
 grep -n "^\s*use tauri" output_router.rs
 ```
 
-### 결과
+### Result
 
-| 덩어리 | 실코드 | `use tauri` | 판정 |
+| Chunk | Real code | `use tauri` | Decision |
 |---|---:|---|---|
-| `layout/` (7파일) | 4,222 | **0줄** | 분리 가능 — 셸 내부 참조도 0 |
-| `output_router.rs` | 906 | **0줄** | 분리 가능 — `layout`만 참조 |
-| `daemon_client/` (tests.rs 제외 6파일) | 3,158 | **1줄** | 분리 가능 — 그 1줄이 유일 장애 |
-| `commands/` (7파일) | 1,347 | 5파일 직결 | 셸 잔류(어댑터) |
-| `tray/` (3파일) | 695 | 2파일 직결 | 셸 잔류(어댑터) |
-| `lib.rs` + `main.rs` | 243 | 조립점 | 셸 잔류 |
-| `output_channel.rs` | 66 | **미확정**(§미확인) | 미정 |
+| `layout/` (7 files) | 4,222 | **0 lines** | splittable — also 0 internal shell references |
+| `output_router.rs` | 906 | **0 lines** | splittable — references only `layout` |
+| `daemon_client/` (6 files excluding tests.rs) | 3,158 | **1 line** | splittable — that 1 line is the only obstacle |
+| `commands/` (7 files) | 1,347 | 5 files directly tied | stays in the shell (adapter) |
+| `tray/` (3 files) | 695 | 2 files directly tied | stays in the shell (adapter) |
+| `lib.rs` + `main.rs` | 243 | assembly point | stays in the shell |
+| `output_channel.rs` | 66 | **undetermined** (§Unchecked) | undecided |
 
-- 셸 소스 총합 13,779줄. 그중 `daemon_client/tests.rs` 3,142줄을 빼면 **실코드 10,637줄**.
-- 분리 후보 합 = 4,222 + 906 + 3,158 = **8,286줄 (77.9%)**.
-- 어댑터 잔류 = 1,347 + 695 + 243 + 66 = **2,351줄**.
+- Shell source total 13,779 lines. Subtracting the 3,142 lines of `daemon_client/tests.rs` gives **10,637 lines of real code**.
+- Split candidates total = 4,222 + 906 + 3,158 = **8,286 lines (77.9%)**.
+- Adapters that stay = 1,347 + 695 + 243 + 66 = **2,351 lines**.
 
-### `daemon_client/`의 그 1줄
+### That 1 line in `daemon_client/`
 
-`daemon_client/connection.rs:41` — `use tauri::Emitter;`. 이벤트 발화용이다.
+`daemon_client/connection.rs:41` — `use tauri::Emitter;`. It is for emitting events.
 
-★새로 발명할 게 없다★ — `layout/apply.rs`가 **이미 같은 문제를 포트로 풀어 놨다**(그 파일 헤더: "전부 `AppHandle`·`State<..>`를 인자에서 걷어낸 자유 함수다 — 창 없이 단독 호출"). 발화를 포트로 받고 실 어댑터는 셸이 소유하는 형태이고, `tests/layout_apply.rs`가 그 하네스의 실물이다. 같은 방식이 그대로 적용된다.
+★There is nothing new to invent★ — `layout/apply.rs` **has already solved the same problem with a port** (that file's header: "all of them are free functions with `AppHandle` · `State<..>` taken out of the arguments — called standalone without a window"). The shape is that emission is received through a port and the shell owns the real adapter, and `tests/layout_apply.rs` is the physical form of that harness. The same method applies as is.
 
-## 의존 방향 — 순환 없음, 일직선
+## Dependency direction — no cycles, a straight line
 
-재현 명령:
+Reproduction command:
 
 ```
 grep -rhoE "crate::[a-z_]+" layout --include="*.rs" | sort | uniq -c
@@ -90,7 +90,7 @@ grep -hoE  "crate::[a-z_]+" output_router.rs | sort | uniq -c
 find daemon_client -name "*.rs" ! -name "tests.rs" -exec grep -hoE "crate::[a-z_]+" {} + | sort | uniq -c
 ```
 
-결과:
+Result:
 
 ```
 layout/           → (셸 내부 참조 0)          ★완전 바닥★
@@ -98,79 +98,79 @@ output_router.rs  → crate::layout (8건)
 daemon_client/    → crate::output_router (2건) · crate::output_channel (2건)
 ```
 
-**어느 후보도 `commands`·`tray`·`lib`(= 어댑터 층)를 참조하지 않는다.** 그래서 위 셋이 아래로 그대로 떨어져 나간다. 화살표가 전부 한 방향이므로 crate로 옮겨도 순환이 생기지 않는다.
+**None of the candidates references `commands` · `tray` · `lib` (= the adapter layer).** So those three come off downward as they are. Since the arrows all point one way, moving them into crates creates no cycle.
 
-## 모양 — 셋보다 둘을 권한다 (권고, 미결정)
+## Shape — two rather than three is recommended (a recommendation, undecided)
 
-**셋으로 쪼개는 것은 권하지 않는다.** 일직선 사슬이라 이득이 없다:
+**Splitting into three is not recommended.** It is a straight chain, so there is no gain:
 
-- matklad "Fast Rust Builds"가 지적하는 선형 체인 = 순차 컴파일이라 빌드 시간이 안 줄어든다(ADR-0151 근거 절에 인용돼 있다).
-- 중간 조각(`output_router` 906줄)은 소비자가 하나뿐이고 **독립적으로 의미가 없다** — ADR-0151 결정 2("독립적으로 쓸 수 없는 것은 쓰는 쪽 crate 안의 모듈로 남긴다")가 정확히 이 경우다.
+- The linear chain matklad's "Fast Rust Builds" points out = sequential compilation, so build time does not shrink (cited in the grounds section of ADR-0151).
+- The middle piece (`output_router`, 906 lines) has only one consumer and **has no meaning on its own** — ADR-0151 decision 2 ("what cannot be used independently stays as a module inside the crate that uses it") is exactly this case.
 
-### 권고안: 2 crate
+### Recommended: 2 crates
 
-1. **창 배치 계산 (4,222줄)** — `layout/`. 아무것도 참조하지 않는 진짜 바닥. 창도 Tauri도 모르고 트리·좌표·분할 계산만 한다. ADR-0151 기준으로 「독립적으로 쓸 수 있는가」에 명확히 걸린다.
-2. **데몬 통신 + 출력 전달 (4,064줄)** — `daemon_client/` + `output_router.rs`. 라우터의 유일한 소비자가 데몬 통신이고, 둘 다 "받은 출력을 어디로 보내나"라는 같은 관심사다.
+1. **Window layout computation (4,222 lines)** — `layout/`. The true bottom that references nothing. It knows neither windows nor Tauri and only does tree · coordinate · split computation. By ADR-0151's criterion it clearly meets 「독립적으로 쓸 수 있는가」 (can it be used independently).
+2. **Daemon communication + output delivery (4,064 lines)** — `daemon_client/` + `output_router.rs`. The router's only consumer is the daemon communication, and both share the same concern: "where do we send the received output?"
 
-셸 잔류 = 2,351줄의 진짜 어댑터. 여기는 지금처럼 통합 타깃으로 검사한다. ★**괄호 안 사유가 바뀌었다(2026-08-24)**★ — 옛 문장은 "lib 타깃이 `0xc0000139`로 죽는 문제는 이 층에 국한되므로 그대로 안고 간다"였는데 그 즉사는 해소됐다(`--test lib_unit`). 지금 통합 타깃으로 검사하는 이유는 **그 층이 재는 것이 실 소켓·실 `AppHandle` 을 요구하는 배선이라서**이고, ~~부수적으로 단위 스위트는 아직 통째로는 CI 미등재라(알려진 실패 대기) CI 신호가 통합 타깃 쪽에 선다~~ → ★**정정(2026-08-24, 같은 날 뒤)**★: 그 뒷절은 죽었다 — 단위 스위트도 CI 에 **통째로** 실렸고 워크스페이스 회귀도 이 패키지를 함께 돈다(위 「후속 사실 정정」). 즉 남는 사유는 **앞절 하나**다.
+What stays in the shell = 2,351 lines of true adapters. Here we keep checking with integration targets as now. ★**The reason in parentheses has changed (2026-08-24)**★ — the old sentence was "the problem of the lib target dying with `0xc0000139` is confined to this layer, so we carry it as it is", but that instant death is resolved (`--test lib_unit`). The reason we now check with integration targets is **that what that layer measures is wiring that needs a real socket and a real `AppHandle`**, and ~~incidentally the unit suite is still not registered in CI as a whole (waiting on known failures), so the CI signal sits on the integration targets~~ → ★**Correction (2026-08-24, later the same day)**★: that latter clause is dead — the unit suite is also registered in CI **as a whole** and the workspace regression also runs this package (「후속 사실 정정」 above). That is, **the former clause alone** remains as the reason.
 
-★이 모양은 권고일 뿐이다★ — ADR-0151 결정 1이 "애매하면 쪼개는 쪽으로 기운다"이므로 3 crate도 기준 위반은 아니다. 사용자가 미래 구조를 보고 정한다.
+★This shape is only a recommendation★ — ADR-0151 decision 1 says "when in doubt, lean toward splitting", so 3 crates is not a criterion violation either. The user decides after seeing the future structure.
 
-## 왜 지금까지 안 됐나
+## Why it has not been done until now
 
-**이유가 있어서 안 한 게 아니라, 기준을 세운 뒤 셸에 대본 적이 없다.**
+**It was not left undone for a reason; since the criterion was set, nobody has applied it to the shell.**
 
-`docs/decisions/`에 셸 분리 결정 기록이 **하나도 없다**. 데몬은 3층 분리(ADR-0129)와 추가 분리 보류(ADR-0130)가 각각 있고, 메시징(ADR-0110)·명령 도구(ADR-0155)도 있다. 셸만 없다. ADR-0151이 판정 기준을 확정한 것이 2026-08-17인데 그 기준을 셸에 적용한 기록이 없다.
+`docs/decisions/` has **no decision record at all** on splitting the shell. The daemon has the three-layer split (ADR-0129) and the deferral of further splitting (ADR-0130) respectively, and messaging (ADR-0110) and the command tool (ADR-0155) too. Only the shell lacks one. ADR-0151 fixed the decision criterion on 2026-08-17, and there is no record of applying that criterion to the shell.
 
-T-27이 그 사각지대의 **증상**으로 이미 등록돼 있었다(레이아웃 권위가 셸에 있는데 자동 회귀망 밖 — ADR-0035 × 미실행 테스트).
+T-27 had already been registered as a **symptom** of that blind spot (layout authority is in the shell yet outside the automatic regression net — ADR-0035 × tests that are not run).
 
-## 미확인
+## Unchecked
 
-- **`output_channel.rs` 66줄의 Tauri 결합** — 느슨한 텍스트 검색에서 3건이 잡혔으나 **주석인지 실제 타입 사용인지 확정하지 않았다**(`use` 라인 앵커로 재검하지 않았다). Tauri 타입이면 셸 잔류이고, 데몬 통신 쪽이 그걸 포트로 받는다(`layout/apply.rs`가 쓴 방식 그대로). ★**경계 판정은 이 66줄과 무관하게 위대로 선다**★ — 분리 후보 8,286줄에 이 파일은 포함되지 않았다.
-- **`lib.rs` 235줄** — 조립점이라 Tauri를 쓰는 것이 당연하므로 `use` 앵커로 따로 재검하지 않았다. 잔류로 분류한 근거는 역할이지 실측이 아니다.
-- **209개의 현재 컴파일 여부** — 위 §「동기가 바뀌었다」 참조. 재지 않았다.
-- **분리 실행 비용** — 실제로 옮겨 보지 않았다. import 방향과 줄 수만 쟀다. `Cargo.toml` 분할·가시성(`pub` 승격) 작업량은 미측정.
+- **The Tauri coupling of the 66 lines of `output_channel.rs`** — a loose text search caught 3 hits, but **we did not settle whether they are comments or actual type uses** (not re-checked with the `use` line anchor). If they are Tauri types, it stays in the shell, and the daemon-communication side receives it through a port (exactly the way `layout/apply.rs` did). ★**The boundary decision stands as above regardless of these 66 lines**★ — this file was not included in the 8,286 split-candidate lines.
+- **`lib.rs`, 235 lines** — it is the assembly point, so using Tauri is natural, and we did not re-check it separately with the `use` anchor. The grounds for classifying it as staying is its role, not measurement.
+- **Whether the 209 currently compile** — see §「동기가 바뀌었다」 (the motive changed) above. Not measured.
+- **Cost of carrying out the split** — we have not actually moved anything. We measured only the import direction and the line counts. The workload of splitting `Cargo.toml` and visibility (`pub` promotion) is unmeasured.
 
-## 부록 — 셸 테스트 실행 현황 계측
+## Appendix — measuring the shell test execution status
 
-| 위치 | 개수 | 도나 |
+| Location | Count | Does it run |
 |---|---:|---|
-| `src-tauri/src/` 안 (`#[test]`·`#[tokio::test(..)]`) | **209** | ✗ 전부 미실행 → ★**정정(2026-08-24): 돈다**★ |
+| inside `src-tauri/src/` (`#[test]`·`#[tokio::test(..)]`) | **209** | ✗ none executed → ★**correction (2026-08-24): it runs**★ |
 | `tests/layout_apply.rs` | 49 | ✓ |
 | `tests/layout_commands.rs` | 27 | ✓ |
 | `tests/daemon_client_pending.rs` | 4 | ✓ |
 
-계측 명령:
+Measurement command:
 
 ```
 grep -rhoE "#\[(tokio::)?test[^]]*\]" src/ --include="*.rs" | wc -l
 grep -rcE "^\s*#\[test\]|^\s*#\[tokio::test\]" tests/*.rs
 ```
 
-★209 집계에 느슨한 패턴을 쓴 이유★ — `^\s*#\[(test|tokio::test)\]` 처럼 `\]`로 닫으면 `#[tokio::test(flavor = "multi_thread", ..)]` 38건을 놓친다(171개만 잡힌다).
+★Why a loose pattern was used for the 209 count★ — closing with `\]` as in `^\s*#\[(test|tokio::test)\]` misses the 38 hits of `#[tokio::test(flavor = "multi_thread", ..)]` (only 171 are caught).
 
-> ★**사실 정정(2026-08-24) — 위 표의 「✗ 전부 미실행」은 이 계측 당시의 상태다.**★ 그 209개는 이제 `cargo test -p engram-dashboard --test lib_unit` 으로 **실행된다**(경위·결정 = ADR-0174 · 수치·CI 등재 상태의 정본 = CLAUDE.md 「빌드·검증 명령」의 `lib_unit` 줄). 표 자체는 그대로 남긴다 — 이 조사가 무엇을 보고 판단했는지가 표의 값어치다.
+> ★**Factual correction (2026-08-24) — the 「✗ 전부 미실행」 (✗ none executed) in the table above is the state at the time of this measurement.**★ Those 209 are now **executed** with `cargo test -p engram-dashboard --test lib_unit` (history · decision = ADR-0174 · the canonical source for the numbers and CI registration status = the `lib_unit` line of CLAUDE.md 「빌드·검증 명령」). The table itself is left as it is — what this survey saw when it judged is the value of the table.
 
-미실행 209개의 분포(엄격 패턴 기준 상위): `layout/manager.rs` 62 · `layout/tree.rs` 29 · `output_router.rs` 26 · `daemon_client/protocol_state.rs` 17 · `tray/core.rs` 10 · `layout/spatial.rs` 10.
+Distribution of the 209 unexecuted (top, by the strict pattern): `layout/manager.rs` 62 · `layout/tree.rs` 29 · `output_router.rs` 26 · `daemon_client/protocol_state.rs` 17 · `tray/core.rs` 10 · `layout/spatial.rs` 10.
 
-`daemon_client/tests.rs`는 **3,142줄짜리 테스트 전용 파일**이고 이것도 안 돈다.
+`daemon_client/tests.rs` is a **3,142-line test-only file** and it does not run either.
 
-> ★**사실 정정(2026-08-24) — 이 줄이 특히 뒤집혔다.**★ `daemon_client/tests.rs` 는 이제 돌 뿐 아니라 **지금 남아 있는 알려진 실패가 전부 그 파일 안에서 난다**(`daemon_client::tests::` — 원인 서술의 정본은 `src-tauri/src/daemon_client/mod.rs` 의 `app: None` 분기 주석, 남은 갭과 결정권은 `docs/tracking.md` T-27).
+> ★**Factual correction (2026-08-24) — this line in particular flipped.**★ `daemon_client/tests.rs` now not only runs, but **all the known failures that remain right now occur inside that file** (`daemon_client::tests::` — the canonical account of the cause is the comment on the `app: None` branch in `src-tauri/src/daemon_client/mod.rs`, and the remaining gap and the decision authority are in `docs/tracking.md` T-27).
 >
-> ★**재정정(2026-08-24, 같은 날 뒤) — 그 실패도 전부 고쳐졌다.**★ 이 파일에 알려진 실패는 남아 있지 않고, 그 결과 이 스위트는 CI 에 **통째로** 실렸다(위 「후속 사실 정정」).
+> ★**Re-correction (2026-08-24, later the same day) — those failures have also all been fixed.**★ No known failure remains in this file, and as a result this suite was put on CI **as a whole** (「후속 사실 정정」 above).
 
-### 원래 계획과 그것이 새는 지점 (이력)
+### The original plan and where it leaks (history)
 
-미실행은 사고가 아니라 **알고 시작한 것**이다. 2026-07-01 커밋 `ffcd766`의 주석:
+Non-execution is not an accident; it was **something started with eyes open**. The comment of commit `ffcd766` on 2026-07-01:
 
-> ★실행 회수 제약★: src-tauri lib test 는 WebView2 DLL 링크(0xc0000139)로 *실행*이 막혀 build/--no-run 까지만 회수된다 — 컴파일 회귀 그물로 둔다(store 단위테스트가 의미 회수 본판).
+> ★Execution recovery constraint★: the src-tauri lib test is blocked from *running* by the WebView2 DLL link (0xc0000139), so only build/--no-run is recovered — we keep it as a compile-regression net (the store unit tests are the real version of semantic recovery).
 
-노린 값어치 = 「실행은 못 해도 컴파일은 되니, 참조하는 함수 모양이 바뀌면 컴파일이 깨져 알려준다」. **그 컴파일을 부르는 곳이 없다** — CI에 `--no-run` 스텝이 없고, QA 절차서에도 없고, `cargo build`는 테스트 타깃을 컴파일하지 않는다(CLAUDE.md가 명시). 그래서 계획했던 유일한 값어치조차 회수되지 않았다.
+The value aimed at = 「실행은 못 해도 컴파일은 되니, 참조하는 함수 모양이 바뀌면 컴파일이 깨져 알려준다」 (even if we cannot run it, it compiles, so when the shape of a referenced function changes the compile breaks and tells us). **Nothing calls that compile** — CI has no `--no-run` step, the QA procedure has none either, and `cargo build` does not compile test targets (CLAUDE.md states this). So even the one value that was planned was not recovered.
 
-~~★단 이 이력은 **위 「동기가 바뀌었다」에 의해 조치 대상이 아니다**★ — 209개를 버리므로 복구할 그물이 없다.~~ 기록은 "왜 이 상태가 됐나"의 근거로 남긴다.
+~~★But this history is **not a target for action because of 「동기가 바뀌었다」 (the motive changed) above**★ — the 209 are being thrown away, so there is no net to restore.~~ The record is kept as the grounds for "why it ended up in this state".
 
-> ★**귀속 정정(2026-08-24) — 앞 문장의 근거가 양쪽 다 빠졌다.**★ ① 「209개를 버리므로」는 **사용자가 한 말이 아니다**(위 §귀속 정정 블록 — 부인 축자: "내가 언제 버린다고 했어?"). ② 그 의역을 걷어내기 전에 **사실이 먼저 뒤집혔다** — 복구할 그물이 없는 게 아니라 **이미 돌고 있다**(ADR-0174). 즉 "조치 대상이 아니다"라는 결론은 전제와 사실을 **둘 다** 잃었다. ★**그렇다고 조치 대상이라고 여기서 정하지도 않는다**★ — 이 이력을 어떻게 다룰지(그리고 애초에 다룰 것이 남았는지)는 열어 둔다.
+> ★**Attribution correction (2026-08-24) — the grounds of the previous sentence have fallen away on both sides.**★ ① 「209개를 버리므로」 (since the 209 are thrown away) is **not something the user said** (the attribution correction block above — the denial verbatim: "내가 언제 버린다고 했어?"). ② Before that paraphrase was stripped out, **the facts flipped first** — it is not that there is no net to restore, it is that **it is already running** (ADR-0174). That is, the conclusion "it is not a target for action" lost **both** its premise and the facts. ★**That said, we do not decide here that it is a target for action either**★ — how to treat this history (and whether anything is left to treat at all) is left open.
 
-원인 표기가 갈리는 점 하나: 이 커밋은 **WebView2 DLL 링크**를 원인으로 적었고, T-27은 "DLL 진입점 실패로 보이나 미확정"으로 적었다. 어느 쪽도 확정 규명이 아니다.
+One point where the stated cause diverges: this commit wrote **the WebView2 DLL link** as the cause, and T-27 wrote "looks like a DLL entry-point failure but unconfirmed". Neither is a confirmed finding.
 
-> ★**사실 정정(2026-08-24) — 규명됐다. 그리고 양쪽 다 틀렸다.**★ 원인은 DLL 자체가 아니라 **Windows 매니페스트 리소스가 `[[bin]]` 타깃에만 링크된 것**이었고(그래서 테스트 exe 가 comctl32 v5.82 를 물어 진입점을 못 찾았다), 해법은 그 소스를 명시 `[[test]]` 타깃으로 다시 선언해 `-tests` 링크 인자가 닿게 한 것이다. **결정과 거부한 대안의 정본 = ADR-0174** — 여기 되풀어 적지 않는다.
+> ★**Factual correction (2026-08-24) — it has been identified. And both were wrong.**★ The cause was not the DLL itself but **the Windows manifest resource being linked only to the `[[bin]]` target** (so the test exe asked for comctl32 v5.82 and could not find the entry point), and the fix was to redeclare that source as an explicit `[[test]]` target so the `-tests` link argument reaches it. **The canonical source for the decision and the rejected alternatives = ADR-0174** — it is not written out again here.

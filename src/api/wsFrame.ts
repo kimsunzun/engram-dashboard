@@ -1,38 +1,38 @@
-// WS binary output frame 디코드 — codec.rs `encode_terminal_frame`/`decode_frame` 의 역.
+// WS binary output frame decode — the inverse of codec.rs `encode_terminal_frame`/`decode_frame`.
 //
-// 포맷(big-endian): [tag:1][agentId:16][epoch:4 BE][seq:8 BE][raw payload...].
+// Format (big-endian): [tag:1][agentId:16][epoch:4 BE][seq:8 BE][raw payload...].
 
-// ── codec.rs binary frame 상수(반드시 codec.rs 와 일치) ─────────────────────────────
-// tag0 = 터미널 raw 바이트(xterm write), tag1 = StructuredEvent JSON(payload=serde_json, ADR-0045).
-// 헤더 포맷은 tag 무관 동일 — payload 해석만 tag 로 갈린다.
+// ── codec.rs binary frame constants (must match codec.rs) ─────────────────────────────
+// tag0 = terminal raw bytes (xterm write), tag1 = StructuredEvent JSON (payload=serde_json, ADR-0045).
+// The header format is the same regardless of tag — only the payload interpretation depends on the tag.
 export const FRAME_TAG_TERMINAL_BYTES = 0
 export const FRAME_TAG_STRUCTURED_EVENT = 1
 const FRAME_HEADER_LEN = 1 + 16 + 4 + 8
 
-// ★replay 경계 마커 tag(ADR-0046 — Channel 내부 계약)★: 데몬 codec 엔 없다. src-tauri 가 각 replay
-//   종결마다 같은 출력 Channel 로 합성해 흘리고, transport(decodeReplayMarker)만 해석한다. 데몬 binary
-//   frame(tag0/1)과 seq 공간이 다르므로 decodeOutputFrame 은 이 tag 를 여전히 skip(전방 호환).
+// ★Replay boundary marker tag (ADR-0046 — Channel-internal contract)★: absent from the daemon codec. src-tauri synthesizes it at each replay
+//   end and sends it down the same output Channel, and only the transport (decodeReplayMarker) interprets it. Its seq space differs from daemon binary
+//   frames (tag0/1), so decodeOutputFrame still skips this tag (forward compatibility).
 export const FRAME_TAG_REPLAY_MARKER = 255
-// 마커 포맷(big-endian): [tag=255:1][agentId:16][epoch:4 BE][gen:8 BE][flags:1][replay_from:8 BE] — 길이 38.
-//   flags: bit0=truncated · bit1=failed · bit2=continues_conversation(src-tauri replay_flight 와 일치).
-//   replay_from = 그 replay 의 머리(SubscribeAck 의 같은 칸 — ADR-0231). 셸과 웹뷰가 한 빌드로 나가므로
-//   이보다 짧은(옛 30바이트) 마커는 받지 않는다 — 비마커로 떨어져 뷰는 watchdog·사다리를 탄다.
+// Marker format (big-endian): [tag=255:1][agentId:16][epoch:4 BE][gen:8 BE][flags:1][replay_from:8 BE] — length 38.
+//   flags: bit0=truncated · bit1=failed · bit2=continues_conversation (matches src-tauri replay_flight).
+//   replay_from = the head of that replay (the same field in SubscribeAck — ADR-0231). Since the shell and webview ship in one build,
+//   a marker shorter than this (the old 30 bytes) is not accepted — it falls to non-marker and the view takes the watchdog · ladder.
 const MARKER_LEN = 1 + 16 + 4 + 8 + 1 + 8
 const MARKER_FLAG_TRUNCATED = 0x01
 const MARKER_FLAG_FAILED = 0x02
-// ADR-0226: 이 화신은 저장된 대화를 이어받으려고 떴다 — 이어받기의 성공 여부가 아니다. 실패 마커는 늘 0.
+// ADR-0226: this incarnation came up to resume a saved conversation — not whether the resume succeeded. A failure marker is always 0.
 const MARKER_FLAG_CONTINUES = 0x04
 
 /**
- * 자리채움 `Error` 의 문구 — 프로토콜 `placeholder.rs` 의 `PLACEHOLDER_ERROR_MESSAGE` 와 **바이트 같다**(시험이
- * 잰다). 사람이 읽는 불투명 문자열이다 — 이 값으로 분기하지 않는다.
+ * The text of the placeholder `Error` — **byte-identical** to `PLACEHOLDER_ERROR_MESSAGE` in the protocol `placeholder.rs` (a test
+ * measures it). It is an opaque human-readable string — do not branch on this value.
  */
 // ADR-0231
 export const PLACEHOLDER_ERROR_MESSAGE = '이 출력 사건을 싣지 못했습니다'
 
 /**
- * 자리채움 tag1 페이로드 — `StructuredEvent::Error { message: PLACEHOLDER_ERROR_MESSAGE }` 의 JSON 으로, 데몬
- * sink·셸 중계가 싣는 페이로드와 바이트 같다. 부를 때마다 새 배열이다.
+ * The placeholder tag1 payload — the JSON of `StructuredEvent::Error { message: PLACEHOLDER_ERROR_MESSAGE }`, byte-identical to the payload the daemon
+ * sink · shell relay carries. A new array on every call.
  */
 // ADR-0231
 export function placeholderErrorPayload(): Uint8Array {
@@ -40,8 +40,8 @@ export function placeholderErrorPayload(): Uint8Array {
 }
 
 /**
- * binary frame 머리만 읽는다 — tag 를 가리지 않는다(codec.rs `peek_frame_header` 의 역). 머리보다 짧으면
- * null — seq 를 읽을 수 없는 프레임이다.
+ * Reads only the binary frame head — does not tell tags apart (the inverse of codec.rs `peek_frame_header`). Null if shorter than the head
+ * — a frame whose seq cannot be read.
  */
 export function peekFrameHeader(
   buf: ArrayBuffer,
@@ -49,36 +49,36 @@ export function peekFrameHeader(
   if (buf.byteLength < FRAME_HEADER_LEN) return null
   const view = new DataView(buf)
   const tag = view.getUint8(0)
-  // agentId: byte[1..17] = AgentId(Uuid).as_bytes() — RFC4122 network order(표준 바이트 그대로).
-  // 16바이트 hex 후 8-4-4-4-12 하이픈 삽입 = 구독 시 보낸 소문자 하이픈 UUID 와 동일 표현.
+  // agentId: byte[1..17] = AgentId(Uuid).as_bytes() — RFC4122 network order (the standard bytes as they are).
+  // Hex of the 16 bytes then insert hyphens 8-4-4-4-12 = the same representation as the lowercase hyphenated UUID sent at subscribe.
   const agentId = bytesToUuid(new Uint8Array(buf, 1, 16))
-  // epoch/seq: codec.rs 가 to_be_bytes — BE 로 읽는다(false=big-endian).
+  // epoch/seq: codec.rs uses to_be_bytes — read as BE (false=big-endian).
   const epoch = view.getUint32(17, false)
-  const seq = Number(view.getBigUint64(21, false)) // seq 는 number 로 유지(설계 결정)
+  const seq = Number(view.getBigUint64(21, false)) // Keep seq as a number (design decision)
   return { tag, agentId, epoch, seq }
 }
 
 /**
- * binary output frame 디코드. 헤더 미만 길이·미지원 tag(≥2) 시 null(무시).
- * payload 는 raw 로 넘긴다 — tag 별 해석(바이트 vs JSON)은 소비자 몫.
+ * Decodes a binary output frame. Null (ignored) for a length shorter than the header or an unsupported tag (≥2).
+ * The payload is passed as raw — per-tag interpretation (bytes vs JSON) is the consumer's job.
  */
 export function decodeOutputFrame(
   buf: ArrayBuffer,
 ): { tag: number; agentId: string; epoch: number; seq: number; payload: Uint8Array } | null {
   const header = peekFrameHeader(buf)
   if (header === null) return null
-  // F1 회귀: 옛 코드는 tag1 도 null-drop 해 구조화 출력이 무음 유실됐다 — tag1 도 통과시킨다.
-  // ★ADR-0046 전방 호환(M0)★: replay 경계 마커(tag=255)도 같은 출력 Channel 로 오지만 여기선 해석하지
-  //   않는다(소비는 decodeReplayMarker, M2). 미지 tag 를 payload 로 오해하지 않게 tag0/tag1 외는 길이
-  //   무관 전부 null 로 버린다.
+  // F1 regression: the old code also null-dropped tag1, so structured output was silently lost — now tag1 passes too.
+  // ★ADR-0046 forward compatibility (M0)★: the replay boundary marker (tag=255) also comes down the same output Channel but is not interpreted
+  //   here (consumption is decodeReplayMarker, M2). So an unknown tag is not mistaken for a payload, everything except tag0/tag1 is dropped as null
+  //   regardless of length.
   if (header.tag !== FRAME_TAG_TERMINAL_BYTES && header.tag !== FRAME_TAG_STRUCTURED_EVENT) return null
   return { ...header, payload: new Uint8Array(buf, FRAME_HEADER_LEN) }
 }
 
 /**
- * replay 경계 마커(tag=255) 디코드 — src-tauri 합성 프레임의 역(ADR-0046). 헤더 미만 길이·다른 tag 시
- * null(비마커). gen 은 u64 라 BigInt 로 읽는다(getBigUint64) — requestReplay 반환값과 폭을 맞춰 gen 펜스
- * 비교가 정밀도 소실 없이 정확하다.
+ * Decodes the replay boundary marker (tag=255) — the inverse of the src-tauri synthesized frame (ADR-0046). Null (non-marker) for a length shorter than the header or another tag. gen is a u64 so it is read
+ * as a BigInt (getBigUint64) — matching the width of the requestReplay return value so the gen fence
+ * comparison is exact without precision loss.
  */
 export function decodeReplayMarker(
   buf: ArrayBuffer,
@@ -105,14 +105,14 @@ export function decodeReplayMarker(
     truncated: (flags & MARKER_FLAG_TRUNCATED) !== 0,
     failed: (flags & MARKER_FLAG_FAILED) !== 0,
     continuesConversation: (flags & MARKER_FLAG_CONTINUES) !== 0,
-    // seq 와 같은 폭으로 읽는다(decodeOutputFrame 의 seq 도 number) — flush 가 둘을 견준다.
+    // Read at the same width as seq (the seq of decodeOutputFrame is also a number) — flush compares the two.
     replayFrom: Number(view.getBigUint64(30, false)),
   }
 }
 
 const HEX: string[] = Array.from({ length: 256 }, (_, i) => i.toString(16).padStart(2, '0'))
 
-/** 16바이트 UUID → 소문자 하이픈 문자열(8-4-4-4-12). uuid 표준 바이트 순서 그대로. */
+/** 16-byte UUID → lowercase hyphenated string (8-4-4-4-12). The standard uuid byte order as is. */
 function bytesToUuid(b: Uint8Array): string {
   return (
     HEX[b[0]] + HEX[b[1]] + HEX[b[2]] + HEX[b[3]] + '-' +

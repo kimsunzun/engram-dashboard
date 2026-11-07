@@ -1,5 +1,5 @@
-// TRD S21-slot-docking R24(탭바 넘침 = Chrome): 탭바 머리 폭 · 숨김 순수 함수의 표 시험. jsdom 은 배치를 하지 않아 그려진
-//   폭은 여기서 못 잰다(화면 QA AC29) — 이 함수가 그 규칙의 유일한 시험 표면이다.
+// TRD S21-slot-docking R24 (tab bar overflow = Chrome): table test of the pure functions for tab bar head width · hiding. jsdom does no layout, so the drawn
+//   width cannot be measured here (screen QA AC29) — this function is the only test surface of that rule.
 
 import { describe, expect, it } from 'vitest'
 
@@ -22,11 +22,11 @@ const T = true
 const F = false
 
 const CASES: Case[] = [
-  // ── 재기 전 ──
+  // ── before measuring ──
   { name: '재지 못함(null) = 제한 없음 → 모두 S · 숨김 없음', available: null, n: 3, active: 1, widths: [S, S, S], visible: [T, T, T] },
   { name: '유한하지 않은 수도 재지 못함', available: Number.NaN, n: 2, active: 0, widths: [S, S], visible: [T, T] },
 
-  // ── 단계 A(available ≥ n·A) ──
+  // ── stage A (available ≥ n·A) ──
   { name: '모두 S — 딱 n·S', available: 3 * S, n: 3, active: 0, widths: [S, S, S], visible: [T, T, T] },
   { name: '모두 S — 남는 px 를 나누지 않는다', available: 1000, n: 3, active: 0, widths: [S, S, S], visible: [T, T, T] },
   { name: 'A 와 S 사이 고른 폭 · 남는 1 px 은 맨 왼쪽', available: 400, n: 3, active: 2, widths: [134, 133, 133], visible: [T, T, T] },
@@ -36,7 +36,7 @@ const CASES: Case[] = [
   { name: '머리 하나 · 활성 — S 보다 좁으면 그 폭 그대로', available: 100, n: 1, active: 0, widths: [100], visible: [T] },
   { name: '머리 하나 · 활성 없음도 단계 A', available: 100, n: 1, active: -1, widths: [100], visible: [T] },
 
-  // ── 단계 B(available < n·A) ──
+  // ── stage B (available < n·A) ──
   { name: '넘김점 바로 아래 — 활성 A 고정 · 비활성만 준다', available: 3 * A - 1, n: 3, active: 1, widths: [A, A, A - 1], visible: [T, T, T] },
   {
     name: '남는 px 은 활성을 건너뛰고 비활성만 왼쪽부터(TabAcceptsExtraSpace — 활성 최소 = 넘김점)',
@@ -66,7 +66,7 @@ const CASES: Case[] = [
   { name: '활성 없음 — 모두 비활성 최소 I 기준', available: 140, n: 4, active: -1, widths: [I + 3, I + 3, I + 3, I + 3], visible: [T, T, T, T] },
   { name: '머리 하나 · 비활성 — I 와 A 사이', available: 35, n: 1, active: -1, widths: [35], visible: [T] },
 
-  // ── 숨김(ShouldTabBeVisible) ──
+  // ── hiding (ShouldTabBeVisible) ──
   {
     name: '안정 집합 — 활성이 뒤면 들어가는 머리도 「오른 끝 + (활성 − 이 폭)」이 넘으면 숨김 · 끝 너머 활성도 숨김',
     available: 135,
@@ -111,7 +111,7 @@ const CASES: Case[] = [
   { name: '머리 하나 · 비활성 · I 보다 좁음 = 숨김', available: 30, n: 1, active: -1, widths: [I], visible: [F] },
   { name: '음수 폭 = 다 숨김', available: -10, n: 2, active: 0, widths: [A, I], visible: [F, F] },
 
-  // ── 가장자리 ──
+  // ── edges ──
   { name: '머리 없음', available: 500, n: 0, active: -1, widths: [], visible: [] },
   { name: '머리 없음 · 음수 폭', available: -5, n: 0, active: -1, widths: [], visible: [] },
   { name: '소수 폭은 내린다', available: 400.9, n: 3, active: 0, widths: [134, 133, 133], visible: [T, T, T] },
@@ -127,7 +127,7 @@ describe('tabStripLayout — 표', () => {
 })
 
 describe('tabStripLayout — 불변식(머리 1–9 · 활성 전부 · 폭 0–1600 전수)', () => {
-  // 어긋난 입력만 모아 한 번에 단언한다 — 칸마다 expect 를 부르면 수십만 번이라 느리다.
+  // Collect only the mismatched inputs and assert once — calling expect per field would be hundreds of thousands of calls and slow.
   const violations = (bad: (available: number, n: number, active: number) => boolean): string[] => {
     const out: string[] = []
     for (let n = 1; n <= 9; n += 1) {
