@@ -16,48 +16,72 @@
 //! - 핸드셰이크 결과는 `ready_tx`(oneshot) 1회로 호출자에게 보고하고, 이후 상태 전이는
 //!   `state_tx`(watch) 로 broadcast 한다.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use engram_dashboard_protocol::handshake::AuthFrame;
-use engram_dashboard_protocol::{
-    AgentBackendKind, AgentCommand, AgentEvent, AgentId, DaemonInfo, RequestId, UsageLimitSnapshot,
-    PROTOCOL_VERSION,
-};
+use engram_dashboard_protocol::{AgentCommand, AgentEvent, AgentId, RequestId};
 
 // ★별칭이 필수다★: 이 파일의 `CommandReply` 는 **다른 것**(요청/응답 상관용 `oneshot::Sender`)이다.
 //   같은 이름 둘이 한 스코프에 들어오면 어느 쪽인지 읽는 사람이 못 가리고, 봉투의 답장을 pending 슬롯으로
 //   착각하는 편집이 그 자리에서 컴파일된다.
 use engram_dashboard_command::CommandReply as BusReply;
 
-use futures_util::{SinkExt, StreamExt};
-use tokio::net::TcpStream;
-use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot};
+
+use super::inbound::{InboundReceiver, InboundSlot};
+use super::protocol_state::{self, PendingMap, SubState};
+use super::replay_flight::{self, RefusalOutcome, ReplayFlightSet, Resolution};
+use crate::output_router::{OutputRouter, WindowLabel};
+
+// The connection task's own imports — it runs only under the old driver's test constructors (gone with 3-2 U4b).
+#[cfg(test)]
+use std::collections::BTreeSet;
+
+#[cfg(test)]
+use engram_dashboard_protocol::handshake::AuthFrame;
+#[cfg(test)]
+use engram_dashboard_protocol::{
+    AgentBackendKind, DaemonInfo, UsageLimitSnapshot, PROTOCOL_VERSION,
+};
+
+#[cfg(test)]
+use futures_util::{SinkExt, StreamExt};
+#[cfg(test)]
+use tokio::net::TcpStream;
+#[cfg(test)]
+use tokio::runtime::Handle;
+#[cfg(test)]
 use tokio_tungstenite::tungstenite::Message;
+#[cfg(test)]
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 // ADR-0012: 프론트 알림은 포트로만 나간다 — 이 파일은 실 `AppHandle` 을 이름으로도 알지 못한다.
 //   그 덕에 이 태스크는 소켓만 있으면 서고, 하네스가 핸드셰이크·재연결·왕복을 실코드로 잰다.
+#[cfg(test)]
 use super::events::{ConnectionStateEvent, DaemonEvents};
+#[cfg(test)]
 use super::frame_relay::{self, FrameRelay};
-use super::inbound::{InboundReceiver, InboundSlot};
+#[cfg(test)]
 use super::lifecycle::{Lifecycle, ReconnectVerdict};
+#[cfg(test)]
 use super::link::route::emit_broadcast;
-use super::protocol_state::{self, CommandFailure, PendingMap, SubState};
+#[cfg(test)]
+use super::protocol_state::CommandFailure;
+#[cfg(test)]
 use super::refusal::{RefusalAlerts, RefusalSite};
-use super::replay_flight::{self, RefusalOutcome, ReplayFlightSet, Resolution};
+#[cfg(test)]
 use super::{AgentNamesSink, ConnectionState, DaemonDiscovery, SharedUsageInterest};
+#[cfg(test)]
 use crate::output_channel::{self, WindowChannelRegistry};
-use crate::output_router::{OutputRouter, WindowLabel};
 
 // ★replay 진행 기반 deadline(ADR-0046)★. single-flight in-flight 가 이 시간 동안 진행(frame/Ack) 0 이면
 // 실패 마커로 종결한다(agent 소멸·subscribe 실패로 Ack/Complete 자체가 안 오는 경로). healthy-slow replay
 // (디버그 빌드·경합)는 frame/Ack 마다 리셋돼 절대 트립 안 된다(진행 기반). 운영 10s급.
 pub(super) const REPLAY_DEADLINE: Duration = Duration::from_secs(10);
 
-// deadline sweep 주기 — main_loop select! 의 tick 간격. 이 granularity 로 만료된 in-flight 를 훑는다.
+// The deadline sweep period — the granularity at which expired in-flight replays are swept (the link driver arms it
+// only while a replay waits; the old driver ticked it in its main loop).
 pub(super) const REPLAY_DEADLINE_TICK: Duration = Duration::from_secs(1);
 
 /// SendCommand 의 대기 슬롯(T6a) — request_id 로 짝지은 데몬 답, 또는 셸 로컬 실패를 호출자에게 나른다.
@@ -75,6 +99,7 @@ pub(super) const REPLAY_DEADLINE_TICK: Duration = Duration::from_secs(1);
 /// await 해 `classify_reply` 로 가른다.
 pub type CommandReply = oneshot::Sender<Result<AgentEvent, String>>;
 
+#[cfg(test)]
 type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 // Upper bound for the handshake (socket open → Hello). A normal handshake on loopback takes well under 1 s, so
@@ -93,13 +118,16 @@ pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 pub const MAX_RECONNECT_ATTEMPTS: u32 = 5;
 
 // 백오프 기준 지연(500ms). attempt 마다 2^attempt 배(500ms→1s→2s→4s→8s), 상한 BACKOFF_CAP.
+#[cfg(test)]
 const BACKOFF_BASE: Duration = Duration::from_millis(500);
 
 // 백오프 상한(10s). 지수 증가가 이 값을 넘지 않게 클램프(wsTransport `Math.min(..., 10000)`).
+#[cfg(test)]
 const BACKOFF_CAP: Duration = Duration::from_secs(10);
 
 // attempt 번째 재연결 시도의 백오프 지연. attempt=0 → 500ms, 1 → 1s, …, 상한 10s.
 // ★shift 안전★: 2^attempt 가 u64 를 넘기지 않게 checked_shl 로 클램프한 뒤 곱한다(MAX5 라 실제론 최대 8s).
+#[cfg(test)]
 pub(crate) fn backoff_delay(attempt: u32) -> Duration {
     // attempt 가 커도 곱셈 오버플로 없이 BACKOFF_CAP 으로 수렴하게: 먼저 shift 후 cap 으로 min.
     let factor = 1u64.checked_shl(attempt).unwrap_or(u64::MAX);
@@ -115,6 +143,7 @@ pub(crate) fn backoff_delay(attempt: u32) -> Duration {
 // reconnect_guard(generation + closed_by_user)를 한 번 더 보고 Stop 이면 재연결 안 한다(끊김과 close 가
 // 동시에 들어온 경우).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(test)]
 enum LoopExit {
     // 데몬 stream 이 끊김/오류/Close frame → 재연결 대상. (비의도 끊김)
     Disconnected,
@@ -127,9 +156,10 @@ enum LoopExit {
 pub enum HandshakeError {
     // 발견/spawn 단계 실패(connect 경로). discovery 에러 메시지를 그대로 싣는다(token 미포함).
     Discovery(String),
-    // ensure(attach-only)인데 살아있는 데몬이 없음(no-spawn 이라 못 띄움 — ADR-0021).
-    // wsTransport 의 "daemon down — daemon_start 로 명시 시작 필요" 대응.
-    NoLiveDaemon,
+    /// No live daemon to attach to — no endpoint record, or one that cannot be used. Carries the cause (a local
+    /// diagnostic, no file content). The text names the cause and asks whether the daemon runs — it does not tell the
+    /// caller to start one (ADR-0021: attaching never spawns; the caller decides).
+    NoLiveDaemon(String),
     // ws://host:port 접속 실패(데몬 죽음/거부).
     Connect(String),
     AuthSend(String),
@@ -149,10 +179,9 @@ impl std::fmt::Display for HandshakeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             HandshakeError::Discovery(m) => write!(f, "daemon discovery 실패: {m}"),
-            HandshakeError::NoLiveDaemon => write!(
-                f,
-                "daemon down — connect(명시 시작) 필요 (ADR-0021: ensure 는 respawn 안 함)"
-            ),
+            HandshakeError::NoLiveDaemon(cause) => {
+                write!(f, "no live daemon ({cause}) — is the daemon running?")
+            }
             HandshakeError::Connect(m) => write!(f, "daemon websocket 접속 실패: {m}"),
             HandshakeError::AuthSend(m) => write!(f, "Auth 전송 실패: {m}"),
             HandshakeError::AuthRejected(m) => write!(f, "daemon auth failed: {m}"),
@@ -259,6 +288,7 @@ pub enum ConnectionCommand {
 /// `connect_async`·`sink.send`·`wait_for_hello`·`sink.close` 등 모든 await 는 lifecycle 락을 보유하지
 /// 않은 채 일어난다(락은 publish_if_current 호출 안에서만 잡혔다 즉시 풀린다).
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub(crate) async fn run_connection(
     info: DaemonInfo,
     my_gen: u64,
@@ -390,11 +420,13 @@ pub(crate) async fn run_connection(
 
 // 한 소켓의 핸드셰이크 산출물 — split 된 sink/stream 을 들고, 정리(sink_close)·소유 이전(into_split)을
 // 제공한다. 첫 연결과 재연결이 같은 핸드셰이크 경로를 공유하게 묶는다.
+#[cfg(test)]
 struct Handshaked {
     sink: futures_util::stream::SplitSink<Ws, Message>,
     stream: futures_util::stream::SplitStream<Ws>,
 }
 
+#[cfg(test)]
 impl Handshaked {
     async fn sink_close(mut self) -> Result<(), tokio_tungstenite::tungstenite::Error> {
         self.sink.close().await
@@ -421,6 +453,7 @@ impl Handshaked {
 // 불일치 시 서버가 거부하는 게 의도된 게이트다(`daemon_client::stop` 의 `build_auth_command` 와 동형).
 // ★타입 출처(ADR-0129 0-4)★: 프레임은 protocol `handshake::AuthFrame` 이다 — 명령 enum 이 아니다.
 // ★token 은 wire 로만★(로그·에러에 미노출).
+#[cfg(test)]
 fn auth_frame_text(info: &DaemonInfo) -> Result<String, serde_json::Error> {
     serde_json::to_string(&AuthFrame::Auth {
         token: info.token.clone(),
@@ -432,6 +465,7 @@ fn auth_frame_text(info: &DaemonInfo) -> Result<String, serde_json::Error> {
 // 전이(Connected/Down)는 **호출자가** 가드(publish_if_current)와 함께 결정한다 — 첫 연결은 ready 보고가
 // 딸리고 재연결은 안 딸려, 그 분기를 호출자에 두는 게 깔끔하다(이 함수는 순수 소켓 핸드셰이크만 —
 // lifecycle 미접촉).
+#[cfg(test)]
 async fn handshake(
     info: &DaemonInfo,
     my_gen: u64,
@@ -499,6 +533,7 @@ async fn handshake(
 // ★취소 가능 핸드셰이크 산출(T4 — in-flight 취소)★. 재연결 루프가 쓰는 핸드셰이크 결과 3분기.
 // `Ok`=성공, `Err`=실패(데몬 죽음/거부/타임아웃), `Cancelled`=close()/승계가 cancel 을 켜서 중단됨
 // (소켓을 안 열었거나, connect_async 가 이미 연 소켓을 즉시 닫음 — 어느 쪽이든 데몬에 Auth 안 보냄).
+#[cfg(test)]
 enum HandshakeOutcome {
     Ok(Handshaked),
     Err(HandshakeError),
@@ -518,6 +553,7 @@ enum HandshakeOutcome {
 //
 // ★cancel-safe★: 모든 arm 의 `cancel_rx.changed()` 와 IO future 는 cancel-safe 라, 한 arm 이 이기면
 // 진 arm 은 부작용 없이 폐기된다(select! 표준). 따라서 부분 진행 상태가 새지 않는다.
+#[cfg(test)]
 async fn handshake_cancellable(
     info: &DaemonInfo,
     my_gen: u64,
@@ -617,6 +653,7 @@ async fn handshake_cancellable(
 // 불가능하고, 남는 위험은 stale task 가 *공유 상태*(watch/cmd_tx)를 건드리는 것뿐인데 그건 전부
 // publish_if_current/store_cmd_if_current/reconnect_guard 한 락으로 닫혀 있다.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 async fn connected_lifetime(
     mut sink: futures_util::stream::SplitSink<Ws, Message>,
     mut stream: futures_util::stream::SplitStream<Ws>,
@@ -938,6 +975,7 @@ async fn connected_lifetime(
 //
 // ★ADR-0006★: `registry.lock()`(std Mutex) 보유 중 `.await` 절대 금지 — `Channel::send` 는 동기라 OK.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 async fn main_loop(
     mut sink: futures_util::stream::SplitSink<Ws, Message>,
     mut stream: futures_util::stream::SplitStream<Ws>,
@@ -1077,12 +1115,11 @@ async fn main_loop(
                                                         ),
                                                     }
                                                 }
-                                                // ADR-0272 결정 6: 답장이 여기 오는 것은 깨져서 번호를 못 읽었을
-                                                //   때뿐이다(성한 답장은 위 pending 갈래가 먼저 가져간다) — 깨울
-                                                //   대기를 못 찾으니 로그만 남기고 버린다(그 대기는 부르는 쪽의
-                                                //   답장 상한으로 끝난다 — 오늘은 `forward_daemon_command` 의
-                                                //   30s. 상한 없이 부르는 쪽은 연결이 끊길 때까지 기다린다 —
-                                                //   `mod.rs` 의 `send_command_with_origin` 주석 「알려진 잔여」).
+                                                // ADR-0272 decision 6: a reply lands here only when it is broken
+                                                //   and its number unreadable (a sound one is taken by the pending
+                                                //   arm above) — no wait to wake, so it is logged and dropped; that
+                                                //   wait lasts until the link drops (this driver has no reply bound
+                                                //   — `mod.rs` `send_command_on_old_driver` "Known residual").
                                                 AgentEvent::CommandReply { reply } => {
                                                     if let Err(e) = protocol_state::reply_from_wire(&reply) {
                                                         tracing::warn!(
@@ -1321,6 +1358,7 @@ async fn main_loop(
 // 진입점은 의도적으로 없다" 주석, 끊는 쪽 근거는 `RequestReplay` 팔의 주석이 정본).
 // ★두 실패가 한 값으로 접힌다★: 직렬화 실패는 소켓이 멀쩡한 채로도 나므로, 호출자가 이 `false` 를
 // "소켓이 곧 끊긴다" 로 읽으면 안 된다.
+#[cfg(test)]
 async fn send_fire(
     sink: &mut futures_util::stream::SplitSink<Ws, Message>,
     cmd: &AgentCommand,
@@ -1354,6 +1392,7 @@ async fn send_fire(
 ///
 /// `pub(crate)` 인 것은 `tests.rs` 가 쓰기에 실패하는 가짜 sink 로 태우기 때문이다 — 루프백 소켓으로는 쓰기
 /// 실패를 결정론으로 못 만든다. 그 팔이 이 함수를 부르는 줄은 `tests.rs` 의 실 소켓 순서 시험이 잰다.
+#[cfg(test)]
 pub(crate) async fn send_request<S>(
     sink: &mut S,
     pending: &mut PendingMap<CommandReply>,
@@ -1410,6 +1449,7 @@ pub(crate) async fn send_request<S>(
 
 /// 명령 한 장을 JSON Text frame 으로 쓴다. `Err` = 요청 명령의 `reply` 에 그대로 실을 문구 — 직렬화 실패
 /// [`SERIALIZE_FAILED_PREFIX`](있어선 안 되는 갈래) · 소켓 쓰기 실패 [`SEND_FAILED_PREFIX`], 뒤에 원인.
+#[cfg(test)]
 async fn write_command<S>(sink: &mut S, cmd: &AgentCommand) -> Result<(), String>
 where
     S: futures_util::Sink<Message> + Unpin,
@@ -1429,6 +1469,7 @@ where
 /// 사용량 구독 집합 한 장. ★실패해도 연결을 끊지 않는다★ — 소켓이 죽었으면 다음 select 가 끊김을 보고 그
 /// 자리에서 `sent` 가 비워지며(`on_socket_lost`) 새 소켓이 관심을 다시 보낸다. replay `Subscribe` 와 달리 풀어야
 /// 할 슬롯이 없다.
+#[cfg(test)]
 async fn send_usage_subscribe(
     sink: &mut futures_util::stream::SplitSink<Ws, Message>,
     vendors: BTreeSet<AgentBackendKind>,
@@ -1460,6 +1501,7 @@ async fn send_usage_subscribe(
 ///
 /// 되보내도 멱등이다 — 전량 교체이고, 존재를 전제하지 않아(회사 낱말은 데몬의 정적 조회기 등록부로 푼다)
 /// 재기동한 데몬도 거절할 것이 없다. 그래서 소켓 전이를 계기로 한 재구독을 거부한 ADR-0164 에 안 걸린다.
+#[cfg(test)]
 async fn write_usage_on_open(
     sink: &mut futures_util::stream::SplitSink<Ws, Message>,
     opened: Option<BTreeSet<AgentBackendKind>>,
@@ -1477,6 +1519,7 @@ async fn write_usage_on_open(
 /// 삼키고 컴파일러는 못 잡는다 — `tests.rs` 의 「방송 한 줄 → 알림 한 번」 시험이 유일한 벽이다.
 /// ★받을 창이 없으면 알리지 않는다★ — 옛 소켓의 한 장이거나 사용량 슬롯이 있는 창이 없다. 웹뷰는 자기 label 이
 /// 든 것만 받으므로 빈 `labels` 는 아무도 안 받는다.
+#[cfg(test)]
 async fn relay_usage_snapshot(
     usage: &SharedUsageInterest,
     events: &dyn DaemonEvents,
@@ -1516,6 +1559,7 @@ pub(crate) const SEND_FAILED_PREFIX: &str = "명령 송신 실패";
 /// 있어선 안 되는 갈래다) — 그래도 상수로 두는 것은, 하네스의 갈래 명단이 **빠짐없다**는 것 자체가
 /// 단언의 전제이기 때문이다(`tests.rs` 의 `DisconnectBranch`). 명단에 구멍이 있으면 그 구멍에 빠진
 /// *정상* 결말이 「모르는 문구」로 분류돼 옳은 동작에서 빨개진다.
+#[cfg(test)]
 pub(crate) const SERIALIZE_FAILED_PREFIX: &str = "명령 직렬화 실패";
 
 /// ★ADR-0195 — 명령은 한 연결 경계를 넘지 않는다★. 지금 소켓 몫이면 그대로 돌려주고, 아니면 기다리는
@@ -1539,6 +1583,7 @@ pub(crate) const SERIALIZE_FAILED_PREFIX: &str = "명령 직렬화 실패";
 /// `tests.rs` 의 `held_clone_enqueued_after_disconnect_is_rejected_and_never_runs` 이고, 하네스가
 /// 창구 clone 을 **직접 쥐고 있다가** 끊긴 뒤에 넣어 그 창을 결정론으로 만든다. ★「실 소켓으로는 이
 /// 창을 겨냥할 수 없다」로 적혀 있던 옛 문장은 거짓이었다 — 되살리지 말 것★.
+#[cfg(test)]
 pub(crate) fn reject_foreign_command(
     cmd: ConnectionCommand,
     socket_epoch: u64,
@@ -1964,6 +2009,7 @@ pub fn registration_command(receiver: &InboundReceiver) -> Option<AgentCommand> 
 // 여기서 기다리면 그 자리에서 교착이다. 그래서 pending 슬롯만 걸어 두고 별도 태스크가 결말을 로그로 남기고
 // 데몬 거절이면 박스를 띄운다(`refusals`) — 등록은 relay 전체의 선행 조건이라 조용히 실패하면 안 된다(데몬도
 // 자기 쪽 거절을 warn 으로 남긴다).
+#[cfg(test)]
 async fn register_own_commands(
     sink: &mut futures_util::stream::SplitSink<Ws, Message>,
     pending: &mut PendingMap<CommandReply>,
@@ -2043,6 +2089,7 @@ async fn register_own_commands(
 // ★Hello 내부 소비(wsTransport 와 동형)★: Hello 는 핸드셰이크 신호라 control 로 위로 올리지
 // 않는다 — 여기서 먹고 connected 로만 전이한다. Hello 전에 오는 다른 control/binary 는 정상
 // 흐름엔 없지만(데몬은 Hello 를 가장 먼저 push), 방어적으로 무시하고 Hello 만 기다린다.
+#[cfg(test)]
 async fn wait_for_hello(
     stream: &mut futures_util::stream::SplitStream<Ws>,
 ) -> Result<(), HandshakeError> {

@@ -1,34 +1,32 @@
-//! DaemonClient — 데몬 WS 연결의 src-tauri측 단일 권위 (S14 모듈①, ADR-0036).
+//! DaemonClient — the shell's single authority over the daemon WS connection (S14 module ①, ADR-0036).
 //!
-//! 프론트가 각 창마다 데몬에 N개 WS 를 직결하던 구조(src/api/wsTransport.ts)를 src-tauri 로
-//! 끌어올린다 — **창이 몇 개든 데몬엔 연결 1개**. 이 모듈은 그 연결의 수립·핸드셰이크·생애를
-//! 소유한다. 프로토콜 의미론(epoch 가드·pending 매칭)은 `protocol_state.rs`, 재연결은 `connection.rs`,
-//! 출력 라우팅은 `output_router`/`output_channel` 이 갖는다.
+//! **One connection to the daemon however many windows** — the frontend reaches the daemon through the shell, not
+//! with a WS per window (`src/api/wsTransport.ts`). This module owns that connection's setup, handshake and life.
+//! Protocol semantics (epoch guard · pending matching) are `protocol_state.rs`, output routing is `output_router` /
+//! `output_channel`.
 //!
-//! ## 구성(이 파일들이 구현하는 것)
-//! - 연결 수립 + Auth/Hello 핸드셰이크(`connection.rs`).
-//! - `connect`(명시 spawn 진입점) / `ensure`(attach-only, no-spawn) 분리 — ADR-0021.
-//! - 단일 연결 task(actor): 한 task 가 `WebSocketStream` 을 단독 소유(Mutex 없음),
-//!   invoke 는 `cmd_tx.send` → 연결 task 가 수신해 처리.
-//! - connected/connecting/down/reconnecting 상태 표현.
-//!
-//! ## ★동시성 모델(load-bearing)★
-//! - **단일 연결 task 가 stream 을 단독 소유한다(Mutex 없이)** — `connection.rs`.
-//! - **generation 가드(openGen 씨앗, Fix B)** — `lifecycle.rs`.
+//! - The connection runs on the driver in `connection_v2.rs` over the transport crate (`link/`) — its module doc holds
+//!   the concurrency model (one actor owns the routing; callers' round trips run on their own tasks).
+//! - `connect` (explicit, may spawn the daemon) and `ensure` (attach-only, never spawns) stay apart — ADR-0021.
+//! - States: connected / down / reconnecting (the link driver never shows connecting).
+//! - The old driver (`connection.rs` — one connection task owning the stream; `lifecycle.rs` — the generation guard,
+//!   Fix B) runs only under its own test constructors until 3-2 U4b deletes it.
 
 pub mod connection;
-// ADR-0310: the new driver on the transport crate (TRD S21 trd-3 §6-2 U3) — tests only until 3-2 U4 switches production.
-#[cfg(test)]
+// ADR-0310: the driver on the transport crate (TRD S21 trd-3 §6-2 U3) — every client runs on it, except the old driver's
+//   test constructors (their suite goes with 3-2 U4b).
 mod connection_v2;
-// ADR-0012: 연결 태스크가 프론트로 내는 emit 의 seam(실물 AppHandle / 기록형 가짜 / no-op). 이 seam 이
-// 없으면 이 모듈의 단위 하네스는 아예 서지 못한다 — 사유·계약 정본은 그 파일 헤더.
-// ★`pub(crate)` 인 것이 요점이다★: 이 포트의 유일한 소비자는 `run_connection`(그 자체가 `pub(crate)`)이고,
-//   밖에 열어 봐야 crate 밖에서 꽂을 자리가 없다 — 열어 두면 `AppHandle` 운반통이 lib 표면으로 새 나간다.
+// ADR-0012: the seam for the connection's emits to the frontend (real AppHandle / recording fake / no-op). Without it
+// this module's unit harness cannot stand — the reasons and contract live in that file's header.
+// ★Being `pub(crate)` is the point★: its consumers are the connection drivers inside this crate; opening it would
+//   leak the `AppHandle` carrier onto the lib surface with nowhere outside the crate to plug it in.
 pub(crate) mod events;
 // ADR-0231: 출력 binary frame 한 장의 중계 판정(디코드 · 화신 표식 거름 · 보는 창) — seq 를 건너뛰지 않는다.
 mod frame_relay;
 // ADR-0155 결정 4: 데몬이 보낸 명령을 받는 입구. 적용은 연결 태스크 밖에서 돈다.
 pub mod inbound;
+// The old driver's generation guard — only its test constructors run it (gone with 3-2 U4b).
+#[cfg(test)]
 mod lifecycle;
 // ADR-0310: the daemon link on the transport crate (TRD S21 trd-3 §6-2 U2).
 pub mod link;
@@ -47,16 +45,27 @@ use std::time::{Duration, Instant};
 
 use engram_dashboard_base::sync;
 use engram_dashboard_protocol::{AgentCommand, AgentEvent, AgentId, AgentInfo, DaemonInfo};
+use engram_dashboard_transport::ws::WsDialer;
+use engram_dashboard_transport::SystemClock;
 use tokio::runtime::Handle;
-use tokio::sync::{mpsc, watch};
+#[cfg(test)]
+use tokio::sync::mpsc;
+use tokio::sync::watch;
 
-use connection::{run_connection, ConnectionCommand, HandshakeError, HANDSHAKE_TIMEOUT};
-use events::{ConnectionStateEvent, DaemonEvents, TauriEmitter};
+use connection::HandshakeError;
+#[cfg(test)]
+use connection::{run_connection, ConnectionCommand, HANDSHAKE_TIMEOUT};
+#[cfg(test)]
+use events::ConnectionStateEvent;
+use events::{DaemonEvents, TauriEmitter};
 // 알림을 버리는 조립은 하네스 전용이다(`events::NoDaemonEvents` doc) — 운영 빌드엔 아예 없다.
 #[cfg(test)]
 use events::NoDaemonEvents;
 use inbound::InboundSlot;
+#[cfg(test)]
 use lifecycle::Lifecycle;
+use link::endpoint::LocalEndpointSource;
+use link::DaemonKey;
 use refusal::{RefusalAlerts, TauriRefusalBox};
 // 박스를 버리는 조립도 하네스 전용이다(`refusal::NoRefusalNotice` doc).
 #[cfg(test)]
@@ -67,32 +76,33 @@ use crate::layout::ViewManager;
 use crate::output_channel::WindowChannelRegistry;
 use crate::output_router::OutputRouter;
 
-/// 연결 수명 상태. 재연결 전이(connected→reconnecting→connected 회복 / 소진 시 down)는 연결 task 안에서
-/// 돈다(`connection.rs`).
+/// The connection's lifetime state. On the link driver, routing (`link/route.rs`) is its only emitter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionState {
-    /// 아직 연결 시도 전 또는 명시 종료됨(close). 재연결 소진 종착도 여기로 모인다.
+    /// Not attached, explicitly closed, refused, or a never-connected handle's first failure (the link may still retry
+    /// in the background — ADR-0346, TRD rev 9 ①).
     Down,
-    // 연결/핸드셰이크 진행 중(소켓 open ~ Hello 수신 전).
+    // Connecting / handshaking (socket open … `Hello`) — the old driver only; the link driver never shows it.
     Connecting,
-    // Hello 수신 = 인증 성공. 명령/구독 가능.
+    // `Hello` received = authenticated. Commands and subscriptions work.
     Connected,
-    // 비의도 끊김 후 재연결 시도 중(백오프 sleep ~ 다음 attach 시도). 소진 시 Down, 성공 시 Connected.
-    // wsTransport `reconnecting` 상태 대응 — 명시 close(Down)와 구분된다(자동 회복 진행 중).
+    // Retrying after an unintended loss (backoff … next attempt); the link driver never gives up on network failures.
+    // Matches wsTransport's `reconnecting` — distinct from an explicit close (Down).
     Reconnecting,
 }
 
-/// 셸 하나의 사용량 관심 상태([`UsageInterest`])의 공유 손잡이 — 연결 태스크와 관심을 바꾸는 쪽(레이아웃
-/// 재계산 · 숨김 · 줄임 타이머)과 웹뷰 pull 이 같은 하나를 쥔다(TRD S21 usage-limit-slot §1-7).
+/// The shared handle to one shell's usage interest ([`UsageInterest`]) — the connection driver, the side that changes
+/// the interest (layout recompute · hide · shrink timer) and the webview pull hold the same one (TRD S21
+/// usage-limit-slot §1-7).
 ///
-/// ★Lock order = `ViewManager → this lock → lifecycle`★ — not a leaf: a nudge
-/// ([`DaemonClient::nudge_usage_interest`]) issued inside this lock takes the lifecycle lock. lifecycle never calls
-/// back either way, and the connection task takes the ViewManager lock ([`AgentNamesSink`]) holding neither this lock
-/// nor lifecycle, so there is no reverse order. Inside this lock only [`UsageInterest`] methods and that nudge run;
-/// ★emits happen after the lock is released★ (ADR-0006). Socket writes too on the old driver; the new driver
-/// (`connection_v2`) instead queues its usage subscribe inside this lock on purpose, so the order sets are read is the
-/// order they are queued — that queueing (`Peer::notify_in`) is a non-blocking leaf, and the peer is looked up
-/// before the lock is taken.
+/// ★Lock order = `ViewManager → this lock`★. On the link driver a nudge ([`DaemonClient::nudge_usage_interest`])
+/// issued inside this lock only sends to the driver's actor (non-blocking); the driver takes the ViewManager lock
+/// ([`AgentNamesSink`]) holding no lock, so there is no reverse order. (The old driver's test-only path takes its
+/// lifecycle lock inside here too — gone with 3-2 U4b.) Inside this lock only [`UsageInterest`] methods, that nudge and
+/// the link driver's usage-subscribe queueing run; ★emits happen after the lock is released★ (ADR-0006). The link
+/// driver queues its usage subscribe inside this lock on purpose, so the order sets are read is the order they are
+/// queued — that queueing (`Peer::notify_in`) is a non-blocking leaf, and the peer is looked up before the lock is
+/// taken.
 ///
 /// ★오염돼도 되찾는다★: 그 메서드 안에서 패닉이 나 상태가 반쯤 고쳐진 채 남아도 결과는 데몬과 어긋난 구독이나
 /// 빗나간 전달 대상이고, 다음 재계산 · 스냅숏 대조 · 새 소켓이 다시 맞춘다. 오염을 전파하면 연결 태스크가 그
@@ -188,6 +198,10 @@ impl DaemonDiscovery for OnTheLink {
 // discover(spawn 가능) timeout 기본값(wsTransport discover_daemon 5s 와 정렬).
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
+// TRD S21 trd-3 §5 15 (C10): one ws message or frame on the daemon link is at most 16 MiB — the shell's side; the
+//   daemon's accept side takes the same value in stage 3-3. The largest legitimate message is not measured.
+const DAEMON_MESSAGE_MAX_BYTES: usize = 16 << 20;
+
 /// 지금 명령을 받을 소켓이 없을 때 호출자가 받는 문구(ADR-0195) — 「한 번도 연결 안 함」·「끊겨 재연결
 /// 중」·「재연결 소진」·「명시 종료」가 **전부** 이 하나로 떨어진다. 갈래를 문구로 가르지 않는 것은
 /// 호출자가 할 일이 넷 다 같기 때문이다.
@@ -208,6 +222,7 @@ pub(crate) const CHANNEL_GONE: &str = "연결 task 가 명령을 받지 못함(�
 /// 명령이 표식 대조를 지나지 못한 채 `cmd_rx` 와 함께 사라졌거나(그 자리 = `connection` 의 버퍼 drain
 /// 주석). ★끊김 계열 문구들과 갈라 두는 이유★: 이건 「나갔나 안 나갔나」를 **모르는** 상태라,
 /// [`connection::UNSENT_ON_DISCONNECT`] 의 「재전송 안전」을 여기에 붙이면 거짓이 된다.
+#[cfg(test)]
 pub(crate) const REPLY_LOST: &str = "명령 응답 수신 실패(연결 task 종료)";
 
 /// A replay request that wrote no `Subscribe` and got no generation — the link dropped, or no window shows the agent.
@@ -220,11 +235,11 @@ pub(crate) const REPLAY_UNSENT: &str =
 pub(crate) const NO_REQUEST_ID: &str =
     "send_command: request_id 없는 명령은 reply 를 기대할 수 없다";
 
-// 데몬 연결의 단일 핸들. invoke 핸들러·트레이·상태 구독자가 공유한다(`Arc<DaemonClient>`).
+// The single handle to the daemon connection, shared by invoke handlers, the tray and state subscribers
+// (`Arc<DaemonClient>`).
 //
-// 연결 task 본체는 spawn 된 tokio task(`run_connection`)가 소유하고, 이 구조체는 그 task 와
-// 통신하는 채널 끝(`cmd_tx`)과 상태 구독(`state_rx`)만 들고 있다 — stream 자체는 절대 들지 않는다
-// (단일 task 소유 불변식).
+// The link driver (`connection_v2`) owns the connection: its actor owns the routing and the transport peer owns the
+// socket; this struct holds the driver's caller side (`link`) and the state watch (`state_rx`) — never the stream.
 pub struct DaemonClient {
     // 연결 task 를 spawn 할 런타임 핸들. 운영=전용 multi-thread(`_owned_rt`), 테스트=현재 런타임.
     rt: Handle,
@@ -234,42 +249,54 @@ pub struct DaemonClient {
     // 이 필드가 런타임을 살려둔다 — drop 되면 Handle 이 무효가 돼 연결 task 가 죽으므로 DaemonClient
     // 수명과 묶는다(`Arc<DaemonClient>` 가 app 수명). `None` = 외부 핸들 주입(테스트=현재 런타임).
     _owned_rt: Option<Arc<tokio::runtime::Runtime>>,
-    // 데몬 발견 경계(connect=spawn 가능 / ensure=no-spawn).
+    /// The old driver's daemon discovery (connect may spawn / ensure never does) — its test constructors only.
+    #[cfg(test)]
     discovery: Arc<dyn DaemonDiscovery>,
-    /// ★emit 경로(seam — ADR-0012)★. broadcast·연결 상태를 전 webview 로 내보내는 포트.
-    /// 운영 = `events::TauriEmitter`(실 `AppHandle`), 하네스 = `events::NoDaemonEvents`(no-op).
-    /// ★`Option` 이 아닌 것이 요점이다★ — 비어 있을 수 있는 emit 경로는 곧 "emit 을 못 하니 연결도 안
-    /// 띄운다"는 단락으로 자라고, 그 단락이 실제로 이 모듈 단위 스위트 전체를 죽였었다(↓ `start_connection`).
+    /// The emit port (seam — ADR-0012) the old driver reads here; the link driver holds its own clone in its ports.
+    /// Harness = `events::NoDaemonEvents` (no-op) or a recording fake. ★Not an `Option` on purpose★ — an emit path that
+    /// may be absent grew into a "nothing to emit to, so no connection" short circuit that once killed this module's
+    /// whole suite (↓ `start_connection`).
+    #[cfg(test)]
     events: Arc<dyn DaemonEvents>,
-    /// 명령 등록 · 차분 거절 박스의 거르개(ADR-0281). 운영 = `refusal::TauriRefusalBox`, 하네스 =
-    /// `refusal::NoRefusalNotice`(기록하려면 [`Self::with_refusal_notice`]).
-    /// ★클라이언트가 쥐고 연결 task 마다 clone 해 넘긴다 — 연결마다 새로 만들지 말 것★: 되풀이 억제의 수명이
-    /// 셸 프로세스라(`RefusalAlerts` doc) 연결마다 만들면 재연결이 같은 거절을 받을 때마다 박스가 다시 뜬다.
+    /// The filter for the command-registration refusal box (ADR-0281). Production = `refusal::TauriRefusalBox`,
+    /// harness = `refusal::NoRefusalNotice` (record with [`Self::with_refusal_notice`]).
+    /// ★The client holds one and shares it with the driver — never make one per connection★: repeat suppression lives
+    /// as long as the shell process (`RefusalAlerts` doc), so one per connection re-shows the box on every reconnect
+    /// that gets the same refusal.
     refusals: Arc<RefusalAlerts>,
-    /// 데몬 에이전트 목록의 이름 몫([`AgentNamesSink`]). 운영 = 셸 조립(`lib.rs`)이 넘긴 실물, 하네스 =
-    /// `NoAgentNames`(기록하려면 [`Self::with_agent_names`]). 연결 task 마다 clone 해 넘긴다.
+    /// The agent-name port ([`AgentNamesSink`]) the old driver reads here; the link driver holds its own clone in its
+    /// ports. Harness = `NoAgentNames` (record with [`Self::with_agent_names`]).
+    #[cfg(test)]
     names: Arc<dyn AgentNamesSink>,
-    // 현재 연결 상태 빠른 읽기(watch). 여러 구독자가 락 없이 현재값을 본다. 송신은 항상 lifecycle
-    // 락 아래서만(가드된 전이) — 그래야 "세대 체크 + watch send" 가 원자적이다. 이 rx 는 borrow 만.
+    /// The connection state, read without a lock — the driver's watch (routing on the link driver; the old driver
+    /// publishes it under its lifecycle lock). Only borrowed here.
     state_rx: watch::Receiver<ConnectionState>,
+    /// The old driver's generation guard — its test constructors only.
+    #[cfg(test)]
     lifecycle: Arc<Lifecycle>,
-    // 핸드셰이크(소켓 open ~ Hello) 상한. 운영=HANDSHAKE_TIMEOUT, 테스트=짧은 값 주입(Fix A).
+    /// The old driver's handshake bound (socket open … `Hello`) — its test constructors only.
+    #[cfg(test)]
     handshake_timeout: Duration,
-    /// ★출력 라우팅★: agent_id → [window_label] 라우팅 표(arc-swap 핫패스). layout command 가
-    ///   rebuild 하고, 연결 task 가 frame fan-out 에 쓴다. app-level 공유(재연결 task 수명 초월).
+    /// Output routing — agent_id → window labels (arc-swap hot path) that the layout commands rebuild. The old driver
+    /// reads it here; the link driver holds its own clone in its ports.
+    #[cfg(test)]
     router: Arc<OutputRouter>,
-    /// ★window Channel registry★: window_label → 출력 Channel. `subscribe_output` invoke 가 insert,
-    ///   연결 task 가 fan-out 시 lookup. Arc 라 task·command 양쪽이 공유한다.
+    /// The windows' output channels — window label → channel, inserted by `subscribe_output`. The old driver reads it
+    /// here; the link driver holds its own clone in its ports.
+    #[cfg(test)]
     registry: WindowChannelRegistry,
-    /// ★데몬이 배달한 명령의 입구★(ADR-0155 결정 4). 늦게 채워진다 — 표의 스폰 포트가 이 클라이언트를
-    ///   쥐어 조립에 순환이 있기 때문이다(`inbound::InboundSlot` doc). 연결 task 마다 clone 해 넘긴다.
+    /// ★The entry for commands the daemon delivers★ (ADR-0155 decision 4). Filled late — the table's spawn port holds
+    ///   this client, so the assembly has a cycle (`inbound::InboundSlot` doc). Shared with the driver.
     inbound: Arc<InboundSlot>,
-    /// 사용량 관심 — 재연결 task 수명을 넘어 산다(관심은 레이아웃에서 나오고 소켓과 무관하다). 연결 task 마다
-    ///   clone 해 넘긴다.
+    /// The usage interest — outlives every connection (the interest comes from the layout, not the socket). Shared
+    ///   with the driver.
     usage: SharedUsageInterest,
-    /// The new driver (`connection_v2`) when this client was built on it ([`Self::new_on_link`]) — connect, ensure,
-    /// close, the command round trips, fire-and-forget sends, unsubscribe, replay requests and usage nudges go there
-    /// instead of the old connection task; `state_rx` is its watch.
+    /// The driver on the transport crate (`connection_v2`) — connect, ensure, close, the command round trips,
+    /// fire-and-forget sends, unsubscribe, replay requests and usage nudges go there; `state_rx` is its watch.
+    #[cfg(not(test))]
+    link: connection_v2::LinkClient,
+    /// As in production, but `None` on the old driver's test constructors — those take the old path (gone with 3-2
+    /// U4b).
     #[cfg(test)]
     link: Option<connection_v2::LinkClient>,
 }
@@ -339,7 +366,6 @@ impl DaemonClient {
             refusals: Arc::new(RefusalAlerts::new(Arc::new(NoRefusalNotice))),
             names: Arc::new(NoAgentNames),
             usage: SharedUsageInterest::default(),
-            #[cfg(test)]
             link: None,
         }
     }
@@ -360,11 +386,11 @@ impl DaemonClient {
         self
     }
 
-    /// A client on the new driver (`connection_v2` — TRD S21 trd-3 §6-2 U3). `inner` dials the address the endpoint
-    /// `source` resolves (a memory network in tests); `clock` drives the transport. ★The ports go in here, not through
-    /// [`Self::with_agent_names`] · [`Self::with_refusal_notice`]★ — the driver starts with this call and keeps what it
-    /// got. Every connection path of the client runs on it (this client's `router`, `registry`, command table slot,
-    /// refusal filter and usage interest are the driver's).
+    /// A client on the link driver over a test network (TRD S21 trd-3 §6-2 U3): `inner` dials the address the endpoint
+    /// `source` resolves (a memory network), `clock` drives the transport. The assembly is production's
+    /// ([`Self::on_link`]); this client's `router` and `registry` are its own, empty ones. ★The ports go in here, not
+    /// through [`Self::with_agent_names`] · [`Self::with_refusal_notice`]★ — the driver starts with this call and keeps
+    /// what it got.
     #[cfg(test)]
     pub(crate) fn new_on_link(
         rt: Handle,
@@ -375,10 +401,38 @@ impl DaemonClient {
         names: Arc<dyn AgentNamesSink>,
         refusal_notice: Arc<dyn RefusalNotice>,
     ) -> Self {
-        let router = Arc::new(OutputRouter::new());
-        let registry = WindowChannelRegistry::default();
+        Self::on_link(
+            rt,
+            None,
+            inner,
+            source,
+            clock,
+            events,
+            names,
+            Arc::new(RefusalAlerts::new(refusal_notice)),
+            Arc::new(OutputRouter::new()),
+            WindowChannelRegistry::default(),
+        )
+    }
+
+    /// Starts the link driver on `rt` and builds the client around it. Every connection path of the client runs on
+    /// the driver, and the driver's ports are this client's own objects (`router`, `registry`, command table slot,
+    /// refusal filter, usage interest), so [`Self::install_command_table`] · [`Self::refusal_alerts`] ·
+    /// [`Self::usage_interest`] see what the driver sees.
+    #[allow(clippy::too_many_arguments)]
+    fn on_link(
+        rt: Handle,
+        owned_rt: Option<Arc<tokio::runtime::Runtime>>,
+        inner: Arc<dyn engram_dashboard_transport::Dialer>,
+        source: Arc<dyn link::endpoint::EndpointSource>,
+        clock: Arc<dyn engram_dashboard_transport::Clock>,
+        events: Arc<dyn DaemonEvents>,
+        names: Arc<dyn AgentNamesSink>,
+        refusals: Arc<RefusalAlerts>,
+        router: Arc<OutputRouter>,
+        registry: WindowChannelRegistry,
+    ) -> Self {
         let inbound = Arc::new(InboundSlot::new());
-        let refusals = Arc::new(RefusalAlerts::new(refusal_notice));
         let usage = SharedUsageInterest::default();
         let link = connection_v2::LinkClient::start(
             &rt,
@@ -395,21 +449,30 @@ impl DaemonClient {
                 usage: usage.clone(),
             },
         );
-        let (lifecycle, _) = Lifecycle::new();
         Self {
             rt,
-            _owned_rt: None,
+            _owned_rt: owned_rt,
+            #[cfg(test)]
             discovery: Arc::new(OnTheLink),
             state_rx: link.state_rx(),
-            lifecycle: Arc::new(lifecycle),
+            #[cfg(test)]
+            lifecycle: Arc::new(Lifecycle::new().0),
+            #[cfg(test)]
             handshake_timeout: HANDSHAKE_TIMEOUT,
+            #[cfg(test)]
             router,
+            #[cfg(test)]
             registry,
             inbound,
+            #[cfg(test)]
             events,
             refusals,
+            #[cfg(test)]
             names,
             usage,
+            #[cfg(not(test))]
+            link,
+            #[cfg(test)]
             link: Some(link),
         }
     }
@@ -445,7 +508,6 @@ impl DaemonClient {
             refusals: Arc::new(RefusalAlerts::new(Arc::new(NoRefusalNotice))),
             names: Arc::new(NoAgentNames),
             usage: SharedUsageInterest::default(),
-            #[cfg(test)]
             link: None,
         }
     }
@@ -475,15 +537,18 @@ impl DaemonClient {
             refusals: Arc::new(RefusalAlerts::new(Arc::new(NoRefusalNotice))),
             names: Arc::new(NoAgentNames),
             usage: SharedUsageInterest::default(),
-            #[cfg(test)]
             link: None,
         }
     }
 
-    /// ★운영 생성자(전용 런타임 소유)★. `lib.rs` `setup` 에서 쓴다. tokio 런타임 컨텍스트 밖
-    /// (`setup` 콜백)에서 `Handle::current()` 가 패닉하지 않도록, 전용 멀티스레드 런타임을 직접 만들어
-    /// 그 Handle 로 연결 task 를 띄운다(spike §2). 런타임은 DaemonClient 가 소유(`_owned_rt`)해 app
-    /// 수명 동안 살아있다. 실패(런타임 생성 불가)면 Err — 호출자가 보고하고 데몬 명령 없이 진행한다.
+    /// ★The production constructor★ — `lib.rs` `setup` calls it. The client owns a multi-thread runtime it builds here,
+    /// because `setup` may run outside a tokio context, where `Handle::current()` panics (spike §2); the runtime lives
+    /// as long as the client (`_owned_rt`). It runs on the link driver: the ws dialer, the local daemon's endpoint
+    /// record (`daemon.json` in the default data folder) and the system clock. `Err` = the runtime could not be built;
+    /// the caller reports it and goes on without daemon commands.
+    ///
+    /// `router` and `registry` are the shared instances `setup` also hands the layout commands and `subscribe_output`,
+    /// so the output fan-out and those commands see the same ones.
     pub fn new_real_with_owned_runtime(
         router: Arc<OutputRouter>,
         registry: WindowChannelRegistry,
@@ -495,41 +560,61 @@ impl DaemonClient {
             .thread_name("engram-daemon-client")
             .build()?;
         let handle = rt.handle().clone();
-        let (lifecycle, state_rx) = Lifecycle::new();
-        Ok(Self {
-            rt: handle,
-            _owned_rt: Some(Arc::new(rt)),
-            discovery: Arc::new(RealDiscovery),
-            state_rx,
-            lifecycle: Arc::new(lifecycle),
-            handshake_timeout: HANDSHAKE_TIMEOUT,
-            // ★운영 공유 Arc 주입★: lib.rs setup 이 router/registry 를 먼저 만들어 app.manage + 여기로
-            //   같은 Arc 를 넘긴다 — layout command(rebuild)·subscribe_output(registry insert)·연결 task
-            //   (fan-out)가 *동일* 인스턴스를 본다.
+        Ok(Self::on_local_daemon(
+            handle,
+            Some(Arc::new(rt)),
+            crate::discovery::default_data_dir(),
+            Arc::new(TauriEmitter(app.clone())),
+            names,
+            Arc::new(RefusalAlerts::new(Arc::new(TauriRefusalBox(app)))),
             router,
             registry,
-            inbound: Arc::new(InboundSlot::new()),
-            refusals: Arc::new(RefusalAlerts::new(Arc::new(TauriRefusalBox(app.clone())))),
-            // ★T7c★: broadcast 이벤트를 전 webview 에 push 하는 emit 경로(실물 어댑터).
-            events: Arc::new(TauriEmitter(app)),
+        ))
+    }
+
+    /// [`Self::on_link`] on the local daemon of `data_dir`: the ws dialer, that folder's endpoint record
+    /// (`daemon.json`) and the system clock — production's transport, which a test drives on a temporary folder.
+    #[allow(clippy::too_many_arguments)]
+    fn on_local_daemon(
+        rt: Handle,
+        owned_rt: Option<Arc<tokio::runtime::Runtime>>,
+        data_dir: PathBuf,
+        events: Arc<dyn DaemonEvents>,
+        names: Arc<dyn AgentNamesSink>,
+        refusals: Arc<RefusalAlerts>,
+        router: Arc<OutputRouter>,
+        registry: WindowChannelRegistry,
+    ) -> Self {
+        Self::on_link(
+            rt,
+            owned_rt,
+            Arc::new(WsDialer::new(DAEMON_MESSAGE_MAX_BYTES)),
+            Arc::new(LocalEndpointSource::new(
+                DaemonKey::new(connection_v2::DAEMON),
+                data_dir,
+            )),
+            Arc::new(SystemClock),
+            events,
             names,
-            usage: SharedUsageInterest::default(),
-            #[cfg(test)]
-            link: None,
-        })
+            refusals,
+            router,
+            registry,
+        )
     }
 
     /// 이 클라이언트가 실행할 수 있는 명령 표를 꽂는다 — ★연결 전에 부른다★(ADR-0155 결정 4·5).
     ///
-    /// ★런타임 선택을 여기 두는 것이 요점이다★: 적용 태스크는 연결 태스크와 **같은 런타임**에서 돌아야
-    /// 한다 — `agent.spawnInto` 가 데몬 왕복을 기다리는 동안 그 소켓 태스크가 계속 돌아야 답이 오기 때문이다
-    /// (다른 런타임에 띄우면 그 인터리브가 우연에 맡겨진다). 조립부가 `Handle` 을 고르게 하면 그 불변식이
-    /// 조립부마다 다시 지켜져야 하므로, 클라이언트가 자기 `rt` 로 정한다.
-    /// 늦게 부르는 것은 허용되지만(첫 승자만 이긴다), **연결 후에 부르면** 그 사이 도착한 봉투는 표가 없다는
-    /// 오류 답장을 받는다. 등록도 그 연결에서는 안 나간다 — 다음 재연결이 보낸다(`register_own_commands`).
-    /// `view` = 셸 표에 없는 이름을 넘길 곳(웹뷰 몫 — TRD §3-8 의 홉 ③). 표와 **같은 자리에서** 꽂는
-    /// 이유는 등록 패킷이 두 층을 한 방에 싣기 때문이다(TRD §3-7 조항 2) — 따로 꽂게 하면 어느 조립부는
-    /// 웹뷰 몫 없이 등록을 내보내고, 그 연결에서는 화면 명령이 통째로 `UNKNOWN_COMMAND` 다.
+    /// ★Choosing the runtime here is the point★: the apply tasks must run on the **same runtime** as the connection
+    /// driver — while `agent.spawnInto` waits on a daemon round trip, the driver's tasks must keep running for the
+    /// answer to arrive (on another runtime that interleaving is left to chance). Letting each assembly pick the
+    /// `Handle` would make every assembly re-keep that invariant, so the client decides with its own `rt`.
+    /// Calling it late is allowed (the first winner wins), but **after a connection opened**, envelopes that arrived
+    /// meanwhile get a "no table" error reply, and that connection sends no registration — the next connection does
+    /// (the driver registers on every `LinkUp`).
+    /// `view` = where names absent from the shell table go (the webview's share — TRD §3-8 hop ③). It is plugged in
+    /// **at the same spot** as the table because the registration packet carries both layers in one go (TRD §3-7
+    /// clause 2) — plugging them separately lets some assembly send a registration without the webview's share, and on
+    /// that connection every view command is `UNKNOWN_COMMAND`.
     pub fn install_command_table(
         &self,
         table: engram_dashboard_command::CommandTable,
@@ -567,6 +652,30 @@ impl DaemonClient {
         &self.refusals
     }
 
+    /// The link driver. ★Test builds★: an old-driver client (`link: None`) takes its own path before reaching this.
+    #[cfg(not(test))]
+    fn link(&self) -> &connection_v2::LinkClient {
+        &self.link
+    }
+
+    /// See the production twin.
+    #[cfg(test)]
+    fn link(&self) -> &connection_v2::LinkClient {
+        self.link
+            .as_ref()
+            .expect("an old-driver client takes its own path first")
+    }
+
+    /// Explicit connect (ADR-0021 §1 — may start a daemon; wsTransport `start()`). Contract: `LinkClient::connect`.
+    pub async fn connect(&self) -> Result<(), HandshakeError> {
+        #[cfg(test)]
+        if self.link.is_none() {
+            return self.connect_on_old_driver().await;
+        }
+        self.link().connect().await
+    }
+
+    // The old driver's path — its test constructors only (gone with 3-2 U4b).
     // 명시 연결 진입점(ADR-0021 §1) = wsTransport `start()` 대응.
     //
     // ★spawn 가능★: 데몬이 없으면 `discovery.ensure_spawn` 이 WMI 로 띄운다 — 부팅 연결/사용자
@@ -580,11 +689,8 @@ impl DaemonClient {
     // 보내지 못한다(OSS 정석: 승계 시 옛 토큰 즉시 취소). 이전엔 discovery 를 먼저 하고 start_connection
     // 안에서 bump 했어서 그 창이 무방비였다(Codex BLOCK). 캡처한 my_gen 을 그대로 start_connection 에
     // 넘겨 ★이중 bump 를 피한다★(start_connection 은 더 이상 bump 안 함).
-    pub async fn connect(&self) -> Result<(), HandshakeError> {
-        #[cfg(test)]
-        if let Some(link) = &self.link {
-            return link.connect().await;
-        }
+    #[cfg(test)]
+    async fn connect_on_old_driver(&self) -> Result<(), HandshakeError> {
         if self.state() == ConnectionState::Connected {
             return Ok(());
         }
@@ -647,6 +753,17 @@ impl DaemonClient {
         self.start_connection(info, my_gen).await
     }
 
+    /// Attach-only connect (ADR-0021 B-1 — never starts a daemon; wsTransport `ensureReady()`). Contract:
+    /// `LinkClient::ensure`.
+    pub async fn ensure(&self) -> Result<(), HandshakeError> {
+        #[cfg(test)]
+        if self.link.is_none() {
+            return self.ensure_on_old_driver().await;
+        }
+        self.link().ensure().await
+    }
+
+    // The old driver's path — its test constructors only (gone with 3-2 U4b).
     // attach-only 진입점(ADR-0021 B-1) = wsTransport `ensureReady()` 대응.
     //
     // ★no-spawn★: `discovery.read_live`(daemon.json read-only)만 부른다 — 데몬이 없으면 띄우지
@@ -657,11 +774,8 @@ impl DaemonClient {
     // connect() 와 동형: read_live(no-spawn 이라 짧지만, 파일 IO 가 느릴 여지)를 부르기 전에 bump 로 옛
     // 세대를 취소·승계한다. ensure 는 attach-only(ADR-0021 — no-spawn)지만 *승계 취소* 는 동일 적용 —
     // read_live 창 동안 옛 재연결이 소켓을 열지 못하게. 캡처한 my_gen 을 start_connection 에 넘긴다.
-    pub async fn ensure(&self) -> Result<(), HandshakeError> {
-        #[cfg(test)]
-        if let Some(link) = &self.link {
-            return link.ensure().await;
-        }
+    #[cfg(test)]
+    async fn ensure_on_old_driver(&self) -> Result<(), HandshakeError> {
         if self.state() == ConnectionState::Connected {
             return Ok(());
         }
@@ -689,7 +803,9 @@ impl DaemonClient {
                     "ensure 실패 — Down 미발행(더 새 연결이 current)"
                 );
             }
-            return Err(HandshakeError::NoLiveDaemon);
+            return Err(HandshakeError::NoLiveDaemon(
+                "daemon.json names no live daemon".to_owned(),
+            ));
         };
         self.start_connection(info, my_gen).await
     }
@@ -708,6 +824,7 @@ impl DaemonClient {
     // ★my_gen 계약★: 호출자가 `bump_and_capture` 로 막 캡처해 넘긴 값이다. 그 bump 와 이 함수 진입
     // 사이에 다른 connect/close 가 또 끼면 내 my_gen 은 이미 stale 일 수 있다 — 그래도 모든 발행이
     // publish_if_current/store_cmd_if_current 가드를 통과하므로 안전하다(stale 이면 그냥 미발행).
+    #[cfg(test)]
     async fn start_connection(&self, info: DaemonInfo, my_gen: u64) -> Result<(), HandshakeError> {
         // ★capacity 512★: cmd_tx 는 bounded mpsc 라 full 이면 fire-and-forget(Unsubscribe/Fire/RequestReplay
         //   fire)이 try_send 실패로 조용히 drop 된다. 빠른 layout toggle/drag 가 짧은 시간에 다량의 델타를 쏘면
@@ -884,10 +1001,23 @@ impl DaemonClient {
     //    화면만 connected」라는 이 작업이 없애려던 결함이 이 자리로 되돌아온다(①②는 그대로 남는다 —
     //    전이 확정 여부와 소멸자 패닉 금지는 순환과 무관하다).
     // ★명시 `close()` 는 셋 다 해당 없다★ — 전이가 확정이고, 소멸자가 아니며, 알릴 창이 살아 있다.
+    #[cfg(test)]
     fn close_on_drop(&self) {
         self.lifecycle.close_best_effort();
     }
 
+    /// Explicit close (wsTransport `close()`) — the link does not reconnect. Returns at once; every window learns `down`
+    /// through routing. Contract: `LinkClient::close`.
+    pub fn close(&self) {
+        #[cfg(test)]
+        if self.link.is_none() {
+            self.close_on_old_driver();
+            return;
+        }
+        self.link().close();
+    }
+
+    // The old driver's path — its test constructors only (gone with 3-2 U4b).
     // 명시 종료(wsTransport `close()` 대응). 연결 task 에 종료를 알리고 Down 으로 전이한다.
     //
     // ★재연결 금지는 T4★: T2 는 명시 close 만. closedByUser 가드(명령/재연결이 respawn 안 하게)는
@@ -928,12 +1058,8 @@ impl DaemonClient {
     // ★국소 땜질로 닫히지 않는다★: 락 안에서 발화하면 ADR-0006 을 깬다. 순서를 세우려면 **락 아래서 밀어
     // 넣고 단일 소비자가 빼는 발화 큐**를 두거나, 발화에 세대를 실어 프론트가 정렬하게 해야 한다 — 둘 다
     // 이 자리 하나로 끝나지 않으므로 별건이다.
-    pub fn close(&self) {
-        #[cfg(test)]
-        if let Some(link) = &self.link {
-            link.close();
-            return;
-        }
+    #[cfg(test)]
+    fn close_on_old_driver(&self) {
         tracing::info!("데몬 연결 명시 종료(close)");
         let my_gen = self.lifecycle.close();
         if self.lifecycle.is_current(my_gen) {
@@ -963,6 +1089,18 @@ impl DaemonClient {
     /// ★호출 전제 — `cmd` 에 request_id 를 호출자가 이미 박는다★(commands/agent.rs 의 빌더가
     /// `RequestId::new()` 로 채운다). 그래야 reply 매칭 키가 호출자에게도 알려져 idempotency(재시도 시 같은
     /// 키)와 정합한다 — 이 왕복이 임의로 채우면 호출자가 키를 모른다.
+    pub async fn send_command_with_origin(
+        &self,
+        cmd: AgentCommand,
+    ) -> Result<AgentEvent, protocol_state::CommandFailure> {
+        #[cfg(test)]
+        if self.link.is_none() {
+            return self.send_command_on_old_driver(cmd).await;
+        }
+        self.link().send_command(cmd).await
+    }
+
+    // The old driver's path — its test constructors only (gone with 3-2 U4b).
     // ★흐름★: (1) 현재 cmd_tx clone + 소켓 표식(없으면 not-connected Err) (2) oneshot 생성
     // (3) `SendCommand` enqueue (4) reply await. 연결 task 가 reply 를 resolve(Ok/Err)하거나, 끊김 시
     // drain 으로 Err 를 보낸다(no-hang). cmd_tx send 실패(채널 full/닫힘)·oneshot drop(연결 task
@@ -984,34 +1122,19 @@ impl DaemonClient {
     // 표식만 돌려준다 — 이후 `tx.send().await`·`rx.await` 는 락 미보유 상태다(Sender 는 lifecycle 락과
     // 독립).
     //
-    // ## ★알려진 잔여 — 이 clone 은 `reply_rx.await` 내내 살아 있고, 그게 `close()` 를 무디게 만든다★
-    // 연결 태스크의 종료 신호는 **강한 송신단이 전부 사라지는 것** 하나뿐이다(`connection::OutcomeSender`
-    // — `main_loop` 의 `select!` 에 취소 arm 이 없다). 그런데 아래 `cmd_tx` 는 답을 기다리는 동안에도
-    // 강한 송신단이다. 그래서 **소켓을 열어 둔 채 답하지 않는 데몬**을 만나면: 호출자는 `reply_rx` 에
-    // 매달리고 → `close()` 가 lifecycle 의 송신단을 놓아도 EOF 가 안 오고 → 옛 `main_loop` 와 소켓이
-    // 살아남는다.
-    // ★그 잠금을 푸는 마감시각은 **이미 있다 — 다만 한 호출자에만 있다**★: `commands::agent` 의
-    // `forward_daemon_command` 가 이 왕복([`Self::send_command`] 입구)을 30s `tokio::time::timeout` 으로 감싼다(같은 hang 을 겨냥해
-    // 들어온 것이다). 시한이 지나면 이 future 가 drop 되고 그 안의 clone 도 함께 죽어 EOF 가 복구되므로
-    // `close()` 가 태스크를 거둔다. 그 경로가 프론트 명령 전부가 지나는 길이라, 운영에서 이 잠금은 30s 로
-    // 유계다. ★남은 것은 그 래핑이 없는 나머지 호출자들이다★ — 두 입구 어느 쪽을 부르든 같은 clone 을
-    // 쥐므로 함께 센다: [`Self::send_command`] 를 맨 `.await` 로 부르는 `commands::agent` 의 다섯 ·
-    // `commands::layout` 의 하나, 이 함수를 직접 부르는 `commands::view_bus` 의 하나. 즉 할 일은
-    // 마감시각을 **설계**하는 것이 아니라 이미 증명된 래핑을 그 일곱에 **넓히는** 것이다(또는 이 왕복
-    // 자체에 마감시각을 얹어 호출자마다 되풀이하지 않는 것 — ADR-0088 계열).
-    // ★이 모양은 ADR-0195 가 만든 것이 아니다★ — 이 변경은 반환을 `(Sender, 표식)` 쌍으로 바꿨을 뿐
-    // clone 의 수명은 그대로다(변경 전 `let Some(cmd_tx) = …` 도 같은 자리에서 같은 범위였다). 그래서
-    // 여기서 고치지 않는다.
-    pub async fn send_command_with_origin(
+    // ## Known residual — this clone lives through `reply_rx.await` and blunts `close()`
+    // The connection task ends only when every strong sender is gone (`connection::OutcomeSender`), and `cmd_tx` below
+    //   stays strong while the reply is awaited. A daemon that keeps the socket open and never answers therefore keeps
+    //   the caller waiting and the old `main_loop` and socket alive past `close()` — this path has no reply bound. Not
+    //   fixed here: the link driver bounds every round trip with the policy's request timeout (ADR-0181). The window
+    //   check and its texts follow ADR-0195; the per-call deadline idea is the ADR-0088 family.
+    #[cfg(test)]
+    async fn send_command_on_old_driver(
         &self,
         cmd: AgentCommand,
     ) -> Result<AgentEvent, protocol_state::CommandFailure> {
         use protocol_state::CommandFailure::Local;
 
-        #[cfg(test)]
-        if let Some(link) = &self.link {
-            return link.send_command(cmd).await;
-        }
         if protocol_state::command_request_id(&cmd).is_none() {
             return Err(Local(NO_REQUEST_ID.to_string()));
         }
@@ -1041,6 +1164,19 @@ impl DaemonClient {
     }
 
     // ── T6b: fire-and-forget 평면(Subscribe/Unsubscribe/Resize — reply 없음) ─────────────
+    /// Writes `Unsubscribe` on the open connection, behind earlier unsubscribes and replay requests; with none open it
+    /// does nothing — the daemon drops a connection's subscriptions with it. Never blocks (the layout calls it under its
+    /// lock). Contract: `LinkClient::unsubscribe`.
+    pub fn unsubscribe(&self, agent_id: AgentId) {
+        #[cfg(test)]
+        if self.link.is_none() {
+            self.unsubscribe_on_old_driver(agent_id);
+            return;
+        }
+        self.link().unsubscribe(agent_id);
+    }
+
+    // The old driver's path — its test constructors only (gone with 3-2 U4b).
     // 출력 구독 enqueue(fire-and-forget). 연결 task 가 SubState 로 epoch/after_seq 를 채워 wire 송신한다.
     //
     // ★동기 + try_send★: layout command 는 `#[tauri::command] pub fn`(동기)이라 `async send` 를 못 한다.
@@ -1051,18 +1187,28 @@ impl DaemonClient {
     // 연결마다 따로 서고 그 연결이 죽을 때 함께 정리된다(`daemon::connection_core` 의 per-conn `subs`).
     // 그래서 소켓이 없는 동안의 해제는 보낼 필요가 **없다** — 이미 끝난 일이다. ★이 문장을 형제
     // [`Self::send_fire_and_forget`] 로 넓히지 말 것★ — 그쪽은 사정이 다르고, 그 doc 이 그것을 적는다.
-    pub fn unsubscribe(&self, agent_id: AgentId) {
-        #[cfg(test)]
-        if let Some(link) = &self.link {
-            link.unsubscribe(agent_id);
-            return;
-        }
+    #[cfg(test)]
+    fn unsubscribe_on_old_driver(&self, agent_id: AgentId) {
         self.try_enqueue(
             |socket| ConnectionCommand::Unsubscribe { agent_id, socket },
             "unsubscribe",
         );
     }
 
+    /// A command without a reply (Resize …) — `agent_resize` uses it. Never blocks; with no connection to take it the
+    /// command is dropped (ADR-0195) and the frontend re-issues a lost Resize. Contract:
+    /// `LinkClient::send_fire_and_forget`.
+    pub fn send_fire_and_forget(&self, cmd: AgentCommand) {
+        #[cfg(test)]
+        if self.link.is_none() {
+            self.send_fire_and_forget_on_old_driver(cmd);
+            return;
+        }
+        self.link().send_fire_and_forget(cmd);
+    }
+
+    // The old driver's path — its test constructors only (gone with 3-2 U4b).
+    //
     // reply 없는 명령(Resize 등) enqueue(fire-and-forget). agent_resize invoke 가 쓴다.
     //
     // ## ★끊긴 동안의 Resize 는 여기서 유실되고, 되돌리는 것은 프론트의 재발행이다(ADR-0195)★
@@ -1082,12 +1228,8 @@ impl DaemonClient {
     // ★남은 갭★: 그 재발행은 **보이고 박스가 선 슬롯**만 낸다(숨은 탭이나 붕괴한 박스에서 내면 생성
     // 기본값 80×24 나 최소 치수가 그대로 PTY 로 간다 — 고치려는 그 값이다). 그런 슬롯은 다시 보이거나
     // 크기가 잡히는 순간 위 넷 중 하나가 발화해 고친다.
-    pub fn send_fire_and_forget(&self, cmd: AgentCommand) {
-        #[cfg(test)]
-        if let Some(link) = &self.link {
-            link.send_fire_and_forget(cmd);
-            return;
-        }
+    #[cfg(test)]
+    fn send_fire_and_forget_on_old_driver(&self, cmd: AgentCommand) {
         self.try_enqueue(|socket| ConnectionCommand::Fire { cmd, socket }, "fire");
     }
 
@@ -1098,17 +1240,15 @@ impl DaemonClient {
     /// (TRD §3 #74).
     ///
     /// 비블로킹이라 [`SharedUsageInterest`] 락 안에서 불러도 된다(락 차례는 그 doc).
-    /// ★창구가 닫혀 있으면 no-op 이고 그래도 된다★: 새 소켓은 창구를 열 때 관심을 통째로 다시 보내고, 첫 연결·
-    /// 승계에서 창구는 열렸는데 채널이 아직 안 꽂힌 틈은 채널을 꽂은 직후의 넛지 한 장이 메운다
-    /// (`start_connection`). 명령 채널이 차서 버려진 넛지는 그 연결의 다음 스냅숏 대조가 고친다 — 구독이
-    /// 하나도 없는 연결은 대조할 계기가 없어 ⟳ 가 고친다(TRD §6 #25).
+    /// With no connection open it does nothing — the next one gets the whole interest when it opens
+    /// (`LinkClient::nudge_usage`).
     pub fn nudge_usage_interest(&self) {
         #[cfg(test)]
-        if let Some(link) = &self.link {
-            link.nudge_usage();
+        if self.link.is_none() {
+            nudge_usage_on(&self.lifecycle);
             return;
         }
-        nudge_usage_on(&self.lifecycle);
+        self.link().nudge_usage();
     }
 
     /// 레이아웃이 바뀌었다 — 사용량 관심을 다시 계산하고 그 결과대로 넛지하거나 줄임 타이머를 띄운다(TRD S21
@@ -1158,12 +1298,15 @@ impl DaemonClient {
                     delay_ms = delay.as_millis() as u64,
                     "사용량 관심: 줄임 대기 — 기한에 넛지"
                 );
-                // 클라이언트를 붙들지 않는다 — 공유 관심 상태와 lifecycle 의 약한 참조만 쥔다(닫힌 뒤 깨면 넛지는
-                //   창구가 닫혀 no-op 이다).
-                let usage = self.usage.clone();
-                let lifecycle = Arc::downgrade(&self.lifecycle);
                 #[cfg(test)]
-                let link_nudger = self.link.as_ref().map(|link| link.usage_nudger());
+                if self.link.is_none() {
+                    self.defer_usage_nudge_on_old_driver(gen, sleep);
+                    return;
+                }
+                // Holds the shared interest and a nudger that does not keep the actor alive — not the client (a nudge
+                //   after the client is gone does nothing).
+                let usage = self.usage.clone();
+                let nudger = self.link().usage_nudger();
                 self.rt.spawn(async move {
                     sleep.await;
                     if !usage.lock().deferral_elapsed(gen) {
@@ -1173,27 +1316,57 @@ impl DaemonClient {
                         );
                         return;
                     }
-                    #[cfg(test)]
-                    if let Some(nudger) = &link_nudger {
-                        tracing::debug!(?gen, "usage interest: shrink deadline — nudge");
-                        nudger.nudge();
-                        return;
-                    }
-                    match lifecycle.upgrade() {
-                        Some(lifecycle) => {
-                            tracing::debug!(?gen, "사용량 관심: 줄임 기한 — 넛지");
-                            nudge_usage_on(&lifecycle);
-                        }
-                        None => tracing::debug!(
-                            ?gen,
-                            "사용량 관심: 줄임 기한 — 클라이언트가 사라져 넛지 없음"
-                        ),
-                    }
+                    tracing::debug!(?gen, "usage interest: shrink deadline — nudge");
+                    nudger.nudge();
                 });
             }
         }
     }
 
+    // The old driver's deferral task: holds the shared interest and a weak lifecycle — not the client (after a close
+    //   the nudge meets a closed window and does nothing).
+    #[cfg(test)]
+    fn defer_usage_nudge_on_old_driver(
+        &self,
+        gen: usage_interest::ShrinkGen,
+        sleep: tokio::time::Sleep,
+    ) {
+        let usage = self.usage.clone();
+        let lifecycle = Arc::downgrade(&self.lifecycle);
+        self.rt.spawn(async move {
+            sleep.await;
+            if !usage.lock().deferral_elapsed(gen) {
+                tracing::debug!(
+                    ?gen,
+                    "사용량 관심: 줄임 기한 — 그 사이 무르거나 새 세대가 섰다, 넛지 없음"
+                );
+                return;
+            }
+            match lifecycle.upgrade() {
+                Some(lifecycle) => {
+                    tracing::debug!(?gen, "사용량 관심: 줄임 기한 — 넛지");
+                    nudge_usage_on(&lifecycle);
+                }
+                None => tracing::debug!(
+                    ?gen,
+                    "사용량 관심: 줄임 기한 — 클라이언트가 사라져 넛지 없음"
+                ),
+            }
+        });
+    }
+
+    /// View-driven replay (ADR-0046 M1 — single flight): the generation the view fences its flush with. `Err` when no
+    /// connection is open, no window shows the agent or its `Subscribe` could not be written. Contract:
+    /// `LinkClient::request_replay`.
+    pub async fn request_replay(&self, agent_id: AgentId) -> Result<u64, String> {
+        #[cfg(test)]
+        if self.link.is_none() {
+            return self.request_replay_on_old_driver(agent_id).await;
+        }
+        self.link().request_replay(agent_id).await
+    }
+
+    // The old driver's path — its test constructors only (gone with 3-2 U4b).
     // ★뷰 주도 replay 채번(ADR-0046 M1 — single-flight, 반환 gen)★. 뷰가 mount/remount 시 호출하면 연결
     // task 가 single-flight 로 wire `Subscribe{after_seq:None}` 를 보내거나(idle) 다음 1회에 병합(in-flight)
     // 하고, 배정된 `gen`(세대)을 돌려준다. 뷰는 그 gen 이상의 성공 마커에만 flush(gen 펜스). 마커는 연결
@@ -1202,11 +1375,8 @@ impl DaemonClient {
     // ★계약★: 비연결이면 Err(프론트 재요청 구동자는 connected 전이 — M2). 연결 task 에 `RequestReplay` 를
     //   보내고 oneshot 으로 gen 을 회수한다(actor 가 single-flight 상태를 단독 소유 → 직렬). 그 에이전트를 보이는
     //   창이 없으면 Subscribe 없이 Err(연결 task 의 `RequestReplay` 팔 — 사유 정본 그 주석).
-    pub async fn request_replay(&self, agent_id: AgentId) -> Result<u64, String> {
-        #[cfg(test)]
-        if let Some(link) = &self.link {
-            return link.request_replay(agent_id).await;
-        }
+    #[cfg(test)]
+    async fn request_replay_on_old_driver(&self, agent_id: AgentId) -> Result<u64, String> {
         let Some((cmd_tx, socket)) = self.lifecycle.current_cmd_tx() else {
             return Err(NOT_CONNECTED.to_string());
         };
@@ -1239,6 +1409,7 @@ impl DaemonClient {
         reply_rx.await.map_err(|_| REPLAY_UNSENT.to_string())
     }
 
+    #[cfg(test)]
     fn try_enqueue(&self, make: impl FnOnce(u64) -> ConnectionCommand, kind: &str) {
         try_enqueue_on(&self.lifecycle, make, kind);
     }
@@ -1266,6 +1437,7 @@ impl DaemonClient {
 //
 // ★명령을 **만들어 주는 클로저**를 받는다(ADR-0195)★: 소켓 표식은 창구를 여는 그 한 번의 락
 // 조회에서만 나오므로, 완성된 명령을 받으면 그 칸을 채울 값이 없다.
+#[cfg(test)]
 fn try_enqueue_on(lifecycle: &Lifecycle, make: impl FnOnce(u64) -> ConnectionCommand, kind: &str) {
     let Some((cmd_tx, socket)) = lifecycle.current_cmd_tx() else {
         // 창구가 닫힘 — 조용히 no-op(ADR-0046: src-tauri 무상태). ★여기서 담아 두지 않는 것이
@@ -1280,6 +1452,12 @@ fn try_enqueue_on(lifecycle: &Lifecycle, make: impl FnOnce(u64) -> ConnectionCom
     }
 }
 
+// The old driver's nudge. ★A closed window makes it a no-op, and that is fine★: a new socket sends the whole interest
+//   when it opens, and the gap on a first connect or a takeover — window open, channel not plugged yet — is covered by
+//   the nudge right after the channel is plugged (`start_connection`). A nudge dropped on a full command channel is
+//   fixed by that connection's next snapshot check — a connection with no subscription has nothing to check, ⟳ fixes
+//   it (TRD §6 #25).
+#[cfg(test)]
 fn nudge_usage_on(lifecycle: &Lifecycle) {
     try_enqueue_on(
         lifecycle,
@@ -1291,6 +1469,8 @@ fn nudge_usage_on(lifecycle: &Lifecycle) {
 // 연결 태스크를 접는 사유·불변식은 [`DaemonClient::close_on_drop`] 이 단독 소유한다 — 여기 다시 적지 않는다.
 impl Drop for DaemonClient {
     fn drop(&mut self) {
+        // The link driver ends with its `LinkClient` (dropped with the fields below).
+        #[cfg(test)]
         self.close_on_drop();
         // ★전용 런타임은 여기서 **비블로킹으로** 접는다★ — 이 함수 본문이 끝나면 필드들이 이어서 drop
         //   되고, 그중 [`Self::_owned_rt`] 는 tokio `Runtime` 이다. `Runtime` 의 기본 drop 은 워커가 멈출

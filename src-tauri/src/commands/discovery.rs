@@ -133,18 +133,17 @@ pub fn daemon_close(client: tauri::State<'_, std::sync::Arc<crate::daemon_client
     client.close();
 }
 
-// ★리로드 자가복구 pull 조회(Fix-D)★.
+// ★Reload self-heal pull (Fix-D)★.
 //
-// ★왜 필요한가★: Rust DaemonClient 는 `daemon-connection-state` 이벤트를 상태 *전이* 시에만 emit
-// 한다 — connect()/ensure() 는 이미 Connected 면 emit 없이 Ok 로 단락한다(connection.rs 는 전이에서만
-// app.emit). 그래서 웹뷰가 리로드되면(TauriTransport 재생성, _state='down') 새 창은 "이미 연결됨"을
-// 알 방법이 없어 출력 Channel 을 등록하지 못하고 replay/live 가 전부 두절된다(창 단위 사각지대).
-// 프론트 self-heal 이 리스너 등록 후 이 command 를 1회 pull 해 현재 상태를 확인한다.
+// ★Why it is needed★: the Rust DaemonClient emits `daemon-connection-state` only on state *transitions* — a
+// connect()/ensure() on an already connected link answers Ok with no emit (the driver's routing emits on transitions
+// only). So after a webview reload (TauriTransport recreated, _state='down') the new window has no way to learn "already
+// connected", cannot register its output Channel, and replay/live are cut off (a per-window blind spot). The frontend
+// self-heal pulls this command once after registering its listeners to read the current state.
 //
-// ★문자열 어휘 정합★: `daemon-connection-state` 이벤트 payload 와 **동일한 어휘**("connected"/
-// "reconnecting"/"down")로 직렬화한다 — 프론트가 이벤트 핸들러와 같은 코드 경로로 먹일 수 있게.
-// Connecting(전이 중)은 이벤트로 emit 되지 않으므로(connection.rs 는 connected/reconnecting/down 만
-// emit) 여기서도 "down"으로 접는다 — 프론트 ConnectionState 어휘(connected/reconnecting/down)와 일치.
+// ★Same vocabulary★: serialized with **the same words** as the `daemon-connection-state` payload ("connected" /
+// "reconnecting" / "down") so the frontend feeds it through the event handler's path. Connecting is never emitted (the
+// link driver never shows it), so it folds into "down" here — matching the frontend ConnectionState vocabulary.
 #[tauri::command]
 pub fn daemon_connection_state(
     client: tauri::State<'_, std::sync::Arc<crate::daemon_client::DaemonClient>>,

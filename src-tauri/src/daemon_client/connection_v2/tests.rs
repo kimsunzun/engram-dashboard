@@ -45,6 +45,8 @@ const TOKEN: &str = "cccc2222cccc2222cccc2222cccc2222cccc2222cccc2222cccc2222ccc
 struct Record {
     now: Mutex<Current>,
     search_fails: Mutex<Option<String>>,
+    /// Set: the search answers this endpoint whatever the record says.
+    search_finds: Mutex<Option<Endpoint>>,
     /// Set: the search reports that it started and waits for the release.
     search_gate: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
     reads: AtomicUsize,
@@ -56,6 +58,7 @@ impl Record {
         Arc::new(Self {
             now: Mutex::new(now),
             search_fails: Mutex::new(None),
+            search_finds: Mutex::new(None),
             search_gate: Mutex::new(None),
             reads: AtomicUsize::new(0),
             searches: AtomicUsize::new(0),
@@ -68,6 +71,10 @@ impl Record {
 
     fn fail_search(&self, why: &str) {
         *self.search_fails.lock().unwrap() = Some(why.to_owned());
+    }
+
+    fn search_finds(&self, endpoint: Endpoint) {
+        *self.search_finds.lock().unwrap() = Some(endpoint);
     }
 
     /// Holds the next search: returns "it started" and the release.
@@ -97,6 +104,9 @@ impl EndpointSource for Record {
         }
         if let Some(why) = self.search_fails.lock().unwrap().clone() {
             return Err(why);
+        }
+        if let Some(endpoint) = self.search_finds.lock().unwrap().clone() {
+            return Ok(endpoint);
         }
         match self.now.lock().unwrap().clone() {
             Current::Live(endpoint) => Ok(endpoint),
@@ -301,12 +311,17 @@ impl Harness {
 }
 
 #[test]
-fn the_link_policy_retries_network_failures_without_limit_and_keeps_the_other_defaults() {
+fn the_link_policy_retries_network_failures_without_limit_waits_30_s_for_a_reply_and_keeps_the_other_defaults(
+) {
     let policy = link_policy();
     assert_eq!(policy.reconnect.max_attempts, u32::MAX);
+    assert_eq!(policy.request_timeout, Duration::from_secs(30));
     let mut expected = Policy::default();
     expected.reconnect.max_attempts = u32::MAX;
+    expected.request_timeout = Duration::from_secs(30);
     assert_eq!(policy, expected);
+    // `Registry::new` debug-asserts the policy's own invariants.
+    assert_eq!(policy.check(), Ok(()));
     // `drop_connection` relies on it: a drop that meets a full queue still drops the link.
     assert_eq!(policy.full_queue, QueueFullPolicy::Disconnect);
 }
@@ -385,9 +400,33 @@ async fn a_cold_start_failure_shows_down_at_once_and_retries_without_limit_until
 async fn ensure_never_searches_and_a_missing_daemon_shows_down() {
     let h = Harness::new(Current::Absent);
     let err = joined("ensure", h.ensure()).await.expect_err("no daemon");
-    assert!(matches!(err, HandshakeError::Connect(_)), "{err:?}");
+    assert_eq!(
+        err.to_string(),
+        "no live daemon (no endpoint record) — is the daemon running?"
+    );
     wait_for("Down", || h.states() == ["state:down"]).await;
     assert_eq!(h.record.searches(), 0);
+}
+
+// A record whose daemon is gone says so in the same shape — the endpoint source's cause in place of "no record".
+#[tokio::test]
+async fn ensure_on_a_stale_record_names_its_cause() {
+    let h = Harness::new(Current::Unusable(
+        "daemon.json names pid 4242 which is not alive".into(),
+    ));
+    let err = joined("ensure", h.ensure()).await.expect_err("no daemon");
+    assert_eq!(
+        err.to_string(),
+        "no live daemon (daemon.json names pid 4242 which is not alive) — is the daemon running?"
+    );
+}
+
+// Any other unreachable first failure keeps the connect text — only "no live daemon" is reworded.
+#[tokio::test]
+async fn ensure_on_a_busy_record_with_no_known_address_is_a_connect_failure() {
+    let h = Harness::new(Current::Busy);
+    let err = joined("ensure", h.ensure()).await.expect_err("no address");
+    assert!(matches!(err, HandshakeError::Connect(_)), "{err:?}");
 }
 
 #[tokio::test]
@@ -682,7 +721,7 @@ impl Bench {
     /// Adds a handle and returns its token.
     fn add(&mut self) -> HandleToken {
         let (first, _answer) = oneshot::channel();
-        self.driver.add(0, first);
+        self.driver.add(0, None, first);
         self.driver.current.expect("a handle was added")
     }
 
@@ -760,17 +799,81 @@ async fn a_handle_routed_as_connected_counts_as_live_until_its_loss_is_routed() 
     assert!(b.driver.is_live());
 
     let (first, mut answer) = oneshot::channel();
-    b.driver.add(0, first);
+    b.driver.add(0, None, first);
     assert_eq!(answer.try_recv(), Ok(Ok(())));
     assert_eq!(b.driver.current, Some(token), "no re-add");
     assert_eq!(b.driver.dialer.registered(), 1);
+}
+
+// The old driver's order, which the frontend relies on (`src/api/tauriTransport.ts` `doConnect`): the state watch and
+// the frontend's `connected` come before the connect resolves.
+#[tokio::test]
+async fn a_connect_resolves_only_after_its_connected_is_shown() {
+    let mut b = Bench::new();
+    let (first, answer) = oneshot::channel();
+    b.driver.add(0, None, first);
+    let token = b.driver.current.expect("a handle was added");
+    let answer = Arc::new(Mutex::new(answer));
+    let seen = Arc::new(Mutex::new(None));
+    {
+        let (answer, seen, state) = (answer.clone(), seen.clone(), b._client.state_rx());
+        b.events.then_on_connected(move || {
+            let unanswered = matches!(
+                answer.lock().unwrap().try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            );
+            *seen.lock().unwrap() = Some((unanswered, *state.borrow()));
+        });
+    }
+    let key = b.key();
+    let connected = bench_connected(&b, Generation(1));
+    b.driver.on_routable(Routable::Item {
+        key,
+        token,
+        item: connected,
+    });
+    assert_eq!(
+        *seen.lock().unwrap(),
+        Some((true, ConnectionState::Connected)),
+        "(not answered yet, state) when the frontend heard `connected`"
+    );
+    assert_eq!(answer.lock().unwrap().try_recv(), Ok(Ok(())));
+}
+
+// The endpoint `connect`'s search found is the first dial's fallback: a record held busy right after the search (a
+// daemon it just spawned) still connects to that daemon, with its credential.
+#[tokio::test]
+async fn a_connect_dials_the_daemon_its_search_found_while_the_record_is_busy() {
+    let h = Harness::new(Current::Busy);
+    let Current::Live(found) = live() else {
+        unreachable!("live() is a live record")
+    };
+    h.record.search_finds(found);
+    let task = h.connect();
+    let (endpoint, auth) = h.next_link().await;
+    assert!(auth.contains(TOKEN), "the found endpoint's credential");
+    assert!(
+        h.record.reads() >= 1,
+        "the dial still read the record first"
+    );
+    endpoint.push(hello());
+    assert_eq!(joined("connect", task).await, Ok(()));
+}
+
+// The replay deadline sweep runs only while a replay waits for its deadline — an idle actor sets no timer.
+#[tokio::test]
+async fn an_idle_actor_sets_no_timer() {
+    let h = Harness::new(live());
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(h.clock.sleepers(), 0);
+    drop(h);
 }
 
 #[tokio::test]
 async fn a_close_answers_the_waiting_connect_at_once_and_a_later_add_waits_for_its_own_handle() {
     let mut b = Bench::new();
     let (first, mut answer_a) = oneshot::channel();
-    b.driver.add(0, first);
+    b.driver.add(0, None, first);
     let old = b.driver.current.expect("a handle");
     b.driver.close();
     assert_eq!(
@@ -780,7 +883,7 @@ async fn a_close_answers_the_waiting_connect_at_once_and_a_later_add_waits_for_i
     );
 
     let (second, mut answer_b) = oneshot::channel();
-    b.driver.add(0, second);
+    b.driver.add(0, None, second);
     assert_ne!(b.driver.current, Some(old));
     assert_eq!(
         answer_b.try_recv(),
@@ -1196,7 +1299,7 @@ async fn a_re_add_of_a_once_connected_key_shows_its_first_failure_as_down() {
 
     h.record.set(Current::Absent);
     let err = joined("ensure", h.ensure()).await.expect_err("no daemon");
-    assert!(matches!(err, HandshakeError::Connect(_)), "{err:?}");
+    assert!(matches!(err, HandshakeError::NoLiveDaemon(_)), "{err:?}");
     assert_eq!(
         h.states(),
         ["state:connected", "state:reconnecting", "state:down"],
@@ -2605,11 +2708,8 @@ async fn a_command_whose_connection_does_not_open_in_time_gives_up_with_a_warn()
     })
     .await;
     let after = link_policy().request_timeout;
-    // The link's own timers stay quiet over the advance.
-    assert!(
-        after + Duration::from_secs(1) < link_policy().ping_interval
-            && after + Duration::from_secs(1) < link_policy().idle_timeout
-    );
+    // The link stays live over the advance: the keepalive ping it passes only writes, and the idle limit is beyond it.
+    assert!(after + Duration::from_secs(1) < link_policy().idle_timeout);
 
     let mut call = Box::pin(h.link().send_command(list()));
     let mut cx = Context::from_waker(Waker::noop());
@@ -2642,6 +2742,35 @@ async fn a_command_whose_connection_does_not_open_in_time_gives_up_with_a_warn()
     );
     drop(usage);
     joined("connect", connect).await.expect("connected");
+}
+
+// The frontend command path has no timeout of its own — the policy's request timeout ends a reply that never comes,
+// with the text that path always gave (golden = its former 30 s wrapper's text).
+#[tokio::test]
+async fn a_frontend_command_whose_reply_never_comes_fails_after_30_s_with_the_reply_timeout_text() {
+    let h = Harness::new(live());
+    let endpoint = h.connected().await;
+    let client = h.client.clone();
+    let cmd = serde_json::to_value(list()).unwrap();
+    let forward =
+        tokio::spawn(async move { crate::commands::agent::forward_to_daemon(&client, cmd).await });
+    assert!(matches!(
+        h.command(&endpoint).await,
+        AgentCommand::ListAgents { .. }
+    ));
+
+    h.clock.advance(Duration::from_secs(29));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!forward.is_finished(), "not before 30 s");
+    assert_eq!(h.peer_state(), Some(PeerState::Live), "the link stays up");
+    h.clock.advance(Duration::from_secs(2));
+    assert_eq!(
+        joined("the forward", forward).await,
+        Err(
+            "daemon reply timeout — 연결은 살아있으나 데몬이 응답을 보내지 않음(30s 초과)"
+                .to_owned()
+        )
+    );
 }
 
 // The actor's rules for the gate's pending list on `LinkUp`: that connection's are written (before it is set opened —
@@ -2744,4 +2873,137 @@ async fn a_refresh_with_no_interest_writes_an_empty_subscribe_first() {
     assert_eq!(h.labels(&endpoint, 2).await, ["usage[]", "refresh:Claude"]);
     endpoint.push(text(&AgentEvent::Ack { request_id }));
     assert!(joined("the refresh", refresh).await.is_ok());
+}
+
+// ── The production assembly on a real socket ─────────────────────────────────────────────────────────────────────
+
+/// Bounds a real-socket wait, so a regression fails instead of hanging.
+async fn within<F: std::future::Future>(what: &str, wait: F) -> F::Output {
+    tokio::time::timeout(Duration::from_secs(10), wait)
+        .await
+        .unwrap_or_else(|_| panic!("not within 10 s: {what}"))
+}
+
+/// Writes the daemon's endpoint record into `dir` — this test process's pid stands for a live daemon.
+fn write_daemon_record(dir: &std::path::Path, port: u16, token: &str) {
+    let path = crate::discovery::DataLayout::new(dir).daemon_file();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let record = engram_dashboard_protocol::DaemonInfo {
+        pid: std::process::id(),
+        host: "127.0.0.1".into(),
+        port,
+        token: Secret::new(token),
+        protocol_version: PROTOCOL_VERSION,
+        start_time: 0,
+    };
+    std::fs::write(path, record.to_json_pretty().unwrap()).unwrap();
+}
+
+type DaemonSocket = tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>;
+
+/// Plays the daemon's side of one handshake: takes the next connection, reads the Auth text, answers `Hello`.
+async fn accept_daemon(listener: &tokio::net::TcpListener) -> (String, DaemonSocket) {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let (stream, _) = listener.accept().await.unwrap();
+    let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+    let auth = match ws.next().await {
+        Some(Ok(Message::Text(auth))) => auth.to_string(),
+        other => panic!("the first frame must be the Auth text, got {other:?}"),
+    };
+    let hello = serde_json::to_string(&AgentEvent::Hello {
+        protocol_version: PROTOCOL_VERSION,
+        daemon_version: "0.0.0".into(),
+        capabilities: None,
+    })
+    .unwrap();
+    ws.send(Message::Text(hello.into())).await.unwrap();
+    (auth, ws)
+}
+
+/// Answers the next `ListAgents` with an empty list — the commands the shell writes on open come first and are
+/// skipped.
+async fn answer_list(ws: &mut DaemonSocket) {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    loop {
+        match ws.next().await {
+            Some(Ok(Message::Text(sent))) => {
+                if let Ok(AgentCommand::ListAgents { request_id }) = serde_json::from_str(&sent) {
+                    let reply = serde_json::to_string(&AgentEvent::AgentList {
+                        request_id,
+                        agents: Vec::new(),
+                    })
+                    .unwrap();
+                    ws.send(Message::Text(reply.into())).await.unwrap();
+                    return;
+                }
+            }
+            Some(Ok(_)) => {}
+            other => panic!("the link ended before the command: {other:?}"),
+        }
+    }
+}
+
+async fn round_trip(what: &str, client: &Arc<DaemonClient>, ws: &mut DaemonSocket) {
+    let call = {
+        let client = client.clone();
+        tokio::spawn(async move { client.send_command(list()).await })
+    };
+    within(what, answer_list(ws)).await;
+    let reply = within(what, call).await.expect("the call ran");
+    assert!(
+        matches!(reply, Ok(AgentEvent::AgentList { .. })),
+        "{reply:?}"
+    );
+}
+
+// Production's transport (`DaemonClient::on_local_daemon`: ws dialer · the folder's `daemon.json` · system clock) on a
+// real socket: attach, one round trip, the daemon's link drops, and the retry alone reaches a daemon on a new port and
+// token written to `daemon.json`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_production_transport_attaches_answers_and_follows_the_daemon_to_a_new_port() {
+    const TOKEN_B: &str = "eeee4444eeee4444eeee4444eeee4444eeee4444eeee4444eeee4444eeee4444";
+    let dir = tempfile::tempdir().unwrap();
+    let first = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    write_daemon_record(dir.path(), first.local_addr().unwrap().port(), TOKEN);
+    let events = Arc::new(RecordingEvents::default());
+    let client = Arc::new(DaemonClient::on_local_daemon(
+        Handle::current(),
+        None,
+        dir.path().to_path_buf(),
+        events.clone(),
+        events.clone(),
+        Arc::new(RefusalAlerts::new(Arc::new(RecordingRefusals::new()))),
+        Arc::new(OutputRouter::new()),
+        WindowChannelRegistry::default(),
+    ));
+
+    let ensure = {
+        let client = client.clone();
+        tokio::spawn(async move { client.ensure().await })
+    };
+    let (auth, mut ws) = within("the first handshake", accept_daemon(&first)).await;
+    assert!(auth.contains(TOKEN), "the record's credential");
+    assert_eq!(within("ensure", ensure).await.expect("ran"), Ok(()));
+    round_trip("the first round trip", &client, &mut ws).await;
+
+    let second = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    write_daemon_record(dir.path(), second.local_addr().unwrap().port(), TOKEN_B);
+    drop(ws);
+    drop(first);
+    let (auth, mut ws) = within("the handshake after the loss", accept_daemon(&second)).await;
+    assert!(auth.contains(TOKEN_B), "the new record's credential");
+    // A command needs the link live on the shell's side — the daemon's `Hello` may not be read yet.
+    wait_for("the loss is shown", || {
+        events.seen().contains(&"state:reconnecting".to_owned())
+    })
+    .await;
+    wait_for("connected again", || {
+        client.state() == ConnectionState::Connected
+    })
+    .await;
+    round_trip("the round trip after the loss", &client, &mut ws).await;
 }

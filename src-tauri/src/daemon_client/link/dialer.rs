@@ -39,13 +39,28 @@ use super::handshake::{CredentialSlot, ShellHandshake};
 use super::DaemonKey;
 
 /// The texts of the failed attempts this dialer makes — routing keys its throttled failure log on them
-/// (`route::UnreachableClass`); nothing decides on them.
+/// (`route::UnreachableClass`), and a handle's first answer reads the two that mean "no live daemon"
+/// ([`no_live_daemon_cause`]). Nothing else decides on them.
 pub(super) const NOT_REGISTERED: &str = "no daemon registered at";
 pub(super) const READ_FAILED: &str = "reading the daemon endpoint failed";
 pub(super) const BUSY_UNKNOWN: &str =
     "the daemon endpoint record is busy and no earlier address is known";
 pub(super) const NO_RECORD: &str = "no daemon endpoint record — no live daemon";
 pub(super) const UNUSABLE: &str = "the daemon endpoint record is unusable";
+
+/// The cause when a failed attempt's text says there is no live daemon — no endpoint record ([`NO_RECORD`]), or one
+/// that cannot be used ([`UNUSABLE`] — broken · dead pid · unreadable); `None` for any other failure. Only this
+/// dialer writes texts with these openings (the ws dialer's start with `ws connect`, the transport's are fixed
+/// words), and the cause is the endpoint source's local diagnostic — it quotes no file content.
+pub(crate) fn no_live_daemon_cause(failure: &str) -> Option<String> {
+    if failure == NO_RECORD {
+        return Some("no endpoint record".to_owned());
+    }
+    failure
+        .strip_prefix(UNUSABLE)
+        .and_then(|rest| rest.strip_prefix(": "))
+        .map(str::to_owned)
+}
 
 struct Registration {
     source: Arc<dyn EndpointSource>,
@@ -70,11 +85,15 @@ impl LocalDaemonDialer {
     }
 
     /// Registers one `Registry::add` of `key` and returns the logical address and the handshake to pass to it. Every
-    /// call makes a new registration, also for a key registered before.
+    /// call makes a new registration, also for a key registered before. `found` = the endpoint the daemon search of
+    /// this connect just returned (`EndpointSource::ensure`) — the registration starts with it as its last-known
+    /// endpoint, so a record held busy right after the search (a daemon it just spawned) still dials that daemon. Every
+    /// dial still reads the record first.
     pub fn register(
         &self,
         key: &DaemonKey,
         source: Arc<dyn EndpointSource>,
+        found: Option<Endpoint>,
     ) -> (Address, Arc<dyn Handshake>) {
         let n = self.next.fetch_add(1, Ordering::Relaxed);
         let address = Address::new(format!("engram-local:{}#{n}", key.peer_id().as_str()));
@@ -82,7 +101,7 @@ impl LocalDaemonDialer {
         let registration = Arc::new(Registration {
             source,
             credential: credential.clone(),
-            last_known: Mutex::new(None),
+            last_known: Mutex::new(found),
         });
         self.registrations
             .lock()
@@ -309,7 +328,7 @@ mod tests {
             });
             let dialer = Arc::new(LocalDaemonDialer::new(recording.clone()));
             let key = DaemonKey::new("local");
-            let (address, handshake) = dialer.register(&key, source);
+            let (address, handshake) = dialer.register(&key, source, None);
             let clock = ManualClock::new();
             let registry = Registry::new(
                 Arc::new(ShellWire),
@@ -676,7 +695,7 @@ mod tests {
             let net = MemoryNetwork::new();
             let dialer = LocalDaemonDialer::new(net.dialer());
             let source = ScriptedSource::new([live(5123, TOKEN_A), gone.clone(), Current::Busy]);
-            let (address, _) = dialer.register(&DaemonKey::new("local"), source.clone());
+            let (address, _) = dialer.register(&DaemonKey::new("local"), source.clone(), None);
             assert!(dialer.dial(&address).await.is_ok(), "{gone:?}");
             assert!(dialer.dial(&address).await.is_err(), "{gone:?}");
             let busy = dialer.dial(&address).await.err();
@@ -706,9 +725,9 @@ mod tests {
             entered: Mutex::new(entered_tx),
             release: Mutex::new(release_rx),
         });
-        let (old_address, old_handshake) = dialer.register(&key, old_source);
+        let (old_address, old_handshake) = dialer.register(&key, old_source, None);
         let (new_address, new_handshake) =
-            dialer.register(&key, ScriptedSource::new([live(6234, TOKEN_B)]));
+            dialer.register(&key, ScriptedSource::new([live(6234, TOKEN_B)]), None);
         assert_ne!(old_address, new_address);
 
         // The old supervisor's dial is reading its source when the re-add's supervisor dials.
@@ -742,7 +761,7 @@ mod tests {
         let net = MemoryNetwork::new();
         let dialer = LocalDaemonDialer::new(net.dialer());
         let source = ScriptedSource::new([live(5123, TOKEN_A)]);
-        let (address, _) = dialer.register(&DaemonKey::new("local"), source.clone());
+        let (address, _) = dialer.register(&DaemonKey::new("local"), source.clone(), None);
         dialer.unregister(&address);
         for target in [address, Address::new("engram-local:nobody#0")] {
             let failure = dialer.dial(&target).await.err();
@@ -753,5 +772,29 @@ mod tests {
         }
         assert_eq!(net.dials(), 0);
         assert_eq!(source.reads(), 0);
+    }
+
+    #[test]
+    fn only_a_missing_or_unusable_record_reads_as_no_live_daemon() {
+        assert_eq!(
+            no_live_daemon_cause(NO_RECORD).as_deref(),
+            Some("no endpoint record")
+        );
+        assert_eq!(
+            no_live_daemon_cause(&format!(
+                "{UNUSABLE}: daemon.json names pid 7 which is not alive"
+            ))
+            .as_deref(),
+            Some("daemon.json names pid 7 which is not alive")
+        );
+        for other in [
+            BUSY_UNKNOWN.to_owned(),
+            format!("{READ_FAILED}: task gone"),
+            format!("{NOT_REGISTERED} engram-local:local#1"),
+            "ws connect ws://127.0.0.1:5123: refused".to_owned(),
+            "connect timed out".to_owned(),
+        ] {
+            assert_eq!(no_live_daemon_cause(&other), None, "{other}");
+        }
     }
 }

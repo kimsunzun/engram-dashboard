@@ -261,37 +261,14 @@ pub(crate) async fn forward_to_daemon(
     // ★끊김 처리★: send_command 가 Err(연결 끊김/응답 못 받음)면 그 메시지를 프론트로 전달해
     //   ProtocolClient.sendCommand 의 send().catch 가 해당 pending 을 reject 하게 한다(영구 hang 차단).
     //
-    // ## ★reply 타임아웃 (Fix-C ③ — 영구 hang 2차 차단)★
-    // send_command 의 끊김 감지는 *carrier 레벨* 끊김(소켓 죽음 → 연결 task 종료 → drain/oneshot drop)만
-    // 잡는다. 그러나 "연결은 살아있는데 데몬이 그 request_id 응답만 누락"하는 경로가 있다:
-    //   - 데몬 dispatch(connection_core.rs)의 Ack/Error sink.enqueue 가 SinkError 로 *무시*(`let _ =`)
-    //     되는 경우(큐 포화 등, ADR-0020 R6 의도된 behavior-preserving) → reply 가 영영 안 온다.
-    // 그러면 send_command 의 `reply_rx.await` 는 carrier 가 안 끊겨 영구 대기 → invoke 가 안 끝나 →
-    // 프론트 ProtocolClient.pending 도 영구 hang(send().catch 도 안 불림). 이를 닫으려 reply 대기에
-    // 상한을 둔다. 타임아웃 시 Err → invoke reject → 프론트 send().catch → 해당 pending reject.
-    //
-    // ★값(30s)★: 데몬은 명령을 enqueue 한 *직후* Ack 를 sink 로 보낸다(무거운 작업 완료를 기다리지
-    //   않음 — connection_core.rs dispatch). 정상 경로의 왕복은 loopback 에서 수 ms 라 30s 에 절대 안
-    //   닿는다. 넉넉히 잡아 "느린 데몬"을 타임아웃으로 오판하지 않으면서, 무한 hang 만 확정적으로 끊는다.
-    //
-    // ★데몬측 enqueue 실패 승격 대신 클라측 타임아웃을 택한 이유★: connection_core.rs 의 enqueue
-    //   실패 무시(`let _ = sink.enqueue(..)`)를 "연결 종료로 승격"하면 ADR-0020 R6(behavior-preserving)을
-    //   깨고 데몬 crate 회귀 위험이 크다(정상 단일 연결도 일시적 큐 포화로 끊길 수 있음). 타임아웃은
-    //   src-tauri(클라) 레이어에 격리돼 데몬 동작을 안 건드리고, 락 순서(ADR-0006)와도 무관하다 —
-    //   send_command 는 락을 잡았다 즉시 풀고 Sender clone 만 반환하므로 이 timeout 래핑은 추가 락을
-    //   보유하지 않는다.
-    const REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-    match tokio::time::timeout(REPLY_TIMEOUT, client.send_command(agent_cmd)).await {
-        Ok(Ok(event)) => {
-            let value =
-                serde_json::to_value(&event).map_err(|e| format!("reply 직렬화 실패: {e}"))?;
-            Ok(Some(value))
-        }
-        Ok(Err(e)) => Err(e),
-        Err(_elapsed) => Err(crate::daemon_client::link::errors::reply_timeout_text(
-            REPLY_TIMEOUT,
-        )),
-    }
+    // A reply that never comes while the link stays up (the daemon drops one answer) is bounded by the transport's
+    //   request timeout — the shared one of every round trip (ADR-0181 · ADR-0310 D15 ① ·
+    //   `daemon_client::connection_v2::link_policy`), whose text is `link::errors::reply_timeout_text`. No second
+    //   timeout here. A command sent while the connection is live but not yet opened by the driver first waits for the
+    //   open, bounded by the same value — so the worst case is about twice it (the open gap is normally milliseconds).
+    let event = client.send_command(agent_cmd).await?;
+    let value = serde_json::to_value(&event).map_err(|e| format!("reply 직렬화 실패: {e}"))?;
+    Ok(Some(value))
 }
 
 fn expect_ack(result: CmdResult) -> Result<(), String> {

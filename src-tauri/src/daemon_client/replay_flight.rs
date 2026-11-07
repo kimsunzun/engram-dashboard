@@ -322,6 +322,14 @@ impl ReplayFlightSet {
         out
     }
 
+    /// Whether a replay still waits for its deadline — one [`Self::check_deadlines`] could still fail. With none, no
+    /// sweep is needed.
+    pub fn awaits_deadline(&self) -> bool {
+        self.agents
+            .values()
+            .any(|f| f.in_flight.as_ref().is_some_and(|inf| !inf.failed))
+    }
+
     /// 데몬이 이 에이전트의 `Subscribe` 를 **거절**했다(`AgentEvent::SubscribeFailed`). 슬롯을 해제하고,
     /// 아직 실패 마커를 안 냈으면 지금 내고(뷰가 10초 deadline 을 기다리지 않게), 병합된 대기열을 전진시킨다.
     ///

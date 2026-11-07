@@ -2,8 +2,9 @@
 //!
 //! ★Byte-identical to the old driver★ — callers tell outcomes apart by these strings (the frontend, the LLM surface,
 //! `daemon_client::tests` `DisconnectBranch`). The old driver's constants are imported in place; the reply-timeout text
-//! lives here and the frontend command path (`commands::agent`) calls it. Failures the old driver never had (a full
-//! queue, a retired request id) read as its send failure with the transport's reason.
+//! lives here — the frontend command path (`commands::agent`) gets it from a request timeout, having no timeout of its
+//! own. Failures the old driver never had (a full queue, a retired request id) read as its send failure with the
+//! transport's reason.
 //!
 //! ★Pre-check first★ — [`RequestError::Disconnected`] with `sent: false` covers both "the peer was not live when
 //! called" and "it dropped before the command reached the wire". The old driver gives those two different texts

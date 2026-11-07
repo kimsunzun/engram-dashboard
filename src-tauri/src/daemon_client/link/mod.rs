@@ -6,11 +6,9 @@
 //! failure texts callers see ([`errors`]). The connection machine itself (dial · backoff · keepalive · pending replies
 //! · per-peer lossless inbox) is the transport crate's; this module only adapts it.
 //!
-//! ★Production does not run on this yet★ — 3-2 U3 builds a new driver on it behind a constructor choice and 3-2 U4
-//! switches production over. Until then the old driver only shares two pieces: `route::emit_broadcast` and the
-//! reply-timeout text (`errors::reply_timeout_text` — `commands::agent`). Items are `pub` so the unused stretch needs no
-//! lint allowances; the one item whose signature names a crate-private port (`route::emit_broadcast` —
-//! `events::DaemonEvents`) is `pub(crate)`.
+//! Production runs on it through the driver in `connection_v2` (3-2 U4a). The old driver, kept for its own test
+//! constructors until 3-2 U4b, shares one piece: `route::emit_broadcast`. The one item whose signature names a
+//! crate-private port (`route::emit_broadcast` — `events::DaemonEvents`) is `pub(crate)`.
 //!
 //! ★Vocabulary wall★ — no `tauri` path and no agent crate in this directory (CI `shell gate 4`). Frontend emits reach
 //! this module only through the ports in the parent module (`events::DaemonEvents` · `AgentNamesSink`), never as

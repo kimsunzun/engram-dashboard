@@ -205,9 +205,9 @@ pub fn command_request_id(cmd: &AgentCommand) -> Option<RequestId> {
 /// ★Error 분기★: `Error{request_id: Some(_)}` = 특정 명령 실패(매칭해 reject), `Error{request_id: None}`
 /// = 명령 무관 오류(broadcast 성격, 매칭 안 함). SubscribeAck 는 request_id 가 없어(agent_id 기반) 여기
 /// None — 데몬 클라이언트의 pending 매칭 대상이 아니다(Subscribe 는 request_id 없는 명령).
-/// ★답장이 깨진 `CommandReply` 도 `None` 이다★(ADR-0272 결정 6) — 깨울 슬롯을 못 찾으니 그 대기는 부르는
-/// 쪽의 답장 상한으로 끝난다(오늘은 `forward_daemon_command` 의 30s). 상한 없이 부르는 쪽은 연결이 끊길
-/// 때까지 기다린다 — 그 잔여는 `daemon_client/mod.rs` 의 `send_command_with_origin` 주석 「알려진 잔여」.
+/// ★A `CommandReply` whose reply is broken is `None` too★ (ADR-0272 decision 6) — no slot to wake is found, so that
+/// wait ends at the link's request timeout (`connection_v2::link_policy`). On the old driver, which has no reply bound,
+/// it lasts until the link drops (`daemon_client/mod.rs` `send_command_on_old_driver` "Known residual").
 pub fn event_reply_request_id(ev: &AgentEvent) -> Option<RequestId> {
     match ev {
         AgentEvent::Ack { request_id }

@@ -305,7 +305,7 @@ async fn ensure_no_spawn_when_no_daemon() {
 
     // ★ADR-0021★: ensure 는 read_live(no-spawn)만 본다 → None 이면 NoLiveDaemon 으로 실패.
     let err = client.ensure().await.expect_err("데몬 없으면 ensure 실패");
-    assert_eq!(err, HandshakeError::NoLiveDaemon);
+    assert!(matches!(err, HandshakeError::NoLiveDaemon(_)), "{err:?}");
 
     // ★불변식 단언★: ensure_spawn(=spawn 유발) 0회, read_live 만 1회. 명령/ensure 가 데몬 못 깨움.
     assert_eq!(
@@ -4282,7 +4282,7 @@ async fn ensure_without_live_daemon_tells_every_window_down() {
 
     let err = client.ensure().await.expect_err("살아있는 데몬 없음");
     assert!(
-        matches!(err, HandshakeError::NoLiveDaemon),
+        matches!(err, HandshakeError::NoLiveDaemon(_)),
         "attach-only 실패여야: {err:?}"
     );
 

@@ -1,8 +1,9 @@
 //! The daemon connection driver on the transport crate (TRD S21 trd-3 §6-2 U3 — working name `connection_v2`).
 //!
-//! ★Not in production yet★ — only the test constructor `DaemonClient::new_on_link` builds it, so the module is
-//! compiled for tests only; 3-2 U4 switches the production constructor over. The old driver (`connection.rs`) and its
-//! suite stay as they are.
+//! Production runs on it (`DaemonClient::new_real_with_owned_runtime`, 3-2 U4a); the test constructor
+//! `DaemonClient::new_on_link` builds the same client on a memory network and a manual clock. The old driver
+//! (`connection.rs` · `lifecycle.rs`) runs only under its own test constructors until 3-2 U4b deletes it; this module
+//! still imports shared pieces from `connection.rs`.
 //!
 //! One actor task per client owns the routing: the registry's dialer registrations, [`RouteState`] and the inbox pumps
 //! all meet on it, and it is the only place that applies what [`route`] returns (connection state · frontend
@@ -29,8 +30,10 @@
 //!   by a close" are answered there, in channel order after any earlier `Close`. A close bumps the close epoch at once;
 //!   a connect / ensure carries the epoch it began under, and an add older than the last close builds nothing (a close
 //!   during `connect`'s daemon search wins).
-//! - `connect` / `ensure` resolve on their handle's first answer — `Connected`, or its first failure. A connect that a
-//!   re-add overtakes gets the new handle's answer; a close before the answer ends it with `ClosedBeforeHello`.
+//! - `connect` / `ensure` resolve on their handle's first answer — `Connected` (once it is shown: state watch and
+//!   frontend event first, as the old driver did), or its first failure; no live daemon (no or an unusable record)
+//!   answers `NoLiveDaemon`. A connect that a re-add overtakes gets the new handle's answer; a close before the answer
+//!   ends it with `ClosedBeforeHello`.
 //! - ★Subscribe · Unsubscribe · RequestReplay go through this one actor, in order, onto one peer queue★ (TRD §6-2 U3 —
 //!   master re-check A1). A replay request checks the window routing when the actor takes it, so an `Unsubscribe`
 //!   queued before it is written first and the check sees the routing that `Unsubscribe` came from. The `Subscribe`
@@ -75,6 +78,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll, Waker};
+use std::time::Duration;
 
 use engram_dashboard_base::sync;
 use engram_dashboard_command::{CommandEnvelope, CommandError, CommandReply as BusReply};
@@ -85,6 +89,7 @@ use engram_dashboard_transport::{
     mask_reason, Address, Clock, ConnectFailure, Dialer, DisconnectCause, Generation, Incoming,
     Peer, PeerState, Policy, Registry, RejectKind, RequestError, TransportEvent,
 };
+use futures_util::future::BoxFuture;
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -95,8 +100,8 @@ use super::connection::{
 use super::events::{ConnectionStateEvent, DaemonEvents};
 use super::frame_relay::{relay_binary_frame, FrameRelay, UnknownTagLog};
 use super::inbound::InboundSlot;
-use super::link::dialer::LocalDaemonDialer;
-use super::link::endpoint::EndpointSource;
+use super::link::dialer::{no_live_daemon_cause, LocalDaemonDialer};
+use super::link::endpoint::{Endpoint, EndpointSource};
 use super::link::errors::{request_error_text, require_live, send_error_text};
 use super::link::pump::{spawn_pump, Routable};
 use super::link::route::{
@@ -116,7 +121,7 @@ use crate::output_channel::{send_to_windows, WindowChannelRegistry};
 use crate::output_router::{OutputRouter, WindowLabel};
 
 /// The one daemon of stage 3 (D4 ① — the registry is built for N).
-const DAEMON: &str = "local";
+pub(super) const DAEMON: &str = "local";
 
 /// Room in the pumps → actor channel. A full channel is backpressure, not loss (`link::pump`).
 const ROUTABLE_QUEUE: usize = 256;
@@ -152,14 +157,21 @@ fn lock_gate(gate: &Mutex<Gate>) -> MutexGuard<'_, Gate> {
     sync::lock(gate)
 }
 
-/// The transport policy of the shell's daemon link: the crate defaults, except that network-class failures retry
-/// without limit (ADR-0346 decision 1 — production never reaches `GaveUp(BudgetExhausted)`). The rest of the TRD §7
-/// values land with 3-2 U4.
+/// The transport policy of the shell's daemon link: the crate defaults (TRD §7 — every other value there is the
+/// default), except two. Network-class failures retry without limit (ADR-0346 decision 1 — production never reaches
+/// `GaveUp(BudgetExhausted)`), and a reply is awaited [`REQUEST_TIMEOUT`] — one value for every round trip, the
+/// registration and the wait for a connection to open included.
 pub(crate) fn link_policy() -> Policy {
     let mut policy = Policy::default();
     policy.reconnect.max_attempts = u32::MAX;
+    policy.request_timeout = REQUEST_TIMEOUT;
     policy
 }
+
+// ADR-0181 · ADR-0310 (decision 21, D15 ①): one shared request timeout. 30 s, not the crate's 8 s — D15 ① keeps the
+//   frontend command path's
+//   former 30 s until agent spawn time is measured (ADR-0181 "검증 안 된 것" 1).
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Where the actor hands what it routes.
 pub(crate) struct Ports {
@@ -227,6 +239,8 @@ enum DriverCmd {
     /// answer.
     Add {
         closes: u64,
+        /// The endpoint `connect`'s daemon search found — the new registration's last-known endpoint.
+        found: Option<Endpoint>,
         first: oneshot::Sender<Result<(), HandshakeError>>,
     },
     Close,
@@ -371,12 +385,12 @@ impl LinkClient {
             .spawn_blocking(move || source.ensure(DEFAULT_CONNECT_TIMEOUT))
             .await
         {
-            Ok(found) => found.map(|_| ()),
+            Ok(found) => found,
             Err(e) => Err(format!("the daemon search task failed: {e}")),
         };
-        let first = self.add(closes);
+        let first = self.add(closes, searched.as_ref().ok().cloned());
         match searched {
-            Ok(()) => first.await,
+            Ok(_) => first.await,
             Err(e) => {
                 tracing::warn!(
                     peer = %self.key.peer_id(),
@@ -392,7 +406,7 @@ impl LinkClient {
     pub(crate) async fn ensure(&self) -> Result<(), HandshakeError> {
         let closes = self.closes.load(Ordering::SeqCst);
         tracing::info!(peer = %self.key.peer_id(), "attaching to a running daemon");
-        self.add(closes).await
+        self.add(closes, None).await
     }
 
     /// The actor's answer — ordered after every `close` called before.
@@ -405,9 +419,17 @@ impl LinkClient {
     }
 
     /// Sends the add now and returns the wait for its first answer.
-    fn add(&self, closes: u64) -> impl std::future::Future<Output = Result<(), HandshakeError>> {
+    fn add(
+        &self,
+        closes: u64,
+        found: Option<Endpoint>,
+    ) -> impl std::future::Future<Output = Result<(), HandshakeError>> {
         let (first, answer) = oneshot::channel();
-        let sent = self.cmd_tx.send(DriverCmd::Add { closes, first });
+        let sent = self.cmd_tx.send(DriverCmd::Add {
+            closes,
+            found,
+            first,
+        });
         async move {
             if sent.is_err() {
                 return Err(HandshakeError::TaskGone);
@@ -690,14 +712,24 @@ impl Driver {
         mut cmd_rx: mpsc::UnboundedReceiver<DriverCmd>,
         mut routable_rx: mpsc::Receiver<Routable>,
     ) {
-        let mut sweep = self.clock.sleep(REPLAY_DEADLINE_TICK);
+        // Armed only while a replay waits for its deadline — an idle actor (no daemon, no replay) does not wake.
+        let mut sweep: Option<BoxFuture<'static, ()>> = None;
         loop {
+            if !self.flight.awaits_deadline() {
+                sweep = None;
+            } else if sweep.is_none() {
+                sweep = Some(self.clock.sleep(REPLAY_DEADLINE_TICK));
+            }
             tokio::select! {
                 cmd = cmd_rx.recv() => match cmd {
                     Some(DriverCmd::IsLive { reply }) => {
                         let _ = reply.send(self.is_live());
                     }
-                    Some(DriverCmd::Add { closes, first }) => self.add(closes, first),
+                    Some(DriverCmd::Add {
+                        closes,
+                        found,
+                        first,
+                    }) => self.add(closes, found, first),
                     Some(DriverCmd::Close) => self.close(),
                     Some(DriverCmd::Unsubscribe { agent_id }) => self.unsubscribe(agent_id),
                     Some(DriverCmd::RequestReplay { agent_id, reply }) => {
@@ -712,9 +744,14 @@ impl Driver {
                 },
                 // Never `None` — `self.routable_tx` is a sender.
                 Some(routable) = routable_rx.recv() => self.on_routable(routable),
-                () = &mut sweep => {
+                () = async {
+                    match sweep.as_mut() {
+                        Some(tick) => tick.await,
+                        None => std::future::pending().await,
+                    }
+                } => {
                     self.sweep_replay_deadlines();
-                    sweep = self.clock.sleep(REPLAY_DEADLINE_TICK);
+                    sweep = None;
                 }
             }
         }
@@ -757,7 +794,12 @@ impl Driver {
         }
     }
 
-    fn add(&mut self, closes: u64, first: oneshot::Sender<Result<(), HandshakeError>>) {
+    fn add(
+        &mut self,
+        closes: u64,
+        found: Option<Endpoint>,
+        first: oneshot::Sender<Result<(), HandshakeError>>,
+    ) {
         if closes != self.closes.load(Ordering::SeqCst) {
             tracing::info!(
                 peer = %self.key.peer_id(),
@@ -773,7 +815,7 @@ impl Driver {
         // Before the peer exists — a caller that sees it live must not read the previous handle's epoch.
         lock_gate(&self.gate).handle_closes = closes;
         let token = HandleToken::mint();
-        let (address, handshake) = self.dialer.register(&self.key, self.source.clone());
+        let (address, handshake) = self.dialer.register(&self.key, self.source.clone(), found);
         let ended = self.route.adopt(self.key.clone(), token);
         let (_peer, inbox) =
             self.registry
@@ -796,8 +838,14 @@ impl Driver {
     fn on_routable(&mut self, routable: Routable) {
         match routable {
             Routable::Item { key, token, item } => {
+                let connected = matches!(item, Incoming::Event(TransportEvent::Connected { .. }));
                 let out = self.route_item(&key, token, item);
                 self.apply(out);
+                // After the state watch and the frontend's `connected` — the frontend registers its listeners before
+                //   it calls connect and relies on that order (`src/api/tauriTransport.ts` `doConnect`).
+                if connected {
+                    self.answer_first_with(token, Ok(()));
+                }
             }
             Routable::Ended { key, token } => {
                 if let Some(address) = self.registrations.remove(&token) {
@@ -859,18 +907,21 @@ impl Driver {
         self.close();
     }
 
-    /// The first answer of the newest handle. Only that handle is the key's current one (`adopt` in the same step as
-    /// the add), so the handle check is the routing's rule ①; items before it carry no older generation of it.
+    /// The first answer of the newest handle, when it is a failure. Only that handle is the key's current one (`adopt`
+    /// in the same step as the add), so the handle check is the routing's rule ①; items before it carry no older
+    /// generation of it. A `Connected` is answered by [`Self::on_routable`] after it is applied.
     fn answer_first(&mut self, token: HandleToken, item: &Incoming<ShellWire>) {
         let Incoming::Event(event) = item else {
             return;
         };
         let answer = match event {
-            TransportEvent::Connected { .. } => Ok(()),
             TransportEvent::ConnectFailed {
                 cause: ConnectFailure::Unreachable(e),
                 ..
-            } => Err(HandshakeError::Connect(e.to_string())),
+            } => Err(match no_live_daemon_cause(&e.message) {
+                Some(cause) => HandshakeError::NoLiveDaemon(cause),
+                None => HandshakeError::Connect(e.to_string()),
+            }),
             // The refusal's own text can be the daemon's — the fixed local text for its code instead (ADR-0342).
             TransportEvent::ConnectFailed {
                 cause: ConnectFailure::Rejected { code, .. },
@@ -1401,7 +1452,8 @@ impl Driver {
                 Routed::Broadcast(event) => {
                     emit_broadcast(self.events.as_ref(), self.names.as_ref(), &event)
                 }
-                // The connection-failure surface is wired in 3-2 U4; routing already logged the refusal.
+                // The band / reconnect surface for notices is 3-2 U5 (ADR-0344/0345); routing already logged the
+                // refusal.
                 Routed::Notice(notice) => {
                     tracing::debug!(peer = %self.key.peer_id(), ?notice, "daemon link notice")
                 }
