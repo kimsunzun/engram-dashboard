@@ -36,13 +36,17 @@ fn ensure_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
-// 프론트로 넘기는 DaemonInfo. token 을 그대로 노출(로컬 IPC) 하나 **로그 금지**.
+/// The daemon's address as handed to the WebView by `discover_daemon` · `daemon_start` · `read_daemon_info`.
+///
+/// Never carries the daemon token: any script in the WebView (`csp: null`) can read a command's result, and the token
+/// would let it leave the WebView (another process · a direct socket). The shell reads the token from `daemon.json`
+/// for its own link; the WebView never needs it.
+// ADR-0310: D23 ① — the token stays out of this DTO; do not add it back.
 #[derive(serde::Serialize)]
 pub struct DaemonInfoDto {
     pub pid: u32,
     pub host: String,
     pub port: u16,
-    pub token: String,
     pub protocol_version: u32,
 }
 
@@ -52,7 +56,6 @@ impl From<engram_dashboard_protocol::DaemonInfo> for DaemonInfoDto {
             pid: i.pid,
             host: i.host,
             port: i.port,
-            token: i.token.expose().to_owned(),
             protocol_version: i.protocol_version,
         }
     }
@@ -95,12 +98,13 @@ pub fn daemon_status() -> Result<DaemonStatusDto, String> {
     })
 }
 
-// 살아있는 데몬의 접속 정보(token 포함)를 daemon.json 에서 읽어 반환. ★spawn 안 함★(ADR-0021:
-// 재연결은 깨우지 않는다 — 단지 데몬이 옮겨갔으면 새 주소를 따라가게 한다). 데몬 없거나 죽었으면 None.
+// Reads the live daemon's address from daemon.json. ★Never spawns★ (ADR-0021: reconnect never wakes a daemon — it
+// only follows a daemon that moved to its new address). No daemon or a dead one → None.
 //
-// ★재연결 hot-swap 추적용★: daemon_stop→daemon_start(통째 교체)나 크래시-재spawn 으로 데몬이 새
-// port/token 으로 뜨면, 프론트 재연결 루프(wsTransport)가 캐시된 옛 주소 대신 이 command 로 현재
-// daemon.json 을 재조회해 새 주소로 attach 한다. read-only 라 discover_daemon(spawn 동반)과 분리된다.
+// ★For hot-swap tracking on reconnect★: when daemon_stop→daemon_start (full replacement) or a crash respawn brings the
+// daemon up on a new port, the frontend reconnect loop (wsTransport) re-reads the current daemon.json through this
+// command instead of its cached old address and attaches at the new one. Read-only, so it is kept apart from
+// discover_daemon (which spawns).
 //
 // daemon.json 없음/깨짐/죽은 PID/버전 불일치 → Ok(None)(보수). 살아있는 호환 데몬이면 Ok(Some(DTO)).
 #[tauri::command]
@@ -221,7 +225,45 @@ mod tests {
         assert_eq!(dto.pid, 4321);
         assert_eq!(dto.host, "127.0.0.1");
         assert_eq!(dto.port, 51000);
-        assert_eq!(dto.token, "c".repeat(64));
         assert_eq!(dto.protocol_version, 7);
+    }
+
+    // ADR-0310: D23 ① — pins the three commands' return type to `DaemonInfoDto`; returning anything else (e.g. the
+    // protocol `DaemonInfo`, which serializes the token) stops this module from compiling.
+    #[test]
+    fn the_three_commands_return_the_tokenless_dto() {
+        fn returns_dto<A, Fut>(_: impl Fn(Option<u64>, A) -> Fut)
+        where
+            Fut: std::future::Future<Output = Result<DaemonInfoDto, String>>,
+        {
+        }
+        returns_dto(|timeout_ms, ()| discover_daemon(timeout_ms));
+        returns_dto(daemon_start);
+        let _: fn() -> Result<Option<DaemonInfoDto>, String> = read_daemon_info;
+    }
+
+    // ADR-0310: D23 ① — all three commands (`discover_daemon` · `daemon_start` · `read_daemon_info`) return this DTO,
+    // so its serialized form is what the WebView receives.
+    #[test]
+    fn serialized_dto_carries_no_token() {
+        let token = "c".repeat(64);
+        let info = engram_dashboard_protocol::DaemonInfo {
+            pid: 4321,
+            host: "127.0.0.1".into(),
+            port: 51000,
+            token: engram_dashboard_protocol::Secret::new(token.clone()),
+            protocol_version: 7,
+            start_time: 999,
+        };
+        let json = serde_json::to_value(DaemonInfoDto::from(info)).expect("DTO serializes");
+        let fields = json.as_object().expect("DTO serializes to an object");
+        assert!(!fields.contains_key("token"), "token field leaked: {json}");
+        assert!(
+            !json.to_string().contains(&token),
+            "token value leaked: {json}"
+        );
+        let mut keys: Vec<&str> = fields.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["host", "pid", "port", "protocol_version"]);
     }
 }

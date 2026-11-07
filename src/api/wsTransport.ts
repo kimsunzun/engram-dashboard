@@ -7,6 +7,11 @@
 //
 // 프로토콜 의미론(request_id 매칭·dedup·epoch 가드·resubscribe)은 ProtocolClient 소유.
 // 이 transport 는 carrier 만 책임진다: 연결·재연결·프레임 인코딩/디코딩.
+//
+// ADR-0310: D23 ① — the WebView never receives the daemon token (the three discovery commands drop it), so the Auth
+// token is the constructor's `authToken`, fixed for the transport's life. Without it every connect attempt rejects with
+// `WS_NO_AUTH_TOKEN_ERROR` before any invoke or socket. This direct path is not production (production = TauriTransport
+// through the shell, ADR-0029); a daemon replaced with a new token is reached at its new port but refuses the old token.
 
 import { invoke } from '@tauri-apps/api/core'
 
@@ -24,9 +29,12 @@ interface DaemonInfoDto {
   pid: number
   host: string
   port: number
-  token: string
   protocol_version: number
 }
+
+/** Rejection text of every connect attempt (`start` · `ensureReady` · reconnect) on a transport built without `authToken`. */
+export const WS_NO_AUTH_TOKEN_ERROR =
+  'direct daemon connection has no auth token — the WebView does not receive the daemon token; connect through TauriTransport'
 
 type WireEvent = Record<string, unknown>
 
@@ -46,6 +54,17 @@ interface WsReplayEntry {
 }
 
 export class WsTransport implements Transport {
+  private readonly authToken: string | undefined
+
+  /**
+   * `authToken` = the daemon token sent in Auth on every socket this transport opens; omitted = cannot connect.
+   * Dev/test only — production has no source of this token on purpose (ADR-0310 D23 ①): do not add a shell command
+   * that hands it to the WebView to revive this path. (TS `private` is not private at runtime.)
+   */
+  constructor(opts?: { authToken?: string }) {
+    this.authToken = opts?.authToken
+  }
+
   private ws: WebSocket | null = null
 
   private _state: ConnectionState = 'down'
@@ -63,12 +82,12 @@ export class WsTransport implements Transport {
   private reconnectAttempt = 0
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
 
-  // ADR-0021: ensure(명시 spawn)와 reconnect(attach-only)를 분리하기 위한 캐시.
-  // 최초 명시 연결에서 discover_daemon 으로 얻은 host/port/token 을 보관한다. 재연결 루프는
-  // 이 캐시를 출발점으로 쓰되, 매 재시도 전에 read_daemon_info(no-spawn)로 현재 daemon.json 을
-  // 재조회해 **옮겨간 데몬(hot-swap·크래시 재spawn)의 새 주소를 따라간다**(아래 openSocket 주석).
-  // ★불변식 유지★: reconnect 는 절대 discover/spawn 을 호출하지 않는다 — read_daemon_info 는
-  // read-only 라 데몬을 깨우지 않는다. 살아있는 데몬이 없으면 backoff/소진 → 'down'(사용자 명시 start 로 복구).
+  // ADR-0021: the cache that keeps ensure (explicit spawn) apart from reconnect (attach-only).
+  // Holds the host/port the first explicit connect got from discover_daemon. The reconnect loop starts from it but
+  // re-reads the current daemon.json through read_daemon_info (no-spawn) before every retry and **follows a daemon
+  // that moved (hot-swap · crash respawn) to its new address** (see openSocket).
+  // ★Invariant★: reconnect never calls discover/spawn — read_daemon_info is read-only and never wakes a daemon. With
+  // no live daemon it backs off until exhausted → 'down' (recovery = the user's explicit start).
   private cachedInfo: DaemonInfoDto | null = null
 
   // ★세대 토큰(Blocker-1 좀비 소켓 가드)★: openSocket 진입마다 ++ 해 "현재 유효한 시도"를 식별한다.
@@ -147,6 +166,8 @@ export class WsTransport implements Transport {
   // 데몬을 끈 뒤 키 한 번/창 리사이즈만 해도 데몬이 되살아나는 버그(B-1)가 안 난다. spawn 은 명시
   // start() 에서만. closedByUser/attempt 리셋도 여기서 하지 않는다(그건 명시 start 의 책임).
   ensureReady(): Promise<void> {
+    // Ahead of the closed / no-cache rejections: their "daemon_start" recovery cannot work without a token.
+    if (this.authToken === undefined) return Promise.reject(new Error(WS_NO_AUTH_TOKEN_ERROR))
     if (this.ws && this.ws.readyState === WebSocket.OPEN && this._state === 'connected') {
       return Promise.resolve()
     }
@@ -190,14 +211,15 @@ export class WsTransport implements Transport {
   }
 
   /**
-   * 1회 소켓 열기 + Auth 전송 + Hello 대기. 성공 시 resolve, 실패 시 reject(상위가 처리).
+   * Opens one socket, sends Auth, waits for Hello. Resolves on success, rejects on failure (the caller handles it).
    *
-   * ADR-0021 ensure/reconnect 분리:
-   *  - allowDiscover=true(명시 연결): discover_daemon 호출(없으면 spawn) → 결과를 cachedInfo 에 보관.
-   *  - allowDiscover=false(재연결 루프): **discover/spawn 절대 금지.** 단, read_daemon_info(no-spawn)로
-   *    현재 daemon.json 을 재조회해 **옮겨간 데몬을 따라간다**(hot-swap·크래시 재spawn — 새 port/token).
-   *    이것은 attach 대상 추적이지 spawn 이 아니다(read-only, 데몬을 깨우지 않음). 살아있는 데몬이 없으면
-   *    캐시 host/port 로 마지막 시도하고, 그것도 없으면 reject(소진→down). 재연결은 새 데몬을 만들지 않는다.
+   * ADR-0021 ensure / reconnect split:
+   *  - allowDiscover=true (explicit connect): calls discover_daemon (spawns if none) → keeps the result in cachedInfo.
+   *  - allowDiscover=false (reconnect loop): **never discovers or spawns.** It re-reads the current daemon.json
+   *    through read_daemon_info (no spawn) and **follows a moved daemon** (hot swap · crash respawn — new port).
+   *    That tracks the attach target; it is not a spawn (read-only, never wakes a daemon). With no live daemon it
+   *    makes a last try on the cached host/port, and rejects if there is none (exhausted → down). A reconnect never
+   *    creates a daemon.
    */
   private openSocket(allowDiscover: boolean): Promise<void> {
     // ★Blocker-1 좀비 가드★: 이 시도의 세대 토큰을 모든 await 전에 동기로 캡처한다. 아래 await 들이
@@ -219,6 +241,8 @@ export class WsTransport implements Transport {
       // settleReject 후 return 해야 한다(WebSocket 생성·this.ws 대입 전 = 좀비 안 생김).
       const isStale = (): boolean => myGen !== this.openGen
       const run = async () => {
+        const authToken = this.authToken
+        if (authToken === undefined) throw new Error(WS_NO_AUTH_TOKEN_ERROR)
         let info: DaemonInfoDto
         if (allowDiscover) {
           info = await invoke<DaemonInfoDto>('discover_daemon')
@@ -230,9 +254,9 @@ export class WsTransport implements Transport {
           }
           this.cachedInfo = info
         } else {
-          // 재연결 = attach-only. ★옮겨간 데몬 추적(ADR-0021)★: spawn 대신 read_daemon_info(no-spawn)로
-          // 현재 daemon.json 을 재조회한다. hot-swap(stop→start)·크래시 재spawn 으로 데몬이 새
-          // port/token 으로 떠도 그 주소를 따라가 attach 한다(read-only — 데몬을 만들거나 깨우지 않음).
+          // Reconnect = attach-only. ★Follow a daemon that moved (ADR-0021)★: instead of spawning, re-read the current
+          // daemon.json through read_daemon_info (no-spawn). When hot-swap (stop→start) or a crash respawn brings the
+          // daemon up on a new port, attach at that address (read-only — never creates or wakes a daemon).
           const fresh = await invoke<DaemonInfoDto | null>('read_daemon_info').catch(() => null)
           // ★await 재개 직후 stale 검사(Blocker-1)★: read_daemon_info 가 yield 한 사이 close()/start()의
           // cleanupSocket(openGen++)이 끼면 무효 — 폐기. pendingReject 만으론 outer promise 만 settle 되고
@@ -270,7 +294,7 @@ export class WsTransport implements Transport {
           // 첫 frame = Auth(JSON text). protocol_version 은 discover 가 준 값을 echo.
           ws.send(
             JSON.stringify({
-              Auth: { token: info.token, protocol_version: info.protocol_version },
+              Auth: { token: authToken, protocol_version: info.protocol_version },
             }),
           )
         }

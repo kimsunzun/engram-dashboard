@@ -6,11 +6,12 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+// ADR-0310: D23 ① — the discovery DTO carries no token; the direct transport gets it from its constructor.
+const TEST_TOKEN = 'test-token'
 const discoverInfo = {
   pid: 4321,
   host: '127.0.0.1',
   port: 9999,
-  token: 'test-token',
   protocol_version: 1,
 }
 // read_daemon_info(no-spawn 재조회, ADR-0021)가 돌려줄 현재 daemon.json. 기본은 discoverInfo 와 동일
@@ -26,7 +27,7 @@ vi.mock('@tauri-apps/api/core', () => ({
   invoke: (cmd: string, ...rest: unknown[]) => invokeMock(cmd, ...rest),
 }))
 
-import { WsTransport } from './wsTransport'
+import { WS_NO_AUTH_TOKEN_ERROR, WsTransport } from './wsTransport'
 import { ProtocolClient } from './protocolClient'
 import { placeholderErrorPayload } from './wsFrame'
 import type { InboundMessage } from './transport'
@@ -144,20 +145,43 @@ async function connect(t: WsTransport): Promise<FakeWebSocket> {
 
 describe('WsTransport 핸드셰이크', () => {
   it('ensureReady → discover + onopen 후 Auth 전송 + Hello 로 connected', async () => {
-    const t = new WsTransport()
+    const t = new WsTransport({ authToken: TEST_TOKEN })
     expect(t.connectionState).toBe('down')
     const ws = await connect(t)
     expect(invokeMock).toHaveBeenCalledWith('discover_daemon')
     expect(ws.url).toBe('ws://127.0.0.1:9999')
     const first = ws.parsedSent()[0] as { Auth: { token: string; protocol_version: number } }
-    expect(first.Auth.token).toBe('test-token')
+    expect(first.Auth.token).toBe(TEST_TOKEN)
     expect(first.Auth.protocol_version).toBe(1)
     expect(t.connectionState).toBe('connected')
     t.close()
   })
 
-  it('Hello/Auth 는 onMessage 로 안 올라온다(handshake 내부 소비)', async () => {
+  it('without authToken, start rejects at once with the fixed text (no discover, no socket, stays down)', async () => {
     const t = new WsTransport()
+    await expect(t.start()).rejects.toThrow(WS_NO_AUTH_TOKEN_ERROR)
+    expect(invokeMock).not.toHaveBeenCalled()
+    expect(FakeWebSocket.instances).toHaveLength(0)
+    expect(t.connectionState).toBe('down')
+    t.close()
+  })
+
+  it('without authToken, ensureReady rejects with the fixed text on a fresh transport and after close', async () => {
+    const fresh = new WsTransport()
+    await expect(fresh.ensureReady()).rejects.toThrow(WS_NO_AUTH_TOKEN_ERROR)
+    expect(fresh.connectionState).toBe('down')
+
+    const closed = new WsTransport()
+    closed.close()
+    await expect(closed.ensureReady()).rejects.toThrow(WS_NO_AUTH_TOKEN_ERROR)
+    expect(closed.connectionState).toBe('down')
+
+    expect(invokeMock).not.toHaveBeenCalled()
+    expect(FakeWebSocket.instances).toHaveLength(0)
+  })
+
+  it('Hello/Auth 는 onMessage 로 안 올라온다(handshake 내부 소비)', async () => {
+    const t = new WsTransport({ authToken: TEST_TOKEN })
     const got: InboundMessage[] = []
     t.onMessage((m) => got.push(m))
     await connect(t)
@@ -168,7 +192,7 @@ describe('WsTransport 핸드셰이크', () => {
 
 describe('WsTransport 정규화', () => {
   it('control JSON → control InboundMessage', async () => {
-    const t = new WsTransport()
+    const t = new WsTransport({ authToken: TEST_TOKEN })
     const got: InboundMessage[] = []
     t.onMessage((m) => got.push(m))
     const ws = await connect(t)
@@ -178,7 +202,7 @@ describe('WsTransport 정규화', () => {
   })
 
   it('binary frame → output InboundMessage(디코드)', async () => {
-    const t = new WsTransport()
+    const t = new WsTransport({ authToken: TEST_TOKEN })
     const got: InboundMessage[] = []
     t.onMessage((m) => got.push(m))
     const ws = await connect(t)
@@ -191,7 +215,7 @@ describe('WsTransport 정규화', () => {
 
   // ADR-0231: 버리면 그 seq 에 구멍이 서서 붙든 뷰가 멈춘다 — 셸 중계와 같게 같은 seq 의 자리채움으로 올린다.
   it('모르는 tag 의 binary frame → 같은 seq·화신의 자리채움(tag1 Error)으로 올린다', async () => {
-    const t = new WsTransport()
+    const t = new WsTransport({ authToken: TEST_TOKEN })
     const got: InboundMessage[] = []
     t.onMessage((m) => got.push(m))
     const ws = await connect(t)
@@ -206,7 +230,7 @@ describe('WsTransport 정규화', () => {
   })
 
   it('seq 를 못 읽는 짧은 binary frame → 올리지 않고 소켓을 닫는다(끊기 → 재연결)', async () => {
-    const t = new WsTransport()
+    const t = new WsTransport({ authToken: TEST_TOKEN })
     const got: InboundMessage[] = []
     t.onMessage((m) => got.push(m))
     const ws = await connect(t)
@@ -221,7 +245,7 @@ describe('WsTransport 정규화', () => {
 
 describe('WsTransport 재연결', () => {
   it('비의도 onclose → reconnecting + 새 소켓 생성', async () => {
-    const t = new WsTransport()
+    const t = new WsTransport({ authToken: TEST_TOKEN })
     const ws1 = await connect(t)
     ws1.fireClose()
     expect(t.connectionState).toBe('reconnecting')
@@ -236,7 +260,7 @@ describe('WsTransport 재연결', () => {
   })
 
   it('in-flight 소켓 중 start() 재호출 → 옛 소켓 detach(onclose 정리) → 옛 close 가 새 소켓 안 깸', async () => {
-    const t = new WsTransport()
+    const t = new WsTransport({ authToken: TEST_TOKEN })
     // 1) in-flight: start → discover+openSocket → onopen(Auth) 까지만, Hello 미수신(connected 아님).
     // p1 은 의도적으로 await 하지 않는다 — 2번째 start 가 ws1 을 cleanup 하면 p1(openSocket(true))의
     // resolve/reject 는 영영 안 불린다(버려진 promise). reject 무시만 붙인다.
@@ -270,7 +294,7 @@ describe('WsTransport 재연결', () => {
   })
 
   it('in-flight start() 가 새 start() 로 대체되면 옛 promise 가 hang 안 하고 reject (no-hang 회귀 가드)', async () => {
-    const t = new WsTransport()
+    const t = new WsTransport({ authToken: TEST_TOKEN })
     // 1) in-flight: start #1 → discover+openSocket → onopen(Auth) 까지만, Hello 미수신.
     const p1 = t.start()
     await Promise.resolve()
@@ -296,7 +320,7 @@ describe('WsTransport 재연결', () => {
   })
 
   it('in-flight start() 가 discover 윈도(ws null)에서 새 start() 로 대체돼도 hang 안 하고 reject (pre-ws no-hang 가드)', async () => {
-    const t = new WsTransport()
+    const t = new WsTransport({ authToken: TEST_TOKEN })
     // ★mutation 가드(pre-ws)★ — cleanupSocket 이 pendingReject 를 ws null 인 discover 윈도에서도
     // reject 하지 않으면 이 단언이 timeout(hang). discover 가 in-flight 라 ws 는 아직 생성 전인데,
     // 두 번째 start()가 cleanupSocket → pendingReject 를 안 깨우면 첫 promise(p1)가 영영 settle 안 됨.
@@ -339,7 +363,7 @@ describe('WsTransport 재연결', () => {
   })
 
   it('정상 연결 후 close() = pendingReject 이미 null → spurious reject/throw 없음', async () => {
-    const t = new WsTransport()
+    const t = new WsTransport({ authToken: TEST_TOKEN })
     const p = t.start()
     await Promise.resolve()
     await Promise.resolve()
@@ -355,7 +379,7 @@ describe('WsTransport 재연결', () => {
   })
 
   it('close() 후 onclose 가 와도 재연결 안 함(closedByUser) + 핸들러 delete(#13133)', async () => {
-    const t = new WsTransport()
+    const t = new WsTransport({ authToken: TEST_TOKEN })
     const ws = await connect(t)
     t.close()
     expect('onmessage' in ws).toBe(false)
@@ -372,7 +396,7 @@ describe('WsTransport 재연결', () => {
   // pendingReject 는 outer promise 만 settle 하지 본체 재개를 못 막는다 → 세대 토큰(openGen)으로 차단.
 
   it('close() during read await → 재개돼도 좀비 소켓 안 생김(WS 수 불변, down 유지) [Blocker-1]', async () => {
-    const t = new WsTransport()
+    const t = new WsTransport({ authToken: TEST_TOKEN })
     const ws1 = await connect(t) // 캐시 채움 + connected
     invokeMock.mockClear()
 
@@ -409,7 +433,7 @@ describe('WsTransport 재연결', () => {
   })
 
   it('start() during reconnect read await → 좀비가 정식 소켓 hijack 안 함 [Blocker-1]', async () => {
-    const t = new WsTransport()
+    const t = new WsTransport({ authToken: TEST_TOKEN })
     const ws1 = await connect(t)
     invokeMock.mockClear()
 
@@ -463,7 +487,7 @@ describe('WsTransport 재연결', () => {
 // ── FIX-4: requestReplay single-flight(sole-outstanding, per-agent) ──────────────────────
 describe('WsTransport requestReplay single-flight(FIX-4)', () => {
   it('in-flight 중 동시 요청은 wire Subscribe 를 겹쳐 안 보내고 다음 1개 gen 으로 병합', async () => {
-    const t = new WsTransport()
+    const t = new WsTransport({ authToken: TEST_TOKEN })
     const ws = await connect(t)
     ws.sent.length = 0 // handshake Auth 제거.
 
@@ -499,7 +523,7 @@ describe('WsTransport requestReplay single-flight(FIX-4)', () => {
   })
 
   it('요청 1개당 boundary 1개 — in-flight 종결 후 새 요청은 다시 즉시 송신', async () => {
-    const t = new WsTransport()
+    const t = new WsTransport({ authToken: TEST_TOKEN })
     const ws = await connect(t)
     ws.sent.length = 0
     const got: InboundMessage[] = []
@@ -522,7 +546,7 @@ describe('WsTransport requestReplay single-flight(FIX-4)', () => {
   // ADR-0226: 직결 경로는 마커가 없으니 Ack 의 칸을 그 요청에 기억해 성공 경계에 싣는다. ★요청마다 새로
   //   시작한다★ — 앞 요청의 참이 뒤 요청(칸 없는 옛 데몬 Ack)으로 새면 첫 화면 대신 로딩이 뜬다.
   it('SubscribeAck 의 continues_conversation 이 그 요청의 성공 경계로 가고, 다음 요청에 새지 않는다', async () => {
-    const t = new WsTransport()
+    const t = new WsTransport({ authToken: TEST_TOKEN })
     const ws = await connect(t)
     const got: InboundMessage[] = []
     t.onMessage((m) => got.push(m))
@@ -559,7 +583,7 @@ describe('WsTransport requestReplay single-flight(FIX-4)', () => {
   // ADR-0231: 직결 경로엔 셸 마커가 없어 replay 머리를 Ack 에서 받아 그 요청의 성공 경계에 싣는다.
   //   ★요청마다 새로 시작한다★ — 앞 요청의 머리가 뒤 요청으로 새면 뷰가 그 사이 이력을 건너뛴다.
   it('SubscribeAck 의 replay_from 이 그 요청의 성공 경계로 가고, 다음 요청에 새지 않는다', async () => {
-    const t = new WsTransport()
+    const t = new WsTransport({ authToken: TEST_TOKEN })
     const ws = await connect(t)
     const got: InboundMessage[] = []
     t.onMessage((m) => got.push(m))
@@ -578,7 +602,7 @@ describe('WsTransport requestReplay single-flight(FIX-4)', () => {
   })
 
   it('replay_from 이 없는 SubscribeAck 은 머리 0 — NaN 이 경계로 새지 않는다', async () => {
-    const t = new WsTransport()
+    const t = new WsTransport({ authToken: TEST_TOKEN })
     const ws = await connect(t)
     const got: InboundMessage[] = []
     t.onMessage((m) => got.push(m))
@@ -591,7 +615,7 @@ describe('WsTransport requestReplay single-flight(FIX-4)', () => {
   })
 
   it('거절(실패 경계)은 continuesConversation=false', async () => {
-    const t = new WsTransport()
+    const t = new WsTransport({ authToken: TEST_TOKEN })
     const ws = await connect(t)
     const got: InboundMessage[] = []
     t.onMessage((m) => got.push(m))
@@ -608,7 +632,7 @@ describe('WsTransport requestReplay single-flight(FIX-4)', () => {
 // ── FIX-B: replay single-flight 상태가 소켓 종료를 넘어 stuck 되지 않음 ──────────────────────
 describe('WsTransport replay single-flight — 소켓 종료 시 상태 리셋 + 대기자 reject(FIX-B)', () => {
   it('gen1 in-flight + gen2 pending 중 소켓 close → pending 대기자 reject, 재연결 후 새 wire Subscribe 재송신', async () => {
-    const t = new WsTransport()
+    const t = new WsTransport({ authToken: TEST_TOKEN })
     const ws1 = await connect(t)
     ws1.sent.length = 0 // handshake Auth 제거.
 
@@ -656,7 +680,7 @@ describe('WsTransport B-1: ensureReady(attach-only) / start(spawn) 분리 (ADR-0
   // "데몬 끈 뒤 키 한 번/리사이즈로 respawn" 버그(B-1) 재발. ensureReady 를 openSocket(true)로
   // 되돌리면 reject 대신 discover 가 불려 이 단언(spawn 0회 + reject)이 실패한다.
   it('ensureReady = 캐시 없으면 reject + discover/spawn 0회(명령이 데몬 못 깨움)', async () => {
-    const t = new WsTransport()
+    const t = new WsTransport({ authToken: TEST_TOKEN })
     await expect(t.ensureReady()).rejects.toThrow(/daemon_start/)
     expect(invokeMock).not.toHaveBeenCalled() // discover(=spawn 유발) 절대 안 함
     expect(FakeWebSocket.instances.length).toBe(0)
@@ -664,7 +688,7 @@ describe('WsTransport B-1: ensureReady(attach-only) / start(spawn) 분리 (ADR-0
   })
 
   it('close(명시 종료) 후 ensureReady = reject + spawn 0회(closedByUser 가드)', async () => {
-    const t = new WsTransport()
+    const t = new WsTransport({ authToken: TEST_TOKEN })
     await connect(t) // 캐시 채움
     t.close() // closedByUser=true → down
     invokeMock.mockClear()
@@ -674,7 +698,7 @@ describe('WsTransport B-1: ensureReady(attach-only) / start(spawn) 분리 (ADR-0
   })
 
   it('start 만 discover_daemon 호출(spawn 유발) — 명령은 호출 안 함', async () => {
-    const t = new WsTransport()
+    const t = new WsTransport({ authToken: TEST_TOKEN })
     await connect(t) // = start()
     expect(invokeMock).toHaveBeenCalledTimes(1)
     expect(invokeMock).toHaveBeenCalledWith('discover_daemon')
@@ -682,7 +706,7 @@ describe('WsTransport B-1: ensureReady(attach-only) / start(spawn) 분리 (ADR-0
   })
 
   it('ensureReady = 캐시 있으면 attach(소켓 재오픈)하되 discover/spawn 은 안 함', async () => {
-    const t = new WsTransport()
+    const t = new WsTransport({ authToken: TEST_TOKEN })
     const ws1 = await connect(t) // start: 캐시 채움
     invokeMock.mockClear()
     ws1.fireClose() // 비의도 끊김 → reconnecting (connectPromise 정리)
@@ -701,7 +725,7 @@ describe('WsTransport B-1: ensureReady(attach-only) / start(spawn) 분리 (ADR-0
   })
 
   it('재연결은 discover_daemon(spawn) 금지 — read_daemon_info(no-spawn) 재조회로 현재 데몬에 attach', async () => {
-    const t = new WsTransport()
+    const t = new WsTransport({ authToken: TEST_TOKEN })
     const ws1 = await connect(t)
     expect(invokeMock).toHaveBeenCalledTimes(1) // 최초 discover 1회만
     invokeMock.mockClear()
@@ -720,13 +744,13 @@ describe('WsTransport B-1: ensureReady(attach-only) / start(spawn) 분리 (ADR-0
     t.close()
   })
 
-  it('hot-swap: 재연결이 read_daemon_info 로 새 port/token 을 따라가 새 주소에 attach', async () => {
-    const t = new WsTransport()
+  it('hot-swap: 재연결이 read_daemon_info 로 새 port 를 따라가 새 주소에 attach', async () => {
+    const t = new WsTransport({ authToken: TEST_TOKEN })
     const ws1 = await connect(t) // 캐시 = 9999
     invokeMock.mockClear()
 
     // 데몬이 통째 교체돼 새 port 로 떴다(daemon_stop→daemon_start). daemon.json 이 갱신됨.
-    liveDaemonInfo = { ...discoverInfo, port: 7777, token: 'new-token' }
+    liveDaemonInfo = { ...discoverInfo, port: 7777 }
 
     ws1.fireClose() // 옛 연결 끊김 → 재연결
     expect(t.connectionState).toBe('reconnecting')
@@ -737,8 +761,10 @@ describe('WsTransport B-1: ensureReady(attach-only) / start(spawn) 분리 (ADR-0
     expect(invokeMock).toHaveBeenCalledWith('read_daemon_info')
     const ws2 = FakeWebSocket.last!
     expect(ws2.url).toBe('ws://127.0.0.1:7777')
-    // 새 데몬에 Hello 까지 가면 attempt 가 리셋되고 connected.
     ws2.fireOpen()
+    // Auth carries the constructor token — the DTO has none to follow.
+    expect((ws2.parsedSent()[0] as { Auth: { token: string } }).Auth.token).toBe(TEST_TOKEN)
+    // 새 데몬에 Hello 까지 가면 attempt 가 리셋되고 connected.
     ws2.fireText({ Hello: { protocol_version: 1 } })
     await Promise.resolve()
     expect(t.connectionState).toBe('connected')
@@ -747,7 +773,7 @@ describe('WsTransport B-1: ensureReady(attach-only) / start(spawn) 분리 (ADR-0
 
   it('attach 재시도 소진 → discover 없이 down 정착(데몬 죽음, 안 살아남음)', async () => {
     vi.useFakeTimers()
-    const t = new WsTransport()
+    const t = new WsTransport({ authToken: TEST_TOKEN })
     // 최초 연결 = 명시 start(타이머 영향 없게 수동 핸드셰이크).
     const p = t.start().catch(() => {})
     await Promise.resolve()
@@ -780,7 +806,7 @@ describe('WsTransport B-1: ensureReady(attach-only) / start(spawn) 분리 (ADR-0
   })
 
   it('down 후 start(명시 재시작) → 다시 discover 허용 + 재연결 루프 부활', async () => {
-    const t = new WsTransport()
+    const t = new WsTransport({ authToken: TEST_TOKEN })
     const ws1 = await connect(t)
     t.close() // 명시 종료 → down
     expect(t.connectionState).toBe('down')
@@ -805,7 +831,7 @@ const V1 = 'view-1'
 
 describe('WsTransport + ProtocolClient 통합(ADR-0046 뷰 직결 replay)', () => {
   it('subscribe → requestReplay 가 wire Subscribe{after_seq:null} 송신 + ReplayComplete → 마커 flush', async () => {
-    const t = new WsTransport()
+    const t = new WsTransport({ authToken: TEST_TOKEN })
     const c = new ProtocolClient(t)
     const ws1 = await connect(t)
     const received: number[] = []
@@ -836,7 +862,7 @@ describe('WsTransport + ProtocolClient 통합(ADR-0046 뷰 직결 replay)', () =
   })
 
   it('live 한가운데 모르는 tag 프레임이 와도 그 seq 가 자리채움으로 채워져 뒤가 붙들리지 않는다', async () => {
-    const t = new WsTransport()
+    const t = new WsTransport({ authToken: TEST_TOKEN })
     const c = new ProtocolClient(t)
     const ws1 = await connect(t)
     const received: Array<[number, number]> = []
@@ -863,7 +889,7 @@ describe('WsTransport + ProtocolClient 통합(ADR-0046 뷰 직결 replay)', () =
   // ADR-0231: 링이 잘린 새 에이전트 — 뷰의 커서는 −1 이라 머리(Ack 의 replay_from)를 모르면 0 을 기다리며
   //   3·4 를 붙든 채 멈춘다.
   it('SubscribeAck 의 replay_from 이 flush 시작점이 된다(잘린 replay 의 머리 점프)', async () => {
-    const t = new WsTransport()
+    const t = new WsTransport({ authToken: TEST_TOKEN })
     const c = new ProtocolClient(t)
     const ws1 = await connect(t)
     const received: number[] = []
@@ -884,7 +910,7 @@ describe('WsTransport + ProtocolClient 통합(ADR-0046 뷰 직결 replay)', () =
   //   나가지 않고, 그 에이전트가 명부에 있다는 관측이 부착시킨다. 여기선 명부에서 빠진 적이 없으므로
   //   같은 세션 이어보기 = 커서 유지 → 전량 재replay 의 겹치는 앞부분은 dedup 이 흡수한다.
   it('재연결 → 명부 부착 → 재요청(전량 재replay) → 이미 그린 앞부분은 dedup', async () => {
-    const t = new WsTransport()
+    const t = new WsTransport({ authToken: TEST_TOKEN })
     const c = new ProtocolClient(t)
     const ws1 = await connect(t)
     const received: number[] = []
@@ -937,7 +963,7 @@ describe('WsTransport + ProtocolClient 통합(ADR-0046 뷰 직결 replay)', () =
   //   같은 결함이다(실측 2026-08-19). 운영 carrier 는 TauriTransport 지만(ADR-0029/0036) 같은 wire 를
   //   먹으면서 한쪽만 멀쩡한 상태를 남기지 않는다.
   it('SubscribeFailed → 실패 경계 합성 + in-flight 해제(다음 요청이 다시 wire 로 나간다)', async () => {
-    const t = new WsTransport()
+    const t = new WsTransport({ authToken: TEST_TOKEN })
     const c = new ProtocolClient(t)
     const ws1 = await connect(t)
     await c.subscribeOutput(V1, AGENT, () => {})
@@ -958,7 +984,7 @@ describe('WsTransport + ProtocolClient 통합(ADR-0046 뷰 직결 replay)', () =
 
   // 병합 대기자가 있으면 거절이 그 세대를 승격한다 — 성공 종결과 같은 뒷정리를 공유한다(settleReplay).
   it('SubscribeFailed → 병합된 다음 세대의 Subscribe 를 정확히 1회 송신', async () => {
-    const t = new WsTransport()
+    const t = new WsTransport({ authToken: TEST_TOKEN })
     const ws1 = await connect(t)
     const gen1 = await t.requestReplay(AGENT)
     const waiter = t.requestReplay(AGENT) // in-flight 중 → 병합
@@ -974,7 +1000,7 @@ describe('WsTransport + ProtocolClient 통합(ADR-0046 뷰 직결 replay)', () =
   // ★방어★: Ack 를 받은(=데몬이 받아들인) 요청은 거절로 풀지 않는다. 풀면 뒤따라오는 ReplayComplete 가
   //   빈 슬롯을 만나 무시되고, 그 replay 를 기다리던 뷰가 성공 마커를 영영 못 받는다.
   it('acked 요청은 SubscribeFailed 로 풀리지 않는다(정상 완료 경로 생존)', async () => {
-    const t = new WsTransport()
+    const t = new WsTransport({ authToken: TEST_TOKEN })
     const c = new ProtocolClient(t)
     const ws1 = await connect(t)
     const received: number[] = []

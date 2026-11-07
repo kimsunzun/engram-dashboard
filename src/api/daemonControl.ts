@@ -19,12 +19,11 @@ export interface DaemonStatus {
   port: number | null
 }
 
-/** discover_daemon/daemon_start 반환(DaemonInfoDto 미러). token 은 노출하나 로그 금지. */
+/** discover_daemon/daemon_start result (mirrors DaemonInfoDto). Carries no daemon token — the WebView never receives it. */
 export interface DaemonInfo {
   pid: number
   host: string
   port: number
-  token: string
   protocol_version: number
 }
 
