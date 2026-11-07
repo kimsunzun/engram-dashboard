@@ -11,6 +11,7 @@ use std::time::Duration;
 use engram_dashboard_base::panic::{contain, Caught};
 use engram_dashboard_base::sync;
 use engram_dashboard_platform::group::GroupOwner;
+use engram_dashboard_platform::pty::CLOSE_NEEDS_DRAIN;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
 use crate::output_core::OutputCore;
@@ -40,6 +41,9 @@ pub struct PtyTransport {
     input: Arc<InputQueue>,
     child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
     shutdown: Arc<AtomicBool>,
+    /// Set (Release) by `shutdown()` once the master has been destroyed; the pump loads it (Acquire) to
+    /// know when it may stop draining — only where [`CLOSE_NEEDS_DRAIN`] holds (rule = [`run_pump`]).
+    master_closed: Arc<AtomicBool>,
     /// start()에서 take해 pump로 move. None이면 이미 시작됨.
     reader: Mutex<Option<Box<dyn Read + Send>>>,
     /// ★이 통로가 입력을 **받아들인** 적이 있나 — 「자식이 아직 사용자·모델 내용을 찍은 적이 없다」의
@@ -110,6 +114,7 @@ impl PtyTransport {
             input: Arc::new(InputQueue::new()),
             child: Arc::new(Mutex::new(guard.into_inner())),
             shutdown: Arc::new(AtomicBool::new(false)),
+            master_closed: Arc::new(AtomicBool::new(false)),
             reader: Mutex::new(Some(reader)),
             input_seen: Arc::new(AtomicBool::new(false)),
             group,
@@ -174,6 +179,49 @@ fn resolve_pump_reason(result: Result<TerminalReason, Caught>) -> TerminalReason
     }
 }
 
+/// The pump body: reads until the stream ends or the stop rule fires, then names the reason.
+///
+/// - Bytes read before `shutdown` is set go to `emit`; bytes read after it are discarded.
+/// - EOF or a read error ends the loop.
+/// - Once `shutdown` is set: with `close_needs_drain` false, the first read that returns ends the loop.
+///   With it true, the loop keeps reading and discarding until the first read that returns after
+///   `master_closed` is set — `ClosePseudoConsole` waits until its output has been read, so a pump that
+///   stops earlier can block the close (and the kill) forever (T-79).
+/// - The reason is `Killed` when `shutdown` is set at the end, otherwise `Exited` with `exit_code()`.
+///   `exit_code` is called either way.
+// ADR-0001
+fn run_pump(
+    mut reader: impl Read,
+    shutdown: &AtomicBool,
+    master_closed: &AtomicBool,
+    close_needs_drain: bool,
+    mut emit: impl FnMut(&[u8]),
+    exit_code: impl FnOnce() -> Option<i32>,
+) -> TerminalReason {
+    let mut buf = [0u8; 4096];
+    loop {
+        // A blocking read batches by itself — there is no separate batching layer.
+        let n = match reader.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        if shutdown.load(Ordering::Relaxed) {
+            if !close_needs_drain || master_closed.load(Ordering::Acquire) {
+                break;
+            }
+            continue;
+        }
+        emit(&buf[..n]);
+    }
+
+    let code = exit_code();
+    if shutdown.load(Ordering::Acquire) {
+        TerminalReason::Killed
+    } else {
+        TerminalReason::Exited { code }
+    }
+}
+
 impl AgentTransport for PtyTransport {
     /// reader가 이미 take됐으면(재호출) 아무것도 안 한다.
     fn start(&self, core: Arc<OutputCore>) {
@@ -217,6 +265,7 @@ impl AgentTransport for PtyTransport {
         let pump_core = core.clone();
         let child = self.child.clone();
         let shutdown = self.shutdown.clone();
+        let master_closed = self.master_closed.clone();
         let writer_stop = WriterStop(self.input.clone());
 
         // ── 자연 종료 감지 watcher(콘솔 전용 — 이 detection 은 PtyTransport 안에만 둔다) ──
@@ -251,6 +300,10 @@ impl AgentTransport for PtyTransport {
                     matches!(child.try_wait(), Ok(Some(_)))
                 };
                 if exited {
+                    // ADR-0001: the master drops while its lock is held (the taken value is a temporary
+                    //   that drops before the guard). `shutdown()` takes this lock before publishing
+                    //   `master_closed`, so the pump keeps draining until this close has returned —
+                    //   binding the taken master and dropping it after the guard would break that.
                     let _ = watcher_master.lock().expect("master poisoned").take();
                     return;
                 }
@@ -269,9 +322,10 @@ impl AgentTransport for PtyTransport {
             // 정지하는데 감지·상태전이가 없었다(§5 위반). 본체를 contain으로 잡아, panic이면
             // core.finish(Error)로 Failed 전이시켜 사용자/LLM에게 가시화한다.
             //
-            // ★UnwindSafe★: 클로저가 잡는 reader/buf/child/shutdown은 panic 후 더
-            //   쓰지 않고 버리므로(스레드가 곧 종료) 논리적 불변 깨짐이 없다 → AssertUnwindSafe로 명시.
-            //   Mutex(child) 자체는 UnwindSafe지만 캡처 묶음(특히 dyn Read reader)이 아니므로 감싼다.
+            // UnwindSafe: what the closure captures (reader, child, shutdown, master_closed, pump_core) is
+            //   not used after a panic except `pump_core`, whose finish below runs outside the mark, and the
+            //   thread ends right after — so no logical invariant breaks. `AssertUnwindSafe` says so: the
+            //   capture bundle (the `dyn Read` reader in particular) is not `UnwindSafe` by itself.
             // ★캡처 목록이 **이 에이전트 전용**이라는 것이 아래 poison 범위 논증의 전제다★ — 그래서
             //   **여러 에이전트가 공유하는 자원**(전역 명부 같은)을 이 클로저에 태워 보내면 안 된다.
             //   그 자원의 락이 `expect` 로 풀리는 것이면 이 스레드의 panic 이 곧 다른 에이전트의
@@ -289,41 +343,19 @@ impl AgentTransport for PtyTransport {
             //   poison은 "데이터 불일치 가능"의 신호라 무시(into_inner)하고 이어 쓰기보다 끝내는 게 안전하다.
             // ADR-0292
             let normal_reason = contain(std::panic::AssertUnwindSafe(|| {
-                let mut reader = reader;
-                let mut buf = [0u8; 4096];
-
-                loop {
-                    // blocking read — read 자체가 자연 배칭(별도 배치 레이어 없음).
-                    let n = match reader.read(&mut buf) {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => n,
-                    };
-
-                    // shutdown 보조 확인 — 보통 master drop EOF가 먼저 깨우지만, read가 데이터를
-                    //   막 반환한 직후 kill이 걸린 경우를 위한 안전망.
-                    if shutdown.load(Ordering::Relaxed) {
-                        break;
-                    }
-
-                    pump_core.emit(OutputEvent::TerminalBytes(buf[..n].to_vec()));
-                }
-
-                // Killed 경로면 안 쓰지만 미리 확보해 둔다.
-                // 주: kill 경로는 shutdown의 child.kill()+wait()가 이미 reap했을 수 있어 None일 수 있다
-                //     — 그땐 shutdown=true라 Killed로 가므로 code 미사용, 무해.
-                let code = {
-                    let mut child = sync::lock(&child);
-                    match child.try_wait() {
+                run_pump(
+                    reader,
+                    &shutdown,
+                    &master_closed,
+                    CLOSE_NEEDS_DRAIN,
+                    |bytes| pump_core.emit(OutputEvent::TerminalBytes(bytes.to_vec())),
+                    // On the kill path `shutdown`'s kill + wait may already have reaped the child, so
+                    //   this can be `None` — harmless, the reason is `Killed` then and the code unused.
+                    || match sync::lock(&child).try_wait() {
                         Ok(Some(status)) => Some(status.exit_code() as i32),
                         _ => None,
-                    }
-                };
-
-                if shutdown.load(Ordering::Acquire) {
-                    TerminalReason::Killed
-                } else {
-                    TerminalReason::Exited { code }
-                }
+                    },
+                )
             }));
 
             // ★finalize 1회 보존★: finish 는 클로저 밖 이 한 곳에서만 불린다 — 정상 · panic 두 갈래가
@@ -411,8 +443,14 @@ impl AgentTransport for PtyTransport {
         // 4. 무리 전체 종료 → 손자 프로세스까지 → ConPTY slave 핸들 해제. 무리가 없는 OS 에서는 무동작이다.
         let _ = self.group.terminate(1);
 
-        // 5. master.take() → drop → ClosePseudoConsole → reader EOF — 인과의 핵심.
+        // 5. master.take() → drop → ClosePseudoConsole → reader EOF — the core of the kill causality.
+        //    Where `CLOSE_NEEDS_DRAIN` holds, the close returns only because a running pump keeps draining
+        //    until 5b (`run_pump`; with no live pump it can still block — S34 TRD §3B residual). If the
+        //    watcher took the master first, this lock waits for its close (it drops under the lock).
         let _ = self.master.lock().expect("master poisoned").take();
+        // 5b. Only after the statement above has completed — publishing earlier lets the pump stop while
+        //     `ClosePseudoConsole` still waits for its output to be read (T-79).
+        self.master_closed.store(true, Ordering::Release);
     }
 
     fn capabilities(&self) -> TransportCaps {
@@ -446,16 +484,16 @@ mod tests {
     use crate::types::{AgentId, AgentInfo, AgentStatus, StatusSink};
     use std::sync::Mutex;
 
-    struct CapturingStatusSink {
+    pub(super) struct CapturingStatusSink {
         statuses: Mutex<Vec<AgentStatus>>,
     }
     impl CapturingStatusSink {
-        fn new() -> Arc<Self> {
+        pub(super) fn new() -> Arc<Self> {
             Arc::new(Self {
                 statuses: Mutex::new(Vec::new()),
             })
         }
-        fn statuses(&self) -> Vec<AgentStatus> {
+        pub(super) fn statuses(&self) -> Vec<AgentStatus> {
             self.statuses.lock().unwrap().clone()
         }
     }
@@ -647,6 +685,170 @@ mod tests {
             "B 는 영향 없이 정상 Exited"
         );
         assert_eq!(sink_b.statuses().len(), 1, "B status 변경 1건(정상)");
+    }
+
+    // ── run_pump: the stop rules, driven by a scripted reader ──
+
+    /// One scripted `read` result. The `*Then*` steps raise a flag first, as a kill landing while that
+    /// read is in flight would.
+    enum Step {
+        Bytes(&'static [u8]),
+        ShutdownThenBytes(&'static [u8]),
+        MasterClosedThenBytes(&'static [u8]),
+        Eof,
+        Fail,
+    }
+
+    /// Plays `steps` in order. A read past the end panics at once — so a loop that should have stopped
+    /// fails right there instead of hanging.
+    struct ScriptedReader<'a> {
+        steps: std::collections::VecDeque<Step>,
+        reads: usize,
+        shutdown: &'a AtomicBool,
+        master_closed: &'a AtomicBool,
+    }
+
+    impl Read for ScriptedReader<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.reads += 1;
+            let step = self.steps.pop_front().unwrap_or_else(|| {
+                panic!(
+                    "read #{} is past the end of the script — the pump kept reading",
+                    self.reads
+                )
+            });
+            let bytes = match step {
+                Step::Bytes(b) => b,
+                Step::ShutdownThenBytes(b) => {
+                    self.shutdown.store(true, Ordering::Release);
+                    b
+                }
+                Step::MasterClosedThenBytes(b) => {
+                    self.master_closed.store(true, Ordering::Release);
+                    b
+                }
+                Step::Eof => return Ok(0),
+                Step::Fail => return Err(std::io::Error::other("scripted read error")),
+            };
+            buf[..bytes.len()].copy_from_slice(bytes);
+            Ok(bytes.len())
+        }
+    }
+
+    struct PumpRun {
+        reason: TerminalReason,
+        emitted: Vec<Vec<u8>>,
+        reads: usize,
+    }
+
+    fn pump_script(close_needs_drain: bool, steps: Vec<Step>) -> PumpRun {
+        let shutdown = AtomicBool::new(false);
+        let master_closed = AtomicBool::new(false);
+        let mut reader = ScriptedReader {
+            steps: steps.into(),
+            reads: 0,
+            shutdown: &shutdown,
+            master_closed: &master_closed,
+        };
+        let mut emitted = Vec::new();
+        let reason = run_pump(
+            &mut reader,
+            &shutdown,
+            &master_closed,
+            close_needs_drain,
+            |bytes| emitted.push(bytes.to_vec()),
+            || Some(3),
+        );
+        PumpRun {
+            reason,
+            emitted,
+            reads: reader.reads,
+        }
+    }
+
+    #[test]
+    fn bytes_read_after_shutdown_are_not_emitted() {
+        for drain in [false, true] {
+            let run = pump_script(
+                drain,
+                vec![
+                    Step::Bytes(b"before"),
+                    Step::ShutdownThenBytes(b"after"),
+                    Step::Bytes(b"later"),
+                    Step::MasterClosedThenBytes(b"last"),
+                ],
+            );
+            assert_eq!(
+                run.emitted,
+                vec![b"before".to_vec()],
+                "drain = {drain}: only bytes read before shutdown may reach viewers"
+            );
+        }
+    }
+
+    #[test]
+    fn with_drain_the_pump_keeps_reading_until_the_master_is_closed() {
+        let run = pump_script(
+            true,
+            vec![
+                Step::ShutdownThenBytes(b"a"),
+                Step::Bytes(b"b"),
+                Step::Bytes(b"c"),
+                Step::Eof,
+            ],
+        );
+        assert_eq!(
+            run.reads, 4,
+            "the pump stopped draining before the master was closed"
+        );
+        assert!(run.emitted.is_empty());
+        assert!(matches!(run.reason, TerminalReason::Killed));
+    }
+
+    #[test]
+    fn with_drain_the_first_read_after_the_master_closed_ends_the_loop_without_eof() {
+        let run = pump_script(
+            true,
+            vec![
+                Step::ShutdownThenBytes(b"a"),
+                Step::Bytes(b"b"),
+                Step::MasterClosedThenBytes(b"c"),
+            ],
+        );
+        assert_eq!(run.reads, 3);
+        assert!(run.emitted.is_empty());
+        assert!(matches!(run.reason, TerminalReason::Killed));
+    }
+
+    #[test]
+    fn without_drain_the_first_read_after_shutdown_ends_the_loop() {
+        let run = pump_script(
+            false,
+            vec![Step::Bytes(b"a"), Step::ShutdownThenBytes(b"b")],
+        );
+        assert_eq!(run.reads, 2);
+        assert_eq!(run.emitted, vec![b"a".to_vec()]);
+        assert!(matches!(run.reason, TerminalReason::Killed));
+    }
+
+    #[test]
+    fn eof_or_a_read_error_ends_the_loop() {
+        for (drain, end) in [(false, Step::Eof), (true, Step::Eof), (true, Step::Fail)] {
+            let run = pump_script(drain, vec![Step::Bytes(b"a"), end]);
+            assert_eq!(run.reads, 2);
+            assert_eq!(run.emitted, vec![b"a".to_vec()]);
+        }
+    }
+
+    #[test]
+    fn the_reason_is_killed_after_shutdown_and_exited_with_the_code_otherwise() {
+        let exited = pump_script(true, vec![Step::Bytes(b"a"), Step::Eof]);
+        assert!(matches!(
+            exited.reason,
+            TerminalReason::Exited { code: Some(3) }
+        ));
+        let killed = pump_script(true, vec![Step::ShutdownThenBytes(b"a"), Step::Eof]);
+        assert!(matches!(killed.reason, TerminalReason::Killed));
     }
 }
 
@@ -892,5 +1094,123 @@ mod contained_pump {
 
         pump_marks::assert_contained_body_and_unmarked_finish(&marks);
         transport.shutdown();
+    }
+}
+
+/// Killing mid-burst must not hang in `ClosePseudoConsole` — launches real child processes (the
+/// process-free `mod tests` above stays process-free).
+///
+/// The producer is a grandchild with an unbounded loop, so output is certainly still flowing when the
+/// kill lands. A pump that stops reading at shutdown failed this in 5 of 5 runs (T-79).
+// ADR-0001
+#[cfg(all(test, windows))]
+mod kill_mid_burst {
+    use super::tests::CapturingStatusSink;
+    use super::*;
+    use crate::output_core::TurnWiring;
+    use crate::types::{AgentStatus, StatusSink};
+    use engram_dashboard_base::testing::wait_until;
+    use std::time::Instant;
+
+    const MARKER: &str = "engram-spew-line";
+
+    /// The producer script — removed on every path out of the test.
+    struct BurstFile(std::path::PathBuf);
+
+    impl BurstFile {
+        /// A PowerShell loop that writes about 2.4 MB of marker lines per call, forever. One huge write
+        /// is the shape of the T-79 fixture (a single 1.5 MB `stdout.write`): conhost still holds most of
+        /// it when the group is terminated, so the close has output to wait on. Line-sized producers
+        /// (`for /L` with `echo` or `type`) never blocked the close on the unfixed pump (0 of 5 runs each).
+        fn create() -> Self {
+            let path =
+                std::env::temp_dir().join(format!("engram-s34-burst-{}.ps1", uuid::Uuid::new_v4()));
+            let script = format!(
+                "$line = '{MARKER} ' + ('x' * 60) + \"`r`n\"\r\n\
+                 $bytes = [Text.Encoding]::ASCII.GetBytes($line * 30000)\r\n\
+                 $out = [Console]::OpenStandardOutput()\r\n\
+                 while ($true) {{ $out.Write($bytes, 0, $bytes.Length) }}\r\n"
+            );
+            std::fs::write(&path, script).expect("write the burst file");
+            Self(path)
+        }
+    }
+
+    impl Drop for BurstFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    /// `cmd.exe` → `powershell.exe` (the grandchild, the producer) running the burst script.
+    fn grandchild_spew(burst: &BurstFile) -> CommandSpec {
+        let mut args: Vec<String> = [
+            "/d",
+            "/c",
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        args.push(burst.0.to_string_lossy().into_owned());
+        CommandSpec {
+            program: "cmd.exe".into(),
+            args,
+            env: vec![],
+            cwd: std::path::PathBuf::from("."),
+        }
+    }
+
+    #[test]
+    fn a_kill_mid_burst_returns_promptly_and_ends_killed() {
+        let burst = BurstFile::create();
+        let (transport, _pid) = PtyTransport::open(&grandchild_spew(&burst), 80, 24).expect("open");
+        let statuses = CapturingStatusSink::new();
+        let core = Arc::new(OutputCore::new(
+            uuid::Uuid::new_v4(),
+            0,
+            statuses.clone() as Arc<dyn StatusSink>,
+            TurnWiring::detached(),
+        ));
+        transport.start(core.clone());
+
+        assert!(
+            wait_until(Duration::from_secs(10), || {
+                String::from_utf8_lossy(&core.terminal_tail(256)).contains(MARKER)
+            }),
+            "the spew never reached the pump within 10 s — the experiment does not stand"
+        );
+        std::thread::sleep(Duration::from_millis(300));
+
+        // The kill runs on its own thread so a regression fails on the watchdog instead of hanging the
+        // suite. Same two verbs as `AgentSession::kill`.
+        let (done_tx, done_rx) = mpsc::channel();
+        let kill_core = core.clone();
+        std::thread::spawn(move || {
+            let t0 = Instant::now();
+            transport.shutdown();
+            kill_core.join_pump(Duration::from_secs(5));
+            let _ = done_tx.send(t0.elapsed());
+        });
+        let elapsed = done_rx.recv_timeout(Duration::from_secs(15)).expect(
+            "the kill did not return within 15 s — `ClosePseudoConsole` is waiting on undrained output",
+        );
+
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "the kill took {elapsed:?} — it must end well under the 5 s pump join"
+        );
+        assert!(
+            statuses
+                .statuses()
+                .iter()
+                .any(|s| matches!(s, AgentStatus::Killed)),
+            "the agent must end `Killed`: {:?}",
+            statuses.statuses()
+        );
     }
 }

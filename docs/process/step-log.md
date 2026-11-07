@@ -2202,8 +2202,9 @@
   - QA = full regression run locally (workspace 5072 passed · gates 30 · frontend 2802 · tsc) · codex lane `backend_contract --ignored` 11/11 ×2 · mutation 2/2 caught · real app: a JSON-mode codex agent answered one turn (`PONG-5968`). Observed only: a TUI-mode codex agent in the app has no xterm scrollback and the mouse wheel goes to codex (alt-screen) — S21 TRD §6-F follow-up, user decision pending.
 - 2026-11-02 — Opened. Number = S32 (not claimed by push — user 「push 금지」). Source = S31 qa codex-lane failure.
 
-## S34 — killing a PTY agent mid-burst wedges the daemon connection (2026-11-07, `v0.5.0/fix/pty-kill-hang`, autonomous session — user 「쭉 진행해」 while away) · folder `docs/process/S34-pty-kill-hang/` · ADR-0206 (premise corrected in comments) · open
+## S34 — killing a PTY agent mid-burst wedges the daemon connection (2026-11-07, `v0.5.0/fix/pty-kill-hang`, autonomous session — user 「쭉 진행해」 while away) · folder `docs/process/S34-pty-kill-hang/` · ADR-0001 (premise refined) · implemented · reviewed · QA PASS · not pushed
 
+- 2026-11-07 — Implementation landed. PTY pump drains while the console closes (Windows only — platform fact `CLOSE_NEEDS_DRAIN`; `master_closed` published after the master drop); daemon `Kill` runs on the blocking pool. PRD+TRD review full 3 rounds PASS; code review deep PASS (no must); QA PASS (AC1 base 5/5 fail → fix pass < 1 s; GUI kill mid-burst → reply 14–161 ms; base reproduces the wedge). Found in QA, separate and pre-existing: a spewing agent shown in a slot makes the daemon close the connection on a full send queue and the shell reconnect/replay every ~20–35 ms (tracked on the S21 branch). Follow-up: `/engram-adr link` to ADR-0001.
 - 2026-11-07 — Topic opened. Number = S34 (claim not pushed — push waits for the user). Source = S21 3-2 U4a GUI QA (the link froze while showing "connected"; also on the old driver) → investigation: `Kill` runs inline on the daemon connection task and `ClosePseudoConsole` blocks while the stopped PTY pump leaves conhost output undrained. PRD + TRD written.
 
 ## 다음 (미진행)

@@ -19,7 +19,7 @@
 | 항목 | 내용 | 출처 | 확신도 |
 |---|---|---|---|
 | `CTRL_CLOSE_EVENT` | 콘솔이 닫히면 붙은 모든 프로세스에 보낸다. 타임아웃 = `SPI_GETHUNGAPPTIMEOUT`(기본 5000ms) 뒤 시스템이 종료. `CTRL_C`·`CTRL_BREAK` 는 타임아웃 없음 | learn.microsoft.com/en-us/windows/console/handlerroutine | 가능성 높음 |
-| `ClosePseudoConsole` | 아직 붙은 클라이언트에 `CTRL_CLOSE_EVENT` 를 보낸다. Windows 11 24H2(26100)부터 즉시 반환, 이전은 끝날 때까지 대기(출력 파이프를 같은 스레드에서 읽으면 교착) | learn.microsoft.com/en-us/windows/console/closepseudoconsole | 가능성 높음 |
+| `ClosePseudoConsole` | Sends `CTRL_CLOSE_EVENT` to clients still attached. The docs say it returns immediately from Windows 11 24H2 (26100) and waits until done before that (deadlock if the output pipe is read on the same thread). **Measured on 26200 (S34, portable-pty 0.8.1): it still blocks while conhost holds output nobody reads** — > 20 s with the reader stopped mid-burst, 12–17 ms while the reader kept draining. Keep draining the output pipe until the close returns (`docs/process/S34-pty-kill-hang/`). | learn.microsoft.com/en-us/windows/console/closepseudoconsole · S34 probe | immediate return: contradicted on 26200 (measured) · blocking without a drain: confirmed |
 | Windows Terminal | 탭을 닫을 때 pseudoconsole 핸들을 놓아 `CTRL_CLOSE_EVENT` 에 맡긴다. `TerminateProcess` 를 부르지 않는다 | microsoft/terminal `src/cascadia/TerminalConnection/ConptyConnection.cpp` `Close()` (요약 도구로 읽음 — 줄 단위 미확인) | 가능성 높음 |
 | VS Code(node-pty) | node-pty Windows `kill()` = ConPTY 경로면 입력 소켓 destroy + 네이티브 kill, winpty 경로면 콘솔 프로세스 목록에 `process.kill`. VS Code 가 그 앞에 유예를 두는지 | microsoft/node-pty `src/windowsPtyAgent.ts` | node-pty 가능성 높음 · VS Code 모름 |
 
@@ -71,7 +71,7 @@
 | 선택지 | 효과 | 비용 · 위험 | 피어 선례 |
 |---|---|---|---|
 | A. 그대로 둔다 | — | 업데이트 창과 겹친 종료는 계속 깨질 수 있음 | 9곳 전부 Windows 에서 즉시 강제 |
-| B. 강제 전에 콘솔 닫기(`ClosePseudoConsole`) 먼저 + 유계 대기 | 일반 터미널(Windows Terminal)과 같은 조건이 됨 | 종료가 수 초 늦어짐 · 24H2 이전엔 `ClosePseudoConsole` 이 **무기한** 막힐 수 있어 출력 파이프를 동시에 비우거나 먼저 닫아야 하고, 24H2 부터는 즉시 반환이라 반환이 클라이언트 종료를 뜻하지 않음 → 대기는 프로세스 종료 관측 + 상한 타이머로 따로 세워야 함 · **업데이터가 그 신호로 교체를 끝내는지 모름** — 효과 미검증 | 매니저 쪽 없음 · 터미널 앱(Windows Terminal)이 이 모양 |
+| B. Close the console (`ClosePseudoConsole`) first, then force, with a bounded wait | Same conditions as an ordinary terminal (Windows Terminal) | Shutdown gets a few seconds slower · `ClosePseudoConsole` can block **indefinitely** unless the output pipe is drained at the same time or closed first — the docs say it returns at once from 24H2, but on this machine (26200) it stayed blocked for over 20 s with the output undrained (S34 measurement — the `ClosePseudoConsole` row above) · its return does not mean the client ended → the wait needs a process-exit observation plus a cap timer of its own · **unknown whether the updater finishes its swap on that signal** — effect unverified | None on the manager side · terminal apps (Windows Terminal) take this shape |
 | B'. 강제 전에 프로토콜 끊기(claude JSON 모드 interrupt) + 유계 대기 | 진행 중 턴을 정리할 틈을 줌 | 터미널 모드 claude 엔 적용 불가 · 업데이터에 대한 효과는 B 보다 더 불확실(업데이터는 턴과 무관) | vibe-kanban(5초) · paseo · t3code |
 | C. claude 자식 env 에 `DISABLE_AUTOUPDATER=1` 기본 주입 | Engram 이 띄운 claude 의 백그라운드 확인이 사라짐 | **같은 설치본을 쓰는 다른 claude(일반 터미널 등)는 여전히 업데이트한다** — 공유 설치본의 교체 창이 없어지지는 않음 · 사용자 동작 변경(Engram 안에선 업데이트를 사용자가 직접) · 「백엔드 확장」 원칙상 `backend/claude` 안에서만 | 없음 |
 | D. 문서 안내만(설정 권장) | 사용자 선택에 맡김 | 모르는 사용자는 계속 겪음 | — |

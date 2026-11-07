@@ -638,9 +638,16 @@ impl AgentSession {
         self.transport.begin_retire();
     }
 
-    /// 자원 강제 종료 + pump 종료 대기. **이 2동사 순서(shutdown THEN join_pump)가 kill 인과의 핵심.**
-    /// shutdown이 master를 drop해 pump read를 EOF로 깨우고(→core.finish(Killed)), join_pump가
-    /// 그 pump 종료를 기다린다. 역전 시 hang(아직 살아있는 pump를 기다림).
+    /// Forced resource teardown, then waiting for the pump. **This two-verb order (shutdown THEN
+    /// join_pump) is the core of the kill causality**: shutdown destroys the transport's resources so the
+    /// pump's read wakes and ends (→ `core.finish(Killed)`), and join_pump waits for that end. Reversed, it
+    /// hangs (waiting on a pump that is still alive).
+    ///
+    /// Only the join is bounded (`timeout`); `shutdown` has no bound of its own. For a PTY transport on
+    /// Windows it returns because a running pump keeps draining after shutdown until the master is
+    /// closed — otherwise `ClosePseudoConsole` can block (rule = `transport::pty::run_pump`; with no live
+    /// pump, e.g. after a contained pump panic, the close can still block — S34 TRD §3B residual).
+    // ADR-0001
     pub fn kill(&self, timeout: Duration) {
         self.transport.shutdown();
         self.core.join_pump(timeout);
