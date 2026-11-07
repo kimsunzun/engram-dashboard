@@ -184,14 +184,16 @@ pub(crate) const SATURATED_REFUSAL: &str =
 ///   ① **어떤 순서 묶음에도 들지 않는가.** `Kill` 은 다섯 묶음 어디에도 없다. 앞서 줄에 든
 ///      `WriteStdin`(X) 을 추월해 그 바이트가 유실되지만, 그 에이전트를 죽이라는 것이 이 명령의 뜻이라
 ///      그 유실이 곧 요청된 결과다.
-///   ② **막힌 것과 다른 경로로 도는가.** ★한때 여기 적혀 있던 「줄이 막히는 현실적 원인은
-///      `write_stdin` 의 블로킹 PTY write 다」는 **더는 참이 아니다**★ — 콘솔 통로가 에이전트별 입력
-///      큐를 갖게 되면서 `send_input` 은 큐에 넣고 즉시 돌아온다(`transport::input_queue`). **그래도 이
-///      줄은 유효하다**: 오늘 도착순 줄을 실제로 오래 붙드는 것은 ㉮ `Kill` 자신
-///      (`AgentManager::kill_agent` 이 통로 종료와 pump join **5초**를 `spawn_blocking` 없이 동기로
-///      기다린다) ㉯ 프로필 CRUD 의 동기 파일 IO 다. 그리고 `Kill` 은 그 둘 중 어느 것도 타지 않는다 —
-///      `child.kill()` + Job 종료로 내려간다(`PtyTransport::shutdown`). 즉 **다른 경로로 돌 뿐 아니라,
-///      줄을 붙들고 있는 것을 끝내는 유일한 명령**이다.
+///   ② **Does it run on a different path from what is blocked?** The old line here — "the realistic
+///      cause of a blocked line is `write_stdin`'s blocking PTY write" — **is no longer true**: console
+///      transports have a per-agent input queue, so `send_input` queues and returns at once
+///      (`transport::input_queue`). **The rule still holds**: what holds the in-order line for long today
+///      is (a) an earlier `Kill` — its arm awaits `AgentManager::kill_agent` on the blocking pool, i.e. the
+///      transport shutdown plus the pump join (5 s ceiling; the shutdown has no bound of its own) — and
+///      (b) the synchronous file IO of profile CRUD. A `Kill` on the bypass lane skips both and goes down
+///      to `child.kill()` + the Job terminate (`PtyTransport::shutdown`), so it **runs on a different path
+///      and ends a stuck agent's I/O**; a second Kill of an agent whose kill is still running waits on that
+///      transport's master lock, so it does not end that first kill.
 /// ★`Interrupt` 를 여기 **넣지 않은 것은 의도다** — 둘 다 어긋난다★: ①로는 순서 묶음 ①에 정면으로
 ///   들고(`WriteStdin`(X) ↔ `Interrupt`(X)), ②로는 **건너뛰어도 도착 시점이 그대로다**.
 ///   ★②의 근거가 갈렸다 — 옛 문장(「`interrupt()` 가 `0x03` 을 **같은 PTY writer 로** 쓰므로 그 writer 에
@@ -273,11 +275,14 @@ pub(crate) fn command_request_id(
 
 /// [`DispatchOrder`] 판정.
 ///
-/// ★떼어 내는 것은 활성화 셋과 ⟳(`RefreshUsageLimits`)뿐이다★: 이것들만이 dispatch 안에서 **끝이 날 때까지**
-///   기다린다 — 활성화는 결말까지(전형 2s, 백스톱 15s, 실패 판정이면 teardown 까지 합쳐 약 20s — 그 사유의 정본은
-///   `Spawn` 갈래 주석), ⟳ 는 조회 끝까지(상한 = `usage_service::REPLY_WAIT_MAX`).
-///   나머지 전부는 await 지점이 없거나(맵 조회·PTY write·목록 인코딩) 이미 자기 태스크로 나간다
-///   (`Command` 의 배달). 그래서 줄에 남겨도 다음 명령을 재지 않는다.
+/// **Only the activation three and ⟳ (`RefreshUsageLimits`) are detached**: they wait inside dispatch
+///   **until an outcome** that may take seconds — activation until its result (typically 2 s, backstop
+///   15 s, about 20 s with the teardown on a failure verdict — the reason's source of truth is the
+///   `Spawn` arm comment), ⟳ until the query ends (cap = `usage_service::REPLY_WAIT_MAX`).
+///   In-order commands may await as well — `Kill` awaits its blocking task (transport shutdown + pump
+///   join), `StopDaemon` awaits `shutdown_all` — and each holds the next command on this connection
+///   until it has replied. The rest have no await point (map lookup · input queue push · list encoding)
+///   or hand off to their own task (`Command` delivery).
 /// ★떼어 내도 되는 근거는 「순서가 뜻을 갖지 않는다」 하나다★(⟳ 의 근거는 그 갈래 주석) — 중복 활성화를
 ///   막는 것은 dispatch 의 도착 순서가 아니라 manager 의 예약(`SpawnReservation`)과 재활성화 가드(`activation_in_flight`)이고,
 ///   그 둘은 연결을 모른다. 즉 이 셋을 줄에서 떼어도 **새로 열리는 창이 없다** — 같은 id 를 동시에
@@ -1472,16 +1477,16 @@ impl ConnectionCore {
                 // ADR-0172
                 let result = match manager.agent_snapshot(profile_id) {
                     Some(profile) => {
-                        // ★★blocking 풀로 넘긴다 — 이 자리에서 직접 부르지 마라★★: `activate_profile`
-                        //   은 연결을 선언하는 통로에서 **결말이 날 때까지** 블록하고(최대 백스톱 15s),
-                        //   실패로 판정하면 그 뒤 teardown 의 `session.kill(5s)` 까지 탄다 — 합쳐 약 20s
-                        //   동안 **yield 지점이 하나도 없다.** async 워커에서 그대로 부르면 그 워커가
-                        //   통째로 묶이고, 막힌 codex 활성화 N 건이 워커 N 개를 가져간다(다른 연결의
-                        //   명령까지 함께 멈춘다). 같은 파일의 `Shutdown` 이 `shutdown_all` 을 같은
-                        //   이유로 감싼다.
-                        //   ★명령 버스 쪽 형제는 이미 보호돼 있다★ — `agent.*` 표가 `blocking_handler`
-                        //   뒤에 있다(`agent::commands::make_table` 의 blocking 계약). 보호가 없던 것은
-                        //   이 WS 표면뿐이다.
+                        // Hand this to the blocking pool — never call it here directly: `activate_profile`
+                        //   blocks **until an outcome** on a transport that declares a connection (backstop
+                        //   15 s), and on a failure verdict it then runs the teardown's `session.kill` (pump
+                        //   join bounded by 5 s) — about 20 s with **no yield point**. Called on an async
+                        //   worker it ties up that whole worker, and N stuck codex activations take N workers
+                        //   (other connections' commands stop too). The `Kill` and `StopDaemon` arms in this
+                        //   file use the blocking pool for the same reason.
+                        //   The command-bus sibling is already protected — the `agent.*` table sits behind
+                        //   `blocking_handler` (the blocking contract of `agent::commands::make_table`).
+                        //   Only this WS surface lacked that protection.
                         let mgr = manager.clone();
                         let started = tokio::task::spawn_blocking(move || {
                             mgr.activate_profile(&profile, SpawnMode::Fresh).map(|_| ())
@@ -1514,7 +1519,15 @@ impl ConnectionCore {
                 agent_id,
                 request_id,
             } => {
-                let result = manager.kill_agent(agent_id).map_err(|e| e.to_string());
+                // Off the async worker, like the activation arms: `kill_agent` blocks its thread until the
+                //   transport has shut down, and a blocked worker also starves tasks woken into its
+                //   unstealable LIFO slot — this connection's writer included (T-79). Awaited here, so the
+                //   reply still follows the kill and the next command waits for the reply.
+                let mgr = manager.clone();
+                let result = tokio::task::spawn_blocking(move || mgr.kill_agent(agent_id))
+                    .await
+                    .map_err(|e| format!("kill task failed: {e}"))
+                    .and_then(|killed| killed.map_err(|e| e.to_string()));
                 reply(sink, request_id, result);
             }
 
@@ -2932,9 +2945,10 @@ mod tests {
 
     /// ★★활성화를 async 워커에서 **직접 부르지 않는다**★★ — 그 워커가 최대 20 초 묶인다.
     ///
-    /// `AgentManager::activate_profile` 은 연결을 선언하는 통로에서 결말이 날 때까지 블록하고(백스톱
-    /// 15s), 실패로 판정하면 teardown 의 `session.kill(5s)` 까지 탄다 — 그 사이 yield 지점이 **없다.**
-    /// 막힌 활성화 N 건이 워커 N 개를 가져가면 다른 연결의 명령까지 함께 멈춘다.
+    /// `AgentManager::activate_profile` blocks until an outcome on a transport that declares a connection
+    /// (backstop 15 s), and on a failure verdict it then runs the teardown's `session.kill` (pump join
+    /// bounded by 5 s) — with **no** yield point in between. N stuck activations taking N workers stop other
+    /// connections' commands too.
     /// ★왜 소스에서 재나★: 워커 고갈은 멀티스레드 런타임에 그 수만큼 부하를 걸어야 관측되고, 그
     ///   시험대는 본질적으로 타이밍 의존이라 이 저장소가 피하는 모양이다(시계 단언 금지). 회귀했을 때
     ///   나는 것은 빨간 단언이 아니라 **부하 아래서만 보이는 정지**다.
@@ -3942,6 +3956,8 @@ mod tests {
         /// 수락 모름으로 쥔 id 만 답하는 통로 — 쓰기는 삼킨다.
         struct SeamTransport {
             unconfirmed: Vec<String>,
+            /// Runs inside `shutdown()` — lets a test hold the kill path on whichever thread runs it.
+            on_shutdown: Option<Box<dyn Fn() + Send + Sync>>,
         }
         impl AgentTransport for SeamTransport {
             fn start(&self, _core: Arc<OutputCore>) {}
@@ -3957,7 +3973,11 @@ mod tests {
             fn interrupt(&self) -> Result<(), PtyError> {
                 Ok(())
             }
-            fn shutdown(&self) {}
+            fn shutdown(&self) {
+                if let Some(on_shutdown) = &self.on_shutdown {
+                    on_shutdown();
+                }
+            }
             fn capabilities(&self) -> TransportCaps {
                 TransportCaps {
                     input: InputCaps {
@@ -3989,6 +4009,39 @@ mod tests {
             epoch: u32,
             events: Vec<QueuedInputEvent>,
             unconfirmed: &[&str],
+        ) -> AgentId {
+            insert_seam(
+                manager,
+                epoch,
+                events,
+                SeamTransport {
+                    unconfirmed: unconfirmed.iter().map(|id| id.to_string()).collect(),
+                    on_shutdown: None,
+                },
+            )
+        }
+
+        /// A live session whose transport runs `on_shutdown` when it is shut down (killed).
+        pub(super) fn insert_with_shutdown(
+            manager: &Arc<AgentManager>,
+            on_shutdown: impl Fn() + Send + Sync + 'static,
+        ) -> AgentId {
+            insert_seam(
+                manager,
+                0,
+                Vec::new(),
+                SeamTransport {
+                    unconfirmed: Vec::new(),
+                    on_shutdown: Some(Box::new(on_shutdown)),
+                },
+            )
+        }
+
+        fn insert_seam(
+            manager: &Arc<AgentManager>,
+            epoch: u32,
+            events: Vec<QueuedInputEvent>,
+            transport: SeamTransport,
         ) -> AgentId {
             let id = AgentId::new_v4();
             let core = Arc::new(OutputCore::new(
@@ -4022,9 +4075,7 @@ mod tests {
                 InputEncoder::ClaudeStreamJson,
                 true,
                 core,
-                Box::new(SeamTransport {
-                    unconfirmed: unconfirmed.iter().map(|id| id.to_string()).collect(),
-                }),
+                Box::new(transport),
             ));
             manager.insert_test_session(session);
             id
@@ -4041,6 +4092,72 @@ mod tests {
         let session = ConnectionSession::new(conn_id);
         core.dispatch(cmd, &session, &mock).await;
         mock.events()
+    }
+
+    /// A kill must not hold the async worker that runs the connection's dispatch (T-79): while the
+    /// transport's shutdown is still in progress, other tasks on that runtime must run.
+    ///
+    /// The fake shutdown signals "entered" and then waits up to 2 s for a release that only the canary
+    /// task sends. On a current-thread runtime an inline kill blocks the only thread, so the canary cannot
+    /// run until the wait has timed out; the canary waits for "entered" first, so the poll order of
+    /// `join!` does not matter.
+    #[tokio::test]
+    async fn a_kill_in_progress_leaves_the_runtime_free() {
+        use engram_dashboard_protocol::RequestId;
+        use std::sync::atomic::AtomicBool;
+        use std::sync::mpsc::{self, TryRecvError};
+
+        let (core, _rx) = test_core();
+        let (entered_tx, entered_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let release_rx = StdMutex::new(release_rx);
+        let released = Arc::new(AtomicBool::new(false));
+        let released_in_shutdown = released.clone();
+        let agent_id = queued_seam::insert_with_shutdown(&core.manager, move || {
+            let _ = entered_tx.send(());
+            let got = release_rx
+                .lock()
+                .expect("release poisoned")
+                .recv_timeout(Duration::from_secs(2));
+            released_in_shutdown.store(got.is_ok(), Ordering::SeqCst);
+        });
+
+        let canary = async move {
+            loop {
+                match entered_rx.try_recv() {
+                    Ok(()) => break,
+                    Err(TryRecvError::Empty) => tokio::time::sleep(Duration::from_millis(1)).await,
+                    Err(TryRecvError::Disconnected) => panic!("the kill never reached shutdown"),
+                }
+            }
+            let _ = release_tx.send(());
+        };
+        let req = RequestId(uuid::Uuid::new_v4());
+        let ((events, released_at_reply), ()) = tokio::join!(
+            async {
+                let events = dispatch_one(
+                    &core,
+                    1,
+                    AgentCommand::Kill {
+                        agent_id,
+                        request_id: req,
+                    },
+                )
+                .await;
+                (events, released.load(Ordering::SeqCst))
+            },
+            canary
+        );
+
+        assert!(
+            released_at_reply,
+            "the kill had not been released when its reply returned — Kill must run off the async worker and \
+             reply only after the kill finished"
+        );
+        match events.as_slice() {
+            [AgentEvent::Ack { request_id }] => assert_eq!(*request_id, req),
+            other => panic!("the kill must be answered with its Ack: {other:?}"),
+        }
     }
 
     /// ★목록 조회는 임대를 안 본다★ — 남이 임대를 쥔 에이전트도 그대로 읽힌다. 응답은 명부의 환원 상태를 빠짐없이
