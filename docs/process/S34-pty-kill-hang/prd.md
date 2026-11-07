@@ -7,12 +7,12 @@
   1. The daemon runs `Kill` inline on the connection's async `dispatch_task` (no `spawn_blocking`).
   2. The kill path calls `PtyTransport::shutdown`: it sets a flag, the pump stops reading after its next read, then the master is dropped → `ClosePseudoConsole`.
   3. `ClosePseudoConsole` blocks while conhost still holds buffered output that nobody drains — probe: blocked > 20 s in 3/3 runs when killed mid-burst; 11–17 ms when the burst was over or the reader kept draining.
-  4. The blocked async worker also starves the connection's `write_task` (woken into that worker's tokio LIFO slot, which other workers cannot steal) — no output, no daemon ping/idle check; the daemon's read side still answers pings, so the shell's silence detection never fires.
+  4. The blocked async worker likely also starves the connection's `write_task` (woken into that worker's tokio LIFO slot, which other workers cannot steal — mechanism confirmed by a probe, its occurrence in the QA run likely) — no output, no daemon ping/idle check; the daemon's read side still answers pings, so the shell's silence detection likely never fires.
 - Users hit this today (it is not tied to the transport work).
 
 ## 2. Scope / non-goals
 
-- Scope: the agent crate's PTY shutdown (keep draining until EOF) and the daemon's `Kill` dispatch (off the async worker). Correct the wrong "bounded by 5 s" claims in code comments.
+- Scope: the agent crate's PTY shutdown (on Windows, keep draining until the master is closed) and the daemon's `Kill` dispatch (off the async worker). Correct the wrong "bounded by 5 s" claims in code comments.
 - Non-goals: a per-connection progress watchdog in the daemon net layer (the net crate is replaced in S21 stage 3-3 — that work owns it); a shell-side "N reply timeouts → drop the link" heuristic; auditing every other synchronous call on the dispatch task (listed as follow-up only).
 
 ## 3. Requirements
@@ -35,5 +35,5 @@
 
 ## 6. Risks
 
-- EOF never arrives after shutdown (a child that keeps the pipe open) → the pump keeps draining; it must still respect the existing join bound and the transport's kill sequence.
+- EOF never arrives after shutdown (a child that keeps the pipe open) → the drain must stay bounded (it ends with the master close on Windows; non-Windows keeps today's rule) so the pump still finishes and the agent is reaped.
 - Moving `Kill` to the blocking pool changes ordering relative to other commands on the same connection — must keep "the reply goes out after the kill finished" and the existing per-connection command order.
