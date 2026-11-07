@@ -1,35 +1,35 @@
-// PopoutPage — 슬롯 팝업 분리(pop-out)·빈 창 생성(create_window)으로 런타임 생성된 OS 창이 그리는 페이지.
+// PopoutPage — the page drawn by an OS window created at runtime by slot pop-out (pop-out) · blank window creation (create_window).
 //
-// ★탭 소유 모델(ADR-0057)★: 옛 "고정 단일 View" 팝업이 아니라 **탭 가진 일반 창**이다(D-2 "팝업도 탭").
-//   URL 키 `#/popup?window=<label>` 로 자기 창 label 을 확정하고, WindowLayout(label) 을 얇게 감싼다 —
-//   탭바·슬롯 캔버스·탭 상태 학습·0탭 자가닫힘은 전부 그 컴포넌트가 소유한다(§7-1). PopoutPage 는
-//   label 만 뽑아 넘기는 껍데기다.
+// ★Tab ownership model (ADR-0057)★: not the old "fixed single View" popup but an **ordinary window that holds tabs** (D-2 "popups have tabs too").
+//   It fixes its own window label from the URL key `#/popup?window=<label>` and thinly wraps WindowLayout(label) —
+//   tab bar · slot canvas · tab state learning · self-close at 0 tabs are all owned by that component (§7-1). PopoutPage is
+//   a shell that only extracts the label and passes it on.
 //
-// ★view:closed 은퇴(G2)★: 옛 "자기 view 가 닫히면 창 자가종료"(view:closed 리스너)는 제거됐다. 창 닫힘은
-//   셸 몫이고(마지막 탭 닫기 · invoke `window_control` · 버스 `window.close` — TRD S26-window-chrome §5-4 · §5-5),
-//   프론트 자가닫힘은 WindowLayout 의 window:tabs-updated{tabs:[]}(0탭) 신호로 셸에 청하는 것뿐이다(이중 발화·재진입
-//   방지). 이 페이지엔 자가종료 로직이 없다.
+// ★view:closed retirement (G2)★: the old "window self-exit when its own view closes" (view:closed listener) was removed. Window closing
+//   is the shell's job (closing the last tab · invoke `window_control` · bus `window.close` — TRD S26-window-chrome §5-4 · §5-5),
+//   and the frontend's self-close is only asking the shell via WindowLayout's window:tabs-updated{tabs:[]} (0 tabs) signal (prevents double firing · re-entry).
+//   This page has no self-exit logic.
 //
-// ★출력 구독은 자동★: 이 창은 자기 TauriTransport 싱글톤(별 WebView2 프로세스라 모듈 그래프가 신선)이
-//   connected 전이에서 subscribe_output 을 자기 window_label 로 등록한다 → 이 창 tabs 의 agent 출력이
-//   이 창 Channel 로 라우팅된다(백엔드 OutputRouter 일반 메커니즘, 모든 탭 walk). 슬롯은 메인과 동일하게
-//   agentClient 로 구독하고 request_replay(gen 펜스, ADR-0046)로 replay 를 받는다 — 팝업 전용 배선 없음.
+// ★Output subscription is automatic★: this window's own TauriTransport singleton (a separate WebView2 process, so the module graph is fresh)
+//   registers subscribe_output with its own window_label on the connected transition → the agent output of this window's tabs is
+//   routed to this window's Channel (the backend OutputRouter general mechanism, walking all tabs). Slots subscribe through
+//   agentClient the same as main and receive replay via request_replay (gen fence, ADR-0046) — no popup-specific wiring.
 //
-// ★§5★: 이 창의 생성/바인딩 자체가 command(`slot.popout`·`window.create` = invoke)로 LLM 제어 가능하다.
-//   이 페이지는 순수 I/O 표시 표면(손발) — 제어는 백엔드측(두뇌)이 쥔다.
+// ★§5★: creation/binding of this window itself can be LLM-controlled through commands (`slot.popout`·`window.create` = invoke).
+//   This page is a pure I/O display surface (hands and feet) — control is held by the backend side (the brain).
 
 import { useState } from 'react'
 
 import ConnectionNotice from '../components/layout/ConnectionNotice'
 import NoticeOverlay from '../components/layout/NoticeOverlay'
 import WindowLayout from '../components/layout/WindowLayout'
-// ★단일 출처★: 이 창 label 파싱은 viewStore 의 공유 헬퍼를 쓴다(WindowLayout·useCurrentViewId·
-//   SlotContextMenu 가 같은 판정을 공유 — §5 제어 표면 일관).
+// ★Single source★: parsing this window's label uses viewStore's shared helper (WindowLayout · useCurrentViewId ·
+//   SlotContextMenu share the same decision — §5 control surface consistency).
 import { readWindowLabelFromHash } from '../store/viewStore'
 
 export default function PopoutPage() {
-  // URL `?window=` 에서 1회 확정 — 창 수명 동안 불변. 팝업 라우트가 아니면 'main' 폴백이나,
-  // /popup 라우트에서만 이 페이지가 뜨므로 정상 경로는 팝업 label 이다.
+  // Fixed once from URL `?window=` — unchanged for the window's lifetime. If it is not a popup route it falls back to 'main', but
+  //   this page only appears on the /popup route, so the normal path is the popup label.
   const [label] = useState<string>(readWindowLabelFromHash)
 
   return (
@@ -42,12 +42,12 @@ export default function PopoutPage() {
         flexDirection: 'column',
       }}
     >
-      {/* 감싼 칸 = `WindowLayout` 의 자리. 알림 층은 이 칸이 아니라 `WindowLayout` 안 제목 줄 아래 칸에 붙는다(화면마다 같은 자리). */}
+      {/* Wrapping area = the spot of `WindowLayout`. The notice layer attaches not to this area but to the area below the title bar inside `WindowLayout` (the same spot on every screen). */}
       <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
         <WindowLayout
           label={label}
-          // 알림은 모든 창에 나온다 — 부팅은 창마다 돌고 실패 이유도 창마다 도착한다(ADR-0134). 레이아웃을 밀지 않고
-          //   덮는다(ADR-0277 — ADR-0180 개정). 덮는 자리는 제목 줄 아래다 — 제목 줄은 덮지 않는다(사용자 결정
+          // Notices appear in every window — boot runs per window and failure reasons arrive per window (ADR-0134). They cover the layout without
+          //   pushing it (ADR-0277 — revision of ADR-0180). The covering spot is below the title bar — the title bar is not covered (user decision
           //   2026-10-26 · T-66).
           notices={
             <NoticeOverlay>

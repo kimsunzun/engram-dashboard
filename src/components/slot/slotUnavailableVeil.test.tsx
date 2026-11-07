@@ -1,12 +1,12 @@
-// 부재 막이 세 슬롯에서 **같은 조건에 같은 모습**으로 뜬다(ADR-0148 결정 2·3 · 사용자 결정 2026-08-20).
+// The absence curtain shows up with **the same look** under **the same condition** in all three slots (ADR-0148 decisions 2·3 · user decision 2026-08-20).
 //
-// 배경: 터미널·DOM 슬롯은 예전에 어두운 막 위에 글을 적었다 — '에이전트 대기 중' · '종료됨' ·
-//   `Failed: <메시지>`. 리치 슬롯만 심볼 하나였다. 같은 사실을 슬롯마다 다른 문장으로 말했고, 데몬
-//   재기동처럼 판정이 흔들리는 구간에서 '종료됨' 같은 단정이 그대로 남았다. 셋을 심볼 하나로 합쳤고,
-//   이 파일이 그 합의의 회귀망이다 — 조건 셋(종료·연결 끊김·구독 부착 대기)과 "글자 없음" 둘 다 잰다.
+// Background: terminal·DOM slots used to write text over a dark curtain — '에이전트 대기 중' · '종료됨' ·
+//   `Failed: <메시지>`. Only the rich slot had a single symbol. The same fact was told in a different sentence per slot, and in spans where the decision wavers such as a daemon
+//   restart, an assertion like '종료됨' stayed put. The three were merged into one symbol, and
+//   this file is that agreement's regression net — it measures both the three conditions (exit · connection lost · waiting for subscription attach) and "no text".
 //
-// 전략: slotReplayRestart.test.tsx 와 같은 stub 패턴. 연결 상태는 실물과 동형으로 구독자를 들고 있다가
-//   전이 때 통지한다(등록 즉시 1회 통지 포함).
+// Strategy: same stub pattern as slotReplayRestart.test.tsx. The connection state holds subscribers like the real one and notifies
+//   them on transitions (including one notification right at registration).
 
 import type { ReactElement } from 'react'
 import { act, cleanup, render } from '@testing-library/react'
@@ -14,7 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { OutputChunk, ViewPhase } from '../../api/agentClient'
 
-// jsdom 미제공 관측자 2종 — TerminalSlot 이 마운트 시 둘 다 만들고, Radix ScrollArea 도 RO 를 참조한다.
+// Two observers jsdom does not provide — TerminalSlot creates both at mount, and Radix ScrollArea also references RO.
 globalThis.ResizeObserver ||= class {
   observe() {}
   unobserve() {}
@@ -60,7 +60,7 @@ vi.mock('../../api/clientFactory', () => ({
     },
     onConnectionStateChange: (cb: (s: string) => void) => {
       conn.cbs.add(cb)
-      cb(conn.state) // 실물과 동일: 등록 즉시 현재 상태 1회 통지.
+      cb(conn.state) // Same as the real one: one notification of the current state right at registration.
       return () => conn.cbs.delete(cb)
     },
   },
@@ -99,7 +99,7 @@ import RichSlot from './RichSlot'
 
 const AGENT = 'aaaa-bbbb-cccc-dddd'
 
-/** 세 슬롯이 공유하는 막의 마커 — 이 한 선택자가 "같은 모습" 의 기계적 정의다. */
+/** Marker of the curtain the three slots share — this one selector is the mechanical definition of "same look". */
 function veil(): HTMLElement | null {
   return document.querySelector('[data-slot-dead="1"]')
 }
@@ -118,7 +118,7 @@ function setConnection(state: 'connected' | 'reconnecting' | 'down'): void {
   })
 }
 
-// 세 슬롯의 props 는 서로 다르다(리치는 viewId 가 옵션, 터미널은 agentId 가 nullable) — 렌더만 감싼다.
+// The three slots' props differ (rich has viewId optional, terminal has agentId nullable) — only the render is wrapped.
 const SLOTS: Array<[string, () => ReactElement]> = [
   ['TerminalSlot', () => <TerminalSlot viewId="v1" agentId={AGENT} />],
   ['DomSlot', () => <DomSlot viewId="v1" agentId={AGENT} />],
@@ -140,9 +140,9 @@ afterEach(() => {
 })
 
 describe.each(SLOTS)('%s — 부재 막(세 슬롯 공통)', (_name, mount) => {
-  // ★막과 같은 자리에서 재는 두 번째 공통 의무★: 비우기 콜백을 안 넘긴 슬롯은 커서만 0 으로 돌아가고
-  //   화면은 앞 화신 내용을 든 채라, 전량 replay 가 그 위에 겹쳐 그려지고 오류는 어디에도 남지 않는다.
-  //   슬롯이 늘어날 때 여기 SLOTS 목록에 한 줄 더하는 것만으로 그 의무가 함께 걸린다.
+  // ★Second common obligation, measured at the same place as the curtain★: a slot that does not pass the clear callback returns only the cursor to 0 and
+  //   the screen still holds the previous incarnation's content, so the full replay is drawn on top of it and no error is left anywhere.
+  //   When slots are added, just adding one line to the SLOTS list here puts that obligation on them too.
   it('구독에 비우기 콜백(onReset)을 넘긴다', async () => {
     agentStoreState.agents = [{ id: AGENT, cwd: 'C:/x', status: { type: 'Running' }, epoch: 0 }]
     agentStoreState.agentsLoaded = true
@@ -204,7 +204,7 @@ describe.each(SLOTS)('%s — 부재 막(세 슬롯 공통)', (_name, mount) => {
     expect(veil()).toBeNull()
   })
 
-  // ★글을 적지 않는다(사용자 결정)★: 실패 사유든 종료든 대기든, 막이 말하는 건 심볼 하나뿐이다.
+  // ★Write no text (user decision)★: whether failure reason, exit or waiting, all the curtain says is one symbol.
   it('막은 심볼 하나뿐 — 글자를 담지 않는다(실패 사유 포함)', async () => {
     agentStoreState.agents = [
       { id: AGENT, cwd: 'C:/x', status: { type: 'Failed', message: 'boom' }, epoch: 0 },

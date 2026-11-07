@@ -1,16 +1,16 @@
-// uiSettings — 셸이 준 테마가 `data-theme` 까지 닿는가 + ★그 적용이 트리를 다시 마운트하지 않는가★.
+// uiSettings — whether the theme the shell gave reaches `data-theme` + ★whether applying it does not remount the tree★.
 //
-// 뒤쪽이 이 스위트의 존재 이유다(ADR-0149): 슬롯이 다시 마운트되면 챗은 컴포넌트 상태라 대화가 영구 소실된다.
+// The latter is the reason this suite exists (ADR-0149): if a slot is remounted the chat is component state, so the conversation is permanently lost.
 //
-// ★`Child` 가 테마를 **구독**하는 것이 그 단언의 전제다★ — 아무것도 구독하지 않는 자식은 구현이 무엇을 하든
-// 리렌더조차 안 돼서 mount 횟수·노드 동일성이 항상 통과한다(즉 리마운트하는 구현도 초록이다). 구독시켜야
-// 테마 변경이 실제 리렌더를 일으키고, 그때도 마운트가 한 번뿐이라는 것이 비로소 재는 값이 된다.
-// 구독이 살아 있다는 것 자체도 매번 확인한다(그린 텍스트가 바뀌는지) — 안 그러면 이 전제가 조용히 썩는다.
+// ★That `Child` **subscribes** to the theme is the premise of that assertion★ — a child that subscribes to nothing does not even
+// re-render whatever the implementation does, so mount counts · node identity always pass (i.e. an implementation that remounts is also green). Only with it subscribed
+// does a theme change cause a real re-render, and only then does the mount being just once become the measured value.
+// We also confirm every time that the subscription is alive (whether the painted text changes) — otherwise this premise quietly rots.
 //
-// ★안 재는 것 — 운영 트리(알려진 갭)★: 여기 `Host`/`Child` 는 **합성 하네스**이지 실제 슬롯 트리가 아니다.
-// 그래서 이 스위트는 "테마 적용 경로가 리마운트를 유발하지 않는다"까지만 재고, 앞으로 누가 테마를 구독하면서
-// **동시에 키가 갈리는** 컴포넌트를 운영 트리에 넣으면 여기는 초록인 채로 남는다. 그 갭을 메우려면 실제
-// 슬롯 서브트리를 띄우는 테스트가 따로 서야 한다.
+// ★What is not measured — the production tree (known gap)★: here `Host`/`Child` are a **synthetic harness**, not the real slot tree.
+// So this suite measures only up to "the theme application path does not trigger a remount", and if someone later puts into the production tree a component that subscribes to the theme while
+// **also having its key change**, this stays green. To close that gap a test that brings up the real
+// slot subtree must stand separately.
 
 import { act, cleanup, render, screen } from '@testing-library/react'
 import { useEffect } from 'react'
@@ -21,7 +21,7 @@ vi.mock('@tauri-apps/api/core', () => ({
   invoke: (cmd: string) => invokeMock(cmd),
 }))
 
-/** 열어 줄 때까지 매달리는 약속 — `listen()` 등록을 테스트가 붙잡아 두는 데 쓴다. */
+/** A promise that hangs until opened — used by the test to hold the `listen()` registration. */
 function deferred(): { promise: Promise<void>; open: () => void } {
   let open: () => void = () => {}
   const promise = new Promise<void>(resolve => {
@@ -30,9 +30,9 @@ function deferred(): { promise: Promise<void>; open: () => void } {
   return { promise, open }
 }
 
-// listen mock: 등록된 핸들러를 보관해 테스트가 셸 푸시를 직접 흉내낸다(viewStore.test 와 같은 모양).
-// listenGate 가 걸려 있으면 등록 자체를 붙잡아 둔다 — 「등록 전에는 부팅 조회를 안 낸다」를 재는 수단.
-// ★`options` 도 함께 넘긴다★ — 구독 타깃(어느 창 몫인가)이 이 인자에 실린다.
+// listen mock: keeps registered handlers so the test imitates a shell push directly (same shape as viewStore.test).
+// While listenGate is set, it holds the registration itself — the means to measure 「등록 전에는 부팅 조회를 안 낸다」 (no boot query is issued before registration).
+// ★`options` is passed along too★ — the subscription target (which window's share) is carried in this argument.
 const listeners = new Map<string, (e: { payload: unknown }) => void>()
 let listenGate: { promise: Promise<void>; open: () => void } | null = null
 const unlistenMock = vi.fn()
@@ -61,7 +61,7 @@ import { installUiSettings } from './uiSettings'
 
 const EVT = 'ui:settings-updated'
 
-/** 셸 푸시 흉내 — React 밖에서 오는 콜백이라 act 로 감싼다(운영에서도 Tauri 이벤트가 같은 모양이다). */
+/** Imitates a shell push — a callback that comes from outside React so wrap it in act (in production a Tauri event has the same shape). */
 function push(theme: unknown): void {
   const h = listeners.get(EVT)
   if (!h) throw new Error(`${EVT} 리스너가 없다 — installUiSettings 가 등록에 실패했나?`)
@@ -70,7 +70,7 @@ function push(theme: unknown): void {
   })
 }
 
-/** 부팅 조회(마이크로태스크 사슬)와 그 뒤 렌더까지 흘려보낸다. */
+/** Flush through the boot query (microtask chain) and the render after it. */
 async function settle(): Promise<void> {
   await act(async () => {
     await new Promise(resolve => setTimeout(resolve, 0))
@@ -83,7 +83,7 @@ function themeAttr(): string | null {
 
 let childMounts = 0
 
-/** ★테마를 구독한다★ — 이 구독이 없으면 아래 리마운트 단언이 아무것도 못 잡는다(파일 머리말). */
+/** ★Subscribes to the theme★ — without this subscription the remount assertion below catches nothing (file header). */
 function Child() {
   const theme = useThemeStore(s => s.theme)
   useEffect(() => {
@@ -92,7 +92,7 @@ function Child() {
   return <div data-testid="child">{theme}</div>
 }
 
-/** App 이 하는 것과 같은 배선 — 마운트 때 한 번 걸고 언마운트 때 푼다. */
+/** The same wiring App does — hook once on mount and release on unmount. */
 function Host() {
   useEffect(() => installUiSettings(), [])
   return <Child />
@@ -103,11 +103,11 @@ beforeEach(() => {
   listeners.clear()
   listenGate = null
   unlistenMock.mockClear()
-  // ★함정: `mockClear()` 는 **호출 기록만** 지우고 `mockImplementation` 은 남긴다★ — 그래서 구현까지
-  //   되돌리는 `mockReset()` + 기본 구현 재설치가 필요하다. 아래쪽 재시도 소진 테스트가 거는 「listen 이
-  //   항상 실패」 구현이 살아남으면, **그 뒤에 오는 테스트 전부**가 조용히 그 세계에서 돈다. 증상은
-  //   「관계없어 보이는 수명 테스트 여러 개가 한꺼번에 깨진다」였다(실발생 — 세 개). 같은 함정이
-  //   `invokeMock` 에도 있어 아래에서 구현을 매번 다시 건다.
+  // ★Pitfall: `mockClear()` clears **only the call records** and leaves `mockImplementation`★ — so `mockReset()` that also
+  //   reverts the implementation + reinstalling the default implementation is needed. If the 「listen 이 항상 실패」 (listen always fails) implementation installed by the retry-exhaustion test below
+  //   survives, **every test after it** quietly runs in that world. The symptom was
+  //   「관계없어 보이는 수명 테스트 여러 개가 한꺼번에 깨진다」 (several unrelated-looking lifetime tests break at once) (it actually happened — three). The same pitfall exists in
+  //   `invokeMock` so the implementation is reinstalled every time below.
   listenMock.mockReset()
   listenMock.mockImplementation(defaultListen)
   invokeMock.mockClear()
@@ -141,8 +141,8 @@ describe('installUiSettings — 부팅 조회', () => {
     expect(themeAttr()).toBe('e-ink')
   })
 
-  // ★셸이 창을 만들며 박은 그 창의 테마를 dark 로 덮지 않는다★ — 덮으면 light · e-ink 창이 셸 값을 못 받은 것만으로
-  //   그 창의 테마가 아닌 색으로 바뀐다.
+  // ★Does not overwrite with dark the window's theme the shell planted when creating the window★ — if it did, a light · e-ink window, merely for not having received the shell value, would
+  //   change to a color that is not that window's theme.
   it('조회가 실패하면 지금 붙은 테마를 그대로 둔다', async () => {
     document.documentElement.dataset.theme = 'light'
     invokeMock.mockImplementation(async () => {
@@ -190,8 +190,8 @@ describe('installUiSettings — 부팅 조회', () => {
 })
 
 describe('installUiSettings — 다시 읽기용 기억', () => {
-  // 셸의 초기화 스크립트가 다시 읽기 때 이 키를 먼저 읽는다(`src-tauri/src/webview_env.rs`) — 안 적으면 테마가 바뀐 창을
-  //   다시 읽을 때 창을 만들 때의 테마로 한 번 그려진다.
+  // The shell's init script reads this key first on reload (`src-tauri/src/webview_env.rs`) — if not written, a window whose theme changed
+  //   is drawn once in the theme at window creation when reloaded.
   it('붙인 테마를 그 창 label 의 키로 적는다', async () => {
     invokeMock.mockImplementation(async () => ({ theme: 'light' }))
     render(<Host />)
@@ -217,8 +217,8 @@ describe('installUiSettings — 다시 읽기용 기억', () => {
 })
 
 describe('installUiSettings — 셸 테마 푸시', () => {
-  // ★셸은 창마다 **그 창의 값**을 보낸다★(ADR-0167). 기본 등록(`Any`)은 필터와 무관하게 전부 깨어나므로
-  //   타깃을 안 걸면 이 창이 남의 창 값까지 받아 마지막에 온 것을 칠한다 — 창별 테마가 그 자리에서 무너진다.
+  // ★The shell sends **that window's value** to each window★ (ADR-0167). A default registration (`Any`) wakes everything regardless of the filter, so
+  //   without a target this window receives other windows' values too and paints the last one to arrive — the per-window theme collapses on the spot.
   it('자기 창 label 로 구독한다', async () => {
     render(<Host />)
     await settle()
@@ -240,10 +240,10 @@ describe('installUiSettings — 셸 테마 푸시', () => {
     push('e-ink')
 
     expect(themeAttr()).toBe('e-ink')
-    // 구독이 살아 있다 = 아래 두 단언이 실제로 무언가를 재고 있다는 증거.
+    // Subscription alive = proof that the two assertions below are actually measuring something.
     expect(screen.getByTestId('child').textContent).toBe('e-ink')
     expect(childMounts).toBe(1)
-    // 같은 DOM 노드다 — React 가 자식을 갈아끼웠으면(키 교체·리마운트) 여기서 갈린다.
+    // It is the same DOM node — if React swapped the child (key swap · remount), it diverges here.
     expect(screen.getByTestId('child')).toBe(node)
     expect(node.isConnected).toBe(true)
   })
@@ -257,7 +257,7 @@ describe('installUiSettings — 셸 테마 푸시', () => {
         }),
     )
     render(<Host />)
-    // 구독 등록은 끝나고 조회는 아직 매달려 있는 상태.
+    // A state where subscription registration has finished and the query is still hanging.
     await settle()
 
     push('e-ink')
@@ -285,9 +285,9 @@ describe('installUiSettings — 셸 테마 푸시', () => {
 })
 
 describe('installUiSettings — 등록과 조회의 순서', () => {
-  // ★이 순서가 유실 방지의 전부다★: 둘을 나란히 띄우면 등록이 끝나기 전에 온 알림은 이 창에 도착조차 안 하고
-  //   (리스너가 없다) 그 뒤 늦게 온 조회 답이 옛 값을 칠한다. `pushed` 빗장은 알림을 **받았을 때만** 서므로
-  //   그 인터리브를 못 막는다.
+  // ★This order is the whole of loss prevention★: if you launch the two side by side, a notice that comes before registration finishes does not even arrive at this window
+  //   (there is no listener) and the query answer that comes late afterwards paints the old value. The `pushed` latch stands **only when a notice is received**, so
+  //   it cannot stop that interleave.
   it('구독 등록이 끝나기 전에는 부팅 조회를 내지 않는다', async () => {
     const gate = deferred()
     listenGate = gate
@@ -300,7 +300,7 @@ describe('installUiSettings — 등록과 조회의 순서', () => {
     expect(listeners.size).toBe(0)
     expect(invokeMock).not.toHaveBeenCalled()
 
-    // 이 틈에 밖의 에이전트가 window.setTheme 을 불렀다 — 리스너가 없어 알림은 이 창에 안 닿는다.
+    // In this gap an outside agent called window.setTheme — there is no listener so the notice does not reach this window.
     shellTheme = 'e-ink'
 
     await act(async () => {
@@ -308,13 +308,13 @@ describe('installUiSettings — 등록과 조회의 순서', () => {
       await new Promise(resolve => setTimeout(resolve, 0))
     })
 
-    // 놓친 알림 대신, **그 뒤에** 나간 조회가 새 값을 집어 왔다.
+    // Instead of the missed notice, the query issued **after that** fetched the new value.
     expect(invokeMock).toHaveBeenCalledTimes(1)
     expect(themeAttr()).toBe('e-ink')
   })
 
-  // ★한 번 거절당하고 끝나면 그 창은 영구히 테마 밀기를 못 받는다★ — 그런데 부팅 값은 멀쩡히 칠해져
-  //   화면은 건강해 보인다(무신호 불일치). 그래서 등록에 유계 재시도를 건다.
+  // ★If it is refused once and that is the end, that window can never receive theme pushes★ — yet the boot value is painted fine and
+  //   the screen looks healthy (a signal-free mismatch). So a bounded retry is put on registration.
   it('구독 등록이 한 번 거절당해도 재시도해서 결국 붙는다', async () => {
     listenMock.mockImplementationOnce(async () => {
       throw new Error('이벤트 평면 미준비')
@@ -331,12 +331,12 @@ describe('installUiSettings — 등록과 조회의 순서', () => {
     expect(warn).toHaveBeenCalled()
     expect(themeAttr()).toBe('light')
 
-    // ★재시도가 실제로 붙었나★ — 붙었으면 이후 알림이 이 창에 닿는다.
+    // ★Did the retry actually attach★ — if it did, later notices reach this window.
     push('e-ink')
     expect(themeAttr()).toBe('e-ink')
   })
 
-  // 재시도까지 소진되면 조용히 넘기지 않는다 — 그 뒤로는 갱신을 못 받는 것이 확정이라 warn 이 아니라 error.
+  // If retries are exhausted too, it is not passed over silently — from then on not receiving updates is certain, so error, not warn.
   it('재시도를 다 써도 실패하면 error 로 표면화하고 부팅 조회는 그대로 나간다', async () => {
     listenMock.mockImplementation(async () => {
       throw new Error('이벤트 평면 미준비')
@@ -346,7 +346,7 @@ describe('installUiSettings — 등록과 조회의 순서', () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {})
 
     render(<Host />)
-    // 기본 재시도 프로필(4회 · 150ms 배수 2) 총 대기 ~1.05s — 그것보다 넉넉히 기다린다.
+    // Default retry profile (4 tries · 150ms multiplier 2) total wait ~1.05s — wait with more margin than that.
     await act(async () => {
       await new Promise(resolve => setTimeout(resolve, 1500))
     })
@@ -375,9 +375,9 @@ describe('installUiSettings — 수명', () => {
     expect(unlistenMock).toHaveBeenCalledTimes(1)
   })
 
-  // ★`off()` 만으로는 한 건이 샌다★: dispose 가 `listen()` 대기 중에 돌면 등록은 이미 끝났는데 해제는 아직
-  //   전이라, 그 틈에 배달된 알림을 죽은 인스턴스가 그린다(StrictMode 첫 회 · HMR 이전 판이 살아 있는 창의
-  //   테마를 덮는다). 여기서는 해제된 뒤에 콜백을 직접 때려 그 배달을 흉내낸다.
+  // ★`off()` alone lets one through★: if dispose runs while `listen()` is pending, registration is already done but release has not happened yet,
+  //   so a notice delivered in that gap is painted by the dead instance (the first StrictMode round · a previous HMR edition overwrites the live window's
+  //   theme). Here we strike the callback directly after release to imitate that delivery.
   it('정리된 뒤에 배달된 알림은 화면을 건드리지 않는다', async () => {
     invokeMock.mockImplementation(async () => ({ theme: 'light' }))
     const dispose = installUiSettings()

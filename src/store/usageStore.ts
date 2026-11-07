@@ -1,10 +1,10 @@
-// 사용량 슬롯의 값 미러(TRD S21 usage-limit-slot §1-8) — 회사별 마지막 스냅숏과, 그것을 받아들인 규칙의 기억.
+// Value mirror of the usage slot (TRD S21 usage-limit-slot §1-8) — the last snapshot per company, and the memory of the rule that accepted it.
 //
-// ★받기는 `merge` 한 곳뿐이다★ — 셸 방송(eventBus 가 잇는다)과 셸 캐시 pull 이 같은 규칙으로 들어온다. 두 길은
-//   서로 순서를 보장하지 않으므로 늦게 닿은 옛 사본을 여기서 가른다. ⟳ 답(`Ack`)은 값을 싣지 않아 대기만 푼다.
-// ★관심(어느 회사를 보고 싶은가)은 여기 없다★ — 셸이 레이아웃에서 계산한다. 그래서 켜지 않은 회사의 방송도 여기
-//   든다 — 거르는 것은 그리는 쪽이다.
-// 스토어는 `agentClient` 만 부른다(ADR-0011) — 셸 커맨드인 pull 도 transport seam 뒤에 있다(ADR-0036).
+// ★Receiving is only the one place `merge`★ — the shell broadcast (eventBus connects it) and the shell cache pull come in by the same rule. The two paths
+//   guarantee no order between them, so an old copy that arrived late is sorted out here. The ⟳ answer (`Ack`) carries no value and only releases the wait.
+// ★Interest (which company one wants to see) is not here★ — the shell computes it from the layout. So broadcasts of companies not turned on
+//   enter here too — filtering is the drawing side's job.
+// The store calls only `agentClient` (ADR-0011) — the pull, which is a shell command, is also behind the transport seam (ADR-0036).
 
 import { create } from 'zustand'
 
@@ -15,33 +15,33 @@ import type { AgentBackendKind } from '../api/types'
 import { retryAsync } from '../util/retryInvoke'
 
 /**
- * 한 회사의 받아 둔 값. 키는 회사 하나다 — 스냅숏의 `account_key` 는 지금 늘 `"default"` 라 가르지 않는다(계정이
- * 늘면 revision 이 회사·계정 칸마다라 키도 넓혀야 한다).
+ * One company's stored value. The key is one company — the snapshot's `account_key` is always `"default"` for now so it is not told apart (if accounts
+ * grow, the revision is per company · account field so the key must be widened too).
  */
 export interface UsageVendorEntry {
   snapshot: UsageLimitSnapshot
-  /** 받아들인 순간의 `performance.now()`(ms). 스냅숏의 상대 시간 칸(`age_secs` 등)은 이 순간 기준이다. */
+  /** `performance.now()` (ms) at the moment of acceptance. The snapshot's relative time fields (`age_secs` etc.) are based on this moment. */
   receivedAt: number
   /**
-   * 지금 소켓에서 받아들인 최고 revision. `null` = 잊었다(더 큰 `socketEpoch` 를 받았다) — 다음 한 장은 revision 과
-   * 무관하게 받는다. 잊어도 `snapshot` 은 그대로 둔다.
+   * The highest revision accepted on the current socket. `null` = forgotten (a larger `socketEpoch` was received) — the next one sheet is accepted regardless of
+   * revision. Even when forgotten, `snapshot` is left as is.
    */
   revision: number | null
 }
 
 interface UsageState {
   vendors: Partial<Record<AgentBackendKind, UsageVendorEntry>>
-  /** 받아들인 가장 큰 소켓 표식(`UsageSnapshotPull.socketEpoch`). 0 = 아직 없다. */
+  /** The largest socket marker accepted (`UsageSnapshotPull.socketEpoch`). 0 = none yet. */
   socketEpoch: number
-  /** ⟳ 대기 수(회사별 — 웹뷰 안 슬롯끼리 공유한다). 읽을 땐 [`useUsagePending`]. */
+  /** ⟳ pending count (per company — shared among slots inside the webview). To read it use [`useUsagePending`]. */
   pending: Partial<Record<AgentBackendKind, number>>
   merge(snapshot: UsageLimitSnapshot, socketEpoch: number): void
   /**
-   * 셸 캐시를 당겨 `merge` 한다 — 유계 재시도, 최종 실패는 들고 있는 값을 그대로 둔다(throw 하지 않는다).
-   * ★방송 수신이 선 뒤에만 순서가 선다★ — eventBus 가 잇기 직후 한 번 부르고, 슬롯은 마운트 때 부른다.
+   * Pull the shell cache and `merge` it — bounded retry, and a final failure leaves the held value as is (does not throw).
+   * ★Order stands only after broadcast reception is up★ — eventBus calls it once right after connecting, and the slot calls it on mount.
    */
   pull(): Promise<void>
-  /** ⟳ — 끝나면(답 · 실패 · 끊김 거절) 대기를 푼다. 값은 방송으로 온다. throw 하지 않는다. */
+  /** ⟳ — when it ends (answer · failure · refusal on disconnect) release the wait. The value comes by broadcast. Does not throw. */
   refresh(vendor: AgentBackendKind): Promise<void>
 }
 
@@ -70,10 +70,10 @@ export const useUsageStore = create<UsageState>()((set, get) => ({
     set(state => {
       let vendors = state.vendors
       let heldEpoch = state.socketEpoch
-      // ADR-0195: 소켓 표식은 셸 프로세스 안에서 되감기지 않아 대소가 곧 소켓 순서다. 작으면 밀려난 소켓의 것이다.
-      //   ★revision 을 잊는 자리는 여기 하나뿐이다★ — 연결 상태 전이(`connected` 떠남)로 잊지 않는다: 그 전이는
-      //   다른 길로 와 새 소켓의 payload 보다 늦게 닿을 수 있고, 그때 바닥이 지워지면 같은 소켓의 늦은 옛 사본이
-      //   받아들여져 화면이 되감긴다. 0 = 표식을 모른다 — 들고 있는 표식을 바꾸지 않는다.
+      // ADR-0195: the socket marker is not rewound inside the shell process, so larger means later socket order. A smaller one belongs to a pushed-out socket.
+      //   ★The place that forgets revision is this one only★ — it is not forgotten on a connection state transition (leaving `connected`): that transition
+      //   comes by another path and may arrive later than the new socket's payload, and if the floor is erased then, a late old copy of the same socket would be
+      //   accepted and the screen rewinds. 0 = the marker is unknown — do not change the held marker.
       if (socketEpoch !== 0) {
         if (socketEpoch < heldEpoch) return state
         if (socketEpoch > heldEpoch) {
@@ -82,7 +82,7 @@ export const useUsageStore = create<UsageState>()((set, get) => ({
         }
       }
       const prev = vendors[snapshot.vendor]
-      // 같은 revision 은 받는다 — 같은 상태를 더 늦게 뜬 사본이라 상대 시간 칸이 더 새롭다.
+      // The same revision is accepted — it is a copy of the same state taken later, so the relative time fields are fresher.
       if (prev && prev.revision !== null && snapshot.revision < prev.revision) return state
       return {
         socketEpoch: heldEpoch,
@@ -109,7 +109,7 @@ export const useUsageStore = create<UsageState>()((set, get) => ({
     try {
       await agentClient.refreshUsageLimits(vendor)
     } catch (err) {
-      // 끊김이면 ProtocolClient 가 대기 요청을 전부 거절한다 — 그 거절이 여기서 대기를 푸는 길이다.
+      // On a disconnect ProtocolClient refuses all pending requests — that refusal is the path that releases the wait here.
       console.warn(`[usageStore] refreshUsageLimits(${vendor}) 실패:`, err)
     } finally {
       set(state => ({ pending: addPending(state.pending, vendor, -1) }))
@@ -117,28 +117,28 @@ export const useUsageStore = create<UsageState>()((set, get) => ({
   },
 }))
 
-/** 그 회사의 받아 둔 값 — 없으면 `undefined`(아직 한 장도 못 받았다). */
+/** That company's stored value — `undefined` if none (not a single one received yet). */
 export function useUsageVendor(vendor: AgentBackendKind): UsageVendorEntry | undefined {
   return useUsageStore(state => state.vendors[vendor])
 }
 
-/** 그 회사의 ⟳ 가 아직 끝나지 않았나. */
+/** Has that company's ⟳ not yet finished. */
 export function useUsagePending(vendor: AgentBackendKind): boolean {
   return useUsageStore(state => (state.pending[vendor] ?? 0) > 0)
 }
 
 /**
- * ⟳ 를 막는 거절 = 보이는 `Rejected` 상태. 두 ⟳(작은 표시 · 팝업 회사별)의 비활성과 `usageSlot.refresh` 의 대상
- * 고르기가 이 하나를 읽는다. 값이 와서 `Ready` 로 보이는 동안의 거절은 여기 안 걸린다 — 그때 ⟳ 는 데몬이 조회 없이 캐시로
- * 답한다(TRD §3 #88).
+ * Refusal that blocks ⟳ = the visible `Rejected` state. The deactivation of the two ⟳ (small display · per-company in the popup) and the target
+ * selection of `usageSlot.refresh` read this one. A refusal while a value has come and shows as `Ready` is not caught here — then ⟳ is answered by the daemon
+ * from cache without a query (TRD §3 #88).
  */
 export function blocksRefresh(state: UsageVendorState | undefined): boolean {
   return state?.kind === 'Rejected'
 }
 
 /**
- * 켠 회사 중 ⟳ 를 보낼 수 있는 것 — [`blocksRefresh`] 에 안 걸리는 것. 값을 아직 못 받은 회사도 든다(⟳ 가 첫
- * 값을 부르는 길이다). `usageSlot.refresh` 가 누를 때 스토어로 다시 보며 이것으로 대상을 고른다.
+ * Among the turned-on companies, those that can send ⟳ — those not caught by [`blocksRefresh`]. It also includes a company that has not yet received a value (⟳ is the way to call for the first
+ * value). `usageSlot.refresh` looks back at the store when pressed and picks targets with this.
  */
 export function refreshableVendors(
   shows: { show_claude: boolean; show_codex: boolean },

@@ -1,19 +1,19 @@
-// ADR-0137: 호출부 배선 게이트 — debug 를 짓는 **모든 문서화된 경로**가 `scripts/build-client-shell.mjs`
-//   를 부르는지, 그리고 생 `cargo build -p engram-dashboard` 로 되돌아가지 않았는지 소스 텍스트로 본다.
+// ADR-0137: call-site wiring gate — checks by source text that **every documented path** that builds debug calls `scripts/build-client-shell.mjs`
+//   and that it has not gone back to a raw `cargo build -p engram-dashboard`.
 //
-// ★왜 이 축이 따로 필요한가(지우지 마라)★: 빌드 산출물 대조(그 스크립트 안)는 **누가 스크립트를 부를
-//   때만** 돈다 — 호출 자체가 사라지면 아무 신호도 남지 않는다. 실제로 그렇게 회귀했다(473e82f:
-//   런처의 `npm run tauri dev` 가 생 `cargo build` 로 바뀌면서 오버레이 주입이 통째로 빠졌고, 전 게이트가
-//   초록인 채였다). 그 커밋을 잡을 수 있었던 유일한 형태가 이 단언이다.
-// 판정 방식은 이 리포의 다른 격리 게이트와 같다 — 소스 텍스트 대조(코어 `use tauri`·messaging·net·
-//   ADR-0130). "단위테스트로는 배선을 못 본다" 는 말은 사실이 아니다.
-// ★주석 줄은 세지 않는다★: 아래 파일들은 "생 cargo build 로 되돌리지 마라" 를 주석으로 적고 있어서,
-//   문자열이 있는지만 보면 그 경고문 자체가 위반으로 잡힌다. 실행되는 줄만 본다.
-// 배치 근거(콜로케이션 규약의 예외)는 `devConfigOverlay.test.ts` 헤더에 한 번만 적는다 — 여기 복제하지
-//   않는다.
+// ★Why this axis is needed separately (do not delete)★: the build-artifact comparison (inside that script) runs **only when someone calls the
+//   script** — if the call itself disappears no signal is left. It actually regressed that way (473e82f:
+//   the launcher's `npm run tauri dev` was changed to a raw `cargo build`, dropping the overlay injection entirely, and all gates
+//   stayed green). This assertion is the only form that could have caught that commit.
+// The decision method is the same as the other isolation gates in this repo — source text comparison (core `use tauri` · messaging · net ·
+//   ADR-0130). The claim "unit tests cannot see wiring" is not true.
+// ★Comment lines are not counted★: the files below write "do not go back to a raw cargo build" in comments, so
+//   looking only for whether the string exists would catch that warning itself as a violation. Only executed lines are looked at.
+// The placement rationale (an exception to the colocation convention) is written once in the `devConfigOverlay.test.ts` header — it is not duplicated
+//   here.
 import { describe, expect, it } from 'vitest'
 
-// 이 파일만 Node 표준 모듈을 쓴다 — 파일 스코프 ambient 선언(`src/store/chatStyleStore.test.ts` 방식).
+// Only this file uses Node standard modules — a file-scope ambient declaration (the `src/store/chatStyleStore.test.ts` way).
 declare function require(id: string): {
   readFileSync(path: string, enc: string): string
   join(...parts: string[]): string
@@ -26,15 +26,15 @@ const { join } = require('node:path')
 const ROOT = process.cwd()
 
 const BUILD_SCRIPT = 'build-client-shell.mjs'
-// 클라이언트 셸을 직접 짓는 형태만 잡는다 — `-p engram-dashboard-daemon`·`-agent` 등 형제 crate 는
-//   정당하므로 이름 뒤에 이어지는 문자가 없을 때만 매치한다.
+// Catches only the form that builds the client shell directly — sibling crates such as `-p engram-dashboard-daemon`·`-agent` are
+//   legitimate, so it matches only when no character follows the name.
 const BARE_CLIENT_BUILD = /cargo\s+build\b[^\n]*-p\s+engram-dashboard(?![-\w])/
 
 function read(relPath: string): string {
   return readFileSync(join(ROOT, relPath), 'utf8')
 }
 
-// `.bat` 의 실행 줄 = REM/:: 주석이 아닌 줄.
+// The executed lines of a `.bat` = lines that are not REM/:: comments.
 function batExecutableLines(text: string): string {
   return text
     .split(/\r?\n/)
@@ -42,8 +42,8 @@ function batExecutableLines(text: string): string {
     .join('\n')
 }
 
-// 마크다운의 실행 줄 = 코드 펜스 안의 줄에서 트레일링 `#` 주석을 뗀 것. 산문 문단은 경고문을 담으므로
-//   대상이 아니다.
+// The executed lines of Markdown = lines inside code fences with the trailing `#` comment removed. Prose paragraphs hold warnings, so
+//   they are not targets.
 function fencedExecutableLines(markdown: string): string {
   const lines = markdown.split(/\r?\n/)
   const out: string[] = []
@@ -80,7 +80,7 @@ describe('the /qa GUI gate procedure builds the client shell the same way', () =
   })
 
   it(`${GATE} runs no bare client-shell cargo build`, () => {
-    // 산문 쪽 경고문("생 cargo build 로 짓지 말 것")은 펜스 밖이라 여기 안 들어온다.
+    // The prose-side warning ("do not build with a raw cargo build") is outside the fence so it does not come in here.
     expect(fencedExecutableLines(read(GATE))).not.toMatch(BARE_CLIENT_BUILD)
   })
 })

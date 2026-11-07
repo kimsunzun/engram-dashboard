@@ -8,27 +8,27 @@ import { applyBootTheme } from "./theme/bootTheme";
 import { settingsClient } from "./api/settingsClient";
 import { installChatStyleApplier } from "./store/chatStyleStore";
 
-// ADR-0265: 셸 설정을 받아 챗 스타일을 칠한다 — 데몬 bootstrap 과 무관하게(설정의 주인은 셸) 첫 렌더 전에 건다.
-// 값은 비동기로 오고 그 전의 첫 페인트는 `theme.css` 의 `--chat-*` fallback 이다(TRD S21-storage §10 F6 (a)).
-// 페이지마다 한 번 돌아 disposer 를 쥐지 않는다 — App 의 effect 로 옮기면 두 disposer 를 effect 가 돌려줘야 한다
-// (StrictMode 이중 실행).
+// ADR-0265: take the shell settings and paint the chat style — independent of daemon bootstrap (the owner of the settings is the shell), hooked before the first render.
+// Values arrive asynchronously, and the first paint before that is the `--chat-*` fallback in `theme.css` (TRD S21-storage §10 F6 (a)).
+// It runs once per page so no disposer is held — moving it into an App effect would make the effect return two disposers
+// (StrictMode double run).
 installChatStyleApplier();
 settingsClient.install();
 
-// ★첫 페인트 전에 data-theme 를 반드시 박는다★ — 색 토큰은 `styles/theme.css` 의 `:root[data-theme='…']`
-// 안에만 있고 폴백이 없다. 속성이 없는 동안에는 `--text`·`--border` 가 통째로 미정의라 index.css 가 배경만
-// 어둡게 깔고 글자·테두리는 UA 기본값(검정)으로 떨어진다 = 검은 배경에 검은 글자. 그 구간은 셸이 정한 테마가
-// 붙기까지의 IPC 왕복만큼 길다(`theme/uiSettings.ts`). 셸이 창을 만들며 박은 값이 있으면 그 값을 지킨다(그 함수 doc).
-// ★이 줄을 App 안 effect 로 되돌리지 말 것★(createRoot 뒤면 이미 늦다).
+// ★Always plant data-theme before the first paint★ — color tokens exist only inside `:root[data-theme='…']` in `styles/theme.css`
+// and have no fallback. While the attribute is absent `--text`·`--border` are entirely undefined, so index.css lays down only a dark background
+// and text · borders fall to the UA default (black) = black text on a black background. That span is as long as the IPC round trip until the theme the shell decided
+// is attached (`theme/uiSettings.ts`). If the shell planted a value while creating the window, that value is kept (that function's doc).
+// ★Do not move this line back into an effect inside App★ (after createRoot is already too late).
 applyBootTheme();
 
-// LLM 제어 표면(CLAUDE.md 「LLM-우선 제어」) — 개발 빌드에서만 store 핸들을 window에 노출한다.
-// 외부(cdp.mjs eval / CDP)에서 window.__engram.<store>.getState()로 상태를 JSON으로 읽고
-// getState().<액션>()으로 UI를 조작할 수 있다. 프로덕션 빌드(import.meta.env.DEV=false)에선 미노출.
-// ★레이아웃(슬롯/뷰)은 여기 없다★ — 백엔드 권위(ADR-0035)라 그 제어 표면은 command 레지스트리다
+// LLM control surface (CLAUDE.md 「LLM-우선 제어」) — expose store handles on window in development builds only.
+// From outside (cdp.mjs eval / CDP) one can read state as JSON with window.__engram.<store>.getState() and
+// operate the UI with getState().<action>(). Not exposed in production builds (import.meta.env.DEV=false).
+// ★Layout (slot/view) is not here★ — it is backend authority (ADR-0035), so its control surface is the command registry
 // (window.__engramCmd).
-// ★theme 의 권위는 셸이다★ — 창 테마(`window.setTheme`) ?? 셸 설정 `theme.default`(ADR-0265)를 셸이 계산해
-// 민다(배달 = `theme/uiSettings.ts`). 여기 노출한 핸들로 바꾼 값은 저장되지 않아 셸의 다음 밀기가 덮는다.
+// ★The authority of theme is the shell★ — the shell computes the window theme (`window.setTheme`) ?? the shell setting `theme.default` (ADR-0265) and
+// pushes it (delivery = `theme/uiSettings.ts`). A value changed through the handle exposed here is not saved, so the shell's next push overwrites it.
 if (import.meta.env.DEV) {
   (window as unknown as { __engram?: unknown }).__engram = {
     theme: useThemeStore,

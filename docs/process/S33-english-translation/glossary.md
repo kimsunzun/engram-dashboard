@@ -93,5 +93,7 @@ Every translation batch uses these renderings. A batch that needs a new term add
 | 맡기다 / 맡김표 / 되물림 | hand over / claim ticket / take back | prewarmed-window handover |
 | 네트워크 행 | network layer | the `net` crate, not a row |
 | 독 (락) | poison | not "dock" |
+| 배치 (항목·사본) | placement | in the queued-input code; not "batch" (배치 of a layout = layout) |
+| 부재 막 / 막 | absence curtain / curtain | the slot overlay; not "veil" |
 
 Kept in Korean: the ADR lint tokens (`- 상태:` + vocab, `- 관련:`, section headings), text in 「」, names of CLAUDE.md and `.claude/` sections.

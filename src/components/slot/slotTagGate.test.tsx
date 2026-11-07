@@ -1,12 +1,12 @@
-// tag 게이트 회귀 테스트(FIX-1, S15/ADR-0045).
+// tag gate regression test (FIX-1, S15/ADR-0045).
 //
-// 배경: subscribeOutput 스트림은 tag0(터미널 raw 바이트)/tag1(StructuredEvent JSON)을 한 seq 공간으로
-//   모든 구독자에게 배달한다. RichSlot 은 tag0 을 무시하지만, tag0 을 소비하는 슬롯(TerminalSlot=xterm
-//   write / DomSlot=<pre> append)에 대칭 게이트가 없으면 tag1 JSON 바이트가 그대로 새어 화면을 오염시킨다.
+// Background: the subscribeOutput stream delivers tag0 (terminal raw bytes)/tag1 (StructuredEvent JSON) to every subscriber in one seq space.
+//   RichSlot ignores tag0, but if a slot that consumes tag0 (TerminalSlot=xterm write / DomSlot=<pre> append) has no symmetric gate,
+//   tag1 JSON bytes leak straight through and pollute the screen.
 //
-// 전략: subscribeOutput 을 mock 해 onChunk 콜백을 캡처한 뒤, 마운트 후 tag0/tag1 chunk 를 직접 주입해
-//   xterm.write(TerminalSlot) / <pre> 텍스트(DomSlot)에 반영됐는지 관측한다. xterm·transport 는
-//   ViewLayoutRenderer.test.tsx 와 동일 패턴으로 stub.
+// Strategy: mock subscribeOutput to capture the onChunk callback, inject tag0/tag1 chunks directly after mount, and observe whether they are
+//   reflected in xterm.write (TerminalSlot) / <pre> text (DomSlot). xterm · transport are stubbed with the same pattern as
+//   ViewLayoutRenderer.test.tsx.
 
 import { act, cleanup, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -14,17 +14,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { FRAME_TAG_STRUCTURED_EVENT, FRAME_TAG_TERMINAL_BYTES } from '../../api/wsFrame'
 import type { OutputChunk } from '../../api/agentClient'
 
-// jsdom 은 ResizeObserver 를 제공하지 않는다 — TerminalSlot 이 마운트 시 new ResizeObserver 하므로
-// no-op stub 을 깐다(fit/resize 는 이 테스트의 관심사가 아님 — 관심사는 tag 게이트뿐).
+// jsdom does not provide ResizeObserver — TerminalSlot does new ResizeObserver at mount, so lay down a
+// no-op stub (fit/resize are not this test's concern — its concern is only the tag gate).
 globalThis.ResizeObserver = class {
   observe() {}
   unobserve() {}
   disconnect() {}
 } as unknown as typeof ResizeObserver
 
-// jsdom 은 IntersectionObserver 도 없다 — TerminalSlot 이 마운트 시 WebGL 가시성 연동(ADR-0056)으로
-// new IntersectionObserver 한다. 콜백을 한 번도 발화하지 않는 no-op stub → WebGL 은 부착되지 않고
-// 데이터 경로(tag 게이트)만 검사된다. WebGL 라이프사이클 자체는 TerminalSlot.test.tsx 에서 별도 검증.
+// jsdom has no IntersectionObserver either — TerminalSlot does new IntersectionObserver at mount for WebGL visibility linkage (ADR-0056).
+// A no-op stub that never fires the callback → WebGL is not attached and only the data path (tag gate) is checked.
+// The WebGL lifecycle itself is verified separately in TerminalSlot.test.tsx.
 globalThis.IntersectionObserver = class {
   observe() {}
   unobserve() {}
@@ -34,13 +34,13 @@ globalThis.IntersectionObserver = class {
   }
 } as unknown as typeof IntersectionObserver
 
-// ── subscribeOutput 콜백 캡처 holder ─────────────────────────────────────────────
-// vi.hoisted 로 만들어 mock factory 와 테스트 본문이 같은 참조를 공유한다.
+// ── holder capturing the subscribeOutput callback ─────────────────────────────────────────────
+// Made with vi.hoisted so the mock factory and the test body share the same reference.
 const captured = vi.hoisted(() => ({ onChunk: null as ((c: OutputChunk) => void) | null }))
 
 vi.mock('../../api/clientFactory', () => ({
   agentClient: {
-    // ADR-0046: 시그니처 (viewId, agentId, onChunk, onState?).
+    // ADR-0046: signature (viewId, agentId, onChunk, onState?).
     subscribeOutput: vi.fn(
       async (_viewId: string, _agentId: string, onChunk: (c: OutputChunk) => void) => {
         captured.onChunk = onChunk
@@ -50,7 +50,7 @@ vi.mock('../../api/clientFactory', () => ({
     writeStdin: vi.fn(async () => undefined),
     resizePty: vi.fn(async () => undefined),
     connectionState: 'connected',
-    // 연결 상태 표면 — 슬롯이 부재 막 판정에 읽는다(등록 즉시 1회 통지 + disposer 반환).
+    // Connection-state surface — the slot reads it for the absence-curtain decision (one notification at registration + returns a disposer).
     onConnectionStateChange: (cb: (s: string) => void) => {
       cb('connected')
       return () => {}
@@ -59,14 +59,14 @@ vi.mock('../../api/clientFactory', () => ({
   getAgentClient: vi.fn(),
 }))
 
-// ── agentStore stub — 슬롯이 종료 판정용으로 useAgentStore(s => s.agents) 를 조회한다. ──
+// ── agentStore stub — the slot queries useAgentStore(s => s.agents) for the exit decision. ──
 const agentStoreState = vi.hoisted(() => ({ agents: [] as unknown[] }))
 vi.mock('../../store/agentStore', () => ({
   useAgentStore: (selector: (s: { agents: unknown[] }) => unknown) => selector(agentStoreState),
 }))
 
-// ── xterm stub — write 호출을 관측(TerminalSlot). Terminal 인스턴스가 매번 새로 생성되므로
-//    write mock 을 정적 holder 에 노출해 테스트가 호출 인자를 검사한다. ──
+// ── xterm stub — observe write calls (TerminalSlot). Because a Terminal instance is created fresh each time,
+//    expose the write mock through a static holder so the test checks the call arguments. ──
 const xtermWrite = vi.hoisted(() => vi.fn())
 vi.mock('@xterm/xterm', () => ({
   Terminal: class {
@@ -84,23 +84,23 @@ vi.mock('@xterm/addon-fit', () => ({ FitAddon: class { fit = vi.fn() } }))
 vi.mock('@xterm/addon-webgl', () => ({ WebglAddon: class { onContextLoss = vi.fn(); dispose = vi.fn() } }))
 vi.mock('@xterm/xterm/css/xterm.css', () => ({}))
 
-// ── 테스트 대상 ────────────────────────────────────────────────────────────────
+// ── Subject under test ────────────────────────────────────────────────────────────────
 import TerminalSlot from './TerminalSlot'
 import DomSlot from './DomSlot'
 
 const AGENT = 'aaaa-bbbb-cccc-dddd'
 const enc = new TextEncoder()
 
-/** tag0 = 터미널 raw 바이트 chunk. */
+/** tag0 = terminal raw bytes chunk. */
 function tag0(seq: number, text: string): OutputChunk {
   return { seq, tag: FRAME_TAG_TERMINAL_BYTES, bytes: enc.encode(text) }
 }
-/** tag1 = StructuredEvent JSON chunk(구조화 슬롯 전용 — tag0 소비자엔 오면 안 됨). */
+/** tag1 = StructuredEvent JSON chunk (structured slots only — must not reach tag0 consumers). */
 function tag1(seq: number, json: string): OutputChunk {
   return { seq, tag: FRAME_TAG_STRUCTURED_EVENT, bytes: enc.encode(json) }
 }
 
-/** 마운트 직후 subscribeOutput 이 콜백을 등록(async .then)할 때까지 마이크로태스크를 비운다. */
+/** Right after mount, flush microtasks until subscribeOutput registers the callback (async .then). */
 async function flushSubscribe(): Promise<void> {
   await act(async () => {
     await Promise.resolve()
@@ -141,7 +141,7 @@ describe('TerminalSlot — tag 게이트(FIX-1)', () => {
     render(<TerminalSlot viewId="v1" agentId={AGENT} />)
     await flushSubscribe()
 
-    act(() => captured.onChunk!(tag1(0, '{"kind":"TextDelta"}'))) // seq 0 — 무시되지만 seq 전진
+    act(() => captured.onChunk!(tag1(0, '{"kind":"TextDelta"}'))) // seq 0 — ignored but seq advances
     act(() => captured.onChunk!(tag0(1, 'after')))
     const calls = xtermWrite.mock.calls.map((c) => new TextDecoder().decode(c[0] as Uint8Array))
     expect(calls).toEqual(['after'])
