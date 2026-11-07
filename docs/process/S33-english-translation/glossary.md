@@ -107,5 +107,10 @@ Every translation batch uses these renderings. A batch that needs a new term add
 | 통로 | link | transport connection |
 | 감독 | supervisor | transport peer supervisor task |
 | 이어받기 표식 | resume marker | `continues_conversation` (ADR-0226); not "takeover"; keep 마커 = marker separate |
+| 수신단 | inbox | per-peer lossless receiving end (transport, ADR-0310) |
+| 받는 줄 / 공유 줄 / 상대별 줄 | receiving queue / shared queue / per-peer queue | |
+| 연결별 줄 | per-connection lane | net `ws.rs` |
+| 제어 줄 | control channel | transport `peer.rs` |
+| 정리 유예 | cleanup grace period | bounded wait, see 유예 (bounded wait) |
 
 Kept in Korean: the ADR lint tokens (`- 상태:` + vocab, `- 관련:`, section headings), text in 「」, names of CLAUDE.md and `.claude/` sections.
