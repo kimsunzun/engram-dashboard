@@ -1,8 +1,8 @@
-//! S14 레이아웃 권위 모듈(ADR-0035) — 레이아웃 SSOT 는 src-tauri(데몬 UI 불가지론).
+//! S14 layout authority module (ADR-0035) — the layout SSOT is src-tauri (the daemon is UI-agnostic).
 
 pub mod apply;
 pub mod bands;
-// ADR-0155 결정 1: `window`/`tab`/`slot` 선언은 그 본문(적용 서비스) 옆에 산다.
+// ADR-0155 decision 1: the `window`/`tab`/`slot` declarations live next to their body (the apply service).
 pub mod commands;
 pub mod dock;
 pub mod drag_size;
@@ -35,9 +35,9 @@ pub use types::{
 
 use std::sync::{Arc, Mutex};
 
-// invoke 스레드풀 동시접근 → Mutex.
-// ★Tauri async_runtime::Mutex 가 아닌 std Mutex★: mutation 은 짧은 동기 구간이고 락 보유 중
-// await(외부 호출)가 없다(ADR-0006: 락 보유 중 외부 호출 0) → std Mutex 로 충분.
+// Concurrent access from the invoke thread pool → Mutex.
+// ★std Mutex, not Tauri async_runtime::Mutex★: a mutation is a short synchronous section and there is no
+// await (external call) while the lock is held (ADR-0006: zero external calls while holding a lock) → std Mutex is enough.
 #[derive(Clone, Default)]
 pub struct LayoutState(pub Arc<Mutex<ViewManager>>);
 
@@ -47,12 +47,12 @@ impl LayoutState {
     }
 }
 
-/// 팝아웃 OS 창 `label` 의 `Destroyed` 몫의 번호 풀기 — 소멸 정리(`commands::popout::cleanup_popup_window`)를 부를
-/// 상태가 없을 때의 대신이다(TRD S26-window-chrome §4-1). 닫히는 창이면 그 번호를 풀고, 아직 모델에 있던 창이면
-/// 항목째 빼 곧바로 푼다. 라우팅 표 재계산 · 구독 정리 · 묘비는 하지 않는다 — 그래서 정리를 부를 수 있으면 이것을
-/// 부르지 않는다(정리가 번호 풀기를 그 셋과 한 락 안에서 한다). main · 모르는 label · 두 번째 부름은 무동작이고,
-/// 락이 오염됐으면 아무것도 하지 않는다.
-// ADR-0300 — 창 번호
+/// Releasing the number for the `Destroyed` part of a popout OS window `label` — a stand-in for when there is no state to call the
+/// destroy cleanup (`commands::popout::cleanup_popup_window`) (TRD S26-window-chrome §4-1). If the window is closing, it releases that number; if the window was
+/// still in the model, it removes the whole entry and releases at once. It does not recompute the routing table, clean up subscriptions or leave a tombstone — so
+/// when the cleanup can be called, do not call this (the cleanup releases the number in the same lock as those three). For main · an unknown label · a second call it does nothing,
+/// and if the lock is poisoned it does nothing at all.
+// ADR-0300 — window number
 pub fn release_window_number(state: &LayoutState, label: &str) {
     if label == MAIN_WINDOW_LABEL {
         return;
@@ -67,7 +67,7 @@ pub fn release_window_number(state: &LayoutState, label: &str) {
     }
 }
 
-// ts-rs 바인딩 export 는 각 타입의 `#[ts(export)]` derive 가 자동 생성하는
-// `export_bindings_<type>` 테스트가 `src-tauri/bindings/` 에 .ts 를 쓴다(단일 출처).
-// 수동 export_all_to 미러는 derive 와 이중출처라 제거(FIX-2, rot 방지). protocol crate
-// 의 bindings/ 와 분리 = UI 불가지론(ADR-0035) 유지.
+// For the ts-rs binding export, the `export_bindings_<type>` test that the `#[ts(export)]` derive of each type
+// generates automatically writes the .ts into `src-tauri/bindings/` (single source).
+// The manual export_all_to mirror was removed as a double source with the derive (FIX-2, to prevent rot). Kept separate from the
+// bindings/ of the protocol crate = UI-agnostic (ADR-0035) is preserved.

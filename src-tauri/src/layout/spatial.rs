@@ -1,25 +1,25 @@
-//! 슬롯 공간 타깃 파생(ADR-0068) — 레이아웃 트리에서 방향·이웃·순서를 산출하는 순수 로직.
+//! Slot spatial target derivation (ADR-0068) — pure logic that yields direction · neighbor · order from the layout tree.
 //!
-//! ★Tauri 의존 0 · 픽셀 0★: 실측 rect·`getBoundingClientRect`·창 크기를 **모른다**. "우하단"·"이 슬롯
-//! 오른쪽" 같은 공간 지시를 slot id 로 옮기는 근거를 논리 도면(트리 구조)만으로 계산한다 → 단독 headless
-//! 테스트 가능(ADR-0012 격리).
+//! ★Zero Tauri dependency · zero pixels★: it does **not know** measured rects · `getBoundingClientRect` · window size. The basis for turning a spatial
+//! instruction such as "bottom-right" or "right of this slot" into a slot id is computed from the logical drawing (tree structure) alone → a standalone headless
+//! test is possible (ADR-0012 isolation).
 //!
-//! ## 계산 뼈대
-//! 1. 말단 슬롯의 정규화 사각형은 `geometry::compute` 의 경계 꼴을 그대로 받는다 — 셸 안의 기하 출처는
-//!    그 하나다(ADR-0227).
-//! 2. 그 사각형들에서 **모서리 인접(neighbor)** 과 **순서(ordinal)** 를 파생한다.
-//!    - neighbor: 두 슬롯이 해당 축에서 맞닿고(경계 좌표가 정확히 같다) 직교축 구간 겹침이 양수면 인접.
-//!    - ordinal: 각 말단 rect 의 **중심점** `(center_y, center_x)` 사전순 GLOBAL 정렬(위→아래,
-//!      동률이면 왼쪽→오른쪽) 0-based. ★트리 전위(pre-order)가 아니라 전역 중심 정렬★ — 트리 구조가
-//!      아니라 화면상 위치로 매긴다. 비교는 `f64::total_cmp` 전순서이고, 중심점까지 같으면 트리 전위 순을
-//!      유지한다(안정 정렬) → 결정적(deterministic).
-//!      단 열/행 응집(cohesion)은 보장하지 않는다: 비대칭 분할에선 전체 높이 한 열(column)이 좌측 열
-//!      슬롯들 사이에 끼어들 수 있다(center_y 로만 순서를 매기므로).
-//!    - 면적 0 잎(`x0 >= x1` 또는 `y0 >= y1` — f64 경계가 무너질 만큼 깊은 트리에서만 생긴다)은 이웃을
-//!      갖지도 되지도 않고 모서리 토큰 후보에서도 빠진다. 순서는 같은 규칙으로 매겨 명단에서 빠지지 않는다.
+//! ## Computation outline
+//! 1. The normalized rectangle of a leaf slot takes the boundary form of `geometry::compute` as it is — that is the only
+//!    source of geometry inside the shell (ADR-0227).
+//! 2. From those rectangles it derives **edge adjacency (neighbor)** and **order (ordinal)**.
+//!    - neighbor: two slots are adjacent if they touch on the relevant axis (boundary coordinates are exactly equal) and the overlap of intervals on the orthogonal axis is positive.
+//!    - ordinal: GLOBAL lexicographic sort by the **center point** `(center_y, center_x)` of each leaf rect (top→bottom,
+//!      ties left→right), 0-based. ★Not tree pre-order but a global center sort★ — numbered by position on screen, not by tree structure.
+//!      Comparison is the `f64::total_cmp` total order, and if even the center points are equal, tree pre-order is
+//!      kept (stable sort) → deterministic.
+//!      But row/column cohesion is not guaranteed: in an asymmetric split, a full-height column can slip in between the
+//!      slots of the left column (since order is assigned by center_y alone).
+//!    - A zero-size leaf (`x0 >= x1` or `y0 >= y1` — arises only in a tree deep enough for the f64 boundary to collapse) neither
+//!      has nor becomes a neighbor and is also dropped from corner token candidates. Order is assigned by the same rule, so it is not dropped from the list.
 //!
-//! ★공개 표면은 `neighbors`+`ordinal` 뿐이다★(ADR-0068): 사각형은 이 계산의 입력일 뿐 이 모듈이
-//! 내보내지 않는다.
+//! ★The public surface is only `neighbors`+`ordinal`★ (ADR-0068): the rectangle is just an input to this computation and this module does not
+//! export it.
 
 use uuid::Uuid;
 
@@ -34,7 +34,7 @@ fn center_y(r: &SlotRect) -> f64 {
     (r.y0 + r.y1) / 2.0
 }
 
-/// 한 슬롯의 방향별 이웃(각 = 인접 slot id 또는 None). 논리 도면 파생(픽셀 무관). ADR-0068.
+/// Neighbors by direction of one slot (each = adjacent slot id or None). Derived from the logical drawing (pixel-independent). ADR-0068.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, ts_rs::TS)]
 #[ts(export)]
 pub struct Neighbors {
@@ -48,21 +48,21 @@ pub struct Neighbors {
     pub right: Option<Uuid>,
 }
 
-/// 한 말단 슬롯의 공간 타깃 파생 정보(ViewSnapshot 에 슬롯별로 실린다). ADR-0068.
+/// Spatial target derivation info for one leaf slot (carried per slot in ViewSnapshot). ADR-0068.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, ts_rs::TS)]
 #[ts(export)]
 pub struct SlotSpatial {
     #[ts(type = "string")]
     pub slot_id: Uuid,
     pub neighbors: Neighbors,
-    /// 순서 인덱스 — 중심점 `(center_y, center_x)` 전역 사전순(위→아래, 동률 왼쪽→오른쪽) 0-based.
-    /// 상세·응집 미보장은 모듈 헤더 §계산 뼈대 참조.
+    /// Order index — global lexicographic by center point `(center_y, center_x)` (top→bottom, ties left→right), 0-based.
+    /// For details and the cohesion non-guarantee see the module header §Computation outline.
     #[ts(type = "number")]
     pub ordinal: u32,
 }
 
-/// 여러 후보가 있으면(예: 오른쪽에 두 슬롯이 세로로 쌓임) 직교축 겹침이 가장 큰 것을 고른다
-/// (대표 이웃 하나 — 방향 이동의 자연스러운 타깃).
+/// If there are several candidates (e.g. two slots stacked vertically on the right), pick the one with the largest orthogonal overlap
+/// (one representative neighbor — the natural target of a directional move).
 fn neighbor_in_dir(rects: &[SlotRect], idx: usize, dir: Dir) -> Option<Uuid> {
     let me = &rects[idx];
     if !has_area(me) {
@@ -73,15 +73,15 @@ fn neighbor_in_dir(rects: &[SlotRect], idx: usize, dir: Dir) -> Option<Uuid> {
         if j == idx || !has_area(other) {
             continue;
         }
-        // ADR-0227: 경계는 정확히(`==`) 비교한다 — 맞닿는 두 칸의 경계는 언제나 어느 한 분할의 `at`
-        // 하나이고 geometry 가 그 값을 양쪽 자손에 복사하므로, 참 인접은 칸 크기와 무관하게 비트 단위로 같다.
-        // 절대 허용오차로 되돌리지 말 것 — 폭이 허용오차보다 얇은 칸이 생기면 그 너머 칸이 인접으로
-        // 오판돼 얇은 칸을 건너뛰고, 얇은 칸과의 직교축 겹침이 임계에 걸려 이웃이 사라진다(패닉 없이
-        // 조용히 틀린다).
-        // 모서리만 닿는 칸도 두 끝점이 서로 다른 분할 경로에서 따로 계산되면 몇 ulp(경로가 깊을수록
-        // 커진다) 겹침으로 후보에 들 수 있다. 내 변의 반대편은 잎들이 빈틈없이 덮으므로 겹침이 그보다 훨씬
-        // 큰 참 이웃이 있어 아래 겹침 최대 규칙에서 밀린다 — 단 내 칸 자체가 몇 ulp 두께로 무너지기
-        // 직전이면 이 여유가 사라져 동률·역전이 날 수 있다.
+        // ADR-0227: boundaries are compared exactly (`==`) — the boundary of two touching areas is always the `at` of one
+        // split and geometry copies that value to both descendants, so true adjacency is bit-for-bit equal regardless of area size.
+        // Never go back to an absolute tolerance — if an area thinner than the tolerance appears, the area beyond it is
+        // misjudged as adjacent and the thin area is skipped, and an orthogonal overlap with the thin area that falls under the threshold makes the neighbor disappear (it is silently
+        // wrong, without a panic).
+        // An area that only touches at a corner can also enter the candidates with a few ulp overlap (larger the deeper the path) if its two endpoints are computed separately
+        // by different split paths. The opposite side of my edge is fully covered by leaves, so there is a true neighbor with far
+        // larger overlap, which pushes it out under the max-overlap rule below — but if my own area is about to collapse to a few ulp
+        // thickness, this margin vanishes and ties or reversals can occur.
         let (adjacent, overlap) = match dir {
             Dir::Right => (
                 me.x1 == other.x0,
@@ -110,7 +110,7 @@ fn neighbor_in_dir(rects: &[SlotRect], idx: usize, dir: Dir) -> Option<Uuid> {
     best.map(|(id, _)| id)
 }
 
-/// 두 구간의 겹치는 길이(떨어져 있거나 끝점만 닿으면 0 이하 — 호출측 `> 0.0` 이 걸러낸다).
+/// Overlap length of two intervals (0 or less if apart or touching only at an endpoint — the caller's `> 0.0` filters it out).
 fn overlap_len(a0: f64, a1: f64, b0: f64, b1: f64) -> f64 {
     a1.min(b1) - a0.max(b0)
 }
@@ -123,7 +123,7 @@ enum Dir {
     Right,
 }
 
-/// 반환 순서 = ordinal 순.
+/// Return order = ordinal order.
 pub fn compute_spatial(node: &LayoutNode) -> Vec<SlotSpatial> {
     let rects = geometry::compute(node).slots;
 
@@ -151,16 +151,16 @@ pub fn compute_spatial(node: &LayoutNode) -> Vec<SlotSpatial> {
         .collect()
 }
 
-/// 공간/방향 토큰 — LLM/사람이 "우하단"·"이 슬롯 오른쪽" 같은 지시를 넘기는 심볼릭 표면(ADR-0068).
-/// tmux 결 edge 토큰(모서리 4종) + 포커스 슬롯 상대 방향(4종).
+/// Spatial/direction token — the symbolic surface by which an LLM/person passes an instruction such as "bottom-right" or "right of this slot" (ADR-0068).
+/// tmux-style edge tokens (4 corners) + directions relative to the focus slot (4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpatialToken {
-    /// 모서리(절대) — 트리 전체에서 그 코너에 가장 가까운 말단 슬롯.
+    /// Corner (absolute) — the leaf slot in the whole tree closest to that corner.
     TopLeft,
     TopRight,
     BottomLeft,
     BottomRight,
-    /// 포커스 슬롯 기준 상대 방향 이웃.
+    /// Neighbor in a direction relative to the focus slot.
     Left,
     Right,
     Up,
@@ -168,7 +168,7 @@ pub enum SpatialToken {
 }
 
 impl SpatialToken {
-    /// wire 문자열(kebab)에서 파싱. 모르는 토큰은 None(호출자 = Err).
+    /// Parse from a wire string (kebab). An unknown token is None (caller = Err).
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "top-left" | "topleft" => Some(Self::TopLeft),
@@ -183,7 +183,7 @@ impl SpatialToken {
         }
     }
 
-    /// wire 철자(kebab) — [`Self::parse`] 가 받는 대표 철자다.
+    /// Wire spelling (kebab) — the representative spelling that [`Self::parse`] accepts.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::TopLeft => "top-left",
@@ -198,8 +198,8 @@ impl SpatialToken {
     }
 }
 
-/// ★edge 토큰이 "우하단"을 정확히 집는가(ADR-0068 수용 기준)★: 각 슬롯 rect 의 해당 코너 좌표까지의
-/// 거리를 최소화한다 — L-shape(좌측 한 칸 + 우측 상하 2칸)에서 bottom-right 는 우측 아래 슬롯을 집는다.
+/// ★Does the edge token pick "bottom-right" exactly (ADR-0068 acceptance criterion)★: minimize the distance to the matching corner coordinate of
+/// each slot rect — in an L-shape (one area on the left + two areas top and bottom on the right), bottom-right picks the lower right slot.
 pub fn resolve_spatial(
     node: &LayoutNode,
     focused: Option<Uuid>,
@@ -218,9 +218,9 @@ pub fn resolve_spatial(
     }
 }
 
-/// 코너 `(cx,cy)`(단위정사각형 모서리)에 rect 코너가 가장 가까운 슬롯을 고른다. 그 코너 방향 rect 코너를
-/// 대표점으로 삼아(예: bottom-right → rect 의 (right,bottom)) 코너까지 유클리드 거리 최소화. 거리가 같으면
-/// 먼저 본(트리 전위 순) 슬롯. 면적 0 잎은 후보가 아니다(이웃 제외와 같은 규칙).
+/// Pick the slot whose rect corner is closest to corner `(cx,cy)` (a corner of the unit square). Take the rect corner in that corner's direction as the
+/// representative point (e.g. bottom-right → the rect's (right,bottom)) and minimize the Euclidean distance to the corner. If distances are equal, the
+/// slot seen first (tree pre-order). A zero-size leaf is not a candidate (same rule as the neighbor exclusion).
 fn corner_slot(rects: &[SlotRect], cx: f64, cy: f64) -> Option<Uuid> {
     let mut best: Option<(Uuid, f64)> = None;
     for r in rects.iter().filter(|r| has_area(r)) {
@@ -235,7 +235,7 @@ fn corner_slot(rects: &[SlotRect], cx: f64, cy: f64) -> Option<Uuid> {
     best.map(|(id, _)| id)
 }
 
-/// focused 슬롯의 방향 이웃(공유 변). focused 가 트리에 없거나 None 이면 None.
+/// Directional neighbor (shared edge) of the focused slot. None if focused is not in the tree or is None.
 fn relative_neighbor(rects: &[SlotRect], focused: Option<Uuid>, dir: Dir) -> Option<Uuid> {
     let fid = focused?;
     let idx = rects.iter().position(|r| r.slot_id == fid)?;
@@ -257,7 +257,7 @@ mod tests {
         list.iter().find(|s| s.slot_id == id).expect("슬롯 있어야")
     }
 
-    // `split_in_tree` 는 늘 0.5 로 나누므로, 비율·모양을 직접 정한 트리는 이 도우미로 짓는다.
+    // `split_in_tree` always splits at 0.5, so a tree whose ratio · shape is set directly is built with this helper.
     fn id(n: u128) -> Uuid {
         Uuid::from_u128(n)
     }
@@ -287,7 +287,7 @@ mod tests {
             .expect("슬롯 있어야")
     }
 
-    // ── 단일 슬롯 ──────────────────────────────────────────────────────────────
+    // ── single slot ────────────────────────────────────────────────────────────
 
     #[test]
     fn single_slot_has_no_neighbors_ordinal_zero() {
@@ -299,7 +299,7 @@ mod tests {
         assert_eq!(s.neighbors, Neighbors::default_none());
     }
 
-    // ── LeftRight 분할(좌/우 이웃) ───────────────────────────────────────────────
+    // ── LeftRight split (left/right neighbors) ───────────────────────────────────
 
     #[test]
     fn left_right_split_has_left_right_neighbors() {
@@ -328,7 +328,7 @@ mod tests {
         assert_eq!(r.ordinal, 1);
     }
 
-    // ── TopBottom 분할(위/아래 이웃) ─────────────────────────────────────────────
+    // ── TopBottom split (up/down neighbors) ──────────────────────────────────────
 
     #[test]
     fn top_bottom_split_has_up_down_neighbors() {
@@ -348,10 +348,10 @@ mod tests {
         assert_eq!(b.ordinal, 1);
     }
 
-    // ── L-shape(좌측 한 칸 + 우측 상하 2칸) — bottom-right 수용 기준 ────────────────
+    // ── L-shape (one area on the left + two areas top and bottom on the right) — bottom-right acceptance criterion ────────────────
 
-    /// 트리: Split{LeftRight, a=Slot(left), b=Split{TopBottom, a=Slot(rt), b=Slot(rb)}}.
-    /// left = 좌측 전체 높이, rt = 우상단, rb = 우하단.
+    /// Tree: Split{LeftRight, a=Slot(left), b=Split{TopBottom, a=Slot(rt), b=Slot(rb)}}.
+    /// left = full height on the left, rt = top right, rb = bottom right.
     fn l_shape() -> (LayoutNode, Uuid, Uuid, Uuid) {
         let (mut node, left) = single();
         let rroot =
@@ -379,7 +379,7 @@ mod tests {
         assert_eq!(s_rt.neighbors.down, Some(rb), "우상단의 아래 = 우하단");
         assert_eq!(s_rt.neighbors.left, Some(left), "우상단의 왼쪽 = 좌측");
 
-        // left(좌측 전체): 오른쪽은 rt/rb 둘 다 후보 → 겹침 큰 쪽(둘 다 0.5 로 동일) 중 하나. 존재만 단언.
+        // left (full left side): on the right both rt/rb are candidates → one of the larger overlap (both equal at 0.5). Only existence is asserted.
         let s_left = spatial_of(&sp, left);
         assert!(
             s_left.neighbors.right == Some(rt) || s_left.neighbors.right == Some(rb),
@@ -390,7 +390,7 @@ mod tests {
 
     #[test]
     fn l_shape_bottom_right_token_resolves_to_rb() {
-        // ★ADR-0068 수용 기준★: "우하단"(bottom-right) 토큰이 우하단 슬롯(rb)으로 해소된다.
+        // ★ADR-0068 acceptance criterion★: the "bottom-right" token resolves to the bottom-right slot (rb).
         let (node, left, rt, rb) = l_shape();
         assert_eq!(
             resolve_spatial(&node, None, SpatialToken::BottomRight),
@@ -402,7 +402,7 @@ mod tests {
             Some(rt),
             "top-right → 우상단 슬롯"
         );
-        // top-left / bottom-left → 좌측(전체 높이라 위·아래 코너 모두 좌측이 가장 가까움).
+        // top-left / bottom-left → left (full height, so the left is closest for both the top and bottom corners).
         assert_eq!(
             resolve_spatial(&node, None, SpatialToken::TopLeft),
             Some(left),
@@ -417,9 +417,9 @@ mod tests {
 
     #[test]
     fn l_shape_ordinal_reading_order() {
-        // ordinal = 중심점 전역 사전순(center_y 우선): left(center_y=0.5)·rt(0.25)·rb(0.75).
-        //   정렬 = rt(0.25) → left(0.5) → rb(0.75). ★전체 높이 left 열이 우측 rt/rb 사이에 끼어든다★
-        //   — 열 응집이 보장되지 않는다는 산 증거(모듈 헤더 §계산 뼈대의 cohesion 미보장).
+        // ordinal = global lexicographic by center point (center_y first): left(center_y=0.5)·rt(0.25)·rb(0.75).
+        //   Sort = rt(0.25) → left(0.5) → rb(0.75). ★The full-height left column slips in between the right rt/rb★
+        //   — living proof that column cohesion is not guaranteed (the cohesion non-guarantee in the module header §Computation outline).
         let (node, left, rt, rb) = l_shape();
         let sp = compute_spatial(&node);
         assert_eq!(spatial_of(&sp, rt).ordinal, 0, "rt(위) 먼저");
@@ -427,7 +427,7 @@ mod tests {
         assert_eq!(spatial_of(&sp, rb).ordinal, 2, "rb(아래) 마지막");
     }
 
-    // ── 상대 방향(포커스 기준) ──────────────────────────────────────────────────
+    // ── relative direction (from focus) ──────────────────────────────────────────
 
     #[test]
     fn relative_direction_from_focus() {
@@ -459,17 +459,17 @@ mod tests {
         );
     }
 
-    // ── 극단 ratio 방어(FIX-4 · ADR-0068 §0) ──────────────────────────────────────
+    // ── extreme ratio defense (FIX-4 · ADR-0068 §0) ──────────────────────────────
 
     #[test]
     fn degenerate_ratio_produces_no_zero_area_leaf() {
-        // ★FIX-4 불변식 검증★: ratio=0.0(극단) 여도 geometry 의 비율 클램프(`[RATIO_MIN, RATIO_MAX]`)가
-        // zero-area leaf 를 막는다. 클램프가 없으면 a 쪽 leaf 는 폭 0 이 되어 이 단언이 깨지고, 면적 0 잎은
-        // 이웃에서 빠지므로 아래 이웃 단언도 깨진다(이 테스트는 가드가 살아있어야만 통과 — load-bearing).
+        // ★FIX-4 invariant check★: even with ratio=0.0 (extreme), geometry's ratio clamp (`[RATIO_MIN, RATIO_MAX]`) prevents a
+        // zero-area leaf. Without the clamp the a-side leaf would have width 0 and this assertion would break, and since a zero-size leaf drops out of
+        // neighbors, the neighbor assertion below would break too (this test passes only while the guard is alive — load-bearing).
         let (mut node, left) = single();
         let right =
             super::super::tree::split_in_tree(&mut node, left, SplitDir::LeftRight).unwrap();
-        // 극단값 — 쓰기 경로로는 안 들어오는 값을 트리에 직접 심는다.
+        // Extreme value — plant directly in the tree a value that never comes in through the write path.
         if let LayoutNode::Split { ratio, .. } = &mut node {
             *ratio = 0.0;
         } else {
@@ -490,10 +490,10 @@ mod tests {
         assert_eq!(spatial_of(&sp, right).neighbors.left, Some(left));
     }
 
-    // ── 아주 얇은 잎(정확 인접 — 절대 허용오차 없음) ─────────────────────────────────
+    // ── very thin leaf (exact adjacency — no absolute tolerance) ─────────────────────
 
-    /// 위 절반 = 0.1 LR 사슬 다섯 단(조상 100 + 그 안 네 단)이라 맨 안쪽 칸 폭이 1e-5 이고, 그 칸을 다시
-    /// 반으로 나눈다(1·2). 3 = 폭 9e-5, 4·5·6·7 = 그 오른쪽으로 점점 넓은 칸. 아래 절반 = 전체 폭 한 칸(8).
+    /// Top half = a 0.1 LR chain of five levels (ancestor 100 + four levels inside), so the innermost area has width 1e-5, and that area is split
+    /// in half again (1·2). 3 = width 9e-5, 4·5·6·7 = areas growing wider to its right. Bottom half = one full-width area (8).
     fn thin_tree() -> LayoutNode {
         let lr = SplitDir::LeftRight;
         let chain = split(
@@ -566,21 +566,21 @@ mod tests {
         assert_eq!(nb(4).left, some(3));
         assert_eq!(nb(8).up, some(7), "겹침 최대 = 가장 넓은 칸");
 
-        // 위 줄은 center_y 가 같아 center_x 로만 갈린다 — 1e-6 단위 차이에서도 왼쪽→오른쪽.
+        // The top row has the same center_y, so it is split by center_x alone — left→right even at a 1e-6 difference.
         let order: Vec<Uuid> = sp.iter().map(|s| s.slot_id).collect();
         assert_eq!(order, (1..=8).map(id).collect::<Vec<_>>());
     }
 
-    // ── 모서리 접촉 ─────────────────────────────────────────────────────────────
+    // ── corner contact ───────────────────────────────────────────────────────────
 
     #[test]
     fn corner_only_touch_is_not_a_neighbor() {
-        // 2×2 격자 — 대각선 두 칸은 모서리 한 점만 닿는다(직교축 겹침 정확히 0). 두 루트 방향 모두.
+        // 2×2 grid — the two diagonal areas touch at a single corner point (orthogonal overlap exactly 0). For both root directions.
         for (root, row) in [
             (SplitDir::TopBottom, SplitDir::LeftRight),
             (SplitDir::LeftRight, SplitDir::TopBottom),
         ] {
-            // 1 = 원점 칸, 4 = 그 대각선. 2 는 1 의 옆(같은 루트 반쪽), 3 은 1 의 루트 반대편.
+            // 1 = origin area, 4 = its diagonal. 2 is beside 1 (same root half), 3 is on the opposite root side of 1.
             let grid = split(
                 100,
                 root,
@@ -612,8 +612,8 @@ mod tests {
         }
     }
 
-    /// 왼쪽 열은 0.65 에서, 오른쪽 열은 0.3 + (1 − 0.3)·0.5 에서 가로로 나뉜다 — 십진으로는 같은 높이지만
-    /// 따로 계산돼 오른쪽 경계가 1 ulp 낮다. 1 = 왼쪽 위 · 2 = 왼쪽 아래 · 3·4·5 = 오른쪽 위·가운데·아래.
+    /// The left column splits horizontally at 0.65, and the right column at 0.3 + (1 − 0.3)·0.5 — the same height in decimal, but
+    /// computed separately, so the right boundary is 1 ulp lower. 1 = top left · 2 = bottom left · 3·4·5 = top·middle·bottom right.
     fn ulp_tree() -> LayoutNode {
         split(
             100,
@@ -634,7 +634,7 @@ mod tests {
     fn one_ulp_corner_candidate_loses_to_true_neighbor() {
         let tree = ulp_tree();
         let (lt, lb, rb) = (rect_of(&tree, 1), rect_of(&tree, 2), rect_of(&tree, 5));
-        // 전제를 실측한다 — 1 ulp 어긋남이 없으면 이 테스트는 아무것도 재지 않는다.
+        // Measure the premise — without the 1 ulp mismatch this test measures nothing.
         assert_eq!(lt.x1, rb.x0, "같은 루트 경계 — 인접 판정을 통과한다");
         assert_eq!(
             lt.y1.to_bits() - rb.y0.to_bits(),
@@ -644,22 +644,22 @@ mod tests {
         assert!(rb.y0 < lt.y1 && lb.y1 > rb.y0);
 
         let sp = compute_spatial(&tree);
-        // 5 의 왼쪽 후보는 전위 순으로 1(겹침 1 ulp, 거짓)이 먼저, 2(참)가 나중이다 — 먼저 본 후보를
-        // 고르는 규칙이었다면 1 이 뽑힌다.
+        // The left candidates of 5 in pre-order are 1 (overlap 1 ulp, false) first and 2 (true) later — if the rule were to
+        // pick the candidate seen first, 1 would be picked.
         assert_eq!(
             spatial_of(&sp, id(5)).neighbors.left,
             Some(id(2)),
             "겹침 최대 규칙 — 1 ulp 후보가 아니라 참 이웃"
         );
-        // 1 쪽에서도 5 는 1 ulp 후보일 뿐 — 오른쪽 이웃은 겹침이 가장 큰 4.
+        // From 1's side too, 5 is only a 1 ulp candidate — the right neighbor is 4, which has the largest overlap.
         assert_eq!(spatial_of(&sp, id(1)).neighbors.right, Some(id(4)));
         assert_eq!(spatial_of(&sp, id(2)).neighbors.right, Some(id(5)));
     }
 
-    // ── 면적 0 잎(트리에 직접 심은 값 — 방어) ───────────────────────────────────────
+    // ── zero-size leaf (value planted directly in the tree — defense) ────────────────
 
-    /// 0.9 로 늘 b 쪽을 나눈 LR 사슬 — 17 단째에서 경계가 반올림으로 1.0 에 붙어 마지막 b 잎(18)의 폭이
-    /// 정확히 0 이 된다. 잎 = 1..=17(각 단의 a) + 18.
+    /// An LR chain that always splits the b side at 0.9 — at the 17th level the boundary sticks to 1.0 by rounding and the last b leaf (18) gets width
+    /// exactly 0. Leaves = 1..=17 (a of each level) + 18.
     fn collapsed_chain() -> LayoutNode {
         const DEPTH: u128 = 17;
         let mut node = slot(DEPTH + 1);
@@ -680,7 +680,7 @@ mod tests {
             1,
             "면적 0 잎은 18 하나뿐"
         );
-        // 17 과 18 은 경계 1.0 을 정확히 공유한다 — 건너뛰기가 없으면 서로 이웃이 된다.
+        // 17 and 18 share boundary 1.0 exactly — without the skipping they would be neighbors.
         assert_eq!(rect_of(&tree, 17).x1, z.x0);
 
         let sp = compute_spatial(&tree);
@@ -697,7 +697,7 @@ mod tests {
         assert_eq!(spatial_of(&sp, id(17)).neighbors.right, None);
         assert_eq!(spatial_of(&sp, id(17)).neighbors.left, Some(id(16)));
 
-        // 17 과 18 은 중심점까지 같다 — 동률은 트리 전위 순(17 먼저)이라 순서가 전위 순과 같다.
+        // 17 and 18 are equal even at the center point — ties go by tree pre-order (17 first), so the order equals pre-order.
         let r17 = rect_of(&tree, 17);
         assert_eq!(
             (center_y(&r17), center_x(&r17)),
@@ -711,9 +711,9 @@ mod tests {
 
     #[test]
     fn corner_token_skips_zero_area_leaf() {
-        // 모서리 토큰은 거리 동률이면 전위 순으로 먼저 본 칸을 고르므로, 면적 0 잎이 모서리를 가져가려면
-        // 전위 순 맨 앞 — 원점 쪽 a 칸 — 이어야 한다. 원점 쪽 경계는 반올림으로 안 붙고 언더플로로만 0 이
-        // 되므로 0.1 LR 사슬을 324 단 쌓는다. z(1000) = 맨 안쪽 a 잎 · k = k 단째 b 잎.
+        // A corner token picks the area seen first in pre-order on a distance tie, so for a zero-size leaf to take a corner it must be
+        // first in pre-order — the a area at the origin side. The origin-side boundary does not stick by rounding and becomes 0 only by underflow,
+        // so a 0.1 LR chain of 324 levels is stacked. z(1000) = innermost a leaf · k = b leaf of the k-th level.
         const DEPTH: u128 = 324;
         let lr = SplitDir::LeftRight;
         let mut node = split(10_000 + DEPTH, lr, 0.1, slot(1000), slot(DEPTH));
@@ -755,7 +755,7 @@ mod tests {
         assert_eq!(compute_spatial(&node), sp, "두 번 계산해 같은 결과");
     }
 
-    // ── 결정성 ─────────────────────────────────────────────────────────────────
+    // ── determinism ──────────────────────────────────────────────────────────────
 
     #[test]
     fn ordering_is_deterministic_and_complete() {
