@@ -1,7 +1,7 @@
 //! Log observation harness for tests — ★collects the **field text** of WARN and ERROR events★.
 //!
-//! ★Why both levels are caught★: what the tests using this measure is not 「어느 레벨로 냈나」 (which level it was logged at) but 「whether that event
-//! remained / what went into that field」. Splitting functions per level would give the same question two harnesses.
+//! ★Why both levels are caught★: what the tests using this measure is not 「어느 레벨로 냈나」 (which level it was logged at) but 「그 사건이
+//! 남았나 / 그 필드에 무엇이 갔나」 (whether that event remained / what went into that field). Splitting functions per level would give the same question two harnesses.
 //!
 //! Entry points: [`capture_loud`] (sync body) · [`capture_loud_async`] (future body) · [`capture_levels`] (`≤DEBUG` +
 //! level — the second branch of 「덮는 범위」 below).

@@ -95,7 +95,7 @@ Codex (cross-family) once · decision **FIX** · of 8 spot checks, 7 held (GitHu
 
 | Finding | Disposition |
 |---|---|
-| Asserted from the Node run record that the `!` revival inside `paths-ignore` is a 「고쳐야 할 틀린 서술」 (wrong statement to fix) | **Accepted (confidence downgraded)** — turned the 「고칠 것」 (what to fix) above into an overstatement correction and lowered it to uncertain. However, the review's counter-logic (「그 커밋들이 `test-linux.yml` 자체를 바꿨으니 분리가 안 된다」) is not a refutation — that file changing is the premise of the revival test. The ground for leaving it uncertain is a defect on our side (per-commit push not confirmed) |
+| Asserted from the Node run record that the `!` revival inside `paths-ignore` is a 「고쳐야 할 틀린 서술」 (wrong statement to fix) | **Accepted (confidence downgraded)** — turned the "What to fix in our docs" above into an overstatement correction and lowered it to uncertain. However, the review's counter-logic (「그 커밋들이 `test-linux.yml` 자체를 바꿨으니 분리가 안 된다」) is not a refutation — that file changing is the premise of the revival test. The ground for leaving it uncertain is a defect on our side (per-commit push not confirmed) |
 | 「필수 체크를 거는 대형 프로젝트는 거의 전부 잡 단위」 — a ratio claim with no population | **Accepted** — changed to a description of the observed sample and added Ruby's other shape |
 | `[skip ci]` 0 occurrences — a workflow file search cannot measure commit message usage | **Accepted** — lowered to uncertain |
 | 「포함 목록은 분할 워크플로용」 — the Biome counterexample | **Accepted** — trimmed to 「분할에서 많이 보인다」 |

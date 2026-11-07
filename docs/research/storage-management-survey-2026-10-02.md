@@ -1,6 +1,6 @@
 # Storage management structure survey — screen-state restore · user settings · backend storage (2026-10-02)
 
-- **Status:** survey complete · PRD-level decisions complete (user decisions 2026-10-02 — 「0. 결정」 (0. Decisions) below) · TRD = `docs/process/S21-storage/trd.md`
+- **Status:** survey complete · PRD-level decisions complete (user decisions 2026-10-02 — "0. Decisions" below) · TRD = `docs/process/S21-storage/trd.md`
 
 ## 0. Decisions (user decisions 2026-10-02 · conversation)
 

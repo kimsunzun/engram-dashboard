@@ -45,7 +45,7 @@
 
 ## Adversarial review (codex · FIX → incorporated)
 
-- 「되감기는 콜드 경로에만」 → two counterexamples (CARB · Codeman). **Conclusion 2 was fixed.** The reason CARB reverted (query-answer leak) may apply to our rewind path too — see 「우리에게 남는 것」 below.
+- 「되감기는 콜드 경로에만」 → two counterexamples (CARB · Codeman). **Conclusion 2 was fixed.** The reason CARB reverted (query-answer leak) may apply to our rewind path too — see "What remains for us" below.
 - 「숨은 동안 크기를 안 보낸다가 예외 없는 규칙」 → VS Code defers sending if it can be measured. **Conclusion 3 was narrowed to 「잴 수 없는 크기」.**
 - tmux 「그 창을 보는 클라이언트에만」 → the `TTY_CTX_INVISIBLE_PANES` exception. **A caveat was added to the table.**
 - The paseo e2e citation is only partly supported → confidence lowered.

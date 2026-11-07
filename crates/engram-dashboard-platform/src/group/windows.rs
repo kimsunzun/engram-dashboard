@@ -200,8 +200,8 @@ impl JobObjectHandle {
         unsafe { TerminateJobObject(self.handle, exit_code) }.map_err(win_err)
     }
 
-    /// Number of processes in the Job that have not yet ended. `terminate` only starts the ending and returns, so a side that waits for "the tree has all
-    /// ended" checks with this.
+    /// Number of processes in the Job that have not yet ended. `terminate` only starts the ending and returns, so a side that waits for 「트리가 다
+    /// 끝났다」 (the tree has all ended) checks with this.
     pub(crate) fn active_processes(&self) -> io::Result<u32> {
         let mut info = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
         // SAFETY: QueryInformationJobObject — passes a valid Job handle, a stack struct pointer matching the class (BasicAccounting)
@@ -327,8 +327,8 @@ impl JobObjectHandle {
         };
 
         let mut in_job = BOOL::default();
-        // SAFETY: two valid handles + stack output. ★The Job argument is always our handle★ — if it were NULL it would turn into "is it in
-        //   any Job at all" and see someone else's Job member as ours.
+        // SAFETY: two valid handles + stack output. ★The Job argument is always our handle★ — if it were NULL it would turn into 「아무 Job 에나
+        //   들었나」 (is it in any Job at all) and see someone else's Job member as ours.
         unsafe { IsProcessInJob(member.handle, self.handle, &mut in_job) }.map_err(win_err)?;
         if !in_job.as_bool() {
             return Ok(None);

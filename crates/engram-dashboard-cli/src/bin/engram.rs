@@ -2485,8 +2485,8 @@ fn post_json(
         .read_to_end(&mut raw)
         .map_err(|e| SendError::Connect(format!("read failed: {e}")))?;
     let resp = parse_response(&raw)?;
-    // 404 = the daemon does not know this route (build mismatch) — send it down the transport failure path, not to a decider (header 「failure
-    //   to reach the daemon」).
+    // 404 = the daemon does not know this route (build mismatch) — send it down the transport failure path, not to a decider (header 「데몬에 못
+    //   닿은 실패」 (failure to reach the daemon)).
     // ADR-0285
     if resp.status == 404 {
         return Err(SendError::NoRoute {

@@ -359,8 +359,8 @@ fn walk(
 /// `Ok` means not 「끝났다」 (it ended) but 「taskkill 을 돌렸다」 (taskkill was run).
 ///
 /// `Err` = taskkill could not be launched (kind `Other` · the reason is in the message). Outside Windows = `Unsupported` — this
-/// means is absent. ★On Windows `Unsupported` does not occur★ — the caller uses that one kind to tell apart "cannot do this on this
-/// OS".
+/// means is absent. ★On Windows `Unsupported` does not occur★ — the caller uses that one kind to tell apart 「이 OS 에서는 못
+/// 한다」 (cannot do this on this OS).
 // ADR-0266
 pub fn kill_tree(pid: u32) -> std::io::Result<()> {
     #[cfg(windows)]

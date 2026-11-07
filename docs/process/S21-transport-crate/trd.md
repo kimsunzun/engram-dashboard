@@ -42,7 +42,7 @@
 
 ### What this crate does not do
 
-Collected separately in §10. If the 「안 하는 것」 are not pinned down as a list, the next session sneaks them in.
+Collected separately in §10. If the "What we do not do" items are not pinned down as a list, the next session sneaks them in.
 
 ---
 
