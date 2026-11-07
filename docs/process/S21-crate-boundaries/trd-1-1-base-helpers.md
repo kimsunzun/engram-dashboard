@@ -1,49 +1,49 @@
-# TRD — 경계 리팩터링 1-1: base 범용 도우미 (S21)
+# TRD — Boundary refactoring 1-1: base general-purpose helpers (S21)
 
-> 상태: **5판 — 결정 반영(2026-10-04).** 코드는 아직 한 줄도 바뀌지 않았다. §4 의 선택 열하나는 전부 정해졌다 — **사용자 위임(2026-10-04 「알아서 진행해」) → 4판 권고안 채택.** 확정된 ADR-0269 · ADR-0268 과 어긋나는 몫은 ADR-0275 로 고쳤다(2026-10-04 · §4-2 — 0274 는 storage 브랜치가 쓴다). 구현은 §6 의 U1 부터(착수 체크리스트 §6-1).
-> **개정 기록 — 2026-10-04 · 5판 — 결정 반영:**
-> - §4 를 「사용자 선택 대기」에서 「결정」 기록으로 바꿨다 — 고른 갈래가 전부 4판 권고와 같다(C5 (b) · T1 (b) · T2 (a) · C1 (a) · C2 (a) · C3 (a) · C4 (a) · S1 (a) · S2 (e) · N1 (b) · P1 (a)). 갈래별 긴 논의는 걷고 고른 것 · 이유 한 줄 · 거부한 갈래 한 줄씩만 남겼다(거부한 갈래는 ADR-0275 「거부한 대안」의 재료다).
-> - **S2=(e) 로 이전 규칙이 바뀌었다** — 쥔 채 로그 금지 자물쇠 열둘(37곳)의 제외 목록은 더 이상 이전 규칙이 아니다. §2-4 에 「(a) 를 고르지 않은 이유」로 짧게 남기고, 단위는 운영 83곳을 옮긴다(제자리 7 — §3-5). U2 13 → **17** · U3a 17 → **24** · U3b 16 → **42**(§5 M3 · §6). codex stdin 소스 개수 시험의 지시(기대값 2 그대로 · matcher 만 넓힌다)는 그대로다.
-> - **T1=(b)** — `text` 에서 자르기 두 함수를 뺐다. 사본 셋은 U1 에서 std `floor_char_boundary` · `ceil_char_boundary` 로 제자리 교체한다(§3-2). **C4=(a)** — 가짜 시계 `ManualClock` 은 `time` 안 `test-support` 기능 뒤다(§3-3).
-> - 고르지 않은 갈래에 매인 조건문(「S2=(b) 면 …」 · 「C5=a 일 때만」 · 「T1=b 면」 등)을 걷거나 각주로 줄였다. G3(transport 의존 상한 1 → 2)은 없어졌다(§7).
-> - §4-2(ADR-0275 에 적을 개정)와 §6-1(U1 착수 체크리스트)을 더했다.
-> - (e) 로 넓어진 파일(잔여물 정리 · 대기 입력 명부 · 대기 목록 표 · 래치 · 턴 관측 표 · codex 상태 락 · daemon 넷)을 소스 문자열 시험과 다시 맞댔다 — 깨지는 것은 여전히 codex stdin 개수 시험 하나다(§6 공통 검증 5).
-> - ★4판은 커밋된 적이 없다(이 폴더는 미추적)★ — 이 판에서 걷은 상세(제외 감사의 찾은 법 · 자물쇠별 문서 인용 전문 · 중첩 전수 점검 · 교착 판정)는 요약만 남는다(§2-4).
+> Status: **Edition 5 — decisions applied (2026-10-04).** Not a single line of code has changed yet. All eleven choices in §4 are settled — **delegated by the user (2026-10-04 「알아서 진행해」) → the edition-4 recommendations were adopted.** The parts that conflicted with the confirmed ADR-0269 and ADR-0268 were amended in ADR-0275 (2026-10-04 · §4-2 — 0274 is used by the storage branch). Implementation starts from U1 in §6 (start checklist §6-1).
+> **Revision log — 2026-10-04 · edition 5 — decisions applied:**
+> - §4 was changed from 「사용자 선택 대기」 to a 「결정」 record — every option chosen is the same as the edition-4 recommendation (C5 (b) · T1 (b) · T2 (a) · C1 (a) · C2 (a) · C3 (a) · C4 (a) · S1 (a) · S2 (e) · N1 (b) · P1 (a)). The long per-option discussion was withdrawn; only the chosen option, a one-line reason, and one line per rejected option remain (the rejected options are material for ADR-0275 「거부한 대안」).
+> - **S2=(e) changed the move rule** — the exclusion list of twelve locks (37 sites) where logging while held is forbidden is no longer the move rule. It remains briefly in §2-4 as 「(a) 를 고르지 않은 이유」, and the units move 83 operational sites (7 stay in place — §3-5). U2 13 → **17** · U3a 17 → **24** · U3b 16 → **42** (§5 M3 · §6). The instruction for the codex stdin source-count test (keep the expected value 2 · only widen the matcher) is unchanged.
+> - **T1=(b)** — the two truncation functions were removed from `text`. The three copies are replaced in place in U1 with std `floor_char_boundary` · `ceil_char_boundary` (§3-2). **C4=(a)** — the fake clock `ManualClock` sits behind the `test-support` feature inside `time` (§3-3).
+> - Conditionals tied to unchosen options (「S2=(b) 면 …」 · 「C5=a 일 때만」 · 「T1=b 면」 etc.) were withdrawn or reduced to footnotes. G3 (raising the transport dependency cap 1 → 2) is gone (§7).
+> - §4-2 (the amendments to write into ADR-0275) and §6-1 (the U1 start checklist) were added.
+> - The files widened by (e) (leftover cleanup · queued-input registry · pending-list table · latch · turn observation table · codex state lock · the four daemon ones) were checked again against the source-string tests — the only thing that breaks is still the codex stdin count test (§6 common check 5).
+> - ★Edition 4 was never committed (this folder is untracked)★ — the details withdrawn in this edition (how the exclusion audit found things · full per-lock quotes from the docs · the exhaustive nesting check · the deadlock decision) survive only as a summary (§2-4).
 >
-> **개정 기록 — 2026-10-03 · 3차 리뷰 반영** (지적마다 코드로 다시 확인한 뒤 고쳤다):
-> - **중첩 규칙이 놓친 자리 하나를 더 뺐다 — 첫 제출 래치의 commit 포트 `expected` 칸(`manager.rs:550`).** 래치가 가드를 쥔 채 그 포트를 부른다(`session_id_latch.rs:141-145`) — 문서의 락 순서 「래치 → 포트의 expected 칸 → profiles → store write_lock」(`session_id_latch.rs:23-25` · `manager.rs:523-524`). 제외 자물쇠 열하나 · 36곳 → **열둘 · 37곳** · agent 이전분 34 → **33** · U3a 18 → **17** · M3 47/48 → **46/47**(§2-4 · §5 M3 · §6).
-> - **중첩 점검을 전수로 다시 했다** — 제외 자물쇠 열둘마다 문서의 락 순서(`rg '락 순서|lock order'` 33줄 + CLAUDE.md 「락 순서」)와 가드를 쥔 채 부르는 콜백 · 포트를 다 읽었다. 더 걸린 것은 없다. 단 codex 머리의 「상태 → 대기표」(`transport.rs:21`)는 문서가 허용만 하고 실제로 그렇게 잡는 운영 자리가 없다 — 옮기는 쪽에 두고 잠복 간선으로 적었다(§2-4 · §10).
-> - 래치 항목의 「`drop(state)` 뒤에 로그」는 래치 **자기** 로그에만 참이다 — commit 포트가 래치를 쥔 채 이미 `warn!` · `info!` · `debug!` 를 낸다(`manager.rs:541-569`). 고쳐 적고 §9 에 올렸다.
-> - 낡은 숫자를 맞췄다 — §4 「묶인 것」의 「48 대 49」 · S2 (a) 의 「그 밖의 48곳」 · 「제외 35곳」(§0 · §1-1 · §2-4 · §3-5 · §4 · §5 · §6 · §7 을 grep 으로 다시 셌다).
-> - 1-3 U1 이 discovery `Cargo.toml:12-14` 의 「liveness 공유」 사유를 platform 줄로 옮기면 base 줄에 새 사유를 적는 단위가 없었다 — U5 의 손댈 목록에 더했다.
-> - **S2 에 갈래 (e)「경고 없이 되찾기만」을 더하고 권고를 (a) → (e) 로 바꿨다(워커 제안 — 결정 아님).** (e) 면 제외 목록이 필요 없고 이전 범위가 46/47 → **83** 이다. 대가 = 확정된 ADR-0269 결정 4 의 개정(§4 S2 · §7).
+> **Revision log — 2026-10-03 · round 3 review applied** (each finding was re-checked against the code before fixing):
+> - **One more site missed by the nesting rule was removed — the `expected` field of the commit port of the first-submit latch (`manager.rs:550`).** The latch calls that port while holding the guard (`session_id_latch.rs:141-145`) — the documented lock order 「래치 → 포트의 expected 칸 → profiles → store write_lock」 (`session_id_latch.rs:23-25` · `manager.rs:523-524`). Excluded locks eleven · 36 sites → **twelve · 37 sites** · agent moved part 34 → **33** · U3a 18 → **17** · M3 47/48 → **46/47** (§2-4 · §5 M3 · §6).
+> - **The nesting check was redone exhaustively** — for each of the twelve excluded locks, we read the documented lock order (`rg '락 순서|lock order'` 33 lines + CLAUDE.md 「락 순서」) and every callback and port called while holding the guard. Nothing more was caught. However, the codex head's 「상태 → 대기표」 (`transport.rs:21`) is only allowed by the docs, and no operational site actually takes the locks that way — we left it on the moving side and recorded it as a latent edge (§2-4 · §10).
+> - The latch entry's 「`drop(state)` 뒤에 로그」 is true only for the latch's **own** logs — the commit port already emits `warn!` · `info!` · `debug!` while holding the latch (`manager.rs:541-569`). We rewrote it and raised it in §9.
+> - Stale numbers were corrected — the 「48 대 49」 in §4 「묶인 것」 · the 「그 밖의 48곳」 in S2 (a) · 「제외 35곳」 (re-counted with grep over §0 · §1-1 · §2-4 · §3-5 · §4 · §5 · §6 · §7).
+> - If 1-3 U1 moves the 「liveness 공유」 reason of discovery `Cargo.toml:12-14` to the platform line, no unit writes a new reason on the base line — we added it to U5's touch list.
+> - **We added option (e) 「경고 없이 되찾기만」 to S2 and changed the recommendation from (a) → (e) (worker proposal — not a decision).** With (e) no exclusion list is needed and the move range goes from 46/47 → **83**. The cost = an amendment to confirmed ADR-0269 decision 4 (§4 S2 · §7).
 >
-> **개정 기록 — 2026-10-03 · 2차 리뷰 반영** (지적마다 코드로 다시 확인한 뒤 고쳤다):
-> - **경고 제외 규칙을 넓은 문구로 다시 훑었다** — 1판 · 2판의 검색어(`쥔 채.{0,40}(로그|IO|emit)|로그도 놓은|잎이다`)가 같은 규율의 다른 표현을 놓쳤다. 새로 든 자물쇠 다섯: codex 상태 락(복구 26곳 — `transport.rs:3012-3015` 「★상태 락을 쥔 채 찍지 않는다★」) · 턴 관측 표(`turn.rs:18` 「잡은 채 외부를 부르지 않는다」 — 검색어가 아니라 사이트별 문서 읽기로 찾았다) · daemon 명령 명부 · 사용량 출구 칸 · 사용량 구독 명부(§2-4). 제외는 그대로 둔다(옛 꼴 · 경고 없음) — **메인 판단 2026-10-03**. 「놓고 경고하고 다시 잡는」 도우미는 거부했다(§4 S2).
-> - **운영/시험 가름을 바로잡았다** — `#[cfg(test)]` 함수 둘(codex `Pending::len` `transport.rs:1348` · `input_queue.rs` `queued_bytes` `:262`)을 운영으로 셌었다. 운영 92 → 90 · 시험 전용 25 → 27.
-> - 숫자를 전부 다시 셌다 — 이전 범위 80/81 → **48/49**(§5 M3) · U3b 43 → **16** · U2 daemon 8 → **5** · U3a 20 → **18** · 섞인 자물쇠 중 (b) 에 걸리는 것 여섯 → **다섯**(명령 명부가 제외로 빠졌다). S2 의 갈래 글에 제외 규칙을 적었다.
-> - **사용량 책 락(`usage_service/mod.rs:606` — 책 락의 복구 사이트는 이 1곳)도 제외로 옮겼다 — 메인 판단 2026-10-03.** 구독 교체 `first_sheets`(`:281-291`)에서 제외한 구독 명부 락 안에서 잡혀, 경고가 그 바깥 락을 쥔 채 찍힌다. 제외 규칙을 「제외한 자물쇠 안에서 잡히는 자물쇠도 제외(중첩)」로 넓혔다. 제외 35 → **36** · M3 48/49 → **47/48** · U2 daemon 5 → **4**(§2-4 · §5 M3 · §6).
-> - discovery 의 base 의존이 U5 뒤 실제 쓰임(`time::Clock` 상위 트레이트)을 얻는다는 것을 §3-3 · U5 에 적었다 — 1-3 이 그 의존을 걷지 않게(넘겨줌).
-> - 루트 `Cargo.toml:2` · `:12-13` 의 base 서술을 U1 의 손댈 목록 · §7 문서 목록에 더했다 — base `lib.rs:15` · CLAUDE.md 와 같은 문장이라 같은 변경에서 낡는다(1-3 이 자기 몫을 다시 고친다).
+> **Revision log — 2026-10-03 · round 2 review applied** (each finding was re-checked against the code before fixing):
+> - **The warning-exclusion rule was swept again with broader wording** — the search terms of editions 1 and 2 (`쥔 채.{0,40}(로그|IO|emit)|로그도 놓은|잎이다`) missed other phrasings of the same discipline. Five newly included locks: codex state lock (26 recovery sites — `transport.rs:3012-3015` 「★상태 락을 쥔 채 찍지 않는다★」) · turn observation table (`turn.rs:18` 「잡은 채 외부를 부르지 않는다」 — found by reading the docs site by site, not by a search term) · daemon command registry · usage exit field · usage subscription registry (§2-4). The exclusions stay as they are (old form · no warning) — **main-session decision 2026-10-03**. A helper that 「놓고 경고하고 다시 잡는」 was rejected (§4 S2).
+> - **The operational/test split was corrected** — two `#[cfg(test)]` functions (codex `Pending::len` `transport.rs:1348` · `input_queue.rs` `queued_bytes` `:262`) had been counted as operational. Operational 92 → 90 · test-only 25 → 27.
+> - All numbers were recounted — move range 80/81 → **48/49** (§5 M3) · U3b 43 → **16** · U2 daemon 8 → **5** · U3a 20 → **18** · of the mixed locks, those caught by (b) six → **five** (the command registry dropped out as an exclusion). The exclusion rule was written into the S2 option text.
+> - **The usage book lock (`usage_service/mod.rs:606` — this is the only recovery site of the book lock) was also moved to the exclusions — main-session decision 2026-10-03.** In the subscription swap `first_sheets` (`:281-291`) it is taken inside the excluded subscription-registry lock, so a warning would be printed while holding that outer lock. The exclusion rule was widened to 「제외한 자물쇠 안에서 잡히는 자물쇠도 제외(중첩)」. Exclusions 35 → **36** · M3 48/49 → **47/48** · U2 daemon 5 → **4** (§2-4 · §5 M3 · §6).
+> - We wrote down in §3-3 and U5 that discovery's base dependency gains a real use after U5 (the `time::Clock` supertrait) — so that 1-3 does not remove that dependency (handed over).
+> - The base description in the root `Cargo.toml:2` · `:12-13` was added to U1's touch list and the §7 document list — it is the same sentence as base `lib.rs:15` and CLAUDE.md, so it goes stale in the same change (1-3 fixes its own part again).
 >
-> **개정 기록 — 2026-10-03 · 1차 리뷰(`/review trd full`) 반영** (지적마다 코드로 다시 확인한 뒤 고쳤다):
-> - **S2 의 권고를 (b) → (a) 로 바꿨다(워커 제안 — 결정 아님).** 독을 걷으면(`clear_poison`) 같은 자물쇠를 `.expect` 로 쓰는 이웃이 보던 신호까지 지워진다 — 섞인 자물쇠 일곱을 §2-4 에 실었다(리뷰가 센 넷 + 이 판 실측 셋: stdio `child` · `CommandDeliveries` · stdin 의 `try_lock`). 독을 걷지 않는 변형 (d)(프로세스당 한 번)를 더했다. §6 의 「동작 그대로」는 S2 에 매인 주장으로 고쳤다.
-> - 셸 `output_channel.rs` 는 이미 경고 + `clear_poison`(ADR-0231)이고 시험이 `!is_poisoned` 를 단언한다 — U2 의 처분을 S2 에 매었다((b) 가 아니면 제자리).
-> - U3b 에 codex 「stdin 블로킹 락 개수」 소스 시험(기대 2)을 넓히라는 지시를 넣었다 — 호출 꼴이 바뀌면 0 이 되어 빨개진다. 소스 문자열 시험 전수를 훑은 결과도 적었다(§6).
-> - 사용량 조회의 찾기 명단(`LookupGate::release`)은 1-3 U5 가 platform 으로 옮기므로 1-1 에서 제자리로 뺐다(U3a).
-> - 경고 제외 규칙을 「자물쇠 문서가 쥔 채 로그 · IO · 밖 호출을 금한 자리」로 정하고 셋을 더 뺐다(`QueuedInputs` · `InputsPendingTable` · 첫 제출 래치) — 교착 판정도 함께 적었다(§2-4). 이전 범위가 85 → 80(S2=(b)면 81)으로 줄었다.
-> - G1 의 게이트 ③ 사본 자리를 4 → 6 으로(`docs/testing-strategy.md` 둘), base 문서 목록에 그 파일의 base 절을 더했다.
-> - C5 — (b) 가 확정된 ADR-0269 결정 3-2 를 미루는 개정이라는 것과, (a) 의 「`windows` 를 끈다」가 1-3 U1 과의 순서에 달렸다는 것을 적고 §7 개정 후보에 더했다.
-> - §6 의 1-3 겹침 포인터를 고쳤다(daemon `lib.rs:109` · agent `manager.rs:77`) · 겹침 파일에 `usage/process.rs` · `leftover.rs` 를 더했다.
-> **범위 = 작업 순서 1-1 중 먼저 가는 몫** — `text` · `time` · `path` · `sync` · `testing` 도우미를 base 에 들이고 흩어진 사본을 갈아 끼운다(`docs/refactoring/architecture-discussion-2026-09-26.md` §10). 손상 사본 치우기(`file`)는 storage P3 착지 뒤로 미룬다(§8).
-> **읽는 법:** 각 항목의 출처를 표시한다 — **사용자 결정(날짜)** · **사용자 위임(날짜)**(사용자가 고르기를 맡겨 권고안을 채택한 것) · **메인 판단** · **워커 제안**(이 문서를 쓴 워커의 제안 — 확정이 아니다) · **실측**(돌린 명령을 함께 적는다). §4 의 열하나는 사용자 위임(2026-10-04)으로 확정이다. 본문의 「C5=b」 같은 꼬리표는 그 결정을 가리킨다.
-> **문서 배치 규약:** `docs/README.md` 「새 내용을 어디에 넣나」의 「새 기능 **설계 착수** → `process/SN-name/` 새 폴더」 줄. 같은 폴더에 1-3(platform crate) TRD 가 따로 선다.
-> **기준 코드:** `0ef6292`(브랜치 `v0.3.3/refactor/crate-boundaries`). master `9406581` 은 이 커밋을 머지한 것이고 `git log master..HEAD` = 0 이라 트리가 같다. storage 브랜치는 `origin/v0.3.3/feat/storage` `5a2cf7f`(2026-10-03 fetch)를 대조했다.
-> 앵커: **ADR-0269**(이 단계의 헌장 — base 범용 도우미) · **ADR-0275**(이 TRD 의 결정 기록 — 2026-10-04 에 박았다. 1-1 몫(ADR-0269 · ADR-0268 개정 — §4-2)과 형제 1-3 몫(ADR-0266 · ADR-0262 개정)을 함께 실은 한 ADR 이다) · ADR-0268(로그는 `tracing` 직접) · ADR-0267(command · messaging 은 지금 base 를 의존하지 않는다) · ADR-0266(platform crate — `write_atomic` 의 거처 · base → platform 간선 없음) · ADR-0270 결정 5(`normalize_cwd` → base) · ADR-0175(입주 조건) · ADR-0177(transport — 워크스페이스 의존 0) · ADR-0086(토큰) · ADR-0231(출력 Channel 명부의 poison 경고 선례) · ADR-0262(claude 잔여물 정리의 잎 자물쇠) · `docs/research/clock-seam-placement-2026-10-03.md`.
+> **Revision log — 2026-10-03 · round 1 review (`/review trd full`) applied** (each finding was re-checked against the code before fixing):
+> - **The S2 recommendation was changed from (b) → (a) (worker proposal — not a decision).** Clearing the poison (`clear_poison`) would also erase the signal that a neighbor using the same lock with `.expect` was watching — seven mixed locks are listed in §2-4 (four counted by the review + three measured in this edition: stdio `child` · `CommandDeliveries` · the `try_lock` of stdin). Variant (d) (once per process), which does not clear the poison, was added. The 「동작 그대로」 in §6 was rewritten as a claim tied to S2.
+> - Shell `output_channel.rs` is already a warning + `clear_poison` (ADR-0231) and its test asserts `!is_poisoned` — U2's disposition was tied to S2 (in place unless (b)).
+> - U3b got an instruction to widen the codex 「stdin 블로킹 락 개수」 source test (expected 2) — if the call shape changes it becomes 0 and goes red. The result of sweeping all source-string tests was also recorded (§6).
+> - The lookup list of the usage query (`LookupGate::release`) is moved by 1-3 U5 to platform, so it was taken out of 1-1 and left in place (U3a).
+> - The warning-exclusion rule was set as 「자물쇠 문서가 쥔 채 로그 · IO · 밖 호출을 금한 자리」 and three more were taken out (`QueuedInputs` · `InputsPendingTable` · the first-submit latch) — the deadlock decision was written together with it (§2-4). The move range shrank 85 → 80 (81 if S2=(b)).
+> - G1's gate ③ copy sites went from 4 → 6 (two in `docs/testing-strategy.md`), and the base section of that file was added to the base document list.
+> - C5 — we wrote that (b) is an amendment that defers confirmed ADR-0269 decision 3-2, and that (a)'s 「`windows` 를 끈다」 depends on the order with 1-3 U1, and added it to the §7 amendment candidates.
+> - The 1-3 overlap pointers in §6 were fixed (daemon `lib.rs:109` · agent `manager.rs:77`) · `usage/process.rs` · `leftover.rs` were added to the overlap files.
+> **Scope = the part of work order 1-1 that goes first** — bring the `text` · `time` · `path` · `sync` · `testing` helpers into base and replace the scattered copies (`docs/refactoring/architecture-discussion-2026-09-26.md` §10). Clearing the corrupt copies (`file`) is deferred until after storage P3 lands (§8).
+> **How to read:** each item shows its source — **user decision (date)** · **user delegation (date)** (the user left the choice to us and the recommendation was adopted) · **main-session decision** · **worker proposal** (the proposal of the worker who wrote this document — not confirmed) · **measured** (the command that was run is written alongside). The eleven choices in §4 are confirmed by user delegation (2026-10-04). Tags in the body such as 「C5=b」 point to that decision.
+> **Document placement rule:** the 「새 기능 **설계 착수** → `process/SN-name/` 새 폴더」 line of `docs/README.md` 「새 내용을 어디에 넣나」. The 1-3 (platform crate) TRD stands separately in the same folder.
+> **Reference code:** `0ef6292` (branch `v0.3.3/refactor/crate-boundaries`). master `9406581` is a merge of this commit and `git log master..HEAD` = 0, so the trees are the same. For the storage branch we compared against `origin/v0.3.3/feat/storage` `5a2cf7f` (fetched 2026-10-03).
+> Anchors: **ADR-0269** (the charter of this phase — base general-purpose helpers) · **ADR-0275** (the decision record of this TRD — written 2026-10-04. One ADR carrying the 1-1 part (amendments to ADR-0269 · ADR-0268 — §4-2) together with the sibling 1-3 part (amendments to ADR-0266 · ADR-0262)) · ADR-0268 (logs go straight through `tracing`) · ADR-0267 (command · messaging do not depend on base for now) · ADR-0266 (platform crate — the home of `write_atomic` · no base → platform edge) · ADR-0270 decision 5 (`normalize_cwd` → base) · ADR-0175 (tenancy condition) · ADR-0177 (transport — zero workspace dependencies) · ADR-0086 (token) · ADR-0231 (the poison-warning precedent of the output Channel registry) · ADR-0262 (the leaf lock of claude leftover cleanup) · `docs/research/clock-seam-placement-2026-10-03.md`.
 
 ---
 
-## 0. 이 판의 정본 요약
+## 0. Canonical summary of this edition
 
 ```
 ① 들이는 모듈 다섯 — 전부 상태 없는 공개 자유 함수(ADR-0269 결정 2 · S1=a), 예외는 시계 트레이트 하나(결정 3).
@@ -71,190 +71,190 @@
 
 ---
 
-## 1. 범위
+## 1. Scope
 
-### 1-1. 하는 것
+### 1-1. What we do
 
-| 모듈 | 무엇 | 흡수 대상(§2 실측) |
+| Module | What | Absorbed targets (§2 measured) |
 |---|---|---|
-| `text` | 바이트 → 소문자 hex | daemon 세 루프(T2=a). ★UTF-8 자르기 사본 셋은 base 로 오지 않는다 — std 로 제자리 교체(T1=b · U1)★ |
-| `time` | 지금 epoch ms · 「지금 읽기」 트레이트 · 가짜 시계(기능 뒤) | agent `now_millis` 세 벌 · daemon `command_delivery` `Clock`(운영 · 가짜 둘 다) · discovery `Clock` 의 now 부분 · agent `LeftoverClock` 의 `mono_now`(C2=a · U6) |
-| `path` | 친 경로의 철자만 고르기 | agent `normalize_cwd`(셸이 가져다 씀) |
-| `sync` | 락 오염 복구 — 경고 없음 · 독 표시는 남김(S2=e) | §2-4 의 운영 사이트 **83곳**(운영 90 − 제자리 7 — §3-5 · §5 M3) |
-| `testing` | `wait_until(timeout, cond) -> bool` | 같은 계약의 사본 11벌 |
+| `text` | bytes → lowercase hex | the three daemon loops (T2=a). ★The three UTF-8 truncation copies do not come to base — they are replaced in place with std (T1=b · U1)★ |
+| `time` | current epoch ms · the 「지금 읽기」 trait · fake clock (behind a feature) | three agent `now_millis` copies · daemon `command_delivery` `Clock` (operational · both fakes) · the now part of discovery `Clock` · the `mono_now` of agent `LeftoverClock` (C2=a · U6) |
+| `path` | pick the spelling of a typed path only | agent `normalize_cwd` (the shell borrows it) |
+| `sync` | lock poison recovery — no warning · the poison mark is kept (S2=e) | **83** operational sites in §2-4 (operational 90 − 7 in place — §3-5 · §5 M3) |
+| `testing` | `wait_until(timeout, cond) -> bool` | 11 copies of the same contract |
 
-- **base 입주 규칙 문서도 함께 고친다** — ADR-0269 영향: base `lib.rs` 헤더의 입주 조건 ①을 결정 7 의 규칙으로 바꾸고, 「셋째 입주자를 받기 전에 ADR-0175 재론」 문단을 결정 1 이 답한 것으로 고친다(같은 변경에서). CLAUDE.md 「백엔드 모듈 맵」 base 항목도 같다. 루트 `Cargo.toml` 의 멤버 주석 둘(`:2` 「base(바닥 인프라 — 로깅·PID 판정 …)」 · `:12-13` 「로깅 + PID 판정만 담는 잎 crate … 셋째 입주자는 ADR 재론을 거친다」)도 같은 문장이라 함께 낡는다 — U1 에서 고친다(2차 리뷰). ADR-0269 결정 8(새 범용 도우미를 base 로 옮기도록 다음 세션을 유도하는 서술)도 이 자리에서 쓸 수 있다 — 쓸지 · 언제 쓸지는 오케스트레이터가 정한다.
+- **The base tenancy rule document is fixed too** — ADR-0269 impact: replace tenancy condition ① in the `lib.rs` header of base with the rule of decision 7, and rewrite the 「셋째 입주자를 받기 전에 ADR-0175 재론」 paragraph as answered by decision 1 (in the same change). The base item in CLAUDE.md 「백엔드 모듈 맵」 is the same. The two member comments in the root `Cargo.toml` (`:2` 「base(바닥 인프라 — 로깅·PID 판정 …)」 · `:12-13` 「로깅 + PID 판정만 담는 잎 crate … 셋째 입주자는 ADR 재론을 거친다」) are the same sentence and go stale together — fixed in U1 (round 2 review). ADR-0269 decision 8 (the wording that steers the next session to move new general-purpose helpers into base) may also be written here — whether and when to write it is for the orchestrator to decide.
 
-### 1-2. 안 하는 것 (사유는 §8)
+### 1-2. What we do not do (reasons in §8)
 
-- `file::set_aside_corrupt` 통일 — storage P3 가 master 에 착지한 뒤(사용자 「알아서」 2026-10-03 → 메인 권고 적용 · 메모 §10).
-- `write_atomic` — base 가 아니라 platform 으로 간다(ADR-0266 결정 8 · 1-3, 역시 P3 뒤).
-- messaging 의 XML 이스케이프 · command 하네스(`src/testing.rs`)의 락 오염 복구 3곳 — 두 crate 는 지금 base 를 의존하지 않는다(ADR-0267 결정 1).
-- 로그 래퍼 — 없다(ADR-0268 결정 1).
-- agent codex 의 `clip` · `truncate`(글자 수 자르기) — 마스킹 문 뒤에 일부러 숨긴 비공개다. 옮기면 그 문이 뚫린다(§2-1).
-- transport 시계와 transport 의 base 의존 — 3단계(transport 부착 TRD)로 미룬다(C5=b · §8 D4). transport 의 UTF-8 자르기는 1-1 에서 std 로 바꾸지만(U1) 그것으로 transport 가 base 를 의존하게 되지는 않는다.
-- daemon `UsageClock` — 그대로 둔다(C3=a · §8 D6).
-- 락 오염 복구의 제자리 7곳(§3-5) · 시험 전용 24곳(§5 M3).
+- `file::set_aside_corrupt` unification — after storage P3 lands on master (user 「알아서」 2026-10-03 → main-session recommendation applied · memo §10).
+- `write_atomic` — goes to platform, not base (ADR-0266 decision 8 · 1-3, also after P3).
+- messaging's XML escape · the three lock poison recovery sites of the command harness (`src/testing.rs`) — the two crates do not depend on base for now (ADR-0267 decision 1).
+- log wrapper — there is none (ADR-0268 decision 1).
+- agent codex's `clip` · `truncate` (character-count truncation) — kept private on purpose behind the masking gate. Moving them would break through that gate (§2-1).
+- transport clock and transport's base dependency — deferred to phase 3 (the transport attachment TRD) (C5=b · §8 D4). 1-1 changes transport's UTF-8 truncation to std (U1), but that does not make transport depend on base.
+- daemon `UsageClock` — left as it is (C3=a · §8 D6).
+- the 7 in-place lock poison recovery sites (§3-5) · the 24 test-only sites (§5 M3).
 
 ---
 
-## 2. 현황 실측 (`0ef6292`)
+## 2. Current state, measured (`0ef6292`)
 
-> 메모(`architecture-discussion-2026-09-26.md`)의 줄 번호는 여러 곳이 밀렸다 — 아래가 지금 값이다. 밀린 목록은 §10.
+> Many line numbers in the memo (`architecture-discussion-2026-09-26.md`) have shifted — the values below are the current ones. The list of shifted ones is in §10.
 
 ### 2-1. `text`
 
-**UTF-8 경계 자르기 — 사본 셋, 모양 둘** (실측: `rg -n "is_char_boundary" crates src-tauri/src`)
+**UTF-8 boundary truncation — three copies, two shapes** (measured: `rg -n "is_char_boundary" crates src-tauri/src`)
 
-| 자리 | 남기는 쪽 | 동작 | 반환 |
+| Site | Side kept | Behavior | Returns |
 |---|---|---|---|
-| `crates/engram-dashboard-transport/src/ws.rs:147-156` `clamp_close_reason` | 앞 | `len <= 123` 이면 그대로, 아니면 123 에서 문자 경계까지 **내려가** 자른다 | 빌린 `&str` |
-| `crates/engram-dashboard-daemon/src/experiment/record.rs:178-186` `cap_response` | 앞 | 같은 루프 · 상한 4096 | 새 `String`(`saturation_pilot` 실험 바이너리만 부른다) |
-| `crates/engram-dashboard-agent/src/output_core.rs:1059-1062` `push_diagnostic` 안 | 뒤 | `cut = len - CAP` 에서 문자 경계까지 **올라가** `drain(..cut)` — 제자리 수정 | 없음(`String` 을 고친다) |
+| `crates/engram-dashboard-transport/src/ws.rs:147-156` `clamp_close_reason` | front | if `len <= 123` return as is, otherwise **go down** from 123 to a character boundary and cut | borrowed `&str` |
+| `crates/engram-dashboard-daemon/src/experiment/record.rs:178-186` `cap_response` | front | same loop · cap 4096 | new `String` (only the `saturation_pilot` experiment binary calls it) |
+| inside `crates/engram-dashboard-agent/src/output_core.rs:1059-1062` `push_diagnostic` | back | **go up** from `cut = len - CAP` to a character boundary and `drain(..cut)` — in-place edit | none (it modifies the `String`) |
 
-- 그 밖의 `is_char_boundary` 셋은 자르기가 아니다 — messaging `service.rs:3804-3807`(구획 검증) · agent `backend/claude/mod.rs:5441`(시험 전제).
-- **★std 한 줄로 같은 동작이 된다(실측)★** — `str::floor_char_boundary` · `str::ceil_char_boundary` 가 이 워크스페이스의 고정 컴파일러(`rust-toolchain.toml` = 1.95.0)에서 기능 플래그 없이 컴파일된다(스크래치 파일을 `rustc --edition 2021` 로 컴파일 · `"가나다"` 에서 4 → 3 · 6 확인, 2026-10-03). 앞 남김 = `&s[..s.floor_char_boundary(max)]`, 뒤 남김 자리 = `s.ceil_char_boundary(s.len() - max)`. 위 두 루프와 결과가 같다(`floor` 는 `max >= len` 이면 `len` 을 돌려준다). → **결정 T1=(b)**: base 함수 없이 이 둘로 제자리 교체(§3-2 · U1).
-- **뒤 남김은 사본이 하나뿐이다** — ADR-0269 결정 7(「지금 여러 곳에서 쓰이거나 복사돼 있으면」)로는 입주 근거가 안 선다. 결정 2 의 표가 `keep_tail_bytes` 를 적은 것은 사용자 「다 옮겨」(2026-09-26)를 따른 것이다 — T1=(b) 로 ADR-0275 가 두 함수를 그 표에서 뺀다(§4-2).
-- **안 옮기는 것(제자리):** agent `backend/codex/decoder.rs:1479` `clip` → `:1488` `truncate`(`char_indices().nth` — 글자 수 · `…` 를 붙임) · `backend/codex/transport.rs:1537` `clip`(글자 수 · `…(잘림)`). 둘 다 소스 문자열 시험이 「문이 정해진 둘뿐」을 잰다(`decoder.rs:3486` · `transport.rs:5028`). agent `usage/process.rs:616` `tail_line` 은 바이트를 손실 복원(`from_utf8_lossy`)하고 마스킹을 먼저 한다 — 계약이 다르다. `output_core.rs` · `session.rs` 의 `terminal_tail` 은 `Vec<u8>` 이다.
+- The other three `is_char_boundary` are not truncation — messaging `service.rs:3804-3807` (segment validation) · agent `backend/claude/mod.rs:5441` (test precondition).
+- **★One std line gives the same behavior (measured)★** — `str::floor_char_boundary` · `str::ceil_char_boundary` compile without a feature flag on this workspace's pinned compiler (`rust-toolchain.toml` = 1.95.0) (compiled a scratch file with `rustc --edition 2021` · confirmed 4 → 3 · 6 in `"가나다"`, 2026-10-03). Keep-front = `&s[..s.floor_char_boundary(max)]`, keep-back site = `s.ceil_char_boundary(s.len() - max)`. The result is the same as the two loops above (`floor` returns `len` if `max >= len`). → **Decision T1=(b)**: replace in place with these two, with no base function (§3-2 · U1).
+- **The keep-back form has only one copy** — ADR-0269 decision 7 (「지금 여러 곳에서 쓰이거나 복사돼 있으면」) does not establish a basis for tenancy. That the table in decision 2 lists `keep_tail_bytes` follows the user 「다 옮겨」 (2026-09-26) — with T1=(b), ADR-0275 removes the two functions from that table (§4-2).
+- **What does not move (in place):** agent `backend/codex/decoder.rs:1479` `clip` → `:1488` `truncate` (`char_indices().nth` — character count · appends `…`) · `backend/codex/transport.rs:1537` `clip` (character count · `…(잘림)`). In both, a source-string test measures 「문이 정해진 둘뿐」 (`decoder.rs:3486` · `transport.rs:5028`). Agent `usage/process.rs:616` `tail_line` restores bytes lossily (`from_utf8_lossy`) and masks first — a different contract. The `terminal_tail` of `output_core.rs` · `session.rs` is `Vec<u8>`.
 
-**바이트 → 소문자 hex — 루프 셋, 전부 「옮기지 않는다」 함수 안** (실측: `rg -n '02x\}' crates src-tauri/src`)
+**bytes → lowercase hex — three loops, all inside 「옮기지 않는다」 functions** (measured: `rg -n '02x\}' crates src-tauri/src`)
 
-| 자리 | 감싼 함수 | ADR-0269 의 판정 |
+| Site | Wrapping function | ADR-0269's decision |
 |---|---|---|
-| `crates/engram-dashboard-daemon/src/lib.rs:77-80` | `generate_token`(:73 — WS 클라이언트 토큰) | 토큰 생성기 공유 금지 · 루프만 범용 |
-| `crates/engram-dashboard-daemon/src/control/mod.rs:146-149` | `gen_token`(:142 — 제어 채널 토큰) | 같음 |
-| `crates/engram-dashboard-daemon/src/experiment/record.rs:192-195` | `sha256_hex`(:189) | 「`sha2` 를 끌고 온다」로 제외 — ★사실이 아니다★(아래) |
+| `crates/engram-dashboard-daemon/src/lib.rs:77-80` | `generate_token` (:73 — WS client token) | no sharing of token generators · only the loop is general-purpose |
+| `crates/engram-dashboard-daemon/src/control/mod.rs:146-149` | `gen_token` (:142 — control channel token) | same |
+| `crates/engram-dashboard-daemon/src/experiment/record.rs:192-195` | `sha256_hex` (:189) | excluded as 「`sha2` 를 끌고 온다」 — ★this is not true★ (below) |
 
-- 셋 다 `write!(s, "{b:02x}")` 루프로 같다. 소비자는 daemon 하나다.
-- **ADR-0086 본문에는 공유 금지 문장이 없다** — `grep -n "공용\|공유" docs/decisions/0086-*.md` → 0줄. 「공용화 금지 · 혼용 금지(ADR-0086 §맥락)」는 코드 주석(`daemon/src/lib.rs:584-585` · `control/mod.rs:140-141`)에 있고, 가리키는 것은 **두 토큰을 섞지 말라**는 것이다(인코딩 루프가 아니라). 그러니 생성기 둘은 따로 두고 그 안의 루프만 `hex_lower` 를 부르는 것은 그 주석과 부딪히지 않는다(워커 판단).
-- **`sha256_hex` 는 `sha2` 를 끌지 않는다** — std 만으로 손구현한 SHA-256 이다(`record.rs:247-251` 주석 「워크스페이스에 sha2 가 없다」 · `grep -n sha2 crates/*/Cargo.toml src-tauri/Cargo.toml` → 0줄). 그래도 함수 자체는 사본이 하나라 결정 7 로 입주하지 않는다 — 제외는 서되 사유가 바뀐다(ADR-0275 — §4-2).
-- → **결정 T2=(a)**: 감싼 함수 셋은 제자리, 안의 루프만 `hex_lower` 로(U1).
+- All three are the same `write!(s, "{b:02x}")` loop. The only consumer is daemon.
+- **The text of ADR-0086 has no sentence forbidding sharing** — `grep -n "공용\|공유" docs/decisions/0086-*.md` → 0 lines. 「공용화 금지 · 혼용 금지(ADR-0086 §맥락)」 is in code comments (`daemon/src/lib.rs:584-585` · `control/mod.rs:140-141`), and what it points to is **do not mix the two tokens** (not the encoding loop). So keeping the two generators separate while only the loop inside them calls `hex_lower` does not conflict with that comment (worker judgment).
+- **`sha256_hex` does not pull in `sha2`** — it is a hand-rolled SHA-256 using std only (`record.rs:247-251` comment 「워크스페이스에 sha2 가 없다」 · `grep -n sha2 crates/*/Cargo.toml src-tauri/Cargo.toml` → 0 lines). Even so, the function itself has one copy, so under decision 7 it does not move in — the exclusion stands but the reason changes (ADR-0275 — §4-2).
+- → **Decision T2=(a)**: the three wrapping functions stay in place; only the loop inside moves to `hex_lower` (U1).
 
 ### 2-2. `time`
 
-**지금 epoch ms** (실측: `rg -n "UNIX_EPOCH" crates src-tauri/src`)
+**Current epoch ms** (measured: `rg -n "UNIX_EPOCH" crates src-tauri/src`)
 
-| 자리 | 모양 | 쓰는 곳 |
+| Site | Shape | Used by |
 |---|---|---|
-| agent `profile.rs:20-25` `now_millis` | `i64` · 1970 전 = 0 | `:244` · `:819`(`last_active`) |
-| agent `persistence/mod.rs:25-30` `now_millis` | 같음 | `:89` 손상 사본 이름(`agents.json.corrupt-<ms>`) **하나뿐** |
-| agent `persistence/presets.rs:22-27` `now_millis` | 같음 | `:81` 손상 사본 이름 **하나뿐** |
-| 셸 `src-tauri/src/settings/store.rs:122-125` `copy_aside` 안 | `u128` · 1970 전 = 0 | 손상 사본 — ★storage P3 가 이 파일을 고친다 → 1-1 에서 손대지 않는다★ |
-| storage 브랜치 `src-tauri/src/state/saver.rs`(`5a2cf7f`) `SystemClock::wall_ms` | `u64` · 1970 전 = 0 | 아직 master 에 없다 |
+| agent `profile.rs:20-25` `now_millis` | `i64` · before 1970 = 0 | `:244` · `:819` (`last_active`) |
+| agent `persistence/mod.rs:25-30` `now_millis` | same | **only one** use: the corrupt copy name at `:89` (`agents.json.corrupt-<ms>`) |
+| agent `persistence/presets.rs:22-27` `now_millis` | same | **only one** use: the corrupt copy name at `:81` |
+| inside shell `src-tauri/src/settings/store.rs:122-125` `copy_aside` | `u128` · before 1970 = 0 | corrupt copy — ★storage P3 fixes this file → 1-1 does not touch it★ |
+| storage branch `src-tauri/src/state/saver.rs` (`5a2cf7f`) `SystemClock::wall_ms` | `u64` · before 1970 = 0 | not on master yet |
 
-- 나머지 `UNIX_EPOCH` 자리는 ms 가 아니다 — 나노초 임시 폴더 이름(discovery `lib.rs:2620` · daemon `tests/ws_e2e.rs:2341` · 셸 `settings/tests.rs:24`) · 초(daemon `bin/saturation_pilot.rs:1703,1713` · `usage_service/clock.rs:51` 의 부호 있는 내림 초) · base `logging/mod.rs:155`(로그 파일 이름 — `logging` 안에 남는다: 입주자 무참조).
-- **반환 타입이 세 갈래다**(i64 · u128 · u64). 1-1 이 바꾸는 것은 agent 의 i64 셋뿐이다.
+- The remaining `UNIX_EPOCH` sites are not ms — nanosecond temp folder names (discovery `lib.rs:2620` · daemon `tests/ws_e2e.rs:2341` · shell `settings/tests.rs:24`) · seconds (daemon `bin/saturation_pilot.rs:1703,1713` · the signed floor seconds of `usage_service/clock.rs:51`) · base `logging/mod.rs:155` (log file name — it stays inside `logging`: no tenant references it).
+- **The return type splits three ways** (i64 · u128 · u64). What 1-1 changes is only the three agent i64 ones.
 
-**시계 seam — ADR-0269 는 넷으로 셌는데 지금 여섯이다** (실측: `rg -n "trait (Clock|UsageClock|\w*Clock)\b" crates src-tauri/src`)
+**Clock seam — ADR-0269 counted four, now there are six** (measured: `rg -n "trait (Clock|UsageClock|\w*Clock)\b" crates src-tauri/src`)
 
-| 자리 | 모양 | 경계 | 운영 구현 | 가짜 |
+| Site | Shape | Boundary | Operational implementation | Fake |
 |---|---|---|---|---|
-| daemon `command_delivery.rs:176` `Clock` | `now() -> Instant` | `Send + Sync` | `SystemClock`(:181) | `tests::ManualClock`(:2425 — `Mutex<Instant>` + `advance`) · `connection_core.rs:4403` 도 쓴다 |
-| discovery `lib.rs:431` `Clock` | `now()` + 막는 `sleep(Duration)` | 없음 · `&dyn Clock` 로 받는다(:485) | `RealClock`(:1047) | `FakeClock`(:1742 — `RefCell<Instant>` · `sleep` 이 now 를 민다 · `slept` 를 센다) |
-| transport `clock.rs:20` `Clock` | `now()` + `sleep -> BoxFuture<'static, ()>` | `Send + Sync + 'static` · `Arc<dyn Clock>` | `SystemClock`(tokio sleep) | `testing::ManualClock`(:99 — 시한 순서로 잠꾸러기를 깨운다 · oneshot) |
-| daemon `usage_service/clock.rs:9` `UsageClock` | `mono() -> Duration`(기점 보유) + `wall() -> i64`(부호 있는 epoch 초) | `Send + Sync + 'static` | `OsUsageClock` | `ManualUsageClock`(두 축을 따로 민다) · `usage_service/mod.rs:1251` · `schedule.rs:370` |
-| ★agent `backend/claude/leftover.rs:953` `LeftoverClock`★ | `mono_now() -> Instant` + 막는 `sleep` + 스레드 `spawn` | `Send + Sync` · `pub(super)` | `SystemClock`(:961) | `FakeClock`(:4664 — 원자 정수 · sleep 이 민다) · `SkipClock`(:6586 — **실시간** + 건너뛴 몫) |
-| ★agent `backend/codex/thread_lock.rs:261` `CaptureClock`★ | `child_alive()` + 막는 `sleep` — **지금 읽기가 없다** | 없음 | `ChildClock` | `FakeClock`(:895) |
+| daemon `command_delivery.rs:176` `Clock` | `now() -> Instant` | `Send + Sync` | `SystemClock` (:181) | `tests::ManualClock` (:2425 — `Mutex<Instant>` + `advance`) · `connection_core.rs:4403` also uses it |
+| discovery `lib.rs:431` `Clock` | `now()` + blocking `sleep(Duration)` | none · received as `&dyn Clock` (:485) | `RealClock` (:1047) | `FakeClock` (:1742 — `RefCell<Instant>` · `sleep` pushes now · counts `slept`) |
+| transport `clock.rs:20` `Clock` | `now()` + `sleep -> BoxFuture<'static, ()>` | `Send + Sync + 'static` · `Arc<dyn Clock>` | `SystemClock` (tokio sleep) | `testing::ManualClock` (:99 — wakes the sleepers in deadline order · oneshot) |
+| daemon `usage_service/clock.rs:9` `UsageClock` | `mono() -> Duration` (holds the origin) + `wall() -> i64` (signed epoch seconds) | `Send + Sync + 'static` | `OsUsageClock` | `ManualUsageClock` (pushes the two axes separately) · `usage_service/mod.rs:1251` · `schedule.rs:370` |
+| ★agent `backend/claude/leftover.rs:953` `LeftoverClock`★ | `mono_now() -> Instant` + blocking `sleep` + thread `spawn` | `Send + Sync` · `pub(super)` | `SystemClock` (:961) | `FakeClock` (:4664 — atomic integer · sleep pushes it) · `SkipClock` (:6586 — **real time** + the skipped share) |
+| ★agent `backend/codex/thread_lock.rs:261` `CaptureClock`★ | `child_alive()` + blocking `sleep` — **there is no now-read (지금 읽기)** | none | `ChildClock` | `FakeClock` (:895) |
 
-- `LeftoverClock` 은 「지금 읽기」 seam 이다 — ADR-0269 결정 3 이 세지 않은 다섯째. `mono_now` 호출 22곳(`rg -n "mono_now\(" crates/engram-dashboard-agent/src | wc -l`). 그 계약에 「★문 자물쇠 안에서도 부른다★ — 다른 자물쇠를 잡거나 기다리지 않는다」가 박혀 있다(:954) — CLAUDE.md 「핵심 불변식」 락 순서의 잔여물 정리 조항과 같은 것이다. → **결정 C2=(a)** — 상위 트레이트 꼴로 합친다(U6).
-- `CaptureClock` 은 시간을 읽지 않는다 — 합칠 몫이 없다(워커 판단, 질문 아님).
-- **storage 브랜치가 일곱째를 더한다** — `src-tauri/src/state/saver.rs`(`5a2cf7f`) `pub trait Clock: Send + 'static { now() -> Instant; wall_ms() -> u64 }`. `Sync` 가 없다. P3 착지 뒤 단위(§8 D2)의 몫이다. ★→ TRD A U8 이 base `Clock` 의 하위 트레이트(`SaverClock` — `Send + Sync` 는 base `Clock` 이 진다)로 합쳤다(ADR-0291 결정 14 · `fa6cb2f3`)★
-- **`UsageClock` 은 깔끔히 맞지 않는다**(ADR-0269 결정 3-4 의 조건 — 「안 맞으면 그때 사용자에게 묻는다」):
-  - `mono()` 는 `Instant` 가 아니라 **시계가 쥔 기점부터의 `Duration`** 이고, 그 값이 `usage_service/book.rs` 의 도메인 타입으로 흘러간다(`book.rs:54` `pub mono: Duration` · `owes_at(mono)` · `reject_deadline(mono, …)` 등). 시험은 `Duration::MAX` · `Duration::ZERO` 끝값을 쓴다(`book.rs:2133,2756` · `clock.rs:176`) — `Instant` 로는 그 끝값을 만들 수 없다.
-  - `wall()` 은 부호 있는 epoch **초**(1970 전 음수 · 양끝 포화)라 `now_epoch_ms()`(ms · 1970 전 0)로 바꿀 수 없다.
-  - 사용량: `.mono()` 11곳 · `.wall()` 13곳(daemon src).
-  - → **결정 C3=(a)** — 그대로 둔다(결정 3-4 의 「안 맞으면 그때 묻는다」에 대한 답 · 사유는 `usage_service/clock.rs` 머리에 · U5 · §8 D6).
+- `LeftoverClock` is the 「지금 읽기」 seam — the fifth one that ADR-0269 decision 3 did not count. `mono_now` is called at 22 sites (`rg -n "mono_now\(" crates/engram-dashboard-agent/src | wc -l`). 「★문 자물쇠 안에서도 부른다★ — 다른 자물쇠를 잡거나 기다리지 않는다」 is baked into that contract (:954) — it is the same as the leftover cleanup clause of the CLAUDE.md 「핵심 불변식」 lock order. → **Decision C2=(a)** — merge in supertrait form (U6).
+- `CaptureClock` does not read time — there is nothing to merge (worker judgment, not a question).
+- **The storage branch adds a seventh** — `src-tauri/src/state/saver.rs` (`5a2cf7f`) `pub trait Clock: Send + 'static { now() -> Instant; wall_ms() -> u64 }`. There is no `Sync`. It is the job of the unit after P3 lands (§8 D2). ★→ TRD A U8 merged it as a subtrait of the base `Clock` (`SaverClock` — base `Clock` carries the `Send + Sync`) (ADR-0291 decision 14 · `fa6cb2f3`)★
+- **`UsageClock` does not fit cleanly** (the condition of ADR-0269 decision 3-4 — 「안 맞으면 그때 사용자에게 묻는다」):
+  - `mono()` is not `Instant` but **`Duration` since the origin the clock holds**, and that value flows into the domain type of `usage_service/book.rs` (`book.rs:54` `pub mono: Duration` · `owes_at(mono)` · `reject_deadline(mono, …)` etc.). Tests use the `Duration::MAX` · `Duration::ZERO` end values (`book.rs:2133,2756` · `clock.rs:176`) — `Instant` cannot produce those end values.
+  - `wall()` is signed epoch **seconds** (negative before 1970 · saturating at both ends), so it cannot be replaced by `now_epoch_ms()` (ms · 0 before 1970).
+  - Usage: `.mono()` 11 sites · `.wall()` 13 sites (daemon src).
+  - → **Decision C3=(a)** — leave as is (the answer to 「안 맞으면 그때 묻는다」 in decision 3-4 · the reason goes in the head of `usage_service/clock.rs` · U5 · §8 D6).
 
 ### 2-3. `path`
 
-- 정의 = agent `commands.rs:1143-1153` `pub fn normalize_cwd(raw) -> String` — 첫 글자가 `"` 또는 `'` 이고 같은 글자로 끝나며 안이 비지 않았으면 **한 겹만** 벗기고, 그 뒤 `\` → `/`. 파일시스템을 보지 않는다.
-- 부르는 곳 = agent `commands.rs:1106`(등록 공통부) · 셸 `src-tauri/src/layout/commands.rs:38`(import) · `:1127`(`verb_spawn_into`). 셸 시험 `tests/layout_commands.rs:2121` 은 주석에서 이름만 부른다.
-- 시험 = agent `commands.rs:2091`(벗기기 · 뒤집기 다섯) · `:2106`(안 벗기는 다섯) — 함수와 함께 base 로 옮길 수 있다. `:2114` 이후의 「두 문이 같은 철자」 시험은 등록 경로를 재므로 agent 에 남는다.
-- 문서 주석이 도메인을 말한다(「사람 · LLM 이 친 cwd」 · 앞의 빈 값 검문 `reject_blanks` · ADR-0122) — base 판은 그 말을 빼고 계약만 남기고, 도메인 사유는 agent 호출 자리 주석으로 옮긴다(워커 제안).
-- 셸 → agent 간선은 이것으로 닫히지 않는다 — `COMMAND_SPECS` · `llm_creation_refusal` 이 남는다(2-1 몫 · ADR-0270).
+- Definition = agent `commands.rs:1143-1153` `pub fn normalize_cwd(raw) -> String` — if the first character is `"` or `'` and the string ends with the same character and the inside is not empty, strip **one layer only**, then `\` → `/`. It does not look at the filesystem.
+- Callers = agent `commands.rs:1106` (common registration part) · shell `src-tauri/src/layout/commands.rs:38` (import) · `:1127` (`verb_spawn_into`). The shell test `tests/layout_commands.rs:2121` only mentions the name in a comment.
+- Tests = agent `commands.rs:2091` (five stripping · flipping cases) · `:2106` (five non-stripping cases) — they can move to base together with the function. The 「두 문이 같은 철자」 tests after `:2114` measure the registration path, so they stay in agent.
+- The doc comment speaks of the domain (「사람 · LLM 이 친 cwd」 · the empty-value check in front `reject_blanks` · ADR-0122) — the base version drops those words and keeps only the contract, and the domain reason moves to the comment at the agent call site (worker proposal).
+- The shell → agent edge is not closed by this — `COMMAND_SPECS` · `llm_creation_refusal` remain (part of 2-1 · ADR-0270).
 
-### 2-4. `sync` — 락 오염 복구
+### 2-4. `sync` — lock poison recovery
 
-**집계 = 117곳**(실측 — 셈법은 §10). ADR-0269 「근거」의 94(`ebfdafc`)는 같은 줄 클로저 67 + `PoisonError::into_inner` 27 이었고, 지금 그 두 셈은 67 · 27(줄 수 — 그중 1줄은 `output_channel.rs:18` 주석)로 같다. 117 은 여러 줄에 걸친 꼴과 다른 꼴까지 넣은 수다.
+**Total = 117 sites** (measured — how it was counted is in §10). The 94 of ADR-0269 「근거」 (`ebfdafc`) was 67 same-line closures + 27 `PoisonError::into_inner`, and now those two counts are the same 67 · 27 (line counts — one of those lines is a `output_channel.rs:18` comment). 117 is the number that includes forms spanning several lines and other forms.
 
-| 꼴 | 수 |
+| Form | Count |
 |---|---|
 | `.lock()` + `unwrap_or_else(\|x\| x.into_inner())` | 77 |
 | `.lock()` + `unwrap_or_else(PoisonError::into_inner)` | 26 |
 | `match m.lock() { Ok(g) => g, Err(p) => p.into_inner() }` | 6 |
 | `.lock().unwrap_or_else(\|e\| { warn; clear_poison; e.into_inner() })` | 1 |
 | `Condvar::wait_timeout(..).unwrap_or_else(\|p\| p.into_inner())` | 4 |
-| `RwLock::read` / `write` + 클로저 | 1 / 1 |
-| `try_lock` 의 `TryLockError::Poisoned` 갈래 | 1 |
+| `RwLock::read` / `write` + closure | 1 / 1 |
+| the `TryLockError::Poisoned` branch of `try_lock` | 1 |
 
-| crate | 운영 | 시험 전용 | 비고 |
+| crate | Operational | Test-only | Note |
 |---|---|---|---|
-| agent | 68 | 19 | 운영 중 `backend/codex/transport.rs` 42 · `transport/input_queue.rs` 7 · `backend/claude/leftover.rs` 3 · `transport/stdio.rs` 3 · `manager.rs` · `reaper.rs`(read 1 · write 1) · `session.rs` · `transport/pty.rs` 각 2 · `inputs_pending.rs` · `queued_input.rs` · `session_id_latch.rs` · `turn.rs` · `usage/process.rs` 각 1 |
-| daemon | 8 | 5 | 운영 = `agent_conn.rs:213` · `command_delivery.rs:1008` · `command_roster.rs:401` · `usage_service/mod.rs:571,606,648` · `usage_service/reject_store.rs:276` · `usage_service/watch.rs:205` |
-| 셸 | 13 | 0 | `view_commands.rs` 7(:403,410,455,527,552,758,790) · `settings/mod.rs` 3(:478,482,486) · `daemon_client/mod.rs:88` · `output_channel.rs:41` · `ui_settings.rs:768` |
+| agent | 68 | 19 | of the operational ones `backend/codex/transport.rs` 42 · `transport/input_queue.rs` 7 · `backend/claude/leftover.rs` 3 · `transport/stdio.rs` 3 · `manager.rs` · `reaper.rs` (read 1 · write 1) · `session.rs` · `transport/pty.rs` 2 each · `inputs_pending.rs` · `queued_input.rs` · `session_id_latch.rs` · `turn.rs` · `usage/process.rs` 1 each |
+| daemon | 8 | 5 | operational = `agent_conn.rs:213` · `command_delivery.rs:1008` · `command_roster.rs:401` · `usage_service/mod.rs:571,606,648` · `usage_service/reject_store.rs:276` · `usage_service/watch.rs:205` |
+| shell | 13 | 0 | `view_commands.rs` 7 (:403,410,455,527,552,758,790) · `settings/mod.rs` 3 (:478,482,486) · `daemon_client/mod.rs:88` · `output_channel.rs:41` · `ui_settings.rs:768` |
 | base | 1 | 0 | `logging/mod.rs:129` |
 | command | 0 | 3 | `src/testing.rs` |
 | messaging · net · protocol · discovery · transport | 0 | 0 | — |
 
-- 「운영/시험」 가름은 스크립트 추정(파일의 첫 `#[cfg(test)] mod … {` 뒤 · `tests/` · `testing.rs` · `fakes.rs`)에 손 정정을 더했다 — daemon `usage_service/clock.rs:114` 는 `#[cfg(test)]` 가짜라 시험 쪽으로 셌다. ★2차 리뷰 때 감싼 함수의 속성까지 보도록 스크립트를 고쳐 둘을 더 시험 쪽으로 옮겼다★ — codex `transport.rs:1349`(`#[cfg(test)] fn len` `:1348` — `Pending` 의 시험용 창) · `transport/input_queue.rs:263`(`#[cfg(test)] fn queued_bytes` `:262`). 그래서 운영 92 → 90 · 시험 전용 25 → 27 이다. 감싼 `impl` 이나 모듈에 붙은 속성은 여전히 손으로 본 것뿐이라 오차 가능성은 남는다.
-- **이미 있는 선례 둘:** agent `usage/process.rs:636` 의 `fn lock<T>(&Mutex<T>) -> MutexGuard<T>` — 자유 함수 꼴 그대로다(부르는 곳 = `StderrTail` 셋 `:696 · 985 · 1002` + 찾기 명단 `LookupGate::release` `:352`). 셸 `output_channel.rs:38-45` — **경고 + `clear_poison`** 으로 「poisoning 한 번에 warn 한 번」(ADR-0231 앵커). 그 시험 `:145-148` 이 되찾은 뒤 `!registry.is_poisoned()` 를 단언한다 — **독을 걷지 않는 도우미로 옮기면 빨개진다** → S2=(e) 의 도우미는 독을 걷지 않으므로 이 자리는 제자리다(§3-5 · U2). 그 밖의 사이트는 전부 **말없이** 되찾고 독 표시를 남긴다 — 117곳 중 116곳이다(S2=(e) 의 근거).
-- **★운영 빌드에서는 이 갈래가 안 닿는다★** — 워크스페이스 `[profile.release]` 가 `panic = "abort"`(`Cargo.toml:34-35`)라 패닉이 프로세스를 끝내고 독이 생기지 않는다. 그 사실을 코드 주석이 이미 적는다(`command_roster.rs:396` · `command_delivery.rs:1003`). 그러니 복구 경고를 달았더라도 **debug · 시험 빌드의 신호**였다 — S2=(e) 가 잃는 것이 그것뿐이라는 근거다(§4).
-- **★S2=(e) 의 이전 규칙 — 운영 90곳 중 83곳을 옮기고 7곳은 제자리★**(목록 · 사유 = §3-5). 도우미가 로그 · 다른 락 · 밖 호출을 하지 않으므로, 문서가 「쥔 채 로그 · IO · 밖 호출」을 금한 자물쇠(잔여물 정리 잎 둘 — CLAUDE.md 「핵심 불변식」 락 순서 · 대기 입력 명부 · codex 상태 락 등)의 사이트도 옮긴다 — 도우미가 더하는 동작이 없어 옮겨도 그 자물쇠들의 규율이 바뀌지 않는다(무엇을 언제 잡는지는 부르는 쪽 그대로).
-- **역사 기록 — 경고를 다는 갈래(S2 (a) ~ (d))였다면 필요했던 제외 목록(채택 안 함 · ADR-0275 의 거부 사유):** 그 갈래들은 경고가 **가드를 쥔 채** 찍힌다(독 걸린 가드를 되찾은 뒤라야 돌려줄 수 있다). 그래서 자물쇠 문서가 「쥔 채 로그 · IO · 밖 호출」을 금한 자물쇠와, 그런 자물쇠 **안에서** 잡히는 자물쇠(중첩)는 옮기지 못하고 옛 꼴로 둬야 했다 — 열둘 · 복구 37곳(메인 판단 2026-10-03):
-  - agent(33) — 잔여물 정리 잎 둘(`leftover.rs:402` `Recorder.inner` · `:1713` `GateCell.state` — CLAUDE.md 락 순서) · 대기 입력 명부(`queued_input.rs:405` — 「★이 가드를 쥔 채 emit·IO·다른 락을 잡지 말 것★」) · 대기 목록 표(`inputs_pending.rs:47` — 「명부·표는 잎」) · 첫 제출 래치(`session_id_latch.rs:150` — 머리 `:23`) · 그 commit 포트의 `expected` 칸(`manager.rs:550` — 중첩 · 3차 리뷰) · 턴 관측 표(`turn.rs:145` — 머리 `:18-21` 「leaf」) · codex 상태 락 26(`backend/codex/transport.rs` — `SharedState` `:1079` · 규율 `:3010-3015` 「★상태 락을 쥔 채 찍지 않는다★」 · 사이트 = `lock.lock()` 25 + 라이터 `wait_timeout` `:2192`).
-  - daemon(4) — 명령 명부(`command_roster.rs:401` — `detach` 문서 `:313-314`) · 사용량 출구 칸(`agent_conn.rs:213` — `usage_service/watch.rs:28-29`) · 사용량 구독 명부(`usage_service/watch.rs:205` — `:146-147`) · 사용량 책 락(`usage_service/mod.rs:606` — 구독 명부 안에서 잡힌다 · 중첩).
-  - **그 목록의 이력이 (a) 를 고르지 않은 주된 사유다** — 1판 = 잔여물 정리 잎 둘 → 1차 리뷰 = 같은 규율의 문구로 셋 더 → 2차 리뷰 = 다른 표현(굵은 글씨 · 영어 `leaf`)으로 다섯 더 + 중첩 규칙(책 락) → 3차 리뷰 = 중첩이 놓친 `expected` 칸. 리뷰마다 넓혀야 했고 지키는 게이트가 없었다 — 자물쇠 문서에 「쥔 채 로그 금지」를 새로 적거나 제외 자물쇠 안에서 옮긴 자물쇠를 잡게 고치면 말없이 어긋난다(잠복 자리 하나 = codex 머리가 허용해 둔 「상태 → 대기표」 · §9). 그 규율이 코드에서 이미 다 지켜지지도 않는다(§9 의 둘). 교착 때문은 아니었다 — 운영 구독자(base `logging/mod.rs:417-421`)의 파일 sink 는 자기 `LOG_FILE` 자물쇠만 잡는다(코드 읽기). 걸린 것은 규율 일관이었다.
-  - ★「놓고 경고하고 다시 잡는」 도우미도 거부했다★ — 그 자물쇠 자신은 비우지만 부른 쪽이 쥔 바깥 자물쇠 아래서는 여전히 찍힌다(예: codex `Announcer.order` → 상태 락 — `transport.rs:1112-1115`).
-  - 4판이 실었던 상세(찾은 법의 `rg` 정규식 · 자물쇠별 문서 인용 전문 · 자물쇠마다의 중첩 전수 점검 · 「경계에 있지만 빼지 않는」 넷 — `command_delivery.rs:1008` · `daemon_client/mod.rs:88` · `view_commands.rs` · `reaper.rs`)는 이 판에서 걷었다. 실측 명령의 요약은 §10. ★경고를 다시 달고 싶어지면 이 감사를 83곳 전체에 대해 처음부터 다시 한다★(ADR-0275 에 적는다).
-- **섞인 자물쇠 — 같은 자물쇠를 한쪽은 되찾고 다른 쪽은 `.expect`(또는 `try_lock`)로 쓴다** (1차 리뷰 넷 + 2판 실측 셋. 찾은 법 = 복구 사이트의 필드 이름으로 같은 crate 운영 코드의 `.lock()/.read()/.write()` + `.expect(`/`.unwrap(` 를 맞대는 스크래치 스크립트 뒤 손 확인 — 필드 이름이 같은 남의 구조체는 걸러 냈다). 지금 독 표시는 **사라지지 않는다** — 그래서 아래 「다른 쪽」의 동작은 그 사이에 복구가 돌았는지와 무관하다. ★S2=(e) 의 도우미도 독을 걷지 않으므로 이 무관함이 1-1 뒤에도 그대로다★ — 이 표는 (b)(`clear_poison`)를 거부한 근거로 남긴다(마지막 칸 = (b) 였다면).
+- The 「운영/시험」 split is a script estimate (after the first `#[cfg(test)] mod … {` in the file · `tests/` · `testing.rs` · `fakes.rs`) plus hand corrections — daemon `usage_service/clock.rs:114` is a `#[cfg(test)]` fake, so it was counted on the test side. ★In the round 2 review we fixed the script to also look at the attributes of the wrapping function, and moved two more to the test side★ — codex `transport.rs:1349` (`#[cfg(test)] fn len` `:1348` — a test-only window of `Pending`) · `transport/input_queue.rs:263` (`#[cfg(test)] fn queued_bytes` `:262`). So operational 92 → 90 · test-only 25 → 27. Attributes attached to the wrapping `impl` or to a module were still checked by hand only, so room for error remains.
+- **Two precedents that already exist:** agent `usage/process.rs:636`'s `fn lock<T>(&Mutex<T>) -> MutexGuard<T>` — exactly the free-function form (callers = three `StderrTail` `:696 · 985 · 1002` + the lookup list `LookupGate::release` `:352`). Shell `output_channel.rs:38-45` — **warning + `clear_poison`**, 「poisoning 한 번에 warn 한 번」 (ADR-0231 anchor). Its test `:145-148` asserts `!registry.is_poisoned()` after recovering — **it goes red if moved to a helper that does not clear the poison** → since the S2=(e) helper does not clear the poison, this site stays in place (§3-5 · U2). Every other site recovers **silently** and leaves the poison mark — 116 of the 117 sites (the basis for S2=(e)).
+- **★In operational builds this branch is unreachable★** — the workspace `[profile.release]` is `panic = "abort"` (`Cargo.toml:34-35`), so a panic ends the process and no poison arises. A code comment already says so (`command_roster.rs:396` · `command_delivery.rs:1003`). So even if a recovery warning had been attached, it would have been a **signal of debug · test builds** — that is the basis for saying that is all S2=(e) loses (§4).
+- **★The move rule of S2=(e) — move 83 of the 90 operational sites and leave 7 in place★** (list · reasons = §3-5). Because the helper does no logging, takes no other lock, and makes no outside call, we also move the sites of locks for which the docs forbid 「쥔 채 로그 · IO · 밖 호출」 (the two leaf locks of leftover cleanup — CLAUDE.md 「핵심 불변식」 lock order · queued-input registry · codex state lock, etc.) — the helper adds no behavior, so moving does not change the discipline of those locks (what to take and when stays with the caller).
+- **Historical record — the exclusion list that would have been needed under the options that attach a warning (S2 (a) ~ (d)) (not adopted · the rejection reason in ADR-0275):** under those options the warning is printed **while holding the guard** (the guard can be returned only after the poisoned guard is recovered). So locks for which the lock docs forbid 「쥔 채 로그 · IO · 밖 호출」, and locks taken **inside** such locks (nesting), could not be moved and had to stay in the old form — twelve · 37 recovery sites (main-session decision 2026-10-03):
+  - agent (33) — two leaf locks of leftover cleanup (`leftover.rs:402` `Recorder.inner` · `:1713` `GateCell.state` — CLAUDE.md lock order) · queued-input registry (`queued_input.rs:405` — 「★이 가드를 쥔 채 emit·IO·다른 락을 잡지 말 것★」) · pending-list table (`inputs_pending.rs:47` — 「명부·표는 잎」) · first-submit latch (`session_id_latch.rs:150` — head `:23`) · the `expected` field of its commit port (`manager.rs:550` — nesting · round 3 review) · turn observation table (`turn.rs:145` — head `:18-21` 「leaf」) · codex state lock 26 (`backend/codex/transport.rs` — `SharedState` `:1079` · discipline `:3010-3015` 「★상태 락을 쥔 채 찍지 않는다★」 · sites = `lock.lock()` 25 + writer `wait_timeout` `:2192`).
+  - daemon (4) — command registry (`command_roster.rs:401` — `detach` doc `:313-314`) · usage exit field (`agent_conn.rs:213` — `usage_service/watch.rs:28-29`) · usage subscription registry (`usage_service/watch.rs:205` — `:146-147`) · usage book lock (`usage_service/mod.rs:606` — taken inside the subscription registry · nesting).
+  - **The history of that list is the main reason we did not choose (a)** — edition 1 = two leaf locks of leftover cleanup → round 1 review = three more by wording of the same discipline → round 2 review = five more by other phrasing (bold text · English `leaf`) + the nesting rule (book lock) → round 3 review = the `expected` field the nesting missed. It had to be widened at every review and no gate guarded it — if 「쥔 채 로그 금지」 is newly written in a lock doc, or code is changed to take a moved lock inside an excluded lock, it silently drifts (one latent site = the 「상태 → 대기표」 that the codex head allows · §9). That discipline is not even fully kept in the code already (two in §9). It was not because of deadlock — the file sink of the operational subscriber (base `logging/mod.rs:417-421`) takes only its own `LOG_FILE` lock (code reading). What was at stake was consistency of discipline.
+  - ★The 「놓고 경고하고 다시 잡는」 helper was rejected too★ — it empties that lock itself, but still prints under an outer lock held by the caller (e.g. codex `Announcer.order` → state lock — `transport.rs:1112-1115`).
+  - The details edition 4 carried (the `rg` regex of how it was found · full per-lock quotes from the docs · the exhaustive nesting check for every lock · the four 「경계에 있지만 빼지 않는」 — `command_delivery.rs:1008` · `daemon_client/mod.rs:88` · `view_commands.rs` · `reaper.rs`) were withdrawn in this edition. The summary of the measuring commands is in §10. ★If we want to attach the warning again, this audit is redone from scratch over all 83 sites★ (written into ADR-0275).
+- **Mixed locks — the same lock is recovered on one side and used as `.expect` (or `try_lock`) on the other** (four from round 1 review + three measured in edition 2. How found = a scratch script that matches the field name of each recovery site against `.lock()/.read()/.write()` + `.expect(`/`.unwrap(` in the same crate's operational code, followed by a hand check — other people's structs with the same field name were filtered out). Right now the poison mark **does not disappear** — so the behavior of 「다른 쪽」 below is independent of whether a recovery ran in between. ★The S2=(e) helper does not clear the poison either, so this independence stays the same after 1-1★ — this table is kept as the basis for rejecting (b) (`clear_poison`) (last column = if it had been (b)).
 
-| 자물쇠 | 되찾는 쪽 | 다른 쪽 | 독을 걷었다면((b) — 채택 안 함) |
+| Lock | Recovering side | Other side | If the poison had been cleared ((b) — not adopted) |
 |---|---|---|---|
-| agent PTY `child` | `transport/pty.rs:261-264`(감시 스레드) · `:330-333`(펌프) | `shutdown()` 2단계 `:422` `.expect("child poisoned")` — ADR-0001 kill 인과 경로 | 지금은 독이면 shutdown 이 패닉해 4단계(Job terminate) · 5단계(master drop)를 건너뛴다. 걷으면 그 패닉 여부가 감시 · 펌프의 복구가 먼저 돌았나에 달린다 |
-| agent stdio `child` | `transport/stdio.rs:378-381`(펌프) | `shutdown()` `:482` `.expect("child poisoned")` | 같은 꼴(Job terminate 를 건너뛰나가 순서에 달린다) |
-| agent `sessions` RwLock | `reaper.rs:52-55`(write) · `:154-156`(read) | `manager.rs` 운영 구획의 `.expect("sessions poisoned")` 7곳(`:843 · 2011 · 2839 · 2921 · 2938 · 2954 · 2972` — 시험 모듈 `:3060~` 의 여섯은 뺐다) | reaper 한 번이 매니저의 fail-fast 신호를 지운다 |
-| daemon `CommandRoster.inner` | `command_roster.rs:400-405` `lock_for_cleanup`(「정리 경로 전용」) | `lock()` `:390-391` `.expect` — 일부러 갈라 둔 짝이다 | 정리 한 번이 「오염된 표를 계속 쓰지 않는다」를 지운다 |
-| daemon `CommandDeliveries.inner` | `command_delivery.rs:1003-1008` `lock_for_cleanup`(소멸자 전용) | `lock()` `:990-991` `.expect` — 위와 같은 짝(그 주석이 「표마다 따로 서야 한다」) | 같음 — ★리뷰가 못 센 것(2판 실측)★ |
-| agent 찾기 명단 `LookupGate` | `usage/process.rs:352` `release` → `:636` 도우미 | `claim` `:345-348` 이 독을 「도는 중 → 모름」으로 읽는다(시험 `:1742`) | 도는 중이던 찾기 하나의 `release` 가 그 판정을 「평소」로 되돌린다 — 1-1 에서는 제자리(U3a · 1-3 U5) |
-| agent stdin(stdio · codex) | `stdio.rs:194` · codex `transport.rs:1555 · 2751-2753` | `shutdown` 의 `try_lock`(`stdio.rs:496` · codex `:4246`)이 독을 「건너뜀」으로 읽는다 | shutdown 이 stdin 을 거두게 된다(무해 쪽이지만 동작이 바뀐다) — 2판 실측 |
+| agent PTY `child` | `transport/pty.rs:261-264` (watcher thread) · `:330-333` (pump) | `shutdown()` stage 2 `:422` `.expect("child poisoned")` — ADR-0001 kill causal path | Now, if poisoned, shutdown panics and skips stage 4 (Job terminate) and stage 5 (master drop). If cleared, whether it panics depends on whether the watcher's or pump's recovery ran first |
+| agent stdio `child` | `transport/stdio.rs:378-381` (pump) | `shutdown()` `:482` `.expect("child poisoned")` | same shape (whether Job terminate is skipped depends on the order) |
+| agent `sessions` RwLock | `reaper.rs:52-55` (write) · `:154-156` (read) | 7 sites of `.expect("sessions poisoned")` in the operational section of `manager.rs` (`:843 · 2011 · 2839 · 2921 · 2938 · 2954 · 2972` — the six in test module `:3060~` were left out) | one reaper pass erases the manager's fail-fast signal |
+| daemon `CommandRoster.inner` | `command_roster.rs:400-405` `lock_for_cleanup` (「정리 경로 전용」) | `lock()` `:390-391` `.expect` — a pair split on purpose | one cleanup pass erases 「오염된 표를 계속 쓰지 않는다」 |
+| daemon `CommandDeliveries.inner` | `command_delivery.rs:1003-1008` `lock_for_cleanup` (destructor only) | `lock()` `:990-991` `.expect` — the same pair as above (its comment 「표마다 따로 서야 한다」) | same — ★something the review could not count (edition 2 measured)★ |
+| agent lookup list `LookupGate` | `usage/process.rs:352` `release` → `:636` helper | `claim` `:345-348` reads the poison as 「도는 중 → 모름」 (test `:1742`) | the `release` of one lookup that was in progress turns that decision back to 「평소」 — in place in 1-1 (U3a · 1-3 U5) |
+| agent stdin (stdio · codex) | `stdio.rs:194` · codex `transport.rs:1555 · 2751-2753` | the `try_lock` of `shutdown` (`stdio.rs:496` · codex `:4246`) reads the poison as 「건너뜀」 | shutdown would take the stdin (harmless direction, but behavior changes) — edition 2 measured |
 
-- **storage P3 와 겹치는 파일:** 셸 `settings/mod.rs`(3곳) — storage 브랜치가 이 파일을 고친다(`git diff <merge-base> origin/v0.3.3/feat/storage --stat` → `settings/mod.rs | 36`). storage 브랜치는 복구 사이트 1곳(`state/` — `self.cell.lock().unwrap_or_else(PoisonError::into_inner)`)을 더한다.
-- **`clear_poison` 은 이 컴파일러에 있다** — `Mutex::clear_poison` · `RwLock::clear_poison`(셸 `output_channel.rs:43` 이 이미 쓴다). 1-1 의 도우미는 쓰지 않는다(S2=e).
-- **시험이 독 상태를 단언하는 자리**(`rg -n "is_poisoned" crates src-tauri/src`): 9곳 — 전부 복구 **전** 전제(「전제: 락이 poisoned」 · 「시험이 poison 갈래를 탔다」)이거나 `!is_poisoned` 이다. S2=(e) 의 도우미는 독을 걷지 않아 그 전제와 재는 범위가 그대로다(읽기 — 돌려 보지 않았다). 셸 `output_channel.rs:145-148` 의 `!is_poisoned` 는 그 자리의 독 걷기(ADR-0231)를 재므로 그 자리는 제자리다(§3-5 · U2). (b) 였다면 단언은 안 깨지되 재는 범위가 줄었다 — 예: `leftover.rs:3903` 「기록 자물쇠가 독에 걸려도 켜기 · 넣기 · 복사 · 끄기가 돈다」가 첫 연산만 독 갈래를 탄다.
+- **Files overlapping with storage P3:** shell `settings/mod.rs` (3 sites) — the storage branch fixes this file (`git diff <merge-base> origin/v0.3.3/feat/storage --stat` → `settings/mod.rs | 36`). The storage branch adds 1 recovery site (`state/` — `self.cell.lock().unwrap_or_else(PoisonError::into_inner)`).
+- **`clear_poison` exists in this compiler** — `Mutex::clear_poison` · `RwLock::clear_poison` (shell `output_channel.rs:43` already uses it). The 1-1 helper does not use it (S2=e).
+- **Sites where tests assert the poison state** (`rg -n "is_poisoned" crates src-tauri/src`): 9 sites — all are preconditions **before** recovery (「전제: 락이 poisoned」 · 「시험이 poison 갈래를 탔다」) or `!is_poisoned`. The S2=(e) helper does not clear the poison, so those preconditions and what they measure stay the same (read — not run). The `!is_poisoned` of shell `output_channel.rs:145-148` measures the poison clearing at that site (ADR-0231), so that site stays in place (§3-5 · U2). Under (b), assertions would not break but what they measure would shrink — e.g. `leftover.rs:3903` 「기록 자물쇠가 독에 걸려도 켜기 · 넣기 · 복사 · 끄기가 돈다」 would take the poison branch on the first operation only.
 
-### 2-5. `testing` — 시험 대기
+### 2-5. `testing` — waiting in tests
 
-**같은 계약 `fn(timeout, cond) -> bool`(마감 뒤 마지막 한 번 더 본다) — 사본 11벌** (실측: `rg -n "fn (wait_until|poll_until|…)\b" crates src-tauri`)
+**Same contract `fn(timeout, cond) -> bool` (checks once more after the deadline) — 11 copies** (measured: `rg -n "fn (wait_until|poll_until|…)\b" crates src-tauri`)
 
-| 자리 | 클로저 | 폴링 |
+| Site | Closure | Polling |
 |---|---|---|
 | agent `tests/activation.rs:53` · `transport_smoke.rs:65` · `session_smoke.rs:85` · `stdio_smoke.rs:135` · `headless.rs:79` | `Fn` | 50 ms |
 | agent `tests/backend_contract.rs:703` | `FnMut` | 50 ms |
 | agent `tests/reaper.rs:54` | `Fn` | 25 ms |
 | daemon `tests/control_send.rs:76` · `tests/mcp_manager_lifecycle.rs:64` | `Fn` | 20 ms |
-| daemon `tests/ws_e2e.rs:2404` `poll_until`(이름만 다름 · 모듈 안) | `FnMut` | 50 ms |
-| daemon `src/messaging_host.rs:1153`(`#[cfg(windows)]` 시험 모듈 안) | `Fn` · **시한 인자 없음**(150 × 20 ms 고정) | 20 ms |
+| daemon `tests/ws_e2e.rs:2404` `poll_until` (only the name differs · inside a module) | `FnMut` | 50 ms |
+| daemon `src/messaging_host.rs:1153` (inside the `#[cfg(windows)]` test module) | `Fn` · **no deadline argument** (fixed 150 × 20 ms) | 20 ms |
 
-- ADR-0269 의 「9개 파일(agent 7 · daemon 2)」은 맞다 — 위 11벌 중 앞 9벌이다.
-- **계약이 다른 변형 다섯(제자리 제안):** agent `platform/windows.rs:746`(`Option<T>` 를 돌려줌 · 10 s 뒤 패닉) · `transport/input_queue.rs:620`(5 s · 패닉) · `backend/codex/mod.rs:1251`(60 s · 패닉 전에 캡처를 안 거치는 stderr 에 먼저 쓴다 — 실측 사유가 주석에 있다) · daemon `usage_service/mod.rs:1417`(상한 `BOUND` · 패닉) · agent `usage/process.rs:1056` `eventually`(5 s · 패닉). 라벨 + 패닉 + 각자의 폴링(5 ms 등)이라 `assert!(wait_until(..), "{what}")` 로 접으면 폴링이 바뀐다.
-- **기능 플래그 선례:** `test-support`(command · transport — 하네스 도우미 모듈을 연다) · `test-harness`(agent · daemon · messaging — 운영 코드 안의 seam 을 연다). 둘 다 dev-dependency 로만 켜고, 워크스페이스는 `resolver = "2"`(`Cargo.toml:9`)라 dev 그래프의 기능이 운영 빌드로 합쳐지지 않는다. → **결정 N1=(b)** — base 도 같은 뜻이므로 `test-support`.
-- **운영 그래프 확인 명령(실측 — 지금은 base 에 기능이 없어 `feature "default"` 만 나온다):** `cargo tree --locked -p engram-dashboard-daemon -e normal,features -i engram-dashboard-base --target all`. 같은 꼴로 `-e normal,dev,features -p engram-dashboard-agent -i engram-dashboard-command` 를 돌리면 dev 쪽에서만 `feature "test-support"` 가 보인다(실측 — 기존 선례가 그렇게 갈린다).
+- The 「9개 파일(agent 7 · daemon 2)」 in ADR-0269 is right — it is the first nine of the 11 copies above.
+- **Five variants with a different contract (proposed to stay in place):** agent `platform/windows.rs:746` (returns `Option<T>` · panics after 10 s) · `transport/input_queue.rs:620` (5 s · panic) · `backend/codex/mod.rs:1251` (60 s · before panicking, writes first to stderr, which does not go through capture — the measured reason is in the comment) · daemon `usage_service/mod.rs:1417` (cap `BOUND` · panic) · agent `usage/process.rs:1056` `eventually` (5 s · panic). They are a label + panic + each one's own polling (5 ms etc.), so folding them into `assert!(wait_until(..), "{what}")` would change the polling.
+- **Feature flag precedents:** `test-support` (command · transport — opens the harness helper module (하네스 도우미 모듈을 연다)) · `test-harness` (agent · daemon · messaging — opens a seam inside operational code (운영 코드 안의 seam 을 연다)). Both are turned on only as a dev-dependency, and the workspace is `resolver = "2"` (`Cargo.toml:9`), so features from the dev graph are not merged into operational builds. → **Decision N1=(b)** — base means the same thing, so `test-support`.
+- **Command to check the operational graph (measured — base has no features now, so only `feature "default"` appears):** `cargo tree --locked -p engram-dashboard-daemon -e normal,features -i engram-dashboard-base --target all`. Running `-e normal,dev,features -p engram-dashboard-agent -i engram-dashboard-command` in the same form shows `feature "test-support"` only on the dev side (measured — the existing precedents split that way).
 
 ---
 
-## 3. 설계 (§4 의 결정을 반영 — 꼬리표가 없는 세부는 워커 제안)
+## 3. Design (decisions of §4 applied — details without a tag are worker proposals)
 
-### 3-1. 배치 · 입주 규칙
+### 3-1. Placement · tenancy rule
 
-- 모듈 = 파일 하나씩: `src/text.rs` · `src/time.rs` · `src/path.rs` · `src/sync.rs` · `src/testing.rs`. 머리마다 `// ADR-0269`.
-- **`testing` 은 `#[cfg(any(test, feature = "test-support"))] pub mod testing;`** — transport 선례(`any(test, feature = "test-support")`)와 같다. 그러면 base 자기 시험이 기능 없이 그 모듈을 컴파일해, CI 의 base 시험 스텝(`ci.yml:276-278` — 기능 인자 없음)을 고치지 않아도 된다. 기능 이름 = `test-support`(N1=b) — `time::ManualClock` 도 같은 기능 뒤다(C4=a).
-- **입주자 무참조(게이트 ③)를 지킨다** — `text` · `time` · `path` · `sync` · `testing` 어느 것도 다른 입주자를 부르지 않는다. 걸리는 자리:
-  - 가짜 시계를 `testing` 에 두면 `crate::time::Clock` 을 구현해야 해 게이트 ③ 에 걸린다 → `time` 안 같은 기능 뒤에 둔다(C4=a · §3-3). `testing` 은 `time` 을 부르지 않는다.
-  - `sync` 는 로그를 내지 않는다(S2=e) — `logging` 도 `tracing` 도 부르지 않는다.
-  - base `logging` 자기 복구 사이트(`logging/mod.rs:129`)는 `sync` 를 쓰지 않는다(게이트 ③ · §3-5).
-- **새 외부 의존 0** — 새 모듈 다섯은 전부 std 만 쓴다. serde · tokio · futures 를 들이지 않는다(ADR-0269 결정 6).
-- **오류 타입:** 1-1 의 함수는 전부 실패하지 않는다 — `std::io::Result` 를 쓸 자리가 없다. 그 규칙은 `file`(P3 뒤)에서 쓰인다.
-- 1-3 이 `platform` 모듈을 base 에서 내보낸다(ADR-0266 결정 4) — 그때 게이트 ③ 의 이름에서 `platform` 이 빠진다(§7).
+- Modules = one file each: `src/text.rs` · `src/time.rs` · `src/path.rs` · `src/sync.rs` · `src/testing.rs`. A `// ADR-0269` in each head.
+- **`testing` is `#[cfg(any(test, feature = "test-support"))] pub mod testing;`** — same as the transport precedent (`any(test, feature = "test-support")`). Then base's own tests compile that module without the feature, so the CI base test step (`ci.yml:276-278` — no feature argument) does not need to be fixed. Feature name = `test-support` (N1=b) — `time::ManualClock` is also behind the same feature (C4=a).
+- **We keep the tenant no-reference rule (gate ③)** — none of `text` · `time` · `path` · `sync` · `testing` calls another tenant. The places that would trip it:
+  - If the fake clock were put in `testing` it would have to implement `crate::time::Clock` and trip gate ③ → put it behind the same feature inside `time` (C4=a · §3-3). `testing` does not call `time`.
+  - `sync` emits no logs (S2=e) — it calls neither `logging` nor `tracing`.
+  - base `logging`'s own recovery site (`logging/mod.rs:129`) does not use `sync` (gate ③ · §3-5).
+- **Zero new external dependencies** — all five new modules use only std. We bring in no serde · tokio · futures (ADR-0269 decision 6).
+- **Error type:** none of the 1-1 functions can fail — there is no place to use `std::io::Result`. That rule is used in `file` (after P3).
+- 1-3 moves the `platform` module out of base (ADR-0266 decision 4) — at that point `platform` drops out of the names in gate ③ (§7).
 
 ### 3-2. `text`
 
@@ -263,12 +263,12 @@
 pub fn hex_lower(bytes: &[u8]) -> String
 ```
 
-- 루프 셋(§2-1)을 이것으로 바꾼다 — 감싼 함수(토큰 생성기 둘 · `sha256_hex`)는 제자리에 그대로 둔다(T2=a).
-- **UTF-8 자르기는 base 에 두지 않는다(T1=b)** — `truncate_bytes` · `keep_tail_bytes` 는 만들지 않는다. 사본 셋을 U1 에서 std 로 제자리 교체한다(손 루프만 바꾸고 함수 이름 · 시그니처 · 상한 상수는 그대로):
-  - transport `ws.rs:147-156` `clamp_close_reason`(앞 남김 · 빌림) — `while … is_char_boundary` 루프 → `&reason[..reason.floor_char_boundary(MAX_CLOSE_REASON_BYTES)]`. transport 는 이 교체로도 base 를 의존하지 않는다(C5=b).
-  - daemon `experiment/record.rs:178-186` `cap_response`(앞 남김 · 새 `String`) — 같은 루프 → `s[..s.floor_char_boundary(RESPONSE_CAP_BYTES)].to_string()`.
-  - agent `output_core.rs:1059-1062` `push_diagnostic` 안(뒤 남김 · 제자리 수정) — `cut` 을 올리는 루프 → `let cut = buf.ceil_char_boundary(buf.len() - DIAGNOSTIC_CAP_BYTES);` 뒤 `buf.drain(..cut)` 그대로. 그 위의 「★문자 경계로 밀어 올린다★」 주석은 남긴다(왜 경계인가는 그대로 참이다).
-  - 셋 다 손 루프와 결과가 같다(§2-1 — `floor` 는 `max >= len` 이면 `len`). 상한 아래에서 일찍 돌아가는 분기는 남겨도 지워도 결과가 같다 — 남긴다(바뀐 줄을 줄인다 · 워커 제안).
+- Replace the three loops (§2-1) with this — the wrapping functions (the two token generators · `sha256_hex`) stay in place as they are (T2=a).
+- **UTF-8 truncation is not placed in base (T1=b)** — we do not create `truncate_bytes` · `keep_tail_bytes`. The three copies are replaced in place with std in U1 (only the hand loop changes; the function name · signature · cap constant stay as they are):
+  - transport `ws.rs:147-156` `clamp_close_reason` (keep front · borrowed) — `while … is_char_boundary` loop → `&reason[..reason.floor_char_boundary(MAX_CLOSE_REASON_BYTES)]`. Even with this replacement transport does not depend on base (C5=b).
+  - daemon `experiment/record.rs:178-186` `cap_response` (keep front · new `String`) — same loop → `s[..s.floor_char_boundary(RESPONSE_CAP_BYTES)].to_string()`.
+  - inside agent `output_core.rs:1059-1062` `push_diagnostic` (keep back · in-place edit) — the loop that raises `cut` → `let cut = buf.ceil_char_boundary(buf.len() - DIAGNOSTIC_CAP_BYTES);` followed by `buf.drain(..cut)` as is. The 「★문자 경계로 밀어 올린다★」 comment above it stays (why it is a boundary is still true).
+  - All three give the same result as the hand loop (§2-1 — `floor` returns `len` if `max >= len`). The branch that returns early below the cap gives the same result whether kept or removed — we keep it (to shrink the changed lines · worker proposal).
 
 ### 3-3. `time`
 
@@ -287,16 +287,16 @@ pub struct SystemClock;                 // now() = Instant::now()
 pub struct ManualClock { /* … */ }      // new() · advance(d) · impl Clock
 ```
 
-- 반환 타입 `i64` = agent 가 영속 필드(`last_active` 등)에 쓰는 타입과 같다. storage 의 `u64` · settings 의 `u128` 은 P3 뒤 단위(§8 D2)에서 맞춘다.
-- 기다리기가 필요한 쪽은 **자기 트레이트가 이것을 상위 트레이트로 둔다**(ADR-0269 결정 3-2) — 예: discovery `pub trait Clock: engram_dashboard_base::time::Clock { fn sleep(&self, d: Duration); }`. 가짜 하나가 두 트레이트를 같은 상태로 구현한다(sleep 이 now 를 미는 연동 유지).
-- **★discovery 는 base 의존을 지키고, U5 뒤에는 그 의존을 실제로 쓴다★(2차 리뷰 — 1-3 과의 정합).** 오늘(`0ef6292`) discovery 가 base 에서 부르는 것은 `platform::pid_alive_with_start_time` 하나다(`discovery/src/lib.rs:1043` · `Cargo.toml:15` 의 `engram-dashboard-base`). 1-3 이 `platform` 을 base 밖으로 옮기면 그 쓰임은 사라지지만, U5 가 discovery `Clock` 을 `engram_dashboard_base::time::Clock` 의 하위 트레이트로 바꾸면서 discovery → base 간선이 다시 실제 쓰임을 얻는다. ★그러니 1-3 은 discovery 의 base 의존을 걷지 않는다★ — 1-3 이 U5 보다 먼저 착지하면 그 사이 잠시 쓰임 없는 의존이 되는데, 워크스페이스에 쓰임 없는 의존을 잡는 게이트가 없어(`rg 'unused_crate_dependencies|machete|udeps' Cargo.toml crates/*/Cargo.toml .github/workflows/ci.yml` → 0줄) 빌드 · CI 는 그대로 선다. 1-3 TRD 쪽 정정은 그 문서의 몫이다(넘겨줌).
-- **`dyn Sub` 에서 상위 트레이트의 `now()` 를 부를 때 base 트레이트를 `use` 해야 하는지는 컴파일로 확인하지 않았다** — 필요하면 호출 파일에 `use engram_dashboard_base::time::Clock as _;` 한 줄이다.
-- 가짜 시계 `ManualClock`(원자 정수 오프셋, 자물쇠 없음 · `new()` · `advance(d)`)은 `time` 안 `#[cfg(any(test, feature = "test-support"))]` 뒤에 둔다(C4=a) — `testing` 에 두면 게이트 ③ 에 걸린다. 자물쇠 없는 꼴인 이유 = `LeftoverClock` 의 「문 자물쇠 안에서도 부른다 — 다른 자물쇠를 잡지 않는다」 계약에 가짜도 들어설 수 있게(지금 그 가짜들이 원자 정수다 · 워커 제안).
-- **합치는 것:**
-  - daemon `command_delivery` — base `Clock` · `SystemClock` 을 그대로 쓰고, 시험 가짜 `tests::ManualClock`(`:2425` — `Mutex<Instant>`)도 base `ManualClock` 으로 바꾼다(`connection_core.rs:4403` 의 시험도 같다). 결정 3-3 · U5. daemon 의 dev 의존에 `test-support` 를 켜는 줄은 U4 가 이미 더한다.
-  - discovery — 결정 3-2 대로 `Clock: engram_dashboard_base::time::Clock` + 막는 `sleep`. 가짜 `FakeClock`(`:1742`)은 sleep 이 now 를 미는 연동 · `slept` 셈을 쥐어 자기 자리에 남고, `RefCell` · `Cell` 을 `Sync` 인 꼴(원자 정수 또는 `Mutex`)로 바꾼다(C1=a). base `ManualClock` 을 품지 않는다 — discovery 에 dev 의존 기능을 새로 켜지 않으려는 것이다(워커 제안). U5.
-  - agent `LeftoverClock` — `trait LeftoverClock: base::time::Clock { sleep; spawn }` · `mono_now` 22곳 → `now`. 가짜 `FakeClock` · `SkipClock` 은 원자 정수 그대로 자기 자리(C2=a · U6).
-- **안 합치는 것(머리에 사유 한 줄):** transport `clock.rs`(C5=b — 「3단계 transport 부착 때 base `time::Clock` 의 하위 트레이트로 — ADR-0275」 · U5) · daemon `usage_service/clock.rs` `UsageClock`(C3=a — §2-2 의 계약 차이 · U5) · agent `CaptureClock`(지금 읽기가 없다 — 주석 불요).
+- The return type `i64` = the same type agent writes into persistent fields (`last_active` etc.). storage's `u64` · settings' `u128` are aligned in a unit after P3 (§8 D2).
+- Whoever needs waiting **makes this a supertrait of its own trait** (ADR-0269 decision 3-2) — e.g. discovery `pub trait Clock: engram_dashboard_base::time::Clock { fn sleep(&self, d: Duration); }`. One fake implements both traits with the same state (keeping the linkage where sleep pushes now).
+- **★discovery keeps its base dependency, and after U5 it really uses that dependency★ (round 2 review — consistency with 1-3).** Today (`0ef6292`) the only thing discovery calls from base is `platform::pid_alive_with_start_time` (`discovery/src/lib.rs:1043` · `engram-dashboard-base` in `Cargo.toml:15`). If 1-3 moves `platform` out of base that use disappears, but when U5 changes discovery `Clock` into a subtrait of `engram_dashboard_base::time::Clock`, the discovery → base edge gets a real use again. ★So 1-3 does not remove discovery's base dependency★ — if 1-3 lands before U5 it briefly becomes an unused dependency in between, but the workspace has no gate that catches unused dependencies (`rg 'unused_crate_dependencies|machete|udeps' Cargo.toml crates/*/Cargo.toml .github/workflows/ci.yml` → 0 lines), so build and CI stand as they are. The correction on the 1-3 TRD side is that document's job (handed over).
+- **Whether the base trait must be `use`d when calling the supertrait's `now()` from `dyn Sub` was not confirmed by compiling** — if needed it is one `use engram_dashboard_base::time::Clock as _;` line in the calling file.
+- The fake clock `ManualClock` (atomic integer offset, no lock · `new()` · `advance(d)`) sits behind `#[cfg(any(test, feature = "test-support"))]` inside `time` (C4=a) — putting it in `testing` would trip gate ③. The reason for the lock-free form = so that fakes can also fit the 「문 자물쇠 안에서도 부른다 — 다른 자물쇠를 잡지 않는다」 contract of `LeftoverClock` (those fakes are atomic integers now · worker proposal).
+- **What merges:**
+  - daemon `command_delivery` — use base `Clock` · `SystemClock` as they are, and change the test fake `tests::ManualClock` (`:2425` — `Mutex<Instant>`) to base `ManualClock` too (the tests of `connection_core.rs:4403` are the same). Decision 3-3 · U5. The line that turns on `test-support` in daemon's dev dependency is already added by U4.
+  - discovery — per decision 3-2, `Clock: engram_dashboard_base::time::Clock` + blocking `sleep`. The fake `FakeClock` (`:1742`) keeps the linkage where sleep pushes now and the `slept` count, so it stays in its own place, and changes `RefCell` · `Cell` to a form that is `Sync` (atomic integer or `Mutex`) (C1=a). It does not carry base `ManualClock` — the intent is not to turn on a dev-dependency feature newly in discovery (worker proposal). U5.
+  - agent `LeftoverClock` — `trait LeftoverClock: base::time::Clock { sleep; spawn }` · `mono_now` 22 sites → `now`. The fakes `FakeClock` · `SkipClock` stay in their own place as atomic integers (C2=a · U6).
+- **What does not merge (one reason line in the head):** transport `clock.rs` (C5=b — 「3단계 transport 부착 때 base `time::Clock` 의 하위 트레이트로 — ADR-0275」 · U5) · daemon `usage_service/clock.rs` `UsageClock` (C3=a — the contract difference in §2-2 · U5) · agent `CaptureClock` (it has no now-read — no comment needed).
 
 ### 3-4. `path`
 
@@ -306,7 +306,7 @@ pub struct ManualClock { /* … */ }      // new() · advance(d) · impl Clock
 pub fn normalize_spelling(raw: &str) -> String     // P1=a
 ```
 
-- agent `normalize_cwd` 는 지운다 — agent 등록부와 셸 둘 다 base 를 직접 부른다(ADR-0270 결정 1 — 셸은 agent 를 모른다). 얇은 agent 판을 남기면 셸이 그쪽을 계속 부를 길이 열린다.
+- agent `normalize_cwd` is deleted — the agent registry and the shell both call base directly (ADR-0270 decision 1 — the shell does not know agent). Leaving a thin agent variant would open a path for the shell to keep calling that one.
 
 ### 3-5. `sync`
 
@@ -318,25 +318,25 @@ pub fn wait_timeout<'a, T>(cv: &Condvar, g: MutexGuard<'a, T>, d: Duration)
     -> (MutexGuard<'a, T>, WaitTimeoutResult)
 ```
 
-- 꼴 = 자유 함수(S1=a — `usage/process.rs:636` 이 이미 그 꼴이다). 몸은 각각 `….unwrap_or_else(PoisonError::into_inner)` 한 줄이다 — **경고 없음 · 독 표시는 남긴다 · `clear_poison` 을 부르지 않는다**(S2=e). `#[track_caller]` 도 필요 없다(위치를 나를 로그가 없다).
-- **계약(모듈 머리에 적는다 · `// ADR-0269` · `// ADR-0275`):**
-  1. 독을 걷지 않는다 — 같은 자물쇠를 `.expect` · `try_lock` 으로 쓰는 이웃이 보는 신호를 지우지 않는다(§2-4 섞인 자물쇠 표).
-  2. 로그 · 다른 락 · 밖 호출을 하지 않는다 — 도우미가 더하는 동작이 없어 「쥔 채 로그 · IO · 밖 호출 금지」 자물쇠의 사이트를 옮겨도 그 자물쇠들의 규율이 바뀌지 않는다(무엇을 언제 잡는지는 부르는 쪽 그대로 · §2-4).
-  3. 운영 빌드는 `panic = "abort"` 라 이 갈래에 닿지 않는다 — debug · 시험 빌드의 복구다.
-  - ★경고를 더하고 싶어지면 2가 깨진다★ — 83곳 전체의 「쥔 채 로그 금지」 감사를 다시 해야 한다(§2-4 역사 기록 · ADR-0275).
-- **옮기는 꼴:** §2-4 의 꼴 중 클로저 · 함수 포인터 · `match` 갈래 · `wait_timeout` · `read` / `write`. `match` 꼴 6곳(`pty.rs:263,332` · `stdio.rs:317,380` · `command_roster.rs:403` · `command_delivery.rs:1010`)은 갈래 뒤에 붙은 후처리(예: `stdio.rs:317` 의 `.take()`)를 도우미 결과에 그대로 잇는다. 조건변수 `wait_timeout` 운영 3곳 = `input_queue.rs:178 · 254` · codex `transport.rs:2192`(`:10176` 은 시험 모듈).
-- **제자리 7곳(운영 90 − 83):**
+- Form = free functions (S1=a — `usage/process.rs:636` is already that form). Each body is one `….unwrap_or_else(PoisonError::into_inner)` line — **no warning · the poison mark is kept · it does not call `clear_poison`** (S2=e). `#[track_caller]` is not needed either (there is no log to carry the location).
+- **Contract (written in the module head · `// ADR-0269` · `// ADR-0275`):**
+  1. It does not clear the poison — it does not erase the signal seen by neighbors that use the same lock with `.expect` · `try_lock` (the mixed-lock table in §2-4).
+  2. It does no logging, takes no other lock, and makes no outside call — the helper adds no behavior, so moving the sites of 「쥔 채 로그 · IO · 밖 호출 금지」 locks does not change the discipline of those locks (what to take and when stays with the caller · §2-4).
+  3. Operational builds are `panic = "abort"`, so this branch is not reached — it is a recovery in debug · test builds.
+  - ★If we want to add a warning, 2 breaks★ — the 「쥔 채 로그 금지」 audit of all 83 sites must be redone (§2-4 historical record · ADR-0275).
+- **Forms that move:** of the forms in §2-4, closure · function pointer · the `match` branch · `wait_timeout` · `read` / `write`. The 6 sites of the `match` form (`pty.rs:263,332` · `stdio.rs:317,380` · `command_roster.rs:403` · `command_delivery.rs:1010`) connect the post-processing attached after the branch (e.g. `.take()` of `stdio.rs:317`) onto the helper result as is. The 3 operational condition-variable `wait_timeout` sites = `input_queue.rs:178 · 254` · codex `transport.rs:2192` (`:10176` is a test module).
+- **The 7 sites that stay in place (operational 90 − 83):**
 
-  | 자리 | 사유 | 「왜 base `sync` 를 안 쓰나」 주석 |
+  | Site | Reason | 「왜 base `sync` 를 안 쓰나」 comment |
   |---|---|---|
-  | base `logging/mod.rs:129` | 같은 crate 의 `sync` 를 부르면 입주자 무참조(게이트 ③)에 걸린다 | U2 에 한 줄 |
-  | agent `leftover.rs:1662-1665` `GateCell` 의 `Debug`(`try_lock`) | `WouldBlock` 갈래가 있는 다른 계약이다 — 자물쇠를 기다리지 않는다 | U3a 에 한 줄 |
-  | agent `usage/process.rs:636` 지역 도우미(찾기 명단 `LookupGate::release` `:352` 몫) | 1-3 U5 가 찾기 명단을 platform 으로 옮기고 platform 은 base 를 모른다(ADR-0266). `StderrTail` 을 부르는 셋(`:696 · 985 · 1002`)은 `sync::lock` 으로 옮기고, 남는 이 도우미는 `release` 안으로 접는다(워커 제안) | U3a 에 한 줄 |
-  | 셸 `settings/mod.rs:478 · 482 · 486`(3) | storage P3 가 이 파일을 고친다 — 1-1 은 손대지 않는다. P3 뒤 D2 에서 셋 다 옮긴다(S2=e 라 `:486` 의 「잎」 규율도 걸리지 않는다) | 없음(파일을 안 건드린다) |
-  | 셸 `output_channel.rs:38-45` | ADR-0231 — 경고 + `clear_poison`(「poisoning 한 번에 warn 한 번」)이 그 자리의 계약이다. 옮기면 그 동작을 잃고 시험 `:145-148` 의 `!is_poisoned` 가 빨개진다 | U2 에 한 줄 — 「ADR-0231 — 독을 걷는 자기 도우미, base `sync` 는 독을 걷지 않는다」 |
+  | base `logging/mod.rs:129` | calling `sync` of the same crate would trip the tenant no-reference rule (gate ③) | one line in U2 |
+  | agent `leftover.rs:1662-1665` `GateCell`'s `Debug` (`try_lock`) | a different contract with a `WouldBlock` branch — it does not wait for the lock | one line in U3a |
+  | agent `usage/process.rs:636` local helper (the share of lookup list `LookupGate::release` `:352`) | 1-3 U5 moves the lookup list to platform and platform does not know base (ADR-0266). The three that call `StderrTail` (`:696 · 985 · 1002`) move to `sync::lock`, and the remaining helper is folded into `release` (worker proposal) | one line in U3a |
+  | shell `settings/mod.rs:478 · 482 · 486` (3) | storage P3 fixes this file — 1-1 does not touch it. After P3, in D2, all three move (with S2=e, the 「잎」 discipline of `:486` does not apply either) | none (the file is not touched) |
+  | shell `output_channel.rs:38-45` | ADR-0231 — warning + `clear_poison` (「poisoning 한 번에 warn 한 번」) is the contract of that site. Moving it loses that behavior and the `!is_poisoned` of test `:145-148` goes red | one line in U2 — 「ADR-0231 — 독을 걷는 자기 도우미, base `sync` 는 독을 걷지 않는다」 |
 
-- 그 밖에 옮기지 않는 것: command `src/testing.rs` 3곳(시험 전용 · ADR-0267) · 시험 전용 24곳(agent 19 · daemon 5 — §5 M3).
-- 주석은 위 제자리 자리에만 단다. 옮긴 83곳에는 따로 주석을 달지 않는다 — 4판의 「제외한 자물쇠 정의에 한 줄」 지시는 제외 목록과 함께 없어졌다.
+- What else does not move: command `src/testing.rs` 3 sites (test-only · ADR-0267) · 24 test-only sites (agent 19 · daemon 5 — §5 M3).
+- Comments are attached only at the in-place sites above. No separate comments are attached to the 83 moved sites — edition 4's 「제외한 자물쇠 정의에 한 줄」 instruction disappeared together with the exclusion list.
 
 ### 3-6. `testing`
 
@@ -345,257 +345,257 @@ pub fn wait_timeout<'a, T>(cv: &Condvar, g: MutexGuard<'a, T>, d: Duration)
 pub fn wait_until(timeout: Duration, cond: impl FnMut() -> bool) -> bool
 ```
 
-- `FnMut` 로 받는다 — `Fn` 사본도 그대로 들어간다.
-- 폴링 20 ms(§5 M2) — 사본들은 20 · 25 · 50 ms 로 갈린다. 50 ms 사본(실 PTY · 실 셸 시험)은 조건을 더 자주 본다 — 자식 프로세스를 더 띄우지는 않는다(`--test-threads=4` 사유와 무관).
-- `messaging_host.rs:1153` 은 `wait_until(Duration::from_secs(3), cond)` 로 — 횟수 대신 시각(150 × 20 ms ≈ 3 s).
-- 쓰는 crate(agent · daemon)는 `[dev-dependencies] engram-dashboard-base = { path = "…", features = ["test-support"] }` 를 더한다(정상 의존과 dev 의존에 같은 crate 를 기능만 달리 적는 것은 command 선례 그대로 — agent `Cargo.toml:41`).
+- It is received as `FnMut` — the `Fn` copy also goes in as is.
+- Polling 20 ms (§5 M2) — the copies split into 20 · 25 · 50 ms. The 50 ms copies (real PTY · real shell tests) check the condition more often — it does not start more child processes (unrelated to the `--test-threads=4` reason).
+- `messaging_host.rs:1153` goes to `wait_until(Duration::from_secs(3), cond)` — a time instead of a count (150 × 20 ms ≈ 3 s).
+- The crates that use it (agent · daemon) add `[dev-dependencies] engram-dashboard-base = { path = "…", features = ["test-support"] }` (writing the same crate as a normal dependency and a dev dependency with only the feature differing is exactly the command precedent — agent `Cargo.toml:41`).
 
 ---
 
-## 4. 결정 (2026-10-04)
+## 4. Decisions (결정) (2026-10-04)
 
-> **출처(열하나 공통): 사용자 위임(2026-10-04 「알아서 진행해」) → 권고안 채택.** 4판 §4 의 워커 권고를 그대로 골랐다 — 위임 뒤 대조한 결과 열하나 모두 4판 권고와 같은 글자다. 확정된 ADR-0269 와 어긋나는 몫은 ADR-0275 로 고친다(§4-2). 거부한 갈래는 ADR-0275 「거부한 대안」의 재료다. 갈래별 긴 논의는 4판에 있었고(커밋 전) 이 판은 결론만 싣는다.
+> **Source (common to all eleven): user delegation (2026-10-04 「알아서 진행해」) → recommendation adopted.** We picked the worker recommendations of edition 4 §4 as they were — after cross-checking following the delegation, all eleven are the same text as the edition-4 recommendations. The parts that conflict with the confirmed ADR-0269 are amended in ADR-0275 (§4-2). The rejected options are material for ADR-0275 「거부한 대안」. The long per-option discussion was in edition 4 (before commit); this edition carries only the conclusions.
 
-### 4-1. 결정 기록
+### 4-1. Decision record
 
-| id | 질문 | 결정 |
+| id | Question | Decision |
 |---|---|---|
-| C5 | transport 에 base 를 붙이나 | **(b)** 이번엔 빼고 3단계(transport 부착 TRD) 때 본다 |
-| T1 | UTF-8 자르기를 base 함수로 두나 | **(b)** std `floor_char_boundary` · `ceil_char_boundary` 로 제자리 교체 |
-| T2 | hex 루프 셋을 `hex_lower` 로 바꾸나 | **(a)** 바꾼다(감싼 함수는 그대로) |
-| C1 | base `Clock` 의 경계 | **(a)** `Send + Sync` |
-| C2 | agent `LeftoverClock` 도 합치나 | **(a)** 합친다 — 별도 단위(U6) |
-| C3 | daemon `UsageClock` | **(a)** 그대로 둔다 |
-| C4 | 가짜 시계의 자리 | **(a)** `time` 안 · 기능 플래그 뒤 |
-| S1 | `sync` 의 꼴 | **(a)** 자유 함수 |
-| S2 | 복구 경고의 단위 · 독을 걷나 | **(e)** 경고 없이 되찾기만(독 표시는 남긴다) |
-| N1 | `testing` 기능 이름 | **(b)** `test-support` |
-| P1 | `normalize_cwd` 의 새 이름 | **(a)** `normalize_spelling` |
+| C5 | Do we attach base to transport? | **(b)** Leave it out this time and look at it in phase 3 (the transport attachment TRD) |
+| T1 | Do we keep UTF-8 truncation as a base function? | **(b)** Replace in place with std `floor_char_boundary` · `ceil_char_boundary` |
+| T2 | Do we change the three hex loops to `hex_lower`? | **(a)** Change them (the wrapping functions stay as they are) |
+| C1 | The boundary of base `Clock` | **(a)** `Send + Sync` |
+| C2 | Do we merge agent `LeftoverClock` too? | **(a)** Merge — as a separate unit (U6) |
+| C3 | daemon `UsageClock` | **(a)** Leave as is |
+| C4 | Where the fake clock goes | **(a)** Inside `time` · behind a feature flag |
+| S1 | The form of `sync` | **(a)** Free functions |
+| S2 | The unit of the recovery warning · do we clear the poison? | **(e)** Recover only, with no warning (the poison mark is kept) |
+| N1 | The name of the `testing` feature | **(b)** `test-support` |
+| P1 | The new name of `normalize_cwd` | **(a)** `normalize_spelling` |
 
-**C5 = (b).** 이유: 둘 다 확정 결정을 고치는 개정이지만 (b) 는 미루는 개정이라 transport 의 게이트 · 의존 그래프가 그대로다 — transport 는 소비자가 0 이고 3단계에서 의존 · 게이트를 어차피 다시 연다(ADR-0267 과 같은 결). `ws.rs` 의 자르기 사본은 T1=(b) 로 base 없이 사라진다.
-- 거부 (a) 붙인다 — transport 게이트 ①(직접 워크스페이스 의존 정확히 1줄 · ADR-0177)을 2줄로 고치는 개정 + `tracing` · `tracing-subscriber` · `regex`(1-3 U1 전이면 `windows` 까지)가 소비자 0 인 재사용 lib 에 실린다.
-- 거부 (c) 시계만 붙이고 자르기는 std — (a) 의 대가를 그대로 지고 얻는 것이 시계 하나다.
-- 받아들인 대가: 「시간은 공용이면 무조건 합친다」(사용자 2026-09-26)와 어긋난 transport 시계가 3단계까지 남는다 — transport `clock.rs` 머리에 적는다(U5 · §8 D4).
+**C5 = (b).** Reason: both are amendments to confirmed decisions, but (b) is a deferring amendment, so transport's gates and dependency graph stay as they are — transport has zero consumers and phase 3 reopens the dependency and gates anyway (in the same vein as ADR-0267). The truncation copy in `ws.rs` disappears without base through T1=(b).
+- Rejected (a) attach — an amendment that changes transport gate ① (exactly 1 direct workspace dependency line · ADR-0177) to 2 lines, plus `tracing` · `tracing-subscriber` · `regex` (up to `windows` if before 1-3 U1) get loaded into a reusable lib with zero consumers.
+- Rejected (c) attach only the clock and use std for truncation — it carries the whole cost of (a) and gains one clock.
+- Accepted cost: the transport clock, which departs from 「시간은 공용이면 무조건 합친다」 (user 2026-09-26), remains until phase 3 — written in the head of transport `clock.rs` (U5 · §8 D4).
 
-**T1 = (b).** 이유: 감쌀 몫이 없는 std 한 줄이다(ADR-0269 가 `dunce::canonicalize` 를 뺀 사유와 같다) · 뒤 남김은 사본 하나라 결정 7 에도 못 미친다 · C5 와 무관하게 `ws.rs` 까지 한 번에 정리된다.
-- 거부 (a) base `text::truncate_bytes` · `keep_tail_bytes` — 이름이 뜻을 말해 주지만 몸이 std 한 줄이고 뒤 남김은 입주 근거(결정 7)가 안 선다.
+**T1 = (b).** Reason: it is one std line with nothing to wrap (the same reason ADR-0269 left out `dunce::canonicalize`) · the keep-back form is one copy, so it falls short of decision 7 · regardless of C5, up to `ws.rs` is cleaned up in one go.
+- Rejected (a) base `text::truncate_bytes` · `keep_tail_bytes` — the name tells the meaning, but the body is one std line and the keep-back form has no basis for tenancy (decision 7).
 
-**T2 = (a).** 이유: ADR-0269 가 「인코딩 루프만 범용」이라고 따로 적은 몫이 정확히 이것이고, 「생성기를 섞지 말라」는 코드 주석과 부딪히지 않는다(§2-1 — ADR-0086 본문엔 공유 금지 문장이 없다).
-- 거부 (b) `hex_lower` 를 1-1 에서 뺀다 — 같은 루프 셋이 남고 결정 2 의 표와 어긋난다.
+**T2 = (a).** Reason: this is exactly the part ADR-0269 wrote down separately as 「인코딩 루프만 범용」, and it does not conflict with the code comment 「생성기를 섞지 말라」 (§2-1 — the text of ADR-0086 has no sentence forbidding sharing).
+- Rejected (b) leave `hex_lower` out of 1-1 — the same three loops remain and it conflicts with the table in decision 2.
 
-**C1 = (a).** 이유: 「지금 읽기」 seam 대다수(daemon · leftover · transport)가 이미 이 경계이고, 바뀌는 것은 discovery 시험 가짜 하나다.
-- 거부 (b) 경계 없음 — 쓰는 자리마다 경계를 적어야 하고 경계 없는 `dyn Clock` 이 생길 수 있다.
-- 거부 (c) 읽기 둘(`now` + 벽시계 ms) — 결정 3-1(「지금 읽기 하나」)을 고치는데 1-1 의 소비자는 벽시계를 안 쓴다.
+**C1 = (a).** Reason: most 「지금 읽기」 seams (daemon · leftover · transport) are already this boundary, and what changes is one discovery test fake.
+- Rejected (b) no boundary — every use site would have to write a boundary, and a `dyn Clock` without a boundary could appear.
+- Rejected (c) two reads (`now` + wall-clock ms) — it amends decision 3-1 (「지금 읽기 하나」), yet 1-1's consumers do not use the wall clock.
 
-**C2 = (a), 별도 단위(U6).** 이유: 사용자 규칙 「시간은 공용이면 무조건 합친다」의 적용 대상이고, 바뀌는 것은 상위 트레이트와 이름(`mono_now` → `now`)뿐이다. 가짜는 「자물쇠를 잡지 않는다」 계약 때문에 원자 정수 그대로 자기 자리.
-- 거부 (b) 둔다 — 규칙에 어긋난 seam 이 남는다.
+**C2 = (a), separate unit (U6).** Reason: it is covered by the user rule 「시간은 공용이면 무조건 합친다」, and all that changes is the supertrait and the name (`mono_now` → `now`). The fake stays in its own place as an atomic integer because of the 「자물쇠를 잡지 않는다」 contract.
+- Rejected (b) leave it — a seam that departs from the rule would remain.
 
-**C3 = (a).** 이유: 깔끔히 맞지 않는다(§2-2 — `mono` 의 `Duration` 이 book 도메인으로 흐르고 `Duration::MAX` 끝값 시험이 있다 · `wall` 은 부호 있는 epoch 초). 결정 3-4 의 「안 맞으면 그때 묻는다」에 대한 답이다. 사유는 `usage_service/clock.rs` 머리에 적는다(U5).
-- 거부 (b) 상위 트레이트만 붙인다 — 아무도 `now()` 를 안 부르는 껍데기 합치기다.
-- 거부 (c) `mono` 를 `Instant` 로 — ADR-0250 · 사용량 TRD §3 #28 의 계약 변경 · 끝값 시험 재작성이라 1-1 범위를 넘는다.
+**C3 = (a).** Reason: it does not fit cleanly (§2-2 — the `Duration` of `mono` flows into the book domain and there are `Duration::MAX` end-value tests · `wall` is signed epoch seconds). This is the answer to the 「안 맞으면 그때 묻는다」 of decision 3-4. The reason is written in the head of `usage_service/clock.rs` (U5).
+- Rejected (b) attach only the supertrait — it merges only a shell that nobody calls `now()` through.
+- Rejected (c) `mono` to `Instant` — a contract change of ADR-0250 · usage TRD §3 #28 and a rewrite of the end-value tests, so it exceeds the 1-1 scope.
 
-**C4 = (a).** 이유: 게이트 ③(입주자 무참조)이 그대로 선다 — `testing` 에 두면 `crate::time::Clock` 을 구현해야 해 걸린다. 대가 = 기능 플래그 하나가 두 모듈(`time` · `testing`)에 걸친다.
-- 거부 (b) `testing` 에 두고 게이트 ③ 이 `testing` 을 뺀다 — 게이트에 예외가 생기고 정규식이 길어진다.
-- 거부 (c) base 에 두지 않는다 — 결정 3-1 · 5 를 고치고 daemon 의 `Mutex<Instant>` 가짜가 남는다.
+**C4 = (a).** Reason: gate ③ (tenant no-reference) stands as it is — putting it in `testing` would require implementing `crate::time::Clock` and trip the gate. Cost = one feature flag spans two modules (`time` · `testing`).
+- Rejected (b) put it in `testing` and have gate ③ exclude `testing` — the gate gets an exception and the regex gets longer.
+- Rejected (c) do not put it in base — it amends decisions 3-1 · 5 and daemon's `Mutex<Instant>` fake remains.
 
-**S1 = (a).** 이유: 결정 2(「상태 없는 공개 함수」)와 같고 `usage/process.rs:636` 이 이미 그 꼴이다.
-- 거부 (b) 확장 트레이트 `m.lock_or_recover()` — 파일마다 `use` 한 줄 · std `lock` 과 다른 이름 · ADR-0269 「거부한 대안」(도우미를 트레이트 뒤에)과 결이 달라 설명이 필요하다.
+**S1 = (a).** Reason: the same as decision 2 (「상태 없는 공개 함수」) and `usage/process.rs:636` is already that form.
+- Rejected (b) extension trait `m.lock_or_recover()` — one `use` line per file · a different name from std `lock` · out of keeping with ADR-0269 「거부한 대안」 (helpers behind a trait), so it needs explaining.
 
-**S2 = (e).** 이유: 오늘 117곳 중 116곳이 이미 말없이 되찾아 동작이 로그까지 그대로이고(순수 중복 제거), 경고를 달면 가드를 쥔 채 찍혀 쥔 채 로그 금지 자물쇠 열둘(37곳)을 빼야 했는데 그 목록은 리뷰마다 넓어졌고 지키는 게이트가 없다(§2-4 역사 기록). 잃는 것 = debug · 시험 빌드에서만 나는, 오늘도 116곳에 없는 신호(운영은 `panic = "abort"`). 이전 범위가 46 → 83 으로 넓어져 ADR-0269 의 목적(흩어진 사본을 한 곳으로)을 더 채운다.
-- 거부 (a) 복구마다 경고(독은 둔다) — 결정 4 의 문구 그대로지만 제외 목록(열둘 · 37곳)을 지고 가야 하고, 독이 든 뒤 모든 잠금이 경고를 쏟는다.
-- 거부 (b) 독 한 번에 한 번(`clear_poison`) — 섞인 자물쇠 일곱(§2-4)에서 이웃(`.expect` · `try_lock`)의 동작이 「그 사이 복구가 돌았나」에 매인다(PTY · stdio `child` 의 shutdown 은 ADR-0001 kill 인과 경로) · 제외 자물쇠와 섞여 한 crate 안에서 걷는 자물쇠와 안 걷는 자물쇠가 갈린다.
-- 거부 (c) 사이트마다 한 번 — 매크로가 필요해 결정 2(「상태 없는 공개 함수」)에서 벗어난다 · 제외 목록은 그대로 필요하다.
-- 거부 (d) 프로세스당 처음 한 번 — 정적 깃발을 쥐어 결정 2 와 결이 어긋나고 둘째 독부터 기본 레벨에서 안 보인다 · 제외 목록은 그대로 필요하다.
-- 거부 「놓고 경고하고 다시 잡는」 도우미 — 부른 쪽이 쥔 바깥 자물쇠 아래서는 여전히 찍힌다(§2-4).
-- 받아들인 대가: 확정된 ADR-0269 결정 4 를 고친다(ADR-0275) · 나중에 경고를 다시 달려면 83곳 전체의 제외 감사를 처음부터 다시 한다 · 셸 `output_channel.rs` 는 ADR-0231 의 경고 + 독 걷기를 지켜 제자리다(§3-5).
+**S2 = (e).** Reason: today 116 of the 117 sites already recover silently, so the behavior stays the same down to the logs (pure de-duplication); attaching a warning would print while holding the guard and force us to exclude twelve locks (37 sites) where logging while held is forbidden, but that list widened at every review and no gate guards it (§2-4 historical record). What we lose = a signal that appears only in debug · test builds and that is absent today at 116 sites (operational is `panic = "abort"`). The move range widens from 46 → 83, which fulfills ADR-0269's purpose (scattered copies into one place) more fully.
+- Rejected (a) a warning at every recovery (poison kept) — the wording of decision 4 as is, but it must carry the exclusion list (twelve · 37 sites), and once the poison is in, every lock pours out warnings.
+- Rejected (b) once per poison (`clear_poison`) — at the seven mixed locks (§2-4) the behavior of the neighbors (`.expect` · `try_lock`) becomes tied to 「그 사이 복구가 돌았나」 (the shutdown of PTY · stdio `child` is the ADR-0001 kill causal path) · mixed with the excluded locks, within one crate some locks would clear and some would not.
+- Rejected (c) once per site — it needs a macro and departs from decision 2 (「상태 없는 공개 함수」) · the exclusion list is still needed.
+- Rejected (d) once per process, the first time — it holds a static flag, which is out of keeping with decision 2, and from the second poison on it is not visible at the default level · the exclusion list is still needed.
+- Rejected 「놓고 경고하고 다시 잡는」 helper — it still prints under an outer lock held by the caller (§2-4).
+- Accepted cost: it amends confirmed ADR-0269 decision 4 (ADR-0275) · to attach a warning later, the exclusion audit of all 83 sites is redone from scratch · shell `output_channel.rs` keeps ADR-0231's warning + poison clearing and stays in place (§3-5).
 
-**N1 = (b).** 이유: command · transport 가 「하네스 도우미 모듈을 연다」는 같은 뜻으로 쓰는 이름이다 — 같은 뜻에 같은 이름.
-- 거부 (a) `testing` — 모듈 이름과 같지만 기존 선례와 갈린다.
-- 거부 (c) `test-harness` — agent · daemon · messaging 이 「운영 코드 안의 seam 을 연다」는 다른 뜻으로 쓴다.
+**N1 = (b).** Reason: command · transport use 「하네스 도우미 모듈을 연다」 as a name with the same meaning — the same name for the same meaning.
+- Rejected (a) `testing` — the same as the module name, but it splits from the existing precedent.
+- Rejected (c) `test-harness` — agent · daemon · messaging use 「운영 코드 안의 seam 을 연다」 with a different meaning.
 
-**P1 = (a).** 이유: ADR-0269 결정 2 · ADR-0270 결정 5 가 이미 적은 가안이라 두 ADR 의 문구가 그대로 맞는다.
-- 거부 (b) `normalize_typed_path` — 대상이 이름에 드러나지만 두 ADR 의 문구와 어긋난다.
-- 거부 (c) `tidy_typed_path` — 같음.
+**P1 = (a).** Reason: it is a draft name that ADR-0269 decision 2 and ADR-0270 decision 5 already wrote, so the wording of both ADRs still fits.
+- Rejected (b) `normalize_typed_path` — the target shows in the name, but it conflicts with the wording of the two ADRs.
+- Rejected (c) `tidy_typed_path` — same.
 
-**묶인 것의 귀결:** C5=(b) · T1=(b) → transport 는 base 를 의존하지 않은 채 `ws.rs` 만 std 로 바뀐다(G3 없음). C1=(a) · C4=(a) → base `ManualClock` 은 `Send + Sync` 를 만족하는 원자 정수 꼴. S2=(e) → 셸 `output_channel.rs` 는 제자리이고 섞인 자물쇠의 처분이 필요 없다 · 제외 규칙 대신 제자리 7곳(§3-5).
+**Consequences of the tied items (묶인 것의 귀결):** C5=(b) · T1=(b) → transport does not depend on base, and only `ws.rs` changes to std (no G3). C1=(a) · C4=(a) → base `ManualClock` is an atomic-integer form that satisfies `Send + Sync`. S2=(e) → shell `output_channel.rs` stays in place and no disposition of the mixed locks is needed · 7 in-place sites instead of an exclusion rule (§3-5).
 
-### 4-2. ADR-0275 에 적은 개정 (Amends ADR-0269 · ADR-0268)
+### 4-2. Amendments written into ADR-0275 (Amends ADR-0269 · ADR-0268)
 
-> **박았다(2026-10-04)** — ADR-0275 는 1-1 몫(이 표 — ADR-0269 개정 + ADR-0268 「영향」의 base 락 오염 복구 경고 줄 개정)과 형제 1-3 몫(ADR-0266 · ADR-0262 개정 — TRD 1-3 §8)을 함께 실은 **한 ADR** 이다. 번호 = **0275**(0274 는 `origin/v0.3.3/feat/storage` 가 쓴다 — 2026-10-04 원격 `git ls-tree` 로 확인. 이 브랜치의 마지막은 0273). 박은 것은 오케스트레이터 · `/adr`(결정 날조 금지 — 아래 거부한 대안 · 이유는 §4-1 과 이 TRD 의 실측에서 왔다). 상태 근거 = 사용자 위임 2026-10-04(「알아서 진행해」 → 권고안 채택) + 이 TRD 의 실측(`0ef6292`). ★ADR-0269 본문에도 「ADR-0275 가 결정 2 · 3 · 4 · 5 와 거부한 대안 한 줄을 고쳤다」는 개정 링크를 단다★ — 옛 ADR 만 읽는 세션이 낡은 문구(경고 로그 · transport 하위 트레이트 · `testing` 의 가짜)를 따라가지 않게(CLAUDE.md 「설계 결정 기록」 — 상태는 양방향). 착수 순서: U1 전에 박는다(U1 이 T1 · 이름 확정에 기댄다 — §6-1).
+> **Recorded (2026-10-04)** — ADR-0275 is **one ADR** carrying the 1-1 part (this table — the amendment of ADR-0269 + the amendment of the base lock poison recovery warning line in ADR-0268 「영향」) together with the sibling 1-3 part (amendments to ADR-0266 · ADR-0262 — TRD 1-3 §8). Number = **0275** (0274 is used by `origin/v0.3.3/feat/storage` — confirmed 2026-10-04 with remote `git ls-tree`. The last one on this branch is 0273). It was recorded by the orchestrator · `/adr` (no fabricated decisions — the rejected alternatives below · the reasons come from §4-1 and the measurements of this TRD). Basis for the status = user delegation 2026-10-04 (「알아서 진행해」 → recommendation adopted) + the measurements of this TRD (`0ef6292`). ★The body of ADR-0269 also gets an amendment link 「ADR-0275 가 결정 2 · 3 · 4 · 5 와 거부한 대안 한 줄을 고쳤다」★ — so that a session reading only the old ADR does not follow stale wording (warning log · transport subtrait · the fake in `testing`) (CLAUDE.md 「설계 결정 기록」 — status is bidirectional). Start order: record it before U1 (U1 leans on T1 · the name confirmation — §6-1).
 
-| # | ADR-0269 의 자리 | 무엇이 바뀌나 | 거부한 대안 | 이유 |
+| # | Place in ADR-0269 | What changes | Rejected alternatives | Reason |
 |---|---|---|---|---|
-| 1 | **결정 4**(S2=e) | 「복구할 때 `tracing::warn!` 로 경고 로그를 남기는」 도우미 → **경고 없이 되찾기만 하는 도우미(독 표시는 남긴다 · `clear_poison` 없음)**. 「`sync` 가 `logging` 을 부르지 않아 무참조가 선다」는 더 강하게 참이 된다(로그 자체가 없다). 예외 하나 = 셸 `output_channel.rs`(ADR-0231 의 경고 + 독 걷기 — 제자리). ADR-0268 「영향」의 「base 의 락 오염 복구 경고도 `tracing::warn!` 을 직접 부른다」 줄도 같은 결정으로 낡는다(Amends ADR-0268) | (a) 복구마다 경고 · (b) 독 한 번에 한 번(`clear_poison`) · (c) 사이트마다 한 번(매크로) · (d) 프로세스당 한 번 · 놓고 경고하고 다시 잡는 도우미 | 운영 빌드는 `panic = "abort"` 라 신호가 debug · 시험 빌드뿐이다 · 경고는 가드를 쥔 채 찍혀 쥔 채 로그 금지 자물쇠 열둘(37곳)을 빼야 했고 그 목록이 리뷰 세 번마다 넓어졌으며 지키는 게이트가 없다 · 117곳 중 116곳이 이미 말없이 되찾는다 · (b) 는 섞인 자물쇠 일곱의 이웃(`.expect` · `try_lock`) 의미를 바꾼다 · (c) · (d) 는 결정 2 의 「상태 없는 함수」에서 벗어난다. 대가 = 경고를 다시 달려면 83곳 전체의 감사를 다시 한다 |
-| 2 | **결정 2 표 `sync` 행 · 「근거」의 57곳** | 흡수 대상 = 실측 117곳(운영 90 · 시험 전용 27) 중 **운영 83곳**. 제자리 = 운영 7(base `logging` · `leftover.rs` `try_lock` · 찾기 명단 도우미 · 셸 `settings/mod.rs` 3(P3 뒤 D2) · 셸 `output_channel.rs`) · command 3(ADR-0267) · 시험 전용 24 | — (수치 확정 — 「근거」가 「1-1 착수 때 다시 센다」고 미뤄 둔 값) | §2-4 · §5 M3 의 셈 |
-| 3 | **결정 3-2 · 3-5 의 transport 몫**(C5=b) | transport 가 base 트레이트를 상위로 둔 자기 트레이트를 갖는 일을 **3단계(transport 부착 TRD)로 미룬다**. 1-1 에서 transport 는 base 를 의존하지 않고 transport 게이트 ①(정확히 1줄 · ADR-0177)도 그대로다. 결정 3-2 의 「가짜 하나가 둘을 같은 상태로 구현」은 discovery 몫만 1-1 에 선다. 결정 3-5(tokio 로 잠 · `tokio::time::pause` 는 std `Instant` 를 안 멈춘다)는 사실로 남고 적용은 3단계다 | (a) 지금 붙인다 · (c) 시계만 붙이고 자르기는 std | transport 는 소비자 0 이고 3단계가 의존 · 게이트를 어차피 다시 연다 · (a) 는 게이트 기대값 변경 + `tracing` · `tracing-subscriber` · `regex`(· `windows`) 발자국 · ADR-0267(필요할 때만 연결)과 같은 결 · transport 의 자르기는 std 로 base 없이 해소된다. 대가 = 「시간은 공용이면 무조건 합친다」와 어긋난 seam 이 3단계까지 남는다(transport `clock.rs` 머리에 적는다) |
-| 4 | **결정 2 표 `text` 행**(T1=b) | `truncate_bytes` · `keep_tail_bytes` 를 뺀다 → `text` = `hex_lower` 하나. 사본 셋은 std `floor_char_boundary` · `ceil_char_boundary` 로 제자리 교체한다. 「맥락」 표의 「UTF-8 경계 자르기」 행은 사실로 남는다 | (a) base 함수 둘(안은 std 한 줄) | 고정 컴파일러 1.95 의 std 한 줄이라 감쌀 몫이 없다(「거부한 대안」 `dunce::canonicalize` 와 같은 사유) · 뒤 남김은 사본 하나라 결정 7 미달 |
-| 5 | **결정 3-1 · 결정 5 · 결정 2 표 `testing` 행**(C4=a · N1=b) | 가짜 `Clock` 의 자리를 `testing` → **`time` 안 `#[cfg(any(test, feature = "test-support"))]`** 로. `testing` 행은 `wait_until` 하나. 기능 이름 = `test-support`(command · transport 와 같은 뜻 · 같은 이름) | (b) `testing` 에 두고 게이트 ③ 에 예외 · (c) base 에 두지 않는다 / 기능 이름 `testing` · `test-harness` | 결정 5 와 결정 6 · 게이트 ③(입주자 무참조)이 부딪힌다 — `testing` 의 가짜는 `crate::time::Clock` 을 구현해야 한다. `test-harness` 는 이 워크스페이스에서 「운영 코드 안의 seam 을 연다」는 다른 뜻이다 |
-| 6 | **결정 3 의 seam 목록 · 「맥락」 표의 「네 벌」**(C2=a) | seam 은 여섯이다(+ agent `LeftoverClock` · `CaptureClock`). **`LeftoverClock` 을 base `Clock` 의 하위 트레이트로 합친다**(`mono_now` → `now` · 가짜는 원자 정수 그대로). `CaptureClock` 은 지금 읽기가 없어 합칠 몫이 없다. storage 브랜치의 saver `Clock` 은 P3 뒤 D2 의 몫이다 | (b) 둔다 | 사용자 규칙 「시간은 공용이면 무조건 합친다」(2026-09-26) · 바뀌는 것이 이름과 상위 트레이트뿐이다. 대가 = ADR-0262 의 불변식이 무거운 파일(잔여물 정리)을 기계적 개명이나마 건드린다 — 별도 단위(U6) |
-| 7 | **결정 3-4**(C3=a) | `UsageClock` 「보류 — 1-1 때 깔끔히 맞으면 합치고 안 맞으면 묻는다」 → 맞지 않음을 실측으로 확인, **그대로 둔다**(사용자 위임). 사유는 `usage_service/clock.rs` 머리에 | (b) 상위 트레이트만 붙인다 · (c) `mono` 를 `Instant` 로 | `mono` 의 `Duration` 이 book 도메인 타입으로 흐르고 `Duration::MAX` · `ZERO` 끝값 시험이 있다 · `wall` 은 부호 있는 epoch 초다 · (b) 는 아무도 `now()` 를 안 부르는 껍데기 · (c) 는 ADR-0250 · 사용량 TRD 계약 변경이라 1-1 범위를 넘는다 |
-| 8 | **「거부한 대안」 `sha256_hex` 줄** | 사유 「`sha2` 를 끌고 온다」 → **「사본이 하나라 결정 7 에 못 미친다」**. 결론(입주 안 함)은 그대로. 안의 hex 루프는 `hex_lower` 를 부른다(T2=a) | — (사실 정정) | std 손구현이다 — `record.rs:247-251` 주석 · `grep -n sha2 crates/*/Cargo.toml src-tauri/Cargo.toml` → 0줄 |
-| 9 | **세부 확정**(개정 아님 — 결정 2 「함수 이름은 가안」 · 결정 3 「세부 모양은 1-1 착수 때 정한다」를 채운 것. ADR-0275 에 한 줄씩 적어 둔다) | `Clock: Send + Sync`(C1=a) · `sync` = 자유 함수 넷(S1=a) · 이름 `hex_lower` · `normalize_spelling` 확정(T2=a · P1=a) · `wait_until` 흡수 대상은 9개 파일이 아니라 사본 11벌(+ daemon `ws_e2e.rs` `poll_until` · `messaging_host.rs`) | C1 (b) 경계 없음 · (c) 읽기 둘 / S1 (b) 확장 트레이트 / P1 (b) `normalize_typed_path` · (c) `tidy_typed_path` | §4-1 의 각 줄 |
+| 1 | **Decision 4** (S2=e) | 「복구할 때 `tracing::warn!` 로 경고 로그를 남기는」 helper → **a helper that only recovers, with no warning (poison mark kept · no `clear_poison`)**. 「`sync` 가 `logging` 을 부르지 않아 무참조가 선다」 becomes even more true (there is no log at all). One exception = shell `output_channel.rs` (ADR-0231's warning + poison clearing — in place). The 「base 의 락 오염 복구 경고도 `tracing::warn!` 을 직접 부른다」 line of ADR-0268 「영향」 goes stale by the same decision (Amends ADR-0268) | (a) a warning at every recovery · (b) once per poison (`clear_poison`) · (c) once per site (macro) · (d) once per process · a helper that releases, warns, and takes the lock again | Operational builds are `panic = "abort"`, so the signal exists only in debug · test builds · a warning prints while holding the guard and forced us to exclude twelve locks (37 sites) where logging while held is forbidden, and that list widened with each of three reviews and no gate guards it · 116 of 117 sites already recover silently · (b) changes the meaning of the neighbors (`.expect` · `try_lock`) of the seven mixed locks · (c) · (d) depart from the 「상태 없는 함수」 of decision 2. Cost = to attach a warning again, the audit of all 83 sites is redone |
+| 2 | **Decision 2 table, row `sync` · the 57 sites of 「근거」** | Absorbed targets = **83 operational sites** of the 117 measured (operational 90 · test-only 27). In place = 7 operational (base `logging` · `leftover.rs` `try_lock` · the lookup list helper · shell `settings/mod.rs` 3 (D2 after P3) · shell `output_channel.rs`) · command 3 (ADR-0267) · test-only 24 | — (number fixed — the value that 「근거」 deferred, saying 「1-1 착수 때 다시 센다」) | the count in §2-4 · §5 M3 |
+| 3 | **The transport part of decisions 3-2 · 3-5** (C5=b) | We **defer to phase 3 (the transport attachment TRD)** the matter of transport having its own trait with the base trait as supertrait. In 1-1 transport does not depend on base and transport gate ① (exactly 1 line · ADR-0177) is also unchanged. Of the 「가짜 하나가 둘을 같은 상태로 구현」 in decision 3-2, only the discovery part stands in 1-1. Decision 3-5 (sleep with tokio · `tokio::time::pause` does not stop std `Instant`) remains as a fact and its application is in phase 3 | (a) attach now · (c) attach only the clock and use std for truncation | transport has zero consumers and phase 3 reopens the dependency and gates anyway · (a) is a gate expected-value change + the footprint of `tracing` · `tracing-subscriber` · `regex` (· `windows`) · in the same vein as ADR-0267 (connect only when needed) · transport's truncation is resolved with std, without base. Cost = a seam that departs from 「시간은 공용이면 무조건 합친다」 remains until phase 3 (written in the head of transport `clock.rs`) |
+| 4 | **Decision 2 table, row `text`** (T1=b) | Remove `truncate_bytes` · `keep_tail_bytes` → `text` = only `hex_lower`. The three copies are replaced in place with std `floor_char_boundary` · `ceil_char_boundary`. The 「UTF-8 경계 자르기」 row of the 「맥락」 table remains as a fact | (a) two base functions (inside is one std line) | it is one std line of the pinned compiler 1.95, so there is nothing to wrap (the same reason as 「거부한 대안」 `dunce::canonicalize`) · the keep-back form is one copy and falls short of decision 7 |
+| 5 | **Decision 3-1 · decision 5 · decision 2 table, row `testing`** (C4=a · N1=b) | Move the fake `Clock` from `testing` → **`#[cfg(any(test, feature = "test-support"))]` inside `time`**. The `testing` row is only `wait_until`. Feature name = `test-support` (the same meaning · same name as command · transport) | (b) put it in `testing` and make an exception in gate ③ · (c) do not put it in base / feature name `testing` · `test-harness` | Decision 5, decision 6, and gate ③ (tenant no-reference) collide — the fake in `testing` must implement `crate::time::Clock`. `test-harness` has a different meaning in this workspace: 「운영 코드 안의 seam 을 연다」 |
+| 6 | **The seam list of decision 3 · the 「네 벌」 of the 「맥락」 table** (C2=a) | There are six seams (+ agent `LeftoverClock` · `CaptureClock`). **Merge `LeftoverClock` as a subtrait of base `Clock`** (`mono_now` → `now` · the fake stays an atomic integer). `CaptureClock` has no now-read, so there is nothing to merge. The storage branch's saver `Clock` is the job of D2 after P3 | (b) leave it | the user rule 「시간은 공용이면 무조건 합친다」 (2026-09-26) · all that changes is the name and the supertrait. Cost = it touches a file heavy with ADR-0262 invariants (leftover cleanup), even if only by a mechanical rename — a separate unit (U6) |
+| 7 | **Decision 3-4** (C3=a) | `UsageClock` 「보류 — 1-1 때 깔끔히 맞으면 합치고 안 맞으면 묻는다」 → confirmed by measurement that it does not fit, **leave as is** (user delegation). The reason goes in the head of `usage_service/clock.rs` | (b) attach only the supertrait · (c) `mono` to `Instant` | the `Duration` of `mono` flows into a book-domain type and there are `Duration::MAX` · `ZERO` end-value tests · `wall` is signed epoch seconds · (b) is a shell that nobody calls `now()` through · (c) is a contract change of ADR-0250 · the usage TRD and exceeds the 1-1 scope |
+| 8 | **「거부한 대안」 `sha256_hex` line** | Reason 「`sha2` 를 끌고 온다」 → **「사본이 하나라 결정 7 에 못 미친다」**. The conclusion (does not move in) stays. The hex loop inside calls `hex_lower` (T2=a) | — (factual correction) | it is a hand-rolled std implementation — `record.rs:247-251` comment · `grep -n sha2 crates/*/Cargo.toml src-tauri/Cargo.toml` → 0 lines |
+| 9 | **Detail confirmation** (not an amendment — it fills in decision 2 「함수 이름은 가안」 · decision 3 「세부 모양은 1-1 착수 때 정한다」. Written as one line each in ADR-0275) | `Clock: Send + Sync` (C1=a) · `sync` = four free functions (S1=a) · names `hex_lower` · `normalize_spelling` confirmed (T2=a · P1=a) · the absorbed targets of `wait_until` are not 9 files but 11 copies (+ daemon `ws_e2e.rs` `poll_until` · `messaging_host.rs`) | C1 (b) no boundary · (c) two reads / S1 (b) extension trait / P1 (b) `normalize_typed_path` · (c) `tidy_typed_path` | each line of §4-1 |
 
-- **고치지 않는 것:** 결정 1 · 6 · 7 · 8 · 9 · 「영향」(게이트 ③ 에 모듈 이름을 더한다는 문장 포함)은 이 결정들과 부딪히지 않는다. ADR-0177(transport 게이트)은 C5=(b) 라 바뀌지 않는다. ADR-0231(출력 Channel 명부의 경고 + 독 걷기)은 그대로 서고 base `sync` 의 예외로 남는다.
-
----
-
-## 5. 메인 판단 (2026-10-04 · ADR-0269 결정 7 — 묻지 않고 보고)
-
-> **출처: 메인 판단(2026-10-04).** 아래 다섯은 ADR-0269 결정 7(입주 판단은 메인이 하고 사용자에게 묻지 않고 보고한다)의 몫이라 사용자 위임(§4)이 아니라 메인이 정했다. 4판까지 워커 제안이던 안을 그대로 채택했다 — 내용은 바뀌지 않았다.
-
-- **M1 — 시험 임시 폴더 도우미:** 「태그 + PID + 시각으로 고유한 임시 폴더 경로」가 9벌 있다(base `logging/mod.rs:448` · discovery `lib.rs:2619` · net `portfile.rs:94` · `instance.rs:349` · 셸 `settings/tests.rs:20` · `settings/store.rs:1193` · agent `backend/claude/session_file.rs:232` · `persistence/mod.rs:162` · `persistence/presets.rs:134`). 결정 7 로는 입주 대상이다. **1-1 에 넣지 않는다**(메인 판단 2026-10-04) — net 이 `testing` 을 부르면 net 의 「base 심볼 정확히 2줄」 게이트가 움직이고(시험 모듈도 `src/` 안이다), 셸 둘은 storage 가 고치는 파일이며, base `logging` 의 사본은 게이트 ③ 때문에 못 쓴다. P3 · 1-3 뒤에 따로.
-- **M2 — `wait_until` 폴링 20 ms 고정**(사본 20 · 25 · 50 ms). 인자로 받지 않는다.
-- **M3 — `sync` 이전 범위 = 운영 사이트 83곳(S2=e).** 시험 전용(agent 19 · daemon 5)은 그대로 둔다 — 옮겨도 얻는 것이 없다(경고가 없어 시험 출력도 같다). 옮기기로 하면 그 단위에 더하면 된다 — 제외 규칙이 없어 막는 것이 없다.
-  - 셈: 117 = 운영 90(agent 68 · daemon 8 · 셸 13 · base 1) + 시험 전용 27(agent 19 · daemon 5 · command 3). 운영 중 제자리 7 = base `logging` 1 · `leftover.rs:1664` `try_lock` 1 · 찾기 명단 도우미(`usage/process.rs:636`) 1 · 셸 `settings/mod.rs` 3 · 셸 `output_channel.rs` 1(§3-5) → 90 − 7 = **83**(agent 66 · daemon 8 · 셸 9).
-  - 단위별: U2 17(daemon 8 · 셸 9) · U3a 24(agent 의 codex 통로 밖) · U3b 42(codex `transport.rs` — 상태 락 26 포함) · §6.
-  - 4판까지의 수(1판 85 → 2판 80/81 → 3판 47/48 → 4판 46/47)는 경고를 다는 갈래의 제외 목록이 리뷰마다 넓어진 기록이다. 4판 46 과 83 의 차 37 = 쥔 채 로그 금지 자물쇠 열둘의 복구 사이트(agent 33 · daemon 4 — §2-4 역사 기록).
-- **M4 — 패닉 변형 다섯은 제자리**(§2-5) — 라벨 · 패닉 · 폴링이 각자 근거를 가진다.
-- **M5 — `now_epoch_ms` 의 persistence 두 벌도 1-1 에서 바꾼다** — 그 두 파일의 쓰임은 손상 사본 이름 하나뿐이라 P3 뒤 `set_aside_corrupt` 가 그 시각을 인자로 받게 되면 다시 움직이지만, 지금 바꿔도 storage 브랜치와 겹치지 않는다(storage 는 `crates/` 를 안 고친다 — `git diff --stat <merge-base> origin/v0.3.3/feat/storage -- crates` → 0).
+- **What is not amended:** decisions 1 · 6 · 7 · 8 · 9 · 「영향」 (including the sentence that adds module names to gate ③) do not collide with these decisions. ADR-0177 (the transport gate) does not change because of C5=(b). ADR-0231 (the output Channel registry's warning + poison clearing) stands as it is and remains an exception to base `sync`.
 
 ---
 
-## 6. 작업 단위
+## 5. Main-session decisions (2026-10-04 · ADR-0269 decision 7 — reported without asking)
 
-> **지시서 공통 문구(코더에게):** 「중간 어디서 멈춰도 빌드가 서게 순서를 짜라」 — **base 에 새 함수를 먼저 더하고(옛 사본과 공존) → 호출부를 파일 단위로 갈아 끼우고 → 옛 사본을 마지막에 지운다.** 옛 자료구조를 먼저 지우는 순서는 금지. 주석은 `/code-conventions` 의 주석 규약 파일을 주입한다.
->
-> **되돌릴 지점:** 코드 트리는 출발점 `0ef6292` 그대로다(미추적은 이 TRD 폴더뿐). U1 전에 이 TRD 를 로컬 커밋해 출발점으로 삼고(§6-1), 단위마다 게이트 초록 뒤 로컬 커밋으로 스냅숏을 남긴다.
->
-> **단위마다 검증(공통):**
-> 1. `cargo test --workspace -- --test-threads=4` 를 단위 **전후로** 돌려 **`test result:` 줄 수와 통과 총계를 둘 다** 견준다 — 타깃 소실은 실패가 아니라 침묵이다(CLAUDE.md 「빌드·검증 명령」). 기대: 줄 수 = 그대로(base 새 시험은 `src/` 안 단위 시험으로만 둔다 — `tests/` 에 파일을 더하면 +1) · 통과 = 전 + base 새 시험 수(옮긴 시험은 이쪽 −N · base +N 으로 상쇄). ★출발 수치는 재지 않았다★ — 마지막 기록은 CLAUDE.md 의 2026-10-01(`cac9ee0`) 59줄 · 3822 통과 · 30 무시다. U1 착수 때 잰다(§6-1 의 명령).
-> 2. `cargo test -p engram-dashboard-base -- --test-threads=4` · `cargo fmt --check` · base 게이트 ①②③(§7) · 바뀐 crate 의 `-p` 시험(플래그 규칙은 CLAUDE.md 「병렬은 테스트 바이너리마다 걸린다」).
-> 3. 셸이 바뀌는 단위는 `cargo test -p engram-dashboard --test lib_unit` 과 해당 통합 타깃(`--test layout_commands` 등)을 따로 돈다.
-> 4. 소스가 바뀌므로 커밋 전 `/qa`(범위는 바인딩이 정한다). **동작은 로그까지 그대로다** — S2=(e) 의 도우미는 독 표시를 건드리지 않고 로그를 내지 않으며, 옮기는 83곳은 이미 말없이 되찾던 자리다(117곳 중 경고를 내는 유일한 자리 `output_channel.rs` 는 제자리). T1 의 std 교체는 손 루프와 결과가 같다(§2-1). 운영 빌드는 `panic = "abort"` 라 복구 갈래에 아예 안 닿는다. 그래서 GUI 실측이 필요한 동작 변화는 없다 — 단 U1 의 셸 `layout/commands.rs` 는 `agent.spawnInto` 의 cwd 철자에 닿는다(동작 동일 · 회귀망 = 옮긴 시험 + `layout_commands`).
-> 5. **소스 문자열 시험(실측 — `rg -n 'include_str!\(' crates src-tauri/src` 의 원천 파일 읽기 21곳 + `settings/tests.rs:1321` 의 폴더 훑기 하나를 다 읽었다):** 1-1 의 편집에 **깨지는** 것은 codex `transport.rs` 의 `the_production_blocking_stdin_locks_are_counted`(`:7329-7375`) 하나다 — U3b. 닿지만 안 깨지는 것: `manager.rs:3953` 의 핸드셰이크 실패 갈래 순서 시험(U3b 가 고치는 `:2751-2753` 이 그 갈래 안이다 — 재는 바늘은 `tracing::warn!(…headline())` 과 `deliver_link(` 의 순서뿐) · `manager.rs:6374` `squashed_production_body`(바늘 `self.sessions.write()` 는 `.expect` 쪽이라 U3a 가 안 고친다) · `profile.rs:1167`(U1 의 `now_millis` 교체가 바늘 `p.epoch` · `replace_session_id(` 를 건드리지 않는다). ★5판 재대조(S2=e 로 넓어진 몫):★ 원천을 읽는 시험이 있는 파일 중 새로 손대는 것은 codex `transport.rs`(상태 락 26곳)와 `manager.rs`(`:550`)뿐이고, 그 시험들의 바늘(`clip(` · `s.turn = TurnState::Idle` · `.close_turn_items(` · `ChildGuard(Some(child))` · `record_session_id(` · `hydrate_history(` · `HANDSHAKE_BUDGET` · `s.closed = true;` · `self.pending.close()` / `manager.rs` 의 `_reservation` · `spawn_fresh_settled` · `note_activation_result` · `.with_session_id_latch(` 등)은 락 복구 꼴을 재지 않는다. 잔여물 정리 · 대기 입력 명부 · 대기 목록 표 · 래치 · 턴 관측 표 · daemon 넷(`command_roster.rs` · `agent_conn.rs` · `usage_service/{watch,mod}.rs`)에는 원천을 읽는 시험이 없다. CI · qa 바인딩의 `rg` 게이트에는 락 복구 꼴을 훑는 줄이 없다(`grep -n 'into_inner\|lock()\|poison' .github/workflows/ci.yml .claude/skill-bindings/qa.md` → 0).
+> **Source: main-session decision (2026-10-04).** The five below fall under ADR-0269 decision 7 (the main session makes the tenancy decision and reports it to the user without asking), so the main session decided them rather than user delegation (§4). The proposals that were worker proposals up to edition 4 were adopted as they were — the content did not change.
 
-| id | 범위(사이트 수) | 건드리는 파일 | 선행 |
+- **M1 — test temp-folder helper:** 「태그 + PID + 시각으로 고유한 임시 폴더 경로」 has 9 copies (base `logging/mod.rs:448` · discovery `lib.rs:2619` · net `portfile.rs:94` · `instance.rs:349` · shell `settings/tests.rs:20` · `settings/store.rs:1193` · agent `backend/claude/session_file.rs:232` · `persistence/mod.rs:162` · `persistence/presets.rs:134`). Under decision 7 it is a tenancy target. **We do not put it in 1-1** (main-session decision 2026-10-04) — if net called `testing`, net's 「base 심볼 정확히 2줄」 gate would move (the test module is also inside `src/`), the two in the shell are files that storage fixes, and the copy in base `logging` cannot be used because of gate ③. Separately, after P3 · 1-3.
+- **M2 — `wait_until` polling fixed at 20 ms** (the copies are 20 · 25 · 50 ms). It is not taken as an argument.
+- **M3 — `sync` move range = 83 operational sites (S2=e).** Test-only ones (agent 19 · daemon 5) stay as they are — moving them gains nothing (there is no warning, so test output is the same too). If we decide to move them, add them to that unit — with no exclusion rule, nothing blocks it.
+  - Count: 117 = operational 90 (agent 68 · daemon 8 · shell 13 · base 1) + test-only 27 (agent 19 · daemon 5 · command 3). Of the operational ones, 7 in place = base `logging` 1 · `leftover.rs:1664` `try_lock` 1 · the lookup list helper (`usage/process.rs:636`) 1 · shell `settings/mod.rs` 3 · shell `output_channel.rs` 1 (§3-5) → 90 − 7 = **83** (agent 66 · daemon 8 · shell 9).
+  - Per unit: U2 17 (daemon 8 · shell 9) · U3a 24 (outside the agent codex link) · U3b 42 (codex `transport.rs` — including 26 state locks) · §6.
+  - The numbers up to edition 4 (edition 1 85 → edition 2 80/81 → edition 3 47/48 → edition 4 46/47) are the record of the exclusion list of the warning-attaching option widening at every review. The difference of 37 between edition 4's 46 and 83 = the recovery sites of the twelve locks where logging while held is forbidden (agent 33 · daemon 4 — §2-4 historical record).
+- **M4 — the five panic variants stay in place** (§2-5) — the label · panic · polling each have their own grounds.
+- **M5 — the two persistence copies of `now_epoch_ms` are also changed in 1-1** — in those two files the only use is the corrupt copy name, so they would move again after P3 when `set_aside_corrupt` takes that time as an argument, but changing them now does not overlap with the storage branch (storage does not fix `crates/` — `git diff --stat <merge-base> origin/v0.3.3/feat/storage -- crates` → 0).
+
+---
+
+## 6. Work units
+
+> **Common wording for the instructions (to the coder):** 「중간 어디서 멈춰도 빌드가 서게 순서를 짜라」 — **first add the new function to base (coexisting with the old copy) → replace call sites file by file → delete the old copy last.** The order that deletes the old data structure first is forbidden. For comments, inject the comment convention file of `/code-conventions`.
+>
+> **Point to roll back to:** the code tree is still the starting point `0ef6292` (the only untracked thing is this TRD folder). Before U1, make a local commit of this TRD to use as the starting point (§6-1), and after each unit's gates go green, leave a snapshot with a local commit.
+>
+> **Verification per unit (common):**
+> 1. Run `cargo test --workspace -- --test-threads=4` **before and after** the unit and compare **both the `test result:` line count and the pass total** — a vanished target is silence, not failure (CLAUDE.md 「빌드·검증 명령」). Expected: line count = unchanged (new base tests are placed only as unit tests inside `src/` — adding a file to `tests/` gives +1) · passes = before + the number of new base tests (moved tests offset as −N on this side · +N in base). ★The starting figures were not measured★ — the last record is 59 lines · 3822 passed · 30 ignored on 2026-10-01 in CLAUDE.md (`cac9ee0`). Measure them when U1 starts (the command in §6-1).
+> 2. `cargo test -p engram-dashboard-base -- --test-threads=4` · `cargo fmt --check` · base gates ①②③ (§7) · the `-p` tests of the changed crates (flag rules in CLAUDE.md 「병렬은 테스트 바이너리마다 걸린다」).
+> 3. A unit that changes the shell runs `cargo test -p engram-dashboard --test lib_unit` and the relevant integration target (`--test layout_commands` etc.) separately.
+> 4. Because source changes, `/qa` before commit (scope is set by the binding). **Behavior stays the same down to the logs** — the S2=(e) helper does not touch the poison mark and emits no logs, and the 83 sites we move already recovered silently (the only one of the 117 that emits a warning, `output_channel.rs`, stays in place). T1's std replacement gives the same result as the hand loop (§2-1). Operational builds are `panic = "abort"`, so they never reach the recovery branch. So there is no behavior change that needs a GUI measurement — except that U1's shell `layout/commands.rs` touches the cwd spelling of `agent.spawnInto` (behavior identical · regression net = the moved tests + `layout_commands`).
+> 5. **Source-string tests (measured — we read all 21 places where `rg -n 'include_str!\(' crates src-tauri/src` reads source files and the one folder sweep of `settings/tests.rs:1321`):** what **breaks** under the 1-1 edits is the one `the_production_blocking_stdin_locks_are_counted` (`:7329-7375`) of codex `transport.rs` — U3b. What it touches but does not break: the order test of the handshake-failure branch of `manager.rs:3953` (the `:2751-2753` that U3b fixes is inside that branch — the needles it measures are only the order of `tracing::warn!(…headline())` and `deliver_link(`) · `manager.rs:6374` `squashed_production_body` (the needle `self.sessions.write()` is on the `.expect` side, so U3a does not fix it) · `profile.rs:1167` (U1's `now_millis` replacement does not touch the needles `p.epoch` · `replace_session_id(`). ★Edition 5 re-cross-check (the part widened by S2=e):★ among files with tests that read source, the only ones newly touched are codex `transport.rs` (26 state-lock sites) and `manager.rs` (`:550`), and the needles of those tests (`clip(` · `s.turn = TurnState::Idle` · `.close_turn_items(` · `ChildGuard(Some(child))` · `record_session_id(` · `hydrate_history(` · `HANDSHAKE_BUDGET` · `s.closed = true;` · `self.pending.close()` / `_reservation` of `manager.rs` · `spawn_fresh_settled` · `note_activation_result` · `.with_session_id_latch(` etc.) do not measure the lock recovery form. Leftover cleanup · queued-input registry · pending-list table · latch · turn observation table · the four daemon ones (`command_roster.rs` · `agent_conn.rs` · `usage_service/{watch,mod}.rs`) have no tests that read source. The `rg` gate of the CI · qa binding has no line that sweeps for the lock recovery form (`grep -n 'into_inner\|lock()\|poison' .github/workflows/ci.yml .claude/skill-bindings/qa.md` → 0).
+
+| id | Scope (site count) | Files touched | Prerequisite |
 |---|---|---|---|
-| **U1** | base 입주 규칙 문서(헤더 · Cargo `description`) + `text::hex_lower`(루프 셋) + `time::now_epoch_ms`(사본 셋) + `path::normalize_spelling`(정의 1 · 부르는 곳 2 · 시험 둘 이사) + UTF-8 자르기 셋을 std 로(T1=b) | §6-1 이 정본(파일 · 줄) — 요약: base `lib.rs` · `Cargo.toml` · 새 `text.rs` · `time.rs` · `path.rs` / agent `commands.rs` · `profile.rs` · `persistence/{mod,presets}.rs` · `output_core.rs` / daemon `lib.rs` · `control/mod.rs` · `experiment/record.rs` / transport `ws.rs` / 셸 `layout/commands.rs` · `tests/layout_commands.rs`(주석) / 게이트 ③ 6곳 · CLAUDE.md · `docs/testing-strategy.md` · 루트 `Cargo.toml` `:2` · `:12-13` | ADR-0275 박제 |
-| **U2** | `sync` 모듈(함수 넷) + daemon 운영 **8** + 셸 운영 **9** = **17** · 제자리 주석 둘 | base `lib.rs` · `Cargo.toml`(`description`) · 새 `sync.rs` · `logging/mod.rs`(`:129` 제자리 주석 — 게이트 ③. ★그 주석에 `crate::` · `super::` + `sync` 철자를 쓰지 않는다 — 게이트 ③ 이 주석까지 잡는다★) / daemon `command_delivery.rs`(`:1008` — `lock_for_cleanup`) · `command_roster.rs`(`:401` — `lock_for_cleanup`) · `agent_conn.rs`(`:213` — `slot`) · `usage_service/mod.rs`(`:571` `save_lock` · `:606` `desk` · `:648` 조회 가드 칸) · `usage_service/reject_store.rs`(`:276`) · `usage_service/watch.rs`(`:205` — `lock`) / 셸 `view_commands.rs`(7 — `:403 · 410 · 455 · 527 · 552 · 758 · 790`) · `daemon_client/mod.rs`(`:88`) · `ui_settings.rs`(`:768`) · `output_channel.rs`(제자리 + 「ADR-0231 — 독을 걷는 자기 도우미, base `sync` 는 독을 걷지 않는다」 한 줄 주석) / 게이트 ③ 6곳(`+sync`). ★`lock_for_cleanup` 두 짝(`command_roster` · `command_delivery`)은 이름 · 「정리 경로 전용」 문서를 그대로 두고 몸만 `sync::lock` 으로 — `.expect` 쪽 `lock()` 과 일부러 갈라 둔 짝이고 (e) 는 독을 걷지 않아 그 가름이 그대로 선다★ | U1(base 헤더) |
-| **U3a** | agent `sync` — codex 통로 밖 운영 **24** · 제자리 주석 둘 | `transport/input_queue.rs` 7(`wait_timeout` `:178 · 254` 포함 — `:263` 은 `#[cfg(test)] fn queued_bytes` 라 안 바꾼다) · `transport/stdio.rs` 3(`:194` stdin · `:317` · `:380`) · `transport/pty.rs` 2(`:263 · 332` — `match` 꼴) · `reaper.rs` 2(`read` `:154-156` · `write` `:52-55`) · `session.rs` 2 · `manager.rs` 2(`session_id_sink` 의 `expected` 칸 `:550` · `lock_name_allocation` `:1061`) · `backend/claude/leftover.rs` 2(`Recorder.inner` `:402` · `GateCell.state` `:1713`) + 제자리 주석 1(`:1662-1665` `Debug` 의 `try_lock`) · `queued_input.rs` 1(`:405`) · `inputs_pending.rs` 1(`:47`) · `session_id_latch.rs` 1(`:150`) · `turn.rs` 1(`:145` `TurnObservations::lock`) · `usage/process.rs`(복구 사이트 0 — `StderrTail` 을 부르는 셋 `:696 · 985 · 1002` 를 `sync::lock` 으로 바꾸고, 찾기 명단 몫만 남는 지역 도우미 `fn lock`(`:636`)은 `LookupGate::release`(`:352`) 안으로 접어 「1-3 U5 로 간다 · platform 은 base 를 모른다(ADR-0266)」 한 줄 주석 — 워커 제안). ★잔여물 정리 잎 둘 · 대기 입력 명부 · 대기 목록 표 · 래치 · 턴 관측 표는 「쥔 채 로그 · 다른 락 · 밖 호출 금지」 자물쇠다 — (e) 의 도우미는 로그도 다른 락도 밖 호출도 없어 그 규율 안에 든다(§3-5 계약 2). 자물쇠 문서는 고치지 않는다★ | U2 |
-| **U3b** | agent `sync` — `backend/codex/transport.rs` 운영 **42** + ★소스 개수 시험 넓히기★ | 그 파일 하나. 운영 구획 = `:4284`(시험 모듈 시작) 앞. ★바꾸는 42곳 = 상태 락 26(`SharedState` `:1079` — `lock.lock()` 25: `:499 · 1115 · 1144 · 1176 · 1572 · 2000 · 2175 · 2230 · 2348 · 2461 · 2638 · 2972 · 3176 · 3254 · 3334 · 3399 · 3524 · 3589 · 3645 · 3715 · 3921 · 3949 · 4079 · 4171 · 4227` + 라이터 `wait_timeout` `:2192`) · `Announcer.order` 1(`:1112`) · `Pending.entries` 5(`:1298 · 1316 · 1328 · 1333 · 1338` — `:1349` 는 `#[cfg(test)] fn len`) · `stdin` 2(`:1555 · 2752`) · `child` 2(`:3889 · 4233`) · `stdout` · `stderr` · `open_params` · `link_sink` · `writer_handle` · `decoder` 각 1(`:3999 · 4009 · 4038 · 4052 · 4073 · 4092`)★. 「★상태 락을 쥔 채 찍지 않는다★」(`:3010-3015`) 규율은 그대로 지켜진다 — 도우미가 찍지 않는다. ★`tests::the_production_blocking_stdin_locks_are_counted`(`:7329-7375`)는 `stdin` 바로 뒤의 `.lock()` 을 세어 **정확히 2** 를 기대한다(교착 가드 — `write_line` `:1555` 과 핸드셰이크 실패 갈래 `:2751-2753`). U3b 가 그 둘을 새 꼴로 바꾸면 0 이 되어 빨개진다. **matcher 를 새 호출 꼴로 넓히고 기대값 2 는 그대로 둔다** — `sync::lock(` 뒤 `&` 를 건너뛴 `stdin`(`write_line` 은 `&Mutex` 를 받아 `sync::lock(stdin)` 이 된다 · S1=a). 옛 `.lock()` 꼴도 계속 센다(되돌아오면 그것도 블로킹이다). 「숫자만 고치지 말 것」은 그 시험 주석의 지시다 — 기대값을 0 으로 내리면 셋째 블로킹 자리가 생겨도 초록인 눈먼 가드가 된다. 같은 파일 `:2741-2750` 의 주석(「블로킹으로 이 락을 잡는 자리는 둘」)은 그대로 참이다★ | U2 |
-| **U4** | `testing` 모듈(`test-support` 기능) + `wait_until` + 사본 11벌 + dev 의존 + 운영 그래프 게이트(§7 G2) | base `lib.rs` · `Cargo.toml`(`[features] test-support = []`) · 새 `testing.rs` / agent `Cargo.toml` · `tests/{activation,transport_smoke,session_smoke,stdio_smoke,headless,backend_contract,reaper}.rs` / daemon `Cargo.toml` · `tests/{control_send,mcp_manager_lifecycle,ws_e2e}.rs` · `src/messaging_host.rs` / `ci.yml` · CLAUDE.md · qa 바인딩 · 게이트 ③ 6곳(`+testing`) | U1 |
-| **U5** | `time::Clock`(`Send + Sync`) + `SystemClock` + `ManualClock`(`test-support` 뒤 · C4=a) + daemon `command_delivery` + discovery + 안 합치는 시계 둘의 머리 주석 | base `time.rs` · `Cargo.toml`(`description`) / daemon `command_delivery.rs`(`Clock` `:176` · `SystemClock` `:181` 삭제 → base · 시험 `ManualClock` `:2425` → base) · `connection_core.rs`(`:4403` 시험) · `usage_service/clock.rs`(머리 주석 — C3=a: 「base `time::Clock` 과 합치지 않는다 — `mono` 의 `Duration` 계약 · 부호 있는 epoch 초 · ADR-0275」) / discovery `lib.rs`(`Clock` `:431` → base 하위 트레이트 + 막는 `sleep` · 가짜 `FakeClock` `:1742` 의 `RefCell` · `Cell` 을 `Sync` 인 꼴로 — C1=a) · `Cargo.toml:12-15`(base 의존 주석 — 사유를 「base `time::Clock` 상위 트레이트」로. 1-3 U1 이 그 줄의 「liveness 판정 공유」 사유를 platform 줄로 옮기므로 이 단위가 안 적으면 base 줄에 사유가 없다 — 1-3 이 먼저 착지하면 덧붙이고, 1-1 이 먼저면 「liveness」 사유 곁에 더한다 · 3차 리뷰) / transport `src/clock.rs`(머리 주석 — C5=b: 「3단계(transport 부착)에서 base `time::Clock` 의 하위 트레이트로 — ADR-0275」 · 코드는 안 바꾼다) | U4(`test-support` 기능) · U2(`command_delivery.rs` 겹침) |
-| **U6** | `LeftoverClock` 을 base `Clock` 의 하위 트레이트로(C2=a) — `mono_now` 22곳 → `now` | agent `backend/claude/leftover.rs` 하나(`LeftoverClock` `:953` · 운영 `SystemClock` `:961` · 가짜 `FakeClock` `:4664` · `SkipClock` `:6586` 은 원자 정수 그대로 자기 자리 — base `Clock` 을 함께 구현한다). ★「문 자물쇠 안에서도 부른다 — 다른 자물쇠를 잡거나 기다리지 않는다」(`:954`) 계약은 `now` 로 옮겨 적는다★ | U5 |
+| **U1** | base tenancy rule document (header · Cargo `description`) + `text::hex_lower` (three loops) + `time::now_epoch_ms` (three copies) + `path::normalize_spelling` (1 definition · 2 callers · 2 tests moved) + the three UTF-8 truncations to std (T1=b) | §6-1 is canonical (files · lines) — summary: base `lib.rs` · `Cargo.toml` · new `text.rs` · `time.rs` · `path.rs` / agent `commands.rs` · `profile.rs` · `persistence/{mod,presets}.rs` · `output_core.rs` / daemon `lib.rs` · `control/mod.rs` · `experiment/record.rs` / transport `ws.rs` / shell `layout/commands.rs` · `tests/layout_commands.rs` (comment) / gate ③ 6 places · CLAUDE.md · `docs/testing-strategy.md` · root `Cargo.toml` `:2` · `:12-13` | ADR-0275 recorded |
+| **U2** | `sync` module (four functions) + daemon operational **8** + shell operational **9** = **17** · two in-place comments | base `lib.rs` · `Cargo.toml` (`description`) · new `sync.rs` · `logging/mod.rs` (in-place comment on `:129` — gate ③. ★Do not write the spellings `crate::` · `super::` + `sync` in that comment — gate ③ catches comments too★) / daemon `command_delivery.rs` (`:1008` — `lock_for_cleanup`) · `command_roster.rs` (`:401` — `lock_for_cleanup`) · `agent_conn.rs` (`:213` — `slot`) · `usage_service/mod.rs` (`:571` `save_lock` · `:606` `desk` · `:648` lookup guard field) · `usage_service/reject_store.rs` (`:276`) · `usage_service/watch.rs` (`:205` — `lock`) / shell `view_commands.rs` (7 — `:403 · 410 · 455 · 527 · 552 · 758 · 790`) · `daemon_client/mod.rs` (`:88`) · `ui_settings.rs` (`:768`) · `output_channel.rs` (in place + one 「ADR-0231 — 독을 걷는 자기 도우미, base `sync` 는 독을 걷지 않는다」 line comment) / gate ③ 6 places (`+sync`). ★The two pairs `lock_for_cleanup` (`command_roster` · `command_delivery`) keep the name · 「정리 경로 전용」 docs as they are and change only the body to `sync::lock` — they are pairs split on purpose from `lock()` on the `.expect` side, and (e) does not clear the poison, so that split still stands★ | U1 (base header) |
+| **U3a** | agent `sync` — operational outside the codex link **24** · two in-place comments | `transport/input_queue.rs` 7 (including `wait_timeout` `:178 · 254` — `:263` is `#[cfg(test)] fn queued_bytes`, so it is not changed) · `transport/stdio.rs` 3 (`:194` stdin · `:317` · `:380`) · `transport/pty.rs` 2 (`:263 · 332` — `match` form) · `reaper.rs` 2 (`read` `:154-156` · `write` `:52-55`) · `session.rs` 2 · `manager.rs` 2 (the `expected` field of `session_id_sink` `:550` · `lock_name_allocation` `:1061`) · `backend/claude/leftover.rs` 2 (`Recorder.inner` `:402` · `GateCell.state` `:1713`) + 1 in-place comment (the `try_lock` of `:1662-1665` `Debug`) · `queued_input.rs` 1 (`:405`) · `inputs_pending.rs` 1 (`:47`) · `session_id_latch.rs` 1 (`:150`) · `turn.rs` 1 (`:145` `TurnObservations::lock`) · `usage/process.rs` (0 recovery sites — change the three `:696 · 985 · 1002` that call `StderrTail` to `sync::lock`, and fold the local helper `fn lock` (`:636`), which keeps only the lookup list's share, into `LookupGate::release` (`:352`) with a 「1-3 U5 로 간다 · platform 은 base 를 모른다(ADR-0266)」 one-line comment — worker proposal). ★Two leaf locks of leftover cleanup · queued-input registry · pending-list table · latch · turn observation table are 「쥔 채 로그 · 다른 락 · 밖 호출 금지」 locks — the (e) helper has no logging, no other lock, no outside call, so it stays within that discipline (§3-5 contract 2). The lock docs are not fixed★ | U2 |
+| **U3b** | agent `sync` — `backend/codex/transport.rs` operational **42** + ★widening the source-count test★ | that one file. Operational section = before `:4284` (start of the test module). ★The 42 sites changed = state lock 26 (`SharedState` `:1079` — `lock.lock()` 25: `:499 · 1115 · 1144 · 1176 · 1572 · 2000 · 2175 · 2230 · 2348 · 2461 · 2638 · 2972 · 3176 · 3254 · 3334 · 3399 · 3524 · 3589 · 3645 · 3715 · 3921 · 3949 · 4079 · 4171 · 4227` + writer `wait_timeout` `:2192`) · `Announcer.order` 1 (`:1112`) · `Pending.entries` 5 (`:1298 · 1316 · 1328 · 1333 · 1338` — `:1349` is `#[cfg(test)] fn len`) · `stdin` 2 (`:1555 · 2752`) · `child` 2 (`:3889 · 4233`) · `stdout` · `stderr` · `open_params` · `link_sink` · `writer_handle` · `decoder` 1 each (`:3999 · 4009 · 4038 · 4052 · 4073 · 4092`)★. The 「★상태 락을 쥔 채 찍지 않는다★」 (`:3010-3015`) discipline is still kept — the helper does not print. ★`tests::the_production_blocking_stdin_locks_are_counted` (`:7329-7375`) counts the `.lock()` right after `stdin` and expects **exactly 2** (the deadlock guard — `write_line` `:1555` and the handshake-failure branch `:2751-2753`). If U3b changes those two to the new form it becomes 0 and goes red. **Widen the matcher to the new call form and keep the expected value 2 as it is** — match `stdin` after `sync::lock(`, skipping any `&` (in `write_line`, which takes a `&Mutex`, the call becomes `sync::lock(stdin)` · S1=a). Keep counting the old `.lock()` form too (if it comes back, that is blocking as well). 「숫자만 고치지 말 것」 is the instruction in that test's comment — lowering the expected value to 0 would make a blind guard that stays green even if a third blocking site appears. The comment of `:2741-2750` in the same file (「블로킹으로 이 락을 잡는 자리는 둘」) is still true★ | U2 |
+| **U4** | `testing` module (`test-support` feature) + `wait_until` + 11 copies + dev dependency + operational graph gate (§7 G2) | base `lib.rs` · `Cargo.toml` (`[features] test-support = []`) · new `testing.rs` / agent `Cargo.toml` · `tests/{activation,transport_smoke,session_smoke,stdio_smoke,headless,backend_contract,reaper}.rs` / daemon `Cargo.toml` · `tests/{control_send,mcp_manager_lifecycle,ws_e2e}.rs` · `src/messaging_host.rs` / `ci.yml` · CLAUDE.md · qa binding · gate ③ 6 places (`+testing`) | U1 |
+| **U5** | `time::Clock` (`Send + Sync`) + `SystemClock` + `ManualClock` (behind `test-support` · C4=a) + daemon `command_delivery` + discovery + head comments for the two clocks that do not merge | base `time.rs` · `Cargo.toml` (`description`) / daemon `command_delivery.rs` (delete `Clock` `:176` · `SystemClock` `:181` → base · test `ManualClock` `:2425` → base) · `connection_core.rs` (`:4403` tests) · `usage_service/clock.rs` (head comment — C3=a: 「base `time::Clock` 과 합치지 않는다 — `mono` 의 `Duration` 계약 · 부호 있는 epoch 초 · ADR-0275」) / discovery `lib.rs` (`Clock` `:431` → base subtrait + blocking `sleep` · the fake `FakeClock` `:1742`'s `RefCell` · `Cell` to a form that is `Sync` — C1=a) · `Cargo.toml:12-15` (base dependency comment — the reason as 「base `time::Clock` 상위 트레이트」. 1-3 U1 moves the 「liveness 판정 공유」 reason of that line to the platform line, so if this unit does not write it, the base line has no reason — if 1-3 lands first, add to it; if 1-1 is first, add it beside the 「liveness」 reason · round 3 review) / transport `src/clock.rs` (head comment — C5=b: 「3단계(transport 부착)에서 base `time::Clock` 의 하위 트레이트로 — ADR-0275」 · the code is not changed) | U4 (`test-support` feature) · U2 (`command_delivery.rs` overlap) |
+| **U6** | make `LeftoverClock` a subtrait of base `Clock` (C2=a) — `mono_now` 22 sites → `now` | agent `backend/claude/leftover.rs` only (`LeftoverClock` `:953` · operational `SystemClock` `:961` · the fakes `FakeClock` `:4664` · `SkipClock` `:6586` stay in their own place as atomic integers — they implement base `Clock` as well). ★Rewrite the 「문 자물쇠 안에서도 부른다 — 다른 자물쇠를 잡거나 기다리지 않는다」 (`:954`) contract over to `now`★ | U5 |
 
-- **순서:** U1 → U2 → (U3a ∥ U3b) → U4 → U5 → U6. 어느 단위 뒤에서 멈춰도 워크스페이스는 빌드되고 초록이다 — 각 단위가 새 함수를 더한 뒤 그 단위 안에서 옛 사본까지 지우기 때문이다.
-- **크기(사이트 수 기준 — 파일 겹침이 축):** U3b 는 한 파일 42곳의 기계적 교체 + 시험 하나라 한 워커에 묶는다(쪼개면 같은 파일이 겹친다). U3a 는 파일 열둘에 24곳 — 파일이 서로 안 겹쳐 둘로 갈라도 되지만 각 몫이 작아 묶는 쪽을 제안한다(워커 제안).
-- **파일 겹침(병렬 판단용):**
-  - base `lib.rs` · `Cargo.toml` · 게이트 ③ 줄(6곳) — U1 · U2 · U4 가 만지고 U5 는 `description` 만 → **직렬.**
-  - daemon `command_delivery.rs` — U2(복구 1곳) · U5(시계 · 가짜) → 직렬.
-  - agent `backend/claude/leftover.rs` — U3a(복구 2곳 · 주석) · U6(시계) → 직렬.
-  - U3a 와 U3b 는 파일이 겹치지 않는다 → 병렬 가능(같은 crate 라 한 워크트리에서 동시 빌드는 서로 막는다 — 워크트리 격리 여부는 오케스트레이터 몫).
-  - agent · daemon `Cargo.toml` — U4 만.
-  - discovery `lib.rs` · `Cargo.toml` — U5 만. transport — U1(`ws.rs`) · U5(`clock.rs` 주석).
-- **형제 TRD(1-3 platform)와 겹치는 파일 — 1-1 과 1-3 을 동시에 돌리지 말 것을 권한다:** base `lib.rs` · `Cargo.toml` · 게이트 ③(1-3 이 `platform` 을 뺀다) · agent `transport/pty.rs` · `transport/stdio.rs` · `backend/codex/transport.rs`(1-3 = Job 핸들 분기 · 1-1 = U3) · agent `usage/process.rs`(1-3 = U3 · U5 — 찾기 명단을 포함한 사용량 조회의 OS 층 · 1-1 = U3a 의 `StderrTail` 셋 + 제자리 주석) · agent `backend/claude/leftover.rs`(1-3 = U3 · 1-1 = U3a · U6) · agent `manager.rs`(1-3 = OS 규칙 :77 · 1-1 = U3a) · discovery `lib.rs`(1-3 = `wmi_spawn` 이사 · 1-1 = U5 — ★1-3 은 discovery 의 base 의존(`Cargo.toml:15`)을 걷지 않는다: U5 뒤 `time::Clock` 이 그 쓰임이다 · §3-3★) · discovery `Cargo.toml:12-15`(1-3 U1 = 「liveness 공유」 사유를 platform 줄로 · 1-1 U5 = base 줄에 `time::Clock` 사유 — 3차 리뷰) · 루트 `Cargo.toml` 멤버 주석 `:2` · `:12-13`(1-1 = U1 이 입주 규칙 문장을 고친다 · 1-3 = `platform` 이 빠진 몫을 다시 고친다 — 넘겨줌) · daemon `lib.rs`(1-3 = 실행 파일 이름 분기 :109 · 1-1 = U1 hex) · agent `persistence/{mod,presets}.rs` · daemon `usage_service/reject_store.rs`(1-3 의 `write_atomic` — 단 그쪽은 P3 뒤).
+- **Order:** U1 → U2 → (U3a ∥ U3b) → U4 → U5 → U6. The workspace builds and is green after stopping at any unit — because each unit adds the new function and then deletes the old copy within that unit.
+- **Size (by site count — file overlap is the axis):** U3b is a mechanical replacement of 42 sites in one file + one test, so it is bundled into one worker (splitting would overlap on the same file). U3a is 24 sites over twelve files — the files do not overlap each other, so it could be split in two, but each part is small, so we propose bundling (worker proposal).
+- **File overlap (for judging parallelism):**
+  - base `lib.rs` · `Cargo.toml` · gate ③ lines (6 places) — U1 · U2 · U4 touch them and U5 touches only `description` → **serial.**
+  - daemon `command_delivery.rs` — U2 (1 recovery site) · U5 (clock · fake) → serial.
+  - agent `backend/claude/leftover.rs` — U3a (2 recovery sites · comment) · U6 (clock) → serial.
+  - U3a and U3b do not overlap in files → can run in parallel (same crate, so simultaneous builds in one worktree block each other — whether to isolate worktrees is the orchestrator's call).
+  - agent · daemon `Cargo.toml` — U4 only.
+  - discovery `lib.rs` · `Cargo.toml` — U5 only. transport — U1 (`ws.rs`) · U5 (`clock.rs` comment).
+- **Files overlapping with the sibling TRD (1-3 platform) — we recommend not running 1-1 and 1-3 at the same time:** base `lib.rs` · `Cargo.toml` · gate ③ (1-3 removes `platform`) · agent `transport/pty.rs` · `transport/stdio.rs` · `backend/codex/transport.rs` (1-3 = the Job handle branch · 1-1 = U3) · agent `usage/process.rs` (1-3 = U3 · U5 — the OS layer of the usage query, including the lookup list · 1-1 = the three `StderrTail` of U3a + the in-place comment) · agent `backend/claude/leftover.rs` (1-3 = U3 · 1-1 = U3a · U6) · agent `manager.rs` (1-3 = OS rule :77 · 1-1 = U3a) · discovery `lib.rs` (1-3 = `wmi_spawn` move · 1-1 = U5 — ★1-3 does not remove discovery's base dependency (`Cargo.toml:15`): after U5 `time::Clock` is its use · §3-3★) · discovery `Cargo.toml:12-15` (1-3 U1 = the 「liveness 공유」 reason moved to the platform line · 1-1 U5 = the `time::Clock` reason on the base line — round 3 review) · root `Cargo.toml` member comments `:2` · `:12-13` (1-1 = U1 fixes the tenancy rule sentence · 1-3 = fixes again the part left after `platform` drops out — handed over) · daemon `lib.rs` (1-3 = executable name branch :109 · 1-1 = U1 hex) · agent `persistence/{mod,presets}.rs` · daemon `usage_service/reject_store.rs` (1-3's `write_atomic` — but that side is after P3).
 
-### 6-1. U1 착수 체크리스트
+### 6-1. U1 start checklist
 
-0. **전제 둘.** ① ADR-0275 를 먼저 박는다 — ★2026-10-04 에 박았다(1-3 몫과 한 ADR)★(오케스트레이터 · `/adr` — §4-2. U1 은 그중 4번(T1 — `text` 표에서 자르기 둘을 뺀다)과 9번(이름 확정)에 기대고, base 머리가 ADR-0269 를 가리키므로 개정이 먼저 서야 앵커가 맞는다). ② 되돌릴 지점 — 이 TRD 폴더가 미추적이다(`?? docs/process/S21-crate-boundaries/`). 착수 전에 로컬 커밋해 출발점을 만든다(코드 트리는 `0ef6292` 그대로).
-1. **출발 수치(코드 손대기 전).** 워크스페이스 루트에서:
+0. **Two preconditions.** ① Record ADR-0275 first — ★recorded on 2026-10-04 (one ADR with the 1-3 part)★ (orchestrator · `/adr` — §4-2. U1 leans on its #4 (T1 — remove the two truncation functions from the `text` table) and #9 (name confirmation), and since the base head points to ADR-0269, the amendment must stand first for the anchors to fit). ② A point to roll back to — this TRD folder is untracked (`?? docs/process/S21-crate-boundaries/`). Before starting, make a local commit to create the starting point (the code tree is still `0ef6292`).
+1. **Starting figures (before touching code).** From the workspace root:
    ```
    cargo test --workspace -- --test-threads=4 > <scratch>/u1-before.txt 2>&1
    awk '/^test result:/{n++; for(i=1;i<NF;i++){if($(i+1)~/^passed/)p+=$i; if($(i+1)~/^failed/)f+=$i; if($(i+1)~/^ignored/)g+=$i}} END{print n" 줄 · "p" 통과 · "f" 실패 · "g" 무시"}' <scratch>/u1-before.txt
    ```
-   결과 줄 수 · 통과 총계(+ 실패 · 무시)를 그대로 적는다. 마지막 기록(CLAUDE.md 2026-10-01 `cac9ee0` = 59 · 3822 · 0 · 30)과 다르면 차이만 적는다 — 출발점이 그 뒤의 master 다. 터미널이 죽으면 `scripts/run-detached.ps1`(qa 바인딩 「분리 실행」)로 돌린다.
-2. **손댈 파일(정확히):**
-   - base — `crates/engram-dashboard-base/src/lib.rs`(머리: 입주자 목록에 `text` · `time` · `path` · 입주 조건 ①을 ADR-0269 결정 7 로 · `:15-19` 「셋째 입주자를 받기 전에 ADR-0175 재론」 문단을 결정 1 이 답한 것으로 · `pub mod text; pub mod time; pub mod path;` · 게이트 ③ `:40` · `// ADR-0269`) · `Cargo.toml:5`(`description`) · 새 `src/text.rs`(`hex_lower` + 단위 시험) · 새 `src/time.rs`(`now_epoch_ms` 하나 — `Clock` 은 U5 · 단위 시험) · 새 `src/path.rs`(`normalize_spelling` + agent 에서 옮겨 온 시험 둘 · 도메인 말을 뺀 계약 문서).
-   - agent — `src/commands.rs`(`normalize_cwd` `:1143-1153` 삭제 · 부르는 곳 `:1106` → base · 시험 `:2091` · `:2106` 을 base `path.rs` 로 이사 · `:2114` 이후 「두 문이 같은 철자」 시험은 남김 · 「사람 · LLM 이 친 cwd」 · ADR-0122 같은 도메인 사유는 호출 자리 주석으로) · `src/profile.rs`(`now_millis` `:20-25` 삭제 · `:244` · `:819` → `now_epoch_ms`) · `src/persistence/mod.rs`(`:25-30` 삭제 · `:89`) · `src/persistence/presets.rs`(`:22-27` 삭제 · `:81`) — 세 파일의 `use std::time::{SystemTime, UNIX_EPOCH};`(`profile.rs:12` · `mod.rs:11` · `presets.rs:12`)가 쓰임을 잃으면 함께 지운다 · `src/output_core.rs:1059-1062`(`ceil_char_boundary` — §3-2).
-   - daemon — `src/lib.rs:77-80`(`generate_token` 안 루프 → `hex_lower`) · `src/control/mod.rs:146-149`(`gen_token` 안 루프) · `src/experiment/record.rs:178-186`(`cap_response` → `floor_char_boundary`) · `:192-195`(`sha256_hex` 안 루프 → `hex_lower`). 토큰 생성기 둘의 「공용화 금지 · 혼용 금지」 주석(`lib.rs:584-585` · `control/mod.rs:140-141`)은 그대로 — 생성기는 섞지 않는다.
-   - transport — `src/ws.rs:147-156`(`clamp_close_reason` → `floor_char_boundary`). `Cargo.toml` 은 안 건드린다(base 의존 없음 — C5=b).
-   - 셸 — `src-tauri/src/layout/commands.rs:38`(import → `engram_dashboard_base::path::normalize_spelling`) · `:1127`(`verb_spawn_into`) · `src-tauri/tests/layout_commands.rs:2121`(주석의 이름). 셸은 이미 base 를 의존한다(`src-tauri/Cargo.toml:61`).
-   - 문서 · 게이트 — 게이트 ③ 정규식 6곳을 `(crate|super)::(logging|platform|text|time|path)` 로: base `lib.rs:40` · `CLAUDE.md:249` · `.github/workflows/ci.yml:644` · `.claude/skill-bindings/qa.md:138` · `docs/testing-strategy.md:50` · `:155`. `CLAUDE.md` 「백엔드 모듈 맵」 base 항목(입주자 · 입주 조건 · 「셋째 입주자를 받기 전에 ADR-0175 … 다시 연다」 문장) · 「빌드·검증 명령」 base 시험 줄 설명. `docs/testing-strategy.md:43`(단위 시험 목록) · `:46` · `:138`. 루트 `Cargo.toml:2` · `:12-13`(base 서술 · 「셋째 입주자는 ADR 재론」). ★CLAUDE.md · qa 바인딩 · testing-strategy 는 load-bearing 문서다 — 그 단위의 리뷰에 doc 렌즈를 함께 건다★. ★새 모듈 머리 · 주석에 `crate::` · `super::` 뒤에 입주자 이름을 붙인 철자를 쓰지 않는다 — 게이트 ③ 정규식은 주석까지 잡는다(예: 「`crate::time` 을 부르지 않는다」라고 적으면 그 줄이 걸린다)★.
-3. **순서(멈춰도 빌드가 서게):** base 새 모듈 셋 + 시험 → 호출부를 파일 단위로(agent → daemon → transport → 셸) → 옛 사본(`now_millis` 셋 · `normalize_cwd`) 삭제 → 문서 · 게이트 ③.
-4. **게이트(U1 뒤):** base ①(`cargo tree -p engram-dashboard-base --depth 1 --prefix none -e normal,dev,build --target all --all-features | rg "^engram-dashboard" | sort -u` → 정확히 1줄) · ②(`rg "^\s*use tauri" crates/engram-dashboard-base/src/` → 0줄) · ③(새 정규식 → 0줄 · 경로 존재 먼저 — qa 바인딩 4b-pre) · transport 게이트 ①(같은 꼴 `-p engram-dashboard-transport` → 정확히 1줄 — `ws.rs` 를 건드렸으니 다시 본다) · `cargo fmt --check` · `cargo test -p engram-dashboard-base -- --test-threads=4` · `cargo test -p engram-dashboard-agent -- --test-threads=4` · `cargo test -p engram-dashboard-daemon -- --test-threads=4` · `cargo test -p engram-dashboard-transport` 와 `--all-features`(CI transport 게이트 4a · 4b 와 같은 두 조합) · `cargo test -p engram-dashboard --test lib_unit` · `--test layout_commands`.
-5. **수치(U1 뒤):** 1번 명령을 다시 돌려 `<scratch>/u1-after.txt` 와 견준다 — 기대: 결과 줄 수 = 전과 같음 · 통과 = 전 + base 새 단위 시험 수(옮긴 `normalize_cwd` 시험 둘은 agent −2 · base +2 로 상쇄) · 실패 0 · 무시 같음. 줄 수가 줄면 타깃 소실이다 — 초록이어도 멈춘다.
-6. `/qa`(소스 변경) → 게이트 초록 뒤 커밋(`S21: refactor(base): …` — 스텝 번호는 step-log 를 잇는다 · 끝에 Co-Authored-By 트레일러).
+   Write down the result line count and pass total (+ failed · ignored) as they are. If they differ from the last record (CLAUDE.md 2026-10-01 `cac9ee0` = 59 · 3822 · 0 · 30), write only the difference — the starting point is master after that. If the terminal dies, run it with `scripts/run-detached.ps1` (qa binding 「분리 실행」).
+2. **Files to touch (exactly):**
+   - base — `crates/engram-dashboard-base/src/lib.rs` (head: add `text` · `time` · `path` to the tenant list · tenancy condition ① per ADR-0269 decision 7 · rewrite the `:15-19` 「셋째 입주자를 받기 전에 ADR-0175 재론」 paragraph as answered by decision 1 · `pub mod text; pub mod time; pub mod path;` · gate ③ `:40` · `// ADR-0269`) · `Cargo.toml:5` (`description`) · new `src/text.rs` (`hex_lower` + unit tests) · new `src/time.rs` (one `now_epoch_ms` — `Clock` is U5 · unit tests) · new `src/path.rs` (`normalize_spelling` + the two tests moved over from agent · a contract doc with the domain words removed).
+   - agent — `src/commands.rs` (delete `normalize_cwd` `:1143-1153` · callers `:1106` → base · move tests `:2091` · `:2106` to base `path.rs` · the 「두 문이 같은 철자」 tests after `:2114` stay · domain reasons such as 「사람 · LLM 이 친 cwd」 · ADR-0122 go into comments at the call sites) · `src/profile.rs` (delete `now_millis` `:20-25` · `:244` · `:819` → `now_epoch_ms`) · `src/persistence/mod.rs` (delete `:25-30` · `:89`) · `src/persistence/presets.rs` (delete `:22-27` · `:81`) — if the `use std::time::{SystemTime, UNIX_EPOCH};` (`profile.rs:12` · `mod.rs:11` · `presets.rs:12`) of the three files lose their use, delete them together · `src/output_core.rs:1059-1062` (`ceil_char_boundary` — §3-2).
+   - daemon — `src/lib.rs:77-80` (loop inside `generate_token` → `hex_lower`) · `src/control/mod.rs:146-149` (loop inside `gen_token`) · `src/experiment/record.rs:178-186` (`cap_response` → `floor_char_boundary`) · `:192-195` (loop inside `sha256_hex` → `hex_lower`). The 「공용화 금지 · 혼용 금지」 comments of the two token generators (`lib.rs:584-585` · `control/mod.rs:140-141`) stay as they are — the generators are not mixed.
+   - transport — `src/ws.rs:147-156` (`clamp_close_reason` → `floor_char_boundary`). `Cargo.toml` is not touched (no base dependency — C5=b).
+   - shell — `src-tauri/src/layout/commands.rs:38` (import → `engram_dashboard_base::path::normalize_spelling`) · `:1127` (`verb_spawn_into`) · `src-tauri/tests/layout_commands.rs:2121` (the name in a comment). The shell already depends on base (`src-tauri/Cargo.toml:61`).
+   - docs · gates — gate ③ regex, 6 places, to `(crate|super)::(logging|platform|text|time|path)`: base `lib.rs:40` · `CLAUDE.md:249` · `.github/workflows/ci.yml:644` · `.claude/skill-bindings/qa.md:138` · `docs/testing-strategy.md:50` · `:155`. `CLAUDE.md` 「백엔드 모듈 맵」 base item (tenants · tenancy condition · 「셋째 입주자를 받기 전에 ADR-0175 … 다시 연다」 sentence) · 「빌드·검증 명령」 base test line description. `docs/testing-strategy.md:43` (unit test list) · `:46` · `:138`. root `Cargo.toml:2` · `:12-13` (base description · 「셋째 입주자는 ADR 재론」). ★CLAUDE.md · the qa binding · testing-strategy are load-bearing documents — attach the doc lens to the review of that unit★. ★Do not write, in new module heads or comments, a spelling of `crate::` · `super::` followed by a tenant name — the gate ③ regex catches comments too (e.g. if you write 「`crate::time` 을 부르지 않는다」 that line gets caught)★.
+3. **Order (so the build stands even if we stop):** three new base modules + tests → call sites file by file (agent → daemon → transport → shell) → delete the old copies (three `now_millis` · `normalize_cwd`) → docs · gate ③.
+4. **Gates (after U1):** base ① (`cargo tree -p engram-dashboard-base --depth 1 --prefix none -e normal,dev,build --target all --all-features | rg "^engram-dashboard" | sort -u` → exactly 1 line) · ② (`rg "^\s*use tauri" crates/engram-dashboard-base/src/` → 0 lines) · ③ (new regex → 0 lines · path existence first — qa binding 4b-pre) · transport gate ① (same form `-p engram-dashboard-transport` → exactly 1 line — we touched `ws.rs`, so look again) · `cargo fmt --check` · `cargo test -p engram-dashboard-base -- --test-threads=4` · `cargo test -p engram-dashboard-agent -- --test-threads=4` · `cargo test -p engram-dashboard-daemon -- --test-threads=4` · `cargo test -p engram-dashboard-transport` and `--all-features` (the same two combinations as CI transport gates 4a · 4b) · `cargo test -p engram-dashboard --test lib_unit` · `--test layout_commands`.
+5. **Figures (after U1):** run the command in step 1 again and compare with `<scratch>/u1-after.txt` — expected: result line count = same as before · passes = before + the number of new base unit tests (the two moved `normalize_cwd` tests offset as agent −2 · base +2) · failures 0 · ignored the same. If the line count drops, a target vanished — stop even if green.
+6. `/qa` (source change) → commit after the gates go green (`S21: refactor(base): …` — the step number continues the step-log · Co-Authored-By trailer at the end).
 
 ---
 
-## 7. 게이트 · 문서 변경 목록 (이 TRD 는 편집하지 않는다 — 목록만)
+## 7. Gate · document change list (this TRD does not edit them — list only)
 
-| id | 무엇 | 자리 | 언제 |
+| id | What | Where | When |
 |---|---|---|---|
-| G1 | 입주자 무참조 정규식에 새 모듈 이름을 더한다 — `(crate\|super)::(logging\|platform)` → `(…\|text\|time\|path)` (U1) → `+sync`(U2) → `+testing`(U4). 모듈을 만드는 단위에서 그 이름을 더한다(게이트가 실재 입주자만 말하게). 1-3 이 `platform` 을 뺀다 | `crates/engram-dashboard-base/src/lib.rs:40` · `CLAUDE.md:249` · `.github/workflows/ci.yml:644` · `.claude/skill-bindings/qa.md:138` · `docs/testing-strategy.md:50` · `:155`(1차 리뷰가 찾은 사본 둘 — 6곳) | U1 · U2 · U4 |
-| G2 | **새 게이트(제안):** base 의 시험 기능이 운영 그래프에 없다 — `cargo tree --locked -p engram-dashboard-daemon -e normal,features -i engram-dashboard-base --target all \| rg 'feature "test-support"'` → 0줄, `-p engram-dashboard`(셸) 도 같음. 짝으로 눈먼 게이트 방지: `-e normal,dev,features -p engram-dashboard-agent` → 1줄 이상(기능 이름을 바꾸면 0 기대가 조용히 통과하므로 — transport 게이트 ⑤와 같은 근거). 같은 기능 뒤의 `time::ManualClock`(C4=a)도 이 게이트가 함께 덮는다 | `ci.yml` 새 스텝 · `CLAUDE.md` 「빌드·검증 명령」 · qa 바인딩 | U4 |
-| — | **바뀌지 않는 것:** base 게이트 ①(정확히 1줄) · ②(`use tauri` 0줄) · transport 게이트 ①(직접 워크스페이스 의존 정확히 1줄 — C5=b 라 4판의 G3(1 → 2줄)은 없어졌다 · 3단계 TRD 가 다시 본다) · net 의 base 심볼 정확히 2줄(net 은 1-1 에서 base 를 새로 안 부른다) · command · messaging 상한 게이트(ADR-0267) · transport 게이트 ③(순수 층 셋은 시계를 인자로 받는다) · base CI 시험 스텝 `ci.yml:276-278`(`testing` 이 `cfg(any(test, …))` 라 기능 인자가 필요 없다) | | |
+| G1 | Add the new module names to the tenant no-reference regex — `(crate\|super)::(logging\|platform)` → `(…\|text\|time\|path)` (U1) → `+sync` (U2) → `+testing` (U4). The unit that creates a module adds its name (so the gate names only tenants that really exist). 1-3 removes `platform` | `crates/engram-dashboard-base/src/lib.rs:40` · `CLAUDE.md:249` · `.github/workflows/ci.yml:644` · `.claude/skill-bindings/qa.md:138` · `docs/testing-strategy.md:50` · `:155` (two copies found by the round 1 review — 6 places) | U1 · U2 · U4 |
+| G2 | **New gate (proposal):** base's test feature is not in the operational graph — `cargo tree --locked -p engram-dashboard-daemon -e normal,features -i engram-dashboard-base --target all \| rg 'feature "test-support"'` → 0 lines, `-p engram-dashboard` (shell) the same. As a pair, to prevent a blind gate: `-e normal,dev,features -p engram-dashboard-agent` → 1 line or more (because if the feature name is changed the expectation of 0 passes silently — the same grounds as transport gate ⑤). The `time::ManualClock` behind the same feature (C4=a) is also covered by this gate | `ci.yml` new step · `CLAUDE.md` 「빌드·검증 명령」 · qa binding | U4 |
+| — | **What does not change:** base gate ① (exactly 1 line) · ② (`use tauri` 0 lines) · transport gate ① (exactly 1 direct workspace dependency line — because of C5=b, edition 4's G3 (1 → 2 lines) is gone · the phase 3 TRD looks at it again) · net's base symbols, exactly 2 lines (net does not newly call base in 1-1) · the command · messaging cap gate (ADR-0267) · transport gate ③ (the three pure layers take the clock as an argument) · the base CI test step `ci.yml:276-278` (`testing` is `cfg(any(test, …))`, so no feature argument is needed) | | |
 
-문서(같은 변경에서):
+Documents (in the same change):
 
-- base `lib.rs` 헤더 — 입주자 목록 · 입주 조건 ①을 ADR-0269 결정 7 로 · 「셋째 입주자 재론」 문단 정리 · 게이트 ③ 이름 · `// ADR-0269` 앵커(U1).
-- base `Cargo.toml` `description`(U1 · 이후 단위마다 모듈 추가).
-- 루트 `Cargo.toml` 멤버 주석 — `:2` 「base(바닥 인프라 — 로깅·PID 판정, 잎 crate, ADR-0175)」 · `:12-13` 「ADR-0175 결정 1: 로깅 + PID 판정만 담는 잎 crate … 셋째 입주자는 ADR 재론을 거친다」(U1 — base `lib.rs:15` 의 재론 문단 · CLAUDE.md base 항목과 같은 문장이라 같은 변경에서 낡는다. 2차 리뷰). ★1-3 이 `platform` 을 base 에서 빼며 「PID 판정」 몫을 다시 고친다★ — 1-1 은 입주 규칙 · 새 입주자 몫만 고치고 나머지는 1-3 에 넘긴다.
-- `CLAUDE.md` 「백엔드 모듈 맵」 base 항목(입주자 · 입주 조건) · 「빌드·검증 명령」 base 시험 줄 설명(U1) · G2(U4).
-- `docs/testing-strategy.md` base 절 — `:43` 단위 시험 목록(`logging` · `platform` 뒤에 새 모듈) · `:46` · `:138` 의 base 시험 줄 설명은 CLAUDE.md 그 줄의 사본이라 같은 변경에서 함께 고친다(U1 · 모듈이 느는 단위마다). 그 두 줄의 플래그 근거(「`platform` 의 자식 PID 테스트가 실 `cmd.exe` 를 띄운다」)는 1-1 이 바꾸지 않는다 — `platform` 을 base 에서 빼는 1-3 의 몫이다.
-- 제자리로 남기는 사본에는 「왜 base 를 안 쓰나」 한 줄 — `sync` 제자리 넷(base `logging` · `leftover.rs` 의 `try_lock` · 찾기 명단 도우미 · 셸 `output_channel.rs` — §3-5. 셸 `settings/mod.rs` 는 파일을 안 건드려 주석 없음) · 안 합치는 시계 둘(transport `clock.rs` — C5=b · daemon `usage_service/clock.rs` — C3=a · 둘 다 U5).
-- **ADR-0275**(오케스트레이터 · `/adr` — U1 전에 · ★2026-10-04 에 박았다★): §4-2 의 표가 정본이다. ADR-0269 · ADR-0268 본문에 개정 링크를 달았다.
+- base `lib.rs` header — tenant list · tenancy condition ① per ADR-0269 decision 7 · tidy the 「셋째 입주자 재론」 paragraph · gate ③ names · `// ADR-0269` anchor (U1).
+- base `Cargo.toml` `description` (U1 · afterwards each unit adds its module).
+- root `Cargo.toml` member comments — `:2` 「base(바닥 인프라 — 로깅·PID 판정, 잎 crate, ADR-0175)」 · `:12-13` 「ADR-0175 결정 1: 로깅 + PID 판정만 담는 잎 crate … 셋째 입주자는 ADR 재론을 거친다」 (U1 — the paragraph that reopens the question in base `lib.rs:15` · the same sentence as the CLAUDE.md base item, so it goes stale in the same change. Round 2 review). ★1-3 removes `platform` from base and fixes the 「PID 판정」 part again★ — 1-1 fixes only the tenancy rule · the new-tenant part and hands the rest over to 1-3.
+- `CLAUDE.md` 「백엔드 모듈 맵」 base item (tenants · tenancy condition) · 「빌드·검증 명령」 base test line description (U1) · G2 (U4).
+- `docs/testing-strategy.md` base section — `:43` unit test list (new modules after `logging` · `platform`) · the base test line descriptions in `:46` · `:138` are copies of that line in CLAUDE.md, so they are fixed together in the same change (U1 · in each unit that adds modules). The flag grounds of those two lines (「`platform` 의 자식 PID 테스트가 실 `cmd.exe` 를 띄운다」) are not changed by 1-1 — that is the job of 1-3, which removes `platform` from base.
+- For copies left in place, one 「왜 base 를 안 쓰나」 line — the four in-place `sync` (base `logging` · the `try_lock` of `leftover.rs` · the lookup list helper · shell `output_channel.rs` — §3-5. Shell `settings/mod.rs` gets no comment because the file is not touched) · the two clocks that do not merge (transport `clock.rs` — C5=b · daemon `usage_service/clock.rs` — C3=a · both U5).
+- **ADR-0275** (orchestrator · `/adr` — before U1 · ★recorded on 2026-10-04★): the table in §4-2 is canonical. Amendment links were attached to the bodies of ADR-0269 · ADR-0268.
 
 ---
 
-## 8. 미룬 것
+## 8. Deferred
 
-| id | 무엇 | 사유 · 트리거 |
+| id | What | Reason · trigger |
 |---|---|---|
-| D1 | `file::set_aside_corrupt` 통일(agent `persistence/{mod,presets}.rs` · 셸 `settings/store.rs` `set_aside`) | storage P3 가 그 동작 규칙을 바꿨다(ADR-0274 — 원격 브랜치) · 셸 `fsutil.rs` · `settings/` 에 파일 쓰기를 더한다 → P3 가 master 에 착지한 뒤(메모 §10 진행 방식) · ★→ TRD A(`trd-A-data-file-unification.md`)가 닫았다 — base `file::copy_aside`(ADR-0274 규칙을 네 파일에 · ADR-0291 R9 · U2 · U5a)★ |
-| D2 | P3 착지 뒤 쓸어 담기 — 셸 `settings/mod.rs` 복구 3곳 · `settings/store.rs:122` epoch ms(`u128`) · storage 의 `state/saver.rs` `Clock`(`now` + `wall_ms`) · `SystemClock::wall_ms`(`u64`) · `state/` 복구 1곳 | 같은 트리거. saver `Clock` 은 base `Clock` 의 `Send + Sync`(C1=a)에 맞춰 `Sync` 를 더해야 한다 · 셸 `settings/mod.rs` 3곳은 S2=(e) 라 셋 다 옮긴다(`:486` 의 「잎」 규율도 걸리지 않는다) · ★→ TRD A U8 이 닫았다 — 셸 락 오염 복구 12곳을 base `sync` 로 · saver `Clock` 을 base `Clock` 의 하위 트레이트로(ADR-0291 결정 14) · `settings/store.rs:122` epoch ms 는 그 전에 ADR-0274 가 시각 이름을 걷어 없었다(TRD A §2-3)★ |
-| D3 | `write_atomic` 여러 벌 → platform | ADR-0266 결정 8 · 1-3 · P3 뒤 · ★→ TRD A 가 닫았다 — 거처는 platform 이 아니라 base `file::write_atomic`(재시도 · 폴더 동기화는 부르는 쪽이 `OsHooks` 로 넘긴다 · ADR-0291 결정 1 · 3 이 ADR-0266 결정 8 개정)★ |
-| D4 | transport 시계와 transport 의 base 의존(C5=b) — 자르기는 U1 에서 std 로 끝난다 | 3단계(transport 부착) TRD — ADR-0275 #3 |
-| D5 | messaging XML 이스케이프 · command `testing.rs` 복구 3곳 | ADR-0267 — 필요해질 때 연결 |
-| D6 | `UsageClock`(C3=a) | 합칠 계기가 생기면(예: book 의 시간 타입을 다시 볼 때) |
+| D1 | `file::set_aside_corrupt` unification (agent `persistence/{mod,presets}.rs` · shell `settings/store.rs` `set_aside`) | storage P3 changed that behavior rule (ADR-0274 — remote branch) · shell `fsutil.rs` · `settings/` add file writes → after P3 lands on master (memo §10 way of proceeding) · ★→ TRD A (`trd-A-data-file-unification.md`) closed it — base `file::copy_aside` (the ADR-0274 rule in four files · ADR-0291 R9 · U2 · U5a)★ |
+| D2 | Sweep-up after P3 lands — shell `settings/mod.rs` 3 recovery sites · `settings/store.rs:122` epoch ms (`u128`) · storage's `state/saver.rs` `Clock` (`now` + `wall_ms`) · `SystemClock::wall_ms` (`u64`) · `state/` 1 recovery site | The same trigger. The saver `Clock` must add `Sync` to match the `Send + Sync` of base `Clock` (C1=a) · the 3 shell `settings/mod.rs` sites all move because of S2=(e) (the 「잎」 discipline of `:486` does not apply either) · ★→ TRD A U8 closed it — the 12 shell lock poison recovery sites go to base `sync` · the saver `Clock` becomes a subtrait of base `Clock` (ADR-0291 decision 14) · the `settings/store.rs:122` epoch ms was already gone, because ADR-0274 had removed the timestamp name before that (TRD A §2-3)★ |
+| D3 | Several copies of `write_atomic` → platform | ADR-0266 decision 8 · 1-3 · after P3 · ★→ TRD A closed it — its home is not platform but base `file::write_atomic` (retry · folder sync is handed to `OsHooks` by the caller · ADR-0291 decisions 1 · 3 amend ADR-0266 decision 8)★ |
+| D4 | transport clock and transport's base dependency (C5=b) — truncation ends with std in U1 | phase 3 (transport attachment) TRD — ADR-0275 #3 |
+| D5 | messaging XML escape · command `testing.rs` 3 recovery sites | ADR-0267 — connect when it becomes necessary |
+| D6 | `UsageClock` (C3=a) | when an occasion to merge arises (e.g. when looking again at book's time type) |
 
 ---
 
-## 9. 지나가며 본 것 (메모 §11 적립 후보 — 오케스트레이터가 옮긴다)
+## 9. Seen in passing (memo §11 accrual candidates — the orchestrator moves them)
 
-| 무엇 | 위치 | 처리 시점 |
+| What | Where | When to handle |
 |---|---|---|
-| `sha256_hex` 제외 사유 「`sha2` 를 끈다」는 거짓 — std 손구현이다 | `daemon/src/experiment/record.rs:189,247-251` · ADR-0269 「거부한 대안」 | ADR-0275(§4-2 #8) |
-| 시계 seam 이 넷이 아니라 여섯(+ storage 일곱) | §2-2 | ADR-0275(#6) · U6 · D2 |
-| `normalize_cwd` 의 `\` → `/` 는 모든 OS 에서 돈다 — POSIX 에서는 `\` 가 파일 이름에 쓸 수 있는 글자다(분기는 없어 platform 감은 아니다) | `agent/src/commands.rs:1143` | macOS 이식 때(ADR-0230) |
-| 시험 임시 폴더 도우미 9벌 | §5 M1 | P3 · 1-3 뒤 |
-| base `logging/mod.rs:155` 도 epoch 를 읽는다(로그 파일 이름) — 게이트 ③ 때문에 `time` 을 못 부른다 | base | 그대로(사실 기록) |
-| 락 오염 복구의 경고는 운영 빌드에서 안 닿는다(`panic = "abort"`) | `Cargo.toml:34-35` | S2=(e) 의 근거(ADR-0275 #1) |
-| 첫 제출 래치 머리 「래치 뮤텍스를 쥔 채 … 로그도 놓은 뒤에 쓴다」는 래치 자기 로그에만 참이다 — commit 포트가 래치를 쥔 채 `warn!` · `info!` · `debug!` 를 내고, 그 아래 명부 · 저장소도 로그를 낸다(저장소는 디스크 쓰기까지) | `session_id_latch.rs:23` · `manager.rs:541-569` · `profile.rs:717` · `persistence/mod.rs:101-106` | 래치 문서를 고칠 때(1-1 밖 — S2=(e) 의 도우미는 로그를 안 내 이 어긋남에 보태지 않는다) |
-| 대기 입력 명부 「★이 가드를 쥔 채 emit·IO·다른 락을 잡지 말 것★」인데 봉인 뒤 `Queued` 를 바꿔 적는 갈래가 그 가드(와 replay 락)를 쥔 채 `debug!` 를 낸다 | `queued_input.rs:399` · `output_core.rs:558-570` | 그 자리를 고칠 때(1-1 밖) — 경고를 다는 갈래가 문서 규율에 기대는 한계의 실례(ADR-0275 #1 의 근거) |
-| codex 머리가 「락 순서 = 상태 → 대기표」를 허용하지만 그렇게 잡는 운영 자리는 없다(소멸자는 일부러 놓은 뒤 잡는다) | `backend/codex/transport.rs:21` · `:2966` | 1-1 엔 무관(S2=e) — 복구 경고를 다시 달면 잠복 간선이 된다(§2-4) |
+| The exclusion reason 「`sha2` 를 끈다」 of `sha256_hex` is false — it is a hand-rolled std implementation | `daemon/src/experiment/record.rs:189,247-251` · ADR-0269 「거부한 대안」 | ADR-0275 (§4-2 #8) |
+| The clock seams are six, not four (+ storage seven) | §2-2 | ADR-0275 (#6) · U6 · D2 |
+| `normalize_cwd`'s `\` → `/` runs on every OS — on POSIX `\` is a character allowed in file names (there is no branch, so it is not a platform candidate) | `agent/src/commands.rs:1143` | at the macOS port (ADR-0230) |
+| 9 copies of the test temp-folder helper | §5 M1 | after P3 · 1-3 |
+| base `logging/mod.rs:155` also reads epoch (log file name) — because of gate ③ it cannot call `time` | base | as is (record of fact) |
+| The warning of lock poison recovery is not reached in operational builds (`panic = "abort"`) | `Cargo.toml:34-35` | the basis of S2=(e) (ADR-0275 #1) |
+| The head of the first-submit latch, 「래치 뮤텍스를 쥔 채 … 로그도 놓은 뒤에 쓴다」, is true only for the latch's own logs — the commit port emits `warn!` · `info!` · `debug!` while holding the latch, and the registry · store below it also log (the store even writes to disk) | `session_id_latch.rs:23` · `manager.rs:541-569` · `profile.rs:717` · `persistence/mod.rs:101-106` | when fixing the latch doc (outside 1-1 — the S2=(e) helper emits no logs, so it adds nothing to this mismatch) |
+| The queued-input registry says 「★이 가드를 쥔 채 emit·IO·다른 락을 잡지 말 것★」, but the branch that rewrites `Queued` after sealing emits `debug!` while holding that guard (and the replay lock) | `queued_input.rs:399` · `output_core.rs:558-570` | when fixing that place (outside 1-1) — an example of the limit of the warning-attaching option leaning on documented discipline (the basis of ADR-0275 #1) |
+| The codex head allows 「락 순서 = 상태 → 대기표」, but no operational site takes the locks that way (the destructor deliberately releases first and takes afterward) | `backend/codex/transport.rs:21` · `:2966` | irrelevant to 1-1 (S2=e) — if the recovery warning is attached again it becomes a latent edge (§2-4) |
 
 ---
 
-## 10. 근거 · 검증 상태
+## 10. Basis · verification status
 
-**실측 명령(전부 `0ef6292`, 2026-10-03):**
+**Measuring commands (all `0ef6292`, 2026-10-03):**
 
-- UTF-8 자르기: `rg -n "is_char_boundary|floor_char_boundary|ceil_char_boundary" crates src-tauri/src --glob '*.rs'`.
-- std 경계 함수: 스크래치 `fcb.rs`(`"가나다".floor_char_boundary(4)` · `ceil_char_boundary(4)`) → `rustc --edition 2021` 컴파일 · 실행 출력 `3 6`(rustc 1.95.0).
-- hex: `rg -n '02x\}|:02x' crates src-tauri/src --glob '*.rs'` · `grep -n sha2 crates/*/Cargo.toml src-tauri/Cargo.toml`(0줄).
+- UTF-8 truncation: `rg -n "is_char_boundary|floor_char_boundary|ceil_char_boundary" crates src-tauri/src --glob '*.rs'`.
+- std boundary functions: scratch `fcb.rs` (`"가나다".floor_char_boundary(4)` · `ceil_char_boundary(4)`) → `rustc --edition 2021` compile · run output `3 6` (rustc 1.95.0).
+- hex: `rg -n '02x\}|:02x' crates src-tauri/src --glob '*.rs'` · `grep -n sha2 crates/*/Cargo.toml src-tauri/Cargo.toml` (0 lines).
 - epoch ms: `rg -n "fn (now_epoch_ms|now_ms|…|now_millis)\b"` · `rg -n "UNIX_EPOCH" crates src-tauri/src` · `rg -n "now_millis\(\)"`.
-- 시계: `rg -n "trait (Clock|UsageClock|\w*Clock)\b" crates src-tauri/src` · `rg -n "impl\b.*\b(Clock|UsageClock|\w+Clock) for\b"` · `rg -n "mono_now\(" crates/engram-dashboard-agent/src | wc -l`(22) · `rg -n "\.mono\(\)"`(11) · `rg -n "\.wall\(\)"`(13).
-- 락 오염: ADR-0269 셈법 `git grep -h -o -E '\.lock\(\)\s*\.unwrap_or_else\(\|[a-z_]+\|\s*[a-z_]+\.into_inner\(\)\)' HEAD -- crates src-tauri/src | wc -l`(67) · `rg -c 'PoisonError::into_inner' crates src-tauri/src`(합 27). 117 은 스크래치 파이썬 스크립트(여러 줄 정규식 — `.lock|read|write|wait_timeout(...)` 뒤 `unwrap_or_else` 의 클로저 · 함수 포인터 꼴 109 + `match` 갈래 6 + 블록 클로저 1 + `try_lock` 1)로 셌다. 같은 109 는 `rg -U -o` 로도 재현된다.
-- 독 단언: `rg -n "is_poisoned|clear_poison" crates src-tauri/src`.
-- 섞인 자물쇠(1차 리뷰 뒤): 스크래치 파이썬 스크립트 — 운영 구획의 복구 사이트에서 받는 쪽 필드 이름을 뽑아, 같은 crate 운영 코드에서 그 이름 뒤 `.lock()/.read()/.write()` + `.expect(`/`.unwrap(` 를 찾는다. 필드 이름만 같은 남의 구조체(codex `child` · `stdout` 대 stdio · `self.inner` 대 `connection_core` 등)는 손으로 걸렀다. `try_lock` 이웃은 `rg -n 'try_lock\(\)' crates/engram-dashboard-agent/src` 로 따로 봤다. 일치 비교라 다른 이름으로 같은 자물쇠를 쥐는 자리(복제한 `Arc` 를 다른 변수 이름으로 받는 꼴)는 못 잡는다 — PTY 감시 스레드의 `watcher_child` 는 손으로 찾았다.
-- 쥔 채 로그 금지 자물쇠 · 중첩(4판까지 — S2=(e) 로 이전 규칙에서 빠졌다 · §2-4 역사 기록): 넓힌 문구 `rg -n '찍지 않는다|놓은 뒤 (찍|부른)|락 밖에서|잠금 밖에서|쥔 채.{0,40}(로그|IO|emit|찍|보내)|로그도 놓은|잎이다' crates/engram-dashboard-agent/src crates/engram-dashboard-daemon/src src-tauri/src`(74줄)을 하나씩 읽고 남은 운영 사이트마다 자물쇠 정의 · 획득 도우미 문서를 읽었다(굵은 글씨 · 영어 `leaf` 가 정규식을 빗나간다) · 문서의 락 순서 `rg -n '락 순서|lock order|Lock order' crates/engram-dashboard-agent/src crates/engram-dashboard-daemon/src src-tauri/src --glob '*.rs'`(33줄)로 제외 자물쇠가 바깥인 간선을 뽑아 가드 구간과 그 안의 콜백 · 포트 · 시계를 읽었다 · codex 상태 락 사이트 = `rg -n -U '(\.lock\(\)|wait_timeout\([^;]*?\))\s*\.unwrap_or_else\(' crates/engram-dashboard-agent/src/backend/codex/transport.rs` 중 `:4284`(시험 모듈 시작) 앞 줄 · 각 자리의 `lock` 이 `SharedState` 에서 풀린 것을 앞 25줄에서 확인 · 운영 구독자 `rg -n 'set_global_default|\.try_init\(\)|\.init\(\)|registry\(\)' crates src-tauri/src`. 운영/시험 재분류 = 스크래치 스크립트(복구 꼴마다 감싼 `fn` 위 `#[cfg(test)]` · `#[cfg(any(test`) — codex `:1348` · `input_queue.rs:262` 를 눈으로 확인했다. 전부 읽기다.
-- 소스 문자열 시험: `rg -n 'include_str!\(' crates src-tauri/src --glob '*.rs'`(생성물 · 문서 제외 21곳) · `rg -n 'CARGO_MANIFEST_DIR' crates src-tauri` 로 원천 파일을 읽는 시험을 찾고 각 시험의 바늘을 읽었다.
-- 시험 대기: `rg -n "fn (wait_until|poll_until|wait_for|eventually|spin_until|wait_while)\b" crates src-tauri --glob '*.rs'`.
-- 운영 그래프: `cargo tree --locked --offline -p engram-dashboard-daemon -e normal,features -i engram-dashboard-base --target all` · `… -p engram-dashboard-agent -e normal,dev,features -i engram-dashboard-command`.
-- storage 겹침: `git fetch` 뒤 `git diff --stat $(git merge-base HEAD origin/v0.3.3/feat/storage) origin/v0.3.3/feat/storage -- crates src-tauri/src` · 같은 diff 의 `+` 줄 grep.
-- transport 게이트: `crates/engram-dashboard-transport/src/lib.rs:31-85` · `.github/workflows/ci.yml:686-760` 읽기.
+- clock: `rg -n "trait (Clock|UsageClock|\w*Clock)\b" crates src-tauri/src` · `rg -n "impl\b.*\b(Clock|UsageClock|\w+Clock) for\b"` · `rg -n "mono_now\(" crates/engram-dashboard-agent/src | wc -l` (22) · `rg -n "\.mono\(\)"` (11) · `rg -n "\.wall\(\)"` (13).
+- lock poison: ADR-0269 counting method `git grep -h -o -E '\.lock\(\)\s*\.unwrap_or_else\(\|[a-z_]+\|\s*[a-z_]+\.into_inner\(\)\)' HEAD -- crates src-tauri/src | wc -l` (67) · `rg -c 'PoisonError::into_inner' crates src-tauri/src` (total 27). The 117 was counted with a scratch Python script (multi-line regex — closure and function-pointer forms of `unwrap_or_else` after `.lock|read|write|wait_timeout(...)` 109 + `match` branch 6 + block closure 1 + `try_lock` 1). The same 109 can also be reproduced with `rg -U -o`.
+- poison assertions: `rg -n "is_poisoned|clear_poison" crates src-tauri/src`.
+- mixed locks (after the round 1 review): a scratch Python script — extract the receiving field names from the recovery sites in the operational section, then in the same crate's operational code look for `.lock()/.read()/.write()` + `.expect(`/`.unwrap(` after that name. Other people's structs that only share the field name (codex `child` · `stdout` versus stdio · `self.inner` versus `connection_core` etc.) were filtered out by hand. The `try_lock` neighbors were examined separately with `rg -n 'try_lock\(\)' crates/engram-dashboard-agent/src`. Because it is a name-equality comparison, it cannot catch sites that hold the same lock under a different name (a cloned `Arc` received in a variable of another name) — the `watcher_child` of the PTY watcher thread was found by hand.
+- Locks where logging while held is forbidden · nesting (up to edition 4 — dropped from the move rule by S2=(e) · §2-4 historical record): we read the widened wording `rg -n '찍지 않는다|놓은 뒤 (찍|부른)|락 밖에서|잠금 밖에서|쥔 채.{0,40}(로그|IO|emit|찍|보내)|로그도 놓은|잎이다' crates/engram-dashboard-agent/src crates/engram-dashboard-daemon/src src-tauri/src` (74 lines) one by one and, for each remaining operational site, read the lock definition · the doc of the acquiring helper (bold text · English `leaf` slip past the regex) · from the documented lock order `rg -n '락 순서|lock order|Lock order' crates/engram-dashboard-agent/src crates/engram-dashboard-daemon/src src-tauri/src --glob '*.rs'` (33 lines) we extracted the edges where an excluded lock is outer and read the guard span and the callbacks · ports · clocks inside it · codex state lock sites = the lines before `:4284` (start of the test module) among `rg -n -U '(\.lock\(\)|wait_timeout\([^;]*?\))\s*\.unwrap_or_else\(' crates/engram-dashboard-agent/src/backend/codex/transport.rs` · we confirmed in the 25 lines before each site that its `lock` comes from `SharedState` · operational subscriber `rg -n 'set_global_default|\.try_init\(\)|\.init\(\)|registry\(\)' crates src-tauri/src`. Operational/test reclassification = a scratch script (for each recovery form, `#[cfg(test)]` · `#[cfg(any(test` above the wrapping `fn`) — we checked codex `:1348` · `input_queue.rs:262` by eye. All of it is reading.
+- Source-string tests: `rg -n 'include_str!\(' crates src-tauri/src --glob '*.rs'` (21 places, excluding generated output · docs) · we found the tests that read source files with `rg -n 'CARGO_MANIFEST_DIR' crates src-tauri` and read each test's needles.
+- waiting in tests: `rg -n "fn (wait_until|poll_until|wait_for|eventually|spin_until|wait_while)\b" crates src-tauri --glob '*.rs'`.
+- operational graph: `cargo tree --locked --offline -p engram-dashboard-daemon -e normal,features -i engram-dashboard-base --target all` · `… -p engram-dashboard-agent -e normal,dev,features -i engram-dashboard-command`.
+- storage overlap: `git diff --stat $(git merge-base HEAD origin/v0.3.3/feat/storage) origin/v0.3.3/feat/storage -- crates src-tauri/src` after `git fetch` · a grep of the `+` lines of the same diff.
+- transport gates: `crates/engram-dashboard-transport/src/lib.rs:31-85` · reading of `.github/workflows/ci.yml:686-760`.
 
-**5판 재대조(2026-10-04 · 코드 트리 `0ef6292` 그대로):**
+**Edition 5 re-cross-check (2026-10-04 · code tree still `0ef6292`):**
 
-- ADR 번호: 원격 브랜치마다 `git ls-tree --name-only <브랜치> docs/decisions/ | grep -E '027[4-9]'` → `origin/v0.3.3/feat/storage` 의 0274 하나뿐 · 이 브랜치의 마지막은 0273 → 새 번호 0275.
-- 소스 문자열 시험(S2=(e) 로 넓어진 몫): 위 21곳 중 codex `transport.rs`(`:5029 · 5631 · 6641 · 6702 · 7076 · 7360`) · `manager.rs`(`:3960 · 4289 · 4319 · 4348 · 4439 · 4473 · 6250 · 6374 · 6512`) · daemon `command_delivery.rs:4779` · `connection_core.rs:2532 · 3166` · `profile.rs:1167` 의 `split/find/contains/matches` 바늘을 다시 뽑아 락 복구 꼴과 맞댔다 — 락 복구를 재는 것은 `:7360`(stdin 개수) 하나.
-- `match` 꼴 6곳: `rg -n -U --pcre2 'Err\((\w+)\)\s*=>\s*\1\.into_inner\(\)' crates src-tauri/src --glob '*.rs'` · `wait_timeout` = 운영 3(`input_queue.rs:178 · 254` · codex `:2192`) + 시험 1(codex `:10176`) — `rg -n -U 'wait_timeout\([^;]*?\)\s*\.unwrap_or_else'`.
-- std 경계 함수의 MSRV: `grep -rn rust-version Cargo.toml crates/*/Cargo.toml src-tauri/Cargo.toml` → 0줄(어느 crate 도 컴파일러 하한을 낮게 선언하지 않는다 — 고정은 `rust-toolchain.toml` 1.95.0 하나).
-- base 의존: `grep -n engram-dashboard-base crates/*/Cargo.toml src-tauri/Cargo.toml` → agent · daemon · discovery · net(optional) · 셸(`src-tauri/Cargo.toml:61`). transport 는 없다.
+- ADR number: `git ls-tree --name-only <브랜치> docs/decisions/ | grep -E '027[4-9]'` on each remote branch → only 0274 of `origin/v0.3.3/feat/storage` · the last one on this branch is 0273 → new number 0275.
+- Source-string tests (the part widened by S2=(e)): of the 21 places above, we re-extracted the `split/find/contains/matches` needles of codex `transport.rs` (`:5029 · 5631 · 6641 · 6702 · 7076 · 7360`) · `manager.rs` (`:3960 · 4289 · 4319 · 4348 · 4439 · 4473 · 6250 · 6374 · 6512`) · daemon `command_delivery.rs:4779` · `connection_core.rs:2532 · 3166` · `profile.rs:1167` and checked them against the lock recovery form — the only one that measures lock recovery is `:7360` (stdin count).
+- The 6 sites of the `match` form: `rg -n -U --pcre2 'Err\((\w+)\)\s*=>\s*\1\.into_inner\(\)' crates src-tauri/src --glob '*.rs'` · `wait_timeout` = operational 3 (`input_queue.rs:178 · 254` · codex `:2192`) + test 1 (codex `:10176`) — `rg -n -U 'wait_timeout\([^;]*?\)\s*\.unwrap_or_else'`.
+- MSRV of the std boundary functions: `grep -rn rust-version Cargo.toml crates/*/Cargo.toml src-tauri/Cargo.toml` → 0 lines (no crate declares a low compiler floor — the only pin is `rust-toolchain.toml` 1.95.0).
+- base dependency: `grep -n engram-dashboard-base crates/*/Cargo.toml src-tauri/Cargo.toml` → agent · daemon · discovery · net (optional) · shell (`src-tauri/Cargo.toml:61`). transport has none.
 
-**메모 줄 번호가 밀린 곳(메모 → 지금):** agent `output_core.rs:716` → `:1059-1062` · agent `commands.rs:763` → `:1143` · discovery `lib.rs:425` → `:431` · daemon `tests/control_send.rs:70` → `:76` · daemon `lib.rs:65` → `:73-82` · daemon `control/mod.rs:141` → `:142-151`.
+**Where memo line numbers shifted (memo → now):** agent `output_core.rs:716` → `:1059-1062` · agent `commands.rs:763` → `:1143` · discovery `lib.rs:425` → `:431` · daemon `tests/control_send.rs:70` → `:76` · daemon `lib.rs:65` → `:73-82` · daemon `control/mod.rs:141` → `:142-151`.
 
-**미검(이 문서의 주장 중 돌려서 확인하지 않은 것):**
+**Unverified (claims in this document that were not confirmed by running):**
 
-- 워크스페이스 회귀의 출발 수치(`0ef6292`) — 재지 않았다(U1 착수 때 — §6-1).
-- `dyn` 하위 트레이트에서 상위 트레이트 메서드를 부를 때 `use` 가 필요한지 — 컴파일 안 함.
-- S2=(e) 를 돌려 보지 않았다 — 83곳이 전부 그 도우미로 컴파일된다는 것, `output_channel.rs` 를 제자리로 둬 `:145-148` 이 초록으로 남는다는 것 모두 읽기다. (e) 는 로그를 늘리지 않아 로그 캡처 시험과 겹칠 것이 없다.
-- T1 의 std 교체 — `fcb.rs` 실측은 함수 동작이다. 세 자리를 바꾼 뒤의 동작은 U1 의 시험이 잰다.
-- 쥔 채 로그 금지 감사(4판까지)의 완전성 — 읽기였고 문구가 다른 규율을 놓쳤을 수 있다. S2=(e) 로 이 감사는 이전 규칙에서 빠졌다 — 복구 경고를 다시 달 때만 다시 문제가 된다(§2-4 · ADR-0275 #1).
-- 섞인 자물쇠 표(§2-4)는 필드 이름 일치로 찾았다 — 다른 이름으로 받은 같은 자물쇠는 손으로 찾은 것뿐이라 빠진 것이 있을 수 있다.
-- 운영/시험 가름(§2-4)은 스크립트 추정 + 손 정정이다.
-- storage 브랜치 사실은 `5a2cf7f` 시점이다 — P3 착지 때 다시 잰다.
+- The starting figures of the workspace regression (`0ef6292`) — not measured (when U1 starts — §6-1).
+- Whether `use` is needed when calling a supertrait method through a `dyn` subtrait — not compiled.
+- We did not run S2=(e) — that all 83 sites compile with that helper, and that leaving `output_channel.rs` in place keeps `:145-148` green, are both from reading. (e) does not add logs, so there is nothing to overlap with the log-capture tests.
+- T1's std replacement — the `fcb.rs` measurement is the function's behavior. The behavior after changing the three sites is measured by U1's tests.
+- The completeness of the audit of locks where logging while held is forbidden (up to edition 4) — it was reading, and the wording may have missed other disciplines. With S2=(e) this audit dropped out of the move rule — it becomes a problem again only when the recovery warning is attached again (§2-4 · ADR-0275 #1).
+- The mixed-lock table (§2-4) was found by field-name equality — the same lock received under a different name was found only by hand, so some may be missing.
+- The operational/test split (§2-4) is a script estimate + hand corrections.
+- The storage branch facts are as of `5a2cf7f` — measured again when P3 lands.

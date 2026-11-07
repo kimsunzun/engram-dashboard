@@ -1,21 +1,21 @@
-# 실행이 막혔을 때 사유 표시 · 안쪽 오류를 바깥 줄에 끌어올리기 (관행 조사)
+# Showing the reason when a launch is blocked · bubbling an inner error up to the outer row (practice survey)
 
-- **상태:** light 조사 · 2026-10-18 · 수집자 1(문서형) + 메인 grounding(NN/g · Unreal 원문 대조) · 적대 리뷰 없음
-- **질문:** ① 붙은 구성 요소가 깨져 실행이 막혔을 때 사유를 어디에 띄우나(모달 · 그 자리 · 알림) ② 안쪽 항목의 오류를 접힌 바깥 줄에 보이나.
-- **맥락:** 에이전트 프리셋 슬롯에서 깨진 설정이 든 프리셋이 한눈에 보이고 눌러서 따라 들어가야 한다(사용자 2026-10-18).
+- **Status:** light survey · 2026-10-18 · 1 collector (documents) + main grounding (checked against the NN/g · Unreal originals) · no adversarial review
+- **Questions:** ① When a launch is blocked because an attached component is broken, where is the reason shown (modal · in place · notification)? ② Is an inner item's error shown on the collapsed outer row?
+- **Context:** In the agent preset slot, a preset that holds a broken setting must be visible at a glance and must be followable by clicking (user 2026-10-18).
 
-## 결론
+## Conclusions
 
-- **모달은 사용자가 모든 것을 멈추고 대응해야 할 때만이고, 그 밖의 오류는 출처 가까이 보이고 출처로 따라가게 한다.** NN/g「Display the error message close to the error's source.」 · 「modal dialogs … should be reserved for severe errors.」(원문 대조). Microsoft「Dialogs block interactions with the app window until being explicitly dismissed.」 — 앱 전체 오류(연결 끊김 등)만 대화상자. 구성 요소 하나 때문에 막힌 실행은 모달 경우가 아니다(추론). — 가능성 높음
-- **Unreal 블루프린트 컴파일 결과 패널이 가장 가까운 선례다** — 오류가 나면 저절로 열리고(「The panel will also open automatically whenever a Blueprint compile results in errors or warnings.」), 항목을 누르면 문제 노드로 간다(「Click on a message to jump the graph view directly to the problematic node」). — 확실(원문 대조)
-- **VS Code 탐색기는 안쪽 파일의 오류를 부모 폴더로 끌어올린다** — 개수 배지(10개 이상 「9+」) · 가장 심한 단계의 색 · 설정 `problems.decorations.enabled`. 릴리스 노트「The number of errors/warnings is shown in the decoration.」 부모로 끌어올림(`bubble: true`)은 소스 요약으로만 확인. — 가능성 높음
-- VS Code · JetBrains 실행 구성 오류 화면 · Docker Desktop · Windows Terminal 설정 오류 배너 · JetBrains/Visual Studio 의 부모 표시 — 1차 자료를 못 찾았다(기권).
+- **A modal is only for when the user must stop everything and respond; any other error is shown near its source and lets the user follow it to the source.** NN/g 「Display the error message close to the error's source.」 · 「modal dialogs … should be reserved for severe errors.」 (checked against the original). Microsoft 「Dialogs block interactions with the app window until being explicitly dismissed.」 — only app-wide errors (a lost connection and the like) get a dialog. A launch blocked by a single component is not a modal case (inference). — likely
+- **The Unreal Blueprint compile results panel is the closest precedent** — it opens by itself when there is an error (「The panel will also open automatically whenever a Blueprint compile results in errors or warnings.」), and clicking an item goes to the problem node (「Click on a message to jump the graph view directly to the problematic node」). — certain (checked against the original)
+- **The VS Code explorer bubbles an inner file's error up to the parent folder** — a count badge (「9+」 for 10 or more) · the color of the most severe level · the setting `problems.decorations.enabled`. Release notes 「The number of errors/warnings is shown in the decoration.」 The bubbling up to the parent (`bubble: true`) is confirmed only from a source summary. — likely
+- The run-configuration error screens of VS Code · JetBrains · Docker Desktop · the Windows Terminal settings-error banner · the parent marking in JetBrains/Visual Studio — no primary material found (abstain).
 
-## 출처
+## Sources
 
-| 출처 | 내용 | 확신도 |
+| Source | Content | Confidence |
 |---|---|---|
-| https://www.nngroup.com/articles/error-message-guidelines/ | 출처 가까이 · 모달은 심각한 오류만 | 확실(원문 대조) |
-| https://learn.microsoft.com/en-us/windows/apps/design/controls/dialogs-and-flyouts/ | 대화상자는 막는다 · 앱 전체 오류만 | 확실(수집자 인용) |
-| https://dev.epicgames.com/documentation/en-us/unreal-engine/compiler-results-in-the-blueprints-visual-scripting-editor-for-unreal-engine | 오류 때 자동으로 열림 · 누르면 문제 노드로 | 확실(원문 대조) |
-| https://code.visualstudio.com/updates/v1_20 · `markersFileDecorations.ts` | 오류 개수 배지 · 부모 폴더로 끌어올림 | 가능성 높음 |
+| https://www.nngroup.com/articles/error-message-guidelines/ | near the source · a modal only for severe errors | certain (checked against the original) |
+| https://learn.microsoft.com/en-us/windows/apps/design/controls/dialogs-and-flyouts/ | a dialog blocks · only app-wide errors | certain (collector quote) |
+| https://dev.epicgames.com/documentation/en-us/unreal-engine/compiler-results-in-the-blueprints-visual-scripting-editor-for-unreal-engine | opens automatically on error · clicking goes to the problem node | certain (checked against the original) |
+| https://code.visualstudio.com/updates/v1_20 · `markersFileDecorations.ts` | error count badge · bubbling up to the parent folder | likely |

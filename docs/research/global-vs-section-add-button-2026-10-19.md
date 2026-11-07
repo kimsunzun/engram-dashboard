@@ -1,26 +1,26 @@
-# 맨 위 「전체 추가」 와 칸별 `+` 를 함께 두나 (2026-10-19)
+# Keep both a top-level 「전체 추가」 and a per-section `+`? (2026-10-19)
 
-| 항목 | 값 |
+| Item | Value |
 |---|---|
-| **상태** | 조사 완료 · 지금 설계(PRD R23 — 편집 칸 머리 「+ 추가」 = 전체 검색 · 칸 제목 `+` = 그 종류만) 그대로 둠 |
-| **방법** | `/research` light — 수집자 1(검색 + 공식 문서 읽음) + 메인 grounding(Epic 문서 원문 확인) |
-| **질문** | 고정 종류 칸(지침 · 스킬 · 설정 · 프리셋)으로 나뉜 편집 화면에서 맨 위 전체 추가와 칸별 `+` 를 같이 두는 선례가 있나 |
+| **Status** | Research complete · keep the current design as is (PRD R23 — the 「+ 추가」 at the top of the edit pane = search across everything · the `+` on a section title = that kind only) |
+| **Method** | `/research` light — collector 1 (search + read the official docs) + main grounding (checked the Epic docs source text) |
+| **Question** | In an edit screen split into fixed-kind sections (instructions · skills · settings · presets), is there precedent for having both a top-level add-all and a per-section `+`? |
 
-## 결론
+## Conclusion
 
-- **같이 두는 선례가 있다 — 언리얼 My Blueprint 패널**(확실 — 메인이 Epic 문서 확인): 패널 맨 위 「Add New」 단추 + 각 칸 제목(Graphs · Functions · Macros · Variables · Event Dispatchers) 끝의 `+` 단축 단추. 고정 종류 칸이라는 점까지 우리와 같다. 차이 = 언리얼 「Add New」 는 새로 만드는 메뉴이고(우클릭 메뉴와 같은 항목이라고만 적혀 있다 — 한 메뉴에 종류가 다 나오는지는 문서에 없다), 우리 것은 있는 항목을 검색해 붙인다.
-- **하나만 두는 곳** — 전체 추가 하나: Unity Inspector 「Add Component」(가능성 높음 · 스니펫) · JetBrains Run/Debug Configurations 툴바 `+`(확실) — 둘 다 종류가 열린 목록. 칸별 `+` 만: Figma 속성 칸 Fill · Stroke · Effects(가능성 높음 · 스니펫 · 전체 추가가 없는지는 미확인).
-- 약한 패턴(해석): 고정 종류 칸은 칸별 `+`, 열린 단일 목록은 전체 추가 하나. 디자인 시스템 지침은 찾지 않았다.
+- **There is precedent for having both — the Unreal My Blueprint panel** (certain — main checked the Epic docs): an 「Add New」 button at the top of the panel + a `+` shortcut button at the end of each section title (Graphs · Functions · Macros · Variables · Event Dispatchers). The sections are fixed kinds, as in ours. The difference = Unreal's 「Add New」 is a menu for creating something new (the docs say only that it has the same items as the right-click menu — they do not say whether one menu lists every kind), while ours searches existing items and attaches them.
+- **Places with only one** — only an add-all: Unity Inspector 「Add Component」 (likely · snippet) · JetBrains Run/Debug Configurations toolbar `+` (certain) — both are open-ended lists of kinds. Only a per-section `+`: Figma properties sections Fill · Stroke · Effects (likely · snippet · not checked whether an add-all is absent).
+- Weak pattern (interpretation): fixed-kind sections get a per-section `+`, an open single list gets one add-all. No design-system guidance was looked up.
 
-## 피어
+## Peers
 
-| 피어 | 전체 추가 | 칸별 `+` | 칸 | 출처 | 확신도 |
+| Peer | Add-all | Per-section `+` | Sections | Source | Confidence |
 |---|---|---|---|---|---|
-| Unreal My Blueprint | 예 · 맨 위 「Add New」 | 예 · 각 칸 제목 끝 | 고정 | https://dev.epicgames.com/documentation/unreal-engine/my-blueprint-panel-in-the-blueprints-visual-scripting-editor-for-unreal-engine | 확실(메인 원문 확인) |
-| Unity Inspector | 예 · 「Add Component」 | 없음 | 열림 | https://docs.unity.com/en-us/unity-studio/develop/ui-refs/inspector-ref | 가능성 높음(스니펫) |
-| JetBrains Run/Debug Configurations | 예 · 툴바 `+` / Alt+Insert → 템플릿 목록 | 없음 | 열림(폴더로 묶음) | https://www.jetbrains.com/help/idea/run-debug-configuration.html | 확실(수집자 읽음) |
-| Figma 속성 칸 | 미확인 | 예 · Fill · Stroke · Effects | 고정 종류 | https://help.figma.com/hc/en-us/articles/360049283914 | 가능성 높음(스니펫) |
+| Unreal My Blueprint | Yes · 「Add New」 at the top | Yes · at the end of each section title | Fixed | https://dev.epicgames.com/documentation/unreal-engine/my-blueprint-panel-in-the-blueprints-visual-scripting-editor-for-unreal-engine | Certain (main checked the source text) |
+| Unity Inspector | Yes · 「Add Component」 | None | Open | https://docs.unity.com/en-us/unity-studio/develop/ui-refs/inspector-ref | Likely (snippet) |
+| JetBrains Run/Debug Configurations | Yes · toolbar `+` / Alt+Insert → template list | None | Open (grouped by folder) | https://www.jetbrains.com/help/idea/run-debug-configuration.html | Certain (collector read it) |
+| Figma properties sections | Not checked | Yes · Fill · Stroke · Effects | Fixed kinds | https://help.figma.com/hc/en-us/articles/360049283914 | Likely (snippet) |
 
-## 한계
+## Limits
 
-- light — 적대 리뷰 없음. Notion · VS Code · Postman · Blender 는 보지 않았다.
+- light — no adversarial review. Notion · VS Code · Postman · Blender were not looked at.

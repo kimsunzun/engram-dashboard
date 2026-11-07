@@ -1,17 +1,17 @@
-//! 사용량 구독 명부 — 연결마다 구독한 벤더 집합과 그 연결의 출구(TRD §1-4 「구독 명부」 · ADR-0254). 발행 한 장을 대상에
-//! 나르는 [`deliver`] 도 여기다.
+//! Usage subscription registry — the vendor set each connection subscribed to and that connection's outlet (TRD §1-4 「구독 명부」 (subscription registry) · ADR-0254). [`deliver`], which carries
+//! one emission sheet to the targets, is here too.
 //!
-//! ★칸을 만드는 곳은 [`UsageWatch::attach`] 하나, 지우는 곳은 [`UsageWatch::detach`] 하나다★ —
-//!   [`UsageWatch::replace`] 는 있는 칸만 고친다. 그래서 끊김 정리와 겹쳐 든 늦은 교체가 지운 칸을 되살리지
-//!   못한다(§3 #56 — 명령 명부의 `attach`·`refuse_if_detached` 와 같은 모양).
-//! ★칸을 지우면 그 출구를 거둔다([`UsageOutlet::revoke`])★ — 출구가 쥔 그 연결의 프레임 출구는
-//!   [`UsageWatch::detach`] 가 돌아오기 전에 놓이고(연결 정리 포트의 의무 — `net/src/frame_port.rs` `on_disconnect`),
-//!   밖에 남은 [`Target`] 사본은 조용해진다. 남는 것은 그때 진행 중이던 보내기마다 하나씩의 일시 사본뿐이다.
-//! ★명부 락을 쥔 채 짓지도 보내지도 않는다★ — 락 안에서는 대상(출구 사본 + 그 연결의 지금 집합)만 뜨고,
-//!   인코딩·보내기는 [`deliver`] 가 락 없이 한다. 그래서 출구·인코더가 이 명부를 다시 불러도 교착이 없다.
-//! ★락 순서 = 명부 → 책★ — 명부 락 안에서 남의 코드를 부르는 자리는 [`UsageWatch::replace`] 의 `first_sheets`
-//!   하나다. 거기서 책을 잡는 것은 되고 명부를 다시 부르면 교착이다(std `Mutex` 는 재진입하지 않는다). 책을 쥔
-//!   채 명부를 부르는 자리는 없어야 한다.
+//! ★There is exactly one place that makes cells, [`UsageWatch::attach`], and exactly one that erases them, [`UsageWatch::detach`]★ —
+//!   [`UsageWatch::replace`] only fixes cells that exist. So a late replacement that arrives overlapping disconnect cleanup cannot revive an erased
+//!   cell (§3 #56 — the same shape as `attach` · `refuse_if_detached` of the command registry).
+//! ★Erasing a cell withdraws its outlet ([`UsageOutlet::revoke`])★ — the connection's frame outlet that the outlet holds is
+//!   dropped before [`UsageWatch::detach`] returns (the duty of the connection cleanup port — `net/src/frame_port.rs` `on_disconnect`),
+//!   and any [`Target`] copy left outside goes quiet. What remains is only one temporary copy for each send in progress at that time.
+//! ★Never build or send while holding the registry lock★ — inside the lock only the targets (outlet copy + that connection's current set) are taken,
+//!   and encoding and sending are done by [`deliver`] without a lock. So there is no deadlock even if the outlet or encoder calls back into this registry.
+//! ★Lock order = registry → book★ — the only place inside the registry lock that calls someone else's code is the `first_sheets` of [`UsageWatch::replace`].
+//!   Taking the book there is fine and calling the registry again is a deadlock (std `Mutex` is not reentrant). There must be no place that calls the registry
+//!   while holding the book.
 // ADR-0006
 
 use std::collections::{BTreeSet, HashMap};
@@ -22,39 +22,39 @@ use engram_dashboard_base::sync;
 use engram_dashboard_net::frame_port::ConnId;
 use engram_dashboard_protocol::UsageLimitSnapshot;
 
-/// 연결 하나의 출구 — 실물은 연결 계층이 `on_connect` 에서 연결마다 새로 만든다: 칸 하나
-/// (`Mutex<Option<Arc<dyn FrameSink>>>`)를 쥐고, `send` = 칸을 잠가 (있으면) `Arc` 사본만 뜨고 놓은 뒤 **칸 밖에서**
-/// `try_send` · `revoke` = 칸을 잠가 꺼내(`take`) 놓는다.
+/// The outlet of one connection — the real one is made fresh per connection by the connection layer in `on_connect`: it holds one cell
+/// (`Mutex<Option<Arc<dyn FrameSink>>>`), `send` = lock the cell, take only an `Arc` copy (if present), release, then `try_send` **outside the cell**,
+/// and `revoke` = lock the cell, take it out (`take`), and release.
 ///
-/// ★칸을 쥔 채 보내지 않는다(ADR-0006)★ — 칸 안의 일은 사본 뜨기·꺼내기뿐이다: 명부·서비스·다른 락을 부르지
-///   않고, 로그도 칸을 놓은 뒤 찍는다. 그래서 `revoke` 가 진행 중인 보내기를 기다리지 않는다.
-/// 두 메서드 다 이 명부의 락을 쥐지 않은 채 불린다 — 명부 쪽에서는 안에서 명부를 다시 불러도 교착이 없다.
+/// ★Never send while holding the cell (ADR-0006)★ — the work inside the cell is only copying and taking out: it calls no registry · service · other lock,
+///   and logs only after releasing the cell. So `revoke` does not wait for a send in progress.
+/// Both methods are called without holding this registry's lock — so on the registry side there is no deadlock even if it calls the registry again inside.
 pub trait UsageOutlet: Send + Sync {
-    /// ★논블록이어야 한다★ — pump 스레드·스케줄러·조회 완료 가드, 그리고 연결 태스크(구독의 첫 한 장 · 요청
-    /// 경로의 발행)에서 불린다. 실패(포화·닫힘)는 출구가 스스로 처리하고 부르는 쪽에 돌려주지 않는다.
+    /// ★Must be non-blocking★ — it is called from the pump thread · scheduler · query completion guard, and the connection task (the first sheet of a subscription · emission of the request
+    /// path). Failure (saturation · closed) is handled by the outlet itself and is not returned to the caller.
     fn send(&self, frame: &UsageFrame);
 
-    /// 이 출구를 거둔다 — 명부가 칸을 지울 때(끊김 · 같은 연결 id 로 다른 출구가 덮음) 그 칸마다 한 번, 명부 락
-    /// 밖에서 부른다. 연결 정리 경로(동기)라 막히지 않아야 한다.
+    /// Withdraw this outlet — called once per cell when the registry erases a cell (disconnect · another outlet overwrote it with the same connection id), outside the registry
+    /// lock. It is the connection cleanup path (sync) so it must not block.
     ///
-    /// ★돌아온 뒤에는 출구가 프레임 출구를 쥐지 않고 `send` 가 아무것도 안 한다★ — 밖에 남은 [`Target`] 은
-    ///   조용해진다. 남는 것은 그때 진행 중이던 `send` 마다(스레드마다) 뜬 사본 하나뿐이고, 그 `try_send` 한 번
-    ///   뒤 놓인다(TRD §1-4 「동시성·락」의 일시 사본 · §3 #87).
+    /// ★After it returns the outlet holds no frame outlet and `send` does nothing★ — a [`Target`] left outside
+    ///   goes quiet. What remains is only one copy taken for each `send` in progress at that time (per thread), and it is dropped after that one `try_send`
+    ///   (the temporary copy of TRD §1-4 「동시성·락」 (concurrency · locks) · §3 #87).
     fn revoke(&self);
 }
 
-/// 발행 한 장을 `subscribed` 집합 하나로 지은 것 — `json` 은 `snapshot` 과 그 집합을 실은 이벤트 한 줄이다. 같은
-/// 집합의 대상은 같은 `json` 을 나눠 쓴다.
+/// One emission sheet built for one `subscribed` set — `json` is the one-line event carrying `snapshot` and that set. Targets of the same
+/// set share the same `json`.
 #[derive(Debug, Clone)]
 pub struct UsageFrame {
     pub snapshot: UsageLimitSnapshot,
     pub json: Arc<str>,
 }
 
-/// 이벤트 JSON 을 짓는 포트 — 실물은 조립이 준다.
+/// The port that builds the event JSON — the assembly gives the real one.
 ///
-/// 명부 락 밖에서, 발행 한 번에 서로 다른 `subscribed` 마다 한 번 불린다. `None` = 짓기 실패 — 그 집합의 대상은
-/// 이번 발행을 건너뛴다. ★실패 로그는 인코더가 스스로 남긴다★ — [`deliver`] 는 찍지 않는다.
+/// Called outside the registry lock, once per distinct `subscribed` in one emission. `None` = building failed — the targets of that set
+/// skip this emission. ★The encoder leaves the failure log itself★ — [`deliver`] does not log.
 pub trait UsageEncoder: Send + Sync {
     fn encode(
         &self,
@@ -63,27 +63,27 @@ pub trait UsageEncoder: Send + Sync {
     ) -> Option<Arc<str>>;
 }
 
-/// 발행 대상 하나 — 명부 락 안에서 뜬 그 연결의 출구 사본과 그때의 집합.
+/// One emission target — the outlet copy of that connection taken inside the registry lock and the set at that time.
 ///
-/// ★사본은 락을 놓는 순간 낡는다★ — `subscribed` 가 한 발 늦을 수 있고(셸의 대조가 같은 집합을 한 장 더 보낼
-///   뿐이다 · TRD §1-7), 그 연결이 이미 끊겼을 수도 있다(거둔 출구라 보내기가 아무것도 안 한다).
-/// ★뜬 자리에서 [`deliver`] 에 넘긴다 — 쌓아 두거나 기다림을 건너 쥐지 말 것★: 쥔 동안 낡는 집합을 싣게 되고,
-///   끊긴 연결의 출구 껍데기도 그만큼 산다.
+/// ★The copy goes stale the moment the lock is released★ — `subscribed` can be one step late (the shell's cross-check just sends the same set one more sheet
+///   · TRD §1-7), and that connection may already have dropped (the outlet was withdrawn so sending does nothing).
+/// ★Pass it to [`deliver`] where it was taken — do not pile them up or hold them across a wait★: while held you would carry a set that goes stale,
+///   and the dropped connection's outlet shell would live that long too.
 #[derive(Clone)]
 pub struct Target {
     pub outlet: Arc<dyn UsageOutlet>,
     pub subscribed: Arc<BTreeSet<UsageVendorKey>>,
 }
 
-/// [`UsageWatch::replace`] 의 결과 — `first_sheets` 는 이번 교체로 새로 든 벤더의 첫 한 장들이고 `target` 은 그
-/// 연결 하나다(`subscribed` = 교체한 **뒤**의 집합). 첫 한 장은 `target` 에만 [`deliver`] 한다.
+/// The result of [`UsageWatch::replace`] — `first_sheets` are the first sheets of the vendors newly added by this replacement and `target` is that
+/// one connection (`subscribed` = the set **after** replacement). The first sheet is [`deliver`]ed to `target` only.
 pub struct Replaced {
     pub first_sheets: Vec<UsageLimitSnapshot>,
     pub target: Target,
 }
 
 struct Entry {
-    // 교체는 새 `Arc` 를 세운다 — 대상마다 집합을 복사하지 않고 나눠 쓴다.
+    // A replacement sets up a new `Arc` — it is shared across targets rather than copying the set per target.
     vendors: Arc<BTreeSet<UsageVendorKey>>,
     outlet: Arc<dyn UsageOutlet>,
 }
@@ -105,13 +105,13 @@ impl UsageWatch {
         }
     }
 
-    /// 연결이 붙었다(`on_connect`) — 빈 집합의 칸을 만든다. ★칸을 만드는 곳은 여기뿐이다★.
-    /// 같은 연결 id 가 다시 오면 앞 칸을 덮고 앞 출구를 거둔다(연결 id 는 재사용되지 않는다 — 오면 error 로그).
+    /// A connection attached (`on_connect`) — make a cell with an empty set. ★This is the only place that makes cells★.
+    /// If the same connection id comes again it overwrites the earlier cell and withdraws the earlier outlet (connection ids are not reused — if it does, an error log).
     ///
-    /// ★출구를 값으로 받아 여기서 `Arc` 로 싼다 — 칸마다 출구 객체가 따로다★: 그래서 거두기가 다른 칸의 출구를
-    ///   조용하게 만들 수 없다(지운 칸의 `revoke` 는 락을 놓은 뒤 돌아, 그 사이 새로 든 칸과 겹칠 수 있다). 밖에서
-    ///   만든 `Arc` 를 받지 말 것 — `Arc`·`Box` 에 대한 `UsageOutlet` 일괄 구현도, 칸(자물쇠)을 다른 출구와 나눠
-    ///   쥐는 출구(`Clone` 되는 `Arc` 감싸개)도 같은 길을 연다. 실물은 칸을 직접 쥔다.
+    /// ★Take the outlet by value and wrap it in an `Arc` here — each cell has its own outlet object★: so withdrawing cannot make another cell's outlet
+    ///   quiet (the `revoke` of an erased cell runs after the lock is released and can overlap a cell newly added in between). Do not take an
+    ///   `Arc` made outside — a blanket `UsageOutlet` impl for `Arc` · `Box`, or an outlet that shares the cell (the lock) with another outlet
+    ///   (a `Clone`able `Arc` wrapper) opens the same path. The real one holds the cell directly.
     pub fn attach(&self, conn: ConnId, outlet: impl UsageOutlet + 'static) {
         let replaced = self.lock().insert(
             conn,
@@ -125,17 +125,17 @@ impl UsageWatch {
                 conn,
                 "같은 연결 id 로 사용량 명부에 두 번 붙었다 — 앞 칸을 덮었다(연결 id 는 재사용되지 않는다)"
             );
-            // 락 밖에서 거두고 놓는다 — 사유는 `detach` 와 같다.
+            // Withdraw and drop outside the lock — the reason is the same as `detach`.
             previous.outlet.revoke();
         }
     }
 
-    /// 연결이 끊겼다(`on_disconnect`) — 칸을 지우고 그 출구를 **반환 전에** 거둔다([`UsageOutlet::revoke`]).
-    /// 그래서 출구가 쥔 그 연결의 프레임 출구는 이 호출 안에서 놓이고(연결 정리 포트의 의무 — `net/src/frame_port.rs`
-    /// `on_disconnect`) 밖에 남은 [`Target`] 사본은 조용해진다. ★칸을 지우는 곳은 여기뿐이다★. 반환 = 칸이 있었다.
+    /// A connection dropped (`on_disconnect`) — erase the cell and withdraw its outlet **before returning** ([`UsageOutlet::revoke`]).
+    /// So the connection's frame outlet that the outlet holds is dropped inside this call (the duty of the connection cleanup port — `net/src/frame_port.rs`
+    /// `on_disconnect`) and any [`Target`] copy left outside goes quiet. ★This is the only place that erases cells★. Return = there was a cell.
     pub fn detach(&self, conn: ConnId) -> bool {
-        // ★거두기·놓기는 락 **밖에서** 한다★ — 거두기·소멸이 무엇을 하는지(실물 = 연결 큐 송신단 닫기·깨우기) 이
-        //   명부는 모른다. 명령 명부 `detach` 와 같은 이유다.
+        // ★Withdrawing and dropping are done **outside** the lock★ — this registry does not know what withdrawing or destruction does (the real one = closing the connection queue sender · waking).
+        //   The reason is the same as the command registry `detach`.
         let Some(removed) = self.lock().remove(&conn) else {
             return false;
         };
@@ -143,15 +143,15 @@ impl UsageWatch {
         true
     }
 
-    /// `UsageSubscribe` — 그 연결의 집합을 통째로 바꾼다(빈 집합 = 해제 · TRD §3 #54). 집합이 그대로여도 `Some`
-    /// 이다. ★칸이 없으면(끊긴 뒤 늦게 든 교체) 아무것도 안 하고 `None`★ — 칸을 되살리지 않고, 여기서는 찍지도
-    /// 않는다: 로그(연결 id · debug)는 부르는 쪽이 락 밖에서 남긴다(명령 명부 `refuse_if_detached` 와 같은 분담).
+    /// `UsageSubscribe` — replace that connection's set whole (empty set = unsubscribe · TRD §3 #54). Even if the set stays the same it is `Some`.
+    /// ★If there is no cell (a replacement that arrives late after the drop) it does nothing and `None`★ — it does not revive the cell, and does not even log here:
+    /// the log (connection id · debug) is left by the caller outside the lock (the same division as the command registry `refuse_if_detached`).
     ///
-    /// ★`first_sheets` 는 명부 락 안에서, 새로 든 벤더가 있을 때만 한 번 불린다★(인자 = 새로 든 벤더, 키 순서) —
-    ///   그 안에서 책을 잡아 첫 한 장을 뜬다(락 순서 `명부 → 책`). ★책 안의 짧은 메모리 일(`eval_time`·스냅숏)뿐
-    ///   — I/O·기다림·이 명부 호출 금지★(명부 호출은 교착이다). 도는 동안 pump·스케줄러의 [`UsageWatch::targets`]
-    ///   가 막힌다. 집합을 고친 **뒤** 부르므로 「등록 먼저, 스냅숏 나중」이 선다(§3 #57): 겹친 발행은 이 스냅숏에
-    ///   들었거나 바뀐 집합으로 이 연결을 대상으로 본다.
+    /// ★`first_sheets` is called once, inside the registry lock, only when there is a newly added vendor★ (argument = the newly added vendors, in key order) —
+    ///   inside it the book is taken and the first sheet is built (lock order `명부 → 책` (registry → book)). ★Only short in-memory work in the book (`eval_time` · snapshot)
+    ///   — no I/O · waiting · calls to this registry★ (calling the registry is a deadlock). While it runs, the pump's and scheduler's [`UsageWatch::targets`]
+    ///   are blocked. It is called **after** the set is fixed so 「등록 먼저, 스냅숏 나중」 (register first, snapshot later) holds (§3 #57): an overlapping emission is either
+    ///   included in this snapshot or sees this connection as a target with the changed set.
     #[must_use = "첫 한 장은 부르는 쪽이 그 연결에 보낸다"]
     pub fn replace(
         &self,
@@ -178,7 +178,7 @@ impl UsageWatch {
         })
     }
 
-    /// 모든 연결의 집합의 합 — 스케줄러가 돌볼 벤더다.
+    /// The union of all connections' sets — the vendors the scheduler looks after.
     pub fn union(&self) -> BTreeSet<UsageVendorKey> {
         self.lock()
             .values()
@@ -186,8 +186,8 @@ impl UsageWatch {
             .collect()
     }
 
-    /// `vendor` 를 구독한 연결마다 대상 하나 — 그 연결의 지금 집합을 싣는다. 순서는 정하지 않는다.
-    /// pump 스레드의 발행마다 불린다 — 락 안에서는 `Arc` 사본 뜨기만 한다.
+    /// One target per connection that subscribed to `vendor` — it carries that connection's current set. The order is not fixed.
+    /// Called on every emission of the pump thread — inside the lock it only copies an `Arc`.
     pub fn targets(&self, vendor: UsageVendorKey) -> Vec<Target> {
         self.lock()
             .values()
@@ -200,19 +200,19 @@ impl UsageWatch {
     }
 
     fn lock(&self) -> MutexGuard<'_, HashMap<ConnId, Entry>> {
-        // poison 을 견딘다 — 이 명부는 pump 스레드의 발행 경로에 있다. 락 안의 변경은 넣기·빼기·집합 한 번
-        //   바꾸기뿐이라 칸은 늘 온전하다: `first_sheets` 가 패닉하면 새 집합이 선 채 그 첫 한 장만 안 나간다
-        //   (다음 revision 발행이 닿는다). 이 락을 쥔 패닉은 가둠 표시 밖이라(pump 쪽은 표시 끔 안) 운영
-        //   프로세스에서는 훅이 되감기 전에 끝낸다 — 훅 없는 시험 빌드에서만 서는 갈래다(ADR-0292).
+        // Tolerates poison — this registry is on the pump thread's emission path. Changes inside the lock are only insert · remove · replacing a set once
+        //   so cells are always intact: if `first_sheets` panics the new set stands and only that first sheet does not go out
+        //   (the next revision's emission reaches it). A panic holding this lock is outside the containment mark (the pump side is inside mark-off) so in a production
+        //   process the hook ends it before unwinding — a branch that stands only in hook-less test builds (ADR-0292).
         sync::lock(&self.entries)
     }
 }
 
-/// 한 장을 대상들에 나른다 — ★어떤 락도 쥐지 않은 채 부른다★. 대상이 실은 서로 다른 `subscribed` 마다 한 번
-/// 짓고(대상이 없으면 안 짓는다) 그 집합의 대상마다 보낸다. 짓기가 `None` 이면 그 집합의 대상만 건너뛴다.
-/// 대상은 받아 가지고 돌아오기 전에 전부 놓는다.
+/// Carry one sheet to the targets — ★called while holding no lock★. Build once per distinct `subscribed` the targets carry
+/// (if there are no targets, do not build) and send to each target of that set. If building gives `None`, only that set's targets are skipped.
+/// It drops every target it received before returning.
 pub fn deliver(snapshot: &UsageLimitSnapshot, targets: Vec<Target>, encoder: &dyn UsageEncoder) {
-    // 집합 수는 연결 수를 넘지 않고 운영에서는 셸 하나라 대개 1 이다 — 선형 탐색으로 묶는다.
+    // The number of sets does not exceed the number of connections and in production it is one shell so it is usually 1 — grouped by linear search.
     type Group = (Arc<BTreeSet<UsageVendorKey>>, Vec<Arc<dyn UsageOutlet>>);
     let mut groups: Vec<Group> = Vec::new();
     for Target { outlet, subscribed } in targets {
@@ -249,7 +249,7 @@ pub(super) mod tests {
     use std::sync::{mpsc, Weak};
     use std::time::Duration;
 
-    // 조회기 키로만 집합을 만든다 — 시험에도 벤더 리터럴을 두지 않는다.
+    // Make sets only from prober keys — do not put vendor literals in tests either.
     fn vendor(i: usize) -> UsageVendorKey {
         usage_probes()[i].key()
     }
@@ -294,8 +294,8 @@ pub(super) mod tests {
         Vec::new()
     }
 
-    /// 출구가 명부에 들어간 뒤에도 시험이 들여다보는 기록. 출구가 살아 있는 동안 강참조가 하나 더 있다 —
-    /// `Arc::strong_count(&log) == 1` 이면 출구가 소멸했다. 서비스 시험도 쓴다.
+    /// A record the test looks into even after the outlet has gone into the registry. While the outlet is alive there is one more strong reference —
+    /// `Arc::strong_count(&log) == 1` means the outlet is destroyed. Service tests use it too.
     #[derive(Default)]
     pub(crate) struct Log {
         pub(crate) frames: Mutex<Vec<UsageFrame>>,
@@ -322,7 +322,7 @@ pub(super) mod tests {
         }
     }
 
-    /// 받은 프레임을 [`Log`] 에 적는다. 거둔 뒤의 보내기는 적지 않고 따로 센다.
+    /// Write the frame received into the [`Log`]. A send after withdrawal is not written and is counted separately.
     pub(crate) struct Recording(Arc<Log>);
 
     pub(crate) fn recording() -> (Recording, Arc<Log>) {
@@ -344,7 +344,7 @@ pub(super) mod tests {
         }
     }
 
-    /// JSON = 집합의 낱말들. `fail_for` 집합이면 `None`.
+    /// JSON = the words of the set. `None` if it is the `fail_for` set.
     #[derive(Default)]
     pub(crate) struct Counting {
         calls: AtomicUsize,
@@ -371,7 +371,7 @@ pub(super) mod tests {
         }
     }
 
-    /// 명부를 거치지 않은 대상 하나와 그 기록.
+    /// One target that did not go through the registry and its record.
     fn target(subscribed: BTreeSet<UsageVendorKey>) -> (Target, Arc<Log>) {
         let (outlet, log) = recording();
         let target = Target {
@@ -381,7 +381,7 @@ pub(super) mod tests {
         (target, log)
     }
 
-    // ── 칸의 수명 ──
+    // ── Cell lifetime ──
 
     #[test]
     fn attach_starts_with_an_empty_set() {
@@ -491,7 +491,7 @@ pub(super) mod tests {
         assert_eq!(Arc::strong_count(&new_log), 1);
     }
 
-    /// 거둘 때·소멸할 때 명부 락이 풀려 있었는지 적는 출구.
+    /// An outlet that records whether the registry lock was released at withdrawal and at destruction.
     struct LockProbe {
         watch: Weak<UsageWatch>,
         log: Arc<Mutex<Vec<(&'static str, Option<bool>)>>>,
@@ -549,7 +549,7 @@ pub(super) mod tests {
         assert_eq!(*overwritten.lock().unwrap(), expected);
     }
 
-    // ── 합집합·대상 ──
+    // ── Union · targets ──
 
     #[test]
     fn union_is_the_union_of_connections() {
@@ -598,7 +598,7 @@ pub(super) mod tests {
         );
     }
 
-    // ── 첫 한 장 ──
+    // ── First sheet ──
 
     #[test]
     fn first_sheets_are_only_for_newly_added_vendors_and_only_for_that_connection() {
@@ -658,7 +658,7 @@ pub(super) mod tests {
         assert_eq!(replaced.first_sheets.len(), 2);
     }
 
-    // ── 나르기 ──
+    // ── Carrying ──
 
     #[test]
     fn deliver_encodes_once_for_one_set_and_releases_the_targets() {
@@ -710,9 +710,9 @@ pub(super) mod tests {
         assert_eq!(b_log.jsons(), [words(&set(&[0, 1]))]);
     }
 
-    // ── 락 ──
+    // ── Locks ──
 
-    /// 보내는 중에 명부를 다시 부르는 출구 — 교체·대상·해제(자기 연결 — 그래서 자기 `revoke` 가 겹친다).
+    /// An outlet that calls the registry again while sending — replacement · targets · release (its own connection — so its own `revoke` overlaps).
     struct Reentrant {
         watch: Weak<UsageWatch>,
         conn: ConnId,
@@ -734,7 +734,7 @@ pub(super) mod tests {
         }
     }
 
-    /// 짓는 중에 합집합을 읽는 인코더.
+    /// An encoder that reads the union while building.
     struct UnionReading {
         watch: Weak<UsageWatch>,
         seen: Mutex<Option<BTreeSet<UsageVendorKey>>>,
@@ -753,7 +753,7 @@ pub(super) mod tests {
 
     #[test]
     fn outlets_and_encoders_may_call_back_into_the_watch() {
-        // 교착이면 매달리는 대신 실패하도록 다른 스레드에서 돌린다.
+        // Run on another thread so a deadlock fails instead of hanging.
         let (done_tx, done_rx) = mpsc::channel();
         std::thread::spawn(move || {
             let watch = Arc::new(UsageWatch::new());

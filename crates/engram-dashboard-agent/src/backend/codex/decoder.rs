@@ -1,57 +1,57 @@
-//! codex app-server **알림** → 중립 [`OutputEvent`] 번역기.
+//! codex app-server **notification** → neutral [`OutputEvent`] translator.
 //!
-//! ★들어오는 문은 [`OutputDecoder`] 하나뿐이다★ — 임의 크기 바이트 청크를 받아 라인 재조립까지
-//!   여기서 한다. 통로는 봉투를 분기하느라(요청엔 응답 의무가, 응답엔 대기표가 걸린다) 그 줄을
-//!   한 번 파싱하고, 그 **원본 바이트를 그대로** 이 문으로 다시 넣는다 — 알림 한 줄당 파싱이 한 번
-//!   더 든다.
-//!   ★그 비용을 받아들인 이유(두 번째 문을 다시 만들고 싶어지는 자리다)★: pump 는 디코더를
-//!   `Box<dyn OutputDecoder>` 로 **move** 해 간다(`transport/stdio.rs`). 그래서 trait 밖의 문은
-//!   운영 경로에서 **닿을 수 없고**, 그 문을 쓰면 여기 라인 재조립·상한·resync·UTF-8 규율과 그것을
-//!   지키는 테스트가 통째로 배송 경로 밖으로 나간다. 통로가 자기 인스턴스를 따로 만드는 길도
-//!   같은 값을 두 벌로 쪼갠다(관측 맵과 "이름별 1 회" 가드가 갈린다). **파싱 한 번이 그보다 싸다.**
+//! ★The only door in is [`OutputDecoder`]★ — it takes byte chunks of arbitrary size, and line reassembly is also done
+//!   here. The path branches on the envelope (a request carries a duty to respond, a response carries a waiting ticket), so it parses that line
+//!   once and feeds its **original bytes as they are** back into this door — each notification line costs one more
+//!   parse.
+//!   ★Why that cost is accepted (this is the spot where you will want to build a second door again)★: the pump **moves** the decoder
+//!   as `Box<dyn OutputDecoder>` (`transport/stdio.rs`). So a door outside the trait is
+//!   **unreachable** on the production path, and using it would take the line reassembly · cap · resync · UTF-8 discipline here, and the tests
+//!   that guard them, wholly off the shipping path. The route where the path builds its own instance separately
+//!   also splits the same value into two copies (the observation map and the "once per name" guard diverge). **One parse is cheaper than that.**
 //!
-//! ★번역(알림 → 이벤트) 자체는 순수하다★ — I/O 도 시계도 없고 같은 알림은 언제나 같은 이벤트를
-//!   낸다(전역 상태는 사용량 해석의 「로그 한 번」 표지뿐이고 산출에 닿지 않는다). ★단 **프레이밍은
-//!   호출 이력에 의존한다**★: 인스턴스가 드는 상태는 부분 라인 버퍼 · resync 플래그 · 진단 계수 셋 ·
-//!   pump 가 줄마다 비우는 사용량 관측이고, 앞의 둘은 산출을 바꾼다(같은 청크라도 앞선 호출에 따라
-//!   이벤트가 나기도 하고 버려지기도 한다). 골든은 그래서 **새 인스턴스**에 건다.
+//! ★The translation (notification → event) itself is pure★ — no I/O and no clock, and the same notification always
+//!   yields the same event (the only global state is the usage interpretation's 「로그 한 번」 (log once) marker, and it does not touch the output). ★But **framing
+//!   depends on call history**★: the state an instance holds is the partial-line buffer · the resync flag · three diagnostic counters ·
+//!   the usage observation the pump clears line by line, and the first two change the output (even for the same chunk, depending on earlier calls
+//!   an event may or may not come out). So goldens are applied to a **new instance**.
 //!
-//! ★사용량 한도 알림은 이벤트가 아니라 [`OutputDecoder::take_usage`] 로 나간다★ — 계정 단위 상태라
-//!   에이전트별 replay·구독자 fan-out 을 타면 안 된다(해석 = 이 폴더 `usage`).
+//! ★The usage limit notification goes out through [`OutputDecoder::take_usage`], not as an event★ — it is account-level state, so
+//!   it must not go through per-agent replay · subscriber fan-out (interpretation = this folder's `usage`).
 //!
-//! ★모르는 것은 버린다 — `Structured` 를 **배출구로** 쓰지 않는다★(TRD §6-2). 그 탈출구를 기본
-//!   경로로 쓰면 프론트가 `kind` 를 label 로 찍고 payload 를 코드블록으로 그려, 결국 **codex 메서드
-//!   이름과 프로토콜 JSON 을 사용자 화면에 띄운다.** 대신 **버린 것은 전부 계수·로그로 남는다**
-//!   (`observe`). 그 대가 = 미지의 신호가 화면에서 로그로 옮겨 간다(TRD §4-7 이 그 회계를 진다).
-//!   ★예외 = 사용량 한도 알림 **안의** 칸★: 봉투가 읽힌 뒤 칸(창 자리 포함) 하나만 틀린 것은 그 칸만 조용히
-//!   버린다. 로그로 남는 것은 버킷·창 길이를 버릴 때와 창에 남는 칸이 하나도 없을 때뿐이고, 그것도 계수 없이
-//!   프로세스당 한 번이다(이 폴더 `usage`).
-//!   ★단 `Structured` 를 아예 안 내는 것은 아니다★ — 되울린 유저 메시지 하나가 그 어휘로 나간다.
-//!   그것은 **모르는 것을 흘리는 것이 아니라 아는 것을 중립 표식으로 옮기는 것**이라 위 규율에 걸리지
-//!   않는다(`kind="user"` 안에 codex 어휘가 없다).
+//! ★Unknown things are dropped — do not use `Structured` as an **outlet**★ (TRD §6-2). If that escape hatch is used as the default
+//!   path, the frontend prints `kind` as a label and draws the payload as a code block, ending up **showing codex method
+//!   names and protocol JSON on the user's screen.** Instead **everything dropped is left as counts · logs**
+//!   (`observe`). The price = unknown signals move from the screen to the log (TRD §4-7 bears that accounting).
+//!   ★Exception = fields **inside** the usage limit notification★: once the envelope is read, if just one field (including the window position) is wrong, only that field is quietly
+//!   dropped. What is left in the log is only when a bucket · window length is dropped and when no field is left in a window, and even that is without counting,
+//!   once per process (this folder's `usage`).
+//!   ★But it is not that `Structured` is never emitted at all★ — one echoed user message goes out in that vocabulary.
+//!   That is **not letting unknown things leak but carrying a known thing into a neutral marker**, so it is not caught by the discipline
+//!   above (there is no codex vocabulary inside `kind="user"`).
 //!
-//! ★턴 경계는 `turn/completed` **하나가** 낸다★ — 그 알림 한 줄이 [`OutputEvent::TurnEnd`] 정확히
-//!   1 회이고, 실려 온 상태 값이 무엇이든(없어도) 그렇다(TRD §6-1). `item/completed` 마다 내면 한 턴이
-//!   여러 경계로 쪼개진다. `turn/started` 는 번역하지 않는다.
-//!   ★**라이브** 번역은 [`OutputEvent::MessageDone`] 을 내지 않는다★ — 그쪽은 "한 메시지가 닫혔다"
-//!   이고 여기서 필요한 것은 "한 턴이 **이 결말로** 닫혔다" 다. 한 턴에 완료 item 이 여럿이라 둘이
-//!   같은 사건이 아니다(실측).
-//!   ★단 **이력 복원은 그 어휘를 쓴다 — 「이 번역기는 MessageDone 을 안 낸다」로 읽지 말 것**★:
-//!   페이지에는 결말이 실려 오지 않아 `TurnEnd` 에 채울 값이 없다([`history_turn_boundary`] 가 그
-//!   선택의 정본). 두 어휘가 출처별로 갈리는 것이고, 소비자의 렌더 경로는 하나다.
-//!   ★단 그 경계를 **화면으로 올릴지는 여기서 정하지 않는다**★ — 이 번역기에는 「이 종료가 우리 턴의
-//!   것인가」를 답할 재료(우리 thread·turn id)가 없다. 그 판정은 봉투를 분류하는 통로가 지고, 그래서
-//!   여기서 낸 `TurnEnd` 가 막히거나 미뤄질 수 있다(정본 = 이 폴더 `transport` 의 `note_turn`).
+//! ★The turn boundary is emitted by `turn/completed` **alone**★ — that one notification line is [`OutputEvent::TurnEnd`] exactly
+//!   once, whatever status value it carries (even none) (TRD §6-1). Emitting on every `item/completed` would split one turn
+//!   into several boundaries. `turn/started` is not translated.
+//!   ★**Live** translation does not emit [`OutputEvent::MessageDone`]★ — that one means "one message closed"
+//!   and what is needed here is "one turn closed **with this outcome**". A turn has several completed items, so the two
+//!   are not the same event (measured).
+//!   ★But **history restore uses that vocabulary — do not read this as 「이 번역기는 MessageDone 을 안 낸다」 (this translator never emits MessageDone)**★:
+//!   a page carries no outcome, so there is no value to fill into `TurnEnd` ([`history_turn_boundary`] is the source of truth for that
+//!   choice). The two vocabularies split by origin, and the consumer's render path is one.
+//!   ★But **whether to raise that boundary to the screen is not decided here**★ — this translator has no material to answer 「이 종료가 우리 턴의
+//!   것인가」 (is this end that of our turn): our thread · turn id. That decision is carried by the path that classifies envelopes, so
+//!   the `TurnEnd` emitted here may be blocked or deferred (source of truth = `note_turn` in this folder's `transport`).
 //!
-//! ★알려진 겹침 — `backend/claude/mod.rs` 의 디코더도 NDJSON 라인 재조립을 한다★. ★단 같은
-//!   코드가 아니다★: 그쪽은 청크를 통째로 버퍼에 붙이고 줄마다 앞에서 drain 하며 상한을 **붙인
-//!   뒤** 재고 `clear()` 로 비운다. 여기는 줄어드는 슬라이스를 앞으로만 걸으며 상한을 **붙이기
-//!   전** 재고 `mem::take` 로 용량까지 반납한다. `flush` 도 갈렸다(그쪽은 꼬리를 파싱, 여기는 버림
-//!   — 사유는 그 impl 주석). 그래서 "중복 제거" 는 옮겨 붙이기가 아니라 **어느 알고리즘으로
-//!   통일할지 먼저 정하는 일**이고, 공용 transport 층과 claude 구현체를 함께 건드린다.
+//! ★Known overlap — the decoder of `backend/claude/mod.rs` also does NDJSON line reassembly★. ★But it is not the same
+//!   code★: that one appends a whole chunk to the buffer, drains from the front line by line, measures the cap **after
+//!   appending**, and empties with `clear()`. This one walks only forward over a shrinking slice, measures the cap **before
+//!   appending**, and returns even the capacity with `mem::take`. `flush` also diverged (that one parses the tail, this one discards
+//!   — the reason is in that impl's comment). So "de-duplication" is not a move-and-paste but **first deciding which algorithm
+//!   to unify on**, and it touches both the shared transport layer and the claude implementation.
 
-// chunk 1 은 타입과 번역기만 세우고 배선은 하나도 하지 않는다. 이 디코더를 실제로 파이프에
-//   꽂는 것은 chunk 2 이고, 그때 이 allow 를 걷는다.
+// chunk 1 only sets up the types and the translator and does no wiring at all. Plugging this decoder into the pipe
+//   for real is chunk 2, and this allow is removed then.
 #![allow(dead_code)]
 
 use std::collections::{BTreeMap, VecDeque};
@@ -65,82 +65,82 @@ use crate::transport::OutputDecoder;
 use crate::types::{OutputEvent, QueuedInputEvent, ToolCategory, ToolOutcome, TurnOutcome};
 use crate::usage::UsageObservation;
 
-/// 로그 한 줄에 실을 상대 문자열 상한(문자 수). ★오류 본문이 4KB 에 이르는 경우가 실측됐다★
-/// (모르는 메서드 오류가 유효 메서드 160 개를 전부 열거한다) — 자르지 않으면 로그가 그것으로 덮인다.
+/// Upper bound (in characters) on the peer's string carried in one log line. ★Error bodies reaching 4KB have been measured★
+/// (an unknown-method error lists all 160 valid methods) — if not truncated, the log is covered by it.
 const LOG_STRING_LIMIT: usize = 512;
 
-/// 화면으로 나가는 오류 문자열에서 **상대가 준 조각 하나마다** 걸리는 상한(문자 수).
+/// Upper bound (in characters) applied to **each piece the peer gave** in an error string that goes to the screen.
 ///
-/// ★합쳐 놓고 끝에서 자르지 않는 것은 의도다★ — 이어 붙인 순서상 가장 실행 가능한 정보(`steer`
-/// = 다음 턴에 그대로 넣을 문장)가 맨 뒤에 오는데, 끝에서 자르면 그것부터 사라진다.
-/// ★조각 여섯이 전부 이 상한을 거쳐야 총량이 유계다★ — 하나라도 빠지면 "총량 유계" 가 거짓이 된다.
-/// 조각 = `message` · `codexErrorInfo` 라벨 · `additionalDetails` · `errorType`
+/// ★Not merging first and cutting at the end is intentional★ — in concatenation order the most actionable information (`steer`
+/// = the sentence to feed as-is into the next turn) comes last, and cutting at the end would lose it first.
+/// ★All six pieces must pass this cap for the total to be bounded★ — if even one is missed, "the total is bounded" becomes false.
+/// Pieces = `message` · the `codexErrorInfo` label · `additionalDetails` · `errorType`
 /// · `detailedExplanation` · `steer.message`.
 const ERROR_PART_LIMIT: usize = 1024;
 
-/// 한 줄이 쓸 수 있는 최대 바이트. ★이보다 큰 정상 줄은 알려진 바 없다★ — 실측된 최대치는 4KB
-/// 대의 오류 본문이다. 상한이 없으면 개행을 안 보내는 상대가 이 버퍼 하나로 메모리를 가져간다.
+/// Maximum bytes one line may use. ★No normal line larger than this is known★ — the largest measured is an error body of about 4KB.
+/// Without a cap, a peer that never sends a newline takes memory through this one buffer.
 const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
 
-/// 화면으로 나가는 **전사(transcript) 본문** 한 조각의 상한(문자 수).
+/// Upper bound (in characters) on one piece of **transcript body** that goes to the screen.
 ///
-/// ★이 상한의 목적은 마스킹이 아니라 **길이**다★ — 그래서 이 조각들은 [`clip`] 을 지나지 [`sanitize`]
-/// 를 지나지 않는다(사유 = [`clip`] doc).
-/// ★없으면 화면 하나가 그 에이전트의 replay 를 통째로 비운다★: [`MAX_LINE_BYTES`] 까지 자란 한 줄이
-/// 이벤트 하나가 되면 그 이벤트의 무게가 replay 링의 **단일 이벤트 상한(2MiB)** 을 홀로 넘고, 링은 그
-/// 한 건을 넣으려고 나머지를 전부 쫓아낸다(`output_core::Ring::push`). 즉 붙여 넣기 한 번이 그 대화의
-/// 되감기를 지운다.
-/// ★값의 근거★: 사람이 한 번에 붙여 넣는 본문이 이 아래이고(로그 파일 한 조각·소스 한 파일),
-/// 최악(4 바이트 문자 + 전부 escape)으로도 링 상한의 4 분의 1 을 넘지 않는다.
+/// ★The purpose of this cap is **length**, not masking★ — so these pieces pass through [`clip`] and not [`sanitize`]
+/// (reason = the [`clip`] doc).
+/// ★Without it, one screen wipes out that agent's entire replay★: if a line grown up to [`MAX_LINE_BYTES`] becomes
+/// one event, that event's weight alone exceeds the replay ring's **single-event cap (2MiB)**, and the ring evicts all the rest to fit
+/// that one (`output_core::Ring::push`). That is, one paste erases
+/// the rewind of that conversation.
+/// ★Basis of the value★: the body a person pastes at once is below this (a piece of a log file · one source file),
+/// and even in the worst case (4-byte characters + everything escaped) it does not exceed a quarter of the ring cap.
 const MAX_TRANSCRIPT_CHARS: usize = 64 * 1024;
 
-/// 대조·상관에 쓰이는 식별자 문자열의 최대 바이트.
+/// Maximum bytes of the identifier strings used for comparison · correlation.
 ///
-/// ★자르지 않고 **거른다**★ — 이 값들은 사람이 읽는 것이 아니라 나중에 **같은지 대조할 토큰**이라,
-/// 잘라 보관하면 서로 다른 긴 둘이 같은 것으로 읽힌다(같은 판단을 이 폴더 `transport` 의
-/// `MAX_TURN_ID_BYTES` 가 한다 — 값도 같다). 관측된 id 는 UUIDv7 문자열(36 바이트)이다.
-/// ★통로가 거절한 승인 item 을 기억할 때도 이 상한으로 거른다★ — 이 상한을 넘은 id 에는 결과가 안 나가 기억이 짝을
-/// 못 찾는다(ADR-0241).
+/// ★They are **filtered**, not truncated★ — these values are not for people to read but **tokens to compare for equality** later,
+/// so if stored truncated, two different long ones would read as the same (the same judgment is made by this folder's `transport`
+/// `MAX_TURN_ID_BYTES` — the value is the same too). Observed ids are UUIDv7 strings (36 bytes).
+/// ★This cap is also used to filter when remembering an approval item the path rejected★ — for an id over this cap no result goes out, so the memory cannot
+/// find its pair (ADR-0241).
 pub(super) const MAX_ID_BYTES: usize = 128;
 
-/// [`OutputEvent::ToolCall`] 의 `args_json` 이 쓸 수 있는 최대 바이트.
+/// The maximum bytes `args_json` of [`OutputEvent::ToolCall`] may use.
 ///
-/// ★이 칸의 계약은 「backend 스키마 그대로」이고, 그 계약은 **이 상한 안에서만** 성립한다★ — 넘으면
-/// item 의 `type`·`id` 만 남긴 축약본이 대신 실린다(잘라 낸 JSON 은 파싱조차 안 되므로 자르지 않는다).
-/// 상한을 두는 사유는 [`MAX_TRANSCRIPT_CHARS`] 와 같다 — 큰 패치 item 하나가 replay 를 비운다.
+/// ★The contract of this field is 「backend 스키마 그대로」 (the backend schema as is), and that contract holds **only within this cap**★ — if exceeded,
+/// an abbreviated version keeping only the item's `type` · `id` is carried instead (truncated JSON cannot even be parsed, so it is not truncated).
+/// The reason for the cap is the same as [`MAX_TRANSCRIPT_CHARS`] — one big patch item wipes out the replay.
 const MAX_TOOL_ARGS_BYTES: usize = 256 * 1024;
 
-/// 진단 맵이 보관하는 서로 다른 키의 최대 개수(드리프트·결함 포함 전체).
+/// Maximum number of distinct keys the diagnostic map keeps (the total, including drift · defects).
 const MAX_UNTRANSLATED_KEYS: usize = 256;
 
-/// 그중 **일상**(아는 이름·아는 변형) 키가 쓸 수 있는 몫.
+/// The share that **routine** (known name · known variant) keys may use.
 ///
-/// ★이 둘로 나누는 이유 = 상한이 탐지기를 스스로 꺼 버리지 않게 하는 것이다★: 한 통이면 일상
-/// 이름만으로 상한이 차서, 정작 드리프트가 도착했을 때 기록할 칸이 없다. 몫을 갈라 두면 일상 키가
-/// [`MAX_ROUTINE_KEYS`] 를 넘겨 자라지 못하므로 **드리프트·결함 몫이 남는다.**
-/// ★일상 천장을 여기 숫자로 적지 않는다★ — 세어 둔 값은 알림 목록·item 축이 바뀔 때마다 낡는다.
-/// 그 성질을 **증명하는 것은 `routine_keys_cannot_crowd_out_drift_keys_in_any_arrival_order`** 이고,
-/// 몫을 지우면 그 테스트가 빨개진다.
+/// ★The reason for the split = so that the cap does not switch off the detector itself★: with one pool, routine
+/// names alone fill the cap, and when drift actually arrives there is no entry left to record it. With the shares separated, routine keys
+/// cannot grow beyond [`MAX_ROUTINE_KEYS`], so **a drift · defect share remains.**
+/// ★The routine ceiling is not written here as a number★ — a counted value goes stale whenever the notification list · item axis changes.
+/// **What proves that property is `routine_keys_cannot_crowd_out_drift_keys_in_any_arrival_order`**, and
+/// if the share is removed, that test turns red.
 const MAX_ROUTINE_KEYS: usize = 128;
 
-/// 이미 화면으로 올린 되울린 유저 메시지 item id 를 몇 개까지 기억하나.
+/// How many already-raised echoed user message item ids to remember.
 ///
-/// ★기억이 막는 것은 **같은 item 의 `started`/`completed` 쌍**이고, 그 둘은 한 턴 안에서 붙어 온다★ —
-/// 그 사이에 낄 수 있는 것은 그 턴의 나머지 item 들뿐이라 몇 칸이면 충분하다. 넉넉히 잡아도 세션이
-/// 길어진다고 자라지 않아야 하므로 상한을 둔다(오래된 것부터 밀려난다).
-/// ★상한을 넘겨 밀려난 id 가 뒤늦게 다시 오면 그 메시지는 화면에 두 번 남는다★ — 그 대가로 메모리를
-/// 유계로 만든다. 프론트가 `uuid` 로 한 번 더 거르므로(`user_message_event` 의 json 계약) 그 경우도
-/// 화면에서는 걸린다.
+/// ★What the memory blocks is the **`started`/`completed` pair of the same item**, and the two come adjacent within one turn★ —
+/// what can come between them is only the rest of that turn's items, so a few entries are enough. Even if generous, it must not grow as the session
+/// gets longer, so there is a cap (the oldest are pushed out first).
+/// ★If an id pushed out beyond the cap comes again late, that message stays on the screen twice★ — that is the price of making memory
+/// bounded. The frontend filters once more by `uuid` (the json contract of `user_message_event`), so that case is also caught
+/// on the screen.
 const MAX_EMITTED_USER_ITEMS: usize = 64;
 
-/// 우리가 **알면서 번역하지 않는** 서버 알림 이름(스키마 0.154.0 의 `ServerNotification` 81 종 중
-/// 이 번역기가 손대는 8 종을 뺀 73 종).
+/// Server notification names we **knowingly do not translate** (of the 81 kinds of `ServerNotification` in schema 0.154.0,
+/// 73 kinds, excluding the 8 this translator handles).
 ///
-/// ★이 목록의 목적은 단 하나 — 등급을 가르는 것이다★: 여기 있는 이름은 "아직 안 옮긴 것" 이라
-/// 일상이고(debug), 여기 **없는** 이름은 상류가 새로 만든 것이라 드리프트 신호다(warn).
-/// 목록이 없으면 둘이 한 통에 섞여, 정작 봐야 할 신호가 일상 소음에 묻힌다.
-/// ★낡는 방향이 안전하다★ — 상류가 이름을 지우면 여기 죽은 항목이 남을 뿐이고, 상류가 이름을
-/// 더하면 그것은 목록에 없으므로 의도대로 warn 이 된다.
+/// ★The purpose of this list is only one — to tell the grades apart★: a name here is "not carried over yet", so it is
+/// routine (debug), and a name **not** here was newly made upstream, so it is a drift signal (warn).
+/// Without the list the two mix in one pool, and the signal that should be seen is buried in routine noise.
+/// ★Going stale is the safe direction★ — if upstream removes a name, only a dead entry stays here, and if upstream
+/// adds a name, it is not in the list, so it becomes a warn as intended.
 const KNOWN_UNTRANSLATED_METHODS: &[&str] = &[
     "account/login/completed",
     "account/updated",
@@ -217,11 +217,11 @@ const KNOWN_UNTRANSLATED_METHODS: &[&str] = &[
     "windowsSandbox/setupCompleted",
 ];
 
-/// `ThreadItem` union 의 `type` 값 19 종(스키마 0.154.0 전량). 위 목록과 같은 목적이다 —
-/// ★여기 없는 `type` 은 상류가 변형을 더한 것이고, 그것이 이 union 이 자라는 방식이다★.
+/// The 19 values of the `type` of the `ThreadItem` union (all of schema 0.154.0). The same purpose as the list above —
+/// ★a `type` not here is a variant upstream added, and that is how this union grows★.
 ///
-/// TRD 의 번역 표는 이 union 을 20 변형으로 적는데 0.154.0 스키마는 19 다 — 문서 쪽 정정 대상이고
-/// 이 목록은 생성기 출력이 정본이다.
+/// The TRD's translation table lists this union as 20 variants, but the 0.154.0 schema has 19 — the document side is to be corrected, and
+/// this list is the generator output as the source of truth.
 const KNOWN_ITEM_TYPES: &[&str] = &[
     "userMessage",
     "hookPrompt",
@@ -244,44 +244,44 @@ const KNOWN_ITEM_TYPES: &[&str] = &[
     "contextCompaction",
 ];
 
-/// codex 가 **우리 입력을 되울려 주는** `ThreadItem` 변형.
+/// The `ThreadItem` variant by which codex **echoes our input back**.
 ///
-/// ★이것을 버리지 않는 것이 결정이다★ — 되울린 유저 항목은 **재부착 시 화면을 되살리는 재료**다
-/// (TRD §10-A 행 2, 사용자 결정). 번역기가 그것을 「우리가 보낸 것」으로 표시해 흘리고 프론트는 그
-/// 표시만 읽는다 — 백엔드 이름은 화면에 가지 않는다(ADR-0004).
+/// ★Not dropping this is the decision★ — an echoed user item is **the material that revives the screen on reattach**
+/// (TRD §10-A row 2, user decision). The translator marks it 「우리가 보낸 것」 (what we sent) and lets it through, and the frontend reads only that
+/// marker — the backend name never reaches the screen (ADR-0004).
 const USER_MESSAGE_ITEM_TYPE: &str = "userMessage";
 
-/// 어시스턴트 본문을 통째로 담은 `ThreadItem` 변형.
+/// The `ThreadItem` variant that carries the whole assistant body.
 ///
-/// ★라이브에서는 이 변형을 **번역하지 않는다 — 그것이 옳다**★: 같은 본문이 `item/agentMessage/delta`
-///   로 이미 흘러 화면에 그려졌으므로, 여기서 또 내면 한 답이 두 벌 남는다.
-/// ★그런데 이력 복원에는 그 델타가 없다★ — 페이지 응답에 실려 오는 것은 완결된 item 뿐이라, 이 변형을
-///   안 옮기면 **복원된 화면에 어시스턴트의 말이 한 줄도 없다**(실측 표본: 120 item 중 5 건이 이것이다).
-///   그래서 [`ItemOrigin::History`] 에서만 옮긴다 — 라이브 두 갈래는 바이트 단위로 그대로다.
+/// ★In live this variant is **not translated — and that is right**★: the same body has already streamed as `item/agentMessage/delta`
+///   and been drawn on the screen, so emitting it again here would leave one answer twice.
+/// ★But history restore has no such deltas★ — what a page response carries is only completed items, so if this variant
+///   is not carried over, **the restored screen has not one line of the assistant's words** (measured sample: 5 of 120 items are this).
+///   So it is carried over only for [`ItemOrigin::History`] — the two live branches are byte-for-byte unchanged.
 const AGENT_MESSAGE_ITEM_TYPE: &str = "agentMessage";
 
-/// 이 item 이 **어느 문으로 들어왔나**. 같은 `ThreadItem` union 을 셋이 공유하되 발행 규칙이 갈린다.
+/// **Which door did this item come in by.** Three share the same `ThreadItem` union, but the emit rules differ.
 ///
-/// ★축을 `bool` 에서 이 enum 으로 넓힌 것이 이력 복원이 더한 전부다★ — 어휘표([`KNOWN_ITEM_TYPES`]
-///   ·[`TOOL_ITEM_TYPES`])도 변형별 번역기([`tool_call`]·[`user_message_event`])도 한 벌 그대로고,
-///   갈리는 것은 「이 출처에서 이 변형을 내나」뿐이다(ADR-0203: 두 번째 어휘표를 만들지 않는다).
+/// ★Widening the axis from `bool` to this enum is all that history restore added★ — the vocabulary tables ([`KNOWN_ITEM_TYPES`]
+///   ·[`TOOL_ITEM_TYPES`]) and the per-variant translators ([`tool_call`]·[`user_message_event`]) are still one set,
+///   and what differs is only 「이 출처에서 이 변형을 내나」 (does this origin emit this variant) (ADR-0203: no second vocabulary table is made).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ItemOrigin {
-    /// `item/started` — 라이브. 도구 호출의 발행 지점.
+    /// `item/started` — live. The emit point of a tool call.
     Started,
-    /// `item/completed` — 라이브. 도구 호출을 **다시 내지 않는다**(`Started` 가 이미 냈다) — 끝이 실패 · 거부면 그
-    ///   결과([`OutputEvent::ToolResult`])만 낸다(ADR-0241).
+    /// `item/completed` — live. Does **not emit the tool call again** (`Started` already did) — if the end is a failure · refusal, it emits only its
+    ///   result ([`OutputEvent::ToolResult`]) (ADR-0241).
     Completed,
-    /// `thread/items/list` 페이지 — 이어받기 직후의 지난 기록(ADR-0203). 끝난 item 이라 호출과 결과를 함께 진다.
+    /// `thread/items/list` page — the past record right after resume (ADR-0203). It is a finished item, so it carries both the call and the result.
     History,
 }
 
-/// 도구 호출로 옮기는 `ThreadItem` 변형. 나머지는 우리 중립 어휘에 자리가 없거나
-/// (추론·계획·리뷰 모드 전환) 다른 알림이 이미 나른다.
+/// The `ThreadItem` variants carried over as tool calls. The rest have no place in our neutral vocabulary
+/// (reasoning · plan · review-mode switch) or are already carried by other notifications.
 ///
-/// ★통로의 도구 끝 계기도 이 표를 읽는다([`is_tool_item`])★ — 여기 든 변형의 `item/completed` 가 쥔 글을 도는 턴에
-///   넘기는 자리다. 넓히려면 그 변형의 끝 뒤에 벤더의 대기분 확인이 온다는 근거(소스 또는 M7 방식 측정)가 먼저다 —
-///   근거 없는 끝에 넘기면 그 글이 확인을 놓쳐 한 경계 늦는다(잃지는 않는다 — 턴 끝이 거둔다).
+/// ★The path's tool-end trigger also reads this table ([`is_tool_item`])★ — it is where the text held at the `item/completed` of a variant listed here
+///   is handed over to the running turn. To widen it, grounds (source or M7-style measurement) must come first that the vendor's pending-input check comes after that variant's end —
+///   if handed over at an end without grounds, that text misses the check and is one boundary late (it is not lost — the turn end collects it).
 const TOOL_ITEM_TYPES: &[&str] = &[
     "mcpToolCall",
     "dynamicToolCall",
@@ -291,16 +291,16 @@ const TOOL_ITEM_TYPES: &[&str] = &[
     "webSearch",
 ];
 
-/// 이 변형이 도구 항목인가 — [`TOOL_ITEM_TYPES`]. 통로는 어휘를 따로 베끼지 않고 이것을 부른다(그 끝이 도구 끝
-/// 계기다 — ADR-0235).
+/// Is this variant a tool item — [`TOOL_ITEM_TYPES`]. The path does not copy the vocabulary separately but calls this (its end is the tool-end
+/// trigger — ADR-0235).
 // ADR-0231
 pub(super) fn is_tool_item(item_type: &str) -> bool {
     TOOL_ITEM_TYPES.contains(&item_type)
 }
 
-/// 도구 item 의 끝 상태(`status`) 낱말 — 변형마다 스키마 enum 이 따로다(`CommandExecutionStatus` · `PatchApplyStatus` ·
-/// `McpToolCallStatus` · `DynamicToolCallStatus` · `CollabAgentToolCallStatus` · 판독 = t3code 생성 스키마). `webSearch` 는
-/// status 칸이 없다.
+/// The end-status (`status`) words of a tool item — each variant has its own schema enum (`CommandExecutionStatus` · `PatchApplyStatus` ·
+/// `McpToolCallStatus` · `DynamicToolCallStatus` · `CollabAgentToolCallStatus` · read from the t3code generated schema). `webSearch` has
+/// no status field.
 // ADR-0241
 mod tool_status {
     pub(super) const IN_PROGRESS: &str = "inProgress";
@@ -309,8 +309,8 @@ mod tool_status {
     pub(super) const DECLINED: &str = "declined";
     pub(super) const INTERRUPTED: &str = "interrupted";
 
-    /// 그 변형의 스키마 어휘. status 칸이 없는 `webSearch` 와 [`super::TOOL_ITEM_TYPES`] 밖의 변형은 빈 목록이다 — ★빈 목록 =
-    /// 「이 변형엔 status 칸이 없다」★이고, 끝 상태를 읽는 쪽은 그것으로 칸의 부재가 일상인지 결함인지를 가른다.
+    /// That variant's schema vocabulary. `webSearch`, which has no status field, and variants outside [`super::TOOL_ITEM_TYPES`] give an empty list — ★empty list =
+    /// 「이 변형엔 status 칸이 없다」 (this variant has no status field)★, and the reader of the end status uses it to tell whether the field's absence is routine or a defect.
     pub(super) fn of(kind: &str) -> &'static [&'static str] {
         match kind {
             "commandExecution" | "fileChange" => &[IN_PROGRESS, COMPLETED, FAILED, DECLINED],
@@ -321,13 +321,13 @@ mod tool_status {
     }
 }
 
-/// [`CodexAppServerDecoder::tool_outcome`] 의 답 — 실을 결말과, 그 끝 상태를 이미 이상으로 적었는가.
+/// The answer of [`CodexAppServerDecoder::tool_outcome`] — the outcome to carry, and whether its end status was already recorded as anomalous.
 // ADR-0241
 struct ToolEnd {
-    /// 실을 결말. `None` = 실을 것이 없다(아직 돎 · 끊김 · 칸 없음 · 이상).
+    /// The outcome to carry. `None` = nothing to carry (still running · interrupted · no field · anomalous).
     outcome: Option<ToolOutcome>,
-    /// 끝 상태를 드리프트 · 결함으로 이미 적었다 — ★서면 부르는 쪽은 `item:` 일상 계수를 더하지 않는다★. 관측 하나를
-    /// 두 등급으로 세면 드리프트가 「아는 변형, 번역 안 함」 칸에도 한 번 더 잡힌다.
+    /// The end status was already recorded as drift · defect — ★if set, the caller does not add the `item:` routine count★. If one observation is
+    /// counted at two grades, the drift is caught once more in the 「아는 변형, 번역 안 함」 (known variant, not translated) field too.
     noted: bool,
 }
 
@@ -347,73 +347,73 @@ impl ToolEnd {
     }
 }
 
-/// 이 변형이 되울린 유저 메시지인가 — [`USER_MESSAGE_ITEM_TYPE`].
+/// Is this variant an echoed user message — [`USER_MESSAGE_ITEM_TYPE`].
 // ADR-0226
 pub(super) fn is_user_message(item_type: &str) -> bool {
     item_type == USER_MESSAGE_ITEM_TYPE
 }
 
-/// 옮기지 못한 관측의 등급 — 로그 레벨과 문구를 정한다.
+/// Grade of an observation that could not be carried over — decides the log level and wording.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Observed {
-    /// 아는 이름·아는 변형인데 아직 안 옮겼다. 일상이므로 debug.
+    /// A known name · known variant that has not been carried over yet. Routine, so debug.
     Routine,
-    /// 스키마(0.154.0)에 없는 이름이다 — 상류 드리프트 의심이므로 warn.
+    /// A name not in the schema (0.154.0) — suspected upstream drift, so warn.
     Drift,
-    /// 스키마가 그 자리에 적지 않은 **아는** 낱말이라 뜻대로 옮겼다 — 버리지 않았지만 상류 드리프트 의심이므로 warn.
-    /// 오늘 쓰는 자리 = 도구 변형의 스키마 어휘 밖 끝 상태(`mcpToolCall` 의 `declined` 등 — [`tool_status::of`]).
+    /// A **known** word the schema did not list in that place, translated as meant — not dropped, but suspected upstream drift, so warn.
+    /// Where it is used today = end statuses outside a tool variant's schema vocabulary (`declined` of `mcpToolCall`, etc. — [`tool_status::of`]).
     DriftTranslated,
-    /// 아는 이름인데 모양이 다르거나 읽을 수 없다 — 결함이므로 warn.
+    /// A known name but the shape differs or it cannot be read — a defect, so warn.
     ///
-    /// ★warn 인 것이 핵심이다★: 릴리스 데몬에는 `RUST_LOG` 가 닿지 않고 기본 레벨이 warn 이라,
-    /// debug 로 두면 **화면을 비우는 실패가 배송 구성에서 아예 기록되지 않는다.**
+    /// ★That it is warn is the key★: `RUST_LOG` does not reach the release daemon and the default level is warn, so
+    /// if left at debug, **a failure that empties the screen is not recorded at all in the shipping configuration.**
     Malformed,
 }
 
-/// codex app-server 알림 번역기.
+/// codex app-server notification translator.
 #[derive(Debug, Default)]
 pub(crate) struct CodexAppServerDecoder {
-    /// 마지막 `\n` 뒤 미완성 라인 바이트.
+    /// Bytes of the incomplete line after the last `\n`.
     ///
-    /// ★불변식★: **완성 라인이 확정되기 전에는 UTF-8 디코딩하지 않는다.** pump 는 라인 경계도
-    /// 문자 경계도 모르는 임의 청크로 던지므로 멀티바이트 문자가 청크 경계에서 잘릴 수 있다.
-    /// 바이트로만 잇다가 `\n` 이 온 줄만 디코딩하면 그 잘림이 자연히 흡수된다(개행 `0x0A` 는
-    /// UTF-8 연속 바이트로 등장할 수 없어 경계 탐색이 바이트 레벨에서 안전하다).
-    /// ★길이는 [`MAX_LINE_BYTES`] 를 절대 넘지 않는다★ — 붙이기 **전에** 판정한다.
+    /// ★Invariant★: **no UTF-8 decoding before a complete line is fixed.** The pump throws arbitrary chunks that know neither line boundaries nor
+    /// character boundaries, so a multibyte character can be cut at a chunk boundary.
+    /// If we join only as bytes and decode only the line a `\n` arrived for, that cut is naturally absorbed (newline `0x0A` cannot
+    /// appear as a UTF-8 continuation byte, so the boundary search is safe at the byte level).
+    /// ★The length never exceeds [`MAX_LINE_BYTES`]★ — decided **before** appending.
     buffer: Vec<u8>,
 
-    /// 상한을 넘긴 줄의 **꼬리를 다음 `\n` 까지 통째 폐기**하는 중인가.
+    /// Is it **discarding the whole tail** of a line that exceeded the cap, **up to the next `\n`**.
     ///
-    /// ★단순히 버퍼만 비우면 안 된다★ — 그 줄의 남은 바이트가 다음 `\n` 까지 "새 줄" 로 파싱돼
-    /// 가짜 이벤트를 낼 수 있다. 오염된 줄 하나만 잃고 그 줄이 끝나는 곳부터 복구한다.
+    /// ★Merely emptying the buffer is not enough★ — the remaining bytes of that line would be parsed as a "new line" up to the next `\n`
+    /// and could produce fake events. Lose only the one polluted line and recover from where that line ends.
     discarding: bool,
 
-    /// 옮기지 못한 관측 → 횟수.
+    /// Observations that could not be carried over → counts.
     ///
-    /// ★키는 **축 접두사 + 나머지**이고, 상대가 만든 문자열은 언제나 접두사 **뒤**에만 놓인다★ —
-    /// 그래서 상대가 어떤 이름을 지어 보내도 자기 축을 벗어나 다른 축의 칸에 떨어질 수 없다.
-    /// 축 = `method:` (알림 이름) · `item:` (알림 이름 + item type) · `turn-status:` (턴 결말 값)
-    /// · `tool-status:` (도구 끝 상태 — item type + 값. 드리프트 · 빠진 칸 결함, 그리고 ★이 맵에서 유일하게 **옮긴** 관측★인
-    /// 스키마 어휘 밖의 아는 낱말 — [`Observed::DriftTranslated`]) · `shape:`·`params:`·`item-type:`·`item-id:`·`tool:`
-    /// (결함) · `line:`·`envelope:` (줄·봉투) · `deprecation:`.
-    /// 접두사 뒤 내용이 어떤 글자를 담든 축은 첫 세그먼트가 정한다.
+    /// ★A key is **axis prefix + the rest**, and a string made by the peer is always placed only **after** the prefix★ —
+    /// so whatever name the peer invents and sends, it cannot leave its own axis and land in another axis's field.
+    /// Axes = `method:` (notification name) · `item:` (notification name + item type) · `turn-status:` (turn outcome value)
+    /// · `tool-status:` (tool end status — item type + value. drift · missing-field defect, and ★the only **translated** observation in this map★ —
+    /// a known word outside the schema vocabulary — [`Observed::DriftTranslated`]) · `shape:`·`params:`·`item-type:`·`item-id:`·`tool:`
+    /// (defects) · `line:`·`envelope:` (line · envelope) · `deprecation:`.
+    /// Whatever characters the content after the prefix holds, the first segment decides the axis.
     untranslated: BTreeMap<String, u64>,
 
-    /// 위 맵이 몫을 다 써 **기록하지 못한 관측**의 수. ★서로 다른 키의 수가 아니다★ — 같은
-    /// 이름이 열 번 오면 열이 오른다. 0 이 아니면 위 맵을 전수로 읽지 말 것.
+    /// The count of **observations that could not be recorded** because the map above used up its share. ★It is not the number of distinct keys★ — if the same
+    /// name comes ten times, ten is added. If it is not 0, do not read the map above as exhaustive.
     untranslated_dropped: u64,
 
-    /// 되울린 유저 메시지를 이미 올린 item id — 오래된 것부터 밀려나는 [`MAX_EMITTED_USER_ITEMS`] 칸.
+    /// Item ids for which an echoed user message was already raised — [`MAX_EMITTED_USER_ITEMS`] entries, with the oldest pushed out first.
     ///
-    /// ★이 칸이 있는 이유 = 발행 지점을 `item/started` 하나로 고정할 수 없기 때문이다★: 그 알림이 이
-    /// item 종류에도 오는지는 **미측정**이고(오면 유저 발화가 영영 안 뜬다), 반대쪽 `item/completed` 는
-    /// 중단된 item 에 아예 안 오는 것이 실측이다(TRD §2 L10). 그래서 **먼저 온 쪽**이 올리고 나중 쪽이
-    /// 이 기억에 걸려 조용히 빠진다.
-    /// ★담는 것은 id 뿐이고, 그 id 도 [`MAX_ID_BYTES`] 를 거친 것만이다★ — 본문이든 상한 없는 id 든
-    /// 상대가 길이를 정하는 문자열이라, 칸 수만 세는 이 상한으로는 총량이 유계가 되지 않는다.
+    /// ★The reason this field exists = the emit point cannot be pinned to `item/started` alone★: whether that notification also comes for this
+    /// item kind is **unmeasured** (if it does not, the user's utterance never appears), and on the other side `item/completed` is measured not to come at all for an
+    /// interrupted item (TRD §2 L10). So **whichever comes first** raises it, and the later one is
+    /// caught by this memory and quietly dropped.
+    /// ★It holds only ids, and only ids that passed [`MAX_ID_BYTES`]★ — whether a body or an id without a cap,
+    /// it is a string whose length the peer decides, so this cap that only counts entries does not bound the total.
     emitted_user_items: VecDeque<String>,
 
-    /// `account/rateLimits/updated` 에서 주운 사용량 관측 — pump 가 `take_usage` 로 줄마다 비운다.
+    /// Usage observations picked up from `account/rateLimits/updated` — the pump empties them line by line with `take_usage`.
     usage_observations: Vec<UsageObservation>,
 }
 
@@ -422,30 +422,30 @@ impl CodexAppServerDecoder {
         Self::default()
     }
 
-    /// 옮기지 못한 관측과 그 횟수(진단 전용 — 번역 결과에는 관여하지 않는다).
+    /// Observations that could not be carried over and their counts (diagnostic only — it takes no part in the translation result).
     ///
-    /// ★키는 **저장 시점에 이미** 마스킹·절단을 거친 값이다★([`Self::observe`]) — 그래서 여기서
-    /// 다시 거르지 않고 그대로 빌려준다. 마스킹을 경계가 아니라 저장 지점에 두는 것이 더 강하다:
-    /// 이 맵으로 나가는 길뿐 아니라 로그로 나가는 길도 같은 한 번으로 덮인다.
+    /// ★A key is a value that **already went through** masking · truncation **at storage time**★ ([`Self::observe`]) — so it is lent out
+    /// as is without filtering again here. Putting masking at the storage point rather than the boundary is stronger:
+    /// not only the path out through this map but also the path out through the log is covered by the same single pass.
     pub(crate) fn untranslated_observations(&self) -> &BTreeMap<String, u64> {
         &self.untranslated
     }
 
-    /// 몫을 다 써 기록하지 못한 **관측의 수**(키 수가 아니다).
+    /// The **number of observations** that could not be recorded because the share was used up (not the number of keys).
     pub(crate) fn untranslated_dropped(&self) -> u64 {
         self.untranslated_dropped
     }
 
-    /// 관측 하나를 계수하고, 그 키를 **처음 본 때만** 로그한다.
+    /// Count one observation, and log its key **only the first time it is seen**.
     ///
-    /// ★등급 판정이 맵 상태보다 **먼저** 선다★ — 맵이 얼마나 찼는지가 "이게 드리프트인가" 를
-    /// 바꾸면 안 된다. 그리고 일상 키는 [`MAX_ROUTINE_KEYS`] 를 넘겨 자라지 못해 드리프트·결함의
-    /// 몫을 잠식하지 못한다.
+    /// ★The grade decision stands **before** the map state★ — how full the map is must not change the answer to "is this drift".
+    /// And routine keys cannot grow beyond [`MAX_ROUTINE_KEYS`], so they cannot
+    /// eat into the drift · defect share.
     fn observe(&mut self, key: String, what: Observed, detail: &str) {
-        // ★마스킹이 절단보다 **먼저**다★: `mask_secrets` 의 패턴은 `sk-`/`sk-proj-` 뒤에 20 자
-        //   이상을 요구하므로, 먼저 자르면 경계에 걸친 자격증명이 그 수량자 밑으로 잘려 **마스킹을
-        //   빠져나간 채** 로그와 이 맵에 남는다. 절단은 길이 방어(상대가 이름 길이로 메모리를
-        //   가져가는 것)이고, 그 방어는 마스킹 뒤에 걸어도 그대로 선다.
+        // ★Masking comes **before** truncation★: the pattern of `mask_secrets` requires 20 or more characters after `sk-`/`sk-proj-`,
+        //   so if truncated first, a credential straddling the boundary is cut below that quantifier and **escapes
+        //   masking**, remaining in the log and this map. Truncation is a length defense (the peer taking memory through name
+        //   length), and that defense holds just the same when applied after masking.
         let key = sanitize(&key, LOG_STRING_LIMIT);
         let budget = if what == Observed::Routine {
             MAX_ROUTINE_KEYS
@@ -455,7 +455,7 @@ impl CodexAppServerDecoder {
         match self.untranslated.get(&key).copied() {
             Some(seen) => {
                 self.untranslated.insert(key, seen.saturating_add(1));
-                return; // 이미 로그한 키 — 여기서 끝난다(스팸 방지).
+                return; // A key already logged — it ends here (spam prevention).
             }
             None if self.untranslated.len() < budget => {
                 self.untranslated.insert(key.clone(), 1);
@@ -472,7 +472,7 @@ impl CodexAppServerDecoder {
             }
         }
 
-        // `key` 는 위에서 이미 마스킹·절단을 거쳤다. `detail` 만 여기서 거른다.
+        // `key` already went through masking · truncation above. Only `detail` is filtered here.
         match what {
             Observed::Routine => {
                 tracing::debug!(observed = %key, "codex app-server: 아는 이름인데 번역하지 않는다 — 버린다")
@@ -495,19 +495,19 @@ impl CodexAppServerDecoder {
         }
     }
 
-    /// 아는 이름의 알림인데 모양이 다르면 **결함**이다 — 버리되 그 사실을 남긴다.
+    /// A notification with a known name but a different shape is a **defect** — drop it but leave that fact.
     ///
-    /// ★로그는 키별 1 회로 눌린다★ — `item/agentMessage/delta` 는 이 프로토콜에서 가장 잦은
-    /// 알림이라, 상류가 칸 하나를 바꾸면 **토큰 delta 마다** 경고가 동기 파일 sink 로 나간다.
-    /// serde 오류 메시지는 문제가 된 값을 그대로 품으므로(`invalid type: string "…"`) 본문과
-    /// 똑같이 마스킹·절단을 거친다.
+    /// ★The log is squashed to once per key★ — `item/agentMessage/delta` is the most frequent
+    /// notification in this protocol, so if upstream changes one field, a warning goes to the synchronous file sink **on every token delta**.
+    /// A serde error message carries the offending value as is (`invalid type: string "…"`), so it goes through the same
+    /// masking · truncation as a body.
     fn parse<T: serde::de::DeserializeOwned>(
         &mut self,
         params: Option<&Value>,
         method_name: &str,
     ) -> Option<T> {
         let Some(params) = params else {
-            // 번역하는 알림은 전부 params 가 required 다 — 아예 없으면 모양이 다른 것과 같은 결함.
+            // Every notification we translate has params as required — if it is absent altogether, it is a defect just like a different shape.
             self.observe(
                 format!("params:{method_name}"),
                 Observed::Malformed,
@@ -528,7 +528,7 @@ impl CodexAppServerDecoder {
         }
     }
 
-    /// 알림 하나를 중립 이벤트로 옮긴다. 옮길 어휘가 없으면 **빈 벡터**다 — 오류가 아니다.
+    /// Carry one notification over into a neutral event. If there is no vocabulary to carry it into, it is an **empty vector** — not an error.
     fn translate(&mut self, method_name: &str, params: Option<&Value>) -> Vec<OutputEvent> {
         match method_name {
             method::ITEM_AGENT_MESSAGE_DELTA => self.text_delta(params),
@@ -538,18 +538,18 @@ impl CodexAppServerDecoder {
             method::ERROR => self.error(params),
             method::TURN_COMPLETED => self.turn_completed(params),
 
-            // ★이쪽에서 나오는 이벤트는 둘뿐이다★ — 되울린 유저 메시지(`item/started` 가 먼저 왔으면 안 나온다 —
-            //   사유 = `item`·`user_message` doc)와 도구 끝이 실패 · 거부일 때의 결과(ADR-0241). 도구 **호출**은
-            //   `item/started` 단독이다 — 양쪽에서 내면 한 호출이 화면에 두 번 뜬다. 그래도 item `type` 은
-            //   들여다본다: 새 변형은 여기로도 온다. 그리고 턴 경계를 여기서 내면 한 턴이 item 개수만큼의 경계로
-            //   쪼개진다(TRD §6-1) — 경계는 `turn/completed` 단독.
+            // ★Only two events come out of this side★ — the echoed user message (if `item/started` came first, it does not come out —
+            //   reason = the `item`·`user_message` doc) and the result when a tool end is a failure · refusal (ADR-0241). A tool **call** is
+            //   `item/started` alone — if emitted from both sides, one call shows up twice on the screen. Even so the item `type` is
+            //   looked at: a new variant comes here too. And if a turn boundary were emitted here, one turn would be split into as many boundaries as there are items
+            //   (TRD §6-1) — the boundary is `turn/completed` alone.
             method::ITEM_COMPLETED => self.item(params, method_name, ItemOrigin::Completed),
 
-            // 상류 드리프트의 조기 신호라 이름만이 아니라 본문까지 남긴다(TRD §4-7 의 2).
-            // ★키 하나로 눌러 담는 것은 의도다★ — 이 파일의 다른 모든 상대발(發) 경고가 키별
-            //   1 회인데 여기만 매번 내면, 데몬 기본 레벨이 warn 이고 파일 sink 가 이벤트마다
-            //   동기 기록이라 같은 홍수를 이 한 줄로 다시 연다. 대가 = 두 번째 이후 공지의 **본문**은
-            //   남지 않는다(도착 횟수는 남는다). 0.154.0 에서 얼마나 자주 오는지는 미측정이다.
+            // An early signal of upstream drift, so it leaves not only the name but also the body (TRD §4-7 item 2).
+            // ★Squashing into one key is intentional★ — every other warning originating from the peer in this file is once per key,
+            //   and if only this one fired every time — the daemon default level is warn and the file sink writes synchronously on every event —
+            //   this one line would reopen the same flood. The price = the **body** of the second and later notices
+            //   is not kept (the arrival count is kept). How often it arrives in 0.154.0 is unmeasured.
             method::DEPRECATION_NOTICE => {
                 let payload = params.map(|v| v.to_string()).unwrap_or_default();
                 self.observe("deprecation:notice".to_string(), Observed::Drift, &payload);
@@ -574,8 +574,8 @@ impl CodexAppServerDecoder {
 
     /// `item/agentMessage/delta` → [`OutputEvent::TextDelta`].
     ///
-    /// ★claude 와 달리 `turn_id`/`message_id` 가 채워진다★ — codex 는 두 값을 알림에 싣는다.
-    /// 잃는 것은 `threadId` 하나다 — 우리 어휘에 스레드 축이 없다.
+    /// ★Unlike claude, `turn_id`/`message_id` are filled★ — codex carries both values in the notification.
+    /// What is lost is only `threadId` — our vocabulary has no thread axis.
     fn text_delta(&mut self, params: Option<&Value>) -> Vec<OutputEvent> {
         let Some(n) = self.parse::<protocol::AgentMessageDeltaNotification>(
             params,
@@ -584,29 +584,29 @@ impl CodexAppServerDecoder {
             return Vec::new();
         };
         vec![OutputEvent::TextDelta {
-            // 본문은 길이만 거른다(마스킹 금지 — [`clip`]), 식별자는 길이로 **거른다**([`bounded_id`]).
+            // For a body only length is filtered (no masking — [`clip`]); identifiers are **filtered** by length ([`bounded_id`]).
             text: clip(&n.delta, MAX_TRANSCRIPT_CHARS),
             turn_id: bounded_id(&n.turn_id),
             message_id: bounded_id(&n.item_id),
         }]
     }
 
-    /// `item/started`·`item/completed` — 같은 `ThreadItem` union 을 나르는 **알림** 쪽 문.
+    /// `item/started`·`item/completed` — the **notification**-side door that carries the same `ThreadItem` union.
     ///
-    /// ★라이브에서 도구 호출의 발행 지점은 `item/started` 하나다★ — 양쪽에서 내면 한 호출이 화면에
-    /// 두 번 뜬다. `item/completed` 는 호출이 아니라 그 **결과**를 내는 자리다(실패 · 거부일 때만 — [`Self::tool_item`]).
-    /// ★그런데 codex 가 모든 item 에 `started` 를 내는지는 미검증★ — `completed` 만 오는
-    /// item 종류가 있다면 그 호출은 사라진다: 끝이 실패 · 거부면 결과만 나가는데 가리킬 행이 없어 소비자가 버리고,
-    /// 그 밖의 끝은 `item:` 일상 계수에만 남는다.
+    /// ★In live, the emit point of a tool call is `item/started` alone★ — if emitted from both sides, one call shows up on the screen
+    /// twice. `item/completed` is the place that emits that call's **result**, not the call (only for failure · refusal — [`Self::tool_item`]).
+    /// ★But it is unverified whether codex emits `started` for every item★ — if there is an item kind for which only `completed` comes,
+    /// that call disappears: if the end is a failure · refusal only the result goes out, and with no row to point at the consumer drops it,
+    /// and any other end is left only in the `item:` routine count.
     ///
-    /// ★되울린 유저 메시지만 그 규칙을 따르지 않는다 — **먼저 온 쪽**이 올린다★: 그쪽은 한쪽에 걸면
-    /// 잃는 것이 「유저 자신이 친 말」이라 대가가 다르고, 두 방향 모두 실패 사례가 있다 — `started` 가
-    /// 이 종류에 오는지는 미측정이고, `completed` 는 중단된 item 에 아예 오지 않는 것이 실측이다
-    /// (TRD §2 L10). 둘째 알림은 [`Self::emitted_user_items`] 에 걸려 조용히 빠진다.
+    /// ★Only the echoed user message does not follow that rule — **whichever comes first** raises it★: for that one, if we hang it on one side,
+    /// what is lost is 「유저 자신이 친 말」 (what the user typed themselves), so the cost differs, and both directions have failure cases — whether `started` comes for
+    /// this kind is unmeasured, and `completed` is measured not to come at all for an interrupted item
+    /// (TRD §2 L10). The second notification is caught by [`Self::emitted_user_items`] and quietly dropped.
     ///
-    /// ★분기표 자체는 [`Self::item_core`] 가 진다★ — 이 문은 봉투를 벗기기만 한다. 이력 쪽 문
-    /// ([`Self::history_item`])이 같은 표를 쓰고, 그 공유가 ADR-0203 의 「두 번째 어휘표를 만들지
-    /// 않는다」의 실물이다.
+    /// ★The branch table itself is carried by [`Self::item_core`]★ — this door only unwraps the envelope. The history-side door
+    /// ([`Self::history_item`]) uses the same table, and that sharing is the real thing behind the ADR-0203 rule 「두 번째 어휘표를 만들지
+    /// 않는다」 (do not make a second vocabulary table).
     fn item(
         &mut self,
         params: Option<&Value>,
@@ -619,14 +619,14 @@ impl CodexAppServerDecoder {
         self.item_core(&n.turn_id, &n.item, method_name, origin)
     }
 
-    /// 이어받기 직후 페이지로 받아 온 지난 item 한 개 → 중립 이벤트 0~n 개(ADR-0203).
+    /// One past item received as a page right after resume → 0 to n neutral events (ADR-0203).
     ///
-    /// ★들어오는 문이 [`OutputDecoder`] 가 아닌 유일한 자리다 — 그 예외의 범위를 정확히 적는다★:
-    ///   페이지는 **알림이 아니라 응답**이라 라인 스트림을 타고 오지 않는다(봉투를 벗긴 `data[]` 를
-    ///   통로가 직접 들고 온다). 그래서 이 문은 라인 재조립·상한·resync 규율을 **우회하는 것이 아니라
-    ///   애초에 그 규율이 걸리는 축 밖**이다 — 그 규율은 여전히 라이브 스트림 전량을 덮는다.
-    /// ★여기로 들어온 item 은 [`ItemOrigin::History`] 규칙을 받는다★ — 도구는 호출과 그 끝 결과를 함께 내고
-    ///   (`[ToolCall, ToolResult?]` — [`Self::tool_item`]) 어시스턴트 본문도 낸다(`AGENT_MESSAGE_ITEM_TYPE` doc).
+    /// ★This is the only place where the door in is not [`OutputDecoder`] — we state exactly the scope of that exception★:
+    ///   a page is **a response, not a notification**, so it does not arrive on the line stream (the path itself carries the envelope-stripped `data[]` over).
+    ///   So this door is not **bypassing** the line reassembly · cap · resync discipline but
+    ///   **outside the axis that discipline applies to in the first place** — that discipline still covers the entire live stream.
+    /// ★An item that comes in here gets the [`ItemOrigin::History`] rules★ — a tool emits the call together with its end result
+    ///   (`[ToolCall, ToolResult?]` — [`Self::tool_item`]) and the assistant body is also emitted (`AGENT_MESSAGE_ITEM_TYPE` doc).
     // ADR-0203
     pub(crate) fn history_item(&mut self, turn_id: &str, item: &Value) -> Vec<OutputEvent> {
         self.item_core(
@@ -637,7 +637,7 @@ impl CodexAppServerDecoder {
         )
     }
 
-    /// 봉투를 벗긴 item 한 개를 옮긴다 — 위 두 문이 공유하는 **단일 분기표**.
+    /// Carry one envelope-stripped item over — the **single branch table** shared by the two doors above.
     fn item_core(
         &mut self,
         turn_id: &str,
@@ -654,8 +654,8 @@ impl CodexAppServerDecoder {
             return Vec::new();
         };
         if kind.len() > MAX_ID_BYTES {
-            // ★`type` 은 분기 키이자 도구 이름 칸이다★ — 상한이 없으면 그 문자열이 그대로
-            //   [`OutputEvent::ToolCall`] 의 `name` 으로 나가고, 관측 키로도 쓰인다.
+            // ★`type` is both the branch key and the tool-name field★ — without a cap, that string goes straight out as the `name` of
+            //   [`OutputEvent::ToolCall`] and is also used as an observation key.
             self.observe(
                 format!("item-type:{method_name}"),
                 Observed::Malformed,
@@ -664,12 +664,12 @@ impl CodexAppServerDecoder {
             return Vec::new();
         }
         if kind == USER_MESSAGE_ITEM_TYPE {
-            // ★버리지 않는다 — 이것이 재부착 뒤 화면을 되살리는 재료다★: 우리 쪽에는 이 대화의
-            //   유저 발화를 복원할 다른 재료가 없다(입력 시점 합성 에코를 선언하지 않으므로 — 이
-            //   폴더 `mod.rs` 의 그 자리 · ADR-0193).
+            // ★Not dropped — this is the material that revives the screen after reattach★: on our side there is no other material
+            //   to restore this conversation's user utterances (since no input-time synthetic echo is declared — that
+            //   spot in this folder's `mod.rs` · ADR-0193).
             return self.user_message(item, method_name, origin);
         }
-        // ★이력 전용 arm — 라이브 두 갈래는 여기 안 들어온다★(사유 정본 = [`AGENT_MESSAGE_ITEM_TYPE`]).
+        // ★History-only arm — the two live branches do not enter here★ (source of truth for the reason = [`AGENT_MESSAGE_ITEM_TYPE`]).
         if origin == ItemOrigin::History && kind == AGENT_MESSAGE_ITEM_TYPE {
             let Some(text) = item.get("text").and_then(|v| v.as_str()) else {
                 self.observe(
@@ -680,15 +680,15 @@ impl CodexAppServerDecoder {
                 return Vec::new();
             };
             if text.is_empty() {
-                // 빈 말풍선을 만들지 않는다 — 소비자도 빈 델타를 같은 판정으로 버린다.
+                // Do not create an empty speech bubble — the consumer also drops an empty delta with the same decision.
                 self.observe(format!("item:{method_name}#{kind}"), Observed::Routine, "");
                 return Vec::new();
             }
-            // ★`TextDelta` 로 내는 것은 claude 쪽 복원과 **같은 선례**다★(ADR-0079: 과거 어시스턴트
-            //   본문을 델타 하나로 싣는다). 소비자는 연속한 텍스트를 이어 붙이므로, 한 턴에 본문 item
-            //   이 여럿이어도 라이브에서 델타가 이어지는 모양과 같아진다.
-            // ★본문은 [`clip`] 만 지난다 — 마스킹하지 않는다★(사유 = `user_message_event` 의 같은 자리:
-            //   이것은 진단 문자열이 아니라 그 대화의 기록이다).
+            // ★Emitting as `TextDelta` is **the same precedent** as the claude-side restore★ (ADR-0079: the past assistant
+            //   body is carried as one delta). The consumer joins consecutive text, so even when a turn has several body items
+            //   it ends up shaped like deltas continuing in live.
+            // ★The body passes only [`clip`] — it is not masked★ (reason = the same spot in `user_message_event`:
+            //   this is not a diagnostic string but the record of that conversation).
             return vec![OutputEvent::TextDelta {
                 text: clip(text, MAX_TRANSCRIPT_CHARS),
                 turn_id: bounded_id(turn_id),
@@ -698,8 +698,8 @@ impl CodexAppServerDecoder {
         if TOOL_ITEM_TYPES.contains(&kind.as_str()) {
             return self.tool_item(item, &kind, turn_id, method_name, origin);
         }
-        // ★여기가 새 변형이 들어오는 자리다★ — 아무 신호도 안 남기면, 상류가 union 을 늘렸을 때
-        //   드리프트를 보여 줄 유일한 진단이 하필 드리프트가 나타나는 지점에서 눈을 감는다.
+        // ★This is where a new variant comes in★ — if no signal is left, when upstream widens the union the only diagnostic that could show
+        //   the drift closes its eyes at exactly the point where drift appears.
         let what = if KNOWN_ITEM_TYPES.contains(&kind.as_str()) {
             Observed::Routine
         } else {
@@ -709,17 +709,17 @@ impl CodexAppServerDecoder {
         Vec::new()
     }
 
-    /// 도구 변형 item 한 개 — 문마다 발행이 갈린다.
+    /// One tool-variant item — the emit differs per door.
     ///
-    /// - `Started` = [`OutputEvent::ToolCall`] 하나. 끝 상태는 읽지 않는다.
-    /// - `Completed` = 끝이 실패 · 거부일 때만 [`OutputEvent::ToolResult`] 하나. 그 밖엔 사건 0 + `item:` 일상 계수 — 단 끝
-    ///   상태를 이미 이상으로 적었으면([`ToolEnd::noted`]) 일상 계수는 더하지 않는다.
-    /// - `History` = `[ToolCall, ToolResult?]` 이 순서 — 이력 페이지에는 시작 알림이 없어 끝난 item 하나가 둘을 다 진다.
+    /// - `Started` = one [`OutputEvent::ToolCall`]. The end status is not read.
+    /// - `Completed` = one [`OutputEvent::ToolResult`] only when the end is a failure · refusal. Otherwise 0 events + the `item:` routine count — but if the end
+    ///   status was already recorded as anomalous ([`ToolEnd::noted`]), the routine count is not added.
+    /// - `History` = `[ToolCall, ToolResult?]` in this order — the history page has no start notification, so one finished item carries both.
     ///
-    /// ★정상 완료는 내지 않는다 — 실패 · 거부만 싣는다★: 화면이 쓰는 것은 오류 · 거부 수와 배지뿐이라, 끝마다 내면
-    ///   호출마다 사건이 하나씩 늘 뿐 얻는 것이 없다(옛 셸은 그 사건마다 「표시할 수 없는 신호」 줄을 남긴다).
-    /// ★결과의 `id` 는 호출과 같은 거르기([`bounded_id`])를 지난다★ — 걸러져 없으면 가리킬 행이 없으므로 결과를 내지
-    ///   않고 결함으로 센다.
+    /// ★Normal completion is not emitted — only failure · refusal are carried★: the screen uses only error · refusal counts and the badge, so emitting at every end
+    ///   just adds one event per call and gains nothing (the old shell leaves a 「표시할 수 없는 신호」 (a signal that cannot be displayed) line for each such event).
+    /// ★The result's `id` passes the same filter as the call ([`bounded_id`])★ — if it was filtered out there is no row to point at, so no result is emitted
+    ///   and it is counted as a defect.
     // ADR-0241
     fn tool_item(
         &mut self,
@@ -734,8 +734,8 @@ impl CodexAppServerDecoder {
             match tool_call(item, kind, turn_id) {
                 Some(call) => events.push(call),
                 None => {
-                    // ★도구 변형인데 호출이 안 나오면 그건 "번역 안 함" 이 아니라 결함이다★ — 일상 계수(debug)로
-                    //   흘려보내면 필수 칸이 빠진 item 이 조용한 소음이 된다.
+                    // ★A tool variant with no call coming out is not "not translated" but a defect★ — if it is sent off as a routine count (debug),
+                    //   an item with a missing required field becomes quiet noise.
                     self.observe(
                         format!("tool:{method_name}#{kind}"),
                         Observed::Malformed,
@@ -761,7 +761,7 @@ impl CodexAppServerDecoder {
                 }
             }
             Some(ToolOutcome::Completed | ToolOutcome::Refused) | None => {
-                // ★이미 이상으로 적은 끝에 일상 계수를 더하지 않는다★ — 관측 하나는 한 등급으로만 센다(결함 id 자리와 같다).
+                // ★Do not add the routine count to an end already recorded as anomalous★ — one observation is counted at one grade only (the same as the defect id case).
                 if origin == ItemOrigin::Completed && !end.noted {
                     self.observe(format!("item:{method_name}#{kind}"), Observed::Routine, "");
                 }
@@ -770,28 +770,28 @@ impl CodexAppServerDecoder {
         events
     }
 
-    /// 도구 item 의 벤더 끝 상태(`status`) → 중립 결말. `Completed` · `History` 두 문이 같이 쓴다(ADR-0203 「두 번째
-    /// 어휘표를 만들지 않는다」).
+    /// A tool item's vendor end status (`status`) → neutral outcome. Shared by the two doors `Completed` · `History` (ADR-0203 「두 번째
+    /// 어휘표를 만들지 않는다」 (do not make a second vocabulary table)).
     ///
-    /// 결말 `None` = 실을 결말이 없다 — 아직 돎(`inProgress` · 이력 페이지의 도는 item) · 끊김(`interrupted` · 그 턴의
-    ///   결말 행이 이미 끊김을 보인다) · 칸 없음(`webSearch` 는 status 칸이 없다) · 이상(아래).
-    /// ★이상은 여기서 적고 [`ToolEnd::noted`] 로 알린다★ — 모르는 값 · 문자열 아닌 값(드리프트) · status 칸이 있어야 할
-    ///   변형에서 칸이 빠짐(결함 · warn — 칸 이름이 상류에서 바뀌면 실패 · 거부 배지가 전부 조용히 사라진다. 같은 판정 =
-    ///   `turn_completed` 의 빠진 `turn.status`).
-    /// ★판정은 `status` 하나다 — `exitCode` 를 읽지 말 것★: 0 아닌 종료를 우리가 실패로 다시 가르면 벤더와 다른 판정이
-    ///   선다. 실측(codex-cli 0.156.1 · fixture `tool_fail_u2`)에서 0 아닌 종료는 `failed` 로 온다. `mcpToolCall.error` ·
-    ///   `dynamicToolCall.success` 도 같은 이유로 읽지 않는다.
-    /// ★우리가 거절한 명령도 `failed` 로 닫힌다(실측 fixture `refuse_u2a`)★ — 진짜 0 아닌 종료와 갈리는 칸은
-    ///   `exitCode`(거절 = `null`) 하나뿐이고 `aggregatedOutput` 은 둘 다 `null` 이다. 그 모양으로 가르지 않는다 — 같은
-    ///   모양을 내는 다른 길(승인 콜백이 버려짐 등)이 있어 거짓 사유가 붙는다. 그래서 이 함수는 `Refused` 를 내지 않고,
-    ///   우리 거절의 귀속은 거절한 item 을 기억하는 통로의 몫이다.
-    /// ★변형별 스키마 어휘 밖의 아는 낱말(예: `mcpToolCall` 의 `declined`)은 뜻대로 옮기되 드리프트로 센다★.
+    /// Outcome `None` = no outcome to carry — still running (`inProgress` · a running item on a history page) · interrupted (`interrupted` · that turn's
+    ///   outcome row already shows the interruption) · no field (`webSearch` has no status field) · anomalous (below).
+    /// ★An anomaly is recorded here and told through [`ToolEnd::noted`]★ — an unknown value · a non-string value (drift) · a missing field in a variant
+    ///   that should have a status field (defect · warn — if the field name changes upstream, all failure · refusal badges quietly disappear. Same decision =
+    ///   the missing `turn.status` of `turn_completed`).
+    /// ★The decision is `status` alone — do not read `exitCode`★: if we re-classify a non-zero exit as failure ourselves, a decision different from the vendor's
+    ///   stands. In measurement (codex-cli 0.156.1 · fixture `tool_fail_u2`) a non-zero exit comes as `failed`. `mcpToolCall.error` ·
+    ///   `dynamicToolCall.success` are not read either, for the same reason.
+    /// ★A command we refused also closes as `failed` (measured fixture `refuse_u2a`)★ — the only field that tells it apart from a real non-zero exit is
+    ///   `exitCode` (refusal = `null`), and `aggregatedOutput` is `null` in both. We do not tell them apart by that shape — there are other paths
+    ///   that produce the same shape (the approval callback being dropped, etc.) and a false reason would be attached. So this function does not emit `Refused`,
+    ///   and attributing our own refusals is the job of the path that remembers the refused item.
+    /// ★A known word outside the per-variant schema vocabulary (e.g. `declined` of `mcpToolCall`) is carried over as meant but counted as drift★.
     // ADR-0241
     fn tool_outcome(&mut self, item: &Value, kind: &str) -> ToolEnd {
         let vocabulary = tool_status::of(kind);
         let Some(status) = item.get("status") else {
             if vocabulary.is_empty() {
-                return ToolEnd::quiet(None); // `webSearch` — 칸이 없는 변형이다.
+                return ToolEnd::quiet(None); // `webSearch` — a variant with no field.
             }
             self.observe(
                 format!("tool-status:{kind}#<없음>"),
@@ -800,8 +800,8 @@ impl CodexAppServerDecoder {
             );
             return ToolEnd::noted(None);
         };
-        // ★상대 문자열을 키로 쓰는 것은 아는 값일 때뿐이다★(사유 = `turn_completed` 의 같은 자리) — 모르는 값은
-        //   변형마다 한 칸에 눌러 담고 실제 값은 로그 본문으로 낸다.
+        // ★A peer string is used as a key only when it is a known value★ (reason = the same spot in `turn_completed`) — unknown values are
+        //   squashed into one entry per variant, and the actual value goes out in the log body.
         let unknown_key = || format!("tool-status:{kind}#<모르는 값>");
         let Some(word) = status.as_str() else {
             self.observe(
@@ -836,20 +836,20 @@ impl CodexAppServerDecoder {
         ToolEnd::quiet(outcome)
     }
 
-    /// 되울린 유저 메시지 item 한 개 → 「우리가 보낸 것」 표시 이벤트 0~1 개.
+    /// One echoed user message item → 0 to 1 「우리가 보낸 것」 (what we sent) marker events.
     ///
-    /// ★`item/started` 든 `item/completed` 든 **먼저 온 쪽**이 올린다★(사유 = [`Self::item`] doc).
-    ///   둘째 알림은 item id 대조로 빠지고, 그 대조는 **정확 일치**다 — 스키마가 그 `id` 를 required 로
-    ///   적는다(0.154.0 `UserMessageThreadItem`).
-    /// ★id 가 없으면 `item/started` 쪽만 올린다★ — 대조할 키가 없어 양쪽을 다 올리면 같은 말이 화면에
-    ///   두 벌 남고, 프론트의 dedup 키도 그 id 라 거기서도 안 걸린다. required 칸이 비었다는 뜻이므로
-    ///   결함으로 계수한다.
-    /// ★같은 것이라 빼는 둘째 알림은 「옮기지 못한 관측」으로 세지 않는다★ — 그 맵의 뜻은 **버린 것**
-    ///   이고, 이것은 이미 올라간 것이다. 여기에 섞으면 그 맵이 드리프트 탐지기이기를 그만둔다.
-    /// ★`clientId`(우리가 `clientUserMessageId` 로 실은 id)가 있으면 말풍선 **바로 앞에**
-    ///   `QueuedInput(Delivered{clientId})` 를 낸다 — 라이브 두 문에서만★. 벤더가 그 글을 이력에 넣은
-    ///   순간이 받음이다(TRD §5-5 「소비 에코」). 이력 문은 내지 않는다: 지난 기록은 받음 사건이 아니고,
-    ///   이력 덩이를 싣는 코어 문은 목록 사건을 받지 않는다.
+    /// ★Whichever of `item/started` or `item/completed` comes **first** raises it★ (reason = [`Self::item`] doc).
+    ///   The second notification is dropped by the item id comparison, and that comparison is an **exact match** — the schema marks that `id` as required
+    ///   (0.154.0 `UserMessageThreadItem`).
+    /// ★If there is no id, only the `item/started` side raises it★ — with no key to compare, raising both would leave the same words on the screen
+    ///   twice, and the frontend's dedup key is also that id, so it does not catch there either. It means a required field is empty, so it is
+    ///   counted as a defect.
+    /// ★The second notification dropped as the same one is not counted as an 「옮기지 못한 관측」 (observation that could not be carried over)★ — that map means **what was dropped**,
+    ///   and this was already raised. Mixing it in would make that map stop being a drift detector.
+    /// ★If `clientId` (the id we carried as `clientUserMessageId`) exists, we emit
+    ///   `QueuedInput(Delivered{clientId})` **right before** the bubble — in the two live doors only★. The moment the vendor put that text into the
+    ///   history is the receipt (TRD §5-5 「소비 에코」 (consumption echo)). The history door does not emit it: past records are not receipt events,
+    ///   and the core door that carries history chunks does not accept list events.
     // ADR-0231
     fn user_message(
         &mut self,
@@ -859,19 +859,19 @@ impl CodexAppServerDecoder {
     ) -> Vec<OutputEvent> {
         let at_item_start = origin != ItemOrigin::Completed;
         let id = item.get("id").and_then(|v| v.as_str());
-        // 대조 토큰이라 자르지 않고 거른다(사유 = [`MAX_ID_BYTES`]) — 걸러지면 오늘처럼 item id 로 간다.
+        // It is a comparison token, so it is filtered, not truncated (reason = [`MAX_ID_BYTES`]) — if filtered out, it goes by the item id as it does today.
         let client_id = item
             .get("clientId")
             .and_then(|v| v.as_str())
             .filter(|c| c.len() <= MAX_ID_BYTES);
-        // ★기억에 담고 대조하는 것은 **와이어와 같은 상한**을 거친 item id 뿐이다★ — 원형을 담으면 칸 수
-        //   상한([`MAX_EMITTED_USER_ITEMS`])이 길이를 못 막아 상대가 길이를 정하는 문자열이 세션 내내 남는다.
-        // ★이 키는 말풍선 `uuid` 와 다르다★ — `uuid` 는 `clientId`(같은 상한을 지난 것)가 먼저고 없을 때만 이
-        //   키다(아래 [`user_message_event`] 호출). 그래서 item id 가 상한을 넘기면 이 기억이 `started`/`completed`
-        //   짝을 못 잡아 말풍선이 두 번 나가고, `clientId` 가 있으면 `Delivered` 도 두 번 나간다. 그 뒤는 `clientId`
-        //   가 가른다 — 있으면 두 말풍선의 `uuid` 가 같아 프론트의 `uuid` dedup 이 한 벌로 접고, 없으면(하한 미달 ·
-        //   식별자 없이 든 입력 · 우리가 넣지 않은 글) `uuid` 가 비어 두 벌 남는다. 길이 판정을 자르기로 바꾸지 않는 사유는
-        //   [`bounded_id`] 와 같다(잘린 둘이 같아지면 서로 다른 말이 한 벌로 접힌다).
+        // ★What is stored in the memory and compared is only an item id that passed the **same cap as the wire**★ — if the raw form were stored, the entry-count
+        //   cap ([`MAX_EMITTED_USER_ITEMS`]) could not bound the length, and a string whose length the peer decides would stay for the whole session.
+        // ★This key differs from the bubble's `uuid`★ — `uuid` is `clientId` (one that passed the same cap) first, and only when that is absent is it this
+        //   key (see the [`user_message_event`] call below). So if the item id exceeds the cap, this memory cannot catch the `started`/`completed`
+        //   pair and the bubble goes out twice, and if there is a `clientId`, `Delivered` also goes out twice. What follows is decided by `clientId`
+        //   — if present, the `uuid` of the two bubbles is the same and the frontend's `uuid` dedup folds them into one, and if absent (below the minimum codex version ·
+        //   input that came in without an identifier · text we did not put in) `uuid` is empty and two copies remain. The reason for not changing the length decision to truncation is the same as
+        //   [`bounded_id`] (if two truncated ones become equal, different words would be folded into one).
         let dedup_key = id.filter(|s| s.len() <= MAX_ID_BYTES);
         if dedup_key.is_some_and(|seen| self.emitted_user_items.iter().any(|k| k == seen)) {
             return Vec::new();
@@ -892,8 +892,8 @@ impl CodexAppServerDecoder {
                 id: c.to_string(),
             })),
         };
-        // 텍스트 조각이 하나도 없는 유저 메시지(이미지·오디오·mention 만) — 빈 말풍선을 만들지 않고
-        //   일상 계수로 흘린다. 그 입력 종류를 나를 어휘가 우리에게 없다. 받음은 그래도 받음이다.
+        // A user message with no text piece at all (only images · audio · mention) — no empty bubble is made and it is
+        //   sent off as a routine count. We have no vocabulary to carry that input kind. A receipt is still a receipt.
         let Some(event) = user_message_event(item, client_id.or(dedup_key)) else {
             self.observe(
                 format!("item:{method_name}#{USER_MESSAGE_ITEM_TYPE}"),
@@ -903,7 +903,7 @@ impl CodexAppServerDecoder {
             return delivered.into_iter().collect();
         };
         if let Some(id) = dedup_key {
-            // 오래된 것부터 밀어낸다 — 세션이 길어진다고 이 기억이 자라면 안 된다.
+            // Push out the oldest first — this memory must not grow just because the session gets longer.
             if self.emitted_user_items.len() >= MAX_EMITTED_USER_ITEMS {
                 self.emitted_user_items.pop_front();
             }
@@ -914,10 +914,10 @@ impl CodexAppServerDecoder {
 
     /// `thread/tokenUsage/updated` → [`OutputEvent::Usage`].
     ///
-    /// ★`total` 이 아니라 `last` 를 쓴다★ — 스키마가 두 칸의 뜻을 설명하지 않아 이름으로 읽었고,
-    /// 소비자가 `Usage` 를 **누적하지 않고 이벤트마다 한 행으로 그린다**. 누적값을 반복해 실으면
-    /// 같은 수가 자라는 행이 쌓이고, `last` 를 실으면 각 행이 "방금 끝난 요청이 쓴 양" 으로 홀로
-    /// 읽힌다. 대가 = 한 턴의 합계는 우리가 내지 않는다(행을 더해야 나온다).
+    /// ★`last` is used, not `total`★ — the schema does not explain the meaning of the two fields, so we read them by name,
+    /// and the consumer **does not accumulate `Usage` but draws one row per event**. If cumulative values were carried repeatedly,
+    /// rows with the same growing number would pile up, and if `last` is carried each row reads alone as "the amount the request that just ended used".
+    /// The price = we do not emit a turn's total (you have to add up the rows to get it).
     fn usage(&mut self, params: Option<&Value>) -> Vec<OutputEvent> {
         let Some(n) = self.parse::<protocol::ThreadTokenUsageUpdatedNotification>(
             params,
@@ -926,16 +926,16 @@ impl CodexAppServerDecoder {
             return Vec::new();
         };
         vec![OutputEvent::Usage {
-            // 와이어는 `int64` 이고 우리 어휘 칸은 `u64` 다 — 음수는 토큰 수로 뜻이 없으므로 0 으로
-            //   누른다. ★알림을 통째로 버리는 것보다 낫다★(그쪽을 고르면 그 턴의 사용량이 사라진다).
+            // The wire is `int64` and our vocabulary field is `u64` — a negative has no meaning as a token count, so it is clamped to 0.
+            //   ★That is better than dropping the whole notification★ (choosing that would lose that turn's usage).
             input_tokens: n.token_usage.last.input_tokens.max(0) as u64,
             output_tokens: n.token_usage.last.output_tokens.max(0) as u64,
             turn_id: bounded_id(&n.turn_id),
         }]
     }
 
-    /// `account/rateLimits/updated` → 이벤트 0개. 읽히는 관측은 [`Self::usage_observations`] 에 쌓는다(해석 규칙 =
-    /// 이 폴더 `usage`). 봉투를 못 읽으면 다른 arm 과 같이 결함으로 남기고 버린다.
+    /// `account/rateLimits/updated` → 0 events. Readable observations are piled up in [`Self::usage_observations`] (interpretation rules =
+    /// this folder's `usage`). If the envelope cannot be read, it is left as a defect and dropped like the other arms.
     fn rate_limits_updated(&mut self, params: Option<&Value>) -> Vec<OutputEvent> {
         if let Some(n) = self.parse::<protocol::AccountRateLimitsUpdatedNotification>(
             params,
@@ -947,19 +947,19 @@ impl CodexAppServerDecoder {
         Vec::new()
     }
 
-    /// `error` 알림 → [`OutputEvent::Error`]. ★이것은 턴 경계가 아니다★ — 재시도 가능한 스트림 오류라
-    /// 이 줄 뒤에도 같은 턴이 이어진다(경계는 `turn/completed` 단독).
+    /// `error` notification → [`OutputEvent::Error`]. ★This is not a turn boundary★ — it is a retryable stream error, so
+    /// the same turn continues after this line (the boundary is `turn/completed` alone).
     ///
-    /// ★두 어휘가 각각 무엇을 뜻하나 — 소비자가 여기서 갈린다★:
-    ///   - [`OutputEvent::Error`] = **턴 안에서 일어난 사고**. 턴은 계속된다. 이 어휘를 턴 종료로 읽으면
-    ///     한 턴이 사고 횟수만큼 쪼개지고, 그 뒤에 오는 진짜 경계는 이미 끝난 턴에 붙는다.
-    ///   - [`OutputEvent::TurnEnd`] = **턴이 끝났다**. 어떻게 끝났나는 그 안의 결말 칸이 진다
-    ///     (`Failed` 포함 — 실패한 턴도 경계는 이쪽 어휘로 온다).
-    /// ★그래서 「재시도되나」를 wire 칸으로 따로 내보내지 않는다★ — 그 구별은 **이벤트 타입**이 이미
-    ///   지고 있고, 칸을 하나 더 만들면 같은 사실이 두 곳에 살다가 하나가 낡는다(같은 판정을
-    ///   [`error_message`] 가 그 문자열에 대해 한다). 그리고 이 알림에는 `threadId`·`turnId` 가 아예
-    ///   없어서(`protocol::ErrorNotification`) **어느 턴의 사고인지 이 층에서 귀속할 수도 없다** —
-    ///   경계로 승격시키려 해도 재료가 없다.
+    /// ★What each of the two vocabularies means — this is where consumers diverge★:
+    ///   - [`OutputEvent::Error`] = **an incident that happened inside a turn**. The turn continues. If this vocabulary is read as a turn end,
+    ///     one turn is split as many times as there are incidents, and the real boundary that comes after is attached to an already ended turn.
+    ///   - [`OutputEvent::TurnEnd`] = **the turn has ended**. How it ended is carried by the outcome field inside it
+    ///     (including `Failed` — the boundary of a failed turn also arrives in this vocabulary).
+    /// ★So 「재시도되나」 (is it retried) is not sent out as a separate wire field★ — **the event type** already carries that distinction,
+    ///   and if one more field is made, the same fact lives in two places and one goes stale (the same decision is made by
+    ///   [`error_message`] for that string). And this notification has no `threadId`·`turnId` at all
+    ///   (`protocol::ErrorNotification`), so **this layer cannot even attribute which turn the incident belongs to** —
+    ///   even to promote it to a boundary, there is no material.
     fn error(&mut self, params: Option<&Value>) -> Vec<OutputEvent> {
         let Some(n) = self.parse::<protocol::ErrorNotification>(params, method::ERROR) else {
             return Vec::new();
@@ -967,27 +967,27 @@ impl CodexAppServerDecoder {
         vec![OutputEvent::Error(error_message(&n.error, n.will_retry))]
     }
 
-    /// `turn/completed` → [`OutputEvent::TurnEnd`] **정확히 1 회**. 결말도 그 이벤트 안에 실린다.
+    /// `turn/completed` → [`OutputEvent::TurnEnd`] **exactly once**. The outcome is also carried inside that event.
     ///
-    /// ★이벤트를 둘로 쪼개지 않는다★ — 실패 사유를 별도 [`OutputEvent::Error`] 로 앞세우면 「턴 경계」와
-    ///   「어떻게 끝났나」가 두 이벤트로 갈려 소비자에게 순서 계약이 하나 더 생긴다. 결말 칸을 가진
-    ///   타입이 있는 이유가 그 쪼갬을 안 하는 것이다.
-    /// ★무엇이 실려 오든 이벤트를 낸다★ — status 가 없어도, 모르는 값이어도 그렇다. 상대가 말해 주는
-    ///   「턴이 끝났다」는 이 한 줄뿐이라, 조용히 버리면 그 대화의 대기 인디케이터가 영영 돈다. 그래서
-    ///   여기서만 `parse::<T>()` 를 쓰지 않고 칸을 하나씩 훑는다 — 한 칸이 어긋나도 경계는 서야 한다.
-    ///   ★「낸다」는 화면까지 간다는 뜻이 아니다★ — 귀속은 통로가 판정하고, 거기서 막히거나 미뤄질 수
-    ///   있다(이 파일 헤더). 그리고 상대가 이 줄을 **아예 안 보내는** 포기 경로에서는 통로가 자기
-    ///   `TurnEnd` 를 낸다 — 즉 이 자리가 경계의 유일한 발행 지점은 아니다.
-    /// ★`status` 는 **문자열로** 읽는다 — 닫힌 Rust `enum` 으로 받지 말 것★: 상류가 다섯째 값을 더한 날
-    ///   줄 **전체**가 역직렬화 실패로 사라지고, 경계가 통째로 없어져 대기 표시가 영영 돈다.
-    /// ★실패 판정은 **허용목록**이다 — 여집합으로 뒤집지 말 것★: 실패로 잡는 것은 `failed` 하나이고
-    ///   나머지는 실패가 아니다. claude 쪽 같은 자리가 한때 여집합(`!= "success"`)이었고, 그 형태가
-    ///   **유저가 Esc 로 정상 중단한 턴**을 실패로 도장 찍었다 — 이 저장소에서 중단은 1 급 정상 경로다
-    ///   (`TerminalReason::Interrupted` 가 따로 있다. 그 되돌림의 기록 = `backend/claude/mod.rs` 의
-    ///   `is_error` 자리). 여집합은 상류가 앞으로 더할 non-error 값도 자동으로 실패로 만든다.
-    /// ★`inProgress` 를 아는 셋 중 하나로 접지 않는다★ — 그 값이 **완료 알림에** 실려 오는 조합이
-    ///   무슨 뜻인지 모른다(TRD §6-1 이 그 칸을 `[미확인]` 으로 둔다). 추측해 매핑하면 화면이 거짓
-    ///   결말을 그리므로 `Unknown` 으로 보낸다 — 턴은 그래도 끝난다.
+    /// ★Do not split the event in two★ — if the failure reason is put ahead as a separate [`OutputEvent::Error`], the 「턴 경계」 (turn boundary) and
+    ///   「어떻게 끝났나」 (how it ended) split into two events and consumers get one more ordering contract. The reason a type with an outcome field
+    ///   exists is to avoid that split.
+    /// ★Emit the event whatever is carried★ — even if there is no status, even if the value is unknown. This one line is the only
+    ///   「턴이 끝났다」 (the turn has ended) the peer tells us, so if it is quietly dropped, that conversation's waiting indicator spins forever. So
+    ///   only here we do not use `parse::<T>()` and scan fields one by one — even if one field is off, the boundary must stand.
+    ///   ★「낸다」 (emit) does not mean it reaches the screen★ — attribution is decided by the path, and it may be blocked or deferred there
+    ///   (this file's header). And in the give-up path where the peer **never sends** this line, the path emits its own
+    ///   `TurnEnd` — so this spot is not the only emit point of the boundary.
+    /// ★Read `status` **as a string — do not receive it as a closed Rust `enum`**★: the day upstream adds a fifth value, the
+    ///   **whole** line vanishes with a deserialization failure, the boundary disappears entirely, and the waiting indicator spins forever.
+    /// ★The failure decision is an **allowlist — do not flip it to the complement**★: only `failed` counts as failure and
+    ///   everything else is not failure. The same spot on the claude side was once a complement (`!= "success"`), and that form
+    ///   stamped **a turn the user normally interrupted with Esc** as a failure — in this repository an interrupt is a first-class normal path
+    ///   (`TerminalReason::Interrupted` exists separately. The record of that reversal = `backend/claude/mod.rs`'s
+    ///   `is_error` spot). The complement also automatically makes any non-error value upstream adds in future a failure.
+    /// ★Do not fold `inProgress` into one of the known three★ — we do not know what the combination of that value **arriving on a completion notification**
+    ///   means (TRD §6-1 leaves that field as `[미확인]` (unconfirmed)). If we guess a mapping the screen draws a false
+    ///   outcome, so it goes to `Unknown` — the turn still ends.
     // ADR-0004
     fn turn_completed(&mut self, params: Option<&Value>) -> Vec<OutputEvent> {
         let turn = params.and_then(|p| p.get("turn"));
@@ -1001,27 +1001,27 @@ impl CodexAppServerDecoder {
             Some(protocol::turn_status::COMPLETED) => TurnOutcome::Completed,
             Some(protocol::turn_status::INTERRUPTED) => TurnOutcome::Interrupted,
             Some(protocol::turn_status::FAILED) => {
-                // 스키마가 `Turn.error` 에 「Only populated when the Turn's status is failed」 를 적는다
-                //   (0.154.0). 그래도 optional 이라 없을 수 있고, 없으면 사유 없이 실패만 낸다.
+                // The schema writes 「Only populated when the Turn's status is failed」 on `Turn.error`
+                //   (0.154.0). It is still optional so may be absent, and if absent it emits only the failure without a reason.
                 let detail = turn
                     .and_then(|t| t.get("error"))
                     .and_then(|v| serde_json::from_value::<protocol::TurnError>(v.clone()).ok())
-                    // `willRetry` 는 이 칸에 없다 — `error` **알림**에만 있는 칸이라 false 로 고정한다.
+                    // `willRetry` is not in this field — it exists only in the `error` **notification**, so it is fixed to false.
                     .map(|e| error_message(&e, false));
                 TurnOutcome::Failed { detail }
             }
             Some(other) => {
                 let what = if protocol::turn_status::ALL.contains(&other) {
-                    // 선언에 있는 값인데 이 알림에서의 뜻을 모른다 — 드리프트가 아니라 미측정이다.
+                    // A value that is in the declaration but whose meaning in this notification is unknown — not drift but unmeasured.
                     Observed::Routine
                 } else {
                     Observed::Drift
                 };
-                // ★상대 문자열을 키로 쓰는 것은 **아는 값일 때뿐**이다★ — 이 맵은 절대 비워지지 않는
-                //   유계 칸을 쓰므로, 임의 문자열이 키가 되면 상대가 서로 다른 status 로 그 예산을
-                //   태워 **그 뒤의 진짜 드리프트는 이름 없이 개수만** 남는다. 모르는 값은 한 칸에
-                //   눌러 담고 실제 값은 로그 본문으로 낸다 — 그 본문이 키별 1 회로 눌리는 것은 이
-                //   파일의 다른 모든 상대발 경고와 같은 규율이다(`observe`).
+                // ★A peer string is used as a key **only when it is a known value**★ — this map uses a bounded
+                //   field that never empties, so if an arbitrary string became a key, the peer could burn that budget with different statuses and
+                //   **real drift after that would leave only a count, without a name**. Unknown values are squashed into one
+                //   entry and the actual value goes out in the log body — that body being squashed to once per key is the same discipline as every other
+                //   peer-originated warning in this file (`observe`).
                 let key = match what {
                     Observed::Routine => format!("turn-status:{other}"),
                     _ => "turn-status:<모르는 값>".to_string(),
@@ -1045,9 +1045,9 @@ impl CodexAppServerDecoder {
         vec![OutputEvent::TurnEnd { turn_id, outcome }]
     }
 
-    /// 완성 라인 1 개(개행 제외) → 0 개 이상의 이벤트.
+    /// One complete line (newline excluded) → zero or more events.
     fn consume_line(&mut self, line: &[u8], events: &mut Vec<OutputEvent>) {
-        // ★여기서 처음 UTF-8 디코딩한다★(위 `buffer` 불변식).
+        // ★UTF-8 is decoded for the first time here★ (the `buffer` invariant above).
         let text = match std::str::from_utf8(line) {
             Ok(t) => t.trim(),
             Err(_) => {
@@ -1063,9 +1063,9 @@ impl CodexAppServerDecoder {
             Ok(Inbound::Notification { method, params }) => {
                 events.extend(self.translate(&method, params.as_ref()));
             }
-            // ★이 문으로는 요청에 답할 수 없다 — 디코더는 쓰기 핸들을 갖지 않는다★. 그래서 이
-            //   경로로 요청이 들어오면 그 에이전트는 **영구 정지한다**(상대가 답을 기다린다).
-            //   통로는 반드시 봉투를 먼저 갈라 요청을 자기가 받아야 한다.
+            // ★This door cannot answer a request — the decoder has no write handle★. So if a request comes in by this
+            //   path, that agent **freezes permanently** (the peer waits for an answer).
+            //   The path must split envelopes first and take requests itself.
             Ok(Inbound::Request { method, .. }) => {
                 self.observe("envelope:request".to_string(), Observed::Malformed, &method)
             }
@@ -1074,9 +1074,9 @@ impl CodexAppServerDecoder {
                 Observed::Malformed,
                 "통로가 응답 봉투를 번역기로 넘겼다",
             ),
-            // ★사유마다 키를 나눈다★ — 한 통이면 처음 만난 깨진 줄 하나가 그 뒤의 모든 봉투
-            //   결함을 영구히 침묵시킨다. 화면이 비는 실패가 배송 구성에서 기록돼야 한다는 것이
-            //   이 경로의 존재 이유인데, 그 목적이 첫 줄에서 끝나 버린다.
+            // ★Keys are split per reason★ — with one pool, the first broken line met permanently silences every later
+            //   envelope defect. The reason this path exists is that a failure that empties the screen must be recorded in the shipping configuration,
+            //   and that purpose would end at the first line.
             Err(err) => self.observe(
                 format!("envelope:{}", envelope_cause(&err)),
                 Observed::Malformed,
@@ -1087,17 +1087,17 @@ impl CodexAppServerDecoder {
 }
 
 impl OutputDecoder for CodexAppServerDecoder {
-    /// 임의 크기 바이트 청크를 밀어 넣고 이번 청크로 **완성된 줄**만 옮긴다. 개행 없는 꼬리는
-    /// 버퍼에 남아 다음 청크와 합쳐진다 — 한 알림이 읽기 경계에서 잘려도 잃지 않는다.
+    /// Push in a byte chunk of arbitrary size and carry over only the **lines completed** by this chunk. A tail without a newline
+    /// stays in the buffer and merges with the next chunk — a notification is not lost even if it is cut at a read boundary.
     ///
-    /// 해독 못 한 줄은 기록만 남기고 건너뛴다. ★fatal 로 두지 않는 것은 방어다★: 0.154.0 의
-    /// stdout 은 실측상 NDJSON 뿐이었지만(4 회 실행, 배너·비-JSON 0 줄 — 오류는 전부 stderr 로
-    /// 갔다) 다른 버전이 같으리라는 보장이 없고, 파싱 실패로 스트림을 끊으면 에이전트가 죽는다.
+    /// A line that cannot be decoded is skipped with only a record left. ★Not treating it as fatal is a defense★: the stdout of 0.154.0
+    /// was measured to be only NDJSON (4 runs, 0 banner or non-JSON lines — all errors went to stderr), but there is no guarantee
+    /// another version is the same, and if a parse failure cut the stream the agent would die.
     fn decode(&mut self, chunk: &[u8]) -> Vec<OutputEvent> {
         let mut events = Vec::new();
         let mut rest = chunk;
 
-        // 상한을 넘긴 줄을 버리는 중이면 그 줄이 끝나는 개행 앞을 통째로 버린다.
+        // If it is discarding a line that exceeded the cap, discard everything up to the newline that ends that line.
         if self.discarding {
             match rest.iter().position(|&b| b == b'\n') {
                 Some(nl) => {
@@ -1108,22 +1108,22 @@ impl OutputDecoder for CodexAppServerDecoder {
             }
         }
 
-        // ★`rest` 는 앞으로만 간다★ — 앞에서 drain 하거나 처음부터 다시 훑지 않으므로 한 청크의
-        //   총 훑기 비용이 청크 길이에 선형이다(개행만 4096 개인 청크도 할당 0 회).
+        // ★`rest` only moves forward★ — it neither drains from the front nor rescans from the start, so a chunk's
+        //   total scan cost is linear in the chunk length (even a chunk of 4096 newlines alone makes 0 allocations).
         while let Some(nl) = rest.iter().position(|&b| b == b'\n') {
             let head = &rest[..nl];
             rest = &rest[nl + 1..];
 
             if self.buffer.is_empty() {
-                // 흔한 경우 — 버퍼를 거치지 않고 청크 안의 슬라이스를 그대로 읽는다.
+                // The common case — read the slice inside the chunk as it is, without going through the buffer.
                 if head.len() > MAX_LINE_BYTES {
                     events.push(overflow_event(head.len()));
                     continue;
                 }
                 self.consume_line(head, &mut events);
             } else {
-                // ★어느 쪽이든 버퍼를 통째로 가져와 비운다★ — 이 줄은 여기서 끝나고, 소유권이
-                //   옮겨 가므로 길이만이 아니라 **용량도** 반납된다.
+                // ★Either way we take the whole buffer and empty it★ — this line ends here, and since ownership
+                //   moves away, not only the length but the **capacity** is also given back.
                 let mut line = std::mem::take(&mut self.buffer);
                 if line.len() + head.len() > MAX_LINE_BYTES {
                     let dropped = line.len() + head.len();
@@ -1137,10 +1137,10 @@ impl OutputDecoder for CodexAppServerDecoder {
         }
 
         if !rest.is_empty() {
-            // ★붙이기 **전에** 판정한다★ — 붙인 뒤 재면 그 순간 상한을 이미 넘긴 뒤다.
+            // ★Decide **before** appending★ — if measured after appending, the cap has already been exceeded at that moment.
             if self.buffer.len() + rest.len() > MAX_LINE_BYTES {
                 let dropped = self.buffer.len() + rest.len();
-                self.buffer = Vec::new(); // 용량 반납 — `clear()` 는 길이만 0 으로 만든다.
+                self.buffer = Vec::new(); // Give back capacity — `clear()` makes only the length 0.
                 self.discarding = true;
                 events.push(overflow_event(dropped));
             } else {
@@ -1150,12 +1150,12 @@ impl OutputDecoder for CodexAppServerDecoder {
         events
     }
 
-    /// 스트림 종료 시 1 회.
+    /// Once at stream end.
     ///
-    /// ★공용 트레이트 doc 은 "잔여 라인을 마저 처리한다" 이고 여기는 **버린다** — 의도된 갈림이다★:
-    /// 개행으로 끝나지 않은 줄은 **잘린 JSON** 이라, 마저 처리한다는 것이 곧 없는 나머지를 지어내는
-    /// 일이 된다. claude 쪽 구현체는 라인 단위 JSON 이 아니어도 되는 자리라 그 doc 대로 처리하므로
-    /// 트레이트 문서는 건드리지 않는다. 손실 자체는 관측돼야 할 사실이라 경고로 남긴다.
+    /// ★The shared trait doc says "process the remaining line to the end" and here we **discard** — an intended divergence★:
+    /// a line not ended by a newline is **truncated JSON**, so "processing it to the end" would mean inventing the missing rest.
+    /// The claude-side implementation is a spot that need not be line-delimited JSON and so processes per that doc, so
+    /// the trait doc is left alone. The loss itself is a fact that must be observed, so it is left as a warning.
     fn flush(&mut self) -> Vec<OutputEvent> {
         if !self.buffer.is_empty() {
             tracing::warn!(
@@ -1173,8 +1173,8 @@ impl OutputDecoder for CodexAppServerDecoder {
     }
 }
 
-/// 봉투를 못 읽은 사유의 안정된 이름. ★[`ParseError`] 의 Display 를 키로 쓰지 않는 이유★ =
-/// 그 문자열에는 serde 오류 본문이 섞여 들어와 같은 사유가 매번 다른 키가 된다.
+/// Stable name for the reason an envelope could not be read. ★The reason the Display of [`ParseError`] is not used as a key★ =
+/// its string has the serde error body mixed in, so the same reason becomes a different key every time.
 fn envelope_cause(err: &protocol::ParseError) -> &'static str {
     use protocol::ParseError as E;
     match err {
@@ -1189,31 +1189,31 @@ fn envelope_cause(err: &protocol::ParseError) -> &'static str {
     }
 }
 
-/// `TurnError` 한 개 → 화면으로 나갈 오류 문자열. ★두 호출자가 같은 모양을 내야 한다★ — `error`
-/// 알림과 `turn/completed` 의 `Turn.error` 는 같은 타입이고, 다르게 그리면 같은 사유가 두 얼굴을 갖는다.
+/// One `TurnError` → the error string that goes to the screen. ★Both callers must produce the same shape★ — the `error`
+/// notification and the `Turn.error` of `turn/completed` are the same type, and if drawn differently the same reason gets two faces.
 ///
-/// ★「턴을 끝낸 실패인가」를 이 문자열에 토큰으로 적지 않는다★ — 그 구별은 **이벤트 타입**이 진다
-///   ([`OutputEvent::TurnEnd`] 의 결말 칸 대 [`OutputEvent::Error`]). 문자열에 또 적으면 같은 사실이 두
-///   곳에 살고, 하나가 낡는다.
+/// ★Do not write 「턴을 끝낸 실패인가」 (is it a failure that ended the turn) into this string as a token★ — **the event type** carries that distinction
+///   (the outcome field of [`OutputEvent::TurnEnd`] vs [`OutputEvent::Error`]). If it is written into the string too, the same fact lives in two
+///   places and one goes stale.
 ///
-/// ★스키마가 가진 유일한 백프레셔 어휘가 `codexErrorInfo` 로 온다★ — `serverOverloaded`
-/// ·`rateLimitExceeded` 는 숫자 오류 코드가 아니라 이 칸의 문자열이다. 그래서 그 라벨을 본문에 붙인다:
-/// 붙이지 않으면 "재시도 중인 과부하" 와 "진짜 실패" 가 화면에서 같아진다.
+/// ★The schema's only backpressure vocabulary arrives as `codexErrorInfo`★ — `serverOverloaded`
+/// ·`rateLimitExceeded` are strings in this field, not numeric error codes. So that label is attached to the body:
+/// if not attached, "overload being retried" and "real failure" look the same on the screen.
 ///
-/// ★우리가 더하는 토큰은 전부 프로토콜의 칸 이름 그대로다★(`willRetry`·`misalignment`·`steer`) —
-/// 이 문자열은 `src/i18n` 을 거치지 않고 화면에 그대로 그려지므로, 여기서 문장을 지어 쓰면 그것이
-/// 번역되지 않는 UI 문구가 된다.
+/// ★Every token we add is exactly a protocol field name★ (`willRetry`·`misalignment`·`steer`) —
+/// this string is drawn on the screen as is without going through `src/i18n`, so if a sentence is composed here it would become an
+/// untranslated UI phrase.
 ///
-/// ★마스킹은 경계가 아니라 **여기**에서 한다★ — 이 문자열은 화면으로도 로그로도 가고, wire 를 타고
-/// [`TurnOutcome::Failed`] 의 사유 칸으로도 나간다. 나가는 문마다 다시 거르면 그중 하나는 반드시
-/// 잊힌다(같은 규율의 다른 판 = 이 폴더 `transport` 의 오류 봉투 자리). `mask_secrets` 는 자동 적용이
-/// 아니라 호출자가 명시로 부른다(`docs/reference/logging-conventions.md`).
+/// ★Masking is done **here**, not at the boundary★ — this string goes to the screen and to the log, and over the wire
+/// also out as the reason field of [`TurnOutcome::Failed`]. If every outgoing door filtered again, one of them would
+/// surely be forgotten (another instance of the same discipline = the error envelope spot of this folder's `transport`). `mask_secrets` is not applied
+/// automatically; the caller calls it explicitly (`docs/reference/logging-conventions.md`).
 ///
-/// `will_retry` = `error` 알림의 같은 이름 칸. `Turn.error` 에는 그 칸이 없어 false 로 온다.
+/// `will_retry` = the field of the same name in the `error` notification. `Turn.error` has no such field, so it arrives as false.
 fn error_message(error: &protocol::TurnError, will_retry: bool) -> String {
-    // ★상대가 길이를 정하는 조각은 **하나도 빠짐없이** [`sanitize`] 를 지나야 한다★ — 그래야 총량이
-    //   유계이고(절단), 자격증명이 안 실린다(마스킹). 한 조각이라도 맨 [`truncate`] 로 되돌리면 그
-    //   조각만 마스킹을 건너뛴다.
+    // ★Every piece whose length the peer decides **must pass** [`sanitize`], with none missed★ — only then is the total
+    //   bounded (truncation) and no credential carried (masking). If even one piece is reverted to a bare [`truncate`], only that
+    //   piece skips masking.
     let mut message = sanitize(&error.message, ERROR_PART_LIMIT);
     if let Some(label) = error.codex_error_info.as_ref().and_then(|v| v.as_str()) {
         message = format!("{message} ({})", sanitize(label, ERROR_PART_LIMIT));
@@ -1224,8 +1224,8 @@ fn error_message(error: &protocol::TurnError, will_retry: bool) -> String {
     if let Some(details) = error.additional_details.as_deref() {
         message = format!("{message}\n{}", sanitize(details, ERROR_PART_LIMIT));
     }
-    // ★`message` 만으로는 왜 막혔는지도, 무엇을 하면 되는지도 알 수 없다★ — 그 둘을 나르는
-    //   칸이 여기다. `steer` 는 codex 가 준 "다음 턴에 그대로 넣을 문장" 이라 우리가 짓지 않는다.
+    // ★`message` alone tells neither why it was blocked nor what to do★ — the field that carries those two
+    //   is here. `steer` is the "sentence to feed as-is into the next turn" that codex gave, so we do not compose it.
     if let Some(m) = error.misalignment.as_ref() {
         if let Some(kind) = m.error_type.as_deref() {
             message = format!(
@@ -1246,36 +1246,36 @@ fn error_message(error: &protocol::TurnError, will_retry: bool) -> String {
     message
 }
 
-/// 상한 초과로 줄 하나를 잃었다는 사실을 화면으로 올린다.
+/// Raise to the screen the fact that one line was lost for exceeding the cap.
 ///
-/// ★산문이 아니라 토큰이다★ — 이 문자열은 `src/i18n` 을 거치지 않고 그대로 그려지므로, 문장을
-/// 지어 쓰면 번역되지 않는 UI 문구가 된다(같은 규율을 [`error_message`] 가 적는다).
+/// ★It is a token, not prose★ — this string is drawn as is without going through `src/i18n`, so if a sentence is
+/// composed it becomes an untranslated UI phrase (the same discipline is written in [`error_message`]).
 fn overflow_event(seen: usize) -> OutputEvent {
-    // ★`seen` 은 **그 시점까지 본 바이트**이고 줄 전체 길이가 아니다★ — 개행 없이 넘긴 경우
-    //   나머지는 resync 가 조용히 삼키므로 아무도 그 총량을 세지 않는다. `dropped=` 로 적으면
-    //   줄 크기로 읽힌다.
+    // ★`seen` is **the bytes seen up to that point** and not the whole line length★ — when handed over without a newline,
+    //   the rest is quietly swallowed by resync, so nobody counts that total. Writing it as `dropped=` would
+    //   read as the line size.
     OutputEvent::Error(format!(
         "codex-decoder: lineOverflow seen={seen}B limit={MAX_LINE_BYTES}B"
     ))
 }
 
-/// 되울린 유저 메시지 item 한 개 → 「우리가 보낸 것」으로 표시된 [`OutputEvent::Structured`].
+/// One echoed user message item → a [`OutputEvent::Structured`] marked 「우리가 보낸 것」 (what we sent).
 ///
-/// `None` = 이 item 에 텍스트 조각이 하나도 없다(이미지·오디오·mention 만) — 호출자가 계수로 흘린다.
+/// `None` = this item has no text piece at all (only images · audio · mention) — the caller sends it off as a count.
 ///
-/// ★표시 = `kind` 가 `"user"` 인 것 하나다★ — 이것이 「우리가 보낸 것」의 유일한 표식이고, 소비자는
-///   **그 표식만** 읽는다. 값에 codex 어휘가 실리지 않으므로 다른 백엔드가 같은 표식을 써도 소비자는
-///   갈라지지 않는다(ADR-0004).
-/// ★json 모양은 소비자 계약이다★ — `{"type":"text","text":…,"uuid":…}`. `type` 이 `"text"` 라야
-///   소비자가 `uuid` 를 dedup 키로 집는다. 그래서 claude 쪽 같은 모양과 **글자 그대로 같아야** 하고,
-///   그 사실이 이 두 벌을 한 함수로 합칠 이유는 되지 않는다 — 합치면 그 함수가 두 백엔드 폴더 밖에
-///   살아야 한다. (그 hoist 는 한 번 시도됐다가 되돌려졌다.)
-/// ★`uuid` = 호출자가 고른 dedup 키★ — item 의 `clientId`(우리가 `clientUserMessageId` 로 실은 id —
-///   통로의 합성 말풍선·목록 항목과 같은 값이라 한 벌로 접힌다)가 있으면 그것, 없으면 **codex 의 item
-///   id** 다. 스키마가 그 `id` 를 required 로 적으므로(0.154.0 `UserMessageThreadItem`) 실제로는 언제나
-///   실리지만, 없으면 칸을 비운다 — 없는 키는 dedup 대상이 아니라 그대로 보존된다.
-/// ★텍스트 조각 여럿은 개행으로 잇는다★ — 스키마는 `content` 를 배열로 두고 조각 사이 구분자를
-///   정하지 않는다. 붙여 쓰면 낱말이 엉기므로 줄을 나눈다(우리 선택 · 실측된 관례가 아니다).
+/// ★The marker = a `kind` of `"user"`, and that alone★ — that is the only marker of 「우리가 보낸 것」 (what we sent), and the consumer
+///   reads **only that marker**. No codex vocabulary is carried in the value, so even if another backend uses the same marker the consumer
+///   does not diverge (ADR-0004).
+/// ★The json shape is a consumer contract★ — `{"type":"text","text":…,"uuid":…}`. Only when `type` is `"text"`
+///   does the consumer pick `uuid` as the dedup key. So it must be **identical character for character** to the same shape on the claude side,
+///   and that fact is no reason to merge the two copies into one function — merging would force that function to live outside the two backend
+///   folders. (That hoist was tried once and reverted.)
+/// ★`uuid` = the dedup key chosen by the caller★ — the item's `clientId` (the id we carried as `clientUserMessageId` —
+///   the same value as the path's synthetic bubble · list entry, so they fold into one) if present, otherwise **codex's item
+///   id**. The schema marks that `id` as required (0.154.0 `UserMessageThreadItem`), so in practice it is always
+///   carried, but if absent the field is left empty — a missing key is not a dedup target and is kept as is.
+/// ★Several text pieces are joined with newlines★ — the schema makes `content` an array and does not decide a separator between pieces.
+///   Writing them together would run the words together, so we split lines (our choice · not a measured convention).
 // ADR-0004
 // ADR-0045
 // ADR-0193
@@ -1294,14 +1294,14 @@ fn user_message_event(item: &Value, uuid: Option<&str>) -> Option<OutputEvent> {
     Some(user_bubble(&text, uuid))
 }
 
-/// 「우리가 보낸 것」 말풍선 한 개 — 되울린 유저 메시지와 통로의 합성 말풍선(Direct)이 같은 모양을 쓴다.
+/// One 「우리가 보낸 것」 (what we sent) bubble — the echoed user message and the path's synthetic bubble (Direct) use the same shape.
 ///
-/// ★json 모양은 소비자 계약이다★(사유 = [`user_message_event`] doc). `uuid` 는 dedup 키라 호출자가
-///   이미 [`MAX_ID_BYTES`] 로 거른 값을 넘긴다.
-/// ★길이는 [`clip`] 으로 거르되 **마스킹하지 않는다 — 되살리지 말 것**★: 이것은 진단 문자열이 아니라
-/// 사용자가 친 말 그대로이고, 마스킹은 그 기록을 변형한다(claude 쪽 유저 블록도 같은 운반선에 마스킹
-/// 없이 싣는다 — `backend/claude/mod.rs` 의 `input_echo_event`). 마스킹 규율이 겨냥하는 것은
-/// **진단 문자열**이다.
+/// ★The json shape is a consumer contract★ (reason = [`user_message_event`] doc). `uuid` is the dedup key, so the caller
+///   passes a value already filtered by [`MAX_ID_BYTES`].
+/// ★Length is filtered with [`clip`] but **not masked — do not revive masking**★: this is not a diagnostic string but
+/// exactly what the user typed, and masking would alter that record (the claude-side user block is also carried on the same carrier without
+/// masking — `input_echo_event` of `backend/claude/mod.rs`). What the masking discipline targets is
+/// **diagnostic strings**.
 // ADR-0231
 pub(super) fn user_bubble(text: &str, uuid: Option<&str>) -> OutputEvent {
     let text = clip(text, MAX_TRANSCRIPT_CHARS);
@@ -1321,42 +1321,42 @@ pub(super) fn user_bubble(text: &str, uuid: Option<&str>) -> OutputEvent {
     };
     OutputEvent::Structured {
         kind: "user".to_string(),
-        // to_string 은 이 형태에선 실패하지 않는다 — 방어적으로 unwrap_or_default.
+        // to_string does not fail for this shape — unwrap_or_default is defensive.
         json: serde_json::to_string(&block).unwrap_or_default(),
     }
 }
 
-/// 도구 변형 item 한 개 → [`OutputEvent::ToolCall`].
+/// One tool-variant item → [`OutputEvent::ToolCall`].
 ///
-/// `None` 은 "도구가 아니다" 가 아니라 **모양이 깨졌다**는 뜻이다 — 호출자는 [`TOOL_ITEM_TYPES`]
-/// 로 먼저 거르므로, 여기 도달한 item 은 이미 도구 변형이다.
+/// `None` means not "not a tool" but **the shape is broken** — the caller filters with [`TOOL_ITEM_TYPES`]
+/// first, so an item reaching here is already a tool variant.
 fn tool_call(item: &Value, kind: &str, turn_id: &str) -> Option<OutputEvent> {
     let name = match kind {
-        // 이 셋은 `tool` 칸이 곧 도구 이름이다. `mcpToolCall` 의 `server` 는 이름에 안 섞는다 —
-        //   구분자를 지어내는 것이라, 그 값은 아래 `args_json` 에 원형 그대로 남는다.
+        // For these three the `tool` field is the tool name itself. The `server` of `mcpToolCall` is not mixed into the name —
+        //   that would be inventing a separator, and that value stays as it is in `args_json` below.
         "mcpToolCall" | "dynamicToolCall" | "collabAgentToolCall" => {
             item.get("tool")?.as_str()?.to_string()
         }
-        // 이 셋은 도구 이름 칸이 없다 — item 종류 자체가 이름이다.
+        // These three have no tool-name field — the item kind itself is the name.
         _ => kind.to_string(),
     };
     Some(OutputEvent::ToolCall {
-        // ★이 칸은 **표시 라벨**이라 거르지 않고 자른다★ — 대조에 쓰지 않으므로 잘린 둘이 같아져도
-        //   잃는 것이 없다. 같은 수를 **문자 수**로 읽으므로 최악 4 바이트 문자여도 512B 다.
+        // ★This field is a **display label**, so it is cut, not filtered★ — it is not used for comparison, so even if two cut ones become
+        //   equal nothing is lost. The same number is read as a **character count**, so even in the worst case of 4-byte characters it is 512B.
         name: clip(&name, MAX_ID_BYTES),
         args_json: bounded_args_json(item, kind),
         id: item.get("id").and_then(|v| v.as_str()).and_then(bounded_id),
         turn_id: bounded_id(turn_id),
-        // codex item 에는 메시지 묶음 id 개념이 없다 — 호출 식별자는 위 `id` 가 진다.
+        // A codex item has no concept of a message-group id — the call identifier is carried by the `id` above.
         message_id: None,
         category: tool_category(item, kind),
     })
 }
 
-/// 도구 변형 item → 중립 종류.
+/// Tool-variant item → neutral kind.
 ///
-/// ★온전한 item 에서 정한다 — `args_json` 에서 되읽지 말 것★: 그 칸은 [`MAX_TOOL_ARGS_BYTES`] 를 넘으면
-///   `type`·`id` 축약본이라 `commandActions` 가 없고, 큰 명령 하나가 종류를 잃는다.
+/// ★Decide from the intact item — do not re-read from `args_json`★: that field, if it exceeds [`MAX_TOOL_ARGS_BYTES`], is
+///   a `type`·`id` abbreviation and has no `commandActions`, so one big command would lose its kind.
 // ADR-0239
 fn tool_category(item: &Value, kind: &str) -> ToolCategory {
     match kind {
@@ -1366,18 +1366,18 @@ fn tool_category(item: &Value, kind: &str) -> ToolCategory {
         "mcpToolCall" => ToolCategory::Mcp,
         "collabAgentToolCall" => ToolCategory::Agent,
         "dynamicToolCall" => ToolCategory::Other,
-        // 호출자가 [`TOOL_ITEM_TYPES`] 로 먼저 거르므로 여기 오는 것은 그 표가 넓어진 뒤 이 판정을 안 고친 경우다.
+        // The caller filters with [`TOOL_ITEM_TYPES`] first, so what comes here is the case where that table was widened but this decision was not updated.
         _ => ToolCategory::Other,
     }
 }
 
-/// `commandExecution` 의 종류 — codex 가 명령을 풀어 적은 `commandActions[].type`(판독 어휘 `read` · `listFiles` ·
-/// `search` · `unknown`)으로 가른다.
+/// The kind of `commandExecution` — decided by `commandActions[].type`, in which codex spells out the command (read vocabulary `read` · `listFiles` ·
+/// `search` · `unknown`).
 ///
-/// 전부 `read` = Read · 전부 `listFiles` = List · `read`·`listFiles` 만 섞임 = Read · `search` 가 있고 그 밖이 이
-/// 셋뿐 = Search. ★셋 밖의 것이 하나라도 있으면 Command 다★ — `unknown` 은 codex 가 풀지 못한 명령이고(실측
-/// fixture 의 `Start-Sleep` 이 그렇다), 모르는 낱말 · `type` 없음도 같은 취급이다(읽기로 잘못 접으면 부작용 있는
-/// 명령이 「읽기」로 요약된다). 배열이 없거나 비어도 Command.
+/// All `read` = Read · all `listFiles` = List · only `read`·`listFiles` mixed = Read · `search` present and the rest only these
+/// three = Search. ★If anything at all is outside the three, it is Command★ — `unknown` is a command codex could not unpack (the `Start-Sleep` of the measured
+/// fixture is that), and an unknown word · a missing `type` are treated the same (if wrongly folded into read, a command with side effects
+/// would be summarized as 「읽기」 (read)). Command too if the array is absent or empty.
 // ADR-0239
 fn command_category(item: &Value) -> ToolCategory {
     let Some(actions) = item.get("commandActions").and_then(Value::as_array) else {
@@ -1404,17 +1404,17 @@ fn command_category(item: &Value) -> ToolCategory {
     }
 }
 
-/// item 전체를 `args_json` 으로 — 단 [`MAX_TOOL_ARGS_BYTES`] 안에서만.
+/// The whole item as `args_json` — but only within [`MAX_TOOL_ARGS_BYTES`].
 ///
-/// ★item 전체를 싣는 것이 기본이다★ — 변형마다 "무엇이 인자인가" 가 달라(명령줄·패치·질의·arguments)
-/// 한 칸을 골라 뽑으면 그 순간 나머지를 잃는다. 이 칸의 계약이 "backend 스키마 그대로" 다.
-/// ★넘으면 자르지 않고 **축약본으로 바꾼다**★ — 중간에서 자른 JSON 은 파싱조차 안 돼 소비자에게 「깨진
-/// 값」이 되지만, `type`·`id` 만 남긴 객체는 여전히 같은 스키마의 부분집합이다. 그래서 잃는 것은
-/// **인자뿐**이고 「이 도구가 불렸다」는 남는다.
-/// ★상한 자체의 사유는 [`MAX_TRANSCRIPT_CHARS`] 와 같다★ — 한 건이 replay 링의 단일 이벤트 상한을
-/// 넘으면 그 링이 나머지를 전부 쫓아낸다.
-/// ★이 경고는 키별 1 회로 눌리지 않는다★ — 그 눌림은 [`CodexAppServerDecoder::observe`] 의 것이고 이
-/// 함수는 `&mut self` 를 안 든다. 큰 item 은 토큰 delta 처럼 쏟아지는 부류가 아니라 그대로 뒀다.
+/// ★Carrying the whole item is the default★ — "what is the argument" differs per variant (command line · patch · query · arguments), so
+/// picking out one field would lose the rest at that moment. The contract of this field is "the backend schema as is".
+/// ★If exceeded, it is not cut but **replaced with an abbreviation**★ — JSON cut in the middle cannot even be parsed and becomes a 「깨진
+/// 값」 (broken value) to the consumer, but an object keeping only `type`·`id` is still a subset of the same schema. So what is lost is
+/// **only the arguments**, and 「이 도구가 불렸다」 (this tool was called) remains.
+/// ★The reason for the cap itself is the same as [`MAX_TRANSCRIPT_CHARS`]★ — if one entry exceeds the replay ring's single-event cap
+/// the ring evicts all the rest.
+/// ★This warning is not squashed to once per key★ — that squashing belongs to [`CodexAppServerDecoder::observe`] and this
+/// function does not hold `&mut self`. A big item is not the kind that pours in like token deltas, so it was left as it is.
 fn bounded_args_json(item: &Value, kind: &str) -> String {
     let full = item.to_string();
     if full.len() <= MAX_TOOL_ARGS_BYTES {
@@ -1436,24 +1436,24 @@ fn bounded_args_json(item: &Value, kind: &str) -> String {
     Value::Object(reduced).to_string()
 }
 
-/// 이력 한 턴을 닫는 경계 이벤트(ADR-0203).
+/// The boundary event that closes one history turn (ADR-0203).
 ///
-/// ★라이브가 쓰는 [`OutputEvent::TurnEnd`] 가 **아닌** 것이 결정이다★: 그 어휘는 결말([`TurnOutcome`])을
-///   요구하는데 페이지 응답에는 지난 턴이 **어떻게** 끝났는지가 실려 오지 않는다. 남는 선택은 둘이고
-///   둘 다 나쁘다 — `Unknown` 은 정직하지만 소비자가 경계마다 「모름」 표식을 그려, 우리가 묻지도 않은
-///   것 때문에 복원된 화면이 표식으로 뒤덮인다. `Completed` 로 접는 것은 **지어낸 결말**이라 그 타입의
-///   doc 이 정면으로 금한다.
-/// ★[`OutputEvent::MessageDone`] 은 결말을 주장하지 않으면서 턴을 닫는다★ — 소비자는 이것을 구분선
-///   하나로 그린다. claude 의 복원도 같은 어휘로 닫는다(ADR-0079 — 그쪽 transcript 에도 결말 줄이 없다).
-/// ★★닫는 것 자체가 load-bearing 이다 — 없애지 말 것★★: 복원분이 진행 신호(텍스트·도구·유저)로만
-///   끝나면 소비자의 파생이 `!turnDone && items>0` 이라 **아무것도 안 보냈는데 대기 표시가 영영 돈다**
-///   (claude 쪽에서 실측된 버그 2026-08-17 · ADR-0079 의 같은 자리).
-/// ★관측(ADR-0113)과 무관하다★ — 이 이벤트는 턴 관측을 적지 않는 문으로 나간다
-///   ([`crate::output_core::OutputCore::emit_without_turn_observation`]). 그래서 이것으로 busy/idle 이
-///   부트스트랩되지 않는다.
-/// ★인자가 `Option` 인 것은 **상한을 넘긴 turn id 를 이미 거른 호출자**를 받기 위해서다★ — 그 거르기는
-///   [`MAX_ID_BYTES`] 규칙 그대로이고(자르지 않고 버린다), `None` 은 「이 턴의 id 를 실을 수 없다」다.
-///   경계 자체는 그래도 선다 — id 를 못 실었다고 턴을 안 닫으면 대기 표시가 도는 쪽으로 틀린다.
+/// ★The decision is that it is **not** the [`OutputEvent::TurnEnd`] that live uses★: that vocabulary requires an outcome ([`TurnOutcome`]),
+///   and a page response does not carry **how** a past turn ended. Two choices remain,
+///   and both are bad — `Unknown` is honest but the consumer draws a 「모름」 (unknown) marker at every boundary, so something we never asked
+///   about covers the restored screen with markers. Folding to `Completed` is an **invented outcome**, which the doc of that
+///   type forbids head-on.
+/// ★[`OutputEvent::MessageDone`] closes the turn without claiming an outcome★ — the consumer draws it as one divider.
+///   The claude restore also closes with the same vocabulary (ADR-0079 — its transcript has no outcome line either).
+/// ★★The closing itself is load-bearing — do not remove it★★: if the restored part ends with only progress signals (text · tool · user), the consumer's
+///   derivation is `!turnDone && items>0`, so **the waiting indicator spins forever though nothing was sent**
+///   (a bug measured on the claude side 2026-08-17 · the same spot in ADR-0079).
+/// ★It is unrelated to observation (ADR-0113)★ — this event goes out through the door that does not record turn observation
+///   ([`crate::output_core::OutputCore::emit_without_turn_observation`]). So busy/idle is
+///   not bootstrapped by it.
+/// ★The argument is an `Option` to accept a **caller that has already filtered out a turn id over the cap**★ — that filtering is
+///   exactly the [`MAX_ID_BYTES`] rule (dropped, not truncated), and `None` means 「이 턴의 id 를 실을 수 없다」 (this turn's id cannot be carried).
+///   The boundary itself still stands — not closing the turn because the id could not be carried errs toward the waiting indicator spinning.
 // ADR-0203
 pub(crate) fn history_turn_boundary(turn_id: Option<&str>) -> OutputEvent {
     OutputEvent::MessageDone {
@@ -1462,25 +1462,25 @@ pub(crate) fn history_turn_boundary(turn_id: Option<&str>) -> OutputEvent {
     }
 }
 
-/// 상대가 만든 문자열을 로그에 실을 수 있는 모양으로 — 자격증명 마스킹 후 길이 절단.
+/// Turn a peer-made string into a form that can go into a log — credential masking, then length truncation.
 fn sanitize(s: &str, limit: usize) -> String {
     truncate(&mask_secrets(s), limit)
 }
 
-/// 상대가 길이를 정하는 **전사 본문**을 상한 안으로 — ★마스킹하지 않는다. 되살리지 말 것★.
+/// Bring the **transcript body**, whose length the peer decides, within the cap — ★not masked. Do not revive masking★.
 ///
-/// ★[`sanitize`] 와 갈리는 자리가 여기다★: 그쪽은 **진단 문자열**(로그·오류 본문·관측 키)용이라
-///   마스킹이 목적이고 길이는 덤이다. 이쪽은 **대화 기록**용이라 목적이 길이 하나다 — 사용자가 친 말과
-///   에이전트가 낸 말을 마스킹으로 변형하면 그 기록이 거짓이 된다(같은 판단으로 claude 쪽 유저 블록도
-///   마스킹 없이 같은 운반선에 실린다).
-/// ★그래서 [`truncate`] 의 문은 둘이고, 그 둘뿐이다★ — 셋째를 만들려는 자리에서는 먼저 「이 문자열은
-///   진단인가 기록인가」를 답해야 한다. 그 성질을 소스에서 재는 항목이
-///   `truncate_is_reachable_only_through_its_two_named_doors` 다.
+/// ★This is where it differs from [`sanitize`]★: that one is for **diagnostic strings** (log · error body · observation key),
+///   so masking is the purpose and length is a bonus. This one is for **conversation records**, so its purpose is length alone — if what the user typed and
+///   what the agent said were altered by masking, that record would become false (by the same judgment the claude-side user block is also
+///   carried on the same carrier without masking).
+/// ★So [`truncate`] has two doors, and only those two★ — at the spot where one wants to make a third, one must first answer 「이 문자열은
+///   진단인가 기록인가」 (is this string a diagnostic or a record). The item that measures that property in the source is
+///   `truncate_is_reachable_only_through_its_two_named_doors`.
 fn clip(s: &str, limit: usize) -> String {
     truncate(s, limit)
 }
 
-/// 대조에 쓰이는 식별자를 길이로 **거른다** — 자르지 않는다(사유 = [`MAX_ID_BYTES`]).
+/// **Filter** identifiers used for comparison by length — do not truncate (reason = [`MAX_ID_BYTES`]).
 fn bounded_id(s: &str) -> Option<String> {
     (s.len() <= MAX_ID_BYTES).then(|| s.to_string())
 }
@@ -1496,7 +1496,7 @@ fn truncate(s: &str, limit: usize) -> String {
 mod tests {
     use super::*;
 
-    /// ★골든은 전부 배송 경로(`decode`)를 탄다★ — 프레이밍까지 함께 재기 위해서다.
+    /// ★All goldens go through the shipping path (`decode`)★ — so that framing is measured together.
     fn decode_line(line: &str) -> Vec<OutputEvent> {
         CodexAppServerDecoder::new().decode(format!("{line}\n").as_bytes())
     }
@@ -1535,10 +1535,10 @@ mod tests {
             .collect()
     }
 
-    // ── 라인 재조립(트레이트 계약) ───────────────────────────────────────────
+    // ── Line reassembly (trait contract) ───────────────────────────────────────────
 
-    /// ★4096B 읽기 경계에서 한 알림이 잘리는 것이 이 계약의 존재 이유다★ — 조각을 버리면
-    /// 컴파일 오류도 실패 테스트도 없이 출력만 사라진다.
+    /// ★That a notification is cut at a 4096B read boundary is the reason this contract exists★ — if a piece is dropped,
+    /// there is no compile error and no failing test, only output that disappears.
     #[test]
     fn one_notification_split_across_two_chunks_still_emits() {
         let line = format!("{}\n", delta_line("안녕하세요"));
@@ -1552,12 +1552,12 @@ mod tests {
         assert_eq!(text_of(&d.decode(&bytes[cut..])), vec!["안녕하세요"]);
     }
 
-    /// 멀티바이트 문자가 청크 경계에서 잘려도 살아남아야 한다.
+    /// A multibyte character must survive even if cut at a chunk boundary.
     #[test]
     fn a_multibyte_character_split_across_chunks_survives() {
         let line = format!("{}\n", delta_line("한글"));
         let bytes = line.as_bytes();
-        // "한" 의 3 바이트 한가운데에서 자른다.
+        // Cut in the middle of the 3 bytes of "한".
         let cut = line.find("한").expect("payload") + 1;
         let mut d = CodexAppServerDecoder::new();
         assert!(d.decode(&bytes[..cut]).is_empty());
@@ -1581,7 +1581,7 @@ mod tests {
         assert_eq!(text_of(&d.decode(chunk.as_bytes())), vec!["done"]);
     }
 
-    /// 개행 없이 넘어온 줄은 **보류**된다 — 개행이 오면 그때 난다.
+    /// A line that arrives without a newline is **held** — it comes out when the newline arrives.
     #[test]
     fn a_line_without_a_terminator_is_held_until_one_arrives() {
         let mut d = CodexAppServerDecoder::new();
@@ -1589,14 +1589,14 @@ mod tests {
         assert_eq!(text_of(&d.decode(b"\n")), vec!["later"]);
     }
 
-    /// 잘린 마지막 줄은 파싱하지 않고 버린다 — 반쪽 JSON 으로 가짜 이벤트를 내지 않는다.
+    /// A truncated last line is dropped without parsing — no fake event from half a JSON.
     #[test]
     fn flush_drops_a_truncated_trailing_line() {
         let partial = &delta_line("never finished")[..30];
         let mut d = CodexAppServerDecoder::new();
         assert!(d.decode(partial.as_bytes()).is_empty());
         assert!(d.flush().is_empty());
-        // 버린 뒤에는 상태가 깨끗하다 — 다음 줄이 그 꼬리와 엉키지 않는다.
+        // After dropping, the state is clean — the next line does not tangle with that tail.
         let line = format!("{}\n", delta_line("after"));
         assert_eq!(text_of(&d.decode(line.as_bytes())), vec!["after"]);
     }
@@ -1610,9 +1610,9 @@ mod tests {
         assert!(d.flush().is_empty());
     }
 
-    /// 개행만 가득한 청크에서 빈 줄은 이벤트도 관측도 만들지 않고, 그 뒤 상태가 깨끗하다.
-    /// ★이 테스트는 비용(제곱 여부)을 재지 않는다★ — 재려면 할당·시간 계측이 필요하고, 그 성질은
-    /// 여기서는 `decode` 본문의 "앞으로만 간다" 주석이 진다.
+    /// In a chunk full of newlines, empty lines make neither events nor observations, and the state afterward is clean.
+    /// ★This test does not measure cost (whether it is quadratic)★ — measuring needs allocation · time instrumentation, and that property is
+    /// carried here by the "only moves forward" comment in the `decode` body.
     #[test]
     fn a_chunk_of_only_newlines_produces_nothing_and_leaves_clean_state() {
         let mut d = CodexAppServerDecoder::new();
@@ -1621,7 +1621,7 @@ mod tests {
         assert_eq!(text_of(&d.decode(line.as_bytes())), vec!["after"]);
     }
 
-    /// ★개행으로 끝나는 거대한 줄도 상한에 걸려야 한다★ — 붙인 뒤에만 재면 이 경로가 통과한다.
+    /// ★A huge line ending in a newline must also hit the cap★ — if measured only after appending, this path passes.
     #[test]
     fn an_oversized_line_that_ends_in_a_newline_is_still_capped() {
         let mut d = CodexAppServerDecoder::new();
@@ -1632,7 +1632,7 @@ mod tests {
             matches!(events.as_slice(), [OutputEvent::Error(m)] if m.contains("lineOverflow")),
             "{events:?}"
         );
-        // 개행에서 끝난 줄이므로 resync 가 필요 없다 — 다음 줄이 바로 난다.
+        // It is a line ended by a newline, so no resync is needed — the next line comes out right away.
         let line = format!("{}\n", delta_line("recovered"));
         assert_eq!(text_of(&d.decode(line.as_bytes())), vec!["recovered"]);
     }
@@ -1649,12 +1649,12 @@ mod tests {
         assert_eq!(text_of(&d.decode(tail.as_bytes())), vec!["recovered"]);
     }
 
-    /// 여러 청크에 걸쳐 자라는 줄도 상한을 넘기 전에 끊긴다 — 버퍼가 상한을 넘어 존재한 적이 없다.
+    /// A line growing across several chunks is also cut before it exceeds the cap — the buffer has never existed beyond the cap.
     #[test]
     fn a_line_growing_across_chunks_is_capped_before_it_exceeds_the_limit() {
         let mut d = CodexAppServerDecoder::new();
         let mib = vec![b'x'; 1024 * 1024];
-        // 4 회면 상한과 정확히 같아 아직 안 넘는다 — 넘기는 것은 다섯 번째다.
+        // 4 times is exactly equal to the cap and does not exceed it yet — the fifth is what exceeds.
         for _ in 0..5 {
             let _ = d.decode(&mib);
             assert!(d.buffer.len() <= MAX_LINE_BYTES, "{}", d.buffer.len());
@@ -1663,7 +1663,7 @@ mod tests {
         assert_eq!(d.buffer.capacity(), 0, "용량이 반납되지 않았다");
     }
 
-    // ── 번역하는 알림 ────────────────────────────────────────────────────────
+    // ── Notifications we translate ────────────────────────────────────────────────
 
     #[test]
     fn agent_message_delta_becomes_a_text_delta_with_both_ids() {
@@ -1710,7 +1710,7 @@ mod tests {
         }
     }
 
-    /// 음수 하나에 그 턴의 사용량 전체가 사라지면 안 된다.
+    /// One negative must not make that turn's whole usage disappear.
     #[test]
     fn negative_token_counts_clamp_instead_of_dropping_the_event() {
         let events = decode_notification(
@@ -1755,8 +1755,8 @@ mod tests {
         }
     }
 
-    /// ★코어가 내는 문자열에 지역화 문장을 섞지 않는다★ — 이 값은 `src/i18n` 을 거치지 않고
-    /// 화면에 그대로 그려진다. 골든으로 못 박는다(느슨한 단언은 산문을 통과시킨다).
+    /// ★Do not mix localized sentences into strings the core emits★ — this value is drawn as is on the screen without going through `src/i18n`.
+    /// Pin it with a golden (a loose assertion lets prose through).
     #[test]
     fn our_own_tokens_are_protocol_field_names_not_prose() {
         let events = decode_notification(
@@ -1769,7 +1769,7 @@ mod tests {
         }
     }
 
-    /// 상한 초과 알림도 같은 규율을 진다 — 문장이 아니라 토큰이어야 한다.
+    /// The cap-exceeded notice carries the same discipline — it must be a token, not a sentence.
     #[test]
     fn the_overflow_event_is_tokens_not_prose() {
         match overflow_event(7) {
@@ -1811,8 +1811,8 @@ mod tests {
         }
     }
 
-    /// ★조각 여섯이 **전부** 잘려야 총량이 유계다★ — 하나라도 빠지면 한 칸으로 전체가 뚫린다.
-    /// 그리고 자르는 자리가 틀리면 안 된다: 끝에서 자르면 가장 실행 가능한 `steer` 부터 사라진다.
+    /// ★The total is bounded only if **all** six pieces are cut★ — if even one is missed, one field breaches the whole.
+    /// And the place of cutting must not be wrong: cutting at the end loses the most actionable `steer` first.
     #[test]
     fn every_server_supplied_part_of_an_error_is_capped_and_the_steer_survives() {
         let huge = "z".repeat(50_000);
@@ -1834,7 +1834,7 @@ mod tests {
         );
         match events.as_slice() {
             [OutputEvent::Error(message)] => {
-                // 잘리는 조각 여섯 + 우리 토큰·구분자 약간.
+                // Six pieces that get cut + a little of our tokens · separators.
                 let bound = ERROR_PART_LIMIT * 6 + 200;
                 assert!(
                     message.chars().count() < bound,
@@ -1929,9 +1929,9 @@ mod tests {
         }
     }
 
-    // ── ADR-0239: 도구 item → 중립 종류 ─────────────────────────────────────────────
+    // ── ADR-0239: tool item → neutral kind ─────────────────────────────────────────────
 
-    /// 라이브(`item/started`)와 이력 문이 **같은 종류**를 내는지까지 함께 재고 그 종류를 돌려준다.
+    /// Also measures whether live (`item/started`) and the history door give **the same kind**, and returns that kind.
     fn category_through_both_doors(item: Value) -> ToolCategory {
         let (started, _, history) = through_each_door(item);
         let category_of = |events: &[OutputEvent]| match events {
@@ -1943,8 +1943,8 @@ mod tests {
         live
     }
 
-    /// ★`commandExecution` 의 종류는 `commandActions[].type` 의 조합이 정한다★ — `unknown` 이 하나라도 있거나 배열이
-    /// 없거나 비면 명령이고, 모르는 낱말 · `type` 없음도 명령이다.
+    /// ★The kind of `commandExecution` is decided by the combination of `commandActions[].type`★ — it is a command if there is even one `unknown` or the array is
+    /// absent or empty, and an unknown word · a missing `type` is also a command.
     // ADR-0239
     #[test]
     fn command_actions_decide_the_category_of_a_command_execution() {
@@ -2032,8 +2032,8 @@ mod tests {
         }
     }
 
-    /// ★실측 fixture(M7 — codex-cli 0.156.1)의 `commandActions: [{type:"unknown"}]` 는 명령이다★ — 라이브 줄 그대로와
-    /// 그 item 을 이력 문에 넣은 것 둘 다.
+    /// ★`commandActions: [{type:"unknown"}]` of the measured fixture (M7 — codex-cli 0.156.1) is a command★ — both the live line as is and
+    /// that item put into the history door.
     // ADR-0239
     #[test]
     fn the_tool_end_fixture_command_with_an_unknown_action_is_a_command() {
@@ -2057,7 +2057,7 @@ mod tests {
         }
     }
 
-    /// 명령 밖의 도구 변형은 item 타입 하나로 정해진다.
+    /// A tool variant other than command is decided by the item type alone.
     // ADR-0239
     #[test]
     fn each_other_tool_item_type_has_its_own_category() {
@@ -2088,8 +2088,8 @@ mod tests {
         }
     }
 
-    /// ★크기 상한을 넘는 item 도 종류는 온전한 item 에서 정한다★ — `args_json` 은 `commandActions` 가 없는 축약본인데
-    /// 종류는 그 안의 `search` 를 본 값이다.
+    /// ★Even an item over the size cap has its kind decided from the intact item★ — `args_json` is an abbreviation without `commandActions`, but
+    /// the kind is the value that saw the `search` inside it.
     // ADR-0239
     #[test]
     fn an_item_over_the_args_cap_still_gets_its_category_from_the_whole_item() {
@@ -2118,9 +2118,9 @@ mod tests {
         }
     }
 
-    // ── ADR-0241: 도구 끝 결과 ─────────────────────────────────────────────────────
+    // ── ADR-0241: tool end result ─────────────────────────────────────────────────
 
-    /// 도구 item 하나를 `item/completed` 로 새 번역기에 넣고, 나온 사건과 그 번역기(관측 맵을 보려고)를 돌려준다.
+    /// Feed one tool item to a new translator as `item/completed`, and return the events that came out and that translator (to look at the observation map).
     fn complete_tool(item: Value) -> (Vec<OutputEvent>, CodexAppServerDecoder) {
         let mut d = CodexAppServerDecoder::new();
         let events = d.decode(
@@ -2133,8 +2133,8 @@ mod tests {
         (events, d)
     }
 
-    /// ★끝이 실패 · 거부면 결과 하나 — 호출은 다시 내지 않는다★. 판정은 벤더 `status` 뿐이고(명령의 `exitCode` 도,
-    /// MCP 의 `error` 도 읽지 않는다), 번역기는 `Refused` 를 내지 않는다(우리 거절의 귀속은 통로 몫).
+    /// ★If the end is a failure · refusal, one result — the call is not emitted again★. The decision is the vendor `status` alone (neither the command's `exitCode`
+    /// nor MCP's `error` is read), and the translator does not emit `Refused` (attributing our refusals belongs to the path).
     // ADR-0241
     #[test]
     fn a_failed_or_declined_tool_end_becomes_one_tool_result_on_the_completed_door() {
@@ -2181,8 +2181,8 @@ mod tests {
         }
     }
 
-    /// ★정상 완료 · 아직 돎 · 끊김 · status 칸 없음은 사건 0 이다★ — 0 아닌 `exitCode` 가 실린 `completed` 도(판정은
-    /// `status` 하나다). 오늘의 일상 계수(`item:`)는 그대로 남는다.
+    /// ★Normal completion · still running · interrupted · no status field are 0 events★ — even a `completed` carrying a non-zero `exitCode` (the decision is
+    /// `status` alone). Today's routine count (`item:`) stays as it is.
     // ADR-0241
     #[test]
     fn other_tool_ends_emit_nothing_and_keep_the_routine_count() {
@@ -2206,8 +2206,8 @@ mod tests {
         }
     }
 
-    /// ★모르는 끝 상태는 사건 0 + 드리프트 한 칸★ — 상대 문자열은 키가 되지 않는다(서로 다른 모르는 값 둘이 같은 칸에
-    /// 쌓인다). 문자열이 아닌 값도 같은 칸이다.
+    /// ★An unknown end status is 0 events + one drift entry★ — a peer string does not become a key (two different unknown values pile up in the same
+    /// entry). A non-string value goes to the same entry.
     // ADR-0241
     #[test]
     fn an_unknown_tool_status_emits_nothing_and_is_counted_as_drift_under_one_key() {
@@ -2244,7 +2244,7 @@ mod tests {
         );
     }
 
-    /// 스키마가 그 변형에 적지 않은 아는 낱말(`mcpToolCall` 의 `declined`)은 뜻대로 옮기되 드리프트로 센다.
+    /// A known word the schema did not list for that variant (`declined` of `mcpToolCall`) is carried over as meant but counted as drift.
     // ADR-0241
     #[test]
     fn a_known_status_outside_the_variant_vocabulary_is_translated_and_counted_as_drift() {
@@ -2268,8 +2268,8 @@ mod tests {
         );
     }
 
-    /// ★끝 상태를 이미 이상으로 적었으면 일상 계수(`item:`)를 더하지 않는다★ — 관측 하나는 한 등급으로만 센다. 모르는 값 ·
-    /// 문자열 아닌 값 · 스키마 어휘 밖의 아는 낱말(결말 없음 쪽 · `webSearch` 에 실린 status 까지) 모두.
+    /// ★If the end status was already recorded as anomalous, the routine count (`item:`) is not added★ — one observation is counted at one grade only. All of: unknown value ·
+    /// non-string value · known word outside the schema vocabulary (including the no-outcome side · even a status carried on `webSearch`).
     // ADR-0241
     #[test]
     fn a_tool_end_already_counted_as_drift_is_not_counted_again_as_routine() {
@@ -2303,9 +2303,9 @@ mod tests {
         }
     }
 
-    /// ★status 칸이 있어야 할 변형에서 칸이 빠지면 결함 한 칸이다 — 조용히 넘기지 않는다★: 상류가 칸 이름을 바꾸면 실패 ·
-    /// 거부 배지가 전부 사라지는데, 그때 남는 신호가 debug 일상 계수뿐이면 배송 구성에서 아무것도 안 남는다. 일상 계수는
-    /// 더하지 않는다. 이력 문도 같다(호출 행은 그대로 선다). 칸이 없는 `webSearch` 만 일상이다(위 `other_tool_ends…`).
+    /// ★If the field is missing in a variant that should have a status field, it is one defect entry — not passed over quietly★: if upstream renames the field, failure ·
+    /// refusal badges all disappear, and if the only signal left then is the debug routine count, nothing is left in the shipping configuration. The routine count is
+    /// not added. The history door is the same (the call row still stands). Only `webSearch`, which has no field, is routine (`other_tool_ends…` above).
     // ADR-0241
     #[test]
     fn a_status_less_tool_end_on_a_status_bearing_variant_is_a_defect() {
@@ -2340,9 +2340,9 @@ mod tests {
         }
     }
 
-    /// ★빈 스키마 어휘 = 「status 칸이 없는 변형」이다★ — 빠진 status 를 일상으로 읽는 판정이 이 빈 목록에 기댄다. 도구 변형
-    /// 표에서 빈 목록은 `webSearch` 하나여야 한다: 새 변형을 표에 더하고 어휘를 안 적으면 그 변형의 빠진 status 가 조용히
-    /// 일상이 된다.
+    /// ★Empty schema vocabulary = 「status 칸이 없는 변형」 (a variant with no status field)★ — the decision that reads a missing status as routine leans on this empty list. In the tool-variant
+    /// table the empty list must be `webSearch` alone: if a new variant is added to the table without writing its vocabulary, that variant's missing status quietly
+    /// becomes routine.
     // ADR-0241
     #[test]
     fn every_tool_variant_but_web_search_has_a_status_vocabulary() {
@@ -2358,8 +2358,8 @@ mod tests {
         }
     }
 
-    /// ★가리킬 호출이 없으면 결과를 내지 않고 결함으로 센다★ — id 가 없거나 상한을 넘은 것(호출도 같은 거르기로 id 를
-    /// 잃는다).
+    /// ★If there is no call to point at, no result is emitted and it is counted as a defect★ — an id that is absent or over the cap (the call also
+    /// loses its id through the same filtering).
     // ADR-0241
     #[test]
     fn a_failed_tool_end_without_a_usable_id_emits_nothing_and_is_a_defect() {
@@ -2392,8 +2392,8 @@ mod tests {
         );
     }
 
-    /// ★이력 문은 끝난 item 하나에서 `[ToolCall, ToolResult]` 를 이 순서로 낸다★ — 누산기는 결과를 앞선 호출 행에 붙이므로
-    /// 순서가 뒤집히면 결과가 버려진다. 같은 id 를 가리키고, 정상 완료면 호출 하나뿐이다.
+    /// ★The history door emits `[ToolCall, ToolResult]` from one finished item in this order★ — the accumulator attaches the result to the preceding call row, so
+    /// if the order is reversed the result is dropped. They point at the same id, and for a normal completion there is only the call.
     // ADR-0241
     #[test]
     fn the_history_door_emits_the_call_then_its_result() {
@@ -2425,7 +2425,7 @@ mod tests {
         }
     }
 
-    /// 이력 문도 id 를 못 쓰면 호출만 내고 결과는 결함으로 센다 — 호출 행은 id 없이도 선다(오늘 그대로).
+    /// If the history door also cannot use the id, it emits only the call and counts the result as a defect — the call row stands even without an id (as today).
     // ADR-0241
     #[test]
     fn the_history_door_without_a_usable_id_emits_only_the_call() {
@@ -2445,7 +2445,7 @@ mod tests {
         );
     }
 
-    /// 알림 줄만 골라 한 번역기에 차례로 넣는다 — 통로가 번역기에 넘기는 것은 알림뿐이다(응답 · 서버 요청은 `id` 를 싣는다).
+    /// Pick only notification lines and feed them to one translator in order — what the path hands to the translator is notifications only (responses · server requests carry an `id`).
     fn decode_fixture_notifications(fixture: &str) -> Vec<OutputEvent> {
         let mut d = CodexAppServerDecoder::new();
         fixture
@@ -2458,8 +2458,8 @@ mod tests {
             .collect()
     }
 
-    /// ★실측(codex-cli 0.156.1 · fixture `tool_fail_u2` — `exit 7`)★: 0 아닌 종료는 `status: failed` 로 닫히고, 번역기는
-    /// 그 명령의 호출 뒤 같은 id 의 `ToolResult{Failed}` 를 정확히 하나 낸다.
+    /// ★Measured (codex-cli 0.156.1 · fixture `tool_fail_u2` — `exit 7`)★: a non-zero exit closes as `status: failed`, and the translator
+    /// emits exactly one `ToolResult{Failed}` of the same id after that command's call.
     // ADR-0241
     #[test]
     fn the_nonzero_exit_fixture_yields_the_call_then_exactly_one_failed_result() {
@@ -2485,7 +2485,7 @@ mod tests {
         }
     }
 
-    /// 기존 실측 fixture 셋은 도구 끝이 전부 `completed` 라 결과 사건이 하나도 없다 — 사건열이 오늘 그대로다.
+    /// The three existing measured fixtures all have tool ends `completed`, so there are no result events at all — the event sequence is as today.
     // ADR-0241
     #[test]
     fn the_older_fixtures_whose_tools_all_completed_yield_no_tool_result() {
@@ -2507,11 +2507,11 @@ mod tests {
         }
     }
 
-    // ── 되울린 유저 메시지(`item/*` 의 `userMessage`) ────────────────────────
+    // ── Echoed user message (`userMessage` of `item/*`) ────────────────────────
 
-    /// ★버리지 마라 — 이것이 유저 발화를 화면에 올리는 유일한 경로다★: 이 백엔드는 입력 시점 합성
-    /// 에코를 선언하지 않으므로(ADR-0193), 이 item 을 떨어뜨리면 유저가 친 말이 화면에 영영 안 뜨고
-    /// 재부착 뒤에도 복원되지 않는다.
+    /// ★Do not drop it — this is the only path that puts the user's utterance on the screen★: this backend does not declare an input-time synthetic
+    /// echo (ADR-0193), so if this item is dropped, what the user typed never appears on the screen and
+    /// is not restored after reattach either.
     #[test]
     fn a_rebounded_user_message_is_marked_as_ours_and_carries_its_text() {
         let events = decode_notification(
@@ -2532,7 +2532,7 @@ mod tests {
         }
     }
 
-    /// 되울린 유저 메시지 item 하나를 두 알림에 똑같이 실어 준다.
+    /// Carry one echoed user message item identically in two notifications.
     fn user_item_line(method: &str, id: &str, text: &str) -> String {
         notification_line(
             method,
@@ -2543,11 +2543,11 @@ mod tests {
         )
     }
 
-    /// ★**먼저 온 쪽**이 올리고 둘째는 빠진다 — 어느 순서로 와도★. 한쪽 알림에 고정하면 잃는 것이
-    /// 「유저 자신이 친 말」이고, 두 방향 모두 실패 사례가 있다: `item/started` 가 이 종류에 오는지는
-    /// 미측정이고, `item/completed` 는 중단된 item 에 아예 오지 않는 것이 실측이다(TRD §2 L10).
-    /// ★같은 인스턴스로 재는 것이 요점이다★ — 대조 기억이 그 인스턴스 안에 산다. 새 인스턴스로 두 줄을
-    /// 넣으면 이 항목은 아무것도 재지 않는다.
+    /// ★**Whichever comes first** raises it and the second drops out — in either order★. If we pin it to one notification, what is lost is
+    /// 「유저 자신이 친 말」 (what the user typed themselves), and both directions have failure cases: whether `item/started` comes for this kind is
+    /// unmeasured, and `item/completed` is measured not to come at all for an interrupted item (TRD §2 L10).
+    /// ★The point is measuring with the same instance★ — the comparison memory lives inside that instance. If two lines are fed to a new instance,
+    /// this item measures nothing.
     #[test]
     fn the_rebounded_user_message_lands_once_whichever_notification_arrives_first() {
         for order in [
@@ -2571,8 +2571,8 @@ mod tests {
         }
     }
 
-    /// ★item id 가 다르면 다른 말이다★ — 대조가 「유저 메시지를 이미 한 번 올렸나」로 뭉개지면 한 대화의
-    /// 두 번째 질문부터 화면에 안 뜬다.
+    /// ★A different item id means different words★ — if the comparison is flattened into 「유저 메시지를 이미 한 번 올렸나」 (has a user message already been raised once), from the
+    /// second question of a conversation on, nothing appears on the screen.
     #[test]
     fn two_different_user_items_both_land() {
         let mut d = CodexAppServerDecoder::new();
@@ -2581,9 +2581,9 @@ mod tests {
         assert_eq!(events.len(), 2, "{events:?}");
     }
 
-    /// ★대조 기억은 세션 길이로 자라지 않는다★ — 상대가 item 을 무한히 만들어도 이 칸은 상한에 선다.
-    /// 그 대가 = 상한 너머로 밀려난 id 가 뒤늦게 다시 오면 그 말풍선이 두 번 남는다(프론트 `uuid`
-    /// dedup 이 그 경우를 받는다).
+    /// ★The comparison memory does not grow with session length★ — even if the peer makes items endlessly, this field stands at the cap.
+    /// The price = if an id pushed out beyond the cap comes again late, that bubble stays twice (the frontend `uuid`
+    /// dedup takes that case).
     #[test]
     fn the_user_item_memory_is_bounded() {
         let mut d = CodexAppServerDecoder::new();
@@ -2593,9 +2593,9 @@ mod tests {
         assert_eq!(d.emitted_user_items.len(), MAX_EMITTED_USER_ITEMS);
     }
 
-    /// ★상한을 넘긴 id 는 기억에 남지 않는다★ — 와이어로 나가는 `uuid` 가 같은 상한에서 걸러지는데
-    /// 이 칸만 원형을 담으면, 칸 수(64)만 세는 상한 아래에서 줄 상한만큼 큰 문자열이 세션 내내 남는다.
-    /// 그 대가로 그 말풍선은 두 벌 올라간다(대조할 키가 없어졌다) — 이 항목이 그 둘을 함께 잰다.
+    /// ★An id over the cap is not kept in the memory★ — the `uuid` going out on the wire is filtered at the same cap, and if only this field held the raw form,
+    /// under a cap that counts only entries (64), a string as large as the line cap would stay for the whole session.
+    /// The price is that bubble goes up in two copies (there is no key left to compare) — this item measures both together.
     #[test]
     fn an_oversize_user_item_id_is_not_retained_in_the_dedup_memory() {
         let long_id = "i".repeat(MAX_ID_BYTES + 1);
@@ -2612,8 +2612,8 @@ mod tests {
         assert_eq!(completed.len(), 1, "{completed:?}");
     }
 
-    /// ★상한 **안**의 id 는 그대로 둘째 알림을 막는다★ — 위 항목의 거름이 dedup 자체를 끄지 않았는지
-    /// 잰다(대조는 어느 쪽이든 정확 일치다).
+    /// ★An id **within** the cap still blocks the second notification as it is★ — measures that the filter of the item above did not switch off dedup itself
+    /// (the comparison is an exact match either way).
     #[test]
     fn a_bounded_user_item_id_still_suppresses_the_second_notification() {
         let id = "i".repeat(MAX_ID_BYTES);
@@ -2629,9 +2629,9 @@ mod tests {
         assert_eq!(d.emitted_user_items.len(), 1, "{:?}", d.emitted_user_items);
     }
 
-    /// ★id 가 없으면 대조할 키가 없다★ — 그래서 그때만 `item/started` 한쪽에 건다. 양쪽을 다 올리면
-    /// 같은 말이 두 벌 남고, 프론트 dedup 키도 그 id 라 거기서도 안 걸린다. 스키마가 required 로 적는
-    /// 칸이 빈 것이라 결함으로 계수한다.
+    /// ★If there is no id there is no key to compare★ — so only then do we hang it on the `item/started` side alone. If both are raised,
+    /// the same words remain twice, and the frontend dedup key is also that id, so it does not catch there either. A field the schema marks required being empty
+    /// is counted as a defect.
     #[test]
     fn a_user_item_without_an_id_lands_only_at_item_start_and_is_counted_as_malformed() {
         let item = serde_json::json!({"type": "userMessage",
@@ -2649,8 +2649,8 @@ mod tests {
         );
     }
 
-    /// 텍스트 조각이 여럿이면 줄로 잇는다 — 붙여 쓰면 낱말이 엉긴다. 그리고 텍스트가 아닌 입력
-    /// (이미지·mention 등)은 나를 어휘가 없어 빠진다(알고 받는 손실).
+    /// If there are several text pieces they are joined with lines — written together the words run together. And non-text input
+    /// (images · mention etc.) has no vocabulary to carry it and drops out (a knowingly accepted loss).
     #[test]
     fn user_message_text_parts_are_joined_and_non_text_inputs_are_dropped() {
         let events = decode_notification(
@@ -2670,12 +2670,12 @@ mod tests {
         }
     }
 
-    /// 텍스트가 하나도 없는 유저 메시지는 **빈 말풍선을 만들지 않는다** — 대신 계수로 남아, 그 입력
-    /// 종류를 나를 어휘가 없다는 사실이 침묵하지 않는다.
-    /// ★되울린 유저 메시지는 상대가 길이를 정하는 칸이다★ — 상한이 없으면 큰 붙여 넣기 하나가 replay
-    /// 링의 단일 이벤트 상한을 홀로 넘고, 링은 그 한 건을 넣으려고 **그 에이전트의 나머지 되감기를
-    /// 전부 쫓아낸다**. ★그래도 마스킹하지는 않는다 — 되살리지 말 것★: 이것은 진단 문자열이 아니라
-    /// 사용자가 친 말 그대로다(그 판정 정본 = `user_message_event` doc).
+    /// A user message with no text at all **does not make an empty bubble** — instead it is left as a count, so the fact that we have no
+    /// vocabulary for that input kind is not silent.
+    /// ★An echoed user message is a field whose length the peer decides★ — without a cap, one big paste alone exceeds the replay
+    /// ring's single-event cap, and to fit that one entry the ring **evicts all the rest of that agent's
+    /// rewind**. ★Even so it is not masked — do not revive masking★: this is not a diagnostic string but
+    /// exactly what the user typed (source of truth for that decision = `user_message_event` doc).
     #[test]
     fn a_huge_pasted_user_message_is_capped_but_not_masked() {
         let secret = "sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -2694,14 +2694,14 @@ mod tests {
             .as_str()
             .expect("text")
             .to_string();
-        // 상한 + 말줄임 한 글자. 넘겨 보낸 것은 그 두 배였다.
+        // The cap + one ellipsis character. What was sent over was twice that.
         assert_eq!(
             carried.chars().count(),
             MAX_TRANSCRIPT_CHARS + 1,
             "상한 없이 실렸다"
         );
 
-        // 짧은 자격증명은 상한 안이라 그대로 남아야 한다 — 마스킹을 켜면 이 단언이 깨진다.
+        // A short credential is within the cap and must remain as it is — if masking is turned on, this assertion breaks.
         let short = decode_notification(
             "item/started",
             serde_json::json!({"threadId": "t", "turnId": "u-2",
@@ -2734,7 +2734,7 @@ mod tests {
         );
     }
 
-    // ── 소비 에코(`clientId`) — ADR-0231 ────────────────────────────────────
+    // ── Consumption echo (`clientId`) — ADR-0231 ────────────────────────────────────
 
     fn client_item(client_id: Option<&str>) -> Value {
         let mut item = serde_json::json!({"type": "userMessage", "id": "codex-item-1",
@@ -2755,8 +2755,8 @@ mod tests {
         }
     }
 
-    /// ★받음은 말풍선 **바로 앞**이다★ — 누산기는 `Delivered` 자리에 목록 항목의 말풍선을 세우고, 뒤이은
-    /// 되울림은 같은 uuid 라 한 벌로 접는다. uuid 가 codex item id 로 남으면 말풍선이 두 벌 선다.
+    /// ★The receipt is **right before** the bubble★ — the accumulator sets the list entry's bubble at the `Delivered` spot, and the echo that follows
+    /// folds into one since it has the same uuid. If the uuid stays as the codex item id, two bubbles stand.
     #[test]
     fn an_echo_carrying_our_client_id_is_delivered_right_before_a_bubble_keyed_by_it() {
         for method_name in [method::ITEM_STARTED, method::ITEM_COMPLETED] {
@@ -2778,7 +2778,7 @@ mod tests {
         }
     }
 
-    /// `clientId` 가 없으면 오늘 그대로다 — 받음 없이 codex item id 로 말풍선 하나.
+    /// If there is no `clientId` it is as today — one bubble with the codex item id, without a receipt.
     #[test]
     fn an_echo_without_a_client_id_is_today_s_bubble_and_no_delivery() {
         let events = decode_notification(
@@ -2791,7 +2791,7 @@ mod tests {
         }
     }
 
-    /// 한 item 의 두 알림은 받음·말풍선 **한 벌**이다 — 둘째는 item id 대조에 걸려 통째로 빠진다.
+    /// Two notifications of one item are **one set** of receipt · bubble — the second is caught by the item id comparison and dropped entirely.
     #[test]
     fn the_second_notification_of_an_echo_repeats_neither_delivery_nor_bubble() {
         let mut d = CodexAppServerDecoder::new();
@@ -2802,8 +2802,8 @@ mod tests {
         assert!(second.is_empty(), "{second:?}");
     }
 
-    /// ★이력 문은 받음을 내지 않는다★ — 지난 기록은 받음 사건이 아니고, 이력 덩이를 싣는 코어 문은 목록
-    /// 사건을 받지 않는다(debug 빌드에서 단언이 터진다). 말풍선 uuid 는 라이브와 같은 규칙이다.
+    /// ★The history door does not emit a receipt★ — past records are not receipt events, and the core door that carries history chunks does not accept list
+    /// events (an assertion fires in a debug build). The bubble uuid follows the same rule as live.
     #[test]
     fn the_history_door_keys_the_bubble_by_client_id_but_delivers_nothing() {
         let (_, _, history) = through_each_door(client_item(Some("ours-1")));
@@ -2813,7 +2813,7 @@ mod tests {
         }
     }
 
-    /// 상한을 넘긴 `clientId` 는 없는 것과 같다 — 대조 토큰이라 자르지 않고 거른다.
+    /// A `clientId` over the cap is the same as none — it is a comparison token, so it is filtered, not truncated.
     #[test]
     fn an_oversize_client_id_falls_back_to_today_s_bubble() {
         let long = "c".repeat(MAX_ID_BYTES + 1);
@@ -2827,10 +2827,10 @@ mod tests {
         }
     }
 
-    // ── 턴 경계(`turn/completed`) ────────────────────────────────────────────
+    // ── Turn boundary (`turn/completed`) ────────────────────────────────────────
 
-    /// ★대기 인디케이터를 끄는 것은 이 이벤트 하나다★ — 어느 결말에서든 경계를 안 내면 그 대화의
-    /// 화면이 영영 돈다. 그래서 **모르는 값까지** 한 줄에 1 회다.
+    /// ★Only this one event turns off the waiting indicator★ — if no boundary is emitted at any outcome, that conversation's
+    /// screen spins forever. So **even for unknown values** it is once per line.
     #[test]
     fn every_turn_status_ends_the_turn_exactly_once() {
         for (status, expected) in [
@@ -2857,7 +2857,7 @@ mod tests {
         }
     }
 
-    /// 결말과 사유는 **한 이벤트**로 온다 — 쪼개면 소비자에게 순서 계약이 하나 더 생긴다.
+    /// The outcome and reason come as **one event** — if split, consumers get one more ordering contract.
     #[test]
     fn a_failed_turn_carries_its_reason_inside_the_outcome() {
         let events = decode_notification(
@@ -2881,7 +2881,7 @@ mod tests {
         }
     }
 
-    /// `Turn.error` 는 optional 이다 — 사유가 없어도 실패했다는 사실은 남아야 한다.
+    /// `Turn.error` is optional — even without a reason, the fact of failure must remain.
     #[test]
     fn a_failed_turn_without_an_error_payload_still_ends_the_turn_as_failed() {
         let events = decode_notification(
@@ -2902,9 +2902,9 @@ mod tests {
         ));
     }
 
-    /// ★되살리지 마라 — claude 쪽에서 실제로 터졌다가 되돌린 그 오분류다★: 실패 판정을
-    /// 「완료가 아닌 것 전부」(여집합)로 쓰면 유저가 Esc 로 정상 중단한 턴이 실패로 도장 찍힌다.
-    /// 이 저장소에서 중단은 1 급 정상 경로다.
+    /// ★Do not revive it — this is the very misclassification that actually blew up on the claude side and was reverted★: if the failure decision is
+    /// written as 「완료가 아닌 것 전부」 (everything that is not completed) (the complement), a turn the user normally interrupted with Esc is stamped as a failure.
+    /// In this repository an interrupt is a first-class normal path.
     #[test]
     fn an_interrupted_turn_is_not_a_failure_allowlist_not_denylist() {
         let events = decode_notification(
@@ -2934,11 +2934,11 @@ mod tests {
         ));
     }
 
-    /// 상류가 다섯째 값을 더해도 경계는 서야 한다 — 버리면 그 화면이 영영 돈다. 그리고 그 값은
-    /// **드리프트**로 계수된다(선언에 없는 이름이므로).
+    /// Even if upstream adds a fifth value, the boundary must stand — if dropped, that screen spins forever. And that value is
+    /// counted as **drift** (since it is a name not in the declaration).
     ///
-    /// ★그런데 그 계수는 **상대 문자열을 키로 쓰지 않는다**★ — 이 맵은 절대 비워지지 않는 유계 칸이라,
-    /// 임의 status 를 키로 쓰면 그것만으로 예산이 차서 정작 봐야 할 드리프트가 이름 없이 개수만 남는다.
+    /// ★But that count **does not use the peer string as a key**★ — this map is a bounded field that never empties, so
+    /// if an arbitrary status were used as a key the budget would fill by that alone and the drift that should be seen would leave only a count, without a name.
     #[test]
     fn an_unknown_turn_status_still_ends_the_turn_and_is_counted_under_one_bounded_key() {
         let mut d = CodexAppServerDecoder::new();
@@ -2956,7 +2956,7 @@ mod tests {
                 ..
             }]
         ));
-        // 서로 다른 모르는 값 둘이 **같은 칸**에 쌓인다 — 예산을 태우지 않는다.
+        // Two different unknown values pile up in the **same entry** — the budget is not burned.
         let _ = d.decode(
             notification_line(
                 "turn/completed",
@@ -2971,7 +2971,7 @@ mod tests {
             "상대 문자열이 키가 됐다: {seen:?}"
         );
 
-        // 선언에 **있는** 값은 그대로 이름이 남는다 — 그 집합은 유계라 예산을 태우지 않는다.
+        // A value that **is** in the declaration keeps its name as is — that set is bounded, so the budget is not burned.
         let mut d = CodexAppServerDecoder::new();
         let _ = d.decode(
             notification_line(
@@ -2986,8 +2986,8 @@ mod tests {
         );
     }
 
-    /// ★`inProgress` 를 아는 결말 중 하나로 추측해 접지 말 것★ — 그 값이 **완료 알림에** 실려 오는
-    /// 조합이 무슨 뜻인지 우리는 모른다(TRD §6-1 의 `[미확인]` 칸). 접으면 화면이 거짓 결말을 그린다.
+    /// ★Do not guess `inProgress` and fold it into one of the known outcomes★ — we do not know what the combination of that value **arriving on a completion notification**
+    /// means (the `[미확인]` field of TRD §6-1). If folded, the screen draws a false outcome.
     #[test]
     fn an_in_progress_status_on_a_completion_is_not_guessed() {
         let line = notification_line(
@@ -3009,7 +3009,7 @@ mod tests {
         );
     }
 
-    /// 한 칸이 어긋나도 경계는 선다 — 그래서 이 알림만 `parse::<T>()` 에 걸지 않는다.
+    /// Even if one field is off the boundary stands — so only this notification is not run through `parse::<T>()`.
     #[test]
     fn turn_completed_without_a_readable_status_still_ends_the_turn() {
         let line = notification_line("turn/completed", serde_json::json!({"threadId": "t-1"}));
@@ -3027,8 +3027,8 @@ mod tests {
         );
     }
 
-    /// ★`MessageDone` 은 이 번역기의 어휘가 아니다★ — 턴 경계와 메시지 경계를 한 어휘로 합치면 한 턴에
-    /// 완료 item 이 여럿인 이 백엔드에서 경계가 쪼개진다. 되살아나면 여기가 빨개진다.
+    /// ★`MessageDone` is not this translator's vocabulary★ — if turn boundary and message boundary are merged into one vocabulary, the boundary splits in this backend where one turn has
+    /// several completed items. If it comes back, this goes red.
     #[test]
     fn this_translator_never_emits_the_message_boundary_vocabulary() {
         let mut d = CodexAppServerDecoder::new();
@@ -3057,7 +3057,7 @@ mod tests {
         );
     }
 
-    /// `turn/started` 는 이 단계의 번역 대상이 아니다 — 등급만 일상으로 남는다.
+    /// `turn/started` is not a translation target at this stage — only the grade is left as routine.
     #[test]
     fn turn_started_stays_untranslated() {
         let line = notification_line(
@@ -3072,10 +3072,10 @@ mod tests {
         );
     }
 
-    // ── 버리는 것 — 단 관측은 남긴다 ─────────────────────────────────────────
+    // ── What is dropped — but the observation is kept ─────────────────────────────────────────
 
-    /// ★상류가 union 을 늘리는 자리다★ — 여기서 침묵하면 드리프트 진단이 정작 드리프트가
-    /// 나타나는 지점에서 눈을 감는다.
+    /// ★This is where upstream grows the union★ — if silent here, the drift diagnostic closes its eyes at exactly the point where
+    /// drift appears.
     #[test]
     fn an_unknown_item_type_is_counted_under_a_distinguishable_key() {
         let line = notification_line(
@@ -3092,14 +3092,14 @@ mod tests {
                 .get("item:item/started#quantumEntanglement"),
             Some(&1)
         );
-        // 메서드 이름 축과 섞이지 않는다.
+        // It does not mix with the method-name axis.
         assert!(d
             .untranslated_observations()
             .get("item:item/started")
             .is_none());
     }
 
-    /// 본문은 delta 알림이 나른다 — item 쪽에서 또 내면 같은 글이 두 번 뜬다. 그래도 관측은 남는다.
+    /// The body is carried by the delta notification — if the item side emitted it too, the same text would show twice. The observation is still kept.
     #[test]
     fn agent_message_item_emits_nothing_but_is_observed() {
         let line = notification_line(
@@ -3151,7 +3151,7 @@ mod tests {
         assert_eq!(d.untranslated_observations().len(), 1);
     }
 
-    /// 우리 어휘에 추론 축이 없다 — 버리되, 버렸다는 사실은 남는다.
+    /// Our vocabulary has no reasoning axis — it is dropped, but the fact that it was dropped is kept.
     #[test]
     fn reasoning_delta_is_dropped_but_observed() {
         let line = notification_line(
@@ -3167,8 +3167,8 @@ mod tests {
         );
     }
 
-    /// ★상대가 보내는 경고도 키별 1 회로 눌린다★ — 이 파일의 다른 모든 상대발 warn 과 같은
-    /// 규율이다. 매번 내면 데몬의 동기 파일 sink 로 같은 홍수를 연다.
+    /// ★Warnings the peer sends are also squashed to once per key★ — the same discipline as every other peer-originated warn in this file.
+    /// If emitted every time, it opens the same flood into the daemon's synchronous file sink.
     #[test]
     fn deprecation_notice_emits_nothing_and_is_throttled_like_every_other_peer_warning() {
         let line = notification_line("deprecationNotice", serde_json::json!({"message": "gone"}));
@@ -3181,7 +3181,7 @@ mod tests {
         assert_eq!(seen.len(), 1, "키 하나로 모여야 한다(로그는 첫 1 회뿐)");
     }
 
-    // ── 결함은 결함으로 기록된다(일상 소음에 섞지 않는다) ────────────────────
+    // ── Defects are recorded as defects (not mixed into routine noise) ────────────────────
 
     #[test]
     fn known_method_with_a_wrong_shape_emits_nothing_and_is_recorded_as_a_defect() {
@@ -3198,7 +3198,7 @@ mod tests {
         );
     }
 
-    /// ★가장 잦은 알림의 모양이 바뀌면 delta 마다 경고가 나간다★ — 키별 1 회로 눌러야 한다.
+    /// ★If the shape of the most frequent notification changes, a warning goes out on every delta★ — it must be squashed to once per key.
     #[test]
     fn a_repeated_shape_defect_is_counted_but_logged_once() {
         let line = notification_line(
@@ -3225,7 +3225,7 @@ mod tests {
         assert_eq!(d.untranslated_observations().get("params:error"), Some(&1));
     }
 
-    /// ★도구 변형인데 필수 칸이 빠진 것은 결함이다★ — 일상 계수로 흘리면 조용한 소음이 된다.
+    /// ★A tool variant with a missing required field is a defect★ — if sent off as a routine count it becomes quiet noise.
     #[test]
     fn a_tool_item_missing_its_tool_field_is_recorded_as_a_defect() {
         let line = notification_line(
@@ -3264,8 +3264,8 @@ mod tests {
         );
     }
 
-    /// ★화면을 비우는 실패가 배송 구성에서 기록돼야 한다★ — 이 둘이 조용하면 "에이전트가
-    /// 한가하다" 와 구별되지 않는다.
+    /// ★A failure that empties the screen must be recorded in the shipping configuration★ — if these two are silent, it cannot be told apart from "the agent is
+    /// idle".
     #[test]
     fn unreadable_lines_are_recorded_as_defects_not_silence() {
         let mut d = CodexAppServerDecoder::new();
@@ -3297,14 +3297,14 @@ mod tests {
         assert!(d.untranslated_observations().is_empty());
     }
 
-    // ── 상대가 정하는 성장의 상한 ────────────────────────────────────────────
+    // ── Cap on growth the peer decides ────────────────────────────────────────────
 
-    /// ★일상 이름이 드리프트의 몫을 잠식하면 안 된다★ — 잠식하면 탐지기가 스스로 꺼진다.
+    /// ★Routine names must not eat into the drift share★ — if they do, the detector switches itself off.
     #[test]
     fn routine_keys_cannot_crowd_out_drift_keys_in_any_arrival_order() {
-        // ★서로 다른 일상 키를 전체 상한보다 **많이** 들이민다★ — 실제 알림 이름 목록으로는
-        //   서로 다른 키가 75 개뿐이라 상한 근처에도 못 가고, 그러면 몫을 통째로 지워도 이
-        //   테스트가 초록이다(그것이 옛 형태의 결함이었다).
+        // ★Push in **more** distinct routine keys than the total cap★ — with the real notification-name list
+        //   there are only 75 distinct keys, which does not even get near the cap, and then this
+        //   test stays green even if the share is removed entirely (that was the defect of the old form).
         let flood = MAX_UNTRANSLATED_KEYS + 50;
         for drift_first in [false, true] {
             let mut d = CodexAppServerDecoder::new();
@@ -3325,9 +3325,9 @@ mod tests {
                 "일상 키가 자기 몫을 넘겼다: {routine} (drift_first={drift_first})"
             );
 
-            // 일상으로 아무리 밀어 넣어도 드리프트 칸이 남는다. ★기록됐다 = 그 키를 처음 본
-            //   것이고, 로그(warn)가 나가는 조건이 바로 그것이다★ — 로그 자체는 여기서 캡처할
-            //   수단이 없어 기록 여부로 대신 잰다.
+            // No matter how much is pushed in as routine, the drift entry remains. ★Recorded = that key was seen for the first
+            //   time, and that is exactly the condition under which the log (warn) goes out★ — there is no means to capture the log itself here,
+            //   so recording is measured instead.
             d.observe("method:late/drift".to_string(), Observed::Drift, "");
             assert_eq!(
                 d.untranslated_observations().get("method:late/drift"),
@@ -3344,8 +3344,8 @@ mod tests {
         }
     }
 
-    /// ★상대가 만든 메서드 이름이 item 축 칸에 떨어지면 그 칸의 탐지가 죽는다★ — 접두사가
-    /// 그것을 구조적으로 막는다.
+    /// ★If a method name made by the peer fell into an item-axis entry, detection of that entry would die★ — the prefix
+    /// structurally prevents it.
     #[test]
     fn a_forged_method_name_cannot_land_in_the_item_axis() {
         let line = notification_line(
@@ -3357,7 +3357,7 @@ mod tests {
         );
         let mut d = CodexAppServerDecoder::new();
         assert!(d.decode(line.as_bytes()).is_empty());
-        // 상대가 그 item 축 키와 **글자 그대로 같은** 메서드 이름을 보낸다.
+        // The peer sends a method name **identical character for character** to that item-axis key.
         d.translate("item/started#agentMessage", None);
 
         let seen = d.untranslated_observations();
@@ -3373,7 +3373,7 @@ mod tests {
         }
         assert_eq!(d.untranslated_observations().len(), MAX_UNTRANSLATED_KEYS);
         assert_eq!(d.untranslated_dropped(), 10);
-        // 상한에 닿은 뒤에도 **이미 아는 키**는 계속 센다.
+        // Even after reaching the cap, **keys already known** are still counted.
         d.translate("drift/name/0", None);
         assert_eq!(
             d.untranslated_observations().get("method:drift/name/0"),
@@ -3381,7 +3381,7 @@ mod tests {
         );
     }
 
-    /// 상대가 이름 길이로도 메모리를 가져갈 수 있다 — 개수 몫만으로는 못 막는다.
+    /// The peer can take memory through name length too — the count share alone cannot prevent it.
     #[test]
     fn an_absurdly_long_name_is_bounded_before_it_is_stored() {
         let mut d = CodexAppServerDecoder::new();
@@ -3391,9 +3391,9 @@ mod tests {
         assert!(key.chars().count() <= LOG_STRING_LIMIT + 1, "{}", key.len());
     }
 
-    // ── 결정성 ───────────────────────────────────────────────────────────────
+    // ── Determinism ───────────────────────────────────────────────────────────────
 
-    /// 같은 줄은 언제나 같은 이벤트를 낸다 — 내용까지 못 박는다(같음만 재면 늘 비어도 통과한다).
+    /// The same line always emits the same event — pin the content too (measuring only sameness passes even when always empty).
     #[test]
     fn the_same_line_always_yields_the_same_events() {
         let line = format!("{}\n", delta_line("x"));
@@ -3405,9 +3405,9 @@ mod tests {
         assert!(first.contains("\"x\""), "{first}");
     }
 
-    // ── 로그·진단 위생 ───────────────────────────────────────────────────────
+    // ── Log · diagnostic hygiene ───────────────────────────────────────────────
 
-    /// ★마스킹을 지우면 반드시 빨개져야 한다★ — 상한만 재던 단언은 `mask_secrets` 를 빼도 통과한다.
+    /// ★If masking is removed it must go red★ — an assertion that measured only the cap passes even without `mask_secrets`.
     #[test]
     fn sanitize_masks_credentials() {
         let secret = "sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -3418,9 +3418,9 @@ mod tests {
         assert!(!bearer.contains("abcdefghijklmnop"), "{bearer}");
     }
 
-    /// ★상대가 쓴 실패 사유는 화면에도 로그에도 **wire 에도** 간다 — 마스킹은 그 셋 앞이 아니라 만드는
-    /// 자리에서 한다★. 이 사유는 `TurnEnd` 의 결말 칸에 실려 데몬을 지나 프론트까지 흐르므로, 여기서
-    /// 놓치면 자격증명이 그 경로 전체에 남는다.
+    /// ★A failure reason the peer wrote goes to the screen, to the log and **to the wire** — masking is done not in front of those three but at the place
+    /// where it is made★. This reason is carried in the outcome field of `TurnEnd` and flows through the daemon to the frontend, so if it is
+    /// missed here, the credential stays along that whole path.
     #[test]
     fn a_secret_inside_a_failed_turns_reason_never_leaves_this_module() {
         let secret = "sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -3452,7 +3452,7 @@ mod tests {
         }
     }
 
-    /// 같은 문자열 제조기를 쓰는 다른 호출자 — `error` 알림도 같은 문을 지나야 한다.
+    /// Another caller that uses the same string maker — the `error` notification must also pass through the same door.
     #[test]
     fn a_secret_inside_an_error_notification_never_leaves_this_module() {
         let secret = "sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -3473,28 +3473,28 @@ mod tests {
         }
     }
 
-    /// ★[`truncate`] 의 문은 **이름 붙은 둘뿐**이다★ — [`sanitize`](마스킹 후 절단 · 진단 문자열용)와
-    /// [`clip`](절단만 · 전사 본문용). 그 밖에서 부르면 「이 문자열은 진단인가 기록인가」를 아무도 답한
-    /// 적이 없다는 뜻이고, 진단이었다면 그것이 마스킹을 건너뛰고 화면·로그·wire 로 나간다(실제로
-    /// 그랬다 — 오류 문자열 제조기가 절단만 하고 마스킹을 건너뛰었다).
+    /// ★[`truncate`] has **only two named doors**★ — [`sanitize`] (truncate after masking · for diagnostic strings) and
+    /// [`clip`] (truncate only · for transcript body). If called from anywhere else, it means nobody has ever answered 「이 문자열은 진단인가 기록인가」 (is this string a diagnostic or a record),
+    /// and if it was a diagnostic it skips masking and goes out to the screen · log · wire (that actually
+    /// happened — the error string maker only truncated and skipped masking).
     ///
-    /// 이 항목은 그 성질을 **소스에서** 잰다 — 새는 경로마다 자격증명 항목을 하나씩 두는 것은 유지되지
-    /// 않고, 안 둔 경로가 곧 새는 경로가 되기 때문이다(같은 형태를 이 폴더 `transport` 가 쓴다).
-    /// ★단 이 축은 **길이**를 못 본다★ — 두 문 중 아무 것도 안 쓰는 경로는 여기서 구조적으로 안 보인다.
-    /// 그쪽은 `no_translated_notification_can_produce_an_event_that_evicts_the_replay_ring` 가 맡는다.
+    /// This item measures that property **in the source** — keeping one credential item per leaking path does not last,
+    /// since a path without one becomes the leaking path (this folder's `transport` uses the same form).
+    /// ★But this axis cannot see **length**★ — a path that uses neither of the two doors is structurally invisible here.
+    /// That is covered by `no_translated_notification_can_produce_an_event_that_evicts_the_replay_ring`.
     #[test]
     fn truncate_is_reachable_only_through_its_two_named_doors() {
         let src = include_str!("decoder.rs");
-        // ★`#[cfg(test)]` 로 가르지 않는다★ — 그 속성은 운영 구획 안에도 있어 거기서 잘리면 이 항목이
-        //   앞쪽만 훑고 뒤쪽을 안 본다. ★줄바꿈이 든 표식도 쓰지 않는다★ — 체크아웃이 CRLF 일 수 있다.
+        // ★Do not split by `#[cfg(test)]`★ — that attribute is also inside the production section, so if cut there this item
+        //   scans only the front part and does not see the rest. ★Do not use a marker containing a line break either★ — the checkout may be CRLF.
         let production = src.split("mod tests {").next().expect("운영 구획");
         let offenders: Vec<&str> = production
             .lines()
             .map(|l| l.trim())
             .filter(|l| l.contains("truncate("))
             .filter(|l| !l.starts_with("//") && !l.starts_with("///"))
-            // 허용되는 것 = 정의 자신 + 두 문의 본문(`sanitize` · `clip`). 셋째를 더하려면 위 doc 의
-            //   질문에 먼저 답해야 한다.
+            // Allowed = the definition itself + the bodies of the two doors (`sanitize` · `clip`). To add a third, the question in the doc above
+            //   must be answered first.
             .filter(|l| {
                 !l.starts_with("fn truncate(")
                     && !l.starts_with("truncate(&mask_secrets(")
@@ -3507,24 +3507,24 @@ mod tests {
         );
     }
 
-    /// replay 링이 **한 이벤트**에 허용하는 무게(= `output_core::Ring` 의 `max_bytes`). 그 링은 이 값을
-    /// 홀로 넘는 항목 하나를 넣으려고 나머지를 전부 쫓아낸다.
+    /// The weight the replay ring allows for **one event** (= `max_bytes` of `output_core::Ring`). That ring evicts everything else to fit one entry that
+    /// exceeds this value alone.
     const RING_SINGLE_EVENT_LIMIT: usize = 2 * 1024 * 1024;
 
-    /// 링이 세는 그 축(`output_core::estimate_cost_bytes`)을 그대로 쓴다 — 여기 따로 베끼면 둘이 갈려 이
-    /// 항목이 재는 것과 링이 세는 것이 달라진다.
+    /// Use the very axis the ring counts (`output_core::estimate_cost_bytes`) — if copied separately here, the two diverge and what this
+    /// item measures differs from what the ring counts.
     fn event_weight(e: &OutputEvent) -> usize {
         crate::output_core::estimate_cost_bytes(e)
     }
 
-    /// ★상한 없는 배출 경로를 **산출물에서** 잡는다★ — 위 소스 항목은 두 문 중 아무 것도 안 쓰는 경로를
-    /// 구조적으로 못 본다. 그런 자리가 실제로 있었다: 되울린 유저 메시지가 `content[].text` 를 그대로
-    /// 실어, 큰 붙여 넣기 하나가 그 에이전트의 replay 를 통째로 비웠다(상한도 마스킹도 없어 두 항목이
-    /// 다 눈을 감았다). 이 항목은 대신 번역하는 알림마다 상대가 길이를 정하는 칸을 거대하게 채우고,
-    /// 나온 이벤트가 링의 단일 이벤트 상한 아래인지 잰다.
+    /// ★Catch the unbounded emit path **in the output**★ — the source item above structurally cannot see a path that uses neither of the two
+    /// doors. Such a spot actually existed: the echoed user message carried `content[].text` as is,
+    /// and one big paste emptied that agent's whole replay (with neither cap nor masking, both items
+    /// closed their eyes). Instead, this item fills the field whose length the peer decides hugely for every notification we translate,
+    /// and measures whether the emitted event is under the ring's single-event cap.
     ///
-    /// ★아래 표가 `translate` 의 arm 목록과 어긋나면 빨개진다★ — 새 알림을 번역하기 시작하면서 상한을
-    /// 안 걸면 그 자리가 여기서 걸린다. 표를 늘리는 것이 곧 그 질문에 답하는 일이다.
+    /// ★If the table below disagrees with the arm list of `translate`, it goes red★ — if we start translating a new notification without
+    /// putting on a cap, that spot is caught here. Growing the table is itself answering that question.
     #[test]
     fn no_translated_notification_can_produce_an_event_that_evicts_the_replay_ring() {
         let huge = "x".repeat(2_500_000);
@@ -3611,7 +3611,7 @@ mod tests {
         }
     }
 
-    // ── 사용량 한도 알림(`account/rateLimits/updated`) — 해석 규칙 자체는 `usage.rs` 시험이 잰다 ──
+    // ── Usage limit notification (`account/rateLimits/updated`) — the interpretation rules themselves are measured by the `usage.rs` tests ──
 
     fn rate_limits_line(snapshot: Value) -> String {
         notification_line(
@@ -3628,12 +3628,12 @@ mod tests {
         })
     }
 
-    /// ★화면 이벤트 0개 + 관측 1건★ — 이벤트로 내면 에이전트별 replay 에 계정 상태가 실린다.
+    /// ★0 screen events + 1 observation★ — if emitted as an event, account state would be carried in per-agent replay.
     #[test]
     fn rate_limits_update_is_collected_without_output_events() {
         let line = rate_limits_line(default_bucket());
         let mut d = CodexAppServerDecoder::new();
-        // 청크 경계가 줄 한가운데에 와도 완성 줄에서만 줍는다.
+        // Even if a chunk boundary falls in the middle of a line, it is picked up only from complete lines.
         let (head, tail) = line.as_bytes().split_at(line.len() / 2);
         assert!(d.decode(head).is_empty());
         assert!(d.take_usage().is_empty(), "줄이 안 끝났는데 주웠다");
@@ -3653,7 +3653,7 @@ mod tests {
         assert!(d.take_usage().is_empty());
     }
 
-    /// 같은 청크의 여러 줄은 도착 순으로 모인다.
+    /// Several lines of the same chunk are gathered in arrival order.
     #[test]
     fn several_updates_in_one_chunk_arrive_in_order() {
         let mut first = default_bucket();
@@ -3671,7 +3671,7 @@ mod tests {
         assert_eq!(pcts, vec![Some(10.0), Some(20.0)]);
     }
 
-    /// ★더는 「알면서 안 옮기는 이름」으로 세지 않는다★ — 옮기는 알림이 일상 관측 칸을 계속 차지하면 그 몫이 준다.
+    /// ★It is no longer counted as a 「알면서 안 옮기는 이름」 (name knowingly not translated)★ — if a notification we translate keeps occupying the routine observation field, that share shrinks.
     #[test]
     fn rate_limits_update_is_no_longer_an_untranslated_observation() {
         let mut d = CodexAppServerDecoder::new();
@@ -3683,7 +3683,7 @@ mod tests {
         );
     }
 
-    /// 버린 관측은 이벤트도 관측도 내지 않고, 봉투 결함만 결함으로 남는다.
+    /// A dropped observation yields neither event nor observation, and only an envelope defect is left as a defect.
     #[test]
     fn unusable_rate_limits_updates_yield_nothing() {
         let mut d = CodexAppServerDecoder::new();
@@ -3704,7 +3704,7 @@ mod tests {
             "모양이 맞는 봉투는 결함이 아니다"
         );
 
-        // `rateLimits` 가 없거나 객체가 아니면 봉투 결함이다 — 다른 arm 과 같은 키로 남는다.
+        // If `rateLimits` is absent or not an object, it is an envelope defect — left under the same key as the other arms.
         for params in [
             serde_json::json!({}),
             serde_json::json!({"rateLimits": null}),
@@ -3723,8 +3723,8 @@ mod tests {
         );
     }
 
-    /// ★배열을 칸 순서대로 읽어 그럴듯한 관측을 만들지 않는다★ — 셋 다 객체 검사 없이는 창이 실린 관측이 됐다
-    /// (params 배열 → 5시간 11 · 스냅숏 배열 → 두 창 · `null` 을 앞세운 스냅숏 배열 → 5시간 14).
+    /// ★Do not read an array in field order to make a plausible observation★ — all three became observations carrying windows without an object check
+    /// (params array → 5 hours 11 · snapshot array → two windows · snapshot array led by `null` → 5 hours 14).
     #[test]
     fn non_object_rate_limits_envelopes_are_not_read_positionally() {
         for params in [
@@ -3749,9 +3749,9 @@ mod tests {
         }
     }
 
-    // ── 이력 복원 번역(ADR-0203) ───────────────────────────────────────────────
+    // ── History restore translation (ADR-0203) ───────────────────────────────────────────────
 
-    /// 같은 item 을 세 문으로 각각 넣고 **무엇이 나오나**만 본다.
+    /// Feed the same item to each of the three doors and look only at **what comes out**.
     fn through_each_door(item: Value) -> (Vec<OutputEvent>, Vec<OutputEvent>, Vec<OutputEvent>) {
         let params = serde_json::json!({"threadId": "th", "turnId": "tu", "item": item});
         (
@@ -3761,10 +3761,10 @@ mod tests {
         )
     }
 
-    /// ★★어시스턴트 본문은 **이력에서만** 옮긴다★★ — 라이브에서는 같은 본문이
-    /// `item/agentMessage/delta` 로 이미 흘러 화면에 그려졌으므로 여기서 또 내면 한 답이 두 벌 남는다.
-    /// 그런데 페이지 응답에는 그 델타가 없어서, 안 옮기면 **복원된 화면에 어시스턴트의 말이 한 줄도
-    /// 없다**(실측 표본 120 item 중 5 건이 이 변형이다).
+    /// ★★The assistant body is carried **only from history**★★ — in live the same body has already streamed as
+    /// `item/agentMessage/delta` and been drawn on the screen, so emitting it again here would leave one answer twice.
+    /// But the page response has no such delta, so if it is not carried, **the restored screen has not one line of
+    /// the assistant's words** (in the measured sample 5 of 120 items are this variant).
     #[test]
     fn an_agent_message_item_becomes_text_only_on_the_history_door() {
         let (started, completed, history) = through_each_door(
@@ -3789,8 +3789,8 @@ mod tests {
         }
     }
 
-    /// ★도구 호출은 이력에서도 나온다 — 발행 축이 `started` 하나가 아니라 「`completed` 가 아닐 것」이다★.
-    /// 실측 표본에서 이 변형이 120 건 중 44 건이라, 빠지면 복원된 화면이 사실상 비어 있다.
+    /// ★Tool calls also come out of history — the emit axis is not `started` alone but 「`completed` 가 아닐 것」 (not being completed)★.
+    /// In the measured sample this variant is 44 of 120, so if it were missing the restored screen would be practically empty.
     #[test]
     fn a_tool_item_is_emitted_on_the_history_door_just_like_item_started() {
         let (started, completed, history) = through_each_door(serde_json::json!({
@@ -3809,7 +3809,7 @@ mod tests {
         );
     }
 
-    /// 되울린 유저 발화는 세 문 전부에서 나온다 — 이력에서는 그것이 「누가 무엇을 물었나」의 유일한 재료다.
+    /// The echoed user utterance comes out of all three doors — in history it is the only material for 「누가 무엇을 물었나」 (who asked what).
     #[test]
     fn a_user_message_item_comes_through_the_history_door_too() {
         let (_, _, history) = through_each_door(serde_json::json!({
@@ -3826,8 +3826,8 @@ mod tests {
         }
     }
 
-    /// ★라이브가 버리는 변형은 이력에서도 버린다★ — 추론·하위 에이전트 활동 따위에 이력 전용 arm 을
-    /// 더하면 두 화면이 서로 다른 대화를 그린다.
+    /// ★A variant live drops is dropped in history too★ — if a history-only arm is added for reasoning · sub-agent activity and the like,
+    /// the two screens draw different conversations.
     #[test]
     fn the_history_door_drops_exactly_what_the_live_doors_drop() {
         for kind in ["reasoning", "subAgentActivity", "contextCompaction", "plan"] {
@@ -3839,9 +3839,9 @@ mod tests {
         }
     }
 
-    /// ★이력 이벤트 하나가 replay 링을 통째로 비우지 못한다★ — 형제 항목
-    /// (`no_translated_notification_can_produce_an_event_that_evicts_the_replay_ring`)이 알림 쪽에
-    /// 거는 같은 벽이고, 이력 문은 그 항목의 사정권 **밖**이라 여기서 따로 잰다.
+    /// ★One history event cannot empty the replay ring★ — this is the same wall the sibling item
+    /// (`no_translated_notification_can_produce_an_event_that_evicts_the_replay_ring`) puts on the notification side, and the history door is **outside**
+    /// that item's reach, so it is measured separately here.
     #[test]
     fn no_history_item_can_produce_an_event_that_evicts_the_replay_ring() {
         let huge = "가".repeat(MAX_LINE_BYTES / 4);
@@ -3863,9 +3863,9 @@ mod tests {
         }
     }
 
-    /// ★★이력 턴 경계는 결말을 **주장하지 않는다**★★ — 페이지에는 지난 턴이 어떻게 끝났는지가 실려
-    /// 오지 않으므로 `TurnEnd` 에 채울 값이 없다. `Unknown` 은 경계마다 「모름」 표식을 그리고,
-    /// `Completed` 는 지어낸 결말이다(그 타입 doc 이 금한다).
+    /// ★★The history turn boundary **does not claim an outcome**★★ — a page does not carry how the past turn ended,
+    /// so there is no value to fill into `TurnEnd`. `Unknown` draws a 「모름」 (unknown) marker at every boundary, and
+    /// `Completed` is an invented outcome (that type's doc forbids it).
     #[test]
     fn a_history_turn_boundary_closes_without_claiming_an_outcome() {
         match history_turn_boundary(Some("tu")) {
@@ -3878,19 +3878,19 @@ mod tests {
             }
             other => panic!("경계가 `MessageDone` 이 아니다 — 결말을 지어내고 있다: {other:?}"),
         }
-        // 대조 토큰이라 상한을 넘으면 자르지 않고 거른다(같은 판정 = `bounded_id`).
+        // It is a comparison token, so over the cap it is filtered, not truncated (the same decision = `bounded_id`).
         match history_turn_boundary(Some(&"t".repeat(MAX_ID_BYTES + 1))) {
             OutputEvent::MessageDone { turn_id, .. } => assert_eq!(turn_id, None),
             other => panic!("경계가 `MessageDone` 이 아니다: {other:?}"),
         }
-        // id 를 못 실어도 경계는 선다 — 안 닫으면 대기 표시가 영영 돈다.
+        // Even if the id cannot be carried the boundary stands — if it is not closed, the waiting indicator spins forever.
         match history_turn_boundary(None) {
             OutputEvent::MessageDone { turn_id, .. } => assert_eq!(turn_id, None),
             other => panic!("경계가 `MessageDone` 이 아니다: {other:?}"),
         }
     }
 
-    /// 진단 맵은 호출자가 어디로든 찍는다 — 경계에서 마스킹되어 나가야 한다.
+    /// The caller may print the diagnostic map anywhere — it must go out masked at the boundary.
     #[test]
     fn the_observation_map_hands_back_masked_keys() {
         let secret = "sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -3904,15 +3904,15 @@ mod tests {
         );
     }
 
-    /// ★자르고 마스킹하면 경계에 걸친 자격증명이 살아남는다★ — `mask_secrets` 의 패턴이
-    /// `sk-proj-` 뒤에 20 자 이상을 요구하므로, 먼저 자른 조각은 그 수량자에 안 걸린다.
+    /// ★If truncated then masked, a credential straddling the boundary survives★ — the pattern of `mask_secrets` requires
+    /// 20 or more characters after `sk-proj-`, so a piece cut first is not caught by that quantifier.
     #[test]
     fn a_credential_straddling_the_truncation_boundary_is_still_masked() {
-        // ★키를 `observe` 에 **직접** 넘긴다★ — `translate` 를 거치면 `method:` 접두사가 절단
-        //   지점을 밀어, 자격증명이 경계에 걸치지 못하고 통째로 잘려 나간다(그러면 이 테스트가
-        //   아무것도 재지 않는다).
-        // 절단 지점이 `sk-proj-` 8 자 + 꼬리 4 자 뒤에 오도록 채운다 — 그 꼬리 4 자는
-        //   `mask_secrets` 가 요구하는 20 자 수량자에 못 미친다.
+        // ★Pass the key to `observe` **directly**★ — if it goes through `translate`, the `method:` prefix pushes the truncation
+        //   point, and the credential, instead of straddling the boundary, is cut off whole (then this test
+        //   measures nothing).
+        // Fill so that the truncation point falls after `sk-proj-` 8 characters + a 4-character tail — that 4-character tail
+        //   falls short of the 20-character quantifier `mask_secrets` requires.
         let padding = "a".repeat(LOG_STRING_LIMIT - 12);
         let key = format!("{padding}sk-proj-{}", "B".repeat(40));
         let mut d = CodexAppServerDecoder::new();
@@ -3938,10 +3938,10 @@ mod tests {
         assert_eq!(truncate(&"한".repeat(10), 3), "한한한…");
     }
 
-    // ── 도구 끝 계기의 어휘 (ADR-0231 · ADR-0235) ───────────────────
+    // ── Vocabulary of the tool-end trigger (ADR-0231 · ADR-0235) ───────────────────
 
-    /// 도구 = 도구 호출 어휘 여섯뿐이다 — 출력(`agentMessage`·`reasoning`·`plan`) · 되울림 · 도구인지 근거 없는 아는 변형 ·
-    /// 모르는 변형 · 빈 문자열은 전부 아니다(그 끝은 계기가 아니다).
+    /// Tool = only the six tool-call vocabularies — output (`agentMessage`·`reasoning`·`plan`) · echo · known variants with no grounds to be tools ·
+    /// unknown variants · the empty string are all not (their ends are not triggers).
     #[test]
     fn is_tool_item_reads_the_tool_vocabulary_and_nothing_else() {
         let table: &[(&str, bool)] = &[
@@ -3970,7 +3970,7 @@ mod tests {
         for (kind, tool) in table {
             assert_eq!(is_tool_item(kind), *tool, "{kind}");
         }
-        // 표가 아는 변형을 전부 덮는다 — 스키마의 새 변형이 이 표를 조용히 빠져나가지 않게.
+        // The table covers every known variant — so a new schema variant does not slip quietly out of this table.
         for kind in KNOWN_ITEM_TYPES {
             assert!(
                 table.iter().any(|(k, _)| k == kind),

@@ -1,20 +1,20 @@
-# ADR-0005: finalize 정확히 1회 (pump 단독)
+# ADR-0005: finalize exactly once (pump alone)
 
-- 상태: 확정 (S3, S10 OutputCore 이관)
+- 상태: 확정 (S3, S10 moved into OutputCore)
 - 관련: CLAUDE.md 핵심 불변식 · `output_core.rs::{finalized,finish}`
 
 ## 맥락
-terminal 전이·알림이 여러 경로(kill, 자연 종료, fallback)에서 발생할 수 있어 중복·경합 위험이 있다.
+The terminal transition and notification can arise from several paths (kill, natural exit, fallback), so there is a risk of duplicates and races.
 
 ## 결정
-`OutputCore.finalized.swap(AcqRel)` 원자 게이트로 terminal 전이/알림을 **정확히 1회**만 발행한다. 발행 주체는 **pump 단독**(EOF 감지 시 `core.finish(reason)`).
+The atomic gate `OutputCore.finalized.swap(AcqRel)` emits the terminal transition/notification **exactly once**. The emitter is **the pump alone** (`core.finish(reason)` on EOF detection).
 
 ## 거부한 대안
-- **각 경로가 직접 status 전이** — kill과 자연 종료가 동시에 발화하면 중복 알림, 상태 경합. 프론트가 terminal을 두 번 받음.
+- **Each path transitions status directly** — if kill and a natural exit fire at the same time, notifications are duplicated and status races. The frontend receives terminal twice.
 
 ## 근거
-master drop → reader EOF는 어떤 종료 경로든 pump를 한 번 깨운다. 그 단일 지점에서만 finish하면 중복이 구조적으로 불가능.
+Master drop → reader EOF wakes the pump once, whichever exit path is taken. If finish happens only at that single point, duplicates are structurally impossible.
 
 ## 영향 / 불변식
-- 과도기 `Exiting`은 manager가 `enter_exiting()`으로 트리거, **terminal(`Killed`/`Exited`/`Failed`)은 pump만**.
-- 프론트는 status_changed로 terminal 판정 금지 → `agent-list-updated`로 판정(→ ADR-0007 epoch와 함께).
+- The transitional `Exiting` is triggered by the manager through `enter_exiting()`; **the terminal states (`Killed`/`Exited`/`Failed`) come from the pump only**.
+- The frontend must not decide terminal from status_changed → it decides from `agent-list-updated` (→ together with the ADR-0007 epoch).

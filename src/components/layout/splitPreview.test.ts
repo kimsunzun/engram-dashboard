@@ -1,4 +1,4 @@
-// splitPreview 단위테스트 — 화해 규칙(TRD §2f 1~6) · 재사상 · 허용 범위(ADR-0227).
+// splitPreview unit test — reconcile rules (TRD §2f 1~6) · remapping · allowed range (ADR-0227).
 
 import { describe, expect, it } from 'vitest'
 
@@ -24,7 +24,7 @@ const committed = (token = 1, splitId = 'A'): PreviewState =>
 const awaiting = (version: number, token = 1): PreviewState =>
   reducePreview(committed(token), { type: 'response', token, outcome: 'Applied', version, cachedVersion: version - 1 })
 
-// ── 화해 규칙 ──
+// ── reconcile rules ──
 
 describe('reducePreview — 드래그', () => {
   it('dragStart → drag, dragMove 가 ratio 를 바꾼다', () => {
@@ -93,7 +93,7 @@ describe('reducePreview — 확정', () => {
 
   it('규칙 2: Unchanged·TooSmall 응답 → 스냅샷을 기다리지 않고 즉시 null', () => {
     for (const outcome of ['Unchanged', 'TooSmall'] as const) {
-      // 응답 version 이 캐시보다 위여도 기다리지 않는다 — 무변경이면 그 version 의 스냅샷은 오지 않는다.
+      // Even if the response version is above the cache, do not wait — if nothing changed, no snapshot of that version arrives.
       const s = reducePreview(committed(1), { type: 'response', token: 1, outcome, version: 99, cachedVersion: 1 })
       expect(s).toBeNull()
       expect(needsPull(s, 1)).toBe(false)
@@ -154,11 +154,11 @@ describe('needsPull — 규칙 6(당김 타이머를 걸어 둘 상태)', () => 
   })
 })
 
-// ── 재사상 ──
+// ── remapping ──
 //   A = left_right [0,1]² at 0.5 → x | B
 //   B = top_bottom [0.5,1]×[0,1] at 0.4 → y | C
 //   C = left_right [0.5,1]×[0.4,1] at 0.65 → z | w
-// 값은 셸 geometry 의 경계식(`x0 + (x1 - x0) * ratio`)으로 손으로 푼 것이다.
+// The values were solved by hand with the shell geometry boundary formula (`x0 + (x1 - x0) * ratio`).
 
 const slot = (slot_id: string, x0: number, y0: number, x1: number, y1: number): SlotRect => ({ slot_id, x0, y0, x1, y1 })
 const splitR = (split_id: string, dir: SplitRect['dir'], x0: number, y0: number, x1: number, y1: number, at: number): SplitRect => ({
@@ -202,7 +202,7 @@ describe('remapRects', () => {
     expect(bySplit(splitRects, 'C').at).toBe(B2)
     expect(bySlot(slotRects, 'z').x1).toBe(B2)
     expect(bySlot(slotRects, 'w').x0).toBe(B2)
-    // 상자 가장자리는 제자리.
+    // Box edges stay in place.
     expect(bySlot(slotRects, 'z').x0).toBe(0.5)
     expect(bySlot(slotRects, 'w').x1).toBe(1)
     expect(bySplit(splitRects, 'C')).toMatchObject({ x0: 0.5, x1: 1, y0: 0.4, y1: 1 })
@@ -224,7 +224,7 @@ describe('remapRects', () => {
   })
 
   it('조상을 끌면 서브트리의 중첩 분할 at(같은 축)까지 재사상되고 셸 재계산과 같다', () => {
-    // A: 0.5 → 0.3. 셸이 새 트리를 풀면 B 상자 x = [0.3,1], C 상자 x = [0.3,1], C.at = 0.3 + 0.7·0.3.
+    // A: 0.5 → 0.3. When the shell unfolds the new tree, B box x = [0.3,1], C box x = [0.3,1], C.at = 0.3 + 0.7·0.3.
     const { slotRects, splitRects } = remapRects(SLOTS, SPLITS, preview('A', 0.3))
     const A2 = 0 + (1 - 0) * 0.3
     const c = bySplit(splitRects, 'C')
@@ -234,7 +234,7 @@ describe('remapRects', () => {
     expect(bySplit(splitRects, 'B')).toMatchObject({ x0: A2, x1: 1, at: 0.4 })
     expect(c.x0).toBe(A2)
     expect(c.at).toBeCloseTo(0.3 + 0.7 * 0.3, 12)
-    // 공유 경계는 비트 단위로 같게 남는다.
+    // Shared boundaries remain bit-for-bit equal.
     expect(bySlot(slotRects, 'z').x1).toBe(c.at)
     expect(bySlot(slotRects, 'w').x0).toBe(c.at)
     expect(bySlot(slotRects, 'z').x0).toBe(bySlot(slotRects, 'y').x0)
@@ -272,9 +272,9 @@ describe('remapRects', () => {
   })
 })
 
-// ── 허용 범위 ──
+// ── allowed range ──
 
-// 셸 `ViewManager::set_split_ratio` ④ 의 px 클램프(src-tauri/src/layout/manager.rs)를 옮긴 오라클.
+// An oracle that transcribes the px clamp of shell `ViewManager::set_split_ratio` ④ (src-tauri/src/layout/manager.rs).
 //   `len = canvas × extent; edge = m / len; lo = max(RATIO_MIN, edge); hi = min(RATIO_MAX, 1 − edge); lo > hi → 빈 범위`.
 function shellRange(canvasLen: number, extent: number, m: number, rmin: number, rmax: number) {
   const len = canvasLen * extent
@@ -320,7 +320,7 @@ describe('ratioRange', () => {
   })
 
   it('같은 입력(보고한 정수 캔버스 × 스냅샷 상자 폭)이면 셸 식과 비트 단위로 같다', () => {
-    // 상자 폭은 셸 geometry 처럼 경계 차로 만든다.
+    // The box width is made from the boundary difference like the shell geometry.
     const extents = [1, 0.5 - 0, 1 - (0.5 + 0.5 * 0.3), (0.5 + 0.5 * 0.3) - 0.5, 0.9 - 0.1 * 0.9, 1 / 3, 0.0625]
     for (const axisPx of [1, 59, 60, 61, 119, 120, 121, 480, 1001, 1366, 1920, 3840]) {
       for (const boxExtent of extents) {

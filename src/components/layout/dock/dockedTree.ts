@@ -1,28 +1,28 @@
-// TRD S21-slot-docking §4-5: 셸 `layout::dock::{docked_tree, incoming_rect}` · `layout::geometry::{compute, boundary, px_edge,
-//   frame_px}` 의 거울 — 끄는 동안 끌기는 판정을 셸과 맞추지 않아(ADR-0296 · ADR-0297) 띠 유효성(R8) · 미리보기(R4)를 웹이 혼자
-//   센다. 순수하다.
-// ★셸과 같은 f64 연산을 같은 순서로 한다★ — 경계는 부모 값을 복사하고 새로 셈하는 값은 분할 경계 하나뿐이다(셸 `geometry.rs`
-//   머리 불변식). 그래야 미리보기가 놓은 뒤 셸이 그릴 칸과 비트 단위로 같고, 깊은 사슬의 면적 0 판정이 셸과 같은 칸에서 선다.
-//   두 판은 골든 `src-tauri/src/layout/bands_golden.json` 이 묶는다(`bands.test.ts` · `judge.test.ts`).
-// 비율 한계는 스냅숏 `ratio_min` · `ratio_max` 로 받는다(ADR-0227 — 화면이 상수를 따로 두지 않는다).
+// TRD S21-slot-docking §4-5: a mirror of the shell `layout::dock::{docked_tree, incoming_rect}` · `layout::geometry::{compute, boundary, px_edge,
+//   frame_px}` — during a drag the drag does not align its decision with the shell (ADR-0296 · ADR-0297), so the web counts band validity (R8) · preview (R4)
+//   alone. Pure.
+// ★Do the same f64 operations as the shell in the same order★ — boundaries copy the parent value and the only newly computed value is one split boundary (shell `geometry.rs`
+//   head invariant). That way the preview is bit-for-bit the same as the area the shell draws after the drop, and the zero-area decision of a deep chain stands at the same area as the shell.
+//   The two versions are tied by the golden `src-tauri/src/layout/bands_golden.json` (`bands.test.ts` · `judge.test.ts`).
+// Ratio limits are received as snapshot `ratio_min` · `ratio_max` (ADR-0227 — the screen keeps no constants of its own).
 
 import type { LayoutNode, SlotRect } from '../../../api/layoutTypes'
 import type { DockSide } from '../../../../src-tauri/bindings/DockSide'
 import type { DropAnchor } from '../../../../src-tauri/bindings/DropAnchor'
 
-/** 분할 비율 한계 — 스냅숏 `ratio_min` · `ratio_max`(셸 `tree::RATIO_MIN` · `RATIO_MAX`). */
+/** Split ratio limits — snapshot `ratio_min` · `ratio_max` (shell `tree::RATIO_MIN` · `RATIO_MAX`). */
 export interface RatioLimits {
   min: number
   max: number
 }
 
-/** 캔버스 크기 — 정수 CSS px. */
+/** Canvas size — integer CSS px. */
 export interface CanvasPx {
   w: number
   h: number
 }
 
-/** 정수 CSS px 경계 꼴 사각형(캔버스 원점) — 반열림. 셸 `geometry::PxRect`. */
+/** Rectangle in integer CSS px boundary form (canvas origin) — half-open. Shell `geometry::PxRect`. */
 export interface PxRect {
   x0: number
   y0: number
@@ -30,7 +30,7 @@ export interface PxRect {
   y1: number
 }
 
-/** 정규화 경계 꼴 사각형 — 셸 `geometry::RectF64`. */
+/** Rectangle in normalized boundary form — shell `geometry::RectF64`. */
 export interface RectF64 {
   x0: number
   y0: number
@@ -38,31 +38,31 @@ export interface RectF64 {
   y1: number
 }
 
-/** 셸 `DockTreeError` — 셸이 보고하는 차례(이 차례로 처음 걸린 것). */
+/** Shell `DockTreeError` — the order the shell reports (the first one hit in this order). */
 export type DockTreeError = 'slot-not-found' | 'slot-id-overlap' | 'zero-area'
 
 export type DockedTree = { ok: true; tree: LayoutNode } | { ok: false; error: DockTreeError }
 
 const U32_MAX = 4294967295
 
-/** 셸 `f64 as u32` — 소수는 버리고 NaN · 음수는 0, 넘치면 `u32::MAX`. */
+/** Shell `f64 as u32` — fraction dropped, NaN · negative become 0, overflow gives `u32::MAX`. */
 export function toU32(v: number): number {
   if (!(v > 0)) return 0
   return v > U32_MAX ? U32_MAX : Math.trunc(v)
 }
 
-/** 셸 `tree::clamp_ratio` — NaN 은 그대로 NaN(거르는 것은 `boundary`). */
+/** Shell `tree::clamp_ratio` — NaN stays NaN (filtering is done by `boundary`). */
 function clampRatio(r: number, limits: RatioLimits): number {
   return Math.min(Math.max(r, limits.min), limits.max)
 }
 
-/** 셸 `geometry::boundary` — 축 구간 `[lo, hi]` 를 `ratio`(a 몫)로 나누는 경계. NaN 비율은 반분으로 읽는다. */
+/** Shell `geometry::boundary` — the boundary that splits the axis range `[lo, hi]` by `ratio` (a's share). A NaN ratio is read as a half split. */
 export function boundary(lo: number, hi: number, ratio: number, limits: RatioLimits): number {
   const t = Number.isNaN(ratio) ? 0.5 : clampRatio(ratio, limits)
   return lo + (hi - lo) * t
 }
 
-/** 셸 `geometry::compute` 의 칸 몫 — 트리 전위 순 칸 사각형(루트 = (0,0,1,1)). 스냅숏 `slot_rects` 와 같은 값이다. */
+/** The area share of shell `geometry::compute` — area rectangles in tree pre-order (root = (0,0,1,1)). The same value as snapshot `slot_rects`. */
 export function computeSlots(node: LayoutNode, limits: RatioLimits): SlotRect[] {
   const out: SlotRect[] = []
   const walk = (n: LayoutNode, r: RectF64): void => {
@@ -70,7 +70,7 @@ export function computeSlots(node: LayoutNode, limits: RatioLimits): SlotRect[] 
       out.push({ slot_id: n.id, x0: r.x0, y0: r.y0, x1: r.x1, y1: r.y1 })
       return
     }
-    // ADR-0140: left_right = x 축 분할(a 왼쪽) · top_bottom = y 축 분할(a 위).
+    // ADR-0140: left_right = x-axis split (a on the left) · top_bottom = y-axis split (a on top).
     if (n.dir === 'left_right') {
       const at = boundary(r.x0, r.x1, n.ratio, limits)
       walk(n.a, { ...r, x1: at })
@@ -85,34 +85,34 @@ export function computeSlots(node: LayoutNode, limits: RatioLimits): SlotRect[] 
   return out
 }
 
-/** 셸 `geometry::has_area` — 두 축 모두 엄격히 `x0 < x1` · `y0 < y1`. */
+/** Shell `geometry::has_area` — both axes strictly `x0 < x1` · `y0 < y1`. */
 export function hasArea(r: SlotRect): boolean {
   return r.x0 < r.x1 && r.y0 < r.y1
 }
 
-/** 셸 `geometry::px_edge` — `round(canvas × e)`(동률은 0 에서 먼 쪽 = 음이 아닌 입력에서 `Math.round`). 범위 밖은 `u32` 포화. */
+/** Shell `geometry::px_edge` — `round(canvas × e)` (ties go to the side away from 0 = `Math.round` on non-negative input). Out of range saturates to `u32`. */
 export function pxEdge(canvas: number, e: number): number {
   return toU32(Math.round(canvas * e))
 }
 
-/** 셸 `geometry::frame_px` — 칸 틀(캔버스 CSS px). 이웃 칸이 같은 정수 경계를 나눈다. */
+/** Shell `geometry::frame_px` — area frame (canvas CSS px). Neighboring areas share the same integer boundary. */
 export function framePx(canvas: CanvasPx, r: RectF64): PxRect {
   return { x0: pxEdge(canvas.w, r.x0), y0: pxEdge(canvas.h, r.y0), x1: pxEdge(canvas.w, r.x1), y1: pxEdge(canvas.h, r.y1) }
 }
 
-/** 셸 `tree::slot_ids` — 전위 순 칸 id. */
+/** Shell `tree::slot_ids` — area ids in pre-order. */
 export function slotIds(node: LayoutNode): string[] {
   return node.type === 'slot' ? [node.id] : [...slotIds(node.a), ...slotIds(node.b)]
 }
 
-// 감싸는 분할의 id — 이 결과 나무는 기하에만 쓰고 셸로 보내지 않는다(셸은 놓을 때 자기 `docked_tree` 로 새 id 를 뽑는다 ·
-//   ADR-0223). 기하는 분할 id 를 읽지 않는다.
+// Id of the enclosing split — this resulting tree is used only for geometry and not sent to the shell (the shell picks new ids with its own `docked_tree` at drop ·
+//   ADR-0223). Geometry does not read split ids.
 const WRAP_SPLIT_ID = 'docked-wrap'
 
 /**
- * 셸 `layout::dock::docked_tree` — `target` 의 `anchor` 를 새 분할로 감싸 `side` 쪽에 `incoming` 을 몫 `share` 로 끼운 결과.
- * 입력은 건드리지 않는다. 오류 차례 = 기준 칸 없음 → 두 나무의 칸 id 겹침 → 결과에 **새로** 면적 0 칸(원래 자리 — 대상 칸은
- * `target` 기하 · 끼운 칸은 `incoming` 단독 기하 — 에서 면적이 있던 칸)이 생김(R8).
+ * Shell `layout::dock::docked_tree` — the result of wrapping `anchor` of `target` in a new split and inserting `incoming` at the `side` with share `share`.
+ * The input is not touched. Error order = reference area missing → area ids of the two trees overlap → a **new** zero-area area appears in the result (original position — the target area is
+ * the area that had area in the `target` geometry · the inserted area in the `incoming`-alone geometry) (R8).
  */
 export function dockedTree(
   target: LayoutNode,
@@ -125,7 +125,7 @@ export function dockedTree(
   const dir = side === 'Left' || side === 'Right' ? 'left_right' : 'top_bottom'
   const newIsA = side === 'Left' || side === 'Top'
   let found = anchor.type === 'outer'
-  // 비율 = a 몫(ADR-0140) — 새것이 b 면 `1 − share`.
+  // Ratio = a's share (ADR-0140) — if the new one is b, `1 − share`.
   const wrap = (original: LayoutNode): LayoutNode =>
     newIsA
       ? { type: 'split', id: WRAP_SPLIT_ID, dir, ratio: share, a: incoming, b: original }
@@ -148,7 +148,7 @@ export function dockedTree(
   const targetSlots = new Set(slotIds(target))
   if (slotIds(incoming).some(s => targetSlots.has(s))) return { ok: false, error: 'slot-id-overlap' }
 
-  // ADR-0227 — 원래부터 면적 0 이던 칸은 사유가 아니다(안 빼면 그런 칸 하나가 그 탭으로의 도킹을 전부 막는다).
+  // ADR-0227 — an area that was zero-area from the start is not a reason (if not subtracted, one such area blocks all docking into that tab).
   const hadArea = new Set(
     [target, incoming].flatMap(n => computeSlots(n, limits).filter(hasArea).map(r => r.slot_id)),
   )
@@ -157,8 +157,8 @@ export function dockedTree(
 }
 
 /**
- * 셸 `layout::dock::incoming_rect` — 결과 기하 `result` 에서 `ids` 칸들의 외접 정규화 사각형(경계 값을 고르기만 한다 — 끼운
- * 서브트리 상자와 비트 단위로 같다). `ids` 가 비었거나 `result` 에 없는 id 가 하나라도 있으면 `null`.
+ * Shell `layout::dock::incoming_rect` — the bounding normalized rectangle of the `ids` areas in result geometry `result` (it only picks boundary values — bit-for-bit the same as the inserted
+ * subtree box). `null` if `ids` is empty or any id is not in `result`.
  */
 export function incomingRect(result: readonly SlotRect[], ids: readonly string[]): RectF64 | null {
   let out: RectF64 | null = null

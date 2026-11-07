@@ -1,11 +1,11 @@
-//! 조회기가 상류 문자열을 다루는 도구 — 표시 칸(plan·모델 이름)에 싣기 전의 정리와 오류 문구의 낱말 대조.
+//! Tools by which a querier handles upstream strings — cleanup before putting into display fields (plan · model name) and word matching against error messages.
 //!
-//! ★상류 문자열을 로그·[`super::ProbeError`] 문구로 옮기는 도구는 여기 두지 않는다★ — 상류 문구에는 계정 정보가
-//!   실릴 수 있다. 표시 칸에 싣는 것은 이름으로 쓰이는 짧은 값뿐이다. 오류 문구의 원문을 싣는 길은
-//!   [`super::UpstreamText`] 하나다(로그에 못 찍히는 전용 칸).
+//! ★Tools that move an upstream string into logs · [`super::ProbeError`] messages are not placed here★ — upstream messages may carry
+//!   account information. What goes into a display field is only a short value used as a name. The only path that carries the original text of an error message is
+//!   [`super::UpstreamText`] (a dedicated field that cannot be printed to logs).
 
-/// 외부 문자열 → 표시 칸 값. 앞뒤 공백을 떼고, 비었거나 제어 문자·서식 문자·줄/문단 구분자가 있으면 `None`,
-/// 넘치면 `max_chars` 글자(바이트가 아니다)로 자른다.
+/// External string → display field value. Strips surrounding whitespace, and `None` if empty or if it has a control character · format character · line/paragraph separator,
+/// and truncates to `max_chars` characters (not bytes) if it overflows.
 pub fn display_text(text: &str, max_chars: usize) -> Option<String> {
     let text = text.trim();
     if text.is_empty() || text.chars().any(is_unprintable) {
@@ -14,15 +14,15 @@ pub fn display_text(text: &str, max_chars: usize) -> Option<String> {
     Some(text.chars().take(max_chars).collect())
 }
 
-/// 화면에 그대로 내면 안 되는 문자 — 제어 문자(`\n`·`\t`·ESC 포함) + [`is_invisible_format`]. 표시 칸은 이것이 있으면
-/// 값을 버리고, 원문 칸은 추적할 수 있게 빈칸이나 U+FFFD 로 바꾼다(규칙 = [`super::UpstreamText::new`]).
+/// Characters that must not be shown on screen as is — control characters (including `\n` · `\t` · ESC) + [`is_invisible_format`]. A display field drops the
+/// value if it has any, and the original-text field replaces them with a blank or U+FFFD so it stays traceable (rule = [`super::UpstreamText::new`]).
 pub(super) fn is_unprintable(c: char) -> bool {
     c.is_control() || is_invisible_format(c)
 }
 
-/// Unicode 일반 범주 Cf(서식 — 양방향 덮어쓰기·너비 없는 문자·태그 등) + 줄/문단 구분자(U+2028·U+2029).
-/// ★std 에 범주 API 가 없어 손으로 옮긴 표다★ — Unicode 16.0 의 Cf 전량(Python `unicodedata` 16.0.0 으로 대조,
-///   2026-09-27). 그 뒤 판에서 Cf 에 더해진 문자는 못 거른다.
+/// Unicode general category Cf (format — bidirectional overrides · zero-width characters · tags etc.) + line/paragraph separators (U+2028·U+2029).
+/// ★A table carried over by hand because std has no category API★ — the whole of Unicode 16.0's Cf (checked against Python `unicodedata` 16.0.0,
+///   2026-09-27). Characters added to Cf in later versions are not filtered.
 fn is_invisible_format(c: char) -> bool {
     matches!(
         c,
@@ -50,9 +50,9 @@ fn is_invisible_format(c: char) -> bool {
     )
 }
 
-/// `piece` 가 `text` 안에서 낱말 머리에 있나(바로 앞이 ASCII 영숫자가 아니다) — `whole` 이면 끝도 낱말 경계여야
-/// 한다. 다른 낱말·id 속의 같은 조각(`moderate limit` 의 `rate limit` · `catalog in` 의 `log in` · `req_14290a` 의
-/// `429`)을 문구로 읽지 않게. 대소문자는 그대로 대조한다 — 접는 것은 호출자 몫이다.
+/// Whether `piece` is at the head of a word in `text` (the character right before is not ASCII alphanumeric) — with `whole` the end must also be a
+/// word boundary. So that the same piece inside another word · id (`rate limit` in `moderate limit` · `log in` in `catalog in` · `429` in `req_14290a`)
+/// is not read as a phrase. Case is compared as is — folding is the caller's share.
 pub fn has_word(text: &str, piece: &str, whole: bool) -> bool {
     text.match_indices(piece).any(|(at, _)| {
         let before = text.get(..at).and_then(|head| head.chars().next_back());
@@ -103,7 +103,7 @@ mod tests {
                 "{hidden:?}"
             );
         }
-        // 범위 바로 바깥은 거르지 않는다.
+        // Just outside the range is not filtered.
         for plain in ['\u{2027}', '\u{2030}', '\u{2065}', '\u{E0080}', '·'] {
             assert_eq!(
                 display_text(&format!("pl{plain}us"), 32),

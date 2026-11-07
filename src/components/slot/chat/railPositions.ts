@@ -1,12 +1,12 @@
-// ★왜 분리★(ADR-0051 rail / ADR-0053 구조 분할): StructuredTextView 는 렌더 dispatch 오케스트레이터로
-//   남기고, 순수 로직(위치 계산)은 여기로 내려 경계를 명확히 한다(순수 로직 ↔ 컴포넌트).
+// ★Why split★ (ADR-0051 rail / ADR-0053 structural split): StructuredTextView is left as the render dispatch orchestrator,
+//   and pure logic (position calculation) goes down here to make the boundary clear (pure logic ↔ component).
 
 export type ChatRowKind = 'assistant' | 'boundary' | 'skip'
 
 export type RailRunPosition = 'top' | 'mid' | 'bottom' | 'single'
 
 /**
- * 기존엔 모든 rail 행이 top-[-12px] 로 위 행에 붙어 최상단 dot(예: "Thought") 위로 선 stub 이 튀어나왔다.
+ * Before, every rail row attached to the row above at top-[-12px], so a stub stuck out above the topmost dot (e.g. "Thought").
  */
 export function computeRailRunPositions(kinds: ChatRowKind[]): (RailRunPosition | null)[] {
   const visible: { idx: number; kind: Exclude<ChatRowKind, 'skip'> }[] = []

@@ -1,15 +1,15 @@
-// 셸이 창마다 정한 테마를 화면에 붙이는 배선 — 그 창의 값 = 창 테마(`window.setTheme`) ?? 셸 설정
-// `theme.default`이고 셸이 계산해 준다(ADR-0265). 오늘 나르는 것은 테마 한 칸이다.
+// Wiring that attaches the theme the shell decided per window to the screen — that window's value = window theme (`window.setTheme`) ?? shell setting
+// `theme.default`, and the shell computes it for us (ADR-0265). What is carried today is a single theme field.
 //
-// ★값만 바꾼다★: 받은 테마를 themeManager 로 흘려 `data-theme` 하나를 갈아끼운다. 리마운트·키 교체·라우터
-// 이동을 이 경로에 얹지 말 것 — 챗은 컴포넌트 상태라 슬롯이 다시 마운트되면 대화가 영구 소실된다(ADR-0149).
+// ★Changes only the value★: pours the received theme into themeManager and swaps one `data-theme`. Do not put a remount · key swap · router
+// navigation onto this path — chat is component state, so if a slot is remounted the conversation is permanently lost (ADR-0149).
 //
-// ★invoke/listen 을 직접 부른다★: 「컴포넌트·스토어는 agentClient 에만 의존한다」의 예외로, 백엔드가 권위인
-// 표면은 Tauri 를 직접 쓴다(레이아웃이 `viewStore` 에서 쓰는 그 예외 — 이 값의 주인은 데몬이 아니라 셸이라
-// agentClient 가 나를 것이 아니다).
+// ★Calls invoke/listen directly★: an exception to 「컴포넌트·스토어는 agentClient 에만 의존한다」 (components · stores depend only on agentClient), a
+// surface whose authority is the backend uses Tauri directly (the same exception layout uses in `viewStore` — the owner of this value is the shell, not the daemon, so
+// agentClient is not what should carry it).
 //
-// ★이 경로는 읽기 전용이다★: 화면에서 테마를 만져도 어디에도 저장하지 않고 셸의 다음 밀기가 덮는다. 값을
-// 바꾸는 길은 셸 명령 둘 — 전역 `settings.set theme.default` · 창별 `window.setTheme` — 뿐이다.
+// ★This path is read-only★: touching the theme on screen saves it nowhere and the shell's next push overwrites it. The ways to
+// change the value are only two shell commands — global `settings.set theme.default` · per-window `window.setTheme`.
 // ADR-0149
 
 import { invoke } from '@tauri-apps/api/core'
@@ -20,17 +20,17 @@ import { isThemeName, type ThemeName } from '../store/themeStore'
 import { retryAsync, RetryCancelledError } from '../util/retryInvoke'
 import { themeManager } from './ThemeManager'
 
-// 셸이 미는 알림. ★창마다 자기 값이 온다★ — 셸이 목적지를 지목해 보낸다(`src-tauri/src/commands/settings.rs`).
+// The notice the shell pushes. ★Each window gets its own value★ — the shell sends it naming the destination (`src-tauri/src/commands/settings.rs`).
 const EVT_UI_SETTINGS_UPDATED = 'ui:settings-updated'
-// 부팅 조회. 미는 쪽과 같은 모양(`{theme}`)을 돌려준다 — 셸이 두 자리에 같은 페이로드 struct 를 쓴다.
-// ★창 인자를 안 넘긴다★ — 어느 창이 물었는지는 Tauri 가 셸 쪽에 넣어 준다(웹뷰가 밝히면 잘못 적힌 label
-// 하나가 남의 창 테마를 가져간다).
+// Boot query. Returns the same shape as the push (`{theme}`) — the shell uses the same payload struct in both places.
+// ★No window argument is passed★ — Tauri supplies which window asked on the shell side (if the webview declared it, one wrongly written label
+// would take another window's theme).
 const CMD_GET_UI_SETTINGS = 'get_ui_settings'
 
 const FALLBACK: ThemeName = 'dark'
 
-// ★셸이 이미 세 값 중 하나로 접어서 준다 — 이 검문은 그 계약이 깨졌을 때를 위한 그물이다★. 여기서 조용히 통과시키면
-//   `data-theme` 에 없는 이름이 박혀 스타일이 통째로 안 붙는다. `null` = 쓸 수 없다 — 부르는 쪽은 `keepCurrent` 로 간다.
+// ★The shell already folds it into one of three values before giving it — this check is a net for when that contract breaks★. If it passed silently here,
+//   a name not in `data-theme` would be planted and styles would not attach at all. `null` = unusable — the caller goes to `keepCurrent`.
 function themeOf(payload: unknown, where: string): ThemeName | null {
   const raw = (payload as { theme?: unknown } | null | undefined)?.theme
   if (isThemeName(raw)) {
@@ -40,9 +40,9 @@ function themeOf(payload: unknown, where: string): ThemeName | null {
   return null
 }
 
-// 셸 값을 못 받았을 때 — 지금 붙은 테마(셸이 창을 만들며 박은 그 창의 테마 · 앞서 받은 값)를 그대로 둔다. ★FALLBACK 으로
-//   덮지 말 것★ — light · e-ink 창이 dark 로 바뀌어 그 창의 테마가 아닌 색이 보인다. 아무것도 안 붙었을 때만 FALLBACK 이다
-//   (무테마면 글자 · 테두리 색 토큰이 통째로 비어 검은 바탕에 검은 글자 — `main.tsx`).
+// When the shell value was not received — keep the currently attached theme as is (the window's theme the shell planted when creating the window · a value received earlier). ★Do not overwrite with FALLBACK★ —
+//   a light · e-ink window would turn dark and show colors that are not that window's theme. FALLBACK applies only when nothing is attached
+//   (with no theme the text · border color tokens are entirely empty, giving black text on a black background — `main.tsx`).
 function keepCurrent(): void {
   if (!isThemeName(document.documentElement.dataset.theme)) {
     themeManager.apply(FALLBACK)
@@ -50,52 +50,52 @@ function keepCurrent(): void {
 }
 
 /**
- * 부팅 조회 1회 + 갱신 구독을 건다. 반환값은 disposer(언마운트/HMR 시 리스너 중복 누적 방지).
+ * Does one boot query + hooks the update subscription. The return value is a disposer (prevents listener duplicate accumulation on unmount/HMR).
  *
- * 창마다 한 번 부른다 — main·팝아웃·트리가 각자 자기 값을 당긴다.
+ * Called once per window — main · pop-out · tree each pull their own value.
  */
 export function installUiSettings(): () => void {
   let disposed = false
   let unlisten: UnlistenFn | undefined
-  // ★부팅 조회가 푸시를 덮지 못하게 하는 빗장★: 조회 왕복 중에 밀기(`window.setTheme` · `theme.default` 쓰기)가
-  //   들어오면 조회 답이 더 낡은 값이다. 도착 순서로 이기게 두면 그 명령은 답만 성공이고 화면은 안 바뀐다 —
-  //   사유 없는 무반응이라 호출자가 명령·설정을 의심하며 헤맨다.
+  // ★The latch that keeps the boot query from overwriting a push★: if a push (`window.setTheme` · `theme.default` write) comes in during the query round trip,
+  //   the query answer is the staler value. Letting arrival order win makes that command succeed only in its answer while the screen does not change —
+  //   a reasonless non-response, so the caller wanders suspecting the command · setting.
   let pushed = false
 
   void (async () => {
-    // ★구독 등록이 끝난 **뒤에** 부팅 조회를 낸다 — 둘을 나란히 띄우지 말 것★.
-    //   나란히 띄우면 등록이 아직 안 끝난 사이에 온 밀기(`window.setTheme` · `theme.default` 쓰기) 알림은 이 창에
-    //   **도착조차 안 하고**(리스너가 없다) 그 뒤 늦게 온 조회 답이 옛 값을 칠한다. 위 `pushed` 빗장은 알림을 **받았을 때만**
-    //   서므로 그 인터리브를 못 막는다 — 순서로만 막힌다.
-    //   순서를 뒤집으면 잃는 것은 없다: 등록 전에 놓친 알림이 있어도 조회가 그 **뒤에** 셸의 지금 값을 읽으므로
-    //   같은(또는 더 새) 값을 가져온다.
-    // ★한 번 거절당하면 그 창은 영구히 귀머거리가 된다 — 그래서 유계 재시도를 건다★.
-    //   조회는 성공하는데 구독만 실패하면 첫 값은 멀쩡히 칠해져 **화면이 건강해 보인다**. 그 뒤 모든
-    //   밀기(`window.setTheme` · `theme.default` 쓰기)를 그 창만 놓쳐 다른 창과 영영 어긋나는데 아무 신호가 없다.
-    //   이벤트 평면 미준비는 부팅 직후의 일시 실패라 재시도로 낫는 종류다(같은 판단으로 `App.tsx` 의 부팅 pull 이 이 헬퍼를
-    //   쓴다 — ADR-0102).
-    //   재시도까지 소진되면 **조용히 넘기지 않고 error 로 표면화한다** — 그 뒤로는 이 창이 갱신을 못 받는
-    //   것이 확정이라 warn 이 아니다.
-    // ★재시도가 걸리는 것은 **구독뿐**이다★ — 아래 부팅 조회는 맨 `invoke` 다. 한 번 실패하면 지금 테마를 그대로
-    //   두고, 다음 밀기(`window.setTheme` · `theme.default` 쓰기)가 값을 맞춘다(구독은 그때 이미 서 있다).
-    // ★이 재시도가 덮는 것은 **거절**뿐이다 — 무응답(hang)은 못 덮는다★(알려진 잔여). 타임아웃이 없어
-    //   `listen()` 이 영영 안 풀리면 재시도 루프가 첫 시도에서 멈춰 있고, 그 아래 부팅 조회까지 함께 막힌다
-    //   (순서 종속 — 바로 위 항목). 「재시도가 있으니 등록은 결국 된다」로 읽지 말 것.
+    // ★Issue the boot query **after** the subscription registration finishes — do not launch the two side by side★.
+    //   Side by side, a push (`window.setTheme` · `theme.default` write) notice that arrives while registration is not yet done **does not even arrive**
+    //   at this window (no listener) and the query answer that comes late afterwards paints the old value. The `pushed` latch above stands **only when a notice is received**,
+    //   so it cannot stop that interleave — only order stops it.
+    //   Reversing the order loses nothing: even if a notice was missed before registration, the query reads the shell's current value **after that**, so
+    //   it fetches the same (or a newer) value.
+    // ★Once refused, that window becomes permanently deaf — so a bounded retry is put on★.
+    //   If the query succeeds and only the subscription fails, the first value is painted fine and **the screen looks healthy**. After that, that window alone misses every
+    //   push (`window.setTheme` · `theme.default` write) and diverges from other windows forever with no signal.
+    //   The event plane not being ready is a transient failure right after boot, the kind that retry cures (by the same judgment the boot pull in `App.tsx` uses this helper
+    //   — ADR-0102).
+    //   If retries are exhausted too, **it is not passed over silently but surfaced as an error** — from then on this window not receiving
+    //   updates is certain, so it is not a warn.
+    // ★The retry covers **the subscription only**★ — the boot query below is a bare `invoke`. If it fails once it leaves the current theme
+    //   as is, and the next push (`window.setTheme` · `theme.default` write) sets the value right (the subscription is already up by then).
+    // ★What this retry covers is **refusal** only — it cannot cover no response (hang)★ (known residual). With no timeout,
+    //   if `listen()` never resolves the retry loop stays stuck at the first attempt, and the boot query below is blocked with it
+    //   (order dependence — the item right above). Do not read it as 「재시도가 있으니 등록은 결국 된다」 (there is a retry so registration eventually happens).
     try {
-      // ★★`target` 을 빼지 말 것 — 그러면 이 창이 **남의 창 값까지** 받아 마지막 것을 칠한다★★
-      //   `listen()` 의 기본 타깃은 `Any` 이고, Tauri 는 `Any` 로 등록된 리스너를 **필터와 무관하게 전부**
-      //   깨운다(`match_any_or_filter`). 셸은 창마다 `emit_to(label, …)` 로 자기 값을 보내므로, 기본
-      //   등록이면 창 셋짜리 밀기 한 번에 이 창이 값 셋을 받고 **먼저 온 것들이 무의미해진다**.
-      //   ★label 은 Tauri 가 준다★ — 셸도 같은 값을 쓴다(`commands/settings.rs` 의 `Window::label()`).
+      // ★★Do not drop `target` — otherwise this window receives **other windows' values too** and paints the last one★★
+      //   The default target of `listen()` is `Any`, and Tauri wakes listeners registered as `Any` **all of them regardless of the filter**
+      //   (`match_any_or_filter`). The shell sends each window its own value with `emit_to(label, …)`, so with a default
+      //   registration one push over three windows makes this window receive three values and **the earlier ones become meaningless**.
+      //   ★The label comes from Tauri★ — the shell uses the same value (`Window::label()` in `commands/settings.rs`).
       const off = await retryAsync(
         () =>
           listen<unknown>(
             EVT_UI_SETTINGS_UPDATED,
             e => {
-              // ★정리된 뒤에 온 것은 버린다★: dispose 가 `listen()` 대기 중에 돌면, 등록은 이미 끝났는데
-              //   아래 `off()` 에는 아직 못 닿은 창이 생긴다. 그 틈에 배달되면 **죽은 인스턴스**
-              //   (StrictMode 첫 회 · HMR 이전 판)가 살아 있는 창의 테마를 덮는다. `off()` 만으로는
-              //   그 한 건을 못 막는다.
+              // ★Anything that arrives after cleanup is discarded★: if dispose runs while `listen()` is pending, a gap arises where registration is already done but
+              //   it has not yet reached the `off()` below. If delivered in that gap, a **dead instance**
+              //   (the first StrictMode round · a previous HMR edition) overwrites the live window's theme. `off()` alone
+              //   cannot stop that one case.
               if (disposed) return
               pushed = true
               const theme = themeOf(e.payload, EVT_UI_SETTINGS_UPDATED)
@@ -114,15 +114,15 @@ export function installUiSettings(): () => void {
           },
         },
       )
-      // 등록이 끝나기 전에 dispose 가 돌면 핸들을 아직 못 받아 unlisten 을 못 건다 — 받은 자리에서 바로 푼다
-      // (viewStore 의 같은 조항).
+      // If dispose runs before registration finishes, the handle has not been received yet so unlisten cannot be called — release it right at the spot it is received
+      // (the same clause in viewStore).
       if (disposed) {
         off()
         return
       }
       unlisten = off
     } catch (e) {
-      // 구독이 죽어도 부팅 조회는 낸다 — 갱신은 못 받아도 첫 값은 맞아야 한다.
+      // Issue the boot query even if the subscription dies — even if updates cannot be received, the first value must be right.
       if (!(e instanceof RetryCancelledError)) {
         console.error(
           `[uiSettings] ${EVT_UI_SETTINGS_UPDATED} 구독 실패 — 이 창은 이후 테마 밀기(window.setTheme · theme.default 쓰기)를 못 받는다:`,

@@ -1,24 +1,24 @@
-//! 사용량 판정의 시계 seam — 쿨타임·거절 대기·값 나이는 [`UsageClock::mono`], 리셋 비교는
-//! [`UsageClock::wall`] 로 잰다(TRD §3 #28 · ADR-0250). 서비스의 판정은 늘 이 시계로 잰다 — 대기 타이머가 깨운
-//! 시각은 믿지 않는다.
+//! The clock seam of usage decisions — cooldown · refusal wait · value age are measured with [`UsageClock::mono`], and reset comparison with
+//! [`UsageClock::wall`] (TRD §3 #28 · ADR-0250). The service's decisions are always measured by this clock — the time a wait timer woke it
+//! is not trusted.
 //!
-//! ★base `time::Clock` 과 합치지 않는다★(ADR-0275 결정 7) — `mono` 는 기점부터의 `Duration` 이라 책의
-//! 시간 타입으로 그대로 흐르고 `Duration::MAX` · `ZERO` 끝값을 시험이 잰다. `wall` 은 부호 있는 epoch 초다.
-//! `Instant` 를 돌려주는 지금 읽기로는 둘 다 담기지 않는다.
+//! ★Not merged with base `time::Clock`★ (ADR-0275 decision 7) — `mono` is a `Duration` from the origin so it flows straight into the book's
+//! time type and tests measure the `Duration::MAX` · `ZERO` boundary values. `wall` is signed epoch seconds.
+//! A current-time read that returns `Instant` cannot hold both.
 
 // ADR-0275
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-/// ★구현은 서비스·명부·책을 다시 부르지 않는다★ — 서비스는 책 락을 쥔 채(구독 교체의 첫 한 장에서는 명부 →
-/// 책 락을 쥔 채) 이 시계를 읽는다. 다시 부르면 교착이다.
+/// ★An implementation does not call back into the service, registry or book★ — the service reads this clock while holding the book lock (in the first sheet of a subscription replacement, while holding the registry →
+/// book locks). Calling back is a deadlock.
 pub trait UsageClock: Send + Sync + 'static {
-    /// 이 시계의 기점부터 흐른 단조 시간 — 벽시계가 되감겨도 줄지 않는다. 잠든 시간은 OS 가 세는 만큼 센다.
+    /// Monotonic time elapsed since this clock's origin — it does not shrink even if the wall clock rewinds. Slept time counts as much as the OS counts it.
     fn mono(&self) -> Duration;
-    /// 벽시계, epoch 초. 되감길 수 있다. 1970 전이면 음수이고 패닉하지 않는다.
+    /// Wall clock, epoch seconds. It can rewind. Before 1970 it is negative and does not panic.
     fn wall(&self) -> i64;
 }
 
-/// 실물 시계. `mono` 의 기점 = 만든 순간.
+/// The real clock. The origin of `mono` = the moment it was made.
 pub struct OsUsageClock {
     origin: Instant,
 }
@@ -39,9 +39,9 @@ impl Default for OsUsageClock {
 
 impl UsageClock for OsUsageClock {
     fn mono(&self) -> Duration {
-        // `Instant` 가 잠든 시간을 세는지는 OS 마다 다르다고 알려져 있다 — Windows QPC 는 세고 Linux
-        // `CLOCK_MONOTONIC`·macOS 는 안 센다(미검 · TRD §6 #2). 안 세면 복귀 뒤 쿨타임·값 나이가 잠든 만큼
-        // 늦게 흐른다. OS 로 가를 때는 이 함수 안에서만 가른다.
+        // Whether `Instant` counts slept time is known to differ by OS — Windows QPC counts it while Linux
+        // `CLOCK_MONOTONIC` and macOS do not (unverified · TRD §6 #2). If it does not count, after resume the cooldown and value age run
+        // behind by the slept time. Splitting by OS is done only inside this function.
         // ADR-0230
         self.origin.elapsed()
     }
@@ -51,7 +51,7 @@ impl UsageClock for OsUsageClock {
     }
 }
 
-/// 초 내림(floor) — 1970 전 0.5초 = -1 이지 0 이 아니다. i64 를 넘는 쪽은 양·음 끝에서 포화한다.
+/// Seconds rounded down (floor) — 0.5 s before 1970 = -1, not 0. Past i64 it saturates at the positive and negative ends.
 fn epoch_secs(t: SystemTime) -> i64 {
     match t.duration_since(UNIX_EPOCH) {
         Ok(after) => i64::try_from(after.as_secs()).unwrap_or(i64::MAX),
@@ -65,7 +65,7 @@ fn epoch_secs(t: SystemTime) -> i64 {
     }
 }
 
-/// 시험용 손 시계. `mono` 와 `wall` 을 따로 옮길 수 있다 — 벽시계만 되감기·단조 시간만 흐르기를 재현한다.
+/// Hand-driven clock for tests. `mono` and `wall` can be moved separately — reproduces the wall clock rewinding alone and only monotonic time flowing.
 #[cfg(test)]
 pub(crate) struct ManualUsageClock {
     state: std::sync::Mutex<ManualState>,
@@ -75,7 +75,7 @@ pub(crate) struct ManualUsageClock {
 struct ManualState {
     mono: Duration,
     wall: i64,
-    /// `advance_both` 가 아직 `wall` 에 못 옮긴 1초 미만 몫 — 0.5초씩 두 번이면 `wall` 이 1 오른다.
+    /// The sub-1-second share `advance_both` could not yet move into `wall` — two times 0.5 s raises `wall` by 1.
     wall_carry: Duration,
 }
 
@@ -91,13 +91,13 @@ impl ManualUsageClock {
         }
     }
 
-    /// `mono` 만 옮긴다 — `wall` 은 그대로.
+    /// Moves only `mono` — `wall` stays.
     pub(crate) fn advance(&self, by: Duration) {
         let mut s = self.lock();
         s.mono = s.mono.saturating_add(by);
     }
 
-    /// 둘을 함께 옮긴다 — `wall` 은 1초 미만 몫을 모아 정수 초로 옮긴다.
+    /// Moves both together — `wall` gathers the sub-1-second share and moves in whole seconds.
     pub(crate) fn advance_both(&self, by: Duration) {
         let mut s = self.lock();
         s.mono = s.mono.saturating_add(by);
@@ -107,7 +107,7 @@ impl ManualUsageClock {
         s.wall_carry = Duration::from_nanos(u64::from(carried.subsec_nanos()));
     }
 
-    /// `wall` 만 그 값으로 둔다(되감기 포함) — 모아 둔 1초 미만 몫도 버린다.
+    /// Sets only `wall` to that value (including rewinding) — the gathered sub-1-second share is also discarded.
     pub(crate) fn set_wall(&self, wall: i64) {
         let mut s = self.lock();
         s.wall = wall;
@@ -156,7 +156,7 @@ mod tests {
             (Duration::from_secs(18), 1_003)
         );
 
-        // 벽시계만 되감긴다 — 단조 시간은 그대로다.
+        // Only the wall clock rewinds — monotonic time stays.
         clock.set_wall(900);
         assert_eq!((clock.mono(), clock.wall()), (Duration::from_secs(18), 900));
     }
@@ -170,7 +170,7 @@ mod tests {
         assert_eq!((clock.mono(), clock.wall()), (Duration::from_secs(1), 1));
         clock.advance_both(Duration::from_millis(1_700));
         assert_eq!(clock.wall(), 2);
-        // set_wall 은 모아 둔 0.7초를 버린다 — 0.5초 더해도 1초가 안 된다.
+        // set_wall discards the gathered 0.7 s — adding 0.5 s does not make 1 second.
         clock.set_wall(100);
         clock.advance_both(Duration::from_millis(500));
         assert_eq!(clock.wall(), 100);

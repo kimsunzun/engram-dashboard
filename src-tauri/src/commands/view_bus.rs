@@ -1,14 +1,14 @@
-//! 웹뷰 몫 명령의 Tauri 어댑터 — 부팅 보고 하나와 결말 회수 하나.
+//! The Tauri adapter for webview-owned commands — one boot report and one outcome retrieval.
 //!
-//! ★이 파일에 로직이 없다★: 필터·상관·마감은 `crate::view_commands` 가 소유하고, 여기 남는 것은 Tauri
-//! 세계로의 번역(창 label 을 어디서 얻나 · 결말을 어떤 인자로 받나)과 **데몬에 차분을 밀 것인가** 하나뿐이다
-//! (`commands/settings.rs`·`commands/layout.rs` 와 같은 분담).
+//! ★There is no logic in this file★: filtering, correlation and closing are owned by `crate::view_commands`, and what remains here is
+//! the translation into the Tauri world (where to get the window label · what argument receives the outcome) and just **whether to push a delta to the daemon**
+//! (the same division of labor as `commands/settings.rs` · `commands/layout.rs`).
 //!
-//! ## ★차분을 여기서 미는 이유★
-//! 셸의 등록은 **핸드셰이크 직후 한 번** 나간다(`daemon_client::connection` 의 `register_own_commands`).
-//! 웹뷰의 보고는 그 시점과 아무 순서 관계가 없다 — 창 스크립트가 늦게 올라오면 그 연결의 등록 패킷에는
-//! 화면 이름이 **하나도 안 실린다**. 그대로 두면 다음 재연결까지 화면 명령이 통째로 `UNKNOWN_COMMAND` 다.
-//! 그래서 명단이 실제로 바뀐 보고에 한해 `UpdateCommands` 를 낸다(TRD §3-7 조항 3).
+//! ## ★Why the delta is pushed here★
+//! The shell's registration goes out **once right after the handshake** (`register_commands` in `daemon_client::connection`).
+//! The webview's report has no order relation to that moment at all — if the window script comes up late, the registration packet of that connection
+//! carries **no screen name at all**. Left as is, screen commands are entirely `UNKNOWN_COMMAND` until the next reconnect.
+//! So `UpdateCommands` is sent only for reports where the list actually changed (TRD §3-7 clause 3).
 // ADR-0155
 
 use std::sync::Arc;
@@ -16,21 +16,21 @@ use std::sync::Arc;
 use engram_dashboard_protocol::{AgentCommand, RequestId};
 use tauri::{AppHandle, Manager, State, Window};
 
-use crate::daemon_client::protocol_state::CommandFailure;
+use crate::daemon_client::protocol_state::{self, CommandFailure};
 use crate::daemon_client::refusal::RefusalSite;
 use crate::daemon_client::DaemonClient;
 use crate::view_commands::{ViewCommandBridge, ViewCommandDecl};
 use engram_dashboard_command::{CommandError, ErrorCode};
 
-/// 창 하나가 부팅에 자기 명령 목록을 알린다 — 창마다 한 번(`src/commands/viewCommandBridge.ts`).
+/// One window announces its own command list at boot — once per window (`src/commands/viewCommandBridge.ts`).
 ///
-/// ★창 label 을 인자로 받지 않는다★: 웹뷰가 스스로 밝히게 하면 잘못 적힌 label 하나가 남의 창으로 봉투를
-/// 보낸다. Tauri 가 넣어 주는 [`Window`] 가 그 값의 유일한 권위다.
-/// ★**창** label 이지 webview label 이 아니다★ — 웹뷰 쪽이 구독을 거는 값(`getCurrentWindow().label`)과
-/// 같아야 `emit_to` 가 그 리스너에 걸린다. 둘은 오늘 같은 문자열이지만(창마다 웹뷰 하나) 같은 것을
-/// **가리키는 쪽**을 골라 둔다.
-/// 반환은 항상 `Ok` 다 — 예약 이름이 빠진 것은 보고한 쪽의 실패가 아니라 셸의 정책이고(사유 =
-/// `view_commands` 모듈 헤더), 그 사실은 로그가 진다.
+/// ★It does not take the window label as an argument★: if the webview states it itself, one mistyped label sends an envelope
+/// to someone else's window. The [`Window`] that Tauri injects is the sole authority of that value.
+/// ★It is the **window** label, not the webview label★ — it must equal the value the webview side subscribes with (`getCurrentWindow().label`)
+/// for `emit_to` to hit that listener. The two are the same string today (one webview per window), but we choose the one that
+/// **points at** the same thing.
+/// The return is always `Ok` — a reserved name being dropped is the shell's policy, not a failure of the reporter (reason =
+/// the `view_commands` module header), and the log carries that fact.
 #[tauri::command]
 pub async fn report_view_commands(
     window: Window,
@@ -40,8 +40,8 @@ pub async fn report_view_commands(
 ) -> Result<(), String> {
     let label = window.label().to_string();
     let mut refused_by_daemon = None;
-    // ★상태 변경과 그 차분 송신을 **다리가 한 문 안에서** 돌린다★ — 여기서 따로 부르면 두 창의 보고가
-    //   서로를 앞질러 데몬이 옛 이름을 쥔 채 남는다(사유 = `ViewCommandBridge` 의 `outbound`).
+    // ★The bridge runs the state change and its delta send **inside one gate**★ — if called separately here, the reports of two windows
+    //   overtake each other and the daemon is left holding old names (reason = `outbound` of `ViewCommandBridge`).
     let outcome = bridge
         .report_and_push(&label, commands, |added, removed| {
             let label = label.clone();
@@ -50,7 +50,7 @@ pub async fn report_view_commands(
             async move { *refused_by_daemon = push_delta(&app, &label, added, removed).await }
         })
         .await;
-    // ADR-0006: 박스는 그 문(`outbound` 자물쇠)을 놓은 뒤에 부른다.
+    // ADR-0006: the box is called after releasing that gate (the `outbound` lock).
     if let Some(message) = refused_by_daemon {
         if let Some(client) = app.try_state::<Arc<DaemonClient>>() {
             client
@@ -71,8 +71,8 @@ pub async fn report_view_commands(
     Ok(())
 }
 
-/// 바뀐 몫만 데몬 명부에 얹는다 — ★부르는 자리는 위 한 곳뿐이다★(순서 문 안).
-/// 데몬이 `Error` 로 거절했으면 그 문구를 돌려준다 — 박스는 부르는 쪽이 문을 놓은 뒤 띄운다.
+/// Puts only the changed share onto the daemon's registry — ★the only place that calls it is the one above★ (inside the ordering gate).
+/// If the daemon rejected with `Error`, it returns that message — the box is shown by the caller after releasing the gate.
 async fn push_delta(
     app: &AppHandle,
     label: &str,
@@ -85,28 +85,40 @@ async fn push_delta(
         removed = removed.len(),
         "웹뷰 명령 명단 갱신"
     );
-    // ★클라이언트가 없으면 조용히 끝낸다★ — 런타임 생성이 실패한 앱(`lib.rs` 의 Err 갈래)에서는 데몬
-    //   명령 자체가 없다. 명단은 이미 다리에 들었으므로 다음 연결의 등록 패킷이 그것을 싣는다.
+    // ★If there is no client, end quietly★ — in an app whose runtime creation failed (the Err branch in `lib.rs`) there is no daemon
+    //   command at all. The list is already in the bridge, so the registration packet of the next connection carries it.
     let Some(client) = app
         .try_state::<Arc<DaemonClient>>()
         .map(|c| c.inner().clone())
     else {
         return None;
     };
+    // ADR-0272: wrap in the raw field. A failure leaves only a warn, like a shell-local failure (the `Local` branch below), and shows no box
+    //   (boxes are for daemon origin only — ADR-0281).
+    let added = match protocol_state::decls_to_wire(&added) {
+        Ok(added) => added,
+        Err(e) => {
+            tracing::error!(
+                window = %label,
+                "웹뷰 명령 차분을 원문 칸으로 싸지 못했다 — 이 차분은 데몬에 안 나간다: {e}"
+            );
+            return None;
+        }
+    };
     let cmd = AgentCommand::UpdateCommands {
-        // ★데몬은 이 칸을 쓰지 않는다★ — 명부 주인은 그 패킷이 온 연결에서 파생된다. 등록 패킷과 **같은
-        //   광고 문자열**을 적어 데몬 로그에서 두 패킷이 같은 셸의 것으로 보이게 한다.
-        owner: crate::daemon_client::connection::shell_owner_advert(),
+        // ★The daemon does not use this field★ — the registry owner is derived from the connection that packet came on. Write the **same
+        //   advertisement string** as the registration packet so that the two packets look like the same shell's in the daemon log.
+        owner: crate::daemon_client::inbound::shell_owner_advert(),
         added,
         removed,
         request_id: RequestId::new(),
     };
-    // ★답장을 기다리되 실패를 위로 올리지 않는다★: 보고 자체는 성공했다(다리에 들었다). 셸 로컬 실패는
-    //   「이 연결에서는 아직 안 보인다」일 뿐이라 다음 재연결의 전량 등록이 그 목록을 다시 보낸다(재시도). 그
-    //   등록마저 거절되면 등록 자리가 warn 을 남기고 거절 박스를 띄운다. 데몬 거절은 다르다 —
-    //   다리가 거절된 이름을 되돌리지 않고 쥐므로 선언이 그대로면 다음 전량 등록도 거절될 수 있어, 데몬 문구를
-    //   돌려 거절 박스로 올린다(ADR-0281). 어느 쪽이든 warn 을 남긴다 — 등록이 안 서면 화면 명령이 안
-    //   불리는데 그 원인이 어디에도 안 남는다.
+    // ★Wait for the reply but do not raise failure upward★: the report itself succeeded (it is in the bridge). A shell-local failure is
+    //   only 「이 연결에서는 아직 안 보인다」 (not visible on this connection yet), so the full registration of the next reconnect sends that list again (retry). If that
+    //   registration is also rejected, the registration site leaves a warn and shows a rejection box. A daemon rejection is different —
+    //   the bridge holds the rejected name without reverting it, so if the declaration stays the same the next full registration may be rejected too, so the daemon message is
+    //   passed on and raised as a rejection box (ADR-0281). Either way leave a warn — if registration fails, screen commands are not
+    //   called and that cause is left nowhere.
     match client.send_command_with_origin(cmd).await {
         Ok(_) => {
             tracing::info!(window = %label, "웹뷰 명령 차분 등록 완료");
@@ -119,7 +131,7 @@ async fn push_delta(
             );
             Some(message)
         }
-        // 박스 없음 — 박스는 데몬 출처만 띄운다(ADR-0281).
+        // No box — boxes are shown only for daemon origin (ADR-0281).
         Err(CommandFailure::Local(message)) => {
             tracing::warn!(
                 window = %label,
@@ -130,15 +142,15 @@ async fn push_delta(
     }
 }
 
-/// 웹뷰가 명령 하나를 끝내고 결말을 돌려준다.
+/// The webview finishes one command and returns the outcome.
 ///
-/// ★어느 창이 답했는지를 [`Window`] 가 준다 — 인자로 받지 않는다★: 상관 키 하나로만 열면 봉투를 받지
-/// 않은 창이 남의 왕복을 끝낼 수 있다(호출자는 위조 결말을 받고, 진짜 창의 부수효과는 그대로 일어나며
-/// 그 답만 반려된다). 대조는 다리가 한다(`ViewCommandBridge::settle`).
+/// ★Which window answered is given by [`Window`] — it is not taken as an argument★: if opened by a correlation key alone, a window that did not receive
+/// the envelope could end someone else's round trip (the caller receives a forged outcome, the real window's side effects still happen and
+/// only its answer is bounced). The bridge does the check (`ViewCommandBridge::settle`).
 ///
-/// ★오류 종류를 웹뷰가 못 고른다(알려진 한계)★ — 인자 실수도 진짜 실패도 `INTERNAL` + 문구로 나간다.
-/// 가르려면 웹뷰 레지스트리가 타입드 코드를 던져야 하고 그건 이 어댑터의 결정이 아니다(광고하는 오류
-/// 집합도 그 사실을 그대로 적는다 — `ViewCommandHelp::to_catalog_item`).
+/// ★The webview cannot pick the error kind (a known limit)★ — both an argument mistake and a real failure go out as `INTERNAL` + message.
+/// To tell them apart the webview registry would have to throw typed codes, and that is not this adapter's decision (the advertised error
+/// set also states that fact as is — `ViewCommandHelp::to_catalog_item`).
 #[tauri::command]
 pub fn report_command_outcome(
     window: Window,
@@ -152,8 +164,8 @@ pub fn report_command_outcome(
         None => Ok(ok.unwrap_or(serde_json::Value::Null)),
     };
     if let Err(detail) = bridge.settle(window.label(), &request_id, outcome) {
-        // 답장을 붙일 자리가 없다 = 마감을 넘겼거나 · 같은 봉투에 두 번째 답이 왔거나 · **봉투를 받지
-        //   않은 창이 답했다**. 셋 다 사람이 봐야 하는 신호다.
+        // There is no place to attach the reply = the deadline was passed · a second reply came for the same envelope · **a window that did not receive
+        //   the envelope answered**. All three are signals a human should look at.
         tracing::warn!(window = %window.label(), "웹뷰 명령 결말을 상관시키지 못했다: {detail}");
         return Err(detail);
     }

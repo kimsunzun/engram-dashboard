@@ -1,21 +1,21 @@
-// ADR-0055: 레지스트리는 상태 권위가 아니다 — 이 다섯은 viewStore 의 렌더 모드 액션으로 라우팅만 한다
-//   (새 상태 경로 0). 사람 클릭·팔레트·LLM(__engramCmd)이 같은 command 를 실행한다(§5 단일 제어 표면).
+// ADR-0055: the registry is not a state authority — these five only route to the render mode actions of viewStore
+//   (0 new state paths). Human clicks · the palette · the LLM (__engramCmd) run the same command (§5 single control surface).
 //
-// ★형제 slot.* 과 달리 백엔드 권위 루프를 안 탄다★: renderModeOverride 는 프론트 전용 override 라
-//   invoke→emit(ADR-0035)을 거치지 않는다(그 예외의 계약 = viewStore 의 renderModeOverride 필드 JSDoc).
-//   그래서 이 다섯의 반환은 항상 undefined 다 — 호출부가 await 할 완료 시점이 없다.
+// ★Unlike the sibling slot.*, these do not take the backend authority loop★: renderModeOverride is a frontend-only override, so
+//   it does not go through invoke→emit (ADR-0035) (the contract of that exception = the JSDoc of the renderModeOverride field in viewStore).
+//   So the return of these five is always undefined — there is no completion point for call sites to await.
 //
-// ★★버스에 올리지 말 것 — `help` 를 더하면 슬롯을 소유하지 않은 창에 쓸 수 있다★★ (ADR-0167)
-//   위 항의 실무적 귀결이다. renderModeOverride 는 **창(웹뷰)마다 따로 있는** 프론트 상태다. 형제 slot.*
-//   의 변경은 invoke 를 타고 **백엔드 권위 한 곳**에 쓰이지만, 이 다섯은 **부른 창의** store 에 쓴다.
-//   그런데 봉투가 갈 창(host)은 셸이 배달 시점에 고르고 앱이 도는 중에도 옮겨 다니므로
-//   (`src-tauri/src/view_commands.rs` 의 `Registered::repick`), 그 슬롯을 소유하지 않은 창의 store 에
-//   기록하고 화면은 아무것도 안 바뀐 채 `ok` 로 답하는 일이 생긴다 — 호출자는 성공으로 읽는다.
-//   ★창 좌표를 인자로 붙이는 것은 탈출구가 아니다★ — 디스패처가 언제나 host 로만 보내서 그 인자를
-//   무시한다. 지목한 창으로 배달하려면 라우팅 구현이 바뀌어야 하고, 그 ADR 이 거부한 대안 1 이 그것이다
-//   (거기 적힌 「구조상 불가능」은 코드보다 센 표현이다 — 리스너·보고는 창마다 이미 있고 미구현인 것은
-//   선정뿐이다. 실측 2026-08-23). 지금 이걸 막는 유일한 것이 **`help` 부재**다
-//   (`commands/viewCommandBridge.ts` 의 `offeredCommands` 가 그 칸 하나로 승선을 가른다).
+// ★★Do not put them on the bus — adding `help` makes writes possible to a window that does not own the slot★★ (ADR-0167)
+//   This is the practical consequence of the item above. renderModeOverride is frontend state that exists **separately per window (webview)**. The changes of the sibling slot.*
+//   go through invoke and are written to **one backend authority**, but these five write to **the calling window's** store.
+//   Yet the window (host) the envelope goes to is chosen by the shell at delivery time and moves around even while the app runs
+//   (`Registered::repick` in `src-tauri/src/view_commands.rs`), so it can happen that it is
+//   recorded in the store of a window that does not own that slot and answers `ok` with the screen changed in no way — the caller reads it as success.
+//   ★Attaching window coordinates as an argument is not an escape hatch★ — the dispatcher always sends to the host alone and
+//   ignores that argument. To deliver to the designated window the routing implementation would have to change, and that is alternative 1 that ADR rejected
+//   (the 「구조상 불가능」 (structurally impossible) written there is a stronger phrase than the code — listeners and reports already exist per window and only the unimplemented part is
+//   the selection. Measured 2026-08-23). The only thing blocking this now is the **absence of `help`**
+//   (`offeredCommands` in `commands/viewCommandBridge.ts` splits boarding by that one field).
 
 import { t } from '../i18n'
 import { RENDER_MODES, type RenderMode } from '../components/slot/renderMode'
@@ -23,24 +23,24 @@ import { useViewStore } from '../store/viewStore'
 import { matchDeclaredSpelling } from './enumArg'
 import { register } from './registry'
 
-/** 렌더 모드 command 의 실행 컨텍스트 인자(단일 가방, ADR-0055). */
+/** The execution context argument of the render mode commands (a single bag, ADR-0055). */
 interface RenderModeCtx {
   slotId?: unknown
   mode?: unknown
 }
 
 /**
- * ★viewId 를 받지 않는다★: 오버라이드 키는 slot node.id 이고(`LayoutLeaf` 의
- * `renderModeOverride[slotId]`), slotId 는 창 간 전역 고유 UUID 라(ADR-0035 불변식) viewId 로 좁힐 것이
- * 없다. 형제 slot.* 이 요구하는 viewId 를 여기서도 요구하면 대상 액션이 쓰지도 않는 값을 호출자(LLM)가
- * 찾아 채워야 한다.
+ * ★Does not take viewId★: the override key is the slot node.id (the `LayoutLeaf`'s
+ * `renderModeOverride[slotId]`), and slotId is a globally unique UUID across windows (ADR-0035 invariant), so there is nothing to narrow with viewId.
+ * If we required here the viewId that the sibling slot.* requires, the caller (LLM) would have to
+ * find and fill a value the target action does not even write.
  *
- * ★모르는 칸은 거절하지 않는다(여분 키 무시)★ — ADR-0055 의 「인자 = 객체 하나(가방), 각 handler 가
- * 필요한 키만 destructure」 그대로다. 덕분에 **나중에** 이 id 들을 슬롯 메뉴에 기여시키면(지금 기여는
- * 없다 — 이 파일에 registerSlotMenu 호출이 없다) 메뉴가 넘기는 실행 가방 `{viewId, slotId, agentId, content}`
- * (`SlotContextMenu` 의 `commandArgs`)이 그대로 들어맞는다. ADR-0157 의 「입구에서 선언에 없는 칸을 거절한다」를 여기에
- * 옮겨 심지 말 것 — 그 거절 목록은 **인자 선언에서 파생**해야 하는데(같은 ADR 불변식: 손으로 유지하는
- * 사본 금지) 이 다섯은 `help` 를 안 달아 파생할 선언 자체가 없다.
+ * ★Unknown fields are not rejected (extra keys ignored)★ — exactly the 「인자 = 객체 하나(가방), 각 handler 가
+ * 필요한 키만 destructure」 (arguments = one object (a bag); each handler destructures only the keys it needs) of ADR-0055. Thanks to that, if these ids are **later** contributed to the slot menu (there is
+ * no contribution now — this file has no registerSlotMenu call), the execution bag `{viewId, slotId, agentId, content}` the menu passes
+ * (`commandArgs` of `SlotContextMenu`) fits as is. Do not transplant here the 「입구에서 선언에 없는 칸을 거절한다」 (reject at the entrance any field not in the declaration) of ADR-0157 —
+ * that rejection list must be **derived from the argument declaration** (same ADR invariant: no hand-maintained
+ * copy), and these five attach no `help`, so there is no declaration to derive from.
  */
 function requireSlotId(args: RenderModeCtx | undefined, cmd: string): string {
   const slotId = args?.slotId
@@ -49,18 +49,18 @@ function requireSlotId(args: RenderModeCtx | undefined, cmd: string): string {
 }
 
 /**
- * ★무효 mode 는 throw — no-op 으로 삼키지 않는다★. store 의 `setRenderMode` 는 무효 mode 를 warn 후
- * 무시하므로, 걸러내지 않고 그대로 흘리면 아무 일도 안 일어난 호출이 `undefined` 반환 = 성공으로 보인다
- * (버스 다리도 error 없는 결말로 회신한다 — `viewCommandBridge.settle`). 같은 판단이 이 레지스트리의
- * 진입점에 이미 박혀 있다: `registry.run` 이 모르는 id 를 throw 하는 근거가 「조용한 no-op 은 LLM/cdp
- * 디버깅을 어렵게 함」이고, 형제 slot.* 의 좌표 가드도 같은 자리에서 throw 한다.
+ * ★An invalid mode throws — it is not swallowed as a no-op★. The store's `setRenderMode` warns and ignores an invalid mode,
+ * so if we pass it through without filtering, a call where nothing happened looks like a `undefined` return = success
+ * (the bus bridge also replies with an outcome without an error — `viewCommandBridge.settle`). The same judgment is already
+ * planted at this registry's entry point: the ground for `registry.run` throwing on an unknown id is 「조용한 no-op 은 LLM/cdp
+ * 디버깅을 어렵게 함」 (a silent no-op makes LLM/cdp debugging hard), and the coordinate guard of the sibling slot.* also throws at the same place.
  *
- * ★이건 「모르는 칸」 규칙(ADR-0157)이 아니다★ — 그 규칙이 가리는 것은 **이름을 모르는 칸**이고,
- * 여기서 걸리는 것은 아는 칸의 **값이 유효 집합 밖**인 경우다.
+ * ★This is not the 「모르는 칸」 (unknown field) rule (ADR-0157)★ — what that rule tells apart is a **field whose name is unknown**,
+ * and what is caught here is a known field whose **value is outside the valid set**.
  *
- * ★대소문자는 접고 유효 집합은 그대로 둔다★ — 호출자가 어떻게 쓰든 store 로 가는 것은 `RENDER_MODES` 의
- * 원소다(사용자 결정 2026-09-23 — command 인자 enum 낱말 전반의 규칙). 접기 뒤에도 모르는 낱말은 여전히
- * 여기서 throw 하므로 아래 store 의 `isRenderMode` 가드에 무효 값이 닿는 일은 없다.
+ * ★Case is folded and the valid set is left as is★ — whatever the caller writes, what goes to the store is an element of `RENDER_MODES`
+ * (user decision 2026-09-23 — the rule for command argument enum words in general). Even after folding, an unknown word still
+ * throws here, so an invalid value never reaches the `isRenderMode` guard of the store below.
  */
 function requireMode(args: RenderModeCtx | undefined, cmd: string): RenderMode {
   const mode = matchDeclaredSpelling(args?.mode, RENDER_MODES)
@@ -78,7 +78,7 @@ register({
   category: 'slot',
   run: args => {
     const cmd = 'slot.renderMode.set'
-    // 두 인자를 모두 검사한 *뒤*에 store 를 부른다 — 부분 적용(mode 만 무효인데 이미 쓴 상태)이 없도록.
+    // Call the store *after* checking both arguments — so there is no partial application (only mode invalid but state already written).
     const slotId = requireSlotId(args, cmd)
     const mode = requireMode(args, cmd)
     useViewStore.getState().setRenderMode(slotId, mode)
@@ -94,7 +94,7 @@ register({
   },
 })
 
-// ── DOM 모드 별칭(= renderMode 'dom' 위 얇은 래퍼 — 도메인 상태는 renderModeOverride 하나뿐) ──────────
+// ── DOM mode aliases (= thin wrappers over renderMode 'dom' — the only domain state is the one renderModeOverride) ──────────
 
 register({
   id: 'slot.domMode.enable',
@@ -118,8 +118,8 @@ register({
   id: 'slot.domMode.toggle',
   title: t('slot.domModeToggle'),
   category: 'slot',
-  // ★토글 판정은 store 가 한다★ — 현재 값을 여기서 읽어 분기하면 레지스트리가 상태를 해석하는 두 번째
-  //   자리가 된다(ADR-0055 「상태 권위 아님」). 읽기-판정-쓰기가 store 액션 한 번 안에서 끝나야 한다.
+  // ★The toggle decision is made by the store★ — reading the current value here and branching would make the registry a second
+  //   place that interprets state (ADR-0055 「상태 권위 아님」 — not a state authority). Read-decide-write must finish inside a single store action.
   run: args => {
     useViewStore.getState().toggleDomMode(requireSlotId(args, 'slot.domMode.toggle'))
   },

@@ -1,14 +1,14 @@
-//! codex 의 사용량 한도 — app-server `account/rateLimits/updated` 알림 해석과 비기본 프로필 판정. 버킷·창을
-//! 가르는 규칙([`DEFAULT_LIMIT_ID`]·[`names_default_bucket`]·[`windows_by_duration`])은 조회 응답을 푸는 형제
-//! `usage_probe` 도 쓴다 — 두 출처가 같은 규칙으로 창을 가른다.
+//! codex usage limits — interpretation of the app-server `account/rateLimits/updated` notification and the non-default profile decision. The rules that tell
+//! buckets and windows apart ([`DEFAULT_LIMIT_ID`] · [`names_default_bucket`] · [`windows_by_duration`]) are also used by the sibling
+//! `usage_probe` that decodes the query response — both sources tell windows apart by the same rules.
 //!
-//! ★모양의 출처가 셋이고 확신도가 다르다★:
-//!   - 칸 이름·타입 = codex-cli 0.156.1 의 JSON Schema(확실 — `protocol.rs` 의 그 구조체 doc).
-//!   - `primary`/`secondary` 가 5시간/주간을 뜻하지 않는다 = `account/rateLimits/read` 실측(확실 —
-//!     `docs/research/usage-limit-display-ui-survey-2026-09-26.md` §4-1). 창은 길이(`windowDurationMins`)로 가른다.
-//!   - 기본 버킷 id = [`DEFAULT_LIMIT_ID`](가능성 높음 — 그 doc).
-//!   이 알림이 턴 중에 온다는 것까지만 실측됐다(`docs/process/S21-codex-backend/trd-phase2a.md` L7) — 실린 값의
-//!   모양과 도착 빈도는 미측정이다.
+//! ★The shape has three sources with different confidence★:
+//!   - Field names · types = codex-cli 0.156.1's JSON Schema (certain — that struct's doc in `protocol.rs`).
+//!   - `primary`/`secondary` do not mean 5-hour/weekly = `account/rateLimits/read` measurement (certain —
+//!     `docs/research/usage-limit-display-ui-survey-2026-09-26.md` §4-1). Windows are told apart by duration (`windowDurationMins`).
+//!   - Default bucket id = [`DEFAULT_LIMIT_ID`] (likely — that doc).
+//!   Only that this notification arrives during a turn was measured (`docs/process/S21-codex-backend/trd-phase2a.md` L7) — the shape of the carried values
+//!   and the arrival frequency are unmeasured.
 
 use std::ffi::OsString;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -23,45 +23,45 @@ use crate::usage::{
     UsageObservation, UsageSource, UsageVendorKey, WindowObs,
 };
 
-/// 사용량 칸에서 codex 를 가리키는 정본 낱말 — wire 의 백엔드 낱말(`AgentBackendKind` 소문자)과 같다.
+/// The canonical word that points at codex in the usage field — the same as the wire's backend word (`AgentBackendKind` lowercase).
 pub const USAGE_VENDOR: UsageVendorKey = UsageVendorKey::new("codex");
 
-/// 계정 기본 한도 버킷의 `limitId`.
+/// The `limitId` of the account default limit bucket.
 ///
-/// ★우리 실측으로 본 값이 아니다★ — 근거 = 스키마 설명(`rateLimitsByLimitId`: "keyed by metered `limit_id`
-///   (for example, `codex`)")과 피어 t3code 가 이 값을 기본 버킷으로 고르는 것. 틀렸다면 증상 = 줍기가 아무것도
-///   안 낸다(값은 조회가 채운다). 다른 버킷의 값이 기본 칸에 섞이는 반대쪽보다 그 증상이 낫다.
+/// ★Not a value we saw in our own measurement★ — grounds = the schema description (`rateLimitsByLimitId`: "keyed by metered `limit_id`
+///   (for example, `codex`)") and the peer t3code picking this value as the default bucket. If wrong, the symptom = pickup emits nothing
+///   (the query fills the value). That symptom is better than the opposite, values of another bucket mixing into the default field.
 pub(super) const DEFAULT_LIMIT_ID: &str = "codex";
 
-/// 5시간 창의 길이(분).
+/// The length of the 5-hour window (minutes).
 const FIVE_HOUR_WINDOW_MINS: i64 = 5 * 60;
 
-/// 주간 창의 길이(분).
+/// The length of the weekly window (minutes).
 const WEEKLY_WINDOW_MINS: i64 = 7 * 24 * 60;
 
-/// 모르는 창 길이를 이미 로그에 적었나 — 이 프로세스에서 한 번만 적는다(알림마다 같은 줄이 반복된다).
+/// Whether an unknown window length has already been written to the log — written only once per process (the same line would repeat on every notification).
 static UNKNOWN_WINDOW_DURATION_LOGGED: AtomicBool = AtomicBool::new(false);
 
-/// 기본이 아닌 버킷을 이미 로그에 적었나 — 위와 같은 이유로 프로세스당 한 번.
+/// Whether a non-default bucket has already been written to the log — once per process, for the same reason as above.
 static OTHER_BUCKET_LOGGED: AtomicBool = AtomicBool::new(false);
 
-/// 칸이 하나도 안 남은 창을 이미 로그에 적었나 — 위와 같은 이유로 프로세스당 한 번.
+/// Whether a window with no fields left has already been written to the log — once per process, for the same reason as above.
 static EMPTY_WINDOW_LOGGED: AtomicBool = AtomicBool::new(false);
 
-/// `limitId` 없는 알림을 기본 버킷으로 읽었다고 이미 적었나 — 위와 같은 이유로 프로세스당 한 번.
+/// Whether it has already been written that a notification without `limitId` was read as the default bucket — once per process, for the same reason as above.
 static MISSING_LIMIT_ID_LOGGED: AtomicBool = AtomicBool::new(false);
 
-/// `account/rateLimits/updated` 알림 → 관측. 기본 버킷이 아니거나 실린 창이 하나도 없으면 `None`.
+/// `account/rateLimits/updated` notification → observation. `None` if it is not the default bucket or no window is carried.
 ///
-/// - 창은 **길이로** 가른다: 300분 → 5시간 · 10080분 → 주간 · 그 밖(길이 없음 포함)은 버린다. 같은 길이의 창이
-///   둘이면 **값이 실린 쪽 중** 앞자리(`primary`)가 이긴다 — 앞자리가 값 없이 오면(칸이 다 비거나 틀리면) 그
-///   창은 뒷자리(`secondary`)가 채운다. 같은 길이가 둘인 것은 상류 의미가 바뀐 신호라 어느 쪽이 맞는지 모르고,
-///   조회가 곧 전체를 준다.
-/// - 기본이 아닌 버킷(모델별 한도)은 통째로 버린다. ★모델별 창으로 옮기지 않는다★ — 알림 하나는 버킷 하나만
-///   싣는데 관측의 `model_scoped: Some` 은 목록 전량 교체라, 싣는 순간 나머지 모델 창을 지운다. 기본 창으로 옮기면
-///   그 버킷의 값이 계정 한도로 보인다.
-/// - `planType` 은 옮기지 않는다 — 플랜은 조회가 싣는다.
-/// - 사용률은 이미 0–100, 리셋은 epoch 초. 정규화 규칙 = [`crate::usage`] 의 도구들.
+/// - Windows are told apart **by duration**: 300 min → 5-hour · 10080 min → weekly · anything else (including no duration) is discarded. If two windows have the same
+///   duration, the front slot (`primary`) **among those carrying a value** wins — if the front slot comes without a value (all fields empty or wrong), that
+///   window is filled by the back slot (`secondary`). Two of the same duration is a sign that upstream meaning changed so we do not know which is right,
+///   and the query gives the whole thing soon.
+/// - A non-default bucket (per-model limit) is discarded whole. ★It is not moved into a per-model window★ — one notification
+///   carries only one bucket, but the observation's `model_scoped: Some` is a full replacement of the list, so the moment it is carried it erases the other model windows. If moved into the default window,
+///   that bucket's value would look like the account limit.
+/// - `planType` is not carried over — the plan is carried by the query.
+/// - Usage is already 0–100, reset is epoch seconds. Normalization rules = the tools of [`crate::usage`].
 pub(super) fn observation_from_rate_limits_updated(
     notification: &AccountRateLimitsUpdatedNotification,
 ) -> Option<UsageObservation> {
@@ -85,9 +85,9 @@ pub(super) fn observation_from_rate_limits_updated(
     })
 }
 
-/// ★`limitId` 없는 알림을 기본 버킷으로 읽는 것은 미측정 가정이다★(규칙 = [`names_default_bucket`]) — 이 알림이
-///   그 칸 없이 오는 것을 본 적이 없다. 그래서 그 가정을 쓸 때 한 번 적는다(틀렸다면 증상 = 모델별 버킷의 값이 기본
-///   칸에 섞인다).
+/// ★Reading a notification without `limitId` as the default bucket is an unmeasured assumption★ (rule = [`names_default_bucket`]) — we have not seen this notification
+///   come without that field. So we write once when using that assumption (if wrong, the symptom = values of a per-model bucket mix into the default
+///   field).
 fn is_default_bucket(limit_id: Option<&Value>) -> bool {
     if limit_id.is_none() {
         note_missing_limit_id();
@@ -95,9 +95,9 @@ fn is_default_bucket(limit_id: Option<&Value>) -> bool {
     names_default_bucket(limit_id)
 }
 
-/// 스냅숏의 `limitId` 가 기본 버킷을 가리키나. 글자 그대로 대조한다.
-/// ★없거나 `null` 이면 기본 버킷으로 읽는다★ — 버킷이 나뉘기 전 모양(조회 응답의 `rateLimits` 가 그 옛 단일 버킷
-///   모양을 그대로 싣는다고 스키마가 적는다)이 이 칸을 싣지 않는다. 타입이 틀리면 어느 버킷인지 모르므로 `false`.
+/// Does the snapshot's `limitId` point at the default bucket. Compared literally.
+/// ★If absent or `null`, it is read as the default bucket★ — the shape before buckets were split (the schema writes that the query response's `rateLimits` carries that old single-bucket
+///   shape as is) does not carry this field. If the type is wrong we do not know which bucket it is, so `false`.
 pub(super) fn names_default_bucket(limit_id: Option<&Value>) -> bool {
     match limit_id {
         None | Some(Value::Null) => true,
@@ -106,7 +106,7 @@ pub(super) fn names_default_bucket(limit_id: Option<&Value>) -> bool {
     }
 }
 
-/// 스냅숏의 두 자리 → `(5시간, 주간)`. 규칙 = [`observation_from_rate_limits_updated`] 의 첫 항목.
+/// The snapshot's two slots → `(5시간, 주간)`. Rule = the first item of [`observation_from_rate_limits_updated`].
 pub(super) fn windows_by_duration(
     snapshot: &RateLimitSnapshot,
 ) -> (Option<WindowObs>, Option<WindowObs>) {
@@ -131,8 +131,8 @@ pub(super) fn windows_by_duration(
     (five_hour, weekly)
 }
 
-/// 두 칸이 다 비면 그 창은 `None` 이다 — 그 뜻은 관측의 출처가 정한다(줍기 = 안 실렸다 · 조회 = 없다 —
-/// [`UsageObservation`]). 칸마다 따로 버리는 것은 조용하고, 칸이 **하나도** 안 남으면 그때만 로그에 적는다.
+/// If both fields are empty, that window is `None` — its meaning is set by the observation's source (pickup = not carried · query = absent —
+/// [`UsageObservation`]). Dropping field by field is quiet, and only when **not one** field is left is it written to the log.
 fn carried(window: &RateLimitWindow) -> Option<WindowObs> {
     let obs = WindowObs {
         used_pct: window.used_percent.and_then(used_pct_from_percent),
@@ -173,7 +173,7 @@ fn note_missing_limit_id() {
     );
 }
 
-/// ★값을 적지 않는다★ — 외부 프로세스가 정한 문자열이라 마스킹을 거쳐도 무엇이 실릴지 우리가 정하지 못한다.
+/// ★The value is not written★ — it is a string decided by an external process, so even after masking we cannot decide what will be carried.
 fn note_other_bucket() {
     if OTHER_BUCKET_LOGGED.swap(true, Ordering::Relaxed) {
         return;
@@ -183,12 +183,12 @@ fn note_other_bucket() {
     );
 }
 
-/// 명세가 이 중 하나라도 데몬 자신의 값과 다르게 두면 그 에이전트는 줍지 않는다 — 데몬의 기본 로그인이 아닌
-/// 계정·자격증명·엔드포인트로 뜰 수 있는 env 다.
+/// If the spec sets any one of these differently from the daemon's own value, pickup is skipped for that agent — these are the envs that can bring it up with an
+/// account · credential · endpoint other than the daemon's default login.
 ///
-/// - [`CODEX_HOME_ENV`] = 상태 폴더(계정 로그인 포함)를 통째로 옮긴다.
-/// - 나머지 = 자격증명(`OPENAI_API_KEY`·`CODEX_API_KEY`)과 엔드포인트(`OPENAI_BASE_URL`). 상태 폴더가 같아도
-///   이것들이 다르면 그 에이전트의 한도가 기본 로그인의 것이라는 보장이 없다.
+/// - [`CODEX_HOME_ENV`] = moves the whole state folder (including the account login).
+/// - The rest = credentials (`OPENAI_API_KEY` · `CODEX_API_KEY`) and an endpoint (`OPENAI_BASE_URL`). Even if the state folder is the same,
+///   if these differ there is no guarantee that agent's limit is that of the default login.
 const ACCOUNT_ENV_KEYS: &[&str] = &[
     CODEX_HOME_ENV,
     "OPENAI_API_KEY",
@@ -196,13 +196,13 @@ const ACCOUNT_ENV_KEYS: &[&str] = &[
     "OPENAI_BASE_URL",
 ];
 
-/// 이 명세로 뜬 codex 가 데몬과 **같은 계정**으로 도나 — [`ACCOUNT_ENV_KEYS`] 가 하나도 데몬 값과 다르지
-/// 않을 때만 `true`. `false` 면 그 에이전트의 줍기를 막는다.
-/// `daemon_env` = 키 → 데몬 프로세스 자신의 그 env 값(운영 = 프로세스 env · 시험 = 대역). 키마다 비교 규칙·틀릴
-/// 때의 방향 = [`env_overrides_daemon`].
+/// Does the codex launched with this spec run on the **same account** as the daemon — `true` only when not one of [`ACCOUNT_ENV_KEYS`] differs from
+/// the daemon's value. If `false`, pickup for that agent is blocked.
+/// `daemon_env` = key → that env value of the daemon process itself (production = the process env · test = a stand-in). The comparison rule per key and the direction of
+/// erring = [`env_overrides_daemon`].
 ///
-/// ★env 만 본다 — 이 판정이 못 보는 구멍★: 프로필의 추가 인자로 넘긴 `-c`(설정 덮어쓰기)·`--profile`. 그렇게
-///   계정·엔드포인트를 바꾼 에이전트의 관측은 기본 칸에 섞인다.
+/// ★Only env is looked at — a hole this decision cannot see★: `-c` (config override) · `--profile` passed as the profile's extra arguments. The observations of an agent
+///   that changed account · endpoint that way mix into the default field.
 pub(super) fn collects_default_account_usage(
     spec_env: &[(String, String)],
     daemon_env: impl Fn(&str) -> Option<OsString>,
@@ -212,8 +212,8 @@ pub(super) fn collects_default_account_usage(
         .any(|key| env_overrides_daemon(spec_env, key, daemon_env(key).as_deref()))
 }
 
-/// 스폰 경로의 디코더를 줍기 판정대로 둔다 — 주우면 **그대로** 돌려주고, 줍지 않으면 [`UsageGate`] 로 막는다.
-/// 판정의 데몬 쪽 값은 여기서 프로세스 env 를 읽는다.
+/// Set the spawn path's decoder per the pickup decision — if it picks up, it returns it **as is**, and if not, it blocks it with [`UsageGate`].
+/// The decision's daemon-side value is read here from the process env.
 pub(super) fn gate_decoder(
     decoder: Box<dyn OutputDecoder>,
     spec_env: &[(String, String)],
@@ -221,7 +221,7 @@ pub(super) fn gate_decoder(
     if collects_default_account_usage(spec_env, |key| std::env::var_os(key)) {
         return decoder;
     }
-    // 어느 키였는지도 값도 적지 않는다 — 자격증명과 사용자 폴더 이름이 든다.
+    // Neither which key it was nor its value is written — credentials and user folder names are in there.
     tracing::debug!("codex 기본 계정이 아닐 수 있는 env — 이 에이전트의 사용량 줍기를 끈다");
     Box::new(UsageGate::blocking(decoder))
 }
@@ -237,7 +237,7 @@ mod tests {
         observation_from_rate_limits_updated(&notification)
     }
 
-    /// `{"rateLimits": <snapshot>}` — 스냅숏만 바꿔 끼운다.
+    /// `{"rateLimits": <snapshot>}` — only swaps the snapshot in.
     fn parse_snapshot(snapshot: &str) -> Option<UsageObservation> {
         parse(&format!(r#"{{"rateLimits":{snapshot}}}"#))
     }
@@ -249,10 +249,10 @@ mod tests {
         })
     }
 
-    /// 조회 실측(조사 문서 §4-1)의 기본 버킷 — 수치는 그 실측값이고 `limitId` 는 실측에 없어 [`DEFAULT_LIMIT_ID`] 를 넣었다.
+    /// The default bucket of the query measurement (research doc §4-1) — the numbers are that measured value and `limitId` is not in the measurement so we put in [`DEFAULT_LIMIT_ID`].
     const DEFAULT_BUCKET: &str = r#"{"limitId":"codex","planType":"plus","primary":{"usedPercent":37,"windowDurationMins":300,"resetsAt":1790424706},"secondary":{"usedPercent":58,"windowDurationMins":10080,"resetsAt":1790739378},"credits":null}"#;
 
-    // ── 모양 ──
+    // ── Shape ──
 
     #[test]
     fn default_bucket_carries_both_windows_by_duration() {
@@ -265,7 +265,7 @@ mod tests {
         assert_eq!(obs.plan, None, "플랜은 조회가 싣는다");
     }
 
-    /// ★자리 이름이 아니라 길이가 가른다★ — `primary` 가 주간인 버킷이 실측됐다(조사 문서 §4-1).
+    /// ★Duration tells them apart, not slot name★ — a bucket where `primary` is weekly was measured (research doc §4-1).
     #[test]
     fn primary_can_be_the_weekly_window() {
         let obs = parse_snapshot(
@@ -295,7 +295,7 @@ mod tests {
         assert_eq!(obs.five_hour, window(Some(5.0), None));
     }
 
-    /// 희소 갱신 — 한 창만 오면 다른 창은 「안 실렸다」다.
+    /// Sparse update — if only one window comes, the other window is 「안 실렸다」 (not carried).
     #[test]
     fn a_sparse_update_carries_only_what_came() {
         let obs = parse_snapshot(
@@ -315,7 +315,7 @@ mod tests {
         assert_eq!(obs.five_hour, window(Some(10.0), None));
         assert_eq!(obs.weekly, None);
 
-        // 앞자리가 값 없이 오면 그 창은 뒷자리가 채운다.
+        // If the front slot comes without a value, the back slot fills that window.
         let obs = parse_snapshot(
             r#"{"primary":{"usedPercent":"10","windowDurationMins":300},"secondary":{"usedPercent":99,"windowDurationMins":300}}"#,
         )
@@ -323,7 +323,7 @@ mod tests {
         assert_eq!(obs.five_hour, window(Some(99.0), None));
     }
 
-    // ── 버림 ──
+    // ── Discard ──
 
     #[test]
     fn null_or_absent_windows_are_no_observation() {
@@ -355,7 +355,7 @@ mod tests {
             parse_snapshot(r#"{"primary":{"usedPercent":40,"windowDurationMins":null}}"#),
             None
         );
-        // 모르는 길이 옆의 아는 길이는 산다.
+        // A known duration next to an unknown duration survives.
         let obs = parse_snapshot(
             r#"{"primary":{"usedPercent":40,"windowDurationMins":43200},"secondary":{"usedPercent":7,"windowDurationMins":10080}}"#,
         )
@@ -364,8 +364,8 @@ mod tests {
         assert_eq!(obs.weekly, window(Some(7.0), None));
     }
 
-    /// 모델별 버킷 — 실측 모양(조사 문서 §4-1의 `base_model_inference`)이면 `primary` 가 주간인데, 그 값이 계정
-    /// 주간 칸에 들어가면 안 된다.
+    /// A per-model bucket — in the measured shape (`base_model_inference` in research doc §4-1) `primary` is weekly, and that value must not go
+    /// into the account weekly field.
     #[test]
     fn other_buckets_are_dropped_whole() {
         assert_eq!(
@@ -381,7 +381,7 @@ mod tests {
             None,
             "버킷 id 는 글자 그대로 대조한다"
         );
-        // 버킷 칸의 타입이 틀리면 어느 버킷인지 모른다.
+        // If the type of the bucket field is wrong, we cannot tell which bucket it is.
         for bad in ["5", "true", "[\"codex\"]", "{\"id\":\"codex\"}"] {
             assert_eq!(
                 parse_snapshot(&format!(
@@ -407,7 +407,7 @@ mod tests {
         .expect("관측");
         assert_eq!(obs.five_hour, window(Some(37.0), None));
 
-        // 소수점 있는 리셋·길이는 정수가 아니다 — 그 칸만 없다(길이가 없으면 창을 못 가른다).
+        // A reset or duration with a fractional part is not an integer — only that field is missing (without a duration the window cannot be told apart).
         let obs = parse_snapshot(
             r#"{"primary":{"usedPercent":37.5,"windowDurationMins":300,"resetsAt":1790424706.0}}"#,
         )
@@ -422,7 +422,7 @@ mod tests {
             None
         );
 
-        // 창 자리가 객체가 아니면 그 창만 없다 — 배열을 칸 순서대로 읽어 가짜 창을 만들지 않는다.
+        // If the window slot is not an object, only that window is missing — we do not read an array in field order and make a fake window.
         for bad in ["[37,300,1790424706]", "\"x\"", "5", "true"] {
             let obs = parse_snapshot(&format!(
                 r#"{{"primary":{bad},"secondary":{{"usedPercent":7,"windowDurationMins":10080}}}}"#
@@ -435,7 +435,7 @@ mod tests {
 
     #[test]
     fn broken_numbers_never_panic() {
-        // 음수 → 0 · 거대 수 → 100 · 범위 밖 epoch → 그 칸 없음.
+        // Negative → 0 · huge number → 100 · out-of-range epoch → that field is missing.
         let obs = parse_snapshot(
             r#"{"primary":{"usedPercent":-30,"windowDurationMins":300,"resetsAt":-5},"secondary":{"usedPercent":1e308,"windowDurationMins":10080,"resetsAt":99999999999999999}}"#,
         )
@@ -449,7 +449,7 @@ mod tests {
         .expect("관측");
         assert_eq!(obs.five_hour, window(Some(100.0), None), "u64 최대");
 
-        // 창 길이가 i64 밖이면 모르는 길이다.
+        // If the window duration is outside i64, it is an unknown duration.
         assert_eq!(
             parse_snapshot(
                 r#"{"primary":{"usedPercent":1,"windowDurationMins":18446744073709551615}}"#
@@ -461,7 +461,7 @@ mod tests {
             None
         );
 
-        // 칸이 다 틀리면 창도 관측도 없다(epoch 0 은 「값 없음」 자리채움이다).
+        // If all fields are wrong, there is no window and no observation (epoch 0 is the 「값 없음」 (no value) placeholder).
         assert_eq!(
             parse_snapshot(
                 r#"{"primary":{"usedPercent":null,"windowDurationMins":300,"resetsAt":0}}"#
@@ -481,7 +481,7 @@ mod tests {
         );
     }
 
-    // ── 비기본 프로필 판정 ──
+    // ── Non-default profile decision ──
 
     fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs
@@ -490,7 +490,7 @@ mod tests {
             .collect()
     }
 
-    /// 데몬 env 대역 — 준 쌍에 없는 키는 「데몬에 없다」.
+    /// Daemon env stand-in — a key not in the given pairs is 「데몬에 없다」 (absent in the daemon).
     fn daemon(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<OsString> {
         let pairs: Vec<(String, OsString)> = pairs
             .iter()
@@ -499,7 +499,7 @@ mod tests {
         move |key: &str| pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
     }
 
-    /// ★목록을 글자로 박는다 — [`ACCOUNT_ENV_KEYS`] 를 돌면 키 하나를 지워도 이 시험이 안 깨진다★.
+    /// ★Pin the list as literal text — if we iterate [`ACCOUNT_ENV_KEYS`], deleting one key would not break this test★.
     const EXPECTED_KEYS: [&str; 4] = [
         "CODEX_HOME",
         "OPENAI_API_KEY",
@@ -519,7 +519,7 @@ mod tests {
                 "{key}: 데몬 값과 다르다"
             );
         }
-        // 키 대소문자는 가리지 않는다 — 스폰이 그 이름으로 자식 env 에 싣는다.
+        // Key case is not distinguished — the spawn loads it into the child env under that name.
         assert!(!collects_default_account_usage(
             &env(&[("codex_home", "D:\\alt-codex")]),
             daemon(&[("CODEX_HOME", "C:\\codex-home")])
@@ -539,14 +539,14 @@ mod tests {
             &env(&[("CLAUDE_CONFIG_DIR", "C:\\other")]),
             daemon(&[])
         ));
-        // 명세에 없으면 데몬 값을 물려받는다 — 데몬에 무엇이 있든 같은 계정이다.
+        // If the spec does not have it, the daemon value is inherited — whatever the daemon has, it is the same account.
         assert!(collects_default_account_usage(
             &env(&[]),
             daemon(&[("CODEX_HOME", "C:\\codex-home"), ("OPENAI_API_KEY", "k")])
         ));
     }
 
-    /// 주우면 디코더를 그대로, 줍지 않으면 막아서 돌려준다 — 데몬 쪽 값은 실제 프로세스 env 다.
+    /// If it picks up, returns the decoder as is; if not, returns it blocked — the daemon-side value is the real process env.
     #[test]
     fn gate_decoder_blocks_only_when_not_collecting() {
         use crate::backend::codex::decoder::CodexAppServerDecoder;
@@ -558,12 +558,12 @@ mod tests {
             })
         );
 
-        // 명세가 아무것도 안 바꾸면 프로세스 env 가 무엇이든 줍는다.
+        // If the spec changes nothing, it picks up whatever the process env is.
         let mut d = gate_decoder(Box::new(CodexAppServerDecoder::new()), &[]);
         d.decode(line.as_bytes());
         assert_eq!(d.take_usage().len(), 1);
 
-        // 프로세스 env 에 있을 리 없는 값 — 그래서 늘 「다르다」.
+        // A value that cannot be in the process env — so it is always 「다르다」 (different).
         let spec = env(&[("OPENAI_BASE_URL", "http://engram-usage-gate-test.invalid")]);
         let mut d = gate_decoder(Box::new(CodexAppServerDecoder::new()), &spec);
         d.decode(line.as_bytes());

@@ -1,38 +1,38 @@
-# ADR-0096: 봉투 포맷 운영 스위치 — 데몬 전역 상태 + invoke 커맨드 (조종 표면 전용·워커 MCP 미노출)
+# ADR-0096: Envelope format operational switch — daemon-global state + an invoke command (control surface only · not exposed to worker MCP)
 
-- 상태: 확정 (2026-07-21, 근거: 사용자 결정 — ADR-0095 결정 5(구현 갈림길) 해소)
-- 관련: Amends ADR-0095 (봉투 포맷 스위치 저장 위치·노출 방식 (결정 5)) · ADR-0086(단일 wrap point 불변) · ADR-0029(데몬이 AgentManager 소유·src-tauri는 클라이언트 셸) · ADR-0094(발신 권한 확대 금지) · CLAUDE.md §5(LLM-우선 제어 — 백엔드 동작은 invoke로 제어 가능) · `crates/engram-dashboard-daemon/src/control/ingress.rs::wrap_message`
+- 상태: 확정 (2026-07-21, basis: user decision — resolves ADR-0095 decision 5 (implementation fork))
+- 관련: Amends ADR-0095 (where the envelope format switch is stored and how it is exposed (decision 5)) · ADR-0086(single wrap point invariant) · ADR-0029(the daemon owns AgentManager · src-tauri is a client shell) · ADR-0094(no widening of send permission) · CLAUDE.md §5(LLM-first control — backend behavior is controllable by invoke) · `crates/engram-dashboard-daemon/src/control/ingress.rs::wrap_message`
 
 ## 맥락
 
-ADR-0095가 봉투 포맷 스위칭 구조(기본 colon·대체 xml, `wrap_message` 안 템플릿 선택)를 확정하며 **스위치의 저장 위치·노출 방식을 구현 갈림길로 이월**(결정 5)하고, 정식 스위치(설정 기반)를 "후속 구현 슬라이스"로 미뤄뒀다. 그 이월분을 이번 구현 슬라이스에서 사용자가 결정한다.
+ADR-0095 fixed the envelope format switching structure (colon by default, xml as the alternative, template selection inside `wrap_message`), **carried over where the switch is stored and how it is exposed as an implementation fork** (decision 5), and deferred the formal switch (settings-based) to a "follow-up implementation slice". In this implementation slice the user decides that carried-over item.
 
-전제: 봉투는 기계 파싱 대상이 아니라 **수신 모델 가독 전용 표면**이고(배달 지정은 툴 파라미터가 이미 완료 — ADR-0086), 포맷 전환은 발신·수신 코드 경로를 건드리지 않는 `wrap_message` 안 템플릿 선택이다. haiku(약모델)는 투입 대상에서 빠졌으므로 colon이 정상 운영값이고, xml은 "나중에 다른 백엔드/모델이 colon에서 라우팅·수용 이상을 보일 때 꺼내는 대체 카드"다.
+Premises: the envelope is not a machine-parsing target but a **surface for the receiving model to read only** (delivery addressing is already done by the tool parameters — ADR-0086), and switching the format is a template selection inside `wrap_message` that touches neither the send nor the receive code path. Haiku (a weak model) has been dropped from deployment, so colon is the normal operating value, and xml is "the alternative card to pull out later when another backend/model shows routing or acceptance anomalies with colon".
 
 ## 결정
 
-1. **스위치 상태 = 데몬 전역 하나.** 수신자별/메타데이터-유무별이 아니라, 데몬이 "현재 봉투 포맷" 하나를 전역 상태로 든다(기본 colon). `wrap_message`가 매 조립 시 이 상태를 읽는다.
-2. **노출 = invoke 커맨드 `set_envelope_format(format)`** — 조종 제어 표면(src-tauri Tauri command → 데몬 전달)으로만 바꾼다. CLAUDE.md §5 "백엔드 동작은 invoke로 LLM 제어 가능" 카테고리. 상주 오케스트레이터 LLM이 생기면 같은 invoke 커맨드를 그대로 부른다.
-3. **워커 MCP 채널엔 미노출.** 관리당하는 에이전트(alice·bob 등)는 `send_message`용 MCP 채널로 전역 포맷을 바꿀 수 없다 — 워커는 봉투 수신자지 팀 정책 결정자가 아니다.
-4. **지속성 = 메모리만.** 데몬(클라이언트 셸) 재시작 시 colon 기본으로 리셋한다. 재시작 유지(영속화)는 백로그.
-5. **사람용 트리거(단축키·UI 버튼)는 나중 옵션** — 이번 슬라이스는 제어 경로(invoke 커맨드)만 뚫는다. 임시 검증/구동은 `scripts/cdp.mjs eval`로 이 invoke를 호출(cdp = 디버그·검증 수단, 정식 트리거 아님).
+1. **Switch state = one daemon-global value.** Not per recipient or by presence of metadata; the daemon holds one "current envelope format" as global state (default colon). `wrap_message` reads this state on every assembly.
+2. **Exposure = the invoke command `set_envelope_format(format)`** — changed only through the steering control surface (a src-tauri Tauri command → forwarded to the daemon). It is in the CLAUDE.md §5 "backend behavior is LLM-controllable by invoke" category. When a resident orchestrator LLM exists, it calls the same invoke command as is.
+3. **Not exposed on the worker MCP channel.** A managed agent (alice, bob, etc.) cannot change the global format over the MCP channel used for `send_message` — a worker is an envelope recipient, not a decider of team policy.
+4. **Persistence = memory only.** On a daemon (client shell) restart it resets to the colon default. Surviving a restart (persistence) is backlog.
+5. **A human-facing trigger (shortcut · UI button) is a later option** — this slice only opens the control path (the invoke command). For temporary verification/driving, call this invoke through `scripts/cdp.mjs eval` (cdp = a debug/verification tool, not the formal trigger).
 
 ## 거부한 대안
 
-- **수신자별 / 메타데이터-유무별 스위치** — 프라이밍 v3가 라우팅을 해결(ADR-0095 근거)해 수신자별 분기의 필요성이 아직 실증되지 않았다. 미실증 복잡도(프로필별 포맷 상태 관리)를 지금 지지 않고 전역 하나로 단순화 — 필요가 증명되면 나중에 확장.
-- **워커 MCP 채널에도 스위치 노출** — 전역 설정이라 한 워커가 전환하면 팀 전체 봉투가 바뀐다(광역 부작용) + 관리당하는 에이전트에 팀 제어권을 주는 권한 확대(ADR-0094 발신 권한 확대 금지 기조와 충돌).
-- **재시작 유지(영속화)** — "xml이면 계속 xml"이 이상적이나 저장(portfile/설정) 공수 대비 이득 불확실. colon이 정상 운영값이라 리셋이 안전한 기본이므로 메모리-only로 두고 영속화는 백로그.
-- **`ENGRAM_WRAP_FORMAT` env를 운영 스위치로 승격** — ADR-0095 불변식 위반(env는 스파이크 전용 seam). 정식 스위치는 별도 전역 상태 + 커맨드로 구현하고 env는 그대로 존치.
+- **A per-recipient / by-metadata-presence switch** — priming v3 solved routing (the ADR-0095 basis), so the need for per-recipient branching is not yet demonstrated. Do not carry unproven complexity (per-profile format state management) now; simplify to one global value — extend later if the need is proven.
+- **Also exposing the switch on the worker MCP channel** — it is a global setting, so if one worker switches it, the envelopes of the whole team change (a wide side effect) + it widens permission by giving a managed agent control over the team (conflicts with ADR-0094's stance of not widening send permission).
+- **Persistence across restarts** — "once xml, always xml" is ideal, but the benefit is uncertain against the storage effort (portfile/settings). Since colon is the normal operating value, a reset is a safe default, so keep it memory-only and leave persistence in the backlog.
+- **Promoting the `ENGRAM_WRAP_FORMAT` env to the operational switch** — violates the ADR-0095 invariant (the env is a spike-only seam). The formal switch is implemented as a separate global state + a command, and the env stays as is.
 
 ## 근거
 
-- **§5 정합** — 포맷 스위치는 데몬(백엔드) 동작이므로 "백엔드 동작은 invoke로 이미 LLM 제어 가능" 카테고리에 정확히 맞는다. UI/레이아웃(프론트 전용·제어 표면 미비)과 달리 새 제어 표면을 발명하지 않고 기존 invoke 경로에 커맨드 하나만 추가.
-- **단일 wrap point 보존(ADR-0086)** — 전역 상태는 `wrap_message`가 읽는 *입력*일 뿐 조립 지점은 여전히 한 곳. 스위칭이 봉투 조립을 두 곳으로 쪼개지 않는다.
-- **최소권한(ADR-0094 결)** — 전역 제어를 조종 표면에 한정하고 워커에서 떼면, 발신 권한 최소화 기조가 제어 권한에도 일관되게 적용된다.
+- **§5 alignment** — the format switch is daemon (backend) behavior, so it fits exactly the category "backend behavior is already LLM-controllable by invoke". Unlike UI/layout (frontend-only · control surface incomplete), it invents no new control surface and adds just one command to the existing invoke path.
+- **Preserves the single wrap point (ADR-0086)** — the global state is just an *input* that `wrap_message` reads; the assembly point is still one place. Switching does not split envelope assembly into two places.
+- **Least privilege (in the spirit of ADR-0094)** — if global control is confined to the steering surface and kept away from workers, the stance of minimizing send permission applies consistently to control permission too.
 
 ## 영향 / 불변식
 
-- **단일 wrap point 불변(ADR-0086) 유지** — 전역 포맷 상태는 `wrap_message` 안에서만 읽고 조립은 그 함수 하나. env(`ENGRAM_WRAP_FORMAT`) 스파이크 seam은 그대로 존치.
-- **상태 소유 = 데몬(ADR-0029)** — 전역 포맷 상태는 `AgentManager`를 소유한 데몬에 산다. src-tauri는 클라이언트 셸이라 상태를 소유하지 않고 invoke 커맨드를 데몬으로 전달만 한다.
-- **제어 경로 단일** — 포맷 전환은 invoke 커맨드(조종 표면)로만. 워커 MCP·에이전트 self-switch 경로를 추가하면 이 불변식 위반.
-- 새 백엔드/모델 투입 시 colon 라우팅·수용을 스모크로 실측하고, 이상 시 이 커맨드로 xml 전환한다(ADR-0095 스위칭 구조가 그 비용을 커맨드 한 번으로 낮춘다).
+- **The single wrap point invariant (ADR-0086) holds** — the global format state is read only inside `wrap_message`, and assembly is that one function. The env (`ENGRAM_WRAP_FORMAT`) spike seam stays as is.
+- **State owner = the daemon (ADR-0029)** — the global format state lives in the daemon that owns `AgentManager`. src-tauri is a client shell, so it does not own the state and only forwards the invoke command to the daemon.
+- **A single control path** — the format switches only through the invoke command (the steering surface). Adding a worker MCP or agent self-switch path violates this invariant.
+- When a new backend/model is deployed, measure colon routing and acceptance with a smoke, and on anomalies switch to xml with this command (the ADR-0095 switching structure lowers that cost to a single command).

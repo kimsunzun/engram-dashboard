@@ -1,11 +1,11 @@
-// agentsLoaded 배선 회귀(ADR-0148).
+// agentsLoaded wiring regression (ADR-0148).
 //
-// ★왜 이 한 줄에 테스트가 붙나★: 이 플래그가 "권위 명부를 아직 못 받음"과 "정말 비었음"을 가르는 유일한
-//   신호다. 안 서면 종료로 수거된 에이전트의 슬롯이 영구히 「에이전트 연결 중…」으로 보이고(부재 표현이
-//   영영 안 뜬다), 반대로 초기값이 true 면 기동 직후 모든 슬롯이 부재로 판정돼 죽은 것처럼 보인다.
-//   두 오작동 모두 화면을 봐야 드러나므로 여기서 못 박는다.
+// ★Why this one line gets a test★: this flag is the only signal that tells "the authoritative registry not yet received" from "truly empty". If it does not
+//   stand, the slot of an agent reaped by exit looks permanently like 「에이전트 연결 중…」 (connecting to agent…) (the unavailable display never
+//   shows up), and conversely if the initial value is true, right after boot every slot is decided unavailable and looks dead.
+//   Both malfunctions show only when you look at the screen, so we pin it here.
 //
-// 부팅 pull(App.tsx) · 재연결 재동기(eventBus) · broadcast 가 전부 setAgents 한 곳을 지나므로 그 한 곳만 본다.
+// The boot pull (App.tsx) · reconnect resync (eventBus) · broadcast all pass through setAgents in one place, so only that one place is looked at.
 
 import { beforeEach, describe, expect, it } from 'vitest'
 
@@ -41,8 +41,8 @@ describe('agentStore — agentsLoaded', () => {
   })
 
   it('setAgents 가 서면 다시 내려가지 않는다 — 빈 목록으로 받아도 "받았음" 이다', () => {
-    // ★빈 배열이 핵심 케이스★: 마지막 에이전트를 종료하면 명부는 []로 온다. 그때도 플래그가 서야
-    //   "정말 비었음" 으로 판정된다.
+    // ★The empty array is the key case★: when the last agent exits the registry arrives as []. The flag must stand then too
+    //   for it to be decided "truly empty".
     useAgentStore.getState().setAgents([])
     expect(useAgentStore.getState().agentsLoaded).toBe(true)
 

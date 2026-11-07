@@ -1,81 +1,81 @@
-# ADR-0257: claude 훅 도중 끊기 멈춤 완화 — 우리 Job 안의 끊기 뒤 잔여물만 끝내고 claude 는 살린다
+# ADR-0257: Mitigating the claude hang on interrupt during a hook — end only the post-interrupt leftovers inside our Job, and keep claude alive
 
-- 상태: 확정 (2026-09-30, 근거: 사용자 결정 2026-09-29 (채택안 · N = 3 초 · 결정 1–4 — TRD `docs/process/S21-chat-ux/trd-t40.md` §1) + 측정 스파이크 2026-09-29 (TRD §3-0) · 구현 전 · TRD `/review trd` deep 4 회차 전원 PASS(5판 — 마지막 회차는 codex 가 4→5판 변경분만 확인)) · 부분 폐기 by ADR-0262 (결정 3의 수단, 결정 4의 시계, 결정 9의 판정 수단, 구현 요지 전부, 개정 절의 턴 열림 문 문구, 맥락의 사고 줄, 거부한 대안 두 줄, 근거 원자료 줄, 영향의 잎 자물쇠와 닫힌 실패와 한계와 base와 코드 앵커 줄)
-- 관련: TRD `docs/process/S21-chat-ux/trd-t40.md`(§0 · §1 · §3-0 · §3-2 – §3-6 · §8 · §9) · 조사 `docs/research/claude-interrupt-hook-hang-2026-09-29.md`(§2 · §4 · §6 · §7) · `docs/tracking.md` T-40 · ADR-0001(kill 인과) · ADR-0004(백엔드 지식 격리) · ADR-0006(락 순서) · ADR-0012(시험대) · ADR-0175(바닥 crate 입주 조건) · ADR-0217(제어 끝점이 에이전트 신원을 싣는다) · ADR-0218(신원 = PID + 시작시각) · ADR-0230(플랫폼 중립) · ADR-0245(터미널 모드는 끊기 명령 없음) · CLAUDE.md 「핵심 불변식」 락 순서 줄 · step-log S21 · Amends ADR-0238 (결정 3과 5) · Amends ADR-0244 (결정 2) · Amended by ADR-0262 (결정 3의 수단, 결정 4의 시계, 결정 9의 판정 수단, 구현 요지 전부, 개정 절의 턴 열림 문 문구, 맥락의 사고 줄, 거부한 대안 두 줄, 근거 원자료 줄, 영향의 잎 자물쇠와 닫힌 실패와 한계와 base와 코드 앵커 줄)
+- 상태: 확정 (2026-09-30, basis: user decision 2026-09-29 (the adopted option · N = 3 seconds · decisions 1–4 — TRD `docs/process/S21-chat-ux/trd-t40.md` §1) + measurement spike 2026-09-29 (TRD §3-0) · before implementation · TRD `/review trd` deep round 4, all reviewers PASS (version 5 — in the last round codex checked only the changes from version 4 to 5)) · 부분 폐기 by ADR-0262 (the means of decision 3, the clock of decision 4, the decision means of decision 9, the whole implementation summary, the turn-open-gate wording in the amendments section, the accident line of the context, two lines of rejected alternatives, the raw-data line of the basis, and the leaf lock, closed failure, limitations, base and code anchors lines of the impact)
+- 관련: TRD `docs/process/S21-chat-ux/trd-t40.md`(§0 · §1 · §3-0 · §3-2 – §3-6 · §8 · §9) · research `docs/research/claude-interrupt-hook-hang-2026-09-29.md`(§2 · §4 · §6 · §7) · `docs/tracking.md` T-40 · ADR-0001(kill causality) · ADR-0004(backend knowledge isolation) · ADR-0006(lock order) · ADR-0012(test bench) · ADR-0175(conditions for settling in the bottom crate) · ADR-0217(the control endpoint carries the agent identity) · ADR-0218(identity = PID + start time) · ADR-0230(platform neutrality) · ADR-0245(terminal mode has no interrupt command) · CLAUDE.md 「핵심 불변식」 lock-order line · step-log S21 · Amends ADR-0238 (decisions 3 and 5) · Amends ADR-0244 (decision 2) · Amended by ADR-0262 (the means of decision 3, the clock of decision 4, the decision means of decision 9, the whole implementation summary, the turn-open-gate wording in the amendments section, the accident line of the context, two lines of rejected alternatives, the raw-data line of the basis, and the leaf lock, closed failure, limitations, base and code anchors lines of the impact)
 
 ## 맥락
-**증상(T-40):** 채팅(stream-json) 모드에서 보낸 직후(약 0.2 초) Esc → 끊기 응답은 오는데 턴 끝(`result`)이 약 300 초 뒤에 온다. 그동안 「중단하는 중…」이 서서 Esc 가 무시되고(ADR-0244) 대기 입력이 멈춘다. 죽이고 다시 열면 대화째 회복한다. 매번은 아니다 — 실험에서 7 번 중 2 번(경합 · 조사 §2 ⑦).
+**Symptom (T-40):** In chat (stream-json) mode, pressing Esc right after sending (about 0.2 seconds) → the interrupt response comes, but the turn end (`result`) comes about 300 seconds later. Meanwhile 「중단하는 중…」 stands, Esc is ignored (ADR-0244), and queued input stops. Killing and reopening recovers the whole conversation. It is not every time — 2 of 7 in the experiment (a race · research §2 ⑦).
 
-**원인(조사 §2):** Windows 의 claude 는 훅 도중 끊기에 훅을 `taskkill /T /F` 로 죽이는데, 그 틈에 Git Bash 가 fork 한 자식이 살아남아 훅 출력 파이프를 약 300 초 쥔다(실측 · 확실). CLI 는 그 파이프가 전부 닫힐 때까지 시한 없이 기다린다(가능성 높음 — upstream `anthropics/claude-code#85250` 의 collaborator 서술과 맞물린다). 300 초가 어디서 오는지는 모른다(추론 · 불확실). 사용자 판단 = claude 의 일반 결함이지만 우리 모드에서 드러난다 → 대시보드가 완화한다(조사 §7).
+**Cause (research §2):** On Windows, when claude is interrupted during a hook it kills the hook with `taskkill /T /F`, and in that gap a child that Git Bash forked survives and holds the hook's output pipe for about 300 seconds (measured · certain). The CLI waits with no time limit until all those pipes are closed (likely — it matches the collaborator's description in upstream `anthropics/claude-code#85250`). Where the 300 seconds comes from is unknown (inference · uncertain). The user's judgment = it is a general defect of claude but surfaces in our mode → the dashboard mitigates it (research §7).
 
-**사고(조사 §4):** 조사 중 실험 정리가 **PID 부모 연결**로 골라 우리와 무관한 프로세스(MSVC `link.exe` · `vctip.exe` 등)를 강제 종료했다. 「부모보다 뒤에 만들어졌나」 검사를 더해도 PID 재사용 때문에 남의 것을 골랐다(21 번 중 4 번 · 18 번 중 3 번). 그래서 고르기는 커널이 추적하는 소속(Job Object 명단)과 생성 시각 위에 선다.
+**Accident (research §4):** During the investigation, experiment cleanup picked processes **by PID-parent link** and force-killed processes unrelated to us (MSVC `link.exe` · `vctip.exe`, etc.). Even adding a check of 「부모보다 뒤에 만들어졌나」, it picked others' processes because of PID reuse (4 of 21 · 3 of 18). So the picking stands on the membership tracked by the kernel (the Job Object roster) and the creation time.
 
-**스파이크(TRD §3-0 · 2026-09-29 · claude 2.1.284):** 끊기 11 번 중 멈춤 3 번.
-- 멈춤을 쥔 프로세스는 3/3 **우리 Job 멤버**였다(깊이 5 훅 bash · 부모 죽음 · 끊기 뒤 +203–244 ms 생성).
-- 끊기 +3 초에 살아 있던 것은 **11/11 에서 멈춤 잔여물뿐**이었다.
-- 아래 결정의 규칙을 글자 그대로 적용하면 후보 = 정확히 잔여물 하나(3/3). 그것만 끝내자 `result` 가 18 / 19 / 21 ms 에 왔고 claude.exe 는 살아 이어 보낸 턴을 1.9–2.1 초에 답했다.
-- 정리 뒤 `result` 는 멈춤 아닌 끊기와 같은 모양이다(`error_during_execution` · `terminal_reason:"aborted_streaming"` · 앞의 합성 줄).
+**Spike (TRD §3-0 · 2026-09-29 · claude 2.1.284):** 3 hangs in 11 interrupts.
+- The process holding the hang was, 3/3, **a member of our Job** (depth-5 hook bash · parent dead · created +203–244 ms after the interrupt).
+- At interrupt +3 seconds, what was alive was **only the hang leftovers in 11/11**.
+- Applying the rule of the decision below literally, the candidate = exactly one leftover (3/3). Ending only that one, the `result` came at 18 / 19 / 21 ms, and claude.exe stayed alive and answered the continued turn in 1.9–2.1 seconds.
+- After the cleanup the `result` has the same shape as a non-hang interrupt (`error_during_execution` · `terminal_reason:"aborted_streaming"` · the synthetic line before it).
 
-**왜 개정인가:** 이 완화는 backend 가 「실제로 끊기를 보냈다」를 적어 둬야 선다. ADR-0238 결정 3 은 턴 열림 문을 `TurnGate { open: AtomicBool }` 로 박았고, 결정 5 는 「끊기를 보냈다」 표식을 끊김 분류의 예비로만 두었다. ADR-0244 결정 2 는 「백엔드는 바뀌지 않는다」였다. 셋 다 이 결정으로 바뀐다(아래 「개정」).
+**Why an amendment:** This mitigation stands only if the backend records that 「실제로 끊기를 보냈다」. ADR-0238 decision 3 fixed the turn-open gate as `TurnGate { open: AtomicBool }`, and decision 5 kept the 「끊기를 보냈다」 marker only as a spare for the interrupt classification. ADR-0244 decision 2 said 「백엔드는 바뀌지 않는다」. All three are changed by this decision (below, 「개정」).
 
 ## 결정
-표기 — **[사용자]** = 사용자 결정(2026-09-29) · **[TRD]** = TRD 가 고른 내부 구현(뒤집을 수 있다 · 정본 = TRD).
+Notation — **[사용자]** = a user decision (2026-09-29) · **[TRD]** = an internal implementation the TRD chose (can be reversed · source of truth = the TRD).
 
-1. **채택 [사용자]** — claude 끊기 뒤 턴 끝이 N 초 안 오면 ★**우리 Job Object 안의 끊기 뒤 잔여물만 끝내고 claude 는 살린다**★(재시작이 아니다).
-2. **고르기 [사용자]** — 실제로 끊기를 보낸 Esc 의 시각을 적는다. N 초 뒤 그 끊기의 턴 끝이 없고 가장 최근 Esc 에서 N 초 이상 지났으면, Job 멤버 중 claude 아님 · claude 의 직계 자식 아님 · 적은 시각 뒤에 생성 · 아직 살아 있음 인 것을 끝낸다. 고아 여부 · 「bash」 인지 · CPU 상태는 주 기준이 아니다.
-3. **PID 규칙 [사용자]** — ★PID 부모만으로 고르지 않는다 — Job 명단 + 생성 시각★. 신원 = (PID, 생성 시각) 쌍(ADR-0218).
-4. **시계 · N [사용자]** — 커널 생성 시각을 같은 시계(시스템 시각)의 타임스탬프와 비교한다. N = 3 초(상수 한 곳).
-5. **OS 조각 [사용자]** — Windows 전용 조각은 작게 둔다(Job 멤버 명단 + 하나 끝내기) · 다른 OS 는 무동작 · 나중에 별도 플랫폼 모듈로 옮길 수 있게 짠다.
-6. **결정 1 — 화면 고지 없음 [사용자]** — 정리가 일어나도 평소 끊김과 똑같이 보이고 로그(tracing warn)만 남긴다. 사용자: 「그걸 왜 알려」.
-7. **결정 2 — 대체 없음 [사용자]** — 정리 뒤에도 턴 끝이 안 와도 자동 재시작을 하지 않는다. 멈추면 사용자가 오늘처럼 죽이고 다시 연다. 사용자: 「너무 복잡해」.
-8. **결정 3 — 끄는 수단 없음 [사용자]** — 환경 변수 등 이 정리를 끄는 수단을 두지 않는다(스파이크에서 같이 죽은 정당한 프로세스 0 · 11/11). 사용자: 「ㅇㅇ 두지 않고」.
-9. **결정 4 — 부모가 살아 있으면 건드리지 않는다 [사용자]** — 후보는 부모가 죽은 것만 끝낸다. 부모 판정 = 표의 ppid 가 살아 있고 자기보다 먼저(같은 눈금 포함) 태어났으면 산 부모 · 그 번호를 자기보다 늦게 태어난 프로세스가 쥐면 죽은 부모(PID 재사용) · 판정할 수 없으면 건드리지 않는다. ★주 기준 위에 덧붙인 AND 거르개이고 후보를 줄이기만 한다 — 「고아 여부는 주 기준이 아니다」(위 2)와 어긋나지 않는다★. 사용자: 「ㅇㅇ 조건 더해줘 어차피 잘 안일어나는 일이니깐」.
+1. **Adopt [사용자]** — if the turn end does not arrive within N seconds after a claude interrupt, ★**end only the post-interrupt leftovers inside our Job Object, and keep claude alive**★ (it is not a restart).
+2. **Picking [사용자]** — record the time of the Esc that actually sent an interrupt. N seconds later, if that interrupt's turn end is absent and at least N seconds have passed since the most recent Esc, end the Job members that are: not claude · not a direct child of claude · created after the recorded time · still alive. Whether it is an orphan · whether it is 「bash」 · the CPU state are not the primary criteria.
+3. **PID rule [사용자]** — ★do not pick by PID parent alone — Job roster + creation time★. Identity = the (PID, creation time) pair (ADR-0218).
+4. **Clock · N [사용자]** — compare the kernel creation time with a timestamp from the same clock (system time). N = 3 seconds (one constant in one place).
+5. **OS piece [사용자]** — keep the Windows-only piece small (Job member roster + end one) · no-op on other OSes · build it so it can later move to a separate platform module.
+6. **Decision 1 — no on-screen notice [사용자]** — even when a cleanup happens, it looks exactly like an ordinary interrupt, and only a log (tracing warn) remains. The user: 「그걸 왜 알려」.
+7. **Decision 2 — no fallback [사용자]** — no automatic restart even if the turn end does not come after the cleanup. If it hangs, the user kills and reopens as today. The user: 「너무 복잡해」.
+8. **Decision 3 — no way to turn it off [사용자]** — no way to turn this cleanup off, such as an environment variable, is provided (legitimate processes killed along in the spike: 0 · 11/11). The user: 「ㅇㅇ 두지 않고」.
+9. **Decision 4 — do not touch if the parent is alive [사용자]** — of the candidates, end only those whose parent is dead. Parent decision = if the ppid in the table is alive and was born before the process itself (equal ticks included), it is a live parent · if a process born later than the process itself holds that number, it is a dead parent (PID reuse) · if it cannot be decided, do not touch. ★It is an AND filter added on top of the primary criterion and only reduces the candidates — it does not conflict with 「고아 여부는 주 기준이 아니다」 (2 above)★. The user: 「ㅇㅇ 조건 더해줘 어차피 잘 안일어나는 일이니깐」.
 
-**구현 요지 [TRD — 설계 정본은 TRD §3]:**
-- **기록(§3-2)** — `TurnGate` 의 `open` 을 자물쇠(`Mutex<GateState>`) 안으로 옮긴다. 끊기 줄 함수는 한 자물쇠 구간에서 「문이 열렸나」를 보고 에피소드를 적고, decoder 의 턴 끝은 한 구간에서 문을 닫고 에피소드를 지운다. 에피소드 = 첫 끊기가 생성 시각 문턱 · 가장 최근 끊기가 대기 기준 · 정리를 한 번 돈 에피소드는 다시 쓰지 않는다.
-- **N 초 확인(§3-3)** — 화신당 동시에 하나인 일꾼 스레드가 에피소드를 끝까지 쥔다(기동 실패 = 에피소드 `Done`). ★끝내기 확정 = 자물쇠 밖에서 같은 핸들로 우리 Job 소속 · 생성 시각 · 생존을 검증하고, 자물쇠 안에서 「같은 에피소드 · 턴 끝 없음 · 가장 최근 끊기에서 N 초」 재확인과 `TerminateProcess` 호출 하나를 한 번에 한다★. 핸들 닫기 · 실패 분류 · 로그는 놓은 뒤다.
-- **고르기(§3-4)** — 보호 집합 = 뿌리 사슬 + 래퍼 층(claude + 통로가 붙인 콘솔 호스트) + 그 아래 한 층. 래퍼 층 식구 수가 예상 모양과 정확히 같을 때만 정리한다. 멤버 시작시각은 프로세스 표 앞뒤로 두 번 읽어 같을 때만 쓴다. 명단 · 표 · 멤버 시작시각 · 시계 중 하나라도 못 믿으면 그 판은 아무것도 끝내지 않는다(닫힌 쪽).
-- **시계(§3-6)** — 시계 두 값은 자물쇠 안에서 읽고 전이는 단조 값을 되감지 않는다 · 시계 닻을 기록 · 판마다 다시 잡고 뒤로 뛰면 그만큼 쉰다 · 「지금보다 미래에 태어난」 멤버는 뺀다.
-- **자리(§0)** — `base::platform` 에 프로세스 표 · 시작시각 세 갈래 판정 함수 둘 · `agent` 의 `platform/windows.rs` `JobObjectHandle` 에 명단 · 검증 · 끝내기 · 중립 손잡이 `ProcessGroup` · claude backend 의 `leftover.rs`(신설).
+**Implementation summary [TRD — design source of truth is TRD §3]:**
+- **Recording (§3-2)** — move the `open` of `TurnGate` inside a lock (`Mutex<GateState>`). The interrupt-line function, in one lock section, looks at 「문이 열렸나」 and records an episode, and the decoder's turn end, in one section, closes the gate and clears the episode. Episode = the first interrupt is the creation-time threshold · the most recent interrupt is the wait baseline · an episode that has gone through a cleanup once is not reused.
+- **N-second check (§3-3)** — a worker thread, one at a time per incarnation, holds the episode to the end (start failure = the episode is `Done`). ★The end decision = outside the lock, verify with the same handle that the process belongs to our Job · its creation time · its liveness, and inside the lock do, at once, the re-check of 「같은 에피소드 · 턴 끝 없음 · 가장 최근 끊기에서 N 초」 and one `TerminateProcess` call★. Closing the handle · classifying failures · logging come after releasing.
+- **Picking (§3-4)** — protected set = the root chain + the wrapper layer (claude + the console host the channel attaches) + one layer below it. Clean up only when the wrapper layer's member count exactly equals the expected shape. A member's start time is used only when two reads, before and after the process table, are equal. If any of the roster · table · member start time · clock cannot be trusted, that round ends nothing (the closed side).
+- **Clock (§3-6)** — the two clock values are read inside the lock and the transition never rewinds the monotonic value · record a clock anchor · retake it every round and rest by that much when it jumps backward · members 「지금보다 미래에 태어난」 are excluded.
+- **Placement (§0)** — in `base::platform`, the process table · two start-time three-way decision functions · in `agent`'s `platform/windows.rs` `JobObjectHandle`, the roster · verification · ending · the neutral handle `ProcessGroup` · the claude backend's `leftover.rs` (new).
 
-**개정(양방향 링크는 관련줄):**
-- **ADR-0238 결정 3** — `TurnGate { open: AtomicBool }` 가 `Mutex<GateState>`(열림 + 에피소드 + 일꾼 + 시계 닻 칸)로 바뀐다. 여닫기 규칙과 거절 계약은 그대로다.
-- **ADR-0238 결정 5** — 「우리가 끊기를 보냈다」 표식은 결과 분류용 예비로만 두기로 했었다(`TurnGate.interrupt_sent`). 이 ADR 이 그 자리에 **정리 용도의** 기록(에피소드)을 세운다. ★끊김 분류는 여전히 `terminal_reason` 이 하고 이 기록을 읽지 않는다★.
-- **ADR-0244 결정 2** — 「백엔드는 바뀌지 않는다」가 바뀐다. backend 는 되풀이 끊기를 **거절하지는 않지만**(막는 자리는 여전히 프론트다) 에피소드로 **기록한다**.
+**Amendments (the two-way links are in the related line):**
+- **ADR-0238 decision 3** — `TurnGate { open: AtomicBool }` becomes `Mutex<GateState>` (open + episode + worker + clock-anchor fields). The open/close rule and the rejection contract stay as they are.
+- **ADR-0238 decision 5** — the 「우리가 끊기를 보냈다」 marker had been kept only as a spare for result classification (`TurnGate.interrupt_sent`). This ADR sets up a record **for cleanup use** (the episode) in that place. ★The interrupt classification is still done by `terminal_reason` and does not read this record★.
+- **ADR-0244 decision 2** — 「백엔드는 바뀌지 않는다」 changes. The backend **does not reject** repeated interrupts (the place that blocks is still the frontend) but **records** them as an episode.
 
 ## 거부한 대안
-**사용자 결정으로 닫힌 것:**
-- **claude 재시작(죽이고 이어받기)** — 채택안이 「claude 는 살린다」다(조사 §7). 잔여물만 끝내면 턴이 풀리고 같은 claude 가 다음 턴을 받았다 — 실험 3(조사 §2 ④ · 3/3) · 스파이크(끝내기 → `result` 18–21 ms · 같은 프로세스가 다음 턴을 1.9–2.1 초에 답함 · 3/3). 피어 중 t3code(`query.close()` 뒤 `--resume`) · happy(죽이기 + resume)가 이 모양이다(조사 §6).
-- **정리했다는 화면 고지** — 결정 1 「그걸 왜 알려」. 정리 뒤 `result` 가 평소 끊김과 선 수준에서 같은 모양이다(스파이크 3/3 · TRD §3-0).
-- **정리 뒤에도 안 끝나면 자동 재시작** — 결정 2 「너무 복잡해」. 정리는 턴을 3/3 풀었다(스파이크 · 실험 3 도 3/3). 못 풀면 warn 한 줄만 남긴다.
-- **끄는 수단(환경 변수)** — 결정 3 「ㅇㅇ 두지 않고」. 끊기 +3 초에 살아 있던 것은 11/11 에서 멈춤 잔여물뿐이었다 — 같이 끝날 정당한 프로세스가 관측되지 않았다.
-- **부모가 산 후보도 고른다(규칙 글자 그대로)** — 백그라운드 작업이 끊기 뒤 띄운 자식(예: `cargo build` 의 `rustc` · `link.exe`)을 끝낼 수 있다(TRD 리뷰 1 M — 규칙에서 나온 추론 · 스파이크는 백그라운드 작업을 재지 않았다). 좁혀서 잃은 관측은 없다 — 잰 잔여물 3/3 은 부모가 죽어 있었고 결정 4 뒤에도 후보 집합이 같다(TRD §3-0 Q1 · §3-4). 사용자가 두 갈래(글자 그대로 · 좁히기)를 보고 좁히기를 골랐다(결정 4 · TRD §10).
+**Closed by user decisions:**
+- **Restarting claude (kill and resume)** — the adopted option is 「claude 는 살린다」 (research §7). Ending only the leftovers released the turn and the same claude received the next turn — experiment 3 (research §2 ④ · 3/3) · spike (ending → `result` at 18–21 ms · the same process answered the next turn in 1.9–2.1 seconds · 3/3). Among peers, t3code (`--resume` after `query.close()`) · happy (kill + resume) have this shape (research §6).
+- **An on-screen notice that a cleanup happened** — decision 1 「그걸 왜 알려」. After the cleanup the `result` has the same shape as an ordinary interrupt at the wire level (spike 3/3 · TRD §3-0).
+- **Automatic restart if it still does not end after the cleanup** — decision 2 「너무 복잡해」. The cleanup released the turn 3/3 (spike · experiment 3 also 3/3). If it cannot, only one warn line remains.
+- **A way to turn it off (an environment variable)** — decision 3 「ㅇㅇ 두지 않고」. At interrupt +3 seconds, what was alive was only the hang leftovers in 11/11 — no legitimate process that would be ended along with it was observed.
+- **Also pick candidates whose parent is alive (the rule literally)** — it could end a child that a background job started after the interrupt (e.g. `rustc` · `link.exe` of `cargo build`) (TRD review 1 M — an inference from the rule · the spike did not measure background jobs). No observation was lost by narrowing — the measured leftovers 3/3 had a dead parent and the candidate set is the same after decision 4 (TRD §3-0 Q1 · §3-4). The user saw the two branches (literal · narrowing) and chose narrowing (decision 4 · TRD §10).
 
-**조사 · TRD 가 닫은 것:**
-- **PID 부모 연결로 고르기(「부모 뒤 생성」 검사를 더해도)** — 조사 §4 사고: 남의 `link.exe` 등을 강제 종료했고, PID 재사용으로 21 번 중 4 번 · 18 번 중 3 번 남의 것을 골랐다(실측).
-- **고아 여부 · 「bash」 인지 · CPU 상태를 주 기준으로** — 조사 §7 은 정당한 고아(예: dev 서버)가 있고 한가한 프로세스는 얼어 보인다고 적는다. 잰 사실:
-  - **이름은 가르지 못했다** — 시행마다 끊기 뒤 우리 Job 에 훅 bash 가 약 10 개(깊이 5 ×5 · 깊이 6 ×5) 생겼고, 끊기 +3 초에 살아 있던 것은 11/11 에서 멈춤 잔여물뿐이었다. 잔여물을 가른 것은 이름이 아니라 「+3 초에 살아 있음」이다(TRD §3-0 Q3).
-  - **채택한 주 기준만으로 충분했다** — Job 멤버 · 보호 밖 · 문턱 뒤 생성 · 생존만으로 후보가 정확히 잔여물 하나였다(3/3 · TRD §3-0 Q4).
-  - **고아 판정은 PID 부모 연결에 기댄다** — 그 연결은 PID 재사용으로 21 번 중 4 번 · 18 번 중 3 번 남의 것을 골랐다(조사 §4).
-  - 그래서 결정 4 는 부모 죽음을 **덧붙인 AND 거르개로만** 쓰고 홀로 고르는 데 쓰지 않는다 — 그 판정도 Job 멤버 안에서 신원(PID + 생성 시각)과 같은 표 한 장으로만 한다(TRD §3-4).
-- **피어의 다른 모양(조사 §6)** — 유예 뒤 로컬에서 턴을 닫기(Zed 30 초 — 「a new session may be required」) · 트리 통째 죽이기(vibe-kanban · paseo · crystal) · 끊지 않고 기다리기(VS Code 확장 · claude-code-action). 조사 §6 은 「claude 를 살려 둔 채 자손만 죽이는 피어는 없다」고 적고, 사용자는 §7 을 골랐다. 트리 통째 죽이기는 claude 도 끝낸다(위 재시작과 같은 실측이 기각한다) · 기다리기는 약 300 초 멈춤 그 자체다(조사 §2 ②) · 로컬에서 닫아도 CLI 는 파이프가 닫힐 때까지 상한 없이 기다린다(조사 §2 ④ · 가능성 높음).
-- **upstream 수정을 기다리기** — CHANGELOG 2.1.284 까지 수정이 없고 스파이크의 2.1.284 에서도 멈춤이 났다(3/11 · TRD §8 ⑩). 판단 = 「claude 의 일반 결함이지만 우리 모드에서 드러난다 → 대시보드가 완화한다」(조사 §7).
-- **[TRD] `open_spawn` 에 `agent_id` 인자** — 제어 끝점이 이미 싣고(`control.agent_id`), 따로 받는 형태로 되돌리지 말라는 결정이 코드에 있다(`types.rs:644-649` · ADR-0217 결정 5).
-- **[TRD] 재확인 뒤 자물쇠를 놓고 끝내기** — 그 틈에 턴 끝 · 새 끊기가 들어와도 끝낸다(TRD 리뷰 2 C1 · §3-3).
-- **[TRD] `push` 실패 때 에피소드 되돌리기** — `push` 성공 뒤의 쓰기 실패는 호출자에게 돌아갈 길이 없어(`input_queue.rs:266-269`) 구멍을 반만 막고, `InterruptLine` 계약(ADR-0238 결정 2)을 넓힌다(TRD §3-2 · §8 ⑬).
-- TRD 내부의 나머지 대안(가려내기 셋 · 「끝내는 중」 표식)은 TRD §3-3 · §3-4 에 있다 — 여기 옮기지 않는다.
+**Closed by the research · TRD:**
+- **Picking by PID-parent link (even with a 「부모 뒤 생성」 check added)** — research §4 accident: it force-killed others' `link.exe` and so on, and because of PID reuse it picked others' processes 4 of 21 · 3 of 18 times (measured).
+- **Whether it is an orphan · whether it is 「bash」 · the CPU state as the primary criterion** — research §7 notes there are legitimate orphans (e.g. a dev server) and an idle process looks frozen. Measured facts:
+  - **The name could not tell them apart** — in every trial about 10 hook bashes (depth 5 ×5 · depth 6 ×5) appeared in our Job after the interrupt, and at interrupt +3 seconds what was alive was only the hang leftovers in 11/11. What separated the leftovers was not the name but 「+3 초에 살아 있음」 (TRD §3-0 Q3).
+  - **The adopted primary criterion alone was enough** — Job member · outside the protection · created after the threshold · alive alone made the candidate exactly one leftover (3/3 · TRD §3-0 Q4).
+  - **The orphan decision relies on the PID-parent link** — that link picked others' processes 4 of 21 · 3 of 18 times because of PID reuse (research §4).
+  - So decision 4 uses the parent's death **only as an added AND filter** and not to pick alone — even that decision is made only inside Job members, with the identity (PID + creation time) and one and the same table (TRD §3-4).
+- **Other peer shapes (research §6)** — close the turn locally after a grace period (Zed 30 seconds — 「a new session may be required」) · kill the whole tree (vibe-kanban · paseo · crystal) · wait without interrupting (the VS Code extension · claude-code-action). Research §6 notes 「claude 를 살려 둔 채 자손만 죽이는 피어는 없다」, and the user chose §7. Killing the whole tree ends claude too (the same measurement as the restart above rejects it) · waiting is the roughly 300-second hang itself (research §2 ②) · even if closed locally, the CLI waits with no upper bound until the pipe closes (research §2 ④ · likely).
+- **Waiting for an upstream fix** — no fix through CHANGELOG 2.1.284, and the hang occurred in the spike's 2.1.284 as well (3/11 · TRD §8 ⑩). Judgment = 「claude 의 일반 결함이지만 우리 모드에서 드러난다 → 대시보드가 완화한다」 (research §7).
+- **[TRD] An `agent_id` argument on `open_spawn`** — the control endpoint already carries it (`control.agent_id`), and a decision in the code says not to go back to receiving it separately (`types.rs:644-649` · ADR-0217 decision 5).
+- **[TRD] Releasing the lock after the re-check and then ending** — even if a turn end · a new interrupt comes in that gap, it would still end it (TRD review 2 C1 · §3-3).
+- **[TRD] Rolling the episode back when `push` fails** — a write failure after a successful `push` has no way back to the caller (`input_queue.rs:266-269`), so it closes the hole only halfway and widens the `InterruptLine` contract (ADR-0238 decision 2) (TRD §3-2 · §8 ⑬).
+- The remaining alternatives inside the TRD (three ways of sorting · the 「끝내는 중」 marker) are in TRD §3-3 · §3-4 — not moved here.
 
 ## 근거
-- **사용자 결정(2026-09-29)** — 원문은 「결정」 각 항. 기록 = TRD §1 · 조사 §7 · T-40.
-- **조사** — `docs/research/claude-interrupt-hook-hang-2026-09-29.md`(light · 적대 리뷰 없음). 원인 §2 · 사고 §4 · 피어 §6 · 결정 §7.
-- **측정 스파이크(TRD §3-0)** — claude 2.1.284 · 끊기 11 번 · 멈춤 3 번. 원시 로그는 세션 스크래치에만 있다(휘발 · 커밋하지 않음). ★스폰은 대시보드를 본떴을 뿐 같지 않다(`--include-hook-events` · `--model haiku` 를 더하고 데몬 끝점 인자를 뺐다) — 실제 대시보드 경로의 판정은 TRD §7 G1 이다★.
-- ★**검증 상태**★ — 구현 전 · TRD `/review trd` deep 4 회차 전원 PASS(5판 — 마지막 회차는 codex 가 4→5판 변경분만 확인). 표본은 멈춤 3 번이다.
+- **User decision (2026-09-29)** — the original words are in each item of 「결정」. Record = TRD §1 · research §7 · T-40.
+- **Research** — `docs/research/claude-interrupt-hook-hang-2026-09-29.md` (light · no adversarial review). Cause §2 · accident §4 · peers §6 · decision §7.
+- **Measurement spike (TRD §3-0)** — claude 2.1.284 · 11 interrupts · 3 hangs. The raw logs exist only in the session scratch (volatile · not committed). ★The spawn only imitated the dashboard and is not the same (it added `--include-hook-events` · `--model haiku` and left out the daemon endpoint argument) — the decision on the real dashboard path is TRD §7 G1★.
+- ★**Verification status**★ — before implementation · TRD `/review trd` deep round 4, all reviewers PASS (version 5 — in the last round codex checked only the changes from version 4 to 5). The sample is 3 hangs.
 
 ## 영향 / 불변식
-- **범위** — claude JSON(stream-json) 한 경로. codex · 터미널 모드 · 프론트 · 선 타입 · 버스 명령 · `open_spawn` 시그니처는 무변경(TRD §0). Windows 에서만 동작하고 다른 OS 는 무동작이다.
-- ★**`TurnGate.state` 는 잎 자물쇠다**★ — 쥔 채 로그 · 스레드 기동 · emit · 잠 · 다른 자물쇠 · 그 밖의 OS 호출을 하지 않는다. 예외는 둘뿐이다 — ⓐ 시계 두 값 읽기 ⓑ 끝내기 확정에서 검증된 핸들로 부르는 `TerminateProcess` 호출 정확히 하나. 정본 = TRD §3-3 끝 문단(CLAUDE.md 「핵심 불변식」 락 순서 줄이 옮긴다).
-- **닫힌 실패** — 명단 · 표 · 멤버 시작시각 · 시계 중 하나라도 못 믿으면 그 판은 아무것도 끝내지 않고 warn 을 남긴다. 한 에피소드에 판은 한 번이다(TRD §8 ⑫).
-- **알려진 한계(TRD §8)** — ① 잔여 경합(ADR-0238 결정 7)의 멈춤은 정리되지 않는다 · ② 턴 끝을 놓치면 판이 한 번 돈다 · ③ 끊기 뒤 태어나 N 에 살아 있고 부모가 이미 죽은 정당한 프로세스는 노출로 남는다(스파이크 11/11 에서 없었다) · 결정 4 로 부모가 산 멈춤 잔여물은 놓친다(관측 없음) · ⑤ 허용치 안의 시계 뒤로 뛰기는 못 본다 · ⑬ 줄이 claude 에 안 닿았는데 에피소드가 남을 수 있다 · ⑭ `TerminateProcess` 가 드물게 늦으면 그동안 끊기 줄 함수와 decoder 의 문 전이가 기다린다.
-- **upstream 이 고치면(#85250) 이 경로는 잠든다** — 턴 끝이 N 안에 오므로 판이 돌지 않는다. 걷을지는 그때 정한다(TRD §8 ⑩).
-- **`base`** — 기존 입주자 `platform` 에 함수 둘(`process_parent_table` · `process_start`)이 늘고 기존 `child_pids` · `process_creation_time` 이 그 위로 옮긴다(동작 동일 · 게이트 셋 통과 — TRD §0 · §11).
-- **코드 앵커 `// ADR-0257`(구현 때 단다 · TRD §9):** `JobObjectHandle::member_pids` · `verify_member` · `VerifiedMember::{terminate_raw, settle}` · `MemberCheck`/`MemberOutcome` · `platform/process_group.rs` 머리 · `process_tree::walk_levels` · `base::platform::process_parent_table` · `process_start` · `StdioTransport::process_group` · `console_wrapper_depth` · `leftover.rs` 머리 · `INTERRUPT_LEFTOVER_GRACE` · `CLOCK_STEP_TOLERANCE` · `LEFTOVER_EXIT_CODE` · `GateState` · 끝내기 확정 구간 · `select_leftovers` · `members_with_parents` · `keep_set` · `WrapperShape::compose` · `TurnGate` · decoder 의 문 여닫기 · `interrupt_line` 의 `try_interrupt` · `open_spawn` 의 정리기 조립과 `control` 주석. 기존 `// ADR-0238` 앵커는 그대로 둔다. 찾는 법(착지 뒤) = `rg "ADR-0257" crates`.
+- **Scope** — claude JSON (stream-json), one path. codex · terminal mode · frontend · wire types · bus commands · the `open_spawn` signature are unchanged (TRD §0). It works only on Windows and is a no-op on other OSes.
+- ★**`TurnGate.state` is a leaf lock**★ — while holding it, do not log · start a thread · emit · sleep · take another lock · make any other OS call. There are only two exceptions — ⓐ reading the two clock values ⓑ exactly one `TerminateProcess` call, with the verified handle, in the end decision. Source of truth = the last paragraph of TRD §3-3 (the CLAUDE.md 「핵심 불변식」 lock-order line carries it).
+- **Closed failure** — if any of the roster · table · member start time · clock cannot be trusted, that round ends nothing and leaves a warn. There is one round per episode (TRD §8 ⑫).
+- **Known limitations (TRD §8)** — ① a hang from the residual race (ADR-0238 decision 7) is not cleaned up · ② if a turn end is missed, the round runs once · ③ a legitimate process that was born after the interrupt, is alive at N, and whose parent is already dead remains as exposure (none in the spike's 11/11) · with decision 4, a hang leftover whose parent is alive is missed (no observation) · ⑤ a clock jump backward within the tolerance is not seen · ⑬ the episode may remain although the line did not reach claude · ⑭ if `TerminateProcess` is rarely late, the interrupt-line function and the decoder's gate transition wait in the meantime.
+- **If upstream fixes it (#85250), this path goes to sleep** — the turn end comes within N, so the round does not run. Whether to remove it is decided then (TRD §8 ⑩).
+- **`base`** — the existing occupant `platform` gains two functions (`process_parent_table` · `process_start`) and the existing `child_pids` · `process_creation_time` move on top of them (same behavior · passes the three gates — TRD §0 · §11).
+- **Code anchors `// ADR-0257` (attached at implementation · TRD §9):** `JobObjectHandle::member_pids` · `verify_member` · `VerifiedMember::{terminate_raw, settle}` · `MemberCheck`/`MemberOutcome` · the head of `platform/process_group.rs` · `process_tree::walk_levels` · `base::platform::process_parent_table` · `process_start` · `StdioTransport::process_group` · `console_wrapper_depth` · the head of `leftover.rs` · `INTERRUPT_LEFTOVER_GRACE` · `CLOCK_STEP_TOLERANCE` · `LEFTOVER_EXIT_CODE` · `GateState` · the end-decision section · `select_leftovers` · `members_with_parents` · `keep_set` · `WrapperShape::compose` · `TurnGate` · the decoder's gate open/close · `try_interrupt` of `interrupt_line` · the cleaner assembly and the `control` comment of `open_spawn`. The existing `// ADR-0238` anchors stay. How to find them (after landing) = `rg "ADR-0257" crates`.

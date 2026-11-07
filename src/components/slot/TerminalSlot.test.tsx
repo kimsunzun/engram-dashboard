@@ -1,25 +1,25 @@
-// WebGL 좌석 가시성 연동 라이프사이클(ADR-0056) 회귀 — 보이는 슬롯만 WebGL 좌석을 쥔다.
+// WebGL seat visibility-linked lifecycle (ADR-0056) regression — only a visible slot holds a WebGL seat.
 //
-// 배경: 모든 터미널 탭은 keep-alive(WindowLayout 이 숨은 탭을 display:none) 로 마운트를 유지한다.
-//   브라우저(WebView2/Chromium)는 동시 활성 WebGL 컨텍스트를 하드 상한(실측 16)으로 제한하므로,
-//   마운트된 모든 슬롯이 WebGL 을 쥐면 상한을 넘겨 오래된 컨텍스트가 소실된다. 그래서 WebGL addon 을
-//   가시성에 묶는다 — 보이면 부착, 숨기면 반납(loseContext→dispose). Terminal 인스턴스(버퍼)는 항상 산다.
+// Background: every terminal tab keeps its mount with keep-alive (WindowLayout puts hidden tabs at display:none).
+//   The browser (WebView2/Chromium) limits concurrently active WebGL contexts with a hard cap (measured 16), so
+//   if every mounted slot held WebGL the cap would be exceeded and old contexts lost. So the WebGL addon is tied to
+//   visibility — attach when visible, return when hidden (loseContext→dispose). The Terminal instance (buffer) always lives.
 //
-// ★검증 핵심★: jsdom 은 실 WebGL/IntersectionObserver 가 없으므로 로직 계층만 검사한다.
+// ★Verification core★: jsdom has no real WebGL/IntersectionObserver, so only the logic layer is checked.
 //
-// 전략: IntersectionObserver 를 제어 가능한 mock 으로 깔아 테스트가 visible/hidden 콜백을 직접 발화한다.
-//   xterm Terminal / FitAddon / WebglAddon 을 stub 해 호출을 정적 holder 로 관측한다. loseContext 는
-//   TerminalSlot 이 attach 시점에 container 안 canvas 를 훑어 getContext('webgl2'|'webgl') 로 컨텍스트를
-//   잡아두므로(언마운트 ref-null 방어), 보임 *이전에* container 에 canvas 를 심고 그 canvas 의 getContext 를
-//   spy 해 잡힌 컨텍스트의 loseContext 호출과 순서를 검사한다.
+// Strategy: lay down IntersectionObserver as a controllable mock so the test fires visible/hidden callbacks directly.
+//   Stub xterm Terminal / FitAddon / WebglAddon and observe calls via a static holder. loseContext:
+//   TerminalSlot scans canvases inside the container at attach time and grabs the context via getContext('webgl2'|'webgl')
+//   (unmount ref-null defense), so *before* it becomes visible, plant a canvas in the container and spy on that canvas's getContext
+//   to check the loseContext call and order on the grabbed context.
 
 import { act, cleanup, render } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { OutputChunk } from '../../api/agentClient'
 
-// jsdom 은 ResizeObserver 를 제공하지 않는다 — TerminalSlot 이 마운트 시 new ResizeObserver 한다.
-//   Fix 3 검증(숨김 중 fit/resize 스킵)을 위해 콜백을 잡아 테스트가 직접 발화할 수 있게 한다.
+// jsdom does not provide ResizeObserver — TerminalSlot does new ResizeObserver on mount.
+//   For the Fix 3 check (skip fit/resize while hidden) the callback is captured so the test can fire it directly.
 type ROEntry = { contentRect: { width: number; height: number } }
 const roState = vi.hoisted(() => ({
   instances: [] as Array<{ cb: (entries: ROEntry[]) => void }>,
@@ -41,9 +41,9 @@ function fireResize(width: number, height: number): void {
   act(() => ro.cb([{ contentRect: { width, height } }]))
 }
 
-// ── 제어 가능한 IntersectionObserver mock ────────────────────────────────────────────
-// 실 IO 는 관측 즉시(현재 가시성 반영) + 전이마다 콜백을 발화한다. 여기선 발화를 테스트가 직접 몰아
-//   초기-숨김/보임/숨김 전이를 재현한다.
+// ── Controllable IntersectionObserver mock ────────────────────────────────────────────
+// A real IO fires the callback immediately on observation (reflecting current visibility) + on every transition. Here the test drives firing directly
+//   to reproduce initial-hidden/visible/hidden transitions.
 type IOEntry = { isIntersecting: boolean; intersectionRatio: number }
 const ioState = vi.hoisted(() => ({
   instances: [] as Array<{ cb: (entries: IOEntry[]) => void; disconnected: boolean }>,
@@ -72,9 +72,9 @@ function fireVisibility(visible: boolean): void {
   act(() => io.cb([{ isIntersecting: visible, intersectionRatio: visible ? 1 : 0 }]))
 }
 
-// ── xterm/addon stub — 생성·호출을 정적 holder 로 관측. ──────────────────────────────
-// WebglAddon 인스턴스는 부착마다 새로 생기므로, 생성 목록·dispose·onContextLoss 를 hoisted holder 에
-//   모아 테스트가 개수/순서를 검사한다. loseContext 순서 검사를 위해 호출 로그(order)를 공유한다.
+// ── xterm/addon stub — observe construction and calls via a static holder. ──────────────────────────────
+// A WebglAddon instance is created anew on every attach, so the creation list · dispose · onContextLoss are gathered in a hoisted holder
+//   for the test to check count/order. The call log (order) is shared for the loseContext order check.
 const order = vi.hoisted(() => ({ log: [] as string[] }))
 const webglState = vi.hoisted(() => ({
   instances: [] as Array<{ dispose: ReturnType<typeof vi.fn>; onContextLoss: ReturnType<typeof vi.fn> }>,
@@ -98,14 +98,14 @@ vi.mock('@xterm/addon-fit', () => ({
   },
 }))
 
-// Terminal stub — loadAddon/refresh/dispose 를 관측한다. cols/rows 는 refresh(0, rows-1) 인자 검증용 고정값.
+// Terminal stub — observes loadAddon/refresh/dispose. cols/rows are fixed values for checking the refresh(0, rows-1) arguments.
 const termState = vi.hoisted(() => ({
   loadAddon: vi.fn(),
   refresh: vi.fn(),
   dispose: vi.fn(),
   reset: vi.fn(),
   write: vi.fn(),
-  // 입력 핸들러 캡처 — 부재 시 입력 차단(ADR-0148)을 관측하려면 실제로 데이터를 먹여봐야 한다.
+  // Input handler capture — to observe input blocking when absent (ADR-0148), data must actually be fed in.
   onDataCb: null as ((data: string) => void) | null,
   options: null as unknown,
 }))
@@ -130,13 +130,13 @@ vi.mock('@xterm/xterm', () => ({
 }))
 vi.mock('@xterm/xterm/css/xterm.css', () => ({}))
 
-// ── agentClient stub — 출력 구독 unsubscribe 관측. ──────────────────────────────────────
+// ── agentClient stub — observe output subscription unsubscribe. ──────────────────────────────────────
 const captured = vi.hoisted(() => ({
   onChunk: null as ((c: OutputChunk) => void) | null,
   unsubscribe: null as ReturnType<typeof vi.fn> | null,
 }))
-// 연결 상태 표면 — 실물과 동형으로 구독자를 들고 있다가 전이 때 통지한다(등록 즉시 1회 통지 포함).
-//   테스트가 전이를 몰 수 있어야 "연결만 끊긴" 부재(에이전트는 명부에 살아 있는 상태)를 재현할 수 있다.
+// Connection state surface — holds subscribers the same as the real one and notifies them on transitions (including one notification on registration).
+//   The test must be able to drive transitions to reproduce the "connection-only" absence (the agent is still alive in the registry).
 const conn = vi.hoisted(() => ({
   state: 'connected' as 'connected' | 'reconnecting' | 'down',
   cbs: new Set<(s: string) => void>(),
@@ -156,7 +156,7 @@ vi.mock('../../api/clientFactory', () => ({
     get connectionState() {
       return conn.state
     },
-    // 슬롯이 부재 막 판정에 읽는다(등록 즉시 1회 통지 + disposer 반환).
+    // The slot reads it to decide the absent curtain (one notification on registration + returns a disposer).
     onConnectionStateChange: (cb: (s: string) => void) => {
       conn.cbs.add(cb)
       cb(conn.state)
@@ -166,19 +166,19 @@ vi.mock('../../api/clientFactory', () => ({
   getAgentClient: vi.fn(),
 }))
 
-// ── agentStore stub — 슬롯이 종료 판정용으로 useAgentStore(s => s.agents) 를 조회. 빈 목록 = 살아있음. ──
-// agentsLoaded=false 기본 = 권위 명부 미수신 → 빈 목록을 부재로 오인하지 않는다(ADR-0148 가드).
+// ── agentStore stub — the slot queries useAgentStore(s => s.agents) for the exit decision. Empty list = alive. ──
+// agentsLoaded=false by default = authoritative registry not received → an empty list is not mistaken for absent (ADR-0148 guard).
 const agentStoreState = vi.hoisted(() => ({ agents: [] as unknown[], agentsLoaded: false }))
 vi.mock('../../store/agentStore', () => ({
   useAgentStore: (selector: (s: typeof agentStoreState) => unknown) => selector(agentStoreState),
 }))
 
-// ── 테스트 대상 ────────────────────────────────────────────────────────────────────
+// ── Test subject ────────────────────────────────────────────────────────────────────
 import TerminalSlot from './TerminalSlot'
 
 const AGENT = 'aaaa-bbbb-cccc-dddd'
 
-/** 마운트 직후 subscribeOutput 이 콜백을 등록(async .then)할 때까지 마이크로태스크를 비운다. */
+/** Flushes microtasks until subscribeOutput registers its callback (async .then) right after mount. */
 async function flushSubscribe(): Promise<void> {
   await act(async () => {
     await Promise.resolve()
@@ -187,12 +187,12 @@ async function flushSubscribe(): Promise<void> {
 }
 
 /**
- * TerminalSlot 이 attach 시점에 GL 컨텍스트를 잡도록 container 안에 WebGL canvas 를 심고, 그
- * getContext/loseContext 를 spy 로 노출한다. 실 WebglAddon 이 append 하는 canvas 를 대역 — TerminalSlot 은
- * addon 이 아니라 DOM canvas 를 훑어 컨텍스트를 얻으므로(버전-견고 경로), 이 대역이 그 경로를 재현한다.
+ * Plants a WebGL canvas inside the container so TerminalSlot grabs the GL context at attach time, and exposes its
+ * getContext/loseContext as spies. A stand-in for the canvas a real WebglAddon appends — TerminalSlot gets the context by scanning the DOM canvas,
+ * not the addon (version-robust path), so this stand-in reproduces that path.
  *
- * ★호출 시점★: 컨텍스트 캡처는 attachWebgl(=보임 전이)에서 일어나므로, 이 canvas 는 반드시 fireVisibility(true)
- *   *이전에* 심어야 캡처된다. (구조상 언마운트 후 containerRef 가 null 이어도 캡처된 컨텍스트로 반납하는 게 Fix 1.)
+ * ★Call timing★: the context capture happens in attachWebgl (= the visible transition), so this canvas must be planted
+ *   *before* fireVisibility(true) to be captured. (Structurally, returning with the captured context even if containerRef is null after unmount is Fix 1.)
  */
 function installWebglCanvas(): { loseContext: ReturnType<typeof vi.fn> } {
   const loseContext = vi.fn(() => {
@@ -200,11 +200,11 @@ function installWebglCanvas(): { loseContext: ReturnType<typeof vi.fn> } {
   })
   const gl = { getExtension: vi.fn((name: string) => (name === 'WEBGL_lose_context' ? { loseContext } : null)) }
   const canvas = document.createElement('canvas')
-  // getContext('webgl2') 가 우리 대역 gl 을 돌려주도록 오버라이드(jsdom 은 null 반환).
+  // Override so getContext('webgl2') returns our stand-in gl (jsdom returns null).
   canvas.getContext = vi.fn((type: string) => (type === 'webgl2' ? gl : null)) as unknown as typeof canvas.getContext
-  // container 는 TerminalSlot 의 containerRef div = 바깥(padding) div 안의 자식 div(자식 없는 leaf).
-  //   실 WebglAddon 이 이 div 에 canvas 를 append 하므로 대역도 정확히 같은 위치에 심는다 —
-  //   attachWebgl 은 containerRef.current 안에서만 canvas 를 훑으므로 위치가 틀리면 컨텍스트를 못 잡는다.
+  // The container is TerminalSlot's containerRef div = a child div (a leaf with no children) inside the outer (padding) div.
+  //   A real WebglAddon appends the canvas to this div, so the stand-in plants it in exactly the same place —
+  //   attachWebgl scans for canvases only inside containerRef.current, so if the place is wrong the context cannot be grabbed.
   const outer = document.querySelector('div[style*="padding"]')
   const container = outer?.querySelector('div')
   if (!container) throw new Error('containerRef div not found')
@@ -263,7 +263,7 @@ describe('TerminalSlot — WebGL 좌석 가시성 연동(ADR-0056)', () => {
     render(<TerminalSlot viewId="v1" agentId={AGENT} />)
     await flushSubscribe()
 
-    // 캡처는 attach 시점 → 보임 *전에* canvas 를 심어야 컨텍스트가 잡힌다.
+    // Capture is at attach time → the canvas must be planted *before* it becomes visible for the context to be grabbed.
     const { loseContext } = installWebglCanvas()
     fireVisibility(true)
     expect(webglState.instances).toHaveLength(1)
@@ -273,11 +273,11 @@ describe('TerminalSlot — WebGL 좌석 가시성 연동(ADR-0056)', () => {
 
     fireVisibility(false)
 
-    // ★load-bearing 순서★: dispose 만으론 GPU 좌석이 GC 전까지 안 풀린다 → 반드시 loseContext 를 *먼저*.
+    // ★load-bearing order★: dispose alone does not free the GPU seat until GC → loseContext must come *first*.
     expect(loseContext).toHaveBeenCalled()
     expect(order.log).toEqual(['loseContext', 'dispose'])
     expect(webglState.instances).toHaveLength(1)
-    // 숨김 중엔 측정 불가라 fit() 을 부르지 않는다(쓰레기 치수 방지).
+    // It cannot be measured while hidden, so fit() is not called (prevents garbage dimensions).
     expect(fitState.fit).not.toHaveBeenCalled()
   })
 
@@ -302,18 +302,18 @@ describe('TerminalSlot — WebGL 좌석 가시성 연동(ADR-0056)', () => {
     installWebglCanvas()
     fireVisibility(true)
     fireVisibility(false)
-    // 숨김 후엔 addon ref 가 비므로 다음 보임에서 새로 만든다.
+    // After hiding the addon ref is empty, so a new one is made at the next visible.
     fireVisibility(true)
 
     expect(webglState.instances).toHaveLength(2)
   })
 
-  // ── Fix 1 (HIGH): 언마운트 시에도 좌석 반납 ──────────────────────────────────────────
+  // ── Fix 1 (HIGH): return the seat on unmount too ──────────────────────────────────────────
   it('언마운트 → 잡아둔 GL 컨텍스트로 loseContext 호출(containerRef 가 null 이 돼도 반납된다)', async () => {
     const { unmount } = render(<TerminalSlot viewId="v1" agentId={AGENT} />)
     await flushSubscribe()
 
-    // 보임 전에 canvas 를 심어 attach 시점 캡처 → 언마운트에서 containerRef 가 null 이어도 이 컨텍스트로 반납.
+    // Plant the canvas before visible to capture at attach time → even if containerRef is null at unmount, return with this context.
     const { loseContext } = installWebglCanvas()
     fireVisibility(true)
     expect(webglState.instances).toHaveLength(1)
@@ -321,19 +321,19 @@ describe('TerminalSlot — WebGL 좌석 가시성 연동(ADR-0056)', () => {
     order.log = []
     act(() => unmount())
 
-    // containerRef 미의존이 핵심(React 가 commit 에서 null 로 비움).
+    // Not depending on containerRef is the point (React clears it to null at commit).
     expect(loseContext).toHaveBeenCalled()
     expect(order.log).toEqual(['loseContext', 'dispose'])
     expect(termState.dispose).toHaveBeenCalled()
   })
 
-  // ── Fix 2 (HIGH): loadAddon throw → 부분생성 addon dispose + ref null + 중복부착 없음 ──
+  // ── Fix 2 (HIGH): loadAddon throw → dispose the partially created addon + ref null + no duplicate attach ──
   it('보임 시 loadAddon 이 throw → 생성된 addon 을 catch 에서 dispose, ref 는 비고, 다음 보임에서 새 addon 1개만 부착', async () => {
     render(<TerminalSlot viewId="v1" agentId={AGENT} />)
     await flushSubscribe()
 
     installWebglCanvas()
-    // 첫 보임에서 loadAddon 이 던지게 한다(부분생성 경로 재현).
+    // Make loadAddon throw at the first visible (reproduces the partial-creation path).
     termState.loadAddon.mockImplementationOnce(() => {
       throw new Error('loadAddon boom')
     })
@@ -343,14 +343,14 @@ describe('TerminalSlot — WebGL 좌석 가시성 연동(ADR-0056)', () => {
     expect(webglState.instances).toHaveLength(1)
     expect(webglState.instances[0].dispose).toHaveBeenCalled()
 
-    // 다음 보임(정상 loadAddon)에서 새 addon 이 정확히 하나만 붙는다 — 이전 실패분이 ref 에 남았으면
-    //   attach 초입 가드(webglAddonRef.current) 때문에 새로 안 붙는다. 즉 두 번째가 붙었다 = ref 가 비어있었다.
+    // At the next visible (normal loadAddon) exactly one new addon attaches — if the earlier failed one had stayed in the ref, the guard at the start of attach
+    //   (webglAddonRef.current) would keep a new one from attaching. So the second one attaching = the ref was empty.
     fireVisibility(true)
     expect(webglState.instances).toHaveLength(2)
     expect(termState.loadAddon).toHaveBeenLastCalledWith(webglState.instances[1])
   })
 
-  // ── Fix 3 (MEDIUM): 숨김 상태에서 RO 발화 → fit()/resizePty 스킵 ─────────────────────
+  // ── Fix 3 (MEDIUM): RO fires while hidden → fit()/resizePty skipped ─────────────────────
   it('ResizeObserver 가 0 크기(숨김)에서 발화 → fit() 과 resizePty 를 호출하지 않는다', async () => {
     const { agentClient } = await import('../../api/clientFactory')
     render(<TerminalSlot viewId="v1" agentId={AGENT} />)
@@ -359,7 +359,7 @@ describe('TerminalSlot — WebGL 좌석 가시성 연동(ADR-0056)', () => {
     fitState.fit.mockClear()
     ;(agentClient.resizePty as ReturnType<typeof vi.fn>).mockClear()
 
-    // 0 폭·높이 = display:none 붕괴 재현. offsetParent 도 jsdom 에서 null 이라 hidden 신호가 성립.
+    // 0 width·height = reproduces the display:none collapse. offsetParent is also null in jsdom, so the hidden signal holds.
     fireResize(0, 0)
 
     expect(fitState.fit).not.toHaveBeenCalled()
@@ -367,19 +367,19 @@ describe('TerminalSlot — WebGL 좌석 가시성 연동(ADR-0056)', () => {
   })
 })
 
-// ★ADR-0148: 부재 = terminal 상태로 발견 ∪ 명부 수신 후에도 해석 안 됨★
+// ★ADR-0148: absent = found in terminal state ∪ unresolved even after the registry is received★
 //
-// 종료(kill)의 실제 결말은 reaper 가 세션을 수거하며 **명부에서 지우는** 것이다. status 로만 판정하면
-// 그 순간 부재 플래그가 풀려 죽은 에이전트로 입력이 나가고(거절은 조용히 삼켜져 무반응으로만 보인다)
-// 부재 막도 사라진다.
+// The real outcome of a kill is that the reaper collects the session and **removes it from the registry**. Deciding by status alone
+// releases the absent flag at that moment, so input goes out to a dead agent (the refusal is quietly swallowed and seen only as no response)
+// and the absent curtain vanishes too.
 //
-// ★막은 세 슬롯 공용이고 문구가 없다(ADR-0148 결정 4, 사용자 결정 2026-08-20)★ — 그래서 존재 판정은 텍스트가
-// 아니라 공용 마커로 한다.
+// ★The curtain is shared by three slots and has no text (ADR-0148 decision 4, user decision 2026-08-20)★ — so the presence decision is made by
+// a shared marker, not by text.
 function veil(): HTMLElement | null {
   return document.querySelector('[data-slot-dead="1"]')
 }
 
-/** 연결 상태 전이(실물 ProtocolClient 가 구독자 전원에게 통지하는 경로와 동형). */
+/** Connection state transition (same shape as the path where the real ProtocolClient notifies all subscribers). */
 function setConnection(state: 'connected' | 'reconnecting' | 'down'): void {
   act(() => {
     conn.state = state
@@ -402,8 +402,8 @@ describe('TerminalSlot — 에이전트 부재 판정(ADR-0148)', () => {
     expect(agentClient.writeStdin).not.toHaveBeenCalled()
   })
 
-  // ★live → 부재 전이를 실제로 태운다★: 처음부터 없는 상태로만 렌더하면 구독이 한 번밖에 안 걸려
-  //   "수거가 재구독을 부르나" 를 못 잰다. 살아있는 채로 마운트해 구독·reset 을 소비한 뒤 수거를 재현한다.
+  // ★Actually carry the live → absent transition★: rendering only in the never-there state hooks the subscription just once, so
+  //   "does collection call a resubscribe" cannot be measured. Mount alive, consume the subscription · reset, then reproduce the collection.
   it('마운트된 뒤 수거되면 입력이 막히고, 재구독·reset 이 다시 돌지 않는다', async () => {
     const { agentClient } = await import('../../api/clientFactory')
     agentStoreState.agents = [{ id: AGENT, cwd: 'C:/x', status: { type: 'Running' }, epoch: 2 }]
@@ -415,7 +415,7 @@ describe('TerminalSlot — 에이전트 부재 판정(ADR-0148)', () => {
     const subCalls = (agentClient.subscribeOutput as ReturnType<typeof vi.fn>).mock.calls.length
     const resetCalls = termState.reset.mock.calls.length
 
-    // 수거 = 명부에서 사라짐. 상위가 넘기는 prop(viewId·agentId)은 그대로다.
+    // Collection = gone from the registry. The props the parent passes (viewId·agentId) are unchanged.
     agentStoreState.agents = []
     rerender(<TerminalSlot viewId="v1" agentId={AGENT} />)
     await flushSubscribe()
@@ -424,15 +424,15 @@ describe('TerminalSlot — 에이전트 부재 판정(ADR-0148)', () => {
     ;(agentClient.writeStdin as ReturnType<typeof vi.fn>).mockClear()
     act(() => termState.onDataCb!('x'))
     expect(agentClient.writeStdin).not.toHaveBeenCalled()
-    // 구독 트리거가 그대로이므로 effect 가 다시 돌지 않는다(돌면 터미널 버퍼가 reset 된다).
+    // The subscription trigger is unchanged, so the effect does not run again (if it ran, the terminal buffer would be reset).
     expect((agentClient.subscribeOutput as ReturnType<typeof vi.fn>).mock.calls.length).toBe(subCalls)
     expect(termState.reset.mock.calls.length).toBe(resetCalls)
   })
 
-  // ★막을 올리는 조건 전부가 입력을 막는 조건이다(ADR-0148 결정 1 / ADR-0149 결정 4)★: 막은
-  //   pointer-events-none 이라 포커스가 남은 xterm 은 막이 떠 있어도 계속 키를 먹는다. 종료만 보고 막으면
-  //   연결이 끊긴 슬롯에서 "없다" 고 적힌 화면 뒤로 입력이 나가고, 그 실패는 조용히 삼켜져 사용자에겐
-  //   무반응으로만 보인다. 여기서는 에이전트를 명부에 **살려 둔 채** 연결만 끊어 그 갈래를 잰다.
+  // ★Every condition for raising the curtain is a condition for blocking input (ADR-0148 decision 1 / ADR-0149 decision 4)★: the curtain is
+  //   pointer-events-none, so an xterm that kept focus keeps eating keys even with the curtain up. Blocking on exit alone sends input
+  //   from a disconnected slot behind a screen that says "없다" (it is gone), and that failure is quietly swallowed and seen by the user only as
+  //   no response. Here the agent is **kept alive** in the registry and only the connection is cut, to measure that branch.
   it('연결이 끊겨 막이 뜬 동안은 에이전트가 살아 있어도 입력이 나가지 않는다', async () => {
     const { agentClient } = await import('../../api/clientFactory')
     agentStoreState.agents = [{ id: AGENT, cwd: 'C:/x', status: { type: 'Running' }, epoch: 0 }]
@@ -442,7 +442,7 @@ describe('TerminalSlot — 에이전트 부재 판정(ADR-0148)', () => {
     await flushSubscribe()
     expect(veil()).toBeNull()
 
-    // 대조군 — 붙어 있는 동안은 그대로 나간다(가드가 늘 막는 것과 구별).
+    // Control — while attached it goes out as is (to tell it apart from a guard that always blocks).
     ;(agentClient.writeStdin as ReturnType<typeof vi.fn>).mockClear()
     act(() => termState.onDataCb!('a'))
     expect(agentClient.writeStdin).toHaveBeenCalledTimes(1)
@@ -453,7 +453,7 @@ describe('TerminalSlot — 에이전트 부재 판정(ADR-0148)', () => {
     act(() => termState.onDataCb!('x'))
     expect(agentClient.writeStdin).not.toHaveBeenCalled()
 
-    // 다시 붙으면 풀린다 — 가드가 잠긴 채 고착되면 슬롯이 영구 무입력이 된다.
+    // It is released when reattached — if the guard sticks locked, the slot becomes permanently input-less.
     setConnection('connected')
     act(() => termState.onDataCb!('y'))
     expect(agentClient.writeStdin).toHaveBeenCalledTimes(1)
@@ -475,9 +475,9 @@ describe('TerminalSlot — 에이전트 부재 판정(ADR-0148)', () => {
 })
 
 describe('TerminalSlot — 커서 기본값', () => {
-  // 사용자 결정 2026-09-25 — 커서를 깜빡이는 흰 막대로 바꾸고 굵기는 그대로 둔다.
-  // 비활성 커서도 막대인 것은 그 선택에 맞춘 것이다 — xterm 기본값 'outline' 은 포커스 없는 슬롯에 칸 전체
-  //   빈 상자를 그린다.
+  // User decision 2026-09-25 — the cursor becomes a blinking white bar and the thickness is left as it is.
+  // The inactive cursor is also a bar to fit that choice — the xterm default 'outline' draws an entire empty box
+  //   over the whole cell in an unfocused slot.
   it('흰 막대·깜빡임 커서로 만들고 비활성도 막대, 굵기는 xterm 기본값을 쓴다', async () => {
     render(<TerminalSlot viewId="v1" agentId={AGENT} />)
     await flushSubscribe()

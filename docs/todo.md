@@ -1,63 +1,63 @@
-# TODO — 할 일 목록
+# TODO — To-Do List
 
-**이 파일은 색인이다** — 항목당 한 줄, 상세는 `todo/` 아래 개별 문서가 갖는다. 결정 기록(`decisions/`)은 *왜 그렇게 정했나*, `process/step-log.md`는 *언제 무엇을 했나*를 담고, 이 파일은 **아직 안 한 것**을 담는다.
+**This file is an index** — one line per item; the detail lives in the individual documents under `todo/`. Decision records (`decisions/`) hold *why we decided that*, `process/step-log.md` holds *when we did what*, and this file holds **what has not been done yet**.
 
-**규칙 넷**
+**Four rules**
 
-1. 항목당 1~3줄. 길어지면 `todo/<이름>.md`로 승격하고 여기엔 한 줄 + 포인터만 남긴다.
-2. **"왜 지금 안 하나"를 반드시 적는다.** 없으면 다음에 읽는 사람이 판단을 못 하고 그냥 쌓인다.
-3. ★해결되면 **지운다**★. 결정 기록은 append-only지만 이건 살아 있는 목록이라, 지워져야 짧게 유지된다.
-   - **지울 땐 `todo/` 상세 파일도 같이 지운다.** 색인 줄만 지우면 폴더에 고아가 쌓인다.
-   - ★**지우기 전에 정본 편입이 실제로 됐는지 확인한다**★ — 편입처는 항목마다 다르다(결정이면 `decisions/`, 언제·무엇이면 `process/step-log.md`, 코드 동기 규약이면 `reference/`). 편입 없이 지우면 그 항목은 어디에도 안 남고 증발한다. 「확인만 됨」 항목은 *해결*되는 게 아니라 **판단이 내려지는** 것이라, 판단이 ADR로 박힌 시점이 지울 시점이다.
-4. 근거·거부한 대안은 여기 쓰지 않는다 — 결정 기록에 두고 번호만 가리킨다.
+1. One to three lines per item. When it grows longer, promote it to `todo/<이름>.md` and leave only one line plus a pointer here.
+2. **Always write "왜 지금 안 하나" (why not now).** Without it, the next reader cannot judge and the item just piles up.
+3. ★When resolved, **delete it**★. Decision records are append-only, but this is a living list, and it stays short only if resolved items are removed.
+   - **When deleting, delete the detail file under `todo/` too.** If you delete only the index line, orphans pile up in the folder.
+   - ★**Before deleting, verify that the content was actually moved into its canonical home**★ — the destination differs per item (a decision goes to `decisions/`, when/what goes to `process/step-log.md`, a code-sync convention goes to `reference/`). Delete without moving it and the item survives nowhere and evaporates. 「확인만 됨」 (observed only) items are not *resolved*; a **judgment is made** on them, so the time to delete is when that judgment is recorded as an ADR.
+4. Do not write rationale or rejected alternatives here — keep them in decision records and point to the number only.
 
-**`tracking.md` 와의 경계**
+**Boundary with `tracking.md`**
 
-둘 다 해결되면 지운다 — `tracking.md` 는 열린 T- 항목만 두고, 해결된 것 중 다른 문서·코드가 번호로 가리키는 것만 `tracking-archive.md` 에 한 줄로 옮긴다(해결 기록은 ADR·step-log·커밋이 진다). 그래서 *근거·조사·재도입 트리거를 달고 다녀야 할 보류 사안*은 `tracking.md` 의 T- 항목으로 가고, *하면 없어질 일감*이 여기로 온다. 한 사안이 양쪽에 걸치면 T- 번호를 정본으로 두고 여기엔 한 줄 + 포인터만 남긴다.
+Both are deleted when resolved — `tracking.md` keeps only open T- items, and of the resolved ones moves to `tracking-archive.md` in a single line only those that other documents or code point to by number (the record of resolution is borne by ADRs, step-log and commits). So *deferred matters that must carry rationale, investigation and re-introduction triggers* go to T- items in `tracking.md`, and *work that disappears once done* comes here. When a matter spans both, keep the T- number as canonical and leave only one line plus a pointer here.
 
-**상태 값 넷**
+**Four status values**
 
-- **착수 가능** — 손 비면 집어가도 되는 것.
-- **트리거 대기** — 조건이 와야 여는 것.
-- **소유됨** — 지금 누가 잡고 있음.
-- **확인만 됨** — 관측만 됐고 판단 보류.
+- **Ready to start (착수 가능)** — anyone with free hands may pick it up.
+- **Waiting for trigger (트리거 대기)** — opened only when a condition arrives.
+- **Owned (소유됨)** — someone holds it right now.
+- **Observed only (확인만 됨)** — only observed; judgment deferred.
 
-**작업 강도 — 고정 기준 없다, 집는 사람이 다시 판단한다**
+**Work size — there is no fixed standard; whoever picks it up judges again**
 
-한 눈에 크기를 가늠하라고 붙인 값일 뿐 계약이 아니다. **적힌 강도와 실제가 다르면 그 자리에서 고쳐 적는다** — 여기 숫자를 맞추려고 작업을 늘리거나 줄이지 않는다. 대략 이런 뜻으로 쓴다: **작음** = 한 세션 안에 끝난다 · **중간** = 설계 판단이 한두 개 낀다 · **큼** = 사용자 결정이나 굵은 설계가 선행한다 · **불명** = 조사부터 해야 크기가 나온다.
+The value is only there to let you gauge size at a glance, not a contract. **If the written size differs from the real one, correct it in place** — do not grow or shrink the work to match the number here. Roughly: **Small** = finishes within one session · **Medium** = one or two design judgments are involved · **Large** = a user decision or a major design comes first · **Unknown** = investigation is needed before a size emerges.
 
 ---
 
-| 항목 | 상태 | 강도 | 상세 |
+| Item | Status | Size | Detail |
 |---|---|---|---|
-| 명부 정합 | 착수 가능 | 큼 | [`todo/roster-consistency.md`](todo/roster-consistency.md) |
-| 문서 드리프트 묶음 | 착수 가능 | 작음~중간 | [`todo/doc-drift.md`](todo/doc-drift.md) |
-| 게이트 스코프 이탈 검사 — 규약에 넣을지 | 착수 가능 | 작음 | [`todo/gate-scope-check.md`](todo/gate-scope-check.md) |
-| 검증 절차 (결정·미룬 정리) | 트리거 대기 | 불명 | [`todo/verification.md`](todo/verification.md) |
-| 명령 표면 — 주인이 선언되지 않는다 | 트리거 대기 | 중간~큼 | [`todo/command-ownership.md`](todo/command-ownership.md) |
-| 표시 정책이 표면마다 흩어져 있다 | 트리거 대기 | 큼 | [`todo/display-policy.md`](todo/display-policy.md) |
-| 터미널 치수 전파 | 트리거 대기 | 중간 | [`todo/terminal-sizing.md`](todo/terminal-sizing.md) |
-| 재생·구독 | 트리거 대기 | 중간 | [`todo/replay-subscription.md`](todo/replay-subscription.md) |
-| 이름·기록 | 트리거 대기 | 큼 | [`todo/naming-and-records.md`](todo/naming-and-records.md) |
-| QA 절차 문서가 CI 테스트 입력이다 — 결합 풀기 | 트리거 대기 | 중간 | [`todo/qa-doc-test-coupling.md`](todo/qa-doc-test-coupling.md) |
-| 프론트엔드 모듈 분리 | 소유됨 | 불명 | [`todo/frontend-module-split.md`](todo/frontend-module-split.md) |
-| 확인만 된 것 (판단 보류) | 확인만 됨 | — | [`todo/observed-only.md`](todo/observed-only.md) |
+| Registry consistency | Ready to start | Large | [`todo/roster-consistency.md`](todo/roster-consistency.md) |
+| Doc drift bundle | Ready to start | Small~Medium | [`todo/doc-drift.md`](todo/doc-drift.md) |
+| Gate scope-escape check — whether to add it to the conventions | Ready to start | Small | [`todo/gate-scope-check.md`](todo/gate-scope-check.md) |
+| Verification procedure (decisions · deferred cleanup) | Waiting for trigger | Unknown | [`todo/verification.md`](todo/verification.md) |
+| Command surface — owners are not declared | Waiting for trigger | Medium~Large | [`todo/command-ownership.md`](todo/command-ownership.md) |
+| Display policy is scattered across surfaces | Waiting for trigger | Large | [`todo/display-policy.md`](todo/display-policy.md) |
+| Terminal dimension propagation | Waiting for trigger | Medium | [`todo/terminal-sizing.md`](todo/terminal-sizing.md) |
+| Replay · subscription | Waiting for trigger | Medium | [`todo/replay-subscription.md`](todo/replay-subscription.md) |
+| Naming · records | Waiting for trigger | Large | [`todo/naming-and-records.md`](todo/naming-and-records.md) |
+| The QA procedure doc is a CI test input — decoupling | Waiting for trigger | Medium | [`todo/qa-doc-test-coupling.md`](todo/qa-doc-test-coupling.md) |
+| Frontend module split | Owned | Unknown | [`todo/frontend-module-split.md`](todo/frontend-module-split.md) |
+| Observed only (judgment deferred) | Observed only | — | [`todo/observed-only.md`](todo/observed-only.md) |
 
-**강도를 그렇게 매긴 이유**(한 줄씩 — 상세 문서가 정본):
+**Why each size was assigned** (one line each — the detail document is canonical):
 
-- **명부 정합 = 큼** — 조사는 끝났지만 후보 다섯 중 선택이 사용자 결정이고, 요구가 셋(순서·유실 복구·상태 알림과의 경쟁)으로 늘었다.
-- **문서 드리프트 = 작음~중간** — 남은 둘 중 미사용 의존은 매니페스트를 건드려 빌드 확인이 따라붙고, ADR-0175 오류는 목록부터 세워야 한다.
-- **검증 절차 = 불명** — 로컬 재현이 전패라 무엇을 고칠 대상으로 삼을지가 안 선다. 크기를 잴 수단이 없다.
-- **명령 표면 = 중간~큼** — 데몬 명령 인자 변경 + 프론트 명령 삭제 + 소유권 정리가 한 몸이고, 에이전트 트리 작업에 묶여 있다.
-- **표시 정책 = 큼** — 1단계(터미널만)는 작지만 2단계가 앱 전역 seam 교체이고 ADR 번복이 따라온다.
-- **이름·기록 = 큼** — `epoch` 개명 하나가 코드 식별자 885곳이다(실측). 미루기로 한 사유도 그것이다.
-- **프론트엔드 모듈 분리 = 불명** — 범위가 안 정해졌다. 크기 압력은 없다(비테스트 11,285줄, 최대 파일 992줄 — 실측 2026-08-26)
-- **QA 절차 문서 결합 = 중간** — 스크립트 추출 자체는 작지만 QA 절차·테스트·CI 경로 필터·ADR-0232 가 함께 움직인다.
+- **Registry consistency = Large** — The investigation is done, but choosing among five candidates is a user decision, and the requirements have grown to three (ordering · lost-frame recovery · race with state notifications).
+- **Doc drift = Small~Medium** — Of the two that remain, the unused dependency touches the manifest, so a build check follows, and the ADR-0175 errors require building the list first.
+- **Verification procedure = Unknown** — Local reproduction failed on every run, so what to treat as the thing to fix is not settled. There is no means to measure the size.
+- **Command surface = Medium~Large** — Changing daemon command arguments + deleting frontend commands + cleaning up ownership are one body, and it is tied to the agent-tree work.
+- **Display policy = Large** — Phase 1 (terminal only) is small, but phase 2 replaces an app-wide seam and an ADR reversal follows.
+- **Naming · records = Large** — The `epoch` rename alone is 885 code identifiers (measured). That is also the reason for deferring.
+- **Frontend module split = Unknown** — The scope is not decided. There is no size pressure (11,285 non-test lines, largest file 992 lines — measured 2026-08-26)
+- **QA procedure doc coupling = Medium** — Extracting the script itself is small, but the QA procedure, the test, the CI path filter and ADR-0232 move together.
 
 ---
 
-## 공통 — 어느 항목이든
+## Common — for any item
 
-- 커밋 제목 스텝 번호 = 새 주제마다 새 번호 — 받는 때 · 고르는 법의 정본은 `handbook/branch-commit.md`.
-- 코드 변경은 `/engram-implement` 로 한다(리뷰 · QA 포함).
-- 브랜치는 master 에서 판다. **master 를 상시 체크아웃하지 않는다** — 통합 절차의 정본은 `handbook/branch-commit.md`.
+- Commit-title step number = a new number for each new topic — the canonical source for when to get one and how to pick it is `handbook/branch-commit.md`.
+- Code changes go through `/engram-implement` (including review and QA).
+- Branch from master. **Do not keep master checked out permanently** — the canonical source for the integration procedure is `handbook/branch-commit.md`.

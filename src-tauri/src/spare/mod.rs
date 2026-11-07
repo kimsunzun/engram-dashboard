@@ -1,8 +1,8 @@
-//! 예열 창 상태(TRD S21-slot-docking §3-9) — 풀([`pool`] — 순수 상태 기계)을 락 · 조건 변수 · 주입한 첫 화면 문
-//! 손잡이([`PaintGate`]) · 시한 둘([`SpareSeams`])과 묶는다. 그 창 웹뷰와의 wire = [`wire`].
+//! Prewarmed window state (TRD S21-slot-docking §3-9) — ties the pool ([`pool`] — a pure state machine) to a lock · condition variable · an injected first-paint gate
+//! handle ([`PaintGate`]) · two deadlines ([`SpareSeams`]). The wire with that window's webview = [`wire`].
 //!
-//! Tauri 를 모른다 — 창 짓기 · 닫기 · 사건 · 시한 걸기는 부르는 쪽이 넘긴다(`commands/spare.rs` · 창 포트 ·
-//! [`CommitPort`]). 레이아웃 권위(`crate::layout` · ADR-0035)에는 확정이 쥐던 재기를 옮기는 것 말고 쓰지 않는다.
+//! It knows nothing of Tauri — building · closing windows · events · setting deadlines are passed in by the caller (`commands/spare.rs` · the window port ·
+//! [`CommitPort`]). To the layout authority (`crate::layout` · ADR-0035) it writes nothing except the commit moving the measurements it held.
 // ADR-0299
 
 pub mod pool;
@@ -24,33 +24,33 @@ use crate::layout::{
     apply, LabelSource, LayoutError, LayoutState, SpareClaim, UiMetrics, ViewManager,
 };
 
-/// 짓는 중인 예열 창을 기다리는 상한(I2) — 넘으면 새로 짓는다. 짓는 창이 메인 스레드를 쥐고 있어 새로 지어도 그
-/// 뒤에 서므로 짓기 한 번(≈ 160 ms)보다 넉넉히 둔다. 실측이 아니라 판단이다.
+/// Upper bound on waiting for a prewarmed window that is being built (I2) — beyond it, build a new one. The window being built holds the main thread, so even a new build stands behind it,
+/// so it is set more generously than one build (≈ 160 ms). It is a judgment, not a measurement.
 pub const BUILD_WAIT: Duration = Duration::from_secs(1);
 
-/// 채택한 창의 다시 짓기 완료를 기다리는 안전 시한(I8) — 첫 화면 시한이 확정 ③ 부터 돌므로 그 위에 메인 스레드
-/// 줄서기 몫을 얹는다. 먼저 울리면 보이려는 창과 짓기(≈ 160 ms)가 메인 스레드에서 겹친다(예열 F2). 여유 1 s 는 판단이다.
+/// Safety deadline for waiting for the rebuild of an adopted window to complete (I8) — the first-paint deadline runs from commit ③, so the main thread
+/// queueing share is added on top of it. If it fires first, the window to be shown and the build (≈ 160 ms) overlap on the main thread (prewarm F2). The 1 s margin is a judgment.
 pub const REVEAL_SAFETY: Duration =
     crate::first_paint::FALLBACK_REVEAL.saturating_add(Duration::from_secs(1));
 
-/// 안전 시한조차 끝내지 못한 보임 기다림을 맡기기가 끝내는 상한 — 그 시한이 걸리지 않았거나 울리지 않았을 때의 그물이다.
-/// 두 배는 판단이다(시한 일이 늦게 돌 몫을 둔다).
+/// Upper bound by which the handover ends a show-wait that even the safety deadline did not end — a net for when that deadline was not set or did not fire.
+/// Twice is a judgment (it leaves room for the deadline job running late).
 pub const REVEAL_BACKSTOP: Duration = REVEAL_SAFETY.saturating_mul(2);
 
-/// 첫 화면 문 손잡이(`first_paint` — I17 · I23 · I26). 풀을 만들 때 넘긴다.
+/// First-paint gate handle (`first_paint` — I17 · I23 · I26). Passed in when the pool is made.
 ///
-/// ★`hold_unarmed` · `cancel` 은 풀 락을 쥔 채 불린다★ — 구현은 자기 잎 락 하나만 잡고 풀을 부르지 않는다(차례 =
-/// 레이아웃 → 풀 → 첫 화면 문). 맡김 상태와 올림이 한 락 구간에서 함께 바뀌어야 그 사이의 UI 숨기기가 거둘 것을 찾고,
-/// 되물림의 거둠이 곧이어 다시 맡긴 쪽의 올림을 지우지 않는다.
+/// ★`hold_unarmed` · `cancel` are called while holding the pool lock★ — the implementation takes only its own leaf lock and does not call the pool (order =
+/// layout → pool → first-paint gate). The handover state and the placement must change together in one lock section so that the UI hide in between finds what to withdraw,
+/// and so that the withdrawal of a take-back does not erase the placement of the one that handed over again right after.
 pub trait PaintGate: Send + Sync {
-    /// 그 label 에 받아 두기만 하는 올림을 건다 — 알림 · 시한이 그 창을 보이지 않는다(보일지는 `reveal_if_held` 가 정한다).
-    /// 이미 올림이 있으면 그대로 둔다(받아 둔 알림을 지우지 않는다).
+    /// Puts on that label a placement that only buffers — notifications · the deadline do not show that window (whether to show is decided by `reveal_if_held`).
+    /// If a placement already exists, it is left as it is (it does not erase buffered notifications).
     fn hold_unarmed(&self, label: &str);
-    /// 그 label 의 올림을 거둔다 — 없으면 무동작.
+    /// Withdraws the placement of that label — a no-op if none.
     fn cancel(&self, label: &str);
-    /// 확정 ③ — 그 label 의 올림이 남아 있으면 기다리는 상태로 올리고 `true`(그 뒤 채택 번호 `generation` 을 실은 알림만
-    /// 받는다 · `activate` = 보인 뒤 활성화를 고를지 · `opened` = 그 창을 마지막으로 연(놓은) 때 — 보임 로그의 열기 → 보임
-    /// 몫), 없으면(UI 숨기기가 거뒀다) 아무 일도 하지 않고 `false`. 풀 락 · 레이아웃 락 밖에서 불린다.
+    /// Commit ③ — if the placement of that label remains, places it in the waiting state and gives `true` (after that it receives only notifications carrying the adoption number `generation` ·
+    /// `activate` = whether to choose activation after showing · `opened` = when that window was last opened (dropped) — the open → show part of the show log),
+    /// and if none (the UI hide withdrew it) it does nothing and gives `false`. Called outside the pool lock · layout lock.
     fn reveal_if_held(
         &self,
         label: &str,
@@ -60,14 +60,14 @@ pub trait PaintGate: Send + Sync {
     ) -> bool;
 }
 
-/// 풀을 만들 때 넘기는 seam(I23) — 시험은 짧은 시한과 가짜 문을 넘긴다.
+/// Seam passed in when the pool is made (I23) — tests pass short deadlines and a fake gate.
 pub struct SpareSeams {
     pub gate: Arc<dyn PaintGate>,
-    /// 짓는 중인 예열 창을 기다리는 상한([`BUILD_WAIT`]).
+    /// Upper bound on waiting for a prewarmed window being built ([`BUILD_WAIT`]).
     pub build_wait: Duration,
-    /// 확정 뒤 다시 짓기 완료의 안전 시한([`REVEAL_SAFETY`]) — [`CommitPort::reveal_deadline`] 에 넘긴다.
+    /// Safety deadline for the rebuild to complete after the commit ([`REVEAL_SAFETY`]) — passed to [`CommitPort::reveal_deadline`].
     pub reveal_safety: Duration,
-    /// 맡기기가 끝나지 않은 보임 기다림을 끝내는 상한([`REVEAL_BACKSTOP`]).
+    /// Upper bound that ends a show-wait whose handover is not finished ([`REVEAL_BACKSTOP`]).
     pub reveal_backstop: Duration,
 }
 
@@ -82,40 +82,40 @@ impl SpareSeams {
     }
 }
 
-/// 확정 ③ ④ 뒤의 창 쪽 일(셸 어댑터). ★전부 레이아웃 락 · 풀 락 밖에서 불린다★ — `destroy` 는 이벤트 루프를 기다리고 그
-/// `Destroyed` 처리기가 레이아웃 락 · 풀 락을 잡는다.
+/// Window-side work after commit ③ ④ (shell adapter). ★All are called outside the layout lock · pool lock★ — `destroy` waits for the event loop and that
+/// `Destroyed` handler takes the layout lock · pool lock.
 pub trait CommitPort {
-    /// ④ — 그 label 의 웹뷰에 `spare:adopted { generation }` 을 낸다.
+    /// ④ — emits `spare:adopted { generation }` to the webview of that label.
     fn adopted(&self, label: &str, generation: u32);
-    /// 안전 시한을 건다 — `after` 뒤 [`SpareState::on_reveal_overdue`] 를 부르고 그 답이 참이면 짓기를 띄운다.
+    /// Sets the safety deadline — after `after` calls [`SpareState::on_reveal_overdue`], and if its answer is true, kicks off a build.
     fn reveal_deadline(&self, label: &str, after: Duration);
-    /// 그 창을 닫는다(destroy). `Err` = 못 닫았다.
+    /// Closes that window (destroy). `Err` = could not close.
     fn destroy(&self, label: &str) -> Result<(), String>;
 }
 
-/// [`SpareState::claim`] 의 답.
+/// The answer of [`SpareState::claim`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaimReply {
-    /// 맡긴 예열 창 — `None` 이면 부른 쪽이 새 label 로 새로 짓는다.
+    /// The prewarmed window handed over — if `None`, the caller builds a new one with a new label.
     pub claim: Option<SpareClaim>,
-    /// 부른 쪽이 예열 창 짓기를 띄운다(I16) — `claim = None` 일 때만 참이다.
+    /// The caller kicks off building a prewarmed window (I16) — true only when `claim = None`.
     pub build: bool,
-    /// 짓는 중인 창을 기다린 시간(로그 `wait_ms`) — 기다리지 않았으면 `None`.
+    /// Time spent waiting for a window being built (log `wait_ms`) — `None` if it did not wait.
     pub waited: Option<Duration>,
 }
 
-/// [`SpareState::answer_role`] 의 답.
+/// The answer of [`SpareState::answer_role`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RoleAnswer {
     pub reply: WindowRoleReply,
-    /// 듣기를 못 건 풀의 창이라 풀에서 뺐다 — 부른 쪽이 그 창을 닫는다(락 밖 · 동기 처리기 밖 · I28).
+    /// It is a pool window that could not set up listening, so it was removed from the pool — the caller closes that window (outside the lock · outside a synchronous handler · I28).
     pub close: bool,
 }
 
-/// [`SpareState::build`] 의 결과.
+/// The result of [`SpareState::build`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpareBuild {
-    /// 자리를 못 잡아 짓지 않았다 — 번호를 받지 않았다(I13).
+    /// Could not secure a place so it did not build — no number was received (I13).
     Refused(NoBuild),
     Failed {
         label: WindowLabel,
@@ -124,29 +124,29 @@ pub enum SpareBuild {
     Built {
         label: WindowLabel,
     },
-    /// 지었으나 그사이 칸을 떠났다(`Destroyed` · 듣기 실패).
+    /// Built, but meanwhile left the field (`Destroyed` · listening failure).
     Vanished {
         label: WindowLabel,
     },
 }
 
-/// [`SpareState::commit`] 의 결과.
+/// The result of [`SpareState::commit`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommitOutcome {
-    /// 채택했다 — `revealed` = ③ 이 남은 올림을 올렸다(`false` = UI 숨기기가 거뒀다 · 숨긴 채 모델 창이 된다).
+    /// Adopted — `revealed` = ③ placed the remaining placement (`false` = the UI hide withdrew it · it becomes a model window while hidden).
     Adopted { revealed: bool },
-    /// 모델에 그 label 이 없어 닫았다 — 그 `Destroyed` 가 칸을 비우고 다시 짓는다.
+    /// That label is not in the model so it was closed — its `Destroyed` empties the field and builds again.
     Closed,
-    /// 두 번 다 못 닫아 칸을 비웠다(I31) — 다음 맡기기가 짓는다.
+    /// Could not close it either time so the field was emptied (I31) — the next handover builds.
     CloseFailed,
-    /// 낡은 맡김표 — 아무것도 하지 않았다(I27).
+    /// A stale handover ticket — nothing was done (I27).
     Stale,
 }
 
-/// 확정 ① ② 를 마친 단계 — 레이아웃 락을 놓은 뒤 [`Self::finish`] 로 ③ ④(또는 닫기)를 한다.
+/// The stage where commit ① ② are done — after releasing the layout lock, [`Self::finish`] does ③ ④ (or closing).
 ///
-/// ★두 반쪽(`commit_locked` · `finish`)을 이 모듈 밖에 내주지 않는다★ — 바깥은 [`SpareState::commit`] 하나로 부른다.
-/// 사이에서 단계를 버리면 `awaiting_reveal` 이 영영 서 그 실행의 예열이 꺼지거나, 칸이 닫는 중으로 멈춰 숨은 창이 남는다.
+/// ★The two halves (`commit_locked` · `finish`) are not given out of this module★ — the outside calls through [`SpareState::commit`] alone.
+/// If the stage is dropped in between, `awaiting_reveal` stays set forever and prewarming is off for the rest of that run, or the field stops at closing and a hidden window is left.
 #[must_use = "레이아웃 락을 놓은 뒤 finish 를 불러야 확정이 끝난다"]
 #[derive(Debug)]
 struct CommitStep {
@@ -155,14 +155,14 @@ struct CommitStep {
     carried: Result<(), LayoutError>,
 }
 
-/// 셸에 하나인 예열 창 상태.
+/// The prewarmed window state, one per shell.
 ///
-/// ★락 차례 = 레이아웃 → 풀 → 첫 화면 문★ — 풀 락을 쥔 채 잡는 것은 첫 화면 문의 잎 락 하나뿐이다([`PaintGate`]).
-/// 쥔 채 레이아웃 락 · emit · 창 호출 · 로그를 하지 않는다. 레이아웃 락을 쥔 채 풀을 잡는 것은 된다(확정 ① —
+/// ★Lock order = layout → pool → first-paint gate★ — the only thing taken while holding the pool lock is the first-paint gate's leaf lock ([`PaintGate`]).
+/// While holding it, do not take the layout lock · emit · call windows · log. Taking the pool while holding the layout lock is fine (commit ① —
 /// [`Self::commit`]).
 pub struct SpareState {
     pool: Mutex<SparePool>,
-    /// 짓는 중이던 칸이 바뀌었다(지어짐 · 짓기 실패 · 사라짐 · 종료) — 기다리는 맡기기를 깨운다.
+    /// The field that was being built changed (built · build failed · vanished · shutdown) — wakes the waiting handovers.
     changed: Condvar,
     gate: Arc<dyn PaintGate>,
     build_wait: Duration,
@@ -186,24 +186,24 @@ impl SpareState {
         sync::lock(&self.pool)
     }
 
-    /// 풀의 창인가(짓는 중 · 지어짐 · 맡김 · 닫는 중) — 트레이 보이기 · 숨기기 · `--hidden` 과 자리 기록이 빼는 창.
+    /// Is it a pool window (being built · built · handed over · closing) — the windows that tray show · hide · `--hidden` and placement recording skip.
     pub fn is_spare(&self, label: &str) -> bool {
         self.pool().contains(label)
     }
 
-    /// 보임을 기다리는 채택 창 label 과 그 채택 번호(I26).
+    /// Labels of adopted windows waiting to be shown and their adoption numbers (I26).
     pub fn awaiting_reveal(&self) -> Option<(WindowLabel, u32)> {
         self.pool()
             .awaiting_reveal()
             .map(|(label, generation)| (label.to_owned(), generation))
     }
 
-    /// 그 label 이 보임을 기다리는 채택 창이면 그 채택 번호 — `window_role` 이 답에 싣는다(I26).
+    /// If that label is an adopted window waiting to be shown, its adoption number — `window_role` puts it in the answer (I26).
     pub fn reveal_generation(&self, label: &str) -> Option<u32> {
         self.pool().reveal_generation(label)
     }
 
-    /// 앱이 끝나는 중이다 — 맡기지도 짓지도 다시 짓지도 않는다. 한 번 서면 내리지 않는다.
+    /// The app is ending — nothing is handed over, built or rebuilt. Once set, it is not lowered.
     pub fn begin_exit(&self) {
         self.pool().begin_exit();
         self.changed.notify_all();
@@ -213,8 +213,8 @@ impl SpareState {
         self.pool().exiting()
     }
 
-    /// 창 `label` 의 역할 — 풀의 창이면 `Spare`, 아니면 `in_model` 로 `Model` · `Unknown`. `in_model` 은 풀 락을
-    /// 놓은 뒤 부르므로 레이아웃 락을 잡아도 된다.
+    /// Role of window `label` — `Spare` if it is a pool window, otherwise `Model` · `Unknown` by `in_model`. `in_model` is called after the pool lock is
+    /// released, so it may take the layout lock.
     pub fn window_role(&self, label: &str, in_model: impl FnOnce() -> bool) -> WindowRole {
         if self.is_spare(label) {
             WindowRole::Spare
@@ -225,9 +225,9 @@ impl SpareState {
         }
     }
 
-    /// `window_role{adoptable}` 의 답(I26 · I28) — 채택 사건 듣기를 못 건 풀의 창이면 풀에서 빼고([`Self::on_listen`])
-    /// `unknown` + 닫기다. 그 밖은 [`Self::window_role`] 의 역할이고, 모델 창이면 보임을 기다리는 채택 번호를 싣는다.
-    /// `in_model` 은 풀 락을 놓은 뒤 부른다.
+    /// The answer of `window_role{adoptable}` (I26 · I28) — if it is a pool window that could not set up listening for the adoption event, remove it from the pool ([`Self::on_listen`])
+    /// and give `unknown` + close. Otherwise it is the role of [`Self::window_role`], and for a model window it carries the adoption number it is waiting to be shown with.
+    /// `in_model` is called after the pool lock is released.
     pub fn answer_role(
         &self,
         label: &str,
@@ -244,7 +244,7 @@ impl SpareState {
             };
         }
         let role = self.window_role(label, in_model);
-        // 번호는 역할을 본 뒤 읽는다 — 확정 ① 전의 `spare` 답에 ① 뒤의 번호가 붙지 않는다.
+        // The number is read after looking at the role — a `spare` answer from before commit ① does not get a number from after ①.
         let generation = match role {
             WindowRole::Model => self.reveal_generation(label),
             WindowRole::Spare | WindowRole::Unknown => None,
@@ -255,16 +255,16 @@ impl SpareState {
         }
     }
 
-    // ── 재기 보고(I6) ──
+    // ── measurement report (I6) ──
 
-    /// 풀의 창이 보낸 재기를 적는다 — `None` = 풀의 창이 아니다(부르는 쪽이 모델에 적는다 · 뜻 = [`SparePool::record`]).
-    /// 풀 락은 돌아오기 전에 놓는다.
+    /// Records the measurements a pool window sent — `None` = not a pool window (the caller records it in the model · meaning = [`SparePool::record`]).
+    /// The pool lock is released before returning.
     pub fn record_measure(&self, label: &str, measure: Measure) -> Option<Result<(), LayoutError>> {
         self.pool().record(label, measure)
     }
 
-    /// 창 웹뷰의 캔버스 보고 — 풀의 창이면 풀에, 아니면 모델에 적는다. 풀을 먼저 보고 놓은 뒤 레이아웃 락을 잡으므로,
-    /// 확정 ① 뒤에 닿은 보고는 그 확정의 레이아웃 락을 기다려 옮긴 값 위에 적힌다.
+    /// Canvas report of a window webview — recorded in the pool if it is a pool window, otherwise in the model. It looks at the pool first and takes the layout lock after releasing it, so
+    /// a report that arrives after commit ① waits for that commit's layout lock and is recorded on top of the moved value.
     pub fn report_canvas(
         &self,
         layout: &LayoutState,
@@ -278,7 +278,7 @@ impl SpareState {
         }
     }
 
-    /// [`Self::report_canvas`] 의 UI 치수 짝.
+    /// The UI metrics counterpart of [`Self::report_canvas`].
     pub fn report_metrics(
         &self,
         layout: &LayoutState,
@@ -291,11 +291,11 @@ impl SpareState {
         }
     }
 
-    // ── 짓기(TRD §3-9 「부팅」 · 「다시 짓기」 · I13) ──
+    // ── build (TRD §3-9 「부팅」 · 「다시 짓기」 · I13) ──
 
-    /// 예열 창 하나를 짓는다 — 칸 자리를 먼저 잡고(이미 있거나 · 보임을 기다리거나 · 종료 중 · 꺼졌으면 번호를 받지
-    /// 않고 `Refused`) 그 뒤 `labels` 에서 번호를 받아 `build` 로 숨긴 채 짓는다. 락 밖에서 부르고, `build` 는 락 밖에서
-    /// 돈다(창 짓기 — 작업 스레드).
+    /// Builds one prewarmed window — secures the field place first (if one already exists · is waiting to be shown · is shutting down · is off, it does not take a number
+    /// and gives `Refused`), then takes a number from `labels` and builds hidden with `build`. Called outside the lock, and `build` runs outside the lock
+    /// (window building — worker thread).
     // ADR-0299
     pub fn build(
         &self,
@@ -350,13 +350,13 @@ impl SpareState {
         }
     }
 
-    // ── 맡기기 · 열기 · 되물림(I2 · I4 · I16 · I17 · I27) ──
+    // ── handover · open · take-back (I2 · I4 · I16 · I17 · I27) ──
 
-    /// 지어진 예열 창을 맡긴다 — 같은 풀 락 안에서 그 label 에 받아 두기만 하는 첫 화면 올림을 건다. 짓는 중이면
-    /// 지어질 때까지(상한 = `build_wait`) 기다린다 — 지어짐 · 짓기 실패 · 사라짐 · 종료가 깨우고, 깬 뒤 먼저 락을 잡은
-    /// 하나만 맡는다. 기다리던 짓기가 실패하거나 사라졌으면 그 뒤에 자리를 잡은 다른 짓기를 따라가지 않고 곧바로
-    /// `None` 이다. 보임 기다림이 `reveal_backstop` 을 넘겨 서 있으면 먼저 그 다시 짓기 완료를 한다(그 뒤 칸이 비었으니
-    /// 이 맡기기가 짓기를 띄운다). ★락 밖 · 메인 스레드 밖에서 부른다★(I15 — 그 짓기가 메인 스레드에서 돈다).
+    /// Hands over the built prewarmed window — inside the same pool lock, puts on that label a first-paint placement that only buffers. If it is being built,
+    /// waits until it is built (upper bound = `build_wait`) — built · build failed · vanished · shutdown wake it, and after waking only the
+    /// first to take the lock takes it. If the build it was waiting for failed or vanished, it does not follow another build that took the place afterward and gives
+    /// `None` right away. If a show-wait has stood past `reveal_backstop`, it first does that rebuild completion (after that the field is empty, so
+    /// this handover kicks off a build). ★Call it outside the lock · outside the main thread★ (I15 — that build runs on the main thread).
     // ADR-0299
     pub fn claim(&self) -> ClaimReply {
         let started = Instant::now();
@@ -410,14 +410,14 @@ impl SpareState {
         }
     }
 
-    /// 맡긴 label 을 열(놓을) 때 — 지금 맡긴 창이면 `activate` 를 그 맡김에 적고 `Claimed`(짓지 않고 놓는다). 맡긴 채
-    /// 사라졌거나 맡기지 않은 예열 창 label 이면 `Unavailable`(새로 짓지 않고 `Err` — I20), 풀과 무관하면 `Fresh`.
+    /// When opening (dropping) a handed-over label — if it is a window handed over now, write `activate` into that handover and give `Claimed` (drop it without building). If it vanished while handed over
+    /// or is a prewarmed window label that was not handed over, `Unavailable` (`Err` without building anew — I20), and if unrelated to the pool, `Fresh`.
     pub fn opening(&self, label: &str, activate: bool) -> Opening {
         self.pool().opening(label, activate, Instant::now())
     }
 
-    /// 확정 전 되물림 — 맡김표가 지금의 맡김일 때만 숨긴 채 칸에 돌려놓고 같은 풀 락 안에서 올림을 거둔다(`true`).
-    /// 낡은 맡김표면 무동작 + warn(`false`).
+    /// Take-back before commit — only if the claim ticket is the current handover, return it to the field hidden and withdraw the placement inside the same pool lock (`true`).
+    /// If it is a stale claim ticket, no-op + warn (`false`).
     pub fn release(&self, claim: &SpareClaim) -> bool {
         let released = {
             let mut pool = self.pool();
@@ -445,10 +445,10 @@ impl SpareState {
         released
     }
 
-    // ── 확정(TRD §3-9 「`committed`」 · I6 · I21 · I25 · I27 · I31) ──
+    // ── commit (TRD §3-9 「`committed`」 · I6 · I21 · I25 · I27 · I31) ──
 
-    /// 맡긴 창의 새 창 항목이 모델에 든 뒤 한 번 — ① ② 를 레이아웃 락 하나 안에서, 락을 놓은 뒤 ③ ④ 또는 닫기를 한다.
-    /// 락 밖에서 부른다.
+    /// Once, after the new window entry of the handed-over window is in the model — does ① ② inside one layout lock, and after releasing the lock does ③ ④ or closing.
+    /// Called outside the lock.
     pub fn commit(
         &self,
         layout: &LayoutState,
@@ -462,10 +462,10 @@ impl SpareState {
         step.finish(self, port)
     }
 
-    /// 확정 ① ② — `mgr` = 부른 쪽이 쥔 레이아웃 락. ① 맡김표가 지금의 맡김이면 칸을 비우며 같은 풀 락 안에서
-    /// `awaiting_reveal` 을 세우고(I25), 그 label 이 모델에 없으면 비우지 않고 닫기로 정하며 같은 풀 락 안에서 올림을
-    /// 거둔다(I27). ② 쥐던 재기를 같은 레이아웃 락 안에서 모델에 적는다 — 확정 도중 닿은 보고는 그 락을 기다려 이 값
-    /// 위에 적힌다(I6).
+    /// Commit ① ② — `mgr` = the layout lock the caller holds. ① If the claim ticket is the current handover, empties the field and sets `awaiting_reveal` inside the same pool lock
+    /// (I25), and if that label is not in the model, does not empty but decides to close and withdraws the placement inside the same pool lock
+    /// (I27). ② Records the measurements it held into the model inside the same layout lock — a report that arrives during the commit waits for that lock and is recorded on top of this value
+    /// (I6).
     // ADR-0299
     fn commit_locked(&self, mgr: &mut ViewManager, claim: &SpareClaim) -> CommitStep {
         let in_model = mgr.window_attrs(&claim.label).is_ok();
@@ -492,15 +492,15 @@ impl SpareState {
         self.pool().close_failed(claim)
     }
 
-    // ── 다시 짓기 완료(I8 · I25) · `Destroyed` ──
+    // ── rebuild completion (I8 · I25) · `Destroyed` ──
 
-    /// 채택한 창이 보였다(첫 화면 풀림 또는 그 시한) — `true` = 부른 쪽이 짓기를 띄운다. label 마다 한 번이다(그
-    /// label 의 다른 완료 — 사라짐 · 안전 시한 — 가 먼저 왔으면 `false`). 보임을 기다리는 창이 아닌 label 이면 `false`.
+    /// The adopted window was shown (first paint released or its deadline) — `true` = the caller kicks off a build. Once per label (`false` if another completion of that
+    /// label — vanishing · the safety deadline — came first). `false` if the label is not a window waiting to be shown.
     pub fn on_shown(&self, label: &str) -> bool {
         self.complete_reveal(label, "shown")
     }
 
-    /// 안전 시한이 울렸다 — 뜻은 [`Self::on_shown`] 과 같다.
+    /// The safety deadline fired — the meaning is the same as [`Self::on_shown`].
     pub fn on_reveal_overdue(&self, label: &str) -> bool {
         self.complete_reveal(label, "overdue")
     }
@@ -519,8 +519,8 @@ impl SpareState {
         done.unwrap_or(false)
     }
 
-    /// 창이 사라졌다(`Destroyed` — 모든 창) — 칸의 창이면 칸을 비우고(맡긴 창이면 같은 풀 락 안에서 올림을 거둔다)
-    /// 종료 중 · 꺼짐이 아니면 `true`(다시 짓는다). 보임을 기다리던 채택 창이면 다시 짓기 완료다. 그 밖은 `false`.
+    /// The window vanished (`Destroyed` — all windows) — if it is the field's window, empties the field (if handed over, withdraws the placement inside the same pool lock)
+    /// and gives `true` (rebuild) unless shutting down · off. If it was an adopted window waiting to be shown, it is a rebuild completion. Otherwise `false`.
     pub fn on_destroyed(&self, label: &str) -> bool {
         let gone = {
             let mut pool = self.pool();
@@ -575,11 +575,11 @@ impl SpareState {
         }
     }
 
-    // ── 듣기 실패(I28) · 트레이 보이기 ──
+    // ── listening failure (I28) · tray show ──
 
-    /// `window_role{adoptable}` 의 풀 몫 — 풀의 창이 듣기를 못 걸었으면 칸을 비운다(맡긴 창이면 같은 풀 락 안에서 올림을
-    /// 거둔다 · 그 `Destroyed` 는 다시 짓지 않는다). 부른 쪽이 그 창을 락 밖에서 닫는다. 잇달아
-    /// [`pool::LISTEN_FAILURE_LIMIT`] 번이면 그 실행 내내 풀을 끈다. 풀의 창이 듣기를 걸었으면 셈을 0 으로 되돌린다.
+    /// The pool part of `window_role{adoptable}` — if a pool window could not set up listening, empties the field (if handed over, withdraws the placement inside the same pool lock
+    /// · its `Destroyed` does not rebuild). The caller closes that window outside the lock. If it happens
+    /// [`pool::LISTEN_FAILURE_LIMIT`] times in a row, the pool is turned off for the whole run. If a pool window did set up listening, the count is reset to 0.
     pub fn on_listen(&self, label: &str, adoptable: bool) -> Listen {
         let listen = {
             let mut pool = self.pool();
@@ -612,7 +612,7 @@ impl SpareState {
         listen
     }
 
-    /// 숨긴 UI 를 다시 보일 때 술어로 건너뛴 예열 창 label 마다 — 맡긴 창이면 같은 풀 락 안에서 올림을 다시 건다.
+    /// For each prewarmed window label skipped by the predicate when the hidden UI is shown again — if handed over, sets the placement again inside the same pool lock.
     pub fn on_tray_show(&self, label: &str) -> TrayShow {
         let pool = self.pool();
         let show = pool.tray_show(label);
@@ -624,8 +624,8 @@ impl SpareState {
 }
 
 impl CommitStep {
-    /// 확정 ③ ④ 또는 닫기 — ★레이아웃 락 · 풀 락을 놓은 뒤 부른다★. 채택이면 ③ 남은 올림을 올리기로 정하고 ④ 채택
-    /// 사건을 내고 안전 시한을 건다. 닫기면 닫고, 못 닫으면 한 번 더, 그래도 못 닫으면 칸을 비운다(I31).
+    /// Commit ③ ④ or closing — ★called after releasing the layout lock · pool lock★. For adoption, decides ③ to place the remaining placement, ④ emits the adoption
+    /// event and sets the safety deadline. For closing, closes, and if it cannot close, once more, and if it still cannot, empties the field (I31).
     fn finish(self, spare: &SpareState, port: &dyn CommitPort) -> CommitOutcome {
         let Self {
             claim,
@@ -702,7 +702,7 @@ impl CommitStep {
     }
 }
 
-// 모델 값이 없는 칸은 건드리지 않는다 — 새 창 항목은 재기 없이 들고, 풀의 값이 없으면 남길 것도 없다.
+// A field with no model value is not touched — a new window entry carries no measurements, and if the pool has no value there is nothing to leave.
 fn carry_measures(
     mgr: &mut ViewManager,
     label: &str,

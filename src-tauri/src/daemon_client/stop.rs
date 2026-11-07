@@ -1,70 +1,70 @@
-//! graceful 데몬 끄기 — 데몬에 WS 로 `StopDaemon` 을 일방 발사한다(트레이 「데몬 끄기」 · 앱 종료).
+//! Graceful daemon stop — fires `StopDaemon` one-way at the daemon over WS (tray 「데몬 끄기」 (stop daemon) · app exit).
 //!
-//! ★임시 거처★ — 3-2(transport 셸 부착)가 정지 명령 클라이언트를 다시 쓴다(ADR-0271 결정 5).
+//! ★Temporary home★ — 3-2 (attaching transport to the shell) rewrites the stop-command client (ADR-0271 decision 5).
 //!
-//! ★이 파일이 [`crate::discovery`] 에서 쓰는 내부는 이 파일을 위해 `pub(crate)` 로 연 것뿐이다★ — `check_acceptable` ·
-//! `AcceptCheck` · `FileReader`(와 그 필드 `path`) · `RealLiveness`. 셸의 다른 모듈이 그것을 쓰기 시작하면 3-2 의
-//! 다시 쓰기가 넓어진다.
+//! The [`crate::discovery`] internals this file uses are `pub(crate)`: `FileReader` (and its field `path`) for this
+//! file only · `check_acceptable` · `AcceptCheck` · `RealLiveness` also for `daemon_client::link::endpoint`, which
+//! reads `daemon.json` itself.
 //!
-//! ★분담(daemon_stop 와의 차이)★: send_stop 은 그 위 계층의 **graceful** 경로 — 데몬에 WS 로
-//! StopDaemon{force} 를 보내 데몬이 스스로 shutdown_all(자식 PTY 정리) + self-exit 하게
-//! 한다(connection_core StopDaemon 핸들러가 처리).
+//! ★Division of labor (difference from daemon_stop)★: send_stop is the **graceful** path of the layer above — it sends
+//! StopDaemon{force} to the daemon over WS so that the daemon itself does shutdown_all (cleaning up child PTYs) + self-exit
+//! (handled by the connection_core StopDaemon handler).
 //!
-//! ★일방 발사(fire-and-forget) — 사용자 결정★: ack/응답을 읽지 않는다. 응답이 없거나 데몬이 정리
-//! 중이면 데몬은 그대로 살아있고(probe 가 alive 로 보고), 사용자가 다시 누르면 재발사한다. close 전
-//! flush 로 메시지가 소켓에 실제 나가는 것만 보장한다.
+//! ★One-way fire (fire-and-forget) — user decision★: the ack/response is not read. If there is no response or the daemon is cleaning up,
+//! the daemon stays alive as is (the probe reports alive), and if the user presses again it fires again. Only that the message actually goes out on the socket
+//! through the flush before close is guaranteed.
 // ADR-0271
 // ADR-0282
 
 use std::path::Path;
 use std::time::Duration;
 
-use engram_dashboard_net::auth::AuthFrame;
-use engram_dashboard_protocol::{AgentCommand, DaemonInfo, RequestId, PROTOCOL_VERSION};
+use engram_dashboard_protocol::handshake::AuthFrame;
+use engram_dashboard_protocol::{AgentCommand, DaemonInfo, RequestId, Secret, PROTOCOL_VERSION};
 
 use crate::discovery::{
     check_acceptable, AcceptCheck, DaemonReader, DataLayout, DiscoveryError, FileReader,
     PidLiveness, RealLiveness,
 };
 
-/// ★왜 enum 으로 끌어올리나(load-bearing)★: 끄기 직후 트레이가 `daemon_status`(PID probe)로 아이콘을
-/// 정하면, 데몬이 죽기 직전 수 ms 동안 "아직 살아있음"으로 보여 **아이콘이 컬러로 고착**되는 race 가
-/// 있었다(QA 실측). 해결 = PID 를 다시 묻지 않고, drain read 루프에서 관측한 **"데몬이 연결을 닫음"**
-/// 을 "꺼짐 확정" 신호로 쓴다. send_stop 이 그 신호를 이 enum 으로 호출자(트레이)에게 올려, 트레이가
-/// probe 우회로 아이콘을 회색 확정한다.
+/// ★Why it is lifted into an enum (load-bearing)★: if right after the stop the tray decided the icon via
+/// `daemon_status` (PID probe), for a few ms just before the daemon died it looked "still alive" and there was a race where **the icon
+/// stuck on color** (QA measured). The fix = do not ask for the PID again, and use the **"daemon closed the connection"** observed in the drain
+/// read loop as the "confirmed off" signal. send_stop raises that signal to the caller (the tray) as this enum, and the tray
+/// confirms the icon gray by bypassing the probe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopOutcome {
-    /// 데몬이 graceful 하게 **이 WS 연결을 닫았다**. 트레이는 probe 없이 회색 확정.
-    /// ★의미 한정(과신 금지)★: 이것은 정확히는 "데몬이 StopDaemon 을 처리하고 **종료 경로에 진입**해
-    /// 이 연결을 닫았다"는 신호다. 실제 프로세스 exit 는 그 직후(보통 ms)에 일어난다 — 연결 닫힘과
-    /// 프로세스 소멸은 동일 순간이 아니다. 정상 경로에선 ms 차라 회색 확정이 맞지만, 데몬의 graceful
-    /// 종료 자체가 hang 하면 연결은 닫혔어도 프로세스가 잠깐 더 살 수 있다(그건 별도 버그 —
-    /// 일방 발사 재발사 모델이 다음 클릭에서 회수). 이 신호를 "프로세스 죽음 확정"으로 더 신뢰해
-    /// probe 폴백을 추가로 제거하지 말 것.
+    /// The daemon closed **this WS connection** gracefully. The tray confirms gray without a probe.
+    /// ★Scope limit (do not over-trust)★: precisely, this is the signal that "the daemon processed StopDaemon, **entered the exit path**, and
+    /// closed this connection". The actual process exit comes right after (usually ms) — connection close and
+    /// process disappearance are not the same instant. On the normal path the gap is ms so confirming gray is right, but if the daemon's graceful
+    /// shutdown itself hangs, the process may live a little longer even though the connection closed (that is a separate bug —
+    /// the one-way fire re-fire model recovers on the next click). Do not trust this signal further as "process death confirmed" and
+    /// remove the probe fallback additionally.
     DaemonClosed,
-    /// STOP_WS_TIMEOUT(3s) 내 데몬이 닫지도 응답하지도 않음.
-    /// = 불확실(데몬이 아직 정리 중일 수 있음) → 트레이는 기존 probe 폴백.
+    /// The daemon neither closed nor responded within STOP_WS_TIMEOUT(3s).
+    /// = uncertain (the daemon may still be cleaning up) → the tray uses the existing probe fallback.
     Timeout,
-    /// 끌 데몬이 없었음(daemon.json 없음/죽음/깨짐/버전 불일치 — send 자체를 안 함).
-    /// = 트레이는 기존 probe 폴백(이미 회색일 것).
+    /// There was no daemon to stop (no daemon.json / dead / broken / version mismatch — send itself is not done).
+    /// = the tray uses the existing probe fallback (it should already be gray).
     NoTarget,
 }
 
 pub trait StopSender {
-    /// 살아있는 데몬 `info` 에 graceful StopDaemon 을 보낸다(Auth → StopDaemon → flush → drain → close).
-    /// 일방 발사라 ack **내용**은 해석하지 않지만, drain read 의 **종료 사유**로
-    /// [`StopOutcome::DaemonClosed`](연결 닫힘=꺼짐 확정) / [`StopOutcome::Timeout`](3s 무응답)을 구분해
-    /// 반환한다. 송신/연결 실패만 Err.
+    /// Sends a graceful StopDaemon to the live daemon `info` (Auth → StopDaemon → flush → drain → close).
+    /// Being one-way fire it does not interpret the ack **content**, but by the **termination reason** of the drain read it tells apart
+    /// [`StopOutcome::DaemonClosed`] (connection closed = confirmed off) / [`StopOutcome::Timeout`] (3s no response) and
+    /// returns it. Only send/connect failures are Err.
     fn send_stop(&self, info: &DaemonInfo) -> Result<StopOutcome, DiscoveryError>;
 }
 
-/// 데몬에 graceful StopDaemon 을 WS 로 보낸다(real 진입점, S13 sub-step 2).
+/// Sends a graceful StopDaemon to the daemon over WS (real entry point, S13 sub-step 2).
 ///
-/// ★나중에 이어붙일 자리(load-bearing)★: 이 send_stop 경로엔 taskkill(daemon_stop) 강제 폴백이
-/// 없다(사용자 결정: 응답 없으면 데몬 활성 유지, 다시 누르면 재발사). 나중에 graceful-with-fallback
-/// 으로 키우려면 **이 함수(또는 TungsteniteStopSender::send_stop) 안에** "Timeout 시
-/// daemon_stop(data_dir) 호출"을 추가하면 된다 — 호출부는 send_stop 시그니처만 보므로 폴백 자체는
-/// 여기서 흡수.
+/// ★A place to attach later (load-bearing)★: this send_stop path has no taskkill (daemon_stop) forced fallback
+/// (user decision: no response means the daemon stays active, pressing again fires again). To grow it later into graceful-with-fallback,
+/// add "call daemon_stop(data_dir) on Timeout" **inside this function (or TungsteniteStopSender::send_stop)** — the
+/// call site sees only the send_stop signature, so the fallback itself is absorbed
+/// here.
 pub fn send_stop(data_dir: &Path) -> Result<StopOutcome, DiscoveryError> {
     stop_with_sender(
         &FileReader {
@@ -75,9 +75,9 @@ pub fn send_stop(data_dir: &Path) -> Result<StopOutcome, DiscoveryError> {
     )
 }
 
-/// ★대상 판정 = check_acceptable(Accept)★: 버전 불일치 데몬은 어차피 데몬의 Auth 가
-/// protocol_version 검사로 거부하므로 일방 발사가 무의미하고, 그런 데몬 종료는 taskkill
-/// 폴백(daemon_stop)의 몫이다(미래 연결).
+/// ★Target decision = check_acceptable(Accept)★: a version-mismatched daemon's Auth rejects with the
+/// protocol_version check anyway, so a one-way fire is pointless, and stopping such a daemon is the job of the taskkill
+/// fallback (daemon_stop) (to be wired in later).
 fn stop_with_sender(
     reader: &dyn DaemonReader,
     liveness: &dyn PidLiveness,
@@ -92,9 +92,9 @@ fn stop_with_sender(
     }
 }
 
-/// force=true·kill_agents=true 고정(작업 중 에이전트가 있어도 데몬이 정리하고 끔 — 사용자 결정).
-/// request_id 는 새 Uuid(데몬이 에코하지만 우리는 ack 를 안 읽으므로 매칭에 안 씀 — 프로토콜 필수
-/// 필드라 채울 뿐).
+/// force=true · kill_agents=true fixed (even with an agent at work the daemon cleans up and stops — user decision).
+/// request_id is a new Uuid (the daemon echoes it but we do not read the ack so it is not used for matching — it is filled
+/// only because it is a required protocol field).
 fn build_stop_command() -> AgentCommand {
     AgentCommand::StopDaemon {
         force: true,
@@ -103,30 +103,30 @@ fn build_stop_command() -> AgentCommand {
     }
 }
 
-/// 데몬은 연결 1초 내 첫 프레임으로 이걸 기대한다(네트워크 lib 의 AUTH_TIMEOUT).
+/// The daemon expects this as the first frame of a connection, within the net lib's `AUTH_TIMEOUT`.
 ///
-/// ★타입 출처(ADR-0129 0-4)★: 이건 **명령이 아니라 네트워크 lib 소유 프레임**이다(`AuthFrame`).
-/// 데몬의 인증 판정을 하는 그 crate 가 모양의 정본을 쥐므로, 발신자가 제 손으로 JSON 을 짜는 대신
-/// 같은 타입을 쓴다 — 그래야 한쪽만 바뀌는 표류가 컴파일 에러가 된다.
-fn build_auth_command(token: &str) -> AuthFrame {
+/// ★Type origin (ADR-0129 0-4)★: this is **not a command but a separate handshake frame** (protocol
+/// `handshake::AuthFrame`). The daemon unpacks it with the same type, so instead of the sender hand-building the JSON
+/// it uses the same type — that way a drift where only one side changes becomes a compile error.
+fn build_auth_command(token: &Secret) -> AuthFrame {
     AuthFrame::Auth {
-        token: token.to_string(),
+        token: token.clone(),
         protocol_version: PROTOCOL_VERSION,
     }
 }
 
-/// ★데몬 핸드셰이크와 1:1(ws.rs)★: 데몬 read_task 는 Message::Text 만 AgentCommand 로 파싱하고
-/// Binary 는 거부하므로 Text 로 보낸다.
+/// ★1:1 with the daemon handshake (ws.rs)★: the daemon read_task parses only Message::Text as AgentCommand and
+/// rejects Binary, so it is sent as Text.
 struct TungsteniteStopSender;
 
-/// send_stop 의 connect/handshake/read/write 상한(초). 이 값을 넘으면 깔끔히 에러로 빠진다.
+/// Upper bound (seconds) on send_stop's connect/handshake/read/write. Going past it falls cleanly into an error.
 ///
-/// ★왜 timeout 이 load-bearing 인가★: 기본 `tungstenite::connect(url)` 은 내부 `TcpStream::connect`
-/// 를 **timeout 없이** 호출하고 handshake read 에도 상한이 없다. daemon.json 의 pid/port 가 stale
-/// 인데 그 PID 가 재사용(M2)으로 liveness 판정을 우회한 드문 경우, 닫혔거나 방화벽이 막은 포트로의
-/// connect 시도가 Windows 기본 ~21초까지 블록될 수 있다 — 트레이 stop 워커 스레드가 그동안 묶여
-/// 아이콘/상태 갱신이 지연된다(워커 누수에 준함). connect_timeout + set_read/write_timeout 으로
-/// 모든 블로킹 구간(TCP 연결 → WS handshake read → send/flush/close)에 상한을 박아 무한 블록을 막는다.
+/// ★Why the timeout is load-bearing★: the default `tungstenite::connect(url)` calls the inner `TcpStream::connect`
+/// **without a timeout**, and the handshake read has no bound either. In the rare case where the pid/port in daemon.json is stale
+/// yet that PID was reused (M2) and slipped past the liveness decision, a connect attempt to a closed or firewall-blocked port
+/// can block up to the Windows default ~21 seconds — the tray stop worker thread is tied up meanwhile, so
+/// icon/state updates are delayed (close to a worker leak). connect_timeout + set_read/write_timeout put a bound on
+/// every blocking stretch (TCP connect → WS handshake read → send/flush/close) and prevent an infinite block.
 const STOP_WS_TIMEOUT: Duration = Duration::from_secs(3);
 
 impl StopSender for TungsteniteStopSender {
@@ -134,7 +134,7 @@ impl StopSender for TungsteniteStopSender {
         use std::net::{SocketAddr, TcpStream};
         use tungstenite::{Error as WsError, Message};
 
-        // ws://host:port — 데몬은 로컬 평문 WS(TLS 없음, ws:// 고정). host 는 항상 127.0.0.1 loopback.
+        // ws://host:port — the daemon is local plaintext WS (no TLS, ws:// fixed). host is always the 127.0.0.1 loopback.
         let url = format!("ws://{}:{}", info.host, info.port);
 
         let addr: SocketAddr = format!("{}:{}", info.host, info.port)
@@ -148,7 +148,7 @@ impl StopSender for TungsteniteStopSender {
         stream
             .set_write_timeout(Some(STOP_WS_TIMEOUT))
             .map_err(|e| DiscoveryError::Io(format!("StopDaemon write timeout 설정 실패: {e}")))?;
-        // 요청은 URL 뿐이라 HandshakeError Display 에도 token 은 들어가지 않는다.
+        // The request is only the URL, so the token does not enter the HandshakeError Display either.
         let (mut ws, _resp) = tungstenite::client(&url, stream)
             .map_err(|e| DiscoveryError::Io(format!("StopDaemon WS handshake 실패({url}): {e}")))?;
 
@@ -162,20 +162,20 @@ impl StopSender for TungsteniteStopSender {
         ws.send(Message::Text(stop.into()))
             .map_err(|e| DiscoveryError::Io(format!("StopDaemon 전송 실패: {e}")))?;
 
-        // ★flush 로 두 프레임을 소켓에 실제 밀어낸다★ — tungstenite send 는 내부 버퍼링이라
-        // flush 없이 곧장 close 하면 미전송 가능. 일방 발사의 "도달 보장"이 이 flush 다.
+        // ★The flush actually pushes the two frames onto the socket★ — tungstenite send buffers internally, so closing right away without a
+        // flush may leave them unsent. This flush is the "delivery guarantee" of the one-way fire.
         ws.flush()
             .map_err(|e| DiscoveryError::Io(format!("WS flush 실패: {e}")))?;
 
-        // ★drain read — 즉시 close 금지(QA 실측 회귀 수정)★:
-        //    flush 직후 곧장 ws.close() 하면 데몬 write_task 가 닫힌 소켓에 outbound(Hello 등)를 write
-        //    하다 os error 10053 으로 실패 → write_task 종료 → 데몬의 "한쪽 끝나면 상대 abort"(ws.rs)로
-        //    read_task 가 StopDaemon 을 read 하기 전에 abort → StopDaemon dispatch 안 됨 → 데몬이
-        //    graceful self-exit 못 함(생존). 즉시 close 가 데몬에게서 "StopDaemon 을 read 하고 처리할
-        //    시간"을 뺏는 게 결함이었다. 그래서 데몬이 self-exit 로 연결을 닫을 때까지(또는 read_timeout
-        //    3s) 소켓에서 read 를 돌려 처리 시간을 준다.
-        //    "받기"가 아니라 "데몬에 시간 주기"로 read 를 도는 것이다. 3s 상한이라 데몬이 안 죽어도
-        //    send_stop 은 최대 3s 후 반환(connect timeout 과 같은 워커 블록 bound).
+        // ★drain read — no immediate close (QA measured regression fix)★:
+        //    if ws.close() is called right after the flush, the daemon write_task writes outbound (Hello etc.) to the closed socket and
+        //    fails with os error 10053 → write_task ends → by the daemon's "when one side ends, abort the other" (ws.rs)
+        //    read_task aborts before it reads StopDaemon → StopDaemon is not dispatched → the daemon
+        //    cannot graceful self-exit (it survives). The defect was that an immediate close took away from the daemon the "time to read and process StopDaemon".
+        //    So read is run on the socket until the daemon closes the connection by self-exit (or read_timeout
+        //    3s), giving it processing time.
+        //    The read loop is for "giving the daemon time", not for "receiving". With the 3s bound, even if the daemon does not die
+        //    send_stop returns after at most 3s (the same worker-block bound as the connect timeout).
         let outcome = loop {
             match ws.read() {
                 Ok(Message::Close(_)) => break StopOutcome::DaemonClosed,
@@ -187,17 +187,17 @@ impl StopSender for TungsteniteStopSender {
                     use std::io::ErrorKind;
                     match e.kind() {
                         ErrorKind::WouldBlock | ErrorKind::TimedOut => break StopOutcome::Timeout,
-                        // EOF/연결 끊김 — 데몬 프로세스가 사라져 소켓이 끊김 → 꺼짐 확정.
+                        // EOF / connection dropped — the daemon process vanished and the socket dropped → confirmed off.
                         _ => break StopOutcome::DaemonClosed,
                     }
                 }
-                // 그 외 WS 에러(프로토콜/Utf8 등) — 더 받을 게 없으니 종료하되, 데몬이 닫았다고 단정할 수
-                // 없어 Timeout(불확실)으로 본다(probe 폴백으로 안전하게 회수).
+                // Other WS errors (protocol/Utf8 etc.) — nothing more to receive so end, but since we cannot assert the daemon closed it,
+                // treat as Timeout (uncertain) (safely recovered by the probe fallback).
                 Err(_) => break StopOutcome::Timeout,
             }
         };
 
-        // 데몬이 이미 닫았으면 무해하고, 안 닫았어도 drop 으로 닫힌다 — 명시적 close 는 best-effort.
+        // If the daemon already closed it this is harmless, and even if not it is closed by drop — the explicit close is best-effort.
         let _ = ws.close(None);
         Ok(outcome)
     }
@@ -210,10 +210,10 @@ mod tests {
 
     use crate::discovery::tests::{info, FakeLiveness, FakeReader};
 
-    // ── send_stop (graceful StopDaemon WS 일방 발사) — 순수 판정/조립 ──────────────────
+    // ── send_stop (graceful StopDaemon WS one-way fire) — pure decision/assembly ──────────────────
     //
-    // 실 WS 왕복은 QA(실 데몬) 영역. 여기선 (1) 대상 판정(어떤 데몬에 보내고 안 보내는지), (2) 보낼
-    // 메시지 조립(Auth/StopDaemon 직렬화 형태)을 StopSender fake 로 검증한다.
+    // The real WS round trip is QA (real daemon) territory. Here we verify with a StopSender fake (1) the target decision (which daemons get a send and which do not),
+    // (2) the assembly of the message to send (Auth/StopDaemon serialization shape).
 
     struct CountingStopSender {
         sent: RefCell<Vec<u32>>,
@@ -326,7 +326,7 @@ mod tests {
 
     #[test]
     fn build_stop_command_is_force_kill_stopdaemon() {
-        // 데몬 read_task 의 serde_json::from_str 이 파싱할 형태를 못 박는다.
+        // Pins the shape that the daemon read_task's serde_json::from_str will parse.
         match build_stop_command() {
             AgentCommand::StopDaemon {
                 force, kill_agents, ..
@@ -347,20 +347,20 @@ mod tests {
 
     #[test]
     fn build_auth_command_carries_token_and_version() {
-        // ★단일 variant 라 반증 불가 패턴이다(ADR-0129 0-4)★ — 옛 `other => panic!` 갈래는 이제 존재할
-        //   수 없는 상태라 지웠다(단언이 약해진 게 아니라 컴파일러가 대신 보증한다).
+        // ★A single variant makes this a non-falsifiable pattern (ADR-0129 0-4)★ — the old `other => panic!` branch is now an impossible
+        //   state so it was deleted (the assertion did not get weaker; the compiler guarantees it instead).
         let token = "f".repeat(64);
         let AuthFrame::Auth {
             token: t,
             protocol_version,
-        } = build_auth_command(&token);
-        assert_eq!(t, token);
+        } = build_auth_command(&Secret::new(token.clone()));
+        assert_eq!(t.expose(), token);
         assert_eq!(protocol_version, PROTOCOL_VERSION);
 
-        // wire 형태 — 태그 존재만이 아니라 **바이트 전체**를 못 박는다. 이 프레임을 받는 쪽(네트워크 lib)이
-        // 같은 문자열을 golden 으로 들고 있고, 데몬은 이 crate 의 타입을 쓰지 않으므로 둘을 잇는 것은
-        // 이 형태뿐이다(트레이 stop 이 조용히 인증에 실패하면 데몬이 안 꺼진다).
-        let json = serde_json::to_string(&build_auth_command(&token)).unwrap();
+        // Wire shape — pins not only the tag's presence but the **whole bytes**. The protocol `handshake` holds the same string as a
+        // golden, and whether this path actually emits those bytes is measured only here (if tray stop quietly fails
+        // auth the daemon does not shut down).
+        let json = serde_json::to_string(&build_auth_command(&Secret::new(token.clone()))).unwrap();
         assert_eq!(
             json,
             format!(r#"{{"Auth":{{"token":"{token}","protocol_version":{PROTOCOL_VERSION}}}}}"#),

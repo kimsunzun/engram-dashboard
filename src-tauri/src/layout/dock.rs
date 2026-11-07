@@ -1,11 +1,11 @@
-//! 도킹 트리 연산 — 탭 하나의 배치(`incoming`)를 대상 탭 트리의 슬롯 옆이나 바깥 변에 끼운 **결과 트리**를 새로
-//! 만든다(PRD R7–R9 · TRD S21-slot-docking 5.8판 §1-2 「트리 연산」). `tree`·`geometry` 만 알고 Tauri·락·I/O 를 모른다 →
-//! 단독 headless 테스트가 된다(ADR-0012 격리).
+//! Docking tree operation — builds the **result tree** in which one tab's layout (`incoming`) is inserted next to a slot of the target tab's tree or at its
+//! outer side (PRD R7–R9 · TRD S21-slot-docking 5.8th edition §1-2 「트리 연산」). It knows only `tree` and `geometry` and knows nothing of Tauri, locks or I/O →
+//! it becomes a standalone headless test (ADR-0012 isolation).
 //!
-//! 진입점 = [`docked_tree`](결과 트리 · 새 면적 0 거절) · [`incoming_rect`](결과 기하에서 끼운 것의 사각형).
-//! 가이드 · 놓기 판정 · 적용이 같은 `docked_tree` 를 쓴다 — 칠한 사각형과 놓은 결과가 한 식에서 나온다(PRD R4).
+//! Entry points = [`docked_tree`](result tree · reject new zero size) · [`incoming_rect`](rectangle of the inserted part in the result geometry).
+//! The guide · drop decision · apply all use the same `docked_tree` — the painted rectangle and the dropped result come out of one formula (PRD R4).
 //!
-//! ★불변식★: 입력 노드의 슬롯 id · 분할 id 를 바꾸지 않는다 — 새로 뽑는 id 는 감싸는 분할 하나뿐이다(ADR-0223).
+//! ★Invariant★: the slot ids and split ids of input nodes are not changed — the only id drawn anew is the wrapping split (ADR-0223).
 
 use std::collections::HashSet;
 
@@ -16,10 +16,10 @@ use super::geometry::{self, has_area, LayoutGeometry, RectF64};
 use super::tree;
 use super::types::{LayoutNode, SlotContent, SplitDir};
 
-/// 붙일 쪽 — 이름이 결과 배치를 말한다. `Left` = 기준의 왼쪽에 새것 · `Right` = 오른쪽 · `Top` = 위 · `Bottom` = 아래.
-/// wire 값 = variant 이름 그대로(`Left` …).
-// ★`#[serde(rename_all)]` 을 달지 말 것★ — 이것을 실을 버스 명령(`tab.dock` · T-65)의 선언 매크로는 rename 을 못 달아
-// variant 이름이 그대로 wire 값이 된다. 놓기 invoke(`tab_drop` 의 `Seam`)도 같은 철자로 싣는다.
+/// Side to attach — the name says the result layout. `Left` = new one to the left of the reference · `Right` = right · `Top` = above · `Bottom` = below.
+/// Wire value = the variant name as is (`Left` …).
+// ★Do not attach `#[serde(rename_all)]`★ — the declaration macro of the bus command that carries this (`tab.dock` · T-65) cannot attach a rename, so
+// the variant name becomes the wire value as is. The drop invoke (`Seam` of `tab_drop`) carries it with the same spelling too.
 // TRD S21-slot-docking §3-1
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
@@ -30,46 +30,46 @@ pub enum DockSide {
     Bottom,
 }
 
-/// 끼울 기준 — `Slot` = 대상 트리의 그 슬롯 하나 · `Outer` = 대상 트리 전체(루트 — 바깥 변).
+/// Reference to insert at — `Slot` = that one slot of the target tree · `Outer` = the whole target tree (root — outer side).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DockAnchor {
     Slot(Uuid),
     Outer,
 }
 
-/// 고정 새것 몫 — 시험만 쓴다. 끌기의 몫은 이 값이 아니라 `layout::bands::attach_share` 가 낸다.
+/// Fixed share of the new one — used only by tests. The drag's share comes from `layout::bands::attach_share`, not from this value.
 pub const DOCK_NEW_SHARE: f64 = 1.0 / 3.0;
 
-/// 도킹 분할에서 새것이 차지하는 몫의 상한 — 모델 계약이다(하한은 `tree::RATIO_MIN`). [`docked_tree`] 는 디버그
-/// 빌드에서 단언하고 `ViewManager::dock` 은 `InvalidShare` 로 거절한다. 끌기 쪽 상한 `layout::bands::ATTACH_SHARE_MAX`
-/// 는 이보다 크지 않아야 한다(거기 컴파일 단언).
+/// Upper bound of the share the new one takes in a docking split — a model contract (the lower bound is `tree::RATIO_MIN`). [`docked_tree`] asserts it in debug
+/// builds and `ViewManager::dock` rejects with `InvalidShare`. The drag-side upper bound `layout::bands::ATTACH_SHARE_MAX`
+/// must not be larger than this (compile assertion there).
 pub const SHARE_MAX: f64 = 0.5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DockTreeError {
-    /// 기준 슬롯이 대상 트리에 없다.
+    /// The reference slot is not in the target tree.
     SlotNotFound(Uuid),
-    /// 대상과 끼울 것에 같은 슬롯 id 가 있다 — 결과에서 칸 하나를 두 자리로 읽게 된다(슬롯 id 는 창 간 전역 고유 —
+    /// The target and the inserted one have the same slot id — the result would read one area as two places (slot ids are globally unique across windows —
     /// ADR-0035).
     SlotIdOverlap,
-    /// 결과에 **새로** 면적 0 인 칸이 생긴다(PRD R8).
+    /// The result has an area that is **newly** zero size (PRD R8).
     ZeroArea,
 }
 
-/// `target` 의 `anchor` 를 새 분할로 감싸 `side` 쪽에 `incoming` 을 끼운 결과 트리. 입력은 건드리지 않는다.
+/// The result tree where the `anchor` of `target` is wrapped in a new split and `incoming` is inserted on the `side` side. The input is not touched.
 ///
-/// - 모양: `Left`·`Right` = `LeftRight` 분할, `Top`·`Bottom` = `TopBottom` 분할. `share` = 감싼 자리에서 새것이
-///   차지하는 몫 — `tree::RATIO_MIN ≤ share ≤` [`SHARE_MAX`] 여야 한다(아래면 기하가 다른 비율로 읽는다 · 밖이면 디버그
-///   빌드에서 단언한다). 새것이 a(왼쪽/위)면 비율 `share`, b 면 `1 − share`(비율 = a 몫 — ADR-0140). 감싼 기준
-///   안쪽의 비율은 그대로라 슬롯 옆이면 그 슬롯만, 바깥 변이면 대상 전체가 안쪽 비율을 지킨 채 줄어든다.
-/// - id: 감싸는 분할만 새 id 다. 대상 · `incoming` 의 슬롯 id · 분할 id · 내용은 그대로 옮긴다 — 출처에서 지우는
-///   것은 호출자 몫이다.
-/// - 오류(이 순서로 보고 처음 걸린 것을 낸다):
-///   1. 기준 슬롯이 `target` 에 없으면 `SlotNotFound`.
-///   2. 두 트리에 같은 슬롯 id 가 있으면 `SlotIdOverlap`.
-///   3. 결과에서 면적 0 인 칸 중 원래 자리(대상 칸은 `target` 기하, 끼운 칸은 `incoming` 단독 기하)에서는 면적이
-///      있던 칸이 하나라도 있으면 `ZeroArea` — 원래부터 면적 0 이던 칸은 사유가 아니다. 좌표는 정규화 레이아웃
-///      좌표다(화면 px 아님).
+/// - Shape: `Left`·`Right` = `LeftRight` split, `Top`·`Bottom` = `TopBottom` split. `share` = the share the new one
+///   takes in the wrapped place — must satisfy `tree::RATIO_MIN ≤ share ≤` [`SHARE_MAX`] (below that, the geometry reads a different ratio · outside, a debug
+///   build asserts). If the new one is a (left/top), ratio is `share`; if b, `1 − share` (ratio = a's share — ADR-0140). The ratio
+///   inside the wrapped reference is unchanged, so beside a slot only that slot, and at an outer side the whole target, shrinks keeping its inner ratio.
+/// - id: only the wrapping split gets a new id. The slot ids · split ids · content of the target and `incoming` are moved as they are — removing
+///   from the source is the caller's job.
+/// - Errors (checked in this order, the first one hit is returned):
+///   1. `SlotNotFound` if the reference slot is not in `target`.
+///   2. `SlotIdOverlap` if the two trees have the same slot id.
+///   3. `ZeroArea` if, among the areas that are zero size in the result, any one had size in its original place (target areas by the `target` geometry, inserted
+///      areas by the standalone `incoming` geometry) — an area that was zero size from the start is not a reason. Coordinates are normalized layout
+///      coordinates (not screen px).
 pub fn docked_tree(
     target: &LayoutNode,
     anchor: DockAnchor,
@@ -117,15 +117,15 @@ pub fn docked_tree(
         (original, moved, 1.0 - share)
     };
     *based = LayoutNode::Split {
-        id: Uuid::new_v4(), // ADR-0223 — 분할마다 새 id
+        id: Uuid::new_v4(), // ADR-0223 — new id per split
         dir,
         ratio,
         a,
         b,
     };
 
-    // 원래부터 면적 0 이던 칸은 빼고 본다 — 안 빼면 그런 칸 하나가 그 탭으로의 도킹을 전부 막는다
-    // (`ViewManager::set_split_ratio` ⑤ 와 같은 태도).
+    // Areas that were zero size from the start are left out of the check — without that, one such area would block all docking to that tab
+    // (same stance as `ViewManager::set_split_ratio` ⑤).
     // ADR-0227
     let had_area: HashSet<Uuid> = [target, incoming]
         .into_iter()
@@ -143,10 +143,10 @@ pub fn docked_tree(
     Ok(result)
 }
 
-/// 결과 기하에서 `incoming_slots` 가 차지하는 정규화 사각형 = 그 칸들의 외접 사각형(PRD R4 「놓았을 때의 실제
-/// 사각형」). 경계를 새로 계산하지 않고 칸 경계 값을 고르기만 하므로, 끼운 서브트리의 칸을 전부 주면 결과 기하의
-/// 그 서브트리 상자와 비트 단위로 같다(`geometry` 머리 불변식). 목록이 비었거나 `result` 에 없는 id 가 하나라도
-/// 있으면 `None`. `result` 의 칸 id 는 고유하다고 본다 — `docked_tree` 결과는 `SlotIdOverlap` 거절로 그것이 선다.
+/// The normalized rectangle that `incoming_slots` take in the result geometry = the bounding rectangle of those areas (PRD R4 「놓았을 때의 실제
+/// 사각형」). It does not recompute boundaries but only picks the area boundary values, so if all areas of the inserted subtree are given, it is bit-for-bit equal to that
+/// subtree's box in the result geometry (`geometry` header invariant). `None` if the list is empty or any one id is not in `result`.
+/// Area ids in `result` are assumed unique — for a `docked_tree` result that holds because of the `SlotIdOverlap` rejection.
 pub fn incoming_rect(result: &LayoutGeometry, incoming_slots: &[Uuid]) -> Option<RectF64> {
     let mut out: Option<RectF64> = None;
     for id in incoming_slots {
@@ -214,7 +214,7 @@ mod tests {
         }
     }
 
-    // TRD S21-slot-docking 5.8판 §1-2 「트리 연산」 분할 모양 — (방향, 새것이 a 인가, 비율 = a 몫).
+    // TRD S21-slot-docking 5.8th edition §1-2 「트리 연산」 split shape — (direction, whether the new one is a, ratio = a's share).
     fn shape(side: DockSide) -> (SplitDir, bool, f64) {
         match side {
             DockSide::Left => (SplitDir::LeftRight, true, 1.0 / 3.0),
@@ -240,7 +240,7 @@ mod tests {
         }
     }
 
-    // Split(100, 좌우 0.3){1, Split(101, 위아래 0.6){2, 3}}
+    // Split(100, left/right 0.3){1, Split(101, top/bottom 0.6){2, 3}}
     fn target() -> LayoutNode {
         split(
             100,
@@ -260,7 +260,7 @@ mod tests {
         }
     }
 
-    // Split(200, 좌우 0.3){21, 22}
+    // Split(200, left/right 0.3){21, 22}
     fn split_tab() -> LayoutNode {
         split(200, SplitDir::LeftRight, 0.3, slot(21), slot(22))
     }
@@ -269,7 +269,7 @@ mod tests {
         tree::list_splits(node).into_iter().map(|s| s.id).collect()
     }
 
-    // 결과의 분할 = 입력의 분할 전부 + 새것 하나 — 그 새 id 를 돌려준다.
+    // Splits of the result = all splits of the input + one new one — returns that new id.
     fn the_new_split(result: &LayoutNode, target: &LayoutNode, moved: &LayoutNode) -> Uuid {
         let old: HashSet<Uuid> = split_ids(target)
             .into_iter()
@@ -315,8 +315,8 @@ mod tests {
             .count()
     }
 
-    // 반분 사슬 — 늘 b 쪽이 다음 단이다. 반환 = (트리, 가장 깊은 칸 id). 칸 id = `base..=base+depth`,
-    // 분할 id = `base+1001..`.
+    // Halving chain — b is always the next level. Returns = (tree, deepest area id). Area ids = `base..=base+depth`,
+    // split ids = `base+1001..`.
     fn half_chain(dir: SplitDir, depth: u128, base: u128) -> (LayoutNode, Uuid) {
         let mut node = slot(base);
         for i in 1..=depth {
@@ -325,7 +325,7 @@ mod tests {
         (node, id(base))
     }
 
-    // ── 몫 · 철자 ──────────────────────────────────────────────────────────────
+    // ── share · spelling ──────────────────────────────────────────────────────
 
     #[test]
     fn the_new_share_is_a_third_and_both_ratios_escape_the_clamp() {
@@ -339,7 +339,7 @@ mod tests {
 
     #[test]
     fn the_given_share_is_the_new_pieces_part_of_the_wrapped_place_on_each_side() {
-        // ADR-0295 — 붙는 몫(PRD R7)은 부르는 쪽이 고른다.
+        // ADR-0295 — the attach share (PRD R7) is chosen by the caller.
         let (t, moved) = (target(), slot(9));
         for share in [tree::RATIO_MIN, 0.25, 0.5] {
             for anchor in [DockAnchor::Slot(id(2)), DockAnchor::Outer] {
@@ -384,7 +384,7 @@ mod tests {
         }
     }
 
-    // ── 모양 · id 보존 ─────────────────────────────────────────────────────────
+    // ── shape · id preservation ───────────────────────────────────────────────
 
     #[test]
     fn outer_wraps_the_whole_target_on_each_side() {
@@ -426,7 +426,7 @@ mod tests {
 
     #[test]
     fn a_split_incoming_tab_lands_whole_with_its_ids_and_ratio() {
-        // AC5 · R9 — 끼운 서브트리는 출처 노드 그대로(슬롯 id · 분할 id · 비율).
+        // AC5 · R9 — the inserted subtree is the source nodes as they are (slot ids · split ids · ratio).
         let (t, moved) = (target(), split_tab());
         for anchor in [DockAnchor::Slot(id(1)), DockAnchor::Outer] {
             for side in SIDES {
@@ -457,7 +457,7 @@ mod tests {
                 docked_tree(&t, DockAnchor::Slot(id(77)), side, &moved, DOCK_NEW_SHARE),
                 Err(DockTreeError::SlotNotFound(id(77)))
             );
-            // 기준은 대상 트리에서만 찾는다 — 끼울 쪽의 칸은 기준이 아니다.
+            // The reference is looked up only in the target tree — an area on the inserted side is not a reference.
             assert_eq!(
                 docked_tree(&t, DockAnchor::Slot(id(21)), side, &moved, DOCK_NEW_SHARE),
                 Err(DockTreeError::SlotNotFound(id(21)))
@@ -468,7 +468,7 @@ mod tests {
     #[test]
     fn a_slot_id_in_both_trees_is_slot_id_overlap() {
         let t = target();
-        // 칸 3 이 양쪽에 있다.
+        // Area 3 is on both sides.
         let shared = split(300, SplitDir::LeftRight, 0.5, slot(40), slot(3));
         for anchor in [
             DockAnchor::Slot(id(1)),
@@ -488,7 +488,7 @@ mod tests {
             Err(DockTreeError::SlotIdOverlap),
             "자기 자신"
         );
-        // 판정 순서 — 기준 슬롯이 먼저다.
+        // Decision order — the reference slot comes first.
         assert_eq!(
             docked_tree(
                 &t,
@@ -499,7 +499,7 @@ mod tests {
             ),
             Err(DockTreeError::SlotNotFound(id(77)))
         );
-        // 판정 순서 — 겹침이 면적 0 보다 먼저다(이 기준은 원래 면적 0 이라 겹침이 없으면 `ZeroArea`).
+        // Decision order — overlap comes before zero size (this reference is zero size originally, so without an overlap it would be `ZeroArea`).
         let (chain, _) = half_chain(SplitDir::TopBottom, 60, 10_000);
         let flat = geometry::compute(&chain)
             .slots
@@ -522,7 +522,7 @@ mod tests {
         );
     }
 
-    // ── 비율 · 기하 (R7 · AC3 · AC4) ──────────────────────────────────────────
+    // ── ratio · geometry (R7 · AC3 · AC4) ─────────────────────────────────────
 
     #[test]
     fn next_to_a_slot_only_that_slot_splits_two_thirds_to_one_third() {
@@ -546,7 +546,7 @@ mod tests {
             assert_eq!(across(&new, dir), across(&orig, dir), "{side:?}");
             let (o, k, n) = (along(&orig, dir), along(&kept, dir), along(&new, dir));
             let (first, second) = if new_is_a { (n, k) } else { (k, n) };
-            // 둘이 원래 칸을 정확히 나눠 갖는다 — 맞닿는 경계도 같은 값.
+            // The two divide the original area exactly between them — the touching boundary has the same value too.
             assert_eq!(
                 (first.0, first.1, second.1),
                 (o.0, second.0, o.1),
@@ -560,7 +560,7 @@ mod tests {
 
     #[test]
     fn at_the_outer_edge_the_whole_layout_shrinks_to_two_thirds_keeping_inner_ratios() {
-        // AC4 — 기존 칸들은 대상 영역 안에서 서로의 비율을 그대로 갖는다.
+        // AC4 — existing areas keep their ratios to each other inside the target region.
         let (t, moved) = (target(), slot(9));
         let before = geometry::compute(&t);
         for side in SIDES {
@@ -572,7 +572,7 @@ mod tests {
             let (n0, n1) = along(&new, dir);
             assert!(close(n1 - n0, 1.0 / 3.0), "{side:?}: 새것 1/3");
             assert_eq!(across(&new, dir), (0.0, 1.0), "{side:?}");
-            // 대상이 차지한 영역 = 남은 2/3.
+            // The region the target occupies = the remaining 2/3.
             let (lo, hi) = if new_is_a { (n1, 1.0) } else { (0.0, n0) };
             for s in [id(1), id(2), id(3)] {
                 let (o, a) = (rect_of(&before, s), rect_of(&after, s));
@@ -591,14 +591,14 @@ mod tests {
         }
     }
 
-    // ── 새 면적 0 (R8 · AC15) ─────────────────────────────────────────────────
+    // ── new zero size (R8 · AC15) ─────────────────────────────────────────────
 
     #[test]
     fn a_deep_child_of_the_incoming_tab_that_would_collapse_is_zero_area() {
-        // 대상: 좌우 반분 사슬 40 단 — 가장 깊은 칸 폭 2^-40(오른쪽 끝).
+        // Target: left/right halving chain of 40 levels — deepest area width 2^-40 (at the right end).
         let (t, deepest) = half_chain(SplitDir::LeftRight, 40, 10_000);
         assert_eq!(zero_area_count(&t), 0, "전제: 대상은 전부 면적이 있다");
-        // 끼울 것: 좌우 반분 사슬 20 단 — 단독으로는 가장 깊은 칸도 폭 2^-20.
+        // To insert: left/right halving chain of 20 levels — on its own even the deepest area has width 2^-20.
         let (moved, _) = half_chain(SplitDir::LeftRight, 20, 30_000);
         assert_eq!(
             zero_area_count(&moved),
@@ -606,7 +606,7 @@ mod tests {
             "전제: 끼울 것도 전부 면적이 있다"
         );
 
-        // 대조: 칸 하나면 붙는다 — 끼울 자리의 1/3 자체에는 면적이 있다.
+        // Contrast: a single area attaches — 1/3 of the place to insert into has size by itself.
         let lone = docked_tree(
             &t,
             DockAnchor::Slot(deepest),
@@ -616,7 +616,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(zero_area_count(&lone), 0);
-        // 사슬이면 그 안쪽 깊은 칸이 무너진다.
+        // With a chain, the deep area inside it collapses.
         assert_eq!(
             docked_tree(
                 &t,
@@ -627,7 +627,7 @@ mod tests {
             ),
             Err(DockTreeError::ZeroArea)
         );
-        // 대조: 넓은 자리(바깥 변)에는 같은 사슬이 붙는다 — 일괄 거절이 아니다.
+        // Contrast: the same chain attaches to a wide place (outer side) — it is not a blanket rejection.
         let wide = docked_tree(
             &t,
             DockAnchor::Outer,
@@ -641,14 +641,14 @@ mod tests {
 
     #[test]
     fn a_target_slot_that_would_newly_collapse_is_zero_area() {
-        // 대상: 좌우 반분 사슬 53 단 — 단독으로는 전부 면적이 있지만 1.0 쪽 끝 칸들이 f64 한계 바로 앞이다.
+        // Target: left/right halving chain of 53 levels — on its own everything has size, but the areas at the 1.0 end are right at the f64 limit.
         let (t, _) = half_chain(SplitDir::LeftRight, 53, 10_000);
         assert_eq!(
             zero_area_count(&t),
             0,
             "전제: 대상은 단독으로 전부 면적이 있다"
         );
-        // 전제: 바깥 왼쪽에 붙이면 대상이 2/3 로 줄며 대상 칸이 무너지고, 끼운 칸에는 면적이 있다.
+        // Premise: attaching at the outer left shrinks the target to 2/3 and the target areas collapse, while the inserted area has size.
         let g = geometry::compute(&wrapped(id(1), DockSide::Left, t.clone(), slot(9)));
         assert!(has_area(&rect_of(&g, id(9))), "전제: 끼운 칸은 면적이 있다");
         assert!(
@@ -665,7 +665,7 @@ mod tests {
             ),
             Err(DockTreeError::ZeroArea)
         );
-        // 대조: 얕은 사슬은 같은 자리에 붙는다.
+        // Contrast: a shallow chain attaches to the same place.
         let (shallow, _) = half_chain(SplitDir::LeftRight, 40, 20_000);
         let ok = docked_tree(
             &shallow,
@@ -682,7 +682,7 @@ mod tests {
     fn repeated_docking_stops_with_zero_area_at_the_representation_limit() {
         for side in SIDES {
             let (_, new_is_a, _) = shape(side);
-            // 늘 1.0 쪽 끝 칸에 붙인다 — 새것이 b 면 방금 붙인 칸, a 면 처음 칸이 그 끝이다.
+            // Always attach to the area at the 1.0 end — if the new one is b, it is the area just attached; if a, it is the first area.
             let mut tree_now = slot(1);
             let mut anchor = id(1);
             let mut docked: u128 = 0;
@@ -707,7 +707,7 @@ mod tests {
                 }
             };
             assert_eq!(err, DockTreeError::ZeroArea, "{side:?}");
-            // f64 한계에서 멈췄다(일찍 거절한 게 아니다).
+            // It stopped at the f64 limit (it was not rejected early).
             assert!(docked > 20, "{side:?}: {docked} 번에서 멈춤");
             assert_eq!(
                 zero_area_count(&tree_now),
@@ -719,7 +719,7 @@ mod tests {
 
     #[test]
     fn a_slot_that_already_had_zero_area_elsewhere_does_not_block_docking() {
-        // 위 = 칸 X · 아래 = 심은 위아래 반분 사슬 60 단(쓰기 경로로는 못 만든다 — 끝 쪽 칸들의 높이가 0).
+        // Top = area X · bottom = planted top/bottom halving chain of 60 levels (cannot be made by the write path — the areas at the end have height 0).
         let (chain, _) = half_chain(SplitDir::TopBottom, 60, 10_000);
         let t = split(1, SplitDir::TopBottom, 0.5, slot(2), chain);
         let zero = zero_area_count(&t);
@@ -738,7 +738,7 @@ mod tests {
             "원래 있던 면적 0 칸만 남는다"
         );
 
-        // 끼울 쪽에 원래 있던 면적 0 칸도 사유가 아니다.
+        // A zero-size area that was already on the inserted side is not a reason either.
         let (moved, _) = half_chain(SplitDir::TopBottom, 60, 30_000);
         let moved_zero = zero_area_count(&moved);
         assert!(moved_zero > 0, "전제: 끼울 것에 면적 0 칸이 심겼다");
@@ -755,7 +755,7 @@ mod tests {
 
     #[test]
     fn docking_next_to_a_slot_that_already_had_zero_area_is_zero_area() {
-        // 기준이 원래 면적 0 이면 끼운 칸이 새로 면적 0 이 된다 — 그건 새 면적 0 이다.
+        // If the reference is zero size originally, the inserted area becomes newly zero size — that counts as a new zero size.
         let (t, _) = half_chain(SplitDir::TopBottom, 60, 10_000);
         let flat = geometry::compute(&t)
             .slots

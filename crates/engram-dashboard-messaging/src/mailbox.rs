@@ -1,223 +1,223 @@
-//! mailbox — 인메모리 파킹 저장소(spec §5 · ADR-0103 결정 5 · ADR-0104 idle 게이트 · **ADR-0111/0114**).
+//! mailbox — in-memory parking store (spec §5 · ADR-0103 decision 5 · ADR-0104 idle gate · **ADR-0111/0114**).
 //!
-//! ★역할★: 수신자별 FIFO 큐로 **아직 주입 못 한 메시지**를 잡아 둔다. 큐 키 = 수신자 **에이전트 id**
-//!   (ADR-0309 — 이름은 입구에서 id 로 바뀌고 여기엔 오지 않는다). 파킹 사유는 **셋**이다:
-//!     ① busy 계열 — 수신자가 턴 진행 중이거나 선행 파킹분 뒤에 FIFO 로 합류. idle 진입 때 일괄 flush.
-//!     ② 주입(write) 실패 — 그 순간 도달 불가. 다음 flush 계기(idle 진입·재등장)까지 대기.
-//!     ③ **잠듦** — 프로세스는 닫혔지만 **프로필이 실재하는**(복원 가능한) 에이전트. flush 계기 = 재등장
-//!        (스폰/복원/epoch — 기존 로스터 diff 기계 재사용).
-//!   등장(스폰/epoch)·idle 진입 시 상위 서비스가 `drain` 으로 큐를 통째 비워 오래된 순으로 일괄 주입한다.
-//!   ★**여전히 들어오지 않는 부류**(ADR-0116 결정 1 — 3분기)★: **어디에도 없는 이름**(로스터·프로필 둘 다에
-//!   없다 — 오타·미스폰·삭제됨)은 `RECIPIENT_NOT_FOUND` 실패 행이고, **동명 다수**는 어느 층에서든
-//!   `RECIPIENT_AMBIGUOUS` 실패 행이다(이름으로는 받는 이를 하나로 고를 수 없다).
-//!   이 둘을 파킹으로 되돌리면 ADR-0116 위반이다.
-//!   ★**턴 신호 없는 산 세션은 파킹 부류가 아니다 — 배달 부류다**(ADR-0116 결정 7)★: 게이트 없이 즉시
-//!   주입되므로 busy 파킹이 없고, 그 부류가 이 큐에 들어오는 유일한 경로는 ②(주입 실패)다.
-//!   (4차 초안의 `RECIPIENT_UNREACHABLE` 반려는 **폐기** — 되살리지 말 것.)
+//! ★Role★: holds **messages not yet injected** in per-recipient FIFO queues. Queue key = recipient **agent id**
+//!   (ADR-0309 — a name is turned into an id at the entrance and never gets here). There are **three** parking reasons:
+//!     ① busy kinds — the recipient is mid-turn, or joins FIFO behind earlier parked items. Batch flush on entering idle.
+//!     ② injection (write) failure — unreachable at that moment. Waits until the next flush trigger (entering idle · reappearance).
+//!     ③ **sleeping** — the process is closed but the agent **has a real profile** (restorable). Flush trigger = reappearance
+//!        (spawn/restore/epoch — reusing the existing roster diff machinery).
+//!   On appearance (spawn/epoch) or entering idle, the upper service empties the whole queue with `drain` and injects it in one batch, oldest first.
+//!   ★**Kinds that still do not come in**(ADR-0116 decision 1 — 3 branches)★: a **name that exists nowhere** (in neither
+//!   the roster nor the profiles — typo · never spawned · deleted) is a `RECIPIENT_NOT_FOUND` failure row, and **several agents with the same name**, at any layer, is a
+//!   `RECIPIENT_AMBIGUOUS` failure row (the recipient cannot be narrowed to one by name).
+//!   Turning these two back into parking violates ADR-0116.
+//!   ★**A live session without turn signals is not a parking kind — it is a delivery kind**(ADR-0116 decision 7)★: it is injected
+//!   at once without a gate, so there is no busy parking, and the only path by which that kind enters this queue is ② (injection failure).
+//!   (The `RECIPIENT_UNREACHABLE` bounce of the amendment-4 draft is **discarded** — do not revive it.)
 //!
-//! ★불변식★:
-//!   - **FIFO(오래된 순)** — `drain`/`sweep_expired` 는 park 순서를 보존한다(ADR-0104 일괄·오래된 순 flush).
-//!   - **큐 정렬축 = admission 순번(`ParkedMessage.admission_seq`)** — 큐는 앞→뒤로 순번이 **강한 증가**다
-//!     (`park` 는 새 순번을 뒤에 붙이고, `restore_ordered` 는 순번 기준 merge 로 되꽂는다). "오래된 순" 의
-//!     정본 축이 시계가 아니라 이 순번인 이유는 `admission_seq` 주석 참조(round-4 finding 1).
-//!   - **용량 = 종류별 **독립 레인** 2개(round-6 재설계 — 예외 없는 단일 회계)**:
-//!       ① `MAILBOX_CAP`(수신자당 message 100건) — message 를 전부 센다.
-//!       ② `NOTICE_CAP`(수신자당 notice 64건) — message 백로그가 통지를 막지 않고, 그 역도 아니다.
-//!     ★**압력 회수(message 레인의 잔해 은퇴)는 폐지됐다**(ADR-0114 결정 1 — ADR-0107 결정 2 개정)★:
-//!     당시 근거는 "결박 폐지(ADR-0111 결정 6) + 없는 이름 반려(결정 1)로 '확실히 배달 불가한 파킹분' 이
-//!     공집합" 이었다. ★그 논리 주장은 4차(ADR-0116)로 **약화됐다**★ — 복원되지 않는 잠든 이름의 파킹분은
-//!     *복원 가능*이지 *복원됨*이 아니고 삭제 정리도 삭제 시점 단발이라 일부는 TTL 까지 남는다. **유계 근거는
-//!     이제 논리 공집합이 아니라 TTL 24h + 레인 cap 이며**, 그 안에서 회수 폐지를 유지한다(spec §5. 회수
-//!     재도입을 재론하려면 이 문장을 근거로 새 결정을 박을 것). message 레인의 유일한 정리 경로는 **TTL
-//!     스윕**(24h 경과분, 60초 주기)이다.
-//!   - **분모 = 큐 + in-flight(F1 — 구조적 유계의 핵심)** — flush 가 **락 밖으로 들고 나간 배치**도 그
-//!     수신자 레인의 분모에 든다(`take_in_flight` → `settle_in_flight`).
-//!     (실측 시나리오·불변식 증명은 `MAILBOX_CAP` 주석.)
-//!   - **TTL = 24h** — 초과 항목은 `sweep_expired` 가 걷어내 상위가 장부에 `expired` 로 남긴다(ADR-0105).
-//!   - **순수 + 주입 시계** — 만료 판정은 `park` 시각과 인자 `now` 의 차로만 한다(모듈 헤더 순수성 불변식).
-//!   - **incarnation 결박(`bound_incarnation`)은 폐지됐다(ADR-0111 결정 6)** — 파킹분은 **같은 에이전트(같은
-//!     id)의 새 화신(epoch)에게도 배달**된다(개인 편지와 동일 규칙 — ADR-0309 결정 1). 그래서 이 저장소엔 결박 축도, 그 축을 보는
-//!     가시성 필터(`visible_to`)도, 생사 스냅샷 인자도 없다. "그룹 방송은 발송 순간 화신에게만" 이 다시
-//!     필요해지면 v2 개인 메일 옵션으로 무파괴 추가한다(spec §8) — 그룹 전용 규칙으로 되살리기 금지.
-//!   - **순서 = 적재 순서(ADR-0125 — 7차)** — 발송은 예외 없이 큐 꼬리에 적재되고(직발송 지름길 없음),
-//!     드레인이 앞에서부터 빼므로 묵은 것이 먼저 나간다. 그래서 이 저장소엔 **좌석 예약도, "앞에 먼저 나갈
-//!     게 있나"(옛 `has_pending_ahead`) 합류 판정도 없다** — 그 장치들이 다시 필요해졌다면 발송 경로가
-//!     둘로 갈라졌다는 신호다. 남은 순서 장치는 `in_flight_len` 하나이고, 그건 **드레인끼리 겹치지 않게**
-//!     하는 데 쓴다.
+//! ★Invariants★:
+//!   - **FIFO (oldest first)** — `drain`/`sweep_expired` preserve park order (ADR-0104 batch, oldest-first flush).
+//!   - **Queue ordering axis = admission sequence number (`ParkedMessage.admission_seq`)** — the sequence number is **strictly increasing** from front to back
+//!     (`park` appends a new number at the back, and `restore_ordered` puts items back by a merge on the number). The reason the
+//!     canonical axis of "oldest first" is this number and not the clock is in the `admission_seq` comment (round-4 finding 1).
+//!   - **Capacity = 2 **independent lanes** by kind (round-6 redesign — single accounting with no exceptions)**:
+//!       ① `MAILBOX_CAP` (100 messages per recipient) — counts every message.
+//!       ② `NOTICE_CAP` (64 notices per recipient) — a message backlog does not block notices, and vice versa.
+//!     ★**Pressure reclaim (retiring leftovers of the message lane) was abolished**(ADR-0114 decision 1 — amendment of ADR-0107 decision 2)★:
+//!     the basis then was "with binding abolished (ADR-0111 decision 6) + bounce for nonexistent names (decision 1), 'parked items certain to be undeliverable' is
+//!     the empty set". ★That logical claim was **weakened** by amendment 4 (ADR-0116)★ — parked items for a sleeping name that is not restored are
+//!     *restorable* but not *restored*, and deletion cleanup is a one shot at deletion time, so some stay until TTL. **The bound's basis
+//!     is now not a logical empty set but TTL 24h + the lane cap**, and within that we keep reclaim abolished (spec §5. To reopen
+//!     reintroducing reclaim, record a new decision on the basis of this sentence). The only cleanup path of the message lane is the **TTL
+//!     sweep** (items older than 24h, 60-second period).
+//!   - **Denominator = queue + in-flight (F1 — the core of the structural bound)** — a **batch flush carried out of the lock** also counts in that
+//!     recipient lane's denominator (`take_in_flight` → `settle_in_flight`).
+//!     (The measured scenario and the invariant proof are in the `MAILBOX_CAP` comment.)
+//!   - **TTL = 24h** — over-limit items are collected by `sweep_expired` and the upper layer records them in the ledger as `expired` (ADR-0105).
+//!   - **Pure + injected clock** — expiry is decided only by the difference between the `park` time and the argument `now` (module header purity invariant).
+//!   - **Incarnation binding (`bound_incarnation`) was abolished (ADR-0111 decision 6)** — parked items are **delivered to a new incarnation (epoch)
+//!     of the same agent (same id) too** (the same rule as a personal letter — ADR-0309 decision 1). So this store has no binding axis, no
+//!     visibility filter (`visible_to`) that looks at that axis, and no liveness snapshot argument. If "a group broadcast goes only to the incarnation at the moment of sending" is
+//!     needed again, it will be added non-breakingly as a v2 personal-mail option (spec §8) — do not revive it as a group-only rule.
+//!   - **Order = load order (ADR-0125 — amendment 7)** — every send is loaded at the queue tail without exception (no direct-send shortcut),
+//!     and the drain pulls from the front, so older items go out first. So this store has **no seat reservation and no "is there something that should go out
+//!     first ahead of me" (the old `has_pending_ahead`) join decision** — if those devices become needed again, it is a sign the send path
+//!     has split in two. The only remaining ordering device is `in_flight_len`, which is used to
+//!     **keep drains from overlapping each other**.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use crate::PeerId;
 
-/// ★왜 24h(spec §5 정책 상수, ADR-0105 — 1h 에서 상향)★: 선례 조사(/research light, 2026-07-25) 상
-///   업계 관행이 일 단위다(SQS 4일·Kafka 7일·Postfix 5일 — 1h 는 그 대비 이례적으로 짧았다). "살아있는
-///   수신자는 TTL 면제"(liveness-aware) 는 조사한 6개 시스템(RabbitMQ·SQS·Kafka·Postfix·ejabberd·LLM
-///   프레임워크) 어디에도 선례가 없어 채택하지 않는다 — 잠듦이든 busy 대기든 시계 기반 단일 규칙을 그대로
-///   유지한다. 인메모리 단계 + cap 100(아래 `MAILBOX_CAP`) 이라 긴 TTL 의 비용은 ~0(데몬 재시작 시 전부
-///   소멸) — **영속화(디스크) 단계가 오면 재설계 전제**(사용자 결정, 2026-07-25). 상위 서비스가 sweep
-///   주기를 정한다(여기선 값만).
+/// ★Why 24h (spec §5 policy constant, ADR-0105 — raised from 1h)★: per the precedent survey (/research light, 2026-07-25),
+///   industry practice is in days (SQS 4 days · Kafka 7 days · Postfix 5 days — 1h was unusually short against that). "Live
+///   recipients are exempt from TTL" (liveness-aware) has no precedent in any of the 6 systems surveyed (RabbitMQ · SQS · Kafka · Postfix · ejabberd · LLM
+///   frameworks), so it is not adopted — whether sleeping or busy-waiting, the single clock-based rule is kept as is.
+///   With the in-memory stage + cap 100 (`MAILBOX_CAP` below), the cost of a long TTL is ~0 (everything vanishes on daemon restart) —
+///   **when the persistence (disk) stage arrives, this is a premise to redesign** (user decision, 2026-07-25). The upper service sets the sweep
+///   period (only the value is here).
 const PARK_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// ★message 레인 상한 — 수신자당 100건 **전량 계수**(round-6)★.
+/// ★Message lane limit — 100 per recipient, **counting everything** (round-6)★.
 ///
-/// ★왜 100건(spec §5 정책 상수)★: 폭주하는 발신자가 한 수신자의 메일박스를 무한히 부풀려 메모리를 잠식하는
-///   것을 막는 방어선이다. 초과를 조용히 drop-head 하면 유실이 은폐되므로(ADR-0103 거부 대안), 대신 신규를
-///   즉시 반려해 발신자에게 가시화한다.
-/// ★왜 예외 없는 전량 계수인가(round-6 — 예외가 구멍을 만들었다)★: 옛 구현은 분모에서 "지금 이 incarnation
-///   에게 배달 불가한(= 결박이 다른) 항목" 을 뺐다. 그러면 같은 이름을 새 PeerId 로 갈아치울 때마다 분모가
-///   0 으로 리셋돼 **incarnation 당 100건씩** 새로 수용됐고(TTL 24h 창 안에서 사실상 무계), 그걸 막으려고
-///   물리 상한이라는 **두 번째 회계**를 얹자 그 상한을 우회하는 경로(`restore_ordered`)와 두 상한 모두를
-///   면제받는 종류(notice)가 각각 새 구멍이 됐다. 그래서 분모에서 예외를 전부 걷어냈다.
-/// ★분모는 큐가 아니라 **큐 + in-flight** 다(F1 — round-6 의 유계 주장이 틀렸던 지점)★: round-6 은 "큐
-///   길이 ≤ cap 이니 총량이 유계" 라고 적었는데, `restore_ordered`(cap 우회 무손실 복원)가 그 논증을
-///   **사이클 간에** 무너뜨렸다. 실측 인터리빙: ① flush 가 락 안에서 큐를 통째로 비운다 ② 락을 놓고
-///   inject 하는 동안 큐는 **비어 있으므로** 동시 발송 k 건이 cap 검사를 무사통과해 들어온다 ③ inject 가
-///   실패해 배치 N 건이 되돌아온다 → 큐 = N + k. 다음 사이클의 배치는 N + k 라 매 사이클 **+k** 로 자란다
-///   (옛 주석의 "초과폭은 한 배치 이하" 는 그 한 배치 자체가 이미 초과분을 품고 있어 순환 논증이었다).
-///   그래서 분모에 **in-flight**(= flush 가 락 밖으로 들고 나가 아직 정산되지 않은 그 수신자 몫)를 더한다.
-/// ★적용 표면이 7차에 넓어졌다 — 이제 **모든 발송이 이 게이트를 지난다**(ADR-0125 §영향 · spec §5)★:
-///   5차까지 이 검사는 파킹 갈래에서만 돌았고, "큐에 안 들어가고 곧바로 stdin 으로 나간 직발송은 분모에
-///   없으므로 idle 수신자에게 101건이 몰려도 cap 위반이 아니다" 가 명시 계약이었다. 직발송 지름길이 폐지돼
-///   **적재를 건너뛰는 경로가 없어졌으므로 그 계약은 함께 죽었다** — 이제 산 수신자도 `MAILBOX_FULL` 이 날
-///   수 있고, 그건 **설계 귀결이지 회귀가 아니다**(cap 값은 불변 — 바꾸려면 별도 결정).
-/// ★단 "전반적으로 늘어난다" 는 아니다★: 수신자가 유휴면 드레인이 큐를 비우므로 쌓이는 것이 없어 cap 이
-///   애초에 물리지 않고, 턴 중·잠듦이면 5차에도 파킹돼 쌓였으므로 차이가 없다. 새로 걸리는 구간은 **여러
-///   발신자가 동시에 몰아쳐 드레인이 따라잡기 전에 큐가 cap 을 넘길 때** 하나뿐이다.
-/// ★그래도 이 상수의 목적은 그대로다★: "쌓이는 메일의 상한" 이지 "초당 주입 수 제한" 이 아니다 — 후자가
-///   필요해지면 그건 rate limit 이라는 다른 장치다.
-///   ★불변식(정확한 등식 — 여유폭 0)★: `queue_lane + in_flight_lane ≤ cap`. 근거는 각 동사가 이 합을
-///   보존하거나 줄이기 때문이다 — `take_in_flight` 는 큐에서 뺀 만큼 in-flight 를 올리고(합 불변),
-///   `restore_ordered` + 같은 락 구간의 정산은 in-flight 에서 뺀 만큼 큐에 되돌리며(합 불변), 배달 완료
-///   정산은 합을 줄이고, `park` 은 합이 cap 을 넘기면 반려한다. notice 레인만 예외적으로
-///   **+1 의 일시 초과**가 가능하다(그 근거는 `NOTICE_CAP` 주석).
+/// ★Why 100 (spec §5 policy constant)★: it is the line of defense against a runaway sender inflating one recipient's mailbox without limit and eating memory.
+///   Silently drop-heading on overflow would hide the loss (ADR-0103 rejected alternative), so instead new items are
+///   bounced at once to make it visible to the sender.
+/// ★Why count everything with no exceptions (round-6 — the exceptions created a hole)★: the old implementation subtracted from the denominator "items undeliverable to this
+///   incarnation right now (= bound to a different one)". Then each time the same name was swapped for a new PeerId the denominator
+///   reset to 0 and **100 per incarnation** were newly accepted (effectively unbounded within the TTL 24h window), and when a **second accounting**, a physical
+///   cap, was layered on to stop that, the path that bypasses that cap (`restore_ordered`) and the kind exempt from both
+///   caps (notice) each became a new hole. So every exception was removed from the denominator.
+/// ★The denominator is **queue + in-flight**, not the queue (F1 — where round-6's bound claim was wrong)★: round-6 wrote "queue
+///   length ≤ cap so the total is bounded", but `restore_ordered` (cap-bypassing lossless restore) broke that argument
+///   **across cycles**. Measured interleaving: ① flush empties the whole queue under the lock ② while the lock is released and
+///   inject runs, the queue is **empty**, so k concurrent sends pass the cap check unhindered ③ inject
+///   fails and a batch of N comes back → queue = N + k. The next cycle's batch is N + k, so it grows by **+k** every cycle
+///   (the old comment's "the excess is at most one batch" was circular since that one batch already contained the excess).
+///   So the denominator adds **in-flight** (= that recipient's share that flush carried out of the lock and has not yet settled).
+/// ★The surface of application widened in amendment 7 — **every send now passes this gate** (ADR-0125 §impact · spec §5)★:
+///   through amendment 5 this check ran only in the parking branch, and "a direct send that went straight to stdin without entering the queue is not in the denominator,
+///   so 101 landing on an idle recipient is not a cap violation" was an explicit contract. With the direct-send shortcut abolished,
+///   **no path skips loading anymore, so that contract died with it** — now a live recipient can also get `MAILBOX_FULL`,
+///   and that is a **design consequence, not a regression** (the cap value is unchanged — changing it needs a separate decision).
+/// ★But this does not mean "it goes up overall"★: when the recipient is idle the drain empties the queue so nothing accumulates and the cap
+///   is never hit in the first place, and when the recipient is mid-turn or sleeping, items were parked and piled up in amendment 5 too, so there is no difference. The only newly hit situation is
+///   **when several senders pile on at once and the queue passes the cap before the drain catches up**.
+/// ★Even so the purpose of this constant is unchanged★: it is "a cap on mail that piles up", not "a limit on injections per second" — if the latter
+///   becomes needed, that is a different device called a rate limit.
+///   ★Invariant (exact equality — zero slack)★: `queue_lane + in_flight_lane ≤ cap`. The basis is that every verb
+///   preserves or reduces this sum — `take_in_flight` raises in-flight by as much as it took from the queue (sum unchanged),
+///   `restore_ordered` + the settlement in the same lock section returns to the queue as much as it took from in-flight (sum unchanged), delivery-complete
+///   settlement reduces the sum, and `park` bounces if the sum would pass the cap. Only the notice lane can
+///   exceptionally have a **temporary +1 overshoot** (the basis is in the `NOTICE_CAP` comment).
 const MAILBOX_CAP: usize = 100; // ADR-0107
 
-/// ★notice 레인 상한 — 수신자당 64건(round-6 도입, **ADR-0114 결정 2 로 20 → 64 상향**)★.
+/// ★Notice lane limit — 64 per recipient (introduced in round-6, **raised from 20 to 64 by ADR-0114 decision 2**)★.
 ///
-/// ★왜 별도 레인인가(옛 "cap 예외" 를 대체)★: 회신 계약의 기한 초과 통지는 가득 찬 메일박스에 막히면
-///   계약이 반쪽 난다(ADR-0103 불변식). 옛 구현은 그걸 "notice 는 cap 을 세지 않는다" 는 **면제**로 풀었는데,
-///   면제는 곧 무계였다 — 근거로 든 "오픈 계약 수 상한(`ledger::MAX_OPEN_REQUESTS`)이 notice 수를 묶는다"
-///   는 **거짓**이다: `due_timeouts` 는 `notified` 를 즉시 세워 그 계약 자리를 비우므로, 앞선 통지가 큐에
-///   그대로 파킹돼 있는 채로 다음 물결이 계약을 새로 열 수 있다(수신자가 오래 잠들어 있으면 무한히 반복).
-///   레인을 나누면 두 요구가 동시에 성립한다 — message 백로그가 통지를 막지 못하고(면제의 목적), 통지도
-///   무계가 아니다(면제의 대가를 제거).
-/// ★왜 64건인가(정책 상수 — 조율 가능, ADR-0114 결정 2)★: notice 는 **데몬이 만드는 인프라 통지**라
-///   정상 운영에서 큐에 여러 건이 쌓일 이유가 없었지만, **다중 수신자 request** 가 열리면서(ADR-0111 결정 5)
-///   한 발송이 계약 N개를 열고 기한 초과 통지도 **계약별 1건**씩 난다 — 20건은 그 폭에 비해 좁다(통지 병합
-///   시스템은 만들지 않는다는 결정과 짝). 상한을 올려 유실 창 자체를 줄인다. 그래도 넘치면 **가장 오래된
-///   통지**는 이미 가치가 낮으므로(최신 통지들이 같은 종류의 사실을 더 정확한 시점으로 전달한다) 신규를
-///   반려하는 대신 그것을 회수한다(회수분은 장부에 `skipped` 로 남아 감사 가능 — `ParkAdmitted`).
-/// ★이 레인만 **+1 의 일시 초과**가 가능하다(F1 — 명시 계약)★: 회수 대상은 **큐에 있는** notice 뿐인데
-///   분모는 큐 + in-flight 라, 통지 64건이 전부 flush 로 나가 있는 순간의 신규 통지는 회수할 대상을 큐에서
-///   못 찾고도 **수용된다**(반려 갈래가 없으므로). 그 순간 `queue + in_flight = NOTICE_CAP + 1` 이다. 그
-///   상태는 스스로 되돌아온다 — 다음 통지 park 이 초과분 전체를 `want` 로 계산해 걷어낸다. message 레인은
-///   반려 갈래가 있어 이 초과가 아예 없다(합이 정확히 cap 에서 멈춘다).
+/// ★Why a separate lane (replaces the old "cap exception")★: if the deadline-overrun notice of a reply contract is blocked by a full mailbox,
+///   the contract is halved (ADR-0103 invariant). The old implementation solved it with an **exemption**, "notice does not count toward the cap", but
+///   the exemption meant unbounded — the stated basis, "the open-contract cap (`ledger::MAX_OPEN_REQUESTS`) bounds the notice count",
+///   is **false**: `due_timeouts` sets `notified` at once and frees that contract's slot, so while the earlier notices stay
+///   parked in the queue the next wave can open contracts anew (repeating without limit if the recipient sleeps for long).
+///   Splitting the lanes makes both requirements hold at once — a message backlog cannot block notices (the purpose of the exemption), and notices
+///   are not unbounded (the cost of the exemption is removed).
+/// ★Why 64 (policy constant — tunable, ADR-0114 decision 2)★: a notice is a **daemon-made infrastructure notice**, so in normal operation there was no reason for several to
+///   pile up in the queue, but with **multi-recipient requests** (ADR-0111 decision 5) one send opens N contracts and the deadline-overrun notice also goes out
+///   **once per contract** — 20 is narrow for that width (paired with the decision not to build a notice-merging
+///   system). Raising the cap reduces the loss window itself. If it still overflows, the **oldest notice** is already of low value (the newest notices
+///   carry the same kind of fact with a more accurate time), so instead of bouncing the new one it is reclaimed (the reclaimed one stays in the ledger as `skipped` and
+///   is auditable — `ParkAdmitted`).
+/// ★Only this lane can have a **temporary +1 overshoot** (F1 — explicit contract)★: the reclaim targets only notices **in the queue**, but
+///   the denominator is queue + in-flight, so at the moment all 64 notices are out in a flush, a new notice cannot find anything to reclaim in the queue and is
+///   **accepted anyway** (there is no bounce branch). At that moment `queue + in_flight = NOTICE_CAP + 1`. That
+///   state returns by itself — the next notice park computes the whole overshoot as `want` and collects it. The message lane has a
+///   bounce branch, so it has no such overshoot at all (the sum stops exactly at cap).
 const NOTICE_CAP: usize = 64; // ADR-0107
 
-/// 파킹 항목의 종류 — **용량 레인**을 가르는 축(round-6). 각 종류는 자기 레인의 상한만 본다(상대 레인의
-///   길이는 서로에게 보이지 않는다 — 모듈 헤더 "독립 레인").
+/// Kind of a parked item — the axis that separates **capacity lanes** (round-6). Each kind sees only its own lane's limit (the
+///   length of the other lane is invisible to it — module header "independent lanes").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParkKind {
-    /// 동료 발신(`<message>`) — `MAILBOX_CAP` 레인.
+    /// Message from a peer (`<message>`) — the `MAILBOX_CAP` lane.
     Message,
-    /// 데몬 통지(`<notice>`) — `NOTICE_CAP` 레인.
+    /// Daemon notice (`<notice>`) — the `NOTICE_CAP` lane.
     Notice,
 }
 
-/// ★envelope = 완성된 봉투 문자열★: 이 모듈은 순수 저장소라 봉투를 **조립하지 않는다** — 상위(service 가
-///   부르는 `envelope.rs` wrap point)가 만든 완성 문자열을 그대로 보관·반환한다(단일 wrap point 불변식, ADR-0096). 여기선 그게
-///   어떤 포맷인지 모른다(불투명 텍스트).
+/// ★envelope = the finished envelope string★: this module is a pure store and does **not assemble** envelopes — it keeps and returns as is the finished string made by the upper layer (the
+///   `envelope.rs` wrap point that service calls) (single wrap point invariant, ADR-0096). Here it is not known what
+///   format that is (opaque text).
 #[derive(Debug, Clone)]
 pub struct ParkedMessage {
-    /// ledger 상관용 논리 메시지 id(상위가 부여). 저장소는 값으로만 나른다.
+    /// Logical message id for ledger correlation (assigned by the upper layer). The store carries it only as a value.
     pub msg_id: String,
     pub envelope: String,
     pub kind: ParkKind,
-    /// park 시각(주입된 now). TTL 판정 기준.
+    /// Park time (the injected now). The TTL decision basis.
     pub parked_at: Instant,
-    /// ★admission 순번 — 큐 정렬축(round-4 finding 1)★: `park` 이 수용 시점에 부여하는 단조 증가 번호다.
-    ///   **호출자가 넣은 값은 무시·덮어쓴다**(저장소가 유일한 부여자 — 두 부여자가 있으면 순서가 갈린다).
+    /// ★Admission sequence number — the queue ordering axis (round-4 finding 1)★: a monotonically increasing number that `park` assigns at acceptance time.
+    ///   **A value the caller supplies is ignored and overwritten** (the store is the only assigner — with two assigners the order diverges).
     ///
-    /// ★왜 `parked_at`(시계)이 아니라 별도 순번인가(load-bearing)★: 재파킹 merge 와 만료 판정은 **서로 다른
-    ///   축**이다. 만료는 시계(`parked_at`)로 봐야 하지만, "누가 먼저 큐에 들어왔나" 를 시계로 판정하면 두
-    ///   군데서 틀어진다: ① `park_pending` 은 락 **획득 전에** `Instant::now()` 를 뜨므로 두 발송이 경합하면
-    ///   시각과 실제 수용 순서가 역전될 수 있다 ② 시계 분해능이 거친 환경에선 연속 park 의 `parked_at` 이
-    ///   **같은 값**이 돼 순서가 결정 불가다. 순번은 저장소 안에서 락 보유 중 부여되므로 두 문제 모두 없다 —
-    ///   그래서 `restore_ordered` 의 merge 키는 순번이고, 큐는 항상 순번 강한 증가다.
+    /// ★Why a separate number and not `parked_at` (the clock) (load-bearing)★: re-park merge and expiry decisions are **different
+    ///   axes**. Expiry must be judged by the clock (`parked_at`), but judging "who entered the queue first" by the clock goes wrong in two
+    ///   places: ① `park_pending` takes `Instant::now()` **before acquiring** the lock, so when two sends race
+    ///   the timestamp and the actual acceptance order can invert ② in an environment with coarse clock resolution, consecutive parks get the **same**
+    ///   `parked_at` and the order is undecidable. The sequence number is assigned inside the store while the lock is held, so neither problem exists —
+    ///   so the merge key of `restore_ordered` is the sequence number, and the queue is always strictly increasing in it.
     pub admission_seq: u64,
 }
 
 impl ParkedMessage {
-    /// ★경계 규약(load-bearing)★: `elapsed >= PARK_TTL` 이라 정확히 TTL 이 지난 순간부터 만료다(경계 포함).
-    ///   `>` 가 아니라 `>=` 를 쓰는 이유는 "TTL = 최대 생존 기간" 이라는 상한 의미와 정합하기 위함이다 —
-    ///   TTL 을 꽉 채운 항목은 더 살려 둘 이유가 없다(경계에서 즉시 만료가 상한 의미에 부합). 이 경계는 단위
-    ///   테스트(`ttl_boundary_*`)가 고정한다 — 바꾸면 회귀.
-    /// ★`pub(crate)` 인 이유(F3)★: 압력 회수분의 장부 어휘를 상위(`service::park_into`)가 가를 때 이 판정을
-    ///   **그대로 재사용**해야 한다(TTL 지난 회수분 = `expired`, 아니면 `skipped`). 상위가 24h 리터럴을
-    ///   복제하면 두 곳이 갈릴 수 있으므로, 상수도 비교 부호도 여기 하나로 묶어 두고 함수만 연다.
+    /// ★Boundary convention (load-bearing)★: `elapsed >= PARK_TTL`, so an item expires from the exact moment TTL has passed (boundary inclusive).
+    ///   The reason for `>=` rather than `>` is to be consistent with the upper-bound meaning "TTL = maximum lifetime" —
+    ///   an item that has used up the whole TTL has no reason to live longer (expiring immediately at the boundary fits the upper-bound meaning). This boundary is pinned by the unit
+    ///   tests (`ttl_boundary_*`) — changing it is a regression.
+    /// ★Why `pub(crate)` (F3)★: when the upper layer (`service::park_into`) splits the ledger vocabulary of pressure-reclaimed items, it must
+    ///   **reuse this decision as is** (reclaimed past TTL = `expired`, otherwise `skipped`). If the upper layer duplicated the 24h literal
+    ///   the two places could diverge, so both the constant and the comparison sign are tied together here and only the function is opened.
     pub(crate) fn is_expired(&self, now: Instant) -> bool {
         now.saturating_duration_since(self.parked_at) >= PARK_TTL
     }
 }
 
-/// park 반려 사유 — 상위가 wire 에러 코드로 매핑한다(현재 유일: cap 초과 → `MAILBOX_FULL`, spec §5).
+/// Park bounce reason — the upper layer maps it to a wire error code (currently the only one: cap exceeded → `MAILBOX_FULL`, spec §5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParkError {
     MailboxFull,
 }
 
-/// ★왜 반환값인가(`DrainOutcome`/`ExpiredParked` 와 같은 패턴)★: 저장소는 순수라 장부를 모른다. 걷어낸
-///   항목을 여기서 조용히 떨구면 그건 **은폐된 유실**이다(장부엔 `pending` 인데 큐엔 없음 = 유령 pending).
-///   그래서 "큐에서 뺐다" 는 사실을 항목째로 호출자에게 넘겨, 상위가 장부에 `skipped` 를 남기고 락 밖에서
-///   로깅하게 한다 — 경로가 아니라 **반환값**으로 유실을 막는 이 모듈의 기존 규율 그대로다.
-/// ★오늘 이 채널을 쓰는 건 **notice 레인 하나뿐**이다(ADR-0114 결정 1)★: message 레인의 압력 회수가
-///   폐지돼(모듈 헤더) 남은 회수 사유는 "가장 오래된 통지가 더 최신 통지에 밀림" 뿐이다. 그래도 값 채널을
-///   유지하는 이유는 조용한 유실 금지 규율(회수 사실은 반드시 장부 종점으로 남는다)이 그대로이기 때문이다.
-/// ★어휘는 **기본 `skipped`, 단 TTL 이 우선한다**(F3)★: 밀려난 옛 통지는 `expired`(시계 사실)가 아니라
-///   `skipped`("그 수신자에게는 배달하지 않음")가 정확한 사실이다. **그러나** sweep 주기(60s)와 TTL(24h)
-///   사이의 틈 때문에 "이미 TTL 을 넘겼지만 아직 안 걷힌" 항목이 회수될 수 있고, 그건 spec §5 계약상
-///   `expired` 다(시계가 먼저 그 항목의 운명을 정했다). 그래서 **판정은 저장소가 하지 않는다** — 회수분을
-///   항목째 돌려주고, 상위가 `ParkedMessage::is_expired(now)` 로 둘을 갈라 전이한다(`service::park_into`).
+/// ★Why a return value (the same pattern as `DrainOutcome`/`ExpiredParked`)★: the store is pure and does not know the ledger. If collected
+///   items were silently dropped here, that would be a **hidden loss** (`pending` in the ledger but not in the queue = a ghost pending).
+///   So the fact "it was taken out of the queue" is handed to the caller together with the item, so the upper layer leaves `skipped` in the ledger and
+///   logs outside the lock — this is the module's existing discipline of preventing loss by the **return value**, not by a path.
+/// ★Today **only the notice lane** uses this channel (ADR-0114 decision 1)★: pressure reclaim of the message lane was
+///   abolished (module header), so the only remaining reclaim reason is "the oldest notice pushed out by a newer notice". The reason to keep the value channel anyway
+///   is that the no-silent-loss discipline is unchanged (the fact of reclaim must always remain as a ledger terminal).
+/// ★Vocabulary is **`skipped` by default, but TTL takes priority** (F3)★: for a pushed-out old notice the accurate fact is
+///   `skipped` ("not delivered to that recipient"), not `expired` (a clock fact). **However**, because of the gap between the sweep period (60s) and TTL (24h),
+///   an item "already past TTL but not yet collected" can be reclaimed, and under the spec §5 contract that is
+///   `expired` (the clock decided that item's fate first). So **the store does not decide** — it returns the reclaimed items
+///   whole and the upper layer splits the two with `ParkedMessage::is_expired(now)` and transitions (`service::park_into`).
 #[derive(Debug, Default)]
 pub struct ParkAdmitted {
-    /// 이 park 이 자리를 만드느라 걷어낸 항목(**오래된 순**). 보통 비어 있다.
+    /// Items collected by this park to make room (**oldest first**). Usually empty.
     pub retired: Vec<ParkedMessage>,
 }
 
-/// ★왜 두 컬렉션을 함께 반환하나(load-bearing — spec §5 "expired 장부 잔존")★: drain 이 만료분을 조용히
-///   버리면 그 항목은 어디에도 기록되지 않아 유실이 은폐된다("조용한 유실 금지"). 그래서 drain 은 큐를
-///   비우되(재-park 방지) 만료분도 함께 반환해, 상위가 **주입 가능분은 오래된 순으로 일괄 주입**하고
-///   **만료분은 장부에 `expired` 로 남기게** 한다(경로가 아니라 반환값으로 유실을 막는다). `sweep_expired`
-///   는 별도 주기적 청소 경로이고, drain 시점에 이미 만료된 것도 이 반환으로 반드시 장부화된다(두 경로 상보).
+/// ★Why both collections are returned together (load-bearing — spec §5 "expired stays in the ledger")★: if drain silently
+///   discarded expired items, they would be recorded nowhere and the loss would be hidden ("no silent loss"). So drain
+///   empties the queue (preventing re-park) and also returns the expired items, so the upper layer **injects the injectable ones in one batch, oldest first** and
+///   **leaves the expired ones in the ledger as `expired`** (loss is prevented by the return value, not by a path). `sweep_expired`
+///   is a separate periodic cleanup path, and what has already expired at drain time is also always entered in the ledger through this return (the two paths complement each other).
 #[derive(Debug, Default)]
 pub struct DrainOutcome {
-    /// 미만료 = 오래된 순 일괄 주입 대상(상위가 그대로 stdin 에 밀어넣음).
+    /// Unexpired = targets of the oldest-first batch injection (the upper layer pushes them into stdin as is).
     pub deliverable: Vec<ParkedMessage>,
-    /// TTL 초과 = 주입 안 하고 장부에 `expired` 로 기록할 대상(오래된 순).
+    /// Past TTL = targets not to be injected but recorded in the ledger as `expired` (oldest first).
     pub expired: Vec<ParkedMessage>,
 }
 
-/// ★왜 recipient 를 함께 돌려주나(load-bearing — 1 msg_id : N 배달기록, spec §4 · ADR-0104)★: 장부 레코드의
-///   키는 `(msg_id, 수신자 id)` 다. 그룹 방송은 한 msg_id 에 수신자별 레코드가 **N개** 있으므로, 만료된
-///   항목이 어느 레코드인지 msg_id 만으로는 특정할 수 없다 — 상위가 msg_id 로 "첫 pending 레코드" 를 역조회
-///   하면 **엉뚱한 멤버의 레코드**를 expired 로 전이할 수 있다(C1 시절 헬퍼의 위험, 그 앵커가 지목한 결함).
-///   저장소는 항목이 어느 큐에 있었는지 아는 유일한 지점이라, 여기서 그 사실을 함께 실어 보낸다.
+/// ★Why the recipient is returned too (load-bearing — 1 msg_id : N delivery records, spec §4 · ADR-0104)★: the key of a ledger record
+///   is `(msg_id, 수신자 id)`. A group broadcast has **N** per-recipient records under one msg_id, so which record an expired
+///   item is cannot be identified by msg_id alone — if the upper layer looked up "the first pending record" by msg_id,
+///   it could transition **the wrong member's record** to expired (the danger of the C1-era helper, the defect that anchor pointed at).
+///   The store is the only place that knows which queue the item was in, so it ships that fact along here.
 #[derive(Debug, Clone)]
 pub struct ExpiredParked {
-    /// 이 항목이 있던 수신자 큐 키(= 장부 레코드의 `to_id`).
+    /// The recipient queue key this item was in (= `to_id` of the ledger record).
     pub recipient: PeerId,
     pub msg: ParkedMessage,
 }
 
-/// ★in-flight 영수증(F1 · load-bearing)★ — flush 가 락 밖으로 들고 나간 배치의 **레인별 건수**.
+/// ★In-flight receipt (F1 · load-bearing)★ — the **per-lane count** of the batch a flush carried out of the lock.
 ///
-/// ★왜 값 타입 티켓인가★: drain 과 복원 사이에 messaging 락이 **풀린다**(inject 는 락 밖 계약). 그래서
-///   "지금 몇 건이 나가 있나" 를 스택 가드로 들 수 없고 저장소가 들어야 하는데, 저장소는 누가 얼마를
-///   가져갔는지 스스로 알 수 없다. 그래서 가져간 쪽에 영수증을 발급하고(`take_in_flight`) 반드시 반납받는다
+/// ★Why a value-type ticket★: the messaging lock is **released** between drain and restore (inject is a contract outside the lock). So
+///   "how many are out right now" cannot be held as a stack guard and must be held by the store, but the store cannot know by itself who
+///   took how many. So a receipt is issued to the taker (`take_in_flight`) and must be handed back
 ///   (`settle_in_flight`).
-/// ★부분 반납이 가능하다★: 배치 중 배달된 항목·되돌린 항목을 그때그때 떼어 반납한다(`split`) — 그래야
-///   분모가 실제 미결 건수와 같아진다.
+/// ★Partial return is possible★: items delivered and items put back within the batch are split off and returned as they happen (`split`) — only then
+///   does the denominator equal the real outstanding count.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct FlightTicket {
     message: usize,
@@ -225,7 +225,7 @@ pub struct FlightTicket {
 }
 
 impl FlightTicket {
-    /// 반납할 게 남았나(대부분의 경로에서 곧바로 0 — 락 획득 자체를 아끼는 데 쓴다).
+    /// Is anything left to return (on most paths 0 right away — used to save acquiring the lock at all).
     pub fn is_zero(&self) -> bool {
         self.message == 0 && self.notice == 0
     }
@@ -248,8 +248,8 @@ impl FlightTicket {
         *self.lane_mut(kind) += 1;
     }
 
-    /// 이 영수증에서 `kinds` 만큼을 떼어 **부분 반납용 영수증**을 만든다. ★잔량을 넘겨 떼지 않는다★ —
-    ///   그게 이중 반납(분모가 실제보다 작아져 cap 이 뚫리는 사고)을 막는 유일한 장치다.
+    /// Splits `kinds` worth off this receipt to make a **receipt for partial return**. ★Never split off beyond the remainder★ —
+    ///   that is the only device that prevents double return (an accident where the denominator becomes smaller than reality and the cap is breached).
     pub fn split(&mut self, kinds: impl IntoIterator<Item = ParkKind>) -> FlightTicket {
         let mut out = FlightTicket::default();
         for kind in kinds {
@@ -262,24 +262,24 @@ impl FlightTicket {
     }
 }
 
-/// 수신자 에이전트 id → FIFO 큐 저장소.
-// ADR-0309 (결정 1 — 큐 키 = 에이전트 id)
+/// Recipient agent id → FIFO queue store.
+// ADR-0309 (decision 1 — queue key = agent id)
 #[derive(Debug, Default)]
 pub struct Mailbox {
     queues: HashMap<PeerId, std::collections::VecDeque<ParkedMessage>>,
-    /// ★수신자별 in-flight 건수(F1)★ — 큐에서 나갔지만 아직 종점(배달/복원)이 확정되지 않은 몫.
+    /// ★Per-recipient in-flight count (F1)★ — the share that left the queue but whose terminal (delivered/restored) is not yet fixed.
     in_flight: HashMap<PeerId, FlightTicket>,
-    /// 다음 admission 순번(전 수신자 공유 단조 카운터 — `ParkedMessage.admission_seq` 부여자). u64 라
-    ///   실질적으로 소진되지 않는다.
+    /// Next admission sequence number (a monotonic counter shared by all recipients — the assigner of `ParkedMessage.admission_seq`). Being u64, it is
+    ///   practically never exhausted.
     next_seq: u64,
 }
 
-/// ★notice 레인 압력 회수 — 가장 오래된 notice 를 최대 `want` 개 걷어낸다(round-6 · ADR-0114 로 축소)★.
+/// ★Notice lane pressure reclaim — collect up to `want` of the oldest notices (round-6 · narrowed by ADR-0114)★.
 ///
-/// - 대상은 **notice 뿐**이다. 술어에 걸리지 않는 항목은 **절대** 건드리지 않는다(회수가 산 메일을
-///   잡아먹지 않는다는 보장).
-/// - **오래된 순의 근거 = 큐 정렬축**: 큐는 admission 순번 **강한 증가**라(모듈 헤더 불변식) 앞→뒤 순회가
-///   곧 오래된 순이다. 별도 정렬을 하지 않는 이유이자, 그 불변식이 깨지면 여기 순서도 깨진다는 뜻이다.
+/// - The target is **notices only**. Items that do not match the predicate are **never** touched (the guarantee that reclaim does not
+///   eat live mail).
+/// - **Basis of "oldest first" = the queue ordering axis**: the queue is admission sequence **strictly increasing** (module header invariant), so a front-to-back walk
+///   is oldest first. It is the reason no separate sort is done, and it means that if that invariant breaks the order here breaks too.
 fn retire_oldest(
     queue: &mut std::collections::VecDeque<ParkedMessage>,
     want: usize,
@@ -303,29 +303,29 @@ impl Mailbox {
         Self::default()
     }
 
-    /// ★용량 = 종류별 독립 레인, 예외 없음(round-6 재설계 · F1 분모 보정 · ADR-0114 회수 폐지)★:
-    ///   - **분모(두 레인 공통)** = 큐의 그 레인 항목 수 **+ 그 수신자 레인의 in-flight 건수**(= flush 가
-    ///     락 밖으로 들고 나가 아직 정산되지 않은 몫 — `take_in_flight`).
-    ///   - **message**: 전량 계수. `MAILBOX_CAP` 이상이면 **회수 시도 없이 즉시** `MailboxFull` 반려다
-    ///     (ADR-0114 결정 1 — 회수 장치 폐지. 유계 근거는 TTL 24h + 이 cap 이다, 모듈 헤더 4차 보정).
-    ///     상위는 그 수신자만 실패 행으로 보고한다(다중
-    ///     수신자에서 전체 반려로 승격하지 않는다 — spec §5).
-    ///   - **notice**: message 는 분모에 세지 않는다. `NOTICE_CAP` 이상이면 **가장 오래된 notice** 를 회수하고
-    ///     신규를 수용한다 — **반려 갈래가 없다**. 왜: `deliver_notice` 는 park 결과를 버리므로 여기서
-    ///     반려하면 통지가 **조용히 사라진다**(회신 계약이 반쪽 — ADR-0103 불변식). 그 대가로 회수 대상이
-    ///     큐에 모자랄 때 +1 의 일시 초과가 난다(`NOTICE_CAP` 주석). 회수분은 `ParkAdmitted.retired` 로
-    ///     **돌려준다**(저장소는 순수 — 장부 종점을 찍는 건 상위 몫, 조용한 유실 금지).
-    /// ★반려 경로는 부작용 0★: 반려면 큐를 건드리지도 순번을 태우지도 않는다 — "반려면 저장 자체를 안
-    ///   한다"(장부도 안 남는다)는 상위 계약과 정합.
-    /// ★notice 의 `want` 가 1보다 클 수 있다★: `restore_ordered`(재파킹)는 cap 을 우회하므로 큐가 일시적으로
-    ///   상한을 넘을 수 있다. 그래서 "1자리 확보" 가 아니라 **초과분 전체**를 계산해 한 번에 정리한다.
+    /// ★Capacity = independent lanes by kind, no exceptions (round-6 redesign · F1 denominator fix · ADR-0114 reclaim abolished)★:
+    ///   - **Denominator (common to both lanes)** = the number of that lane's items in the queue **+ that recipient lane's in-flight count** (= the share flush
+    ///     carried out of the lock and has not yet settled — `take_in_flight`).
+    ///   - **message**: count everything. At `MAILBOX_CAP` or more it is an **immediate** `MailboxFull` bounce **with no reclaim attempt**
+    ///     (ADR-0114 decision 1 — reclaim device abolished. The bound's basis is TTL 24h + this cap, module header amendment-4 correction).
+    ///     The upper layer reports only that recipient as a failure row (it does not escalate to a whole bounce
+    ///     in the multi-recipient case — spec §5).
+    ///   - **notice**: messages are not counted in the denominator. At `NOTICE_CAP` or more it reclaims the **oldest notice** and
+    ///     accepts the new one — **there is no bounce branch**. Why: `deliver_notice` discards the park result, so bouncing here would make
+    ///     the notice **silently vanish** (the reply contract is halved — ADR-0103 invariant). The price is a temporary +1 overshoot when the reclaim target is
+    ///     short in the queue (`NOTICE_CAP` comment). The reclaimed items are **returned** via `ParkAdmitted.retired` (the store is pure — stamping the ledger
+    ///     terminal is the upper layer's job, no silent loss).
+    /// ★The bounce path has zero side effects★: on a bounce it neither touches the queue nor burns a sequence number — consistent with the upper contract "on a bounce nothing is stored
+    ///   at all" (nothing stays in the ledger either).
+    /// ★The notice `want` can be greater than 1★: `restore_ordered` (re-park) bypasses the cap, so the queue can temporarily
+    ///   pass the limit. So instead of "secure 1 slot" it computes **the whole overshoot** and cleans it up at once.
     pub fn park(
         &mut self,
         recipient: PeerId,
         mut msg: ParkedMessage,
     ) -> Result<ParkAdmitted, ParkError> {
         let kind = msg.kind;
-        // 필드가 서로 달라 queues 의 가변 대여와 공존한다(disjoint field borrow).
+        // The fields differ, so this coexists with the mutable borrow of queues (disjoint field borrow).
         let in_flight = self
             .in_flight
             .get(&recipient)
@@ -347,21 +347,21 @@ impl Mailbox {
                 }
             }
         }
-        // admission 순번은 **수용이 확정된 뒤** 저장소가 부여한다(반려분은 번호를 태우지 않는다).
+        // The admission sequence number is assigned by the store **after acceptance is confirmed** (a bounced item does not burn a number).
         msg.admission_seq = self.next_seq;
         self.next_seq += 1;
         queue.push_back(msg);
         Ok(ParkAdmitted { retired })
     }
 
-    /// ★신규 park 이 **지금 수용될 수 있나**(순수 조회 — ADR-0114 이후 가능해진 예측)★.
+    /// ★Can a new park **be accepted now** (pure query — a prediction made possible after ADR-0114)★.
     ///
-    /// ★왜 필요한가(load-bearing — 봉투 `to` 동결의 전제)★: 다중 수신자 발송은 **전 수신자의 수용 판정이
-    ///   끝난 뒤에야** 봉투 `to` 값을 확정할 수 있는데(spec §1 — 실패 행은 세지 않는다), 파킹은 그 값을
-    ///   payload 에 실어야 하므로 "판정 → to 확정 → 파킹" 순서가 강제된다. 즉 파킹 **전에** cap 결과를
-    ///   알아야 한다. 압력 회수가 있던 시절엔 이 예측이 불가능했지만(회수 여부가 park 안에서 정해졌다),
-    ///   회수가 폐지되면서 판정이 순수 산술이 됐다 — 그래서 예측과 실제가 **절대 갈리지 않는다**(같은 락
-    ///   구간 안에서 부르는 한).
+    /// ★Why it is needed (load-bearing — the premise of freezing the envelope `to`)★: a multi-recipient send can fix the envelope `to` value
+    ///   **only after every recipient's acceptance decision is done** (spec §1 — failure rows are not counted), and parking must carry that value in the
+    ///   payload, so the order "decide → fix to → park" is forced. That is, the cap result must be known **before** parking. In the era of pressure reclaim
+    ///   this prediction was impossible (whether reclaim happened was decided inside park), but
+    ///   with reclaim abolished the decision became pure arithmetic — so prediction and reality **never diverge** (as long as it is called within the same lock
+    ///   section).
     pub fn can_admit(&self, recipient: PeerId, kind: ParkKind) -> bool {
         let cap = match kind {
             ParkKind::Message => MAILBOX_CAP,
@@ -380,55 +380,55 @@ impl Mailbox {
         queued + in_flight < cap
     }
 
-    /// ★재파킹(무손실 복원) primitive — cap 우회 + admission 순번 merge(ADR-0103/0104 · finding 1)★: flush
-    ///   배치 도중 배달하지 못한 **이미 admitted 된** 항목들을, 큐의 나머지와 **전역 수용 순서대로 섞어**
-    ///   되돌린다(단순 앞쪽 삽입이 아니다 — 아래 "왜 merge 인가").
+    /// ★Re-park (lossless restore) primitive — cap bypass + admission-sequence merge (ADR-0103/0104 · finding 1)★: puts back the **already admitted**
+    ///   items that could not be delivered mid-flush-batch, **mixed in global admission order** with the rest of the queue
+    ///   (it is not a simple front insertion — see "why merge" below).
     ///
-    /// ★왜 `park` 가 아니라 별도 primitive 인가(load-bearing — 조용한 유실 금지)★: `park` 는 **신규
-    ///   admission** 통제라 cap 을 세고 초과 시 반려한다. 그런데 재파킹은 이미 장부에 `pending` 으로 들어간
-    ///   (admitted) 항목의 **보류 복원**이지 신규 발송이 아니다 — cap 은 유입 통제일 뿐 **보관 통제가 아니다**.
-    ///   drain↔inject 사이 동시 park 로 큐가 다시 cap 까지 찼을 때 `park` 로 되돌리면 `MailboxFull` 이 나고,
-    ///   그 에러를 무시하면 admitted 메시지가 조용히 유실된다(ledger 는 pending 인데 큐엔 없음 — 유령 pending).
-    ///   그래서 재파킹은 cap 을 **우회**한다(보관은 무제한 — 유입만 cap). 상한 위반이 걱정되면 그건 유입
-    ///   경로(`park`)가 이미 막고 있고, 재파킹분은 원래 그 cap 안에서 admitted 됐던 것이다.
-    /// ★유계의 근거는 "한 배치 이하" 가 **아니라** in-flight 회계다(F1 — 옛 논증 폐기)★:
-    ///   drain 한 배치가 **분모에 계속 잡혀 있으므로**(`take_in_flight`)
-    ///   drain↔복원 창에서 들어올 수 있는 신규 유입 k 는 `cap − (큐 + in-flight)` 로 이미 제한돼 있고,
-    ///   복원은 in-flight 에서 큐로 **자리를 옮길 뿐**이라(같은 락 구간에서 그만큼 정산한다 — service.rs
-    ///   `flush_for` 실패 갈래) 합이 늘지 않는다. 즉 이 우회는 cap 을 뚫지 못한다 — `queue + in_flight ≤ cap`
-    ///   이 그대로 성립한다. **cap 을 세지 않는다는 성질 자체는 유지**된다(무손실 복원이 목적이고, 유입
-    ///   제한은 park 쪽에서 이미 걸렸다).
-    ///   ★되돌아오는 배치를 줄이는 것도 그대로다★: flush 는 로스터를 손에 쥔 유일한 지점이라, 복원 **전에**
-    ///   확정 사망 결박분(같은 PeerId 의 더 높은 epoch)을 걷어내고 장부에 `skipped` 를 찍는다(service.rs
-    ///   `flush_for`) — 즉 되돌아오는 배치에는 증거 있는 사망분이 이미 빠져 있다.
-    /// ★왜 단순 FRONT 삽입이 아니라 merge 인가(전역 오래된 순 — round-4 finding 1)★: 복원 사이에 큐에 새
-    ///   항목이 들어올 수 있고, 같은 큐에 재파킹이 **여러 번** 불리면 앞쪽 삽입은 나중 호출을 앞선 호출보다
-    ///   앞에 놓아 호출 간 나이 순서가 **뒤집힌다**(예: [m0,m2] 복원 → [m1,m3] 복원 = [m1,m3,m0,m2]). 그래서
-    ///   앞쪽 삽입 대신 **admission 순번 기준 merge** 로 되꽂아, 몇 번을 부르든 큐가 항상 전역 수용 순서(오래된
-    ///   순)를 유지하게 한다. 재파킹분은 신규 park 분보다 순번이 작으므로, 단일 호출·빈 큐 케이스에선
-    ///   merge 결과가 옛 FRONT 삽입과 동일하다(동작 회귀 없음).
-    /// ★왜 순서가 정확해야 하나(두 가지 손해)★: ① 수신자가 보는 배달 순서가 뒤집힌다(ADR-0104 "오래된 순
-    ///   일괄" 은 큐 내부가 아니라 **수신자가 보는 순서**에 대한 약속) ② 드레인은 **큐 앞머리부터** 빼므로
-    ///   (ADR-0125 — 순서 = 적재 순서) 나이 역전이 곧 배달 순서 역전이다: 뒤이은 발송의 동기 드레인이 묵은
-    ///   것보다 새 편지를 먼저 내게 된다.
-    /// ★전제(호출자 계약)★: `items` 는 **순번 오름차순**이어야 한다(drain 이 낸 순서 그대로거나 그 부분열 —
-    ///   호출자가 인덱스 정렬로 보장한다). merge 는 두 오름차순 열을 합치는 것이라 이 전제가 깨지면 결과도
-    ///   깨진다.
-    /// ★`parked_at`·순번 모두 원래 값 유지★: 호출자가 원본 ParkedMessage 를 그대로 넘긴다 — TTL 이 연장되지
-    ///   않고(오배송 방어) 수용 순서도 재부여되지 않는다(뒤로 밀리지 않는다).
-    /// ★notice/message 무관 무조건 수용★: 재파킹은 kind 를 안 본다(이미 admitted). cap 회계는 신규 park 만.
+    /// ★Why a separate primitive and not `park` (load-bearing — no silent loss)★: `park` controls **new
+    ///   admission**, so it counts the cap and bounces on overflow. But a re-park is a **deferred restore** of an item already entered in the ledger as `pending`
+    ///   (admitted), not a new send — the cap is only inflow control and **not storage control**.
+    ///   If the queue is full to the cap again from a concurrent park between drain and inject and we put back with `park`, `MailboxFull` results,
+    ///   and ignoring that error silently loses an admitted message (the ledger says pending but it is not in the queue — a ghost pending).
+    ///   So re-park **bypasses** the cap (storage is unlimited — only inflow is capped). If an upper-limit violation is a worry, the inflow
+    ///   path (`park`) already blocks it, and re-parked items were originally admitted within that cap.
+    /// ★The basis of the bound is **not** "at most one batch" but in-flight accounting (F1 — the old argument is discarded)★:
+    ///   a batch that drain took out is **still held in the denominator** (`take_in_flight`),
+    ///   so the new inflow k that can arrive in the drain↔restore window is already limited by `cap − (큐 + in-flight)`,
+    ///   and restore **only moves slots** from in-flight to the queue (it settles that much in the same lock section — service.rs
+    ///   `flush_for` failure branch), so the sum does not grow. So this bypass cannot breach the cap — `queue + in_flight ≤ cap`
+    ///   still holds. **The property of not counting the cap itself is kept** (lossless restore is the purpose, and the inflow
+    ///   limit was already applied on the park side).
+    ///   ★Reducing the batch that comes back also still applies★: flush is the only point holding the roster, so **before** restoring
+    ///   it collects the items bound to a confirmed-dead incarnation (evidence: a higher epoch of the same PeerId) and stamps `skipped` in the ledger (service.rs
+    ///   `flush_for`) — so the returning batch already has the evidenced-dead ones removed.
+    /// ★Why merge rather than a simple FRONT insertion (global oldest-first — round-4 finding 1)★: new items can enter the queue
+    ///   between restores, and if re-park is called **several times** on the same queue, front insertion puts a later call ahead of an earlier one and
+    ///   **inverts** the age order across calls (e.g. restore [m0,m2] → restore [m1,m3] = [m1,m3,m0,m2]). So
+    ///   instead of front insertion it puts back by an **admission-sequence merge**, so however many times it is called the queue always keeps global admission order (oldest
+    ///   first). Re-parked items have smaller sequence numbers than newly parked ones, so in the single-call, empty-queue case
+    ///   the merge result is identical to the old FRONT insertion (no behavior regression).
+    /// ★Why the order must be exact (two losses)★: ① the delivery order the recipient sees is inverted (ADR-0104 "oldest-first
+    ///   batch" is a promise about the **order the recipient sees**, not the inside of the queue) ② drain pulls **from the queue head**
+    ///   (ADR-0125 — order = load order), so an age inversion is directly a delivery-order inversion: the synchronous drain of a following send would
+    ///   put out a newer letter before an older one.
+    /// ★Precondition (caller contract)★: `items` must be in **ascending sequence order** (as drain emitted them or a subsequence of that —
+    ///   the caller guarantees it by index sorting). Merge combines two ascending sequences, so if this precondition breaks the result
+    ///   breaks too.
+    /// ★Both `parked_at` and the sequence number keep their original values★: the caller passes the original ParkedMessage as is — TTL is not
+    ///   extended (misdelivery defense) and the admission order is not reassigned (it is not pushed back).
+    /// ★Unconditional acceptance regardless of notice/message★: re-park does not look at kind (already admitted). Cap accounting is for new parks only.
     pub fn restore_ordered(&mut self, recipient: PeerId, items: Vec<ParkedMessage>) {
         if items.is_empty() {
             return;
         }
         let queue = self.queues.entry(recipient).or_default();
         if queue.is_empty() {
-            // 흔한 경로(락 안 복원 = drain 직후라 큐가 비어 있다) — merge 불요.
+            // Common path (restore under the lock = right after drain, so the queue is empty) — no merge needed.
             queue.extend(items);
             return;
         }
-        // 동률은 구조적으로 없다(순번은 저장소가 유일 부여자이고 강한 증가) — 그래도 방어적으로
-        //   재파킹분을 먼저 둔다(더 오래된 쪽).
+        // Ties structurally do not exist (the sequence number has the store as sole assigner and is strictly increasing) — even so, defensively
+        //   the re-parked item goes first (the older side).
         let existing = std::mem::take(queue);
         let mut merged = std::collections::VecDeque::with_capacity(existing.len() + items.len());
         let mut restored = items.into_iter().peekable();
@@ -449,9 +449,9 @@ impl Mailbox {
         *queue = merged;
     }
 
-    /// 수신자 큐를 통째로 비워 주입 가능분·만료분을 **둘 다** 오래된 순으로 반환(flush primitive).
-    ///   주입은 `deliverable`(미만료, 오래된 순)만 한다(ADR-0104 일괄 flush · 근거는 `DrainOutcome` 주석).
-    /// ★큐 제거★: 비운 뒤 빈 큐는 맵에서 없앤다(빈 큐가 무한 누적되지 않게).
+    /// Empties the recipient queue and returns **both** the injectable and expired items, oldest first (flush primitive).
+    ///   Injection is done only for `deliverable` (unexpired, oldest first) (ADR-0104 batch flush · basis in the `DrainOutcome` comment).
+    /// ★Queue removal★: after emptying, the empty queue is removed from the map (so empty queues do not accumulate without limit).
     pub fn drain(&mut self, recipient: PeerId, now: Instant) -> DrainOutcome {
         let Some(queue) = self.queues.remove(&recipient) else {
             return DrainOutcome::default();
@@ -467,17 +467,17 @@ impl Mailbox {
         outcome
     }
 
-    /// ★락 밖으로 나가는 배치를 in-flight 로 등록한다(F1 · load-bearing)★ — 드레인이 `drain` 결과 중 **실제로
-    ///   락을 떠나 주입 대상이 되는 몫**만 여기에 신고하고, 반환 영수증을 반드시 `settle_in_flight` 로 반납한다.
+    /// ★Registers the batch leaving the lock as in-flight (F1 · load-bearing)★ — the drain reports here only the share of the `drain` result that **actually
+    ///   leaves the lock to become an injection target**, and must hand the returned receipt back with `settle_in_flight`.
     ///
-    /// ★왜 `drain` 이 자동으로 안 하고 별도 동사인가(의도적)★: drain 이 낸 항목 전부가 락을 떠나는 게
-    ///   아니다 — busy 타깃 몫·배달 경로 없는 몫은 **같은 락 구간에서** 곧바로 되돌아가고(`restore_ordered`),
-    ///   확정 사망분·만료분은 그 자리에서 장부 종점을 찍고 사라진다. 그 몫까지 in-flight 로 잡으면 분모가
-    ///   근거 없이 부풀어(= 락 안에서만 존재한 창을 분모에 반영) 정상 유입이 `MailboxFull` 로 반려된다.
-    ///   구멍은 **락이 풀리는 구간**에만 있으므로, 등록 단위도 정확히 그 구간으로 맞춘다.
-    /// ★호출자 계약★: 등록한 건수는 배달 완료·복원·포기 중 무엇이 되든 **전부** 반납돼야 한다. 반납이
-    ///   누락되면 그 레인의 분모가 영구히 부풀어 유입이 막히므로, 상위는 단일 출구 가드로 들고 다닌다
-    ///   (service.rs `FlightSettle` — early break·언와인딩까지 덮는다).
+    /// ★Why `drain` does not do this automatically and this is a separate verb (intentional)★: not every item drain emits
+    ///   leaves the lock — the share for busy targets and the share with no delivery path go back **in the same lock section** right away (`restore_ordered`),
+    ///   and confirmed-dead and expired items stamp a ledger terminal on the spot and disappear. If that share were also held as in-flight, the denominator
+    ///   would swell without grounds (= reflecting a window that existed only under the lock in the denominator) and normal inflow would be bounced with `MailboxFull`.
+    ///   The hole is **only in the span where the lock is released**, so the registration unit is set to exactly that span.
+    /// ★Caller contract★: the registered count must be **fully** handed back whether it ends as delivered, restored or abandoned. If a return
+    ///   is missed, that lane's denominator swells permanently and inflow is blocked, so the upper layer carries it in a single-exit guard
+    ///   (service.rs `FlightSettle` — covers early break and unwinding too).
     pub fn take_in_flight<'m>(
         &mut self,
         recipient: PeerId,
@@ -495,9 +495,9 @@ impl Mailbox {
         ticket
     }
 
-    /// ★saturating 인 이유★: 여기서 패닉하면 언와인딩 중 이중 패닉으로 프로세스가 죽는다. 과다 반납은
-    ///   영수증 쪽(`FlightTicket::split`)이 구조적으로 막고 있으므로, 만에 하나 어긋나면 **분모를 0 으로
-    ///   수렴시키는 쪽**(= 유입을 막지 않는 쪽)이 안전하다 — 반대로 남겨 두면 그 수신자가 영영 메일을 못 받는다.
+    /// ★Why saturating★: panicking here would kill the process with a double panic during unwinding. Over-return is structurally prevented on the
+    ///   receipt side (`FlightTicket::split`), so if it ever goes off, **converging the denominator to 0**
+    ///   (= the side that does not block inflow) is the safe side — conversely, leaving it would mean that recipient never receives mail again.
     pub fn settle_in_flight(&mut self, recipient: PeerId, ticket: FlightTicket) {
         if ticket.is_zero() {
             return;
@@ -512,11 +512,11 @@ impl Mailbox {
         }
     }
 
-    /// ★운영 판정에 쓰인다(round-7 — 더 이상 테스트 전용이 아니다)★: **같은 수신자에 대한 드레인 중복 진입
-    ///   차단**(service.rs `drain_queue` 0단계 — 배치 B 가 배치 A 의 잔여를 앞지르는 것을 막는다). 전부-큐가
-    ///   된 뒤로 이것이 "배달 순서 = 적재 순서" 를 성립시키는 장치이고, **동기 드레인에서는 두 발신 스레드가
-    ///   같은 수신자를 동시에 드레인하는 것이 상시 경우라 더 중요하다**(ADR-0125 §영향 — 제거 금지).
-    ///   테스트에서는 정산 누수 단언에도 쓴다.
+    /// ★Used in production decisions (round-7 — no longer test-only)★: **blocking duplicate drain entry
+    ///   for the same recipient** (service.rs `drain_queue` step 0 — keeps batch B from overtaking batch A's remainder). Since everything became queued, this is the device that makes
+    ///   "delivery order = load order" hold, and **in synchronous drain two sending threads
+    ///   draining the same recipient at once is the routine case, so it matters even more** (ADR-0125 §impact — do not remove).
+    ///   Tests also use it for settlement-leak assertions.
     pub fn in_flight_len(&self, recipient: PeerId) -> usize {
         self.in_flight
             .get(&recipient)
@@ -524,20 +524,20 @@ impl Mailbox {
             .unwrap_or(0)
     }
 
-    /// TTL 초과 항목을 **전 수신자에 걸쳐** 걷어내 반환한다(상위가 각 항목을 장부에 `expired` 로 기록).
+    /// Collects TTL-exceeded items **across all recipients** and returns them (the upper layer records each item in the ledger as `expired`).
     ///
-    /// ★반환 = 걷어낸 만료분 + **그 항목이 있던 수신자 큐 키**(`ExpiredParked`)★: 상위는 이 목록을 순회하며
-    ///   ledger 를 `(msg_id, recipient)` 로 지목해 expired 전이를 남긴다(spec §5 "TTL 초과 expired, 장부
-    ///   잔존"). 비워진 큐는 맵에서 제거한다.
-    /// ★순서★: 큐 간 순회 순서는 HashMap 이라 비결정이지만, **한 수신자 안에서는 오래된 순**을 보존한다
-    ///   (상위 전이는 항목별 독립이라 큐 간 순서에 의존하지 않는다).
-    /// ★전량 스캔이다 — front 조기 종료 안 한다(round-4 finding 1 · load-bearing)★: 옛 구현은 "FIFO 니까
-    ///   front 가 미만료면 뒤도 미만료" 로 첫 미만료에서 break 했다. 그 전제는 **큐 정렬축(admission 순번)과
-    ///   만료축(`parked_at`)이 같다** 는 가정인데, 둘은 같지 않다(축이 갈리는 이유는 `admission_seq`
-    ///   주석). 그 경우 더 최근 항목이 앞에 서면 **뒤에 있는 만료 항목이 sweep
-    ///   에서 영구히 가려진다**(TTL 이 무력화되고 장부에도 안 남는다 = 조용한 유실의 다른 얼굴). 그래서 전량
-    ///   스캔으로 바꿨다 — 비용은 큐 길이 선형이고 규모가 극소해(수신자당 cap 100, 큐 수는 소수) 무의미하다.
-    ///   `drain` 도 같은 이유로 전량 분할이다(그쪽은 원래부터).
+    /// ★Return = the collected expired items + **the recipient queue key the item was in** (`ExpiredParked`)★: the upper layer walks this list,
+    ///   points at the ledger by `(msg_id, recipient)` and records the expired transition (spec §5 "TTL exceeded is expired, stays
+    ///   in the ledger"). Emptied queues are removed from the map.
+    /// ★Order★: the walk order across queues is non-deterministic because it is a HashMap, but **within one recipient the oldest-first order** is preserved
+    ///   (the upper-layer transitions are independent per item so they do not depend on the order across queues).
+    /// ★It is a full scan — no early exit at the front (round-4 finding 1 · load-bearing)★: the old implementation broke at the first unexpired item on the grounds "it is FIFO, so
+    ///   if the front is unexpired the rest is unexpired too". That premise assumes **the queue ordering axis (admission sequence) and
+    ///   the expiry axis (`parked_at`) are the same**, but they are not (why the axes diverge is in the `admission_seq`
+    ///   comment). In that case, if a more recent item stands in front, **an expired item behind it stays hidden from the sweep
+    ///   forever** (TTL is neutralized and it is not in the ledger either = another face of silent loss). So it was changed to a full
+    ///   scan — the cost is linear in the queue length and the scale is tiny (cap 100 per recipient, few queues), so it is meaningless.
+    ///   `drain` splits the whole queue for the same reason (that side always did).
     pub fn sweep_expired(&mut self, now: Instant) -> Vec<ExpiredParked> {
         let mut expired = Vec::new();
         self.queues.retain(|recipient, queue| {
@@ -557,20 +557,20 @@ impl Mailbox {
         expired
     }
 
-    /// ★수신자 큐를 통째로 비워 항목을 돌려준다 — **프로필 삭제 정리 전용**(spec §5 · ADR-0116 결정 3)★.
+    /// ★Empties the recipient queue and returns the items — **only for profile deletion cleanup** (spec §5 · ADR-0116 decision 3)★.
     ///
-    /// ★`drain` 과 다른 점(둘을 합치지 말 것)★: `drain` 은 "지금 주입할 몫을 꺼낸다" 라 만료/미만료를 갈라
-    ///   돌려주고 되돌아올 여지를 남긴다. 이쪽은 **그 에이전트(프로필)가 세상에서 사라졌다**는 통보라 갈래가 없다 —
-    ///   전량을 종점 처리 대상으로 넘긴다(상위가 장부에 `failed` + `RECIPIENT_DELETED` 로 남긴다).
-    /// ★반환값으로 유실을 막는다(이 모듈의 기존 규율)★: 저장소는 순수라 장부를 모른다. 조용히 비우면
-    ///   "장부엔 `pending` 인데 큐엔 없는" 유령 pending 이 남으므로 항목째 돌려준다("산 메일 조용히 버리기
-    ///   금지" — spec §5 불변식).
-    /// ★notice 도 함께 치운다★: 그 에이전트 앞 통지도 받을 주체가 없어졌다 — 레인을 가리지 않는다(장부 종점은
-    ///   상위가 같은 코드로 남긴다).
-    /// ★in-flight 는 건드리지 않는다(load-bearing)★: 지금 flush 가 락 밖으로 들고 나간 몫은 **영수증
-    ///   보유자의 것**이다(`FlightTicket` 계약). 여기서 회계를 손대면 그쪽 정산과 이중으로 어긋난다. 그
-    ///   몫의 결말은 원래 경로가 정하고(배달 성공 또는 복원), 복원된 잔여는 **TTL 소관**이다 — 삭제 정리가
-    ///   삭제 시점 단발이라는 spec §5 의 수용된 잔여와 같은 성질이다.
+    /// ★How it differs from `drain` (do not merge the two)★: `drain` "takes out the share to inject now", so it splits expired/unexpired
+    ///   and leaves room for items to come back. This one is a notice that **that agent (profile) has vanished from the world**, so there is no branching —
+    ///   everything is handed over as a terminal-processing target (the upper layer leaves `failed` + `RECIPIENT_DELETED` in the ledger).
+    /// ★Loss is prevented by the return value (this module's existing discipline)★: the store is pure and does not know the ledger. Emptying silently
+    ///   would leave a ghost pending, "`pending` in the ledger but not in the queue", so the items are returned whole ("no silently discarding
+    ///   live mail" — spec §5 invariant).
+    /// ★Notices are cleared together too★: notices addressed to that agent also have no one left to receive them — lanes are not distinguished (the ledger terminal is
+    ///   left by the upper layer with the same code).
+    /// ★In-flight is not touched (load-bearing)★: the share a flush has carried out of the lock right now **belongs to the receipt
+    ///   holder** (`FlightTicket` contract). Touching accounting here would put it out of step twice with that side's settlement. The
+    ///   outcome of that share is decided by its original path (delivery success or restore), and the restored remainder is **TTL's concern** — the same nature as the accepted
+    ///   residual in spec §5 that deletion cleanup is a one shot at deletion time.
     pub fn purge_recipient(&mut self, recipient: PeerId) -> Vec<ParkedMessage> {
         self.queues
             .remove(&recipient)
@@ -578,12 +578,12 @@ impl Mailbox {
             .unwrap_or_default()
     }
 
-    /// ★용량 회계와는 다르다★: cap 은 레인별 계수이고 in-flight 를 함께 본다(`park`/`can_admit`).
+    /// ★Different from capacity accounting★: the cap is counted per lane and also looks at in-flight (`park`/`can_admit`).
     pub fn len(&self, recipient: PeerId) -> usize {
         self.queues.get(&recipient).map(|q| q.len()).unwrap_or(0)
     }
 
-    /// 순서 단언용 — 길이만으로는 재파킹의 나이 순서 역전이 안 잡힌다(round-4 finding 1).
+    /// For order assertions — length alone cannot catch an age-order inversion of re-park (round-4 finding 1).
     pub fn msg_ids(&self, recipient: PeerId) -> Vec<String> {
         self.queues
             .get(&recipient)
@@ -595,13 +595,13 @@ impl Mailbox {
         self.queues.is_empty()
     }
 
-    /// 전 수신자 큐 항목 합(in-flight 제외) — 「어느 큐에도 안 들어갔다」 단언용.
+    /// Sum of items in all recipient queues (in-flight excluded) — for the assertion 「어느 큐에도 안 들어갔다」 (it entered no queue).
     #[cfg(any(test, feature = "test-harness"))]
     pub fn total_len(&self) -> usize {
         self.queues.values().map(|q| q.len()).sum()
     }
 
-    /// 테스트 편의 — 회수가 없는 정상 park(대부분의 테스트가 레인 상한 아래에서 돈다).
+    /// Test convenience — a normal park with no reclaim (most tests run below the lane limit).
     #[cfg(test)]
     fn park_ok(&mut self, recipient: PeerId, msg: ParkedMessage) -> Result<(), ParkError> {
         self.park(recipient, msg).map(|admitted| {
@@ -612,9 +612,9 @@ impl Mailbox {
         })
     }
 
-    /// ★테스트 전용 손상 주입(C3 리뷰 fix 4)★ — 파킹 payload 가
-    ///   깨진 상황(형식 드리프트·메모리 손상)에서 **그 항목 하나만 열화되고 배치는
-    ///   계속 나가는지**를 실제 flush 경로로 단언하기 위한 seam 이다. 운영 코드에서 부르지 않는다.
+    /// ★Test-only corruption injection (C3 review fix 4)★ — a seam to assert, through the real flush path, that in a situation where the parked payload is
+    ///   broken (format drift · memory corruption) **only that one item degrades and the batch
+    ///   keeps going out**. Not called from production code.
     #[cfg(any(test, feature = "test-harness"))]
     pub fn corrupt_envelope_for_test(&mut self, recipient: PeerId, idx: usize, envelope: String) {
         if let Some(q) = self.queues.get_mut(&recipient) {
@@ -630,7 +630,7 @@ mod tests {
     use super::*;
     use crate::tid;
 
-    /// `admission_seq` 는 `park` 이 덮어쓰므로 여기선 0(placeholder).
+    /// `admission_seq` is overwritten by `park`, so it is 0 here (placeholder).
     fn parked(id: &str, kind: ParkKind, at: Instant) -> ParkedMessage {
         ParkedMessage {
             msg_id: id.to_string(),
@@ -663,7 +663,7 @@ mod tests {
         assert_eq!(mb.msg_ids(tid("w"))[0], "m0", "아무것도 걷어내지 않았다");
     }
 
-    // ── round-6: notice 레인(독립 상한 + 반려 없음) ─────────────────────────────────────────
+    // ── round-6: notice lane (independent limit + no bounce) ─────────────────────────────────────────
     #[test]
     fn the_notice_lane_retires_its_oldest_instead_of_rejecting() {
         let mut mb = Mailbox::new();
@@ -732,7 +732,7 @@ mod tests {
         );
     }
 
-    // ── F1: 분모 = 큐 + in-flight(락 밖 배치) ─────────────────────────────────────────────────
+    // ── F1: denominator = queue + in-flight (batch outside the lock) ─────────────────────────────────────────────────
     #[test]
     fn an_in_flight_batch_still_counts_against_the_cap() {
         let mut mb = Mailbox::new();
@@ -758,7 +758,7 @@ mod tests {
         assert_eq!(mb.len(tid("w")), 1);
     }
 
-    // ── round-7 → ADR-0125: 진행 중인 배치의 관측 수단(드레인 중복 진입 가드의 저장소 층) ──────────
+    // ── round-7 → ADR-0125: observation means of an in-progress batch (store layer of the duplicate drain entry guard) ──────────
     #[test]
     fn an_out_of_lock_batch_stays_observable_until_it_settles() {
         let mut mb = Mailbox::new();
@@ -1020,7 +1020,7 @@ mod tests {
     fn drain_surfaces_expired_never_silently_dropped() {
         let mut mb = Mailbox::new();
         let t0 = Instant::now();
-        // old 는 만료되게(t0), recent 는 살아 있게(t0 + 30m). now = t0 + TTL.
+        // Make old expire (t0) and recent stay alive (t0 + 30m). now = t0 + TTL.
         mb.park_ok(tid("h"), parked("old", ParkKind::Message, t0))
             .unwrap();
         mb.park_ok(
@@ -1049,7 +1049,7 @@ mod tests {
     fn sweep_expired_removes_and_returns_expired_only() {
         let mut mb = Mailbox::new();
         let t0 = Instant::now();
-        // 오래된 것(t0) + 최근 것(t0 + 30m). now = t0 + TTL + 1ns 면 오래된 것만 만료.
+        // Old (t0) + recent (t0 + 30m). With now = t0 + TTL + 1ns only the old one expires.
         mb.park_ok(tid("e"), parked("old", ParkKind::Message, t0))
             .unwrap();
         mb.park_ok(
@@ -1095,7 +1095,7 @@ mod tests {
         let now = t0 + PARK_TTL;
         let expired = mb.sweep_expired(now);
         assert_eq!(expired.len(), 2, "두 멤버 큐의 같은 msg_id 가 각각 만료");
-        // 큐 간 순서는 HashMap 이라 비결정 — 집합으로 본다.
+        // The order across queues is non-deterministic because of HashMap — view it as a set.
         let mut got: Vec<PeerId> = expired.iter().map(|e| e.recipient).collect();
         let mut want = vec![tid("alice"), tid("bob")];
         got.sort();
@@ -1107,7 +1107,7 @@ mod tests {
         );
     }
 
-    // ── restore_ordered(재파킹 무손실 복원 — finding 1 · round-4 finding 1) ─────────────
+    // ── restore_ordered (re-park lossless restore — finding 1 · round-4 finding 1) ─────────────
     #[test]
     fn restore_ordered_bypasses_cap_no_loss() {
         let mut mb = Mailbox::new();
@@ -1135,8 +1135,8 @@ mod tests {
 
     #[test]
     fn restore_ordered_preserves_oldest_first_before_concurrent_parks() {
-        // 시나리오: drain 으로 [old0,old1,old2] 를 꺼냈고 그 사이 new0·new1 이 park 됐다 → old0 배달 후
-        //   실패 → [old1,old2] 재파킹. 이때 큐 = [new0,new1] 이므로 restore_ordered 후 = [old1,old2,new0,new1].
+        // Scenario: [old0,old1,old2] were taken out by drain and new0·new1 were parked in the meantime → delivered old0, then
+        //   failed → re-park [old1,old2]. The queue is then [new0,new1], so after restore_ordered = [old1,old2,new0,new1].
         let mut mb = Mailbox::new();
         let t0 = Instant::now();
         mb.park_ok(
@@ -1209,9 +1209,9 @@ mod tests {
             mb.park_ok(tid("r"), parked(&format!("old{i}"), ParkKind::Message, t0))
                 .unwrap();
         }
-        let drained = mb.drain(tid("r"), t0).deliverable; // old0..old2 (순번 0..2)
+        let drained = mb.drain(tid("r"), t0).deliverable; // old0..old2 (sequence 0..2)
         mb.park_ok(tid("r"), parked("new0", ParkKind::Message, t0))
-            .unwrap(); // 순번 3
+            .unwrap(); // sequence 3
         mb.restore_ordered(tid("r"), drained);
         assert_eq!(
             mb.msg_ids(tid("r")),
@@ -1224,7 +1224,7 @@ mod tests {
     fn sweep_surfaces_expired_hidden_behind_newer_front() {
         let mut mb = Mailbox::new();
         let t0 = Instant::now();
-        // 수용 순서는 newer → older(역전) — front 는 미만료, 그 뒤가 만료.
+        // Admission order is newer → older (inverted) — the front is unexpired and what follows is expired.
         mb.park_ok(
             tid("z"),
             parked("newer", ParkKind::Message, t0 + Duration::from_secs(3600)),
@@ -1260,7 +1260,7 @@ mod tests {
     fn sweep_preserves_oldest_first_within_recipient() {
         let mut mb = Mailbox::new();
         let t0 = Instant::now();
-        // 세 건 모두 만료되게(오래된 순으로 park).
+        // Make all three expire (park in oldest-first order).
         mb.park_ok(tid("g"), parked("first", ParkKind::Message, t0))
             .unwrap();
         mb.park_ok(

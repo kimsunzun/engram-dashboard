@@ -1,5 +1,5 @@
-//! 예열 창 상태 기계 시험(TRD S21-slot-docking §8-1 ⑫) — 가짜 첫 화면 문 · 번호 발급기 · 확정 포트 · 짓기로 잰다.
-//! 시한은 주입한다 — 실제 1 s 를 기다리는 시험은 없다(시한 시험만 몇 ms).
+//! Prewarmed window state machine tests (TRD S21-slot-docking §8-1 ⑫) — measured with a fake first-paint gate · number issuer · commit port · build.
+//! Deadlines are injected — no test waits the real 1 s (only the deadline tests, a few ms).
 
 use super::*;
 
@@ -15,12 +15,12 @@ use crate::layout::geometry::Insets;
 use crate::layout::manager::ViewId;
 use crate::layout::CanvasPx;
 
-// 옳은 시험은 닿지 않는 기다림 상한 — 깨우기가 빠지면 이만큼 기다린 뒤 빨개진다. ★깨움은 `LONG / 2` 로 잰다★ —
-//   Windows 의 조건 변수 시한은 몇 ms 일찍 풀려, `< LONG` 은 깨우기를 뺀 변이도 통과시켰다(실측 2026-10-21).
+// A wait upper bound a correct test never reaches — if the wake-up is missing, it turns red after waiting this long. ★The wake is measured with `LONG / 2`★ —
+//   a condition variable deadline on Windows releases a few ms early, so `< LONG` let even a mutant without the wake-up pass (measured 2026-10-21).
 const LONG: Duration = Duration::from_secs(10);
 const SAFETY: Duration = Duration::from_millis(7);
 
-// ── 가짜 첫 화면 문 · 번호 발급기 · 확정 포트 ──
+// ── fake first-paint gate · number issuer · commit port ──
 
 #[derive(Debug, Clone, PartialEq)]
 enum GateCall {
@@ -34,7 +34,7 @@ enum GateCall {
     },
 }
 
-// 올림 걸기 · 거두기는 풀 락 안, 올리기는 풀 락 밖이어야 한다 — 부를 때마다 잰다(어긋나면 그 자리에서 빨갛다).
+// Setting · withdrawing a placement must be inside the pool lock, and placing outside the pool lock — measured at every call (if it deviates, it is red on the spot).
 #[derive(Default)]
 struct FakeGate {
     spare: OnceLock<Weak<SpareState>>,
@@ -57,12 +57,12 @@ impl FakeGate {
         self.held.lock().unwrap().contains_key(label)
     }
 
-    // ③ 이 올린 항목 — 채택 번호 · 활성화.
+    // The entry ③ placed — adoption number · activation.
     fn raised(&self, label: &str) -> Option<(u32, bool)> {
         self.held.lock().unwrap().get(label).copied().flatten()
     }
 
-    // UI 숨기기 — 풀 밖의 부르는 쪽이 술어와 상관없이 그 label 의 올림을 거둔다.
+    // UI hide — a caller outside the pool withdraws that label's placement regardless of the predicate.
     fn hide(&self, label: &str) {
         self.held.lock().unwrap().remove(label);
     }
@@ -200,9 +200,9 @@ impl CommitPort for FakePort {
     }
 }
 
-// ── 차림 ──
+// ── setup ──
 
-// 보임 기다림 그물은 기본으로 닿지 않는 `LONG` 이다 — 짧으면 보임 기다림을 재는 시험이 느린 실행에서 그물에 걸린다.
+// The show-wait net is `LONG`, which by default is never reached — if short, a test that measures the show-wait is caught in the net on a slow run.
 fn fresh_with(build_wait: Duration) -> (Arc<SpareState>, Arc<FakeGate>) {
     fresh_seams(build_wait, LONG)
 }
@@ -238,7 +238,7 @@ fn claimed(spare: &SpareState, labels: &Labels) -> SpareClaim {
     spare.claim().claim.expect("지어진 창을 맡긴다")
 }
 
-// 맡긴 창의 새 창 항목을 모델에 넣는다(놓기 · 팝아웃이 확정 전에 하는 일).
+// Puts the new window entry of the handed-over window into the model (what dropping · popout does before commit).
 fn model_with(label: &str) -> (LayoutState, ViewId) {
     let layout = LayoutState::new();
     let view = layout.0.lock().unwrap().create_window(label).unwrap();
@@ -266,7 +266,7 @@ fn adopt(spare: &Arc<SpareState>, claim: &SpareClaim) -> CommitOutcome {
     spare.commit(&layout, claim, &FakePort::new(spare, &layout))
 }
 
-// 짓기 단계 안에서 `go` 를 기다리는 짓기 — 그동안 칸은 `Building` 이다.
+// A build that waits for `go` inside the build stage — meanwhile the field is `Building`.
 struct HeldBuild {
     go: mpsc::Sender<()>,
     done: thread::JoinHandle<SpareBuild>,
@@ -311,7 +311,7 @@ fn wait_for_waiters(spare: &SpareState, n: u32) {
     }
 }
 
-// ── 맡기기(I2 · I16 · I17) ──
+// ── handover (I2 · I16 · I17) ──
 
 #[test]
 fn a_built_spare_is_handed_out_once_with_a_receive_only_hold() {
@@ -462,8 +462,8 @@ fn exiting_wakes_a_waiting_claim() {
     building.finish();
 }
 
-// 기다리던 짓기 A 가 사라지거나 실패하고, 깨운 맡기기가 락을 다시 잡기 전에 다른 짓기 B 가 자리를 잡았다(짓는 중 ·
-//   지어짐). 그 사이를 풀 락으로 고정한다 — 깬 맡기기는 이 락을 놓은 뒤에야 칸을 다시 본다.
+// The awaited build A vanishes or fails, and another build B took the place before the woken handover took the lock again (being built ·
+//   built). That gap is pinned with the pool lock — the woken handover looks at the field again only after this lock is released.
 #[test]
 fn a_claim_whose_awaited_build_ended_does_not_follow_its_replacement() {
     for (ending, replacement_built) in [
@@ -526,7 +526,7 @@ fn a_building_spare_dropped_for_a_listen_failure_wakes_a_waiting_claim() {
     building.finish();
 }
 
-// ── 짓기(I13 · I25) ──
+// ── build (I13 · I25) ──
 
 #[test]
 fn one_build_at_a_time_and_a_refused_build_takes_no_number() {
@@ -546,7 +546,7 @@ fn one_build_at_a_time_and_a_refused_build_takes_no_number() {
     assert_eq!(labels.issued(), 1);
 }
 
-// 안전 시한이 끝내지 못한 보임 기다림 — 다음 맡기기가 그 완료를 하고 짓기를 띄운다. 그 뒤의 늦은 완료 셋은 무동작이다.
+// A show-wait the safety deadline could not end — the next handover does that completion and kicks off a build. The three late completions after that are no-ops.
 #[test]
 fn a_claim_completes_a_pending_reveal_older_than_the_backstop_and_asks_for_a_build() {
     let backstop = Duration::from_millis(5);
@@ -663,7 +663,7 @@ fn a_reveal_completion_while_exiting_clears_without_building() {
     assert_eq!(spare.awaiting_reveal(), None);
 }
 
-// ── 되물림 · 맡김표(I27) ──
+// ── take-back · claim ticket (I27) ──
 
 #[test]
 fn a_release_with_the_current_ticket_returns_the_spare_hidden_and_claimable() {
@@ -734,7 +734,7 @@ fn a_commit_with_a_ticket_of_another_generation_does_nothing() {
     assert!(spare.is_spare(&claim.label));
 }
 
-// ── 열기(I4 · I20) ──
+// ── open (I4 · I20) ──
 
 #[test]
 fn a_claimed_label_is_opened_in_place_and_a_lost_one_is_refused() {
@@ -771,7 +771,7 @@ fn the_activate_choice_of_the_open_reaches_the_reveal() {
     }
 }
 
-// ── 확정(I6 · I21 · I26 · I31) ──
+// ── commit (I6 · I21 · I26 · I31) ──
 
 #[test]
 fn commit_carries_the_measures_then_reveals_then_announces_outside_both_locks() {
@@ -832,7 +832,7 @@ fn a_report_during_the_commit_lands_on_top_and_one_before_it_is_carried() {
 
     let mut mgr = layout.0.lock().unwrap();
     let step = spare.commit_locked(&mut mgr, &claim);
-    // 확정의 레이아웃 락 구간 안 — 풀은 그 label 을 더 받지 않고, 지금 닿는 보고는 이 락을 기다린다.
+    // Inside the layout lock section of the commit — the pool does not accept that label any more, and a report that arrives now waits for this lock.
     assert_eq!(
         spare.record_measure(&label, Measure::Canvas { w: 1, h: 1 }),
         None
@@ -850,7 +850,7 @@ fn a_report_during_the_commit_lands_on_top_and_one_before_it_is_carried() {
         "확정 전에 닿은 보고 = 확정이 옮긴 값"
     );
     drop(mgr);
-    // ③ 의 락 밖 검사가 보고 스레드의 락을 잘못 잡지 않게 그 스레드를 먼저 끝낸다.
+    // End the report thread first so that the outside-the-lock check of ③ does not wrongly take that thread's lock.
     reporter.join().unwrap();
     let _ = step.finish(&spare, &FakePort::new(&spare, &layout));
     assert_eq!(
@@ -923,7 +923,7 @@ fn a_close_that_fails_is_tried_once_more_and_a_second_failure_frees_the_slot() {
     }
 }
 
-// ── 숨기기 · 트레이 보이기(I17) ──
+// ── hide · tray show (I17) ──
 
 #[test]
 fn a_hide_between_claim_and_reveal_keeps_the_window_hidden() {
@@ -969,7 +969,7 @@ fn a_tray_show_rehangs_the_hold_of_a_claimed_window_only() {
     assert_eq!(spare.on_tray_show(&label), TrayShow::Adopted);
 }
 
-// ── 듣기 실패(I28) ──
+// ── listening failure (I28) ──
 
 #[test]
 fn a_window_that_failed_to_listen_leaves_the_pool_without_an_immediate_rebuild() {
@@ -1072,7 +1072,7 @@ fn a_window_outside_the_pool_is_not_counted() {
     assert!(spare.claim().claim.is_some());
 }
 
-// 듣기 결과는 칸의 창인지 먼저 본다 — 풀 밖 창의 「들었다」가 셈을 되돌리면 잇단 실패가 끝내 풀을 끄지 못한다.
+// The listening result first looks at whether it is the field's window — if a 「들었다」 (it listened) of a window outside the pool resets the count, consecutive failures never turn the pool off.
 #[test]
 fn a_listen_success_from_a_window_outside_the_pool_does_not_reset_the_count() {
     let (spare, _) = fresh();
@@ -1092,7 +1092,7 @@ fn a_listen_success_from_a_window_outside_the_pool_does_not_reset_the_count() {
     );
 }
 
-// ── 역할 · 채택 번호(I26) ──
+// ── role · adoption number (I26) ──
 
 #[test]
 fn the_adoption_number_is_reported_only_while_the_reveal_is_pending() {
@@ -1115,7 +1115,7 @@ fn the_adoption_number_is_reported_only_while_the_reveal_is_pending() {
     assert_eq!(spare.reveal_generation(&claim.label), None);
 }
 
-// ── `window_role{adoptable}` 의 답(I26 · I28) ──
+// ── the answer of `window_role{adoptable}` (I26 · I28) ──
 
 fn reply(role: WindowRole, generation: Option<u32>, close: bool) -> RoleAnswer {
     RoleAnswer {
@@ -1160,7 +1160,7 @@ fn a_pool_window_that_listens_stays_spare() {
     assert!(spare.is_spare(&label));
 }
 
-// 모델 창은 이 사건이 필요 없다 — 듣기를 못 걸어도 닫지 않고 셈하지도 않는다.
+// A model window does not need this event — even if it could not set up listening, it is neither closed nor counted.
 #[test]
 fn a_model_window_is_model_whether_or_not_it_listens() {
     let (spare, _) = fresh();
@@ -1185,7 +1185,7 @@ fn a_model_window_is_model_whether_or_not_it_listens() {
     );
 }
 
-// 채택 사건을 놓친 페이지(늦은 마운트 · 다시 읽기)는 보임을 기다리는 동안 그 번호를 답으로 받는다 — 듣기를 못 걸었어도.
+// A page that missed the adoption event (late mount · reload) receives that number as the answer while waiting to be shown — even if it could not set up listening.
 #[test]
 fn an_adopted_window_awaiting_its_reveal_gets_its_adoption_number() {
     let (spare, _) = fresh();
@@ -1214,7 +1214,7 @@ fn the_role_answer_asks_the_model_with_the_pool_unlocked() {
     assert_eq!(answer, reply(WindowRole::Model, None, false));
 }
 
-// ── 뜻밖의 `Destroyed` ──
+// ── an unexpected `Destroyed` ──
 
 #[test]
 fn a_spare_lost_in_any_state_is_rebuilt_unless_exiting() {
@@ -1224,25 +1224,25 @@ fn a_spare_lost_in_any_state_is_rebuilt_unless_exiting() {
                 spare.begin_exit();
             }
         };
-        // 지어짐
+        // built
         let (spare, _) = fresh();
         let label = built(&spare, &Labels::default());
         stop(&spare);
         assert_eq!(spare.on_destroyed(&label), !exiting);
         assert!(!spare.is_spare(&label));
-        // 맡김
+        // handed over
         let (spare, _) = fresh();
         let claim = claimed(&spare, &Labels::default());
         stop(&spare);
         assert_eq!(spare.on_destroyed(&claim.label), !exiting);
-        // 닫는 중
+        // closing
         let (spare, _) = fresh();
         let claim = claimed(&spare, &Labels::default());
         let layout = LayoutState::new();
         let _ = spare.commit(&layout, &claim, &FakePort::new(&spare, &layout));
         stop(&spare);
         assert_eq!(spare.on_destroyed(&claim.label), !exiting);
-        // 짓는 중
+        // being built
         let (spare, _) = fresh();
         let labels = Arc::new(Labels::default());
         let building = HeldBuild::start(&spare, &labels, Ok(()));
@@ -1254,7 +1254,7 @@ fn a_spare_lost_in_any_state_is_rebuilt_unless_exiting() {
     assert!(!spare.on_destroyed("main"), "풀과 무관한 창");
 }
 
-// ── 창 역할 · 재기 받기 ──
+// ── window role · receiving measurements ──
 
 #[test]
 fn the_exit_mark_stays_once_set() {

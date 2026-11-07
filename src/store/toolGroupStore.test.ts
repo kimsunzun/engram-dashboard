@@ -1,4 +1,4 @@
-// 도구 묶음 펼침 상태 시험(ADR-0239 · TRD S21-chat-ux §4-4).
+// Tool group expand-state test (ADR-0239 · TRD S21-chat-ux §4-4).
 
 import { beforeEach, describe, expect, it } from 'vitest'
 
@@ -7,7 +7,7 @@ import { effectiveOpen, useToolGroupStore } from './toolGroupStore'
 const store = () => useToolGroupStore.getState()
 const openOf = (slotId: string, key: string) => effectiveOpen(store(), slotId, key)
 
-// zustand 싱글톤이라 시험 간 격리.
+// Isolation between tests since zustand is a singleton.
 beforeEach(() => useToolGroupStore.setState({ bySlot: {} }))
 
 describe('toolGroupStore', () => {

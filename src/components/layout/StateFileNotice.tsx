@@ -1,11 +1,11 @@
-// 이 실행이 화면 상태를 제대로 다루지 못할 때 main 에 띄우는 알림 — 부팅이 `state.json` 을 제대로 못 읽었거나(TRD
-// S21-storage §6-5) 이 실행이 화면 상태를 저장하지 않을 때(가드 ⅱ — 사본을 못 떴다 · 같은 종류로 띄우는 것 = 사용자
-// 결정 2026-10-06). 안내만 하고 고치는 단추는 두지 않는다 = 사용자 결정 2026-10-05 · 모달처럼 막지 않고(가린 자리는 ✕ 전까지 못 누른다) 닫을 수 있는 이 모양 =
-// 세션 판단(사용자 위임).
+// A notice raised in main when this launch cannot handle the screen state properly — when boot could not read `state.json` properly (TRD
+// S21-storage §6-5) or when this launch does not save the screen state (guard ⅱ — the copy could not be copied aside · raised as the same kind = user
+// decision 2026-10-06). It only informs and has no fix button = user decision 2026-10-05 · this shape that does not block like a modal (the covered area cannot be pressed until ✕) but can be closed =
+// session judgment (delegated by the user).
 //
-// ADR-0276: 이 알림은 레이아웃을 덮는다 · 가드 ⅱ 도 같은 종류로 띄운다.
-// ★스스로 자리를 잡지 않는다★ — 레이아웃을 덮는 층(`NoticeOverlay`)은 `AppLayout` 이 깐다.
-// ★닫으면 이 실행 동안 다시 안 뜬다★ — 두 값(`state_file` · `saves`)은 부팅 단계 ⑥ 이 정하고 답해도 바뀌지 않는다
+// ADR-0276: this notice covers the layout · guard ⅱ is also raised as the same kind.
+// ★It does not take its own place★ — the layer that covers the layout (`NoticeOverlay`) is laid by `AppLayout`.
+// ★Once closed it does not show again during this launch★ — the two values (`state_file` · `saves`) are decided by boot step ⑥ and do not change even when answered
 // (`src-tauri/bindings/RestoreStatusView.ts`).
 
 import { useState } from 'react'
@@ -15,8 +15,8 @@ import { t } from '../../i18n'
 
 function messageOf(stateFile: StateFileStatus | undefined, saves: boolean | undefined): string | null {
   switch (stateFile) {
-    // 가드 ⅰ(못 읽음 · 새 판)도 `saves:false` 지만 이 두 문구가 「저장하지 않는다」를 이미 싣는다 — 가드 ⅱ 문구를
-    //   겹쳐 띄우지 않는다.
+    // Guard ⅰ (unreadable · newer edition) is also `saves:false`, but these two wordings already carry 「저장하지 않는다」 (does not save) — we do not
+    //   raise the guard ⅱ wording on top of them.
     case 'unreadable':
       return t('restore.stateFileUnreadable')
     case 'newer':
@@ -32,7 +32,7 @@ function messageOf(stateFile: StateFileStatus | undefined, saves: boolean | unde
   }
 }
 
-/** 둘 다 `restore.status` 의 칸 — 아직 못 받았거나 모르는 값이면 `undefined`(그 칸으로는 그리지 않는다). */
+/** Both are fields of `restore.status` — `undefined` if not yet received or an unknown value (nothing is drawn for that field). */
 export default function StateFileNotice({
   stateFile,
   saves,

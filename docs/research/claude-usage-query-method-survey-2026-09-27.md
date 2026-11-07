@@ -1,97 +1,97 @@
-# Claude 사용량을 능동 조회하는 방법 — 피어 서베이 (medium)
+# Ways to actively query Claude usage — peer survey (medium)
 
-| 항목 | 값 |
+| Item | Value |
 |---|---|
-| **상태** | 적대 리뷰(FIX) 반영판 — 반영 기록은 §6 · A 탐침 결과 = §7(2026-09-27) |
-| **날짜** | 2026-09-27 |
-| **방법** | 수집 2갈래(피어 코드 · 공식 문서·정책) + 메인 grounding 스팟체크(§5) + cross-family 적대 리뷰 1회(§6) |
-| **앞 문서** | `docs/research/usage-limit-display-ui-survey-2026-09-26.md` 「사용자 결정」 — 갱신 = 대화 중 줍기 + 쿨타임(5분) 뒤 자동 조회 + 수동 ⟳. 이 문서는 그 **자동 조회를 Claude 에서 무엇으로 하나**를 본다 |
-| **확신도** | 확실 = 독립 출처 둘 이상 · 가능성 높음 = 출처 하나 · 불확실 = 미지지·추론 |
-| **정책 주의** | 이 문서는 약관·정책 문장을 **인용만** 한다. 해석·적용 판단은 법무·보안 담당 부서 몫이다 |
+| **Status** | Edition with adversarial review (FIX) applied — application record in §6 · A probe result = §7 (2026-09-27) |
+| **Date** | 2026-09-27 |
+| **Method** | 2 collection tracks (peer code · official docs/policy) + main grounding spot checks (§5) + one cross-family adversarial review (§6) |
+| **Preceding doc** | `docs/research/usage-limit-display-ui-survey-2026-09-26.md` 「사용자 결정」 — refresh = pick up during conversation + automatic query after the cooldown (5 min) + manual ⟳. This document looks at **what to use for that automatic query on Claude** |
+| **Confidence** | certain = two or more independent sources · likely = one source · uncertain = unsupported · inference |
+| **Policy caution** | This document only **quotes** terms/policy sentences. Interpretation and applicability are for the legal and security department |
 
-## 0. 결론
+## 0. Conclusion
 
-1. **피어 대부분은 비공개 OAuth 사용량 주소를 직접 부른다(B).** `GET https://api.anthropic.com/api/oauth/usage` + `Authorization: Bearer <토큰>` + `anthropic-beta: oauth-2025-04-20`. Orca·Paseo·CodexBar·jean·claude-usage-widget·CodeZeno 가 1순위로, ClaudeBar 가 보조로 쓴다. 토큰은 **Claude Code 가 저장한 것을 앱이 직접 읽는다**(`~/.claude/.credentials.json`, macOS Keychain, `CLAUDE_CODE_OAUTH_TOKEN`). 여럿이 `User-Agent: claude-code/2.1.x` 를 흉내 낸다(Orca `src/main/rate-limits/claude-fetcher.ts:46-48,358-360`). 일부(ClaudeBar·jean·Orca 관리 계정)는 Claude Code 의 공개 client_id 로 **토큰 갱신까지 스스로** 한다. (확실 — Orca 스팟체크)
-2. **t3code 는 SDK `get_usage`(A)를 쓴다.** 프롬프트를 절대 내보내지 않는 claude SDK 세션을 띄워 초기화만 끝내고 `usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET()` 를 부른다 — 주석: "사용자 메시지가 stdin 에 한 번도 쓰이지 않아 … Anthropic 에 API 요청을 시작하지 않는다"(`apps/server/src/provider/Layers/ClaudeProvider.ts:318-367`). 로그인은 claude 프로세스가 스스로 하므로 **앱이 토큰을 만지지 않는다.** 5분 캐시. (확실 — 스팟체크) 단 t3code 는 **SDK 라이브러리를 거쳐** 부른다 — SDK 없이 CLI 에 직접 보내는 경로의 증거는 아니다(§1). 또 "API 요청 없음"은 **추론(모델) 요청이 없다**는 뜻이고, 사용량 값 자체는 SDK 타입 주석대로 "claude.ai usage endpoint 에서" 온다(`sdk.d.ts:4232`) — 네트워크 호출은 있다.
-3. **사용량 주소는 조회 제한이 세다 — "벌칙 상자"처럼 군다.** ClaudeBar: "조용한 기간 뒤 단 한 번의 호출이 1시간짜리 `Retry-After` 를 부른 적이 있다 … 5분 캐시로도 걸렸다" → 성공값 15분 캐시·API 모드 하한 15분(`docs/providers/claude/design.md:61-62`). **이 15분은 운용 선택이지 안전이 증명된 간격이 아니다.** Orca: 기본 15분 폴링, 레이트리밋 중엔 이전 값을 24시간 유지. Claude Code 자신도 CHANGELOG 에 "usage endpoint 가 rate-limited 일 때 마지막 값을 'as of' 로 보여 준다"(2.1.208)·"한 기계의 세션들이 최근 1분 안의 읽기를 공유한다"(2.1.275)를 적었다. 사용자 이슈에는 10분 간격도 `Retry-After` 없이 한 시간 안에 계속 429 라는 보고(anthropics/claude-code#31637)와 `Retry-After: 0` 인 채 429 가 이어졌다는 보고(#30930)가 있다(공식 수치는 없음). (확실 — 조회 제한이 있다는 것 / 불확실 — 정확한 한도·안전 간격)
-4. **`get_usage`(A)가 B 와 같은 제한을 공유한다는 간접 증거가 여럿이다 — 정확한 버킷은 미확인.** ① SDK 타입이 값의 출처를 "claude.ai usage endpoint" 라 적는다(`sdk.d.ts:4232`) ② ClaudeBar 는 CLI `/usage` 와 자기 직접 호출이 같은 백엔드라 보고 직접 호출 429 뒤 CLI 로 넘어가지 않는다(`docs/providers/claude/design.md` 18행 — 리뷰어 인용) ③ CLI 2.1.275 가 한 기계 세션들의 최근 1분 읽기를 공유한다. 어느 것도 서버 쪽 버킷을 증명하지 않는다. 그 1분 공유 캐시는 A 쪽에만 이득이다. (가능성 높음 — 공유 / 불확실 — 버킷)
-5. **정책 문장(인용만):** Claude Code 법률·준수 문서(`code.claude.com/docs/en/legal-and-compliance`)는 OAuth 인증이 "Claude Code 와 다른 네이티브 Anthropic 앱의 일상적 사용을 위해 설계됐다"고 하고, "개발자는 Claude.ai 자격증명이나 세션 토큰을 수집·저장·중개할 수 없다"고 적는다. **같은 항목은 그보다 앞서 "Agent SDK 를 쓰는 개발자를 포함해 Claude 의 기능과 상호작용하는 제품을 만드는 개발자는 API 키 인증을 써야 한다(should)"고 적고, 이어서 제3자 개발자가 사용자 대신 Free·Pro·Max 플랜 자격증명으로 요청을 중계하는 것을 허용하지 않는다고 적는다.** 같은 문서는 "최종 사용자가 **수정하지 않은 Claude Code 바이너리**에 자기 구독으로 로그인하는 것을 막지 않는다"고도 적는다. B(앱이 토큰을 직접 읽어 호출)는 자격증명 문장이 이름 붙인 모양과 같고, API 키 문장은 Agent SDK 를 이름으로 들어 A 도 검토 범위에 든다. A 가 어느 쪽에 드는지는 이 문서가 판단하지 않는다 — **법무·보안 확인 대상.** (확실 — 다섯 문장 모두 존재, 메인이 원문 대조 2026-09-27)
-6. **공개된 공식 조회 API 는 없다.** 문서화된 경로는 statusline 의 `rate_limits`(TUI 전용 — 앞 문서 결정으로 쓰지 않음)와 실험 기능 `get_usage` 뿐이다. (가능성 높음 — 없음의 증명은 아니다)
-7. **C(짧은 프롬프트)·D(`/usage` 화면 긁기)·E(claude.ai 쿠키)는 보조로만 쓰인다.** C 는 CodeZeno 만(`max_tokens: 1` Haiku — 사용량을 쓴다), D 는 ClaudeBar 기본·Orca/CodexBar 보조(시작 대기 2초 고정 등 깨지기 쉬움), E 는 CodexBar 만.
+1. **Most peers call a private OAuth usage address directly (B).** `GET https://api.anthropic.com/api/oauth/usage` + `Authorization: Bearer <토큰>` + `anthropic-beta: oauth-2025-04-20`. Orca · Paseo · CodexBar · jean · claude-usage-widget · CodeZeno use it as first choice, and ClaudeBar as a secondary. The token is **the one Claude Code stored, which the app reads directly** (`~/.claude/.credentials.json`, macOS Keychain, `CLAUDE_CODE_OAUTH_TOKEN`). Several imitate `User-Agent: claude-code/2.1.x` (Orca `src/main/rate-limits/claude-fetcher.ts:46-48,358-360`). Some (ClaudeBar · jean · Orca managed accounts) even **refresh the token themselves** with Claude Code's public client_id. (certain — Orca spot check)
+2. **t3code uses the SDK `get_usage` (A).** It starts a claude SDK session that never sends a prompt, finishes only initialization, and calls `usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET()` — comment (back-translated, not the original wording): "no user message is ever written to stdin … so it does not start an API request to Anthropic" (`apps/server/src/provider/Layers/ClaudeProvider.ts:318-367`). The login is done by the claude process itself, so **the app does not touch the token.** 5-minute cache. (certain — spot check) However, t3code calls **through the SDK library** — it is not evidence for a path that sends directly to the CLI without the SDK (§1). Also, "no API request" means **no inference (model) request**; the usage value itself comes "from the claude.ai usage endpoint", as the SDK type comment says (`sdk.d.ts:4232`) — a network call does happen.
+3. **The usage address has strict query limits — it acts like a "penalty box".** ClaudeBar (quotes in this item back-translated, not the original wording): "a single call after a quiet period once triggered a 1-hour `Retry-After` … even a 5-minute cache got caught" → success values cached for 15 minutes · API-mode floor 15 minutes (`docs/providers/claude/design.md:61-62`). **This 15 minutes is an operating choice, not an interval proven safe.** Orca: default 15-minute polling, and while rate-limited it keeps the previous value for 24 hours. Claude Code itself wrote in its CHANGELOG "when the usage endpoint is rate-limited, it shows the last value as 'as of'" (2.1.208) and "sessions on one machine share a read made within the last 1 minute" (2.1.275). User issues include a report that even a 10-minute interval kept getting 429 within an hour with no `Retry-After` (anthropics/claude-code#31637) and a report that 429 continued with `Retry-After: 0` (#30930) (there is no official figure). (certain — that query limits exist / uncertain — the exact limit and the safe interval)
+4. **There are several pieces of indirect evidence that `get_usage` (A) shares the same limit as B — the exact bucket is unconfirmed.** ① The SDK type says the value's source is the "claude.ai usage endpoint" (`sdk.d.ts:4232`) ② ClaudeBar sees CLI `/usage` and its own direct call as the same backend, so it does not fall back to the CLI after a direct-call 429 (`docs/providers/claude/design.md` line 18 — reviewer's quote) ③ CLI 2.1.275 shares the last 1 minute of reads across sessions on one machine. None of them proves a server-side bucket. That 1-minute shared cache benefits only the A side. (likely — sharing / uncertain — the bucket)
+5. **Policy sentences (quotes only — back-translated here, not the original wording):** The Claude Code legal and compliance document (`code.claude.com/docs/en/legal-and-compliance`) says OAuth authentication "is designed for ordinary use of Claude Code and other native Anthropic apps", and "developers may not collect, store, or broker Claude.ai credentials or session tokens". **The same item says, earlier than that, that "developers building products that interact with Claude's capabilities, including those using the Agent SDK, should use API key authentication (should)", and goes on to say that third-party developers are not allowed to relay requests with Free · Pro · Max plan credentials on behalf of users.** The same document also says "it does not prevent end users from logging in to an **unmodified Claude Code binary** with their own subscription". B (the app reads the token directly and calls) has the same shape the credential sentence names, and the API key sentence names the Agent SDK, so A also falls within the review scope. Which side A falls under, this document does not decide — **subject to legal and security confirmation.** (certain — all five sentences exist, main checked against the source text 2026-09-27)
+6. **There is no public official query API.** The documented routes are only the statusline's `rate_limits` (TUI only — not used, per the preceding doc's decision) and the experimental `get_usage`. (likely — not a proof of absence)
+7. **C (short prompt) · D (scraping the `/usage` screen) · E (claude.ai cookie) are used only as secondaries.** C only by CodeZeno (`max_tokens: 1` Haiku — it consumes usage), D is ClaudeBar's default and Orca/CodexBar's secondary (fragile, e.g. a fixed 2-second startup wait), E only by CodexBar.
 
-## 1. 우리에게 주는 뜻
+## 1. What this means for us
 
-- **A 가 우리 제약에 가장 맞는다 — 단 raw stream-json 탐침이 A 를 고르는 선행 조건이다.** ★**→ 탐침 완료(§7, 2026-09-27): ①②③ 는 동작 확인(초기화 불요 · 첫 턴 없이 응답), ⑤ 는 모델 호출 흔적 없음(가능성 높음). 아래는 탐침 전 기록이다.**★ 토큰을 우리가 읽지 않고, 우리가 이미 띄우는 공식 CLI 에 묻는다. 그러나 t3code 는 SDK 를 거치므로 우리 경로의 증거가 아니다. 탐침으로 볼 것: ① 우리 데몬(Rust)이 SDK 라이브러리 없이 **CLI stream-json 에 `control_request{subtype:"get_usage"}` 를 직접 보내서** 되는지(CLI 2.1.208 릴리스 노트는 headless stream-json 이 control request 일반을 받는다고만 하고 이 subtype 은 적지 않는다 — 미실측) ② `initialize` 가 먼저 필요한지 ③ 첫 턴 전에도 되는지 ④ 응답 처리(§3 의 null·빠짐) ⑤ 사용량을 안 쓰는지(모델 호출이 없으니 안 쓸 것으로 **추론** — 공식 문장은 찾지 못함). 정책 쪽은 §0-5 의 Agent SDK·API 키 문장이 A 에도 닿는다 — 적용 판단은 법무·보안 몫.
-- **Claude 쿨타임 5분은 피어 증거와 부딪힌다.** 성숙한 피어는 Claude 조회 하한을 15분에 둔다(Orca·ClaudeBar). A 는 같은 제한을 공유할 가능성이 높아(§0-4) 5분 주기 조회는 429 를 부를 수 있다. → **Claude 만 15분에서 시작**이 증거에 맞는 쪽이다. 단 15분은 **출발점이지 안전 간격이 아니다** — 조용한 기간 뒤 한 번 호출에 1시간 거절을 받은 사례가 있다(§0-3). 계정 단위로 조율한다(한 계정에 조회 하나만). Codex(로컬 app-server)는 5분 그대로.
-- **429 처리는 `Retry-After` 존중에서 멈추지 않는다.** 값이 없거나·깨졌거나·과거거나·`0` 이면(#30930) 대체 대기를 쓴다(ClaudeBar = 5분). 거절 중엔 **자동·수동(⟳) 모두 즉시 재조회하지 않고** 이전 값을 유지한다.
-- JSON 모드 Claude 에이전트가 이미 떠 있으면 **그 프로세스에 `get_usage` 를 보낼 수 있는지**도 볼 가치가 있다(새 프로세스를 안 띄운다 — TRD 확인 사항).
+- **A fits our constraints best — but a raw stream-json probe is the precondition for choosing A.** ★**→ Probe done (§7, 2026-09-27): ①②③ confirmed working (no initialization needed · responds without a first turn), ⑤ shows no trace of a model call (likely). What follows is the pre-probe record.**★ We do not read the token; we ask the official CLI we already launch. But t3code goes through the SDK, so it is not evidence for our path. What the probe should look at: ① whether our daemon (Rust) works **sending `control_request{subtype:"get_usage"}` directly to the CLI stream-json**, without the SDK library (the CLI 2.1.208 release notes say only that headless stream-json accepts control requests in general and do not list this subtype — not measured) ② whether `initialize` is needed first ③ whether it works before the first turn ④ response handling (null · omissions in §3) ⑤ whether it does not consume usage (we **infer** it won't since there is no model call — no official sentence found). On the policy side, the Agent SDK · API key sentence of §0-5 reaches A too — the applicability decision is for legal and security.
+- **The Claude cooldown of 5 minutes collides with peer evidence.** Mature peers put the Claude query floor at 15 minutes (Orca · ClaudeBar). A likely shares the same limit (§0-4), so a 5-minute query period may draw 429. → **Starting Claude alone at 15 minutes** is the side that fits the evidence. However, 15 minutes is a **starting point, not a safe interval** — there is a case where one call after a quiet period got a 1-hour rejection (§0-3). Coordinate per account (only one query per account). Codex (local app-server) stays at 5 minutes.
+- **429 handling does not stop at honoring `Retry-After`.** If the value is missing, broken, in the past, or `0` (#30930), use a fallback wait (ClaudeBar = 5 minutes). While rejected, **neither automatic nor manual (⟳) re-queries immediately**; the previous value is kept.
+- If a JSON-mode Claude agent is already running, it is also worth checking **whether `get_usage` can be sent to that process** (no new process is launched — a TRD item to confirm).
 
-## 2. 피어 표
+## 2. Peer table
 
-| 피어 | 방법(순서) | 인증 | 주기·429 |
+| Peer | Method (order) | Authentication | Period · 429 |
 |---|---|---|---|
-| t3code | A (+ 대화 중 `rate_limit_event` 병합) | claude 프로세스가 스스로 | 5분 캐시·5분 헬스 갱신 · 429 처리 없음 |
-| Orca | B → 자격증명 재읽기·갱신 후 B → D · statusline 수신 | Keychain → `.credentials.json` | 15분 · 디바운스 5분 · `Retry-After` 존중 · 레이트리밋 중 24시간 유지 |
-| Paseo | B | `.credentials.json` → Keychain · 읽기만(갱신은 CLI 몫) | 5분 캐시 · 429 모름 |
-| CodexBar | B → D → E | Keychain/`.credentials.json` · 갱신은 `claude /status` 에 맡김 | 적응형 · 토큰별 429 게이트(기본 5분) |
-| ClaudeBar | D ↔ B | `.credentials.json` → Keychain → env · 스스로 갱신 | 성공 15분 캐시 · 하한 15분 · `Retry-After`(없으면 5분) |
-| jean | B + 자기 실행의 `rate_limit_event` 병합 | Keychain → `.credentials.json` · 스스로 갱신 | 5분 캐시 · 이벤트가 오는 동안 B 는 30분에 한 번 · 429 쿨다운 |
-| claude-usage-widget | B | env → `.credentials.json` → Keychain · 갱신 없음 | 60초 → 300초 백오프 · 429 두 번 재시도 |
-| CodeZeno (Windows) | B → C | `.credentials.json` 등 · 만료 시 `claude -p .`(사용량 씀) | 설정형 · `Retry-After` 최대 24시간 |
+| t3code | A (+ merges `rate_limit_event` during conversation) | the claude process itself | 5-minute cache · 5-minute health refresh · no 429 handling |
+| Orca | B → re-read and refresh credentials, then B → D · receives statusline | Keychain → `.credentials.json` | 15 minutes · debounce 5 minutes · honors `Retry-After` · keeps value 24 hours while rate-limited |
+| Paseo | B | `.credentials.json` → Keychain · read only (refresh is the CLI's job) | 5-minute cache · unaware of 429 |
+| CodexBar | B → D → E | Keychain/`.credentials.json` · refresh left to `claude /status` | adaptive · per-token 429 gate (default 5 minutes) |
+| ClaudeBar | D ↔ B | `.credentials.json` → Keychain → env · refreshes itself | success cached 15 minutes · floor 15 minutes · `Retry-After` (5 minutes if absent) |
+| jean | B + merges `rate_limit_event` of its own runs | Keychain → `.credentials.json` · refreshes itself | 5-minute cache · while events arrive B runs once per 30 minutes · 429 cooldown |
+| claude-usage-widget | B | env → `.credentials.json` → Keychain · no refresh | 60 seconds → 300-second backoff · retries twice on 429 |
+| CodeZeno (Windows) | B → C | `.credentials.json` etc. · on expiry `claude -p .` (consumes usage) | configurable · `Retry-After` up to 24 hours |
 
-## 3. `get_usage` 모양 (SDK 타입 `sdk.d.ts` 기준)
+## 3. `get_usage` shape (per SDK type `sdk.d.ts`)
 
-- 요청: `{type:"control_request", request_id, request:{subtype:"get_usage", skip_behaviors?:boolean}}` — `skip_behaviors` 는 "사용량 미터처럼 플랜 한도만 필요한 호출자용"(7일치 기록 스캔을 건너뜀).
-- 응답: `subscription_type`(pro/max/team/enterprise/null) · `rate_limits_available` · `rate_limits`(null 가능){five_hour, seven_day, seven_day_opus, seven_day_sonnet, seven_day_oauth_apps: {utilization 0–100 | null, resets_at ISO 8601 | null}, model_scoped[](없을 수 있고 허용 목록으로 걸러짐 — `sdk.d.ts:4285-4295`), extra_usage} · `session{…}`.
-- **null·빠짐은 정상 응답이다**(`sdk.d.ts:4234-4254,4303`) — 없는 값을 0% 로 그리지 않는다.
-- 표시: "EXPERIMENTAL: this API is unstable and may change or be removed in any release without notice"(`sdk.d.ts:3041`).
+- Request: `{type:"control_request", request_id, request:{subtype:"get_usage", skip_behaviors?:boolean}}` — `skip_behaviors` is (back-translated) "for callers like usage meters that need only the plan limits" (skips scanning 7 days of history).
+- Response: `subscription_type` (pro/max/team/enterprise/null) · `rate_limits_available` · `rate_limits` (may be null){five_hour, seven_day, seven_day_opus, seven_day_sonnet, seven_day_oauth_apps: {utilization 0–100 | null, resets_at ISO 8601 | null}, model_scoped[] (may be absent and is filtered by an allowlist — `sdk.d.ts:4285-4295`), extra_usage} · `session{…}`.
+- **null · omissions are normal responses** (`sdk.d.ts:4234-4254,4303`) — do not draw a missing value as 0%.
+- Label: "EXPERIMENTAL: this API is unstable and may change or be removed in any release without notice" (`sdk.d.ts:3041`).
 
-## 4. 한계
+## 4. Limits
 
-- **미실측:** A 가 B 와 같은 429 예산을 쓰는지(간접 증거만 — §0-4) · 사용량 소모 여부(모델 호출 흔적 없음까지만 — §7) · 떠 있는 에이전트 프로세스에 보내는 경로. (CLI stream-json 직접 전송 · `initialize` 필요 여부 · 첫 턴 전 동작은 §7 탐침으로 확인됐다.)
-- 조회 제한 수치는 피어·사용자 관찰뿐이다(공식 수치 없음). 관찰끼리도 갈린다(5분이 버텼다는 보고 vs 10분도 429 라는 보고). 15분도 안전이 증명된 간격이 아니다.
-- 약관 해석은 하지 않았다. 언론 보도(2026-02 문구 변경·차단 조치)는 1차 출처로 확인하지 않았다.
-- 피어 소스 시점: t3code `5378f87f9`(2026-09-18) · Orca `df7460af`(2026-08-20) · Paseo `bbe3f17`(2026-08-25) · 그 밖은 2026-09-27 기본 브랜치.
+- **Not measured:** whether A uses the same 429 budget as B (indirect evidence only — §0-4) · whether usage is consumed (only up to no trace of a model call — §7) · the path of sending to a running agent process. (Sending CLI stream-json directly · whether `initialize` is needed · behavior before the first turn were confirmed by the §7 probe.)
+- The query-limit figures are only peer and user observations (no official figure). The observations disagree with each other (a report that 5 minutes held vs a report that even 10 minutes gets 429). 15 minutes is also not an interval proven safe.
+- We did not interpret the terms. Press reports (the 2026-02 wording change · blocking measures) were not checked against a primary source.
+- Peer source points in time: t3code `5378f87f9` (2026-09-18) · Orca `df7460af` (2026-08-20) · Paseo `bbe3f17` (2026-08-25) · the rest were the default branch on 2026-09-27.
 
-## 5. grounding (메인 대조)
+## 5. grounding (main check)
 
-| 클레임 | 대조 | 판정 |
+| Claim | Check | Decision |
 |---|---|---|
-| t3code 가 프롬프트 없는 SDK 세션으로 `get_usage` 를 부르고 "API 요청을 시작하지 않는다" | 로컬 클론 `ClaudeProvider.ts:318-367` 원문 | 지지 |
-| Orca 가 OAuth 주소 + beta 헤더 + `claude-code/2.1.0` UA 로 부른다 | 로컬 클론 `claude-fetcher.ts:46-48,358-360` | 지지 |
-| ClaudeBar 의 "벌칙 상자"·15분 하한 | `gh api` 로 `design.md:61-62` 원문 | 지지 |
-| `get_usage` 요청 모양·출처 주석·EXPERIMENTAL | `sdk.d.ts:3041,4201-4205,4232` | 지지 |
-| CLI 가 1분 안의 사용량 읽기를 공유 | CHANGELOG 원문 grep | 지지 |
-| 법률·준수 문서의 세 문장 | 페이지 원문 grep | 지지 |
-| 같은 문서의 API 키 문장·플랜 자격증명 중계 금지 문장(§6 반영분) | 페이지 원문 대조(2026-09-27) | 지지 |
-| 나머지 피어(Paseo·CodexBar·jean·widget·CodeZeno) 세부 | 메인 미대조 — 수집자 보고 | 부분지지(단일 출처) |
-| §6 반영분의 새 인용(ClaudeBar `design.md` 18·48행 · `sdk.d.ts` null 허용 행 · #30930) | 리뷰어 대조 — 메인 미대조 | 부분지지(단일 출처) |
+| t3code calls `get_usage` with a prompt-less SDK session and "does not start an API request" | local clone `ClaudeProvider.ts:318-367` source text | supported |
+| Orca calls with the OAuth address + beta header + `claude-code/2.1.0` UA | local clone `claude-fetcher.ts:46-48,358-360` | supported |
+| ClaudeBar's "penalty box" · 15-minute floor | `design.md:61-62` source text via `gh api` | supported |
+| `get_usage` request shape · source comment · EXPERIMENTAL | `sdk.d.ts:3041,4201-4205,4232` | supported |
+| The CLI shares usage reads within 1 minute | CHANGELOG source-text grep | supported |
+| Three sentences of the legal and compliance document | page source-text grep | supported |
+| The API key sentence of the same document · the plan-credential relay prohibition sentence (the part applied from §6) | page source-text check (2026-09-27) | supported |
+| Details of the remaining peers (Paseo · CodexBar · jean · widget · CodeZeno) | not checked by main — collector's report | partially supported (single source) |
+| New quotes in the part applied from §6 (ClaudeBar `design.md` lines 18 · 48 · `sdk.d.ts` null-allowed line · #30930) | checked by the reviewer — not checked by main | partially supported (single source) |
 
-기존 `sdk.d.ts` 줄 번호는 버전 미기록 사본 기준 — 0.3.276 대응 줄은 §7.
+The existing `sdk.d.ts` line numbers are based on a copy with no recorded version — the lines for 0.3.276 are in §7.
 
-## 6. 적대 리뷰 결과
+## 6. Adversarial review result
 
-리뷰어 = codex(cross-family) · 판정 **FIX** · 원문 = `.claude/handoff/attachments/claude-usage-query-review-2026-09-27.md`.
+Reviewer = codex (cross-family) · decision **FIX** · source text = `.claude/handoff/attachments/claude-usage-query-review-2026-09-27.md`.
 
-| # | 지적(심각도) | 반영 |
+| # | Finding (severity) | Applied in |
 |---|---|---|
-| 1 | A 추천이 미실측 CLI 직접 경로에 기댄다 — raw stream-json 탐침을 선행 조건으로(높음) | §0-2 · §1 · §4 |
-| 2 | 정책 인용에 인접 문장(Agent SDK 사용자도 API 키 인증) 누락 — A 에도 닿는다(높음) | §0-5 · §1 · §5 |
-| 3 | 15분을 증거가 받친 간격처럼 적었다 — 출발점일 뿐(중간) | §0-3 · §1 · §4 |
-| 4 | A·B 제한 공유의 간접 증거를 뺐다 — 버킷은 미확인(중간) | §0-4 · §1 · §4 |
-| 5 | `get_usage` 응답의 null·빠짐을 뺐다 — 0% 로 그리지 말 것(중간) | §3 · §1 |
-| 6 | 429 처리가 `Retry-After` 존중에서 멈춘다 — 대체 대기·즉시 재조회 금지(중간) | §0-3 · §1 |
+| 1 | The A recommendation rests on an unmeasured direct CLI path — make a raw stream-json probe a precondition (high) | §0-2 · §1 · §4 |
+| 2 | The policy quote omits the adjacent sentence (Agent SDK users also use API key authentication) — it reaches A too (high) | §0-5 · §1 · §5 |
+| 3 | 15 minutes was written as if the evidence backed the interval — it is only a starting point (medium) | §0-3 · §1 · §4 |
+| 4 | The indirect evidence that A and B share a limit was left out — the bucket is unconfirmed (medium) | §0-4 · §1 · §4 |
+| 5 | The null · omissions of the `get_usage` response were left out — do not draw as 0% (medium) | §3 · §1 |
+| 6 | 429 handling stops at honoring `Retry-After` — fallback wait · no immediate re-query (medium) | §0-3 · §1 |
 
-ClaudeBar `design.md` 행 번호는 기준이 어긋난다 — 같은 "벌칙 상자" 내용을 §0-3 은 61-62행(`gh api`), 리뷰어는 47-49행(raw main)으로 적었다. 원인은 확인하지 않았다.
+The ClaudeBar `design.md` line numbers disagree because they use different baselines — §0-3 wrote the same "penalty box" content at lines 61-62 (`gh api`), and the reviewer at lines 47-49 (raw main). The cause was not checked.
 
-## 7. 탐침 결과 (2026-09-27)
+## 7. Probe result (2026-09-27)
 
-- **대상** = 원시 `claude` CLI 2.1.280 — SDK 없음 · 프롬프트 없음 · `initialize` 없음. stdin 에 한 줄만 썼다: `{"type":"control_request","request_id":"<random>","request":{"subtype":"get_usage","skip_behaviors":true}}`
-- **인자** = 우리 백엔드 JSON 모드 인자 `--permission-mode bypassPermissions -p --input-format stream-json --output-format stream-json --replay-user-messages --verbose` + 부작용 줄이기 `--no-session-persistence --settings {"disableAllHooks":true} --strict-mcp-config --mcp-config {"mcpServers":{}}`.
-- **결과** = 기동 뒤 약 1.2초에 `control_response` success. stdout 전체가 그 한 줄이다(`system:init`·`assistant`·`result` 없음).
-- **응답 모양** = `rate_limits.five_hour`/`seven_day` {utilization, resets_at} · `subscription_type` · `model_scoped`[] · 키는 있고 값이 null 인 창(`seven_day_opus`·`seven_day_sonnet`·`seven_day_oauth_apps`) · 타입에 없는 필드 여럿.
-- **모델 호출 없음** — `session.total_api_duration_ms`=0 · `total_cost_usd`=0 · `model_usage`={}. (가능성 높음 — 증명은 아니다)
-- **조회 예산** = `get_usage` 1회 사용 · 429 없음. A 에서 앱은 토큰을 만지지 않는다.
-- **미검** = 부작용 줄이는 인자 없이 우리 인자 그대로 · 이미 떠 있는 에이전트 프로세스에 `get_usage` 보내기 · CLI 에 "get_usage is not supported in this context" 를 돌려주는 분기가 있다(어느 모드인지 미식별).
-- **SDK 줄 번호(`@anthropic-ai/claude-agent-sdk@0.3.276` — t3code `pnpm-lock.yaml:1117` 의 버전)** = EXPERIMENTAL 메서드 2860-2868 · `SDKControlGetUsageRequest` 3995-4001 · 응답 타입 4006 · "claude.ai usage endpoint" 주석 4027 · null 가능 창 4039-4079 · `model_scoped?` 4083 · `rate_limits … | null` 4098.
-- 원시 로그 = 세션 스크래치(저장소 밖, 식별자 없음).
+- **Target** = raw `claude` CLI 2.1.280 — no SDK · no prompt · no `initialize`. Only one line was written to stdin: `{"type":"control_request","request_id":"<random>","request":{"subtype":"get_usage","skip_behaviors":true}}`
+- **Arguments** = our backend JSON-mode arguments `--permission-mode bypassPermissions -p --input-format stream-json --output-format stream-json --replay-user-messages --verbose` + side-effect reducers `--no-session-persistence --settings {"disableAllHooks":true} --strict-mcp-config --mcp-config {"mcpServers":{}}`.
+- **Result** = a `control_response` success about 1.2 seconds after startup. The whole stdout is that one line (no `system:init` · `assistant` · `result`).
+- **Response shape** = `rate_limits.five_hour`/`seven_day` {utilization, resets_at} · `subscription_type` · `model_scoped`[] · windows whose key is present but value is null (`seven_day_opus` · `seven_day_sonnet` · `seven_day_oauth_apps`) · several fields not in the type.
+- **No model call** — `session.total_api_duration_ms`=0 · `total_cost_usd`=0 · `model_usage`={}. (likely — not a proof)
+- **Query budget** = `get_usage` used once · no 429. In A the app does not touch the token.
+- **Unchecked** = our arguments exactly as they are, without the side-effect-reducing arguments · sending `get_usage` to an already running agent process · the CLI has a branch that returns "get_usage is not supported in this context" (which mode is unidentified).
+- **SDK line numbers (`@anthropic-ai/claude-agent-sdk@0.3.276` — the version in t3code `pnpm-lock.yaml:1117`)** = EXPERIMENTAL method 2860-2868 · `SDKControlGetUsageRequest` 3995-4001 · response type 4006 · "claude.ai usage endpoint" comment 4027 · nullable windows 4039-4079 · `model_scoped?` 4083 · `rate_limits … | null` 4098.
+- Raw log = session scratch (outside the repository, no identifiers).

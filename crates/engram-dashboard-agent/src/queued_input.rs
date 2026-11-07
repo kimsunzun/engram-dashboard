@@ -1,18 +1,18 @@
-//! # 대기 입력 명부 — 화신 하나의 「아직 전달되지 않은 입력」 목록
+//! # Pending-input registry — the list of an incarnation's 「아직 전달되지 않은 입력」 (inputs not yet delivered)
 //!
-//! 링에 선 [`QueuedInputEvent`] 를 링 순서대로 환원해 목록(항목)과 묘비를 쥔다. 코어가 replay 락 안에서
-//! 먹이므로 **명부 상태 = 링 접두의 환원값**이다 — 명부를 바꾸는 다른 길을 만들지 않는다(세션의 취소·분류도
-//! 사건을 emit 할 뿐이다).
+//! It reduces the [`QueuedInputEvent`] standing in the ring in ring order and holds the list (items) and tombstones. Since the core
+//! feeds it inside the replay lock, **registry state = the reduced value of the ring prefix** — we do not make another way to change the registry (the session's cancel · classification
+//! only emit events too).
 //!
-//! - ★순수 · 잎★: 환원기는 밖을 부르지 않는다 — 락 순서 `input_order → replay → 명부(이 모듈) → 대기 목록
-//!   표(`inputs_pending`)` 에서 명부와 표는 둘 다 replay 아래 잎이다(명부 가드는 표를 쓰기 전에 놓는다 —
+//! - ★Pure · leaf★: the reducer calls nothing outside — in the lock order `input_order → replay → 명부(이 모듈) → 대기 목록
+//!   표(`inputs_pending`)` the registry and the table are both leaves under replay (the registry guard is released before writing the table —
 //!   `OutputCore::record_list_event`).
-//! - ★규칙은 이력이 아니라 지금 상태로 선다★ — 「앞에 무엇이 왔었나」를 되짚지 않으므로 같은 사건열이 늘
-//!   같은 상태로 떨어진다. 취소 대기의 두 칸(`answer` · `vendor_closed`)도 상태다.
-//! - ★프론트 누산기와 한 벌이다★: 같은 규칙을 TS 로 다시 짜고, 둘 다 골든 `queued_input_golden.json`(이
-//!   파일 옆)을 먹는다. 규칙을 고치면 골든과 TS 판을 같은 변경에서 고친다 — 갈라지면 한쪽이 빨개진다.
-//! - ★묘비는 생산자 결함에 대한 둘째 방어다★: 정상 링에서는 같은 id 의 종결이 `Queued` 보다 먼저 서지
-//!   않는다. 그래서 명부(화신 전체)와 누산기(링 창)의 묘비 집합이 달라도 환원 결과가 갈리지 않는다.
+//! - ★The rules stand on the current state, not on history★ — since it does not trace back 「앞에 무엇이 왔었나」 (what came before), the same event sequence always
+//!   lands in the same state. The two fields of cancel-pending (`answer` · `vendor_closed`) are state too.
+//! - ★It is a set with the frontend accumulator★: the same rules are rewritten in TS, and both feed on the golden `queued_input_golden.json` (next to this
+//!   file). When a rule changes, the golden and the TS edition are fixed in the same change — if they diverge, one side goes red.
+//! - ★Tombstones are a second defense against producer defects★: in a normal ring, the terminal of the same id does not come
+//!   before `Queued`. So even if the tombstone sets of the registry (the whole incarnation) and the accumulator (the ring window) differ, the reduction result does not diverge.
 // ADR-0231
 
 use std::collections::{HashMap, VecDeque};
@@ -22,59 +22,59 @@ use engram_dashboard_base::sync;
 
 use crate::types::{DeliveredCopy, DropCause, QueuedInputEvent};
 
-/// 화신당 묘비 상한 — 넘치면 가장 먼저 든 묘비부터 버린다(FIFO).
-/// ★골든 파일 머리(`tombstone_cap`)에 같은 값이 있다★ — TS 판이 자기 상수를 그것과 대조한다.
+/// The per-incarnation tombstone cap — on overflow, the tombstone that entered first is dropped first (FIFO).
+/// ★The same value is in the golden file header (`tombstone_cap`)★ — the TS edition checks its own constant against it.
 // ADR-0231
 pub const TOMBSTONE_CAP: usize = 1024;
 
-/// 취소 대기 항목의 「응답」 칸 — 우리 취소 요청이 어떻게 됐나.
-/// 「뺐다」(`removed:true`)는 칸에 남지 않는다 — 그 응답이 곧바로 취소됨으로 닫는다.
+/// The 「응답」 (answer) field of a cancel-pending item — what happened to our cancel request.
+/// 「뺐다」 (removed) (`removed:true`) does not stay in the field — that response closes it as cancelled right away.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CancelAnswer {
-    /// 아직 응답이 없다.
+    /// No response yet.
     Unanswered,
-    /// 성공 응답 `removed:false` 를 받았거나, 요청 자체가 실패했다(`CancelFailed`).
+    /// A success response `removed:false` was received, or the request itself failed (`CancelFailed`).
     NotRemoved,
 }
 
-/// 목록 항목의 상태 — 둘 다 비종결이다.
+/// The state of a list item — both are non-terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowPhase {
     Queued,
-    /// 취소 대기. `vendor_closed` = 그 id 의 벤더 닫힘(`Dropped{Unknown}`)을 이미 봤다 — 그것이 우리
-    /// 취소였는지는 `answer` 가 가른다.
+    /// Cancel-pending. `vendor_closed` = the vendor closing (`Dropped{Unknown}`) of that id has already been seen — whether that was our
+    /// cancel is told apart by `answer`.
     Cancelling {
         answer: CancelAnswer,
         vendor_closed: bool,
     },
 }
 
-/// 목록 한 줄 — 명부의 환원 상태를 빠짐없이 싣는다. 그래야 스냅숏 위에 뒤 사건을 다시 환원한 결과가
-/// 명부와 같다(취소 대기의 두 칸이 빠지면 늦게 온 응답·판명의 결말이 갈린다).
+/// One list line — it carries the registry's reduction state without omission. That way the result of re-reducing later events on top of a snapshot
+/// equals the registry (if the two fields of cancel-pending were missing, the outcome of late-arriving responses · findings would diverge).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueuedRow {
     pub id: String,
     pub text: String,
     pub phase: RowPhase,
-    /// 통로가 벤더에 넘겼다(마지막 `HandedOver` 의 값) — 단계(`phase`)와 따로 선다: 넘긴 뒤에 온 ✕ 는 취소 대기이면서
-    ///   넘긴 행이다. 결말이 아니다(행은 받음·거둠까지 남는다).
+    /// The path handed it to the vendor (the value of the last `HandedOver`) — it stands apart from the stage (`phase`): a ✕ that came after handing over is both cancel-pending and
+    ///   a handed-over row. It is not an outcome (the row stays until receipt · reaping).
     pub sent: bool,
 }
 
-/// 한 id 가 종결에 닿은 결말.
+/// The outcome by which one id reached terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
-    /// 벤더가 받았다(너무 늦은 취소 포함).
+    /// The vendor received it (including a cancel that came too late).
     Delivered,
-    /// 취소됐다 — 벤더가 그 글을 쓰지 않았다.
+    /// Cancelled — the vendor did not write that text.
     Cancelled,
-    /// 전달되지 않았다. `Withdrawn` 은 여기 오지 않는다(그 원인은 늘 `Cancelled` 다).
+    /// Not delivered. `Withdrawn` does not come here (its cause is always `Cancelled`).
     Discarded(DropCause),
 }
 
 impl Verdict {
-    /// ★되살림 정의 — 한 벌★: 종결 원인이 `Unknown` 이면 되살림 가능 묘비다. 어느 사건이 그 모름을
-    /// 만들었는지(벤더 닫힘 · 취소 응답 · 수락 모름)와 무관하다 — 「벤더가 준 사실이 모름을 이긴다」.
+    /// ★Revival definition — one set★: if the terminal cause is `Unknown`, it is a revivable tombstone. It does not matter which event
+    /// produced that unknown (vendor closing · cancel response · acceptance unknown) — 「벤더가 준 사실이 모름을 이긴다」 (a fact the vendor gave beats unknown).
     fn resurrectable(self) -> bool {
         self == Verdict::Discarded(DropCause::Unknown)
     }
@@ -87,18 +87,18 @@ impl Verdict {
     }
 }
 
-/// 명부 본체 — 항목(비종결 · 든 순서) + 묘비 + 화신 칸 둘.
+/// The registry body — items (non-terminal · in entry order) + tombstones + two incarnation fields.
 ///
-/// id 하나의 자리는 셋 중 하나다: **항목** · **묘비**(종결 — 본문 없이 id 와 「되살림 가능」 표시 하나)
-/// · **모름**(둘 다 없음).
+/// The slot of one id is one of three: **item** · **tombstone** (terminal — no body, just the id and one 「되살림 가능」 (revivable) flag)
+/// · **unknown** (neither).
 #[derive(Debug, Default)]
 pub struct Registry {
     items: Vec<QueuedRow>,
     tombstones: Tombstones,
-    /// 「받음 불가 판명」 표식 — `AckUnavailable` 을 환원했다. ★환원 규칙은 이 칸을 읽지 않는다★ — 판명
-    /// 뒤에 늦게 선 `Queued` 를 코어가 바꿔 적는 재료일 뿐이다.
+    /// The 「받음 불가 판명」 (acceptance-impossible finding) marker — `AckUnavailable` was reduced. ★The reduction rules do not read this field★ — it is only the material
+    /// for the core to rewrite a `Queued` that stood late after the finding.
     ack_unavailable_seen: bool,
-    /// 마지막으로 환원한 목록 사건의 seq(버린 사건 포함 — 그것도 링 접두에 들었다).
+    /// The seq of the last list event reduced (including dropped events — those also entered the ring prefix).
     as_of_seq: Option<u64>,
 }
 
@@ -107,12 +107,12 @@ impl Registry {
         Self::default()
     }
 
-    /// 링의 `seq` 자리에 선 사건 하나를 환원한다. 반환 = 이 사건으로 결말이 선 id 와 그 결말(환원 순서).
+    /// Reduce one event standing at the ring's `seq` slot. Returns = the id whose outcome was settled by this event and that outcome (in reduction order).
     ///
-    /// ★항목이 닫힌 것만 돌려주지 않는다★ — 모르는 id 에 묘비만 남긴 종결, 되살림(`Delivered`), 받음 뒤
-    /// 거절의 고쳐 읽기(`Discarded(Rejected)`)도 결말로 돌려준다. 항목이 있었는지는 호출자가 환원 전
-    /// 상태로 가른다.
-    /// ★호출 전제 = `seq` 는 호출마다 커진다(링 순서)★.
+    /// ★It does not return only item closures★ — a terminal that left only a tombstone on an unknown id, a revival (`Delivered`), and the re-reading
+    /// of a rejection after receipt (`Discarded(Rejected)`) are also returned as outcomes. Whether an item existed is told apart by the caller from the pre-reduction
+    /// state.
+    /// ★Call precondition = `seq` grows with every call (ring order)★.
     pub(crate) fn reduce(&mut self, seq: u64, event: &QueuedInputEvent) -> Vec<(String, Verdict)> {
         debug_assert!(
             self.as_of_seq.is_none_or(|last| seq > last),
@@ -139,7 +139,7 @@ impl Registry {
         closed
     }
 
-    /// 열린 항목(든 순서 — 가장 오래된 것이 앞).
+    /// Open items (in entry order — the oldest first).
     pub fn rows(&self) -> &[QueuedRow] {
         &self.items
     }
@@ -152,13 +152,13 @@ impl Registry {
         self.ack_unavailable_seen
     }
 
-    /// `None` = 이 화신의 목록 사건을 아직 하나도 환원하지 않았다.
+    /// `None` = not a single list event of this incarnation has been reduced yet.
     pub fn as_of_seq(&self) -> Option<u64> {
         self.as_of_seq
     }
 
-    /// `AckUnavailable` 이 받음으로 닫는 항목(= 열린 항목 전부)의 본문 사본 — 그 사건의 `delivered` 를
-    /// 링에 적기 전에 채울 때 쓴다(디코더는 빈 채로 낸다).
+    /// Copies of the bodies of the items `AckUnavailable` closes with a receipt (= all open items) — used when filling in that event's `delivered`
+    /// before writing it into the ring (the decoder emits it empty).
     pub fn open_copies(&self) -> Vec<DeliveredCopy> {
         self.items
             .iter()
@@ -169,7 +169,7 @@ impl Registry {
             .collect()
     }
 
-    /// 그 id 의 묘비. `Some(true)` = 되살림 가능 · `None` = 묘비가 없다(항목이거나 모름).
+    /// That id's tombstone. `Some(true)` = revivable · `None` = no tombstone (an item or unknown).
     pub fn tombstone(&self, id: &str) -> Option<bool> {
         self.tombstones.get(id)
     }
@@ -182,7 +182,7 @@ impl Registry {
         self.items.iter().position(|row| row.id == id)
     }
 
-    /// 항목을 지우고 묘비로 접는다 — 본문은 화신 수명 내내 쥐지 않는다.
+    /// Delete the item and fold it into a tombstone — the body is not held for the whole incarnation lifetime.
     fn close(&mut self, at: usize, verdict: Verdict, closed: &mut Vec<(String, Verdict)>) {
         let row = self.items.remove(at);
         self.tombstones.insert(&row.id, verdict.resurrectable());
@@ -190,8 +190,8 @@ impl Registry {
     }
 
     fn on_queued(&mut self, id: &str, text: &str) {
-        // 이미 항목이면 무동작(재방출 없음 — 둘째 방어) · 묘비면 버린다(늦은 `Queued` 가 영구 항목을 만들지
-        // 않게).
+        // If it is already an item, a no-op (no re-emit — a second defense) · if a tombstone, dropped (so a late `Queued` does not create a permanent
+        // item).
         if self.position(id).is_some() || self.tombstones.get(id).is_some() {
             return;
         }
@@ -203,8 +203,8 @@ impl Registry {
         });
     }
 
-    /// 넘김 표지 — 항목이면 단계와 무관하게 표지만 갈아 끼운다(결말 없음). 모르는 id · 묘비(받음 뒤 늦게 온 표지)는
-    /// 무동작이다 — 표지가 행을 지어내지 않는다.
+    /// Hand-over marker — if an item, only the marker is swapped regardless of stage (no outcome). An unknown id · tombstone (a marker that came late after receipt) is
+    /// a no-op — a marker does not invent a row.
     fn on_handed_over(&mut self, id: &str, sent: bool) {
         if let Some(at) = self.position(id) {
             self.items[at].sent = sent;
@@ -223,8 +223,8 @@ impl Registry {
         }
     }
 
-    /// `removed:true` = 벤더가 그 글을 자기 큐에서 뺐다 — 다시 배출될 수 없으니 수명주기 줄을 기다리지 않고
-    /// 닫는다. 기다리면 그 줄이 끝내 안 오는 날, 취소한 항목이 목록을 쥔 채 남아 우편을 막는다.
+    /// `removed:true` = the vendor took that text out of its own queue — it cannot be drained again, so we close it without waiting for the lifecycle line.
+    /// If we waited, on the day that line never comes, the cancelled item would stay holding the list and block mail.
     fn on_removed(&mut self, id: &str, closed: &mut Vec<(String, Verdict)>) {
         if let Some(at) = self.position(id) {
             if matches!(self.items[at].phase, RowPhase::Cancelling { .. }) {
@@ -233,8 +233,8 @@ impl Registry {
         }
     }
 
-    /// `removed:false` · 요청 실패. ★대기로 되돌리지 않는다★ — 응답 칸(`NotRemoved`)이 뒤이은 벤더 닫힘의 원인을
-    /// 가른다(그리기는 이 행을 넘긴 행처럼 ✕ 없이 그린다 — ADR-0235).
+    /// `removed:false` · request failure. ★It is not returned to waiting★ — the answer field (`NotRemoved`) tells apart the cause of the vendor closing that follows
+    /// (drawing renders this row without a ✕ like a handed-over row — ADR-0235).
     fn on_not_removed(&mut self, id: &str, closed: &mut Vec<(String, Verdict)>) {
         let Some(at) = self.position(id) else {
             return;
@@ -250,7 +250,7 @@ impl Registry {
                     vendor_closed: false,
                 };
             }
-            // 벤더가 이미 닫았는데 우리 취소가 아니었다.
+            // The vendor had already closed it and it was not our cancel.
             RowPhase::Cancelling {
                 vendor_closed: true,
                 ..
@@ -268,12 +268,12 @@ impl Registry {
                 self.tombstones.insert(id, false);
                 closed.push((id.to_owned(), Verdict::Delivered));
             }
-            // 「모름」으로 버린 항목에 벤더 받음이 뒤늦게 왔다. 말풍선은 뒤따르는 벤더 에코가 그린다.
+            // A vendor receipt arrived late for an item dropped as 「모름」 (unknown). The bubble is drawn by the vendor echo that follows.
             Some(true) => {
                 self.tombstones.clear_resurrectable(id);
                 closed.push((id.to_owned(), Verdict::Delivered));
             }
-            // 같은 id 의 둘째 `Delivered`(codex 는 `item/started`·`item/completed` 양쪽에서 낸다)도 여기서 끝난다.
+            // A second `Delivered` of the same id (codex emits it on both `item/started` and `item/completed`) also ends here.
             Some(false) => {}
         }
     }
@@ -287,7 +287,7 @@ impl Registry {
                     RowPhase::Cancelling { .. },
                     cause @ (DropCause::Interrupted | DropCause::AgentEnded | DropCause::Rejected),
                 ) => self.close(at, Verdict::Discarded(cause), closed),
-                // 실패·끊긴 턴이 닫았다 — 우리 취소는 이미 「못 뺐다」로 답했다.
+                // A failed · interrupted turn closed it — our cancel had already answered 「못 뺐다」 (could not remove).
                 (
                     RowPhase::Cancelling {
                         answer: CancelAnswer::NotRemoved,
@@ -295,7 +295,7 @@ impl Registry {
                     },
                     DropCause::Unknown,
                 ) => self.close(at, Verdict::Discarded(DropCause::Unknown), closed),
-                // 우리 취소가 뺐다면 그 응답이 같은 ms 에 뒤따른다 — 목록엔 취소 대기 그대로 두고 기다린다.
+                // If our cancel removed it, its response follows in the same ms — we leave it as cancel-pending in the list and wait.
                 (
                     RowPhase::Cancelling {
                         answer: CancelAnswer::Unanswered,
@@ -308,7 +308,7 @@ impl Registry {
                         vendor_closed: true,
                     };
                 }
-                // 벤더 닫힘을 이미 봤다 — 둘째 닫힘은 새 사실이 없다.
+                // The vendor closing has already been seen — a second closing carries no new fact.
                 (
                     RowPhase::Cancelling {
                         vendor_closed: true,
@@ -325,7 +325,7 @@ impl Registry {
                 self.tombstones.insert(id, verdict.resurrectable());
                 closed.push((id.to_owned(), verdict));
             }
-            // 받음 뒤 거절 — 벤더 `refused` 는 `started` 뒤의 종결로도 온다. 결말을 고쳐 읽고 되살림을 막는다.
+            // Rejection after receipt — the vendor `refused` also arrives as a terminal after `started`. Re-read the outcome and block revival.
             Some(_) if cause == DropCause::Rejected => {
                 self.tombstones.clear_resurrectable(id);
                 closed.push((id.to_owned(), Verdict::Discarded(DropCause::Rejected)));
@@ -334,10 +334,10 @@ impl Registry {
         }
     }
 
-    /// 열린 항목 전부를 그 링 자리의 받음으로 닫는다 — 벤더는 이미 받았고 자리만 판명 순간이다. 취소 대기도
-    /// 응답을 기다리지 않는다: 옛 CLI 는 취소 줄을 말없이 버릴 수 있어, 기다리면 그 항목이 에이전트가 끝날
-    /// 때까지 남아 우편을 막는다. 사본의 id 는 그 뒤 `Delivered` 와 같게 환원한다(항목이던 것은 방금 닫혀
-    /// 무동작 · 모르는 id 는 묘비만).
+    /// Close all open items with a receipt at that ring slot — the vendor already received them and the slot is only the moment of finding. Cancel-pending
+    /// does not wait for a response either: an old CLI may silently drop a cancel line, so if we waited, that item would remain until the agent ends
+    /// and block mail. The copy's id is reduced the same as the `Delivered` that follows (what was an item has just been closed so
+    /// a no-op · an unknown id gets only a tombstone).
     fn on_ack_unavailable(
         &mut self,
         delivered: &[DeliveredCopy],
@@ -353,7 +353,7 @@ impl Registry {
     }
 }
 
-/// 묘비 집합 — 든 순서를 쥐는 FIFO. ★집합이다★: 이미 있는 id 를 다시 넣으면 무동작이고 자리도 안 옮긴다.
+/// Tombstone set — a FIFO holding entry order. ★It is a set★: inserting an id that already exists is a no-op and does not move its slot.
 #[derive(Debug, Default)]
 struct Tombstones {
     order: VecDeque<String>,
@@ -385,8 +385,8 @@ impl Tombstones {
     }
 }
 
-/// 화신 하나의 명부 — 코어가 이 Arc 를 소유하고, 세션은 코어를 거쳐 닿는다(`AgentSession::queued_inputs()`).
-/// 읽는 쪽(목록 조회 · 취소 검증)은 이 락 하나만 잡는다.
+/// One incarnation's registry — the core owns this Arc, and the session reaches it through the core (`AgentSession::queued_inputs()`).
+/// The reading side (list query · cancel validation) takes only this one lock.
 // ADR-0231
 #[derive(Debug, Default)]
 pub struct QueuedInputs {
@@ -398,17 +398,17 @@ impl QueuedInputs {
         Self::default()
     }
 
-    /// ★이 가드를 쥔 채 emit·IO·다른 락을 잡지 말 것★ — 락 순서의 잎이다.
-    /// 독은 풀어 쓴다: 환원기는 밖을 부르지 않아 독이 들 길은 환원기 자신의 패닉뿐이고, 그 대가로 목록을
-    /// 읽는 호출자까지 죽일 이유가 없다.
-    /// ★crate 밖에 열지 않는다(`reduce` 도 같다)★ — 가드로 환원기에 닿으면 replay 락 밖에서 명부를 바꿀 수
-    /// 있어 「명부 = 링 접두의 환원값」이 깨진다. 밖에서는 [`Self::snapshot`] 으로 읽는다.
+    /// ★Do not emit, do IO, or take other locks while holding this guard★ — it is a leaf of the lock order.
+    /// Poison is unwrapped: the reducer calls nothing outside so the only way poison gets in is the reducer's own panic, and at that price there is no reason
+    /// to kill the callers that read the list.
+    /// ★Not opened outside the crate (`reduce` too)★ — if the reducer is reached through the guard, the registry can be changed outside the replay lock,
+    /// which breaks 「명부 = 링 접두의 환원값」 (registry = the reduced value of the ring prefix). Outside, read with [`Self::snapshot`].
     pub(crate) fn lock(&self) -> MutexGuard<'_, Registry> {
         sync::lock(&self.registry)
     }
 
-    /// 목록 행과 그 행이 환원한 마지막 목록 사건의 seq 를 **한 락 아래** 함께 읽는다 — 행 = 링 접두
-    /// `as_of_seq` 의 환원값이다. seq 는 한 화신 안에서만 견준다.
+    /// Read the list rows and the seq of the last list event those rows reduced together **under one lock** — rows = the reduced value of the ring prefix
+    /// `as_of_seq`. seq is compared only within one incarnation.
     pub fn snapshot(&self) -> (Vec<QueuedRow>, Option<u64>) {
         let registry = self.lock();
         (registry.items.clone(), registry.as_of_seq)
@@ -416,7 +416,7 @@ impl QueuedInputs {
 }
 
 impl CancelAnswer {
-    /// 목록 조회 응답의 `cancel.answer` 낱말 — 버스와 WS 가 같은 낱말을 싣는다.
+    /// The `cancel.answer` word of the list query response — the bus and WS carry the same word.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Unanswered => "none",
@@ -425,12 +425,12 @@ impl CancelAnswer {
     }
 }
 
-/// 목록 조회가 싣는 행 상태 — 명부 상태([`RowPhase`]) 위에 통로의 수락 모름 표지를 덧댄 것.
+/// The row state the list query carries — the registry state ([`RowPhase`]) with the path's acceptance-unknown marker laid on top.
 ///
-/// ★`Unconfirmed` 는 환원 상태가 아니다★ — 조회 순간의 통로 상태(`AgentTransport::unconfirmed_inputs`)라
-/// 행 스냅숏(`as_of_seq`)과 한 원자가 아니다. 재부착 대조는 그것을 `Queued` 로 읽는다.
-/// `Sent` = 넘김 표지(`QueuedRow::sent`)가 선 `Queued` 행 — 환원 상태라 `as_of_seq` 와 한 원자다. ★취소 대기 행의
-///   표지는 싣지 않는다★(`cancelling` 낱말이 이긴다 — 행 모양을 늘리지 않으려는 대가다).
+/// ★`Unconfirmed` is not a reduction state★ — it is the path state at the query moment (`AgentTransport::unconfirmed_inputs`), so
+/// it is not one atom with the row snapshot (`as_of_seq`). The reattach comparison reads it as `Queued`.
+/// `Sent` = a `Queued` row where the hand-over marker (`QueuedRow::sent`) stands — it is a reduction state, so it is one atom with `as_of_seq`. ★The marker of a cancel-pending row
+///   is not carried★ (the `cancelling` word wins — the price of not growing the row shape).
 // ADR-0231
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ListedState {
@@ -444,7 +444,7 @@ pub enum ListedState {
 }
 
 impl ListedState {
-    /// 목록 조회 응답의 `state` 낱말.
+    /// The `state` word of the list query response.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Queued => "queued",
@@ -455,7 +455,7 @@ impl ListedState {
     }
 }
 
-/// 목록 조회의 한 줄.
+/// One line of the list query.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListedRow {
     pub id: String,
@@ -463,20 +463,20 @@ pub struct ListedRow {
     pub state: ListedState,
 }
 
-/// 목록 조회 한 번의 답 — 버스 `agent.listQueuedInputs` 와 WS 목록 조회가 같은 이 값을 싣는다.
+/// The answer of one list query — the bus `agent.listQueuedInputs` and the WS list query carry this same value.
 // ADR-0231
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueuedListing {
     pub rows: Vec<ListedRow>,
-    /// 행이 환원한 마지막 목록 사건의 seq. `None` = 이 화신의 목록 사건이 아직 없다. `epoch` 안에서만 견준다.
+    /// The seq of the last list event the rows reduced. `None` = this incarnation has no list event yet. Compared only within `epoch`.
     pub as_of_seq: Option<u64>,
     pub epoch: u32,
-    /// 턴 관측 표의 `last_end_failed` 그대로 — 표에 항목이 없으면 거짓.
+    /// Exactly the turn observation table's `last_end_failed` — false if the table has no entry.
     pub stopped_after_error: bool,
 }
 
-/// 명부 행에 수락 모름 표지를 덧댄다 — `Queued` 행만 바뀐다(취소 대기가 이긴다 · 넘김 표지가 선 행은 `Sent` 그대로 —
-/// 환원 상태가 조회 순간의 표지를 이긴다). 명부에 없는 id 는 버린다(행을 지어내지 않는다).
+/// Lay the acceptance-unknown marker on registry rows — only `Queued` rows change (cancel-pending wins · a row with a hand-over marker stays `Sent` —
+/// the reduction state beats the marker at the query moment). An id not in the registry is dropped (no row is invented).
 pub(crate) fn overlay_unconfirmed(rows: Vec<QueuedRow>, unconfirmed: &[String]) -> Vec<ListedRow> {
     rows.into_iter()
         .map(|row| {
@@ -536,8 +536,8 @@ mod tests {
         }
     }
 
-    /// 골든의 사건은 wire `op` 모양 그대로다(`kind` 판별자) — 도메인 타입은 serde 를 달지 않으므로 여기서
-    /// 손으로 옮긴다.
+    /// The golden's events are in the wire `op` shape as is (the `kind` discriminator) — domain types carry no serde, so here
+    /// we carry them over by hand.
     fn event_of(v: &Value) -> QueuedInputEvent {
         match v["kind"].as_str().expect("kind") {
             "Queued" => QueuedInputEvent::Queued {
@@ -582,8 +582,8 @@ mod tests {
         }
     }
 
-    /// 행의 JSON 모양 = 목록 조회 응답의 행과 같은 낱말(`state` · `cancel`). 넘김 표지는 선 행에만 `"sent": true` 로
-    /// 싣는다(골든 `_format`) — 표지 없는 사례를 고치지 않으려는 모양이다.
+    /// A row's JSON shape = the same words as the list query response row (`state` · `cancel`). The hand-over marker is carried as `"sent": true` only on
+    /// standing rows (golden `_format`) — a shape chosen so cases without the marker need not be changed.
     fn row_json(row: &QueuedRow) -> Value {
         let (state, cancel) = match row.phase {
             RowPhase::Queued => ("queued", Value::Null),
@@ -665,7 +665,7 @@ mod tests {
         }
     }
 
-    // ── 골든(TS 누산기와 공유) ────────────────────────────────────────────────────
+    // ── Golden (shared with the TS accumulator) ────────────────────────────────────────────────────
 
     #[test]
     fn golden_sequences_reduce_to_the_expected_state() {
@@ -683,7 +683,7 @@ mod tests {
         assert_eq!(golden["tombstone_cap"].as_u64(), Some(TOMBSTONE_CAP as u64));
     }
 
-    /// 골든이 어휘를 빠짐없이 한 번 이상 먹인다 — 새 사건·원인이 골든 없이 들어오는 것을 막는다.
+    /// The golden feeds the vocabulary at least once without omission — it blocks a new event · cause from entering without a golden.
     #[test]
     fn the_golden_feeds_every_event_kind_and_cause() {
         let golden: Value = serde_json::from_str(GOLDEN).expect("골든 JSON");
@@ -725,7 +725,7 @@ mod tests {
         }
     }
 
-    // ── Rust 판만의 표면(스냅숏 · 사본 · seq) ─────────────────────────────────────
+    // ── Surface of the Rust edition only (snapshot · copy · seq) ─────────────────────────────────────
 
     fn queued(id: &str, text: &str) -> QueuedInputEvent {
         QueuedInputEvent::Queued {
@@ -768,8 +768,8 @@ mod tests {
         );
     }
 
-    /// 버린 사건도 링 접두에 들었다 — 스냅숏 seq 가 그 자리까지 간다(재부착 대조가 이 seq 뒤의 사건만 다시
-    /// 환원하므로, 버린 사건에서 멈추면 그 사건을 두 번 환원한다).
+    /// Dropped events also entered the ring prefix — the snapshot seq goes up to that slot (the reattach comparison re-reduces only events after this seq,
+    /// so stopping at a dropped event would reduce that event twice).
     #[test]
     fn an_ignored_event_still_advances_the_snapshot_seq() {
         let mut registry = Registry::new();
@@ -872,7 +872,7 @@ mod tests {
         assert_eq!(listed[1].text, "text of held");
     }
 
-    /// 낱말은 골든 행(`row_json`)과 같은 철자다 — 목록 조회 응답이 이 낱말을 싣는다.
+    /// The words are spelled the same as the golden rows (`row_json`) — the list query response carries these words.
     #[test]
     fn the_listing_words_are_pinned() {
         assert_eq!(ListedState::Queued.as_str(), "queued");

@@ -1,10 +1,10 @@
-# S10 구현 스펙 (impl-spec) — 코더 공통 참조
+# S10 implementation spec (impl-spec) — shared reference for coders
 
-`agent-transport-design.md`의 개념을 **구체 Rust 시그니처**로 확정한 문서. 모든 단계 코더가 이걸 기준으로 코딩한다. 설계 충돌 시 `agent-transport-design.md`(권위) > 이 문서 > 코더 재량.
+A document that fixes the concepts of `agent-transport-design.md` as **concrete Rust signatures**. Coders of every stage code against this. On a design conflict: `agent-transport-design.md` (authoritative) > this document > coder discretion.
 
-오케스트레이터(상위 claude)가 derive. 목표: **회귀 0**. 검증된 S9 PTY 코드를 아래 구조로 재편하되 동작·불변식은 그대로.
+Derived by the orchestrator (the upper claude). Goal: **zero regressions**. Restructure the verified S9 PTY code into the structure below, keeping behavior and invariants as they are.
 
-## 목표 모듈 레이아웃 (`src-tauri/src/pty/`)
+## Target module layout (`src-tauri/src/pty/`)
 
 ```
 types.rs           # 기존 타입 + 신규 중립 타입(OutputEvent/InputEvent/TerminalReason/Capabilities/CommandSpec/OutputChunk)
@@ -26,15 +26,15 @@ session_tracker.rs # 불변
 platform/windows.rs# 불변
 ```
 
-기존 `drain.rs`, `claude.rs`는 위로 흡수되며 제거(또는 re-export). `pty/mod.rs`는 새 모듈 선언으로 갱신.
+The existing `drain.rs` and `claude.rs` are absorbed into the above and removed (or re-exported). `pty/mod.rs` is updated with the new module declarations.
 
-## 소유권 분할 (절대 준수 — fable 저수준 취합 §2)
+## Ownership split (must follow — fable low-level consolidation §2)
 
-- **transport(PtyTransport)**: master / writer / child(Arc<Mutex>) / shutdown flag(Arc<AtomicBool>) / job_handle / reader(start 전까지 보관) / cols·rows? → **cols/rows는 AgentSession이 보유**(아래 참조).
-- **core(OutputCore)**: subscribers / replay / seq / status / finalized flag / status_sink / drain_handle / drain_done_rx / id / epoch.
-- **session(AgentSession)**: id / cwd / epoch / cols / rows(atomic) / core(Arc) / transport(Box).
+- **transport (PtyTransport)**: master / writer / child (Arc<Mutex>) / shutdown flag (Arc<AtomicBool>) / job_handle / reader (held until start) / cols·rows? → **cols/rows are held by AgentSession** (see below).
+- **core (OutputCore)**: subscribers / replay / seq / status / finalized flag / status_sink / drain_handle / drain_done_rx / id / epoch.
+- **session (AgentSession)**: id / cwd / epoch / cols / rows (atomic) / core (Arc) / transport (Box).
 
-## 신규 타입 (types.rs)
+## New types (types.rs)
 
 ```rust
 /// pump→core 내부 출력 이벤트. 확장 가능 enum. core는 variant-agnostic(_ => ignore).
@@ -88,9 +88,9 @@ pub struct Capabilities {
 #[derive(Debug, Clone, serde::Serialize)] pub struct ModelCaps   { pub select: bool, pub temperature: bool, pub max_tokens: bool }
 ```
 
-`PtyChunk` → **`OutputChunk`** 개명. **직렬화 필드명은 그대로(`seq`,`data`)** 유지(wire 호환). `get_snapshot` 반환도 `Vec<OutputChunk>`.
+`PtyChunk` → renamed **`OutputChunk`**. **Keep the serialized field names as they are (`seq`,`data`)** (wire compatibility). The `get_snapshot` return is also `Vec<OutputChunk>`.
 
-`PtyEvent`(프론트 wire, base64)·`OutputSink`(send(PtyEvent))·`StatusSink`·`PtyError`·`SinkError`·`AgentStatus`·`AgentInfo`는 **이름 유지**(프론트 결합 최소화). PtyError 변형 부족 시 `Unsupported(&str)` 추가 허용(ApiTransport용).
+`PtyEvent` (frontend wire, base64) · `OutputSink` (send(PtyEvent)) · `StatusSink` · `PtyError` · `SinkError` · `AgentStatus` · `AgentInfo` **keep their names** (minimize frontend coupling). If PtyError lacks variants, adding `Unsupported(&str)` is allowed (for ApiTransport).
 
 ## OutputCore (output_core.rs) — stage 2
 
@@ -109,21 +109,21 @@ pub struct OutputCore {
 }
 ```
 
-메서드(불변식: drain.rs/session.rs 현 락 규율 그대로):
+Methods (invariant: keep the current lock discipline of drain.rs/session.rs as is):
 - `new(id, epoch, status_sink) -> Self` — status Running, seq 0.
-- `emit(&self, event: OutputEvent)` — **variant-agnostic**. `TerminalBytes(bytes)`: seq.fetch_add → OutputChunk push(replay, brief lock) → subscribers clone 스냅샷 후 lock 해제 → lock 밖에서 PtyEvent(base64) fanout → dead sink 짧게 retain. 그 외 variant `_ => {}`. **불변식 1·2(drain.rs) 그대로**.
-- `finish(&self, reason: TerminalReason)` — `if finalized.swap(true, AcqRel) { return; }`. reason→AgentStatus 매핑 후 status 기록 + `status_sink.status_changed(id, status, epoch)`. **terminal 알림 주체 = pump(=여기), 현 drain transition 대체.**
-- `enter_exiting(&self) -> bool` — finalized면 false. status가 terminal이면 false. 아니면 Exiting 기록 + `status_changed(Exiting)` 후 true. **(manager kill 0.5단계용)**
-- `join_pump(&self, timeout: Duration)` — drain_done_rx.take() 후 recv_timeout. (kill 6단계)
-- `attach_pump(&self, handle: JoinHandle<()>, done_rx: Receiver<()>)` — transport.start가 호출해 핸들/rx 적재.
-- `subscribe(&self, sink) -> SinkId` / `unsubscribe(&self, sink_id)` — 현 session.rs C4 로직 그대로 이식.
-- `snapshot(&self) -> Vec<OutputChunk>` — replay 스냅샷.
-- `status(&self) -> AgentStatus` — clone 반환.
+- `emit(&self, event: OutputEvent)` — **variant-agnostic**. `TerminalBytes(bytes)`: seq.fetch_add → push OutputChunk (replay, brief lock) → take a clone snapshot of subscribers and release the lock → fan out PtyEvent (base64) outside the lock → briefly retain to drop dead sinks. Other variants `_ => {}`. **Invariants 1·2 (drain.rs) kept as is**.
+- `finish(&self, reason: TerminalReason)` — `if finalized.swap(true, AcqRel) { return; }`. Map reason→AgentStatus, then record status + `status_sink.status_changed(id, status, epoch)`. **The terminal notification emitter = the pump (= here), replacing the current drain transition.**
+- `enter_exiting(&self) -> bool` — false if finalized. False if status is already terminal. Otherwise record Exiting + `status_changed(Exiting)` and return true. **(for manager kill step 0.5)**
+- `join_pump(&self, timeout: Duration)` — after drain_done_rx.take(), recv_timeout. (kill step 6)
+- `attach_pump(&self, handle: JoinHandle<()>, done_rx: Receiver<()>)` — called by transport.start to store the handle/rx.
+- `subscribe(&self, sink) -> SinkId` / `unsubscribe(&self, sink_id)` — port the current session.rs C4 logic as is.
+- `snapshot(&self) -> Vec<OutputChunk>` — replay snapshot.
+- `status(&self) -> AgentStatus` — returns a clone.
 
-**reason→AgentStatus 매핑(AgentStatus 변형 추가 금지):**
+**reason→AgentStatus mapping (no adding AgentStatus variants):**
 `Exited{code}`→`Exited{code}` · `Killed`→`Killed` · `Interrupted`→`Killed` · `StreamClosed`→`Exited{code:None}` · `Cancelled`→`Killed` · `Error(s)`→`Failed{message:s}`.
 
-stage 2 단위 테스트: emit seq 증가/replay 누적 · finish 1회(2번 호출해도 1번만 status 변경) · enter_exiting가 terminal 후엔 false.
+Stage 2 unit tests: emit seq increments/replay accumulates · finish once (even if called twice, status changes only once) · enter_exiting is false after terminal.
 
 ## trait AgentTransport (transport/mod.rs) — stage 3
 
@@ -157,17 +157,17 @@ pub struct PtyTransport {
 }
 ```
 
-- `open(spec: &CommandSpec, size: (u16,u16)) -> Result<(PtyTransport, Option<u32> /*child_pid*/), PtyError>` — 현 manager.spawn_session의 1~5단계(openpty/spawn/job/clone_reader/take_writer). reader는 PtyTransport.reader에 보관. **pump는 아직 안 띄움.**
-- `start(&self, core)` — reader.take() → pump 스레드 spawn(아래) → `core.attach_pump(handle, done_rx)`.
-- pump 스레드 = 현 drain_loop + transition 흡수:
-  - 캡처: reader(move) · core(Arc) · child(Arc clone) · shutdown(Arc clone) · done_tx.
-  - loop: `reader.read` → Ok(0)/Err break, Ok(n) → `core.emit(OutputEvent::TerminalBytes(buf[..n].to_vec()))`. read 후 `if shutdown.load(Relaxed) break`.
-  - 탈출 후 reason 산출: child exit code를 status lock 없이 `child.lock().try_wait()`로 취득 → `if shutdown.load(Acquire) { Killed } else { Exited{code} }` → `core.finish(reason)` → `done_tx.send(())`.
-- `send_input(Raw(bytes))` — writer.write_all+flush (현 write_stdin).
-- `resize(cols,rows)` — master.resize. (cols/rows atomic 저장은 AgentSession이 함)
-- `interrupt()` — writer로 `0x03` 주입(현 send_input 경로 재사용).
-- `shutdown()` — **멱등**: shutdown.store(true,Release) → child.kill+wait → (win)job.terminate(1) → master.take(). (현 kill 1~5단계, drain 대기 제외).
-- `capabilities()` — 콘솔 값: input.raw=true, output.terminal_bytes=true, control{resize:true,interrupt:true,cancel:false,graceful_shutdown:false}, session{resume:true,snapshot:false,cwd_env:true}, 나머지 false.
+- `open(spec: &CommandSpec, size: (u16,u16)) -> Result<(PtyTransport, Option<u32> /*child_pid*/), PtyError>` — steps 1~5 of the current manager.spawn_session (openpty/spawn/job/clone_reader/take_writer). The reader is held in PtyTransport.reader. **The pump is not started yet.**
+- `start(&self, core)` — reader.take() → spawn the pump thread (below) → `core.attach_pump(handle, done_rx)`.
+- pump thread = the current drain_loop + transition absorbed:
+  - Captures: reader (move) · core (Arc) · child (Arc clone) · shutdown (Arc clone) · done_tx.
+  - loop: `reader.read` → Ok(0)/Err break, Ok(n) → `core.emit(OutputEvent::TerminalBytes(buf[..n].to_vec()))`. After a read, `if shutdown.load(Relaxed) break`.
+  - After exiting, produce the reason: get the child exit code via `child.lock().try_wait()` without the status lock → `if shutdown.load(Acquire) { Killed } else { Exited{code} }` → `core.finish(reason)` → `done_tx.send(())`.
+- `send_input(Raw(bytes))` — writer.write_all+flush (the current write_stdin).
+- `resize(cols,rows)` — master.resize. (Storing cols/rows atomically is done by AgentSession)
+- `interrupt()` — inject `0x03` via the writer (reuse the current send_input path).
+- `shutdown()` — **idempotent**: shutdown.store(true,Release) → child.kill+wait → (win) job.terminate(1) → master.take(). (The current kill steps 1~5, excluding the drain wait).
+- `capabilities()` — console values: input.raw=true, output.terminal_bytes=true, control{resize:true,interrupt:true,cancel:false,graceful_shutdown:false}, session{resume:true,snapshot:false,cwd_env:true}, the rest false.
 
 ## AgentSession (session.rs) — stage 5
 
@@ -186,12 +186,12 @@ pub struct AgentSession {
 - `write_input(&self, bytes: &[u8])` → `transport.send_input(InputEvent::Raw(bytes.to_vec()))`.
 - `resize(&self, cols, rows)` → `transport.resize(cols,rows)?; self.cols.store; self.rows.store;`.
 - `interrupt(&self)` → `transport.interrupt()`.
-- `kill(&self, timeout)` → `transport.shutdown(); self.core.join_pump(timeout);` **(= 합성, 인과 보존)**.
+- `kill(&self, timeout)` → `transport.shutdown(); self.core.join_pump(timeout);` **(= composition, causality preserved)**.
 - `enter_exiting(&self) -> bool` → core.enter_exiting().
 - `capabilities(&self)` → transport.capabilities().
-- `subscribe`/`unsubscribe`/`snapshot`/`status` → core 위임.
-- `core(&self) -> &Arc<OutputCore>` — manager.spawn에서 transport.start에 넘기기 위함(또는 new 내부에서 처리).
-- start 호출 위치: AgentSession::new가 `transport.start(core.clone())`를 부르거나, manager가 new 후 부른다 → **manager가 spawn_session에서 명시 호출**(테스트 가시성).
+- `subscribe`/`unsubscribe`/`snapshot`/`status` → delegate to core.
+- `core(&self) -> &Arc<OutputCore>` — so that manager.spawn can pass it to transport.start (or handle it inside new).
+- Where start is called: AgentSession::new calls `transport.start(core.clone())`, or the manager calls it after new → **the manager calls it explicitly in spawn_session** (test visibility).
 
 ## AgentBackend (backend/) — stage 4
 
@@ -202,9 +202,9 @@ pub trait AgentBackend: Send + Sync {
                   session_id: Option<Uuid>, cwd: PathBuf, env: Vec<(String,String)>) -> CommandSpec;
 }
 ```
-- `claude.rs ClaudeBackend` — 현 claude.rs build_command 로직. `--session-id`/`--resume`. needs_session=true.
-- `shell.rs ShellBackend` — program/args 그대로. needs_session=false.
-- `mod.rs` 디스패치:
+- `claude.rs ClaudeBackend` — the current claude.rs build_command logic. `--session-id`/`--resume`. needs_session=true.
+- `shell.rs ShellBackend` — program/args as is. needs_session=false.
+- `mod.rs` dispatch:
   ```rust
   pub fn needs_session(c: &AgentCommand) -> bool { backend_for(c).needs_session() }
   pub fn build_command_spec(c, mode, sid, cwd, env) -> CommandSpec { backend_for(c).build_spec(...) }
@@ -212,15 +212,15 @@ pub trait AgentBackend: Send + Sync {
       match c { Claude{..} => &ClaudeBackend, Shell{..} => &ShellBackend }
   }
   ```
-- 현 claude.rs의 단위 테스트는 backend/claude.rs로 이동(시그니처 맞춰 갱신).
-- **codex.rs/gemini.rs(tail)**: CodexBackend/GeminiBackend struct + build_spec(best-guess 플래그 + `// TODO: CLI spike로 플래그 확정` 표식). AgentCommand에 variant 추가 안 함(라우팅 X) — 구조만. 자체 단위 테스트로 build_spec 검증.
+- The unit tests of the current claude.rs move to backend/claude.rs (updated to match the signatures).
+- **codex.rs/gemini.rs (tail)**: CodexBackend/GeminiBackend structs + build_spec (best-guess flags + a `// TODO: CLI spike로 플래그 확정` marker). Do not add variants to AgentCommand (no routing) — structure only. Verify build_spec with their own unit tests.
 
 ## AgentManager (manager.rs) — stage 6
 
-PtyManager→AgentManager 개명. `sessions: RwLock<HashMap<AgentId, Arc<AgentSession>>>`. 나머지 필드 동일(status_sink/profiles/tracker).
+PtyManager renamed to AgentManager. `sessions: RwLock<HashMap<AgentId, Arc<AgentSession>>>`. The other fields are the same (status_sink/profiles/tracker).
 
-`spawn_agent` 흐름 변경:
-1. 이중 spawn 가드(동일) · profiles.upsert · cwd canonicalize(동일).
+`spawn_agent` flow changes:
+1. Double-spawn guard (same) · profiles.upsert · cwd canonicalize (same).
 2. `let needs = backend::needs_session(&profile.command); let sid = if needs { profiles.ensure_session_id(id) } else { None };`
 3. `let spec = backend::build_command_spec(&profile.command, mode, sid, cwd, profile.env.clone());`
 4. `spawn_session(id, spec, epoch)` → `(Arc<AgentSession>, Option<u32>)`:
@@ -230,34 +230,34 @@ PtyManager→AgentManager 개명. `sessions: RwLock<HashMap<AgentId, Arc<AgentSe
    - `transport.start(core.clone());`
    - `let session = Arc::new(AgentSession::new(id, spec.cwd.clone(), epoch, DEFAULT_COLS, DEFAULT_ROWS, core, transport));`
    - sessions.write().insert. return.
-5. tracker.watch(동일) · 로그 · agent_info · agent_list_updated.
+5. tracker.watch (same) · log · agent_info · agent_list_updated.
 
 `kill_agent`:
-- get_session → `session.enter_exiting()` true면 별도 알림 없음(enter_exiting가 이미 status_changed(Exiting) 발행) → `session.kill(Duration::from_secs(5))` → sessions.remove → tracker.unwatch → agent_list_updated.
+- get_session → if `session.enter_exiting()` is true, no separate notification (enter_exiting already emitted status_changed(Exiting)) → `session.kill(Duration::from_secs(5))` → sessions.remove → tracker.unwatch → agent_list_updated.
 
-`remove_session`(fallback용): tracker.unwatch → sessions.remove(Arc 회수) → `session.kill(5s)`(silent, Exiting 알림 없음). pump의 finish(Killed)는 정상 발행되고 join으로 소진(현 C-1 동작 동일).
+`remove_session` (for fallback): tracker.unwatch → sessions.remove (reclaim the Arc) → `session.kill(5s)` (silent, no Exiting notification). The pump's finish(Killed) is emitted normally and drained by the join (same as the current C-1 behavior).
 
-`early_terminal_status`: session.status()(=core.status()) 사용.
-`list_agents`/`agent_info`: cols/rows는 session.cols/rows, status는 session.status().
+`early_terminal_status`: uses session.status() (=core.status()).
+`list_agents`/`agent_info`: cols/rows from session.cols/rows, status from session.status().
 `get_snapshot` → session.snapshot().
-`write_stdin`→`write_input`, `resize`, 신규 `interrupt(id)` 위임.
-`shutdown_all` 동일(tracker.stop + scope kill_agent).
+`write_stdin`→`write_input`, `resize`, and the new `interrupt(id)` delegate.
+`shutdown_all` same (tracker.stop + scope kill_agent).
 
-**불변식 체크리스트(회귀 금지):**
-- kill 자원 순서 child→job→master(PtyTransport.shutdown) + master drop→pump EOF→core.finish→join_pump.
-- §10 락: sessions clone 후 해제 → session 내부 접근. status lock 보유 중 외부호출 금지. emit fanout 시 subscribers lock 미보유.
-- finalize 1회(core.finalized). epoch 재구독(epoch 보존). best-effort tracker 불변.
-- 과도기 Exiting=manager(enter_exiting 트리거), terminal=pump 단독(core.finish).
+**Invariant checklist (no regression):**
+- kill resource order child→job→master (PtyTransport.shutdown) + master drop→pump EOF→core.finish→join_pump.
+- §10 locks: release after sessions clone → then access session internals. No external calls while holding the status lock. No subscribers lock held during emit fanout.
+- Finalize once (core.finalized). epoch resubscribe (epoch preserved). best-effort tracker unchanged.
+- Transitional Exiting = manager (enter_exiting trigger), terminal = pump alone (core.finish).
 
 ## stage 7 — ApiTransport (transport/api.rs)
-AgentTransport 구현, 전부 `Err(PtyError::Unsupported(...))`/`unimplemented!`/no-op. start=no-op. capabilities 전부 false. **manager 라우팅 추가 안 함**(껍데기 존재만).
+Implements AgentTransport, all `Err(PtyError::Unsupported(...))`/`unimplemented!`/no-op. start=no-op. capabilities all false. **Do not add manager routing** (the shell merely exists).
 
-## stage 8 — commands/lib/프론트
-- commands: `write_stdin`→유지 또는 `send_input`(둘 다 가능, 우선 기존 유지+신규 `interrupt_agent` 추가). `interrupt_agent(agent_id)` 커맨드. lib.rs invoke_handler 등록.
-- AgentInfo에 `capabilities: Capabilities` 필드 추가 → agent_info에서 session.capabilities() 실어줌.
-- TS 미러(api/types.ts): Capabilities 인터페이스 + AgentInfo.capabilities 추가. (OutputEvent/InputEvent는 내부라 TS 미러 불필요. OutputChunk wire 필드 동일이라 영향 없음.)
+## stage 8 — commands/lib/frontend
+- commands: `write_stdin`→keep or `send_input` (both possible; first keep the existing one + add a new `interrupt_agent`). The `interrupt_agent(agent_id)` command. Register in the lib.rs invoke_handler.
+- Add a `capabilities: Capabilities` field to AgentInfo → agent_info carries session.capabilities().
+- TS mirror (api/types.ts): add the Capabilities interface + AgentInfo.capabilities. (OutputEvent/InputEvent are internal so no TS mirror is needed. OutputChunk wire fields are the same so no impact.)
 
-## QA 게이트(매 단계 후 오케스트레이터 인라인)
-`cargo test --lib` (≥19) + `cargo run --example headless`(Running→Exiting→Killed, remaining=0) + `cargo fmt` + `rg "use tauri" src/pty/`(→0). 통과해야 다음 단계·커밋.
+## QA gate (inline by the orchestrator after every stage)
+`cargo test --lib` (≥19) + `cargo run --example headless` (Running→Exiting→Killed, remaining=0) + `cargo fmt` + `rg "use tauri" src/pty/` (→0). It must pass before the next stage and commit.
 </content>
 </invoke>

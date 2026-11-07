@@ -1,41 +1,41 @@
-//! 전송 seam 과 인바운드 수신기(TRD §3-4 · §3-6).
+//! Transport seam and inbound receiver (TRD §3-4 · §3-6).
 
 use std::future::Future;
 use std::pin::Pin;
 
 use crate::{CommandEnvelope, CommandError, CommandReply, ErrorCode, RequestId};
 
-/// 봉투를 상대 프로세스로 보내고 **같은 `request_id`** 의 답을 기다린다.
+/// Sends the envelope to the peer process and waits for the reply with **the same `request_id`**.
 ///
-/// 구현체는 프로세스마다 하나다(데몬 = WS 연결 · 셸 = daemon_client · 화면 = invoke).
-/// ★이것이 교체점이라 전송 방식이 코드에 안 묶인다★(CLAUDE.md 「설계 원칙」).
+/// There is one implementation per process (daemon = WS connection · shell = daemon_client · screen = invoke).
+/// ★This is the swap point, so the transport method is not tied into the code★ (CLAUDE.md 「설계 원칙」 (design principles)).
 pub trait CommandLink: Send + Sync {
     fn send(&self, env: CommandEnvelope) -> Pin<Box<dyn Future<Output = CommandReply> + Send>>;
 }
 
-/// 받은 봉투를 넘겨받는 입구.
+/// The entry that takes over received envelopes.
 ///
-/// ★`on_command` 는 즉시 반환해야 한다★ — 적용은 **연결 태스크 밖**에서 돈다. 받은 자리에서 인라인으로
-/// 기다리면 합성 명령(핸들러가 같은 링크로 두 번째 명령을 부르는 경우)이 자기 답을 자기가 못 꺼내
-/// 교착한다(ADR-0081 결정 3 의 self-deadlock). 셸·데몬·웹뷰 **모두**에 적용되는 규칙이다.
+/// ★`on_command` must return immediately★ — applying runs **outside the connection task**. If it waits inline
+/// where it received the envelope, a composite command (a handler calling a second command over the same link) cannot pull
+/// its own reply and deadlocks (the self-deadlock of ADR-0081 decision 3). This rule applies to the shell, daemon, and webview **alike**.
 pub trait InboundCommands: Send + Sync {
     fn on_command(&self, env: CommandEnvelope, reply: ReplySink);
 }
 
-/// 답장 한 장을 그 `request_id` 로 되돌려 보내는 일회용 출구.
+/// A one-shot exit that sends one reply back under its `request_id`.
 ///
-/// ★「정확히 한 번」을 형태로 강제한다★ — 소비(`fn send(self)`)가 **두 번 이상**을 막고, [`Drop`] 이
-/// **0번**을 막는다. 소유자가 답을 못 내고 사라지면(경로 누락 · 조기 return · 패닉 unwind) 그 자리에서
-/// 오류 답장이 나간다. 이게 없으면 호출자는 마감시각까지 매달리고, 그건 「한 `request_id` 에 답장은
-/// 정확히 하나」(TRD §4-⑤)가 **최대 한 번**으로 약해진 것이다.
+/// ★It enforces 「정확히 한 번」 (exactly once) by shape★ — consuming (`fn send(self)`) prevents **two or more**, and [`Drop`]
+/// prevents **zero**. If the owner disappears without producing an answer (a missed path · an early return · a panic unwind), an
+/// error reply goes out right there. Without this, the caller hangs until the deadline, and that means 「한 `request_id` 에 답장은
+/// 정확히 하나」 (exactly one reply per request id) (TRD §4-⑤) has weakened to **at most once**.
 ///
-/// ★배달 호출 지점은 [`Drop`] **하나뿐**이다★ — `send` 는 결말을 적어 두기만 한다. ★`send` 안에서
-/// 콜백을 꺼내 부르는 형태로 되돌리지 말 것★: 부르는 지점이 둘이면 「앞 지점이 부르다 패닉 → 뒤 지점은
-/// 이미 소비됐다고 보고 그냥 반환」이라는 **답장 0번** 경로가 열린다. 지점이 하나면 그 경로 자체가 없다.
-/// `send(self)` 가 self 를 소비하므로 배달은 `send` 반환 전에 끝난다.
-/// ★남는 한계(형태로 못 막는 것)★: 콜백 **자체**가 패닉하면 답장이 나갔는지 알 수 없다 — `FnOnce` 라
-/// 다시 부를 수단이 없다. 그 패닉은 여기서 삼켜 drop 밖으로 내보내지 않는다(unwind 중 재패닉 = abort).
-/// 실물 전달 방식(oneshot·큐·콜백)은 조립부가 정한다 — 이 crate 는 전송을 모른다.
+/// ★There is **only one** delivery call site: [`Drop`]★ — `send` only records the outcome. ★Do not revert to a form that
+/// takes the callback out and calls it inside `send`★: with two call sites, a **zero-reply** path opens — 「앞 지점이 부르다 패닉 → 뒤 지점은
+/// 이미 소비됐다고 보고 그냥 반환」 (the first site panics while calling → the second site sees it as already consumed and just returns). With one site, that path does not exist at all.
+/// Since `send(self)` consumes self, delivery finishes before `send` returns.
+/// ★Remaining limit (what shape cannot prevent)★: if the callback **itself** panics, we cannot know whether the reply went out — it is `FnOnce`, so
+/// there is no means of calling it again. That panic is swallowed here and not let out of drop (a re-panic during unwind = abort).
+/// How it is actually delivered (oneshot · queue · callback) is decided by the assembly code — this crate knows nothing about transport.
 pub struct ReplySink {
     request_id: RequestId,
     outcome: Option<Result<serde_json::Value, CommandError>>,
@@ -55,7 +55,7 @@ impl ReplySink {
         self.request_id
     }
 
-    /// 결말을 적는다 — 실제 배달은 이 함수가 반환하기 직전의 [`Drop`] 이 한다(위 doc).
+    /// Records the outcome — the actual delivery is done by the [`Drop`] just before this function returns (doc above).
     pub fn send(mut self, outcome: Result<serde_json::Value, CommandError>) {
         self.outcome = Some(outcome);
     }
@@ -76,9 +76,9 @@ impl Drop for ReplySink {
             request_id: self.request_id,
             outcome,
         };
-        // drop 은 unwind 중에도 돈다 — 여기서 다시 패닉하면 프로세스가 abort 한다.
-        // 데몬 · 셸은 「가두는 중」 표시 밖의 패닉을 훅이 먼저 끝내므로(ADR-0292) 이 그물은 표시 안에서 drop 될
-        //   때와 훅 없는 시험 빌드에서만 실효가 있다.
+        // drop runs even during unwind — if it panics again here, the process aborts.
+        // In the daemon and shell the hook finishes any panic outside the 「가두는 중」 (containing) marker first (ADR-0292), so this net only has effect
+        //   when dropped inside the marker and in test builds without the hook.
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| deliver(reply)));
     }
 }
@@ -144,8 +144,8 @@ mod tests {
         assert_eq!(seen.lock().unwrap().len(), 1, "unwind 중에도 답장은 나간다");
     }
 
-    /// ★답을 낸 **뒤** 터져도 그 답이 그대로 나간다★ — 배달 지점이 하나라 「적었다 → 배달」 사이에
-    /// 패닉이 끼어들 자리가 없다.
+    /// ★Even if it blows up **after** producing the answer, that answer goes out as is★ — there is one delivery site, so there is no room
+    /// for a panic to intrude between 「적었다 → 배달」 (recorded → delivered).
     #[test]
     fn an_owner_that_panics_after_answering_still_sends_its_own_outcome() {
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -164,8 +164,8 @@ mod tests {
         assert!(seen[0].outcome.is_ok(), "오류 답장으로 덮이지 않는다");
     }
 
-    /// ★콜백 자체의 패닉은 drop 밖으로 못 나간다★ — unwind 중 재패닉은 abort 라 여기서 삼킨다.
-    /// 답장이 실제로 나갔는지는 **알 수 없다**(`FnOnce` 라 다시 부를 수단이 없다) — 형태로 못 막는 자리다.
+    /// ★A panic of the callback itself cannot get out of drop★ — a re-panic during unwind is abort, so it is swallowed here.
+    /// Whether the reply actually went out is **unknowable** (it is `FnOnce`, so there is no means of calling it again) — a spot shape cannot prevent.
     #[test]
     fn a_panicking_delivery_callback_does_not_escape() {
         let attempts = Arc::new(Mutex::new(0usize));

@@ -1,31 +1,31 @@
-//! 웹뷰가 주인인 명령의 셸쪽 다리 — 부팅 보고를 받아 등록 패킷에 얹고, 데몬이 배달한 봉투를 그 웹뷰로
-//! 내려보낸 뒤 답장을 상관시킨다(TRD §3-7 조항 2 · §3-8 의 홉 ②).
+//! The shell-side bridge for commands the webview owns — it takes the boot report and puts it on the registration packet, sends the envelope the daemon delivered
+//! down to that webview, and then correlates the reply (TRD §3-7 clause 2 · hop ② of §3-8).
 //!
-//! ★두 번째 제어 표면이 아니다★: 웹뷰 안에서 실제로 도는 것은 여전히 `src/commands/registry.ts` 의
-//! `run(id, args)` 하나다(ADR-0055). 이 모듈이 더하는 것은 그 입구로 가는 **바깥 경로**뿐이고, 새 전역
-//! 핸들도 두 번째 레지스트리도 만들지 않는다(CLAUDE.md 「LLM-우선 제어」).
+//! ★It is not a second control surface★: what actually runs inside the webview is still the single
+//! `run(id, args)` of `src/commands/registry.ts` (ADR-0055). All this module adds is the **outer path** to that entrance, and it creates
+//! neither a new global handle nor a second registry (CLAUDE.md 「LLM-우선 제어」).
 //!
-//! ## ★예약 이름 — 셸 표 이름만 거른다 · 데몬 이름의 벽은 데몬이다★
-//! 웹뷰 레지스트리에는 `tab.create`·`slot.close` 처럼 셸 자기 표가 먼저 답하는 것과 **철자가 같은 id** 가
-//! 있다. 셸 표 선언과 웹뷰 선언은 한 등록 패킷으로 가고 명부는 한 패킷 안 같은 이름을 오류 없이 하나로
-//! 접으므로, 누가 그 id 에 `help` 를 달면 두 주인이 말없이 겹친다. 그래서 [`reserved_names`] 가 **셸 표
-//! 선언에서** 그 집합을 뽑아 보고 시점에 뺀다(손 목록 금지 — 어휘가 늘면 목록이 조용히 뒤처진다).
-//! ★데몬이 답하는 이름(`agent.spawn`·`agent.rename` 등 — 웹뷰 레지스트리에 같은 철자가 있다)은 여기서
-//! 거르지 않는다(ADR-0270 결정 2)★ — 데몬이 그런 이름이 하나라도 실린 등록 패킷을 통째로 반려한다
-//! (`engram-dashboard-daemon` 의 `refuse_names_i_answer`). 그러면 이 셸의 명령이 0 개가 되고 원인 선언을
-//! 고쳐 다시 빌드할 때까지 재연결마다 같은 반려가 온다. 그 반려는 재연결마다 셸 warn 로그에 남고, OS 오류
-//! 창은 같은 (자리, 문구) 에 대해 프로세스당 한 번만 뜬다(`RefusalAlerts` · ADR-0270 결정 4 · ADR-0281).
+//! ## ★Reserved names — only shell-table names are filtered · the wall for daemon names is the daemon★
+//! The webview registry has ids with **the same spelling** as those the shell's own table answers first, such as `tab.create` · `slot.close`.
+//! The shell table's declarations and the webview's declarations go in one registration packet, and the registry folds the same name within one packet into one without an error,
+//! so if someone attaches `help` to that id, two owners silently overlap. So [`reserved_names`] takes that set **from the shell-table
+//! declarations** and removes it at report time (no hand-written list — as the vocabulary grows, the list silently falls behind).
+//! ★Names the daemon answers (`agent.spawn` · `agent.rename`, etc. — the webview registry has the same spelling) are not
+//! filtered here (ADR-0270 decision 2)★ — the daemon bounces a registration packet wholesale if even one such name is carried
+//! (`refuse_names_i_answer` in `engram-dashboard-daemon`). Then this shell's commands become 0 and the same bounce comes at every reconnect until
+//! the declaration at fault is fixed and rebuilt. That bounce is left in the shell warn log at every reconnect, and the OS error
+//! window appears only once per process for the same (place, wording) (`RefusalAlerts` · ADR-0270 decision 4 · ADR-0281).
 //!
-//! ## ★배달 대상이 창 하나인 이유★
-//! 이벤트를 전 창에 뿌리면 같은 명령이 창 수만큼 실행되고 답장도 그만큼 온다(한 `request_id` 에 답장
-//! 하나 — TRD §4-⑤ 위반). 그래서 보고한 창 중 **하나**만 목적지로 삼고, **광고하는 명단도 그 창의
-//! 것**이다 — 둘이 다른 창에서 나오면 데몬이 광고한 이름을 실행할 창이 없다([`Registered`]).
-//! 고르는 규칙은 [`Registered::repick`], 죽은 창에서 회복하는 경로는 [`ViewCommandBridge::prune_dead`] 다.
+//! ## ★Why the delivery target is one window★
+//! If an event is scattered over all windows, the same command runs as many times as there are windows and as many replies come back (one reply per `request_id` —
+//! TRD §4-⑤ violation). So only **one** of the windows that reported is made the destination, and **the advertised list is also that window's** —
+//! if the two come from different windows, there is no window to run a name the daemon advertised ([`Registered`]).
+//! The picking rule is [`Registered::repick`], and the path to recover from a dead window is [`ViewCommandBridge::prune_dead`].
 //!
-//! ## 진입점
-//! - [`ViewCommandBridge::report_and_push`] — 부팅 보고(`report_view_commands` invoke).
-//! - [`ViewCommandBridge::settle`] — 웹뷰가 낸 결말(`report_command_outcome` invoke).
-//! - [`crate::daemon_client::inbound::ViewCommandPort`] 구현 — 수신기가 쓰는 세 창구.
+//! ## Entry points
+//! - [`ViewCommandBridge::report_and_push`] — the boot report (`report_view_commands` invoke).
+//! - [`ViewCommandBridge::settle`] — the outcome the webview sent (`report_command_outcome` invoke).
+//! - The [`crate::daemon_client::inbound::ViewCommandPort`] implementation — the three endpoints the receiver uses.
 // ADR-0155
 // ADR-0156
 
@@ -49,47 +49,47 @@ use tokio::sync::oneshot;
 use crate::daemon_client::inbound::ViewCommandPort;
 use crate::layout::MAIN_WINDOW_LABEL;
 
-/// 셸 → 웹뷰. 목적지 창 하나에만 간다(모듈 헤더 「배달 대상이 창 하나인 이유」).
+/// Shell → webview. Goes only to one destination window (module header 「배달 대상이 창 하나인 이유」).
 pub const EVT_COMMAND_REQUEST: &str = "command:request";
 
-/// 웹뷰 명령의 명부상 주인 표식.
+/// The owner marker of a webview command in the registry.
 ///
-/// ★데몬은 이 값을 보지 않는다★ — 명부의 주인 키는 그 패킷이 온 **연결**에서 파생되고, 웹뷰 이름도 셸
-/// 토큰 아래 함께 오른다(TRD §3-7 조항 2). 이 토큰이 쓰이는 곳은 **셸 안**뿐이다: `route` 가 명부의 답을
-/// 겉봉에 덮어 싣는데(그것이 2단 배달의 재료다) 실을 값이 있어야 한다.
+/// ★The daemon does not look at this value★ — the registry's owner key is derived from the **connection** the packet came from, and webview names are also listed together under the shell
+/// token (TRD §3-7 clause 2). This token is used only **inside the shell**: `route` writes the registry's answer over the
+/// outer cover (that is the material of two-stage delivery), so there must be a value to write.
 const VIEW_OWNER: &str = "engram-dashboard-webview";
 
-/// 웹뷰 답장을 기다리는 상한 — ★바깥 예산 **안**에 들어야 한다★.
+/// The upper bound on waiting for the webview reply — ★it must fit **inside** the outer budget★.
 ///
-/// ★없으면 창이 사라진 뒤의 봉투가 영영 안 끝난다★ — `route` 는 마감을 걸지 않는 것이 계약이라
-/// (그 함수 doc: 「마감시각은 조립부의 몫」) 이 자리가 조립부다.
+/// ★Without it, an envelope after the window disappears never ends★ — `route` by contract sets no deadline
+/// (that function's doc: 「마감시각은 조립부의 몫」), and this spot is the assembly.
 ///
-/// ★★값을 고르는 기준은 「store 조작이 얼마나 걸리나」가 **아니다**★★ — 이 왕복은 데몬이 쥔 자리 표의
-/// 마감 **안쪽**에서 돈다(`engram-dashboard-daemon` 의 `CommandDeliveries::DEFAULT_DEADLINE`). 바깥보다
-/// 크게 잡으면 두 가지가 동시에 깨진다:
-/// - **이 마감이 도달 불가가 된다.** 데몬이 먼저 자리를 거둬 호출자에게 `TIMEOUT`/`retry: never` 로
-///   답해 버리고, 뒤늦은 이쪽 결말은 자리 없는 답장(`NoSeat`)으로 버려진다 — 여기 적은 진단 문구도
-///   `retry: same-request-id` 도 호출자에게 **한 번도** 닿지 않는다.
-/// - **같은 명령이 두 번 돈다.** 데몬 마감 뒤 호출자가 같은 id 로 다시 부르면, 이 자리는 아직 첫 왕복을
-///   붙들고 있어 두 번째 봉투가 웹뷰로 또 내려간다. 그 방어선이 [`PendingSlot::hold`] 의 거절이고,
-///   부등식은 그 상황 자체가 생기지 않게 한다.
+/// ★★The criterion for choosing the value is **not** 「store 조작이 얼마나 걸리나」★★ — this round trip runs **inside** the deadline of the seat table
+/// the daemon holds (`CommandDeliveries::DEFAULT_DEADLINE` of `engram-dashboard-daemon`). If set
+/// larger than the outside, two things break at once:
+/// - **This deadline becomes unreachable.** The daemon withdraws the seat first and answers the caller `TIMEOUT`/`retry: never`,
+///   and this side's late outcome is dropped as a seat-less reply (`NoSeat`) — neither the diagnostic text written here nor
+///   `retry: same-request-id` ever reaches the caller **even once**.
+/// - **The same command runs twice.** If the caller calls again with the same id after the daemon deadline, this seat is still
+///   holding the first round trip, so a second envelope goes down to the webview again. The defense line is the refusal of [`PendingSlot::hold`], and
+///   the inequality keeps that situation from arising at all.
 ///
-/// ★부등식: `VIEW_REPLY_DEADLINE + VIEW_HOP_MARGIN ≤ 데몬 자리 마감`★. 그 자리 마감은 **여기서 볼 수
-/// 없다** — 데몬 crate 는 이 패키지의 dev 의존이라 운영 코드가 참조할 수 없다. 그래서 값은 여기 박고,
-/// 관계는 둘 다 볼 수 있는 곳에서 문다(`tests/layout_commands.rs` 의
-/// `the_webview_deadline_fits_inside_the_daemon_seat`). ★그 셈을 여기 베껴 적지 않는다★ — 데몬 쪽 doc 이
-/// 정본이고, 두 사본이 갈리는 날 어느 쪽도 못 믿는다(코어 `CLI_CONTROL_READ_TIMEOUT_SECS` 의 같은 조항).
+/// ★Inequality: `VIEW_REPLY_DEADLINE + VIEW_HOP_MARGIN ≤ 데몬 자리 마감` (the daemon seat deadline)★. That seat deadline **cannot be seen
+/// here** — the daemon crate is a dev dependency of this package, so production code cannot reference it. So the value is fixed here,
+/// and the relation is pinned where both can be seen (in `tests/layout_commands.rs`,
+/// `the_webview_deadline_fits_inside_the_daemon_seat`). ★Do not copy that arithmetic here★ — the daemon-side doc is
+/// canonical, and on the day the two copies diverge neither can be trusted (the same clause as core `CLI_CONTROL_READ_TIMEOUT_SECS`).
 pub const VIEW_REPLY_DEADLINE: Duration = Duration::from_secs(4);
 
-/// 이 왕복 **밖**에서 흘러가는 시간의 몫 — 데몬↔셸 두 홉의 소켓 왕복 · 적용 태스크 스케줄링 · 결말
-/// 직렬화. 데몬의 `CALLER_MARGIN` 과 같은 종류의 항이고, 있어야 위 부등식이 산문이 아니라 사실이 된다.
+/// The share of time that flows **outside** this round trip — the socket round trips of the two daemon↔shell hops · scheduling of the apply task · serializing
+/// the outcome. A term of the same kind as the daemon's `CALLER_MARGIN`, and with it the inequality above becomes fact rather than prose.
 pub const VIEW_HOP_MARGIN: Duration = Duration::from_secs(3);
 
-// ── 웹뷰가 보내는 모양 ───────────────────────────────────────────────────────
+// ── Shape the webview sends ───────────────────────────────────────────────────────
 
-/// 인자 한 칸의 모양 — 웹뷰가 **손으로 적는** 유일한 자리다(Rust 쪽은 선언 매크로가 채운다).
+/// The shape of one argument field — the only place the webview **writes by hand** (on the Rust side the declaration macro fills it in).
 ///
-/// JSON Schema 조각으로 그대로 펴진다([`ViewCommandHelp::args_schema`]) — 그래서 칸 이름이 그쪽 어휘다.
+/// It is unfolded as is into a JSON Schema fragment ([`ViewCommandHelp::args_schema`]) — so the field names are that side's vocabulary.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ViewArgSchema {
     #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
@@ -100,11 +100,11 @@ pub struct ViewArgSchema {
     pub description: Option<String>,
 }
 
-/// 읽기/쓰기 표식 — Rust 선언은 `#[effect(..)]` 로 컴파일 옆에서 정하지만 TypeScript 엔 그 자리가 없다.
+/// The read/write marker — a Rust declaration decides it beside compilation with `#[effect(..)]`, but TypeScript has no such place.
 ///
-/// ★그래서 웹뷰가 **실어 보내야** 한다★: 상수로 박으면 첫 조회 명령이 붙는 날 명부가 거짓 표식을 광고하고,
-/// 그 값은 데몬의 쓰기 보존 회계에 그대로 먹인다(`Effect::Read` = dedup 면제 — ADR-0156). 안 실은 항목은
-/// 등록에서 뺀다([`ViewCommandBridge::report`]) — 기본값을 고르는 것이 곧 그 거짓말이기 때문이다.
+/// ★So the webview **must carry it**★: if hard-coded as a constant, the day the first query command is attached the registry would advertise a false marker,
+/// and that value feeds straight into the daemon's write-preservation accounting (`Effect::Read` = dedup exempt — ADR-0156). An entry that does not carry it
+/// is dropped from registration ([`ViewCommandBridge::report`]) — because choosing a default is itself that lie.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ViewEffect {
@@ -113,7 +113,7 @@ pub enum ViewEffect {
 }
 
 impl ViewEffect {
-    /// 카탈로그 어휘 — Rust 쪽 `Effect::as_str` 와 **같은 철자**여야 한다(한 명부에 두 방언 금지).
+    /// Catalog vocabulary — must have the **same spelling** as the Rust-side `Effect::as_str` (no two dialects in one registry).
     fn as_catalog_str(self) -> &'static str {
         match self {
             ViewEffect::Read => "Read",
@@ -122,12 +122,12 @@ impl ViewEffect {
     }
 }
 
-/// 명령 하나의 설명 — 이름만으로는 부를 수 없으니 **인자 모양**이 함께 온다(ADR-0156).
+/// The description of one command — a name alone cannot be called, so the **argument shape** comes with it (ADR-0156).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ViewCommandHelp {
     pub summary: String,
-    /// ★`None` = 등록 거절★. `#[serde(default)]` 이지만 기본값을 **고르지 않는다** — 사유는 [`ViewEffect`].
-    /// 이 칸을 안 싣는 것은 옛 웹뷰 번들뿐인데, 그 경우 조용히 `Write` 로 광고하느니 이름이 없는 편이 낫다.
+    /// ★`None` = registration refused★. It is `#[serde(default)]` but **does not choose** a default — for the reason, see [`ViewEffect`].
+    /// Only an old webview bundle fails to carry this field, and in that case having no name is better than quietly advertising it as `Write`.
     #[serde(default)]
     pub effect: Option<ViewEffect>,
     #[serde(default)]
@@ -136,15 +136,15 @@ pub struct ViewCommandHelp {
     pub required: Vec<String>,
 }
 
-/// 웹뷰가 보고하는 항목 하나.
+/// One entry the webview reports.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ViewCommandDecl {
     pub name: String,
     pub help: ViewCommandHelp,
 }
 
-/// 웹뷰로 내려가는 봉투 — ★`owner`·`proto_ver` 를 안 싣는다★. 그 둘은 홉 사이 라우팅 재료이고
-/// (`CommandEnvelope` doc) 마지막 홉인 웹뷰는 자기 표 하나만 본다.
+/// The envelope that goes down to the webview — ★it does not carry `owner` · `proto_ver`★. Those two are routing material between hops
+/// (`CommandEnvelope` doc), and the webview, as the last hop, sees only its own table.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ViewCommandRequest {
     pub request_id: String,
@@ -152,28 +152,28 @@ pub struct ViewCommandRequest {
     pub args: serde_json::Value,
 }
 
-// ── 배달 seam ────────────────────────────────────────────────────────────────
+// ── Delivery seam ────────────────────────────────────────────────────────────────
 
-/// 봉투를 창 하나로 미는 통로 — ★주입인 이유★: 실물은 `AppHandle::emit_to` 라 창 없이 못 세운다
-/// (ADR-0012). 가짜를 꽂으면 필터·상관·마감 전부가 창 0으로 단언된다.
+/// The channel that pushes an envelope to one window — ★why injected★: the real thing is `AppHandle::emit_to`, so it cannot be stood up without a window
+/// (ADR-0012). If a fake is plugged in, all of filtering·correlation·deadline are asserted with zero windows.
 pub trait ViewDispatch: Send + Sync {
     fn deliver(&self, target: &str, request: &ViewCommandRequest) -> Result<(), String>;
 
-    /// 그 label 의 창이 아직 있나 — ★[`ViewDispatch::deliver`] 의 실패로는 대신할 수 없다★.
+    /// Does the window with that label still exist — ★it cannot be replaced by a failure of [`ViewDispatch::deliver`]★.
     ///
-    /// Tauri 의 `emit_to` 는 **없는 label 에도 `Ok` 를 준다**(맞는 리스너가 0이면 그냥 아무도 안 깨운다 —
-    /// `Listeners::emit_js_filter`). 그래서 「보내 보고 실패하면 죽은 것」이라는 값싼 판정이 여기서는
-    /// 성립하지 않고, 죽은 창을 목적지로 쥔 다리는 봉투마다 마감까지 기다렸다가 `TIMEOUT` 을 낸다.
+    /// Tauri's `emit_to` **gives `Ok` even for a label that does not exist** (if there are 0 matching listeners it simply wakes no one —
+    /// `Listeners::emit_js_filter`). So the cheap decision 「보내 보고 실패하면 죽은 것」 (send it and if it fails it is dead) does not hold
+    /// here, and a bridge holding a dead window as its destination waits for the deadline on every envelope and then emits `TIMEOUT`.
     fn is_alive(&self, label: &str) -> bool;
 }
 
-/// 운영 구현 — 그 label 의 웹뷰에만 보낸다.
+/// Production implementation — sends only to the webview of that label.
 ///
-/// ★★`emit_to` 만으로는 창 하나로 좁혀지지 않는다 — 받는 쪽이 자기 label 로 구독해야 한다★★
-/// Tauri 는 **`Any` 로 등록된 리스너를 필터와 무관하게 전부** 깨운다(`match_any_or_filter`), 그리고 JS
-/// `listen()` 의 기본 타깃이 바로 `Any` 다. 그래서 웹뷰 쪽은 `{ target: getCurrentWindow().label }` 로
-/// 건다(`src/commands/viewCommandBridge.ts`) — 그 인자를 빼면 창 수만큼 같은 명령이 실행되고 답장도
-/// 그만큼 온다. **이 두 줄은 한 쌍이다.**
+/// ★★`emit_to` alone does not narrow it to one window — the receiving side must subscribe by its own label★★
+/// Tauri wakes **every listener registered as `Any` regardless of the filter** (`match_any_or_filter`), and the JS
+/// `listen()` default target is exactly `Any`. So the webview side hooks with `{ target: getCurrentWindow().label }`
+/// (`src/commands/viewCommandBridge.ts`) — without that argument the same command runs as many times as there are windows and as many replies
+/// come back. **These two lines are a pair.**
 pub struct TauriViewDispatch(pub AppHandle);
 
 impl ViewDispatch for TauriViewDispatch {
@@ -183,27 +183,27 @@ impl ViewDispatch for TauriViewDispatch {
             .map_err(|e| format!("웹뷰 '{target}' 로 명령을 보내지 못했다: {e}"))
     }
 
-    /// ★`get_window` 이 아니라 `get_webview_window` 을 쓴다★ — 전자는 tauri 의 `unstable` feature 뒤에
-    /// 있어 이 셸이 못 켠다(features 를 늘리는 것이 이 조각의 결정이 아니다). 이 앱의 창은 전부 웹뷰 창
-    /// 하나짜리라(`tauri.conf.json` 의 정적 둘 + `WebviewWindowBuilder` 로 만드는 팝아웃) 두 label 이
-    /// 같은 값이고, 그래서 `Window::label()` 로 보관한 값이 여기서 그대로 조회된다. 웹뷰가 둘인 창을
-    /// 만들면 이 등식이 깨진다 — 그때는 보관하는 쪽과 조회하는 쪽을 함께 옮겨야 한다.
+    /// ★Use `get_webview_window`, not `get_window`★ — the former is behind tauri's `unstable` feature,
+    /// which this shell cannot turn on (growing features is not this piece's decision). Every window of this app is a single-webview
+    /// window (the two static ones in `tauri.conf.json` + popouts made with `WebviewWindowBuilder`), so the two labels are
+    /// the same value, and so the value kept with `Window::label()` is looked up here as is. If a window with two webviews
+    /// is made, this equality breaks — then the keeping side and the lookup side must be moved together.
     fn is_alive(&self, label: &str) -> bool {
         self.0.get_webview_window(label).is_some()
     }
 }
 
-// ── 예약 이름 ────────────────────────────────────────────────────────────────
+// ── Reserved names ────────────────────────────────────────────────────────────────
 
-/// 웹뷰가 가져갈 수 없는 이름 = 셸 자기 표가 답하는 것.
+/// Names the webview cannot take = those the shell's own table answers.
 ///
-/// ★손 목록이 아니라 **선언에서** 뽑는다★ — 셸 표 어휘가 늘어도 이 그물이 함께 자란다.
-/// ★**선언**을 센다(표에 꽂힌 것이 아니라)★ — 안전한 방향이다: 선언만 있고 안 꽂힌 이름을 웹뷰가 가져가면
-/// 나중에 그것을 꽂는 순간 배달이 조용히 셸로 옮겨간다(`route` 는 표를 먼저 본다).
-/// ★데몬이 답하는 이름은 담지 않는다★ — 그 벽은 데몬의 등록 반려다(모듈 헤더). 셸은 agent crate 를
-/// 의존하지 않아 그 선언을 볼 수도 없다(ADR-0270 결정 1).
-/// ★이 그물을 걷지 말 것★ — 데몬 반려는 데몬이 답하는 이름만 보고, 명부는 한 패킷 안 같은 이름을 오류 없이
-/// 접는다(command `roster.rs` 의 `register`). 셸 · 웹뷰 같은 이름을 막는 것은 이것 하나다.
+/// ★Taken **from the declarations**, not a hand-written list★ — this net grows along with the shell-table vocabulary.
+/// ★It counts **declarations** (not what is plugged into the table)★ — the safe direction: if the webview took a name that is only declared and not plugged in,
+/// the moment that is plugged in later, delivery would silently move to the shell (`route` looks at the table first).
+/// ★It does not include names the daemon answers★ — that wall is the daemon's registration bounce (module header). The shell does not
+/// depend on the agent crate, so it cannot even see that declaration (ADR-0270 decision 1).
+/// ★Do not remove this net★ — the daemon bounce looks only at names the daemon answers, and the registry folds the same name within one packet without an error
+/// (`register` in command `roster.rs`). This alone blocks the same name in shell and webview.
 // ADR-0270
 pub fn reserved_names() -> BTreeSet<String> {
     crate::layout::commands::COMMAND_SPECS
@@ -212,70 +212,70 @@ pub fn reserved_names() -> BTreeSet<String> {
         .collect()
 }
 
-// ── 다리 ─────────────────────────────────────────────────────────────────────
+// ── Bridge ─────────────────────────────────────────────────────────────────────
 
-/// 이번 보고가 명단을 어떻게 바꿨나 — 부르는 쪽이 차분 등록을 낼지 정하는 재료다.
+/// How this report changed the list — material for the caller to decide whether to send a diff registration.
 #[derive(Debug, Default, PartialEq)]
 pub struct ReportOutcome {
-    /// 보고 뒤 웹뷰 몫 전량.
+    /// The whole webview share after the report.
     pub accepted: Vec<CommandDecl>,
-    /// 직전 명단에 없던 것.
+    /// What was not in the previous list.
     pub added: Vec<CommandDecl>,
-    /// 직전에 있었는데 이번에 안 실린 것.
+    /// What was there before but is not carried this time.
     pub removed: Vec<String>,
-    /// 예약 이름이라 뺀 것(로그용 — 보고한 쪽에는 실패가 아니다).
+    /// What was dropped for being a reserved name (for the log — not a failure to the reporting side).
     pub refused: Vec<String>,
 }
 
 impl ReportOutcome {
-    /// 데몬에 차분을 보낼 일이 있나.
+    /// Is there a diff to send to the daemon.
     pub fn changed(&self) -> bool {
         !self.added.is_empty() || !self.removed.is_empty()
     }
 }
 
-/// 이름 → 모양(불투명 문자열 — 데몬이 열어보지 않는다, ADR-0156).
+/// Name → shape (an opaque string — the daemon does not open it, ADR-0156).
 type Shapes = BTreeMap<String, String>;
 
-/// 창별 보고를 그대로 둔다 — ★합치지 않는다★.
+/// Keep the per-window reports as they are — ★do not merge them★.
 ///
-/// ★광고하는 명단과 봉투를 받는 창은 **같은 창에서 나와야 한다**★: 하나로 합쳐 두면 팝아웃의 보고가
-/// 명단을 갈아치우는데 배달은 main 으로 계속 가서, 데몬은 B 를 광고하고 main 은 A 를 실행한다 — 광고된
-/// 이름이 `UNKNOWN_COMMAND` 로 나가거나 실행되는 이름이 광고에 없다. 오늘은 창마다 같은 정적
-/// `contributions` 를 올려 두 집합이 바이트 동일하지만, **그 우연에 계약을 얹지 않는다.**
+/// ★The advertised list and the window that receives envelopes **must come from the same window**★: if merged into one, a popout's report
+/// swaps the list while delivery keeps going to main, so the daemon advertises B and main runs A — an advertised
+/// name goes out as `UNKNOWN_COMMAND` or a name that runs is not in the advertisement. Today every window uploads the same static
+/// `contributions`, so the two sets are byte-identical, but **no contract is laid on that coincidence.**
 #[derive(Default)]
 struct Registered {
-    /// 창 label → 그 창이 보고한 전량.
+    /// Window label → everything that window reported.
     reports: BTreeMap<String, Shapes>,
-    /// 봉투를 받을 창 = **광고하는 명단의 주인**. `None` = 살아 있는 보고자가 없다.
+    /// The window to receive envelopes = **the owner of the advertised list**. `None` = there is no live reporter.
     host: Option<String>,
 }
 
 impl Registered {
-    /// 죽은 보고자를 명단에서 뺀다 — ★생사 판정은 **밖에서** 받는다★(락 규율 = [`ViewCommandBridge::prune_dead`]).
+    /// Remove dead reporters from the list — ★the liveness decision is taken **from outside**★ (lock discipline = [`ViewCommandBridge::prune_dead`]).
     fn forget(&mut self, dead: &[String]) {
         for label in dead {
             self.reports.remove(label);
         }
     }
 
-    /// 목적지를 다시 고른다 — ★main 우선 · 살아 있는 host 유지 · 마지막 수단은 사전순 첫 보고자★.
+    /// Pick the destination again — ★main first · keep a live host · last resort is the first reporter in lexicographic order★.
     ///
-    /// **왜 다시 고르나:** host 를 한 번 정하고 끝내면 그 창이 닫힌 뒤 회복 경로가 없다. 실제 경로 —
-    /// main 의 단발 보고가 실패하고(그 invoke 는 재시도가 없다) 팝아웃이 host 가 된 뒤 그 팝아웃이 닫히면,
-    /// 이후 모든 배달이 죽은 label 로 나가 마감까지 기다렸다가 `TIMEOUT` 이 된다. 이름은 명부에 그대로
-    /// 남아 있어 「있는데 영영 안 되는」 상태가 연결 내내 굳는다.
-    /// **왜 main 우선인가:** 창마다 같은 App 이 떠서 전부 보고하는데(`src/App.tsx`) 마지막 보고를 따르면
-    /// 목적지가 팝아웃으로 옮겨 다니고 그 창이 닫힐 때마다 흔들린다. main 은 닫아도 숨을 뿐이라
-    /// (`lib.rs` 의 `CloseRequested`) 수명이 앱과 같다.
-    /// - ★**그 전제는 아직 실측되지 않았다**★: 「숨은 main 이 웹뷰 표에 남는가」를 확인하려면 자동화
-    ///   하네스가 창을 숨겨 봐야 하는데 이 앱의 권한 설정이 `hide()`·`close()` 를 막아 GUI 로 못 닿았다
+    /// **Why pick again:** if the host is decided once and that is the end, there is no recovery path after that window closes. The real path —
+    /// main's single report fails (that invoke has no retry) and a popout becomes host, and then that popout closes,
+    /// after which every delivery goes to a dead label, waits for the deadline, and becomes `TIMEOUT`. The name
+    /// remains in the registry as is, so the state 「있는데 영영 안 되는」 (present but never working) hardens for the whole connection.
+    /// **Why main first:** every window runs the same App and all of them report (`src/App.tsx`), so following the last report would make
+    /// the destination jump to popouts and wobble every time that window closes. Closing main only hides it
+    /// (`CloseRequested` in `lib.rs`), so its lifetime equals the app's.
+    /// - ★**That premise has not been measured yet**★: to check 「숨은 main 이 웹뷰 표에 남는가」 (whether a hidden main stays in the webview table), an automation
+    ///   harness would have to hide the window, but this app's permission settings block `hide()` · `close()`, so it could not be reached by GUI
     ///   (2026-08-23).
     ///
-    /// **왜 마지막 수단이 보임을 묻지 않나:** 설정이 숨긴 정적 창이 없다(ADR-0225). 그런 창을 다시 들이면 사전순
-    /// 첫 생존자 고르기가 그 창을 목적지로 삼을 수 있다 — 그러면 `tab.next` 는 **성공을 답하면서** 아무도 안 보는
-    /// 창의 탭을 넘긴다. 그때 거르더라도 `--hidden` 부팅의 main 은 빼면 안 된다(트레이로 여는 그 창이라 숨김이
-    /// 상태이지 성질이 아니다).
+    /// **Why the last resort does not ask about visibility:** there is no static window the config hides (ADR-0225). If such a window is brought back, picking the first
+    /// survivor in lexicographic order could make it the destination — then `tab.next` would pass the tabs of a window no one is looking at **while answering success**.
+    /// Even if filtered then, the main of a `--hidden` boot must not be excluded (that window is opened via the tray, so hidden is
+    /// its state, not its nature).
     fn repick(&mut self) {
         let keep = self
             .host
@@ -286,14 +286,14 @@ impl Registered {
         }
         self.host = match self.reports.contains_key(MAIN_WINDOW_LABEL) {
             true => Some(MAIN_WINDOW_LABEL.to_string()),
-            // 살아 있는 host 를 이유 없이 갈아치우지 않는다 — 자리를 옮기는 것은 죽었을 때뿐이다.
+            // Do not swap out a live host for no reason — the place moves only when it has died.
             false => keep
                 .map(str::to_string)
                 .or_else(|| self.reports.keys().next().cloned()),
         };
     }
 
-    /// 지금 광고할 명단 = **host 창이 보고한 것**.
+    /// The list to advertise now = **what the host window reported**.
     fn advertised(&self) -> Shapes {
         self.host
             .as_ref()
@@ -303,40 +303,40 @@ impl Registered {
     }
 }
 
-/// 웹뷰 몫 등록·배달·상관을 한자리에서 쥔다.
+/// Holds the webview share of registration·delivery·correlation in one place.
 pub struct ViewCommandBridge {
     dispatch: Arc<dyn ViewDispatch>,
     reserved: BTreeSet<String>,
     deadline: Duration,
     state: Mutex<Registered>,
-    /// 보고 하나의 **상태 변경과 그 차분 송신**을 한 덩이로 묶는 문(FIX: 두 보고의 뒤집힘).
+    /// The gate that binds one report's **state change and its diff send** into one block (FIX: reversal of two reports).
     ///
-    /// ★없으면 데몬과 다리가 갈린다★: 보고 A 가 이름을 더하고 보고 B 가 그것을 뺀 뒤, B 의 송신이 A 보다
-    /// **먼저** 큐에 들면 데몬은 둘의 합집합을 쥔 채로 남는다(A 의 `added` 가 나중에 도착한다). 다리는 B 의
-    /// 집합만 아는데 명부에는 A 의 이름이 살아 있어, 그 이름이 배달되면 웹뷰가 모른다고 답한다.
-    /// 순서를 매기는 칸을 wire 에 더할 수는 없으므로(계약 무변경) **보내는 쪽을 직렬화**한다.
+    /// ★Without it the daemon and the bridge diverge★: after report A adds a name and report B removes it, if B's send enters the queue **before** A's,
+    /// the daemon is left holding the union of the two (A's `added` arrives later). The bridge knows only B's
+    /// set, yet A's name is alive in the registry, and if that name is delivered the webview answers that it does not know it.
+    /// A field to give the order cannot be added to the wire (contract unchanged), so **the sending side is serialized**.
     outbound: tokio::sync::Mutex<()>,
     pending: Arc<Pending>,
 }
 
-/// 답장을 기다리는 자리 하나 — **누구에게 보냈나**를 함께 든다.
+/// One seat waiting for a reply — it also holds **whom it was sent to**.
 ///
-/// ★목적지를 여기 적어 두는 것이 요점이다★: 결말이 들어올 때 대조할 상대는 **그때의 host** 가 아니라
-/// 이 봉투를 실제로 받은 창이다. host 는 보고 순서에 따라 바뀔 수 있어(main 이 팝아웃을 덮는다) 현재
-/// host 로 대조하면 진짜 답이 반려되고, 반대로 옛 host 의 위조가 통과한다.
+/// ★Writing the destination here is the point★: the party to check against when an outcome comes in is not **the host at that time** but
+/// the window that actually received this envelope. The host can change by report order (main overwrites the popout), so
+/// checking against the current host would bounce the real reply, and conversely a forgery from the old host would pass.
 struct Waiting {
-    /// 이 자리의 신원 — 같은 `request_id` 를 쓰는 **다음** 자리와 구별한다(사유 = [`PendingSlot::drop`]).
+    /// The identity of this seat — distinguishes it from the **next** seat that uses the same `request_id` (reason = [`PendingSlot::drop`]).
     seat: u64,
     target: String,
     answer: oneshot::Sender<Result<serde_json::Value, CommandError>>,
 }
 
-/// 답장을 기다리는 자리들 — ★`Arc` 인 이유★: 마감 타이머가 도는 future 는 `'static` 이라 다리를 빌릴 수
-/// 없는데, 시간이 지나면 자기 자리를 **직접 치워야** 한다(안 치우면 죽은 창 하나가 맵을 영구히 불린다).
+/// The seats waiting for replies — ★why `Arc`★: the future the deadline timer runs in is `'static`, so it cannot borrow the bridge,
+/// yet when the time passes it must **clear its own seat directly** (if not cleared, one dead window grows the map permanently).
 #[derive(Default)]
 struct Pending {
     seats: Mutex<HashMap<RequestId, Waiting>>,
-    /// 자리마다 새로 뽑는 번호 — 되감기지 않는다.
+    /// A number drawn anew for each seat — never rewound.
     next_seat: AtomicU64,
 }
 
@@ -345,7 +345,7 @@ impl ViewCommandBridge {
         Self::with_reserved(dispatch, VIEW_REPLY_DEADLINE, reserved_names())
     }
 
-    /// 하네스용 — 예약 집합·마감을 직접 준다. ★운영에서는 [`reserved_names`] 를 쓸 것★(손 목록은 뒤처진다).
+    /// For the harness — gives the reserved set · deadline directly. ★In production use [`reserved_names`]★ (a hand-written list falls behind).
     pub fn with_reserved(
         dispatch: Arc<dyn ViewDispatch>,
         deadline: Duration,
@@ -361,15 +361,15 @@ impl ViewCommandBridge {
         }
     }
 
-    /// 죽은 보고자를 걷어내고 목적지를 다시 고른다.
+    /// Clear out dead reporters and pick the destination again.
     ///
-    /// ★★생존 조회를 **내 락 밖에서** 돈다 — 이 순서를 되돌리지 말 것★★(ADR-0006 「락 보유 중 외부 호출
-    /// 금지」): 조회 실물은 Tauri 의 전역 웹뷰 표 락과 창별 락을 잡는다. 지금 그 락을 쥔 채 이 다리로
-    /// 되들어오는 경로는 없지만, 순서가 한 번 서면 그 사실을 이 파일 밖의 변경이 조용히 뒤집을 수 있고
-    /// 그때는 교착이다. 그래서 **① 락 안에서 label 만 스냅샷 → ② 락 밖에서 조회 → ③ 다시 락 잡고 반영**
-    /// 세 걸음으로 가른다.
-    /// ★그 사이에 창이 죽거나 새 보고가 들어올 수 있다★ — 스냅샷에 없던 label 은 이번에 안 지워지고
-    /// (다음 호출이 잡는다) 이미 사라진 label 은 지워도 무해하다. 회복이 한 박자 늦는 것이 계약이다.
+    /// ★★The liveness lookup is run **outside my lock** — do not reverse this order★★ (ADR-0006 「락 보유 중 외부 호출
+    /// 금지」): the real lookup takes Tauri's global webview table lock and per-window locks. There is no path now that re-enters this bridge
+    /// while holding that lock, but once the order stands, a change outside this file could silently reverse that fact, and
+    /// then it is a deadlock. So it is split by **① snapshot only the labels inside the lock → ② look up outside the lock → ③ take the lock again and apply**
+    /// into three steps.
+    /// ★The window may die in between or a new report may come in★ — a label that was not in the snapshot is not cleared this time
+    /// (the next call catches it), and clearing an already vanished label is harmless. Recovery being one beat late is the contract.
     fn prune_dead(&self) {
         let labels: Vec<String> = {
             let state = sync::lock(&self.state);
@@ -384,31 +384,31 @@ impl ViewCommandBridge {
         state.repick();
     }
 
-    /// 창 하나가 부팅에 자기 목록을 알린다 — **그 창의 전량**이다(차분이 아니다).
+    /// One window reports its own list at boot — it is **that window's whole set** (not a diff).
     ///
-    /// ★예약 이름은 조용히 빼되 조용히 넘기지는 않는다★ — 반려하면 나머지 이름까지 못 오르고, 아무 말도
-    /// 안 하면 「등록했는데 안 불린다」의 원인이 어디에도 안 남는다. 그래서 빼고 [`ReportOutcome::refused`]
-    /// 로 돌려준다(부르는 쪽이 로그로 남긴다).
-    /// ★모양이 빈 항목도 뺀다★ — `help` 는 데몬에게 불투명 문자열이라 비어도 등록은 성공하지만, 그 이름을
-    /// 발견한 호출자는 인자를 채울 재료가 없어 부를 수 없다(ADR-0156 이 왕복을 없앤 이유가 그것이다).
-    /// ★차분은 **광고 집합**의 앞뒤 차이다 — 그 창의 목록이 아니다★: host 가 아닌 창이 보고해도 광고가
-    /// 그대로면 보낼 것이 없다(위 [`Registered`] 의 결합 규칙이 그것을 보장한다).
-    /// ★★직접 부르는 것은 하네스뿐이다★★ — 운영 경로는 [`ViewCommandBridge::report_and_push`] 이고,
-    /// 그것이 상태 변경과 차분 송신을 한 문 안에 묶는다(사유 = `outbound` 필드). 여기만 부르면 그 순서
-    /// 보장이 없다.
+    /// ★Reserved names are dropped quietly but not passed over quietly★ — if bounced, the remaining names could not go up either, and if nothing
+    /// were said, the cause of 「등록했는데 안 불린다」 (registered but never called) would be left nowhere. So it drops them and returns them via [`ReportOutcome::refused`]
+    /// (the caller logs them).
+    /// ★Entries with an empty shape are dropped too★ — `help` is an opaque string to the daemon, so registration succeeds even if empty, but a caller that
+    /// discovers that name has no material to fill in arguments and cannot call it (that is why ADR-0156 removed this round trip).
+    /// ★The diff is the before/after difference of the **advertised set** — not that window's list★: even if a non-host window reports, if the advertisement
+    /// stays the same there is nothing to send (the coupling rule of [`Registered`] above guarantees it).
+    /// ★★Only the harness calls this directly★★ — the production path is [`ViewCommandBridge::report_and_push`],
+    /// which binds the state change and the diff send into one gate (reason = the `outbound` field). Calling only this gives no such order
+    /// guarantee.
     ///
-    /// ## ★남는 것 — 죽은 host 의 이름은 **재연결까지** 명부에 남는다(알려진 잔여)★
-    /// 조회 경로([`ViewCommandBridge::prune_dead`])가 죽은 host 를 먼저 걷어내면, 그 뒤 이 함수가 보는
-    /// `previous` 는 **이미 줄어든** 집합이다 — 그래서 사라진 이름이 `removed` 로 나가지 않는다. 데몬
-    /// 명부에는 그 이름이 그대로 남아, 부르면 셸까지 왔다가 「모르는 이름」으로 되돌아간다.
-    /// ★해소는 재연결의 전량 등록뿐이고, **그 재연결을 예약하는 것은 아무것도 없다**★ — 「다음 재연결이
-    /// 곧 고친다」로 읽지 말 것. 고치려면 배달 경로가 차분을 낼 수 있어야 하는데, 그러려면 이 crate 가
-    /// 데몬 링크를 알아야 한다(지지 않기로 한 의존이다 — 모듈 헤더).
+    /// ## ★What remains — the names of a dead host stay in the registry **until reconnect** (a known residual)★
+    /// If the lookup path ([`ViewCommandBridge::prune_dead`]) clears the dead host first, the `previous` this function then sees
+    /// is an **already shrunk** set — so the vanished names are not sent out as `removed`. They stay as they are in the daemon
+    /// registry, and calling one reaches the shell and comes back as 「모르는 이름」 (unknown name).
+    /// ★The only resolution is the whole registration of a reconnect, and **nothing schedules that reconnect**★ — do not read it as 「다음 재연결이
+    /// 곧 고친다」 (the next reconnect will fix it soon). To fix it, the delivery path would have to be able to emit a diff, and for that this crate would
+    /// have to know the daemon link (a dependency we decided not to carry — module header).
     pub fn report(&self, label: &str, reported: Vec<ViewCommandDecl>) -> ReportOutcome {
         let mut refused = Vec::new();
         let mut next: Shapes = BTreeMap::new();
         for decl in reported {
-            // 예약 이름 · 빈 설명 · **표식 없음** 셋이 같은 자리에서 빠진다(각각의 사유는 위 doc 과
+            // A reserved name · an empty description · **no marker** — all three are dropped at the same spot (the reason for each is in the doc above and
             //   [`ViewEffect`]).
             let Some(effect) = decl.help.effect else {
                 refused.push(decl.name);
@@ -422,12 +422,12 @@ impl ViewCommandBridge {
             next.insert(decl.name, help);
         }
 
-        // 생존 조회는 **락 밖에서** 먼저 돈다(사유 = `prune_dead`) — 그래야 아래 한 락 안이 순수해진다.
+        // The liveness lookup runs first **outside the lock** (reason = `prune_dead`) — so that what is inside the single lock below becomes pure.
         self.prune_dead();
         let mut state = sync::lock(&self.state);
         let previous = state.advertised();
         state.reports.insert(label.to_string(), next);
-        // ★보고를 넣은 **뒤에** 다시 고른다★ — 방금 뜬 창이 죽은 host 를 이어받을 수 있어야 한다.
+        // ★Pick again **after** putting in the report★ — a window that just came up must be able to take over from a dead host.
         state.repick();
         let current = state.advertised();
         drop(state);
@@ -454,12 +454,12 @@ impl ViewCommandBridge {
         }
     }
 
-    /// 운영 경로 — 보고를 반영하고, 바뀐 것이 있으면 **같은 문 안에서** 차분을 내보낸다.
+    /// Production path — apply the report and, if anything changed, send the diff out **within the same gate**.
     ///
-    /// `push(added, removed)` 는 데몬으로 나가는 왕복이다(`commands/view_bus.rs` 가 `UpdateCommands` 를
-    /// 짓는다) — 이 crate 는 그 wire 를 모르므로 호출자가 넣는다.
-    /// ★문이 덮는 범위가 「변경 + 송신」 둘 다인 것이 요점이다★: 송신만 직렬화하면 두 보고가 상태를 먼저
-    /// 뒤집고 차분만 순서대로 나가, 나중 보고의 차분이 옛 상태를 기준으로 계산된다(사유 = `outbound` 필드).
+    /// `push(added, removed)` is the round trip out to the daemon (`commands/view_bus.rs` builds `UpdateCommands`) — this crate does not know that wire, so
+    /// the caller injects it.
+    /// ★The point is that the gate covers both 「변경 + 송신」 (change + send)★: if only the send were serialized, two reports would flip the state first and only
+    /// the diffs would go out in order, so the later report's diff would be computed against the old state (reason = the `outbound` field).
     pub async fn report_and_push<F, Fut>(
         &self,
         label: &str,
@@ -478,16 +478,16 @@ impl ViewCommandBridge {
         outcome
     }
 
-    /// 웹뷰가 낸 결말을 그 왕복에 붙인다 — 자리가 없으면 `Err`(늦게 온 답 · 두 번째 답 · 남의 키).
+    /// Attach the outcome the webview sent to that round trip — `Err` if there is no seat (a late reply · a second reply · someone else's key).
     ///
-    /// `from` = 결말을 낸 창(Tauri 가 invoke 에 넣어 주는 값 — `commands/view_bus.rs`).
-    /// ★봉투를 받은 창만 답할 수 있다★: 상관 키 하나로만 열면 **남의 창이 남의 왕복을 끝낼 수 있다** —
-    /// 호출자는 그 위조 결말을 받고, 진짜 창은 자기 답이 반려되는 동안 부수효과는 그대로 일어난다.
-    /// 대조 상대가 「지금 host」가 아니라 **그 봉투를 실제로 받은 창**인 이유는 [`Waiting`].
-    /// ★대조에 실패해도 자리는 그대로 둔다★ — 빼 버리면 위조 하나가 진짜 답의 자리를 지운다.
+    /// `from` = the window that sent the outcome (the value Tauri puts into the invoke — `commands/view_bus.rs`).
+    /// ★Only the window that received the envelope may answer★: if opened by the correlation key alone, **another window could end another's round trip** —
+    /// the caller would receive that forged outcome, and while the real window's own reply is bounced the side effect happens just the same.
+    /// The reason the party checked against is not 「지금 host」 (the current host) but **the window that actually received that envelope** is in [`Waiting`].
+    /// ★Even if the check fails, the seat is left as is★ — if removed, a single forgery would erase the real reply's seat.
     ///
-    /// ★두 번째 답을 조용히 먹지 않는다★: 그 상황은 창 둘이 같은 봉투를 받았다는 뜻이라(배달 대상이 하나가
-    /// 아니게 됐다는 신호) 부르는 쪽이 로그로 남길 수 있어야 한다.
+    /// ★A second reply is not swallowed quietly★: that situation means two windows received the same envelope (a sign that the delivery target is
+    /// no longer one), so the caller must be able to log it.
     pub fn settle(
         &self,
         from: &str,
@@ -516,10 +516,10 @@ impl ViewCommandBridge {
             .map_err(|_| format!("답장을 받을 쪽이 이미 사라졌다: {parsed}"))
     }
 
-    /// 지금 봉투를 받을 창과 그 창이 광고하는 명단 — ★죽은 보고자를 걸러낸 뒤의 답이다★.
+    /// The window to receive envelopes now and the list that window advertises — ★this is the answer after filtering out dead reporters★.
     ///
-    /// 광고(등록 패킷)·조회(배달 2단계)·배달이 **전부 이 하나를 지난다** — 세 자리가 각자 상태를 읽으면
-    /// 어느 하나만 옛 host 를 보는 순간 광고와 실행이 갈린다.
+    /// Advertisement (registration packet) · lookup (delivery stage 2) · delivery **all pass through this one** — if the three places each read state, the moment
+    /// any one sees the old host, advertisement and execution diverge.
     fn live_host(&self) -> Option<(String, Shapes)> {
         self.prune_dead();
         let state = sync::lock(&self.state);
@@ -527,7 +527,7 @@ impl ViewCommandBridge {
         Some((label, state.advertised()))
     }
 
-    /// 지금 목적지로 잡혀 있는 창(진단·테스트용).
+    /// The window currently held as the destination (for diagnostics · tests).
     pub fn host(&self) -> Option<String> {
         self.live_host().map(|(label, _)| label)
     }
@@ -544,26 +544,26 @@ fn decls_of(map: &BTreeMap<String, String>) -> Vec<CommandDecl> {
 }
 
 impl ViewCommandHelp {
-    /// 카탈로그 항목 하나로 편다 — ★Rust 선언이 내는 것과 **같은 칸 이름**을 쓴다★
-    /// (`engram_dashboard_command::spec_item_json`). 갈리면 명부 하나에 모양이 두 방언으로 섞여, 그것을
-    /// 읽는 LLM 이 명령마다 다른 독법을 써야 한다.
+    /// Unfold into one catalog entry — ★it uses the **same field names** as what the Rust declaration emits★
+    /// (`engram_dashboard_command::spec_item_json`). If they diverge, the shapes in one registry mix as two dialects, and the LLM that
+    /// reads them has to use a different reading for each command.
     ///
-    /// `effect` 는 웹뷰가 실은 값을 그대로 쓴다(사유 = [`ViewEffect`]). 나머지 셋은 여기서 정하고, 각각
-    /// 사실이다:
-    /// - `since: 1` — 이 경로로 올라오는 이름에는 세대가 없다. 웹뷰 어휘의 세대를 실제로 세려면 그 쪽에
-    ///   카탈로그 번호가 서야 하고, 없는 번호를 지어내느니 「첫 세대」로 고정한다.
-    /// - `ok: {}` — 빈 스키마는 「무엇이든」이다. 웹뷰 `run` 의 반환은 명령마다 제각각이고(void·id·Promise)
-    ///   계약으로 고정된 적이 없다 — 모양을 지어내는 대신 모른다고 적는다.
-    /// - `errors` — 이 다리가 실제로 낼 수 있는 **전량**이다([`ViewCommandBridge`] 의 갈래들): 웹뷰가
-    ///   실패했다(`INTERNAL`) · 마감을 넘겼다(`TIMEOUT`) · 보낼 창이 없다(`UNSUPPORTED`) · 같은 번호가
-    ///   이미 돈다(`REQUEST_ID_CONFLICT`). ★광고에 없는 코드를 내보내지 않는다★ — 호출자는 이 목록으로
-    ///   분기를 짜므로, 안 적힌 코드가 오면 그 분기의 기본 갈래(대개 「모르는 실패」)로 떨어진다.
-    ///   ★웹뷰가 던진 오류는 종류를 못 가른다(알려진 한계)★ — 인자 실수도 진짜 실패도 `INTERNAL` + 문구로
-    ///   나간다. 가르려면 웹뷰가 타입드 코드를 실어야 하고 그건 이 조각의 결정이 아니다.
+    /// `effect` uses the value the webview carried as is (reason = [`ViewEffect`]). The other three are decided here, and each is
+    /// true:
+    /// - `since: 1` — a name coming up this path has no generation. To really count generations of the webview vocabulary, a
+    ///   catalog number would have to stand on that side, and rather than invent a number we pin it to 「첫 세대」 (first generation).
+    /// - `ok: {}` — an empty schema means 「무엇이든」 (anything). The return of webview `run` varies per command (void · id · Promise)
+    ///   and has never been fixed by a contract — instead of inventing a shape, we write that it is unknown.
+    /// - `errors` — the **whole set** this bridge can actually emit (the branches of [`ViewCommandBridge`]): the webview
+    ///   failed (`INTERNAL`) · the deadline passed (`TIMEOUT`) · there is no window to send to (`UNSUPPORTED`) · the same number
+    ///   is already running (`REQUEST_ID_CONFLICT`). ★Do not emit a code that is not in the advertisement★ — callers build their branching from this list,
+    ///   so if an unlisted code arrives it falls to that branching's default branch (usually 「모르는 실패」, unknown failure).
+    ///   ★An error thrown by the webview cannot be told apart by kind (a known limitation)★ — an argument mistake and a real failure both go out as `INTERNAL` + text.
+    ///   To tell them apart the webview would have to carry typed codes, and that is not this piece's decision.
     ///
-    /// ★`effect` 를 **인자로 받는다** — `self` 의 `Option` 을 읽지 않는다★: 여기서 읽으면 「값이 없으면
-    /// 무엇으로 하나」라는 질문이 되살아나고, 그 답은 어떤 것을 골라도 거짓 광고다([`ViewEffect`]).
-    /// 부르는 쪽([`ViewCommandBridge::report`])이 이미 그 칸을 벗겨 냈으므로 여기엔 값만 온다.
+    /// ★`effect` is **taken as an argument** — the `Option` in `self` is not read★: if read here, the question 「값이 없으면
+    /// 무엇으로 하나」 (what do we use if there is no value) comes back to life, and whichever answer is picked it is a false advertisement ([`ViewEffect`]).
+    /// The caller ([`ViewCommandBridge::report`]) has already peeled that field off, so only the value comes here.
     fn to_catalog_item(&self, name: &str, effect: ViewEffect) -> String {
         let item = serde_json::json!({
             "name": name,
@@ -579,8 +579,8 @@ impl ViewCommandHelp {
                 ErrorCode::RequestIdConflict.as_str(),
             ],
         });
-        // 직렬화는 실패할 수 없다(전부 JSON 값이다). 그래도 패킷을 죽이지 않고 빈 문자열로 접는다 —
-        //   빈 `help` 는 보고 필터가 이미 뺀 뒤라 여기 오면 위쪽 계약이 깨진 것이고, 그 신호는 로그가 진다.
+        // Serialization cannot fail (everything is a JSON value). Still, it folds to an empty string rather than killing the packet —
+        //   an empty `help` was already dropped by the report filter, so reaching here means the contract above is broken, and the log carries that signal.
         serde_json::to_string(&item).unwrap_or_default()
     }
 
@@ -595,8 +595,8 @@ impl ViewCommandHelp {
                 )
             })
             .collect();
-        // ★`required` 는 선언된 칸만 남긴다★ — 없는 칸을 required 에 실으면 그 스키마는 아무 인자로도
-        //   만족되지 않아 호출자가 영영 못 부른다(Rust 쪽 `lint_spec` 이 같은 것을 컴파일 옆에서 막는다).
+        // ★`required` keeps only declared fields★ — if a nonexistent field is put in required, that schema is satisfied by no arguments at all,
+        //   so the caller can never call it (Rust-side `lint_spec` blocks the same thing beside compilation).
         let required: Vec<&String> = self
             .required
             .iter()
@@ -611,8 +611,8 @@ impl ViewCommandHelp {
 }
 
 impl ViewCommandPort for ViewCommandBridge {
-    /// ★광고하는 것은 **살아 있는 host 창의 목록**이다★ — 재연결마다 다시 고르므로, 죽은 창이 쥐고 있던
-    /// 이름이 다음 등록 패킷에 실려 나가지 않는다.
+    /// ★What is advertised is **the list of the live host window**★ — it is picked again on every reconnect, so names held by a dead window
+    ///   do not go out in the next registration packet.
     fn declarations(&self) -> Vec<CommandDecl> {
         self.live_host()
             .map(|(_, shapes)| decls_of(&shapes))
@@ -620,8 +620,8 @@ impl ViewCommandPort for ViewCommandBridge {
     }
 
     fn lookup(&self, name: &str) -> OwnerLookup {
-        // ★목적지 창이 없으면 「모르는 이름」이다★ — 보낼 곳이 없는데 주인이 있다고 답하면 배달이
-        //   `link.send` 까지 가서 오류를 만들고, 호출자는 그 둘을 구분할 수 없다.
+        // ★If there is no destination window it is 「모르는 이름」 (unknown name)★ — if we answered that there is an owner when there is nowhere to send, delivery would
+        //   go as far as `link.send` and produce an error, and the caller could not tell the two apart.
         match self
             .live_host()
             .is_some_and(|(_, shapes)| shapes.contains_key(name))
@@ -649,9 +649,9 @@ impl ViewCommandPort for ViewCommandBridge {
         };
 
         let (answer, wait) = oneshot::channel();
-        // ★보내기 **전에** 자리를 건다★ — invoke 로 오는 답이 emit 반환보다 먼저 도착할 수 있고, 그때
-        //   자리가 없으면 그 답은 「기다리는 왕복이 없다」로 버려진다.
-        // ★같은 번호가 이미 돌고 있으면 **안 보낸다**★ — 사유는 `PendingSlot::hold`.
+        // ★Hang the seat **before** sending★ — the reply coming by invoke may arrive before the emit returns, and then,
+        //   if there is no seat, that reply is dropped as 「기다리는 왕복이 없다」 (no round trip is waiting).
+        // ★If the same number is already running, **do not send**★ — for the reason, see `PendingSlot::hold`.
         let Some(slot) = PendingSlot::hold(&self.pending, request_id, &target, answer) else {
             return ready(CommandReply::err(
                 request_id,
@@ -662,7 +662,7 @@ impl ViewCommandPort for ViewCommandBridge {
             ));
         };
         if let Err(detail) = self.dispatch.deliver(&target, &request) {
-            // `slot` 이 여기서 drop 되며 자리를 되가져간다.
+            // `slot` is dropped here and takes the seat back.
             return ready(CommandReply::err(
                 request_id,
                 CommandError::of(ErrorCode::Internal, detail),
@@ -671,15 +671,15 @@ impl ViewCommandPort for ViewCommandBridge {
 
         let deadline = self.deadline;
         Box::pin(async move {
-            // ★future 안으로 들고 들어간다★ — 마감이든 취소든(이 future 를 drop 하면 왕복이 그대로 버려진다,
-            //   `route` 의 취소 의미) 자리를 되가져가는 경로가 `Drop` 하나로 모인다.
+            // ★Carried into the future★ — whether by deadline or cancellation (dropping this future discards the round trip as is,
+            //   the cancellation meaning of `route`), the path that takes the seat back converges on a single `Drop`.
             let _slot = slot;
             match tokio::time::timeout(deadline, wait).await {
                 Ok(Ok(outcome)) => CommandReply {
                     request_id,
                     outcome,
                 },
-                // 송신단이 답 없이 사라졌다 — `settle` 이 자리를 빼 갔는데 값을 못 넣은 경우뿐이다.
+                // The sender vanished without an answer — only the case where `settle` took the seat away but could not put in a value.
                 Ok(Err(_)) => CommandReply::err(
                     request_id,
                     CommandError::of(
@@ -702,27 +702,27 @@ impl ViewCommandPort for ViewCommandBridge {
     }
 }
 
-/// 답장 자리 하나의 수명 — ★비우는 경로가 `Drop` 하나다★.
+/// The lifetime of one reply seat — ★the clearing path is a single `Drop`★.
 ///
-/// 자리를 손으로 지우게 두면 빠뜨린 갈래가 맵을 영구히 불린다. 실제로 갈래가 넷이다: 배달 실패 · 정상
-/// 답장(`settle` 이 이미 빼 갔다) · 마감 · **이 future 자체가 drop 되는 경우**(취소 — `route` 의 그 의미).
-/// 마지막 하나는 손으로는 닿을 수 없는 자리라, 없으면 런타임이 접힐 때마다 자리가 남는다.
+/// If seats were cleared by hand, a missed branch would grow the map permanently. There really are four branches: delivery failure · normal
+/// reply (`settle` already took it) · deadline · **the case where this future itself is dropped** (cancellation — that meaning of `route`).
+/// The last one is a spot that cannot be reached by hand, so without it a seat is left every time the runtime shuts down.
 struct PendingSlot {
     pending: Arc<Pending>,
     request_id: RequestId,
-    /// 내 자리의 신원 — [`PendingSlot::drop`] 이 **남의 자리를 안 지우게** 하는 유일한 재료다.
+    /// My seat's identity — the only material that makes [`PendingSlot::drop`] **not clear another's seat**.
     seat: u64,
 }
 
 impl PendingSlot {
-    /// 자리를 잡는다 — ★이미 도는 번호면 `None` 이고, **살아 있는 대기자를 밀어내지 않는다**★.
+    /// Take a seat — ★if the number is already running it is `None`, and **a live waiter is not pushed out**★.
     ///
-    /// 조용히 덮으면 같은 명령이 두 번 돈다: 첫 왕복이 아직 웹뷰에서 도는 중에 같은 번호가 다시 오면
-    /// 봉투가 한 번 더 내려가고(부수효과 2회), 첫 대기자는 답을 못 받은 채 버려지며, 먼저 도착한 **옛**
-    /// 결말이 새 시도의 답으로 붙는다. 거절이 그 셋을 한꺼번에 막는다.
-    /// ★그런데도 이 상황 자체가 생기지 않는 것이 정상이다★ — 재시도가 이 자리에 닿으려면 바깥 마감이
-    /// 안쪽보다 먼저 끝나야 하고, 그 순서는 [`VIEW_REPLY_DEADLINE`] 의 부등식이 막는다. 이 거절은 그
-    /// 부등식이 깨졌을 때의 두 번째 그물이다.
+    /// If covered quietly, the same command runs twice: if the same number comes again while the first round trip is still running in the webview,
+    /// the envelope goes down one more time (side effect twice), the first waiter is dropped without receiving an answer, and the **old**
+    /// outcome that arrived first attaches as the new attempt's answer. The refusal blocks all three at once.
+    /// ★Even so, it is normal that this situation itself does not arise★ — for a retry to reach this seat, the outer deadline would have to
+    /// end before the inner one, and the inequality of [`VIEW_REPLY_DEADLINE`] blocks that order. This refusal is the second net for when that
+    /// inequality breaks.
     fn hold(
         pending: &Arc<Pending>,
         request_id: RequestId,
@@ -751,15 +751,15 @@ impl PendingSlot {
 }
 
 impl Drop for PendingSlot {
-    /// ★**내 자리일 때만** 지운다★ — 번호가 같아도 자리가 다르면 남의 것이다.
+    /// ★Clear **only when it is my seat**★ — even with the same number, if the seat differs it is another's.
     ///
-    /// 막는 인터리브: `settle` 이 X 를 빼 답을 보내고 → 같은 X 로 새 봉투가 새 자리를 잡은 뒤 → 옛
-    /// future 의 이 가드가 떨어지며 **새 자리**를 쫓아내면, 그 대기자는 닫힌 채널로 실패한다.
-    /// ★오늘은 그 인터리브가 안 생긴다 — 그래도 신원으로 막는다★: 가드는 async 블록 끝에서 떨어지고 그
-    /// 시점은 결말이 데몬에 닿기 **전**이라, 데몬이 같은 번호를 다시 열 창이 없다. 하지만 그 논증은
-    /// 「가드가 언제 떨어지나」·「데몬이 언제 번호를 재사용하나」 **두 모듈의 성질**에 걸려 있어, 어느
-    /// 한쪽이 바뀌면 조용히 무너진다(그 변경이 이 파일을 건드릴 이유도 없다). 신원 비교는 그 논증 자체를
-    /// 필요 없게 만든다.
+    /// The interleave it blocks: `settle` takes X out and sends the answer → after a new envelope takes a new seat with the same X → this guard of the old
+    /// future drops and evicts the **new seat**, and that waiter fails with a closed channel.
+    /// ★Today that interleave does not arise — still we block it by identity★: the guard drops at the end of the async block, and that
+    /// moment is **before** the outcome reaches the daemon, so the daemon has no window to reopen the same number. But that argument hangs on
+    /// the properties of **two modules** — 「가드가 언제 떨어지나」 (when the guard drops) · 「데몬이 언제 번호를 재사용하나」 (when the daemon reuses numbers) — so if either
+    /// changes it silently collapses (and there is no reason for that change to touch this file). The identity comparison makes that argument itself
+    /// unnecessary.
     fn drop(&mut self) {
         let mut waiting = sync::lock(&self.pending.seats);
         if waiting

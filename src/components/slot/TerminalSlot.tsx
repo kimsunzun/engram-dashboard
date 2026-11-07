@@ -10,7 +10,7 @@ import { useAgentStore } from '../../store/agentStore'
 import { SlotUnavailableVeil } from './SlotUnavailableVeil'
 
 interface TerminalSlotProps {
-  /** 구독 키(ADR-0046) = 슬롯 id. 같은 agentId 두 슬롯도 이 값으로 독립 구독·독립 진도(버그 B 해소). */
+  /** Subscription key (ADR-0046) = slot id. Two slots with the same agentId also get independent subscriptions and independent progress through this value (bug B resolved). */
   viewId: string
   agentId: string | null
 }
@@ -19,19 +19,19 @@ export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const terminalRef = useRef<Terminal | null>(null)
   const fitAddonRef = useRef<FitAddon | null>(null)
-  // ADR-0056: WebGL 좌석은 "보이는 슬롯"에만. 숨김 시 반납(loseContext+dispose)하고 이 ref 를 null 로
-  //   비운다. Terminal 인스턴스(버퍼/스크롤백)는 계속 살아있고 WebGL addon 만 붙였다 뗀다.
+  // ADR-0056: a WebGL seat only for a "visible slot". On hide it is returned (loseContext+dispose) and this ref is
+  //   cleared to null. The Terminal instance (buffer/scrollback) stays alive and only the WebGL addon is attached and detached.
   const webglAddonRef = useRef<WebglAddon | null>(null)
-  // ADR-0056: 좌석 결정적 반납용으로 attach 시점에 잡아둔 GL 컨텍스트. 언마운트 경로 방어의 핵심 —
-  //   releaseWebgl 을 containerRef.current 에 의존시키면 안 되기 때문이다(아래 releaseWebgl 주석 참조).
+  // ADR-0056: the GL context grabbed at attach time for deterministic seat return. The core of the unmount path defense —
+  //   because releaseWebgl must not depend on containerRef.current (see the releaseWebgl comment below).
   const glRef = useRef<WebGLRenderingContext | null>(null)
   const agentIdRef = useRef<string | null>(agentId)
-  // 입력 가드가 읽는 부재 값 — onData 는 xterm 콜백 안에서 돌아 리렌더로 갱신되는 state 를 못 보므로
-  //   막을 올리는 그 값(agentUnavailable)을 ref 로 실어 나른다. 아래 effect 가 매 판정마다 갱신한다.
+  // The absent value the input guard reads — onData runs inside an xterm callback and cannot see state updated by re-render, so
+  //   the value that raises the curtain (agentUnavailable) is carried via a ref. The effect below updates it on every decision.
   const unavailableRef = useRef(false)
   const resizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  // 구독이 마지막으로 알린 국면 — 아래 오버레이의 근거. 명부·연결 상태를 따로 유도하지 않고 구독이
-  //   판정한 사실을 그대로 받는다(제어 표면은 하나 — ADR-0046 §5).
+  // The phase the subscription last announced — the basis of the overlay below. It takes the fact the subscription decided as it is, rather than
+  //   deriving registry·connection state separately (one control surface — ADR-0046 §5).
   const [phase, setPhase] = useState<ViewPhase | null>(null)
 
   useEffect(() => {
@@ -40,11 +40,11 @@ export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
 
   const agents = useAgentStore(s => s.agents)
   const agent = agentId ? (agents.find(a => a.id === agentId) ?? null) : null
-  // ADR-0148: 권위 명부를 받았나 — 받기 전(기동·재연결 직후)의 빈 명부를 "없어졌다" 로 오인하지 않기 위한 가드.
+  // ADR-0148: did we receive the authoritative registry? — a guard so the empty registry before receipt (right after boot/reconnect) is not mistaken for "gone".
   const agentsLoaded = useAgentStore(s => s.agentsLoaded)
-  // ★부재 = terminal 상태로 발견 ∪ 명부 수신 후에도 해석 안 됨(ADR-0148)★. 후자가 종료(kill)의 실제 결말이다
-  //   — reaper 가 세션을 수거하며 명부에서 지우므로 status 로는 잡히지 않는다. 이걸 부재로 안 보면 죽은
-  //   에이전트가 막도 입력 가드도 없는 슬롯으로 남는다(아래 agentUnavailable 의 한 항).
+  // ★Absent = found in terminal state ∪ unresolved even after the registry is received (ADR-0148)★. The latter is the real outcome of a kill
+  //   — the reaper collects the session and removes it from the registry, so status does not catch it. If it were not seen as absent, the dead
+  //   agent would remain as a slot with neither curtain nor input guard (one term of agentUnavailable below).
   const agentGone =
     (agentsLoaded && agentId != null && agent == null) ||
     (agent != null &&
@@ -52,35 +52,35 @@ export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
         agent.status.type === 'Killed' ||
         agent.status.type === 'Failed'))
 
-  // ADR-0148 결정 1 / ADR-0149 결정 4: 부재 판정은 세 슬롯이 같다(RichSlot 이 정본 형태) — 종료 ∪ 연결
-  //   끊김 ∪ 구독이 출력을 못 내는 상태. 기존 연결 상태 표면(agentClient)을 **읽기만** 한다. 구독 콜백은
-  //   등록 즉시 현재 상태로 1회 발화하므로 초기값 동기화가 따로 필요 없다.
+  // ADR-0148 decision 1 / ADR-0149 decision 4: the absent decision is the same for all three slots (RichSlot has the canonical form) — ended ∪ connection
+  //   lost ∪ the subscription cannot produce output. It only **reads** the existing connection state surface (agentClient). The subscription callback fires once with
+  //   the current state on registration, so no separate initial value sync is needed.
   const [connected, setConnected] = useState(() => agentClient.connectionState === 'connected')
   useEffect(() => agentClient.onConnectionStateChange(s => setConnected(s === 'connected')), [])
-  // ★'error' 도 부재다★: 재요청 사다리를 소진한 뷰는 아무것도 못 받는데, 이걸 빼면 명부에 살아 있고
-  //   연결도 붙은 슬롯이 **아무 표시 없는 빈 판**으로 남는다(신호도 회복 안내도 없다).
+  // ★'error' is absent too★: a view that exhausted the re-request ladder receives nothing, and without this a slot alive in the registry and
+  //   with the connection attached stays as a **blank panel with no indicator** (no signal and no recovery hint).
   const subscriptionDown = phase === 'detached' || phase === 'error'
   const agentUnavailable = agentGone || !connected || subscriptionDown
 
-  // ★입력을 막는 조건 = 막을 올리는 조건★: 막은 pointer-events-none 이라 아래 조작을 가리지 않는다
-  //   (SlotUnavailableVeil) — 포커스가 남은 xterm 은 막이 떠 있어도 계속 키를 먹는다. 종료만 보고 막으면
-  //   연결이 끊긴·구독이 죽은 슬롯에서 "없다" 고 적힌 화면 뒤로 입력이 계속 나가고, 그 실패는 조용히
-  //   삼켜져 사용자에겐 무반응으로만 보인다.
+  // ★Input-blocking condition = curtain-raising condition★: the curtain is pointer-events-none so it does not intercept operation below
+  //   (SlotUnavailableVeil) — an xterm that kept focus keeps eating keys even with the curtain up. Blocking on exit alone makes input keep
+  //   going out from a disconnected or subscription-dead slot behind a screen that says "없다" (it is gone), and that failure is quietly
+  //   swallowed and seen by the user only as no response.
   useEffect(() => { unavailableRef.current = agentUnavailable }, [agentUnavailable])
 
   useEffect(() => {
     if (!containerRef.current) return
-    // WebGL/canvas 렌더러는 글리프를 canvas 2D(ctx.font)로 rasterize하는데 canvas 는 CSS var() 를
-    // 해석 못 한다 → 'var(--font-terminal)' 을 그대로 넘기면 폰트 무효로 검은 화면. 생성 시점에
-    // 실제 폰트 문자열로 해석해 넘긴다. (실측: canvas 가 '13px var(--font-terminal)' 거부→10px sans-serif)
+    // The WebGL/canvas renderer rasterizes glyphs with canvas 2D (ctx.font), and a canvas cannot resolve CSS var() →
+    // passing 'var(--font-terminal)' as is makes the font invalid and a black screen. It is resolved to the real font string at creation time
+    // and passed. (Measured: canvas rejected '13px var(--font-terminal)' → 10px sans-serif)
     const fontFamily =
       getComputedStyle(document.documentElement).getPropertyValue('--font-terminal').trim() || 'monospace'
     const term = new Terminal({
       fontFamily,
       fontSize: 13,
-      // 사용자 결정 2026-09-25: 기본값만 흰 막대·깜빡임으로 바꾼다. 사용자 설정으로 여는 것은 미뤘다 — 설정이
-      //   되려면 LLM 제어 경로가 함께 있어야 한다(CLAUDE.md 「LLM-우선 제어」).
-      // 포커스 없는 슬롯도 막대로 — xterm 기본값('outline')은 칸 전체를 빈 상자로 그려 그 선택과 어긋난다.
+      // User decision 2026-09-25: only the default changes to a white bar and blinking. Opening it as a user setting was put off — for it to be a
+      //   setting an LLM control path must come with it (CLAUDE.md 「LLM-우선 제어」).
+      // An unfocused slot is a bar too — the xterm default ('outline') draws the whole cell as an empty box, which conflicts with that choice.
       cursorStyle: 'bar',
       cursorInactiveStyle: 'bar',
       cursorBlink: true,
@@ -89,19 +89,19 @@ export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
     const fitAddon = new FitAddon()
     term.loadAddon(fitAddon)
     term.open(containerRef.current)
-    // ADR-0056: WebGL 렌더러는 여기(마운트)서 안 붙인다 — 가시성 연동 effect 로 옮겼다. keep-alive 로
-    //   숨은 탭도 Terminal 인스턴스는 살아있지만, WebGL 좌석(브라우저 하드 상한 16)은 보이는 슬롯에만
-    //   준다.
+    // ADR-0056: the WebGL renderer is not attached here (at mount) — it moved to the visibility-linked effect. With keep-alive
+    //   hidden tabs also keep their Terminal instance alive, but WebGL seats (browser hard cap 16) are given only to visible
+    //   slots.
     fitAddon.fit()
     terminalRef.current = term
     fitAddonRef.current = fitAddon
 
     const ro = new ResizeObserver(entries => {
-      // ADR-0056: 숨김(탭 keep-alive = display:none) 이면 컨테이너가 0 크기로 붕괴하며 RO 가 발화한다.
-      //   이때 fit() 하면 0 크기 위에서 cols/rows 가 최소값/쓰레기로 계산되고, resizePty 로 그 치수가
-      //   PTY 에 전파돼 에이전트 레이아웃이 깨진다. hidden 신호로 조기 반환하고 대기 중 타이머도 지운다.
-      //   신호는 offsetParent===null — display:none 이면(자신·조상 어느 쪽이든) null 이라 붕괴한 contentRect
-      //   0 폭·높이보다 견고하다(1px·overflow 잔여 크기 오탐 회피).
+      // ADR-0056: when hidden (tab keep-alive = display:none) the container collapses to size 0 and RO fires.
+      //   Calling fit() then computes cols/rows at minimum/garbage over size 0, and resizePty propagates those dimensions to the
+      //   PTY and breaks the agent layout. Return early on the hidden signal and also clear the pending timer.
+      //   The signal is offsetParent===null — with display:none (on itself or any ancestor) it is null, which is more robust than the collapsed contentRect
+      //   0 width·height (avoids false positives from 1px · overflow residual size).
       const hidden =
         containerRef.current?.offsetParent === null ||
         (entries[0]?.contentRect.width === 0 && entries[0]?.contentRect.height === 0)
@@ -115,12 +115,12 @@ export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
       fitAddon.fit()
       const aid = agentIdRef.current
       if (!aid) return
-      // debounce 50ms — 드래그 중 매 프레임 IPC 발사 방지
+      // debounce 50ms — prevents firing IPC every frame during a drag
       if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current)
       resizeTimerRef.current = setTimeout(() => {
         resizeTimerRef.current = null
-        // 거절 싱크 — 형제 호출부와 동형. 죽은/끊긴 슬롯이 마운트된 채 RO 가 살아 있으므로(ADR-0148 뷰
-        //   유지) 분할선을 끌면 여기로 실패가 온다. Resize 는 fire-and-forget 이라 흡수만 한다.
+        // Rejection sink — same shape as sibling call sites. A dead/disconnected slot stays mounted with RO alive (ADR-0148 view
+        //   kept), so dragging the divider makes the failure come here. Resize is fire-and-forget so it only absorbs.
         void agentClient.resizePty(aid, term.cols, term.rows).catch(() => {})
       }, 50)
     })
@@ -129,7 +129,7 @@ export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
     return () => {
       ro.disconnect()
       if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current)
-      // ADR-0056: Terminal dispose 만으론 GC 전까지 GPU 좌석이 안 풀린다(아래 releaseWebgl 주석 참조).
+      // ADR-0056: Terminal dispose alone does not free the GPU seat until GC (see the releaseWebgl comment below).
       releaseWebgl()
       term.dispose()
       terminalRef.current = null
@@ -137,38 +137,38 @@ export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
     }
   }, [])
 
-  // ADR-0056 ── WebGL 좌석 결정적 반납 ────────────────────────────────────────────────
-  // ★load-bearing 불변식★: xterm 의 `WebglAddon.dispose()` 는 canvas/layer 를 DOM 에서 떼기만 하고
-  //   `WEBGL_lose_context.loseContext()` 를 호출하지 않는다(소스 확인: WebglRenderer 에 loseContext 없음).
-  //   즉 dispose 만 하면 GPU 컨텍스트 좌석은 GC 될 때까지(비결정적) 계속 점유된다 → 브라우저 하드 상한
-  //   16 을 넘기면 오래된 컨텍스트가 소실(참조: PixiJS #8215 — destroy 후에도 GC 전까지 경고 지속).
-  //   그래서 dispose *이전에* 우리가 직접 loseContext() 를 불러 좌석을 결정적으로 놓는다.
-  // ★왜 attach 시점에 컨텍스트를 잡아두나(glRef)★: React 는 host ref(containerRef) 를 commit 의 mutation
-  //   단계에서 null 로 비운다 — 이건 passive effect cleanup(언마운트 시 releaseWebgl 이 도는 지점) *이전*이다.
-  //   그래서 언마운트 경로에서 releaseWebgl 이 containerRef.current 를 훑으면 이미 null → canvas 루프가
-  //   통째로 스킵되고 loseContext 가 안 불려 좌석이 GC 까지 샌다(탭/슬롯 닫기 = 정확히 반납이 필요한 경로).
-  //   그래서 컨테이너가 살아있고 보이는 attach 시점(attachWebgl, loadAddon 성공 직후)에 GL 컨텍스트를
-  //   glRef 에 잡아두고, 여기선 그 잡아둔 컨텍스트로 loseContext 를 부른다 — ref-null·DOM 제거를 견딘다.
-  //   (detach 된 canvas 의 컨텍스트라도 lose/dispose 전까지는 유효해 getExtension 호출이 가능하다. 방어차
-  //   전 구간 옵셔널 체이닝 + try-catch — 컨텍스트를 못 얻어도 절대 throw 하지 않는다.)
+  // ADR-0056 ── Deterministic return of the WebGL seat ────────────────────────────────
+  // ★load-bearing invariant★: xterm's `WebglAddon.dispose()` only detaches the canvas/layer from the DOM and does not call
+  //   `WEBGL_lose_context.loseContext()` (source checked: WebglRenderer has no loseContext).
+  //   So with dispose alone the GPU context seat stays occupied until GC (non-deterministic) → past the browser hard cap
+  //   16 old contexts are lost (ref: PixiJS #8215 — warnings persist after destroy until GC).
+  //   So *before* dispose we call loseContext() ourselves to release the seat deterministically.
+  // ★Why grab the context at attach time (glRef)★: React clears the host ref (containerRef) to null in the commit's mutation
+  //   phase — this is *before* the passive effect cleanup (the point where releaseWebgl runs on unmount).
+  //   So if releaseWebgl scans containerRef.current on the unmount path it is already null → the canvas loop
+  //   is skipped entirely, loseContext is not called and the seat leaks until GC (closing a tab/slot = exactly the path that needs the return).
+  //   So at attach time (attachWebgl, right after loadAddon succeeds) while the container is alive and visible, the GL context is
+  //   grabbed into glRef, and here loseContext is called with that grabbed context — it survives ref-null and DOM removal.
+  //   (Even the context of a detached canvas is valid until lose/dispose, so a getExtension call is possible. As a precaution,
+  //   optional chaining throughout + try-catch — it never throws even if the context cannot be obtained.)
   const releaseWebgl = () => {
     const addon = webglAddonRef.current
     if (!addon) return
     try {
       glRef.current?.getExtension('WEBGL_lose_context')?.loseContext()
     } catch {
-      // loseContext 실패는 치명적 아님 — dispose 는 계속 진행(좌석은 GC 로라도 결국 풀림).
+      // A loseContext failure is not fatal — dispose carries on (the seat is eventually freed by GC at least).
     }
     addon.dispose()
     webglAddonRef.current = null
     glRef.current = null
   }
 
-  // ADR-0056 ── 가시성 연동 WebGL 라이프사이클 ──────────────────────────────────────────
-  // 보이는 슬롯만 WebGL 좌석을 쥔다. keep-alive(탭 숨김=display:none, WindowLayout) 하에서 IO 는 숨은
-  //   타겟을 not-intersecting 으로 보고하고, 전환 시 콜백을 발화한다. ★초기-숨김 주의★: 숨은 탭에서
-  //   마운트되면 첫 observe() 콜백이 이미 not-intersecting 이므로, 첫 콜백이 보인다고 가정하면 안 된다 —
-  //   숨은 채 마운트된 슬롯은 첫 "보임" 콜백 전까지 WebGL 을 만들지 않는다(좌석 절약).
+  // ADR-0056 ── Visibility-linked WebGL lifecycle ──────────────────────────────────────────
+  // Only a visible slot holds a WebGL seat. Under keep-alive (tab hidden = display:none, WindowLayout) IO reports a hidden
+  //   target as not-intersecting and fires the callback on transition. ★Initial-hidden caution★: if mounted in a hidden tab
+  //   the first observe() callback is already not-intersecting, so you must not assume the first callback means visible —
+  //   a slot mounted hidden does not create WebGL until its first "visible" callback (saves seats).
   useEffect(() => {
     const container = containerRef.current
     if (!container) return
@@ -176,17 +176,17 @@ export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
     const attachWebgl = () => {
       const term = terminalRef.current
       if (webglAddonRef.current || !term) return
-      // WebGL 렌더러 — DOM 렌더러는 customGlyphs 미지원이라 블록/박스드로잉 문자를 폰트에 위임,
-      // 분수 DPI(rowHeight 비정수)에서 첫 행 상단 픽셀이 깎인다. WebGL은 이 글리프를 직접 그려
-      // 클리핑 제거(조사: xterm.js #2409/#3807/#967). 미지원/컨텍스트 소실 시 DOM 자동 폴백.
-      // ★부분생성 누수 방어★: new WebglAddon() 이 이미 GL 컨텍스트를 잡은 뒤 loadAddon 등에서 throw 하면,
-      //   catch 에서 이 addon 을 dispose 하지 않으면 좌석이 새고 다음 "보임"에서 두 번째 addon 이 붙는다.
-      //   그래서 addon 참조를 try 밖에 두고 catch 에서 dispose 한다. ref 는 완전 성공 시에만 세팅.
+      // WebGL renderer — the DOM renderer does not support customGlyphs so it delegates block/box-drawing characters to the font,
+      // and at fractional DPI (non-integer rowHeight) the top pixel of the first row gets shaved. WebGL draws these glyphs itself and
+      // removes the clipping (research: xterm.js #2409/#3807/#967). On unsupported/context loss it falls back to DOM automatically.
+      // ★Partial-creation leak defense★: if new WebglAddon() already grabbed a GL context and then loadAddon etc. throws,
+      //   and the catch does not dispose this addon, the seat leaks and a second addon attaches at the next "visible".
+      //   So the addon reference is kept outside try and disposed in catch. The ref is set only on full success.
       let webgl: WebglAddon | undefined
       try {
         webgl = new WebglAddon()
-        // 컨텍스트 소실(좌석 축출 등) 시 반응형 DOM 폴백. addon 을 버리고 ref 를 비워
-        //   다음 "보임" 때 재부착 가능하게 둔다.
+        // On context loss (seat eviction etc.) a reactive DOM fallback. The addon is dropped and the ref cleared
+        //   so it can be reattached at the next "visible".
         webgl.onContextLoss(() => {
           webgl?.dispose()
           if (webglAddonRef.current === webgl) {
@@ -196,10 +196,10 @@ export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
         })
         term.loadAddon(webgl)
         webglAddonRef.current = webgl
-        // ADR-0056: 결정적 반납용 GL 컨텍스트를 지금(컨테이너 live·visible) 잡아둔다. 언마운트 시 releaseWebgl
-        //   이 containerRef 없이도 loseContext 를 부를 수 있게 — 이유는 releaseWebgl 주석 참조. addon 이
-        //   container 에 append 한 canvas 중 WebGL(2) 컨텍스트가 잡히는 것을 찾는다(layer class 이름 비의존
-        //   버전-견고 경로; 2d atlas canvas 는 getContext('webgl2'|'webgl') 이 null 이라 자연히 건너뜀).
+        // ADR-0056: grab the GL context for deterministic return now (container live·visible). So that on unmount releaseWebgl
+        //   can call loseContext even without containerRef — see the releaseWebgl comment for why. Among the canvases the addon
+        //   appended to the container, find the one whose WebGL(2) context can be grabbed (a version-robust path independent of layer class names;
+        //   the 2d atlas canvas has getContext('webgl2'|'webgl') null so it is naturally skipped).
         const container = containerRef.current
         if (container) {
           for (const canvas of container.querySelectorAll('canvas')) {
@@ -212,16 +212,16 @@ export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
             }
           }
         }
-        // 새로 붙은 GPU 렌더러가 현재 버퍼를 즉시 그리도록: 보이는 상태이므로 fit()→PTY 크기 전파→refresh.
-        //   (숨김 중엔 fit() 금지 — 측정 불가라 쓰레기 치수가 나온다.)
+        // So the newly attached GPU renderer draws the current buffer at once: it is visible, so fit()→PTY size propagation→refresh.
+        //   (No fit() while hidden — it cannot be measured so garbage dimensions come out.)
         fitAddonRef.current?.fit()
         const aid = agentIdRef.current
         if (aid) void agentClient.resizePty(aid, term.cols, term.rows).catch(() => {})
-        // rows===0(측정 전 등)이면 refresh(0, -1) 이 되어 무의미/오작동 → rows>0 일 때만 refresh.
+        // If rows===0 (before measurement etc.), refresh(0, -1) results and is meaningless/misbehaves → refresh only when rows>0.
         if (term.rows > 0) term.refresh(0, term.rows - 1)
       } catch (e) {
-        // WebGL 미지원/로드 실패 → DOM 렌더러 폴백. 부분생성된 addon 은 반드시 dispose(좌석 누수·중복부착
-        //   방지). 무로깅이면 클리핑 픽스가 조용히 무효화돼도 모르니 경고.
+        // WebGL unsupported/load failure → DOM renderer fallback. A partially created addon must be disposed (prevents seat leak and duplicate
+        //   attach). With no logging we would not know if the clipping fix were silently disabled, so warn.
         webgl?.dispose()
         console.warn('[TerminalSlot] WebGL 비활성 → DOM 렌더러로 폴백', e)
       }
@@ -231,7 +231,7 @@ export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
       for (const entry of entries) {
         const visible = entry.isIntersecting && entry.intersectionRatio > 0
         if (visible) attachWebgl()
-        else releaseWebgl() // DOM 렌더러가 자동 인수(어차피 안 보여 그리지 않음).
+        else releaseWebgl() // The DOM renderer takes over automatically (nothing is drawn anyway since it is not visible).
       }
     })
     io.observe(container)
@@ -239,21 +239,21 @@ export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
     return () => io.disconnect()
   }, [])
 
-  // 잴 수 있을 때만 지금 치수를 PTY 에 낸다. 잴 수 없으면 아무것도 보내지 않고 PTY 는 마지막 치수를 유지한다
-  //   — 조사한 xterm 기반 피어 공통 규칙이다(docs/research/hidden-tab-terminal-subscription-survey-2026-09-25.md).
-  // ★잴 수 없는 상태는 두 갈래다★ — display:none(offsetParent 로 잡는다)과, 표시는 됐는데 박스의 폭·높이 중
-  //   **한 축이라도** 0 으로 붕괴한 경우. FitAddon 은 xterm 이 글꼴로 잰 칸 크기(박스와 무관)로 부모의 계산된
-  //   폭·높이를 나누므로, 붕괴한 축은 바닥값(열 2 · 행 1)으로 눌리고 display:none 하위의 계산 값은 실제 배치를
-  //   잰 값이 아니다. 어느 쪽이든 fit() 이 내는 격자는 믿을 수 없다 — 실측(2026-09-25, WebView2): 숨은 채
-  //   마운트된 칸은 계산 폭·높이가 문자열 "100%" 라 fit() 이 100px 로 읽어 11×6 을 냈다(보이다 숨은 칸이 직전 격자를 지니는 것은 숨은 동안 fit() 을 아무도 안 불러서다).
-  // ★그래서 치수 자체를 검사하지 않는다★: 그 격자는 정상 치수와 값으로 구별되지 않고, fit() 뒤 cols/rows 는
-  //   0 도 NaN 도 될 수 없다(`@xterm/addon-fit` 계약) — 이상값 표지가 없다. 값으로 가를 수 없으니
-  //   **언제 보내나**로 가른다 — 두 갈래 다 fit() 에 닿기 전에 빠진다.
-  // ★RO 콜백·onReset 은 아직 이 판정보다 느슨하다★(RO = 두 축이 다 0 일 때만 · onReset = offsetParent 만)
-  //   — 한 축만 붕괴한 박스를 못 거르는 알려진 결손이고 네 송신 지점을 접을 때 맞춘다
-  //   (docs/todo/terminal-sizing.md). 이 판정을 그쪽에 맞춰 느슨하게 되돌리지 말 것.
-  // ☐ 안 걸리는 것: 보이고 박스도 멀쩡한데 칸 크기가 아직 0 인 슬롯 — fit() 이 no-op 이라 직전 치수가
-  //   나간다. 재시도는 없고 다음 레이아웃·가시성 사건이 고친다.
+  // Send the current dimensions to the PTY only when they can be measured. When they cannot, send nothing and the PTY keeps its last dimensions
+  //   — a rule common to the xterm-based peers surveyed (docs/research/hidden-tab-terminal-subscription-survey-2026-09-25.md).
+  // ★There are two branches of the unmeasurable state★ — display:none (caught via offsetParent) and a box that is shown but has
+  //   **even one axis** of width·height collapsed to 0. FitAddon divides the parent's computed width·height by the cell size xterm measured from the font
+  //   (unrelated to the box), so a collapsed axis is pressed down to the floor value (2 columns · 1 row), and computed values under display:none are not
+  //   values measured from real layout. Either way the grid fit() produces cannot be trusted — measured (2026-09-25, WebView2): a cell mounted
+  //   hidden has computed width·height of the string "100%", so fit() read it as 100px and produced 11×6 (a cell that was visible then hidden keeps its previous grid because nobody calls fit() while hidden).
+  // ★So the dimensions themselves are not inspected★: that grid cannot be told from a normal one by value, and after fit() cols/rows
+  //   can be neither 0 nor NaN (the `@xterm/addon-fit` contract) — there is no outlier marker. Since it cannot be split by value, it is split by
+  //   **when to send** — both branches drop out before reaching fit().
+  // ★The RO callback and onReset are still looser than this decision★ (RO = only when both axes are 0 · onReset = offsetParent only)
+  //   — a known gap that cannot filter a box with only one axis collapsed, to be matched when the four send points are folded together
+  //   (docs/todo/terminal-sizing.md). Do not loosen this decision back to match theirs.
+  // ☐ Not caught: a slot that is visible with a sound box but whose cell size is still 0 — fit() is a no-op so the previous dimensions
+  //   go out. There is no retry, and the next layout or visibility event fixes it.
   const sendSizeIfMeasurable = (aid: string, terminal: Terminal) => {
     const container = containerRef.current
     if (!container || container.offsetParent === null) return
@@ -270,9 +270,9 @@ export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
     let sub: OutputSubscription | null = null
     let cancelled = false
 
-    terminal.reset() // C2: StrictMode 중복 방지
-    setPhase(null) // 새 구독의 국면은 그 구독의 통지가 다시 세운다.
-    const lastSeq = { current: -1 } // T-2/G-2: seq dedup(컴포넌트 방어 — 클라도 내부 dedup)
+    terminal.reset() // C2: StrictMode duplicate prevention
+    setPhase(null) // The phase of a new subscription is set again by that subscription's notification.
+    const lastSeq = { current: -1 } // T-2/G-2: seq dedup (component defense — the client also dedups internally)
 
     agentClient
       .subscribeOutput(
@@ -282,36 +282,36 @@ export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
           if (cancelled) return
           if (chunk.seq <= lastSeq.current) return
           lastSeq.current = chunk.seq
-          // ★tag 게이트(S15/ADR-0045)★: 이 슬롯은 터미널 raw 바이트(tag0)만 xterm 에 write 한다. tag1
-          //   (StructuredEvent JSON)이 오면 무시한다 — RichSlot 이 tag0 을 무시하는 것과 정확히 대칭.
-          //   구조화 에이전트에 터미널 슬롯이 붙거나(renderModeOverride·다중 구독) 배선 버그로 tag1 이
-          //   공유 스트림(한 seq 공간)으로 새면, 게이트가 없을 때 JSON 바이트가 그대로 xterm 에 찍혀
-          //   화면이 오염된다. seq 는 위에서 이미 전진시켰으므로(tag 무관 한 seq 공간) tag1 을 건너뛰어도
-          //   dedup 은 정합하다.
+          // ★tag gate (S15/ADR-0045)★: this slot writes only terminal raw bytes (tag0) to xterm. When tag1
+          //   (StructuredEvent JSON) arrives it is ignored — exactly symmetric to RichSlot ignoring tag0.
+          //   If a terminal slot attaches to a structured agent (renderModeOverride · multiple subscriptions) or a wiring bug lets tag1 leak into the
+          //   shared stream (one seq space), without the gate JSON bytes would be printed to xterm as they are and
+          //   pollute the screen. seq was already advanced above (one seq space regardless of tag), so skipping tag1 keeps
+          //   dedup consistent.
           if (chunk.tag !== FRAME_TAG_TERMINAL_BYTES) return
-          terminal.write(chunk.bytes) // 디코드는 클라 내부에서 끝남(transport 캡슐화)
+          terminal.write(chunk.bytes) // Decoding ends inside the client (transport encapsulation)
         },
-        // 국면으로는 화면을 건드리지 않는다 — 'buffering' 에는 같은 화신 이어보기가 섞여 있어 거기서
-        //   비우면 잠깐 끊겼다 온 슬롯이 매번 깜빡인다. 값은 부재 막 판정에만 쓴다.
+        // The screen is not touched on a phase — 'buffering' includes same-incarnation resume, so clearing
+        //   there makes a slot that briefly disconnected and came back flicker every time. The value is used only for the absent curtain decision.
         state => {
           if (cancelled) return
           setPhase(state)
         },
-        // ★비우기 콜백은 세 슬롯 모두 반드시 넘긴다(정본 진술 — DomSlot·RichSlot 은 이 자리를 미러)★:
-        //   라우터는 이 콜백을 부른 직후 같은 틱에 다른 화신의 전량 replay 를 배달하며 진도 커서를 버린다.
-        //   안 넘기면 커서만 0 으로 돌아가고 화면은 앞 화신 내용을 든 채라, 전량이 그 위에 겹쳐 그려지고
-        //   오류는 어디에도 남지 않는다. 화면과 이 로컬 가드를 **함께** 비우는 이유도 같다 — 가드만
-        //   되돌리면 겹쳐 쌓이고, 화면만 지우면 0 부터 다시 매겨진 프레임이 전부 여기서 탈락해 빈 채 남는다.
+        // ★The clearing callback must be passed in all three slots (canonical statement — DomSlot·RichSlot mirror this place)★:
+        //   right after calling this callback the router delivers another incarnation's full replay in the same tick and drops the progress cursor.
+        //   If it is not passed, only the cursor goes back to 0 while the screen still holds the previous incarnation's content, so the full replay is drawn over it and
+        //   the error is left nowhere. The same is why the screen and this local guard are cleared **together** — if only the guard
+        //   is reset, content piles up; if only the screen is erased, frames renumbered from 0 are all dropped here and it stays blank.
         () => {
           if (cancelled) return
           terminal.reset()
           lastSeq.current = -1
-          // ★재부착은 다른 PTY 다★: 복원된 에이전트의 PTY 는 데몬 spawn 기본값(80×24)에서 시작하고 이
-          //   슬롯의 xterm 은 벌려 둔 치수(실측 137×25) 그대로라, 어긋난 채 live 가 되면 TUI(Ink)가 자기가
-          //   믿는 크기로 지울 행 수·열 위치를 계산해 매 갱신이 한 행·수십 열 빗나간다(줄 중복·상태줄 혼입).
-          //   ★이 전파를 위 구독 트리거(화신)로 되돌리지 말 것★ — 그 형태의 실패 모드는 아래 트리거 주석이
-          //   정본이다. 숨김 중엔 건너뛴다(붕괴한 컨테이너의 fit() = 최소 치수 — RO 주석) — 다시 보일 때
-          //   가시성 effect 가 같은 전파를 낸다.
+          // ★A reattach is a different PTY★: the restored agent's PTY starts at the daemon spawn default (80×24) and this
+          //   slot's xterm stays at the dimensions it was stretched to (measured 137×25), so if it goes live out of step, the TUI (Ink) computes
+          //   the rows to erase and column positions from the size it believes and every update misses by one row and dozens of columns (duplicate lines · status line mixing in).
+          //   ★Do not move this propagation back into the subscription trigger above (the incarnation)★ — the failure mode of that form is
+          //   canonical in the trigger comment below. It is skipped while hidden (fit() on a collapsed container = minimum dimensions — RO comment) — when visible again
+          //   the visibility effect issues the same propagation.
           if (containerRef.current?.offsetParent != null) {
             fitAddonRef.current?.fit()
             void agentClient.resizePty(agentId, terminal.cols, terminal.rows).catch(() => {})
@@ -324,52 +324,52 @@ export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
           return
         }
         sub = handle
-        // Task1(ADR-0036 carry-forward): 구독 직후 초기 크기 1회 전파. ResizeObserver 는 관측을 시작할 때
-        // (렌더된 비-0 박스면) 한 번 울린 뒤로는 크기 *변화* 시에만 울리므로, 이미 크기가 잡힌 슬롯에
-        // 에이전트가 붙거나 바뀌면 한 번도 안 울려 PTY 가 spawn 시 기본값(80×24)에 고착된다 → claude
-        // welcome 박스가 80칸 기준으로 그려져 좁은 슬롯에서 깨짐.
-        // 그 빈 "초기 1회"를 여기서 채운다(gotty 패턴; client-first(ttyd)는 데몬이 View 를 모르는
-        // ADR-0035 구조라 불가). 보내기 직전 fit() 은 지금 박스를 동기로 잰다 — 구독 왕복 동안 칸 크기가
-        // 바뀌었는데 RO 가 아직 안 울렸어도(RO 는 다음 렌더링 단계에야 발화한다) 최신 cols/rows 가 나간다.
-        // resizePty 는 fire-and-forget(Resize 는 request_id 없음) — 직전 kill 등으로 실패해도 흡수.
-        // ★잴 수 없으면 건너뛴다(ADR-0056 keep-alive)★: 숨은 탭에서 구독이 풀리면 여기서 나갈 격자는 잴 수
-        //   없는 상태의 fit() 이 낸 믿을 수 없는 값이라, 같은 에이전트를 보는 보이는 슬롯이 맞춰 둔 PTY 치수를
-        //   덮는다. 숨은 탭이 보이게 되면 치수는 두 경로가 낸다 — 가시성 effect(attachWebgl 의 fit()+
-        //   resizePty)와 RO(붕괴했던 박스가 실제 크기로 커지며 발화). WebGL 부착이 실패하면 앞의 것은
-        //   빠지지만 RO 는 남는다 — 여기서 건너뛰는 두 조건(display:none · 한 축이라도 0 인 박스)을 벗어나는
-        //   일 자체가 박스 크기 변화다.
+        // Task1 (ADR-0036 carry-forward): propagate the initial size once right after subscribing. ResizeObserver rings once when it starts observing
+        // (if it is a rendered non-0 box) and after that rings only on size *change*, so when an agent attaches to or changes in a slot whose size is already set
+        // it never rings once and the PTY stays stuck at the spawn default (80×24) → the claude
+        // welcome box is drawn for 80 columns and breaks in a narrow slot.
+        // We fill that empty "initial once" here (the gotty pattern; client-first (ttyd) is impossible because the ADR-0035 structure has the daemon not know the
+        // View). The fit() just before sending measures the current box synchronously — even if the cell size changed during the subscription round trip and RO has not rung yet
+        // (RO fires only at the next rendering step), the latest cols/rows go out.
+        // resizePty is fire-and-forget (Resize has no request_id) — a failure from a just-before kill etc. is absorbed.
+        // ★Skip when it cannot be measured (ADR-0056 keep-alive)★: if a subscription is released in a hidden tab, the grid that would go out here is an untrustworthy value from fit() in an
+        //   unmeasurable state, and would overwrite the PTY dimensions that a visible slot viewing the same agent had set.
+        //   When a hidden tab becomes visible the dimensions come from two paths — the visibility effect (fit()+
+        //   resizePty in attachWebgl) and RO (fires as a collapsed box grows to its real size). If WebGL attach fails the former
+        //   drops out but RO remains — leaving the two conditions skipped here (display:none · a box with even one axis 0) is
+        //   itself a box size change.
         sendSizeIfMeasurable(agentId, terminal)
       })
-      // 구독 실패(예: 직전 kill로 NotFound)는 unhandled rejection 방지용으로 흡수.
+      // A subscription failure (e.g. NotFound from a just-before kill) is absorbed to prevent an unhandled rejection.
       .catch(() => {})
 
     return () => {
       cancelled = true
-      // unsubscribe 내부가 transport 정리(#13133 delete onmessage) + 백엔드 구독 해제까지 수행.
+      // Inside unsubscribe it also does the transport cleanup (#13133 delete onmessage) + backend subscription release.
       sub?.unsubscribe()
     }
-    // ★화신(epoch)은 이 트리거에 넣지 않는다★: 화면을 비우는 일은 onReset 단독이 진다. 여기에 화신을
-    //   섞으면 재spawn·데몬 재기동처럼 값이 흔들리는 구간마다 구독이 통째로 갈리면서 **replay 가 오기도
-    //   전에** 이 위의 terminal.reset() 이 돌아 화면이 지워지고(데몬 ring 도 이미 없어 복구 불가),
-    //   그 교체가 화신 표식까지 잃어버려 정작 회전 판정(protocolClient.observeRoster)이 못 선다.
-    // viewId 포함 — 구독 키(ADR-0046)라 바뀌면 재구독(실무상 key=viewId 라 slot 교체는 remount).
+    // ★The incarnation (epoch) is not put in this trigger★: clearing the screen is borne by onReset alone. If the incarnation is mixed in here, in every span where
+    //   the value wavers like a re-spawn or daemon restart the subscription is replaced whole, so **before the replay even arrives** the terminal.reset() above runs and the screen is erased
+    //   (the daemon ring is already gone too, so no recovery), and that replacement even loses the incarnation marker so the rotation decision
+    //   (protocolClient.observeRoster) cannot stand.
+    // viewId included — it is the subscription key (ADR-0046) so a change resubscribes (in practice key=viewId so a slot swap is a remount).
   }, [viewId, agentId])
 
-  // 재연결 뒤 치수 재전파 ──────────────────────────────────────────────────────────────
-  // ADR-0195: 소켓이 없는 동안 들어온 명령은 담아 두지 않고 그 자리에서 실패한다. resize 는
-  //   fire-and-forget 이라 그 실패가 조용히 삼켜지고 다시 낼 자리가 없어, 재연결 창(실측 500ms~10초)에
-  //   분할선을 끌면 그 치수가 에이전트에 영영 닿지 않는다. 담아 두는 대신 소켓이 서면 여기서 한 번 낸다.
-  // ★이 복구를 위 구독 트리거에 연결 상태를 섞어 만들지 말 것★ — 그 형태의 실패 모드는 위 트리거 주석이
-  //   정본이다. 이 effect 는 구독을 건드리지 않고 치수만 낸다.
-  // ★상태가 아니라 전이에 발화한다★: connected 는 한 세션 내내 참으로 머물 수 있다. 값만 보는 구현이
-  //   어긋나는 자리는 둘 — **마운트**와 **agentId 교체**다. 리렌더만으로는 다시 돌지 않고(deps 가 그 둘뿐),
-  //   같은 값 재통지는 setState 가 걸러 렌더조차 안 난다. 기준선이 마운트 시점 값이라 붙은 채 뜬 슬롯은
-  //   여기서 아무것도 내지 않는다.
-  // 데몬이 재기동해 그 에이전트가 없으면 거절이 콘솔 경고 한 줄로 남는다 — 상태도 재요청 사다리도 건드리지
-  //   않는 소음이다(재부착을 내는 것은 명부 관측 단독 — ADR-0164).
-  // 같은 agentId 를 보는 보이는 슬롯이 둘이면 둘 다 발화한다 — 어느 쪽이 PTY 에 남는지는 정해져 있지
-  //   않다(별개의 비동기 왕복이라 발화 순서가 도착 순서를 보장하지 않는다). RO 발화에 이미 있는 중재이고,
-  //   이 effect 는 계기를 하나 더할 뿐 새 부류를 만들지 않는다.
+  // Dimension re-propagation after reconnect ──────────────────────────────────────────────────────────────
+  // ADR-0195: a command that comes in while there is no socket is not queued and fails on the spot. resize is
+  //   fire-and-forget so that failure is quietly swallowed and there is nowhere to send it again, so if the divider is dragged in the reconnect window (measured 500ms~10s)
+  //   those dimensions never reach the agent. Instead of queueing, once the socket is up it is sent here once.
+  // ★Do not build this recovery by mixing connection state into the subscription trigger above★ — the failure mode of that form is
+  //   canonical in the trigger comment above. This effect does not touch the subscription and only sends dimensions.
+  // ★It fires on a transition, not on a state★: connected can stay true for a whole session. An implementation that only looks at the value
+  //   goes wrong in two places — **mount** and **agentId swap**. A re-render alone does not run it again (deps are just those two),
+  //   and a repeat notification of the same value is filtered by setState so no render even happens. The baseline is the value at mount, so a slot that came up attached
+  //   sends nothing here.
+  // If the daemon restarted and the agent is gone, the refusal is left as one console warning line — noise that touches neither state nor the re-request ladder
+  //   (what issues a reattach is registry observation alone — ADR-0164).
+  // If two visible slots view the same agentId both fire — which one remains on the PTY is not
+  //   determined (separate async round trips, so firing order does not guarantee arrival order). It is arbitration already present in RO firing,
+  //   and this effect only adds one more trigger and creates no new class.
   const wasConnectedRef = useRef(connected)
   useEffect(() => {
     const wasConnected = wasConnectedRef.current
@@ -396,8 +396,8 @@ export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
       height: '100%',
       position: 'relative',
       boxSizing: 'border-box',
-      padding: '4px 8px',        // 터미널 좌우 여백(wezterm 스타일). 여백만큼 inset → FitAddon이 그 크기로 cols/rows 계산.
-      background: '#0a0a0a',     // 터미널 배경(Terminal theme)과 동일 → 여백이 seamless
+      padding: '4px 8px',        // Terminal left/right margin (wezterm style). Inset by the margin → FitAddon computes cols/rows at that size.
+      background: '#0a0a0a',     // Same as the terminal background (Terminal theme) → the margin is seamless
     }}>
       <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
       {agentUnavailable && <SlotUnavailableVeil phase={phase} />}

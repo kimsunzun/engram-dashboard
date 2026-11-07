@@ -2,40 +2,40 @@
 name = "engram-dashboard-net"
 version = "0.1.0"
 edition = "2021"
-description = "Engram Dashboard 네트워크 행 — WS 서버(Origin·auth·연결 수명·단일 writer·keepalive), 불투명 프레임 포트, 전-연결 팬아웃 레지스트리, 단일 인스턴스 가드, portfile. 에이전트 어휘를 타입으로도 모른다(0-4 로 예외 0 — 핸드셰이크 프레임은 이 crate 소유 `auth::AuthFrame`, ADR-0129 결정 1, 상세는 lib.rs 헤더)."
+description = "Engram Dashboard 네트워크 행 — WS 서버(Origin·auth·연결 수명·단일 writer·keepalive), 불투명 프레임 포트, 전-연결 팬아웃 레지스트리, 단일 인스턴스 가드, portfile. 에이전트 어휘를 타입으로도 모른다(0-4 로 예외 0 — 핸드셰이크 프레임은 protocol `handshake::AuthFrame` 의 재수출 `auth::AuthFrame`, ADR-0129 결정 1, 상세는 lib.rs 헤더)."
 
 [lib]
 name = "engram_dashboard_net"
 path = "src/lib.rs"
 
-# `server` = 소켓 수락 뒤의 서버 살림 전부(`ws`·`frame_port`·`instance`·`portfile` 모듈 + 그것이 지는
-#   async 런타임·플랫폼 의존)를 켠다. 끄면 `auth` 만 남는다 — 핸드셰이크 프레임 **모양**만 필요한 소비자가
-#   tokio 를 지지 않게 하는 것이 이 feature 의 존재 이유다(그때 동기 소비자였던 discovery crate 의 "동기라
-#   async 런타임을 안 들인다" 성질이 `net` 간선 때문에 조용히 깨져 있었다 — 실측 2026-08-05).
-#   ★`default = []` — 서버 행이 필요한 쪽이 명시로 켠다(사용자 결정 2026-08-05)★: 기본이 `["server"]` 면
-#   의존을 적는 평범한 형태(`{ path = … }`)가 async 런타임을 조용히 끌고 오고, 소비자마다 빼는 것을
-#   **기억해야** 한다 — 지금 고치는 결함이 그렇게 생겼다. 비어 있으면, 서버 행이 필요한데 안 적은 소비자는
-#   컴파일 오류로 말한다. 조용한 회귀보다 시끄러운 실패가 낫다. 켜야 할 곳의 정본은
-#   `rg -n "engram-dashboard-net" crates/*/Cargo.toml src-tauri/Cargo.toml` 이 찍는 선언 줄이고,
-#   대가는 거기 붙는 `features = ["server"]` 한 조각이다(여기서 소비자를 열거하지 말 것).
-#   ★슬라이스 2 재개 시 먼저 볼 것(그 슬라이스는 ADR-0130 으로 보류 중 — 지금 할 일이 아니다)★:
-#   `frame_port` 는 서버가 아니라 **계약**이고 tokio 를 쓰지 않는다
-#   (`rg -n "tokio" crates/engram-dashboard-net/src/frame_port.rs` → 0줄). 슬라이스 2(에이전트 시스템 lib)는
-#   그 trait 을 **구현**하는 위층이라, 지금 gating 대로면 계약을 보려고 `server` 를 켜서 async 런타임·Win32·
-#   net 의 platform/protocol 간선까지 지게 된다 — auth 만 필요한 소비자에게서 걷어낸 짐을 슬라이스 2 에서
-#   되살리는 셈이다.
-#   `frame_port` 를 `server` 밖으로(또는 자기 feature 로) 빼는 것을 그때 먼저 검토할 것. 슬라이스 2 가
-#   `server` 를 켜고 난 뒤엔 되돌리는 것이 공개 API 변경이다.
-#   ★이득의 범위를 넘겨 읽지 말 것★: feature 합집합은 **cargo 호출 1회 단위**라, 루트 `cargo build` 는
-#   데몬이 `server` 를 켜므로 net 을 여전히 한 번 server 로 빌드한다. 통짜 빌드가 가벼워지는 게 아니라,
-#   **net 을 기본 feature 로 단독 빌드/소비할 때** 가볍고 그 설계 성질이 참으로 유지된다(그 성질을 재는
-#   것 = CI `platform gate 7` 의 net 기본 feature 줄). 지금 기본 feature 만 쓰는 소비자(셸)는 tokio 를 따로
-#   지므로, 그쪽에서 얻는 이득은 없다.
+# `server` = turns on all of the server's lifecycle management after socket accept (the `ws` · `frame_port` · `instance` · `portfile` modules + the
+#   async runtime · platform dependencies they carry). Off, only `auth` (a re-export of the protocol handshake frame) remains — the
+#   reason this feature exists is to keep consumers that need only the frame **shape** from carrying tokio (at that time the
+#   discovery crate, a sync consumer, had its "sync, so it brings no async runtime" property silently broken by the `net` edge —
+#   measured 2026-08-05). ★No consumer uses that combination now★ — the shell takes the frame directly from protocol (TRD stage 3
+#   3-1 U2). Even so, that combination is still measured by gate 5a · CI `platform gate 7`.
+#   ★`default = []` — whoever needs the server layer turns it on explicitly (user decision 2026-08-05)★: if the default were `["server"]`,
+#   the plain form of writing a dependency (`{ path = … }`) would silently pull in the async runtime, and every consumer would
+#   have to **remember** to remove it — the defect being fixed now looked exactly like that. With it empty, a consumer that needs the server layer but did not write it
+#   says so with a compile error. A loud failure beats a silent regression. The source of truth for where it must be turned on is
+#   the declaration lines printed by `rg -n "engram-dashboard-net" crates/*/Cargo.toml src-tauri/Cargo.toml`,
+#   and the price is the one `features = ["server"]` fragment attached there (do not list consumers here).
+#   ★Look here first when slice 2 resumes (that slice is on hold under ADR-0130 — not work for now)★:
+#   `frame_port` is a **contract**, not a server, and does not use tokio
+#   (`rg -n "tokio" crates/engram-dashboard-net/src/frame_port.rs` → 0 lines). Slice 2 (the agent system lib) is the
+#   upper layer that **implements** that trait, so under the current gating, to see the contract it would have to turn on `server` and carry the async runtime · Win32 ·
+#   net's platform edge —
+#   reviving in slice 2 the burden that was lifted from consumers that need only auth.
+#   Consider first, at that time, moving `frame_port` out of `server` (or into its own feature). Once slice 2 has turned on
+#   `server`, reverting it is a public API change.
+#   ★Do not read the extent of the gain too broadly★: feature union is **per cargo invocation**, so a root `cargo build`
+#   still builds net once with server because the daemon turns on `server`. It is not that the whole build gets lighter;
+#   it is light **when net is built/consumed alone with the default feature**, and that design property stays true (what measures that property
+#   = the net default feature line of CI `platform gate 7`).
 [features]
 default = []
 server = [
     "dep:engram-dashboard-platform",
-    "dep:engram-dashboard-protocol",
     "dep:futures-util",
     "dep:serde_json",
     "dep:tokio",
@@ -43,60 +43,61 @@ server = [
     "dep:tracing",
 ]
 
-# ★의존성 상한 — 열거가 아니라 **규칙**(load-bearing, ADR-0129 결정 1)★: 워크스페이스 crate 는
-#   **"이 crate 를 쓰는 쪽이 이미 어차피 지고 있는 것" 만** 둔다. 지금 그 조건을 만족하는 것은
-#   protocol·platform 이고, 그 밖(agent·daemon·messaging 및 앞으로 생길 것)은 넣지 않는다 —
-#   넣는 순간 "네트워크만 필요한 소비자" 가 에이전트 시스템까지 의존으로 지게 되고 이 crate 를 만든
-#   이유가 사라진다. **규칙으로 적은 이유** = 이름을 열거하면 새 crate 가 생길 때마다 한 칸 모자란다
-#   (그 결함이 이 이사 슬라이스의 지배적 결함 유형이었다).
-#   ★기계 강제 = lib.rs 헤더의 게이트 3★ — **이 파일의 텍스트가 아니라 해석된 의존 그래프**를 읽는다
-#   (명령 정본은 그 헤더. 매니페스트 텍스트 grep 은 rename·테이블 형 등에 뚫려 쓰지 않는다). 게이트 1·2 는
-#   `src/` 만 보므로 소스가 이름을 안 부르는 의존은 못 잡고, 그 자리를 게이트 3 이 맡는다.
-#   추가하고 싶어지면 그건 포트를 파야 한다는 신호다(위층이 어댑터로 꽂는다 — messaging 커널과 같은 idiom).
-#   ★아래 `optional = true` 는 전부 `server` feature 가 켠다★ — 상한 규칙과 무관하고(상한은 켰을 때 기준),
-#   빼는 것이 아니라 **auth 만 필요한 소비자에게 안 지우는** 장치다. 새 의존은 `optional = true` 로 적고
-#   `server` 목록에도 넣는다.
-#   ★어긋났을 때 무엇이 터지는지(실측 2026-08-05 — 옛 주석의 "`--no-default-features` 빌드에서만 터진다"
-#   는 양방향으로 틀렸다)★: `optional = true` 로 적고 `server` 목록에 안 넣으면 그것을 켜는 것이 없으므로,
-#   그 의존을 쓰는 코드가 컴파일되는 조합에서 곧바로 터진다(시끄러운 실패라 문제가 아니다). 그냥
-#   `foo = "1"` 로 적으면 — 개발자가 실제로 치는 형태다 — **어디서도 안 터지고** feature 0개 소비자가
-#   조용히 그것을 진다. `serde` 가 그 실례다:
-#   `cargo tree -p engram-dashboard-net --no-default-features -e normal --prefix none --depth 1` 에 나온다.
-#   ★게이트 5 도 뒤쪽은 못 잡는다★ — 그 게이트는 feature 0개 쪽이 **컴파일되는지**만 보고, 조용히 딸려온
-#   의존은 컴파일을 깨지 않는다(명령 정본 = lib.rs 헤더). 조용한 반입 중 async 런타임을 실제로 잡는 것은
-#   **트리 실측**이다 — CI `platform gate 7` 의 net 기본 feature 줄(`cargo tree -p engram-dashboard-net -e normal
-#   … | rg -i "^(tokio|…)"` → 0줄 · 명령 정본 = 그 스텝). `serde` 같은 런타임 아닌 의존은 그 줄도 못 본다.
+# ★Dependency ceiling — a **rule**, not an enumeration (load-bearing, ADR-0129 decision 1)★: for workspace crates, put
+#   **only "what the side using this crate already carries anyway"**. What meets that condition now
+#   is protocol·platform, and nothing else (agent·daemon·messaging and anything that appears later) goes in —
+#   the moment it does, a "consumer that needs only the network" carries the agent system as a dependency and the reason this crate was made
+#   disappears. **Why it is written as a rule** = if names are enumerated, every new crate leaves it one entry short
+#   (that defect was the dominant defect type of this move slice).
+#   ★Machine enforcement = gate 3 in the lib.rs header★ — it reads **the resolved dependency graph, not this file's text**
+#   (the command's source of truth is that header; a grep over manifest text is not used because rename · table form etc. slip through). Gates 1·2
+#   look only at `src/`, so they cannot catch a dependency whose name the source does not call, and gate 3 covers that spot.
+#   If you feel like adding one, that is a signal to dig a port (the upper layer plugs it in as an adapter — same idiom as the messaging kernel).
+#   ★Every `optional = true` below is turned on by the `server` feature★ — unrelated to the ceiling rule (the ceiling is measured with it on),
+#   and it is a device not for removing but for **not loading consumers that need only auth**. Write a new dependency as `optional = true` and
+#   add it to the `server` list too. The only unconditional dependency is protocol (see its dependency comment).
+#   ★What blows up when it goes wrong (measured 2026-08-05 — the old comment's "blows up only in a `--no-default-features` build"
+#   was wrong in both directions)★: if you write `optional = true` and do not add it to the `server` list, nothing turns it on,
+#   so it blows up right away in combinations where code using that dependency compiles (a loud failure, so not a problem). If you just
+#   write `foo = "1"` — the form developers actually type — **it blows up nowhere** and zero-feature consumers
+#   silently carry it. What gets pulled in is printed by
+#   `cargo tree -p engram-dashboard-net --no-default-features -e normal --prefix none --depth 1`.
+#   ★Gate 5 cannot catch the latter either★ — that gate looks only at whether the zero-feature side **compiles**, and a silently
+#   pulled dependency does not break compilation. What actually catches the async runtime among silent imports is
+#   the **tree measurement** — the net default feature line of CI `platform gate 7` (`cargo tree -p engram-dashboard-net -e normal
+#   … | rg -i "^(tokio|…)"` → 0 lines · command source of truth = that step). A non-runtime dependency such as `serde` is not seen by that line either.
 [dependencies]
-# 소비자는 이제 하나뿐 — `portfile` 의 daemon.json 공유 구조체(`DaemonInfo`, 데몬이 write·클라가 read).
-#   0-4 이전엔 `ws` 의 auth 핸드셰이크가 위층 명령 enum 을 빌려 쓰는 어휘 예외가 하나 더 있었는데,
-#   그 모양이 `src/auth.rs` 로 옮겨오며 사라졌다. 남은 ①은 어휘가 아니라 **파일 포맷 계약**이라
-#   `net → protocol` 은 **영구**다(`portfile.rs` 가 `DaemonInfo` 를 re-export 한다) — 지우려 들지 말 것.
-engram-dashboard-protocol = { path = "../engram-dashboard-protocol", optional = true }
-# OS 층 둘이 쓴다 — `portfile` 의 stale 판정(`process::` 의 프로세스 liveness 헬퍼)과 `instance` 의 단일
-#   인스턴스 가드(`fs::` 의 공유 제한 열기와 그 실패 분류). 둘 다 에이전트 어휘가 아니다.
-#   **허용 심볼의 정본은 lib.rs 헤더의 게이트 2**이고, 그 게이트가 심볼 목록 자체를 기대값으로 못 박는다
-#   (파일 단위가 아니라 심볼 단위 — 여기서 목록을 다시 세지 말고 그 게이트를 볼 것). daemon·tauri 양쪽이
-#   같은 liveness 로직을 보게 하는 DRY — 셸이 같은 crate 를 직접 의존하는 것과 같은 이유
-#   (ADR-0129 결정: 격리 게이트는 crate 단위가 아니라 **타입 단위**다).
-#   ★이 간선을 `agent` 로 되돌리지 말 것★ — 이 crate 는 에이전트 런타임을 **의존으로도** 모른다(ADR-0175
-#   결정 1 이 끊었다). 헬퍼의 지금 자리는 OS 층 platform crate 다(ADR-0266) — 게이트 2 가 그 이름을 조준한다.
-#   ★optional 이어도 게이트 3 의 기대값은 3 그대로다★ — 그 게이트는 `--all-features` 로 읽으므로
-#   optional 간선이 그대로 드러난다(그게 애초에 그 플래그를 붙인 이유다).
-#   ★`optional = true` + 위 `server` 목록 등재를 함께 지킬 것★ — 맨 `{ path = … }` 로 적으면 feature 0개
-#   소비자(지금 셸)가 이걸 조용히 지게 된다(같은 실패 모드의 정본 = 위 `[features]` 주석).
+# ★The only unconditional dependency★ — two places use it: the handshake frame that `auth` re-exports (`handshake::AuthFrame` —
+#   ADR-0310 decision 9 · its shape lives in protocol) and the daemon.json shared struct of `portfile` (`DaemonInfo`, the daemon
+#   writes · the client reads). Both are handshake · file-format contracts, not command vocabulary — that the command vocabulary is not called
+#   is measured by lib.rs header gate 4. The frame must exist in the zero-feature combination too, so it is not optional —
+#   so what zero-feature consumers carry is exactly this edge (and the graph under it).
+engram-dashboard-protocol = { path = "../engram-dashboard-protocol" }
+# Used by two OS-layer parts — `portfile`'s stale decision (the process liveness helper of `process::`) and `instance`'s single
+#   instance guard (the shared-restricted open of `fs::` and its failure classification). Neither is agent vocabulary.
+#   **The source of truth for allowed symbols is gate 2 in the lib.rs header**, and that gate nails down the symbol list itself as the expected value
+#   (by symbol, not by file — do not recount the list here; look at that gate). It is DRY so that daemon·tauri both see
+#   the same liveness logic — the same reason the shell depends on the same crate directly
+#   (ADR-0129 decision: the isolation gate is per **type**, not per crate).
+#   ★Do not revert this edge to `agent`★ — this crate does not know the agent runtime even **as a dependency** (ADR-0175
+#   decision 1 cut it). The helper's current home is the OS-layer platform crate (ADR-0266) — gate 2 aims at that name.
+#   ★Even though it is optional, gate 3's expected value stays 3★ — that gate reads with `--all-features`, so
+#   the optional edge shows up as is (that is why the flag was attached in the first place).
+#   ★Keep `optional = true` + the listing in the `server` list above together★ — if written as a bare `{ path = … }`, the zero-feature
+#   combination silently carries it (the source of truth for the same failure mode = the `[features]` comment above).
 engram-dashboard-platform = { path = "../engram-dashboard-platform", optional = true }
 
-# macros = `tokio::select!`(write_task 의 큐/close_signal/keepalive 3-arm) + `#[tokio::test]`.
-# net/sync/time = TcpStream·mpsc·Notify·timeout/interval. daemon 과 같은 1.x 핀.
-# ★`rt-multi-thread` 는 필요보다 넓다(의도적 유보)★: `handle_connection` 의 task spawn 이 요구하는 것은
-#   **`rt`** 이고, 이 crate 엔 런타임 빌더도 `flavor = "multi_thread"` 도 없다(둘 다 사용 0). 그래도
-#   좁히지 않은 이유 = 이 슬라이스는 **순수 이사**라 동작 인접 변경을 넣지 않는다는 것 하나다.
-#   ★"어차피 데몬이 켜니 좁혀도 같다" 는 근거로 쓰지 말 것★: feature 합집합은 **호출 1회 단위**라, 데몬을
-#   함께 빌드할 때만 그렇다. 이 crate 의 단독 빌드/테스트(`cargo build|test -p engram-dashboard-net` —
-#   lib.rs 헤더가 광고하는 바로 그 격리 경로)에서는 여기 적힌 feature 가 그대로 유효 집합이다.
-#   `rt` 로의 축소는 별 단위로 미룬다.
-# `signal` 은 넣지 않는다 — Ctrl-C 는 데몬 살림이고 이 crate 에 `ctrl_c` 사용이 0이다(accept loop 가
-#   아직 조립부에 있어 그쪽이 쥔다).
+# macros = `tokio::select!` (write_task's 3 arms: queue/close_signal/keepalive) + `#[tokio::test]`.
+# net/sync/time = TcpStream·mpsc·Notify·timeout/interval. Same 1.x pin as daemon.
+# ★`rt-multi-thread` is wider than needed (intentional reservation)★: what the task spawn in `handle_connection` requires is
+#   **`rt`**, and this crate has neither a runtime builder nor `flavor = "multi_thread"` (both 0 uses). The only reason
+#   it is still not narrowed = this slice is a **pure move**, so it adds no behavior-adjacent change.
+#   ★Do not use "the daemon turns it on anyway, so narrowing is the same" as the rationale★: feature union is **per invocation**, so that holds
+#   only when the daemon is built together. In this crate's standalone build/test (`cargo build|test -p engram-dashboard-net` —
+#   the very isolated path the lib.rs header advertises), the features written here are the effective set as is.
+#   The narrowing to `rt` is deferred to a separate unit.
+# `signal` is not added — Ctrl-C is daemon lifecycle management and this crate has 0 uses of `ctrl_c` (the accept loop is
+#   still in the assembly part, which holds it).
 tokio = { version = "1", features = [
     "rt-multi-thread",
     "macros",
@@ -104,35 +105,24 @@ tokio = { version = "1", features = [
     "sync",
     "time",
 ], optional = true }
-# WS 서버: accept_hdr_async(Origin 콜백)/split/Message. rustls 등 TLS 불필요(로컬 평문 WS).
+# WS server: accept_hdr_async (Origin callback)/split/Message. No TLS such as rustls needed (local plain-text WS).
 tokio-tungstenite = { version = "0.26", optional = true }
-# 포트 trait 시그니처의 `future::BoxFuture`(async fn in trait 이 dyn 비호환이라 수동 박싱)와, `ws` 의 WS
-#   살림·스트림 추상(`stream::SplitSink` writer half 별칭 · `SinkExt` · `StreamExt` · `read_task<S>` 의
-#   `Stream` 바운드)에 쓴다. 격리 테스트는 `stream::iter`(합성 프레임열)·`poll!`(포화 park 양성 관측)도
-#   쓴다. 정확한 사용처는 `rg "futures_util|SinkExt|StreamExt|Stream\b" src/` 로 볼 것 — 여기 목록을
-#   기대값으로 삼지 말 것(세 번 세어 세 번 한 칸 모자랐다).
+# Used for the port trait signature's `future::BoxFuture` (async fn in trait is not dyn compatible, so boxing is manual) and for `ws`'s WS
+#   lifecycle · stream abstractions (the `stream::SplitSink` writer half alias · `SinkExt` · `StreamExt` · the `Stream`
+#   bound of `read_task<S>`). Isolation tests also use `stream::iter` (synthetic frame sequence) · `poll!` (positive observation of saturation park).
+#   See the exact uses with `rg "futures_util|SinkExt|StreamExt|Stream\b" src/` — do not take a list here
+#   as the expected value (counted three times, one entry short three times).
 futures-util = { version = "0.3", optional = true }
-# ★유일한 무조건 의존★ — 핸드셰이크 프레임(`auth::AuthFrame`)의 파생. 이 crate 가 wire 모양을 소유하므로
-#   derive 가 필요하고, `--no-default-features` 소비자가 지는 짐은 정확히 이것 하나다.
-serde = { version = "1", features = ["derive"] }
-# auth 핸드셰이크에 쓴다 — 운영 경로의 사용처는 `ws.rs` 가 첫 프레임을 `auth::AuthFrame` 로 파싱하는
-#   자리 하나뿐이고, 테스트가 그 핸드셰이크를 합성하는 데 더 쓴다. 그 밖의 프레임은 불투명 text/바이트로만
-#   다루므로, 핸드셰이크 밖에서 JSON 해석이 늘어나면 어휘 격리가 새고 있다는 신호다.
-#   ★dev 쪽에도 무조건 걸어 둔다(아래 [dev-dependencies])★ — `auth.rs` 의 golden 테스트가 이걸 쓰는데
-#   여기선 optional 이라, 안 걸면 `cargo test --no-default-features` 가 컴파일조차 안 된다.
+# Used for the auth handshake — the only production-path use is the spot where `ws.rs` parses the first frame as `auth::AuthFrame`,
+#   and tests use it further to synthesize that handshake. Every other frame is handled only as opaque text/bytes,
+#   so if JSON interpretation grows outside the handshake, it is a signal that the vocabulary isolation is leaking.
 serde_json = { version = "1", optional = true }
 tracing = { version = "0.1", optional = true }
 
-# `auth` 만 켠 격리 경로(`cargo test -p engram-dashboard-net` — 기본 feature 가 비어 있어 맨 명령이 그
-#   조합이다. 게이트 5 첫 줄)를 살려 두는 몫. 위 `[dependencies]` 쪽 `serde_json` 은 optional 이라
-#   그 조합에 없다. dev-의존은 feature 와 무관하게 항상 켜지므로 golden 테스트가 어느 조합에서도 돈다.
-[dev-dependencies]
-serde_json = "1"
-
-# ★Win32 크레이트 의존 0(의도)★: OS 호출은 platform crate 가 한다 — `instance` 의 공유 제한 열기(`fs::`)도
-#   `portfile` 의 pid liveness(`process::`)도 거기 있다(위 platform 의존 주석 · ADR-0266).
-#   ★구간 잠금(`std::fs::File::try_lock`)을 되살리지 말 것★: MS 문서상 배타 구간 잠금은 다른 프로세스의
-#   **읽기까지** 거부하는데, 이 파일은 클라이언트가 읽어야 하는 접속 파일을 겸한다(ADR-0135). 그래서
-#   `LockFileEx` 를 부르려고 `windows` 를 되살릴 이유도 함께 사라졌다.
-#   ★공유 모드를 넓히지 말 것★ — 쓰기·삭제 공유는 각각 배제와 파일 보호를 무너뜨린다
-#   (`src/instance.rs` 헤더의 ★되살리지 마라★ 두 절).
+# ★Win32 crate dependency 0 (intended)★: OS calls are made by the platform crate — both `instance`'s shared-restricted open (`fs::`) and
+#   `portfile`'s pid liveness (`process::`) live there (see the platform dependency comment above · ADR-0266).
+#   ★Do not revive range locking (`std::fs::File::try_lock`)★: per MS docs an exclusive range lock denies even **reads**
+#   from other processes, but this file doubles as the connection file that clients must read (ADR-0135). So the reason to
+#   revive `windows` to call `LockFileEx` is gone with it.
+#   ★Do not widen the share mode★ — write · delete sharing each break exclusion and file protection
+#   (the two ★do not revive★ clauses in the `src/instance.rs` header).

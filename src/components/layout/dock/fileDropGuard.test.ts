@@ -1,5 +1,5 @@
-// fileDropGuard 단위테스트 — 파일 · URL 끌기만 막고 끊지 않는다(PRD AC22). jsdom 에는 DragEvent · DataTransfer 가 없어
-//   MouseEvent 에 끌기 데이터 칸을 붙여 낸다 — 실제 WebView2 의 탐색 여부는 이 시험이 못 덮는다.
+// fileDropGuard unit test — blocks only file · URL drags and does not stop propagation (PRD AC22). jsdom has no DragEvent · DataTransfer, so
+//   it issues a MouseEvent with a drag data field attached — whether the real WebView2 navigates is not covered by this test.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
@@ -39,7 +39,7 @@ describe('파일 막기 — 탐색을 부르는 끌기(파일 · URL)만', () =>
       window.addEventListener('dragover', spy)
       window.addEventListener('drop', spy)
       try {
-        // 커서 밑 요소가 바뀐 걸음엔 dragenter 만 온다 — 그 걸음에서 떼도 탐색하지 않게.
+        // On the step where the element under the cursor changed, only dragenter arrives — so that releasing on that step does not navigate either.
         const enter = drag('dragenter', [type, 'text/plain'])
         expect(enter.e.defaultPrevented).toBe(true)
         expect(enter.dt.dropEffect).toBe('none')

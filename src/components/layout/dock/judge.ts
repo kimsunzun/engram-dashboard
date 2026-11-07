@@ -1,6 +1,6 @@
-// TRD S21-slot-docking §4-3: 모든 우리 창 뿌리 dragover 의 판정 — 점 + 그 창 맥락 → 탭바 자리 · 띠 · 그 밖. 순수하다.
-// 앞서는 차례(R6a) = 탭바 구역 > 바깥 띠 > 칸 띠 > 그 밖. 띠는 `bands.ts` 가 dragenter 에 미리 센 유효한 것만 본다 — 막힌 띠는
-//   칠하지도 고르지도 않는다(R8). 탭바 구역 · 띠의 규칙 · 숫자는 셸 `layout/bands.rs` 와 한 벌이고 골든이 묶는다(`judge.test.ts`).
+// TRD S21-slot-docking §4-3: the decision of every root dragover of our windows — a point + that window's context → tab bar position · band · other. Pure.
+// Order of precedence (R6a) = tab bar zone > outer band > area band > other. Bands look only at the effective ones `bands.ts` pre-computed at dragenter — blocked bands are
+//   neither painted nor chosen (R8). The rules · numbers of the tab bar zone · bands are a set with the shell `layout/bands.rs` and the golden ties them (`judge.test.ts`).
 
 import type { PointCss } from '../../../../src-tauri/bindings/PointCss'
 import {
@@ -15,49 +15,49 @@ import { choose, contains, zonesAt, type WindowBands } from './bands'
 import type { RectCss } from './overlayTypes'
 
 /**
- * 그 창 탭바 — 탭바 좌표 0 = 탭 끌기 영역 왼쪽(`left` · 뷰포트 x). `source` = 끄는 탭이 든 출처 창 자기 탭바(Chrome 순서 이동 —
- * R23) · `other` = 다른 창 탭바(세로선 — W13).
+ * That window's tab bar — tab bar coordinate 0 = left of the tab drag area (`left` · viewport x). `source` = the source window's own tab bar containing the dragged tab (Chrome order move —
+ * R23) · `other` = another window's tab bar (vertical line — W13).
  */
 export type JudgeStrip =
   | {
       role: 'source'
       left: number
-      /** 지금 순서의 이상적 경계(끄는 탭 포함 — `idealBounds(layout, dragged)`). */
+      /** Ideal bounds of the current order (including the dragged tab — `idealBounds(layout, dragged)`). */
       bounds: StripBounds
-      /** 끄는 탭의 `bounds.tabs` 자리 — 목록 밖(−1 · 길이 이상 = 끄는 탭이 이 탭바를 떠남)이면 다른 창 탭바처럼 센다. */
+      /** Index of the dragged tab in `bounds.tabs` — if outside the list (−1 · length or more = the dragged tab left this tab bar), it is counted like another window's tab bar. */
       dragged: number
-      /** `grabOffset` — dragstart 에 한 번 셈한 값. */
+      /** `grabOffset` — the value computed once at dragstart. */
       grabOffset: number
-      /** `reorderAreaWidth` 의 `available` — 잰 값(`null` = 재지 못함). */
+      /** `available` of `reorderAreaWidth` — the measured value (`null` = could not be measured). */
       available: number | null
     }
   | { role: 'other'; left: number; bounds: StripBounds }
 
-/** 판정의 창 맥락 — dragenter · 보이는 탭 · 스냅숏이 바뀔 때만 다시 짓는다. */
+/** Window context of the decision — rebuilt only when dragenter · the visible tab · the snapshot changes. */
 export interface JudgeWindow {
-  /** 캔버스 왼쪽 위(뷰포트 CSS px). */
+  /** Canvas top-left (viewport CSS px). */
   canvasOrigin: PointCss
   /**
-   * 탭바 — `zone` = 탭바 구역(`bands.canvasZone` 의 값 · 캔버스 좌표 — 띠 셈의 `BandsInput.zone` 과 같은 값이어야 띠 영역과 맞물린다)
-   * · `strip` = 그 자리를 셀 탭바. `null` = 탭바를 모름.
+   * Tab bar — `zone` = tab bar zone (value of `bands.canvasZone` · canvas coordinates — it must be the same value as `BandsInput.zone` of the band computation to mesh with the band regions)
+   * · `strip` = the tab bar that computes that position. `null` = tab bar unknown.
    */
   tabBar: { zone: RectCss; strip: JudgeStrip } | null
-  /** 보이는 탭의 띠 — `null` = 끄는 탭 자신이 보이는 캔버스(탭 하나뿐인 출처 창 · `SelfTarget` — 띠 없음). */
+  /** Bands of the visible tab — `null` = the canvas where the dragged tab itself is visible (a single-tab source window · `SelfTarget` — no bands). */
   bands: WindowBands | null
 }
 
 export type Judgement =
   /**
-   * 탭바 구역. `index` = 출처면 Chrome `insertionIndex`(끄는 탭을 뺀 목록의 자리) · 다른 창이면 `dropIndex`(그 창 목록에 끼울 자리).
-   * `left` = 출처의 끄는 머리 왼쪽(탭바 좌표 · `draggedLeft`) · `marker` = 다른 창의 세로선 x(탭바 좌표 · `dropMarkerX`).
+   * Tab bar zone. `index` = for the source, Chrome `insertionIndex` (position in the list without the dragged tab) · for another window, `dropIndex` (insertion position in that window's list).
+   * `left` = left of the source's dragged head (tab bar coordinates · `draggedLeft`) · `marker` = x of the vertical line in another window (tab bar coordinates · `dropMarkerX`).
    */
   | { type: 'strip'; index: number; left: number | null; marker: number | null }
-  /** 띠 — `band` = `bands.bands` 의 자리(미리보기 = 그 `landing`) · `zones` = 구역 선을 그릴 `bands.frames` 의 자리(바깥 띠면 `null`). */
+  /** Band — `band` = index in `bands.bands` (preview = its `landing`) · `zones` = index in `bands.frames` to draw zone lines for (`null` for an outer band). */
   | { type: 'band'; band: number; zones: number | null }
-  /** 그 밖(칸 가운데 · 캔버스 밖 우리 UI) — drop 이면 새 창. 칸 가운데면 그 칸의 구역 선(`zones`)은 그린다. */
+  /** Other (area center · our UI outside the canvas) — a drop gives a new window. For an area center, that area's zone lines (`zones`) are drawn. */
   | { type: 'elsewhere'; zones: number | null }
 
-/** 점 `point`(그 창 뷰포트 CSS px)의 판정. */
+/** Decision for point `point` (that window's viewport CSS px). */
 export function judge(w: JudgeWindow, point: PointCss): Judgement {
   const p = { x: point.x - w.canvasOrigin.x, y: point.y - w.canvasOrigin.y }
   if (w.tabBar !== null && contains(w.tabBar.zone, p)) return stripAt(w.tabBar.strip, point.x - w.tabBar.strip.left)

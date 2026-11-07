@@ -3,11 +3,11 @@ import type { SettingItem } from "./SettingItem";
 
 export type ResetOutcome = { rev: number, 
 /**
- * 선택자가 덮은 키 전부(표 순서) — 호출 뒤 모두 기본값이다.
+ * All keys the selector covers (table order) — all are at the default after the call.
  */
 reset: Array<string>, 
 /**
- * 그중 유효 값이 실제로 바뀐 키의 새 값(= 기본값). 비었으면 알림도 `rev` 도 없다 — 파일은 바로잡았을 수
- * 있다([`SettingsService::reset`]).
+ * Among them, the new values (= default) of keys whose effective value actually changed. If empty, no notification and no `rev` — the file may have
+ * been corrected ([`SettingsService::reset`]).
  */
 changed: Array<SettingItem>, };

@@ -62,10 +62,10 @@ use usage_service::{OsProbeThreads, ProbeThreads, UsageParts, UsageService};
 pub use engram_dashboard_net::ws::KeepaliveConfig;
 #[cfg(not(feature = "test-support"))]
 use engram_dashboard_net::ws::KeepaliveConfig;
-// ADR-0129 0-4: 핸드셰이크 프레임(`auth::AuthFrame`)은 **재수출하지 않는다** — 이 crate 의 공개
+// ADR-0129 0-4: 핸드셰이크 프레임(protocol `handshake::AuthFrame`)은 **재수출하지 않는다** — 이 crate 의 공개
 //   시그니처에 나타나지 않으므로 위 재수출의 사유가 성립하지 않고, 한 타입에 import 경로가 둘이 생긴다.
-//   `tests/ws_e2e.rs` 는 네트워크 crate 를 직접 부른다(그 crate 는 여기 normal 의존이라 테스트 타깃에서
-//   그대로 보인다) — 경계가 각 사용 지점에서 보이게 두는 슬라이스 1 의 원칙 그대로다(step-log S18.21).
+//   `tests/ws_e2e.rs` 는 protocol 을 직접 부른다(여기 normal 의존이라 테스트 타깃에서 그대로 보인다) —
+//   경계가 각 사용 지점에서 보이게 두는 슬라이스 1 의 원칙 그대로다(step-log S18.21).
 
 // ★경로를 여기서 조립하지 마라★: 데몬이 **붙잡는** 파일과 **쓰는** 파일이 같아야 단일 인스턴스가
 //   성립한다(ADR-0135). 경로는 `data_dir::DataLayout` 하나가 내고, 쓰기는 붙잡은 guard 로만 한다. 이 이름은 로그 문구용이다.
@@ -730,7 +730,7 @@ pub async fn run() -> Result<(), i32> {
         pid: std::process::id(),
         host: "127.0.0.1".to_string(),
         port,
-        token,
+        token: engram_dashboard_protocol::Secret::new(token),
         protocol_version: PROTOCOL_VERSION,
         start_time,
     };

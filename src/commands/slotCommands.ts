@@ -1,13 +1,13 @@
-// ADR-0064 / ADR-0055 / ADR-0035: 각 command 는 실행 컨텍스트(viewId·slotId)를 run(args) 로 받아 viewStore
-//   액션으로 라우팅만 한다(새 상태 경로 0 — 레이아웃 권위는 백엔드 ViewManager, ADR-0035). 사람 우클릭·
-//   팔레트·키바인딩·LLM(__engramCmd)이 모두 같은 command 를 컨텍스트 인자로 실행한다(§5 단일 제어 표면).
+// ADR-0064 / ADR-0055 / ADR-0035: each command receives the execution context (viewId · slotId) through run(args) and only routes to a viewStore
+//   action (0 new state paths — the layout authority is the backend ViewManager, ADR-0035). Human right click ·
+//   palette · keybindings · the LLM (__engramCmd) all run the same command with the context argument (§5 single control surface).
 //
-// ★공통 = '*' 단일소스★(ADR-0064 불변식): 이 항목들은 registerSlotMenu('*', …) 로 모든 슬롯에 붙는다 —
-//   콘텐츠 컴포넌트가 재선언하지 않는다(재선언 = drift, 리뷰 reject). 콘텐츠 전용 항목은 각 콘텐츠 모듈에서.
+// ★Common = '*' single source★ (ADR-0064 invariant): these items attach to every slot via registerSlotMenu('*', …) —
+//   content components do not redeclare them (redeclaring = drift, review reject). Content-specific items go in each content module.
 //
-// ★팝업 분리 = 공통으로 승격(ADR-0064)★: 옛 메뉴는 '팝업으로 분리'를 라이브 agent 有일 때만 활성화했지만,
-//   슬롯 콘텐츠 유니온(ADR-0060) 이후엔 콘텐츠 종류와 무관하게 슬롯을 다른 창으로 옮길 수 있어야 한다 →
-//   agent 게이팅을 제거하고 '*'(공통)으로 옮긴다.
+// ★Popup detach = promoted to common★ (ADR-0064): the old menu enabled 'detach to popup' only when a live agent existed, but
+//   after the slot content union (ADR-0060), a slot must be movable to another window regardless of content kind →
+//   remove the agent gating and move it to '*' (common).
 
 import { invoke } from '@tauri-apps/api/core'
 
@@ -17,13 +17,13 @@ import type { SplitDir } from '../api/layoutTypes'
 import { register } from './registry'
 import { registerSlotMenu } from './slotMenu'
 
-/** 공통 slot-op command 의 실행 컨텍스트 인자(단일 가방, ADR-0055). */
+/** The execution context argument of the common slot-op commands (a single bag, ADR-0055). */
 interface SlotCtx {
   viewId?: unknown
   slotId?: unknown
 }
 
-/** 둘 다 문자열이어야 한다 — 백엔드 권위 좌표계. */
+/** Both must be strings — the backend authority coordinate system. */
 function requireCoords(args: SlotCtx | undefined, cmd: string): { viewId: string; slotId: string } {
   const viewId = args?.viewId
   const slotId = args?.slotId
@@ -37,7 +37,7 @@ function registerSplit(id: string, title: string, dir: SplitDir): void {
     id,
     title,
     category: 'slot',
-    // ADR-0035: viewStore.split → invoke(split_slot) → emit 반영(낙관 갱신 X).
+    // ADR-0035: viewStore.split → invoke(split_slot) → reflected through emit (no optimistic update).
     run: args => {
       const { viewId, slotId } = requireCoords(args, id)
       return useViewStore.getState().split(viewId, slotId, dir)
@@ -45,9 +45,9 @@ function registerSplit(id: string, title: string, dir: SplitDir): void {
   })
 }
 
-// ★라벨↔방향 결선 = vim 관례(ADR-0140)★: `가로 분할` = 가로줄(수평 분할선)이 생겨 위/아래로 나뉜다 →
-//   `top_bottom`. 라벨 단어만 보면 뒤바뀐 것처럼 읽히지만 뒤집으면 사용자가 고른 관례가 깨진다
-//   (tmux 축 관례로 회귀 = ADR-0140 이 거부한 대안). 여기가 두 어휘가 만나는 유일한 지점이다.
+// ★Label↔direction wiring = vim convention (ADR-0140)★: `가로 분할` = a horizontal line (a horizontal split line) appears, dividing into top/bottom →
+//   `top_bottom`. Reading only the label word it looks reversed, but flipping it would break the convention the user chose
+//   (reverting to the tmux axis convention = the alternative ADR-0140 rejected). This is the only point where the two vocabularies meet.
 registerSplit('slot.split.topBottom', t('slot.splitTopBottom'), 'top_bottom')
 registerSplit('slot.split.leftRight', t('slot.splitLeftRight'), 'left_right')
 
@@ -55,8 +55,8 @@ register({
   id: 'slot.focus',
   title: t('slot.focus'),
   category: 'slot',
-  // ADR-0066: click-to-focus — viewStore.focusSlot → invoke(focus_slot) → emit(layout:updated) 로 링을
-  //   갱신한다(낙관 갱신 X, §5 단일 제어 표면). LayoutLeaf 의 슬롯 onClick 도 같은 핸들을 부른다.
+  // ADR-0066: click-to-focus — viewStore.focusSlot → invoke(focus_slot) → emit(layout:updated) updates the ring
+  //   (no optimistic update, §5 single control surface). The slot onClick of LayoutLeaf calls the same handle.
   run: args => {
     const { viewId, slotId } = requireCoords(args, 'slot.focus')
     return useViewStore.getState().focusSlot(viewId, slotId)
@@ -67,13 +67,13 @@ register({
   id: 'slot.popout',
   title: t('slot.popout'),
   category: 'slot',
-  // ADR-0057/0064: 슬롯을 새 런타임 팝업 창의 새 탭으로 MOVE(detach) — viewStore.moveSlotToWindow →
-  //   invoke(move_slot_to_window, toWindow=null). 콘텐츠 종류 무관(agent 게이팅 제거, ADR-0064).
-  // ★알려진 과도기 분열 — 같은 id 가 두 표면에서 받는 것도 주는 것도 다르다★: 셸의 명령 버스에도
-  //   `slot.popout` 이 있다(`src-tauri/src/layout/commands.rs`). 받는 것 — 여기는 목적지 인자가 없어 항상
-  //   새 창이고(아래 호출이 toWindow 를 안 넘긴다), 그쪽은 to_window 로 기존 창도 고른다. 주는 것 — 여기는
-  //   `{window, tab, window_id, number}`, 그쪽은 `{window, new_view_id, window_id, number}`. 한쪽만 맞춰 고치지 말 것 — 합류는 이 레지스트리를
-  //   은퇴시키는 후속 스텝 몫이다. 반대편에도 같은 메모가 붙어 있다.
+  // ADR-0057/0064: MOVE (detach) a slot to a new tab of a new runtime popup window — viewStore.moveSlotToWindow →
+  //   invoke(move_slot_to_window, toWindow=null). Independent of content kind (agent gating removed, ADR-0064).
+  // ★Known transitional split — the same id receives and gives different things on two surfaces★: the shell's command bus also has
+  //   `slot.popout` (`src-tauri/src/layout/commands.rs`). What it receives — here there is no destination argument so it is always
+  //   a new window (the call below does not pass toWindow), whereas that side can also pick an existing window with to_window. What it gives — here it is
+  //   `{window, tab, window_id, number}`, there `{window, new_view_id, window_id, number}`. Do not fix only one side — joining is the job of the follow-up step that
+  //   retires this registry. The same memo is attached on the other side.
   run: args => {
     const { viewId, slotId } = requireCoords(args, 'slot.popout')
     return useViewStore.getState().moveSlotToWindow(viewId, slotId)
@@ -104,7 +104,7 @@ register({
   id: 'slot.close',
   title: t('slot.close'),
   category: 'slot',
-  // ADR-0035: viewStore.closeSlot → invoke(close_slot)(형제 승격).
+  // ADR-0035: viewStore.closeSlot → invoke(close_slot) (sibling promotion).
   run: args => {
     const { viewId, slotId } = requireCoords(args, 'slot.close')
     return useViewStore.getState().closeSlot(viewId, slotId)
@@ -115,26 +115,26 @@ register({
   id: 'slot.resolveSpatial',
   title: t('slot.resolveSpatial'),
   category: 'slot',
-  // ★공간/방향 토큰 → slot id 해소(ADR-0068 — §5 백엔드 권위 resolver)★: "우하단"·"이 슬롯 오른쪽" 같은
-  //   공간 지시를 논리 도면(split 방향·ratio) 파생으로 slot id 에 매핑한다(픽셀·getBoundingClientRect 무관 —
-  //   레이아웃 진실은 백엔드 ViewManager, ADR-0035). 프론트는 계산하지 않고 백엔드 resolve_spatial 을 invoke 만
-  //   한다(낙관 프론트 계산 금지 — §5 단일 제어 표면). 상대 방향은 대상 View 의 focused_slot_id 기준.
+  // ★Spatial/directional token → slot id resolution (ADR-0068 — §5 backend authority resolver)★: maps a spatial reference such as "bottom right" · "right of this slot"
+  //   to a slot id through derivation from the logical plan (split direction · ratio) (independent of pixels · getBoundingClientRect —
+  //   the layout truth is the backend ViewManager, ADR-0035). The frontend does not compute but only invokes the backend resolve_spatial
+  //   (no optimistic frontend computation — §5 single control surface). A relative direction is based on the target View's focused_slot_id.
   run: args => {
     const token = args?.token
     if (typeof token !== 'string' || token.length === 0) throw new Error('[slot.resolveSpatial] token 필요')
     const viewId = typeof args?.viewId === 'string' && args.viewId.length > 0 ? args.viewId : undefined
-    // viewId 미지정이면 이 웹뷰 창(main·팝업 label)을 넘겨 백엔드가 그 창의 활성 탭을 대상 삼게 한다.
+    // If viewId is not specified, pass this webview window (main · popup label) so the backend targets that window's active tab.
     const window = viewId ? undefined : readWindowLabelFromHash()
     return invoke<string | null>('resolve_spatial', { token, window: window ?? null, viewId: viewId ?? null })
   },
 })
 
-// ★공통 슬롯 ops 기여 = '*'(모든 슬롯) 단일소스★(ADR-0064). group='slot-ops'(콘텐츠 항목 아래에 렌더).
-//   닫기는 관례상 맨 아래라 order 99.
-// ★hideOn 트림(ADR-0065)★: slot.empty(빈 슬롯 재비우기 = no-op)는 빈 슬롯에서 무의미하므로 hideOn:['empty'] 로
-//   제외한다. '*' 보편 등록은 유지(공통 ops 단일소스 불변식) — 콘텐츠 타입별 재선언이 아니라 subtraction 필터일
-//   뿐이다(ADR-0065 거부 대안 참조).
-// ADR-0228: slot.popout 엔 hideOn 을 달지 않는다 — 빈 슬롯도 팝아웃 대상이다(사용자 결정).
+// ★Common slot ops contribution = '*' (all slots) single source★ (ADR-0064). group='slot-ops' (rendered below the content items).
+//   Close is by convention at the very bottom, so order 99.
+// ★hideOn trim (ADR-0065)★: slot.empty (re-emptying an empty slot = no-op) is meaningless on an empty slot, so it is
+//   excluded with hideOn:['empty']. The '*' universal registration is kept (common ops single-source invariant) — it is a subtraction filter,
+//   not a per-content-type redeclaration (see the rejected alternative of ADR-0065).
+// ADR-0228: slot.popout gets no hideOn — an empty slot is also a popout target (user decision).
 registerSlotMenu('*', [
   { commandId: 'slot.split.topBottom', group: 'slot-ops', order: 10 },
   { commandId: 'slot.split.leftRight', group: 'slot-ops', order: 20 },

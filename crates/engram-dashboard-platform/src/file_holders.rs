@@ -1,12 +1,12 @@
-//! 「이 파일을 지금 어느 프로세스가 열고 있나」를 OS 에 묻는다.
+//! Asks the OS 「이 파일을 지금 어느 프로세스가 열고 있나」 (which process has this file open right now).
 //!
-//! ★무엇을 찾으려고 묻는지는 이 파일이 모른다(ADR-0266 결정 3)★ — 받는 것은 경로 하나이고 돌려주는 것은
-//! 홀더 목록뿐이다.
+//! ★This file does not know what the answer is used to look for (ADR-0266 decision 3)★ — it takes one path and returns
+//! only a list of holders.
 //!
-//! 묻는 수단은 **Windows Restart Manager** 이고 다른 OS 에는 이 질문을 할 수단을 두지 않았다 —
-//! 거기서는 항상 빈 목록이라 이 위에 선 판정은 오검출 대신 「못 받음」에 머문다(ADR-0218 결정 10).
+//! The means of asking is the **Windows Restart Manager**; no means of asking this question was provided on other OSes —
+//! there the list is always empty, so a decision built on it stays at 「못 받음」 (not received) instead of a false detection (ADR-0218 decision 10).
 //!
-//! 진입점 = [`holders_of`]. 실패는 값으로 돌려준다(panic 없음).
+//! Entry point = [`holders_of`]. Failure is returned as a value (no panic).
 
 // ADR-0266
 
@@ -23,32 +23,32 @@ use windows::Win32::System::RestartManager::{
     RM_PROCESS_INFO,
 };
 
-/// 한 파일을 열고 있는 프로세스 하나.
+/// One process that has a file open.
 ///
-/// ★두 칸은 **함께** 대조하라고 있다★ — PID 는 OS 가 재사용하므로 PID 단독 일치는 남의 프로세스를
-/// 그 프로세스로 본다(ADR-0218 결정 2).
-/// 모양이 같은 [`crate::process::ProcessIdentity`] 는 「한 뿌리 아래의 프로세스」라 뜻이 다르다 — 합치지 않는다.
+/// ★The two fields are there to be compared **together**★ — the OS reuses PIDs, so matching on PID alone takes
+/// someone else's process for that process (ADR-0218 decision 2).
+/// [`crate::process::ProcessIdentity`] has the same shape but means 「한 뿌리 아래의 프로세스」 (a process under one root), so the two differ — do not merge them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Holder {
     pub pid: u32,
-    /// 프로세스 생성 FILETIME(1601-01-01 UTC 부터 100나노초 간격 수)의 high/low 32비트를 합친 값 —
-    /// 같은 PID 에 대해 [`crate::process::process_creation_time`] 이 돌려주는 값과 같다(ADR-0218 「근거」의
-    /// 실측이고, 이 파일의 테스트가 그 동일성을 잰다).
+    /// The high/low 32 bits of the process creation FILETIME (count of 100-nanosecond intervals since 1601-01-01 UTC) joined into one value —
+    /// the same as what [`crate::process::process_creation_time`] returns for the same PID (the
+    /// measurement in ADR-0218 「근거」 (Rationale); this file's test measures that equality).
     ///
-    /// Restart Manager 가 이 칸을 못 채워 0 을 주는 항목이 있는지는 미검이다 — 그런 항목은 대조에서
-    /// 그냥 떨어진다(대조 상대의 시작시각은 0 이 아니므로).
+    /// Whether Restart Manager returns 0 for some entry because it cannot fill this field is unchecked — such an entry
+    /// simply drops out of the comparison (the start time of the other side is not 0).
     pub start_time: u64,
 }
 
-/// `path` 를 열고 있는 프로세스 전부.
+/// All processes that have `path` open.
 ///
-/// - **빈 목록 = 아무도 안 쥐고 있다**. 오류가 아니라 죽은 락 파일의 정상 모습이다(ADR-0218 「근거」 —
-///   소유 프로세스를 죽인 뒤 같은 파일을 물으면 0 이 나오는 것을 실측했다).
-/// - **오류 = 물어보는 데 실패했다**(세션 생성·등록·열거 실패). 「홀더 없음」과 갈라 두는 이유는 호출부가
-///   그 둘을 다르게 로깅할 수 있게 하려는 것뿐 — 소유 판정에서는 둘 다 「후보 아님」이다.
-/// - 관리자 권한은 필요 없다(같은 실측).
-/// - ★전체 경로로 준다★ — 실측·문서가 다룬 것이 전체 경로뿐이고, 상대 경로를 Restart Manager 가 무엇에
-///   상대로 푸는지는 미검이다. 어긋나면 증상은 오류가 아니라 「홀더 0」이다.
+/// - **Empty list = nobody holds it**. It is not an error but the normal look of a dead lock file (ADR-0218 「근거」 (Rationale) —
+///   we measured that asking about the same file after killing the owning process gives 0).
+/// - **Error = the query failed** (session create, register or enumerate failed). The only reason to keep this apart from 「홀더 없음」 (no holder) is so the caller can
+///   log the two differently — for the ownership decision both mean 「후보 아님」 (not a candidate).
+/// - Administrator rights are not needed (same measurement).
+/// - ★Pass the full path★ — the measurement and the docs covered only full paths, and what Restart Manager resolves a
+///   relative path against is unchecked. If it goes wrong the symptom is not an error but 「홀더 0」 (0 holders).
 #[cfg(windows)]
 pub fn holders_of(path: &Path) -> io::Result<Vec<Holder>> {
     use std::os::windows::ffi::OsStrExt;
@@ -64,15 +64,15 @@ pub fn holders_of(path: &Path) -> io::Result<Vec<Holder>> {
 
     let session = RmSession::start()?;
     let files = [PCWSTR(wide.as_ptr())];
-    // SAFETY: 살아 있는 세션 핸들 + 이 함수가 소유한 널종단 wide 경로 한 칸. 호출이 끝날 때까지
-    // `wide` 가 살아 있고, 등록된 리소스는 세션이 닫힐 때 함께 정리된다.
+    // SAFETY: a live session handle plus one null-terminated wide path owned by this function. `wide` stays alive
+    // until the call ends, and the registered resource is cleaned up when the session closes.
     let rc = unsafe { RmRegisterResources(session.handle, Some(&files), None, None) };
     if rc != ERROR_SUCCESS {
         return Err(rm_err("RmRegisterResources", rc));
     }
 
-    // 버퍼 크기는 API 에 물어서 받는다(`needed`). ★한 바퀴로 안 끝낼 수 있다★ — 두 호출 사이에 홀더가
-    // 늘면 두 번째도 ERROR_MORE_DATA 로 떨어지므로 몇 바퀴 되묻고, 수렴 안 하면 무한 루프 대신 오류다.
+    // The buffer size is obtained by asking the API (`needed`). ★One round may not be enough★ — if holders grow
+    // between the two calls, the second also fails with ERROR_MORE_DATA, so it asks again a few rounds, and if it does not converge it is an error instead of an infinite loop.
     let mut buf: Vec<RM_PROCESS_INFO> = Vec::new();
     for _ in 0..GET_LIST_ATTEMPTS {
         let mut needed: u32 = 0;
@@ -83,7 +83,7 @@ pub fn holders_of(path: &Path) -> io::Result<Vec<Holder>> {
         } else {
             Some(buf.as_mut_ptr())
         };
-        // SAFETY: 살아 있는 세션 핸들 + 스택의 출력 포인터 셋 + `have` 칸을 가진 `buf`(비었으면 None/0).
+        // SAFETY: a live session handle plus three output pointers on the stack plus `buf` holding the `have` field (None/0 if empty).
         let rc = unsafe { RmGetList(session.handle, &mut needed, &mut have, out, &mut reasons) };
         if rc == ERROR_SUCCESS {
             buf.truncate(have as usize);
@@ -99,19 +99,19 @@ pub fn holders_of(path: &Path) -> io::Result<Vec<Holder>> {
     )))
 }
 
-/// non-windows: 물을 수단이 없어 **항상 빈 목록**이다 — 「아무도 안 쥐고 있다」와 같은 모양으로
-/// 내려간다(ADR-0218 결정 10).
+/// non-windows: there is no means of asking, so the list is **always empty** — it is passed down in the same shape as 「아무도 안 쥐고 있다」
+/// (nobody holds it) (ADR-0218 decision 10).
 #[cfg(not(windows))]
 pub fn holders_of(_path: &Path) -> io::Result<Vec<Holder>> {
     Ok(Vec::new())
 }
 
-/// 홀더 목록 조회의 재시도 상한 — 크기를 묻고 받는 사이에 홀더가 느는 경우만 재시도한다.
+/// Retry limit for the holder-list query — it retries only when holders grow between asking the size and receiving.
 #[cfg(windows)]
 const GET_LIST_ATTEMPTS: u32 = 4;
 
-/// Restart Manager 세션 하나. ★`Drop` 이 닫는 것이 이 타입의 전부다★ — 조회 중간에 `?` 로 빠져나가도
-/// 세션이 남지 않게 하려고 값으로 쥔다.
+/// One Restart Manager session. ★`Drop` closing it is all this type does★ — it is held by value so that
+/// leaving midway through a query with `?` does not leave the session behind.
 #[cfg(windows)]
 struct RmSession {
     handle: u32,
@@ -121,9 +121,9 @@ struct RmSession {
 impl RmSession {
     fn start() -> io::Result<Self> {
         let mut handle: u32 = 0;
-        // 키 버퍼 크기는 API 가 정한다 — CCH_RM_SESSION_KEY 글자 + 널 하나.
+        // The key buffer size is set by the API — CCH_RM_SESSION_KEY characters plus one null.
         let mut key = [0u16; CCH_RM_SESSION_KEY as usize + 1];
-        // SAFETY: 스택의 핸들 출력 포인터 + 위 규격대로 잡은 키 버퍼. 플래그는 예약돼 있어 0 뿐이다.
+        // SAFETY: a handle output pointer on the stack plus a key buffer sized per the spec above. Flags are reserved, so 0 only.
         let rc = unsafe { RmStartSession(&mut handle, 0, PWSTR(key.as_mut_ptr())) };
         if rc != ERROR_SUCCESS {
             return Err(rm_err("RmStartSession", rc));
@@ -134,11 +134,11 @@ impl RmSession {
 
 #[cfg(windows)]
 impl Drop for RmSession {
-    /// ★실패를 삼키지 않는다 — 닫히지 않은 세션은 [`holders_of`] 를 부를 때마다 하나씩 남는다★(되풀어
-    /// 부르는 호출자일수록 많이 쌓인다). `Drop` 이라 돌려보낼 곳이 없으므로 남기는 것은 로그뿐이고, 그
-    /// 로그가 세션이 새고 있다는 것을 볼 수 있는 유일한 자리다.
+    /// ★The failure is not swallowed — a session left unclosed remains, one more with each call to [`holders_of`]★ (the more a
+    /// caller calls it repeatedly, the more pile up). Being in `Drop` there is nowhere to return it, so all that is left is a log, and that
+    /// log is the only place where you can see that sessions are leaking.
     fn drop(&mut self) {
-        // SAFETY: start() 가 성공으로 돌려준 핸들을 한 번만 닫는다.
+        // SAFETY: closes the handle that start() returned as a success, exactly once.
         let rc = unsafe { RmEndSession(self.handle) };
         if rc != ERROR_SUCCESS {
             tracing::warn!(
@@ -169,9 +169,9 @@ mod tests {
     #[cfg(windows)]
     use super::*;
 
-    /// 자기 자신이 연 파일을 물어, PID 와 시작시각이 **둘 다** 우리 것으로 오는지 잰다. 시작시각의
-    /// 기준값은 같은 crate 의 `process` 헬퍼에서 받는다 — 두 경로가 같은 시계를 읽는다는 것이 ADR-0218 결정 2 의
-    /// 전제이고, 여기가 그 전제를 지키는 자리다.
+    /// Asks about a file it opened itself and measures whether the PID and start time **both** come back as ours. The
+    /// reference start time comes from the `process` helper in the same crate — that the two paths read the same clock is the premise of ADR-0218 decision 2,
+    /// and this is the place that upholds that premise.
     #[cfg(windows)]
     #[test]
     fn a_file_this_process_holds_reports_this_process() {
@@ -200,7 +200,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// 아무도 안 쥔 파일(그리고 아예 없는 파일)은 오류가 아니라 빈 목록이다 — 죽은 락의 정상 모습.
+    /// A file nobody holds (and a file that does not exist at all) gives an empty list, not an error — the normal look of a dead lock.
     #[cfg(windows)]
     #[test]
     fn an_unheld_file_has_no_holder() {

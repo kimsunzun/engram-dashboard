@@ -1,16 +1,16 @@
-//! 한 무리로 묶은 프로세스의 OS 층 — 강한 주인 [`GroupOwner`] · 약한 손잡이 [`GroupRef`] 와 손잡이가 내주는
-//! 구체 타입(붙든 멤버 [`PinnedMember`] · 가입 알림 포트 [`BirthPort`] · 값 [`MemberFacts`] · [`PortOutcome`] ·
-//! [`MemberOutcome`]). Windows 는 Job Object(비공개 `windows` 조각 — 이 모듈이 그 타입을 제 공개 타입으로 옮겨
-//! 싣는다)이고, 그 밖의 OS 는 아무것도 묶지 않는 껍데기다(각 메서드 문서).
+//! The OS layer for processes tied into one group — the strong owner [`GroupOwner`], the weak handle [`GroupRef`], and the
+//! concrete types the handle hands out (pinned member [`PinnedMember`], join-notification port [`BirthPort`], value [`MemberFacts`], [`PortOutcome`],
+//! [`MemberOutcome`]). On Windows it is a Job Object (the private `windows` part — this module moves
+//! that type into its own public types), and on other OSes it is a shell that ties nothing together (see each method's docs).
 //!
-//! 무엇을 끝낼지는 모른다(ADR-0266 결정 3) — 고르기 · 물러남 같은 뜻은 부르는 쪽 어댑터의 몫이고, 여기는 받은
-//! 번호가 그 무리의 멤버인지 OS 에 물어 붙들고 그 핸들로 사실을 읽고 끝낼 뿐이다. 끝낼 때 줄 종료 코드도 부르는
-//! 쪽이 준다(ADR-0275 결정 12). 공개 API 에 트레이트 객체가 없다 — 시험용 가짜가 필요하면 부르는 쪽이 작은
-//! 트레이트를 두고 이 구체 타입에 구현한다(ADR-0266 결정 5).
+//! It does not know what to end (ADR-0266 decision 3) — meanings such as choosing or backing off belong to the caller's adapter; here it only
+//! asks the OS whether a given number is a member of the group, pins it, reads facts through that handle and ends it. The exit code to give when ending is also
+//! supplied by the caller (ADR-0275 decision 12). There are no trait objects in the public API — if a test fake is needed, the caller
+//! defines a small trait and implements it on this concrete type (ADR-0266 decision 5).
 //!
-//! ★로그도 락도 쓰지 않는다★ — [`PinnedMember::terminate_raw`] · [`PinnedMember::classify`] · [`GroupRef::is_gone`]
-//! 은 부르는 쪽이 자물쇠를 쥔 채 부르고, 그 자물쇠 안의 OS 호출은 끝내기 하나로 묶여 있다(ADR-0262 결정 8). 이
-//! crate 가 `tracing` 을 쓸 수 있다는 것(ADR-0266 결정 9)을 이 모듈로 번지게 하지 말 것.
+//! ★It uses neither logging nor locks★ — [`PinnedMember::terminate_raw`], [`PinnedMember::classify`], [`GroupRef::is_gone`]
+//! are called by the caller while holding a lock, and the OS calls inside that lock are bundled into a single terminate (ADR-0262 decision 8). Do not
+//! let the fact that this crate may use `tracing` (ADR-0266 decision 9) spread into this module.
 // ADR-0262
 // ADR-0266
 // ADR-0275
@@ -29,19 +29,19 @@ pub(crate) use self::windows::image_path;
 #[cfg(windows)]
 pub(crate) use self::windows::resume_suspended_process;
 
-/// 주인이 이미 사라져 무리가 없을 때 [`GroupRef::watch_births`] · [`GroupRef::unwatch_births`] 가 돌려주는 `Err`
-/// 종류 — OS 실패가 아니라서 부르는 쪽이 가를 수 있게 따로 둔다. 포트 만들기 · 붙이기 · 떼기의 OS 실패는 이
-/// 종류가 아니다(`Other` 로 감싼다) — 단 `start` 가 이 종류를 돌려주면 가를 수 없다.
+/// The `Err` kind that [`GroupRef::watch_births`] and [`GroupRef::unwatch_births`] return when the owner is already gone and there is no group —
+/// it is not an OS failure, so it is kept separate so the caller can tell it apart. OS failures in creating, attaching or detaching the port are not this
+/// kind (they are wrapped as `Other`) — but if `start` returns this kind it cannot be told apart.
 pub const GROUP_GONE: io::ErrorKind = io::ErrorKind::NotConnected;
 
-/// 무리의 강한 주인 — 이것이 살아 있는 동안 무리가 있다. 버리면 Windows 에서는 Job 핸들이 닫혀 남은 멤버를 OS 가
-/// 끝낸다(`KILL_ON_JOB_CLOSE`) — 단 그 순간 [`GroupRef`] 가 부르는 중이면 그 호출이 끝날 때 닫힌다.
+/// The strong owner of a group — while this is alive the group exists. Dropping it on Windows closes the Job handle and the OS ends the remaining
+/// members (`KILL_ON_JOB_CLOSE`) — but if a [`GroupRef`] is in a call at that moment, the handle closes when that call ends.
 ///
-/// ★`Clone` 이 아니다★ — 타입이 강제하는 것은 「한 무리의 강한 주인은 하나」까지다. 그 주인이 누구인가(띄운
-/// 통로 · 트리 손잡이)는 배치가 지킨다(ADR-0275 결정 11). 밖으로는 [`Self::downgrade`] 의 약한 손잡이만 내준다.
+/// ★Not `Clone`★ — what the type enforces goes only as far as 「한 무리의 강한 주인은 하나」 (one strong owner per group). Who that owner is (the launch
+/// path, the tree handle) is kept by the arrangement (ADR-0275 decision 11). Outward it hands out only the weak handle from [`Self::downgrade`].
 ///
-/// Windows 밖에서는 아무것도 묶지 않는다 — `new` · `adopt` · `terminate` 는 `Ok`, `active_processes` 는
-/// `Unsupported`, `downgrade` 는 `None` 이다.
+/// Outside Windows it ties nothing together — `new`, `adopt` and `terminate` are `Ok`, `active_processes` is
+/// `Unsupported`, and `downgrade` is `None`.
 // ADR-0266
 // ADR-0275
 pub struct GroupOwner {
@@ -50,7 +50,7 @@ pub struct GroupOwner {
 }
 
 impl GroupOwner {
-    /// Windows = 익명 Job 을 `KILL_ON_JOB_CLOSE` 로 만든다. `Err` = 만들기 · 설정의 OS 실패.
+    /// Windows = creates an anonymous Job with `KILL_ON_JOB_CLOSE`. `Err` = an OS failure in creating or configuring it.
     pub fn new() -> io::Result<Self> {
         #[cfg(windows)]
         {
@@ -64,10 +64,10 @@ impl GroupOwner {
         }
     }
 
-    /// 그 번호의 프로세스를 무리에 넣는다.
+    /// Puts the process with that number into the group.
     ///
-    /// ★띄운 뒤에 넣으면 넣기 전에 그것이 띄운 자식은 무리 밖에 남는다★ — 닫는 법 = 멈춘 채 띄워 넣은 뒤 깨운다
-    /// ([`crate::spawn::prepare_tree_root`] · [`crate::spawn::TreeRoot`]).
+    /// ★If you put it in after launching, children it launched before being put in remain outside the group★ — the way to close this = launch it suspended, put it in, then wake it
+    /// ([`crate::spawn::prepare_tree_root`], [`crate::spawn::TreeRoot`]).
     pub fn adopt(&self, pid: u32) -> io::Result<()> {
         #[cfg(windows)]
         {
@@ -80,8 +80,8 @@ impl GroupOwner {
         }
     }
 
-    /// 멤버 전부를 `exit_code` 로 끝낸다 — 끝내기를 시작만 하고 돌아온다. 다 끝났는지는
-    /// [`Self::active_processes`] 로 본다.
+    /// Ends all members with `exit_code` — it only starts the ending and returns. Whether everything has ended is checked with
+    /// [`Self::active_processes`].
     // ADR-0001
     pub fn terminate(&self, exit_code: u32) -> io::Result<()> {
         #[cfg(windows)]
@@ -95,7 +95,7 @@ impl GroupOwner {
         }
     }
 
-    /// 무리 안에서 아직 끝나지 않은 프로세스 수. Windows 밖 = `Unsupported`.
+    /// Number of processes in the group that have not yet ended. Outside Windows = `Unsupported`.
     pub fn active_processes(&self) -> io::Result<u32> {
         #[cfg(windows)]
         {
@@ -107,7 +107,7 @@ impl GroupOwner {
         }
     }
 
-    /// 무리를 붙들지 않는 약한 손잡이. `None` = 이 OS 에는 무리를 묶는 수단이 없다(Windows 밖).
+    /// A weak handle that does not hold the group. `None` = this OS has no means of tying a group together (outside Windows).
     pub fn downgrade(&self) -> Option<GroupRef> {
         #[cfg(windows)]
         {
@@ -122,14 +122,14 @@ impl GroupOwner {
     }
 }
 
-/// 무리의 약한 손잡이 — 멤버 명단 · 멤버 하나 붙들기(사실 · 끝내기) · 가입 알림 포트 · 「사라졌나」.
+/// The weak handle of a group — member list, pinning one member (facts, ending), join-notification port, 「사라졌나」 (is it gone).
 ///
-/// ★무리를 약하게 쥔다★ — 강하게 쥐면 주인이 사라진 뒤에도 Job 핸들이 안 닫혀 `KILL_ON_JOB_CLOSE` 가 늦어진다.
-/// 부를 때마다 그 호출 동안만 올린다([`Self::is_gone`] 은 올리지도 않는다) — 가장 긴 창은 [`Self::watch_births`]
-/// 가 `start` 를 부르는 동안이다(그래서 `start` 는 막히지 않아야 한다). 주인이 사라졌으면 명단은 비고 아무도 못
-/// 붙들며 포트는 [`GROUP_GONE`] 이다. 내준 붙든 멤버 · 포트는 무리를 붙들지 않는다.
+/// ★It holds the group weakly★ — holding it strongly would leave the Job handle unclosed even after the owner is gone, delaying `KILL_ON_JOB_CLOSE`.
+/// It is upgraded only for the duration of each call ([`Self::is_gone`] does not even upgrade) — the longest window is while [`Self::watch_births`]
+/// calls `start` (so `start` must not block). If the owner is gone, the list is empty, nothing can
+/// be pinned, and the port is [`GROUP_GONE`]. The pinned members and ports it hands out do not hold the group.
 ///
-/// Windows 밖에서는 주인이 사라진 손잡이와 같은 답이다 — 포트의 `Err` 종류만 `Unsupported` 다.
+/// Outside Windows the answer is the same as a handle whose owner is gone — only the port's `Err` kind is `Unsupported`.
 // ADR-0266
 // ADR-0275
 pub struct GroupRef {
@@ -138,7 +138,7 @@ pub struct GroupRef {
 }
 
 impl GroupRef {
-    /// 주인이 처음부터 없는 손잡이 — 모든 OS 에서 같은 모양이다.
+    /// A handle that never had an owner — the same shape on every OS.
     #[cfg(any(test, feature = "test-support"))]
     pub fn gone() -> Self {
         Self {
@@ -147,11 +147,11 @@ impl GroupRef {
         }
     }
 
-    /// 완전한 멤버 PID 명단(뿌리 포함 · 중첩된 무리의 멤버 포함 · 순서는 뜻이 없다). 주인이 사라졌으면
-    /// `Ok(빈 목록)` · 되묻는 상한 안에 명단이 완전해지지 않으면 `Err` — 빠진 멤버를 「무리 밖」으로 읽지 않게.
+    /// The complete list of member PIDs (including the root, including members of nested groups; the order has no meaning). If the owner is gone,
+    /// `Ok(빈 목록)` (empty list); if the list does not become complete within the retry limit, `Err` — so a missing member is not read as 「무리 밖」 (outside the group).
     ///
-    /// ★막 끝난 멤버가 잠깐 남을 수 있다★ — 명단에서 빠지는 때가 끝남(붙든 핸들의 대기가 돌아옴)보다 늦을 수
-    /// 있다(CI 실측 2026-10-01). 살았는지는 명단이 아니라 붙든 핸들([`PinnedMember::exited`])로 본다.
+    /// ★A member that has just ended may linger briefly★ — it may leave the list later than the ending (the wait on the pinned handle returning)
+    /// (CI measurement 2026-10-01). Whether it is alive is judged not by the list but by the pinned handle ([`PinnedMember::exited`]).
     pub fn member_pids(&self) -> io::Result<Vec<u32>> {
         #[cfg(windows)]
         {
@@ -166,11 +166,11 @@ impl GroupRef {
         }
     }
 
-    /// 그 번호의 프로세스를 **이 무리의 멤버일 때만** 붙들고 사실을 한 번 읽는다. 살았는지는 보지 않는다.
+    /// Pins the process with that number **only when it is a member of this group** and reads the facts once. It does not check whether it is alive.
     ///
-    /// `kill` = 끝내기 권한도 연다. `Ok(None)` = 그 번호의 프로세스가 없다 · 이 무리 밖이다(이 무리를 감싼 바깥
-    /// Job 에만 든 것 포함) · 주인이 이미 사라졌다 · 이 OS 에는 무리가 없다. `Err` = 여는 실패(부재 말고 — 권한
-    /// 거부 등) · 소속 조회 실패.
+    /// `kill` = also opens the terminate right. `Ok(None)` = no process with that number · it is outside this group (including one that sits only in an outer
+    /// Job wrapping this group) · the owner is already gone · this OS has no group. `Err` = failure to open (other than absence — access
+    /// denied and the like) · failure of the membership query.
     pub fn pin_member(&self, pid: u32, kill: bool) -> io::Result<Option<PinnedMember>> {
         #[cfg(windows)]
         {
@@ -189,16 +189,16 @@ impl GroupRef {
         }
     }
 
-    /// 가입 알림 포트를 만들어 `start` 에 넘기고, **`start` 가 `Ok` 일 때만** 무리를 그 포트에 붙인다 — 알림이 쌓일
-    /// 수 있게 되는 때에는 꺼낼 쪽이 이미 포트를 쥐고 있다. `start` 의 `Err` 는 그대로 돌려준다(붙지 않았다).
+    /// Creates the join-notification port and passes it to `start`, and attaches the group to that port **only when `start` is `Ok`** — by the time notifications can
+    /// pile up, the side that takes them out already holds the port. `start`'s `Err` is returned as is (nothing was attached).
     ///
-    /// ★`start` 가 도는 동안 무리를 강하게 쥔다(올린 `Arc`)★ — 그 사이 주인이 사라져도 Job 핸들이 안 닫혀
-    /// `KILL_ON_JOB_CLOSE` 가 `start` 가 막힌 만큼 늦는다. 그래서 `start` 는 꺼낼 스레드를 띄우기만 하고 막히지 않는다.
+    /// ★While `start` runs it holds the group strongly (the upgraded `Arc`)★ — even if the owner goes away meanwhile, the Job handle does not close and
+    /// `KILL_ON_JOB_CLOSE` is delayed by as long as `start` blocks. So `start` only spawns the thread that takes notifications out and does not block.
     ///
-    /// 붙일 때 이미 든 멤버도 `Joined` 로 다시 알려진다 · 붙이는 동안 상태가 바뀐 멤버의 알림은 빠질 수 있다(MS
-    /// Learn). ★한 무리에 한 번만 부른다★ — 두 번째 부름을 여기서 막지 않는다(부르는 쪽 몫). `Err` 종류:
-    /// [`GROUP_GONE`] = 주인이 이미 사라졌다(`start` 는 불리지 않았다) · `Unsupported` = 이 OS 에는 무리가 없다
-    /// (`start` 는 불리지 않았다) · 그 밖 = `start` 의 오류 · 포트 만들기 · 붙이기의 OS 실패.
+    /// Members already inside are announced again as `Joined` when attaching · notifications for a member whose state changes during attaching may be missed (MS
+    /// Learn). ★Call it only once per group★ — a second call is not blocked here (that is the caller's job). `Err` kinds:
+    /// [`GROUP_GONE`] = the owner is already gone (`start` was not called) · `Unsupported` = this OS has no group
+    /// (`start` was not called) · anything else = `start`'s error, or an OS failure in creating the port or attaching.
     pub fn watch_births(
         &self,
         start: impl FnOnce(Arc<BirthPort>) -> io::Result<()>,
@@ -217,7 +217,7 @@ impl GroupRef {
         }
     }
 
-    /// 무리의 포트 연결을 뗀다 — 뗀 뒤 태어난 멤버는 알려지지 않는다. `Err` 종류는 [`Self::watch_births`] 와 같다.
+    /// Detaches the group's port connection — members born after detaching are not announced. The `Err` kinds are the same as [`Self::watch_births`].
     pub fn unwatch_births(&self) -> io::Result<()> {
         #[cfg(windows)]
         {
@@ -232,8 +232,8 @@ impl GroupRef {
         }
     }
 
-    /// 주인이 사라져 무리가 없나 — 무리를 올리지 않고 본다(부작용 없음 · 그 사이 Job 핸들 닫기를 늦추지 않는다). 한
-    /// 번 참이면 계속 참이다. 이 OS 에는 무리가 없어 늘 참이다.
+    /// Is the owner gone so there is no group — it looks without upgrading the group (no side effects · it does not delay closing the Job handle meanwhile). Once
+    /// true it stays true. On this OS there is no group, so it is always true.
     pub fn is_gone(&self) -> bool {
         #[cfg(windows)]
         {
@@ -246,12 +246,12 @@ impl GroupRef {
     }
 }
 
-/// 붙든 핸들로 **한 번** 읽은 사실 — 번호가 아니라 그 프로세스 객체의 것이다. 못 읽은 칸은 `ppid` · `create` =
-/// 0 · 문자열 = 빈 문자열이다.
+/// Facts read **once** through the pinned handle — they belong to that process object, not to the number. For fields that could not be read, `ppid` and `create` =
+/// 0 and strings = empty string.
 ///
-/// - `ppid` = 만들 때 적힌 부모 번호 — 그 번호가 지금도 같은 부모라는 보장은 없다.
-/// - `create` = 생성 시각(FILETIME · 100 ns) — 두 프로세스의 생성 순서를 비교하는 데만 뜻이 있다.
-/// - `image` = 실행 파일 전체 경로(Win32 형식) · `cmdline` = 명령줄 그대로.
+/// - `ppid` = the parent number recorded at creation — there is no guarantee that number is still the same parent.
+/// - `create` = creation time (FILETIME · 100 ns) — meaningful only for comparing the creation order of two processes.
+/// - `image` = full executable path (Win32 form) · `cmdline` = the command line as is.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MemberFacts {
     pub ppid: u32,
@@ -260,12 +260,12 @@ pub struct MemberFacts {
     pub cmdline: String,
 }
 
-/// [`BirthPort::next`] 의 답.
+/// The answer of [`BirthPort::next`].
 ///
-/// - `Joined(pid)` = 멤버가 새로 들었다. 번호뿐이라 꺼낸 때 이미 끝나 재사용됐을 수 있다 — 곧바로 붙들어야
-///   신원이 선다.
-/// - `Other` = 그 밖의 알림(끝남 등) 또는 이 포트의 것이 아닌 패킷.
-/// - `Timeout` = 기다리는 동안 알림이 없었다.
+/// - `Joined(pid)` = a member newly joined. It is only a number, so by the time it is taken out it may already have ended and been reused — it must be pinned
+///   right away for the identity to stand.
+/// - `Other` = any other notification (ending etc.) or a packet that is not this port's.
+/// - `Timeout` = no notification arrived while waiting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PortOutcome {
     Joined(u32),
@@ -273,30 +273,30 @@ pub enum PortOutcome {
     Timeout,
 }
 
-/// [`PinnedMember::classify`] 의 답. `Gone` = 붙든 뒤 끝내기 전에 스스로 끝났다.
+/// The answer of [`PinnedMember::classify`]. `Gone` = it ended by itself after being pinned and before the terminate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemberOutcome {
     Terminated,
     Gone,
 }
 
-/// 이 무리의 멤버로 확인하고 붙든 프로세스 하나 — 쥐는 동안 그 번호는 재사용되지 않고, 끝난 뒤에도 사실은
-/// 남는다. 무리를 붙들지 않는다. 버리면 핸들이 닫힌다. [`GroupRef::pin_member`] 만 만든다.
+/// One process confirmed as a member of this group and pinned — while it is held that number is not reused, and the facts
+/// remain even after it ends. It does not hold the group. Dropping it closes the handle. Only [`GroupRef::pin_member`] creates it.
 ///
-/// 끝내기가 두 메서드로 갈린 것은 부르는 쪽이 자물쇠 안에서 OS 호출을 **하나만** 하게 하려는 것이다:
-/// [`Self::terminate_raw`] = 끝내기 호출 하나 · [`Self::classify`] = 그 날것 결과 가르기.
+/// Terminating is split into two methods so the caller does only **one** OS call inside a lock:
+/// [`Self::terminate_raw`] = one terminate call · [`Self::classify`] = sorting that raw result.
 #[derive(Debug)]
 pub struct PinnedMember {
     #[cfg(windows)]
     os: windows::PinnedMember,
-    // Windows 밖에서는 만들어지지 않는다 — 메서드 몸이 빈 match 로 그것을 말한다.
+    // It is never created outside Windows — the method bodies say so with an empty match.
     #[cfg(not(windows))]
     os: std::convert::Infallible,
     facts: MemberFacts,
 }
 
 impl PinnedMember {
-    /// 지금 끝났나 — 기다리지 않는다. `Err` = 대기 조회 자체의 실패.
+    /// Has it ended now — it does not wait. `Err` = failure of the wait query itself.
     pub fn exited(&self) -> io::Result<bool> {
         #[cfg(windows)]
         {
@@ -308,7 +308,7 @@ impl PinnedMember {
         }
     }
 
-    /// `limit` 까지 끝나기를 기다린다 — 끝났으면 `true`. `Err` = 대기 조회 자체의 실패.
+    /// Waits up to `limit` for it to end — `true` if it ended. `Err` = failure of the wait query itself.
     pub fn wait_exit(&self, limit: Duration) -> io::Result<bool> {
         #[cfg(windows)]
         {
@@ -325,9 +325,9 @@ impl PinnedMember {
         &self.facts
     }
 
-    /// 붙든 그 핸들로 `exit_code` 를 주는 끝내기 호출 **하나만** 한다 — 대상이 끝나기를 기다리지 않는다. 날것
-    /// 결과만 돌려주며 가르기는 [`Self::classify`] 가 한다. 끝내기 권한 없이 붙든 것(`kill = false`)은 늘 `Err`
-    /// 다. 실패도 힙을 쓰지 않는 오류로 돌려준다.
+    /// Makes **only one** terminate call, giving `exit_code`, on that pinned handle — it does not wait for the target to end. It returns the raw
+    /// result only; sorting is done by [`Self::classify`]. One pinned without the terminate right (`kill = false`) is always `Err`.
+    /// Failure is also returned as an error that does not use the heap.
     // ADR-0262
     pub fn terminate_raw(&self, exit_code: u32) -> io::Result<()> {
         #[cfg(windows)]
@@ -341,8 +341,8 @@ impl PinnedMember {
         }
     }
 
-    /// [`Self::terminate_raw`] 의 날것 결과를 가른다 — 실패여도 그 사이 스스로 끝났으면 `Gone` 이다. 핸들은
-    /// 닫지 않는다(버릴 때 닫힌다).
+    /// Sorts the raw result of [`Self::terminate_raw`] — even on failure, if it ended by itself in the meantime it is `Gone`. The handle is
+    /// not closed (it closes when dropped).
     // ADR-0262
     pub fn classify(&self, raw: io::Result<()>) -> io::Result<MemberOutcome> {
         #[cfg(windows)]
@@ -360,18 +360,18 @@ impl PinnedMember {
     }
 }
 
-/// 무리의 가입 알림 포트 — [`GroupRef::watch_births`] 가 `start` 에 넘긴다. 여러 스레드가 `Arc` 로 나눠 쥐고,
-/// 마지막 것이 사라지면 포트 핸들이 닫힌다. 무리를 붙들지 않는다.
+/// The group's join-notification port — [`GroupRef::watch_births`] passes it to `start`. Several threads share it through `Arc`,
+/// and when the last one is gone the port handle closes. It does not hold the group.
 ///
-/// 알림은 통지일 뿐 배달이 보장되지 않는다(MS Learn) — 빠진 가입은 여기서 알 수 없다.
+/// Notifications are only notices and delivery is not guaranteed (MS Learn) — a missed join cannot be known here.
 ///
-/// ★무리가 붙은 채 마지막 것을 놓지 않는다 — 먼저 떼고([`GroupRef::unwatch_births`]) 놓는다★: 붙어 있는 동안
-/// 무리가 포트를 제 커널 참조로 쥐어 핸들이 닫혀도 포트가 남고, 아무도 안 읽는 포트에 알림이 계속 쌓인다. 그 커널
-/// 참조는 MS Learn 에 적혀 있지 않고 실측하지 않았다 — 틀려도 먼저 떼는 쪽은 잃는 것이 없다.
+/// ★Do not let go of the last one while the group is attached — detach first ([`GroupRef::unwatch_births`]), then let go★: while attached
+/// the group holds the port as its own kernel reference, so the port survives even if the handle closes, and notifications keep piling up on a port nobody reads. That kernel
+/// reference is not written in MS Learn and was not measured — even if wrong, detaching first loses nothing.
 #[derive(Debug)]
 pub struct BirthPort {
-    // 안쪽 `Arc` 는 조각의 `watch_births` 가 붙이기를 마칠 때까지 쥐는 제 몫과 나눈다 — 그 전에 핸들이 닫히면 그
-    //   값이 재사용돼 남의 핸들을 붙일 수 있다(그 함수 주석).
+    // The inner `Arc` is shared with the share the part's `watch_births` holds until it finishes attaching — if the handle closed before that, that
+    //   value could be reused and someone else's handle attached (that function's comment).
     #[cfg(windows)]
     os: Arc<windows::BirthPort>,
     #[cfg(not(windows))]
@@ -379,7 +379,7 @@ pub struct BirthPort {
 }
 
 impl BirthPort {
-    /// 알림 하나를 `wait` 까지 기다려 꺼낸다. `Err` = 꺼내기 자체의 실패(포트가 닫힘 등).
+    /// Waits up to `wait` for one notification and takes it out. `Err` = failure of taking it out itself (port closed etc.).
     pub fn next(&self, wait: Duration) -> io::Result<PortOutcome> {
         #[cfg(windows)]
         {
@@ -426,8 +426,8 @@ mod tests {
 
     use super::{GroupRef, GROUP_GONE};
 
-    /// 주인이 없는 손잡이가 주는 답 — 멤버 없음 · 아무도 못 붙듦 · 포트 없음(`start` 를 부르지 않는다). 종류만 OS
-    /// 마다 갈린다.
+    /// The answer given by a handle with no owner — no members · nothing can be pinned · no port (`start` is not called). Only the kind
+    /// differs per OS.
     #[test]
     fn a_group_without_a_live_job_lists_nothing_and_owns_nobody() {
         let group = GroupRef::gone();
@@ -461,7 +461,7 @@ mod tests {
         );
     }
 
-    // ── 실프로세스(Windows) — 시험마다 몇 개만 차례로 띄운다: 몰아 띄우지 않는다(로컬 병렬 상한 `--test-threads=4` — `.claude/skill-bindings/qa.md` 「모듈별 명령」) ──
+    // ── real processes (Windows) — each test launches only a few, one after another: do not launch them in a burst (local parallel limit `--test-threads=4` — `.claude/skill-bindings/qa.md` 「모듈별 명령」) ──
 
     #[cfg(windows)]
     use std::io::Write;
@@ -478,7 +478,7 @@ mod tests {
     #[cfg(windows)]
     use crate::testing::{is_ping, open_gate, spawn_gated_cmd, wait_until};
 
-    /// 시험이 고른 끝내기 종료 코드 — 무리 통째 끝내기(1)와 다르기만 하면 된다.
+    /// The terminate exit code chosen by the test — it only needs to differ from terminating the whole group (1).
     #[cfg(windows)]
     const EXIT_CODE: u32 = 0x7E57;
 
@@ -491,8 +491,8 @@ mod tests {
         (owner, group)
     }
 
-    /// [`open_gate`] 와 같되 stdin 을 닫지 않고 돌려준다 — `line` 이 stdin 을 다시 읽으면(`set /p`) 돌려준 끝을
-    /// 쥐는 동안 거기서 기다린다.
+    /// Like [`open_gate`] but returns stdin without closing it — if `line` reads stdin again (`set /p`), it waits there for as long as the returned
+    /// end is held.
     #[cfg(windows)]
     fn open_gate_keeping_stdin(child: &mut Child) -> ChildStdin {
         let mut stdin = child.stdin.take().expect("stdin 파이프");
@@ -500,7 +500,7 @@ mod tests {
         stdin
     }
 
-    /// 콘솔 없이 도는 `ping` 하나 — 콘솔 호스트를 끌고 오지 않는다.
+    /// A single `ping` that runs without a console — it does not drag in a console host.
     #[cfg(windows)]
     fn spawn_lone_ping() -> Child {
         use std::os::windows::process::CommandExt;
@@ -522,9 +522,9 @@ mod tests {
             .unwrap_or_else(|| panic!("PID {pid} 가 우리 무리의 멤버가 아니다"))
     }
 
-    /// 붙든 멤버의 부모가 끝났나 — 적힌 부모 번호를 우리 무리에서 붙들 수 없다 · 붙든 부모가 끝났다 · 그 번호를
-    /// 자기보다 늦게 태어난 것이 쥐었다. ★부모가 우리 무리에서 태어났다는 전제다★ — 무리 밖의 산 부모도 「끝남」
-    /// 으로 읽힌다. 못 붙들면(권한 거부 등) 끝남으로 치지 않는다.
+    /// Has the pinned member's parent ended — the recorded parent number cannot be pinned in our group · the pinned parent has ended · a process born later than the member
+    /// holds that number. ★This assumes the parent was born in our group★ — a live parent outside the group also reads as 「끝남」 (ended).
+    /// If it cannot be pinned (access denied etc.), it does not count as ended.
     #[cfg(windows)]
     fn parent_is_dead(group: &GroupRef, member: &PinnedMember) -> bool {
         let child = member.facts();
@@ -541,7 +541,7 @@ mod tests {
         }
     }
 
-    /// 프로세스 하나를 지켜보는 핸들 — 끝나기를 기다리고 종료 코드를 읽는다. 쥐는 동안 그 프로세스 객체가 남는다.
+    /// A handle that watches one process — waits for it to end and reads the exit code. While it is held that process object remains.
     #[cfg(windows)]
     struct Watch(::windows::Win32::Foundation::HANDLE);
 
@@ -551,7 +551,7 @@ mod tests {
             use ::windows::Win32::System::Threading::{
                 OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
             };
-            // SAFETY: 조회 · 대기 권한만 연다.
+            // SAFETY: opens only the query and wait rights.
             let handle = unsafe {
                 OpenProcess(
                     PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
@@ -566,12 +566,12 @@ mod tests {
         fn exit_code_within(&self, limit: Duration) -> Option<u32> {
             use ::windows::Win32::Foundation::WAIT_OBJECT_0;
             use ::windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
-            // SAFETY: 유효 핸들 · 유한 대기.
+            // SAFETY: valid handle · finite wait.
             if unsafe { WaitForSingleObject(self.0, limit.as_millis() as u32) } != WAIT_OBJECT_0 {
                 return None;
             }
             let mut code = 0u32;
-            // SAFETY: 유효 핸들 + 스택 출력.
+            // SAFETY: valid handle plus stack output.
             unsafe { GetExitCodeProcess(self.0, &mut code) }.ok()?;
             Some(code)
         }
@@ -580,14 +580,14 @@ mod tests {
     #[cfg(windows)]
     impl Drop for Watch {
         fn drop(&mut self) {
-            // SAFETY: open 이 연 핸들을 한 번 닫는다.
+            // SAFETY: closes the handle that open opened, exactly once.
             unsafe {
                 let _ = ::windows::Win32::Foundation::CloseHandle(self.0);
             }
         }
     }
 
-    /// 손잡이는 무리를 붙들지 않는다 — 주인을 놓으면 그때부터 사라진 것으로 읽힌다.
+    /// The handle does not hold the group — once the owner is let go it reads as gone from then on.
     #[cfg(windows)]
     #[test]
     fn a_group_is_gone_once_its_job_is_dropped() {
@@ -601,8 +601,8 @@ mod tests {
             .is_none());
     }
 
-    /// ② 무리 안 cmd 의 자식 ping 을 끝내기 권한으로 붙들어 끝낸다 — 붙든 핸들로 끝남을 기다리고, 종료 코드로 누가
-    /// 끝냈는지 남는다. 끝난 뒤에도 쥐고 있어 그 번호는 명단 확인 동안 재사용되지 않는다.
+    /// ② Pin the child ping of cmd in the group with the terminate right and end it — wait for the ending on the pinned handle, and the exit code leaves who
+    /// ended it. It is still held after ending, so that number is not reused during the list check.
     #[cfg(windows)]
     #[test]
     fn a_pinned_member_is_terminated_with_the_given_code() {
@@ -643,7 +643,7 @@ mod tests {
         let _ = root.wait();
     }
 
-    /// ③ 다른 무리의 산 프로세스는 붙들지 않는다(조사 §4 사고의 회귀망).
+    /// ③ A live process of another group is not pinned (regression net for the incident in survey §4).
     #[cfg(windows)]
     #[test]
     fn a_process_in_another_job_is_not_ours() {
@@ -667,8 +667,8 @@ mod tests {
         let _ = stranger.wait();
     }
 
-    /// ③ 중첩 변형 — 우리 무리가 부모 Job P 아래로 중첩돼도 P 에만 든 남은 우리 것이 아니다. Job 인자로 NULL 을
-    /// 넘기면(「아무 Job 에나 들었나」) 여기서 빨개진다.
+    /// ③ Nested variant — even if our group is nested under a parent Job P, a process that sits only in P is someone else's, not ours. If NULL is passed
+    /// as the Job argument (「아무 Job 에나 들었나」 (is it in any Job at all)), this goes red here.
     #[cfg(windows)]
     #[test]
     fn a_process_only_in_the_enclosing_job_is_not_ours() {
@@ -703,8 +703,8 @@ mod tests {
         }
     }
 
-    /// ⑦ 손잡이를 거친 포트 — `start` 의 오류는 그대로 오고(붙지 않음), 받은 포트에서 붙일 때 이미 든 멤버가
-    /// `Joined` 로 다시 알려진다. 붙이기 · 떼기의 OS 동작 자체는 `windows` 조각의 ⑦ 이 잰다.
+    /// ⑦ A port obtained through the handle — `start`'s error comes back as is (not attached), and when attaching from the received port the members already inside are
+    /// announced again as `Joined`. The OS behavior of attaching and detaching itself is measured by ⑦ in the `windows` part.
     #[cfg(windows)]
     #[test]
     fn a_port_through_the_group_reports_the_members_already_in() {
@@ -743,21 +743,21 @@ mod tests {
         let _ = ping.wait();
     }
 
-    /// ① 끝났지만 핸들이 붙든(좀비) 부모 — 무리 명단에서 빠지고 명단은 완전하다(좀비가 멤버 수에만 남으면 명단이
-    /// 영영 불완전해 정리가 한 번도 돌지 못한다). 붙든 자식에서 보면 그 부모는 끝났다 — 좀비가 산 것으로 읽히면
-    /// 잔여물을 놓친다.
+    /// ① A parent that has ended but whose handle holds it (zombie) — it drops out of the group list and the list is complete (if a zombie remained only in the member count, the list would
+    /// stay incomplete forever and cleanup would never run once). From the pinned child's view that parent has ended — if the zombie is read as alive,
+    /// leftovers are missed.
     #[cfg(windows)]
     #[test]
     fn a_dead_parent_held_open_is_off_the_list_and_reads_dead() {
         let (job, group) = new_group();
-        // C(ping)의 출력을 받는 파일 — C 가 첫 줄을 쓴 뒤에야 P 를 끝낸다. 기동을 마치지 않은 C 는 P 가 끝날 때
-        // 함께 죽어(종료 코드 0xC000010A) 명단이 빈다(병렬 부하에서 11/60 · 끝낼 때 C 나이 1~4 ms 인 판 · 실측).
-        // 첫 줄은 제 코드를 돌기 시작한 ping 만 쓴다.
+        // The file that receives the output of C (ping) — P is ended only after C writes its first line. A C that has not finished starting dies
+        // together when P ends (exit code 0xC000010A) and the list comes up empty (11/60 under parallel load · in runs where C's age at ending was 1 to 4 ms · measured).
+        // The first line is written only by a ping that has started running its own code.
         let ready =
             std::env::temp_dir().join(format!("t40-dead-parent-{}.txt", std::process::id()));
         let _ = std::fs::remove_file(&ready);
-        // P 는 ping 을 띄운 뒤 둘째 `set /p` 에서 stdin 을 기다리며 산다 — 끝은 아래 kill 한 곳이다. 둘째 `set /p`
-        // 가 없으면 `cmd /c` 가 `start /b` 직후 끝나 P 가 탐침 전에 이미 죽어 있다(실측 5/5).
+        // P launches the ping and then lives waiting on stdin at the second `set /p` — it ends at the single kill below. Without the second `set /p`
+        // `cmd /c` ends right after `start /b` and P is already dead before the probe (measured 5/5).
         let mut parent = spawn_gated_cmd(
             &format!(
                 "start \"\" /b ping -n 30 127.0.0.1 >\"{}\" & set /p _=",
@@ -793,10 +793,10 @@ mod tests {
         let _ = parent.kill();
         let _ = parent.wait();
         drop(gate);
-        // `parent` 를 아직 쥐고 있다 — 그 핸들이 P 의 프로세스 객체를 붙든다.
+        // `parent` is still held — that handle pins P's process object.
 
-        // 대기가 돌아온 직후에는 P 가 아직 명단에 있을 수 있다(`member_pids` 문서) — 빠지기만 기다린다. 완전함은
-        // 기다리지 않는다: 부를 때마다 서야 한다.
+        // Right after the wait returns, P may still be in the list (`member_pids` docs) — it waits only for it to drop out. It does not wait for
+        // completeness: that must hold on every call.
         let members = wait_until(
             "명단에서 빠진 P(끝났지만 핸들이 붙든 것)",
             || {
@@ -820,8 +820,8 @@ mod tests {
         let _ = std::fs::remove_file(&ready);
     }
 
-    /// ⑤ 부모가 끝난 MSYS fork 자식이 우리 무리 멤버로 남는지 · 부모 끝남으로 읽히는지 · 끝나는지.
-    /// ★무리 상속만 잰다 — 멈춤은 재현하지 않는다★. `PATH` 의 `bash` 는 WSL 일 수 있어 경로를 박는다.
+    /// ⑤ Whether an MSYS fork child whose parent has ended stays a member of our group, whether it reads as parent-ended, whether it ends.
+    /// ★It measures group inheritance only — it does not reproduce the hang★. The `bash` on `PATH` may be WSL, so the path is hard-coded.
     #[cfg(windows)]
     #[test]
     #[ignore = "Git Bash(C:\\Program Files\\Git\\usr\\bin\\bash.exe) 가 있어야 한다"]
@@ -833,8 +833,8 @@ mod tests {
             "{BASH} 가 없다 — PATH 의 bash 로 대신하지 않는다"
         );
         let (job, group) = new_group();
-        // `sleep` 을 절대 경로로 부른다 — Git 런처(`Git\bin\bash.exe`)를 거치지 않은 `usr\bin\bash.exe` 는 `PATH` 에
-        // `/usr/bin` 이 없어 맨 `sleep` 이 127(없는 명령)로 끝난다(실측).
+        // Call `sleep` by absolute path — `usr\bin\bash.exe`, started without the Git launcher (`Git\bin\bash.exe`), has no `/usr/bin` in `PATH`,
+        // so a bare `sleep` ends with 127 (command not found) (measured).
         let mut bash = Command::new(BASH)
             .args(["-c", "read _; (/usr/bin/sleep 30 &)"])
             .stdin(Stdio::piped())

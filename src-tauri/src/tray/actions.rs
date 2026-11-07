@@ -1,10 +1,10 @@
-//! tray actions — 트레이 핸들러와 Tauri command 가 **공유하는** 부수효과 함수(불순: Tauri/discovery 의존).
+//! tray actions — side-effect functions that the tray handler and the Tauri command **share** (impure: depends on Tauri/discovery).
 //!
-//! ## 왜 이 모듈이 따로 있나 (CLAUDE.md 「LLM-우선 제어」 — load-bearing)
-//! 네이티브 트레이 팝업은 WebView DOM 이 아니라 cdp 가 직접 클릭 못 한다. 그래서 트레이 메뉴 클릭과
-//! LLM/cdp 의 invoke 가 **같은 내부 함수**(여기)를 부르게 해 두 조작 주체가 같은 동작을 공유한다.
-//! 트레이 핸들러(mod.rs on_menu_event)도, command(commands/tray.rs)도 전부 이 함수들만 호출 —
-//! 동작 로직 중복 금지. core.rs(순수 판정)와 분리: 여기는 실제 창/아이콘/데몬을 만진다(불순).
+//! ## Why this module is separate (CLAUDE.md 「LLM-우선 제어」 — load-bearing)
+//! The native tray popup is not a WebView DOM, so cdp cannot click it directly. So a tray menu click and
+//! an LLM/cdp invoke are made to call the **same internal function** (here), so the two operating parties share the same behavior.
+//! Both the tray handler (mod.rs on_menu_event) and the command (commands/tray.rs) call only these functions —
+//! no duplicating behavior logic. Separate from core.rs (pure decisions): this one touches real windows/icons/the daemon (impure).
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -25,46 +25,46 @@ use crate::layout::{LayoutState, MAIN_WINDOW_LABEL};
 use crate::spare::pool::TrayShow;
 use crate::spare::SpareState;
 
-// 트레이 아이콘 id(빌더에 부여, tray_by_id 로 재조회). 단일 트레이라 고정 문자열.
+// The tray icon id (given to the builder, looked up again with tray_by_id). A single tray, so a fixed string.
 pub const TRAY_ID: &str = "engram-main-tray";
 
-// 데몬 생사 push 의 단일 소유 상태(ADR-0028 단일 채널). 모든 소스(옵저버 probe·켜기·끄기)가
-// [`publish_daemon_liveness`] 로 들어와 여기 `last` 와 비교 → 변화 시에만 트레이+emit.
+// The single-owner state of the daemon liveness push (ADR-0028 single channel). Every source (observer probe · turn-on · turn-off) enters through
+// [`publish_daemon_liveness`] and is compared with `last` here → tray + emit only on change.
 //
-// ★왜 manage 상태로 일원화하나(M-1 — load-bearing)★: 기존엔 옵저버(주기 probe)와 끄기 즉시확정
-// (StopOutcome::DaemonClosed → 회색 직접 set)이 **상태를 공유하지 않아** race 가 있었다 — 끄기 클릭
-// 후 데몬이 아직 죽는 중인 death-window(연결 닫힘 ~ 프로세스 exit 사이)에 옵저버가 그 창에서
-// alive=true 를 probe 해 방금 회색 박은 아이콘을 컬러로 되돌렸다(S13 race 재발). 이제 모든 생사
-// 소스가 이 단일 진입점으로 수렴하고, 끄기는 [`force_daemon_down`] 으로 억제창을 세팅해 그 race 를 닫는다.
+// ★Why unify into manage state (M-1 — load-bearing)★: previously the observer (periodic probe) and the turn-off immediate confirmation
+// (StopOutcome::DaemonClosed → set gray directly) **did not share state**, so there was a race — after clicking turn-off,
+// in the death-window while the daemon was still dying (between connection closed and process exit), the observer probed alive=true
+// in that window and turned the icon just set gray back to color (S13 race recurred). Now all liveness
+// sources converge on this single entry point, and turn-off sets a suppression window with [`force_daemon_down`] to close that race.
 #[derive(Default)]
 pub struct LivenessState {
-    // 마지막으로 push 한 alive 값(None=아직 한 번도 push 안 함). 변화 판정 기준.
+    // The alive value pushed last (None = never pushed yet). The basis for change detection.
     last: Mutex<Option<bool>>,
-    // None=억제 없음. Some(t)=now<t 동안 alive=true probe 를 무시.
+    // None = no suppression. Some(t) = ignore alive=true probes while now<t.
     suppress_alive_until: Mutex<Option<Instant>>,
 }
 
-// 끄기 직후 death-window 억제 시간. 데몬이 연결을 닫고 실제 exit 하기까지의 여유 — discovery 의
-// stop 폴링 timeout 과 같은 5초로 잡아 그 안에 probe 가 거짓 alive 를 보고해도 무시한다.
+// The death-window suppression time right after turn-off. The margin until the daemon closes the connection and actually exits — set to the same 5 seconds as discovery's
+// stop polling timeout, so that even if a probe reports a false alive within it, it is ignored.
 const STOP_GRACE: Duration = Duration::from_secs(5);
 
-// "부팅 시 자동 시작" CheckMenuItem 핸들 보관(ADR-0027 §55).
+// Keeps the handle of the "부팅 시 자동 시작" (start automatically at boot) CheckMenuItem (ADR-0027 §55).
 //
-// ★왜 핸들을 manage 로 들고 있나(load-bearing)★: 토글 후 체크 표시를 set_checked 로 즉시 갱신해야
-// 하는데, CheckMenuItem 핸들이 없으면 갱신 대상을 못 잡는다. tray.menu() → id 재조회는 MenuItem 의
-// downcast(CheckMenuItem)가 번거로워, build_tray 가 만든 핸들을 그대로 state 로 보관해 직접 set_checked 한다.
+// ★Why hold the handle in manage (load-bearing)★: after a toggle the check mark must be updated at once with set_checked, but
+// without the CheckMenuItem handle there is no update target. Re-looking it up by tray.menu() → id needs a cumbersome MenuItem
+// downcast (CheckMenuItem), so the handle build_tray made is kept as state as is and set_checked is called on it directly.
 pub struct AutostartCheck(pub CheckMenuItem<Wry>);
 
-// 메인과 팝아웃 창을 전부 되살린다 — 숨은 창은 보이고 최소화된 창은 펼친다. 이름에 `main` 이 남은 것은 같은 이름의
-// command 가 LLM 제어 표면이라서다 — 이름을 바꾸면 표면이 바뀐다. 갈래는 둘이다(TRD S26-window-chrome §6-2 — 누가 어느
-// 갈래인가는 `Activation` 문서):
-// - 누름(`TrayClick`) — 이미 떠 있던 창도 다른 앱 위로 올리고 포커스는 마지막에 메인이 받아 메인이 맨 위, 팝아웃이 그
-//   바로 아래에 온다. 첫 화면을 기다리던 창도 그 기다림을 거두고 보인다(사람이 누른 보이기다 — §2-4 불변식 5).
-// - 포커스를 빼앗지 않기(`NoSteal`) — [`show_main_ui_no_steal`].
-// ★`NoSteal` 은 메인 스레드에서만 부른다★ — 그 갈래가 날 Win32 올리기(`raise_without_activation` 안의 `SetWindowPos`)를
-//   부른다. 버스 · invoke 는 `commands::window_ctl::TauriWindowControl` 의 메인 스레드 일로 들어온다.
-// 창 하나가 실패해도(목록을 뜬 뒤 닫힌 팝아웃 등) 나머지와 메인은 계속 처리한다 — `?` 로 끊지 말 것.
-// 예열 창 풀의 창은 두 갈래 다 띄우지 않는다 — 그사이 확정으로 풀을 떠난 창만 보통 창처럼 띄운다([`show_ui_windows`]).
+// Bring back all of main and the popout windows — hidden windows are shown and minimized windows are unminimized. `main` remains in the name because the command of the same name
+// is the LLM control surface — changing the name changes the surface. There are two branches (TRD S26-window-chrome §6-2 — which is which
+// branch is in the `Activation` docs):
+// - Click (`TrayClick`) — even windows that were already up are raised above other apps, and focus goes last to main, so main is on top and the popouts come right
+//   below it. A window that was waiting for first paint also has that wait withdrawn and is shown (it is a show a person pressed — §2-4 invariant 5).
+// - Not stealing focus (`NoSteal`) — [`show_main_ui_no_steal`].
+// ★`NoSteal` is called only from the main thread★ — that branch calls a raw Win32 raise (`SetWindowPos` inside `raise_without_activation`).
+//   Bus · invoke come in as main-thread work of `commands::window_ctl::TauriWindowControl`.
+// Even if one window fails (a popout closed after the list was taken, etc.), the rest and main keep being processed — do not cut it off with `?`.
+// Windows of the prewarmed-window pool are not shown in either branch — only a window that left the pool by adoption in the meantime is shown like a normal window ([`show_ui_windows`]).
 // ADR-0229 · ADR-0299 · ADR-0302
 pub(crate) fn show_main_ui(app: &AppHandle, how: Activation) {
     match how {
@@ -73,15 +73,15 @@ pub(crate) fn show_main_ui(app: &AppHandle, how: Activation) {
     }
 }
 
-// ★창마다 show()→unminimize()→바람 입히기→set_focus() 순서가 load-bearing★:
-// - show → unminimize → set_focus(Windows focus-stealing) — 이 순서가 아니면 hidden/minimized 에서 작업표시줄 깜빡임만
-//   나고 실제로 안 떠오를 수 있다(TRD §4).
-// - 바람 입히기는 펴기 뒤다 — 앞에 두면 최소화된 창의 원래 크기 바람을 잃는다(`apply_deferred_maximize` 머리 ·
+// ★The order show()→unminimize()→apply the desire→set_focus() per window is load-bearing★:
+// - show → unminimize → set_focus (Windows focus-stealing) — in any other order, from hidden/minimized you may get only a taskbar flash
+//   and the window may not actually come up (TRD §4).
+// - Applying the desire comes after unminimize — put before it, a minimized window loses its original-size desire (`apply_deferred_maximize` header ·
 //   TRD S26-window-chrome §6-2).
-// ★창 사이 순서(메인이 마지막)도 load-bearing★: 넷 다 창을 활성화하므로(tao 0.35 Windows = `SW_SHOW` ·
-//   `SW_RESTORE` · 바람 입히기의 `SW_MAXIMIZE`/`SW_RESTORE` · `SetForegroundWindow`) 메인 뒤에 무엇이든 하면 그 창이
-//   포커스를 가져간다. 순서는
-//   [`core::ui_windows`] 가 정한다.
+// ★The order between windows (main last) is also load-bearing★: all four activate the window (tao 0.35 Windows = `SW_SHOW` ·
+//   `SW_RESTORE` · `SW_MAXIMIZE`/`SW_RESTORE` of applying the desire · `SetForegroundWindow`), so if anything is done after main, that window takes
+//   focus. The order is decided by
+//   [`core::ui_windows`].
 // ADR-0229 · ADR-0299
 fn show_main_ui_on_click(app: &AppHandle) {
     let windows = app.webview_windows();
@@ -89,8 +89,8 @@ fn show_main_ui_on_click(app: &AppHandle) {
         let Some(w) = windows.get(label) else {
             return false;
         };
-        // 첫 화면을 기다리던 창이면 그 올림을 거둔다 — 이 보이기가 그 기다림을 끝낸다(숨기기와 같은 길). 남기면
-        //   뒤에 오는 알림 · 시한이 보인 창을 이 순서 밖에서 한 번 더 보인다(`crate::first_paint`).
+        // If the window was waiting for first paint, withdraw that raise — this show ends that wait (the same path as hide). If left,
+        //   a notification · time limit that comes later would show the already-shown window once more outside this order (`crate::first_paint`).
         crate::first_paint::cancel_hold(app, label);
         let _ = w.show();
         let _ = w.unminimize();
@@ -109,13 +109,13 @@ fn show_main_ui_on_click(app: &AppHandle) {
     });
 }
 
-/// 포커스를 빼앗지 않는 모든 창 보이기(`Activation::NoSteal` — TRD S26-window-chrome §6-2) — 누름 갈래와 같은 창 차례
-/// (예열 창 건너뛰기 · 풀을 떠난 예열 창 먼저 · main 이 마지막)로 창마다 `window_ctl::show_one_no_steal` 이다: 첫 화면
-/// 대기 창은 건너뛰고(§2-4 불변식 5 — 그 창은 첫 화면 문이 곧 보인다), 활성화 없이 맨 위로 올려 보이고 · 펴고 · 적어 둔
-/// 최대화 바람을 입힌다. 포커스는 우리 프로세스가 이미 전경을 쥐었을 때 main 에만 준다.
+/// Show all windows without stealing focus (`Activation::NoSteal` — TRD S26-window-chrome §6-2) — in the same window order as the click branch
+/// (skip prewarmed windows · prewarmed windows that left the pool first · main last), it is `window_ctl::show_one_no_steal` per window: windows waiting
+/// for first paint are skipped (§2-4 invariant 5 — that window's first-paint gate will show it soon), and it raises to the top without activation, shows · unminimizes · applies the recorded
+/// maximize desire. Focus is given only to main, and only when our process already holds the foreground.
 ///
-/// ★메인 스레드에서 부른다★ — `ops` 가 날 Win32 올리기를 부르고, 창마다의 대기 판정 · 보이기가 첫 화면 보이기와
-/// 끼어들지 않아야 한다(§5-2). 버스 · invoke 는 `commands::window_ctl::TauriWindowControl` 의 메인 스레드 일로 부른다.
+/// ★Call it from the main thread★ — `ops` calls a raw Win32 raise, and the per-window wait decision · show must not
+/// interleave with the first-paint show (§5-2). Bus · invoke call it as main-thread work of `commands::window_ctl::TauriWindowControl`.
 // ADR-0299
 pub(crate) fn show_main_ui_no_steal(app: &AppHandle, ops: &dyn WindowOps) {
     let windows = app.webview_windows();
@@ -147,13 +147,13 @@ fn tray_show(app: &AppHandle, label: &str) -> TrayShow {
         .map_or(TrayShow::Untouched, |spare| spare.on_tray_show(label))
 }
 
-// 트레이 보이기의 차례 — [`for_each_ui_window`] 를 보이기로 돌리고, 예열 창 술어(`spare`)로 건너뛴 label 마다 풀에
-// 묻는다(`tray_show` — 운영 = `SpareState::on_tray_show`). 술어 판정 뒤 확정으로 풀을 떠난 창(`Adopted`)만 다른 창과
-// 같은 `show` 로 띄우고, 맡긴 창(`Rehold` — 풀이 올림을 다시 걸어 확정 ③ 이 보인다)과 맡기지 않은 예열 창(`Untouched`)은
-// 띄우지 않는다 — 띄우면 내용 없는 틀이 드러난다.
-// ★`Adopted` 는 차례를 정한 창들보다 먼저 띄운다★ — 뒤에 띄우면 그 포커스가 main 의 마지막 포커스를 앗는다.
-// ★`tray_show` 는 풀 락을 놓고 돌아와야 한다★ — 이어서 사용량 관심이 레이아웃 락을 잡고(차례 = 레이아웃 → 풀) 창을
-//   부른다(풀 락을 쥔 채 창 호출 금지 — `SpareState`).
+// The order of the tray show — run [`for_each_ui_window`] as a show, and for each label skipped by the prewarmed-window predicate (`spare`), ask the pool
+// (`tray_show` — production = `SpareState::on_tray_show`). Only a window that left the pool by adoption after the predicate decision (`Adopted`) is shown with the same `show` as other windows,
+// and a handed-over window (`Rehold` — the pool re-applies the raise so adoption ③ shows it) and a prewarmed window not handed over (`Untouched`) are
+// not shown — showing them would reveal a frame with no content.
+// ★`Adopted` is shown before the windows whose order was decided★ — if shown after, its focus steals main's last focus.
+// ★`tray_show` must return after releasing the pool lock★ — right after, usage interest takes the layout lock (order = layout → pool) and calls the
+//   window (no window call while holding the pool lock — `SpareState`).
 // (TRD S21-slot-docking §3-9 「숨어 있기」)
 // ADR-0299
 fn show_ui_windows<'a>(
@@ -180,8 +180,8 @@ fn show_ui_windows<'a>(
     );
 }
 
-// 메인과 팝아웃 창을 전부 숨긴다(파괴 아님 — WebView 상주, [`show_main_ui`] 로 복귀). 메인 X 도 여기로
-// 온다. 대상은 [`show_main_ui`] 와 같다 — 숨긴 창을 보이기가 못 되살리면 되찾을 길이 없다.
+// Hide all of main and the popout windows (not destruction — the WebView stays resident, and [`show_main_ui`] brings it back). Main's X also
+// comes here. The targets are the same as [`show_main_ui`] — if show cannot bring a hidden window back, there is no way to get it back.
 // ADR-0229 · ADR-0299
 pub fn hide_main_ui(app: &AppHandle) {
     let windows = app.webview_windows();
@@ -195,8 +195,8 @@ pub fn hide_main_ui(app: &AppHandle) {
                 let Some(w) = windows.get(label) else {
                     return false;
                 };
-                // 첫 화면을 기다리던 창이면 그 올림을 거둔다 — 숨긴 뒤 오는 알림 · 시한이 그 창을 다시 보인다
-                //   (`crate::first_paint`). 숨기기가 실패해도 거둔다 — 숨기라고 청한 창이다.
+                // If the window was waiting for first paint, withdraw that raise — a notification · time limit that comes after hiding would show that window again
+                //   (`crate::first_paint`). It is withdrawn even if hiding fails — it is a window that was asked to hide.
                 crate::first_paint::cancel_hold(app, label);
                 match w.hide() {
                     Ok(()) => true,
@@ -214,11 +214,11 @@ pub fn hide_main_ui(app: &AppHandle) {
     });
 }
 
-// 트레이 숨기기의 차례 — [`for_each_ui_window`] 를 숨기기로 돌린 뒤 팝아웃 label 전부의 올림을 예열 창 술어와 상관없이
-// 거둔다(`cancel_hold` — 올림이 없는 label 은 무동작). 그 차례는 술어로 건너뛴 창(맡긴 예열 창 포함)에 `hide` 를 부르지
-// 않아, 맡길 때 건 올림이 남으면 확정 ③ 이 그 창을 숨긴 UI 위로 보인다.
-// ★건너뛴 것만 고르려고 풀을 다시 묻지 말 것★ — 확정 ① 과 경주한다([`for_each_ui_window`]). 차례 뒤에 두어 차례를 도는
-//   동안 맡겨진 창의 올림도 거둔다(TRD S21-slot-docking §3-9 「숨어 있기」).
+// The order of the tray hide — after running [`for_each_ui_window`] as a hide, withdraw the raise of all popout labels regardless of the prewarmed-window
+// predicate (`cancel_hold` — a no-op for a label with no raise). That order does not call `hide` on windows skipped by the predicate (including a handed-over prewarmed window), so
+// if the raise set at hand-over stays, adoption ③ would show that window over the hidden UI.
+// ★Do not ask the pool again just to pick out the skipped ones★ — it races with adoption ① ([`for_each_ui_window`]). Put it after the order, so the raise of a window handed over
+//   while the order was running is also withdrawn (TRD S21-slot-docking §3-9 「숨어 있기」).
 // ADR-0299
 fn hide_ui_windows<'a>(
     labels: &[&'a str],
@@ -233,14 +233,14 @@ fn hide_ui_windows<'a>(
     }
 }
 
-/// 트레이 보이기·숨기기가 창 하나의 보임을 바꿀 때 사용량 관심에 알리는 자리(ADR-0012 seam — 운영 =
-/// [`LayoutUsageVisibility`], 시험 = 기록형). 숨긴 창의 사용량 슬롯은 관심에서 빠진다(TRD S21 usage-limit-slot
+/// The spot that tells usage interest when tray show·hide changes one window's visibility (ADR-0012 seam — production =
+/// [`LayoutUsageVisibility`], test = recording type). The usage slot of a hidden window drops out of interest (TRD S21 usage-limit-slot
 /// §1-7 「숨김」).
 pub(crate) trait UsageVisibility {
     fn set_visible(&self, label: &str, visible: bool);
 }
 
-/// 운영 구현 — 창마다 ViewManager 락을 **짧게** 잡고 그 안에서 사용량 관심만 다시 계산한다.
+/// Production implementation — per window, takes the ViewManager lock **briefly** and recomputes only usage interest inside it.
 pub(crate) struct LayoutUsageVisibility<'a> {
     pub state: &'a LayoutState,
     pub client: &'a DaemonClient,
@@ -260,7 +260,7 @@ impl UsageVisibility for LayoutUsageVisibility<'_> {
     }
 }
 
-// 클라이언트 생성이 실패한 조립(`lib.rs` setup — 앱은 계속 뜬다)에는 사용량 관심이 없다 — 창만 다룬다.
+// An assembly where client creation failed (`lib.rs` setup — the app keeps coming up) has no usage interest — it handles only windows.
 struct NoUsageVisibility;
 
 impl UsageVisibility for NoUsageVisibility {
@@ -280,17 +280,17 @@ pub(crate) fn with_usage_visibility(app: &AppHandle, run: impl FnOnce(&dyn Usage
     }
 }
 
-// 트레이가 다룰 창마다([`core::ui_windows`] 순서) OS 창을 다루고(`os` — `true` = 그 창에 적용됐다) 사용량 관심에
-// 보임을 알린다. `spare` 인 창(예비 창 풀의 창 — TRD S21-slot-docking §3-9)은 다루지 않는다 — 그 창은 숨긴 채
-// 기다리므로 보이기가 그 창을 드러낸다. 그렇게 건너뛴 label 은 `skipped` 가 받는다 — 거른 뒤 · `os` 첫 호출 전에
-// 정확히 한 번(건너뛴 것이 없어도). ★`spare` 는 팝아웃 label 마다 한 번만 묻고 그 판정을 `skipped` 에 넘긴다★ — 부르는
-// 쪽이 풀을 다시 물으면 그 물음이 확정 ① 과 경주해 어느 쪽에서도 다루지 않는 label 이 생긴다.
-// ★차례는 방향마다 다르다 — 틀려도 안전한 쪽으로★:
-// - 보이기 = 관심 먼저 · OS 나중. 보이기가 실패해도 남는 비용은 안 보이는 창 몫의 조회뿐이다.
-// - 숨기기 = OS 먼저 · 숨긴 창만 관심에서 뺀다. 실패한 숨기기를 빼면 **보이는** 창의 값이 멎는다.
-// ★`os` 는 락 밖에서 불린다★ — 운영 구현의 ViewManager 락은 `set_visible` 한 번 안에서 잡혔다 풀린다. 이 함수는
-//   메인 스레드 밖에서도 돌고(`state::placement::TauriRestoreWindows::set_shown`), OS 창 호출을 그 락 안에 두면 창 호스트 포트와 같은 교착
-//   위험이다(`layout::apply` 의 `WindowHost` doc).
+// For each window the tray will handle ([`core::ui_windows`] order), handle the OS window (`os` — `true` = applied to that window) and tell usage interest
+// the visibility. A window that is `spare` (a window of the spare-window pool — TRD S21-slot-docking §3-9) is not handled — that window waits
+// hidden, so the show reveals it. A label skipped that way is received by `skipped` — exactly once, after filtering · before the first `os` call
+// (even if nothing was skipped). ★`spare` is asked only once per popout label and that decision is passed to `skipped`★ — if the caller
+// asks the pool again, that question races with adoption ① and a label handled by neither side can arise.
+// ★The order differs by direction — toward the side that is safe even if wrong★:
+// - Show = interest first · OS after. Even if the show fails, the only remaining cost is a lookup for a window that is not visible.
+// - Hide = OS first · only hidden windows are removed from interest. If a failed hide were removed, the value of a **visible** window would stall.
+// ★`os` is called outside the lock★ — the production implementation's ViewManager lock is taken and released within a single `set_visible`. This function
+//   also runs off the main thread (`state::placement::TauriRestoreWindows::set_shown`), and putting OS window calls inside that lock carries the same
+//   deadlock risk as the window-host port (`WindowHost` doc of `layout::apply`).
 // ADR-0295 · ADR-0299
 pub(crate) fn for_each_ui_window<'a>(
     labels: impl IntoIterator<Item = &'a str>,
@@ -314,15 +314,15 @@ pub(crate) fn for_each_ui_window<'a>(
     }
 }
 
-// 앱 전체 종료. **best-effort 데몬 graceful stop 후 exit**(ADR-0026).
+// Quit the whole app. **Exit after a best-effort daemon graceful stop** (ADR-0026).
 //
-// ★best-effort 한정(load-bearing)★: 여기선 데몬을 graceful 로 한 번 찔러보고 결과를 무시한 뒤
-// 즉시 exit 한다. 정밀한 C4 graceful 순서(ack 대기·taskkill 폴백·아이콘 동기화)는 다음 단계 —
-// 여기서 데몬 종료를 기다리면(blocking) 종료가 지연되고, 데몬은 detached 라 우리가 안 죽여도
-// 독립 생존한다(ADR-0024). send_stop 은 수초 blocking 가능 → exit 전에 짧게만 시도하도록 별도
-// 스레드에서 발사하지 않고 동기로 부르되, 실패/무응답이어도 exit 로 진행한다.
+// ★Best-effort only (load-bearing)★: here the daemon is poked once gracefully, the result is ignored, and
+// exit happens at once. The precise C4 graceful order (ack wait · taskkill fallback · icon sync) is a later step —
+// waiting for the daemon to end here (blocking) would delay the exit, and the daemon is detached so it survives
+// independently even if we do not kill it (ADR-0024). send_stop may block for seconds → to try only briefly before exit, it is not fired
+// from a separate thread but called synchronously, and even on failure/no response it proceeds to exit.
 pub fn quit_app(app: &AppHandle) {
-    // 데몬 graceful 일방 발사(결과 무시).
+    // One-way daemon graceful fire (result ignored).
     let data_dir = crate::discovery::default_data_dir();
     match crate::daemon_client::stop::send_stop(&data_dir) {
         Ok(outcome) => tracing::info!(
@@ -334,49 +334,49 @@ pub fn quit_app(app: &AppHandle) {
     app.exit(0);
 }
 
-// 데몬 alive 를 probe 해 단일 publish 진입점([`publish_daemon_liveness`])으로 흘린다.
+// Probe daemon alive and feed it into the single publish entry point ([`publish_daemon_liveness`]).
 //
-// ★publish 경유로 일원화(ADR-0028 단일 채널 — load-bearing)★: 예전엔 여기서 직접 set_icon 했으나,
-// 이제 probe 결과를 publish 에 넘겨 **중복차단(변화 시에만 set)·emit·억제창 판정**을 한 곳에서
-// 처리한다. 그래야 옵저버·켜기·끄기 모든 생사 소스가 같은 게이트(LivenessState)를 거쳐 M-1 race 와
-// emit 비대칭(m-2)이 사라진다.
+// ★Unified through publish (ADR-0028 single channel — load-bearing)★: it used to call set_icon directly here, but
+// now it passes the probe result to publish, which handles **duplicate blocking (set only on change) · emit · suppression-window decision** in one place.
+// That way all liveness sources — observer · turn-on · turn-off — pass through the same gate (LivenessState), and the M-1 race and
+// the emit asymmetry (m-2) are gone.
 //
-// daemon_status 는 daemon.json + PID liveness 판정(빠름, 비-blocking 수준). 외부/크래시 죽음
-// 주기감지는 옵저버가 담당(spawn_daemon_observer) — 여기는 액션 직후·setup 초기 갱신용.
+// daemon_status is a daemon.json + PID liveness decision (fast, non-blocking level). Periodic detection of external/crash death
+// is the observer's job (spawn_daemon_observer) — this is for updates right after an action · at the initial setup.
 pub fn refresh_tray_icon(app: &AppHandle) {
     let data_dir = crate::discovery::default_data_dir();
     let alive = crate::discovery::daemon_status(&data_dir).alive;
     publish_daemon_liveness(app, alive);
 }
 
-// 데몬 생사 단일 publish — 변화 시에만 트레이 set_icon + emit("daemon-status-changed").
+// Daemon liveness single publish — only on change, tray set_icon + emit("daemon-status-changed").
 //
-// ★억제창 중 alive=true 는 무시(M-1 race 차단 — load-bearing)★: 억제창(suppress_alive_until) 안에서는
-// alive=true 를 버린다. alive=false 는 항상 통과한다(끄기 확정 — 억제 무관).
+// ★During the suppression window, alive=true is ignored (blocks the M-1 race — load-bearing)★: inside the suppression window (suppress_alive_until),
+// alive=true is discarded. alive=false always passes through (turn-off confirmation — regardless of suppression).
 //
-// ★락 보유 중 set_icon/emit 금지(ADR-0006 락 순서)★: 변화 판정·억제 판정만 락 안에서 하고, 락을
-// 드롭한 뒤에 set_icon/emit(외부 호출·메인 스레드 post)을 부른다. set_icon 자체는
-// set_tray_icon_state 가 run_on_main_thread 로 메인 스레드 보장.
+// ★No set_icon/emit while holding the lock (ADR-0006 lock order)★: only the change decision · suppression decision are done inside the lock, and after
+// dropping the lock set_icon/emit (external calls · main-thread post) are called. set_icon itself is guaranteed on the main thread by
+// set_tray_icon_state with run_on_main_thread.
 pub fn publish_daemon_liveness(app: &AppHandle, observed_alive: bool) {
     let st = app.state::<LivenessState>();
 
-    // 억제창 판정: alive=true 보고가 death-window 안이면 거짓일 수 있어 무시(락 짧게 잡고 드롭).
+    // Suppression-window decision: an alive=true report inside the death-window may be false, so ignore it (take the lock briefly and drop).
     if observed_alive {
         if let Some(until) = *st.suppress_alive_until.lock().unwrap() {
             if Instant::now() < until {
-                return; // death-window — 거짓 alive 무시
+                return; // death-window — ignore false alive
             }
         }
     }
 
-    // 변화 판정(락 짧게) → 드롭 → 부수효과. 변화 없으면 set_icon/emit 둘 다 생략.
+    // Change decision (lock briefly) → drop → side effects. If no change, skip both set_icon/emit.
     {
         let mut last = st.last.lock().unwrap();
         if *last == Some(observed_alive) {
             return;
         }
         *last = Some(observed_alive);
-    } // ← 여기서 last 락 드롭. 아래 부수효과는 락 미보유 상태에서 실행.
+    } // ← the last lock is dropped here. The side effects below run without holding the lock.
 
     set_tray_icon_state(app, core::icon_state_for(observed_alive));
     if let Err(e) = app.emit("daemon-status-changed", observed_alive) {
@@ -385,32 +385,32 @@ pub fn publish_daemon_liveness(app: &AppHandle, observed_alive: bool) {
     tracing::debug!(alive = observed_alive, "[tray] 데몬 생사 push");
 }
 
-// 끄기 확정(StopOutcome::DaemonClosed) — 회색을 강제하고 death-window 억제창을 설정한다.
+// Turn-off confirmation (StopOutcome::DaemonClosed) — force gray and set the death-window suppression window.
 //
-// ★억제창 먼저, publish(false) 나중(M-1 — load-bearing)★: suppress_alive_until 을 먼저 세팅한 뒤
-// publish(false) 로 회색을 확정한다. false 는 억제 판정과 무관하게 통과하므로(억제는 alive=true 만
-// 막음) 즉시 회색+emit 이 나가고, 이후 STOP_GRACE 동안 옵저버의 거짓 alive=true probe 는 publish 가
-// 억제창에서 버린다 → 회색이 컬러로 되돌아가지 않는다.
+// ★Suppression window first, publish(false) after (M-1 — load-bearing)★: set suppress_alive_until first, then
+// confirm gray with publish(false). false passes regardless of the suppression decision (suppression
+// blocks only alive=true), so gray+emit goes out immediately, and for STOP_GRACE after that, the observer's false alive=true probe is discarded by publish
+// at the suppression window → the gray does not go back to color.
 pub fn force_daemon_down(app: &AppHandle) {
     *app.state::<LivenessState>()
         .suppress_alive_until
         .lock()
         .unwrap() = Some(Instant::now() + STOP_GRACE);
-    publish_daemon_liveness(app, false); // false 는 억제 무관 통과 → 회색+emit, last=false
+    publish_daemon_liveness(app, false); // false passes regardless of suppression → gray+emit, last=false
 }
 
-// 주어진 [`IconState`] 로 트레이 아이콘을 직접 교체한다(**PID probe 없음**).
+// Directly replace the tray icon with the given [`IconState`] (**no PID probe**).
 //
-// ★probe 우회 경로(load-bearing — S13 race 재발 방지)★: `refresh_tray_icon` 은
-// `daemon_status().alive`(PID probe=OpenProcess)로 상태를 *조회*해 set 하지만, 이 함수는 호출자가
-// 이미 확정한 state 를 그대로 set 한다. 그래서 StopOutcome::DaemonClosed(꺼짐 확정) 경로는 probe 를
-// 거치지 않고 이 함수로 회색을 직접 박는다. probe 가 필요한 일반 갱신은 `refresh_tray_icon` 을 쓴다.
+// ★The probe-bypass path (load-bearing — prevents recurrence of the S13 race)★: `refresh_tray_icon` *queries* the state with
+// `daemon_status().alive` (PID probe = OpenProcess) and sets it, but this function sets the state the caller has
+// already confirmed as is. So the StopOutcome::DaemonClosed (confirmed off) path does not go through the probe and sets gray directly with this function.
+// General updates that need a probe use `refresh_tray_icon`.
 //
-// set_icon 메인 스레드 보장은 `refresh_tray_icon` 과 동일(run_on_main_thread). 아이콘 두 벌은
-// TrayIcons state 에서 clone(저렴 — 내부 Cow/Arc).
+// The set_icon main-thread guarantee is the same as `refresh_tray_icon` (run_on_main_thread). The two icon sets are
+// cloned from TrayIcons state (cheap — internal Cow/Arc).
 pub fn set_tray_icon_state(app: &AppHandle, state: IconState) {
     let icons = app.state::<TrayIcons>();
-    // Image<'static> 는 내부 Cow — clone 저렴. 메인 스레드 클로저로 move 하기 위해 미리 복제.
+    // Image<'static> is an internal Cow — clone is cheap. Cloned in advance to move into the main-thread closure.
     let img = match state {
         IconState::Active => icons.active.clone(),
         IconState::Inactive => icons.inactive.clone(),
@@ -424,18 +424,18 @@ pub fn set_tray_icon_state(app: &AppHandle, state: IconState) {
             }
         }
     };
-    // 이미 메인 스레드면 즉시, 아니면 메인 루프에 post.
+    // If already on the main thread, immediately; otherwise post to the main loop.
     if let Err(e) = app.run_on_main_thread(set) {
         tracing::warn!("[tray] run_on_main_thread(set_icon) 실패: {e}");
     }
 }
 
-// "부팅 시 자동 시작" 토글(ADR-0027 §55) — 현재 활성 여부를 읽어 반전(enable/disable)하고
-// CheckMenuItem 체크 표시를 새 상태로 동기화한다. 트레이 클릭·command(set_autostart) 가 공유할 수
-// 있으나, command 는 명시 bool 을 받으므로 토글(반전)은 트레이 전용 진입이다.
+// Toggle "부팅 시 자동 시작" (start automatically at boot) (ADR-0027 §55) — read whether it is currently enabled, invert it (enable/disable), and
+// sync the CheckMenuItem check mark to the new state. Tray click · command (set_autostart) could share it,
+// but the command takes an explicit bool, so the toggle (invert) is a tray-only entry.
 //
-// is_enabled/enable/disable·set_checked 실패는 warn 만(토글 1회 실패가 앱을 죽이면 안 됨). 갱신
-// 누락 시 다음 클릭이 다시 토글하므로 영구 고착 아님.
+// Failures of is_enabled/enable/disable·set_checked are only warn (one failed toggle must not kill the app). If the update is
+// missed, the next click toggles again, so it is not stuck permanently.
 pub fn toggle_autostart(app: &AppHandle) {
     let mgr = app.autolaunch();
     let enabled = match mgr.is_enabled() {
@@ -476,7 +476,7 @@ mod tests {
 
     const WINDOWS: [&str; 4] = ["main", "slot-popup-2", "devtools", "slot-popup-1"];
 
-    // 보이기는 창마다 관심을 먼저 고치고 OS 를 부른다. 다루지 않는 창(`devtools`)은 관심에도 안 알린다.
+    // Show fixes the interest per window first and then calls the OS. A window that is not handled (`devtools`) is not told to interest either.
     #[test]
     fn showing_tells_the_usage_interest_before_each_os_call() {
         let log = Log::default();
@@ -504,7 +504,7 @@ mod tests {
         );
     }
 
-    // 숨기기는 창마다 OS 를 먼저 부르고, 숨긴 창만 관심에서 뺀다 — 숨기기가 실패한 창은 보이는 창으로 남는다.
+    // Hide calls the OS per window first and removes only hidden windows from interest — a window whose hide failed stays as a visible window.
     #[test]
     fn hiding_marks_only_the_windows_the_os_actually_hid() {
         let log = Log::default();
@@ -531,7 +531,7 @@ mod tests {
         );
     }
 
-    // 예비 창 풀의 창은 보이기 · 숨기기 어느 쪽에서도 OS 도 관심도 건드리지 않는다.
+    // A window of the spare-window pool is touched by neither the OS nor interest, in either show or hide.
     #[test]
     fn a_spare_window_is_left_alone_both_ways() {
         for visible in [true, false] {
@@ -559,9 +559,9 @@ mod tests {
         }
     }
 
-    // ── 예열 창 — 건너뛴 label 의 훅 · 보이기 · 숨기기(TRD S21-slot-docking §8-1 ⑫) ──
+    // ── Prewarmed windows — the hook · show · hide for skipped labels (TRD S21-slot-docking §8-1 ⑫) ──
 
-    // 술어는 팝아웃 label 마다 한 번만 묻고, 그 판정으로 건너뛴 label 을 훅이 `os` 첫 호출 전에 한 번 받는다.
+    // The predicate is asked only once per popout label, and the hook receives the labels skipped by that decision once, before the first `os` call.
     #[test]
     fn the_skipped_hook_gets_the_spare_labels_once_before_any_os_call() {
         for visible in [true, false] {
@@ -629,8 +629,8 @@ mod tests {
         assert_eq!(calls.get(), 1, "건너뛴 것이 없어도 훅은 한 번 불린다");
     }
 
-    // 보이기 — 건너뛴 예열 창 중 그사이 풀을 떠난 창(`Adopted`)만 다른 창과 같은 보이기로 띄우고, 차례를 정한 창들보다
-    // 먼저라 main 이 마지막이다. 맡긴 창(`Rehold`) · 맡기지 않은 예열 창(`Untouched`)은 띄우지 않는다.
+    // Show — among skipped prewarmed windows, only a window that left the pool in the meantime (`Adopted`) is shown with the same show as other windows, and since it comes before the windows whose order was decided,
+    // main is last. A handed-over window (`Rehold`) · a prewarmed window not handed over (`Untouched`) are not shown.
     #[test]
     fn showing_reveals_only_the_spares_that_left_the_pool_before_the_ordered_windows() {
         let log = Log::default();
@@ -673,10 +673,10 @@ mod tests {
         );
     }
 
-    // ── 포커스를 빼앗지 않는 보이기(TRD S26-window-chrome §6-2 · §10-1) ──
+    // ── Show without stealing focus (TRD S26-window-chrome §6-2 · §10-1) ──
 
-    /// 숨은 창들의 OS 대역 — `held` 는 첫 화면 대기 창 · `ours` = 우리 프로세스가 전경을 쥐었다. 상태 명령 몫 조작이 오면
-    /// 터진다(모든 창 보이기는 그것을 부르지 않는다).
+    /// A stand-in for the OS side of hidden windows — `held` is windows waiting for first paint · `ours` = our process holds the foreground. It
+    /// blows up if an operation that belongs to the state command arrives (show-all does not call it).
     #[derive(Default)]
     struct Ops {
         held: Vec<&'static str>,
@@ -737,8 +737,8 @@ mod tests {
         }
     }
 
-    // 누름 갈래와 같은 창 차례(풀을 떠난 예열 창 먼저 · main 이 마지막)로 보이되 첫 화면 대기 창은 건너뛰고, 포커스는
-    // 전경이 우리일 때 main 에만 준다 — 남의 앱이 전경이면 아무 창에도 주지 않는다.
+    // Show in the same window order as the click branch (prewarmed windows that left the pool first · main last) but skip windows waiting for first paint, and give focus
+    // only to main when the foreground is ours — if another app is in the foreground, it is given to no window.
     #[test]
     fn no_steal_skips_waiting_windows_and_focuses_only_main_when_the_foreground_is_ours() {
         for ours in [true, false] {
@@ -780,7 +780,7 @@ mod tests {
         }
     }
 
-    // 숨기기 — 술어로 건너뛴 예열 창의 올림도 차례 뒤에 거둔다. 거둠은 팝아웃 label 전부이고 술어를 다시 묻지 않는다.
+    // Hide — the raise of prewarmed windows skipped by the predicate is also withdrawn after the order. The withdrawal is all popout labels and does not ask the predicate again.
     #[test]
     fn hiding_cancels_the_hold_of_every_popup_label_after_the_ordered_windows() {
         let log = Log::default();

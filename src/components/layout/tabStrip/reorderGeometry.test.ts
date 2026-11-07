@@ -1,5 +1,5 @@
-// TRD S21-slot-docking §4-1 · §8-2 · 6.3판 §5-1 · §11 「TS tabStrip」: 탭바 안 순서 이동 순수 기하의 표 시험 — 기대값은 Chromium 규칙을 손으로
-//   셈한 것이다(제자리 후보 건너뜀 · 앞 쪽 동률 · 끄는 탭 뒤 −1 · 보이는 끝 자르기 · 문턱).
+// TRD S21-slot-docking §4-1 · §8-2 · edition 6.3 §5-1 · §11 「TS tabStrip」: table test of the pure geometry of the in-tab-bar order move — expected values are the Chromium rules computed by
+//   hand (skipping the in-place candidate · front-side tie · −1 after the dragged tab · clipping at the visible end · threshold).
 
 import { describe, expect, it } from 'vitest'
 
@@ -26,7 +26,7 @@ import {
 const A = TAB_MIN_ACTIVE_W
 const I = TAB_MIN_INACTIVE_W
 
-/** 폭 목록 → 한 탭바의 이상적 경계(모든 탭 폭 누적). 앞쪽 `shown` 개가 보이고, `dragged` 는 숨겨도 보이는 탭으로 센다. */
+/** Width list → ideal bounds of one tab bar (accumulation of all tab widths). The first `shown` are visible, and `dragged` is counted as a visible tab even if hidden. */
 function stripOf(widths: number[], shown = widths.length, dragged?: number): StripBounds {
   let x = 0
   const tabs = widths.map(w => {
@@ -40,11 +40,11 @@ function stripOf(widths: number[], shown = widths.length, dragged?: number): Str
 
 const EMPTY: StripBounds = { tabs: [], visible: [], lastVisible: -1 }
 const FOUR = stripOf([100, 100, 100, 100])
-/** 단계 B — 활성(끄는 탭) A · 비활성 I 와 그 사이(`layout.ts` 가 내는 꼴). */
+/** Stage B — active (dragged tab) A · inactive I and in between (the shapes `layout.ts` produces). */
 const PHASE_B = stripOf([I, A, I, I])
-/** 넘침 — 보이는 셋(A · I · I) 뒤 숨긴 둘이 보이는 끝 116 너머에 제 폭으로 선다(116–148 · 148–180). */
+/** Overflow — after the three visible (A · I · I), the two hidden stand at their own width beyond the visible end 116 (116–148 · 148–180). */
 const OVERFLOW = stripOf([A, I, I, I, I], 3)
-/** 넘침 · 끄는 탭(활성)이 끝 너머 4 — 레이아웃은 숨기지만 끄는 탭이라 보이는 탭으로 센다(숨긴 3 = 96–128 · 4 = 128–180). */
+/** Overflow · the dragged tab (active) is 4 beyond the end — the layout hides it but it is the dragged tab so it is counted as visible (hidden 3 = 96–128 · 4 = 128–180). */
 const DRAGGED_HIDDEN = stripOf([I, I, I, I, A], 3, 4)
 
 describe('idealBounds — 모든 탭 계산 폭 누적 · 보임 · 보이는 마지막 자리', () => {
@@ -152,7 +152,7 @@ describe('draggedLeft — clamp(p − offset, 0, max(0, A − w))', () => {
 
 describe('insertionIndex — Chromium CalculateInsertionIndex', () => {
   const CASES: { name: string; B: StripBounds; d: number; L: number; out: number }[] = [
-    // ── 같은 폭 넷 · 가운데 탭(d=1) — 후보 이상적 x: k0 0 · k1 100 · (k2 건너뜀) · k3 200 · k4 300 ──
+    // ── four of the same width · middle tab (d=1) — candidate ideal x: k0 0 · k1 100 · (k2 skipped) · k3 200 · k4 300 ──
     { name: '제자리(L = 지금 x)', B: FOUR, d: 1, L: 100, out: 1 },
     { name: '앞 쪽 동률(k0 · k1 거리 50) → 앞 후보 k0', B: FOUR, d: 1, L: 50, out: 0 },
     { name: 'k0 쪽으로 1 px 더', B: FOUR, d: 1, L: 49, out: 0 },
@@ -164,35 +164,35 @@ describe('insertionIndex — Chromium CalculateInsertionIndex', () => {
     { name: '영역 끝 너머 L 도 끝', B: FOUR, d: 1, L: 900, out: 3 },
     { name: '왼쪽 너머 L 은 맨 앞', B: FOUR, d: 1, L: -40, out: 0 },
 
-    // ── 맨 앞 탭(d=0) — k1 건너뜀 · k2 100 · k3 200 · k4 300 ──
+    // ── first tab (d=0) — k1 skipped · k2 100 · k3 200 · k4 300 ──
     { name: 'd=0 · k0 · k2 동률 → k0 = 제자리', B: FOUR, d: 0, L: 50, out: 0 },
     { name: 'd=0 · 동률을 넘으면 k2 → 1', B: FOUR, d: 0, L: 50.01, out: 1 },
     { name: 'd=0 · 끝', B: FOUR, d: 0, L: 300, out: 3 },
 
-    // ── 맨 끝 탭(d=3) — k4 건너뜀 · k3 300 이 제자리 ──
+    // ── last tab (d=3) — k4 skipped · k3 300 is in place ──
     { name: 'd=3 · k2 · k3 동률 → k2(끄는 탭 앞이라 −1 없음)', B: FOUR, d: 3, L: 250, out: 2 },
     { name: 'd=3 · 제자리', B: FOUR, d: 3, L: 251, out: 3 },
     { name: 'd=3 · 맨 앞', B: FOUR, d: 3, L: 0, out: 0 },
 
-    // ── 폭이 다름(단계 B · 끄는 탭 = 활성 A, d=1) — k0 0 · k1 32 · k3 116 − 52 = 64 · k4 96 ──
+    // ── different widths (stage B · dragged tab = active A, d=1) — k0 0 · k1 32 · k3 116 − 52 = 64 · k4 96 ──
     { name: '단계 B · k1 · k3 가운데(48) 동률 → k1 = 제자리', B: PHASE_B, d: 1, L: 48, out: 1 },
     { name: '단계 B · 가운데 넘음 → k3 → 2', B: PHASE_B, d: 1, L: 48.5, out: 2 },
     { name: '단계 B · k3 · k4 가운데(80) 동률 → 2', B: PHASE_B, d: 1, L: 80, out: 2 },
     { name: '단계 B · k4 → 3', B: PHASE_B, d: 1, L: 81, out: 3 },
 
-    // ── 넘친 탭바 — 숨긴 탭은 제 폭 · 보이는 마지막 자리로 자른다 ──
+    // ── overflowing tab bar — hidden tabs are clipped to their own width · the last visible position ──
     // OVERFLOW · d=0(A): k0 0 · k2 32 · k3 64 · k4 148 − 52 = 96 · k5 128.
     { name: '넘침 · 숨긴 탭 사이 후보(k4 → 3)가 이겨도 보이는 마지막 자리 2 로 자른다', B: OVERFLOW, d: 0, L: 93, out: 2 },
     { name: '넘침 · 보이는 범위 안은 그대로(k3 → 2)', B: OVERFLOW, d: 0, L: 64, out: 2 },
     { name: '넘침 · 보이는 범위 안(k2 → 1)', B: OVERFLOW, d: 0, L: 40, out: 1 },
-    // DRAGGED_HIDDEN · d=4(A): k0 0 · k1 32 · k2 64 · k3 96 · k4 128(제자리) · k5 건너뜀.
+    // DRAGGED_HIDDEN · d=4(A): k0 0 · k1 32 · k2 64 · k3 96 · k4 128 (in place) · k5 skipped.
     { name: '★끝 너머 끄는 탭의 제자리 — 숨긴 탭 앞 후보와 동률이 아니라 그대로 4★', B: DRAGGED_HIDDEN, d: 4, L: 128, out: 4 },
     { name: '끝 너머 끄는 탭 · 제자리 쪽이 가까우면 그대로', B: DRAGGED_HIDDEN, d: 4, L: 120, out: 4 },
     { name: '끝 너머 끄는 탭 · k3 · k4 가운데(112) 동률 → 앞 k3', B: DRAGGED_HIDDEN, d: 4, L: 112, out: 3 },
     { name: '끝 너머 끄는 탭 · 숨긴 탭 앞으로', B: DRAGGED_HIDDEN, d: 4, L: 96, out: 3 },
     { name: '끝 너머 끄는 탭도 맨 앞으로는 간다', B: DRAGGED_HIDDEN, d: 4, L: 0, out: 0 },
 
-    // ── 가장자리 ──
+    // ── edges ──
     { name: '탭 하나 — 늘 0', B: stripOf([160]), d: 0, L: 500, out: 0 },
     { name: '보이는 탭 없음 — 0(Chrome 「last_insertion_point = 0」)', B: stripOf([100, 100], 0), d: 1, L: 100, out: 0 },
     { name: '탭 없음 — 0(Chrome 「the only position to insert at is 0」)', B: EMPTY, d: 0, L: 10, out: 0 },
@@ -282,7 +282,7 @@ describe('slideTargets · slideMs — 비켜남(C2)', () => {
       const s = i / 100
       worst = Math.max(worst, Math.abs(bez(y1, y2, s) - easeOut(bez(x1, x2, s))))
     }
-    // 제어점을 넷째 자리에서 끊은 만큼만 어긋난다.
+    // It is off only by as much as the control points were cut at the fourth decimal place.
     expect(worst).toBeLessThan(1e-3)
     expect(easeOut(0)).toBe(0)
     expect(easeOut(1)).toBe(1)
@@ -292,7 +292,7 @@ describe('slideTargets · slideMs — 비켜남(C2)', () => {
 
 describe('dropIndex · dropMarkerX — 다른 창 탭바의 놓을 자리 · 세로선(W13)', () => {
   it('보이는 머리 중 가운데가 x 보다 왼쪽인 것의 수 · 가운데와 같은 x = 그 머리의 왼쪽', () => {
-    // 가운데 = 50 · 150 · 250 · 350
+    // middle = 50 · 150 · 250 · 350
     expect(dropIndex(FOUR, -5, null)).toBe(0)
     expect(dropIndex(FOUR, 49, null)).toBe(0)
     expect(dropIndex(FOUR, 50, null)).toBe(0)
@@ -308,7 +308,7 @@ describe('dropIndex · dropMarkerX — 다른 창 탭바의 놓을 자리 · 세
   })
 
   it('숨긴 탭이 넘친 탭바는 보이는 마지막 머리 다음 자리에서 자른다(R24)', () => {
-    // 보이는 셋 = 0–52 · 52–84 · 84–116 · 숨긴 둘이 116–148 · 148–180 에 제 폭으로 선다.
+    // The three visible = 0–52 · 52–84 · 84–116 · the two hidden stand at 116–148 · 148–180 at their own width.
     expect(dropIndex(OVERFLOW, 120, null)).toBe(3)
     expect(dropIndex(OVERFLOW, 160, null)).toBe(3)
     expect(dropMarkerX(OVERFLOW, 3, null)).toBe(A + 2 * I)
@@ -336,7 +336,7 @@ describe('dropIndex · dropMarkerX — 다른 창 탭바의 놓을 자리 · 세
   })
 
   it('끄는 탭이 이 탭바에 있으면 세지 않는다', () => {
-    // 끄는 탭 1(100–200)을 빼면 머리 = 0–100 · 200–300 · 300–400.
+    // Removing dragged tab 1 (100–200), the heads = 0–100 · 200–300 · 300–400.
     expect(dropIndex(FOUR, 260, 1)).toBe(2)
     expect(dropIndex(FOUR, 240, 1)).toBe(1)
     expect(dropMarkerX(FOUR, 1, 1)).toBe(100)

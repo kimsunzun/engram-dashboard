@@ -1,8 +1,8 @@
-//! 1차 로그 폴더를 못 쓰는 릴리즈 상황에서 **기동 실패 사유가 어디엔가 남는지** 본다.
+//! Checks, in the release situation where the primary log folder cannot be used, **whether the startup failure reason is left somewhere**.
 //!
-//! ★별도 프로세스가 필요하다★: 전역 subscriber 는 프로세스당 한 번뿐이고, 이 테스트는 `%TEMP%` 까지
-//! 갈아끼운다(다른 테스트가 보는 임시 폴더를 건드리지 않으려고). 그래서 통합 테스트 파일 하나 =
-//! 테스트 하나다.
+//! ★A separate process is needed★: the global subscriber is once per process, and this test even swaps `%TEMP%`
+//! (so as not to touch the temp folder other tests see). So one integration test file =
+//! one test.
 
 use std::path::PathBuf;
 
@@ -23,16 +23,16 @@ fn daemon_failure_reason_survives_when_the_data_dir_cannot_hold_logs() {
     std::fs::create_dir_all(&data_dir).expect("data dir");
     std::fs::create_dir_all(&temp_home).expect("temp home");
 
-    // ★로그 하위 폴더 자리에 파일을 둔다★ = `create_dir_all` 이 반드시 실패하는 상태(읽기 전용
-    //   볼륨·권한 없음과 같은 결과를 결정적으로 재현하는 방법).
+    // ★Put a file where the log subfolder goes★ = a state where `create_dir_all` must fail (a way to deterministically
+    //   reproduce the same result as a read-only volume · no permission).
     std::fs::write(data_dir.join("logs"), "이 자리는 파일이다").expect("막기");
-    // 이 프로세스는 아직 스레드를 안 띄웠다(테스트 하나뿐) — 여기서만 안전하다.
+    // This process has not started any thread yet (only one test) — it is safe only here.
     std::env::set_var("TMP", &temp_home);
     std::env::set_var("TEMP", &temp_home);
 
     let path = init_logging_with_file(&data_dir.join("logs"), LogKind::Daemon)
         .expect("폴백으로라도 열려야");
-    // 데몬이 그 직후 내는 바로 그 줄(= 기동 포기 사유).
+    // The very line the daemon emits right after (= the reason for giving up startup).
     tracing::error!("데이터 폴더를 준비하지 못해 데몬을 시작할 수 없음: (재현)");
 
     assert!(

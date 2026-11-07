@@ -1,40 +1,40 @@
-# ADR-0200: 왕복 실패 갈래도 통로가 자기 stdin 쓰기 끝을 닫는다
+# ADR-0200: The round-trip-failure branch too — the transport closes its own stdin write end
 
-- 상태: 확정 (2026-09-15, 근거: 리뷰 3렌즈 독립 적출 + 변이 검증 — 게이트를 되살리면 거절 테스트가 20초 뒤 실패, 되돌리면 1초 내 통과)
-- 관련: Amends ADR-0199 (stdin 을 닫는 갈래 범위) · Supersedes 없음 · ADR-0001(kill 인과 2동사) · ADR-0005(finalize 1회) · ADR-0019(reaper 단일 소비자) · ADR-0082(이어받기 실패 처분) · ADR-0201 · `backend/codex/transport.rs::writer_loop`
+- 상태: 확정 (2026-09-15, basis: independent findings by 3 review lenses + mutation verification — if the gate is revived the rejection test fails after 20 seconds, if reverted it passes within 1 second)
+- 관련: Amends ADR-0199 (the scope of branches that close stdin) · Supersedes none · ADR-0001(kill causality, 2 verbs) · ADR-0005(finalize once) · ADR-0019(reaper single consumer) · ADR-0082(disposition of resume failure) · ADR-0201 · `backend/codex/transport.rs::writer_loop`
 
 ## 맥락
 
-ADR-0199 는 **기록 실패 갈래에서만** 통로가 자기 stdin 을 닫기로 정했다. 그 범위를 좁게 그은 근거는 「그 갈래에서만 상대의 생존이 **확정**된다」였다 — 왕복이 성공한 뒤에 넘어진 것이므로 상대가 살아서 우리 stdin 을 읽고 있는 것이 확실하다는 것.
+ADR-0199 decided that **only on the record-failure branch** the transport closes its own stdin. The ground for drawing that scope narrowly was 「그 갈래에서만 상대의 생존이 **확정**된다」 (the peer's liveness is **confirmed** only on that branch) — since it tripped after the round trip succeeded, it is certain that the peer is alive and reading our stdin.
 
-그 사이에 codex 이어받기 배선이 들어오면서 **왕복 자체가 실패하는 갈래가 릴리스에서 도달 가능해졌다.** codex 가 `thread/resume` 을 거절하면(모르는 스레드·설정 오류·서브에이전트 스레드) JSON-RPC 오류가 돌아오고, 그것은 「왕복 실패」로 분류된다. 그런데 그 갈래에서 **상대는 멀쩡히 살아 있다.** 거절은 죽음이 아니라 응답이다.
+In the meantime, with the codex resume wiring coming in, **the branch where the round trip itself fails became reachable in release.** When codex rejects `thread/resume` (an unknown thread · a configuration error · a subagent thread), a JSON-RPC error comes back, and it is classified as a 「왕복 실패」 (“round-trip failure”). But on that branch **the peer is alive and well.** A rejection is not a death but a response.
 
-그래서 ADR-0199 의 전제(「왕복 실패 = 상대 생존 미확정」)가 거짓이 되는 경우가 생겼고, 좁게 그은 범위가 그대로 결함이 됐다:
+So there are now cases where the premise of ADR-0199 (「왕복 실패 = 상대 생존 미확정」 (“round-trip failure = peer liveness unconfirmed”)) is false, and the narrowly drawn scope became a defect as it stands:
 
-stdin 이 안 닫힌다 → 자식·리더·라이터가 살아남는다 → 리더가 EOF 를 못 본다 → `OutputCore::finish` 가 안 돈다 → `ReapMsg` 가 발행되지 않는다 → **reaper 가 그 메시지의 단일 소비자라 수거 경로가 0** 이다(ADR-0019). 화면엔 Running 인 에이전트가 서 있는데 입력은 전부 거절되고 아무도 거두지 않는다. 부팅 복원이 이것을 이어받기 가능한 프로필 수만큼 곱한다.
+stdin is not closed → the child, reader and writer survive → the reader does not see EOF → `OutputCore::finish` does not run → `ReapMsg` is not emitted → **the reaper is the single consumer of that message, so the reap paths are 0** (ADR-0019). An agent stands on screen as Running, but all input is rejected and nobody reaps it. Boot restore multiplies this by the number of resumable profiles.
 
 ## 결정
 
-**갈래를 가리지 않고 닫는다.** 핸드셰이크가 실패하면 — 왕복에서 넘어졌든 기록에서 넘어졌든 — 통로는 자기 쪽 stdin 쓰기 끝을 놓는다.
+**We close regardless of branch.** When the handshake fails — whether it tripped on the round trip or on the record — the transport releases its own stdin write end.
 
-★**생존 확정은 닫기의 전제가 아니다**★ — 상대가 이미 죽었으면 그 동작은 no-op 이고, 살아 있으면 EOF 다. 양쪽 다 안전하다. 반면 **안 닫는 쪽에는 안전한 결말이 없다**: 상대가 살아 있으면 위 교착이고, 죽었으면 어차피 닫든 말든 같다.
+★**Confirmation of liveness is not a precondition for closing**★ — if the peer is already dead, the action is a no-op, and if it is alive, it is EOF. Both are safe. On the other hand, **there is no safe outcome on the not-closing side**: if the peer is alive, it is the deadlock above, and if it is dead, it is the same whether we close or not.
 
-`while_recording` 칸은 남되 **문구만 가른다.** 기록 실패는 「이 화신을 쓰지 않는다」, 왕복 실패는 「연결이 서지 못했다」 — 둘은 사람에게 다른 사실을 말해야 한다. 그 칸을 다시 동작 분기로 쓰지 않는다.
+The `while_recording` field stays but **only the wording is split.** A record failure says 「이 화신을 쓰지 않는다」 (“this incarnation is not used”), and a round-trip failure says 「연결이 서지 못했다」 (“the connection could not be established”) — the two have to tell a person different facts. We do not use that field as a behavior branch again.
 
 ## 거부한 대안
 
-- **ADR-0199 의 범위를 유지하고 거절만 따로 처리한다** — 거절을 알아보는 판정이 통로 안에 하나 더 생기고, 그 판정이 벤더 오류 코드에 묶인다. 실측상 `-32600` 은 「모르는 스레드」 전용이 아니라 설정 오류·서브에이전트 스레드도 같은 코드를 쓴다(2026-09-15 실 codex app-server 측정). 코드로 가르면 틀린다.
-- **거절 시 새 스레드로 폴백한다** — ADR-0082 가 이미 폐기한 방향이고, codex 쪽 근거가 하나 더 있다: 같은 `-32600` 이 설정 오류에도 오므로 폴백은 **멀쩡한 손잡이를 덮어쓴다**. 사용자 결정으로 재확인(2026-09-15).
-- **통로가 유계로 기다렸다가 직접 거둔다** — 한 라운드 실제로 구현했다가 되돌렸다. ADR-0199 가 그은 선(「통로가 `kill`·`TerminateJobObject`·`core.finish` 중 하나라도 부르면 위반」)을 정면으로 넘고, ADR-0001 이 종료 주체를 하나로 묶어 둔 이유가 흐려진다. 거두는 일은 실패로 판정한 쪽(manager)이 기존 2동사로 한다 → ADR-0201.
+- **Keep ADR-0199's scope and handle rejection separately** — one more decision that recognizes a rejection arises inside the transport, and that decision is tied to the vendor error code. As measured, `-32600` is not exclusive to 「모르는 스레드」 (“unknown thread”); configuration errors and subagent threads use the same code too (measured against a real codex app-server, 2026-09-15). Splitting by code is wrong.
+- **On rejection, fall back to a new thread** — a direction ADR-0082 already discarded, and there is one more ground on the codex side: the same `-32600` also comes for configuration errors, so the fallback would **overwrite a perfectly good handle**. Reconfirmed by user decision (2026-09-15).
+- **The transport waits in a bounded way and then reaps directly** — we actually implemented it for one round and reverted it. It crosses head-on the line ADR-0199 drew (「통로가 `kill`·`TerminateJobObject`·`core.finish` 중 하나라도 부르면 위반」 (“the transport violates it if it calls any one of kill·TerminateJobObject·core.finish”)), and the reason ADR-0001 ties the terminating party to one gets blurred. The reaping is done by the side that judged it a failure (the manager) with the existing 2 verbs → ADR-0201.
 
 ## 근거
 
-- **리뷰 3렌즈가 독립으로 같은 자리를 짚었다**(불변식·동시성·cross-family blind). blind 렌즈는 결정 근거를 하나도 받지 않고 같은 결함에 닿았다.
-- **변이 검증**: `while_recording` 게이트를 되살리면 거절 테스트가 20초 뒤 `관측된 상태: []` 로 실패하고, 되돌리면 1초 안에 통과한다. 초록이 구현 위에 얹혀 있지 않다.
-- ADR-0199 가 기록 실패 갈래에 쓴 인과(닫기 → 상대 exit → 리더 EOF → finish → reaper)가 **그대로 재사용된다.** 새 기구가 없다.
+- **3 review lenses pointed at the same spot independently** (invariants · concurrency · cross-family blind). The blind lens reached the same defect without receiving any of the decision grounds.
+- **Mutation verification**: if the `while_recording` gate is revived, the rejection test fails after 20 seconds with `관측된 상태: []`, and if reverted it passes within 1 second. The green is not sitting on top of the implementation.
+- The causality that ADR-0199 wrote for the record-failure branch (close → peer exit → reader EOF → finish → reaper) is **reused as is.** There is no new machinery.
 
 ## 영향 / 불변식
 
-- ADR-0001 의 2동사는 그대로다 — 이 결정은 **쓰기 끝을 놓는 것**이지 kill 이 아니다. 통로가 kill 을 부르지 않는다는 ADR-0199 의 선은 **살아 있다**(그 선을 넘었던 구현은 ADR-0201 에서 걷혔다).
-- 블로킹으로 stdin 락을 잡는 운영 지점은 여전히 **둘**이고 `tests::the_production_blocking_stdin_locks_are_counted` 가 그 수를 지킨다. 셋째가 생기면 이 결정의 락 안전 논증을 다시 해야 한다.
-- 닫은 뒤 상대가 실제로 몇 ms 에 끝나는지는 **거절 갈래에서 미측정**이다. 기록 실패 갈래의 41~51ms 를 빌려 쓰지 않는다.
+- The 2 verbs of ADR-0001 are as they are — this decision is **releasing the write end**, not kill. ADR-0199's line that the transport does not call kill is **alive** (the implementation that crossed that line was removed in ADR-0201).
+- The production points that take the stdin lock in a blocking way are still **two**, and `tests::the_production_blocking_stdin_locks_are_counted` keeps that count. If a third appears, the lock-safety argument of this decision must be redone.
+- How many ms the peer actually takes to finish after closing is **unmeasured on the rejection branch.** We do not borrow the 41~51ms of the record-failure branch.

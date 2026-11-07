@@ -1,5 +1,5 @@
-// TRD S26-window-chrome §7-2 · §9: 끌 자리 속성과 그 권한. 권한이 빠지면 끌 자리 누름이 소리 없이 아무 일도 안 한다(W4) —
-//   타입 검사 · 렌더 시험이 못 보므로 capability 원문을 읽어 잰다. 금지 권한 쪽은 `src/__tests__/noWindowControl.test.ts`.
+// TRD S26-window-chrome §7-2 · §9: draggable area attribute and its permission. If the permission is missing, a press on the draggable area silently does nothing (W4) —
+//   type checks · render tests cannot see it, so it is measured by reading the capability source. The forbidden-permission side is `src/__tests__/noWindowControl.test.ts`.
 
 import { describe, expect, it } from 'vitest'
 

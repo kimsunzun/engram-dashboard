@@ -1,55 +1,55 @@
-# 구조 선택지 — "에이전트 죽음"의 백엔드 무관 추상 (Slot ≠ Run ≠ Transport)
+# Structure options — a backend-agnostic abstraction of "agent death" (Slot ≠ Run ≠ Transport)
 
-> **결론(2026-06-16): 사용자가 (A) 채택 → ADR-0017로 확정.** 슬롯=한 모드의 한 세션, 끝나면 슬롯도 끝(슬롯 내 백엔드 교체·zombie 슬롯 없음). 터미널(셸)은 저장/복원 안 함(이어받을 세션 없음). consult가 민 (나) 슬롯-persist 컨테이너 모델은 **도메인 혼란(in-place 모드교체·dead pane)으로 기각.** 단 consult 합의 중 "백엔드별 죽음 정의 + exit-reason 분류 + KilledByUser 재시작제외 + API stream≠death"는 채택. 아래 (가)/(나) 비교·OSS 조사는 이력으로 보존. 상세: ADR-0017.
+> **Conclusion (2026-06-16): the user adopted (A) → finalized as ADR-0017.** Slot = one session of one mode; when it ends, the slot ends too (no backend swap inside a slot, no zombie slot). A terminal (shell) is not saved/restored (no session to resume). The (B) slot-persist container model pushed by the consult was **rejected for domain confusion (in-place mode swap, dead pane).** However, from the consult agreement, "per-backend definition of death + exit-reason classification + KilledByUser excluded from restart + API stream ≠ death" is adopted. The (A)/(B) comparison and the OSS survey below are preserved as history. Details: ADR-0017.
 
-- 상태: **해소됨 → ADR-0017 (A 채택)**
-- 근거: `/consult` job `20260616-011502-consult-death-abstraction` — GPT·Gemini·Claude(opus) 블라인드 + judge. 유명 OSS 조사 포함. 원자료 `I:\Engram\agents\web-runner\shared\<job>\`.
-- 연결: ADR-0016(에이전트 수명 모델)의 "sid 인스턴스"가 여기서 말하는 **Run**에 해당 — 그 위에 **Slot** 계층을 추가하는 구조 정정.
+- 상태: **Resolved → ADR-0017 (A adopted)**
+- Basis: `/consult` job `20260616-011502-consult-death-abstraction` — GPT, Gemini and Claude (opus) blind + judge. Includes a survey of well-known OSS. Raw material `I:\Engram\agents\web-runner\shared\<job>\`.
+- Link: the "sid instance" of ADR-0016 (agent lifecycle model) corresponds to the **Run** here — a structural correction that adds a **Slot** layer on top of it.
 
-## 배경 — 왜 "죽음"이 애매했나
-현재 `cmd.exe /c claude`라 claude가 빠지면 cmd도 끝나 PTY EOF → **세션(슬롯)이 통째로 사라짐.** 그래서 "claude 빠짐"과 "슬롯 소멸"이 한 사건이 됨. 사용자가 "claude 죽어도 터미널/슬롯은 남아야 하고, 그 자리에 codex로 바꿔 띄울 수도 있어야" 한다고 지적 → "죽음"을 백엔드 무관 추상으로 다시 정의해야 함.
+## Background — why "death" was ambiguous
+Currently it is `cmd.exe /c claude`, so when claude exits cmd ends too and the PTY hits EOF → the **session (slot) disappears entirely.** So "claude leaving" and "slot disappearing" become one event. The user pointed out that "even if claude dies, the terminal/slot must remain, and it must be possible to start codex in that place instead" → "death" must be redefined as a backend-agnostic abstraction.
 
-## ★ 교차검증 합의 (3종 + judge 일치 — 거의 확정) ★
-1. **데이터 모델 = Slot ≠ Run ≠ Transport 3계층 분리.**
-   - **Slot**: UI/도메인 슬롯. 데몬이 보유, persist, 오래 산다. 안정적 `slot_id`.
-   - **Run(=ADR-0016의 sid 인스턴스)**: 한 번의 실행(claude/codex/shell/api). 시작~종료(코드/시그널 포함). 짧게 산다.
-   - **Transport**: PTY / HTTP stream / None. Run과 묶임.
-2. **"죽음"을 Slot이 아니라 Run의 "종료 사건"으로 정의.** 나쁜 추상="Session is dead" / 좋은 추상="Slot은 살아있고, Run이 reason과 함께 끝났고, Transport는 Open/Eof/Closed."
-3. **exit-reason 분류 필수**(EOF 하나로 죽음 정의 부족): Completed(0) / Failed(≠0) / Signaled / KilledByUser / InterruptedByUser / TransportLost / StartupFailed / RestoreFailed. (systemd·supervisord 선례)
-4. **API는 stream-end ≠ death** — 정상 스트림 종료=Completed이지 Dead 아님. (백엔드 무관성 핵심)
-5. **KilledByUser / Interrupted는 respawn·자동재시작 제외.** interrupt(Ctrl-C)와 kill(프로세스레벨)은 계속 분리(ADR-0001 유지).
-6. **자동재시작은 미래 옵션** — UI=뷰어·자동복원 금지 제약상 지금은 death 관측만, respawn은 명시 트리거. (켜면 backoff/FATAL/rate-limit 필요 — supervisord/systemd 선례)
-7. **추상(타입/이벤트)은 지금 (나) 3계층으로 깐다**(저위험·장기 인터페이스, CLAUDE.md §0). **실동작은 (가)에 머물 수 있다**(점진 이행).
-8. **★Windows 구현 = cmd /k 아님, "Rust Slot 수명 격상"★** — 셸을 살려두는 `cmd /k`는 위험(TUI raw-mode 오염·PTY EOF 안 옴→child watcher 필요·JobObject가 셸까지 잡음). 대신 **`cmd /c` 그대로 두고**, inner 종료로 PTY가 EOF 나면 **Rust의 `AgentSlot` struct를 드롭하지 않고 `state: Dead`로 유지**(PTY는 닫힘). 이러면 EOF 신호원·kill 인과(ADR-0001)·finalize 1회(ADR-0005) 불변식을 **보존**하면서 슬롯 유지+respawn UX를 얻음. (tmux dead-pane과 동형 — 죽은 건 process, 슬롯은 메모리에 남음.)
+## ★ Cross-validation agreement (3 models + judge agree — nearly certain) ★
+1. **Data model = three-layer separation Slot ≠ Run ≠ Transport.**
+   - **Slot**: the UI/domain slot. Held by the daemon, persisted, long-lived. A stable `slot_id`.
+   - **Run (= the sid instance of ADR-0016)**: a single execution (claude/codex/shell/api). Start to end (including code/signal). Short-lived.
+   - **Transport**: PTY / HTTP stream / None. Bound to the Run.
+2. **Define "death" not as the Slot's but as the Run's "end event".** A bad abstraction = "Session is dead" / a good abstraction = "the Slot is alive, the Run ended with a reason, and the Transport is Open/Eof/Closed."
+3. **Exit-reason classification is mandatory** (EOF alone is insufficient to define death): Completed(0) / Failed(≠0) / Signaled / KilledByUser / InterruptedByUser / TransportLost / StartupFailed / RestoreFailed. (systemd·supervisord precedent)
+4. **For an API, stream-end ≠ death** — a normal stream end = Completed, not Dead. (The core of backend-agnosticism)
+5. **KilledByUser / Interrupted are excluded from respawn and automatic restart.** interrupt (Ctrl-C) and kill (process level) stay separate (ADR-0001 kept).
+6. **Automatic restart is a future option** — under the constraint "UI = viewer · no automatic restore", for now only death is observed and respawn is an explicit trigger. (Turning it on needs backoff/FATAL/rate-limit — supervisord/systemd precedent)
+7. **The abstraction (types/events) is laid down now as (B) three layers** (low risk, long-term interface, CLAUDE.md §0). **The actual behavior may stay at (A)** (gradual migration).
+8. **★Windows implementation = not cmd /k, but "elevate the Rust Slot lifetime"★** — `cmd /k`, which keeps the shell alive, is dangerous (TUI raw-mode contamination · PTY EOF does not come → a child watcher is needed · the JobObject also catches the shell). Instead, **keep `cmd /c` as is**, and when the PTY hits EOF because the inner process ended, **do not drop Rust's `AgentSlot` struct and keep it as `state: Dead`** (the PTY is closed). This **preserves** the invariants of the EOF signal source, kill causality (ADR-0001) and finalize once (ADR-0005), while getting slot retention + respawn UX. (Isomorphic to tmux dead-pane — what died is the process; the slot remains in memory.)
 
-## OSS 선례 (조사)
-| OSS | inner 종료 후 | 재실행 | 비고 |
+## OSS precedents (survey)
+| OSS | After the inner process exits | Re-run | Note |
 |---|---|---|---|
-| tmux `remain-on-exit` | dead pane 유지 | `respawn-pane -k` | SlotId 유지·Run만 교체 (가장 근접) |
-| GNU screen `zombie` | dead window | resurrect 키, `onerror`=비정상만 | 정상/비정상 구분 선례 |
-| Zellij command pane | exit status 표시·hold | Enter rerun, `close_on_exit=true`로 (가) | (나) 기본+(가) 옵션 |
-| VS Code terminal | (Terminated) 탭 유지 | Relaunch 버튼 | dead 슬롯+명시 재실행 핸들 |
-| abduco/dtach | 세션 `+`(inner 죽고 세션 유지) | 사용자 재spawn | **persist 데몬 모델 최근접** |
-| supervisord/systemd | Unit failed/dead, PID와 분리 | `restart`(명시) | exit-reason 분류·자동재시작 정책 선례 |
+| tmux `remain-on-exit` | keeps the dead pane | `respawn-pane -k` | SlotId kept, only the Run replaced (closest) |
+| GNU screen `zombie` | dead window | resurrect key, `onerror` = abnormal only | precedent for distinguishing normal/abnormal |
+| Zellij command pane | shows exit status · hold | Enter reruns, (A) via `close_on_exit=true` | (B) default + (A) option |
+| VS Code terminal | keeps the (Terminated) tab | Relaunch button | dead slot + explicit re-run handle |
+| abduco/dtach | session `+` (inner dies, session stays) | user re-spawns | **closest to the persist daemon model** |
+| supervisord/systemd | Unit failed/dead, separated from PID | `restart` (explicit) | precedent for exit-reason classification and automatic restart policy |
 
-## ★ 사용자 결정 대기 — 선택지 ★
-합의(위)는 깔되, 아래는 골라야 함:
+## ★ Awaiting user decision — choices ★
+Lay down the agreement (above), but the following must be chosen:
 
-**S-1. 실동작 채택 범위 (가 vs 나, 시점)**
-- (a) **추상만 지금**(타입·이벤트=(나)), 실동작은 (가)(inner 종료=슬롯 닫힘) 유지 → dead-slot 실구현은 후속. *보수적.*
-- (b) **claude/codex 슬롯부터 KeepDeadSlot 실동작 도입**(Rust Slot 격상) → 죽어도 슬롯 유지·respawn. *적극적.*
+**S-1. Scope of adopting actual behavior ((A) vs (B), timing)**
+- (a) **Abstraction only now** (types·events = (B)), keep actual behavior at (A) (inner exit = slot closes) → real dead-slot implementation is a follow-up. *Conservative.*
+- (b) **Introduce real KeepDeadSlot behavior starting with claude/codex slots** (elevate the Rust Slot) → the slot is kept even on death · respawn. *Aggressive.*
 
-**S-2. `on_exit_policy` 기본값 (백엔드별 차등 가능)**
-- claude/codex = `KeepDeadSlot` / shell = `CloseSlot` 또는 KeepDead / api = `Idle`(stream end=Completed). → 차등으로 갈지, 일괄로 갈지.
+**S-2. Default of `on_exit_policy` (may differ per backend)**
+- claude/codex = `KeepDeadSlot` / shell = `CloseSlot` or KeepDead / api = `Idle` (stream end = Completed). → Whether to differentiate or go uniform.
 
-**S-3. respawn 1차 지원 범위**
-- same command(claude→claude resume) / different command(claude→codex 교체) / drop-to-shell / restore-with-resume — 어디까지 1차로.
+**S-3. Scope of first-phase respawn support**
+- same command (claude→claude resume) / different command (replace claude→codex) / drop-to-shell / restore-with-resume — how far for the first phase.
 
-**S-4. dead 슬롯 보존 수준**
-- 마지막 화면(scrollback)·layout·exit status를 dead 슬롯에 얼마나 들고 있을지.
+**S-4. Level of dead-slot retention**
+- How much of the last screen (scrollback), layout and exit status to hold in the dead slot.
 
-## 권고 (단정 아님 — 선택지)
-judge 종합 권고 = **데이터 모델·exit-reason 분류는 GPT 안 그대로, 구현 경로는 "cmd /c 유지 + Rust AgentSlot 수명 격상"**(Gemini 정답). 이게 (나)의 UX를 ADR-0001/0005 불변식·Windows PTY 손상 없이 얻는 유일한 길. S-1은 (a)(추상 먼저)로 시작해 §0(저위험·장기는 미리)에 맞추고, S-2는 claude/codex=KeepDeadSlot 지향 권고.
+## Recommendation (not a verdict — choices)
+The judge's synthesized recommendation = **the data model and exit-reason classification exactly as in the GPT proposal, the implementation path "keep cmd /c + elevate the Rust AgentSlot lifetime"** (Gemini's correct answer). This is the only way to get the UX of (B) without damaging the ADR-0001/0005 invariants or the Windows PTY. Start S-1 with (a) (abstraction first) to fit §0 (low-risk long-term things laid down early), and S-2 leans toward claude/codex = KeepDeadSlot.
 
-## 다음
-S-1~S-4 사용자 선택 → **ADR-0017**(세션/죽음 구조: Slot≠Run≠Transport, death=Run 종료사건, Windows=Rust Slot 격상) 확정 → 변수/타입 스키마를 ADR-0016과 합쳐 코더로 구현(동작은 단계적).
+## Next
+User chooses S-1 to S-4 → **ADR-0017** (session/death structure: Slot≠Run≠Transport, death = Run end event, Windows = Rust Slot elevation) finalized → merge the variable/type schema with ADR-0016 and implement via a coder (behavior in stages).

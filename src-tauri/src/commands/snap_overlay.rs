@@ -1,26 +1,26 @@
-// ADR-0304 — 스냅 오버레이 feature
-//! 스냅 레이아웃 오버레이의 Tauri 어댑터 — invoke `report_max_button_rect`(TRD S26-window-chrome §8-4). ★셸 기능
-//! `snap-overlay` 뒤 · 기본 꺼짐★(사용자 결정 Q1 2026-10-24) — 이 파일 · 그 모듈 선언(`commands/mod.rs`) · invoke 등록
-//! (`lib.rs`)이 그 기능으로만 컴파일된다. 꺼진 빌드에서 창 사실 `caption.snap_overlay` 는 거짓이라(`commands/tab_drop.rs` 의
-//! `caption_chrome`) 웹이 이 invoke 를 부르지 않는다.
+// ADR-0304 — snap overlay feature
+//! The Tauri adapter of the snap layout overlay — invoke `report_max_button_rect` (TRD S26-window-chrome §8-4). ★Behind the shell feature
+//! `snap-overlay` · default off★ (user decision Q1 2026-10-24) — this file · its module declaration (`commands/mod.rs`) · the invoke registration
+//! (`lib.rs`) are compiled only with that feature. In a build where it is off, the window fact `caption.snap_overlay` is false (`caption_chrome` of
+//! `commands/tab_drop.rs`), so the web does not call this invoke.
 //!
-//! - 웹이 자기 최대화 단추 사각형(이 창 클라이언트의 물리 px)을 보고하면 platform `window::snap` 이 그 자리에 오버레이를
-//!   놓거나 옮기고, `rect: null` 이면 걷는다. 오버레이가 커서를 가져가므로 맴돎 바뀜은 그 창에 사건 [`EVT_SNAP_HOVER`]
-//!   (몸 = bool)로 돌려준다 — 웹이 단추 맴돎을 그 값으로 그린다(`src/components/layout/titleRow/snapOverlay.ts`).
-//! - 창 label 을 인자로 받지 않는다 — Tauri 가 넣어 주는 창이 그 값의 유일한 권위다(`report_window_min_width` 와 같은 규칙).
-//!   버스 명령이 아니다 — 측정 보고다(ADR-0227).
-//! - ★비동기로 바꾸지 말 것★ — 동기 명령은 메인 스레드에서 돌고, 오버레이 창은 부모 창 스레드(메인)에서 지어야 한다
-//!   (platform `window::snap` 머리 「스레드」). 다른 스레드에서 부르면 platform 의 부모 창 스레드 가드(`on_parent_thread`)가
-//!   아무것도 하지 않고 `Err` 로 거절한다 — 그러면 오버레이가 늘 안 선다.
-//! - OS `cfg` 를 두지 않는다 — OS 마다 다른 일은 platform 이 한다(ADR-0266 · TRD §8-3).
+//! - When the web reports its own maximize-button rectangle (physical px of this window's client), platform `window::snap` places or moves the overlay
+//!   there, and with `rect: null` it lifts it. The overlay takes the cursor, so hover changes are returned to that window as the event [`EVT_SNAP_HOVER`]
+//!   (body = bool) — the web draws the button hover with that value (`src/components/layout/titleRow/snapOverlay.ts`).
+//! - It does not take the window label as an argument — the window Tauri injects is the sole authority for that value (the same rule as `report_window_min_width`).
+//!   It is not a bus command — it is a measurement report (ADR-0227).
+//! - ★Do not change it to async★ — a synchronous command runs on the main thread, and the overlay window must be built on the parent window's thread (main)
+//!   (`window::snap` head of platform 「스레드」). If called from another thread, platform's parent-window-thread guard (`on_parent_thread`)
+//!   does nothing and rejects with `Err` — then the overlay never stands.
+//! - Do not put in an OS `cfg` — what differs per OS is done by platform (ADR-0266 · TRD §8-3).
 
 use engram_dashboard_platform::window::{snap, PhysRect};
 use tauri::{Emitter, WebviewWindow};
 
-/// 오버레이 맴돎 바뀜 — 셸 → 그 창. 몸 = bool(참 = 들어옴). 웹의 같은 이름 상수(`snapOverlay.ts`)와 짝이다.
+/// Overlay hover change — shell → that window. Body = bool (true = entered). Paired with the same-named constant on the web (`snapOverlay.ts`).
 pub const EVT_SNAP_HOVER: &str = "window:snap-hover";
 
-/// 최대화 단추 사각형 — 이 창 클라이언트의 물리 px(웹이 CSS px 에 `devicePixelRatio` 를 곱해 바깥으로 맞춘 값).
+/// Maximize-button rectangle — physical px of this window's client (the value the web fitted to the outside by multiplying CSS px by `devicePixelRatio`).
 #[derive(Debug, Clone, Copy, serde::Deserialize)]
 pub struct MaxButtonRect {
     pub x: i32,
@@ -29,8 +29,8 @@ pub struct MaxButtonRect {
     pub height: i32,
 }
 
-/// `invoke('report_max_button_rect', { rect })` — `rect` 가 있으면 오버레이를 놓거나 옮기고, `null` 이면 걷는다. 너비 · 높이가
-/// 1 보다 작거나 OS 호출이 실패하면 `Err` 다(그 창의 오버레이는 그대로).
+/// `invoke('report_max_button_rect', { rect })` — if `rect` is present, place or move the overlay, and if `null`, lift it. If the width · height is
+/// less than 1 or the OS call fails, it is `Err` (that window's overlay stays as is).
 #[tauri::command]
 pub fn report_max_button_rect(
     window: WebviewWindow,

@@ -1,6 +1,6 @@
-// Splitter 단위테스트 — 드래그·클릭·더블클릭·취소·잠김(ADR-0227, TRD §2f).
-// jsdom 은 레이아웃이 없어 루트의 getBoundingClientRect 를 목으로 준다. 포인터 캡처 API 는 jsdom 에 없을 수 있어
-// 컴포넌트가 선택적으로 부르고, 여기서는 창에 좌표를 실은 이벤트를 쏜다. rAF 는 손으로 비우는 큐로 바꾼다.
+// Splitter unit test — drag · click · double-click · cancel · locked (ADR-0227, TRD §2f).
+// jsdom has no layout, so give the root's getBoundingClientRect as a mock. The pointer capture API may be absent in jsdom, so
+// the component calls it optionally, and here we fire events carrying coordinates at the window. rAF is replaced by a queue flushed by hand.
 
 import { act, cleanup, fireEvent, render } from '@testing-library/react'
 import { StrictMode, useRef } from 'react'
@@ -93,7 +93,7 @@ const callCount = (h: ReturnType<typeof handlers>) =>
   h.onCancel.mock.calls.length +
   h.onReset.mock.calls.length
 
-/** 한 루트 아래 여러 구분선 — 구분선마다 따로 콜백을 단다. */
+/** Several dividers under one root — attach a separate callback to each divider. */
 function setupMany(splits: SplitRect[]) {
   const hs = splits.map(() => handlers())
   function Many() {
@@ -115,11 +115,11 @@ function setupMany(splits: SplitRect[]) {
   }))
 }
 
-// 좌우 분할은 x 축 — 루트 left 100·폭 1000 이라 clientX = 100 + 1000·정규화 좌표.
+// A left-right split is the x axis — root left 100 · width 1000, so clientX = 100 + 1000 · normalized coordinate.
 const at = (norm: number) => ROOT.left + ROOT.width * norm
 const down = (el: HTMLElement, clientX: number, clientY = 300, extra: PointerEventInit = {}) =>
   fireEvent.pointerDown(el, { clientX, clientY, pointerId: 1, button: 0, ...extra })
-// 누른 채 끄는 이동은 주 버튼이 눌린 상태(buttons bit 0)를 싣는다 — 컴포넌트가 버튼 없는 이동을 pointerup 유실로 본다.
+// A move dragged while held carries the primary button pressed state (buttons bit 0) — the component treats a move with no button as a lost pointerup.
 const move = (clientX: number, clientY = 300, pointerId = 1, buttons = 1) => {
   let notPrevented = true
   act(() => {
@@ -162,7 +162,7 @@ describe('Splitter — 드래그', () => {
     expect(s.onRelease).toHaveBeenCalledTimes(1)
     expect(s.onRelease).toHaveBeenCalledWith(0.75)
     expect(s.onCancel).not.toHaveBeenCalled()
-    // 뗀 뒤의 창 이벤트는 아무것도 부르지 않는다(리스너가 떨어졌다).
+    // Window events after release call nothing (the listener was detached).
     move(at(0.3))
     up(at(0.3))
     flushFrames()
@@ -185,7 +185,7 @@ describe('Splitter — 드래그', () => {
   })
 
   it('비율은 분할 상자 기준이다(위아래 분할 — y 축·루트 top/height)', () => {
-    // TB 상자 y = [0.2,1] → y 정규화 0.84 면 (0.84 − 0.2)/0.8.
+    // TB box y = [0.2,1] → y normalized 0.84 gives (0.84 − 0.2)/0.8.
     const s = setup(TB)
     fireEvent.pointerDown(s.el, { clientX: 700, clientY: ROOT.top + ROOT.height * 0.6, pointerId: 1, button: 0 })
     move(700, ROOT.top + ROOT.height * 0.84)
@@ -218,7 +218,7 @@ describe('Splitter — 드래그', () => {
     expect(s.onPreview).toHaveBeenCalledWith(0.3)
     expect(s.onRelease).toHaveBeenCalledWith(0.3)
     expect(s.onPreview.mock.invocationCallOrder[0]).toBeLessThan(s.onRelease.mock.invocationCallOrder[0])
-    // 취소된 프레임은 뒤늦게 돌지 않는다.
+    // A cancelled frame does not run late.
     flushFrames()
     expect(s.onPreview).toHaveBeenCalledTimes(1)
   })
@@ -309,7 +309,7 @@ describe('Splitter — 클릭·더블클릭', () => {
   it('움직임 없는 클릭(분할 축 좌표 불변) → 아무 콜백도 없다', () => {
     const s = setup()
     down(s.el, at(0.5), 300)
-    move(at(0.5), 320) // 분할 축(x)은 그대로, 직교 축만 움직임
+    move(at(0.5), 320) // The split axis (x) stays as is, only the orthogonal axis moves
     up(at(0.5), 320)
     fireEvent.click(s.el)
     flushFrames()
@@ -363,7 +363,7 @@ describe('Splitter — 여러 포인터', () => {
     document.body.style.cursor = 'wait'
     const [a, b, c] = setupMany([LR, TB, LR_HALF])
 
-    // C 는 다른 포인터로 끌리는 중 — 아래 교체와 무관하게 끝까지 잠금을 쥔다.
+    // C is being dragged with another pointer — it holds the lock to the end regardless of the replacement below.
     down(c.el, at(0.25), 300, { pointerId: 2 })
     move(at(0.3), 300, 2)
     down(a.el, at(0.5), 300, { pointerId: 1 })
@@ -374,7 +374,7 @@ describe('Splitter — 여러 포인터', () => {
     expect(a.onCancel).toHaveBeenCalledTimes(1)
     expect(document.body.style.userSelect).toBe('none')
 
-    // x 도 움직여 A 가 아직 살아 있다면 다른 비율로 반응하게 한다.
+    // Move x too so that if A were still alive it would react with a different ratio.
     move(800, 400, 1)
     move(820, 420, 1)
     flushFrames()
@@ -389,7 +389,7 @@ describe('Splitter — 여러 포인터', () => {
     expect(a.onRelease).not.toHaveBeenCalled()
     expect(a.onCancel).toHaveBeenCalledTimes(1)
     expect(c.called()).toBe(1)
-    // C 가 아직 끌리는 중이라 잠금이 남는다.
+    // C is still being dragged, so the lock remains.
     expect(document.body.style.cursor).toBe('col-resize')
     expect(document.body.style.userSelect).toBe('none')
 
@@ -425,7 +425,7 @@ describe('Splitter — 여러 포인터', () => {
     expect(document.body.style.cursor).toBe('row-resize')
     up(at(0.6), 300, 1)
     expect(a.onRelease).toHaveBeenCalledTimes(1)
-    // B 는 아직 끌리는 중 — 잠금이 남는다.
+    // B is still being dragged — the lock remains.
     expect(document.body.style.userSelect).toBe('none')
     expect(document.body.style.cursor).toBe('row-resize')
     up(700, 400, 2)
@@ -465,7 +465,7 @@ describe('Splitter — 취소', () => {
     expect(document.body.style.cursor).toBe('wait')
     expect(document.body.style.userSelect).toBe('')
     flushFrames()
-    // 리스너가 떨어졌다 — 다시 버튼을 쥔 이동·떼기에도 아무것도 부르지 않고 기본 동작도 막지 않는다.
+    // The listener was detached — even a move · release with the button held again calls nothing and does not prevent the default action either.
     expect(move(at(0.8))).toBe(true)
     up(at(0.8))
     flushFrames()

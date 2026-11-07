@@ -186,9 +186,10 @@ export interface AgentClient {
    */
   connect(): Promise<void>
   /**
-   * **명시 연결 해제(재연결 중단, ADR-0021 note3)** — graceful daemon_stop
-   * 후 부른다: closedByUser=true 로 즉시 'down' 정착해 5회 재연결 헛시도를 없앤다. ProtocolClient
-   * 자체(구독 라우터/콜백 레지스트리)는 유지하므로, 이후 connect 로 다시 살릴 수 있다(close 와 다름).
+   * **Explicit disconnect (stops reconnecting, ADR-0021 note3)** — called after a graceful daemon_stop:
+   * closedByUser=true settles on 'down' at once, so the transport does not keep retrying a daemon that is gone
+   * (the shell link retries without limit — ADR-0346). The ProtocolClient itself (subscription router, callback
+   * registry) stays, so a later connect revives it (unlike close).
    */
   disconnect(): void
 

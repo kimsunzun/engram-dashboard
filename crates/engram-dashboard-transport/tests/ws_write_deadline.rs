@@ -1,28 +1,28 @@
-//! 실소켓 ② — 상대가 안 읽을 때 쓰기 시한이 실제로 잘라내나, 그리고 그 쓰기 경로가 실패를 **값으로**
-//! 신고하나(TRD §9-1 · ADR-0177 결정 8).
+//! Real socket ② — when the peer does not read, does the write deadline really cut, and does that write path report failure **as a value**
+//! (TRD §9-1 · ADR-0177 decision 8).
 //!
-//! ★인메모리로는 원리상 못 재는 유일한 성질이다★ — 하네스의 `stall_writes` 는 **우리 쪽** 시한·큐
-//! 로직을 재고, 여기서 재는 것은 그 앞에 있는 **커널 send buffer** 다. 그것이 차서 쓰기가 영원히 안
-//! 끝나는 상태를 만들 수 있는 것은 실소켓뿐이다.
+//! ★The only property that in principle cannot be measured in memory★ — the harness's `stall_writes` measures **our side's** deadline and queue
+//! logic, and what is measured here is the **kernel send buffer** in front of it. Only a real socket can create the state where
+//! that buffer fills and a write never finishes.
 //!
-//! ★재는 자리★ — 통로 seam(`LinkTx::send` + `with_deadline`)과 감독의 쓰기 경로. 앞은 어댑터가 배압을
-//! 실제로 `Pending` 으로 옮기는지를, 뒤는 그 `Pending` 과 통로가 낸 오류가 각각 연결을 버리고 **사유를
-//! 이름 붙여** 올리는지를 잰다.
+//! ★Where it measures★ — the link seam (`LinkTx::send` + `with_deadline`) and the supervisor's write path. The first measures whether the adapter
+//! really turns backpressure into `Pending`, the second whether that `Pending` and the error the link gave each drop the connection and report **naming the
+//! reason**.
 //!
-//! ## 이 파일의 모양이 왜 이런가
+//! ## Why this file has this shape
 //!
-//! - ★프레임을 **반복해서** 미는 것이 핵심이다★ — 한 프레임을 크게 만드는 방식으로는 안 멈춘다.
-//!   근거(실측)의 정본은 `src/ws.rs` 헤더 「통로 성질」이고 여기 숫자를 베끼지 않는다. 소켓 버퍼 옵션도
-//!   결과를 바꾸지 않으므로 이 파일은 `WsDialer`·`WsListener` 를 그대로 쓴다.
-//! - ★감독 테스트가 `ping_interval`·`idle_timeout` 을 창 밖으로 밀어 두는 이유★ — 안 밀었을 때
-//!   (2s/5s) 통과의 출처가 **flood 가 아니라 t=4s 의 keepalive 쓰기**였고, 그 시한 만료가
-//!   `idle_timeout` 과 **같은 순간**(5.004s)에 도착했다(실측 2026-09-07). 즉 `Idle` 과 동전 던지기인
-//!   테스트였다. 멀리 밀면 그 창 안에서 `WriteDeadline` 을 만들 수 있는 것이 flood 하나뿐이 된다.
-//!   ★단 그 성질을 정책 값 두 줄에만 맡기지 않는다★ — 감독 테스트가 사건 도착 시각을 벽시계로 직접
-//!   재므로, 그 두 줄을 지우거나 [`common::PATIENCE`] 를 올려도 동전 던지기가 조용히 돌아오지 않는다.
-//! - ★직렬로 돈다★ — libtest 는 한 바이너리의 테스트를 동시에 돌리는데, 이 파일에는 일부러 loopback 을
-//!   포화시키는 테스트와 「어떤 쓰기도 시한에 안 걸렸다」를 단언하는 테스트가 함께 있다. 같은 커널
-//!   스택에서 겹치면 남의 부하가 그 단언을 빨갛게 만들 수 있다(작은 러너에서 실제 위험).
+//! - ★The key is pushing frames **repeatedly**★ — making one frame big does not stop it.
+//!   The canonical source of the evidence (measured) is the `src/ws.rs` header 「통로 성질」 and the numbers are not copied here. Socket buffer options also
+//!   do not change the result, so this file uses `WsDialer` and `WsListener` as they are.
+//! - ★Why the supervisor test pushes `ping_interval` and `idle_timeout` out of the window★ — when not pushed
+//!   (2s/5s) the source of the pass was **not the flood but the keepalive write at t=4s**, and that deadline expiry
+//!   arrived at **the same moment** as `idle_timeout` (5.004s) (measured 2026-09-07). That is, it was a
+//!   coin-flip with `Idle`. Pushed far away, the only thing that can produce `WriteDeadline` inside that window is the flood.
+//!   ★But that property is not left to two policy-value lines alone★ — the supervisor test directly measures the event arrival time against the wall clock,
+//!   so even if those two lines are deleted or [`common::PATIENCE`] is raised, the coin flip does not quietly return.
+//! - ★It runs serially★ — libtest runs the tests of one binary concurrently, and this file deliberately has a test that
+//!   saturates loopback together with a test that asserts 「어떤 쓰기도 시한에 안 걸렸다」 (no write hit the deadline). If they overlap on the same kernel
+//!   stack, someone else's load can turn that assertion red (a real risk on a small runner).
 #![cfg(all(feature = "ws", feature = "test-support"))]
 
 mod common;
@@ -35,56 +35,54 @@ use tokio::sync::{Mutex, MutexGuard};
 
 use engram_dashboard_transport::link::LinkRead;
 use engram_dashboard_transport::testing::{ImmediateHandshake, TestOut};
-use engram_dashboard_transport::ws::{WsDialer, WsListener};
+use engram_dashboard_transport::ws::WsListener;
 use engram_dashboard_transport::{
-    with_deadline, Dialer, DisconnectCause, Elapsed, Frame, Generation, LinkRx, LinkTx, PeerId,
-    Policy, SystemClock, TransportEvent,
+    with_deadline, Dialer, DisconnectCause, Elapsed, Frame, Generation, LinkRx, LinkTx, Listener,
+    PeerId, Policy, SystemClock, TransportEvent,
 };
 
-/// 한 번에 미는 프레임 크기.
+/// The frame size pushed at one time.
 const FRAME: usize = 1024 * 1024;
 
-/// 몇 프레임까지 밀어 보나. ★`ws.rs` 헤더가 적은 멈춤 지점의 스무 배 여유다★ — 다 들어가 버리면
-/// 아래 테스트가 이 숫자를 말하며 실패한다. 그때 커널이 삼키는 양이 바뀐 것이고, 올릴 자리가 여기다.
+/// How many frames to push up to. ★Twenty times the stall point recorded in the `ws.rs` header★ — if all of them go in,
+/// the test below fails citing this number. That means the amount the kernel swallows changed, and this is the place to raise it.
 const FRAME_BUDGET: usize = 64;
 
-/// 쓰기 시한.
+/// The write deadline.
 ///
-/// ★멈춘 쓰기는 상대가 읽지 않는 한 **영원히** 안 끝나므로 값이 커도 양성 신호가 흐려지지 않는다★ —
-/// 이 값이 막는 것은 반대쪽, 즉 「멀쩡한 쓰기가 느려서 걸리는」 거짓 양성이다.
+/// ★A stalled write **never** finishes unless the peer reads, so a large value does not blur the positive signal★ —
+/// what this value guards against is the opposite side, the false positive 「멀쩡한 쓰기가 느려서 걸리는」 (a healthy write is slow and hits it).
 const DEADLINE: Duration = Duration::from_secs(2);
 
-/// flood 전체에 걸리는 상한.
+/// The cap over the whole flood.
 ///
-/// ★최악치([`FRAME_BUDGET`] × [`DEADLINE`] = 128초)를 실제로 쓰는 경로는 없다★ — 안 읽는 상대에게는 몇
-/// 프레임 안에서 걸리고(`ws.rs` 헤더의 실측), 읽어 주는 상대에게는 loopback 이라 예산 전량이 금방
-/// 나간다. 이 상한이 잡는 것은 그 둘 다 아닌 상태(시한도 예산도 안 걸리고 느리게 흐르는 통로)이고,
-/// 공용 러너에서 두 자리 분(分)을 앉아 기다리는 대신 그 자리를 시끄럽게 만든다.
+/// ★No path actually uses the worst case ([`FRAME_BUDGET`] × [`DEADLINE`] = 128 seconds)★ — against a peer that does not read it hits within a few
+/// frames (the measurement in the `ws.rs` header), and against a peer that reads, it is loopback so the whole budget
+/// goes out quickly. What this cap catches is the state that is neither of those (a link flowing slowly that hits neither deadline nor budget),
+/// and instead of sitting and waiting two-digit minutes on a shared runner it makes that spot loud.
 const FLOOD_CAP: Duration = Duration::from_secs(20);
 
-/// 감독 테스트가 keepalive 를 밀어 두는 자리. ★파일 헤더의 실측이 그 사유고, 아래 벽시계 단언이 이
-/// 값을 판정 기준으로 되읽는다★.
+/// Where the supervisor test pushes keepalive out. ★The measurement in the file header is the reason, and the wall-clock assertion below reads this
+/// value back as the decision criterion★.
 const SUPERVISOR_PING_INTERVAL: Duration = Duration::from_secs(30);
 
-/// 감독 테스트가 침묵 시한을 밀어 두는 자리. 같은 사유다.
+/// Where the supervisor test pushes the silence deadline out. Same reason.
 const SUPERVISOR_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 
-/// 감독이 첫 멈춤에 닿을 만큼 한 번에 밀어 둘 프레임 수 = 나가는 큐 길이. 커널이 삼키는 양보다 크다
-/// (`ws.rs` 헤더).
+/// The number of frames to push at once so the supervisor reaches its first stall = the outgoing queue length. It is larger than what the kernel swallows
+/// (`ws.rs` header).
 const PARKED_BLOBS: usize = 16;
 
-/// 받는 쪽 상한을 **한 바이트** 넘는 payload. 상한 자체는 legal 이다(어댑터가 `>` 로 본다).
+/// A payload **one byte** over the receiving side's cap. The cap itself is legal (the adapter checks with `>`).
 ///
-/// ★임계값의 정본은 `ws.rs` 의 `MAX_OUTGOING_PAYLOAD` 이고 그것은 비공개라 여기서 부를 수 없다★ — 두
-/// 값이 어긋나면 이 프레임이 상한 아래로 내려앉아 아무 오류도 안 나고, 그때 아래 테스트는 조용히
-/// 통과하는 대신 상한에서 「끊김 사건이 안 왔다」로 빨개진다. 맞출 자리가 여기다.
-const OVER_LIMIT: usize = (16 << 20) + 1;
+/// The threshold is the cap this suite gave the dialing side ([`common::MAX_MESSAGE`]).
+const OVER_LIMIT: usize = common::MAX_MESSAGE + 1;
 
-/// 이 바이너리의 테스트를 한 번에 하나만 돌린다 — 사유는 파일 헤더 「직렬로 돈다」.
+/// Runs only one test of this binary at a time — the reason is 「직렬로 돈다」 in the file header.
 static SOCKET_LOCK: Mutex<()> = Mutex::const_new(());
 
-/// 지금 이 파일에서 몇 개가 돌고 있나. ★잠금을 지우면 여기가 1을 넘어 그 자리가 빨개진다★ — 직렬성을
-/// 구조에만 맡기면 다음 세션이 잠금을 「불필요한 장치」로 읽고 걷어도 아무도 모른다.
+/// How many in this file are running right now. ★If the lock is deleted this exceeds 1 and that spot turns red★ — if seriality is left
+/// to structure alone, the next session may read the lock as an 「불필요한 장치」 (unnecessary device) and remove it, and nobody would know.
 static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 
 struct OneAtATime {
@@ -109,10 +107,10 @@ async fn one_at_a_time() -> OneAtATime {
     held
 }
 
-/// 시한에 걸릴 때까지 프레임을 민다. 걸린 프레임 번호를 돌려주고, [`FRAME_BUDGET`] 을 다 밀고도
-/// 안 걸리면 `None`.
+/// Pushes frames until the deadline hits. Returns the number of the frame that hit, and `None` if it pushed all of [`FRAME_BUDGET`] and
+/// none hit.
 ///
-/// 패닉 조건: 시한 대신 통로 오류 · [`FLOOD_CAP`] 초과.
+/// Panics: a link error instead of the deadline · exceeding [`FLOOD_CAP`].
 async fn flood_until_cut(tx: &mut Box<dyn LinkTx>) -> Option<usize> {
     let flood = async {
         for nth in 0..FRAME_BUDGET {
@@ -139,20 +137,21 @@ async fn flood_until_cut(tx: &mut Box<dyn LinkTx>) -> Option<usize> {
     }
 }
 
-/// 핸드셰이크까지 끝난 통로 두 끝. ★거는 쪽과 받는 쪽이 서로를 기다리므로 함께 폴링해야 끝난다★.
+/// Both ends of a link that finished the handshake. ★The dialing side and the receiving side wait on each other, so it finishes only when polled together★.
 ///
-/// ★상한이 붙은 이유★ — TCP 는 붙었는데 WS 업그레이드가 안 끝나는 회귀는 두 future 를 **둘 다** 영구히
-/// `Pending` 으로 만든다. 그 자리는 시한도 [`common::PATIENCE`] 도 아직 시작되지 않은 지점이라, 상한이
-/// 없으면 뒤따르는 flood 가 유계인 것과 무관하게 테스트가 매달린다.
+/// ★Why there is a cap★ — a regression where TCP connected but the WS upgrade never finishes makes **both** futures `Pending` forever.
+/// That spot is a point where neither the deadline nor [`common::PATIENCE`] has started yet, so without a cap the test hangs regardless of the
+/// flood that follows being bounded.
 async fn connected_pair(
-    listener: &WsListener,
+    listener: &mut WsListener,
 ) -> (
     (Box<dyn LinkTx>, Box<dyn LinkRx>),
     (Box<dyn LinkTx>, Box<dyn LinkRx>),
 ) {
-    let addr = listener.dial_address().expect("dial_address");
+    let addr = listener.dial_address();
+    let dialer = common::dialer();
     let (accepted, dialed) = tokio::time::timeout(common::PATIENCE, async {
-        tokio::join!(listener.accept(), WsDialer.dial(&addr))
+        tokio::join!(common::accept_link(listener), dialer.dial(&addr))
     })
     .await
     .expect("핸드셰이크 상한 — TCP 는 붙었는데 WS 업그레이드가 안 끝난 것이 첫 가설이다");
@@ -162,11 +161,11 @@ async fn connected_pair(
 #[tokio::test]
 async fn writes_into_a_peer_that_never_reads_are_cut_by_the_deadline() {
     let _one_at_a_time = one_at_a_time().await;
-    let listener = WsListener::bind("127.0.0.1:0").await.expect("bind");
+    let mut listener = common::listen();
 
-    // ★받은 통로를 붙들고 **한 번도 폴링하지 않는다**★ — 그래서 받는 쪽 커널 버퍼가 차고, 이어서
-    //   보내는 쪽이 멈춘다. 떨어뜨리면 소켓이 닫혀 시한이 아니라 통로 오류가 난다.
-    let (_never_read, (mut tx, _rx)) = connected_pair(&listener).await;
+    // ★Hold the accepted link and **never poll it**★ — so the receiving side's kernel buffer fills, and then
+    //   the sending side stalls. If dropped, the socket closes and a link error arises instead of the deadline.
+    let (_never_read, (mut tx, _rx)) = connected_pair(&mut listener).await;
 
     let cut = flood_until_cut(&mut tx).await;
     assert!(
@@ -177,19 +176,19 @@ async fn writes_into_a_peer_that_never_reads_are_cut_by_the_deadline() {
 
 #[tokio::test]
 async fn the_same_writes_into_a_peer_that_reads_are_never_cut() {
-    // ★위 테스트의 반대쪽이다★ — 이것이 없으면 「이만한 쓰기는 무조건 시한에 걸린다」는 구현도 통과한다.
-    //   프레임 수·크기·시한이 전부 같고 다른 것은 상대가 읽는지 하나뿐이다.
+    // ★This is the opposite side of the test above★ — without it an implementation of 「이만한 쓰기는 무조건 시한에 걸린다」 (a write this size always hits the deadline) passes too.
+    //   Frame count, size and deadline are all the same and the only difference is whether the peer reads.
     let _one_at_a_time = one_at_a_time().await;
-    let listener = WsListener::bind("127.0.0.1:0").await.expect("bind");
+    let mut listener = common::listen();
 
-    let ((_server_tx, mut server_rx), (mut tx, _rx)) = connected_pair(&listener).await;
+    let ((_server_tx, mut server_rx), (mut tx, _rx)) = connected_pair(&mut listener).await;
 
     let drain = tokio::spawn(async move {
         let mut seen = 0usize;
         while seen < FRAME_BUDGET * FRAME {
-            // ★바이너리 아닌 것이 오면 그 자리에서 말한다★ — 건너뛰면 원인이 바이트 수 불일치로
-            //   둔갑한다. 오늘 이 통로에 keepalive 를 보내는 것은 없지만(감독이 아니라 생 통로다)
-            //   그것이 이 단언의 전제다.
+            // ★If something non-binary arrives, say so on the spot★ — if skipped, the cause is disguised as a byte-count
+            //   mismatch. Today nothing sends keepalive on this link (it is a raw link, not the supervisor)
+            //   and that is the premise of this assertion.
             match server_rx.recv().await {
                 Ok(LinkRead::Frame(Frame::Binary(bytes))) => seen += bytes.len(),
                 other => panic!("읽어 주는 쪽에 바이너리 프레임 대신 {other:?} 가 왔다 (여기까지 {seen} 바이트)"),
@@ -213,23 +212,23 @@ async fn the_same_writes_into_a_peer_that_reads_are_never_cut() {
 #[tokio::test]
 async fn the_supervisor_names_the_write_deadline_when_it_drops_a_parked_link() {
     let _one_at_a_time = one_at_a_time().await;
-    let listener = WsListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr = listener.dial_address().expect("dial_address");
+    let mut listener = common::listen();
+    let addr = listener.dial_address();
 
     let policy = Policy {
         write_deadline: Duration::from_millis(500),
-        // ★keepalive 와 침묵 시한을 창 밖으로 밀어 둔다★ — 파일 헤더의 실측이 그 사유다. 이 창 안에서
-        //   `WriteDeadline` 을 만들 수 있는 것이 아래 flood 하나뿐이어야 판정이 선다.
+        // ★Push keepalive and the silence deadline out of the window★ — the measurement in the file header is the reason. The decision stands only if the flood below is the only thing that can produce
+        //   `WriteDeadline` inside this window.
         ping_interval: SUPERVISOR_PING_INTERVAL,
         idle_timeout: SUPERVISOR_IDLE_TIMEOUT,
-        // 감독이 첫 멈춤에 닿을 만큼을 한 번에 밀어 둘 자리.
+        // Where to push, at once, enough for the supervisor to reach its first stall.
         outbound_queue: PARKED_BLOBS,
         ..Policy::default()
     };
-    let (registry, mut inbound) = common::registry(Arc::new(WsDialer), policy);
-    let peer = registry.add(PeerId::new("d1"), addr, Arc::new(ImmediateHandshake));
+    let registry = common::registry(Arc::new(common::dialer()), policy);
+    let (peer, mut inbox) = registry.add(PeerId::new("d1"), addr, Arc::new(ImmediateHandshake));
 
-    // ★받고 나서 한 번도 폴링하지 않는다★ — 위 테스트와 같은 이유다.
+    // ★After receiving, never poll it★ — same reason as the test above.
     let _never_read = tokio::time::timeout(common::PATIENCE, listener.accept())
         .await
         .expect("수락 상한")
@@ -243,7 +242,7 @@ async fn the_supervisor_names_the_write_deadline_when_it_drops_a_parked_link() {
     }
 
     let cause = common::wait_incoming(
-        &mut inbound,
+        &mut inbox,
         &format!(
             "Disconnected 사건(첫 가설 = {PARKED_BLOBS}개 × {FRAME} 바이트에서는 커널이 더는 멈추지 \
              않는다)"
@@ -260,10 +259,10 @@ async fn the_supervisor_names_the_write_deadline_when_it_drops_a_parked_link() {
         DisconnectCause::WriteDeadline,
         "멈춘 쓰기를 다른 사유로 끊었다"
     );
-    // ★사유 이름만으로는 그 출처가 flood 인지 t=주기 의 keepalive 쓰기인지 안 갈린다★ — 그 갈림을 위
-    //   정책 두 줄에만 맡기면, 그 줄을 지우는 사람도 [`common::PATIENCE`] 를 올리는 사람도 동전
-    //   던지기를 되살린 것을 모른다. 그래서 사건이 그 주기보다 훨씬 이르게(3배 여유) 왔다는 것을 여기서
-    //   직접 잰다.
+    // ★The reason name alone cannot tell whether the source was the flood or the keepalive write at t=period★ — if that distinction is left
+    //   to the two policy lines above alone, neither the person who deletes those lines nor the person who raises
+    //   [`common::PATIENCE`] would know they revived the coin flip. So here we directly measure that the event came
+    //   far earlier than that period (with a 3x margin).
     assert!(
         waited * 3 < SUPERVISOR_PING_INTERVAL,
         "WriteDeadline 이 {waited:?} 만에 왔다 — keepalive 주기({SUPERVISOR_PING_INTERVAL:?})에 가까우면 \
@@ -272,16 +271,16 @@ async fn the_supervisor_names_the_write_deadline_when_it_drops_a_parked_link() {
 }
 
 #[tokio::test]
-async fn an_oversized_frame_is_reported_as_a_link_error_instead_of_killing_the_supervisor() {
-    // ★재는 것은 「값으로 실패하나」다★ — 이 자리가 패닉이면 감독 태스크가 그 안에서 죽고, 그
-    //   `JoinHandle` 을 아무도 안 쥐고 있어 패닉을 **관측하는 자리가 없다**: 발행된 상태가 `Live` 에
-    //   영구히 얼고 끊김 사건도 재연결도 안 난다. 그래서 이 테스트가 재는 것은 사건이 **오는지**다.
+async fn an_oversized_frame_is_reported_as_a_write_failure_instead_of_killing_the_supervisor() {
+    // ★What is measured is 「값으로 실패하나」 (does it fail as a value)★ — if this spot panics, the supervisor task dies inside it, and nobody holds that
+    //   `JoinHandle`, so there is **no place to observe the panic**: the emitted state freezes at `Live`
+    //   forever and neither a disconnect event nor a reconnect happens. So what this test measures is whether the event **comes**.
     let _one_at_a_time = one_at_a_time().await;
-    let listener = WsListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr = listener.dial_address().expect("dial_address");
+    let mut listener = common::listen();
+    let addr = listener.dial_address();
 
-    // ★받은 통로를 붙들고만 있는다★ — 재연결이 실제로 붙어야 아래 둘째 세대 단언이 선다. 폴링하지
-    //   않는 것은 이 파일의 다른 테스트와 같은 이유이고, 여기 프레임은 애초에 소켓에 닿지 않는다.
+    // ★Only hold the accepted link★ — the reconnect must actually connect for the second-generation assertion below to stand. Not polling
+    //   is for the same reason as the other tests in this file, and the frames here never reach the socket in the first place.
     let server = tokio::spawn(async move {
         let mut links = Vec::new();
         while let Ok(link) = listener.accept().await {
@@ -289,15 +288,15 @@ async fn an_oversized_frame_is_reported_as_a_link_error_instead_of_killing_the_s
         }
     });
 
-    let (registry, mut inbound) = common::registry(Arc::new(WsDialer), Policy::default());
-    let peer = registry.add(PeerId::new("d1"), addr, Arc::new(ImmediateHandshake));
+    let registry = common::registry(Arc::new(common::dialer()), Policy::default());
+    let (peer, mut inbox) = registry.add(PeerId::new("d1"), addr, Arc::new(ImmediateHandshake));
     common::wait_state(&peer, "운영 단계", |state| state.is_live()).await;
 
     peer.notify(TestOut::Blob(vec![0u8; OVER_LIMIT]))
         .expect("나가는 큐");
 
     let cause = common::wait_incoming(
-        &mut inbound,
+        &mut inbox,
         "Disconnected 사건(첫 가설 = 그 쓰기가 값 대신 패닉으로 실패해 감독이 죽었다)",
         |msg| match msg.as_event() {
             Some(TransportEvent::Disconnected { cause, .. }) => Some(*cause),
@@ -307,13 +306,13 @@ async fn an_oversized_frame_is_reported_as_a_link_error_instead_of_killing_the_s
     .await;
     assert_eq!(
         cause,
-        DisconnectCause::LinkError,
+        DisconnectCause::WriteFailed,
         "상한을 넘은 프레임을 다른 사유로 끊었다"
     );
 
-    // ★감독이 살아 있다는 증거는 다음 통로다★ — 죽은 감독은 재연결하지 않는다.
+    // ★The evidence that the supervisor is alive is the next link★ — a dead supervisor does not reconnect.
     let generation = common::wait_incoming(
-        &mut inbound,
+        &mut inbox,
         "재연결의 Connected 사건(첫 가설 = 감독이 그 쓰기에서 죽었다)",
         |msg| match msg.as_event() {
             Some(TransportEvent::Connected { generation, .. }) => Some(*generation),

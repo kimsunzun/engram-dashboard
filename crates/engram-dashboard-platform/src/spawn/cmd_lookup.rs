@@ -1,5 +1,5 @@
-//! `cmd.exe /c <대상>` 의 대상 찾기 — [`super::MissingProgramCheck`] 의 Windows 갈래. cmd 와 같은 규칙(작업 폴더 →
-//! `PATH`, 확장자 = `PATHEXT`)으로 찾고, 같은 대상의 찾기는 프로세스 전체에서 한 번에 하나다([`LookupGate`]).
+//! Lookup of the target of `cmd.exe /c <대상>` — the Windows branch of [`super::MissingProgramCheck`]. It looks by the same rules as cmd (working folder →
+//! `PATH`, extension = `PATHEXT`), and a lookup for the same target runs once at a time across the whole process ([`LookupGate`]).
 // ADR-0266
 
 use std::collections::BTreeSet;
@@ -19,7 +19,7 @@ pub(super) fn is_cmd_shell(program: &str) -> bool {
         .is_some_and(|stem| stem.eq_ignore_ascii_case("cmd"))
 }
 
-/// cmd 의 내부 명령 — 이 이름은 파일로 찾지 않는다.
+/// cmd's internal commands — these names are not looked up as files.
 const CMD_BUILTINS: &[&str] = &[
     "assoc", "break", "call", "cd", "chdir", "cls", "color", "copy", "date", "del", "dir", "dpath",
     "echo", "endlocal", "erase", "exit", "for", "ftype", "goto", "if", "keys", "md", "mkdir",
@@ -27,7 +27,7 @@ const CMD_BUILTINS: &[&str] = &[
     "rmdir", "set", "setlocal", "shift", "start", "time", "title", "type", "ver", "verify", "vol",
 ];
 
-/// `cmd.exe … /c <대상> …` 의 대상 — 프로그램 이름 한 낱말일 때만(공백·cmd 특수 문자·내부 명령이면 `None`).
+/// The target of `cmd.exe … /c <대상> …` — only when it is a one-word program name (`None` for spaces, cmd special characters or an internal command).
 fn cmd_target<'a>(program: &str, args: &'a [String]) -> Option<&'a str> {
     if !is_cmd_shell(program) {
         return None;
@@ -45,8 +45,8 @@ fn cmd_target<'a>(program: &str, args: &'a [String]) -> Option<&'a str> {
     (plain && !builtin).then_some(target)
 }
 
-/// 자식이 받을 env 의 값 — `env_set`(마지막이 이김) → `env_remove` → 이 프로세스 자신의 값 순. Windows 이름
-/// 규칙대로 대소문자를 가리지 않는다.
+/// The value of the env the child will receive — in the order `env_set` (the last wins) → `env_remove` → this process's own value. Case-insensitive,
+/// per Windows name rules.
 fn child_env(env_set: &[(String, String)], env_remove: &[String], key: &str) -> Option<OsString> {
     if let Some((_, value)) = env_set
         .iter()
@@ -61,7 +61,7 @@ fn child_env(env_set: &[(String, String)], env_remove: &[String], key: &str) -> 
     std::env::var_os(key)
 }
 
-/// `cmd.exe /c <대상>` 의 대상 찾기 — 자식이 받은 env(`PATH`·`PATHEXT`)와 작업 폴더를 기동 때 떠 둔다.
+/// Lookup of the target of `cmd.exe /c <대상>` — the env the child received (`PATH` · `PATHEXT`) and the working folder are captured at startup.
 #[derive(Clone)]
 pub(super) struct CmdLookup {
     target: String,
@@ -95,8 +95,8 @@ impl CmdLookup {
         })
     }
 
-    /// ★원격 칸은 건너뛴다★([`is_remote`]) — 건너뛴 칸에만 있는 프로그램은 「없다」로 판정된다. 느린 원격 칸이
-    ///   판정을 붙잡는 것보다 그쪽을 택했다(그 칸의 프로그램이 **실패했을 때만** 틀린다).
+    /// ★Remote entries are skipped★ ([`is_remote`]) — a program that exists only in a skipped entry is decided 「없다」 (missing). We chose that over
+    ///   a slow remote entry holding up the decision (it is wrong **only when the program in that entry failed**).
     fn resolve(&self, deadline: Instant) -> TargetLookup {
         let pathext = self
             .pathext
@@ -108,11 +108,11 @@ impl CmdLookup {
             .map(str::trim)
             .filter(|ext| !ext.is_empty())
             .collect();
-        // 정의됐지만 비었으면(`PATHEXT=`) 없는 것과 같게 기본 목록을 쓴다.
+        // If defined but empty (`PATHEXT=`), use the default list as if it were absent.
         if exts.is_empty() {
             exts = Self::DEFAULT_PATHEXT.split(';').collect();
         }
-        // `symlink_metadata` = 재분석 지점을 따라가지 않는다 — 앱 실행 별칭(WindowsApps)은 따라가면 열리지 않는다.
+        // `symlink_metadata` = does not follow reparse points — an app execution alias (WindowsApps) cannot be opened if followed.
         let present = |path: &Path| std::fs::symlink_metadata(path).is_ok_and(|m| !m.is_dir());
         let found_in = |dir: &Path| {
             let exact = dir.join(&self.target);
@@ -130,7 +130,7 @@ impl CmdLookup {
                 TargetLookup::Missing
             }
         };
-        // 경로로 준 대상은 그 자리만 본다(상대 경로 = 작업 폴더 기준).
+        // A target given as a path is looked at in that place only (relative path = relative to the working folder).
         if self.target.contains(['\\', '/', ':']) {
             if is_remote(&self.cwd.join(&self.target)) {
                 return TargetLookup::Unknown;
@@ -143,7 +143,7 @@ impl CmdLookup {
         let Some(path) = &self.path else {
             return TargetLookup::Missing;
         };
-        // 빈 칸은 건너뛴다 · 상대 칸은 cmd 처럼 작업 폴더 기준이다(이 프로세스의 작업 폴더가 아니다).
+        // Empty entries are skipped · relative entries are relative to the working folder, like cmd (not this process's working folder).
         for entry in std::env::split_paths(path) {
             if entry.as_os_str().is_empty() {
                 continue;
@@ -163,15 +163,15 @@ impl CmdLookup {
     }
 }
 
-/// 운영의 찾기 명단 — 프로세스 전체에 하나다([`run_bounded`]).
+/// The production lookup list — one across the whole process ([`run_bounded`]).
 pub(super) static LOOKUPS_IN_FLIGHT: LookupGate = LookupGate::new();
 
-/// 도는 중인 대상 찾기의 명단 — ★같은 대상의 찾기는 한 번에 하나, 대상이 다르면 서로 막지 않는다★. 대상 이름의
-/// ASCII 대소문자는 가리지 않는다(Windows 이름은 대소문자를 안 가린다 — ASCII 밖은 접지 않는다).
+/// The list of target lookups in progress — ★a lookup for the same target runs once at a time; different targets do not block each other★. The target name's
+/// ASCII case is ignored (Windows names are case-insensitive — non-ASCII is not folded).
 ///
-/// ★프로세스에 하나인 표식으로 합치지 말 것★ — 판정은 나란히 돈다(agent 사용량 조회는 벤더마다 따로 판정한다).
-///   두 대상이 다 없으면 두 셸이 몇 ms 안에 함께 실패하고, 뒤의 판정이 앞의 찾기에 막혀 「없다」 대신 「모른다」가
-///   된다.
+/// ★Do not merge it into a one-per-process marker★ — decisions run side by side (the agent usage query decides separately per vendor).
+///   If both targets are missing, two shells fail together within a few ms, and the later decision is blocked by the earlier lookup and becomes 「모른다」 (unknown) instead of
+///   「없다」 (missing).
 pub(super) struct LookupGate(Mutex<BTreeSet<String>>);
 
 impl LookupGate {
@@ -179,8 +179,8 @@ impl LookupGate {
         Self(Mutex::new(BTreeSet::new()))
     }
 
-    /// `target` 의 자리를 잡았나 — 이미 도는 중이면 거짓. ★잠금이 독에 걸렸으면(앞선 패닉) 도는 중으로 친다★ —
-    /// 패닉을 퍼뜨리지 않고 판정을 「모른다」로 둔다. 독은 걷지 않는다 — 그 뒤 이 명단의 판정은 늘 「모른다」다.
+    /// Did it claim the slot for `target` — false if one is already running. ★If the lock is poisoned (an earlier panic), it counts as running★ —
+    /// it does not spread the panic and leaves the decision 「모른다」 (unknown). The poison is not cleared — afterwards decisions on this list are always 「모른다」 (unknown).
     fn claim(&self, target: &str) -> bool {
         match self.0.lock() {
             Ok(mut running) => running.insert(target.to_ascii_lowercase()),
@@ -195,14 +195,14 @@ impl LookupGate {
             .remove(&target.to_ascii_lowercase());
     }
 
-    /// 시험마다 제 명단 — 병렬로 도는 시험끼리 서로의 찾기를 「도는 중」으로 보지 않게(운영 명단은 하나다).
+    /// Each test gets its own list — so tests running in parallel do not see each other's lookups as 「도는 중」 (running) (production has one list).
     #[cfg(test)]
     pub(super) fn own() -> &'static Self {
         Box::leak(Box::new(Self::new()))
     }
 }
 
-/// drop 되면 그 대상의 자리를 비운다 — 찾기가 패닉해도 자리가 영영 차 있지 않게.
+/// When dropped it frees that target's slot — so the slot is not left occupied forever even if the lookup panics.
 struct InFlight {
     gate: &'static LookupGate,
     target: String,
@@ -214,12 +214,12 @@ impl Drop for InFlight {
     }
 }
 
-/// `resolve` 를 딴 스레드에서 돌리고 마감까지만 기다린다 — 파일 시스템 조회 하나가 원격 칸에서 오래 막혀도
-/// (가르지 못한 네트워크 드라이브 등) 판정이 마감을 넘기지 않는다. 막힌 스레드는 그 조회가 풀릴 때 스스로 끝난다.
+/// Runs `resolve` on another thread and waits only until the deadline — even if one file-system query blocks for a long time on a remote entry
+/// (a network drive that cannot be told apart etc.), the decision does not go past the deadline. The stuck thread ends by itself when that query is released.
 ///
-/// ★`target` 의 찾기가 도는 동안은 새로 띄우지 않고 곧바로 [`TargetLookup::Busy`] 다★([`LookupGate`]) — 마감을
-///   넘겨 남은 스레드가 막혀 있는 동안 실패한 조회가 되풀이되면 막힌 스레드가 조회마다 하나씩 쌓인다. 그 사이의
-///   판정은 「모른다」라 「없다」로 접히지 않는다.
+/// ★While a lookup for `target` is running, it does not launch a new one but is [`TargetLookup::Busy`] right away★ ([`LookupGate`]) — if failed lookups
+///   repeat while a thread left past the deadline is stuck, one stuck thread would pile up per lookup. The decision in between
+///   is 「모른다」 (unknown), so it does not fold into 「없다」 (missing).
 fn run_bounded(
     deadline: Instant,
     gate: &'static LookupGate,
@@ -240,13 +240,13 @@ fn run_bounded(
             move || {
                 let release = InFlight { gate, target };
                 let found = resolve();
-                // 결과를 보내기 전에 비운다 — 받은 쪽이 곧바로 다음 판정을 해도 「아직 도는 중」으로 보이지 않게.
+                // Free it before sending the result — so that even if the receiver makes the next decision right away it does not look like 「아직 도는 중」 (still running).
                 drop(release);
                 let _ = tx.send(found);
             }
         });
     if let Err(e) = started {
-        // 몸체가 돌지 않았으니 자리를 비울 가드도 없다 — 여기서 비운다.
+        // The body did not run, so there is no guard to free the slot either — free it here.
         gate.release(target);
         return TargetLookup::NoThread(e.to_string());
     }
@@ -259,9 +259,9 @@ fn remaining(deadline: Instant) -> Option<Duration> {
         .filter(|left| !left.is_zero())
 }
 
-/// 원격일 수 있는 자리 — UNC(`\\서버\공유` · `\\?\UNC\…`)와 드라이브가 아닌 장치 이름공간(`\\.\…` · `\\?\…`).
-/// ★드라이브 문자로 연결한 네트워크 드라이브는 못 가른다★ — 가르는 API(`GetDriveTypeW`)가 이 crate 가 켜 둔
-///   `windows` 기능(`Win32_Storage_FileSystem`) 밖이다. 그런 칸이 막히면 [`CmdLookup::run_within`] 의 마감이 끊는다.
+/// A location that may be remote — UNC (`\\서버\공유` · `\\?\UNC\…`) and non-drive device namespaces (`\\.\…` · `\\?\…`).
+/// ★A network drive connected by drive letter cannot be told apart★ — the API that tells them apart (`GetDriveTypeW`) lives in the `windows` feature
+///   (`Win32_Storage_FileSystem`), which this crate does not turn on. If such an entry blocks, the deadline of [`CmdLookup::run_within`] cuts it.
 fn is_remote(path: &Path) -> bool {
     use std::path::{Component, Prefix};
     match path.components().next() {
@@ -285,7 +285,7 @@ mod tests {
         Instant::now() + FAR
     }
 
-    /// 시험 하나의 임시 폴더 — drop 하면 지운다.
+    /// A temp folder for one test — deleted when dropped.
     struct TempRoot(PathBuf);
 
     impl TempRoot {
@@ -405,7 +405,7 @@ mod tests {
             TargetLookup::Found,
             "경로로 준 대상"
         );
-        // 상대 칸은 이 프로세스가 아니라 자식의 작업 폴더 기준이다.
+        // Relative entries are relative to the child's working folder, not this process's.
         assert_eq!(
             lookup("engram-probe-tool", root.path(), &[("PATH", "bin")], &[]),
             TargetLookup::Found,
@@ -413,7 +413,7 @@ mod tests {
         );
     }
 
-    /// 정의됐지만 빈 `PATHEXT` 는 없는 것과 같다 — 기본 확장자 목록을 쓴다.
+    /// A defined but empty `PATHEXT` is the same as absent — the default extension list is used.
     #[test]
     fn an_empty_pathext_means_the_default_list() {
         let root = TempRoot::new("probe-empty-pathext");
@@ -432,7 +432,7 @@ mod tests {
         }
     }
 
-    /// 원격 칸은 건너뛴다 — 닿지 않는 UNC 칸이 판정을 붙잡지 않는다.
+    /// Remote entries are skipped — an unreachable UNC entry does not hold up the decision.
     #[test]
     fn remote_path_entries_are_skipped() {
         for remote in [
@@ -487,7 +487,7 @@ mod tests {
         );
     }
 
-    /// 마감이 지나면 「모른다」다 — 「없다」가 아니다.
+    /// Past the deadline it is 「모른다」 (unknown) — not 「없다」 (missing).
     #[test]
     fn a_lookup_out_of_time_is_unknown() {
         let root = TempRoot::new("probe-lookup-late");
@@ -511,8 +511,8 @@ mod tests {
         assert_eq!(lookup.run_within(far(), gate), TargetLookup::Missing);
     }
 
-    /// ★같은 대상의 찾기는 한 번에 하나다★ — 마감을 넘겨 막힌 찾기가 남아 있는 동안 같은 대상(ASCII 대소문자
-    /// 무시)의 판정은 새로 찾지 않고 「모른다」다. 다른 대상은 그 사이에도 찾는다.
+    /// ★A lookup for the same target runs once at a time★ — while a lookup stuck past the deadline remains, a decision on the same target (ASCII case
+    /// ignored) does not look anew and is 「모른다」 (unknown). Other targets are still looked up in the meantime.
     #[test]
     fn a_lookup_still_in_flight_keeps_a_second_one_for_the_same_target_from_starting() {
         let gate = LookupGate::own();
@@ -558,8 +558,8 @@ mod tests {
         });
     }
 
-    /// ★대상이 다르면 동시에 찾는다★ — 두 대상이 다 없어 두 판정이 겹쳐도 둘 다 「없다」에 닿는다. 각 찾기가
-    /// 다른 쪽이 도는 중일 때까지 기다리므로, 한쪽이 막히면 다른 쪽도 마감에서 「모른다」가 된다.
+    /// ★Different targets are looked up at the same time★ — even if two decisions overlap with both targets missing, both reach 「없다」 (missing). If each lookup
+    /// waited until the other was done running, one being blocked would make the other 「모른다」 (unknown) at the deadline too.
     #[test]
     fn lookups_for_different_targets_run_side_by_side() {
         let gate = LookupGate::own();
@@ -579,7 +579,7 @@ mod tests {
         assert_eq!(second.join().expect("둘째 판정"), TargetLookup::Missing);
     }
 
-    /// 독에 걸린 명단은 「도는 중」으로 친다 — 패닉하지 않고, 찾지도 않고 「모른다」다.
+    /// A poisoned list counts as 「도는 중」 (running) — it does not panic, does not look, and is 「모른다」 (unknown).
     #[test]
     fn a_poisoned_gate_means_unknown_without_a_panic() {
         let gate = LookupGate::own();

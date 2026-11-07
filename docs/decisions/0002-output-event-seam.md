@@ -1,20 +1,20 @@
-# ADR-0002: 출력 seam = OutputEvent (터미널 가정 금지)
+# ADR-0002: Output seam = OutputEvent (no terminal assumption)
 
-- 상태: 확정 (S10 백엔드 추상화)
+- 상태: 확정 (S10 backend abstraction)
 - 관련: CLAUDE.md 「백엔드 확장」 · `types.rs::OutputEvent` · `Capabilities.output`
 
 ## 맥락
-멀티 백엔드(claude/codex 콘솔 + API)의 출력을 무엇으로 모델링할지. 콘솔은 터미널 바이트지만 API는 구조화된 텍스트/usage/tool call이다.
+What should the output of multiple backends (claude/codex console + API) be modeled as? A console produces terminal bytes, but an API produces structured text/usage/tool calls.
 
 ## 결정
-`OutputEvent`를 **확장 enum**으로 둔다 — 터미널 바이트는 한 variant일 뿐이고, API는 `TextDelta`/`Usage`/`ToolCall` 등. 출력 종류는 `capabilities.output`(terminal_bytes/markdown/tool_events/usage)로 구분하고, 슬롯이 그에 맞는 렌더러를 고른다(터미널=xterm / API=구조화·마크다운 뷰).
+`OutputEvent` is an **extensible enum** — terminal bytes are just one variant, and the API uses `TextDelta`/`Usage`/`ToolCall` and so on. The kind of output is distinguished by `capabilities.output` (terminal_bytes/markdown/tool_events/usage), and the slot picks the renderer that fits it (terminal = xterm / API = structured/markdown view).
 
 ## 거부한 대안
-- **"API도 가상 터미널에 물려 같은 바이트 스트림으로"** — S10 이전 가정. **폐기.** API는 터미널이 아닐 수 있어 바이트 강제는 구조화 출력(usage/tool call)을 표현 못 한다.
+- **"Attach the API to a virtual terminal too and use the same byte stream"** — the assumption before S10. **Withdrawn.** An API may not be a terminal, so forcing bytes cannot express structured output (usage/tool call).
 
 ## 근거
-장기 멀티백엔드 전제(§0 저위험·장기 → 미리 깐다). seam을 터미널에 묶으면 API 모델 도입 때 전면 재설계.
+The premise is a long-term multi-backend design (§0 low risk, long term → lay it down in advance). If the seam is tied to the terminal, introducing an API model means a full redesign.
 
 ## 영향 / 불변식
-- **출력은 종류를 가정하지 않는다(터미널 강제 금지).**
-- API variant(TextDelta/Usage 등) 본체는 API 모델 등장 때 채움(현재 enum 자리만).
+- **Output does not assume its kind (forcing a terminal is forbidden).**
+- The body of the API variants (TextDelta/Usage etc.) is filled in when an API model appears (for now, only the enum slot).

@@ -1,39 +1,39 @@
-# ADR-0137: dev 빌드에 별도 번들 identifier — 릴리스 앱과 동시 실행
+# ADR-0137: A separate bundle identifier for the dev build — running alongside the release app
 
-- 상태: 확정 (2026-08-16, 근거: 실측 + 플러그인 소스 확인 2.4.2/2.4.3) · 부분 폐기 by ADR-0283 (영향의 WebView2 데이터 폴더 대가 서술)
-- 관련: ADR-0134(단일 인스턴스 스코프) · ADR-0135(잠금 파일 = 연결키) · `src-tauri/tauri.dev.conf.json` · `scripts/tauri-cli.mjs` · step-log S21 · Amended by ADR-0283 (영향의 WebView2 데이터 폴더 대가 서술)
+- 상태: 확정 (2026-08-16, grounds: measured + plugin source check 2.4.2/2.4.3) · 부분 폐기 by ADR-0283 (the WebView2 data folder cost statement in 영향)
+- 관련: ADR-0134(single-instance scope) · ADR-0135(lock file = connection key) · `src-tauri/tauri.dev.conf.json` · `scripts/tauri-cli.mjs` · step-log S21 · Amended by ADR-0283 (the WebView2 data folder cost statement in 영향)
 
 ## 맥락
 
-릴리스 앱이 떠 있는 상태에서 dev 앱을 띄우면 **dev 프로세스가 즉시 종료**됐다 — 창도 안 뜨고 자기 데몬도 안 뜬다(dev 쪽 연결키 파일이 실행 전후로 바이트 동일. 실측 2026-08-16).
+When the dev app was launched while the release app was running, **the dev process exited immediately** — no window appeared and its own daemon did not start either (the dev-side connection key file was byte-identical before and after the run. Measured 2026-08-16).
 
-원인은 `tauri-plugin-single-instance`가 Windows 전역 뮤텍스 이름을 **번들 identifier로부터** 만든다는 것이다(`{identifier}-sim`). 두 빌드가 같은 identifier를 쓰면 같은 뮤텍스를 잡으므로, 나중에 뜬 쪽이 "이미 실행 중"으로 판정돼 스스로 죽는다. 플러그인 소스(`platform_impl/windows.rs`, 2.4.2·2.4.3)를 확인한 결과 Builder가 노출하는 것은 `callback`과 **Linux 전용** `dbus_id`뿐이라 **Windows에서 뮤텍스 이름을 갈아끼울 방법이 없다** — identifier를 가르는 것이 유일한 레버다.
+The cause is that `tauri-plugin-single-instance` builds the Windows global mutex name **from the bundle identifier** (`{identifier}-sim`). When two builds use the same identifier they grab the same mutex, so the one that starts later is decided to be "already running" and kills itself. We checked the plugin source (`platform_impl/windows.rs`, 2.4.2 and 2.4.3): the Builder exposes only `callback` and the **Linux-only** `dbus_id`, so there is **no way to swap the mutex name on Windows** — splitting the identifier is the only lever.
 
 ## 결정
 
-1. **dev 빌드는 identifier `com.engram.dashboard.dev`를 쓴다.** 릴리스 정체성 `com.engram.dashboard`는 그대로다.
-2. **수단 = 설정 오버레이 파일**(`src-tauri/tauri.dev.conf.json`). 릴리스 설정을 건드리지 않고 dev 값만 덮는다.
-3. **주입은 `scripts/tauri-cli.mjs`가 `dev` 서브커맨드에만** 한다. `build`는 통과시켜 배포 정체성이 절대 바뀌지 않게 한다.
+1. **The dev build uses the identifier `com.engram.dashboard.dev`.** The release identity `com.engram.dashboard` stays as it is.
+2. **Means = a config overlay file** (`src-tauri/tauri.dev.conf.json`). It overrides only the dev values without touching the release config.
+3. **Injection is done by `scripts/tauri-cli.mjs` for the `dev` subcommand only.** `build` is passed through so the distribution identity can never change.
 
 ## 거부한 대안
 
-- **★단일 인스턴스 키를 데이터 폴더로 바꾸기(원래 선호하던 방향)★** — 조사 결과 **키를 override할 수 없다**. 하려면 창을 앞으로 가져오는 동작까지 포함해 플러그인 메커니즘 전체를 다시 구현해야 한다. 기각 근거 = 플러그인 소스 확인(공개 표면에 이름 override 없음).
-- **그대로 두기** — 개발하려면 릴리스 앱을 닫아야 한다. 더 나쁜 것은 **화면에 아무 설명이 없다는 것**이다 — 두 번째 앱이 그냥 사라지므로 사람마다 이 사실을 처음부터 다시 발견한다. 기각 근거 = 실측(무증상 종료).
-- **single-instance 플러그인 제거** — 같은 데이터 폴더에 창이 둘 붙어 한 데몬을 함께 쓰게 된다. 트레이·창 소유 가정이 통째로 흔들린다. 기각 근거 = 논리(ADR-0134/0135가 세운 폴더 단위 배제가 무너진다).
-- **플러그인의 `semver` feature에 기대기**(패키지 버전을 뮤텍스 이름에 섞는다) — **두 빌드의 버전이 같으면 아무 도움이 안 된다**. 우리가 정확히 그 경우다. 기각 근거 = 기능 정의상 무효.
+- **★Switch the single-instance key to the data folder (the originally preferred direction)★** — investigation showed **the key cannot be overridden**. Doing it would mean reimplementing the whole plugin mechanism, including the behavior that brings the window to the front. Grounds for rejection = plugin source check (no name override on the public surface).
+- **Leave it as is** — developing requires closing the release app. Worse, **nothing on screen explains it** — the second app simply vanishes, so each person rediscovers this fact from scratch. Grounds for rejection = measured (silent exit).
+- **Remove the single-instance plugin** — two windows attach to the same data folder and share one daemon. The tray and window ownership assumptions are shaken wholesale. Grounds for rejection = logic (the per-folder exclusion that ADR-0134/0135 established collapses).
+- **Lean on the plugin's `semver` feature** (mix the package version into the mutex name) — **it does not help at all if the versions of the two builds are the same**. That is exactly our case. Grounds for rejection = invalid by the feature's definition.
 
 ## 근거
 
-- **Tauri 공식 문서가 flavour별 설정 오버레이를 바로 이 패턴으로 제시한다** — 우리가 발명한 구조가 아니다.
-- **성숙한 앱들이 stable/insider 채널을 별도 identifier로 낸다** — 같은 기계에서 공존시키는 표준 수단이다.
-- dev와 release는 **데이터 폴더부터 서로 다른 독립 배포판**이다(discovery `default_data_dir`). identifier를 가르는 것은 이미 갈라진 것을 이름에서도 인정하는 것이다.
+- **The official Tauri docs present a per-flavour config overlay in exactly this pattern** — it is not a structure we invented.
+- **Mature apps ship their stable/insider channels under separate identifiers** — it is the standard way to let them coexist on the same machine.
+- Dev and release are **independent distributions that differ starting from the data folder** (discovery `default_data_dir`). Splitting the identifier acknowledges in the name too what is already split.
 
 ## 영향 / 불변식
 
-- **identifier는 WebView2 데이터 폴더도 정한다** → dev 빌드의 저장된 웹 상태가 **한 번 초기화**된다(의도된 대가). 데몬 데이터 폴더는 identifier와 무관해 그대로다.
-  - ★(2026-10-08 개정 표시 — ADR-0283) 지금은 그렇지 않다★ — WebView2 데이터 폴더는 데이터 루트 아래 `webview\` 이고(dev = `.engram-dev\webview`) identifier 와 무관하다. 그 폴더에 쓸 수 없는 실행만 identifier 의 Tauri 기본 자리(`%LOCALAPPDATA%\<identifier>`)로 물러난다.
-- **identifier를 키로 삼는 OS 통합(딥링크·알림·파일 연결)이 dev와 release를 다른 앱으로 취급한다** — 이것이 이 결정의 목적이다.
-- **★잔여 미해결(의도적)★:** 서로 다른 폴더에 푼 **릴리스 배포판 둘**은 여전히 같은 identifier를 공유해 서로를 막는다. 이 결정은 dev↔release 축만 연다.
-- **`build`에 오버레이가 새면 배포 정체성이 조용히 바뀐다** — `scripts/tauri-cli.mjs`의 서브커맨드 판정과 `--` 경계 판정이 그 벽이다. CI의 `build-release.ps1`도 이 래퍼를 지나간다.
-- **identifier 값 제약**(오버레이 주석에 박음): `.app`으로 끝내지 말 것(macOS가 디렉터리를 앱으로 오인 — tauri#12674, CLI가 PR#13618 이후 거부) · 점 없는 단일 토큰 금지(Linux 크래시 — tauri#10353).
-- **이 결정이 dev·release 동시 실행을 평상시 동작으로 만든다** → 이미지 이름 단위로 프로세스를 죽이는 도구의 폭발 반경이 커진다. 그 귀결이 ADR-0139다.
+- **The identifier also decides the WebView2 data folder** → the dev build's stored web state is **reset once** (an intended cost). The daemon data folder is unrelated to the identifier and stays as it is.
+  - ★(2026-10-08 revision note — ADR-0283) This is no longer so★ — the WebView2 data folder is `webview\` under the data root (dev = `.engram-dev\webview`) and is unrelated to the identifier. Only a run that cannot write to that folder falls back to the identifier's Tauri default location (`%LOCALAPPDATA%\<identifier>`).
+- **OS integrations keyed on the identifier (deep links, notifications, file associations) treat dev and release as different apps** — that is the purpose of this decision.
+- **★Remaining open issue (intentional):★** **two release distributions** unpacked into different folders still share the same identifier and block each other. This decision opens only the dev↔release axis.
+- **If the overlay leaks into `build`, the distribution identity changes silently** — the subcommand decision and the `--` boundary decision in `scripts/tauri-cli.mjs` are that wall. CI's `build-release.ps1` also goes through this wrapper.
+- **Constraints on the identifier value** (written into the overlay comment): do not end it with `.app` (macOS mistakes the directory for an app — tauri#12674, the CLI rejects it since PR#13618) · no single token without a dot (Linux crash — tauri#10353).
+- **This decision makes running dev and release together the normal state** → the blast radius of tools that kill processes by image name grows. ADR-0139 is the consequence of that.

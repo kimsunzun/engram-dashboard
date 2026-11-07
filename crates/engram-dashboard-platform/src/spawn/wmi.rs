@@ -1,7 +1,7 @@
-//! [`super::spawn_outside_job`] 의 WMI 호출 — COM 초기화와 그 해제의 짝맞춤 · `Win32_Process.Create`.
+//! The WMI call of [`super::spawn_outside_job`] — pairing COM initialization with its release · `Win32_Process.Create`.
 //!
-//! 초기화 결과의 분류([`classify_com_init`])는 OS 와 무관한 규칙이라 모든 OS 에서 컴파일되고 시험된다. 나머지는
-//! Windows 전용이다.
+//! The classification of the initialization result ([`classify_com_init`]) is an OS-independent rule, so it compiles and is tested on every OS. The rest is
+//! Windows only.
 // ADR-0266
 // ADR-0271
 
@@ -13,12 +13,12 @@ use super::DetachedSpawnError;
 #[derive(Debug, PartialEq, Eq)]
 #[cfg_attr(not(windows), allow(dead_code))]
 enum ComInit {
-    /// 우리가 초기화했다(`S_OK` · `S_FALSE` — 둘 다 짝으로 `CoUninitialize` 를 한 번 부를 책임이 있다).
+    /// We initialized it (`S_OK` · `S_FALSE` — both carry the duty to call `CoUninitialize` once as the pair).
     Initialized,
-    /// 이 스레드가 이미 다른 아파트 모드(STA)로 초기화돼 있다(`RPC_E_CHANGED_MODE`) — 우리는 초기화하지 않았다.
-    /// 그 아파트로 WMI 를 부르되 해제하지 않는다.
+    /// This thread was already initialized in another apartment mode (STA) (`RPC_E_CHANGED_MODE`) — we did not initialize.
+    /// Call WMI into that apartment but do not release.
     AlreadyOtherMode,
-    /// 그 밖의 실패 — 진행하지 않는다.
+    /// Any other failure — do not proceed.
     Failed(i32),
 }
 
@@ -34,8 +34,8 @@ fn classify_com_init(hr: i32) -> ComInit {
     }
 }
 
-/// 우리가 초기화한 COM 을 모든 탈출 경로에서 정확히 한 번 해제한다 — [`create`] 의 `?` 조기 반환마다 손으로 짝을
-/// 맞추면 하나를 빠뜨린다.
+/// Releases the COM that we initialized exactly once on every exit path — pairing it by hand at each early `?` return of [`create`]
+/// would miss one.
 #[cfg(windows)]
 struct ComGuard {
     needs_uninit: bool,
@@ -46,18 +46,18 @@ impl Drop for ComGuard {
     fn drop(&mut self) {
         if self.needs_uninit {
             use windows::Win32::System::Com::CoUninitialize;
-            // SAFETY: 우리가 CoInitializeEx 로 성공 초기화한 스레드에서 정확히 1회 해제한다.
-            // AlreadyOtherMode 경로는 needs_uninit=false 라 여기 진입하지 않는다.
+            // SAFETY: releases exactly once on the thread where we successfully initialized with CoInitializeEx.
+            // The AlreadyOtherMode path has needs_uninit=false so it does not enter here.
             unsafe { CoUninitialize() };
         }
     }
 }
 
-/// `ReturnValue` 를 오류로 올리지 않고 돌려준다 — 그 판정은 부르는 쪽 몫이다. 답 객체나 그 값을 못 얻으면
-/// `u32::MAX` 다. `create_flags` = `None` 이면 시작 정보(`ProcessStartupInformation`)를 아예 넘기지 않는다.
+/// Returns `ReturnValue` without raising it as an error — deciding on it is the caller's job. If the answer object or that value cannot be obtained, it is
+/// `u32::MAX`. `create_flags` = `None` passes no startup information (`ProcessStartupInformation`) at all.
 #[cfg(windows)]
 pub(super) fn create(exe: &Path, create_flags: Option<i32>) -> Result<u32, DetachedSpawnError> {
-    // Interface trait — startup_inst.cast::<IUnknown>() 에 필요(임베디드 오브젝트를 VARIANT 로 박기).
+    // Interface trait — needed for startup_inst.cast::<IUnknown>() (embedding the embedded object as a VARIANT).
     use windows::core::{Interface, BSTR, VARIANT};
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoSetProxyBlanket, CLSCTX_INPROC_SERVER,
@@ -71,10 +71,10 @@ pub(super) fn create(exe: &Path, create_flags: Option<i32>) -> Result<u32, Detac
     let exe_str = exe.to_string_lossy();
     let command_line = format!("\"{exe_str}\"");
 
-    // SAFETY 블록: COM/WMI 호출 시퀀스. spike #1 의 PowerShell Invoke-CimMethod 와 동일한
-    // Win32_Process.Create 를 COM 직접 호출로 수행한다.
+    // SAFETY block: the COM/WMI call sequence. It performs the same Win32_Process.Create as spike #1's PowerShell Invoke-CimMethod
+    // by calling COM directly.
     unsafe {
-        // SAFETY: CoInitializeEx 는 스레드 단위 COM 초기화. 반환 HRESULT 로 짝맞춤(아래 가드).
+        // SAFETY: CoInitializeEx is per-thread COM initialization. Paired by the returned HRESULT (the guard below).
         let hr = CoInitializeEx(None, COINIT_MULTITHREADED);
         let _com_guard = match classify_com_init(hr.0) {
             ComInit::Initialized => ComGuard { needs_uninit: true },
@@ -103,7 +103,7 @@ pub(super) fn create(exe: &Path, create_flags: Option<i32>) -> Result<u32, Detac
             )
             .map_err(hresult_err)?;
 
-        // 로컬 WMI 호출에 필요한 impersonation 레벨.
+        // The impersonation level needed for a local WMI call.
         CoSetProxyBlanket(
             &services,
             RPC_C_AUTHN_WINNT,
@@ -156,7 +156,7 @@ pub(super) fn create(exe: &Path, create_flags: Option<i32>) -> Result<u32, Detac
                 .map_err(hresult_err)?;
             let startup_class = startup_class.ok_or(NO_ANSWER)?;
             let startup_inst = startup_class.SpawnInstance(0).map_err(hresult_err)?;
-            // CreateFlags 는 VT_I4(부호 있는 32-bit).
+            // CreateFlags is VT_I4 (signed 32-bit).
             let flags_value = VARIANT::from(create_flags);
             startup_inst
                 .Put(&BSTR::from("CreateFlags"), 0, &flags_value, 0)
@@ -200,7 +200,7 @@ pub(super) fn create(_exe: &Path, _create_flags: Option<i32>) -> Result<u32, Det
     Err(DetachedSpawnError::Io(io::ErrorKind::Unsupported.into()))
 }
 
-/// WMI 가 비어 있는 객체를 돌려줬다 — 띄우기 전에 멈췄으므로 `ReturnValue` 를 못 얻은 것과 같은 답으로 낸다.
+/// WMI returned an empty object — it stopped before launching, so it is reported with the same answer as not obtaining `ReturnValue`.
 #[cfg(windows)]
 const NO_ANSWER: DetachedSpawnError = DetachedSpawnError::Refused { rv: u32::MAX };
 
@@ -212,7 +212,7 @@ unsafe fn read_u32_prop(
     use windows::core::{BSTR, VARIANT};
     let mut value = VARIANT::default();
     obj.Get(&BSTR::from(name), 0, &mut value, None, None).ok()?;
-    // ReturnValue 는 VT_I4 — windows-core 의 TryFrom<&VARIANT> for u32 가 변환 처리.
+    // ReturnValue is VT_I4 — windows-core's TryFrom<&VARIANT> for u32 handles the conversion.
     u32::try_from(&value).ok()
 }
 
@@ -228,7 +228,7 @@ fn hresult_err(e: windows::core::Error) -> DetachedSpawnError {
 mod tests {
     use super::*;
 
-    // ── classify_com_init 매핑(실제 CoInitialize 없이 순수 검증) ────────────────
+    // ── classify_com_init mapping (pure verification without a real CoInitialize) ────────────────
 
     #[test]
     fn classify_com_init_maps_hresults() {
@@ -241,7 +241,7 @@ mod tests {
             classify_com_init(RPC_E_CHANGED_MODE),
             ComInit::AlreadyOtherMode
         );
-        let e_fail = 0x8000_4005u32 as i32; // E_FAIL 류 임의 실패
+        let e_fail = 0x8000_4005u32 as i32; // An arbitrary failure like E_FAIL
         assert_eq!(classify_com_init(e_fail), ComInit::Failed(e_fail));
     }
 
@@ -250,7 +250,7 @@ mod tests {
         let needs = |hr: i32| match classify_com_init(hr) {
             ComInit::Initialized => true,
             ComInit::AlreadyOtherMode => false,
-            ComInit::Failed(_) => false, // 실패면 가드 자체를 안 만듦
+            ComInit::Failed(_) => false, // On failure the guard itself is not created
         };
         assert!(needs(0), "S_OK → uninit");
         assert!(needs(1), "S_FALSE → uninit");

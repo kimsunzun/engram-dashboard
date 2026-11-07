@@ -1,5 +1,5 @@
-// TRD S21-slot-docking §4-3 「그대로인 것」 · 6.3판 §5-6 · §11 「TS tabStrip」 · PRD AC40: 닫기 모드 순수 상태 줄의 표 시험 — 경계(39/40 · 59/60 · 위 ·
-//   시작 쪽 0) · 300 ms(가짜 시계 = 입력의 `now`) · 밖 누름 · 맨 끝 탭 · 고정 폭.
+// TRD S21-slot-docking §4-3 「그대로인 것」 · edition 6.3 §5-6 · §11 「TS tabStrip」 · PRD AC40: table test of the closing mode pure state line — boundaries (39/40 · 59/60 · top ·
+//   start side 0) · 300 ms (fake clock = the input `now`) · outside press · last tab · fixed width.
 
 import { describe, expect, it } from 'vitest'
 
@@ -282,7 +282,7 @@ describe('stepClosingMode — 나감(300 ms · 밖 누름)', () => {
 
 describe('연달아 닫기 — 들어감부터 나감까지', () => {
   it('세 번 이어 닫은 뒤 떠나 300 ms 에 다시 배치', () => {
-    // 같은 폭 다섯(넘치지 않고 표준 폭보다 좁음) · 잰 폭 500 · 커서는 탭바 위 같은 자리.
+    // Five of the same width (not overflowing and narrower than the standard width) · measured width 500 · the cursor at the same place over the tab bar.
     const close = (widths: number[], at: number): ClosingInput => ({ kind: 'closed', mouse: true, widths, closed: at, measured: 500 })
     let mode = stepClosingMode(CLOSING_OFF, close([100, 100, 100, 100, 100], 1))
     expect(mode).toEqual({ on: true, available: 400, deadline: null })
@@ -306,7 +306,7 @@ describe('연달아 닫기 — 들어감부터 나감까지', () => {
   })
 
   it('넘친 탭바에서 같은 자리를 세 번 닫음 — 고정 103 → 71 → 71 · 남은 폭 [A, I](Chromium 재현)', () => {
-    // 잰 폭 135 · 탭 다섯 · 활성 0 · 마우스로 자리 2 를 세 번 닫는다. 폭은 상한(고정 폭)으로 · 보임은 잰 폭으로.
+    // Measured width 135 · five tabs · active 0 · close position 2 three times with the mouse. The width is the cap (fixed width) · visibility uses the measured width.
     const measured = 135
     let n = 5
     let mode: ClosingMode = CLOSING_OFF

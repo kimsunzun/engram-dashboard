@@ -1,28 +1,28 @@
-# Engram Dashboard — 프론트엔드 통합 설계 LLD
+# Engram Dashboard — Frontend Integration Design LLD
 
-**작성:** ed12, 2026-06-11  
-**기반:** `backend-lld-stage1.md` 확정본  
-**목적:** React/TypeScript 층이 Rust 백엔드와 어떻게 연결되는지 확정
-
----
-
-## 0. 비목표
-
-**주의 (GPT G-3):** Tauri v2 capabilities 설정 필요.  
-팝업 창(`slot-popup`, `agent-tree`)도 `tauri.conf.json` capability에 포함해야 invoke 가능.  
-`src-tauri/capabilities/default.json` → windows 배열에 모든 window label 추가.
-
-
-
-- Rust 백엔드 코드 변경 — Stage 1에서 확정됨
-- xterm.js 렌더링 최적화 (VT 파싱 등)
-- DiffPanel 실제 연동 — 추후 단계
+**Author:** ed12, 2026-06-11  
+**Basis:** finalized `backend-lld-stage1.md`  
+**Purpose:** Finalize how the React/TypeScript layer connects to the Rust backend
 
 ---
 
-## 1. TypeScript 타입 미러 (`src/types/pty.ts`)
+## 0. Non-goals
 
-Rust LLD §3 타입을 TypeScript로 미러. Tauri invoke 반환값과 Channel 페이로드 타입.
+**Note (GPT G-3):** Tauri v2 capabilities configuration is required.  
+Popup windows (`slot-popup`, `agent-tree`) must also be included in the `tauri.conf.json` capability for invoke to work.  
+`src-tauri/capabilities/default.json` → add every window label to the windows array.
+
+
+
+- Rust backend code changes — finalized in Stage 1
+- xterm.js rendering optimization (VT parsing etc.)
+- Actual DiffPanel integration — later stage
+
+---
+
+## 1. TypeScript type mirror (`src/types/pty.ts`)
+
+Mirror the Rust LLD §3 types in TypeScript. Types for Tauri invoke return values and Channel payloads.
 
 ```ts
 // Rust AgentStatus enum 미러
@@ -57,10 +57,10 @@ export type SinkId = string  // UUID
 
 ---
 
-## 2. Tauri invoke 래퍼 (`src/lib/ptyApi.ts`)
+## 2. Tauri invoke wrapper (`src/lib/ptyApi.ts`)
 
-컴포넌트가 invoke를 직접 호출하지 않도록 래퍼 레이어.  
-테스트/목업 시 이 레이어만 교체.
+A wrapper layer so components do not call invoke directly.  
+For tests/mocks, only this layer is swapped.
 
 ```ts
 import { invoke } from '@tauri-apps/api/core'
@@ -101,7 +101,7 @@ export const ptyApi = {
 
 ---
 
-## 3. agentStore.ts 변경 계획
+## 3. agentStore.ts change plan
 
 ```ts
 // 더미 제거 → Tauri invoke로 교체
@@ -125,14 +125,14 @@ listen<AgentInfo[]>('agent-list-updated', (e) => {
 
 ---
 
-## 4. TerminalSlot.tsx — subscribe/unsubscribe 패턴
+## 4. TerminalSlot.tsx — subscribe/unsubscribe pattern
 
-### 핵심 요구사항
-- React StrictMode: dev에서 effect 2회 실행 → cleanup 반드시 구현
-- unmount 시 명시적 unsubscribe (Channel GC에 의존 금지)
-- channel.onmessage 명시적 정리 (Tauri Channel memory leak 방지, GitHub #13133)
+### Core requirements
+- React StrictMode: effects run twice in dev → cleanup must be implemented
+- Explicit unsubscribe on unmount (do not rely on Channel GC)
+- Explicitly clear channel.onmessage (prevents the Tauri Channel memory leak, GitHub #13133)
 
-### 구현 패턴
+### Implementation pattern
 
 ```ts
 useEffect(() => {
@@ -182,7 +182,7 @@ useEffect(() => {
 }, [agentId])
 ```
 
-### 키 입력 → PTY stdin
+### Key input → PTY stdin
 
 ```ts
 useEffect(() => {
@@ -197,7 +197,7 @@ useEffect(() => {
 
 ---
 
-## 4-1. 에러 처리 + Exited 상태 입력 가드 (M4)
+## 4-1. Error handling + input guard in the Exited state (M4)
 
 ```ts
 // ptyApi 공통 에러 처리
@@ -225,7 +225,7 @@ const disp = terminal.onData((data: string) => {
 })
 ```
 
-## 5. resize 동기화 흐름
+## 5. resize synchronization flow
 
 ```ts
 useEffect(() => {
@@ -245,10 +245,10 @@ useEffect(() => {
 }, [agentId])
 ```
 
-**M1 멀티 창 resize 정책: 마지막 포커스 창 우선 (option b)**
-- 포커스된 창만 `resizePty` 호출 권한 → 핑퐁 차단
-- 비포커스 창은 PTY cols/rows와 어긋날 수 있음 (허용)
-- 포커스 전환 시 즉시 resize 한 번 실행
+**M1 multi-window resize policy: last focused window wins (option b)**
+- Only the focused window has permission to call `resizePty` → blocks ping-pong
+- Non-focused windows may diverge from the PTY cols/rows (allowed)
+- Run one immediate resize on focus switch
 
 ```ts
 // 포커스 가드
@@ -263,9 +263,9 @@ const handleFit = () => {
 window.addEventListener('focus', handleFit)  // 창 포커스 시 즉시 sync
 ```
 
-**주의:**
-- hidden 상태(display:none)에서 `fit()` 호출 시 cols=0 → guard 추가
-- 팝업 창 open 후 첫 render에서 resize 한 번 강제 호출 (초기 크기 동기화)
+**Notes:**
+- Calling `fit()` while hidden (display:none) gives cols=0 → add a guard
+- On the first render after a popup window opens, force one resize call (initial size synchronization)
 
 ```ts
 // hidden guard
@@ -280,10 +280,10 @@ const handleFit = () => {
 
 ---
 
-## 6. 팝업 창 구독 패턴
+## 6. Popup window subscription pattern
 
-팝업 창은 메인과 독립된 Tauri WebviewWindow — Zustand 공유 불가.  
-각 창이 독립적으로 `subscribe_agent_output` 호출.
+A popup window is a Tauri WebviewWindow independent of the main window — Zustand cannot be shared.  
+Each window calls `subscribe_agent_output` independently.
 
 ```
 메인 창: subscribe(agentA) → sinkId_main
@@ -292,11 +292,11 @@ const handleFit = () => {
 → drain thread → 둘 다 Channel.send
 ```
 
-**팝업 창 열릴 때 순서:**
-1. URL param `?agentId=xxx`로 열림
-2. `useEffect` → `ptyApi.subscribeOutput` → replay 자동 수신
-3. replay 완료 후 live stream 이어짐
-4. **resize 먼저**: subscribe 전에 `resizePty(agentId, cols, rows)` 호출 (cols/rows 불일치 방지)
+**Order when a popup window opens:**
+1. Opened with the URL param `?agentId=xxx`
+2. `useEffect` → `ptyApi.subscribeOutput` → replay is received automatically
+3. After replay completes, the live stream continues
+4. **resize first**: call `resizePty(agentId, cols, rows)` before subscribe (prevents a cols/rows mismatch)
 
 ```ts
 // PopupPage.tsx
@@ -333,9 +333,9 @@ useEffect(() => {
 
 ---
 
-## 7. Tauri Event 수신 (저빈도)
+## 7. Receiving Tauri Events (low frequency)
 
-`lib.ts` 또는 App.tsx에서 앱 초기화 시 1회 등록. 절대 컴포넌트 안에서 등록 금지(중복 누적).
+Register once at app initialization in `lib.ts` or App.tsx. Never register inside a component (duplicates accumulate).
 
 ```ts
 // src/lib/eventBus.ts — 앱 시작 시 1회 호출
@@ -376,48 +376,48 @@ export async function initEventBus() {
 
 ---
 
-## 8. 더미 → 실제 교체 체크리스트
+## 8. Dummy → real replacement checklist
 
-| 파일 | 더미 | 교체 |
+| File | Dummy | Replacement |
 |---|---|---|
-| `agentStore.ts` | `dummyAgents` 하드코딩 | `ptyApi.getAgents()` + `agent-list-updated` event |
+| `agentStore.ts` | hard-coded `dummyAgents` | `ptyApi.getAgents()` + `agent-list-updated` event |
 | `TerminalSlot.tsx` | `terminal.write("dummy text")` | `subscribeOutput` Channel |
-| `AgentTree.tsx` | 더미 status 색상 | `AgentStatus` 타입 기반 |
+| `AgentTree.tsx` | dummy status colors | based on the `AgentStatus` type |
 | `SlotContextMenu.tsx` | `splitSlot` only | + `spawnAgent`, `killAgent` |
-| App.tsx / main.ts | — | `initEventBus()` 추가 |
+| App.tsx / main.ts | — | add `initEventBus()` |
 
 ---
 
-## 9. 동시성 + 메모리 안전 규칙
+## 9. Concurrency + memory safety rules
 
-| 규칙 | 이유 |
+| Rule | Reason |
 |---|---|
 | `channel.onmessage = null` on cleanup | Tauri Channel memory leak (GitHub #13133) |
-| `cancelled` flag in subscribeOutput effect | StrictMode 2회 실행 방지 |
-| Event listener는 App level 1회만 | 컴포넌트 remount 시 중복 방지 |
-| resize는 visible 확인 후 | hidden 시 cols=0 방지 |
-| subscribe 전 resize | 팝업 cols/rows 불일치 방지 |
+| `cancelled` flag in subscribeOutput effect | Handles StrictMode running twice |
+| Event listeners only once at App level | Prevents duplicates on component remount |
+| resize only after confirming visibility | Prevents cols=0 when hidden |
+| resize before subscribe | Prevents popup cols/rows mismatch |
 
 ---
 
-## 10. 검토 요청 질문
+## 10. Review request questions
 
-1. `Channel<PtyEvent>`를 `invoke`에 파라미터로 전달하는 패턴 — Tauri v2.4 TypeScript SDK에서 올바른 방법인가? `new Channel<T>()` 직접 생성 후 `channel.onmessage` 할당하는 패턴이 맞는가?
-2. `atob(data_b64) → Uint8Array` 변환이 브라우저 환경(WebView2)에서 안전한가? 더 나은 디코딩 방법?
-3. React StrictMode double-effect에서 `cancelled` flag 패턴 — 경쟁 조건이 있는가?
-4. Tauri Event listener를 App level에서 1회 등록하는 패턴 — HMR/dev reload 시 중복 등록 위험이 있는가? 해결책?
-5. 팝업 창에서 `resize → subscribe` 순서 — Rust 쪽에서 보면 resize 전에 subscribe가 먼저 도착할 수 있는가? (async 순서 보장 여부)
-6. 전체 구조에서 놓친 것, 프론트엔드 통합 시 알려진 Tauri v2.4 pitfall?
+1. The pattern of passing `Channel<PtyEvent>` to `invoke` as a parameter — is it the correct way in the Tauri v2.4 TypeScript SDK? Is creating `new Channel<T>()` directly and then assigning `channel.onmessage` the right pattern?
+2. Is the `atob(data_b64) → Uint8Array` conversion safe in the browser environment (WebView2)? Is there a better decoding method?
+3. In the React StrictMode double-effect, is there a race condition in the `cancelled` flag pattern?
+4. For the pattern of registering a Tauri Event listener once at the App level — is there a risk of duplicate registration on HMR/dev reload? What is the fix?
+5. For the `resize → subscribe` order in a popup window — from the Rust side, can subscribe arrive before resize? (Is async ordering guaranteed?)
+6. What was missed in the overall structure, and what are the known Tauri v2.4 pitfalls for frontend integration?
 
 ---
 
-## 11. S9 개정 (세션 복원) — 프론트 델타
+## 11. S9 revision (session restore) — frontend delta
 
-근거: `../S9-session-restore/session-restore-lld.md`(§6) + `session-restore-code-plan.md`(§E·§H). fable 7건 중 프론트 (e)~(g).
+Basis: `../S9-session-restore/session-restore-lld.md` (§6) + `session-restore-code-plan.md` (§E·§H). Frontend items (e)~(g) of the 7 fable findings.
 
-### (e) §4 subscribe effect — `[agentId, epoch]` 재구독
-- 재시작은 **구독자 승계(이주)가 아니라 프론트 재구독**으로 처리한다(확정 설계 2개에 대한 최소 변경, 실패 모드 가시성). 백엔드 변경은 "같은 AgentId 새 PtySession 맵 교체"뿐.
-- `AgentInfo`/`agent-status-changed`에 추가된 `epoch: u32`를 받아, subscribe effect 의존성을 `[agentId, epoch]`로 바꾼다. status 변화만으로는 effect가 재실행되지 않으므로 **epoch 증가가 재구독의 결정적 트리거**가 된다. 멀티 창도 각자 이벤트 수신 → 각자 재구독으로 균일.
+### (e) §4 subscribe effect — `[agentId, epoch]` resubscribe
+- A restart is handled by **frontend resubscribe, not subscriber succession (migration)** (minimal change to the two finalized designs, visible failure modes). The only backend change is "replace the map entry with a new PtySession under the same AgentId".
+- Take the `epoch: u32` added to `AgentInfo`/`agent-status-changed` and change the subscribe effect dependencies to `[agentId, epoch]`. Since a status change alone does not re-run the effect, **an epoch increment is the deterministic trigger for resubscribing**. Multi-window is uniform too: each window receives the event → each resubscribes.
 
 ```ts
 // 변경 전: }, [agentId])
@@ -425,12 +425,12 @@ export async function initEventBus() {
 }, [agentId, epoch])   // epoch 증가 = 재spawn → 재구독
 ```
 
-### (f) §4 재시작 배너 순서 — reset → 배너 → replay
-- 재시작 감지 시 순서: `terminal.reset()` → 재시작 배너 표시 → (재구독으로) replay 재생. 이미 검증된 idempotent 경로(C2 reset + seq dedup)를 그대로 탄다 — agent 전환과 동일 코드.
+### (f) §4 restart banner order — reset → banner → replay
+- Order on detecting a restart: `terminal.reset()` → show the restart banner → replay plays (via resubscribe). It takes the already-verified idempotent path as is (C2 reset + seq dedup) — the same code as switching agents.
 
-### (g) §1/§4 상태 표시 — Exited→Running 재진입 허용
-- 프론트 상태 모델이 terminal(`Exited`/`Killed`/`Failed`) → `Running` 재진입을 허용해야 한다(같은 AgentId가 다시 살아남). 입력 가드(§4-1)는 현재 status 기준으로 동작하므로 재진입 시 자동 해제된다. 선택적으로 `Restarting` 표시.
+### (g) §1/§4 status display — Exited→Running re-entry allowed
+- The frontend state model must allow re-entry from terminal (`Exited`/`Killed`/`Failed`) → `Running` (the same AgentId comes alive again). The input guard (§4-1) works off the current status, so it is released automatically on re-entry. Optionally show `Restarting`.
 
-### TS 타입 미러 추가 (§1)
-- `AgentInfo`/`AgentStatusChanged`에 `epoch: number` 추가.
-- `agent-restore-result` 이벤트 payload: `{ agent_id: string, epoch: number, outcome: RestoreOutcome }` (discriminated union, tag `type`: `Resumed`/`FreshFallback`/`Blocked`/`Failed`).
+### TS type mirror additions (§1)
+- Add `epoch: number` to `AgentInfo`/`AgentStatusChanged`.
+- `agent-restore-result` event payload: `{ agent_id: string, epoch: number, outcome: RestoreOutcome }` (discriminated union, tag `type`: `Resumed`/`FreshFallback`/`Blocked`/`Failed`).

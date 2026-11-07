@@ -1,5 +1,5 @@
-// ★연결선 오프셋★: --chat-rail-line-offset 은 outer top-padding(--chat-rail-row-pt) 과 커플링돼 있다
-//   (기존 top-[-12px]↔pt-3 암묵 커플링을 변수로 명시화).
+// ★Connector offset★: --chat-rail-line-offset is coupled to the outer top-padding (--chat-rail-row-pt)
+//   (the existing implicit coupling top-[-12px]↔pt-3 made explicit with a variable).
 
 import type { ReactNode } from 'react'
 
@@ -18,12 +18,12 @@ export function ChatRow({
   runPos?: RailRunPosition
 }) {
   if (rail) {
-    // 점 색 = 확장 룩 벤치마크.
+    // Dot color = the extension look benchmark.
     const dotColor = tone === 'tool' ? 'bg-green-500' : tone === 'error' ? 'bg-red-500' : 'bg-muted'
     const pos = runPos ?? 'mid'
     const lineStyle: Record<string, string> =
       pos === 'top'
-        ? { top: 'var(--chat-rail-dot-top)', bottom: '0' } // 위 stub 제거
+        ? { top: 'var(--chat-rail-dot-top)', bottom: '0' } // The stub above removed
         : pos === 'bottom'
           ? {
               top: 'var(--chat-rail-line-offset)',
@@ -35,8 +35,8 @@ export function ChatRow({
         className="relative flex px-4"
         style={{ paddingTop: 'var(--chat-rail-row-pt)' }}
       >
-        {/* aria-hidden 은 span 에만 얹는다(순수 장식) — gutter div 에 얹으면 separator 스페이서
-            (div[aria-hidden]) 셀렉터와 충돌한다. */}
+        {/* aria-hidden is put only on the span (pure decoration) — putting it on the gutter div collides with the separator spacer
+            (div[aria-hidden]) selector. */}
         <div
           className="relative flex-none"
           style={{ width: 'var(--chat-rail-gutter)' }}
@@ -57,7 +57,7 @@ export function ChatRow({
             style={{ top: 'var(--chat-rail-dot-top)' }}
           />
         </div>
-        {/* min-w-0 — 긴 토큰/wrap-anywhere 오버플로 방지. */}
+        {/* min-w-0 — prevents long token/wrap-anywhere overflow. */}
         <div className="min-w-0 flex-1">{children}</div>
       </div>
     )

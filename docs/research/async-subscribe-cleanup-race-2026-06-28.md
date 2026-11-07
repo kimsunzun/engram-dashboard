@@ -1,49 +1,49 @@
-# Research — async subscribe cleanup race (등록 await 중 dispose 누수)
+# Research — async subscribe cleanup race (leak when dispose arrives during the registration await)
 
-- **상태:** 완료 (cross-family medium: Claude Sonnet 팬아웃 3갈래 + Codex blind 1 → opus 교차/적대)
-- **날짜:** 2026-06-28
-- **동기:** S14 레이아웃 슬라이스의 `subscribeViewEvents` dispose-during-await 가드가 **dead branch**임이 적대 검증으로 확정됨. 실제 누수(등록 `await` 중 정리가 오면 리스너 영구 누수)를 OSS 관행에 맞게 닫기 위한 설계 근거.
-- **확신도 범례:** (확실) 1차/공식 출처 다수 수렴 · (가능성 높음) 합의하나 1차 출처 일부 · (불확실) 단일/지식기반.
+- **Status:** done (cross-family medium: Claude Sonnet fan-out of 3 branches + Codex blind 1 → opus cross-check/adversarial)
+- **Date:** 2026-06-28
+- **Motivation:** Adversarial verification established that the dispose-during-await guard in `subscribeViewEvents` of the S14 layout slice is a **dead branch**. The design basis for closing the real leak (if cleanup arrives during the registration `await`, the listener leaks permanently) in line with OSS practice.
+- **Confidence legend:** (certain) many primary/official sources converge · (likely) agreed on, but only some primary sources · (uncertain) single source / knowledge-based.
 
-## 문제
+## Problem
 
-비동기 구독 등록(`subscribe`/`listen`이 `Promise<Unlisten>` 반환)이 `await`로 끝나기 **전에** cleanup/unmount/dispose가 호출되면, 호출자는 아직 unlisten 핸들을 못 받아 → 등록이 뒤늦게 완료된 리스너가 **영구 누수**.
+If cleanup/unmount/dispose is called **before** an async subscription registration (`subscribe`/`listen` returning `Promise<Unlisten>`) finishes its `await`, the caller has not yet received the unlisten handle → a listener whose registration completes late **leaks permanently**.
 
-우리 코드(`src/store/viewStore.ts` `subscribeViewEvents` + `src/store/eventBus.ts:75` `await subscribeViewEvents()`)가 이 형태. 기존 `if (disposed)` 가드는 disposer가 `await` *이후* 반환되어 `disposed`를 set할 경로가 없으므로 dead.
+Our code (`src/store/viewStore.ts` `subscribeViewEvents` + `src/store/eventBus.ts:75` `await subscribeViewEvents()`) has this shape. The existing `if (disposed)` guard is dead, because the disposer is returned *after* the `await`, so there is no path that could set `disposed`.
 
-## 발견 (확신도·출처)
+## Findings (confidence · source)
 
-- **동기 teardown 핸들 반환이 업계 표준.** RxJS `Subscription`(unsubscribe idempotent·"늦은 unsubscribe는 무해"), zustand `subscribe`(동기 unsub), Node `EventEmitter`(동기 on/off), React `useSyncExternalStore`(subscribe가 unsub 동기 반환 요구) — 모두 동기. 근거: 등록~첫 emission 사이 *취소 불가 window* 제거. (확실)
-  - https://rxjs.dev/guide/subscription · https://react.dev/reference/react/useSyncExternalStore · https://github.com/tc39/proposal-observable/issues/163 (`Promise<Subscription>` 안티패턴 기각: 무한 버퍼 + 취소 불가 window)
-- **React 표준 race 해법 = `ignore`/`cancelled` 플래그(클로저 로컬).** `isMounted` ref는 안티패턴(동시성 모드 충돌). (확실) https://react.dev/learn/synchronizing-with-effects · https://react.dev/reference/react/useEffect
-- **단, 구독 해제는 fetch 결과 무시(ignore)와 다름 — 늦게 온 unlisten은 cancelled여도 반드시 호출.** 안 부르면 누수. (가능성 높음) https://github.com/tauri-apps/tauri/issues/8913
-- **Tauri `listen()`은 등록 전 unmount race를 내부적으로 막지 않음.** `invoke('plugin:event|listen')` resolve 후에야 UnlistenFn 생성(packages/api/src/event.ts). 공식 cleanup 예제는 `promise.then(fn => fn())`이나 race window는 남음. (확실) https://v2.tauri.app/develop/calling-frontend/ · https://github.com/tauri-apps/tauri/issues/8913
-- **`@tauri-apps/api` 2.6.0+(PR #13306): unlisten 호출 시 리스너 즉시 동기 해제.** 이전 v2.0.x는 unlisten이 비동기 IPC라 별도 race. (이건 우리 등록-await race와 *별개* 층위지만 의존성 버전 점검 가치.) (확실) https://github.com/tauri-apps/tauri/pull/13306 · https://github.com/tauri-apps/tauri/issues/8916
-- **AbortController는 "취소 의도 전달"이지 "정리 완료 보장"이 아님.** `abort()` 반환 ≠ 정리 완료. Tauri `listen()`이 signal을 안 받아 래핑 시 내부 ignore-flag 로직이 결국 동일하게 필요 → AbortSignal 도입의 추가 이득 없음. (확실) https://developer.mozilla.org/en-US/docs/Web/API/AbortController
-- **`Symbol.asyncDispose`/`await using`(TS 5.2+)은 비동기 정리의 현대 표준** — 단 "취소 핸들을 await 없이 즉시 쥐어야"만 충족하면 별도 적용 불필요. (가능성 높음)
+- **Returning a synchronous teardown handle is the industry standard.** RxJS `Subscription` (unsubscribe is idempotent · "a late unsubscribe is harmless"), zustand `subscribe` (synchronous unsub), Node `EventEmitter` (synchronous on/off), React `useSyncExternalStore` (requires subscribe to return the unsub synchronously) — all synchronous. Reason: it removes the *non-cancellable window* between registration and the first emission. (certain)
+  - https://rxjs.dev/guide/subscription · https://react.dev/reference/react/useSyncExternalStore · https://github.com/tc39/proposal-observable/issues/163 (`Promise<Subscription>` rejected as an anti-pattern: unbounded buffer + non-cancellable window)
+- **The standard React race fix = an `ignore`/`cancelled` flag (closure-local).** An `isMounted` ref is an anti-pattern (conflicts with concurrent mode). (certain) https://react.dev/learn/synchronizing-with-effects · https://react.dev/reference/react/useEffect
+- **But unsubscribing differs from ignoring a fetch result — an unlisten that arrives late must be called even if cancelled.** If it is not called, it leaks. (likely) https://github.com/tauri-apps/tauri/issues/8913
+- **Tauri `listen()` does not internally prevent the unmount-before-registration race.** The UnlistenFn is created only after `invoke('plugin:event|listen')` resolves (packages/api/src/event.ts). The official cleanup example is `promise.then(fn => fn())`, but the race window remains. (certain) https://v2.tauri.app/develop/calling-frontend/ · https://github.com/tauri-apps/tauri/issues/8913
+- **`@tauri-apps/api` 2.6.0+ (PR #13306): calling unlisten releases the listener immediately and synchronously.** Earlier v2.0.x had unlisten as an async IPC, so a separate race. (This is a *different* layer from our registration-await race, but worth checking the dependency version.) (certain) https://github.com/tauri-apps/tauri/pull/13306 · https://github.com/tauri-apps/tauri/issues/8916
+- **AbortController "conveys the intent to cancel"; it does not "guarantee cleanup is complete".** The return of `abort()` ≠ cleanup done. Tauri `listen()` does not accept a signal, so wrapping it would still need the same internal ignore-flag logic in the end → introducing AbortSignal brings no extra benefit. (certain) https://developer.mozilla.org/en-US/docs/Web/API/AbortController
+- **`Symbol.asyncDispose`/`await using` (TS 5.2+) is the modern standard for async cleanup** — but if the only requirement is "hold the cancel handle immediately, without an await", a separate adoption is unnecessary. (likely)
 
-## 교차검증표 (Claude ↔ Codex)
+## Cross-verification table (Claude ↔ Codex)
 
-| 클레임 | Claude | Codex | 판정 |
+| Claim | Claude | Codex | Decision |
 |---|---|---|---|
-| 동기 teardown 핸들이 표준 | ✓ | ✓ | 수렴(확실) |
-| Tauri listen 내부 race 미방어 | ✓(#8913) | ✓(event.ts 구현) | 수렴(확실) |
-| cancelled여도 unlisten 호출해야 | ✓(Claude B) | ✓(`disposed?fn():…`) | 수렴 |
-| `{dispose, ready}` = 표준 시그니처? | 아니오(개념적 유사만) | 아니오 | 수렴 |
-| `{dispose, ready}` = 우리 케이스 적절? | 조건부 적절 | "Tauri listen 래핑엔 깔끔" | 수렴 |
-| AbortSignal이 더 표준? | 한계 동일 | 새 API면 우선, 래핑엔 불요 | 수렴 |
+| A synchronous teardown handle is the standard | ✓ | ✓ | converged (certain) |
+| Tauri listen does not defend against the race internally | ✓(#8913) | ✓(event.ts implementation) | converged (certain) |
+| unlisten must be called even if cancelled | ✓(Claude B) | ✓(`disposed?fn():…`) | converged |
+| Is `{dispose, ready}` a standard signature? | no (only a conceptual resemblance) | no | converged |
+| Is `{dispose, ready}` appropriate for our case? | conditionally appropriate | "clean for wrapping Tauri listen" | converged |
+| Is AbortSignal more standard? | same limits | preferred for a new API, unnecessary for a wrapper | converged |
 
-## 우리 적용 (결정 근거)
+## Our application (decision basis)
 
-`subscribeViewEvents`를 `{ dispose: () => void, ready: Promise<void> }` 동기 반환으로. eventBus는 `dispose`를 `await` 없이 즉시 `unlistenFns`에 push(등록 중 정리가 와도 누수 0) + `ready`를 await 후 `initFromBackend`(F-listen 유지).
+Make `subscribeViewEvents` return `{ dispose: () => void, ready: Promise<void> }` synchronously. eventBus pushes `dispose` into `unlistenFns` immediately without an `await` (zero leaks even if cleanup arrives during registration) + awaits `ready`, then `initFromBackend` (F-listen kept).
 
-**필수 계약(함정 회피, 양 family 합의):**
-1. `dispose` idempotent (double-dispose noop).
-2. `dispose`가 `ready` 전에 불리면, 늦게 도착한 unlisten 핸들을 **즉시 호출**(cancelled 무관 — 안 부르면 누수).
-3. `ready`는 hang 금지 (dispose/등록실패에도 정상 종료).
-4. `ready` reject 시 부분 등록분 정리(누수 0).
+**Required contract (avoid the pitfalls, agreed by both families):**
+1. `dispose` is idempotent (double-dispose is a noop).
+2. If `dispose` is called before `ready`, **call the late-arriving unlisten handle immediately** (regardless of cancelled — if it is not called, it leaks).
+3. `ready` must not hang (it ends normally even on dispose/registration failure).
+4. On `ready` reject, clean up the partial registrations (zero leaks).
 
-## 공백 / 한계
+## Gaps / limits
 
-- 우리 누수의 **실제 트리거 확률은 낮음**(dev HMR + `import.meta.hot.accept` 부재 → 보통 full reload·prod엔 경로 없음). 그러나 설계결함이라 수정 대상.
-- `@tauri-apps/api` 현재 버전(package.json) 미점검 — 2.6.0 미만이면 unlisten IPC race(#8916)가 별도로 존재. 우리 수정 범위(등록-await race)와는 다른 층위.
+- The **actual trigger probability of our leak is low** (dev HMR + no `import.meta.hot.accept` → usually a full reload · no path in prod). But it is a design defect, so it is worth fixing.
+- The current `@tauri-apps/api` version (package.json) was not checked — below 2.6.0 the unlisten IPC race (#8916) exists separately. It is a different layer from our fix scope (the registration-await race).

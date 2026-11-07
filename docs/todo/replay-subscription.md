@@ -1,10 +1,10 @@
-# 재생·구독
+# Replay · subscription
 
-> **상태:** 트리거 대기 · **정본 색인:** [`../todo.md`](../todo.md)
+> **Status:** Waiting for trigger · **Canonical index:** [`../todo.md`](../todo.md)
 
-> **연관:** 아래 「뷰·데몬 껐다 켜기 정합」 항목은 [`roster-consistency.md`](./roster-consistency.md) 의 덩어리에 묶여 다시 열렸다(2026-08-26) — 그 항목 자체는 여기 그대로 둔다.
+> **Related:** the 「뷰·데몬 껐다 켜기 정합」 (view · daemon off-and-on consistency) item below was reopened, tied to the lump in [`roster-consistency.md`](./roster-consistency.md) (2026-08-26) — the item itself stays here as is.
 
-- **재생 머리가 잘렸는데 "잘렸다"고 알리지 않는다** — 고리 버퍼(2MB·4096조각)가 앞쪽을 버려도 클라이언트는 온전한 재생으로 받는다. 프레임 중간부터 그리면 TUI가 깨진다. 출력이 2MB를 넘는 긴 세션에서 실제로 난다. **지금 안 하는 이유:** 별건이고, 아직 실제로 관측되지 않았다.
-- **뷰·데몬 껐다 켜기 정합**(사용자가 나중 이슈로 분류) — ⓐ 명부 스냅샷에 신선도 방벽이 없다: 늦게 도착한 옛 스냅샷이 살아 있는 에이전트를 분리시키고, 되돌릴 계기가 무관한 사건(다른 에이전트의 생성·종료)에 달려 있다. ⓑ 업그레이드해도 옛 데몬에 붙으면 증상이 그대로다: 수용 관문이 프로토콜 번호뿐이고 빌드 식별자가 없다. **구조 단서:** 명부 조회가 원래 읽기였는데 부착 권위로 승격돼, 앞으로 조회 호출자가 늘면 전부 분리 트리거가 된다 — 정합 작업 때 이 구조부터 정할 것.
-- **`resume=false`가 무시된다** — 프로필에 세션 id가 있으면 fresh 요청도 이어받기로 간다. 의도인지 불명. **지금 안 하는 이유:** 판단이 필요하고 설계 결정이다.
-- **모바일 클라이언트의 「잠자기 모드」** — 숨은 칸은 구독을 끊고 보일 때 다시 붙는다(재부착 + 재생). **PC 는 지금처럼 keep-alive 로 남는다**(ADR-0056 · 사용자 결정 2026-09-25). **트리거:** 모바일 클라이언트를 만들 때. 조사 = `../research/hidden-tab-terminal-subscription-survey-2026-09-25.md`.
+- **The replay head is truncated but nobody is told "truncated"** — even when the ring buffer (2MB · 4096 chunks) discards the front, the client receives it as a complete replay. Drawing from the middle of a frame breaks the TUI. It actually happens in long sessions whose output exceeds 2MB. **Why not now:** a separate matter, and it has not actually been observed yet.
+- **View · daemon off-and-on consistency (뷰·데몬 껐다 켜기 정합)** (classified by the user as a later issue) — ⓐ the registry snapshot has no freshness barrier: a late-arriving old snapshot detaches a live agent, and the trigger to revert it hangs on an unrelated event (another agent's creation · exit). ⓑ Even after upgrading, attaching to an old daemon leaves the symptom as is: the admission gate is only the protocol number and there is no build identifier. **Structural clue:** the registry query was originally a read but was promoted to attach authority, so as query callers increase in the future, all of them become detach triggers — settle this structure first during the consistency work.
+- **`resume=false` is ignored** — if the profile has a session id, even a fresh request goes as a resume. Unclear whether this is intended. **Why not now:** it needs judgment and is a design decision.
+- **「잠자기 모드」 (sleep mode) of the mobile client** — a hidden area drops its subscription and reattaches when shown (reattach + replay). **The PC stays keep-alive as it is now** (ADR-0056 · user decision 2026-09-25). **Trigger:** when building the mobile client. Investigation = `../research/hidden-tab-terminal-subscription-survey-2026-09-25.md`.

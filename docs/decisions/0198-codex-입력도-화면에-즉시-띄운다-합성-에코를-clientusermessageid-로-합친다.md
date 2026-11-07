@@ -1,48 +1,48 @@
-# ADR-0198: codex 입력도 화면에 즉시 띄운다 — 합성 에코를 clientUserMessageId 로 합친다
+# ADR-0198: Show codex input on screen at once too — merge the synthetic echo by clientUserMessageId
 
-- 상태: 확정 (2026-09-14, 근거: 사용자 결정 + 벤더 스키마·통합 테스트 직독) · 부분 폐기 by ADR-0231 (합성 에코는 한가할 때만 · 영향의 하이드레이션 순서 미결을 닫음(대기 → 이력 뒤 전달) · 보낸 자리 정식 말풍선 원안 거부)
-- 관련: ADR-0193(큐 해제 판정 — **번복이 아니다**, 아래 「거부한 대안」 마지막 항) · ADR-0192(백엔드 기본값은 claude 와 동일) · `docs/reference/backend-capabilities.md` §2 · `crates/engram-dashboard-agent/src/backend/codex/protocol.rs` · step-log S21 · Amended by ADR-0231 (합성 에코는 한가할 때만 · 영향의 하이드레이션 순서 미결을 닫음(대기 → 이력 뒤 전달) · 보낸 자리 정식 말풍선 원안 거부)
+- 상태: 확정 (2026-09-14, basis: user decision + direct reading of the vendor schema and integration tests) · 부분 폐기 by ADR-0231 (the synthetic echo only when idle · closes the hydration-order open item under impact (waiting → deliver after history) · rejects the original plan of a formal bubble at the sent spot)
+- 관련: ADR-0193(the queue-release decision — **not a reversal**, see the last item of 「거부한 대안」 below) · ADR-0192(backend defaults match claude) · `docs/reference/backend-capabilities.md` §2 · `crates/engram-dashboard-agent/src/backend/codex/protocol.rs` · step-log S21 · Amended by ADR-0231 (the synthetic echo only when idle · closes the hydration-order open item under impact (waiting → deliver after history) · rejects the original plan of a formal bubble at the sent spot)
 
 ## 맥락
 
-claude 는 사용자가 친 글이 채팅에 **즉시** 뜨는데 codex 는 **왕복 후에** 뜬다. 기제가 다르다 — claude 경로는 입력을 보낼 때 화면용 합성 에코를 함께 내보내고(`input_echo_event`), 그 에코와 claude 가 나중에 되울리는 것을 같은 uuid 로 합친다. codex 경로는 합성 에코를 선언하지 않아서(기본값 `None`) codex 가 `userMessage` 항목을 되돌려줄 때까지 화면에 아무것도 없다.
+With claude, the text the user types appears in the chat **at once**, but with codex it appears **after a round trip**. The mechanisms differ — the claude path emits a synthetic echo for the screen along with the input when it sends it (`input_echo_event`), and merges that echo with what claude echoes back later under the same uuid. The codex path does not declare a synthetic echo (default `None`), so nothing is on screen until codex hands back a `userMessage` item.
 
-사용자가 화면에서 먼저 알아챘고(2026-09-14) 고치기로 했다. ★**지연이 실제로 몇 초인지는 아직 안 쟀다**★ — 이 결정은 「느리다」의 수치가 아니라 **claude 와 동작이 갈린다**는 사실에 선다(ADR-0192 가 기본값을 claude 에 맞추라고 정한 축이다).
+The user noticed it first on the screen (2026-09-14) and decided to fix it. ★**We have not yet measured how many seconds the delay actually is**★ — this decision stands not on a figure for 「느리다」 (“slow”) but on the fact that **behavior diverges from claude** (the axis ADR-0192 set when it said to match defaults to claude).
 
-왜 이제 와서 가능한가 — **codex 에 합칠 키가 있다는 것이 이번에 드러났다.** `turn/start` 는 `clientUserMessageId` 를 받고, 되울린 `userMessage` 항목이 그 값을 `clientId` 로 달고 온다. codex 0.140.0 에 들어왔고 우리가 쓰는 0.154.0 에 있다. ★**공개 문서에는 이 필드가 없고, 우리가 손으로 적은 `protocol.rs` 에도 없어서 두 번 놓쳤다**★ — 그래서 「합칠 키가 없다」가 오래 사실처럼 통했다.
+Why it is possible only now — **it came to light this time that codex has a key to merge on.** `turn/start` accepts `clientUserMessageId`, and the echoed-back `userMessage` item comes with that value as `clientId`. It entered in codex 0.140.0 and is present in the 0.154.0 we use. ★**The public documentation does not have this field, and neither does the `protocol.rs` we wrote by hand, so we missed it twice**★ — so 「합칠 키가 없다」 (“there is no key to merge on”) passed for fact for a long time.
 
 ## 결정
 
-**codex 도 입력을 보낼 때 화면용 합성 에코를 내고, 되울린 항목과 `clientUserMessageId` ↔ `clientId` 로 합친다.** claude 와 같은 모양이다.
+**Codex too emits a synthetic echo for the screen when it sends input, and merges it with the echoed-back item by `clientUserMessageId` ↔ `clientId`.** The same shape as claude.
 
-- 보내는 쪽이 그 id 를 만들어 **합성 에코와 `turn/start` 양쪽에 같은 값**으로 싣는다.
-- 되울린 `userMessage` 항목이 그 id 를 달고 오면 **합친다**(새 줄을 만들지 않는다).
-- ★**큐 해제 판정 축은 건드리지 않는다**★ — 「지금 보낼 수 있나」는 ADR-0193 대로 각 통로 구현체가 자기 상태로 판정한다. 이 합성 에코는 **화면용이고 화면용으로만 쓴다.**
-- **codex 가 되울린 내용은 정규화될 수 있다** — 합칠 때 표시 문구는 **우리 로컬 사본**을 남긴다(벤더 TUI 도 같은 이유로 그렇게 한다).
+- The sending side makes that id and puts **the same value in both the synthetic echo and `turn/start`**.
+- When the echoed-back `userMessage` item arrives carrying that id, we **merge** (we do not make a new line).
+- ★**The queue-release decision axis is not touched**★ — 「지금 보낼 수 있나」 (“can we send now?”) is decided by each transport implementation from its own state, as in ADR-0193. This synthetic echo is **for the screen and is used only for the screen.**
+- **What codex echoes back may be normalized** — when merging, the display text keeps **our local copy** (the vendor TUI does the same for the same reason).
 
 ## 거부한 대안
 
-- **현행 유지(왕복 후 표시)** — 사용자가 화면에서 체감해 고치기로 결정했다(2026-09-14). ★기각 근거가 실측 수치가 아니라 사용자 관측이다★ — 지연 수치는 아직 없다. 다만 ADR-0192 가 「백엔드 기본값은 claude 와 동일하게 맞춘다」를 이미 정했으므로, 수치와 무관하게 **갈려 있다는 것 자체**가 맞춰야 할 사유다.
-- **우리 것만 렌더하고 codex 가 되울린 항목은 버린다** — 합칠 키가 필요 없어 더 간단해 보이지만, **재접속·replay 경로에서는 그 되울림이 유일한 기록**이다. 벤더 TUI 가 replay 분기를 따로 두고 그때는 매칭을 건너뛰고 무조건 렌더하는 것이 그 대비다. 버리면 재접속 후 내가 뭘 보냈는지가 화면에서 사라진다.
-- **내용 비교로 합친다(키 없이)** — 벤더가 구버전 서버용 폴백으로 실제로 쓰는 방식이지만, 그 키는 **본문을 경계 없이 이어 붙이고 이미지는 개수만 세며 오디오·mention 은 아예 안 본다**(벤더 소스의 TODO 주석이 그 한계를 자인한다). 같은 문구 재전송이나 첨부만 다른 두 전송이 충돌한다. **우리는 키가 있으므로 이 폴백을 쓸 이유가 없다.**
-- **ADR-0193 을 번복한다** — 번복이 아니다. 그 ADR 의 본론은 **큐 해제 판정을 어디서 하나**이고 그건 그대로 유효하다. 그 ADR 이 기각한 것은 「합성 에코를 **바쁜지 판정 재료로** 쓰자」는 제안이고, 이 결정은 그것을 하지 않는다. 기각 사유 둘 중 「이중 표시·dedup 문제」만 이번에 해소됐고, 「목적이 다른 표면을 판정에 전용한다」는 사유는 건드리지 않는다.
+- **Keep as is (show after the round trip)** — the user felt it on the screen and decided to fix it (2026-09-14). ★The ground for rejection is the user's observation, not a measured figure★ — there is still no delay figure. But since ADR-0192 already decided 「백엔드 기본값은 claude 와 동일하게 맞춘다」 (“match backend defaults to claude”), **the fact of the divergence itself** is the reason to align, regardless of the figure.
+- **Render only ours and drop the items codex echoes back** — it looks simpler because no merge key is needed, but **on the reconnect·replay path that echo is the only record**. The vendor TUI has a separate replay branch that skips matching and renders unconditionally, and that is its safeguard. If we drop it, what I sent disappears from the screen after reconnecting.
+- **Merge by content comparison (without a key)** — the vendor really uses this as a fallback for old-version servers, but that key **joins the body without boundaries, counts only the number of images, and does not look at audio·mentions at all** (a TODO comment in the vendor source admits this limit). Two sends of the same text, or two sends that differ only in attachments, collide. **We have a key, so there is no reason to use this fallback.**
+- **Reverse ADR-0193** — it is not a reversal. The main point of that ADR is **where to make the queue-release decision**, and that remains valid. What that ADR rejected is the proposal to 「합성 에코를 **바쁜지 판정 재료로** 쓰자」 (“use the synthetic echo **as material for deciding whether it is busy**”), and this decision does not do that. Of its two reasons for rejection, only the 「이중 표시·dedup 문제」 (“double display·dedup problem”) is resolved this time, and the reason 「목적이 다른 표면을 판정에 전용한다」 (“it repurposes a surface with a different purpose for the decision”) is untouched.
 
 ## 근거
 
-- `turn/start` 의 `clientUserMessageId` 와 되울린 항목의 `clientId` 는 **codex rust-v0.154.0 스키마에 있다**(직독). 그 경로의 에코는 **벤더 통합 테스트가 단언한다** — `turn/steer` 뿐 아니라 `turn/start` 쪽에도 단언이 있다.
-- 도입 구간 = 0.135.0 에 없고 0.140.0 에 있다(태그별 스키마 대조).
-- 벤더 TUI 가 같은 키로 합치고, 키가 없는 구버전 서버용으로만 내용 비교 폴백을 둔다(벤더 소스).
-- 피어 구현(codex app-server 를 실사용하는 클라이언트)도 같은 방식이다 — 클라이언트가 만든 id 로 낙관 표시 후 **제자리 병합**(삭제 후 재삽입이 아니라 — 깜빡임 방지).
+- `turn/start`'s `clientUserMessageId` and the echoed-back item's `clientId` are **in the codex rust-v0.154.0 schema** (read directly). The echo on that path is **asserted by the vendor integration tests** — not only for `turn/steer` but also for `turn/start`.
+- Introduction range = absent in 0.135.0 and present in 0.140.0 (schema comparison by tag).
+- The vendor TUI merges by the same key, and keeps a content-comparison fallback only for old-version servers that have no key (vendor source).
+- A peer implementation (a client that actually uses the codex app-server) does it the same way — optimistic display with a client-made id, then **in-place merge** (not delete then reinsert — to prevent flicker).
 
 ## 영향 / 불변식
 
-- ★**`clientUserMessageId` 는 상관 키이지 멱등 키가 아니다**★ — 같은 id 로 두 번 보내면 **모델에 두 번 갈 수 있는데 화면엔 한 줄로 합쳐져 보인다**. 재전송·재연결 경로를 이 id 로 「이미 보냈나」 판정하지 말 것. 중복 방지가 필요하면 **우리 쪽에서** 막는다.
-- **버전 하한이 생긴다** — codex 0.140.0 미만에는 이 필드가 없다. 그 아래에서는 합칠 키가 없으므로 **합성 에코를 내지 않는 오늘 동작으로 떨어지는 것이 맞다**(내용 비교 폴백을 만들지 않는다 — 위 기각 사유).
-- **되울린 항목은 두 번 온다**(`item/started`·`item/completed`). 합치는 자리가 그 중복을 함께 흡수해야 한다 — 안 그러면 합치고도 두 줄이 된다.
-- **큐 해제 판정(ADR-0193)과 이 에코는 서로 모른다.** 이 에코를 「턴이 돈다」의 근거로 읽는 코드가 생기면 그것이 회귀다.
-- **터미널 모드 codex 는 해당 없다** — 그 모드에는 이 프로토콜 자체가 없다.
-- 표시 지연 수치는 여전히 **미측정**이다. 이 결정은 그 수치에 의존하지 않지만, GUI 실측 때 한 번 재 두면 이후 회귀를 잴 기준선이 생긴다.
-- ★**이 에코를 구현하면 화면 복원과 순서가 부딪힌다 — 그 자리를 함께 정해야 한다**★(2026-09-16 추가 · 이 ADR 의 결정은 무변경). ADR-0204 가 정한 대로 **이어받은 codex 는 준비 완료 직전에 과거 대화를 링에 넣는다**. 그런데 통로는 **연결 중에도 입력을 받아 큐에 세우고**, 합성 에코는 문을 거치지 않고 `core.emit` 으로 바로 들어간다 — 문이 막는 것은 *나가는 것*이지 *링에 들어오는 것*이 아니다. 그래서 사용자가 그 창(최대 10초)에 입력하면 **방금 친 말이 복원된 옛 대화 위에** 그려진다. 손으로 재활성화한 직후는 그 슬롯에 포커스가 있어 흔한 경로다.
-  - ★**오늘은 이 일이 일어나지 않는다 — 그리고 그 사실이 이 ADR 을 구현하면 사라진다**★: codex 의 encoder 가 에코를 선언하지 않아 `input_echo_event` 가 `None` 으로 단락하기 때문이다(양 모드 모두). 그 성질을 지키는 회귀망이 `neither_mode_makes_a_synthetic_input_echo`(ADR-0193)인데, **이 ADR 을 구현하면 그 테스트가 지워지는 것이 정상이다.** 그래서 이 상호작용을 그 테스트 주석에만 두면 구현과 함께 증발한다 — 그 자리가 여기인 이유다.
-  - **정해야 할 것** = 에코가 복원된 이력보다 **앞이냐 뒤냐**, 그리고 하이드레이션 중 입력을 받을 것인가(받되 에코를 미루기 · 아예 막기 · 그대로 두기). ★**「아예 막기」는 최대 10초 동안 타이핑이 먹통이 되는 것이라 그것대로 나쁘다**★.
-  - 위 마지막 항목(표시 지연 실측)과 **같은 자리에서 함께 볼 것** — 둘 다 GUI 실측이 답할 수 있고, 하이드레이션 창이 곧 그 지연의 최악값이다.
+- ★**`clientUserMessageId` is a correlation key, not an idempotency key**★ — if the same id is sent twice, **it may reach the model twice, yet on screen it looks merged into one line**. Do not use this id on resend·reconnect paths to decide 「이미 보냈나」 (“did we already send it?”). If duplicate prevention is needed, block it **on our side**.
+- **A version lower bound arises** — below codex 0.140.0 this field does not exist. Below that there is no key to merge on, so **falling back to today's behavior of not emitting a synthetic echo is correct** (we do not build a content-comparison fallback — the reason for rejection above).
+- **The echoed-back item comes twice** (`item/started`·`item/completed`). The place that merges must absorb that duplication too — otherwise it becomes two lines even after merging.
+- **The queue-release decision (ADR-0193) and this echo do not know each other.** If code appears that reads this echo as evidence for 「턴이 돈다」 (“a turn is running”), that is the regression.
+- **Terminal-mode codex is not applicable** — that mode has no such protocol at all.
+- The display-delay figure is still **unmeasured**. This decision does not depend on that figure, but measuring it once during GUI measurement gives a baseline to measure later regressions against.
+- ★**Implementing this echo collides in order with screen restore — that spot must be decided together**★ (added 2026-09-16 · the decision of this ADR is unchanged). As ADR-0204 decided, **a resumed codex puts the past conversation into the ring just before it is ready**. But the transport **accepts input even while connecting and queues it**, and the synthetic echo goes in directly by `core.emit` without passing through the door — what the door blocks is *going out*, not *entering the ring*. So if the user types in that window (up to 10 seconds), **the line just typed is drawn on top of the restored old conversation**. Right after a manual re-activation, that slot has focus, so this is a common path.
+  - ★**Today this does not happen — and that fact disappears when this ADR is implemented**★: because codex's encoder does not declare an echo, `input_echo_event` short-circuits to `None` (in both modes). The regression net that keeps that property is `neither_mode_makes_a_synthetic_input_echo`(ADR-0193), but **when this ADR is implemented, that test being deleted is normal.** So if this interaction is kept only in that test's comment, it evaporates along with the implementation — which is why that spot is here.
+  - **What to decide** = whether the echo goes **before or after** the restored history, and whether to accept input during hydration (accept but defer the echo · block it entirely · leave as is). ★**「아예 막기」 (“Block entirely”) makes typing dead for up to 10 seconds, so it is bad in its own way**★.
+  - **To be looked at together, at the same spot** with the last item above (measuring the display delay) — GUI measurement can answer both, and the hydration window is the worst case of that delay.

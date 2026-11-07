@@ -1,4 +1,4 @@
-// ADR-0237: Esc 끊기 술어 표 — 조건 하나씩 거짓이면 발화하지 않고, 전부 참일 때만 발화한다(TRD §3-2).
+// ADR-0237: Esc interrupt predicate table — if any one condition is false it does not fire, and it fires only when all are true (TRD §3-2).
 
 import { describe, expect, it } from 'vitest'
 

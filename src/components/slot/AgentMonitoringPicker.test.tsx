@@ -1,10 +1,10 @@
-// ADR-0237: 에이전트 모니터링 팝업의 백드롭은 열린 동안만 오버레이 표지를 단다 — 그 Esc 는 팝업을 닫는 키라
-//   뒤의 채팅 칸이 턴을 끊으면 안 된다.
+// ADR-0237: the agent monitoring popup's backdrop carries an overlay marker only while open — that Esc is the key that closes the popup, so
+//   the chat area behind it must not interrupt the turn.
 
 import { act, cleanup, fireEvent, render } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-// 배정(on-select)은 이 시험의 관심사가 아니다 — 셸 invoke 를 들이지 않게 막아 둔다.
+// Assignment (on-select) is not this test's concern — blocked so no shell invoke gets in.
 vi.mock('../../store/viewStore', () => ({
   useViewStore: { getState: () => ({ assignAgent: vi.fn(async () => undefined) }) },
 }))

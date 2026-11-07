@@ -1,6 +1,6 @@
-//! 서비스 밖(연결 계층·조립) 시험이 실 CLI 없이 사용량 서비스를 세우는 대역.
+//! A stand-in with which tests outside the service (connection layer · assembly) set up the usage service without a real CLI.
 //!
-//! ★조회기 키·정책은 실 조회기에서 빌린다★ — 시험에도 벤더 리터럴을 두지 않는다. 서비스는 실물 인코더를 단다.
+//! ★Prober keys and policy are borrowed from the real prober★ — vendor literals are not put in tests either. The service attaches the real encoder.
 
 use std::collections::BTreeSet;
 use std::sync::{mpsc, Arc, Mutex, PoisonError};
@@ -14,7 +14,7 @@ use engram_dashboard_agent::usage::{
 use super::clock::{OsUsageClock, UsageClock};
 use super::{OsProbeThreads, UsageParts, UsageService};
 
-/// 자식을 띄우지 않는 스포너 — 불리면 실패다.
+/// A spawner that launches no child — it is a failure if called.
 pub(crate) struct NoChildren;
 
 impl ProbeSpawner for NoChildren {
@@ -27,7 +27,7 @@ impl ProbeSpawner for NoChildren {
     }
 }
 
-/// 조회마다 들어왔다고 알리고 시험이 놓아 줄 때까지 막힌 뒤 같은 5시간 창 하나를 돌려주는 조회기.
+/// A prober that reports it came in on every query, blocks until the test releases it, then returns one same 5-hour window.
 struct GatedProbe {
     key: UsageVendorKey,
     policy: UsagePolicy,
@@ -36,8 +36,8 @@ struct GatedProbe {
     release: Mutex<mpsc::Receiver<()>>,
 }
 
-/// [`GatedProbe`] 의 시험 쪽 손잡이 — `entered` 는 조회가 시작될 때마다 한 번 울리고, `release` 로 한 번 보낼 때마다
-/// 조회 하나가 값을 돌려준다. ★놓으면(drop) 막혀 있던·뒤에 올 조회는 시한 초과 실패로 끝난다★.
+/// The test-side handle of [`GatedProbe`] — `entered` rings once each time a query starts, and each `release` sent once
+/// lets one query return a value. ★If dropped, queries that were blocked and ones that come later end as a timeout failure★.
 pub(crate) struct ProbeGate {
     pub(crate) entered: tokio::sync::mpsc::UnboundedReceiver<()>,
     pub(crate) release: mpsc::Sender<()>,
@@ -74,7 +74,7 @@ impl UsageProbe for GatedProbe {
     }
 }
 
-/// `real` 의 키·정책을 빌린 [`GatedProbe`] — 조회기는 `'static` 이라 부를 때마다 하나씩 샌다.
+/// A [`GatedProbe`] borrowing `real`'s key and policy — a prober is `'static` so one leaks each time it is called.
 pub(crate) fn gated_probe(
     real: &dyn UsageProbe,
     used_pct: f64,
@@ -95,7 +95,7 @@ pub(crate) fn gated_probe(
     (probe, ProbeGate { entered, release })
 }
 
-/// 실물 인코더를 단 서비스. 스케줄러는 띄우지 않는다 — 시각은 시험이 몬다.
+/// A service with the real encoder attached. The scheduler is not launched — the test drives the time.
 pub(crate) fn service(
     probes: Vec<&'static dyn UsageProbe>,
     clock: Arc<dyn UsageClock>,
@@ -103,8 +103,8 @@ pub(crate) fn service(
     UsageService::new(parts(probes, clock)).0
 }
 
-/// [`service`] 와 같되 ⟳ 답장 대기 상한을 시험이 정한다 — 막힌 조회 동안 「답이 아직 없다」를 단언하는 시험이
-/// 운영 상한(`REPLY_WAIT_MAX`)에 기대지 않게 한다(느린 러너에서 그 상한이 먼저 끝나면 거짓 실패한다).
+/// Same as [`service`] but the test sets the ⟳ reply wait cap — so a test asserting 「답이 아직 없다」 (there is no answer yet) during a blocked query does not
+/// lean on the production cap (`REPLY_WAIT_MAX`) (on a slow runner, if that cap ended first it would fail falsely).
 pub(crate) fn service_with_wait(
     probes: Vec<&'static dyn UsageProbe>,
     clock: Arc<dyn UsageClock>,
@@ -124,12 +124,12 @@ fn parts(probes: Vec<&'static dyn UsageProbe>, clock: Arc<dyn UsageClock>) -> Us
     }
 }
 
-/// 칸이 없는 서비스 — 사용량을 보지 않는 시험의 조립용.
+/// A service with no cells — for assembly in tests that do not look at usage.
 pub(crate) fn idle_service() -> Arc<UsageService> {
     service(Vec::new(), Arc::new(OsUsageClock::new()))
 }
 
-/// 구독 명부의 합집합 — 스케줄러가 돌볼 벤더.
+/// The union of the subscription registry — the vendors the scheduler looks after.
 pub(crate) fn union(service: &UsageService) -> BTreeSet<UsageVendorKey> {
     service.watch.union()
 }

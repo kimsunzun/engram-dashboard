@@ -1,4 +1,4 @@
-// usageFormat — 사용량 슬롯의 수·문구(TRD S21 usage-limit-slot §4 「프론트 표시」 행 중 순수 계산 몫).
+// usageFormat — numbers and phrasing of the usage slot (the pure-computation share of the 「프론트 표시」 (frontend display) rows of TRD S21 usage-limit-slot §4).
 
 import { describe, expect, it } from 'vitest'
 
@@ -30,7 +30,7 @@ function win(over: Partial<UsageWindow> = {}): UsageWindow {
   return { used_pct: 38, resets_at: NOW + 3600, age_secs: 0, expired: false, ...over }
 }
 
-// ── 보이는 수·색 경계(R10·D17 — 남은 양 기준) ──
+// ── Visible number · color boundaries (R10·D17 — based on the remaining amount) ──
 describe('보이는 수와 색 구간', () => {
   const cases: Array<[left: number, visible: number, level: string]> = [
     [19.6, 19, 'danger'],
@@ -67,7 +67,7 @@ describe('보이는 수와 색 구간', () => {
       resetsAt: NOW + 600,
       resetInSecs: 600,
     })
-    // 리셋이 지났으면 값이 없어도 만료다.
+    // If the reset has passed, it is expired even without a value.
     expect(readWindow(win({ used_pct: null, resets_at: NOW }), 0, NOW)).toEqual({ kind: 'expired' })
   })
 
@@ -75,14 +75,14 @@ describe('보이는 수와 색 구간', () => {
     expect(leftFromUsed(80.4)).toBeCloseTo(19.6)
     expect(visibleLeft(leftFromUsed(80.4))).toBe(19)
     expect(visibleLeft(leftFromUsed(79.6))).toBe(20)
-    // 경계 바로 아래 — 19.9999999999 는 20 이 아니다(노랑으로 올리지 않는다).
+    // Just below the boundary — 19.9999999999 is not 20 (it is not raised to yellow).
     expect(visibleLeft(leftFromUsed(80.0000000001))).toBe(19)
     expect(usageLevel(visibleLeft(leftFromUsed(80.0000000001)))).toBe('danger')
     expect(visibleLeft(29.9)).toBe(29)
   })
 })
 
-// ── 나이·30분 경계·만료(R32) ──
+// ── Age · 30-minute boundary · expiry (R32) ──
 describe('나이 · 오래됨 · 만료', () => {
   it('나이 = age_secs + 받은 뒤 흐른 초', () => {
     expect(elapsedSecs(1_000, 61_000)).toBe(60)
@@ -95,7 +95,7 @@ describe('나이 · 오래됨 · 만료', () => {
     const at = (age: number) => readWindow(win({ age_secs: age }), 0, NOW)
     expect(at(STALE_AFTER_SECS)).toMatchObject({ kind: 'value', stale: false })
     expect(at(STALE_AFTER_SECS + 1)).toMatchObject({ kind: 'value', stale: true })
-    // 받은 뒤 로컬로 흐른 시간도 나이에 든다.
+    // Time that elapsed locally after receipt also counts toward the age.
     expect(readWindow(win({ age_secs: STALE_AFTER_SECS - 10 }), 11, NOW)).toMatchObject({ stale: true })
   })
 
@@ -109,14 +109,14 @@ describe('나이 · 오래됨 · 만료', () => {
     const at = (age: number) => readWindow(win({ age_secs: age }), 0, NOW)
     expect(oldestAgeSecs([at(60), at(125)])).toBe(125)
     expect(oldestAgeSecs([at(125), at(60)])).toBe(125)
-    // 한 창이 빠져도(값 없음) 남은 창의 나이다.
+    // Even if one window drops out (no value), it is the age of the remaining window.
     expect(oldestAgeSecs([at(60), readWindow(null, 0, NOW)])).toBe(60)
     expect(oldestAgeSecs([readWindow(win({ used_pct: null, age_secs: 9_999 }), 0, NOW), at(30)])).toBe(30)
-    // 만료 창은 값을 들지 않는다.
+    // An expired window holds no value.
     expect(oldestAgeSecs([readWindow(win({ age_secs: 9_999, expired: true }), 0, NOW), at(30)])).toBe(30)
     expect(oldestAgeSecs([readWindow(null, 0, NOW), readWindow(win({ used_pct: null }), 0, NOW)])).toBeNull()
     expect(oldestAgeSecs([])).toBeNull()
-    // 받은 뒤 흐른 초가 든 나이다.
+    // It is the age that includes the seconds elapsed since receipt.
     expect(oldestAgeSecs([readWindow(win({ age_secs: 100 }), 60, NOW)])).toBe(160)
   })
 
@@ -133,7 +133,7 @@ describe('나이 · 오래됨 · 만료', () => {
   })
 })
 
-// ── 문구 ──
+// ── Phrasing ──
 describe('시간 문구', () => {
   it('남은 시간 — 분 올림 · 1분 아래로 안 내려감', () => {
     expect(formatDuration(1)).toBe('1분')
@@ -159,9 +159,9 @@ describe('시간 문구', () => {
   })
 })
 
-// ── 리셋 시각(사용자 결정 2026-09-29) — 같은 로컬 날짜면 「HH:MM」, 아니면 「M/D HH:MM」(요일 없음 · 0 채움 없음) ──
+// ── Reset time (user decision 2026-09-29) — on the same local date 「HH:MM」, otherwise 「M/D HH:MM」 (no weekday · no zero padding) ──
 describe('리셋 시각', () => {
-  // 로컬 시각으로 세워 시간대와 무관하게 같은 글자가 나온다. 지금 = 인자로 넣는다(실제 시계를 읽지 않는다).
+  // Built from local time so the same text comes out regardless of time zone. Now = passed as an argument (the real clock is not read).
   const at = (month: number, day: number, hour: number, minute: number, year = 2026) =>
     new Date(year, month - 1, day, hour, minute).getTime() / 1000
 
@@ -177,7 +177,7 @@ describe('리셋 시각', () => {
     expect(formatResetAt(at(9, 30, 23, 59), now)).toBe('23:59')
     expect(formatResetAt(at(10, 1, 0, 0), now)).toBe('10/1 00:00')
     expect(formatResetAt(at(10, 1, 0, 58), now)).toBe('10/1 00:58')
-    // 지금이 막 자정을 넘었으면 그날 안의 리셋은 시각만.
+    // If now has just passed midnight, a reset within that day shows the time only.
     expect(formatResetAt(at(10, 1, 0, 58), at(10, 1, 0, 0))).toBe('00:58')
     expect(formatResetAt(at(10, 1, 23, 59), at(10, 1, 0, 0))).toBe('23:59')
   })
@@ -185,7 +185,7 @@ describe('리셋 시각', () => {
   it('달·해 경계 — 월·일에 0 을 채우지 않는다', () => {
     expect(formatResetAt(at(11, 1, 9, 5), at(10, 31, 22, 0))).toBe('11/1 09:05')
     expect(formatResetAt(at(1, 1, 0, 5, 2027), at(12, 31, 23, 0))).toBe('1/1 00:05')
-    // 같은 월·일이라도 해가 다르면 다른 날이다.
+    // Even with the same month and day, a different year is a different day.
     expect(formatResetAt(at(9, 30, 10, 0, 2027), at(9, 30, 9, 0))).toBe('9/30 10:00')
   })
 
@@ -197,7 +197,7 @@ describe('리셋 시각', () => {
   })
 })
 
-// ── 상태 문장(R31 · §6 #20) ──
+// ── Status sentence (R31 · §6 #20) ──
 describe('상태 문장', () => {
   const at = (secs: number) => formatClock(NOW + secs)
 
@@ -233,7 +233,7 @@ describe('상태 문장', () => {
         NOW,
       ),
     ).toBe('로그인 필요 — 응답 (-32600): Unauthorized')
-    // 설치 안 됨의 원문은 회사 응답이 아니라 실행 오류일 수 있다.
+    // The raw text of not-installed may be an execution error, not the company's response.
     expect(
       statusSentence({ kind: 'NotInstalled', detail: { kind: 'spawn', code: null, upstream: 'program not found' } }, 0, NOW),
     ).toBe('설치 안 됨 — 오류: program not found')

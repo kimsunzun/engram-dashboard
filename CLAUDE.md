@@ -10,6 +10,14 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 - 코드 변경은 `/engram-implement`로 한다.
 - 굵은 결정은 결정 즉시 ADR(`/engram-adr`)로 남긴다.
 
+## 사용자 대면 동작 — 관례를 먼저 확인한다
+
+- 사용자가 체감하는 동작·정책·기본값을 정하거나 선택지로 올리기 전에 업계·오픈소스 관례를 먼저 확인한다. 대상 = UI 동작 · 타임아웃·재시도 횟수 같은 기본값 · 닫기·재연결 같은 흐름.
+  - 확인은 가볍게 한다 — 오픈소스 소스 몇 곳을 직접 본다. 조사 스킬은 관례가 갈리거나 결정이 클 때만 돌린다.
+  - 관례가 정하는 부분은 관례를 기본안으로 내고 묻는다.
+  - 확인하지 못했으면 그 문장 안에 「관례 미확인」을 쓴다.
+- 버그를 우회하는 정책을 선택지로 올리지 않는다. 원인 수정을 따로 항목으로 낸다.
+
 ## 브랜치·커밋
 
 - 브랜치 하나 = 주제 하나이고 master 에서 판다. 자잘한 변경은 `v<다음 릴리스>/chore/misc` 브랜치 하나에 모은다.
@@ -42,12 +50,12 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 - **daemon** — `AgentManager` 소유. WS 로 셸을 받고 명령 버스 배달 · 우편 호스트 · 제어 평면(HTTP 하나에 MCP `/mcp` + CLI `/control/*`, 신원 = Bearer 토큰)을 돈다.
 - **agent** — 에이전트 런타임(Tauri 0). 세션 · 펌프 · transport(PTY · stdio) · backend(claude · codex · 셸).
 - **cli** — `engram.exe`. 스폰된 에이전트가 HTTP 로 데몬 제어 라우트에 붙는다(인증 + 배송만).
-- **protocol** — 셸 ↔ 데몬 wire 계약 + codec + ts-rs 바인딩.
+- **protocol** — 셸 ↔ 데몬 wire 계약 + codec + ts-rs 바인딩(워크스페이스 의존 0).
 - **command** — 명령 버스 도구(명령 0개 — 명령은 생산자 옆에서 선언).
 - **net** — 데몬 네트워크 행(WS · 핸드셰이크 · 단일 인스턴스 · `daemon.json`).
 - **messaging** — 에이전트 간 우편 커널(워크스페이스 의존 0, 포트 trait 로만 접합).
 - **base** · **platform** — 잎 crate. 범용 도우미 · OS 에 따라 갈리는 운영 코드.
-- **transport** — 재사용 전송 lib. 아직 소비자 없음.
+- **transport** — 재사용 전송 lib. 셸의 데몬 연결이 그 위에서 돈다(`daemon_client/link/` · 구동 = `daemon_client/connection.rs`). 데몬은 3-3 에서 붙는다.
 
 크레이트·패키지를 더하거나 바꾸면 사용자에게 보고한다.
 

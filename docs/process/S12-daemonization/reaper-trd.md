@@ -1,11 +1,11 @@
-# TRD — 세션 Reaper + 종료 분류 (ADR-0019 구현 설계)
+# TRD — session Reaper + exit classification (ADR-0019 implementation design)
 
-근거: ADR-0019(종료 분류·disposition) · ADR-0001(kill 2동사) · ADR-0005(finalize 1회) · ADR-0006(락 순서) · ADR-0007(epoch). consult `20260616-215346-consult-session-reaper`(GPT·Gemini·Claude 블라인드 교차검증, judge 최신뢰=GPT) 종합.
+Basis: ADR-0019 (exit classification · disposition) · ADR-0001 (kill 2 verbs) · ADR-0005 (finalize once) · ADR-0006 (lock order) · ADR-0007 (epoch). Synthesis of consult `20260616-215346-consult-session-reaper` (GPT, Gemini and Claude blind cross-validation, judge's most trusted = GPT).
 
-## 설계 (correctness-merge 결과)
-**단일 supervisor 스레드 + std unbounded `mpsc<ReapMsg>`.** pump가 종료 시 이벤트만 발행, reaper 한 스레드가 소비해 맵 제거+disposition+통지.
+## Design (correctness-merge result)
+**A single supervisor thread + std unbounded `mpsc<ReapMsg>`.** On termination the pump only emits an event; one reaper thread consumes it and does map removal + disposition + notification.
 
-### 새 타입
+### New types
 ```rust
 // 유저 의도 — kill 핸들러가 채움. PTY 관측 사실(TerminalReason)과 분리.
 #[repr(u8)]
@@ -23,10 +23,10 @@ struct ReapMsg {
 enum Disposition { DeleteProfile, KeepDisableAutoRestore, KeepAsIs }
 ```
 
-### 흐름
-1. **spawn_session**: pump에 `{ id, epoch, reaper_tx: Sender<ReapMsg> clone, intent: Arc<AtomicU8>, shutting_down: Arc<AtomicBool> }`를 주입(transport.start 경유 또는 pump 클로저 캡처). `intent`는 세션별 신규 atomic, `shutting_down`은 manager 전역 1개. **활성화(spawn) 시 프로필 auto_restore=true로** 세팅(강제종료 후 부팅 복원 대상).
-2. **pump 종료(finish 승자)**: 기존 `OutputCore.finish()`의 `finalized.swap(AcqRel)`가 true 반환한 그 경로에서, **그 순간** intent·shutting_down을 load(snapshot)해 `ReapMsg` 빌드 → `reaper_tx.send`. (finish 자체·done_tx·status 통지 분담은 ADR-0005 그대로 — reaper_tx 송신만 추가.)
-3. **reaper 루프(단일 스레드)**: `while let Ok(msg) = rx.recv() { manager.reap_one(msg) }`. 모든 Sender drop 시 종료(+명시 Stop 메시지 옵션).
+### Flow
+1. **spawn_session**: inject `{ id, epoch, reaper_tx: Sender<ReapMsg> clone, intent: Arc<AtomicU8>, shutting_down: Arc<AtomicBool> }` into the pump (via transport.start or pump closure capture). `intent` is a new per-session atomic, `shutting_down` is a single manager-wide one. **On activation (spawn) set the profile's auto_restore=true** (so it is a boot-restore target after a forced termination).
+2. **Pump termination (finish winner)**: on the very path where the existing `OutputCore.finish()`'s `finalized.swap(AcqRel)` returned true, load (snapshot) intent and shutting_down **at that moment**, build the `ReapMsg` → `reaper_tx.send`. (finish itself, done_tx and the split of status notification stay as in ADR-0005 — only the reaper_tx send is added.)
+3. **Reaper loop (single thread)**: `while let Ok(msg) = rx.recv() { manager.reap_one(msg) }`. Ends when all Senders drop (+ optional explicit Stop message).
 4. **reap_one**:
    ```
    let removed = { let mut m = sessions.write();
@@ -38,10 +38,10 @@ enum Disposition { DeleteProfile, KeepDisableAutoRestore, KeepAsIs }
    }
    status_sink.agent_list_updated(list_agents());                      // lock 밖: 외부 콜백
    ```
-5. **kill_agent**(변경): intent=UserKill 태깅 **shutdown 전에** → `transport.shutdown()` → `core.join_pump(5s)`. **맵 제거·disposition·통지는 직접 안 함**(reaper에 위임 — done 단일 소비자). join_pump는 pump 스레드 join만.
-6. **shutdown_all**(변경): `shutting_down.store(true)` **먼저** → 그 다음 각 세션 kill. (set이 kill보다 늦으면 그 틈에 종료된 세션이 크래시로 오분류 — race.)
+5. **kill_agent** (changed): tag intent=UserKill **before shutdown** → `transport.shutdown()` → `core.join_pump(5s)`. **It does not do map removal, disposition or notification directly** (delegated to the reaper — done has a single consumer). join_pump only joins the pump thread.
+6. **shutdown_all** (changed): `shutting_down.store(true)` **first** → then kill each session. (If the set comes later than the kill, a session that ended in that gap is misclassified as a crash — race.)
 
-### decide(msg) — disposition 판정
+### decide(msg) — disposition decision
 ```
 if msg.shutting_down_at_finish        => KeepAsIs            // 데몬 셧다운: 손 안 댐 → 부팅 복원
 match (intent_at_finish, reason):
@@ -49,24 +49,24 @@ match (intent_at_finish, reason):
   (None, Exited{code:0})               => DeleteProfile       // 정상 /exit
   (None, _)                            => KeepDisableAutoRestore // 크래시/EOF/exit≠0/signal: 보수적
 ```
-- **exit code 불명(EOF/StreamClosed/Error)도 크래시 취급**(보수적 — code 0 확실할 때만 삭제). consult 합의.
-- **apply_disposition은 downgrade-only**: auto_restore를 절대 true로 *올리지 않음*(KeepDisableAutoRestore=false로만). 이게 하드킬 안전망 성립 조건 — reaper 못 돌면 auto_restore=true 잔류→부팅 복원.
+- **An unknown exit code (EOF/StreamClosed/Error) is also treated as a crash** (conservative — delete only when code 0 is certain). Consult agreement.
+- **apply_disposition is downgrade-only**: it never *raises* auto_restore to true (KeepDisableAutoRestore only lowers it to false). This is the condition for the hard-kill safety net to hold — if the reaper cannot run, auto_restore=true remains → boot restore.
 
-## 불변식 준수 (변경 0)
-- **kill 2동사(ADR-0001)**: shutdown→join_pump 그대로. reaper는 그 뒤 done 소비만 추가.
-- **finalize 1회(ADR-0005)**: pump의 finalized.swap 승자 1회 그대로. reaper_tx.send는 그 승자 경로에서 1회.
-- **락 순서(ADR-0006)**: write lock 구간=epoch검증+remove만. ProfileRegistry mutate·status_sink는 lock 밖. sessions lock과 ProfileRegistry lock 보유 구간 시간상 비중첩.
-- **epoch(ADR-0007)**: reap 전 epoch 일치 검증 → restart로 자리 바뀐 유령 done이 새 세션 안 지움.
-- **idempotency**: kill_agent(위임)·reaper가 같은 done을 봐도 remove Some 승자 1명만 disposition·통지.
+## Invariant compliance (0 changes)
+- **kill 2 verbs (ADR-0001)**: shutdown→join_pump as is. The reaper only adds consuming done after that.
+- **finalize once (ADR-0005)**: the pump's finalized.swap winner once, as is. reaper_tx.send happens once on that winner path.
+- **Lock order (ADR-0006)**: the write-lock section = epoch check + remove only. ProfileRegistry mutate and status_sink are outside the lock. The sections holding the sessions lock and the ProfileRegistry lock do not overlap in time.
+- **epoch (ADR-0007)**: verify the epoch matches before reaping → a ghost done whose place was taken by a restart does not delete the new session.
+- **idempotency**: even if kill_agent (delegated) and the reaper see the same done, only the one winner whose remove is Some does disposition and notification.
 
-## 테스트 (headless harness, 실제 PTY)
-- 자연 종료(셸 `exit 0`) → 세션 맵에서 reap + 프로필 삭제 + agent-list-updated 1회.
-- 크래시(`exit 1`) → 프로필 유지 + auto_restore=false(예약 복귀).
-- 유저 kill → 프로필 삭제(intent 태깅 경로).
-- shutting_down=true 중 종료 → 프로필 유지(disposition 스킵), 맵 제거는 됨.
-- epoch race: 옛 epoch ReapMsg가 새 세션(현 epoch) 안 지움.
-- idempotency: 같은 ReapMsg 2회 → 통지 1회.
-- 락/데드락: kill_agent와 자연종료 동시 → 패닉/행 없음.
+## Tests (headless harness, real PTY)
+- Natural exit (shell `exit 0`) → reaped from the session map + profile deleted + agent-list-updated once.
+- Crash (`exit 1`) → profile kept + auto_restore=false (back to reserved).
+- User kill → profile deleted (intent tagging path).
+- Termination while shutting_down=true → profile kept (disposition skipped), map removal still happens.
+- epoch race: an old-epoch ReapMsg does not delete the new session (current epoch).
+- idempotency: the same ReapMsg twice → notification once.
+- Lock/deadlock: kill_agent and a natural exit at the same time → no panic/hang.
 ```
 cargo test -p engram-dashboard-core
 ```

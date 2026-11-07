@@ -1,54 +1,54 @@
-# ADR-0045: 출력 정제를 백엔드로 이동 — 타입 OutputEvent를 서버에서 파싱해 wire로 흘림
+# ADR-0045: Move output refinement to the backend — parse the typed OutputEvent on the server and carry it on the wire
 
-- 상태: 확정 (2026-07-03, 근거: §5 손발/두뇌 분리 + ADR-0002 출력종류 비가정 + 가상 터미널 요구 + 출력 파이프라인 seam 코드 실측(재-review 3회) + 사용자 결정) · 부분 폐기 by ADR-0231 (렌더 모델에 대기 목록 추가와 uuid dedup 범위 좁힘)
-- 관련: Amends ADR-0044 (통로 무정제·프론트 파싱 → 백엔드 서버 정제(타입 OutputEvent)로 전환) · ADR-0002(출력 종류 비가정·터미널 강제 금지 — 이 설계가 그 실현) · ADR-0003(OutputSink/OutputFrame 계약·코어 격리 — payload 확장 대상) · ADR-0004(claude 지식 격리) · ADR-0006(락 순서) · ADR-0030 · ADR-0040(서버 authoritative bounded 버퍼) · ADR-0043(mount-replay) · Amended by ADR-0231 (렌더 모델에 대기 목록 추가와 uuid dedup 범위 좁힘)
+- 상태: 확정 (2026-07-03, basis: §5 hands/brain separation + ADR-0002 no assumption about output kinds + the virtual terminal requirement + measurement of the output pipeline seam code (3 re-reviews) + user decision) · 부분 폐기 by ADR-0231 (adding a waiting list to the render model and narrowing the scope of uuid dedup)
+- 관련: Amends ADR-0044 (the unrefined channel · frontend parsing → switched to backend server-side refinement (typed OutputEvent)) · ADR-0002 (no assumption about output kinds · no forcing a terminal — this design is its realization) · ADR-0003 (OutputSink/OutputFrame contract · core isolation — the target of the payload extension) · ADR-0004 (claude knowledge isolation) · ADR-0006 (lock order) · ADR-0030 · ADR-0040 (server-authoritative bounded buffer) · ADR-0043 (mount-replay) · Amended by ADR-0231 (adding a waiting list to the render model and narrowing the scope of uuid dedup)
 
-## 용어 (자립용)
-- **`OutputEvent`** — pump/core 경계의 확장 enum. `TerminalBytes(Vec<u8>)` + 신규 구조화 variant(`TextDelta`/`ToolCall`/`Usage`/`MessageDone`/`Error`, optional `turn_id`/`message_id`, + `Structured{kind,json}` 탈출구).
-- **decoder** — backend가 소유하는 변환기(버퍼 아님). 바이트→라인 재조립→claude JSON 파싱→`OutputEvent`. claude 스키마 지식은 여기만(ADR-0004).
-- **`Ring<StoredOutput>`** — seq·bounded(byte budget)·cursor replay를 담는 단일 히스토리 버퍼. `StoredOutput{ seq, payload, cost_bytes }`. pump 입력 이벤트와 저장 타입을 분리.
-- **`OutputPayload<'a>{ Bytes(&[u8]) | Event(&OutputEvent) }`** — 코어 도메인 payload(빌림). **`WirePayload`** — sink/daemon 인코딩 단계 이름(코어에 wire 개념 안 샘).
-- **frame tag** — wire 물리 표현. `tag0`=TerminalBytes, `tag1`=StructuredEvent(payload = self-describing 직렬화 이벤트). codec은 이벤트 스키마를 모른다(payload opaque).
+## Terms (self-contained)
+- **`OutputEvent`** — an extensible enum at the pump/core boundary. `TerminalBytes(Vec<u8>)` + new structured variants (`TextDelta`/`ToolCall`/`Usage`/`MessageDone`/`Error`, optional `turn_id`/`message_id`, + the `Structured{kind,json}` escape hatch).
+- **decoder** — a converter owned by the backend (not a buffer). bytes → line reassembly → claude JSON parsing → `OutputEvent`. Knowledge of the claude schema lives only here (ADR-0004).
+- **`Ring<StoredOutput>`** — a single history buffer that holds seq · bounded (byte budget) · cursor replay. `StoredOutput{ seq, payload, cost_bytes }`. The pump input event and the stored type are separated.
+- **`OutputPayload<'a>{ Bytes(&[u8]) | Event(&OutputEvent) }`** — the core domain payload (borrowed). **`WirePayload`** — the name of the sink/daemon encoding stage (no wire concept leaks into the core).
+- **frame tag** — the physical wire representation. `tag0` = TerminalBytes, `tag1` = StructuredEvent (payload = a self-describing serialized event). The codec does not know the event schema (payload opaque).
 
 ## 맥락
-ADR-0044가 JSON 모드를 "통로 무정제(바보 파이프) + 프론트 파싱"으로 배선했다. NDJSON이 `OutputEvent::TerminalBytes`로 흘러 프론트 `RichSlot`이 유일 파서다.
+ADR-0044 wired JSON mode as "an unrefined channel (a dumb pipe) + frontend parsing". NDJSON flows as `OutputEvent::TerminalBytes`, and the frontend `RichSlot` is the only parser.
 
-문제(코드 실측·재-review 3회 확정):
-- **§5 위반** — 구조 이해가 웹뷰에만 존재, 백엔드측 LLM(두뇌)이 자기 출력을 못 봄.
-- **바이트 평탄화** — 다형성은 `OutputEvent`(pump/core)에만, sink 아래는 바이트 전용(`OutputFrame{data:&[u8]}`·`OutputSink`·replay 바이트).
-- **가상 터미널** — VT 바이트 스트림(터미널)과 discrete 이벤트(구조화 LLM)는 본질이 다른 payload. 단일 구조화 버퍼로 통일하면 터미널 강제 왜곡(ADR-0002 위반).
-- **클라 relay가 tag를 검증·거부** — `connection.rs`가 버퍼 저장 전 `decode_frame`을 부르고, `codec.rs`가 `tag≠0`을 `UnknownTag`로 거부한다. 그래서 새 tag를 그냥 흘리면 클라 버퍼에 저장조차 안 돼 리로드 두절 → 구 B 재발. wire·codec 선택이 여기 걸린다(↓ 결정).
+Problems (confirmed by code measurement · 3 re-reviews):
+- **§5 violation** — the understanding of structure exists only in the webview, and the backend-side LLM (the brain) cannot see its own output.
+- **Byte flattening** — polymorphism exists only in `OutputEvent` (pump/core), and below the sink it is bytes only (`OutputFrame{data:&[u8]}` · `OutputSink` · replay bytes).
+- **Virtual terminal** — a VT byte stream (terminal) and discrete events (structured LLM) are payloads of essentially different natures. Unifying them into a single structured buffer distorts by forcing a terminal (violating ADR-0002).
+- **The client relay validates and rejects the tag** — `connection.rs` calls `decode_frame` before storing into the buffer, and `codec.rs` rejects `tag≠0` as `UnknownTag`. So if a new tag is simply passed through, it is not even stored in the client buffer and a reload breaks → the old B recurs. The wire/codec choice hinges on this (↓ decision).
 
 ## 결정
-**payload 다형성을 유지하되, 백엔드가 decoder로 정제하고 타입 이벤트를 binary frame(단일 `tag1`)으로 흘려 클라 공유버퍼의 append/replay 로직을 재사용**한다.
+**Keep payload polymorphism, but have the backend refine with a decoder and carry the typed event as a binary frame (a single `tag1`), reusing the append/replay logic of the client shared buffer.**
 
-1. **backend 정제 = decoder 레이어(구현 갈림길 = B, 사용자 결정)** — `transport`(pump)는 **바이트 그대로 emit**(순수 파이프 유지, `PtyTransport`와 균일). pump→core 사이 **backend 소유 decoder**가 라인 재조립 + claude 파싱 → `OutputEvent`. transport·core는 claude/라인 지식 없음(ADR-0003/0004). (거부: transport pump가 파싱까지 소유 = transport 책임 불균일. 근거 = decoder만 backend별 교체, transport는 하나 공유.)
-2. **단일 `Ring<StoredOutput>` 버퍼(사용자 결정)** — 에이전트당 히스토리 버퍼 1개. 터미널=바이트 payload, JSON=이벤트 payload. **원본/변환본 이중 보관 없음.** 저장 타입(`StoredOutput`)을 pump 이벤트(`OutputEvent`)와 분리. eviction = **byte budget(인코딩 payload 크기) + 이벤트 건수 상한**(큰 `args_json`이 건수 1로 새지 않게).
-3. **wire = frame `tag0`/`tag1`(사용자 결정)** — 타입 이벤트를 variant별이 아니라 **`tag1 StructuredEvent` 하나**로(payload self-describing). `codec.decode_frame`을 **known tag는 헤더만 파싱(payload opaque)** 하도록 넓히면 → **클라 공유버퍼 append/replay 로직 재사용**(그 로직 무변경). codex/gemini·API도 같은 seam.
-4. **core↔wire 변환 = daemon adapter(ADR-0003)** — 변환을 protocol crate가 아니라 daemon에 둔다(core는 `OutputEvent`만, protocol은 wire 타입만, daemon이 결합). `WsOutputSink`가 `WirePayload`를 frame으로 인코딩.
-5. **프론트** — `wsFrame.decodeOutputFrame`이 tag로 분기(`tag0`→`TerminalSlot` xterm / `tag1`→`RichSlot` 타입 렌더). `RichSlot` NDJSON 파서 제거.
+1. **Backend refinement = a decoder layer (the implementation fork = B, user decision)** — the `transport` (pump) **emits bytes as they are** (keeping a pure pipe, uniform with `PtyTransport`). Between the pump and the core, a **backend-owned decoder** does line reassembly + claude parsing → `OutputEvent`. The transport and the core have no knowledge of claude/lines (ADR-0003/0004). (Rejected: the transport pump owning parsing too = non-uniform transport responsibility. Basis = only the decoder is swapped per backend, the transport is shared as one.)
+2. **A single `Ring<StoredOutput>` buffer (user decision)** — one history buffer per agent. Terminal = a bytes payload, JSON = an event payload. **No dual storage of original/converted.** The stored type (`StoredOutput`) is separated from the pump event (`OutputEvent`). Eviction = **byte budget (encoded payload size) + an event count cap** (so that a large `args_json` does not slip through as a count of 1).
+3. **Wire = frame `tag0`/`tag1` (user decision)** — typed events go not per variant but as **a single `tag1 StructuredEvent`** (payload self-describing). If `codec.decode_frame` is widened so that **a known tag parses only the header (payload opaque)** → the **client shared buffer's append/replay logic is reused** (that logic unchanged). The same seam for codex/gemini and the API.
+4. **core ↔ wire conversion = the daemon adapter (ADR-0003)** — the conversion is placed not in the protocol crate but in the daemon (the core has only `OutputEvent`, the protocol has only wire types, the daemon couples them). `WsOutputSink` encodes `WirePayload` into a frame.
+5. **Frontend** — `wsFrame.decodeOutputFrame` branches by tag (`tag0` → `TerminalSlot` xterm / `tag1` → `RichSlot` typed render). The `RichSlot` NDJSON parser is removed.
 
 ## 거부한 대안
-- **프론트 파싱 유지(ADR-0044 MVP·현행)** — 구조가 웹뷰에 갇혀 두뇌가 못 봄(§5). → *Amends 대상.*
-- **타입을 JSON `AgentEvent::Output`(Text arm, frame tag 없이)** — 클라 공유버퍼가 frame 경로(Binary arm)에만 붙어 있어 Text arm은 seq/cursor/replay를 새로 신설해야 함(더 비쌈 + 리로드 두절 위험). frame tag가 append/replay 재사용으로 더 쌈.
-- **frame tag를 variant별(`tag1`=TextDelta, `tag2`=ToolCall…)로** — codec이 이벤트 스키마 변화마다 바뀜. `tag1 StructuredEvent` 하나 + self-describing payload가 codec을 스키마-무지로 유지(교체성↑).
-- **단일 구조화(JSON) 버퍼로 통일** — 가상 터미널 raw VT를 discrete 이벤트로 강제 = 손실 + ADR-0002 위반.
-- **두 버퍼 클래스(`TerminalBuffer`/`StructuredBuffer` + trait)** — 에이전트당 버퍼 1개뿐이라 dyn/trait이 락 규율(ADR-0006)을 숨길 위험만 늘림. 단일 `Ring<StoredOutput>` + `cost()`가 eviction 차이 흡수.
-- **바이트 + typed 사이드카(병렬 채널)** / **backend-only typed view** — 각각 replay 이중부담 / 프론트 재파싱 잔존(§5 "프론트 순수 렌더" 미달).
-- **데몬 재요청/재-hydration(ADR-0040 기각분)** — 무관, 여전히 거부.
+- **Keep frontend parsing (the ADR-0044 MVP · current)** — the structure is trapped in the webview and the brain cannot see it (§5). → *The target of Amends.*
+- **A typed JSON `AgentEvent::Output` (Text arm, without a frame tag)** — the client shared buffer is attached only to the frame path (Binary arm), so the Text arm would need seq/cursor/replay newly created (more expensive + a risk of a reload break). The frame tag is cheaper through append/replay reuse.
+- **A frame tag per variant (`tag1` = TextDelta, `tag2` = ToolCall…)** — the codec would change with every event schema change. A single `tag1 StructuredEvent` + a self-describing payload keeps the codec schema-ignorant (swappability ↑).
+- **Unify into a single structured (JSON) buffer** — forcing the virtual terminal's raw VT into discrete events = loss + violating ADR-0002.
+- **Two buffer classes (`TerminalBuffer`/`StructuredBuffer` + trait)** — there is only one buffer per agent, so dyn/trait only increases the risk of hiding the lock discipline (ADR-0006). A single `Ring<StoredOutput>` + `cost()` absorbs the eviction difference.
+- **Bytes + a typed sidecar (a parallel channel)** / **a backend-only typed view** — respectively a double replay burden / frontend re-parsing remaining (falls short of §5 "frontend = pure rendering").
+- **Daemon re-request/re-hydration (the part ADR-0040 rejected)** — unrelated, still rejected.
 
 ## 근거
-- **§5 손발/두뇌 분리(불변)** · **ADR-0002**(다형성 실현·터미널 강제 금지) · **가상 터미널 요구**(바이트 payload 유지 강제).
-- **클라 relay가 tag를 저장 전 검증(재-review 코드검증)** — 그래서 "클라 완전 무변경"은 거짓. 정정: `codec.decode_frame` tag 게이트를 넓히면 **append/replay 로직만 재사용**(무변경), codec 게이트·프론트 decode는 변경면. 그래도 JSON 경로보다 쌈(JSON은 replay 신설).
-- **사용자 결정(2026-07-03)** — 서버 정제 + payload 각각 추상화(파이프 공유, decoder만 backend별) + ①B/②단일ring/③tag1 확정. §0(저위험 seam·장기 → 지금 제대로).
+- **§5 hands/brain separation (invariant)** · **ADR-0002** (realizing polymorphism · no forcing a terminal) · **the virtual terminal requirement** (forces keeping the bytes payload).
+- **The client relay validates the tag before storing (code-verified in the re-review)** — so "no change at all on the client" is false. Correction: if the `codec.decode_frame` tag gate is widened, **only the append/replay logic is reused** (unchanged), while the codec gate and the frontend decode are the change surface. Still cheaper than the JSON path (JSON would create replay anew).
+- **User decision (2026-07-03)** — server-side refinement + abstracting each payload (the pipe shared, only the decoder per backend) + ① B / ② single ring / ③ tag1 settled. §0 (low-risk seam, long term → do it properly now).
 
 ## 영향 / 불변식
-- **변경면(정직):** ① `OutputEvent` 구조화 variant + `Serialize` ② decoder(backend/claude.rs, 라인재조립+파싱) ③ `Ring<StoredOutput>` 버퍼 일반화(session/output_core) ④ `codec` `tag1` + decode_frame 헤더-only 게이트 넓힘 + golden ⑤ daemon adapter(core→wire 변환) + `WsOutputSink` frame 인코딩 ⑥ `OutputSink`/`OutputFrame`→`OutputPayload`(ADR-0003, Copy/빌림) ⑦ 프론트 `wsFrame`(tag 분기) + `protocolClient`/`agentClient`(union) + `RichSlot`(파서 제거). **재사용(무변경): 클라 공유버퍼 append/replay·mount-replay 로직**(decode 게이트만 넓힘).
-- **ADR-0006 락** — 버퍼 일반화가 emit "replay lock 짧게→해제→lock 밖 send" 규율 유지(단일 ring은 기존 구조 그대로, 새 락 0).
-- **ADR-0003 격리** — core `OutputEvent`≠protocol wire 타입, 변환은 daemon adapter. `OutputPayload`는 코어 도메인 타입(빌림), wire 인코딩은 sink. core tauri-import 0 유지.
-- **ADR-0004** — claude 스키마 지식 = decoder(backend/claude.rs)만.
-- **출력종류 = 세션 수명 내 불변** — spawn 시 capability로 고정, 전환=epoch 교체. 런타임 스위칭 금지.
-- **교체성** — `Structured{kind,json}` 탈출구 + optional `turn_id`/`message_id`로 codex/gemini·API 이벤트 모델 누수 흡수.
-- **MVP** — 파이프라인 축(decoder·tag1·버퍼·decode = TextDelta 흘리기)=MUST / 렌더 축(TextDelta 렌더 MUST, ToolCall·Usage·MessageDone·Error 렌더·권한 UX DEFER).
-- **범위 밖** — 원 "B"(터미널 바이트 경로 리로드 두절)는 선재 버그, 별도 후속. 타입 경로는 append/replay 재사용이라 재도입 안 함.
-- **ADR-0044 부분폐기 경계** — 0044의 "통로 무정제/프론트 파싱/typed 거부"만 개정. "통로 무정제"는 transport 층 한정으로 재정의(OutputCore/버퍼/codec/데몬은 payload 다형). StdioTransport·지속프로세스·입력 wrapping 격리는 유효. (0044 §31/§34 인라인 포인터 박음.)
+- **Change surface (honest):** ① the `OutputEvent` structured variants + `Serialize` ② the decoder (backend/claude.rs, line reassembly + parsing) ③ generalizing the `Ring<StoredOutput>` buffer (session/output_core) ④ `codec` `tag1` + widening the decode_frame header-only gate + golden ⑤ the daemon adapter (core → wire conversion) + `WsOutputSink` frame encoding ⑥ `OutputSink`/`OutputFrame` → `OutputPayload` (ADR-0003, Copy/borrowed) ⑦ the frontend `wsFrame` (tag branching) + `protocolClient`/`agentClient` (union) + `RichSlot` (parser removed). **Reused (unchanged): the client shared buffer's append/replay · mount-replay logic** (only the decode gate is widened).
+- **ADR-0006 lock** — the buffer generalization keeps the emit discipline "keep the replay lock short → release → send outside the lock" (a single ring keeps the existing structure as is, zero new locks).
+- **ADR-0003 isolation** — core `OutputEvent` ≠ protocol wire type, and the conversion is the daemon adapter. `OutputPayload` is a core domain type (borrowed), and the wire encoding is the sink. Core tauri-import stays 0.
+- **ADR-0004** — claude schema knowledge = only the decoder (backend/claude.rs).
+- **Output kind = immutable within a session lifetime** — fixed by capability at spawn, switching = an epoch swap. No runtime switching.
+- **Swappability** — the `Structured{kind,json}` escape hatch + optional `turn_id`/`message_id` absorb the leak of the codex/gemini/API event models.
+- **MVP** — pipeline axis (decoder · tag1 · buffer · decode = passing TextDelta through) = MUST / render axis (TextDelta render MUST; ToolCall · Usage · MessageDone · Error render · permission UX DEFER).
+- **Out of scope** — the original "B" (the terminal byte path's reload break) is a pre-existing bug, a separate follow-up. The typed path reuses append/replay so it does not reintroduce it.
+- **ADR-0044 partial-discard boundary** — only 0044's "the unrefined channel / frontend parsing / typed rejected" is amended. "The unrefined channel" is redefined as limited to the transport layer (OutputCore/buffer/codec/daemon are payload-polymorphic). StdioTransport · the persistent process · input wrapping isolation remain valid. (Inline pointers placed at 0044 §31/§34.)

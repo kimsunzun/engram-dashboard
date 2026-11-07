@@ -116,6 +116,9 @@ impl engram_dashboard_net::frame_port::FrameSink for AnsweringSink {
         if let Ok(engram_dashboard_protocol::AgentEvent::CommandRequest { envelope }) =
             serde_json::from_str(&text)
         {
+            // 봉투 칸은 원문 JSON 이다(ADR-0272) — 받는 주인이 푼다.
+            let envelope: engram_dashboard_command::CommandEnvelope =
+                serde_json::from_str(envelope.get()).expect("데몬이 싼 봉투는 풀린다");
             self.0.complete(engram_dashboard_command::CommandReply::ok(
                 envelope.request_id,
                 serde_json::json!({ "ran": envelope.name }),

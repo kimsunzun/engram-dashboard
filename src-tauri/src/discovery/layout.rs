@@ -1,11 +1,11 @@
-//! 데이터 폴더 — 루트 찾기 · 셸 쪽 배치([`DataLayout`]).
+//! Data folder — root finding · the shell-side layout ([`DataLayout`]).
 //!
-//! ★루트 규칙 · `daemon.json` 자리 · `logs\` 는 데몬 `data_dir` 의 사본이다★ — 셸은 데몬 crate 를 운영 의존하지
-//! 않으므로 따로 갖고, 두 벌이 같은 경로를 내는지는 같은 경로 시험이 묶는다(ADR-0271 결정 4). 규칙의 설명 정본은
-//! 데몬이다 — 고치면 두 벌을 같은 변경에서 고친다.
+//! ★The root rule · the `daemon.json` place · `logs\` are copies of the daemon's `data_dir`★ — the shell has no production dependency on the daemon crate,
+//! so it keeps its own, and whether the two copies yield the same path is bound by a same-path test (ADR-0271 decision 4). The canonical explanation of the rule is
+//! the daemon's — if it is changed, both copies are changed in the same change.
 //!
-//! ★셸 폴더(`shell\…` · `webview\`)의 이름은 여기가 정본이고 디스크 계약이다★ — 바꾸면 기존 폴더의 데이터는
-//! 읽히지 않고 남는다. 옮겨 주는 코드는 없다(ADR-0264 — 옛 데이터는 버린다).
+//! ★The names of the shell folders (`shell\…` · `webview\`) are canonical here and are a disk contract★ — if changed, the data of the existing folders
+//! is left unread. There is no code that moves it over (ADR-0264 — old data is discarded).
 // ADR-0271
 // ADR-0282
 // ADR-0264
@@ -14,29 +14,29 @@ use std::path::{Path, PathBuf};
 
 const DATA_DIR_ENV: &str = "ENGRAM_DATA_DIR";
 
-// ADR-0029: debug 분기(walk-up `.engram-dev`)와 그 단위테스트에서만 쓰인다 — release
-// default_data_dir 은 exe 옆 `data` 만 쓰므로 release 비-test 빌드에선 dead_code.
+// ADR-0029: used only in the debug branch (walk-up `.engram-dev`) and its unit tests — the release
+// default_data_dir uses only the `data` next to the exe, so in a release non-test build it is dead_code.
 // ADR-0264
 #[cfg_attr(not(debug_assertions), allow(dead_code))]
 const LOCAL_DATA_DIR: &str = ".engram-dev";
 
 const RELEASE_DATA_DIR: &str = "data";
 
-/// 데몬이 쓰고 셸·스크립트가 읽는 접속·잠금 파일 이름(ADR-0135 — 잠금 파일 = 접속 파일).
+/// The connection · lock file name that the daemon writes and the shell · scripts read (ADR-0135 — lock file = connection file).
 pub(crate) const DAEMON_FILE: &str = "daemon.json";
 
 const DAEMON_DIR: &str = "daemon";
 const SHELL_DIR: &str = "shell";
-/// 사용자가 고치는 설정.
+/// Settings the user edits.
 const CONFIG_DIR: &str = "config";
-/// 프로그램이 쓰고 다음 실행에 다시 읽는 것(화면 상태).
+/// What the program writes and reads again on the next run (screen state).
 const STATE_DIR: &str = "state";
-/// 버려도 되는 것(잠금+접속 파일 · 토큰을 담은 스폰 부착 파일 · 임시 폴더).
+/// What may be discarded (lock+connection file · the spawn attachment file carrying the token · temp folder).
 const RUN_DIR: &str = "run";
 const WEBVIEW_DIR: &str = "webview";
 const LOGS_DIR: &str = "logs";
 
-/// engram 프로세스의 데이터 디렉토리 — 데몬 `data_dir::default_data_dir` 의 사본(우선순위 · 분기 설명은 거기).
+/// The data directory of the engram process — a copy of the daemon's `data_dir::default_data_dir` (priority · branch explanation is there).
 pub fn default_data_dir() -> PathBuf {
     if let Some(path) = data_dir_env_override() {
         return path;
@@ -44,9 +44,9 @@ pub fn default_data_dir() -> PathBuf {
 
     #[cfg(debug_assertions)]
     {
-        // ★왜 exe-기준 walk-up 인가★: 데몬은 WMI Win32_Process.Create 로 떠 **부모의 cwd 를 상속하지
-        // 않는다**(WmiPrvSE 자식) — cwd 는 신뢰할 수 없다. 반면 exe 경로는 신뢰 가능하고, 개발 빌드
-        // 산출물은 같은 repo 의 target/ 아래라 어느 exe 에서 올라가도 같은 repo 루트로 수렴한다.
+        // ★Why exe-based walk-up★: the daemon is launched via WMI Win32_Process.Create and **does not inherit the parent's
+        // cwd** (a WmiPrvSE child) — cwd cannot be trusted. The exe path, on the other hand, is reliable, and development build
+        // artifacts are under the same repo's target/, so walking up from any exe converges on the same repo root.
         if let Ok(exe) = std::env::current_exe() {
             if let Some(root) = find_workspace_root(&exe) {
                 return root.join(LOCAL_DATA_DIR);
@@ -62,8 +62,8 @@ pub fn default_data_dir() -> PathBuf {
 
     #[cfg(not(debug_assertions))]
     {
-        // exe 경로는 WMI spawn(부모 cwd 미상속) 아래서도 신뢰 가능한 유일한 기준점이다 — 디버그
-        // 분기의 walk-up 이 exe 에서 출발하는 것과 같은 이유.
+        // The exe path is the only reference point that remains reliable even under a WMI spawn (parent cwd not inherited) — the same reason
+        // the debug branch's walk-up starts from the exe.
         if let Ok(exe) = std::env::current_exe() {
             if let Some(dir) = exe.parent() {
                 return release_data_dir(dir);
@@ -75,10 +75,10 @@ pub fn default_data_dir() -> PathBuf {
     }
 }
 
-/// `ENGRAM_DATA_DIR` override 가 **활성**이면 그 경로. 빈 값은 미설정과 같다.
+/// If the `ENGRAM_DATA_DIR` override is **active**, that path. An empty value is the same as unset.
 ///
-/// ★단일 출처★: "override 가 켜져 있나"를 묻는 곳이 둘 이상이라 여기로 모은다 — 판정이 갈리면
-/// 한쪽은 데몬이 안 쓸 폴더를 보게 된다(`ensure_daemon` 의 사전 점검이 그 자리다).
+/// ★Single source★: there is more than one place that asks "is the override on", so they are gathered here — if the decisions diverge,
+/// one side would look at a folder the daemon does not use (the precheck of `ensure_daemon` is that place).
 pub(crate) fn data_dir_env_override() -> Option<PathBuf> {
     let val = std::env::var_os(DATA_DIR_ENV)?;
     if val.is_empty() {
@@ -87,16 +87,16 @@ pub(crate) fn data_dir_env_override() -> Option<PathBuf> {
     Some(PathBuf::from(val))
 }
 
-/// 릴리스 데이터 폴더 = `<exe 폴더>/data`(ADR-0134 결정 1·2).
+/// Release data folder = `<exe 폴더>/data` (ADR-0134 decisions 1·2).
 ///
-/// ★cfg 를 걸지 않는다(load-bearing)★: 호출부인 [`default_data_dir`] 의 릴리즈 분기는
-/// `not(debug_assertions)` 아래에 있고 **테스트는 항상 debug 로 돈다** — 이 함수까지 cfg 로 가리면
-/// 릴리스 규칙을 단언할 수단이 사라진다.
+/// ★Do not put a cfg on it (load-bearing)★: the release branch of the caller [`default_data_dir`] is under
+/// `not(debug_assertions)` and **tests always run as debug** — if this function were also hidden behind a cfg,
+/// there would be no means to assert the release rule.
 pub fn release_data_dir(exe_dir: &Path) -> PathBuf {
     exe_dir.join(RELEASE_DATA_DIR)
 }
 
-// 둘 다 디버그 분기만 부른다 — 위 `LOCAL_DATA_DIR` 과 같은 사유(데몬 판은 설치 위치도 불러 이 속성이 없다).
+// Both call only the debug branch — the same reason as `LOCAL_DATA_DIR` above (the daemon's version also calls the install location, so it lacks this attribute).
 #[cfg_attr(not(debug_assertions), allow(dead_code))]
 fn find_workspace_root(start: &Path) -> Option<PathBuf> {
     let mut cur: Option<&Path> = if start.is_dir() {
@@ -120,16 +120,16 @@ fn is_workspace_root(dir: &Path) -> bool {
     }
     let cargo = dir.join("Cargo.toml");
     match std::fs::read_to_string(&cargo) {
-        // 주석에 박힌 `[workspace]` 문자열 같은 극단 케이스는 무시 — repo 루트는 .git 으로도 잡힌다.
+        // Extreme cases such as a `[workspace]` string embedded in a comment are ignored — the repo root is also caught by .git.
         Ok(s) => s.contains("[workspace]"),
         Err(_) => false,
     }
 }
 
-/// 한 데이터 폴더(`root`)의 셸 쪽 배치. 경로 계산만 하고 디스크를 보지 않는다.
+/// The shell-side layout of one data folder (`root`). It only computes paths and does not look at the disk.
 ///
-/// ★데몬 폴더는 `daemon.json` 자리(사본)만 안다★ — 나머지는 데몬 `data_dir::DataLayout` 이 갖고(ADR-0271 결정 4),
-/// 셸은 데몬 폴더를 만들지 않는다.
+/// ★The daemon folder knows only the `daemon.json` place (a copy)★ — the rest is held by the daemon's `data_dir::DataLayout` (ADR-0271 decision 4),
+/// and the shell does not create the daemon folder.
 // ADR-0264
 // ADR-0271
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,7 +142,7 @@ impl DataLayout {
         Self { root: root.into() }
     }
 
-    /// [`default_data_dir`] 위의 배치 — 셸 운영 진입점.
+    /// The layout over [`default_data_dir`] — the shell's production entry point.
     pub fn resolve() -> Self {
         Self::new(default_data_dir())
     }
@@ -151,7 +151,7 @@ impl DataLayout {
         &self.root
     }
 
-    /// 데몬의 잠금이자 접속 파일 — 클라이언트가 읽는 레코드는 여기에만 발행된다.
+    /// The daemon's lock and also its connection file — the record clients read is published only here.
     pub fn daemon_file(&self) -> PathBuf {
         self.root.join(DAEMON_DIR).join(RUN_DIR).join(DAEMON_FILE)
     }
@@ -172,7 +172,7 @@ impl DataLayout {
         self.root.join(WEBVIEW_DIR)
     }
 
-    /// 데몬 · 셸이 함께 쓰는 로그 폴더(파일은 프로세스마다 따로 — ADR-0264 결정 2).
+    /// The log folder shared by the daemon · shell (files are separate per process — ADR-0264 decision 2).
     pub fn logs_dir(&self) -> PathBuf {
         self.root.join(LOGS_DIR)
     }
@@ -201,15 +201,15 @@ mod tests {
         assert_eq!(l.logs_dir(), root.join("logs"));
     }
 
-    // ── 데몬 정본과 같은 경로(ADR-0271 결정 4) ─────────────────────────────────────────
-    // 셸 → (dev) 데몬 간선에 기댄다(그 간선은 남긴다 — ADR-0286) — 걷는 날 이 시험의 자리를 다시 정한다. 늘 debug 로
-    // 돌아 루트 규칙의 release 분기 본문은 대조하지 못하고(도우미 `release_data_dir` 만 잰다), walk-up 표지 하나를
-    // 빠뜨린 사본도 못 잡는다 — 이 저장소 루트엔 표지 둘이 다 있어 같은 루트가 나온다(표지 시험은 데몬에만 있다).
+    // ── same path as the daemon source of truth (ADR-0271 decision 4) ─────────────────────────────────────────
+    // Relies on the shell → (dev) daemon edge (that edge is kept — ADR-0286) — on the day it is removed, this test's place is decided again. It always runs as debug, so
+    // the release-branch body of the root rule cannot be compared (only the helper `release_data_dir` is measured), and it also cannot catch a copy that omitted one walk-up marker —
+    // this repository's root has both markers, so the same root comes out (the marker test exists only in the daemon).
     // ADR-0271
     // ADR-0282
 
-    /// env 이름을 상수가 아니라 리터럴로 쓴다 — 어느 쪽 상수의 철자가 틀려도 두 벌이 갈려 여기서 잡힌다.
-    /// `_guard` = `DATA_DIR_ENV_LOCK` 의 가드 — 프로세스 env 를 바꾸므로 그 잠금 밖에서 부르지 않는다.
+    /// The env name is written as a literal, not a constant — if the spelling of either side's constant is wrong, the two copies diverge and are caught here.
+    /// `_guard` = the guard of `DATA_DIR_ENV_LOCK` — it changes the process env, so do not call it outside that lock.
     fn both_data_dirs_with_env(
         _guard: &std::sync::MutexGuard<'_, ()>,
         val: Option<&OsStr>,
@@ -239,7 +239,7 @@ mod tests {
         let (empty_shell, empty_daemon) = both_data_dirs_with_env(&guard, Some(OsStr::new("")));
         let (set_shell, set_daemon) = both_data_dirs_with_env(&guard, Some(tmp.as_os_str()));
 
-        // 전제 — 세 상태가 실제로 다른 갈래를 탔다. 환경을 못 바꿨으면 두 벌이 같아도 아무것도 재지 않는다.
+        // Precondition — the three states actually took different branches. If the environment could not be changed, nothing is measured even if the two copies are the same.
         assert!(
             unset_daemon.ends_with(".engram-dev"),
             "env 없음: 데몬이 debug 기본 폴더여야 {unset_daemon:?}"

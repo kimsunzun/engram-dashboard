@@ -1,13 +1,13 @@
-//! 통로가 띄운 프로세스 무리의 **중립 손잡이** — 멤버 명단 · 멤버 하나 붙들기(사실 · 끝내기) · 가입 알림 포트 ·
-//! 통로의 물러남 표시(읽기 전용).
+//! The **neutral handle** of the process group a path launched — member list · holding one member (facts · ending) · join notification port ·
+//! the path's retiring marker (read-only).
 //!
-//! 무엇을 끝낼지는 모른다(ADR-0004) — 고르기는 이것을 받아 쓰는 쪽의 몫이다. 여기는 OS 층의 약한 무리 손잡이
-//! (`engram_dashboard_platform::group::GroupRef`)에 묻고, 그 답을 이 crate 의 값 · 트레이트로 옮겨 싣는다. OS 갈래는
-//! 그 OS 층에 있다(ADR-0266) — 그래서 이 파일에는 운영 `cfg` 가 없다. 시험용 가짜가 끼우는 트레이트([`Pinned`] ·
-//! [`Births`])와 그 트레이트 객체는 이 파일에서만 만든다(ADR-0266 결정 5).
+//! It does not know what to end (ADR-0004) — choosing is the job of the side that takes and uses this. Here we ask the OS layer's weak group handle
+//! (`engram_dashboard_platform::group::GroupRef`) and carry its answer over into this crate's values · traits. The OS branches are
+//! in that OS layer (ADR-0266) — so this file has no production `cfg`. The traits the test fakes plug into ([`Pinned`] ·
+//! [`Births`]) and their trait objects are made only in this file (ADR-0266 decision 5).
 //!
-//! ★무리를 붙들지 않는다★ — 손잡이도, 내준 붙든 멤버 · 포트 · 표시도 무리를 강하게 쥐지 않는다(부르는 동안만
-//! 쥐는 창은 `GroupRef` 문서). 통로가 사라졌으면 명단은 비고 아무도 못 붙들며 포트는 [`GROUP_GONE`] 이다.
+//! ★It does not hold the group★ — neither the handle nor the handed-out held member · port · marker holds the group strongly (the window held only
+//! during a call is in the `GroupRef` doc). If the path is gone, the list is empty, nobody can be held, and the port is [`GROUP_GONE`].
 // ADR-0262
 // ADR-0266
 // ADR-0275
@@ -23,12 +23,12 @@ use engram_dashboard_platform::group::{
 
 pub(crate) use engram_dashboard_platform::group::GROUP_GONE;
 
-/// 붙든 핸들로 **한 번** 읽은 사실 — 번호가 아니라 그 프로세스 객체의 것이다. 못 읽은 칸은 `ppid` · `create` =
-/// 0 · 문자열 = 빈 문자열이다.
+/// Facts read **once** with the held handle — they belong to that process object, not to the number. Fields that could not be read are `ppid` · `create` =
+/// 0 · strings = the empty string.
 ///
-/// - `ppid` = 만들 때 적힌 부모 번호 — 그 번호가 지금도 같은 부모라는 보장은 없다.
-/// - `create` = 생성 시각(FILETIME · 100 ns) — 두 프로세스의 생성 순서를 비교하는 데만 뜻이 있다.
-/// - `image` = 실행 파일 전체 경로(Win32 형식) · `cmdline` = 명령줄 그대로.
+/// - `ppid` = the parent number recorded at creation — there is no guarantee that number is still the same parent now.
+/// - `create` = creation time (FILETIME · 100 ns) — meaningful only for comparing the creation order of two processes.
+/// - `image` = the full executable path (Win32 form) · `cmdline` = the command line as is.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ProcessFacts {
     pub ppid: u32,
@@ -37,12 +37,12 @@ pub(crate) struct ProcessFacts {
     pub cmdline: String,
 }
 
-/// [`Births::next`] 의 답.
+/// The answer of [`Births::next`].
 ///
-/// - `Joined(pid)` = 멤버가 새로 들었다. 번호뿐이라 꺼낸 때 이미 끝나 재사용됐을 수 있다 — 곧바로 붙들어야
-///   신원이 선다.
-/// - `Other` = 그 밖의 알림(끝남 등) 또는 이 포트의 것이 아닌 패킷.
-/// - `Timeout` = 기다리는 동안 알림이 없었다.
+/// - `Joined(pid)` = a member newly joined. It is only a number, so it may have already ended and been reused by the time it is taken out — it must be held
+///   right away for the identity to stand.
+/// - `Other` = another notification (ended, etc.) or a packet that is not this port's.
+/// - `Timeout` = there was no notification during the wait.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PortEvent {
     Joined(u32),
@@ -50,13 +50,13 @@ pub(crate) enum PortEvent {
     Timeout,
 }
 
-/// 통로의 물러남 표시를 **읽기만** 하는 사본 — 칸의 주인(통로)이 [`Self::of`] 로 만들어 [`ProcessGroup`] 에 싣는다.
-/// ★세우는 메서드가 없다★ — 세우는 것은 칸의 주인뿐이고, 읽는 쪽은 manager 도 통로의 문도 모른 채 이것만 본다.
+/// A copy that **only reads** the path's retiring marker — the cell's owner (the path) makes it with [`Self::of`] and puts it on [`ProcessGroup`].
+/// ★There is no method that sets it★ — only the cell's owner sets it, and the reading side sees only this, knowing neither the manager nor the path's doors.
 #[derive(Debug, Clone)]
 pub(crate) struct RetiringSignal(Arc<AtomicBool>);
 
 impl RetiringSignal {
-    /// 칸을 나눠 쥔다 — 칸의 주인만 부른다. 주인은 `Release` 로 세운다.
+    /// Share the cell — only the cell's owner calls it. The owner sets it with `Release`.
     pub(crate) fn of(flag: &Arc<AtomicBool>) -> Self {
         Self(Arc::clone(flag))
     }
@@ -66,37 +66,37 @@ impl RetiringSignal {
     }
 }
 
-/// 우리 무리의 멤버로 확인하고 붙든 프로세스 하나 — 쥐는 동안 그 번호는 재사용되지 않고, 끝난 뒤에도 사실은
-/// 남는다. 무리를 붙들지 않는다. 버리면 핸들이 닫힌다.
+/// One process confirmed as a member of our group and held — while held, its number is not reused, and the facts
+/// remain even after it ends. It does not hold the group. If dropped, the handle is closed.
 ///
-/// 끝내기가 두 메서드로 갈린 것은 부르는 쪽이 자물쇠 안에서 OS 호출을 **하나만** 하게 하려는 것이다:
-/// `terminate_raw` = 끝내기 호출 하나 · `classify` = 그 날것 결과 가르기.
+/// Ending is split into two methods so the caller makes **only one** OS call inside a lock:
+/// `terminate_raw` = one ending call · `classify` = sorting that raw result.
 pub(crate) trait Pinned: Send + Sync {
-    /// 지금 끝났나 — 기다리지 않는다. `Err` = 대기 조회 자체의 실패.
+    /// Has it ended now — does not wait. `Err` = failure of the wait query itself.
     fn exited(&self) -> io::Result<bool>;
-    /// `d` 까지 끝나기를 기다린다 — 끝났으면 `true`. `Err` = 대기 조회 자체의 실패.
+    /// Wait until `d` for it to end — `true` if it ended. `Err` = failure of the wait query itself.
     fn wait_exit(&self, d: Duration) -> io::Result<bool>;
     fn facts(&self) -> &ProcessFacts;
-    /// `exit_code` 를 주는 끝내기 호출 하나 — 대상이 끝나기를 기다리지 않는다. 끝내기 권한 없이 붙든 것은 늘
-    /// `Err` 다.
+    /// One ending call that gives `exit_code` — it does not wait for the target to end. One held without ending permission is always
+    /// `Err`.
     fn terminate_raw(&self, exit_code: u32) -> io::Result<()>;
-    /// [`Self::terminate_raw`] 의 날것 결과를 가른다 — 실패여도 그 사이 스스로 끝났으면 `Gone` 이다.
+    /// Sort the raw result of [`Self::terminate_raw`] — even on failure, if it ended on its own meanwhile it is `Gone`.
     fn classify(&self, raw: io::Result<()>) -> io::Result<MemberKill>;
 }
 
-/// 무리의 가입 알림 포트 — [`ProcessGroup::watch_births`] 가 `start` 에 넘긴다. 여러 스레드가 나눠 쥐고, 마지막
-/// 것이 사라지면 포트 핸들이 닫힌다. 무리를 붙들지 않는다.
+/// The group's join notification port — [`ProcessGroup::watch_births`] hands it to `start`. Several threads share it, and when the last
+/// one disappears the port handle is closed. It does not hold the group.
 ///
-/// 알림은 통지일 뿐 배달이 보장되지 않는다(MS Learn) — 빠진 가입은 여기서 알 수 없다.
+/// A notification is only a notice and delivery is not guaranteed (MS Learn) — a missed join cannot be known here.
 ///
-/// ★무리가 붙은 채 마지막 것을 놓지 않는다 — 먼저 떼고([`ProcessGroup::unwatch_births`]) 놓는다★(까닭 = OS 층
-/// `BirthPort` 문서).
+/// ★Do not release the last one with the group still attached — detach first ([`ProcessGroup::unwatch_births`]) and then release★ (reason = the OS layer's
+/// `BirthPort` doc).
 pub(crate) trait Births: Send + Sync {
-    /// 알림 하나를 `wait` 까지 기다려 꺼낸다. `Err` = 꺼내기 자체의 실패(포트가 닫힘 등).
+    /// Wait for one notification up to `wait` and take it out. `Err` = failure of taking out itself (the port closed, etc.).
     fn next(&self, wait: Duration) -> io::Result<PortEvent>;
 }
 
-/// `Gone` = 붙든 뒤 끝내기 전에 스스로 끝났다.
+/// `Gone` = it ended on its own after being held and before ending.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MemberKill {
     Terminated,
@@ -113,7 +113,7 @@ impl ProcessGroup {
         Self { group, retiring }
     }
 
-    /// 무리가 이미 사라진 손잡이 — 모든 OS 에서 같은 모양이다.
+    /// A handle whose group has already vanished — the same shape on every OS.
     #[cfg(test)]
     pub(crate) fn detached(retiring: RetiringSignal) -> Self {
         Self {
@@ -122,17 +122,17 @@ impl ProcessGroup {
         }
     }
 
-    /// 완전한 멤버 PID 명단(뿌리 포함). 통로가 사라졌으면 `Ok(빈 목록)` · 불완전하면 `Err`.
+    /// A complete list of member PIDs (including the root). `Ok(빈 목록)` if the path is gone · `Err` if incomplete.
     ///
-    /// ★막 끝난 멤버가 잠깐 남을 수 있다★ — 살았는지는 명단이 아니라 붙든 핸들([`Pinned::exited`])로 본다.
+    /// ★A member that just ended may remain briefly★ — whether it is alive is seen not from the list but from the held handle ([`Pinned::exited`]).
     pub(crate) fn member_pids(&self) -> io::Result<Vec<u32>> {
         self.group.member_pids()
     }
 
-    /// 그 번호의 프로세스를 **우리 무리의 멤버일 때만** 붙들고 사실을 한 번 읽는다. 살았는지는 보지 않는다.
+    /// Hold the process of that number **only if it is a member of our group** and read the facts once. Whether it is alive is not looked at.
     ///
-    /// `kill` = 끝내기 권한도 연다. `Ok(None)` = 그 번호의 프로세스가 없다 · 우리 무리 밖이다 · 통로가 이미
-    /// 사라졌다 · 이 OS 에는 무리가 없다. `Err` = 여는 실패(부재 말고 — 권한 거부 등) · 소속 조회 실패.
+    /// `kill` = also opens ending permission. `Ok(None)` = there is no process with that number · it is outside our group · the path has already
+    /// vanished · this OS has no group. `Err` = open failure (other than absence — permission denied, etc.) · membership query failure.
     pub(crate) fn pin(&self, pid: u32, kill: bool) -> io::Result<Option<Box<dyn Pinned>>> {
         Ok(self
             .group
@@ -140,16 +140,16 @@ impl ProcessGroup {
             .map(|member| Box::new(Member::from(member)) as Box<dyn Pinned>))
     }
 
-    /// 가입 알림 포트를 만들어 `start` 에 넘기고, **`start` 가 `Ok` 일 때만** 무리를 그 포트에 붙인다. `start` 의
-    /// `Err` 는 그대로 돌려준다(붙지 않았다).
+    /// Make the join notification port and hand it to `start`, and attach the group to that port **only if `start` is `Ok`**. The `Err` of `start`
+    /// is returned as is (it was not attached).
     ///
-    /// ★`start` 는 막히지 않아야 한다★ — 도는 동안 무리를 강하게 쥐어 통로가 사라져도 무리 닫기가 그만큼 늦는다.
-    /// 그래서 `start` 는 꺼낼 스레드를 띄우기만 한다.
+    /// ★`start` must not block★ — while it runs it holds the group strongly, so even if the path vanishes, closing the group is delayed by that much.
+    /// So `start` only launches the thread that takes out.
     ///
-    /// 붙일 때 이미 든 멤버도 `Joined` 로 다시 알려진다. ★한 무리에 한 번만 부른다★ — 두 번째 부름을 여기서 막지
-    /// 않는다(부르는 쪽 몫). `Err` 종류: [`GROUP_GONE`] = 통로가 이미 사라졌다(`start` 는 불리지 않았다) ·
-    /// `Unsupported` = 이 OS 에는 무리가 없다(`start` 는 불리지 않았다) · 그 밖 = `start` 의 오류 · 포트 만들기 ·
-    /// 붙이기의 OS 실패.
+    /// Members already in at attach time are also notified again as `Joined`. ★Call it only once per group★ — a second call is not blocked here
+    /// (the caller's job). `Err` kinds: [`GROUP_GONE`] = the path has already vanished (`start` was not called) ·
+    /// `Unsupported` = this OS has no group (`start` was not called) · others = the error of `start` · port creation ·
+    /// the OS failure of attaching.
     pub(crate) fn watch_births(
         &self,
         start: impl FnOnce(Arc<dyn Births>) -> io::Result<()>,
@@ -160,7 +160,7 @@ impl ProcessGroup {
         })
     }
 
-    /// 무리의 포트 연결을 뗀다 — 뗀 뒤 태어난 멤버는 알려지지 않는다. `Err` 종류는 [`Self::watch_births`] 와 같다.
+    /// Detach the group's port connection — members born after detaching are not notified. `Err` kinds are the same as [`Self::watch_births`].
     pub(crate) fn unwatch_births(&self) -> io::Result<()> {
         self.group.unwatch_births()
     }
@@ -169,14 +169,14 @@ impl ProcessGroup {
         self.retiring.clone()
     }
 
-    /// 통로가 사라져 무리가 없나 — 무리를 올리지 않고 본다(부작용 없음). 한 번 참이면 계속 참이다. 이 OS 에는
-    /// 무리가 없어 늘 참이다.
+    /// Is the group absent because the path vanished — looked at without bringing the group up (no side effects). Once true it stays true. On this OS
+    /// there is no group so it is always true.
     pub(crate) fn is_gone(&self) -> bool {
         self.group.is_gone()
     }
 }
 
-/// OS 층의 붙든 멤버 + 이 crate 의 값으로 옮겨 실은 사실 — [`Pinned::facts`] 가 참조를 내주려고 함께 쥔다.
+/// The OS layer's held member + the facts carried over into this crate's values — held together so [`Pinned::facts`] can hand out a reference.
 struct Member {
     pin: PinnedMember,
     facts: ProcessFacts,
@@ -213,7 +213,7 @@ impl Pinned for Member {
 
 impl Births for BirthPort {
     fn next(&self, wait: Duration) -> io::Result<PortEvent> {
-        // 경로 호출은 고유 메서드를 먼저 고른다 — 이 trait 메서드로 되돌아오지 않는다.
+        // A path call picks the inherent method first — it does not come back to this trait method.
         BirthPort::next(self, wait).map(PortEvent::from)
     }
 }
@@ -255,7 +255,7 @@ pub(crate) mod tests {
     #[cfg(windows)]
     use engram_dashboard_platform::group::GroupOwner;
 
-    /// 내준 표시는 칸의 주인이 세운 것을 따른다 — 무리 손잡이를 거쳐도, 복제해도 같은 칸이다.
+    /// The handed-out marker follows what the cell's owner set — passing through the group handle or cloning, it is the same cell.
     #[test]
     fn a_retiring_signal_follows_the_flag_it_shares() {
         let flag = Arc::new(AtomicBool::new(false));
@@ -271,8 +271,8 @@ pub(crate) mod tests {
         assert!(group.retiring().is_set());
     }
 
-    /// 실물 무리와 그 위의 손잡이 — claude 잔여물 정리의 실프로세스 시험이 쓴다. 주인을 놓으면 손잡이는 사라진
-    /// 무리를 본다. 물러남 표시는 아무도 세우지 않는다.
+    /// A real group and the handle on it — used by the real-process test of claude residue cleanup. If the owner is released, the handle sees a vanished
+    /// group. Nobody sets the retiring marker.
     #[cfg(windows)]
     pub(crate) fn new_group() -> (GroupOwner, ProcessGroup) {
         let owner = GroupOwner::new().expect("무리 만들기");
@@ -285,8 +285,8 @@ pub(crate) mod tests {
         )
     }
 
-    /// 손잡이로 붙든 멤버의 끝내기는 받은 종료 코드를 그대로 OS 에 넘긴다 — 어댑터가 다른 값을 넘기면 빨개진다.
-    /// cmd 는 문을 열지 않아 stdin 의 한 줄을 기다리며 산다.
+    /// Ending a member held by the handle passes the received exit code to the OS as is — it goes red if the adapter passes another value.
+    /// cmd does not open the door so it lives waiting for one line of stdin.
     #[cfg(windows)]
     #[test]
     fn a_pinned_member_ends_with_the_exit_code_it_was_given() {

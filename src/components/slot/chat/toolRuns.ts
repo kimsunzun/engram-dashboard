@@ -1,10 +1,10 @@
-// ADR-0239: 채팅 도구 행 묶기의 순수 로직 — 묶음 짓기(`groupToolRuns`) · 묶음 요약 셈(`summarizeGroup`) · 묶음 키.
-//   렌더 중 파생이라 상태가 없다 — 누산기도 백엔드도 묶음을 만들지 않고, 펼침 상태는 `store/toolGroupStore.ts` 가 진다.
-// ADR-0241: 한 호출이 오류인가 · 거부인가의 판정(`toolCallVerdict`)과 거부 표식 스위치(`DECLINED_MARK`)도 여기 한
-//   곳에 둔다 — 묶음 요약 줄과 펼친 행의 배지가 같은 판정을 써야 둘이 어긋나지 않는다.
+// ADR-0239: pure logic of chat tool row bundling — bundle building (`groupToolRuns`) · bundle summary count (`summarizeGroup`) · bundle key.
+//   It is derived during render so it has no state — neither the accumulator nor the backend makes bundles, and expansion state is held by `store/toolGroupStore.ts`.
+// ADR-0241: the decision of whether one call is an error or a decline (`toolCallVerdict`) and the decline marker switch (`DECLINED_MARK`) are also kept in this one
+//   place — the bundle summary line and the expanded row's badge must use the same decision so the two do not diverge.
 //
-// ★벤더 결과 본문을 여기서 파싱하지 않는다★ — 행 종류(`rowKind`)와 벤더 오류(`vendorErrorIds`)는 `StructuredTextView`
-//   의 `rowKindOf` · `buildToolResultMap` 결과를 받아 쓴다. 같은 판정을 두 곳에 두면 레일 계산과 DOM 이 갈린다(ADR-0051).
+// ★The vendor result body is not parsed here★ — the row kind (`rowKind`) and vendor errors (`vendorErrorIds`) take the results of
+//   `StructuredTextView`'s `rowKindOf` · `buildToolResultMap`. Keeping the same decision in two places would split the rail calculation and the DOM (ADR-0051).
 
 import {
   normalizeToolCategory,
@@ -16,24 +16,24 @@ import {
 import type { ChatRowKind } from './railPositions'
 
 /**
- * 거부 표식(`'declined'` · `'refused'`)을 어떻게 보이나. `'own'` = 오류와 따로(주황 「거부됨」 배지 · 출처별 사유 줄 ·
- * 요약 「거부 N」 — 오류 수에 안 든다) · `'error'` = 오류로 함께 센다(붉은 배지 · 사유 줄 없음 · 요약 「오류 N」에 든다).
+ * How a decline marker (`'declined'` · `'refused'`) is shown. `'own'` = separate from errors (orange 「거부됨」 (declined) badge · reason line by source ·
+ * summary 「거부 N」 (N declined) — does not count toward the error number) · `'error'` = counted together as errors (red badge · no reason line · counts in the summary 「오류 N」 (N errors)).
  */
 export type DeclinedMarkMode = 'own' | 'error'
 
-// ADR-0241: 사용자 결정 U2-a = 따로 표기. `'error'` 는 거부한 대안(거부를 오류로 함께 센다)으로 되돌리는 스위치다.
+// ADR-0241: user decision U2-a = shown separately. `'error'` is the switch to go back to the rejected alternative (counting a decline as an error too).
 export const DECLINED_MARK: DeclinedMarkMode = 'own'
 
 /**
- * 대화 목록의 한 줄 — 항목 하나 그대로이거나, 연속된 도구 호출 둘 이상을 접은 묶음 하나.
- * - `members` = 묶음이 펼쳐졌을 때 그릴 항목(도구 행 · 비지 않은 생각)만 원래 순서로. 그리지 않는 항목은 없다.
- * - `calls` = `members` 중 도구 행.
- * - `key` = 펼침 상태의 키(`tool:<첫 호출의 백엔드 id>` · 없으면 `item:<itemId>`). 같은 사건열은 같은 키다 — 같은 링을
- *   처음부터 되감는 replay 뒤에도. ★링에서 밀려난 뒤 시작하는 재구독 replay 는 사건열이 다르다★ — `itemId` 가 앞당겨져
- *   `item:` 키가 바뀌고, 묶음 머리 호출이 밀려나면 `tool:` 키도 바뀐다. 그 묶음의 고른 펼침은 잃는다 — ★그리고 스토어는
- *   재구독에 비워지지 않으므로 앞당겨진 `item:<n>` 이 **다른** 묶음의 키와 겹치면 그 묶음이 옛 묶음의 펼침을 물려받는다★.
- * - `live` = 턴이 열려 있고 이 묶음 뒤에 그리는 항목이 생각뿐이다 — 머리가 진행형이고, 고른 펼침이 없으면 마지막 호출 한
- *   줄이 머리 밑에 보인다(ADR-0263 결정 1).
+ * One line of the conversation list — either one item as it is, or one bundle that folds two or more consecutive tool calls.
+ * - `members` = only the items to draw when the bundle is expanded (tool rows · non-empty thoughts), in original order. There are no items that are not drawn.
+ * - `calls` = the tool rows among `members`.
+ * - `key` = the key of the expansion state (`tool:<첫 호출의 백엔드 id>` — backend id of the first call · otherwise `item:<itemId>`). The same event sequence has the same key — even after a replay
+ *   that rewinds the same ring from the start. ★A resubscribe replay that starts after being pushed out of the ring has a different event sequence★ — `itemId` shifts forward so
+ *   the `item:` key changes, and if the bundle's head call is pushed out the `tool:` key changes too. That bundle's chosen expansion is lost — ★and since the store is
+ *   not cleared on resubscribe, if the shifted `item:<n>` overlaps the key of a **different** bundle, that bundle inherits the old bundle's expansion★.
+ * - `live` = the turn is open and the only item drawn after this bundle is thoughts — the head is progressive, and with no chosen expansion the last call as one
+ *   line is shown under the head (ADR-0263 decision 1).
  */
 export type DisplayRow =
   | { kind: 'item'; item: StructuredItem }
@@ -43,22 +43,22 @@ type RunRole = 'hidden' | 'thought' | 'break'
 
 function runRoleOf(item: StructuredItem, rowKind: (item: StructuredItem) => ChatRowKind): RunRole {
   if (rowKind(item) === 'skip') return 'hidden'
-  // ADR-0239: 사용자 결정 U5 — 도구 사이의 비지 않은 생각은 묶음에 흡수한다. 대안(끊는다)이면 이 줄이 'break' 다.
+  // ADR-0239: user decision U5 — non-empty thoughts between tools are absorbed into the bundle. With the alternative (cut) this line is 'break'.
   if (item.kind === 'structured' && item.label === 'thinking') return 'thought'
   return 'break'
 }
 
 /**
- * 항목 목록을 대화 줄 목록으로 — 도구 행이 둘 이상 이어지면 묶음 하나로 접는다.
+ * Item list to conversation line list — if two or more tool rows continue, they fold into one bundle.
  *
- * 묶음은 첫 도구 행에서 마지막 도구 행까지다. 그 사이의 그리지 않는 항목(`rowKind` 가 `'skip'`)과 비지 않은 생각은
- * 묶음을 끊지 않고, 그 밖의 그리는 항목(글 · 사용자 말풍선 · 턴 구분선 · 결말 · 끊김 표시 · 오류 · 모르는 사건 · 그 밖의
- * 탈출구 항목)은 끊는다. 첫 도구 앞 · 마지막 도구 뒤의 생각은 멤버가 아니다.
+ * A bundle runs from the first tool row to the last tool row. Items not drawn between them (`rowKind` is `'skip'`) and non-empty thoughts
+ * do not break the bundle, and other drawn items (text · user bubble · turn divider · outcome · interruption display · error · unknown event · other
+ * escape-hatch items) do. Thoughts before the first tool · after the last tool are not members.
  *
- * 묶음 안의 그리지 않는 항목은 반환에 없다. 그 밖의 항목은 전부 원래 순서로 한 번씩 나온다.
+ * Items not drawn inside a bundle are absent from the return. All other items appear once each in original order.
  *
- * @param turnOpen 턴이 도는 중인가 — `StructuredTextView` 의 `streaming`.
- * @param rowKind 항목의 행 종류 — `StructuredTextView` 의 `rowKindOf` 를 그대로 넘긴다.
+ * @param turnOpen is the turn running — `StructuredTextView`'s `streaming`.
+ * @param rowKind the row kind of an item — pass `StructuredTextView`'s `rowKindOf` as it is.
  */
 export function groupToolRuns(
   items: readonly StructuredItem[],
@@ -78,7 +78,7 @@ export function groupToolRuns(
     const members: StructuredItem[] = [first]
     const calls: ToolItem[] = [first]
     let lastCall = i
-    // 앞 도구 뒤에 온 생각 — 뒤에 도구가 또 와야 멤버가 된다.
+    // A thought that came after the previous tool — it becomes a member only if another tool comes after it.
     let thoughts: StructuredItem[] = []
     let j = i + 1
     for (; j < items.length; j += 1) {
@@ -99,8 +99,8 @@ export function groupToolRuns(
       i += 1
       continue
     }
-    // ADR-0239: 뒤에 생각이 왔다고 끝난 것으로 보지 않는다 — 그 뒤에 도구가 이어지면 진행형 표시와 마지막 호출 줄이 꺼졌다
-    //   켜지는 깜빡임이 된다.
+    // ADR-0239: it is not seen as finished because a thought came after — if a tool follows it, the progressive indicator and last call line would flicker off and
+    //   on.
     const live = turnOpen && j === items.length
     rows.push({ kind: 'toolGroup', key: groupKeyOf(first, usedKeys), members, calls, live })
     i = lastCall + 1
@@ -109,29 +109,29 @@ export function groupToolRuns(
 }
 
 function groupKeyOf(first: ToolItem, used: Set<string>): string {
-  // ADR-0239: 누산기는 같은 사건열을 같은 백엔드 id · 같은 `itemId` 로 재구성한다 — 그래서 replay 뒤에도 같은 키이고
-  //   고른 펼침이 살아남는다(한계 = `DisplayRow` 의 `key`). `itemId` 폴백은 첫 호출에 id 가 없을 때와, 앞 묶음이 이미 그 id 키를 쓸 때다(한 키를
-  //   두 묶음이 나눠 쓰면 펼침 상태와 React key 가 엉킨다 — 백엔드가 한 id 를 두 호출에 싣는지는 관측된 적 없다).
+  // ADR-0239: the accumulator rebuilds the same event sequence with the same backend id · same `itemId` — so even after a replay the key is the same and
+  //   the chosen expansion survives (limit = `key` of `DisplayRow`). The `itemId` fallback applies when the first call has no id and when an earlier bundle already uses that id key (if two
+  //   bundles shared one key, expansion state and React key would tangle — it has never been observed that the backend puts one id on two calls).
   const byId = typeof first.id === 'string' && first.id.length > 0 ? `tool:${first.id}` : null
   const key = byId !== null && !used.has(byId) ? byId : `item:${first.itemId}`
   used.add(key)
   return key
 }
 
-/** `groupToolRuns` 가 짓는 묶음 키의 모양인가 — `tool:<백엔드 id>` 또는 `item:<itemId>`. */
+/** Is it the shape of a bundle key that `groupToolRuns` builds — `tool:<백엔드 id>` (backend id) or `item:<itemId>`. */
 export function isToolGroupKey(value: string): boolean {
   return /^(?:tool:[\s\S]+|item:\d+)$/.test(value)
 }
 
 /**
- * 한 호출이 묶음 요약과 행 배지에서 무엇으로 보이나. `null` = 표시할 결말이 없다 — ★성공이라는 뜻이 아니다★(끝을
- * 모르는 호출 · 끝이 안 온 호출도 여기 든다).
+ * What one call looks like in the bundle summary and row badge. `null` = there is no outcome to show — ★it does not mean success★ (a call
+ * whose end is unknown or whose end has not come falls in here too).
  */
 export type ToolCallVerdict = 'error' | 'declined' | null
 
 /**
- * @param mark 누산기가 붙인 끝 표식(칸이 없으면 표식 없음과 같다).
- * @param vendorError 벤더 결과 본문이 오류라고 말했나 — `buildToolResultMap` 의 `isError`(claude).
+ * @param mark the end marker the accumulator attached (a missing field is the same as no marker).
+ * @param vendorError did the vendor result body say it is an error — `isError` of `buildToolResultMap` (claude).
  */
 export function toolCallVerdict(
   mark: ToolResultMark | null | undefined,
@@ -139,16 +139,16 @@ export function toolCallVerdict(
   declinedMark: DeclinedMarkMode = DECLINED_MARK,
 ): ToolCallVerdict {
   if (mark === 'failed') return 'error'
-  // ADR-0241: 거부는 실행되지 않은 것이라 오류가 아니다. 표식이 벤더 본문보다 먼저인 것은 표식이 중립 끝 결과이고
-  //   벤더 본문 파싱은 그 결과를 아직 안 싣는 백엔드의 대체이기 때문이다.
+  // ADR-0241: a decline was not executed so it is not an error. The marker comes before the vendor body because the marker is a neutral end result
+  //   and vendor body parsing is the substitute for backends that do not yet carry that result.
   if (mark === 'declined' || mark === 'refused') return declinedMark === 'error' ? 'error' : 'declined'
   return vendorError ? 'error' : null
 }
 
 /**
- * 거부 행의 사유 줄 문구 키 — 출처별로 갈린다(`'refused'` = 우리 거절 · `'declined'` = 그 밖의 거부). 거부가
- * 아니거나 `declinedMark` 가 `'error'` 면 `null`(사유 줄 없음).
- * ★출처는 이 키로 가른다 — 문구로 가르지 말 것★: 그 밖의 거부 사유 문구는 우리 거절 사유 문구의 꼬리와 같다.
+ * Message key of the reason line of a decline row — split by source (`'refused'` = our refusal · `'declined'` = any other decline). If it is not a decline
+ * or `declinedMark` is `'error'`, `null` (no reason line).
+ * ★The source is told apart by this key — do not tell it apart by wording★: the wording of the other-decline reason is the same as the tail of our refusal reason wording.
  */
 export function declinedReasonKey(
   mark: ToolResultMark | null | undefined,
@@ -160,7 +160,7 @@ export function declinedReasonKey(
   return null
 }
 
-/** 벤더 결과 본문이 오류라고 말한 호출 id — `results` = `StructuredTextView` 의 `buildToolResultMap` 결과. */
+/** Call ids whose vendor result body said error — `results` = the result of `StructuredTextView`'s `buildToolResultMap`. */
 export function vendorErrorIdsOf(results: ReadonlyMap<string, { readonly isError: boolean }>): Set<string> {
   const ids = new Set<string>()
   for (const [id, result] of results) if (result.isError) ids.add(id)
@@ -168,23 +168,23 @@ export function vendorErrorIdsOf(results: ReadonlyMap<string, { readonly isError
 }
 
 export interface ToolGroupSummary {
-  /** 종류별 호출 수 — 0 인 종류는 빠지고, 순서는 검색 · 읽기 · 목록 · 편집 · 명령 · 웹 · 에이전트 · MCP · 기타. */
+  /** Number of calls per kind — kinds with 0 are left out, and the order is search · read · list · edit · command · web · agent · MCP · other. */
   counts: ReadonlyArray<readonly [ToolCategory, number]>
   errors: number
-  /** 실행되지 않은 호출 — `errors` 와 겹치지 않는다. `declinedMark` 가 `'error'` 면 늘 0 이고 그 수는 `errors` 에 든다. */
+  /** Calls that were not executed — they do not overlap with `errors`. If `declinedMark` is `'error'` it is always 0 and that count goes into `errors`. */
   declined: number
 }
 
 /**
- * 묶음 머리 요약 줄의 수 — 한 호출은 `errors` · `declined` 중 많아야 하나에 든다(`toolCallVerdict`).
- * @param vendorErrorIds 벤더 결과 본문이 오류인 호출 id(`vendorErrorIdsOf`). codex 는 여기 없고 표식으로 온다.
+ * Counts in the bundle head summary line — one call falls into at most one of `errors` · `declined` (`toolCallVerdict`).
+ * @param vendorErrorIds call ids whose vendor result body is an error (`vendorErrorIdsOf`). codex is not here and comes as a marker.
  */
 export function summarizeGroup(
   calls: readonly ToolItem[],
   vendorErrorIds: ReadonlySet<string>,
   declinedMark: DeclinedMarkMode = DECLINED_MARK,
 ): ToolGroupSummary {
-  // ADR-0239: 키 순서가 곧 요약 순서다. `Record` 라 `ToolCategory` 에 낱말이 늘거나 줄면 여기서 tsc 가 빨갛다.
+  // ADR-0239: key order is the summary order. It is a `Record`, so if a word is added to or removed from `ToolCategory`, tsc goes red here.
   const table: Record<ToolCategory, number> = {
     Search: 0,
     Read: 0,
@@ -211,7 +211,7 @@ export function summarizeGroup(
   return { counts, errors, declined }
 }
 
-/** 요약 줄 한 칸의 톤 — `'error'` = 붉은 톤 · `'declined'` = 주황 경고 토큰(`var(--status-blocked)`) · `'default'` = 기본. */
+/** Tone of one cell of the summary line — `'error'` = red tone · `'declined'` = orange warning token (`var(--status-blocked)`) · `'default'` = default. */
 export type SummaryTone = 'default' | 'error' | 'declined'
 
 export interface SummaryPart {
@@ -220,13 +220,13 @@ export interface SummaryPart {
   tone: SummaryTone
 }
 
-/** 요약 줄의 칸 — 순서 = 종류별 수(`counts` 순서) → 오류 → 거부. 0 인 칸은 없다. 칸 사이는 ` · ` 로 잇는다. */
+/** Cells of the summary line — order = per-kind count (`counts` order) → error → decline. There is no cell with 0. Cells are joined with ` · `. */
 export function summaryParts(summary: ToolGroupSummary): SummaryPart[] {
   const parts: SummaryPart[] = []
   for (const [category, count] of summary.counts) {
     parts.push({ key: `chat.toolGroup${category}` as const, count, tone: 'default' })
   }
-  // ADR-0241: 거부는 오류 뒤 — 오류 수에 안 든 채 따로 센다(사용자 결정 U2-a).
+  // ADR-0241: declines come after errors — counted separately without entering the error number (user decision U2-a).
   if (summary.errors > 0) parts.push({ key: 'chat.toolGroupErrors', count: summary.errors, tone: 'error' })
   if (summary.declined > 0) parts.push({ key: 'chat.toolGroupDeclined', count: summary.declined, tone: 'declined' })
   return parts

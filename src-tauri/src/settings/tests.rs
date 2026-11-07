@@ -42,7 +42,7 @@ fn the_service_is_send_and_sync() {
     assert_send_sync::<SettingsService>();
 }
 
-// ── 적재 · 쓰기 관문 ──
+// ── load · write gate ──
 
 #[test]
 fn loading_never_touches_the_disk() {
@@ -75,7 +75,7 @@ fn writes_are_refused_until_enabled() {
         svc.reset("chat.style."),
         Err(SettingsError::Internal(_))
     ));
-    // 인자 오류가 관문보다 먼저다.
+    // Argument errors come before the gate.
     assert!(matches!(
         svc.set("no.such", "x"),
         Err(SettingsError::NotFound(_))
@@ -199,7 +199,7 @@ fn a_failed_disk_write_leaves_memory_rev_and_file_unchanged() {
     assert_eq!(svc.set("theme.default", "e-ink").unwrap().rev, 1);
 }
 
-// ── 파일 관용 ──
+// ── file tolerance ──
 
 #[test]
 fn unknown_keys_survive_every_write() {
@@ -228,7 +228,7 @@ fn an_unusable_file_is_untouched_until_the_first_write_then_copied_aside() {
         serde_json::json!({"$version": 1, "theme.default": "light"})
     );
 
-    // 다음 쓰기는 멀쩡한 파일 위다 — 다시 뜨면 하나뿐인 사본이 새 파일로 덮인다.
+    // The next write is on top of a healthy file — if it is copied aside again, the only copy is overwritten by the new file.
     svc.set("chat.style.userPy", "9px").unwrap();
     let disk = files.disk();
     assert_eq!(disk.copies, 1);
@@ -241,7 +241,7 @@ fn rmw_keeps_a_key_written_by_someone_else_between_writes() {
     let svc = service(&files);
     svc.set("theme.default", "light").unwrap();
 
-    // 앱 밖의 편집자가 다른 키를 더한다.
+    // An editor outside the app adds another key.
     let mut doc = files.json();
     doc["chat.style.fontSize"] = "20px".into();
     files.disk().text = Some(doc.to_string());
@@ -256,7 +256,7 @@ fn rmw_keeps_a_key_written_by_someone_else_between_writes() {
             "chat.style.userPy": "9px",
         })
     );
-    // 실행 중엔 반영되지 않는다 — 다음 적재에 읽힌다.
+    // It is not reflected while running — it is read at the next load.
     assert_eq!(value_of(&svc, "chat.style.fontSize"), "13px");
     let reloaded = SettingsService::load(Box::new(files.clone()));
     assert_eq!(value_of(&reloaded, "chat.style.fontSize"), "20px");
@@ -322,7 +322,7 @@ fn reset_by_prefix_lists_every_key_but_only_reports_actual_changes() {
             is_default: true,
         }]
     );
-    // 접혀 있던 못 쓸 값도 함께 지운다. 범위 밖 키는 그대로.
+    // Unusable values that had been collapsed are removed too. Keys outside the selector stay as they are.
     assert_eq!(
         files.json(),
         serde_json::json!({"$version": 1, "theme.default": "light", "x": 1})
@@ -432,12 +432,12 @@ fn outcomes_serialize_with_snake_case_fields() {
     );
 }
 
-// ── 알림 진입점(set_and_notify · reset_and_notify) ──
+// ── notification entry points (set_and_notify · reset_and_notify) ──
 
 #[derive(Default)]
 struct Heard {
     changed: Mutex<Vec<SettingsSnapshot>>,
-    /// 알림 순서 — `changed` 다음에 `theme` 이 와야 한다.
+    /// Notification order — `theme` must come after `changed`.
     order: Mutex<Vec<&'static str>>,
 }
 
@@ -548,7 +548,7 @@ fn a_reset_announces_only_the_keys_it_changed() {
     assert_eq!(keys, vec!["chat.style.userPx", "chat.style.fontSize"]);
     assert_eq!(heard.order(), vec!["changed"]);
 
-    // 이미 다 기본값 — 쓰지도 알리지도 않는다.
+    // Already all defaults — neither writes nor notifies.
     reset_and_notify(&svc, &heard, "chat.style.").unwrap();
     assert_eq!(heard.changes().len(), 1);
 
@@ -556,7 +556,7 @@ fn a_reset_announces_only_the_keys_it_changed() {
     assert_eq!(heard.order(), vec!["changed", "changed", "theme"]);
 }
 
-// ── 실제 디스크 ──
+// ── real disk ──
 
 #[test]
 fn real_disk_round_trip_creates_the_folder_only_on_the_first_write() {
@@ -690,7 +690,7 @@ fn real_disk_bom_and_float_version_load() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-// ── 못 쓰는 파일 · 없어진 파일 위의 쓰기 ──
+// ── writes on top of an unusable file · a vanished file ──
 
 #[test]
 fn a_write_over_a_file_broken_by_hand_keeps_the_values_memory_shows() {
@@ -829,13 +829,13 @@ fn a_write_that_would_exceed_the_read_cap_is_refused() {
     assert_eq!(svc.get(None).unwrap().rev, 0);
 }
 
-// ── 쓸지는 파일로, changed 는 유효 값으로 ──
+// ── whether to write by the file, changed by the effective value ──
 
 #[test]
 fn set_rewrites_a_file_that_disagrees_without_announcing() {
     let files = MemFiles::default();
     let svc = service(&files);
-    // 앱 밖의 편집 — 메모리는 기본값 그대로다.
+    // An edit from outside the app — memory stays at the default.
     files.disk().text = Some(r#"{"theme.default":"light","x":1}"#.to_string());
     let heard = Heard::default();
 
@@ -884,7 +884,7 @@ fn reset_clears_a_folded_bad_value_without_announcing() {
 fn a_change_the_file_already_holds_is_committed_without_a_write() {
     let files = MemFiles::with_text(r#"{"theme.default":"light"}"#);
     let svc = service(&files);
-    // 밖에서 그 키를 지웠다 — 파일은 이미 목표(기본값)다.
+    // That key was removed from outside — the file is already at the target (default).
     files.disk().text = Some(r#"{"$version":1}"#.to_string());
     let heard = Heard::default();
 
@@ -930,9 +930,9 @@ fn an_unusable_file_is_not_rewritten_for_a_no_op() {
     assert_eq!(disk.text.as_deref(), Some("{broken"));
 }
 
-// ── 새 판이 쓴 파일(ADR-0291 R2) ──
+// ── a file written by a newer version (ADR-0291 R2) ──
 
-/// 새 판이 쓴 파일 위의 쓰기는 `Conflict` 이고 덮지도 떠 두지도 않는다 — 메모리 · `rev` · 알림 그대로.
+/// A write on top of a file written by a newer version is `Conflict` and is neither overwritten nor copied aside — memory · `rev` · notification as they are.
 #[test]
 fn a_newer_version_file_refuses_writes_with_conflict_and_is_left_alone() {
     let text = r#"{"$version":2,"theme.default":"light"}"#;
@@ -949,7 +949,7 @@ fn a_newer_version_file_refuses_writes_with_conflict_and_is_left_alone() {
         set_and_notify(&svc, &heard, "theme.default", "e-ink"),
         Err(SettingsError::Conflict(_))
     ));
-    // 유효 값이 안 바뀌는 호출은 파일을 가를 수 없어 쓰지 않는다 — 거절도 아니다.
+    // A call that does not change the effective value cannot judge the file, so it does not write — and it is not a rejection either.
     assert!(!svc.set("chat.style.fontSize", "13px").unwrap().changed);
     assert!(reset_and_notify(&svc, &heard, "chat.style.")
         .unwrap()
@@ -964,7 +964,7 @@ fn a_newer_version_file_refuses_writes_with_conflict_and_is_left_alone() {
     assert_eq!(value_of(&svc, "theme.default"), "dark");
 }
 
-/// 실행 중에 새 판으로 바뀐 파일도 쓰기마다 다시 읽어 거절하고, 치워지면 다음 쓰기가 풀린다(ADR-0291 R16).
+/// A file that changed to a newer version while running is also re-read at every write and rejected, and once it is cleared away the next write goes through (ADR-0291 R16).
 #[test]
 fn a_file_that_turns_newer_while_running_is_refused_until_it_is_replaced() {
     let files = MemFiles::with_text(r#"{"theme.default":"light"}"#);
@@ -987,10 +987,10 @@ fn a_file_that_turns_newer_while_running_is_refused_until_it_is_replaced() {
     );
 }
 
-// ── 락 — 읽기는 쓰기를 기다리지 않고, 알림은 rev 순서로 나간다 ──
+// ── locks — reads do not wait for writes, and notifications go out in rev order ──
 
-/// 쓰기마다 `entered` 로 알리고 `release` 에서 하나를 받을 때까지 멈추는 디스크(송신단이 사라지면 멈추지
-/// 않는다).
+/// A disk that signals `entered` at every write and stops until it receives one from `release` (it does not stop
+/// when the sender is gone).
 struct GatedFiles {
     inner: MemFiles,
     entered: Sender<()>,
@@ -1017,7 +1017,7 @@ impl SettingsFiles for GatedFiles {
     }
 }
 
-/// (쓰기에 들어섰다는 신호, 쓰기를 풀어 줄 손잡이, 쓰기가 열린 서비스).
+/// (signal that a write was entered, the handle that releases the write, the service whose write is open).
 fn gated_service() -> (Receiver<()>, Sender<()>, Arc<SettingsService>) {
     let (entered_tx, entered_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
@@ -1048,7 +1048,7 @@ fn readers_do_not_wait_for_a_write_in_flight() {
             let _ = read_tx.send((snapshot, effective));
         });
     }
-    // 실패할 때만 닿는 상한이다 — 읽기가 쓰기 뒤에 줄 서면 여기서 끊고 쓰기를 풀어 준다.
+    // A bound reached only on failure — if a read queues behind a write, it cuts here and releases the write.
     let read = read_rx.recv_timeout(Duration::from_secs(10));
     release.send(()).unwrap();
     let (snapshot, effective) = read.expect("읽기가 진행 중인 쓰기의 디스크 대기를 기다렸다");
@@ -1060,13 +1060,13 @@ fn readers_do_not_wait_for_a_write_in_flight() {
     assert_eq!(svc.get(None).unwrap().rev, 1);
 }
 
-/// `changed` 안에서 서비스를 다시 읽고, 그때 어느 락이 잡혀 있는지 적는다.
+/// Inside `changed` it reads the service again and records which locks are held at that point.
 struct ReadingEvents {
     svc: Arc<SettingsService>,
-    /// (알림 rev, 그 자리의 `get` rev, 그 자리의 유효 값, 알림 순서 락이 잡혀 있었나, 쓰기 직렬화 락이 잡혀
-    /// 있었나).
+    /// (notification rev, the `get` rev at that point, the effective value at that point, whether the notification order lock was held, whether the write serialization lock was
+    /// held).
     seen: Mutex<Vec<(u64, u64, Option<String>, bool, bool)>>,
-    /// 테마 밀기 자리에서 (알림 순서 락, 쓰기 직렬화 락, 상태 락)이 잡혀 있었나.
+    /// At the theme push point, were (the notification order lock, the write serialization lock, the state lock) held.
     theme: Mutex<Vec<(bool, bool, bool)>>,
 }
 
@@ -1122,7 +1122,7 @@ fn a_notification_may_read_the_service_and_sees_its_own_write() {
     );
 }
 
-/// 첫 알림 안에서 `hold` 를 받을 때까지 멈추고(들어섰다고 `in_first` 로 알린다), 알림 rev 를 적는다.
+/// Inside the first notification it stops until it receives `hold` (it signals through `in_first` that it was entered), and records the notification rev.
 struct HoldingEvents {
     heard: Mutex<Vec<u64>>,
     in_first: Mutex<Option<Sender<()>>>,
@@ -1144,8 +1144,8 @@ impl SettingsEvents for HoldingEvents {
     fn theme_default_changed(&self) {}
 }
 
-/// ★회귀를 매번 잡지는 않는다★ — 순서 락이 빠지면 B 의 알림이 A 를 풀기 전에 나갈 수도, 뒤에 나갈 수도
-/// 있다(스케줄러 몫). 고친 코드에서는 언제나 초록이다.
+/// ★It does not catch the regression every time★ — if the order lock is missing, B's notification may go out before A is released or after.
+/// (the scheduler's call). With the fixed code it is always green.
 #[test]
 fn notifications_leave_in_rev_order_across_writers() {
     let (entered, release, svc) = gated_service();
@@ -1164,11 +1164,11 @@ fn notifications_leave_in_rev_order_across_writers() {
         std::thread::spawn(move || set_and_notify(&svc, &*events, key, "9px").unwrap())
     };
 
-    // A 가 rev 1 을 확정하고 그 알림 안에서 멈춘다.
+    // A commits rev 1 and stops inside that notification.
     let first = write("chat.style.userPy");
     entered.recv().unwrap();
     in_first_rx.recv().unwrap();
-    // 그사이 B 가 디스크 쓰기에 들어선다 — B 의 확정 · 알림은 A 의 알림이 끝날 때까지 못 나간다.
+    // Meanwhile B enters the disk write — B's commit · notification cannot go out until A's notification ends.
     let second = write("chat.style.userPx");
     entered.recv().unwrap();
     hold_tx.send(()).unwrap();
@@ -1178,7 +1178,7 @@ fn notifications_leave_in_rev_order_across_writers() {
     assert_eq!(*events.heard.lock().unwrap(), vec![1, 2]);
 }
 
-// ── 적재 로그 — 로거가 선 뒤(enable_writes)에 나간다 ──
+// ── load log — goes out after the logger is up (enable_writes) ──
 
 #[derive(Debug, Clone, PartialEq)]
 struct Line {
@@ -1187,7 +1187,7 @@ struct Line {
     fields: Vec<(String, String)>,
 }
 
-/// 이 스레드에서 낸 이벤트를 전부 모은다.
+/// Collects all events emitted on this thread.
 #[derive(Clone, Default)]
 struct Captured(Arc<Mutex<Vec<Line>>>);
 
@@ -1336,11 +1336,11 @@ fn a_copied_aside_file_is_logged_as_a_warning_with_where_it_went() {
     );
 }
 
-// ── 격리 — 이 모듈은 Tauri 도 async 런타임도 모른다(그래서 앱 없이 시험이 돈다) ──
+// ── isolation — this module knows neither Tauri nor an async runtime (so tests run without an app) ──
 
 #[test]
 fn the_settings_module_names_neither_tauri_nor_tokio() {
-    // 바늘을 쪼개 적는다 — 이 파일도 훑는 대상이다.
+    // Write the needles split up — this file is also among the files scanned.
     let needles = [
         concat!("tau", "ri::"),
         concat!("tok", "io::"),

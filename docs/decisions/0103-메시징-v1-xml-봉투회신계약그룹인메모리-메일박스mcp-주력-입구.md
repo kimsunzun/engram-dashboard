@@ -1,49 +1,49 @@
-# ADR-0103: 메시징 v1 — XML 봉투·회신계약·그룹·인메모리 메일박스·MCP 주력 입구
+# ADR-0103: Messaging v1 — XML envelope · reply contract · groups · in-memory mailbox · MCP as the main entrance
 
-- 상태: 확정 (2026-07-24, 근거: 5갈래 설계 서베이 + cross-family 적대 리뷰 + 세션 내 실측 — 아래 근거 절) · 부분 폐기 by ADR-0107 (notice cap 예외 통로 및 파킹 단일 수신자 전용 조항) · 부분 폐기 by ADR-0111 (결정 2 request 단일 한정, 결정 4 그룹 등록 명단과 skip, 결정 5 부재 파킹, 결정 6 group 툴, 방송 소급 금지 불변식)
-- 관련: `docs/process/S18-messaging-v1/spec/messaging-v1-spec.md`(구현 계약 정본) · ADR-0086(듀얼 입구) · ADR-0087(send 시맨틱·이름 규칙) · ADR-0094(발신 권한 — MCP 서버명 const `engram` 정의처) · ADR-0096(봉투 wrap seam) · ADR-0099(mcp-config 발급) · ADR-0101(canonical 이름) · Amended by ADR-0105 (파킹 TTL 1h → 24h — 인메모리 단계 한정) · Amended by ADR-0107 (notice cap 예외 통로 및 파킹 단일 수신자 전용 조항) · Amended by ADR-0111 (결정 2 request 단일 한정, 결정 4 그룹 등록 명단과 skip, 결정 5 부재 파킹, 결정 6 group 툴, 방송 소급 금지 불변식) · Amends ADR-0086 (SQLite 메일박스-first 조항을 인메모리 메일박스로 대체)
+- 상태: 확정 (2026-07-24, basis: a 5-branch design survey + a cross-family adversarial review + in-session measurement — see the basis section below) · 부분 폐기 by ADR-0107 (the notice cap exception channel and the clause that parking is for a single recipient only) · 부분 폐기 by ADR-0111 (decision 2 request limited to single, decision 4 group registration roster and skip, decision 5 absent-recipient parking, decision 6 group tool, the no-retroactive-broadcast invariant)
+- 관련: `docs/process/S18-messaging-v1/spec/messaging-v1-spec.md`(canonical implementation contract) · ADR-0086(dual entrance) · ADR-0087(send semantics · name rules) · ADR-0094(send permission — where the MCP server name const `engram` is defined) · ADR-0096(envelope wrap seam) · ADR-0099(mcp-config issuance) · ADR-0101(canonical name) · Amended by ADR-0105 (parking TTL 1h → 24h — in-memory stage only) · Amended by ADR-0107 (the notice cap exception channel and the clause that parking is for a single recipient only) · Amended by ADR-0111 (decision 2 request limited to single, decision 4 group registration roster and skip, decision 5 absent-recipient parking, decision 6 group tool, the no-retroactive-broadcast invariant) · Amends ADR-0086 (replacing the SQLite mailbox-first clause with an in-memory mailbox)
 
 ## 맥락
 
-메시징이 즉시 배달(fire-and-forget)뿐이라 ① 수신자 부재 시 유실(반려) ② 회신 보장·추적 없음 ③ 그룹 발송 없음 ④ 배달 이력 조회 표면 없음. 사용자 목표 = "데몬이 살아 있는 동안 메시지가 확실히 간다"(영속화는 에이전트 시스템 메모리 설계 때로 명시 유예). 오케스트레이션 시나리오("코더에게 위임 → 회신 받고 진행")에는 피어 메시징에 회신 계약이 필요하다 — 스폰 상하관계는 하네스가 회신을 구조로 보장하지만 피어는 데몬 장부가 그 역할을 해야 한다.
+Messaging is only immediate delivery (fire-and-forget), so ① a message is lost (bounced) when the recipient is absent ② there is no reply guarantee or tracking ③ there is no group sending ④ there is no surface to query delivery history. The user's goal = "while the daemon is alive, a message definitely gets through" (persistence is explicitly deferred to the agent system memory design). The orchestration scenario ("delegate to a coder → proceed after receiving the reply") needs a reply contract in peer messaging — in a spawn parent-child relationship the harness guarantees the reply structurally, but for peers the daemon ledger has to play that role.
 
 ## 결정
 
-1. **봉투 = XML 태그 단일화**(콜론 기본값 폐지, 스위치 잔존): `<message from id? type? reply-by? to?>` + 데몬 통지는 **별도 태그 `<notice>`(from 없음)**. LLM 노출 필드 = 행동을 바꾸는 것만(id는 request에만, to는 그룹에만, 시각 미노출).
-2. **타입 = 데몬 행동 기준 최소형**: 기본(통보)·`request`(장부 미회신 오픈, 단일 수신자 한정)·notice(데몬 전용). **회신은 타입이 아니라 `in_reply_to` 필드**로 판정(엄격 매칭). refuse/failure는 회신 본문 소관.
-3. **회신 계약**: `reply_by`(기간 표기) 초과 시 데몬이 **발신자에게** notice. LLM측 soft + 데몬 장부 hard.
-4. **그룹 = 런타임 등록 명단**(인메모리·이름 기반) + **내장 `@all`**. 발송 순간 스냅샷 fan-out, 죽은 멤버 skip(파킹 없음), 장부 = 메시지 1 : 배달기록 N.
-5. **메일박스 = 인메모리**: 부재 수신자 파킹(미존재 이름 포함 — 스폰 전 선지시 지원), TTL 1h·수신자당 100건·초과 신규 반려, notice는 cap 예외. 등장(스폰/epoch) 시 자동 주입.
-6. **입구 = MCP 주력(툴 3: send_message·messages·group) + CLI 예비**(서브커맨드 미러 + `--body-stdin`). 유저 전역 `allowedMcpServers: []` 차단은 **데몬이 스폰 시 `--settings`로 engram 서버 허용 조각을 세션 한정 주입**으로 우회(전역 무변경).
+1. **Envelope = XML tags only** (the colon default retired, the switch remains): `<message from id? type? reply-by? to?>` + a daemon notification uses a **separate tag `<notice>` (no from)**. The LLM-exposed fields = only the ones that change behavior (id only on a request, to only on a group, no timestamps exposed).
+2. **Types = minimal, by daemon behavior**: default (notification) · `request` (a ledger-open unreplied item, limited to a single recipient) · notice (daemon-only). **A reply is decided by the `in_reply_to` field, not by a type** (strict matching). refuse/failure belong to the reply body.
+3. **Reply contract**: when `reply_by` (a duration notation) is exceeded, the daemon sends a notice **to the sender**. Soft on the LLM side + hard in the daemon ledger.
+4. **Group = a runtime-registered roster** (in-memory · name-based) + the built-in **`@all`**. Snapshot fan-out at the moment of sending, dead members skipped (no parking), ledger = 1 message : N delivery records.
+5. **Mailbox = in-memory**: park for an absent recipient (including a name that does not exist — supports instructing before spawn), TTL 1h · 100 items per recipient · a new one over the limit is bounced, a notice is exempt from the cap. Injected automatically on appearance (spawn/epoch).
+6. **Entrance = MCP as the main path (3 tools: send_message · messages · group) + CLI as a spare** (subcommand mirror + `--body-stdin`). The user-global `allowedMcpServers: []` block is bypassed by **the daemon injecting, at spawn, a session-scoped fragment allowing the engram server through `--settings`** (global unchanged).
 
 ## 거부한 대안
 
-- **FIPA식 다(多)performative 타입 어휘(22종)** — 산업 채택 실패 선례 + LLM 수신자는 본문으로 의도를 전달받으므로 데몬 행동이 안 갈리는 타입은 비용만 늘림.
-- **`type=reply`·refuse/failure 타입 분리** — 데몬 행동이 "미회신 닫기"로 동일. 필드/본문으로 충분, 장부 사유 칸은 v2 무파괴 추가 가능.
-- **구독(subscribe) 계약** — 세션 상태·출력은 기존 관측 인프라(이벤트·replay)가 이미 노출. 메일로 만들면 같은 정보에 표면 이중화.
-- **그룹 정의 = 프로필 태그 / 트리 구조** — 태그는 동적 재편 불가(A 위 편의 기능으로 후행 가능), 트리는 프론트 표시 개념이라 데몬 이관 공사가 선행돼야 함.
-- **`@all` 별도 특례** — 내장 그룹으로 흡수하면 fan-out 코드 경로 1벌.
-- **그룹 request(v1)** — 완료 판정(any/all/quorum) 시맨틱 미정 상태로 넣으면 타임아웃 오발(적대 리뷰 CRITICAL 지적). v2에서 수신자별 계약+집계로.
-- **cc/bcc(v1)** — LLM 프로토콜 전원 미채택 + cc는 이메일에서도 서술적 관례일 뿐(참조자 LLM이 명령문에 행동해버릴 위험 — 역할 명시 주입 설계가 선행돼야). v2 항목.
-- **priority 필드** — 액터·LLM 프레임워크 전원 미채택 + AMQP 실무 경고(기아·TTL 교차 버그·"큐 분리가 낫다").
-- **회신 관대 매칭**(미회신 상대의 다음 메시지를 회신 간주) — 우연 닫힘 오발. 엄격 + 프라이밍 보강 채택.
-- **오래된 파킹 몰래 드롭(drop-head)** — 조용한 유실 금지. 초과 = 신규 반려(MAILBOX_FULL)로 발신자에게 즉시 가시화.
-- **CLI(Bash) 주력** — 실측·조사 결과 기각: Windows Bash 툴 미해결 병리(#19585 30~90s, #31437 스냅샷 ~8s, #38882 콘솔 창 스팸) + 셸 인용 취약. MCP 컨텍스트 비용 우려는 디퍼드 로딩 실측으로 해소(이름만 상주). CLI는 예비·사람 테스트로 잔존(ADR-0086 이중화 유지).
-- **조회·그룹 MCP 툴 개별 분리(5개+)** — 툴 스프롤. 3개로 압축, 시스템 조작(스폰·레이아웃 등)은 별도 버스 `engram_control` 1개로(S17 방향 — §5 command bus와 정합).
-- **전역 allowedMcpServers에 engram 추가** — 사용자 원칙(전역=전부 차단, 로컬 오버라이드) 위반. 프로젝트 로컬 설정도 기각(에이전트 cwd가 임의 폴더라 무력) → 스폰 시 `--settings` 주입 채택.
-- **출력 마커 채널**(응답 본문 태그를 데몬이 파싱·실행 — 툴 호출 0) — 이론상 최속이나 인용 인젝션 위험(Copilot CVE 선례) + nonce 완화 실전 사례 부재. 연사 병목 실측 시 재검토.
-- **파일 outbox 채널**(Write 툴 + 데몬 감시) — 유효한 대안 1순위로 보관(Claude Code 팀 기능 선례). MCP 디퍼드가 실측에서 무너지면 채택.
+- **A FIPA-style multi-performative type vocabulary (22 kinds)** — a precedent of industry adoption failure + an LLM recipient receives the intent through the body, so a type that does not change daemon behavior only adds cost.
+- **`type=reply` · splitting refuse/failure into types** — the daemon behavior is the same, "close the unreplied item". A field/body is enough, and a reason column in the ledger can be added non-destructively in v2.
+- **A subscribe contract** — session state and output are already exposed by the existing observation infrastructure (events · replay). Making it mail would duplicate the surface for the same information.
+- **Group definition = profile tag / tree structure** — tags cannot be dynamically reorganized (can follow later as a convenience on top of A), and the tree is a frontend display concept so a daemon migration job would have to come first.
+- **A separate special case for `@all`** — absorbing it into a built-in group gives one fan-out code path.
+- **Group request (v1)** — adding it with the completion decision (any/all/quorum) semantics undecided causes timeout misfires (the adversarial review's CRITICAL finding). In v2, per-recipient contracts + aggregation.
+- **cc/bcc (v1)** — not adopted by any LLM protocol + even in email cc is only a descriptive convention (the risk that the cc'd LLM acts on an imperative — a design that injects the role explicitly has to come first). A v2 item.
+- **A priority field** — not adopted by any actor or LLM framework + AMQP practitioner warnings (starvation · TTL cross bugs · "splitting the queue is better").
+- **Lenient reply matching** (treating the next message from an unreplying party as the reply) — an accidental-close misfire. Adopt strict + priming reinforcement.
+- **Silently dropping old parked items (drop-head)** — no silent loss. Over the limit = a new one is bounced (MAILBOX_FULL), made immediately visible to the sender.
+- **CLI (Bash) as the main path** — rejected by measurement and survey: unresolved Windows Bash tool pathologies (#19585 30~90s, #31437 snapshot ~8s, #38882 console window spam) + shell quoting fragility. The concern about MCP context cost was resolved by measuring deferred loading (only names stay resident). The CLI remains as a spare and for human testing (keeping the ADR-0086 duality).
+- **Splitting the query/group MCP tools individually (5+)** — tool sprawl. Compressed to 3, with system operations (spawn, layout, etc.) on a separate bus, a single `engram_control` (the S17 direction — consistent with the §5 command bus).
+- **Adding engram to the global allowedMcpServers** — violates the user's principle (global = block everything, override locally). A project-local setting is also rejected (the agent's cwd is an arbitrary folder, so it is powerless) → adopt injecting `--settings` at spawn.
+- **An output marker channel** (the daemon parses and executes tags in the response body — 0 tool calls) — in theory the fastest, but it carries a quoted-injection risk (the Copilot CVE precedent) + there is no real-world case of the nonce mitigation. Revisit when a burst-send bottleneck is measured.
+- **A file outbox channel** (the Write tool + a daemon watch) — kept as the first-ranked valid alternative (the Claude Code team feature precedent). Adopt it if MCP deferred loading collapses in measurement.
 
 ## 근거
 
-- **설계 서베이(medium, 2026-07-24)**: 이메일 RFC·액터(gen_server call/cast, Akka ask)·FIPA-ACL·AMQP·LLM 프로토콜(A2A/AutoGen/LangGraph/Claude Code 팀) 5갈래 병렬 수집 + codex(cross-family) 적대 리뷰 1회(FIX — 교정 13건 반영: 그룹×회신계약 충돌, cc 서술성, in_reply_to≠스레드, MDN 과장 등). 수렴 코어(id·발신자·회신 상관·기한)는 3계보 교차확증 = 확실.
-- **실측(세션 내)**: 데몬 HTTP 왕복 ~3ms · engram-send.exe 스폰 ~105ms · bash 스폰 ~120ms → 속도는 결격 아님, LLM 추론이 지배항. MCP 디퍼드 = 본 세션에서 라이브 확인(연결된 MCP 서버 하나(~70툴)의 이름만 상주). `allowedMcpServers: []`(유저 전역 42행)가 스폰 에이전트의 send_message 툴 부재의 원인(당일 QA 관측과 부합 — ADR-0099 배선은 정상).
-- **미검증(구현 QA 항목)**: `--settings` 주입의 allowedMcpServers merge 동작 · XML 봉투 실 claude 왕복(콜론 검증분 중 포맷 결합부만 재검증 — 배관은 포맷 무관이라 유효).
+- **Design survey (medium, 2026-07-24)**: 5 branches collected in parallel — email RFCs · actors (gen_server call/cast, Akka ask) · FIPA-ACL · AMQP · LLM protocols (A2A/AutoGen/LangGraph/Claude Code team) — + one codex (cross-family) adversarial review (FIX — 13 corrections applied: group × reply-contract conflict, cc being descriptive, in_reply_to ≠ thread, MDN overstatement, etc.). The converged core (id · sender · reply correlation · deadline) is cross-confirmed by 3 lineages = certain.
+- **Measurement (in-session)**: daemon HTTP round trip ~3ms · engram-send.exe spawn ~105ms · bash spawn ~120ms → speed is not disqualifying, and LLM inference is the dominant term. MCP deferred = confirmed live in this session (only the names of one connected MCP server (~70 tools) stay resident). `allowedMcpServers: []` (line 42 of the user-global settings) is the cause of the spawned agent lacking the send_message tool (consistent with that day's QA observation — the ADR-0099 wiring is normal).
+- **Unverified (implementation QA items)**: the allowedMcpServers merge behavior of the `--settings` injection · the XML envelope in a real claude round trip (of what was verified with colon, only the format-coupled part is re-verified — the plumbing is format-independent, so it stays valid).
 
 ## 영향 / 불변식
 
-- **회신 계약의 보장 주체 = 데몬 장부**(LLM 준수는 soft) — 타임아웃 notice 없이 request를 구현하면 계약이 반쪽. notice는 메일박스 cap 예외 통로 필수.
-- **방송 소급 금지**: 그룹/@all은 발송 순간 스냅샷 — 이후 스폰된 에이전트에게 배달 금지(파킹은 단일 수신자 전용).
-- **`<notice>` 태그는 데몬 전용** — 에이전트 발신 불가. from 있는 `<message>`와의 구분이 회신 가능성 판단의 근거라 섞으면 LLM이 인프라에 회신 시도.
-- **툴 3개 상한 규율**: 에이전트용 MCP 표면은 send_message·messages·group에 인자 확장으로만 성장. 시스템 조작은 `engram_control` 버스(별도).
-- 구현 계약 상세(필드·응답 JSON·에러 코드·정책 상수·수용 기준) = spec 문서가 정본(관련 절 링크).
+- **The party that guarantees the reply contract = the daemon ledger** (LLM compliance is soft) — implementing request without the timeout notice makes the contract half. The notice must have a mailbox cap exception channel.
+- **No retroactive broadcast**: a group/@all is a snapshot at the moment of sending — delivery to agents spawned afterwards is forbidden (parking is for a single recipient only).
+- **The `<notice>` tag is daemon-only** — agents cannot send it. The distinction from a `<message>` with from is the basis for judging whether a reply is possible, so mixing them makes the LLM try to reply to infrastructure.
+- **The 3-tool cap discipline**: the MCP surface for agents grows only by argument extension of send_message · messages · group. System operations go on the `engram_control` bus (separate).
+- The implementation contract details (fields · response JSON · error codes · policy constants · acceptance criteria) = the spec document is canonical (related section link).

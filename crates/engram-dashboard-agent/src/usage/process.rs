@@ -1,15 +1,15 @@
-//! 실물 조회 스포너 — [`ProbeSpawner`] 를 OS 프로세스로 구현한다(ADR-0249).
+//! The real query spawner — implements [`ProbeSpawner`] with an OS process (ADR-0249).
 //!
-//! ★이 모듈은 OS 를 모른다★: 트리 뿌리로 띄우기 · 트리 kill · 실패한 셸의 「프로그램 없음」 판정은 OS 층
-//!   ([`prepare_tree_root`] · [`TreeRoot`] · [`MissingProgramCheck`])이 하고, 여기는 그 답을 조회의 오류 · 종료
-//!   정보로 옮기고 찍는다.
+//! ★This module does not know the OS★: spawning as a tree root · tree kill · the 「프로그램 없음」 (program missing) decision for a failed shell is done by the OS layer
+//!   ([`prepare_tree_root`] · [`TreeRoot`] · [`MissingProgramCheck`]), and here we move its answer into the query's error · exit
+//!   info and print it.
 //!
-//! 스레드 셋이 자식 하나를 받친다 — 아무도 join 하지 않으므로 drop 이 [`KILL_WAIT`] 보다 오래 걸리지 않는다:
-//!   - stdin 라이터: stdin 을 닫을 때·자식 값이 drop 될 때(송신단이 사라질 때) 또는 쓰기가 실패할 때 끝난다.
-//!     OS 쓰기에 막혀 있으면 트리 kill 이 파이프를 끊어 풀어 준다.
-//!   - stdout 줄 리더: EOF(쓰기 끝을 쥔 프로세스가 모두 끝남) 또는 받는 쪽이 사라진 뒤의 첫 전달에서 끝난다.
-//!     ★트리 kill 을 빠져나간 프로세스가 stdout 을 쥐고 있으면 그것이 끝날 때까지 이 스레드가 남는다★.
-//!   - stderr 드레인: EOF 에서 끝난다. 내용은 버리고 가린 꼬리 몇 줄만 붙든다(로그에는 줄 수만).
+//! Three threads back one child — no one joins them, so a drop takes no longer than [`KILL_WAIT`]:
+//!   - stdin writer: ends when stdin is closed · when the child value is dropped (when the sending end disappears) or when a write fails.
+//!     If blocked on an OS write, the tree kill breaks the pipe and frees it.
+//!   - stdout line reader: ends at EOF (every process holding the write end has ended) or at the first delivery after the receiving side has gone.
+//!     ★If a process that escaped the tree kill holds stdout, this thread stays until it ends★.
+//!   - stderr drain: ends at EOF. It discards the content and keeps only the last few masked lines (only the line count goes to logs).
 // ADR-0230
 
 use std::collections::VecDeque;
@@ -29,22 +29,22 @@ use engram_dashboard_platform::spawn::{
 
 use super::{ExitInfo, ProbeChild, ProbeCommand, ProbeError, ProbeSpawner};
 
-/// kill 뒤 자식(Windows 는 Job 안 전부)이 끝나기를 기다리는 상한. 임시 폴더를 지우기 전에 파일 잠금이
-/// 풀리기를 기다리는 몫이다(Windows 는 열린 파일·작업 폴더를 못 지운다).
+/// Upper bound on waiting after kill for the child (on Windows, everything in the Job) to end. It is the share that waits for file locks to be
+/// released before the scratch folder is deleted (Windows cannot delete open files · a working folder).
 pub const KILL_WAIT: Duration = Duration::from_secs(2);
 
 const WAIT_POLL: Duration = Duration::from_millis(20);
 
-/// stdout 한 줄의 상한. 조회 응답은 몇 KB 이고 가장 긴 줄(초기화 알림)도 이보다 훨씬 작다.
+/// Bound of one line of stdout. A query response is a few KB and even the longest line (the initialization notice) is far smaller than this.
 const STDOUT_LINE_MAX: usize = 1024 * 1024;
-/// 아직 안 읽은 stdout 줄의 상한 — 차면 리더가 멈추고 자식이 파이프에 막힌다(메모리 상한).
+/// Bound of stdout lines not yet read — when full the reader stops and the child blocks on the pipe (memory bound).
 const STDOUT_QUEUE: usize = 16;
 
 const STDERR_READ_MAX: usize = 4096;
 const STDERR_TAIL_LINES: usize = 8;
 const STDERR_TAIL_CHARS: usize = 240;
 
-/// 실제 OS 프로세스를 띄우는 스포너.
+/// A spawner that spawns real OS processes.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OsProbeSpawner;
 
@@ -58,19 +58,19 @@ impl ProbeSpawner for OsProbeSpawner {
     }
 }
 
-// ── 줄 읽기 ──────────────────────────────────────────────────────────────────────
+// ── Line reading ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, PartialEq, Eq)]
 enum LineEnd {
-    /// 한 바이트도 없이 스트림이 끝났다.
+    /// The stream ended without a single byte.
     Eof,
     Complete,
-    /// 상한에 닿았다 — ★줄의 나머지는 아직 안 읽었다★. 다음 줄을 읽기 전에 [`skip_rest_of_line`] 을 부른다.
+    /// Hit the bound — ★the rest of the line is not read yet★. Call [`skip_rest_of_line`] before reading the next line.
     Cut,
 }
 
-/// 줄 하나(끝의 `\n` 포함, 개행 없이 끝난 마지막 조각도 한 줄)를 `out` 에 최대 `cap` 바이트까지 담는다.
-/// 상한에 닿으면 나머지를 기다리지 않고 곧바로 `Cut` 이다 — 개행 없이 쏟아지는 출력에도 곧 돌아온다.
+/// Puts one line (including the trailing `\n`; a last piece ending without a newline is also a line) into `out` up to `cap` bytes.
+/// If the bound is hit, it is `Cut` right away without waiting for the rest — it returns soon even for output pouring in without newlines.
 fn read_capped_line(
     reader: &mut impl BufRead,
     cap: usize,
@@ -107,7 +107,7 @@ fn read_capped_line(
                     let end = if found_newline {
                         Some(LineEnd::Complete)
                     } else if out.len() >= cap {
-                        // 개행 없이 상한을 딱 채웠다 — 다음 바이트를 기다리면 멈춘 자식 앞에서 마감까지 막힌다.
+                        // Exactly filled the bound without a newline — waiting for the next byte would block until the deadline in front of a stalled child.
                         Some(LineEnd::Cut)
                     } else {
                         None
@@ -123,7 +123,7 @@ fn read_capped_line(
     }
 }
 
-/// 줄의 남은 바이트를 개행(포함)이나 EOF 까지 읽어 버린다 — 메모리에 담지 않는다.
+/// Reads and discards the remaining bytes of the line up to the newline (inclusive) or EOF — does not hold them in memory.
 fn skip_rest_of_line(reader: &mut impl BufRead) -> io::Result<()> {
     loop {
         let (used, done) = {
@@ -157,11 +157,11 @@ fn line_text(mut raw: Vec<u8>) -> String {
     String::from_utf8(raw).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
-/// stderr 한 줄을 꼬리에 실을 모양으로 — ★가리기가 자르기보다 먼저다★(자른 뒤 가리면 경계에 걸친 토큰이
-/// 패턴 길이 밑으로 잘려 빠져나간다).
+/// Shape one stderr line for the tail — ★masking comes before truncating★ (if truncated first and masked after, a token straddling the boundary
+/// is cut below the pattern length and slips through).
 ///
-/// 읽기 상한에서 잘린 줄은 마지막 공백 앞까지만 쓴다 — 가리는 토큰 모양에는 공백이 없으므로 그 경계에 걸친
-/// 토큰 조각이 가리기를 빠져나가지 못한다. 공백이 없으면 그 줄은 통째로 버린다.
+/// A line cut at the read bound is used only up to before the last whitespace — a masked token shape has no whitespace, so a token piece straddling that boundary
+/// cannot slip through the masking. If there is no whitespace, the line is dropped whole.
 fn tail_line(raw: &[u8], cut_at_read: bool) -> String {
     let raw = if cut_at_read {
         match raw.iter().rposition(|b| b.is_ascii_whitespace()) {
@@ -182,7 +182,7 @@ struct StderrTail {
     total_lines: u64,
 }
 
-// ── 스레드 몸체 ──────────────────────────────────────────────────────────────────
+// ── Thread bodies ─────────────────────────────────────────────────────────────
 
 fn pump_stdin(mut stdin: ChildStdin, lines: Receiver<Vec<u8>>, acks: Sender<io::Result<()>>) {
     for bytes in lines {
@@ -194,8 +194,8 @@ fn pump_stdin(mut stdin: ChildStdin, lines: Receiver<Vec<u8>>, acks: Sender<io::
     }
 }
 
-/// 개행 없이 상한에 닿은 줄(상한을 넘는 줄 · 개행 없이 상한을 딱 채운 조각)은 닿는 순간 `Io` 를 보내고, 그 줄의
-/// 나머지는 읽어 버린 뒤 다음 줄로 간다.
+/// A line that hit the bound without a newline (a line over the bound · a piece that exactly fills the bound without a newline) sends `Io` the moment it hits, and the
+/// rest of that line is read and discarded before moving to the next line.
 fn pump_stdout(stdout: impl Read, lines: SyncSender<Result<String, ProbeError>>) {
     let mut reader = BufReader::new(stdout);
     loop {
@@ -264,20 +264,20 @@ fn remaining(deadline: Instant) -> Option<Duration> {
         .filter(|left| !left.is_zero())
 }
 
-// ── 자식 ─────────────────────────────────────────────────────────────────────────
+// ── Child ─────────────────────────────────────────────────────────────────────
 
 struct OsProbeChild {
     child: Child,
     tree: TreeRoot,
     not_installed: MissingProgramCheck,
-    /// `None` = stdin 이 닫혔다(쓰기 실패 · 라이터 종료 · [`ProbeChild::close_stdin`]).
+    /// `None` = stdin has closed (write failure · writer ended · [`ProbeChild::close_stdin`]).
     stdin_tx: Option<Sender<Vec<u8>>>,
     write_acks: Receiver<io::Result<()>>,
     stdout_rx: Receiver<Result<String, ProbeError>>,
     stdout_eof: bool,
     stderr_tail: Arc<Mutex<StderrTail>>,
     exit: Option<ExitInfo>,
-    /// 마감으로 끊었다 — 이후 모든 동작은 곧바로 `Timeout`.
+    /// Cut by the deadline — every later action is immediately `Timeout`.
     cut: bool,
 }
 
@@ -286,7 +286,7 @@ impl OsProbeChild {
         if remaining(deadline).is_none() {
             return Err(ProbeError::Timeout);
         }
-        // 없는 작업 폴더는 POSIX 에서 `NotFound` 로 떨어져 「미설치」로 오인된다 — 먼저 가른다.
+        // A working folder that does not exist falls to `NotFound` on POSIX and is mistaken for 「미설치」 (not installed) — tell them apart first.
         if !cmd.cwd.is_dir() {
             return Err(ProbeError::Spawn("작업 폴더가 없다".to_owned()));
         }
@@ -338,7 +338,7 @@ impl OsProbeChild {
         let (ack_tx, write_acks) = mpsc::channel();
         let (stdout_tx, stdout_rx) = mpsc::sync_channel(STDOUT_QUEUE);
         let stderr_tail = Arc::new(Mutex::new(StderrTail::default()));
-        // 여기부터 실패하면 이 값의 drop 이 트리를 끊는다.
+        // If anything fails from here on, the drop of this value cuts the tree.
         let this = Self {
             child,
             tree,
@@ -406,7 +406,7 @@ impl OsProbeChild {
         matches!(self.child.try_wait(), Ok(Some(_))) && self.tree.members_gone()
     }
 
-    /// 직접 띄운 프로세스의 종료 코드 — 판정은 부르는 쪽 몫이다([`ProbeChild::wait_exit`]).
+    /// Exit code of the directly spawned process — the decision is the caller's share ([`ProbeChild::wait_exit`]).
     fn wait_status(&mut self, deadline: Instant) -> Result<Option<i32>, ProbeError> {
         if remaining(deadline).is_none() {
             return Err(self.cut_at_deadline("wait"));
@@ -461,7 +461,7 @@ fn reap_within(child: &mut Child, budget: Duration) -> bool {
     }
 }
 
-/// 도는 중인 찾기에 막혀 판정을 「모른다」로 둔 것을 경고했나 — 경고는 프로세스당 한 번이고 그 뒤는 debug 다.
+/// Whether we warned that a decision was left as 「모른다」 (unknown) because it was blocked by a running search — the warning is once per process and after that it is debug.
 static STUCK_LOOKUP_WARNED: AtomicBool = AtomicBool::new(false);
 
 fn judged_not_installed(check: &MissingProgramCheck, code: Option<i32>, deadline: Instant) -> bool {
@@ -469,7 +469,7 @@ fn judged_not_installed(check: &MissingProgramCheck, code: Option<i32>, deadline
     if let MissingProgramVerdict::Looked(found) = &verdict {
         match found {
             TargetLookup::Busy => {
-                // 보통은 앞선 조회의 찾기가 마감을 넘겨 막힌 채 남은 것이다 — 비정상이나 안전한 폴백(「모른다」).
+                // Usually an earlier query's search was left blocked past its deadline — abnormal but a safe fallback (「모른다」 (unknown)).
                 if STUCK_LOOKUP_WARNED.swap(true, Ordering::Relaxed) {
                     tracing::debug!(
                         "사용량 조회: 같은 대상의 앞선 찾기가 아직 끝나지 않아 새로 찾지 않는다"
@@ -582,7 +582,7 @@ impl ProbeChild for OsProbeChild {
     }
 }
 
-/// 트리 kill + 유계 종료 대기. 정상 종료한 자식에도 kill 을 보낸다 — 자식이 남긴 손자가 있을 수 있다.
+/// Tree kill + bounded wait for exit. Sends kill even to a child that exited normally — the child may have left a grandchild.
 impl Drop for OsProbeChild {
     fn drop(&mut self) {
         self.kill_tree();
@@ -615,7 +615,7 @@ mod tests {
         Instant::now() + FAR
     }
 
-    /// 셸 한 줄을 도는 명령 — Windows 는 `cmd.exe /v:on /c`(지연 확장 `!VAR!`), POSIX 는 `sh -c`.
+    /// A command that runs one shell line — on Windows `cmd.exe /v:on /c` (delayed expansion `!VAR!`), on POSIX `sh -c`.
     fn shell(windows: &str, posix: &str, cwd: &Path) -> ProbeCommand {
         #[cfg(windows)]
         let (program, args) = {
@@ -639,12 +639,12 @@ mod tests {
         }
     }
 
-    /// stdin 을 기다리며 영영 안 끝나는 자식.
+    /// A child that waits on stdin and never ends.
     fn waits_for_stdin(cwd: &Path) -> ProbeCommand {
         shell("set /p L=", "read l", cwd)
     }
 
-    /// stdin 을 읽지 않고 한동안 사는 자식(Windows 는 손자 `ping` 을 둔다).
+    /// A child that does not read stdin and lives for a while (on Windows it places a grandchild `ping`).
     fn ignores_stdin(cwd: &Path) -> ProbeCommand {
         shell("ping -n 30 127.0.0.1 > NUL", "sleep 30", cwd)
     }
@@ -665,7 +665,7 @@ mod tests {
         lines
     }
 
-    // ── 순수 도우미 ──
+    // ── Pure helpers ──
 
     #[test]
     fn capped_reader_splits_lines_cuts_long_ones_and_keeps_the_stream_in_step() {
@@ -681,13 +681,13 @@ mod tests {
         };
         assert_eq!(read(8), (LineEnd::Complete, b"ab\r\n".to_vec()));
         assert_eq!(read(4), (LineEnd::Cut, b"abcd".to_vec()));
-        // 개행까지 딱 상한이면 자르지 않는다 — 상한은 개행 바이트를 센다.
+        // A line exactly at the bound including the newline is not truncated — the bound counts the newline byte.
         assert_eq!(read(5), (LineEnd::Complete, b"wxyz\n".to_vec()));
         assert_eq!(read(8), (LineEnd::Complete, b"last".to_vec()));
         assert_eq!(read(8), (LineEnd::Eof, Vec::new()));
     }
 
-    /// 데이터를 다 준 뒤 `release` 가 사라질 때까지 막히는 읽기 끝 — 개행 없이 멈춘 자식의 stdout.
+    /// A read end that blocks until `release` disappears after all the data is given — the stdout of a child that stopped without a newline.
     struct StallingReader {
         data: Cursor<Vec<u8>>,
         release: Receiver<()>,
@@ -705,8 +705,8 @@ mod tests {
         }
     }
 
-    /// ★상한에 닿는 순간 `Io` 다★ — 개행이 올 때까지(= 끝내 안 오면 마감까지) 기다리지 않는다. 상한을 개행 없이
-    ///   딱 채우고 멈춘 줄도 같다(다음 바이트를 기다리지 않는다).
+    /// ★The moment it hits the bound it is `Io`★ — it does not wait until a newline comes (= until the deadline if it never comes). A line that fills the bound exactly
+    ///   without a newline and stops is the same (it does not wait for the next byte).
     #[test]
     fn an_over_long_line_is_reported_before_its_newline_arrives() {
         for len in [STDOUT_LINE_MAX + 1, STDOUT_LINE_MAX] {
@@ -743,7 +743,7 @@ mod tests {
             tail_line(format!("key {token}\r\n").as_bytes(), false),
             "key ***"
         );
-        // 읽기 상한이 토큰 한가운데를 잘랐다 — 잘린 조각은 가릴 수 없으니 마지막 공백 앞까지만.
+        // The read bound cut right through the middle of a token — the cut piece cannot be masked, so use only up to before the last whitespace.
         let cut = format!("key {}", &token[..12]);
         assert_eq!(tail_line(cut.as_bytes(), true), "key");
         assert_eq!(tail_line(token.as_bytes(), true), "");
@@ -754,7 +754,7 @@ mod tests {
         );
     }
 
-    /// 끝난 뒤 받아 둔 종료 상태도 마감에 끊긴 뒤에는 `Timeout` 이다 — 끊긴 뒤의 모든 동작은 `Timeout`.
+    /// An exit status received after the end is also `Timeout` once cut by the deadline — every action after being cut is `Timeout`.
     #[test]
     fn a_cut_after_the_exit_turns_wait_exit_into_a_timeout() {
         let root = TempRoot::new("probe-cut-after-exit");
@@ -782,7 +782,7 @@ mod tests {
         assert!(!marker.exists(), "마감이 지났는데 자식이 돌았다");
     }
 
-    // ── 실 자식 ──
+    // ── Real child ──
 
     #[test]
     fn a_line_round_trips_through_a_real_child() {
@@ -815,7 +815,7 @@ mod tests {
         );
         eventually("마감 kill 뒤 자식 종료", || child.has_exited());
 
-        // 끊긴 뒤에는 무엇이든 곧바로 Timeout.
+        // After being cut, anything is immediately Timeout.
         assert_eq!(child.write_line("x", far()), Err(ProbeError::Timeout));
         assert_eq!(child.read_line(far()), Err(ProbeError::Timeout));
         assert_eq!(child.wait_exit(far()), Err(ProbeError::Timeout));
@@ -836,7 +836,7 @@ mod tests {
     fn a_child_that_never_reads_stdin_blocks_the_write_until_the_deadline() {
         let root = TempRoot::new("probe-write-blocks");
         let mut child = OsProbeChild::spawn(&ignores_stdin(root.path()), far()).expect("기동");
-        // 파이프 버퍼보다 훨씬 크다 — 안 읽는 자식 앞에서 반드시 막힌다.
+        // Far larger than the pipe buffer — it surely blocks in front of a child that does not read.
         let huge = "x".repeat(1024 * 1024);
 
         let started = Instant::now();
@@ -849,7 +849,7 @@ mod tests {
         eventually("마감 kill 뒤 자식 종료", || child.has_exited());
     }
 
-    /// 아래 시험의 자식 몫 — 이 시험 바이너리를 다시 띄워 이 항목만 돌린다. 표식 env 가 없으면 아무것도 안 한다.
+    /// The child's share of the test below — respawns this test binary and runs only this item. If the marker env is absent, it does nothing.
     const LINGER_ENV: &str = "ENGRAM_USAGE_PROBE_TEST_LINGER";
     const LINGER_TEST: &str = "usage::process::tests::helper_closes_stdout_and_lingers";
 
@@ -867,14 +867,14 @@ mod tests {
     fn close_own_stdout() {
         use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
         let raw = std::io::stdout().as_raw_handle();
-        // SAFETY: 이 시험 자식 프로세스의 stdout 핸들을 한 번 닫는다 — 닫은 뒤로는 stdout 에 쓰지 않는다.
+        // SAFETY: closes the stdout handle of this test child process once — after closing, nothing is written to stdout.
         drop(unsafe { OwnedHandle::from_raw_handle(raw) });
     }
 
     #[cfg(unix)]
     fn close_own_stdout() {
         use std::os::unix::io::{FromRawFd, OwnedFd};
-        // SAFETY: 이 시험 자식 프로세스의 fd 1 을 한 번 닫는다 — 닫은 뒤로는 stdout 에 쓰지 않는다.
+        // SAFETY: closes fd 1 of this test child process once — after closing, nothing is written to stdout.
         drop(unsafe { OwnedFd::from_raw_fd(1) });
     }
 
@@ -899,7 +899,7 @@ mod tests {
         };
         let mut child = OsProbeChild::spawn(&cmd, far()).expect("기동");
 
-        // 시험 하네스의 머리 줄이 먼저 올 수 있다 — EOF 까지 흘린다.
+        // The test harness's header line may come first — drain to EOF.
         read_to_eof(&mut child);
         let started = Instant::now();
         let result = child.wait_exit(Instant::now() + Duration::from_millis(500));
@@ -915,8 +915,8 @@ mod tests {
         eventually("마감 kill 뒤 자식 종료", || child.has_exited());
     }
 
-    /// ★트리 전부가 끝난다★ — 셸의 자식(손자 `ping` · 콘솔 호스트)까지. 멈춘 채 띄워 넣은 뒤 깨우므로 곧바로 띄운
-    ///   손자도 트리를 빠지지 않고, drop 은 그 전부가 끝난 뒤에 돌아온다.
+    /// ★The whole tree ends★ — down to the shell's children (grandchild `ping` · console host). It is spawned suspended, put into the tree, and then woken, so even a
+    ///   grandchild spawned right away does not leave the tree, and drop returns after all of it has ended.
     #[cfg(windows)]
     #[test]
     fn drop_kills_the_whole_tree() {
@@ -971,8 +971,8 @@ mod tests {
         }
     }
 
-    /// `cmd.exe /c <없는 이름>` 은 뜬다 — 실패한 뒤의 종료 상태가 「없다」를 싣는다(종료 코드는 이 PC 에서 1 이라
-    /// 코드만으로는 못 가른다).
+    /// `cmd.exe /c <없는 이름>` does start — the exit status after the failure carries 「없다」 (missing) (the exit code is 1 on this PC, so
+    /// the code alone cannot tell).
     #[cfg(windows)]
     #[test]
     fn cmd_with_a_missing_target_spawns_and_its_exit_says_not_installed() {
@@ -985,7 +985,7 @@ mod tests {
         assert!(exit.looks_not_installed(), "{exit:?}");
     }
 
-    /// 판정 없는 종료 대기는 판정도 하지 않고 판정 없는 종료를 받아 두지도 않는다 — 뒤의 `wait_exit` 가 판정한다.
+    /// A wait for exit without a decision neither makes a decision nor keeps an exit without a decision — the later `wait_exit` decides.
     #[cfg(windows)]
     #[test]
     fn the_unjudged_wait_leaves_the_judgment_to_wait_exit() {
@@ -996,12 +996,12 @@ mod tests {
         let mut child = OsProbeChild::spawn(&cmd_c(&target, root.path()), far()).expect("기동");
         read_to_eof(&mut child);
         assert_eq!(child.wait_exit_code(far()).expect("종료"), Some(1));
-        // 대상이 그 사이에 사라진다 — 종료 대기가 판정해 받아 두었다면 「있다」로 굳어 뒤의 판정이 거짓이 된다.
+        // The target disappears in the meantime — if the wait for exit had decided and kept it, it would harden to 「있다」 (exists) and the later decision would be false.
         std::fs::remove_file(&shim).expect("대상 지우기");
         assert!(child.wait_exit(far()).expect("종료").looks_not_installed());
     }
 
-    /// 있는 대상이 스스로 실패해도 「없다」가 아니다 — 판정은 대상을 찾아본 뒤에만 선다.
+    /// Even if a target that exists fails by itself, that is not 「없다」 (missing) — the decision stands only after the target has been looked for.
     #[cfg(windows)]
     #[test]
     fn a_present_cmd_target_that_fails_is_not_mistaken_for_not_installed() {
@@ -1027,7 +1027,7 @@ mod tests {
         let exit = child.wait_exit(far()).expect("종료");
         assert_eq!(exit.code(), Some(3));
         assert!(!exit.looks_not_installed());
-        // 끝난 자식의 stdin 에 쓰면 매달리지 않고 실패한다.
+        // Writing to the stdin of an ended child fails without hanging.
         assert!(matches!(
             child.write_line("late", far()),
             Err(ProbeError::Io(_))
@@ -1047,7 +1047,7 @@ mod tests {
     #[test]
     fn env_set_and_env_remove_reach_the_child() {
         let root = TempRoot::new("probe-env");
-        // 부모에게 늘 있는 변수를 벗긴다.
+        // Strips the variable that the parent always has.
         #[cfg(windows)]
         let inherited = "WINDIR";
         #[cfg(unix)]
@@ -1101,7 +1101,7 @@ mod tests {
         assert_eq!(tail.last().map(String::as_str), Some("key ***"));
     }
 
-    /// 자식이 작업 폴더로 쥐고 있으면 Windows 는 그 폴더를 못 지운다 — 자식을 먼저 drop 하면 지워진다.
+    /// Windows cannot delete a folder the child holds as its working folder — dropping the child first lets it be deleted.
     #[test]
     fn a_scratch_dir_used_as_cwd_is_deleted_after_the_child_is_dropped() {
         let root = TempRoot::new("probe-scratch-cwd");

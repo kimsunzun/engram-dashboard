@@ -1,37 +1,37 @@
-# ADR-0212: engram help 본문을 외부 파일로 빼되 내장 사본을 폴백으로 남긴다
+# ADR-0212: Move the engram help body into an external file, but keep a built-in copy as the fallback
 
-- 상태: 확정 (2026-09-19, 근거: 사용자 결정 + 빌드 없이 반영·바이트 동일 렌더 실측) · 부분 폐기 by ADR-0220 (파일명과 구획 표시 꼴) · 부분 폐기 by ADR-0285 (결정 3과 4 및 거부한 대안 셋과 영향의 잃은 보증)
-- 관련: ADR-0211(계약이 도움말로 이사한 라운드) · ADR-0092(내용은 외부 MD) · ADR-0100(릴리스 매니페스트) · `prompts/engram-cli-help.md` · `crates/engram-dashboard-daemon/src/bin/engram.rs` · Amended by ADR-0220 (파일명과 구획 표시 꼴) · Amended by ADR-0285 (결정 3과 4 및 거부한 대안 셋과 영향의 잃은 보증)
+- 상태: 확정 (2026-09-19, basis: user decision + measured reflection without a build and byte-identical rendering) · 부분 폐기 by ADR-0220 (file name and the shape of the section markers) · 부분 폐기 by ADR-0285 (decisions 3 and 4, the three rejected alternatives, and the lost guarantee in Impact)
+- 관련: ADR-0211(the round in which the contract moved into help) · ADR-0092(content lives in an external MD) · ADR-0100(release manifest) · `prompts/engram-cli-help.md` · `crates/engram-dashboard-daemon/src/bin/engram.rs` · Amended by ADR-0220 (file name and the shape of the section markers) · Amended by ADR-0285 (decisions 3 and 4, the three rejected alternatives, and the lost guarantee in Impact)
 
 ## 맥락
 
-ADR-0211 이 에이전트 대면 우편 계약을 **지시서에서 `engram help` 로 옮겼다.** 그런데 도움말 본문은 Rust 문자열 상수로 **바이너리에 컴파일돼 들어간다.** 옮기고 나니 모양이 이렇게 됐다:
+ADR-0211 moved the agent-facing mail contract **from the instruction document to `engram help`.** But the help body is **compiled into the binary** as a Rust string constant. After the move, the shape ended up like this:
 
-- 지시서(`prompts/agent-priming.md`)는 **외부 MD** 라 고치면 바로 반영된다 — ADR-0092 가 「내용을 코드에 박지 마라」로 박아 둔 것이다.
-- 도움말은 **문구 한 글자를 고쳐도 빌드를 타야 한다.**
+- The instruction document (`prompts/agent-priming.md`) is an **external MD**, so it takes effect immediately when edited — ADR-0092 nailed this down as 「내용을 코드에 박지 마라」 (do not bake content into code).
+- For help, **changing even one character of wording has to go through a build.**
 
-즉 **계약이 파일에서 바이너리 안으로 이사한 셈**이고, ADR-0092 가 지시서에 대해 없앤 문제를 도움말이 도로 들고 왔다. 사용자 판정 = 「빌드할 때마다 문구 수정하는 건 오버다」.
+That is, **the contract moved from a file into the binary**, and help brought back the problem that ADR-0092 had removed for the instruction document. The user's judgment = 「빌드할 때마다 문구 수정하는 건 오버다」 ("having to build every time we edit wording is overkill").
 
 ## 결정
 
-1. **본문은 `prompts/engram-cli-help.md` 한 파일**이고, 화면 조각은 **줄 전체를 차지하는 구분자 주석**으로 가른다(17개 절).
-   - ★**페이지당 파일 하나는 성립하지 않는다**★ — 우편 가시성 필터가 루트·에이전트 **페이지 안쪽 조각**을 빼기 때문에 어차피 절 단위가 필요하다. 절이 필수라면 파일 하나가 매니페스트 항목도 하나이고 표면 전체가 한 문서로 읽힌다.
-2. **자리는 `prompts/`** — 「에이전트가 읽는 외부 텍스트를 exe 옆에 싣는다」는 이미 그 폴더의 뜻이고, ADR-0100 의 복사·양방향 트립와이어가 그 폴더를 이미 덮는다. 새 폴더는 복사 경로·매니페스트 배열·트립와이어를 **각각 하나씩 더** 만든다.
-3. **경로 해석은 ADR-0092 와 같은 모양** — 환경변수 override 가 먼저, 없으면 exe 기준 walk-up + 고정 상대경로. cwd 를 안 보고 데몬도 자격증명도 안 탄다. **override 실패는 고정 경로로 안 내려간다**(지시서 쪽 규칙 승계).
-4. ★**파일이 없거나 깨졌으면 내장 사본으로 답한다**★ — `include_str!` 로 같은 파일을 바이너리에도 싣고, 실패 시 **stdout 은 온전한 화면 · 종료코드 0 · 경고는 stderr 한 줄**. **절이 하나라도 빠진 파일은 통째로 거부**한다(반쪽 화면 금지).
-5. **매니페스트에 등재한다** — 릴리스 목록이 두 파일이 되고, 빠짐·남음 양방향 트립와이어가 그대로 덮는다.
+1. **The body is the single file `prompts/engram-cli-help.md`**, and the screen pieces are separated by **delimiter comments that take up a whole line** (17 sections).
+   - ★**One file per page does not hold**★ — since the mail visibility filter removes **pieces inside** the root and agent **pages**, section units are needed anyway. If sections are required, one file is one manifest entry and the whole surface reads as one document.
+2. **The place is `prompts/`** — 「에이전트가 읽는 외부 텍스트를 exe 옆에 싣는다」 (put the external text an agent reads next to the exe) is already the meaning of that folder, and the copy and two-way tripwires of ADR-0100 already cover that folder. A new folder would create **one more each** of a copy path, a manifest array and a tripwire.
+3. **Path resolution has the same shape as ADR-0092** — the environment-variable override first, and if absent, an exe-based walk-up + a fixed relative path. It does not look at cwd and does not go through the daemon or credentials. **An override failure does not fall down to the fixed path** (inheriting the instruction-document-side rule).
+4. ★**If the file is missing or broken, answer with the built-in copy**★ — we also embed the same file in the binary with `include_str!`, and on failure **stdout is a complete screen · exit code 0 · the warning is one line on stderr**. **A file missing even one section is rejected as a whole** (no half screens).
+5. **Register it in the manifest** — the release list becomes two files, and the two-way tripwire for missing and surplus covers it as it is.
 
 ## 거부한 대안
 
-- **그냥 컴파일된 상수로 둔다**(현행 유지) — ★**기각 = 사용자 결정**★. 계약이 도움말로 이사한 이상 문구 수정 빈도가 오른다.
-- **파일이 없으면 시끄럽게 죽는다** — ★**기각 = 둘 다 같은 결말이다**★. `engram help` 는 **에이전트가 표면의 존재를 배우는 자리**다. 빈 화면을 내든 오류로 죽든 에이전트는 **표면 없이 떠난다** — 그러면 우편이 있는데도 못 쓰는 상태가 조용히 성립한다. **낡았지만 맞는 화면이 엄격히 낫다.** 경고를 stderr 로 보내 **LLM 이 읽는 stdout 은 안 더럽히면서** 사람은 알 수 있게 한다.
-- **내장 사본을 안 두고 파일만 쓴다** — 기각. 위와 같은 사유이고, 덤으로 **설치가 깨진 기기에서 진단이 불가능**해진다.
-- **exe walk-up 을 CLI 안에 다시 구현한다** — 기각. 같은 일을 하는 기제가 둘이 되고 갈린다. ★**대가는 치렀다**★ — `engram` 바이너리가 discovery crate 심볼 하나를 링크하게 됐다(그 crate 는 이미 데몬 의존이라 **서드파티는 안 늘었다**). CLI 의 「의존 최소」 선을 한 칸 넘은 것은 사실이고 그것이 이 결정이 받아들인 값이다.
+- **Just leave it as a compiled constant** (keep the status quo) — ★**Rejection = user decision**★. Since the contract moved into help, the frequency of wording edits goes up.
+- **Die loudly if the file is missing** — ★**Rejection = both have the same ending**★. `engram help` is the **place where an agent learns of the existence of the surface**. Whether it shows an empty screen or dies with an error, the agent **leaves without the surface** — then a state in which mail exists but cannot be used quietly holds. **A stale but correct screen is strictly better.** We send the warning to stderr so that **stdout, which the LLM reads, is not dirtied** while a human can still notice.
+- **Do not keep a built-in copy and use only the file** — rejected. Same reason as above, and as a bonus, **diagnosis becomes impossible on a machine with a broken install**.
+- **Re-implement the exe walk-up inside the CLI** — rejected. The mechanisms doing the same job would become two and diverge. ★**The price was paid**★ — the `engram` binary now links one symbol from the discovery crate (that crate is already a daemon dependency, so **no third party was added**). It is true that we crossed the CLI's 「의존 최소」 (minimal dependency) line by one notch, and that is the price this decision accepted.
 
 ## 영향 / 불변식
 
-- ★**렌더 결과가 이전과 바이트 단위로 동일함을 확인했다**★ — 9개 화면(루트·에이전트 각 노출/숨김 · 우편 개요 · 하위 넷)을 변경 전후로 떠서 대조했다. 외부화가 **문구를 바꾸는 작업이 아니다.**
-- **빌드 없이 반영되는 것을 실측했다** — 외부 파일을 고치고 재빌드 없이 화면이 바뀌었다. 그것이 이 결정의 목적 전부다.
-- ★**잃은 보증 하나를 적어 둔다**★ — 전에는 하위 항목마다 페이지가 있다는 것을 **컴파일러가 강제**했다(catch-all 없는 match). 지금은 절 id 를 토큰에서 만들므로 그 강제가 사라졌고, **「필요한 절 명단」 검사와 내장 사본 테스트가 그 자리를 대신한다.** 둘 중 하나라도 지우면 **없는 절을 가리키는 하위 항목이 컴파일된다.**
-- **개행 정규화** — 이 저장소는 체크아웃 시 CRLF 로 바뀌는 설정이라, 파싱에서 `\r\n` 을 접어 어느 클론에서나 같은 바이트가 나오게 한다. ★이 접기를 빼면 화면이 클론마다 달라진다.★
-- **미검** — 릴리스 스크립트를 실제로 돌려 새 파일이 패키지에 실리는지는 **확인하지 않았다**(전체 빌드를 타야 한다). 매니페스트 배열과 그것을 소비하는 네 자리를 읽어 판단했을 뿐이다.
+- ★**We confirmed that the render result is byte-for-byte identical to before**★ — we took the 9 screens (root and agent, each shown/hidden · mail overview · the four sub-pages) before and after the change and compared them. The externalization is **not work that changes the wording.**
+- **We measured that it takes effect without a build** — we edited the external file and the screen changed with no rebuild. That is the whole purpose of this decision.
+- ★**We note one lost guarantee**★ — before, **the compiler enforced** that every sub-item has a page (a match with no catch-all). Now the section id is built from a token, so that enforcement is gone, and **the 「필요한 절 명단」 (list of required sections) check and the built-in-copy test take its place.** If you delete either of the two, **a sub-item pointing to a nonexistent section compiles.**
+- **Newline normalization** — this repository is configured to turn into CRLF at checkout, so the parsing folds `\r\n` so that the same bytes come out in any clone. ★If this folding is removed, the screen differs from clone to clone.★
+- **Unverified** — we **did not confirm** that actually running the release script puts the new file into the package (it requires going through the full build). We only judged by reading the manifest array and the four places that consume it.

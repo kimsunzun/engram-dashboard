@@ -1,37 +1,37 @@
-//! 골든 `src-tauri/src/layout/bands_golden.json` — 도킹 띠 · 새 창 크기 규칙(`layout::bands` · `layout::drag_size`)을
-//! 웹 거울(`dock/bands.ts` · `dockedTree.ts` · `judge.ts` · `dragSize.ts` — TS 시험 `dock/testing/bandsGolden.ts`)과
-//! 묶는다(TRD S21-slot-docking §4-5 · §8-1 ⑩ · 선례 `queued_input_golden.json`).
+//! Golden `src-tauri/src/layout/bands_golden.json` — binds the docking band · new window size rules (`layout::bands` · `layout::drag_size`) to
+//! the web mirror (`dock/bands.ts` · `dockedTree.ts` · `judge.ts` · `dragSize.ts` — TS test `dock/testing/bandsGolden.ts`)
+//! (TRD S21-slot-docking §4-5 · §8-1 ⑩ · precedent `queued_input_golden.json`).
 //!
-//! - 뜨기 = `#[ignore]` 시험 [`regenerate_bands_golden`] — `cargo test -p engram-dashboard --test lib_unit --
-//!   --ignored regenerate_bands_golden`. 같은 규칙이면 두 번 떠도 같은 바이트다. 손으로 고치지 않는다.
-//! - 단언 = 나머지 시험 — 골든의 입력으로 지금 Rust 규칙을 다시 돌려 기록된 답과 하나하나 견준다. 규칙 · 상수를 바꾸고
-//!   다시 뜨지 않으면 여기와 TS 시험이 함께 빨개진다.
+//! - Capturing = the `#[ignore]` test [`regenerate_bands_golden`] — `cargo test -p engram-dashboard --test lib_unit --
+//!   --ignored regenerate_bands_golden`. With the same rule, capturing twice gives the same bytes. It is not hand-edited.
+//! - Assertions = the remaining tests — they rerun the current Rust rule on the golden's inputs and compare one by one with the recorded answers. If the rule · constants are changed
+//!   and it is not recaptured, these and the TS tests turn red together.
 //!
-//! 꼴(골든 머리 `_format` 에 같은 글을 싣는다 — TS 쪽이 이 파일을 읽지 않아도 되게):
+//! Form (the same text is carried in the golden head `_format` — so the TS side need not read this file):
 //!
-//! - `_constants` = 생성물 `DockConstants.ts` 의 `DOCK_CONSTANTS` 와 같은 객체(키 = Rust 상수 이름).
-//! - `ratio_limits` = `{min, max}` — 규칙을 돌린 분할 비율 한계(`tree::RATIO_MIN` · `RATIO_MAX` = 스냅숏 `ratio_min` ·
+//! - `_constants` = the same object as `DOCK_CONSTANTS` of the generated `DockConstants.ts` (keys = Rust constant names).
+//! - `ratio_limits` = `{min, max}` — the split ratio limits the rule ran with (`tree::RATIO_MIN` · `RATIO_MAX` = snapshot `ratio_min` ·
 //!   `ratio_max`).
-//! - `bands[]` — 창 하나씩.
-//!   - 입력: `name` · `canvas {w, h}`(정수 CSS px) · `canvas_origin {x, y}` · `tab_bar {x0, y0, x1, y1} | null`(뷰포트
-//!     CSS px — [`strip_zone`] 의 바탕 사각형. 골든의 값은 탭 끌기 영역 꼴이다 — 웹이 지금 넘기는 바탕은 첫 머리 왼쪽 ~
-//!     `+` 오른 끝 × 제목 줄(없으면 탭바 줄)이고 규칙은 바탕을 그대로 받으므로 골든은 바뀌지 않는다 · TRD
-//!     S26-window-chrome §7-9) · `layout`(보이는 탭의 `LayoutNode` wire 꼴) · `shape`(끄는 탭 배치 — 끌기 MIME 의 모양
-//!     문자열: 전위 순 `l` = 칸 · `h<비율>_` = 좌우 분할 · `v<비율>_` = 위아래 분할, 분할 뒤에 두 자식. 칸 id 는 `layout`
-//!     에 없는 새 값으로 짓는다) · `original {w, h} | null`(끄는 탭의 원래 크기 — `null` = 모름 → 길이를 NaN 으로
-//!     친다 = 몫이 `ATTACH_SHARE_MAX`).
-//!   - 답: `zone` = `zone_in_canvas(strip_zone(tab_bar), canvas_origin)` | `null` · `blocked` = 끼우면 새로 면적 0 칸이
-//!     생기는(`docked_tree` 실패) `{anchor, side}` 전부(바깥 변 먼저 · 칸은 전위 순 · 변은 `SIDE_ORDER` · 몫 =
-//!     `attach_share(original, side, 칸 틀 또는 캔버스 전체)`) · `bands` = `effective_bands` 차례 그대로 `{anchor
-//!     ("outer" | 칸 id), side, band, areas, share, landing}` · `slots` = 전위 순 칸 `{id, frame, zones: {slot, centre}
-//!     | null}`(`zones` = 커서가 그 칸 위일 때 그리는 구역 선 · 유효한 칸 띠가 없으면 `null`) · `points` = `[x, y,
-//!     pick, zones]`(캔버스 CSS px): `pick` = 탭바 구역 안(반열림)이면 `"strip"` · 아니면 그 점에서 고른 `bands` 의
-//!     자리(`choose`) · 없으면 `null` / `zones` = 그 점에서 구역 선을 그리는 `slots` 의 자리(탭바 · 바깥 띠 · 캔버스
-//!     밖 · 유효한 칸 띠가 없는 칸 위면 `null`). 안내의 나머지 둘은 `pick` 에서 나온다 — 미리보기 = 고른 띠의
-//!     `landing` · 레이아웃 틀(캔버스 전체)은 고른 띠가 바깥 띠일 때만.
-//!   - 사각형은 전부 `{x0, y0, x1, y1}` 경계 꼴 · 반열림이다.
-//! - `drag_size[]` — `drag_sizes` 의 입력 `restored {w, h} | null` · `maximized` · `insets {t, r, b, l}` · `viewport` ·
-//!   `work` · `chrome` · `single` → 답 `size {w, h} | null` · `original {w, h}`.
+//! - `bands[]` — one per window.
+//!   - Input: `name` · `canvas {w, h}` (integer CSS px) · `canvas_origin {x, y}` · `tab_bar {x0, y0, x1, y1} | null` (viewport
+//!     CSS px — the base rectangle of [`strip_zone`]. The golden's value is in the tab drag area form — the base the web now passes is from the left of the first head ~
+//!     the right end of `+` × the title row (the tab bar row if none), and the rule takes the base as it is, so the golden does not change · TRD
+//!     S26-window-chrome §7-9) · `layout` (the `LayoutNode` wire form of the visible tab) · `shape` (the dragged tab's layout — the shape
+//!     string of the drag MIME: in preorder `l` = area · `h<비율>_` = left-right split · `v<비율>_` = top-bottom split (the bracketed part is the ratio), with two children after a split. Area ids are made
+//!     as new values not in `layout`) · `original {w, h} | null` (the dragged tab's original size — `null` = unknown → the length is
+//!     treated as NaN = the share is `ATTACH_SHARE_MAX`).
+//!   - Answer: `zone` = `zone_in_canvas(strip_zone(tab_bar), canvas_origin)` | `null` · `blocked` = every `{anchor, side}` where inserting would
+//!     create a new zero-area area (`docked_tree` failure) (outer edges first · areas in preorder · edges in `SIDE_ORDER` · share =
+//!     `attach_share(original, side, 칸 틀 또는 캔버스 전체)`, the last argument being the area frame or the whole canvas) · `bands` = in `effective_bands` order as is, `{anchor
+//!     ("outer" | 칸 id), side, band, areas, share, landing}` · `slots` = areas in preorder, `{id, frame, zones: {slot, centre}
+//!     | null}` (`zones` = the zone lines drawn when the cursor is over that area · `null` if there is no valid area band) · `points` = `[x, y,
+//!     pick, zones]` (canvas CSS px): `pick` = `"strip"` if inside the tab bar zone (half-open) · otherwise the place in `bands` chosen at that point
+//!     (`choose`) · `null` if none / `zones` = the place in `slots` whose zone lines are drawn at that point
+//!     (`null` over the tab bar · outer band · outside the canvas · an area with no valid area band). The other two of the guide come from `pick` — preview = the chosen band's
+//!     `landing` · the layout frame (whole canvas) only when the chosen band is an outer band.
+//!   - All rectangles are in `{x0, y0, x1, y1}` bounds form · half-open.
+//! - `drag_size[]` — inputs of `drag_sizes` `restored {w, h} | null` · `maximized` · `insets {t, r, b, l}` · `viewport` ·
+//!   `work` · `chrome` · `single` → answer `size {w, h} | null` · `original {w, h}`.
 
 use std::fmt::Write as _;
 
@@ -71,7 +71,7 @@ half-open. drag_size[] = drag_sizes: inputs restored \
 now), work (screen.avail*), chrome (viewport - canvas), single (a tab-one popout); outputs size {w,h}|null (new \
 window inner size; null = move that window as it is) and original {w,h}.";
 
-// ── 입력 ──────────────────────────────────────────────────────────────────────
+// ── inputs ──────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 struct Size {
@@ -97,7 +97,7 @@ struct Canvas {
     h: u32,
 }
 
-/// 골든 `bands[]` 한 줄의 입력.
+/// The input of one `bands[]` row of the golden.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct BandsInput {
     name: String,
@@ -109,7 +109,7 @@ struct BandsInput {
     original: Option<Size>,
 }
 
-/// 골든 `bands[]` 한 줄 — 입력 + 기록된 답.
+/// One `bands[]` row of the golden — input + recorded answer.
 #[derive(Deserialize)]
 struct BandsCase {
     name: String,
@@ -140,7 +140,7 @@ impl BandsCase {
     }
 }
 
-/// 골든 `drag_size[]` 한 줄의 입력.
+/// The input of one `drag_size[]` row of the golden.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DragSizeInput {
     name: String,
@@ -170,9 +170,9 @@ struct Golden {
     drag_size: Vec<DragSizeCase>,
 }
 
-// ── 끄는 탭 모양 문자열 (TRD §4-2 `shape`) ─────────────────────────────────────
+// ── dragged-tab shape string (TRD §4-2 `shape`) ─────────────────────────────────────
 
-// 모양에서 지은 칸 · 분할 id 의 시작 — 이 파일의 배치들이 쓰는 id 와 겹치지 않는다.
+// The start of the area · split ids built from a shape — does not collide with the ids used by this file's layouts.
 const SHAPE_ID_BASE: u128 = 0xD0C0_0000_0000;
 
 fn parse_shape(shape: &str) -> LayoutNode {
@@ -218,7 +218,7 @@ fn parse_shape(shape: &str) -> LayoutNode {
     tree
 }
 
-// 비율 = JS `String(n)` 과 같은 최단 왕복 표기 — 분할 비율(`RATIO_MIN..=RATIO_MAX`)에서는 Rust `Display` 와 같다.
+// Ratio = the same shortest round-trip notation as JS `String(n)` — for split ratios (`RATIO_MIN..=RATIO_MAX`) it equals Rust `Display`.
 fn encode_shape(node: &LayoutNode) -> String {
     match node {
         LayoutNode::Slot { .. } => "l".to_owned(),
@@ -234,9 +234,9 @@ fn encode_shape(node: &LayoutNode) -> String {
     }
 }
 
-// ── 답 셈 ─────────────────────────────────────────────────────────────────────
+// ── computing answers ─────────────────────────────────────────────────────────────────────
 
-// 답의 줄 모양 — 구조체라 키 차례가 선언 차례로 고정된다(`serde_json` 의 맵 기능과 무관하게 같은 바이트).
+// The row shape of the answer — it is a struct, so the key order is fixed to declaration order (the same bytes regardless of the `serde_json` map feature).
 
 #[derive(Serialize)]
 struct Px {
@@ -325,7 +325,7 @@ fn value(v: &impl Serialize) -> Value {
     serde_json::to_value(v).expect("직렬화")
 }
 
-/// 창 하나를 지금 규칙으로 돌린 것.
+/// One window run with the current rule.
 struct Eval<'a> {
     targets: WindowTargets<'a>,
     bands: Vec<BandHit>,
@@ -406,7 +406,7 @@ impl<'a> Eval<'a> {
             .collect()
     }
 
-    // 그 칸 위에서 그릴 구역 선 — `slot_zones` 가 점마다 내는 값과 같아야 한다(`point` 가 견준다).
+    // The zone lines to draw over that area — must equal the value `slot_zones` produces for each point (`point` compares).
     fn zones_of(&self, slot: Uuid, frame: PxRect) -> Option<SlotZones> {
         self.bands
             .iter()
@@ -465,7 +465,7 @@ fn drag_size_line(input: &DragSizeInput) -> DragSizeLine<'_> {
     }
 }
 
-// ── 단언 (§8-1 ⑩) ────────────────────────────────────────────────────────────
+// ── assertions (§8-1 ⑩) ────────────────────────────────────────────────────────────
 
 fn golden() -> Golden {
     serde_json::from_str(GOLDEN).expect("골든이 읽혀야")
@@ -534,7 +534,7 @@ fn a_shape_string_round_trips_its_layout() {
     assert_eq!(tree::slot_ids(&tree).len(), 3);
 }
 
-// ── 뜨기 ──────────────────────────────────────────────────────────────────────
+// ── capturing ──────────────────────────────────────────────────────────────────────
 
 fn tab_bar() -> Option<RectCss> {
     Some(RectCss {
@@ -814,12 +814,12 @@ fn drag_size_inputs() -> Vec<DragSizeInput> {
     ]
 }
 
-// 점을 4 분의 1 px 격자에 — 이진 소수라 JSON 왕복 · TS 셈이 정확하다.
+// Points on a quarter-px grid — they are binary fractions, so the JSON round trip · TS arithmetic is exact.
 fn quarter(v: f64) -> f64 {
     (v * 4.0).round() / 4.0
 }
 
-/// 점 고르기 — 캔버스를 조금 넘는 성긴 격자 + 띠 영역 · 탭바 구역의 변 안팎 + 칸 구역 선의 대각선 가운데 · 가운데.
+/// Point picking — a coarse grid slightly beyond the canvas + inside and outside the edges of band regions · the tab bar zone + the diagonal middles · centers of the area zone lines.
 fn probe_points(e: &Eval) -> Vec<(f64, f64)> {
     let (w, h) = (f64::from(e.targets.canvas.w), f64::from(e.targets.canvas.h));
     let mut pts: Vec<(f64, f64)> = Vec::new();
@@ -893,7 +893,7 @@ fn line(v: &impl Serialize) -> String {
     serde_json::to_string(v).expect("직렬화")
 }
 
-// `"key": [` 한 줄 · 원소마다 한 줄 · `]` — 비면 `"key": []`.
+// One `"key": [` line · one line per element · `]` — if empty, `"key": []`.
 fn push_list(out: &mut String, indent: &str, key: &str, items: &[String], last: bool) {
     let comma = if last { "" } else { "," };
     if items.is_empty() {

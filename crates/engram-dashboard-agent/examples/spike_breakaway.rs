@@ -1,24 +1,24 @@
-// S12 Spike #1 — Windows Job Object breakaway 실측 (throwaway)
+// S12 Spike #1 — measured Windows Job Object breakaway (throwaway)
 //
-// 데몬화 성패의 단일 장애점(daemon-design.md §4·§6)을 검증한다.
+// Verifies the single point of failure for daemonization success (daemon-design.md §4·§6).
 //
-// 검증 가정:
-//   A. 부모(=현재 셸/IDE) Job 안에서 자식을 CREATE_BREAKAWAY_FROM_JOB|DETACHED_PROCESS로
-//      spawn 하면, 자식이 부모 Job에서 분리(breakaway)되는가?
-//      → IsProcessInJob(child) == false 이면 분리 성공.
-//   B. 부모를 KILL_ON_JOB_CLOSE Job에 넣고 자살시켜도, breakaway 한 자식은 생존하는가?
-//      → 자식이 marker 파일에 "SURVIVED" 를 남기면 생존 입증.
-//   C. breakaway 가 실패(부모 Job 이 JOB_OBJECT_LIMIT_BREAKAWAY_OK 불허)할 때
-//      fallback `cmd /c start /b` 경유 spawn 이 분리에 성공하는가?
+// Assumptions to verify:
+//   A. If a child is spawned from inside the parent (= the current shell/IDE) Job with CREATE_BREAKAWAY_FROM_JOB|DETACHED_PROCESS,
+//      does the child break away from the parent Job?
+//      → if IsProcessInJob(child) == false, the breakaway succeeded.
+//   B. Even if the parent is put in a KILL_ON_JOB_CLOSE Job and kills itself, does the child that broke away survive?
+//      → if the child leaves "SURVIVED" in the marker file, survival is proven.
+//   C. When breakaway fails (the parent Job does not allow JOB_OBJECT_LIMIT_BREAKAWAY_OK),
+//      does a spawn through the fallback `cmd /c start /b` succeed in breaking away?
 //
-// 데몬 모드는 데몬이 PTY child 를 직접 자기 Job(KILL_ON_JOB_CLOSE)에 담으므로
-// "Job 소유권 이전" 은 검증 대상이 아니다(설계 §4: 환상이라 삭제). 이 spike 는 오직
-// "데몬을 부모에서 떼어내 살리는" breakaway 한 점만 본다.
+// In daemon mode the daemon puts the PTY child directly into its own Job (KILL_ON_JOB_CLOSE), so
+// "Job ownership transfer" is not under verification (design §4: deleted as an illusion). This spike looks only at
+// the single point of breakaway, "detaching the daemon from its parent so it survives".
 //
-// 실행(오케스트레이션은 scripts 가 함):
-//   cargo run --example spike_breakaway -- diag        # 테스트 A·C 진단(출력 판독)
-//   cargo run --example spike_breakaway -- selfkill <marker>  # 테스트 B(부모 자살 후 자식 생존)
-//   cargo run --example spike_breakaway -- child <marker>     # 자식 본체(직접 호출 안 함)
+// Run (orchestration is done by scripts):
+//   cargo run --example spike_breakaway -- diag        # tests A·C diagnosis (read the output)
+//   cargo run --example spike_breakaway -- selfkill <marker>  # test B (child survives after the parent kills itself)
+//   cargo run --example spike_breakaway -- child <marker>     # child body (not called directly)
 
 use std::fs::OpenOptions;
 use std::io::Write as _;
@@ -26,7 +26,7 @@ use std::os::windows::process::CommandExt;
 use std::process::Command;
 use std::time::Duration;
 
-// Win32 process creation flags (winbase.h). windows crate 상수 대신 raw 로 고정.
+// Win32 process creation flags (winbase.h). Fixed as raw values instead of windows crate constants.
 const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
 const DETACHED_PROCESS: u32 = 0x0000_0008;
 const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
@@ -51,12 +51,12 @@ mod win {
         Ok(result.as_bool())
     }
 
-    /// 현재 프로세스 의사 핸들(닫을 필요 없음).
+    /// Pseudo-handle of the current process (no need to close it).
     pub fn current_process() -> HANDLE {
         unsafe { GetCurrentProcess() }
     }
 
-    /// 호출자가 CloseHandle 책임 — 여기선 spike 라 프로세스 종료 시 OS 가 정리하므로 명시적 close 생략.
+    /// The caller is responsible for CloseHandle — this is a spike and the OS cleans up at process exit, so the explicit close is omitted.
     pub fn open_for_query(pid: u32) -> windows::core::Result<HANDLE> {
         unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
     }
@@ -80,7 +80,7 @@ mod win {
         unsafe { AssignProcessToJobObject(job, process) }
     }
 
-    /// hjob=None → 호출 프로세스의 현재 Job.
+    /// hjob=None → the calling process's current Job.
     pub fn current_job_limit_flags() -> windows::core::Result<u32> {
         let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
         let mut ret_len: u32 = 0;
@@ -113,8 +113,8 @@ fn main() {
     }
 }
 
-/// 자식 본체. 시작 즉시 ALIVE, 6초 뒤 SURVIVED 를 marker 에 append.
-/// 부모가 그 사이 죽어도 breakaway 했으면 SURVIVED 가 찍힌다.
+/// Child body. Appends ALIVE to the marker right at start and SURVIVED 6 seconds later.
+/// Even if the parent dies in between, SURVIVED is written if it broke away.
 fn run_child(marker: &str) {
     let pid = std::process::id();
     append_line(marker, &format!("ALIVE pid={pid}"));
@@ -128,7 +128,7 @@ fn append_line(path: &str, line: &str) {
     }
 }
 
-/// 테스트 A·C: 진단. 부모 Job 상태 + breakaway spawn 으로 자식이 분리되는지 + fallback.
+/// Tests A·C: diagnosis. Parent Job state + whether the child breaks away via breakaway spawn + fallback.
 fn run_diag() {
     println!("=== spike_breakaway: DIAG ===");
 
@@ -139,13 +139,13 @@ fn run_diag() {
 
     #[cfg(windows)]
     {
-        // 0. 부모(=이 프로세스) 가 이미 Job 안에 있나? (IDE/터미널이 넣었을 수 있음)
+        // 0. Is the parent (= this process) already inside a Job? (the IDE/terminal may have put it there)
         let parent_in_job = win::is_in_any_job(win::current_process())
             .map(|b| b.to_string())
             .unwrap_or_else(|e| format!("ERR {e:?}"));
         println!("[A] parent_in_job = {parent_in_job}");
 
-        // 0-b. 부모 Job 의 LimitFlags — KILL_ON_JOB_CLOSE / BREAKAWAY_OK 여부가 판정의 핵심.
+        // 0-b. The parent Job's LimitFlags — whether KILL_ON_JOB_CLOSE / BREAKAWAY_OK are set is the key to the decision.
         const KILL_ON_JOB_CLOSE: u32 = 0x2000;
         const BREAKAWAY_OK: u32 = 0x0800;
         const SILENT_BREAKAWAY_OK: u32 = 0x1000;
@@ -219,7 +219,7 @@ fn run_diag() {
             .spawn();
         match spawn_c {
             Ok(_) => {
-                // start 는 즉시 반환하고 손자가 뜬다.
+                // start returns immediately and the grandchild comes up.
                 std::thread::sleep(Duration::from_millis(800));
                 let alive = std::fs::read_to_string(&marker_c).unwrap_or_default();
                 println!(
@@ -236,7 +236,7 @@ fn run_diag() {
     }
 }
 
-/// 주어진 pid 가 (어떤) Job 에 속해 있는지 출력. WMI 로 띄운 프로세스의 분리 여부 확인용.
+/// Print whether the given pid belongs to (any) Job. For checking whether a process launched via WMI broke away.
 fn run_checkjob(pid_str: &str) {
     #[cfg(not(windows))]
     {
@@ -253,10 +253,10 @@ fn run_checkjob(pid_str: &str) {
     }
 }
 
-/// 테스트 D: WMI 우회. 부모가 KILL_ON_JOB_CLOSE Job 에 자기를 넣고, 자식을 WMI
-/// (Win32_Process.Create) 로 띄운다. WmiPrvSE 가 부모가 되어 호출자 Job 을 상속하지 않으므로,
-/// 부모가 자살(TerminateJobObject)해도 WMI 자식은 살아 SURVIVED 를 남겨야 한다.
-/// breakaway·start/b 가 막힌 worst-case Job 의 마지막 우회책.
+/// Test D: WMI bypass. The parent puts itself in a KILL_ON_JOB_CLOSE Job and launches the child via WMI
+/// (Win32_Process.Create). WmiPrvSE becomes the parent and does not inherit the caller's Job, so
+/// even if the parent kills itself (TerminateJobObject), the WMI child should survive and leave SURVIVED.
+/// The last workaround for the worst-case Job where breakaway · start/b are blocked.
 fn run_wmikill(marker: &str) {
     let _ = std::fs::remove_file(marker);
 
@@ -297,7 +297,7 @@ fn run_wmikill(marker: &str) {
             Err(e) => println!("[D] WMI 호출 실패: {e}"),
         }
 
-        std::thread::sleep(Duration::from_millis(1200)); // 자식 ALIVE 기록 시간
+        std::thread::sleep(Duration::from_millis(1200)); // Time the child's ALIVE was recorded
         println!("[D] 부모 자살(TerminateJobObject) — 외부에서 marker SURVIVED 확인");
         let _ = win::terminate(job, 1);
         std::thread::sleep(Duration::from_secs(2));
@@ -305,8 +305,8 @@ fn run_wmikill(marker: &str) {
     }
 }
 
-/// 테스트 B: 부모가 KILL_ON_JOB_CLOSE Job 에 자기를 넣고 자식을 breakaway spawn 한 뒤
-/// TerminateJobObject 로 자살. breakaway 한 자식만 살아 SURVIVED 를 남겨야 한다.
+/// Test B: the parent puts itself in a KILL_ON_JOB_CLOSE Job, spawns the child with breakaway, then kills itself with
+/// TerminateJobObject. Only the child that broke away should survive and leave SURVIVED.
 fn run_selfkill(marker: &str) {
     let _ = std::fs::remove_file(marker);
 
@@ -320,7 +320,7 @@ fn run_selfkill(marker: &str) {
     {
         println!("=== spike_breakaway: SELFKILL (marker={marker}) ===");
         let job = win::create_kill_on_close_job().expect("create job");
-        // 부모(자신)를 KILL_ON_JOB_CLOSE Job 에 편입 — Tauri 가 자기 PTY job 안에 있는 상황 모사.
+        // Put the parent (itself) into a KILL_ON_JOB_CLOSE Job — simulates the situation where Tauri is inside its own PTY job.
         match win::assign(job, win::current_process()) {
             Ok(()) => println!("[B] 부모를 KILL_ON_JOB_CLOSE Job 에 assign 함"),
             Err(e) => println!("[B] WARN 부모 assign 실패(이미 breakaway 불가 nested?): {e:?}"),
@@ -345,11 +345,11 @@ fn run_selfkill(marker: &str) {
             }
         }
 
-        // 자식이 ALIVE 찍을 시간.
+        // Time for the child to write ALIVE.
         std::thread::sleep(Duration::from_millis(800));
         println!("[B] 이제 부모 자살(TerminateJobObject) — 외부에서 marker 확인할 것");
-        let _ = win::terminate(job, 1); // job 안의 모든 프로세스(=부모) 종료. breakaway 자식은 제외.
-                                        // 도달 못 할 수 있음(자기 자신 종료).
+        let _ = win::terminate(job, 1); // Terminate every process in the job (= the parent). The breakaway child is excluded.
+                                        // May not be reached (it terminates itself).
         std::thread::sleep(Duration::from_secs(2));
         println!("[B] (여기 출력되면 자살 실패 — 부모가 job 에 안 들어갔을 수 있음)");
     }

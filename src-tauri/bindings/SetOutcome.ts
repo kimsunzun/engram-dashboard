@@ -2,15 +2,15 @@
 
 export type SetOutcome = { 
 /**
- * `changed: false` 면 호출 전과 같은 값.
+ * If `changed: false`, the same value as before the call.
  */
 rev: number, key: string, 
 /**
- * 정규형.
+ * Canonical form.
  */
 value: string, 
 /**
- * `false` = 유효 값이 이미 그 값이었다 — 알림도 `rev` 도 없다. 파일은 바로잡았을 수 있다
+ * `false` = the effective value was already that value — no notification and no `rev`. The file may have been corrected
  * ([`SettingsService::set`]).
  */
 changed: boolean, };

@@ -1,19 +1,19 @@
-// ★main·팝업 통일 경로(D-2 "동일 코드경로")★: main 창(AppLayout 이 크롬으로 감쌈)과 팝업 창(PopoutPage
-// 이 얇게 감쌈)이 둘 다 이걸 마운트한다(각자 자기 label). 옛 "AppLayout=전역 active 렌더 vs
-// PopoutPage=고정 뷰 렌더" 갈라짐(D-2 위반)을 제거한다.
+// ★One path for main · popup (D-2 "same code path")★: the main window (wrapped by AppLayout as chrome) and the popup window (thinly wrapped
+// by PopoutPage) both mount this (each with its own label). The old split "AppLayout = global active render vs
+// PopoutPage = fixed view render" (a D-2 violation) is removed.
 //
-// ★keep-alive(ADR-0056)★: windows[label].tabs 를 *전부* 마운트하고 활성 탭만 표시한다(숨은 탭
-// display:none — xterm 인스턴스·버퍼 유지, 전환 즉시·무손실). WebglAddon 좌석은 보이는 슬롯만
-// (숨은 탭은 화면에서 빠져 CSS 로 안 보이지만 인스턴스는 살아 출력 계속 누적 — 백엔드가 모든 탭 라우팅).
+// ★keep-alive (ADR-0056)★: mount *all* of windows[label].tabs and show only the active tab (hidden tabs
+// display:none — xterm instance · buffer kept, switch instant · lossless). The WebglAddon seat only for visible slots
+// (hidden tabs leave the screen and are invisible by CSS, but the instance stays alive and keeps accumulating output — the backend routes to every tab).
 //
-// ★탭 끌기(TRD S21-slot-docking §4-3 · §4-4)★: 이 창 뿌리에서 우리 탭 끌기를 받아(`dock/useWindowDrop` — 판정 · 안내 · 놓기
-// 명령) 그 안내를 캔버스 위 층(`DockOverlayView`)에 그린다. 탭바의 끌기 모습은 `TabBar` 몫이고, 이 창에서 끄는 동안 보일
-// 캔버스(R15 남은 탭)는 출처 쪽 `useShownTab` 이 정한다 — keep-alive 의 `display` 가 그것을 따른다. 파일 · URL 놓기는
-// `dock/fileDropGuard.ts` 가 막는다.
+// ★Tab drag (TRD S21-slot-docking §4-3 · §4-4)★: this window's root receives our tab drag (`dock/useWindowDrop` — decision · guide · drop
+// command) and draws that guide on the layer over the canvas (`DockOverlayView`). The tab bar's drag appearance belongs to `TabBar`, and the canvas shown
+// while dragging in this window (R15 remaining tab) is decided by the source side `useShownTab` — keep-alive `display` follows it. File · URL drops are
+// blocked by `dock/fileDropGuard.ts`.
 //
-// ★대기 모드(예열 창 — ADR-0299 · TRD S21-slot-docking §3-9)★: 예비 창 풀의 창(숨은 예비 창)은 탭 모델 밖이다. 그 창은
-// 제목 줄(빈 탭바 — 번호 표식 · 창 단추 없음) + 빈 캔버스(빈 틀)만 그리고, 탭을 끌어오지 않고, 0탭 자가닫힘을 끈다. 재기
-// 보고(캔버스 · 지표)는 그대로 보낸다. 모드는 `spareMode.ts` 가 정한다.
+// ★Waiting mode (prewarmed window — ADR-0299 · TRD S21-slot-docking §3-9)★: a window of the spare window pool (hidden spare window) is outside the tab model. That window
+// draws only the title row (empty tab bar — no number badge · window buttons) + an empty canvas (empty frame), does not pull in tabs, and turns off 0-tab self-close. Measuring
+// reports (canvas · metrics) are still sent. The mode is decided by `spareMode.ts`.
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { listen } from '@tauri-apps/api/event'
@@ -49,19 +49,19 @@ import { reportFirstPaint } from '../../theme/firstPaint'
 import { t } from '../../i18n'
 
 interface WindowLayoutProps {
-  /** 이 창의 label(main·slot-popup-N). */
+  /** This window's label (main·slot-popup-N). */
   label: string
   /**
-   * 알림 층(`NoticeOverlay`) — 제목 줄 바로 아래 칸의 맨 위를 덮는다. ★제목 줄은 가리지 않는다★ — 창 단추 · 끌 자리가
-   * 알림에 덮이면 창을 옮기지도 닫지도 못한다(사용자 결정 2026-10-26 · T-66 · TRD S26-window-chrome §12-2). 로딩 · 부팅
-   * 실패 화면도 같은 자리다 — ★어느 화면이든 트리의 같은 자리에 둔다★: 자리가 바뀌면 React 가 층을 다시 마운트해 ✕ 로
-   * 닫은 기억(`ConnectionNotice` · `StateFileNotice` — ADR-0277 이 걷지 말라고 한 것)이 사라진다.
+   * Notice layer (`NoticeOverlay`) — covers the top of the area just under the title row. ★It does not cover the title row★ — if the window buttons · draggable area are
+   * covered by a notice, the window can be neither moved nor closed (user decision 2026-10-26 · T-66 · TRD S26-window-chrome §12-2). The loading · boot
+   * failure screens use the same place — ★whichever screen, put it at the same place in the tree★: if the place changes, React remounts the layer and the memory of closing with ✕
+   * (`ConnectionNotice` · `StateFileNotice` — what ADR-0277 said not to withdraw) is lost.
    */
-  // ADR-0306 — 알림 띠 자리
+  // ADR-0306 — notice band position
   notices?: ReactNode
 }
 
-// 대기 모드의 탭 목록 — 참조가 고정돼야 탭 목록에 걸린 effect(창 틀 보고 · keep-alive pull)가 렌더마다 다시 돌지 않는다.
+// Tab list of waiting mode — the reference must be fixed so that effects hanging on the tab list (window frame report · keep-alive pull) do not rerun on every render.
 const NO_TABS: ViewMeta[] = []
 
 export default function WindowLayout({ label, notices }: WindowLayoutProps) {
@@ -89,23 +89,23 @@ export default function WindowLayout({ label, notices }: WindowLayoutProps) {
   const guide = useWindowDrop({ label, canvas: canvasOf })
   const titleRowRef = useRef<HTMLDivElement>(null)
 
-  // ADR-0102: 부팅 pull 최종 실패 표면화 — 재시도 소진 후에도 이 창 상태(win)가 안 채워지면 로딩
-  //   플레이스홀더에 영구 고착되므로(main 은 이벤트 복구 경로 없음), 조용한 console.warn 대신 이 플래그로
-  //   가시적 에러 상태를 렌더한다. 그 사이 emit 으로 win 이 채워지면(경합) 아래 렌더가 정상 경로를 택한다.
+  // ADR-0102: surfacing the final boot pull failure — if this window's state (win) is still not filled after retries are exhausted, it would be stuck forever on the loading
+  //   placeholder (main has no event recovery path), so instead of a quiet console.warn this flag renders
+  //   a visible error state. If win is filled by an emit in the meantime (race), the render below takes the normal path.
   const [bootFailed, setBootFailed] = useState(false)
 
-  // `null` = 아직 모름(`window_role` 답 전) — 탭 끌어오기 · 자가닫힘은 `normal` 일 때만 돈다.
+  // `null` = not known yet (before the `window_role` answer) — tab pull-in · self-close run only when `normal`.
   const [mode, setMode] = useState<WindowMode | null>(null)
   const [wasSpare, setWasSpare] = useState(false)
-  // 이 페이지가 받은 채택 번호(`spare:adopted` · `window_role` 답 — TRD S21-slot-docking §3-9 I26). `0` 도 번호다.
+  // The adoption number this page received (`spare:adopted` · `window_role` answer — TRD S21-slot-docking §3-9 I26). `0` is also a number.
   const [adoption, setAdoption] = useState<number | null>(null)
   const adoptionRef = useRef<number | null>(null)
-  // 빈 틀을 거두는 때는 셸이 들인 창의 탭을 대기를 풀기 전에 알리는 순서에 기댄다 — 예열 창 채택(ADR-0299 · TRD
-  //   S21-slot-docking §3-9 「`committed`」)이 그 순서로 알린다는 가정이다.
-  // 새 채택 번호는 부팅 실패를 같은 렌더에서 내린다 — `window_role` 이 실패해 보통 모드로 모델이 모르는 자기 label 을
-  //   당긴 예열 페이지는 이미 `bootFailed` 이고, 모드가 그대로 `normal` 이라 번호가 바뀌어야 당기기가 다시 돈다(아래
-  //   deps). 따로 렌더하면 그 사이 실패 문구 화면을 새 번호로 알려 셸이 그 화면을 보인다. 같은 번호가 거듭 오면(답과
-  //   사건이 둘 다 실음) 내리지 않는다 — 당기기가 다시 돌지 않아 로딩 바탕에 남는다.
+  // The moment the empty frame is withdrawn relies on the order in which the shell announces the adopted window's tabs before lifting the wait — the assumption is that prewarmed window adoption (ADR-0299 · TRD
+  //   S21-slot-docking §3-9 「`committed`」) announces in that order.
+  // A new adoption number lowers the boot failure in the same render — a prewarmed page whose `window_role` failed and which pulled its own label, unknown to the model, in normal mode
+  //   is already `bootFailed`, and since the mode stays `normal` the number must change for the pull to run again (deps
+  //   below). Rendering separately would announce the failure text screen with the new number in between, and the shell would show that screen. If the same number arrives repeatedly (the answer and
+  //   the event both carry it), it is not lowered — the pull does not rerun and it stays on the loading background.
   // ADR-0299
   useEffect(
     () =>
@@ -122,17 +122,17 @@ export default function WindowLayout({ label, notices }: WindowLayoutProps) {
   )
   const spare = mode === 'spare'
   const normal = mode === 'normal'
-  // 들인 예열 창(`spare:adopted`)은 제 탭을 받기 전까지 빈 틀 그대로다 — 「로딩」 화면(바탕만)으로 바꾸면 탭바가
-  //   사라졌다 다시 마운트된다. 예열 창은 새 label 로 대기에 든 채 떠 마운트 때 스토어에 그 창 항목이 없다 — 그래서
-  //   `win` 이 있다 = 채택 때 받은 탭이다.
+  // An adopted prewarmed window (`spare:adopted`) stays an empty frame until it receives its tabs — switching to the 「로딩」 screen (background only) makes the tab bar
+  //   disappear and mount again. A prewarmed window comes up waiting under a new label, so at mount the store has no entry for that window — therefore
+  //   `win` present = the tabs received at adoption.
   const framed = spare || (wasSpare && win === undefined && !bootFailed)
 
   useEffect(() => installFileDropGuard(), [])
 
-  // ── 보통 모드: 자기 창 탭 상태 초기 pull + window:tabs-updated listen(자기 label 만) ────────────────
-  // ★구독 먼저, pull 나중★(F-listen 동형): listen 등록 완료 전 도착한 emit 을 놓치지 않게 구독을 먼저
-  // 걸고 그 뒤 pull 한다. 더 최신 emit 이 pull 을 덮으면 applyWindowTabsUpdated 의 version 가드가 역전을 막는다.
-  // 대기 모드에서 들여지면(`spare:adopted`) 여기로 다시 들어와 들인 탭을 당긴다 — 이미 보통 모드면 새 채택 번호가 다시 돌린다.
+  // ── Normal mode: initial pull of own window's tab state + window:tabs-updated listen (own label only) ────────────────
+  // ★Subscribe first, pull later★ (same shape as F-listen): subscribe first so an emit arriving before listen registration completes
+  // is not missed, then pull. If a newer emit overwrites the pull, the version guard of applyWindowTabsUpdated prevents the reversal.
+  // When taken in from waiting mode (`spare:adopted`) it comes back in here and pulls the adopted tabs — if already in normal mode, a new adoption number reruns it.
   // ADR-0295
   // ADR-0299
   useEffect(() => {
@@ -140,10 +140,10 @@ export default function WindowLayout({ label, notices }: WindowLayoutProps) {
     let disposed = false
     let unlisten: (() => void) | null = null
 
-    // ADR-0102(FIX-2): ★부팅 경로 전체★를 하나의 try 로 감싼다 — 옛 구조는 listen() await 가 이 try
-    //   밖이라, 부팅 중 리스너 등록이 reject 하면 async IIFE 가 unhandled 로 죽고 list_tabs pull 자체가
-    //   시작조차 안 돼 bootFailed 가 영영 안 걸린다(로딩 플레이스홀더 영구 고착 — 무신호). listen() 실패도
-    //   pull 실패와 동일하게 bootFailed 로 표면화해 "조용한 영구 고착" 불변식(ADR-0102)을 지킨다.
+    // ADR-0102 (FIX-2): wrap ★the whole boot path★ in one try — in the old structure the listen() await was outside this try,
+    //   so if listener registration rejected during boot, the async IIFE died as unhandled and the list_tabs pull itself
+    //   never even started, so bootFailed was never set (loading placeholder stuck forever — no signal). A listen() failure is also
+    //   surfaced as bootFailed like a pull failure, keeping the "no silent permanent stuck" invariant (ADR-0102).
     void (async () => {
       try {
         const off = await listen<WindowTabsPayload>('window:tabs-updated', e => {
@@ -151,12 +151,12 @@ export default function WindowLayout({ label, notices }: WindowLayoutProps) {
           applyWindowTabsUpdated(e.payload)
         })
         if (disposed) {
-          off() // 등록 완료 전 unmount 됐으면 즉시 해제(누수 가드)
+          off() // If unmounted before registration completes, release immediately (leak guard)
           return
         }
         unlisten = off
-        // ADR-0102: 초기 pull 을 유계 재시도로 감싼다 — main 은 이벤트 복구 경로가 없어(window:tabs-updated 는
-        //   탭 변형 시에만 발화) 이 pull 이 one-shot 이면 조기 실패 = 영구 고착이다.
+        // ADR-0102: wrap the initial pull in bounded retry — main has no event recovery path (window:tabs-updated fires only on
+        //   tab mutation), so if this pull is one-shot, an early failure = stuck forever.
         const payload = await retryAsync(
           () => invoke<WindowTabsPayload>('list_tabs', { window: label }),
           {
@@ -182,22 +182,22 @@ export default function WindowLayout({ label, notices }: WindowLayoutProps) {
     }
   }, [label, normal, adoption, applyWindowTabsUpdated])
 
-  // 대기 중에 이 창 항목이 다시 차도(셸은 들일 탭을 알린 뒤 대기를 푼다 — 전역 미러가 받는다) 대기가 풀리기 전에는 그리지 않는다.
+  // Even if this window's entry fills again during waiting (the shell lifts the wait after announcing the tabs to take in — the global mirror receives them), do not draw before the wait is lifted.
   const tabs = framed ? NO_TABS : win?.tabs
   const active = framed ? null : (win?.active ?? null)
   const tabIds = useMemo(() => tabs?.map(tab => tab.id) ?? null, [tabs])
-  // 보이는 캔버스 — 이 창에서 끄는 동안 탭바 구역 밖이면 남은 탭(R15 · 모델은 그대로 — TRD S21-slot-docking §4-2).
+  // Visible canvas — while dragging in this window, if outside the tab bar zone, the remaining tab (R15 · the model is unchanged — TRD S21-slot-docking §4-2).
   const shown = useShownTab(label, tabIds, active)
 
-  // 셸은 이 창을 숨긴 채 만들고 첫 화면 알림에 창을 보인다(`theme/firstPaint.ts`) — 그 알림을 첫 화면(제목 줄 + 활성 탭의
-  //   레이아웃 · 부팅 실패 문구)이 커밋된 뒤에 보낸다. 그 전 화면(바탕만 · 활성 탭의 「View 로딩」)이 보이는 것은 알림이
-  //   오지 않아 셸 시한이 보일 때뿐이다.
-  // 빈 틀은 첫 화면이 아니다 — 대기 창은 숨은 채 맡겨질 때를 기다리고, 채택한 창은 제 탭을 그린 뒤 채택 번호로 알린다
-  //   (TRD S21-slot-docking §3-9 I26). 번호가 deps 에 드는 것은 채택 전후로 `firstScreen` 이 참으로 이어져도(부팅 실패를
-  //   내림과 탭 반영이 한 렌더) 다시 알리게 하려는 것이다 — 빠지면 채택한 창이 늘 셸 시한에만 보인다.
-  // 알림은 제목 줄의 최소 창 크기 보고(`titleRow/minSizeReport.ts`)가 끝난 뒤다 — 셸이 보이기 전에 그 창을 넓히게(TRD
-  //   S26-window-chrome §7-7). 기다림에는 상한이 있다. 기다리는 사이 deps 가 바뀌면 그 알림은 버린다 — 옛 채택 번호가 새
-  //   번호 뒤에 나가면 한 번 더 보낸다.
+  // The shell builds this window hidden and shows it on the first-screen notice (`theme/firstPaint.ts`) — send that notice after the first screen (title row + the active tab's
+  //   layout · boot failure text) is committed. The earlier screens (background only · the active tab's 「View 로딩」) are visible only when the notice
+  //   does not arrive and the shell deadline shows the window.
+  // The empty frame is not a first screen — a waiting window stays hidden until it is handed over, and an adopted window notifies with the adoption number after drawing its tabs
+  //   (TRD S21-slot-docking §3-9 I26). The number is in deps so that it notifies again even if `firstScreen` stays true across adoption (lowering the boot failure
+  //   and applying the tabs happen in one render) — without it, an adopted window would always be shown only by the shell deadline.
+  // The notice comes after the title row's minimum window size report (`titleRow/minSizeReport.ts`) finishes — so the window is widened before the shell shows it (TRD
+  //   S26-window-chrome §7-7). The wait has an upper bound. If deps change while waiting, that notice is discarded — if an old adoption number goes out after the new
+  //   number, it is sent once more.
   // ADR-0299
   const activeLaidOut = useViewStore(s => active === null || selectView(s, active) !== null)
   const firstScreen = bootFailed || (!framed && tabs !== undefined && activeLaidOut)
@@ -212,23 +212,23 @@ export default function WindowLayout({ label, notices }: WindowLayoutProps) {
     }
   }, [firstScreen, adoption])
 
-  // ── keep-alive: 이 창의 모든 탭 layout 을 캐시에 채운다(숨은 탭도 렌더 유지, ADR-0056) ───────────
-  // layout:updated 는 eventBus 전역 구독이 이미 캐시에 반영하므로(뷰별 version 가드), 여기선 "아직 한 번도
-  // 안 받은 탭"만 초기 pull 한다.
+  // ── keep-alive: fill the cache with the layouts of all this window's tabs (hidden tabs stay rendered, ADR-0056) ───────────
+  // layout:updated is already reflected in the cache by the eventBus global subscription (per-view version guard), so here only "tabs
+  // never received yet" get an initial pull.
   const tabIdsKey = tabs ? tabs.map(t => t.id).join(',') : ''
-  // ★S4-F2: deps 는 탭 집합(tabIdsKey)만★ — deps 에 win(객체 통째)을 넣으면 active 만 바뀌는 switch 마다
-  //   win 참조가 갈려 effect 가 재실행돼 in-flight get_view 를 취소·재발행한다(탭 전환마다 pull 낭비).
-  //   탭 목록이 실제로 바뀔 때(추가/닫기)만 재실행하도록 tabIdsKey 하나로 좁힌다. 탭 id 배열은 tabIdsKey
-  //   에서 되짚어(store 직접 조회로 win 참조 회피) 순회한다.
+  // ★S4-F2: deps is only the tab set (tabIdsKey)★ — if win (the whole object) is put in deps, the win reference changes on every switch that changes only active,
+  //   so the effect reruns and cancels · reissues the in-flight get_view (wasted pulls on every tab switch).
+  //   Narrow it to the single tabIdsKey so it reruns only when the tab list actually changes (add/close). The tab id array is recovered
+  //   from tabIdsKey (avoiding the win reference by a direct store lookup) and iterated.
   useEffect(() => {
     if (tabIdsKey === '') return
     let cancelled = false
     for (const tabId of tabIdsKey.split(',')) {
       if (useViewStore.getState().layouts[tabId]) continue
-      // ADR-0102(FIX-3): 이 pull 도 유계 재시도로 감싼다 — 옛 one-shot 은 transient 실패 시 console.warn
-      //   뿐이고, tabIdsKey 가 그대로라 재실행 트리거가 없어 그 탭 캔버스가 무관한 layout:updated 가 올
-      //   때까지 "View 로딩 중"에 갇힌다. 재시도로 순간적 미준비를 스스로 회복한다. ★창 전체 bootFailed
-      //   와는 분리★: 단일 (대개 숨은) 탭의 최종 실패는 앱 전체 고착이 아니므로 console.error 로만 남긴다.
+      // ADR-0102 (FIX-3): this pull is also wrapped in bounded retry — the old one-shot only did console.warn on a transient failure,
+      //   and tabIdsKey stays the same so there is no rerun trigger, and that tab's canvas stays stuck on "View 로딩 중" until an unrelated layout:updated
+      //   arrives. Retry recovers from momentary unreadiness by itself. ★Separate from the window-wide bootFailed★: the final failure
+      //   of a single (usually hidden) tab is not an app-wide stuck state, so it is only left as console.error.
       void retryAsync(() => invoke<ViewSnapshot>('get_view', { viewId: tabId }), {
         isCancelled: () => cancelled,
         onRetry: (err, attempt) =>
@@ -247,20 +247,20 @@ export default function WindowLayout({ label, notices }: WindowLayoutProps) {
     }
   }, [tabIdsKey, applyLayoutUpdated])
 
-  // ── 0탭 자가닫힘 = ★방어적 idempotent fallback★(S4-F3, §5-2/G2) ─────────────────────────────────
-  // ★이 경로는 정상 흐름에선 dead 다★: 팝업 마지막 탭을 닫으면 셸 close_tab 이 WindowClosed 로 분류해
-  //   OS 창을 *직접 파괴*한다(`layout/apply.rs` `close_tab` — WindowClosed 분기는 emit 을 (None,None) 으로 두어
-  //   window:tabs-updated{tabs:[]} 를 프론트에 안 쏜다). 즉 정상 닫힘의 주 경로는 셸 destroy 이고, 프론트는
-  //   tabs:[] 신호를 받지 못한다.
-  // 그래도 이 분기를 남기는 이유(제거 X): 어떤 비정상 경로로든 tabs 가 0인 window:tabs-updated 가 프론트에
-  //   닿으면(방어), 자기 창을 한 번만 닫아 달라고 셸에 청해 stranded 창을 정리한다(main 은 백엔드가 빈 탭을 강제
-  //   유지하므로 0이 안 됨). ★재진입 가드(closingRef)★: 청한 뒤 탭이 다시 올 때까지는 no-op.
-  // ★닫기는 셸이 판정한다 — 웹이 창 API 로 닫지 않는다★(TRD S26-window-chrome §5-5 · AC10 · 팝아웃 권한에 창 닫기가 없다):
-  //   `window.close { if_empty }` 는 그 창이 모델에 다시 있으면(그사이 탭이 들어왔다) 닫지 않는다. 그 판정이 영속 id 로
-  //   찾으므로 탭이 있던 때 받아 둔 id 만 넘긴다(§5-5) — 탭 0 개 창은 이미 모델에서 빠져 있다. 받아 둔 id 가 없으면(이
-  //   화면이 그 창의 탭을 본 적이 없다) 청하지 않는다.
-  // ★보통 모드에서만★ — 대기 창은 탭 0 개가 정상이다(TRD S21-slot-docking §3-9). 모드를 모르는 동안 온 0탭은 모드가
-  //   정해진 뒤 다시 본다.
+  // ── 0-tab self-close = ★defensive idempotent fallback★ (S4-F3, §5-2/G2) ─────────────────────────────────
+  // ★This path is dead in the normal flow★: when the last tab of a popup is closed, the shell close_tab classifies it as WindowClosed and
+  //   *directly destroys* the OS window (`layout/apply.rs` `close_tab` — the WindowClosed branch sets the emit to (None,None) so
+  //   window:tabs-updated{tabs:[]} is not sent to the frontend). That is, the main path of a normal close is the shell destroy, and the frontend
+  //   never receives the tabs:[] signal.
+  // Why this branch is kept anyway (do not remove): if a window:tabs-updated with 0 tabs reaches the frontend by some abnormal path (defense),
+  //   it asks the shell to close its own window once and cleans up the stranded window (main never reaches 0 because the backend forces an empty tab to be
+  //   kept). ★Re-entry guard (closingRef)★: after asking, no-op until tabs come back.
+  // ★Close is decided by the shell — the web does not close through the window API★ (TRD S26-window-chrome §5-5 · AC10 · the popout permissions have no window close):
+  //   `window.close { if_empty }` does not close if that window is back in the model (a tab came in meanwhile). That decision
+  //   looks up by the persistent id, so only the id received while tabs existed is passed (§5-5) — a 0-tab window is already out of the model. If there is no id
+  //   received (this screen has never seen that window's tabs), it does not ask.
+  // ★Only in normal mode★ — 0 tabs is normal for a waiting window (TRD S21-slot-docking §3-9). A 0-tab that arrives while the mode is unknown is looked at again after the mode is
+  //   decided.
   // ADR-0295
   useEffect(() => {
     if (!normal || !win) return
@@ -279,11 +279,11 @@ export default function WindowLayout({ label, notices }: WindowLayoutProps) {
     fireAndForget('window.close', { window: windowId, if_empty: true })
   }, [win, normal, label])
 
-  // ★틀은 화면마다 같다 — 제목 줄 → 칸(맨 앞 = 알림 층) → 화면 내용★. OS 틀을 걷었으니 로딩 · 부팅 실패 화면에도 제목 줄(창
-  //   단추 · 끌 자리)이 있어야 창을 옮기고 닫는다. 알림 층이 화면마다 같은 자리여야 ✕ 로 닫은 기억이 남는다(`notices` doc).
-  // 탭을 받기 전 화면: 부팅 직후 pull 전, 또는 유효 label 못 찾음(dev 리로드 stale 팝업, §3-3/G3) · 부팅 실패(ADR-0102).
-  //   로딩은 바탕만 그린다 — 문구 · 표시를 그리면 셸이 시한으로 창을 보였을 때 탭 화면 앞에 한 번 깜빡인다(사용자 요구
-  //   2026-10-19: 창의 첫 화면은 테마 바탕 다음 곧바로 실제 내용). 이 화면의 칸은 캔버스가 아니다 — 크기를 보고하지 않는다.
+  // ★The frame is the same on every screen — title row → area (first = notice layer) → screen content★. With the OS frame removed, the loading · boot failure screens also need a title row (window
+  //   buttons · draggable area) so the window can be moved and closed. The notice layer must be at the same place on every screen so the memory of closing with ✕ remains (`notices` doc).
+  // Screens before receiving tabs: right after boot before the pull, or no valid label found (dev reload stale popup, §3-3/G3) · boot failure (ADR-0102).
+  //   Loading draws only the background — drawing text · an indicator would flash once in front of the tab screen when the shell shows the window by the deadline (user requirement
+  //   2026-10-19: a window's first screen is the theme background followed directly by the real content). The area of this screen is not a canvas — it does not report size.
   let content: ReactNode
   if (!tabs) {
     content = bootFailed ? (
@@ -302,7 +302,7 @@ export default function WindowLayout({ label, notices }: WindowLayoutProps) {
             key={tab.id}
             data-testid="tab-canvas"
             data-view-id={tab.id}
-            // ★keep-alive★: 절대배치로 겹쳐 두어 전환이 리마운트가 아니라 표시 토글이 되게 한다(ADR-0056).
+            // ★keep-alive★: overlay them with absolute positioning so a switch is a display toggle, not a remount (ADR-0056).
             style={{
               position: 'absolute',
               inset: 0,
@@ -312,8 +312,8 @@ export default function WindowLayout({ label, notices }: WindowLayoutProps) {
             <TabCanvas viewId={tab.id} />
           </div>
         ))}
-        {/* 끌기 안내 — 늘 마운트하고 `null` 로 치운다(내리면 사라짐 페이드가 없다). 이 층이 캔버스와 같은 상자라 안내 좌표 =
-            캔버스 CSS px(판정과 같은 원점). */}
+        {/* Drag guide — always mounted and cleared with `null` (taking it down would lose the disappear fade). This layer is the same box as the canvas, so guide coordinates =
+            canvas CSS px (same origin as the decision). */}
         <div data-testid="dock-overlay-layer" style={OVERLAY_LAYER}>
           <DockOverlayView guide={guide} />
         </div>
@@ -337,37 +337,37 @@ export default function WindowLayout({ label, notices }: WindowLayoutProps) {
               void renameTab(viewId, name).catch(e => console.error('[renameTab]', e))
             }
             canvas={canvasOf}
-            // 모드를 모르는 동안도 당기지 않는다 — 대기 창이면 셸이 그 창을 몰라 실패한다.
+            // Do not pull while the mode is unknown either — for a waiting window the shell does not know that window and the call fails.
             pullFrame={normal}
           />
         ) : (
           <TabBarStandIn pullFrame={normal} />
         )}
       </TitleRow>
-      {/* 캔버스 크기 보고(callback ref)는 탭을 그리는 동안만 붙는다 — 탭 내용 영역의 크기다(ADR-0227). */}
+      {/* The canvas size report (callback ref) attaches only while tabs are drawn — it is the size of the tab content area (ADR-0227). */}
       <div ref={tabs ? canvasRef : undefined} style={{ flex: 1, position: 'relative', minHeight: 0 }}>
-        {/* 알림 층은 이 칸(positioned)의 맨 위 = 제목 줄 바로 아래에 붙는다 — 흐름 밖이라 캔버스 크기 보고를 바꾸지 않는다(ADR-0306). */}
+        {/* The notice layer attaches to the top of this area (positioned) = directly under the title row — it is out of flow, so it does not change the canvas size report (ADR-0306). */}
         {notices}
         {content}
       </div>
-      {/* ADR-0067: 에이전트 모니터링 검색 팝업 — 창당 하나 마운트. slot 우클릭 "에이전트 모니터링"
-          (slot.assignRunningAgent)이 monitoringPickerStore 로 열고, on-select 는 assign_agent 로 흘린다(§5).
-          닫힘 상태(target=null)면 아무것도 렌더하지 않는다.
-          key={openId}: open() 마다 key 가 바뀌어 fresh remount → query/activeIndex 가 useState 초기값으로
-          재설정된다(stale 플래시 없음, monitoringPickerStore.openId ADR-0067). */}
+      {/* ADR-0067: agent monitoring search popup — one mounted per window. The slot right-click "에이전트 모니터링"
+          (slot.assignRunningAgent) opens it through monitoringPickerStore, and on-select flows to assign_agent (§5).
+          When closed (target=null) nothing is rendered.
+          key={openId}: the key changes on every open() for a fresh remount → query/activeIndex are
+          reset to the useState initial values (no stale flash, monitoringPickerStore.openId ADR-0067). */}
       {tabs && <AgentMonitoringPicker key={openId} />}
     </div>
   )
 }
 
-// 탭을 받기 전 화면의 탭바 자리 — 탭바처럼 남는 폭을 차지해 창 단추를 오른쪽 끝에 두고, 그 자리를 끌 자리로 둔다. 창
-//   사실(최대화 · 앞 창)도 탭바처럼 받는다 — 그래야 이 화면의 줄 높이 · 최대화 단추가 창 상태를 따른다.
+// The tab bar position of the screen before tabs are received — like the tab bar it takes the remaining width, puts the window buttons at the right end, and makes that area a draggable area. Window
+//   facts (maximized · front window) are received like the tab bar too — so that this screen's row height · maximize button follow the window state.
 function TabBarStandIn({ pullFrame }: { pullFrame: boolean }) {
   useEffect(() => (pullFrame ? windowFrame.install() : undefined), [pullFrame])
   return <div data-testid="tab-bar-standin" aria-hidden {...dragProps()} style={TAB_BAR_STAND_IN} />
 }
 
-// 탭바 뿌리와 같은 몫 — 줄어드는 쪽 · 아래 선(`TabBar` 뿌리). 기준 폭은 `0px` 로 단위를 붙인다(jsdom 은 단위 없는 0 을 버린다).
+// The same share as the tab bar root — the shrinking side · the line below (`TabBar` root). The basis width gets a unit as `0px` (jsdom drops a unitless 0).
 const TAB_BAR_STAND_IN: React.CSSProperties = {
   flex: '1 1 0px',
   minWidth: 0,
@@ -378,23 +378,23 @@ const TAB_BAR_STAND_IN: React.CSSProperties = {
 
 const FILL: React.CSSProperties = { position: 'absolute', inset: 0 }
 
-// 끌기 안내 층의 z = 칸 안의 분할 막대 · 포커스 링(z 20) 위 · 연결 안내(z 40) · 메뉴(1000 이상) 아래. 캔버스 상자와 탭 캔버스
-//   층은 쌓임 맥락을 만들지 않아 그 안의 z 와 이 층이 같은 맥락에서 견준다.
+// The z of the drag guide layer = above the split bars · focus ring (z 20) in an area · below the connection guide (z 40) · menu (1000 and up). The canvas box and the tab canvas
+//   layer do not create a stacking context, so z inside them and this layer compare in the same context.
 const OVERLAY_LAYER: React.CSSProperties = { position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 30 }
 
-/** 훅 인스턴스가 소유하는 관측 상태. */
+/** Observation state owned by the hook instance. */
 interface CanvasObserverState {
   ro: ResizeObserver | null
   timer: ReturnType<typeof setTimeout> | null
-  /** 디바운스 대기 중인 최신 측정(반올림 후). */
+  /** The latest measurement waiting in debounce (after rounding). */
   measured: CanvasPx | null
 }
 
-// ADR-0227: 탭 내용 영역(창 캔버스) 크기를 재어 바뀔 때만 셸에 보고한다. 탭들이 이 영역을 공유하므로 창당
-//   하나다. 부팅·팝아웃 생성·웹뷰 재로드는 모두 새 마운트라 첫 측정이 곧 보고다. 무엇을 언제 보낼지(한 번에
-//   하나·합치기·재시도)는 `windowCanvasReport.ts` 가 정한다.
-// callback ref 인 이유: 재는 div 는 win 이 온 뒤에야 렌더되므로(조기 반환) 마운트 때 effect 에선 아직 없다.
-//   참조를 고정하는 이유: 렌더마다 새 함수면 React 가 떼고 다시 붙여 디바운스·재시도가 매번 날아간다.
+// ADR-0227: measure the tab content area (window canvas) size and report to the shell only when it changes. The tabs share this area, so there is one
+//   per window. Boot · popout creation · webview reload are all new mounts, so the first measurement is the report. What to send and when (one at a time
+//   · merging · retry) is decided by `windowCanvasReport.ts`.
+// Why a callback ref: the measured div is rendered only after win arrives (early return), so it does not yet exist in the effect at mount.
+//   Why the reference is fixed: a new function on every render makes React detach and reattach, and the debounce · retry would be lost every time.
 function useWindowCanvasReport(): (el: HTMLDivElement | null) => void {
   const obsRef = useRef<CanvasObserverState>({ ro: null, timer: null, measured: null })
 
@@ -404,7 +404,7 @@ function useWindowCanvasReport(): (el: HTMLDivElement | null) => void {
     detachCanvasObserver(obs)
     releaseCanvasReport(st)
     if (!el) return
-    // jsdom(vitest 에 setupFiles 없음)처럼 RO 가 없는 환경에선 관측 없이 지나간다.
+    // In environments without RO such as jsdom (vitest has no setupFiles), it passes without observing.
     if (typeof ResizeObserver === 'undefined') return
     const ro = new ResizeObserver(entries => {
       const rect = entries[entries.length - 1]?.contentRect
@@ -435,8 +435,8 @@ function detachCanvasObserver(obs: CanvasObserverState): void {
   obs.measured = null
 }
 
-// 대기 모드의 빈 캔버스 — 칸 틀 하나만 그린다. 탭이 없어 잎이 마운트되지 않으므로 칸 틀 지표(`report_ui_metrics`)를
-//   여기서 보낸다 — 예비 창을 채택할 때 셸이 이 지표를 모델에 옮겨 적는다(TRD S21-slot-docking §3-9 `committed`).
+// The empty canvas of waiting mode — draws only one area frame. There are no tabs so no leaf is mounted, so the area frame metrics (`report_ui_metrics`)
+//   are sent from here — when a spare window is adopted, the shell copies these metrics into the model (TRD S21-slot-docking §3-9 `committed`).
 // ADR-0295
 function SpareCanvas() {
   const borderRef = useRef<HTMLDivElement>(null)
@@ -453,8 +453,8 @@ function SpareCanvas() {
 }
 
 /**
- * viewIdOverride 로 자기 view 를 내려꽂아 안쪽 SlotContextMenu 액션이 이 탭 좌표를 쓰게 한다
- * (창별 active 무지 — §3-4).
+ * Pass its own view down with viewIdOverride so the inner SlotContextMenu actions use this tab's coordinates
+ * (unaware of per-window active — §3-4).
  */
 function TabCanvas({ viewId }: { viewId: string }) {
   const cached = useViewStore(s => selectView(s, viewId))

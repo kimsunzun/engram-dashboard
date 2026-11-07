@@ -1,37 +1,37 @@
-//! 트랜스크립트 탭 — claude CLI 가 남기는 raw 세션 JSONL 을 **측정용**으로만 읽는 순수 파서 (ADR-0090).
+//! Transcript tap — a pure parser that reads the raw session JSONL left by the claude CLI **for measurement only** (ADR-0090).
 //!
-//! ## ★위상(정직 범위) — 이건 제품 기능이 아니라 실험 측정 탭이다★
-//! 코어 decoder(`ClaudeStreamDecoder`)는 `cache_creation_input_tokens`/`cache_read_input_tokens`(실
-//! 컨텍스트 크기가 사는 곳)·`system/init`(모델 id)·compact 관련 raw 라인을 **버린다**. 코어는 무수정
-//! 대상이라(ADR-0090 제약) 이 정보를 스폰 경로에서 못 얻는다. 우회: **우리가 세션 id 를 통제**하므로
-//! (`--session-id`, ADR-0008) claude CLI 가 `~/.claude/projects/<munged-cwd>/<session-id>.jsonl` 에 남기는
-//! raw 트랜스크립트를 **best-effort 로** 읽어 측정치를 보강한다.
+//! ## ★Standing (honest scope) — this is an experiment measurement tap, not a product feature★
+//! The core decoder (`ClaudeStreamDecoder`) **discards** `cache_creation_input_tokens`/`cache_read_input_tokens` (where the real
+//! context size lives) · `system/init` (model id) · compact-related raw lines. The core is a no-modification
+//! target (ADR-0090 constraint) so this information cannot be obtained from the spawn path. Workaround: since **we control the session id**
+//! (`--session-id`, ADR-0008), read the raw transcript the claude CLI leaves at `~/.claude/projects/<munged-cwd>/<session-id>.jsonl`
+//! **best-effort** to supplement the measurements.
 //!
-//! ★ADR-0008 경계 — 추적 파일 위에 제품 기능을 짓지 않는다★: 이 트랜스크립트는 **실험 측정 탭 전용**이다.
-//! ADR-0008 은 "복원 정확성은 통제-sid 에만 의존, 추적 파일은 best-effort — 이걸로 기능 확장 금지" 를
-//! 못박는다. 그래서 이 모듈은 파일 부재/파싱 실패에 **절대 하네스를 실패시키지 않는다**(best-effort).
+//! ★ADR-0008 boundary — no product feature is built on a trace file★: this transcript is **for the experiment measurement tap only**.
+//! ADR-0008 pins down "restore correctness depends only on the controlled sid; the trace file is best-effort — no feature expansion with it".
+//! So this module **never fails the harness** on a missing file or parse failure (best-effort).
 // ADR-0090
 
 use std::path::{Path, PathBuf};
 
 use super::record::{event_type_key, line_mentions_compact, parse_init_model};
 
-/// 한 assistant 턴의 **실 컨텍스트 footprint** 토큰. claude usage 의 `input_tokens` 만 보면 그 턴의
-/// 증분 입력이라 누적 컨텍스트를 반영 못 한다.
+/// The **real context footprint** tokens of one assistant turn. Looking only at claude usage `input_tokens` gives that turn's
+/// incremental input, which does not reflect the cumulative context.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RealUsage {
-    /// 비-캐시 입력 토큰(그 턴에 새로 보낸 것).
+    /// Non-cache input tokens (newly sent in that turn).
     pub input_tokens: u64,
-    /// 캐시 생성 입력 토큰(이번에 캐시에 쓴 프롬프트 — 컨텍스트의 일부).
+    /// Cache-creation input tokens (the prompt written to the cache this time — part of the context).
     pub cache_creation_input_tokens: u64,
-    /// 캐시 읽기 입력 토큰(이전 컨텍스트 재사용분 — 컨텍스트의 대부분).
+    /// Cache-read input tokens (the reused part of the previous context — most of the context).
     pub cache_read_input_tokens: u64,
     pub output_tokens: u64,
 }
 
 impl RealUsage {
-    /// 실 컨텍스트 footprint = input + cache_creation + cache_read. 캐시 두 항이 진짜 컨텍스트 크기의
-    /// 대부분이라, 이 합이 "지금 모델이 보고 있는 컨텍스트 토큰 수" 의 ground truth 근사다.
+    /// Real context footprint = input + cache_creation + cache_read. The two cache terms are most of the true context size,
+    /// so this sum is a ground-truth approximation of "the number of context tokens the model is looking at now".
     pub fn context_footprint(&self) -> u64 {
         self.input_tokens
             .saturating_add(self.cache_creation_input_tokens)
@@ -42,22 +42,22 @@ impl RealUsage {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TranscriptSummary {
     pub resolved_model: Option<String>,
-    /// **assistant 메시지 per-turn footprint 만** 담는다(등장 순서 = 턴 순서). result 라인의 집계
-    ///   usage 는 여기 섞지 않는다.
+    /// Holds **only assistant-message per-turn footprints** (appearance order = turn order). The aggregate usage
+    ///   of a result line is not mixed in here.
     pub real_usage_series: Vec<RealUsage>,
-    /// result 라인의 최상위 집계 usage(마지막 것) — 진단·기록용.
+    /// The top-level aggregate usage of a result line (the last one) — for diagnosis and records.
     pub aggregate_result_usage: Option<RealUsage>,
-    /// raw event-type/subtype 히스토그램(record::event_type_key 로 산출).
+    /// Raw event-type/subtype histogram (produced by record::event_type_key).
     pub event_histogram: std::collections::BTreeMap<String, u64>,
-    /// compact/summary 관련으로 걸린 라인 verbatim(캡 적용 전 — 호출자가 record::cap_response 로 캡).
+    /// Lines caught as compact/summary-related, verbatim (before the cap — the caller caps with record::cap_response).
     pub compact_marker_lines: Vec<String>,
-    /// 파싱한 총 라인 수(비어 있지 않은).
+    /// Total number of lines parsed (non-empty).
     pub total_lines: usize,
 }
 
-/// ★cwd-munging 미하드코딩★: claude 는 cwd 를 munge 한 디렉토리명 아래에 트랜스크립트를 둔다(예:
-/// `C--Users-x-proj`). 그 규칙은 버전에 따라 바뀔 수 있어 **재귀 검색**으로 파일명만 매칭한다 — munging
-/// 규칙 변화에 무관하게 흡수.
+/// ★cwd-munging not hardcoded★: claude puts the transcript under a directory name made by munging the cwd (e.g.
+/// `C--Users-x-proj`). That rule may change by version, so we match only the file name by **recursive search** — absorbs
+/// changes in the munging rule regardless.
 pub fn locate_transcript(session_id: &str) -> Option<PathBuf> {
     let projects = claude_projects_dir()?;
     let target = format!("{session_id}.jsonl");
@@ -65,7 +65,7 @@ pub fn locate_transcript(session_id: &str) -> Option<PathBuf> {
 }
 
 fn claude_projects_dir() -> Option<PathBuf> {
-    // std env 로 홈을 찾는다 — dirs crate 미도입(no-new-deps).
+    // Find home via std env — the dirs crate is not introduced (no-new-deps).
     let home = std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))
         .map(PathBuf::from)?;
@@ -77,7 +77,7 @@ fn claude_projects_dir() -> Option<PathBuf> {
     }
 }
 
-/// 깊이 상한은 폭주 방지 — claude 구조는 projects/<munged>/<sid>.jsonl 로 얕아 8 이면 충분하다.
+/// The depth cap is to prevent runaway — claude's structure is shallow, projects/<munged>/<sid>.jsonl, so 8 is enough.
 fn find_file_recursive(dir: &Path, target: &str, depth: usize) -> Option<PathBuf> {
     const MAX_DEPTH: usize = 8;
     if depth > MAX_DEPTH {
@@ -87,7 +87,7 @@ fn find_file_recursive(dir: &Path, target: &str, depth: usize) -> Option<PathBuf
     let mut subdirs: Vec<PathBuf> = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
-        // 대소문자 정확 매칭 — sid 는 소문자 uuid.
+        // Exact case match — sid is a lowercase uuid.
         if path.file_name().and_then(|n| n.to_str()) == Some(target) {
             return Some(path);
         }
@@ -109,7 +109,7 @@ fn real_usage_from_obj(usage: &serde_json::Value) -> Option<RealUsage> {
     let cache_creation = get("cache_creation_input_tokens");
     let cache_read = get("cache_read_input_tokens");
     let output = get("output_tokens");
-    // 토큰 필드가 전부 0/부재면 의미 없는 usage — 예: geo/tier 만 있는 객체.
+    // If the token fields are all 0/absent it is a meaningless usage — e.g. an object with only geo/tier.
     if input == 0 && cache_creation == 0 && cache_read == 0 && output == 0 {
         return None;
     }
@@ -121,11 +121,11 @@ fn real_usage_from_obj(usage: &serde_json::Value) -> Option<RealUsage> {
     })
 }
 
-/// ★finding 4 경고★: 이 함수는 **assistant 여부를 가리지 않는다** — result 라인의 최상위 `usage`(집계·
-///   부분치)도 뽑는다. running context 계열을 만들 때 이 함수를 직접 쓰면 집계 라인이 per-turn
-///   footprint 를 덮어쓴다. per-turn 계열은 `assistant_footprint_from_line` 을 써야 한다.
+/// ★finding 4 warning★: this function **does not check whether the line is an assistant line** — it also extracts the top-level `usage` of a result line (aggregate ·
+///   partial). If this function is used directly to build the running context series, an aggregate line overwrites the per-turn
+///   footprint. The per-turn series must use `assistant_footprint_from_line`.
 ///
-/// 실측 스키마(claude 2.1.170): assistant 라인은 `{"type":"assistant","message":{...,"usage":{
+/// Measured schema (claude 2.1.170): an assistant line is `{"type":"assistant","message":{...,"usage":{
 /// "input_tokens":N,"cache_creation_input_tokens":N,"cache_read_input_tokens":N,"output_tokens":N}}}`.
 pub fn real_usage_from_line(line: &str) -> Option<RealUsage> {
     let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
@@ -136,14 +136,14 @@ pub fn real_usage_from_line(line: &str) -> Option<RealUsage> {
     real_usage_from_obj(usage)
 }
 
-/// **assistant 메시지의 per-turn footprint 만** 뽑는다 — 이것이 "지금 모델이 보고 있는 컨텍스트" 의
-///   진짜 running 계열이다.
+/// Extracts **only the assistant message's per-turn footprint** — this is the true running series of "the context
+///   the model is looking at now".
 ///
-/// ★왜 이 구분이 load-bearing 인가★: claude 트랜스크립트의 마지막 라인은 종종 `{"type":"result",...,
-///   "usage":{"input_tokens":1200,...}}` 같은 **집계·부분 usage** 다 — 이 input_tokens 는 그 턴의 증분일
-///   뿐 누적 컨텍스트가 아니다. 이 라인을 running 계열에 섞으면, 49k footprint 를 찍은 직후 result 라인의
-///   1200 이 series.last() 를 덮어 드라이버가 "컨텍스트가 49k→1200 으로 급감" 으로 오독한다(가짜
-///   compaction + 잘못된 per-turn usage). 그래서 running 계열은 assistant 메시지 footprint 로만 만든다.
+/// ★Why this distinction is load-bearing★: the last line of a claude transcript is often an **aggregate/partial usage** like `{"type":"result",...,
+///   "usage":{"input_tokens":1200,...}}` — this input_tokens is only that turn's increment and not the cumulative context.
+///   If this line is mixed into the running series,
+///   right after a 49k footprint is logged the result line's 1200 overwrites series.last() and the driver misreads it as "the context dropped sharply from 49k→1200" (a fake
+///   compaction + wrong per-turn usage). So the running series is built only from assistant message footprints.
 pub fn assistant_footprint_from_line(line: &str) -> Option<RealUsage> {
     let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
     if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
@@ -153,10 +153,10 @@ pub fn assistant_footprint_from_line(line: &str) -> Option<RealUsage> {
     real_usage_from_obj(usage)
 }
 
-/// assistant 라인의 `message.model` 에서 모델 id 를 뽑는다(트랜스크립트 파서). 스폰 경로(stream-json
-/// headless)의 트랜스크립트에는 `system/init` 라인이 **없고**(실측 2026-07-20, claude 2.1.170) 모델 id 가
-/// assistant 메시지의 `message.model` 에 실린다 — 그래서 parse_init_model 만으로는 스폰 경로 모델 id 를
-/// 못 얻어 이 보조 추출기가 필요하다. `<synthetic>`(합성 메시지 placeholder)은 실제 모델이 아니라 제외.
+/// Extracts the model id from the `message.model` of an assistant line (transcript parser). The transcript of the spawn path (stream-json
+/// headless) **has no** `system/init` line (measured 2026-07-20, claude 2.1.170) and the model id is carried in the
+/// assistant message's `message.model` — so parse_init_model alone cannot get the spawn-path model id,
+/// and this auxiliary extractor is needed. `<synthetic>` (placeholder for synthetic messages) is not a real model so it is excluded.
 pub fn model_from_assistant_line(line: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
     if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
@@ -179,12 +179,12 @@ fn is_result_line(line: &str) -> bool {
     }
 }
 
-/// `isCompactSummary:true` 는 claude 트랜스크립트의 압축 요약 마커다.
+/// `isCompactSummary:true` is the compaction summary marker of a claude transcript.
 pub fn line_is_compact_marker(line: &str) -> bool {
     if line_mentions_compact(line) {
         return true;
     }
-    // isCompactSummary 는 top-level 또는 message 안에 boolean 으로 온다.
+    // isCompactSummary comes as a boolean at top level or inside message.
     match serde_json::from_str::<serde_json::Value>(line.trim()) {
         Ok(v) => {
             v.get("isCompactSummary").and_then(|b| b.as_bool()) == Some(true)
@@ -197,7 +197,7 @@ pub fn line_is_compact_marker(line: &str) -> bool {
     }
 }
 
-/// 파싱은 라인 독립이라 손상 라인 하나가 전체를 깨지 않는다(그 라인은 non_json 히스토그램으로 흡수).
+/// Parsing is per line so one corrupted line does not break the whole (that line is absorbed into the non_json histogram).
 pub fn parse_transcript(path: &Path) -> Option<TranscriptSummary> {
     let content = std::fs::read_to_string(path).ok()?;
     Some(parse_transcript_str(&content))
@@ -243,23 +243,23 @@ pub fn parse_transcript_str(content: &str) -> TranscriptSummary {
 mod tests {
     use super::*;
 
-    // ── 픽스처(실 트랜스크립트 형태에서 발췌·redact) ────────────────────────────────
-    //   실 트랜스크립트 구조를 그대로 본떴다 — 민감 내용은 무해 텍스트로 치환.
+    // ── Fixtures (excerpted and redacted from the real transcript form) ────────────────────────────────
+    //   Modeled exactly on the real transcript structure — sensitive content replaced with harmless text.
 
-    /// 터미널 모드 모델 id 소스.
+    /// Terminal-mode model id source.
     const INIT_LINE: &str = r#"{"type":"system","subtype":"init","cwd":"C:\\tmp\\ws","model":"claude-sonnet-4-5-20250929","session_id":"abc"}"#;
 
-    /// stream-json headless assistant 라인 — 실 스모크 형태.
+    /// stream-json headless assistant line — real smoke form.
     const STREAM_ASSISTANT_LINE: &str = r#"{"type":"assistant","message":{"id":"msg_h","model":"claude-sonnet-4-6","role":"assistant","content":[{"type":"text","text":"received 3"}],"usage":{"input_tokens":3,"cache_creation_input_tokens":1129,"cache_read_input_tokens":31094,"output_tokens":4}},"uuid":"uh"}"#;
 
     const SYNTHETIC_LINE: &str = r#"{"type":"assistant","message":{"id":"msg_s","model":"<synthetic>","role":"assistant","content":[]},"uuid":"us"}"#;
 
     const ASSISTANT_LINE_1: &str = r#"{"type":"assistant","message":{"id":"msg_1","role":"assistant","content":[{"type":"text","text":"received 1"}],"usage":{"input_tokens":3561,"cache_creation_input_tokens":5048,"cache_read_input_tokens":20679,"output_tokens":6,"service_tier":"standard"}},"uuid":"u1"}"#;
 
-    /// 컨텍스트가 더 큰 후속 턴(캐시 read 증가).
+    /// A later turn with a larger context (cache read increased).
     const ASSISTANT_LINE_2: &str = r#"{"type":"assistant","message":{"id":"msg_2","role":"assistant","content":[{"type":"text","text":"received 2"}],"usage":{"input_tokens":12,"cache_creation_input_tokens":8000,"cache_read_input_tokens":41000,"output_tokens":5}},"uuid":"u2"}"#;
 
-    /// usage 없는 라인.
+    /// A line without usage.
     const USER_LINE: &str = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"DOC-1: x"}]},"uuid":"u3"}"#;
 
     const COMPACT_LINE: &str = r#"{"type":"user","isCompactSummary":true,"message":{"role":"user","content":[{"type":"text","text":"Summary of prior conversation"}]},"uuid":"u4"}"#;
@@ -268,7 +268,7 @@ mod tests {
 
     const ASSISTANT_49K: &str = r#"{"type":"assistant","message":{"id":"msg_big","model":"claude-sonnet-4-6","role":"assistant","content":[{"type":"text","text":"received 20"}],"usage":{"input_tokens":8,"cache_creation_input_tokens":2000,"cache_read_input_tokens":47000,"output_tokens":5}},"uuid":"ubig"}"#;
 
-    /// assistant 직후의 result 집계 라인.
+    /// A result aggregate line right after the assistant.
     const RESULT_1200: &str =
         r#"{"type":"result","subtype":"success","usage":{"input_tokens":1200,"output_tokens":34}}"#;
 
@@ -301,7 +301,7 @@ mod tests {
 
     #[test]
     fn real_usage_handles_missing_cache_fields() {
-        // result 라인은 cache 항이 없을 수 있다.
+        // A result line may have no cache terms.
         let line = r#"{"type":"result","usage":{"input_tokens":1200,"output_tokens":34}}"#;
         let u = real_usage_from_line(line).unwrap();
         assert_eq!(u.input_tokens, 1200);

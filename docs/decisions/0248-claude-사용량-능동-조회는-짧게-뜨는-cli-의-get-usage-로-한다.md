@@ -1,19 +1,19 @@
-# ADR-0248: Claude 사용량 능동 조회는 짧게 뜨는 CLI 의 get_usage 로 한다
+# ADR-0248: Claude usage active query is done with the short-lived CLI's get_usage
 
-- 상태: 확정 (2026-09-27, 근거: 사용자 결정 + TRD §7 #4)
+- 상태: 확정 (2026-09-27, basis: user decision + TRD §7 #4)
 - 관련: TRD §7 #4 · step-log S21
 
 ## 맥락
-Claude 사용량을 능동으로 조회하는 방법을 골라야 했다. 후보는 A(짧게 뜨는 CLI 에 `get_usage`)와 B(토큰 파일을 읽어 비공개 OAuth 사용량 주소를 직접 침)였다.
+We had to choose how to actively query Claude usage. The candidates were A (`get_usage` on a short-lived CLI) and B (read the token file and call the private OAuth usage URL directly).
 
 ## 결정
-**A** — 짧게 뜨는 CLI 에 `get_usage` 로 조회한다.
+**A** — query with `get_usage` on a short-lived CLI.
 
 ## 거부한 대안
-- **B(토큰 파일 + 비공개 OAuth 사용량 주소)** — 지금은 거부. 앱이 자격증명을 직접 만지고, 첫 TLS 의존·인터넷 직접 송신·OS 별 자격증명 분기가 새로 생긴다. **A 가 깨지면 같은 seam 뒤로 B 를 들인다** — 대체 경로는 닫지 않는다.
+- **B (token file + private OAuth usage URL)** — rejected for now. The app would touch credentials directly, and a first TLS dependency · direct internet sending · per-OS credential branching would be new. **If A breaks, B is brought in behind the same seam** — the replacement path is not closed.
 
 ## 근거
-사용자 결정 2026-09-27 · TRD §7 #4.
+User decision 2026-09-27 · TRD §7 #4.
 
 ## 영향 / 불변식
-Claude 조회 경로는 CLI 서브프로세스 seam 뒤에 있다 — 훗날 B 로 교체해도 그 seam 의 소비자(사용량 버스 명령·상태 갱신)는 바뀌지 않아야 한다. 구현 커밋: `56776d6`, `c68b885`.
+The Claude query path sits behind the CLI-subprocess seam — even if it is later swapped for B, the consumers of that seam (the usage bus command · state update) must not change. Implementation commits: `56776d6`, `c68b885`.

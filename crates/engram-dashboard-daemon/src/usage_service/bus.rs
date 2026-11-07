@@ -1,10 +1,10 @@
-//! 버스 `usage.*` 의 데몬 실물 — agent 포트 [`UsageCommandHost`] 를 서비스에 단다(TRD S21 usage-limit-slot §1-4
-//! 「버스」 · §1-6 「버스」 · ADR-0251).
+//! The daemon's real implementation of bus `usage.*` — attaches the agent port [`UsageCommandHost`] to the service (TRD S21 usage-limit-slot §1-4
+//! 「버스」 (bus) · §1-6 「버스」 (bus) · ADR-0251).
 //!
-//! ★요청은 [`UsageService::request_blocking`] 하나로 든다★ — 버스 입구는 blocking 풀 스레드라 std 채널로 기다리고
-//!   (§3 #17 — tokio 타이머를 안 쓴다), 판정은 wire ⟳ 와 같은 책·같은 요청 표에서 한다.
-//! ★행은 답 한 장을 편 것뿐이다★ — 벤더 이름·정책이 없다(모듈 머리 「백엔드 확장」). 칸은 들어온 철자가 아니라
-//!   조회기의 키로 찾는다([`usage_vendor_of`] — wire 입구와 같은 길).
+//! ★A request is held by [`UsageService::request_blocking`] alone★ — the bus entrance is a blocking pool thread so it waits on a std channel
+//!   (§3 #17 — the tokio timer is not used), and the decision is made from the same book and the same request table as the wire ⟳.
+//! ★A row is just one answer sheet unfolded★ — it has no vendor name or policy (module header 「백엔드 확장」 (backend extension)). The cell is found not by the spelling that came in but by
+//!   the prober's key ([`usage_vendor_of`] — the same path as the wire entrance).
 // ADR-0004
 // ADR-0155
 
@@ -20,7 +20,7 @@ use super::book::RequestKind;
 use super::{UsageAnswer, UsageServed, UsageService, REPLY_WAIT_MAX};
 use crate::command_delivery::CommandDeliveries;
 
-// 기다리는 `usage.*` 는 버스 수거의 TIMEOUT 보다 먼저 답해야 한다 — 대기 상한에 여유 1초를 더해도 명령 마감 안.
+// A waiting `usage.*` must answer before the bus pickup's TIMEOUT — even adding a 1-second margin to the wait cap it is within the command deadline.
 const _: () = assert!(
     REPLY_WAIT_MAX.as_millis() + Duration::from_secs(1).as_millis()
         < CommandDeliveries::DEFAULT_DEADLINE.as_millis(),
@@ -38,11 +38,11 @@ impl UsageCommandHost for UsageService {
 }
 
 impl UsageService {
-    /// `None` = 그 낱말의 조회기가 없거나 이 서비스가 그 칸을 안 든다(조회기 0개 조립).
+    /// `None` = there is no prober for that word or this service does not hold that cell (assembly with 0 probers).
     ///
-    /// ★대기 상한([`REPLY_WAIT_MAX`])은 핸들러에 든 순간부터, 버스 마감은 자리가 열린 순간부터 잰다★ — 그 사이의
-    ///   blocking 풀 지연은 두 상수의 차(약 2초)가 받아 준다. 자리 마감에서 그 지연을 따로 빼 셈하지 않는다 — 풀이
-    ///   그보다 밀리면 답 대신 TIMEOUT 이 나가는 것은 알고 남긴 잔여다.
+    /// ★The wait cap ([`REPLY_WAIT_MAX`]) is measured from the moment it enters the handler, and the bus deadline from the moment the slot opens★ — the
+    ///   blocking pool delay in between is absorbed by the difference of the two constants (about 2 seconds). The slot deadline does not separately subtract that delay — if the pool
+    ///   lags beyond that, a TIMEOUT goes out instead of an answer, a residue we knowingly left.
     fn bus_request(&self, backend: &AgentBackend, kind: RequestKind) -> Option<UsageVendorRow> {
         let vendor = usage_vendor_of(backend)?;
         let answer = self.request_blocking(vendor, kind)?;
@@ -50,10 +50,10 @@ impl UsageService {
     }
 }
 
-/// 답 한 장 → 버스 행. `backend` = 요청의 낱말 그대로 — 칸은 그 낱말의 조회기 키로 찾았으므로 같은 백엔드다.
+/// One answer sheet → bus row. `backend` = the request's word as is — the cell was found by that word's prober key so it is the same backend.
 ///
-/// 창 차례 = 5시간 · 주간 · 모델별(스냅숏 차례 그대로). 상태의 칸(`next_attempt_in_secs`·`retry_in_secs`·detail)은
-/// 그 상태일 때만 싣는다 — 매크로 enum 이 문자열 열거뿐이라 태그 enum 을 단어 + 선택 칸으로 편다(§1-6).
+/// Window order = 5-hour · weekly · per-model (snapshot order as is). The state's fields (`next_attempt_in_secs`·`retry_in_secs`·detail)
+/// are carried only in that state — the macro enum is only a string enumeration so a tag enum is unfolded into a word + optional fields (§1-6).
 pub(crate) fn vendor_row(backend: AgentBackend, answer: UsageAnswer) -> UsageVendorRow {
     let UsageAnswer { snapshot, served } = answer;
     let mut windows = Vec::with_capacity(2 + snapshot.model_scoped.len());
@@ -136,11 +136,11 @@ fn window_row(
     }
 }
 
-/// 남은 양 — 화면과 같은 `floor(clamp(100 − used, 0, 100))`(TRD §1-6).
+/// Amount left — the same `floor(clamp(100 − used, 0, 100))` as the screen (TRD §1-6).
 ///
-/// ★반올림이 아니라 내림이다★ — 화면과 LLM 이 같은 수를 봐야 하고, 올리면 남은 양을 부풀리는 쪽으로 틀린다.
-///   `used_pct` 는 생산자가 소수 넷째 자리로 다듬어 싣는다(§3 #32 — `100 − 55.00000000000001` 이 44 로 떨어지는
-///   부동소수 꼬리를 거기서 막는다). 유한수가 아닌 값은 오지 않지만 오면 `as` 가 0 으로 접는다(패닉 없음).
+/// ★It is rounding down, not rounding★ — the screen and the LLM must see the same number, and rounding up errs toward inflating the amount left.
+///   `used_pct` is carried by the producer trimmed to the fourth decimal place (§3 #32 — it blocks there the floating-point tail where `100 − 55.00000000000001` falls to 44).
+///   A non-finite value does not come, but if it does `as` folds it to 0 (no panic).
 fn left_pct(used_pct: f64) -> u64 {
     (100.0 - used_pct).clamp(0.0, 100.0).floor() as u64
 }
@@ -177,8 +177,8 @@ mod tests {
         }
     }
 
-    /// ★도움말의 수가 상수와 같다★ — 호출자(LLM)가 읽는 것은 요약에 적힌 수뿐이라, 상수만 바꾸면 광고가 조용히
-    /// 거짓이 된다. 요약은 agent 선언이고 상수는 이 crate 것이라 컴파일러가 둘을 잇지 않는다.
+    /// ★The number in the help equals the constant★ — all the caller (the LLM) reads is the number in the summary, so changing only the constant makes the advertisement quietly
+    /// false. The summary is an agent declaration and the constant belongs to this crate, so the compiler does not connect the two.
     #[test]
     fn the_usage_help_quotes_the_wait_constant() {
         use engram_dashboard_agent::commands::{UsageGetArgs, UsageRefreshArgs};
@@ -202,7 +202,7 @@ mod tests {
         );
     }
 
-    /// ★내림이다★ — 반올림으로 바꾸면 첫 셋 중 둘이 깨진다. 범위 밖 사용률은 0·100 에 눌린다.
+    /// ★It is rounding down★ — changing it to rounding breaks two of the first three. An out-of-range usage is clamped to 0·100.
     #[test]
     fn left_pct_rounds_down_and_clamps() {
         assert_eq!(left_pct(55.5), 44);
@@ -214,7 +214,7 @@ mod tests {
         assert_eq!(left_pct(-5.0), 100);
     }
 
-    /// 창 차례·모델 이름·모름(`null`)이 그대로 건너온다 — `used_pct` 가 없는 창의 `left_pct` 는 0 이 아니라 `null`.
+    /// Window order · model names · unknown (`null`) cross over as is — the `left_pct` of a window with no `used_pct` is `null`, not 0.
     #[test]
     fn windows_keep_their_order_label_and_unknowns() {
         let row = vendor_row(
@@ -248,7 +248,7 @@ mod tests {
         );
     }
 
-    /// 상태 여섯이 단어 여섯으로 1:1 이고, 상태의 칸은 그 상태일 때만 실린다. detail 은 세 칸으로 펴진다.
+    /// Six states map 1:1 to six words, and a state's fields are carried only in that state. detail is unfolded into three fields.
     #[test]
     fn every_wire_state_maps_to_its_word_and_carries_only_its_own_fields() {
         let detail = || {

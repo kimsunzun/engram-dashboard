@@ -1,43 +1,43 @@
-# 사용량 조회 429 거절 기한 — 영속하나, 어디에 두나 (2026-10-08)
+# Usage fetch 429 rejection deadline — is it persisted, and where does it go (2026-10-08)
 
-- 상태: 조사 완료(light) · 결정 대기
-- 방법: `/research light` — 수집자 1(소스 직접 읽기) · 메인 grounding 스팟체크(orca `service.ts:91` · Claude-Code-Usage-Monitor `api_usage.py` 대조 — 지지) · cross-family 적대 리뷰 없음(light)
-- 확신도 범례: 확실 = 코드로 확인 · 가능성 높음 = 코드 일부 확인/부재 근거 · 불확실 = 검색만
+- Status: research complete (light) · awaiting decision
+- Method: `/research light` — collector 1 (read the source directly) · main-session grounding spot-check (checked against orca `service.ts:91` · Claude-Code-Usage-Monitor `api_usage.py` — supported) · no cross-family adversarial review (light)
+- Confidence legend: certain = confirmed in code · likely = partly confirmed in code / evidence of absence · uncertain = search only
 
-## 질문
+## Question
 
-데몬이 claude·codex 사용량을 조회하다 429(`Retry-After` 약 1시간 관측)를 받으면 거절 기한을 `daemon\state\usage_rejects.json` 에 따로 저장한다(`crates/engram-dashboard-daemon/src/usage_service/reject_store.rs` · TRD S21-usage-limit-slot §3 #30 — PRD 리뷰 2차의 「재시작 거절」 지적을 반영한 기본값이고 사용자 결정은 아니었다). 사용자 물음: 메모리만으로 충분하지 않나 · 영속한다면 기능마다 파일을 만들지 말고 한곳에 둬야 하지 않나.
+When the daemon gets a 429 (`Retry-After` of about 1 hour observed) while fetching claude · codex usage, it stores the rejection deadline separately in `daemon\state\usage_rejects.json` (`crates/engram-dashboard-daemon/src/usage_service/reject_store.rs` · TRD S21-usage-limit-slot §3 #30 — a default that reflected the 「재시작 거절」 (rejection on restart) point from PRD review round 2, and it was not a user decision). The user's questions: isn't memory alone enough · if it is persisted, shouldn't it go in one place rather than a file per feature?
 
-## 결론
+## Conclusion
 
-- **피어는 갈린다.** 사용량 엔드포인트를 부르면서 429 를 다루는 도구 넷 중 둘은 기한을 재시작 너머로 들고 가고(CodexBar · Claude-Code-Usage-Monitor) 둘은 메모리에만 둔다(orca · ClaudeBar). 아예 429 를 따로 다루지 않는 도구도 둘이다(paseo · t3code).
-- **기한만 담는 전용 파일을 두는 곳은 없다.** 영속하는 둘은 ① 범용 키-값 저장소에 게이트당 키 하나(CodexBar — macOS UserDefaults) 또는 ② 마지막 값 캐시와 같은 파일에 칸 하나(Claude-Code-Usage-Monitor — `latest.json` 의 `retry_after_epoch`)로 둔다.
-- orca 는 같은 1시간 창을 주석으로 알면서도(`src/main/rate-limits/service.ts:91`) 기한을 메모리에만 두고, 429 동안 옛 값을 최대 24시간 보여 주는 쪽을 택했다.
+- **Peers split.** Of the four tools that call a usage endpoint and handle 429, two carry the deadline across restarts (CodexBar · Claude-Code-Usage-Monitor) and two keep it only in memory (orca · ClaudeBar). Two other tools do not handle 429 separately at all (paseo · t3code).
+- **No one has a dedicated file that holds only the deadline.** The two that persist use either ① a general-purpose key-value store with one key per gate (CodexBar — macOS UserDefaults) or ② one field in the same file as the last-value cache (Claude-Code-Usage-Monitor — `retry_after_epoch` in `latest.json`).
+- orca knows the same 1-hour window from a comment (`src/main/rate-limits/service.ts:91`), yet keeps the deadline only in memory and chose to show the old value for up to 24 hours during a 429.
 
-## 사례
+## Cases
 
-| 도구 | 429 처리 | 기한 위치 | 작은 상태 저장 방식 | 확신도 | 근거 |
+| Tool | 429 handling | Deadline location | How small state is stored | Confidence | Basis |
 |---|---|---|---|---|---|
-| CodexBar | 있음(없으면 5분) · 사용자 새로고침은 우회 | **영속** — UserDefaults 키(`claudeOAuthUsageRateLimitBlockedUntilV2.<토큰 해시>` 등) | 게이트 = UserDefaults 키 · 큰 스냅숏 = 기능별 JSON | 확실 | `ClaudeOAuthUsageRateLimitGate.swift:4-6,28-41` · `ClaudeCLIRateLimitGate.swift:4-5,13,30-34` (HEAD `5891c0b`) |
-| Claude-Code-Usage-Monitor | 있음 → 캐시 값으로 답 | **영속** — 값 캐시 파일 `~/.claude-monitor/api/latest.json` 의 `retry_after_epoch`(tmp + `os.replace`) | 값 + 기한 = 파일 하나 | 확실 | `src/claude_monitor/output/api_usage.py:33,150-165,196` |
-| orca | 있음 · 강제 조회는 우회 · 옛 값 24시간 유지 | **메모리** | 앱 상태 `orca-data.json` 하나 + 자주 바뀌는 캐시만 따로(`orca-github-cache.json` — 큰 파일 재기록을 피하려고) | 메모리 = 가능성 높음(영속 계층에 참조 없음) · 저장 방식 = 확실 | `src/main/rate-limits/service.ts:91,170-180` · `src/main/persistence/loading-store/user-data-path.ts:16,29-32` (`df7460af`) |
-| ClaudeBar | 있음(없으면 5분) | **메모리** — `UsageMemory.retryAt` | 메모리 | 확실 | `Modules/DataSources/Sources/DataSource.swift:100-111,367-394` |
-| paseo | 없음(401·403 만) | 없음 — 5분 메모리 캐시 | 메모리 | 확실 | `packages/server/src/services/quota-fetcher/providers/claude.ts:466-474` |
-| t3code | 따로 없음(비2xx = 일반 오류) | 없음 | 조사 안 함 | 가능성 높음 | `apps/server/src/usage/cliproxyApi.ts:174-176` |
-| ccusage · herdr · Claude Squad | 사용량 엔드포인트를 부르지 않음 | — | — | 가능성 높음 ~ 불확실(검색만) | — |
+| CodexBar | yes (5 minutes if absent) · user refresh bypasses it | **persisted** — UserDefaults key (`claudeOAuthUsageRateLimitBlockedUntilV2.<토큰 해시>` etc.) | gate = UserDefaults key · large snapshots = per-feature JSON | certain | `ClaudeOAuthUsageRateLimitGate.swift:4-6,28-41` · `ClaudeCLIRateLimitGate.swift:4-5,13,30-34` (HEAD `5891c0b`) |
+| Claude-Code-Usage-Monitor | yes → answers with the cached value | **persisted** — `retry_after_epoch` in the value-cache file `~/.claude-monitor/api/latest.json` (tmp + `os.replace`) | value + deadline = one file | certain | `src/claude_monitor/output/api_usage.py:33,150-165,196` |
+| orca | yes · a forced fetch bypasses it · keeps the old value for 24 hours | **memory** | one app-state file `orca-data.json` + only the frequently changing cache separately (`orca-github-cache.json` — to avoid rewriting a large file) | memory = likely (no reference in the persistence layer) · storage method = certain | `src/main/rate-limits/service.ts:91,170-180` · `src/main/persistence/loading-store/user-data-path.ts:16,29-32` (`df7460af`) |
+| ClaudeBar | yes (5 minutes if absent) | **memory** — `UsageMemory.retryAt` | memory | certain | `Modules/DataSources/Sources/DataSource.swift:100-111,367-394` |
+| paseo | none (401 · 403 only) | none — 5-minute memory cache | memory | certain | `packages/server/src/services/quota-fetcher/providers/claude.ts:466-474` |
+| t3code | none separately (non-2xx = generic error) | none | not investigated | likely | `apps/server/src/usage/cliproxyApi.ts:174-176` |
+| ccusage · herdr · Claude Squad | do not call a usage endpoint | — | — | likely ~ uncertain (search only) | — |
 
-일반 HTTP 클라이언트·CLI 의 백오프(Google API 클라이언트 · gh CLI · Octokit throttling)는 거의 다 프로세스 메모리다 — 이번에 코드로 다시 확인하지 않았다(불확실 ~ 가능성 높음).
+Backoff in general HTTP clients and CLIs (Google API clients · gh CLI · Octokit throttling) is almost all process memory — we did not re-verify this in code this time (uncertain ~ likely).
 
-## 우리 선택지
+## Our options
 
-| | 내용 | 대가 |
+| | Content | Cost |
 |---|---|---|
-| **A. 메모리만** | `usage_rejects.json` 과 `reject_store.rs` 를 걷는다 | 거절 기한 안에 데몬을 재시작하면 조회가 한 번 더 나가 다시 429 를 받는다. 그 재조회가 거절을 늘리는지는 모른다. 데몬은 셸보다 오래 살아 재시작이 드물다 |
-| **B. 현행 유지** | 기능별 파일 | 피어 선례 없음 · 작은 상태가 늘 때마다 파일이 는다 |
-| **C. 한곳으로 통합** | 데몬의 작은 런타임 상태를 파일 하나(또는 키-값 하나)에 모으고 거절 기한은 그 안의 칸 하나 | 공용 저장 계층을 새로 세워야 한다 — 지금 그 파일에 들어갈 다른 입주자가 없다 |
+| **A. Memory only** | remove `usage_rejects.json` and `reject_store.rs` | If the daemon restarts within the rejection deadline, one more fetch goes out and gets a 429 again. We do not know whether that re-fetch extends the rejection. The daemon outlives the shell, so restarts are rare |
+| **B. Keep as is** | per-feature files | no peer precedent · a file is added every time a new piece of small state appears |
+| **C. Consolidate in one place** | gather the daemon's small runtime state in one file (or one key-value store), with the rejection deadline as one field inside it | a shared storage layer has to be built new — right now there is no other tenant for that file |
 
-## 공백
+## Gaps
 
-- 조기 재조회가 Claude 쪽 거절 기간을 늘리는지 — 피어 어디에도 실측이 없다.
-- CodexBar · ClaudeBar 가 사용량 값 자체를 디스크에 캐시하는지 — 보지 않았다.
-- orca 메모리 판정은 영속 계층에 참조가 없다는 데서 나왔고 기동 경로 전체를 추적하지 않았다.
+- Whether fetching again early extends Claude's rejection period — no peer has a measurement.
+- Whether CodexBar · ClaudeBar cache the usage values themselves on disk — not looked at.
+- The judgment that orca keeps it in memory came from there being no reference in the persistence layer, and we did not trace the whole startup path.

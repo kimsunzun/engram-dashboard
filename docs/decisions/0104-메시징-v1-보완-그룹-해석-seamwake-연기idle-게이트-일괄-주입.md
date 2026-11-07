@@ -1,37 +1,37 @@
-# ADR-0104: 메시징 v1 보완 — 그룹 해석 seam·wake 연기·idle 게이트 일괄 주입
+# ADR-0104: Messaging v1 addendum — group resolution seam · deferring wake · idle gate with batch injection
 
-- 상태: 확정 (2026-07-24, 근거: 사용자 결정 — S18 설계 확정(ADR-0103) 직후 재검토 세션에서 3쟁점 논의·확정) · 부분 폐기 by ADR-0112 (결정 1 런타임 등록 명단 소스, 결정 2 잠든 수신자 파킹) · 부분 폐기 by ADR-0231 (결정 3 idle 게이트의 한가에 사용자 목록 빔과 오류 뒤 멈춤 아님을 더함(상한 없음))
-- 관련: ADR-0103(메시징 v1 본체 — 이 ADR은 그 보완) · `docs/process/S18-messaging-v1/spec/messaging-v1-spec.md` §4·§5·§7·§8 · ADR-0096(봉투 wrap seam) · ADR-0101(WYSIWYA 이름) · ADR-0012(seam 격리) · step-log S18 · Amended by ADR-0112 (결정 1 런타임 등록 명단 소스, 결정 2 잠든 수신자 파킹) · Amended by ADR-0231 (결정 3 idle 게이트의 한가에 사용자 목록 빔과 오류 뒤 멈춤 아님을 더함(상한 없음))
+- 상태: 확정 (2026-07-24, basis: user decision — 3 issues discussed and settled in a re-review session right after the S18 design was fixed (ADR-0103)) · 부분 폐기 by ADR-0112 (decision 1 the source of the runtime-registered roster, decision 2 parking for a sleeping recipient) · 부분 폐기 by ADR-0231 (decision 3 adds to the idle of the idle gate that the user list is empty and that it is not stopped after an error (no upper bound))
+- 관련: ADR-0103(the messaging v1 main body — this ADR is its addendum) · `docs/process/S18-messaging-v1/spec/messaging-v1-spec.md` §4·§5·§7·§8 · ADR-0096(envelope wrap seam) · ADR-0101(WYSIWYA name) · ADR-0012(seam isolation) · step-log S18 · Amended by ADR-0112 (decision 1 the source of the runtime-registered roster, decision 2 parking for a sleeping recipient) · Amended by ADR-0231 (decision 3 adds to the idle of the idle gate that the user list is empty and that it is not stopped after an error (no upper bound))
 
 ## 맥락
 
-ADR-0103으로 메시징 v1 설계를 박제한 뒤, 구현 진입 전 사용자 재검토에서 3가지 쟁점이 제기됐다: ① 그룹의 정의 단위 — 향후 폴더(트리 조직)·하위 에이전트 계층이 생길 텐데 그룹을 어디에 정박시키나 ② 잠든 에이전트(프로세스는 닫혔지만 세션 복원 가능) 수신자를 깨워서 배달하나 ③ 메시지 주입 타이밍 — 수신 LLM이 턴 진행 중일 때 주입하나, 여러 건 쌓이면 한 건씩 주입하나. 셋 다 내부 구현이 아닌 동작·정책(사용자 체감)이라 사용자 결정이 필요했다.
+After the messaging v1 design was recorded in ADR-0103, the user's re-review before entering implementation raised 3 issues: ① the unit of group definition — folders (tree organization) and a sub-agent hierarchy will appear in the future, so where is the group anchored ② for a sleeping agent (the process is closed but the session can be restored) as a recipient, do we wake it to deliver ③ the message injection timing — do we inject while the receiving LLM is in the middle of a turn, and when several pile up do we inject one at a time. All three are behavior and policy (felt by the user), not internal implementation, so a user decision was needed.
 
 ## 결정
 
-1. **그룹 해석 = seam(GroupRegistry: "그룹 이름 → 멤버 목록" 해석기, 소스 플러그인 구조).** v1 소스 = 런타임 등록 명단 + 내장 `@all`(ADR-0103 결정 4 유지). **폴더가 데몬 소유로 생기면 폴더 = 추가 소스**(`@폴더명`)이자 조직 방송의 정본 단위 예정. **하위 에이전트 계층은 주소 단위 비채택.**
-2. **wake 비채택(v1) — 잠든 수신자도 부재와 동일하게 파킹.** wake 일반(모든 발송이 깨움)과 request 한정 변형 모두 v1 제외 — v2 유력 후보 = **wake-on-request**(spec §8 용어와 동일). 필요가 실증될 때 추가한다(사용자: "나중으로, 필요할 때 추가").
-3. **주입 타이밍 = idle 게이트 + 일괄 flush.** 수신자가 턴 진행 중(busy)이면 데몬 메일박스에 대기시키고, idle 진입(턴 종료)·등장(스폰/epoch) 시 쌓인 메시지 전부를 오래된 순으로 일괄 주입(각 메시지는 자기 봉투). `delivered` 장부는 실제 주입 시점에만 찍는다. busy/idle 관측은 백엔드 capability(stream-json 턴 이벤트) — 관측 불가 백엔드는 즉시 주입 폴백. 배치 처리는 수용 기준에서 중점 검증(사용자 지시로 강화).
+1. **Group resolution = a seam (GroupRegistry: a "group name → member list" resolver, with a pluggable source structure).** v1 sources = the runtime-registered roster + the built-in `@all` (ADR-0103 decision 4 kept). **When folders come to exist owned by the daemon, a folder = an additional source** (`@폴더명`) and is planned as the canonical unit of organizational broadcast. **A sub-agent hierarchy is not adopted as an address unit.**
+2. **wake not adopted (v1) — a sleeping recipient is parked the same as an absent one.** Both general wake (every send wakes) and the request-limited variant are excluded from v1 — the leading v2 candidate = **wake-on-request** (same as the term in spec §8). Add it when the need is demonstrated (the user: "나중으로, 필요할 때 추가").
+3. **Injection timing = an idle gate + a batch flush.** If the recipient is in the middle of a turn (busy), hold the message in the daemon mailbox, and on entering idle (turn end) or appearance (spawn/epoch) inject all the accumulated messages in a batch, oldest first (each message in its own envelope). The `delivered` ledger is stamped only at the actual injection time. busy/idle observation is a backend capability (stream-json turn events) — a backend that cannot be observed falls back to immediate injection. Batch handling is verified with emphasis in the acceptance criteria (strengthened at the user's instruction).
 
 ## 거부한 대안
 
-- **하위 에이전트 계층을 그룹 주소 단위로 채택** — 계층 방송("내 밑 전원")의 실수요자는 오케스트레이터(부모)뿐인데, 부모는 스폰하며 런타임 그룹을 등록하면 동일 효과(중복 기능). 또한 계층 명단은 동적(스폰마다 변동)이라 발송 범위(blast radius) 예측이 어렵고 "발송 순간 스냅샷" 원칙과 마찰. 오케스트레이션 모델 확립 + 실수요 실증 시 seam 소스 추가로 재론.
-- **폴더 시스템 공사 선행(그룹 = 폴더 단일화)** — 메시징 v1이 트리/폴더의 데몬 이관(별개 스텝)을 기다리게 됨 + 폴더는 배타 소속이라 겹침 그룹(여러 폴더에 걸친 태스크포스)을 표현 못 함. seam 구조면 폴더 등장 시 소스 추가로 무파괴 흡수되므로 기다릴 이유 없음.
-- **wake-on-send(v1 포함)** — 깨우기 = claude 프로세스 스폰 + 토큰 비용, 방송 시 대량 스폰 위험, "이름 → 잠든 복원 가능 세션" 레지스트리 신설 스코프. 통보에는 비용 대비 실익이 없고, request 한정 wake가 유력 후보지만 v1 스코프에서 제외(사용자 결정). 파킹이 배달 보장(자연 기상 시 flush)을 이미 제공.
-- **즉시 주입(busy 무시, 현행 방식 유지)** — 턴 진행 중 stdin으로 밀면 CLI 내부 큐에 쌓여 데몬 손을 떠난다: 장부 `delivered`가 "실제로 봤음"과 어긋나고 배치·순서 제어권 상실.
-- **한 건씩 드리블 주입** — 메시지당 턴 하나 = N배 토큰·시간, 배치 내 모순("3번: 1번은 무시해")을 수신자가 이미 1번에 행동한 뒤 발견. 일괄이면 수신 LLM이 전체를 보고 스스로 우선순위·모순 정리(사람이 메일함 여는 방식과 동형).
+- **Adopting a sub-agent hierarchy as the group address unit** — the only real demander of hierarchical broadcast ("everyone under me") is the orchestrator (the parent), and the parent gets the same effect by registering a runtime group as it spawns (duplicate feature). Also, a hierarchy roster is dynamic (changes at every spawn), so the blast radius of a send is hard to predict and it clashes with the "snapshot at the moment of sending" principle. Revisit by adding a seam source once the orchestration model is established + real demand is shown.
+- **Doing the folder system work first (group = folder, unified)** — messaging v1 would wait for the daemon migration of the tree/folders (a separate step) + a folder is exclusive membership, so it cannot express overlapping groups (a task force spanning several folders). With the seam structure, when folders appear they are absorbed non-destructively by adding a source, so there is no reason to wait.
+- **wake-on-send (included in v1)** — waking = spawning a claude process + token cost, a risk of mass spawning on a broadcast, and the scope of building a new "name → sleeping restorable session" registry. For plain notification there is no benefit against the cost, and request-limited wake is the leading candidate but is excluded from the v1 scope (user decision). Parking already provides the delivery guarantee (flush at natural wake-up).
+- **Immediate injection (ignoring busy, keeping the current way)** — pushing to stdin in the middle of a turn piles up in the CLI's internal queue and leaves the daemon's hands: the ledger `delivered` diverges from "actually saw it" and control of batching and order is lost.
+- **Dribble injection one at a time** — one turn per message = N times the tokens and time, and a contradiction within a batch ("#3: ignore #1") is found by the recipient only after it has already acted on #1. With a batch, the receiving LLM sees the whole and sorts out priorities and contradictions itself (isomorphic to how a person opens a mailbox).
 
 ## 근거
 
-- 사용자 결정(2026-07-24, 이 세션): 그룹 주소 단위 = 폴더 방향(계층 비채택) · wake 연기 · idle 게이트 + 일괄 채택 + 배치 검증 강화 지시.
-- idle 주입 선례 = Claude Code 팀의 파일 수신함 + idle 주입(ADR-0103 근거 절의 리서치에서 확인) — 우리 메일박스 대기·flush와 동형.
-- XML 봉투 단일화(ADR-0103 결정 1)가 일괄 주입의 전제를 받침 — 배치 안에서 메시지 경계가 구조적으로 명확(콜론 포맷이었으면 경계가 뭉개짐).
-- 미검증(구현 QA 항목, spec §7): 턴 진행 중 stdin 주입 시 CLI(stream-json) 큐잉 실동작 · busy/idle 관측(턴 이벤트) 정확성.
+- User decision (2026-07-24, this session): group address unit = the folder direction (hierarchy not adopted) · wake deferred · idle gate + batch adopted + an instruction to strengthen batch verification.
+- The idle injection precedent = the Claude Code team's file inbox + idle injection (confirmed in the research in the 근거 section of ADR-0103) — isomorphic to our mailbox wait and flush.
+- Unifying on the XML envelope (ADR-0103 decision 1) supports the premise of batch injection — message boundaries within a batch are structurally clear (with the colon format the boundaries would be blurred).
+- Unverified (implementation QA item, spec §7): the real queuing behavior of the CLI (stream-json) when injecting to stdin in the middle of a turn · the accuracy of busy/idle observation (turn events).
 
 ## 영향 / 불변식
 
-- **GroupRegistry는 해석 seam** — 그룹 소스(명단/@all, 미래 폴더·계층)를 추가해도 메시징 파이프라인(ingress·MessagingService)은 불변이어야 한다. 소스 지식이 파이프라인에 새면 이 결정 위반.
-- **`delivered` = 실제 주입 시점** — busy 중 CLI stdin에 선주입하고 delivered를 찍으면 장부 신뢰가 깨진다(idle 게이트 우회 금지).
-- **flush = 일괄·오래된 순** — 등장 flush(ADR-0103 결정 5)와 idle flush가 같은 규칙을 공유한다(경로 2벌 금지).
-- **잠든 수신자 = 파킹**(v1) — wake 경로를 슬쩍 넣지 말 것. 재론은 사용자만(v2 후보: request 한정 wake).
-- busy/idle 관측은 capability로 선언 — 관측 불가 백엔드에서 idle 게이트를 강제하면 배달이 영구 대기된다(즉시 주입 폴백 필수).
+- **GroupRegistry is a resolution seam** — adding a group source (roster/@all, a future folder or hierarchy) must leave the messaging pipeline (ingress · MessagingService) unchanged. If source knowledge leaks into the pipeline, this decision is violated.
+- **`delivered` = the actual injection time** — pre-injecting to the CLI stdin during busy and stamping delivered breaks trust in the ledger (no bypassing the idle gate).
+- **flush = batch · oldest first** — the appearance flush (ADR-0103 decision 5) and the idle flush share the same rule (no two paths).
+- **A sleeping recipient = parking** (v1) — do not slip in a wake path. Only the user may reopen it (v2 candidate: request-limited wake).
+- busy/idle observation is declared as a capability — forcing the idle gate on a backend that cannot be observed makes delivery wait forever (the immediate-injection fallback is mandatory).

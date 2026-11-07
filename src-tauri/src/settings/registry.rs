@@ -1,29 +1,29 @@
-//! 설정 스키마 표 — 키 · 종류 · 기본값 · 설명의 정본이고, 입력을 정규 문자열로 바꾸는 규칙(TRD §5-2)도
-//! 여기 있다. 설정 하나를 더하는 일 = [`SETTINGS`] 에 한 줄. 파일은 모른다(`store`).
+//! Settings schema table — the canonical source of key · kind · default · description, and the rules that turn input into a canonical string (TRD §5-2) are
+//! here too. Adding one setting = one line in [`SETTINGS`]. It does not know the file (`store`).
 
-/// 값의 종류 — 받는 입력과 정규형이 종류마다 갈린다([`SettingDef::normalize`]).
+/// Kind of value — the accepted input and canonical form differ per kind ([`SettingDef::normalize`]).
 pub(super) enum Kind {
-    /// 표의 철자가 정규형이다. 입력은 대소문자를 가리지 않는다.
+    /// The spelling in the table is the canonical form. Input is case-insensitive.
     Choice(&'static [&'static str]),
-    /// CSS 길이. ★범위는 단위마다 따로다★ — 숫자 범위 하나를 단위와 무관하게 대면 `48rem` 이 통과한다.
-    /// `px` 는 늘 받고, `rem` 이 `Some` 인 키만 rem·em 을 같은 범위로 받는다. 양 끝 포함.
+    /// CSS length. ★The range is separate per unit★ — if a single numeric range is applied regardless of unit, `48rem` passes.
+    /// `px` is always accepted, and only keys where `rem` is `Some` accept rem·em with the same range. Both ends inclusive.
     CssLength {
         px: (f64, f64),
         rem: Option<(f64, f64)>,
     },
-    /// 단위 없는 CSS 수. 양 끝 포함.
+    /// Unitless CSS number. Both ends inclusive.
     CssNumber { range: (f64, f64) },
 }
 
 pub(super) struct SettingDef {
     pub key: &'static str,
     pub kind: Kind,
-    /// 정규형으로 적는다 — 시험이 「기본값이 자기 자신으로 정규화된다」를 잰다.
+    /// Write it in canonical form — a test measures 「기본값이 자기 자신으로 정규화된다」(the default normalizes to itself).
     pub default: &'static str,
     pub desc: &'static str,
 }
 
-/// px · rem(em) 범위 묶음 셋. 지금 값이 통과하는 넉넉한 선이지 다듬은 값이 아니다(아래 표 머리).
+/// Three sets of px · rem(em) range bundles. A generous line that current values pass, not a refined value (table header below).
 const FONT_PX: (f64, f64) = (8.0, 48.0);
 const FONT_REM: (f64, f64) = (0.5, 3.0);
 const SPACE_PX: (f64, f64) = (0.0, 200.0);
@@ -43,16 +43,16 @@ const fn spacing(key: &'static str, default: &'static str, desc: &'static str) -
     }
 }
 
-/// 설정 전부 — 이 순서가 `get`·`schema` 의 답 순서다.
+/// All settings — this order is the answer order of `get`·`schema`.
 ///
-/// ★`chat.style.*` 는 임시 이름공간이다(사용자 결정 2026-10-02 · U2)★ — 프론트의 11키와 기본값을 그대로
-/// 옮겼고, 챗 영역 재작성과 플러그인 배치로 갈려 나갈 예정이다. 키 이름 · 묶음 · 범위를 다듬지 않는다.
-/// 이 키들을 표에서 빼는 변경이 파일에 남은 값을 지우는 일까지 맡는다 — 모르는 키는 파일에 남고 명령으로
-/// 못 지운다(TRD §5-1).
+/// ★`chat.style.*` is a temporary namespace (user decision 2026-10-02 · U2)★ — the frontend's 11 keys and defaults were carried over
+/// as they are, and it is due to be replaced by the chat area rewrite and the plugin layout. Key names · bundling · ranges are not refined.
+/// A change that removes these keys from the table also takes on deleting the values left in the file — an unknown key stays in the file and cannot be
+/// deleted by a command (TRD §5-1).
 ///
-/// ADR-0051: `chat.style.*` 기본값은 `src/styles/theme.css` `:root` 의 `--chat-*` fallback 과 같아야 한다 —
-/// 하나만 바뀌면 부팅 첫 프레임과 설정 적용이 어긋난다. 그 대조를 재는 시험은 없다(U2). 숫자는 사용자가
-/// 라이브 튜닝으로 확정한 값이다 — 임의로 「정리」하지 말 것.
+/// ADR-0051: the `chat.style.*` defaults must equal the `--chat-*` fallback of `:root` in `src/styles/theme.css` —
+/// if only one changes, the first boot frame and the settings application diverge. There is no test that measures that comparison (U2). The numbers are values the user
+/// settled by live tuning — do not 「정리」(tidy up) them arbitrarily.
 // ADR-0265
 pub(super) const SETTINGS: &[SettingDef] = &[
     SettingDef {
@@ -123,7 +123,7 @@ pub(super) fn find(key: &str) -> Option<&'static SettingDef> {
     SETTINGS.iter().find(|def| def.key == key)
 }
 
-/// 정확한 키 하나, 또는 `.` 으로 끝나는 접두가 덮는 키 전부(표 순서). 맞는 것이 없으면 빈 목록.
+/// One exact key, or all keys covered by a prefix ending in `.` (table order). An empty list if none match.
 pub(super) fn select(selector: &str) -> Vec<&'static SettingDef> {
     if selector.ends_with('.') {
         SETTINGS
@@ -136,13 +136,13 @@ pub(super) fn select(selector: &str) -> Vec<&'static SettingDef> {
 }
 
 impl SettingDef {
-    /// 입력 → 정규 문자열(TRD §5-2). 모든 종류가 앞뒤 공백을 받는다.
+    /// Input → canonical string (TRD §5-2). All kinds accept leading and trailing whitespace.
     ///
-    /// 수는 `[+-]? (숫자+ (. 숫자+)? | . 숫자+)` 만 받는다 — 지수 표기 · `inf` · `NaN` · `5.` 은 거절이다.
-    /// 정규형은 최단 십진(지수 없음) · `+` 없음 · `-0` 은 `0` · 단위는 소문자.
+    /// A number accepts only `[+-]? (숫자+ (. 숫자+)? | . 숫자+)` — exponent notation · `inf` · `NaN` · `5.` are rejected.
+    /// The canonical form is the shortest decimal (no exponent) · no `+` · `-0` becomes `0` · unit in lowercase.
     ///
-    /// `Err` = 호출자에게 그대로 보일 문구(무엇이 틀렸나 + 기대 형식). ★받은 값은 싣지 않는다★ — 보낸 쪽이
-    /// 이미 알고, 상한 없는 문자열이 오류 문구와 로그로 번진다.
+    /// `Err` = a message shown to the caller as is (what is wrong + the expected format). ★The received value is not included★ — the sender
+    /// already knows it, and an unbounded string would spread into the error message and log.
     pub fn normalize(&self, input: &str) -> Result<String, String> {
         let input = input.trim();
         let refuse = |problem: &str| Err(format!("{problem} — 기대: {}", self.expected()));
@@ -174,7 +174,7 @@ impl SettingDef {
         }
     }
 
-    /// `settings.schema` 가 싣는 종류 이름.
+    /// Kind name that `settings.schema` carries.
     pub fn kind_name(&self) -> &'static str {
         match self.kind {
             Kind::Choice(_) => "choice",
@@ -190,8 +190,8 @@ impl SettingDef {
         }
     }
 
-    /// (하한, 상한) — 정규형 문자열. `CssLength` 는 받는 단위마다 한 값씩 `, ` 로 잇는다
-    /// (`"8px, 0.5rem, 0.5em"`). `Choice` 는 둘 다 `None`.
+    /// (lower bound, upper bound) — canonical form strings. `CssLength` joins one value per accepted unit with `, `
+    /// (`"8px, 0.5rem, 0.5em"`). `Choice` is `None` for both.
     pub fn bounds(&self) -> (Option<String>, Option<String>) {
         match &self.kind {
             Kind::Choice(_) => (None, None),
@@ -252,9 +252,9 @@ fn within(value: f64, (lo, hi): (f64, f64)) -> bool {
     lo <= value && value <= hi
 }
 
-/// 앞머리의 수와 나머지(단위 자리). 수 문법은 [`SettingDef::normalize`] 문서.
+/// The leading number and the rest (the unit place). For the number grammar see the docs of [`SettingDef::normalize`].
 ///
-/// 지수를 따로 막지 않아도 거절된다 — `1e2px` 의 나머지는 `e2px` 라 단위가 아니다.
+/// It is rejected even without blocking exponents separately — the rest of `1e2px` is `e2px`, which is not a unit.
 fn split_number(text: &str) -> Option<(f64, &str)> {
     let bytes = text.as_bytes();
     let digits_from = |start: usize| {
@@ -277,14 +277,14 @@ fn split_number(text: &str) -> Option<(f64, &str)> {
     if int_digits + frac_digits == 0 {
         return None;
     }
-    // 위 문법을 지난 문자열은 `f64` 파서가 늘 받는다. 아주 긴 수는 무한대로 올라가 범위 검사에서 걸린다.
+    // A string that passed the grammar above is always accepted by the `f64` parser. A very long number rises to infinity and is caught by the range check.
     let value = text[..end].parse::<f64>().ok()?;
     Some((value, &text[end..]))
 }
 
-/// 최단 십진 — `f64` 의 `Display` 는 왕복하는 가장 짧은 자릿수를 지수 없이 낸다.
+/// Shortest decimal — `Display` of `f64` gives the shortest round-tripping digits with no exponent.
 fn canonical_number(value: f64) -> String {
-    // `-0` 을 `0` 으로 — 안 그러면 `-0px` 가 `-0px` 로 남는다.
+    // `-0` to `0` — otherwise `-0px` stays as `-0px`.
     let value = if value == 0.0 { 0.0 } else { value };
     format!("{value}")
 }
@@ -310,7 +310,7 @@ mod tests {
         }
     }
 
-    // ── 표 ──
+    // ── table ──
 
     #[test]
     fn the_table_has_twelve_unique_keys() {
@@ -354,7 +354,7 @@ mod tests {
         assert_eq!(def("theme.default").default, "dark");
     }
 
-    // ── 선택자 ──
+    // ── selector ──
 
     #[test]
     fn a_selector_is_an_exact_key_or_a_prefix_ending_in_a_dot() {
@@ -486,7 +486,7 @@ mod tests {
         refused(k, "normal");
     }
 
-    // ── 스키마 ──
+    // ── schema ──
 
     #[test]
     fn schema_kinds_and_bounds() {

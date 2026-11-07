@@ -1,17 +1,17 @@
-// 재연결 뒤 PTY 치수 재전파 회귀 — 끊긴 동안 떨어진 resize 를 소켓이 서면 한 번 다시 낸다.
+// Regression for PTY size re-propagation after reconnect — once the socket is up, re-emit the resize that was dropped while disconnected.
 //
-// 배경(ADR-0195): 소켓이 없는 동안 들어온 명령은 담아 두지 않고 그 자리에서 실패한다 — 명령이 연결
-//   경계를 넘지 않게 하려는 결정이다. resize 는 fire-and-forget 이라 그 실패가 조용히 삼켜지고 다시
-//   낼 사람이 없어 PTY 가 끊기기 전 치수에 고착된다(재연결 창 = 500ms~10초. 그 사이 분할선을 끌면
-//   그 치수는 에이전트에 영영 닿지 않는다).
+// Background (ADR-0195): a command that arrives while there is no socket is not queued but fails on the spot — a decision meant to keep commands
+//   from crossing the connection boundary. resize is fire-and-forget, so that failure is silently swallowed, nobody re-emits it, and the PTY
+//   stays stuck at its pre-disconnect size (reconnect window = 500ms~10s. If the divider is dragged in between,
+//   that size never reaches the agent).
 //
-// ★이 회귀가 막는 반대편 둘★
-//   ① 같은 증상을 구독 트리거(viewId·agentId deps)에 연결 상태를 섞어 고치면 재연결마다 구독이 갈려
-//      replay 도착 전에 화면이 지워지고 화신 표식까지 잃는다(ADR-0164) — 재전파가 **재구독 없이**
-//      일어났음을 함께 못 박는다.
-//   ② 전이가 아니라 **값**을 보고 쏘는 구현(연결 상태가 참인 동안 effect 가 도는 족족 발사)은 마운트와
-//      agentId 교체에서 구독 경로와 겹쳐 쏜다 — 아래 '마운트' · 'agentId 교체' · StrictMode 케이스가
-//      그 구현에서 실패하도록 세워져 있다.
+// ★The two opposite sides this regression guards★
+//   ① Fixing the same symptom by mixing connection state into the subscription trigger (viewId·agentId deps) splits the subscription at every reconnect,
+//      so the screen is wiped before the replay arrives and the incarnation marker is lost too (ADR-0164) — so we also pin that the re-propagation
+//      happened **without resubscribing**.
+//   ② An implementation that fires on the **value**, not the transition (fires whenever the effect runs while connection state is true)
+//      fires overlapping the subscription path at mount and agentId swap — the 'mount' · 'agentId swap' · StrictMode cases below are
+//      built to fail on that implementation.
 
 import { StrictMode } from 'react'
 import { act, cleanup, render } from '@testing-library/react'
@@ -19,8 +19,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { OutputChunk, ViewPhase } from '../../api/agentClient'
 
-// jsdom 미제공 관측자 2종 — 콜백을 한 번도 발화하지 않는 no-op 이라 연결 경로만 남는다(크기 변화·
-//   가시성 전이가 내는 전파와 섞이지 않게 한다).
+// Two observers jsdom does not provide — no-ops that never fire the callback, so only the connection path remains (so they do not mix with the propagation that size changes ·
+//   visibility transitions produce).
 globalThis.ResizeObserver = class {
   observe() {}
   unobserve() {}
@@ -35,12 +35,12 @@ globalThis.IntersectionObserver = class {
   }
 } as unknown as typeof IntersectionObserver
 
-// ── 레이아웃 대역 ───────────────────────────────────────────────────────────────────
-// jsdom 은 레이아웃이 없어 offsetParent 를 **항상** null 로, getBoundingClientRect 를 **항상** 0 으로
-//   낸다. 그 둘이 정확히 슬롯의 숨김 판정 두 갈래(ADR-0056)라, 손대지 않으면 보이는 슬롯의 갈래를 이
-//   하네스에서 아예 밟을 수 없다. ★프로토타입에 심는 이유★: render() 이후에 붙이면 **마운트 커밋 시점**
-//   에는 여전히 숨김이라, 마운트에서 겹쳐 쏘는 구현조차 가드에 걸려 조용히 통과한다(그 함정이 이 파일의
-//   앞 판이었다).
+// ── Layout stand-in ───────────────────────────────────────────────────────────────────
+// jsdom has no layout, so it returns offsetParent **always** null and getBoundingClientRect **always** 0. Those two are exactly the slot's two
+//   hide-decision branches (ADR-0056), so untouched, the visible-slot branch can never be stepped on in this
+//   harness. ★Why it is planted on the prototype★: if attached after render(), it is still hidden **at the mount commit**,
+//   so even an implementation that fires overlapping at mount is caught by the guard and silently passes (that trap was this file's
+//   earlier edition).
 const layout = vi.hoisted(() => ({ visible: true, width: 800, height: 400 }))
 Object.defineProperty(HTMLElement.prototype, 'offsetParent', {
   configurable: true,
@@ -67,7 +67,7 @@ const captured = vi.hoisted(() => ({
   onState: null as ((s: ViewPhase) => void) | null,
 }))
 
-// 연결 상태 표면 — 실물과 동형으로 구독자를 들고 있다가 전이 때 통지한다(등록 즉시 1회 통지 포함).
+// Connection-state surface — holds subscribers like the real one and notifies them on transitions (including one notification right at registration).
 const conn = vi.hoisted(() => ({
   state: 'connected' as 'connected' | 'reconnecting' | 'down',
   cbs: new Set<(s: string) => void>(),
@@ -106,8 +106,8 @@ vi.mock('../../store/agentStore', () => ({
   useAgentStore: (selector: (s: typeof agentStoreState) => unknown) => selector(agentStoreState),
 }))
 
-// 치수는 holder 로 읽는다 — fit() 이 실제로 측정을 반영한 뒤에 읽혔는지를 값으로 가르기 위해서다.
-//   초기값 80×24 = xterm 생성자 기본값(실물과 같은 값이어야 한다 — 아래 fit 목 주석).
+// Size is read through a holder — to tell by value whether it was read after fit() actually reflected a measurement.
+//   Initial value 80×24 = xterm constructor default (must be the same value as the real one — see the fit mock comment below).
 const xtermDims = vi.hoisted(() => ({ cols: 80, rows: 24 }))
 vi.mock('@xterm/xterm', () => ({
   Terminal: class {
@@ -140,7 +140,7 @@ import TerminalSlot from './TerminalSlot'
 
 const AGENT = 'aaaa-bbbb-cccc-dddd'
 const OTHER_AGENT = 'eeee-ffff-0000-1111'
-/** 이 하네스에서 "실측된 살아있는 슬롯" 의 치수. */
+/** The size of a "measured live slot" in this harness. */
 const measured = { cols: 137, rows: 25 }
 
 async function flushSubscribe(): Promise<void> {
@@ -150,7 +150,7 @@ async function flushSubscribe(): Promise<void> {
   })
 }
 
-/** 연결 상태 전이(실물 ProtocolClient 가 구독자 전원에게 통지하는 경로와 동형). */
+/** Connection-state transition (same shape as the path where the real ProtocolClient notifies all subscribers). */
 function setConnection(state: 'connected' | 'reconnecting' | 'down'): void {
   act(() => {
     conn.state = state
@@ -176,13 +176,13 @@ beforeEach(() => {
   layout.height = 400
   xtermDims.cols = 80
   xtermDims.rows = 24
-  // ★fit 계약의 목이다(`@xterm/addon-fit` 소스 확인)★. `proposeDimensions()` 가 undefined 로
-  //   빠지는 조건은 셋뿐이다 — terminal 없음 · `element.parentElement` 없음 · **cell metrics 가 0**.
-  //   ★컨테이너 박스 크기는 그 셋에 없다★: metrics 는 xterm 이 글꼴로 재므로 박스와 무관하게 살아
-  //   있고, 붕괴한 박스는 음수 폭을 낳아 `Math.max(2,·)`/`Math.max(1,·)` 바닥인 2×1 로 **실제 resize 가
-  //   걸린다**. display:none 갈래의 no-op 은 목의 자리채움이다 — 실물은 no-op 이 아니다(실측 11×6 — TerminalSlot 헬퍼 주석).
-  //   목이 이 계약을 어기면 테스트가 라이브러리가 못 내는 값을 지어내고, 그 위에 세운 가드는 한 번도
-  //   발화할 수 없는 코드가 된다 — 이 파일의 앞 판이 정확히 그랬다.
+  // ★This is the mock of the fit contract (checked against the `@xterm/addon-fit` source)★. `proposeDimensions()` falls through to undefined
+  //   under only three conditions — no terminal · no `element.parentElement` · **cell metrics are 0**.
+  //   ★The container box size is not among the three★: metrics are measured by xterm from the font, so they stay alive
+  //   regardless of the box, and a collapsed box yields a negative width, clamped to the `Math.max(2,·)`/`Math.max(1,·)` floor 2×1, and **a real resize
+  //   is issued**. The no-op in the display:none branch is the mock's placeholder — the real one is not a no-op (measured 11×6 — TerminalSlot helper comment).
+  //   If the mock breaks this contract the test invents values the library cannot produce, and a guard built on that becomes code that can
+  //   never fire — the earlier edition of this file was exactly that.
   fitAddonFit.mockReset()
   fitAddonFit.mockImplementation(() => {
     if (!layout.visible) return
@@ -219,10 +219,10 @@ describe('TerminalSlot — 재연결 뒤 PTY 치수 재전파', () => {
     setConnection('reconnecting')
     setConnection('connected')
 
-    // fit 앞에서 치수를 읽으면 실측값이 아니라 생성 기본값(80×24)이 나간다.
+    // Reading the size before fit yields the construction default (80×24), not the measured value.
     expect(fitAddonFit).toHaveBeenCalled()
     expect(agentClient.resizePty).toHaveBeenCalledWith(AGENT, 137, 25)
-    // ★재구독 없이★ — 구독이 갈리면 replay 도착 전에 화면이 지워진다(ADR-0164).
+    // ★Without resubscribing★ — if the subscription is split, the screen is wiped before the replay arrives (ADR-0164).
     expect(subscribeCalls(agentClient)).toBe(subCalls)
   })
 
@@ -240,10 +240,10 @@ describe('TerminalSlot — 재연결 뒤 PTY 치수 재전파', () => {
     expect(agentClient.resizePty).toHaveBeenCalledTimes(1)
   })
 
-  // ★값이 아니라 전이를 보는지 가르는 것은 아래 agentId 교체 블록 하나다★. 같은 상태 재통지는 계기가
-  //   아니다 — setState 가 같은 값을 걸러 렌더가 안 나고 deps 도 그대로라, 값만 보는 구현도 거기선 안 쏜다.
-  //   앞의 재통지·리렌더 단언은 그 계약을 적어 둔 것이고, 구현을 가르는 힘은 교체 블록에만 있다
-  //   — ★그 블록을 「중복」으로 지우면 이 테스트는 아무것도 못 가른다★.
+  // ★What tells value-watching from transition-watching is the agentId swap block below alone★. Re-notifying the same state is not a
+  //   trigger — setState filters the same value so no render happens and deps stay the same, so an implementation watching only the value does not fire there either.
+  //   The earlier re-notify · re-render assertions record that contract, and the power to tell implementations apart lies only in the swap block
+  //   — ★if that block is deleted as 「중복」 (duplicate) this test can tell nothing apart★.
   it('붙어 있는 동안에는 발화하지 않는다 — 재통지·리렌더·agentId 교체 어느 것도 계기가 아니다', async () => {
     const { agentClient } = await import('../../api/clientFactory')
     const { rerender } = render(<TerminalSlot viewId="v1" agentId={AGENT} />)
@@ -255,7 +255,7 @@ describe('TerminalSlot — 재연결 뒤 PTY 치수 재전파', () => {
     await flushSubscribe()
     expect(agentClient.resizePty).not.toHaveBeenCalled()
 
-    // 새 에이전트의 초기 1회는 구독 .then 몫이다 — 여기서도 내면 그 위에 겹친다.
+    // The new agent's initial one-time emit belongs to the subscription .then — emitting here too would overlap it.
     rerender(<TerminalSlot viewId="v1" agentId={OTHER_AGENT} />)
     await flushSubscribe()
     expect(agentClient.resizePty).toHaveBeenCalledTimes(1)
@@ -271,9 +271,9 @@ describe('TerminalSlot — 재연결 뒤 PTY 치수 재전파', () => {
     expect(agentClient.resizePty).toHaveBeenCalledWith(AGENT, 137, 25)
   })
 
-  // 앱은 StrictMode 로 뜬다(main.tsx) — dev 이중 마운트가 effect 를 두 번 돌린다. 전이 기준선이 ref 라
-  //   두 번째 실행은 "이미 붙어 있었다" 로 읽혀야 한다. ★마운트 몫을 걷어내고 재연결만 재면 그 주장이
-  //   빠진다★ — 마운트 단언을 먼저 세운다.
+  // The app starts under StrictMode (main.tsx) — the dev double mount runs the effect twice. The transition baseline is a ref, so
+  //   the second run must read as "already attached". ★If you strip out the mount share and measure only reconnect, that claim
+  //   is lost★ — set up the mount assertion first.
   it('StrictMode 이중 마운트에서도 마운트 0 · 재연결 1 이다', async () => {
     const { agentClient } = await import('../../api/clientFactory')
     render(
@@ -283,8 +283,8 @@ describe('TerminalSlot — 재연결 뒤 PTY 치수 재전파', () => {
     )
     await flushSubscribe()
 
-    // 이중 마운트라 구독은 두 번 걸리지만, 살아남은 구독 하나만 .then 에서 치수를 낸다(앞 구독은
-    //   cancelled 가드에 걸려 빠진다). 이 경로가 마운트에서 아무것도 안 내야 총계가 1 이다.
+    // Because of the double mount the subscription is made twice, but only the surviving subscription emits a size in .then (the earlier one
+    //   is dropped by the cancelled guard). The total is 1 only if this path emits nothing at mount.
     expect(agentClient.resizePty).toHaveBeenCalledTimes(1)
 
     resizeCalls(agentClient).mockClear()
@@ -293,7 +293,7 @@ describe('TerminalSlot — 재연결 뒤 PTY 치수 재전파', () => {
     expect(agentClient.resizePty).toHaveBeenCalledTimes(1)
   })
 
-  // 숨은 슬롯(탭 keep-alive = display:none). 다시 보일 때 가시성 effect 가 같은 전파를 낸다.
+  // Hidden slot (tab keep-alive = display:none). When shown again, the visibility effect emits the same propagation.
   it('숨은 슬롯은 재연결에서도 치수를 전파하지 않는다', async () => {
     const { agentClient } = await import('../../api/clientFactory')
     layout.visible = false
@@ -309,11 +309,11 @@ describe('TerminalSlot — 재연결 뒤 PTY 치수 재전파', () => {
     expect(agentClient.resizePty).not.toHaveBeenCalled()
   })
 
-  // ★숨김 판정의 두 번째 갈래★: 표시는 됐는데(offsetParent 살아 있음) 박스만 0 으로 붕괴한 슬롯.
-  //   여기서 fit() 은 빠지지 않는다 — cell metrics 가 멀쩡해 음수 폭이 Math.max 바닥 2×1 로 눌리고 그
-  //   치수로 실제 resize 가 걸린다. 가드가 offsetParent 한 갈래뿐이면 그 2×1 이 PTY 로 나간다.
-  //   ★치수를 검사해서는 이 케이스를 못 막는다★(2×1 은 정상 치수와 구별되지 않는다) — 막는 것은
-  //   "언제 보내나" 쪽이라 fit() 에 닿기 전에 빠져야 한다. 그래서 단언도 fit() 미호출에 건다.
+  // ★Second branch of the hide decision★: a slot that is displayed (offsetParent alive) but whose box alone collapsed to 0.
+  //   Here fit() is not skipped — cell metrics are fine, so the negative width is clamped to the Math.max floor 2×1 and a real resize
+  //   is issued at that size. If the guard had only the offsetParent branch, that 2×1 would go out to the PTY.
+  //   ★Checking the size cannot block this case★ (2×1 is indistinguishable from a normal size) — what blocks it is
+  //   the "when to send" side, so it must drop out before reaching fit(). So the assertion hangs on fit() not being called too.
   it('표시됐지만 박스가 붕괴한 슬롯은 fit() 에 닿기 전에 빠진다', async () => {
     const { agentClient } = await import('../../api/clientFactory')
     layout.width = 0

@@ -1,24 +1,24 @@
-// TRD S21-slot-docking §4-2 「실음」: 탭 끌기의 OS 끌기 자료 — 타입 문자열 하나에 값 하나. 짓기(출처 dragstart) · 읽기(대상
-//   dragenter · drop)를 이 파일이 갖는다. 순수하다(DOM · Tauri 0).
-// ★대상이 dragover 동안 볼 수 있는 것은 `types` 뿐이다★(`getData` 는 drop 에서만 — 스파이크 실측) — 그래서 미리보기(R4)에 드는
-//   원래 크기와 띠 유효성(R8)에 드는 끄는 탭 모양을 타입 문자열의 칸에 싣는다. 셸 경유 · 창 사이 채널은 거부했다(ADR-0296 ·
-//   TRD §4-2). 타입 문자열 칸이 창 사이 OLE 를 못 건너는지는 미검이다(M3 — 새면 대상이 크기 · 모양 없음으로 읽는다).
-// ★타입 문자열은 소문자로 짓고 소문자로 견준다★ — Chromium 이 `setData` 의 형식을 소문자로 바꾼다.
-// ★이 형식 하나만 싣는다★ — `text/plain` · URL 을 실으면 다른 앱이 받아 그 앱에 글자가 들어간다(옛 HTML5 끌기 `TabBar` 조항).
+// TRD S21-slot-docking §4-2 「실음」: OS drag data of the tab drag — one value per type string. This file owns building (source dragstart) · reading (target
+//   dragenter · drop). Pure (no DOM · Tauri).
+// ★All a target can see during dragover is `types`★ (`getData` only at drop — spike measurement) — so the original size needed by the preview (R4) and the dragged tab shape needed by
+//   band validity (R8) are carried in fields of the type string. A path through the shell · a channel between windows was rejected (ADR-0296 ·
+//   TRD §4-2). Whether a type string field cannot cross OLE between windows is untested (M3 — if it leaks, the target reads it as no size · no shape).
+// ★The type string is built in lowercase and compared in lowercase★ — Chromium lowercases the format of `setData`.
+// ★Carry only this one format★ — if `text/plain` · a URL is carried, another app receives it and text enters that app (the clause of the old HTML5 drag `TabBar`).
 
 import type { LayoutNode, SplitDir } from '../../../api/layoutTypes'
 import type { PointCss } from '../../../../src-tauri/bindings/PointCss'
 import type { SizeCss } from '../../../../src-tauri/bindings/SizeCss'
 
-/** 우리 탭 끌기 타입 문자열의 머리 — 뒤에 `;키=값` 칸이 붙는다. */
+/** Head of our tab drag type string — `;키=값` fields are attached after it. */
 export const TAB_MIME = 'application/x-engram-tab'
 
-/** 값의 판 — 읽는 쪽은 이것이 아니면 우리 끌기 값이 아니라고 본다. */
+/** Version of the value — if it is not this, the reader sees it as not our drag value. */
 const VALUE_VERSION = 1
 
 /**
- * 끌기 자료의 값(JSON) — drop 에서만 읽힌다. 뜻은 `TabDrop` · `DropTo.new_window` 의 같은 이름 칸이다(`size` = 새 창 안쪽
- * 크기 · `null` = 탭 하나뿐인 팝아웃 · `grab` = 새 창 뷰포트에서 커서가 올 점).
+ * Value of the drag data (JSON) — read only at drop. Meaning is the same-named fields of `TabDrop` · `DropTo.new_window` (`size` = new window inner
+ * size · `null` = single-tab popout · `grab` = the point where the cursor will be in the new window viewport).
  */
 export interface TabDragValue {
   v: typeof VALUE_VERSION
@@ -30,9 +30,9 @@ export interface TabDragValue {
   grab: PointCss
 }
 
-/** 출처가 타입 문자열에 싣는 것. `original` = 원래 크기(R7 · CSS px — 정수로 반올림해 싣는다) · `shape` = `shapeOf` 의 답. */
+/** What the source carries in the type string. `original` = original size (R7 · CSS px — carried rounded to integers) · `shape` = the answer of `shapeOf`. */
 export interface TabDragTypeInput {
-  /** Tauri `getIdentifier()` — 다른 판(개발 · 배포 · 스파이크)의 끌기를 받지 않는 열쇠. */
+  /** Tauri `getIdentifier()` — a key that does not accept drags of other builds (dev · release · spike). */
   app: string
   drag: string
   original: SizeCss | null
@@ -40,21 +40,21 @@ export interface TabDragTypeInput {
 }
 
 /**
- * 대상이 `types` 에서 읽은 우리 끌기. 칸이 없거나 깨졌으면 그 칸만 `null` 이다 — 대상은 원래 크기 없음 = 칸 절반 몫(상한),
- * 모양 없음 = 칸 하나로 친다(TRD §4-2 · §4-5).
+ * Our drag the target read from `types`. If a field is missing or broken, only that field is `null` — the target treats no original size = half the area (the cap),
+ * no shape = one area (TRD §4-2 · §4-5).
  */
 export interface TabDragHead {
-  /** `dataTransfer.types` 에 실린 그대로의 타입 문자열 — drop 에서 `getData` 의 열쇠. */
+  /** The type string exactly as carried in `dataTransfer.types` — the key for `getData` at drop. */
   mime: string
   drag: string | null
   original: SizeCss | null
-  /** 끄는 탭 레이아웃 모양 — `parseShape` 의 답. */
+  /** Layout shape of the dragged tab — the answer of `parseShape`. */
   shape: LayoutNode | null
 }
 
-// ── 타입 문자열 ────────────────────────────────────────────────────────────────
+// ── type string ────────────────────────────────────────────────────────────────
 
-/** 출처 dragstart 의 타입 문자열 — `application/x-engram-tab;app=…;drag=…;w=…;h=…;shape=…`(없는 칸은 싣지 않는다). */
+/** Type string of the source dragstart — `application/x-engram-tab;app=…;drag=…;w=…;h=…;shape=…` (a missing field is not carried). */
 export function buildTabDragType(input: TabDragTypeInput): string {
   const parts = [TAB_MIME, `app=${input.app}`, `drag=${input.drag}`]
   if (input.original !== null) {
@@ -65,8 +65,8 @@ export function buildTabDragType(input: TabDragTypeInput): string {
 }
 
 /**
- * `types` 에서 우리 끌기를 찾는다 — 우리 머리이고 `app` 칸이 `app` 과 같은(대소문자 무시) 첫 타입. 없으면 `null`(파일 ·
- * 링크 · 트리 행 · 다른 판의 탭 끌기).
+ * Find our drag in `types` — the first type that is our head and whose `app` field equals `app` (case ignored). If none, `null` (a file ·
+ * link · tree row · tab drag of another build).
  */
 export function readTabDragType(types: readonly string[], app: string): TabDragHead | null {
   const want = app.toLowerCase()
@@ -98,24 +98,24 @@ function sizeOf(w: string | undefined, h: string | undefined): SizeCss | null {
   return { w: Number(w), h: Number(h) }
 }
 
-// ── 모양 ───────────────────────────────────────────────────────────────────────
+// ── shape ───────────────────────────────────────────────────────────────────────
 
-// 전위 순 — 칸 = `l` · 분할 = `h<비율>_`(좌우) · `v<비율>_`(위아래) 뒤에 두 자식(a → b). 비율 = JS `String(n)` — f64 를
-//   그대로 되읽고, 소문자이며 `;` · `=` 가 없어 타입 문자열 칸에 그대로 든다.
+// Pre-order — area = `l` · split = `h<비율>_` (left-right) · `v<비율>_` (top-bottom) followed by two children (a → b). Ratio = JS `String(n)` — f64 is read back
+//   as is, is lowercase and has no `;` · `=`, so it fits in a type string field as is.
 const DIR_CODE: Record<SplitDir, string> = { left_right: 'h', top_bottom: 'v' }
 
-/** 레이아웃의 모양만(슬롯 id · 내용 없음) — 타입 문자열 `shape` 칸의 값. */
+/** Shape of the layout only (no slot id · no content) — the value of the type string `shape` field. */
 export function shapeOf(layout: LayoutNode): string {
   if (layout.type === 'slot') return 'l'
   return `${DIR_CODE[layout.dir]}${String(layout.ratio)}_${shapeOf(layout.a)}${shapeOf(layout.b)}`
 }
 
-/** `String(n)` 이 내는 유한 수의 꼴(소문자 지수). */
+/** Form of a finite number that `String(n)` emits (lowercase exponent). */
 const NUMBER_TEXT = /^-?(?:\d+(?:\.\d+)?|\.\d+)(?:e[+-]?\d+)?$/
 
 /**
- * `shapeOf` 의 답 → 레이아웃 나무. id 는 전위 순서로 지어 붙인다(칸 = `shape-slot-<k>` · 분할 = `shape-split-<k>`) · 칸 내용은
- * `empty`. 문법에 맞지 않거나 비율이 유한 수가 아니면 `null`.
+ * Answer of `shapeOf` → layout tree. Ids are built and attached in pre-order (area = `shape-slot-<k>` · split = `shape-split-<k>`) · area content is
+ * `empty`. `null` if it does not fit the grammar or a ratio is not a finite number.
  */
 export function parseShape(text: string): LayoutNode | null {
   let at = 0
@@ -147,14 +147,14 @@ export function parseShape(text: string): LayoutNode | null {
   return root !== null && at === text.length ? root : null
 }
 
-// ── 값 ─────────────────────────────────────────────────────────────────────────
+// ── value ─────────────────────────────────────────────────────────────────────────
 
-/** 출처 dragstart 의 값. */
+/** Value of the source dragstart. */
 export function buildTabDragValue(value: Omit<TabDragValue, 'v'>): string {
   return JSON.stringify({ v: VALUE_VERSION, ...value })
 }
 
-/** drop 의 `getData` 결과 → 값. JSON 이 깨졌거나 칸 모양이 다르면 `null`. */
+/** Result of `getData` at drop → value. `null` if the JSON is broken or the field shape differs. */
 export function readTabDragValue(raw: string): TabDragValue | null {
   let parsed: unknown
   try {

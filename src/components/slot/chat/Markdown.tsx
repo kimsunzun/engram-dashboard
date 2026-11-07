@@ -1,9 +1,9 @@
-// 채팅 마크다운 렌더러 — 우리 자체 구현(벤치마크 = Claude Code VSCode 확장 룩, 픽셀은 후속 조정).
-//   assistant 본문(신뢰 콘텐츠)만 이 렌더러를 태운다. 도구 IN/OUT·탈출구 json 은 신뢰할 수 없는
-//   텍스트라 StructuredTextView 가 리터럴 <pre>(InertCode)로만 그린다 — 여기 오지 않는다.
+// Chat markdown renderer — our own implementation (benchmark = Claude Code VSCode extension look, pixels adjusted later).
+//   Only assistant body (trusted content) goes through this renderer. Tool IN/OUT and escape-hatch json are untrusted
+//   text, so StructuredTextView draws them only as a literal <pre> (InertCode) — they do not come here.
 //
-// bare URL 자동링크용 커스텀 remark 플러그인은 두지 않는다 — remark-gfm 이 이미 처리하므로
-//   unist-util-visit 기반 변환이 불필요.
+// No custom remark plugin for bare URL autolinks — remark-gfm already handles it, so
+//   an unist-util-visit based transform is unnecessary.
 import type { ComponentProps, HTMLAttributes } from 'react'
 import { useCallback, useRef } from 'react'
 import ReactMarkdown from 'react-markdown'
@@ -17,16 +17,16 @@ import { t } from '../../../i18n'
 import './chat.css'
 import 'katex/dist/katex.min.css'
 
-// 스트림 출력이 ``` 펜스 바로 앞에 zero-width 문자를 흘리면(U+200B/200C/200D/2060/FEFF) 펜스 오프너는
-//   "공백 0–3 + 백틱" 이어야 하는데 zero-width 는 비공백이라 micromark 가 펜스를 놓치고 두 ``` 를 인라인
-//   code-span 쌍으로 파싱한다 → 코드블록이 문단으로 붕괴한다. 우리 신뢰 콘텐츠에서 zero-width 는 의미가
-//   없으므로 파싱 전에 제거하는 게 안전하고 렌더를 견고하게 한다. (\u 이스케이프로 명시 — 소스에 리터럴
-//   zero-width 를 두면 보이지 않는 편집 위험.)
+// If the stream output leaks a zero-width character right before a ``` fence (U+200B/200C/200D/2060/FEFF), a fence opener must be
+//   "0–3 spaces + backticks", but zero-width is non-whitespace so micromark misses the fence and parses two ``` as an inline
+//   code-span pair → the code block collapses into a paragraph. In our trusted content zero-width has no meaning,
+//   so removing it before parsing is safe and makes the render robust. (Stated with \u escapes — leaving a literal
+//   zero-width in the source risks invisible edits.)
 const ZERO_WIDTH_RE = /[\u200B\u200C\u200D\u2060\uFEFF]/g
 const stripZeroWidth = (text: string): string => text.replace(ZERO_WIDTH_RE, '')
 
-// rehype-highlight 는 등록 언어명만 인식한다. 점이 낀 언어명 처리 = 스트림이 파일명을 언어로 흘리는
-//   경우 방어.
+// rehype-highlight recognizes only registered language names. Handling dotted language names = defense for the case
+//   where the stream passes a file name as the language.
 function normalizeCodeLang() {
   return (tree: unknown) => {
     const visit = (node: any): void => {
@@ -66,8 +66,8 @@ interface MarkdownProps {
 }
 
 /**
- * 전체 마크다운 문서를 하나의 <ReactMarkdown> 으로 렌더한다(블록 분할 금지 — 분할하면 uniformly 들여쓴
- * 문서가 단일 code 토큰으로 붕괴).
+ * Renders the whole markdown document as one <ReactMarkdown> (no block splitting — if split, a uniformly indented
+ * document collapses into a single code token).
  */
 export function Markdown({ markdown }: MarkdownProps) {
   const clean = markdown ? stripZeroWidth(markdown) : ''

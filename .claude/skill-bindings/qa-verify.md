@@ -16,12 +16,13 @@ cargo test --workspace -- --test-threads=4
 cargo test -p engram-dashboard-transport --all-features --test ws_dial -- --list
 cargo test -p engram-dashboard-transport --all-features --test ws_reject -- --list
 cargo test -p engram-dashboard-transport --all-features --test ws_write_deadline -- --list
+cargo test -p engram-dashboard-transport --all-features --test ws_accept -- --list
 cargo check -p engram-dashboard --features snap-overlay
 cargo test -p engram-dashboard-platform --features snap-overlay -- window::snap --test-threads=4
 ```
 
 - 그 밖에 `qa.md` 「모듈별 명령」의 crate 줄을 전부 돈다(셸 타깃 다섯 · net 두 줄 · transport 세 줄 포함). daemon 줄은 뺀다 — backend 잡에 따로 없고 워크스페이스 줄이 이미 돈다.
-- `--list` 세 줄은 줄마다 `: test` 로 끝나는 줄이 1개 이상이어야 PASS 다.
+- `--list` 네 줄은 줄마다 `: test` 로 끝나는 줄이 1개 이상이어야 PASS 다.
 - `window::snap` 줄은 `test window::snap::` … `ok` 줄이 1개 이상이어야 PASS 다.
 - 로컬 워크스페이스 회귀는 실 claude 시험을 빼지 않는다 — claude 가 없거나 미로그인이면 그 시험은 수단 없음 PARTIAL 이다(`qa.md` 「claude · codex 레인」과 같다).
 - 빠진 스텝이 없는지 backend 잡 스텝 이름과 대조한다:

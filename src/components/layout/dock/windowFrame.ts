@@ -1,10 +1,10 @@
-// TRD S21-slot-docking §3-8: 이 창의 창 사실(복원 안쪽 크기 · 최대화 · 틀 inset · 앞 창 · 크롬 모양 — 뒤 둘은 TRD
-//   S26-window-chrome §6-5) — 마운트 때 `window_frame` 으로 한 번 당기고,
-//   그 뒤는 셸이 값이 바뀔 때만 미는 `window:frame` 을 받아 마지막 값 하나만 쥔다. 출처 웹뷰가 dragstart 에 원래 크기 · 새 창
-//   크기를 셈하는 재료이고(R7 · R22), 제목 줄이 최대화 · 흐림 · 단추를 그리는 재료다(TRD S26-window-chrome §7 — `subscribe`).
-//   끌기 밖의 통신이라 끄는 동안에도 막지 않고 받는다(ADR-0297) — 끌기는 dragstart 에 그때 값을 한 번 읽을 뿐이다.
-// ★틀 inset 을 웹에서 `outer* − inner*` 로 셈하지 않는다★ — WebView2 에서 그 값이 창 틀과 맞는지 미검이라 셸이 셈한 값만 쓴다.
-// invoke/listen 을 직접 부르는 까닭 · 끊는 법은 `tabDrop.ts` 와 같다(셸이 주인 · 버스 명령 아님 · ADR-0012).
+// TRD S21-slot-docking §3-8: this window's window facts (restored inner size · maximized · frame inset · front window · chrome shape — the last two are TRD
+//   S26-window-chrome §6-5) — pulled once at mount with `window_frame`,
+//   after that it receives `window:frame`, which the shell pushes only when values change, and holds only the last value. It is the material the source webview uses at dragstart to compute the original size · new window
+//   size (R7 · R22), and the material the title row uses to draw maximize · dimming · buttons (TRD S26-window-chrome §7 — `subscribe`).
+//   It is communication outside the drag, so it is received without blocking even during a drag (ADR-0297) — the drag reads the value at that time only once at dragstart.
+// ★Do not compute the frame inset in the web as `outer* − inner*`★ — whether that value matches the window frame on WebView2 is untested, so only the value the shell computed is used.
+// The reason for calling invoke/listen directly · how to cut it apart is the same as `tabDrop.ts` (the shell owns it · not a bus command · ADR-0012).
 
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
@@ -21,18 +21,18 @@ export type { WindowFrame }
 export const CMD_WINDOW_FRAME = 'window_frame'
 export const EVT_WINDOW_FRAME = 'window:frame'
 
-/** Tauri 와의 접점. `listen` 은 이 창으로 지목된 사건만 받고, 등록이 끝나면 푸는 함수로 풀린다. */
+/** Contact point with Tauri. `listen` receives only events addressed to this window, and when registration finishes it is released by the unlisten function. */
 export interface WindowFrameIpc {
   invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T>
   listen(event: string, handler: (payload: unknown) => void): Promise<() => void>
 }
 
 export interface WindowFrameSource {
-  /** 마지막으로 받은 값 — 아직 못 받았으면 `null`(그동안 대상은 크기 없음으로 친다 · TRD §4-2). 다음 값을 받기 전까지 같은 참조다. */
+  /** The last value received — `null` if not yet received (meanwhile the target treats it as no size · TRD §4-2). The same reference until the next value is received. */
   current(): WindowFrame | null
-  /** `current()` 가 바뀔 때마다 부른다(`useSyncExternalStore` 꼴). 반환 = 떼기. 받기는 `install` 이 따로 단다. */
+  /** Called every time `current()` changes (`useSyncExternalStore` style). Return = detach. Receiving is attached separately by `install`. */
   subscribe(listener: () => void): () => void
-  /** 사건 듣기를 단 뒤 한 번 당긴다. 반환 = 떼기. */
+  /** Pull once after attaching event listening. Return = detach. */
   install(): () => void
 }
 
@@ -61,7 +61,7 @@ function captionOf(raw: unknown): CaptionChrome | undefined {
     : undefined
 }
 
-/** 모양이 계약과 다르면 `null`. */
+/** `null` if the shape differs from the contract. */
 function frameOf(raw: unknown): WindowFrame | null {
   if (raw === null || typeof raw !== 'object') return null
   const v = raw as Record<string, unknown>
@@ -81,7 +81,7 @@ function frameOf(raw: unknown): WindowFrame | null {
 
 export function createWindowFrame(ipc: WindowFrameIpc): WindowFrameSource {
   let frame: WindowFrame | null = null
-  // 받은 `window:frame` 의 수 — 당기기 답은 그것을 낸 뒤 사건이 하나라도 왔으면 버린다.
+  // Number of `window:frame` received — a pull answer is discarded if even one event came after it was issued.
   let pushes = 0
   const listeners = new Set<() => void>()
   const set = (next: WindowFrame): void => {
@@ -130,20 +130,20 @@ export function createWindowFrame(ipc: WindowFrameIpc): WindowFrameSource {
           off = unlisten
         } catch (err) {
           if (err instanceof RetryCancelledError) return
-          // 당기기는 그대로 낸다 — 사건을 못 받아도 마운트 때 값은 있어야 한다.
+          // Issue the pull as is — even if events cannot be received, a value must exist at mount.
           console.error(`[windowFrame] ${EVT_WINDOW_FRAME} 구독 최종 실패 — 이 창은 창 사실 바뀜을 못 받는다:`, err)
         }
         if (disposed) return
-        // ★구독을 단 **뒤에** 당긴다★ — 나란히 띄우면 당기기와 등록 사이의 바뀜을 놓쳐 옛 값에 머문다
-        //   (`api/restoreClient.ts` 의 같은 조항).
+        // ★Pull **after** attaching the subscription★ — if issued side by side, a change between the pull and the registration is missed and it stays at the old value
+        //   (the same clause of `api/restoreClient.ts`).
         const seen = pushes
         try {
           const raw = await retryAsync(() => ipc.invoke<unknown>(CMD_WINDOW_FRAME), {
             isCancelled,
             onRetry: (err, attempt) => console.warn(`[windowFrame] ${CMD_WINDOW_FRAME} 재시도 #${attempt}:`, err),
           })
-          // 당기기를 낸 뒤 사건이 왔으면 마지막 값은 사건이 나른다(셸은 바뀔 때마다 민다) — 답이 사건보다 늦게 닿아 옛 값으로
-          //   덮지 않게 버린다.
+          // If an event came after the pull was issued, the event carries the last value (the shell pushes on every change) — discard the answer so that, arriving later than the event, it does not
+          //   overwrite with the old value.
           if (disposed || pushes !== seen) return
           const next = frameOf(raw)
           if (next === null) {
@@ -167,10 +167,10 @@ export function createWindowFrame(ipc: WindowFrameIpc): WindowFrameSource {
 }
 
 const tauriIpc: WindowFrameIpc = {
-  // ★`target` = 자기 label★ — 몸에 창 label 이 없어, 기본 타깃 `Any` 로 들으면 남의 창 값을 제 것으로 쥔다(TRD §2-2).
+  // ★`target` = its own label★ — the body has no window label, so listening with the default target `Any` would hold another window's value as its own (TRD §2-2).
   listen: (event, handler) => listen<unknown>(event, e => handler(e.payload), { target: getCurrentWindow().label }),
   invoke: <T>(cmd: string, args?: Record<string, unknown>) => invoke<T>(cmd, args),
 }
 
-/** 웹뷰마다 하나. */
+/** One per webview. */
 export const windowFrame: WindowFrameSource = createWindowFrame(tauriIpc)

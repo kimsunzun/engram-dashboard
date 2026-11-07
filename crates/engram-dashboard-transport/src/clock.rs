@@ -1,15 +1,15 @@
-//! 시간 seam — 백오프·keepalive·쓰기 시한이 **실제로 기다리지 않고** 검증되게 하는 축(ADR-0177 결정 8).
+//! Time seam — the axis that lets backoff · keepalive · write deadlines be verified **without actually waiting** (ADR-0177 decision 8).
 //!
-//! ★왜 dyn 인가★ — 제네릭으로 두면 `Peer`·`Registry`·`Pending`·`Streams` 네 타입 시그니처에 전부 번지고
-//! 명부의 컬렉션 타입까지 오염된다. 운영 구현이 하나뿐이라 단형화로 얻을 것도 없다.
+//! ★Why dyn★ — made generic, it would spread over all four type signatures `Peer` · `Registry` · `Pending` · `Streams`
+//! and even pollute the registry's collection type. There is only one production implementation, so monomorphization gains nothing.
 //!
-//! ★왜 `tokio::time::pause()` 로 대신하지 않나★ — ① 그것은 **런타임 전역** 장치라 런타임을 세워야만 쓰고
-//! [`crate::machine`](future 가 하나도 없는 순수 층)에는 적용할 데가 없다 ② 전송도 갈아끼우기로 한
-//! 마당에 시간을 tokio 에 묶으면 그 둘이 도로 붙는다 ③ `test-util` 은 dev 전용이라 소비자 하네스에서
-//! 켜지지 않을 수 있다. **단 실소켓 테스트에서는 `pause()` 가 더 싸므로 금지하지 않는다.**
+//! ★Why not replace it with `tokio::time::pause()`★ — ① it is a **runtime-global** device, so it can be used only by standing up a runtime, and
+//! there is nowhere to apply it in [`crate::machine`] (a pure layer with no future at all) ② with the transport also decided to be swappable,
+//! tying time to tokio would stick the two back together ③ `test-util` is dev-only, so it may not be
+//! enabled in the consumer harness. **But in real-socket tests `pause()` is cheaper, so it is not forbidden.**
 //!
-//! ★base `time::Clock` 과 아직 합치지 않았다★ — 3단계(transport 부착)에서 이 트레이트를 그것의 하위
-//! 트레이트로 만든다. 그때까지 이 crate 는 base 를 의존하지 않는다(ADR-0275 결정 3).
+//! ★Not yet merged with base `time::Clock`★ — at stage 3 (transport attachment) this trait is made a subtrait of it.
+//! Until then this crate does not depend on base (ADR-0275 decision 3).
 
 // ADR-0275
 use std::future::Future;
@@ -17,17 +17,17 @@ use std::time::{Duration, Instant};
 
 use futures_util::future::{BoxFuture, Either};
 
-/// 지금 몇 시인가와 얼마나 기다리나.
+/// What time it is and how long to wait.
 ///
-/// 지금 읽기만 있는 형제는 base 의 `time::Clock`(`now()` 하나)이고 **이 crate 는 거기에 `sleep` 을
-/// 더한다** — 백오프·keepalive·쓰기 시한은 *기다림*이 필요한데 `now()` 만으로는 그것을 못 만든다.
+/// The sibling that only reads the clock is base's `time::Clock` (just `now()`), and **this crate adds `sleep`
+/// to it** — backoff · keepalive · write deadlines need *waiting*, and `now()` alone cannot make that.
 pub trait Clock: Send + Sync + 'static {
     fn now(&self) -> Instant;
-    /// 반환 future 가 `'static` 인 것이 계약이다 — `select!` 팔에 넣은 뒤 그 자리에서 살아 있어야 한다.
+    /// The contract is that the returned future is `'static` — after being put in a `select!` arm it must stay alive there.
     fn sleep(&self, d: Duration) -> BoxFuture<'static, ()>;
 }
 
-/// 운영 구현.
+/// Production implementation.
 pub struct SystemClock;
 
 impl Clock for SystemClock {
@@ -40,7 +40,7 @@ impl Clock for SystemClock {
     }
 }
 
-/// 시한이 지났다.
+/// The deadline has passed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Elapsed;
 
@@ -52,12 +52,12 @@ impl std::fmt::Display for Elapsed {
 
 impl std::error::Error for Elapsed {}
 
-/// `dyn Clock` 위에서 도는 시한.
+/// A deadline running on `dyn Clock`.
 ///
-/// ★trait 메서드가 아니라 자유 함수인 것은 의도★ — 제네릭 메서드를 trait 에 두면 그 trait 이 dyn 호환이
-/// 아니게 되어 시간 축 전체가 무너진다.
+/// ★Being a free function rather than a trait method is intended★ — putting a generic method on the trait would make that trait not
+/// dyn-compatible and the whole time axis would collapse.
 ///
-/// `d` 가 0이면 `f` 를 **한 번은 폴링한다** — 이미 지난 시한이 진행 중인 일을 무조건 잘라내지 않게 한다.
+/// If `d` is 0, `f` is **polled once** — so that an already-passed deadline does not unconditionally cut off work in progress.
 pub async fn with_deadline<F: Future>(
     clock: &dyn Clock,
     d: Duration,
@@ -90,7 +90,7 @@ mod tests {
         let never = clock.sleep(Duration::from_secs(3600));
         let handle = clock.clone();
         let work = async move {
-            // 시한이 걸린 쪽은 영원히 안 끝난다.
+            // The side with the deadline never ends.
             never.await;
             0u8
         };

@@ -1,34 +1,34 @@
-//! 명령 주인 명부의 공유 핸들 — **전 연결이 같은 한 부를 본다**(ADR-0155/0156 · TRD §3-7).
+//! Shared handle to the command owner registry — **every connection sees the same one copy** (ADR-0155/0156 · TRD §3-7).
 //!
-//! 명부의 규칙(등록 전량 last-wins · 차분 · 끊김 제거 · 상한)은 전부 도구 crate 의 [`Roster`] 가
-//! 소유한다. 여기가 더하는 것은 **연결 수명과 그 주인에게 닿는 길** 둘이다 — 명부는 이름과 그 주인만
-//! 알고 어느 연결이 아직 붙어 있는지도, 그 주인에게 어떻게 보내는지도 모르는데, 둘 다 아는 쪽이
-//! 데몬이다(ADR-0154).
+//! The registry's rules (full registration last-wins · diff · removal on disconnect · cap) are all
+//! owned by the tool crate's [`Roster`]. What this file adds is two things: **connection lifetime and the path to
+//! the owner** — the registry knows only names and their owners; it knows neither which connections are still attached
+//! nor how to send to an owner, and the daemon is the side that knows both (ADR-0154).
 //!
-//! ★끊긴 연결의 늦은 패킷을 막는 그물은 **여기 하나뿐**이다★(`Shared::refuse_if_detached`):
-//! [`Roster`] 는 끊긴 주인의 등록을 지우므로(ADR-0150 결정 3) 그 주인의 죽음을 기억할 자리가 없고, 늦은
-//! 등록·차분과 진짜 인수인계를 구분하지 못한다. 이 그물을 지우면 죽은 연결의 패킷이 통과해 그 이름이
-//! **없는 주인**을 가리킨 채 데몬 수명 내내 `Available` 로 답한다(그 연결엔 다시 올 정리가 없다).
-//! [`Roster`] 쪽에 같은 그물을 다시 세우지 말 것 — 주인 단위 상태를 따로 들면 그 목록이 자취와 똑같이
-//! 무한히 자란다(ADR-0150 가 자취를 버린 것과 같은 이유).
+//! ★The net that stops late packets from a dropped connection is **only here**★ (`Shared::refuse_if_detached`):
+//! [`Roster`] erases a dropped owner's registrations (ADR-0150 decision 3), so it has no place to remember that owner's death, and
+//! it cannot tell a late registration or diff from a real handover. If this net is removed, a dead connection's packets pass through and the name
+//! points at a **nonexistent owner** and answers `Available` for the daemon's whole lifetime (no cleanup will ever come again for that connection).
+//! Do not build the same net again on the [`Roster`] side — keeping per-owner state separately makes that list grow without bound,
+//! exactly like the trace (the same reason ADR-0150 dropped the trace).
 //!
-//! ★살아 있는지 확인과 명부 변경은 **같은 임계 구역** 안에서 일어난다★: 둘을 나누면 확인과 변경
-//! 사이에 정리가 끼어들어, 이미 끊긴 연결의 등록이 그 뒤에 내려앉는다. `on_disconnect` 는 조용한
-//! 시점이 아니라 **`on_text` 와 겹칠 수 있는** 시점이므로(`frame_port::ConnectionHandler` 계약 —
-//! 네트워크 행은 abort 를 걸 뿐 완료를 기다리지 않는다) 그 겹침은 이론이 아니다.
+//! ★The liveness check and the registry change happen inside **the same critical section**★: if split, cleanup can slip in
+//! between the check and the change, and the registration of an already-dropped connection lands afterwards. `on_disconnect` is not a quiet
+//! moment but a moment that **can overlap with `on_text`** (the `frame_port::ConnectionHandler` contract —
+//! the network layer only calls abort and does not wait for completion), so that overlap is not theoretical.
 //!
-//! ★이름이 겹치는 다른 것과 헷갈리지 말 것★: 이 crate 의 `RosterBroadcast`·`RosterChanged`·`RosterDiff`
-//! 는 **에이전트/프로필 명단**의 통지 포트다(ADR-0132). 여기 명부는 **명령 이름 → 주인**이고 둘은
-//! 아무 관계가 없다.
+//! ★Do not confuse this with the other things that share the name★: this crate's `RosterBroadcast`, `RosterChanged`, `RosterDiff`
+//! are the notification port for the **agent/profile list** (ADR-0132). The registry here maps **command name → owner**, and the two are
+//! unrelated.
 //!
-//! ★락은 이 파일 안에서만 잡고 이 파일 안에서 푼다★(ADR-0006): 아래 메서드는 잠그고 [`Roster`] 를 한 번
-//! 부르거나 표에서 핸들 사본을 뜬 뒤 즉시 놓는다 — **보내는 것은 호출자가 잠금 밖에서 한다**. 가드를
-//! 밖으로 내보내면 답장을 기다리는 배달 하나가 등록·연결 정리·조회를 전부
-//! 세운다(근거 정본 = [`engram_dashboard_command::OwnerLookupSource`] 주석).
-//! ★알려진 비용★: [`CommandRoster::entries`] 는 잠근 채로 명부 전량을 복제한다 — 상한까지 찬 명부면
-//! 그 구간이 짧지 않다. 줄이려면 [`Roster`] 가 빌려주는 모양을 바꿔야 해서 이 슬라이스 밖이다.
-//! [`CommandRoster::sink_of`] 도 잠근 채로 표를 선형 훑는다 — 연결 수에 상한이 없고 배달마다 한 번씩
-//! 도는 조회다(자세한 것은 그 자리 주석).
+//! ★The lock is taken and released only inside this file★ (ADR-0006): the methods below lock, then either call [`Roster`] once
+//! or take a handle copy from the table and release at once — **the caller does the sending outside the lock**. If the guard
+//! is passed outside, one delivery waiting for a reply stalls registration, connection cleanup and query
+//! all at once (the authoritative rationale = the [`engram_dashboard_command::OwnerLookupSource`] comment).
+//! ★Known cost★: [`CommandRoster::entries`] clones the whole registry while locked — for a registry filled to the cap
+//! that span is not short. Reducing it would mean changing the shape [`Roster`] lends out, which is outside this slice.
+//! [`CommandRoster::sink_of`] also scans the table linearly while locked — the number of connections has no cap and it is a query
+//! run once per delivery (details in the comment at that spot).
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -42,20 +42,20 @@ use engram_dashboard_net::frame_port::{ConnId, FrameSink};
 
 use crate::connection_core::sanitize_for_log;
 
-/// 끊김 한 줄에 **이름을 몇 개까지** 적나.
+/// How **many names** to write on one disconnect line.
 ///
-/// ★상한이 없으면 로그 줄 하나의 크기를 상대가 정한다★: 한 주인이 얹을 수 있는 이름은 512개
-/// ([`Roster::MAX_NAMES_PER_OWNER`])이고 하나가 128 B 까지라(`Roster::MAX_NAME_BYTES`) 안 자르면 이 한
-/// 줄이 64 KiB 가 된다 — 그 값 전부가 클라이언트가 고른 문자열이다.
-/// ★자르는 것이 뭘 잃나★: **개수는 안 잃는다**(`names` 필드가 정확한 수를 따로 나른다). 잃는 것은
-/// 「어느 이름이었나」의 뒤쪽이고, 진단에 쓰이는 것은 앞쪽 몇 개다.
+/// ★Without a cap, the peer decides the size of one log line★: one owner can put up 512 names
+/// ([`Roster::MAX_NAMES_PER_OWNER`]) and each can be up to 128 B (`Roster::MAX_NAME_BYTES`), so without truncation this one
+/// line becomes 64 KiB — and all of those values are strings the client chose.
+/// ★What truncation loses★: **the count is not lost** (the `names` field carries the exact number separately). What is lost is the tail of
+/// 「어느 이름이었나」 (which names were they), and what diagnosis uses is the first few.
 const MAX_LOGGED_NAMES: usize = 8;
 
-/// 클라이언트가 등록한 이름들을 로그 필드 하나로 — **모양은 손질기가, 개수는 [`MAX_LOGGED_NAMES`] 가** 묶는다.
+/// Turn the names a client registered into one log field — **the shape is bounded by the sanitizer, the count by [`MAX_LOGGED_NAMES`]**.
 ///
-/// ★같은 문으로 들어온 같은 값을 두 모양으로 적지 않는다★: 등록 반려가 이미 같은 형태를 골랐다
-/// (`connection_core::ConnectionCore::refuse_names_i_answer` — `'이름'` 을 콤마로 잇는다). 한 값이 자리마다
-/// 다른 모양이면 로그를 훑는 사람이 같은 것을 같은 것으로 못 본다.
+/// ★The same value coming in through the same door is not written in two shapes★: the registration bounce already chose the same form
+/// (`connection_core::ConnectionCore::refuse_names_i_answer` — joins `'이름'` ('name') with commas). If one value has a different shape
+/// in each place, whoever scans the log cannot see the same thing as the same thing.
 fn logged_names(names: &[String]) -> String {
     let mut out = names
         .iter()
@@ -70,11 +70,11 @@ fn logged_names(names: &[String]) -> String {
     out
 }
 
-/// 붙어 있지 않은 연결의 등록·차분을 반려할 때의 문구.
+/// The wording used when bouncing the registration or diff of a connection that is not attached.
 ///
-/// ★상수로 두는 이유는 테스트다★: 같은 `CONFLICT` 를 [`Roster`] 의 남의 이름 검사도 내므로, 문구를 안
-/// 보면 「연결 수명 그물이 잡았다」와 「명부 검사가 잡았다」가 구분되지 않는다 — 그러면 이 파일의 그물을
-/// 통째로 지워도 초록인 테스트가 생긴다.
+/// ★It is a constant because of tests★: the same `CONFLICT` is also raised by [`Roster`]'s check on other owners' names, so if the wording is not
+/// looked at, 「연결 수명 그물이 잡았다」 (the connection-lifetime net caught it) and 「명부 검사가 잡았다」 (the registry check caught it) cannot be told apart — then there would be a test
+/// that stays green even if this file's net is deleted entirely.
 pub(crate) const DETACHED_REFUSAL: &str =
     "this connection is not attached — a registration lands only while its connection is up";
 
@@ -86,19 +86,19 @@ pub struct CommandRoster {
 #[derive(Default)]
 struct Shared {
     roster: Roster,
-    /// 지금 붙어 있는 연결과 그 각각에 닿는 길. **명부와 한 잠금 아래** 있어야 확인과 변경 사이가
-    /// 벌어지지 않는다.
+    /// The connections attached now and the path to each of them. It must sit **under the same lock as the registry** so no gap opens
+    /// between the check and the change.
     // ADR-0154
     live: BTreeMap<ConnId, LiveConn>,
 }
 
-/// 붙어 있는 연결 하나 — **누구의 것인가**와 **어떻게 닿는가**.
+/// One attached connection — **whose it is** and **how to reach it**.
 ///
-/// ★주인 토큰을 붙을 때 계산해 **저장한다** — 조회할 때 되짚지 않는다★: 오늘의 주인 토큰은
-/// [`CommandRoster::owner_of`] 가 연결 id 에서 파생하지만 그 파생은 잠정 규칙이고 슬라이스 B 가
-/// 클라이언트 자작 식별자로 대체한다(ADR-0150). 토큰 문자열에서 연결 id 를 되짚는 조회를 쓰면 그날
-/// 조용히 빈손이 되고, 그 빈손은 「주인이 없다」와 구분되지 않는다. 저장해 두면 파생 규칙이 바뀌어도
-/// 조회는 그대로 성립한다.
+/// ★The owner token is computed when attaching and **stored** — it is not traced back at query time★: today's owner token is
+/// derived from the connection id by [`CommandRoster::owner_of`], but that derivation is a provisional rule and slice B
+/// replaces it with a client-made identifier (ADR-0150). A query that traces the connection id back from the token string would quietly come up
+/// empty-handed that day, and that empty result is indistinguishable from 「주인이 없다」 (there is no owner). If it is stored, the
+/// query still holds even when the derivation rule changes.
 // ADR-0154
 struct LiveConn {
     owner: OwnerToken,
@@ -106,61 +106,61 @@ struct LiveConn {
 }
 
 impl CommandRoster {
-    /// 주인 토큰의 접두사 — 이 형식은 데몬 안에서만 난다(`CommandRoster::owner_of`).
+    /// Prefix of the owner token — this format appears only inside the daemon (`CommandRoster::owner_of`).
     pub const OWNER_TOKEN_PREFIX: &'static str = "conn-";
 
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// 연결 하나의 주인 토큰 — **연결 id 에서 파생한다**. 파생 규칙은 여기 하나뿐이고, 부르는 곳은
-    /// [`CommandRoster::attach`] 하나다(정책과 그 근거는
+    /// The owner token of one connection — **derived from the connection id**. This is the only derivation rule, and the only caller is
+    /// [`CommandRoster::attach`] (policy and its rationale in
     /// `connection_core::ConnectionSession::owner_token`).
     ///
-    /// ★등록·정리·조회는 이 함수가 아니라 attach 가 **저장한 값**을 본다★ — 그래야 이 파생이 바뀌는 날
-    /// 세 쪽이 갈라지지 않는다(ADR-0154). 그 저장값을 밖에서 물으려면 [`CommandRoster::attached_owner`].
+    /// ★Registration, cleanup and query look at the value attach **stored**, not this function★ — so the three do not
+    /// diverge the day this derivation changes (ADR-0154). To ask for that stored value from outside, use [`CommandRoster::attached_owner`].
     ///
-    /// ★이 파생은 **오늘의 잠정 규칙**이고 슬라이스 B 가 대체한다★: 주인 키는 **클라이언트가 만들어 첫
-    /// 인사에 실어 보낸 식별자**가 되고(ADR-0150 결정 1·2), 연결 id 파생은 그 값을 안 보낸 연결의 fail-open
-    /// 갈래로만 남는다(그 결정의 영향절). 그 식별자는 아직 코드에 없다 — 그래서 지금은 이 파생이 전부다.
+    /// ★This derivation is **today's provisional rule** and slice B replaces it★: the owner key becomes **an identifier the client made and carried
+    /// in its first greeting** (ADR-0150 decisions 1 and 2), and the connection-id derivation remains only as the fail-open
+    /// branch for connections that did not send it (the impact section of that decision). That identifier is not in the code yet — so for now this derivation is everything.
     // ADR-0150
     pub fn owner_of(conn_id: ConnId) -> OwnerToken {
         OwnerToken::new(format!("{}{conn_id}", Self::OWNER_TOKEN_PREFIX))
     }
 
-    /// 연결이 섰다 — 이 뒤로 그 연결의 등록이 받아들여지고, 그 주인 앞으로 온 봉투가 `frames` 로 나간다.
+    /// The connection is up — from here its registrations are accepted, and envelopes addressed to its owner go out through `frames`.
     ///
-    /// ★`frames` 를 clone 해 든다★: 연결 수명 훅이 넘겨 주는 것은 **빌린 참조**라 그대로는 연결보다
-    /// 오래 못 산다(`engram_dashboard_net::frame_port::ConnectionHandler::on_connect` 계약). 표에 두려면
-    /// `'static` 공유 핸들이 필요하고, 그 clone 이 이 한 줄이다.
+    /// ★Hold a clone of `frames`★: what the connection-lifetime hook hands over is a **borrowed reference**, so as it stands it cannot outlive
+    /// the connection (the `engram_dashboard_net::frame_port::ConnectionHandler::on_connect` contract). To put it in the table
+    /// a `'static` shared handle is needed, and that clone is this one line.
     ///
-    /// ★닿는 길이 명부 등재보다 **먼저**다★: 이름은 등록 패킷으로 오르고 그 패킷은 이 호출 뒤에만
-    /// 받아들여지므로([`Shared::refuse_if_detached`]), 명부에 오른 이름은 항상 닿을 수 있다. 순서가
-    /// 뒤집히면 「명부엔 있는데 닿을 길이 없는」 이름이 서고 그 창은 런타임에 아무 신호도 내지 않는다
-    /// (ADR-0154 삽입 순서).
+    /// ★The path comes **before** the registry entry★: names get onto the registry through a registration packet, and that packet is
+    /// accepted only after this call ([`Shared::refuse_if_detached`]), so a name on the registry is always reachable. If the order
+    /// is reversed, a name that is 「명부엔 있는데 닿을 길이 없는」 (in the registry but has no path to reach) stands, and that window gives no signal at runtime
+    /// (ADR-0154 insertion order).
     ///
-    /// ★전제 — 같은 [`ConnId`] 로 두 번 부르지 않는다★: 두 번째가 첫 번째의 출구를 덮으므로, 먼저 붙은
-    /// 연결이 얹은 이름의 봉투가 나중 연결로 간다. 그래서 **거절 로직을 두지 않고** 덮어쓰기 그대로 두되
-    /// `error!` 한 줄을 남긴다.
-    /// ★그 도달 불가는 **호출자가 둘**이라 두 수열이 함께 서야 성립한다★ — 한쪽만 적어 두면 반쪽 근거다:
-    /// 소켓 연결은 네트워크 행의 단조 증가 카운터에서 나오고 재사용되지 않으며(`ws.rs` 의
-    /// `ConnRegistry::alloc_id`), 제어 라우트의 가짜 호출자 연결은 `u64::MAX` 에서 **내려간다**
-    /// (`command_delivery::CommandBus::open_caller` — 두 수열이 만나려면 2^63 번을 할당해야 한다는 셈이
-    /// 그 함수 doc 에 있다). 두 발급기 중 하나라도 성질이 바뀌면 여기 전제가 함께 깨진다.
-    /// ★여기서 패닉하지 않는다 — 되살리지 마라★: 이 함수는 `on_connect` 안에서 돈다. 거기서 죽으면 운영
-    /// 프로세스는 통째로 끝나고(가둠 표시 밖 — 훅 · ADR-0292), 훅 없는 시험 빌드에서는
-    /// 정리 훅도 레지스트리 해제도 통째로 건너뛴 채 죽은 큐가 팬아웃 대상으로 남고(그 사유의 정본 =
-    /// 네트워크 행 `ws.rs` 의 같은 금지), 표에는 영영 안 지워지는 항목이 남아 [`CommandRoster::sink_of`]
-    /// 가 **죽은 주인에게 `Some`** 을 답한다. `debug_assert` 도 같은 이유로 안 된다 — 릴리스에서 사라져
-    /// 관측을 못 주면서 debug 에서만 그 사고를 만든다.
+    /// ★Precondition — do not call twice with the same [`ConnId`]★: the second overwrites the first's outlet, so an envelope for a name
+    /// registered by the earlier connection goes to the later connection. So **no refusal logic is added** and the overwrite is left as is, but
+    /// one `error!` line is emitted.
+    /// ★That unreachability depends on **two callers**, so both sequences must hold together★ — writing down only one is half a rationale:
+    /// socket connections come from the network layer's monotonically increasing counter and are not reused (`ConnRegistry::alloc_id`
+    /// in `ws.rs`), and the control route's fake caller connection **counts down** from `u64::MAX`
+    /// (`command_delivery::CommandBus::open_caller` — the calculation that the two sequences would meet only after 2^63 allocations is
+    /// in that function's doc). If the nature of either of the two issuers changes, the precondition here breaks with it.
+    /// ★Do not panic here — do not revive it★: this function runs inside `on_connect`. If it dies there, the production
+    /// process ends outright (outside the containment mark — hook · ADR-0292), and in a hook-less test build
+    /// cleanup hooks and registry release are both skipped entirely, a dead queue stays as a fan-out target (the authoritative reason =
+    /// the same prohibition in the network layer's `ws.rs`), and an entry that is never erased stays in the table so [`CommandRoster::sink_of`]
+    /// answers **`Some` for a dead owner**. `debug_assert` is also out for the same reason — it vanishes in release, so
+    /// it gives no observation, while only debug produces that accident.
     ///
-    /// ★파생은 여기 한 번뿐이다★ — 아래 [`CommandRoster::detach`]·[`CommandRoster::register`]·
-    /// [`CommandRoster::update`] 는 [`CommandRoster::owner_of`] 를 다시 부르지 않고 여기서 저장한 값을
-    /// 읽는다. 그래야 파생 규칙이 바뀌는 날 명부 등재·제거·조회가 **같은 토큰**을 본다(ADR-0154 재론
-    /// 트리거 ②).
+    /// ★The derivation happens only once, here★ — [`CommandRoster::detach`], [`CommandRoster::register`] and
+    /// [`CommandRoster::update`] below do not call [`CommandRoster::owner_of`] again; they
+    /// read the value stored here. That way, the day the derivation rule changes, registry entry, removal and query see **the same token** (ADR-0154 reopen
+    /// trigger ②).
     // ADR-0154
     pub fn attach(&self, conn_id: ConnId, frames: &Arc<dyn FrameSink>) {
-        // ★강참조는 잠금 **밖에서** 놓는다★ — 소멸자가 무엇을 하는지 이 표는 모른다(근거 = 이 파일 헤더).
+        // ★Strong references are dropped **outside** the lock★ — this table does not know what a destructor does (rationale = this file's header).
         let replaced = {
             let mut shared = self.lock();
             shared.live.insert(
@@ -171,14 +171,14 @@ impl CommandRoster {
                 },
             )
         };
-        // 덮인 항목이 곧 충돌의 증거다 — 그래서 잠금을 놓은 뒤에 찍어도 사건을 그대로 서술한다(로그를
-        //   임계 구역 밖으로 빼는 근거는 [`CommandRoster::detach`] 와 같다).
-        // ★갚아야 할 빚 — 이 토큰은 **다듬지 않고** 찍는다★: 오늘은 데몬이 만든 `conn-<id>` 라 길이도
-        //   모양도 우리 것이다. 슬라이스 B 가 여기 **클라이언트가 보낸 식별자**를 저장하는 순간, 이 줄은
-        //   검증 안 된 상대 문자열을 원문으로 찍는 자리가 된다 — 메가바이트짜리 로그 줄과 제어문자
-        //   위조 항목이 그때 열린다. ★`attach` 가 저장하는 값을 바꾸는 커밋이 이 줄을 함께 고쳐야 한다★ —
-        //   손질기는 같은 crate 안에 있어(`connection_core::sanitize_for_log` — 이 파일이 아래
-        //   [`logged_names`] 에서 이미 쓴다) 그때 할 일은 그 함수를 부르는 것뿐이다.
+        // The overwritten entry is itself the proof of the conflict — so even when logged after the lock is released, it still describes the event as it was (the reason for moving the log
+        //   out of the critical section is the same as in [`CommandRoster::detach`]).
+        // ★Debt to repay — this token is logged **unsanitized**★: today it is the daemon-made `conn-<id>`, so its length and
+        //   shape are ours. The moment slice B stores a **client-sent identifier** here, this line becomes
+        //   a spot that logs an unverified peer string verbatim — megabyte-sized log lines and control-character
+        //   forged entries open up then. ★The commit that changes the value `attach` stores must fix this line too★ —
+        //   the sanitizer is in the same crate (`connection_core::sanitize_for_log` — this file already uses it below in
+        //   [`logged_names`]) so all that is left to do then is to call that function.
         if let Some(previous) = &replaced {
             tracing::error!(
                 conn = conn_id,
@@ -189,19 +189,19 @@ impl CommandRoster {
         drop(replaced);
     }
 
-    /// 그 연결이 붙을 때 저장한 주인 토큰. **부재 = 지금 붙어 있지 않다**(그래서 이 연결 앞으로는 어떤
-    /// 이름도 설 수 없다 — [`Shared::refuse_if_detached`]).
+    /// The owner token stored when that connection attached. **Absent = not attached now** (so no
+    /// name can stand for this connection — [`Shared::refuse_if_detached`]).
     ///
-    /// ★명부의 주인이 **누구인가**를 묻는 곳은 여기다★ — [`CommandRoster::owner_of`] 를 밖에서 다시 부르면
-    /// 그 파생이 바뀌는 날 물은 값과 저장된 값이 갈라진다(ADR-0154).
+    /// ★This is the place to ask **who the registry's owner is**★ — if [`CommandRoster::owner_of`] is called again from outside,
+    /// the day that derivation changes the value asked for and the stored value diverge (ADR-0154).
     ///
-    /// ★답은 **잠금을 놓는 순간 낡는다** — 판정 경로에 놓지 마라★: 이 호출과 그다음 호출 사이에 그 연결의
-    /// `detach` 가 낄 수 있다(겹침이 실재하는 근거는 이 파일 헤더). 그러니 「붙어 있으니 등록이 통과할
-    /// 것」·「붙어 있으니 봉투가 나갈 것」처럼 **읽은 값으로 뒷일을 결정하면** 안 된다 — 그 결정들은
-    /// [`CommandRoster::register`]·[`CommandRoster::sink_of`] 안에서 잠금과 함께 원자적으로 난다.
-    /// 오늘 유일한 소비자(`connection_core` 의 `note_claimed_owner`)가 안전한 이유도 그것이다: 고르는 것이
-    /// **로그 갈래**뿐이고, 등록의 성사 여부는 여전히 [`Shared::refuse_if_detached`] 가 한 임계 구역 안에서
-    /// 정한다.
+    /// ★The answer **goes stale the moment the lock is released** — do not put it on a decision path★: that connection's
+    /// `detach` can slip in between this call and the next (the basis that the overlap is real is this file's header). So, as with 「붙어 있으니 등록이 통과할
+    /// 것」 (it is attached so the registration will pass) and 「붙어 있으니 봉투가 나갈 것」 (it is attached so the envelope will go out), you must not **decide what follows from the value read** — those decisions
+    /// happen atomically with the lock inside [`CommandRoster::register`] and [`CommandRoster::sink_of`].
+    /// That is also why today's only consumer (`note_claimed_owner` in `connection_core`) is safe: what it picks is only
+    /// the **log branch**, and whether a registration succeeds is still decided by [`Shared::refuse_if_detached`] inside one critical
+    /// section.
     // ADR-0154
     pub fn attached_owner(&self, conn_id: ConnId) -> Option<OwnerToken> {
         self.lock()
@@ -210,30 +210,30 @@ impl CommandRoster {
             .map(|conn| conn.owner.clone())
     }
 
-    /// 주인 토큰이 지금 붙어 있는 연결의 프레임 출구. **부재(`None`) = 지금 붙어 있는 어느 연결도 그
-    /// 토큰을 들고 있지 않다** — 이 함수가 아는 것은 그게 전부라 「한 번도 붙은 적 없다」와 「왕복 도중
-    /// 끊겼다」를 **구분하지 못한다**. 조회가 `Available` 을 답한 뒤 여기서 부재가 나오는 경합에서
-    /// 호출자는 `OUTCOME_UNKNOWN` 으로 답한다(ADR-0154). ★소유자 부재로 접지 않는다 — 그건 거짓
-    /// 확신이다★(같은 결의 선례 = 도구 crate `route.rs` 의 `forwarding_unknown` 과 상관 키 불일치 갈래).
+    /// The frame outlet of the connection the owner token is currently attached to. **Absent (`None`) = no currently attached connection holds that
+    /// token** — that is all this function knows, so it **cannot tell** 「한 번도 붙은 적 없다」 (never attached) from 「왕복 도중
+    /// 끊겼다」 (dropped mid round trip). In the race where the query answered `Available` and then the absence comes out here,
+    /// the caller answers `OUTCOME_UNKNOWN` (ADR-0154). ★Do not fold it into owner-absent — that is false
+    /// certainty★ (a precedent of the same kind = the tool crate's `route.rs` `forwarding_unknown` and the correlation-key mismatch branch).
     ///
-    /// ★핸들 사본만 내보내고 잠금은 여기서 끝난다★ — 보내는 것은 호출자가 잠금 밖에서 한다(ADR-0006 ·
-    /// 이 파일 헤더). 가드째 내보내면 답장을 기다리는 배달 하나가 등록·연결 정리·조회를 전부 세운다.
+    /// ★Only a handle copy goes out and the lock ends here★ — the caller does the sending outside the lock (ADR-0006 ·
+    /// this file's header). If the guard went out with it, one delivery waiting for a reply would stall registration, connection cleanup and query all at once.
     ///
-    /// ★조회는 **저장된 토큰과의 동등 비교**다★ — 토큰에서 연결 id 를 되짚지 않는다(근거 = [`LiveConn`]).
+    /// ★The query is an **equality comparison with the stored token**★ — it does not trace the connection id back from the token (rationale = [`LiveConn`]).
     ///
-    /// ★받은 핸들은 **즉시 쓰고 버린다** — 대기표·상관 표에 보관하지 않는다★: 명부는 내보낸 사본을
-    /// 회수할 수단이 없으므로, 보관하는 순간 그 연결의 송신 큐가 명부보다 오래 살아남는다(살아남은
-    /// `Sender` 사본이 무엇을 깨는지는 네트워크 행 `ws.rs` 의 「사본 전수」가 적는다).
+    /// ★Use the received handle **at once and drop it** — do not keep it in a wait ticket or correlation table★: the registry has no means to
+    /// take back a copy it handed out, so the moment it is kept, that connection's send queue outlives the registry (what a surviving
+    /// `Sender` copy breaks is written in the network layer `ws.rs` under 「사본 전수」 (all copies)).
     ///
-    /// ★한 주인에 연결이 여럿이면 **어느 것이 나오는지 보장하지 않는다**★: 오늘은
-    /// [`CommandRoster::owner_of`] 가 연결과 1:1 이라 도달 불가고, 슬라이스 B 가 주인 키를 클라이언트
-    /// 자작 식별자로 바꾸면 도달 가능해진다. 그때의 선택 규칙은 그 슬라이스 몫이라 여기서 특정 승자를
-    /// 계약으로 굳히지 않는다 — 지금 나오는 순서는 표의 순회 순서일 뿐 약속이 아니다(같은 뿌리의
-    /// 어긋남 = [`CommandRoster::detach`] 의 「알려진 어긋남」).
+    /// ★With several connections for one owner, **which one comes out is not guaranteed**★: today
+    /// [`CommandRoster::owner_of`] is 1:1 with the connection so this is unreachable, and it becomes reachable when slice B changes the owner key into a client-made
+    /// identifier. The selection rule then belongs to that slice, so no particular winner is fixed as a contract here — the order that comes out now is just the
+    /// table's iteration order, not a promise (the mismatch with the same root =
+    /// the 「알려진 어긋남」 (known mismatch) of [`CommandRoster::detach`]).
     ///
-    /// ★알려진 비용★: 잠근 채로 표를 **선형 훑는다**. 붙는 연결 수에 상한이 없고(네트워크 행 수락
-    /// 루프에 동시 연결 제한이 없다) 배달은 명령마다 이 조회를 한 번씩 하므로, 그 둘이 함께 커지면
-    /// 여기가 등록·연결 정리와 같은 잠금을 두고 다툰다. 역인덱스는 이 슬라이스 밖이다.
+    /// ★Known cost★: it **scans the table linearly** while locked. The number of attached connections has no cap (the network layer's accept
+    /// loop has no concurrent-connection limit) and delivery makes this query once per command, so when both grow together
+    /// this place contends with registration and connection cleanup for the same lock. A reverse index is outside this slice.
     // ADR-0154
     pub fn sink_of(&self, owner: &OwnerToken) -> Option<Arc<dyn FrameSink>> {
         self.lock()
@@ -243,39 +243,39 @@ impl CommandRoster {
             .map(|conn| conn.sink.clone())
     }
 
-    /// **연결 하나**의 프레임 출구 — 배달이 답장을 되돌릴 때 쓴다(형제 [`CommandRoster::sink_of`] 는 주인
-    /// 토큰으로 찾는다).
+    /// The frame outlet of **one connection** — used when a delivery sends the reply back (its sibling [`CommandRoster::sink_of`] looks up by owner
+    /// token).
     ///
-    /// ★두 조회를 하나로 합치지 않는 이유★: 나가는 봉투의 목적지는 **주인**이고 돌아오는 답장의 목적지는
-    /// **물어본 연결**이라 키가 다르다. 오늘 둘이 1:1 이라 같은 표를 보지만, 슬라이스 B 가 주인 키를
-    /// 클라이언트 자작 식별자로 바꾸면 한 주인에 연결이 여럿이 되고 그때 답장이 엉뚱한 연결로 간다.
+    /// ★Why the two lookups are not merged★: the destination of an outgoing envelope is the **owner**, and the destination of the returning reply is
+    /// the **connection that asked**, so the keys differ. Today the two are 1:1 so they look at the same table, but when slice B changes the owner key into a
+    /// client-made identifier, one owner will have several connections and the reply would then go to the wrong connection.
     ///
-    /// ★받은 핸들은 즉시 쓰고 버린다★ — 보관 금지의 근거는 [`CommandRoster::sink_of`] 와 같다.
-    /// **부재 = 그 연결이 이미 끊겼다**(답장을 낼 곳이 없다는 뜻이고, 오류가 아니다).
+    /// ★The received handle is used at once and dropped★ — the rationale for the no-keeping rule is the same as [`CommandRoster::sink_of`].
+    /// **Absent = that connection has already dropped** (it means there is nowhere to send the reply, and it is not an error).
     ///
-    /// ★[`ConnId`] 하나로 지목하는 것이 안전한 근거는 **할당기가 그 값을 재사용하지 않는다**는 사실
-    /// 뿐이다★ — 세대 번호가 없으므로, 재사용이 생기는 날 오래 남은 상관 표 항목이 같은 번호를 새로 받은
-    /// 다른 피어에게 남의 답장을 건넨다. 실측과 그때의 처방은 `command_delivery` 의 `Pending::origin`.
+    /// ★The only basis for pointing at a connection by [`ConnId`] alone being safe is the fact that **the allocator does not reuse the value**★
+    /// — there is no generation number, so the day reuse appears, a long-lingering correlation-table entry hands someone else's reply to a different peer
+    /// that newly got the same number. The measurement and the remedy then are in `Pending::origin` of `command_delivery`.
     // ADR-0154
     pub fn sink_for_conn(&self, conn_id: ConnId) -> Option<Arc<dyn FrameSink>> {
         self.lock().live.get(&conn_id).map(|conn| conn.sink.clone())
     }
 
-    /// 그 연결이 아직 붙어 있나 — ★출구 **사본을 만들지 않는** 조회다★.
+    /// Is that connection still attached — ★a query that **makes no copy of the outlet**★.
     ///
-    /// 살아 있는지만 알면 되는 자리(부수효과를 내기 전 호출자 확인)가 형제 [`CommandRoster::sink_for_conn`]
-    /// 을 쓰면 강참조 하나가 그 자리의 수명만큼 산다. 그 자리가 수 초짜리 blocking 본문이면 사본이 그동안
-    /// 살아 있어 **끊긴 연결의 writer 가 자기 종료를 못 한다**(ADR-0154 의 「내준 사본을 왕복 너머로 들지
-    /// 않는다」 — 그 문장이 막는 누수 그대로다). 그래서 판정만 필요한 호출자는 이쪽을 쓴다.
-    /// ★`ConnId` 는 재사용되지 않는다★ — 이 술어가 「같은 피어인가」로도 읽히는 근거이고, 그 실측의 정본은
-    /// `command_delivery` 의 `Pending::origin`.
+    /// A place that only needs to know whether it is alive (checking the caller before producing side effects) and uses the sibling [`CommandRoster::sink_for_conn`]
+    /// keeps one strong reference alive for the lifetime of that place. If that place is a blocking body of several seconds, the copy stays
+    /// alive meanwhile and **the dropped connection's writer cannot finish itself** (ADR-0154's 「내준 사본을 왕복 너머로 들지
+    /// 않는다」 (do not hold a handed-out copy across a round trip) — the leak that sentence blocks, exactly). So a caller that needs only the decision uses this one.
+    /// ★`ConnId` is not reused★ — this is the basis on which the predicate also reads as 「같은 피어인가」 (is it the same peer), and the authoritative measurement is
+    /// `Pending::origin` of `command_delivery`.
     // ADR-0154
     pub fn is_attached(&self, conn_id: ConnId) -> bool {
         self.lock().live.contains_key(&conn_id)
     }
 
-    /// 시험 전용 — 저장된 주인 토큰만 갈아 끼워 **찢어진 창**(명부 조회는 `Available` 인데 닿는 길이 없다)을
-    /// 결정적으로 만든다. 운영 경로에서 그 상태는 조회와 전달 사이에 낀 `detach` 로만 생겨 손으로 못 세운다.
+    /// Test only — swap only the stored owner token to deterministically make a **torn window** (the registry query says `Available` but there is no path to reach).
+    /// On the production path that state arises only from a `detach` slipping between query and delivery, and cannot be set up by hand.
     #[cfg(test)]
     pub(crate) fn overwrite_stored_owner(&self, conn_id: ConnId, owner: OwnerToken) {
         self.lock()
@@ -285,62 +285,62 @@ impl CommandRoster {
             .owner = owner;
     }
 
-    /// 연결이 끊겼다 — 그 주인의 이름을 명부에서 지우고 그 연결에 닿는 길을 거둔다. **둘은 한 잠금
-    /// 안에서** 일어난다(겹쳐 도는 등록이 그 사이로 못 들어온다).
+    /// The connection dropped — erase that owner's names from the registry and withdraw the path to that connection. **Both happen inside one lock**
+    /// (a concurrently running registration cannot get in between).
     ///
-    /// ★ADR-0154 이 못 박은 제거 순서(명부가 먼저, 닿는 길이 나중)를 그대로 쓴다★ — 오늘은 둘이 한
-    /// 잠금 안이라 「명부엔 있는데 닿을 수 없는」 중간 상태를 아무도 관측하지 못하지만, 순서를 코드에
-    /// 남겨 두어야 표가 잠금 밖으로 갈리는 날 그 창이 열리지 않는다.
+    /// ★It uses the removal order ADR-0154 fixed (registry first, path later)★ — today the two are inside one
+    /// lock so nobody can observe the 「명부엔 있는데 닿을 수 없는」 (in the registry but unreachable) intermediate state, but the order has to
+    /// stay in the code so that window does not open the day the table is split outside the lock.
     ///
-    /// ## ★부르는 자리는 둘이고, 그 둘은 **다른 종류의 연결**을 거둔다★
+    /// ## ★There are two call sites, and they withdraw **different kinds of connection**★
     ///
-    /// ① **실 연결의 끊김** — `AgentConnection::on_disconnect` 하나뿐이다. 끊김을 아는 경로가 그것 하나라
-    ///    이 종류의 두 번째 제거 지점을 만들면 인과가 갈라진다(ADR-0150). 그 조항은 그대로 유효하다.
-    /// ② **가짜 호출자 연결의 왕복 끝** — `command_delivery::CallerSeat` 의 소멸자(ADR-0160). 제어 라우트
-    ///    호출 하나가 답장을 받으려고 세우는 연결이고, **`on_disconnect` 에 영영 닿지 않는다**(소켓이 없다).
+    /// ① **Drop of a real connection** — only `AgentConnection::on_disconnect`. It is the only path that knows about a drop, so
+    ///    making a second removal point of this kind would split the causality (ADR-0150). That clause remains valid.
+    /// ② **End of a fake caller connection's round trip** — the destructor of `command_delivery::CallerSeat` (ADR-0160). It is the connection
+    ///    one control-route call sets up to receive a reply, and it **never reaches `on_disconnect`** (there is no socket).
     ///
-    /// ★그래서 ①의 불변식을 「전체 하나」로 되돌려 적지 말 것★ — 그 문장은 이제 거짓이고, 거짓인 채로
-    /// 두면 ②를 지우는 편집이 「단일 제거 지점」을 근거로 정당해 보인다. ②를 지우면 그 칸은 프로세스
-    /// 수명 내내 남아 [`CommandRoster::sink_of`] 의 선형 훑기를 영구히 늘린다.
-    /// ★카브아웃이 성립하는 근거 = **두 종류가 서로의 항목을 못 건드린다**★: 가짜 연결의 번호는 `u64::MAX`
-    /// 에서 내려가고 실 연결은 1부터 올라가며(그 발급기 doc), 가짜 연결은 이름을 등록하지 않아 지울 명부
-    /// 항목이 아예 없다. 즉 ②는 `live` 에서 자기 칸 하나를 빼는 것 이상을 하지 않는다.
-    /// ★지운 것을 로그로 남긴다 — 이 줄이 그 사건의 **유일한 진단 표면**이다★: 명부에는 끊긴 주인의 자취가
-    /// 남지 않으므로(ADR-0150 결정 3) 사라진 이름을 조회로 되짚을 길이 없다. 이 줄을 지우면 「어느 명령이 왜
-    /// 없어졌나」에 답할 자료가 아무 데도 없다(반려 로그는 **거절된 패킷**만 말한다). 레벨은 연결 수명
-    /// 사건이라 `info!` 다(`docs/reference/logging-conventions.md` 레벨 표 · 같은 문서 「계측 의무」의 연결
-    /// 수명 항목). 내릴 이름이 없던 끊김만 `debug!` 로 내린다 — 지운 것이 없으면 이 줄이 말할 사건이 없고
-    /// 연결 자체의 종료는 네트워크 행이 이미 남기는데, **등록하는 클라이언트가 아직 0건이라 그 갈래가
-    /// 평상시 전부**다.
-    /// ★로그는 잠금을 **놓은 뒤** 부른다★ — 파일 sink 가 동기 쓰기라(로깅 컨벤션 「인프라」) 임계 구역 안에서
-    /// 부르면 등록·조회·다른 연결의 정리가 그 IO 만큼 함께 멈춘다.
-    /// `help` 는 싣지 않는다 — 클라이언트가 실어 온 문자열이고 상한이 이름의 32배다(`Roster::MAX_HELP_BYTES`).
+    /// ★So do not write ①'s invariant back as 「전체 하나」 (one for the whole)★ — that sentence is now false, and if left false,
+    /// an edit that deletes ② would look justified by the 「단일 제거 지점」 (single removal point). If ② is deleted, that slot stays for the whole process
+    /// lifetime and permanently lengthens the linear scan in [`CommandRoster::sink_of`].
+    /// ★The basis that the carve-out holds = **the two kinds cannot touch each other's entries**★: fake connections' numbers count down from `u64::MAX`
+    /// and real connections count up from 1 (that issuer's doc), and fake connections register no names so there is no registry
+    /// entry to erase at all. That is, ② does nothing beyond removing its own slot from `live`.
+    /// ★Log what was erased — this line is that event's **only diagnostic surface**★: the registry keeps no trace of a dropped owner
+    /// (ADR-0150 decision 3), so there is no way to trace the vanished names back through a query. If this line is removed, there is no material anywhere to answer 「어느 명령이 왜
+    /// 없어졌나」 (which command vanished and why) (the bounce log tells only about **refused packets**). The level is `info!` because it is a connection-lifetime
+    /// event (`docs/reference/logging-conventions.md` level table · the connection-lifetime item of the same document's 「계측 의무」).
+    /// Only a drop with no names to remove drops to `debug!` — with nothing erased this line has no event to tell, and
+    /// the connection's own end is already logged by the network layer, and **registering clients are still at zero, so that branch is
+    /// the usual case in full**.
+    /// ★The log is called **after** the lock is released★ — the file sink writes synchronously (logging convention 「인프라」), so calling
+    /// inside the critical section stalls registration, query and other connections' cleanup for as long as that IO takes.
+    /// `help` is not included — it is a string the client sent and its cap is 32 times that of a name (`Roster::MAX_HELP_BYTES`).
     ///
-    /// ★알려진 어긋남 — 제거 단위는 **주인 토큰**인데 생존 표(`Shared::live`)의 키는 **[`ConnId`]** 다★:
-    /// 오늘은 [`CommandRoster::owner_of`] 가 연결과 1:1 이라 무해하다. 슬라이스 B 가 주인 키를 클라이언트
-    /// 자작 식별자로 바꿔 **여러 연결이 한 주인을 공유**하면 `detach(conn1)` 이 아직 산 `conn2` 의 등록까지
-    /// 지우고, `conn2` 는 `Shared::refuse_if_detached` 를 계속 통과하므로 **자기 이름이 지워진 것을
-    /// 모른다**(등록은 붙을 때 1회뿐이라 다시 얹을 계기가 없다). ★슬라이스 B 가 이것을 닫아야 한다★ — 지금
-    /// 고치려면 제거 단위를 연결로 좁혀야 하는데 [`ConnId`] 는 도구 crate 가 모르는 타입이라, 고치는 행위
-    /// 자체가 그 슬라이스의 주인 모델을 선결한다(사용자 결정 2026-08-17 — `docs/process/step-log.md` ㉲).
+    /// ★Known mismatch — the removal unit is the **owner token** but the key of the liveness table (`Shared::live`) is the **[`ConnId`]**★:
+    /// today it is harmless because [`CommandRoster::owner_of`] is 1:1 with the connection. If slice B changes the owner key into a client-made
+    /// identifier so that **several connections share one owner**, `detach(conn1)` erases even the registrations of the still-alive `conn2`,
+    /// and `conn2` keeps passing `Shared::refuse_if_detached`, so it **does not know its names were erased**
+    /// (registration happens only once at attach, so there is no occasion to put them up again). ★Slice B must close this★ — to
+    /// fix it now the removal unit would have to be narrowed to the connection, but [`ConnId`] is a type the tool crate does not know, so the act of fixing
+    /// itself would pre-decide that slice's owner model (user decision 2026-08-17 — `docs/process/step-log.md` ㉲).
     ///
-    /// ★지울 주인은 **표에서 읽는다** — 여기서 다시 파생하지 않는다★: 파생하면 [`CommandRoster::attach`]
-    /// 가 저장한 토큰과 어긋나는 날 `disconnect` 가 아무것도 못 지우고, 그 이름은 **죽은 주인 앞으로**
-    /// 데몬 수명 내내 `Available` 로 남는다(ADR-0154). 표에 없는 연결이면 지울 것도 없다 — 등록 자체가
-    /// [`Shared::refuse_if_detached`] 를 통과해야만 서기 때문이다.
+    /// ★The owner to erase is **read from the table** — not derived again here★: if derived, the day it diverges from the token [`CommandRoster::attach`]
+    /// stored, `disconnect` could erase nothing, and those names would stay `Available` **toward a dead owner**
+    /// for the daemon's whole lifetime (ADR-0154). If the connection is not in the table there is nothing to erase either — because a registration itself
+    /// stands only by passing [`Shared::refuse_if_detached`].
     // ADR-0150
     // ADR-0154
     pub fn detach(&self, conn_id: ConnId) {
-        // ★거둔 항목을 잠금 **밖에서** 놓는다★: 여기가 프레임 출구의 마지막 강참조일 수 있고(등록만 하고
-        //   아무 에이전트도 구독하지 않은 클라이언트가 그렇다), 그러면 채널 닫기·waker 깨우기가 임계 구역
-        //   안에서 돈다. 이 파일 헤더가 약속한 「잠그고 한 번 부른 뒤 즉시 놓는다」 밖의 일이다.
+        // ★Drop the withdrawn entry **outside** the lock★: this may be the last strong reference to the frame outlet (a client that
+        //   registered but subscribed to no agent is such a case), and then channel closing and waker waking run inside the critical
+        //   section. That is outside the 「잠그고 한 번 부른 뒤 즉시 놓는다」 (lock, call once, then release at once) this file's header promised.
         let (removed, reclaimed) = {
-            // ★잠금 실패에 패닉하지 않는다 — 이 함수의 호출자 둘이 **전부 정리 경로**다★(위 ①②). 그중
-            //   ②는 소멸자라, 여기서 패닉하면 되감기 중이면 곧바로 abort 이고 그렇지 않아도 그 소멸자의
-            //   **다음 줄**(상관 표 정리)이 통째로 안 돌아 두 표가 함께 샌다. 그리고 이 함수가 하는 일은
-            //   **제거뿐**이라 오염된 표를 계속 쓰는 위험도 형제 동사들(등록·조회)보다 작다 —
-            //   형제는 [`CommandRoster::lock`] 의 패닉을 그대로 진다.
-            //   짝 규율의 정본 = `command_delivery::CommandDeliveries::lock_for_cleanup`.
+            // ★Do not panic on a lock failure — both callers of this function are **cleanup paths**★ (① and ② above). ②
+            //   is a destructor, so a panic here is an immediate abort if it happens during unwinding, and even if not, the destructor's
+            //   **next line** (correlation-table cleanup) would not run at all and both tables would leak together. And what this function does is
+            //   **removal only**, so the risk of continuing to use a poisoned table is also smaller than for its sibling verbs (registration, query) —
+            //   the siblings carry the panic of [`CommandRoster::lock`] as is.
+            //   The authoritative source of the paired discipline = `command_delivery::CommandDeliveries::lock_for_cleanup`.
             let mut shared = self.lock_for_cleanup();
             let owner = shared.live.get(&conn_id).map(|conn| conn.owner.clone());
             let removed = match owner {
@@ -363,15 +363,15 @@ impl CommandRoster {
         }
     }
 
-    /// 붙을 때의 전량 등록. 끊긴 연결의 늦은 패킷은 `CONFLICT` 로 반려한다. 이름이 서는 주인은
-    /// [`CommandRoster::attach`] 가 저장한 토큰이다 — 여기서 다시 파생하지 않는다(ADR-0154).
+    /// Full registration at attach time. A dropped connection's late packet is bounced with `CONFLICT`. The owner a name stands for is
+    /// the token [`CommandRoster::attach`] stored — it is not derived again here (ADR-0154).
     pub fn register(&self, conn_id: ConnId, decls: Vec<CommandDecl>) -> Result<(), CommandError> {
         let mut shared = self.lock();
         let owner = shared.refuse_if_detached(conn_id)?;
         shared.roster.register(&owner, decls)
     }
 
-    /// 붙어 있는 동안의 차분. 반려 규칙과 주인 토큰의 출처는 [`CommandRoster::register`] 와 같다.
+    /// Diff while attached. The bounce rule and the source of the owner token are the same as [`CommandRoster::register`].
     pub fn update(
         &self,
         conn_id: ConnId,
@@ -383,14 +383,14 @@ impl CommandRoster {
         shared.roster.update(&owner, added, removed)
     }
 
-    /// 명부 전량의 스냅샷. [`Roster::entries`] 의 iterator 를 그대로 내보내면 호출자가 순회하는 동안
-    /// 락이 잡혀 있으므로 여기서 걷어 낸다.
+    /// Snapshot of the whole registry. If [`Roster::entries`]'s iterator were handed out as is, the lock would be held while the caller iterates,
+    /// so it is drained here.
     pub fn entries(&self) -> Vec<RosterEntry> {
         self.lock().roster.entries().collect()
     }
 
-    /// 이 이름의 주인이 표시한 에이전트 참조 칸(등록 순서)의 사본 — 배달이 중계 전에 읽는다
-    /// ([`Roster::agent_args`]). 잠금은 이 호출 안에서 끝난다.
+    /// A copy of the agent-reference slots (in registration order) that this name's owner marked — delivery reads it before relaying
+    /// ([`Roster::agent_args`]). The lock ends inside this call.
     // ADR-0308
     pub fn agent_args_of(&self, name: &str) -> Vec<String> {
         self.lock().roster.agent_args(name).to_vec()
@@ -400,21 +400,21 @@ impl CommandRoster {
         self.inner.lock().expect("command roster poisoned")
     }
 
-    /// 잠금 실패에 패닉하지 않는 획득 — ★**정리 경로 전용**★. 유일한 호출자가
-    /// [`CommandRoster::detach`] 이고, 사유는 그 함수 안 주석이다.
+    /// Lock acquisition that does not panic on failure — ★**for the cleanup path only**★. The only caller is
+    /// [`CommandRoster::detach`], and the reason is in the comment inside that function.
     ///
-    /// ★운영 프로세스에서는 이 갈래에 닿지 못한다(알려진 범위)★ — 이 표를 쥔 패닉은 가둠 표시 밖이라 훅이
-    /// 되감기 전에 끝내 오염이 아예 생기지 않는다(ADR-0292). 그래도 두는 이유는 훅 없는 시험 빌드에서 그
-    /// 갈래가 실재하고, 거기서 새는 표가 그대로 회귀 시험의 관측을 망치기 때문이다.
+    /// ★A production process cannot reach this branch (known scope)★ — a panic holding this table is outside the containment mark so the hook
+    /// ends the process before unwinding and no poisoning arises at all (ADR-0292). It is kept anyway because in a hook-less test build that
+    /// branch is real, and a table that leaks there ruins the observation of regression tests as it is.
     fn lock_for_cleanup(&self) -> std::sync::MutexGuard<'_, Shared> {
         sync::lock(&self.inner)
     }
 }
 
-/// 배달 3단계의 2단계가 명부에 묻는 **한 가지**(`engram_dashboard_command::route`).
+/// The **one thing** stage 2 of the 3-stage delivery asks the registry (`engram_dashboard_command::route`).
 ///
-/// ★잠금은 이 호출 안에서 끝난다 — 그것이 이 trait 의 존재 이유다★: 참조를 통째로 넘기면 배달이 답장을
-/// 기다리는 내내 명부가 잠겨 등록·연결 정리·다른 배달이 전부 선다(근거 정본 = 그 trait 주석).
+/// ★The lock ends inside this call — that is the reason this trait exists★: if the reference were handed over whole, the registry would stay locked for as long as the delivery
+/// waits for a reply, and registration, connection cleanup and other deliveries would all stall (authoritative rationale = that trait's comment).
 // ADR-0154
 impl OwnerLookupSource for CommandRoster {
     fn lookup(&self, name: &str) -> OwnerLookup {
@@ -423,29 +423,29 @@ impl OwnerLookupSource for CommandRoster {
 }
 
 impl Shared {
-    /// ★끊긴 연결의 늦은 패킷을 막는 **유일한** 그물이다★ — 근거와 「두 번째를 세우지 말 것」은 이 파일
-    /// 헤더.
+    /// ★This is the **only** net that stops late packets from a dropped connection★ — the rationale and 「두 번째를 세우지 말 것」 (do not build a second one) are in this file's
+    /// header.
     ///
-    /// 통과하면 그 연결이 붙을 때 저장한 **주인 토큰**을 낸다 — 부르는 쪽이 다시 파생하지 않게 하려는
-    /// 것이다(파생 지점은 [`CommandRoster::attach`] 하나. ADR-0154). 반려 갈래에서는 토큰이 없고, 그것이
-    /// 곧 이 그물의 뜻이다.
+    /// If it passes, it returns the **owner token** stored when that connection attached — so the caller does not derive it again
+    /// (the single derivation point is [`CommandRoster::attach`]. ADR-0154). The refusal branch has no token, and that is
+    /// the meaning of this net.
     ///
-    /// ★코드 선택★: 패킷은 멀쩡하고(`INVALID_ARGUMENT` 아님) 부르는 쪽 잘못도 아니다 — 거절하는 것은
-    /// **상태**(그 연결은 지금 명단에 없다)라서 `CONFLICT` 다. 그 코드의 재시도 지시는 `never` 다 — 같은
-    /// 연결로 다시 보내 봐야 그 연결은 이미 없고, 다시 붙으면 **새 토큰**을 받으므로 재시도가 아니라
-    /// 재등록이다.
+    /// ★Code choice★: the packet is fine (not `INVALID_ARGUMENT`) and it is not the caller's fault — what is refused is the
+    /// **state** (that connection is not on the list now), so it is `CONFLICT`. That code's retry instruction is `never` — resending over the same
+    /// connection is pointless since that connection is already gone, and when it attaches again it gets a **new token**, so it is not a retry but a
+    /// re-registration.
     ///
-    /// ★문구가 「끊겼다」로 좁지 않은 이유★: 같은 갈래가 **한 번도 붙은 적 없는** 연결에도 선다. 오늘
-    /// 운영 경로에서는 안 나지만(`on_connect` 이 dispatch 보다 앞이라는 네트워크 행 순서) 타입이 막는
-    /// 것은 아니다 — `register`/`update` 는 맨 [`ConnId`] 를 받는다.
+    /// ★Why the wording is not narrowed to 「끊겼다」 (dropped)★: the same branch also stands for a connection that **never attached**. Today
+    /// it does not occur on the production path (the network layer's order that `on_connect` comes before dispatch) but the type does not
+    /// prevent it — `register`/`update` take a bare [`ConnId`].
     ///
-    /// ★이 반려에 로그를 따로 남기지 않는다★ — 부르는 쪽(`connection_core` 의 `reply_roster`)이 명부 거절
-    /// 전량을 `warn!`(conn·verb·code·문구)으로 이미 남긴다. 여기서 한 줄 더 내면 같은 사건이 두 번 적히고,
-    /// 그 줄은 **잠금을 쥔 채** 나간다([`CommandRoster::detach`] 가 로그를 잠금 밖으로 뺀 것과 같은 이유).
-    /// ★알려진 어긋남 — 이 판정 단위는 [`ConnId`] 인데 제거 단위는 주인 토큰이다★: 오늘은 둘이 1:1 이라
-    /// 무해하나, 슬라이스 B 가 여러 연결이 한 주인을 공유하게 만들면 **자기 등록이 남의 `detach` 에 지워진
-    /// 뒤에도 이 그물을 통과하는** 연결이 생긴다 — 그 연결은 자기 이름이 없어진 것을 모르고, 등록은 붙을 때
-    /// 1회뿐이라 되돌릴 계기도 없다. 근거 정본과 「슬라이스 B 가 닫는다」는 [`CommandRoster::detach`] 주석.
+    /// ★No separate log is left for this bounce★ — the caller (`reply_roster` in `connection_core`) already leaves every registry refusal
+    /// as a `warn!` (conn · verb · code · wording). One more line here would write the same event twice,
+    /// and that line would go out **while holding the lock** (the same reason [`CommandRoster::detach`] moved its log outside the lock).
+    /// ★Known mismatch — this decision's unit is [`ConnId`] but the removal unit is the owner token★: today the two are 1:1 so it is
+    /// harmless, but if slice B makes several connections share one owner, there will be connections that **pass this net even after
+    /// their own registration was erased by someone else's `detach`** — that connection does not know its names are gone, and registration is only once at attach
+    /// so there is no occasion to undo it. The authoritative rationale and 「슬라이스 B 가 닫는다」 (slice B closes it) are in the [`CommandRoster::detach`] comment.
     // ADR-0150
     fn refuse_if_detached(&self, conn_id: ConnId) -> Result<OwnerToken, CommandError> {
         match self.live.get(&conn_id) {
@@ -473,20 +473,20 @@ mod tests {
         }
     }
 
-    /// 표에 들 출구 하나와 **그 출구가 닿는 곳**. 핸들끼리를 `Arc` 포인터로 견주지 않는 이유는 이 표가
-    /// 지키는 것이 「그 핸들로 보내면 그 연결로 간다」이지 「같은 객체가 나왔다」가 아니라서다.
+    /// One outlet to go in the table and **where that outlet reaches**. The reason handles are not compared by `Arc` pointer is that what this table
+    /// guards is 「그 핸들로 보내면 그 연결로 간다」 (sending through that handle goes to that connection), not 「같은 객체가 나왔다」 (the same object came out).
     fn sink_with_inbox() -> (Arc<dyn FrameSink>, mpsc::Receiver<Frame>) {
         let (tx, rx) = mpsc::channel::<Frame>(4);
         (Arc::new(FakeFrameSink::new(tx)), rx)
     }
 
-    /// 닿는 길을 보지 않는 테스트가 자리만 채울 때 쓴다.
+    /// Used as a placeholder when a test that does not look at the path needs to fill the slot.
     fn some_sink() -> Arc<dyn FrameSink> {
         sink_with_inbox().0
     }
 
-    /// 소멸 시점에 **명부 잠금이 풀려 있었는지**를 기록하는 출구. 프레임은 버린다 — 이 더블이 보는 것은
-    /// 배달이 아니라 자기가 언제 죽는가다.
+    /// An outlet that records **whether the registry lock was released** at the time of its destruction. It drops frames — what this double watches is
+    /// not delivery but when it itself dies.
     struct LockProbeSink {
         roster: CommandRoster,
         unlocked_at_drop: Arc<AtomicBool>,
@@ -509,7 +509,7 @@ mod tests {
         }
     }
 
-    /// 핸들에 표식을 흘려 어느 받는 곳으로 나갔는지 가른다.
+    /// Mark the handle so we can tell which receiver it went out to.
     fn ping(sink: &Arc<dyn FrameSink>, mark: &str) {
         sink.try_send(Frame::Text(mark.to_string()))
             .expect("가짜 출구는 비어 있다");
@@ -523,22 +523,22 @@ mod tests {
         }
     }
 
-    /// 명부에 직접 묻는다 — 배달이 보는 것이 이 답이다(`entries` 의 투영이 아니라).
+    /// Ask the registry directly — what delivery sees is this answer (not the projection of `entries`).
     fn lookup(roster: &CommandRoster, name: &str) -> OwnerLookup {
         let shared = roster.lock();
         shared.roster.lookup(name)
     }
 
-    // ── 연결 정리와 겹쳐 도는 등록(frame_port::ConnectionHandler 계약의 잔여 경쟁) ──────
+    // ── Registration running concurrently with connection cleanup (the remaining race of the frame_port::ConnectionHandler contract) ──────
     //
-    // 네 갈래를 못으로 박는다: {등록·차분} × {아무도 안 쥔 이름·산 연결이 쥔 이름}. 명부에는 끊긴 주인의
-    // 흔적이 없으므로(ADR-0150) 이 그물은 **연결 수명**으로만 설 수 있다.
+    // Nail down four branches: {registration, diff} × {a name nobody holds, a name a live connection holds}. The registry has no
+    // trace of a dropped owner (ADR-0150), so this net can stand only on **connection lifetime**.
     //
-    // ★코드만 보면 안 된다 — 문구까지 본다★: 같은 `CONFLICT` 를 `Roster::check_added_are_not_taken` 도
-    // 내므로, 코드만 단언하면 이 파일의 그물을 통째로 지워도 몇몇은 **다른 이유로** 초록을 유지한다.
+    // ★Looking at the code alone is not enough — look at the wording too★: the same `CONFLICT` is also raised by `Roster::check_added_are_not_taken`,
+    // so if only the code is asserted, some of these stay green **for another reason** even when this file's net is deleted entirely.
 
-    /// 이름이 되살아나는지까지 본다 — 정리가 지운 이름을 늦은 등록이 다시 얹으면, 그 이름은 **없는 주인**
-    /// 앞으로 데몬 수명 내내 `Available` 이 된다(그 연결엔 다시 올 정리가 없다).
+    /// Also check whether the name comes back to life — if a late registration puts back a name cleanup erased, that name becomes `Available` toward a
+    /// **nonexistent owner** for the daemon's whole lifetime (no cleanup will ever come again for that connection).
     #[test]
     fn a_registration_that_lands_after_its_disconnect_is_refused() {
         let roster = CommandRoster::new();
@@ -564,9 +564,9 @@ mod tests {
         assert!(roster.entries().is_empty(), "명부에 남는 것이 없다");
     }
 
-    /// ★명부만으로는 못 막는 갈래★ — 끊긴 주인의 등록은 지워지므로 `Roster` 에는 그 죽음을 기억할 자리가
-    /// 없고, 늦은 등록이 산 연결의 이름을 인수인계로 이어받는 것처럼 통과한다. 여기서 막는 것은 연결
-    /// 수명이다.
+    /// ★A branch the registry alone cannot stop★ — a dropped owner's registrations are erased, so `Roster` has no place to remember that death,
+    /// and a late registration passes as if taking over a live connection's names by handover. What stops it here is the connection
+    /// lifetime.
     #[test]
     fn a_late_registration_cannot_take_a_live_connections_name() {
         let roster = CommandRoster::new();
@@ -642,11 +642,11 @@ mod tests {
         );
     }
 
-    /// ★명부 검사가 통째로 비켜가는 자리 — 여기선 연결 수명이 유일한 그물이다★
+    /// ★A spot the registry check bypasses entirely — here connection lifetime is the only net★
     ///
-    /// 아무도 안 쥔 이름을 더하는 차분은 `Roster::check_added_are_not_taken` 이 통과시키고, 끊긴 주인을
-    /// 가릴 검사는 명부에 아예 없다(ADR-0150). 그물이 빠지면 `tab.split` 이 **없는 주인** 앞으로
-    /// `Available` 이 되어 데몬 수명 내내 굳는다.
+    /// A diff that adds a name nobody holds is passed by `Roster::check_added_are_not_taken`, and the registry has no check at all
+    /// that would tell a dropped owner apart (ADR-0150). If the net is missing, `tab.split` becomes `Available` toward a **nonexistent owner**
+    /// and stays stuck for the daemon's whole lifetime.
     #[test]
     fn a_late_delta_adding_an_unclaimed_name_is_refused() {
         let roster = CommandRoster::new();
@@ -675,15 +675,15 @@ mod tests {
         );
     }
 
-    /// ★끊김이 **무엇을 지웠는지** 로그가 말해야 한다★
+    /// ★The log must say **what the disconnect erased**★
     ///
-    /// 자취를 남기지 않으므로(ADR-0150 결정 3) 사라진 이름은 **자료에 남지 않는다** — 조회로 되짚을 길이
-    /// 없어 「어느 명령이 왜 없어졌나」에 답하는 표면이 이 한 줄뿐이다. 반려 로그(`connection_core` 의
-    /// `reply_roster`)는 **거절된 패킷**만 말하므로 대체가 못 된다.
+    /// Since no trace is kept (ADR-0150 decision 3), the vanished names **do not remain in the data** — there is no way to trace them back
+    /// through a query, so this one line is the only surface that answers 「어느 명령이 왜 없어졌나」 (which command vanished and why). The bounce log (`reply_roster` in `connection_core`)
+    /// tells only about **refused packets**, so it is no substitute.
     ///
-    /// 문구가 아니라 **레벨과 필드**를 본다: 연결 수명 사건이라 `info!` 이고
-    /// (`docs/reference/logging-conventions.md` 레벨 표), 개수만으로는 어느 명령이 사라졌는지 못 짚으므로
-    /// 이름까지 실린다.
+    /// We look not at the wording but at **the level and the fields**: it is `info!` because it is a connection-lifetime event
+    /// (`docs/reference/logging-conventions.md` level table), and since the count alone cannot point out which command vanished,
+    /// the names are carried too.
     #[test]
     fn a_detach_logs_the_names_it_removed() {
         let roster = CommandRoster::new();
@@ -701,14 +701,14 @@ mod tests {
         );
     }
 
-    /// ★이 줄의 **모양**을 상대가 정하지 못한다★ — 개행 하나면 로그 줄이 둘로 쪼개져 뒤 줄이 우리가 찍은
-    /// 항목처럼 보인다(위조 항목).
+    /// ★The peer cannot decide this line's **shape**★ — a single newline would split the log line in two, and the second line would look like an entry
+    /// we wrote (a forged entry).
     ///
-    /// 명부는 이름의 **바이트 길이만** 보고 문자셋을 안 보므로(도구 crate `Roster` 의 등록 검사) 개행이 든
-    /// 이름은 실제로 등록된다 — 이 시험의 전제가 그것이다.
-    /// ★이름을 **하나만** 얹는다 — 이 축을 개수 축과 한 시험에 합치지 말 것★: 실제로 합쳐 봤더니
-    /// [`MAX_LOGGED_NAMES`] 를 넘겨 채운 순간 위조 이름이 이름순 정렬에서 **잘리는 쪽에 들어가** 손질기를
-    /// 걷어내도 초록이었다(즉 그 형태는 모양 축을 한 번도 재지 않는다). 개수 축은 아래 형제가 잰다.
+    /// The registry looks only at the **byte length** of a name and not the character set (the tool crate `Roster`'s registration check), so a name
+    /// containing a newline really does get registered — that is this test's premise.
+    /// ★Put up **only one** name — do not merge this axis with the count axis into one test★: when I actually merged them,
+    /// the moment the fill exceeded [`MAX_LOGGED_NAMES`] the forged name fell **on the truncated side** of the name-order sort, so it stayed green even with the sanitizer
+    /// removed (that is, that form never measures the shape axis even once). The count axis is measured by the sibling below.
     #[test]
     fn a_control_character_in_a_removed_name_never_reaches_the_log_field_verbatim() {
         let roster = CommandRoster::new();
@@ -728,11 +728,11 @@ mod tests {
         );
     }
 
-    /// ★이 줄의 **크기**를 상대가 정하지 못한다★ — 한 주인이 512개까지 얹을 수 있어(도구 crate 의
-    /// `Roster::MAX_NAMES_PER_OWNER`) 안 자르면 이 한 줄이 64 KiB 가 된다.
+    /// ★The peer cannot decide this line's **size**★ — one owner can put up 512 names (the tool crate's
+    /// `Roster::MAX_NAMES_PER_OWNER`), so without truncation this one line becomes 64 KiB.
     ///
-    /// ★`names` 는 자르지 않는다★ — 정확한 개수가 남아야 「몇 개가 사라졌나」가 안 흐려진다. 그래서 잘리는
-    /// 것은 「어느 이름이었나」의 뒤쪽뿐이고, 그 사실도 줄에 적힌다.
+    /// ★`names` is not truncated★ — the exact count must remain so 「몇 개가 사라졌나」 (how many vanished) does not blur. So what gets cut
+    /// is only the tail of 「어느 이름이었나」 (which names were they), and that fact is also written on the line.
     #[test]
     fn the_removed_names_line_says_how_many_it_elided() {
         let roster = CommandRoster::new();
@@ -755,8 +755,8 @@ mod tests {
             !logged.contains(&format!("tab.n{:02}", total - 1)),
             "마지막 이름은 잘려 나가야 한다: {logged:?}"
         );
-        // 넉넉한 상한으로 「상대가 크기를 정하지 못한다」만 못박는다 — 정확한 수를 박으면 필드 하나 늘 때마다
-        //   깨진다.
+        // With a generous cap, only pin down 「상대가 크기를 정하지 못한다」 (the peer cannot decide the size) — pinning an exact number would break
+        //   every time a field is added.
         assert!(
             logged.len() < 1024,
             "줄 크기를 상대가 정한다: {} bytes",
@@ -764,9 +764,9 @@ mod tests {
         );
     }
 
-    /// 내릴 이름이 없던 끊김은 `info!` 를 내지 않는다 — 지운 것이 없으면 이 줄이 말할 사건도 없고, 연결
-    /// 자체의 종료는 네트워크 행이 이미 남긴다. 등록하는 클라이언트가 아직 0건이라(TRD §3-7) 이 갈래가
-    /// **평상시 전부**이므로, 여기서 안 가르면 기본 경로가 무의미한 줄로 덮인다.
+    /// A disconnect with no names to remove does not emit `info!` — with nothing erased this line has no event to tell, and the
+    /// connection's own end is already logged by the network layer. Since registering clients are still at zero (TRD §3-7) this branch is
+    /// **the usual case in full**, so if it were not separated here, the default path would be buried under pointless lines.
     #[test]
     fn a_detach_with_nothing_to_remove_stays_quiet_at_info() {
         let roster = CommandRoster::new();
@@ -780,9 +780,9 @@ mod tests {
         );
     }
 
-    /// 붙은 적 없는 연결의 정리 — 표에 항목이 없으니 읽을 주인도 지울 이름도 없다. 이 갈래는 `detach` 가
-    /// 주인 토큰을 **표에서 읽게** 되면서 생겼다. 조용해야 하고, 무엇보다 산 연결의 이름을 건드리면 안
-    /// 된다.
+    /// Cleanup of a connection that never attached — there is no entry in the table so there is no owner to read and no name to erase. This branch arose when `detach`
+    /// began to **read the owner token from the table**. It must be quiet, and above all it must not touch a live connection's
+    /// names.
     #[test]
     fn a_detach_for_a_connection_that_never_attached_is_quiet() {
         let roster = CommandRoster::new();
@@ -802,9 +802,9 @@ mod tests {
         );
     }
 
-    /// INFO 이벤트의 필드만 모으는 최소 수집기 — 포맷 레이어를 쓰지 않는 이유는 이 테스트가 보는 것이
-    /// 「그 필드가 실린 INFO 이벤트가 났는가」 하나뿐이라서다(`control::tests` 의 같은 형태).
-    /// `with_default` 는 **이 스레드에서만** 걸리므로 병렬 테스트와 섞이지 않는다.
+    /// A minimal collector that gathers only the fields of INFO events — the reason for not using the format layer is that what this test looks at is
+    /// only one thing, 「그 필드가 실린 INFO 이벤트가 났는가」 (did an INFO event carrying that field occur) (the same form as in `control::tests`).
+    /// `with_default` is installed **only on this thread**, so it does not mix with parallel tests.
     fn capture_info(body: impl FnOnce()) -> String {
         use tracing::subscriber;
 
@@ -846,7 +846,7 @@ mod tests {
         captured.join("\n")
     }
 
-    /// 재연결은 **새 연결 id** 로 오므로 막히지 않는다 — 위 반려가 정상 경로를 잠그지 않는다는 경계.
+    /// A reconnect comes with a **new connection id** so it is not blocked — the boundary that the bounce above does not lock the normal path.
     #[test]
     fn reconnecting_under_a_new_connection_id_registers_normally() {
         let roster = CommandRoster::new();
@@ -865,11 +865,11 @@ mod tests {
         );
     }
 
-    // ── 주인 토큰 → 그 주인에게 닿는 길(ADR-0154) ──────────────────────────────────
+    // ── Owner token → the path to that owner (ADR-0154) ──────────────────────────────────
     //
-    // 배달이 밟는 순서 그대로 잰다: 이름으로 명부에 물어 주인을 얻고(`lookup`), 그 주인으로 출구를
-    // 얻는다(`sink_of`). 그래서 **조회 키는 명부가 실제로 쥔 값**이지 시험이 손으로 지어낸 문자열이
-    // 아니다.
+    // Measure in exactly the order delivery follows: ask the registry by name to get the owner (`lookup`), and with that owner get the
+    // outlet (`sink_of`). So **the lookup key is a value the registry really holds**, not a string the test
+    // made up by hand.
 
     #[test]
     fn an_attached_owner_resolves_to_that_connections_sink() {
@@ -894,22 +894,22 @@ mod tests {
         );
     }
 
-    /// 끊긴 주인은 닿는 길이 없다 — 그리고 ★안 보이는 것으로는 부족하고 **놓아야** 한다★.
+    /// A dropped owner has no path to reach — and ★merely not being visible is not enough; it must be **released**★.
     ///
-    /// 그래서 조회의 부재만이 아니라 강참조가 실제로 사라졌는지까지 잰다. 묘비만 남기고 `Arc` 를 쥐고
-    /// 있는 구현은 앞의 단언만으로는 초록이다. 그런 구현이 깨는 것 둘: 채널 할당과 `Notify` 가 데몬
-    /// 수명 내내 남고 — 그리고 이쪽이 하류에 중한데 — **살아남은 표 항목은 죽은 주인에게
-    /// [`CommandRoster::sink_of`] 가 `Some` 을 답하게 만들어**, 배달이 정직한 「주인 없음」 대신 조용한
-    /// 블랙홀이 된다.
-    /// (writer task 의 자기종료와는 무관하다 — 네트워크 행은 `on_disconnect` **앞에서** 진 task 에
-    /// `abort()` 를 걸므로 명부의 사본이 writer 를 좀비로 만들지는 못한다.)
+    /// So we measure not only the absence in the query but also whether the strong reference really disappeared. An implementation that keeps only a tombstone and holds
+    /// the `Arc` is green with the preceding assertion alone. Two things such an implementation breaks: the channel allocation and `Notify` stay for the daemon's
+    /// whole lifetime, and — this one matters more downstream — **the surviving table entry makes
+    /// [`CommandRoster::sink_of`] answer `Some` for a dead owner**, so delivery becomes a silent
+    /// black hole instead of an honest 「주인 없음」 (no owner).
+    /// (It is unrelated to the writer task's self-termination — the network layer calls `abort()` on the losing task
+    /// **before** `on_disconnect`, so the registry's copy cannot turn the writer into a zombie.)
     #[test]
     fn a_detached_owner_releases_its_sink() {
         let roster = CommandRoster::new();
         let (sink, _inbox) = sink_with_inbox();
         let reclaimed = Arc::downgrade(&sink);
         roster.attach(1, &sink);
-        drop(sink); // 이제 표가 유일한 강참조다.
+        drop(sink); // Now the table is the only strong reference.
 
         roster.detach(1);
 
@@ -924,13 +924,13 @@ mod tests {
         );
     }
 
-    /// ★거둔 핸들의 소멸자가 **임계 구역 밖**에서 돈다★ — `detach` 의 제거를 잠금 블록 안으로 되돌리면
-    /// 소멸자가 그 안에서 돈다. 그 자리에서 도는 코드가 무엇을 하는지 명부는 모르고(`dyn` 이다), 이 파일
-    /// 헤더가 약속한 「잠그고 한 번 부른 뒤 즉시 놓는다」 밖의 일이다. 그런 되돌림은 저장소 어디도 빨개지지
-    /// 않으므로 이 테스트가 그 유일한 그물이다.
+    /// ★The withdrawn handle's destructor runs **outside the critical section**★ — if `detach`'s removal is moved back inside the lock block, the
+    /// destructor runs inside it. The registry does not know what code running at that spot does (it is `dyn`), and that is outside the
+    /// 「잠그고 한 번 부른 뒤 즉시 놓는다」 (lock, call once, then release at once) this file's header promised. Nothing else in the repository goes red on such a revert,
+    /// so this test is the only net for it.
     ///
-    /// 재는 방법: 소멸자가 그 시점에 명부 잠금을 잡아 본다. 같은 스레드가 이미 쥐고 있으면 `try_lock` 은
-    /// `WouldBlock` 이라 **교착 없이** 갈린다.
+    /// How it measures: the destructor tries to take the registry lock at that moment. If the same thread already holds it, `try_lock` returns
+    /// `WouldBlock`, so the two cases are told apart **without deadlock**.
     #[test]
     fn the_reclaimed_sink_is_dropped_outside_the_lock() {
         let roster = CommandRoster::new();
@@ -940,7 +940,7 @@ mod tests {
             unlocked_at_drop: unlocked_at_drop.clone(),
         });
         roster.attach(1, &sink);
-        drop(sink); // 표가 유일한 강참조 — 소멸자는 `detach` 가 돌린다.
+        drop(sink); // The table is the only strong reference — `detach` runs the destructor.
 
         roster.detach(1);
 
@@ -950,12 +950,12 @@ mod tests {
         );
     }
 
-    /// ★저장된 토큰이 파생형이 **아닌** 상태에서도 등재·조회·제거가 전부 그 값을 쓰는지 잰다★
+    /// ★Measure that registration, query and removal all use the stored token even when it is **not** of the derived form★
     ///
-    /// 셋 중 하나라도 [`CommandRoster::owner_of`] 로 재파생하는 구현은 여기서 빨개진다 — 재파생하는
-    /// `register` 는 이름을 `conn-1` 앞에 세우고, 재파생하는 `detach` 는 아무것도 못 지운다.
-    /// ★슬라이스 B 를 선결하지 않는다★: 바꾸는 것은 표에 든 값 하나이고 [`CommandRoster::attach`] 의
-    /// 시그니처가 아니다 — 운영 경로는 여전히 토큰을 스스로 계산한다.
+    /// An implementation that re-derives with [`CommandRoster::owner_of`] in any of the three goes red here — a `register` that re-derives
+    /// puts the name up under `conn-1`, and a `detach` that re-derives erases nothing.
+    /// ★This does not pre-decide slice B★: what changes is one value in the table, not the signature of [`CommandRoster::attach`] —
+    /// the production path still computes the token by itself.
     #[test]
     fn the_roster_files_and_removes_under_the_stored_token() {
         let roster = CommandRoster::new();
@@ -981,11 +981,11 @@ mod tests {
         );
         assert_eq!(roster.attached_owner(1), Some(stored));
 
-        // ★`capture_info` 로 감싼다 — 이 `detach` 는 지울 이름이 있어 `info!` 를 낸다★: 구독자 없는
-        //   스레드가 그 callsite 를 **처음** 등록하면 「관심 없음」이 박혀, 뒤에 그 줄을 재는
-        //   `a_detach_logs_the_names_it_removed` 가 빈손이 된다(4-스레드 실행에서 실제로 그렇게 깨졌다,
-        //   2026-08-18). ★「전역 캐시라 한 번 때리면 굳는다」로 적지 말 것 — 그 진술은 틀렸다★: 하자의
-        //   실제 조건(스레드를 가로지르는 최초 등록)과 실측 근거는 `log_capture` 모듈 헤더가 정본이다.
+        // ★Wrap with `capture_info` — this `detach` has names to erase so it emits `info!`★: when a thread with no subscriber
+        //   registers that callsite **first**, 「관심 없음」 (no interest) gets baked in, and `a_detach_logs_the_names_it_removed`, which measures that line afterwards,
+        //   comes back empty-handed (it really broke that way in a 4-thread run,
+        //   2026-08-18). ★Do not write it as 「전역 캐시라 한 번 때리면 굳는다」 (it is a global cache so it sticks once hit) — that statement is wrong★: the
+        //   actual condition of the flaw (first registration across threads) and the measured evidence are in the `log_capture` module header, the authority.
         capture_info(|| roster.detach(1));
 
         assert_eq!(
@@ -1010,8 +1010,8 @@ mod tests {
         );
     }
 
-    /// 여럿이 붙어 있을 때 **각자 자기 출구**가 나온다 — 섞이면 한 클라이언트의 명령이 다른
-    /// 클라이언트로 배달된다(그쪽은 자기가 안 시킨 것을 실행한다).
+    /// When several are attached, **each gets its own outlet** — if mixed, one client's command is delivered to another
+    /// client (which executes something it did not order).
     #[test]
     fn each_owner_gets_its_own_sink() {
         let roster = CommandRoster::new();
@@ -1039,17 +1039,17 @@ mod tests {
         );
     }
 
-    /// ★조회가 토큰을 **파싱하지 않는다**는 것을 문다★
+    /// ★Bite on the fact that the query does **not parse** the token★
     ///
-    /// 아래 문자열은 전부 `"conn-"` 을 떼고 수로 읽으면 **1** 이 된다(`"01"`·`"+1"` 은 Rust 의 정수
-    /// 파서가 받는다). 즉 접두를 떼어 연결 id 를 되짚는 조회는 이것들에 conn 1 의 출구를 내주고, 저장된
-    /// 토큰과 동등 비교하는 조회는 빈손을 낸다. 그 파생이 잠정 규칙이라 되짚기를 금지한 근거는
+    /// Every string below becomes **1** when `"conn-"` is stripped and the rest read as a number (`"01"` and `"+1"` are accepted by Rust's integer
+    /// parser). That is, a query that strips the prefix to trace the connection id back hands conn 1's outlet to these, while a query that compares by
+    /// equality with the stored token comes up empty-handed. The rationale for forbidding tracing back, since that derivation is a provisional rule, is
     /// [`LiveConn`].
     ///
-    /// ★이 테스트가 못 무는 변종이 하나 있다★: 파싱한 뒤 [`CommandRoster::owner_of`] 로 **되돌려
-    /// 비교하는** 구현은 위 문자열에도 빈손을 내므로 여기는 통과한다. 그 변종은 저장된 토큰이 파생형이
-    /// 아닌 상태에서만 갈리므로 [`the_roster_files_and_removes_under_the_stored_token`] 이 잡는다 — 그쪽이
-    /// 표의 값을 직접 바꿔 그 상태를 만든다.
+    /// ★There is one variant this test cannot bite★: an implementation that parses and then **compares back** with [`CommandRoster::owner_of`] comes up empty-handed
+    /// for the strings above too, so it passes here. That variant only diverges when the stored token is not of the derived form, so
+    /// [`the_roster_files_and_removes_under_the_stored_token`] catches it —
+    /// that one changes the table's value directly to create that state.
     #[test]
     fn a_lookup_compares_the_stored_token_and_never_parses_it() {
         let roster = CommandRoster::new();

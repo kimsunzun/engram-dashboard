@@ -1,22 +1,22 @@
-//! claude 끊기 뒤 잔여물 정리의 **고르기 규칙** — 판 한 차례에 끝낼 후보를 추리고([`candidates`]) 후보 하나를
-//! 규칙 넷의 AND 로 가른다([`select`]). 훅 명령줄 · taskkill 표지는 [`is_hook_command`] · [`taskkill_names`].
+//! **Selection rules** for cleaning up leftovers after a claude interrupt — pick the candidates to kill in one round of a pass ([`candidates`]) and decide one candidate
+//! by the AND of four rules ([`select`]). Hook command lines and taskkill markers are in [`is_hook_command`] · [`taskkill_names`].
 //!
-//! ★규칙은 순수하다★ — OS 호출 · 자물쇠 · 스레드가 없고 모든 OS 에서 컴파일된다(ADR-0012 · ADR-0230). 사실은 붙든
-//!   핸들로 이미 읽어 온 값([`ProcessFacts`])만 보고, 「끝났나」는 [`Chain::exited`] 로 주입받는다.
-//! ★좁히기만 한다★ — 하나라도 못 믿으면(못 찾은 고리 · 빈 칸 · 조회 오류 · 모양 밖) 끝내지 않는 판정을 낸다. 표지
-//!   어느 것도 후보를 늘리지 않는다 — claude 가 훅 감싸기나 끊기 방식을 바꾸면 모두 놓친다(안전한 쪽).
+//! ★The rules are pure★ — no OS calls, no locks, no threads, and they compile on every OS (ADR-0012 · ADR-0230). They look only at facts
+//!   already read through held handles ([`ProcessFacts`]); 「끝났나」 (has it exited) is injected through [`Chain::exited`].
+//! ★Narrowing only★ — if any one cannot be trusted (a link not found · an empty field · a query error · outside the expected shape), the decision is not to kill. No marker
+//!   ever widens the candidates — if claude changes how it wraps hooks or how it interrupts, all of them miss (the safe side).
 //!
-//! 규칙이 보는 탄생은 **탄생 기록**([`Recorder`])이 모은다 — 무리의 가입 알림을 듣는 스레드가 기록이 켜진 동안 받자마자
-//! 붙들어 넣는다. 포트와 그 스레드는 화신마다 한 번 [`BirthWatch`] 가 띄운다. 무리는 중립 손잡이로만 보고 여기에 OS
-//! 갈래는 없다.
+//! The births the rules see are collected by the **birth record** ([`Recorder`]) — a thread listening for the group's join notifications, while recording is on, grabs
+//! and holds each one on arrival. [`BirthWatch`] starts the port and that thread once per incarnation. The group is seen only through a neutral handle; there is no OS
+//! branch here.
 //!
-//! 끊기 에피소드는 [`GateCell`](화신마다 하나 — 턴 열림 문 + 에피소드 · 끊기 줄 함수와 decoder 가 함께 쥔다)이 세우고,
-//! 줄이 쓰인 뒤 N 초를 일꾼이 잰다 — 그때도 턴 끝이 없으면 정리 한 판([`run_pass`])이 차례마다 고르고 끝낸다.
-//! 정리기([`Cleaner`])가 없으면 문만 여닫는다.
-//! ★문 자물쇠는 잎이다★ — 쥔 채 필드 · 단조 시각 읽기 · 원자 읽기(기록 번호 · 물러남 표시)만 하고, 로그 · 스레드 기동 ·
-//!   할당과 해제 · OS 호출 · 다른 자물쇠는 하지 않는다(유일한 예외는 끝내기 확정의 끝내기 호출 하나). 빼낸 것은 놓은 뒤
-//!   버린다. 기록 자물쇠와 겹쳐 잡지 않는다.
-//! 명세 = `docs/process/S21-chat-ux/trd-t40.md` §3-2 · §3-3 · §3-4 · §3-5 · §3-7.
+//! An interrupt episode is set up by [`GateCell`] (one per incarnation — the turn-open gate + the episode; the interrupt-line function and the decoder hold it together),
+//! and the worker times N seconds after the line is written — if there is still no turn end by then, one cleanup pass ([`run_pass`]) selects and kills, round by round.
+//! Without a cleaner ([`Cleaner`]) it only opens and closes the gate.
+//! ★The gate lock is a leaf★ — while held it only reads fields · monotonic time · atomics (record number · retirement flag), and does no logging · thread start ·
+//!   allocation or free · OS calls · other locks (the one exception is the single kill call in the kill commit). What was taken out is
+//!   dropped after release. Never held together with the record lock.
+//! Spec = `docs/process/S21-chat-ux/trd-t40.md` §3-2 · §3-3 · §3-4 · §3-5 · §3-7.
 // ADR-0262
 
 use std::fmt;
@@ -38,13 +38,13 @@ use crate::transport::process_group::{
 use crate::transport::stdio::InterruptOut;
 use crate::types::AgentId;
 
-/// 조상 걸음의 상한 — D(A₁)부터 꼭대기 T 까지의 고리 수. 잰 사슬은 넷 이하(p3t3)이고, 넘으면 끊긴 사슬로 본다.
+/// Cap on the ancestor walk — the number of links from D(A₁) up to the top T. Measured chains are four or fewer (p3t3); more than that is treated as a broken chain.
 pub(super) const ANCESTOR_MAX: usize = 16;
 
-/// 고르기가 보는 고리 하나 — 붙든 프로세스의 번호와 그 핸들로 읽은 사실.
+/// One link the selection looks at — a held process's number and the facts read through its handle.
 ///
-/// - `seq` = 탄생 기록의 순번(가입 알림을 꺼낸 순서) · `None` = 스냅숏 멤버.
-/// - `killable` = 끝내기 권한까지 붙들었나 — `false` 면 사슬은 잇되 후보는 못 된다.
+/// - `seq` = sequence number in the birth record (the order join notifications were taken out) · `None` = snapshot member.
+/// - `killable` = was kill access held too — if `false` the chain still connects through it, but it cannot be a candidate.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Link<'a> {
     pub pid: u32,
@@ -53,11 +53,11 @@ pub(super) struct Link<'a> {
     pub killable: bool,
 }
 
-/// 한 기록에 대한 보기 — 스냅숏과 같은 기록의 탄생이 「알려진 고리」의 전부다.
+/// A view over one record — the snapshot plus the births of the same record are all of the 「알려진 고리」 (known links).
 ///
-/// - `root_pid` = 통로의 뿌리(`cmd /c`) — 적힌 부모가 이 번호인 고리를 claude 로 본다. `0` = 모름.
-/// - `births` 의 순서는 뜻이 없다 — 차례는 `seq` 가 정한다.
-/// - `exited` = 알려진 고리 하나가 지금 끝났나. `Err` 은 조회 실패이고 고르기는 그것을 「모름」으로 읽는다.
+/// - `root_pid` = the root of the path (`cmd /c`) — the link whose recorded parent is this number is taken to be claude. `0` = unknown.
+/// - The order of `births` has no meaning — `seq` decides the order.
+/// - `exited` = has one known link exited now. `Err` is a query failure, and the selection reads it as 「모름」 (unknown).
 pub(super) struct Chain<'a> {
     pub root_pid: u32,
     pub snapshot: &'a [Link<'a>],
@@ -65,11 +65,11 @@ pub(super) struct Chain<'a> {
     pub exited: &'a dyn Fn(&Link<'_>) -> io::Result<bool>,
 }
 
-/// [`select`] 의 판정 — `Cleanup` 말고는 전부 「끝내지 않는다」이고, 이름은 로그 사유(TRD §3-4 · §3-8)와 짝이다.
+/// The decision of [`select`] — everything except `Cleanup` means 「끝내지 않는다」 (do not kill), and the names pair with the log reasons (TRD §3-4 · §3-8).
 ///
-/// - `Cleanup.chain` = 후보 C 부터 꼭대기 T 까지의 번호(C 가 처음 · T 가 끝 · claude 는 빠진다).
-/// - `AncestorAlive.pid` = 살아 있는 첫 조상.
-/// - `Unknown` = 빈 칸 · 끝남 조회 오류 · 뿌리 번호 모름.
+/// - `Cleanup.chain` = numbers from candidate C up to the top T (C first · T last · claude is left out).
+/// - `AncestorAlive.pid` = the first live ancestor.
+/// - `Unknown` = empty field · exit query error · root number unknown.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Verdict {
     Cleanup { chain: Vec<u32> },
@@ -83,11 +83,11 @@ pub(super) enum Verdict {
     Unknown,
 }
 
-/// 판 한 차례의 후보 — 이 기록의 탄생 가운데 번호가 쓰기 명단 `w` 에 없고 · 끝내기 권한까지 붙들었고 ·
-/// (번호, 생성)이 스냅숏에 없고 · 끝나지 않은 것(끝남 조회 `Err` 이면 뺀다)을 `seq` 오름차순으로.
+/// Candidates of one round of a pass — among this record's births, those whose number is not in the write list `w` · for which kill access was held ·
+/// whose (number, creation) is not in the snapshot · and that have not exited (dropped if the exit query is `Err`), in ascending `seq` order.
 ///
-/// `w` 는 번호만 대조하고 순서에 기대지 않는다 — 정렬이 어긋나도 후보가 늘지 않는다. `seq` 가 없는 고리는
-/// 탄생이 아니라 빠진다.
+/// `w` is compared by number only and does not depend on order — if the sort is off, candidates still do not grow. A link without `seq` is
+/// not a birth and is left out.
 pub(super) fn candidates<'a>(view: &Chain<'a>, w: &[u32]) -> Vec<&'a Link<'a>> {
     let mut out: Vec<&'a Link<'a>> = view
         .births
@@ -107,13 +107,13 @@ pub(super) fn candidates<'a>(view: &Chain<'a>, w: &[u32]) -> Vec<&'a Link<'a>> {
     out
 }
 
-/// 후보 C 하나를 규칙 넷의 AND 로 가른다 — 앞에서 걸린 규칙의 판정 하나를 돌려준다.
+/// Decide one candidate C by the AND of four rules — return the one decision of the first rule that catches it.
 ///
-/// 1. 부모 D 가 알려진 고리이고 끝났다. 2. C 가 D 의 훅 사본이다(실행 파일이 같고 명령줄이 같거나 D 가 훅 명령).
-/// 3. D 부터 claude 직전까지 모든 조상이 알려진 고리이고 끝났다(고리마다 부모 생성 ≤ 자식 생성 · claude 는 판단하지
-///    않는다). 4. 꼭대기 T 가 훅 실행기이고, 이 기록에 claude 가 띄운 `taskkill /PID <T> /T /F` 가 T 이후에 태어났다.
+/// 1. Parent D is a known link and has exited. 2. C is a hook copy of D (same executable, and the command line is the same or D is a hook command).
+/// 3. Every ancestor from D up to just before claude is a known link and has exited (per link, parent creation ≤ child creation · claude is not
+///    judged). 4. The top T is a hook runner, and in this record a `taskkill /PID <T> /T /F` launched by claude was born after T.
 ///
-/// `exited` 는 D 와 claude 직전까지의 조상에만 부른다.
+/// `exited` is called only for D and the ancestors up to just before claude.
 // ADR-0262
 pub(super) fn select(c: &Link<'_>, view: &Chain<'_>) -> Verdict {
     if view.root_pid == 0 {
@@ -169,10 +169,10 @@ pub(super) fn select(c: &Link<'_>, view: &Chain<'_>) -> Verdict {
     }
 }
 
-/// 훅 명령 모양인가 — 명령줄이 「첫 토큰 · `-c` · 큰따옴표로 감싼 인자 S」이고 S 가 `bash ` 로 시작하며
-/// `shell-snapshots` 를 담지 않는다. claude 2.1.284 가 `.sh` 훅을 감싸는 모양이다(훅 291 대 Bash 도구 6 · 모호 0).
+/// Is it a hook command shape — the command line is 「첫 토큰 · `-c` · 큰따옴표로 감싼 인자 S」 (first token, the -c flag, a double-quoted argument S) and S starts with `bash ` and
+/// does not contain `shell-snapshots`. This is the shape in which claude 2.1.284 wraps `.sh` hooks (291 hooks vs 6 Bash tool · 0 ambiguous).
 ///
-/// S 에 줄바꿈이 있으면 거짓이다 — 잰 대조(`r4sim.py` 의 정규식)가 그런 S 를 받지 않았고, 받으면 넓히는 쪽이다.
+/// False if S has a line break — the measured comparison (the regex in `r4sim.py`) did not accept such an S, and accepting one would widen.
 pub(super) fn is_hook_command(f: &ProcessFacts) -> bool {
     let Some(rest) = after_program(&f.cmdline) else {
         return false;
@@ -196,9 +196,9 @@ pub(super) fn is_hook_command(f: &ProcessFacts) -> bool {
         && !s.contains(|ch: char| ch == '\r' || ch == '\n')
 }
 
-/// claude 가 띄운 `taskkill /PID n /T /F` 의 `n` — 부모가 `claude` 이고 실행 파일 이름이 `taskkill.exe`(대소문자
-/// 무시)이며 프로그램 뒤 인자가 정확히 `/PID` · 십진수 · `/T` · `/F` 일 때만. 대소문자 · `/PID:n` · 순서 바꿈 · 더 붙은
-/// 인자 · 앞자리 0 · `0` 은 모두 `None` — 출처 스파이크 표의 taskkill 218 개가 모두 이 모양이고, 그 밖은 받지 않는다.
+/// The `n` of a `taskkill /PID n /T /F` launched by claude — only when the parent is `claude`, the executable name is `taskkill.exe` (case
+/// insensitive), and the arguments after the program are exactly `/PID` · a decimal number · `/T` · `/F`. Case variants · `/PID:n` · reordering · extra
+/// arguments · leading zeros · `0` are all `None` — all 218 taskkills in the source spike table have this shape, and nothing else is accepted.
 pub(super) fn taskkill_names(f: &ProcessFacts, claude: u32) -> Option<u32> {
     if f.ppid != claude || !image_is(&f.image, "taskkill.exe") {
         return None;
@@ -219,10 +219,10 @@ pub(super) fn taskkill_names(f: &ProcessFacts, claude: u32) -> Option<u32> {
     n.parse().ok()
 }
 
-/// 기록된 부모를 알려진 고리에서 찾는다 — 번호가 `child.ppid` 이고 생성이 0 이 아니며 자식의 생성 이하인 것
-/// 가운데 생성이 가장 늦은 것. 붙든 번호는 재사용되지 않아 그런 고리는 실제로 많아야 하나지만, 둘 이상이면 자식이
-/// 태어날 때 그 번호를 쥐었을 수 있는 마지막 주인을 고른다. 생성까지 같은 둘(스냅숏 멤버의 되알림)이면 스냅숏 쪽.
-/// 부모 번호 0 · 자기 번호 · 자식 생성 0 은 모름.
+/// Find the recorded parent among the known links — those whose number is `child.ppid`, whose creation is not 0 and is at most the child's creation;
+/// the one with the latest creation wins. A held number is not reused, so there should be at most one such link, but if there are two or more, pick the
+/// last owner that could have held that number when the child was born. If two are equal even in creation (a re-notification of a snapshot member), the snapshot one wins.
+/// Parent number 0 · own number · child creation 0 are unknown.
 fn parent_of<'a>(view: &Chain<'a>, child_pid: u32, child: &ProcessFacts) -> Option<&'a Link<'a>> {
     if child.ppid == 0 || child.ppid == child_pid || child.create == 0 {
         return None;
@@ -239,8 +239,8 @@ fn parent_of<'a>(view: &Chain<'a>, child_pid: u32, child: &ProcessFacts) -> Opti
     best
 }
 
-/// 규칙 3 — D(A₁)에서 적힌 부모를 따라 걸어 `(A₁ … Aₖ₋₁, Aₖ)` 를 돌려준다. `Aₖ` = 적힌 부모가 뿌리인 고리(claude).
-/// D 의 끝남은 규칙 1 이 이미 봤다.
+/// Rule 3 — walk from D(A₁) along the recorded parents and return `(A₁ … Aₖ₋₁, Aₖ)`. `Aₖ` = the link whose recorded parent is the root (claude).
+/// D's exit was already checked by rule 1.
 fn ancestors<'a>(
     c: &Link<'_>,
     d: &'a Link<'a>,
@@ -255,7 +255,7 @@ fn ancestors<'a>(
         }
         seen.push((a.pid, a.facts.create));
         if a.facts.ppid == view.root_pid {
-            // k = 1(D 가 곧 claude 자리)이면 꼭대기가 없다.
+            // If k = 1 (D itself is the claude position), there is no top.
             return if walked.is_empty() {
                 Err(Verdict::ChainCut)
             } else {
@@ -277,8 +277,8 @@ fn ancestors<'a>(
     }
 }
 
-/// 명령줄의 첫 토큰(프로그램)을 건너뛴 나머지 — 첫 토큰은 큰따옴표로 감싼 것이거나 공백 없는 덩이이고, 뒤에 공백이
-/// 하나 이상 와야 한다.
+/// The rest of the command line after skipping the first token (the program) — the first token is either double-quoted or a run without spaces, and
+/// at least one space must follow it.
 fn after_program(cmdline: &str) -> Option<&str> {
     let rest = if let Some(quoted) = cmdline.strip_prefix('"') {
         let close = quoted.find('"')?;
@@ -294,8 +294,8 @@ fn after_program(cmdline: &str) -> Option<&str> {
     (trimmed.len() < rest.len()).then_some(trimmed)
 }
 
-/// 실행 파일 경로의 파일 이름이 `name` 인가(ASCII 대소문자 무시). `\` · `/` 둘 다 경로 구분자로 본다 — 어느 OS 에서
-/// 돌아도 Windows 경로를 같게 가른다.
+/// Is the file name of the executable path `name` (ASCII case-insensitive). Both `\` · `/` count as path separators — on whichever OS
+/// it runs, Windows paths are split the same way.
 fn image_is(image: &str, name: &str) -> bool {
     image
         .rsplit(|ch: char| ch == '\\' || ch == '/')
@@ -303,23 +303,23 @@ fn image_is(image: &str, name: &str) -> bool {
         .is_some_and(|file| file.eq_ignore_ascii_case(name))
 }
 
-// ── 탄생 기록 · 가입 알림 듣기 ──────────────────────────────────────────────────────────────
+// ── Birth record · listening for join notifications ──────────────────────────────────────────
 
-/// 한 기록에 넣는 탄생의 상한 — 넘는 것은 넣지 않고 [`Recorder::full`] 이 선다(그 고리는 알려지지 않아 놓침 쪽).
+/// Cap on births put into one record — those over it are not put in and [`Recorder::full`] is raised (that link stays unknown, on the miss side).
 pub(super) const BIRTH_MAX: usize = 512;
 
-/// 듣는 스레드가 알림 하나를 기다리는 한도 — 이만큼마다 무리가 사라졌는지 · 물러나는지 본다.
+/// How long the listener thread waits for one notification — at each interval it checks whether the group is gone · retiring.
 const LISTEN_WAIT: Duration = Duration::from_millis(500);
 
-/// 1601-01-01 부터 1970-01-01 까지의 FILETIME 눈금(100 ns).
+/// The FILETIME scale (100 ns) from 1601-01-01 to 1970-01-01.
 const UNIX_EPOCH_FILETIME: u64 = 116_444_736_000_000_000;
 
-/// 기록이 켜진 동안 가입 알림을 받자마자 붙든 프로세스 하나 — 쥐는 동안 그 번호는 재사용되지 않고, 끝난 뒤에도
-/// 사실이 남는다. 마지막 `Arc` 를 버리면 핸들이 닫힌다 — 기록 자물쇠 밖에서 버린다.
+/// One process held right when its join notification arrived while the record was on — while held, its number is not reused, and
+/// its facts remain after it exits. Dropping the last `Arc` closes the handle — drop it outside the record lock.
 ///
-/// - `seq` = 이 화신에서 넣은 순번 — 가입 알림을 꺼낸 순서다(생성 순서가 아니다).
-/// - `facts` = `pin` 이 붙들 때 읽은 사실의 사본.
-/// - `killable` = 끝내기 권한까지 붙들었나 — `false` 면 사슬은 잇되 후보는 못 된다.
+/// - `seq` = sequence number assigned in this incarnation — the order join notifications were taken out (not creation order).
+/// - `facts` = a copy of the facts read when `pin` held it.
+/// - `killable` = was kill access held too — if `false` the chain still connects through it, but it cannot be a candidate.
 pub(super) struct Birth {
     pub pid: u32,
     pub seq: u64,
@@ -339,18 +339,18 @@ impl Birth {
     }
 }
 
-/// 끊기 에피소드가 켜고 끄는 탄생 기록 — 화신마다 하나, 여는 이 · 듣는 스레드 · 판이 같은 `Arc` 로 쥔다.
+/// The birth record turned on and off by an interrupt episode — one per incarnation, the opener · listener thread · pass hold it through the same `Arc`.
 ///
-/// - 기록은 번호로 갈린다: [`Self::start`] 가 새 번호를 켜고, 그 번호를 쥔 이만 끄고([`Self::stop`]) 복사한다
-///   ([`Self::copy`]). 켜진 번호(`0` = 꺼짐)는 [`Self::active`] 로 자물쇠 없이 읽는다.
-/// - [`Self::port_failed`] = 가입 알림 포트가 진짜 OS 실패로 못 쓰게 됐다 — 한 번 서면 화신 동안 내려가지 않는다.
+/// - Records are told apart by number: [`Self::start`] turns on a new number, and only whoever holds that number turns it off ([`Self::stop`]) and copies
+///   ([`Self::copy`]). The active number (`0` = off) is read without a lock through [`Self::active`].
+/// - [`Self::port_failed`] = the join-notification port became unusable through a real OS failure — once raised it never comes down for the incarnation.
 ///
-/// ★기록 자물쇠는 잎이다★ — 쥔 채 필드 · `Vec` · `Arc` 복제 · 꺼내기만 하고, OS 호출 · 핸들 닫기(`Arc<Birth>` 의
-/// 마지막 drop) · 로그 · 다른 자물쇠는 하지 않는다. 문 자물쇠와 겹쳐 잡지 않는다. 그래서 꺼낸 기록은 돌려주고, 받은
-/// 쪽이 자물쇠가 놓인 뒤 버린다. 독에 걸려도 그대로 쓴다.
+/// ★The record lock is a leaf★ — while held it only does fields · `Vec` · `Arc` clone · take-out, and no OS calls · handle closing (the last drop of
+/// `Arc<Birth>`) · logging · other locks. Never held together with the gate lock. So a taken-out record is handed back, and the
+/// receiver drops it after the lock is released. A poisoned lock is used as it is.
 // ADR-0262
 pub(super) struct Recorder {
-    /// 쓰기는 자물쇠 안에서만 — 「같은 기록인가」 판정과 넣기 · 꺼내기가 한 구간이 된다.
+    /// Write only inside the lock — the 「같은 기록인가」 (is it the same record) decision and the insert · take-out form one section.
     active: AtomicU64,
     port_failed: AtomicBool,
     inner: Mutex<RecInner>,
@@ -363,7 +363,7 @@ struct RecInner {
     full: bool,
 }
 
-/// 듣는 스레드가 붙든 탄생 — 기록에 넣기 전.
+/// A birth held by the listener thread — before it is put into the record.
 struct Caught {
     pid: u32,
     facts: ProcessFacts,
@@ -371,16 +371,16 @@ struct Caught {
     killable: bool,
 }
 
-/// [`Recorder::admit`] 의 답 — 넣지 못한 것은 돌려준다(부른 쪽이 자물쇠 밖에서 버린다).
+/// The answer of [`Recorder::admit`] — what could not be put in is handed back (the caller drops it outside the lock).
 enum Admit {
     Recorded {
         seq: u64,
     },
-    /// 받을 기록이 꺼졌거나 다른 기록으로 바뀌었다.
+    /// The record to receive it was turned off or replaced by another record.
     Stale(Caught),
-    /// 같은 (번호, 생성)이 이미 있다 — 중첩 Job 의 재보고 · 붙일 때의 되알림.
+    /// The same (number, creation) is already there — a nested Job's re-report · the re-notification on attach.
     Known(Caught),
-    /// 상한에 닿았다 — `first` = 이 기록에서 처음 넘쳤다.
+    /// The cap was reached — `first` = this is the first overflow in this record.
     Full {
         caught: Caught,
         first: bool,
@@ -405,8 +405,8 @@ impl Recorder {
         sync::lock(&self.inner)
     }
 
-    /// 새 기록을 켜고 그 번호(`0` 아님)를 준다 — 넘침 표시를 내리고, 앞 기록에 남아 있던 것을 꺼내 돌려준다(받은
-    /// 쪽이 버린다).
+    /// Turn on a new record and give its number (not `0`) — lower the overflow flag, and take out and return what was left in the previous record (the
+    /// receiver drops it).
     pub(super) fn start(&self) -> (u64, Vec<Arc<Birth>>) {
         let mut inner = self.lock();
         let r = match inner.next_rec.wrapping_add(1) {
@@ -419,7 +419,7 @@ impl Recorder {
         (r, std::mem::take(&mut inner.births))
     }
 
-    /// `r` 이 켜져 있을 때만 끄고 그 기록을 꺼내 돌려준다(받은 쪽이 버린다). 아니면 아무것도 안 바꾸고 빈 것을 준다.
+    /// Turn off only when `r` is on, and take out and return that record (the receiver drops it). Otherwise change nothing and return an empty one.
     pub(super) fn stop(&self, r: u64) -> Vec<Arc<Birth>> {
         if r == 0 {
             return Vec::new();
@@ -436,7 +436,7 @@ impl Recorder {
         self.active.load(Ordering::Acquire)
     }
 
-    /// `r` 이 켜져 있으면 지금까지 넣은 것을 복제해 준다 — 아니면 빈 것.
+    /// If `r` is on, return a clone of what has been put in so far — otherwise an empty one.
     pub(super) fn copy(&self, r: u64) -> Vec<Arc<Birth>> {
         if r == 0 {
             return Vec::new();
@@ -448,7 +448,7 @@ impl Recorder {
         inner.births.clone()
     }
 
-    /// 마지막으로 켠 기록이 상한에 닿아 넣지 못한 탄생이 있었다.
+    /// In the last record turned on, there was a birth that could not be put in because the cap was reached.
     pub(super) fn full(&self) -> bool {
         self.lock().full
     }
@@ -465,7 +465,7 @@ impl Recorder {
         self.port_failed.store(true, Ordering::Release);
     }
 
-    /// 기록 `r` 에 넣는다 — 아직 `r` 이 켜져 있고 · (번호, 생성)이 새롭고 · 상한 안일 때만.
+    /// Put into record `r` — only while `r` is still on · (number, creation) is new · and within the cap.
     fn admit(&self, r: u64, caught: Caught) -> Admit {
         let mut inner = self.lock();
         if r == 0 || self.active.load(Ordering::Acquire) != r {
@@ -502,8 +502,8 @@ impl Recorder {
     }
 }
 
-/// 로그 귀속 — 제어 채널이 있는 스폰이면 에이전트 id 를, 늘 뿌리 PID 를 싣는다(ADR-0217 — 제어 채널이 없는 스폰은
-/// id 가 없어 뿌리로 잇는다).
+/// Log attribution — carries the agent id if the spawn has a control channel, and always the root PID (ADR-0217 — a spawn without a control channel
+/// has no id, so it is linked by the root).
 #[derive(Debug, Clone, Copy)]
 pub(super) struct LogTag {
     agent: Option<AgentId>,
@@ -520,8 +520,8 @@ impl LogTag {
     }
 }
 
-/// 듣는 스레드 · 포트 확보 · 여는 이 · 쓰기 확인이 무리에게 묻는 것 — 실물 = [`ProcessGroup`]. 시험이 가짜로 갈아
-/// 끼운다.
+/// What the listener thread · port acquisition · opener · write confirmation ask the group — the real thing = [`ProcessGroup`]. Tests swap in
+/// a fake.
 pub(super) trait Group: Send + Sync + 'static {
     fn member_pids(&self) -> io::Result<Vec<u32>>;
     fn pin(&self, pid: u32, kill: bool) -> io::Result<Option<Box<dyn Pinned>>>;
@@ -532,7 +532,7 @@ pub(super) trait Group: Send + Sync + 'static {
     fn retiring(&self) -> RetiringSignal;
 }
 
-// 경로 호출은 고유 메서드를 먼저 고른다 — 이 trait 메서드로 되돌아오지 않는다.
+// A path call picks the inherent method first — it does not come back to this trait method.
 impl Group for ProcessGroup {
     fn member_pids(&self) -> io::Result<Vec<u32>> {
         ProcessGroup::member_pids(self)
@@ -562,8 +562,8 @@ impl Group for ProcessGroup {
     }
 }
 
-/// 화신 하나의 가입 알림 포트 확보 — 처음 부른 이만 포트를 만들고 듣는 스레드를 띄우고 무리를 붙이며, 그 뒤로는 그
-/// 결과를 읽는다. 무리에 두 번째 `watch_births` 가 가지 않게 막는 것이 이것이다(OS 의 거절에 기대지 않는다).
+/// Acquire one incarnation's join-notification port — only the first caller creates the port, starts the listener thread and attaches the group; later callers read
+/// that result. This is what keeps a second `watch_births` from reaching the group (it does not rely on the OS refusing).
 // ADR-0262
 pub(super) struct BirthWatch {
     acquired: OnceLock<Result<(), ()>>,
@@ -576,12 +576,12 @@ impl BirthWatch {
         }
     }
 
-    /// 탄생을 기록할 수 있나 — `Ok` = 듣는 스레드가 돌고 무리가 포트에 붙었다. `Err` = 포트를 못 쓴다(그 에피소드는
-    /// `Failed(port)`): 확보 실패 · 무리가 이미 없음 · 듣는 스레드가 실패로 굳힘([`Recorder::port_failed`]).
+    /// Can births be recorded — `Ok` = the listener thread is running and the group is attached to the port. `Err` = the port is unusable (that episode is
+    /// `Failed(port)`): acquisition failed · the group is already gone · the listener thread latched a failure ([`Recorder::port_failed`]).
     ///
-    /// 듣는 스레드가 무리가 사라져서 · 물러나서 끝난 뒤에도 `Ok` 다 — 끝나며 켜진 기록을 껐고, 그 뒤 켠 기록에는 탄생이
-    /// 안 든다(놓침 쪽). 처음 부름은 붙이는 동안 Job 을 강하게 쥐지만 막히지 않는다 — `spawn` 은 듣는 스레드를 띄우기만
-    /// 한다(처음 부름만 쓴다).
+    /// It is `Ok` even after the listener thread ended because the group vanished · retired — on ending it turned off the record that was on, and a record turned on after that
+    /// receives no births (the miss side). The first call holds the Job strongly during attach but does not block — `spawn` only
+    /// starts the listener thread (only the first call uses it).
     fn ensure_with<G: Group>(
         &self,
         group: &Arc<G>,
@@ -599,7 +599,7 @@ impl BirthWatch {
     }
 }
 
-/// 포트 확보가 어디까지 갔나 — 실패를 가르는 데만 쓴다.
+/// How far port acquisition got — used only to tell failures apart.
 #[derive(Clone, Copy)]
 enum Stage {
     BeforeStart,
@@ -607,10 +607,10 @@ enum Stage {
     Started,
 }
 
-/// 포트 → 듣는 스레드 기동 → (기동이 `Ok` 일 때만) 붙이기 — 순서는 `watch_births` 가 강제한다. 그래서 알림이 쌓일 수
-/// 있게 되는 때에는 꺼낼 스레드가 이미 떠 있다. 붙었는지는 뜬 스레드에 알린다.
+/// Port → start the listener thread → (only when the start is `Ok`) attach — `watch_births` enforces this order. So when notifications can
+/// start to pile up, a thread to drain them is already running. Whether it attached is told to the running thread.
 ///
-/// 굳히는 것은 진짜 OS 실패뿐이다 — 무리가 이미 없거나 이 OS 에 무리가 없으면 그 에피소드만 실패한다.
+/// Only a real OS failure is latched — if the group is already gone or this OS has no group, only that episode fails.
 fn acquire<G: Group>(
     group: &Arc<G>,
     recorder: &Arc<Recorder>,
@@ -634,7 +634,7 @@ fn acquire<G: Group>(
         };
         spawned
     });
-    // 뜬 스레드가 없으면(기동 전 실패 · 기동 실패) 받을 이가 없어 보내기가 실패한다 — 알릴 이가 없을 뿐이다.
+    // If there is no running thread (failure before start · start failed), there is no receiver so the send fails — there is just nobody to tell.
     let _ = attached_tx.send(watched.is_ok());
     let Err(e) = watched else {
         return Ok(());
@@ -668,7 +668,7 @@ fn acquire<G: Group>(
     Err(())
 }
 
-/// 듣는 스레드가 쥐는 것. 무리는 중립 손잡이로만 쥔다 — Job 은 손잡이를 부르는 동안만 올라간다.
+/// What the listener thread holds. It holds the group only through a neutral handle — the Job is upgraded only while the handle is being called.
 struct Listener<G> {
     port: Arc<dyn Births>,
     attached: Receiver<bool>,
@@ -677,14 +677,14 @@ struct Listener<G> {
     tag: LogTag,
 }
 
-/// 듣기가 끝나는 정상 까닭.
+/// The normal reasons listening ends.
 #[derive(Clone, Copy)]
 enum End {
     Gone,
     Retiring,
 }
 
-/// 한 차례의 실패 — 포트를 굳힌다.
+/// One failure — latches the port.
 enum Failure {
     Take(io::Error),
     Panic(String),
@@ -699,17 +699,17 @@ impl fmt::Display for Failure {
     }
 }
 
-/// 듣는 스레드 몸통 — 화신 수명 동안 돈다. 기록이 켜진 동안 온 가입 알림만 곧바로 붙들어 넣고, 나머지는 버린다.
+/// Listener thread body — runs for the incarnation's lifetime. Only join notifications that arrive while the record is on are held and put in right away; the rest are dropped.
 ///
-/// - 시작: 여는 이의 「붙었나」를 먼저 받는다. `false` = 붙은 적이 없다 → 뗄 것 없이 끝난다. 보내는 쪽이
-///   사라졌으면(붙인 뒤 보내기 전에 여는 이가 패닉) 붙었을 수 있어 평소대로 돈다.
-/// - 끝: 알림 · 시간 초과마다 무리가 사라졌는지 · 물러나는지 본다 → 켜진 기록을 끄고 끝난다(물러날 때는 먼저 뗀다).
-/// - 실패 모드: 꺼내기 오류 · 차례 패닉 → 포트를 굳히고 켜진 기록을 끄고 뗀다 → 떼면 끝 · 못 떼면 끝나지 않고 위의 끝이
-///   올 때까지 꺼내 버리기만 한다(붙은 포트를 아무도 안 꺼내면 커널 큐가 커진다). 그 사이 꺼내기마저 실패하면 비울 수
-///   없으니 끝난다.
+/// - Start: first receive the opener's 「붙었나」 (did it attach). `false` = it never attached → nothing to detach, so it just ends. If the sender is
+///   gone (the opener panicked after attaching and before sending), it may have attached, so it runs as usual.
+/// - End: at each notification · timeout, check whether the group is gone · retiring → turn off the record that was on and end (when retiring, detach first).
+/// - Failure mode: take-out error · panic in a round → latch the port, turn off the record that was on, and detach → if detached, end · if not, do not end and only
+///   take out and discard until the end above comes (if nobody drains an attached port, the kernel queue grows). If even taking out fails meanwhile, it cannot
+///   drain, so it ends.
 ///
-/// ★차례마다 `catch_unwind` 를 두르지만 이 스레드는 가둠 표시 밖이다★ — 운영 프로세스에서는 패닉을 훅이 끝내므로
-/// 몸통은 패닉하지 않게 짠다(풀기 · 첨자 없음 · 독 견딤). 두른 것은 훅 없는 시험 빌드의 안전망이다.
+/// ★Each round is wrapped in `catch_unwind`, but this thread is outside the containment marker★ — in the production process a panic is ended by the hook, so
+/// the body is written not to panic (no unwrap · no indexing · poison tolerated). The wrapping is a safety net for test builds without the hook.
 // ADR-0262
 // ADR-0292
 fn listen<G: Group>(l: Listener<G>) {
@@ -748,8 +748,8 @@ fn listen<G: Group>(l: Listener<G>) {
 }
 
 impl<G: Group> Listener<G> {
-    /// 알림 하나를 꺼내고, 끝낼 때면 그 까닭을 준다. 비우기만 하는 중이 아니면 가입을 기록한다. ★올린 Job 을 쥔 채
-    /// 꺼내지 않는다★ — 손잡이를 거쳐 부를 때만 올라간다.
+    /// Take out one notification, and give the reason when it is time to end. Unless merely draining, record the join. ★Do not take out while
+    /// holding an upgraded Job★ — it is upgraded only when called through the handle.
     fn round(
         &self,
         retiring: &RetiringSignal,
@@ -769,8 +769,8 @@ impl<G: Group> Listener<G> {
         Ok(None)
     }
 
-    /// 기록이 켜져 있으면 곧바로 붙든다(자물쇠 밖) — 알림의 번호는 열어 쥐어야 산 것도 재사용 안 된 것도 선다. 그
-    /// 뒤 같은 기록일 때만 넣고, 못 넣은 것은 기록 자물쇠를 놓은 뒤 버린다.
+    /// If the record is on, hold it right away (outside the lock) — the notification's number must be opened and held for it to be both alive and not reused. Then
+    /// put it in only if it is the same record, and drop what could not be put in after the record lock is released.
     fn record(&self, pid: u32, attached_at: Instant) {
         let r = self.recorder.active();
         if r == 0 {
@@ -813,7 +813,7 @@ impl<G: Group> Listener<G> {
         }
     }
 
-    /// 끝내기 권한까지 붙든다 — 거절되면 조회 권한만으로 한 번 더 붙들어 고리로만 쓴다(`false`).
+    /// Also hold kill access — if refused, hold once more with query access only and use it only as a link (`false`).
     fn pin(&self, pid: u32) -> Option<(Box<dyn Pinned>, bool)> {
         let refused = match self.group.pin(pid, true) {
             Ok(found) => return found.map(|pin| (pin, true)),
@@ -842,13 +842,13 @@ impl<G: Group> Listener<G> {
         }
     }
 
-    /// 정상 끝 — 켜진 기록을 끈다. 물러나는 무리는 아직 붙어 있으니 포트를 놓기 전에 뗀다(`Births` 의 규칙).
+    /// Normal end — turn off the record that was on. A retiring group is still attached, so detach before releasing the port (the rule of `Births`).
     fn finish(&self, end: End) {
         drop(self.recorder.stop(self.recorder.active()));
         let reason = match end {
             End::Gone => "gone",
             End::Retiring => {
-                // 곧 무리가 닫히므로 떼기 실패는 적기만 한다.
+                // The group is closing soon, so a detach failure is only logged.
                 if let Err(e) = self.group.unwatch_births() {
                     tracing::debug!(
                         agent = self.tag.agent(),
@@ -867,7 +867,7 @@ impl<G: Group> Listener<G> {
         );
     }
 
-    /// 실패 모드 — 포트를 굳히고 켜진 기록을 끄고 뗀다. 참 = 뗐다(무리가 이미 없는 것도 뗀 것이다).
+    /// Failure mode — latch the port, turn off the record that was on, and detach. True = detached (a group already gone also counts as detached).
     fn fail(&self, failure: Failure) -> bool {
         self.recorder.fail_port();
         drop(self.recorder.stop(self.recorder.active()));
@@ -894,8 +894,8 @@ impl<G: Group> Listener<G> {
     }
 }
 
-/// 생성부터 지금까지(µs) — 로그의 「가입 → 엶」 지연 칸에만 쓴다(고르기는 벽시계를 보지 않는다 — TRD §3-6). 생성을 못
-/// 읽었거나 시계가 그 앞이면 `None`.
+/// Time from creation until now (µs) — used only for the 「가입 → 엶」 (join → open) delay field in the log (selection does not look at the wall clock — TRD §3-6). If creation could not be
+/// read or the clock is before it, `None`.
 fn born_ago_us(create: u64) -> Option<u64> {
     if create == 0 {
         return None;
@@ -915,47 +915,47 @@ fn micros(d: Duration) -> u64 {
     u64::try_from(d.as_micros()).unwrap_or(u64::MAX)
 }
 
-// ── 끊기 문 · 에피소드 · 일꾼 ───────────────────────────────────────────────────────────────
+// ── Interrupt gate · episode · worker ───────────────────────────────────────────────────────
 
-/// 가장 최근에 쓰인 끊기 줄에서 이만큼 턴 끝이 없으면 판을 열고, 무엇이든 끝낸 판 뒤의 확인도 이 간격이다. 근거
-/// (스파이크 2026-09-29): 멈춤 아닌 끊기의 `result` ≤ 1394 ms · 끊기 뒤 생긴 정상 프로세스의 최장 수명 1171 ms ·
-/// 끊기 +3 s 에 살아 있던 것은 11/11 시행에서 멈춤 잔여물뿐.
+/// If this long passes with no turn end after the most recently written interrupt line, open a pass; the check after a pass that killed anything is also this interval. Basis
+/// (spike 2026-09-29): `result` of an interrupt that does not stall ≤ 1394 ms · longest life of a normal process born after an interrupt 1171 ms ·
+/// what was alive at interrupt +3 s was only stall leftovers, in 11/11 trials.
 // ADR-0257
 // ADR-0262
 pub(super) const INTERRUPT_LEFTOVER_GRACE: Duration = Duration::from_secs(3);
 
-/// 이 정리가 끝낸 프로세스의 종료 코드 — 사후 조사에서 종료 코드만으로 이 정리가 끝낸 것을 알아본다. 통로
-/// `shutdown()` 의 무리 통째 끝내기(1)와 겹치지 않게 골랐다.
+/// Exit code of a process this cleanup killed — lets a post-mortem recognize what this cleanup killed from the exit code alone. Chosen so it does not collide with the path's
+/// `shutdown()` group-wide kill (1).
 // ADR-0262
 // ADR-0275
 const LEFTOVER_EXIT_CODE: u32 = 0x7440;
 
-/// 스냅숏이 붙드는 멤버 수의 상한 — 명단이 이보다 길면 그 에피소드는 `Failed(too_many)` 다.
+/// Cap on the number of members a snapshot holds — if the list is longer, that episode is `Failed(too_many)`.
 pub(super) const PIN_MAX: usize = 256;
 
-/// 스냅숏에서 받아들이는 뿌리 자식의 수 — 콘솔 호스트 · claude(Q2 — 추론). 넘으면 `Failed(shape)`.
+/// Number of root children accepted in a snapshot — console host · claude (Q2 — inference). Over it is `Failed(shape)`.
 const ROOT_CHILDREN_MAX: usize = 2;
 
-/// 한 판이 끝내기까지 가는 차례의 상한 — 잰 가장 긴 판이 2 차례(p3bg: 주인 → 그 fork)이고 한 차례를 여유로 둔다.
-/// 그 뒤에도 끝낼 후보가 남으면 끝내지 않고 warn `rounds_exhausted`.
+/// Cap on the rounds one pass goes through to kill — the longest measured pass is 2 rounds (p3bg: owner → its fork), and one round is left as margin.
+/// If kill candidates still remain after that, it does not kill and warns `rounds_exhausted`.
 // ADR-0262
 pub(super) const PASS_ROUNDS: u32 = 3;
 
-/// 한 차례에 끝낸 것들의 끝남 확인 마감 — 차례마다 하나를 나눠 쓴다. 그래서 판의 기다림은 많아야
-/// [`PASS_ROUNDS`] × 이것이다.
+/// Deadline for confirming the exits of what one round killed — one is allotted per round. So a pass's waiting is at most
+/// [`PASS_ROUNDS`] × this.
 pub(super) const KILL_CONFIRM: Duration = Duration::from_millis(200);
 
 const WORKER_THREAD: &str = "engram-claude-leftover";
 const LISTENER_THREAD: &str = "engram-claude-births";
 
-/// 정리기가 읽는 단조 시계 · 기다림 · 스레드 기동 — 실물 = [`SystemClock`]. 일꾼과 듣는 스레드가 이것으로 뜬다.
+/// The monotonic clock · waiting · thread start the cleaner reads — the real thing = [`SystemClock`]. The worker and the listener thread are started through this.
 ///
-/// ★[`now`](Clock::now) 는 문 자물쇠 안에서도 부른다★ — 다른 자물쇠를 잡거나 기다리지 않는다.
+/// ★[`now`](Clock::now) is also called inside the gate lock★ — it takes or waits on no other lock.
 // ADR-0262
 // ADR-0275
 pub(super) trait LeftoverClock: Clock {
     fn sleep(&self, d: Duration);
-    /// `body` 를 `name` 스레드로 띄운다. join 하는 이는 없다. `Err` = `body` 는 버려졌고 돌지 않았다.
+    /// Start `body` as thread `name`. Nobody joins. `Err` = `body` was dropped and did not run.
     fn spawn(&self, name: &str, body: Box<dyn FnOnce() + Send>) -> io::Result<()>;
 }
 
@@ -972,11 +972,11 @@ impl LeftoverClock for SystemClock {
     }
 }
 
-/// 에피소드의 단계.
+/// Phase of the episode.
 ///
-/// - `Waiting` = 판을 기다린다(쓰였으면 가장 최근 끊기 + N 에) · `Cleaning` = 일꾼이 판을 도는 중.
-/// - `Spent.at` = 무엇이든 끝낸 판이 끝난 때 — `at + N` 에도 같은 에피소드면 warn 하고 `Done`(결정 2 — 더 하지 않는다).
-/// - `Done` = 더 판이 없다.
+/// - `Waiting` = waiting for a pass (if written, for the most recent interrupt + N) · `Cleaning` = the worker is running a pass.
+/// - `Spent.at` = when a pass that killed anything ended — if it is still the same episode at `at + N`, warn and `Done` (decision 2 — do no more).
+/// - `Done` = no more passes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
     Waiting,
@@ -985,22 +985,22 @@ enum Phase {
     Done,
 }
 
-/// 스냅숏이 서지 않은 사유 — 그 에피소드의 판은 아무것도 끝내지 않는다(warn `snapshot_failed`).
+/// Why the snapshot was not set up — that episode's pass kills nothing (warn `snapshot_failed`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SnapCause {
-    /// 명단이 불완전했다.
+    /// The list was incomplete.
     List,
-    /// 명단에 뿌리가 없거나 뿌리를 못 붙들었다.
+    /// The list has no root, or the root could not be held.
     Root,
     TooMany,
-    /// 뿌리 자식이 [`ROOT_CHILDREN_MAX`] 를 넘는다.
+    /// Root children exceed [`ROOT_CHILDREN_MAX`].
     Shape,
-    /// 가입 알림 포트를 못 쓴다 · 판 때 그 기록이 이미 꺼졌다.
+    /// The join-notification port is unusable · that record was already turned off at pass time.
     Port,
 }
 
 impl SnapCause {
-    /// 로그 필드 `cause` 의 값.
+    /// Value of the log field `cause`.
     fn label(self) -> &'static str {
         match self {
             SnapCause::List => "list",
@@ -1017,15 +1017,15 @@ struct Member {
     pin: Box<dyn Pinned>,
 }
 
-/// 새 에피소드를 세울 때 우리 무리에 있던 멤버 — 조회 권한만으로 붙들어 쥔다(쥐는 동안 번호가 재사용되지 않는다).
-/// 뿌리는 늘 붙들었다. 마지막 `Arc` 를 버리면 핸들이 닫힌다 — 두 자물쇠 밖에서 버린다.
+/// Members that were in our group when the new episode was set up — held with query access only (while held, the number is not reused).
+/// The root is always held. Dropping the last `Arc` closes the handle — drop it outside both locks.
 struct Snapshot {
     root: Member,
     others: Vec<Member>,
 }
 
 impl Snapshot {
-    /// 고르기가 보는 고리 — 뿌리가 처음이다. 끝내기 권한 없이 붙들어 `killable` 은 거짓이다.
+    /// The link the selection looks at — the root is first. Held without kill access, so `killable` is false.
     fn links(&self) -> Vec<Link<'_>> {
         std::iter::once(&self.root)
             .chain(&self.others)
@@ -1039,7 +1039,7 @@ impl Snapshot {
     }
 }
 
-/// 에피소드가 쥔 스냅숏. `Released` = 판이 끝나 놓았다.
+/// The snapshot the episode holds. `Released` = the pass ended and let go.
 #[derive(Clone)]
 enum SnapState {
     Taken(Arc<Snapshot>),
@@ -1070,12 +1070,12 @@ impl fmt::Debug for SnapState {
     }
 }
 
-/// 끊기 한 판 — 새 에피소드를 세운 끊기로 시작해 턴 끝 · 새 입력 · 갈아 끼우기 · 물러남 · 판 끝으로 끝난다.
+/// One interrupt episode — starts with the interrupt that set up a new episode, and ends with turn end · new input · swap · retirement · pass end.
 ///
-/// - `first_mono` = 세운 때 · `last_mono` = 가장 최근 끊기(받아들인 때 · 쓰인 때 중 늦은 것) — N 의 기준.
-/// - `written` = 이 에피소드의 줄이 쓰였고 그때의 쓰기 명단 `w`(정렬)를 얻었다 — 그 전에는 판이 없다.
-/// - `rec` = 이 에피소드가 켠 기록 번호 · `0` = 놓았다.
-/// - `killed_any` = 어느 판이든 하나라도 끝냈다.
+/// - `first_mono` = when set up · `last_mono` = the most recent interrupt (the later of accepted time · written time) — the basis of N.
+/// - `written` = this episode's line was written and the write list `w` (sorted) of that moment was obtained — before that there is no pass.
+/// - `rec` = the record number this episode turned on · `0` = released.
+/// - `killed_any` = any pass killed at least one.
 #[derive(Debug)]
 struct Episode {
     gen: u64,
@@ -1094,7 +1094,7 @@ impl Episode {
         matches!(self.phase, Phase::Waiting | Phase::Cleaning)
     }
 
-    /// 스냅숏과 기록을 내놓는다 — 에피소드는 자리에 남는다.
+    /// Hand out the snapshot and record — the episode stays in place.
     fn release(&mut self) -> Released {
         let snap = match std::mem::replace(&mut self.snap, SnapState::Released) {
             SnapState::Taken(snap) => Some(snap),
@@ -1107,7 +1107,7 @@ impl Episode {
         }
     }
 
-    /// 상태에서 빼낸 에피소드가 쥔 것 전부.
+    /// Everything the episode taken out of the state holds.
     fn into_released(mut self) -> Released {
         let mut released = self.release();
         released.w = self.w.take();
@@ -1115,7 +1115,7 @@ impl Episode {
     }
 }
 
-/// 문 자물쇠에서 빼낸 것 — 받은 쪽이 자물쇠를 놓은 뒤 [`GateCell::release`] 로 버리고 기록을 끈다.
+/// What was taken out of the gate lock — after releasing the lock the receiver drops it through [`GateCell::release`] and turns off the record.
 #[must_use]
 #[derive(Default)]
 struct Released {
@@ -1124,7 +1124,7 @@ struct Released {
     rec: u64,
 }
 
-/// 여는 이가 구간 ① 에서 찍은 값 — 구간 ② 가 그 사이에 무엇이 왔는지 가른다.
+/// The value the opener took in section ① — section ② tells apart what came in between.
 #[derive(Debug, Clone, Copy)]
 struct Mark {
     closes: u64,
@@ -1132,13 +1132,13 @@ struct Mark {
     next_gen: u64,
 }
 
-/// [`GateCell`] 의 자물쇠 안 상태. 전이는 순수하다 — 시각 · 원자 값은 인자로 받고, OS 를 부르지 않고, 할당 · 해제를
-/// 하지 않고, 패닉하지 않는다. 빼낸 것은 돌려주고 부른 쪽이 자물쇠를 놓은 뒤 버린다.
+/// State inside the lock of [`GateCell`]. Transitions are pure — time · atomic values come in as arguments, no OS calls, no allocation or free,
+/// no panics. What was taken out is returned and the caller drops it after releasing the lock.
 ///
-/// - `open` = 끊을 턴이 열려 있다 — 쓰는 이는 decoder 하나.
-/// - `closes` · `delivers` = 턴 끝 · 새 입력을 센 값.
-/// - `opening` = 여는 이 하나가 두 구간 사이에 있다.
-/// - `worker` = 이 화신에 일꾼이 떠 있다(기동 중 포함).
+/// - `open` = a turn that can be interrupted is open — the only user is the decoder.
+/// - `closes` · `delivers` = counts of turn ends · new inputs.
+/// - `opening` = one opener is between the two sections.
+/// - `worker` = a worker is up for this incarnation (including while starting).
 #[derive(Debug, Default)]
 struct GateState {
     open: bool,
@@ -1150,37 +1150,37 @@ struct GateState {
     worker: bool,
 }
 
-/// 구간 ① 의 답.
+/// Answer of section ①.
 #[derive(Debug)]
 enum Begin {
-    /// 문이 닫혔다 — 줄 없음.
+    /// The gate is closed — no line.
     Closed,
-    /// 산 에피소드에 이어 적었다 — 그 세대로 쓰기 확인을 받는다.
+    /// Appended to a live episode — write confirmation is received with that generation.
     Continue { gen: u64 },
-    /// 다른 끊기가 여는 중이다 — 줄만 준다(그 에피소드가 이 턴을 맡는다).
+    /// Another interrupt is opening — only the line is given (that episode takes this turn).
     Busy,
-    /// 이 끊기가 여는 이다.
+    /// This interrupt is the opener.
     Open(Mark),
 }
 
-/// 구간 ② 의 답. 세우지 못한 스냅숏은 돌려준다.
+/// Answer of section ②. A snapshot that could not be set up is handed back.
 enum Settle {
-    /// 두 구간 사이에 턴이 닫혔다 — 줄 없음.
+    /// The turn closed between the two sections — no line.
     NoLine(SnapState),
-    /// 에피소드 없이 줄만 준다.
+    /// Only the line is given, without an episode.
     LineOnly { snap: SnapState, why: Stale },
-    /// `old` = 갈아 끼운 옛 에피소드.
+    /// `old` = the old episode that was swapped out.
     Opened { gen: u64, old: Option<Episode> },
 }
 
-/// 구간 ② 가 에피소드를 세우지 않은 까닭(debug `stale`).
+/// Why section ② did not set up an episode (debug `stale`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stale {
-    /// 켠 기록이 이미 꺼졌다(듣는 스레드의 끝 · 실패).
+    /// The record that was turned on is already off (listener thread ended · failed).
     Record,
     Delivered,
     Generation,
-    /// 산 에피소드가 있다 — 여는 이가 하나라 닿지 않는 갈래.
+    /// A live episode exists — a branch that is not reached because there is only one opener.
     Live,
 }
 
@@ -1195,7 +1195,7 @@ impl Stale {
     }
 }
 
-/// 쓰기 확인 한 번의 결과. `back` = 쓰지 않은 쓰기 명단 — 부른 쪽이 놓은 뒤 버린다.
+/// Result of one write confirmation. `back` = the write list that was not used — the caller drops it after releasing.
 struct Noted {
     back: Option<Arc<[u32]>>,
     note: WriteNote,
@@ -1204,35 +1204,35 @@ struct Noted {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WriteNote {
-    /// 첫 쓰임 — 쓰기 명단을 받았다.
+    /// First write — received the write list.
     First { w_len: usize },
-    /// 쓰였지만 명단이 없어 쓰임으로 세지 않았다.
+    /// Written but without a list, so not counted as written.
     Unlisted,
-    /// 이미 쓰인 에피소드의 뒤 끊기.
+    /// A later interrupt of an already written episode.
     Again,
-    /// 그 세대의 산 에피소드가 없다.
+    /// There is no live episode of that generation.
     Stale,
 }
 
-/// 일꾼의 한 걸음.
+/// One step of the worker.
 enum Step {
-    /// 일꾼이 끝난다(`worker` 는 이미 내렸다). `retired` = 물러나는 무리라 치운 에피소드.
+    /// The worker ends (`worker` was already lowered). `retired` = the episode cleared because the group is retiring.
     Exit {
         retired: Option<Episode>,
         released: Released,
     },
     Sleep(Duration),
     Pass(Ticket),
-    /// 무엇이든 끝낸 판 뒤 N 에도 같은 에피소드다 — 에피소드는 이미 `Done`.
+    /// Still the same episode at N after a pass that killed anything — the episode is already `Done`.
     StillHung {
         waited: Duration,
     },
 }
 
-/// 판 한 번의 입력 — `Cleaning` 으로 바꾸는 자물쇠 구간에서 뜬다. 쥔 `Arc` 는 판이 끝난 뒤 자물쇠 밖에서 버린다.
+/// Input of one pass — taken in the lock section that switches to `Cleaning`. The `Arc` held is dropped outside the lock after the pass ends.
 ///
-/// - `rec` = 이 에피소드의 기록 번호 — 판이 그 기록을 복사한다(`active` 가 다르면 빈 것).
-/// - `w` = 첫 쓰임의 쓰기 명단(정렬).
+/// - `rec` = this episode's record number — the pass copies that record (empty if `active` differs).
+/// - `w` = write list of the first write (sorted).
 struct Ticket {
     gen: u64,
     first_mono: Instant,
@@ -1241,12 +1241,12 @@ struct Ticket {
     snap: SnapState,
 }
 
-/// 끝내기 확정 한 구간의 판정.
+/// Decision of one kill-commit section.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Commit {
     Go,
     Retiring,
-    /// 판 도중 턴 끝 · 새 끊기 · 새 입력 — 판 전체를 멈춘다(debug `superseded`).
+    /// Mid-pass turn end · new interrupt · new input — stops the whole pass (debug `superseded`).
     Superseded,
 }
 
@@ -1255,7 +1255,7 @@ impl GateState {
         self.open = true;
     }
 
-    /// 새 입력이 CLI 에 닿았다 — 에피소드를 버리고 문을 연다.
+    /// New input reached the CLI — drop the episode and open the gate.
     fn deliver(&mut self) -> Option<Episode> {
         self.delivers = self.delivers.wrapping_add(1);
         self.open = true;
@@ -1268,7 +1268,7 @@ impl GateState {
         self.episode.take()
     }
 
-    /// 구간 ①. 산 에피소드에 이어 적을 때 도는 판은 다음 끝내기 확정에서 멈추고, 가장 최근 끊기 + N 을 다시 기다린다.
+    /// Section ①. The pass running when appending to a live episode stops at the next kill commit, and waits again for the most recent interrupt + N.
     fn begin_interrupt(&mut self, now: Instant) -> Begin {
         if !self.open {
             return Begin::Closed;
@@ -1289,7 +1289,7 @@ impl GateState {
         })
     }
 
-    /// 구간 ② — 여는 이가 켠 기록 `rec`(지금 켜진 번호 = `active`)과 찍은 스냅숏으로 새 에피소드를 세운다.
+    /// Section ② — set up a new episode with the record `rec` the opener turned on (the number now on = `active`) and the snapshot it took.
     fn settle_interrupt(
         &mut self,
         mark: Mark,
@@ -1332,8 +1332,8 @@ impl GateState {
         Settle::Opened { gen, old }
     }
 
-    /// 쓰기 확인 — 같은 세대의 산 에피소드면 가장 최근 끊기를 당기고, 첫 쓰임은 명단 `w` 가 있을 때만 쓰임으로 센다.
-    /// 그 밖의 `w` 는 돌려준다. 쓰인 에피소드에 일꾼이 없으면 띄울 몫을 준다.
+    /// Write confirmation — if it is a live episode of the same generation, pull the most recent interrupt forward; the first write counts as written only when there is a list `w`.
+    /// Other `w` are returned. If the written episode has no worker, give the job of starting one.
     fn note_written(&mut self, gen: u64, w: Option<Arc<[u32]>>, now: Instant) -> Noted {
         let worker = self.worker;
         let Some(ep) = self
@@ -1365,8 +1365,8 @@ impl GateState {
         Noted { back, note, spawn }
     }
 
-    /// 일꾼의 한 걸음(TRD §3-3) — 표식이면 에피소드를 치우고 끝 · 없음 · `Done` · 쓰이지 않은 `Waiting` → 끝 · 쓰인
-    /// `Waiting` 은 N 전이면 잔다 · 지났으면 `Cleaning` + 판 · `Spent` 는 N 전이면 잔다 · 지났으면 `Done` + warn.
+    /// One worker step (TRD §3-3) — if the marker is set, clear the episode and end · none · `Done` · unwritten `Waiting` → end · written
+    /// `Waiting` sleeps if before N · if past, `Cleaning` + pass · `Spent` sleeps if before N · if past, `Done` + warn.
     fn next_step(&mut self, now: Instant, retiring: bool) -> Step {
         if retiring {
             self.worker = false;
@@ -1400,7 +1400,7 @@ impl GateState {
                             snap: ep.snap.clone(),
                         });
                     }
-                    // 「쓰였으면 명단이 있다」가 깨진 자리 — 판을 세울 명단이 없다.
+                    // A spot where 「쓰였으면 명단이 있다」 (if written, a list exists) broke — there is no list to set up a pass.
                     ep.phase = Phase::Done;
                     ep.release()
                 }
@@ -1409,8 +1409,8 @@ impl GateState {
                     ep.release()
                 }
             },
-            // `Cleaning` 은 일꾼만 세우고 그 판 끝이 늘 걷으므로 앞으로의 결함 없이는 오지 않는다. 와도 한 에피소드의
-            // 완료된 판은 한 번이라 다시 돌지 않는다.
+            // Only the worker sets `Cleaning`, and the end of that pass always clears it, so it is not reached without a future defect. Even if it were, an episode
+            // completes only one pass, so it does not run again.
             Phase::Cleaning => {
                 ep.phase = Phase::Done;
                 ep.release()
@@ -1434,8 +1434,8 @@ impl GateState {
         }
     }
 
-    /// 끝내기 확정의 재확인 — 표식 없음 · 같은 세대 · 쓰임 · 아직 `Cleaning`(판 도중 끊기 · 턴 끝 · 새 입력이 없었다) ·
-    /// 가장 최근 끊기 + N ≤ 지금.
+    /// Recheck of the kill commit — no marker · same generation · written · still `Cleaning` (no interrupt · turn end · new input during the pass) ·
+    /// most recent interrupt + N ≤ now.
     fn still_due(&self, gen: u64, now: Instant, retiring: bool) -> bool {
         !retiring
             && self.episode.as_ref().is_some_and(|ep| {
@@ -1459,15 +1459,15 @@ impl GateState {
         }
     }
 
-    /// 끝내기 확정에서 끝내기 호출이 받아들여졌다.
+    /// The kill call was accepted in the kill commit.
     fn note_kill(&mut self, gen: u64) {
         if let Some(ep) = self.episode.as_mut().filter(|ep| ep.gen == gen) {
             ep.killed_any = true;
         }
     }
 
-    /// 판 끝 — 같은 세대가 아직 `Cleaning` 일 때만 `Spent`(무엇이든 끝냈다)/`Done` 으로 매듭짓고 스냅숏 · 기록을
-    /// 내놓는다. 판 도중 끊기로 `Waiting` 에 돌아갔으면 쥔 채 다음 판을 기다린다.
+    /// Pass end — only if the same generation is still `Cleaning`, close it out as `Spent` (killed something)/`Done` and hand out the snapshot · record.
+    /// If an interrupt mid-pass returned it to `Waiting`, keep holding and wait for the next pass.
     fn finish_pass(&mut self, gen: u64, killed: bool, now: Instant) -> Released {
         let Some(ep) = self.episode.as_mut().filter(|ep| ep.gen == gen) else {
             return Released::default();
@@ -1486,8 +1486,8 @@ impl GateState {
         released
     }
 
-    /// 일꾼이 없어졌다(기동 실패 · 패닉) — 세대가 무엇이든 지금 에피소드를 `Done` 으로 내린다. 그 사이 다른 끊기가
-    /// 세운 에피소드도 「일꾼이 떠 있다」고 믿고 아무도 안 띄웠기 때문이다. 곧바로 다시 띄우지 않는다.
+    /// The worker is gone (start failure · panic) — whatever the generation, bring the current episode down to `Done`. Because an episode another interrupt set up in the meantime
+    /// also believed 「일꾼이 떠 있다」 (a worker is up) and nobody started one. Do not immediately start again.
     fn abandon(&mut self) -> Released {
         self.worker = false;
         match self.episode.as_mut() {
@@ -1500,8 +1500,8 @@ impl GateState {
     }
 }
 
-/// 한 화신의 정리기 — 무리 손잡이 · 탄생 기록 · 포트 확보 · 시계 · 뿌리 · 물러남 표시 · 로그 귀속. 조립하지 못하면
-/// 만들지 않는다(그때 [`GateCell`] 은 문만 여닫는다).
+/// One incarnation's cleaner — group handle · birth record · port acquisition · clock · root · retirement flag · log attribution. If it cannot be assembled,
+/// it is not created (then [`GateCell`] only opens and closes the gate).
 // ADR-0262
 pub(super) struct Cleaner<G: Group = ProcessGroup> {
     group: Arc<G>,
@@ -1511,7 +1511,7 @@ pub(super) struct Cleaner<G: Group = ProcessGroup> {
     root_pid: u32,
     retiring: RetiringSignal,
     tag: LogTag,
-    /// 쓰기 명단 실패를 warn 으로 남겼다 — 화신마다 한 번.
+    /// The write-list failure was logged as warn — once per incarnation.
     unlisted_warned: AtomicBool,
 }
 
@@ -1547,7 +1547,7 @@ impl<G: Group> Cleaner<G> {
         }
     }
 
-    /// 포트 · 듣는 스레드 확보(처음 한 번) — 듣는 스레드도 시계로 띄운다.
+    /// Acquire port · listener thread (first time only) — the listener thread is also started through the clock.
     fn ensure_port(&self) -> Result<(), ()> {
         self.watch
             .ensure_with(&self.group, &self.recorder, &self.tag, |body| {
@@ -1556,8 +1556,8 @@ impl<G: Group> Cleaner<G> {
     }
 }
 
-/// 새 에피소드의 스냅숏 [고름] — 완전한 명단의 멤버마다 조회 권한만으로 붙들어 사실을 읽는다. 못 붙든 뿌리 밖 멤버
-/// (끝남 · 무리 밖 · 거절)는 빠진다 — 알려지지 않은 고리라 그 아래는 놓친다. 두 자물쇠 밖에서 부른다.
+/// Snapshot of a new episode [selection] — for each member of the complete list, hold it with query access only and read its facts. Non-root members that could not be held
+/// (exited · outside the group · refused) are left out — they are unknown links, so what is below them is missed. Called outside both locks.
 // ADR-0262
 fn take_snapshot<G: Group>(group: &G, root_pid: u32) -> SnapState {
     let Ok(pids) = group.member_pids() else {
@@ -1595,10 +1595,10 @@ fn take_snapshot<G: Group>(group: &G, root_pid: u32) -> SnapState {
     SnapState::Taken(Arc::new(Snapshot { root, others }))
 }
 
-/// 쓰기 명단을 찍지 못한 까닭.
+/// Why the write list could not be taken.
 enum Unlisted {
     List(io::Error),
-    /// 명단이 비었다 — 통로가 사라졌다.
+    /// The list is empty — the path is gone.
     Gone,
 }
 
@@ -1611,8 +1611,8 @@ impl fmt::Display for Unlisted {
     }
 }
 
-/// 쓰기 명단 W — 줄이 쓰인 직후의 완전한 멤버 번호(정렬). 아무 자물쇠 없이 부른다(손잡이가 그 호출 동안만 Job 을
-/// 올린다). 후보는 W 밖이어야 하므로 W 를 못 찍으면 그 쓰임으로는 판이 서지 않는다.
+/// Write list W — complete member numbers right after the line was written (sorted). Called with no lock (the handle upgrades the Job only for that call).
+/// Candidates must be outside W, so if W cannot be taken, no pass is set up for that write.
 fn write_list<G: Group>(group: &G) -> Result<Arc<[u32]>, Unlisted> {
     let mut pids = group.member_pids().map_err(Unlisted::List)?;
     if pids.is_empty() {
@@ -1622,14 +1622,14 @@ fn write_list<G: Group>(group: &G) -> Result<Arc<[u32]>, Unlisted> {
     Ok(pids.into())
 }
 
-/// 턴 열림 문 + 끊기 에피소드 — 화신마다 하나, 끊기 줄 함수 · decoder · 쓰기 확인 · 일꾼이 같은 `Arc` 로 쥔다.
+/// Turn-open gate + interrupt episode — one per incarnation, held by the same `Arc` by the interrupt-line function · decoder · write confirmation · worker.
 // ADR-0262
 pub(super) struct GateCell<G: Group = ProcessGroup> {
     state: Mutex<GateState>,
     cleaner: Option<Arc<Cleaner<G>>>,
 }
 
-/// [`GateCell`] 의 Debug 가 자물쇠에서 베껴 오는 것.
+/// What the Debug of [`GateCell`] copies from the lock.
 #[derive(Debug, Clone, Copy)]
 struct Seen {
     open: bool,
@@ -1652,9 +1652,9 @@ impl Seen {
 
 impl<G: Group> fmt::Debug for GateCell<G> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // 쓰기는 자물쇠를 놓은 뒤다 — 포매터가 곧바로 파일 · 콘솔에 쓸 수 있다. 기다리지도 않는다: 자물쇠를 쥔 채
-        // 이것을 찍는 결함이 생겨도 제 자신을 기다려 멈추지 않게.
-        // ADR-0275: base `sync` 를 쓰지 않는다 — 그쪽은 기다리는 `lock` 뿐이다. 오염 갈래만 여기서 되찾는다.
+        // The write happens after the lock is released — the formatter may write straight to a file · console. It does not wait either: so that even if a defect
+        // printing this while holding the lock appears, it does not stall waiting for itself.
+        // ADR-0275: do not use base `sync` — it has only the waiting `lock`. Only the poisoned branch is recovered here.
         let seen = match self.state.try_lock() {
             Ok(state) => Some(Seen::of(&state)),
             Err(TryLockError::Poisoned(state)) => Some(Seen::of(&state.into_inner())),
@@ -1672,11 +1672,11 @@ impl<G: Group> fmt::Debug for GateCell<G> {
     }
 }
 
-/// 여는 이 가드 — 구간 ① 에서 여는 이가 된 뒤 세운다. 새 에피소드를 세우지 못한 모든 출구(패닉 · 줄 없음 · 줄만)에서
-/// 문 자물쇠를 잡아 `opening` 을 내리고(구간 ② 에 닿기 전일 때만) 놓은 **뒤에** 켠 기록을 끈다.
+/// Opener guard — set up after becoming the opener in section ①. On every exit that did not set up a new episode (panic · no line · line only),
+/// take the gate lock, lower `opening` (only if section ② has not been reached) and turn off the record that was on **after** releasing it.
 ///
-/// ★구간 ② 뒤에는 `opening` 을 건드리지 않는다★ — ② 가 이미 내렸고, 그 뒤 다른 끊기가 여는 이가 됐을 수 있다(그
-/// 표시를 지우면 여는 이가 둘이 된다). 기록은 번호로 끄므로 그 사이 새 기록이 켜졌으면 아무것도 안 한다.
+/// ★After section ② do not touch `opening`★ — ② already lowered it, and another interrupt may have become the opener since (clearing
+/// that flag would make two openers). The record is turned off by number, so if a new record was turned on meanwhile, nothing is done.
 struct Opener<'a, G: Group> {
     cell: &'a GateCell<G>,
     recorder: &'a Recorder,
@@ -1697,7 +1697,7 @@ impl<G: Group> Drop for Opener<'_, G> {
 }
 
 impl<G: Group> GateCell<G> {
-    /// `cleaner` 가 `None` 이면 문만 여닫는다 — 끊기 줄은 문이 열렸을 때만 주고 에피소드는 없다.
+    /// If `cleaner` is `None`, only open and close the gate — an interrupt line is given only when the gate is open, and there is no episode.
     pub(super) fn new(cleaner: Option<Arc<Cleaner<G>>>) -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(GateState::default()),
@@ -1714,11 +1714,11 @@ impl<G: Group> GateCell<G> {
         self.lock().open
     }
 
-    /// 끊기 줄 함수의 몸통 — 문이 닫혔으면 `None`(줄 없음). 줄을 주면 `on_written` 은 이 끊기가 에피소드를 세웠거나 산
-    /// 에피소드에 이어 적었을 때만 있다(다른 끊기가 여는 중 · 두 구간 사이에 기록 · 입력 · 세대가 바뀜 → 줄만).
+    /// Body of the interrupt-line function — `None` (no line) if the gate is closed. If it gives a line, `on_written` exists only when this interrupt set up an episode or appended to a live
+    /// episode (another interrupt is opening · record · input · generation changed between the two sections → line only).
     ///
-    /// 여는 이는 하나다: 자물쇠 밖에서 포트를 확보하고 → 기록을 켜고 → 스냅숏을 찍는다. ★기록을 스냅숏 앞에 켠다★ —
-    /// 그 사이 태어난 것은 기록되거나(명단 뒤) 스냅숏에 든다(명단 앞).
+    /// There is one opener: acquire the port outside the lock → turn on the record → take the snapshot. ★Turn the record on before the snapshot★ —
+    /// what is born in between is either recorded (after the listing) or in the snapshot (before the listing).
     // ADR-0262
     pub(super) fn interrupt(self: &Arc<Self>, bytes: Vec<u8>) -> Option<InterruptOut> {
         let Some(cleaner) = self.cleaner.as_ref() else {
@@ -1838,13 +1838,13 @@ impl<G: Group> GateCell<G> {
         }
     }
 
-    /// 줄이 쓰인 뒤 라이터가 부를 것 — 쓰기 명단을 찍어 그 세대에 적는다.
+    /// To be called by the writer after the line is written — takes the write list and records it under that generation.
     fn on_written(self: &Arc<Self>, gen: u64) -> OnWritten {
         let cell = Arc::clone(self);
         Box::new(move || cell.written(gen))
     }
 
-    /// 쓰기 확인 — 라이터 스레드가 아무 락 없이 부른다. 명단은 문 자물쇠 밖에서 찍고, 쓰지 않은 명단도 밖에서 버린다.
+    /// Write confirmation — called by the writer thread with no lock. The list is taken outside the gate lock, and an unused list is also dropped outside.
     fn written(self: &Arc<Self>, gen: u64) {
         let Some(cleaner) = self.cleaner.as_ref() else {
             return;
@@ -1895,7 +1895,7 @@ impl<G: Group> GateCell<G> {
         }
     }
 
-    /// 일꾼을 띄운다 — 실패하면 지금 에피소드를 `Done` 으로 내리고 쥔 것을 놓는다.
+    /// Start the worker — if it fails, bring the current episode down to `Done` and release what is held.
     fn spawn_worker(self: &Arc<Self>, cleaner: &Arc<Cleaner<G>>) {
         let cell = Arc::clone(self);
         let worker_cleaner = Arc::clone(cleaner);
@@ -1914,12 +1914,12 @@ impl<G: Group> GateCell<G> {
         }
     }
 
-    /// decoder 가 턴 열림을 볼 때 — 이미 열려 있으면 아무것도 안 바꾼다.
+    /// When the decoder sees a turn open — if already open, change nothing.
     pub(super) fn open_turn(&self) {
         self.lock().open_turn();
     }
 
-    /// decoder 가 새 입력(라이브 `started`)을 볼 때 — 에피소드를 버리고 문을 연다(한 구간).
+    /// When the decoder sees new input (live `started`) — drop the episode and open the gate (one section).
     pub(super) fn deliver(&self) {
         let dropped = self.lock().deliver();
         let Some(ep) = dropped else {
@@ -1938,7 +1938,7 @@ impl<G: Group> GateCell<G> {
         self.release(ep.into_released());
     }
 
-    /// decoder 가 턴 끝을 볼 때 — 문 닫기와 에피소드 버리기를 한 구간에서.
+    /// When the decoder sees a turn end — closing the gate and dropping the episode in one section.
     pub(super) fn close_turn(&self) {
         let dropped = self.lock().close_turn();
         if let Some(ep) = dropped {
@@ -1946,7 +1946,7 @@ impl<G: Group> GateCell<G> {
         }
     }
 
-    /// 판 끝(TRD §3-3).
+    /// Pass end (TRD §3-3).
     fn end_pass(&self, cleaner: &Cleaner<G>, gen: u64, killed: bool) {
         let released = {
             let mut state = self.lock();
@@ -1956,7 +1956,7 @@ impl<G: Group> GateCell<G> {
         self.release(released);
     }
 
-    /// 빼낸 것을 버리고 그 기록을 끈다 — 두 자물쇠 밖에서 부른다.
+    /// Drop what was taken out and turn off that record — called outside both locks.
     fn release(&self, released: Released) {
         let Released { snap, w, rec } = released;
         drop(snap);
@@ -1967,11 +1967,11 @@ impl<G: Group> GateCell<G> {
     }
 }
 
-/// 일꾼 몸통 — 에피소드가 없거나 · 쓰이지 않았거나 · `Done` 이 되거나 물러날 때까지 걷는다. 쥐는 것은 문과 정리기뿐이다.
+/// Worker body — walks until there is no episode · it was not written · it becomes `Done` or retires. It holds only the gate and the cleaner.
 ///
-/// ★패닉 가드는 훅 없는 시험 빌드에서만 선다 — 이 스레드는 가둠 표시 밖이라 운영 프로세스에서는 훅이 끝낸다★.
-/// 그래서 몸통은 패닉하지 않게 짠다(풀기 · 첨자 없음 · 독 견딤). 되감기면 지금 에피소드를 `Done` 으로 내리고 쥔 것을
-/// 놓는다 — 일꾼 없이 쓰인 에피소드가 남지 않게.
+/// ★The panic guard stands only in test builds without the hook — this thread is outside the containment marker, so in the production process the hook ends it★.
+/// So the body is written not to panic (no unwrap · no indexing · poison tolerated). On unwind, bring the current episode down to `Done` and release what is
+/// held — so no written episode is left without a worker.
 // ADR-0262
 // ADR-0292
 fn run_worker<G: Group>(cell: &Arc<GateCell<G>>, cleaner: &Arc<Cleaner<G>>) {
@@ -2002,7 +2002,7 @@ impl<G: Group> Drop for WorkerGuard<'_, G> {
     }
 }
 
-/// 일꾼의 한 걸음 — 계속 걸으면 참.
+/// One step of the worker — true if it keeps walking.
 fn worker_turn<G: Group>(cell: &Arc<GateCell<G>>, cleaner: &Arc<Cleaner<G>>) -> bool {
     let step = {
         let mut state = cell.lock();
@@ -2042,21 +2042,21 @@ fn worker_turn<G: Group>(cell: &Arc<GateCell<G>>, cleaner: &Arc<Cleaner<G>>) -> 
     }
 }
 
-/// 판이 새로 끝낼 것이 없는 차례에 닿기 전에 멈춘 까닭.
+/// Why the pass stopped before reaching a round with nothing new to kill.
 #[derive(Debug)]
 enum PassStop {
-    /// 판의 순서 1–3 이 서지 않았거나, 끝내기 전 재확인 · 확정에서 물러남 · 뿌리 끝남을 봤다.
+    /// Pass steps 1–3 did not hold, or the recheck before kill · retirement in the commit · root exit was seen.
     NotReady(NotReady),
-    /// 확정의 재확인이 거절됐다 — 판 도중 턴 끝 · 새 끊기 · 새 입력(debug `superseded`).
+    /// The commit's recheck was refused — mid-pass turn end · new interrupt · new input (debug `superseded`).
     Superseded,
-    /// 차례의 기록 복사가 비었고 그 기록이 이미 꺼졌다 — 에피소드가 버려졌거나 듣는 스레드가 끝났다(그쪽이 따로
-    /// 적는다).
+    /// The round's record copy is empty and that record is already off — the episode was dropped or the listener thread ended (that side logs
+    /// separately).
     RecordGone,
-    /// [`PASS_ROUNDS`] 차례를 끝내고도 끝낼 후보가 남았다(warn `rounds_exhausted`).
+    /// Candidates to kill remain even after finishing [`PASS_ROUNDS`] rounds (warn `rounds_exhausted`).
     RoundsExhausted,
 }
 
-/// 끝낸 것 하나 — 정리함 로그의 `terminated` 칸. `chain` = 후보부터 꼭대기 T 까지([`Verdict::Cleanup`]).
+/// One killed item — the `terminated` field of the cleaned log. `chain` = from the candidate up to the top T ([`Verdict::Cleanup`]).
 struct Killed {
     pid: u32,
     ppid: u32,
@@ -2074,8 +2074,8 @@ impl fmt::Debug for Killed {
     }
 }
 
-/// 규칙별로 뺀 후보 수 — 마지막으로 고른 차례의 것이다. 산 채 빠진 후보는 다음 차례에 다시 세어지므로 차례끼리
-/// 더하지 않는다.
+/// Number of candidates dropped per rule — those of the last round selected. A candidate dropped while alive is counted again in the next round, so rounds are not
+/// added together.
 #[derive(Debug, Default, Clone, Copy)]
 struct Excluded {
     parent_alive: usize,
@@ -2105,15 +2105,15 @@ impl Excluded {
     }
 }
 
-/// 판 한 번의 결과 — 로그가 읽는다.
+/// Result of one pass — read by the log.
 ///
-/// - `stop` = `None` 이면 새로 끝낼 `Cleanup` 이 없는 차례까지 돌았다.
-/// - `rounds` = 확정까지 간 차례 수(마지막의 빈 차례는 세지 않는다).
-/// - `terminated` = 끝내기 호출이 받아들여진 것 · `confirmed` = 그 가운데 그 차례의 마감 안에 끝남을 확인한 수(판이
-///   도중에 멈춘 차례는 확인하지 않는다).
-/// - `candidates` = 첫 차례의 후보 수 · `births` = 마지막으로 복사한 기록의 크기 · `full` = 첫 차례 때 그 기록이
-///   넘쳤나.
-/// - `cleanups` = 확정에서 끝내기 호출까지 간 수 · `failed` = 그 가운데 끝내기 오류 · `gone` = 그 사이 스스로 끝난 수.
+/// - `stop` = if `None`, it ran up to a round with no new `Cleanup` to kill.
+/// - `rounds` = number of rounds that reached the commit (the last empty round is not counted).
+/// - `terminated` = kill calls that were accepted · `confirmed` = among them, the number whose exit was confirmed within that round's deadline (a round in which the pass
+///   stopped midway does not confirm).
+/// - `candidates` = number of candidates in the first round · `births` = size of the last copied record · `full` = whether that record
+///   overflowed in the first round.
+/// - `cleanups` = number that reached the kill call from the commit · `failed` = kill errors among them · `gone` = number that exited by themselves meanwhile.
 #[derive(Debug, Default)]
 struct PassReport {
     stop: Option<PassStop>,
@@ -2130,15 +2130,15 @@ struct PassReport {
     gone: usize,
 }
 
-/// 정리 한 판(TRD §3-3 「판의 차례」 · §3-4 「판의 순서」) — 순서 1–3 이 서면 차례를 돈다. 하나라도 서지 않으면
-/// 아무것도 끝내지 않는다.
+/// One cleanup pass (TRD §3-3 「판의 차례」 (rounds of a pass) · §3-4 「판의 순서」 (steps of a pass)) — if steps 1–3 hold, it goes through the rounds. If any one does not hold,
+/// nothing is killed.
 ///
-/// 한 차례 = 기록 복사 → 후보 · 규칙 → `Cleanup` 을 `seq` 오름차순으로 끝내기 확정 → 그 차례에 끝낸 것들을 마감
-/// 하나([`KILL_CONFIRM`]) 안에서 확인. 끝낸 것은 다음 차례에서 끝난 알려진 고리로 보여 그것이 거느리던 사본이 후보가
-/// 된다. 새로 끝낼 `Cleanup` 이 없는 차례에서 멈춘다 — 한 판에서 확정까지 간 후보는 다시 고르지 않는다(마감 안에 안
-/// 끝났거나 끝내기가 실패한 것이 다음 차례에 산 것으로 보여 거듭 끝내지 않게).
+/// One round = copy the record → candidates · rules → kill commit of the `Cleanup` items in ascending `seq` order → confirm the ones killed in that round within one deadline
+/// ([`KILL_CONFIRM`]). What was killed shows up in the next round as an exited known link, and the copies it parented become candidates.
+/// It stops at a round with no new `Cleanup` to kill — a candidate that reached the commit in one pass is not selected again (so that one that did not
+/// exit within the deadline or whose kill failed, and shows up as alive in the next round, is not killed repeatedly).
 ///
-/// 늘 판 끝으로 매듭짓고, 로그 · 복사한 기록 · `ticket` 은 두 자물쇠 밖에서 버린다.
+/// Always closes with the pass end, and the log · the copied record · `ticket` are dropped outside both locks.
 // ADR-0262
 fn run_pass<G: Group>(
     cell: &Arc<GateCell<G>>,
@@ -2168,7 +2168,7 @@ fn run_pass<G: Group>(
     report
 }
 
-/// 판의 차례들 — 끝내기 호출이 하나라도 받아들여졌으면 참.
+/// The rounds of a pass — true if at least one kill call was accepted.
 fn kill_rounds<G: Group>(
     cell: &GateCell<G>,
     cleaner: &Cleaner<G>,
@@ -2217,8 +2217,8 @@ fn kill_rounds<G: Group>(
                 report.stop = Some(PassStop::NotReady(why));
                 break;
             }
-            // ★끝내기 확정 — 재확인과 끝내기 호출 하나만 자물쇠 안★(TRD §3-3 「자물쇠 규칙」 ⓑ). 가르기 · 로그 ·
-            //   핸들 버리기는 놓은 뒤다. 표식은 여기서 한 번 더 읽는다 — 남는 겹침은 이 읽기 직후의 끝내기 하나다.
+            // ★Kill commit — only the recheck and one kill call are inside the lock★ (TRD §3-3 「자물쇠 규칙」 (lock rules) ⓑ). Deciding · logging ·
+            //   dropping handles come after release. The marker is read once more here — the remaining overlap is the single kill right after this read.
             // ADR-0262
             let committed = {
                 let mut state = cell.lock();
@@ -2279,8 +2279,8 @@ fn kill_rounds<G: Group>(
     killed_any
 }
 
-/// 한 차례의 고르기 — 이 판에서 아직 확정에 가지 않은 `Cleanup` 을 `seq` 오름차순으로 준다. 첫 차례의 후보 수와
-/// 규칙별로 뺀 수를 보고서에 적는다.
+/// Selection of one round — gives the `Cleanup` items of this pass that have not yet gone to the commit, in ascending `seq` order. Writes the first round's candidate count and
+/// the per-rule dropped counts into the report.
 fn pick(
     snapshot: &Snapshot,
     snapshot_links: &[Link<'_>],
@@ -2321,8 +2321,8 @@ fn pick(
     picks
 }
 
-/// 알려진 고리 하나가 지금 끝났나 — 그 고리를 붙든 핸들로 묻는다(탄생은 `seq` · 스냅숏 멤버는 (번호, 생성)으로
-/// 찾는다). 못 찾으면 모름(`Err`) — 고르기가 끝내지 않는 쪽으로 읽는다.
+/// Has one known link exited now — asked through the handle holding that link (a birth is found by `seq`, a snapshot member by (number, creation)). If not found, unknown (`Err`) —
+/// which the selection reads on the side of not killing.
 fn link_exited(snapshot: &Snapshot, births: &[Arc<Birth>], link: &Link<'_>) -> io::Result<bool> {
     let pin = match link.seq {
         Some(seq) => births.iter().find(|b| b.seq == seq).map(|b| &b.pin),
@@ -2337,7 +2337,7 @@ fn link_exited(snapshot: &Snapshot, births: &[Arc<Birth>], link: &Link<'_>) -> i
     }
 }
 
-/// 판의 순서 5 — 끝내기 앞마다 표식 · 붙든 뿌리를 자물쇠 밖에서 다시 본다.
+/// Pass step 5 — before every kill, look again at the marker · held root outside the lock.
 fn recheck(snapshot: &Snapshot, retiring: &RetiringSignal) -> Result<(), NotReady> {
     if retiring.is_set() {
         return Err(NotReady::Retiring);
@@ -2345,8 +2345,8 @@ fn recheck(snapshot: &Snapshot, retiring: &RetiringSignal) -> Result<(), NotRead
     root_alive(snapshot)
 }
 
-/// 한 차례에 끝낸 것들의 끝남 확인 — 마감 하나를 나눠 쓴다(앞의 것이 기다린 만큼 뒤의 것은 덜 기다린다). 마감 안에
-/// 끝남을 확인한 수를 준다.
+/// Confirm the exits of what one round killed — one deadline is shared (the later ones wait as much less as the earlier ones waited). Gives the number whose exit was
+/// confirmed within the deadline.
 fn confirm(clock: &dyn LeftoverClock, killed: &[&Birth]) -> usize {
     if killed.is_empty() {
         return 0;
@@ -2362,8 +2362,8 @@ fn confirm(clock: &dyn LeftoverClock, killed: &[&Birth]) -> usize {
         .count()
 }
 
-/// 판의 로그(TRD §3-8) — 자물쇠를 놓은 뒤. 무엇이든 끝냈으면 정리함 warn 하나를 남기고, 멈춘 까닭은 그 사유의 레벨로,
-/// 아무것도 못 끝내고 다 돈 판은 못 끝냄 warn 하나로.
+/// The pass's log (TRD §3-8) — after releasing the lock. If it killed anything, leave one cleaned warn; the stop reason goes at that reason's level;
+/// a pass that ran through without killing anything gets one could-not-kill warn.
 fn log_pass<G: Group>(cleaner: &Cleaner<G>, report: &PassReport, waited: Duration) {
     let (agent, root_pid) = (cleaner.tag.agent(), cleaner.tag.root_pid);
     let waited_ms = millis(waited);
@@ -2490,24 +2490,24 @@ fn log_pass<G: Group>(cleaner: &Cleaner<G>, report: &PassReport, waited: Duratio
     }
 }
 
-/// 판의 순서 1–3(TRD §3-4)이 서지 않은 까닭.
+/// Why pass steps 1–3 (TRD §3-4) did not hold.
 #[derive(Debug)]
 enum NotReady {
-    /// 물러나는 무리다(debug `retiring`).
+    /// The group is retiring (debug `retiring`).
     Retiring,
-    /// warn `snapshot_failed` — 판 때 그 기록이 꺼져 있었으면(듣는 스레드의 끝 · 실패) `Port`.
+    /// warn `snapshot_failed` — `Port` if that record was off at pass time (listener thread ended · failed).
     Snapshot(SnapCause),
-    /// 판 끝이 이미 스냅숏을 놓았다 — 닿지 않는 갈래.
+    /// The pass end already released the snapshot — a branch that is not reached.
     Released,
-    /// 붙든 뿌리가 끝났다(debug `root_gone`).
+    /// The held root has exited (debug `root_gone`).
     RootGone,
-    /// 뿌리 끝남 조회 실패(warn `root_unknown`).
+    /// The root exit query failed (warn `root_unknown`).
     RootUnknown(io::Error),
 }
 
-/// 판의 순서 1–3 — 표식 없음 → 포트가 실패로 굳지 않음(`port_failed`) · 스냅숏이 섰고 그 기록이 아직 켜져 있음
-/// (`active` = 지금 켜진 번호) → 붙든 뿌리가 산다. 포트가 굳었으면 새 멤버를 못 들었을 수 있어 「새 멤버 없음」 대신
-/// `snapshot_failed(port)` 다. 뿌리 끝남 조회는 OS 호출이라 두 자물쇠 밖에서 부른다.
+/// Pass steps 1–3 — no marker → the port is not latched as failed (`port_failed`) · the snapshot was set up and that record is still on
+/// (`active` = the number now on) → the held root is alive. If the port is latched, new members may have been missed, so it is `snapshot_failed(port)` instead of
+/// 「새 멤버 없음」 (no new members). The root exit query is an OS call, so it is called outside both locks.
 fn precheck(
     ticket: &Ticket,
     active: u64,
@@ -2542,9 +2542,9 @@ fn root_alive(snapshot: &Snapshot) -> Result<(), NotReady> {
 mod tests {
     use super::*;
 
-    // 실물 값의 출처 = `.claude/handoff/attachments/20260930-t40-provenance-spike/procs/*.procs.tsv`(출처 스파이크 ·
-    //   claude 2.1.284). 번호 · 실행 파일 · 명령줄은 표 그대로이고, 시각은 그 판의 끊기 줄이 쓰인 때(첫 taskkill − 5 ms ·
-    //   p3bg 는 TRD §3-0 표의 기준)에서 잰 ms 로 반올림했다. 명령줄 가운데 규칙과 무관한 꼬리(claude 인자 등)는 줄였다.
+    // Source of the real values = `.claude/handoff/attachments/20260930-t40-provenance-spike/procs/*.procs.tsv` (provenance spike ·
+    //   claude 2.1.284). Numbers · executables · command lines are as in the table, and times are rounded to ms measured from when that pass's interrupt line was written (first taskkill − 5 ms ·
+    //   p3bg uses the basis of the TRD §3-0 table). The tails of command lines that are unrelated to the rules (claude arguments etc.) are shortened.
 
     const CMD: &str = r"C:\Windows\System32\cmd.exe";
     const CONHOST: &str = r"C:\Windows\System32\conhost.exe";
@@ -2564,27 +2564,27 @@ mod tests {
     const WIKI: &str = "wiki-preconsult";
     const HANDOFF: &str = "handoff-trigger";
 
-    /// 끊기 줄이 쓰인 때의 FILETIME — 표의 시각은 이 점에서 ms 로 잰다.
+    /// FILETIME when the interrupt line was written — the table's times are measured in ms from this point.
     const T0: i64 = 134_352_256_000_000_000;
     const TICKS_PER_MS: i64 = 10_000;
-    /// 판 = 줄이 쓰인 때 + 3 s.
+    /// pass = when the line was written + 3 s.
     const PASS_MS: i64 = 3_000;
 
-    /// 훅 실행기 — claude 가 훅마다 띄우는 꼭대기 T 의 모양.
+    /// Hook runner — the shape of the top T that claude starts for each hook.
     fn launcher(hook: &str) -> String {
         format!(
             r#""C:\Program Files\Git\bin\bash.exe" -c "bash ${{CLAUDE_PLUGIN_ROOT}}/hooks/{hook}.sh""#
         )
     }
 
-    /// 껍데기 — 실행기가 띄운 `usr\bin` bash. 명령줄은 실행기와 같은 `-c "bash …"` 이다.
+    /// Wrapper shell — the `usr\bin` bash started by the runner. Its command line is the same `-c "bash …"` as the runner's.
     fn shell(hook: &str) -> String {
         format!(
             r#""C:\Program Files\Git\bin\..\usr\bin\bash.exe" -c "bash ${{CLAUDE_PLUGIN_ROOT}}/hooks/{hook}.sh""#
         )
     }
 
-    /// 껍데기가 exec 한 훅 스크립트 — 그 fork 사본도 같은 명령줄을 가진다.
+    /// The hook script the wrapper shell exec'd — its fork copies have the same command line too.
     fn script(hook: &str) -> String {
         format!(
             r#""C:\Program Files\Git\usr\bin\bash.exe" C:/Users/kimsunzun/.claude/plugins/cache/nmfc-origin-plugins/nmfc-origin-dev-harness/2.11.0/hooks/{hook}.sh"#
@@ -2595,7 +2595,7 @@ mod tests {
         format!(r"C:\WINDOWS\System32\taskkill.exe /PID {target} /T /F")
     }
 
-    /// Bash 도구 실행기 · 그 껍데기 · fork 의 명령줄(p1 의 백그라운드 반복 `while true; do sleep 2; done`).
+    /// Command lines of the Bash tool runner · its wrapper shell · fork (p1's background loop `while true; do sleep 2; done`).
     fn bash_tool(program: &str) -> String {
         format!(
             r#""{program}" -c "source /c/Users/kimsunzun/.claude/shell-snapshots/snapshot-bash-1790752041336-sy2let.sh 2>/dev/null || true && eval 'T40BG=1; while true; do sleep 2; done' < /dev/null && pwd -P >| '/c/Users/KIMSUN~1/AppData/Local/Temp/claude-5f7e-cwd'""#
@@ -2632,19 +2632,19 @@ mod tests {
     struct Proc {
         pid: u32,
         born_ms: i64,
-        /// `None` = 판 때 산다.
+        /// `None` = alive at pass time.
         exit_ms: Option<i64>,
-        /// `false` = 가입 알림을 놓쳤다(기록에 없다).
+        /// `false` = the join notification was missed (not in the record).
         recorded: bool,
         facts: ProcessFacts,
     }
 
-    /// 표를 본뜬 가짜 세계 — 줄이 쓰인 때(0 ms)에 살아 있던 것이 스냅숏, 0 < 생성 ≤ 판 인 것이 탄생 기록(생성 순
-    /// `seq`)이고, 쓰기 명단 W 는 0 ms 에 산 것의 번호다.
+    /// A fake world modeled on the table — what was alive at the time the line was written (0 ms) is the snapshot, those with 0 < creation ≤ pass are the birth record (in creation order
+    /// `seq`), and the write list W is the numbers of those alive at 0 ms.
     pub(super) struct World {
         root: u32,
         procs: Vec<Proc>,
-        /// 끝남 조회가 `Err` 인 번호.
+        /// A number whose exit query is `Err`.
         failing: Vec<u32>,
     }
 
@@ -2657,7 +2657,7 @@ mod tests {
             }
         }
 
-        /// 뿌리(`cmd /c`) · 그 콘솔 호스트 · claude — 셋 다 판 때 산다.
+        /// Root (`cmd /c`) · its console host · claude — all three are alive at pass time.
         fn hosted(root: u32, conhost: u32, claude: u32) -> Self {
             let mut w = World::new(root);
             w.add(root, 26792, -60_000, None, CMD, ROOT_CMD)
@@ -2751,7 +2751,7 @@ mod tests {
             Ok(killed.contains(&p.pid) || p.exit_ms.is_some_and(|e| e <= PASS_MS))
         }
 
-        /// 탄생 기록의 `pid`(같은 번호가 여럿이면 마지막)를 판 때 가른다 — `killed` 는 앞 차례에 끝낸 번호.
+        /// Decide the `pid` of the birth record (the last one if the same number occurs several times) at pass time — `killed` is the numbers killed in earlier rounds.
         fn judge(&self, pid: u32, killed: &[u32]) -> Verdict {
             let (snapshot, births) = self.links();
             let view = Chain {
@@ -2768,7 +2768,7 @@ mod tests {
             select(c, &view)
         }
 
-        /// 판 한 차례 — 후보를 추려 `Cleanup` 이 난 번호를 차례대로.
+        /// One pass round — pick candidates and give, in order, the numbers that came out as `Cleanup`.
         fn round(&self, killed: &[u32]) -> Vec<u32> {
             let (snapshot, births) = self.links();
             let view = Chain {
@@ -2784,7 +2784,7 @@ mod tests {
                 .collect()
         }
 
-        /// 판 시험(`gate_tests`)이 무리 · 기록에 옮겨 싣는 모양 — 스냅숏 · 탄생은 [`Self::links`] 와 같은 것이다.
+        /// The shape that the pass tests (`gate_tests`) carry into the group · record — the snapshot · births are the same as [`Self::links`].
         pub(super) fn staged(&self) -> Staged {
             let state = |p: &Proc| {
                 (
@@ -2813,10 +2813,10 @@ mod tests {
         }
     }
 
-    /// [`World::staged`] — 번호 · 사실 · 판 때 끝났나.
+    /// [`World::staged`] — number · facts · whether it had exited at pass time.
     ///
-    /// - `listing` = 줄이 쓰인 때의 명단(= 쓰기 명단 W) — 알림을 놓친 것도 든다.
-    /// - `births` = 생성 순(넣는 순서가 곧 `seq`).
+    /// - `listing` = the listing when the line was written (= write list W) — includes those whose notification was missed.
+    /// - `births` = in creation order (the insertion order is `seq`).
     pub(super) struct Staged {
         pub(super) root: u32,
         pub(super) listing: Vec<u32>,
@@ -2830,9 +2830,9 @@ mod tests {
         }
     }
 
-    // ── 스파이크 모양 ─────────────────────────────────────────────────────────────
+    // ── Spike shapes ─────────────────────────────────────────────────────────────
 
-    /// 09-30 p1 — 주인 ← 훅 bash D ← 껍데기 ← 실행기 T, D 이상은 스냅숏.
+    /// 09-30 p1 — owner ← hook bash D ← wrapper shell ← runner T; D and everything above it is the snapshot.
     pub(super) fn p1_chain() -> World {
         let mut w = World::hosted(29284, 36360, 35724);
         w.add(26208, 35724, -182, Some(330), BIN_BASH, launcher(WIKI))
@@ -2851,14 +2851,14 @@ mod tests {
         w
     }
 
-    /// p1 에 같은 훅 bash 의 사본 주인 38200 을 하나 더 — 한 차례에 `Cleanup` 이 둘이다(잰 모양은 아니다).
+    /// Add to p1 one more owner 38200, a copy of the same hook bash — two `Cleanup` in one round (not a measured shape).
     pub(super) fn p1_two_owners() -> World {
         let mut w = p1();
         w.add(38200, 36088, 310, None, USR_BASH, script(WIKI));
         w
     }
 
-    /// 09-30 p3t3 — 주인 ← D fork(탄생) ← 훅 bash ← 껍데기 ← 실행기.
+    /// 09-30 p3t3 — owner ← D fork (birth) ← hook bash ← wrapper shell ← runner.
     pub(super) fn p3t3() -> World {
         let mut w = World::hosted(37152, 34960, 40848);
         w.add(33144, 40848, -173, Some(540), BIN_BASH, launcher(WIKI))
@@ -2873,7 +2873,7 @@ mod tests {
         w
     }
 
-    /// pilot p1bg — 주인 ← D 훅 bash(탄생) ← 껍데기 ← 실행기.
+    /// pilot p1bg — owner ← D hook bash (birth) ← wrapper shell ← runner.
     pub(super) fn pilot() -> World {
         let mut w = World::hosted(19888, 28960, 5212);
         w.add(25096, 5212, -96, Some(392), BIN_BASH, launcher(WIKI))
@@ -2887,9 +2887,9 @@ mod tests {
         w
     }
 
-    /// 09-30 p3bg — 실행기 · 껍데기 · 주인이 모두 탄생이고, 주인은 껍데기가 exec 한 스크립트(명령줄이 껍데기와
-    /// 다르다)이며 판 때 산 fork 24776 을 거느린다. 같은 판의 끊기 뒤 탄생(taskkill · 그 conhost · Bash 도구 반복의
-    /// `sleep` · 다른 훅의 `cat`) 가운데 판 때 산 것을 함께 싣는다.
+    /// 09-30 p3bg — the runner · wrapper shell · owner are all births, and the owner is a script exec'd by the wrapper shell (its command line differs from the wrapper shell's)
+    /// and parents fork 24776, which was alive at pass time. Of the births after the interrupt in the same pass (taskkill · its conhost · the `sleep` of the Bash tool loop ·
+    /// `cat` of another hook), the ones alive at pass time are included.
     pub(super) fn p3bg() -> World {
         let mut w = World::hosted(37152, 34960, 40848);
         w.add(35688, 40848, 74, Some(1722), BIN_BASH, launcher(HANDOFF))
@@ -2930,8 +2930,8 @@ mod tests {
         w
     }
 
-    /// p3bg 의 fork 24776 아래로 fork 가 둘 더 이어진다(24776 → 24800 → 24810) — 차례마다 하나씩 후보가 되어 네 차례가
-    /// 필요하다(잰 모양은 아니다).
+    /// Two more forks follow below p3bg's fork 24776 (24776 → 24800 → 24810) — one becomes a candidate per round, so four rounds are
+    /// needed (not a measured shape).
     pub(super) fn p3bg_deeper() -> World {
         let mut w = p3bg();
         w.add(24800, 24776, 2800, None, USR_BASH, script(HANDOFF))
@@ -2999,7 +2999,7 @@ mod tests {
         assert_eq!(w.judge(30144, &[]), Verdict::NotHookCopy, "훅이 띄운 cat");
     }
 
-    // ── taskkill 표지 ─────────────────────────────────────────────────────────────
+    // ── taskkill markers ─────────────────────────────────────────────────────────────
 
     #[test]
     fn no_taskkill_birth_is_no_taskkill() {
@@ -3023,24 +3023,24 @@ mod tests {
 
     #[test]
     fn taskkill_older_than_the_top_is_no_taskkill() {
-        // 번호 재사용 흉내 — 옛 꼭대기를 가리키던 taskkill 이 같은 번호의 새 T 보다 먼저 태어났다.
+        // Imitating number reuse — a taskkill that pointed at the old top was born before the new T of the same number.
         let mut w = p3bg();
         w.proc_mut(12180, 125).facts.create = (T0 + 60 * TICKS_PER_MS) as u64;
         w.proc_mut(32648, 1671).facts.create = (T0 + 70 * TICKS_PER_MS) as u64;
         assert_eq!(w.judge(32228, &[]), Verdict::NoTaskkill);
     }
 
-    // ── 사슬 ──────────────────────────────────────────────────────────────────────
+    // ── Chain ──────────────────────────────────────────────────────────────────────
 
     #[test]
     fn reused_number_younger_than_the_child_is_not_its_parent() {
-        // D fork 26732 의 알림을 놓쳤고 그 번호를 주인보다 늦게 태어난 프로세스가 재사용했다.
+        // The notification for D fork 26732 was missed and its number was reused by a process born later than the owner.
         let mut w = p3t3();
         w.lose(26732, 282)
             .add(26732, 27108, 600, Some(900), USR_BASH, script(WIKI));
         assert_eq!(w.judge(23604, &[]), Verdict::ParentUnknown);
 
-        // 가운데 고리(껍데기 25028)의 번호가 재사용된 경우 — 2 차례의 fork 에서 사슬이 끊긴다.
+        // When the number of the middle link (wrapper shell 25028) is reused — the chain breaks at the fork of round 2.
         let mut w = p3bg();
         w.lose(25028, 871)
             .add(25028, 40848, 2000, Some(2500), USR_BASH, shell(HANDOFF));
@@ -3056,8 +3056,8 @@ mod tests {
         assert!(w.round(&[32228]).is_empty());
     }
 
-    /// p1 의 Bash 도구 백그라운드 반복 — 실행기 37280 · 반복하는 껍데기 36052(둘 다 스냅숏 · 산다) · 반복마다의 fork
-    /// 35732 · 그 `sleep` 9408. 35740 은 같은 fork 의 서브셸(사본)을 지어 넣은 것이다.
+    /// p1's Bash tool background loop — runner 37280 · looping wrapper shell 36052 (both snapshot · alive) · the per-iteration fork
+    /// 35732 · its `sleep` 9408. 35740 is a subshell (copy) of the same fork, added artificially.
     fn bash_tool_loop() -> World {
         let usr = r"C:\Program Files\Git\bin\..\usr\bin\bash.exe";
         let mut w = World::hosted(29284, 36360, 35724);
@@ -3107,7 +3107,7 @@ mod tests {
         assert_eq!(w.judge(900, &[]), Verdict::ChainCut);
     }
 
-    /// claude ← 실행기 100 ← 101 ← … ← `100 + n − 1`(D) ← 후보 200 — 조상 `n` 개 · 모두 끝남 · taskkill 있음.
+    /// claude ← runner 100 ← 101 ← … ← `100 + n − 1`(D) ← candidate 200 — `n` ancestors · all exited · taskkill present.
     fn tower(n: u32) -> World {
         let mut w = World::hosted(1, 2, 3);
         w.add(100, 3, 10, Some(1000), BIN_BASH, launcher(WIKI));
@@ -3136,7 +3136,7 @@ mod tests {
 
     #[test]
     fn parent_in_claudes_seat_is_k_equals_one() {
-        // claude 가 끝났다고 치고 그 사본을 후보로 — D 가 곧 뿌리의 자식이라 꼭대기가 없다.
+        // Treat claude as exited and make its copy the candidate — D is itself a child of the root, so there is no top.
         let mut w = World::hosted(1, 2, 3);
         w.set_exit(3, -59_900, Some(1000))
             .add(200, 3, 500, None, CLAUDE, CLAUDE_CMD);
@@ -3151,7 +3151,7 @@ mod tests {
         assert_eq!(w.judge(200, &[]), Verdict::ChainCut);
     }
 
-    /// 뿌리와 claude 사이에 런처가 낀 모양 — 뿌리 1 ← 런처 4 ← claude 3 ← 훅 사슬.
+    /// A launcher sits between the root and claude — root 1 ← launcher 4 ← claude 3 ← hook chain.
     fn behind_a_launcher() -> World {
         let mut w = World::new(1);
         w.add(1, 26792, -60_000, None, CMD, ROOT_CMD)
@@ -3174,7 +3174,7 @@ mod tests {
 
     #[test]
     fn launcher_between_root_and_claude_is_missed() {
-        // 걷기가 claude 를 조상으로 만난다 — 살아 있으면 거기서, 끝났다면 꼭대기가 claude.exe 라 놓친다.
+        // The walk meets claude as an ancestor — if alive, it stops there; if exited, the top is claude.exe so it is missed.
         assert_eq!(
             behind_a_launcher().judge(200, &[]),
             Verdict::AncestorAlive { pid: 3 }
@@ -3184,7 +3184,7 @@ mod tests {
         assert_eq!(w.judge(200, &[]), Verdict::NotHook);
     }
 
-    // ── 모름 ──────────────────────────────────────────────────────────────────────
+    // ── Unknown ──────────────────────────────────────────────────────────────────
 
     #[test]
     fn liveness_errors_and_empty_fields_are_unknown() {
@@ -3228,7 +3228,7 @@ mod tests {
         assert_eq!(w.judge(38108, &[]), Verdict::ParentUnknown);
     }
 
-    // ── 부모 찾기 ─────────────────────────────────────────────────────────────────
+    // ── Finding the parent ─────────────────────────────────────────────────────────
 
     fn never(_: &Link<'_>) -> io::Result<bool> {
         Err(io::Error::new(io::ErrorKind::Other, "부르지 않는다"))
@@ -3275,7 +3275,7 @@ mod tests {
         assert_eq!(parent_of(&view, 20, &child).map(|l| l.seq), Some(None));
     }
 
-    // ── 후보 ──────────────────────────────────────────────────────────────────────
+    // ── Candidates ─────────────────────────────────────────────────────────────────
 
     #[test]
     fn candidates_are_new_killable_live_births_in_seq_order() {
@@ -3324,7 +3324,7 @@ mod tests {
         assert_eq!(picked, vec![(61, Some(1)), (60, Some(3)), (50, Some(8))]);
     }
 
-    // ── 표지 ──────────────────────────────────────────────────────────────────────
+    // ── Markers ────────────────────────────────────────────────────────────────────
 
     fn cmd(cmdline: &str) -> ProcessFacts {
         facts(3, 1, BIN_BASH, cmdline)
@@ -3426,11 +3426,11 @@ mod birth_tests {
 
     use tracing::Level;
 
-    /// 시험이 듣는 스레드를 기다리는 한도 — 넘으면 매달린 것이다.
+    /// How long the test waits for the listener thread — over that, it is hung.
     const PATIENCE: Duration = Duration::from_secs(10);
     const ROOT: u32 = 7;
 
-    // ── 가짜 ──────────────────────────────────────────────────────────────────────────
+    // ── Fakes ──────────────────────────────────────────────────────────────────────────
 
     fn facts(ppid: u32, create: u64) -> ProcessFacts {
         ProcessFacts {
@@ -3481,7 +3481,7 @@ mod birth_tests {
         Fail,
     }
 
-    /// 시험이 알림을 하나씩 먹이는 포트 — 꺼내기에 들어올 때마다 그때 Job 의 강한 수를 시험에 알린다.
+    /// A port the test feeds notifications to one at a time — each time it enters take-out, it tells the test the Job's strong count at that moment.
     struct FakePort {
         feed: Mutex<mpsc::Receiver<Feed>>,
         waiting: Sender<usize>,
@@ -3500,7 +3500,7 @@ mod birth_tests {
             match fed {
                 Ok(Feed::Event(event)) => Ok(event),
                 Ok(Feed::Fail) => Err(io::Error::other("꺼내기 실패 흉내")),
-                // 먹일 이가 없다 — 실물처럼 시간 초과로 돈다(헛돌지 않게 조금 쉰다).
+                // There is no one to feed — it loops on timeouts like the real one (resting a little so it does not spin).
                 Err(_) => {
                     thread::sleep(Duration::from_millis(10));
                     Ok(PortEvent::Timeout)
@@ -3522,7 +3522,7 @@ mod birth_tests {
         Panic,
     }
 
-    /// 실물 손잡이처럼 Job 을 약하게 쥐고 부르는 동안만 올린다. 부름 순서를 적는다.
+    /// Like the real handle, it holds the Job weakly and upgrades it only while called. Records the call order.
     struct FakeGroup {
         job: Weak<()>,
         retiring: Arc<AtomicBool>,
@@ -3604,10 +3604,10 @@ mod birth_tests {
         }
     }
 
-    // ── 판 ────────────────────────────────────────────────────────────────────────────
+    // ── Pass ────────────────────────────────────────────────────────────────────────────
 
-    /// 가짜 무리 · 포트 · 기록 · 포트 확보 한 벌. 듣는 스레드는 시험이 먹이는 알림 하나마다 한 차례를 돌고, 시험은 그
-    /// 스레드가 다음 꺼내기에 들어온 것을 보고 상태를 읽는다 — 둘이 겹쳐 돌지 않는다.
+    /// A set of fake group · port · record · port acquisition. The listener thread runs one round per notification the test feeds, and the test reads the state after seeing that
+    /// thread enter the next take-out — the two never run overlapped.
     struct Rig {
         job: Option<Arc<()>>,
         group: Arc<FakeGroup>,
@@ -3665,7 +3665,7 @@ mod birth_tests {
             }
         }
 
-        /// 듣는 스레드를 시험의 스레드로 띄운다 — 그 스레드의 로그를 모으고, 몸통이 끝나면 알린다.
+        /// Start the listener thread as the test's thread — collect that thread's logs, and signal when the body ends.
         fn spawner(&self) -> impl FnOnce(Box<dyn FnOnce() + Send>) -> io::Result<()> {
             let calls = Arc::clone(&self.group.calls);
             let lines = Arc::clone(&self.lines);
@@ -3691,7 +3691,7 @@ mod birth_tests {
             }
         }
 
-        /// 포트 확보 — 이 스레드의 로그도 모은다.
+        /// Port acquisition — also collects this thread's logs.
         fn ensure(
             &self,
             spawn: impl FnOnce(Box<dyn FnOnce() + Send>) -> io::Result<()>,
@@ -3702,32 +3702,32 @@ mod birth_tests {
             })
         }
 
-        /// 확보하고 듣는 스레드가 첫 꺼내기에 들어올 때까지.
+        /// Until it has acquired and the listener thread enters its first take-out.
         fn listening(&self) {
             assert_eq!(self.ensure(self.spawner()), Ok(()));
             self.wait_next();
         }
 
-        /// 듣는 스레드가 꺼내기에 들어올 때까지 — 앞 알림의 처리는 다 끝났다. 그때 Job 의 강한 수를 준다.
+        /// Until the listener thread enters take-out — the handling of the previous notification is all done. Then give the Job's strong count.
         fn wait_next(&self) -> usize {
             self.waits
                 .recv_timeout(PATIENCE)
                 .expect("듣는 스레드가 꺼내기로 돌아오지 않았다")
         }
 
-        /// 알림 하나를 먹이고 그 처리가 끝나기를 기다린다.
+        /// Feed one notification and wait for its handling to finish.
         fn feed(&self, event: PortEvent) -> usize {
             self.feed.send(Feed::Event(event)).expect("먹이기");
             self.wait_next()
         }
 
-        /// 꺼내기 오류 하나를 먹이고, 스레드가 끝나지 않고 다음 꺼내기에 들어오기를 기다린다.
+        /// Feed one take-out error, and wait for the thread to enter the next take-out without ending.
         fn fail_take(&self) {
             self.feed.send(Feed::Fail).expect("먹이기");
             self.wait_next();
         }
 
-        /// 먹이고 듣는 스레드가 끝나기를 기다린다.
+        /// Feed and wait for the listener thread to end.
         fn feed_last(&self, feed: Feed) {
             self.feed.send(feed).expect("먹이기");
             self.ended();
@@ -3762,7 +3762,7 @@ mod birth_tests {
                 .collect()
         }
 
-        /// 통로가 Job 을 놓는다 — 무리가 사라진다.
+        /// The path releases the Job — the group disappears.
         fn vanish(&mut self) {
             self.job = None;
         }
@@ -3783,16 +3783,16 @@ mod birth_tests {
 
     impl Drop for Rig {
         fn drop(&mut self) {
-            // 아직 도는 듣는 스레드가 있으면 끝나게 한다 — 무리를 없애고 한 차례를 돌린다.
+            // If a listener thread is still running, make it end — remove the group and run one round.
             self.job = None;
             let _ = self.feed.send(Feed::Event(PortEvent::Timeout));
         }
     }
 
-    // ── 탄생 기록 ─────────────────────────────────────────────────────────────────────
+    // ── Birth record ─────────────────────────────────────────────────────────────────────
 
-    /// (번호, 생성)이 새로운 것만 한 번씩 `seq` 오름차순으로 들고, 같은 번호라도 생성이 다르면 따로 든다. 넣지 못한 것은
-    /// 돌려받아 자물쇠 밖에서 버린다.
+    /// Holds only those whose (number, creation) is new, once each, in ascending `seq` order; the same number with a different creation is held separately. What could not be put in is
+    /// handed back and dropped outside the lock.
     #[test]
     fn a_record_takes_each_pid_create_pair_once_in_seq_order() {
         let recorder = Arc::new(Recorder::new());
@@ -3825,8 +3825,8 @@ mod birth_tests {
         assert_eq!(probe.held_drops(), 0);
     }
 
-    /// 상한을 넘는 것은 넣지 않고 `full` 이 선다(처음 넘친 것만 `first`). 새 기록이 `full` 을 내리고 남은 기록을
-    /// 돌려주며, 받은 쪽이 버릴 때 — 자물쇠 밖에서 — 핸들이 닫힌다.
+    /// Those over the cap are not put in and `full` is raised (only the first overflow is `first`). A new record lowers `full` and hands back the remaining record,
+    /// and when the receiver drops it — outside the lock — the handles close.
     #[test]
     fn a_full_record_refuses_past_the_cap_and_a_new_record_clears_it() {
         let recorder = Arc::new(Recorder::new());
@@ -3859,7 +3859,7 @@ mod birth_tests {
         assert_eq!(probe.held_drops(), 0);
     }
 
-    /// 켜진 기록만 복사 · 끄기 · 넣기가 된다 — 꺼졌거나 다른 기록이 켜졌으면 빈 것을 주고 아무것도 안 바꾼다.
+    /// Only the record that is on can be copied · turned off · put into — if it is off or another record is on, give an empty one and change nothing.
     #[test]
     fn only_the_running_record_is_copied_stopped_or_admitted() {
         let recorder = Arc::new(Recorder::new());
@@ -3894,7 +3894,7 @@ mod birth_tests {
         assert_eq!(probe.held_drops(), 0);
     }
 
-    /// 기록 자물쇠가 독에 걸려도 켜기 · 넣기 · 복사 · 끄기가 돈다.
+    /// Turning on · putting in · copying · turning off work even if the record lock is poisoned.
     #[test]
     fn a_poisoned_record_lock_still_records() {
         let recorder = Arc::new(Recorder::new());
@@ -3915,10 +3915,10 @@ mod birth_tests {
         assert_eq!(recorder.active(), 0);
     }
 
-    // ── 듣는 스레드 ───────────────────────────────────────────────────────────────────
+    // ── Listener thread ──────────────────────────────────────────────────────────────────
 
-    /// 기록이 켜진 동안의 가입만 끝내기 권한으로 곧바로 붙들어 넣는다 — 꺼진 동안은 붙들지도 않고, 무리 밖 · 끝남 ·
-    /// 다른 알림은 버린다. 붙들기는 기록 자물쇠 밖이고, 꺼내기에 들어설 때 Job 을 강하게 쥐지 않는다.
+    /// Only joins while the record is on are held right away with kill access and put in — while it is off, it does not even hold; those outside the group · exited ·
+    /// other notifications are dropped. Holding is outside the record lock, and on entering take-out the Job is not held strongly.
     #[test]
     fn the_listener_pins_joined_members_with_the_kill_right_only_while_recording() {
         let rig = Rig::new();
@@ -3954,8 +3954,8 @@ mod birth_tests {
         assert_eq!(rig.probe.held_drops(), 0);
     }
 
-    /// 끝내기 권한이 거절되면 조회 권한만으로 다시 붙들어 고리로만 넣는다 — 후보는 못 되지만 사슬은 잇는다. 그마저
-    /// 못 붙들면 버린다.
+    /// If kill access is refused, hold again with query access only and put it in only as a link — it cannot be a candidate but it keeps the chain connected. If even that cannot be
+    /// held, drop it.
     #[test]
     fn a_member_refused_the_kill_right_is_kept_as_a_chain_link_only() {
         let rig = Rig::new();
@@ -4008,7 +4008,7 @@ mod birth_tests {
         assert_eq!(parent_of(&view, 30, &child).map(|l| l.pid), Some(20));
     }
 
-    /// 무리가 사라지면 켜진 기록을 끄고(놓은 뒤 버린다) 끝난다 — 무리가 없으니 떼지 않는다. 굳히지 않는다.
+    /// When the group disappears, turn off the record that was on (dropped after release) and end — there is no group, so no detach. Not latched.
     #[test]
     fn the_listener_releases_the_record_and_ends_once_the_group_is_gone() {
         let mut rig = Rig::new();
@@ -4034,7 +4034,7 @@ mod birth_tests {
         assert_eq!(rig.count(Level::WARN) + rig.count(Level::ERROR), 0);
     }
 
-    /// 물러나면 켜진 기록을 끄고, 아직 붙은 무리에서 포트를 뗀 **뒤에** 놓는다.
+    /// On retirement, turn off the record that was on, and release the port **after** detaching it from the group that is still attached.
     #[test]
     fn a_retiring_group_is_detached_before_the_port_is_let_go() {
         let rig = Rig::new();
@@ -4051,7 +4051,7 @@ mod birth_tests {
         assert!(!rig.recorder.port_failed());
     }
 
-    /// 꺼내기 오류 → 굳힘 · 켜진 기록 끔 · 뗌 → 끝. warn 한 번이고, 다음 에피소드의 확보는 굳은 칸을 보고 실패한다.
+    /// Take-out error → latch · turn off the record that was on · detach → end. One warn, and the next episode's acquisition sees the latched field and fails.
     #[test]
     fn a_failed_take_latches_the_port_stops_the_record_and_detaches() {
         let rig = Rig::new();
@@ -4074,8 +4074,8 @@ mod birth_tests {
         assert_eq!(ports, 1, "포트를 두 번 만들었다");
     }
 
-    /// 실패 모드에서 떼기마저 실패하면 끝나지 않고 꺼내 버리기만 한다(그 뒤 켠 기록에도 넣지 않는다) — 무리가 사라지면
-    /// 끝난다.
+    /// If even detaching fails in the failure mode, it does not end and only takes out and discards (it does not put into a record turned on later either) — it ends when the group
+    /// disappears.
     #[test]
     fn a_failed_detach_drains_without_recording_until_the_group_is_gone() {
         let mut rig = Rig::new();
@@ -4103,7 +4103,7 @@ mod birth_tests {
         assert_eq!(rig.count(Level::WARN), 1);
     }
 
-    /// 차례 몸통의 패닉도 꺼내기 오류처럼 굳히고 뗀 뒤 끝난다 — 패닉이라 error 로 남긴다.
+    /// A panic in the round body is also latched and detached like a take-out error, then ends — logged as error because it is a panic.
     #[test]
     fn a_panicking_round_latches_the_port_like_a_failed_take() {
         let rig = Rig::new();
@@ -4119,7 +4119,7 @@ mod birth_tests {
         assert_eq!(rig.count(Level::WARN), 0);
     }
 
-    /// 여는 이가 「붙었나」를 보내기 전에 사라지면(붙었을 수 있다) 스레드는 평소대로 돈다.
+    /// If the opener disappears before sending 「붙었나」 (did it attach) (it may have attached), the thread runs as usual.
     #[test]
     fn a_lost_attached_sender_keeps_the_listener_running() {
         let mut rig = Rig::new();
@@ -4146,10 +4146,10 @@ mod birth_tests {
         assert_eq!(rig.recorder.active(), 0);
     }
 
-    // ── 포트 확보 ─────────────────────────────────────────────────────────────────────
+    // ── Port acquisition ─────────────────────────────────────────────────────────────────
 
-    /// 포트 → 듣는 스레드 기동 → 붙이기 순서이고, 스레드는 「붙었다」를 받고서 꺼내기에 들어간다. 두 번째 확보는 결과만
-    /// 읽는다.
+    /// The order is port → start the listener thread → attach, and the thread enters take-out after receiving 「붙었다」 (attached). A second acquisition only
+    /// reads the result.
     #[test]
     fn the_port_comes_first_then_the_listener_then_the_attach() {
         let rig = Rig::new();
@@ -4163,8 +4163,8 @@ mod birth_tests {
         assert_eq!(rig.count(Level::WARN), 0);
     }
 
-    /// 듣는 스레드를 못 띄우면 붙이지 않고 굳는다 — 포트는 아무도 쥐지 않는다. 두 번째 확보도 실패하고 다시 만들지
-    /// 않는다.
+    /// If the listener thread cannot be started, it latches without attaching — nobody holds the port. A second acquisition also fails and does not create it
+    /// again.
     #[test]
     fn a_listener_that_fails_to_start_is_never_attached_and_latches() {
         let rig = Rig::new();
@@ -4177,7 +4177,7 @@ mod birth_tests {
         assert_eq!(rig.calls(), [Call::Port, Call::Spawn, Call::PortDrop]);
     }
 
-    /// 붙이기가 실패하면 굳고, 뜬 스레드는 「안 붙었다」를 받아 꺼내지도 떼지도 않고 끝난다.
+    /// If attaching fails, it latches, and the running thread receives 「안 붙었다」 (did not attach) and ends without taking out or detaching.
     #[test]
     fn a_failed_attach_latches_and_the_listener_ends_without_detaching() {
         let rig = Rig::new();
@@ -4194,7 +4194,7 @@ mod birth_tests {
         assert_eq!(rig.count(Level::WARN), 1);
     }
 
-    /// 무리가 이미 없거나 이 OS 에 무리가 없으면 그 에피소드만 실패한다 — 굳히지 않는다(OS 실패가 아니다).
+    /// If the group is already gone or this OS has no group, only that episode fails — not latched (it is not an OS failure).
     #[test]
     fn a_missing_group_fails_the_episode_without_latching() {
         for kind in [GROUP_GONE, io::ErrorKind::Unsupported] {
@@ -4207,10 +4207,10 @@ mod birth_tests {
         }
     }
 
-    // ── 실프로세스(Windows) ───────────────────────────────────────────────────────────
+    // ── Real processes (Windows) ───────────────────────────────────────────────────────────
 
-    /// 실물 손잡이 · 포트 · 스레드로 — 기록이 켜진 뒤 Job 안에서 태어난 ping 이 끝내기 권한으로 붙들려 사실과 함께
-    /// 들고, Job 이 사라지면 듣는 스레드가 켜진 기록을 끄고 끝난다. cmd · 그 콘솔 호스트 · ping 셋.
+    /// With the real handle · port · thread — a ping born inside the Job after the record is on is held with kill access and kept together with its facts,
+    /// and when the Job disappears the listener thread turns off the record that was on and ends. Three: cmd · its console host · ping.
     #[cfg(windows)]
     #[test]
     fn a_birth_in_the_job_is_recorded_with_its_facts_through_the_real_port() {
@@ -4253,8 +4253,8 @@ mod birth_tests {
 
         job.terminate(1).expect("Job 끝내기");
         let _ = x.wait();
-        // 기록은 Job 을 놓기 **전에** 켠다 — 듣는 스레드는 무리가 사라진 것을 본 때 켜져 있던 기록만 끈다. 놓은 뒤에
-        // 켜면 그 사이 깬 스레드는 켜진 기록 없이 끝날 수 있어, 뒤에 켠 기록을 끌 쪽이 없다.
+        // Turn the record on **before** releasing the Job — the listener thread turns off only the record that was on when it saw the group disappear. If it is turned on after releasing,
+        // a thread that woke in between may end without a record on, and nobody is left to turn off a record turned on later.
         let (after, _) = recorder.start();
         drop(job);
         wait_until("무리가 사라져 듣는 스레드가 끈 기록", || {
@@ -4267,7 +4267,7 @@ mod birth_tests {
 
 #[cfg(test)]
 mod test_support {
-    //! 탄생 기록 · 문 시험이 함께 쓰는 가짜 — 붙든 것 · 자물쇠 탐지 · 로그 잡기.
+    //! Fakes shared by the birth record · gate tests — what is held · lock detection · log capture.
 
     use super::*;
 
@@ -4277,24 +4277,24 @@ mod test_support {
 
     use tracing::Level;
 
-    /// [`FakePin`] 의 끝남 칸 값.
+    /// Value of the exit field of [`FakePin`].
     pub(super) const ALIVE: u8 = 0;
     pub(super) const EXITED: u8 = 1;
-    /// 끝남 조회가 `Err` 다.
+    /// The exit query is `Err`.
     pub(super) const FAILING: u8 = 2;
 
-    /// [`FakePin`] 의 끝내기 흉내.
+    /// [`FakePin`]'s imitation of kill.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub(super) enum Kill {
-        /// 끝내기 호출이 거절된다.
+        /// The kill call is refused.
         Refuse,
-        /// 받아들여지고 곧바로 끝난다.
+        /// Accepted and exits immediately.
         Exit,
-        /// 받아들여지지만 끝나지 않는다 — 확인 마감을 넘긴다.
+        /// Accepted but does not exit — it overruns the confirmation deadline.
         Linger,
     }
 
-    /// 붙든 것이 받은 부름 — [`Probe::calls`] 가 그때 두 자물쇠 가운데 하나라도 잡혀 있었나와 함께 적는다.
+    /// A call the held item received — [`Probe::calls`] records it together with whether either of the two locks was held at that time.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub(super) enum PinCall {
         Exited,
@@ -4305,9 +4305,9 @@ mod test_support {
 
     type Hook = Arc<dyn Fn() + Send + Sync>;
 
-    /// 붙든 것을 버릴 때 · 무리에게 물을 때 기록 자물쇠나 문 자물쇠가 잡혀 있었는지 센다. 시험은 다른 스레드와 겹쳐
-    /// 돌지 않게 순서를 맞추므로, 잡혀 있었다면 부른 스레드 자신이 쥔 것이다. 붙든 것의 부름을 적고, 끝남 조회에 시험의
-    /// 일을 끼우고, 기다림 · 끝내기가 쓰는 시간만큼 시험 시계를 민다.
+    /// Counts whether the record lock or the gate lock was held when dropping a held item · asking the group. Tests are ordered so they do not run overlapped with other threads,
+    /// so if one was held, it was held by the calling thread itself. Records the held item's calls, inserts the test's job into the exit query,
+    /// and advances the test clock by the time that waiting · killing uses.
     pub(super) struct Probe {
         recorder: Weak<Recorder>,
         gate: OnceLock<Box<dyn Fn() -> bool + Send + Sync>>,
@@ -4337,7 +4337,7 @@ mod test_support {
             })
         }
 
-        /// 기다림 · 끝내기가 쓴 시간을 시험 시계에 민다.
+        /// Advance the test clock by the time waiting · killing used.
         pub(super) fn drive(&self, advance: impl Fn(Duration) + Send + Sync + 'static) {
             let _ = self.clock.set(Box::new(advance));
         }
@@ -4346,24 +4346,24 @@ mod test_support {
             *self.terminate_cost.lock().unwrap() = d;
         }
 
-        /// `pid` 를 붙든 것의 끝남 조회마다 돌 일 — 자물쇠 안에서 불리면 돌리지 않고 센다(같은 자물쇠에 매달리지 않게).
+        /// A job to run at every exit query of the held item with `pid` — if called inside a lock, it is counted rather than run (so as not to hang on the same lock).
         pub(super) fn on_exited(&self, pid: u32, hook: impl Fn() + Send + Sync + 'static) {
             self.hooks.lock().unwrap().insert(pid, Arc::new(hook));
         }
 
-        /// 끼운 일이 쥔 문 · 정리기의 고리를 끊는다.
+        /// Cuts the cycle formed by the gate the inserted job holds · the cleaner.
         pub(super) fn clear_hooks(&self) {
             if let Ok(mut hooks) = self.hooks.lock() {
                 hooks.clear();
             }
         }
 
-        /// 붙든 것이 받은 부름 — (번호, 부름, 그때 자물쇠가 잡혀 있었나), 부른 순서대로.
+        /// Calls the held item received — (number, call, whether a lock was held then), in call order.
         pub(super) fn calls(&self) -> Vec<(u32, PinCall, bool)> {
             self.calls.lock().unwrap().clone()
         }
 
-        /// 산 것을 실제로 기다린 시간 — 부른 순서대로.
+        /// Time actually waited on live items — in call order.
         pub(super) fn waits(&self) -> Vec<Duration> {
             self.waits.lock().unwrap().clone()
         }
@@ -4387,7 +4387,7 @@ mod test_support {
             self.hooks.lock().unwrap().get(&pid).cloned()
         }
 
-        /// 문 자물쇠도 본다.
+        /// Also looks at the gate lock.
         pub(super) fn watch_gate<G: Group>(&self, cell: &Arc<GateCell<G>>) {
             let cell = Arc::downgrade(cell);
             let _ = self.gate.set(Box::new(move || {
@@ -4423,8 +4423,8 @@ mod test_support {
         }
     }
 
-    /// 붙든 프로세스 흉내 — 끝남은 칸이 정하고, 버릴 때 두 자물쇠가 잡혀 있었는지 적는다. 끝내기는 `kill` 이 정한다
-    /// (기본 = 거절). `pid` 는 부름 기록의 이름표일 뿐이다(기본 0).
+    /// Imitation of a held process — exit is decided by the field, and on drop it records whether the two locks were held. Kill is decided by `kill`
+    /// (default = refused). `pid` is only a label for the call record (default 0).
     pub(super) struct FakePin {
         facts: ProcessFacts,
         probe: Arc<Probe>,
@@ -4493,7 +4493,7 @@ mod test_support {
             &self.facts
         }
 
-        /// 정리가 고른 종료 코드가 아니면 실패로 답한다 — 끝냈다고 단언하는 시험이 빨개진다.
+        /// Answers with failure unless it is the exit code the cleanup chose — a test that asserts it was killed turns red.
         fn terminate_raw(&self, exit_code: u32) -> io::Result<()> {
             self.probe.note(self.pid, PinCall::Terminate);
             let cost = *self.probe.terminate_cost.lock().unwrap();
@@ -4511,7 +4511,7 @@ mod test_support {
             }
         }
 
-        /// 실물처럼 — 끝내기가 실패했어도 그 사이 끝났으면 `Gone`.
+        /// Like the real thing — even if the kill failed, `Gone` if it exited in the meantime.
         fn classify(&self, raw: io::Result<()>) -> io::Result<MemberKill> {
             self.probe.note(self.pid, PinCall::Classify);
             match raw {
@@ -4531,7 +4531,7 @@ mod test_support {
         }
     }
 
-    // ── 로그 잡기 ─────────────────────────────────────────────────────────────────────
+    // ── Log capture ──────────────────────────────────────────────────────────────────────
 
     pub(super) type Line = (Level, BTreeMap<String, String>);
 
@@ -4604,9 +4604,9 @@ mod gate_tests {
         }
     }
 
-    // ── 가짜 ──────────────────────────────────────────────────────────────────────────
+    // ── Fakes ──────────────────────────────────────────────────────────────────────────
 
-    /// 시험이 모는 시계 — 잠은 그만큼 시각을 밀고(적어 둔다), 기동은 몸통을 쌓아 둔다(돌릴지는 시험이 정한다).
+    /// A clock driven by the test — sleep advances time by that amount (and records it), start piles up the body (the test decides whether to run it).
     struct FakeClock {
         base: Instant,
         nanos: AtomicU64,
@@ -4635,7 +4635,7 @@ mod gate_tests {
             self.nanos.fetch_add(nanos, Ordering::SeqCst);
         }
 
-        /// 시험 시작에서 `d` 뒤의 단조 시각.
+        /// Monotonic time `d` after the start of the test.
         fn at(&self, d: Duration) -> Instant {
             self.base + d
         }
@@ -4699,10 +4699,10 @@ mod gate_tests {
         Panic,
     }
 
-    /// 문 시험의 무리 — 명단 · 붙들기 답을 시험이 정하고, 명단을 물을 때 시험의 일 하나를 끼워 돌린다(두 구간 사이 ·
-    /// 쓰기와 명단 사이의 사건을 흉내 낸다).
+    /// The group of the gate tests — the listing · hold answers are decided by the test, and one test job is inserted when the listing is asked (imitates events between the two sections ·
+    /// between write and listing).
     struct GateGroup {
-        /// `None` = 명단 실패.
+        /// `None` = listing failure.
         listing: Mutex<Option<Vec<u32>>>,
         answers: Mutex<HashMap<u32, Answer>>,
         exits: Mutex<HashMap<u32, Arc<AtomicU8>>>,
@@ -4731,7 +4731,7 @@ mod gate_tests {
         fn member_pids(&self) -> io::Result<Vec<u32>> {
             self.lists.fetch_add(1, Ordering::SeqCst);
             if self.probe.held() {
-                // 자물쇠를 쥔 채 불렸다 — 끼워 둔 일이 같은 자물쇠를 잡아 매달리지 않게 돌리지 않는다.
+                // Called while holding the lock — it is not run, so the inserted job does not hang by taking the same lock.
                 self.probe.held_calls.fetch_add(1, Ordering::SeqCst);
             } else {
                 let hook = self.hook.lock().unwrap().take();
@@ -4792,10 +4792,10 @@ mod gate_tests {
         }
     }
 
-    // ── 판 ────────────────────────────────────────────────────────────────────────────
+    // ── Pass ────────────────────────────────────────────────────────────────────────────
 
-    /// 뿌리(`cmd /c`) · 콘솔 호스트 · claude 셋이 든 무리와 그 문 — 문은 닫혀 있다. 듣는 스레드 · 일꾼 몸통은 시계에
-    /// 쌓일 뿐 시험이 돌리지 않으면 돌지 않는다(탄생은 시험이 기록에 직접 넣는다).
+    /// A group holding the root (`cmd /c`) · console host · claude, and its gate — the gate is closed. The listener thread · worker body only pile up on the clock
+    /// and do not run unless the test runs them (the test puts births directly into the record).
     struct GateRig {
         root: u32,
         clock: Arc<FakeClock>,
@@ -4811,7 +4811,7 @@ mod gate_tests {
         fn new() -> Self {
             Self::build(
                 ROOT,
-                // 정렬되지 않은 명단 — 쓰기 명단은 정렬해 둔다.
+                // An unsorted listing — the write list is sorted.
                 vec![CLAUDE, ROOT, CONHOST],
                 HashMap::from([
                     (ROOT, Answer::Ours(facts(1, 10))),
@@ -4878,14 +4878,14 @@ mod gate_tests {
             self.logged(|| self.cell.interrupt(LINE.to_vec()))
         }
 
-        /// 줄이 쓰인 것으로 친다 — 부를 것이 있으면 라이터처럼 아무 락 없이 부른다.
+        /// Treat the line as written — if there is something to call, call it with no lock, like the writer.
         fn write(&self, out: InterruptOut) {
             if let Some(on_written) = out.on_written {
                 self.logged(on_written);
             }
         }
 
-        /// 쓰기 확인을 받는 끊기 — 줄과 부를 것이 둘 다 있어야 한다.
+        /// An interrupt that receives write confirmation — both the line and the thing to call must be present.
         fn esc_with_check(&self) -> InterruptOut {
             let out = self.esc().expect("끊기 줄");
             assert_eq!(out.bytes, LINE);
@@ -4897,14 +4897,14 @@ mod gate_tests {
             self.logged(|| worker_turn(&self.cell, &self.cleaner))
         }
 
-        /// 쌓인 일꾼 몸통을 이 스레드에서 끝까지 돌린다.
+        /// Run the piled-up worker bodies to the end on this thread.
         fn run_workers(&self) {
             for body in self.clock.take(WORKER_THREAD) {
                 self.logged(body);
             }
         }
 
-        /// 다음 명단 조회(스냅숏 · 쓰기 명단) 때 한 번 돌 일.
+        /// A job to run once at the next listing query (snapshot · write list).
         fn on_list(&self, f: impl FnOnce() + Send + 'static) {
             *self.group.hook.lock().unwrap() = Some(Box::new(f));
         }
@@ -4963,13 +4963,13 @@ mod gate_tests {
                 .any(|(_, fields)| fields.get("message").is_some_and(|m| m.contains(text)))
         }
 
-        /// 이 기록에 탄생 하나를 넣는다 — 듣는 스레드가 붙들어 넣은 것처럼.
+        /// Put one birth into this record — as if the listener thread had held it and put it in.
         fn admit(&self, rec: u64, pid: u32, facts: ProcessFacts, exit: u8) {
             admit_into(&self.recorder, &self.probe, rec, pid, facts, exit);
         }
 
-        /// 세계 `w` 를 판 직전까지 싣는다 — 끊기 · 쓰임 · 탄생(`births` 순서가 `seq` · 끝내기 흉내는 `kills`, 그 밖은
-        /// [`Kill::Exit`]) · 판 때의 끝남을 싣고 N 을 민다. 끝남 칸은 번호마다 하나다([`GateGroup::exit_of`]).
+        /// Load world `w` up to just before the pass — interrupt · write · births (the order of `births` is `seq` · the imitation of kill is `kills`, others are
+        /// [`Kill::Exit`]) · load the exits at pass time and advance N. The exit field is one per number ([`GateGroup::exit_of`]).
         fn staged(w: &Staged, kills: &[(u32, Kill)]) -> Self {
             let answers = w
                 .members
@@ -5007,7 +5007,7 @@ mod gate_tests {
             rig
         }
 
-        /// 일꾼이 돌 판 한 번 — 판이 서야 한다.
+        /// One pass for the worker to run — the pass must hold.
         fn pass(&self) -> PassReport {
             let step = {
                 let mut state = self.cell.lock();
@@ -5019,8 +5019,8 @@ mod gate_tests {
             self.logged(|| run_pass(&self.cell, &self.cleaner, ticket))
         }
 
-        /// 뿌리 끝남 조회의 `nth` 번째에 한 번 돌 일 — 1 = 판의 순서 3 · 2 = 첫 끝내기 앞 재확인 · 3 = 둘째 끝내기 앞.
-        /// 고르기와 확정 사이의 사건을 흉내 낸다.
+        /// A job to run once at the `nth` root exit query — 1 = pass step 3 · 2 = recheck before the first kill · 3 = before the second kill.
+        /// Imitates events between selection and commit.
         fn on_root_check(&self, nth: usize, f: impl Fn() + Send + Sync + 'static) {
             let seen = AtomicUsize::new(0);
             self.probe.on_exited(self.root, move || {
@@ -5030,7 +5030,7 @@ mod gate_tests {
             });
         }
 
-        /// 끝내기 호출을 받은 번호 — 부른 순서대로.
+        /// Numbers that received a kill call — in call order.
         fn terminates(&self) -> Vec<u32> {
             self.probe
                 .calls()
@@ -5040,8 +5040,8 @@ mod gate_tests {
                 .collect()
         }
 
-        /// 끝내기 호출은 모두 문 자물쇠 안이고 한 구간에 하나다 — 두 끝내기 사이에는 늘 자물쇠 밖의 부름(가르기 ·
-        /// 재확인)이 있다. 그 밖의 부름 · 핸들 닫기 · 무리 조회는 자물쇠 안에 없다.
+        /// Every kill call is inside the gate lock and one per section — between two kills there is always a call outside the lock (deciding ·
+        /// recheck). Other calls · handle closing · group queries are not inside the lock.
         fn assert_lock_sections(&self) {
             let mut outside_since_last = true;
             for (pid, call, held) in self.probe.calls() {
@@ -5057,7 +5057,7 @@ mod gate_tests {
             self.check();
         }
 
-        /// `reason` 칸이 그 값인 줄 — 레벨과 칸.
+        /// A line whose `reason` field is that value — level and field.
         fn line_with_reason(&self, reason: &str) -> Option<Line> {
             self.lines
                 .lock()
@@ -5067,7 +5067,7 @@ mod gate_tests {
                 .cloned()
         }
 
-        /// 정리함 줄(`terminated` 칸이 있는 warn).
+        /// A cleaned line (a warn with the `terminated` field).
         fn cleaned_line(&self) -> Option<BTreeMap<String, String>> {
             self.lines
                 .lock()
@@ -5077,7 +5077,7 @@ mod gate_tests {
                 .map(|(_, fields)| fields.clone())
         }
 
-        /// 자물쇠 밖에서 보이는 모든 순간의 불변식(TRD §3-2) + 자물쇠 안에서 버리지도 · 묻지도 않았다.
+        /// The invariants of every moment visible outside the lock (TRD §3-2) + nothing was dropped or asked inside the lock.
         fn check(&self) {
             let active = self.recorder.active();
             self.state(|st| {
@@ -5117,7 +5117,7 @@ mod gate_tests {
 
     impl Drop for GateRig {
         fn drop(&mut self) {
-            // 끼워 둔 일 · 쌓인 몸통이 문을 쥐어 생긴 고리를 끊는다.
+            // Cuts the cycle formed by the inserted job · piled-up body holding the gate.
             if let Ok(mut hook) = self.group.hook.lock() {
                 hook.take();
             }
@@ -5128,7 +5128,7 @@ mod gate_tests {
         }
     }
 
-    /// 기록 `rec` 에 탄생 하나를 넣는다 — 듣는 스레드가 붙들어 넣은 것처럼.
+    /// Put one birth into record `rec` — as if the listener thread had held it and put it in.
     fn admit_into(
         recorder: &Recorder,
         probe: &Arc<Probe>,
@@ -5155,7 +5155,7 @@ mod gate_tests {
         }
     }
 
-    /// 쓰인 `Waiting` 에피소드 — 순수 전이 시험용.
+    /// A written `Waiting` episode — for pure transition tests.
     fn written_episode(gen: u64, at: Instant, rec: u64) -> Episode {
         Episode {
             gen,
@@ -5170,9 +5170,9 @@ mod gate_tests {
         }
     }
 
-    // ── 두 구간 · 여는 이 ─────────────────────────────────────────────────────────────
+    // ── Two sections · opener ─────────────────────────────────────────────────────────────
 
-    /// 정리기가 없으면 문만 본다 — 닫히면 줄 없음 · 열리면 쓰기 확인 없는 줄.
+    /// Without a cleaner it only looks at the gate — if closed, no line · if open, a line without write confirmation.
     #[test]
     fn without_a_cleaner_the_gate_only_answers_open_or_closed() {
         let cell = GateCell::<GateGroup>::new(None);
@@ -5189,7 +5189,7 @@ mod gate_tests {
         assert!(cell.lock().episode.is_none());
     }
 
-    /// 닫힌 문은 줄을 주지 않고 아무것도 켜지 · 묻지 않는다.
+    /// A closed gate gives no line and turns on or asks nothing.
     #[test]
     fn a_closed_gate_gives_no_line_and_touches_nothing() {
         let rig = GateRig::new();
@@ -5201,8 +5201,8 @@ mod gate_tests {
         rig.check();
     }
 
-    /// 첫 끊기가 여는 이 — 포트 확보 → 기록 켬 → 스냅숏(그때 기록이 이미 켜져 있다) → 쓰이지 않은 `Waiting`
-    /// 에피소드. 스냅숏은 뿌리가 처음인 붙든 멤버 셋이다.
+    /// The first interrupt is the opener — port acquisition → record on → snapshot (the record is already on then) → an unwritten `Waiting`
+    /// episode. The snapshot is the set of three held members with the root first.
     #[test]
     fn the_first_interrupt_records_before_the_snapshot_and_opens_a_waiting_episode() {
         let rig = GateRig::new();
@@ -5250,8 +5250,8 @@ mod gate_tests {
         rig.check();
     }
 
-    /// 산 에피소드의 뒤 끊기는 이어 적는다 — 같은 세대로 쓰기 확인을 받고, 명단 · 기록 켬 · 포트가 다시 없다. 도는
-    /// 판(`Cleaning`)은 `Waiting` 으로 돌아가고 가장 최근 끊기가 당겨진다.
+    /// A later interrupt of a live episode appends — write confirmation is received with the same generation, and the listing · record on · port are not made again. A running
+    /// pass (`Cleaning`) returns to `Waiting` and the most recent interrupt is pulled forward.
     #[test]
     fn a_later_interrupt_continues_the_live_episode_without_listing_or_recording() {
         let rig = GateRig::new();
@@ -5276,7 +5276,7 @@ mod gate_tests {
         rig.check();
     }
 
-    /// 두 구간 사이에 턴이 닫히면 줄이 없다 — 기록을 끄고 찍은 스냅숏을 자물쇠 밖에서 버리고 `opening` 을 내린다.
+    /// If the turn closes between the two sections, there is no line — turn off the record, drop the snapshot taken outside the lock, and lower `opening`.
     #[test]
     fn a_turn_end_between_the_sections_gives_no_line() {
         let rig = GateRig::new();
@@ -5287,7 +5287,7 @@ mod gate_tests {
         assert!(!rig.has_episode());
         assert_eq!(rig.recorder.active(), 0);
         assert_eq!(rig.probe.drops(), 3);
-        // 턴이 닫혔다 다시 열려도(그 사이 세대가 바뀌었다) 줄은 없다.
+        // Even if the turn closes and reopens (the generation changed meanwhile), there is no line.
         let cell = Arc::clone(&rig.cell);
         rig.open();
         rig.on_list(move || {
@@ -5300,8 +5300,8 @@ mod gate_tests {
         rig.check();
     }
 
-    /// 두 구간 사이에 새 입력이 닿거나 켠 기록이 꺼지면(듣는 스레드의 끝) 에피소드 없이 줄만 준다 — 기록 끔 · 스냅숏
-    /// 버림은 자물쇠 밖.
+    /// If new input arrives between the two sections or the record turned on is turned off (the listener thread ended), only the line is given without an episode — turning off the record · dropping the snapshot
+    /// are outside the lock.
     #[test]
     fn new_input_or_a_lost_record_between_the_sections_gives_the_line_only() {
         for (lost, reason) in [(0, "delivered"), (1, "record")] {
@@ -5328,8 +5328,8 @@ mod gate_tests {
         }
     }
 
-    /// 두 Esc 가 엇갈리면 둘째는 여는 이를 보고 줄만 받는다(기록 · 명단 · 포트 0). 여는 이의 ② 뒤 셋째 Esc 는 이어
-    /// 적는다.
+    /// If two Esc interleave, the second sees the opener and receives only a line (record · listing · port 0). The third Esc after the opener's ② appends
+    /// to the live episode.
     #[test]
     fn a_second_escape_while_opening_gets_the_line_only() {
         let rig = GateRig::new();
@@ -5354,8 +5354,8 @@ mod gate_tests {
         rig.check();
     }
 
-    /// 여는 이 가드 — 스냅숏 도중 패닉해도 `opening` 을 내리고 놓은 뒤 기록을 끄며, 찍다 만 스냅숏도 자물쇠 밖에서
-    /// 버린다. 그 뒤의 끊기가 다시 연다.
+    /// Opener guard — even if it panics during the snapshot, it lowers `opening` and turns off the record after releasing, and also drops a half-taken snapshot outside the lock.
+    /// The next interrupt opens again.
     #[test]
     fn the_opener_guard_cleans_up_after_a_panic() {
         let rig = GateRig::new();
@@ -5374,8 +5374,8 @@ mod gate_tests {
         rig.check();
     }
 
-    /// 구간 ② 에 산 에피소드가 있으면(여는 이가 하나라 닿지 않는 갈래) 줄만 주고 그 에피소드를 그대로 둔다. 세대가
-    /// 바뀌었어도 줄만이다.
+    /// If there is a live episode in section ② (a branch not reached because there is one opener), only the line is given and that episode is left as it is. Even if the generation
+    /// changed, it is line only.
     #[test]
     fn the_second_section_never_replaces_a_live_episode_or_a_newer_generation() {
         let t = Instant::now();
@@ -5414,10 +5414,10 @@ mod gate_tests {
         assert!(st.episode.is_none());
     }
 
-    // ── 스냅숏 ────────────────────────────────────────────────────────────────────────
+    // ── Snapshot ────────────────────────────────────────────────────────────────────────
 
-    /// 스냅숏이 서지 않으면 그 사유로 에피소드가 열린다(기록은 켜진다) — 명단 실패 · 뿌리 없음 · 뿌리 못 붙듦 · 상한
-    /// 넘음(붙들지 않는다) · 뿌리 자식 셋 · 포트 없음(명단을 묻지도 않는다) · 포트 굳음. 붙든 것은 자물쇠 밖에서 버린다.
+    /// If the snapshot is not set up, the episode opens with that reason (the record is turned on) — listing failure · no root · root not held · cap
+    /// exceeded (nothing is held) · three root children · no port (the listing is not even asked) · port latched. What was held is dropped outside the lock.
     #[test]
     fn a_snapshot_that_cannot_stand_fails_with_its_cause() {
         type Setup = fn(&GateRig);
@@ -5492,7 +5492,7 @@ mod gate_tests {
         }
     }
 
-    /// 뿌리 밖 멤버를 못 붙들면(거절) 그 멤버만 빠지고 스냅숏은 선다.
+    /// If a non-root member cannot be held (refused), only that member is left out and the snapshot is set up.
     #[test]
     fn an_unpinnable_member_is_left_out_of_the_snapshot() {
         let rig = GateRig::new();
@@ -5503,10 +5503,10 @@ mod gate_tests {
         rig.check();
     }
 
-    // ── 쓰기 확인 · 쓰기 명단 W ───────────────────────────────────────────────────────
+    // ── Write confirmation · write list W ───────────────────────────────────────────────────────
 
-    /// 첫 쓰임 — 명단을 자물쇠 밖에서 한 번 찍어 정렬해 두고, 가장 최근 끊기를 쓰인 때로 당기고, 일꾼을 띄운다. 뒤
-    /// 끊기의 쓰임은 시각만 당기고 그 명단은 돌려받아 버린다(일꾼은 더 띄우지 않는다).
+    /// First write — take the list once outside the lock and sort it, pull the most recent interrupt to the write time, and start the worker. A later
+    /// interrupt's write only pulls the time, and its list is handed back and dropped (no more workers are started).
     #[test]
     fn the_first_write_takes_the_write_list_and_asks_for_one_worker() {
         let rig = GateRig::new();
@@ -5538,7 +5538,7 @@ mod gate_tests {
         rig.check();
     }
 
-    /// 뒤 쓰임의 명단은 상태에 들지 않고 돌려받는다 — 받은 쪽이 자물쇠 밖에서 버린다.
+    /// A later write's list does not enter the state and is handed back — the receiver drops it outside the lock.
     #[test]
     fn a_later_write_hands_its_list_back() {
         let t = Instant::now();
@@ -5563,8 +5563,8 @@ mod gate_tests {
         assert_eq!(st.episode.as_ref().map(|ep| ep.last_mono), Some(t + ms(10)));
     }
 
-    /// 쓰기 명단을 못 찍거나(명단 실패) 무리가 없으면(빈 명단) 쓰임으로 세지 않는다 — 일꾼도 판도 없다. warn 은
-    /// 화신마다 한 번. 같은 에피소드의 뒤 쓰임이 명단을 얻으면 그때부터 쓰인 것이다(후보는 그 명단 뒤의 탄생뿐).
+    /// If the write list cannot be taken (list failure) or the group is gone (empty list), it does not count as written — no worker and no pass. warn is
+    /// once per incarnation. If a later write of the same episode gets the list, it counts as written from then (candidates are only the births after that list).
     #[test]
     fn an_unlisted_write_never_counts_as_written() {
         let rig = GateRig::new();
@@ -5593,7 +5593,7 @@ mod gate_tests {
         rig.check();
     }
 
-    /// 끝난 에피소드 · 갈아 끼운 세대의 쓰임은 버린다 — 새 에피소드를 쓰인 것으로 만들지 않는다.
+    /// A write of an ended episode · a swapped-out generation is dropped — it does not turn a new episode into a written one.
     #[test]
     fn a_write_for_another_episode_is_dropped() {
         let rig = GateRig::new();
@@ -5617,13 +5617,13 @@ mod gate_tests {
         rig.check();
     }
 
-    /// 후보는 쓰기 명단 W 뒤에 가입한 탄생뿐이다 — 알림이 언제 쌓였는지에 기대지 않는다.
+    /// Candidates are only the births that joined after the write list W — it does not depend on when notifications piled up.
     ///
-    /// - X: 쓰기 전에 가입해 산다 → W 에 든다(포트가 그 가입을 W 뒤에 늦게 내줘도) → 후보 아님.
-    /// - Z: 쓰기와 W 사이에 가입 → W 에 든다 → 빠짐(놓침 창).
-    /// - P′: W 에 있던 번호를 쓰인 뒤 탄생이 재사용 → 번호로만 비교해 빠짐(놓침).
-    /// - Q: 쓰기 전에 가입해 W 전에 끝났다 → W 밖이지만 끝나 고리 전용.
-    /// - Y: W 뒤 가입 → 후보.
+    /// - X: joined before the write and alive → in W (even if the port delivers that join late, after W) → not a candidate.
+    /// - Z: joined between the write and W → in W → left out (miss window).
+    /// - P′: a birth after the write reuses a number that was in W → compared by number only, so left out (miss).
+    /// - Q: joined before the write and exited before W → outside W but exited, so link only.
+    /// - Y: joined after W → candidate.
     #[test]
     fn only_births_after_the_write_list_are_candidates() {
         const X: u32 = 200;
@@ -5642,7 +5642,7 @@ mod gate_tests {
             Arc::clone(&rig.recorder),
             Arc::clone(&rig.probe),
         );
-        // Z 는 줄이 쓰인 뒤 · 명단이 찍히기 전에 태어나 곧바로 기록된다.
+        // Z is born after the line was written · before the list is taken, and is recorded right away.
         rig.on_list(move || {
             if let Some(listing) = group.listing.lock().unwrap().as_mut() {
                 listing.push(Z);
@@ -5689,10 +5689,10 @@ mod gate_tests {
         rig.check();
     }
 
-    // ── 일꾼 · 판 끝 ──────────────────────────────────────────────────────────────────
+    // ── Worker · pass end ──────────────────────────────────────────────────────────────────
 
-    /// 일꾼은 가장 최근 쓰임 + N 까지 자고 판을 한 번 돈다 — 판 끝이 `Done` 으로 매듭짓고 스냅숏 · 기록을 자물쇠
-    /// 밖에서 놓은 뒤 일꾼이 끝난다.
+    /// The worker sleeps until the most recent write + N and runs one pass — the pass end closes it out as `Done`, and after the snapshot · record are released outside the lock
+    /// the worker ends.
     #[test]
     fn the_worker_sleeps_until_n_after_the_last_write_then_ends_the_pass_once() {
         let rig = GateRig::new();
@@ -5714,13 +5714,13 @@ mod gate_tests {
         assert_eq!(rig.probe.drops(), 3);
         rig.check();
 
-        // 끝난 에피소드 뒤의 끊기는 새 에피소드다.
+        // An interrupt after an ended episode is a new episode.
         rig.esc_with_check();
         rig.episode(|ep| assert_eq!((ep.gen, ep.phase), (1, Phase::Waiting)));
         rig.check();
     }
 
-    /// 뒤 끊기의 쓰임이 판을 미룬다 — N 은 가장 최근에 쓰인 끊기부터다.
+    /// A later interrupt's write postpones the pass — N counts from the most recently written interrupt.
     #[test]
     fn a_later_write_moves_the_pass_back() {
         let rig = GateRig::new();
@@ -5738,7 +5738,7 @@ mod gate_tests {
         rig.check();
     }
 
-    /// 판 도중 끊기는 에피소드를 `Waiting` 으로 돌리고, 그 판의 끝은 에피소드를 쥔 채 둔다(완료된 판이 아니다).
+    /// An interrupt mid-pass returns the episode to `Waiting`, and the end of that pass leaves the episode held (it is not a completed pass).
     #[test]
     fn a_pass_superseded_by_a_new_interrupt_keeps_the_episode() {
         let t = Instant::now();
@@ -5760,12 +5760,12 @@ mod gate_tests {
         let ep = st.episode.as_ref().expect("에피소드");
         assert_eq!((ep.phase, ep.rec), (Phase::Waiting, 6));
         assert!(ep.killed_any);
-        // 다시 N 을 기다린다.
+        // Waits for N again.
         assert!(matches!(st.next_step(t + N + ms(10), false), Step::Sleep(d) if d == N - ms(5)));
     }
 
-    /// 무엇이든 끝낸 판은 `Spent` — N 뒤에도 같은 에피소드면 한 번 warn(`StillHung`)하고 `Done`, 일꾼이 끝난다.
-    /// 아무것도 못 끝낸 판은 곧바로 `Done`.
+    /// A pass that killed anything is `Spent` — if it is still the same episode after N, warn once (`StillHung`) and `Done`, and the worker ends.
+    /// A pass that killed nothing goes straight to `Done`.
     #[test]
     fn a_pass_that_killed_waits_n_then_reports_once_and_ends() {
         let t = Instant::now();
@@ -5814,8 +5814,8 @@ mod gate_tests {
         assert_eq!(st.episode.as_ref().map(|ep| ep.phase), Some(Phase::Done));
     }
 
-    /// 끝내기 확정의 재확인은 같은 세대 · 쓰인 `Cleaning` · N 이 지난 때에만 선다. 표식이면 `Retiring`. 끝냄 표시는
-    /// 같은 세대에만.
+    /// The recheck of the kill commit holds only for the same generation · written `Cleaning` · when N has passed. If the marker is set, `Retiring`. The killed mark is
+    /// only for the same generation.
     #[test]
     fn the_commit_check_goes_only_for_the_same_due_cleaning_episode() {
         let t = Instant::now();
@@ -5843,7 +5843,7 @@ mod gate_tests {
         assert_eq!(st.commit_check(3, t + N, false), Commit::Superseded);
     }
 
-    /// 물러남 표시가 서면 일꾼이 에피소드를 치우고(스냅숏 · 기록을 자물쇠 밖에서 놓는다) 끝난다.
+    /// When the retirement flag is set, the worker clears the episode (releasing the snapshot · record outside the lock) and ends.
     #[test]
     fn retiring_clears_the_episode_and_ends_the_worker() {
         let rig = GateRig::new();
@@ -5860,7 +5860,7 @@ mod gate_tests {
         rig.check();
     }
 
-    /// 일꾼을 못 띄우면 에피소드를 `Done` 으로 내리고 기록 · 스냅숏을 놓는다(warn). 그 뒤 끊기는 새 에피소드를 연다.
+    /// If the worker cannot be started, bring the episode down to `Done` and release the record · snapshot (warn). The next interrupt opens a new episode.
     #[test]
     fn a_worker_that_fails_to_spawn_drops_the_episode() {
         let rig = GateRig::new();
@@ -5884,7 +5884,7 @@ mod gate_tests {
         rig.check();
     }
 
-    /// 일꾼 몸통이 패닉하면 가드가 에피소드를 `Done` 으로 내리고 쥔 것을 놓는다(error).
+    /// If the worker body panics, the guard brings the episode down to `Done` and releases what it holds (error).
     #[test]
     fn a_panicking_worker_drops_the_episode_through_its_guard() {
         let rig = GateRig::new();
@@ -5909,8 +5909,8 @@ mod gate_tests {
         rig.check();
     }
 
-    /// 쓰이지 않은 에피소드에서는 일꾼이 그냥 끝나고(에피소드는 그대로) 그 에피소드가 쓰이면 다시 뜬다. 턴 끝 · 새
-    /// 입력은 에피소드를 버리고 기록 · 스냅숏을 자물쇠 밖에서 놓는다 — 자는 일꾼은 깨서 조용히 끝난다.
+    /// For an unwritten episode the worker simply ends (the episode stays as it is) and comes up again when that episode is written. A turn end · new
+    /// input drops the episode and releases the record · snapshot outside the lock — a sleeping worker wakes and ends quietly.
     #[test]
     fn decoder_hooks_drop_the_episode_and_the_worker_follows() {
         let rig = GateRig::new();
@@ -5950,10 +5950,10 @@ mod gate_tests {
         );
     }
 
-    // ── 판의 순서 1–3 ─────────────────────────────────────────────────────────────────
+    // ── Pass steps 1–3 ─────────────────────────────────────────────────────────────────
 
-    /// 판은 표식 · 스냅숏 · 기록 · 뿌리를 먼저 본다 — 듣는 스레드가 끝나 기록이 꺼졌으면(`active ≠ rec`)
-    /// `snapshot_failed(port)` 다.
+    /// The pass looks first at the marker · snapshot · record · root — if the listener thread ended and the record is off (`active ≠ rec`)
+    /// it is `snapshot_failed(port)`.
     #[test]
     fn the_pass_checks_retiring_snapshot_record_and_root_first() {
         let rig = GateRig::new();
@@ -6009,8 +6009,8 @@ mod gate_tests {
         ));
     }
 
-    /// 포트가 실패로 굳었으면 스냅숏 · 기록이 멀쩡해도 판은 서지 않는다 — `no_new_member` 가 아니라
-    /// `snapshot_failed(port)` 다. 표식이 먼저다.
+    /// If the port is latched as failed, the pass does not hold even if the snapshot · record are fine — it is not `no_new_member`, it is
+    /// `snapshot_failed(port)`. The marker comes first.
     #[test]
     fn a_failed_port_stops_the_pass_as_a_port_snapshot_failure() {
         let rig = GateRig::new();
@@ -6038,14 +6038,14 @@ mod gate_tests {
         rig.check();
     }
 
-    // ── 판의 차례 ─────────────────────────────────────────────────────────────────────
+    // ── Rounds of a pass ─────────────────────────────────────────────────────────────────────
 
     fn pids_rounds(report: &PassReport) -> Vec<(u32, u32)> {
         report.terminated.iter().map(|k| (k.pid, k.round)).collect()
     }
 
-    /// 잰 모양 셋은 한 차례에 주인 하나를 끝내고 확인한 뒤, 새로 끝낼 것이 없는 둘째 차례에서 멈춘다 — 판은 `Spent`
-    /// 로 매듭짓고 정리함 warn 하나만 남는다.
+    /// The three measured shapes each kill one owner in one round and confirm it, then stop at the second round with nothing new to kill — the pass is closed out as `Spent`
+    /// and only one cleaned warn remains.
     #[test]
     fn measured_shapes_end_their_owner_in_one_round() {
         for (name, world, owner, chain) in [
@@ -6079,8 +6079,8 @@ mod gate_tests {
         }
     }
 
-    /// p3bg — 1 차례에 주인 32228 을 끝내고 확인하면 2 차례에 그것이 끝난 고리로 보여 fork 24776 이 후보가 된다. 3
-    /// 차례에는 새로 끝낼 것이 없다. 판 때 산 다른 탄생(taskkill · conhost · sleep · cat)은 건드리지 않는다.
+    /// p3bg — if round 1 kills owner 32228 and confirms it, in round 2 it shows up as an exited link and fork 24776 becomes a candidate. In round 3
+    /// there is nothing new to kill. Other births alive at pass time (taskkill · conhost · sleep · cat) are not touched.
     #[test]
     fn p3bg_ends_the_owner_then_its_fork_in_the_next_round() {
         let rig = GateRig::staged(&p3bg().staged(), &[]);
@@ -6097,7 +6097,7 @@ mod gate_tests {
         rig.assert_lock_sections();
     }
 
-    /// 한 차례의 `Cleanup` 은 `seq` 오름차순으로 끝낸다 — 생성 순서가 아니라 기록에 든 순서다.
+    /// One round's `Cleanup` items are killed in ascending `seq` order — the order in which they entered the record, not creation order.
     #[test]
     fn a_round_ends_its_cleanups_in_seq_order() {
         let rig = GateRig::staged(&p1_two_owners().staged(), &[]);
@@ -6119,8 +6119,8 @@ mod gate_tests {
         rig.assert_lock_sections();
     }
 
-    /// 한 차례에 끝낸 것들의 확인은 마감 하나(200 ms)를 나눠 쓴다 — 앞의 것이 마감을 다 쓰면 뒤의 것은 기다리지
-    /// 않는다. 안 끝난 것은 확인되지 않은 채 남고 다음 차례에 거듭 끝내지 않는다.
+    /// The confirmation of what one round killed shares one deadline (200 ms) — if an earlier one uses up the deadline, later ones do not wait.
+    /// Those that did not exit remain unconfirmed and are not killed again in the next round.
     #[test]
     fn a_round_shares_one_confirm_deadline() {
         let rig = GateRig::staged(
@@ -6138,7 +6138,7 @@ mod gate_tests {
         rig.assert_lock_sections();
     }
 
-    /// 마감 안에 안 끝난 주인은 다음 차례에 산 것으로 보여 그 fork 는 빠진다(놓침).
+    /// An owner that did not exit within the deadline shows up as alive in the next round, so its fork is left out (a miss).
     #[test]
     fn an_owner_not_gone_by_the_deadline_keeps_its_fork_out() {
         let rig = GateRig::staged(&p3bg().staged(), &[(32228, Kill::Linger)]);
@@ -6152,7 +6152,7 @@ mod gate_tests {
         rig.assert_lock_sections();
     }
 
-    /// 네 차례가 필요한 모양은 세 차례까지만 끝내고 warn `rounds_exhausted` — 넷째 후보는 남긴다.
+    /// A shape that needs four rounds is killed only up to three rounds and warns `rounds_exhausted` — the fourth candidate is left.
     #[test]
     fn a_fourth_round_is_never_run() {
         let rig = GateRig::staged(&p3bg_deeper().staged(), &[]);
@@ -6177,8 +6177,8 @@ mod gate_tests {
         Retire,
     }
 
-    /// 고르기와 확정 사이(둘째 후보 앞 재확인)에 턴 끝 · 새 끊기 · 새 입력 · 물러남이 오면 확정이 거절되고, 남은 후보와
-    /// 다음 차례를 버린다(debug). 앞서 끝낸 것은 정리함에 남는다.
+    /// If a turn end · new interrupt · new input · retirement comes between selection and commit (the recheck before the second candidate), the commit is refused, and the remaining candidates and
+    /// the next round are dropped (debug). What was killed earlier remains in the cleaned log.
     #[test]
     fn a_refused_commit_drops_the_rest_of_the_pass() {
         for cut in [Cut::TurnEnd, Cut::Escape, Cut::Input, Cut::Retire] {
@@ -6211,7 +6211,7 @@ mod gate_tests {
             rig.assert_lock_sections();
         }
 
-        // 다음 차례도 버린다 — p3bg 의 2 차례 fork 앞에서 턴이 끝난다.
+        // The next round is dropped too — the turn ends before p3bg's round-2 fork.
         let rig = GateRig::staged(&p3bg().staged(), &[]);
         let cell = Arc::clone(&rig.cell);
         rig.on_root_check(3, move || cell.close_turn());
@@ -6222,8 +6222,8 @@ mod gate_tests {
         rig.assert_lock_sections();
     }
 
-    /// 끝내기 앞 재확인 — 뿌리가 끝났으면(debug `root_gone`) · 모르면(warn `root_unknown`) · 물러나면(debug
-    /// `retiring`) 아무것도 끝내지 않고 판을 멈춘다.
+    /// Recheck before kill — if the root has exited (debug `root_gone`) · is unknown (warn `root_unknown`) · retires (debug
+    /// `retiring`), nothing is killed and the pass stops.
     #[test]
     fn the_recheck_before_a_kill_stops_the_pass() {
         for (state, reason, level) in [
@@ -6250,7 +6250,7 @@ mod gate_tests {
             rig.assert_lock_sections();
         }
 
-        // 판의 순서 3(첫 조회) 뒤에 선 표식은 끝내기 앞에서 본다.
+        // A marker raised after pass step 3 (the first query) is seen before the kill.
         let rig = GateRig::staged(&p1().staged(), &[]);
         let retiring = Arc::clone(&rig.group.retiring);
         rig.on_root_check(1, move || retiring.store(true, Ordering::Release));
@@ -6268,8 +6268,8 @@ mod gate_tests {
         rig.assert_lock_sections();
     }
 
-    /// 끝내기 오류는 하나씩 warn 하고, 고른 것을 하나도 못 끝낸 판은 warn `all_failed` — 그 사이 스스로 끝난 것
-    /// (`Gone`)도 끝낸 것이 아니다. 실패한 것을 한 판에서 거듭 끝내지 않는다.
+    /// Each kill error is warned one by one, and a pass that could not kill any of what it selected warns `all_failed` — one that exited by itself meanwhile
+    /// (`Gone`) also does not count as killed. A failed one is not killed again within one pass.
     #[test]
     fn a_pass_that_ends_nothing_it_picked_is_all_failed() {
         let rig = GateRig::staged(&p1().staged(), &[(38108, Kill::Refuse)]);
@@ -6295,8 +6295,8 @@ mod gate_tests {
         rig.assert_lock_sections();
     }
 
-    /// 못 끝냄 — 첫 차례에 후보가 없으면 warn `no_new_member`(`births` · `full`), 후보가 모두 규칙에서 빠지면 warn
-    /// `parent_rule`(규칙별 수), 스냅숏이 서지 않았으면 warn `snapshot_failed`(`cause`).
+    /// Could not kill — if the first round has no candidates, warn `no_new_member` (`births` · `full`); if all candidates drop out by the rules, warn
+    /// `parent_rule` (per-rule counts); if the snapshot was not set up, warn `snapshot_failed` (`cause`).
     #[test]
     fn a_pass_without_a_cleanup_says_why() {
         let rig = GateRig::new();
@@ -6349,7 +6349,7 @@ mod gate_tests {
         rig.assert_lock_sections();
     }
 
-    /// 정리함 warn 은 TRD §3-8 의 칸을 모두 싣는다.
+    /// The cleaned warn carries every field of TRD §3-8.
     #[test]
     fn the_cleaned_line_carries_every_field() {
         let rig = GateRig::staged(&p3bg().staged(), &[]);
@@ -6392,7 +6392,7 @@ mod gate_tests {
         rig.assert_lock_sections();
     }
 
-    /// 일꾼으로 돌면 — 끝낸 판 뒤 N 을 자고, 그때도 같은 에피소드면 한 번 warn 하고 끝난다.
+    /// Running as the worker — sleep N after the pass that killed, and if it is still the same episode then, warn once and end.
     #[test]
     fn the_worker_reports_once_more_n_after_a_pass_that_killed() {
         let rig = GateRig::staged(&pilot().staged(), &[]);
@@ -6409,7 +6409,7 @@ mod gate_tests {
         rig.assert_lock_sections();
     }
 
-    /// Debug 는 자물쇠를 기다리지 않는다.
+    /// Debug does not wait on the lock.
     #[test]
     fn the_debug_view_never_waits_for_the_lock() {
         let rig = GateRig::new();
@@ -6421,7 +6421,7 @@ mod gate_tests {
         assert!(text.contains("<locked>"), "{text}");
     }
 
-    // ── 상태기계 · 불변식 ─────────────────────────────────────────────────────────────
+    // ── State machine · invariants ─────────────────────────────────────────────────────────────
 
     struct Rng(u64);
 
@@ -6436,8 +6436,8 @@ mod gate_tests {
         }
     }
 
-    /// 임의 전이열(끊기 · 두 구간 사이 사건 · 쓰기 확인 · 버린 확인 · decoder 셋 · 시각 · 일꾼 걸음 · 명단 실패 · 듣는
-    /// 스레드의 끝 · 일꾼 기동 실패 · 물러남) 뒤마다 TRD §3-2 불변식과 자물쇠 규칙이 선다. 결정적이다(고정 씨앗).
+    /// After every arbitrary transition sequence (interrupt · event between two sections · write confirmation · dropped confirmation · three decoder calls · time · worker step · list failure · listener
+    /// thread end · worker start failure · retirement) the TRD §3-2 invariants and the lock rules hold. It is deterministic (fixed seed).
     #[test]
     fn random_transition_sequences_keep_every_invariant() {
         let (mut passes, mut opened, mut line_only, mut no_line) = (0, 0, 0, 0);
@@ -6560,9 +6560,9 @@ mod gate_tests {
     }
 }
 
-/// 실물 무리 · 포트 · 듣는 스레드 · 쓰기 확인 · 일꾼 · 판을 한 줄로 잇는다(TRD §5 실프로세스 12). 시험마다 넷 이하
-/// (콘솔 호스트 포함)를 띄운다. ★끝내는 경로는 재지 않는다★ — claude 훅 실행기 모양 아래 사본은 넷을 넘어 순수
-/// 시험(스파이크 모양)이 잰다. 여기서는 판의 사유가 로그에 남고 아무것도 끝나지 않는 것을 본다.
+/// Connects the real group · port · listener thread · write confirmation · worker · pass in one line (TRD §5 real process 12). Each test starts four or fewer
+/// (including the console host). ★The kill path is not measured★ — under the claude hook runner shape the copies exceed four, so the pure
+/// tests (spike shapes) measure it. Here we check that the pass's reason is left in the log and nothing is killed.
 #[cfg(all(test, windows))]
 mod real_tests {
     use super::test_support::{Capture, Line};
@@ -6577,8 +6577,8 @@ mod real_tests {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const LINE: &[u8] = b"{\"type\":\"control_request\"}\n";
 
-    /// 잠은 기다리지 않고 단조 시각을 그만큼 민다 — 일꾼이 N 을 곧바로 지난다. 일꾼 몸통은 쌓아 두고 시험 스레드가
-    /// 돌린다(판의 로그를 잡으려고). 듣는 스레드는 진짜로 띄운다.
+    /// Sleeps do not wait and advance monotonic time by that amount — the worker passes N immediately. The worker body is piled up and the test thread
+    /// runs it (to capture the pass's log). The listener thread is started for real.
     #[derive(Default)]
     struct SkipClock {
         skipped_ns: AtomicU64,
@@ -6607,7 +6607,7 @@ mod real_tests {
         }
     }
 
-    /// 뿌리 `root` 의 정리기와 그 문 — `open_spawn` 의 조립에서 시계만 바꾼 모양.
+    /// The cleaner of root `root` and its gate — the assembly of `open_spawn` with only the clock swapped.
     fn cleaner_for(
         group: &Arc<ProcessGroup>,
         root: u32,
@@ -6623,8 +6623,8 @@ mod real_tests {
         (clock, cleaner, cell)
     }
 
-    /// 열린 턴에 끊기 하나를 받고 그 줄이 쓰인 것으로 친다 — 쓰기 확인이 쓰기 명단을 찍고 일꾼 하나를 부른다.
-    /// 돌려주는 것 = 그 에피소드의 기록 번호.
+    /// Receive one interrupt in an open turn and treat its line as written — write confirmation takes the write list and calls one worker.
+    /// Returns = that episode's record number.
     fn interrupt_and_write(cell: &Arc<GateCell>, cleaner: &Cleaner, clock: &SkipClock) -> u64 {
         cell.open_turn();
         let out = cell.interrupt(LINE.to_vec()).expect("끊기 줄");
@@ -6640,7 +6640,7 @@ mod real_tests {
         rec
     }
 
-    /// 쌓인 일꾼을 이 스레드에서 끝까지 돌리고 그동안의 로그를 준다.
+    /// Run the piled-up workers to the end on this thread and give the logs in the meantime.
     fn run_workers(clock: &SkipClock) -> Vec<Line> {
         let lines = Arc::new(Mutex::new(Vec::new()));
         let bodies: Vec<_> = clock.workers.lock().unwrap().drain(..).collect();
@@ -6651,7 +6651,7 @@ mod real_tests {
         taken
     }
 
-    /// 판이 남긴 사유 줄 하나 — 아무것도 끝내지 않았다(정리함 줄이 없다).
+    /// One reason line the pass left — nothing was killed (there is no cleaned line).
     fn the_pass_line(lines: &[Line]) -> BTreeMap<String, String> {
         assert!(
             !lines
@@ -6667,21 +6667,21 @@ mod real_tests {
         fields.clone()
     }
 
-    /// 창 없는 콘솔의 R 이 콘솔 호스트를 띄울 때까지 기다린다 — 문을 열기 전 R 의 자식은 그것 하나다. 그 호스트는
-    /// R 이 Job 에 든 뒤에 태어나기도 해서(실측), 기다리지 않으면 쓰기 명단 뒤의 산 탄생(부모 R 산다)으로 끼어든다.
+    /// Wait until R in the windowless console starts the console host — before the gate opens, that is R's only child. That host
+    /// is sometimes born after R enters the Job (measured), so if not waited for, it slips in as a live birth after the write list (parent R alive).
     fn console_host_born(r: &std::process::Child) {
         wait_until("R 의 콘솔 호스트", || {
             (!engram_dashboard_platform::process::child_pids(r.id()).is_empty()).then_some(())
         });
     }
 
-    /// 끊기 뒤 R 이 띄운 B(`cmd`)가 P(ping)를 띄우고 끝났다 — P 의 부모는 끝났지만 P 는 B 의 사본이 아니다. P 는 산다.
-    /// R · 그 콘솔 호스트 · B · P 넷.
+    /// After the interrupt, B (`cmd`) started by R launched P (ping) and exited — P's parent has exited, but P is not a copy of B. P is alive.
+    /// Four: R · its console host · B · P.
     #[test]
     fn a_ping_left_by_an_exited_cmd_is_not_a_hook_copy_and_survives() {
         let (job, group) = new_group();
         let group = Arc::new(group);
-        // R = 문 → B → 둘째 줄을 기다림(뿌리가 판 때 살아 있게). B = P 를 뒤로 띄우고 한 줄을 기다린 뒤 끝난다.
+        // R = gate → B → waits for a second line (so the root is alive at pass time). B = launches P in the background, waits for one line, then exits.
         let mut r = spawn_gated_cmd(
             r#"cmd /d /c "start "" /b ping -n 30 127.0.0.1 >nul & set /p _=" & set /p _="#,
             CREATE_NO_WINDOW,
@@ -6723,8 +6723,8 @@ mod real_tests {
         let _ = r.wait();
     }
 
-    /// 끊기 전에 태어난 것만 있다 — 쓰기 명단에 들어 후보가 없다(붙일 때 되알려져 기록에 들어도). R · 그 콘솔
-    /// 호스트 · ping 셋.
+    /// Only things born before the interrupt exist — they are in the write list, so there is no candidate (even if they enter the record by re-notification on attach). Three: R · its console
+    /// host · ping.
     #[test]
     fn births_before_the_interrupt_leave_no_new_member() {
         let (job, group) = new_group();
@@ -6749,7 +6749,7 @@ mod real_tests {
         let _ = r.wait();
     }
 
-    /// 끊기 뒤 태어났지만 부모(뿌리 R)가 산다. R · 그 콘솔 호스트 · ping 셋.
+    /// Born after the interrupt, but the parent (root R) is alive. Three: R · its console host · ping.
     #[test]
     fn a_birth_under_a_live_parent_is_parent_alive() {
         let (job, group) = new_group();

@@ -1,40 +1,40 @@
-# ADR-0100: 릴리즈 패키징 — 포터블 폴더 조립 스크립트 (co-location 불변식)
+# ADR-0100: Release packaging — a portable folder assembly script (co-location invariant)
 
-- 상태: 확정 (2026-07-23, 근거: 사용자 결정 + S10 백엔드 조사 실측) · 부분 폐기 by ADR-0134 (런타임 데이터 위치를 실행 폴더 하위로 대체) · 부분 폐기 by ADR-0285 (영향의 조용한 저하 서술 중 help 본문 파일) · 부분 폐기 by ADR-0294 (결정 2 배송 목록에 고지 파일 추가)
-- 관련: CLAUDE.md "아키텍처 원칙" · ADR-0023(3-프로세스 토폴로지) · ADR-0024(데몬 생사·데이터 위치) · ADR-0086(듀얼 입구 CLI/MCP) · ADR-0092(프라이밍 파일) · ADR-0099(채널 capability 스위치·프라이밍 2파일) · `scripts/build-release.ps1` · `.gitignore` · Amended by ADR-0134 (런타임 데이터 위치를 실행 폴더 하위로 대체) · Amended by ADR-0285 (영향의 조용한 저하 서술 중 help 본문 파일) · Amended by ADR-0294 (결정 2 배송 목록에 고지 파일 추가)
+- 상태: 확정 (2026-07-23, basis: user decision + S10 backend survey measurement) · 부분 폐기 by ADR-0134 (replacing the runtime data location with one under the run folder) · 부분 폐기 by ADR-0285 (the help body file in the Impact's description of silent degradation) · 부분 폐기 by ADR-0294 (adding the notice file to the decision 2 shipping list)
+- 관련: CLAUDE.md "아키텍처 원칙" · ADR-0023(3-process topology) · ADR-0024(daemon liveness · data location) · ADR-0086(dual entrance CLI/MCP) · ADR-0092(priming file) · ADR-0099(channel capability switch · two priming files) · `scripts/build-release.ps1` · `.gitignore` · Amended by ADR-0134 (replacing the runtime data location with one under the run folder) · Amended by ADR-0285 (the help body file in the Impact's description of silent degradation) · Amended by ADR-0294 (adding the notice file to the decision 2 shipping list)
 
 ## 맥락
-릴리즈 빌드가 한 번도 검증된 적 없는 영역이었다. 실사용 확인("사용자가 대시보드에서 에이전트에게 명령")이 최초 관문인데, 현 `src-tauri/tauri.conf.json` 번들 설정에는 `resources`·`externalBin`·`sidecar`가 전혀 없어 `npm run tauri build`가 런타임 필수 동반물을 **하나도 포함하지 않는다**.
+The release build was an area that had never been verified. Real-use confirmation ("the user commands an agent from the dashboard") is the first gate, but the current `src-tauri/tauri.conf.json` bundle settings have no `resources`, `externalBin` or `sidecar` at all, so `npm run tauri build` includes **none** of the companions the runtime needs.
 
-런타임 배치 규약(불변식)은 3개 exe와 프라이밍 폴더가 **같은 디렉토리에 co-located**되어야 성립한다:
-- `engram-dashboard.exe`(UI 셸)가 데몬 exe를 형제로 찾음(`discovery::locate_daemon_exe` — current_exe sibling 우선).
-- 데몬이 `engram-send.exe`를 형제로 찾아 `ENGRAM_SEND_EXE`로 주입(`daemon/src/lib.rs::locate_send_exe`).
-- 데몬이 `prompts/agent-priming.md`(MCP-capable)·`agent-priming-cli.md`(비-MCP)를 exe-상대 install-root로 해석(`control/priming.rs` FilePrimingProvider, ADR-0092/0099). ★정정 (2026-09-19) — 프라이밍 파일은 지금 **하나**다. 정본은 아래 「결정」의 정정 블록.★
+The runtime layout convention (invariant) holds only if the 3 exes and the priming folder are **co-located in the same directory**:
+- `engram-dashboard.exe` (the UI shell) finds the daemon exe as a sibling (`discovery::locate_daemon_exe` — current_exe sibling first).
+- The daemon finds `engram-send.exe` as a sibling and injects it as `ENGRAM_SEND_EXE` (`daemon/src/lib.rs::locate_send_exe`).
+- The daemon resolves `prompts/agent-priming.md` (MCP-capable) · `agent-priming-cli.md` (non-MCP) against the exe-relative install-root (`control/priming.rs` FilePrimingProvider, ADR-0092/0099). ★Correction (2026-09-19) — there is now **one** priming file. The canonical text is the correction block in 「결정」 below.★
 
-특히 prompts 누락은 **에러 없이 조용히**(fail-open) 프라이밍 없는 에이전트를 스폰하고, engram-send 누락은 CLI 입구를 조용히 비활성화한다 — 둘 다 배포 시 사람이 눈치채기 어렵다. 따라서 배치를 자동·검증 가능하게 보장하는 패키징 절차가 필요했다.
+In particular, a missing prompts file spawns an agent without priming **silently, with no error** (fail-open), and a missing engram-send silently disables the CLI entrance — both are hard for a person to notice at deployment. So a packaging procedure that guarantees the layout automatically and verifiably was needed.
 
 ## 결정
-릴리즈를 **포터블 폴더**로 산출한다 — 빌드 후 조립 스크립트(`scripts/build-release.ps1`, Windows 전용)가 다음을 수행한다:
-1. 프론트 빌드 + 릴리즈 바이너리 3종 빌드(`engram-dashboard.exe` · `engram-dashboard-daemon.exe` · `engram-send.exe`).
-2. 깨끗한 `release/` 폴더(프로젝트 루트, `.gitignore`)에 **정확히 이 항목만** 복사: 위 3개 exe + `prompts/agent-priming.md` + `prompts/agent-priming-cli.md`.
-3. 매니페스트 검증 — 산출 폴더에 기대 파일이 전부 있고 그 외 잡파일이 없는지 단언(불일치 시 실패).
+Produce the release as a **portable folder** — after the build, an assembly script (`scripts/build-release.ps1`, Windows only) does the following:
+1. Build the frontend + build the 3 release binaries (`engram-dashboard.exe` · `engram-dashboard-daemon.exe` · `engram-send.exe`).
+2. Copy **exactly these items only** into a clean `release/` folder (project root, `.gitignore`): the 3 exes above + `prompts/agent-priming.md` + `prompts/agent-priming-cli.md`.
+3. Manifest verification — assert that the output folder has all the expected files and no other stray files (fail on mismatch).
 
-★**정정 (2026-09-19, 커밋 `2ef6902`) — 프라이밍은 두 파일이 아니라 한 파일이다**★: `prompts/agent-priming-cli.md`(비-MCP 변형)가 삭제되고 `PrimingVariant` 축이 함께 걷혔다(사용자 결정 2026-09-19 — CLI 우편은 한참 뒤 일이라 거의 같은 지시서 두 벌을 끌고 갈 값이 없다). 그래서 위 결정 2 의 목록과 「맥락」의 해석 줄에 적힌 `agent-priming-cli.md` 는 **오늘의 트리에 없고**, 스크립트의 `$ExpectedPrompts` 도 `@('agent-priming.md')` 한 줄이다. ★**이 ADR 의 결정 자체는 바뀌지 않았다**★ — 포터블 폴더 · 조립 스크립트 · 매니페스트 tripwire 는 그대로이고 갈린 것은 그 매니페스트가 **세는 파일 수**뿐이다. 바로 아래 문단이 "무엇을 담나"의 정본을 애초에 스크립트에 넘겨 뒀고 「영향 / 불변식」이 매니페스트 갱신을 예고해 뒀으므로, 이 변경은 번복이 아니라 **사실 정정**이다(새 ADR 을 파지 않는 이유). 번복된 결정은 따로 있다 — 프라이밍을 정적 2파일로 둔 **ADR-0099 결정 4** 쪽이고, 비-MCP 스폰이 이제 지시서를 한 글자도 안 받는다는 사실(`wants_priming = uses_mail && accepts_mcp_config`)도 그 소관이다.
+★**Correction (2026-09-19, commit `2ef6902`) — priming is one file, not two**★: `prompts/agent-priming-cli.md` (the non-MCP variant) was deleted and the `PrimingVariant` axis was removed with it (user decision 2026-09-19 — CLI mail is a long way off, so there is no value in carrying two nearly identical instruction sheets). So the `agent-priming-cli.md` written in the list of decision 2 above and in the resolution line of 「맥락」 is **not in today's tree**, and the script's `$ExpectedPrompts` is also a single line, `@('agent-priming.md')`. ★**The decision itself of this ADR has not changed**★ — the portable folder · the assembly script · the manifest tripwire are as they were, and all that differs is the **number of files** that manifest counts. The paragraph right below handed the canonical text of "what goes in" to the script from the start, and 「영향 / 불변식」 foreshadowed a manifest update, so this change is a **factual correction**, not a reversal (the reason no new ADR is opened). The reversed decision is elsewhere — it is on the side of ADR-0099 **decision 4**, which kept priming as two static files, and the fact that a non-MCP spawn now receives not a single character of the instruction sheet (`wants_priming = uses_mail && accepts_mcp_config`) is also within its remit.
 
-co-location 불변식과 "무엇을 담나"의 단일 출처(SSOT)를 이 스크립트가 소유한다. 측정용 bin(`roundtrip-smoke` 등)은 `required-features=["test-harness"]`라 릴리즈 그래프에서 자동 제외된다. 런타임 데이터(`daemon.json`·`agents.json`·`sessions/`)는 `%APPDATA%\com.engram.dashboard`에 실행 시 생성되며 번들 대상이 아니다(ADR-0024).
+This script owns the co-location invariant and the single source of truth (SSOT) for "what goes in". The measurement bins (`roundtrip-smoke` etc.) are automatically excluded from the release graph because of `required-features=["test-harness"]`. The runtime data (`daemon.json` · `agents.json` · `sessions/`) is created at run time in `%APPDATA%\com.engram.dashboard` and is not a bundle target (ADR-0024).
 
 ## 거부한 대안
-- **Tauri 정식 번들(externalBin/sidecar + resources → MSI/NSIS)** — 지금은 버림. (a) sidecar는 `engram-send-x86_64-pc-windows-msvc.exe` 식 target-triple 네이밍 처리가 필요해 마찰이 큼. (b) 산출물이 설치 프로그램이라 "폴더에 파일만 두고 실행" 요구와 형태가 다름. (c) 실사용 확인이라는 당면 목표엔 과함. 정식 배포 정식화 시점에 재검토(그때 이 ADR을 supersede/amend).
-- **tauri.conf.json `resources`에 prompts만 추가 + 나머지(exe) 수동 복사** — 버림. 절반만 자동화되어 co-location 불변식이 tauri 설정과 수동 절차 두 곳에 쪼개져 rot한다. 배치의 단일 출처를 조립 스크립트 하나로 모으는 편이 낫다.
-- **`target/release/` 폴더를 그대로 배포** — 버림. 빌드 중간물(`deps/`·`build/`·`.pdb`·기타 bin)이 섞여 "릴리즈 파일만" 요구를 위반하고, `prompts/`는 애초에 그 폴더에 없다.
+- **The official Tauri bundle (externalBin/sidecar + resources → MSI/NSIS)** — dropped for now. (a) sidecars need target-triple naming like `engram-send-x86_64-pc-windows-msvc.exe`, which is a lot of friction. (b) the output is an installer, so the form differs from the "just put the files in a folder and run" requirement. (c) it is excessive for the immediate goal of real-use confirmation. Revisit when formalizing official distribution (then supersede/amend this ADR).
+- **Add only prompts to `resources` in tauri.conf.json + copy the rest (exes) by hand** — dropped. It is only half automated, so the co-location invariant gets split between the tauri settings and a manual procedure and rots. It is better to gather the single source of the layout into one assembly script.
+- **Ship the `target/release/` folder as is** — dropped. Build intermediates (`deps/` · `build/` · `.pdb` · other bins) get mixed in and violate the "release files only" requirement, and `prompts/` is not in that folder in the first place.
 
 ## 근거
-- 사용자 결정(2026-07-23): 패키징 방식 = 포터블 폴더만, 산출 위치 = `release/`. 두 대안(정식 설치본·둘 다)은 명시적으로 후순위.
-- co-location 불변식·fail-open 동작은 S10 백엔드 추상화 조사에서 실코드로 확인(`locate_daemon_exe`·`locate_send_exe`·`FilePrimingProvider`).
-- 측정 bin 제외는 `required-features` 게이트로 이미 보장됨(추가 조치 불필요).
+- User decision (2026-07-23): packaging method = portable folder only, output location = `release/`. The two alternatives (an official installer · both) are explicitly lower priority.
+- The co-location invariant and the fail-open behavior were confirmed in real code in the S10 backend abstraction survey (`locate_daemon_exe` · `locate_send_exe` · `FilePrimingProvider`).
+- The exclusion of the measurement bins is already guaranteed by the `required-features` gate (no extra action needed).
 
 ## 영향 / 불변식
-- **co-location 불변식(변경 금지):** `release/` 산출 폴더는 3개 exe + `prompts/`(★정정 2026-09-19: 2파일 → **1파일** `agent-priming.md` — 위 「결정」의 정정 블록★)가 한 디렉토리에 함께 있어야 한다. 하나라도 빠지면 조용한 기능 저하(프라이밍 없는 스폰 / CLI 입구 사망 / 데몬 미발견)가 난다. 스크립트의 매니페스트 검증이 이 불변식의 게이트다. ★**파일 수의 정본은 이 줄이 아니라 스크립트의 `$ExpectedPrompts` 다**★ — 여기 숫자를 박아 두면 다음 갱신에 또 어긋난다(실제로 한 번 어긋났다).
-- 새 런타임 동반물(추가 exe·리소스)이 생기면 이 스크립트의 매니페스트를 함께 갱신해야 한다 — 안 하면 검증이 실패해 시끄럽게 잡힌다(의도된 tripwire).
-- `release/`는 `.gitignore` 대상(재빌드마다 재생성, repo 오염 방지).
-- 정식 설치본이 필요해지면 이 ADR을 supersede/amend하고 tauri 번들 설정을 도입한다.
+- **Co-location invariant (do not change):** the `release/` output folder must have the 3 exes + `prompts/` (★correction 2026-09-19: 2 files → **1 file** `agent-priming.md` — the correction block in 「결정」 above★) together in one directory. If even one is missing, a silent feature degradation (a spawn without priming / the CLI entrance dead / the daemon not found) results. The script's manifest verification is the gate for this invariant. ★**The canonical source for the file count is not this line but the script's `$ExpectedPrompts`**★ — embedding a number here would drift again at the next update (it actually drifted once).
+- When a new runtime companion (an extra exe or resource) appears, the script's manifest must be updated together — if not, verification fails and it is caught loudly (an intended tripwire).
+- `release/` is a `.gitignore` target (regenerated on every rebuild, to keep the repo clean).
+- If an official installer becomes necessary, supersede/amend this ADR and introduce the tauri bundle settings.

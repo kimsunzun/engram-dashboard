@@ -1,14 +1,14 @@
-//! 에이전트 명령 invoke 핸들러 — request/reply 평면(S14 모듈① T6a, ADR-0036).
+//! Agent command invoke handlers — the request/reply plane (S14 module① T6a, ADR-0036).
 //!
-//! 프론트(또는 §5 LLM)가 `invoke('agent_spawn'|…)` 로 부르면 여기서 `AgentCommand` 를 빌드해
-//! `DaemonClient::send_command` 로 데몬에 보내고, 데몬 reply(request_id 매칭)를 프론트 친화 Result 로
-//! 돌려준다. 두뇌(연결 의미론)는 `DaemonClient`, 이 레이어는 **얇은 빌더 + 주입**일 뿐이다.
+//! When the frontend (or §5 LLM) calls `invoke('agent_spawn'|…)`, this builds an `AgentCommand`, sends it to the daemon through
+//! `DaemonClient::send_command`, and returns the daemon reply (matched by request_id) as a frontend-friendly Result.
+//! The brain (connection semantics) is `DaemonClient`; this layer is only a **thin builder + injection**.
 //!
-//! ## ★request_id 는 여기서 박는다(load-bearing)★
-//! 각 핸들러가 `RequestId::new()` 로 새 키를 만들어 명령에 싣는다 — send_command 가 그 키로 reply 를
-//! 매칭한다(spike §9 G1 의 "request_id 출처"는 이 레이어). idempotency 의미상 *재시도 시 같은 키*가
-//! 정석이나, invoke 단발 호출은 매번 새 키로 충분(끊김 시 호출자가 재호출 = 새 키). writeStdin 중복
-//! 방지는 데몬측 dedup table 책임(ids.rs RequestId 주석).
+//! ## ★request_id is set here (load-bearing)★
+//! Each handler creates a new key with `RequestId::new()` and puts it in the command — send_command matches the reply by that key
+//! (the "request_id source" of spike §9 G1 is this layer). By idempotency semantics *the same key on retry*
+//! is the standard, but for a one-shot invoke a new key each time is enough (on a disconnect the caller re-calls = a new key). Preventing writeStdin
+//! duplicates is the daemon-side dedup table's responsibility (ids.rs RequestId comment).
 
 use std::sync::Arc;
 
@@ -27,8 +27,8 @@ fn parse_uuid(s: &str, what: &str) -> Result<Uuid, String> {
 
 type CmdResult = Result<AgentEvent, String>;
 
-// ★주의(reply 종류)★: 데몬 connection_core.rs 의 `Spawn{profile_id}` dispatch 는 Ack 로 응답한다(SpawnByCwd/
-// SpawnProfile 만 Spawned 로 AgentInfo 동봉).
+// ★Note (reply kind)★: the daemon connection_core.rs `Spawn{profile_id}` dispatch answers with Ack (only SpawnByCwd/
+// SpawnProfile answer Spawned with AgentInfo attached).
 #[tauri::command]
 pub async fn agent_spawn(
     client: State<'_, Arc<DaemonClient>>,
@@ -42,7 +42,7 @@ pub async fn agent_spawn(
     expect_ack_or_spawned(client.send_command(cmd).await)
 }
 
-// 에이전트 종료(자원 강제 폐쇄).
+// Agent termination (forced closing of resources).
 #[tauri::command]
 pub async fn agent_kill(
     client: State<'_, Arc<DaemonClient>>,
@@ -56,7 +56,7 @@ pub async fn agent_kill(
     expect_ack(client.send_command(cmd).await)
 }
 
-// 진행 중 작업만 중단. 프로세스는 생존. 터미널 모드(PTY)는 거절한다 — 터미널이 키를 직접 받는다.
+// Interrupts only the work in progress. The process survives. Terminal mode (PTY) is rejected — the terminal receives keys directly.
 // ADR-0245
 #[tauri::command]
 pub async fn agent_interrupt(
@@ -71,7 +71,7 @@ pub async fn agent_interrupt(
     expect_ack(client.send_command(cmd).await)
 }
 
-// `data` 는 프론트에서 byte 배열(키 입력).
+// `data` is a byte array from the frontend (key input).
 #[tauri::command]
 pub async fn agent_write_stdin(
     client: State<'_, Arc<DaemonClient>>,
@@ -87,14 +87,14 @@ pub async fn agent_write_stdin(
     expect_ack(client.send_command(cmd).await)
 }
 
-// PTY 크기 변경. ★주의★: `Resize` 는 wire 상 request_id 가 없어(데몬이 reply 안 보냄) send_command 의
-// reply 매칭 대상이 아니다 — 그래서 **fire-and-forget**(`send_fire_and_forget`)가 정답이다(reply 기대
-// 경로로 보내면 영구 hang).
+// PTY resize. ★Note★: `Resize` has no request_id on the wire (the daemon sends no reply) so it is not a target of send_command's
+// reply matching — so **fire-and-forget** (`send_fire_and_forget`) is the right answer (sending it on a
+// path that expects a reply would hang forever).
 //
-// ★fire-and-forget 의미★: enqueue 만 하고 ack 를 안 기다린다(resize 미반영=화면 크기 어긋남일 뿐
-// 동작 안전엔 무해). 비연결이면 DaemonClient 가 조용히 no-op — Resize 는 구독 델타가 아니라 단발 명령이라
-// connect 시 자동 재동기되지 않는다(다음 resize 입력이 새 치수로 갱신). 그래서 `Ok(())` 는 "송신 시도함"
-// 이지 "데몬 반영 확인"이 아니다.
+// ★Fire-and-forget meaning★: it only enqueues and does not wait for an ack (an unapplied resize = just a screen size mismatch, harmless to
+// operational safety). If not connected, DaemonClient quietly no-ops — Resize is a one-shot command, not a subscription delta, so
+// it is not automatically re-synced on connect (the next resize input updates to the new dimensions). So `Ok(())` means "a send was attempted",
+// not "daemon application confirmed".
 #[tauri::command]
 pub async fn agent_resize(
     client: State<'_, Arc<DaemonClient>>,
@@ -112,18 +112,18 @@ pub async fn agent_resize(
     Ok(())
 }
 
-// ★봉투 포맷 전역 스위치(ADR-0096) — 조종/invoke 제어 표면★. 오퍼레이터(또는 §5 LLM/상주
-// 오케스트레이터)가 `invoke('set_envelope_format', { format: 'colon' | 'xml' })` 로 부르면 데몬 전역
-// 봉투 포맷 상태를 바꾼다 — 이후 모든 A→B 메시지 봉투가 그 포맷으로 렌더된다(colon=`{sender}: {body}`
-// 기본, xml=`<message from="{sender}">{body}</message>`).
+// ★Global envelope format switch (ADR-0096) — a steering/invoke control surface★. When an operator (or §5 LLM / resident
+// orchestrator) calls `invoke('set_envelope_format', { format: 'colon' | 'xml' })` it changes the daemon-global
+// envelope format state — afterwards every A→B message envelope is rendered in that format (colon=`{sender}: {body}`
+// default, xml=`<message from="{sender}">{body}</message>`).
 //
-// ★src-tauri = 클라이언트 셸(ADR-0029)★: 상태 소유·조립은 데몬(AgentManager 소유 프로세스)이다.
-// ★워커 MCP 채널엔 미노출★(관리당하는 에이전트가 팀-전역 포맷을 바꾸면 안 됨 — ADR-0096 결정 3·ADR-0094
-// 최소권한). 이 invoke 표면이 정식 활성 경로이고, 사람용 트리거(단축키/UI 버튼)는 나중 옵션이다(ADR-0096
-// 결정 5 — cdp.mjs eval 로 이 invoke 를 임시 호출·검증).
+// ★src-tauri = client shell (ADR-0029)★: state ownership and assembly belong to the daemon (the process that owns AgentManager).
+// ★Not exposed on the worker MCP channel★ (a managed agent must not change a team-global format — ADR-0096 decision 3 · ADR-0094
+// least privilege). This invoke surface is the official active path, and a human trigger (shortcut/UI button) is a later option
+// (ADR-0096 decision 5 — this invoke is temporarily called and verified with cdp.mjs eval).
 //
-// ★format 역직렬화★: `EnvelopeFormat` 는 serde lowercase 라 invoke JSON `{format:"xml"}` 이 그대로
-// 들어온다(wire enum 계약, ADR-0096).
+// ★format deserialization★: `EnvelopeFormat` is serde lowercase so the invoke JSON `{format:"xml"}` comes in
+// as is (wire enum contract, ADR-0096).
 // ADR-0096
 #[tauri::command]
 pub async fn set_envelope_format(
@@ -137,22 +137,22 @@ pub async fn set_envelope_format(
     expect_ack(client.send_command(cmd).await)
 }
 
-// ★출력 Channel 등록(ADR-0046 — 등록만, replay 트리거 없음)★. 창 mount 시 프론트가
-// `invoke('subscribe_output', { channel })` 로 호출한다 — 그 창의 출력 Channel 을 window_label → Channel
-// registry 에 넣는다. 연결 task 가 라우팅 표를 보고 이 Channel 로 그 창의 모든 agent 출력을 fan-out 한다
-// (프레임에 agent_id 태그 내장).
+// ★Output Channel registration (ADR-0046 — registration only, no replay trigger)★. The frontend calls it on window mount with
+// `invoke('subscribe_output', { channel })` — it puts that window's output Channel into the window_label → Channel
+// registry. The connection task looks at the routing table and fans out all agent output of that window to this Channel
+// (the agent_id tag is built into the frame).
 //
-// ★window label 자동 주입★: `tauri::Window` 를 인자로 받으면 Tauri 가 **호출한 webview** 를 주입한다 →
-// `window.label()` 로 라벨을 얻는다(프론트가 라벨을 안 넘겨도 됨, 위조 불가). Channel 도 호출 webview 에
-// 태생 바인딩된다(spike §7) — 그래서 라벨↔Channel 짝이 항상 정합한다.
+// ★Automatic window label injection★: if it takes `tauri::Window` as an argument, Tauri injects **the calling webview** →
+// the label is obtained with `window.label()` (the frontend need not pass the label, and it cannot be forged). The Channel is also
+// bound to the calling webview by birth (spike §7) — so the label↔Channel pair is always consistent.
 //
-// ★raw byte(spike §7)★: registry 타입이 `Channel<tauri::ipc::Response>` 라 연결 task 가
-// `Response::new(bytes)` 로 raw 바이트를 보낸다(`Channel<Vec<u8>>` 의 JSON 직렬화 함정 회피).
+// ★raw byte (spike §7)★: the registry type is `Channel<tauri::ipc::Response>` so the connection task
+// sends raw bytes with `Response::new(bytes)` (avoiding the JSON serialization trap of `Channel<Vec<u8>>`).
 //
-// ## ★ADR-0046: replay 트리거 분리★
-// 미러 버퍼 제거로 subscribe_output 은 **Channel 등록만** 한다(옛 등록-즉시-replay 삭제). replay 는 뷰가
-// mount 시 별도로 `request_replay` 로 유발한다 — 등록(창 단위)과 replay(뷰/agent 단위)를 분리해, 한 창의
-// 여러 뷰가 각자 gen 펜스로 자기 replay 경계를 안다.
+// ## ★ADR-0046: replay trigger separated★
+// With the mirror buffer removed, subscribe_output does **Channel registration only** (the old register-then-replay-immediately is deleted). Replay is triggered by the view
+// separately on mount with `request_replay` — registration (per window) and replay (per view/agent) are separated so that multiple
+// views of one window each know their own replay boundary through the gen fence.
 #[tauri::command]
 pub fn subscribe_output(
     registry: State<'_, WindowChannelRegistry>,
@@ -160,20 +160,20 @@ pub fn subscribe_output(
     channel: tauri::ipc::Channel<tauri::ipc::Response>,
 ) -> Result<(), String> {
     let label = window.label().to_string();
-    // ★ADR-0006★: registry std Mutex — insert 는 동기, 락 보유 중 await 0. 같은 라벨 재등록(창 reload)은
-    //   덮어쓴다(옛 Channel 은 drop — 이미 죽은 webview 라 무해).
-    // ★poison 이어도 등록한다(ADR-0231)★ — 옛 `Err` 반환은 그 창이 출력을 영영 못 받게 했다(근거 정본 =
-    //   `output_channel` 모듈 헤더).
+    // ★ADR-0006★: the registry is a std Mutex — insert is synchronous, 0 awaits while holding the lock. Re-registering the same label (window reload)
+    //   overwrites (the old Channel is dropped — harmless since that webview is already dead).
+    // ★Register even if poisoned (ADR-0231)★ — the old `Err` return left that window never receiving output (the canonical
+    //   reasoning = the `output_channel` module header).
     crate::output_channel::register_window(&registry, label, channel);
     Ok(())
 }
 
-// ★뷰 주도 replay 채번(ADR-0046 M1 — request_replay)★. 뷰(slot)가 mount/remount 시 호출한다 — 그 agent 의
-// 데몬 ring 전량 재replay 를 single-flight 로 유발하고, 배정된 `gen`(세대)을 돌려준다. 뷰는 자기가 받은
-// gen **이상**의 성공 마커에만 sort+dedup flush(gen 펜스 — 남의/구세대 replay 조기 flush 차단).
+// ★View-driven replay numbering (ADR-0046 M1 — request_replay)★. A view (slot) calls it on mount/remount — it triggers a full re-replay of that agent's
+// daemon ring as single-flight and returns the assigned `gen` (generation). The view does sort+dedup flush only on success markers whose
+// gen is **at or above** the gen it received (gen fence — blocks early flush of someone else's / an old generation's replay).
 //
-// ★BLOCK-1 전면화(ADR-0046)★: wire `Subscribe{after_seq:None}`(전량)를 보내는 유일 경로다. layout 은
-// Unsubscribe(정리)만 보낸다. 비연결이면 Err(프론트가 connected 전이에서 재요청 — M2).
+// ★BLOCK-1 made universal (ADR-0046)★: this is the only path that sends wire `Subscribe{after_seq:None}` (everything). layout sends
+// only Unsubscribe (cleanup). If not connected, Err (the frontend re-requests on the connected transition — M2).
 #[tauri::command]
 pub async fn request_replay(
     client: State<'_, Arc<DaemonClient>>,
@@ -183,28 +183,29 @@ pub async fn request_replay(
     client.request_replay(agent_id).await
 }
 
-// ★T7c: TauriTransport.send() 진입점★. 프론트 ProtocolClient 가 AgentCommand wire 객체를
-// JSON 으로 보내면 Rust DaemonClient 를 통해 데몬으로 전달한다.
+// ★T7c: the TauriTransport.send() entry point★. When the frontend ProtocolClient sends an AgentCommand wire object as
+// JSON, it is forwarded to the daemon through the Rust DaemonClient.
 //
-// ★계약★: `cmd` 는 AgentCommand 의 externally-tagged JSON(e.g. `{"Kill":{…}}`). 파싱 실패는
-// 에러 반환(JSON 구조 불일치).
+// ★Contract★: `cmd` is the externally-tagged JSON of AgentCommand (e.g. `{"Kill":{…}}`). A parse failure returns an
+// error (JSON structure mismatch). A broken envelope field of `Command` · reply field of `CommandOutcome` · registration list field of `RegisterCommands` and
+// `UpdateCommands` also returns the same error.
 //
-// ## ★reply 평면 (Fix-B / 안 ②)★
-// 프론트 ProtocolClient 는 reply 를 oneshot(pending 맵)으로 기다리고, 그 reply 를 `onMessage`(control
-// InboundMessage)로 받아 request_id 매칭으로 resolve 한다. 그래서 이 invoke 는 **reply 를 버리지 않고**
-// 데몬 reply(AgentEvent)를 그대로 직렬화해 invoke 반환값으로 돌려준다 — TauriTransport.send 가 그 반환을
-// `onMessage({kind:'control', event})` 로 올려, ProtocolClient.handleEvent 가 기존대로 pending 을 깬다.
-// (WsTransport 가 데몬 Text frame 을 control 로 올리는 것과 동형 — broadcast 낭비·다창 누수 없는 oneshot 경로.)
+// ## ★reply plane (Fix-B / plan ②)★
+// The frontend ProtocolClient waits for a reply with a oneshot (pending map), receives that reply as `onMessage` (control
+// InboundMessage), and resolves by request_id matching. So this invoke **does not discard the reply** but
+// serializes the daemon reply (AgentEvent) as is and returns it as the invoke return value — TauriTransport.send raises that return as
+// `onMessage({kind:'control', event})`, and ProtocolClient.handleEvent breaks the pending as before.
+// (Isomorphic to WsTransport raising a daemon Text frame as control — a oneshot path with no broadcast waste or multi-window leak.)
 //
-// ★request_id 유무로 경로 분기 (hang 방지)★:
-// - request_id 있는 명령(spawn/kill/write/list/snapshot/profile CRUD/…) → `send_command`(reply await).
-//   ProtocolClient 가 pending 을 거는 명령은 *전부* request_id 를 가지며(resizePty 만 예외=fire-and-forget),
-//   데몬은 그 명령들에 reply variant(Ack/Spawned/Created/AgentList/ProfileList/Snapshot) 또는 Error 를
-//   echo 한다(connection_core.rs dispatch). 즉 send_command await 가 영구 점유되는 명령은 없다.
-// - request_id 없는 명령(Resize 등) → fire-and-forget. 반환 `Ok(None)`(올릴 reply 없음).
-// - 구독 셋(Subscribe/Unsubscribe/UsageSubscribe) → 그 앞에서 차단. 반환 `Ok(None)`(아래 본체 주석).
+// ★Path branching by presence of request_id (hang prevention)★:
+// - Commands with a request_id (spawn/kill/write/list/snapshot/profile CRUD/…) → `send_command` (awaits the reply).
+//   Commands for which ProtocolClient sets a pending *all* have a request_id (only resizePty is an exception = fire-and-forget),
+//   and the daemon echoes a reply variant (Ack/Spawned/Created/AgentList/ProfileList/Snapshot) or Error for those commands
+//   (connection_core.rs dispatch). That is, no command leaves the send_command await occupied forever.
+// - Commands without a request_id (Resize etc.) → fire-and-forget. Returns `Ok(None)` (no reply to raise).
+// - The subscription set (Subscribe/Unsubscribe/UsageSubscribe) → blocked before that. Returns `Ok(None)` (see the body comment below).
 //
-// 반환 `Ok(Some(value))` = 프론트로 올릴 control event(reply), `Ok(None)` = 올릴 것 없음.
+// Return `Ok(Some(value))` = a control event (reply) to raise to the frontend, `Ok(None)` = nothing to raise.
 #[tauri::command]
 pub async fn forward_daemon_command(
     client: tauri::State<'_, std::sync::Arc<DaemonClient>>,
@@ -213,25 +214,30 @@ pub async fn forward_daemon_command(
     forward_to_daemon(&client, cmd).await
 }
 
-/// [`forward_daemon_command`] 의 본체 — `State` 없이 하네스가 태운다(`daemon_client/tests.rs`).
+/// The body of [`forward_daemon_command`] — the harness drives it without `State` (`daemon_client/connection/tests.rs`).
 pub(crate) async fn forward_to_daemon(
     client: &DaemonClient,
     cmd: serde_json::Value,
 ) -> Result<Option<serde_json::Value>, String> {
     let agent_cmd: engram_dashboard_protocol::AgentCommand =
         serde_json::from_value(cmd).map_err(|e| format!("AgentCommand 파싱 실패: {e}"))?;
+    // The command fields (envelope · reply · registration list) are raw text so the parsing above does not look at their shape — if a broken field is not stopped here,
+    //   an envelope goes out as a one-way shot with no number so the frontend pending is never rejected, and a reply is
+    //   received by the daemon as a rejection with no number so the frontend does not learn of the failure (ADR-0272).
+    let agent_cmd = crate::daemon_client::protocol_state::reseal_webview_command_slots(agent_cmd)
+        .map_err(|e| format!("AgentCommand 명령 칸 파싱 실패: {e}"))?;
 
-    // ★데몬 구독 소유 = src-tauri 단독(ADR-0035/0037 — BLOCK-1)★: 프론트가 보낸 Subscribe/Unsubscribe
-    //   는 데몬으로 흘리지 않고 여기서 차단(drop)한다. 데몬 구독·재구독은 layout 구독 델타(ViewManager
-    //   권위, commands/layout.rs send_subscription_delta)가 `after_seq=버퍼 최신 seq`(축 A)로 단독
-    //   트리거한다 — 프론트가 `Subscribe{after_seq:null}`(FromOldest)를 N창에서 forward 하면 데몬이
-    //   FromOldest 를 N번 replay 해 공유 버퍼 seq 단조(무손실 전제)가 붕괴하기 때문이다. 프론트
-    //   ProtocolClient 는 이미 subscribeOutput 첫 구독에서 Subscribe 를 안 보내지만, resubscribeAll
-    //   (재연결 resume)·미래 carrier 변경이 다시 보낼 여지가 있어 Rust 가 무시로 2차 방어한다
-    //   (프론트가 안 보내거나 Rust 가 무시 — 어느 쪽이든 데몬 직접 구독 0).
-    // ★사용량 구독(`UsageSubscribe`)도 셸 단독이다(TRD S21 usage-limit-slot §1-7)★: 관심은 셸이 레이아웃에서
-    //   계산하고 연결 태스크만 그 집합을 쓴다. 웹뷰의 한 장이 데몬에 닿으면 셸이 보냈다고 아는 집합(`sent`)과
-    //   데몬 구독이 어긋난다 — request_id 가 없어 막지 않으면 아래 fire-and-forget 으로 그대로 간다.
+    // ★Daemon subscription ownership = src-tauri alone (ADR-0035/0037 — BLOCK-1)★: Subscribe/Unsubscribe sent by the frontend
+    //   are not passed to the daemon but blocked (dropped) here. Daemon subscribe and resubscribe are triggered by the layout subscription delta (ViewManager
+    //   authority, send_subscription_delta in commands/layout.rs) alone, with `after_seq=버퍼 최신 seq` (axis A) — because if the frontend
+    //   forwarded `Subscribe{after_seq:null}` (FromOldest) from N windows, the daemon would replay
+    //   FromOldest N times and the monotonic shared-buffer seq (the lossless premise) would collapse. The frontend
+    //   ProtocolClient already does not send Subscribe on the first subscribeOutput subscription, but resubscribeAll
+    //   (reconnect resume) or a future carrier change could send it again, so Rust ignores it as a second line of defense
+    //   (either the frontend does not send or Rust ignores — either way 0 direct daemon subscriptions).
+    // ★The usage subscription (`UsageSubscribe`) is also shell-only (TRD S21 usage-limit-slot §1-7)★: the interest is
+    //   computed by the shell from the layout and only the connection task uses that set. If one webview page reached the daemon, the set the shell knows it sent (`sent`) and
+    //   the daemon subscription would diverge — it has no request_id so if not blocked it goes straight to the fire-and-forget below.
     if matches!(
         agent_cmd,
         engram_dashboard_protocol::AgentCommand::Subscribe { .. }
@@ -250,51 +256,27 @@ pub(crate) async fn forward_to_daemon(
         return Ok(None);
     }
 
-    // ★reply 직렬화★: 데몬 reply(Ack/Spawned/…)는 externally-tagged AgentEvent 라, 직렬화하면
-    //   `{"Ack":{"request_id":…}}` 형태가 그대로 나온다 — 프론트 handleEvent 가 기대하는 wire 형태와 동형.
-    // ★끊김 처리★: send_command 가 Err(연결 끊김/응답 못 받음)면 그 메시지를 프론트로 전달해
-    //   ProtocolClient.sendCommand 의 send().catch 가 해당 pending 을 reject 하게 한다(영구 hang 차단).
+    // ★reply serialization★: the daemon reply (Ack/Spawned/…) is an externally-tagged AgentEvent, so serializing it gives
+    //   the `{"Ack":{"request_id":…}}` shape as is — isomorphic to the wire shape the frontend handleEvent expects.
+    // ★Disconnect handling★: if send_command returns Err (disconnected / no response received), that message is passed to the frontend so that
+    //   the send().catch of ProtocolClient.sendCommand rejects the corresponding pending (blocks a permanent hang).
     //
-    // ## ★reply 타임아웃 (Fix-C ③ — 영구 hang 2차 차단)★
-    // send_command 의 끊김 감지는 *carrier 레벨* 끊김(소켓 죽음 → 연결 task 종료 → drain/oneshot drop)만
-    // 잡는다. 그러나 "연결은 살아있는데 데몬이 그 request_id 응답만 누락"하는 경로가 있다:
-    //   - 데몬 dispatch(connection_core.rs)의 Ack/Error sink.enqueue 가 SinkError 로 *무시*(`let _ =`)
-    //     되는 경우(큐 포화 등, ADR-0020 R6 의도된 behavior-preserving) → reply 가 영영 안 온다.
-    // 그러면 send_command 의 `reply_rx.await` 는 carrier 가 안 끊겨 영구 대기 → invoke 가 안 끝나 →
-    // 프론트 ProtocolClient.pending 도 영구 hang(send().catch 도 안 불림). 이를 닫으려 reply 대기에
-    // 상한을 둔다. 타임아웃 시 Err → invoke reject → 프론트 send().catch → 해당 pending reject.
-    //
-    // ★값(30s)★: 데몬은 명령을 enqueue 한 *직후* Ack 를 sink 로 보낸다(무거운 작업 완료를 기다리지
-    //   않음 — connection_core.rs dispatch). 정상 경로의 왕복은 loopback 에서 수 ms 라 30s 에 절대 안
-    //   닿는다. 넉넉히 잡아 "느린 데몬"을 타임아웃으로 오판하지 않으면서, 무한 hang 만 확정적으로 끊는다.
-    //
-    // ★데몬측 enqueue 실패 승격 대신 클라측 타임아웃을 택한 이유★: connection_core.rs 의 enqueue
-    //   실패 무시(`let _ = sink.enqueue(..)`)를 "연결 종료로 승격"하면 ADR-0020 R6(behavior-preserving)을
-    //   깨고 데몬 crate 회귀 위험이 크다(정상 단일 연결도 일시적 큐 포화로 끊길 수 있음). 타임아웃은
-    //   src-tauri(클라) 레이어에 격리돼 데몬 동작을 안 건드리고, 락 순서(ADR-0006)와도 무관하다 —
-    //   send_command 는 락을 잡았다 즉시 풀고 Sender clone 만 반환하므로 이 timeout 래핑은 추가 락을
-    //   보유하지 않는다.
-    const REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-    match tokio::time::timeout(REPLY_TIMEOUT, client.send_command(agent_cmd)).await {
-        Ok(Ok(event)) => {
-            let value =
-                serde_json::to_value(&event).map_err(|e| format!("reply 직렬화 실패: {e}"))?;
-            Ok(Some(value))
-        }
-        Ok(Err(e)) => Err(e),
-        Err(_elapsed) => Err(
-            "daemon reply timeout — 연결은 살아있으나 데몬이 응답을 보내지 않음(30s 초과)"
-                .to_string(),
-        ),
-    }
+    // A reply that never comes while the link stays up (the daemon drops one answer) is bounded by the transport's
+    //   request timeout — the shared one of every round trip (ADR-0181 · ADR-0310 D15 ① ·
+    //   `daemon_client::connection::link_policy`), whose text is `link::errors::reply_timeout_text`. No second
+    //   timeout here. A command sent while the connection is live but not yet opened by the driver first waits for the
+    //   open, bounded by the same value — so the worst case is about twice it (the open gap is normally milliseconds).
+    let event = client.send_command(agent_cmd).await?;
+    let value = serde_json::to_value(&event).map_err(|e| format!("reply 직렬화 실패: {e}"))?;
+    Ok(Some(value))
 }
 
 fn expect_ack(result: CmdResult) -> Result<(), String> {
     match result {
         Ok(AgentEvent::Ack { .. }) => Ok(()),
-        // 데몬이 다른 성공 reply 를 줘도(있어선 안 되지만) 성공으로 본다 — 핵심은 Error 가 아니라는 것.
-        // ★프로토콜 drift 가시화(FIX-5)★: Ack 가 아닌 다른 variant 를 성공으로 *조용히* 삼키면 데몬-클라
-        //   계약 어긋남이 안 보인다 → 어떤 variant 였는지 warn 후 통과(반환 동작은 그대로 = 호출자 안 깨짐).
+        // Even if the daemon gives some other success reply (it should not), it is treated as success — the point is that it is not an Error.
+        // ★Protocol drift made visible (FIX-5)★: if a variant other than Ack is *silently* swallowed as success, a daemon-client
+        //   contract mismatch is invisible → warn which variant it was and then pass (the return behavior is unchanged = the caller does not break).
         Ok(other) => {
             tracing::warn!(
                 reply = ?other,
@@ -309,7 +291,7 @@ fn expect_ack(result: CmdResult) -> Result<(), String> {
 fn expect_ack_or_spawned(result: CmdResult) -> Result<(), String> {
     match result {
         Ok(AgentEvent::Ack { .. }) | Ok(AgentEvent::Spawned { .. }) => Ok(()),
-        // ★프로토콜 drift 가시화(FIX-5)★: Ack/Spawned 가 아닌 variant 를 조용히 삼키지 않고 warn.
+        // ★Protocol drift made visible (FIX-5)★: do not silently swallow a variant other than Ack/Spawned, warn.
         Ok(other) => {
             tracing::warn!(
                 reply = ?other,

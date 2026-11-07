@@ -1,51 +1,51 @@
-# ADR-0138: 릴리스 로그를 파일에 동기로 남긴다 — stdout 이 아무 데도 없다
+# ADR-0138: Write the release log to a file synchronously — stdout goes nowhere
 
-- 상태: 확정 (2026-08-16, 근거: 실측 + `tracing_appender` 크레이트 확인)
-- 관련: ADR-0003(코어 격리) · ADR-0134 결정 4(데이터 폴더 폴백 없음) · ADR-0135(클라이언트 사전 점검) · `crates/engram-dashboard-core/src/logging/mod.rs` · `crates/engram-dashboard-daemon/src/lib.rs:386` · `src-tauri/src/lib.rs:67` · `docs/reference/logging-conventions.md` · step-log S21
+- 상태: 확정 (2026-08-16, grounds: measured + `tracing_appender` crate check)
+- 관련: ADR-0003(core isolation) · ADR-0134 decision 4(no data folder fallback) · ADR-0135(client pre-check) · `crates/engram-dashboard-core/src/logging/mod.rs` · `crates/engram-dashboard-daemon/src/lib.rs:386` · `src-tauri/src/lib.rs:67` · `docs/reference/logging-conventions.md` · step-log S21
 
 ## 맥락
 
-**릴리스 빌드에서 데몬의 stdout은 아무에게도 닿지 않는다**(실측). 세 겹이다:
+**In a release build the daemon's stdout reaches no one** (measured). There are three layers:
 
-1. 릴리스 바이너리는 `windows_subsystem = "windows"`라 콘솔이 없다.
-2. 데몬은 WMI `Win32_Process.Create`로 뜨는데 그 API는 **std 핸들을 넘길 수 없다**(비-WMI 경로는 아예 null로 지정한다).
-3. 데몬은 부모 환경을 물려받지 않아 **`RUST_LOG`가 닿지 않는다**.
+1. The release binary is `windows_subsystem = "windows"`, so it has no console.
+2. The daemon is started through WMI `Win32_Process.Create`, and that API **cannot pass std handles** (the non-WMI path specifies null outright).
+3. The daemon does not inherit the parent environment, so **`RUST_LOG` never reaches it**.
 
-그래서 사용자가 본 것은 `데몬 시작 대기 timeout(5s 초과)` 배너 하나뿐이었고 **사유가 남는 곳이 한 군데도 없었다.** 이전 세션 기록이 "로그로 백엔드 동작을 확인한다"를 배제한 이유도 정확히 이것이다.
+So all the user saw was one banner, `데몬 시작 대기 timeout(5s 초과)` (daemon start wait timeout, over 5s), and **there was not a single place where the reason was kept.** This is exactly why the earlier session record ruled out "check backend behavior through logs."
 
 ## 결정
 
-1. **데몬과 앱 셸이 각각 `<데이터 폴더>/logs/<종류>-<UTC>-<pid>.log`를 쓴다.**
-2. **동기 쓰기.** `File` 직접 쓰기 — 이벤트 한 줄이 곧 한 번의 write다.
-3. **보존 = 종류별 최신 10개**(이번 실행분 포함 상한).
-4. **사람이 읽는 텍스트, 한 줄 한 이벤트.** ANSI 색 없음(사람·LLM이 그대로 읽는다).
-5. **로그 폴더는 호출자가 넘긴다 — 코어가 스스로 찾지 않는다.**
+1. **The daemon and the app shell each write `<데이터 폴더>/logs/<종류>-<UTC>-<pid>.log`.**
+2. **Synchronous writes.** Direct `File` writes — one event line is one write.
+3. **Retention = the latest 10 per kind** (the cap includes this run's file).
+4. **Human-readable text, one event per line.** No ANSI color (people and LLMs read it as is).
+5. **The caller passes the log folder — the core does not look for it itself.**
 
 ## 거부한 대안
 
-- **★`tracing_appender`의 non-blocking writer★** — worker가 **비동기**인데 데몬은 `std::process::exit`로 끝나 소멸자를 건너뛴다. 버퍼에 남은 줄이 그대로 사라지는데, **그 사라지는 줄이 바로 우리가 잡으려는 기동 실패 직전의 마지막 줄**이다. 크레이트에서 확인: 기본 버퍼 128,000줄 · 기본 lossy · 종료 시 send 타임아웃 100ms/1000ms. 기각 근거 = 크레이트 소스·문서 확인 + 데몬 종료 경로(코드).
-- **로그 대신 네이티브 팝업을 띄운다** — **사용자가 로그를 먼저 택했다**: LLM 오퍼레이터가 읽는 것은 로그이고, 팝업은 필요해지면 나중에 얹을 수 있다. 기각 근거 = 사용자 결정(2026-08-16).
-- **로그용 마스킹·레닥션 레이어 추가** — **의도적으로 거부.** 토큰은 이미 **같은 폴더에 평문으로** 있다(연결키 파일). 그 사본을 가리는 것은 아무것도 보호하지 않는다. 대신 채택한 규율 = **우리가 쓰는 문장에는 자격증명을 넣지 않는다.** 기각 근거 = 논리(같은 신뢰 경계 안의 중복 방어).
-- **구조화 JSON 출력** — 연기. 지금 필요한 것은 사람 또는 LLM이 "데몬이 왜 죽었나"를 읽는 것이다. 기각 근거 = 범위(필요가 아직 없다).
-- **코어가 데이터 폴더를 스스로 해석하게 하기** — 코어가 `discovery`를 의존하게 돼 **「코어 격리」(ADR-0003)가 깨진다.** 코어가 소유하는 것은 그 폴더 **아래의 배치 규약**(`logs/<종류>-<UTC>-<pid>.log`)뿐이다. 기각 근거 = 아키텍처 불변식 + 격리 게이트.
+- **★The non-blocking writer of `tracing_appender`★** — its worker is **asynchronous**, but the daemon ends with `std::process::exit` and skips destructors. Lines left in the buffer vanish, and **the vanishing lines are exactly the last lines before the startup failure we want to catch.** Confirmed in the crate: default buffer 128,000 lines · lossy by default · send timeout of 100ms/1000ms at shutdown. Grounds for rejection = crate source and docs check + the daemon exit path (code).
+- **Show a native popup instead of a log** — **the user chose the log first**: what the LLM operator reads is the log, and a popup can be added later if it becomes necessary. Grounds for rejection = user decision (2026-08-16).
+- **Add a masking/redaction layer for the log** — **rejected on purpose.** The token is already **in the same folder in plaintext** (the connection key file). Masking its copy protects nothing. The discipline adopted instead = **do not put credentials into sentences we write.** Grounds for rejection = logic (duplicate defense inside the same trust boundary).
+- **Structured JSON output** — deferred. What is needed now is for a person or an LLM to read "why did the daemon die." Grounds for rejection = scope (the need does not exist yet).
+- **Let the core resolve the data folder itself** — the core would depend on `discovery`, which **breaks "core isolation" (ADR-0003)** (「코어 격리」). What the core owns is only the **layout convention under** that folder (`logs/<종류>-<UTC>-<pid>.log`). Grounds for rejection = architecture invariant + isolation gate.
 
 ## 근거
 
-- 실측: 릴리스에서 데몬 실패 시 사용자에게 남는 정보가 배너 문구 하나였다(원인 0).
-- `tracing_appender` 기각은 **가정이 아니라 확인**이다 — 버퍼 크기·lossy 기본값·종료 타임아웃을 크레이트에서 읽었고, 데몬의 `std::process::exit` 종료가 소멸자를 건너뛴다는 것은 코드가 말한다.
-- 파일 이름의 UTC 타임스탬프는 **자릿수 고정이라 사전순 = 시간순**이고, 보존 정리가 그 성질에 기댄다.
+- Measured: when the daemon failed in release, the only information left to the user was one banner phrase (zero cause).
+- Rejecting `tracing_appender` is **a check, not an assumption** — the buffer size, the lossy default and the shutdown timeouts were read from the crate, and the code says that the daemon's `std::process::exit` exit skips destructors.
+- The UTC timestamp in the file name has **a fixed digit count, so lexical order = time order**, and retention cleanup leans on that property.
 
 ## 영향 / 불변식
 
-- **★비동기 writer로 되돌리지 말 것★** — 위 기각 사유가 그대로 되살아난다(앵커: `logging/mod.rs`의 `init_subscriber`).
-- **1차 폴더를 못 쓰면 `%TEMP%/engram-dashboard/logs/`로 물러난다.** 안 그러면 이 기능이 **자기 목적에서 실패한다** — 데이터 폴더를 못 쓰는 것이야말로 데몬 기동 실패의 흔한 이유인데, 하필 그때만 사유가 stdout(릴리스엔 없다)으로 간다. 이 폴백은 ADR-0134 결정 4를 침범하지 않는다 — 그 결정이 막는 것은 **상태**(명부·잠금)가 두 곳에 생기는 것이고, 여기서 옮기는 것은 상태 없는 사유 한 장뿐이다.
-- **★1차·폴백 둘 다 실패하면 sink를 설치하지 않는다 — 이 실패 경로를 명시적으로 다뤄야 한다★.** 그러지 않으면 **조용히 사라진다.** 이 경우의 주인은 클라이언트가 데몬을 띄우기 전에 도는 데이터 폴더 사전 점검이고(ADR-0135), 사용자는 그쪽 창에서 사유를 본다.
-- **subscriber 설치 전에 생긴 사유는 모아 두었다가 설치 직후 한 번에 낸다**(보존 삭제 실패·머리글 쓰기 실패·폴백 사용). 그 시점엔 낼 곳이 없어서다.
-- **파일은 subscriber 설치에 이긴 뒤에만 연다.** 순서를 뒤집으면 진 호출도 파일을 만들고 보존 정리까지 돌려, 아무도 쓰지 않을 빈 파일이 **진짜 로그 하나를 지우고** 그 자리를 영구히 차지한다.
-- **★알려진 잔여 1 — 이름 충돌★:** 같은 UTC 초 안에서 pid가 재사용되거나 시계가 뒤로 돌면 이름이 겹치고, append 모드라 **두 실행분이 한 파일에 이어진다.** 머리글이 그때마다 다시 찍혀 경계는 읽을 수 있다. 막으려면 배타 생성 + 재시도 루프가 필요해 대가가 이득을 넘는다.
-- **★알려진 잔여 2 — panic hook 자기교착★:** panic hook은 되감기 **전에, panic한 그 스레드에서** 돈다(데몬 `install_panic_hook`). 그 스레드가 sink 잠금을 쥔 채였다면 hook의 `error!`가 같은 `Mutex`를 다시 잠가 자기교착한다(프로세스가 멎는다 — abort보다 나쁘다). 창은 `write_all` 안에서 panic할 때뿐이라 실측된 적이 없다. 없애려면 잠금 없는 쓰기(줄 섞임)나 hook 전용 우회가 필요해 대가가 더 크다. 손질한다면 **hook 쪽**이지 sink 쪽이 아니다.
-- **sink는 poison을 무시하고 계속 쓴다** — 표준 구현은 poison에서 panic하는데, 그러면 hook의 로그가 다시 panic해(panic-in-panic → abort) **정작 남겨야 할 죽음의 이유가 사라진다.**
-- **`LogKind`는 자유 문자열이 아니라 닫힌 집합이다** — 두 프로세스가 같은 접두사를 고르면 한 파일을 나눠 써 줄이 섞인다. 새 프로세스가 생기면 variant를 더해 **의식적으로** 다른 이름을 고르게 한다.
-- **보존 정리는 접두사 일치가 아니라 파일명 문법으로 고른다** — 접두사로 되돌리면 둘이 깨진다: 라벨이 다른 라벨의 접두사이면(`app` vs `app-updater`) 한쪽 정리가 **다른 종류를 지우고**, 손으로 둔 이름 하나가 사전순 끝에 눌러앉아 **진짜 로그를 상한 밖으로 밀어낸다.**
-- **머리글은 로그 이벤트가 아니라 파일 첫 줄이다** — 기본 레벨이 `warn`이라 정상 기동은 한 줄도 안 남는다. 그러면 남는 건 빈 파일이고 언제 뜬 어느 바이너리인지조차 알 수 없다. 이걸 메우려고 기동 알림을 `info`→`warn`으로 올리면 레벨의 의미가 무너진다.
-- **날짜 crate를 들이지 않는다** — 코어의 의존은 파일명 하나 때문에 늘릴 값이 아니다(로그 **줄**의 타임스탬프는 tracing-subscriber가 이미 찍는다).
+- **★Do not go back to an asynchronous writer★** — the rejection reasons above come back as they were (anchor: `init_subscriber` in `logging/mod.rs`).
+- **If the primary folder cannot be used, it falls back to `%TEMP%/engram-dashboard/logs/`.** Otherwise this feature **fails at its own purpose** — being unable to use the data folder is a common reason for daemon startup failure, and precisely then the reason would go to stdout (which release does not have). This fallback does not violate ADR-0134 decision 4 — what that decision blocks is **state** (registry · lock) appearing in two places, and what is moved here is one stateless sheet of reason.
+- **★If both the primary and the fallback fail, no sink is installed — this failure path must be handled explicitly★.** Otherwise **it disappears silently.** The owner for this case is the data folder pre-check that runs before the client starts the daemon (ADR-0135), and the user sees the reason in that window.
+- **Reasons that arise before the subscriber is installed are collected and emitted all at once right after installation** (retention deletion failure · header write failure · fallback use). Until then there is nowhere to emit them.
+- **The file is opened only after winning the subscriber installation.** If the order is reversed, the losing call also creates a file and even runs retention cleanup, and an empty file nobody will write to **deletes one real log** and permanently takes its place.
+- **★Known residual 1 — name collision★:** If a pid is reused within the same UTC second or the clock goes backward, the names collide, and because of append mode **two runs continue in one file.** The header is printed again each time, so the boundary stays readable. Preventing it needs exclusive creation plus a retry loop, and the cost exceeds the gain.
+- **★Known residual 2 — panic hook self-deadlock★:** The panic hook runs **before** unwinding, **on the thread that panicked** (daemon `install_panic_hook`). If that thread was holding the sink lock, the hook's `error!` locks the same `Mutex` again and deadlocks itself (the process hangs — worse than abort). The window exists only when it panics inside `write_all`, and it has never been measured. Eliminating it needs lock-free writes (interleaved lines) or a hook-only bypass, and the cost is higher. If it is touched, touch **the hook side**, not the sink side.
+- **The sink ignores poison and keeps writing** — the standard implementation panics on poison, and then the hook's log panics again (panic-in-panic → abort) and **the very reason for the death that should be left disappears.**
+- **`LogKind` is a closed set, not a free string** — if two processes pick the same prefix they share one file and lines interleave. When a new process appears, a variant is added so that a different name is chosen **consciously**.
+- **Retention cleanup selects by file name grammar, not by prefix match** — going back to prefix breaks two things: if a label is a prefix of another label (`app` vs `app-updater`), cleaning one **deletes the other kind**, and a hand-placed name settling at the end of the lexical order **pushes a real log out beyond the cap.**
+- **The header is the first line of the file, not a log event** — the default level is `warn`, so a normal startup leaves not a single line. Then what remains is an empty file, and you cannot even tell which binary started when. Raising the startup notice from `info` to `warn` to fill this gap would collapse the meaning of the levels.
+- **No date crate is brought in** — the core's dependencies are not worth growing for one file name (the timestamp of the log **line** is already printed by tracing-subscriber).

@@ -53,11 +53,14 @@
 | T-59 | Job 멤버 명단이 「멤버 수 ≠ 명단 수」로 4 번 안에 완전해지지 않는 flake | 버그 | 미착수 · 선재(platform) · CI 1 회 관측 |
 | T-64 | 합쳐진 replay 의 후속 Subscribe 가 창 닫힌 뒤 나가 구독이 샌다 | 버그 | 미착수 · 선재 |
 | T-76 | 즉석 by-cwd codex 의 연결 실패에 주인이 없다(굳음) | 버그 | 미착수 · 선재 · S25 4 단계 리뷰가 찾음 |
+| T-79 | Shell–daemon link freezes while still showing "connected" (killing a PTY agent mid-burst) | 버그 | Fixed on `v0.5.0/fix/pty-kill-hang` (S34, `75de8476`) — not pushed/merged yet |
+| T-80 | A spewing agent shown in a slot makes the daemon close the connection on a full send queue → reconnect/replay storm | 버그 | Not started · pre-existing (old driver too) · found by S34 QA |
 | T-71 | 트래킹 번호를 가리키지 않기 — 해결되면 그냥 지우기 | 사소한 기능·정리 | 할 일 — 나중에 이슈로 |
 | T-70 | 브랜치 앞 버전 짐작 기준 — 기능이면 0.5.0 쪽 | 사소한 기능·정리 | 할 일 — 나중에 이슈로 |
 | T-69 | 스텝 번호 규약 — 새 주제마다 S번호 | 사소한 기능·정리 | 일부 됨 · 남은 것 = 자잘한 커밋 접두 |
 | T-68 | 로컬라이제이션 — 앱 전체를 다른 언어로 | 사소한 기능·정리 | 할 일 — 할 게 없을 때 뽑아서(사용자 2026-10-16) |
 | T-61 | Third-party wrapping criterion — in the code-conventions binding (done) · check existing code | 사소한 기능·정리 | Waiting for trigger — next refactoring round |
+| T-60 | 브랜치 이름에서 버전 접두 떼기(버전 묶음 = 태그 기준) | 사소한 기능·정리 | 사용자 결정 대기 — 나중에 고친다(2026-10-12) |
 | T-51 | 슬롯 보기 모드 덮어쓰기 영속(옛 P3e) | 사소한 기능·정리 | 보류 — 필요해질 때 |
 | T-43 | claude 도구 결과 중립 사건화 | 사소한 기능·정리 | 보류 |
 | T-37 | `todo` 폐기·합치기 | 사소한 기능·정리 | 트리거 대기 |
@@ -355,6 +358,18 @@
 - **다음:** by-cwd 갈래도 연결 결말을 보게 한다 — 후보 = 데몬이 `spawn_fresh_settled` 와 같은 판정을 거치게(즉석 생성은 「마지막 실패」 를 쓰지 않는 차이는 지키며 — ADR-0172) · 정하지 않았다.
 - **근거:** ADR-0200 · ADR-0201 · ADR-0202 · `manager.rs` 의 `spawn_fresh_settled` doc(이 구멍의 정본)
 
+### T-79. Shell–daemon link freezes while still showing "connected"
+- **Status:** fixed on branch `v0.5.0/fix/pty-kill-hang` (topic S34, commit `75de8476` — review + QA PASS; push/merge waits for the user). Remove this entry once merged. Reproduced on the old driver (`0d4f79d1`, 1/1) and on the 3-2 U4a tree (2/5); found 2026-11-07 by the U4a GUI QA.
+- **Repro (QA, isolated data dir, non-token fixture agent printing a 20000-line burst then a line every 20 ms):** spawn it; open an extra `subscribeOutput` view on no slot (its watchdog asks for replay every 11 s); after ~30 s put the agent on a slot (replay gen 1); the stray view's next asks go out as real replays (gen 2, gen 3); ~0.3 s after gen 3 spawn and kill a second agent.
+- **Symptom:** the daemon carries out the kill but its reply never arrives; from then on every request fails at 30 s with the reply-timeout text; output freezes in every view; `daemon_connection_state` stays `connected` for 3–4+ minutes — neither the shell keepalive nor the daemon idle check cuts the link. Both sides idle on CPU; the shell actor still answers; the daemon still serves other clients but ignores commands on the stuck connection. `daemon_close` + `daemon_ensure` recovers on a new connection; the old socket stays in FinWait2 on the shell side.
+- **Cause (confirmed by investigation + probes; S34 TRD §2):** not the shell. The daemon ran `Kill` inline on the connection's async dispatch task; `PtyTransport::shutdown` stopped the pump's reads and then dropped the master, so `ClosePseudoConsole` blocked forever on undrained conhost output; the blocked worker also starved the connection's writer (tokio LIFO slot), and the daemon's read side kept answering pings, so neither keepalive fired. The earlier suspicion (shell stops reading / daemon blocked in a send) was refuted.
+
+### T-80. A spewing agent shown in a slot triggers a reconnect/replay storm
+- **Status:** not started · pre-existing — reproduced on master's daemon with the old shell driver (S34 QA base run: 67 reconnects in 4 s, no kill involved). Found 2026-11-07 by the S34 GUI QA.
+- **Symptom:** while an agent that writes ~1.5 MB per call is shown in a slot, the connection drops and reconnects every ~20–35 ms; commands sent meanwhile fail fast ("connection lost" / handshake ended) and output stalls until the slot is emptied. No wedge — it stops once the agent is no longer shown.
+- **Observed mechanism (daemon log):** `ReplayComplete 를 큐에 못 실었다(포화) — 연결을 닫는다` (908×) then `연결 끊김` (1792×) — the daemon's per-connection send queue fills (by design: "포화면 이 연결이 끝난다"), the daemon closes, the shell reconnects and re-subscribes, the replay fills the queue again. Each cycle shows two dials accepted at once. Evidence: S34 QA logs (session scratchpad `t79/qa/gui`, `gui-base2`).
+- **Next:** design question — how the daemon should treat a slow/full consumer during a replay burst (backpressure vs close), likely within S21 stage 3-3 (daemon on the transport, byte budget / per-peer queue) or its own topic.
+
 ## 사소한 기능·정리
 
 ### T-71. 트래킹 번호를 가리키지 않기 — 해결되면 그냥 지우기
@@ -390,6 +405,11 @@
 - **첫 적용:** 프리셋 라이브러리 — walkdir · serde-saphyr · `std::fs` 는 데몬 「라이브러리 저장소」(목록 · 읽기 · 쓰기) 하나로 묶고, 화면 부품 라이브러리(react-arborist · TanStack Table · react-selecto)는 따로 감싸지 않고 라이브러리 트리 · 목록 부품 안에서 쓴다(`.claude/handoff/attachments/20261012-preset-decisions.md` 2026-10-14 절).
 - **할 것:** ① CLAUDE.md 「설계 원칙」에 이 기준을 짧게(또는 ADR 로 박고 그 번호를 가리키게 — 거부한 대안 = 「모든 라이브러리 감싸기」 · 「전혀 안 감싸기」) ② 기존 코드 점검 — 예: react-arborist 는 지금 `src/components/agent/AgentList.tsx` 한 곳뿐이라 ③ 이 「아니오」 → 지금은 그대로, 라이브러리 트리가 두 번째로 쓰는 순간 공용 부품으로.
 - **근거:** `docs/research/third-party-wrapping-criteria-survey-2026-10-14.md`
+### T-60. 브랜치 이름에서 버전 접두를 떼고, 버전 묶음은 태그로 본다
+- **상태:** 나중에 고친다(사용자 2026-10-12 — 「피드백에 올려 나중에 수정」). 그때까지 현행 규약(`v<다음 릴리스>/<타입>/<슬러그>`)을 따른다.
+- **문제:** 현행 규약은 다음 릴리스 번호를 브랜치를 팔 때 미리 짐작하게 한다. 짐작이 두 번 틀렸다 — 2026-08-17(매니페스트 현재 버전을 넣음) · 2026-10-12(transport 브랜치를 `v0.3.3/…` 로 팠다가 0.4.0 이 따로 진행 중이라 `v0.4.1/…` 로 바꿈). 일반 관행은 작업 브랜치를 주제로만 짓고 버전은 내보낼 때 정한다.
+- **다음:** `docs/handbook/branch-commit.md` 를 「브랜치 = `<타입>/<슬러그>` · 잡동사니 = `chore/misc` · 버전 묶음 = 태그 기준」으로 고친다(`/review doc` 거쳐 커밋). 묶음 보기 명령: `git log --first-parent --merges --oneline <옛 태그>..<새 태그>` · `git branch --merged <새 태그> --no-merged <옛 태그>` · 아직 안 실린 것 = `git branch --merged master --no-merged <최신 태그>`. 잃는 것 = git GUI 의 릴리스별 폴더 접힘. 이미 있는 `v0.x/…` 브랜치는 지우지 않는다(현행 규약).
+- **근거:** CLAUDE.md 「브랜치·커밋」(사용자 결정 2026-08-16/17) · 이 세션 대화(2026-10-12)
 
 ### T-51. 슬롯 보기 모드 덮어쓰기 영속(옛 P3e) — 지금은 프론트 메모리뿐이다
 - **상태:** 보류 — 사용자가 S21-storage 에서 뺐다(사용자 결정 2026-10-07 — 「json · 터미널에서 값을 주고 있는데 아직은 필요없어 보임」). 트리거 = 손으로 바꾼 보기 모드가 재시작 뒤에도 남아야 할 필요가 실제로 생길 때.

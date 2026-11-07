@@ -1,29 +1,29 @@
-//! envelope — 봉투 조립 + 배달 관측 어휘(ADR-0086/0093/0095/0096/0103, ADR-0110 이사).
+//! envelope — envelope assembly + delivery observation vocabulary (ADR-0086/0093/0095/0096/0103, moved by ADR-0110).
 //!
-//! ★역할★: 수신 LLM 에게 보이는 **봉투 텍스트의 단일 조립 지점**(`wrap_message`/`wrap_notice`)과, 그
-//!   봉투 1건의 배달 경계를 남기는 관측 어휘(`DeliveryObservation`/`DeliveryObserver`), 논리 메시지 id
-//!   생성기(`new_msg_id`), 입구 라벨(`Entrance`)을 모은다.
+//! ★Role★: collects the **single assembly point of the envelope text** the receiving LLM sees (`wrap_message`/`wrap_notice`), the
+//!   observation vocabulary that records the delivery boundary of one such envelope (`DeliveryObservation`/`DeliveryObserver`), the logical message id
+//!   generator (`new_msg_id`), and the entrance label (`Entrance`).
 //!
-//! ★왜 여기(커널)로 이사했나(ADR-0110 결정 5)★: 원래 데몬 `control::ingress` 안에 살았는데, 파킹된
-//!   메시지를 주입 시점에 감싸는 `MessagingService` 가 이걸 호출하면서 messaging↔control 모듈 순환이
-//!   생겼다. 봉투는 "이 커널이 만드는 산출물" 이지 입구의 소유물이 아니다 — 형제 소비자(채팅)도 같은
-//!   부품을 쓴다. 그래서 커널로 옮기고 입구(ingress)가 이쪽을 import 하는 단방향으로 정리했다.
+//! ★Why it moved here (the kernel) (ADR-0110 decision 5)★: it originally lived inside the daemon `control::ingress`, but when `MessagingService`,
+//!   which wraps parked messages at injection time, called it, a messaging↔control module cycle
+//!   appeared. The envelope is "an output this kernel produces", not the entrance's property — the sibling consumer (chat) uses the same
+//!   part too. So it moved into the kernel and was tidied into a one-way dependency where the entrance (ingress) imports this side.
 //!
-//! ★단일 wrap point 불변식(load-bearing — ADR-0086 §7)★: 봉투 조립은 이 모듈의 `wrap_message`/
-//!   `wrap_notice` **두 함수에만** 있다. 다른 곳에서 문자열을 손으로 조립하면 포맷 스위치·이스케이프
-//!   규율(사칭 차단)이 갈라진다.
+//! ★Single wrap point invariant (load-bearing — ADR-0086 §7)★: envelope assembly exists **only in the two functions** `wrap_message`/
+//!   `wrap_notice` of this module. Assembling strings by hand elsewhere splits the format switch and the escape
+//!   discipline (impersonation blocking).
 
 use crate::{PeerId, SenderIdentity};
 
-/// ★봉투 포맷 렌더 enum(ADR-0095/0096/0103)★
-/// 이 enum 이 **렌더 규칙(정확한 문자열)의 단일 출처**다 — protocol crate 의 동명 wire 타입은 값만
-/// 나르고(순수 계약), 실제 문자열 조립은 이 메시징 커널(여기)이 소유한다(ADR-0004 격리 결).
+/// ★Envelope format render enum (ADR-0095/0096/0103)★
+/// This enum is the **single source of the render rules (the exact strings)** — the same-named wire type in the protocol crate carries only the value
+/// (pure contract), and the actual string assembly is owned by this messaging kernel (here) (the isolation grain of ADR-0004).
 ///
-/// - `Xml` → `<message from="{sender}" ...>{body}</message>`(**운영 기본**, ADR-0103). request/reply/
-///   group 은 속성으로 확장(아래 EnvelopeFields). S18 메시징 v1 이 XML 봉투를 수신 LLM 계약으로 삼는다.
-/// - `Colon` → `{sender}: {body}`(잔존 스위치, ADR-0103 — 삭제 아님). 속성 확장 미지원(레거시 채팅 관례).
+/// - `Xml` → `<message from="{sender}" ...>{body}</message>` (**production default**, ADR-0103). request/reply/
+///   group are extended as attributes (EnvelopeFields below). S18 messaging v1 makes the XML envelope the receiving-LLM contract.
+/// - `Colon` → `{sender}: {body}` (leftover switch, ADR-0103 — not deleted). Attribute extension unsupported (legacy chat convention).
 ///
-/// 데몬 전역 상태 초기값·fold-unknown 도 Xml 로 정합.
+/// The daemon's global initial value and fold-unknown are also aligned to Xml.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EnvelopeFormat {
     #[default]
@@ -31,33 +31,33 @@ pub enum EnvelopeFormat {
     Colon,
 }
 
-/// ★노출 원칙(spec §1 · ADR-0103 결정 1)★: **수신 LLM 의 행동을 바꾸는 필드만** 봉투에 나타난다 —
-///   각 필드는 `Option` 이고 `Some` 일 때만 그 속성이 렌더된다(`None` = 속성 생략).
-///   시각·장부 상태는 여기 없다(내부 데이터).
+/// ★Exposure principle (spec §1 · ADR-0103 decision 1)★: **only fields that change the receiving LLM's behavior** appear in the envelope —
+///   each field is an `Option` and the attribute is rendered only when `Some` (`None` = attribute omitted).
+///   Timestamps and ledger state are not here (internal data).
 ///
-/// ★표기 매핑(고정, spec §1)★: 툴/CLI 인자 snake_case → XML 속성 kebab-case.
+/// ★Notation mapping (fixed, spec §1)★: tool/CLI argument snake_case → XML attribute kebab-case.
 #[derive(Debug, Clone, Default)]
 pub struct EnvelopeFields {
-    /// 메시지 id — **request 봉투에만** 실린다(회신 상관용, spec §1). XML 속성 `id`.
+    /// Message id — carried **only on request envelopes** (for reply correlation, spec §1). XML attribute `id`.
     pub id: Option<String>,
-    /// 메시지 타입 — 현재 유일 값은 `"request"`(장부 미회신 오픈). XML 속성 `type`. `None` = 통보(기본).
+    /// Message type — the only value now is `"request"` (ledger unreplied open). XML attribute `type`. `None` = notify (default).
     pub msg_type: Option<String>,
-    /// 회신 기한(기간 표기 "10m"/"1h" — spec §3). XML 속성 `reply-by`(kebab). request 부속.
+    /// Reply deadline (duration notation "10m"/"1h" — spec §3). XML attribute `reply-by` (kebab). Belongs to request.
     pub reply_by: Option<String>,
-    /// 어느 요청의 회신인가 — 발신 인자 `reply_to` 가 수신 봉투 속성 `in-reply-to` 로 나타난다(spec §1).
+    /// Which request this replies to — the send argument `reply_to` appears as the receiving envelope attribute `in-reply-to` (spec §1).
     pub in_reply_to: Option<String>,
-    /// 그룹 방송 대상(`@coders` 등) — **그룹일 때만** 실린다(방송임을 수신자에게 알림, spec §1). XML 속성 `to`.
+    /// Group broadcast target (`@coders` etc.) — carried **only for groups** (tells the recipient it is a broadcast, spec §1). XML attribute `to`.
     pub to: Option<String>,
 }
 
-/// ★메시지 래퍼(단일 wrap point — ADR-0086 §7 · 포맷 스위칭 ADR-0095/0096 · 속성 확장 ADR-0103 · 실험 seam ADR-0093)★:
-/// ★순수성(테스트 용이)★: env override 를 제외하면 이 함수는 인자만으로 결정된다 — `format`·`fields` 를
-/// param 으로 받아(전역 상태를 이 함수가 직접 읽지 않음) 호출부(handle_send)가 registry 에서 읽어 넘긴다.
-/// 그래야 wrap_message/apply_wrap_template 를 순수 함수로 유지해 포맷별 결과를 단위 테스트로 단언한다.
+/// ★Message wrapper (single wrap point — ADR-0086 §7 · format switching ADR-0095/0096 · attribute extension ADR-0103 · experiment seam ADR-0093)★:
+/// ★Purity (easy to test)★: apart from the env override, this function is decided by its arguments alone — it takes `format` and `fields` as
+/// params (this function does not read global state itself) and the call site (handle_send) reads them from the registry and passes them in.
+/// That keeps wrap_message/apply_wrap_template pure functions so per-format results are asserted in unit tests.
 ///
-/// ★spike 전용 seam — **verbatim 유지**, 제거/전용 금지(ADR-0093/0095/0096 불변식)★: `ENGRAM_WRAP_FORMAT`
-///   가 비어있지 않으면 그 값을 **템플릿 문자열**로 보고 placeholder(`{sender}`/`{id}`/`{body}`)를 치환한다.
-///   이 경로가 속성 확장(fields)을 무시하는 것도 의도 — 운영자 통제 verbatim 템플릿이라 별개다.
+/// ★Spike-only seam — **keep verbatim**, do not remove/repurpose (ADR-0093/0095/0096 invariant)★: if `ENGRAM_WRAP_FORMAT`
+///   is non-empty, that value is treated as a **template string** and placeholders (`{sender}`/`{id}`/`{body}`) are substituted.
+///   It is also intentional that this path ignores the attribute extension (fields) — it is an operator-controlled verbatim template, so it is a separate thing.
 pub fn wrap_message(
     sender: &str,
     msg_id: &str,
@@ -74,15 +74,15 @@ pub fn wrap_message(
     }
 }
 
-/// ★XML `<message>` 봉투 렌더(ADR-0103 — 속성 순서·이스케이프 단일 출처)★
+/// ★XML `<message>` envelope render (ADR-0103 — single source of attribute order and escaping)★
 ///
-/// ★속성 순서(고정·결정적, spec §1)★: `from → id → type → reply-by → in-reply-to → to`. 안정 순서라
-///   같은 입력이면 바이트 동일 출력(테스트 golden 고정 가능).
+/// ★Attribute order (fixed and deterministic, spec §1)★: `from → id → type → reply-by → in-reply-to → to`. A stable order means
+///   the same input gives byte-identical output (test goldens can be pinned).
 ///
-/// ★이스케이프(보안, ADR-0086 발신자 오인 0 · ADR-0096 FIX-2)★: **모든 속성 값은 attr 문맥 이스케이프**
-///   (`escape_xml_attr` — `"` 포함 4문자)를 거친다. `"` 를 반드시 이스케이프하는 이유: 속성 값이라 겹따옴표가
-///   값 경계를 깨 `from="a" from="admin` 식으로 사칭·속성 덮어쓰기가 가능하다(브로커 보장 authenticated-sender
-///   무력화). 이걸로 `</message>` 조각·속성 브레이크아웃이 전부 리터럴이 돼 봉투를 깨거나 사칭할 수 없다.
+/// ★Escaping (security, ADR-0086 zero sender misidentification · ADR-0096 FIX-2)★: **every attribute value passes through attr-context escaping**
+///   (`escape_xml_attr` — 4 characters including `"`). Why `"` must be escaped: since it is an attribute value, a double quote
+///   breaks the value boundary and enables impersonation and attribute overwrite like `from="a" from="admin` (defeating the broker-guaranteed authenticated-sender).
+///   With this, `</message>` fragments and attribute breakouts all become literals and cannot break or impersonate the envelope.
 fn render_message_xml(sender: &str, body: &str, fields: &EnvelopeFields) -> String {
     let mut out = format!("<message from=\"{}\"", escape_xml_attr(sender));
     if let Some(id) = &fields.id {
@@ -106,23 +106,23 @@ fn render_message_xml(sender: &str, body: &str, fields: &EnvelopeFields) -> Stri
     out
 }
 
-/// ★`<notice>` 렌더(ADR-0103 — 데몬 전용 인프라 통지)★: `<message>` 와 **다른 태그**로, `from` 속성이
-///   **없다**. 태그 분리가 load-bearing — 수신 LLM 은 `<notice>` 에 회신하지 않아야 한다(인프라 통지지
-///   동료 발신이 아님, spec §1·§2 · ADR-0103 불변식). from 이 없어 "누구에게 회신" 대상 자체가 없다.
+/// ★`<notice>` render (ADR-0103 — daemon-only infrastructure notice)★: a **different tag** from `<message>`, with **no** `from` attribute.
+///   The tag separation is load-bearing — the receiving LLM must not reply to a `<notice>` (it is an infrastructure notice,
+///   not a peer send, spec §1·§2 · ADR-0103 invariant). With no from there is no "reply to whom" target at all.
 ///
-/// ★유일 호출부 = `MessagingService`(C3 타임아웃 통지)★: `reply_by`
-///   초과 시 **발신자에게** notice 를 주입/파킹하는 경로(service.rs `deliver_notice`)가 유일한 생성처다.
-///   그래서 에이전트는 어떤 입구로도 `<notice>` 를 만들 수 없다(발신 인자에 타입 문자열 자체가 없다).
-/// ★포맷 스위치 무관(의도적)★: `wrap_message` 와 달리 `EnvelopeFormat`·`ENGRAM_WRAP_FORMAT` 을 보지 않는다 —
-///   colon 변형에는 notice 대응물이 정의돼 있지 않고(ADR-0103: colon = 레거시 채팅 관례), 인프라 통지는
-///   "회신 대상이 아님" 을 태그로 알려야 하므로 포맷과 무관하게 항상 `<notice>` 다.
-/// ★이스케이프★: notice 는 데몬이 만드는 텍스트지만 요청 id·에이전트 이름을 보간하므로 동일 규율 적용.
+/// ★Only call site = `MessagingService` (C3 timeout notice)★: the path that injects/parks a notice **to the sender** when `reply_by`
+///   is exceeded (service.rs `deliver_notice`) is the only place it is created.
+///   So an agent cannot create a `<notice>` through any entrance (the send arguments have no type string at all).
+/// ★Independent of the format switch (intentional)★: unlike `wrap_message`, it does not look at `EnvelopeFormat` or `ENGRAM_WRAP_FORMAT` —
+///   the colon variant has no notice counterpart defined (ADR-0103: colon = legacy chat convention), and an infrastructure notice
+///   must signal "not a reply target" by tag, so it is always `<notice>` regardless of format.
+/// ★Escaping★: a notice is daemon-made text but interpolates the request id and agent name, so the same discipline applies.
 pub fn wrap_notice(body: &str) -> String {
     format!("<notice>{}</notice>", escape_xml_text(body))
 }
 
-/// ★XML attribute 값 이스케이프(ADR-0096 FIX-2 보안)★ — `from="..."` 안에 들어갈 sender 용.
-///   `&` 를 **먼저** 치환한다 — 이후 도입되는 `&` 를 재이스케이프하지 않게.
+/// ★XML attribute value escaping (ADR-0096 FIX-2 security)★ — for the sender that goes inside `from="..."`.
+///   `&` is replaced **first** — so that a `&` introduced afterwards is not escaped again.
 fn escape_xml_attr(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('"', "&quot;")
@@ -130,16 +130,16 @@ fn escape_xml_attr(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
-/// ★XML element text 이스케이프(ADR-0096 FIX-2 보안)★ — element 본문에 들어갈 body 용.
-///   attr 문맥이 아니라 `"` 는 이스케이프 불요(안전).
+/// ★XML element text escaping (ADR-0096 FIX-2 security)★ — for the body that goes in the element body.
+///   It is not attr context, so `"` need not be escaped (safe).
 fn escape_xml_text(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
 }
 
-/// ★순진한 replace★: 치환 순서상 앞서 넣은 값 안에 `{...}` 가 있으면 뒤 치환이 다시 건드릴 수 있으나,
-///   env 는 운영자 통제(에이전트 아님)라 스파이크에선 무해하다(위 wrap_message 주석 참조).
+/// ★Naive replace★: given the substitution order, if a value inserted earlier contains `{...}` a later substitution can touch it again, but
+///   env is operator-controlled (not an agent), so it is harmless in the spike (see the wrap_message comment above).
 fn apply_wrap_template(template: &str, sender: &str, id: &str, body: &str) -> String {
     template
         .replace("{sender}", sender)
@@ -147,17 +147,17 @@ fn apply_wrap_template(template: &str, sender: &str, id: &str, body: &str) -> St
         .replace("{body}", body)
 }
 
-/// 어느 입구로 들어온 요청인가(ADR-0086 F6 — relay 계측 로그 필드).
-/// 파이프라인 로직은 이걸 분기하지 않는다(entrance-agnostic) — **로그 라벨 전용**이다.
+/// Which entrance the request came in through (ADR-0086 F6 — relay instrumentation log field).
+/// Pipeline logic does not branch on this (entrance-agnostic) — it is **for log labels only**.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Entrance {
-    /// MCP `eg_send` 툴 경로.
+    /// MCP `eg_send` tool path.
     Mcp,
-    /// `/control/send` 평문 HTTP 라우트(CLI `engram mail send`).
+    /// `/control/send` plain-text HTTP route (CLI `engram mail send`).
     Cli,
-    /// ★데몬 자가 발신(C3 — `<notice>`)★: 어떤 에이전트 입구도 거치지 않고 데몬이 스스로 만든 배달이다
-    ///   (request 기한 초과 통지 — spec §3 단계 4). 관측 레코드에서 "이건 인프라 통지지 동료 발신이 아니다"
-    ///   를 라벨만으로 가르려고 별도 값을 둔다(에이전트가 이 입구를 쓸 방법은 없다 — 생성처가 데몬 내부뿐).
+    /// ★Daemon self-send (C3 — `<notice>`)★: a delivery the daemon made by itself without passing through any agent entrance
+    ///   (request deadline-overrun notice — spec §3 step 4). A separate value is kept so that an observation record can tell "this is an infrastructure notice, not a peer send"
+    ///   apart by label alone (an agent has no way to use this entrance — the only place it is created is inside the daemon).
     Daemon,
 }
 
@@ -171,30 +171,30 @@ impl Entrance {
     }
 }
 
-/// ★논리 메시지 id 알파벳 — 소문자 base36★(수신 LLM 이 눈으로 옮겨 적는 값이라 대소문자 혼용 금지).
+/// ★Logical message id alphabet — lowercase base36★ (the receiving LLM copies this value by eye, so mixing cases is forbidden).
 const MSG_ID_ALPHABET: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
 
-/// id 본체 길이(접두 `m-` 제외).
+/// Length of the id body (excluding the `m-` prefix).
 const MSG_ID_BODY_LEN: u32 = 8;
 
-/// ★논리 메시지 id 생성(C3 · spec §1 `m-7f3k` 계약)★ — `m-` + 소문자 base36 8자.
+/// ★Logical message id generation (C3 · spec §1 `m-7f3k` contract)★ — `m-` + 8 lowercase base36 characters.
 ///
-/// ★왜 UUID 가 아닌가(load-bearing — LLM 인간공학)★: 이 id 는 **수신 LLM 이 봉투에서 읽어 회신 인자
-///   (`reply_to`)로 되받아쳐야** 하는 값이다(spec §2 엄격 매칭). 36자 UUID 는 토큰을 먹고 전사 오류를 부른다 —
-///   그래서 짧은 불투명 id 로 바꿨다. 이 id 는 **봉투·장부 키·응답 `id`·관측 레코드**에서 전부 같은 값이다
-///   (`DeliveryObservation.msg_uuid` 는 **다른 축** — 세션 replay-dedup 키라 여전히 UUID다).
-/// ★충돌 방어(문서화된 잔여)★: 공간 2.8×10^12 에 인메모리 규모(장부 링버퍼 1024 · 미회신 request 소수)라
-///   충돌 확률은 무시 가능하다. 그래도 조용히 넘기지 않는다 — request 발송은 `Ledger::open_request` 의
-///   `DuplicateId` 로 충돌을 잡고, 호출자(`handle_send`)가 **새 id 로 1회 재시도**한 뒤에도 걸리면 반려한다.
-/// ★난수원★: `uuid::v4`(OS CSPRNG) 의 앞 8바이트를 base36 공간으로 접는다 — 새 의존을 들이지 않으려고
-///   이미 있는 uuid 를 난수원으로만 쓴다(모듈러 접기의 편향은 2^64 mod 36^8 수준이라 무의미).
+/// ★Why not a UUID (load-bearing — LLM ergonomics)★: this id is a value the **receiving LLM must read from the envelope and echo back as the reply
+///   argument (`reply_to`)** (spec §2 strict matching). A 36-character UUID eats tokens and invites transcription errors —
+///   so it was replaced with a short opaque id. This id is the same value in the **envelope, ledger key, response `id` and observation record**
+///   (`DeliveryObservation.msg_uuid` is a **different axis** — it is the session replay-dedup key, so it is still a UUID).
+/// ★Collision defense (documented residual)★: with a space of 2.8×10^12 and an in-memory scale (ledger ring 1024 · few unreplied requests),
+///   the collision probability is negligible. Even so it is not passed over silently — a request send catches a collision via `DuplicateId` of
+///   `Ledger::open_request`, and if the caller (`handle_send`) is still caught after **one retry with a new id**, it bounces.
+/// ★Randomness source★: folds the first 8 bytes of `uuid::v4` (OS CSPRNG) into the base36 space — to avoid bringing in a new dependency,
+///   the already-present uuid is used only as a randomness source (the bias of modular folding is on the order of 2^64 mod 36^8, so meaningless).
 // ADR-0103
 pub fn new_msg_id() -> String {
     let bytes = *uuid::Uuid::new_v4().as_bytes();
     let mut n = u64::from_le_bytes(bytes[..8].try_into().expect("uuid = 16 bytes"));
     n %= 36u64.pow(MSG_ID_BODY_LEN);
     let mut buf = [b'0'; MSG_ID_BODY_LEN as usize];
-    // 뒤에서 앞으로 채워 자리수를 고정한다(상위 자리가 0 이면 '0' 패딩 — 길이 불변 = 파싱·로그 정렬 안정).
+    // Fills from back to front to fix the digit count (if the upper digits are 0, pad with '0' — fixed length = stable parsing and log sorting).
     for slot in buf.iter_mut().rev() {
         *slot = MSG_ID_ALPHABET[(n % 36) as usize];
         n /= 36;
@@ -202,86 +202,86 @@ pub fn new_msg_id() -> String {
     format!("m-{}", std::str::from_utf8(&buf).expect("base36 = ascii"))
 }
 
-/// ★배달-경계 관측 레코드(ADR-0088 Stage 0)★ — 제어 채널 relay 1건의 write 경계에서 남기는
-///   **기계 소비용** 증거다. 배달 정확성 하네스가 이걸로 "전송 실패(바이트가 안 꽂힘)" vs "모델이
-///   받고도 무시" 를 가른다 — 그 판정의 전제 계측이다.
+/// ★Delivery-boundary observation record (ADR-0088 Stage 0)★ — evidence for **machine consumption** left at the write boundary of one
+///   control-channel relay. With it the delivery-correctness harness tells apart "transport failure (the bytes were not written)" from "the model
+///   received it and ignored it" — it is the instrumentation that decision presupposes.
 ///
-/// ★왜 in-proc 레코드인가(로그 아님)★: 운영 데몬은 detached 로 돌아 로그 스크레이핑이 do-not 다
-///   (ADR-0088 HARD CONSTRAINT). 그래서 이 레코드를 호스트의 제어 평면(`ControlPlanePort` 구현)에
-///   설치된 in-proc 싱크(`DeliveryObserver`)로 흘려 통합 하네스(ADR-0012)가 직접 회수하게 한다. 같은
-///   정보를 사람 눈용
-///   tracing 으로도 남기지만(운영 forensic), 하네스는 tracing 이 아니라 이 레코드를 단언한다.
+/// ★Why an in-proc record (not a log)★: the production daemon runs detached, so log scraping is a do-not
+///   (ADR-0088 HARD CONSTRAINT). So this record is routed into an in-proc sink (`DeliveryObserver`) installed on the host's control plane
+///   (`ControlPlanePort` implementation) so the integration harness (ADR-0012) retrieves it directly. The same
+///   information is also left as human-readable
+///   tracing (production forensics), but the harness asserts this record, not tracing.
 ///
-/// ★필드 상관(핵심)★: `msg_id`(ingress 논리 메시지 id — 봉투 XML 속성 `id`) 와
-///   `msg_uuid`(session.write_input 이 만든 replay-dedup 키)를 **한 레코드에** 담아 상관시킨다.
-///   하네스는 "데몬이 논리 메시지 msg_id 를 write 했다" → "claude 가 user-turn msg_uuid 를 replay 했다
-///   (= 실제로 파싱함)" 를 이 쌍으로 잇는다. 실패(write 에러) 시 msg_uuid 는 없다(None).
+/// ★Field correlation (core)★: `msg_id` (the ingress logical message id — envelope XML attribute `id`) and
+///   `msg_uuid` (the replay-dedup key session.write_input made) are put **in one record** to correlate them.
+///   The harness links "the daemon wrote logical message msg_id" → "claude replayed the user-turn msg_uuid
+///   (= actually parsed it)" through this pair. On failure (write error) there is no msg_uuid (None).
 ///
-/// ★보안★: body 텍스트·토큰은 절대 담지 않는다(tracing 규율과 동일 — 바이트 수만).
+/// ★Security★: body text and tokens are never included (same as the tracing discipline — byte count only).
 #[derive(Debug, Clone)]
 pub struct DeliveryObservation {
     pub msg_id: String,
     pub to_id: PeerId,
-    /// 해석된 수신자 표시 이름(profile name).
+    /// Resolved recipient display name (profile name).
     pub to_name: String,
-    /// 발신자 신원(토큰 파생 — 페이로드 아님, ADR-0086).
+    /// Sender identity (token-derived — not payload, ADR-0086).
     pub from: SenderIdentity,
     pub entrance: Entrance,
-    /// 넘긴 논리 메시지(`wrap_message` 로 만든 봉투 문자열)의 바이트 수 = write 요청 바이트(char 수 아님).
-    /// `InjectReceipt.bytes_requested`(주입 포트 영수증) 와 같은 "논리 메시지 바이트" 의미다(그 계층의 논리 메시지 =
-    /// 이 봉투 문자열). encoder 가 감싸는 실제 wire 바이트가 아니다.
+    /// Byte count of the logical message handed over (the envelope string made by `wrap_message`) = write request bytes (not char count).
+    /// It has the same "logical message bytes" meaning as `InjectReceipt.bytes_requested` (the injection port receipt) (the logical message at that layer =
+    /// this envelope string). It is not the actual wire bytes the encoder wraps.
     pub bytes_requested: usize,
-    /// write 성공 시 `Some(bytes_requested)` — `InjectReceipt.bytes_written` 을 그대로 실은
-    /// by-construction 복사값이라 `bytes_requested` 와 항상 같다(short-write 탐지 아님, 비교하면 항상 동일).
-    /// write 실패 시 `None`(요청 바이트가 수용됐다는 증거 없음). `is_delivered()` 참조.
+    /// On write success `Some(bytes_requested)` — a by-construction copy that carries `InjectReceipt.bytes_written` as is,
+    /// so it is always equal to `bytes_requested` (not short-write detection; comparing always gives identical).
+    /// On write failure `None` (no evidence the requested bytes were accepted). See `is_delivered()`.
     pub bytes_written: Option<usize>,
-    /// 이 유저 턴의 session-level replay-dedup 키(write 성공 시 Some).
+    /// Session-level replay-dedup key of this user turn (Some on write success).
     pub msg_uuid: Option<uuid::Uuid>,
-    /// ★write 가 실제로 착지한 수신자 incarnation 의 epoch(ADR-0088 Stage 1, write 성공 시 Some)★.
-    /// `InjectReceipt.epoch` 를 그대로 실은 값 = write 를 **집행한** 세션의 epoch(resolve 시점
-    /// 스냅샷 epoch 이 아니다 — 그 비대칭이 핵심). 이 필드가 오라클 5 가 남긴
-    /// **관측 한계**("DeliveryObservation 이 수신자 epoch 을 안 담아 어느 incarnation 이 받았는지 레코드
-    /// 만으로 단정 못 한다")를 닫는다 — mid-flight epoch race(resolve↔write 사이 재시작)에서 메시지가
-    /// 새 incarnation 에 착지했음을 레코드만으로(record-self-sufficient) 직접 단언할 수 있게 한다.
-    /// write 실패 시 None(꽂힌 데 없으니 착지 epoch 도 없음 — msg_uuid/bytes_written 실패 시맨틱과 정합).
+    /// ★The epoch of the recipient incarnation the write actually landed on (ADR-0088 Stage 1, Some on write success)★.
+    /// Carries `InjectReceipt.epoch` as is = the epoch of the session that **executed** the write (not
+    /// the epoch snapshotted at resolve time — that asymmetry is the key). This field closes the
+    /// **observation limit** oracle 5 left behind ("DeliveryObservation does not carry the recipient epoch, so the record
+    /// alone cannot say which incarnation received it") — in a mid-flight epoch race (restart between resolve and write) it lets one
+    /// assert directly from the record alone (record-self-sufficient) that the message landed on the new incarnation.
+    /// On write failure None (nothing was written, so no landing epoch either — consistent with the msg_uuid/bytes_written failure semantics).
     pub to_epoch: Option<u32>,
-    /// ★회신 계약 관측(ADR-0088 확장 — roundtrip-smoke `--seed-request`)★: 이 배달이 어느 request 의
-    ///   회신인가 — 통보·request 발송이면 None.
-    ///   ★값의 진짜 출처 = 구조화 발신 메타, 텍스트에서 절대 파생하지 않는다(F1 리뷰 fix, load-bearing —
-    ///   보안)★: 이 필드는 `SendMeta.reply_to`(ingress `validate_contract` 가 이미 검증한 발신 인자)를
-    ///   관측 호출부(service.rs `observe_success`/`observe_failure`)가 **파라미터로 그대로 전달받아**
-    ///   채운다 — 렌더된 봉투 문자열을 다시 훑지 않는다. 옛 구현은 봉투 전체를 `in-reply-to="` 로
-    ///   substring 탐색했는데, 본문 이스케이프(`escape_xml_text`)가 `"` 를 이스케이프하지 않아 발신자가
-    ///   본문에 `in-reply-to="m-x..."` 같은 텍스트를 넣으면 관측이 위조됐다(재현됨) — 그래서 본문을 절대
-    ///   보지 않는 구조화 경로로 바꿨다. 그룹 방송은 reply_to 가 입구에서 이미 금지돼 있어(spec §4) 자연히
-    ///   None 이고, 콜론 포맷은 계약 필드 자체가 이 층에 오기 전에 반려된다(`contract_unsupported_by_envelope`)
-    ///   — 어느 쪽도 텍스트 파싱으로 판정하지 않는다.
-    ///   ★registry read accessor 를 추가하지 않는다(ADR-0088 HARD CONSTRAINT)★ — 새 조회 경로가 아니라
-    ///   호출부가 **이미 손에 쥔** 구조화 값(`SendMeta`/파킹 payload 의 `meta`)을 파라미터로 얹을 뿐이다
-    ///   (`observe_success`/`observe_failure` 시그니처에 파라미터 하나가 늘었을 뿐, registry 조회는 없다).
+    /// ★Reply-contract observation (ADR-0088 extension — roundtrip-smoke `--seed-request`)★: which request this delivery
+    ///   replies to — None for a notify or a request send.
+    ///   ★The true source of the value = structured send metadata, never derived from text (F1 review fix, load-bearing —
+    ///   security)★: this field is filled by the observation call site (service.rs `observe_success`/`observe_failure`) **receiving as a parameter, as is**,
+    ///   `SendMeta.reply_to` (the send argument ingress `validate_contract` already verified)
+    ///   — it does not rescan the rendered envelope string. The old implementation did a substring search of the whole envelope for `in-reply-to="`, but
+    ///   body escaping (`escape_xml_text`) does not escape `"`, so if a sender put text like `in-reply-to="m-x..."` in the
+    ///   body the observation was forged (reproduced) — so it was changed to a structured path that never
+    ///   looks at the body. For a group broadcast reply_to is already forbidden at the entrance (spec §4), so it is naturally
+    ///   None, and for the colon format the contract field itself is bounced before it reaches this layer (`contract_unsupported_by_envelope`)
+    ///   — neither is decided by text parsing.
+    ///   ★No registry read accessor is added (ADR-0088 HARD CONSTRAINT)★ — it is not a new lookup path; the call site
+    ///   just adds the structured value it **already holds** (`meta` of `SendMeta`/the parking payload) as a parameter
+    ///   (the `observe_success`/`observe_failure` signatures merely gained one parameter; there is no registry lookup).
     pub in_reply_to: Option<String>,
-    /// write 결과 — 성공이면 None, 실패면 에러 문자열(PtyError Display). 실패를 성공으로 삼키지 않음의 증거.
+    /// Write result — None on success, an error string (PtyError Display) on failure. Evidence that a failure is not swallowed as a success.
     pub error: Option<String>,
 }
 
 impl DeliveryObservation {
-    /// ★완결성의 근거는 `error.is_none()`★ — 그 `Ok` 는 배달 동사(`submit_stdin_observed`)가 **바이트가
-    ///   실제로 OS 로 나간 것을 확인한 뒤** 낸 것이다. ★한때 여기 「= 세션 write_all 이 Ok」로 적혀 있던
-    ///   것은 낡았다★: 통로가 유계 입력 큐를 쓰게 되면서 `write_all` 은 호출 스레드에서 일어나지 않고,
-    ///   그 착지 확인이 별도 동사로 옮겨 갔다(`AgentTransport::flush_input`). ★쓰기 완료를 확인할 수단이
-    ///   없다고 신고하는 통로(codex app-server)에서는 이 레코드가 착지가 아니라 **수락**까지만 단언한다★. 뒤의 바이트 등식은 short-write 를
-    ///   잡는 게 아니라(비교하면 항상 같다 — `InjectReceipt` by-construction) 성공 레코드가 잘 채워졌는지의
-    ///   by-construction 정합성 방어일 뿐이다(성공인데 bytes_written=None 같은 구성 버그를 거른다).
+    /// ★The basis of completeness is `error.is_none()`★ — that `Ok` was produced by the delivery verb (`submit_stdin_observed`) **after confirming the bytes
+    ///   actually went out to the OS**. ★What once said here 「= 세션 write_all 이 Ok」 (= session write_all is Ok) is
+    ///   stale★: once the channel began using a bounded input queue, `write_all` no longer happens on the calling thread,
+    ///   and that landing confirmation moved to a separate verb (`AgentTransport::flush_input`). ★On a channel that reports it has no means
+    ///   of confirming write completion (codex app-server), this record asserts only up to **acceptance**, not landing★. The byte equality that follows does not catch short-write
+    ///   (comparing always gives equal — `InjectReceipt` by-construction); it is only a by-construction consistency defense that a success record was filled in properly
+    ///   (it filters construction bugs like success with bytes_written=None).
     pub fn is_delivered(&self) -> bool {
         self.error.is_none() && self.bytes_written == Some(self.bytes_requested)
     }
 }
 
-/// 배달-경계 관측 싱크(ADR-0088) — 호스트 sink 스타일의 in-proc 콜백. 통합 하네스가 호스트 제어 평면
-///   (데몬 `ControlRegistry::set_delivery_observer`) 으로 설치하고, relay 경로가 배달마다 `observe` 를
-///   호출한다. 운영 데몬은 설치하지 않아 no-op(오버헤드 0). Send+Sync — Arc 로 공유·다른 스레드 회수.
+/// Delivery-boundary observation sink (ADR-0088) — an in-proc callback in the host sink style. The integration harness installs it through the host control plane
+///   (daemon `ControlRegistry::set_delivery_observer`), and the relay path calls `observe` on every delivery.
+///   The production daemon does not install it, so it is a no-op (zero overhead). Send+Sync — shared via Arc and retrievable from other threads.
 pub trait DeliveryObserver: Send + Sync {
-    /// 구현은 짧게(하네스는 보통 Vec 에 push) — relay 스레드가 호출하므로 블로킹 I/O 를 하지 않는다.
+    /// Keep implementations short (a harness usually pushes to a Vec) — the relay thread calls it, so do no blocking I/O.
     fn observe(&self, obs: DeliveryObservation);
 }
 
@@ -289,11 +289,11 @@ pub trait DeliveryObserver: Send + Sync {
 mod tests {
     use super::*;
 
-    /// ENGRAM_WRAP_FORMAT 은 프로세스 전역 env — set/remove·미설정 단언 테스트끼리 직렬화한다
-    /// (병렬 실행 시 한 테스트의 set 이 다른 테스트의 "미설정" 단언을 짓밟지 않게).
+    /// ENGRAM_WRAP_FORMAT is a process-global env — tests that set/remove it and tests that assert it unset are serialized
+    /// (so that on parallel runs one test's set does not trample another test's "unset" assertion).
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    // ── wrapper: 봉투 포맷 스위칭(ADR-0095/0096/0103) ────────────────────────────────
+    // ── wrapper: envelope format switching (ADR-0095/0096/0103) ────────────────────────────────
     #[test]
     fn wrap_message_colon_is_sender_body() {
         let _g = ENV_LOCK.lock().unwrap();
@@ -351,7 +351,7 @@ mod tests {
         );
     }
 
-    // ── ADR-0103: XML 봉투 속성 확장(순서·조건부 렌더·이스케이프) ────────────────────────
+    // ── ADR-0103: XML envelope attribute extension (order · conditional render · escaping) ────────────────────────
     #[test]
     fn wrap_message_xml_renders_request_attributes_in_order() {
         let _g = ENV_LOCK.lock().unwrap();
@@ -377,8 +377,8 @@ mod tests {
 
     #[test]
     fn wrap_message_xml_renders_all_fields_full_golden() {
-        // 기존 `wrap_message_xml_renders_request_attributes_in_order` 는 in_reply_to·to 가 None 이라
-        //   전 필드 동시 조합을 미커버 — 이 테스트가 그 갭을 닫는다.
+        // The existing `wrap_message_xml_renders_request_attributes_in_order` has in_reply_to and to as None, so it does not
+        //   cover the combination of all fields at once — this test closes that gap.
         let _g = ENV_LOCK.lock().unwrap();
         let fields = EnvelopeFields {
             id: Some("m-7f3k".into()),
@@ -476,7 +476,7 @@ mod tests {
         );
     }
 
-    // ── ADR-0103: `<notice>` 렌더(데몬 전용, from 없음) ──────────────────────────────
+    // ── ADR-0103: `<notice>` render (daemon-only, no from) ──────────────────────────────
     #[test]
     fn wrap_notice_has_no_from_attribute() {
         let n = wrap_notice("요청 m-7f3k 기한(10m) 초과 — qa-bravo 회신 없음");
@@ -498,7 +498,7 @@ mod tests {
         );
     }
 
-    // ── ADR-0096 FIX-2: XML 봉투 이스케이프(보안 — 사칭·봉투 브레이크아웃 차단) ──────────────
+    // ── ADR-0096 FIX-2: XML envelope escaping (security — blocks impersonation and envelope breakout) ──────────────
     #[test]
     fn wrap_message_xml_escapes_body_special_chars() {
         let _g = ENV_LOCK.lock().unwrap();
@@ -568,7 +568,7 @@ mod tests {
         assert_eq!(escape_xml_attr(r#"<&>""#), r#"&lt;&amp;&gt;&quot;"#);
     }
 
-    // ── ADR-0093: env-driven 실험 봉투 형식 seam ─────────────────────────────────
+    // ── ADR-0093: env-driven experimental envelope format seam ─────────────────────────────────
     #[test]
     fn apply_wrap_template_substitutes_all_placeholders() {
         assert_eq!(
@@ -612,7 +612,7 @@ mod tests {
             EnvelopeFormat::Xml,
             &EnvelopeFields::default(),
         );
-        std::env::remove_var("ENGRAM_WRAP_FORMAT"); // 반드시 제거(다른 테스트로 새지 않게).
+        std::env::remove_var("ENGRAM_WRAP_FORMAT"); // Must be removed (so it does not leak into other tests).
         assert_eq!(w_colon, "<alice#id7> hello", "env 템플릿이 colon 을 이겨야");
         assert_eq!(w_xml, "<alice#id7> hello", "env 템플릿이 xml 도 이겨야");
     }
@@ -651,7 +651,7 @@ mod tests {
         );
     }
 
-    // ── C3: 메시지 id 포맷(spec §1 `m-7f3k`) ────────────────────────────────────────────────
+    // ── C3: message id format (spec §1 `m-7f3k`) ────────────────────────────────────────────────
 
     #[test]
     fn new_msg_id_is_m_prefix_plus_eight_lowercase_base36() {

@@ -1,17 +1,17 @@
-// RichSlot(라이브 모드) send() 실패 경로 회귀 — 로컬 UI-state 에러 처리(WIRE 불변 ADR-0044/45/46).
+// RichSlot (live mode) send() failure path regression — local UI-state error handling (WIRE unchanged ADR-0044/45/46).
 //
-// 배경: send() 는 전송 직후 awaiting=true 로 즉시 streaming 힌트를 켠다(FIX 5b). 응답 이벤트가 도착하면
-//   awaiting 이 해제되지만, writeStdin 자체가 reject 되면 응답이 영영 안 와 awaiting 이 걸린 채 남는다 →
-//   파생 streaming(= awaiting || (!turnDone && items.length>0))이 계속 true 라 표시가 고착.
-//   fix: catch 에서 setAwaiting(false). 여기서 그 복귀를 관측한다.
+// Background: send() turns the streaming hint on at once with awaiting=true right after sending (FIX 5b). When the response event arrives,
+//   awaiting is cleared, but if writeStdin itself rejects, the response never comes and awaiting stays set →
+//   derived streaming (= awaiting || (!turnDone && items.length>0)) stays true, so the indicator sticks.
+//   fix: setAwaiting(false) in catch. This test observes that recovery.
 //
-// ★관측 표면★: streaming 의 유일한 시각 신호는 입력창 위 대기 표시 줄의 "Wait" 라벨(`chat/WaitRow.tsx`)이고,
-//   streaming 이면 뜬다. 그래서 관측 가능한 상태를 만들려고, 구독 콜백을 캡처해
-//   TextDelta + MessageDone 을 먹인다 → items=[text,separator] & turnDone=true. 그러면 streaming = awaiting
-//   로 좁혀져(!turnDone 항이 죽음), "Wait" 표시의 유무가 곧 awaiting 의 거울이 된다.
+// ★Observation surface★: the only visual signal of streaming is the "Wait" label (`chat/WaitRow.tsx`) on the wait row above the input box,
+//   shown when streaming. So to make the state observable, the subscription callback is captured
+//   and fed TextDelta + MessageDone → items=[text,separator] & turnDone=true. Then streaming narrows to awaiting
+//   (the !turnDone term dies), and the presence of the "Wait" indicator mirrors awaiting.
 //
-// 전략: agentClient(clientFactory)·agentStore 를 slotTagGate.test.tsx 와 동일 패턴으로 stub. subscribeOutput
-//   콜백을 캡처(onChunk)해 tag1(StructuredEvent) chunk 를 주입하고, writeStdin 을 reject/resolve 로 갈아끼운다.
+// Strategy: stub agentClient (clientFactory) and agentStore with the same pattern as slotTagGate.test.tsx. Capture the subscribeOutput
+//   callback (onChunk) to inject tag1 (StructuredEvent) chunks, and swap writeStdin between reject/resolve.
 
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -19,15 +19,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { FRAME_TAG_STRUCTURED_EVENT } from '../../api/wsFrame'
 import { INPUT_LOCKED_REFUSAL, type OutputChunk, type ReplayLiveInfo, type ViewPhase } from '../../api/agentClient'
 import { t } from '../../i18n'
-import '../../commands/chatCommands' // side-effect register — 도구 묶음 command 가 마운트된 슬롯에 닿나를 잰다.
-import '../../commands/agentCommands' // side-effect register — 끊기 명령이 「중단하는 중」을 세우는 길까지 태운다(ADR-0244).
+import '../../commands/chatCommands' // side-effect register — measures whether the tool-bundle command reaches the mounted slot.
+import '../../commands/agentCommands' // side-effect register — carries the interrupt command all the way to the path that sets 「중단하는 중」 (interrupting) (ADR-0244).
 import { run, type CommandArgs } from '../../commands/registry'
 import { useToolGroupStore } from '../../store/toolGroupStore'
 import { pendingInterrupt, useInterruptStore } from '../../store/interruptStore'
 import { getFollow } from './scrollFollow/followRegistry'
 import { JUMP_BUTTON_DELAY_MS } from './scrollFollow/JumpToBottom'
 
-// ── subscribeOutput 콜백 캡처 + writeStdin holder(테스트마다 갈아끼움). ──
+// ── subscribeOutput callback capture + writeStdin holder (swapped per test). ──
 const captured = vi.hoisted(() => ({
   onChunk: null as ((c: OutputChunk) => void) | null,
   onState: null as ((s: ViewPhase, info?: ReplayLiveInfo) => void) | null,
@@ -35,19 +35,19 @@ const captured = vi.hoisted(() => ({
 }))
 const clientMock = vi.hoisted(() => ({
   writeStdin: vi.fn(async () => undefined) as (id: string, bytes: Uint8Array) => Promise<void>,
-  // ADR-0231 재부착 대조 — 'live'(표식 실림)마다 불린다. 테스트가 답을 늦게 풀려고 갈아끼운다.
+  // ADR-0231 re-attach check — called on every 'live' (marker carried). The test swaps it to release the reply late.
   listQueuedInputs: vi.fn(async () => ({ inputs: [], as_of_seq: null, epoch: 0, stopped_after_error: false })) as (
     id: string,
   ) => Promise<unknown>,
   interruptAgent: vi.fn(async () => undefined) as (id: string) => Promise<void>,
-  // 연결 상태 표면(ADR-0148 부재 판정의 절반) — 등록 즉시 현재 상태로 1회 발화하는 실물 계약을 따른다.
+  // Connection state surface (half of the ADR-0148 absent decision) — follows the real contract of firing once with the current state on registration.
   connectionState: 'connected' as 'connected' | 'reconnecting' | 'down',
   stateCbs: new Set<(s: 'connected' | 'reconnecting' | 'down') => void>(),
 }))
 
 vi.mock('../../api/clientFactory', () => ({
   agentClient: {
-    // ADR-0046 시그니처 (viewId, agentId, onChunk, onState?, onReset?).
+    // ADR-0046 signature (viewId, agentId, onChunk, onState?, onReset?).
     subscribeOutput: vi.fn(
       async (
         _viewId: string,
@@ -71,23 +71,23 @@ vi.mock('../../api/clientFactory', () => ({
     },
     onConnectionStateChange: (cb: (s: 'connected' | 'reconnecting' | 'down') => void) => {
       clientMock.stateCbs.add(cb)
-      cb(clientMock.connectionState) // 실물과 동일: 등록 즉시 현재 상태 1회 통지.
+      cb(clientMock.connectionState) // Same as the real one: notifies the current state once on registration.
       return () => clientMock.stateCbs.delete(cb)
     },
   },
   getAgentClient: vi.fn(),
 }))
 
-// ── 사람 경로 명령 호출(ADR-0237 Esc 끊기) — 실행이 아니라 무엇을 불렀나만 본다. ──
+// ── Human-path command calls (ADR-0237 Esc interrupt) — checks only what was called, not execution. ──
 const dispatchMock = vi.hoisted(() => ({ fireAndForget: vi.fn() }))
 vi.mock('../../commands/dispatch', () => ({
   fireAndForget: (...args: unknown[]) => dispatchMock.fireAndForget(...args),
 }))
-// 끊기 명령 모듈이 폴더 다이얼로그를 import 한다 — 이 시험들은 그 문을 부르지 않는다.
+// The interrupt command module imports the folder dialog — these tests do not call that door.
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn() }))
 
-// ── agentStore stub — 슬롯이 부재 판정용으로 agents·agentsLoaded 를 조회한다. ──
-// agentsLoaded=false 가 기본 = "권위 명부 미수신" → 빈 목록을 부재로 오인하지 않는다(ADR-0148 가드).
+// ── agentStore stub — the slot queries agents and agentsLoaded for the absent decision. ──
+// agentsLoaded=false by default = "authoritative registry not received" → an empty list is not mistaken for absent (ADR-0148 guard).
 const agentStoreState = vi.hoisted(() => ({
   agents: [] as unknown[],
   agentsLoaded: false,
@@ -96,18 +96,18 @@ vi.mock('../../store/agentStore', () => ({
   useAgentStore: (selector: (s: typeof agentStoreState) => unknown) => selector(agentStoreState),
 }))
 
-// ── 테스트 대상 ────────────────────────────────────────────────────────────────
+// ── Test subject ────────────────────────────────────────────────────────────────
 import RichSlot from './RichSlot'
 
 const AGENT = 'aaaa-bbbb-cccc-dddd'
 const enc = new TextEncoder()
 
-/** tag1 = StructuredEvent JSON chunk(구조화 슬롯이 소비하는 유일 tag). */
+/** tag1 = StructuredEvent JSON chunk (the only tag the structured slot consumes). */
 function tag1(seq: number, json: string): OutputChunk {
   return { seq, tag: FRAME_TAG_STRUCTURED_EVENT, bytes: enc.encode(json) }
 }
 
-/** subscribeOutput/writeStdin async 마이크로태스크를 비운다(구독 등록·write reject 반영). */
+/** Flushes the subscribeOutput/writeStdin async microtasks (subscription registration, write reject taking effect). */
 async function flush(): Promise<void> {
   await act(async () => {
     await Promise.resolve()
@@ -116,15 +116,15 @@ async function flush(): Promise<void> {
 }
 
 /**
- * 콘텐츠 1턴을 완결 상태로 주입한다(TextDelta → MessageDone). 결과: items=[text,separator], turnDone=true.
- * 이 상태에서 streaming = awaiting 로 좁혀져(!turnDone 항 무력화) "Wait" 표시가 awaiting 을 그대로 반영.
+ * Injects 1 content turn in a completed state (TextDelta → MessageDone). Result: items=[text,separator], turnDone=true.
+ * In this state streaming narrows to awaiting (the !turnDone term neutralized), so the "Wait" indicator reflects awaiting as is.
  */
 function feedCompletedTurn(): void {
   act(() => captured.onChunk!(tag1(0, JSON.stringify({ type: 'TextDelta', text: 'assistant reply' }))))
   act(() => captured.onChunk!(tag1(1, JSON.stringify({ type: 'MessageDone' }))))
 }
 
-/** 연결 상태 전이(실물 ProtocolClient 가 구독자 전원에게 통지하는 경로와 동형). */
+/** Connection state transition (same shape as the path where the real ProtocolClient notifies all subscribers). */
 function setConnection(state: 'connected' | 'reconnecting' | 'down'): void {
   clientMock.connectionState = state
   act(() => {
@@ -132,7 +132,7 @@ function setConnection(state: 'connected' | 'reconnecting' | 'down'): void {
   })
 }
 
-/** 부재 오버레이(ADR-0148 결정 2·3) — 흐림 막 + 심볼. 시각값(투명도·크기)은 단언하지 않는다. */
+/** Absent overlay (ADR-0148 decisions 2·3) — blur curtain + symbol. Visual values (opacity, size) are not asserted. */
 function deadOverlay(): HTMLElement | null {
   return document.querySelector('[data-slot-dead="1"]')
 }
@@ -155,7 +155,7 @@ beforeEach(() => {
   agentStoreState.agents = []
   agentStoreState.agentsLoaded = false
   dispatchMock.fireAndForget.mockReset()
-  // 펼침 저장소는 모듈 전역이다 — 모든 시험이 같은 슬롯 · 에이전트(v1 · AGENT)라 앞 시험의 고른 펼침이 이어 붙는다.
+  // The expansion store is module-global — every test uses the same slot · agent (v1 · AGENT), so a prior test's chosen expansion carries over.
   useToolGroupStore.setState({ bySlot: {} })
 })
 
@@ -166,7 +166,7 @@ afterEach(() => {
 
 describe('RichSlot(live) — send() 실패 시 awaiting 해제', () => {
   it('writeStdin 이 reject 되면 "Wait" 스트리밍 신호가 고착되지 않고 idle 로 복귀한다', async () => {
-    // console.warn 은 fix 의 에러 표면 — 테스트 로그 오염 방지 겸 호출 관측용으로 잠재운다.
+    // console.warn is the fix's error surface — silenced both to keep test logs clean and to observe calls.
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     clientMock.writeStdin = vi.fn(async () => {
       throw new Error('write failed')
@@ -176,18 +176,18 @@ describe('RichSlot(live) — send() 실패 시 awaiting 해제', () => {
     await flush()
     expect(captured.onChunk).toBeTruthy()
 
-    // 완결된 1턴을 주입 → turnDone=true & 콘텐츠 존재. 이 상태에서 streaming = awaiting.
+    // Inject one completed turn → turnDone=true & content present. In this state streaming = awaiting.
     feedCompletedTurn()
     expect(screen.queryByText('Wait')).toBeNull()
 
-    // send() 는 즉시 awaiting=true 로 streaming 힌트를 켠다.
+    // send() turns the streaming hint on at once with awaiting=true.
     const textarea = screen.getByPlaceholderText(/메시지 입력/)
     fireEvent.change(textarea, { target: { value: 'hello' } })
     fireEvent.keyDown(textarea, { key: 'Enter' })
 
     expect(clientMock.writeStdin).toHaveBeenCalledTimes(1)
 
-    // reject 반영(catch → setAwaiting(false)) 마이크로태스크 flush.
+    // Flush the microtask for the reject taking effect (catch → setAwaiting(false)).
     await flush()
 
     expect(screen.queryByText('Wait')).toBeNull()
@@ -195,7 +195,7 @@ describe('RichSlot(live) — send() 실패 시 awaiting 해제', () => {
   })
 
   it('writeStdin 이 성공하면(응답 전) awaiting 이 유지돼 "Wait" 신호가 켜진다(대조군)', async () => {
-    clientMock.writeStdin = vi.fn(async () => undefined) // 성공 = resolve
+    clientMock.writeStdin = vi.fn(async () => undefined) // success = resolve
 
     render(<RichSlot viewId="v1" agentId={AGENT} />)
     await flush()
@@ -208,12 +208,12 @@ describe('RichSlot(live) — send() 실패 시 awaiting 해제', () => {
     fireEvent.keyDown(textarea, { key: 'Enter' })
     await flush()
 
-    // 성공 경로 — 아직 응답 이벤트가 없으므로 awaiting 브리지로 streaming 유지.
+    // Success path — there is no response event yet, so streaming is kept by the awaiting bridge.
     expect(screen.getByText('Wait')).toBeTruthy()
   })
 })
 
-// 사용자 결정 2026-10-01: 대기 표시는 스크롤 목록 밖 · 입력창 바로 위의 늘 서 있는 줄에 선다.
+// User decision 2026-10-01: the wait indicator stands outside the scroll list, on an always-present row right above the input box.
 describe('RichSlot(live) — 대기 표시 줄', () => {
   it('대화 중이면 줄이 늘 서 있고 스크롤 목록 밖 · 입력 묶음 바로 위다 — 표시는 도는 동안만 그 안에', async () => {
     render(<RichSlot viewId="v1" agentId={AGENT} />)
@@ -226,7 +226,7 @@ describe('RichSlot(live) — 대기 표시 줄', () => {
     expect(strip).not.toBeNull()
     expect(viewport.contains(strip)).toBe(false)
     expect(strip.nextElementSibling?.contains(textarea)).toBe(true)
-    expect(strip.contains(label)).toBe(true) // 정체성 라벨은 이 줄의 오른쪽 칸이다 — 띄워 겹치지 않는다
+    expect(strip.contains(label)).toBe(true) // The identity label is this row's right-hand area — it does not float and overlap
     expect(label.className).not.toContain('absolute')
     expect(screen.queryByText('Wait')).toBeNull()
 
@@ -237,10 +237,10 @@ describe('RichSlot(live) — 대기 표시 줄', () => {
     expect(document.querySelector('[data-wait-strip="1"]')).toBe(strip)
     expect(strip.contains(wait)).toBe(true)
     expect(viewport.contains(wait)).toBe(false)
-    // 대기 글이 왼쪽 · 라벨이 오른쪽에 한 줄로 서고, 라벨은 대기 표시가 켜져도 같은 노드다.
+    // The wait text stands on the left and the label on the right in one line, and the label is the same node even when the wait indicator turns on.
     expect(wait.compareDocumentPosition(label) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     expect(document.querySelector('[data-rich-label="1"]')).toBe(label)
-    // 입력창은 줄이 끼어도 같은 노드다(textarea 주석 — 두 배치에서 같은 엘리먼트).
+    // The input box is the same node even when the row is inserted (textarea comment — the same element in both layouts).
     expect(screen.getByPlaceholderText(/메시지 입력/)).toBe(textarea)
   })
 
@@ -250,34 +250,34 @@ describe('RichSlot(live) — 대기 표시 줄', () => {
     act(() => captured.onState!('live', { continuesConversation: false }))
     expect(emptyState()).not.toBeNull()
     expect(document.querySelector('[data-wait-strip="1"]')).toBeNull()
-    expect(document.querySelector('[data-rich-label="1"]')).toBeNull() // 빈 상태의 라벨 접힘은 그대로다
+    expect(document.querySelector('[data-rich-label="1"]')).toBeNull() // The label collapse in the empty state is unchanged
   })
 })
 
-// ★후속 전송 flicker 회귀★: 완결된 직전 턴(turnDone=true) 뒤에 새로 전송하면, 첫 assistant 토큰보다
-//   합성 user 에코가 먼저 도착한다. 그 에코가 awaiting 을 해제하는 순간에도 "Wait" 이 유지돼야 한다
-//   (누산기 fix: user Structured 가 turnDone=false 로 내려 streaming 파생을 살린다). fix 전엔 이 순간
-//   streaming = awaiting(false) || (!turnDone(true) && items>0) = false 로 떨어져 "Wait" 이 깜빡 꺼졌다.
+// ★Follow-up send flicker regression★: when a new send follows a completed previous turn (turnDone=true), the synthetic user echo
+//   arrives before the first assistant token. "Wait" must hold even at the moment that echo clears awaiting
+//   (accumulator fix: user Structured lowers turnDone to false, keeping the derived streaming alive). Before the fix, at this moment
+//   streaming = awaiting(false) || (!turnDone(true) && items>0) = false, and "Wait" flickered off.
 describe('RichSlot(live) — 후속 전송 시 합성 user 에코가 "Wait" 을 끄지 않는다(flicker FIX)', () => {
   it('완결 턴 뒤 전송 → user 에코 도착 후에도 "Wait" 이 유지된다', async () => {
-    clientMock.writeStdin = vi.fn(async () => undefined) // 성공 = resolve
+    clientMock.writeStdin = vi.fn(async () => undefined) // success = resolve
 
     render(<RichSlot viewId="v1" agentId={AGENT} />)
     await flush()
 
-    // 직전 턴 완결(turnDone=true) + 콘텐츠 존재.
+    // Previous turn complete (turnDone=true) + content present.
     feedCompletedTurn()
     expect(screen.queryByText('Wait')).toBeNull()
 
-    // 후속 전송 — awaiting=true 로 streaming 힌트 on.
+    // Follow-up send — streaming hint on with awaiting=true.
     const textarea = screen.getByPlaceholderText(/메시지 입력/)
     fireEvent.change(textarea, { target: { value: 'follow-up' } })
     fireEvent.keyDown(textarea, { key: 'Enter' })
     await flush()
     expect(screen.getByText('Wait')).toBeTruthy()
 
-    // 합성 user 에코가 첫 assistant 토큰보다 먼저 도착(json 모드 write_input 직후). 구독 콜백이
-    //   setAwaiting(false) 하지만, 누산기가 turnDone=false 로 내려 파생 streaming 이 유지된다.
+    // The synthetic user echo arrives before the first assistant token (right after write_input in json mode). The subscription callback does
+    //   setAwaiting(false), but the accumulator lowers turnDone to false, so the derived streaming holds.
     act(() =>
       captured.onChunk!(
         tag1(2, JSON.stringify({
@@ -292,10 +292,10 @@ describe('RichSlot(live) — 후속 전송 시 합성 user 에코가 "Wait" 을 
   })
 })
 
-// ★못 알아들은 프레임이 대기 표시를 끄지 않는다★ — 회귀는 **여러 턴**으로만 보인다: 갓 마운트한 슬롯은
-//   turnDone 이 false 라 무슨 프레임이 오든 "Wait" 이 서므로, 한 턴만 재는 테스트는 이 결함을 못 본다.
-//   결함 모양: 직전 턴이 닫힌 뒤(turnDone=true) 새로 전송하고, 그 턴의 첫 프레임이 이 셸이 모르는 종류로
-//   오면 — 구독 콜백이 awaiting 을 풀고 turnDone 은 직전 턴의 true 로 남아 응답이 도는 중에 "Wait" 이 꺼진다.
+// ★A frame that was not understood does not turn off the wait indicator★ — the regression shows only over **multiple turns**: a freshly mounted slot has
+//   turnDone false, so "Wait" stands whatever frame arrives, and a one-turn test cannot see this defect.
+//   Defect shape: after the previous turn closed (turnDone=true) a new send goes out, and if the first frame of that turn
+//   is of a kind this shell does not know — the subscription callback clears awaiting, turnDone stays true from the previous turn, and "Wait" goes off while the response is running.
 describe('RichSlot(live) — 모르는 종류의 프레임이 "Wait" 을 끄지 않는다', () => {
   it('완결 턴 뒤 전송 → 그 턴 첫 프레임이 모르는 종류여도 "Wait" 이 유지된다', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
@@ -304,7 +304,7 @@ describe('RichSlot(live) — 모르는 종류의 프레임이 "Wait" 을 끄지 
     render(<RichSlot viewId="v1" agentId={AGENT} />)
     await flush()
 
-    feedCompletedTurn() // turnDone=true + 콘텐츠 존재
+    feedCompletedTurn() // turnDone=true + content present
     expect(screen.queryByText('Wait')).toBeNull()
 
     const textarea = screen.getByPlaceholderText(/메시지 입력/)
@@ -313,16 +313,16 @@ describe('RichSlot(live) — 모르는 종류의 프레임이 "Wait" 을 끄지 
     await flush()
     expect(screen.getByText('Wait')).toBeTruthy()
 
-    // 더 새 데몬이 보낸, 이 셸의 bindings 에 없는 종류.
+    // A kind sent by a newer daemon that is not in this shell's bindings.
     act(() => captured.onChunk!(tag1(2, JSON.stringify({ type: 'SomethingNewer', whatever: 1 }))))
     expect(screen.getByText('Wait')).toBeTruthy()
 
-    // 아는 프레임이 오면 그때 표시 주도권이 turnDone 으로 넘어가고, 경계가 정상적으로 끈다.
+    // When a known frame arrives, control of the indicator passes to turnDone, and the boundary turns it off normally.
     act(() => captured.onChunk!(tag1(3, JSON.stringify({ type: 'TextDelta', text: 'answer' }))))
     expect(screen.getByText('Wait')).toBeTruthy()
     act(() => captured.onChunk!(tag1(4, JSON.stringify({ type: 'MessageDone' }))))
     expect(screen.queryByText('Wait')).toBeNull()
-    expect(warn).toHaveBeenCalled() // 진단용 이름은 console 로만
+    expect(warn).toHaveBeenCalled() // The diagnostic name goes to console only
   })
 
   it('복원된 이력의 끝이 모르는 종류여도 "Wait" 이 고착되지 않는다(전송 없음)', async () => {
@@ -338,10 +338,10 @@ describe('RichSlot(live) — 모르는 종류의 프레임이 "Wait" 을 끄지 
   })
 })
 
-// ★재시도 가능한 스트림 오류가 "Wait" 을 끄지 않는다★ — codex 는 과부하·rate limit 을 `Error` 한 줄로
-//   내고 그 뒤에도 같은 턴이 이어진다(그쪽 decoder 주석). claude 도 실패 턴을 `MessageDone` 으로 닫으므로
-//   `Error` 를 턴 종료로 세던 옛 규칙은 양쪽 다 어긋났다. fix 전 증상 = 오류 한 줄에 "Wait" 이 꺼졌다가
-//   다음 델타에 되살아나는 깜빡임.
+// ★A retryable stream error does not turn off "Wait"★ — codex reports overload and rate limits as a single `Error` line
+//   and the same turn continues after it (see the decoder comment on that side). claude also closes a failed turn with `MessageDone`, so
+//   the old rule of counting `Error` as a turn end was wrong on both sides. Symptom before the fix = "Wait" went off on one error line and
+//   came back on the next delta, a flicker.
 describe('RichSlot(live) — 턴 한복판의 Error 가 "Wait" 을 끄지 않는다', () => {
   it('델타 → Error → 델타 구간 내내 "Wait" 이 유지되고, 경계만이 끈다', async () => {
     render(<RichSlot viewId="v1" agentId={AGENT} />)
@@ -355,7 +355,7 @@ describe('RichSlot(live) — 턴 한복판의 Error 가 "Wait" 을 끄지 않는
         tag1(1, JSON.stringify({ type: 'Error', message: 'overloaded (serverOverloaded) [willRetry]' })),
       ),
     )
-    expect(screen.getByText('Wait')).toBeTruthy() // fix 전: 여기서 꺼졌다
+    expect(screen.getByText('Wait')).toBeTruthy() // Before the fix: it went off here
 
     act(() => captured.onChunk!(tag1(2, JSON.stringify({ type: 'TextDelta', text: ' resumed' }))))
     expect(screen.getByText('Wait')).toBeTruthy()
@@ -365,16 +365,16 @@ describe('RichSlot(live) — 턴 한복판의 Error 가 "Wait" 을 끄지 않는
   })
 })
 
-// ★ADR-0145 빈 상태★: JSON 모드 첫 실행 화면(마스코트 + "Claude Code" + 가운데 입력창).
+// ★ADR-0145 empty state★: the JSON-mode first-run screen (mascot + "Claude Code" + centered input box).
 //
-// 핵심 회귀 = **표시 게이트가 "0건"이 아니라 "복원 완료 신호('live') + 0건"이라는 것**. 챗 뷰는 마운트 시
-//   목록을 비우고 구독을 걸므로 이력이 있는 세션도 복원이 끝나기 전엔 0건이다 → 0건만 보면 안내 화면이
-//   떴다가 대화로 바뀌는 깜빡임이 난다. 그 신호는 subscribeOutput 의 4번째 인자(상태 콜백)로 온다.
+// Core regression = **the display gate is not "0 items" but "restore-complete signal ('live') + 0 items"**. The chat view clears the
+//   list and subscribes on mount, so even a session with history has 0 items before restore ends → looking at 0 items alone makes the
+//   intro screen show and then flip to the conversation, a flicker. That signal comes as the 4th argument of subscribeOutput (the state callback).
 //
-// 관측 표면: 빈 상태 컨테이너 [data-rich-empty] · 마스코트 [data-rich-mascot] · 하단 배치에만 붙는
-//   정체성 라벨 [data-rich-label] · 입력창 className(빈 상태 rounded-xl ↔ 하단 flex-1).
+// Observation surface: empty-state container [data-rich-empty] · mascot [data-rich-mascot] · identity label attached only in the
+//   bottom layout [data-rich-label] · input box className (empty state rounded-xl ↔ bottom flex-1).
 
-/** 빈 상태 컨테이너(마스코트 + 문구). null = 기존(대화) 레이아웃. */
+/** Empty-state container (mascot + text). null = the existing (conversation) layout. */
 function emptyState(): HTMLElement | null {
   return document.querySelector('[data-rich-empty="1"]')
 }
@@ -383,19 +383,19 @@ function mascot(): HTMLElement | null {
   return document.querySelector('[data-rich-mascot="1"]')
 }
 
-/** 입력창은 두 배치가 같은 엘리먼트라 문서에 항상 1개다(이 함수가 그 전제를 겸사겸사 지킨다). */
+/** The input box is the same element in both layouts, so there is always exactly 1 in the document (this function also upholds that premise along the way). */
 function textarea(): HTMLTextAreaElement {
   const els = document.querySelectorAll('textarea')
   if (els.length !== 1) throw new Error(`textarea 는 1개여야 한다 — 실제 ${els.length}개`)
   return els[0]
 }
 
-/** replay 국면 콜백 발화(구독 등록 이후에만 유효). */
+/** Fires the replay phase callback (valid only after subscription registration). */
 function fireState(state: ViewPhase): void {
   act(() => captured.onState!(state))
 }
 
-/** 비우기 신호 발화 — 실물은 새 화신의 전량 replay 배달 **직전** 같은 틱에 부른다. */
+/** Fires the clearing signal — the real one calls it in the same tick **just before** delivering the new incarnation's full replay. */
 function fireReset(): void {
   act(() => captured.onReset!())
 }
@@ -405,7 +405,7 @@ describe('RichSlot(live) — ADR-0145 첫 실행 빈 상태', () => {
     render(<RichSlot viewId="v1" agentId={AGENT} />)
     await flush()
 
-    // 4번째 인자(상태 콜백) 전달 자체가 회귀 대상 — 안 넘기면 게이트가 영영 안 열린다.
+    // Passing the 4th argument (state callback) is itself the regression target — if it is not passed, the gate never opens.
     expect(captured.onState).toBeTruthy()
     expect(emptyState()).toBeNull()
     expect(screen.queryByText('Claude Code')).toBeNull()
@@ -423,7 +423,7 @@ describe('RichSlot(live) — ADR-0145 첫 실행 빈 상태', () => {
     expect(mascot()).not.toBeNull()
     expect(screen.getByText('Claude Code')).toBeTruthy()
     expect(textarea().className).toContain('rounded-xl')
-    // 마스코트는 순수 장식이라 접근성 트리에서 숨긴다(ADR-0146 불변식) — 스크린리더가 도트를 읽지 않는다.
+    // The mascot is pure decoration, so it is hidden from the accessibility tree (ADR-0146 invariant) — a screen reader does not read the dots.
     expect(mascot()?.getAttribute('aria-hidden')).toBe('true')
   })
 
@@ -435,9 +435,9 @@ describe('RichSlot(live) — ADR-0145 첫 실행 빈 상태', () => {
     expect(emptyState()).toBeNull()
   })
 
-  // ★재부착 회귀(protocolClient 의 buffering 통지와 한 쌍)★: 데몬이 끊겼다 붙으면 뷰가 live →
-  //   buffering 으로 되돌아가 full replay 를 다시 받는다. 그 통지를 안 듣고 '복원 완료'를 래치해 두면,
-  //   끊긴 동안 쌓인 이력이 쏟아질 때 마스코트가 대화로 뒤집힌다.
+  // ★Re-attach regression (a pair with protocolClient's buffering notification)★: when the daemon disconnects and reattaches, the view goes live →
+  //   back to buffering and receives a full replay again. If that notification is not heard and 'restore complete' stays latched, the mascot
+  //   flips to the conversation when history accumulated during the disconnect pours in.
   it("live 이후 'buffering' 이 다시 오면 빈 상태를 내린다(재replay 깜빡임 차단)", async () => {
     render(<RichSlot viewId="v1" agentId={AGENT} />)
     await flush()
@@ -447,18 +447,18 @@ describe('RichSlot(live) — ADR-0145 첫 실행 빈 상태', () => {
     fireState('buffering')
     expect(emptyState()).toBeNull()
 
-    // 재replay 로 이력이 도착 — 빈 상태는 이미 내려가 있어 전환이 눈에 띄지 않는다.
+    // History arrives by re-replay — the empty state is already down, so the transition is not noticeable.
     act(() => captured.onChunk!(tag1(0, JSON.stringify({ type: 'TextDelta', text: 'restored' }))))
     expect(emptyState()).toBeNull()
   })
 
-  // ★재replay 누적 회귀(사용자 결정 2026-08-20)★: 비우기 신호는 다른 화신이 프레임을 0 부터 다시 매기고
-  //   구독이 진도 커서를 버렸다는 뜻이다. 누산기를 안 비우면 처음부터 다시 오는 이력이 지금 대화 위에
-  //   겹쳐 쌓이고, 로컬 seq 가드를 안 되돌리면 그 프레임이 전부 탈락해 대화가 안 돌아온다.
+  // ★Re-replay accumulation regression (user decision 2026-08-20)★: the clearing signal means another incarnation numbers frames from 0 again and
+  //   the subscription dropped its progress cursor. If the accumulator is not cleared, history coming again from the start piles
+  //   over the current conversation, and if the local seq guard is not reset, all those frames are dropped and the conversation never returns.
   it('onReset 은 대화를 비우고 새 화신을 한 벌로만 다시 그린다', async () => {
     render(<RichSlot viewId="v1" agentId={AGENT} />)
     await flush()
-    // 비우기 콜백 전달 자체가 회귀 대상 — 안 넘기면 겹쳐 그려도 오류가 어디에도 안 남는다.
+    // Passing the clearing callback is itself the regression target — if it is not passed, even overlapping drawing leaves no error anywhere.
     expect(captured.onReset).toBeTypeOf('function')
     act(() => captured.onChunk!(tag1(0, JSON.stringify({ type: 'TextDelta', text: 'session one' }))))
     fireState('live')
@@ -467,15 +467,15 @@ describe('RichSlot(live) — ADR-0145 첫 실행 빈 상태', () => {
     fireReset()
     expect(screen.queryByText('session one')).toBeNull()
 
-    // 재기동된 데몬의 새 화신 — seq 가 0 부터 다시 온다.
+    // A restarted daemon's new incarnation — seq comes again from 0.
     act(() => captured.onChunk!(tag1(0, JSON.stringify({ type: 'TextDelta', text: 'session one' }))))
     fireState('live')
     expect(screen.getAllByText('session one')).toHaveLength(1)
   })
 
-  // ★국면 통지로는 비우지 않는다(반대 방향 회귀)★: 소켓만 깜빡이고 돌아온 경우 클라는 커서를 지킨 채
-  //   전량 재replay 를 내고 겹치는 앞부분을 dedup 이 흡수한다 — 그 구간도 'buffering' 이라, 국면으로
-  //   비우면 잠깐 끊겼다 올 때마다 대화가 사라졌다 다시 그려진다.
+  // ★Not cleared on a phase notification (regression in the opposite direction)★: when only the socket flickers and returns, the client keeps its cursor,
+  //   issues a full re-replay, and dedup absorbs the overlapping front — that span is also 'buffering', so if the phase
+  //   cleared it, the conversation would vanish and be redrawn on every brief disconnect.
   it.each<ViewPhase>(['detached', 'buffering', 'live', 'error'])(
     "'%s' 국면은 대화를 그대로 둔다",
     async (phase) => {
@@ -491,10 +491,10 @@ describe('RichSlot(live) — ADR-0145 첫 실행 빈 상태', () => {
     },
   )
 
-  // ★비우기는 전송 흔적까지 함께 내린다★: 이 신호는 **다른 화신**의 이력이 온다는 뜻이라, 앞서 보낸
-  //   메시지는 이미 사라진 화신이 받았고 답은 영영 오지 않는다. 남겨 두면 이력 0건인 새 화신에 첫 실행
-  //   화면이 안 뜨고("빈 슬롯인데 대화 중"), 대기 표시가 답 없이 고착된다.
-  //   ★같은 화신 이어보기에는 이 신호가 오지 않는다★ — 그 구간의 대기 표시는 바로 아래 국면 케이스가 잰다.
+  // ★Clearing also takes down the send traces★: this signal means history of **another incarnation** is coming, so the
+  //   message sent earlier was received by an incarnation that is already gone and the reply never comes. If left, the new incarnation with 0 history items
+  //   does not show the first-run screen ("empty slot but in conversation"), and the wait indicator sticks with no reply.
+  //   ★This signal does not come on resuming the same incarnation★ — the wait indicator in that span is measured by the phase case right below.
   it('onReset 은 전송 흔적도 함께 내려 새 화신을 첫 실행 화면으로 되돌린다', async () => {
     render(<RichSlot viewId="v1" agentId={AGENT} />)
     await flush()
@@ -505,16 +505,16 @@ describe('RichSlot(live) — ADR-0145 첫 실행 빈 상태', () => {
     fireEvent.keyDown(textarea(), { key: 'Enter' })
     await flush()
     expect(emptyState()).toBeNull()
-    expect(screen.getByText('Wait')).toBeTruthy() // 대기 표시(awaiting)
+    expect(screen.getByText('Wait')).toBeTruthy() // wait indicator (awaiting)
 
-    // 다른 화신이 붙었다 — 이력 0건으로 끝나면 첫 실행 화면이 정답이다.
+    // Another incarnation attached — if it ends with 0 history items, the first-run screen is correct.
     fireReset()
     fireState('live')
     expect(emptyState()).not.toBeNull()
   })
 
-  // 반대 방향: 같은 화신으로 다시 붙는 구간(비우기 신호 없음)에서는 대기 표시가 살아 있어야 한다 —
-  //   나간 전송은 재부착으로 취소되지 않는다.
+  // Opposite direction: in the span of re-attaching to the same incarnation (no clearing signal) the wait indicator must stay alive —
+  //   a send that went out is not cancelled by re-attach.
   it('비우기 없이 국면만 오가면 전송 흔적을 지키지 않는다(대기 표시 유지)', async () => {
     render(<RichSlot viewId="v1" agentId={AGENT} />)
     await flush()
@@ -529,8 +529,8 @@ describe('RichSlot(live) — ADR-0145 첫 실행 빈 상태', () => {
     expect(screen.getByText('Wait')).toBeTruthy()
   })
 
-  // 부재를 표면에 남긴다 — 명부에 그 에이전트가 없는 동안 슬롯이 "살아 있는데 조용한" 것처럼 보이면
-  //   안 된다(ADR-0148 의 부재 막을 detached 에도 건다).
+  // Leaves absence on the surface — while the registry has no such agent, the slot must not look "alive but quiet"
+  //   (the ADR-0148 absent curtain is applied to detached too).
   it("'detached' 는 부재 막을 띄운다", async () => {
     render(<RichSlot viewId="v1" agentId={AGENT} />)
     await flush()
@@ -540,7 +540,7 @@ describe('RichSlot(live) — ADR-0145 첫 실행 빈 상태', () => {
     expect(deadOverlay()).not.toBeNull()
   })
 
-  // 재요청 사다리를 소진한 뷰도 같다 — 아무것도 못 받는 상태인데 표시가 없으면 조용한 빈 판이 된다.
+  // Same for a view that exhausted the re-request ladder — it can receive nothing, and with no indicator it becomes a quiet blank panel.
   it("'error' 도 부재 막을 띄운다(세 슬롯 동형)", async () => {
     render(<RichSlot viewId="v1" agentId={AGENT} />)
     await flush()
@@ -571,16 +571,16 @@ describe('RichSlot(live) — ADR-0145 첫 실행 빈 상태', () => {
     await flush()
 
     expect(emptyState()).toBeNull()
-    // 두 배치가 한 엘리먼트라야 전환 중 입력 포커스가 끊기지 않는다(ADR-0145 §5).
+    // The two layouts must be one element so input focus does not break during the transition (ADR-0145 §5).
     expect(textarea()).toBe(before)
     expect(document.activeElement).toBe(before)
     expect(before.className).toContain('flex-1')
     expect(document.querySelector('[data-rich-label="1"]')).not.toBeNull()
   })
 
-  // 재구독이 도는 경로는 **배정이 다른 에이전트로 바뀌는 것** 하나다(재spawn 은 구독을 갈지 않는다 —
-  //   아래 '정체성' describe). 그 전환에서 복원 완료 표시를 물려받으면, 새 에이전트의 이력이 도착하기
-  //   전 구간에 빈 상태가 떴다가 대화로 바뀌는 깜빡임이 된다.
+  // The only path where resubscribe runs is **the assignment changing to a different agent** (a re-spawn does not replace the subscription —
+  //   see the 'identity' describe below). If that transition inherited the restore-complete mark, the empty state would show in the span before
+  //   the new agent's history arrives and then flip to the conversation, a flicker.
   it('다른 에이전트로 배정이 바뀌면 복원 완료 표시가 내려가 live 재발화 전까지 빈 상태가 아니다', async () => {
     const { rerender } = render(<RichSlot viewId="v1" agentId={AGENT} />)
     await flush()
@@ -591,12 +591,12 @@ describe('RichSlot(live) — ADR-0145 첫 실행 빈 상태', () => {
     await flush()
     expect(emptyState()).toBeNull()
 
-    fireState('live') // 새 구독의 상태 콜백
+    fireState('live') // The new subscription's state callback
     expect(emptyState()).not.toBeNull()
   })
 
-  // 배치마다 문구가 갈린다: 빈 상태는 사용자 지정 인사말, 하단은 Enter/Shift+Enter 조작 안내.
-  //   두 배치가 한 엘리먼트를 공유하므로 키 분기가 무너져도 화면만 봐선 안 드러난다 → 여기서 못 박는다.
+  // Text differs per layout: the empty state shows the user-set greeting, the bottom shows the Enter/Shift+Enter usage hint.
+  //   The two layouts share one element, so if the key branching breaks it is not visible from the screen alone → pinned down here.
   it('placeholder 는 빈 상태와 하단 배치가 서로 다른 문구를 쓴다', async () => {
     render(<RichSlot viewId="v1" agentId={AGENT} />)
     await flush()
@@ -619,18 +619,18 @@ describe('RichSlot(live) — ADR-0145 첫 실행 빈 상태', () => {
     await flush()
     fireState('live')
 
-    // 배치는 빈 상태인데(마스코트·문구 표시) 안내만 종료 쪽으로 갈린다.
+    // The layout is the empty state (mascot and text shown), but only the hint goes to the ended side.
     expect(emptyState()).not.toBeNull()
     expect(textarea().placeholder).toBe(t('agent.terminatedPlaceholder'))
   })
 
 })
 
-// ★ADR-0145 빈 상태 게이트가 awaiting 이 아니라 "이 구독에서 이미 보냈다" 인 이유★
+// ★Why the ADR-0145 empty-state gate is "already sent on this subscription", not awaiting★
 //
-// awaiting 은 (a) item 을 만들지 않는 tag1 프레임에도 풀리고(빈 TextDelta · user uuid dedup 스킵 ·
-// 빈 MessageDone), (b) writeStdin 실패 catch 가 어느 전송의 것인지 모른 채 푼다. 둘 다 "응답 대기 중인데
-// items 는 아직 0건" 인 구간을 만들고, 그 구간에 마스코트가 되살아나면 대화 위로 첫 화면이 덮인다.
+// awaiting is also cleared (a) on tag1 frames that create no item (empty TextDelta · user uuid dedup skip ·
+// empty MessageDone), and (b) by the writeStdin failure catch without knowing which send it belongs to. Both create a span of "waiting for a response but
+// items is still 0", and if the mascot comes back to life in that span, the first screen covers the conversation.
 describe('RichSlot(live) — ADR-0145 빈 상태 억제는 전송 사실을 따른다(awaiting 아님)', () => {
   it('전송 후 item 을 만들지 않는 프레임(빈 델타)이 와도 빈 상태로 돌아가지 않는다', async () => {
     render(<RichSlot viewId="v1" agentId={AGENT} />)
@@ -643,15 +643,15 @@ describe('RichSlot(live) — ADR-0145 빈 상태 억제는 전송 사실을 따�
     await flush()
     expect(emptyState()).toBeNull()
 
-    // 빈 델타 = 누산기가 item 을 만들지 않고 흘려보내는 프레임(structuredAccumulator 의 TextDelta arm).
-    //   구독 콜백은 이 프레임에도 awaiting 을 푼다 → awaiting 게이트였다면 여기서 마스코트가 되살아난다.
+    // Empty delta = a frame the accumulator lets through without creating an item (the TextDelta arm of structuredAccumulator).
+    //   The subscription callback clears awaiting on this frame too → with an awaiting gate, the mascot would come back to life here.
     act(() => captured.onChunk!(tag1(0, JSON.stringify({ type: 'TextDelta', text: '' }))))
     expect(emptyState()).toBeNull()
   })
 
   it('앞 화신에 보낸 전송의 뒤늦은 실패가 새 화신의 전송 표시를 되돌리지 않는다', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    // 전송 A — 아직 결말이 안 난 promise 를 쥐고 있다가 나중에 reject 한다.
+    // Send A — holds a promise with no outcome yet and rejects it later.
     let rejectA!: (e: Error) => void
     clientMock.writeStdin = vi.fn(
       () =>
@@ -667,22 +667,22 @@ describe('RichSlot(live) — ADR-0145 빈 상태 억제는 전송 사실을 따�
     fireEvent.keyDown(textarea(), { key: 'Enter' })
     await flush()
 
-    // 다른 화신이 붙었다(재spawn) → 비우기 신호가 전송 흔적을 내리고, live 를 다시 받아 빈 상태로 복귀.
-    //   ★인스턴스는 그대로다★ — 재spawn 이 컴포넌트를 갈지 않으므로 건너온 실패는 **같은 인스턴스**로
-    //   떨어진다. 그걸 막는 것이 아래 순번 가드다.
+    // Another incarnation attached (re-spawn) → the clearing signal takes down the send traces, live is received again and it returns to the empty state.
+    //   ★The instance stays the same★ — a re-spawn does not replace the component, so a failure carried across lands on the **same instance**.
+    //   What blocks that is the sequence guard below.
     fireReset()
     fireState('live')
     expect(emptyState()).not.toBeNull()
 
-    // 전송 B(새 화신) — 성공 경로.
+    // Send B (new incarnation) — success path.
     clientMock.writeStdin = vi.fn(async () => undefined)
     fireEvent.change(textarea(), { target: { value: 'send B' } })
     fireEvent.keyDown(textarea(), { key: 'Enter' })
     await flush()
     expect(emptyState()).toBeNull()
 
-    // 이제 A 가 실패한다. A 는 사라진 화신에 보낸 전송이므로 지금 화면의 어떤 표시도 건드리지 못해야
-    //   한다 — 빈 상태로 되돌아가지도, B 의 대기 표시가 꺼지지도 않는다.
+    // Now A fails. A was a send to the vanished incarnation, so it must not touch any indicator on the current screen
+    //   — it neither goes back to the empty state nor turns off B's wait indicator.
     rejectA(new Error('write failed'))
     await flush()
     expect(emptyState()).toBeNull()
@@ -704,19 +704,19 @@ describe('RichSlot(live) — ADR-0145 빈 상태 억제는 전송 사실을 따�
     await flush()
     fireState('live')
 
-    // 전송 A — 결말 미정.
+    // Send A — outcome undecided.
     fireEvent.change(textarea(), { target: { value: 'send A' } })
     fireEvent.keyDown(textarea(), { key: 'Enter' })
     await flush()
     expect(screen.getByText('Wait')).toBeTruthy()
 
-    // 전송 B(성공) — 최신 전송이 B 로 넘어간다.
+    // Send B (success) — the latest send passes to B.
     clientMock.writeStdin = vi.fn(async () => undefined)
     fireEvent.change(textarea(), { target: { value: 'send B' } })
     fireEvent.keyDown(textarea(), { key: 'Enter' })
     await flush()
 
-    // 뒤늦은 A 실패 — 최신 전송이 아니므로 아무 표시도 건드리지 않는다(B 는 여전히 응답 대기 중).
+    // Belated A failure — it is not the latest send, so it touches no indicator (B is still waiting for a response).
     rejectA(new Error('write failed'))
     await flush()
     expect(screen.getByText('Wait')).toBeTruthy()
@@ -737,10 +737,10 @@ describe('RichSlot(live) — ADR-0145 빈 상태 억제는 전송 사실을 따�
 
     fireEvent.change(textarea(), { target: { value: 'hello' } })
     fireEvent.keyDown(textarea(), { key: 'Enter' })
-    // 전송 시점엔 낙관적으로 내린다(성공을 기다리며 대화 화면으로).
+    // At send time it is taken down optimistically (to the conversation screen while waiting for success).
     expect(emptyState()).toBeNull()
 
-    // 실패가 확인되면 되돌아온다 — 안 되돌리면 재구독 전까지 첫 실행 화면이 영구히 안 뜬다.
+    // It comes back once the failure is confirmed — if not, the first-run screen never shows until resubscribe.
     await flush()
     expect(emptyState()).not.toBeNull()
     expect(screen.queryByText('Wait')).toBeNull()
@@ -755,12 +755,12 @@ describe('RichSlot(live) — ADR-0145 빈 상태 억제는 전송 사실을 따�
     await flush()
     fireState('live')
 
-    // A: 성공(응답은 아직 없어 items 는 0건 — 되돌림 판정이 items 만 봐선 갈리지 않는 구간).
+    // A: success (no response yet so items is 0 — a span where the revert decision cannot be settled by items alone).
     fireEvent.change(textarea(), { target: { value: 'send A' } })
     fireEvent.keyDown(textarea(), { key: 'Enter' })
     await flush()
 
-    // B: 실패. A 의 응답이 오는 중일 수 있으므로 첫 실행 화면으로 돌아가면 안 된다.
+    // B: failure. A's response may be on its way, so it must not go back to the first-run screen.
     clientMock.writeStdin = vi.fn(async () => {
       throw new Error('write failed')
     })
@@ -772,14 +772,14 @@ describe('RichSlot(live) — ADR-0145 빈 상태 억제는 전송 사실을 따�
     expect(warn).toHaveBeenCalled()
   })
 
-  // ★비우기를 건너온 성공은 새 화신의 전송 사실이 아니다★: 전송 A 가 날아가는 중에 화신이 갈리면 A 의
-  //   결말은 이미 사라진 화신의 것이다. 그 성공이 "이 인스턴스에서 나간 전송이 있다" 를 세우면, 새 화신에서
-  //   실제로 나가지 못한 전송이 실패해도 첫 실행 화면으로 못 돌아가 아무것도 못 보낸 슬롯이 대화 중으로
-  //   남는다. 순번 가드는 성공·실패 양쪽에 걸려야 하고, 비우기도 그 순번을 올려야 한다 — 한쪽만이면
-  //   나머지 한쪽으로 이 케이스가 그대로 통과한다.
+  // ★A success carried across a clearing is not a send fact of the new incarnation★: if the incarnation changes while send A is in flight, A's
+  //   outcome belongs to the already vanished incarnation. If that success set "a send went out from this instance", then even when a send that
+  //   actually failed to go out in the new incarnation fails, it cannot return to the first-run screen, and a slot that sent nothing
+  //   stays as in-conversation. The sequence guard must cover both success and failure, and clearing must bump that sequence too — with only
+  //   one side, this case passes through the other side as is.
   it('비우기 뒤 도착한 앞 화신 전송의 성공은 새 화신의 실패 되돌리기를 막지 않는다', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    // 전송 A — 결말을 테스트가 쥐고 있다가 비우기 **뒤에** 성공으로 끝낸다.
+    // Send A — the test holds its outcome and ends it as a success **after** the clearing.
     let resolveA!: () => void
     clientMock.writeStdin = vi.fn(
       () =>
@@ -796,16 +796,16 @@ describe('RichSlot(live) — ADR-0145 빈 상태 억제는 전송 사실을 따�
     await flush()
     expect(emptyState()).toBeNull()
 
-    // 다른 화신이 붙었다 — 전송 흔적이 내려가고 첫 실행 화면으로 돌아온다(인스턴스는 그대로).
+    // Another incarnation attached — the send traces are taken down and it returns to the first-run screen (the instance stays the same).
     fireReset()
     fireState('live')
     expect(emptyState()).not.toBeNull()
 
-    // 사라진 화신에 보낸 A 가 이제 성공으로 결말난다.
+    // A, sent to the vanished incarnation, now ends as a success.
     resolveA()
     await flush()
 
-    // 새 화신에 보낸 B 는 실패 — 이 화신은 아무것도 받지 못했으므로 첫 실행 화면이 정답이다.
+    // B, sent to the new incarnation, fails — this incarnation received nothing, so the first-run screen is correct.
     clientMock.writeStdin = vi.fn(async () => {
       throw new Error('write failed')
     })
@@ -819,10 +819,10 @@ describe('RichSlot(live) — ADR-0145 빈 상태 억제는 전송 사실을 따�
   })
 })
 
-// ★ADR-0148: 타겟한 에이전트가 없는 슬롯★
+// ★ADR-0148: a slot with no targeted agent★
 //
-// 프로세스 종료와 연결 끊김을 같게 본다(사용자 결정). 화면 내용은 지우지 않고 — 대화든 첫 실행 화면이든
-// 그 시점 모습 그대로 — 흐림 막 + 심볼만 얹는다. 죽은 슬롯이 "이제 시작하면 됨" 처럼 보이던 것이 결함이었다.
+// Process exit and connection loss are treated the same (user decision). Screen content is not erased — whether conversation or first-run
+// screen, it stays as it was at that moment — only a blur curtain + symbol is laid on. A dead slot looking like "just start now" was the defect.
 describe('RichSlot(live) — ADR-0148 에이전트 부재 표현', () => {
   it('종료된 에이전트: 대화 내용을 지우지 않고 흐림 막 + 심볼만 얹는다', async () => {
     agentStoreState.agents = [{ id: AGENT, cwd: 'C:/x', status: { type: 'Killed' } }]
@@ -830,13 +830,13 @@ describe('RichSlot(live) — ADR-0148 에이전트 부재 표현', () => {
     await flush()
     feedCompletedTurn()
 
-    // 내용 유지 + 오버레이 존재가 한 화면에 같이 성립해야 한다.
+    // Content retained + overlay present must both hold on one screen.
     expect(screen.getByText('assistant reply')).toBeTruthy()
     expect(deadOverlay()).not.toBeNull()
-    // 심볼만 — 문구·배너를 넣지 않는다(정보를 하드하게 남기지 않는다는 결정).
+    // Symbol only — no text or banner is put in (a decision not to leave the information hard-coded).
     expect(deadOverlay()?.textContent).toBe('')
     expect(deadOverlay()?.querySelector('svg')).not.toBeNull()
-    // 입력창은 기존 비활성 처리 그대로.
+    // The input box keeps its existing disabled handling.
     expect(textarea().disabled).toBe(true)
     expect(textarea().placeholder).toBe(t('agent.terminatedPlaceholder'))
   })
@@ -853,11 +853,11 @@ describe('RichSlot(live) — ADR-0148 에이전트 부재 표현', () => {
     expect(deadOverlay()).not.toBeNull()
   })
 
-  // ★종료(kill)의 실제 결말★: reaper 가 세션을 수거하며 **명부에서 지운다**(프로필은 시체로 남는다).
-  //   그래서 status 로는 안 잡히고, 명부를 받은 뒤에도 해석 안 되는 id 가 곧 부재다. 이걸 부재로 안 보면
-  //   죽은 에이전트의 입력창이 활성으로 남는다.
+  // ★The real outcome of a kill★: the reaper collects the session and **removes it from the registry** (the profile stays as a corpse).
+  //   So status does not catch it, and an id that still does not resolve after the registry is received is absent. If that were not seen as absent,
+  //   the dead agent's input box would stay active.
   it('명부 수신 후 해석 안 되는 에이전트도 부재로 본다 — 내용 유지 + 오버레이 + 입력 차단', async () => {
-    // 살아있는 동안 대화가 쌓인 상태를 만든다(명부에 있음).
+    // Builds a state where a conversation accumulated while alive (present in the registry).
     agentStoreState.agents = [{ id: AGENT, cwd: 'C:/x', status: { type: 'Running' } }]
     agentStoreState.agentsLoaded = true
     const { rerender } = render(<RichSlot viewId="v1" agentId={AGENT} />)
@@ -866,11 +866,11 @@ describe('RichSlot(live) — ADR-0148 에이전트 부재 표현', () => {
     expect(deadOverlay()).toBeNull()
     expect(textarea().disabled).toBe(false)
 
-    // 수거 완료 = 명부에서 사라짐(프로필만 남는다 — 이 컴포넌트는 프로필을 부재 판정에 쓰지 않는다).
+    // Collection done = gone from the registry (only the profile stays — this component does not use profiles for the absent decision).
     agentStoreState.agents = []
     rerender(<RichSlot viewId="v1" agentId={AGENT} />)
 
-    expect(screen.getByText('assistant reply')).toBeTruthy() // 내용은 그대로
+    expect(screen.getByText('assistant reply')).toBeTruthy() // Content unchanged
     expect(deadOverlay()).not.toBeNull()
     expect(textarea().disabled).toBe(true)
     expect(textarea().placeholder).toBe(t('agent.terminatedPlaceholder'))
@@ -880,7 +880,7 @@ describe('RichSlot(live) — ADR-0148 에이전트 부재 표현', () => {
     render(<RichSlot viewId="v1" agentId={AGENT} />)
     await flush()
 
-    // agents 가 비어 있지만 명부 미수신이므로 판정을 보류한다 — 기동 직후 슬롯을 죽이면 안 된다.
+    // agents is empty but the registry is not received, so the decision is held — a slot must not be killed right after boot.
     expect(deadOverlay()).toBeNull()
     expect(textarea().disabled).toBe(false)
   })
@@ -893,19 +893,19 @@ describe('RichSlot(live) — ADR-0148 에이전트 부재 표현', () => {
 
     setConnection('down')
     expect(deadOverlay()).not.toBeNull()
-    expect(screen.getByText('assistant reply')).toBeTruthy() // 내용은 그대로
+    expect(screen.getByText('assistant reply')).toBeTruthy() // Content unchanged
 
-    setConnection('reconnecting') // 붙기 전까진 여전히 부재
+    setConnection('reconnecting') // Still absent until attached
     expect(deadOverlay()).not.toBeNull()
 
     setConnection('connected')
     expect(deadOverlay()).toBeNull()
   })
 
-  // ★막을 올리는 조건 전부가 입력을 막는 조건이다(ADR-0148 결정 1 / ADR-0149 결정 4)★: 막은
-  //   pointer-events-none 이라 조작을 가리지 않고, disabled 도 프로그램적 키 이벤트를 막지 못한다.
-  //   종료만 보고 막으면 연결이 끊긴 슬롯에서 전송이 나가 실패하고, 사용자에겐 무반응으로만 보인다.
-  //   여기서는 에이전트를 명부에 **살려 둔 채** 연결만 끊어 종료가 아닌 갈래를 잰다.
+  // ★Every condition for raising the curtain is a condition for blocking input (ADR-0148 decision 1 / ADR-0149 decision 4)★: the curtain is
+  //   pointer-events-none so it does not intercept operation, and disabled cannot stop programmatic key events either.
+  //   Blocking on exit alone lets a send go out from a disconnected slot and fail, which the user sees only as no response.
+  //   Here the agent is **kept alive** in the registry and only the connection is cut, to measure the branch that is not an exit.
   it('연결이 끊겨 막이 뜬 동안은 에이전트가 살아 있어도 전송이 막히고 입력창이 비활성이다', async () => {
     agentStoreState.agents = [{ id: AGENT, cwd: 'C:/x', status: { type: 'Running' } }]
     agentStoreState.agentsLoaded = true
@@ -914,7 +914,7 @@ describe('RichSlot(live) — ADR-0148 에이전트 부재 표현', () => {
     feedCompletedTurn()
     expect(textarea().disabled).toBe(false)
 
-    // 초안은 붙어 있는 동안 넣는다 — 끊긴 뒤엔 입력창이 비활성이라 값을 채울 수 없다.
+    // The draft is entered while attached — after the disconnect the input box is disabled and cannot be filled.
     fireEvent.change(textarea(), { target: { value: 'hello' } })
 
     setConnection('down')
@@ -925,10 +925,10 @@ describe('RichSlot(live) — ADR-0148 에이전트 부재 표현', () => {
     fireEvent.keyDown(textarea(), { key: 'Enter' })
     await flush()
     expect(clientMock.writeStdin).not.toHaveBeenCalled()
-    // 초안은 남는다 — 막힌 전송이 입력을 삼키면 사용자가 쓴 것이 사라진다.
+    // The draft stays — if a blocked send swallowed the input, what the user wrote would vanish.
     expect(textarea().value).toBe('hello')
 
-    // 다시 붙으면 그 초안이 그대로 나간다(가드가 잠긴 채 고착되지 않는다).
+    // When it reattaches, that draft goes out as it is (the guard does not stick locked).
     setConnection('connected')
     expect(textarea().disabled).toBe(false)
     fireEvent.keyDown(textarea(), { key: 'Enter' })
@@ -937,12 +937,12 @@ describe('RichSlot(live) — ADR-0148 에이전트 부재 표현', () => {
   })
 })
 
-// ★정체성 변경 = 새 인스턴스(key remount)★
+// ★Identity change = new instance (key remount)★
 //
-// 구독 effect 가 목록·표시를 내리는 방식만으로는, 정체성이 바뀐 **첫 커밋**이 새 props + 옛 상태로 그려진다
-// (passive effect 는 페인트 뒤). 같은 슬롯에 다른 에이전트를 배정하면 그 프레임에 이전 에이전트의 대화가
-// 스친다. effect 를 flush 한 뒤 단언하면 이 결함이 안 보이므로, 여기서는 "인스턴스가 갈렸나"를 직접 본다
-// (DOM 노드 교체 = 언마운트 후 재마운트).
+// If the subscription effect alone takes down the list and indicators, the **first commit** after the identity changes is drawn with
+// new props + old state (passive effects run after paint). Assigning a different agent to the same slot flashes the previous agent's conversation
+// in that frame. Asserting after flushing effects hides this defect, so here we look directly at "was the instance replaced?"
+// (DOM node replaced = unmount then remount).
 describe('RichSlot(live) — 정체성이 바뀌면 인스턴스를 새로 마운트한다', () => {
   const OTHER = 'eeee-ffff-0000-1111'
 
@@ -960,10 +960,10 @@ describe('RichSlot(live) — 정체성이 바뀌면 인스턴스를 새로 마�
     expect(screen.queryByText('assistant reply')).toBeNull()
   })
 
-  // ★반대 방향(옛 회귀를 되살리지 말 것)★: 한때는 화신 번호가 이 key 에 들어 있어 재spawn 이 인스턴스를
-  //   갈았다. 그러면 replay 가 오기도 전에 대화가 지워지는데, 데몬은 종료와 함께 ring 을 버리므로 그
-  //   대화는 어디서도 못 살린다. 지금은 같은 인스턴스를 유지하고, 지우는 일은 **새 화신의 이력이 실제로
-  //   도착했을 때** 비우기 신호가 한다(위 onReset 케이스들).
+  // ★Opposite direction (do not revive the old regression)★: once, the incarnation number was in this key, so a re-spawn replaced the instance.
+  //   Then the conversation is erased before the replay even arrives, and since the daemon discards the ring on exit, that
+  //   conversation cannot be revived anywhere. Now the same instance is kept, and erasing is done by the clearing signal **when the new incarnation's
+  //   history actually arrives** (the onReset cases above).
   it('같은 agentId 로 다시 그려도 인스턴스를 갈지 않는다(대화 보존)', async () => {
     const { rerender } = render(<RichSlot viewId="v1" agentId={AGENT} />)
     await flush()
@@ -977,11 +977,11 @@ describe('RichSlot(live) — 정체성이 바뀌면 인스턴스를 새로 마�
   })
 })
 
-// ★ADR-0226 이어받기 화신의 이력 대기(D5)★
+// ★ADR-0226 history wait of a resumed incarnation (D5)★
 //
-// 'live' 가 "이 화신은 저장된 대화를 이어받으려고 떴다" 고 알리면 첫 실행 화면 대신 대화 영역에 로딩을
-// 얹는다. 끝나는 길이 넷이다 — 첫 이력 행 · 입력 · 부재(막이 이긴다) · 재시작(비우기 + 거짓 'live').
-// 표식이 없거나 거짓이면 표식 도입 전과 한 글자도 다르지 않아야 한다(표식을 안 싣는 옛 데몬·셸 경로가 이 경우다).
+// When 'live' announces "this incarnation came up to resume a saved conversation", a loading overlay goes on the conversation area instead of the first-run screen. There are four
+// ways it ends — the first history row · input · absence (the curtain wins) · restart (clearing + a false 'live').
+// With the marker missing or false, nothing may differ by a single character from before the marker was introduced (the old daemon/shell path that carries no marker is this case).
 describe('RichSlot(live) — ADR-0226 이어받기 화신의 이력 대기', () => {
   const OTHER = 'eeee-ffff-0000-1111'
 
@@ -1006,44 +1006,44 @@ describe('RichSlot(live) — ADR-0226 이어받기 화신의 이력 대기', () 
     expect(screen.queryByText('Claude Code')).toBeNull()
     const panel = loadingPanel()
     expect(panel).not.toBeNull()
-    expect(panel!.textContent).toBe('') // 안내 문구 없음 — 아이콘뿐
+    expect(panel!.textContent).toBe('') // No hint text — just an icon
     expect(awaitingAttr()).toBe('1')
-    // 막은 조작을 가리지 않는다 — 스크롤·선택·클릭이 통과한다.
+    // It does not intercept operation — scroll, selection and clicks pass through.
     expect(panel!.className).toContain('pointer-events-none')
     expect(panel!.className).toContain('bg-foreground/')
-    // 막이 덮는 범위 = 대화 영역(스크롤 영역)뿐. 입력창은 그 밖이다.
+    // The curtain covers only the conversation area (scroll area). The input box is outside it.
     const conversationArea = panel!.closest('[data-radix-scroll-area-viewport]')
     expect(conversationArea).not.toBeNull()
     expect(conversationArea!.contains(textarea())).toBe(false)
-    // 이력이 끝내 안 오면 입력이 빠져나갈 길이다 — 활성 + 하단 배치.
+    // This is the way out for input if history never comes — active + bottom layout.
     expect(textarea().disabled).toBe(false)
     expect(textarea().className).toContain('flex-1')
     expect(textarea().placeholder).toBe(t('agent.inputPlaceholder'))
     expect(screen.queryByText('Wait')).toBeNull()
   })
 
-  // 실측상 이어받기의 첫 라이브 프레임이 usage 다. 그걸로 대기를 끝내면 이력이 오기 전 빈 목록이 비치고,
-  //   대기 표시 판정까지 그걸로 하면 로딩과 대기 표시가 함께 뜬다.
+  // As measured, the first live frame of a resume is usage. Ending the wait on it shows an empty list before history arrives,
+  //   and if the wait indicator decision also uses it, loading and the wait indicator show together.
   it('행을 안 그리는 usage 만 온 동안 로딩이 유지되고 대기 표시는 없다', async () => {
     render(<RichSlot viewId="v1" agentId={AGENT} />)
     await flush()
-    act(() => captured.onChunk!(tag1(0, USAGE))) // replay 는 'live' 보다 먼저 배달된다
+    act(() => captured.onChunk!(tag1(0, USAGE))) // The replay is delivered before 'live'
     fireLive(true)
     expect(loadingPanel()).not.toBeNull()
     expect(screen.queryByText('Wait')).toBeNull()
 
-    act(() => captured.onChunk!(tag1(1, USAGE))) // 라이브 usage
+    act(() => captured.onChunk!(tag1(1, USAGE))) // Live usage
     expect(loadingPanel()).not.toBeNull()
     expect(screen.queryByText('Wait')).toBeNull()
     expect(emptyState()).toBeNull()
   })
 
-  // 패널이 잠깐 내려가는 창(같은 화신 재부착의 'buffering')에도 대기 표시를 세우지 않는다 — 세우면 패널 →
-  //   대기 표시(경과 초) → 패널로 깜빡인다. 대기 표시를 내리는 근거는 국면이 아니라 "아직 이력이 없다" 다.
+  // The wait indicator is not raised in the window where the panel briefly goes down ('buffering' of a same-incarnation reattach) either — if raised, it flickers panel →
+  //   wait indicator (elapsed seconds) → panel. The basis for taking the wait indicator down is "no history yet", not the phase.
   it("대기 중 'buffering' 으로 패널이 내려가도 대기 표시가 끼지 않는다(턴 열린 usage 만)", async () => {
     render(<RichSlot viewId="v1" agentId={AGENT} />)
     await flush()
-    act(() => captured.onChunk!(tag1(0, USAGE))) // 턴은 열린 채(turnDone=false)
+    act(() => captured.onChunk!(tag1(0, USAGE))) // The turn stays open (turnDone=false)
     fireLive(true)
     expect(loadingPanel()).not.toBeNull()
     expect(screen.queryByText('Wait')).toBeNull()
@@ -1072,8 +1072,8 @@ describe('RichSlot(live) — ADR-0226 이어받기 화신의 이력 대기', () 
     expect(screen.queryByText('Wait')).toBeNull()
   })
 
-  // 턴 경계는 선행 item 이 usage 뿐이어도 구분선을 붙인다. 구분선은 빈 스페이서라 이력이 아니다 — 그걸로
-  //   대기를 끝내면 로딩도 첫 화면도 없는 빈 판이 남는다(0건 이어받기 = 입력 전까지 로딩).
+  // A turn boundary attaches a divider even when the preceding item is only usage. The divider is an empty spacer, not history — ending
+  //   the wait on it leaves an empty panel with neither loading nor the first screen (0-item resume = loading until input).
   it.each([
     ['MessageDone', JSON.stringify({ type: 'MessageDone' })],
     ['TurnEnd', JSON.stringify({ type: 'TurnEnd', outcome: { kind: 'Completed' } })],
@@ -1083,13 +1083,13 @@ describe('RichSlot(live) — ADR-0226 이어받기 화신의 이력 대기', () 
     fireLive(true)
     act(() => captured.onChunk!(tag1(0, USAGE)))
     act(() => captured.onChunk!(tag1(1, boundary)))
-    expect(document.querySelector('[data-rich-live="1"] .h-3')).not.toBeNull() // 구분선이 실제로 섰다
+    expect(document.querySelector('[data-rich-live="1"] .h-3')).not.toBeNull() // The divider really did stand
     expect(loadingPanel()).not.toBeNull()
     expect(emptyState()).toBeNull()
     expect(screen.queryByText('Wait')).toBeNull()
   })
 
-  // 반대 방향: 'boundary' 행을 통째로 빼면 유저 말풍선만 복원된 이력도 대기로 남는다.
+  // Opposite direction: dropping all 'boundary' rows would leave even history in which only a user bubble was restored stuck in the wait.
   it('구분선 뒤 유저 말풍선이 오면 로딩이 걷힌다', async () => {
     render(<RichSlot viewId="v1" agentId={AGENT} />)
     await flush()
@@ -1121,8 +1121,8 @@ describe('RichSlot(live) — ADR-0226 이어받기 화신의 이력 대기', () 
     expect(textarea()).toBe(before)
   })
 
-  // ADR-0231: 입력은 로딩을 걷지 않는다 — 연결 중 친 글은 대기 목록에 서고, 로딩을 걷는 것은 행(이력 ·
-  //   전달된 말풍선)이다. 입력으로 걷으면 이력이 오기 전 빈 판이 비친다.
+  // ADR-0231: input does not lift the loading — text typed while connecting stands in the queued list, and what lifts the loading is a row (history ·
+  //   a delivered bubble). Lifting it by input would show an empty panel before history arrives.
   it('입력은 로딩을 걷지 않는다 — 목록에 선 글이 전달된 말풍선이 되는 순간 걷힌다', async () => {
     render(<RichSlot viewId="v1" agentId={AGENT} />)
     await flush()
@@ -1188,7 +1188,7 @@ describe('RichSlot(live) — ADR-0226 이어받기 화신의 이력 대기', () 
     expect(emptyState()).toBeNull()
   })
 
-  // D4 재시작 — 이어받기가 실패해 새 대화로 다시 띄운 화신은 거짓 표식으로 온다.
+  // D4 restart — an incarnation relaunched with a new conversation after the resume failed arrives with a false marker.
   it("비우기 + 'live'(거짓) → 첫 화면, 비우기 + 'live'(참) → 다시 로딩", async () => {
     render(<RichSlot viewId="v1" agentId={AGENT} />)
     await flush()
@@ -1210,7 +1210,7 @@ describe('RichSlot(live) — ADR-0226 이어받기 화신의 이력 대기', () 
     expect(loadingPanel()).not.toBeNull()
   })
 
-  // 재부착(같은 화신)의 'buffering' 은 복원 완료를 내린다 — 그동안은 로딩도 첫 화면도 아니다(오늘의 규칙).
+  // 'buffering' of a reattach (same incarnation) lowers restore-complete — in that span it is neither loading nor the first screen (today's rule).
   it("대기 중 'buffering' 이 오면 로딩을 내리고, 다음 'live' 의 표식을 다시 따른다", async () => {
     render(<RichSlot viewId="v1" agentId={AGENT} />)
     await flush()
@@ -1223,7 +1223,7 @@ describe('RichSlot(live) — ADR-0226 이어받기 화신의 이력 대기', () 
     expect(loadingPanel()).not.toBeNull()
   })
 
-  // info 없는 'live' 는 거짓으로 읽는다 — 앞 'live' 의 참을 물려받으면 안 된다.
+  // A 'live' without info reads as false — it must not inherit the true of the previous 'live'.
   it("info 없는 'live' 는 거짓 — 앞서 받은 참이 남지 않는다", async () => {
     render(<RichSlot viewId="v1" agentId={AGENT} />)
     await flush()
@@ -1249,7 +1249,7 @@ describe('RichSlot(live) — ADR-0226 이어받기 화신의 이력 대기', () 
     expect(emptyState()).not.toBeNull()
   })
 
-  // 표식이 없거나 거짓이면 화면이 표식 도입 전과 같다 — 바이트 단위로 잰다(표식을 안 싣는 옛 데몬·셸 경로).
+  // With the marker missing or false the screen is the same as before the marker was introduced — measured byte for byte (the old daemon/shell path that carries no marker).
   it("'live'(거짓)과 info 없는 'live' 는 같은 DOM 을 그린다", async () => {
     const a = render(<RichSlot viewId="v1" agentId={AGENT} />)
     await flush()
@@ -1265,8 +1265,8 @@ describe('RichSlot(live) — ADR-0226 이어받기 화신의 이력 대기', () 
     expect(emptyState()).not.toBeNull()
   })
 
-  // 대기 표시 규칙은 이력 대기 밖에서 표식 도입 전 그대로다 — 행을 안 그리는 usage 만 온 창도 턴이 안
-  //   닫혔으면 대기 표시가 뜬다. 대기 표시를 내리는 것은 로딩 패널이 떠 있는 동안뿐이다(바로 위 usage 케이스).
+  // The wait indicator rule outside history wait is as before the marker was introduced — a window that received only usage, which draws no row, also shows the wait indicator if the turn is not
+  //   closed. The wait indicator is taken down only while the loading panel is up (the usage case right above).
   it.each([
     ['info 없음', undefined],
     ['거짓', { continuesConversation: false }],
@@ -1281,7 +1281,7 @@ describe('RichSlot(live) — ADR-0226 이어받기 화신의 이력 대기', () 
   })
 })
 
-// ── ADR-0231: 대기 입력 목록 배치 · 빈 상태 게이트 · 재부착 대조 배선 ─────────────────────────
+// ── ADR-0231: queued-input list layout · empty-state gate · re-attach check wiring ─────────────────────────
 function queuedFrame(seq: number, op: Record<string, unknown>): OutputChunk {
   return tag1(seq, JSON.stringify({ type: 'QueuedInput', op }))
 }
@@ -1293,7 +1293,7 @@ function listedIds(): string[] {
     (el) => el.getAttribute('data-queued-input') ?? '',
   )
 }
-/** 답을 테스트가 푸는 목록 조회 — 부른 순서대로 풀개를 쌓는다. */
+/** List query whose reply the test releases — stacks resolvers in the order called. */
 function deferredListing(): Array<(listing: unknown) => void> {
   const resolvers: Array<(listing: unknown) => void> = []
   clientMock.listQueuedInputs = vi.fn(() => new Promise((resolve) => resolvers.push(resolve)))
@@ -1314,12 +1314,12 @@ describe('RichSlot(live) — 대기 입력 목록(ADR-0231)', () => {
     expect(listedIds()).toEqual(['X'])
     const list = queuedList()!
     const label = document.querySelector('[data-rich-label="1"]')!
-    expect(label.closest('[data-wait-strip="1"]')).not.toBeNull() // 라벨은 목록 위 대기 표시 줄에 — 목록이 가리지 않는다
+    expect(label.closest('[data-wait-strip="1"]')).not.toBeNull() // The label is on the wait indicator row above the list — the list does not cover it
     expect(label.compareDocumentPosition(list) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     expect(list.compareDocumentPosition(textarea()) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     expect(textarea()).toBe(before)
 
-    // 받음 → 목록에서 빠지고 그 자리에 말풍선. 입력창은 여전히 같은 엘리먼트다.
+    // Receipt → leaves the list and a bubble takes its place. The input box is still the same element.
     act(() => captured.onChunk!(queuedFrame(1, { kind: 'Delivered', id: 'X' })))
     expect(queuedList()).toBeNull()
     expect(screen.getByText('hello')).toBeTruthy()
@@ -1338,10 +1338,10 @@ describe('RichSlot(live) — 대기 입력 목록(ADR-0231)', () => {
     expect(screen.queryByText('Wait')).toBeNull()
   })
 
-  // P1b 판정 2: 받음 배치는 턴이 닫힌 뒤에 와도 대기 표시를 켠다 — codex 는 턴 도중 친 글을 다음 턴 머리에
-  //   넘기므로 그 `Delivered` 가 새 턴의 첫 사건이고, 추론 구간은 번역되지 않아 그 뒤 한동안 사건이 없다.
-  //   ★그래서 누산기 쪽에서 배치의 재개를 막지 않는다★ — 막으면 그 구간에 대기 표시가 꺼진다. 끄는 것은 생산자가
-  //   그 턴에 내는 경계다(턴이 없는 자리에 받음을 놓지 않는 것이 생산자 몫).
+  // P1b decision 2: placing a receipt turns the wait indicator on even if it arrives after the turn closed — codex hands text typed mid-turn to the head of the next turn,
+  //   so that `Delivered` is the first event of the new turn, and the reasoning span is not translated, so no events come for a while after it.
+  //   ★So the accumulator side does not block the resume that the placement causes★ — blocking it would turn the wait indicator off in that span. What turns it off is the boundary
+  //   the producer emits for that turn (not placing a receipt where there is no turn is the producer's job).
   it('턴 도중 친 글 — 목록에 섰다가 다음 턴 머리의 받음 자리에 말풍선 한 벌, 대기 표시는 그 턴의 경계가 끈다', async () => {
     const turnEnd = JSON.stringify({ type: 'TurnEnd', outcome: { kind: 'Completed' } })
     render(<RichSlot viewId="v1" agentId={AGENT} />)
@@ -1431,10 +1431,10 @@ describe('RichSlot(live) — 대기 입력 목록(ADR-0231)', () => {
   })
 })
 
-// ★스크롤 따라가기 배선(ADR-0242 · TRD §2-1)★: 판정은 followCore.test.ts · 훅은 useScrollFollow.test.tsx 가 잰다.
-//   여기는 슬롯이 그 훅을 대화 뷰포트에 꽂았고, 붙이는 두 자리(보냄 U4 · 비우기)와 버튼 · 손잡이 맵이 닿는지만 잰다.
-//   jsdom 엔 레이아웃이 없어 Radix Viewport 만 기하를 갖게 하고, ResizeObserver 는 호출 기록만 하는 가짜를 둔다.
-//   ★scroll 이벤트를 쏘지 않는다★ — 쏘면 Radix 스크롤바가 마운트돼 이 시험의 대상 밖을 끌어들인다.
+// ★Scroll-follow wiring (ADR-0242 · TRD §2-1)★: the decision is measured by followCore.test.ts and the hook by useScrollFollow.test.tsx.
+//   Here we only measure that the slot plugged that hook into the conversation viewport, and that the two places that attach (send U4 · clearing) and the button · handle map are reached.
+//   jsdom has no layout, so only the Radix Viewport is given geometry, and ResizeObserver is a fake that only records calls.
+//   ★Do not fire scroll events★ — doing so mounts the Radix scrollbar and pulls in things outside this test's subject.
 describe('RichSlot(live) — 스크롤 따라가기(ADR-0242)', () => {
   const geo = { height: 1000, client: 200 }
   const tops = new WeakMap<Element, number>()
@@ -1510,7 +1510,7 @@ describe('RichSlot(live) — 스크롤 따라가기(ADR-0242)', () => {
     fireEvent.wheel(viewport(), { deltaY: -40 })
     expect(jumpButton()).toBeNull()
     act(() => vi.advanceTimersByTime(JUMP_BUTTON_DELAY_MS))
-    // 버튼은 ScrollArea 의 자식이다 — absolute 기준이 seam 의 Root 라 스크롤되지 않는다.
+    // The button is a child of ScrollArea — the absolute reference is the seam's Root, so it does not scroll.
     expect(viewport().contains(jumpButton())).toBe(true)
 
     fireEvent.click(jumpButton()!)
@@ -1530,7 +1530,7 @@ describe('RichSlot(live) — 스크롤 따라가기(ADR-0242)', () => {
     fireEvent.wheel(viewport(), { deltaY: -40 })
     act(() => vi.advanceTimersByTime(JUMP_BUTTON_DELAY_MS))
 
-    // jsdom 은 클릭으로 포커스를 옮기지 않는다 — 실제 창에서 버튼을 누르면 먼저 버튼이 포커스를 받는다.
+    // jsdom does not move focus on click — in a real window, pressing the button gives the button focus first.
     jumpButton()!.focus()
     fireEvent.click(jumpButton()!)
     expect(jumpButton()).toBeNull()
@@ -1552,10 +1552,10 @@ describe('RichSlot(live) — 스크롤 따라가기(ADR-0242)', () => {
   })
 })
 
-// ★이 표는 일부러 명령을 흉내만 낸다(`fireAndForget` mock)★ — 실제 창 명령은 한 턴의 두 번째 Esc 를 무시하므로(ADR-0244 ·
-//   아래 「중단하는 중」 표) 한 턴에 두 번 눌러 두 번 부르는 포커스 시험들은 그 mock 에 기댄다.
+// ★This table deliberately only imitates the command (`fireAndForget` mock)★ — the real window command ignores the second Esc of a turn (ADR-0244 ·
+//   the 「중단하는 중」 table below), so the focus tests that press twice in one turn and call twice lean on that mock.
 describe('RichSlot(live) — Esc 는 도는 턴을 끊는다(ADR-0237)', () => {
-  // 'absent' = 능력 칸이 아예 없다(undefined 를 넘기면 기본값이 대신 들어간다).
+  // 'absent' = there is no capability field at all (passing undefined makes the default go in instead).
   function running(interrupt: boolean | 'absent' = true): unknown[] {
     const capabilities = interrupt === 'absent' ? undefined : { control: { interrupt } }
     return [{ id: AGENT, cwd: 'C:/x', status: { type: 'Running' }, capabilities }]
@@ -1565,7 +1565,7 @@ describe('RichSlot(live) — Esc 는 도는 턴을 끊는다(ADR-0237)', () => {
   const root = (): HTMLElement => document.querySelector('[data-rich-live="1"]') as HTMLElement
   const input = (): HTMLTextAreaElement => screen.getByPlaceholderText(/메시지 입력/) as HTMLTextAreaElement
 
-  /** 끊기 능력이 있는 에이전트의 턴이 도는 중(델타만 왔다 — 턴 끝 없음). */
+  /** The turn of an agent with the interrupt capability is running (only deltas have come — no turn end). */
   async function mountStreaming(interrupt: boolean | 'absent' = true): Promise<void> {
     agentStoreState.agents = running(interrupt)
     agentStoreState.agentsLoaded = true
@@ -1674,7 +1674,7 @@ describe('RichSlot(live) — Esc 는 도는 턴을 끊는다(ADR-0237)', () => {
       act(() => captured.onChunk!(queuedFrame(seq, { kind: 'Queued', id, text: `later ${id}` })))
     }
 
-    // jsdom 은 클릭으로 포커스를 옮기지 않는다 — 실제 창에서 버튼을 누르면 먼저 버튼이 포커스를 받는다.
+    // jsdom does not move focus on click — in a real window, pressing the button gives the button focus first.
     const remove = document.querySelector('[data-queued-input="Q1"] button') as HTMLButtonElement
     remove.focus()
     fireEvent.click(remove)
@@ -1700,7 +1700,7 @@ describe('RichSlot(live) — Esc 는 도는 턴을 끊는다(ADR-0237)', () => {
     fireEvent.keyDown(viewport, { key: 'Escape' })
     expect(interrupts()).toHaveLength(1)
 
-    // 본문 여백처럼 뷰포트 밖을 누르면 루트가 포커스를 받는다(tabIndex -1 — 탭 순서 밖).
+    // Pressing outside the viewport, like the body margin, gives the root focus (tabIndex -1 — outside tab order).
     expect(root().tabIndex).toBe(-1)
     root().focus()
     expect(document.activeElement).toBe(root())
@@ -1709,8 +1709,8 @@ describe('RichSlot(live) — Esc 는 도는 턴을 끊는다(ADR-0237)', () => {
   })
 })
 
-// ★Esc 뒤 「중단하는 중」(ADR-0244)★: 세우는 쪽은 창 명령이고 걷는 쪽은 칸이라, 여기서는 사람 경로를 실제 명령까지
-//   태운다(위 ADR-0237 표는 명령을 흉내만 내므로 그 시험들의 두 번째 Esc 는 여전히 부른다).
+// ★「중단하는 중」 (interrupting) after Esc (ADR-0244)★: the side that sets it is the window command and the side that lifts it is the area, so here the human path is carried
+//   all the way to the real command (the ADR-0237 table above only imitates the command, so the second Esc in those tests is still called).
 describe('RichSlot(live) — Esc 뒤 「중단하는 중…」 · 턴 끝까지 Esc 무시(ADR-0244)', () => {
   const root = (): HTMLElement => document.querySelector('[data-rich-live="1"]') as HTMLElement
   const input = (): HTMLTextAreaElement => screen.getByPlaceholderText(/메시지 입력/) as HTMLTextAreaElement
@@ -1732,7 +1732,7 @@ describe('RichSlot(live) — Esc 뒤 「중단하는 중…」 · 턴 끝까지 
     agentStoreState.agentsLoaded = true
   })
 
-  /** 끊기 능력이 있는 에이전트의 턴이 도는 중(델타만 왔다 — 턴 끝 없음). */
+  /** The turn of an agent with the interrupt capability is running (only deltas have come — no turn end). */
   async function mountStreaming(): Promise<void> {
     render(<RichSlot viewId="v1" agentId={AGENT} />)
     await flush()
@@ -1750,7 +1750,7 @@ describe('RichSlot(live) — Esc 뒤 「중단하는 중…」 · 턴 끝까지 
     expect(screen.getByText(t('chat.interrupting'))).toBeTruthy()
     expect(screen.queryByText('Wait')).toBeNull()
 
-    // 끊기가 받아들여져도 턴 끝이 오기 전까지는 그대로다.
+    // Even if the interrupt is accepted, it stays as is until the turn end arrives.
     await flush()
     expect(indicator()).not.toBeNull()
     expect(fireEvent.keyDown(input(), { key: 'Escape' })).toBe(true)
@@ -1808,7 +1808,7 @@ describe('RichSlot(live) — Esc 뒤 「중단하는 중…」 · 턴 끝까지 
     await flush()
     expect(indicator()).not.toBeNull()
 
-    // 턴을 여는 프레임 없이 끝만 온다(누산기는 끝 → 끝) — 끝 사건 자체로 걷는다.
+    // Only the end arrives with no frame that opened the turn (the accumulator goes end → end) — it is lifted by the end event itself.
     act(() => captured.onChunk!(turnEnd(2)))
     expect(screen.queryByText('Wait')).toBeNull()
     expect(interrupting()).toBe(false)
@@ -1888,7 +1888,7 @@ describe('RichSlot(live) — Esc 뒤 「중단하는 중…」 · 턴 끝까지 
     await flush()
     expect(interrupting()).toBe(true)
 
-    // 둘째 뷰 — 빈 누산기가 이력을 다시 짓는다(옛 턴 끝 seq 1 이 끝 → 끝으로 넘어간다).
+    // Second view — an empty accumulator rebuilds the history (the old turn end seq 1 passes from end to end).
     render(<RichSlot viewId="v2" agentId={AGENT} />)
     await flush()
     act(() => {
@@ -1980,7 +1980,7 @@ describe('RichSlot(live) — Esc 뒤 「중단하는 중…」 · 턴 끝까지 
     })
     expect(interrupting()).toBe(true)
 
-    // 턴 끝이 따라잡기 전 이력에만 있다 — 대기 표시는 그 전후로 꺼져 있어 켜짐 → 꺼짐도 없다.
+    // The turn end is only in the history before the catch-up — the wait indicator is off before and after, so there is no on → off either.
     act(() => {
       for (const frame of replay) captured.onChunk!(frame)
       captured.onState!('live')
@@ -2044,9 +2044,9 @@ describe('RichSlot(live) — Esc 뒤 「중단하는 중…」 · 턴 끝까지 
   })
 })
 
-// ★도구 묶음 접착(ADR-0239 · TRD S21-chat-ux §4-4 · §4-5)★: 묶기 · 요약 · 토글 자체는 toolRuns.test.ts ·
-//   ToolGroupRow.test.tsx 가 잰다. 여기는 슬롯이 대화 뷰에 슬롯 id 를 내려보내고 저장소에 묶였는지(머리가 살아 있고
-//   command 가 닿는다) · 묶임의 수명(마운트 · 에이전트 교체 · 새 화신) · 마지막이 아닌 묶음을 펼치면 따라가기를 푸는지만 잰다.
+// ★Tool bundle glue (ADR-0239 · TRD S21-chat-ux §4-4 · §4-5)★: bundling · summary · toggle themselves are measured by toolRuns.test.ts ·
+//   ToolGroupRow.test.tsx. Here we only measure that the slot passes its slot id down to the conversation view and is bound to the store (the head is alive and
+//   the command reaches it) · the lifetime of the binding (mount · agent swap · new incarnation) · that expanding a non-last bundle releases follow.
 describe('RichSlot(live) — 도구 묶음 접착(ADR-0239)', () => {
   const OTHER = 'eeee-ffff-0000-1111'
 
@@ -2060,7 +2060,7 @@ describe('RichSlot(live) — 도구 묶음 접착(ADR-0239)', () => {
     return tag1(seq, JSON.stringify({ type: 'TurnEnd', turn_id: null, outcome: { kind: 'Completed' } }))
   }
 
-  /** 끝난 턴 하나 = 도구 호출 둘 — 고른 값이 없으면 접힌다. 묶음 키 = 첫 호출의 id(`tool:<id>`). */
+  /** One finished turn = two tool calls — with no chosen value it is collapsed. Bundle key = the id of the first call (`tool:<id>`). */
   function feedFinishedGroup(seq: number, ids: readonly [string, string]): void {
     act(() => captured.onChunk!(toolCallFrame(seq, ids[0])))
     act(() => captured.onChunk!(toolCallFrame(seq + 1, ids[1])))
@@ -2073,7 +2073,7 @@ describe('RichSlot(live) — 도구 묶음 접착(ADR-0239)', () => {
     if (el === null) throw new Error(`묶음 '${key}' 이 그려져 있지 않다`)
     return el
   }
-  // 묶음 뿌리의 첫 버튼이 머리다 — 펼치면 멤버 행의 버튼이 그 뒤에 선다.
+  // The first button of the bundle root is the head — when expanded, the member rows' buttons stand after it.
   const header = (key: string): HTMLButtonElement => group(key).querySelector('button') as HTMLButtonElement
   const openAttr = (key: string): string | null => group(key).getAttribute('data-tool-group-open')
   const chosen = (key: string): boolean | undefined => useToolGroupStore.getState().bySlot.v1?.open[key]
@@ -2087,7 +2087,7 @@ describe('RichSlot(live) — 도구 묶음 접착(ADR-0239)', () => {
 
     expect(groups()).toHaveLength(1)
     expect(group('tool:r1').getAttribute('data-tool-group-count')).toBe('2')
-    // FE-2b-2 리뷰가 잡은 결함의 회귀망 — 슬롯 id 를 안 내려보내면 머리가 꺼져 접힌 묶음을 다시 못 연다.
+    // Regression net for a defect the FE-2b-2 review caught — if the slot id is not passed down, the head is off and a collapsed bundle cannot be reopened.
     expect(header('tool:r1').disabled).toBe(false)
     expect(openAttr('tool:r1')).toBe('0')
 
@@ -2126,17 +2126,17 @@ describe('RichSlot(live) — 도구 묶음 접착(ADR-0239)', () => {
     expect(groups().map((g) => g.getAttribute('data-tool-group'))).toEqual(['tool:a1', 'tool:b1'])
     expect(followAttr()).toBe('pinned')
 
-    fireEvent.click(header('tool:b1')) // 마지막 묶음
+    fireEvent.click(header('tool:b1')) // Last bundle
     expect(openAttr('tool:b1')).toBe('1')
     expect(followAttr()).toBe('pinned')
     expect(getFollow('v1')!.pinned).toBe(true)
 
-    fireEvent.click(header('tool:a1')) // 마지막이 아닌 묶음
+    fireEvent.click(header('tool:a1')) // Non-last bundle
     expect(openAttr('tool:a1')).toBe('1')
     expect(followAttr()).toBe('free')
     expect(getFollow('v1')!.pinned).toBe(false)
 
-    // 접기는 부르지 않는다 — 다시 붙인 뒤 위 묶음을 접어도 붙음이 남는다.
+    // Collapse is not called — even if the bundle above is collapsed after re-attaching, the pin remains.
     act(() => getFollow('v1')!.pin())
     fireEvent.click(header('tool:a1'))
     expect(openAttr('tool:a1')).toBe('0')
@@ -2150,14 +2150,14 @@ describe('RichSlot(live) — 도구 묶음 접착(ADR-0239)', () => {
     fireEvent.click(header('tool:r1'))
     expect(openAttr('tool:r1')).toBe('1')
 
-    // 마운트 해제(렌더 모드 교체 · 팝아웃 이동) → 같은 에이전트로 다시 — 같은 사건열의 replay 가 같은 키로 선다.
+    // Unmount (render mode swap · pop-out move) → again with the same agent — a replay of the same event sequence stands with the same keys.
     cleanup()
     render(<RichSlot viewId="v1" agentId={AGENT} />)
     await flush()
     feedFinishedGroup(0, ['r1', 'r2'])
     expect(openAttr('tool:r1')).toBe('1')
 
-    // 같은 슬롯에 다른 에이전트 — 같은 키의 묶음이 와도 기본(접힘)으로 그려진다.
+    // A different agent in the same slot — even if a bundle with the same key comes, it is drawn as the default (collapsed).
     cleanup()
     render(<RichSlot viewId="v1" agentId={OTHER} />)
     await flush()
@@ -2166,8 +2166,8 @@ describe('RichSlot(live) — 도구 묶음 접착(ADR-0239)', () => {
     expect(useToolGroupStore.getState().bySlot.v1).toMatchObject({ agentId: OTHER, open: {} })
   })
 
-  // 옛 해제가 새 묶임을 못 푸는 것(마운트 표식)은 `toolGroupStore.test.ts` 가 잰다 — 여기서는 React 가 옛 정리를 먼저
-  //   돌려 그 순서를 가릴 수 없다.
+  // That an old release cannot release a new binding (the mount marker) is measured by `toolGroupStore.test.ts` — here React runs the old cleanup first,
+  //   so that order cannot be told apart.
   it('한 인스턴스에서 에이전트가 바뀌면(key 재마운트) 새 에이전트로 다시 묶여 고른 펼침은 비고 새 머리가 적는다', async () => {
     const { rerender } = render(<RichSlot viewId="v1" agentId={AGENT} />)
     await flush()
@@ -2178,7 +2178,7 @@ describe('RichSlot(live) — 도구 묶음 접착(ADR-0239)', () => {
     await flush()
     feedFinishedGroup(0, ['r1', 'r2'])
     expect(openAttr('tool:r1')).toBe('0')
-    // 새 인스턴스의 머리가 저장소에 적는다(새 묶임이 섰다).
+    // The new instance's head writes to the store (a new binding stands).
     fireEvent.click(header('tool:r1'))
     expect(openAttr('tool:r1')).toBe('1')
   })
@@ -2193,7 +2193,7 @@ describe('RichSlot(live) — 도구 묶음 접착(ADR-0239)', () => {
     fireReset()
     feedFinishedGroup(0, ['r1', 'r2'])
     expect(openAttr('tool:r1')).toBe('0')
-    // 묶임은 남는다 — 비운 뒤에도 머리가 적는다.
+    // The binding stays — the head writes even after clearing.
     fireEvent.click(header('tool:r1'))
     expect(openAttr('tool:r1')).toBe('1')
   })
@@ -2210,9 +2210,9 @@ describe('RichSlot(live) — 도구 묶음 접착(ADR-0239)', () => {
     expect(chosen('tool:r1')).toBe(true)
   })
 
-  // ★늦은 도구 끝 창(TRD §4-7 ⑧ · ⑨ 프론트 · ADR-0241)★: codex 는 끊어도 도는 명령을 죽이지 않아 지난 턴 도구의 끝이
-  //   늦게 온다. 보낸 직후 · 첫 답 전에 그 끝이 들면 — 직전 턴이 닫혀 turnDone 이 참이라 대기 표시를 떠받치는 것은
-  //   awaiting 하나다. `ToolResult` 로 awaiting 을 풀면 여기서 "Wait" 이 답 없이 꺼진다.
+  // ★Late tool end window (TRD §4-7 ⑧ · ⑨ frontend · ADR-0241)★: codex does not kill a running command even when interrupted, so the end of a previous turn's tool
+  //   arrives late. If that end lands right after a send · before the first reply — the previous turn is closed so turnDone is true, and what holds up the wait indicator is
+  //   awaiting alone. If `ToolResult` released awaiting, "Wait" would go off here with no reply.
   it('보낸 직후 지난 턴 도구의 끝(ToolResult)만 오면 "Wait" 이 남고 그 행에 표식이 붙는다 — 첫 진짜 답부터는 턴이 이어받는다', async () => {
     render(<RichSlot viewId="v1" agentId={AGENT} />)
     await flush()
@@ -2230,7 +2230,7 @@ describe('RichSlot(live) — 도구 묶음 접착(ADR-0239)', () => {
     expect(screen.getByText('Wait')).toBeTruthy()
     expect(document.querySelector('[data-tool-mark="failed"]')).not.toBeNull()
 
-    // 첫 진짜 답 — awaiting 이 풀리고 표시는 열린 턴이 떠받친다. 턴 경계가 끈다(awaiting 이 고착됐다면 안 꺼진다).
+    // First real reply — awaiting is released and the indicator is held up by the open turn. The turn boundary turns it off (if awaiting were stuck it would not go off).
     act(() => captured.onChunk!(tag1(3, JSON.stringify({ type: 'TextDelta', text: 'answer' }))))
     expect(screen.getByText('Wait')).toBeTruthy()
     act(() => captured.onChunk!(turnEndFrame(4)))
