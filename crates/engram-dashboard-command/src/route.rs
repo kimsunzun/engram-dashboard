@@ -1,4 +1,4 @@
-//! 배달 — **전 프로세스·전 홉이 같은 3단계**다(TRD §3-5).
+//! Delivery — **every process and every hop uses the same 3 steps** (TRD §3-5).
 
 use std::any::Any;
 use std::future::Future;
@@ -11,13 +11,13 @@ use crate::{
     OwnerLookupSource,
 };
 
-/// 동기 본문의 패닉을 오류 답장으로 접는다.
+/// Folds a panic in the synchronous body into an error reply.
 ///
-/// ★없으면 요청이 답장 없이 끝난다★: 핸들러 패닉이 그대로 풀리면 `CommandReply` 가 만들어지지 않아
-/// 호출자는 마감시각까지 매달린다 — 「한 `request_id` 에 답장은 정확히 하나」(TRD §4-⑤) 위반이다.
-/// ★운영 프로세스에서는 닿지 않는다★: 데몬 · 셸은 「가두는 중」 표시 밖의 패닉을 훅이 되감기 전에 끝내고
-/// (ADR-0292), 명령 본문을 표시 안에서 모는 곳은 없다(ADR-0293). 그래서 이 그물은 훅 없는 시험 빌드에서만
-/// 실효가 있다 — 그 빌드의 셸 · 데몬 시험이 여기에 기대므로 걷지 않는다.
+/// ★Without it, the request ends with no reply★: if a handler panic unwinds as is, no `CommandReply` is made and
+/// the caller hangs until the deadline — a violation of 「한 `request_id` 에 답장은 정확히 하나」 (exactly one reply per request id) (TRD §4-⑤).
+/// ★It is not reached in production processes★: in the daemon and shell the hook ends any panic outside the 「가두는 중」 (containing) marker before it unwinds
+/// (ADR-0292), and nowhere runs a command body inside the marker (ADR-0293). So this net only
+/// has effect in test builds without the hook — the shell and daemon tests of that build rely on it, so it is not removed.
 pub(crate) fn guard_panic<T>(
     body: impl FnOnce() -> Result<T, CommandError>,
 ) -> Result<T, CommandError> {
@@ -35,7 +35,7 @@ fn panic_detail(payload: &Box<dyn Any + Send>) -> String {
         .unwrap_or_else(|| "unknown payload".to_string())
 }
 
-/// 핸들러가 터졌다 — 이 홉에서 **확실히** 실패했다(봉투가 나간 적이 없다).
+/// The handler blew up — it **definitely** failed at this hop (the envelope never went out).
 // ADR-0159
 fn handler_panicked(detail: String) -> CommandError {
     CommandError::of(
@@ -44,11 +44,11 @@ fn handler_panicked(detail: String) -> CommandError {
     )
 }
 
-/// 배달 중 패닉의 결말 — ★`INTERNAL` 이 아니다★.
+/// The outcome of a panic during delivery — ★it is not `INTERNAL`★.
 ///
-/// 봉투는 이미 선을 탔을 수 있으므로 **이 홉의 확실성은 「불명」**이다(TRD §4-④). `INTERNAL`(= `retry:
-/// never`)로 답하면 호출자는 「여기서 확실히 실패했다」로 읽고 새 id 로 다시 부르는데, 그러면 상대가
-/// 이미 적용한 조작이 두 번 적용될 수 있다. `OUTCOME_UNKNOWN` 은 **같은 id 로만** 다시 묻게 한다.
+/// The envelope may already have gone on the wire, so **this hop's certainty is 「불명」** (unknown) (TRD §4-④). If we answer with `INTERNAL` (= `retry:
+/// never`), the caller reads it as 「여기서 확실히 실패했다」 (definitely failed here) and calls again with a new id, and then an operation the peer
+/// had already applied can be applied twice. `OUTCOME_UNKNOWN` makes it ask again **with the same id only**.
 // ADR-0159
 fn forwarding_unknown(detail: String) -> CommandError {
     CommandError::of(
@@ -57,9 +57,9 @@ fn forwarding_unknown(detail: String) -> CommandError {
     )
 }
 
-/// future 의 패닉을 결말로 접는다 — 본문이 첫 poll 에서 도는 형태라 여기서 터진다.
+/// Folds a panic in the future into an outcome — the body runs on the first poll, so it blows up here.
 ///
-/// 접는 값은 부르는 쪽이 준다(`on_panic`) — 로컬 실행과 전달은 **같은 그물을 쓰되 다른 확실성**을 답한다.
+/// The folded value is supplied by the caller (`on_panic`) — local execution and delivery **use the same net but answer with different certainty**.
 struct CatchUnwind<F, P> {
     inner: F,
     on_panic: Option<P>,
@@ -76,7 +76,7 @@ where
         let this = self.get_mut();
         match catch_unwind(AssertUnwindSafe(|| Pin::new(&mut this.inner).poll(cx))) {
             Ok(polled) => polled,
-            // 패닉 후의 future 는 상태가 불명이라 다시 폴링하지 않는다 — 여기서 끝낸다.
+            // A future after a panic has unknown state, so it is not polled again — it ends here.
             Err(payload) => {
                 let fold = this
                     .on_panic
@@ -88,31 +88,31 @@ where
     }
 }
 
-/// 내 표에 있나 → 명부에 있나 → 오류.
+/// In my table? → in the registry? → error.
 ///
-/// ★홉마다 다른 규칙을 두지 않는다★ — 새 주인(모바일 클라이언트 등)이 붙어도 배달 코드는 안 바뀌고
-/// 등록이 하나 늘 뿐이다. 명부가 없는 프로세스는 빈 [`crate::Roster`] 를 넘긴다.
-/// ★명부는 **조회 한 번**만 받는다([`OwnerLookupSource`])★ — 참조로 붙들면 공유 명부를 쥔 조립부가
-/// `link.send` 왕복 내내 락을 들어야 하고, 느린 상대 하나가 그동안 등록·연결 정리·다른 배달을 전부
-/// 세운다. **인자로 되돌리지 말 것** — 여기 참조가 서면 그 정지는 호출자가 피할 수 없다.
-/// ★인자 검문은 여기 없다★ — 선언에 없는 칸의 거절은 **사람·LLM 이 치는 입구**의 일이고
-/// ([`CommandTable::check_args`] · ADR-0157), 홉 간 배선은 모르는 칸을 무시하고 옛 의미로 실행해야
-/// additive 진화가 산다(TRD §4-③).
-/// ★그래서 **남의 이름**으로 온 인자는 이 경로 어디서도 검문받지 않는다(알려진 구멍)★ — 치는 쪽 입구는
-/// 그 선언을 안 들어 검문하지 못하고, 여기서 넣으면 위 이유로 additive 진화가 죽는다. 그 구멍을 누가
-/// 메우나는 입구 어댑터 **쌍**(치는 쪽 · 주인 쪽)의 배선 결정으로 남아 있다 —
-/// [`CommandTable::check_args`] 의 통과 목록에 그 갈림이 적혀 있다.
-/// 나가는 봉투에는 명부가 답한 주인 토큰을 **덮어 싣는다** — 받는 홉이 「누구 앞으로 온 것인가」를
-/// 자기 명부와 대조할 수 있어야 2단 배달에서 중간 홉이 갈라 줄 수 있다(TRD §3-8).
-/// ★마감시각은 여기서 걸지 않는다 — 조립부의 몫이다★: 마감은 **호출자가 정하고**(TRD §4-⑥) 최초 수신
-/// 데몬의 라우팅 표 엔트리가 같은 `deadline` 을 들고 있어야 호출자가 사라져도 표가 안 샌다. 그 표가
-/// Step 2 에서 생기므로, 그 전에 여기 시계를 넣으면 홉마다 다른 마감이 생겨 같은 왕복이 중간에서
-/// 잘린다(전 구간 하나의 `request_id` 에 답장 하나 — §4-⑤).
-/// ★취소 의미(v1 미도입 — TRD §4-⑤)★: 이 future 를 drop 하면 왕복이 **그대로 버려진다** — 상대 홉에는
-/// 아무 통보도 가지 않고, 이미 나간 봉투의 결말은 불명으로 남는다. 회수는 Step 2 의 마감시각 sweep 이
-/// 맡는다.
-/// ★핸들러·링크 future 는 drop 에서 패닉하면 안 된다★ — 아래 그물은 `poll` 만 덮고 drop 은 못 덮으며,
-/// unwind 중 재패닉은 프로세스 abort 라 답장이 아예 나가지 못한다.
+/// ★No different rule per hop★ — even when a new owner (a mobile client, etc.) attaches, the delivery code does not change and
+/// only one more registration is added. A process with no registry passes an empty [`crate::Roster`].
+/// ★The registry receives **a single lookup** only ([`OwnerLookupSource`])★ — if it were held by reference, the assembly code holding the shared registry
+/// would have to hold the lock for the entire `link.send` round trip, and one slow peer would halt registration, connection cleanup and other deliveries
+/// meanwhile. **Do not revert to an argument** — if a reference stands here, the caller cannot avoid that halt.
+/// ★There is no argument screening here★ — rejecting fields absent from the declaration is the job of **the entry where a person or LLM types**
+/// ([`CommandTable::check_args`] · ADR-0157), and inter-hop wiring must ignore unknown fields and run with the old meaning
+/// for additive evolution to survive (TRD §4-③).
+/// ★So arguments arriving under **another owner's name** are screened nowhere on this path (a known hole)★ — the typing side's entry
+/// does not hold that declaration and so cannot screen, and putting it here kills additive evolution for the reason above. Who
+/// plugs that hole remains a wiring decision of the entry adapter **pair** (typing side · owner side) —
+/// that fork is written in the pass-through list of [`CommandTable::check_args`].
+/// On the outgoing envelope the owner token the registry answered is **overwritten in** — the receiving hop must be able to check 「누구 앞으로 온 것인가」 (who was this addressed to)
+/// against its own registry for the middle hop to sort it in two-stage delivery (TRD §3-8).
+/// ★The deadline is not set here — it belongs to the assembly code★: the deadline is **set by the caller** (TRD §4-⑥), and
+/// the routing-table entry of the first receiving daemon must hold the same `deadline` so the table does not leak even if the caller disappears. That table
+/// arises in Step 2, so if a clock were put here before then, each hop would get a different deadline and the same round trip would be
+/// cut in the middle (one reply per `request_id` across the whole path — §4-⑤).
+/// ★Cancellation semantics (not introduced in v1 — TRD §4-⑤)★: dropping this future **discards the round trip as is** — no
+/// notice goes to the peer hop, and the outcome of an envelope already sent remains unknown. Reclaiming is
+/// the job of Step 2's deadline sweep.
+/// ★A handler or link future must not panic in drop★ — the net below covers only `poll` and cannot cover drop, and
+/// a re-panic during unwind is a process abort, so no reply can go out at all.
 // ADR-0155
 pub async fn route(
     table: &CommandTable,
@@ -122,7 +122,7 @@ pub async fn route(
 ) -> CommandReply {
     let request_id = env.request_id;
 
-    // 표에 없으면 `call` 이 `None` 을 내고 인자는 그대로 남는다 — 다음 단계가 그것을 실어 보낸다.
+    // If it is not in the table, `call` returns `None` and the arguments remain as they are — the next step carries them.
     let called = catch_unwind(AssertUnwindSafe(|| table.call(&env.name, &mut env.args)));
     match called {
         Ok(Some(future)) => {
@@ -144,8 +144,8 @@ pub async fn route(
 
     match roster.lookup(&env.name) {
         OwnerLookup::Available(owner) => {
-            // ★그물은 전달 쪽에도 있다★ — 없으면 링크가 터질 때 답장 없이 요청이 끝난다(TRD §4-⑤ 위반).
-            //   두 진입점을 함께 덮는다: 봉투를 받아 future 를 만들다가 터지는 경우와 첫 poll 에서 터지는 경우.
+            // ★The net is on the delivery side too★ — without it, when the link blows up the request ends with no reply (violates TRD §4-⑤).
+            //   It covers both entry points: blowing up while receiving the envelope and making the future, and blowing up on the first poll.
             let sent = catch_unwind(AssertUnwindSafe(|| {
                 link.send(CommandEnvelope { owner, ..env })
             }));
@@ -166,8 +166,8 @@ pub async fn route(
                     )
                 }
             };
-            // ★남의 답을 내 왕복으로 세지 않는다★: 상관 키가 다른 답장을 그대로 통과시키면 호출자는 다른
-            //   요청의 결과를 자기 것으로 읽는다. 적용 여부는 알 수 없으므로 확실성은 **불명**이다.
+            // ★Do not count another's reply as my round trip★: if a reply with a different correlation key passed through as is, the caller would read
+            //   another request's result as its own. We cannot know whether it was applied, so the certainty is **unknown**.
             if reply.request_id != request_id {
                 return CommandReply::err(
                     request_id,
@@ -182,8 +182,8 @@ pub async fn route(
             }
             reply
         }
-        // ★끊긴 주인의 이름은 명부에서 사라지므로 여기 「주인 부재」 갈래가 없다★ — 그 이름은 한 번도
-        //   등록되지 않았던 이름과 같은 답을 받는다(ADR-0150 가 감수한 구분 손실).
+        // ★A disconnected owner's name vanishes from the registry, so there is no 「주인 부재」 (owner absent) branch here★ — that name gets the same answer as a name that
+        //   was never registered (the loss of distinction ADR-0150 accepted).
         OwnerLookup::Unknown => CommandReply::err(
             request_id,
             CommandError::of(ErrorCode::UnknownCommand, env.name),
@@ -220,7 +220,7 @@ mod tests {
     };
     static DECLARED: &[&CommandSpec] = &[&AGENT_LIST];
 
-    /// 보낸 봉투를 기록하고 미리 정한 답을 돌려준다 — 소켓 0으로 배달 규칙만 단언한다.
+    /// Records the envelope sent and returns a preset answer — asserts only the delivery rules, with zero sockets.
     #[derive(Default)]
     struct FakeLink {
         sent: Mutex<Vec<CommandEnvelope>>,
@@ -234,7 +234,7 @@ mod tests {
         }
     }
 
-    /// 이 홉 앞으로 온 봉투 — `owner` 는 **보낸 이가 아니라 목적지**다(앞 홉이 명부를 보고 적어 넣는다).
+    /// An envelope addressed to this hop — `owner` is **the destination, not the sender** (the previous hop looks at the registry and writes it in).
     fn envelope(name: &str) -> CommandEnvelope {
         CommandEnvelope {
             name: name.to_string(),
@@ -304,11 +304,11 @@ mod tests {
         assert_eq!(sent[0].request_id, request_id, "id 는 전 구간 동일");
     }
 
-    /// ★끊긴 주인의 이름과 한 번도 본 적 없는 이름이 **같은 답**을 받는다★
+    /// ★A disconnected owner's name and a name never seen before get **the same answer**★
     ///
-    /// 명부가 끊긴 주인의 등록을 지우므로(ADR-0150 결정 3) 배달에는 두 상황을 가를 근거가 없다 — 알고
-    /// 감수한 손실이다. 그 구분이 실제로 필요해지면 자취를 되살리는 것이 아니라 연결 목록을 응답에 싣는
-    /// 쪽으로 푼다.
+    /// The registry erases a disconnected owner's registration (ADR-0150 decision 3), so delivery has no basis to tell the two situations apart — a loss
+    /// accepted knowingly. If that distinction is ever really needed, it is solved not by reviving the trace but by putting the connection list in the
+    /// response.
     #[test]
     fn step3_answers_a_disconnected_owners_name_as_an_unknown_command() {
         let table = CommandTable::new(DECLARED);
@@ -376,10 +376,10 @@ mod tests {
         );
     }
 
-    /// ★`route` 자신의 그물을 겨눈다★ — 핸들러 안쪽 그물(`blocking_handler`)을 쓰면 이 테스트는 바깥
-    /// 그물이 없어져도 통과한다(안쪽이 먼저 접으므로). 그래서 **그물 없는 핸들러**로 두 진입점을 각각
-    /// 태운다: `call` 이 터지는 경우와 future 첫 poll 이 터지는 경우.
-    /// 그물이 없으면 이 테스트는 hang 이 아니라 패닉으로 죽는다(둘 다 「답장 없음」의 얼굴이다).
+    /// ★This aims at `route`'s own net★ — if it used the handler's inner net (`blocking_handler`), this test would pass even if the outer
+    /// net disappeared (the inner one folds first). So we run each of the two entry points through a **handler with no net**:
+    /// the case where `call` blows up and the case where the future's first poll blows up.
+    /// Without the net, this test dies with a panic, not a hang (both are faces of 「답장 없음」 (no reply)).
     #[test]
     fn a_panic_in_an_unguarded_handler_still_produces_exactly_one_reply() {
         struct PanicOnCall;
@@ -424,10 +424,10 @@ mod tests {
         }
     }
 
-    /// ★그물의 비대칭이 없어야 한다★ — 로컬 실행만 덮고 전달을 비워 두면, 링크가 터지는 순간 답장 없이
-    /// 요청이 끝난다(호출자는 마감시각까지 매달린다 — TRD §4-⑤). 여기서도 두 진입점을 각각 태운다.
-    /// ★답은 `INTERNAL` 이 아니라 `OUTCOME_UNKNOWN` 이다★ — 봉투가 이미 선을 탔을 수 있어 이 홉의
-    /// 확실성이 「불명」이고, 그래야 재시도가 **같은 id 로만** 일어난다(TRD §4-④).
+    /// ★There must be no asymmetry in the net★ — if only local execution is covered and delivery is left empty, at the moment the link blows up the request ends
+    /// with no reply (the caller hangs until the deadline — TRD §4-⑤). Here too we run each of the two entry points.
+    /// ★The answer is `OUTCOME_UNKNOWN`, not `INTERNAL`★ — the envelope may already have gone on the wire so this hop's
+    /// certainty is 「불명」 (unknown), and only then does retry happen **with the same id only** (TRD §4-④).
     #[test]
     fn a_panic_while_forwarding_still_produces_exactly_one_reply() {
         struct PanicOnSend;
@@ -491,7 +491,7 @@ mod tests {
         }
     }
 
-    /// ★남의 답을 내 왕복으로 세지 않는다★
+    /// ★Do not count another's reply as my round trip★
     #[test]
     fn a_link_answering_a_different_request_id_is_outcome_unknown() {
         struct WrongIdLink;
@@ -529,9 +529,9 @@ mod tests {
         );
     }
 
-    /// ★배달은 명부를 **조회 한 번** 동안만 본다★ — 공유 명부를 쥔 조립부가 왕복 내내 락을 들지 않아도
-    /// 되는 것이 [`OwnerLookupSource`] 의 존재 이유다. 락을 조회 안에서만 잡는 구현으로 단언한다: 배달이
-    /// 명부를 붙들고 있으면 링크가 도는 동안 `try_lock` 이 실패한다.
+    /// ★Delivery looks at the registry only for **a single lookup**★ — the reason [`OwnerLookupSource`] exists is that the assembly code holding the shared registry need not
+    /// hold the lock for the whole round trip. We assert it with an implementation that takes the lock only inside the lookup: if delivery
+    /// were holding the registry, `try_lock` would fail while the link runs.
     #[test]
     fn the_roster_is_not_held_while_the_link_is_in_flight() {
         struct SharedRoster(Arc<Mutex<Roster>>);
@@ -592,7 +592,7 @@ mod tests {
 
     #[test]
     fn arc_table_is_shareable_across_threads() {
-        // 표는 조립부가 Arc 로 들고 여러 연결이 나눠 쓴다 — Send + Sync 가 형태로 유지되는지 본다.
+        // The table is held in an Arc by the assembly code and shared by several connections — checks that Send + Sync is kept by shape.
         let table = Arc::new(table_with_agent_list());
         let clone = Arc::clone(&table);
         std::thread::spawn(move || {
