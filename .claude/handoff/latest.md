@@ -1,4 +1,4 @@
-# Handoff: S33 follow-up translation merged; S35 (i18next behind t()) paused after a deep TRD review + an English-source direction change
+# Handoff: S33 follow-up merged; S35/S36/test-name translation fully decided and queued — run sequentially when tokens allow
 
 ## Read first
 
@@ -9,9 +9,9 @@
 ## One-line state · next first action
 
 - State: S33 translation fully merged for everything except preset-library's files (master `d4b31567`). S35 branch has ADR-0349, research report, approved PRD, TRD ed.1 with the deep-review findings recorded but not applied. No S35 code.
-- Next first action (when the user resumes S35): ask the two open questions under Decisions → Open, then revise PRD/TRD + write the ADR amending ADR-0349 + edit CLAUDE.md 「언어」, re-run `/engram-review trd` (deep), then `/engram-implement` coding.
+- Next first action (when the user says to run it): nothing left to ask. S35: revise PRD/TRD for the confirmed decisions + write the ADR amending ADR-0349 + edit CLAUDE.md 「언어」 (app screen text = English source, Korean translation later), re-run `/engram-review trd` (deep), then `/engram-implement` coding (units: en.ts → i18next lookup-only swap + Rust tray/dialog → test expectations), HTML ko/en comparison table for the user before commit. Then S36, then test names — sequentially.
 
-## Repo state (measured 2026-11-08 00:41)
+## Repo state (measured 2026-11-08 01:12)
 
 - Worktree `wt2`, branch `v0.5.0/feat/i18next-backend`, HEAD `64e3262e`, 5 ahead / 0 behind `origin/master`, pushed (0/0 vs its remote). Working tree clean (only pre-existing untracked `.claude/handoff/attachments/*` and old `.claude/handoff/history/*` from other sessions). This handoff's commit comes after this text.
 - master = `d4b31567` (S33 follow-up merge), pushed. Branches `v0.5.0/docs/english-translation`, `-sweep`, `-2` are merged (not deleted).
@@ -48,10 +48,16 @@ Claude decisions:
 - S35 includes the Rust tray (4) + refusal dialog strings under "English UI source" (main default, user may veto).
 - 앞잡이 줄 = read-ahead queue etc.: glossary extended (transport terms, resume marker).
 
-Open (not decided):
-- S35: confirm the lookup-only design (hold H1); confirm Rust tray/dialog in scope.
-- S36 (not opened): English for logs (yes) + panic/assert messages + internal error strings + LLM-facing strings (main recommends 1-4, excludes test names) — user asked what 5 (test names) is, did not answer 1-4 yet. Needs `docs/reference/logging-conventions.md` rule change ("log message = one line of Korean").
-- Residue: Korean prose inside fenced ```text blocks (TRD §0 summaries, a few comment blocks); `#[tool(description = …)]` Korean string literals (part of S36 LLM-facing strings).
+- confirm all pending choices · 상황: main listed 5 recommendations · 고른 것 「ㅇㅇ 그렇게 하면 될것같은데? 마지막 작업으로 테스트 이름 제외 추가하고. 어차피 토큰남을때 돌리는거니깐 순차적으로 하면 되지.」 · 추천과 같음 (+ test names added as a last topic):
+  1. S35 i18next for lookup only, own `{\w+}` interpolate stays (`skipInterpolation: true`) — closes review hold H1.
+  2. S35 includes Rust tray (4) + refusal-dialog strings in English.
+  3. English labels in sentence case ("Close tab") — 관례 미확인, check the Microsoft style guide first.
+  4. HTML ko/en comparison table for the user to skim before the S35 commit.
+  5. S36 = logs + panic/assert messages + internal error strings + LLM-facing strings (MCP descriptions, `engram help`, `#[tool(description)]`) to English, change `docs/reference/logging-conventions.md` ("log = one line of Korean"), translate Korean prose in fenced ```text blocks.
+  6. Last topic after S36: test names and test messages to English.
+  7. Order: S35 → S36 → test names, sequentially.
+
+Open (not decided): none. Korean display + language setting = later, not in these three topics.
 
 ## References
 
