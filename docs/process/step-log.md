@@ -2971,3 +2971,4 @@
 ## S35 — i18next behind `t()` (2026-11-08~, `v0.5.0/feat/i18next-backend`) · folder `docs/process/S35-i18next-backend/`
 
 - 2026-11-08 — Opened. User decision: replace the home-made `t()` backend with i18next now, keep `ko.ts` as the source and the `t()` signature, Korean only for now, English later. Basis: `docs/research/i18n-oss-library-reevaluation-2026-11-07.md`.
+- 2026-11-08 — Paused by the user (do later when tokens allow). PRD approved; TRD edition 1 reviewed deep — FIX (interpolation grammar), findings recorded in `trd.md` §10 but not applied. User then changed direction: English becomes the UI source and default language (Korean later) — PRD/TRD/ADR/CLAUDE.md not yet revised. No code changed.
