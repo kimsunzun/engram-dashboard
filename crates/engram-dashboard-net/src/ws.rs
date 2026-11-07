@@ -1,29 +1,29 @@
-//! WebSocket 서버 본체 — 소켓 살림만 하는 네트워크 행(ADR-0129).
+//! WebSocket server body — a network layer that does only socket lifecycle management (ADR-0129).
 //!
 //! Duty: upgrade an accepted TCP stream to WS (Origin allowlist) → token auth on the first frame within
-//! [`AUTH_TIMEOUT`] → connection lifetime · single writer · keepalive · registry. **프레임 내용의 어휘는 모른다** — 들어온 text/binary
-//! 는 `ConnectionHandler`(frame_port)로 올리고, 나가는 것은 `FrameSink`(연결당)·`FrameFanout`
-//! (전-연결)으로 받는다.
+//! [`AUTH_TIMEOUT`] → connection lifetime · single writer · keepalive · registry. **It does not know the vocabulary of frame content** — incoming text/binary
+//! is raised to `ConnectionHandler` (frame_port), and outgoing frames are received through `FrameSink` (per connection) · `FrameFanout`
+//! (all connections).
 //!
-//! ★동시성 모델(위험 지점)★
-//! - **연결당 단일 writer**: SplitSink 는 동시 write 불가. 그래서 모든 출력 프레임을 연결당 단일
-//!   `mpsc::Sender<Frame>`(conn_tx)에 넣고, write_task 한 곳만 SinkHalf 에 write 한다.
-//!   SubscribeAck→replay→live 의 FIFO 순서가 이 단일 큐로 보장된다.
-//! - **연결당 수신 큐(읽기 ≠ 처리)**: 읽기 루프는 프레임을 디코드해 `Inbound` 큐에 넣고 곧바로 다음
-//!   프레임을 읽는다. 핸들러 호출은 그 큐의 **단일** 소비자(`dispatch_task`)가 도착 순서대로 한다.
-//!   둘을 한 줄로 묶어 두면 명령 하나의 처리 시간이 곧 그 연결 전체의 정지 시간이 된다(소켓
-//!   head-of-line blocking). 순서가 뜻을 갖는 명령들은 소비자가 하나라는 성질로 그대로 지켜진다 —
-//!   오래 걸리는 명령을 그 줄에서 떼는 판단은 위층 몫이다(`frame_port::ConnectionHandler` 계약).
-//! - **try_send vs await 경계**: 위층 sink 가 pump 스레드에서 부르는 `FrameSink::try_send` 는 절대
-//!   block 금지. async 문맥의 `FrameSink::send` 는 await 허용(.send().await).
-//! - **out-of-band 종료 신호(close_signal)**: conn_tx 가 full 이면 큐 안 마커(`Frame::Close`)도
-//!   try_send 실패해 좀비 연결이 된다. 그래서 큐 **밖**의 `Arc<Notify>` close_signal 을 둔다.
-//!   `ConnFrameSink` 가 try_send 에서 full 을 만나면 `close_signal.notify_one()`(sync 안전)으로
-//!   신호하고, write_task 는 `tokio::select!` 로 conn_rx.recv() 와 close_signal.notified() 를 동시에
-//!   대기해 큐가 막혀 있어도 깨어 sink_half.close() 후 break → cleanup 한다.
-//! - **레지스트리**: 전-연결 팬아웃용. 모든 연결의 conn_tx 를 ConnId→Sender 맵으로 보관하고, 위층에는
-//!   `FrameFanout`(불투명 text 하나를 전 연결에 try_send)만 내준다. 등록·해제·id 발급은 이 파일이 쥔
-//!   연결 수명이라 그 포트에 없다 — 그 포트로 표현할 수 있는 것은 "전부에게 이 text" 하나뿐이다.
+//! ★Concurrency model (risk points)★
+//! - **Single writer per connection**: SplitSink cannot write concurrently. So all output frames are put into a single per-connection
+//!   `mpsc::Sender<Frame>` (conn_tx), and only write_task writes to the SinkHalf.
+//!   The FIFO order of SubscribeAck→replay→live is guaranteed by this single queue.
+//! - **Per-connection inbound queue (reading ≠ processing)**: the read loop decodes frames, puts them in the `Inbound` queue, and immediately reads the next
+//!   frame. Handler calls are made in arrival order by the **single** consumer of that queue (`dispatch_task`).
+//!   Tying the two into one line makes the processing time of one command the stall time of that whole connection (socket
+//!   head-of-line blocking). Commands whose order carries meaning keep it through the property that there is one consumer —
+//!   the decision to peel a long-running command off that line is the upper layer's job (the `frame_port::ConnectionHandler` contract).
+//! - **try_send vs await boundary**: `FrameSink::try_send`, which the upper layer's sink calls from a pump thread, must never
+//!   block. `FrameSink::send` in an async context may await (.send().await).
+//! - **Out-of-band close signal (close_signal)**: when conn_tx is full, even the in-queue marker (`Frame::Close`)
+//!   fails to try_send and the connection becomes a zombie. So there is an `Arc<Notify>` close_signal **outside** the queue.
+//!   When `ConnFrameSink` meets full in try_send, it signals with `close_signal.notify_one()` (sync-safe),
+//!   and write_task waits on conn_rx.recv() and close_signal.notified() simultaneously with `tokio::select!`,
+//!   so even if the queue is blocked it wakes, does sink_half.close(), then break → cleanup.
+//! - **Registry**: for all-connection fan-out. It keeps every connection's conn_tx in a ConnId→Sender map, and gives the upper layer
+//!   only `FrameFanout` (try_send one opaque text to all connections). Registration · release · id issuing are connection lifetime held by this file,
+//!   so they are not in that port — what that port can express is only one thing: "this text to everyone".
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -47,78 +47,78 @@ use tokio_tungstenite::tungstenite::handshake::server::{
 use tokio_tungstenite::tungstenite::http::StatusCode;
 use tokio_tungstenite::tungstenite::{Bytes, Message, Utf8Bytes};
 
-/// 연결당 송신 큐 용량. ReplayBuffer.max_events(4096) + control_slack(512) = 4608.
-/// replay 전체가 들어가도 control 여유가 남게 한다(output_core.rs 불변식과 정합).
+/// Per-connection outbound queue capacity. ReplayBuffer.max_events(4096) + control_slack(512) = 4608.
+/// Leaves control headroom even when the whole replay fits (consistent with the output_core.rs invariant).
 const CONN_TX_CAP: usize = 4608;
 
-/// 연결당 **수신** 도착순 줄의 **칸 수** — 읽기 루프가 핸들러의 일을 기다리지 않고 다음 프레임을
-/// 읽게 하는 여유. 메모리 축은 이 값이 아니라 [`CONN_RX_MAX_BYTES`] 가 진다(그 doc 이 회계의 정본).
+/// **Number of entries** in the per-connection **inbound** arrival-order lane — headroom that lets the read loop read the next frame without waiting for the handler's work.
+/// The memory axis is carried not by this value but by [`CONN_RX_MAX_BYTES`] (that doc is the source of truth for the accounting).
 ///
-/// ★이 큐는 backlog 저장소가 아니라 **버스트 흡수기**다★: 소비자(`dispatch_task`)가 한 번에 붙드는
-///   것은 도착 순서가 뜻을 갖는 프레임 **하나**뿐이고, 긴 일은 위층이 이 줄 밖으로 떼어 낸다
-///   (`frame_port::ConnectionHandler` 의 「도착 순서」 계약). 그래서 replay 전량을 담아야 하는
-///   [`CONN_TX_CAP`] 과 달리 큰 값이 필요하지 않다 — 두 값을 같은 축으로 견주지 말 것.
-/// ★★가득 차도 **읽기 루프는 서지 않는다** — 그 한 프레임의 처분을 위층에 묻고 계속 읽는다★★
-///   ([`ConnectionHandler::on_inbound_saturated`]). ★한때 여기 적혀 있던 「가득 차면 읽기 루프가
-///   기다린다」는 **틀린 설계였다**★: TCP 는 스트림이라 기다리는 동안 **그 뒤 프레임은 소켓에서
-///   꺼내지지도 않는다**. 그러면 위층이 「굶으면 안 된다」고 고른 프레임([`Saturated::Bypass`])이
-///   막힌 줄 뒤에서 굶고, 이 배치가 없애려던 바로 그 증상이 다른 경로로 되돌아온다.
-///   ㆍ**그래도 조용히 버리지는 않는다**: 처분을 위층에 되물어 [`Saturated::Refused`] 를 받는다는 것은
-///     **위층이 이미 답장을 냈다**는 뜻이다(포트 계약의 의무 2). 그 답장조차 못 냈을 때의 처분은
-///     [`Saturated::Unanswered`] 가 따로 갖는다 — 그 자리에서만 연결을 끝낸다.
-///   ㆍ**그 밖에는 끊지도 않는다**: 송신 큐([`ConnFrameSink::try_send`])가 포화에서 연결을 끊는 것은
-///     그쪽 호출자가 **답장을 만들 수 없는** 동기 경로이기 때문이다(비대칭의 정본 =
-///     `frame_port::FrameSink`). 여기서는 위층이 거절을 말로 할 수 있으므로 연결을 죽일 이유가 없다.
-/// ★그래서 이 값이 재는 것★ = 「소비자가 막힌 동안 **손실 없이** 받아 둘 프레임 **개수**」. 둘 중
-///   먼저 걸리는 쪽이 포화다 — 칸이 다 차거나, 바이트 예산이 다 차거나.
-/// ★소비자가 멀쩡하면 이 값은 보이지도 않는다★: 줄에 남는 것은 await 지점이 없는 짧은 프레임들뿐이라
-///   (긴 것은 위층이 떼어 낸다) 정상 운용에서 64 칸이 차는 일이 없다. 차 있다는 것은 **소비자가
-///   막혔다**는 신호이고, 그 상태에서 옳은 답은 기다리는 것이 아니라 건너뛸 것을 통과시키는 것이다.
+/// ★This queue is a **burst absorber**, not a backlog store★: what the consumer (`dispatch_task`) holds at a time
+///   is only **one** frame whose arrival order carries meaning, and long work is peeled off this lane by the upper layer
+///   (the 「도착 순서」 (arrival order) contract of `frame_port::ConnectionHandler`). So unlike [`CONN_TX_CAP`], which must hold
+///   the entire replay, no large value is needed — do not compare the two values on the same axis.
+/// ★★Even when full, **the read loop does not stop** — it asks the upper layer how to dispose of that one frame and keeps reading★★
+///   ([`ConnectionHandler::on_inbound_saturated`]). ★The 「가득 차면 읽기 루프가
+///   기다린다」 (when full, the read loop waits) that was once written here **was a wrong design**★: TCP is a stream, so while waiting **the frames behind it
+///   are not even taken out of the socket**. Then a frame the upper layer chose as 「굶으면 안 된다」 (must not starve) ([`Saturated::Bypass`])
+///   starves behind the blocked lane, and the very symptom this arrangement was meant to eliminate comes back by another path.
+///   ㆍ**Even so it does not drop silently**: asking the upper layer for the disposition and getting [`Saturated::Refused`] means
+///     **the upper layer has already sent a reply** (obligation 2 of the port contract). The disposition for when even that reply could not be sent is
+///     held separately by [`Saturated::Unanswered`] — only there is the connection ended.
+///   ㆍ**Otherwise it does not disconnect either**: the outbound queue ([`ConnFrameSink::try_send`]) disconnects on saturation
+///     because its caller is a synchronous path that **cannot produce a reply** (the source of truth for the asymmetry =
+///     `frame_port::FrameSink`). Here the upper layer can state the refusal in words, so there is no reason to kill the connection.
+/// ★So what this value measures★ = 「소비자가 막힌 동안 **손실 없이** 받아 둘 프레임 **개수**」 (the **number** of frames to hold **without loss** while the consumer is blocked). Whichever of the two
+///   is hit first is the saturation — the entries all fill, or the byte budget all fills.
+/// ★When the consumer is healthy this value is not even seen★: what remains in the lane is only short frames with no await point
+///   (long ones are peeled off by the upper layer), so in normal operation the 64 entries never fill. Being full is a signal that **the consumer
+///   is blocked**, and the right answer in that state is not to wait but to let through what should be skipped.
 // ADR-0206
 const CONN_RX_CAP: usize = 64;
 
-/// 도착순 줄이 붙들 수 있는 **페이로드 바이트** 예산 — [`CONN_RX_CAP`] 과 **함께** 포화를 정한다.
+/// Budget of **payload bytes** the arrival-order lane may hold — decides saturation **together with** [`CONN_RX_CAP`].
 ///
-/// ★왜 칸 수만으로는 모자란가★: 한 칸에 드는 것은 tungstenite 가 준 페이로드 핸들이라 **칸마다 크기가
-///   다르다**. 칸 수만 세면 이 줄의 실제 천장이 `CONN_RX_CAP × (한 프레임의 상한)` 이 되는데, 그
-///   상한은 이 crate 가 정한 적이 없는 **tungstenite 기본값 `max_message_size` = 64 MiB** 다
-///   (업그레이드에 `WebSocketConfig` 를 넘기지 않는다 — `handle_connection` 의 `accept_hdr_async`).
-///   즉 64 × 64 MiB = **4 GiB** 였다. ★한때 여기 적혀 있던 「프레임 하나의 상한은 이 상수의 관심사가
-///   아니다」는 그 곱을 아무도 세지 않게 만든 문장이다★ — 회계는 둘 중 하나가 반드시 져야 한다.
-/// ★판정은 **더하기 전 물높이**로 한다★: 이미 든 바이트가 이 값 이상이면 포화로 본다. 그래서 빈 줄에
-///   오는 프레임은 **크기와 무관하게 언제나 한 장 받는다** — 크다는 이유만으로 정당한 명령이 거절되는
-///   일이 없다. 대가로 천장이 「예산 + 프레임 하나」가 된다(= 16 MiB + max_message_size).
-/// ★남는 항 — 정직하게 적는다★: 위 곱의 둘째 항(프레임 하나의 상한)을 좁히려면 업그레이드에
-///   `WebSocketConfig` 를 넘겨야 하는데, 그것은 **받아 주는 프레임의 크기를 바꾸는 동작 변경**이라
-///   별건이다. 여기서는 개수 축만 닫는다.
-/// ★값의 근거★: 이 줄에 서는 것은 짧은 제어 프레임들이고 큰 것은 어쩌다 한 장이다 — 16 MiB 면 그
-///   「어쩌다 한 장」이 여러 번 겹쳐도 남고, 정상 버스트는 이 값을 볼 일이 없다.
+/// ★Why the entry count alone is not enough★: what sits in an entry is the payload handle tungstenite handed over, so **each entry
+///   differs in size**. Counting only entries makes this lane's real ceiling `CONN_RX_CAP × (한 프레임의 상한)`, and that
+///   limit is **tungstenite's default `max_message_size` = 64 MiB**, which this crate never set
+///   (no `WebSocketConfig` is passed to the upgrade — `accept_hdr_async` in `handle_connection`).
+///   That is, 64 × 64 MiB = **4 GiB**. ★The 「프레임 하나의 상한은 이 상수의 관심사가
+///   아니다」 (the limit of one frame is not this constant's concern) once written here is a sentence that made nobody count that product★ — one of the two must bear the accounting.
+/// ★The decision uses **the fill level before adding**★: if the bytes already held are at or above this value, it counts as saturated. So a frame arriving at an empty lane
+///   **is always accepted, whatever its size** — a legitimate command is never refused merely for being large.
+///   The price is that the ceiling becomes 「예산 + 프레임 하나」 (budget + one frame) (= 16 MiB + max_message_size).
+/// ★The remaining term — written honestly★: to narrow the second term of the product above (the limit of one frame), the upgrade would have to be passed
+///   a `WebSocketConfig`, but that is a **behavior change that alters the size of frames accepted**, so it is a separate matter.
+///   Here only the count axis is closed.
+/// ★Basis of the value★: what stands in this lane is short control frames, and a large one is an occasional single frame — 16 MiB leaves room even if that
+///   「어쩌다 한 장」 (an occasional single frame) overlaps several times, and a normal burst never sees this value.
 const CONN_RX_MAX_BYTES: usize = 16 * 1024 * 1024;
 
-/// 도착순 줄을 건너뛴 프레임([`Saturated::Bypass`])이 서는 줄의 용량.
+/// Capacity of the lane where a frame that skipped the arrival-order lane ([`Saturated::Bypass`]) stands.
 ///
-/// ★작은 이유★: 이 줄에 드는 것은 「막힌 줄을 풀려는 것」뿐이라 정상 운용에서 **한 칸도 안 쓴다**.
-///   8 칸이 차 있다는 것은 그것을 여덟 번 보냈는데 하나도 안 끝났다는 뜻 — 그 경로 자체가 막힌
-///   상태이고, 그때는 더 받아 봐야 같은 일을 여덟 번 더 줄 세울 뿐이다.
-/// ★여기서는 기다린다(위 줄과 다르다)★: 이 줄이 찼을 때 읽기를 멈추면 굶는 것은 **도착순 줄로 갈
-///   프레임**이고, 그것들은 어차피 거절되던 참이다. 즉 이 자리의 대기는 지켜야 할 것을 굶기지 않는다.
-/// ★바이트 예산이 여기엔 **걸리지 않는다**★: 위층이 「굶으면 안 된다」고 고른 프레임을 예산으로
-///   거절하면 이 줄의 존재 이유가 사라진다. 그래서 이 줄의 천장은 칸 수 그대로이고, 그 값은
-///   8 × max_message_size 다([`CONN_RX_MAX_BYTES`] 가 적은 둘째 항과 같은 항). 정상 운용에서 이 줄이
-///   비어 있다는 성질이 그 천장을 실효 0 으로 만든다 — 보장이 아니라 관측이므로 그대로 적어 둔다.
+/// ★Why it is small★: what enters this lane is only 「막힌 줄을 풀려는 것」 (things that try to unblock the blocked lane), so in normal operation it **uses not a single entry**.
+///   8 entries being full means eight were sent and not one finished — that path itself is blocked,
+///   and accepting more then only lines up the same thing eight more times.
+/// ★Here it waits (unlike the lane above)★: if reading stops when this lane is full, what starves is **the frames bound for the arrival-order lane**,
+///   and those were about to be refused anyway. That is, waiting here does not starve anything that must be protected.
+/// ★The byte budget is **not applied** here★: refusing by budget a frame the upper layer chose as 「굶으면 안 된다」 (must not starve)
+///   removes the reason this lane exists. So this lane's ceiling is the entry count as is, and its value is
+///   8 × max_message_size (the same term as the second term written in [`CONN_RX_MAX_BYTES`]). The property that this lane is
+///   empty in normal operation makes that ceiling effectively 0 — it is an observation, not a guarantee, so it is written as is.
 const CONN_BYPASS_CAP: usize = 8;
 
-/// 연결 정리에서 우선 줄이 **받아 둔 것을 비울** 때까지 기다리는 유예([`finish_bypass_lane`]).
+/// Grace period in connection cleanup, waiting until the priority lane **empties what it has accepted** ([`finish_bypass_lane`]).
 ///
-/// ★이 값이 정확성을 지지는 **않는다**★ — 정확성은 「기다린다」 자체가 지고, 이 값은 그 기다림이
-///   무한이 되지 않게 하는 상한일 뿐이다. 유예를 넘기면 옛 동작(abort)으로 떨어지므로, 이 상수가
-///   틀려도 **이전보다 나쁠 수는 없다**.
-/// ★크기의 근거★: 이 줄의 한 건은 위층에서 「막힌 것을 끝내는」 동작이고, 그런 동작은 대상이 죽기를
-///   동기로 기다리는 구간을 갖는다(오늘 그 구간의 상한은 위층의 5초 join 이다). 10초면 진행 중 한 건
-///   + 다음 한 건이 끝나고, 그보다 더 밀려 있다면 그 경로 자체가 막힌 상태라 더 기다려도 같은 일을
-///   줄 세울 뿐이다([`CONN_BYPASS_CAP`] 의 「8칸이 차 있다는 것은」과 같은 판단).
-/// ★이 유예 동안 무엇이 붙들리나★ = 그 **연결 하나의 정리**뿐이다. 소켓은 이미 끝났고, accept 루프도
-///   다른 연결도 이 대기에 걸리지 않는다.
+/// ★This value does **not** bear correctness★ — correctness is borne by 「기다린다」 (waiting) itself, and this value is only the upper bound that keeps that wait
+///   from becoming infinite. Past the grace period it falls back to the old behavior (abort), so even if this constant
+///   is wrong it **cannot be worse than before**.
+/// ★Basis of the size★: one item in this lane is an action in the upper layer that 「막힌 것을 끝내는」 (finishes something blocked), and such actions have a section
+///   that synchronously waits for the target to die (today the upper bound of that section is the upper layer's 5-second join). With 10 seconds the one in progress
+///   + the next one finish, and if more is backed up than that, that path itself is blocked, and waiting longer only
+///   lines up the same thing (the same judgment as 「8칸이 차 있다는 것은」 (8 entries being full means) in [`CONN_BYPASS_CAP`]).
+/// ★What is held during this grace period★ = only **the cleanup of that one connection**. The socket is already finished, and neither the accept loop nor
+///   other connections are caught by this wait.
 const BYPASS_DRAIN_GRACE: Duration = Duration::from_secs(10);
 
 /// How long a new connection may stay open without its first (auth) frame before it is closed with an
@@ -131,18 +131,18 @@ const BYPASS_DRAIN_GRACE: Duration = Duration::from_secs(10);
 const AUTH_TIMEOUT: Duration = Duration::from_secs(15);
 
 const DEFAULT_PING_INTERVAL: Duration = Duration::from_secs(20);
-/// ping_interval 의 2.5배(여러 Ping 을 놓쳐야 끊김 — 일시 지연 위양성 방지).
+/// 2.5x ping_interval (the connection drops only after several Pings are missed — prevents false positives from a transient delay).
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(50);
 
-/// WS application-level keepalive 설정(A).
+/// WS application-level keepalive settings (A).
 ///
-/// ★half-open 감지★: tungstenite 는 들어온 Ping 에 자동 Pong 만 하고 능동 Ping 은 안 보낸다.
-/// FIN 없이 끊기는 연결(sleep/wake·NAT 타임아웃·모바일 터널)에서 TCP keepalive(기본 2시간)는
-/// 무의미하므로, write_task 가 ping_interval 마다 Ping 을 보내고 read_task 가 마지막 수신 시각을
-/// 기록한다. idle_timeout 초과면 그 연결을 끊는다(좀비 구독/broadcast 누수 방지).
+/// ★Half-open detection★: tungstenite only auto-Pongs incoming Pings and does not send active Pings.
+/// For connections that drop without FIN (sleep/wake · NAT timeout · mobile tunnel), TCP keepalive (default 2 hours)
+/// is meaningless, so write_task sends a Ping every ping_interval and read_task
+/// records the last receive time. If idle_timeout is exceeded, that connection is dropped (prevents zombie subscription/broadcast leaks).
 ///
-/// ★테스트 주입★: 상수 하드코딩이면 테스트가 수십 초 걸리므로, 짧은 값(예 200ms/600ms)을
-/// 주입할 수 있게 설정 가능하게 둔다. 운영 경로는 `default()`(20s/50s) 그대로.
+/// ★Test injection★: hard-coding constants would make tests take tens of seconds, so short values (e.g. 200ms/600ms)
+/// are made configurable for injection. The production path stays `default()` (20s/50s) as is.
 #[derive(Clone, Copy, Debug)]
 pub struct KeepaliveConfig {
     pub ping_interval: Duration,
@@ -158,10 +158,10 @@ impl Default for KeepaliveConfig {
     }
 }
 
-/// 허용 Origin allowlist. Origin 없음(네이티브/하네스)은 허용 — 토큰이 주 방어.
-/// ★미실측 — 알려진 미확인★: 아래 네 문자열은 **설계값**이다. 실제 Tauri WebView2·모바일이 보내는
-///   Origin 을 실측해 확정한 적이 없다. 불일치 = 403. 클라이언트 표면(패키징 변형·모바일 터널 등)을
-///   늘릴 때 이 목록을 검증된 것으로 다루지 말 것 — 403 은 클라 버그가 아니라 이 목록 쪽일 수 있다.
+/// Allowed Origin allowlist. No Origin (native/harness) is allowed — the token is the main defense.
+/// ★Unmeasured — known unverified★: the four strings below are **design values**. The Origins actually sent by Tauri WebView2 · mobile
+///   have never been measured and confirmed. A mismatch = 403. When growing the client surface (packaging variants · mobile tunnels, etc.), do not treat this list
+///   as verified — a 403 may be this list's fault, not a client bug.
 const ALLOWED_ORIGINS: &[&str] = &[
     "http://localhost:1420",
     "http://127.0.0.1:1420",
@@ -201,7 +201,7 @@ impl ConnRegistry {
             .remove(&id);
     }
 
-    /// 이 conn 이 아직 fanout 대상인지 — 테스트가 cleanup 순서(정리 후 등록 해제)를 관측한다.
+    /// Whether this conn is still a fan-out target — the test observes the cleanup order (release registration after cleanup).
     #[cfg(test)]
     pub(crate) fn contains(&self, id: ConnId) -> bool {
         self.inner
@@ -212,8 +212,8 @@ impl ConnRegistry {
 }
 
 impl FrameFanout for ConnRegistry {
-    /// ★맵을 잠근 채 보내지 않는다(ADR-0006 락 순서)★: 스냅샷을 뜬 뒤 락을 놓고 그 사본으로 send 한다
-    ///   — 락 보유 중 외부(채널)로 나가는 호출을 만들지 않기 위해서다.
+    /// ★Do not send while holding the map locked (ADR-0006 lock order)★: take a snapshot, release the lock, and send with that copy
+    ///   — so as not to make a call that goes outside (a channel) while holding the lock.
     fn broadcast_text(&self, text: String) {
         let conns: Vec<(ConnId, mpsc::Sender<Frame>)> = {
             let guard = self.inner.lock().expect("conn registry poisoned");
@@ -233,7 +233,7 @@ impl Default for ConnRegistry {
     }
 }
 
-// ── ConnFrameSink(연결당 프레임 출구 — 프레임 포트의 WS 구현) ──────────────────────
+// ── ConnFrameSink (per-connection frame outlet — the WS implementation of the frame port) ──────────────────────
 
 pub(crate) struct ConnFrameSink {
     conn_tx: mpsc::Sender<Frame>,
@@ -267,7 +267,7 @@ impl FrameSink for ConnFrameSink {
 
 // ── Origin allowlist 콜백 ─────────────────────────────────────────────────────────
 
-/// upgrade 콜백 — Origin 헤더 검사. 없으면 허용(네이티브/하네스), 있고 allowlist 밖이면 거부.
+/// Upgrade callback — checks the Origin header. Allowed if absent (native/harness); rejected if present and outside the allowlist.
 struct OriginCheck;
 
 impl Callback for OriginCheck {
@@ -293,9 +293,9 @@ impl Callback for OriginCheck {
     }
 }
 
-// ── 상수시간 토큰 비교 ──────────────────────────────────────────────────────────
+// ── Constant-time token comparison ──────────────────────────────────────────────────────────
 
-/// 길이 노출은 토큰 길이가 고정(hex 64자)이라 무해.
+/// Exposing the length is harmless since the token length is fixed (64 hex chars).
 fn constant_time_eq(a: &str, b: &str) -> bool {
     let a = a.as_bytes();
     let b = b.as_bytes();
@@ -309,15 +309,15 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
     diff == 0
 }
 
-// ── 연결 핸들러 ────────────────────────────────────────────────────────────────
+// ── Connection handler ────────────────────────────────────────────────────────────────
 
-/// `expected_token` 은 daemon.json 의 토큰. `handlers` 는 이 연결에 붙일 위층 핸들러 공장 —
-/// 프레임의 의미(명령 해석·이벤트 인코딩·연결 정리)는 전부 그쪽이 소유하므로, 이 함수는 에이전트
-/// 어휘를 알지 못한다(ADR-0129).
+/// `expected_token` is the token from daemon.json. `handlers` is the factory of upper-layer handlers to attach to this connection —
+/// the meaning of frames (command interpretation · event encoding · connection cleanup) is all owned by that side, so this function does not know
+/// agent vocabulary (ADR-0129).
 ///
-/// ★`expected_protocol_version` 도 **주입**이다(0-4)★: 토큰과 같은 결로 조립부가 값을 넣어 준다.
-/// 그래서 이 crate 는 "지금 버전이 몇" 을 모르고 **"클라가 말한 숫자가 내가 받은 숫자와 같은가"** 만
-/// 판정한다 — 버전 상수를 여기서 읽으면 그 순간 프로토콜 어휘가 네트워크 행으로 돌아온다.
+/// ★`expected_protocol_version` is also **injected** (0-4)★: in the same vein as the token, the assembly part puts the value in.
+/// So this crate does not know "what the current version is" and decides only **"is the number the client stated equal to the number I received"** —
+/// reading the version constant here would, at that moment, bring protocol vocabulary back into the network layer.
 pub async fn handle_connection(
     stream: TcpStream,
     peer: std::net::SocketAddr,
@@ -342,7 +342,7 @@ pub async fn handle_connection(
                     token,
                     protocol_version,
                 }) => {
-                    // 보안: 토큰 값은 로그 금지.
+                    // Security: no logging of the token value.
                     if !constant_time_eq(token.expose(), expected_token.as_str()) {
                         tracing::warn!(%peer, "auth 실패: 토큰 불일치 — close");
                         let _ = send_error_and_close(
@@ -370,16 +370,16 @@ pub async fn handle_connection(
                     }
                     tracing::info!(%peer, "auth 성공");
                 }
-                // ★두 실패 문구의 경계★: 이 crate 는 위층 명령을 모르므로 "위층 명령으로는 파싱되지만
-                //   auth 가 아님" 을 판정하지 못한다 —
-                //   대신 serde 가 이미 계산해 둔 에러 분류를 쓴다(재파싱 0):
-                //     · data 에러  = JSON 은 맞는데 이 모양이 아님 → "auth 를 기대했다"
-                //     · 그 밖(syntax/eof/io) = 애초에 JSON 이 아님 → "프레임 자체가 잘못됐다"
-                //   이 문구를 단언하는 테스트는 없고(핸드셰이크 실패는 close 로 관측된다) 발신자 중
-                //   어느 것도 문구로 분기하지 않는다 — 사람이 읽는 진단 텍스트다.
-                // ★에러를 `{e}` 로 싣지 않는다★: `{"Auth":"<토큰>"}` 의 Display 는 그 문자열을 그대로
-                //   내놓아 토큰이 로그로 샌다(`docs/reference/logging-conventions.md`). 분류와 위치만
-                //   남긴다 — 회귀 방어는 아래 `auth_parse_failure_log_fields_do_not_carry_the_payload`.
+                // ★The boundary of the two failure messages★: this crate does not know upper-layer commands, so it cannot decide "parses as an upper-layer command
+                //   but is not auth" —
+                //   instead it uses the error classification serde already computed (zero re-parsing):
+                //     · data error  = JSON is valid but not this shape → "expected auth"
+                //     · anything else (syntax/eof/io) = not JSON at all → "the frame itself is wrong"
+                //   No test asserts this wording (handshake failure is observed through close) and none of the senders
+                //   branches on the wording — it is diagnostic text for humans.
+                // ★Do not carry the error as `{e}`★: the Display of `{"Auth":"<토큰>"}` emits that string
+                //   as is, and the token leaks into the log (`docs/reference/logging-conventions.md`). Leave only the classification and position
+                //   — the regression defense is `auth_parse_failure_log_fields_do_not_carry_the_payload` below.
                 Err(e) if e.is_data() => {
                     tracing::warn!(
                         %peer,
@@ -395,7 +395,7 @@ pub async fn handle_connection(
                     .await;
                     return;
                 }
-                // 위 갈래와 같은 이유로 Display 를 싣지 않는다(토큰이 이 갈래로도 올 수 있다).
+                // For the same reason as the branch above, do not carry Display (the token can arrive on this branch too).
                 Err(e) => {
                     tracing::warn!(
                         %peer,
@@ -450,15 +450,15 @@ pub async fn handle_connection(
         Arc::new(ConnFrameSink::new(conn_tx.clone(), close_signal.clone()));
     let handler = handlers.handler_for(conn_id);
 
-    // 순서상 여기가 두 task 스폰보다 앞이어야 명령 dispatch 가 인사보다 앞설 수 없다.
+    // In order, this must come before spawning the two tasks so that command dispatch cannot get ahead of the greeting.
     handler.on_connect(conn_id, &frames).await;
-    // ★관측만 하고 흐름은 바꾸지 않는다★: 패닉을 쓰지 않는 이유는 운영 데몬에선 그것이 프로세스 종료이고
-    //   (훅 — ADR-0292), 훅 없는 빌드에선 여기서 죽으면 아래 정리 훅과 레지스트리 해제를 통째로 건너뛴 채 죽은
-    //   큐가 fanout 대상으로 남기 때문이다(HEAD 에 없던 종료 경로).
-    // ★잡히는 범위 = "정확히 가득 찬 채로 on_connect 이 **반환한**" 경계 하나뿐★: 정작 위험한 쪽
-    //   (용량을 넘겨 넣어 `send` 가 영구 대기)은 이 줄에 **도달조차 못 한다** — 그 hang 은 어디에도
-    //   로그가 남지 않는다(알려진 미로그 구멍 — `ConnectionHandler::on_connect` 계약에 서술).
-    // ★"지금 막혔다"는 뜻이 아니다★: 바로 아래에서 write_task 가 떠 큐를 비우므로 진행은 계속된다.
+    // ★Observe only and do not change the flow★: the reason not to use a panic is that in the production daemon it is a process exit
+    //   (the hook — ADR-0292), and in a hookless build, dying here would skip the cleanup hook and registry release below wholesale and leave a dead
+    //   queue as a fan-out target (an exit path that was not in HEAD).
+    // ★The caught range = only "the one boundary where on_connect **returned** exactly full"★: the truly dangerous side
+    //   (putting in over capacity so `send` waits forever) **cannot even reach this line** — that hang leaves
+    //   no log anywhere (a known unlogged hole — described in the `ConnectionHandler::on_connect` contract).
+    // ★It does not mean "blocked right now"★: right below, write_task starts and drains the queue, so progress continues.
     if conn_tx.capacity() == 0 {
         tracing::warn!(
             conn = conn_id,
@@ -466,20 +466,20 @@ pub async fn handle_connection(
         );
     }
 
-    // ── keepalive 공유 시계(A) ──────────────────────────────────────────────────────
-    // base = 연결 시작 시각(tokio Instant). last_recv = base 기준 경과 ms(AtomicU64).
-    // read_task 가 클라로부터 무언가(Pong 포함) 받을 때마다 갱신하고, write_task 의 ping arm 이
-    // base.elapsed() - last_recv 로 idle 경과를 계산해 idle_timeout 초과 시 close_signal 발동.
+    // ── keepalive shared clock (A) ──────────────────────────────────────────────────────
+    // base = connection start time (tokio Instant). last_recv = elapsed ms relative to base (AtomicU64).
+    // read_task updates it whenever it receives anything (Pong included) from the client, and write_task's ping arm computes
+    // the idle elapsed time with base.elapsed() - last_recv and fires close_signal if idle_timeout is exceeded.
     let keepalive_base = tokio::time::Instant::now();
     let last_recv = Arc::new(AtomicU64::new(0));
 
-    // ★수신 큐 = 읽기 행과 처리 행의 경계★: 읽기는 소켓에서 꺼내 여기 넣기만 하고, 핸들러 호출은
-    //   [`dispatch_task`] 가 도착 순서대로 진다. 용량과 포화 처분의 근거는 [`CONN_RX_CAP`].
+    // ★Inbound queue = the boundary between the read layer and the processing layer★: reading only takes from the socket and puts here, and handler calls
+    //   are borne by [`dispatch_task`] in arrival order. The basis of capacity and saturation disposition is [`CONN_RX_CAP`].
     let (inbound_tx, inbound_rx) = mpsc::channel::<Inbound>(CONN_RX_CAP);
-    // ★칸 수와 **함께** 포화를 정하는 바이트 예산의 물높이★ — 근거 정본 = [`CONN_RX_MAX_BYTES`].
+    // ★The fill level of the byte budget that decides saturation **together with** the entry count★ — source of truth for the basis = [`CONN_RX_MAX_BYTES`].
     let rx_bytes: RxBytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    // ★막힌 줄 뒤에서 굶으면 안 되는 프레임을 위한 두 번째 줄★ — 왜 별도 용량·별도 소비자여야
-    //   하는지는 [`CONN_BYPASS_CAP`] 과 [`bypass_task`] 가 각각 갖는다.
+    // ★The second lane for frames that must not starve behind a blocked lane★ — why it must have separate capacity · a separate consumer
+    //   is held by [`CONN_BYPASS_CAP`] and [`bypass_task`] respectively.
     let (bypass_tx, bypass_rx) = mpsc::channel::<Inbound>(CONN_BYPASS_CAP);
 
     let read_handle = tokio::spawn(read_task(
@@ -501,8 +501,8 @@ pub async fn handle_connection(
         conn_id,
     ));
 
-    // ★프레임 출구의 강참조가 read_task 에서 이 task 로 옮겨 갔다★ — `the_losing_task_is_aborted_not_detached`
-    //   의 관측이 그 사실 위에 서 있다(그 테스트 주석).
+    // ★The strong reference to the frame outlet moved from read_task to this task★ — the observation of `the_losing_task_is_aborted_not_detached`
+    //   stands on that fact (that test's comment).
     let mut dispatch_handle = tokio::spawn(dispatch_task(
         inbound_rx,
         rx_bytes,
@@ -521,31 +521,31 @@ pub async fn handle_connection(
         last_recv,
     ));
 
-    // ★살아남은 쪽을 명시적으로 abort★ — JoinHandle 을 그냥 drop 하면
-    //    task 가 detach 되어 계속 돈다(WS half 를 붙든 채 좀비). 그래서 &mut 로 select 해 핸들을
-    //    소비하지 않고, 진 쪽을 abort 한다(연결의 read/write 가 함께 끝나게).
-    //    회귀 방어 = `the_losing_task_is_aborted_not_detached`(read 를 abort 하는 갈래만).
-    //    ★write 를 abort 하는 갈래도 abort 를 제거하지 말 것★: 대개는 송신단이 모두 드롭돼 write_task 가
-    //    스스로 끝나지만, 그건 "모든 Sender<Frame> 사본이 함께 죽는다" 는 조건부다 — 구독 기록 누락
-    //    (아래 on_disconnect 경쟁)으로 사본이 살아남으면 자기종료가 성립하지 않는다. 전수 열거와 실측
-    //    범위는 그 테스트 주석에 있다.
-    // ★★task 는 셋인데 select 대상이 **둘**인 것은 의도다 — read_task 는 여기 안 든다★★:
-    //    읽기 루프가 끝나는 것(클라 close·EOF·수신 오류)은 「입력이 끝났다」는 뜻이지 「이 연결을 그
-    //    자리에서 끊으라」가 아니다. 끝나면 수신 큐의 **유일한 송신단**이 드롭되므로 dispatch_task 가
-    //    남은 것을 처리한 **뒤** 스스로 끝나고, 그 종료를 아래 첫 갈래가 잡는다. read 를 여기 넣어 즉시
-    //    abort 하면 「명령 한 장 보내고 곧바로 소켓을 닫는」 클라의 마지막 명령이 처리 전에 잘린다 —
-    //    읽기와 처리가 한 줄이던 HEAD 에서는 그 명령이 **항상** 끝난 뒤에야 close frame 을 읽었으므로
-    //    그건 회귀다.
-    //    ★대가 = 핸들러가 영영 반환하지 않으면 이 연결은 정리되지 않는다★. HEAD 도 같았다(그때는 읽기
-    //    루프가 `on_text` 안에 파킹된 채 남았다) — 이 배치가 새로 만든 위험이 아니다.
-    //    ★우선 줄(bypass_task)도 select 대상이 아니다★ — 그것이 끝나는 것은 read 가 끝났다는 뜻일
-    //    뿐이고(자기 송신단이 read 에 있다), 연결을 끊을 사유가 아니다. 그쪽이 낸 종료 의사는
-    //    `Frame::Close` 로 write 줄을 타고 아래 둘째 갈래로 돌아온다(그 task 주석).
-    //    ★★우선 줄은 **abort 하지 않는다 — 비운다**★★: 그 줄에 든 프레임은 위층이 「굶으면 안 된다」고
-    //    골라 **받아 준** 것이다. 여기서 abort 하면 받아 놓고 안 하는 것이 되어, 이 줄을 둔 이유가
-    //    통째로 무너진다(도착순 줄에는 그런 구멍이 없다 — 송신단이 드롭되면 남은 것을 비우고 끝난다).
-    //    그래서 read 를 먼저 끊어 **그 줄의 유일한 송신단**을 놓고, [`finish_bypass_lane`] 이 그
-    //    비움을 기다린다.
+    // ★Explicitly abort the survivor★ — if a JoinHandle is simply dropped,
+    //    the task is detached and keeps running (a zombie holding the WS half). So select on &mut so the handle
+    //    is not consumed, and abort the losing side (so the connection's read/write end together).
+    //    Regression defense = `the_losing_task_is_aborted_not_detached` (only the branch that aborts read).
+    //    ★Do not remove the abort on the branch that aborts write either★: usually all senders are dropped and write_task
+    //    ends by itself, but that is conditional on "all copies of Sender<Frame> die together" — if a copy survives because of a missed
+    //    subscription record (the on_disconnect race below), self-termination does not hold. The full enumeration and the measured
+    //    range are in that test's comment.
+    // ★★There are three tasks but **two** select targets — this is intended; read_task is not among them★★:
+    //    The read loop ending (client close · EOF · receive error) means 「입력이 끝났다」 (the input has ended), not 「이 연결을 그
+    //    자리에서 끊으라」 (cut this connection on the spot). When it ends, the inbound queue's **only sender** is dropped, so dispatch_task
+    //    ends by itself **after** processing what is left, and the first branch below catches that end. Putting read here and aborting
+    //    immediately would cut off the last command of a client that 「명령 한 장 보내고 곧바로 소켓을 닫는」 (sends one command and closes the socket right away) before it is processed —
+    //    in HEAD, where reading and processing were one line, that command was **always** finished before the close frame was read,
+    //    so that would be a regression.
+    //    ★The price = if the handler never returns, this connection is not cleaned up★. HEAD was the same (then the read
+    //    loop stayed parked inside `on_text`) — this is not a risk this arrangement newly created.
+    //    ★The priority lane (bypass_task) is not a select target either★ — its ending only means read has ended
+    //    (its own sender is in read), and is not a reason to cut the connection. The intent to end that it raises
+    //    goes through the write lane as `Frame::Close` and comes back to the second branch below (that task's comment).
+    //    ★★The priority lane is **not aborted — it is drained**★★: the frames in that lane are ones the upper layer chose as 「굶으면 안 된다」 (must not starve) and
+    //    **accepted**. Aborting here would be accepting and then not doing, and the reason this lane was made
+    //    collapses entirely (the arrival-order lane has no such hole — when its sender is dropped it drains what is left and ends).
+    //    So cut read first to release **that lane's only sender**, and [`finish_bypass_lane`] waits for
+    //    that draining.
     tokio::select! {
         _ = &mut dispatch_handle => {
             tracing::debug!(conn = conn_id, "dispatch_task 종료 → read abort · bypass 비움 · write abort + cleanup");
@@ -561,14 +561,14 @@ pub async fn handle_connection(
         }
     }
 
-    // ── cleanup(누수 방지 — 리뷰 필수) ──────────────────────────────────────────
+    // ── cleanup (leak prevention — review required) ──────────────────────────────────────────
     handler.on_disconnect(conn_id);
 
     registry.unregister(conn_id);
     tracing::info!(%peer, conn = conn_id, "연결 종료 — cleanup 완료");
 }
 
-/// 핸드셰이크 실패 통보 + close 를 소켓에 직접 쓴다(레지스트리 등록 전이라 단일 writer 큐가 없다).
+/// Writes the handshake-failure notice + close directly to the socket (no single-writer queue yet since it is before registry registration).
 async fn send_error_and_close(
     ws: &mut tokio_tungstenite::WebSocketStream<TcpStream>,
     frame: Option<String>,
@@ -584,13 +584,13 @@ async fn send_error_and_close(
 type SinkHalf =
     futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<TcpStream>, Message>;
 
-/// ★알려진 구멍 — 진행 중인 소켓 write 는 이 신호로 끊기지 않는다(HEAD 도 동일, 이 슬라이스 범위 밖)★:
-/// recv arm 은 프레임을 꺼낸 **뒤** `sink_half.send(msg).await` 를 **select! 밖**(arm 본문)에서 기다린다.
-/// 인증된 피어가 읽기를 멈추면 그 send 가 무기한 pending 일 수 있고, 그 동안 이 task 는 select! 를
-/// 폴링하지 않으므로 `close_signal` 도 keepalive tick 도 그 연결을 구할 수 없다 — 같은 select! 안에
-/// 있어서 둘 다 함께 멈춘다. 즉 코드가 광고하는 "슬로우 소비자 정리" 는 **이 경우를 덮지 못한다**.
-/// `Notify` 는 대기자가 없을 때 permit 을 보관하므로 깨우기는 **유실이 아니라 지연**이다(그 send 가
-/// 언젠가 풀리면 즉시 발화). 고치려면 write 자체에 타임아웃/취소를 걸어야 하는데 그건 동작 변경이다.
+/// ★Known hole — an in-progress socket write is not cut by this signal (same in HEAD, outside this slice's scope)★:
+/// the recv arm, **after** taking a frame, waits on `sink_half.send(msg).await` **outside select!** (in the arm body).
+/// If an authenticated peer stops reading, that send can be pending indefinitely, and during that time this task does not poll select!, so
+/// neither `close_signal` nor the keepalive tick can save that connection — they are in the same select!, so both stop together.
+/// That is, the "slow consumer cleanup" the code advertises **does not cover this case**.
+/// `Notify` keeps a permit when there is no waiter, so the wake-up is **a delay, not a loss** (it fires immediately once that send is eventually released).
+/// To fix it, a timeout/cancel would have to be put on the write itself, but that is a behavior change.
 #[allow(clippy::too_many_arguments)]
 async fn write_task(
     mut sink_half: SinkHalf,
@@ -602,7 +602,7 @@ async fn write_task(
     last_recv: Arc<AtomicU64>,
 ) {
     let mut ping_tick = tokio::time::interval(keepalive.ping_interval);
-    // 첫 tick 즉발 방지(연결 직후 바로 Ping 쏘지 않게) — 정상 첫 주기부터.
+    // Prevents the first tick firing immediately (so a Ping is not shot right after connecting) — start from the normal first period.
     ping_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
@@ -653,26 +653,26 @@ async fn write_task(
     tracing::debug!(conn = conn_id, "write_task 루프 종료");
 }
 
-// ── read_task + dispatch_task(수신 큐로 갈라진 두 행) ─────────────────────────────
+// ── read_task + dispatch_task (two layers split by the inbound queue) ─────────────────────────────
 
-/// 읽기 루프가 디코드해 수신 큐로 넘기는 단위.
+/// The unit the read loop decodes and hands to the inbound queue.
 ///
-/// ★나가는 쪽 [`Frame`] 과 달리 Close 가 없다★: 나가는 Close 는 위층이 큐에 넣는 마커지만, 들어오는
-///   쪽의 close 판정은 프레임 **내용**이 아니라 핸들러의 답(`ConnFlow::Close`)이 낸다 — 그래서 이
-///   어휘에는 그 모양이 없다.
-/// ★페이로드를 **복사하지 않는다**★: tungstenite 가 준 payload 타입을 그대로 옮긴다(둘 다 refcount
-///   핸들이라 이동이 값싸다). `String`/`Vec<u8>` 으로 바꾸면 **클라가 고른 크기만큼** 프레임마다
-///   복사가 생긴다 — 옛 `on_binary` 가 페이로드를 빌려주던 것과 같은 축의 이유다.
+/// ★Unlike the outgoing [`Frame`], there is no Close★: an outgoing Close is a marker the upper layer puts in the queue, but on the incoming
+///   side the close decision is made not by frame **content** but by the handler's answer (`ConnFlow::Close`) — so this
+///   vocabulary has no such shape.
+/// ★The payload is **not copied**★: the payload type tungstenite gave is moved as is (both are refcount
+///   handles, so moving is cheap). Converting to `String`/`Vec<u8>` would create a copy per frame of **the size the client chose** —
+///   the same axis of reason as the old `on_binary` lending the payload.
 enum Inbound {
     Text(Utf8Bytes),
     Binary(Bytes),
 }
 
 impl Inbound {
-    /// 이 프레임이 줄에서 붙들고 있는 페이로드 바이트 — [`CONN_RX_MAX_BYTES`] 회계의 단위.
+    /// The payload bytes this frame holds in the lane — the unit of [`CONN_RX_MAX_BYTES`] accounting.
     ///
-    /// ★핸들 자체의 크기가 아니라 **페이로드** 길이다★: 둘 다 refcount 핸들이라 `size_of` 는 몇십
-    ///   바이트로 똑같고, 실제로 메모리를 무는 것은 그 뒤의 버퍼다.
+    /// ★It is the **payload** length, not the size of the handle itself★: both are refcount handles, so `size_of` is the same few tens of
+    ///   bytes, and what actually bites memory is the buffer behind it.
     fn payload_len(&self) -> usize {
         match self {
             Inbound::Text(t) => t.len(),
@@ -681,20 +681,20 @@ impl Inbound {
     }
 }
 
-/// 도착순 줄이 지금 붙들고 있는 페이로드 바이트 — 생산자(`read_task`)가 더하고 소비자
-/// (`dispatch_task`)가 뺀다. 한 연결에 하나.
+/// The payload bytes the arrival-order lane currently holds — the producer (`read_task`) adds and the consumer
+/// (`dispatch_task`) subtracts. One per connection.
 ///
-/// ★빼는 자리가 **핸들러 호출 뒤**인 것은 의도다★: 꺼내자마자 빼면 「꺼냈지만 아직 처리 중인」 프레임이
-///   0 으로 세어져, 예산이 실제로는 두 배가 된다(같은 축의 실수 = `input_queue` 의 in-flight 회계).
+/// ★That the subtraction happens **after the handler call** is intended★: subtracting right on taking it out would count a frame that is 「꺼냈지만 아직 처리 중인」 (taken out but still being processed) as
+///   0, so the budget would actually double (the same-axis mistake = the in-flight accounting of `input_queue`).
 type RxBytes = Arc<std::sync::atomic::AtomicUsize>;
 
-/// ★stream 이 generic 인 이유★: 소켓 없이 합성 프레임열로 이 루프를 돌리는 격리 하네스를 두려고
-/// (ADR-0129). 운영 경로는 WS stream half 로만 단형화된다.
+/// ★Why stream is generic★: to have an isolation harness that runs this loop on a synthetic frame sequence without a socket
+/// (ADR-0129). The production path is monomorphized only to the WS stream half.
 ///
-/// ★핸들러의 일을 **기다리지 않는다**★: 디코드한 프레임을 수신 큐에 넘기고 곧바로 다음 프레임을
-/// 읽는다. 옛 모양(여기서 `on_text` 를 완료까지 await)에서는 한 명령의 처리 시간이 곧 그 연결
-/// **전체**의 정지 시간이었다 — 에이전트 활성화 하나가 다른 에이전트로 가는 입력·kill 까지 소켓에서
-/// 꺼내지지도 않게 했다. 처리는 [`dispatch_task`] 가 도착 순서대로 진다.
+/// ★It does **not wait for the handler's work**★: it hands the decoded frame to the inbound queue and immediately
+/// reads the next frame. In the old shape (awaiting `on_text` to completion here), the processing time of one command was the stall time of that connection's
+/// **whole** — one agent activation kept even input · kill bound for other agents from being taken out of the socket.
+/// Processing is borne by [`dispatch_task`] in arrival order.
 // ADR-0206
 #[allow(clippy::too_many_arguments)]
 async fn read_task<S>(
@@ -718,9 +718,9 @@ async fn read_task<S>(
                 break;
             }
         };
-        // ★keepalive(A) 갱신이 **디스패치보다 앞**인 것은 그대로다★: 이 줄은 옛 모양에서도 핸들러
-        //   호출 앞이었으므로, 처리를 다른 task 로 옮겨도 keepalive 판정은 달라지지 않는다.
-        //   tungstenite 는 Pong 을 Message::Pong 으로 올려주므로 능동 Ping 의 응답도 여기서 잡힌다.
+        // ★That the keepalive (A) update is **before dispatch** stays as it was★: this line was before the handler
+        //   call in the old shape too, so moving processing to another task does not change the keepalive decision.
+        //   tungstenite raises a Pong as Message::Pong, so the reply to an active Ping is also caught here.
         last_recv.store(
             keepalive_base.elapsed().as_millis() as u64,
             Ordering::Release,
@@ -728,7 +728,7 @@ async fn read_task<S>(
         let queued = match msg {
             Message::Text(text) => Inbound::Text(text),
             Message::Binary(payload) => Inbound::Binary(payload),
-            // Ping/Pong 은 tungstenite 가 자동 응답(write_task 가 아닌 내부). 여기선 무시.
+            // Ping/Pong are auto-answered by tungstenite (internally, not by write_task). Ignored here.
             Message::Ping(_) | Message::Pong(_) => continue,
             Message::Close(_) => {
                 tracing::debug!(conn = conn_id, "Close frame 수신 — 종료");
@@ -736,11 +736,11 @@ async fn read_task<S>(
             }
             Message::Frame(_) => continue,
         };
-        // ★칸보다 **바이트 예산이 먼저 걸릴 수 있다**★ — 판정은 더하기 전 물높이로 한다(빈 줄에는
-        //   크기와 무관하게 한 장은 들어간다). 근거 정본 = [`CONN_RX_MAX_BYTES`].
+        // ★The **byte budget can be hit before the entries**★ — the decision uses the fill level before adding (an empty lane
+        //   accepts one frame regardless of size). Source of truth for the basis = [`CONN_RX_MAX_BYTES`].
         let over_budget = rx_bytes.load(Ordering::Acquire) >= CONN_RX_MAX_BYTES;
-        // ★`try_send` 다 — 여기서 기다리면 그 뒤 프레임을 **소켓에서 꺼내지도 못한다**★(근거 정본 =
-        //   [`CONN_RX_CAP`]). 자리가 있으면 이게 전부이고(정상 경로 비용 0), 없을 때만 아래로 간다.
+        // ★It is `try_send` — waiting here would mean **not even taking the frames behind it out of the socket**★ (source of truth for the basis =
+        //   [`CONN_RX_CAP`]). If there is room, this is all (normal path cost 0), and only when there is none does it go below.
         let full = if over_budget {
             queued
         } else {
@@ -754,29 +754,29 @@ async fn read_task<S>(
                     tracing::debug!(conn = conn_id, "수신 큐 소비자 없음 — read_task 종료");
                     break;
                 }
-                // 넣지 못한 프레임을 **되돌려 받는다** — 이게 있어야 조용한 유실 없이 처분을 고를 수 있다.
+                // **Gets back** the frame that could not be put in — only with this can a disposition be chosen without silent loss.
                 Err(mpsc::error::TrySendError::Full(item)) => item,
             }
         };
 
-        // ★줄이 찼다 — 이 한 프레임의 처분은 위층이 정한다★(어휘를 아는 쪽이 위층뿐이다).
-        //   binary 는 묻지 않는다: 이 프로토콜에서 클라→데몬 binary 는 그 자체가 위반이라 위층이 어차피
-        //   연결을 닫으며, 그 판정에 줄 순서가 걸려 있지 않다.
+        // ★The lane is full — the disposition of this one frame is decided by the upper layer★ (only the upper layer knows the vocabulary).
+        //   Binary is not asked: in this protocol a client→daemon binary is itself a violation and the upper layer closes
+        //   the connection anyway, and lane order is not at stake in that decision.
         let disposition = match &full {
             Inbound::Text(text) => handler.on_inbound_saturated(conn_id, text.as_str(), &frames),
             Inbound::Binary(_) => Saturated::Bypass,
         };
         match disposition {
             Saturated::Refused => {
-                // 위층이 답장을 냈다 — 버리고 계속 읽는다. 「계속 읽는다」가 이 갈래의 존재 이유다.
+                // The upper layer sent a reply — discard it and keep reading. 「계속 읽는다」 (keep reading) is the reason this branch exists.
                 tracing::debug!(
                     conn = conn_id,
                     "수신 줄 포화 — 위층이 거절했다(계속 읽는다)"
                 );
             }
-            // ★거절조차 못 냈다 — 「버리고 계속 읽는다」의 근거가 사라졌으므로 끝낸다★(근거 정본 =
-            //   [`Saturated::Unanswered`]). 읽기만 끝내면 도착순 줄은 이미 받아 둔 것을 마저 처리한 뒤
-            //   스스로 끝나고, 그 종료를 `handle_connection` 이 잡아 정리한다.
+            // ★It could not even send a refusal — the basis of 「버리고 계속 읽는다」 (discard and keep reading) is gone, so end★ (source of truth for the basis =
+            //   [`Saturated::Unanswered`]). If only reading ends, the arrival-order lane finishes processing what it already accepted and
+            //   ends by itself, and `handle_connection` catches that end and cleans up.
             Saturated::Unanswered => {
                 tracing::warn!(
                     conn = conn_id,
@@ -784,7 +784,7 @@ async fn read_task<S>(
                 );
                 break;
             }
-            // ★여기서는 기다려도 된다★ — 근거는 [`CONN_BYPASS_CAP`].
+            // ★Waiting is fine here★ — the basis is [`CONN_BYPASS_CAP`].
             Saturated::Bypass => {
                 if bypass_tx.send(full).await.is_err() {
                     tracing::debug!(conn = conn_id, "우선 줄 소비자 없음 — read_task 종료");
@@ -796,13 +796,13 @@ async fn read_task<S>(
     tracing::debug!(conn = conn_id, "read_task 루프 종료");
 }
 
-/// 수신 큐의 **단일** 소비자 — 한 연결의 프레임을 도착 순서대로, 서로 겹치지 않게 핸들러에 올린다.
+/// The **single** consumer of the inbound queue — raises one connection's frames to the handler in arrival order, without overlapping.
 ///
-/// ★이 직렬성이 위층 순서 불변식의 **실물**이다★: 「같은 에이전트로 가는 입력끼리」·「입력 lease
-/// 획득과 그 뒤 입력」·「같은 연결의 구독/해지」·「명령 명부 등록과 그 차분」이 전부 도착 순서에
-/// 걸려 있고, 그것을 지키는 것은 이 task 가 하나이고 한 번에 하나만 await 한다는 성질뿐이다
-/// (계약의 정본 = `frame_port::ConnectionHandler`). **두 번째 소비자를 띄우거나 여기서 spawn 으로
-/// 흩으면 그 넷이 한꺼번에 깨진다** — 오래 걸리는 명령을 줄에서 떼는 판단은 위층 몫이다.
+/// ★This serialization is the **real thing** behind the upper layer's order invariants★: 「같은 에이전트로 가는 입력끼리」 (inputs bound for the same agent) · 「입력 lease
+/// 획득과 그 뒤 입력」 (input lease acquisition and the input after it) · 「같은 연결의 구독/해지」 (subscribe/unsubscribe on the same connection) · 「명령 명부 등록과 그 차분」 (command registry registration and its diff) all
+/// hang on arrival order, and what keeps it is only the property that this task is one and awaits only one at a time
+/// (source of truth for the contract = `frame_port::ConnectionHandler`). **Starting a second consumer or scattering here with spawn
+/// breaks all four at once** — the decision to peel a long-running command off the lane is the upper layer's job.
 async fn dispatch_task(
     mut inbound_rx: mpsc::Receiver<Inbound>,
     rx_bytes: RxBytes,
@@ -814,14 +814,14 @@ async fn dispatch_task(
         let len = item.payload_len();
         let flow = match item {
             Inbound::Text(text) => handler.on_text(conn_id, text.as_str(), &frames).await,
-            // 페이로드는 **빌려준다** — 거부 경로가 유일한 소비자라 복사하지 않는다(클라가 고른
-            //   크기만큼 할당하게 두면 인증 후 최대 프레임 크기까지 낭비 할당이 된다).
+            // The payload is **lent** — the rejection path is the only consumer, so no copy is made (letting it allocate the size
+            //   the client chose would be wasted allocation up to the maximum frame size after authentication).
             Inbound::Binary(payload) => handler.on_binary(conn_id, payload.as_ref(), &frames).await,
         };
-        // ★핸들러가 반환한 **뒤**에 뺀다★ — 처리 중인 한 장을 0 으로 세면 예산이 두 배가 된다
-        //   ([`RxBytes`]). 핸들러가 panic 하면 이 줄에 못 오지만, 운영 데몬은 훅이 프로세스째 끝내고
-        //   (ADR-0292) 훅 없는 시험 빌드에선 이 task 자체가 죽어 연결이 통째로 정리되므로 새는 예산이 남을
-        //   곳이 없다.
+        // ★Subtract **after** the handler returns★ — counting the one being processed as 0 doubles the budget
+        //   ([`RxBytes`]). If the handler panics it never reaches this line, but the production daemon ends the whole process in the hook
+        //   (ADR-0292), and in a hookless test build this task itself dies and the connection is cleaned up wholesale, so there is nowhere
+        //   for a leaked budget to remain.
         rx_bytes.fetch_sub(len, Ordering::AcqRel);
         if flow == ConnFlow::Close {
             tracing::debug!(conn = conn_id, "핸들러가 Close — dispatch_task 종료");
@@ -831,19 +831,19 @@ async fn dispatch_task(
     tracing::debug!(conn = conn_id, "dispatch_task 루프 종료");
 }
 
-/// 도착순 줄을 건너뛴 프레임([`Saturated::Bypass`])의 소비자.
+/// The consumer of frames that skipped the arrival-order lane ([`Saturated::Bypass`]).
 ///
-/// ★★[`dispatch_task`] 와 **별도 task 여야 한다** — 같은 task 의 `select!` 로 합칠 수 없다★★: 이 줄이
-/// 존재하는 상황은 곧 **그쪽 소비자가 막혀 있는** 상황이다. 막힌 task 는 아무것도 폴링하지 못하므로,
-/// 한 task 안에 우선순위를 두는 형태로는 이 프레임이 영영 안 돈다.
+/// ★★It must be a **separate task from** [`dispatch_task`] — it cannot be merged by `select!` in the same task★★: the situation in which this lane
+/// exists is precisely one where **that side's consumer is blocked**. A blocked task cannot poll anything, so
+/// with a priority arrangement inside one task, this frame would never run.
 ///
-/// ★그래서 두 줄은 **겹쳐서 돈다**★ — 포트 계약의 「겹치지 않는다」에 대한 유일한 예외이고, 그 예외를
-/// 고른 것은 위층 자신이다(`on_inbound_saturated`). 여기서 도는 것과 저기서 막혀 있는 것이 같은 대상을
-/// 건드릴 수 있다는 뜻이므로, 그래도 되는 프레임만 고르는 책임도 위층에 있다.
+/// ★So the two lanes **run overlapped**★ — the only exception to the port contract's 「겹치지 않는다」 (they do not overlap), and the one who
+/// chose that exception is the upper layer itself (`on_inbound_saturated`). It means that what runs here and what is blocked there may
+/// touch the same target, so the responsibility of choosing only frames that are allowed to do so also lies with the upper layer.
 ///
-/// ★`Close` 를 큐 안 마커로 돌린다★: 이 task 는 `handle_connection` 의 select 대상이 **아니다**(그랬다면
-/// 읽기가 끝나 이 줄이 닫히는 순간 teardown 이 시작돼, 도착순 줄이 남은 것을 비울 기회를 잃는다).
-/// 그래서 종료 의사는 `Frame::Close` 로 write 줄에 실어 보낸다 — 앞서 넣은 프레임이 먼저 나간 뒤 닫힌다.
+/// ★Route `Close` as an in-queue marker★: this task is **not** a select target of `handle_connection` (if it were,
+/// the moment reading ends and this lane closes, teardown would start, and the arrival-order lane would lose the chance to drain what is left).
+/// So the intent to end is sent on the write lane as `Frame::Close` — it closes after the frames put in earlier go out first.
 async fn bypass_task(
     mut bypass_rx: mpsc::Receiver<Inbound>,
     frames: Arc<dyn FrameSink>,
@@ -867,20 +867,20 @@ async fn bypass_task(
     tracing::debug!(conn = conn_id, "bypass_task 루프 종료");
 }
 
-/// 우선 줄을 **거둔다** — `abort()` 가 아니라, 남은 것을 비우고 스스로 끝나기를 기다린다.
+/// **Reap** the priority lane — not with `abort()`, but by draining what is left and waiting for it to end by itself.
 ///
-/// ★왜 abort 가 결함이었나★: 우선 줄에 들어간 프레임은 위층이 「이건 굶으면 안 된다」고 판정해
-///   **받아 준** 것이다(`on_inbound_saturated` → [`Saturated::Bypass`]). 그런데 도착순 줄이 먼저
-///   끝나면(피어가 명령 한 장 보내고 곧바로 close 하는 흔한 모양) 그 자리에서 이 task 를 abort 했고,
-///   **받아 놓고 한 번도 폴링되지 않은 프레임이 그대로 사라졌다.** 이 줄을 둔 이유가 통째로 무너지는
-///   갈래다 — 도착순 줄에는 같은 구멍이 없다(송신단이 드롭되면 남은 것을 비운 뒤 끝난다).
+/// ★Why abort was a defect★: a frame that entered the priority lane is one the upper layer decided 「이건 굶으면 안 된다」 (this must not starve) and
+///   **accepted** (`on_inbound_saturated` → [`Saturated::Bypass`]). But when the arrival-order lane ended first
+///   (the common shape where a peer sends one command and closes right away), this task was aborted on the spot, and
+///   **a frame that was accepted and never polled simply vanished.** This is the branch where the reason this lane was made collapses entirely —
+///   the arrival-order lane does not have the same hole (when its sender is dropped it drains what is left and ends).
 ///
-/// ★부르는 쪽의 의무 = **먼저 `read_task` 를 끊을 것**★: 이 줄의 유일한 송신단이 거기 있어서, 그것이
-///   드롭되지 않으면 `recv()` 가 영영 `None` 을 못 받아 이 대기가 유예를 다 쓴다.
-/// ★유예를 넘기면 옛 처분으로 떨어진다★ — 그래서 이 함수는 **손해가 없다**: 잘 되면 받아 둔 것을
-///   마저 하고, 안 되면 예전과 똑같이 abort 한다. ★`timeout` 에 핸들을 **넘기지 않고 빌려주는 것은
-///   의도다**★: 넘기면 시한 초과 시 핸들이 drop 되어 task 가 abort 가 아니라 **detach** 되고, 그건
-///   `handle_connection` 이 명시적 abort 로 막고 있는 바로 그 누수다.
+/// ★The caller's obligation = **cut `read_task` first**★: this lane's only sender is there, and if it is
+///   not dropped, `recv()` never gets `None` and this wait uses up the whole grace period.
+/// ★Past the grace period it falls back to the old disposition★ — so this function has **no downside**: if it goes well it finishes
+///   what was accepted, and if not it aborts exactly as before. ★Lending the handle to `timeout` **instead of passing it
+///   is intended**★: passing it would drop the handle on timeout, so the task would be **detached** rather than aborted, and that is
+///   exactly the leak that `handle_connection` blocks with the explicit abort.
 async fn finish_bypass_lane(mut handle: tokio::task::JoinHandle<()>, conn_id: ConnId) {
     match tokio::time::timeout(BYPASS_DRAIN_GRACE, &mut handle).await {
         Ok(_) => {}
@@ -900,7 +900,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
 
-    // ── 2. 토큰 상수시간 비교 정확성 ──────────────────────────────────────────
+    // ── 2. Token constant-time comparison correctness ──────────────────────────────────────────
     #[test]
     fn constant_time_eq_correctness() {
         let a = "a".repeat(64);
@@ -914,10 +914,10 @@ mod tests {
         assert!(constant_time_eq("", ""));
     }
 
-    // ── 2b. auth 파싱 실패 로그에 페이로드가 실리지 않는다 ─────────────────────
+    // ── 2b. The auth parse-failure log does not carry the payload ─────────────────────
     #[test]
     fn auth_parse_failure_log_fields_do_not_carry_the_payload() {
-        let token = "deadbeef".repeat(8); // 운영과 같은 64자
+        let token = "deadbeef".repeat(8); // Same 64 chars as production
         let e = serde_json::from_str::<AuthFrame>(&format!(r#"{{"Auth":"{token}"}}"#)).unwrap_err();
         assert!(
             e.to_string().contains(&token),
@@ -930,8 +930,8 @@ mod tests {
         );
     }
 
-    // ── 3. Frame 매핑(Text/Binary/Close → Message) ───────────────────────────
-    // write_task 의 변환 로직과 동일한 매핑을 직접 검증(실제 WS 없이).
+    // ── 3. Frame mapping (Text/Binary/Close → Message) ───────────────────────────
+    // Directly verifies the same mapping as write_task's conversion logic (without a real WS).
     #[test]
     fn frame_maps_to_message() {
         let t = Frame::Text("hi".into());
@@ -950,7 +950,7 @@ mod tests {
         assert!(matches!(to_msg(c), Message::Close(_)));
     }
 
-    // ── 4. ConnFrameSink: try_send 는 포화 시 out-of-band close_signal 을 울린다 ──
+    // ── 4. ConnFrameSink: try_send rings the out-of-band close_signal on saturation ──
     #[tokio::test]
     async fn conn_frame_sink_notifies_close_signal_when_full() {
         let (tx, mut rx) = mpsc::channel::<Frame>(1);
@@ -971,7 +971,7 @@ mod tests {
         assert!(matches!(rx.recv().await.unwrap(), Frame::Text(_)));
     }
 
-    // ── 4b. ConnFrameSink: send(backpressure)는 close_signal 을 울리지 않는다 ──
+    // ── 4b. ConnFrameSink: send (backpressure) does not ring close_signal ──
     #[tokio::test]
     async fn conn_frame_sink_send_does_not_signal_close() {
         let (tx, mut rx) = mpsc::channel::<Frame>(1);
@@ -980,10 +980,10 @@ mod tests {
 
         sink.try_send(Frame::Text("first".into())).expect("한 칸");
 
-        // ★포화 경로를 탔다는 **양성 관측**★: future 를 직접 1회 폴링해 Pending 을 확인한다. 이게
-        //   없으면 `spawn` + 곧바로 `recv()` 조합에서 send 가 **자리가 빈 뒤에야** 처음 폴링될 수 있어
-        //   (spawn 은 폴링을 보장하지 않고, 비어있지 않은 채널의 recv 는 yield 없이 Ready) 정작 검증
-        //   대상인 포화 분기를 한 번도 안 타고 통과할 수 있다(실측: 그 형태는 회귀를 놓쳤다).
+        // ★**Positive observation** that the saturation path was taken★: poll the future once directly to confirm Pending. Without
+        //   this, in a `spawn` + immediate `recv()` combination the send could be polled for the first time **only after room opens**
+        //   (spawn does not guarantee polling, and recv on a non-empty channel is Ready without yielding), so it could pass without ever taking
+        //   the saturation branch that is the very thing under verification (measured: that form missed the regression).
         let mut pending = Box::pin(sink.send(Frame::Text("second".into())));
         assert!(
             futures_util::poll!(pending.as_mut()).is_pending(),
@@ -1000,7 +1000,7 @@ mod tests {
         pending.await.expect("자리가 나면 backpressure 가 풀린다");
     }
 
-    // ── 4c. ConnFrameSink: 세 프레임 종류가 그대로 단일 writer 큐에 FIFO 로 실린다 ──
+    // ── 4c. ConnFrameSink: the three frame kinds ride the single writer queue in FIFO as they are ──
     #[tokio::test]
     async fn conn_frame_sink_maps_frames_to_queue_in_order() {
         let (tx, mut rx) = mpsc::channel::<Frame>(8);
@@ -1020,35 +1020,35 @@ mod tests {
         }
     }
 
-    // ── 4d. ConnRegistry: 전-연결 팬아웃 — 포화한 연결 하나가 나머지를 막지 않는다(ADR-0129) ──
+    // ── 4d. ConnRegistry: all-connection fan-out — one saturated connection does not block the rest (ADR-0129) ──
     #[test]
     fn broadcast_text_copies_the_text_to_every_connection_that_can_take_it() {
-        // ★반복하는 이유 = 매 회차 HashMap 순회 순서를 다시 뽑으려는 것(패딩 아님)★: `broadcast_text` 는
-        //   레지스트리 맵을 순회해 Vec 으로 뜨므로 방문 순서가 곧 배달 순서다.
-        //   - **정상 코드는 순서와 무관하게 통과한다** → 이 루프가 위양성(flake)을 만들 수는 없다. 반복이
-        //     바꾸는 것은 오직 **탐지력**이다.
-        //   - 잡으려는 회귀 = "첫 try_send 실패에서 fanout 중단". 그 회귀는 포화 연결이 **마지막에** 방문된
-        //     회차에서는 멀쩡한 연결들이 이미 다 받은 뒤라 살아남는다(S18.17 이 기록한 "포화 경로를 한 번도
-        //     안 밟고 통과" 와 같은 부류). 그래서 회차마다 **새 레지스트리**로 순서를 다시 뽑는다.
-        //     ※ 같은 레지스트리를 재사용하면 순서가 고정돼 반복이 무의미하다(그래서 루프 **안**에서 만든다).
-        // ★탐지력은 경험적이지 증명이 아니다(정직 명시)★: std 는 `RandomState` 가 인스턴스마다 다른 씨앗을
-        //   쓴다고만 하고, **인스턴스 간 순서 독립성도 특정 분포도 보장하지 않는다**. 그러니 "K회면 놓칠 확률
-        //   2^-K" 같은 계산을 여기 적을 근거가 없다 — 그건 관측을 보장으로 격상하는 것이다.
-        //   ★실측(2026-08-04 · 이 형태 = 포화 1 + 멀쩡 2)★: 위 회귀를 심고 **10회 시도 전부** 잡혔다.
-        //   잡히는 회차도, 굶은 연결(ok0/ok1)도 실행마다 달랐다 — 순서가 실제로 매 회차 다시 뽑힌다는
-        //   증거. **보장이 아니라 측정치다.**
-        // ★결정적 탐지를 원하면 순회 순서를 통제해야 한다★ = `ConnRegistry` 의 맵 타입 교체(정렬 맵 등).
-        //   이사 슬라이스(ADR-0129)의 범위 밖이라 하지 않는다 — 이게 **하드 보장**이어야 할 날이 오면 그때
-        //   그 교체가 정공법이고, 그 전까지 K 는 탐지력 손잡이일 뿐이다(임계값 튜닝 대상 아님 — ADR-0038).
-        // ★멀쩡한 연결을 2개 두는 이유★: 포화가 **가운데**에 오는 배치까지 덮는다. 회귀가 한 회차를
-        //   살아남으려면 포화 연결이 **맨 뒤**에 와야 하는데, 멀쩡한 연결이 1개면 "뒤" 가 두 자리 중
-        //   하나이고 2개면 세 자리 중 하나다 — 즉 회차당 생존 여지가 좁아진다(분포 보장이 없으므로
-        //   이것도 확률 계산이 아니라 **자리 수 논증**이다).
+        // ★The reason for repeating = to redraw the HashMap iteration order every round (not padding)★: `broadcast_text` iterates the
+        //   registry map and takes a Vec, so the visiting order is the delivery order.
+        //   - **Correct code passes regardless of order** → this loop cannot create false positives (flakes). What repetition
+        //     changes is only the **detection power**.
+        //   - The regression to catch = "abort the fan-out at the first try_send failure". That regression survives a round in which the saturated connection is visited **last**,
+        //     because the healthy connections have already all received (the same family as "passing without ever taking the saturation path" recorded in S18.17).
+        //     So each round redraws the order with a **new registry**.
+        //     ※ Reusing the same registry fixes the order and makes repetition meaningless (so it is created **inside** the loop).
+        // ★Detection power is empirical, not a proof (stated honestly)★: std says only that `RandomState` uses a different seed per instance, and
+        //   **guarantees neither order independence between instances nor any particular distribution**. So there is no basis to write a calculation like "with K rounds the miss
+        //   probability is 2^-K" here — that would promote an observation to a guarantee.
+        //   ★Measured (2026-08-04 · this form = 1 saturated + 2 healthy)★: planting the regression above, **all 10 attempts** caught it.
+        //   The round that caught it and the starved connection (ok0/ok1) differed every run — evidence that the order is actually
+        //   redrawn every round. **A measurement, not a guarantee.**
+        // ★If you want deterministic detection, you must control the iteration order★ = swap the `ConnRegistry` map type (an ordered map, etc.).
+        //   It is outside the scope of the move slice (ADR-0129), so it is not done — the day this needs to be a **hard guarantee**, that
+        //   swap is the proper way, and until then K is only a detection-power knob (not a threshold-tuning target — ADR-0038).
+        // ★Why two healthy connections★: it covers the arrangement where the saturated one comes in the **middle** too. For the regression to survive
+        //   a round the saturated connection must come **last**, and with 1 healthy connection "last" is one of two
+        //   positions, with 2 it is one of three — so the room for survival per round narrows (with no distribution guarantee,
+        //   this too is a **position-count argument**, not a probability calculation).
         const K: usize = 20;
         const PAYLOAD: &str = "opaque-fanout-payload";
         for round in 0..K {
             let registry = ConnRegistry::new();
-            // 운영 등록 경로(alloc_id + register)를 그대로 쓴다 — 같은 모듈이라 테스트 전용 seam 이 필요 없다.
+            // Uses the production registration path as is (alloc_id + register) — it is the same module, so no test-only seam is needed.
             let register = |tx: mpsc::Sender<Frame>| {
                 let id = registry.alloc_id();
                 registry.register(id, tx);
@@ -1076,8 +1076,8 @@ mod tests {
                 full_rx.try_recv().is_err(),
                 "round {round}: 포화 연결은 이번 건을 못 받는다"
             );
-            // ★분기마다 회차·연결 번호를 메시지에 담는다★: 잡는 회귀("첫 포화에서 중단")는 "아무것도 못
-            //   받음" 으로 나타나므로, 일반 메시지로는 어느 회차가 걸렸는지 안 보인다.
+            // ★Put the round · connection number in the message at each branch★: the regression we catch ("abort at the first saturation") shows up as "received
+            //   nothing", so a generic message does not show which round was hit.
             for (n, ok_rx) in oks.iter_mut().enumerate() {
                 match ok_rx.try_recv() {
                     Ok(Frame::Text(s)) => assert_eq!(
@@ -1096,8 +1096,8 @@ mod tests {
         }
     }
 
-    // ── 10. (적용4-1) OriginCheck::on_request 분기 — 무방비 였던 거부/허용 분기 검증 ──────
-    //    순수 헤더 검사라 in-process 서버 불필요. Request 를 직접 만들어 콜백을 호출한다.
+    // ── 10. (apply 4-1) OriginCheck::on_request branches — verifying the reject/allow branches that were unprotected ──────
+    //    A pure header check, so no in-process server is needed. Build the Request directly and call the callback.
     fn run_origin_check(origin: Option<&str>) -> Result<(), ()> {
         use tokio_tungstenite::tungstenite::http::Request as HttpRequest;
         let mut builder = HttpRequest::builder().uri("/");
@@ -1105,7 +1105,7 @@ mod tests {
             builder = builder.header("origin", o);
         }
         let request = builder.body(()).unwrap();
-        // Response 는 콜백이 통과시키는 더미.
+        // Response is a dummy that the callback passes through.
         let response = tokio_tungstenite::tungstenite::http::Response::builder()
             .body(())
             .unwrap();
@@ -1131,9 +1131,9 @@ mod tests {
         assert!(run_origin_check(None).is_ok());
     }
 
-    // ── 11. 프레임 포트 seam — 소켓 없이 도는 격리 하네스(ADR-0129) ──────────────────
-    //    가짜 ConnectionHandler + 가짜 FrameSink 로 연결 수명을 재현한다. TcpStream 이 없어야
-    //    네트워크 행이 별도 crate 로 떨어져도 이 검증이 그대로 산다.
+    // ── 11. Frame port seam — an isolation harness that runs without a socket (ADR-0129) ──────────────────
+    //    Reproduces connection lifetime with a fake ConnectionHandler + a fake FrameSink. Without a TcpStream,
+    //    this verification stays alive even if the network layer is split off into a separate crate.
 
     #[derive(Debug, PartialEq, Eq)]
     enum SeenFrame {
@@ -1145,12 +1145,12 @@ mod tests {
     #[derive(Default)]
     struct FakeFrameSink {
         frames: Mutex<Vec<SeenFrame>>,
-        /// 켜면 모든 `try_send`/`send` 가 실패한다 — 「송신 큐도 포화」를 시한 없이 만드는 손잡이.
+        /// When on, every `try_send`/`send` fails — a knob that makes 「송신 큐도 포화」 (the outbound queue is saturated too) without a time limit.
         refuse: AtomicBool,
     }
 
     impl FakeFrameSink {
-        /// 한 프레임도 받아 주지 않는 출구(= 그 연결의 송신 큐가 포화이거나 닫힌 상태의 대역).
+        /// An outlet that accepts no frame at all (= a stand-in for a connection whose outbound queue is saturated or closed).
         fn refusing() -> Self {
             Self {
                 refuse: AtomicBool::new(true),
@@ -1194,43 +1194,43 @@ mod tests {
     enum HandlerCall {
         Connect(ConnId),
         Text(ConnId, String),
-        /// payload 길이만 — 내용은 이 seam 의 관심사가 아니다.
+        /// Only the payload length — the content is not this seam's concern.
         Binary(ConnId, usize),
         Disconnect(ConnId),
     }
 
     struct FakeHandler {
         calls: Mutex<Vec<HandlerCall>>,
-        /// 이 텍스트를 받으면 `ConnFlow::Close` 를 돌려준다(수신 루프 탈출 검증용).
+        /// On receiving this text it returns `ConnFlow::Close` (for verifying exit from the receive loop).
         close_on: Option<String>,
-        /// 이 텍스트를 받으면 `Frame::Close` 를 큐에 넣고 **Continue** 를 돌려준다 — 연결을
-        /// read 쪽이 아니라 **write_task 쪽**에서 끝내, select! 의 "read 를 abort" 갈래를 태운다.
+        /// On receiving this text it puts `Frame::Close` in the queue and returns **Continue** — it ends the connection
+        /// on the **write_task side** rather than the read side, taking the select! "abort read" branch.
         close_queue_on: Option<String>,
-        /// `on_connect` 가 인사 프레임을 넣은 뒤 여기서 대기한다. 테스트가 그 창 동안 "아직 아무것도
-        /// 소켓으로 안 나갔다"(=writer 미기동) 와 "아직 아무 프레임도 처리 안 됐다"(=reader 미기동)를
-        /// 관측한다.
+        /// After `on_connect` puts in the greeting frame, it waits here. During that window the test observes "nothing has gone out to the
+        /// socket yet" (= writer not started) and "no frame has been processed yet" (= reader not
+        /// started).
         connect_gate: Option<Arc<Notify>>,
-        /// `on_text` 1건 처리 완료 신호 — 테스트가 클라 close 타이밍과 무관하게 진행하기 위한 것.
+        /// Signal that 1 `on_text` has finished processing — so the test can proceed regardless of the client close timing.
         text_seen: Arc<Notify>,
-        /// 이 텍스트를 받으면 [`Self::slow_gate`] 가 열릴 때까지 `on_text` **안에서** 대기한다 —
-        /// 「핸들러가 한 명령에 붙들려 있는 동안 읽기 루프가 앞서 나가는가」를 재는 창을 만든다.
-        /// ★타이밍 가정을 쓰지 않으려는 장치다★: sleep 으로 흉내 내면 느린 러너에서 창이 닫혀 위양성이
-        ///   난다. 게이트는 테스트가 열기 전까지 **영원히** 닫혀 있다.
+        /// On receiving this text it waits **inside** `on_text` until [`Self::slow_gate`] opens —
+        /// it creates a window that measures 「핸들러가 한 명령에 붙들려 있는 동안 읽기 루프가 앞서 나가는가」 (does the read loop get ahead while the handler is held by one command).
+        /// ★A device to avoid relying on timing assumptions★: imitating it with sleep closes the window on a slow runner and gives
+        ///   a false positive. The gate stays closed **forever** until the test opens it.
         slow_on: Option<String>,
         slow_gate: Arc<Notify>,
-        /// [`Self::slow_on`] 의 **우선 줄 판**: 이 텍스트를 받으면 [`Self::bypass_gate`] 가 열릴 때까지
-        /// `on_text` 안에서 대기한다. 도착순 줄과 **따로** 잠가야 「도착순은 끝났는데 우선 줄은 아직
-        /// 한 건에 붙들려 있다」는 상태를 만들 수 있다(그 상태가 곧 abort 결함의 무대다).
+        /// The **priority lane version** of [`Self::slow_on`]: on receiving this text it waits inside `on_text`
+        /// until [`Self::bypass_gate`] opens. Only by locking it **separately** from the arrival-order lane can the state 「도착순은 끝났는데 우선 줄은 아직
+        /// 한 건에 붙들려 있다」 (arrival order is finished but the priority lane is still held by one item) be created (that state is the stage of the abort defect).
         bypass_gate_on: Option<String>,
         bypass_gate: Arc<Notify>,
-        /// `on_connect` 이 받은 프레임 출구의 약참조. 강참조는 read_task 만 들고 있으므로, 연결이
-        /// 끝난 뒤에도 upgrade 되면 그 task 가 abort 되지 않고 **detach** 됐다는 뜻이다.
-        /// ★이 fake 는 프레임 출구의 **강참조를 절대 보관하면 안 된다**★ — 필드에 `Arc` 를 하나라도
-        /// 남기면 upgrade 가 항상 성공하고, `the_losing_task_is_aborted_not_detached` 의 폴링 루프가
-        /// 끝까지 `released == false` 로 돌아 **정상 코드에서 그 테스트가 항상 실패한다**(조용한 탐지
-        /// 불능이 아니라 시끄러운 위양성 — 그래서 원인을 이 필드로 되짚기 어렵다).
+        /// A weak reference to the frame outlet that `on_connect` received. Only read_task holds a strong reference, so if it can still be
+        /// upgraded after the connection has ended, that task was not aborted but **detached**.
+        /// ★This fake **must never keep a strong reference to the frame outlet**★ — if even one `Arc` is left in a field, upgrade
+        /// always succeeds and the polling loop of `the_losing_task_is_aborted_not_detached` runs to the end with
+        /// `released == false`, so **that test always fails on correct code** (not silent inability to detect but a loud false positive — so
+        /// it is hard to trace the cause back to this field).
         frames_weak: Mutex<Option<std::sync::Weak<dyn FrameSink>>>,
-        /// `on_disconnect` 시점에 이 연결이 아직 fanout 레지스트리에 있었는지(cleanup 순서 관측).
+        /// Whether this connection was still in the fan-out registry at the time of `on_disconnect` (observing the cleanup order).
         registry: Option<ConnRegistry>,
         registered_at_disconnect: Mutex<Option<bool>>,
     }
@@ -1253,7 +1253,7 @@ mod tests {
             }
         }
 
-        /// 한 명령에 붙들리는 변종 — `slow_gate` 를 열 때까지 그 `on_text` 이 반환하지 않는다.
+        /// A variant held by one command — that `on_text` does not return until `slow_gate` is opened.
         fn blocking_on(slow_on: &str) -> Self {
             Self {
                 slow_on: Some(slow_on.to_string()),
@@ -1261,7 +1261,7 @@ mod tests {
             }
         }
 
-        /// 두 줄을 **각각** 잠그는 변종 — 도착순 줄은 `slow_on` 에, 우선 줄은 `bypass_gate_on` 에.
+        /// A variant that locks the two lanes **each** — the arrival-order lane with `slow_on`, the priority lane with `bypass_gate_on`.
         fn blocking_on_both(slow_on: &str, bypass_gate_on: &str) -> Self {
             Self {
                 bypass_gate_on: Some(bypass_gate_on.to_string()),
@@ -1269,7 +1269,7 @@ mod tests {
             }
         }
 
-        /// `handle_connection` 의 순서 검증용 — 레지스트리를 들여다보고 on_connect 을 게이트로 잡는다.
+        /// For order verification of `handle_connection` — peeks into the registry and catches on_connect with a gate.
         fn probing(registry: ConnRegistry, connect_gate: Arc<Notify>) -> Self {
             Self {
                 registry: Some(registry),
@@ -1278,7 +1278,7 @@ mod tests {
             }
         }
 
-        /// write_task 쪽에서 연결을 끝내는 변종(패자 abort 검증용).
+        /// A variant that ends the connection on the write_task side (for verifying the loser abort).
         fn closing_via_writer(close_queue_on: &str) -> Self {
             Self {
                 close_queue_on: Some(close_queue_on.to_string()),
@@ -1304,8 +1304,8 @@ mod tests {
             *self.registered_at_disconnect.lock().unwrap()
         }
 
-        /// `on_connect` 이 두 지점에서 쓰는 단언 — 정상 코드에선 `on_connect` 이 끝나기 전에 어떤
-        /// 프레임도 처리될 수 없다(read_task 가 아직 없다).
+        /// Assertions `on_connect` uses at two points — in correct code, no frame can be processed
+        /// before `on_connect` finishes (read_task does not exist yet).
         fn assert_nothing_processed_yet(&self, at: &str) {
             let calls = self.calls.lock().unwrap();
             assert!(
@@ -1332,17 +1332,17 @@ mod tests {
         ) -> BoxFuture<'a, ()> {
             Box::pin(async move {
                 *self.frames_weak.lock().unwrap() = Some(Arc::downgrade(frames));
-                // ★게이트 **앞** 단언(프로그램 순서로 결정)★: 정상 코드에선 read_task 가 아직 스폰조차
-                //   안 됐으므로 처리된 프레임이 있을 수 없다. 스케줄러와 무관하게 참이다.
+                // ★Assertion **before** the gate (decided by program order)★: in correct code read_task has not even been spawned yet,
+                //   so there can be no processed frame. True regardless of the scheduler.
                 self.assert_nothing_processed_yet("게이트 진입 전");
-                // 인사를 **게이트 앞에서** 넣는다 — writer 가 이미 떠 있다면 이 프레임이 게이트 대기
-                //   중에 소켓으로 나가고, 테스트가 그걸 잡는다.
+                // Put the greeting **before the gate** — if the writer were already up, this frame would go out to the socket
+                //   during the gate wait, and the test would catch it.
                 let _ = frames.send(Frame::Text("greeting".into())).await;
                 if let Some(gate) = &self.connect_gate {
                     gate.notified().await;
                 }
-                // ★게이트 **뒤** 단언★: 게이트가 열릴 때까지의 창(테스트가 그 안에서 명령을 미리
-                //   흘려둔다) 동안 잘못 스폰된 read_task 가 그 명령을 처리했는지 잡는다.
+                // ★Assertion **after** the gate★: during the window until the gate opens (in which the test has fed commands in advance), it catches whether
+                //   a wrongly spawned read_task processed that command.
                 self.assert_nothing_processed_yet("게이트 통과 후");
                 self.calls
                     .lock()
@@ -1398,11 +1398,11 @@ mod tests {
             })
         }
 
-        /// 이 fake 는 "bypass:" 로 시작하는 text 만 줄을 건너뛰게 한다. 나머지는 거절하고, 거절도
-        /// **기록해** 조용한 유실과 구별한다(포트 계약의 의무 2 에 해당하는 이 fake 의 답장).
+        /// This fake makes only text starting with "bypass:" skip the lane. It refuses the rest, and **records**
+        /// the refusal too to tell it apart from silent loss (this fake's reply, corresponding to obligation 2 of the port contract).
         ///
-        /// ★답장 결과를 보고 [`Saturated::Unanswered`] 로 갈리는 것까지 운영 핸들러와 같은 모양이다★ —
-        ///   결과를 버리고 늘 `Refused` 를 돌려주면 이 fake 는 그 갈래를 **표현조차 못 한다.**
+        /// ★It is the same shape as the production handler down to splitting into [`Saturated::Unanswered`] by the reply result★ —
+        ///   if it discarded the result and always returned `Refused`, this fake could not even **express** that branch.
         fn on_inbound_saturated(
             &self,
             _conn_id: ConnId,
@@ -1446,11 +1446,11 @@ mod tests {
         Ok(Message::Text(s.to_string().into()))
     }
 
-    /// 읽기 행과 처리 행을 **실제 배치대로**(수신 큐로 이어) 함께 돌린다 — `handle_connection` 이
-    /// 하는 배선의 최소 재현이고, 둘 다 끝난 뒤 반환한다.
+    /// Runs the read layer and processing layer together **in the actual arrangement** (chained through the inbound queue) — a minimal
+    /// reproduction of the wiring that `handle_connection` does, and returns after both finish.
     ///
-    /// ★소켓 없이 도는 격리 하네스라는 성질은 그대로다★(ADR-0129) — 바뀐 것은 이 seam 을 태우는 데
-    ///   task 가 하나가 아니라 둘이라는 점뿐이다.
+    /// ★The property of an isolation harness that runs without a socket stays as it is★ (ADR-0129) — the only change is that
+    ///   taking this seam now takes two tasks instead of one.
     async fn run_read_and_dispatch<S>(
         incoming: S,
         frames: Arc<dyn FrameSink>,
@@ -1483,7 +1483,7 @@ mod tests {
             conn_id,
         ));
         dispatch_task(rx, rx_bytes, frames, handler, conn_id).await;
-        // `handle_connection` 의 "dispatch 가 먼저 끝난" 갈래와 같은 처분.
+        // The same disposition as `handle_connection`'s "dispatch finished first" branch.
         read.abort();
         let _ = read.await;
         finish_bypass_lane(bypass, conn_id).await;
@@ -1521,7 +1521,7 @@ mod tests {
                 "connect:7",
                 "text:7:cmd",
                 "binary:7:3",
-                "disconnect:7", // Close frame 뒤의 프레임은 소비되지 않는다
+                "disconnect:7", // Frames after a Close frame are not consumed
             ]
         );
         assert_eq!(
@@ -1531,10 +1531,10 @@ mod tests {
         );
     }
 
-    /// ★close 판정이 읽기 루프 밖으로 나간 뒤에도 그 뜻은 같다★: 처리 행이 `ConnFlow::Close` 를 받으면
-    /// 그 자리에서 멈추고, 뒤에 이미 **큐에 들어와 있던** 프레임도 처리되지 않는다. 옛 모양에서
-    /// "소켓에서 더 읽지 않는다" 였던 것이 지금은 "더 처리하지 않는다" 이고, 연결 종료로 잇는 것은
-    /// `handle_connection` 의 select 갈래다.
+    /// ★The meaning is the same even after the close decision left the read loop★: when the processing layer receives `ConnFlow::Close`,
+    /// it stops on the spot, and frames that were **already in the queue** behind it are not processed either. What was
+    /// "no more reading from the socket" in the old shape is now "no more processing", and what ties it to connection end is
+    /// the select branch of `handle_connection`.
     #[tokio::test]
     async fn close_flow_from_on_text_stops_the_dispatch_row() {
         let frames: Arc<dyn FrameSink> = Arc::new(FakeFrameSink::default());
@@ -1560,17 +1560,17 @@ mod tests {
         );
     }
 
-    /// ★★이 변경이 고친 결함의 회귀망★★ — 옛 읽기 루프는 핸들러 호출을 **완료까지 await** 한 뒤에야
-    /// 다음 프레임을 읽었다. 그래서 에이전트 활성화 한 건(전형 2s·백스톱 15s)이 도는 동안 같은
-    /// 클라이언트가 보낸 **다른 에이전트로 가는 입력·kill·또 다른 활성화**가 소켓에서 꺼내지지도
-    /// 않았다(소켓 head-of-line blocking).
+    /// ★★Regression net for the defect this change fixed★★ — the old read loop **awaited the handler call to completion** before
+    /// reading the next frame. So while one agent activation (typically 2s · backstop 15s) ran, **input · kill · another
+    /// activation bound for other agents** sent by the same client were not even taken out of the socket
+    /// (socket head-of-line blocking).
     ///
-    /// ★두 가지를 한 번에 잰다★: ① 핸들러가 한 명령에 붙들려 있는 동안 나머지 프레임이 **전부** 읽힌다
-    /// ② 그럼에도 처리는 여전히 **도착 순서대로 하나씩**이다(순서가 뜻을 갖는 명령들이 이 성질 하나에
-    /// 걸려 있다 — `frame_port::ConnectionHandler` 계약). ①만 재면 "순서를 버려서 빨라진" 회귀를 못
-    /// 잡고, ②만 재면 원래 결함이 그대로 있어도 초록이다.
+    /// ★It measures two things at once★: ① while the handler is held by one command, the rest of the frames are **all** read
+    /// ② and yet processing is still **one at a time in arrival order** (commands whose order carries meaning hang on this single property — the
+    /// `frame_port::ConnectionHandler` contract). Measuring only ① misses a regression that "got faster by dropping order", and measuring
+    /// only ② stays green even if the original defect is still there.
     ///
-    /// ★게이트로 재고 sleep 으로 재지 않는다★: 느린 러너에서 창이 닫혀 나는 위양성을 없앤다.
+    /// ★Measure with a gate, not with sleep★: it removes the false positives that occur when the window closes on a slow runner.
     #[tokio::test]
     async fn the_read_loop_runs_ahead_while_a_handler_call_is_still_running() {
         let frames: Arc<dyn FrameSink> = Arc::new(FakeFrameSink::default());
@@ -1606,7 +1606,7 @@ mod tests {
         ));
         let dispatch = tokio::spawn(dispatch_task(rx, rx_bytes, frames, handler, 5));
 
-        // 첫 명령이 핸들러 **안에서** 붙들린 것을 확인하고 나서 관측한다.
+        // Observe after confirming that the first command is held **inside** the handler.
         tokio::time::timeout(Duration::from_secs(5), fake.text_seen.notified())
             .await
             .expect("첫 명령이 핸들러에 닿아야");
@@ -1649,17 +1649,17 @@ mod tests {
         );
     }
 
-    /// ★★적대 리뷰가 찾아낸 두 번째 구멍의 회귀망★★ — 수신 줄에 **취소를 위한 자리가 없으면**, 줄이
-    /// 가득 찬 순간 `Kill` 이 그 줄 뒤에서 굶어 이 변경이 없애려던 증상(「취소가 안 먹는다」)이 다른
-    /// 경로로 되돌아온다.
+    /// ★★Regression net for the second hole the adversarial review found★★ — if the inbound lane **has no room for cancellation**, the moment the lane
+    /// fills, a `Kill` starves behind it and the symptom this change meant to eliminate (「취소가 안 먹는다」 (cancel has no effect)) comes back by another
+    /// path.
     ///
-    /// ★핵심은 「우선 줄이 있다」가 아니라 「**읽기가 안 선다**」다★: 읽기 루프가 포화한 줄 위에서
-    /// 기다리면, 그 뒤에 오는 `Kill` 은 **소켓에서 꺼내지지도 않는다**(TCP 는 스트림이다). 그래서 이
-    /// 시험은 `Kill` 을 **가득 찬 뒤에 오는 프레임**으로 놓고, 그 앞에 일반 명령을 하나 더 끼워
-    /// 「그 한 장을 처분하고 계속 읽었는가」까지 함께 본다.
+    /// ★The point is not 「우선 줄이 있다」 (there is a priority lane) but 「**읽기가 안 선다**」 (reading does not stop)★: if the read loop waits on a saturated lane,
+    /// the `Kill` that comes after it is **not even taken out of the socket** (TCP is a stream). So this
+    /// test places `Kill` as **a frame that arrives after the lane is full**, and slips in one more ordinary command before it
+    /// to also check 「그 한 장을 처분하고 계속 읽었는가」 (did it dispose of that one and keep reading).
     ///
-    /// ★소비자가 막힌 상태를 만든다★: 첫 프레임이 게이트에 붙들리므로 도착순 줄은 절대 비지 않는다 —
-    /// 실제 사고(막힌 PTY write 뒤로 키 입력이 쌓인다)와 같은 모양이다.
+    /// ★It creates the state where the consumer is blocked★: the first frame is held at the gate, so the arrival-order lane is never empty —
+    /// the same shape as the real incident (key input piles up behind a blocked PTY write).
     #[tokio::test]
     async fn a_cancel_still_gets_through_a_saturated_inbound_queue() {
         let sink = Arc::new(FakeFrameSink::default());
@@ -1667,12 +1667,12 @@ mod tests {
         let fake = Arc::new(FakeHandler::blocking_on("slow"));
         let handler: Arc<dyn ConnectionHandler> = fake.clone();
 
-        // 줄을 꽉 채운다: 게이트에 붙들릴 1장 + 줄을 메울 CONN_RX_CAP 장.
+        // Fill the lane completely: 1 frame held at the gate + CONN_RX_CAP frames to fill the lane.
         let mut items = vec![text_frame("slow")];
         for i in 0..CONN_RX_CAP {
             items.push(text_frame(&format!("filler-{i}")));
         }
-        // ★여기부터가 이 시험의 본론★ — 줄에 자리가 없는 상태에서 도착하는 두 장.
+        // ★From here on is the main point of this test★ — two frames arriving while the lane has no room.
         items.push(text_frame("overflow-ordered"));
         items.push(text_frame("bypass:kill"));
 
@@ -1693,7 +1693,7 @@ mod tests {
         let bypass = tokio::spawn(bypass_task(bypass_rx, frames.clone(), handler.clone(), 11));
         let dispatch = tokio::spawn(dispatch_task(rx, rx_bytes, frames, handler, 11));
 
-        // 취소가 **도착순 소비자가 아직 첫 명령에 붙들려 있는 동안** 실제로 처리되는지 본다.
+        // Check that the cancel is actually processed **while the arrival-order consumer is still held by the first command**.
         let mut cancelled = false;
         for _ in 0..500 {
             if fake.calls().iter().any(|c| c == "text:11:bypass:kill") {
@@ -1707,16 +1707,16 @@ mod tests {
             "줄이 가득 찬 동안 취소가 통과하지 못했다 — 취소 자리 없음 회귀: {:?}",
             fake.calls()
         );
-        // ★여기서 재는 것은 **집합이지 순서가 아니다**★: 두 줄이 서로 다른 task 라 "slow" 와 취소 중
-        //   어느 쪽이 먼저 기록되는지는 스케줄러 몫이고, 그것을 단언하면 위양성이 난다. 지켜야 할 것은
-        //   「줄에 든 것들은 아직 하나도 안 돌았다」 — 즉 건너뛴 것이 취소뿐이라는 사실이다.
+        // ★What is measured here is **the set, not the order**★: the two lanes are different tasks, so which of "slow" and the cancel
+        //   is recorded first is up to the scheduler, and asserting it gives false positives. What must hold is
+        //   「줄에 든 것들은 아직 하나도 안 돌았다」 (none of the things in the lane has run yet) — that is, the only thing skipped is the cancel.
         let ran: Vec<String> = fake.calls();
         assert!(
             ran.iter()
                 .all(|c| c == "text:11:slow" || c == "text:11:bypass:kill"),
             "취소 말고 다른 것이 줄을 건너뛰었다(또는 막힌 줄이 돌았다): {ran:?}"
         );
-        // ★넘친 일반 명령은 **조용히 사라지지 않는다**★ — 이 fake 의 거절 답장이 그 증거다.
+        // ★The overflowed ordinary command **does not vanish silently**★ — this fake's refusal reply is the evidence.
         assert!(
             sink.frames()
                 .iter()
@@ -1731,14 +1731,14 @@ mod tests {
         bypass.abort();
     }
 
-    /// ★★칸은 남았는데 **바이트가 먼저 찬다**★★ — [`CONN_RX_MAX_BYTES`] 회귀망.
+    /// ★★Entries remain but **the bytes fill first**★★ — the regression net for [`CONN_RX_MAX_BYTES`].
     ///
-    /// ★잡는 회귀★: 포화를 칸 수로만 재던 모양. 그러면 이 줄의 실제 천장이
-    ///   `CONN_RX_CAP × max_message_size` (= 64 × 64 MiB) 가 되는데, 그 곱을 아무도 세지 않았다.
-    /// ★결정적이다★: sleep 도 스케줄러 가정도 없다 — 소비자를 게이트로 붙들어 두면 줄은 절대 비지
-    ///   않으므로, 예산 판정은 프레임을 넣는 그 순서만으로 결정된다.
-    /// ★큰 프레임 **두 장**인 이유★: 판정이 「더하기 전 물높이」라 빈 줄에 오는 한 장은 크기와 무관하게
-    ///   언제나 들어간다(그 성질도 함께 고정한다). 예산을 넘기는 것은 그 다음 장부터다.
+    /// ★The regression it catches★: the shape that measured saturation by entry count only. Then this lane's real ceiling becomes
+    ///   `CONN_RX_CAP × max_message_size` (= 64 × 64 MiB), and nobody had counted that product.
+    /// ★Deterministic★: no sleep and no scheduler assumption — if the consumer is held at a gate the lane is never empty,
+    ///   so the budget decision is fixed by the order in which frames are put in alone.
+    /// ★Why **two** large frames★: the decision is 「더하기 전 물높이」 (the fill level before adding), so one frame arriving at an empty lane
+    ///   always goes in regardless of size (that property is nailed down here too). What exceeds the budget is from the next frame on.
     #[tokio::test]
     async fn the_inbound_row_is_bounded_by_bytes_not_only_by_slots() {
         let sink = Arc::new(FakeFrameSink::default());
@@ -1746,7 +1746,7 @@ mod tests {
         let fake = Arc::new(FakeHandler::blocking_on("slow"));
         let handler: Arc<dyn ConnectionHandler> = fake.clone();
 
-        // 예산의 절반보다 한 바이트 큰 장 둘 — 둘이면 예산을 넘고, 칸은 64 중 셋밖에 안 쓴다.
+        // Two frames each one byte more than half the budget — two exceed the budget, and only three of the 64 entries are used.
         let big = "x".repeat(CONN_RX_MAX_BYTES / 2 + 1);
         let items = vec![
             text_frame("slow"),
@@ -1771,7 +1771,7 @@ mod tests {
         ));
         let dispatch = tokio::spawn(dispatch_task(rx, rx_bytes, frames, handler, 21));
 
-        // 읽기 루프는 프레임을 다 훑고 끝난다(예산 초과에서도 서지 않는다 — 그게 이 배치의 전제).
+        // The read loop finishes after scanning all the frames (it does not stop even on exceeding the budget — that is this arrangement's premise).
         tokio::time::timeout(Duration::from_secs(10), read)
             .await
             .expect("읽기 루프가 예산 초과에서 서면 안 된다")
@@ -1784,7 +1784,7 @@ mod tests {
             "칸이 남았다고 통과시켰다 — 바이트 예산이 안 걸렸다: {:?}",
             sink.frames()
         );
-        // 소비자가 첫 장을 실제로 집었음을 **신호로** 확인하고 나서 아래를 단언한다(스케줄러 가정 금지).
+        // Confirm **by signal** that the consumer actually picked up the first frame, then assert below (no scheduler assumptions).
         tokio::time::timeout(Duration::from_secs(5), fake.text_seen.notified())
             .await
             .expect("소비자가 첫 장을 집어야");
@@ -1798,20 +1798,20 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_secs(10), dispatch).await;
     }
 
-    /// ★★거절을 **답장하지 못하면** 그 연결은 끝난다★★ — [`Saturated::Unanswered`] 회귀망.
+    /// ★★If the refusal **cannot be sent as a reply**, that connection ends★★ — the regression net for [`Saturated::Unanswered`].
     ///
-    /// ★잡는 회귀★: 위층이 `Error` 답장 enqueue 결과를 버리고 늘 `Refused` 를 돌려주던 모양. 그러면
-    ///   네트워크 행은 없는 답장을 믿고 원래 명령을 버리고, 보낸 쪽은 **명령도 거절도** 못 받은 채
-    ///   자기 마감시각까지 기다린다.
-    /// ★관측 = 「그 뒤 프레임을 소켓에서 꺼냈는가」★: 종료 여부를 join 으로 재면 두 갈래가 구별되지
-    ///   않는다(둘 다 곧 끝난다). 스트림에서 **몇 장을 뽑았는지**를 세면 갈린다 — 끝냈으면 뒤엣것은
-    ///   뽑히지 않는다.
-    /// ★소비자를 아예 안 띄운다★: 띄우면 「소비자가 첫 장을 꺼내 갔는가」가 스케줄러에 달려 포화 시점이
-    ///   한 장씩 흔들린다(실측으로 그 흔들림을 봤다). 수신단만 살려 두면 줄은 정확히 `CONN_RX_CAP` 장에서
-    ///   차므로 판정이 결정적이다 — 이 시험이 재는 것은 소비자 동작이 아니라 **읽기 행의 처분**이다.
+    /// ★The regression it catches★: the shape where the upper layer discarded the result of enqueuing the `Error` reply and always returned `Refused`. Then
+    ///   the network layer trusts a reply that does not exist and discards the original command, and the sender gets **neither the command nor the refusal** and
+    ///   waits until its own deadline.
+    /// ★Observation = 「그 뒤 프레임을 소켓에서 꺼냈는가」 (did it take the frames after that out of the socket)★: measuring whether it ended by join does not
+    ///   distinguish the two branches (both end soon). Counting **how many frames were pulled** from the stream tells them apart — if it ended, the later ones
+    ///   are not pulled.
+    /// ★Do not start the consumer at all★: if started, 「소비자가 첫 장을 꺼내 갔는가」 (did the consumer take the first frame) depends on the scheduler and the saturation moment
+    ///   wobbles by one frame (we saw that wobble in measurement). With only the receiving end kept alive, the lane fills at exactly `CONN_RX_CAP` frames,
+    ///   so the decision is deterministic — what this test measures is not consumer behavior but **the read layer's disposition**.
     #[tokio::test]
     async fn a_refusal_that_could_not_be_sent_ends_the_read_row() {
-        // 한 프레임도 못 받는 출구 = 송신 큐도 포화인 상태.
+        // An outlet that accepts not a single frame = a state where the outbound queue is saturated too.
         let frames: Arc<dyn FrameSink> = Arc::new(FakeFrameSink::refusing());
         let handler: Arc<dyn ConnectionHandler> = Arc::new(FakeHandler::new(None));
 
@@ -1819,11 +1819,11 @@ mod tests {
         for i in 0..CONN_RX_CAP {
             items.push(text_frame(&format!("filler-{i}")));
         }
-        items.push(text_frame("unanswerable")); // 줄도 차고 답장도 못 내는 그 한 장
+        items.push(text_frame("unanswerable")); // That one frame where the lane is full and no reply can be sent either
         items.push(text_frame("tail-1"));
         items.push(text_frame("tail-2"));
         let total = items.len();
-        let trigger_index = CONN_RX_CAP + 1; // filler 들 + 그 한 장
+        let trigger_index = CONN_RX_CAP + 1; // fillers + that one frame
 
         let pulled = Arc::new(AtomicU64::new(0));
         let counter = pulled.clone();
@@ -1831,8 +1831,8 @@ mod tests {
             counter.fetch_add(1, Ordering::Release);
         });
 
-        // ★수신단을 살려 둔다★ — 드롭하면 첫 `try_send` 가 Closed 로 끊겨 이 시험이 포화가 아니라
-        //   "소비자 없음" 을 재게 된다.
+        // ★Keep the receiving end alive★ — if dropped, the first `try_send` is cut by Closed and this test would measure
+        //   "no consumer" rather than saturation.
         let (tx, _rx) = mpsc::channel::<Inbound>(CONN_RX_CAP);
         let (bypass_tx, _bypass_rx) = mpsc::channel::<Inbound>(CONN_BYPASS_CAP);
         read_task(
@@ -1855,12 +1855,12 @@ mod tests {
         );
     }
 
-    /// 초기값을 도달 불가능한 sentinel 로 두어 "갱신됐다" 를 타이밍 없이 판정한다.
+    /// Set the initial value to an unreachable sentinel so "it was updated" can be decided without timing.
     async fn clock_updated_by(msg: Message) -> bool {
         let last_recv = Arc::new(AtomicU64::new(u64::MAX));
 
-        // ★수신단을 살려 둔다★: 드롭하면 `send` 가 실패해 루프가 첫 프레임에서 끊겨, 이 판정이
-        //   "갱신됐나" 가 아니라 "큐가 살아 있나" 를 재게 된다.
+        // ★Keep the receiving end alive★: if dropped, `send` fails and the loop is cut at the first frame, so this decision
+        //   would measure "is the queue alive" rather than "was it updated".
         let (tx, _rx) = mpsc::channel::<Inbound>(CONN_RX_CAP);
         let (bypass_tx, _bypass_rx) = mpsc::channel::<Inbound>(CONN_BYPASS_CAP);
         read_task(
@@ -1881,17 +1881,17 @@ mod tests {
 
     #[tokio::test]
     async fn every_received_message_updates_the_keepalive_clock() {
-        // ★"무엇이든 받았다 = 살아있다"★: 갱신은 메시지 **종류를 가리지 않는다**(생산 코드가 match
-        //   **앞에서** 갱신하는 이유). 특히 Pong 이 빠지면 능동 Ping 에만 답하는 정상 연결이 idle 로
-        //   오판돼 끊긴다(half-open 위양성). 갱신을 일부 arm 안으로 옮기는 회귀를 잡으려면 6종을 다
-        //   태워야 하므로 `Message` 의 variant 전부를 넣는다.
+        // ★"Received anything = alive"★: the update does not distinguish message **kinds** (the reason production code updates
+        //   **before** the match). In particular, if Pong is missing, a healthy connection that answers only active Pings is misjudged as idle and
+        //   cut (half-open false positive). To catch a regression that moves the update into some arms, all 6 kinds must be
+        //   exercised, so every variant of `Message` is fed in.
         assert!(clock_updated_by(Message::Text("cmd".to_string().into())).await);
         assert!(clock_updated_by(Message::Binary(vec![1].into())).await);
         assert!(clock_updated_by(Message::Ping(Vec::new().into())).await);
         assert!(clock_updated_by(Message::Pong(Vec::new().into())).await);
         assert!(clock_updated_by(Message::Close(None)).await);
-        // Message::Frame 은 실소켓 수신으로는 안 올라오지만(tungstenite 문서) read_task 가 arm 을
-        //   갖고 있으므로 합성해 태운다.
+        // Message::Frame does not come up from real socket receives (tungstenite docs), but read_task has an arm for it,
+        //   so it is synthesized and exercised.
         assert!(
             clock_updated_by(Message::Frame(
                 tokio_tungstenite::tungstenite::protocol::frame::Frame::pong(Vec::new())
@@ -1900,13 +1900,13 @@ mod tests {
         );
     }
 
-    // ── 12. handle_connection 순서 계약(ADR-0129) ─────────────────────────────────
+    // ── 12. handle_connection order contract (ADR-0129) ─────────────────────────────────
 
-    /// 이 crate 의 테스트가 쓰는 임의 프로토콜 버전. ★실제 운영 버전과 일부러 다른 값★ — 서버가
-    /// 상수를 도로 읽는 회귀가 생기면 이 값과 어긋나 테스트가 깨진다(주입 경로의 존재 증명).
+    /// An arbitrary protocol version used by this crate's tests. ★Deliberately a different value from the real production version★ — if a regression arises where the server
+    /// reads the constant back, it diverges from this value and the test breaks (proof that the injection path exists).
     const TEST_WIRE_VERSION: u32 = 4242;
 
-    /// 테스트 서버 1개를 띄우고 인증까지 마친 클라이언트를 돌려준다(공통 뼈대).
+    /// Starts one test server and returns a client that has completed authentication (common skeleton).
     async fn serve_one(
         registry: ConnRegistry,
         fake: Arc<FakeHandler>,
@@ -2007,22 +2007,22 @@ mod tests {
         );
     }
 
-    /// 실제 `handle_connection` 이 지키는 세 순서를 고정한다 — read_task 하네스로는 못 잡는 것들:
-    ///   ① `on_connect` 가 **write_task 스폰**보다 앞선다(그래야 `on_connect` 계약의 "소비자가 아직
-    ///      없다" 전제가 성립한다)
-    ///   ② `on_connect` 가 **read_task 스폰**보다 앞선다(그래야 명령이 인사를 앞지르지 못한다)
-    ///   ③ `on_disconnect` 가 레지스트리 제거보다 앞선다
+    /// Pins down the three orders the real `handle_connection` keeps — things the read_task harness cannot catch:
+    ///   ① `on_connect` comes before **spawning write_task** (so that the `on_connect` contract's premise "there is no
+    ///      consumer yet" holds)
+    ///   ② `on_connect` comes before **spawning read_task** (so that a command cannot overtake the greeting)
+    ///   ③ `on_disconnect` comes before registry removal
     ///
-    /// ★탐지력의 정직한 범위★ — 세 단언 다 **정상 코드를 실패시킬 수는 없다**(전부 부정형: "아직
-    ///   아무것도 처리/도달하지 않았다"). 그러나 회귀를 잡는 것은 ③만 결정적이다:
-    ///   - ①·② 모두 **확률적**이다. 스폰은 그 자체로 아무것도 실행하지 않으므로, 잘못 앞당겨 스폰된
-    ///     task 가 **이 창 안에 폴링되어야** 흔적이 남는다. ②의 경우 회귀 구현이 read_task 를 먼저
-    ///     스폰해도 실행기가 그 전에 `on_connect` 을 게이트 앞 단언까지 폴링해 버릴 수 있고, 게이트가
-    ///     열릴 때까지도 명령이 처리되지 않았으면 게이트 뒤 단언과 마지막 호출 순서 검사까지 전부
-    ///     통과한다. 그래서 단언을 게이트 앞·뒤 **두 곳**에 둬 창을 넓히지만(공짜다) 보증은 아니다.
-    ///     ★결정적 판별자는 없다★ — 스케줄링이나 task 생성에 직접 걸 훅이 없으면 만들 수 없다.
-    ///   - ③은 `on_disconnect` 안에서 레지스트리를 직접 들여다보므로 사실상 결정적이다.
-    ///   요약: 위양성 0 · ③ 결정적 · ①② 확률적(창을 넓힌 표집).
+    /// ★The honest range of detection power★ — none of the three assertions **can fail correct code** (all negative: "nothing
+    ///   has been processed/reached yet"). But only ③ catches a regression deterministically:
+    ///   - ①·② are both **probabilistic**. Spawning by itself runs nothing, so a wrongly
+    ///     early-spawned task leaves a trace only if it **is polled inside this window**. In the case of ②, even if a regressed implementation spawns read_task first,
+    ///     the executor may poll `on_connect` up to the assertion before the gate before that, and if the command is still not processed by the time the gate
+    ///     opens, it all passes through the assertion after the gate and the last call-order check. So putting assertions at **two places**, before and after the gate, widens
+    ///     the window (it is free), but it is not a guarantee.
+    ///     ★There is no deterministic discriminator★ — it cannot be made without a hook directly on scheduling or task creation.
+    ///   - ③ looks directly at the registry inside `on_disconnect`, so it is effectively deterministic.
+    ///   Summary: false positives 0 · ③ deterministic · ①② probabilistic (sampling with a widened window).
     #[tokio::test]
     async fn handle_connection_orders_connect_before_both_tasks_and_cleanup_before_unregister() {
         let registry = ConnRegistry::new();
@@ -2031,16 +2031,16 @@ mod tests {
         let (mut client, server) =
             serve_one(registry.clone(), fake.clone(), KeepaliveConfig::default()).await;
 
-        // 게이트가 닫힌 동안 서버 소켓에 대기하도록 명령을 미리 흘려둔다.
+        // Feed commands in advance so they wait on the server socket while the gate is closed.
         client
             .send(Message::Text("cmd".to_string().into()))
             .await
             .unwrap();
 
-        // ★①★ 이 창에서 클라에 도달하는 게 있으면 writer 가 이미 떠 있다는 뜻이다. 정상 코드에선
-        //   writer 가 없으므로 **영원히** 아무것도 안 온다 — 즉 위양성(flake)은 불가능하고, 부하가
-        //   높으면 위음성(놓침) 쪽으로만 틀린다. **결정적 보증이 아니라 확률적 탐지**다(임계값 튜닝
-        //   대상이 아닌 이유이기도 하다 — 값을 키워도 보증이 되지는 않는다).
+        // ★①★ If anything reaches the client in this window, the writer is already up. In correct code
+        //   there is no writer, so **nothing** ever arrives — that is, a false positive (flake) is impossible, and under
+        //   high load it errs only toward false negatives (misses). It is **probabilistic detection, not a deterministic guarantee** (which is also why it is not a
+        //   threshold-tuning target — raising the value does not make it a guarantee).
         assert!(
             tokio::time::timeout(Duration::from_millis(200), client.next())
                 .await
@@ -2050,8 +2050,8 @@ mod tests {
 
         gate.notify_one();
 
-        // ★클라 close 타이밍에 의존하지 않는다★: 명령이 실제로 처리된 걸 확인한 **뒤에** 닫는다.
-        //   (닫기를 먼저 하면 writer 의 인사 write 실패 → reader abort 경합이 결과를 좌우할 수 있다.)
+        // ★Does not depend on client close timing★: close **after** confirming the command was actually processed.
+        //   (If closing came first, the race of the writer's greeting write failing → reader abort could decide the result.)
         tokio::time::timeout(Duration::from_secs(5), fake.text_seen.notified())
             .await
             .expect("명령이 처리돼야");
@@ -2080,19 +2080,19 @@ mod tests {
         );
     }
 
-    /// ★★받아 준 우선 프레임을 teardown 이 **버리지 않는다**★★ — [`finish_bypass_lane`] 회귀망.
+    /// ★★Teardown does **not discard** an accepted priority frame★★ — the regression net for [`finish_bypass_lane`].
     ///
-    /// ★잡는 결함★: 도착순 줄이 먼저 끝나는 갈래(피어가 명령을 보내고 곧바로 close 하는 흔한 모양)에서
-    ///   `handle_connection` 이 우선 줄 task 를 그냥 `abort()` 했다. 위층이 「이건 굶으면 안 된다」고
-    ///   판정해 **받아 준** 프레임이 한 번도 돌지 않고 사라진다 — 그 줄을 둔 이유가 통째로 무너진다.
+    /// ★The defect it catches★: in the branch where the arrival-order lane ends first (the common shape where a peer sends a command and closes right away),
+    ///   `handle_connection` simply `abort()`ed the priority-lane task. A frame the upper layer decided 「이건 굶으면 안 된다」 (this must not starve) and
+    ///   **accepted** vanished without ever running — the reason that lane was made collapses entirely.
     ///
-    /// ★무대 만들기★: 두 줄을 **각각** 잠근다. 도착순 줄은 게이트에 붙들어 수신 큐를 채우고(그래야
-    ///   뒤엣것이 우선 줄로 간다), 우선 줄은 **첫 건에서** 따로 잠가 둘째 건이 큐에 남게 한다. 그 상태로
-    ///   도착순 줄을 풀고 소켓을 닫으면 teardown 이 시작되는데, 그때 우선 줄에는 **받아 놓고 아직 안 돈
-    ///   한 장**이 있다 — 결함이 있으면 그 장이 abort 와 함께 사라진다.
-    /// ★탐지의 정직한 범위★: 300ms 창은 **버그판이 그 안에 정리를 끝내는가**만 본다(정상 코드는 우선
-    ///   줄을 기다리느라 그 창에 절대 안 끝난다 — 위양성 불가). 창이 짧아 버그판이 아직 안 끝났으면
-    ///   위음성 쪽으로만 틀린다. 그 뒤 게이트를 열고 결과를 보는 단언은 두 갈래 모두에서 결정적이다.
+    /// ★Setting the stage★: lock the two lanes **each**. The arrival-order lane is held at a gate to fill the inbound queue (so that
+    ///   what follows goes to the priority lane), and the priority lane is separately locked **at the first item** so the second stays in the queue. In that state,
+    ///   releasing the arrival-order lane and closing the socket starts teardown, and at that moment the priority lane has **one frame accepted and not yet run** — if the defect exists,
+    ///   that frame vanishes together with the abort.
+    /// ★The honest range of detection★: the 300ms window looks only at **whether the buggy version finishes cleanup within it** (correct code waits for
+    ///   the priority lane and never finishes in that window — false positives impossible). If the window is short and the buggy version has not finished yet, it
+    ///   errs only toward false negatives. The assertion that opens the gate afterwards and looks at the result is deterministic in both branches.
     #[tokio::test]
     async fn an_accepted_bypass_frame_survives_the_ordered_row_finishing_first() {
         let registry = ConnRegistry::new();
@@ -2100,7 +2100,7 @@ mod tests {
         let (mut client, mut server) =
             serve_one(registry.clone(), fake.clone(), KeepaliveConfig::default()).await;
 
-        // ① 도착순 소비자를 붙든다 — 이 뒤로 그 줄은 절대 비지 않는다.
+        // ① Hold the arrival-order consumer — after this that lane is never empty.
         client
             .send(Message::Text("slow".to_string().into()))
             .await
@@ -2109,7 +2109,7 @@ mod tests {
             .await
             .expect("첫 명령이 핸들러에 닿아야");
 
-        // ② 도착순 줄을 꽉 채운다(소비자가 하나를 꺼내 갔으므로 정확히 CONN_RX_CAP 장).
+        // ② Fill the arrival-order lane completely (the consumer took one, so exactly CONN_RX_CAP frames).
         for i in 0..CONN_RX_CAP {
             client
                 .send(Message::Text(format!("filler-{i}").into()))
@@ -2117,7 +2117,7 @@ mod tests {
                 .unwrap();
         }
 
-        // ③ 포화 상태에서 우선 줄로 두 장 — 첫 장은 그 줄의 게이트에 붙들리고, 둘째 장은 큐에 남는다.
+        // ③ Two frames to the priority lane in the saturated state — the first is held at that lane's gate, and the second stays in the queue.
         client
             .send(Message::Text("bypass:first".to_string().into()))
             .await
@@ -2141,17 +2141,17 @@ mod tests {
             fake.calls()
         );
 
-        // ④ 도착순 줄을 풀고 소켓을 닫는다 → read 종료 → dispatch 가 남은 것을 비우고 종료 → teardown.
+        // ④ Release the arrival-order lane and close the socket → read ends → dispatch drains what is left and ends → teardown.
         fake.slow_gate.notify_one();
         client.close(None).await.unwrap();
 
-        // ⑤ 정상 코드는 우선 줄을 기다리므로 이 창 안에 안 끝난다. 끝났다면 버려 버린 것이다.
+        // ⑤ Correct code waits for the priority lane, so it does not finish within this window. If it finished, it threw the frame away.
         let finished_before_the_gate =
             tokio::time::timeout(Duration::from_millis(300), &mut server)
                 .await
                 .is_ok();
 
-        // ⑥ 이제 우선 줄을 풀어 준다 — 받아 둔 둘째 장이 여기서 돌아야 한다.
+        // ⑥ Now release the priority lane — the accepted second frame must run here.
         fake.bypass_gate.notify_one();
         if !finished_before_the_gate {
             tokio::time::timeout(Duration::from_secs(15), &mut server)
@@ -2168,57 +2168,57 @@ mod tests {
         drop(client);
     }
 
-    /// ★패자 task 의 명시적 abort★(`handle_connection` 의 select!) — JoinHandle 을 그냥 drop 하면
-    /// detach 되어 WS half 를 쥔 task 가 살아남는다. 그 누수는 e2e 로는 안 보인다(전부 정상 종료라
-    /// 남은 half 가 표에 안 드러난다).
+    /// ★Explicit abort of the loser task★ (the select! in `handle_connection`) — if a JoinHandle is simply dropped,
+    /// it is detached and the task holding the WS half survives. That leak is not visible in e2e (everything ends normally, so
+    /// the remaining half does not show up in the table).
     ///
-    /// ★관측 방법★: 프레임 출구 `Arc` 의 **강참조는 dispatch_task 만** 들고 있다(`handle_connection` 은
-    /// 그것을 dispatch_task 로 move 하고, `on_connect` 은 빌리기만 한다). 그래서 연결 종료 뒤에도
-    /// 약참조가 upgrade 되면 = 그 task 가 살아 있다 = abort 대신 detach 됐다는 뜻이다.
-    /// ★그 관측이 **read_task 의 abort 도 함께** 무는 것은 배선 때문이다★: dispatch_task 가 스스로
-    /// 끝나려면 수신 큐의 유일한 송신단(read_task 가 쥔다)이 드롭돼야 하는데, 이 갈래의 read_task 는
-    /// `next()` 에 파킹돼 스스로 끝나지 않는다 — 즉 read 의 abort 가 빠져도 이 폴링이 끝까지
-    /// `released == false` 로 돈다. 옛 주석은 이 강참조가 read_task 에 있다고 적혀 있었다.
-    /// ★이 관측은 **이 테스트의 fake 핸들러에서만** 성립한다★ — 그 fake 는 강참조를 하나도 보관하지
-    /// 않는다(아래 `FakeHandler` 주석의 금지 조항). 운영 핸들러는 `on_connect` 에서 사본을 떠
-    /// **명령 명부**·**사용량 명부**에 넣고 연결 수명 내내 들고 있으므로 이 테스트를 그쪽으로 옮기면 관측이 성립하지
-    /// 않는다. 즉 아래 「사본 전수」의 ⑤·⑥은 이 테스트가 **지켜 주지 않는다**.
-    /// 이 방향(write 가 먼저 끝나 read 를 abort 하는 갈래)을 태우려고 핸들러가 `Frame::Close` 를 큐에
-    /// 넣고 Continue 를 돌려준다 — read 는 계속 `next()` 에 파킹된 채로 남는다.
-    /// ★대칭 갈래(read 가 먼저 끝나 write 를 abort)는 **미검증으로 남긴다**★ — 아래 조건부 관측 때문에
-    /// 부정형 테스트를 못 만들었을 뿐이고, **그쪽 `abort()` 가 불필요하다는 뜻은 아니다.**
+    /// ★Observation method★: **only dispatch_task** holds the **strong reference** to the frame outlet `Arc` (`handle_connection` moves
+    /// it into dispatch_task, and `on_connect` only borrows). So if the weak reference can still be upgraded after the connection ends = that task is
+    /// alive = it was detached instead of aborted.
+    /// ★That the observation also bites **the abort of read_task** is due to the wiring★: for dispatch_task to end by itself, the inbound queue's
+    /// only sender (held by read_task) must be dropped, but in this branch read_task is parked on `next()`
+    /// and does not end by itself — that is, even if read's abort is missing, this polling runs to the end with
+    /// `released == false`. The old comment stated that this strong reference was in read_task.
+    /// ★This observation holds **only with this test's fake handler**★ — that fake keeps no strong reference at all
+    /// (the prohibition clause in the `FakeHandler` comment below). The production handler copies in `on_connect` and puts the copy in the
+    /// **command registry** and the **usage registry**, holding it for the whole connection lifetime, so if this test were moved there the observation would not
+    /// hold. That is, items ⑤·⑥ of the 「사본 전수」 (copy enumeration) below are **not protected by this test**.
+    /// To take this direction (the branch where write ends first and aborts read), the handler puts `Frame::Close` in the queue and
+    /// returns Continue — read stays parked on `next()`.
+    /// ★The symmetric branch (read ends first and aborts write) is **left unverified**★ — it is only that the conditional observation below
+    /// kept a negative test from being made, and **it does not mean that `abort()` is unnecessary.**
     ///
-    /// ★관측된 것(2026-08-04, 현 `AgentConnection` + 아래 경쟁 미발생 조건에서만)★: write_task 를
-    /// detach 해도 `handle_connection` 반환 시 마지막 `Sender<Frame>` 이 드롭되어 `conn_rx.recv()` 가
-    /// None 을 돌려주고, write_task 가 **스스로 종료**하며 sink_half 를 놓았다(짧은 `ping_interval` 로
-    /// "종료 후 Ping 이 더 오는가" 를 봤더니 즉시 EOF — 소켓이 닫혔다 = writer 가 이미 끝났다).
+    /// ★Observed (2026-08-04, only with the current `AgentConnection` and only when the race below does not occur)★: even when write_task is
+    /// detached, on `handle_connection` return the last `Sender<Frame>` is dropped, `conn_rx.recv()` returns
+    /// None, and write_task **ended by itself** and released sink_half (looking at "do more Pings come after the end" with a short `ping_interval`
+    /// gave an immediate EOF — the socket was closed = the writer had already ended).
     ///
-    /// ★그 자기종료는 "모든 `Sender<Frame>` 사본이 `handle_connection` 과 함께 죽는다" 는 **조건부**다★.
-    /// 사본 전수: ① 이 함수의 지역 `conn_tx` ② 레지스트리 항목(등록 해제로 소멸) ③ read_task 가 소유한
-    /// `ConnFrameSink` ④ 코어 subscribers 에 등록된 `FrameOutputSink` 사본들 — ④는 `session.subs` 기록을
-    /// 통해서만 회수된다(`on_disconnect`) ⑤ **명령 버스의 주인 명부**가 `on_connect` 부터 `on_disconnect`
-    /// 까지 드는 사본 하나 — 위층이 어느 연결로 명령 봉투를 보낼지 지목하려고 든다. ⑤ 본체는 넣는 곳도
-    /// 빼는 곳도 각각 한 곳이고 둘 다 그 명부의 한 잠금 안이라 ④ 같은 누락 경쟁이 없다.
-    /// ⑥ **사용량 명부**의 연결별 출구(데몬의 `ConnUsageOutlet`)가 드는 사본 하나 — `on_connect` 에서 넣고
-    /// `on_disconnect` 의 사용량 명부 detach 가 거둔다. ⑤와 같이 넣는 곳도 거두는 곳도 한 곳씩이다.
-    /// ★`on_disconnect` 를 넘겨 살 수 있는 짧은 사본은 이 전수에 안 든다★ — ⑥의 출구가 한 장 보낼 때
-    /// 잠깐 뜨는 사본(죽어 가는 큐에 `try_send` 한 번이 전부다)과, 줄 밖으로 떼어 낸 명령 태스크가 든
-    /// sink 사본(활성화 명령 — 원래 있던 것 — 과 사용량 ⟳ 조회, 이쪽은 데몬의 `REPLY_WAIT_MAX` 까지 든다)이다.
-    /// 둘 다 무해한 것은 `handle_connection` 이 write 쪽을 abort 하기 때문이다 — 그 abort 를 지우면 이들이
-    /// 자기종료를 그만큼 늦춘다.
-    /// ★다만 ⑤가 **내주는** 사본은 이 전수에 안 든다★ — 명부는 지목할 때 사본을 떠서 배달하는 쪽에
-    /// 건네고, 내준 뒤로는 회수할 수단이 없다. 그것을 대기표에 넣고 답장을 기다리는 배달이 있으면 그
-    /// 사본은 `on_disconnect` 를 넘겨 산다. 그래서 그쪽은 **호출자 계약**(받아서 즉시 쓰고 버린다)으로만
-    /// 막혀 있고, 컴파일러도 이 crate 도 그것을 강제하지 않는다.
-    /// ★그래서 ④가 새면 조건이 깨지고, 살아남은 sender 때문에 detach 된 writer 는 **자기종료하지
-    /// 않는다**★. 새는 경로가 실제로 있다: `handle_subscribe` 가 코어에 sink 를 등록한 **뒤**
-    /// `subs.insert` 전에 read_task 가 **패닉**하면(그 사이엔 `.await` 가 없어 취소는 못 끼어들지만
-    /// 패닉은 낀다) 그 sink 는 어디에도 기록되지 않은 채 코어에 남아 conn_tx 사본을 붙든다.
-    /// 운영 데몬은 그 패닉을 훅이 되감기 전에 끝내지만 훅 없는 시험 빌드에선 도달 가능하다(ADR-0292).
-    /// **결론: 그 갈래의 `abort()` 는 제거 금지** — 위 실측은 "그 경쟁이 안 났을 때 그렇더라" 이지
-    /// 불변식이 아니다.
-    /// 반대 갈래(이 테스트)는 read_task 가 `next()` 에 파킹돼 스스로 끝나지 않으므로 abort 가 유일한
-    /// 회수 수단이다 — 그래서 여기만 검증한다.
+    /// ★That self-termination is **conditional** on "all copies of `Sender<Frame>` die together with `handle_connection`"★.
+    /// Enumeration of copies: ① this function's local `conn_tx` ② the registry entry (vanishes on deregistration) ③ the
+    /// `ConnFrameSink` owned by read_task ④ the `FrameOutputSink` copies registered in the core subscribers — ④ is reclaimed only
+    /// through the `session.subs` record (`on_disconnect`) ⑤ one copy held by **the command bus's owner registry** from `on_connect` to `on_disconnect`
+    /// — the upper layer holds it to designate which connection to send a command envelope through. The body of ⑤ has one place to put it in and one to take it out, both inside one lock of that registry,
+    /// so it has no missed-record race like ④.
+    /// ⑥ one copy held by **the usage registry's** per-connection outlet (the daemon's `ConnUsageOutlet`) — put in at `on_connect` and
+    /// collected by the usage-registry detach in `on_disconnect`. As with ⑤, there is one place to put it in and one to collect it.
+    /// ★Short-lived copies that can outlive `on_disconnect` are not in this enumeration★ — the copy that the ⑥ outlet briefly holds when sending one frame
+    /// (a single `try_send` to a dying queue is all), and the sink copies held by command tasks peeled off the lane
+    /// (the activation command — which existed originally — and the usage ⟳ query, which holds it up to the daemon's `REPLY_WAIT_MAX`).
+    /// Both are harmless because `handle_connection` aborts the write side — deleting that abort delays their
+    /// self-termination by that much.
+    /// ★However, the copy that ⑤ **hands out** is not in this enumeration either★ — the registry takes a copy at designation time and hands it to the delivering side,
+    /// and after handing it out there is no means of reclaiming it. If a delivery puts it in a wait ticket and waits for the reply, that
+    /// copy outlives `on_disconnect`. So that side is blocked only by the **caller contract** (receive it, use it immediately, and discard it),
+    /// and neither the compiler nor this crate enforces it.
+    /// ★So if ④ leaks, the condition breaks, and a writer detached because of a surviving sender **does not
+    /// end by itself**★. There is a path where it really leaks: if read_task **panics** after `handle_subscribe` registers a sink in the core and **before**
+    /// `subs.insert` (no `.await` lies in between so cancellation cannot intrude, but a panic can), that sink stays in the core
+    /// unrecorded anywhere and holds a conn_tx copy.
+    /// The production daemon ends that panic in the hook before it unwinds, but it is reachable in a hookless test build (ADR-0292).
+    /// **Conclusion: the `abort()` on that branch must not be removed** — the measurement above is "that is how it was when that race did not occur", not
+    /// an invariant.
+    /// On the opposite branch (this test), read_task is parked on `next()` and does not end by itself, so abort is the only
+    /// means of reclamation — that is why only this one is verified.
     #[tokio::test]
     async fn the_losing_task_is_aborted_not_detached() {
         let registry = ConnRegistry::new();
@@ -2236,8 +2236,8 @@ mod tests {
             .expect("write_task 가 Frame::Close 로 끝나면 handle_connection 도 반환해야")
             .unwrap();
 
-        // abort 는 요청이라 future drop 이 반환과 동기는 아니다 — 넉넉히 폴링한다(정상 코드는 곧
-        //   놓고, detach 회귀는 `next()` 에 영원히 파킹돼 절대 놓지 않는다).
+        // abort is a request, so the future drop is not synchronous with the return — poll generously (correct code releases
+        //   soon, and the detach regression is parked on `next()` forever and never releases).
         let mut released = false;
         for _ in 0..200 {
             if !fake.frames_still_held() {
