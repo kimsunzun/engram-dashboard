@@ -1,19 +1,19 @@
-//! 셸 설정 · 창별 테마의 Tauri 어댑터 — 설정 command 넷 · 부팅 조회 command · 설정 알림 · 테마 밀기.
+//! The Tauri adapter of shell settings · per-window theme — four settings commands · a boot query command · the settings notification · theme push.
 //!
-//! ★이 파일에 로직이 없다★: 설정 값·검증·저장은 `crate::settings` 가, 창별 유효 테마는 `crate::theme` 가 소유하고,
-//! 여기 남는 것은 Tauri 세계로의 번역(조회 응답 · **살아 있는 웹뷰 세기** · `emit`/`emit_to`)뿐이다
-//! (`commands/layout.rs` 와 같은 분담).
-//! 설정 command 넷은 버스 `settings.*`(`layout::commands`)와 같은 서비스·같은 쓰기 진입점을 부르는 두 번째
-//! 껍데기다(ADR-0081 결정 3).
+//! ★There is no logic in this file★: setting values · validation · storage are owned by `crate::settings`, the per-window effective theme by `crate::theme`,
+//! and what remains here is only translation into the Tauri world (query response · **counting live webviews** · `emit`/`emit_to`)
+//! (the same division as `commands/layout.rs`).
+//! The four settings commands are a second shell that calls the same service · the same write entry point as the bus `settings.*` (`layout::commands`)
+//! (ADR-0081 decision 3).
 //!
-//! ## ★창별 테마를 읽는 자리가 둘인 이유★
-//! - **부팅 = 프론트가 당긴다**(`get_ui_settings`). 창이 언제 스크립트를 다 올렸는지 셸이 모르므로
-//!   밀면 첫 값이 유실된다 — 레이아웃이 겪은 그 레이스다(ADR-0102).
-//! - **그 뒤 = 셸이 민다**(`window.setTheme` · `theme.default` 쓰기 · 부팅 · 복원 수락). 값이 언제 바뀌었는지는
-//!   프론트가 모른다.
+//! ## ★Why there are two places that read the per-window theme★
+//! - **Boot = the frontend pulls** (`get_ui_settings`). The shell does not know when a window has finished loading its scripts, so
+//!   if it pushed, the first value would be lost — the very race layout went through (ADR-0102).
+//! - **After that = the shell pushes** (`window.setTheme` · `theme.default` write · boot · restore acceptance). The frontend does not know when
+//!   the value changed.
 //!
-//! 둘 다 같은 [`EffectiveThemes`] 를 부르므로 답이 갈리지 않는다. 그리고 둘 다 **창 label 로 값을 고른다** —
-//! 한쪽만 창을 알면 그 창은 부팅과 밀기에서 다른 테마를 본다.
+//! Both call the same [`EffectiveThemes`], so the answers do not diverge. And both **pick the value by window label** —
+//! if only one side knew the window, that window would see a different theme at boot and at push.
 // ADR-0167
 
 use std::sync::Arc;
@@ -27,28 +27,28 @@ use crate::settings::{
 use crate::theme::{EffectiveThemes, ThemeControl, ThemeWindows, UiSettingsPayload, UiTheme};
 use crate::webview_env;
 
-/// 창마다 **자기 값**을 받는다 — 목적지를 지목해 보내므로 받는 쪽도 자기 label 로 구독해야 한다
-/// (`src/theme/uiSettings.ts` · 사유 = `theme::deliver_per_window`).
+/// Each window receives **its own value** — it is sent by pointing at the destination, so the receiving side must also subscribe by its own label
+/// (`src/theme/uiSettings.ts` · reason = `theme::deliver_per_window`).
 const EVT_UI_SETTINGS_UPDATED: &str = "ui:settings-updated";
 
-/// 설정이 바뀌었다 — **모든 웹뷰에 같은 봉투**(설정은 창마다 다르지 않다). 짐 = [`SettingsSnapshot`]
-/// (`rev` + 바뀐 키만). 창별 테마는 이 이벤트가 아니라 [`EVT_UI_SETTINGS_UPDATED`] 가 나른다.
+/// The settings changed — **the same envelope to all webviews** (settings do not differ per window). Payload = [`SettingsSnapshot`]
+/// (`rev` + only the changed keys). The per-window theme is carried not by this event but by [`EVT_UI_SETTINGS_UPDATED`].
 const EVT_SETTINGS_CHANGED: &str = "settings:changed";
 
-/// 부팅 조회 — 프론트가 창마다 한 번 당긴다.
+/// Boot query — the frontend pulls once per window.
 ///
-/// ★창 label 을 인자로 받지 않는다★: 웹뷰가 스스로 밝히게 하면 잘못 적힌 label 하나가 남의 창 테마를
-/// 가져간다. Tauri 가 넣어 주는 [`Window`] 가 그 값의 유일한 권위다(`commands/view_bus.rs` 의 같은 조항 —
-/// 그 doc 이 **창** label 과 webview label 의 관계도 진다).
+/// ★It does not take the window label as an argument★: if the webview declared it itself, one wrongly written label would take another window's
+/// theme. The [`Window`] that Tauri injects is the sole authority for that value (the same clause in `commands/view_bus.rs` —
+/// that doc also carries the relation between the **window** label and the webview label).
 ///
-/// ★밀기 순서 락을 여기서 잡지 않는다(의도)★: 이 조회는 부른 창 하나에만 답하고 아무것도 밀지 않으므로
-/// **창들 사이의 순서**를 뒤집을 것이 없다. 여기에 락을 걸면 창 부팅이 남의 밀기 뒤에 줄만 선다.
+/// ★Do not take the push-order lock here (intended)★: this query answers only the one window that called and pushes nothing, so there is
+/// nothing to reverse in the **order between windows**. If a lock were taken here, a window's boot would just queue behind someone else's push.
 ///
-/// 받는 쪽 빗장(`src/theme/uiSettings.ts` 의 `pushed`)이 덮는 것은 **한 방향뿐**이다 — 조회 답이 그보다
-/// 새 알림을 덮는 것. 반대는 안 덮는다: 밀기가 "light" 를 읽고 멈춘 사이 값이 "e-ink" 로 바뀌고 새 창의
-/// 조회가 "e-ink" 를 받아 그린 뒤, 그 밀기의 옛 알림이 도착해 그 창을 "light" 로 되돌린다.
-/// ★그래도 결함이 아니다★ — 값을 바꾼 쪽이 저장 뒤에 다시 밀므로 그 밀기가 맞춘다. 고치려면 조회에도 세대를
-/// 실어야 하는데 그건 답 모양을 바꾼다.
+/// What the receiver's latch (`pushed` in `src/theme/uiSettings.ts`) covers is **one direction only** — a query answer overwriting
+/// a notification newer than it. The reverse is not covered: while a push has read "light" and paused, the value changes to "e-ink", a new window's
+/// query receives "e-ink" and draws it, then the old notification of that push arrives and reverts that window to "light".
+/// ★Even so it is not a defect★ — the side that changed the value pushes again after saving, so that push corrects it. To fix it, the query would have to carry a generation
+/// too, and that changes the answer's shape.
 #[tauri::command]
 pub fn get_ui_settings(
     window: Window,
@@ -57,9 +57,9 @@ pub fn get_ui_settings(
     themes.for_window(window.label())
 }
 
-/// `settings.get` 의 사람 경로 — `key` = 정확한 키 또는 `.` 으로 끝나는 접두 · 빼면 전부.
-/// 오류 문구는 서비스의 것 그대로다(종류 = 버스 쪽 코드 NOT_FOUND · INVALID_ARGUMENT). 쓰기 둘([`settings_set`] ·
-/// [`settings_reset`])도 문구는 그대로이고 종류가 둘 더 있다 — CONFLICT(새 판이 쓴 파일) · INTERNAL.
+/// The human path of `settings.get` — `key` = an exact key or a prefix ending in `.` · if omitted, everything.
+/// The error messages are the service's as they are (kinds = bus-side codes NOT_FOUND · INVALID_ARGUMENT). The two writes ([`settings_set`] ·
+/// [`settings_reset`]) also keep the messages as they are and have two more kinds — CONFLICT (a file written by a newer version) · INTERNAL.
 #[tauri::command]
 pub fn settings_get(
     settings: State<'_, Arc<SettingsService>>,
@@ -68,11 +68,11 @@ pub fn settings_get(
     settings.get(key.as_deref()).map_err(|e| e.to_string())
 }
 
-/// `settings.set` 의 사람 경로. 실제로 바뀌었으면 [`EVT_SETTINGS_CHANGED`] 가 모든 웹뷰로 나가고,
-/// `theme.default` 면 모든 창의 유효 테마도 다시 민다.
+/// The human path of `settings.set`. If something actually changed, [`EVT_SETTINGS_CHANGED`] goes out to all webviews,
+/// and if it is `theme.default`, the effective theme of every window is pushed again.
 ///
-/// ★블로킹 풀에서 돈다★ — 이 쓰기는 디스크 `sync_all` 까지 기다린다. 동기 command 는 메인 스레드에서 돌아
-/// 그동안 창 이벤트가 멈추고, async 본문에서 그대로 부르면 그 런타임 워커에 얹힌 다른 태스크가 멈춘다.
+/// ★Runs on the blocking pool★ — this write waits until the disk `sync_all`. A synchronous command runs on the main thread, so
+/// window events stop in the meantime, and calling it directly from an async body would stall other tasks sitting on that runtime worker.
 #[tauri::command]
 pub async fn settings_set(
     app: AppHandle,
@@ -86,7 +86,7 @@ pub async fn settings_set(
     off_the_runtime(move || set_and_notify(&settings, &events, &key, &value)).await
 }
 
-/// `settings.reset` 의 사람 경로 — 알림 · 블로킹 풀 사유는 [`settings_set`] 과 같다.
+/// The human path of `settings.reset` — the notification · blocking-pool reasons are the same as [`settings_set`].
 #[tauri::command]
 pub async fn settings_reset(
     app: AppHandle,
@@ -99,8 +99,8 @@ pub async fn settings_reset(
     off_the_runtime(move || reset_and_notify(&settings, &events, &key)).await
 }
 
-/// 설정 쓰기를 블로킹 풀에서 끝까지 돌린다. ★답보다 쓰기가 오래 산다★ — 기다리던 쪽이 사라져도 쓰기 ·
-/// 알림은 끝까지 간다(값은 디스크에 남는다).
+/// Run the settings write to the end on the blocking pool. ★The write outlives the answer★ — even if the waiting side disappears, the write ·
+/// notification goes through to the end (the value remains on disk).
 async fn off_the_runtime<T: Send + 'static>(
     write: impl FnOnce() -> Result<T, crate::settings::SettingsError> + Send + 'static,
 ) -> Result<T, String> {
@@ -110,7 +110,7 @@ async fn off_the_runtime<T: Send + 'static>(
     }
 }
 
-/// `settings.schema` 의 사람 경로 — `key` 는 [`settings_get`] 과 같다.
+/// The human path of `settings.schema` — `key` is the same as [`settings_get`].
 #[tauri::command]
 pub fn settings_schema(
     settings: State<'_, Arc<SettingsService>>,
@@ -122,30 +122,30 @@ pub fn settings_schema(
         .map_err(|e| e.to_string())
 }
 
-/// 셸에 하나인 유효 테마에 Tauri 창 쪽을 붙인 손잡이 — 명령 표 · 설정 알림 · 복원 조율자 · 부팅이 쥔다.
-/// `themes` = `lib.rs` 가 빌더에서 manage 한 그 인스턴스(다르면 두 밀기의 순서 락이 갈린다).
+/// A handle that attaches the Tauri window side to the shell's single effective theme — held by the command table · settings notification · restore coordinator · boot.
+/// `themes` = the very instance `lib.rs` managed in the builder (if different, the order locks of the two pushes diverge).
 pub fn theme_control(app: AppHandle, themes: Arc<EffectiveThemes>) -> ThemeControl {
     ThemeControl::new(themes, Arc::new(TauriThemeWindows { app }))
 }
 
-/// 테마 밀기의 창 쪽 — 살아 있는 웹뷰 명단과 창 하나로의 `emit_to`.
+/// The window side of the theme push — the list of live webviews and `emit_to` to one window.
 struct TauriThemeWindows {
     app: AppHandle,
 }
 
 impl ThemeWindows for TauriThemeWindows {
-    // ★명단은 Tauri 에서 받는다 — 레이아웃 명부가 아니다★. 둘은 양쪽으로 어긋난다 — 새 창(슬롯 팝아웃
-    //   `move_slot_to_window` · 빈 새 창 `create_window` · 도킹 새 창)과 복원 수락(TRD S21-storage §6-7 ②)은 웹뷰를
-    //   먼저 만들고 모델에 나중에 들이고, 부팅 복원(`state::placement::open_restored_popouts`)은 모델에 먼저 든 팝아웃의
-    //   웹뷰를 나중에 만든다. 여기서 세는 것은 「지금 살아 있는
-    //   웹뷰」이고, 그 label 이 웹뷰가 구독을 거는 값과 같다는 근거는 `view_commands` 의 같은 조항.
+    // ★The list is taken from Tauri — not the layout registry★. The two diverge in both directions — a new window (slot pop-out
+    //   `move_slot_to_window` · empty new window `create_window` · docking new window) and restore acceptance (TRD S21-storage §6-7 ②) make the webview
+    //   first and put it in the model later, while boot restore (`state::placement::open_restored_popouts`) makes the webview of a pop-out already in the model
+    //   later. What is counted here is 「지금 살아 있는
+    //   웹뷰」 (the webviews alive now), and the grounds that its label equals the value the webview subscribes with are in the same clause of `view_commands`.
     fn labels(&self) -> Vec<String> {
         self.app.webview_windows().into_keys().collect()
     }
 
-    // 테마 관문을 쥔 채 불린다 — Rust 쪽 수신자가 없어(웹뷰로만 나간다) 그 락을 되잡는 길이 없다. 바탕 칠하기도
-    //   이벤트 루프에 넘기기만 하거나(다른 스레드) 그 자리에서 색만 바꾼다(메인 스레드 — tauri-runtime-wry 2.11.3
-    //   `send_user_message`) — 셸의 락을 잡지 않는다.
+    // Called while holding the theme gate — there is no Rust-side receiver (it goes out only to the webview), so there is no path to retake that lock. Painting the background also
+    //   either only hands it to the event loop (another thread) or changes just the color on the spot (main thread — tauri-runtime-wry 2.11.3
+    //   `send_user_message`) — it does not take the shell's locks.
     fn send(&self, label: &str, payload: UiSettingsPayload) -> Result<(), String> {
         if let (Some(window), Some(theme)) = (
             self.app.get_webview_window(label),
@@ -159,7 +159,7 @@ impl ThemeWindows for TauriThemeWindows {
     }
 }
 
-/// 설정 쓰기 알림의 실물 — 사람 경로(설정 command)와 LLM 경로(버스 표)가 같은 구현을 쓴다.
+/// The real implementation of the settings-write notification — the human path (settings command) and the LLM path (bus table) use the same implementation.
 pub struct TauriSettingsEvents {
     app: AppHandle,
     themes: ThemeControl,
@@ -171,11 +171,11 @@ impl TauriSettingsEvents {
     }
 }
 
-// 둘 다 실패를 삼킨다(로그만) — 값은 이미 디스크와 메모리에 있고, 알림 유실은 그 쓰기를 되돌릴 사유가
-//   아니다. 프론트는 `settings_get` · `get_ui_settings` 당기기로 따라잡는다.
+// Both swallow failure (log only) — the value is already on disk and in memory, and losing a notification is no reason to undo that write.
+//   The frontend catches up by pulling with `settings_get` · `get_ui_settings`.
 impl SettingsEvents for TauriSettingsEvents {
-    // 알림 순서 락 아래서 불린다(trait doc) — `emit` 은 웹뷰 스크립트 실행을 이벤트 루프에 넘기기만 하고 그
-    //   실행을 기다리지 않는다.
+    // Called under the notification order lock (trait doc) — `emit` only hands the webview script execution to the event loop and does not wait for that
+    //   execution.
     fn changed(&self, change: &SettingsSnapshot) {
         if let Err(e) = self.app.emit(EVT_SETTINGS_CHANGED, change) {
             tracing::warn!(

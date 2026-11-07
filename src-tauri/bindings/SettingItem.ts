@@ -2,10 +2,10 @@
 
 export type SettingItem = { key: string, 
 /**
- * 정규형. 덮어쓴 값이 없으면 기본값.
+ * Canonical form. The default if there is no overridden value.
  */
 value: string, 
 /**
- * 덮어쓴 값이 없다. 파일의 못 쓸 값이 기본값으로 접힌 키도 `true` 다.
+ * There is no overridden value. A key whose unusable file value collapsed to the default is `true` too.
  */
 is_default: boolean, };

@@ -1,6 +1,6 @@
-//! 크래시 사본 「복원할까요?」의 사람 경로 — 버스 `restore.status` · `restore.answer`(`layout::commands`)와 같은 복원
-//! 조율자를 부르는 invoke 껍데기 둘(TRD S21-storage §6-7 · ADR-0081 결정 3 「두 껍데기, 서비스 하나」). 상태가 바뀌면
-//! 조율자의 서비스가 `restore:changed` 를 main 에 낸다.
+//! The human path of the crash copy 「복원할까요?」 — two invoke shells that call the same restore
+//! coordinator as the bus `restore.status` · `restore.answer` (`layout::commands`) (TRD S21-storage §6-7 · ADR-0081 decision 3 「두 껍데기, 서비스 하나」). When the state changes,
+//! the coordinator's service emits `restore:changed` to main.
 
 use std::sync::Arc;
 
@@ -8,18 +8,18 @@ use tauri::State;
 
 use crate::state::restore::{AnswerReply, RestoreCoordinator, RestoreStatusView};
 
-/// `restore.status` 의 사람 경로 — 막지 않는다(잎 락 하나).
+/// The human path of `restore.status` — does not block (one leaf lock).
 #[tauri::command]
 pub fn restore_status(restore: State<'_, Arc<RestoreCoordinator>>) -> RestoreStatusView {
     restore.status()
 }
 
-/// `restore.answer` 의 사람 경로. 오류 문자열로 종류를 가르지 않는다 — 실패 뒤의 상태는 `restore_status` 로 다시
-/// 읽는다(`awaiting` = 다시 답할 수 있다 · `answered` = 다른 답이 먼저 끝났다).
+/// The human path of `restore.answer`. It does not tell kinds apart by the error string — the state after a failure is read again with `restore_status`
+/// (`awaiting` = can answer again · `answered` = another answer finished first).
 ///
-/// ★블로킹 풀에서 돈다★ — 수락은 창을 만들며 이벤트 루프를 기다리고 답은 기록기를 마감(2초)까지 기다린다. 동기
-/// command 는 메인 스레드에서 돌아 창 만들기가 자기 자신을 기다려 멈추고, async 본문에서 그대로 부르면 그 런타임
-/// 워커가 그만큼 선다. ★답보다 본문이 오래 산다★ — 기다리던 쪽이 사라져도 답은 끝까지 간다.
+/// ★Runs on the blocking pool★ — acceptance builds windows while waiting for the event loop, and the answer waits for the recorder to finish (2 seconds). A synchronous
+/// command runs on the main thread, so window creation waits for itself and stalls, and calling it directly from an async body would block that runtime
+/// worker for that long. ★The body outlives the answer★ — even if the waiting side disappears, the answer goes through to the end.
 #[tauri::command]
 pub async fn restore_answer(
     restore: State<'_, Arc<RestoreCoordinator>>,

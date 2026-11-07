@@ -1,12 +1,12 @@
-//! 창 상태 포트(`layout::window_ctl::WindowControl`)의 Tauri 어댑터와 invoke `window_control` — 사람 길(웹 단추 ·
-//! 레지스트리)과 버스 동사가 같은 서비스(`layout::window_ctl`)에 떨어진다(ADR-0081 · TRD S26-window-chrome §6-2 · §6-4).
-//! 웹의 최소 창 크기 보고 invoke `report_window_min_width` 도 여기 둔다(장부 = `crate::chrome` · §7-7).
+//! The Tauri adapter of the window state port (`layout::window_ctl::WindowControl`) and invoke `window_control` — the human path (web buttons ·
+//! registry) and the bus verbs land on the same service (`layout::window_ctl`) (ADR-0081 · TRD S26-window-chrome §6-2 · §6-4).
+//! The web's minimum window size report invoke `report_window_min_width` is also placed here (ledger = `crate::chrome` · §7-7).
 //!
-//! - ★동작 하나 = 메인 스레드 일 하나★(§5-2) — [`TauriWindowControl`] 의 `apply` · `show_all` · `hide_all` 은 읽기 ·
-//!   판정 · 입히기를 한 `run_on_main_thread` 일 안에서 하고 그 답을 기다린다. 첫 화면 보이기도 메인 스레드라 그 일과
-//!   끼어들 수 없다. 그 일 안의 창 하나 조작이 [`TauriOps`] 다.
-//! - ★부르는 쪽은 레이아웃 락을 쥐지 않는다★ — 그 일이 같은 락을 잠깐 잡는다(`layout::window_ctl` 머리).
-//! - OS `cfg` 를 두지 않는다 — OS 마다 다른 일은 platform `window` 가 한다(ADR-0266 · TRD §8-3).
+//! - ★One action = one main-thread job★ (§5-2) — `apply` · `show_all` · `hide_all` of [`TauriWindowControl`] do reading ·
+//!   decision · applying inside one `run_on_main_thread` job and wait for its answer. The first-paint show is also on the main thread, so it cannot
+//!   interleave with that job. The one-window operation inside that job is [`TauriOps`].
+//! - ★The caller does not hold the layout lock★ — that job takes the same lock briefly (`layout::window_ctl` head).
+//! - Do not put in an OS `cfg` — what differs per OS is done by platform `window` (ADR-0266 · TRD §8-3).
 
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
@@ -26,14 +26,14 @@ use crate::layout::window_ctl::{
 use crate::layout::{LayoutState, SubscriptionSync, ViewManager, MAIN_WINDOW_LABEL};
 use crate::output_router::OutputRouter;
 
-/// 메인 스레드 일 하나의 답을 기다리는 시한. 창 상태 일은 창 게터 · 세터 몇 번이라 짧고, 메인 스레드가 그동안 창 하나를
-/// 짓고 있으면(WebView2 짓기 — debug 빌드 약 1 s · `docs/process/step-log.md` 의 U4d′ 실측) 그만큼 늦는다. 그 몇 배를 둔다.
-/// ★시한이 지나도 넘긴 일은 취소되지 않는다★ — 답만 버리고, 그 일은 메인 스레드가 풀리면 돈다.
+/// The deadline for waiting for the answer of one main-thread job. A window-state job is a few window getter · setter calls, so it is short, and if the main thread is meanwhile
+/// building a window (WebView2 build — about 1 s in a debug build · measured in U4d′ of `docs/process/step-log.md`) it is delayed that much. Several times that is allowed.
+/// ★Even after the deadline the handed-over job is not cancelled★ — only the answer is discarded, and the job runs when the main thread is freed.
 const MAIN_THREAD_WAIT: Duration = Duration::from_secs(5);
 
-/// [`WindowControl`] 의 Tauri 실물 — 시한 뒤의 답: `apply` = `Err` · `show_all` = 거짓 · `hide_all` = 무동작(로그 한 줄).
-/// 메인 스레드에서 불러도 된다 — 넘긴 일이 그 자리에서 돈다(`layout::window_ctl::WindowControl` 문서).
-// ADR-0302 — 창 상태 명령
+/// The Tauri real implementation of [`WindowControl`] — answers after the deadline: `apply` = `Err` · `show_all` = false · `hide_all` = no-op (one log line).
+/// It may be called from the main thread — the handed-over job runs on the spot (`layout::window_ctl::WindowControl` docs).
+// ADR-0302 — window state command
 pub(crate) struct TauriWindowControl {
     app: AppHandle,
 }
@@ -75,13 +75,13 @@ impl WindowControl for TauriWindowControl {
         }
     }
 
-    // 어느 스레드에서나 읽는다 — 창 게터는 메인 스레드에 물어 답을 받고, 앞 창 · 첫 화면 대기 판정은 스레드와 무관하다.
+    // Read from any thread — window getters ask the main thread and get the answer, and the front-window · first-paint-wait decision is thread-independent.
     fn state(&self, label: &str) -> Option<OsWindowState> {
         read_state(&self.app, label)
     }
 
-    // 팝아웃 label 만 — main 은 늘 모델에 있고, 그 밖 label 의 창은 셸이 짓지 않는다. 예열 창 풀의 창은 뺀다 — 숨은 채
-    //   다음 새 창을 기다리는 창이라 닫거나 바람을 적으면 들인 창에 옮아간다.
+    // Pop-out labels only — main is always in the model, and a window with any other label is not built by the shell. Windows of the prewarmed window pool are excluded — they are windows
+    //   waiting hidden for the next new window, so if one were closed or a wish recorded on it, it would carry over to the taken-in window.
     fn is_unmodeled(&self, label: &str) -> bool {
         crate::commands::popout::is_popup_label(label)
             && self.app.get_webview_window(label).is_some()
@@ -96,8 +96,8 @@ impl WindowControl for TauriWindowControl {
     }
 }
 
-// `job` 을 메인 스레드 일 하나로 돌고 그 답을 기다린다. 답의 주인은 [`handoff`] 가 가른다 — 시한 뒤 버려진 답은 일 쪽이
-//   한 줄 남긴다.
+// Run `job` as one main-thread job and wait for its answer. Who owns the answer is decided by [`handoff`] — an answer discarded after the deadline is
+//   logged by the job side with one line.
 fn on_main_thread<T: Send + std::fmt::Debug + 'static>(
     app: &AppHandle,
     what: &str,
@@ -130,15 +130,15 @@ fn on_main_thread<T: Send + std::fmt::Debug + 'static>(
     }
 }
 
-// 답 하나의 주인을 한 칸의 비교-교체로 가른다 — 일이 먼저 `DELIVERED` 를 세우면 받는 쪽이 시한을 넘겼어도 반드시 받고,
-//   받는 쪽이 먼저 `ABANDONED` 를 세우면 일이 답을 버리며 남긴다. ★보내기 성공을 받음으로 읽지 말 것★ — 받는 쪽은 시한
-//   뒤에도 함수가 끝날 때까지 채널을 쥐고 있어, 시한 직후의 보내기는 성공하고도 버려졌다.
+// Decide who owns one answer with a single compare-and-swap — if the job sets `DELIVERED` first, the receiver always receives it even if it passed the deadline,
+//   and if the receiver sets `ABANDONED` first, the job discards the answer and logs it. ★Do not read a successful send as receipt★ — the receiver holds the channel
+//   until the function ends even after the deadline, so a send right after the deadline succeeded and was still discarded.
 const WAITING: u8 = 0;
 const DELIVERED: u8 = 1;
 const ABANDONED: u8 = 2;
 
-// 채널은 버퍼 하나다 — 메인 스레드에서 부르면 그 일이 이 자리에서 돌아(tauri-runtime-wry 2.11.3 `send_user_message`) 받기
-//   전에 보내므로, 용량 0 이면 그 보내기가 영영 선다.
+// The channel has a buffer of one — if called on the main thread, that job runs on the spot (tauri-runtime-wry 2.11.3 `send_user_message`) and sends before
+//   receiving, so with capacity 0 that send would block forever.
 fn handoff<T>() -> (Slot<T>, Waiter<T>) {
     let (tx, rx) = mpsc::sync_channel(1);
     let state = Arc::new(AtomicU8::new(WAITING));
@@ -157,7 +157,7 @@ struct Slot<T> {
 }
 
 impl<T> Slot<T> {
-    // `Err` = 받는 쪽이 이미 물러나 그 답을 돌려준다.
+    // `Err` = the receiver has already withdrawn, so the answer is returned.
     fn deliver(self, value: T) -> Result<(), T> {
         if !self.commit() {
             return Err(value);
@@ -197,23 +197,23 @@ impl<T> Waiter<T> {
                 if abandoned {
                     return Waited::Abandoned;
                 }
-                // 일이 보내기로 정했다 — 곧 온다. 정하고도 못 보냈으면(채널째 버려짐) 돌지 않은 것과 같다.
+                // The job decided to send — it is coming soon. If it decided and still could not send (the channel itself was dropped), it is the same as not having run.
                 self.rx.recv().map_or(Waited::NotRun, Waited::Answered)
             }
         }
     }
 }
 
-/// 그 창이 지금 OS 전경 창인가 — platform `window::is_foreground` 이고, 그 OS 에 수단이 없으면(`None`) Tauri `is_focused`
-/// 로 물러난다. Windows 에서 `is_focused` 를 쓰지 않는 까닭 = 웹뷰가 키보드 포커스를 쥔 동안 거짓이다(TRD
-/// S26-window-chrome §6-2 「앞 창 판정」 · `state::placement::foreground_is_ours` 머리). 못 읽으면 거짓. 어느 스레드에서나
-/// 된다.
+/// Is that window the OS foreground window now — platform `window::is_foreground`, and if the OS has no means (`None`), fall back to Tauri `is_focused`.
+/// The reason `is_focused` is not used on Windows = it is false while the webview holds keyboard focus (TRD
+/// S26-window-chrome §6-2 「앞 창 판정」 · head of `state::placement::foreground_is_ours`). If unreadable, false. Works
+/// from any thread.
 pub(crate) fn is_foreground(window: &Window) -> bool {
     engram_dashboard_platform::window::is_foreground(window)
         .unwrap_or_else(|| matches!(window.is_focused(), Ok(true)))
 }
 
-/// 창 하나의 OS 상태 순간값 — `None` = 그 label 의 OS 창이 없거나 보임 · 최소화 · 최대화를 못 읽었다. 칸의 뜻은
+/// A snapshot of one window's OS state — `None` = that label's OS window does not exist or visible · minimized · maximized could not be read. The meaning of the fields is in
 /// [`OsWindowState`].
 fn read_state(app: &AppHandle, label: &str) -> Option<OsWindowState> {
     let window = app.get_webview_window(label)?;
@@ -238,10 +238,10 @@ fn read_state(app: &AppHandle, label: &str) -> Option<OsWindowState> {
     })
 }
 
-/// [`WindowOps`] 의 Tauri 실물(TRD S26-window-chrome §6-2) — Tauri 창 · platform `window` · 첫 화면 문 · 미룬 최대화 표를
-/// 부른다. ★메인 스레드 일 안에서만 쓴다★ — 날 Win32 올리기(`first_paint::raise_without_activation`)가 메인 스레드를
-/// 요구하고, 읽기 · 판정 · 입히기가 첫 화면 보이기와 끼어들지 않아야 한다(§5-2). 그 안에서 메인 스레드로 다시 넘기지
-/// 않는다 — 넘긴 일은 지금 일이 끝난 뒤에야 돌아 이 일의 차례 밖이 된다.
+/// The Tauri real implementation of [`WindowOps`] (TRD S26-window-chrome §6-2) — calls Tauri windows · platform `window` · the first-paint gate · the deferred-maximize table.
+/// ★Used only inside a main-thread job★ — a raw Win32 raise (`first_paint::raise_without_activation`) requires the main thread,
+/// and reading · decision · applying must not interleave with the first-paint show (§5-2). Inside it, do not hand off to the main thread again — the handed-off job
+/// runs only after the current job ends, which puts it outside this job's turn.
 pub(crate) struct TauriOps<'a> {
     app: &'a AppHandle,
 }
@@ -338,9 +338,9 @@ impl WindowOps for TauriOps<'_> {
 
 // ── invoke `window_control` (TRD S26-window-chrome §6-4) ─────────────────────────
 
-/// invoke `window_control` 의 동작 — 뜻은 같은 이름의 버스 동사(`window.minimize` · `window.maximize` ·
-/// `window.unmaximize` · `window.raise` · `window.hideAll` · `window.showAll` · `window.close`)와 같다. wire 값은 snake_case
-/// (`hide_all` 따위).
+/// The action of invoke `window_control` — the meaning is the same as the same-named bus verb (`window.minimize` · `window.maximize` ·
+/// `window.unmaximize` · `window.raise` · `window.hideAll` · `window.showAll` · `window.close`). The wire value is snake_case
+/// (like `hide_all`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
@@ -354,8 +354,8 @@ pub enum WindowControlAction {
     Close,
 }
 
-/// `close` 의 결말 — 뜻은 버스 `window.close` 의 `outcome` 과 같다: `closed` = 팝아웃을 닫았다 · `hidden_all` = main 이라
-/// 닫지 않고 모든 창을 숨겼다 · `kept` = `if_empty` 인데 그 창에 탭이 있거나 이미 닫혀 그대로 뒀다.
+/// The outcome of `close` — the meaning is the same as `outcome` of bus `window.close`: `closed` = a pop-out was closed · `hidden_all` = it was main, so it was not
+/// closed and all windows were hidden · `kept` = it was `if_empty` but that window has tabs or was already closed, so it was left as is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
@@ -365,14 +365,14 @@ pub enum WindowCloseResult {
     Kept,
 }
 
-/// invoke `window_control` 의 답 — 칸의 뜻은 버스 답과 같고, 그 동작이 싣지 않는 칸은 거짓 · `null` 이다.
+/// The answer of invoke `window_control` — the meaning of the fields is the same as the bus answer, and a field that the action does not carry is false · `null`.
 ///
-/// - `deferred` = 보이지 않는 창이라 바랄 최대화 상태를 적어 뒀다(보일 때 입힌다) — `maximize` · `unmaximize`.
-/// - `pending` = 첫 화면 전인 창이라 아무것도 하지 않았다(곧 보인다) — `raise`.
-/// - `shown_all` = 숨은 창이라 먼저 모든 창을 보였다 — `raise`.
-/// - `focused` = 끝난 뒤 그 창(`show_all` 이면 main)이 OS 전경 창이다 — 사실 그대로다(남의 앱이 전경이면 맨 위로만
-///   올리고 거짓) — `raise` · `show_all`.
-/// - `close` = `close` 의 결말 — 그 밖의 동작은 `null`.
+/// - `deferred` = it was an invisible window, so the wished maximize state was recorded (applied when shown) — `maximize` · `unmaximize`.
+/// - `pending` = it was a window before first paint, so nothing was done (it will be visible soon) — `raise`.
+/// - `shown_all` = it was a hidden window, so all windows were shown first — `raise`.
+/// - `focused` = after finishing, that window (main for `show_all`) is the OS foreground window — the fact as it is (if another app is foreground, it is only
+///   raised to the top and false) — `raise` · `show_all`.
+/// - `close` = the outcome of `close` — `null` for other actions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
 pub struct WindowControlOutcome {
@@ -405,15 +405,15 @@ impl From<CloseOutcome> for WindowCloseResult {
     }
 }
 
-/// 창 상태 동작 하나(async — 메인 스레드 일을 기다리므로 블로킹 풀에서 돈다) — `invoke('window_control', { window,
-/// action, ifEmpty? })`(Tauri 는 JS 쪽 인자 이름을 camelCase 로 받는다). 버스 동사와 같은 서비스다(ADR-0081).
+/// One window-state action (async — it waits for a main-thread job, so it runs on the blocking pool) — `invoke('window_control', { window,
+/// action, ifEmpty? })` (Tauri accepts JS-side argument names in camelCase). It is the same service as the bus verbs (ADR-0081).
 ///
-/// - `window` = 창 인자(window_id 또는 같은 실행 안 label — TRD §4-5). `hide_all` · `show_all` 은 그 창을 가리지 않는다
-///   (모든 창이다) — 받은 값은 숫자 거절만 본다.
-/// - `if_empty` = `close` 에만 쓴다(`true` 면 `window` 는 그 창의 window_id — 해석기를 거치지 않는다 · TRD §5-5). 다른
-///   동작에 `true` 를 주면 `Err`.
-/// - 차례(TRD §5-4) — ① 숫자만인 인자는 어느 동작이든 `Err`(`if_empty` 여도) ② `if_empty` ③ 인자 풀기.
-/// - `Err` = 그 문구(버스의 `INVALID_ARGUMENT` · `CONFLICT` 문구와 같다).
+/// - `window` = the window argument (window_id or a label within the same run — TRD §4-5). `hide_all` · `show_all` do not distinguish that window
+///   (it is all windows) — the received value is only checked for numeric rejection.
+/// - `if_empty` = used only for `close` (if `true`, `window` is that window's window_id — it does not go through the resolver · TRD §5-5). Giving
+///   `true` to another action gives `Err`.
+/// - Order (TRD §5-4) — ① an argument that is only digits is `Err` for any action (even with `if_empty`) ② `if_empty` ③ argument resolution.
+/// - `Err` = that message (the same as the bus `INVALID_ARGUMENT` · `CONFLICT` messages).
 #[tauri::command]
 pub async fn window_control(
     app: AppHandle,
@@ -462,8 +462,8 @@ fn control(
         }),
         WindowControlAction::Close => {
             let host = TauriWindowHost { app };
-            // main 닫기(= 모든 창 숨기기)와 `if_empty` 닫기(`close_if_empty` 는 구독 포트를 받지 않는다)는 구독을 다시 셈하지
-            //   않는다 — 데몬 클라이언트가 없을 때도 돈다.
+            // main close (= hide all windows) and `if_empty` close (`close_if_empty` does not take a subscription port) do not recount subscriptions
+            //   — they run even when there is no daemon client.
             let no_subs = if_empty
                 || window_ctl::resolve(&state, window)
                     .is_ok_and(|label| label == MAIN_WINDOW_LABEL);
@@ -497,18 +497,18 @@ fn control(
     }
 }
 
-/// 창 웹뷰가 자기 제목 줄로 센 최소 창 크기(정수 CSS px = 논리 px · 보통 상태 기준)를 알린다 —
-/// `invoke('report_window_min_width', { width, height, seq, epoch })`(TRD S26-window-chrome §7-7).
+/// The window webview reports the minimum window size it counted from its own title row (integer CSS px = logical px · based on the normal state) —
+/// `invoke('report_window_min_width', { width, height, seq, epoch })` (TRD S26-window-chrome §7-7).
 ///
-/// - 창 label 을 인자로 받지 않는다 — Tauri 가 넣어 주는 [`Window`] 가 그 값의 유일한 권위다(`report_window_canvas` 와 같은
-///   규칙). 버스 명령이 아니다 — 측정 보고라 LLM 이 위조할 값이 아니다(ADR-0227).
-/// - `seq` = 그 웹 페이지 안에서 보낼 때마다(재시도 포함) 오르는 순번 · `epoch` = 그 페이지를 읽은 벽시계 ms
-///   (`Math.floor(performance.timeOrigin)` — 다시 읽을수록 크다). 받아들인 것보다 옛 `epoch` 이거나 같은 `epoch` 에서
-///   받아들인 순번보다 새 것이 아니면 적지 않고 `Ok` 다 — 웹이 시한에 놓은 옛 시도(다시 읽기 전 페이지의 것 포함)가 늦게
-///   닿아도 마지막으로 보낸 값을 덮지 못한다.
-/// - 너비 · 높이 둘 중 하나라도 1~4096 밖이면 `Err` 이고 그 창의 직전 값을 유지한다.
-/// - 비동기로 바꾸지 말 것 — 메인 스레드에서 돌아야 창 확인과 적기 사이에 `Destroyed` 가 끼지 않는다(`crate::chrome`).
-// ADR-0303 — 크롬식 제목 표시줄
+/// - It does not take the window label as an argument — the [`Window`] that Tauri injects is the sole authority for that value (the same
+///   rule as `report_window_canvas`). It is not a bus command — it is a measurement report, so not a value for the LLM to forge (ADR-0227).
+/// - `seq` = a sequence number that rises on every send within that web page (retries included) · `epoch` = the wall-clock ms at which that page was loaded
+///   (`Math.floor(performance.timeOrigin)` — the later it is reloaded, the larger). If it has an `epoch` older than the accepted one, or in the same `epoch` is not newer than the
+///   accepted sequence, it is not recorded and `Ok` — even if an old attempt the web left on a deadline (including one from the page before reload) arrives late,
+///   it cannot overwrite the last sent value.
+/// - If either width or height is outside 1~4096, `Err` and that window's previous value is kept.
+/// - Do not change it to async — it must run on the main thread so that `Destroyed` cannot come in between the window check and the recording (`crate::chrome`).
+// ADR-0303 — chrome-style title bar
 #[tauri::command]
 pub fn report_window_min_width(
     app: AppHandle,
@@ -527,7 +527,7 @@ pub fn report_window_min_width(
     )
 }
 
-// main 닫기 · `if_empty` 닫기에 넘기는 빈 구독 포트 — 두 갈래 다 부르지 않는다. 불렸으면 구독이 낡았다는 뜻이라 남긴다.
+// The empty subscription port passed to main close · `if_empty` close — neither branch calls it. If it was called, it means the subscription is stale, so it is logged.
 struct NoSubs;
 
 impl SubscriptionSync for NoSubs {
@@ -545,7 +545,7 @@ mod tests {
 
     use super::*;
 
-    // ── 답 넘기기 ──
+    // ── handing over the answer ──
 
     #[test]
     fn an_answer_delivered_in_time_is_received() {
@@ -563,7 +563,7 @@ mod tests {
 
     #[test]
     fn a_job_committed_before_the_timeout_is_still_received() {
-        // 보내기를 다른 스레드에 둬 받는 쪽이 대개 먼저 시한(0)을 맞는다 — 어느 차례로 와도 답은 받혀야 한다.
+        // The send is put on another thread so the receiver usually meets the deadline (0) first — the answer must be received in either order.
         let (slot, waiter) = handoff();
         assert!(slot.commit());
         let sender = std::thread::spawn(move || slot.tx.send(7).unwrap());

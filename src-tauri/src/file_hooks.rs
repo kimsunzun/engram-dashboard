@@ -1,5 +1,5 @@
-//! 셸 데이터 파일(설정 · 화면 상태)이 base `file` 에 넘기는 OS 몫 — 잠김 다시 하기와 폴더 동기화를 OS 층
-//! crate 의 것으로 잇는다. `OsHooks` 를 받는 셸의 `file` 호출은 전부 [`OS_HOOKS`] 를 넘긴다.
+//! The OS share that shell data files (settings · screen state) pass to base `file` — connects lock retry and folder sync to the OS-layer
+//! crate's. Every shell `file` call that takes `OsHooks` passes [`OS_HOOKS`].
 // ADR-0291
 
 use std::io;
@@ -23,7 +23,7 @@ fn retry(attempt: &mut dyn FnMut() -> io::Result<()>) -> io::Result<()> {
 mod tests {
     use super::*;
 
-    /// ★아무것도 안 하는 다시 하기를 넘겨도 컴파일은 선다★ — 그 실수를 이 시험이 잡는다.
+    /// ★Even if a do-nothing retry is passed, it still compiles★ — this test catches that mistake.
     #[test]
     fn the_retry_really_retries_a_locked_attempt() {
         let mut attempts = 0;

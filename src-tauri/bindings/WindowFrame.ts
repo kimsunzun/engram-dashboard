@@ -4,13 +4,13 @@ import type { Insets } from "./Insets";
 import type { SizeCss } from "./SizeCss";
 
 /**
- * 창 사실 — 셸 → 그 창 사건 `window:frame`(값이 바뀔 때만) · 마운트 때 당기는 `window_frame` 의 답.
+ * Window fact — shell → that window's event `window:frame` (only when the value changes) · the answer of `window_frame`, pulled at mount.
  *
- * - `restored`: 그 창의 보통(복원) 안쪽 크기 — 최대화 중이어도 최대화 전 크기다. 아직 모르면 `null`.
- * - `maximized`: 최대화돼 있나.
- * - `insets`: 창 틀 = 바깥 사각형 − 안쪽 사각형(CSS px — 그 창 배율로 나눈 값 · 보이지 않는 크기 조절 테두리 포함).
- * - `focused`: 그 창이 OS 전경 창인가(제목 줄 흐림 몫 — TRD S26-window-chrome §6-5). 그 창의 포커스 사건이 민 값은
- *   그 사건의 값이고, 당기기 · 그 밖의 밀기는 그때의 OS 전경 창 판정이다 — 두 값이 잠깐 어긋날 수 있다(미검 · S12).
- * - `caption`: 제목 줄 크롬 모양 — OS 상수라 창마다 · 실행 내내 같다.
+ * - `restored`: that window's normal (restored) inner size — even while maximized it is the size before maximize. `null` if not yet known.
+ * - `maximized`: is it maximized.
+ * - `insets`: window frame = outer rectangle − inner rectangle (CSS px — divided by that window's scale factor · including the invisible resize border).
+ * - `focused`: is that window the OS foreground window (for dimming the title bar — TRD S26-window-chrome §6-5). The value pushed by that window's focus event is
+ *   that event's value, and a pull · any other push is the OS foreground-window decision at that time — the two values may briefly disagree (unverified · S12).
+ * - `caption`: the title-bar chrome shape — an OS constant, so the same for every window · throughout a run.
  */
 export type WindowFrame = { restored: SizeCss | null, maximized: boolean, insets: Insets, focused: boolean, caption: CaptionChrome, };

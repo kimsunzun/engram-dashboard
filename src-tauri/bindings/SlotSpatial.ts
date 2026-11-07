@@ -2,11 +2,11 @@
 import type { Neighbors } from "./Neighbors";
 
 /**
- * 한 말단 슬롯의 공간 타깃 파생 정보(ViewSnapshot 에 슬롯별로 실린다). ADR-0068.
+ * Spatial target derivation info for one leaf slot (carried per slot in ViewSnapshot). ADR-0068.
  */
 export type SlotSpatial = { slot_id: string, neighbors: Neighbors, 
 /**
- * 순서 인덱스 — 중심점 `(center_y, center_x)` 전역 사전순(위→아래, 동률 왼쪽→오른쪽) 0-based.
- * 상세·응집 미보장은 모듈 헤더 §계산 뼈대 참조.
+ * Order index — global lexicographic by center point `(center_y, center_x)` (top→bottom, ties left→right), 0-based.
+ * For details and the cohesion non-guarantee see the module header §Computation outline.
  */
 ordinal: number, };

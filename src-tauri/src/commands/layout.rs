@@ -1,13 +1,13 @@
-//! 레이아웃 invoke 껍데기 + 그 포트의 Tauri 어댑터 — §5 LLM 제어 표면(ADR-0035/0057).
+//! Layout invoke shell + the Tauri adapters of its ports — §5 LLM control surface (ADR-0035/0057).
 //!
-//! ★이 파일에 로직이 없다★: `#[tauri::command]` 전부가 전송 중립 적용 서비스(`crate::layout::apply`)를
-//! 부르는 얇은 껍데기이고, 락 규율·순서·검증은 전부 거기 있다(ADR-0081 결정 3 — 사람 클릭과 중계된 LLM
-//! 호출이 같은 함수에 떨어진다). 여기 남는 것은 Tauri 세계로의 번역 4종(알림 emit(+ OS 창 제목 — `crate::chrome`) · 구독 재동기 ·
-//! OS 창 · 데몬 스폰)과 측정 보고의 창 label(Tauri 가 넣어 주는 `Window` 에서 꺼낸다) · 창 인자 풀기(버스와 같은
-//! 해석기 — [`resolve_window`])뿐이다.
+//! ★There is no logic in this file★: all of `#[tauri::command]` are thin shells that call the transport-neutral apply service (`crate::layout::apply`),
+//! and lock discipline · order · validation are all there (ADR-0081 decision 3 — a human click and a relayed LLM
+//! call land on the same function). What remains here is only 4 kinds of translation into the Tauri world (notification emit (+ OS window title — `crate::chrome`) · subscription resync ·
+//! OS window · daemon spawn), the window label of measurement reports (taken from the `Window` that Tauri injects), and unpacking the window argument (the same
+//! resolver as the bus — [`resolve_window`]).
 //!
-//! ## ★이벤트: 창별 `window:tabs-updated`(ADR-0057)★
-//! `view:closed` 는 엔드투엔드 은퇴(더는 emit 안 함 — §5-2/G2). `layout:updated`(뷰 스냅샷)는 유지.
+//! ## ★Event: per-window `window:tabs-updated` (ADR-0057)★
+//! `view:closed` is retired end to end (no longer emitted — §5-2/G2). `layout:updated` (view snapshot) is kept.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -36,36 +36,36 @@ use crate::state::restore::RestoreCoordinator;
 use crate::theme::ThemeControl;
 
 const EVT_LAYOUT_UPDATED: &str = "layout:updated";
-// 프론트는 `label` 이 자기 창과 일치할 때만 반응한다(§7-1).
+// The frontend reacts only when `label` matches its own window (§7-1).
 const EVT_WINDOW_TABS_UPDATED: &str = "window:tabs-updated";
 
-// ★ViewManager 락 보유 중 호출 — 구독 정리 델타를 DaemonClient 로 enqueue(fire-and-forget)★. rebuild 와
-// **같은 critical section 안**에서 불러 "enqueue 순서 = rebuild 순서"를 세운다(동시 invoke 인터리브 방지).
-// 부르는 메서드는 동기 `try_send`(await/network 0)라 락 안에서 ADR-0006 위반 아님(lifecycle 락도 독립 —
-// 데드락 0). 비연결이면 DaemonClient 가 조용히 no-op.
+// ★Called while holding the ViewManager lock — enqueue the subscription-cleanup delta to DaemonClient (fire-and-forget)★. Called **inside the same
+// critical section** as rebuild to establish "enqueue order = rebuild order" (prevents interleaving of concurrent invokes).
+// The method called is a synchronous `try_send` (await/network 0), so inside the lock it is not an ADR-0006 violation (the lifecycle lock is also independent —
+// deadlock 0). If not connected, DaemonClient quietly no-ops.
 pub(crate) fn send_subscription_delta(client: &DaemonClient, delta: SubscriptionDelta) {
     for agent_id in delta.to_unsubscribe {
         client.unsubscribe(agent_id);
     }
 }
 
-/// 창 인자를 지금 모델 안 창의 label 로 푼다 — 버스 동사와 같은 해석기다(TRD S26-window-chrome §4-5). 웹은 제 창 label
-/// 을 넘기므로 그대로 지나간다. 레이아웃 락은 푸는 동안만 쥔다.
+/// Resolve the window argument into the label of a window currently in the model — the same resolver as the bus verbs (TRD S26-window-chrome §4-5). The web passes
+/// its own window label, so it passes through as is. The layout lock is held only while resolving.
 pub(crate) fn resolve_window(state: &LayoutState, window: &str) -> Result<String, String> {
     let mgr = state.0.lock().map_err(|e| e.to_string())?;
     window_arg::resolve(&mgr, window).map_err(|e| e.to_string())
 }
 
-// ★락 미보유 상태에서 발행★.
+// ★Emitted without holding the lock★.
 pub(crate) fn emit_window_tabs(app: &AppHandle, tabs: &WindowTabsPayload) {
     if let Err(e) = app.emit(EVT_WINDOW_TABS_UPDATED, tabs) {
         tracing::warn!("[layout] {EVT_WINDOW_TABS_UPDATED} emit 실패: {e}");
     }
 }
 
-// ── 적용 서비스 포트의 Tauri 어댑터 ──────────────────────────────────────────
+// ── Tauri adapters of the apply service's ports ──────────────────────────────────────────
 
-// popout 껍데기도 같은 어댑터를 빌려 쓴다 — emit 로직을 두 번 적으면 사람 경로와 LLM 경로가 갈린다.
+// The popout shell borrows the same adapter too — if emit logic is written twice, the human path and the LLM path diverge.
 pub(crate) struct TauriEvents<'a> {
     pub app: &'a AppHandle,
 }
@@ -77,7 +77,7 @@ impl LayoutEvents for TauriEvents<'_> {
         }
     }
 
-    // 페이로드의 제목은 OS 창에도 입힌다 — 웹은 그 칸을 읽지 않는다(TRD S26-window-chrome §4-4).
+    // The title in the payload is also applied to the OS window — the web does not read that field (TRD S26-window-chrome §4-4).
     fn window_tabs_updated(&self, tabs: &WindowTabsPayload) {
         emit_window_tabs(self.app, tabs);
         crate::chrome::push_title(self.app, tabs);
@@ -96,9 +96,9 @@ impl SubscriptionSync for RouterSubs<'_> {
     }
 }
 
-// 스폰 응답 해석(어떤 프레임이 성공인가)은 전송 계약이라 어댑터 몫이다.
+// Interpreting the spawn response (which frame is success) is a transport contract, so it is the adapter's job.
 //
-// backend 는 고른 낱말을 그대로 wire 에 싣는다 — 비면 데몬이 거절한다(기본값은 어느 쪽에도 없다).
+// backend puts the chosen word on the wire as is — if empty, the daemon rejects it (there is no default on either side).
 struct DaemonSpawner<'a> {
     client: &'a DaemonClient,
 }
@@ -120,9 +120,9 @@ impl AgentSpawner for DaemonSpawner<'_> {
                 .await?;
             match reply {
                 AgentEvent::Spawned { agent, .. } => Ok(agent.id.to_string()),
-                // ADR-0279: 데몬 거절 문구(정책 거절 포함)는 접두 없이 그대로 간다. 오늘은 `send_command` 가
-                //   `Error` 를 먼저 `Err(message)` 로 접어(문구 원문 그대로 — 출처를 지키는 형제 =
-                //   `send_command_with_origin` · ADR-0281) 이 팔에 안 닿지만, 그 접기가 바뀌면 여기로 온다.
+                // ADR-0279: daemon rejection messages (including policy rejections) go through without a prefix. Today `send_command`
+                //   folds `Error` first into `Err(message)` (the message text verbatim — the sibling that preserves the origin =
+                //   `send_command_with_origin` · ADR-0281) so it does not reach this arm, but if that folding changes it will arrive here.
                 AgentEvent::Error { message, .. } => Err(message),
                 other => Err(format!("spawn 응답 예상 밖(Spawned 기대): {other:?}")),
             }
@@ -130,11 +130,11 @@ impl AgentSpawner for DaemonSpawner<'_> {
     }
 }
 
-// ── 명령 표가 쥐는 소유형 어댑터 ──────────────────────────────────────────────
+// ── Owning adapters held by the command table ──────────────────────────────────────────────
 //
-// ★위 어댑터 넷과 **같은 구현을 재사용한다**★: 표의 핸들러는 `'static` 이라야 하므로 빌린 참조를 담을 수
-// 없고, 그렇다고 emit·창 빌드·스폰 로직을 두 번 적으면 사람 경로와 LLM 경로가 다시 갈린다(ADR-0081 결정 3
-// 이 없애려던 그 2 코드 경로). 그래서 소유형은 자기 것을 빌려 위 구현에 그대로 넘긴다 — 로직은 한 벌이다.
+// ★**Reuses the same implementation** as the four adapters above★: the table's handlers must be `'static`, so they cannot
+// hold borrowed references, and yet if the emit · window build · spawn logic is written twice the human path and the LLM path diverge again (the very 2 code paths
+// that ADR-0081 decision 3 meant to eliminate). So the owning type lends its own to the implementation above and passes it through — the logic is one copy.
 
 pub(crate) struct OwnedEvents {
     pub(crate) app: AppHandle,
@@ -150,7 +150,7 @@ impl LayoutEvents for OwnedEvents {
     }
 }
 
-// 셸 단위 시험이 버스 경로(표 → 적용 서비스 → 이 어댑터 → 실 소켓)를 창 없이 세우려고 crate 안에 연다.
+// Opened inside the crate so that shell unit tests can stand up the bus path (table → apply service → this adapter → real socket) without a window.
 pub(crate) struct OwnedSubs {
     pub(crate) router: Arc<OutputRouter>,
     pub(crate) client: Arc<DaemonClient>,
@@ -166,8 +166,8 @@ impl SubscriptionSync for OwnedSubs {
     }
 }
 
-// 복원 조율자의 구독 원천 — 쓸 때마다 라우터 · 데몬 클라이언트를 `AppHandle` 에서 찾는다(창 소멸 정리가 사건마다
-//   찾는 것과 같다). 조율자 포트는 셸 setup 에서 한 번 꽂히므로, 그때 찾아 쥐면 늦게 등록된 클라이언트를 놓친다.
+// The subscription source of the restore coordinator — each time it is used it finds the router · daemon client from the `AppHandle` (same as window-destroy cleanup
+//   finding them on every event). The coordinator port is plugged in once at shell setup, so finding and holding them then would miss a client registered later.
 pub(crate) struct AppSubscriptions {
     pub(crate) app: AppHandle,
 }
@@ -246,12 +246,12 @@ impl AgentSpawner for OwnedSpawner {
     }
 }
 
-/// 레이아웃 명령 표가 쥘 포트 묶음 — 조립부(`lib.rs` setup)가 한 번 만든다.
+/// The bundle of ports the layout command table holds — the assembly part (`lib.rs` setup) makes it once.
 ///
-/// ★사람 클릭 경로와 **같은 상태·같은 라우터·같은 발급기**를 받는다★: 다른 인스턴스를 주면 LLM 이 만든 창이
-/// 사람이 보는 목록에 없고 label 이 충돌한다(ADR-0035 레이아웃 권위가 하나라는 것의 실물). 설정 서비스와
-/// 유효 테마 · 복원 조율자도 같다 — 빌더에서 manage 한 그 인스턴스를 받는다(다르면 두 경로가 다른 값·다른 밀기
-/// 순서·다른 처리 중 표지를 본다).
+/// ★It receives **the same state · the same router · the same issuer** as the human click path★: if a different instance is given, a window made by the LLM
+/// is not in the list the human sees and labels collide (the concrete form of there being a single ADR-0035 layout authority). The settings service and
+/// the effective theme · restore coordinator are the same — they take the very instance managed in the builder (otherwise the two paths see different values · different push
+/// orders · different in-progress markers).
 #[allow(clippy::too_many_arguments)]
 pub fn command_ports(
     app: AppHandle,
@@ -274,7 +274,7 @@ pub fn command_ports(
         labels,
         spawner: Arc::new(OwnedSpawner { client }),
         control: Arc::new(TauriWindowControl::new(app.clone())),
-        // 아래 넷은 레이아웃 포트가 아니다 — 표가 하나라 여기 함께 실린다(`layout::commands` 헤더).
+        // The four below are not layout ports — they are carried here together because there is one table (`layout::commands` header).
         themes: themes.clone(),
         settings,
         settings_events: Arc::new(TauriSettingsEvents::new(app, themes)),
@@ -282,9 +282,9 @@ pub fn command_ports(
     }
 }
 
-// ── 탭 command (창별 — ADR-0057) ─────────────────────────────────────────────
+// ── tab command (per window — ADR-0057) ─────────────────────────────────────────────
 
-// 창 `window` 에 새 빈-슬롯 탭 추가·활성화. 새 View id 반환. (탭바 `+`.)
+// Add and activate a new empty-slot tab in window `window`. Returns the new View id. (Tab bar `+`.)
 #[tauri::command]
 pub fn create_tab(
     app: AppHandle,
@@ -307,8 +307,8 @@ pub fn create_tab(
     )
 }
 
-// 빈 새 창(빈 탭 1개) 생성 + 웹뷰 빌드(D-6). 성공 시 새 창의 label · 영속 id · 번호([`NewWindow`]).
-// ★async fn 필수★: WebviewWindowBuilder 데드락 회피(락 밖 빌드).
+// Create an empty new window (1 empty tab) + build the webview (D-6). On success the new window's label · persistent id · number ([`NewWindow`]).
+// ★async fn required★: avoids a WebviewWindowBuilder deadlock (build outside the lock).
 #[tauri::command]
 pub async fn create_window(
     app: AppHandle,
@@ -329,7 +329,7 @@ pub async fn create_window(
     )
 }
 
-// 창 `window` 의 활성 탭을 `view` 로 교체(그 창만, 타 창 불변).
+// Replace the active tab of window `window` with `view` (that window only, other windows unchanged).
 #[tauri::command]
 pub fn switch_tab(
     app: AppHandle,
@@ -352,7 +352,7 @@ pub fn switch_tab(
     )
 }
 
-// 탭 끌기의 원래 선택 되돌리기 전용(웹 → 셸 · TRD S21-slot-docking §4-6) — 버스 명령이 아니다(LLM 은 `tab.switch` · §3-6).
+// Only for restoring the original selection after a tab drag (web → shell · TRD S21-slot-docking §4-6) — not a bus command (the LLM uses `tab.switch` · §3-6).
 #[tauri::command]
 pub fn switch_tab_if(
     app: AppHandle,
@@ -377,7 +377,7 @@ pub fn switch_tab_if(
     )
 }
 
-// 창 `window` 의 탭 `view` 닫기(§5-2 상태기계).
+// Close tab `view` of window `window` (§5-2 state machine).
 #[tauri::command]
 pub async fn close_tab(
     app: AppHandle,
@@ -401,7 +401,7 @@ pub async fn close_tab(
     )
 }
 
-// 새 슬롯 id 반환.
+// Returns the new slot id.
 #[tauri::command]
 pub fn split_slot(
     app: AppHandle,
@@ -425,8 +425,8 @@ pub fn split_slot(
     )
 }
 
-// JS: `invoke('set_split_ratio', { viewId, splitId, ratio })` — ratio = a 쪽(왼쪽/위) 칸의 몫. 결말·반환
-// version 의 뜻은 `SplitRatioApplied` 문서(바인딩에 실린다).
+// JS: `invoke('set_split_ratio', { viewId, splitId, ratio })` — ratio = the share of the a-side (left/top) area. The outcome · meaning of the returned
+// version is in the `SplitRatioApplied` docs (carried in the bindings).
 // ADR-0227
 #[tauri::command]
 pub fn set_split_ratio(
@@ -460,7 +460,7 @@ pub fn close_slot(
     )
 }
 
-// router/client State 를 안 받는다 — 포커스 이동은 출력 라우팅을 안 바꾼다(ADR-0066, 사유는 적용 서비스).
+// It does not take router/client State — focus movement does not change output routing (ADR-0066, the reason is in the apply service).
 #[tauri::command]
 pub fn focus_slot(
     app: AppHandle,
@@ -527,12 +527,12 @@ pub fn set_slot_content(
     )
 }
 
-/// 사용량 슬롯의 표시 칸을 칸 단위로 쓴다 — 준 칸만 바뀌고 `None` 칸은 그 슬롯의 지금 값을 지킨다. 사용량이 아니던
-/// 슬롯은 사용량이 되고 `None` 칸은 `true` 다(버스 `layout.setSlotContent` 의 Usage 와 같은 적용 함수).
+/// Write the display fields of a usage slot field by field — only the fields given change, and a `None` field keeps that slot's current value. A slot that was not usage
+/// becomes usage and its `None` fields are `true` (the same apply function as Usage in bus `layout.setSlotContent`).
 ///
-/// ★`set_slot_content` 로 온전한 content 를 보내 대신하지 말 것★ — 웹뷰가 들고 있는 content 는 방송이 닿기 전엔 낡아,
-/// 다른 칸을 옛 값으로 되돌린다(Codex 켬 직후의 Claude 끔이 Codex 를 도로 끈다). 읽기와 쓰기가 한 락 안인 것은
-/// 적용 서비스가 진다. 없는 view·slot 은 `Err`.
+/// ★Do not substitute by sending a whole content through `set_slot_content`★ — the content the webview holds is stale until the broadcast arrives,
+/// so it would revert other fields to old values (a Claude off right after Codex on turns Codex back off). Reading and writing being in one lock is
+/// the apply service's responsibility. A nonexistent view·slot is `Err`.
 // ADR-0258
 #[tauri::command]
 pub fn set_usage_slot(
@@ -559,10 +559,10 @@ pub fn set_usage_slot(
     )
 }
 
-// ── 합성 command: spawn_into(D-7 배치 지정 스폰) ──────────────────────────────
+// ── composite command: spawn_into (D-7 placement-directed spawn) ──────────────────────────────
 
-// 데몬에 에이전트를 스폰하고 그 agent 를 `window` 의 탭 슬롯에 배정한다. 성공 시 새 AgentId(String) 반환.
-// 순서·슬롯 정책·실패 가시성은 적용 서비스가 소유한다.
+// Spawn an agent on the daemon and assign that agent to a tab slot of `window`. On success returns the new AgentId (String).
+// Order · slot policy · failure visibility are owned by the apply service.
 #[tauri::command]
 pub async fn spawn_into(
     app: AppHandle,
@@ -593,19 +593,19 @@ pub async fn spawn_into(
     .await
 }
 
-// ── 측정 보고(웹뷰 → 셸) ─────────────────────────────────────────────────────
+// ── measurement reports (webview → shell) ─────────────────────────────────────────────────────
 //
-// 둘 다 버스 명령이 아니다 — 버스에 두면 LLM 이 캔버스·지표를 위조할 수 있다. version 을 올리지도 알리지도 않는다.
+// Neither is a bus command — on the bus the LLM could forge the canvas · metrics. They neither raise nor announce the version.
 // ADR-0227
 //
-// 둘 다 예비 창 풀의 창(모델 밖)이면 모델 대신 풀에 적는다(TRD S21-slot-docking §3-9 「풀」) — 모델은 모르는
-//   label 을 거절해, 적지 않으면 들일 때 옮겨 담을 재기가 없다.
+// For a window of the spare window pool (outside the model), both are recorded in the pool instead of the model (TRD S21-slot-docking §3-9 「풀」) — the model rejects an unknown
+//   label, and if not recorded there would be no measurement to move over when it is taken in.
 
-/// 창 웹뷰가 자기 탭 내용 영역 크기(정수 CSS px)를 알린다 — `invoke('report_window_canvas', { w, h })`.
+/// The window webview tells the size of its own tab content area (integer CSS px) — `invoke('report_window_canvas', { w, h })`.
 ///
-/// ★창 label 을 인자로 받지 않는다★ — 잘못 적힌 label 하나가 남의 창 캔버스를 덮는다. Tauri 가 넣어 주는
-/// [`Window`] 가 그 값의 유일한 권위다(`report_view_commands` 와 같은 규칙).
-/// `w` 나 `h` 가 0 이면 무시하고 직전 값을 유지한다(`Ok`). 탭 모델에도 예비 창 풀에도 없는 창이면 `Err`.
+/// ★It does not take the window label as an argument★ — one wrongly written label would overwrite another window's canvas. The [`Window`] that
+/// Tauri injects is the sole authority for that value (the same rule as `report_view_commands`).
+/// If `w` or `h` is 0 it is ignored and the previous value is kept (`Ok`). If the window is in neither the tab model nor the spare window pool, `Err`.
 #[tauri::command]
 pub fn report_window_canvas(
     window: Window,
@@ -617,9 +617,9 @@ pub fn report_window_canvas(
     spare.report_canvas(&state, window.label(), w, h)
 }
 
-/// 창 웹뷰가 칸 틀 기본 지표를 알린다 — `invoke('report_ui_metrics', { metrics })`. 계약(단위·범위)은
-/// [`UiMetrics`] 문서가 정본이다. 범위를 벗어나면 `Err` 이고 직전 값을 유지한다. 창 label 은
-/// `report_window_canvas` 와 같이 Tauri 가 넣어 주는 [`Window`] 에서 꺼낸다.
+/// The window webview tells the basic metrics of the area frame — `invoke('report_ui_metrics', { metrics })`. The contract (units · range) is
+/// canonical in the [`UiMetrics`] docs. If out of range it is `Err` and the previous value is kept. The window label is taken, like
+/// `report_window_canvas`, from the [`Window`] that Tauri injects.
 #[tauri::command]
 pub fn report_ui_metrics(
     window: Window,
@@ -630,14 +630,14 @@ pub fn report_ui_metrics(
     spare.report_metrics(&state, window.label(), metrics)
 }
 
-// ── read-only 조회 ───────────────────────────────────────────────────────────
+// ── read-only queries ───────────────────────────────────────────────────────────
 
 #[tauri::command]
 pub fn get_view(state: State<'_, LayoutState>, view_id: Uuid) -> Result<ViewSnapshot, String> {
     apply::get_view(&state, view_id)
 }
 
-// 창 `window` 의 탭 목록 + 활성 + version 조회(= window:tabs-updated 페이로드와 동형).
+// Query window `window`'s tab list + active + version (= isomorphic to the window:tabs-updated payload).
 #[tauri::command]
 pub fn list_tabs(
     state: State<'_, LayoutState>,
@@ -646,7 +646,7 @@ pub fn list_tabs(
     apply::list_tabs(&state, &resolve_window(&state, &window)?)
 }
 
-// 창 label 목록 조회(부팅·진단용).
+// Query the window label list (for boot · diagnostics).
 #[tauri::command]
 pub fn list_windows(state: State<'_, LayoutState>) -> Result<Vec<String>, String> {
     apply::list_windows(&state)
