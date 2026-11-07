@@ -1,27 +1,27 @@
-//! tracing 전역 초기화 + 프로세스 실행 1회분 파일 로그.
+//! tracing global init + a file log for one process run.
 //!
-//! ADR-0138 — 릴리스 로그는 파일에 **동기로** 남긴다(비동기 writer 금지 · 폴더는 호출자가 넘긴다).
+//! ADR-0138 — release logs are written to a file **synchronously** (no async writer · the caller passes the folder).
 //!
-//! 진입점은 둘이다: [`init_logging`](stdout 만) · [`init_logging_with_file`](stdout + 파일). 둘 다
-//! 멱등이고, 프로세스당 먼저 부른 쪽이 이긴다.
+//! There are two entry points: [`init_logging`] (stdout only) · [`init_logging_with_file`] (stdout + file). Both are
+//! idempotent, and per process the one called first wins.
 //!
-//! ★파일 sink 의 존재 이유 = 릴리즈에서 stdout 이 아무 데도 없다는 것★(실측):
-//! 릴리즈 바이너리는 `windows_subsystem = "windows"` 라 콘솔이 없고, 데몬은 WMI
-//! `Win32_Process.Create` 로 뜨는데 그 API 는 std 핸들을 넘길 수 없어 자식의 stdout/stderr 이
-//! 어디에도 붙지 않는다(비-WMI 경로는 아예 null 로 지정한다). 데몬은 부모 환경도 물려받지 않아
-//! `RUST_LOG` 도 닿지 않는다. 그래서 파일이 없으면 **기동 실패의 원인이 남는 곳이 한 군데도 없다.**
+//! ★The reason the file sink exists = in release, stdout goes nowhere★ (measured):
+//! the release binary has `windows_subsystem = "windows"`, so there is no console, and the daemon is launched by WMI
+//! `Win32_Process.Create`, an API that cannot pass std handles, so the child's stdout/stderr attach
+//! to nothing (the non-WMI path sets them to null outright). The daemon does not inherit the parent environment either,
+//! so `RUST_LOG` does not reach it. So without a file, **there is no place at all where the cause of a startup failure remains.**
 //!
-//! ★로그 폴더는 호출자가 넘긴다 — 이 모듈이 스스로 찾지 않는다★: 데이터 폴더 배치는 데몬 `data_dir` 과
-//! 셸 `discovery`(사본)의 `DataLayout` 몫인데 둘 다 이쪽을 의존하므로, 여기서 그걸 부르면 고리가 된다(잎
-//! crate 불변식 — lib.rs 헤더 입주 조건 ②). 이 모듈이 소유하는 것은 받은 폴더 안의 파일
-//! 이름 규약(`<종류>-<UTC>-<pid>.log`)과 `%TEMP%` 폴백 자리뿐이다.
+//! ★The caller passes the log folder — this module does not find it itself★: the data folder layout belongs to the daemon `data_dir` and the
+//! shell `discovery` (copy)'s `DataLayout`, and both depend on this crate, so calling it from here would make a cycle (the leaf
+//! crate invariant — lib.rs header, tenancy condition ②). What this module owns is only the file
+//! name convention inside the received folder (`<종류>-<UTC>-<pid>.log`) and the `%TEMP%` fallback location.
 //!
-//! ★그 폴더를 못 쓰면 조용히 포기하지 않고 `%TEMP%` 아래로 물러난다★: 안 그러면 이 기능이 **자기
-//! 목적에서 실패한다** — 데이터 폴더를 못 쓰는 것이야말로 데몬이 기동에 실패하는 흔한 이유인데,
-//! 하필 그때만 사유가 stdout(= 릴리즈에 없는 곳)으로 간다. 이 폴백은 ADR-0134 결정 4(데이터 폴더
-//! 폴백 없음)를 건드리지 않는다 — 그 결정이 막는 손상은 **상태**(명부·잠금)가 두 곳에 생기는 것이고,
-//! 여기서 옮기는 것은 상태가 없는 사유 한 장뿐이다. 둘 다 실패하면 정말 남는 곳이 없고, 그 경우의
-//! 주인은 클라이언트가 spawn 전에 도는 사전 점검이다(ADR-0135 — 데몬이 아니라 창에 사유를 띄운다).
+//! ★If that folder cannot be used, it does not give up silently but falls back under `%TEMP%`★: otherwise this feature **fails at
+//! its own purpose** — being unable to use the data folder is exactly a common reason for the daemon failing to start,
+//! and precisely then the reason goes only to stdout (= a place that does not exist in release). This fallback does not touch ADR-0134 decision 4 (no data folder
+//! fallback) — the damage that decision prevents is **state** (registry · lock) ending up in two places,
+//! and what is moved here is one state-free sheet of reasons. If both fail there is truly nowhere left, and in that case the
+//! owner is the preflight check the client runs before spawn (ADR-0135 — the reason is shown in the window, not by the daemon).
 
 use std::cell::Cell;
 use std::fs::File;
@@ -41,12 +41,12 @@ static RELOAD_HANDLE: OnceLock<FilterHandle> = OnceLock::new();
 static BEARER_RE: OnceLock<Regex> = OnceLock::new();
 static KEY_RE: OnceLock<Regex> = OnceLock::new();
 
-/// debug 로그 출력 전 민감 값(API키·Bearer 토큰)을 `***`로 치환 (T-1).
-/// 기본 로그 레벨(warn)에서는 PTY 텍스트가 찍히지 않으나,
-/// debug/trace 활성화 시 실수로 키가 노출되는 것을 방지한다.
+/// Replaces sensitive values (API keys · Bearer tokens) with `***` before debug log output (T-1).
+/// At the default log level (warn) PTY text is not printed,
+/// but this prevents a key from being exposed by mistake when debug/trace is enabled.
 ///
-/// ※ AWS Secret Access Key(40자 base64)는 패턴 식별불가로 미포함.
-/// ※ generic api_key=/token= 형태는 오탐 리스크로 미포함.
+/// ※ AWS Secret Access Key (40-char base64) is not included because the pattern is unidentifiable.
+/// ※ Generic api_key=/token= forms are not included because of false-positive risk.
 pub fn mask_secrets(s: &str) -> String {
     let bearer =
         BEARER_RE.get_or_init(|| Regex::new(r"Bearer\s+\S{10,}").expect("bearer regex compile"));
@@ -60,18 +60,18 @@ pub fn mask_secrets(s: &str) -> String {
     keys.replace_all(step1.as_ref(), "***").into_owned()
 }
 
-// ── 파일 sink ────────────────────────────────────────────────────────────────────
+// ── File sink ────────────────────────────────────────────────────────────────────
 
-/// 로그 파일을 쓰는 프로세스의 종류. **파일 이름의 접두사이자 보존 정리의 단위**다.
+/// The kind of process that writes a log file. It is **the file-name prefix and also the unit of retention cleanup**.
 ///
-/// ★자유 문자열이 아니라 닫힌 집합인 이유★: 두 프로세스가 같은 접두사를 고르면 같은 파일을 나눠
-/// 쓰게 되고, Windows 에서 그건 곧 줄이 섞여 깨진 로그다. 새 프로세스가 생기면 여기 variant 를
-/// 더해 **의식적으로** 다른 이름을 고르게 한다.
+/// ★Why it is a closed set, not a free string★: if two processes pick the same prefix they end up sharing
+/// one file, and on Windows that means interleaved, corrupted lines. When a new process appears, add a variant here
+/// so that it **consciously** picks a different name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogKind {
-    /// 에이전트 호스트 데몬(`engram-dashboard-daemon.exe`).
+    /// The agent-host daemon (`engram-dashboard-daemon.exe`).
     Daemon,
-    /// 데스크톱 클라이언트 셸(`engram-dashboard.exe`).
+    /// The desktop client shell (`engram-dashboard.exe`).
     App,
 }
 
@@ -84,60 +84,60 @@ impl LogKind {
     }
 }
 
-/// 폴백 루트 아래 로그가 모이는 하위 폴더 이름. 1차 폴더는 호출자가 통째로 넘긴다.
+/// The name of the subfolder under the fallback root where logs collect. The primary folder is passed in whole by the caller.
 const LOG_SUBDIR: &str = "logs";
 
 const LOG_EXT: &str = ".log";
 
-/// 종류별로 남기는 파일 수 — **이번 실행분을 포함한** 상한이다(그래서 새 파일을 만들기 전에
-/// `KEEP_PER_KIND - 1` 개만 남긴다).
+/// The number of files kept per kind — a cap **including this run's file** (so only
+/// `KEEP_PER_KIND - 1` are kept before creating a new file).
 const KEEP_PER_KIND: usize = 10;
 
-/// 1차 폴더를 못 쓸 때 물러나는 자리 = `%TEMP%/<이 이름>/logs/`. 데이터 폴더와 **이름이 겹치지 않게**
-/// 제품 이름을 그대로 쓴다(한 사람의 임시 폴더에 여러 배포판이 물러나면 한 폴더를 나눠 쓰게 되는데,
-/// 파일 이름에 pid 가 붙어 섞이지는 않고 보존 상한만 함께 쓴다).
+/// Where it falls back when the primary folder is unusable = `%TEMP%/<이 이름>/logs/`. The product name is used as is so that it **does not collide in name**
+/// with the data folder (if several distributions fall back into one person's temp folder they share a folder,
+/// but the pid in file names keeps them from mixing, and only the retention cap is shared).
 const FALLBACK_DIR_NAME: &str = "engram-dashboard";
 
-/// 실제로 열린 로그 파일. **subscriber 설치에 이긴 뒤에만 채워진다** — 그 전에 쓰이면 삼킨다.
+/// The log file actually opened. **Filled only after winning the subscriber install** — anything written before that is swallowed.
 static LOG_FILE: OnceLock<Mutex<File>> = OnceLock::new();
 
-/// [`Mutex`] 의 기본 [`MakeWriter`] 구현 대신 쓰는 파일 writer. 가리키는 칸이 아직 비어 있으면
-/// 그 줄을 버린다 — layer 는 설치 시점에 만들어지고 파일은 그보다 **뒤에** 열리기 때문이다.
+/// A file writer used instead of the default [`MakeWriter`] implementation of [`Mutex`]. If the slot it points to is still empty,
+/// it drops that line — because the layer is built at install time and the file is opened **after** that.
 ///
-/// ★poison 을 무시하고 계속 쓴다★: 표준 구현은 poison 에서 panic 하는데, 이 sink 의 소비자에는
-/// panic hook 이 있다. 한 번 poison 되면 그 hook 의 로그가 다시 panic 해(panic-in-panic → abort)
-/// **정작 남겨야 할 죽음의 이유가 사라진다.** 잠금이 지키는 건 줄 섞임뿐이라 뒤엎어도 안전하다.
+/// ★It ignores poison and keeps writing★: the standard implementation panics on poison, and this sink's consumers include a
+/// panic hook. Once poisoned, that hook's log would panic again (panic-in-panic → abort) and
+/// **the reason for the death we most need to keep disappears.** The lock protects only against interleaved lines, so it is safe to override.
 ///
-/// ★같은 스레드가 writer 를 쥔 채 다시 오면 그 줄은 파일에 남기지 않는다★: panic hook 은 되감기
-/// **전에, panic 한 그 스레드에서** 돌고 그 안의 로그가 이 sink 를 다시 부른다. writer 를 쥔 채
-/// (`write_all` 안에서) panic 하면 그 재진입이 같은 `Mutex` 를 다시 잠가 자기교착한다(프로세스가 멎는다 —
-/// abort 보다 나쁘다). 그래서 writer 를 쥔 동안 [`WRITING`] 표지를 세우고, 표지가 선 스레드에는
-/// 잠그지 않고 버리는 writer 를 준다(stdout layer 는 그대로 받는다).
+/// ★If the same thread comes back while holding the writer, that line is not kept in the file★: the panic hook runs **before**
+/// unwinding, **on the thread that panicked**, and the log inside it calls this sink again. If a thread panics while holding the writer
+/// (inside `write_all`), that re-entry locks the same `Mutex` again and self-deadlocks (the process hangs —
+/// worse than abort). So a [`WRITING`] flag is raised while the writer is held, and a thread with the flag set
+/// is given a writer that drops instead of locking (the stdout layer receives it as is).
 ///
-/// ★panic 중인 스레드는 다른 스레드가 쥔 잠금을 [`PANICKING_LOCK_WAIT`] 까지만 기다리고 그 줄을 버린다★:
-/// 쥔 스레드가 멎어 있으면 hook 이 끝내기(abort)에 닿기 전에 같이 멎기 때문이다. panic 중이 아닌 쓰기는
-/// 그대로 기다린다(모든 로그 호출과 같다). 되감기 중 소멸자가 내는 줄도 panic 중이라 같은 길을 탄다.
+/// ★A panicking thread waits for a lock held by another thread only up to [`PANICKING_LOCK_WAIT`], then drops the line★:
+/// if the holding thread is stuck, the hook would hang with it before reaching the end (abort). A write that is not during a panic
+/// waits as is (same as every log call). A line emitted by a destructor during unwinding is also during a panic, so it takes the same path.
 // ADR-0292
 struct FileSink(&'static OnceLock<Mutex<File>>);
 
-/// panic 중인 스레드가 파일 잠금을 기다리는 상한. 평상시 잠금은 한 줄을 쓰는 동안만 쥐어지므로 흔한 경합에서는
-/// 줄을 남기기에 넉넉하고, 쥔 이가 멎었을 때 끝내기(abort)를 늦추는 양은 사람이 못 느낄 만큼으로 둔다.
+/// The cap on how long a panicking thread waits for the file lock. Normally the lock is held only while one line is written, so in common contention it is
+/// enough to keep the line, and the amount it delays the end (abort) when the holder is stuck is kept below what a person can notice.
 const PANICKING_LOCK_WAIT: Duration = Duration::from_millis(100);
 
 thread_local! {
-    /// 이 스레드가 지금 [`FileSink`] 의 파일 잠금을 쥐고 있나. const + `Drop` 없는 값이라 스레드 해체 중에도
-    /// 읽힌다고 보지만 이는 std 구현의 동작이지 문서화된 보장이 아니다 — 못 읽으면 「쥐고 있지 않음」으로 읽는다.
+    /// Does this thread currently hold the file lock of [`FileSink`]? As a const value without `Drop` it is thought to be readable even during thread teardown,
+    /// but that is std implementation behavior, not a documented guarantee — if it cannot be read, it is read as 「쥐고 있지 않음」 (not holding).
     static WRITING: Cell<bool> = const { Cell::new(false) };
 }
 
 enum FileSinkWriter<'a> {
     Live(Held<'a>),
-    /// 파일이 아직(또는 끝내) 안 열린 상태이거나, 이 스레드가 이미 쓰는 중 — 조용히 버린다. stdout layer 는
-    /// 그대로 받는다.
+    /// The file is not yet (or never) opened, or this thread is already writing — quietly dropped. The stdout layer
+    /// receives it as is.
     Void,
 }
 
-/// 파일 잠금 + 그동안 선 [`WRITING`] 표지. drop 이 표지를 내린다 — 되감기로 버려져도 내려간다.
+/// File lock + the [`WRITING`] flag raised meanwhile. drop lowers the flag — it is lowered even if dropped by unwinding.
 struct Held<'a>(MutexGuard<'a, File>);
 
 impl<'a> Held<'a> {
@@ -163,7 +163,7 @@ impl<'a> MakeWriter<'a> for FileSink {
         if WRITING.try_with(Cell::get).unwrap_or(false) {
             return FileSinkWriter::Void;
         }
-        // 같은 crate 의 `sync` 입주자를 부르지 않는다 — 입주자끼리 무참조(lib.rs 게이트 ③ · ADR-0275).
+        // Does not call the `sync` tenant of the same crate — no references between tenants (lib.rs gate ③ · ADR-0275).
         let guard = if std::thread::panicking() {
             match lock_within(m, PANICKING_LOCK_WAIT) {
                 Some(guard) => guard,
@@ -176,7 +176,7 @@ impl<'a> MakeWriter<'a> for FileSink {
     }
 }
 
-/// `limit` 안에 잠금을 얻으면 그 가드, 못 얻으면 `None`. poison 은 위 [`FileSink`] 와 같은 까닭으로 무시한다.
+/// If the lock is acquired within `limit`, that guard; otherwise `None`. Poison is ignored for the same reason as [`FileSink`] above.
 fn lock_within(m: &Mutex<File>, limit: Duration) -> Option<MutexGuard<'_, File>> {
     let deadline = Instant::now() + limit;
     loop {
@@ -207,8 +207,8 @@ impl io::Write for FileSinkWriter<'_> {
     }
 }
 
-/// UTC 초 단위 타임스탬프 `YYYYMMDD-HHMMSS`. 자릿수가 고정이라 **사전순 = 시간순**이고, 보존 정리가
-/// 그 성질에 기댄다.
+/// A UTC second-resolution timestamp `YYYYMMDD-HHMMSS`. The digit count is fixed so **lexicographic order = time order**, and retention cleanup
+/// relies on that property.
 fn utc_stamp(t: SystemTime) -> String {
     let secs = t
         .duration_since(UNIX_EPOCH)
@@ -220,11 +220,11 @@ fn utc_stamp(t: SystemTime) -> String {
     format!("{y:04}{m:02}{d:02}-{hh:02}{mm:02}{ss:02}")
 }
 
-/// Unix epoch 이후 경과 일수 → (년, 월, 일). Howard Hinnant 의 `civil_from_days`(public domain
-/// chrono 알고리즘)를 1970 이후 구간으로 좁힌 것.
+/// Days elapsed since the Unix epoch → (year, month, day). Howard Hinnant's `civil_from_days` (public domain
+/// chrono algorithm) narrowed to the range after 1970.
 ///
-/// ★날짜 crate 를 들이지 않으려고 손으로 둔다★: 이 crate 의 의존은 이 파일명 하나 때문에 늘릴 값이
-/// 아니다(로그 **줄**의 타임스탬프는 tracing-subscriber 가 이미 찍는다).
+/// ★Hand-written to avoid pulling in a date crate★: this crate's dependencies are not to be increased for this one file name
+/// (the timestamp of a log **line** is already printed by tracing-subscriber).
 fn civil_from_days(days: u64) -> (u64, u64, u64) {
     let z = days + 719_468;
     let era = z / 146_097;
@@ -238,16 +238,16 @@ fn civil_from_days(days: u64) -> (u64, u64, u64) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
-/// 이 이름이 **이 종류의** 실행 로그인가 — `<종류>-YYYYMMDD-HHMMSS-<pid>.log` 문법에 정확히 맞는
-/// 것만 참이다.
+/// Is this name a run log **of this kind** — only a name that matches exactly the `<종류>-YYYYMMDD-HHMMSS-<pid>.log` grammar
+/// is true.
 ///
-/// ★접두사 일치(`starts_with("<종류>-")`)로 고르지 마라(되살리지 마라)★: 그러면 둘이 깨진다.
-/// ① 라벨이 다른 라벨의 접두사이기만 하면(`app` vs `app-updater`) 한쪽의 정리가 **다른 종류의
-/// 파일을 지운다** — 라벨은 앞으로도 늘어난다. ② 이름이 곧 정렬 키라, 손으로 둔 `daemon-메모.log`
-/// 하나가 사전순 끝에 눌러앉아 **진짜 로그를 상한 밖으로 밀어내 지운다.**
+/// ★Do not select by prefix match (`starts_with("<종류>-")`) (do not revive it)★: then two things break.
+/// ① If a label is merely the prefix of another label (`app` vs `app-updater`), one side's cleanup **deletes files of the other
+/// kind** — labels will keep growing. ② The name is the sort key, so one hand-placed `daemon-메모.log`
+/// settles at the end of lexicographic order and **pushes real logs out of the cap and deletes them.**
 ///
-/// 달력 유효성까지 보지는 않는다(`daemon-20261301-…` 는 통과). 문법만으로도 위 둘은 막히고, 우리가
-/// 쓴 이름은 [`utc_stamp`] 가 만들어 애초에 유효하다.
+/// It does not check calendar validity either (`daemon-20261301-…` passes). The grammar alone blocks the two above, and the names we
+/// wrote are made by [`utc_stamp`] and are valid to begin with.
 fn is_run_log_name(name: &str, kind: LogKind) -> bool {
     let Some(rest) = name
         .strip_prefix(kind.label())
@@ -270,12 +270,12 @@ fn is_run_log_name(name: &str, kind: LogKind) -> bool {
             .all(|s| s.bytes().all(|b| b.is_ascii_digit()))
 }
 
-/// 같은 종류의 오래된 파일을 지워 `keep` 개만 남긴다. 반환 = **삼킨 실패들의 사유**.
+/// Deletes old files of the same kind and leaves only `keep`. Returns = **the reasons of the failures it swallowed**.
 ///
-/// 삭제 실패로 기동을 멈추지는 않는다 — 다른 프로세스가 붙들고 있는 파일이 정상적으로 존재하고(같은
-/// 종류의 데몬이 두 데이터 폴더에서 도는 등), 그 하나 때문에 못 뜨면 안 된다. 다만 **조용히**
-/// 삼키지는 않는다: 이건 영원히 실패해도 아무도 모르는 종류의 일이라, 호출자가 subscriber 설치
-/// 직후 한 번에 낸다(여기서는 못 낸다 — 이 함수가 도는 시점엔 subscriber 가 아직 없다).
+/// A deletion failure does not stop startup — a file held by another process legitimately exists (e.g. a daemon of the same
+/// kind running on two data folders), and a start must not fail because of that one. But it is not swallowed **silently**:
+/// this is the kind of thing that could fail forever with nobody knowing, so the caller emits it all at once right after the subscriber is installed
+/// (it cannot emit here — the subscriber does not exist yet when this function runs).
 fn prune_old_logs(dir: &Path, kind: LogKind, keep: usize) -> Vec<String> {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
@@ -304,23 +304,23 @@ fn prune_old_logs(dir: &Path, kind: LogKind, keep: usize) -> Vec<String> {
     failures
 }
 
-/// 이번 실행이 실제로 연 파일 한 벌 + **그때는 낼 수 없었던 진단**.
+/// One set of files this run actually opened + **diagnostics that could not be emitted at that time**.
 ///
-/// `deferred` 는 subscriber 설치 전에 일어난 실패의 사유들이다(보존 삭제 · 머리글 쓰기 · 폴백).
-/// 그 시점엔 로그를 낼 곳이 없어 모아 두고, 호출자가 설치 직후 한 번에 낸다.
+/// `deferred` is the reasons of failures that happened before the subscriber install (retention deletion · header write · fallback).
+/// At that point there is nowhere to emit logs, so they are gathered, and the caller emits them all at once right after install.
 struct OpenedLog {
     path: PathBuf,
     file: File,
     deferred: Vec<String>,
 }
 
-/// `<dir>/<종류>-<UTC>-<pid>.log` 를 새로 열고 그 핸들을 돌려준다(`dir` 은 없으면 만든다).
+/// Newly opens `<dir>/<종류>-<UTC>-<pid>.log` and returns the handle (`dir` is created if missing).
 ///
-/// pid 를 붙이는 이유는 같은 초에 두 번 뜬 실행이 한 파일을 나눠 쓰는 것을 막기 위해서다.
+/// The pid is added to keep two runs started in the same second from sharing one file.
 ///
-/// 알려진 잔여(수정 안 함): pid 가 같은 UTC 초 안에서 재사용되거나 시계가 뒤로 돌면 이름이 겹치고,
-/// append 라 **두 실행분이 한 파일에 이어진다**. 머리글이 그때마다 다시 찍혀 경계는 읽을 수 있고,
-/// 이걸 막으려면 열기에 배타 생성 + 재시도 루프가 필요해 대가가 이득을 넘는다.
+/// Known residual (not fixed): if a pid is reused within the same UTC second or the clock goes backwards, the names collide,
+/// and because of append **two runs are joined in one file**. The header is printed again each time so the boundary is readable,
+/// and preventing this would need exclusive create + a retry loop on open, so the cost exceeds the benefit.
 fn open_run_log(dir: &Path, kind: LogKind) -> io::Result<OpenedLog> {
     std::fs::create_dir_all(dir)?;
     let mut deferred = prune_old_logs(dir, kind, KEEP_PER_KIND.saturating_sub(1));
@@ -342,12 +342,12 @@ fn open_run_log(dir: &Path, kind: LogKind) -> io::Result<OpenedLog> {
     })
 }
 
-/// [`open_run_log`] 를 1차(호출자 폴더) → 2차(`%TEMP%`) 순으로 시도한다. `Err` = 둘 다 실패, 값은
-/// 두 사유.
+/// Tries [`open_run_log`] in the order primary (caller's folder) → secondary (`%TEMP%`). `Err` = both failed, the value is
+/// the two reasons.
 ///
-/// ★2차가 있는 이유 = 1차가 실패하는 그 상황이 곧 진단이 가장 필요한 상황이라서★: 데이터 폴더를
-/// 못 쓰면 데몬은 그 직후 기동을 포기하는데, 폴백이 없으면 그 사유가 stdout(릴리즈엔 없다)으로만
-/// 간다. 근거·이 폴백이 ADR-0134 결정 4를 침범하지 않는 이유는 이 파일 머리말.
+/// ★Why the secondary exists = the situation where the primary fails is exactly where diagnosis is needed most★: if the data folder
+/// cannot be used the daemon gives up startup right after, and without the fallback that reason goes only to stdout (which does not exist in release).
+/// For the rationale and why this fallback does not infringe ADR-0134 decision 4, see this file's header.
 fn open_run_log_with_fallback(logs_dir: &Path, kind: LogKind) -> Result<OpenedLog, Vec<String>> {
     let primary = match open_run_log(logs_dir, kind) {
         Ok(opened) => return Ok(opened),
@@ -373,11 +373,11 @@ fn open_run_log_with_fallback(logs_dir: &Path, kind: LogKind) -> Result<OpenedLo
     }
 }
 
-/// 파일 첫 줄에 이 실행의 신원을 박는다.
+/// Stamps the identity of this run on the first line of the file.
 ///
-/// ★로그 이벤트가 아니라 파일 머리글인 이유★: 기본 레벨이 `warn` 이라 **정상 기동은 한 줄도 남기지
-/// 않는다** — 그러면 남는 건 빈 파일이고, 언제 뜬 어느 바이너리의 것인지조차 알 수 없다. 그걸 메우려고
-/// 기동 알림을 `info` → `warn` 으로 올리면 레벨의 의미가 무너지므로, 이벤트 평면 밖에 한 줄만 둔다.
+/// ★Why a file header and not a log event★: the default level is `warn`, so **a normal startup leaves not a single line**
+/// — what remains is an empty file, and you cannot even tell which binary from when it belongs to. Raising the startup notice from `info` → `warn`
+/// to fill that would break the meaning of levels, so one line is placed outside the event plane.
 fn write_header(file: &mut File, kind: LogKind, stamp: &str) -> io::Result<()> {
     let exe = std::env::current_exe()
         .map(|p| p.display().to_string())
@@ -390,36 +390,36 @@ fn write_header(file: &mut File, kind: LogKind, stamp: &str) -> io::Result<()> {
     )
 }
 
-// ── 초기화 ───────────────────────────────────────────────────────────────────────
+// ── Initialization ───────────────────────────────────────────────────────────────
 
-/// tracing-subscriber 전역 초기화(stdout 만). 앱 부팅 시 1회만 호출 (멱등 — 중복 호출 no-op).
-/// 기본 레벨: RUST_LOG 환경변수 우선, 없으면 "warn" (릴리스 기본 OFF — 평상시 거의 무출력).
+/// Global tracing-subscriber init (stdout only). Call only once at app boot (idempotent — repeated calls are no-ops).
+/// Default level: the RUST_LOG environment variable takes priority, otherwise "warn" (release default OFF — almost no output normally).
 pub fn init_logging() {
     init_subscriber(false);
 }
 
-/// [`init_logging`] + `logs_dir` 안의 이번 실행 전용 파일 sink. `logs_dir` = 로그 폴더 자체(데이터 폴더가
-/// 아니다 — 배치는 부르는 쪽 `DataLayout::logs_dir` 이 정한다).
+/// [`init_logging`] + a file sink dedicated to this run inside `logs_dir`. `logs_dir` = the log folder itself (not the data folder —
+/// the layout is decided by the caller's `DataLayout::logs_dir`).
 ///
-/// 반환값 = 이 호출이 실제로 붙인 로그 파일 경로. **1차 폴더를 못 쓰면 `%TEMP%` 아래 경로일 수
-/// 있다**(그 사실은 반환 직전 `warn` 으로도 남는다 — 이 파일 머리말). `None` = 파일 sink 없음이고,
-/// 사유는 셋이다: 이미 초기화됨(조용) · 남이 먼저 깐 subscriber 라 layer 가 버려짐(조용) ·
-/// 1차·폴백 둘 다 열기 실패(직후 `warn` — 단 릴리즈에선 그 `warn` 도 갈 곳이 없다).
+/// Return value = the log file path this call actually attached. **If the primary folder cannot be used, it may be a path under `%TEMP%`**
+/// (that fact is also left as a `warn` just before returning — this file's header). `None` = no file sink,
+/// and there are three reasons: already initialized (quiet) · someone else installed the subscriber first so the layer was discarded (quiet) ·
+/// both primary and fallback failed to open (a `warn` right after — but in release even that `warn` has nowhere to go).
 ///
-/// 레벨 필터·stdout 출력은 [`init_logging`] 과 동일하다 — 파일은 **더해질 뿐** 대체하지 않는다.
+/// The level filter and stdout output are the same as [`init_logging`] — the file is **only added**, it does not replace.
 ///
-/// 알려진 잔여(수정 안 함): 같은 종류를 두 스레드가 동시에 부르면 둘 다 맨 앞 검사를 통과할 수 있다.
-/// 진 쪽은 `try_init` 에서 걸러져 `None` 을 돌려주고 파일도 만들지 않으므로 손상은 없다 — 정확한
-/// 배제를 하려면 초기화 전용 잠금이 필요하고, 부팅 1회 호출에 그 값은 없다.
+/// Known residual (not fixed): if two threads call the same kind at the same time, both may pass the first check.
+/// The loser is filtered out at `try_init`, returns `None`, and creates no file, so there is no corruption — exact
+/// exclusion would need an init-only lock, and for a once-at-boot call it is not worth it.
 pub fn init_logging_with_file(logs_dir: &Path, kind: LogKind) -> Option<PathBuf> {
     if RELOAD_HANDLE.get().is_some() {
         return None;
     }
 
-    // ★파일은 subscriber 설치에 **이긴 뒤에만** 연다★: 순서를 뒤집으면 진 호출도 파일을 만들고
-    //   보존 정리까지 돌려, 아무도 쓰지 않을 빈 파일이 **진짜 로그 하나를 지우고** 그 자리를 영구히
-    //   차지한다. layer 는 아직 안 열린 칸을 가리킨 채 설치되고(그 사이 줄은 [`FileSink`] 가 버린다),
-    //   칸이 채워지는 건 바로 아래다.
+    // ★The file is opened **only after winning** the subscriber install★: if the order is reversed, a losing call also creates the file and
+    //   runs retention cleanup, and an empty file nobody will write **deletes one real log** and permanently
+    //   takes its place. The layer is installed pointing at a slot that is not yet open (lines in between are dropped by [`FileSink`]),
+    //   and the slot is filled right below.
     if !init_subscriber(true) {
         return None;
     }
@@ -427,21 +427,21 @@ pub fn init_logging_with_file(logs_dir: &Path, kind: LogKind) -> Option<PathBuf>
     match open_run_log_with_fallback(logs_dir, kind) {
         Ok(opened) => {
             let path = opened.path;
-            // set 실패 = 이 정적 칸을 채운 다른 호출이 있다는 뜻인데, 그건 try_init 에 이긴 하나뿐이라
-            //   여기까지 오지 않는다. 그래도 파일 없이 경로를 광고하지는 않는다.
+            // A set failure means another call filled this static slot, but only the one that won try_init can do that, so
+            //   it never gets here. Even so, it does not advertise a path without a file.
             if LOG_FILE.set(Mutex::new(opened.file)).is_err() {
                 return None;
             }
-            // 이제야 낼 수 있는 것들 — 모아 둔 사유는 sink 가 붙은 다음에 내야 파일에 남는다.
+            // The things that can be emitted only now — the gathered reasons must be emitted after the sink is attached to remain in the file.
             for line in opened.deferred {
                 tracing::warn!("{line}");
             }
             Some(path)
         }
         Err(reasons) => {
-            // ★여기가 이 기능의 마지막 구멍이다★: 갈 곳이 stdout 뿐인데 릴리즈엔 stdout 이 없다.
-            //   이 경우(1차 폴더도 임시 폴더도 못 씀)의 주인은 클라이언트가 데몬을 띄우기 전에 도는
-            //   데이터 폴더 사전 점검이고(ADR-0135), 사용자는 그쪽 창에서 사유를 본다.
+            // ★This is the last hole of this feature★: the only place to go is stdout, and release has no stdout.
+            //   The owner for this case (neither the primary folder nor the temp folder can be used) is the data folder preflight the client runs before it starts the daemon
+            //   (ADR-0135), and the user sees the reason in that window.
             for r in reasons {
                 tracing::warn!("파일 로그를 열지 못해 stdout 으로만 기록함: {r}");
             }
@@ -450,8 +450,8 @@ pub fn init_logging_with_file(logs_dir: &Path, kind: LogKind) -> Option<PathBuf>
     }
 }
 
-/// subscriber 를 실제로 설치했으면 `true`. `with_file` 은 파일 layer 를 **자리만** 붙일지다 —
-/// 실제 파일은 [`LOG_FILE`] 이 채워질 때 살아난다.
+/// `true` if the subscriber was actually installed. `with_file` says whether to attach the file layer as **a placeholder only** —
+/// the real file comes alive when [`LOG_FILE`] is filled.
 fn init_subscriber(with_file: bool) -> bool {
     if RELOAD_HANDLE.get().is_some() {
         return false;
@@ -461,18 +461,18 @@ fn init_subscriber(with_file: bool) -> bool {
 
     let (filter_layer, handle) = reload::Layer::new(filter);
 
-    // ★비동기 writer(`tracing_appender::non_blocking`)를 쓰지 마라(되살리지 마라)★: 데몬은
-    //   `std::process::exit(code)` 로 끝나 소멸자를 건너뛴다. worker 스레드가 아직 안 비운 줄은
-    //   그대로 사라지는데, 그 사라지는 줄이 바로 이 기능이 잡으려는 **기동 실패 직전의 마지막 줄**이다.
-    //   `File` 은 버퍼가 없어 이벤트 한 줄이 곧 한 번의 write 다 — 프로세스가 죽기 전에 이미 디스크에 있다.
-    // ANSI OFF: 파일을 사람이나 LLM 이 그대로 읽는다(색 이스케이프는 잡음).
+    // ★Do not use an async writer (`tracing_appender::non_blocking`) (do not revive it)★: the daemon
+    //   ends with `std::process::exit(code)` and skips destructors. Lines the worker thread has not yet flushed
+    //   vanish, and those vanishing lines are exactly **the last line just before a startup failure** that this feature is meant to catch.
+    //   `File` has no buffer, so one event line is one write — it is already on disk before the process dies.
+    // ANSI OFF: a person or LLM reads the file as is (color escapes are noise).
     let file_layer = with_file.then(|| {
         tracing_subscriber::fmt::layer()
             .with_ansi(false)
             .with_writer(FileSink(&LOG_FILE))
     });
 
-    // try_init: 다른 subscriber가 이미 설정된 경우(테스트 등) 무시
+    // try_init: ignored if another subscriber is already set (tests etc.)
     let result = tracing_subscriber::registry()
         .with(filter_layer)
         .with(tracing_subscriber::fmt::layer())
@@ -485,7 +485,7 @@ fn init_subscriber(with_file: bool) -> bool {
     result.is_ok()
 }
 
-/// 런타임 로그 레벨 변경. 유효값: "trace"|"debug"|"info"|"warn"|"error"|"off".
+/// Runtime log level change. Valid values: "trace"|"debug"|"info"|"warn"|"error"|"off".
 pub fn set_log_level(level: &str) -> Result<(), String> {
     let handle = RELOAD_HANDLE
         .get()
@@ -515,7 +515,7 @@ mod tests {
         dir
     }
 
-    // ── 타임스탬프 ──
+    // ── Timestamps ──
     #[test]
     fn utc_stamp_is_lexicographically_sortable_utc() {
         assert_eq!(utc_stamp(UNIX_EPOCH), "19700101-000000");
@@ -523,7 +523,7 @@ mod tests {
             utc_stamp(UNIX_EPOCH + Duration::from_secs(1_755_000_000)),
             "20250812-120000"
         );
-        // 윤일 — civil_from_days 의 400년 주기 분기.
+        // Leap day — the 400-year cycle branch of civil_from_days.
         assert_eq!(
             utc_stamp(UNIX_EPOCH + Duration::from_secs(951_782_400)),
             "20000229-000000"
@@ -533,7 +533,7 @@ mod tests {
         assert!(early < late, "사전순이 시간순이어야: {early} < {late}");
     }
 
-    // ── 파일 생성 ──
+    // ── File creation ──
     #[test]
     fn open_run_log_creates_the_given_dir_and_kind_prefixed_file() {
         let logs_dir = temp_dir("open").join("logs");
@@ -554,7 +554,7 @@ mod tests {
             "pid 포함: {name}"
         );
 
-        // 정상 기동은 warn 레벨에서 무출력이라, 머리글이 없으면 파일이 통째로 빈다.
+        // A normal startup prints nothing at warn level, so without the header the file would be entirely empty.
         let head = std::fs::read_to_string(&path).expect("읽기");
         assert!(head.starts_with("==== engram daemon | "), "머리글: {head}");
         assert!(head.ends_with("====\n"), "머리글 한 줄로 끝나야: {head}");
@@ -568,10 +568,10 @@ mod tests {
         assert_ne!(daemon.path, app.path);
     }
 
-    // 폴백(1차 폴더 불가 → `%TEMP%`)은 `%TEMP%` 를 갈아끼운 별도 프로세스가 필요해 통합 테스트에
-    // 있다(`tests/logging_fallback.rs`) — 여기서 하면 다른 테스트가 보는 임시 폴더까지 건드린다.
+    // The fallback (primary folder unusable → `%TEMP%`) needs a separate process that swaps `%TEMP%`, so it is in an integration test
+    // (`tests/logging_fallback.rs`) — doing it here would touch the temp folder that other tests see too.
 
-    // ── 보존 ──
+    // ── Retention ──
     #[test]
     fn prune_keeps_newest_per_kind_and_ignores_other_kinds() {
         let data_dir = temp_dir("prune");
@@ -610,15 +610,15 @@ mod tests {
         );
     }
 
-    /// 라벨이 다른 라벨의 접두사인 경우와, 문법에 안 맞는 이름이 정렬 끝에 눌러앉는 경우 — 접두사
-    /// 일치로 되돌리면 둘 다 **남의 파일을 지운다**.
+    /// The case where a label is the prefix of another label, and the case where a name not matching the grammar settles at the end of the sort — if reverting to prefix
+    /// match, both **delete someone else's file**.
     #[test]
     fn prune_selects_by_filename_grammar_not_prefix() {
         let data_dir = temp_dir("grammar");
         let dir = data_dir.join(LOG_SUBDIR);
         std::fs::create_dir_all(&dir).expect("dir");
 
-        // 아직 없는 미래 종류(라벨이 `app-` 로 시작한다)와 손으로 둔 이름.
+        // A future kind that does not exist yet (the label starts with `app-`) and a hand-placed name.
         for name in [
             "app-updater-20260101-000000-1.log",
             "app-메모.log",
@@ -672,8 +672,8 @@ mod tests {
         assert_eq!(count, KEEP_PER_KIND);
     }
 
-    /// 삭제까지 막는 진짜 배타 열기는 Windows 공유 모드로만 만들 수 있다(std `File::open` 은
-    /// `FILE_SHARE_DELETE` 를 포함해 열어 삭제가 그냥 성공한다 — 그걸로는 이 회귀를 못 잡는다).
+    /// A truly exclusive open that also blocks deletion can be made only with Windows share modes (std `File::open` opens
+    /// including `FILE_SHARE_DELETE`, so deletion simply succeeds — that cannot catch this regression).
     #[cfg(windows)]
     #[test]
     fn prune_tolerates_locked_files() {
@@ -715,8 +715,8 @@ mod tests {
     }
 
     // ── writer ──
-    /// 운영에서는 [`LOG_FILE`] 하나뿐이지만 그건 프로세스당 한 번만 채워져 테스트가 나눠 쓸 수 없다.
-    /// 그래서 sink 가 가리킬 칸을 테스트마다 새로 만든다.
+    /// In production there is only [`LOG_FILE`], but it is filled once per process so tests cannot share it.
+    /// So the slot the sink points to is made anew for each test.
     fn leaked_slot() -> &'static OnceLock<Mutex<File>> {
         Box::leak(Box::new(OnceLock::new()))
     }
@@ -746,16 +746,16 @@ mod tests {
             .ends_with("after-poison\n"));
     }
 
-    /// 파일이 아직 안 열린 창(= layer 설치 ~ 칸 채우기 사이)에 오는 줄은 버린다 — 여기서 막지 않으면
-    /// `unwrap` 계열이 부팅 초입의 로그 한 줄로 프로세스를 죽인다.
+    /// Lines arriving in the window where the file is not yet open (= between layer install and slot fill) are dropped — if not blocked here,
+    /// `unwrap`-family calls would kill the process with one log line early in boot.
     #[test]
     fn file_sink_writer_discards_lines_before_the_file_exists() {
         let sink = FileSink(leaked_slot());
         sink.make_writer().write_all(b"nowhere\n").expect("삼켜야");
     }
 
-    /// writer 를 쥔 스레드가 다시 오면(쥔 채 panic 한 스레드의 hook 로그) 그 줄은 버리고 자기를 기다리지
-    /// 않는다. 다른 스레드에서 돌려 시한을 거는 것은 회귀가 영영 멈춤으로 나타나기 때문이다.
+    /// If the thread that holds the writer comes back (a hook log of a thread that panicked while holding it), that line is dropped and it does not wait for itself.
+    /// Running it on another thread with a deadline is because the regression would show up as a permanent hang.
     #[test]
     fn file_sink_drops_the_line_of_a_thread_already_writing() {
         let data_dir = temp_dir("reentry");
@@ -787,8 +787,8 @@ mod tests {
             .ends_with("outer-1\nouter-2\nafter\n"));
     }
 
-    /// 다른 스레드가 쥔 채 멎은 잠금 앞에서 panic 중인 스레드(hook · 되감기 중 소멸자)는 상한만 기다리고 그 줄을
-    /// 버린다. 회귀는 영영 멈춤이라 시한을 건다.
+    /// A panicking thread (hook · destructor during unwinding) facing a lock held and stuck by another thread waits only up to the cap and drops the line.
+    /// The regression is a permanent hang, so a deadline is applied.
     #[test]
     fn a_panicking_thread_gives_up_on_a_lock_held_by_another_thread() {
         let data_dir = temp_dir("held-elsewhere");
