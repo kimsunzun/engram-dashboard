@@ -277,7 +277,7 @@ That is 27 constructions plus 1 pattern. `tests/ws_e2e.rs` and `commands/layout.
 5. Add `impl RosterChanged for RosterFanout` next to its `RosterBroadcast` impl (`:2635`). It sends profile list then agent list (the same two frames as the bus notify). Amend `RosterFanout`'s doc (`:2612-2623`; struct at `:2624`): "`DaemonWiring::roster_broadcast` is the only production construction point" (`:2619`) becomes "… and the WS `SpawnByCwd` arm, from the core's own `fanout` + `manager` (the same assembly)".
 6. Run `tokio::task::spawn_blocking(move || create_and_start(&*mgr, &roster, NewAgent { cwd, name: None, backend, policy, delivery }))`.
 7. Map the result per §4-1. The created-asleep arm builds `Error { request_id: Some(request_id), message, launch_blocked, created_agent_id: Some(id) }` directly — not through `activation_error`, which stays `created_agent_id: None` for every activation verb.
-8. Delete `spawn_command_by_cwd` (`:731`) and the asymmetry comment (`:1725-1732`).
+8. Delete `spawn_command_by_cwd` (`:731`) and the asymmetry comment (`:1727-1732`).
 9. `by_cwd_refusal` (`:762`) keeps its wording; it takes `(kind, reason)` instead of calling the policy.
 10. A `JoinError` maps to `activation_error(… PtyError::SpawnFailed("spawn task failed: …"))`, as today.
 11. Update the `llm_policy` doc (`:1294-1300`: "asked before `spawn_agent_reporting`" → "passed to the one creation body").
@@ -625,20 +625,20 @@ R6 — screen create failure after the add leaves an asleep agent with the mark 
 
 R7c — codex app-server create whose handshake really fails, with teardown observed (mandatory; run on the before-run daemon as well).
 - Setup:
-  1. Write `<QA_TMP>/fake-app-server.js` with the Write tool. It reads newline-delimited JSON from stdin. In mode `error` it answers the `initialize` request (`{"jsonrpc":"2.0","id":<its id>,"error":{"code":-32600,"message":"qa: refused"}}`). In mode `silent` it answers nothing. In both modes it stays alive (`setInterval`).
-  2. Write `<QA_TMP>/fake-error/codex.cmd` = `@node "%~dp0..\fake-app-server.js" error %*` and `<QA_TMP>/fake-silent/codex.cmd` = `@node "%~dp0..\fake-app-server.js" silent %*`. `%*` forwards codex's arguments, so the agent's fake carries `--cd <scene cwd>` on its command line. The codex backend runs `cmd.exe /c codex app-server …` resolved through `PATH` (`backend/codex/mod.rs:182, :996`).
+  1. Write `<QA_TMP>/fake-app-server.js` with the Write tool. It reads newline-delimited JSON from stdin. In mode `error` it answers the `initialize` request (`{"jsonrpc":"2.0","id":<its id>,"error":{"code":-32600,"message":"qa: refused"}}`). In mode `silent` it answers nothing. In both modes it stays alive (`setInterval`). At start it appends one JSON line `{pid, cwd: process.cwd(), argv}` to `<QA_TMP>/fakes.log` — the process cwd is the scene folder (`CommandSpec.cwd`), because in app-server mode the working folder travels in `thread/start`, not on the command line (`backend/codex/mod.rs:833-839`; `--cd` is pushed only in the Terminal branch, `:826-831`).
+  2. Write `<QA_TMP>/fake-error/codex.cmd` = `@node "%~dp0..\fake-app-server.js" error %*` and `<QA_TMP>/fake-silent/codex.cmd` = `@node "%~dp0..\fake-app-server.js" silent %*`. `%*` forwards codex's arguments (the agent's argv is `app-server --stdio` plus the MCP `-c` override, `:880`; it carries no `--cd`). The codex backend runs `cmd.exe /c codex app-server …` resolved through `PATH` (`backend/codex/mod.rs:182, :996`).
   3. Stop the daemon and relaunch it with `-EnvVars` adding `PATH=<QA_TMP win>\fake-error;<original PATH>` (original from `powershell -NoProfile -Command "$env:Path"`).
   4. **Keep the codex usage probe out of the scan.** The probe also launches `cmd /c codex app-server --stdio` (`backend/codex/usage_probe.rs:90-98`), so with the fake on PATH a probe can start a fake too. Two guards:
      - no slot shows codex usage during R7c–R7d (`layout.get` — no `Usage` slot with `show_codex`), so the shell sends no codex usage interest;
-     - the scan matches only command lines containing both `fake-app-server.js` **and** the scene's cwd (`w7c`, `w7s`, `w7d`). A probe's command line has `--stdio` and no `--cd`.
+     - the scene's fake is identified by `<QA_TMP>/fakes.log`: the line whose `cwd` ends with the scene folder (`w7c`, `w7s`, `w7d`) gives its pid; a probe-started fake (cwd = the probe's scratch dir) is ignored. Liveness = that pid alive (`Get-Process -Id <pid>`), not a command-line match. Run the scenes one at a time.
 - Action: `eval "(async () => { const t = performance.now(); const r = await window.__engramCmd.run('agent.spawnInto', { cwd: '<QA_TMP>/w7c', backend: 'codex' }).catch(e => String(e)); return { r, ms: Math.round(performance.now() - t) } })()"`.
 - Then repeat with `fake-silent` on PATH, cwd `w7s`.
 - Expected, error mode:
   - `r` contains `was created but did not start`, and `ms` is short (well under 10 s);
   - row `"blocked"` with the **`Other`** title;
-  - grandchild scan (qa 「GUI 뒷정리」, `QA_TAG`, filtered as in setup step 4) finds **no** fake for `w7c`.
+  - grandchild scan (qa 「GUI 뒷정리」, `QA_TAG`, filtered as in setup step 4) finds the `w7c` fake pid from `fakes.log` **not** alive.
 - Expected, silent mode: the same, with `ms` ≈ 10 s (`HANDSHAKE_BUDGET`).
-- Before-run: `r` is a uuid (answered as started), the row is not marked, and the scan **finds** the fake still running.
+- Before-run: `r` is a uuid (answered as started), the row is not marked, and the `fakes.log` pid for the scene is **still alive**.
 
 R7 — *extra* — fake that exits:
 - Action: `fake-exit/codex.cmd` = `@exit /b 1`, same action.
@@ -662,9 +662,9 @@ R7d — kill during the handshake window:
   4. Then `eval "window.__p"`.
 - Expected:
   - the created-asleep error, with cause `…(Killed)`;
-  - the error carries `created_agent_id`, so the bus form would carry `args.agent_id`;
+  - (the webview Tauri `spawn_into` path returns `Result<String, String>` (M8), so `created_agent_id` is not observable here — `args.agent_id` is checked by R6's bus form);
   - probe `"square"`, **no** `"blocked"` mark (a user kill is not an activation failure — §2 premise 12);
-  - the filtered scan finds no fake for `w7d`.
+  - the `w7d` fake pid from `fakes.log` is not alive.
 
 R8 — codex app-server create success, timing:
 - Action:
@@ -808,6 +808,7 @@ Code comments to fix in passing:
 
 ## 9. Review record
 
+- 2026-11-09 — round 3 (lead reviewer, delta): FIX — one MUST (R7c/R7d scan filter assumed `--cd` on the app-server argv); fixed by main in place (pid log `fakes.log`), plus R7d observability and one anchor. Remaining: U2 pending with the user.
 - 2026-11-06 — draft 1 `/engram-review trd deep` (2 Claude reviewers + Codex): **FIX**. Five MUST, the recommended items and the batched wording were applied in draft 2. H1–H3 went to the user as U2–U4. One finding was refined rather than taken verbatim: "every failure after the add records last failure" now excludes a user kill during the handshake (§2 premise 12).
 - 2026-11-09 — round 2 delta review (Claude lead + Codex): round-1 findings 1–5 **FIXED**; new **FIX** → draft 3. Applied:
   - U3 fully specified (`Error.created_agent_id`, M14);
