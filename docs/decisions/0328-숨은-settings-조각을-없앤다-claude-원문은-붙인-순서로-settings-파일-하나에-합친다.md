@@ -1,34 +1,34 @@
-# ADR-0328: 숨은 settings 조각을 없앤다 — claude 원문은 붙인 순서로 `--settings` 파일 하나에 합친다
+# ADR-0328: Remove the hidden settings fragment — merge the claude raw text into one `--settings` file in attached order
 
-- 상태: 제안 (2026-10-31, 근거: 사용자 결정 T10(2026-10-18 「프리셋으로 해줘. 사실 감추는 설정이 있으면 안되지.」 · 「이어붙이기 진행」))
-- 관련: Amends ADR-0109 (결정 9의 settings 조각 부분) (아래 「바뀌는 조항」) · ADR-0099(mcp-config 수명주기) · ADR-0327 · ADR-0316 · PRD R32 · TRD §1-2 · §1-5 표 · §3 합침 규칙 · §7 19
+- 상태: 제안 (2026-10-31, basis: user decision T10 (2026-10-18 「프리셋으로 해줘. 사실 감추는 설정이 있으면 안되지.」 · 「이어붙이기 진행」))
+- 관련: Amends ADR-0109 (the settings fragment part of Decision 9) (see 「바뀌는 조항」 below) · ADR-0099 (mcp-config lifecycle) · ADR-0327 · ADR-0316 · PRD R32 · TRD §1-2 · §1-5 table · §3 merge rules · §7 19
 
 ## 맥락
-지금 제어 채널은 스폰마다 `{"allowedMcpServers":[{"serverName":"engram"}]}` 단일 키 조각 파일을 `--settings` 로 싣는다(ADR-0109 결정 9 · `control/mcp_config.rs`). S25 는 프리셋의 claude 원문 설정도 `--settings` 로 싣는다.
+Today the control channel loads a single-key fragment file `{"allowedMcpServers":[{"serverName":"engram"}]}` with `--settings` on every spawn (ADR-0109 Decision 9 · `control/mcp_config.rs`). S25 also loads the preset's claude raw-text settings with `--settings`.
 
 ## 결정
-1. 숨은 settings 조각이 없다. `allowedMcpServers:[{serverName:"engram"}]` 와 `DISABLE_AUTOUPDATER` 는 기본 제공 「기본」 의 claude 원문(`engram:/settings/default`)에 보이게 든다.
-2. 붙은 프리셋(「기본」 포함)의 claude 원문을 붙인 순서로 휘발 폴더 `settings.json` 하나에 합쳐 `--settings` 하나로 싣는다. 합침 = 값은 나중 것 · 객체는 재귀 · 목록은 이어 붙이고 같은 값은 하나 · 키마다 다른 규칙 없음 · Engram 우선 규칙 없음. 합치는 쪽은 backend 설정 검사 포트(ADR-0334).
-3. 실 재료면 제어 채널 조각(`ControlEndpoint.settings_file`)을 싣지 않는다. `NoopLaunchKits` 는 지금 그대로 싣는다(argv 바이트 같음).
-4. `--mcp-config` 는 범위 밖이다(실행 인자 그대로 · 프리셋 아님).
+1. There is no hidden settings fragment. `allowedMcpServers:[{serverName:"engram"}]` and `DISABLE_AUTOUPDATER` are visibly contained in the claude raw text (`engram:/settings/default`) of the built-in 「기본」.
+2. Merge the claude raw text of the attached presets (including 「기본」) in attached order into one volatile folder `settings.json` and load it as one `--settings`. Merge = later values win · objects are recursive · lists are concatenated and equal values collapse to one · no per-key rules · no Engram-priority rule. The merging side is the backend settings-check port (ADR-0334).
+3. For real material, the control channel fragment (`ControlEndpoint.settings_file`) is not loaded. `NoopLaunchKits` still loads it as it does now (argv bytes identical).
+4. `--mcp-config` is out of scope (run arguments as they are · not a preset).
 
-**바뀌는 조항 (ADR-0109 결정 9):**
-- 바뀜: 「조각은 `allowedMcpServers` 단일 키 유지(잡동사니화 금지 — 회귀 테스트로 고정)」 → 조각이 없고 그 키는 「기본」 원문으로 옮긴다. 「mcp-config 디렉토리 · 스윕 · revoke 수명주기에 동승」 → 합친 파일은 실행 재료 휘발 폴더(`daemon\run\launch\` — TRD §1-4)에 산다.
-- 그대로: 「`--settings` = 파일 경로 주입(인라인 JSON 아님)」 과 그 사유(`cmd /c` 따옴표 붕괴).
-- **원천에 없음(확인 필요)**: 「쓰기 실패는 warn+계속」 이 새 판에서 어떻게 되는지.
-- Noop 길은 걷힐 때까지 결정 9 그대로 돈다.
+**Clauses that change (ADR-0109 Decision 9):**
+- Changed: 「조각은 `allowedMcpServers` 단일 키 유지(잡동사니화 금지 — 회귀 테스트로 고정)」 → there is no fragment, and that key moves into the 「기본」 raw text. 「mcp-config 디렉토리 · 스윕 · revoke 수명주기에 동승」 → the merged file lives in the launch-materials volatile folder (`daemon\run\launch\` — TRD §1-4).
+- Unchanged: 「`--settings` = 파일 경로 주입(인라인 JSON 아님)」 and its reason (`cmd /c` quote collapse).
+- **Not in the source (to confirm)**: what happens to 「쓰기 실패는 warn+계속」 in the new edition.
+- The Noop path runs as in Decision 9 until it is withdrawn.
 
 ## 거부한 대안
-- **숨겨 주입하는 조각** — 사용자 「사실 감추는 설정이 있으면 안되지」(T10).
-- **`allowedMcpServers` 는 Engram 값이 권위**(옛 추천 — 프리셋의 그 키는 버리고 경고) — 사용자가 숨은 설정 없음을 골랐다(T10).
-- **목록 갈아 끼우기** — 사용자 「이어붙이기 진행」. 귀결: 뒤 프리셋이 `engram` 을 못 뺀다 — 받아들였다.
-- **두 번째 `--settings`** — 동작이 문서에 없고 재지 않았다.
-- **원문을 안 싣기**(프리셋의 claude 원문을 싣지 않기 — 2026-10-15 TRD 첫 판부터 이름만 적힌 갈래) — 근거(메인 2026-10-31 — 보고): 설정 에셋은 백엔드별 원문 칸이고 claude 칸은 `--settings` 로 넘긴다(PRD R5 — 사용자 2026-10-18) — 싣지 않으면 claude 에이전트에겐 설정 에셋이 하는 일이 없다. 또 T10 이 Engram 통로 키를 「기본」 의 claude 원문으로 옮겼으므로 원문을 안 실으면 그 키가 빠지거나 숨은 조각으로 돌아가야 한다(T10 — 사용자 「사실 감추는 설정이 있으면 안되지」).
+- **A fragment injected in hiding** — user 「사실 감추는 설정이 있으면 안되지」 (T10).
+- **For `allowedMcpServers`, the Engram value is the authority** (the old recommendation — drop that key of the preset and warn) — the user chose no hidden settings (T10).
+- **Swapping the list in** — user 「이어붙이기 진행」. Consequence: a later preset cannot remove `engram` — accepted.
+- **A second `--settings`** — its behavior is not in the documentation and was not measured.
+- **Not loading the raw text** (not loading the preset's claude raw text — a branch only named, never worked out, since the first edition of the TRD on 2026-10-15) — basis (main 2026-10-31 — reported): the settings asset is a per-backend raw-text field, and the claude field is passed through `--settings` (PRD R5 — user 2026-10-18) — if it is not loaded, the settings asset does nothing for a claude agent. Also, since T10 moved the Engram channel keys into the claude raw text of 「기본」, not loading the raw text means those keys go missing or must return to a hidden fragment (T10 — user 「사실 감추는 설정이 있으면 안되지」).
 
 ## 근거
-사용자 결정 T10(2026-10-18) · TRD §2-2 T10.
+User decision T10 (2026-10-18) · TRD §2-2 T10.
 
 ## 영향 / 불변식
-- 「기본」 을 떼면 Engram 메시지 · 제어 통로가 빠질 수 있다(사용자 전역 설정이 `allowedMcpServers: []` 로 막을 때) — 떼기 확인 문구가 그것을 말한다(R32 · `DetachDefaultConfirm`).
-- 합친 claude settings 도 검사한다 — 오류는 그것을 들인 나중 에셋 줄에 붙는다(M14).
-- ADR-0109 의 앵커 `mcp_config.rs`(settings 조각)는 Noop 길에만 남는다.
+- Detaching 「기본」 may remove the Engram message and control channel (when the user's global settings block it with `allowedMcpServers: []`) — the detach confirmation text says so (R32 · `DetachDefaultConfirm`).
+- The merged claude settings are also checked — an error is attached to the line of the later asset that brought it in (M14).
+- The anchor `mcp_config.rs` (settings fragment) of ADR-0109 remains only on the Noop path.

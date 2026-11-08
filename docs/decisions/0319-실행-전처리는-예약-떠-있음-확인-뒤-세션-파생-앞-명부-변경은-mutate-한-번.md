@@ -1,23 +1,23 @@
-# ADR-0319: 실행 전처리는 예약 · 떠 있음 확인 뒤, 세션 파생 앞 — 명부 변경은 mutate 한 번
+# ADR-0319: Run preprocessing goes after the reservation and the alive check, before the session is derived — a registry change is one mutate
 
-- 상태: 제안 (2026-10-31, 근거: TRD `/review trd` 2회차 반영(TRD 머리 이력) · M16 · TRD §1-5 (가) · §3)
-- 관련: ADR-0226(첫 제출 래치) · ADR-0334 · TRD §8(작업 폴더 몫) · §7 17
+- 상태: 제안 (2026-10-31, basis: TRD `/review trd` round 2 applied (TRD header history) · M16 · TRD §1-5 (a) · §3)
+- 관련: ADR-0226 (first-submit latch) · ADR-0334 · TRD §8 (working-folder share) · §7 17
 
 ## 맥락
-실행 전 점검 · 비교(붙은 프리셋 펼치기 · 막힘 판정)를 기동 흐름의 어디에 두나.
+Where in the start-up flow do we put the pre-run check and comparison (expanding attached presets, deciding blocks)?
 
 ## 결정
-1. 실행 전처리는 예약 · 떠 있음 확인 바로 뒤, 세션 파생 앞에 둔다. 에이전트마다 줄 선다.
-2. 명부 변경은 mutate 한 번(비교-교체)이라 사이에 바뀐 값을 덮지 않는다.
-3. 막힘도 제어 채널 발급 앞에서 끊는다.
-4. 무인 기본값 채움은 다음 주제(M16). 작업 폴더 맞추기 · Engram 폴더 몫은 §8.
+1. Run preprocessing goes right after the reservation and the alive check, before the session is derived. It queues per agent.
+2. A registry change is one mutate (compare-and-replace), so it does not overwrite a value changed in between.
+3. A block is also cut off before the control channel is issued.
+4. Filling unattended defaults is the next topic (M16). Matching the working folder and the Engram folder share are in §8.
 
 ## 거부한 대안
-- **기동 중간에 맞추기** — 래치 · 화신 표식이 옛 사본을 본다(§7 17).
-- **예약 앞** — 같은 에이전트의 두 실행이 겹친다(§7 17).
+- **Matching in the middle of start-up** — the latch and the incarnation marker see the old copy (§7 17).
+- **Before the reservation** — two runs of the same agent overlap (§7 17).
 
 ## 근거
-TRD `/review trd` 2회차 두 리뷰어 FIX 반영 — 전처리를 예약 · 떠 있음 확인 바로 뒤로 + 명부 변경 mutate 한 번(비교-교체)(TRD 머리 이력).
+Applied the FIX of both reviewers in TRD `/review trd` round 2 — put the preprocessing right after the reservation and the alive check + a registry change as one mutate (compare-and-replace) (TRD header history).
 
 ## 영향 / 불변식
-- 래치(ADR-0226)와 화신 표식은 맞춰진 프로필만 본다. 전처리를 다른 자리로 옮기면 두 거부 사유가 되살아난다.
+- The latch (ADR-0226) and the incarnation marker see only the matched profile. If the preprocessing is moved to another place, the two rejection reasons come back to life.

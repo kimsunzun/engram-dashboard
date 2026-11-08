@@ -1,40 +1,40 @@
-# ADR-0335: 파일 조작 = 계획 → 실행 → 참조 고침, 진행 기록 없이 순서만 (Obsidian 꼴) — 남은 임시 파일도 저절로 치우지 않는다
+# ADR-0335: File operations = plan → execute → fix references, with order only and no progress record (Obsidian shape) — leftover temporary files are not cleaned up automatically either
 
-- 상태: 제안 (2026-10-31, 근거: 사용자 결정 G38(2026-10-31 「일단 이건 이대로 두고 나중에 생각하자」) · G40(2026-10-31 「남기고 알아서 치우라그래」) · P3 · P5 · G36 + 메인 M4 · M26 · M36 · M56(보고 — 사용자에게 알림 2026-10-31) · M65(재리뷰 r7 — 보고) · 조사 `docs/research/multi-file-rename-crash-safety-practice-2026-10-31.md` · `docs/research/atomic-write-temp-cleanup-practice-2026-10-31.md` · `docs/research/junction-recycle-bin-atomic-write-2026-10-31.md`) · 부분 폐기 by ADR-0339 (결정 5 대체와 결정 1 및 6 확장)
-- 관련: ADR-0312 · ADR-0315 · ADR-0330 · ADR-0320 · ADR-0324(편집의 차례) · ADR-0336 · ADR-0265 결정 4 · ADR-0291(원자적 쓰기) · PRD R17 · R19 · TRD §1-4 흐름 ④ · `store.rs` · §1-11a 발견 15 · §7 7 · T-74 · Amended by ADR-0339 (결정 5 대체와 결정 1 및 6 확장)
+- 상태: 제안 (2026-10-31, basis: user decisions G38 (2026-10-31 「일단 이건 이대로 두고 나중에 생각하자」) · G40 (2026-10-31 「남기고 알아서 치우라그래」) · P3 · P5 · G36 + main M4 · M26 · M36 · M56 (reported — the user was told 2026-10-31) · M65 (re-review r7 — reported) · research `docs/research/multi-file-rename-crash-safety-practice-2026-10-31.md` · `docs/research/atomic-write-temp-cleanup-practice-2026-10-31.md` · `docs/research/junction-recycle-bin-atomic-write-2026-10-31.md`) · 부분 폐기 by ADR-0339 (replaces Decision 5 and extends Decisions 1 and 6)
+- 관련: ADR-0312 · ADR-0315 · ADR-0330 · ADR-0320 · ADR-0324 (edit ordering) · ADR-0336 · ADR-0265 Decision 4 · ADR-0291 (atomic write) · PRD R17 · R19 · TRD §1-4 flow ④ · `store.rs` · §1-11a finding 15 · §7 7 · T-74 · Amended by ADR-0339 (replaces Decision 5 and extends Decisions 1 and 6)
 
 ## 맥락
-앱 안 이동 · 이름 바꾸기는 파일 하나와 그것을 가리키는 여러 프리셋 · 에이전트를 함께 고친다. 중간에 끊기면 어떻게 되나.
+An in-app move or rename fixes one file together with the many presets and agents that point at it. What happens if it is interrupted midway?
 
 ## 결정
-1. 이동 · 이름 바꾸기 · 다시 연결 = 계획 → 실행 → 참조 고침. 순서 = 파일 이름 바꾸기 → 참조하는 프리셋을 하나씩 고침 → 에이전트. 파일 쓰기는 하나하나 원자적이고 **이미 있는 `base::file::write_atomic` 을 그대로 쓴다**(임시 `<이름>.tmp<pid>.<번호>` → sync → 바꿔 넣기 — ADR-0265 결정 4 · ADR-0291 · M56).
-2. 진행 기록(일지)이 없다. 중간에 끊기면 일부 참조가 옛 경로를 가리켜 「찾을 수 없음」 이 되고, 다시 연결 한 번이 그 옛 경로의 참조를 전부 고친다(R19 · ADR-0330).
-3. **남은 임시 파일을 저절로 치우지 않는다 — 부팅 때도 훑기 때도**(G40). 라이브러리는 `base::file::sweep_temps` 를 부르지 않는다(M56). 훑기는 base 임시 이름 꼴을 건너뛴다 — 목록에 안 나오고 문제도 아니다(G40 · M56). 그 판정은 base 의 공개 함수 `base::file::is_temp_name`(이름만으로 가린다)을 부른다 — 꼴을 베끼지 않는다(메인 2026-10-31 — M65).
-4. 탐색기 규칙 — 덮어쓴 파일만 `.trash` 로(P5). 루트 안 이동은 어디로든(ADR-0312). 이름이 부딪는데 `onConflict` 를 안 주면 그 항목만 실패하고 아무것도 덮어쓰지 않는다 — 호출자가 고른다(M26 · 되살리기의 이름 부딪힘도 같은 꼴).
-5. 삭제는 참조를 고치지 않는다 — 자리 = 정체(P3 · M4). 삭제 = 루트 안 `.trash`(ADR-0320).
-6. 에이전트 쪽 참조 고침 = 옛 → 새 대응표만 프로필 편집 포트에 넘기고, manager 가 **지금** 명부 전체에서 맞는 붙임을 명부 락 한 번 보유로 고쳐 바꾼 에이전트를 돌려준다. 계획은 에이전트 목록을 미리 뽑지 않는다(계획의 명부 읽기는 `yes` 판정만). `agent.duplicate` 도 원본 읽기 + 넣기를 한 보유 안에서 해 둘이 줄 선다 — 복제가 먼저면 사본이 고쳐지고, 고침이 먼저면 사본이 새 경로를 싣는다(M36 · 재리뷰 B3).
-7. **라이브러리 쓰기는 부모 폴더가 있는지 먼저 본다** — 없으면 그 항목은 `NOT_FOUND` 다. `write_atomic` 은 없는 폴더를 만들므로(ADR-0291) 그 앞에서 막는다 — 바깥에서 지운 폴더를 되살리지 않는다(G43)(메인 2026-10-31 — M65).
+1. Move · rename · relink = plan → execute → fix references. Order = rename the file → fix the referencing presets one by one → agents. Each file write is atomic and **uses the already existing `base::file::write_atomic` as it is** (temporary `<이름>.tmp<pid>.<번호>` → sync → swap in — ADR-0265 Decision 4 · ADR-0291 · M56).
+2. There is no progress record (journal). If interrupted midway, some references point to the old path and become 「찾을 수 없음」, and one relink fixes all references to that old path (R19 · ADR-0330).
+3. **Leftover temporary files are not cleaned up automatically — neither at boot nor at scan** (G40). The library does not call `base::file::sweep_temps` (M56). The scan skips the base temporary-name shape — it does not appear in the list and is not a problem (G40 · M56). That decision calls the public base function `base::file::is_temp_name` (it tells by name alone) — we do not copy the shape (main 2026-10-31 — M65).
+4. Explorer rules — only the overwritten file goes to `.trash` (P5). A move inside the root can go anywhere (ADR-0312). If names collide and `onConflict` is not given, only that entry fails and nothing is overwritten — the caller chooses (M26 · a name collision on restore has the same shape).
+5. Delete does not fix references — place = identity (P3 · M4). Delete = `.trash` inside the root (ADR-0320).
+6. Agent-side reference fixing = only the old → new mapping table is passed to the profile-edit port, and the manager fixes the matching attachments across the **current** whole registry while holding the registry lock once and returns the agents it changed. The plan does not pull the agent list in advance (the plan's registry read is only the `yes` decision). `agent.duplicate` also does the source read + insert within one hold, so the two queue — if the clone comes first, the copy is fixed; if the fix comes first, the copy carries the new path (M36 · re-review B3).
+7. **A library write first checks that the parent folder exists** — if it does not, that entry is `NOT_FOUND`. `write_atomic` creates missing folders (ADR-0291), so we block it before that — a folder deleted from outside is not revived (G43) (main 2026-10-31 — M65).
 
 ## 거부한 대안
-- **의도를 적어 두는 조작 기록 + 부팅 때 마저 끝내기**(옛 `library-ops\` 일지 롤포워드) — 사용자 「일단 이건 이대로 두고 나중에 생각하자」(G38) · 그런 피어를 못 찾았다(조사 2026-10-31).
-- **삭제 때 참조를 휴지통 경로로 고치기**(리뷰 #5) — 사용자 「따로 처리를 해야됨?」(2026-10-20 · P3). 되살리면 경로로 풀린다(P3 · M4).
-- **파일마다 고정 정체(사이드카 `.meta` · 파일 안 id · NTFS 파일 id)를 다시 연결 후보로** — 사용자 「나중에 생각하자」(G38 · T-74). 하면 R19 「후보 제안 없음」 을 다시 연다(G38).
-- **영구 삭제** — ADR-0320 의 같은 대안 사유(「영구 삭제 + 센 확인 — 에이전트 호출엔 답할 사람이 없다」)를 본다.
-- **바깥 정리 + 이름 다시 연결만**(메모 68 — 앱 안 이동 · 이름 없음 · 사용자 2026-10-14) — 사용자가 2026-10-15 뒤집었다(메모 106 · 107 「이왕 하는 김에 다 해버려」 — 앱 안 옮기기 · 이름 바꾸기 · 삭제를 넣음). 기록된 이유(메모 108): 참조가 라이브러리 루트부터의 경로라 옮기거나 이름을 바꾸는 순간 참조를 고치고 지울 때 알릴 수 있는 것은 Engram 뿐이다 — 앱 안 이동이 없으면 모든 재정리가 이름 다시 연결에 기댄다. 자리 = 2판(P1 — 메인 · 사용자 위임 「알아서 해 순서적인 부분은」).
-- **부팅 때 남은 임시 파일 쓸기**(G38 의 세부 「Stray temp files swept at boot」) — 사용자 2026-10-17 「데몬이 켜질 때 미리 훑지 않는다」 와 어긋났고(TRD §1-11a 발견 15) 사용자가 「남기고 알아서 치우라그래」 로 정리 자체를 뺐다(G40). 표본에서 앱 기동 때 훑어 치우는 곳은 없다(조사 atomic-write-temp-cleanup).
-- **훑기 때 오래된 임시 파일 치우기**(조사의 둘째 갈래 — Syncthing 24시간 · git `tmp_obj_*` 꼴) — 같은 사용자 결정으로 훑기 때도 치우지 않는다(G40 「not at boot, not at scan」).
-- **고정 이름 `<파일>.engram-tmp`**(G40 의 첫 꼴 — 같은 파일의 다음 쓰기가 덮는다 · VS Code `.vsctmp` 와 같은 모델) — 이미 있는 `base::file::write_atomic` 곁의 둘째 규칙이 된다(M56 · 조사 junction-recycle-bin). 대가: 남은 찌꺼기는 다음 쓰기가 덮지 않는다(pid 가 다르다) — 쓰는 도중 죽는 일은 드물어 받아들였다(M56).
-- **계획 때 에이전트 목록을 뽑아 그 목록만 고치기** — 그 사이 `agent.duplicate` 가 만든 사본이 옛 경로를 지닌 채 남는다(M36 · 재리뷰 B3).
+- **An operation record that writes down the intent + finishing it at boot** (the old `library-ops\` journal roll-forward) — user 「일단 이건 이대로 두고 나중에 생각하자」 (G38) · no such peer was found (research 2026-10-31).
+- **Fixing references to the trash path on delete** (review #5) — user 「따로 처리를 해야됨?」 (2026-10-20 · P3). If restored, it resolves by path (P3 · M4).
+- **A fixed identity per file (sidecar `.meta` · an id inside the file · NTFS file id) as a relink candidate** — user 「나중에 생각하자」 (G38 · T-74). Doing so reopens R19 「후보 제안 없음」 (G38).
+- **Permanent deletion** — see the same alternative reason in ADR-0320 (「영구 삭제 + 센 확인 — 에이전트 호출엔 답할 사람이 없다」).
+- **Outside cleanup + only name relink** (memo 68 — no in-app move or rename · user 2026-10-14) — the user reversed it on 2026-10-15 (memos 106 · 107 「이왕 하는 김에 다 해버려」 — put in in-app move, rename and delete). The recorded reason (memo 108): the reference is a path from the library root, so only Engram can fix references at the moment of a move or rename and report on deletion — without in-app moves, every reorganization relies on name relink. Place = edition 2 (P1 — main · delegated by the user 「알아서 해 순서적인 부분은」).
+- **Sweeping leftover temporary files at boot** (a detail of G38 「Stray temp files swept at boot」) — it disagreed with the user's 2026-10-17 「데몬이 켜질 때 미리 훑지 않는다」 (TRD §1-11a finding 15) and the user removed cleanup itself with 「남기고 알아서 치우라그래」 (G40). In the sample, no one scans and cleans up at app start (research atomic-write-temp-cleanup).
+- **Cleaning old temporary files at scan** (the second branch of the research — Syncthing 24 hours · git `tmp_obj_*` shape) — by the same user decision, we do not clean at scan either (G40 「not at boot, not at scan」).
+- **A fixed name `<파일>.engram-tmp`** (the first shape of G40 — the next write of the same file overwrites it · the same model as VS Code `.vsctmp`) — it becomes a second rule beside the already existing `base::file::write_atomic` (M56 · research junction-recycle-bin). Cost: leftover debris is not overwritten by the next write (the pid differs) — dying mid-write is rare, so we accepted it (M56).
+- **Pulling the agent list at plan time and fixing only that list** — a copy made by `agent.duplicate` in the meantime stays with the old path (M36 · re-review B3).
 
 ## 근거
-- 사용자 결정 G38 · G40 · P3 · P5 · 조사(2026-10-31).
-- 조사 atomic-write-temp-cleanup(light · 리뷰 없음): 흔한 두 갈래 = 안 치움(고정 이름이라 다음 쓰기가 덮는다 — VS Code · git `index.lock` · Rust crate) · 훑기 때 게으르게(알아볼 접두 + 나이 문턱). 공통 = 같은 폴더 · 이름에 앱 표식 · 훑는 쪽이 그 이름을 건너뜀. Windows 에서 이름 있는 임시 파일은 피할 수 없다(`O_TMPFILE` 은 리눅스뿐).
-- 조사 junction-recycle-bin(medium · codex 리뷰): `write_atomic` = 확실(`file.rs:348`) · 셸 설정 저장이 이미 쓴다.
+- User decisions G38 · G40 · P3 · P5 · research (2026-10-31).
+- Research atomic-write-temp-cleanup (light · no review): the two common branches = no cleanup (a fixed name so the next write overwrites it — VS Code · git `index.lock` · Rust crates) · lazily at scan (a recognizable prefix + an age threshold). Common ground = the same folder · an app marker in the name · the scanning side skips that name. On Windows, a named temporary file cannot be avoided (`O_TMPFILE` is Linux only).
+- Research junction-recycle-bin (medium · codex review): `write_atomic` = certain (`file.rs:348`) · the shell settings save already uses it.
 
 ## 영향 / 불변식
-- 일지를 되살리려면 G38 을 다시 연다. 끊긴 조작의 회복 길은 다시 연결 하나다.
-- 공통 뼈대(계획 → 실행 → 참조 고침)는 이동 · 이름 바꾸기 · 다시 연결만 쓴다.
-- 찌꺼기 `<이름>.tmp<pid>.<번호>` 가 라이브러리 폴더에 남을 수 있다 — 목록에 안 보이고 지우는 것은 사용자 몫이다(G40). 「훑기가 base 임시 이름 꼴을 건너뛴다」 는 구현 전제다(조사 파일럿 항목).
-- 내구성은 임시 파일 sync + 같은 볼륨 rename 까지로만 쓴다 — Windows 의 디렉터리 sync 는 무동작이다(조사 junction-recycle-bin).
-- 라이브러리가 `sweep_temps` 를 부르게 바꾸면 G40 을 다시 연다.
-- 부모 확인과 쓰기 사이에 폴더가 지워지는 좁은 틈은 남는다 — 그것까지 닫으려면 base 에 폴더를 만들지 않는 꼴을 더한다(구현 판단 — TRD §1-4 `store.rs` · M65).
+- To revive a journal, reopen G38. The recovery path for an interrupted operation is the single relink.
+- The common skeleton (plan → execute → fix references) is used only by move, rename and relink.
+- Debris `<이름>.tmp<pid>.<번호>` may remain in the library folder — it is not seen in the list and deleting it is up to the user (G40). 「훑기가 base 임시 이름 꼴을 건너뛴다」 is an implementation premise (research pilot item).
+- Durability is stated only up to temporary-file sync + a same-volume rename — directory sync on Windows is a no-op (research junction-recycle-bin).
+- If the library is changed to call `sweep_temps`, reopen G40.
+- A narrow gap remains where the folder is deleted between the parent check and the write — to close even that, add to base a shape that does not create folders (implementation judgment — TRD §1-4 `store.rs` · M65).

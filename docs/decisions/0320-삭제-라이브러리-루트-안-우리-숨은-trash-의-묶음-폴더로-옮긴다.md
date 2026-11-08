@@ -1,30 +1,30 @@
-# ADR-0320: 삭제 = 라이브러리 루트 안 우리 숨은 `.trash` 의 묶음 폴더로 옮긴다
+# ADR-0320: Delete = move to a bundle folder in our hidden `.trash` inside the library root
 
-- 상태: 제안 (2026-10-31, 근거: 사용자 결정 B8 / F9-confirmed(2026-10-19 「ㅇㅇ 우리 trash 폴더로해」) · G31(2026-10-30 「휴지통 경로 … 시스템에서 알아서 보내는게 맞는것같은데 고정경로로하고 나중에 변경경로로」) · G44(2026-10-31) + 메인 M22 · M46 · M52 · M53(보고) · 조사 `docs/research/trash-unavailable-delete-practice-2026-10-19.md`)
-- 관련: ADR-0312 · ADR-0335 · ADR-0322 · ADR-0324(휴지통 잠금) · PRD R18 · TRD §1-1 · §1-4 `store.rs` · §6-5 1 · §7 20
+- 상태: 제안 (2026-10-31, basis: user decisions B8 / F9-confirmed (2026-10-19 「ㅇㅇ 우리 trash 폴더로해」) · G31 (2026-10-30 「휴지통 경로 … 시스템에서 알아서 보내는게 맞는것같은데 고정경로로하고 나중에 변경경로로」) · G44 (2026-10-31) + main M22 · M46 · M52 · M53 (reported) · research `docs/research/trash-unavailable-delete-practice-2026-10-19.md`)
+- 관련: ADR-0312 · ADR-0335 · ADR-0322 · ADR-0324 (trash lock) · PRD R18 · TRD §1-1 · §1-4 `store.rs` · §6-5 1 · §7 20
 
 ## 맥락
-라이브러리 항목을 지울 때 어디로 보내나. 사람 · LLM · CLI 가 다 지운다.
+Where do we send a library entry when it is deleted? Humans, the LLM and the CLI all delete.
 
 ## 결정
-1. 삭제 = 라이브러리 루트 안 숨은 `.trash` 로 옮긴다. 자리 = 시스템이 정한 고정 `<루트>\.trash\` — 바꿀 수 있는 자리는 필요가 생기면 나중(G31).
-2. 같은 루트 안 rename 이다. 트리 · 목록 · 검색에서 숨긴다. 루트 자체는 못 지운다. LLM · CLI 삭제도 같은 곳으로 간다.
-3. 루트가 git 작업 트리면 그 저장소의 `.git/info/exclude` 에 `.trash/` 를 더한다(로컬 · 커밋 안 함 — M22).
-4. **조작 하나 = 묶음 하나** — `.trash\<UTC>-<id>\` 폴더 안에 원래 경로대로 둔다. 삭제 · 덮어쓰기로 밀려난 파일(P5) 모두 이 길로 가고, 두 파일을 밀어낸 이동도 묶음 하나다(M46 · M52 · M53). 비우기는 이 묶음 폴더를 통째로 OS 휴지통에 보낸다(G44 · ADR-0322).
-5. `.trash` 로 옮기기 · 되살리기는 휴지통 잠금으로 비우기와 줄 선다(ADR-0324 결정 9).
-6. 비우기 · 영구 삭제 = ADR-0322.
+1. Delete = move into the hidden `.trash` inside the library root. The place = a fixed `<루트>\.trash\` decided by the system — a changeable place comes later if a need arises (G31).
+2. It is a rename inside the same root. It is hidden from the tree, the list and search. The root itself cannot be deleted. Deletes by the LLM and the CLI go to the same place.
+3. If the root is a git working tree, add `.trash/` to that repository's `.git/info/exclude` (local · not committed — M22).
+4. **One operation = one bundle** — placed inside the `.trash\<UTC>-<id>\` folder under the original path. Files pushed out by a delete or an overwrite (P5) all go this way, and a move that pushed out two files is also one bundle (M46 · M52 · M53). Emptying sends this bundle folder as a whole to the OS trash (G44 · ADR-0322).
+5. Moving to `.trash` and restoring queue with emptying under the trash lock (ADR-0324 Decision 9).
+6. Emptying and permanent deletion = ADR-0322.
 
 ## 거부한 대안
-- **삭제를 OS 휴지통으로**(platform 의 전용 STA 작업 스레드가 부르는 `IFileOperation` — 2026-10-18 까지의 후보) — 휴지통 대신 말없이 영구 삭제할 수 있고(Microsoft 문서 `FOF_WANTNUKEWARNING` — UI 없이 부르면 그 경고가 묻힌다 · 네트워크 드라이브 · 휴지통 없는 볼륨 · 용량 초과) · 비우기를 사람만으로 묶을 수 없다(탐색기 · 다른 도구가 비운다)(§7 20).
-- **`trash` crate** — 같은 OS 휴지통 길에 셋째 `windows` 사본 · `CoInitialize` 실패 패닉(§7 20). 비우기 길에서도 걷었다 — 항목마다 보고가 없다(ADR-0322 · M57).
-- **OS 휴지통을 못 쓰면 거절**(옛 F8(b)) — `.trash` 가 같은 볼륨 rename 이라 물음 자체가 사라졌다(결정 기록 F9-confirmed).
-- **영구 삭제 + 센 확인**(VS Code 꼴) — 에이전트 호출엔 답할 사람이 없다(§7 20).
-- **중앙 휴지통 한 곳** — 드라이브를 넘는 복사가 필요하다(G31 — 같은 볼륨 rename 이 빠르고 반쯤 옮긴 상태가 없다). ★이 사유는 여러 루트 시절(G25)에 든 것이다★ — 루트 하나(ADR-0312)에서도 그대로 서는지는 다시 보지 않았다. (기각 근거: 약함) 근거(메인 2026-11-01 — 보고 · M98): 루트 하나에서도 선다 — 루트 자리는 사용자가 고르고(R9 · G39) 중앙 자리(데이터 폴더 등)와 다른 볼륨일 수 있다. 그러면 삭제가 rename 이 아니라 복사 + 지우기가 되어 반쯤 옮긴 상태가 생기고, 같은 볼륨 rename 으로 없앤 물음이 되살아난다.
-- **바꿀 수 있는 휴지통 자리** — 필요가 생기면 나중(G31 「고정경로로하고 나중에 변경경로로」).
+- **Delete to the OS trash** (`IFileOperation` called by a dedicated STA worker thread in platform — the candidate until 2026-10-18) — it may silently delete permanently instead of using the trash (Microsoft docs `FOF_WANTNUKEWARNING` — if called without UI, that warning is buried · network drives · volumes without a trash · over capacity) · and emptying cannot be limited to humans (Explorer and other tools empty it) (§7 20).
+- **The `trash` crate** — a third `windows` copy on the same OS trash path · a `CoInitialize` failure panic (§7 20). It was also withdrawn from the emptying path — there is no per-item report (ADR-0322 · M57).
+- **Reject if the OS trash cannot be used** (old F8(b)) — `.trash` is a same-volume rename, so the question itself disappeared (decision record F9-confirmed).
+- **Permanent deletion + a strong confirmation** (VS Code shape) — an agent call has no human to answer (§7 20).
+- **One central trash place** — it needs a copy across drives (G31 — a same-volume rename is fast and has no half-moved state). ★This reason came from the multiple-roots period (G25)★ — we did not re-check whether it still holds with one root (ADR-0312). (Basis for rejection: weak) Basis (main 2026-11-01 — reported · M98): it holds with one root too — the user picks the root place (R9 · G39), and it can be on a different volume from a central place (a data folder etc.). Then deletion becomes copy + delete rather than a rename, a half-moved state appears, and the question removed by the same-volume rename comes back to life.
+- **A changeable trash place** — later if a need arises (G31 「고정경로로하고 나중에 변경경로로」).
 
 ## 근거
-사용자 결정 B8 · G31 · 조사(2026-10-19 — 앱 전용 `.trash` 선례 = Obsidian).
+User decisions B8 · G31 · research (2026-10-19 — the app-specific `.trash` precedent = Obsidian).
 
 ## 영향 / 불변식
-- 그 밖의 `library.*` 는 `.trash` 아래를 가리키지 못한다(뒷문 막기 — ADR-0322).
-- 에이전트 자신의 `rm` · 파일 도구는 `.trash` 를 우회한다 — 받아들였다(P13).
+- No other `library.*` can point under `.trash` (closing the back door — ADR-0322).
+- The agent's own `rm` and file tools bypass `.trash` — accepted (P13).

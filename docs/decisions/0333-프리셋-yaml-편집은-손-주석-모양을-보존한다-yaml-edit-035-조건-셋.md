@@ -1,38 +1,38 @@
-# ADR-0333: 프리셋 YAML 편집은 손 주석 · 모양을 보존한다 — `yaml-edit =0.3.5` + 조건 셋
+# ADR-0333: Preset YAML editing preserves hand-written comments · shape — `yaml-edit =0.3.5` + three conditions
 
-- 상태: 제안 (2026-10-31, 근거: TRD 결정 T2(2026-10-18 관행) · 사용자 「없으면 관행대로 처리해」 · G48(2026-10-31 「보통 메모 지킴은 맞는데 그걸 위해 별도로 노력할 필요는 없음 … 어쨋든 그 라이브러리에 맞게 하면 될것같음」) + 메인 M61(0b 스파이크) · M68(2차 측정) · M73(보고) · 스파이크 `docs/research/yaml-comment-preserving-edit-spike-2026-10-31.md`)
-- 관련: ADR-0338 · ADR-0318 · ADR-0336(읽기 = serde-saphyr) · TRD §1-4 `format.rs` · §1-12 · §5 0b · §7 27 · 앞선 관행 조사 `docs/research/yaml-comment-preserving-edit-2026-10-18.md`
+- 상태: 제안 (2026-10-31, basis: TRD decision T2 (2026-10-18 convention) · user 「없으면 관행대로 처리해」 · G48 (2026-10-31 「보통 메모 지킴은 맞는데 그걸 위해 별도로 노력할 필요는 없음 … 어쨋든 그 라이브러리에 맞게 하면 될것같음」) + main M61 (0b spike) · M68 (second measurement) · M73 (report) · spike `docs/research/yaml-comment-preserving-edit-spike-2026-10-31.md`)
+- 관련: ADR-0338 · ADR-0318 · ADR-0336 (reading = serde-saphyr) · TRD §1-4 `format.rs` · §1-12 · §5 0b · §7 27 · earlier convention research `docs/research/yaml-comment-preserving-edit-2026-10-18.md`
 
 ## 맥락
-데몬이 프리셋 파일을 고칠 때(붙이기 · 빼기 · 순서 · 꼬리표) 사람이 쓴 주석 · 모양이 남느냐. 0b 스파이크가 손 주석 14개 · 목록 넷인 실제 꼴 프리셋으로 두 편집기를 재었다(연산마다 새 사본 · `diff` · serde-saphyr 로 다시 읽어 값 대조 · CRLF/LF 셈).
+When the daemon edits a preset file (attach · detach · reorder · tags), do the comments and shape a person wrote remain? The 0b spike measured two editors on a preset of the real shape with 14 hand-written comments and four lists (a new copy per operation · `diff` · re-reading with serde-saphyr to compare values · counting CRLF/LF).
 
 ## 결정
-1. 읽기 = serde-saphyr · 쓰기 = `yaml-edit` **`=0.3.5` 로 판을 박는다**(M61) — 패치 판마다 동작이 바뀐다(0.3.2 → 0.3.5 사이 다섯 연산의 결과가 달라졌다 · 0.3.3~0.3.5 가 이틀에 셋 나왔다).
-2. 조건 셋(M61):
-   ① **순서 바꾸기 = 빼기 + 뺀 노드 글을 그 노드의 원래 내용 칸(CST 오프셋)만큼 내어 쓰고 다시 읽어 넣기**(주석 · 빈 줄은 건너뛴다 — M73 · 옛 고정 칸은 들여쓰기 없는 꼴 · 4칸 꼴에서 틀렸고(M68) 「둘째 줄부터 공통 들여쓰기」 도 M73 이 대신했다) — 이동 API 가 없고, 0.3.5 에서 뺀 노드를 그대로 다시 넣으면 맵 항목이 다시 못 읽는 YAML 이 된다(0.3.2 에서 되던 것의 회귀). 우회는 실측으로 통했다(줄 끝 주석도 따라감). 새 값으로 다시 만들어 넣으면 값은 맞지만 그 항목 줄 끝 주석을 잃는다.
-   ② **소스가 빈 흐름 목록 `[]` 이면 첫 항목 때 새 블록 `Sequence` 로 바꿔 끼운다** — 그대로 넣으면 흐름 꼴 `[x]` 로 남는다.
-   ③ **골든 시험 + `format.rs` 의 문** — 쓰기 전에 출력을 serde-saphyr 로 다시 읽어 의도한 값과 견주고, 어긋나면 쓰지 않고 거절한다(결정 4 — 안정된 코드 + 걸린 앵커 이름 · serde 다시 쓰기로 물러나지 않는다 · G48). 스파이크에서 본 깨진 출력을 이 문이 다 잡았다.
-3. TRD 0b 의 물러날 자리(serde 로 다시 쓰고 손 주석 잃음)는 쓰지 않는다.
-4. **쓰기 문이 거절하면 거절한다** — 안정된 코드 + 걸린 앵커 이름을 인자로 답하고 serde 다시 쓰기로 물러나지 않는다(G48 · U3 (a) — 「별도로 노력할 필요는 없음」 을 메인이 이렇게 옮겨 보고). 2차 측정에서 문이 거절한 것은 앵커 · 별칭으로 나눠 쓰는 값의 고침뿐이다(2/220 · 앵커가 없으면 0/200 — M68).
-5. **주석 보존을 위해 더 하지 않는다**(G48) — 조건 셋까지가 전부다(값을 견주는 쓰기 문은 주석이 아니라 값의 정확성을 지키므로 남는다). 알려진 틈(받아들임 — G48): ① 뺀 항목 **위** 주석 줄은 제자리에 남아 다음 항목의 주석처럼 읽힌다 · 중간 넣기도 새 항목이 다음 항목 윗줄 주석 아래로 든다(M61) ② 흐름 목록 안 순서 바꾸기는 옮긴 항목의 줄 끝 주석을 잃을 수 있다 ③ 제자리 값 고침은 따옴표 꼴을 잃을 수 있다(U4 · M68 · M74).
+1. Reading = serde-saphyr · writing = `yaml-edit` **pinned with `=0.3.5`** (M61) — behavior changes with each patch release (between 0.3.2 and 0.3.5 the results of five operations changed · the three releases 0.3.3~0.3.5 came out within two days).
+2. Three conditions (M61):
+   ① **Reorder = detach + write out the detached node's text outdented by the node's original content column (CST offset) and re-read it and insert** (comments · blank lines are skipped — M73 · the old fixed column was wrong for the no-indent form · the 4-space form (M68), and 「둘째 줄부터 공통 들여쓰기」 was also replaced by M73) — there is no move API, and in 0.3.5 putting the detached node back as it is turns a map entry into YAML that cannot be re-read (a regression of what worked in 0.3.2). The workaround worked in measurement (the end-of-line comment follows too). Rebuilding with a new value and inserting gives the right value but loses that entry's end-of-line comment.
+   ② **If the source is an empty flow list `[]`, replace it with a new block `Sequence` at the first item** — if inserted as is, it remains as the flow form `[x]`.
+   ③ **Golden test + the gate of `format.rs`** — before writing, re-read the output with serde-saphyr and compare it with the intended value, and if it differs do not write and refuse (decision 4 — a stable code + the name of the anchor involved · no fallback to a serde rewrite · G48). This gate caught all the broken outputs seen in the spike.
+3. The fallback place of TRD 0b (rewrite with serde and lose hand-written comments) is not used.
+4. **If the write gate refuses, we refuse** — answer with a stable code + the name of the anchor involved as arguments, and do not fall back to a serde rewrite (G48 · U3 (a) — the main session reported 「별도로 노력할 필요는 없음」 translated this way). In the second measurement, all the gate refused was the editing of values written split by anchors · aliases (2/220 · 0/200 when there is no anchor — M68).
+5. **Nothing more is done for comment preservation** (G48) — the three conditions are all (the write gate that compares values stays because it guards the correctness of values, not comments). Known gaps (accepted — G48): ① the comment lines **above** a detached item stay in place and read like the next item's comment · for a middle insert too, the new item goes in under the comment line above the next item (M61) ② reordering inside a flow list can lose the end-of-line comment of the moved item ③ editing a value in place can lose the quote form (U4 · M68 · M74).
 
-**닫힌 물음(G48):**
-- 항목을 빼면 그 **위** 주석 줄이 제자리에 남아 다음 항목의 주석처럼 읽히는 것(두 편집기 공통 · 줄 끝 주석은 함께 간다 — M61) — 받아들였다(결정 5 ①). 윗줄 주석을 함께 지우는 길(`yaml-edit` 의 주석 노드 API)은 재지 않았고 짓지 않는다(G48 「별도로 노력할 필요는 없음」).
+**Closed question (G48):**
+- When an item is detached, the comment line **above** it stays in place and reads like the next item's comment (common to both editors · the end-of-line comment goes along — M61) — accepted (decision 5 ①). The way to delete the line-above comment together (`yaml-edit`'s comment node API) was not measured and is not built (G48 「별도로 노력할 필요는 없음」).
 
 ## 거부한 대안
-- **`yamlpatch` 1.31.1**(MIT · zizmor 의 `crates/yamlpatch`) — rustc 1.97 이 필요하다(`tree-sitter-iter` — 저장소 핀 1.95.0 · `--ignore-rust-version` 으로만 지어졌다) · 줄 끝 주석에 한글이 있으면 하나 남은 항목 빼기가 panic(ASCII 면 `settings:` 키째 지운다) · 맵 → 문자열에서 말없이 틀린 값을 쓴다 · 중간 넣기 · 순서 바꾸기 연산이 없다(목록 통째 바꾸기는 목록 안 주석 넷을 잃는다) · CRLF 파일에 LF 가 섞인다 · 의존 45개(tree-sitter-yaml C 포함)(M61 · 스파이크).
-- **`yaml-edit` 0.3.2**(TRD 가 적던 판) — 머리 주석이 있는 문서를 거절하고 · 맵 끝 추가가 들여쓰기 0칸으로 가 값이 바뀌며 · 문자열 → 맵이 다시 못 읽는 YAML 이 되고 · CRLF 에 LF 가 섞인다(스파이크). 0.3.5 로 올리고 판을 박는다.
-- **serde 왕복으로 다시 쓰고 주석 잃음을 받아들이기**(옛 T2 추천) — 관행이 보존한다(§7 27). 스파이크가 통과해 물러날 자리로도 쓰지 않는다(M61).
-- **쓰기 문이 거절한 편집만 serde 다시 쓰기로 살리기**(U3 (b) — 주석을 잃는다는 알림 · 확인과 함께) — G48(「별도로 노력할 필요는 없음」 — 메인이 「물러날 길 없음」 으로 옮겨 보고) · 2차 측정: 거절은 앵커로 나눠 쓴 값의 고침뿐이고(2/220) 그것을 살리려 파일의 모든 주석을 잃는다(M68).
+- **`yamlpatch` 1.31.1** (MIT · zizmor's `crates/yamlpatch`) — it needs rustc 1.97 (`tree-sitter-iter` — the repository pin is 1.95.0 · it was built only with `--ignore-rust-version`) · if an end-of-line comment contains Hangul, detaching the last remaining item panics (with ASCII it deletes the `settings:` key too) · for map → string it silently writes a wrong value · it has no insert-in-the-middle · reorder operations (replacing the whole list loses four comments inside the list) · LF gets mixed into a CRLF file · 45 dependencies (including tree-sitter-yaml C) (M61 · spike).
+- **`yaml-edit` 0.3.2** (the version the TRD had written) — it refuses a document with a head comment · appending at the end of a map goes in at 0 spaces of indentation and changes the value · string → map becomes YAML that cannot be re-read · LF gets mixed into CRLF (spike). Raise to 0.3.5 and pin the version.
+- **Rewrite by a serde round trip and accept losing comments** (the old T2 recommendation) — convention preserves them (§7 27). The spike passed, so it is not used as a fallback either (M61).
+- **Rescue only the edits the write gate refused with a serde rewrite** (U3 (b) — with a notice that comments are lost · confirmation) — G48 (「별도로 노력할 필요는 없음」 — the main session reported it translated as 「물러날 길 없음」) · second measurement: the refusals are only the edits of values written split by anchors (2/220) and rescuing them would lose all the comments of the file (M68).
 
 ## 근거
-- T2 · 2026-10-18 관행(ruamel.yaml 등 — 왕복 보존이 존재 이유).
-- 스파이크(2026-10-31): `yaml-edit` 0.3.5 에서 끝 추가(문자열 · 맵) · 꼬리표 값 바꾸기 · 맵 → 문자열 · `description` · 값 없는 `settings:` 에 첫 항목 · 하나 남은 항목 빼기 → `settings: []` · CRLF(전부 CRLF 한 가지) · 한글 주석 · 값 = ✅, 손대지 않은 줄은 바이트 그대로.
-- 2차 측정(M68 — 22 꼴 × 10 연산): 문의 거절 2/220(0.9%) — 앵커 · 별칭으로 나눠 쓴 값의 고침뿐 · 앵커가 없으면 0/200 · 문을 지난 틀린 값 0 · 들여쓰기 없는 꼴(PyYAML 기본) · 4칸 · 한 줄 흐름 목록 · BOM/CRLF · 탭 · `---`/`...`/`%YAML` 통과 · 문은 값을 견줘야 한다(스키마만 보는 읽기는 거절 넷 중 셋을 통과시켰다).
-- 사용자 결정 G48.
+- T2 · the 2026-10-18 convention (ruamel.yaml etc. — round-trip preservation is the reason they exist).
+- Spike (2026-10-31): on `yaml-edit` 0.3.5, append at the end (string · map) · change a tag value · map → string · `description` · first item into a valueless `settings:` · detach the last remaining item → `settings: []` · CRLF (all CRLF, one kind) · Hangul comments · values = ✅, and untouched lines are byte for byte.
+- Second measurement (M68 — 22 shapes × 10 operations): gate refusals 2/220 (0.9%) — only edits of values written split by anchors · aliases · 0/200 when there is no anchor · wrong values that passed the gate 0 · no-indent form (PyYAML default) · 4 spaces · one-line flow list · BOM/CRLF · tab · `---`/`...`/`%YAML` passed · the gate must compare values (a read that looks only at the schema passed three of the four refused).
+- User decision G48.
 
 ## 영향 / 불변식
-- 판을 올리면 골든 시험과 `format.rs` 의 문을 다시 돌린다 — 판 고정(`=`)이 이 결정의 조건이다.
-- 라이선스: crates.io 메타는 Apache-2.0 인데 저장소(`jelmer/yaml-edit`) 루트에 LICENSE 파일이 없다 — 적어 둔다(M61). MSRV 선언 1.70 · 새 패키지 = rowan · countme · text-size.
-- 측정 범위: 1차 = 샘플 하나 · 2차 = 22 꼴 × 10 연산(M68 — 들여쓰기 없는 꼴 · 4칸 · 흐름 목록 · 탭 · BOM/CRLF · 앵커 포함). 문이 못 보는 모양 문제(여러 줄 흐름 목록의 끝 추가 · 중간 넣기 자리 · 결정 5 ② ③)는 알려진 것으로 적는다(M68). 골든은 항목 사이 0칸 머리 주석 · 키 하나짜리 안쪽 항목을 더한다(M73).
-- 편집기를 바꾸려면 이 결정을 다시 연다 — 읽기(serde-saphyr)는 그대로 두고 쓰기 길만 바뀐다.
+- When the version is raised, re-run the golden test and the gate of `format.rs` — the version pin (`=`) is a condition of this decision.
+- License: the crates.io metadata says Apache-2.0 but there is no LICENSE file at the root of the repository (`jelmer/yaml-edit`) — noted (M61). Declared MSRV 1.70 · new packages = rowan · countme · text-size.
+- Measurement scope: first = one sample · second = 22 shapes × 10 operations (M68 — no-indent form · 4 spaces · flow list · tab · BOM/CRLF · including anchors). Shape problems the gate cannot see (appending at the end of a multi-line flow list · the place of a middle insert · decision 5 ② ③) are written down as known (M68). The golden adds a head comment with 0 spaces between items and an inner item with a single key (M73).
+- To change the editor, reopen this decision — reading (serde-saphyr) stays as it is and only the writing path changes.

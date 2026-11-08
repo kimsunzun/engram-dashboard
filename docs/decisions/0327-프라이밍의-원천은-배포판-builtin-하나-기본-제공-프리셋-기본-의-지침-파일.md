@@ -1,34 +1,34 @@
-# ADR-0327: 프라이밍의 원천은 배포판 `builtin\` 하나 — 기본 제공 프리셋 「기본」 의 지침 파일
+# ADR-0327: The source of priming is one distribution `builtin\` — the instruction file of the built-in preset 「기본」
 
-- 상태: 제안 (2026-10-31, 근거: 메인 세션 결정 G1(2026-10-20 · 보고) · M7(2026-10-21 · 보고 · TRD 리뷰 #4 · #8) · M18(보고) · G46(2026-10-31 — 메인 결정 · 사용자 위임: 폐기가 아니라 부분 개정))
-- 관련: Amends ADR-0092 (결정 1 프라이밍 원천 경로) (아래 「바뀌는 조항」) · ADR-0099 · ADR-0100 · ADR-0211 · ADR-0215(같은 경로나 배달을 가리킨다 — 「영향」 의 확인 항목) · ADR-0329 · ADR-0337 · ADR-0328 · TRD §1-1 · §1-2 · §2-4 1 · 2 · §5 17 · §7 35
+- 상태: 제안 (2026-10-31, basis: main session decision G1 (2026-10-20 · reported) · M7 (2026-10-21 · reported · TRD review #4 · #8) · M18 (reported) · G46 (2026-10-31 — main decision · delegated by the user: a partial amendment, not a discard))
+- 관련: Amends ADR-0092 (Decision 1, the priming source path) (see 「바뀌는 조항」 below) · ADR-0099 · ADR-0100 · ADR-0211 · ADR-0215 (points at the same path or delivery — an item to confirm in 「영향」) · ADR-0329 · ADR-0337 · ADR-0328 · TRD §1-1 · §1-2 · §2-4 1 · 2 · §5 17 · §7 35
 
 ## 맥락
-지금 프라이밍은 고정 경로의 공용 마크다운(`prompts/agent-priming.md` · 덮개 `ENGRAM_PRIMING_FILE`)을 스폰 때 로더가 읽어 시스템 프롬프트에 주입한다 — 전원 무조건(ADR-0092 결정 1). S25 는 기본 제공 에셋(프리셋 「기본」 과 그 지침 · 설정)을 라이브러리와 같은 꼴의 파일로 두고 가짜 경로 `engram:/…` 로 가리킨다(Δ1). 원천이 「코드 + 배포판 `prompts\agent-priming.md`」 로 나뉘어 있던 것을 하나로 모은다(G1).
+Today priming is a shared markdown file at a fixed path (`prompts/agent-priming.md` · cover `ENGRAM_PRIMING_FILE`) that a loader reads at spawn and injects into the system prompt — for everyone unconditionally (ADR-0092 Decision 1). S25 keeps built-in assets (the preset 「기본」 and its instructions and settings) as files of the same shape as the library and points to them with the fake path `engram:/…` (Δ1). The source that had been split across 「코드 + 배포판 `prompts\agent-priming.md`」 is gathered into one (G1).
 
 ## 결정
-1. 기본 제공 에셋은 배포판 `builtin\` 폴더 하나에 라이브러리와 같은 꼴로 둔다(프리셋 `.yaml` · 지침 `.md` · 설정 `.yaml`). `engram:/…` 가 그 파일에 대응한다(G1). 파일 이름 · 대응의 꼴은 구현 판단.
-2. 프라이밍의 원천은 그 안의 지침 파일(`engram:/priming` — 지금 프라이밍 글 그대로) 하나다. 「기본」 프리셋이 그것을 지침으로 싣는다(M7).
-3. 해석은 asset-library 가 스스로 한다 — `LaunchKitSource::prepare` 에 priming 인자가 없다(M18).
-4. `builtin\` 이 없으면 프라이밍 없이 뜬다 — 막지 않는다(M7).
-5. 배포 zip 에 싣는다(§5 17). 개발 · 시험 · `ENGRAM_DATA_DIR` 에서 찾는 법과, 옛 길(지금 `NoopLaunchKits` 만 쓰는 `priming_file`)을 걷는 때는 미결이다(TRD §2-4 1 · 2 · M25 LEFT OPEN).
+1. Built-in assets live in one distribution `builtin\` folder in the same shape as the library (preset `.yaml` · instructions `.md` · settings `.yaml`). `engram:/…` corresponds to those files (G1). The file names and the shape of the correspondence are implementation judgment.
+2. The source of priming is one instruction file inside it (`engram:/priming` — today's priming text as is). The 「기본」 preset loads it as instructions (M7).
+3. Resolution is done by asset-library itself — `LaunchKitSource::prepare` has no priming argument (M18).
+4. If `builtin\` is absent, it comes up without priming — it does not block (M7).
+5. It ships in the distribution zip (§5 17). How to find it in development, tests and `ENGRAM_DATA_DIR`, and when to withdraw the old path (`priming_file` that only `NoopLaunchKits` uses now), are open (TRD §2-4 1 · 2 · M25 LEFT OPEN).
 
-**바뀌는 조항 (ADR-0092):**
-- **결정 1 만 바뀐다 — 부분 개정이다**(G46 — 메인 결정 · 사용자 위임 · TRD §7 35 도 「폐기가 아니라 개정」 으로 고쳤다). 결정 2(1:1 선행 · 다중수신 추상) · 3(형식 판정축 수용>토큰) · 4(happy-path-first)는 프라이밍 원천과 무관해 그대로다.
-- 결정 1 에서 바뀌는 것: ① 경로 — repo 의 `prompts/agent-priming.md` → 배포판 `builtin\` 의 지침 파일 ② 로더 seam → 실행 재료 포트 `LaunchKitSource`(ADR-0092 가 「미래 구현체 = 에이전트별 프롬프트 인젝션/스킬등록 시스템(로더 교체로 흡수)」 이라 예고한 자리) ③ 「임시판은 전원 무조건 주입」 → 「기본」 이 붙은 에이전트에만(만들 때 붙고, 떼기는 `yes` 확인 — M21).
-- 결정 1 에서 그대로인 것: 하드코딩 금지(여전히 외부 파일) · 데몬이 읽어 시스템 프롬프트 쪽으로 넘긴다(에이전트가 스스로 파일을 읽지 않는다). ADR-0092 「영향」 첫 줄(프라이밍 내용 하드코딩 금지 · 로더는 seam)은 계속 지켜진다.
-- 이 ADR 의 결정 4(없으면 막지 않음)를 TRD 는 「ADR-0092 와 같은 너그러움」 이라 적지만 ADR-0092 본문에 그 조항은 없다 — 지금 코드의 동작인지는 확인하지 않았다.
+**Clauses that change (ADR-0092):**
+- **Only Decision 1 changes — it is a partial amendment** (G46 — main decision · delegated by the user · TRD §7 35 was also fixed to 「폐기가 아니라 개정」). Decisions 2 (1:1 first · multi-recipient abstraction) · 3 (format decision axis acceptance > tokens) · 4 (happy-path-first) are unrelated to the priming source and stay.
+- What changes in Decision 1: ① path — `prompts/agent-priming.md` in the repo → the instruction file in the distribution `builtin\` ② loader seam → the launch-materials port `LaunchKitSource` (the place that ADR-0092 foretold as 「미래 구현체 = 에이전트별 프롬프트 인젝션/스킬등록 시스템(로더 교체로 흡수)」) ③ 「임시판은 전원 무조건 주입」 → only agents with 「기본」 attached (attached at creation, detaching is confirmed by `yes` — M21).
+- What stays in Decision 1: no hardcoding (still an external file) · the daemon reads it and passes it toward the system prompt (the agent does not read the file by itself). The first line of ADR-0092 「영향」 (no hardcoding of priming content · the loader is a seam) is still kept.
+- The TRD writes Decision 4 of this ADR (not blocking when absent) as 「ADR-0092 와 같은 너그러움」, but there is no such clause in the ADR-0092 body — we have not confirmed whether it is today's code behavior.
 
 ## 거부한 대안
-- **「코드 + 배포판 `prompts\agent-priming.md`」 나눔**(G1 이 대신한 꼴 — 내장 프리셋 · 설정 정의는 코드의 내용 표(`builtin.rs`) · 프라이밍 글만 배포판 파일 · 2026-10-15 TRD 첫 판 §1-1) — 근거(메인 2026-10-31 — 보고): ① 기본 제공 에셋은 라이브러리 화면에서 읽기 전용 뿌리로 둘러보고(프리셋 → 안의 지침 · 설정 · 상세 칸) 라이브러리로 복사해 나가는 대상이다(R43 · G2-REVISED · P6 · M14 — 사용자 결정) — 라이브러리와 같은 꼴의 파일이어야 같은 훑기 · 해석 · 상세가 그대로 돌고, 코드의 내용 표는 그 길마다 기본 제공 몫의 둘째 길을 요구한다. ② 「기본」 의 설정(`allowedMcpServers` · `DISABLE_AUTOUPDATER`)은 보여야 한다(T10 — 사용자 「사실 감추는 설정이 있으면 안되지」) — 파일이면 같은 화면에 그대로 보인다. ③ ADR-0092 가 프라이밍을 코드에 박지 않은 이유(「내용 수정마다 재빌드」 · 교체 불가 — 그 ADR 의 거부한 대안)가 「기본」 의 프리셋 · 설정 정의에도 같다.
-- **ADR-0092 통째 폐기(supersede)**(TRD §7 35 · §5 0c 의 옛 문구) — 바뀌는 것은 결정 1 의 고정 경로뿐이고 결정 2~4 는 프라이밍 원천과 무관해 그대로 선다(G46 — 메인 결정 · 사용자 위임).
-- (참고 · 거부 아님) 프라이밍 자체를 사용자 라이브러리 에셋으로 두는 것은 비목표 · 나중 생각이다(PRD R52 · 결정 기록 ROUND 2 「LATER IDEA」).
+- **The 「코드 + 배포판 `prompts\agent-priming.md`」 split** (the shape that G1 replaced — built-in preset and settings definitions are in a content table in code (`builtin.rs`) · only the priming text is a distribution file · TRD first edition 2026-10-15 §1-1) — basis (main 2026-10-31 — reported): ① built-in assets are browsed in the library screen as a read-only root (preset → the instructions, settings and detail areas inside) and copied out into the library (R43 · G2-REVISED · P6 · M14 — user decisions) — only files of the same shape as the library let the same scan, resolution and detail run as they are, and a content table in code demands a second path for the built-in share on each of those paths. ② The settings of 「기본」 (`allowedMcpServers` · `DISABLE_AUTOUPDATER`) must be visible (T10 — user 「사실 감추는 설정이 있으면 안되지」) — if they are files, they show on the same screen as they are. ③ The reason ADR-0092 did not embed priming in code (「내용 수정마다 재빌드」 · not swappable — the rejected alternative of that ADR) applies equally to the preset and settings definitions of 「기본」.
+- **Discarding ADR-0092 as a whole (supersede)** (the old wording of TRD §7 35 · §5 0c) — only the fixed path of Decision 1 changes, and Decisions 2~4 are unrelated to the priming source and still stand (G46 — main decision · delegated by the user).
+- (Reference · not a rejection) Keeping priming itself as a user library asset is a non-goal · a later thought (PRD R52 · decision record ROUND 2 「LATER IDEA」).
 
 ## 근거
-G1 · M7 · M18(메인 — 보고). M7 이 가리키는 TRD 리뷰 #4 · #8. 거부한 대안의 근거 = 위(메인 2026-10-31 — R43 · G2-REVISED · P6 · T10 · ADR-0092).
+G1 · M7 · M18 (main — reported). TRD review #4 · #8 that M7 points at. The basis of the rejected alternative = above (main 2026-10-31 — R43 · G2-REVISED · P6 · T10 · ADR-0092).
 
 ## 영향 / 불변식
-- 프라이밍 글을 고치는 자리는 `builtin\` 의 지침 파일 하나다 — 코드에 다시 두지 않는다.
-- 「기본」 을 떼면 프라이밍과 Engram 통로 설정(`allowedMcpServers` — ADR-0328)이 함께 빠진다 — 떼기 확인 문구가 그것을 말한다(R32 · `DetachDefaultConfirm`).
-- 옛 길(`NoopLaunchKits` 의 `priming_file`)은 걷는 때가 정해질 때까지 남는다 — Noop 회귀 골든(argv 바이트 같음)이 그것에 기댄다(§2-4 2).
-- **확인 필요(`/adr link` 때)**: ADR-0099(결정 4 — 이미 ADR-0211 이 부분 폐기) · ADR-0100(배포판 조립) · ADR-0211 · ADR-0215 가 `prompts/agent-priming.md` 경로나 프라이밍 배달을 가리킨다. 이 결정이 그 조항까지 바꾸는지 판정하지 않았다.
+- The one place to edit the priming text is the instruction file of `builtin\` — it is not put back into code.
+- Detaching 「기본」 removes both the priming and the Engram channel settings (`allowedMcpServers` — ADR-0328) — the detach confirmation text says so (R32 · `DetachDefaultConfirm`).
+- The old path (`priming_file` of `NoopLaunchKits`) stays until the time to withdraw it is decided — the Noop regression golden (argv bytes identical) relies on it (§2-4 2).
+- **To confirm (at `/adr link`)**: ADR-0099 (Decision 4 — already partially discarded by ADR-0211) · ADR-0100 (distribution assembly) · ADR-0211 · ADR-0215 point at the `prompts/agent-priming.md` path or at priming delivery. We have not decided whether this decision changes those clauses too.

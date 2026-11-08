@@ -1,26 +1,26 @@
-# ADR-0315: 참조 = 라이브러리 루트부터의 `/` 경로 한 꼴 + 기본 제공 `engram:/`
+# ADR-0315: A reference = one form, the `/` path from the library root + built-in `engram:/`
 
-- 상태: 제안 (2026-10-31, 근거: 사용자 결정 메모 101–103(2026-10-15 「ㅇㅇ 지정한 폴더로 확정」) · PRD R3 · Δ1)
-- 관련: ADR-0312 · ADR-0335(자리 = 정체) · ADR-0325 · TRD `docs/process/S25-preset-library/trd.md` §1-2 `LibPath` · §7 2 · 조사 `docs/research/preset-asset-reference-base-survey-2026-10-14.md`(+ 2026-10-15 덧붙임)
+- 상태: 제안 (2026-10-31, basis: user decisions memos 101–103 (2026-10-15 「ㅇㅇ 지정한 폴더로 확정」) · PRD R3 · Δ1)
+- 관련: ADR-0312 · ADR-0335 (place = identity) · ADR-0325 · TRD `docs/process/S25-preset-library/trd.md` §1-2 `LibPath` · §7 2 · research `docs/research/preset-asset-reference-base-survey-2026-10-14.md` (+ 2026-10-15 addendum)
 
 ## 맥락
-프리셋 안의 참조(스킬 · 지침 · 설정 · 다른 프리셋)를 어떤 꼴로 적나.
+In what form do we write a reference inside a preset (skill, instruction, settings, another preset)?
 
 ## 결정
-1. 참조 = 라이브러리 맨 위부터의 `/` 경로 한 꼴(예 `스킬/리뷰/review`) · 범위 제한 없음(R3).
-2. `LibPath` 규칙: UTF-8 · 구분자는 `/` 만 · 앞뒤 `/` 없음 · 빈 칸 · `.` · `..` · `\` · `:` · 제어 문자 없음. 루트가 하나라 루트 접두가 없다(ADR-0312).
-3. 기본 제공 에셋 = 라이브러리 밖의 고정 가짜 경로 `engram:/…`(Δ1). `LibPath` 가 `:` 를 받지 않아 둘이 섞이지 않는다.
+1. A reference = one form, the `/` path from the very top of the library (e.g. `스킬/리뷰/review`) · no scope limit (R3).
+2. `LibPath` rules: UTF-8 · the separator is only `/` · no leading or trailing `/` · no empty segment · `.` · `..` · `\` · `:` · no control characters. There is one root, so there is no root prefix (ADR-0312).
+3. A built-in asset = a fixed fake path outside the library, `engram:/…` (Δ1). `LibPath` does not accept `:`, so the two do not mix.
 
 ## 거부한 대안
-- **프리셋 파일 기준 상대**(`./` — Claude Code 플러그인 · Compose · Cargo 꼴) — 파일이 묶음 안에 사는 경우에 맞고, 여러 프리셋이 나눠 쓰는 공유 라이브러리엔 안 맞는다(메모 103 (a) · PRD R3).
-- **이름 참조**(Claude Code 플러그인 의존 · Continue `owner/name`) — 범위가 분명한 네임스페이스 안에서만 선다. 폴더 브라우저에선 다른 폴더의 같은 이름이 흔하다(메모 103 (b) · PRD R3).
-- **고정 ID 파일**(Unity · Godot) — 무거운 엔진 모델이고 바깥 이동에 깨진다(메모 103 (c)).
-- **URI 꼴**(`lib://업무/...`) — URL 호스트 정규화가 비 ASCII 라이브러리 이름을 망가뜨린다(메모 126 — 세션이 기각 · 사용자 확인 기록 없음). (기각 근거: 약함) 근거(메인 2026-11-01 — 보고 · M98): 메모 126 의 뜻(표준 함수가 풀 꼴)은 `relative-path` 로 감싼 `LibPath` 가 채운다 · 루트가 하나라(ADR-0312) URI 호스트 칸에 담을 라이브러리 이름이 없다 · 호스트 처리가 비 ASCII 이름을 바꾸는지는 재지 않았다.
+- **Relative to the preset file** (`./` — the shape of Claude Code plugins · Compose · Cargo) — it fits when the file lives inside a bundle, and does not fit a shared library that many presets share (memo 103 (a) · PRD R3).
+- **Reference by name** (Claude Code plugin dependencies · Continue `owner/name`) — it holds only inside a namespace with a clear scope. In a folder browser, the same name in a different folder is common (memo 103 (b) · PRD R3).
+- **Fixed ID files** (Unity · Godot) — a heavy engine model that breaks on outside moves (memo 103 (c)).
+- **A URI form** (`lib://업무/...`) — URL host normalization mangles non-ASCII library names (memo 126 — rejected by a session · no record of user confirmation). (Basis for rejection: weak) Basis (main 2026-11-01 — reported · M98): the intent of memo 126 (a form that a standard function can parse) is filled by `LibPath` wrapped in `relative-path` · there is one root (ADR-0312), so there is no library name to put in the URI host area · whether host handling changes non-ASCII names was not measured.
 
 ## 근거
-사용자 이유(메모 102): 스킬은 여러 프리셋이 나눠 쓴다(다대다) — 한 프리셋 옆에 두면 다른 프리셋이 둘 자리가 없다 · 프리셋이 프리셋을 품는다 · Engram 은 폴더 브라우저라 항목의 정체는 자리다. 브라우저 꼴 피어 확인(Obsidian 볼트 루트 경로 등 — 조사 덧붙임 2).
+User reason (memo 102): a skill is shared by many presets (many-to-many) — placing it next to one preset leaves no place for the other presets · a preset contains presets · Engram is a folder browser, so an entry's identity is its place. Browser-shaped peers confirmed (Obsidian vault-root paths etc. — research addendum 2).
 
 ## 영향 / 불변식
-- 검증 · 디스크 경로 바꾸기 · 이동 때 접두 바꾸기는 `LibPath` 타입 하나가 맡는다(`relative-path` 감쌈 — TRD §1-2).
-- 여러 루트를 다시 열면 새 루트에만 접두를 붙인다(ADR-0312 결정 6).
-- 경로로 찾는 표(`Catalog`)의 열쇠와 대소문자 비교는 platform `path_key` · `same_path` 가 맡는다(ADR-0325) — `LibPath` 문자열 그대로 견주지 않는다.
+- Validation, changing disk paths, and changing the prefix on move are handled by one `LibPath` type (wrapped in `relative-path` — TRD §1-2).
+- If multiple roots are reopened, only the new root gets a prefix (ADR-0312 Decision 6).
+- The key and case-insensitive comparison of the table looked up by path (`Catalog`) are handled by the platform `path_key` · `same_path` (ADR-0325) — `LibPath` strings are not compared as they are.

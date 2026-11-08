@@ -1,33 +1,33 @@
-# ADR-0337: codex 실행 재료 — JSON 은 developerInstructions · extraRoots, 터미널은 「기본」 프라이밍과 설정 `-c` 만
+# ADR-0337: codex launch materials — JSON uses developerInstructions · extraRoots, the terminal only the 「기본」 priming and the settings `-c`
 
-- 상태: 제안 (2026-10-31, 근거: 사용자 결정 P4-FINAL(2026-10-20 「프리셋은 베이스때문에 무조건 들어가야겠네. 그럼 안에 스킬이나 그런 지시서가 있을때 경고 띄우면 될듯」) · P7AC · G28 + 메인 M8 · M13 · M19 · M20 · M29 · M97(보고)) · 부분 폐기 by ADR-0341 (결정 3 알림 횟수)
-- 관련: ADR-0215(codex 지시서 = developer_instructions) · ADR-0216(덮어쓰기 순서) · ADR-0329 · ADR-0334 · ADR-0331 · PRD R37 · TRD §1-3 6 · §1-5 표 · §7 5 · 조사 `docs/research/codex-instruction-channels-2026-10-20.md` · Amended by ADR-0341 (결정 3 알림 횟수)
+- 상태: 제안 (2026-10-31, basis: user decisions P4-FINAL (2026-10-20 「프리셋은 베이스때문에 무조건 들어가야겠네. 그럼 안에 스킬이나 그런 지시서가 있을때 경고 띄우면 될듯」) · P7AC · G28 + main M8 · M13 · M19 · M20 · M29 · M97 (reported)) · 부분 폐기 by ADR-0341 (Decision 3, the notice count)
+- 관련: ADR-0215 (codex instructions = developer_instructions) · ADR-0216 (override order) · ADR-0329 · ADR-0334 · ADR-0331 · PRD R37 · TRD §1-3 6 · §1-5 table · §7 5 · research `docs/research/codex-instruction-channels-2026-10-20.md` · Amended by ADR-0341 (Decision 3, the notice count)
 
 ## 맥락
-codex 는 JSON(app-server)과 터미널 모드의 지침 · 스킬 채널이 다르다. 터미널은 프로세스마다 스킬 폴더를 줄 길이 없다(PRD R37 · 조사).
+For codex, the instruction and skill channels differ between JSON (app-server) and terminal mode. In the terminal there is no way to give a skill folder per process (PRD R37 · research).
 
 ## 결정
-1. **JSON**: 새 대화 = `thread/start.developerInstructions` · 스킬 = 같은 정션 폴더를 `skills/extraRoots/set`(프로세스마다 · 안에 든 프리셋 속 스킬까지 — M13) · 이어받기 = 지침 해시가 지난 적용값과 다를 때만 첫 턴 `additionalContext`(실험 API — T6) · codex 가 못 싣는 스킬 형식 = 「오류」 막힘(새 범주 없음 — P7AC).
-2. **터미널**: 「기본」 의 프라이밍(지금 길 `-c developer_instructions=`) + 프리셋 설정 codex 칸 `-c` 줄만 싣는다. 프리셋 지침 · 스킬(공통 · codex 꼬리표 모두)은 싣지 않는다.
-3. 터미널에서 빠진 지침 · 스킬은 실행 성공 답의 알림 목록 `notices` 에 이름을 싣는다 — 호출자(CLI 출력 · 화면)에게만, 띄운 에이전트에는 아무것도 보내지 않는다. 문구는 사실만 · 의도된 동작이라 적고 해결책을 권하지 않는다(G28 — 마지막 문구는 구현 때 사용자에게 보인다).
-4. 작업 폴더 · `~/.codex` 에 아무것도 쓰지 않는다.
-5. 설정 `-c` 줄 = 패스스루 뒤 · 우리 덮어쓰기 앞 · 명령줄 가드 · 길이 예산에 걸리면 막힘(M8).
+1. **JSON**: a new conversation = `thread/start.developerInstructions` · skills = the same junction folder passed as `skills/extraRoots/set` (per process · including skills in nested presets — M13) · on resume, only when the instruction hash differs from the last applied value, the first-turn `additionalContext` (an experimental API — T6) · a skill format that codex cannot load = blocked with 「오류」 (no new category — P7AC).
+2. **Terminal**: only the priming of 「기본」 (today's path `-c developer_instructions=`) + the preset settings codex field `-c` lines are loaded. Preset instructions and skills (both common and codex-tagged) are not loaded.
+3. The instructions and skills dropped in the terminal are listed by name in the notice list `notices` of the successful run reply — only to the caller (CLI output · screen), and nothing is sent to the started agent. The wording is facts only · it states that this is intended behavior and does not recommend a fix (G28 — the final wording is shown to the user at implementation).
+4. Nothing is written to the working folder or `~/.codex`.
+5. The settings `-c` lines = after the passthrough · before our overrides · blocked if they hit the command-line guard or the length budget (M8).
 
 ## 거부한 대안
-- **터미널 작업 폴더에 늘 생성 지침 파일 + `.agents\skills` 정션**(2026-10-18 결정) — 같은 폴더 codex 끼리의 경합 · 복제본 막힘 · 정리 없음(리뷰 #1 · P4 로 걷음).
-- **에이전트별 프로필 `-p` 로 지침만**(P4) — 「codex 가 지원하면 나중」 의 조사로 남겼다(`codex-instruction-channels-2026-10-20.md`).
-- **터미널엔 프리셋을 아예 안 싣기**(P4-REVISED) — 「기본」 때문에 들어가야 한다(P4-FINAL 사용자 말).
-- **못 싣는 스킬에 고치기 단추 · 「고치고 실행」 모달**(P7A) — 사용자 「너무 요란한데?」 · 기존 막힘 길로(P7AC).
-- **알림 문구에 해결책(「JSON 모드를 쓰세요」)을 넣기**(P4-FINAL 의 첫 문구) — 나쁜 문구가 LLM 이 그 파일을 스스로 읽어 넣게 만들 수 있다는 사용자 걱정으로 사실만 남겼다(G28).
-- **`CODEX_HOME` 을 에이전트마다 바꾸기** — 근거(기록 — 조사): `CODEX_HOME` 은 설정 · 스킬 · 전역 AGENTS.md · 세션 · 인증을 통째로 옮겨, 에이전트마다 바꾸면 이어받기 조회와 인증이 깨진다(`docs/research/external-skill-dir-loading-claude-codex-2026-10-10.md` 발견 11 — 소스 확실 · 부작용 가능성 높음 · `docs/research/codex-instruction-channels-2026-10-20.md` 「앞선 보고서가 이미 막았다」).
-- **로컬 플러그인 설치**(`codex plugin marketplace add` → `codex plugin add`) — 근거(기록 — 조사): 설치가 전역 설정을 바꿔 에이전트마다의 스위치가 아니다(같은 조사 발견 15 — 적재는 미측).
-- **사용자 폴더면 만들지 묻고 기억**(옛 R37 대답 · 메모 30) — 사용자가 2026-10-18 걷었다(메모 202 — 물음 · 에이전트마다 기억한 답 · CLI · 버스 기본값 · 막힘 사유 「codex 파일 대답 없음」 을 통째로). 근거(메인 2026-10-31 — 보고): P4-FINAL 뒤로 작업 폴더에 아무것도 쓰지 않아 물음 자체가 없다(M97). 지금은 물음 자체가 없다 — 그 뒤 P4-FINAL 이 「늘 작업 폴더에 깐다」 도 걷어 codex 터미널은 작업 폴더에 아무것도 쓰지 않으므로 만들지 물을 파일이 없다.
+- **Always generating an instruction file in the terminal working folder + a `.agents\skills` junction** (the decision of 2026-10-18) — contention among codex instances in the same folder · clone blocking · no cleanup (review #1 · withdrawn with P4).
+- **Instructions only, through a per-agent profile `-p`** (P4) — left as research of 「codex 가 지원하면 나중」 (`codex-instruction-channels-2026-10-20.md`).
+- **Not loading presets in the terminal at all** (P4-REVISED) — they must be included because of 「기본」 (P4-FINAL user words).
+- **A fix button · 「고치고 실행」 modal for skills that cannot be loaded** (P7A) — user 「너무 요란한데?」 · go through the existing block path (P7AC).
+- **Putting a remedy (「JSON 모드를 쓰세요」) in the notice wording** (the first wording of P4-FINAL) — because of the user's worry that bad wording could make the LLM read and insert that file by itself, only facts were kept (G28).
+- **Changing `CODEX_HOME` per agent** — basis (record — research): `CODEX_HOME` moves settings, skills, global AGENTS.md, sessions and authentication as a whole, so changing it per agent breaks resume lookup and authentication (`docs/research/external-skill-dir-loading-claude-codex-2026-10-10.md` finding 11 — source certain · side effects likely · `docs/research/codex-instruction-channels-2026-10-20.md` 「앞선 보고서가 이미 막았다」).
+- **Installing a local plugin** (`codex plugin marketplace add` → `codex plugin add`) — basis (record — research): installing changes the global settings, so it is not a per-agent switch (finding 15 of the same research — loading not measured).
+- **If it is a user folder, ask whether to create it and remember** (the old R37 answer · memo 30) — the user withdrew it on 2026-10-18 (memo 202 — the question · the answer remembered per agent · the CLI · the bus default · the block reason 「codex 파일 대답 없음」, as a whole). Basis (main 2026-10-31 — reported): after P4-FINAL nothing is written to the working folder, so there is no question itself (M97). There is no question now — afterwards P4-FINAL also withdrew 「늘 작업 폴더에 깐다」, so the codex terminal writes nothing to the working folder, and there is no file to ask about creating.
 
 ## 근거
-- 실측: `developerInstructions` = 확실 · `extraRoots` = 가능성 높음 · `additionalContext` = 실험 API(TRD §1-5 표).
-- 사용자 결정 P4-FINAL · P7AC · G28.
+- Measured: `developerInstructions` = certain · `extraRoots` = likely · `additionalContext` = an experimental API (TRD §1-5 table).
+- User decisions P4-FINAL · P7AC · G28.
 
 ## 영향 / 불변식
-- 알림은 경고 범주가 아니다(ADR-0331). codex 터미널 알림은 P4-FINAL 의 사용자 예외다.
-- JSON 이어받기의 「지난 적용 지침 해시」 는 래치의 첫 턴 사건에 **따로 된 화신 확인 명부 mutate** 로 적는다 — 세션 id 비교-교체가 쓰든 안 쓰든(이어받기는 기대 = 저장값 · 새 값 = 저장값이라 아무것도 안 쓴다). manager 가 실행 재료에서 해시를 받아 그 closure 로 나른다. 세션 id 영속 지점(CLAUDE.md 불변식)은 그대로다(M29 · 재리뷰 A3).
-- 터미널에 지침 · 스킬을 싣는 길은 codex 가 프로세스마다의 지침 채널을 지원할 때 그 조사에서 다시 연다.
+- The notice is not a warning category (ADR-0331). The codex terminal notice is a user exception of P4-FINAL.
+- The 「지난 적용 지침 해시」 of JSON resume is written at the latch's first-turn event as a **separate incarnation-check registry mutate** — whether or not the session id compare-and-replace writes anything (on resume, expected = stored value · new value = stored value, so it writes nothing). The manager receives the hash from the launch materials and carries it through that closure. The session id persistence point (CLAUDE.md invariant) is unchanged (M29 · re-review A3).
+- The path that loads instructions and skills in the terminal is reopened in that research when codex supports a per-process instruction channel.
