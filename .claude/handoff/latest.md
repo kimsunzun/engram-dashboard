@@ -17,6 +17,10 @@ P1 code review (deep: lead PASS, risk-axis PASS, Codex FIX → must WITHDRAWN on
 4. source pin that the `verb_spawn` cwd arm passes `llm_creation_refusal` (door ③ wiring) (risk 2);
 Then re-review (only reviewers who raised; delta), then main applies the batched doc fixes once (list below), then P2 → P3 (briefs from TRD §7), then `/engram-qa` incl. the §6-2 live run, then ask U2, then commit per piece.
 
+## Status update (usage limit hit)
+- P1 권장 round DONE by the coder (4 items, mutations bite, full regression green 5567 / 34 gates); snapshot tree `11a00483bc2a69c43658f332a2a8eadf8bb5a983`. Risk-axis re-review: PASS. Lead re-review (items 1–3): was running when the usage limit hit — re-run it if no result (delta `scratchpad/p1-round2.diff`, trees 8318550 → 11a00483).
+- Next: apply batched docs (below, plus: policy-table header `commands.rs:738-739` should also name `the_bus_cwd_arm_hands_the_production_policy_to_the_body`; `new_profile` spelling comment wrongly says existence is checked by spawn's `dunce::canonicalize` — a missing folder fails at process spawn), then P2.
+
 ## Batched (main fixes at the last round, no coder)
 - `commands.rs:517` `AgentCommandHost` trait doc: add `create_and_activate` + its contract (store refusal of the add → `created:false`; failure after the add → `created:true`, row stays).
 - `activation.rs:1772`: PTY "falls back to another folder" → unverified observation (only measured: ConPTY starts with a missing cwd, `activation.rs:~750`); `:1609` "(review finding 1)" → "TRD S25 step 20 review finding 1".
