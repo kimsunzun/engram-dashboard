@@ -808,6 +808,7 @@ Code comments to fix in passing:
 
 ## 9. Review record
 
+- **2026-11-09 — PRD+TRD review PASSED** (`/engram-review trd deep`, rounds 1–3 + confirmation; final confirmation PASS on `c43b576c`). U2 stays pending with the user (design neutral).
 - 2026-11-09 — round 3 (lead reviewer, delta): FIX — one MUST (R7c/R7d scan filter assumed `--cd` on the app-server argv); fixed by main in place (pid log `fakes.log`), plus R7d observability and one anchor. Remaining: U2 pending with the user.
 - 2026-11-06 — draft 1 `/engram-review trd deep` (2 Claude reviewers + Codex): **FIX**. Five MUST, the recommended items and the batched wording were applied in draft 2. H1–H3 went to the user as U2–U4. One finding was refined rather than taken verbatim: "every failure after the add records last failure" now excludes a user kill during the handshake (§2 premise 12).
 - 2026-11-09 — round 2 delta review (Claude lead + Codex): round-1 findings 1–5 **FIXED**; new **FIX** → draft 3. Applied:
