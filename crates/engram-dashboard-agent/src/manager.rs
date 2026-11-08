@@ -1698,15 +1698,18 @@ impl AgentManager {
     ///     기다린다 — 다만 그것은 창이 아니라 **신호**라(ADR-0201) 정상 왕복이면 즉시 돌아온다
     ///     (실측 약 130ms). 상한은 [`LINK_RESOLUTION_BACKSTOP`] 이고 그것은 판정 창이 아니라 포기다.
     ///   재활성화 가드와 아래 in-flight 가드는 어느 축에서도 폴링 없이 즉시 반환한다.
-    /// ★★그래서 이 동사는 **blocking 풀에서만 불러야 한다 — 호출자의 의무다**★★: 최악은 백스톱(15s) +
-    ///   실패 판정 뒤 teardown 의 `session.kill(5s)` 이고 그 사이 **yield 지점이 없다.** async 워커에서
-    ///   직접 부르면 그 워커가 통째로 묶이고, 막힌 활성화 N 건이 워커 N 개를 가져가 다른 연결의 명령까지
-    ///   함께 멈춘다. 오늘 운영 호출자 넷이 전부 그 계약을 지킨다 — 명령 버스 둘은 `blocking_handler`
-    ///   뒤(`crate::commands::make_table`), WS 둘은 `tokio::task::spawn_blocking` 뒤
-    ///   (`connection_core` 의 `Spawn`·`SpawnProfile`). ★한때 이 자리에 「그 연결의 응답만 지연되고
-    ///   다른 세션에는 영향 없다」로 적혀 있었는데, 그것은 **호출자가 위 계약을 지킬 때만** 참이고
-    ///   실제로 WS 둘이 안 지키고 있었다★ — 성질이 아니라 계약으로 적는다.
-    ///   ★실패는 이 상한보다 빨리 돌아올 수 있다★ — 진단 스트림이 먼저 말하면 그 자리에서 끊는다.
+    /// **So this verb must be called only on a blocking pool — that is the caller's duty**: the worst case
+    ///   is the backstop (15 s) plus, after a failure verdict, the teardown's `session.kill` (pump join
+    ///   bounded by 5 s), with **no yield point** in between. Called directly on an async worker it ties up
+    ///   that whole worker, and N stuck activations take N workers and stop other connections' commands
+    ///   too. All four production callers keep the contract today — the two command-bus ones behind
+    ///   `blocking_handler` (`crate::commands::make_table`), the two WS ones behind
+    ///   `tokio::task::spawn_blocking` (`connection_core`'s `Spawn` · `SpawnProfile`). **This spot once
+    ///   said "only that connection's reply is delayed, other sessions are unaffected"; that is true only
+    ///   when callers keep the contract above, and the two WS callers did not** — so it is written as a
+    ///   contract, not a property.
+    ///   **A failure can return sooner than this cap** — when the diagnostic stream speaks first, it cuts
+    ///   off right there.
     /// ★부르는 쪽 있는 입구다(`Entry::Caller`)★ — 띄우기 전 명부 변경의 저장이 `Err` 면 띄우지 않고
     ///   [`PtyError::Store`] 다(부분 성공 = [`AgentManager::spawn_agent_watching_link`]). 같은 동사를 부팅
     ///   복원은 `Entry::Internal` 로 부른다.
