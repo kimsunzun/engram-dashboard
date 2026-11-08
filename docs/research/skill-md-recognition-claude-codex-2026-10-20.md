@@ -1,155 +1,155 @@
-# claude · codex 는 SKILL.md 를 어떻게 알아보고 이름 붙이나 (2026-10-20)
+# How claude · codex recognize and name SKILL.md (2026-10-20)
 
 | | |
 |---|---|
-| **상태** | 조사 완료 · 결정 전(S25 프리셋 라이브러리의 스킬 인식 · 이름 · 충돌 규칙 입력) |
-| **방법** | 공식 문서 2쪽(claude skills · plugins-reference) · 소스(codex 태그 `rust-v0.156.1` = `b412ff32` · claude 는 설치본 `claude.exe` 에 든 번들 JS 를 문자열로 정독) · 실측(같은 가짜 스킬 26종을 두 CLI 에 물림 — 아래 「방법」). **실 모델 호출 0**(claude = 로컬 가짜 API 서버 · codex = `skills/list` · `debug prompt-input`) |
-| **대상판** | Claude Code **2.1.284** · codex-cli **0.156.1** · Windows 11(26200) |
-| **질문** | ① 파일 이름 대소문자 ② 깊이(묶음 폴더 · 스킬 안 스킬) ③ 앞머리 필수 칸 · 깨졌을 때 ④ 정체가 되는 이름 · 제약 ⑤ 이름 겹침 ⑥ 정션 · 링크 ⑦ claude 플러그인 경로의 최소 모양 · 이름 ⑧ 스킬 폴더의 다른 특별 파일 |
-| **앞선 보고서** | [`external-skill-dir-loading-claude-codex-2026-10-10.md`](external-skill-dir-loading-claude-codex-2026-10-10.md)(발견 위치 · `--plugin-dir` · codex 폴더) · [`codex-instruction-channels-2026-10-20.md`](codex-instruction-channels-2026-10-20.md)(가짜 서버 · 덫 프록시 방법) |
-| **확신도 범례** | 확실 = 실측(또는 실측 + 소스 교차) · 가능성 높음 = 소스나 문서만 · 불확실 = 미검 |
+| **Status** | Investigation complete · decision pending (input for S25 preset library's skill recognition · naming · collision rules) |
+| **Method** | 2 pages of official docs (claude skills · plugins-reference) · source (codex tag `rust-v0.156.1` = `b412ff32` · for claude, the bundled JS inside the installed `claude.exe` was read closely as strings) · measurement (the same 26 fake skills fed to both CLIs — 「방법」 below). **0 real model calls** (claude = a local fake API server · codex = `skills/list` · `debug prompt-input`) |
+| **Target versions** | Claude Code **2.1.284** · codex-cli **0.156.1** · Windows 11 (26200) |
+| **Questions** | (1) File-name case (2) Depth (bundle folder · skill within a skill) (3) Required frontmatter fields · when it is broken (4) The name that becomes the identity · constraints (5) Name overlap (6) Junctions · links (7) Minimal shape of the claude plugin path · name (8) Other special files in a skill folder |
+| **Earlier reports** | [`external-skill-dir-loading-claude-codex-2026-10-10.md`](external-skill-dir-loading-claude-codex-2026-10-10.md) (discovery location · `--plugin-dir` · codex folder) · [`codex-instruction-channels-2026-10-20.md`](codex-instruction-channels-2026-10-20.md) (fake server · trap proxy method) |
+| **Confidence legend** | certain = measured (or measured + source cross-check) · likely = source or docs only · uncertain = not tested |
 
-## 결론
+## Conclusion
 
-1. **두 CLI 는 「스킬」 을 다르게 알아본다 — 너그러운 claude, 엄격하고 깊게 훑는 codex.**
-   - **claude** 는 `<뿌리>/<폴더>/SKILL.md` **한 층만** 경로를 붙여 열어 본다. 그래서 대소문자는 **OS 규칙**이고(Windows 에선 `skill.md` 도 실림), 앞머리가 없거나 깨져도 싣는다.
-   - **codex** 는 뿌리 아래를 **6층까지 재귀**로 걸으며 파일 이름이 **정확히 `SKILL.md`** 인 것만 줍는다(Windows 에서도). 앞머리 · `description` 이 없거나 YAML 이 깨지거나 BOM 이 붙으면 **그 스킬을 빼고** 오류 목록에만 올린다.
-2. **이름의 정체도 다르다.**
-   - **claude:** 정체는 **폴더 이름**이다. 플러그인이면 `<플러그인>:<폴더 이름의 [^A-Za-z0-9_-] 를 - 로>` 꼴이다. 앞머리 `name` 은 표시 이름이자 별칭으로만 붙는다.
-   - **codex:** 정체는 **앞머리 `name`**(공백 접기)이고, 없으면 **정션을 따라간 실제 폴더 이름**이다. 64자 상한이 있다. 실제 폴더의 조상에 플러그인 manifest 가 있으면 `<플러그인>:` 접두가 붙는다.
-3. **이름 겹침은 어느 쪽도 막지 않는다.**
-   - **claude:** 같은 **실제 파일**만 하나로 합친다. 같은 표시 이름 둘을 이름으로 부르면 **오류 없이 정렬상 첫째**가 돈다.
-   - **codex:** 같은 **정규 경로**만 합친다. 이름이 겹치면 **둘 다 모델에게 보인다** — `$이름` 멘션만 모호해서 고르지 않는다.
-4. **Engram 휘발 플러그인 경로(TRD §1-5)는 그대로 된다 — 실측 확실.** 지켜야 할 조건 셋:
-   - **manifest 불요** — `--plugin-dir <휘발>\engram` 에 `skills\` 만 있으면 한 플러그인이다.
-   - **이름** — 이름은 `engram:<정션 이름>` 이다. TRD 의 「정션 따라가기 미측」 은 이번 실측으로 확인됐다.
-   - **두지 말 것** — `skills\SKILL.md` 를 두면 안 된다. 그 하나만 스킬이 되고 자식은 무시된다.
-5. **Engram 규칙과 어긋나는 곳은 다섯이다**(아래 「Engram 규칙과 어긋나는 곳」).
-   - `skill.md` 인식 — codex 가 조용히 버린다.
-   - 붙인 스킬 안의 스킬 — codex 에만 새어 들어간다.
-   - 앞머리 형식 무검사 — codex 가 조용히 빠뜨린다.
-   - 이름 문자 · 길이 무검사 — claude 가 이름을 바꾸고, Windows 폴더 이름이 못 되는 이름이 있다.
-   - 충돌 키의 대소문자 · 치환 — claude 쪽 내부 이름이 부딪힌다.
+1. **The two CLIs recognize a 「스킬」 (skill) differently — a lenient claude, and a strict, deeply scanning codex.**
+   - **claude** opens **only one layer** of `<뿌리>/<폴더>/SKILL.md` by joining the path. So case is **an OS rule** (on Windows `skill.md` is also loaded), and it loads the skill even when the frontmatter is missing or broken.
+   - **codex** walks under the root **recursively up to 6 layers** and picks up only files whose name is **exactly `SKILL.md`** (on Windows too). If the frontmatter · `description` is missing, the YAML is broken, or a BOM is attached, it **leaves that skill out** and raises it only in the error list.
+2. **The identity of the name differs too.**
+   - **claude:** the identity is the **folder name**. For a plugin it takes the shape `<플러그인>:<폴더 이름의 [^A-Za-z0-9_-] 를 - 로>`. The frontmatter `name` is attached only as a display name and an alias.
+   - **codex:** the identity is the **frontmatter `name`** (whitespace folded), and if absent, the **actual folder name after following the junction**. There is a 64-character cap. If an ancestor of the actual folder has a plugin manifest, the `<플러그인>:` prefix is attached.
+3. **Neither side blocks name overlap.**
+   - **claude:** merges only the same **actual file**. If two identical display names are called by name, **the first in sort order** runs **without an error**.
+   - **codex:** merges only the same **canonical path**. If names overlap, **both are visible to the model** — only the `$이름` mention is ambiguous and does not pick.
+4. **Engram's volatile plugin path (TRD §1-5) works as is — measured, certain.** Three conditions to keep:
+   - **No manifest needed** — `skills\` alone under `--plugin-dir <휘발>\engram` makes one plugin.
+   - **Name** — the name is `engram:<정션 이름>`. The TRD's 「정션 따라가기 미측」 (following junctions untested) was confirmed by this measurement.
+   - **What not to put** — do not put `skills\SKILL.md`. Only that one becomes a skill and the children are ignored.
+5. **There are five places that diverge from Engram's rules** (「Engram 규칙과 어긋나는 곳」 below).
+   - `skill.md` recognition — codex silently discards it.
+   - A skill inside an attached skill — leaks in only to codex.
+   - No frontmatter format check — codex silently drops it.
+   - No name character · length check — claude changes the name, and some names cannot be Windows folder names.
+   - Case · substitution of the collision key — claude's internal names collide.
 
-## 질문별 답
+## Answers by question
 
-| # | claude 2.1.284 | 근거 · 확신도 | codex 0.156.1 | 근거 · 확신도 |
+| # | claude 2.1.284 | Basis · confidence | codex 0.156.1 | Basis · confidence |
 |---|---|---|---|---|
-| **1 파일 이름** | 폴더 경로에 `SKILL.md` 를 붙여 연다 → **OS 파일 시스템 규칙**. Windows 실측: `skill.md` · `Skill.md` 모두 실림(플러그인 `engram:c-lower` · `engram:c-mixed`, 프로젝트 `p-lower`). 문서는 대소문자를 적지 않는다(예시는 전부 대문자) | 실측 + 번들(`join(dir,"SKILL.md")` 뒤 stat · readFile) · **확실** | 걷기에서 얻은 파일 이름을 **`== "SKILL.md"` 로 바이트 비교**(`ext/skills/src/loader/discovery.rs:176`) → OS 무관 정확 일치. Windows 에서 `skill.md` · `Skill.md` 는 **목록에도 오류에도 없다** | 실측 + 소스 · **확실** |
-| **2 깊이** | **한 층만**: `<뿌리>/<폴더>/SKILL.md`(플러그인 `skills/` · 개인 · 프로젝트 공통). 묶음 폴더 아래(`c-group/c-nested`) · 스킬 안 스킬(`c-outer/c-inner`) · 더 깊은 것 **안 실림**(디버그 로그 「Loaded 23 skills」 = 26 항목 − 셋). 예외: 플러그인 `skills/` 바로 안에 `SKILL.md` 가 있으면 **그 하나만** 스킬(소스) · 프로젝트는 하위 폴더의 `.claude/skills` 도 그 폴더 파일을 만질 때 읽는다(문서) | 실측 + 번들 · **확실** | **재귀**: 최대 6층 · 폴더 2000 · 항목 20000(`loader/mod.rs:31-32` · `discovery.rs:49`). 모든 `SKILL.md` 가 스킬 — `c-nested` · `c-inner` · `c-deep6` 실림, `c-deep7` 안 실림. **점(.) 폴더 아래는 건너뜀**(`.c-hidden` 없음). 플러그인의 Agent Plugin 루트만 직속 자식 모드 | 실측 + 소스 · **확실** |
-| **3 앞머리** | 전부 선택. 앞머리 없음 → 그대로 실림 · YAML 깨짐 → 「필드 없이」 실림(경고 로그) · BOM 허용 · CRLF 허용. 설명이 없으면 본문 첫 줄을 설명으로 쓴다(프로젝트 `p-nofm` = 「Heading」). ★단 **플러그인 경로에서 설명을 직접 안 쓴 스킬**(`c-nofm` · `c-nodesc` · `c-badyaml`)은 init `slash_commands` 에만 있고 **모델에게 보내는 스킬 목록엔 없다**(이름을 대 Skill 도구로 부르면 돈다 — `engram:c-nofm` 실측). `claude plugin validate`: 깨진 YAML = error · 앞머리/설명 없음 = warning | 실측 · **확실**(모델 목록에서 빠지는 이유는 코드로 못 짚음 = 가능성 높음) | **필수**: 첫 줄 `---` · 닫는 `---` · 비지 않은 블록 · YAML 파싱(값에 `: ` 가 든 줄은 한 번 따옴표로 고쳐 다시 읽음) · `description` 비지 않음 · `name` ≤ 64자(`skills/src/parser.rs`). 어기면 **그 스킬은 빠지고** `skills/list` 의 `errors` 에 오른다(TUI = 「Skipped loading N skill(s) due to invalid SKILL.md files.」). ★**BOM 이 붙으면 「missing YAML frontmatter」 로 빠진다**(`c-bom`). `name` 은 선택 | 실측 + 소스 · **확실** |
-| **4 이름** | **정체(내부 이름 · 모델 목록 이름) = 폴더 이름.** 플러그인 = `<플러그인>:` + 폴더 이름의 `[^A-Za-z0-9_-]` 를 `-` 로(`.c-hidden` → `engram:-c-hidden`). 앞머리 `name` = `/` 메뉴 표시 이름이자 별칭 — Skill 도구가 `engram:c-fm-other` · 맨 `c-fm-other` 둘 다 받는다. 맨 폴더 이름(`c-dir-mismatch`)은 거부(「Did you mean engram:c-dir-mismatch?」). 앞머리 이름이 다르면 모델 목록엔 폴더 쪽이 뜬다(디버그 「Skill prompt: showing "engram:c-dir-mismatch" (userFacingName="engram:c-fm-other")」). **길이 상한 없음**(65자 실림). 문자: 문서상 제어문자 · zero-width · bidi · `<>` · 낱칸 공백 밖의 공백을 거부. 공백 · 점 · 한글 · `:` 는 앞머리 이름으로 실림(`c-weird` · `c-colon`) | 실측 + 번들 + 문서 · **확실** | **정체 = 앞머리 `name`**(공백 접기). 없거나 빈 문자열이면 **정규화된(정션을 따라간) 실제 폴더 이름**(`loader/host.rs:394` — `c-junc-alias` → `c-jtarget` · `engram-1234abcd-c-noname` → `c-noname`). **≤ 64자**(65 = 오류). **문자 제한 없음**(공백 · 점 · 대문자 · 한글 · `:` 실측). ★**실제 폴더의 조상에 `.codex-plugin/plugin.json` · `.claude-plugin/plugin.json` · `.cursor-plugin/plugin.json` 이 있으면 `<manifest name>:<이름>`**(`myplug:c-ps` 실측 · `loader/namespace.rs`). `$이름` 멘션은 `[A-Za-z0-9_:-]` 만 이어 읽어 공백 든 이름은 멘션으로 못 부른다(`skills/src/mentions.rs:226`) | 실측 + 소스 · **확실**(멘션 = 소스만) |
-| **5 이름 겹침** | **같은 실제 파일(realpath)** 은 한 번만 — 플러그인끼리(`engram2:c-exact` · `engram2:other-dirname` 건너뜀 실측), 그리고 개인 스킬 폴더와 겹치면 플러그인 쪽을 건너뛴다(소스). 다른 파일이면 다 실린다: 개인 > 프로젝트 — 같은 이름이면 개인만(`c-pers` 실측 · 문서) · 플러그인은 접두로 갈라져 공존. 한 플러그인 안에서 앞머리 이름이 같은 둘(`c-dupA` · `c-dupB`)은 폴더 이름이 달라 **둘 다 실리고**, 겹친 표시 이름 `engram:c-dup` 으로 부르면 **오류 없이 정렬상 첫째(c-dupA)** 가 돈다 | 실측 + 번들 · **확실** | **같은 정규 `SKILL.md` 경로만** 하나로 합친다 — 먼저 오는 루트가 이긴다(순서 = `$CODEX_HOME/skills` · `~/.agents/skills` · 시스템 · 플러그인 · extraRoots · 프로젝트 `.agents/skills` — `host_roots.rs` · `host_merge.rs:232`). **이름 겹침은 오류도 우선순위도 없이 전부 목록에 오르고 모델 프롬프트에 둘 다 뜬다**(`c-dup` 셋 · 프롬프트 두 줄 실측). `$c-dup` 처럼 이름으로 부르면 개수 ≠ 1 이라 **고르지 않는다**(`skills/src/selection.rs`) | 실측(목록 · 프롬프트) + 소스(멘션) · **확실** |
-| **6 정션 · 링크** | 따라간다 — 폴더 항목이 디렉터리거나 링크면 받는다. 이름 = **링크 이름**, 「Base directory」 = 링크 경로, 중복 판정 = realpath | 실측 · **확실** | 사용자 · 프로젝트 · 관리자 범위는 디렉터리 링크 · 정션을 따라간다(시스템 범위만 무시) · 같은 실제 폴더는 한 번만 걷는다. 이름 · 접두 = **실제 경로 기준**, 프롬프트의 경로 표시는 링크 경로(`r2/engram-1234abcd-c-exact/SKILL.md`). **파일 심볼릭 링크인 `SKILL.md` 는 걷기에서 빠진다**(`exec-server/src/local_file_system.rs` 의 `walk`) | 정션 = 실측 · **확실** / 파일 링크 = 소스만 · **가능성 높음**(만들 권한이 없어 못 잼) |
-| **7 claude 플러그인** | **manifest 불요** — `--plugin-dir X` 에서 `X\skills\` 가 있으면 「is one plugin: skills at its top marks it」(디버그 로그). 플러그인 이름 = **X 폴더 이름**(init `plugins` = `engram` · source `engram@inline`). 최소 모양 = `X\skills\<이름>\SKILL.md`. 함정: ① `X\skills\SKILL.md` 가 있으면 그 하나만 스킬(번들) ② `X` 에 `skills\` 같은 표식이 없으면 「플러그인 묶음」 으로 보고 자식마다 플러그인(`--help`) ③ **`claude plugin validate` 는 manifest 가 없으면 실패**(「No manifest found in directory」) — 런타임은 멀쩡하다 ④ 링크를 안 따라간다(「components are read without following symlinks」) — 실제 경로를 따로 검사해야 한다 ⑤ 플러그인 이름 규칙(공백 · `@` · `:` · 경로 구분자 금지 · `claude-` · `anthropic-` 접두 예약 — 문서). `engram` 은 안전 | 실측 + 문서 + 번들 · **확실** | 해당 없음(JSON = `skills/extraRoots/set` 호스트 루트 · 터미널 = 작업 폴더 `.agents/skills` — 앞선 보고서). 단 **codex 도 `.claude-plugin/plugin.json` 을 플러그인 표식으로 읽는다**(4) | — |
-| **8 특별 파일** | 개인 · 프로젝트 스킬 폴더 안의 `.claude-plugin/plugin.json` → `<이름>@skills-dir` 플러그인으로 실림(문서) · 예약 폴더 이름 `synced` · `anthropic-skills`(문서) · 본문의 `${CLAUDE_SKILL_DIR}` 등 치환 · 플러그인 뿌리의 `CLAUDE.md` 는 안 읽힘(문서). 나머지는 모델이 필요할 때 읽는 일반 파일 | 문서 + 번들 · **가능성 높음**(이번에 안 잼) | `agents/openai.yaml` — 표시 정보 · 의존 도구 · 정책(`allow_implicit_invocation: false` = 암묵 호출 대상에서 뺌 · `products` 제한 — `skills/src/model.rs`) · 조상의 플러그인 manifest 셋(4의 접두) · 점 폴더 무시. 나머지는 일반 파일 | 소스 · **가능성 높음** |
+| **1 File name** | Opens by attaching `SKILL.md` to the folder path → **OS file system rule**. Measured on Windows: both `skill.md` · `Skill.md` are loaded (plugin `engram:c-lower` · `engram:c-mixed`, project `p-lower`). The docs do not state case (the examples are all uppercase) | Measured + bundle (stat · readFile after `join(dir,"SKILL.md")`) · **certain** | The file name obtained from the walk is **byte-compared with `== "SKILL.md"`** (`ext/skills/src/loader/discovery.rs:176`) → exact match regardless of OS. On Windows `skill.md` · `Skill.md` are **in neither the list nor the errors** | Measured + source · **certain** |
+| **2 Depth** | **One layer only**: `<뿌리>/<폴더>/SKILL.md` (common to plugin `skills/` · personal · project). Under a bundle folder (`c-group/c-nested`) · a skill inside a skill (`c-outer/c-inner`) · anything deeper is **not loaded** (debug log 「Loaded 23 skills」 = 26 items − three). Exception: if `SKILL.md` is directly inside plugin `skills/`, **only that one** is a skill (source) · in a project, a subfolder's `.claude/skills` is also read when files in that folder are touched (docs) | Measured + bundle · **certain** | **Recursive**: up to 6 layers · 2000 folders · 20000 entries (`loader/mod.rs:31-32` · `discovery.rs:49`). Every `SKILL.md` is a skill — `c-nested` · `c-inner` · `c-deep6` loaded, `c-deep7` not loaded. **Skips under dot (.) folders** (no `.c-hidden`). Only the plugin's Agent Plugin root is in direct-child mode | Measured + source · **certain** |
+| **3 Frontmatter** | All optional. No frontmatter → loaded as is · broken YAML → loaded 「필드 없이」 (without fields) (warning log) · BOM allowed · CRLF allowed. If there is no description, the first line of the body is used as the description (project `p-nofm` = 「Heading」). ★But a skill **whose description was not written directly on the plugin path** (`c-nofm` · `c-nodesc` · `c-badyaml`) is only in init `slash_commands` and **not in the skill list sent to the model** (calling it by name through the Skill tool works — `engram:c-nofm` measured). `claude plugin validate`: broken YAML = error · no frontmatter/description = warning | Measured · **certain** (the reason it drops out of the model list could not be pinned in code = likely) | **Required**: first line `---` · closing `---` · a non-empty block · YAML parsing (a line whose value contains `: ` is fixed once with quotes and re-read) · `description` non-empty · `name` ≤ 64 characters (`skills/src/parser.rs`). If violated, **that skill drops out** and goes on the `errors` of `skills/list` (TUI = 「Skipped loading N skill(s) due to invalid SKILL.md files.」). ★**If a BOM is attached it drops out as 「missing YAML frontmatter」**★ (`c-bom`). `name` is optional | Measured + source · **certain** |
+| **4 Name** | **Identity (internal name · model list name) = folder name.** Plugin = `<플러그인>:` + the `[^A-Za-z0-9_-]` of the folder name changed to `-` (`.c-hidden` → `engram:-c-hidden`). Frontmatter `name` = the `/` menu display name and an alias — the Skill tool accepts both `engram:c-fm-other` · bare `c-fm-other`. A bare folder name (`c-dir-mismatch`) is rejected (「Did you mean engram:c-dir-mismatch?」). If the frontmatter name differs, the model list shows the folder side (debug 「Skill prompt: showing "engram:c-dir-mismatch" (userFacingName="engram:c-fm-other")」). **No length cap** (65 characters loaded). Characters: per the docs, rejects control characters · zero-width · bidi · `<>` · whitespace other than a single-cell space. Spaces · dots · Korean · `:` are loaded as a frontmatter name (`c-weird` · `c-colon`) | Measured + bundle + docs · **certain** | **Identity = frontmatter `name`** (whitespace folded). If absent or an empty string, the **normalized (junction-followed) actual folder name** (`loader/host.rs:394` — `c-junc-alias` → `c-jtarget` · `engram-1234abcd-c-noname` → `c-noname`). **≤ 64 characters** (65 = error). **No character restriction** (spaces · dots · uppercase · Korean · `:` measured). ★**If an ancestor of the actual folder has `.codex-plugin/plugin.json` · `.claude-plugin/plugin.json` · `.cursor-plugin/plugin.json`, `<manifest name>:<이름>`**★ (`myplug:c-ps` measured · `loader/namespace.rs`). A `$이름` mention reads on only `[A-Za-z0-9_:-]`, so a name containing a space cannot be called by mention (`skills/src/mentions.rs:226`) | Measured + source · **certain** (mention = source only) |
+| **5 Name overlap** | **The same actual file (realpath)** only once — among plugins (`engram2:c-exact` · `engram2:other-dirname` skipping measured), and if it overlaps with a personal skill folder, the plugin side is skipped (source). If they are different files, all are loaded: personal > project — with the same name only personal (`c-pers` measured · docs) · plugins coexist, separated by prefix. Two with the same frontmatter name within one plugin (`c-dupA` · `c-dupB`) have different folder names, so **both are loaded**, and if called by the overlapping display name `engram:c-dup`, **the first in sort order (c-dupA)** runs **without an error** | Measured + bundle · **certain** | Merges into one **only the same canonical `SKILL.md` path** — the root that comes first wins (order = `$CODEX_HOME/skills` · `~/.agents/skills` · system · plugin · extraRoots · project `.agents/skills` — `host_roots.rs` · `host_merge.rs:232`). **Name overlap is listed in full with no error and no priority, and both appear in the model prompt** (three `c-dup` entries · two lines in the prompt measured). If called by name like `$c-dup`, the count ≠ 1, so it **does not pick** (`skills/src/selection.rs`) | Measured (list · prompt) + source (mention) · **certain** |
+| **6 Junctions · links** | Follows — if a folder entry is a directory or a link, it is accepted. Name = **link name**, 「Base directory」 = link path, duplicate decision = realpath | Measured · **certain** | User · project · admin scopes follow directory links · junctions (only the system scope ignores them) · the same actual folder is walked only once. Name · prefix = **based on the actual path**, the path shown in the prompt is the link path (`r2/engram-1234abcd-c-exact/SKILL.md`). **`SKILL.md`, which is a file symbolic link, drops out of the walk** (`walk` of `exec-server/src/local_file_system.rs`) | Junction = measured · **certain** / file link = source only · **likely** (no permission to create one, so not measured) |
+| **7 claude plugin** | **No manifest needed** — if `X\skills\` exists under `--plugin-dir X`, 「is one plugin: skills at its top marks it」 (debug log). Plugin name = the **X folder name** (init `plugins` = `engram` · source `engram@inline`). Minimal shape = `X\skills\<이름>\SKILL.md`. Pitfalls: (1) if `X\skills\SKILL.md` exists, only that one is a skill (bundle) (2) if `X` lacks a marker like `skills\`, it is seen as 「플러그인 묶음」 and each child becomes a plugin (`--help`) (3) **`claude plugin validate` fails if there is no manifest** (「No manifest found in directory」) — the runtime is fine (4) it does not follow links (「components are read without following symlinks」) — the actual path must be checked separately (5) plugin name rules (no spaces · `@` · `:` · path separators · `claude-` · `anthropic-` prefixes reserved — docs). `engram` is safe | Measured + docs + bundle · **certain** | Not applicable (JSON = `skills/extraRoots/set` host root · terminal = working folder `.agents/skills` — earlier report). But **codex also reads `.claude-plugin/plugin.json` as a plugin marker** (4) | — |
+| **8 Special files** | `.claude-plugin/plugin.json` inside a personal · project skill folder → loaded as a `<이름>@skills-dir` plugin (docs) · reserved folder names `synced` · `anthropic-skills` (docs) · substitutions such as `${CLAUDE_SKILL_DIR}` in the body · `CLAUDE.md` at the plugin root is not read (docs). The rest are ordinary files the model reads when needed | Docs + bundle · **likely** (not measured this time) | `agents/openai.yaml` — display info · dependent tools · policy (`allow_implicit_invocation: false` = removed from implicit-invocation targets · `products` restriction — `skills/src/model.rs`) · the three plugin manifests of ancestors (the prefix in 4) · dot folders ignored. The rest are ordinary files | Source · **likely** |
 
-### 픽스처별 결과 (실측)
+### Results by fixture (measured)
 
-claude = `--plugin-dir <휘발>\engram`(항목마다 라이브러리로 가는 정션 — TRD §1-5 모양 그대로) · codex = `skills/extraRoots/set [lib]` 뒤 `skills/list`.
+claude = `--plugin-dir <휘발>\engram` (a junction to the library per entry — exactly the TRD §1-5 shape) · codex = `skills/list` after `skills/extraRoots/set [lib]`.
 
-| 픽스처 | 내용 | claude | codex |
+| Fixture | Content | claude | codex |
 |---|---|---|---|
-| `c-exact` | 기준 | `engram:c-exact` | `c-exact` |
-| `c-lower` · `c-mixed` | `skill.md` · `Skill.md` | 실림 | **없음**(오류도 없음) |
-| `c-group/c-nested` | 묶음 폴더 아래 | **없음** | `c-nested` |
-| `c-outer` + `c-outer/c-inner` | 스킬 안 스킬 | `c-outer` 만 | **둘 다** |
-| `c-deep6` · `c-deep7` | 6층 · 7층 | 없음 · 없음 | 있음 · 없음 |
-| `.c-hidden` | 점 폴더 | `engram:-c-hidden` | 없음 |
-| `c-noname` · `c-emptyname` | `name` 없음 · `name: ""` | 폴더 이름 | 폴더 이름 |
-| `c-nodesc` · `c-nofm` · `c-badyaml` | 설명 없음 · 앞머리 없음 · YAML 깨짐 | 실림 · **모델 목록엔 없음** | **오류로 빠짐** |
-| `c-bom` · `c-crlf` | BOM · CRLF | 정상 · 정상 | **오류로 빠짐** · 정상 |
-| `c-dir-mismatch` | `name: c-fm-other` | `engram:c-dir-mismatch`(표시 `engram:c-fm-other`) | `c-fm-other` |
-| `c-weird` · `c-colon` | `Weird Name.v2 한글` · `ns:c-colon` | `engram:c-weird` · `engram:c-colon`(표시는 앞머리 이름) | 앞머리 그대로 |
-| `c-long64` · `c-long` | 64자 · 65자 | 둘 다 실림 | 실림 · **오류** |
-| `c-dupA` · `c-dupB` | 같은 `name: c-dup` | 둘 다(폴더 이름으로 갈림) | 둘 다 `c-dup` |
-| `c-caseA` · `c-caseB` | `C-Case` · `c-case` | 둘 다 | 둘 다 |
-| `c-junc-alias` | 정션 → 이름 없는 `c-jtarget` | `engram:c-junc-alias` | **`c-jtarget`** |
-| `c-junc-plug` | 정션 → `myplug\.claude-plugin` 아래 `c-ps` | `engram:c-junc-plug`(표시 `engram:c-ps`) | **`myplug:c-ps`** |
+| `c-exact` | Baseline | `engram:c-exact` | `c-exact` |
+| `c-lower` · `c-mixed` | `skill.md` · `Skill.md` | Loaded | **None** (no error either) |
+| `c-group/c-nested` | Under a bundle folder | **None** | `c-nested` |
+| `c-outer` + `c-outer/c-inner` | A skill inside a skill | `c-outer` only | **Both** |
+| `c-deep6` · `c-deep7` | 6 layers · 7 layers | None · none | Present · none |
+| `.c-hidden` | Dot folder | `engram:-c-hidden` | None |
+| `c-noname` · `c-emptyname` | No `name` · `name: ""` | Folder name | Folder name |
+| `c-nodesc` · `c-nofm` · `c-badyaml` | No description · no frontmatter · broken YAML | Loaded · **not in the model list** | **Dropped as an error** |
+| `c-bom` · `c-crlf` | BOM · CRLF | Normal · normal | **Dropped as an error** · normal |
+| `c-dir-mismatch` | `name: c-fm-other` | `engram:c-dir-mismatch` (display `engram:c-fm-other`) | `c-fm-other` |
+| `c-weird` · `c-colon` | `Weird Name.v2 한글` · `ns:c-colon` | `engram:c-weird` · `engram:c-colon` (display is the frontmatter name) | Frontmatter as is |
+| `c-long64` · `c-long` | 64 characters · 65 characters | Both loaded | Loaded · **error** |
+| `c-dupA` · `c-dupB` | Same `name: c-dup` | Both (separated by folder name) | Both `c-dup` |
+| `c-caseA` · `c-caseB` | `C-Case` · `c-case` | Both | Both |
+| `c-junc-alias` | Junction → an unnamed `c-jtarget` | `engram:c-junc-alias` | **`c-jtarget`** |
+| `c-junc-plug` | Junction → `c-ps` under `myplug\.claude-plugin` | `engram:c-junc-plug` (display `engram:c-ps`) | **`myplug:c-ps`** |
 
-곁 실측 — claude 프로젝트 `.claude/skills`:
+Side measurement — claude project `.claude/skills`:
 
-- `skill.md` 실림 · 묶음 폴더 아래 안 실림.
-- `p-dirname` 의 앞머리 `name: p-fmname` 은 별칭으로만 돈다.
-- 개인 `c-pers` 가 프로젝트 `c-pers` 를 가린다.
+- `skill.md` loaded · under a bundle folder not loaded.
+- The frontmatter `name: p-fmname` of `p-dirname` works only as an alias.
+- Personal `c-pers` shadows project `c-pers`.
 
-곁 실측 — codex 작업 폴더 `.agents/skills`:
+Side measurement — codex working folder `.agents/skills`:
 
-- Engram 꼴 정션 `engram-1234abcd-c-exact` 는 extraRoots 쪽과 같은 실제 경로라 **한 줄로 합쳐졌다**.
-- 같은 이름 둘(`w-samename` · `w-samename2`)은 프롬프트에 두 줄로 떴다.
-- ★실 `~/.agents/skills`(이 PC 는 공유 스킬 폴더 정션) 아래의 claude 동기화 폴더 `synced/<uuid>/…` 까지 재귀로 주워 **`docs` · `pdf` · `pptx` 등이 둘씩** 프롬프트에 오른다. claude 는 그 폴더 이름을 예약해 건너뛴다.
+- The Engram-shaped junction `engram-1234abcd-c-exact` has the same actual path as the extraRoots side, so it **merged into one line**.
+- Two with the same name (`w-samename` · `w-samename2`) appeared as two lines in the prompt.
+- ★Even the claude sync folder `synced/<uuid>/…` under the real `~/.agents/skills` (on this PC a junction to the shared skill folder) is picked up recursively, and **`docs` · `pdf` · `pptx` and so on appear in the prompt twice each**. claude reserves that folder name and skips it.
 
-## Engram 규칙과 어긋나는 곳
+## Where it diverges from Engram's rules (Engram 규칙과 어긋나는 곳)
 
-비교 대상 = TRD §1-2 「종류 판정」 의 스킬 행 · §1-3 5 충돌 · §1-5 스킬 번역 행. 지금 규칙의 요점:
+Comparison target = the skill row of TRD §1-2 「종류 판정」 (kind decision) · §1-3 5 collision · the §1-5 skill translation row. The gist of the current rules:
 
-- 바로 안에 `SKILL.md` 가 든 폴더 = 스킬(OS 대소문자 규칙 · Windows 는 `skill.md` 도).
-- 참조 = 폴더 경로.
-- 이름 = 앞머리 `name`, 없으면 폴더 이름.
-- 같은 이름 다른 경로 = 충돌(빨강).
+- A folder with `SKILL.md` directly inside = a skill (OS case rule · on Windows `skill.md` too).
+- Reference = folder path.
+- Name = frontmatter `name`, or the folder name if absent.
+- Same name, different path = collision (red).
 
-| # | Engram 규칙 | claude | codex | 생기는 일 | 권고 |
+| # | Engram rule | claude | codex | What happens | Recommendation |
 |---|---|---|---|---|---|
-| **A** | `SKILL.md` 찾기 = OS 규칙(Windows 는 `skill.md` 도 — 사용자 2026-10-17) | 맞음 | **어긋남** — OS 무관 정확히 `SKILL.md` | Windows 라이브러리의 `skill.md` 스킬이 화면에 보이고 claude 는 싣는데 **codex 는 오류 한 줄 없이 빠뜨린다** | **인식을 정확히 `SKILL.md` 로 좁힌다** — 두 CLI 가 모든 OS 에서 싣는 유일한 이름이다. 2026-10-17 사용자 결정을 뒤집으므로 **사용자 확인 필요**. 대안 = 인식은 두고 codex 백엔드 에이전트에 붙으면 문제 줄(「codex 는 `SKILL.md` 만 읽는다」) |
-| **B** | 스킬 안 스킬 = 따로 스킬(붙이면 그 폴더 하나) | 맞음 — 정션 하나 = 스킬 하나(안쪽은 안 훑음) | **어긋남** — 붙인 폴더 아래 6층까지 `SKILL.md` 를 전부 함께 싣는다(점 폴더 제외) | **붙이지 않은 안쪽 스킬이 codex 에만 실린다.** 이름이 겹쳐도 Engram 충돌 검사가 못 본다 | codex 백엔드의 「실제로 받는 것」(`library::resolve`)에 **안쪽 스킬까지 펼쳐 넣고** 충돌 검사도 그 목록으로 한다(실제로 실리니까). 안쪽 스킬을 따로 붙이면 같은 실제 경로라 codex 가 하나로 합친다 — Engram 의 「같은 경로 = 처음 한 번」 과 맞다 |
-| **C** | 앞머리 형식을 안 본다(이름만 읽음) | 너그러움 — 단 플러그인 경로에서 설명을 안 쓴 스킬은 **모델 목록에 안 뜬다** | **엄격** — 앞머리 블록 · YAML · `description` · BOM 없음 · `name` ≤ 64 를 어기면 **빠진다**(오류 목록 · TUI 경고 한 줄) | 라이브러리에선 멀쩡한 스킬이 codex 에선 없고, claude 에선 모델이 모른다 | 훑기에서 `SKILL.md` 를 **codex 규칙으로 검사**해 그 스킬 줄을 「오류」 상태로(이유 + 줄). 막힘 ② 오류로 둘지(두 백엔드 공통 · 또는 codex 만)는 **사용자 결정** — claude 도 모델이 못 보니 공통이 일관된다 |
-| **D** | 이름 = 앞머리 `name`, 없으면 폴더 이름 | 정체는 **Engram 이 만든 정션 폴더 이름**이 `[^A-Za-z0-9_-]`→`-` 로 바뀐 것. 앞머리 `name` 은 표시 이름 · 별칭 | 같음 — 단 ① 공백을 접고 빈 문자열은 없음으로 ② 폴더 이름은 **정션을 따라간 실제 폴더** ③ manifest 조상이 있으면 `<ns>:` 접두 | `Weird Name.v2 한글` 같은 이름은 claude 에서 `engram:Weird-Name-v2---` 로 바뀐다. `ns:x` 처럼 Windows 폴더 이름이 못 되는 이름(`:` `?` `*` `"` `<` `>` `|` `\` `/`)은 **정션 자체를 못 만든다**. 라이브러리가 남의 플러그인 폴더를 품으면 codex 이름만 `ns:이름` 이 된다 | 이름 = 앞머리 `name` 을 trim · 공백 접기, 비면 **실제 폴더 이름**(정션이면 대상). **이름 검사 추가**: 1–64자 · `[a-z0-9-]`(Anthropic 권장 꼴 — 소문자 · 숫자 · 하이픈) 밖이면 「오류」. 실제 폴더 조상에 플러그인 manifest 셋 중 하나가 있으면 「codex 에서는 `<ns>:<이름>`」 문제 줄(또는 그 이름으로 충돌 검사) |
-| **E** | 충돌 = 같은 이름(정확히 같음) · 다른 경로 | 정션 이름이 Windows 에서 **대소문자 무시**로 부딪히고(`C-Case` · `c-case` 를 한 폴더에 못 둔다), 치환 뒤 같아지는 이름(`a b` · `a-b` · 한글 두 글자끼리)은 **같은 내부 이름**이 된다 | 이름 겹침을 허용(둘 다 실림 · 멘션만 모호). 멘션 개수는 소문자로도 센다 | 지금 키로는 `Foo` · `foo` 가 통과하는데 휘발 폴더를 못 깐다 | **충돌 키 = `lower(이름)` 을 `[^a-z0-9_-]`→`-` 로 바꾼 것.** D 의 이름 검사를 넣으면 키는 「소문자 이름」 으로 줄어든다 |
+| **A** | `SKILL.md` lookup = OS rule (on Windows `skill.md` too — user 2026-10-17) | Matches | **Diverges** — exactly `SKILL.md` regardless of OS | A `skill.md` skill in a Windows library is visible on screen and claude loads it, but **codex drops it without a single error line** | **Narrow recognition to exactly `SKILL.md`** — it is the only name both CLIs load on every OS. It overturns the 2026-10-17 user decision, so **user confirmation is needed**. Alternative = keep recognition and, when attached to a codex-backend agent, raise a problem line (「codex 는 `SKILL.md` 만 읽는다」 (codex reads only the exact name SKILL.md)) |
+| **B** | A skill inside a skill = a separate skill (if attached, that one folder) | Matches — one junction = one skill (the inside is not scanned) | **Diverges** — loads together every `SKILL.md` up to 6 layers under the attached folder (dot folders excluded) | **An inner skill that was not attached is loaded only in codex.** Even if names overlap, Engram's collision check cannot see it | **Expand the inner skills too** into the codex backend's 「실제로 받는 것」 (`library::resolve`) (what it actually receives), and run the collision check on that list too (since they really are loaded). If an inner skill is attached separately, it has the same actual path, so codex merges it into one — which matches Engram's 「같은 경로 = 처음 한 번」 (the same path = only the first time) |
+| **C** | Does not look at frontmatter format (reads only the name) | Lenient — but a skill on the plugin path that wrote no description **does not appear in the model list** | **Strict** — violating the frontmatter block · YAML · `description` · no BOM · `name` ≤ 64 makes it **drop out** (error list · one TUI warning line) | A skill that is fine in the library is absent in codex, and in claude the model does not know it | During the scan, **validate `SKILL.md` by codex's rules** and put that skill's line in an 「오류」 (error) state (reason + line). Whether to make it block ② as an error (common to both backends · or codex only) is **a user decision** — claude's model cannot see it either, so common is consistent |
+| **D** | Name = frontmatter `name`, or the folder name if absent | The identity is the **name of the junction folder Engram made** with `[^A-Za-z0-9_-]`→`-` substituted. The frontmatter `name` is a display name · alias | Same — but (1) whitespace is folded and an empty string counts as absent (2) the folder name is **the actual folder after following the junction** (3) if there is a manifest ancestor, the `<ns>:` prefix | A name like `Weird Name.v2 한글` is changed to `engram:Weird-Name-v2---` in claude. Names that cannot be Windows folder names, like `ns:x` (`:` `?` `*` `"` `<` `>` `|` `\` `/`), **cannot even create the junction itself**. If the library holds someone else's plugin folder, only the codex name becomes `ns:이름` | Name = frontmatter `name` trimmed · whitespace folded, and if empty, the **actual folder name** (the target if a junction). **Add a name check**: 1–64 characters · outside `[a-z0-9-]` (Anthropic's recommended shape — lowercase · digits · hyphen) is 「오류」 (error). If an ancestor of the actual folder has one of the three plugin manifests, a problem line 「codex 에서는 `<ns>:<이름>`」 (in codex it is the namespace-prefixed name) (or run the collision check on that name) |
+| **E** | Collision = the same name (exactly the same) · different path | The junction names collide on Windows by **case-insensitivity** (`C-Case` · `c-case` cannot be placed in one folder), and names that become equal after substitution (`a b` · `a-b` · any two two-character Korean names) become **the same internal name** | Allows name overlap (both loaded · only the mention is ambiguous). The mention count is also counted in lowercase | With the current key, `Foo` · `foo` pass, but the volatile folder cannot be laid down | **Collision key = `lower(이름)` with `[^a-z0-9_-]` replaced by `-`.** If D's name check is added, the key reduces to 「소문자 이름」 (lowercase name) |
 
-곁 사항 (규칙 변경 아님 · 알아 둘 것)
+Side notes (not a rule change · good to know)
 
-- **휘발 플러그인 모양은 확인됐다** — manifest 없이 `engram:<정션 이름>` · 정션 따라감 · Base directory = 정션 경로.
-  - `skills\SKILL.md` 를 두지 말 것.
-  - `claude plugin validate` 를 관문으로 쓰지 말 것 — manifest 가 없으면 실패하고 링크를 안 따라간다. 쓰려면 `.claude-plugin\plugin.json` `{"name":"engram"}` 한 줄이 필요하다.
-- **같은 실제 스킬을 사용자 전역 폴더가 이미 가리키면 「붙임」 이 효과가 없다.**
-  - claude 는 플러그인 쪽을 건너뛰고 맨 이름(개인 스킬)으로만 보인다.
-  - codex 는 경로가 같아 하나로 합친다.
-  - 이 PC 는 `~/.claude/skills` · `~/.agents/skills` 가 둘 다 공유 스킬 폴더로 이어져 있다. 라이브러리가 그 폴더를 품으면 그 스킬은 늘 켜져 있고, 떼도 안 빠진다.
-- **codex 는 이름이 겹쳐도 막지 않으므로 Engram 충돌 검사는 codex 에 대해선 「Engram 이 깔 수 없다」 가 아니라 「모델이 둘을 본다」 의 문제다.** claude 는 Engram 휘발 폴더가 이름별이라 깔 수 없다(TRD §1-3 5 의 이유 그대로).
+- **The volatile plugin shape was confirmed** — without a manifest `engram:<정션 이름>` · follows the junction · Base directory = junction path.
+  - Do not put `skills\SKILL.md`.
+  - Do not use `claude plugin validate` as a gate — if there is no manifest it fails and does not follow links. To use it, a line `.claude-plugin\plugin.json` `{"name":"engram"}` is needed.
+- **If the user's global folder already points to the same actual skill, 「붙임」 (attaching) has no effect.**
+  - claude skips the plugin side and it shows only under the bare name (a personal skill).
+  - codex merges it into one because the path is the same.
+  - On this PC, `~/.claude/skills` · `~/.agents/skills` both lead to the shared skill folder. If the library holds that folder, that skill is always on, and does not drop out even if detached.
+- **Since codex does not block even when names overlap, the Engram collision check, as far as codex is concerned, is a matter of 「모델이 둘을 본다」 (the model sees both), not 「Engram 이 깔 수 없다」 (Engram cannot lay it down).** claude cannot lay it down because Engram's volatile folder is per name (the reason of TRD §1-3 5 as is).
 
-## 방법 — 재현 요점
+## Method (방법) — reproduction essentials
 
-스크립트는 세션 스크래치(`…\scratchpad\skill-recog\`)라 남지 않는다. 요점만 남긴다.
+The scripts are session scratch (`…\scratchpad\skill-recog\`) and do not remain. Only the essentials are kept.
 
-- **픽스처:** 라이브러리 흉내 폴더 하나에 위 표의 26 항목을 만들었다. 정션 대상은 그 폴더 밖에 두었다.
-  - 파일 심볼릭 링크는 `mklink` 권한이 없어 만들지 못했다.
-- **codex 소스:** 태그 `rust-v0.156.1` sparse 클론을 정독했다.
+- **Fixtures:** in one folder imitating the library, I made the 26 items of the table above. The junction targets were placed outside that folder.
+  - File symbolic links could not be created because there was no `mklink` permission.
+- **codex source:** I read closely a sparse clone of tag `rust-v0.156.1`.
   - `ext/skills/src/loader/{mod,discovery,host,namespace,host_merge}.rs` · `ext/skills/src/host_roots.rs`
   - `skills/src/{parser,selection,name_counts,mentions,model}.rs`
-  - `exec-server/src/local_file_system.rs`(walk) · `utils/plugins/src/plugin_namespace.rs` · `exec-server-protocol/src/protocol.rs`(manifest 경로 셋)
-- **codex 실측:**
-  - 스크래치 `CODEX_HOME`(이름 `hc`)에서 `codex app-server` 를 띄웠다.
-  - `skills/list` 를 extraRoots 설정 전 · 후 한 번씩 불렀다. 응답의 `skills` · `errors` 가 판정 근거다.
-  - 작업 폴더 `.agents/skills` 의 렌더는 `codex debug prompt-input` 으로 봤다 — 모델 입력을 오프라인으로 낸다.
-  - 덫 프록시(`HTTP(S)_PROXY` → 기록 후 403)가 `chatgpt.com` · `github.com` 접속 시도 각 1회를 막았다. 모델 요청은 없었다.
-- **claude 문서:** <https://code.claude.com/docs/en/skills>(「How a skill gets its command name」 · 이름 거부 문자 · YAML 깨짐 = 필드 없이 실림 · 겹침 표) · <https://code.claude.com/docs/en/plugins-reference>(manifest 선택 · 플러그인 이름 = `--plugin-dir` 폴더 이름 · `skills/` = `<name>/SKILL.md` 하나씩 · 이름 규칙).
-- **claude 번들:** `claude.exe`(246 MB · bun 단일 실행 파일)에서 `"SKILL.md"` 주변 문자열을 떠 읽었다.
-  - 개인 · 프로젝트 로더 = `readdir` 뒤 `join(dir, 이름, "SKILL.md")` 를 stat · readFile.
-  - 플러그인 로더 = 같은 꼴, 내부 이름은 `${플러그인}:${폴더 이름.replace(/[^a-zA-Z0-9_-]/g,"-")}`.
-  - 표시 이름 = 앞머리 `name`(플러그인 접두 붙임) · 별칭 = `:` 없는 앞머리 이름 · realpath 중복 건너뛰기.
-  - 난독화된 함수 이름은 판본마다 바뀌므로 인용하지 않는다.
-- **claude 실측:**
-  - 실행 환경:
-    - `CLAUDE_CONFIG_DIR` = 스크래치 · `ANTHROPIC_BASE_URL` = 로컬 가짜 Messages API(요청 **본문만** 기록 · 헤더 미기록 · 가짜 키) · `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`
-    - 부모 세션 환경변수(`CLAUDECODE` · 메시징 소켓 등)는 뺐다.
-    - `-p --output-format stream-json --verbose --no-session-persistence --debug-file` · `--plugin-dir` 둘
-  - 1회차 = init 이벤트(`skills` · `slash_commands` · `plugins`) + 요청 본문의 스킬 목록 + 디버그 로그.
-  - 2회차 = 가짜 서버가 첫 답으로 **Skill 도구 호출 10개**(이름 후보)를 돌려보냈다. 다음 요청에 실린 `tool_result`(성공/「Unknown skill」)와 주입된 「Base directory」 로 어느 이름이 풀리는지 쟀다.
-  - `claude plugin validate --json` 4회(전부 오프라인).
-  - **실 모델 호출 0.**
-- **실 설정 불변 확인:**
-  - `~/.codex` — 세션 파일 1589 · `history.jsonl` 150줄 · `session_index.jsonl` 513줄 · `config.toml` 해시 · `skills` 목록, 전 · 후 같음.
-  - `~/.claude` — `settings.json` · `skills` · `plugins` 해시가 같다.
-  - `~/.claude.json` · `~/.claude/projects` · `~/.codex/*.sqlite-wal` 은 다른 세션들이 그 사이에 썼다. 시험 이후 바뀐 파일 전부에서 스크래치 경로 문자열 0건이다.
+  - `exec-server/src/local_file_system.rs` (walk) · `utils/plugins/src/plugin_namespace.rs` · `exec-server-protocol/src/protocol.rs` (the three manifest paths)
+- **codex measurement:**
+  - Started `codex app-server` in the scratch `CODEX_HOME` (name `hc`).
+  - Called `skills/list` once before and once after setting extraRoots. The `skills` · `errors` of the response are the basis for the decision.
+  - The rendering of the working folder `.agents/skills` was seen with `codex debug prompt-input` — it emits the model input offline.
+  - The trap proxy (`HTTP(S)_PROXY` → log then 403) blocked one connection attempt each to `chatgpt.com` · `github.com`. There was no model request.
+- **claude docs:** <https://code.claude.com/docs/en/skills> (「How a skill gets its command name」 · rejected characters in names · broken YAML = loaded without fields · overlap table) · <https://code.claude.com/docs/en/plugins-reference> (manifest optional · plugin name = `--plugin-dir` folder name · `skills/` = `<name>/SKILL.md` one each · name rules).
+- **claude bundle:** from `claude.exe` (246 MB · a single bun executable) I picked out and read the strings around `"SKILL.md"`.
+  - Personal · project loader = after `readdir`, stat · readFile of `join(dir, 이름, "SKILL.md")`.
+  - Plugin loader = the same shape, internal name is `${플러그인}:${폴더 이름.replace(/[^a-zA-Z0-9_-]/g,"-")}`.
+  - Display name = frontmatter `name` (with plugin prefix attached) · alias = the frontmatter name without `:` · realpath duplicate skipping.
+  - Obfuscated function names change between builds, so they are not quoted.
+- **claude measurement:**
+  - Execution environment:
+    - `CLAUDE_CONFIG_DIR` = scratch · `ANTHROPIC_BASE_URL` = a local fake Messages API (records **the request body only** · headers not recorded · fake key) · `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`
+    - The parent session's environment variables (`CLAUDECODE` · messaging socket etc.) were removed.
+    - `-p --output-format stream-json --verbose --no-session-persistence --debug-file` · two `--plugin-dir`
+  - Round 1 = the init event (`skills` · `slash_commands` · `plugins`) + the skill list in the request body + the debug log.
+  - Round 2 = the fake server sent back **10 Skill tool calls** (name candidates) as its first answer. Which names resolve was measured from the `tool_result` (success/「Unknown skill」) carried in the next request and the injected 「Base directory」.
+  - `claude plugin validate --json` 4 times (all offline).
+  - **0 real model calls.**
+- **Real-config unchanged check:**
+  - `~/.codex` — session files 1589 · `history.jsonl` 150 lines · `session_index.jsonl` 513 lines · `config.toml` hash · `skills` list, same before and after.
+  - `~/.claude` — the `settings.json` · `skills` · `plugins` hashes are the same.
+  - `~/.claude.json` · `~/.claude/projects` · `~/.codex/*.sqlite-wal` were written by other sessions in the meantime. 0 occurrences of the scratch path string in all files changed since the test.
 
-## 한계
+## Limits
 
-- **대소문자 구분 파일 시스템(Linux · macOS 구분 볼륨) 미측.**
-  - 소스상 claude 는 그 OS 의 열기 규칙을 따르므로 거기선 `SKILL.md` 만 실릴 것이다(가능성 높음).
-  - codex 는 OS 무관 정확 일치다(소스 확실).
-- **파일 심볼릭 링크 `SKILL.md` 미측**(권한). codex 는 소스상 빠지고, claude 는 stat 이 링크를 따라가므로 실릴 것이다(불확실).
-- **실 모델이 어느 스킬을 고르는지는 안 쟀다.** claude 의 이름 풀이는 실제 CLI 코드 경로를 탔지만 호출은 가짜 서버가 지어냈다. codex `$이름` 멘션의 모호 처리는 소스만 봤다.
-- **claude 플러그인 경로에서 설명 없는 스킬이 모델 목록에서 빠지는 규칙**은 세 경우를 실측했을 뿐 코드 조건을 못 짚었다.
-- **claude 개인 · 프로젝트 경로의 정션**, 스킬 폴더 안 `.claude-plugin`(`@skills-dir`), 하위 폴더 `.claude/skills` 동적 발견, `agents/openai.yaml` 효과 — 미측(문서 · 소스).
-- **codex 대화형 TUI 미측** — `skills/list` 와 `debug prompt-input` 은 같은 로더를 쓴다(소스).
-- 판본 한정: Claude Code 2.1.284 · codex-cli 0.156.1. claude 는 번들 문자열 판독이라 다음 판에서 쉽게 바뀔 수 있다.
+- **Case-sensitive file systems (Linux · macOS case-sensitive volumes) not measured.**
+  - Per source, claude follows that OS's open rules, so there only `SKILL.md` would be loaded (likely).
+  - codex is an exact match regardless of OS (certain from source).
+- **File symbolic link `SKILL.md` not measured** (permission). codex drops it per source, and claude's stat follows the link so it would be loaded (uncertain).
+- **Which skill a real model picks was not measured.** claude's name resolution went through the real CLI code path, but the calls were made up by the fake server. The ambiguity handling of the codex `$이름` mention was seen in source only.
+- **The rule by which a skill without a description drops out of the model list on claude's plugin path** was measured in only three cases, and the code condition could not be pinned.
+- **claude personal · project path junctions**, `.claude-plugin` (`@skills-dir`) inside the skill folder, dynamic discovery of subfolder `.claude/skills`, the effect of `agents/openai.yaml` — not measured (docs · source).
+- **codex interactive TUI not measured** — `skills/list` and `debug prompt-input` use the same loader (source).
+- Version-bound: Claude Code 2.1.284 · codex-cli 0.156.1. claude is read from bundle strings, so it can easily change in the next version.

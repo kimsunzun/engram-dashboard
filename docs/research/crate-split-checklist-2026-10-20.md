@@ -1,175 +1,175 @@
-# crate 분리 판정표 — 한 장 + S25 `library` 에 대 보기
+# Crate split decision table — one page + checked against S25 `library`
 
 | | |
 |---|---|
-| 상태 | 초안 · 리뷰 안 거침. 판정표 D 4 · 5 단계, 「실재로 세는 조건」 칸, 「두 조사가 갈린 자리」 표의 「이 표」 칸은 **판단(메인 아님 — 이 문서)** 이다. 나머지 칸은 적힌 출처를 옮긴 것이다 |
-| 날짜 | 2026-10-20 (HEAD `19d6b638`) |
-| 방법 | 두 조사 · ADR(0110 · 0129 · 0130 · 0151 · 0175 · 0236 · 0251 · 0266 · 0269 · 0273) · CLAUDE.md 를 정독해 판정표를 세웠다. 그 표를 S25 TRD 에 대고, TRD 문면과 코드 몇 곳을 대조했다. 웹 검색 0 · 빌드 · 시험 시간 실측 0 |
-| 질문 | 사용자 기준 「개념적으로 분리할 수 있으면 분리한다. 다만 분리에 대가가 크면 합친다」(2026-10-20)를 누구나 예/아니오로 답할 수 있게 만든다. 그 기준으로 S25 의 `library` 는 crate 인가, 데몬 모듈인가 |
-| 입력 | **조사1** = [crate-granularity-survey-2026-08-17.md](crate-granularity-survey-2026-08-17.md) · **조사2** = [module-split-criteria-2026-08-26.md](module-split-criteria-2026-08-26.md)(본문은 §9 정정을 거쳐 인용). 조사2 머리가 「두 기준을 하나로 합치는 작업은 미해소」로 남겼고, 그 일을 이 문서가 한다 |
+| Status | Draft · not reviewed. Decision table D steps 4 · 5, the 「실재로 세는 조건」 (conditions that count as real) field, and the 「이 표」 field of the 「두 조사가 갈린 자리」 (where the two surveys disagree) table are **judgment (not the main session — this document)**. The other fields carry the cited sources over |
+| Date | 2026-10-20 (HEAD `19d6b638`) |
+| Method | Read the two surveys · ADRs (0110 · 0129 · 0130 · 0151 · 0175 · 0236 · 0251 · 0266 · 0269 · 0273) · CLAUDE.md closely and built the decision table. Held that table against the S25 TRD and cross-checked the TRD wording against a few places in the code. 0 web searches · 0 build · test time measurements |
+| Question | Make the user's criterion 「개념적으로 분리할 수 있으면 분리한다. 다만 분리에 대가가 크면 합친다」 (split it if it can conceptually be split, but merge if the split costs a lot) (2026-10-20) answerable yes/no by anyone. By that criterion, is S25's `library` a crate or a daemon module |
+| Input | **Survey 1** = [crate-granularity-survey-2026-08-17.md](crate-granularity-survey-2026-08-17.md) · **Survey 2** = [module-split-criteria-2026-08-26.md](module-split-criteria-2026-08-26.md) (the body is cited after the §9 correction). The head of survey 2 left 「두 기준을 하나로 합치는 작업은 미해소」 (merging the two criteria into one is unresolved), and this document does that work |
 
-## 결론
+## Conclusion
 
-- **판정 순서 = 0 언어 강제 → A 분리할 수 있나 → C 대가가 구조적인가 → B 사 오는 것이 있나.**
-  - A 가 다 「예」이고 대가가 고정분(매니페스트 · 게이트 등록 · 공개 표면)뿐이면 뗀다.
-  - 대가에 구조 변경(타입 · 포트 이사 · 어댑터 층)이 들면, 실재하는 이득이 있을 때만 뗀다.
-- **`library` 는 떼는 쪽으로 기운다(확신도 중간).** 조건이 하나 있다 — `validate.rs` 의 백엔드 지식을 먼저 backend 포트 뒤로 옮긴다. 리뷰가 어차피 요구한 일이다. 그러고 나면 바깥 접점이 전부 다른 crate 의 공개 API 와 값으로 넘길 경로뿐이라, 대가가 고정분만 남는다.
-- **TRD 의 기각 사유 「소비자가 하나다」는 ADR-0151 이 2026-08-17 에 폐기한 기준이다.**
-- ★메모 96(사용자 결정 2026-10-14 「애매하긴 하지만 그렇게 해」 — 데몬 모듈)과 갈린다★ — 이 문서는 그 결정을 뒤집지 않고 올린다. 결정은 사용자가 한다.
+- **Decision order = 0 language-forced → A can it be split → C is the cost structural → B is there anything bought.**
+  - If A is all 「예」 (yes) and the cost is only the fixed part (manifest · gate registration · public surface), split it off.
+  - If the cost involves structural change (moving types · ports · an adapter layer), split it off only when there is a real gain.
+- **`library` leans toward being split off (confidence: medium).** There is one condition — first move `validate.rs`'s backend knowledge behind the backend port. The review demanded that anyway. After that, the outside contact points are only the public APIs of other crates and paths that can be passed by value, so only the fixed part remains as cost.
+- **The TRD's rejection reason 「소비자가 하나다」 (there is one consumer) is a criterion that ADR-0151 discarded on 2026-08-17.**
+- ★It diverges from memo 96 (user decision 2026-10-14 「애매하긴 하지만 그렇게 해」 (it is ambiguous, but do it that way) — daemon module)★ — this document does not overturn that decision but raises it. The user decides.
 
-## 1. 판정표
+## 1. Decision table
 
-### 0. 언어가 강제하나
+### 0. Is it language-forced
 
-- proc-macro 나 crate 단위 속성(`#![no_std]` 등)이 필요하면 뗀다. 여기서 끝난다(조사2 §9 E · 조사1 F7).
+- If a proc-macro or a crate-level attribute (`#![no_std]` etc.) is needed, split it off. It ends here (survey 2 §9 E · survey 1 F7).
 
-### A. 분리할 수 있나 — 개념적 독립 (숙주 = 지금 그것이 사는 crate)
+### A. Can it be split — conceptual independence (host = the crate it lives in now)
 
-| # | 물음 (예/아니오) | 출처 |
+| # | Question (yes/no) | Source |
 |---|---|---|
-| A1 | 숙주의 다른 모듈 없이 쓰고 시험할 수 있나? 가짜를 꽂거나 값을 주입하는 것은 허용한다 | MS 「if a submodule can be used independently」 — 조사1 F2 · ADR-0151 결정 1 |
-| A2 | 숙주의 비공개 항목이나 다른 모듈을 부르지 않나? 값으로 넘길 수 있는 경로 · 설정만 쓰면 「예」 | ADR-0175 근거(「나가는 참조 0」 실측) · ADR-0130 근거 ③ |
-| A3 | 숙주와 서로 부르는 관계(모듈 순환)가 없나? | ADR-0175 근거(수명·펌프 ↔ transport ↔ backend 순환이라 한 crate 에 유지) · 조사1 F6(ruff 의 Checker ↔ rule) |
-| A4 | 바깥 접점이 포트(trait) · 공개 타입 · 값뿐인가? | ADR-0110 결정 3(계약은 lib 이 갖고, 실물 어댑터는 호스트가 갖는다) |
-| A5 | 남의 몫(다른 자리가 정본인 지식)이 섞여 있지 않나? 섞였으면 그것부터 제자리로 옮긴다 | CLAUDE.md 「백엔드 확장」 · ADR-0266 결정 3 |
+| A1 | Can it be used and tested without the host's other modules? Plugging in fakes or injecting values is allowed | MS 「if a submodule can be used independently」 — survey 1 F2 · ADR-0151 decision 1 |
+| A2 | Does it avoid calling the host's non-public items or other modules? If it uses only paths · settings that can be passed by value, 「예」 (yes) | ADR-0175 rationale (「나가는 참조 0」 (outgoing references 0) measured) · ADR-0130 rationale ③ |
+| A3 | Is there no mutual-calling relationship (module cycle) with the host? | ADR-0175 rationale (lifetime · pump ↔ transport ↔ backend is a cycle, so it stays in one crate) · survey 1 F6 (ruff's Checker ↔ rule) |
+| A4 | Are the outside contact points only ports (traits) · public types · values? | ADR-0110 decision 3 (the lib owns the contract, the host owns the real adapter) |
+| A5 | Is there no mixed-in role of someone else (knowledge whose canonical home is elsewhere)? If mixed in, move it to its proper place first | CLAUDE.md 「백엔드 확장」 (backend extension) · ADR-0266 decision 3 |
 
-- **묻지 않는 것** — 지금 소비자가 몇인가(ADR-0151 결정 1 · 조사1 F7), 몇 줄인가(ADR-0151 결정 3 · 조사1 F1).
+- **What is not asked** — how many consumers there are now (ADR-0151 decision 1 · survey 1 F7), how many lines (ADR-0151 decision 3 · survey 1 F1).
 
-### B. 떼어야만 얻는 것 — 「실재」 조건을 채울 때만 센다
+### B. What is gained only by splitting — counted only when the 「실재」 (real) condition is met
 
-경계만 있어도 얻는 것은 세지 않는다. 정보 은닉 · 이해하기 쉬움 · seam 으로 하는 격리 시험 · 소유권이 여기 든다(조사2 결론 · §1 · §9 N).
+What is gained by a boundary alone is not counted. Information hiding · ease of understanding · isolated testing through a seam · ownership fall under this (survey 2 conclusion · §1 · §9 N).
 
-| # | 이득 | 실재로 세는 조건 | 출처 · 이 저장소 선례 |
+| # | Gain | Condition for counting as real (실재로 세는 조건) | Source · precedent in this repository |
 |---|---|---|---|
-| B1 | 컴파일러가 세는 바깥 벽 — 선언한 의존만 쓸 수 있고, 프로덕션 의존 그래프는 비순환이다 | 막을 간선을 이름으로 짚을 수 있다(숙주 안의 침식 이력 · 끌려갈 모듈) | 조사2 §4 · §9 F · 조사1 F4(게이트로도 선다) · messaging(ADR-0110 「약속이 아니라 구조로」) · net(ADR-0129) |
-| B2 | 그것만 원하는 다른 crate · exe 가 숙주의 의존 전체를 지지 않는다 | 이름 있는 소비자가 지금 있거나, 착수된 계획에 있다 | 조사2 §9 B · M(모노레포 안의 재사용 = 의존 폐포 축소뿐) · net(ADR-0130 ① — 폐포 122→110) · cli(ADR-0273) · 셸(ADR-0270) |
-| B3 | 시험 빌드가 숙주를 거치지 않는다(TDD 고리) | 숙주의 시험 고리가 느리다는 실측이 있다 | 조사2 §3 Nx 「Split when tests slow you down」 · §1(격리 자체는 seam 몫) |
-| B4 | 병렬 · 증분 컴파일 단위 | 그래프가 넓어진다(A→B→C 체인이면 0) | 조사1 F3 · F6(ruff) · 조사2 §4 · §9 L |
-| B5 | 독립 버전 · 릴리스 | 게시한다 | 조사2 §9 M — 이 저장소에는 없다 |
+| B1 | An outside wall counted by the compiler — only declared dependencies can be used, and the production dependency graph is acyclic | The edge to block can be pointed at by name (an erosion history inside the host · a module that would be dragged along) | Survey 2 §4 · §9 F · survey 1 F4 (also stands as a gate) · messaging (ADR-0110 「약속이 아니라 구조로」 (by structure, not by promise)) · net (ADR-0129) |
+| B2 | Another crate · exe that wants only this does not carry the host's entire dependencies | A named consumer exists now, or is in a started plan | Survey 2 §9 B · M (reuse inside a monorepo = only a smaller dependency closure) · net (ADR-0130 ① — closure 122→110) · cli (ADR-0273) · shell (ADR-0270) |
+| B3 | The test build does not go through the host (TDD loop) | There is a measurement that the host's test loop is slow | Survey 2 §3 Nx 「Split when tests slow you down」 · §1 (isolation itself is the seam's role) |
+| B4 | Parallel · incremental compilation unit | The graph gets wider (if it is an A→B→C chain, 0) | Survey 1 F3 · F6 (ruff) · survey 2 §4 · §9 L |
+| B5 | Independent version · release | It is published | Survey 2 §9 M — not in this repository |
 
-### C. 대가 — 이 저장소에서 세는 법
+### C. Cost — how to count it in this repository
 
-**고정분 — 어느 crate 든 거의 같다**
+**Fixed part — almost the same for any crate**
 
-| # | 대가 | 출처 |
+| # | Cost | Source |
 |---|---|---|
-| C1 | 새 `Cargo.toml` 과 루트 `members` 한 줄이 든다. 이름에는 `engram-dashboard-` 접두를 붙인다 — 어기면 상한 게이트가 그 crate 를 조용히 못 본다. 버전 게이트는 exe 패키지만 보므로 lib 은 0 이다 | ADR-0151 「개명 함정」 · ADR-0273 결정 2 · `ci.yml:1468-1469` |
-| C2 | 게이트를 등록한다. 한 종류마다 세 곳이다(`ci.yml` · CLAUDE.md 「빌드·검증 명령」 · `.claude/skill-bindings/qa.md`).<br>- 선례 최소 = 둘(시험 줄 + 의존 상한 — command). 보통은 셋~다섯이다(messaging 3 · base 5).<br>- 메시징 격리 정규식에 손으로 박아 둔 crate 이름에도 하나를 더한다.<br>- 유지비 — 개명 · 이사 때 이 게이트들이 함께 움직인다. 개명 한 번에 qa.md 12줄을 고쳤다 | ADR-0175 영향 · ADR-0266 게이트 · CLAUDE.md 메시징 격리 줄 |
-| C3 | CLAUDE.md 「백엔드 모듈 맵」에 항목 하나 | 같은 절 관행 |
-| C4 | 숙주가 부르는 것은 `pub` 이 된다. 나머지는 그대로 비공개다 | 조사2 §2(언어 메커니즘이라 확실) · 조사1 F6(실제 피해 사례는 못 찾음) |
-| C5 | (선택) 시험 도우미를 넘기면 `test-support` 기능과 운영 그래프 게이트(0 기대 셋 + 짝)가 든다 | base · platform 선례(CLAUDE.md) |
+| C1 | A new `Cargo.toml` and one line in the root `members` are needed. Give the name the `engram-dashboard-` prefix — if violated, the cap gate silently fails to see that crate. The version gate looks only at exe packages, so for a lib it is 0 | ADR-0151 「개명 함정」 (rename trap) · ADR-0273 decision 2 · `ci.yml:1468-1469` |
+| C2 | Register the gates. Three places per kind (`ci.yml` · CLAUDE.md 「빌드·검증 명령」 (build · verify commands) · `.claude/skill-bindings/qa.md`).<br>- Minimum in the precedents = two (test line + dependency cap — command). Usually three to five (messaging 3 · base 5).<br>- The crate names hard-coded in the messaging isolation regex also get one more.<br>- Upkeep — these gates move together on a rename · move. One rename changed 12 lines of qa.md | ADR-0175 impact · ADR-0266 gate · CLAUDE.md messaging isolation line |
+| C3 | One entry in the CLAUDE.md 「백엔드 모듈 맵」 (backend module map) | Same practice in the same section |
+| C4 | What the host calls becomes `pub`. The rest stays private | Survey 2 §2 (a language mechanism, so certain) · survey 1 F6 (no actual damage case found) |
+| C5 | (Optional) handing over test helpers brings in a `test-support` feature and an operating graph gate (three checks expecting 0 + a counterpart check) | base · platform precedent (CLAUDE.md) |
 
-**구조분 — 하나라도 있으면 「대가가 크다」**
+**Structural part — if any one is present, 「대가가 크다」 (the cost is large)**
 
-| # | 대가 | 출처 |
+| # | Cost | Source |
 |---|---|---|
-| C6 | 순환을 끊으려고 타입 · 포트를 옮기거나 중립 타입을 새로 짓는다 | 조사1 F6(ruff) · ADR-0110 결정 5(봉투 계층 이사) |
-| C7 | 숙주 쪽에 어댑터 층을 새로 쓴다 | ADR-0110 결정 3 |
-| C8 | 언어 제약을 돌아가야 한다 — 남의 crate 타입에는 inherent impl 을 못 붙이고, orphan rule 에 걸린다 | 조사2 §9 J · §4 · 조사1 F6 |
-| C9 | 사용자 거부권 — 파일 하나짜리 lib 은 만들지 않는다. lib 끼리 무게를 비슷하게 맞춘다 | ADR-0175 결정 6 |
+| C6 | Move types · ports to break a cycle, or build a new neutral type | Survey 1 F6 (ruff) · ADR-0110 decision 5 (moving the envelope layer) |
+| C7 | Write a new adapter layer on the host side | ADR-0110 decision 3 |
+| C8 | Have to work around a language constraint — an inherent impl cannot be attached to another crate's type, and the orphan rule applies | Survey 2 §9 J · §4 · survey 1 F6 |
+| C9 | User veto — do not make a one-file lib. Keep libs similar in weight | ADR-0175 decision 6 |
 
-- **세지 않는 것** — 버전 · 의존성 관리 세금은 모노레포 안이라 거의 걸리지 않는다(조사2 §9 B). feature unification 은 아직 확립되지 않은 대가다(조사1 F6 · 조사2 §9 I).
+- **What is not counted** — the version · dependency management tax hardly applies inside a monorepo (survey 2 §9 B). Feature unification is a cost that is not yet established (survey 1 F6 · survey 2 §9 I).
 
-### D. 판정 규칙
+### D. Decision rules
 
-1. **0 에 걸리면 뗀다.**
-2. **A5 가 「아니오」면** 섞인 몫부터 제자리로 옮기고 다시 잰다.
-3. **A1–A4 중 하나라도 「아니오」면 숙주 안의 모듈로 둔다**(ADR-0151 결정 2). C9 에 걸려도 모듈이다.
-4. **A 가 다 「예」이고 대가가 고정분(C1–C5)뿐이면 뗀다**(ADR-0151 결정 1 · 사용자 2026-10-20). B 는 「무엇을 사 오나」를 기록하는 데만 쓴다.
-   - ★판단(메인 아님 — 이 문서): 고정분은 「크지 않은 대가」로 친다★ — crate 마다 거의 같은 기계 작업이라, 그것으로 「대가가 크다」가 서면 어떤 분리도 서지 않는다.
-5. **A 가 다 「예」인데 구조분(C6–C8)이 들면, B 에 실재 이득이 하나 이상일 때만 뗀다.** 없으면 모듈로 두되 바깥 간선 시험을 단다 — 나중에 떼는 값이 늘지 않게 하려는 것이다. 그 구조 변경이 제 이유로 찾아올 때 다시 잰다(CLAUDE.md 「판단 기준」 위험도 × 기간). ★판단(메인 아님 — 이 문서)★
-6. **떼기로 했으면 신설 때가 가장 싸다.** 나중에 떼면 들어오는 간선의 import 경로 고침과, 숙주 시험이 옆 모듈로 뻗은 자리의 재배치가 더해진다(ADR-0130 거부한 대안 옵션 A · 영향 「테스트 코드의 옆걸음」).
+1. **If 0 applies, split it off.**
+2. **If A5 is 「아니오」 (no),** first move the mixed-in role to its proper place and measure again.
+3. **If any one of A1–A4 is 「아니오」 (no), keep it as a module inside the host** (ADR-0151 decision 2). If C9 applies, it is a module too.
+4. **If A is all 「예」 (yes) and the cost is only the fixed part (C1–C5), split it off** (ADR-0151 decision 1 · user 2026-10-20). B is used only to record 「무엇을 사 오나」 (what is being bought).
+   - ★Judgment (not the main session — this document): the fixed part is counted as 「크지 않은 대가」 (not a large cost)★ — it is nearly the same mechanical work for every crate, so if 「대가가 크다」 (the cost is large) stood on that, no split would ever stand.
+5. **If A is all 「예」 (yes) but the structural part (C6–C8) is involved, split it off only when B has at least one real gain.** If there is none, keep it as a module but attach an outside-edge test — so that the price of splitting later does not grow. Measure again when that structural change comes on its own reasons (CLAUDE.md 「판단 기준」 (decision criteria) risk × duration). ★Judgment (not the main session — this document)★
+6. **If it is decided to split, the time of creation is cheapest.** Splitting later adds fixing the import paths of incoming edges and rearranging the places where the host's tests reach into neighboring modules (ADR-0130 rejected alternatives option A · impact 「테스트 코드의 옆걸음」 (the sidestep in test code)).
 
-### 두 조사 · ADR 이 갈린 자리와 이 표의 해소
+### Where the two surveys · ADRs disagree, and how this table resolves it
 
-| 쟁점 | 한쪽 | 다른 쪽 | 이 표 |
+| Issue | One side | The other side | This table (이 표) |
 |---|---|---|---|
-| 방향 강제가 분리 사유인가 | 조사1 F4 · ADR-0151 결정 4 — crate 가 아니어도 `pub(in path)` · 규칙 시험 · rg/cargo tree 게이트로 선다 | 조사2 §4 — 컴파일러를 강제자로 쓰려면 타당한 사유다. ADR-0110/0129 — rg 게이트만 두는 안은 「약속」이라 사용자가 기각했다 | A 의 근거로는 쓰지 않는다(결정 4). B1 이득으로만 센다. 실재 조건 = 이름으로 짚이는 침식 간선 |
-| 재사용 · 소비자 수 | 조사2 §1 · §3 — REP 「재사용 단위 = 릴리스 단위」 · 셋째 사용처 규칙 | 조사1 F7 · ADR-0151 결정 1 — 소비자 수 규칙이 없고 반례가 있다(rust-analyzer `ide`) | A(할 수 있나)에선 묻지 않는다. B2(사 오는 것)에서만 이름 있는 소비자를 센다 |
-| 컴파일 시간 | 조사1 F2 — MS 「dramatic compile time improvements」 | 조사1 F6 · 조사2 §4 — 조건부다. 체인이면 0 이고, 통제된 A/B 측정이 없다 | B4 는 그래프가 넓어질 때만 센다. 미측정이면 0 으로 친다 |
-| 격리 시험 | 조사2 §1 — seam 문제지 단위 문제가 아니다 | 조사2 §3 Nx — 시험이 느리면 쪼갠다. 메모 96 의 되열 조건 「isolated testing」 | 가짜로 도는 시험은 경계 몫이라 세지 않는다. 시험 빌드 범위만 B3 로 센다(실측이 있을 때) |
-| 크기 | ADR-0151 결정 3 · 조사1 F1 — 크기는 축이 아니다 | ADR-0175 결정 6 — 파일 하나짜리 lib 금지 · 무게를 비슷하게(사용자) | 크기로 떼지 않는다. 결정 6 은 C9(거부권)로만 쓴다. ★두 ADR 모두 살아 있고, 서로를 고친 표시가 없다★ |
-| 의존성 관리 세금 | 조사2 §2(SWE at Google) | 조사2 §9 B — 모노레포 안에는 거의 걸리지 않는다 | 세지 않는다 |
+| Is enforcing direction a reason to split | Survey 1 F4 · ADR-0151 decision 4 — it stands even without a crate through `pub(in path)` · rule tests · rg/cargo tree gates | Survey 2 §4 — if you use the compiler as the enforcer, it is a valid reason. ADR-0110/0129 — the user rejected the option of having only an rg gate as 「약속」 (a promise) | Not used as a basis for A (decision 4). Counted only as a B1 gain. Condition for real = an erosion edge that can be pointed at by name |
+| Reuse · number of consumers | Survey 2 §1 · §3 — REP 「재사용 단위 = 릴리스 단위」 (reuse unit = release unit) · the third-user rule | Survey 1 F7 · ADR-0151 decision 1 — there is no consumer-count rule and there is a counterexample (rust-analyzer `ide`) | Not asked in A (can it be done). Named consumers are counted only in B2 (what is bought) |
+| Compile time | Survey 1 F2 — MS 「dramatic compile time improvements」 | Survey 1 F6 · survey 2 §4 — conditional. If it is a chain it is 0, and there is no controlled A/B measurement | B4 is counted only when the graph gets wider. If unmeasured, counted as 0 |
+| Isolated testing | Survey 2 §1 — it is a seam problem, not a unit problem | Survey 2 §3 Nx — if tests are slow, split. Memo 96's reopening condition 「isolated testing」 | Tests that run on fakes are the boundary's role, so not counted. Only the test build scope is counted as B3 (when there is a measurement) |
+| Size | ADR-0151 decision 3 · survey 1 F1 — size is not an axis | ADR-0175 decision 6 — no one-file lib · keep weight similar (user) | Do not split by size. Decision 6 is used only as C9 (veto). ★Both ADRs are alive, and neither has a mark of amending the other★ |
+| Dependency management tax | Survey 2 §2 (SWE at Google) | Survey 2 §9 B — hardly applies inside a monorepo | Not counted |
 
-## 2. library 에 대 보기
+## 2. Checked against library
 
-대상 = TRD(`docs/process/S25-preset-library/trd.md`) §1-4 의 데몬 `library` 모듈, 열네 파일이다. 숙주 = 데몬 crate — `src` 39 파일 · 41,610 줄(시험 포함 · `wc -l` 실측).
+Target = the daemon `library` module of TRD (`docs/process/S25-preset-library/trd.md`) §1-4, fourteen files. Host = the daemon crate — `src` 39 files · 41,610 lines (including tests · `wc -l` measured).
 
 ### A
 
-| # | 답 | 근거 |
+| # | Answer | Basis |
 |---|---|---|
-| A1 | 예 | 저장소는 `LibraryStore` 포트 + 가짜 `MemStore` 로 갈아끼운다(§1-4 `store.rs`). 해석은 순수 함수다(§1-3). 프로필 명부는 `ProfileRegistry::new(Arc<dyn ProfileStore>)`(`agent/src/profile.rs:377`)로 가짜를 꽂는다 |
-| A2 | 예 (값 주입 조건) | 데몬 쪽에서 쓰는 것은 셋이다 — `DataLayout`(`daemon/src/data_dir.rs:207`)이 내는 상태 · 캐시 · 실행 경로, `suggested_new`(§1-4 「루트 · 기본 경로」), 설치 위치(`builtin\` — 리뷰 #4). 모두 값으로 넘길 수 있다. 버스 꽂기는 command crate 의 `blocking_handler`(`command/src/table.rs:365`)가 맡는다. `SpawnByCwd` 를 `spawn_blocking` 으로 옮기는 일은 데몬 쪽 고침이다 |
-| A3 | 예 | 데몬 → library 한 방향뿐이다. 방송 · 구독이 없어서(§0 · §1-4 흐름 ①) `status_fanout` · `connection_core` 로 되돌아갈 간선이 TRD 에 없다 |
-| A4 | 예 | 바깥 접점은 넷이다 — agent 포트 둘(`LaunchKitSource` · `LibraryCommandHost` — §1-5 · `trd.md:253`), agent 타입(`AgentProfile` · `ProfileRegistry` — `catalog.rs` 의 profiles 입력 · `ops.rs` (e)), platform `fs`(§1-6), command. 전부 다른 crate 의 공개 API 다. 같은 꼴의 선례 = 데몬 `usage_service` 가 `UsageCommandHost`(`agent/src/commands.rs:462` · ADR-0251)를 구현한다 |
-| A5 | **아니오** | `validate.rs`(§1-4)가 claude 스키마 출처 · codex `-c` 점 키 해석 · `--version` 을 안다. 리뷰 #2(두 리뷰어 일치)가 「백엔드 확장」 위반으로 보고 backend 검사 포트 뒤로 옮기라고 했다. **떼든 안 떼든 해야 하는 일이다** |
+| A1 | Yes | The store is swapped through the `LibraryStore` port + a fake `MemStore` (§1-4 `store.rs`). Resolution is a pure function (§1-3). The profile registry plugs in a fake through `ProfileRegistry::new(Arc<dyn ProfileStore>)` (`agent/src/profile.rs:377`) |
+| A2 | Yes (value-injection condition) | What the daemon side uses is three — the state · cache · launch paths that `DataLayout` (`daemon/src/data_dir.rs:207`) produces, `suggested_new` (§1-4 「루트 · 기본 경로」), and the install location (`builtin\` — review #4). All can be passed by value. Plugging in the bus is handled by `blocking_handler` (`command/src/table.rs:365`) of the command crate. Moving `SpawnByCwd` to `spawn_blocking` is a fix on the daemon side |
+| A3 | Yes | Only one direction, daemon → library. Since there is no broadcast or subscription (§0 · §1-4 flow ①), the TRD has no edge going back to `status_fanout` · `connection_core` |
+| A4 | Yes | There are four outside contact points — two agent ports (`LaunchKitSource` · `LibraryCommandHost` — §1-5 · `trd.md:253`), agent types (`AgentProfile` · `ProfileRegistry` — the profiles input of `catalog.rs` · `ops.rs` (e)), platform `fs` (§1-6), command. All are public APIs of other crates. A precedent of the same shape = the daemon's `usage_service` implements `UsageCommandHost` (`agent/src/commands.rs:462` · ADR-0251) |
+| A5 | **No** | `validate.rs` (§1-4) knows the claude schema source · the codex `-c` dotted-key resolution · `--version`. Review #2 (both reviewers agreed) saw this as a 「백엔드 확장」 (backend extension) violation and said to move it behind the backend check port. **It is work that has to be done whether or not it is split off** |
 
 ### B
 
-| # | 판정 | 근거 |
+| # | Decision | Basis |
 |---|---|---|
-| B1 | 가능성 있음 | 같은 숙주에서 잎이던 `control/` 은 잎이라고 적힌 지 이틀 만에 잎이 아니게 됐다. 그 뒤 재론 트리거가 한 달 넘게 판단 없이 울렸다(ADR-0236 맥락 · 근거). 데몬 부식 이력도 있다(ADR-0129 거부한 대안 → ADR-0020). 단 **리뷰가 실제로 찾은 새는 길(A5)은 심볼 참조가 아니라 지식 복제라 crate 벽이 못 막는다** |
-| B2 | 없음 | 셸은 디스크를 읽지 않는다(PRD 불변 제약 · §1-1 거부한 대안). cli 는 인증과 배송만 한다(ADR-0285) |
-| B3 | 미측정 | 떼면 library 시험 고리가 데몬 crate 와, 데몬만 지는 의존(rmcp · axum · net · messaging — `daemon/Cargo.toml:92-149`)을 거치지 않는다. agent 는 그래도 거친다 |
-| B4 | 0 | agent → library → 데몬 체인이다 |
-| B5 | 0 | 게시하지 않는다 |
+| B1 | Possible | `control/` in the same host, which was a leaf, stopped being a leaf only two days after it was written as a leaf. After that the reopening trigger fired for over a month with no judgment (ADR-0236 context · rationale). There is also an erosion history of the daemon (ADR-0129 rejected alternatives → ADR-0020). But **the leaking path the review actually found (A5) is knowledge duplication, not symbol references, so the crate wall cannot stop it** |
+| B2 | None | The shell does not read the disk (PRD invariant constraint · §1-1 rejected alternatives). cli only does authentication and delivery (ADR-0285) |
+| B3 | Not measured | If split off, the library test loop does not go through the daemon crate and the dependencies only the daemon carries (rmcp · axum · net · messaging — `daemon/Cargo.toml:92-149`). It still goes through agent |
+| B4 | 0 | It is an agent → library → daemon chain |
+| B5 | 0 | Not published |
 
-### C — 떼는 모양 = 「얇은 library crate」
+### C — shape of the split = 「얇은 library crate」 (a thin library crate)
 
-얇은 library crate 는 agent · platform · command · base 를 의존하고, 데몬이 그것을 의존한다.
+The thin library crate depends on agent · platform · command · base, and the daemon depends on it.
 
-| # | 셈 |
+| # | Count |
 |---|---|
-| C1 | 매니페스트 1 + `members` 1 |
-| C2 | 필수 셋 × 세 곳 = 9곳: 시험 줄 · 의존 상한(cli 식 이름 집합) · 메시징 격리 정규식 이름. 선택 둘을 더하면 최대 15곳이다 — `use tauri` 0(데몬에 링크되므로 base · platform 선례), 동기 유지(platform gate 7 꼴 · TRD 는 `std::sync::RwLock` 동기 포트) |
+| C1 | Manifest 1 + `members` 1 |
+| C2 | Three required × three places = 9 places: test line · dependency cap (cli-style name set) · messaging isolation regex name. Adding two optional makes at most 15 places — `use tauri` 0 (it is linked into the daemon, so the base · platform precedent), staying synchronous (platform gate 7 shape · the TRD uses `std::sync::RwLock` sync port) |
 | C3 | 1 |
-| C4 | 추정 5–8개(미구현): `LibraryService` 생성자 · 부팅 훅 둘(일지 롤포워드 · `launch\` 쓸기) · 휴지통 비우기 진입점(리뷰 #3) · 경로 묶음 · 설정 · 신원 타입 |
-| C5 | 0 이 가능하다 — 데몬 시험이 실 `FsStore` + 임시 폴더를 쓰면 기능 배선이 필요 없다 |
-| C6 | 0 — agent 가 library 를 의존하지 않고, 포트는 이미 agent 에 있다. 옮길 타입이 없다 |
-| C7 | 0 — 포트 구현(`impl LaunchKitSource for LibraryService`)이 library 안에 머문다. 자기 타입에 남의 trait 을 붙이는 것이라 orphan rule 에도 안 걸린다 |
-| C8 | 0 — agent 타입에 inherent impl 을 못 붙이는 것은 데몬 모듈이어도 똑같다 |
-| C9 | 통과 — 열네 파일 |
+| C4 | Estimated 5–8 (not implemented): `LibraryService` constructor · two boot hooks (journal roll-forward · `launch\` sweep) · trash-emptying entry point (review #3) · path bundle · settings · identity type |
+| C5 | 0 is possible — if the daemon tests use a real `FsStore` + a temporary folder, no feature wiring is needed |
+| C6 | 0 — agent does not depend on library, and the ports are already in agent. There are no types to move |
+| C7 | 0 — the port implementation (`impl LaunchKitSource for LibraryService`) stays inside library. It attaches someone else's trait to its own type, so the orphan rule does not apply either |
+| C8 | 0 — not being able to attach an inherent impl to an agent type is the same even if it is a daemon module |
+| C9 | Passes — fourteen files |
 
-**대가 = 고정분뿐**(등록 9–15곳 + 매니페스트 · 맵 3 + 공개 항목 5–8개). A5 고침은 분리의 대가가 아니다.
+**Cost = only the fixed part** (9–15 registrations + 3 manifest · map entries + 5–8 public items). The A5 fix is not a cost of the split.
 
-### TRD 의 기각 사유
+### The TRD's rejection reason
 
-- `trd.md:49` 는 「소비자가 하나다. 다른 crate 가 필요해지면 뺀다(메모 96)」, `trd.md:253` 은 「라이브러리 전용 crate(소비자 하나)」라고 적는다. 둘 다 ADR-0151 결정 1(2026-08-17)이 폐기한 기준이다(ADR-0130 재개 조건 ①).
-- 메모 96(`.claude/handoff/attachments/20261012-preset-decisions.md:96`)의 되열 조건은 셋인데, TRD 는 첫째만 옮겼다.
-  - 다른 crate 가 필요해진다 — 폐기된 소비자 기준이다.
-  - 프리셋 로직이 커진다 — 크기다. ADR-0151 결정 3 은 크기가 축이 아니라고 한다.
-  - 격리 시험을 원한다 — 셋 중 이것만 B3 으로 살아 있다.
-- TRD 리뷰는 「crate 배치」를 깨끗하다고 봤다(`20261020-trd-review-findings.md` 끝). 판정 기준을 대고 잰 흔적은 없다.
+- `trd.md:49` says 「소비자가 하나다. 다른 crate 가 필요해지면 뺀다(메모 96)」 (there is one consumer. If another crate needs it, pull it out (memo 96)), and `trd.md:253` says 「라이브러리 전용 crate(소비자 하나)」 (a library-only crate (one consumer)). Both are criteria that ADR-0151 decision 1 (2026-08-17) discarded (ADR-0130 reopening condition ①).
+- Memo 96 (`.claude/handoff/attachments/20261012-preset-decisions.md:96`) has three reopening conditions, but the TRD carried over only the first.
+  - Another crate becomes necessary — a discarded consumer criterion.
+  - The preset logic grows — size. ADR-0151 decision 3 says size is not an axis.
+  - Wanting isolated tests — only this one of the three is still alive, as B3.
+- The TRD review saw 「crate 배치」 as clean (end of `20261020-trd-review-findings.md`). There is no trace of measuring it against the decision criteria.
 
-## 3. 결론 + 확신도
+## 3. Conclusion + confidence
 
-- **추천 — D 4 단계: 얇은 library crate 로, 신설 때 뗀다. 그 전에 A5(검사 지식을 backend 포트로)를 먼저 고친다.** 확신도 = **중간**.
-- **가르는 사실 둘**
-  1. A5 를 고치면 TRD 의 library 바깥 접점이 전부 다른 crate 의 공개 API 와 값으로 넘길 경로뿐이다. 그래서 대가가 고정분만 남는다(§2 C6–C8 = 0).
-  2. 지금이 가장 싸다. 데몬에서 library 로 들어오는 간선이 아직 없다(D 6). 같은 숙주의 `control/` 처럼 간선이 쌓이면 나중 떼기의 값이 커진다(ADR-0236).
-- **정직하게 — 사 오는 것도 작다.** B 에서 「실재」로 확정된 항목이 없다(B1 가능성 · B3 미측정 · B2 · B4 · B5 = 0). 「뗀다」는 측정된 이득의 귀결이 아니라 「대가가 고정분이면 뗀다」(ADR-0151 결정 1 · 사용자 2026-10-20)를 따른 귀결이다. 메모 96(사용자 결정)은 반대쪽이라 사용자 확인 대상이다.
-- **뒤집는 것(→ 데몬 모듈)**
-  - 구현에서 library 가 데몬 내부(`connection_core` · `command_delivery` · `control`)를 불러야 한다는 것이 드러난다 — A2 가 「아니오」가 된다.
-  - 리뷰 #6 의 해법이 agent → library 알림을 포트가 아닌 꼴로 요구한다 — C6 이 생긴다. 리뷰 #6 = 복제 · 생성 · 삭제가 라이브러리를 거치지 않아 참조 색인이 낡는 문제다.
-  - 사용자가 메모 96 을 재확인한다.
-- **모듈로 가면** D 5 대로 바깥 간선 시험을 단다 — `library/` 에서 다른 데몬 최상위 모듈로 가는 간선 = 0. 모듈 이름은 `lib.rs` 의 `mod` 선언에서 파생한다(ADR-0130 근거 ③ 명령 꼴). 그 명령의 오탐 · 0줄 오통과 이력은 ADR-0236 「영향」에 있다.
-- **뒤집지 않는 것** — 소비자 수, 파일 수.
+- **Recommendation — D step 4: as a thin library crate, split off at creation. Before that, first fix A5 (check knowledge to the backend port).** Confidence = **medium**.
+- **Two facts that decide it**
+  1. If A5 is fixed, the TRD's outside contact points of library are only the public APIs of other crates and paths that can be passed by value. So only the fixed part remains as cost (§2 C6–C8 = 0).
+  2. Now is the cheapest. There is not yet an edge from the daemon into library (D 6). As with `control/` in the same host, if edges pile up, the price of splitting later grows (ADR-0236).
+- **To be honest — what is bought is also small.** Among B there is no item settled as 「실재」 (real) (B1 possible · B3 not measured · B2 · B4 · B5 = 0). The result 「뗀다」 (split it off) is not the consequence of a measured gain but the consequence of following 「대가가 고정분이면 뗀다」 (split it off if the cost is a fixed part) (ADR-0151 decision 1 · user 2026-10-20). Memo 96 (a user decision) is on the opposite side, so it is a matter for the user to confirm.
+- **What would overturn it (→ daemon module)**
+  - Implementation reveals that library has to call daemon internals (`connection_core` · `command_delivery` · `control`) — A2 becomes 「아니오」 (no).
+  - The fix for review #6 requires the agent → library notification in a non-port shape — C6 arises. Review #6 = the problem that duplicate · create · delete do not go through the library, so the reference index goes stale.
+  - The user reconfirms memo 96.
+- **If it goes as a module**, attach an outside-edge test per D 5 — edges from `library/` to other top-level daemon modules = 0. Module names are derived from the `mod` declarations in `lib.rs` (the command shape of ADR-0130 rationale ③). The history of false positives · 0-line false passes of that command is in ADR-0236 「영향」 (impact).
+- **What would not overturn it** — number of consumers, number of files.
 
-## 4. 한계
+## 4. Limits
 
-- 빌드 · 시험 시간 실측이 0 이다. B3 · B4 는 메커니즘으로 추론했다. 조사1 F6 에 따르면 통제된 A/B 측정은 어디에도 없다.
-- library 는 아직 구현되지 않았다. C4 의 공개 표면 수와 A2 의 「데몬 내부 0」은 TRD 문면 기준이다.
-- 웹 검색을 하지 않았다. 비용 축은 두 조사와 이 저장소 ADR 로만 셌다.
-- C2 의 「한 종류 × 세 곳」은 ADR-0175 · ADR-0266 이 적은 규약이다. 선례 crate 마다 세 곳에 다 등록돼 있는지는 하나하나 대조하지 않았다 — 이름 언급 수만 `grep -c` 로 봤다.
-- 판정표 D 4 · 5 는 이 문서의 합성이고, 리뷰를 거치지 않았다.
-- 곁 사실: 워크스페이스 멤버 `engram-dashboard-transport`(루트 `Cargo.toml` 의 `members`)가 CLAUDE.md 「백엔드 모듈 맵」에도, 「빌드·검증 명령」의 시험 줄에도 없다.
+- Build · test time measurements are 0. B3 · B4 were inferred from mechanism. According to survey 1 F6, there is no controlled A/B measurement anywhere.
+- library is not yet implemented. The number of public surface items in C4 and the 「데몬 내부 0」 (daemon internals 0) in A2 are based on the TRD wording.
+- No web search was done. The cost axis was counted only from the two surveys and this repository's ADRs.
+- The 「한 종류 × 세 곳」 (one kind × three places) in C2 is a convention written in ADR-0175 · ADR-0266. Whether every precedent crate is registered in all three places was not checked one by one — only the number of name mentions was looked at with `grep -c`.
+- Decision table D 4 · 5 is a synthesis of this document and has not been through review.
+- Side fact: the workspace member `engram-dashboard-transport` (`members` of the root `Cargo.toml`) is neither in CLAUDE.md 「백엔드 모듈 맵」 (backend module map) nor in the test line of 「빌드·검증 명령」 (build · verify commands).
 
-## 5. 덧붙임 — 잘 나뉜 오픈소스가 글로 적어 둔 기준 (2026-10-20 · light · 수집자 1 + 메인 grounding)
+## 5. Addendum — criteria that well-divided open source wrote down (2026-10-20 · light · 1 collector + main grounding)
 
-- **rust-analyzer**(메인 원문 확인 — https://raw.githubusercontent.com/rust-lang/rust-analyzer/master/docs/book/src/contributing/architecture.md): crate 를 떼는 이유가 일관되게 **「이 덩어리는 무엇을 모르는가」** 다 — 「syntax crate is completely independent from the rest of rust-analyzer. It knows nothing about salsa or LSP.」 · 「`base-db` knows nothing about cargo.」 그리고 **경계 crate**(`syntax` · `hir` · `ide` — 「API Boundary」)와 **내부 crate**(`hir-def` · `hir-expand` · `hir-ty` — 「these crates are not, and will never be, an api boundary」)를 따로 표시한다. 내부 crate 도 crate 다 — 「경계가 아니라 마음대로 고친다」 는 표시일 뿐이다. → 이 표의 A5(다른 지식이 섞였나) · B1(밖으로 새는 간선을 컴파일러로)과 같은 축이다. 확신도 = 확실(원문).
-- **tokio**: 다른 crate 공개 API 에 드러날 타입은 하위 crate(tokio-util 등)로 낸다 — 검색 요약만(가능성 높음).
-- **zellij · herdr(로컬 클론)**: crate 기준을 적은 곳이 없다. herdr `AGENTS.md` 는 모듈 원칙만 — 「State is separated from runtime. AppState is pure data, testable without PTYs or async.」(확실 — 직접 읽음).
-- **Bevy**: `bevy_core` 를 0.16 에서 합쳐 없앴다(migration guide 제목 — 확실) · 사유는 못 찾았다.
-- **못 읽음**: Zed · ruff/uv · Deno · Nushell · Helix · wezterm · Cargo · Servo. 컴파일 시간 · 순환 · feature 격리를 crate 기준으로 **글로 적은** 곳은 이번에 못 찾았다.
-- **사용자 결정 이력(메인 확인)**: 2026-10-14 사용자 결정(「애매하긴 하지만 그렇게 해」 — `.claude/handoff/attachments/20261012-preset-decisions.md:96`) = 데몬 안 전용 **모듈** + 처음부터 trait seam · 「다른 crate 가 필요하거나 · 프리셋 로직이 커지거나 · 따로 시험하고 싶어지면」 crate 로 뺀다. 이 문서의 「떼는 쪽」 기욺은 그 결정과 다르므로 사용자 재판정 대상이다.
+- **rust-analyzer** (main confirmed the original — https://raw.githubusercontent.com/rust-lang/rust-analyzer/master/docs/book/src/contributing/architecture.md): the reason to split a crate off is consistently **「이 덩어리는 무엇을 모르는가」** (what this chunk does not know) — 「syntax crate is completely independent from the rest of rust-analyzer. It knows nothing about salsa or LSP.」 · 「`base-db` knows nothing about cargo.」 and it marks **boundary crates** (`syntax` · `hir` · `ide` — 「API Boundary」) and **internal crates** (`hir-def` · `hir-expand` · `hir-ty` — 「these crates are not, and will never be, an api boundary」) separately. An internal crate is also a crate — 「경계가 아니라 마음대로 고친다」 (it is not a boundary, so edit it freely) is only a marker. → This is on the same axis as this table's A5 (is other knowledge mixed in) · B1 (leaking edges to the outside, by the compiler). Confidence = certain (original).
+- **tokio**: types that will be exposed in another crate's public API are put out into a lower crate (tokio-util etc.) — search summary only (likely).
+- **zellij · herdr (local clone)**: nowhere states a crate criterion. herdr `AGENTS.md` has only a module principle — 「State is separated from runtime. AppState is pure data, testable without PTYs or async.」 (certain — read directly).
+- **Bevy**: merged and removed `bevy_core` in 0.16 (migration guide title — certain) · the reason was not found.
+- **Could not read**: Zed · ruff/uv · Deno · Nushell · Helix · wezterm · Cargo · Servo. This time we found no place that **wrote down** compile time · cycles · feature isolation as crate criteria.
+- **User decision history (main confirmed)**: the user decision of 2026-10-14 (「애매하긴 하지만 그렇게 해」 — `.claude/handoff/attachments/20261012-preset-decisions.md:96`) = a dedicated **module** inside the daemon + a trait seam from the start · 「다른 crate 가 필요하거나 · 프리셋 로직이 커지거나 · 따로 시험하고 싶어지면」 (if another crate becomes necessary, or the preset logic grows, or separate testing is wanted) pull it out as a crate. This document's lean toward 「떼는 쪽」 (splitting off) differs from that decision, so it is a matter for the user to decide again.

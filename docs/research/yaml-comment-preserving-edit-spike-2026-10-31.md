@@ -1,49 +1,49 @@
-# 주석 보존 YAML 편집 — yaml-edit · yamlpatch 실측 (프리셋 파일)
+# Comment-preserving YAML editing — yaml-edit · yamlpatch measured (preset files)
 
-| 항목 | 값 |
+| Item | Value |
 |---|---|
-| 상태 | 실측 완료 · 편집기 추천(메인 세션 확인 대기) |
-| 날짜 | 2026-10-31 |
-| 방법 | 스파이크 — 세션 스크래치의 따로 된 cargo 프로젝트(저장소 밖)에서 프리셋 샘플 한 벌을 연산마다 새 사본으로 고쳐 원본과 `diff -U1` · 결과를 serde-saphyr 2.0.0 으로 다시 읽어 기대 값(원본을 읽은 값에 같은 연산을 serde_json 으로 적용한 것)과 대조 · 타입 있는 읽기(경로 문자열 \| `{path, backend}` untagged)도 함께 · 손 주석 14개의 남음/사라짐/중복 셈 · 줄 끝(CRLF/LF) 셈. rustc 1.95.0 · Windows 11 · MSVC |
-| 버전 | `yaml-edit` **0.3.5**(최신 · 2026-10-22) — 대조로 TRD 가 적은 0.3.2 도 같은 표를 돌림 · `yamlpatch` **1.31.1**(최신 정식 · 2026-10-15 · 1.32.0-rc1 은 안 봄) + `yamlpath` 1.31.1 · 다시 읽기 = `serde-saphyr` 2.0.0(TRD 의 읽기 crate) |
-| 질문 | TRD `S25-preset-library/trd.md` §5-1 0b — 손으로 쓴 프리셋 파일을 Engram 이 고칠 때(목록 끝 추가 · 중간 넣기 · 빼기 · 순서 바꾸기 · 맵 칸 바꾸기) 손 주석 · 모양이 남는가 |
-| 산출물 | 스크래치(보존 안 함) — 결과는 이 문서가 정본 |
+| Status | Measurement complete · editor recommendation (awaiting main session confirmation) |
+| Date | 2026-10-31 |
+| Method | Spike — in a separate cargo project in the session scratch (outside the repository), took one set of preset samples and edited a fresh copy per operation, compared `diff -U1` with the original · re-read the result with serde-saphyr 2.0.0 and checked it against the expected value (the value obtained by reading the original and applying the same operation with serde_json) · a typed read (path string \| `{path, backend}` untagged) too · counted 14 hand-written comments as kept/lost/duplicated · counted line endings (CRLF/LF). rustc 1.95.0 · Windows 11 · MSVC |
+| Versions | `yaml-edit` **0.3.5** (latest · 2026-10-22) — the same table was run on 0.3.2, which the TRD wrote, for comparison · `yamlpatch` **1.31.1** (latest stable · 2026-10-15 · 1.32.0-rc1 not looked at) + `yamlpath` 1.31.1 · re-read = `serde-saphyr` 2.0.0 (the TRD's reading crate) |
+| Question | TRD `S25-preset-library/trd.md` §5-1 0b — when Engram edits a hand-written preset file (append to the end of a list · insert in the middle · remove · reorder · change a map field), do the hand comments · shape survive |
+| Deliverable | Scratch (not kept) — this document is the canonical result |
 
-## 결론
+## Conclusion
 
-- **고른다 = `yaml-edit` 0.3.5 — 조건 셋을 붙여서.** 끝 추가 · 중간 넣기 · 빼기 · 꼬리표 바꾸기(맵 칸 값 · 문자열↔맵) · `description` · 빈 목록 · CRLF · 한글 주석에서 손 주석을 잃지 않고 다시 읽은 값도 맞다. 조건:
-  1. **순서 바꾸기는 그대로 쓸 API 가 없고, 자연스러운 길(뺀 노드를 다시 넣기)은 맵 항목에서 다시 못 읽는 YAML 을 낸다**(`backend:` 들여쓰기 두 겹 — 0.3.2 에서 되던 것이 0.3.5 에서 깨짐). 우회 = 뺀 노드의 글을 둘째 줄부터 들여쓰기를 걷고 다시 읽어 넣기 — 실측으로 통했다(그 항목 줄 끝 주석까지 따라감). 새 값으로 다시 만들어 넣기도 맞지만 그 항목 줄 끝 주석을 잃는다.
-  2. 소스가 `[]` 인 목록에 넣으면 흐름 꼴 `[x]` 로 남는다 → 새 블록 `Sequence` 로 바꿔 끼운다(실측 ✅).
-  3. 패치 판마다 동작이 바뀐다(0.3.2 → 0.3.5 사이 다섯 연산 결과가 달라짐 · 아래 대조) → `=0.3.5` 로 박고, **쓰기 전에 serde-saphyr 로 다시 읽어 기대 값과 대조**하는 문을 `format.rs` 에 둔다(어긋나면 쓰지 않는다 — 그때 할 일은 구현 판단). 이번에 잡힌 깨진 출력은 전부 이 대조가 잡는 종류였다.
-- **`yamlpatch` 1.31.1 은 안 된다.** ① 중간 넣기 · 순서 바꾸기 연산이 없다(목록 통째 `Replace` = 목록 안 주석 4개 잃음) ② 문자열 → 맵이 깨진 YAML 로 거절되고, **맵 → 문자열은 말없이 틀린 값을 쓴다**(꼬리표를 떼라 했는데 `- path: …` 맵으로 남고 `backend` · 줄 끝 주석이 사라짐 · 순수 ASCII 최소 문서에서도 재현) ③ 하나 남은 항목 빼기가 그 줄 끝 주석에 한글이 있으면 **panic**(`line-index` invalid offset) · ASCII 면 `settings:` 키째 지운다 ④ CRLF 파일에 끝 추가하면 LF 가 섞인다 ⑤ 의존이 rustc **1.97** 을 요구한다(`tree-sitter-iter` ≥ 1.28 · 저장소 핀 1.95.0) — 여기서는 `--ignore-rust-version` 으로만 지었다.
-- **두 crate 공통 한계 — 빼는 항목의 윗줄 주석은 남는다.** 줄 끝 주석은 함께 가지만 항목 위 주석 줄은 제자리에 남아 다음 항목의 주석처럼 보인다. 이웃 주석은 그대로다. 같은 까닭으로 `yaml-edit` 의 중간 넣기는 새 항목이 **다음 항목의 윗줄 주석 아래**로 들어간다. 받아들일지는 사용자 몫 — 아니면 `format.rs` 가 주석 줄을 따로 다뤄야 하는데 그 API 는 재지 않았다.
-- TRD 0b 의 물러남(serde 로 다시 쓰고 손 주석 잃음)은 필요 없다 — 위 조건 셋이면 `yaml-edit` 로 선다.
+- **Pick = `yaml-edit` 0.3.5 — with three conditions attached.** Append at the end · insert in the middle · remove · change a tag (map field value · string↔map) · `description` · empty list · CRLF · Korean comments all keep the hand comments with no loss, and the re-read values are correct too. Conditions:
+  1. **There is no API usable as is for reordering, and the natural route (re-inserting the removed node) produces YAML that cannot be re-read at a map entry** (`backend:` double indentation — what worked in 0.3.2 broke in 0.3.5). The workaround = strip the indentation from the removed node's text from the second line on and re-read and insert it — it worked in measurement (the end-of-line comment of that entry follows along). Re-creating it as a new value and inserting it is also correct but loses that entry's end-of-line comment.
+  2. If inserted into a list whose source is `[]`, it remains in the flow shape `[x]` → swap it in with a new block `Sequence` (measured ✅).
+  3. Behavior changes with each patch version (five operation results differed between 0.3.2 and 0.3.5 · comparison below) → pin it with `=0.3.5`, and put a gate in `format.rs` that **re-reads with serde-saphyr before writing and checks against the expected value** (if they diverge, do not write — what to do then is an implementation decision). The broken outputs caught this time were all of the kind this check catches.
+- **`yamlpatch` 1.31.1 does not work.** (1) It has no insert-in-the-middle or reorder operation (replacing the whole list with `Replace` = loses 4 comments inside the list) (2) string → map is rejected as broken YAML, and **map → string silently writes a wrong value** (asked to remove the tag, it remained as a `- path: …` map, and `backend` · the end-of-line comment disappeared · also reproduced in a pure-ASCII minimal document) (3) removing the last remaining entry **panics** if its end-of-line comment contains Korean (`line-index` invalid offset) · if ASCII, it deletes the whole `settings:` key (4) appending at the end of a CRLF file mixes in LF (5) its dependency requires rustc **1.97** (`tree-sitter-iter` ≥ 1.28 · repository pin 1.95.0) — here it was built only with `--ignore-rust-version`.
+- **Common limit of both crates — the comment above an entry being removed stays.** The end-of-line comment goes with it, but the comment line above the entry stays in place and looks like the next entry's comment. Neighboring comments are untouched. For the same reason, insert-in-the-middle of `yaml-edit` puts the new entry **under the next entry's above-line comment**. Whether to accept that is up to the user — otherwise `format.rs` would have to handle comment lines separately, and that API was not measured.
+- The fallback in TRD 0b (rewrite with serde and lose hand comments) is not needed — with the three conditions above it stands on `yaml-edit`.
 
-## 연산 × 크레이트
+## Operation × crate
 
-✅ = 값 · 주석 · 모양 모두 맞음 · △ = 값은 맞고 주석 자리나 모양이 어긋남(또는 우회 필요) · ✗ = 연산 없음 · 오류 · 틀린 값 · 깨진 출력
+✅ = value · comments · shape all correct · △ = value correct but comment position or shape off (or a workaround needed) · ✗ = no operation · error · wrong value · broken output
 
-| 연산 | yaml-edit 0.3.5 | yamlpatch 1.31.1 |
+| Operation | yaml-edit 0.3.5 | yamlpatch 1.31.1 |
 |---|---|---|
-| 1 끝 추가 — 문자열(`skills`) | ✅ 마지막 항목 바로 아래(빈 줄 · 파일 끝 주석 앞) | △ 빈 줄 **뒤** · 파일 끝 주석 바로 위에 붙음(목록 안에 빈 줄) — 값은 맞음 |
-| 1 끝 추가 — 맵 `{path, backend: codex}`(`instructions`) | ✅ 블록 맵 · 들여쓰기 맞음 | ✅ 같은 결과 |
-| 2 중간 넣기(`instructions` [0] 뒤) | △ `insert(1, …)` — 값 맞음 · 새 항목이 다음 항목의 윗줄 주석 아래로 들어가 그 주석이 새 항목 몫처럼 보임 | ✗ 연산 없음 · 목록 통째 `Replace` = 목록 안 주석 4개 잃음 |
-| 3 빼기 — 문자열(윗줄 주석 + 줄 끝 주석) | △ 항목 줄 + 줄 끝 주석 사라짐 · **윗줄 주석 남음** · 이웃 주석 그대로 | △ 같은 결과(글자까지 같음) |
-| 3 빼기 — 맵 항목(윗줄 주석 + `path` 줄 끝 주석) | △ 같은 꼴 | △ 같은 결과 |
-| 4 순서 바꾸기(`instructions` [1] 을 끝으로) | ✗ 그대로는 안 됨 — 뺀 노드를 `push`/`insert` = **다시 못 읽는 YAML**(`backend:` 6칸) · 문자열 노드 옮김 = 줄 끝 주석 잃음 · 자리마다 `set` = 주석이 자리에 남고 하나 잃음. **우회 ✅** 노드 글 → 둘째 줄부터 4칸 걷기 → 다시 읽어 `push` = 값 맞음 · 줄 끝 주석 따라감(윗줄 주석은 남음) | ✗ 연산 없음 · `Remove` + `Append` = 값 맞음 · 줄 끝 주석 잃음 · 목록 통째 `Replace` = 주석 4개 잃음 · 자리마다 `Replace` = 오류(아래 문자열 → 맵 결함) |
-| 5 꼬리표 값 바꾸기(`backend: claude` → `codex`) | ✅ 줄 끝 주석 그대로 | ✅ 같은 결과 |
-| 5 문자열 → 맵(꼬리표 붙이기) | △ 값 맞음 · 줄 끝 주석은 남되 대시 줄로 감(`-      # 커밋 끝 주석` 다음 줄부터 맵) | ✗ 오류 — 깨진 YAML 을 만들어 거절(ASCII 최소 문서에서도) |
-| 5 맵 → 문자열(꼬리표 떼기) | ✅ `path` 줄 끝 주석이 같은 줄에 남음(2차 측정에서 정정) | ✗ **말없이 틀린 값** — `- path: 지침/codex 보고 형식.md` 맵으로 남고 `backend` · 줄 끝 주석 사라짐 |
-| 6 `description` 바꾸기 | ✅ 줄 끝 주석 그대로 | ✅ 같은 결과 |
-| 빈 목록 `settings: []` → 첫 항목 | △ `push` = `[설정/첫 설정.yaml]` 흐름 꼴 · 새 블록 `Sequence` 로 바꿔 끼우면 ✅(키 줄 주석 그대로) | △ `Append` = 오류(흐름 목록 거절) · `Replace` = 블록이 되나 키 줄 주석이 항목 줄로 옮겨감 |
-| 값 없는 `settings:` → 첫 항목 | ✅ 새 블록 `Sequence` 끼우기 · 키 줄 주석 그대로 | △ `Append` = 오류 · `Replace` = 키 줄 주석이 항목 줄로 |
-| 하나 남은 항목 빼기 → 빈 목록 | ✅ `settings: []`(그 항목 줄 끝 주석은 함께 사라짐) | ✗ **panic**(줄 끝 주석 한글) · ASCII 면 `settings:` 키째 지움(yamlpath 의 「빈 블록 부모를 위로 접는다」 설계) |
-| CRLF 입력(1 · 2 · 3 · 4 · 5 문자열→맵 · 6) | ✅ 결과 전부 CRLF 한 가지 · CR 을 걷으면 LF 결과와 바이트 같음(4 자연 경로는 LF 와 똑같이 깨짐) | △ 끝 추가 = LF 섞임(CRLF 30 + LF만 1~2 — 원래 줄 하나도 CR 을 잃음) · 빼기 · `description` = CRLF 유지 |
-| 한글 주석 · 값 | ✅ 문제 없음 | ✗ 하나 남은 항목 빼기 panic(위) · 그 밖은 문제 없음 |
-| 다시 읽기(serde-saphyr 2.0.0) | 우회 안 쓴 순서 바꾸기(노드 다시 넣기)만 실패 — 나머지 전부 기대 값과 같음 | 출력이 나온 것 중 맵 → 문자열만 다름(틀린 값) |
-| 손대지 않은 줄 | 바이트 그대로(따옴표 `"공용/팀 규칙.yaml"` · 정렬 공백 포함 — diff 로 확인) | 같음 |
+| 1 Append at end — string (`skills`) | ✅ Right under the last entry (before the blank line · the end-of-file comment) | △ Attached **after** the blank line · right above the end-of-file comment (a blank line inside the list) — value correct |
+| 1 Append at end — map `{path, backend: codex}` (`instructions`) | ✅ Block map · indentation correct | ✅ Same result |
+| 2 Insert in the middle (after `instructions` [0]) | △ `insert(1, …)` — value correct · the new entry goes under the next entry's above-line comment, so that comment looks like the new entry's | ✗ No operation · replacing the whole list with `Replace` = loses 4 comments inside the list |
+| 3 Remove — string (above-line comment + end-of-line comment) | △ The entry line + end-of-line comment disappear · **the above-line comment stays** · neighboring comments untouched | △ Same result (identical down to the characters) |
+| 3 Remove — map entry (above-line comment + `path` end-of-line comment) | △ Same shape | △ Same result |
+| 4 Reorder (`instructions` [1] to the end) | ✗ Does not work as is — removed node `push`/`insert` = **YAML that cannot be re-read** (`backend:` 6 columns) · moving a string node = loses the end-of-line comment · `set` at each position = comments stay in place and one is lost. **Workaround ✅** node text → strip 4 columns from the second line → re-read and `push` = value correct · end-of-line comment follows (the above-line comment stays) | ✗ No operation · `Remove` + `Append` = value correct · loses the end-of-line comment · replacing the whole list with `Replace` = loses 4 comments · `Replace` at each position = error (the string → map defect below) |
+| 5 Change a tag value (`backend: claude` → `codex`) | ✅ End-of-line comment as is | ✅ Same result |
+| 5 String → map (attach a tag) | △ Value correct · the end-of-line comment stays but moves to the dash line (map starts on the line after `-      # 커밋 끝 주석`) | ✗ Error — produces broken YAML and rejects (even in an ASCII minimal document) |
+| 5 Map → string (remove the tag) | ✅ The `path` end-of-line comment stays on the same line (corrected in the 2nd measurement) | ✗ **Silently wrong value** — remains as a `- path: 지침/codex 보고 형식.md` map and `backend` · the end-of-line comment disappears |
+| 6 Change `description` | ✅ End-of-line comment as is | ✅ Same result |
+| Empty list `settings: []` → first entry | △ `push` = `[설정/첫 설정.yaml]` flow shape · ✅ if swapped in with a new block `Sequence` (key-line comment as is) | △ `Append` = error (flow list rejected) · `Replace` = becomes a block but the key-line comment moves to the entry line |
+| Value-less `settings:` → first entry | ✅ Insert a new block `Sequence` · key-line comment as is | △ `Append` = error · `Replace` = the key-line comment goes to the entry line |
+| Remove the last remaining entry → empty list | ✅ `settings: []` (that entry's end-of-line comment disappears with it) | ✗ **panic** (end-of-line comment in Korean) · if ASCII, deletes the `settings:` key entirely (yamlpath's 「빈 블록 부모를 위로 접는다」 design) |
+| CRLF input (1 · 2 · 3 · 4 · 5 string→map · 6) | ✅ All results are CRLF only · stripping the CR gives bytes identical to the LF result (the natural route of 4 breaks the same as LF) | △ Append at end = LF mixed in (CRLF 30 + LF-only 1–2 — even one original line loses its CR) · remove · `description` = CRLF kept |
+| Korean comments · values | ✅ No problem | ✗ Remove-last-remaining-entry panic (above) · otherwise no problem |
+| Re-read (serde-saphyr 2.0.0) | Only the reorder without the workaround (re-inserting the node) fails — all the rest equal the expected value | Among those that produced output, only map → string differs (wrong value) |
+| Untouched lines | Byte for byte (including quotes `"공용/팀 규칙.yaml"` · alignment whitespace — confirmed by diff) | Same |
 
-**대표 출력(diff)** — yaml-edit 0.3.5 순서 바꾸기 자연 경로(다시 못 읽음 · `comment intercepting the multiline text`):
+**Representative output (diff)** — yaml-edit 0.3.5 reorder natural route (cannot be re-read · `comment intercepting the multiline text`):
 
 ```diff
      backend: claude          # 꼬리표 끝 주석
@@ -51,7 +51,7 @@
 +      backend: codex
 ```
 
-yamlpatch 맵 → 문자열(말없이 틀린 값):
+yamlpatch map → string (silently wrong value):
 
 ```diff
    # codex 쪽 보고 형식 — 꼬리표 달린 항목
@@ -60,28 +60,28 @@ yamlpatch 맵 → 문자열(말없이 틀린 값):
 +  - path: 지침/codex 보고 형식.md
 ```
 
-## yaml-edit 0.3.2 대조(TRD 가 적은 판)
+## yaml-edit 0.3.2 comparison (the version the TRD wrote)
 
-- `Document::from_str` 가 머리 주석 있는 파일을 거절한다(「stream-level comments … Use YamlFile::from_str()」) — 0.3.5 는 둘 다 받는다. 대조 표는 두 판 모두 `YamlFile::from_str` 로 돌렸다(0.3.5 결과는 `Document` 로 돌린 것과 같음).
-- 0.3.5 보다 나쁜 것: 맵 끝 추가 = `backend:` 가 0칸으로 가 값이 바뀜(다시 읽기 다름) · 문자열 → 맵 = 다시 못 읽는 YAML · 빼기 = 줄 끝 주석이 혼자 남은 줄로 남음 · CRLF 에 LF 섞임.
-- 0.3.5 보다 나은 것: 맵 노드 옮기기(뺀 노드 다시 넣기)가 됐다 → 0.3.5 에서 깨짐(회귀).
-- → 0.3.3 ~ 0.3.5 가 10-21 ~ 10-22 이틀에 셋 나왔고 판 사이 동작이 크게 바뀐다. 정확한 판 고정 + 골든 시험 + 쓰기 전 다시 읽기 대조가 필요하다(결론 조건 3).
+- `Document::from_str` rejects a file with a head comment (「stream-level comments … Use YamlFile::from_str()」) — 0.3.5 accepts both. The comparison table was run with `YamlFile::from_str` for both versions (the 0.3.5 result is the same as running with `Document`).
+- Worse than 0.3.5: map append at end = `backend:` went to 0 columns and changed the value (re-read differs) · string → map = YAML that cannot be re-read · remove = the end-of-line comment is left as a line on its own · LF mixed into CRLF.
+- Better than 0.3.5: moving a map node (re-inserting the removed node) worked → it broke in 0.3.5 (a regression).
+- → 0.3.3 ~ 0.3.5 came out as three in the two days 10-21 ~ 10-22, and behavior changes a lot between versions. Exact version pinning + golden tests + a re-read check before writing are needed (conclusion condition 3).
 
-## 크레이트 사실
+## Crate facts
 
 | | yaml-edit | yamlpatch |
 |---|---|---|
-| 라이선스 | Apache-2.0(crates.io 메타) · GitHub 저장소 루트에 LICENSE 파일 없음(GitHub 감지 = 없음) | MIT |
-| 저장소 · 활동 | `jelmer/yaml-edit` · ★12 · fork 10 · 열린 이슈 1 · 마지막 push 2026-10-22 · 2026-08-01 뒤 커밋 ≥ 100(API 한 쪽 상한) | `zizmorcore/zizmor` 의 `crates/yamlpatch`(★6.8k · 열린 이슈 172 · 마지막 push 2026-10-30) · 2026-08-01 뒤 그 폴더 커밋 3 · zizmor 와 같은 판 번호로 나감 |
-| 최근 판 | 0.3.5 10-22 · 0.3.4 · 0.3.3 10-21 · 0.3.2 09-17 · 0.3.1 08-31 · 0.3.0 08-25 · 0.2.3 07-01 | 1.31.1 · 1.31.0 10-15 · 1.30.1 09-09 · 1.30.0 08-30 · 1.29.0 08-01 · (1.32.0-rc1 10-23) |
-| 내려받기 · 역의존 | 누적 24.9만 · 최근 90일 20.7만 · 역의존 21(wasmer-cli · lintian-brush · debian-lsp 등) | 누적 40.0만 · 최근 90일 20.4만 · 역의존 7(zizmor 등) |
-| MSRV · Windows 빌드 | 선언 1.70 · rustc 1.95.0 + MSVC 로 지어짐(rust-version 검사에 안 걸림) | 선언 없음 · 의존 `tree-sitter-iter` 1.31.1 이 **1.97.0** 선언 → rustc 1.95.0 에서 `cargo build` 가 거절 · `--ignore-rust-version` 이면 지어짐(약 30초 · C 컴파일 = tree-sitter · cc). `tree-sitter-iter` 가 1.88 을 선언한 마지막 판 = 1.27.0 → yamlpatch 1.27.0 이 1.95 로 설 것(안 돌려 봄) |
-| 의존 무게(`cargo tree -e normal,build --target all` · 자기 포함 고유) | 7 — rowan · countme · hashbrown 0.14 · rustc-hash · text-size · base64(기본 기능 `binary` — 끌 수 있음) | 45 — tree-sitter · tree-sitter-yaml(C) · cc · yaml_serde · libyaml-rs · regex · tracing · serde_json · indexmap 등 |
-| 저장소 `Cargo.lock` 에 이미 있나 | rowan · countme · text-size 없음(새로 들어옴) | tree-sitter · tree-sitter-yaml · yaml_serde · line-index 없음 |
+| License | Apache-2.0 (crates.io metadata) · no LICENSE file at the GitHub repository root (GitHub detection = none) | MIT |
+| Repository · activity | `jelmer/yaml-edit` · ★12 · 10 forks · 1 open issue · last push 2026-10-22 · ≥ 100 commits since 2026-08-01 (one-page cap of the API) | `crates/yamlpatch` of `zizmorcore/zizmor` (★6.8k · 172 open issues · last push 2026-10-30) · 3 commits to that folder since 2026-08-01 · released with the same version number as zizmor |
+| Recent versions | 0.3.5 10-22 · 0.3.4 · 0.3.3 10-21 · 0.3.2 09-17 · 0.3.1 08-31 · 0.3.0 08-25 · 0.2.3 07-01 | 1.31.1 · 1.31.0 10-15 · 1.30.1 09-09 · 1.30.0 08-30 · 1.29.0 08-01 · (1.32.0-rc1 10-23) |
+| Downloads · reverse dependencies | 249k total · 207k in the last 90 days · 21 reverse dependencies (wasmer-cli · lintian-brush · debian-lsp, etc.) | 400k total · 204k in the last 90 days · 7 reverse dependencies (zizmor, etc.) |
+| MSRV · Windows build | Declared 1.70 · built with rustc 1.95.0 + MSVC (does not trip the rust-version check) | None declared · the dependency `tree-sitter-iter` 1.31.1 declares **1.97.0** → `cargo build` is rejected on rustc 1.95.0 · it builds with `--ignore-rust-version` (about 30 seconds · C compilation = tree-sitter · cc). The last version where `tree-sitter-iter` declared 1.88 = 1.27.0 → yamlpatch 1.27.0 would stand on 1.95 (not run) |
+| Dependency weight (`cargo tree -e normal,build --target all` · unique including itself) | 7 — rowan · countme · hashbrown 0.14 · rustc-hash · text-size · base64 (default feature `binary` — can be turned off) | 45 — tree-sitter · tree-sitter-yaml (C) · cc · yaml_serde · libyaml-rs · regex · tracing · serde_json · indexmap, etc. |
+| Already in the repository's `Cargo.lock`? | rowan · countme · text-size absent (newly brought in) | tree-sitter · tree-sitter-yaml · yaml_serde · line-index absent |
 
-## 실측에 쓴 샘플(LF · UTF-8)
+## Sample used in the measurement (LF · UTF-8)
 
-목록 순서는 지시대로 `presets` · `instructions` · `settings` · `skills`(TRD §1-2 예는 `skills` 가 `settings` 앞 — 편집 동작과 무관).
+As instructed, the list order is `presets` · `instructions` · `settings` · `skills` (in the TRD §1-2 example, `skills` is before `settings` — unrelated to editing behavior).
 
 ```yaml
 # PR 리뷰 프리셋 — 손으로 쓴 머리 주석
@@ -116,99 +116,99 @@ skills:
 # 파일 끝 주석
 ```
 
-변형: CRLF = 같은 글의 `\n` → `\r\n` · 빈 목록 = `settings` 두 줄을 `settings: []   # 설정 줄 주석` 로 · 값 없음 = `settings:   # 설정 줄 주석` 로.
+Variants: CRLF = the same text with `\n` → `\r\n` · empty list = the two `settings` lines turned into `settings: []   # 설정 줄 주석` · no value = `settings:   # 설정 줄 주석`.
 
-연산 대상: 1 = `skills` 에 `스킬/공용/새 스킬` · `instructions` 에 `{path: 지침/새 codex 지침.md, backend: codex}` / 2 = `instructions` [0] 뒤에 `지침/새 지침.md` / 3 = `skills` [1](lint) · `instructions` [1](codex 맵) / 4 = `instructions` [1] 을 끝으로 / 5 = `instructions` [3] `backend` → `codex` · [2] 를 `{path, backend: claude}` 로 · [1] 을 문자열로 / 6 = `PR 리뷰 · 보안 점검`.
+Operation targets: 1 = `스킬/공용/새 스킬` to `skills` · `{path: 지침/새 codex 지침.md, backend: codex}` to `instructions` / 2 = after `instructions` [0] put `지침/새 지침.md` / 3 = `skills` [1](lint) · `instructions` [1] (codex map) / 4 = `instructions` [1] to the end / 5 = `instructions` [3] `backend` → `codex` · [2] to `{path, backend: claude}` · [1] to a string / 6 = `PR 리뷰 · 보안 점검`.
 
-## 주의
+## Notes
 
-- 샘플 하나 · 들여쓰기 꼴 하나(키 아래 2칸 들여 쓴 `  - `). 대시를 키와 같은 칸에 두는 꼴(0칸 `- x`) · 손으로 쓴 흐름 목록 · 탭 · BOM · 앵커 · 여러 문서는 안 돌렸다.
-- 순서 바꾸기 우회(들여쓰기 걷기)는 이 샘플의 맵 항목(내용 칸 4) 하나로 LF 에서만 쟀다 — 칸을 노드에서 읽는 일반화 · CRLF 는 안 했다.
-- yamlpatch 결과는 rustc 1.95 에서 `--ignore-rust-version` 으로 지은 것이다 — 선언 MSRV 1.97 에서는 돌리지 않았다. 1.27.0 등 옛 판도 안 돌렸다.
-- 다시 읽기 대조의 기대 값은 원본을 serde-saphyr 로 읽은 값에 같은 연산을 serde_json 으로 적용한 것 — 의미 대조다. 모양(주석 자리 · 빈 줄 · 들여쓰기) 판정은 diff 를 눈으로 봤다.
-- 타입 있는 읽기 곁 사실: `settings:`(값 없음)를 `#[serde(default)] Vec` 로 읽으면 serde-saphyr 2.0.0 은 빈 목록으로 받는다(오류 아님).
-- 빼는 항목의 윗줄 주석을 함께 지우는 길(yaml-edit 의 주석 노드 API 등)은 재지 않았다.
+- One sample · one indentation shape (`  - ` indented 2 columns under the key). The shape with the dash at the same column as the key (0 columns `- x`) · hand-written flow lists · tabs · BOM · anchors · multiple documents were not run.
+- The reorder workaround (stripping indentation) was measured on only one map entry of this sample (content column 4), LF only — generalizing to read the column from the node · CRLF was not done.
+- The yamlpatch results were built on rustc 1.95 with `--ignore-rust-version` — not run at the declared MSRV 1.97. Older versions such as 1.27.0 were not run either.
+- The expected value of the re-read check is the value from reading the original with serde-saphyr and applying the same operation with serde_json — it is a semantic comparison. Shape (comment position · blank lines · indentation) judgments were made by eyeballing the diff.
+- A side fact of the typed read: if `settings:` (no value) is read as `#[serde(default)] Vec`, serde-saphyr 2.0.0 accepts it as an empty list (not an error).
+- The route of deleting together the above-line comment of the removed entry (the comment node API of yaml-edit, etc.) was not measured.
 
-## 스파이크 코드
+## Spike code
 
-세션 스크래치 `C:\Users\kimsunzun\AppData\Local\Temp\claude\…\scratchpad\yaml-spike\`(저장소 밖 · 보존 안 함) — `src/main.rs`(연산 표 · 다시 읽기 대조 · 주석 셈 · 줄 끝 셈) · `src/bin/dbg.rs`(yamlpatch 결함 좁히기 — ASCII · 한글 최소 문서). 저장소에는 코드 · 의존을 더하지 않았다.
+Session scratch `C:\Users\kimsunzun\AppData\Local\Temp\claude\…\scratchpad\yaml-spike\` (outside the repository · not kept) — `src/main.rs` (operation table · re-read check · comment count · line-ending count) · `src/bin/dbg.rs` (narrowing down the yamlpatch defect — ASCII · Korean minimal documents). No code · dependency was added to the repository.
 
-## 2차 측정 (2026-10-31)
+## 2nd measurement (2026-10-31)
 
-| 항목 | 값 |
+| Item | Value |
 |---|---|
-| 계기 | 리뷰 지적 — 쓰기 전 다시 읽기 대조(결론 조건 3)가 실제 파일 꼴에서 자주 거절하면 프리셋을 Engram 에서 못 고친다 |
-| 대상 | `yaml-edit` =0.3.5 만 · 다시 읽기 = serde-saphyr 2.0.0 · 같은 스크래치 프로젝트에 `src/bin/shapes.rs` 를 더함(저장소 밖) |
-| 연산(꼴마다 10) | 끝 추가(문자열 `skills` · 맵 `instructions`) · 중간 넣기 · 빼기(문자열 · 맵 — 둘 다 윗줄 · 줄 끝 주석 달림) · 순서 바꾸기(1차 우회 — 들여쓰기 칸을 고정 4 대신 **둘째 줄부터의 공통 들여쓰기**로 일반화) · 꼬리표 값 바꾸기 · 문자열 → 맵 · 맵 → 문자열 · `description`. 참고로 자연 순서 바꾸기(뺀 노드 다시 넣기)도 돌렸으나 셈에서 뺐다 |
-| 판정 | 문 거절 = 다시 읽은 값 ≠ 기대 값(또는 못 읽음) · 죽음 = panic · `Err` · 그 밖은 1차와 같은 줄 diff 를 자동 표지(주석 사라짐 · 새 들여쓰기 칸 · BOM · 줄 끝 · 문서 표지 · 괄호 수 · 바뀐 줄 수)로 거른 뒤 **전부 눈으로 봤다**(자동 표지 20 중 10 은 오탐 — 맵 항목 넣고 뺄 때 괄호 수가 변하는 것 등 · 자동 표지가 놓친 △ 4 와 표기 섞임 6 은 눈으로 잡음) |
+| Occasion | Review finding — if the re-read check before writing (conclusion condition 3) often rejects on real file shapes, presets cannot be edited from Engram |
+| Target | `yaml-edit` =0.3.5 only · re-read = serde-saphyr 2.0.0 · added `src/bin/shapes.rs` to the same scratch project (outside the repository) |
+| Operations (10 per shape) | Append at end (string `skills` · map `instructions`) · insert in the middle · remove (string · map — both with above-line · end-of-line comments) · reorder (1st-round workaround — generalized the indentation columns from a fixed 4 to **the common indentation from the second line on**) · change a tag value · string → map · map → string · `description`. For reference, the natural reorder (re-inserting the removed node) was also run but left out of the count |
+| Verdict | Gate rejection = re-read value ≠ expected value (or could not be read) · death = panic · `Err` · for the rest, the same line diff as the 1st round was filtered with automatic flags (comment disappeared · new indentation column · BOM · line ending · document marker · bracket count · changed line count) and then **all of it was eyeballed** (10 of 20 automatic flags were false positives — e.g. bracket count changing when inserting and removing a map entry · 4 △ that the automatic flags missed and 6 notation mixes were caught by eye) |
 
-### 결과 — 꼴 × 10 연산
+### Result — shape × 10 operations
 
-✅ = 값 · 주석 · 모양 맞음(1차 기준 꼴과 같은 결과 — 1차의 공통 △ 셋 = 중간 넣기가 다음 항목 윗줄 주석 아래로 · 빼면 윗줄 주석 남음 · 문자열 → 맵에서 줄 끝 주석이 대시 줄로 — 은 블록 꼴 전부에서 그대로라 다시 세지 않음) · △ = 값은 맞고 그 꼴 고유의 모양 어긋남 · ✗ = 문 거절 · 죽음은 0 건
+✅ = value · comments · shape correct (the same result as the 1st-round baseline shape — the three common △ of the 1st round = insert in the middle goes under the next entry's above-line comment · removing leaves the above-line comment · in string → map the end-of-line comment goes to the dash line — remain in every block shape, so are not counted again) · △ = value correct but a shape divergence specific to that shape · ✗ = gate rejection · deaths are 0
 
-| 꼴 | ✅ | △ | ✗ | 비고 |
+| Shape | ✅ | △ | ✗ | Note |
 |---|---|---|---|---|
-| 1a 대시 0칸(`key:\n- a` · 0칸 주석 · 맵 이음 2칸) | 10 | 0 | 0 | 새 항목도 0칸 대시 · 맵 이음 2칸. 정규화 불요 |
-| 1b PyYAML `yaml.dump` 기본 출력 그대로(0칸 · 키 정렬 · 비ASCII `"\uXXXX"` · 주석 없음) | 10 | (6) | 0 | 값 · 들여쓰기 맞음. 새로 쓰는 글(끝 추가 · 넣기 · 문자열↔맵 · `description`)은 UTF-8 그대로 → 이웃의 `\u` 이스케이프와 표기가 섞임(괄호 안 6 = 표기만) |
-| 1c 0칸 · 빈 줄 없음 · 목록 끝 바로 뒤 0칸 주석 | 10 | 0 | 0 | 끝 추가가 그 주석 **앞**에 들어감 |
-| 2 4칸 들여쓴 목록(Go yaml.v3 기본꼴) | 10 | 0 | 0 | 새 항목 4칸 · 맵 이음 6칸 |
-| 3a 한 줄 흐름 `[a, b]`(맵 항목 `{path, backend}` 포함) | 10 | 0 | 0 | 흐름 꼴 유지 · 키 줄 끝 주석 유지. 새 맵도 `{…}` |
-| 3b 여러 줄 흐름(항목마다 줄 끝 주석 · 꼬리 쉼표) | 6 | 4 | 0 | △ = 끝 추가(마지막 항목과 **같은 줄**에 붙음 · 맵은 `, {…}]` 가 새 줄 머리에) · 중간 넣기(다음 항목과 같은 줄) · 순서 바꾸기(옮긴 항목 줄 끝 주석 사라짐 + 같은 꼴 어긋남) |
-| 3c 블록 목록에 흐름 맵 항목(`- {path: …, backend: codex}`) | 7 | 3 | 0 | △ = 맵 끝 추가 · 문자열 → 맵이 **블록 맵**으로 써짐(이웃은 흐름) · 순서 바꾸기가 옮긴 항목 줄 끝 주석 잃음 |
-| 4 따옴표(작은 · 큰 · `\"` · `\uC608` · `''` · `: ` · `#` 든 경로) | 8 | 2 | 0 | △ = 꼬리표 값 · `description` 처럼 **제자리에서 바꾼 값의 따옴표가 벗겨짐**(`'claude'` → `codex` · `"PR 리뷰 전용"` → 맨글). 손대지 않은 따옴표 항목은 바이트 그대로 |
-| 5a BOM + LF | 10 | 0 | 0 | BOM 유지 · serde-saphyr 가 BOM 을 읽음 |
-| 5b BOM + CRLF | 10 | 0 | 0 | BOM 유지 · 결과 전부 CRLF |
-| 5c 0칸 + CRLF(Windows 의 PyYAML 텍스트 모드 쓰기 꼴) | 10 | 0 | 0 | 1a 와 바뀐 줄 같음 · 전부 CRLF |
-| 6 주석 안 탭 · 주석 앞 탭 · 줄 끝 공백 · 공백만 든 빈 줄 | 10 | 0 | 0 | 손대지 않은 줄 바이트 그대로 · 고친 줄은 제 탭/공백을 달고 감. 1차 기준과 바뀐 줄이 같음 |
-| 7a 앵커/별칭이 다른 목록에(`presets` 의 `&base` → `settings` 의 `*base`) | 10 | 0 | 0 | 편집 대상 밖이라 영향 없음 |
-| 7b 고치는 목록 항목에 앵커(`instructions` [1] `&cx` · `skills` 에 `*cx`) | 7 | 2 | 1 | △ 빼기 · 순서 바꾸기 = yaml-edit 가 **앵커를 별칭 자리로 옮겨 내용을 펼친다**(값 맞음 · 별칭 줄이 맵 세 줄로 바뀜 · 순서 바꾸기는 줄 끝 주석이 두 벌). ✗ 맵 → 문자열 = 앵커가 새 문자열에 붙어 별칭 자리 값도 문자열로 바뀜 |
-| 7c 병합 키(`- <<: *cx` + `path`) | 7 | 2 | 1 | 7b 와 같은 꼴 · ✗ 맵 → 문자열 = 병합 대상이 문자열이 돼 다시 못 읽음(`YAML merge value must be mapping`) · 꼬리표 값 바꾸기는 `backend:` 키를 새로 더해 ✅ |
-| 8a `---` 로 시작 · `...` 로 끝 | 10 | 0 | 0 | 표지 유지 · 끝 추가가 `...` 앞 |
-| 8b 머리 주석 → `--- # 주석` · 마지막 항목 바로 뒤 `...` · 그 뒤 주석 | 10 | 0 | 0 | 같음 |
-| 8c `%YAML 1.2` + `---` | 10 | 0 | 0 | 지시자 유지 |
-| 9a 마지막 줄바꿈 없음(마지막 목록 항목으로 끝) | 10 | 0 | 0 | 끝 추가 정상 · 결과도 마지막 줄바꿈 없음 |
-| 9b 0칸 + 마지막 줄바꿈 없음 | 10 | 0 | 0 | 같음 |
-| 10a `description: \|` 블록 글 | 9 | 1 | 0 | △ `description` 을 한 줄로 바꾸면 블록 뒤 **빈 줄 하나도 함께 사라짐**(블록 글의 꼬리로 붙어 있음) |
-| 10b PyYAML 이 80칸에서 접은 여러 줄 맨글 `description` | 10 | 0 | 0 | 새 값이 한 줄로 들어감 |
-| **합계(22 꼴 × 10 = 220)** | **204** | **14 (+표기 6)** | **2** | 죽음 0 · 입력 못 읽음 0 |
+| 1a Dash at 0 columns (`key:\n- a` · 0-column comment · map continuation 2 columns) | 10 | 0 | 0 | The new entry also has a 0-column dash · map continuation 2 columns. No normalization needed |
+| 1b PyYAML `yaml.dump` default output as is (0 columns · sorted keys · non-ASCII `"\uXXXX"` · no comments) | 10 | (6) | 0 | Value · indentation correct. Newly written text (append at end · insert · string↔map · `description`) is UTF-8 as is → the notation mixes with the neighbors' `\u` escapes (6 in parentheses = notation only) |
+| 1c 0 columns · no blank lines · a 0-column comment right after the end of the list | 10 | 0 | 0 | Append at end goes in **before** that comment |
+| 2 List indented 4 columns (Go yaml.v3 default shape) | 10 | 0 | 0 | New entry 4 columns · map continuation 6 columns |
+| 3a One-line flow `[a, b]` (including map entries `{path, backend}`) | 10 | 0 | 0 | Flow shape kept · key-line end-of-line comment kept. A new map is also `{…}` |
+| 3b Multi-line flow (an end-of-line comment per entry · trailing comma) | 6 | 4 | 0 | △ = append at end (attached on **the same line** as the last entry · for a map `, {…}]` at the head of a new line) · insert in the middle (on the same line as the next entry) · reorder (the moved entry's end-of-line comment disappears + the same kind of divergence) |
+| 3c Flow map entry in a block list (`- {path: …, backend: codex}`) | 7 | 3 | 0 | △ = map append at end · string → map is written as a **block map** (the neighbors are flow) · reorder loses the moved entry's end-of-line comment |
+| 4 Quotes (a path containing single · double · `\"` · `\uC608` · `''` · `: ` · `#`) | 8 | 2 | 0 | △ = the quotes of **a value changed in place**, like the tag value · `description`, **are stripped** (`'claude'` → `codex` · `"PR 리뷰 전용"` → plain text). Untouched quoted entries are byte for byte |
+| 5a BOM + LF | 10 | 0 | 0 | BOM kept · serde-saphyr reads the BOM |
+| 5b BOM + CRLF | 10 | 0 | 0 | BOM kept · all results CRLF |
+| 5c 0 columns + CRLF (the shape of PyYAML text-mode writing on Windows) | 10 | 0 | 0 | Same changed lines as 1a · all CRLF |
+| 6 Tab inside a comment · tab before a comment · trailing whitespace · a blank line with only whitespace | 10 | 0 | 0 | Untouched lines byte for byte · an edited line carries its own tab/whitespace. Changed lines same as the 1st-round baseline |
+| 7a Anchor/alias in another list (`&base` of `presets` → `*base` of `settings`) | 10 | 0 | 0 | Outside the editing target, so no effect |
+| 7b Anchor on an entry of the list being edited (`instructions` [1] `&cx` · `*cx` on `skills`) | 7 | 2 | 1 | △ remove · reorder = yaml-edit **moves the anchor to the alias position and expands the content** (value correct · the alias line turns into three map lines · reorder has two copies of the end-of-line comment). ✗ map → string = the anchor attaches to the new string, so the value at the alias position also becomes a string |
+| 7c Merge key (`- <<: *cx` + `path`) | 7 | 2 | 1 | Same shape as 7b · ✗ map → string = the merge target becomes a string and cannot be re-read (`YAML merge value must be mapping`) · change a tag value newly adds a `backend:` key, so ✅ |
+| 8a Starts with `---` · ends with `...` | 10 | 0 | 0 | Marker kept · append at end goes before `...` |
+| 8b Head comment → `--- # 주석` · `...` right after the last entry · a comment after it | 10 | 0 | 0 | Same |
+| 8c `%YAML 1.2` + `---` | 10 | 0 | 0 | Directive kept |
+| 9a No final newline (ends with the last list entry) | 10 | 0 | 0 | Append at end normal · the result also has no final newline |
+| 9b 0 columns + no final newline | 10 | 0 | 0 | Same |
+| 10a `description: \|` block text | 9 | 1 | 0 | △ If `description` is changed to one line, **one blank line after the block also disappears with it** (it is attached as the tail of the block text) |
+| 10b Multi-line plain text `description` folded by PyYAML at 80 columns | 10 | 0 | 0 | The new value goes in as one line |
+| **Total (22 shapes × 10 = 220)** | **204** | **14 (+6 notation)** | **2** | Deaths 0 · unreadable input 0 |
 
-곁 측정:
+Side measurements:
 
-- **앵커 달린 항목 자체를 고치기**(7b · 7c 의 [1] 에 꼬리표 값 바꾸기) = **2/2 문 거절** — 별칭 자리 값도 따라 바뀌어 기대 값(그 항목만 바뀜)과 다르다. 7a(앵커 없는 항목)는 ✅.
-- **따옴표가 필요한 새 값**(`yes` · `123` · `null` · `스킬/a: b` · `#스킬` · ` 앞공백` · `[스킬]` · `PR: 리뷰 #1`) = 기준 · 따옴표 꼴에서 8/8 ✅ — 필요할 때만 작은따옴표로 쓴다.
-- **여러 줄 값**(`"첫 줄\n둘째 줄"`) = `|-` 블록으로 써짐 ✅(줄 끝 주석은 키 줄에 남음).
-- **자연 순서 바꾸기(쓰지 않는 길)** = 0칸 꼴(1a · 1b · 1c · 5c · 9b)과 한 줄 흐름(3a)에선 ✅ · 2칸/4칸 블록 꼴 전부(12 꼴 + 기준)에서 다시 못 읽음 · 여러 줄 흐름 · 흐름 맵 · 앵커 꼴에선 값은 맞고 줄 끝 주석을 잃거나 두 벌. **일반화한 우회는 22 꼴 전부에서 값이 맞았다**(0 · 2 · 4칸 · 흐름 모두).
-- **문의 정밀도** — 문 거절 4 건(셈 2 + 곁 2)은 전부 실제로 값이 바뀐 출력이었다(헛거절 0). 거꾸로 값이 틀린 출력이 문을 지나간 경우도 없다(✅ · △ 출력은 타입 있는 읽기도 전부 통과). **거절 4 중 3 은 타입 있는 읽기를 통과했다** — 스키마에 맞는지만 보는 문이었으면 놓쳤다(별칭 자리 값이 다른 올바른 모양으로 바뀜). 값 대조가 필요하다. **단 △ 의 모양 어긋남은 문이 못 본다** — 문은 값만 대조한다.
+- **Editing an entry that has an anchor itself** (change a tag value on [1] of 7b · 7c) = **2/2 gate rejections** — the value at the alias position changes along with it, so it differs from the expected value (only that entry changes). 7a (an entry without an anchor) is ✅.
+- **A new value that needs quotes** (`yes` · `123` · `null` · `스킬/a: b` · `#스킬` · ` 앞공백` · `[스킬]` · `PR: 리뷰 #1`) = 8/8 ✅ on the baseline · quote shapes — written with single quotes only when needed.
+- **Multi-line value** (`"첫 줄\n둘째 줄"`) = written as a `|-` block ✅ (the end-of-line comment stays on the key line).
+- **Natural reorder (the route not to be used)** = ✅ on 0-column shapes (1a · 1b · 1c · 5c · 9b) and the one-line flow (3a) · cannot be re-read on all 2-column/4-column block shapes (12 shapes + baseline) · on multi-line flow · flow map · anchor shapes the value is correct but the end-of-line comment is lost or doubled. **The generalized workaround was correct in value on all 22 shapes** (0 · 2 · 4 columns · flow, all).
+- **Precision of the gate** — all 4 gate rejections (2 in the count + 2 on the side) were outputs whose value had actually changed (0 false rejections). Conversely, there was no case of an output with a wrong value slipping through the gate (the ✅ · △ outputs all passed the typed read too). **3 of the 4 rejections passed the typed read** — a gate that only checked schema conformance would have missed them (the value at the alias position changed into a correctly shaped one). A value comparison is needed. **But the shape divergences of △ are not seen by the gate** — the gate compares only values.
 
-### 정규화 한 번 — 해 볼 만한가
+### Normalization once — is it worth trying
 
-| 정규화 | 대상 | 정규화 뒤 10 연산 | 대가(사용자 모양 변화) |
+| Normalization | Target | 10 operations after normalization | Cost (change to the user's shape) |
 |---|---|---|---|
-| 0칸 → 2칸 들여쓰기(글자 단위 · 최상위 목록만) | 1a · 1b · 5c | 10/10 ✅ | 파일의 목록 줄 **전부**(24~30 줄)가 바뀐다 — 그런데 0칸 꼴은 정규화 없이도 10/10 이라 얻는 것이 없다 |
-| 흐름 → 블록(yaml-edit 로 목록을 새 블록 `Sequence` 로 다시 짓기) | 3a · 3b | 10/10 ✅ | 3b 에서 **흐름 안 주석 11 중 7 사라짐**(항목별 줄 끝 · 윗줄 주석) · 손대지 않은 항목의 따옴표도 벗겨짐(`"공용/팀 규칙.yaml"` → 맨글) · 한 줄 목록이 여러 줄로. 3a 는 키 줄 끝 주석만 있어 주석은 안 잃음(그러나 3a 는 원래 10/10) |
-| 앵커 | 7b · 7c | 안 해 봄 | 별칭을 펼치는 것밖에 없다 — 공유가 복사로 바뀐다(값은 같음). 거절은 정규화로 없앨 꼴(들여쓰기 · 흐름)이 아니라 **공유 값을 고치는 연산** 자체에서 난다 |
+| 0 columns → 2-column indentation (character level · top-level list only) | 1a · 1b · 5c | 10/10 ✅ | **All** list lines of the file (24~30 lines) change — but the 0-column shape is already 10/10 without normalization, so nothing is gained |
+| Flow → block (rebuilding the list as a new block `Sequence` with yaml-edit) | 3a · 3b | 10/10 ✅ | In 3b, **7 of 11 comments inside the flow disappear** (per-entry end-of-line · above-line comments) · quotes of untouched entries are also stripped (`"공용/팀 규칙.yaml"` → plain text) · a one-line list becomes multiple lines. 3a has only a key-line end-of-line comment so loses no comments (but 3a was 10/10 to begin with) |
+| Anchors | 7b · 7c | Not tried | The only option is to expand the aliases — sharing becomes copying (the value is the same). The rejection comes not from a shape that normalization can remove (indentation · flow) but from **the operation of editing a shared value** itself |
 
-### 결론 (U3 판단 자료 — 결정은 사용자)
+### Conclusion (material for the U3 decision — the decision is the user's)
 
-- **문 거절은 드물다 — 220 중 2(0.9%), 둘 다 앵커가 걸린 항목을 고칠 때다.** 앵커 없는 20 꼴(0칸 · 4칸 · 흐름 · 따옴표 · BOM · CRLF · 탭 · 표지 · 지시자 · 마지막 줄바꿈 없음 · 블록 글)에선 **200 중 0**. 앵커 꼴(7b · 7c)만 보면 곁 측정 포함 22 중 4(앵커 달린 항목을 맵 → 문자열로 · 그 항목 꼬리표 값 바꾸기).
-- 리뷰가 걱정한 「실제 파일 꼴에서 자주 거절」은 이 표본에선 나오지 않았다. 대신 **문이 못 보는 △(값은 맞고 모양 어긋남)가 꼴에 몰린다** — 여러 줄 흐름 목록(4/10) · 흐름 맵 항목(3/10) · 따옴표 값 제자리 바꾸기(2/10) · 앵커 항목 빼기/옮기기(앵커가 별칭 자리로 옮겨 감 · 2/10) · 블록 글 `description`(1/10).
-- 물러남 셋을 데이터에 대면:
-  - **거절(쓰지 않고 알림)** — 이 표본에서 걸리는 것은 앵커 공유 값을 고치는 경우뿐이다. 그 경우 무엇을 고쳐도 별칭 쪽이 함께 바뀌므로 「그 항목만」이라는 사용자 의도와 원래 맞지 않는다.
-  - **serde 로 다시 쓰기** — 이 샘플의 손 주석 14 를 전부 잃고 앵커는 펼쳐진다. 거절 2 건을 살리려고 쓰기에는 잃는 것이 크다(거절이 드물수록 이 물러남이 지키는 경우도 드물다).
-  - **정규화 후 편집** — 거절을 줄이는 데는 쓸 곳이 없다(거절 꼴이 들여쓰기 · 흐름이 아니다). △ 를 줄이는 쪽으로는 여러 줄 흐름 → 블록이 4 건을 없애지만 그 목록의 흐름 안 주석 7/11 · 따옴표를 잃는다.
-- 1차 결론 조건 1(순서 바꾸기 우회)은 **칸을 노드에서 읽도록 일반화하면** 모든 꼴에서 선다 — 고정 4칸 우회는 0칸 · 4칸 꼴에서 틀린다(이번엔 일반화한 것만 돌림).
+- **Gate rejections are rare — 2 of 220 (0.9%), both when editing an entry that an anchor is attached to.** On the 20 shapes without anchors (0 columns · 4 columns · flow · quotes · BOM · CRLF · tabs · markers · directives · no final newline · block text), **0 of 200**. Looking at only the anchor shapes (7b · 7c), including side measurements, 4 of 22 (map → string on an entry with an anchor · change a tag value on that entry).
+- The 「실제 파일 꼴에서 자주 거절」 (frequent rejection on real file shapes) that the review worried about did not appear in this sample. Instead, **the △ that the gate cannot see (value correct, shape diverges) concentrate in shapes** — multi-line flow lists (4/10) · flow map entries (3/10) · in-place change of quoted values (2/10) · removing/moving an anchored entry (the anchor moves to the alias position · 2/10) · block text `description` (1/10).
+- Holding the three fallbacks against the data:
+  - **Reject (do not write, notify)** — the only case caught in this sample is editing an anchored shared value. In that case whatever is edited, the alias side changes with it, so it does not fit the user intent of 「그 항목만」 (only that entry) to begin with.
+  - **Rewrite with serde** — it loses all 14 hand comments of this sample and expands the anchors. The loss is too large to justify saving 2 rejections (the rarer the rejections, the rarer the cases this fallback protects).
+  - **Edit after normalization** — it has no use in reducing rejections (the rejection shapes are not indentation · flow). As for reducing △, flow → block for multi-line flow removes 4 cases but loses 7/11 of that list's in-flow comments · quotes.
+- Condition 1 of the 1st-round conclusion (the reorder workaround) **stands on all shapes if generalized to read the columns from the node** — the fixed 4-column workaround is wrong on 0-column · 4-column shapes (this time only the generalized one was run).
 
-### 1차 표 정정
+### 1st-round table correction
 
-- 1차 표 「5 맵 → 문자열」의 「`path` 줄 끝 주석이 새 줄에 남음」은 실제 출력과 다르다 — 줄 끝 주석은 **같은 줄**에 남는다(`- 지침/codex 보고 형식.md   # codex 에이전트에만`). 1차 출력 파일(`out_035/yaml-edit/op5c_map_to_plain.yaml`)과 이번 출력이 같다. 판정(✅)은 그대로.
+- The 「`path` 줄 끝 주석이 새 줄에 남음」 of 「5 맵 → 문자열」 (5 map → string) in the 1st-round table differs from the actual output — the end-of-line comment stays on **the same line** (`- 지침/codex 보고 형식.md   # codex 에이전트에만`). The 1st-round output file (`out_035/yaml-edit/op5c_map_to_plain.yaml`) and this round's output are the same. The verdict (✅) stands.
 
-### 주의 (2차)
+### Notes (2nd round)
 
-- 샘플은 지시대로 만든 손 샘플이다(실사용 프리셋 파일 수집 아님). PyYAML 출력은 이 PC 에 Python 이 없어 **손으로 재현**했다(`yaml.dump` 기본값 = `sort_keys=True` · `allow_unicode=False` · 0칸 · 폭 80 — 경로가 짧아 접힘 없음).
-- 여러 문서(`---` 둘 이상) · 0칸과 2칸이 섞인 파일 · 탭 들여쓰기(YAML 에서 금지) · 키 중복 · `!!tag` 는 안 돌렸다.
-- 앵커 · 병합 키 쪽은 앵커가 `instructions` [1] 하나에 걸린 꼴만 쟀다. 정규화 「흐름 → 블록」은 yaml-edit 로 목록을 새로 지은 한 가지만 쟀다(글자 단위 변환 안 함).
-- 쓰기 전 대조의 기대 값은 1차와 같다(원본 읽은 값 + 같은 연산을 serde_json 으로). Engram 이 타입 모델에서 기대 값을 만들면 별칭이 펼쳐진 값과 대조하게 되므로 앵커 꼴 판정은 같다.
+- The samples are hand-made samples built as instructed (not a collection of real-use preset files). The PyYAML output was **reproduced by hand** because this PC has no Python (`yaml.dump` defaults = `sort_keys=True` · `allow_unicode=False` · 0 columns · width 80 — paths are short, so no folding).
+- Multiple documents (two or more `---`) · files mixing 0 and 2 columns · tab indentation (forbidden in YAML) · duplicate keys · `!!tag` were not run.
+- For anchors · merge keys, only the shape where the anchor is attached to a single `instructions` [1] was measured. For normalization 「흐름 → 블록」 (flow → block), only one kind — rebuilding the list with yaml-edit — was measured (no character-level conversion).
+- The expected value of the pre-write check is the same as in the 1st round (the value from reading the original + the same operation applied with serde_json). If Engram builds the expected value from a typed model, it would be comparing against the value with the aliases expanded, so the verdict for anchor shapes is the same.
 
-### 스파이크 코드 (2차)
+### Spike code (2nd round)
 
-같은 스크래치 `yaml-spike\src\bin\shapes.rs`(꼴 생성 · 연산 · 문 대조 · 자동 표지 · LCS 줄 diff · 정규화 둘) — 출력 `out2\<꼴>\<연산>.yaml` · `out2\diffs.txt`. 저장소에는 코드 · 의존을 더하지 않았다.
+The same scratch `yaml-spike\src\bin\shapes.rs` (shape generation · operations · gate comparison · automatic flags · LCS line diff · two normalizations) — output `out2\<꼴>\<연산>.yaml` · `out2\diffs.txt`. No code · dependency was added to the repository.
