@@ -1,31 +1,31 @@
-# 깨진 참조 표시는 언제 계산하나 — 볼 때 · 새로 고침 때 · 쓸 때 (관행 조사 · light)
+# When is the broken-reference marker computed — on view, on refresh, or on use (practice survey · light)
 
-- **상태:** light · 2026-10-31 · 수집자 1(worker-scout-sonnet · 검색 4회 · 대부분 검색 요약 기반) · 메인 grounding 스팟체크 2건(Blender = 지지 · Obsidian 갱신 시점 = 해당 문서에 없음 → 불확실로 강등). 적대 리뷰 없음(light). **근거가 얇다** — 시점을 문장으로 밝힌 1차 출처가 거의 없다.
-- **계기:** S25 — 라이브러리 목록 · 트리 ⛔ 의 「찾을 수 없음」을 폴더를 볼 때마다(메모리 목록에 대고) 계산하는 설계(P8)를, 사용자가 「F5 나 실행할 때만 하면 되지 않나」로 물음(2026-10-31).
-- **확신도 범례:** 확실 = 1차 출처 확인 · 가능성 높음 = 단일 출처 · 불확실 = 추정 · 출처 없음.
+- **Status:** light · 2026-10-31 · collector 1 (worker-scout-sonnet · 4 searches · mostly based on search summaries) · 2 main grounding spot-checks (Blender = supported · Obsidian update timing = not in that document → downgraded to uncertain). No adversarial review (light). **The evidence is thin** — almost no primary source states the timing in a sentence.
+- **Trigger:** S25 — the user asked 「F5 나 실행할 때만 하면 되지 않나」 (2026-10-31) about the design (P8) that computes the 「찾을 수 없음」 of the library list · tree ⛔ every time a folder is viewed (against the in-memory list).
+- **Confidence legend:** certain = primary source checked · likely = single source · uncertain = estimate · no source.
 
-## 결론
+## Conclusion
 
-- 갈래 셋이 모두 있다:
-  1. **색인(메모리)에서 볼 때 바로 보이고 + 쓸 때 다시 확인** — 참조 색인을 들고 있는 도구(Obsidian 의 메타데이터 캐시 · IDE 류로 짐작 — 시점 1차 출처 없음 · 불확실).
-  2. **명시적 검사 명령 때만** — Blender 「Report Missing Files」(확실 · 수동 명령) · Lightroom 「Find All Missing Photographs」(목록은 그 명령을 다시 돌려야 갱신 — 가능성 높음).
-  3. **열 때 · 쓸 때 실패로 드러남** — 프로젝트 파일이 경로 문자열만 드는 도구(Premiere 「Link Media」 = 프로젝트 열 때 · Ableton = 세트 불러올 때 — 가능성 높음).
-- 「새로 고침이나 쓸 때만」(2+3)은 **파일 기반 도구에서 흔한 꼴**이다. 색인을 들고 있는 도구는 1 이 많다(짐작).
-- 바깥 변경은 표본 어디서도 감시자를 확인하지 못했다 — Blender · Lightroom · Ableton 은 수동 명령.
-- 「보이는 항목만 vs 전체」를 밝힌 1차 출처는 없다(Lightroom 폴더 펼치기 조언이 「보이는 것만」을 암시할 뿐).
+- All three approaches exist:
+  1. **Shown immediately on view from an index (memory) + rechecked on use** — tools that hold a reference index (Obsidian's metadata cache · IDEs and the like, by guess — no primary source for the timing · uncertain).
+  2. **Only on an explicit check command** — Blender 「Report Missing Files」 (certain · manual command) · Lightroom 「Find All Missing Photographs」 (the list updates only when that command is rerun — likely).
+  3. **Surfaces as a failure on open or on use** — tools whose project file holds only path strings (Premiere 「Link Media」 = when the project is opened · Ableton = when the set is loaded — likely).
+- 「새로 고침이나 쓸 때만」 (2+3) is **the common shape for file-based tools**. Tools that hold an index mostly use 1 (a guess).
+- No sample confirmed a watcher for outside changes — Blender, Lightroom and Ableton use manual commands.
+- No primary source states 「보이는 항목만 vs 전체」 (Lightroom's advice to expand folders only hints at 「보이는 것만」).
 
-## 도구별
+## Per tool
 
-| 도구 | 시점 | 범위 | 바깥 변경 | 확신도 · 출처 |
+| Tool | Timing | Scope | Outside changes | Confidence · source |
 |---|---|---|---|---|
-| Blender | 명시 명령 「Report Missing Files」(경고가 없으면 빠진 것 없음) · 「Find Missing Files」(폴더를 골라 재귀 검색 · 찾은 것 복구) · 그 밖엔 불러올 때(추정) | 파일 전체 | 수동 | 명령 = 확실(메인 원문 확인 — https://docs.blender.org/manual/en/3.4/interface/window_system/topbar.html) · 불러올 때 = 불확실 |
-| Lightroom Classic | 썸네일 「!」 배지(언제 검사하는지 미상) · 「Missing Photographs」 목록은 Find All Missing Photographs 를 다시 돌려야 갱신 | 미상 | 감시자 없음 · 다시 동기화 | 갱신 명령 = 가능성 높음 · 시점 = 불확실 (https://helpx.adobe.com/au/lightroom-classic/desktop/manage-catalogs-and-files/locate-missing-photos.html) |
-| Premiere | 프로젝트 열 때 「Link Media」 | 프로젝트 전체(열 때 훑기 — 끄자는 요청 글로 짐작) | 미상 | 가능성 높음(Premiere Elements 문서 — https://helpx.adobe.com/ca/premiere-elements/desktop/importing-and-adding-media/offline-files.html) |
-| Ableton Live | 세트 불러올 때 missing/offline · 「Manage Files › View Files」로 수시 목록 | 세트 전체 | 미상 | 가능성 높음(검색 요약 — https://help.ableton.com/hc/en-us/articles/209070829) |
-| Obsidian | 메타데이터 캐시의 `unresolvedLinks`(볼트 전체 지도) | 볼트 전체 | 미상 | 캐시 존재 = 확실(https://docs.obsidian.md/Reference/TypeScript+API/MetadataCache/unresolvedLinks) · 갱신 시점 = 불확실(그 문서에 없음 — 메인 확인) |
+| Blender | explicit command 「Report Missing Files」 (no warning means nothing is missing) · 「Find Missing Files」 (pick a folder, recursive search · recovers what it finds) · otherwise on load (estimate) | whole file | manual | command = certain (main checked the source text — https://docs.blender.org/manual/en/3.4/interface/window_system/topbar.html) · on load = uncertain |
+| Lightroom Classic | thumbnail 「!」 badge (when it checks is unknown) · 「Missing Photographs」 list updates only when Find All Missing Photographs is rerun | unknown | no watcher · resync | update command = likely · timing = uncertain (https://helpx.adobe.com/au/lightroom-classic/desktop/manage-catalogs-and-files/locate-missing-photos.html) |
+| Premiere | when the project is opened 「Link Media」 | whole project (scan on open — guessed from requests to turn it off) | unknown | likely (Premiere Elements docs — https://helpx.adobe.com/ca/premiere-elements/desktop/importing-and-adding-media/offline-files.html) |
+| Ableton Live | missing/offline when the set is loaded · ad-hoc list via 「Manage Files › View Files」 | whole set | unknown | likely (search summary — https://help.ableton.com/hc/en-us/articles/209070829) |
+| Obsidian | `unresolvedLinks` in the metadata cache (a map of the whole vault) | whole vault | unknown | cache exists = certain (https://docs.obsidian.md/Reference/TypeScript+API/MetadataCache/unresolvedLinks) · update timing = uncertain (not in that document — main checked) |
 
-## 공백
+## Gaps
 
-- Unity · Unreal · DaVinci Resolve · Zotero · IDE 는 못 봄.
-- 전체 페이지를 거의 열지 않았다(검색 요약 기반).
-- 색인형 도구가 바깥 변경을 감시자로 따라가는지 미확인.
+- Unity · Unreal · DaVinci Resolve · Zotero · IDEs were not examined.
+- Almost no full pages were opened (based on search summaries).
+- Not confirmed whether index-based tools follow outside changes with a watcher.

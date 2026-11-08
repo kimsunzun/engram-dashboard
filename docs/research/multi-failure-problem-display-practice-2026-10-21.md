@@ -1,28 +1,28 @@
-# 여러 항목이 실행에 실패할 때 문제 표시 · 닫은 뒤 다시 열기 (2026-10-21)
+# Problem display when several items fail to launch · reopening after closing (2026-10-21)
 
-| 항목 | 값 |
+| Item | Value |
 |---|---|
-| **상태** | 조사 완료 · **다음 주제(에이전트 시스템)로 넘김 2026-10-21**(사용자 — 막힘 창이 여럿일 때 · 닫았다 다시 열 때 · 다시 실행은 그때 정한다) |
-| **방법** | `/research` light — 수집자 1(검색 5 · 원문 1) + 메인 grounding(JetBrains 원문은 수집자가 읽음 · 나머지 스니펫) |
-| **질문** | 실행이 여러 항목에서 막히면 ① 항목마다 창인가 · 공용 패널 하나에 묶나 ② 닫은 뒤 무엇으로 다시 여나 ③ 고치는 동안 바로 갱신되나 · 그 자리에 다시 실행이 있나 |
+| **Status** | survey done · **handed to the next topic (agent system) 2026-10-21** (user — what to do when there are several block windows · when closing and reopening · and relaunch will be decided then) |
+| **Method** | `/research` light — collector 1 (5 searches · 1 source text) + main grounding (the JetBrains source text was read by the collector · the rest are snippets) |
+| **Question** | When a launch is blocked on several items, ① is it one window per item, or are they grouped into one shared panel ② what is used to reopen after closing ③ does it update immediately while fixing · is there a relaunch in that place |
 
-## 결론
+## Conclusion
 
-1. **항목마다 창이 아니라 공용 패널 하나에 묶는 것이 관행이다**(가능성 높음) — VS Code Problems(파일별) · JetBrains Problems(탭 · 묶음) · Unreal Message Log(분류별) · GitHub Actions run 페이지(job 별). 실패마다 창을 띄우는 사례는 찾지 못했다.
-2. **다시 여는 길 = 늘 있는 진입점**(가능성 높음) — 메뉴 · 단축키 · 상태 표시줄의 오류 수 · 항목 옆 아이콘. 문제가 없어도 진입점은 남는다.
-3. **바로 갱신 · 다시 실행은 그 패널 안이나 곁**(JetBrains 갱신 = 확실 · 원문 「IDE continuously checks … updated as you switch files」 / GitHub Actions 「Re-run failed jobs」 = 확실 · 공식 문서 스니펫 / JetBrains Run 창 rerun = 가능성 높음).
+1. **The practice is to group them in one shared panel, not one window per item** (likely) — VS Code Problems (per file) · JetBrains Problems (tabs · groups) · Unreal Message Log (per category) · GitHub Actions run page (per job). No case that opens a window per failure was found.
+2. **The way to reopen = an always-present entry point** (likely) — menu · shortcut · error count in the status bar · icon beside the item. The entry point stays even when there are no problems.
+3. **Immediate update · relaunch is in or beside that panel** (JetBrains update = certain · source text 「IDE continuously checks … updated as you switch files」 / GitHub Actions 「Re-run failed jobs」 = certain · official documentation snippet / JetBrains Run window rerun = likely).
 
-## 사례
+## Cases
 
-| 사례 | 여러 실패 | 다시 열기 | 갱신 · 다시 실행 | 출처 | 확신도 |
+| Case | Several failures | Reopen | Update · relaunch | Source | Confidence |
 |---|---|---|---|---|---|
-| JetBrains Problems | 탭(Current File · Project · Inspection Results) · 묶음 | 도구 창 바 · View 메뉴(추정) | 계속 갱신 · 퀵픽스 | https://jetbrains.com/help/clion/problems-tool-window.html | 확실(원문) |
-| JetBrains Run 창 | 실행 구성마다 탭 | — | 툴바 rerun · rerun failed | https://www.jetbrains.com/help/idea/2018.2/rerunning-tests.html | 가능성 높음 |
-| VS Code Problems | 패널 하나 · 파일별 | View > Problems · Ctrl+Shift+M · 상태 표시줄 오류 수 | 재실행 개념 없음 | 2차 글 스니펫 | 가능성 높음 |
-| Unreal Message Log | 창 하나 · 분류별 로그 | Window > Developer Tools > Message Log | 미확인 | https://unrealcommunity.wiki/message-log-4wzqj97j (커뮤니티) | 가능성 높음 |
-| GitHub Actions | run 페이지 하나 · job 별 | — | Re-run failed jobs · 전체 · 특정 job | https://docs.github.com/en/actions/how-tos/manage-workflow-runs/re-run-workflows-and-jobs | 확실(공식 스니펫) |
+| JetBrains Problems | tabs (Current File · Project · Inspection Results) · groups | tool window bar · View menu (estimate) | continuous update · quick fix | https://jetbrains.com/help/clion/problems-tool-window.html | certain (source text) |
+| JetBrains Run window | a tab per run configuration | — | toolbar rerun · rerun failed | https://www.jetbrains.com/help/idea/2018.2/rerunning-tests.html | likely |
+| VS Code Problems | one panel · per file | View > Problems · Ctrl+Shift+M · error count in the status bar | no concept of rerun | secondary article snippet | likely |
+| Unreal Message Log | one window · per-category log | Window > Developer Tools > Message Log | unchecked | https://unrealcommunity.wiki/message-log-4wzqj97j (community) | likely |
+| GitHub Actions | one run page · per job | — | Re-run failed jobs · all · a specific job | https://docs.github.com/en/actions/how-tos/manage-workflow-runs/re-run-workflows-and-jobs | certain (official snippet) |
 
-## 공백
+## Gaps
 
-- Visual Studio Error List · Xcode · Unity Console · Docker Desktop · Task Scheduler 는 보지 않았다.
-- 「항목 배지를 눌러 그 항목의 문제를 다시 연다」 꼴은 확인 못 함(진입점 존재까지만).
+- Visual Studio Error List · Xcode · Unity Console · Docker Desktop · Task Scheduler were not examined.
+- The 「항목 배지를 눌러 그 항목의 문제를 다시 연다」 shape could not be confirmed (only that an entry point exists).

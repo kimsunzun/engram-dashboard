@@ -1,39 +1,39 @@
-# 원자적 쓰기의 찌꺼기 임시 파일 — 언제 · 어떻게 치우나 (관행 조사 · light)
+# Leftover temp files from atomic writes — when and how they get cleaned up (practice survey · light)
 
-- **상태:** light · 2026-10-31 · 수집자 1(worker-scout) · 메인 grounding 스팟체크 2건(Syncthing · VS Code 원문 대조 — 지지). 적대 리뷰 없음(light).
-- **계기:** S25 TRD — 프리셋 파일을 같은 폴더 임시 파일에 쓰고 바꿔치기(G38)할 때 꺼지면 남는 찌꺼기를 「데몬 기동 때 쓸기」로 적었는데, 사용자 결정 「데몬이 켜질 때 미리 훑지 않는다」(2026-10-17)와 부딪침(TRD §1-11a 발견 15).
-- **확신도 범례:** 확실 = 1차 출처(소스 · 공식 문서) 확인 · 가능성 높음 = 단일 출처/포럼 직원 답 · 불확실 = 출처 없음.
+- **Status:** light · 2026-10-31 · collector 1 (worker-scout) · 2 main grounding spot-checks (Syncthing and VS Code, checked against the source text — both supported). No adversarial review (light).
+- **Trigger:** In the S25 TRD, the preset file is written to a temp file in the same folder and then swapped in (G38). The leftover temp file that remains if the process dies was written as 「데몬 기동 때 쓸기」, which collides with user decision 「데몬이 켜질 때 미리 훑지 않는다」 (2026-10-17) (TRD §1-11a finding 15).
+- **Confidence legend:** certain = primary source (source code or official docs) checked · likely = single source / forum staff answer · uncertain = no source.
 
-## 결론
+## Conclusion
 
-- **표본 중 앱 기동 때 훑어서 찌꺼기를 치우는 곳은 없다.** 두 갈래가 흔하다:
-  1. **안 치움 — 고정 이름이라 같은 파일의 다음 쓰기가 덮는다**(VS Code · git `index.lock` · Rust crate 들 · JetBrains 는 손으로 지우라고 안내).
-  2. **폴더 훑기 · 색인 때 게으르게 치움 — 알아볼 접두 + 나이 문턱**(Syncthing — 접두 + 24시간 · 다시 훑기 때 / git `prune` — `tmp_obj_*` 를 만료 지난 것만).
-- 공통 모양 = **임시 파일은 같은 폴더**(바꿔치기가 원자적이려면 같은 볼륨이어야 함) · **이름에 앱 표식**(접두나 꼬리) · **훑는 쪽이 그 이름을 건너뛰고, 오래된 것만 지움.**
-- 찌꺼기 자체를 없애는 길은 리눅스 `O_TMPFILE`(이름 없는 파일)뿐 — Windows 에선 이름 있는 임시 파일을 피할 수 없다.
+- **None of the sampled tools sweeps leftovers by scanning at app startup.** Two approaches are common:
+  1. **Do not clean up — a fixed name means the next write to the same file overwrites it** (VS Code · git `index.lock` · Rust crates · JetBrains tells the user to delete by hand).
+  2. **Clean up lazily during a folder scan or indexing — a recognizable prefix plus an age threshold** (Syncthing — prefix + 24 hours · at rescan / git `prune` — removes only the expired `tmp_obj_*`).
+- Common shape = **the temp file is in the same folder** (for the swap to be atomic it must be on the same volume) · **the name carries an app marker** (prefix or suffix) · **the scanning side skips that name and deletes only old ones.**
+- The only way to remove the leftover itself is Linux `O_TMPFILE` (an unnamed file) — on Windows a named temp file cannot be avoided.
 
-→ S25 후보 대입: **(a) 첫 훑기 때 정리**가 Syncthing · git prune 꼴과 같다(나이 문턱을 더하면 그대로). (b) 별도 숨김 폴더는 표본에 선례 없음. (c) 안 치움도 흔하다(고정 이름이면 다음 쓰기가 덮음).
+→ Applied to the S25 candidates: **(a) clean up at first scan** has the same shape as Syncthing and git prune (the same if an age threshold is added). (b) A separate hidden folder has no precedent in the sample. (c) Not cleaning up is also common (with a fixed name, the next write overwrites it).
 
-## 도구별
+## Per tool
 
-| 도구 | 자리 · 이름 | 언제 치우나 | 확신도 · 출처 |
+| Tool | Location · name | When it cleans up | Confidence · source |
 |---|---|---|---|
-| Syncthing | 같은 폴더 · Windows `~syncthing~<이름>.tmp` · Unix `.syncthing.<이름>.tmp` · 160자 넘으면 해시 | 폴더 다시 훑기 때 `keepTemporariesH`(기본 24h)보다 오래된 것 삭제(검사는 약 1시간마다 → 최대 약 2배 지연). 일부러 남겨 재시도 때 블록 재사용 | 이름 · `IsTemporary()` = 확실(`lib/fs/tempname.go` — 메인 원문 확인) · 정책 = 확실(포럼 · issue #3215) · 훑기가 접두로 건너뛰는 호출 자리 = 가능성 높음 |
-| VS Code 파일 서비스 | 같은 폴더 · 고정 꼬리 `foo.txt.vsctmp` | 정리 코드 없음 — 고정 이름 + 덮어쓰기라 같은 파일의 다음 원자적 쓰기가 덮음. 심볼릭 링크엔 원자적 쓰기 거부 | 확실(`src/vs/platform/files/common/files.ts` 약 314–323 — 메인 원문 확인 · `diskFileSystemProvider.ts` `doWriteFileAtomic`) · 내부 상태 파일에만 쓰는지 = 가능성 높음 |
-| JetBrains 「safe write」 | 같은 폴더 · `이름___jb_tmp___` → 원본을 `___jb_old___` 로 → tmp 를 원본으로 → old 삭제 | 기동 정리 증거 없음 — 손으로 지우거나 설정 끄기 안내 | 가능성 높음(지원 포럼 직원 답) · 정리 = 불확실 |
-| git | 같은 폴더 `<경로>.lock` · `objects/` 의 `tmp_obj_*` | 잠금: 정상 종료 · 신호는 지우지만 강제 종료 뒤 남은 `index.lock` 은 **자동으로 안 지우고** 거부 + 사람에게 맡김(PID 재사용 때문에 낡음 판정 불가) · 데이터 임시: `git prune`/`gc` 가 나이로 삭제 | 확실(`lockfile.h` · `lockfile.c` · `builtin/prune.c`) |
-| Logseq | 원자적 쓰기 아님(제자리 쓰기) · 실패 때만 `<graph>/logseq/bak/` 백업 | 찌꺼기 없음 — 대신 꺼지면 잘린 파일 가능 | 가능성 높음(`handler.cljs` 103–130) |
-| Obsidian | 불명(비공개 소스) — 원자적 쓰기 요청 글(2023)만 있고 직원 답 없음 | 불명 | 불확실 |
-| Rust `atomic-write-file` · `tempfile` | 같은 폴더 · `.이름.XXXXXX` / `.tmp` + 무작위 | 정리 장치 없음 — 문서가 「갑자기 끊기면 남을 수 있다」고 명시 | 확실(docs.rs) |
+| Syncthing | same folder · Windows `~syncthing~<이름>.tmp` · Unix `.syncthing.<이름>.tmp` · hashed if over 160 characters | At folder rescan, deletes those older than `keepTemporariesH` (default 24h) (the check runs about hourly → up to about 2x delay). Leaves them on purpose so a retry can reuse the blocks | name · `IsTemporary()` = certain (`lib/fs/tempname.go` — main checked the source text) · policy = certain (forum · issue #3215) · the call site where the scan skips by prefix = likely |
+| VS Code file service | same folder · fixed suffix `foo.txt.vsctmp` | No cleanup code — fixed name + overwrite, so the next atomic write to the same file overwrites it. Atomic write is refused for symbolic links | certain (`src/vs/platform/files/common/files.ts` about 314–323 — main checked the source text · `diskFileSystemProvider.ts` `doWriteFileAtomic`) · whether it is used only for internal state files = likely |
+| JetBrains 「safe write」 | same folder · `이름___jb_tmp___` → rename the original to `___jb_old___` → tmp becomes the original → delete old | No evidence of startup cleanup — tells the user to delete by hand or turn the setting off | likely (support forum staff answer) · cleanup = uncertain |
+| git | same folder `<경로>.lock` · `tmp_obj_*` in `objects/` | Lock: removed on normal exit and on signals, but an `index.lock` left after a forced kill is **not removed automatically**; git refuses and leaves it to a person (staleness cannot be decided because of PID reuse) · data temp: `git prune`/`gc` delete by age | certain (`lockfile.h` · `lockfile.c` · `builtin/prune.c`) |
+| Logseq | not an atomic write (in-place write) · `<graph>/logseq/bak/` backup only on failure | No leftover — but a truncated file is possible if the process dies | likely (`handler.cljs` 103–130) |
+| Obsidian | unknown (closed source) — only an atomic-write request post (2023) exists, with no staff answer | unknown | uncertain |
+| Rust `atomic-write-file` · `tempfile` | same folder · `.이름.XXXXXX` / `.tmp` + random | No cleanup mechanism — the docs state that it 「갑자기 끊기면 남을 수 있다」 | certain (docs.rs) |
 
-## 공백
+## Gaps
 
-- Obsidian · JetBrains 가 기동 · 열기 때 치우는지 1차 출처 없음.
-- VS Code 감시자가 `.vsctmp` 를 어떻게 거르는지, 편집기 저장이 기본으로 원자적인지 미확인.
-- Windows `ReplaceFile` vs `MoveFileEx(MOVEFILE_REPLACE_EXISTING)` 도구별 선택 미조사.
-- 별도 숨김 폴더에서 만들어 옮기는 방식(후보 b)의 선례는 못 찾음.
+- No primary source on whether Obsidian or JetBrains cleans up at startup or on open.
+- Not confirmed how the VS Code watcher filters `.vsctmp`, or whether editor save is atomic by default.
+- Per-tool choice between Windows `ReplaceFile` and `MoveFileEx(MOVEFILE_REPLACE_EXISTING)` not surveyed.
+- No precedent found for creating in a separate hidden folder and moving (candidate b).
 
-## 출처
+## Sources
 
 - https://github.com/syncthing/syncthing/blob/main/lib/fs/tempname.go
 - https://forum.syncthing.net/t/when-sync-error-how-long-will-remove-or-keep-the-temp-file-syncthing-xxx/1126 · https://github.com/syncthing/syncthing/issues/3215
