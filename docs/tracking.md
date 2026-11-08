@@ -55,6 +55,7 @@
 | T-76 | 즉석 by-cwd codex 의 연결 실패에 주인이 없다(굳음) | 버그 | 미착수 · 선재 · S25 4 단계 리뷰가 찾음 |
 | T-79 | Shell–daemon link freezes while still showing "connected" (killing a PTY agent mid-burst) | 버그 | Fixed on `v0.5.0/fix/pty-kill-hang` (S34, `75de8476`) — not pushed/merged yet |
 | T-80 | A spewing agent shown in a slot makes the daemon close the connection on a full send queue → reconnect/replay storm | 버그 | Not started · pre-existing (old driver too) · found by S34 QA |
+| T-81 | A claude that exits right after launch is answered "started" with no failure mark | 버그 | Not started · known limit of S25 step 20 (ADR-0348 decision 6) |
 | T-71 | 트래킹 번호를 가리키지 않기 — 해결되면 그냥 지우기 | 사소한 기능·정리 | 할 일 — 나중에 이슈로 |
 | T-70 | 브랜치 앞 버전 짐작 기준 — 기능이면 0.5.0 쪽 | 사소한 기능·정리 | 할 일 — 나중에 이슈로 |
 | T-69 | 스텝 번호 규약 — 새 주제마다 S번호 | 사소한 기능·정리 | 일부 됨 · 남은 것 = 자잘한 커밋 접두 |
@@ -369,6 +370,12 @@
 - **Symptom:** while an agent that writes ~1.5 MB per call is shown in a slot, the connection drops and reconnects every ~20–35 ms; commands sent meanwhile fail fast ("connection lost" / handshake ended) and output stalls until the slot is emptied. No wedge — it stops once the agent is no longer shown.
 - **Observed mechanism (daemon log):** `ReplayComplete 를 큐에 못 실었다(포화) — 연결을 닫는다` (908×) then `연결 끊김` (1792×) — the daemon's per-connection send queue fills (by design: "포화면 이 연결이 끝난다"), the daemon closes, the shell reconnects and re-subscribes, the replay fills the queue again. Each cycle shows two dials accepted at once. Evidence: S34 QA logs (session scratchpad `t79/qa/gui`, `gui-base2`).
 - **Next:** design question — how the daemon should treat a slow/full consumer during a replay burst (backpressure vs close), likely within S21 stage 3-3 (daemon on the transport, byte budget / per-peer queue) or its own topic.
+
+### T-81. A claude that exits right after launch is answered "started" with no failure mark
+- **Status:** not started · known limit recorded by S25 step 20 (ADR-0348 decision 6, user decision 2026-11-09).
+- **Symptom:** claude runs as `cmd.exe /c claude`, so a missing or broken claude binary shows up as an early exit after `cmd.exe` started. Creates answer "started" and `spawn_fresh_settled` clears the last failure on `Started`; the agent list shows no ban glyph.
+- **Why open:** claude has no link verdict, and ADR-0201 left claude Fresh early-exit detection out of scope.
+- **Next:** design how claude Fresh settles its first seconds (an early-exit window like the resume path), then record last failure through the one create body.
 
 ## 사소한 기능·정리
 

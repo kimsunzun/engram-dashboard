@@ -686,14 +686,18 @@ Code comments to fix in passing:
   - (a) a longer deadline for spawn verbs — the daemon seat for those names plus the CLI read timeout;
   - (b) accept `TIMEOUT` as it is.
   This TRD changes neither; R7b and R8 record the behaviour.
+  - **Decided 2026-11-09 by the user: (b) accept** (「추천으로 가」 on main's recommendation). Basis: a healthy codex answers `initialize` in ≈ 130 ms and a refusal comes back at once (`codex/transport.rs` `HANDSHAKE_BUDGET` doc), so only a silently hung codex exceeds 7 s, and its failure mark still lands in the agent list. If R8 measures a normal success ≥ 5 s, raise it again before commit.
 - **U3 — `agent.spawnInto` created-asleep answer has no `args.agent_id`** (review H2). The parent TRD §1-5 (가) 1 ② wants the created id as an argument. Options:
   - (a) widen WS `AgentEvent::Error` with an optional created-agent id. It could ride with P2's `deliver_notices` wire change (same additive rule, no version move), and the shell would put it in `args.agent_id`.
+  - **Decided 2026-11-09 by the user: (a)** (「1번 a」, main's recommendation). Same answer shape as bus `agent.spawn`; the LLM can wake that id and attach it instead of creating a duplicate.
   - (b) name the agent in the text only (this draft's shape).
   §3-6 keeps `SpawnRefusal` open for a later field.
 - **U4 — a claude that exits right after launch is answered "started" with no mark** (review H3). `cmd.exe /c claude` starts, and claude has no link axis; ADR-0201 left claude Fresh out of scope. Options:
   - (a) state the limit in ADR-0348 decision 6 and track it separately;
   - (b) extend this step to settle claude's first seconds.
   Not touched here.
+  - **Decided 2026-11-09 by the user: (a)** (「너 추천으로 해」). ADR-0348 decision 6 states the limit; tracked as `docs/tracking.md` T-81.
+- **T-76 closes with this step** — 「즉석 by-cwd codex 의 연결 실패에 주인이 없다」 is the WS link-verdict gap this step fixes (R7c proves it); delete the T-76 row and section when step 20 lands (T-71 rule).
 
 ### 8-3. Risks
 
