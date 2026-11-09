@@ -126,8 +126,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-detached.ps1 -Co
 
 | 레인 | 경로 |
 |---|---|
-| claude | `crates/engram-dashboard-agent/src/backend/claude/**` · `crates/engram-dashboard-agent/src/backend/mod.rs` · `crates/engram-dashboard-agent/src/usage/**` · `crates/engram-dashboard-daemon/src/control/**` · `crates/engram-dashboard-messaging/src/**` · `crates/engram-dashboard-daemon/tests/control_send.rs` · `crates/engram-dashboard-agent/tests/usage_probe_smoke.rs` |
-| codex | `crates/engram-dashboard-agent/src/backend/codex/**` · `crates/engram-dashboard-agent/src/backend/mod.rs` · `crates/engram-dashboard-agent/src/usage/**` · `crates/engram-dashboard-agent/tests/backend_contract.rs` · `crates/engram-dashboard-agent/tests/usage_probe_smoke.rs` |
+| claude | `crates/engram-dashboard-agent/src/backend/claude/**` · `crates/engram-dashboard-agent/src/backend/mod.rs` · `crates/engram-dashboard-agent/src/usage/**` · `crates/engram-dashboard-daemon/src/control/**` · `crates/engram-dashboard-messaging/src/**` · `crates/engram-dashboard-daemon/tests/control_send.rs` · `crates/engram-dashboard-agent/tests/usage_probe_smoke.rs` · `crates/engram-dashboard-platform/src/shell.rs` |
+| codex | `crates/engram-dashboard-agent/src/backend/codex/**` · `crates/engram-dashboard-agent/src/backend/mod.rs` · `crates/engram-dashboard-agent/src/usage/**` · `crates/engram-dashboard-agent/tests/backend_contract.rs` · `crates/engram-dashboard-agent/tests/usage_probe_smoke.rs` · `crates/engram-dashboard-platform/src/shell.rs` |
 
 claude 레인 — 첫 줄의 이름 = CI `--skip` 목록에서 `#[ignore]` 가 아닌 것(목록이 바뀌면 여기도 고친다):
 
