@@ -280,9 +280,9 @@ pub(crate) fn command_request_id(
 ///   15 s, about 20 s with the teardown on a failure verdict — the reason's source of truth is the
 ///   `Spawn` arm comment), ⟳ until the query ends (cap = `usage_service::REPLY_WAIT_MAX`).
 ///   In-order commands may await as well — `Kill` awaits its blocking task (transport shutdown + pump
-///   join), `StopDaemon` awaits `shutdown_all` — and each holds the next command on this connection
-///   until it has replied. The rest have no await point (map lookup · input queue push · list encoding)
-///   or hand off to their own task (`Command` delivery).
+///   join) and holds the next command on this connection until it has replied. The rest have no await
+///   point (map lookup · input queue push · list encoding) or hand off to their own task (`Command`
+///   delivery · `StopDaemon`'s shutdown).
 /// ★떼어 내도 되는 근거는 「순서가 뜻을 갖지 않는다」 하나다★(⟳ 의 근거는 그 갈래 주석) — 중복 활성화를
 ///   막는 것은 dispatch 의 도착 순서가 아니라 manager 의 예약(`SpawnReservation`)과 재활성화 가드(`activation_in_flight`)이고,
 ///   그 둘은 연결을 모른다. 즉 이 셋을 줄에서 떼어도 **새로 열리는 창이 없다** — 같은 id 를 동시에
@@ -329,9 +329,8 @@ pub(crate) fn dispatch_order(cmd: &AgentCommand) -> DispatchOrder {
         //    `ReplayComplete` 는 코어 잠금을 놓은 **뒤** 큐에 드니, 겹치면 Ack/replay/Complete 가
         //    단일 writer 줄에서 뒤섞인다(R1 위반).
         // ④ `RegisterCommands`↔`UpdateCommands` — 앞은 전량 교체, 뒤는 그 결과에 대한 차분이다.
-        // ⑤ `StopDaemon` 은 이 연결의 **마지막**이어야 한다(`Close` 를 돌려주는 유일한 갈래).
-        //    ★그래서 이것만은 느린데도 줄에 남는다★ — 떼어 내면 연결을 끝내라는 답이 이미 다음
-        //    명령이 지나간 뒤에 나온다.
+        // ⑤ `StopDaemon` must be this connection's **last** command (the only arm that returns `Close`). Detached,
+        //    its answer to end the connection would come after the next command had already passed.
         AgentCommand::Kill { .. }
         | AgentCommand::Interrupt { .. }
         | AgentCommand::WriteStdin { .. }
@@ -1289,6 +1288,12 @@ pub struct ConnectionCore {
     locals: Arc<dyn LocalCommands>,
     usage: Arc<UsageService>,
     shutdown_tx: watch::Sender<bool>,
+    /// Set by the first `StopDaemon` — the daemon is shutting down; a later `StopDaemon` joins instead of
+    /// running `shutdown_all` again.
+    stopping: AtomicBool,
+    /// How many shutdown tasks `StopDaemon` spawned — each runs `shutdown_all` once.
+    #[cfg(test)]
+    shutdowns_spawned: std::sync::atomic::AtomicUsize,
     /// `SpawnByCwd` 처리부가 `spawn_agent` 전에 묻는 백엔드 생성 정책. 운영은 늘 agent
     /// `commands::llm_creation_refusal` 이고 [`ConnectionCore::new`] 가 채운다 — 시험만 닫는 가짜로 갈아
     /// 꽂는다(오늘 운영 표는 아무것도 안 닫아 실물 입력으로는 거절 갈래에 못 닿는다 · ADR-0012).
@@ -1323,6 +1328,9 @@ impl ConnectionCore {
             locals,
             usage,
             shutdown_tx,
+            stopping: AtomicBool::new(false),
+            #[cfg(test)]
+            shutdowns_spawned: std::sync::atomic::AtomicUsize::new(0),
             llm_policy: llm_creation_refusal,
         }
     }
@@ -1672,12 +1680,23 @@ impl ConnectionCore {
                 //   자식 유지)가 현 Job 모델에선 불가능하다. 플래그는 미래 detach 여지로 protocol 에
                 //   남겨두되 v1 동작은 값과 무관하다.
                 let _ = kill_agents;
-                let mgr = manager.clone();
-                let _ = tokio::task::spawn_blocking(move || mgr.shutdown_all()).await;
+                // The shutdown runs in its own task, not in this handler: `net` aborts this connection's dispatch
+                //   task when the client closes, and an awaited `shutdown_all` would then never reach `shutdown_tx`
+                //   — the daemon survived with its agents killed (TRD S21 trd-3-2-u5 §3-4). A second `StopDaemon`
+                //   while one runs only joins it. The `shutdown_tx` trigger is watched by `run()`'s `select!`.
+                if !self.stopping.swap(true, Ordering::SeqCst) {
+                    #[cfg(test)]
+                    self.shutdowns_spawned.fetch_add(1, Ordering::SeqCst);
+                    let mgr = manager.clone();
+                    let shutdown_tx = self.shutdown_tx.clone();
+                    tokio::spawn(async move {
+                        let _ = tokio::task::spawn_blocking(move || mgr.shutdown_all()).await;
+                        let _ = shutdown_tx.send(true);
+                    });
+                }
 
+                // Best effort: on `Close` the net layer aborts the writer, so this Ack can be lost.
                 reply(sink, request_id, Ok(()));
-                // main 종료 트리거(watch). 수신측은 run() 의 select! 가 감지.
-                let _ = self.shutdown_tx.send(true);
                 return DispatchFlow::Close;
             }
 
@@ -2923,7 +2942,7 @@ mod tests {
                 removed: vec![],
                 request_id: rid(),
             },
-            // ⑤ 연결을 끝내는 명령 — 느린데도 줄에 남는 유일한 것
+            // ⑤ the command that ends the connection
             AgentCommand::StopDaemon {
                 force: true,
                 kill_agents: true,
@@ -6183,8 +6202,125 @@ mod tests {
             matches!(mock.events().as_slice(), [AgentEvent::Ack { .. }]),
             "Ack 1건"
         );
-        assert!(rx.has_changed().unwrap_or(false));
+        // The shutdown runs in its own task — the signal follows it, not the handler's return.
+        tokio::time::timeout(Duration::from_secs(10), rx.changed())
+            .await
+            .expect("the shutdown signal fires")
+            .expect("the sender is alive");
         assert!(*rx.borrow_and_update());
+    }
+
+    /// TRD S21 trd-3-2-u5 §3-4: a client that closes right after `StopDaemon` makes `net` abort the dispatch task —
+    /// the handler is dropped after one poll here. The shutdown still runs and still signals.
+    #[tokio::test]
+    async fn stop_daemon_survives_a_dispatch_dropped_after_one_poll() {
+        use futures_util::FutureExt;
+
+        let (core, mut rx) = test_core();
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = ConnectionSession::new(1);
+        let polled_once = core
+            .dispatch(
+                AgentCommand::StopDaemon {
+                    force: true,
+                    kill_agents: true,
+                    request_id: rid(),
+                },
+                &session,
+                &mock,
+            )
+            .now_or_never();
+        assert_eq!(
+            polled_once,
+            Some(DispatchFlow::Close),
+            "the handler awaits nothing"
+        );
+        tokio::time::timeout(Duration::from_secs(10), rx.changed())
+            .await
+            .expect("the shutdown signal fires although the dispatch was dropped")
+            .expect("the sender is alive");
+        assert!(*rx.borrow_and_update());
+    }
+
+    /// TRD S21 trd-3-2-u5 §3-4: two `StopDaemon`s back to back — the second arrives before the first shutdown has
+    /// signalled (on this current-thread runtime its task has not even been polled) and starts no second one.
+    #[tokio::test]
+    async fn a_stop_daemon_before_the_first_shutdown_signals_joins_it() {
+        let (core, mut rx) = test_core();
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let stop = || AgentCommand::StopDaemon {
+            force: true,
+            kill_agents: true,
+            request_id: rid(),
+        };
+        let first = core
+            .dispatch(stop(), &ConnectionSession::new(1), &mock)
+            .await;
+        let second = core
+            .dispatch(stop(), &ConnectionSession::new(2), &mock)
+            .await;
+        assert_eq!((first, second), (DispatchFlow::Close, DispatchFlow::Close));
+        assert!(!*rx.borrow(), "the first shutdown had not signalled");
+        assert_eq!(
+            core.shutdowns_spawned.load(Ordering::SeqCst),
+            1,
+            "one shutdown_all"
+        );
+        tokio::time::timeout(Duration::from_secs(10), rx.changed())
+            .await
+            .expect("the shutdown signals")
+            .expect("the sender is alive");
+        assert!(*rx.borrow_and_update());
+    }
+
+    /// A `StopDaemon` once the daemon is stopping only joins — it answers and closes its connection but does not run
+    /// `shutdown_all` or signal again. Here it comes after the first shutdown signalled, so the latch is what is
+    /// checked, not an overlap with a running `shutdown_all`.
+    // Known limit: the negative half waits a bounded real time; a second run slower than that would pass unseen.
+    #[tokio::test]
+    async fn a_stop_daemon_after_the_shutdown_signalled_only_answers_and_closes() {
+        let (core, mut rx) = test_core();
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let stop = || AgentCommand::StopDaemon {
+            force: true,
+            kill_agents: true,
+            request_id: rid(),
+        };
+        let first = core
+            .dispatch(stop(), &ConnectionSession::new(1), &mock)
+            .await;
+        assert_eq!(first, DispatchFlow::Close);
+        tokio::time::timeout(Duration::from_secs(10), rx.changed())
+            .await
+            .expect("the first shutdown signals")
+            .expect("the sender is alive");
+        rx.borrow_and_update();
+
+        let second = core
+            .dispatch(stop(), &ConnectionSession::new(2), &mock)
+            .await;
+        assert_eq!(
+            second,
+            DispatchFlow::Close,
+            "the joiner's connection still ends"
+        );
+        assert_eq!(
+            mock.events()
+                .iter()
+                .filter(|e| matches!(e, AgentEvent::Ack { .. }))
+                .count(),
+            2,
+            "both get their Ack"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), rx.changed())
+                .await
+                .is_err(),
+            "a joiner must not run the shutdown again"
+        );
     }
 
     // ── kind_to_action 매핑(3 variant 전수) ──────────────────────────────────────

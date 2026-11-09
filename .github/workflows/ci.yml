@@ -1197,6 +1197,47 @@ jobs:
           if [ "$n" -lt 1 ]; then echo "FAIL — expected >= 1 — was the feature renamed? (then the 0 check above passes blind)"; printf '%s\n' "$tree"; exit 1; fi
           echo "PASS"
 
+      # TRD S21 trd-3-2-u5 §3-5 (S11 — 3-2 U5a): the shell's stop client runs on the transport (`daemon_client::link::stop`),
+      #   so the shell names no `tungstenite` among its direct normal dependencies — the sync client it once used for the stop
+      #   must not come back beside the transport. PASS = 0 `tungstenite` lines at depth 1 of the shell's normal graph.
+      # ★Do not drop the pair (the same graph without the depth limit → at least 1)★ — the shell still links `tungstenite`
+      #   through the transport's `ws` feature; if the crate is renamed or the output form changes, the 0 check loses its
+      #   word and passes blind.
+      # `--all-features` on the 0 check = the shell's own features are on too (as in `shell gate 1` · `shell gate 3`).
+      # ★Limit★ — direct edges only, by package name: a rename (`tws = { package = "tungstenite" }`) still prints the package
+      #   name and is caught; a dev edge is not counted (tests may use the sync client through `tokio-tungstenite`).
+      - name: 'shell gate 6: no direct tungstenite in the shell (shell depth 1 = 0, shell graph >= 1)'
+        shell: bash
+        run: |
+          set +e
+          tree=$(cargo tree --locked -p engram-dashboard -e normal --depth 1 --prefix none --target all --all-features)
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then echo "FAIL — cargo tree -p engram-dashboard --depth 1 exited $rc"; printf '%s\n' "$tree"; exit 1; fi
+          set +e
+          hits=$(printf '%s\n' "$tree" | rg '^tungstenite ')
+          rgrc=$?
+          set -e
+          case "$rgrc" in
+            1) echo "PASS — shell direct normal dependencies: 0 tungstenite lines" ;;
+            0) echo "FAIL — the shell depends on tungstenite directly (the stop client runs on the transport):"; printf '%s\n' "$hits"; exit 1 ;;
+            *) echo "FAIL — rg errored (exit $rgrc)"; exit 1 ;;
+          esac
+          set +e
+          tree=$(cargo tree --locked -p engram-dashboard -e normal --prefix none --target all --all-features)
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then echo "FAIL — cargo tree -p engram-dashboard exited $rc"; printf '%s\n' "$tree"; exit 1; fi
+          set +e
+          hits=$(printf '%s\n' "$tree" | rg '^tungstenite ')
+          rgrc=$?
+          set -e
+          if [ "$rgrc" -gt 1 ]; then echo "FAIL — rg errored (exit $rgrc)"; exit 1; fi
+          if [ -z "$hits" ]; then n=0; else n=$(printf '%s\n' "$hits" | wc -l | tr -d '[:space:]'); fi
+          echo "shell normal graph: $n tungstenite line(s)"
+          if [ "$n" -lt 1 ]; then echo "FAIL — pair: expected >= 1 through the transport — was the crate renamed or the output form changed? (then the 0 check above passes blind)"; exit 1; fi
+          echo "PASS"
+
       # ADR-0273: CLI 패키지(`engram-dashboard-cli`)의 직접 워크스페이스 의존이 정확히 agent · cli(자기) · command
       #   여야 PASS. 해석된 그래프를 읽는다 — 꼴 · 플래그는 messaging · command · base · platform 상한 게이트와
       #   같다(줄이면 rename · 비활성 target · optional 이 샌다).

@@ -32,6 +32,9 @@
 //!   frontend event first — the frontend relies on that order), or its first failure; no live daemon (no or an unusable record)
 //!   answers `NoLiveDaemon`. A connect that a re-add overtakes gets the new handle's answer; a close before the answer
 //!   ends it with `ClosedBeforeHello`.
+//! - ★While a daemon stop is in flight★ (its stopping mode — `shutdown`), `ensure` answers `HandshakeError::Stopping`
+//!   and builds no handle, and `connect` first waits for the stop to end and only then reads its close epoch — the
+//!   stop's own close never overtakes it (TRD S21 trd-3-2-u5 R2 · R16).
 //! - ★Subscribe · Unsubscribe · RequestReplay go through this one actor, in order, onto one peer queue★ (TRD §6-2 U3 —
 //!   master re-check A1). A replay request checks the window routing when the actor takes it, so an `Unsubscribe`
 //!   queued before it is written first and the check sees the routing that `Unsubscribe` came from. The `Subscribe`
@@ -112,6 +115,9 @@ use super::replay_events::{
     apply_replay_event, known_epoch, ReplayFollowUp, REPLAY_DEADLINE, REPLAY_DEADLINE_TICK,
 };
 use super::replay_flight::{encode_marker_frame, ReplayFlightSet};
+#[cfg(test)]
+use super::shutdown::RacePoint;
+use super::shutdown::StoppingMode;
 use super::{
     AgentNamesSink, ConnectionState, SharedUsageInterest, CHANNEL_GONE, DEFAULT_CONNECT_TIMEOUT,
     NOT_CONNECTED, NO_REQUEST_ID, REPLAY_UNSENT,
@@ -136,6 +142,8 @@ pub enum HandshakeError {
     ClosedBeforeHello,
     /// The driver ended or a close overtook the call before its first answer.
     TaskGone,
+    /// An attach-only connect while a daemon stop is in flight — nothing was added (TRD S21 trd-3-2-u5 R2).
+    Stopping,
 }
 
 impl std::fmt::Display for HandshakeError {
@@ -151,6 +159,7 @@ impl std::fmt::Display for HandshakeError {
                 write!(f, "daemon websocket closed before handshake")
             }
             HandshakeError::TaskGone => write!(f, "연결 task 가 핸드셰이크 전 종료됨"),
+            HandshakeError::Stopping => write!(f, "the daemon is being stopped — not attaching"),
         }
     }
 }
@@ -252,6 +261,55 @@ pub(crate) struct LinkClient {
     usage: SharedUsageInterest,
     /// Times the wait for an opened connection.
     clock: Arc<dyn Clock>,
+    /// On while a daemon stop is in flight (`shutdown`) — `ensure` adds nothing, `connect` waits.
+    stopping: Arc<StoppingMode>,
+}
+
+/// Closes and re-adds the link from outside the client — the stop path (`shutdown::Stopper`) holds one. It does not keep
+/// the actor alive: after the client is gone both do nothing.
+pub(crate) struct LinkControl {
+    key: DaemonKey,
+    cmd_tx: mpsc::WeakUnboundedSender<DriverCmd>,
+    closes: Arc<AtomicU64>,
+    stopping: Arc<StoppingMode>,
+}
+
+impl LinkControl {
+    /// [`LinkClient::close`].
+    pub(crate) fn close(&self) {
+        if let Some(cmd_tx) = self.cmd_tx.upgrade() {
+            close_link(&self.key, &self.closes, &cmd_tx);
+        }
+    }
+
+    /// [`LinkClient::ensure`] without waiting for its answer — nothing while a stop is in flight. That check is
+    /// defensive: today's one caller, the stop's supervisor, calls this after its own flight left the mode and while
+    /// that flight still holds the single-flight slot, so no newer flight can be in the mode then.
+    pub(crate) fn reattach(&self) {
+        let closes = self.closes.load(Ordering::SeqCst);
+        if self.stopping.active() {
+            tracing::debug!(peer = %self.key.peer_id(), "a daemon stop is in flight — not re-attaching");
+            return;
+        }
+        let Some(cmd_tx) = self.cmd_tx.upgrade() else {
+            return;
+        };
+        tracing::info!(peer = %self.key.peer_id(), "re-attaching to the daemon after a stop");
+        // Nobody waits for the first answer — the actor ignores a gone caller.
+        let (first, _answer) = oneshot::channel();
+        let _ = cmd_tx.send(DriverCmd::Add {
+            closes,
+            found: None,
+            first,
+        });
+    }
+}
+
+/// Bump the epoch before queueing `Close` — [`LinkClient::close`] holds why.
+fn close_link(key: &DaemonKey, closes: &AtomicU64, cmd_tx: &mpsc::UnboundedSender<DriverCmd>) {
+    tracing::info!(peer = %key.peer_id(), "closing the daemon link");
+    closes.fetch_add(1, Ordering::SeqCst);
+    let _ = cmd_tx.send(DriverCmd::Close);
 }
 
 /// Nudges the actor's usage interest without keeping the actor alive — the usage shrink timer holds one
@@ -345,6 +403,7 @@ impl LinkClient {
         let closes = Arc::new(AtomicU64::new(0));
         let (opened_tx, opened_rx) = watch::channel(());
         let gate = Arc::new(Mutex::new(Gate::default()));
+        let stopping = Arc::new(StoppingMode::new(clock.clone()));
         let Ports {
             events,
             names,
@@ -370,6 +429,7 @@ impl LinkClient {
             opened_rx,
             usage: usage.clone(),
             clock: clock.clone(),
+            stopping,
         };
         let driver = Driver {
             key,
@@ -407,11 +467,38 @@ impl LinkClient {
         self.state_rx.clone()
     }
 
+    /// The stopping mode this link reads — the stop path enters and leaves it.
+    pub(crate) fn stopping(&self) -> Arc<StoppingMode> {
+        self.stopping.clone()
+    }
+
+    /// A close / re-add handle for the stop path.
+    pub(crate) fn control(&self) -> LinkControl {
+        LinkControl {
+            key: self.key.clone(),
+            cmd_tx: self.cmd_tx.downgrade(),
+            closes: self.closes.clone(),
+            stopping: self.stopping.clone(),
+        }
+    }
+
     /// Explicit connect (ADR-0021 — may start a daemon). A failed search still starts the handle — unless a close
     /// overtook this connect, then nothing is built: it reads `daemon.json` on every attempt and connects once a
     /// daemon is there, and the caller gets the search's error.
+    ///
+    /// ★A daemon stop in flight is waited out first★ (at most its flight deadline), and the close epoch is read only
+    /// after that wait (TRD S21 trd-3-2-u5 R16) — the stop's own close is not a close that overtook this connect.
     pub(crate) async fn connect(&self) -> Result<(), HandshakeError> {
-        let closes = self.closes.load(Ordering::SeqCst);
+        let closes = loop {
+            let closes = self.closes.load(Ordering::SeqCst);
+            #[cfg(test)]
+            self.stopping.race.fire(RacePoint::ConnectEpochRead);
+            if !self.stopping.active() {
+                break closes;
+            }
+            tracing::info!(peer = %self.key.peer_id(), "a daemon stop is in flight — connecting after it");
+            self.stopping.wait_over().await;
+        };
         if self.is_live().await {
             return Ok(());
         }
@@ -439,9 +526,19 @@ impl LinkClient {
         }
     }
 
-    /// Attach-only connect (ADR-0021 — never starts a daemon).
+    /// Attach-only connect (ADR-0021 — never starts a daemon). While a daemon stop is in flight it answers
+    /// [`HandshakeError::Stopping`] and adds nothing (TRD S21 trd-3-2-u5 R2).
+    ///
+    /// ★The epoch before the mode★ — the stop enters its mode before it closes, so an epoch read after that close
+    /// always finds the mode on.
     pub(crate) async fn ensure(&self) -> Result<(), HandshakeError> {
         let closes = self.closes.load(Ordering::SeqCst);
+        #[cfg(test)]
+        self.stopping.race.fire(RacePoint::EnsureEpochRead);
+        if self.stopping.active() {
+            tracing::info!(peer = %self.key.peer_id(), "a daemon stop is in flight — not attaching");
+            return Err(HandshakeError::Stopping);
+        }
         tracing::info!(peer = %self.key.peer_id(), "attaching to a running daemon");
         self.add(closes, None).await
     }
@@ -481,9 +578,7 @@ impl LinkClient {
     /// captured the old epoch is seen as stale. The other order lets an `Add` queued behind `Close` still read the old
     /// value and revive the link.
     pub(crate) fn close(&self) {
-        tracing::info!(peer = %self.key.peer_id(), "closing the daemon link");
-        self.closes.fetch_add(1, Ordering::SeqCst);
-        let _ = self.cmd_tx.send(DriverCmd::Close);
+        close_link(&self.key, &self.closes, &self.cmd_tx);
     }
 
     /// One command round trip on the caller's task, on the opened connection ([`Self::opened_generation`]); failure

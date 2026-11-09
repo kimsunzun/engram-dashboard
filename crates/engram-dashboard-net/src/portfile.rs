@@ -229,4 +229,31 @@ mod tests {
         info.start_time = real.wrapping_add(999);
         assert!(is_stale(&info), "creation time 불일치 = 재사용 PID → stale");
     }
+
+    /// A record of a daemon that exited while someone still holds its process object is stale — the handle still
+    /// opens, so the open-process check alone kept it live (TRD S21 trd-3-2-u5 R4).
+    ///
+    /// Only with an unknown start time: reading the child's start time would take a platform symbol this crate does not
+    /// import (CI `net gate 2a`). The known-start-time case is platform's
+    /// `an_exited_process_whose_object_is_held_is_gone` — [`is_stale`] is the negation it checks.
+    #[cfg(windows)]
+    #[test]
+    fn an_exited_process_whose_object_is_held_is_stale() {
+        let mut child = std::process::Command::new("cmd.exe")
+            .args(["/c", "exit"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("cmd.exe spawn");
+        let mut info = sample();
+        info.pid = child.id();
+        info.start_time = 0;
+        let _ = child.wait();
+        // `child` still holds the handle, so the exited process can still be opened.
+        let stale = is_stale(&info);
+        drop(child);
+
+        assert!(stale, "the exit code decides — an exited daemon is stale");
+    }
 }

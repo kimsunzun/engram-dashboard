@@ -93,6 +93,8 @@ engram-dashboard-protocol = { path = "../crates/engram-dashboard-protocol" }
 #   `sweep_temps`) · 런타임 복원 수락 끝에 main 에 포커스를 줄지 가르는 전경 창 판정
 #   (`window::foreground_is_current_process` — `state::placement` 의 `foreground_is_ours`).
 #   스냅 레이아웃 오버레이(`window::snap`)는 위 `[features] snap-overlay` 를 켤 때만 — 그 기능이 platform 의 같은 이름을 켠다.
+#   The stop path (`daemon_client::shutdown`) — whether the target still runs (`process::presence`) and the
+#   identity-checked kill (`process::terminate_if_same` — ADR-0343).
 #   ★`windows` 를 이 셸에 직접 되살리지 말 것★ — OS crate 운영 의존은 platform 하나에만 둔다(CI `platform gate 5`).
 #   ★운영 의존에서 `test-support` 를 켜지 않는다★(CI `platform gate 3` — 시험 기능은 아래 dev 재선언에서만).
 engram-dashboard-platform = { path = "../crates/engram-dashboard-platform" }
@@ -102,9 +104,8 @@ engram-dashboard-platform = { path = "../crates/engram-dashboard-platform" }
 #   ★Never turn on `test-support` here★ — the harness is for tests only (dev re-declaration below). Wall = CI
 #   `shell gate 5` (0 lines of that feature in this package's normal · build graph).
 engram-dashboard-transport = { path = "../crates/engram-dashboard-transport", features = ["ws"] }
-# 동기 WS 클라이언트 — graceful 데몬 끄기(`daemon_client::stop` 의 일방 발사)만 쓴다. 3-2(transport 셸 부착)가 그
-#   클라이언트를 다시 쓰며 걷는다(ADR-0271 결정 5). 새 패키지가 아니다 — 아래 `tokio-tungstenite` 가 같은 판을 이미 문다.
-tungstenite = "0.26"
+# ★No direct `tungstenite` here★ — the stop client runs on the transport (`daemon_client::link::stop` · TRD S21
+#   trd-3-2-u5 §3-5). Wall = CI `shell gate 6` (no `tungstenite` among this package's direct normal dependencies).
 tauri-plugin-autostart = "2"
 
 # T1(S14 모듈①): DaemonClient(비동기 WS 클라이언트) + OutputRouter(arc-swap) 신설을 위해
@@ -124,8 +125,9 @@ arc-swap = "1"
 #   reads the daemon's command delivery deadline. The day this edge goes or narrows, those tests move (ADR-0271
 #   decision 4). No daemon feature: nothing here uses its in-process test server (`test-support`).
 engram-dashboard-daemon = { path = "../crates/engram-dashboard-daemon" }
-# The daemon side of the production-transport test (a real ws accept — `daemon_client::connection::tests`). Tests
-#   only: no shell code outside tests uses it (the real-socket dialer comes from the transport's `ws` feature).
+# The daemon side of the production-transport test (a real ws accept — `daemon_client::connection::tests`) and the
+#   sync client of the close-race diagnostics in `tests/stop_smoke.rs` (its re-exported `tungstenite`). Tests only: no
+#   shell code outside tests uses it (the real-socket dialer comes from the transport's `ws` feature).
 tokio-tungstenite = "0.26"
 # `test-util` = paused tokio time (`tokio::time::pause` / `advance`) — timer tests (the usage shrink timer and others)
 #   run on it instead of the wall clock (ADR-0038 — no magic sleeps). ★Dev only★: release builds get no `test-util`.

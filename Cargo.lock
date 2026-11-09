@@ -1013,7 +1013,6 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "ts-rs",
- "tungstenite",
  "uuid",
 ]
 

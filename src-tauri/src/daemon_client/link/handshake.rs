@@ -48,18 +48,23 @@ impl ShellHandshake {
         Self { slot }
     }
 
-    /// The daemon's text as it may be logged — masked (`mask_reason`), or `None` when it carries the token we sent, as
-    /// it is or once the hidden characters masking drops are gone (they can split a token that masking then joins).
-    /// ★Both checks run before masking truncates★ — a token past the cut would survive in part.
     fn loggable(&self, message: &str) -> Option<String> {
-        if let Some(token) = self.slot.get().filter(|t| !t.expose().is_empty()) {
-            let token = token.expose();
-            if message.contains(token) || without_hidden(message).contains(token) {
-                return None;
-            }
-        }
-        Some(mask_reason(message))
+        loggable(self.slot.get().as_ref(), message)
     }
+}
+
+/// The daemon's text as it may be logged — masked (`mask_reason`), or `None` when it carries `token` (the one we sent),
+/// as it is or once the hidden characters masking drops are gone (they can split a token that masking then joins).
+/// ★Both checks run before masking truncates★ — a token past the cut would survive in part. The stop handshake
+/// (`link::stop`) logs its refusals through this too.
+pub(super) fn loggable(token: Option<&Secret>, message: &str) -> Option<String> {
+    if let Some(token) = token.filter(|t| !t.expose().is_empty()) {
+        let token = token.expose();
+        if message.contains(token) || without_hidden(message).contains(token) {
+            return None;
+        }
+    }
+    Some(mask_reason(message))
 }
 
 /// `text` without the characters [`mask_reason`] drops. ★`mask_reason` stays the one source of what is hidden★ (the

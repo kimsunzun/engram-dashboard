@@ -161,10 +161,9 @@ pub fn daemon_connection_state(
     .to_string()
 }
 
-// Daemon termination fallback (§5). Forcibly turns off the pid in daemon.json along with its child tree (`/F /T` — platform `process::kill_tree`).
-//
-// ★graceful first★: a frontend holding a connection must first send the StopDaemon AgentCommand (graceful, exits voluntarily after
-// cleaning up children). This command is the fallback for when there is no connection or graceful does not work.
+// Force-kills the pid in daemon.json with its child tree (`/F /T` — platform `process::kill_tree`), with no graceful
+// `StopDaemon` first. No frontend calls it; U5b-2 removes it (TRD S21 trd-3-2-u5 §3-5). The graceful stop with an
+// identity-checked kill is the shell's stop path (`daemon_client::shutdown`).
 // Returns: the pid it tried to kill (None if none).
 #[tauri::command]
 pub async fn daemon_stop() -> Result<Option<u32>, String> {

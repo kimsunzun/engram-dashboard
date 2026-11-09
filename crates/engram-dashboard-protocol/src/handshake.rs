@@ -8,7 +8,7 @@
 //! override. So the frame is exactly
 //!   `{"Auth":{"token":"…","protocol_version":N}}`
 //! . The token field's [`Secret`] is `serde(transparent)`, so the bytes are unchanged. The senders that build this shape —
-//! the tray stop path (shell `daemon_client/stop.rs`) · the daemon client shell (`daemon_client/connection.rs`) · the frontend
+//! the stop path (shell `daemon_client/link/stop.rs`) · the daemon client shell (`daemon_client/connection.rs`) · the frontend
 //! `wsTransport` · `scripts/engram.mjs`.
 //! ★The last two are **hand-assembled JS, which the compiler cannot catch**★: both build the frame as an untyped object literal, and
 //! the `scripts/engram.mjs` side is a path that runs even though no test covers it (`run-dashboard-release.bat` ·

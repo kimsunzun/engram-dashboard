@@ -12,8 +12,8 @@
 //! The real implementations of the traits (PID decision · WMI launch · process tree stop) merely call functions of the OS-layer crate `platform` —
 //! this module's production code has no OS branches (ADR-0266).
 //!
-//! The data folder root · the `daemon.json` location · `logs\` are copies of the daemon's authority ([`layout`]). Graceful stop (`StopDaemon`
-//! one-way fire) is held by [`crate::daemon_client::stop`].
+//! The data folder root · the `daemon.json` location · `logs\` are copies of the daemon's authority ([`layout`]). The shell's
+//! stop path (graceful `StopDaemon`, then the identity-checked kill) is [`crate::daemon_client::shutdown`].
 //!
 //! ## Security
 //! `DaemonInfo.token` is never printed to logs (flows only in the local IPC file).
@@ -201,7 +201,7 @@ pub trait Clock: engram_dashboard_base::time::Clock {
 // ── pure orchestration ────────────────────────────────────────────────────────────
 
 /// A reference-based decision so the caller keeps ownership of info — Accept gives only a signal without data.
-// pub(crate) for daemon_client::stop and daemon_client::link::endpoint · ADR-0271
+// pub(crate) for daemon_client::link::stop and daemon_client::link::endpoint · ADR-0271
 pub(crate) enum AcceptCheck {
     Accept,
     DeadPid,
@@ -211,7 +211,7 @@ pub(crate) enum AcceptCheck {
 // ADR-0196: the liveness check comes **before** the version comparison — do not flip it. And this decision **deliberately does not look at the version
 // direction**: a dead record is stale whether it is lower or higher than ours, so do not "fix" it by adding a direction decision to make it
 // 「더 새 기록이면 물러난다」 (back off if the record is newer).
-// pub(crate) for daemon_client::stop and daemon_client::link::endpoint · ADR-0271
+// pub(crate) for daemon_client::link::stop and daemon_client::link::endpoint · ADR-0271
 pub(crate) fn check_acceptable(info: &DaemonInfo, liveness: &dyn PidLiveness) -> AcceptCheck {
     if liveness.is_dead(info.pid, info.start_time) {
         return AcceptCheck::DeadPid;
@@ -448,19 +448,14 @@ pub trait ProcessKiller {
     fn kill(&self, pid: u32) -> Result<(), DiscoveryError>;
 }
 
-// ADR-0024: the place for a taskkill fallback when graceful StopDaemon gets no response/times out. When ack waiting is added to send_stop (one-way fire),
-// escalate here.
+// ADR-0024: the pid kill behind the `daemon_stop` command. No frontend calls the command; U5b-2 removes it (TRD S21
+//   trd-3-2-u5 §3-5). The shell's stop path does not use it: its kill is handle-pinned (`daemon_client::shutdown` ·
+//   `platform::process::terminate_if_same`).
 //
-// ★No call site escalates from send_stop yet = intended state (user decision: attach the forced fallback later,
-//   one-way fire first). Do not delete — it is send_stop's future fallback path.★
-//   (current call site = the daemon_stop command in src-tauri — the fallback kill path of the frontend stop(). For the wiring
-//    see the ★place to attach later★ comment of send_stop: called inside send_stop on an ack timeout.)
-//
-/// Daemon stop fallback (real entry point).
+/// Daemon pid kill (real entry point).
 ///
-/// ★Division of labor★: graceful exit (StopDaemon AgentCommand) is sent by **the frontend that holds the connection** (the daemon cleans up its child
-/// PTYs and goes down by itself). This command is the **fallback** for when there is no connection or graceful failed —
-/// it kills the pid in daemon.json directly. The daemon holds its children in a KILL_ON_JOB_CLOSE Job, so when the daemon
+/// It kills the pid in daemon.json directly, with no graceful `StopDaemon` first — the graceful stop is the shell's
+/// stop path (see the note above). The daemon holds its children in a KILL_ON_JOB_CLOSE Job, so when the daemon
 /// process dies the child PTYs are cleaned up with it (no detach possible, same as the connection_core StopDaemon comment).
 ///
 /// Returns: Ok(Some(pid))=the pid a kill was attempted on, Ok(None)=no daemon to kill (no file/already dead).
@@ -590,10 +585,8 @@ fn locate_in(candidates: &[PathBuf]) -> Result<PathBuf, DiscoveryError> {
 
 // ── real 구현 ──────────────────────────────────────────────────────────────────
 
-// pub(crate) = only for daemon_client::stop (until 3-2) · ADR-0271
-pub(crate) struct FileReader {
-    // pub(crate) = only for daemon_client::stop (until 3-2) · ADR-0271
-    pub(crate) path: PathBuf,
+struct FileReader {
+    path: PathBuf,
 }
 
 impl DaemonReader for FileReader {
@@ -609,7 +602,7 @@ impl DaemonReader for FileReader {
     }
 }
 
-// pub(crate) for daemon_client::stop and daemon_client::link::endpoint · ADR-0271
+// pub(crate) for daemon_client::link::stop and daemon_client::link::endpoint · ADR-0271
 pub(crate) struct RealLiveness;
 
 impl PidLiveness for RealLiveness {

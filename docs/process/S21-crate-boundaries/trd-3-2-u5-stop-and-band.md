@@ -20,7 +20,7 @@
 | Daemon refusals (`net` `ws.rs:338-438`) | Token checked before version; every refusal = an `Error` text frame + `close(None)`. |
 | Shell refusal paths | Version: the dialer refuses from `daemon.json` before dialing (`link/dialer.rs:170-182`). Wire: `ShellHandshake::on_frame` (`link/handshake.rs:108-133`) turns the `Error` frame into `Reject{Terminal}`. Both reach routing as `Rejected{4001}`. `ShellHandshake` never echoes the daemon's version (`:97-98` "Fix C"). |
 | Refusal text | `link/route.rs:193`: every 4001 → the version text, so a token refusal shows it too (also `connect()`'s error, `connection.rs:951-970`). Refusal notices reach a debug log only (`connection.rs:1490-1494`). |
-| Frontend surface | Event `daemon-connection-state` + pull: one word; `TauriTransport.setState` notifies on a word change only. `ConnectionNotice.tsx` renders `agentClient.connectionError` (only writer: `DaemonControl.start()`'s catch). `DaemonControl.stop()` = link round trip + `client.disconnect()` (its only production caller) + `daemon_stop` pid kill without a handle-pinned identity check. |
+| Frontend surface | Event `daemon-connection-state` + pull: one word; `TauriTransport.setState` notifies on a word change only. `ConnectionNotice.tsx` renders `agentClient.connectionError` (only writer: `DaemonControl.start()`'s catch). `DaemonControl.stop()` = link round trip + `client.disconnect()` (its only production caller) + `daemon_stop` pid kill without a handle-pinned identity check — removed in U5a (§7-1 U5). |
 | Boot start | Every window runs `App.tsx:52` `bootstrapDaemonIfNeeded()` → `daemon_start` (may spawn) — popouts and the prewarmed spare (built in `setup`, `lib.rs:357` `spawn_spare_build`) included (N7 — against ADR-0021 d1 / ADR-0025 "once at boot"). |
 | Liveness | `platform::process::pid_alive_with_start_time` (`process.rs:164-184` — dialer liveness and `ensure_daemon`) compares creation time only: an exited daemon whose process object is still held reads as live. `process_start` says `Gone` only on open error 87 (`process.rs:36-68`, `:114-123`). |
 | `DaemonClient` may be absent | `lib.rs:235-243`: managed only when setup built it. |
@@ -57,7 +57,7 @@
 
 ### 3-3. The one stop path — `DaemonClient::stop_daemon(plan, origin)` (`daemon_client/shutdown.rs`)
 
-Plans: **`User`** = band, tray, LLM, `DaemonControl.stop()` — graceful deadline 10 s · **`Exit`** = app exit — 3 s, never kills. **One absolute clock: every deadline below is measured from flight start**, including the `daemon.json` read and its retries (R13).
+Plans: **`User`** = band, tray, LLM `daemon.stop` — graceful deadline 10 s · **`Exit`** = app exit — 3 s, never kills. **One absolute clock: every deadline below is measured from flight start**, including the `daemon.json` read and its retries (R13).
 
 **R1 / R13 — order and fallback:**
 
@@ -75,7 +75,7 @@ Plans: **`User`** = band, tray, LLM, `DaemonControl.stop()` — graceful deadlin
 - **Stopping mode** lasts from flight start until the flight ends or the **flight deadline** = plan deadline + margin (`User` 10 s + 3 s, `Exit` 3 s + 1 s) — whichever comes first. **On expiry (R19) the flight task is aborted**: every side effect (dial, notify, kill, re-add) checks the flight deadline before it runs; the continuation of a blocking `daemon.json` read is discarded; the mode is released and the re-add is fired explicitly at expiry. Pins: the mode carries its own deadline (`ensure()` / `connect()` treat it as off past it); the expiry timer runs outside the flight task; the `daemon.json` read runs on `spawn_blocking`; joiners and the blocking wrapper get `timeout`, never a dropped sender; after a kill, an optional short "gone" wait on the same handle before the re-add.
 - While in stopping mode: attach-only `ensure()` (every frontend `ensureReady` / `daemon_ensure`) answers not-connected and adds nothing; explicit `connect()` (「다시 연결」) and tray 「데몬 켜기」 wait for the mode to end (at most the flight deadline). A `connect()` that waited re-reads the close epoch after the wait (R16).
 - Routing holds the shown band during the mode (R8).
-- `DaemonControl.stop()` drops `client.disconnect()`.
+- No frontend stop calls `client.disconnect()` — `DaemonControl.stop()` was removed in U5a (§7-1 U5).
 
 **R5 — blocking wrapper** `stop_daemon_blocking(plan, origin)` (tray, `quit_app`): spawns on the client's runtime and waits on a `std::sync::mpsc` channel with `recv_timeout(flight deadline)` — `User` ≤ 13 s, `Exit` ≤ 4 s from flight start; the margin covers busy-read retries, the kill and the "gone" poll. The re-add is fired, never awaited. `debug_assert!` that the thread is not an `engram-daemon-client` thread.
 
@@ -89,7 +89,7 @@ Plans: **`User`** = band, tray, LLM, `DaemonControl.stop()` — graceful deadlin
 
 ### 3-5. Cleanup
 
-Delete `stop.rs` (move its wire-shape tests); promote `terminate_if_same` from `platform::testing` to `platform::process` with a non-Windows stub inside `platform` (B1 — production API of an existing crate: report to the user); S11–S13. **Interim (U5a → U5b-2):** the frontend `DaemonControl.stop()` still uses its old path (link `StopDaemon` + `daemon_stop` pid kill) until U5b-2 — a stop through it in that window is not evidence for the new path.
+Delete `stop.rs` (move its wire-shape tests); promote `terminate_if_same` from `platform::testing` to `platform::process` with a non-Windows stub inside `platform` (B1 — production API of an existing crate: report to the user); S11–S13. **Interim (U5a → U5b-2):** the frontend `DaemonControl.stop()` and `AgentClient.stopDaemon` were removed in U5a (§7-1 U5), so there is no old frontend stop path. Until U5b-2 adds `daemon.stop` there is no supported LLM stop surface; tray Stop / Quit work. The `daemon_stop` command stays with no frontend caller until U5b-2 removes it.
 
 ## 4. U5b — two bands
 
@@ -100,7 +100,7 @@ Delete `stop.rs` (move its wire-shape tests); promote `terminate_if_same` from `
 | ① 연결 안 됨 | cold-start failure · runtime loss after the first failed reconnect (D1) · token refusal · after any stop (U4 — the re-add fails) | 「데몬에 연결하지 못했습니다.」 + token refusal: 「데몬이 이 앱의 인증을 거절했습니다」 · or `connectionError` (R14) | 「다시 연결」 |
 | ② 버전 다름 | any version mismatch | 「데몬에 연결하지 못했습니다.」 + 「실행 중인 데몬이 이 앱과 버전이 다릅니다」 | 「데몬 끄기」 only when `can_stop` |
 
-- No band: connected · an explicit frontend close (`daemon_close` — `window.__ENGRAM_AGENT__.disconnect()`; no production caller after U5b-2) · a runtime loss before the first reconnect attempt failed.
+- No band: connected · an explicit frontend close (`daemon_close` — `window.__ENGRAM_AGENT__.disconnect()`; no production caller since U5a (`DaemonControl.stop()` was its only one)) · a runtime loss before the first reconnect attempt failed.
 - 「데몬 끄기」 confirms first (ADR-0344 d2): 「이전 데몬을 끕니다. 실행 중인 에이전트가 멈춥니다 — 나중에 이어서 실행할 수 있지만 진행 중인 응답은 사라집니다」 · 「끄기」 / 「취소」.
 - **R8** — during a stop the shown band stays, the pressed button shows 「끄는 중…」 (disabled); 「다시 연결」 shows 「연결 중…」 while it runs.
 - **R9** — popouts show the band text only: no buttons, no confirm, no `connection.*` / `daemon.stop` commands.
@@ -132,10 +132,10 @@ pub enum Band { NotConnected { refused: bool }, Version { can_stop: bool } }
 |---|---|---|---|
 | `connection.status` | read | the surface | `{state, band, text}` |
 | `connection.reconnect` | write | `DaemonControl.start()` (D2): `daemon_start` (starts the local daemon if none runs) then `connect()`; on a failed `daemon_start` the catch fires the attach-only `daemon_ensure`, which starts the handle as `connect()`'s failed-search path does (R15) — not `connect()` itself, which would run a second spawning search | status after the first answer · on ② → error: with `can_stop` 「버전이 달라 다시 연결해도 거절됩니다 — daemon.stop 을 쓰세요」, without it the version text only |
-| `daemon.stop` | write | `DaemonControl.stop()` → new `daemon_shutdown` → `stop_daemon(User)`; no confirm (D5) | `{outcome: closed \| killed \| timeout \| no_target, reason?, status}` — `status` is the snapshot taken when the flight ends, before the fired re-add answers |
+| `daemon.stop` | write | new `daemon_shutdown` → `stop_daemon(User)`; no confirm (D5) | `{outcome: closed \| killed \| timeout \| no_target, reason?, status}` — `status` is the snapshot taken when the flight ends, before the fired re-add answers |
 
 - Not on the daemon bus: in every state with a button the shell has no daemon link (ADR-0344 d7, ADR-0345 d5).
-- `DaemonControl.stop()` → `daemon_shutdown`, no `disconnect()`; the `daemon_stop` command goes if unused.
+- `daemon.stop` is a new surface that calls `daemon_shutdown`, no `disconnect()` — not a rewrite of `DaemonControl.stop()`, which U5a removed (§7-1 U5). The `daemon_stop` command goes (no frontend caller since U5a).
 
 ### 4-5. Boot and runtime fixes
 
@@ -160,7 +160,7 @@ pub enum Band { NotConnected { refused: bool }, Version { can_stop: bool } }
 |---|---|
 | **U5a** | §3 in full: daemon `StopDaemon` fix + its two tests · `link/stop.rs` · `daemon_client/shutdown.rs` (R1/R13 absolute deadline and fallback, R2 single flight + stopping mode with flight deadline, R4 "gone" incl. the one-handle probe and the `pid_alive_with_start_time` exit-code alignment in `platform` (review / test its callers `codex/thread_lock.rs:288`, `net/portfile.rs:86`), R5, R16 epoch re-read, R19 expiry) · `terminate_if_same` promotion + non-Windows stub · tray Stop / Start, `quit_app` with `try_state` · delete `stop.rs` · drop `tungstenite` + 「shell gate 6」 · `stop_smoke` re-aim + `v0.3.2` case · `qa.md` / comment follow-ups. No UI change. |
 | **U5b-1** | Verify A and B · refusal slot · `Band` status in routing (R7, held band, R20 boot-pending flag) · driver watch + port + DTO + binding + pull · texts · `daemon_shutdown` · frontend transport parses the DTO and notifies on band change (contract in one commit). |
-| **U5b-2** | Frontend: band model + `ConnectionNotice` (buttons, confirm, busy labels, ✕ key, popout text-only, R14) · `connectionCommands.ts` (main window) · `DaemonControl.stop()` → `daemon_shutdown` without `disconnect` (remove `daemon_stop` if unused) · `connectionError` guard (R21) · `DaemonControl.start()` attach on failure (R15) · boot start in the main window only (R17) · `src/i18n/ko.ts` · GUI QA. |
+| **U5b-2** | Frontend: band model + `ConnectionNotice` (buttons, confirm, busy labels, ✕ key, popout text-only, R14) · `connectionCommands.ts` (main window) · `daemon.stop` on a new surface → `daemon_shutdown` without `disconnect` (not a rewrite of `DaemonControl.stop()`, removed in U5a) · remove `daemon_stop` (no frontend caller since U5a) · `connectionError` guard (R21) · `DaemonControl.start()` attach on failure (R15) · boot start in the main window only (R17) · `src/i18n/ko.ts` · GUI QA. |
 
 Docs: main TRD row 404 → pointer here, §6-4 ③ and ⑤ wording · `docs/reference/architecture.md` · `docs/tracking.md` T-52.
 
@@ -176,12 +176,13 @@ Docs: main TRD row 404 → pointer here, §6-4 ③ and ⑤ wording · `docs/refe
   - **Carry-over to the multi-daemon PRD** — user: 「나중에 멀티데몬 할 경우에도 한개가 타겟이 되어야되는데 그 데몬을 붙이면 되겠지」: the button targets one daemon; a remote daemon can only be attached, not started.
 - **Two bands** User: 「버전 다름 하고 연결안됨」 → §4-1.
 - **U4** (2026-11-09) After a user-initiated stop (tray 「데몬 끄기」, LLM `daemon.stop`, band stop) the band is just the ordinary ① 「연결 안 됨」 — no "no band after an intended stop" rule, no special text. User: 「A로 해 문구는 너무 디테일하게 말고 심플하게」. → no stopped latch; stopping mode only during a flight; supersedes parent §6-4 ⑤ for stops.
+- **U5** (2026-11-09) Remove the frontend `DaemonControl.stop()` / `AgentClient.stopDaemon` in U5a. User: 「ㅇㅇ 그렇게 해」. Closes the U5a review hold on an explicit disconnect reversed by the stop's re-add. Accepted: until U5b-2 there is no supported LLM stop surface (tray Stop / Quit work).
 
 ### 7-2. Main decisions
 
 - **D3** Two bands; the shell sends `state` + `band`; `newer` / `stale_exe` stay shell-internal.
 - **D4** Token vs version via a per-registration refusal slot.
-- **D5** The LLM `daemon.stop` runs without the confirm dialog (precedent: `__ENGRAM_DAEMON__.stop()`).
+- **D5** The LLM `daemon.stop` runs without the confirm dialog (precedent: `__ENGRAM_DAEMON__.stop()`; that surface was removed in U5a — §7-1 U5).
 - **D6** Identity-checked kill fallback for band and tray (ADR-0343 d3 / ADR-0344 d3, d6).
 - **D7** Graceful deadline 10 s, then the kill. Convention: `docker stop` 10 s (docs.docker.com), supervisord `stopwaitsecs` 10 s (supervisord.org); PM2 1.6 s; Windows SCM 5 s unconfirmed; k8s 30 s / systemd 90 s are server settings.
 - **D8** App exit (ADR-0026) also stops an older-version daemon.
@@ -189,7 +190,7 @@ Docs: main TRD row 404 → pointer here, §6-4 ③ and ⑤ wording · `docs/refe
 - **D10** LLM path = `__engramCmd` `connection.status` / `connection.reconnect` / `daemon.stop`.
 - **D11** Findings A and B fixed in U5 after a verify-first step.
 - **R1** (round 1: codex must 1 · lead R1 · risk F4/F6) Fallback also when nothing was sent (dial bound now per R13); identity re-check after a kill; `start_time == 0` → no kill, reported; busy `daemon.json` retried. `Exit` never kills.
-- **R2** (round 1: codex must 2 · lead M1/R3 · risk F2/F8) Single-flight stop + stopping mode; `DaemonControl.stop()` drops `disconnect()`. Latch and band-origin rule removed by U4.
+- **R2** (round 1: codex must 2 · lead M1/R3 · risk F2/F8) Single-flight stop + stopping mode; no frontend stop calls `disconnect()` (`DaemonControl.stop()` removed in U5a — §7-1 U5). Latch and band-origin rule removed by U4.
 - **R3** (risk F1 · lead R4) Daemon `StopDaemon` shutdown in a task a connection abort cannot cancel; Ack best-effort; older daemons accepted as is.
 - **R4** (risk F3 · round 2: lead N4 · risk N5 · codex · round 3: codex must · risk N-5) "Gone" = open fails with 87 only, or creation time ≠ a nonzero target `start_time`, or exit code ≠ `STILL_ACTIVE` on the same handle; any other failure = unknown (not gone); `start_time == 0` → no creation-time compare, no kill. Kill identity = the target resolved at flight start. `pid_alive_with_start_time` gains the exit-code check, done on one handle with the creation time (a leftover `daemon.json` of an exited daemon is not live); its other callers — `agent/src/backend/codex/thread_lock.rs:288`, `net/src/portfile.rs:86` — are in U5a's review and test scope. Poll and finish early. Tray maps `killed` like `closed`.
 - **R5** (risk F5 · round 2: risk N4/N6a · lead 6) Blocking bound = the flight deadline from flight start (`User` 10 + 3 s, `Exit` 3 + 1 s), covering busy-read retries, kill and "gone" poll; re-add fired, not awaited.
@@ -221,6 +222,7 @@ Docs: main TRD row 404 → pointer here, §6-4 ③ and ⑤ wording · `docs/refe
 
 ## 9. Risks
 
+- **A spawning search racing a stop that starts after it** (U5a code review, risk 권장) — a `daemon_connect` / tray Start whose search spawns a daemon after a tray stop resolved `NoTarget` leaves that daemon running (the User re-add attaches it). No crash or data loss; the tray probe shows the truth. Accepted.
 - **Older daemons cancel their own shutdown** (accepted): a shipped daemon stopped by `Exit` whose `shutdown_all` outlasts the 3 s wait may survive with zero agents (`shutting_down` was set first, so boot auto-restore marks stay). `User` stops wait 10 s and kill a survivor.
 - **Kill during cleanup** — bounded: `shutdown_all` ≈5 s under the 10 s deadline; an at-once kill hits only a daemon to which nothing was sent.
 - **Unknown liveness** — an open / query failure other than 87 is "unknown": the stop reports `timeout` rather than claim gone; a process that denies `PROCESS_QUERY_LIMITED_INFORMATION` never reads as gone.

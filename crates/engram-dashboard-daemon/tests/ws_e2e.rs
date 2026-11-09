@@ -1437,11 +1437,19 @@ async fn case20_ws_stop_daemon_force_policy() {
         request_id: req_stop,
     })
     .await;
-    c.await_ack(req_stop).await;
+    // The Ack is best effort (the daemon's `Close` aborts its writer), so the test asserts the close and the shutdown.
     assert!(
         c.expect_closed().await,
         "StopDaemon(force) 후 연결이 닫혀야"
     );
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !server.shutdown_signalled() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "StopDaemon(force) must fire the daemon's shutdown within 10 s"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 
     // accept_handle join 으로 accept loop 종료 확정(shutdown 은 idempotent — 이미 종료된 watch 에 재send).
     server.shutdown().await;

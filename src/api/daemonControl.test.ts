@@ -11,18 +11,14 @@ import type { AgentClient, ConnectionState } from './agentClient'
 function fakeClient(
   state: ConnectionState,
   overrides: {
-    stopDaemon?: ReturnType<typeof vi.fn>
     connect?: ReturnType<typeof vi.fn>
-    disconnect?: ReturnType<typeof vi.fn>
     reportConnectionError?: ReturnType<typeof vi.fn>
   } = {},
 ): AgentClient {
   return {
     connectionState: state,
     connectionError: null,
-    stopDaemon: overrides.stopDaemon ?? vi.fn(async () => undefined),
     connect: overrides.connect ?? vi.fn(async () => undefined),
-    disconnect: overrides.disconnect ?? vi.fn(() => undefined),
     reportConnectionError: overrides.reportConnectionError ?? vi.fn(() => undefined),
   } as unknown as AgentClient
 }
@@ -71,67 +67,6 @@ describe('DaemonDaemonControl (daemon 모드)', () => {
     invokeMock.mockResolvedValueOnce({ pid: 1, host: '127.0.0.1', port: 5, protocol_version: 1 })
     await ctrl.start()
     expect(invokeMock).toHaveBeenCalledWith('daemon_start', { console: false, timeoutMs: null })
-  })
-
-  it('stop(연결 있음) → graceful StopDaemon → disconnect → still-alive 확인 → fallback', async () => {
-    const stop = vi.fn(async () => undefined)
-    const disconnect = vi.fn(() => undefined)
-    const ctrl = new DaemonDaemonControl(fakeClient('connected', { stopDaemon: stop, disconnect }))
-    // Since graceful was Acked, M-1: check still-alive with daemon_status. It answers dead → fallback skipped.
-    invokeMock.mockImplementation(async (cmd: string) => {
-      if (cmd === 'daemon_status') return { alive: false, pid: null, port: null }
-      return undefined
-    })
-    await ctrl.stop()
-    expect(stop).toHaveBeenCalledWith(false)
-    expect(disconnect).toHaveBeenCalledTimes(1) // note3: reconnect noise removed.
-    expect(invokeMock).toHaveBeenCalledWith('daemon_status')
-    expect(invokeMock).not.toHaveBeenCalledWith('daemon_stop')
-  })
-
-  it('stop(연결 있음) graceful 후에도 살아있으면 → fallback daemon_stop(M-1)', async () => {
-    const stop = vi.fn(async () => undefined)
-    const ctrl = new DaemonDaemonControl(fakeClient('connected', { stopDaemon: stop }))
-    invokeMock.mockImplementation(async (cmd: string) => {
-      if (cmd === 'daemon_status') return { alive: true, pid: 9, port: 1 }
-      return undefined
-    })
-    await ctrl.stop()
-    expect(invokeMock).toHaveBeenCalledWith('daemon_status')
-    expect(invokeMock).toHaveBeenCalledWith('daemon_stop')
-  })
-
-  it('stop(연결 없음) → graceful 스킵, disconnect 후 곧장 fallback daemon_stop(status 확인 안 함)', async () => {
-    const stop = vi.fn(async () => undefined)
-    const disconnect = vi.fn(() => undefined)
-    const ctrl = new DaemonDaemonControl(fakeClient('down', { stopDaemon: stop, disconnect }))
-    await ctrl.stop()
-    expect(stop).not.toHaveBeenCalled()
-    expect(disconnect).toHaveBeenCalledTimes(1)
-    expect(invokeMock).not.toHaveBeenCalledWith('daemon_status')
-    expect(invokeMock).toHaveBeenCalledWith('daemon_stop')
-  })
-
-  it('stop graceful 거부(active agents)해도 status 확인 없이 fallback kill 로 진행', async () => {
-    const stop = vi.fn(async () => {
-      throw new Error('active agents present')
-    })
-    const ctrl = new DaemonDaemonControl(fakeClient('connected', { stopDaemon: stop }))
-    await expect(ctrl.stop({ force: false })).resolves.toBeUndefined()
-    expect(stop).toHaveBeenCalledWith(false)
-    expect(invokeMock).not.toHaveBeenCalledWith('daemon_status')
-    expect(invokeMock).toHaveBeenCalledWith('daemon_stop')
-  })
-
-  it('stop(force) → graceful 에 force=true 전달', async () => {
-    const stop = vi.fn(async () => undefined)
-    const ctrl = new DaemonDaemonControl(fakeClient('connected', { stopDaemon: stop }))
-    invokeMock.mockImplementation(async (cmd: string) => {
-      if (cmd === 'daemon_status') return { alive: false, pid: null, port: null }
-      return undefined
-    })
-    await ctrl.stop({ force: true })
-    expect(stop).toHaveBeenCalledWith(true)
   })
 
   it('status → daemon_status invoke 결과 반환', async () => {

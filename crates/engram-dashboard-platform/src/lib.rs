@@ -10,7 +10,7 @@
 //!
 //! There are ten residents today — [`process`](PID liveness · process start time and its three-way verdict ·
 //! the process table · child PID enumeration · the identity list under one root · ending one process tree —
-//! Windows `taskkill`) · [`group`](the strong owner of a process group · weak handles · held members · the
+//! Windows `taskkill` · whether one identity still runs and ending it only if it does — one handle) · [`group`](the strong owner of a process group · weak handles · held members · the
 //! join-notification port — Windows Job Object) · [`file_holders`](the processes that have this file open
 //! now — Restart Manager) · [`fs`](opening while denying others' writes · classifying that failure — sharing
 //! violation · access denied · the verdict and retry for a failure caused by someone holding it briefly ·

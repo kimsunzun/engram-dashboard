@@ -848,6 +848,11 @@ impl TestServerHandle {
         let _ = tokio::task::spawn_blocking(move || mgr.shutdown_all()).await;
         self.flush_worker.shutdown().await;
     }
+
+    /// Whether the daemon's shutdown trigger has fired — by a `StopDaemon` or by [`Self::shutdown`].
+    pub fn shutdown_signalled(&self) -> bool {
+        *self.shutdown_tx.borrow()
+    }
 }
 
 #[cfg(feature = "test-support")]

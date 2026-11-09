@@ -3322,6 +3322,7 @@ fn idle_client() -> Idle {
         Arc::new(RefusalAlerts::new(Arc::new(RecordingRefusals::new()))),
         Arc::new(OutputRouter::new()),
         WindowChannelRegistry::default(),
+        crate::daemon_client::shutdown::inert_ports(MemoryNetwork::new().dialer()),
         |rt, ports| {
             let (link, driver, cmds, routable_rx) = LinkClient::build(
                 rt,
