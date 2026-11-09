@@ -2,7 +2,7 @@
 
 | Item | Value |
 |---|---|
-| **Status** | **Draft 1 — 2026-11-09.** Not reviewed. Main's decisions are recorded in §9-1. Four conflicts between those decisions and the code or the parent documents are raised in §9-2 and need main's ruling. Three user decisions stay open (§9-3: U1–U3). The library survey for the new `toml` dependency (§9-4) is to be reported to the user before P1. |
+| **Status** | **Draft 2 — 2026-11-09 — user decisions U1–U3 decided; review pending.** Main's decisions are in §9-1; main's rulings on the four conflicts found in draft 1 (C1–C4) are in §9-2; the user's decisions U1–U3 are in §9-3. The `toml` survey (§9-4) was reported to the user 2026-11-09 with no objection. Draft 1 = `21bc0063`. |
 | **Canonical ADRs** | ADR-0334 (the port; flag translation in backend `materialize`; no YAML in agent) · ADR-0337 (codex materials: JSON = `developerInstructions` + `extraRoots`; terminal = the 「기본」 priming + the settings `-c` lines; nothing written) · ADR-0341 (folder entries: codex gets only what it lacks) · ADR-0351 (a failed placement write fails the spawn — the claude precedent that #5 extends to codex) · ADR-0316 (the claude counterpart, pattern only). ADR candidates from this step: §8-1. |
 | **Line pointers** | HEAD `1e36176d` (branch `v0.5.0/feat/preset-library`). Every code anchor below was re-read at this commit. Paths are under `crates/engram-dashboard-agent/src/` unless stated otherwise. |
 | **Measurements** | [`docs/research/codex-launch-materials-measurements-2026-11-09.md`](../../research/codex-launch-materials-measurements-2026-11-09.md) — M1–M7 on `codex-cli 0.163.0` (cited below as M1 … M7). |
@@ -23,12 +23,12 @@
 - terminal: the 「기본」 priming by the current path (`-c developer_instructions=`) + the preset raw `-c` lines; preset instructions and skills are not loaded; nothing is written to the working folder;
 - the port's codex implementation: `-c` assembly (dotted key · TOML), skill format (P7AC — through the caller's parser; the front-matter serde type is agent's — M72; tests here use a fake parser — M63), skill-name rule (codex JSON only — M24-3), command-line guard and the 8191-character budget (both modes — M8), unknown key = ⚠;
 - folder entries (ADR-0341): JSON = the folder's instruction file joins the merged instructions (asset-library composes it; this step only carries the text), the folder's `.agents/skills` · `.codex/skills` become extra roots (no junction, nothing written); terminal = nothing from the folder + the omission notice; the codex folder load set;
-- the same-name measurement across extra roots (done — M2) and its fallback policy (U2).
+- the same-name measurement across extra roots (done — M2) and its fallback policy (U2 — decided: launch + a notice naming the duplicates).
 
 **Handed over by step 5 (L880) — all in scope:** a skill-root kind in the folder load set · a malformed-skill mark that is not `unsure` · a per-version `SchemaRefetch` variant · an `omitted` list for the terminal folder notice · the registry growing to two slots. The step-5 list is incomplete: the codex skill-format method, the agent-owned codex front-matter type and its parser-seam method, and the command-line guard/budget methods are also needed (parent §1-5 L278–L279 says the port holds them). They are added here, additively (§4-1).
 
 **Not in scope:**
-- **emitting notices.** Notices live in `LaunchPlan.notices`, which `check` (asset-library, step 7) fills. `materialize` has no notice channel. This step defines the codes and their wording (U3), the `loads()` knowledge and the folder `omitted` list; step 7 produces the notices;
+- **emitting notices.** Notices live in `LaunchPlan.notices`, which `check` (asset-library, step 7) fills. `materialize` has no notice channel. This step defines the codes and their wording (U3 — decided), the `loads()` knowledge, the folder `omitted` list and the inputs for the same-name notice (`skill_names`, `native_skill_roots`); step 7 produces the notices;
 - **recording the hash at the first-turn event** (`manager.rs:1780` `TODO(TRD S25 §5-2 4 (b))`) — stays with step 8 (§4-8, decision #1);
 - the real YAML parser golden for the codex skill format (step 7 — M63);
 - a manager hook that turns a build-time overflow into `LaunchBlocked` (decision #7);
@@ -100,6 +100,38 @@ pub trait SettingsCheck: Send + Sync {
     /// channel, a resume id) at their upper-bound length. `Err` = over the budget or an instructions text the command
     /// line cannot carry (problem ②). A backend with no command-line budget answers `Ok(())`.
     fn command_line_fits(&self, line: &CommandLine<'_>) -> Result<(), Reason>;
+
+    /// The skill folders this backend reads by itself in `mode`, besides the roots Engram passes — the input for the
+    /// same-name notice (U2). Pure: candidate paths and rules only; the caller stats and lists them. Empty for a
+    /// backend or mode that needs no such notice (claude; codex terminal).
+    fn native_skill_roots(&self, places: &NativePlaces<'_>, mode: AgentOutputFormat) -> NativeSkillRoots;
+
+    /// The skills this backend loads from one skill root, predicted from a listing of that root (the same walk and
+    /// format check as the skill roots inside [`SettingsCheck::folder_load_set`]). Used for the native roots above.
+    fn root_skills(
+        &self,
+        entries: &[FolderEntry],
+        read: &dyn Fn(&Path) -> std::io::Result<String>,
+        parser: &dyn FrontMatterParser,
+    ) -> FolderLoadSet;
+}
+
+pub struct NativePlaces<'a> {
+    pub home: &'a Path,
+    /// The agent's normalized working folder.
+    pub cwd: &'a Path,
+    /// An environment variable as the agent's process would see it (the profile env over the daemon's).
+    pub env: &'a dyn Fn(&str) -> Option<String>,
+}
+
+pub struct NativeSkillRoots {
+    /// Roots read as they are (codex: `$CODEX_HOME/skills` — default `<home>/.codex/skills` — and
+    /// `<home>/.agents/skills`).
+    pub fixed: Vec<PathBuf>,
+    /// A root name looked for in `cwd` and in each parent up to the project root (codex: `.agents/skills`).
+    pub per_folder: Option<PathBuf>,
+    /// The name whose presence marks the project root (codex default: `.git`); none found = `cwd` only.
+    pub project_marker: Option<String>,
 }
 
 pub enum SkillFormat {
@@ -184,7 +216,7 @@ pub struct FolderSkillName { pub path: PathBuf, pub name: String }
 
 `FolderLoad.path` doc changes from "as listed" to "as listed — for a `SkillRoot`, the root folder (relative to the entry folder)".
 
-**Claude answers** (`backend/claude/settings.rs`, one line each): `skill_format` → `NotChecked` · `command_line_args` → `Ok(vec![])` (the raw value goes into the merged `settings.json`) · `command_line_fits` → `Ok(())` (no claude budget is claimed — parent L314; T-83). The claude test `FakeParser` gains `skill` as a stub that returns an error ("not used by the claude tests") (decision #9).
+**Claude answers** (`backend/claude/settings.rs`, one line each): `skill_format` → `NotChecked` · `command_line_args` → `Ok(vec![])` (the raw value goes into the merged `settings.json`) · `command_line_fits` → `Ok(())` (no claude budget is claimed — parent L314; T-83) · `native_skill_roots` → empty · `root_skills` → `FolderLoadSet::default()`. The claude test `FakeParser` gains `skill` as a stub that returns an error ("not used by the claude tests") (decision #9).
 
 ### 4-2. The codex implementation — `backend/codex/settings.rs` (new)
 
@@ -205,6 +237,7 @@ pub struct FolderSkillName { pub path: PathBuf, pub name: String }
 | `folder_load_set` | §4-2c |
 | `skill_format` | §4-2b (JSON); `NotChecked` in Terminal |
 | `command_line_args` / `command_line_fits` | §4-3 |
+| `native_skill_roots` / `root_skills` | §4-2d (JSON); empty in Terminal |
 
 #### 4-2a. Raw text → JSON (decision #10, M6)
 
@@ -212,8 +245,11 @@ The codex raw value is a JSON array of strings, one `key=value` override each (p
 1. split at the first `=` — none ⇒ `Err` (`codex-config-line-invalid`, args `{index, line}`);
 2. trim the key and the value; an empty key ⇒ `Err` (same code);
 3. split the key on `.` with no quoting (empty segments allowed, as codex allows `a..b=1`);
-4. value = `toml::from_str::<toml::Table>(&format!("_x_ = {value}"))` and take `_x_`. If that fails, the value is the trimmed text with leading and trailing `"` and `'` characters stripped (M6 — the trim set is inferred from two cases, **likely**);
-5. insert into the result object along the dotted path, a later line replacing an earlier value at the same path.
+4. value = `toml::from_str::<toml::Table>(&format!("_x_ = {value}"))` and take `_x_`. If that fails, the value is the trimmed text with every leading and trailing `"` and `'` character stripped (`trim_matches(|c| c == '"' || c == ''')`);
+5. the key `use_legacy_landlock` is renamed `features.use_legacy_landlock` (codex's one key alias);
+6. insert into the result object along the dotted path, a later line replacing an earlier value at the same path.
+
+**Checked against the codex source** (draft 2): steps 1, 2, 4 and 5 are `CliConfigOverrides::parse_overrides` / `parse_toml_value` / `canonicalize_override_key` in `codex-rs/utils/cli/src/config_override.rs` at tag `rust-v0.163.0` (read 2026-11-09) — `splitn(2, '=')`, `trim()` on both sides, `"Empty key in override"`, the `_x_ = {raw}` wrapper parsed with `toml::from_str::<toml::Table>`, and the `trim_matches` fallback — **certain**. Draft 1 had the fallback from memory and the trim set as "likely". Step 3 (the dotted split) and step 6 (applying the path) are not in that file — they rest on M6 (certain for the cases measured); the applying code was not re-read (**unverified** beyond M6). Codex resolves `toml 0.9.11+spec-1.1.0` (its `Cargo.lock` at the same tag; workspace dependency `toml = "0.9.5"`); our `toml 1.1.2+spec-1.1.0` implements the same TOML spec (1.1.0) — a difference between the two crate versions is possible but not known (R2).
 
 A non-array raw value or a non-string element ⇒ `Err` (`codex-config-not-a-list`). Conversion of the TOML value to JSON is written by hand: a TOML datetime becomes its TOML text as a JSON string (serde would emit toml's private datetime struct); a non-finite float becomes its text as a string (the schema then decides).
 
@@ -242,9 +278,17 @@ Input = the listing of one folder entry (`FolderEntry::File` / `UnenteredLink`, 
 
 Codex terminal: `loads`, `unsure`, `malformed`, `skill_names` empty; `omitted` = the `loads` rows the JSON computation produces (instruction file, roots, skills). The same function computes both, so the notice and the JSON launch cannot disagree.
 
+#### 4-2d. Codex's own skill folders (U2 — the same-name notice)
+
+`native_skill_roots(places, Json)` = `fixed: [$CODEX_HOME/skills (default <home>/.codex/skills), <home>/.agents/skills]`, `per_folder: .agents/skills`, `project_marker: .git`. Terminal ⇒ empty (no skill notice: the terminal loads no Engram skills). The list comes from research `external-skill-dir-loading-claude-codex-2026-10-10.md` (finding 7, codex 0.15x); P1 re-checks it against the codex skill loader at `rust-v0.163.0` and keeps only what it confirms (**unverified on 0.163.0** until then). Not covered — "as far as we can see them": a project-root marker configured in the user's codex config, codex's bundled system skills, and any root a plugin adds.
+
+`root_skills(entries, read, parser)` = the skill walk of §4-2c applied to one root (`loads` = `Skill` rows, `skill_names`, `malformed`, `unsure`). Whether codex walks its own scopes with the same rules as an extra root (dot-folder pruning, depth) is part of the same P1 source check — unverified.
+
+**The comparison is step 7's** (asset-library `check`): the names of the library skills it loads (Engram names — equal to codex's names, M1), the folder entries' `skill_names`, and `root_skills` over each existing native root; a name seen in two or more places ⇒ one `codex-same-name-skills` notice per name (U3). Names are compared as exact strings (how codex matches a `$name` mention is not measured beyond M2's identical names). Library-vs-library stays the existing conflict block (PRD R4 / parent §1-3 5), so it never reaches the notice.
+
 ### 4-3. Command-line guard and budget — `backend/codex/cmdline.rs` (new) + `platform::shell`
 
-**Platform** (decision #8, conflict C1): `engram-dashboard-platform/src/shell.rs` gains
+**Platform** (decision #8, C1 — ruled by main: as drafted): `engram-dashboard-platform/src/shell.rs` gains
 
 ```rust
 /// Whether a text argument reaches a CLI wrapped by [`console_command`] unchanged — `false` when it holds one of
@@ -257,8 +301,9 @@ built on the existing private `CMD_UNSAFE_CHARS` (`:52`), so the set lives in on
 **Codex** (`cmdline.rs`, shared by the port and `materialize`):
 
 ```rust
-/// `-c` + value for each line of one raw codex value, refusing a line that `text_is_cli_safe` refuses.
-/// `"` and `'` are allowed (M5 — but see conflict C2). Lines are first validated by the §4-2a split rule.
+/// `-c` + value for each line of one raw codex value, refusing a line that `text_is_cli_safe` refuses or that holds
+/// an odd number of `"` (C2 — main's ruling). An even number of `"` and any `'` are allowed (M5). Lines are first
+/// validated by the §4-2a split rule.
 pub(super) fn config_args(raw: &Value) -> Result<Vec<String>, Reason>;
 
 /// The codex terminal priming value `developer_instructions='…'` (TOML literal) for `text`, or why it cannot be
@@ -275,7 +320,7 @@ pub(super) fn fits(line: &CommandLine<'_>) -> Result<(), Reason>;
 
 **The MCP bound is made structural.** `mcp_attachment` (`codex/mod.rs:453`) returns `Unrepresentable` when the control URL is longer than a new constant `MCP_URL_BUDGET` (128 UTF-16 units; the daemon's URL is `http://127.0.0.1:<port>/mcp`, at most 27). `precheck_control_endpoint` already fails a spawn on `Unrepresentable`, so the bound used by `fits` can never be below the real value. The resume pair is counted in every terminal spawn (a 36-character uuid).
 
-Reason codes: `codex-config-unsafe-char` (args `{index, line}`) · `codex-priming-unsafe-char` (args `{char}`) · `command-line-too-long` (args `{needed, limit}`).
+Reason codes: `codex-config-unsafe-char` (args `{index, line}` — a banned char or an odd `"` count) · `codex-priming-unsafe-char` (args `{char}`) · `command-line-too-long` (args `{needed, limit}`).
 
 ### 4-4. Launch types — `launch.rs`
 
@@ -330,7 +375,7 @@ The read closure is a seam for the unit tests (the `LaunchFs` port stays write-o
 **Body.** Noop kit (`!kit.plan.real`) ⇒ `LaunchArtifacts::default()`. Real kit — every check comes **before** the first write (the step-5 D6 order):
 1. `config_overrides` = `cmdline::config_args` over `kit.plan.raw_settings` in order (defense in depth — `check` ran the same function). `Err` ⇒ `Err`.
 2. Instructions text (decision #5): `kit.instructions_file` `Some` ⇒ `read` it. A read error or non-UTF-8 ⇒ `Err` (fail closed — the ADR-0351 rule; a new ADR, §8-1). Blank ⇒ treated as none.
-3. **Terminal:** `instructions_override` = `cmdline::priming_value(text)`; a refusal ⇒ per **U1** (§9-3): (a) `Err`; (b) warn and `None`. Then `cmdline::fits(...)` with the real pieces and the two bounds. Over ⇒ per U1 when dropping the priming would make it fit, else `Err`. Skills, extra roots and folders are ignored; nothing is written (P4-FINAL, ADR-0337 decision 4).
+3. **Terminal:** `instructions_override` = `cmdline::priming_value(text)`; a refusal ⇒ `Err` (U1 (a) — decided: there is no warn-and-launch path on real materials). Then `cmdline::fits(...)` with the real pieces and the two bounds; over ⇒ `Err`. `check` already blocked both cases with `Broken`, so reaching them here is the residual case (decision #7). Skills, extra roots and folders are ignored; nothing is written (P4-FINAL, ADR-0337 decision 4).
 4. **JSON:** `instructions_text` = the text; `instructions_changed` = `kit.instructions_hash.is_some() && kit.instructions_hash != kit.last_applied_instructions_hash`. Extra roots: every `kit.plan.extra_skill_roots` path must be absolute and valid UTF-8, else `Err`. Skill links (decision #4): each `kit.skills` name must pass `accepts_skill_name(name, Json)` (defense in depth — `check` blocks it as ②), else `Err`; two skills on the same link path (`platform::fs::same_path`) ⇒ `Err`. `cmdline::fits(...)` (JSON has no priming on the line) — over ⇒ `Err` (decision #7).
 5. Writes (JSON, only with ≥ 1 skill): `fs.link_dir(<vol>\engram\skills\<name>, skill.dir)` per skill. A failed link ⇒ `Err` (ADR-0351 rule). `skill_roots` = `[<vol>\engram\skills]` (when ≥ 1 skill) followed by `kit.plan.extra_skill_roots`.
 
@@ -402,7 +447,7 @@ pub(crate) struct AppServerOpen {
 3. **new:** if `extra_roots` is not empty, `skills/extraRoots/set {extraRoots}` and wait for its response. An error response or a timeout fails the handshake (the link fails → the spawn fails — fail closed, like any handshake error). Sent on **every** process, start and resume alike (M4, decision #4);
 4. `thread/start` / `thread/resume` (unchanged).
 
-**First turn.** `State` gains `first_turn_context: Option<String>`, set from the open plan. `take_turn_locked` (`:1984`) attaches it as `{ "engram-instructions": {kind: "application", value} }` to the first `turn/start` it builds. What happens to it after that turn's outcome is conflict **C3** (§9-2) — the draft default, pending main's ruling, is: clear it when that `turn/start` is answered with success; keep it for the next `turn/start` after `Rejected` (M3: a rejected `turn/start` creates nothing) and after `Unanswered` (a duplicate developer message is cheaper than a lost one). Steer (`turn/steer`) never carries it.
+**First turn.** `State` gains `first_turn_context: Option<String>`, set from the open plan. `take_turn_locked` (`:1984`) attaches it as `{ "engram-instructions": {kind: "application", value} }` to the first `turn/start` it builds, and keeps it until a `turn/start` carrying it is accepted (C3 (a) — ruled by main): cleared when that `turn/start` is answered with success; kept for the next `turn/start` after `Rejected` (M3: a rejected `turn/start` creates nothing, so this cannot duplicate) and after `Unanswered` (a duplicate developer message is cheaper than a lost one). Steer (`turn/steer`) never carries it. This also keeps step 8's recording honest: the hash is recorded at the echo of the first user message, and only an accepted `turn/start` produces that echo — the one that carried the context.
 
 **Wording** (decision #3): value = one English preface line, a blank line, then the full new text:
 > `The instructions for this agent changed since its last launch. The current instructions follow and take precedence over earlier instructions in this conversation.`
@@ -419,9 +464,17 @@ pub(crate) struct AppServerOpen {
 - **Manager:** one assignment after the re-read: `kit.last_applied_instructions_hash = reread.last_applied_instructions_hash.clone();` (the binding at `:1546` becomes `let mut kit`). Comment anchor `// ADR-0337`.
 - **Recording at the first-turn event stays with step 8** (`manager.rs:1780` TODO 4(b)). It is not a one-line change: it needs a separate, incarnation-guarded registry mutate that runs at the first-turn event whether or not the session-id compare-and-replace wrote anything (parent L245, ADR-0337 impact), carried through the latch closure, plus its tests. Consequence until then: the stored hash stays `None`, so every real codex JSON resume would carry `additionalContext`. No live effect, because real kits are plugged in by step 8 — step 8 must land the recording in the same commit (§8-1).
 
-### 4-9. Notice codes (U3)
+### 4-9. Notice codes (U3 — decided)
 
-Defined in `launch.rs` next to `notice_text` (constants + one wording arm each); produced by step 7. Codes and Korean wording are U3 (§9-3). `args` carry only identity (names and paths), as `notice_fingerprint` requires.
+Defined in `launch.rs` next to `notice_text` (a constant + one wording arm each, replacing the generic wording for these codes); produced by step 7. `args` carry only identity (names and paths), as `notice_fingerprint` requires; the wording fills the placeholders from `args` (names joined with `, `).
+
+| Code | `args` | Wording (user 2026-11-09, exact) |
+|---|---|---|
+| `codex-terminal-omitted` | `{instructions: [library paths], skills: [names]}` | 「알림: codex 터미널 모드는 프리셋 지시서와 스킬을 지원하지 않습니다. 적용되지 않은 항목: 지시서 <이름>, 스킬 <이름>」 |
+| `codex-terminal-folder-omitted` | `{folder, items: [relative paths]}` | 「알림: codex 터미널 모드는 폴더 항목을 지원하지 않습니다. 적용되지 않은 폴더: <폴더> (<파일, 스킬 폴더>)」 |
+| `codex-same-name-skills` | `{name, paths: [...]}` | 「알림: 같은 이름의 스킬이 여러 곳에 있습니다. codex에서 $<이름>으로 부르면 어느 쪽도 선택되지 않습니다. <이름>: <경로>, <경로>」 |
+
+When a list in `codex-terminal-omitted` is empty, its part is left out (「적용되지 않은 항목: 스킬 a, b」). Style rule from the user (2026-11-09): app wording avoids translationese — no 「싣다 / 실리다」.
 
 ## 5. Answer shapes
 
@@ -436,7 +489,7 @@ No wire or bus shape changes. New `Reason` codes (kebab-case, as the existing on
 | `command-line-too-long` | `command_line_fits` | `{needed, limit}` |
 | `codex-skill-file-name` · `codex-skill-no-front-matter` · `codex-skill-front-matter` · `codex-skill-name-too-long` · `codex-skill-description-empty` | `skill_format` | `{message?}`, `line` where known |
 
-The block-window wording for these codes belongs to the client step. The notice codes are U3.
+The block-window wording for these codes belongs to the client step. The notice codes are in §4-9.
 
 ## 6. Concurrency
 
@@ -457,23 +510,26 @@ QA binding rows (`.claude/skill-bindings/qa.md` 「돌릴 것 표」):
 
 **P1 — port codex half** (`cargo test -p engram-dashboard-agent -- --test-threads=4`, `cargo test -p engram-dashboard-platform -- --test-threads=4`)
 - `platform::shell`: `text_is_cli_safe` refuses each of `% & ^ | < >`, LF, CR, TAB and another control char; accepts `"` and `'`; `path_is_cli_safe` results unchanged.
-- `raw_to_json`: one row per M6 table line (nested table, array, quoted string, bare literal, trimmed `p0.sp = 5`, `[1,` literal, `"s` literal, `'it''s'` literal, first-`=` split, inline table, quoted key split plainly, last wins, missing `=` ⇒ `Err`, empty key ⇒ `Err`, `a..b=1` accepted); non-array and non-string ⇒ `Err`; a datetime and `inf` become strings; the P1 measurement for `a=1` then `a.b=2`.
+- `raw_to_json`: one row per M6 table line (nested table, array, quoted string, bare literal, trimmed `p0.sp = 5`, `[1,` literal, `"s` literal, `'it''s'` literal, first-`=` split, inline table, quoted key split plainly, last wins, missing `=` ⇒ `Err`, empty key ⇒ `Err`, `a..b=1` accepted); non-array and non-string ⇒ `Err`; a datetime and `inf` become strings; `use_legacy_landlock=true` ⇒ `{features: {use_legacy_landlock: true}}`; `p0.q=""s''` ⇒ `"s"` (every outer quote stripped — `trim_matches`); the P1 measurement for `a=1` then `a.b=2`.
 - `parse_version`: `codex-cli 0.163.0` ⇒ `0.163.0`; a banner line before it; no version ⇒ `None`. `schema_source` URL and `PerCliVersion`. `version_probe` shape (`console_command`). `loads` / `accepts_skill_name` per mode (64 vs 65 characters, uppercase, `_`, empty). `merge` ⇒ `None`. `unknown_keys` ⇒ `Warn`. `folder_entry_blocks` ⇒ `false`.
 - `skill_format` with a **fake parser** that counts calls (M63): wrong file name · BOM · no opening `---` · no closing `---` · empty block · first parse OK ⇒ called once · first fails, repaired succeeds ⇒ called twice with the repaired text · both fail ⇒ the **original** error and line · name collapse and folder fallback · 64 / 65 characters · empty description · whitespace short-description · Terminal ⇒ `NotChecked`. Repair golden at the text level (no parser): colon-space values quoted · values starting with `[ { @ \`` quoted · inner `'` doubled · trailing `#` comment kept · block scalars and quoted values untouched.
-- `command_line_args` / `fits`: each banned char rejected in a line; `"` and `'` accepted; the budget edge (exactly 8191 fits, 8192 does not) in both modes with the resume and MCP bounds counted; a priming with `'` / `"` / `%` / `\` / a control char ⇒ `codex-priming-unsafe-char`; LF in the priming becomes `\n` and counts two units. `mcp_attachment` refuses a URL over `MCP_URL_BUDGET`.
+- `command_line_args` / `fits`: each banned char rejected in a line; `'` accepted; an even number of `"` accepted (`model="o3"`), an odd number refused (`model="o3`) — C2; the budget edge (exactly 8191 fits, 8192 does not) in both modes with the resume and MCP bounds counted; a priming with `'` / `"` / `%` / `\` / a control char ⇒ `codex-priming-unsafe-char`; LF in the priming becomes `\n` and counts two units. `mcp_attachment` refuses a URL over `MCP_URL_BUDGET`.
 - `folder_load_set` over a fake listing: override > `AGENTS.md`; lowercase names match (OS rule); empty and blank override ⇒ nothing, no fallback; override as a link ⇒ `unsure`; the two roots; dot-folder below a root pruned while the dotted root itself is walked; the depth boundary (premise 17); `skill.md` ignored; a link under a root ⇒ `unsure` `Link`; a root that is a link ⇒ `unsure` `SkillRoot`; a malformed skill ⇒ `malformed`, not `unsure`, not `loads`; `skill_names` order; Terminal ⇒ only `omitted`, equal to the JSON `loads`.
+- `native_skill_roots`: JSON ⇒ `$CODEX_HOME/skills` from the env closure, else `<home>/.codex/skills`; `<home>/.agents/skills`; `per_folder` `.agents/skills`; `project_marker` `.git`; Terminal ⇒ empty. `root_skills` over a fake root listing = the §4-2c skill walk (same rows as a folder entry's root).
 - Registry (`backend/mod.rs:1989`, `:2017`): two slots, each key = its backend word; `settings_check_for("CODEX")` finds codex. All existing claude settings tests pass unchanged (the claude fake gains the `skill` stub).
 
 **P2 — shared + terminal translation**
 - `launch_argv_golden` and `manager/prelaunch.rs` replay: **byte-identical** (Noop).
 - `codex::launch::materialize` called **directly** with the memory `LaunchFs` and a fake reader (parent L792 — the dispatch path cannot prove "nothing outside"): Noop ⇒ default; terminal real ⇒ no write at all, `instructions_override` from the file, `config_overrides` in plan order, skills and extra roots ignored; JSON real ⇒ links at `<vol>\engram\skills\<name>`, `skill_roots` = junction root + plan roots in order, `instructions_text`, `instructions_changed` truth table (none/none, same, different, kit `None` with stored `Some`); a read failure ⇒ `Err` before any write; a relative extra root ⇒ `Err`; a name outside `[a-z0-9-]` ⇒ `Err`; two names on one link ⇒ `Err`; a failed `link_dir` ⇒ `Err`; budget overflow ⇒ `Err`; U1 behaviour per the user's choice; an empty real kit writes nothing.
+- U1 (a): a priming the rule refuses, and a terminal line over the budget only because of the priming, both ⇒ `Err` (no warn-and-launch on the real path); the Noop path still warns and drops (its pin unchanged).
+- `launch::notice_text`: the three §4-9 codes give the exact user wording (golden strings, including an empty instructions or skills list); every other code keeps the generic wording.
 - `build_spec` real: terminal argv = base + pass-through + preset `-c` lines + MCP + priming, in that order; JSON argv = `app-server --stdio` + pass-through + preset `-c` + MCP; the control `priming_file` is not read on the real path; a preset line setting `developer_instructions` is followed by ours; never `-m`. Noop pins (`interactive_args_are_the_measured_ones` `:1353`, `extra_args_follow_our_base_args`, `a_resuming_spawn_still_carries_our_override_after_the_passthrough`, `app_server_extra_args_come_last` `:2016`) unchanged.
 - Manager: a fake kit source whose `prepare` returns `None` for the stored hash, and a profile whose field is `Some("h")` ⇒ the kit reaching `materialize` carries `Some("h")` (`probe_spec` / a recording backend in `manager.rs` tests).
 
 **P3 — JSON channel**
 - `protocol.rs`: `initialize` without capabilities (the `:1168` pin stays) and with `{"capabilities":{"experimentalApi":true}}`; `skills/extraRoots/set` params `{"extraRoots":[…]}`; `turn/start` with and without `additionalContext` (`{"engram-instructions":{"kind":"application","value":…}}`); the no-identifier envelope stays byte-identical.
 - Handshake goldens (the fake app-server already used by the handshake pin, `codex/mod.rs:3708`): start / resume × roots / no roots × context / no context — the request order (`initialize` → `initialized` → [`skills/extraRoots/set`] → `thread/start|resume`); roots sent on resume too; an error response to `skills/extraRoots/set` fails the link. The Noop pin is unchanged.
-- First turn: only the first `turn/start` carries the context; the second does not; a steer never does; the C3 rule as ruled by main (rejected / unanswered / accepted).
+- First turn (C3 (a)): the first `turn/start` carries the context; after it is accepted the next one does not; after `Rejected` or `Unanswered` the next `turn/start` carries it again; a steer never does.
 - Notifications: `thread/readState/changed`, `turn/moderationMetadata`, `skills/changed` produce no output events and leave the turn state as it was.
 - `open_spawn` real: start ⇒ `developerInstructions` = the merged text; resume + changed ⇒ no `developerInstructions`, the context = preface + text, capabilities on; resume + unchanged ⇒ no context, no capabilities.
 
@@ -491,7 +547,7 @@ New `#[ignore]` file `crates/engram-dashboard-agent/tests/codex_launch_live.rs`,
 | L2 | Resume the L1 thread with a kit whose instructions carry `L2-DEV-<m>` (stored hash = L1's, set in the test registry). One turn: "Print the marker from your current instructions." | The answer prints `L2-DEV-<m>`. The handshake carried `experimentalApi` and `skills/extraRoots/set` (transport log line), and the turn was not rejected. |
 | L3 | Resume again with the **same** hash, no model turn (kill after the link settles). | No `capabilities`, no context (log); the roots are sent again. |
 | L4 | codex terminal, real kit with the priming text and one raw line. No model turn. | The TUI comes up (the `backend_contract` readiness probe); the argv carries the preset `-c` line before the MCP and priming `-c`; no new file in the working folder or the volatile folder. |
-| L5 | No tokens, temporary `CODEX_HOME` (M5 method): a preset line with an odd number of `"` followed by the priming argument holding `<` and `>`, in pty style. | Only if main keeps `"` allowed (C2): records whether the priming survives. |
+| L5 | No tokens, temporary `CODEX_HOME` (M5 method), pty style: (i) a preset line with an **even** number of `"` (e.g. `model="o3"`, `p0.s="x y"`) followed by the priming argument holding `<` and `>`; (ii) the same with an **odd** count, as the contrast. | (i) the priming and every later argument arrive intact (`config/read` `sessionFlags`); (ii) shows why the odd count is refused. M5 did not test this combination — L5 confirms the C2 rule. |
 
 Leftovers: L1/L2 create one thread in the real `~/.codex` (as M2/M4 did); the test prints its id and leaves it — deleting the user's codex data is the user's call.
 
@@ -504,7 +560,7 @@ Sequential — each ends green (build, its tests, full regression, the codex lan
 - Ends green because nothing calls the new methods outside tests, and the Noop path keeps its behaviour (the wrapper keeps warn-and-drop).
 
 **P2 — shared + terminal translation.** Rough size: prod +450, tests +500.
-- Files: `backend/codex/launch.rs` (new) · `backend/codex/mod.rs` (`materialize` override, `build_spec` real branch, remove the `:658` TODO) · `launch.rs` (§4-4 fields and docs, the `:179` TODO, notice code constants and arms — U3) · `manager.rs` (§4-8 assignment) · `LaunchKit` literals in tests (`launch.rs`, `backend/claude/launch.rs`, `backend/mod.rs`).
+- Files: `backend/codex/launch.rs` (new) · `backend/codex/mod.rs` (`materialize` override, `build_spec` real branch, remove the `:658` TODO) · `launch.rs` (§4-4 fields and docs, the `:179` TODO, the three notice codes and their wording arms — §4-9) · `manager.rs` (§4-8 assignment) · `LaunchKit` literals in tests (`launch.rs`, `backend/claude/launch.rs`, `backend/mod.rs`).
 - Ends green because Noop artifacts are the default (golden byte-identical) and the JSON artifacts are not read by `open_spawn` yet.
 
 **P3 — JSON channel.** Rough size: prod +350, tests +600.
@@ -519,12 +575,12 @@ After the pieces: `/engram-review code` per piece (or once over P1–P3) · `/en
 - **§1-5 L279 (command-line guard)** — amend "step 7 measures once more … cuts it off before spawn with the same `Broken`": the residual overflow found in `materialize` is `Err` → `SpawnFailed` (decision #7); the `Broken` comes only from `check`.
 - **§1-5 translation table L310** — "per process · measured likely" → measured certain on 0.163.0 (M1 junction followed, M4 per process incl. resume); add "the `experimentalApi` opt-in is sent only on a spawn that carries `additionalContext`" to L309.
 - **§1-5 L319 folder load set** — the walk follows links under a root (M1), so a link under a root is `unsure` (`Link`), and the malformed mark, `skill_names` and `omitted` shapes (§4-1).
-- **§6-2 L1004** — strike "whether codex's `extraRoots` walk follows a link" (M1: yes) and "same-name across extra roots" (M2), with the U2 policy; keep the folder-root real turn for step 8 (L1 covers one, but not after compaction).
-- **§6-3** — new rows: a resumed codex still recalls removed skills from its record (M4 — accepted, same class as research 2026-10-10); same-name skills across roots (U2 outcome); removing every instruction does not reach a resumed conversation (R6).
-- **PRD §6 L281** — the measured result (M2) and the U2 policy.
-- **Step 7** — produce the notices with the U3 codes; call `command_line_args` / `command_line_fits` / `skill_format` at check time; the real `format.rs` parser implements `FrontMatterParser::skill` with the golden (incl. repair rows); `prepare` leaves `last_applied_instructions_hash` `None`; `release` must detach links at `<vol>\engram\skills\*` for codex too.
+- **§6-2 L1004** — strike "whether codex's `extraRoots` walk follows a link" (M1: yes) and "same-name across extra roots" (M2), with the U2 policy (launch + `codex-same-name-skills` notice); keep the folder-root real turn for step 8 (L1 covers one, but not after compaction).
+- **§6-3** — new rows: a resumed codex still recalls removed skills from its record (M4 — accepted, same class as research 2026-10-10); same-name skills across roots — launched with a notice naming them (U2 (b), user 2026-11-09), library-vs-library stays the conflict block; removing every instruction does not reach a resumed conversation (R6).
+- **PRD §6 L281** — the measured result (M2) and the U2 policy (launch + a notice naming the duplicates; R57 addendum candidate). **PRD R37 addendum** — replace the draft wording with the §4-9 wording (user 2026-11-09).
+- **Step 7** — produce the notices with the §4-9 codes, including the same-name comparison (§4-2d: library names + folder `skill_names` + `root_skills` over the existing native roots, listed with the bounded folder listing); block a terminal priming that does not fit with `Broken` (U1 (a)); call `command_line_args` / `command_line_fits` / `skill_format` at check time; the real `format.rs` parser implements `FrontMatterParser::skill` with the golden (incl. repair rows); `prepare` leaves `last_applied_instructions_hash` `None`; `release` must detach links at `<vol>\engram\skills\*` for codex too.
 - **Step 8** — the first-turn recording of the hash (TODO 4(b)) lands **in the same commit** that plugs real kits; otherwise every real codex JSON resume re-sends `additionalContext`. Real CLI lane: the codex terminal with the real priming source; compaction survival of `extraRoots`.
-- **ADR candidates (`/engram-adr`)** — (a) a failed read of the merged instructions file fails the codex spawn (extends ADR-0351; amends ADR-0216's fail-open for the real path); (b) the U1 outcome for the terminal priming (if (a): amends ADR-0216 for the real path); (c) ADR-0337 impact line: `experimentalApi` only with `additionalContext`, extra roots on every process, junction layout confirmed (M1). Not a new decision for (c) — an amendment note.
+- **ADR candidates (`/engram-adr`)** — (a) a failed read of the merged instructions file fails the codex spawn (extends ADR-0351; amends ADR-0216's fail-open for the real path); (b) U1 (a) — a 「기본」 priming that the codex terminal command line cannot carry blocks the launch (amends ADR-0216's warn-and-drop for the real path); (d) U2 (b) — same-name codex skills across roots launch with a notice (answers the PRD §6 row); (c) ADR-0337 impact line: `experimentalApi` only with `additionalContext`, extra roots on every process, junction layout confirmed (M1). Not a new decision for (c) — an amendment note.
 - **Tracking candidates** — R9 (resume deprecation), R10 (`"` in pass-through args), and T-84 (`!`) now also covers `text_is_cli_safe`.
 
 ## 9. Decisions, conflicts, open items
@@ -535,73 +591,52 @@ After the pieces: `/engram-review code` per piece (or once over P1–P3) · `/en
 |---|---|---|
 | #1 | The stored hash reaches the backend as `LaunchKit.last_applied_instructions_hash`, filled by one manager line from the post-`prepare` re-read. The first-turn recording stays with step 8 (not a one-line change). | §4-8 · premise 3 |
 | #2 | `capabilities.experimentalApi: true` only on spawns that carry `additionalContext`; the transport tolerates `thread/readState/changed` and `turn/moderationMetadata`. | M3 (the opt-in changes only that extra notification; `-32600` without it) · premise 6, 8 |
-| #3 | `additionalContext` key = `engram-instructions` (shown as `<engram-instructions>…</engram-instructions>`), `kind: "application"`, English one-line preface (§4-7). Rejection rule: **see C3** — main's "no retry; a rejected first `turn/start` fails the spawn as today" rests on a false premise. | M3 · premise 10 |
+| #3 | `additionalContext` key = `engram-instructions` (shown as `<engram-instructions>…</engram-instructions>`), `kind: "application"`, English one-line preface (§4-7). Rejection rule = C3 (a): the context stays attached until a `turn/start` carrying it is accepted (draft 1's "no retry; a rejected first `turn/start` fails the spawn" rested on a false premise — premise 10). | M3 · premise 10 · C3 |
 | #4 | Skills keep the ADR-0337 junction folder, `<vol>\engram\skills\<name>`, passed as one extra root; extra roots are set on `thread/start` **and** on every resume. | M1 (followed) · M4 (process-scoped) |
 | #5 | The merged instructions text is read in `materialize`; a failure fails the spawn (fail closed, as ADR-0351). | §4-5 step 2 |
 | #7 | Argv overflow: `check` blocks with `Broken` by upper-bound counting (parent L279); a residual overflow at `materialize` → `Err` → `SpawnFailed`; no new manager hook in step 6. **This amends parent L279** (§8-1). | premise 4, 5 · §4-3 MCP bound |
-| #8 | `-c` guard: refuse `% & ^ \| < >`, control characters (incl. LF/CR) and non-UTF-8 in every preset `-c` line; allow `"` and `'`. The set comes from `platform::shell` (new `text_is_cli_safe` over the existing private set). **See C1 and C2.** | M5 |
+| #8 | `-c` guard: refuse `% & ^ \| < >`, control characters (incl. LF/CR), non-UTF-8 **and an odd number of `"`** in every preset `-c` line; allow an even number of `"` and any `'`. The set comes from `platform::shell` (new `text_is_cli_safe` over the existing private set). | M5 · C1 · C2 (the odd-`"` rule; the exact combination is unmeasured — L5 confirms) |
 | #9 | Plain names mirroring step 5: `backend/codex/settings.rs`, `CODEX_SETTINGS_CHECK`, registry of two; the claude fake parser gets the new method as a stub. | — |
-| #10 | TOML: the `toml` crate for `-c` value parsing (subject to §9-4 and the user report); mirror codex's `-c` parse per M6. | M6 · §9-4 |
-| #13 | Folder load set: additive `SkillRoot` kind, a `malformed` list distinct from `unsure`, an `omitted` list for the terminal notice; `SchemaRefetch::PerCliVersion` for codex. Plus `skill_names` (needed by U2 (a) or (b)). | step-5 hand-over |
+| #10 | TOML: `toml` 1.1.2 (`default-features = false, features = ["std", "serde", "parse"]`) for `-c` value parsing — reported to the user 2026-11-09, no objection (§9-4); mirror codex's `-c` parse per M6 and the codex source (§4-2a). | M6 · §4-2a · §9-4 |
+| #13 | Folder load set: additive `SkillRoot` kind, a `malformed` list distinct from `unsure`, an `omitted` list for the terminal notice; `SchemaRefetch::PerCliVersion` for codex. Plus `skill_names`, `native_skill_roots` and `root_skills` — the inputs of the U2 notice (§4-2d). | step-5 hand-over · U2 |
 | #14 | AGENTS pick: the override wins even when empty or blank (nothing loaded, no fallback); names compared by the OS rule. | M7 |
 | — | Preview policy from step 5: clear cases only, the rest `unsure`. `folder_entry_blocks` = `false` for codex. | step 5 |
 | — | The resume `deprecationNotice` is a risk / tracking candidate, out of scope (R9 — with the premise-9 correction). | M4 |
 
-### 9-2. Conflicts found — need main's ruling (not resolved here)
+### 9-2. Conflicts found in draft 1 — ruled by main (2026-11-09)
 
-- **C1 — `CMD_UNSAFE_CHARS` is not public** (premise 11). The brief says it is already `pub`; it is a private `const` at `shell.rs:52`. The draft adds `pub fn text_is_cli_safe(&str)` over it (the set stays in one place, no duplication). The alternative is making the const `pub`. Either meets #8's intent; the draft's choice keeps the control-character rule next to the char set.
-- **C2 — `"` allowed in preset lines × the priming argument's own `<` `>`** (premise 12, M5). In the terminal argv the preset `-c` lines come **before** the priming `-c` (ADR-0337 decision 5). Today's priming file holds two `<` and two `>`, which are safe only because the priming argument is wrapped whole in `"…"` and cmd's quote state is balanced when it arrives. A preset line with an **odd** number of `"` (e.g. `model="o3` — or any typo) flips that state (M5), so the priming's `<`/`>` would be read as redirections — a broken launch, in the very mode #8 meant to protect. #8's "refuse metachars in every `-c` argument" cannot apply to the priming argument without blocking today's priming. M5 did not measure this exact combination (the research file says so). Options:
-  - (a) refuse a preset line whose number of `"` is odd (keeps `model="o3"`; keeps cmd's state balanced at every argument boundary in both quoting styles — likely, not measured) ★ draft recommendation;
-  - (b) refuse `"` in preset lines (`model=o3` and `model='o3'` still work — the old proposal);
-  - (c) keep #8 as is and measure first (L5) — a broken launch is the failure mode if the measurement is skipped.
-  The same flip from a pass-through `extra_args` argument is pre-existing and unguarded (R10).
-- **C3 — "a rejected first `turn/start` fails the spawn as today's first-turn failure does" is false** (premise 10). Today a rejected `turn/start` closes the turn `Rejected` (the text returns to its held slot and the transport halts); `Unanswered` is handled like `Failed`. The link is already `Ready`, so the spawn does not fail. With "no retry", the instructions-changed context would be dropped, and the next accepted turn would still trigger the first-turn event where step 8 records the new hash — the change would be recorded as applied without having reached the model (a silent loss). Options:
-  - (a) carry the context on every `turn/start` until one carrying it is answered with success (M3: a rejected `turn/start` creates nothing, so this cannot duplicate) ★ draft default;
-  - (b) treat the rejection of the context-carrying `turn/start` as a link failure and tear the agent down (a new failure path in the transport);
-  - (c) no retry, and step 8 must record the hash only when the context was accepted (the transport would have to report that to the latch — a new channel).
-- **C4 — parent TRD L279 vs #7.** L279 says the launch-step recheck "cuts it off before spawn with the same `Broken`"; #7 makes it `SpawnFailed`. Main asked to state it explicitly: this TRD follows #7 and hands the L279 amendment over (§8-1). Not a code conflict.
+- **C1 — `CMD_UNSAFE_CHARS` is not public** (premise 11). The brief said it was already `pub`; it is a private `const` at `shell.rs:52`. **Ruling:** `pub fn text_is_cli_safe(&str)` over the private set in `platform::shell`, as drafted (§4-3) — the set stays in one place, and the control-character rule sits next to it.
+- **C2 — `"` in preset lines × the priming argument's own `<` `>`** (premise 12, M5). In the terminal argv the preset `-c` lines come **before** the priming `-c` (ADR-0337 decision 5). Today's priming file holds two `<` and two `>`, which are safe only because the priming argument is wrapped whole in `"…"` and cmd's quote state is balanced when it arrives. A preset line with an **odd** number of `"` flips that state (M5), so the priming's `<`/`>` would become redirections — a broken launch. #8's metachar ban cannot apply to the priming argument without blocking today's priming. **Ruling: (a)** — refuse a preset `-c` line whose number of `"` is odd, on top of the #8 set (§4-3; `codex-config-unsafe-char`). An even count keeps cmd's quote state balanced at every argument boundary in both quoting styles — **likely**: M5 did not test this exact combination, so live scene L5 confirms it (§7-3). Rejected: banning `"` (would refuse `model="o3"`); keeping #8 unchanged and measuring first (a broken launch if the measurement is skipped). The same flip from a pass-through `extra_args` argument stays pre-existing and unguarded (R10).
+- **C3 — "a rejected first `turn/start` fails the spawn as today's first-turn failure does" was false** (premise 10). A rejected `turn/start` closes the turn `Rejected` (the text returns to its held slot and the transport halts); `Unanswered` is handled like `Failed`; the link is already `Ready`, so the spawn does not fail. With "no retry", the context would be dropped while the next accepted turn still triggered step 8's first-turn recording — the change recorded as applied without having reached the model. **Ruling: (a)** — keep the `additionalContext` until a `turn/start` carrying it is accepted (M3: a rejected `turn/start` creates nothing, so this cannot duplicate) (§4-7). Rejected: tearing the agent down on that rejection (a new transport failure path); no retry plus a delivered-or-not report to the latch (a new channel).
+- **C4 — parent TRD L279 vs #7.** L279 says the launch-step recheck "cuts it off before spawn with the same `Broken`"; #7 makes a residual overflow at `materialize` `SpawnFailed`. **Ruling:** follow #7; the L279 amendment is handed over to the parent TRD (§8-1). Not a code conflict.
 
-### 9-3. User decisions — open
+### 9-3. User decisions — decided (2026-11-09)
 
-- **U1 — the 「기본」 priming in the codex terminal does not fit on the real path** (#6). On the real path the priming comes from the merged instructions file and is placed last, after the preset `-c` lines (parent L279: the count includes it so a preset line cannot silently push it out — M8). It may not fit (budget) or may hold a char the priming rule refuses (`' " % \`, a control char other than CR/LF). Today's Noop path warns in the log and launches without it.
-  - (a) **Block** — `check` returns `Broken` (`codex-priming-unsafe-char` / `command-line-too-long`), the user fixes the preset lines (or the priming text); a residual case at `materialize` fails the spawn. Consistent with M8 "never drop silently" and with ADR-0351's fail-closed rule. Cost: a long preset `-c` list can block every terminal launch of that agent until shortened. ★ **main recommends** (a).
-  - (b) **Warn and launch without the priming** (today's behaviour) — the agent starts without the mail and control instructions of 「기본」; only the daemon log says why. A variant (b′) adds a notice so the caller sees it — needs a U3 code and makes `materialize` a notice producer (it has no channel today).
-  - Trade-off: (a) may stop a launch the user expected to work; (b) runs an agent that does not know its mail contract, with no visible cause.
-- **U2 — same-name skills across extra roots in codex JSON** (#12). Measured (M2): codex lists both, reports no error, and `$name` then selects neither; the model sees both and may read both files. **The existing conflict check (PRD R4 / parent §1-3 5) does not cover this case**: it counts only library skills actually loaded (including codex JSON's nested presets — M13), and folder entries are explicitly not counted (parent §1-3 "Folder entries in resolution"). Two library skills with the same collision key are already blocked there, and codex's name for a junction skill equals Engram's name (front-matter `name`, else the target folder name — M1), so library-vs-library is covered. Not covered: a folder skill vs a library skill, two folder skills (two folder entries, or `.agents/skills` vs `.codex/skills` of one folder), and Engram roots vs codex's own user or repository skill folders.
-  - (a) **Block** with a conflict reason — extend the conflict check to folder skills, using the folder load set's `skill_names` (§4-1). Cost: a folder the user does not control can block the launch; the user scopes stay invisible anyway.
-  - (b) **Accept + a launch notice naming the duplicates** (folder-vs-library and folder-vs-folder, from `skill_names`) ★ **main recommends** — the agent still sees both, and the notice tells the human why `$name` does not pick one. Shown once per agent (ADR-0341 decision 5).
-  - (c) **Accept silently + document** in PRD §6 and parent §6-3 — the cheapest; the human finds out only when `$name` does nothing.
-- **U3 — notice codes and wording for codex-terminal omissions** (#11, parent §2-4 8, PRD R37 addendum). Facts only, says the omission is intended, recommends no fix (G28). Proposed (to be confirmed by the user):
+- **U1 — the 「기본」 priming that the codex terminal command line cannot carry** (#6) — over the budget, or a char the priming rule refuses (`' " % \`, a control char other than CR/LF). **Decided: (a) block** (user 「띄우지 말아」). `check` blocks the launch with `Broken` (`codex-priming-unsafe-char` / `command-line-too-long`); a residual case at `materialize` fails the spawn (`SpawnFailed`). There is no warn-and-launch path on real materials (§4-5 step 3); the Noop path keeps today's warn-and-drop until it is withdrawn. Consistent with M8 "never drop silently" and ADR-0351. Known cost: a long preset `-c` list can block every terminal launch of that agent until it is shortened. Rejected: (b) warn and launch without the priming (the agent would not know its mail and control contract, with no visible cause) and its notice variant (b′).
+- **U2 — same-name skills across skill roots in codex JSON** (#12). Measured (M2): codex lists both, reports no error, and `$name` then selects neither. **Decided: (b) launch + a notice naming the duplicates** (user 「같은 이름이 여러곳있으면 띄우되 알려.」) — code `codex-same-name-skills` (§4-9), produced by step 7 from the inputs in §4-2d. Covered: folder-vs-library, folder-vs-folder (two folder entries, or `.agents/skills` vs `.codex/skills` of one folder), and Engram roots vs codex's own skill folders as far as Engram can see them (`$CODEX_HOME/skills`, `<home>/.agents/skills`, `.agents/skills` from the working folder up to the project root — §4-2d; the list is unverified on 0.163.0 until P1). **Library-vs-library stays the existing conflict block** (PRD R4 / parent §1-3 5 — it already counts every library skill a codex JSON agent loads, including nested presets, M13; codex names a junction skill the same way Engram does, M1), so it never reaches the notice. M2 measured two extra roots only; that codex treats a user-scope skill and an extra-root skill of the same name the same way rests on research 2026-10-20 row 5 (list all, no priority — 0.156.1). Shown once per agent (ADR-0341 decision 5). Rejected: (a) block (a folder the user does not control could block the launch); (c) accept silently.
+- **U3 — notice codes and wording** (#11, parent §2-4 8, PRD R37 addendum). **Decided** (user 「그렇게 하던지」 after rewording, 2026-11-09): the three codes and the exact wording in §4-9. Facts only, no fix recommended (G28). The user's style rule for app wording: no translationese (no 「싣다 / 실리다」). Draft 1's wording and its split-per-kind alternative are withdrawn.
 
-  | Code | `args` | Korean wording (one sentence) |
-  |---|---|---|
-  | `codex-terminal-omitted` | `{instructions: [library paths], skills: [names]}` | 「알림: codex 터미널 모드는 프리셋 지시서와 스킬을 싣지 않습니다(의도된 동작). 빠진 것 — 지시서 <이름> · 스킬 <이름>」 |
-  | `codex-terminal-folder-omitted` | `{folder, items: [relative paths]}` | 「알림: codex 터미널 모드는 폴더 항목을 읽지 않습니다(의도된 동작). 빠진 것 — <폴더>: <파일 · 스킬 폴더>」 |
-  | `codex-same-name-skills` (only with U2 (b)) | `{name, paths: [...]}` | 「알림: 이름이 같은 스킬이 codex 에 함께 실립니다 — <이름>: <경로> · <경로>. codex 는 둘 다 보이고 `$<이름>` 으로는 어느 것도 고르지 않습니다.」 |
-
-  Alternative: split the first code per kind (`…-instructions-omitted`, `…-skills-omitted`) — two lines instead of one; the PRD R37 draft is one line. With U1 (b′), one more code (`codex-terminal-priming-omitted`).
-
-### 9-4. Library survey — TOML value parsing (for the user report — CLAUDE.md, parent §1-12 0a rule)
+### 9-4. Library survey — TOML value parsing (reported to the user 2026-11-09 — no objection; CLAUDE.md, parent §1-12 0a rule)
 
 Need: parse the value side of a codex `-c` override as a TOML value (inline tables, arrays, basic and literal strings with escapes, integers, floats, booleans, datetimes) exactly as codex does, then convert it to JSON for the schema check (§4-2a).
 
 | Candidate | License · maintenance | Size / graph | Fit | Verdict |
 |---|---|---|---|---|
-| `toml` 1.1.2 (`toml-rs/toml`) | MIT OR Apache-2.0 · actively maintained (the toml-rs project; spec 1.1.0 support) · MSRV 1.85 | Already in `Cargo.lock` with `toml_parser`, `toml_datetime`, `serde_spanned`, `winnow` (via the shell's Tauri graph) ⇒ **0 new packages**; newly linked into the daemon binary. Features: `default-features = false, features = ["std", "serde", "parse"]` (drops `display` / `toml_writer`). | `toml::from_str::<toml::Table>("_x_ = …")` is the same call shape codex uses (codex-rs depends on `toml`; its override parser wraps the value this way — **likely**, from memory; the source at `rust-v0.163.0` was not re-read here). A recursion limit is on by default (`unbounded` off). | **Recommended** |
+| `toml` 1.1.2 (`toml-rs/toml`) | MIT OR Apache-2.0 · actively maintained (the toml-rs project; spec 1.1.0 support) · MSRV 1.85 | Already in `Cargo.lock` with `toml_parser`, `toml_datetime`, `serde_spanned`, `winnow` (via the shell's Tauri graph) ⇒ **0 new packages**; newly linked into the daemon binary. Features: `default-features = false, features = ["std", "serde", "parse"]` (drops `display` / `toml_writer`). | `toml::from_str::<toml::Table>("_x_ = …")` is the call codex makes (`codex-rs/utils/cli/src/config_override.rs` `parse_toml_value` at `rust-v0.163.0` — read 2026-11-09, **certain**; draft 1 had this from memory). Codex resolves `toml 0.9.11+spec-1.1.0` (workspace `toml = "0.9.5"`); 1.1.2 implements the same spec 1.1.0. A recursion limit is on by default (`unbounded` off). | **Chosen** |
 | `toml_edit` 0.25.12 | same project and license | Already in the lock; heavier (a format-preserving document model) | Parses values too, but we never edit TOML text; more API than needed | Rejected |
 | Hand-rolled value parser | — | 0 dependencies | Must cover escapes, multi-line and literal strings, numbers with `_` / hex / octal / binary, special floats, datetimes, nested inline tables — and drift from codex silently (a value codex accepts would be blocked, or the reverse) | Rejected |
 
-Not checked: whether 1.1.2 is the latest release (offline). A new direct dependency is a T-62 target (license notice regeneration). **Report to the user before P1** with this table.
+Not checked: whether 1.1.2 is the latest release. A new direct dependency is a T-62 target (license notice regeneration). **Reported to the user 2026-11-09 with this table — no objection.** Alternative kept in view: `toml` 0.9.12 (also in our lock) would match codex's major line; not chosen because both implement spec 1.1.0 and the report named 1.1.2.
 
 ## 10. Risks
 
-- **R1 C2 unresolved** — if `"` stays allowed without the parity rule and without L5, an odd `"` in a preset line can break the terminal launch through the priming's `<`/`>`.
-- **R2 Mirroring codex by hand** — the `-c` parser (M6 trim set: likely), the walk depth (premise 17), `extract_frontmatter` and the repair are copies of codex behaviour; codex updates itself. Golden rows are drawn from codex behaviour (M6 table, parent L278 sources); the real-parser golden runs in step 7. A drift blocks a valid skill or passes a bad one.
+- **R1 The odd-`"` rule is likely, not measured** (C2) — an even count of `"` keeping cmd's quote state balanced in both quoting styles is inferred from M5; L5 confirms it. If L5 fails, the fallback is to refuse `"` in preset lines (C2's rejected option).
+- **R2 Mirroring codex by hand** — the `-c` parser (split, trim and fallback checked against the codex source; the dotted-path application only against M6; `toml` 1.1.2 vs codex's 0.9.11 — same spec, crate differences unknown), the native skill roots (§4-2d — unverified on 0.163.0), the walk depth (premise 17), `extract_frontmatter` and the repair are copies of codex behaviour; codex updates itself. Golden rows are drawn from codex behaviour (M6 table, parent L278 sources); the real-parser golden runs in step 7. A drift blocks a valid skill or passes a bad one.
 - **R3 Hash not recorded until step 8** — every real codex JSON resume would re-send the context; harmless only because real kits arrive with step 8 (§8-1 couples them).
 - **R4 `turn/moderationMetadata`** — possibly opt-in gated (M3 unknown). Dropped as unknown either way; the P3 pin covers it.
 - **R5 Resumed conversations remember removed skills** (M4) — removing a skill from a preset does not make a resumed codex forget it. Accepted (parent §6-3 row, §8-1).
 - **R6 Instructions removed entirely** — kit hash `None` with a stored hash: no context is sent (there is no text), so a resumed conversation keeps the old instructions. Accepted for step 6; recorded in parent §6-3.
-- **R7 Same-name skills** (U2) — whatever is chosen, codex user and repository skill folders stay outside Engram's view.
+- **R7 Same-name skills** (U2 (b)) — the notice sees codex's own skill folders only as far as §4-2d lists them; a configured project-root marker, codex's bundled system skills and plugin-added roots stay invisible. The notice is a hint, not a guarantee; `$name` still selects neither.
 - **R8 Developer instructions vs a preset `developer_instructions` line in JSON mode** — which wins (`thread/start.developerInstructions` or the `-c` config) is not measured. Engram's own instructions travel in `developerInstructions`; a preset that also sets the key may be ignored or may replace it. Recorded; the check gives no warning.
 - **R9 Resume deprecation** — codex warns that full-history hydration is deprecated for paginated threads. Our `thread/resume` already sends `excludeTurns: true` (premise 9), so the warning in M4 came from the harness; the remaining risk is upstream changing `thread/resume` semantics. Tracking candidate.
 - **R10 Pass-through arguments are not guarded** — an odd `"` or a metachar in `command.extra_args` reaches cmd unchanged (pre-existing; the user's own input). Tracking candidate.
@@ -610,4 +645,5 @@ Not checked: whether 1.1.2 is the latest release (offline). A new direct depende
 
 ## 11. Review record
 
-- 2026-11-09 — Draft 1 written (TRD author subagent). Not reviewed. Pending: main's rulings on C1–C4, the user's U1–U3, the user report of §9-4.
+- 2026-11-09 — Draft 2: user decisions U1 (a) · U2 (b) · U3 (exact wording) applied; main's rulings C1 · C2 (a) · C3 (a) · C4 applied; `toml` survey marked reported; the codex `-c` parse re-checked against `codex-rs/utils/cli/src/config_override.rs` at `rust-v0.163.0` (adds the `use_legacy_landlock` alias and the exact `trim_matches` fallback). Review pending.
+- 2026-11-09 — Draft 1 written (TRD author subagent), committed as `21bc0063`. Not reviewed.
