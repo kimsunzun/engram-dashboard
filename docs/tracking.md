@@ -55,6 +55,9 @@
 | T-79 | Shell–daemon link freezes while still showing "connected" (killing a PTY agent mid-burst) | 버그 | Fixed on `v0.5.0/fix/pty-kill-hang` (S34, `75de8476`) — not pushed/merged yet |
 | T-80 | A spewing agent shown in a slot makes the daemon close the connection on a full send queue → reconnect/replay storm | 버그 | Not started · pre-existing (old driver too) · found by S34 QA |
 | T-81 | A claude that exits right after launch is answered "started" with no failure mark | 버그 | Not started · known limit of S25 step 20 (ADR-0348 decision 6) |
+| T-82 | A pass-through `--settings` (or instructions / snapshot flag) in claude `extra_args` replaces the one Engram passes | 버그 | Not started · pre-existing (Noop fragment too) · found by S25 step 5 review |
+| T-83 | No cap on the number of claude `--add-dir` pairs vs the cmd.exe 8191-character line | 버그 | Not started · theoretical path · found by S25 step 5 review |
+| T-84 | `path_is_cli_safe` does not refuse `!` — a path holding `!` is altered under cmd `DelayedExpansion` | 버그 | Not started · pre-existing · theoretical path · found by S25 step 5 review |
 | T-71 | 트래킹 번호를 가리키지 않기 — 해결되면 그냥 지우기 | 사소한 기능·정리 | 할 일 — 나중에 이슈로 |
 | T-70 | 브랜치 앞 버전 짐작 기준 — 기능이면 0.5.0 쪽 | 사소한 기능·정리 | 할 일 — 나중에 이슈로 |
 | T-69 | 스텝 번호 규약 — 새 주제마다 S번호 | 사소한 기능·정리 | 일부 됨 · 남은 것 = 자잘한 커밋 접두 |
@@ -368,6 +371,21 @@
 - **Symptom:** claude runs as `cmd.exe /c claude`, so a missing or broken claude binary shows up as an early exit after `cmd.exe` started. Creates answer "started" and `spawn_fresh_settled` clears the last failure on `Started`; the agent list shows no ban glyph.
 - **Why open:** claude has no link verdict, and ADR-0201 left claude Fresh early-exit detection out of scope.
 - **Next:** design how claude Fresh settles its first seconds (an early-exit window like the resume path), then record last failure through the one create body.
+
+### T-82. A pass-through `--settings` (or instructions / snapshot flag) in claude `extra_args` replaces the one Engram passes
+- **Status:** not started · pre-existing · found 2026-11-09 by the S25 step 5 code review (`baf769ff`).
+- **Problem:** the claude `build_spec` (`backend/claude/mod.rs`) appends the agent's `command.extra_args` after its own flags. claude takes `--settings`, `--append-system-prompt-file` and `--system-prompt-snapshot` once and keeps the last value (step-5 review — not measured on the real CLI), so a pass-through `--settings <x>` replaces the merged settings file (real materials — S25 step 5) and today the control channel's settings fragment (Noop); `--append-system-prompt-file` replaces the merged instructions or the priming; `--system-prompt-snapshot on` undoes the real-material `off`. Losing the merged settings drops `allowedMcpServers`, so the Engram MCP tools can go missing when the user's global settings carry `allowedMcpServers: []`.
+- **Next:** decide whether to refuse or warn on these flags in `extra_args` (a check at preset/agent edit or at launch) or accept and document it. Related: the S25 TRD §6-3 row on `extra_args` and the default-only preview.
+
+### T-83. No cap on the number of claude `--add-dir` pairs vs the cmd.exe 8191-character line
+- **Status:** not started · theoretical path · found 2026-11-09 by the S25 step 5 code review (`baf769ff`).
+- **Problem:** claude runs as `cmd.exe /c claude …` on Windows (`platform::shell::console_command`), and cmd.exe refuses a command line over 8191 characters. Each preset folder entry adds `--add-dir <folder>`; nothing counts them (the S25 TRD claims no claude length budget — only codex has `CMD_LINE_LIMIT_UTF16`). Estimate, not measured: ≈ 70 entries of ≈ 100 characters fill the line together with the other flags. What claude does then is not measured (expected: cmd refuses and claude never starts — an early exit, see T-81).
+- **Next:** add a claude length check (a count at `check` time like the codex budget, block ②) or a cap on folder entries; measure first how the failure shows.
+
+### T-84. `path_is_cli_safe` does not refuse `!` — a path holding `!` is altered under cmd `DelayedExpansion`
+- **Status:** not started · pre-existing (the rule moved unchanged from daemon `control/priming.rs` to `platform::shell` in S25 step 5) · theoretical path · found 2026-11-09 by the S25 step 5 code review (`baf769ff`).
+- **Problem:** `CMD_UNSAFE_CHARS` = `% & ^ | < >` (`crates/engram-dashboard-platform/src/shell.rs`). When cmd delayed expansion is on (registry `DelayedExpansion=1` under `Command Processor` — off by default), cmd expands `!NAME!` and drops a lone `!`, so a path holding `!` reaches claude changed. `console_command` passes `/c` without `/V:OFF`. Affects every path the rule guards (the priming file in daemon `control/priming.rs`, and from S25 step 5 the claude merged instructions, settings file, plugin folder and preset folder entries) — and any other path on the same cmd line.
+- **Next:** add `!` to the rule (a folder holding `!` is then refused at `preset.add` and blocks with ②), or pass `/V:OFF` to cmd — check the shim side first (the npm `.cmd` shim runs under cmd too).
 
 ## 사소한 기능·정리
 
