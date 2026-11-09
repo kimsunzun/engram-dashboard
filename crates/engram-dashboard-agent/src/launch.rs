@@ -171,7 +171,6 @@ pub struct LaunchPlan {
     /// Folder entries — absolute normalized paths in expansion order, deduplicated. Only `backend/claude` reads them
     /// (the backend loads each folder itself). Empty in a Noop plan.
     // ADR-0341
-    // TODO(TRD S25 §5-2 5): no backend translates this list yet — every plan today carries it empty.
     pub folders: Vec<PathBuf>,
     /// Extra skill roots that codex JSON appends to its skill roots as they are (the folder entries' `.agents/skills`
     /// and `.codex/skills` that exist). Roots, not named skills — they join neither [`LaunchPlan::skills`] nor the
@@ -825,10 +824,15 @@ pub struct LaunchArtifacts {
     pub instructions_file: Option<PathBuf>,
     /// 스킬을 싣는 뿌리 폴더(휘발 폴더 안).
     pub skill_roots: Vec<PathBuf>,
+    /// The merged backend settings file (inside the volatile folder). `None` = no raw settings to load.
+    // ADR-0328
+    pub settings_file: Option<PathBuf>,
+    /// Folders the CLI is given access to, in [`LaunchPlan::folders`] order.
+    // ADR-0341
+    pub add_dirs: Vec<PathBuf>,
     /// Environment pairs the backend adds to the process (claude's `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD`),
     /// meant to be applied after the profile env so they override a profile value for the same key.
     // ADR-0341
-    // TODO(TRD S25 §5-2 5): nothing fills or applies this yet — every artifact today carries it empty.
     pub env: Vec<(String, String)>,
 }
 

@@ -9,12 +9,13 @@
 //! 인코딩·합성 에코·출력 decoder·transcript seed 넷을 이 모듈의 함수로 직접 불렀고, 한 파일에 살던
 //! 동안은 그것이 보이지 않았다.
 //!
-//! ★밖으로 나가는 표면 = [`crate::backend::AgentBackend`] 구현 하나 + 사용량 조회기 싱글턴
-//!   [`CLAUDE_USAGE_PROBE`]([`crate::usage::UsageProbe`]) 하나★: 바깥이 새 지식을 필요로 하면 그 trait 에
-//!   메서드를 더하고 여기서 구현한다 — 바깥이 이 모듈의 항목을 이름으로 부르는 게 아니라. 조회기가 trait 칸이
-//!   아닌 것은 에이전트가 없어도 도는 조회라 두 겹 디스패치를 두지 않으려는 것이고, 그것을 이름으로 부를 수
-//!   있는 자리는 `backend/mod.rs` 의 등록부뿐이다 — crate 밖은 `pub(crate)` 라 컴파일러가 막고, crate 안은
-//!   아래 격리 게이트가 본다.
+//! ★The surface that goes out = one [`crate::backend::AgentBackend`] implementation + two singletons: the usage probe
+//!   [`CLAUDE_USAGE_PROBE`] ([`crate::usage::UsageProbe`]) and the settings check [`CLAUDE_SETTINGS_CHECK`]
+//!   ([`crate::backend::SettingsCheck`])★: when the outside needs new knowledge, add a method to one of those traits
+//!   and implement it here — the outside does not call this module's items by name. The two singletons are not trait
+//!   slots because they run without an agent (no double dispatch), and the only place that may name them is the
+//!   registry in `backend/mod.rs` — outside the crate `pub(crate)` lets the compiler stop it, inside the crate the
+//!   isolation gate below watches.
 //! ★격리 게이트(백엔드 폴더 넷 공통 — 이름만 바꿔 돌린다)★:
 //!   `rg -n --glob '*.rs' --glob '!**/backend/claude/**' "\bclaude::" crates/ src-tauri/`
 //!   ★히트를 세지 않는다★ — 각 히트가 `backend/mod.rs` 의 **등록부**(`pub use claude::ClaudeBackend;`)
@@ -27,15 +28,18 @@
 //!
 //! tauri import 0.
 
+mod launch;
 mod leftover;
 mod session_file;
+mod settings;
 mod usage;
 mod usage_probe;
 
+pub(crate) use settings::CLAUDE_SETTINGS_CHECK;
 pub(crate) use usage_probe::CLAUDE_USAGE_PROBE;
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use engram_dashboard_base::panic::uncontained;
@@ -51,7 +55,7 @@ use crate::backend::{
     TransportShape, TurnClassifier,
 };
 use crate::failure::AgentFailureKind;
-use crate::launch::LaunchArtifacts;
+use crate::launch::{LaunchArtifacts, LaunchFs, LaunchKit};
 use crate::profile::{AgentCommand, AgentOutputFormat, SpawnMode};
 use crate::session_tracker::SessionIdSource;
 use crate::transport::pty::PtyTransport;
@@ -163,10 +167,15 @@ impl AgentBackend for ClaudeBackend {
         true
     }
 
-    // TODO(TRD S25 §5-2 5): `materialize` 를 여기서 덮는다(휘발 폴더의 플러그인 정션 · 합친 settings) — 그때까지 트레이트
-    //   기본값(실을 것 없음 · 쓰기 없음)이다. 파일 · 링크 경로는 `kit.volatile_dir` 에 낱말을 이어 붙여서만 짓고, 실을
-    //   링크 경로는 `link_dir` 에 넘긴 바로 그 값이다 — 대소문자 · 접두를 바꾼 철자를 쓰지 않고 링크 아래에는 쓰지
-    //   않는다(가둠 포트가 막아 배치가 실패한다).
+    fn materialize(
+        &self,
+        _command: &AgentCommand,
+        kit: &LaunchKit,
+        _cwd: &Path,
+        fs: &dyn LaunchFs,
+    ) -> Result<LaunchArtifacts, String> {
+        launch::materialize(kit, fs)
+    }
 
     fn build_spec(
         &self,
@@ -177,7 +186,7 @@ impl AgentBackend for ClaudeBackend {
         cwd: PathBuf,
         mut env: Vec<(String, String)>,
         control: Option<ControlEndpoint>,
-        _artifacts: &LaunchArtifacts,
+        artifacts: &LaunchArtifacts,
     ) -> CommandSpec {
         match command {
             AgentCommand::Claude {
@@ -185,17 +194,29 @@ impl AgentBackend for ClaudeBackend {
                 output_format,
             } => {
                 let mut args = Vec::with_capacity(8 + extra_args.len());
-                // ★AUTO 권한 모드 — `--permission-mode bypassPermissions`(사용자 결정 2026-07-22)★:
-                //   스폰되는 claude 는 헤드리스 워커라 승인자가 없다 — 기본 거부 + per-tool grant 배선은
-                //   승인 프롬프트를 띄울 사람이 없어 성립하지 않는다(CLI 실측 0/38 전량 permission-block).
-                //   **임시 체제**이며 정식 대체는 전 LLM 공용 제약 레이어다(그때 이 base 플래그를 걷는다).
-                //   ★맨 앞 배치★: `--permission-mode`+`bypassPermissions` 는 NON-variadic 2요소라 맨 앞에
-                //   둬도 뒤 그룹의 흡수 규칙(아래 extra_args 주석)에 걸리지 않는다. control endpoint 유무·
-                //   spawn 모드와 무관하게 **무조건** 주입.
+                // ADR-0341: the folder entries go first — `--add-dir` is variadic, and the always-present
+                //   `--permission-mode` right after the group ends it, so no later bare value (an `extra_args` one) joins it.
+                for dir in &artifacts.add_dirs {
+                    args.push("--add-dir".to_string());
+                    args.push(dir.to_string_lossy().into_owned());
+                }
+                // ★AUTO permission mode — `--permission-mode bypassPermissions` (user decision 2026-07-22)★: the spawned
+                //   claude is a headless worker with no approver — default-deny + per-tool grant wiring cannot work without a
+                //   person to answer the approval prompt (CLI measured 0/38, all permission-blocked). It is a **temporary
+                //   regime**; the proper replacement is a constraint layer shared by every LLM (this base flag goes then).
+                //   ★Placement★: a NON-variadic pair, so it joins no absorbing group (see the extra_args comment below);
+                //   it ends the `--add-dir` group above. Injected **unconditionally** — with
+                //   or without a control endpoint, in every spawn mode.
                 // 사용자 결정 2026-07-22
                 // ADR-0097
                 args.push("--permission-mode".to_string());
                 args.push("bypassPermissions".to_string());
+                // ADR-0341: the launch-material env overrides a profile value for the same key — the stated exception to
+                //   the profile-wins rule below (why the folder variable must hold: `launch.rs` `ADDED_DIRS_CLAUDE_MD_ENV`).
+                for (key, value) in &artifacts.env {
+                    env.retain(|(k, _)| !env_key_eq(k, key));
+                    env.push((key.clone(), value.clone()));
+                }
                 // 프로필이 같은 키를 이미 넣었으면 건너뛴다 — 아래 MAX_THINKING_TOKENS 와 같은 프로필 우선 규칙.
                 let (key, value) = NO_AUTOUPDATE_ENV;
                 if !env.iter().any(|(k, _)| env_key_eq(k, key)) {
@@ -284,7 +305,16 @@ impl AgentBackend for ClaudeBackend {
                 //   claude CLI(2.1.170)가 그 파일을 **직접 읽어** 기본 시스템 프롬프트 **뒤에** 덧붙인다.
                 //   터미널·json 둘 다 시스템 프롬프트를 받으므로 mode 무관 동일 주입.
                 // ADR-0092
-                if let Some(endpoint) = &control {
+                // ADR-0316: real materials load the merged instructions here instead of the control channel's priming,
+                //   and turn the system-prompt snapshot off so a resumed session also gets the current text.
+                if artifacts.real {
+                    if let Some(instructions) = &artifacts.instructions_file {
+                        args.push("--append-system-prompt-file".to_string());
+                        args.push(instructions.to_string_lossy().into_owned());
+                    }
+                    args.push("--system-prompt-snapshot".to_string());
+                    args.push("off".to_string());
+                } else if let Some(endpoint) = &control {
                     if let Some(priming) = &endpoint.priming_file {
                         args.push("--append-system-prompt-file".to_string());
                         args.push(priming.to_string_lossy().into_owned());
@@ -301,7 +331,19 @@ impl AgentBackend for ClaudeBackend {
                 //   `--append-system-prompt-file`)이 이미 실측으로 검증돼 있다(M3 심의 기록) — 그래서
                 //   경로를 택한다. 대가는 파일 하나의 수명 관리인데, 그건 mcp-config 파일과 **같은 폴더·
                 //   같은 생성/삭제/부팅스윕 경로**를 그대로 재사용해 흡수한다(mcp_config.rs).
-                if let Some(endpoint) = &control {
+                // ADR-0328: real materials carry no hidden settings fragment — the control channel's `settings_file` is
+                //   not loaded; the merged raw settings (in the volatile folder) are the one `--settings`.
+                // ADR-0316: the skills ride in as a plugin folder here.
+                if artifacts.real {
+                    for root in &artifacts.skill_roots {
+                        args.push("--plugin-dir".to_string());
+                        args.push(root.to_string_lossy().into_owned());
+                    }
+                    if let Some(settings) = &artifacts.settings_file {
+                        args.push("--settings".to_string());
+                        args.push(settings.to_string_lossy().into_owned());
+                    }
+                } else if let Some(endpoint) = &control {
                     if let Some(settings) = &endpoint.settings_file {
                         args.push("--settings".to_string());
                         args.push(settings.to_string_lossy().into_owned());

@@ -3,21 +3,24 @@
 //! transport(PtyTransport)는 claude/codex를 모른다. 누가 어떤 프로그램인지 아는 곳은
 //! 오직 `backend/<이름>/` 폴더다.
 //!
-//! ★이 파일은 어느 백엔드의 항목도 이름으로 부르지 않는다★: 백엔드 이름이 적히는 자리는 **등록부**
-//! (`pub mod`·`pub use`·정적 싱글턴 · 사용량 조회기 표 [`usage_probes`])와 **두 dispatch 표**(`backend_for` ·
-//! `backend_for_encoder`)뿐이고, 백엔드별 지식은 전부 [`AgentBackend`] 메서드와 [`UsageProbe`] 구현으로만 나온다.
-//! 게이트는 `backend/claude/mod.rs` 헤더.
+//! ★This file names no backend's item★: a backend name is written only in the **registry** (`pub mod` · `pub use` ·
+//! static singletons · the usage-probe table [`usage_probes`] · the settings-check table [`settings_checks`]) and the
+//! **two dispatch tables** (`backend_for` · `backend_for_encoder`). Every piece of backend knowledge comes out only
+//! through [`AgentBackend`] methods and the [`UsageProbe`] · [`SettingsCheck`] implementations. The gate is in the
+//! `backend/claude/mod.rs` header.
 //!
 //! tauri import 0.
 
 pub mod claude;
 pub mod codex;
 pub mod gemini;
+pub mod settings_check;
 pub mod shell;
 
 pub use claude::ClaudeBackend;
 pub use codex::CodexBackend;
 pub use gemini::GeminiBackend;
+pub use settings_check::SettingsCheck;
 pub use shell::ShellBackend;
 
 use std::path::{Path, PathBuf};
@@ -715,8 +718,9 @@ fn backend_for(c: &AgentCommand) -> &'static dyn AgentBackend {
 /// 명령은 갖고 있지 않아(소유권 분할) 여기서 되짚는다.
 ///
 /// `None` = 그 태그에는 backend 지식이 없다(바이트 통과).
-/// ★백엔드 이름은 이 표와 바로 위 `backend_for`, 아래 [`usage_probes`], 그리고 싱글턴 선언에만 적는다★ —
-///   그 바깥에서 백엔드 이름이 나오면 `backend/<이름>/` 폴더 격리가 샌 것이다(ADR-0004).
+/// ★A backend name is written only in this table, `backend_for` right above, [`usage_probes`] ·
+///   [`settings_checks`] below and the singleton declarations★ — a backend name outside them means the
+///   `backend/<name>/` folder isolation leaked (ADR-0004).
 fn backend_for_encoder(e: InputEncoder) -> Option<&'static dyn AgentBackend> {
     match e {
         InputEncoder::Raw => None,
@@ -748,6 +752,23 @@ pub fn usage_probe_for(word: &str) -> Option<&'static dyn UsageProbe> {
     usage_probes()
         .into_iter()
         .find(|probe| probe.key().as_str().eq_ignore_ascii_case(word))
+}
+
+// ── Settings-check registry ────────────────────────────────────────────────────
+
+/// Every backend settings check — the caller (asset-library) gets each backend's settings knowledge only from here.
+/// A word with no entry gets no settings check — today only claude has one.
+// ADR-0334
+pub fn settings_checks() -> [&'static dyn SettingsCheck; 1] {
+    [&claude::CLAUDE_SETTINGS_CHECK]
+}
+
+/// Backend word → its settings check, ASCII case-insensitive (the same entrances as [`usage_probe_for`]).
+/// `None` = that word has no settings check.
+pub fn settings_check_for(word: &str) -> Option<&'static dyn SettingsCheck> {
+    settings_checks()
+        .into_iter()
+        .find(|check| check.backend().eq_ignore_ascii_case(word))
 }
 
 // ── 자유 함수 dispatch ─────────────────────────────────────────────────────────
@@ -1962,6 +1983,47 @@ mod tests {
         }
     }
 
+    // ── settings-check registry (ADR-0334) ──
+
+    #[test]
+    fn each_settings_check_key_is_the_backend_word_of_its_backend() {
+        let claude_word = crate::launch::backend_word(&AgentCommand::Claude {
+            extra_args: vec![],
+            output_format: AgentOutputFormat::Terminal,
+        });
+        let keys: Vec<&str> = settings_checks().iter().map(|c| c.backend()).collect();
+        assert_eq!(keys, [claude_word.as_str()]);
+        assert!(std::ptr::addr_eq(
+            settings_checks()[0],
+            &claude::CLAUDE_SETTINGS_CHECK as &dyn SettingsCheck,
+        ));
+    }
+
+    #[test]
+    fn settings_check_keys_are_unique() {
+        let checks = settings_checks();
+        for (i, a) in checks.iter().enumerate() {
+            for b in &checks[i + 1..] {
+                assert!(
+                    !a.backend().eq_ignore_ascii_case(b.backend()),
+                    "{}",
+                    a.backend()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn settings_check_for_ignores_ascii_case_and_refuses_unknown_words() {
+        for word in ["claude", "Claude", "CLAUDE"] {
+            let check = settings_check_for(word).unwrap_or_else(|| panic!("{word}"));
+            assert_eq!(check.backend(), "claude", "{word}");
+        }
+        for unknown in ["", "shell", "gemini", " claude", "claude ", "claud"] {
+            assert!(settings_check_for(unknown).is_none(), "{unknown:?}");
+        }
+    }
+
     // ── 실행 재료 배치(ADR-0334) ──
 
     /// 배치 포트로 쓰려 한 자리를 전부 적는 가짜 — 「쓰기 없음」 을 잰다.
@@ -2035,7 +2097,8 @@ mod tests {
         assert_eq!(*fs.writes.lock().unwrap(), Vec::<PathBuf>::new());
     }
 
-    /// 기본 배치는 실 재료라도 아무것도 싣거나 쓰지 않지만 `real` 은 계획 그대로 넘긴다.
+    /// An empty real kit places nothing and writes nothing on every backend, but `real` is carried as planned — the
+    /// default `materialize` and the claude override (which has nothing to place from an empty kit) alike.
     #[test]
     fn the_default_materialize_carries_real_and_nothing_else() {
         let cwd = std::env::temp_dir();

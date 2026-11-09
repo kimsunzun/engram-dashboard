@@ -22,6 +22,7 @@ use std::path::PathBuf;
 use engram_dashboard_agent::types::{
     CLI_EXE_ENV, CLI_EXE_NAME, CLI_GROUP_MAIL, CLI_MAIL_FLAGS, CLI_MAIL_VERBS,
 };
+use engram_dashboard_platform::shell::path_is_cli_safe;
 
 /// A character that continues a token — if this character is attached on either side of a match, it is **part of another word**.
 ///
@@ -243,27 +244,6 @@ pub struct FilePrimingProvider {
 const REL_MCP_PRIMARY: &str = "prompts/agent-priming.md";
 const ENV_OVERRIDE: &str = "ENGRAM_PRIMING_FILE";
 
-/// ★Characters that corrupt under cmd.exe (ADR-0092, Codex #1+#5)★: on Windows, claude arguments are wrapped by `console_command`
-///   (the platform crate's `shell`) as `cmd.exe /c claude …` and run — this path expands `%VAR%` **even inside quotes** and
-///   interprets `& ^ | < >` as shell metacharacters, corrupting the argument. If a priming path contains these characters,
-///   claude would receive a wrong/truncated path, so we do not inject at all (None).
-///   ★PRE-EXISTING · separate follow-up (scope, ADR-0092)★: the cmd.exe escaping flaw of `console_command` itself is
-///   not introduced by this slice but is an **existing** problem, and `--mcp-config` (config_path), carried by the same path, is
-///   exposed in the same way (that one is a path the daemon makes so it is practically safe, but the principle is the same). Here we do only the
-///   slice-level cheap defense (the priming path filter) and do not fix console_command — that is tracked as a separate task that
-///   affects the arguments of **all backends** (avoiding scope creep).
-const CMD_UNSAFE_CHARS: &[char] = &['%', '&', '^', '|', '<', '>'];
-
-/// ★Why UTF-8 is checked too (Codex #5)★: arguments are finally stringified with `to_string_lossy()` and carried to the CLI
-///   (`backend/claude/`). A non-UTF8 path is **corrupted** to U+FFFD by that lossy conversion and claude receives a nonexistent path.
-///   Such a path is not injected in the first place (a corrupted path < no priming).
-fn path_is_cli_safe(p: &std::path::Path) -> bool {
-    let Some(s) = p.to_str() else {
-        return false;
-    };
-    !s.chars().any(|c| CMD_UNSAFE_CHARS.contains(&c))
-}
-
 impl FilePrimingProvider {
     pub fn new(base_dir: PathBuf) -> Self {
         Self { base_dir }
@@ -471,22 +451,6 @@ mod tests {
             "cmd 메타문자(% &) 포함 경로 → None(부패 위험 미주입)"
         );
         let _ = std::fs::remove_dir_all(&root);
-    }
-
-    // ── ADR-0092 hardening: path_is_cli_safe unit (per metacharacter) ────────────────────────────
-    #[test]
-    fn path_is_cli_safe_rejects_each_metachar() {
-        for c in CMD_UNSAFE_CHARS {
-            let p = std::path::PathBuf::from(format!("C:/base/na{c}me/agent.md"));
-            assert!(
-                !path_is_cli_safe(&p),
-                "메타문자 {c:?} 포함 경로는 거부되어야"
-            );
-        }
-        assert!(
-            path_is_cli_safe(std::path::Path::new("C:/base/prompts/agent-priming.md")),
-            "메타문자 없는 경로는 안전"
-        );
     }
 
     // ── ADR-0099/0126: consistency invariant pin (content-based) — the channel the production priming file actually teaches ──────

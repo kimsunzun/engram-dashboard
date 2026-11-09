@@ -1476,9 +1476,10 @@ mod tests {
         let _ = rig.spec();
     }
 
-    /// ★조립에 실리는 재료는 준비가 낸 재료를 한 번 배치한 것이다★ — 점검한 계획은 Noop 인데 재료만 실 재료로 표시하면
-    /// 실린 재료도 실 재료다. 번역이 아직 없는 backend 의 배치는 그 표시만 넘기고 배치 포트를 부르지 않는다. Noop 재료는
-    /// 기본값 그대로다(argv 골든 = `noop_spawn_paths_produce_todays_argv`).
+    /// ★The assembled materials are the prepared kit, placed once★ — when the checked plan is Noop but the kit is marked
+    /// real, the assembled materials are real too. An empty real kit carries only that mark and does not call the layout
+    /// port (the claude translation has nothing to place from it). Noop materials stay at the default (argv golden =
+    /// `noop_spawn_paths_produce_todays_argv`).
     // TRD S25 §1-5 (나) 6 · 7
     #[test]
     fn the_assembled_artifacts_come_from_the_prepared_kit() {

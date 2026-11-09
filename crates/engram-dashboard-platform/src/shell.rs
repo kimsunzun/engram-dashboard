@@ -1,4 +1,7 @@
-//! OS rules for launching console programs — the default interactive shell · wrapping a CLI in that OS's console shell. Uses only std.
+//! OS rules for launching console programs — the default interactive shell · wrapping a CLI in that OS's console shell ·
+//! which path values survive that wrapping. Uses only std.
+
+use std::path::Path;
 
 #[cfg(windows)]
 pub fn default_shell() -> &'static str {
@@ -22,8 +25,8 @@ pub fn default_shell() -> &'static str {
 ///   command line of `cmd.exe`, and an argument containing cmd metacharacters (`%NAME%` — expanded as an environment variable even inside quotes · `& ^ | < >`)
 ///   or the `"` and `\` that cmd counts as quotes may reach it changed, as cmd interprets them. The decision not to fix it and its
 ///   rationale are authoritatively in the comment 「알려진 한계 — `%VAR%` 가 든 경로는 shim 을
-///   지나며 치환된다」 inside `build_spec` in agent `backend/codex/mod.rs`. Mitigation is placed by the caller per value — e.g. daemon `control/priming.rs`'s
-///   `CMD_UNSAFE_CHARS` · `path_is_cli_safe` · codex's `developer_instructions_override` · `mcp_attachment`
+///   지나며 치환된다」 inside `build_spec` in agent `backend/codex/mod.rs`. Mitigation is placed by the caller per value — e.g.
+///   [`path_is_cli_safe`] · codex's `developer_instructions_override` · `mcp_attachment`
 ///   rejection · passing claude `--settings` as a file path instead of inline JSON.
 /// - A process launched with this command is, on Windows, the `cmd.exe` wrapper rather than that CLI — the CLI itself is a descendant under it.
 // ADR-0230
@@ -42,9 +45,65 @@ pub fn console_command(program: &str, args: Vec<String>) -> (String, Vec<String>
     }
 }
 
+/// Characters that `cmd.exe /c` may interpret in an argument (see [`console_command`]'s known limitation): `%NAME%`
+/// is expanded as an environment variable even inside quotes, and `& ^ | < >` are shell metacharacters outside
+/// quotes — an argument without whitespace is passed unquoted, so a path holding one of them reaches cmd bare.
+// ADR-0092
+const CMD_UNSAFE_CHARS: &[char] = &['%', '&', '^', '|', '<', '>'];
+
+/// Whether a path reaches a CLI wrapped by [`console_command`] unchanged — `false` when it holds one of `% & ^ | < >`
+/// or is not valid UTF-8 (arguments are carried as text, so a lossy conversion would hand the CLI a
+/// different path).
+///
+/// The rule is the same on every OS (no OS branch) — a path that passes here passes on Windows, where the wrapping
+/// happens. A caller that gets `false` must not pass the path at all; it is not escaped here.
+// ADR-0092
+pub fn path_is_cli_safe(path: &Path) -> bool {
+    let Some(text) = path.to_str() else {
+        return false;
+    };
+    !text.chars().any(|c| CMD_UNSAFE_CHARS.contains(&c))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn path_is_cli_safe_rejects_each_metachar() {
+        for c in CMD_UNSAFE_CHARS {
+            let path = std::path::PathBuf::from(format!("C:/base/na{c}me/agent.md"));
+            assert!(!path_is_cli_safe(&path), "{c:?}");
+        }
+        assert!(path_is_cli_safe(Path::new(
+            "C:/base/prompts/agent-priming.md"
+        )));
+        assert!(path_is_cli_safe(Path::new(
+            r"C:\Users\a b\AppData\Local\engram\vol (1)\settings.json"
+        )));
+    }
+
+    #[test]
+    fn path_is_cli_safe_rejects_a_path_that_is_not_utf8() {
+        #[cfg(windows)]
+        let path = {
+            use std::os::windows::ffi::OsStringExt;
+            // A lone surrogate is a valid Windows file name but not valid UTF-8.
+            std::path::PathBuf::from(std::ffi::OsString::from_wide(&[
+                u16::from(b'C'),
+                u16::from(b':'),
+                u16::from(b'/'),
+                0xD800,
+            ]))
+        };
+        #[cfg(unix)]
+        let path = {
+            use std::os::unix::ffi::OsStrExt;
+            std::path::PathBuf::from(std::ffi::OsStr::from_bytes(b"/base/\xFF"))
+        };
+        assert!(path.to_str().is_none(), "the sample must not be UTF-8");
+        assert!(!path_is_cli_safe(&path));
+    }
 
     /// ★Arguments are carried in order without changing a single character★ — arguments with spaces or cmd metacharacters also get no quotes or escapes
     /// added (it measures the 「이스케이프하지 않는다」 (does not escape) in the doc above).
