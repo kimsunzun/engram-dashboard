@@ -374,7 +374,7 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0325](0325-경로-열쇠-os-대문자-표의-utf-16-단위-접기-파일-신원-128비트-우선-둘-다-platform-fs.md) | Path key = per-UTF-16-unit folding with the OS uppercase table · file identity = 128-bit first — both in platform `fs` | 제안 |
 | [0326](0326-휴지통-비우기-영구-삭제-os-휴지통에-넘기고-os-가-정한다-adr-0322-결정-5-6-7-개정.md) | Emptying the trash and permanent deletion = hand over to the OS trash and let the OS decide — amends ADR-0322 Decisions 5 · 6 · 7 | 제안 |
 | [0327](0327-프라이밍의-원천은-배포판-builtin-하나-기본-제공-프리셋-기본-의-지침-파일.md) | The source of priming is one distribution `builtin\` — the instruction file of the built-in preset 「기본」 | 제안 |
-| [0328](0328-숨은-settings-조각을-없앤다-claude-원문은-붙인-순서로-settings-파일-하나에-합친다.md) | Remove the hidden settings fragment — merge the claude raw text into one `--settings` file in attached order | 제안 |
+| [0328](0328-숨은-settings-조각을-없앤다-claude-원문은-붙인-순서로-settings-파일-하나에-합친다.md) | Remove the hidden settings fragment — merge the claude raw text into one `--settings` file in attached order | 제안 (부분 폐기 by ADR-0351: 쓰기 실패 처리) |
 | [0329](0329-지침-스킬의-백엔드-꼬리표는-프리셋-항목에-단다-에셋-파일은-손대지-않는다.md) | The backend tag of instructions and skills is attached to the preset entry — asset files are not touched | 제안 |
 | [0330](0330-다시-연결-하나를-고르면-나머지를-이름으로-잇는다-훑기는-후보를-제안하지-않는다.md) | Relink = pick one and the rest are linked by name — the scan does not suggest candidates | 제안 |
 | [0331](0331-편집-칸-실행이-알리는-것은-충돌뿐이다-경고-범주가-없다.md) | What the edit area and a run report is conflicts only — there is no warning category | 제안 |
@@ -395,3 +395,4 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0346](0346-network-failures-retry-without-limit-on-a-capped-backoff-token-and-version-refusals-stop-at-the-first-refusal.md) | Network failures retry without limit on a capped backoff; token and version refusals stop at the first refusal | 확정 |
 | [0347](0347-the-daemon-waits-15-s-for-the-first-auth-frame-and-the-longer-pre-auth-window-is-accepted-as-a-known-local-limit-until-3-3-caps-land.md) | The daemon waits 15 s for the first auth frame, and the longer pre-auth window is accepted as a known local limit until 3-3 caps land | 확정 |
 | [0348](0348-creating-and-starting-a-new-agent-is-one-body-in-the-agent-crate-ws-spawnbycwd-and-bus-agentspawn-cwd-are-its-adapters.md) | Creating and starting a new agent is one body in the agent crate — WS SpawnByCwd and bus agent.spawn --cwd are its adapters | 확정 |
+| [0351](0351-a-failed-write-of-the-merged-claude-settings-file-fails-the-spawn.md) | A failed write of the merged claude settings file fails the spawn | 확정 |

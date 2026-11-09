@@ -1,7 +1,7 @@
 # ADR-0328: Remove the hidden settings fragment — merge the claude raw text into one `--settings` file in attached order
 
-- 상태: 제안 (2026-10-31, basis: user decision T10 (2026-10-18 「프리셋으로 해줘. 사실 감추는 설정이 있으면 안되지.」 · 「이어붙이기 진행」))
-- 관련: Amends ADR-0109 (the settings fragment part of Decision 9) (see 「바뀌는 조항」 below) · ADR-0099 (mcp-config lifecycle) · ADR-0327 · ADR-0316 · PRD R32 · TRD §1-2 · §1-5 table · §3 merge rules · §7 19
+- 상태: 제안 (2026-10-31, basis: user decision T10 (2026-10-18 「프리셋으로 해줘. 사실 감추는 설정이 있으면 안되지.」 · 「이어붙이기 진행」)) · 부분 폐기 by ADR-0351 (쓰기 실패 처리)
+- 관련: Amends ADR-0109 (the settings fragment part of Decision 9) (see 「바뀌는 조항」 below) · ADR-0099 (mcp-config lifecycle) · ADR-0327 · ADR-0316 · PRD R32 · TRD §1-2 · §1-5 table · §3 merge rules · §7 19 · Amended by ADR-0351 (쓰기 실패 처리)
 
 ## 맥락
 Today the control channel loads a single-key fragment file `{"allowedMcpServers":[{"serverName":"engram"}]}` with `--settings` on every spawn (ADR-0109 Decision 9 · `control/mcp_config.rs`). S25 also loads the preset's claude raw-text settings with `--settings`.
