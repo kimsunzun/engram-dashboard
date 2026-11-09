@@ -169,6 +169,73 @@ Not measured: what happens when a later override goes **through** an earlier sca
 
 **Verdict.** The pick is `AGENTS.override.md` if it exists (any case, on this case-insensitive NTFS volume), else `AGENTS.md`. An existing empty or blank override is still the pick and contributes no text — codex does **not** fall back to `AGENTS.md`. To mirror codex: pick by existence (by the OS name rule), then drop the text when it is blank. Not tested: folders with per-directory NTFS case sensitivity.
 
+## M8 — `thread/resume.developerInstructions` — **Accepted, but it does not reach the next turn; it is held only in the live process and is used only when a compaction rebuilds the initial context (certain, mock provider)**
+
+**Method.** A second measurement run (same day, same CLI, no token, **no real model turns**). Each step is one `codex app-server --stdio` process (spawn and handshake as above, harness trimmed to a small client), so every resume is a cold resume in a new process — the way our backend resumes. To see the **actual model input** of each turn instead of the rollout alone, the temporary `CODEX_HOME` pointed codex at a local mock of the Responses API on `127.0.0.1` that records every request body and answers with a minimal SSE stream (assistant `ok`), so turns complete and history grows normally. Two provider setups:
+- **custom provider** — `config.toml`: `model_provider = "mock"`, `[model_providers.mock] base_url = "http://127.0.0.1:…/v1"`, `wire_api = "responses"`. Manual compaction takes the **local** path (a `CONTEXT CHECKPOINT COMPACTION` summarization request, then a summary user message);
+- **built-in `openai` provider** — `config.toml`: `openai_base_url = "http://127.0.0.1:…/v1"`. Manual compaction takes the **remote** path (`request_kind: compaction`, `implementation: responses_compaction_v2`, input ends with `{type: compaction_trigger}`); the mock answered with one `{type: compaction, encrypted_content: "M8ENC-n"}` item. (This provider first tries a WebSocket `GET /v1/responses`, gets 404 and falls back to HTTP POST after 5 retries.)
+
+`thread/start` was sent as our backend sends it (`codex/mod.rs` `ThreadOpen` → `protocol.rs` `ThreadStartParams`): `{cwd, approvalPolicy, sandbox, developerInstructions: "M8-DEV-A-1111 …"}`. `thread/resume` = `{threadId, excludeTurns: true, developerInstructions?}`. Compaction = `thread/compact/start {threadId}`. Nothing was written to the real `~/.codex`; the temporary folder (homes, mock, captured requests) was sent to the recycle bin after the run (M8 and M9). Schema check: `generate-json-schema` **without** `--experimental` lists `developerInstructions` (and `baseInstructions`, `config`, `model`, …) in `ThreadResumeParams` — a stable field; no opt-in was sent for these runs.
+
+**Evidence** (request inputs, codex's own default developer message and the multi-agent/environment items left out; `[A]` = the developer message whose first content item is the `developerInstructions` text, followed in the same message by `<skills_instructions>`, `<permissions instructions>`, `<collaboration_mode>`):
+
+```
+custom provider
+P1 start(A) + turn             : [A] env  user#1
+P2 resume(B) + turn            : [A] env  user#1 ok  user#2                     ← B absent, A still there (history)
+P3 resume(no field) + turn     : [A] … user#3
+P4 resume(C) + ctx + turn      : [A] … user#3 ok  <engram-instructions>M8-ADDCTX-4444</engram-instructions>  user#4   ← C absent
+P5 resume(no field) + compact + turn : user#1 user#2 user#3 [skills…, no instructions] env user#4 <summary> user#5
+                                       ← A gone, the additionalContext message gone; no developer instructions at all
+V1  P1 start(A)+turn | P2 resume(B)+turn+compact+turn | P3 resume(no field)+compact+turn
+    P2 turn 1      : [A] …                                   (B absent)
+    P2 after compact: user#1 [B] env user#2 <summary> user#3  (B present, A gone)
+    P3 compact req : … [B] …                                  (B came back from the stored compacted history)
+    P3 after compact: user#… [skills…, no instructions] …     (B gone too)
+V2  one live process: start(A)+turn+compact+turn → after compact: [A] env user#1 <summary> user#2   (A kept)
+V3  P1 start(A) | P2 resume(B)+turn | P3 resume(no field)+compact+turn
+    P2 turn: [A] …   P3 after compact: no instructions          (B never reached the model)
+
+openai provider, remote compaction (same pattern)
+OA1 P2 resume(B)+turn+compact+turn : turn 1 [A] …;  after compact: user#1 [B] env user#2 {compaction M8ENC-17} user#3
+    P3 resume(no field)+compact+turn: after compact: user#1 user#2 [skills…, no instructions] env user#3 {compaction} user#4
+OA2 P2 resume(no field) + ctx + turn + compact + turn:
+    turn 1: [A] … <engram-instructions>M8-ADDCTX-4444</engram-instructions> user#2
+    after compact: user#1 [skills…, no instructions] env user#2 {compaction M8ENC-41} user#3   ← A and the context both gone
+```
+
+- `thread/resume` with `developerInstructions` returned success in every case; no error, no warning, no notification about it.
+- Persistence: in the rollout and the sqlite state files, `B` appears **only** inside a `compacted` rollout item written by a compaction in the process that received `B` (V1: 1 occurrence; V3, no compaction in that process: 0). `turn_context` and `thread_settings_applied` carry no developer-instructions text (`collaboration_mode.settings.developer_instructions: null` there is a different field).
+- The no-token run against the real endpoint (401) showed the same rollout shape: after `resume(B)`, the turn wrote only the user message — no developer message with `B`.
+
+**Verdict.**
+- **B does not take effect for the next turn** (certain). On a cold resume codex replays the stored history as the model input; it does not inject or diff the developer instructions. A stays (it is part of the stored history); never both.
+- `B` is kept **only in the resumed process's session settings**. It reaches the model only when a compaction in **that** process rebuilds the initial context — then `B` replaces `A` (certain, manual compaction, both compaction paths).
+- **Not persisted** as a setting: a later resume without the field has no instructions in its session, so its next compaction rebuilds the initial context with **none** — even though `A` (or `B`) was in the history before (certain).
+- Corollary for **today's** backend (resume never sends the field): a resumed JSON thread loses its start-time instructions at the first compaction in any resumed process (certain on the mock; a thread that stays in its starting process keeps them — V2).
+- `additionalContext` is a separate developer message right before the turn's user message (`<key>value</key>`, as M3). It lives in history only, so **every compaction drops it** (certain on both paths; with a real server the opaque compaction item may still carry its gist — **unknown**).
+- Not measured: automatic (token-limit, mid-turn) compaction — likely the same rebuild, not observed; a same-process `thread/resume` of a thread that is already loaded; what the real server puts into the remote compaction item.
+
+**Implication.** `developerInstructions` on resume does **not** replace the `additionalContext` route: the next turn after a resume never sees it. The two are complementary — `additionalContext` on the first turn delivers changed instructions now; `developerInstructions` = the current full text on **every** resume (changed or not) is what keeps the instructions alive across a compaction in that process, and after such a compaction only the new text remains (the `additionalContext` message is dropped, so no duplicate). The `protocol.rs` comment on `ThreadResumeParams` ("no `developerInstructions` counterpart … not measured whether that field is in this request's schema") is now outdated: the field is in the stable schema and accepted.
+
+## M9 — Process scope of `skills/extraRoots/set` — **Not shared between concurrent processes (certain)**
+
+**Method.** One driver started two `codex app-server --stdio` processes A and B at the same time (same temporary `CODEX_HOME`, same cwd, mock provider of M8 so turns complete). Fixtures: `rootA\m9-a\SKILL.md`, `rootB\m9-b\SKILL.md`. Each `skills/list` used `forceReload: true`. Finally each process started a thread and ran one turn; the skills message in the captured request shows what the model sees.
+
+**Evidence** (both processes alive throughout — `exitCode === null` at the end):
+
+```
+0  A list → []          B list → []
+1  A set [rootA] → {}   A list → [m9-a]   B list → []
+2  B set [rootB] → {}   A list → [m9-a]   B list → [m9-b]
+3  A turn request skills: m9-a only        B turn request skills: m9-b only
+   skills/changed: A got 1 (right after its own set), B got 1 (right after its own set) — none from the other process
+```
+
+- Side observation: on the **first** attempt the home was new and both processes initialised it at the same moment; B exited 1 with `failed to initialize sqlite state runtime under …`. The rerun on the now-initialised home had no error. n = 1, so whether this is a first-init race only is **likely**, not settled. Our product runs against an existing `~/.codex`, so this is a note, not a risk for the design.
+
+**Verdict.** Extra roots are per app-server process: a set in one process is invisible to `skills/list`, to `skills/changed` and to the model input of another live process, in both directions, and B's set does not overwrite A's roots. Together with M4: every process must set its own roots, and two agents with different presets can run concurrent codex processes on the same `CODEX_HOME` without leaking roots into each other.
+
 ---
 
 ## Summary by question
@@ -183,3 +250,5 @@ Not measured: what happens when a later override goes **through** an earlier sca
 | `-c` parse rule | The M6 table. | certain (trim set likely) |
 | Same-name skills across roots | Both loaded, no error; `$name` selects neither. | certain (n = 1) |
 | AGENTS pick | The M7 table. | certain |
+| `thread/resume.developerInstructions` | Accepted (stable field) but not in the next turn's input; held in the process only; used when a compaction in that process rebuilds the initial context (replaces the old text); not persisted. `additionalContext` is dropped by compaction. | certain (mock provider, manual compaction) |
+| Extra roots across concurrent processes | Not shared, either direction; no cross-process `skills/changed`. | certain |
