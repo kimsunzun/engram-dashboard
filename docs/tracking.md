@@ -50,7 +50,7 @@
 | T-59 | Job 멤버 명단이 「멤버 수 ≠ 명단 수」로 4 번 안에 완전해지지 않는 flake | 버그 | 미착수 · 선재(platform) · CI 1 회 관측 |
 | T-64 | 합쳐진 replay 의 후속 Subscribe 가 창 닫힌 뒤 나가 구독이 샌다 | 버그 | 미착수 · 선재 |
 | T-79 | Shell–daemon link freezes while still showing "connected" (killing a PTY agent mid-burst) | 버그 | Fixed — merged to master (S34, `baa97e41`); remove when convenient |
-| T-80 | A spewing agent shown in a slot makes the daemon close the connection on a full send queue → reconnect/replay storm | 버그 | Not started · pre-existing (old driver too) · found by S34 QA |
+| T-80 | A spewing agent shown in a slot makes the daemon close the connection on a full send queue → reconnect/replay storm | 버그 | Not started · pre-existing · left out of 3-3 (replace-only scope, user 2026-11-10) |
 | T-71 | 트래킹 번호를 가리키지 않기 — 해결되면 그냥 지우기 | 사소한 기능·정리 | 할 일 — 나중에 이슈로 |
 | T-70 | 브랜치 앞 버전 짐작 기준 — 기능이면 0.5.0 쪽 | 사소한 기능·정리 | 할 일 — 나중에 이슈로 |
 | T-69 | 스텝 번호 규약 — 새 주제마다 S번호 | 사소한 기능·정리 | 일부 됨 · 남은 것 = 자잘한 커밋 접두 |
@@ -335,6 +335,7 @@
 - **Symptom:** while an agent that writes ~1.5 MB per call is shown in a slot, the connection drops and reconnects every ~20–35 ms; commands sent meanwhile fail fast ("connection lost" / handshake ended) and output stalls until the slot is emptied. No wedge — it stops once the agent is no longer shown.
 - **Observed mechanism (daemon log):** `ReplayComplete 를 큐에 못 실었다(포화) — 연결을 닫는다` (908×) then `연결 끊김` (1792×) — the daemon's per-connection send queue fills (by design: "포화면 이 연결이 끝난다"), the daemon closes, the shell reconnects and re-subscribes, the replay fills the queue again. Each cycle shows two dials accepted at once. Evidence: S34 QA logs (session scratchpad `t79/qa/gui`, `gui-base2`).
 - **Next:** design question — how the daemon should treat a slow/full consumer during a replay burst (backpressure vs close), likely within S21 stage 3-3 (daemon on the transport, byte budget / per-peer queue) or its own topic.
+- **2026-11-10:** 3-3 landed as a pure replacement of net (user: 「일단 기존거 교체하는 정도로 구현하라고」), so this was not fixed there — the daemon adapter keeps net's queue sizes and close-on-saturation. Its own topic now.
 
 ## 사소한 기능·정리
 
