@@ -2,20 +2,18 @@
 //! `ConnectionHandler` calls) implemented over accepted transport peers (TRD S21 trd-3 §6-3 U4 · D11 ②′).
 //!
 //! The transport owns the socket: WS upgrade + Origin · Host check ([`accept_policy`]), the auth deadline, the single
-//! writer, keepalive (active ping · idle decision) and the close frame. This file owns what the net layer's
-//! `handle_connection` did above that, carried over as code: per connection one read task (it reads that peer's
-//! lossless inbox instead of the socket), the arrival-order lane + byte budget + saturation disposition, the single
-//! `dispatch_task`, the overlapping `bypass_task`, and the teardown order. Constants are the net layer's.
+//! writer, keepalive (active ping · idle decision) and the close frame. This file owns what sits above that: per
+//! connection one read task (it reads that peer's lossless inbox), the arrival-order lane + byte budget + saturation
+//! disposition, the single `dispatch_task`, the overlapping `bypass_task`, and the teardown order.
 //!
-//! ★Connection lifetime (net parity)★ — net selected on two ends: the dispatch task finishing (read abort → priority lane
-//! drained → write abort) and the write task finishing (read abort → priority lane drained → dispatch abort). Here:
+//! ★Connection lifetime★ — three ends:
 //! - dispatch finished (`ConnFlow::Close` · the lane closed after the read side stopped) → stop feeding · drain the
 //!   priority lane · close the peer after flushing what is queued (`Peer::close_after_flush`).
 //! - the link ended on the write side (write failure · write deadline · idle · our own close) or a send through the
 //!   [`FrameSink`] failed → stop feeding · drain the priority lane · abort dispatch.
-//! - the link ended on the read side (the peer closed · a read error) → the lanes close, dispatch drains what it
-//!   holds; net's writer then ended at its next write — a failed send, or at the latest its next ping — so dispatch is
-//!   aborted at the first failed send or after one ping interval.
+//! - the link ended on the read side (the peer closed · a read error) → the lanes close and dispatch drains what it
+//!   holds; it is aborted at the first failed send or after one ping interval, so the last command of a client that
+//!   sends and closes at once still runs, but a dispatch stuck in a handler does not hold the connection forever.
 //!
 //! In every branch `on_disconnect` runs before the fan-out list drops the connection, and the read task keeps draining
 //! the inbox to its end (`Closed` · `None`) after it stops feeding the lanes (transport receiver invariant 5).
@@ -57,7 +55,7 @@ const CONN_TX_CAP: usize = 4608;
 ///
 /// ★This queue is a **burst absorber**, not a backlog store★: what the consumer (`dispatch_task`) holds at a time
 ///   is only **one** frame whose arrival order carries meaning, and long work is peeled off this lane by the upper layer
-///   (the 「도착 순서」 (arrival order) contract of `frame_port::ConnectionHandler`). So unlike [`CONN_TX_CAP`], which must hold
+///   (the 「도착 순서」 (arrival order) contract of `conn_port::ConnectionHandler`). So unlike [`CONN_TX_CAP`], which must hold
 ///   the entire replay, no large value is needed — do not compare the two values on the same axis.
 /// ★★Even when full, **the read loop does not stop** — it asks the upper layer how to dispose of that one frame and keeps reading★★
 ///   ([`ConnectionHandler::on_inbound_saturated`]). ★The 「가득 차면 읽기 루프가
@@ -69,7 +67,7 @@ const CONN_TX_CAP: usize = 4608;
 ///     held separately by [`Saturated::Unanswered`] — only there is the connection ended.
 ///   ㆍ**Otherwise it does not disconnect either**: the outbound queue ([`ConnFrameSink`]) disconnects on saturation
 ///     because its caller is a synchronous path that **cannot produce a reply** (the source of truth for the asymmetry =
-///     `frame_port::FrameSink`). Here the upper layer can state the refusal in words, so there is no reason to kill the connection.
+///     `conn_port::FrameSink`). Here the upper layer can state the refusal in words, so there is no reason to kill the connection.
 /// ★So what this value measures★ = 「소비자가 막힌 동안 **손실 없이** 받아 둘 프레임 **개수**」 (the **number** of frames to hold **without loss** while the consumer is blocked). Whichever of the two
 ///   is hit first is the saturation — the entries all fill, or the byte budget all fills.
 /// ★When the consumer is healthy this value is not even seen★: what remains in the lane is only short frames with no await point
@@ -128,17 +126,17 @@ const DEFAULT_PING_INTERVAL: Duration = Duration::from_secs(20);
 /// 2.5x ping_interval (the connection drops only after several Pings are missed — prevents false positives from a transient delay).
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(50);
 
-/// The transport requires a write deadline below the ping interval (`Policy::check`); the net layer had none. The deadline
+/// The transport requires a write deadline below the ping interval (`Policy::check`). The deadline
 /// is set as late as the transport allows — one millisecond under the ping interval — so this cut fires as rarely as it can.
 const WRITE_DEADLINE_MARGIN: Duration = Duration::from_millis(1);
 
 /// The byte cap of one WS message and one frame, both directions — the shell dialer's value (`DAEMON_MESSAGE_MAX_BYTES`).
-/// The net layer kept tungstenite's defaults (64 MiB message · 16 MiB frame); a client that does not fragment, like the
-/// shell, was already bounded by the 16 MiB frame cap.
+/// Tighter than tungstenite's defaults (64 MiB message · 16 MiB frame) only for fragmented messages — a client that does
+/// not fragment, like the shell, is bounded by the 16 MiB frame cap either way.
 const MAX_MESSAGE_BYTES: usize = 16 << 20;
 
-/// Upgrade permits — links from TCP accept until they go live (upgrade · ready queue · auth wait). The net layer had no cap;
-/// this is set far above any legitimate count of clients so it never refuses one.
+/// Upgrade permits — links from TCP accept until they go live (upgrade · ready queue · auth wait). Set far above any
+/// legitimate count of clients so it never refuses one.
 const MAX_PENDING_UPGRADES: usize = 1024;
 
 /// Refusal reports the listener may hold before the accept loop logs them — past it they are counted, not kept.
@@ -159,7 +157,7 @@ const ALLOWED_ORIGINS: &[&str] = &[
     "https://tauri.localhost",
 ];
 
-/// Host names a WS upgrade may carry (the port must be the bound one). The net layer checked no Host; the transport accepts
+/// Host names a WS upgrade may carry (the port must be the bound one). The transport accepts
 /// only listed names (an upgrade without Host passes), so the list is the names a loopback client dials by.
 const ALLOWED_HOST_NAMES: &[&str] = &["127.0.0.1", "localhost"];
 
@@ -187,7 +185,7 @@ fn accept_policy() -> AcceptPolicy {
     AcceptPolicy {
         allowed_origins: ALLOWED_ORIGINS.iter().map(|s| s.to_string()).collect(),
         allowed_host_names: ALLOWED_HOST_NAMES.iter().map(|s| s.to_string()).collect(),
-        // The net layer had no upgrade deadline; the transport requires one — the auth window's length.
+        // The transport requires an upgrade deadline — the auth window's length.
         upgrade_timeout: AUTH_TIMEOUT,
         max_pending_upgrades: MAX_PENDING_UPGRADES,
         max_message_bytes: MAX_MESSAGE_BYTES,
@@ -195,10 +193,9 @@ fn accept_policy() -> AcceptPolicy {
     }
 }
 
-/// The transport policy of one accepted peer. The values the net layer had are kept (auth window · keepalive · outbound
-/// queue); the rest are the transport's defaults. ★Outbound saturation is not a transport disconnect★ — the per-connection
-/// sink closes on it ([`ConnFrameSink`]) and the fan-out skips it ([`ConnRegistry`]), the net layer's asymmetry
-/// (`frame_port::FrameFanout`).
+/// The transport policy of one accepted peer. The daemon sets the auth window · keepalive · outbound queue; the rest are
+/// the transport's defaults. ★Outbound saturation is not a transport disconnect★ — the per-connection sink closes on it
+/// ([`ConnFrameSink`]) and the fan-out skips it ([`ConnRegistry`]), the asymmetry of `conn_port::FrameFanout`.
 fn accepted_policy(keepalive: KeepaliveConfig) -> Policy {
     Policy {
         connect_timeout: AUTH_TIMEOUT,
@@ -339,7 +336,7 @@ impl ConnRegistry {
 
 impl FrameFanout for ConnRegistry {
     /// ★Do not send while holding the map locked (ADR-0006 lock order)★: take a snapshot, release the lock, and send with that copy.
-    /// ★One saturated connection is skipped, not closed★ (`frame_port::FrameFanout` duties 2 · 3) — the transport also counts
+    /// ★One saturated connection is skipped, not closed★ (`conn_port::FrameFanout` duties 2 · 3) — the transport also counts
     ///   it on that peer's inbox (`TransportEvent::Dropped`).
     fn broadcast_text(&self, text: String) {
         let conns: Vec<(ConnId, ConnOutlet)> = {
@@ -367,11 +364,11 @@ impl Default for ConnRegistry {
 
 /// The per-connection [`FrameSink`] — puts frames on the peer's outbound queue without waiting.
 ///
-/// ★Saturation closes the connection★ (`frame_port::FrameSink::try_send`) — the peer is closed at once and the connection
-///   task is woken through `write_end` (the net layer's out-of-band close signal). ★`send` does not wait for room★ — the
+/// ★Saturation closes the connection★ (`conn_port::FrameSink::try_send`) — the peer is closed at once and the connection
+///   task is woken through `write_end`. ★`send` does not wait for room★ — the
 ///   transport has no waiting send (a waiting sender on the read side would form a cycle with the supervisor — TRD trd-3
-///   §3-0 ①), so `send` behaves as `try_send`. A send on a link that is no longer live also wakes `write_end` — the net
-///   layer's writer ended on a failed write.
+///   §3-0 ①), so `send` behaves as `try_send`. A send on a link that is no longer live also wakes `write_end` — a failed
+///   send ends the connection.
 /// ★`Frame::Close` = drain then close★ — frames put in earlier go out first (`Peer::close_after_flush`); the reason is
 ///   logged and not sent.
 pub(crate) struct ConnFrameSink {
@@ -433,7 +430,7 @@ pub(crate) struct Server {
     handlers: Arc<dyn ConnectionHandlerFactory>,
     auth: Arc<AuthCheck>,
     policy: Policy,
-    /// The read-end wait ([`Server::run_connection`]) — the net layer's writer noticed a dead link at its next ping at the latest.
+    /// The read-end wait ([`Server::run_connection`]) — after the read side ends, dispatch gets at most one ping interval.
     ping_interval: Duration,
     /// Registry labels of accepted links — handed out at accept, before auth; connection ids are issued after auth.
     labels: AtomicU64,
@@ -611,7 +608,7 @@ impl Server {
         //   ★★The priority lane is **not aborted — it is drained**★★: the frames in that lane are ones the upper layer chose as 「굶으면 안 된다」 (must not starve) and
         //   **accepted**. So stop feeding first to release **that lane's only sender**, and [`finish_bypass_lane`] waits for that draining.
         // ★A read end does not abort at once★: the last command of a client that 「명령 한 장 보내고 곧바로 소켓을 닫는」 (sends one command and closes the socket right away)
-        //   still runs — dispatch drains the lane, and only a failed send or one ping interval ends the wait (the net layer's writer).
+        //   still runs — dispatch drains the lane, and only a failed send or one ping interval ends the wait.
         let mut link_ended = false;
         tokio::select! {
             _ = &mut dispatch_handle => {
@@ -781,7 +778,7 @@ impl LinkEnd {
         }
     }
 
-    /// The input ended (the peer closed · a read error) — the net layer's read task ending. Every other end is the write
+    /// The input ended (the peer closed · a read error). Every other end is the write
     /// side's (write failure · write deadline · idle · our own close).
     fn read_side(&self) -> bool {
         matches!(
@@ -846,7 +843,7 @@ where
     end
 }
 
-/// The feeding phase of [`read_task`] — returns where the net layer's read loop broke out; both lane senders drop with it.
+/// The feeding phase of [`read_task`] — returns where feeding stops; both lane senders drop with it.
 #[allow(clippy::too_many_arguments)]
 async fn feed_lanes<S>(
     incoming: &mut S,
@@ -936,7 +933,7 @@ async fn feed_lanes<S>(
 /// ★This serialization is the **real thing** behind the upper layer's order invariants★: 「같은 에이전트로 가는 입력끼리」 (inputs bound for the same agent) · 「입력 lease
 /// 획득과 그 뒤 입력」 (input lease acquisition and the input after it) · 「같은 연결의 구독/해지」 (subscribe/unsubscribe on the same connection) · 「명령 명부 등록과 그 차분」 (command registry registration and its diff) all
 /// hang on arrival order, and what keeps it is only the property that this task is one and awaits only one at a time
-/// (source of truth for the contract = `frame_port::ConnectionHandler`). **Starting a second consumer or scattering here with spawn
+/// (source of truth for the contract = `conn_port::ConnectionHandler`). **Starting a second consumer or scattering here with spawn
 /// breaks all four at once** — the decision to peel a long-running command off the lane is the upper layer's job.
 async fn dispatch_task(
     mut inbound_rx: mpsc::Receiver<Inbound>,

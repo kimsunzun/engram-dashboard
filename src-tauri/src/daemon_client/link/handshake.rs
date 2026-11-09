@@ -1,10 +1,10 @@
 //! The shell side of the daemon handshake as a transport [`Handshake`] (TRD S21 trd-3 §6-2 U2 · §3-0 ⑤ · D20 ①).
 //!
 //! Two steps: `start` sends the Auth frame, the daemon's `Hello` ends the handshake. ★An `Error` frame before `Hello`
-//! ends the handshake as a terminal refusal★ (`HANDSHAKE_REJECTED` — no retry, no budget): the daemon closes without
-//! a close code after it (net `ws.rs` `send_error_and_close`), which the transport would read as "could not connect"
-//! and retry without limit, and no refusal is retried on the local path (ADR-0346). Which refusal it was (token ·
-//! version · anything else) is never read from the daemon's text — the text is only logged, masked. Anything else that
+//! ends the handshake as a terminal refusal★ (`HANDSHAKE_REJECTED` — no retry, no budget): a net-era daemon closed without
+//! a close code after it (the current one sends a code), which the transport would read as "could not connect" and
+//! retry without limit — the Error frame ends the handshake either way, and no refusal is retried on the local path
+//! (ADR-0346). Which refusal it was (token · version · anything else) is never read from the daemon's text — the text is only logged, masked. Anything else that
 //! arrives before `Hello` is dropped.
 //!
 //! The credential comes from a [`CredentialSlot`] that the dialer of the same registration fills on every dial

@@ -7,8 +7,7 @@
 //!
 //! ★Scope of this crate (ADR-0130)★ — the application layer, assembly (`run()` decides the order the parts are called in),
 //! and process housekeeping: the single-instance guard (`instance`) and `daemon.json` (`portfile`). The accepting side runs
-//! on the transport crate (`link`); the connection port contract is still re-exported from `engram-dashboard-net`
-//! (`conn_port`).
+//! on the transport crate (`link`) and meets the upper layers through the connection port contract (`conn_port`).
 
 pub mod agent_conn;
 pub mod command_delivery;

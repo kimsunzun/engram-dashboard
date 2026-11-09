@@ -1,4 +1,4 @@
-//! The first-frame auth decision — token (constant time) and protocol version, the same rules the net layer applied.
+//! The first-frame auth decision — token (constant time) and protocol version.
 //!
 //! Both expected values are **injected** by the assembly (`run_accept_loop`): this module decides only "is the token the
 //! client stated equal to the one I was given" and "is the version the client stated equal to the one I was given" — it

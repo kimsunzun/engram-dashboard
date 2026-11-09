@@ -81,9 +81,8 @@ engram-dashboard-base = { path = "../crates/engram-dashboard-base" }
 #   ★새 서드파티가 아니다★ — 이 crate 는 워크스페이스 의존 0 이고, 여기 적기 전에도 agent 를 타고 이미
 #   이 셸의 의존 그래프에 링크돼 있었다(직접 간선만 는다).
 engram-dashboard-command = { path = "../crates/engram-dashboard-command" }
-# discovery: daemon.json 공유 계약(DaemonInfo) + PROTOCOL_VERSION · 데몬 WS 첫 프레임(`handshake::AuthFrame`).
-#   ★데몬의 네트워크 행 crate(`engram-dashboard-net`)를 되살리지 말 것★ — 그 간선이 나르던 것은 첫 프레임
-#   하나였고 그 모양은 protocol 로 왔다(ADR-0310 결정 9). 벽 = CI `shell gate 3`(셸 운영 그래프에 net 0줄).
+# discovery: the daemon.json shared contract (DaemonInfo) + PROTOCOL_VERSION · the daemon WS first frame (`handshake::AuthFrame`).
+#   The first frame's shape lives in protocol (ADR-0310 decision 9), so the shell needs no daemon-side crate for it.
 engram-dashboard-protocol = { path = "../crates/engram-dashboard-protocol" }
 # ADR-0266: OS 층 — 이 셸의 OS 일은 전부 여기서 온다.
 #   데몬 찾기 · 띄우기 · 끄기(`crate::discovery`) — PID 생존 판정(`process::pid_alive_with_start_time`) · 데몬 exe 의

@@ -14,7 +14,7 @@
 //!
 //! ★The liveness check and the registry change happen inside **the same critical section**★: if split, cleanup can slip in
 //! between the check and the change, and the registration of an already-dropped connection lands afterwards. `on_disconnect` is not a quiet
-//! moment but a moment that **can overlap with `on_text`** (the `frame_port::ConnectionHandler` contract —
+//! moment but a moment that **can overlap with `on_text`** (the `conn_port::ConnectionHandler` contract —
 //! the network layer only calls abort and does not wait for completion), so that overlap is not theoretical.
 //!
 //! ★Do not confuse this with the other things that share the name★: this crate's `RosterBroadcast`, `RosterChanged`, `RosterDiff`
@@ -149,8 +149,8 @@ impl CommandRoster {
     /// in that function's doc). If the nature of either of the two issuers changes, the precondition here breaks with it.
     /// ★Do not panic here — do not revive it★: this function runs inside `on_connect`. If it dies there, the production
     /// process ends outright (outside the containment mark — hook · ADR-0292), and in a hook-less test build
-    /// cleanup hooks and registry release are both skipped entirely, a dead queue stays as a fan-out target (the authoritative reason =
-    /// the same prohibition in the network layer's `ws.rs`), and an entry that is never erased stays in the table so [`CommandRoster::sink_of`]
+    /// cleanup hooks and registry release are both skipped entirely, a dead queue stays as a fan-out target (the network layer registered the
+    /// connection before `on_connect` and unregisters it only after `on_disconnect` — `link::server::Server::run_connection`), and an entry that is never erased stays in the table so [`CommandRoster::sink_of`]
     /// answers **`Some` for a dead owner**. `debug_assert` is also out for the same reason — it vanishes in release, so
     /// it gives no observation, while only debug produces that accident.
     ///
@@ -223,7 +223,7 @@ impl CommandRoster {
     ///
     /// ★Use the received handle **at once and drop it** — do not keep it in a wait ticket or correlation table★: the registry has no means to
     /// take back a copy it handed out, so the moment it is kept, that connection's send queue outlives the registry (what a surviving
-    /// `Sender` copy breaks is written in the network layer `ws.rs` under 「사본 전수」 (all copies)).
+    /// copy keeps alive = the `on_disconnect` duty of `conn_port::ConnectionHandler`).
     ///
     /// ★With several connections for one owner, **which one comes out is not guaranteed**★: today
     /// [`CommandRoster::owner_of`] is 1:1 with the connection so this is unreachable, and it becomes reachable when slice B changes the owner key into a client-made
@@ -529,7 +529,7 @@ mod tests {
         shared.roster.lookup(name)
     }
 
-    // ── Registration running concurrently with connection cleanup (the remaining race of the frame_port::ConnectionHandler contract) ──────
+    // ── Registration running concurrently with connection cleanup (the remaining race of the conn_port::ConnectionHandler contract) ──────
     //
     // Nail down four branches: {registration, diff} × {a name nobody holds, a name a live connection holds}. The registry has no
     // trace of a dropped owner (ADR-0150), so this net can stand only on **connection lifetime**.

@@ -36,7 +36,7 @@ impl DaemonHandshake {
     fn reject(&self, refusal: Refusal) -> HandshakeStep {
         HandshakeStep::Reject {
             kind: refusal.kind,
-            // `None` = the upper layer could not encode the text — close with no body (as the net layer did).
+            // `None` = the upper layer could not encode the text — close with no body.
             last: self
                 .handlers
                 .handshake_error_frame(&refusal.message)

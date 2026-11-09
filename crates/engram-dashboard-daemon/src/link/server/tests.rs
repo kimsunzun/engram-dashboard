@@ -1,6 +1,6 @@
-//! The net layer's `ws.rs` tests that keep their meaning, moved onto the transport adapter, plus the adapter's own.
+//! Tests of the daemon's transport adapter.
 //!
-//! Two harnesses, as in the net layer: synthetic inbox items drive the read · dispatch · bypass tasks without a socket
+//! Two harnesses: synthetic inbox items drive the read · dispatch · bypass tasks without a socket
 //! (ADR-0129), and a real loopback listener drives the whole connection life (`Server::serve`) with a tokio-tungstenite
 //! client.
 
@@ -93,6 +93,10 @@ struct FakeHandler {
     emit_on: Option<String>,
     /// On receiving this text it puts `Text("ack")` and returns `ConnFlow::Close`.
     ack_close_on: Option<String>,
+    /// [`backlog_frame`]s that `emit_on` · `ack_close_on` put **before** their own frames.
+    backlog: usize,
+    /// Notified once `emit_on` has put all its frames, the close included.
+    emitted: Arc<Notify>,
     /// On receiving this text it `try_send`s this many frames without yielding; the index of the first refusal is recorded.
     flood_on: Option<(String, usize)>,
     flood_refused_at: Mutex<Option<usize>>,
@@ -128,6 +132,8 @@ impl FakeHandler {
             close_then_hang_on: None,
             emit_on: None,
             ack_close_on: None,
+            backlog: 0,
+            emitted: Arc::new(Notify::new()),
             flood_on: None,
             flood_refused_at: Mutex::new(None),
             connect_gate: None,
@@ -201,6 +207,14 @@ impl FakeHandler {
         );
     }
 
+    fn put_backlog(&self, frames: &Arc<dyn FrameSink>) {
+        for i in 0..self.backlog {
+            frames
+                .try_send(Frame::Text(backlog_frame(i)))
+                .expect("the backlog fits the outbound queue");
+        }
+    }
+
     fn frames_still_held(&self) -> bool {
         self.frames_weak
             .lock()
@@ -257,11 +271,14 @@ impl ConnectionHandler for FakeHandler {
                 }
             }
             if self.emit_on.as_deref() == Some(text) {
+                self.put_backlog(frames);
                 let _ = frames.try_send(Frame::Text("hi".into()));
                 let _ = frames.try_send(Frame::Binary(vec![1, 2, 3]));
                 let _ = frames.try_send(Frame::Close("bye".into()));
+                self.emitted.notify_one();
             }
             if self.ack_close_on.as_deref() == Some(text) {
+                self.put_backlog(frames);
                 let _ = frames.try_send(Frame::Text("ack".into()));
                 return ConnFlow::Close;
             }
@@ -913,6 +930,43 @@ async fn wait_released(fake: &FakeHandler) -> bool {
     false
 }
 
+/// Frames that stay queued while the client does not read: 32 × 256 KiB = 8 MiB, more than the loopback socket buffers
+/// hold, so the writer stalls with frames still in the outbound queue. ★A close that does not wait for the queue
+/// (`Peer::close` — the control channel overtakes the data queue) drops them★ — that is what the two close-order tests
+/// below catch.
+const BACKLOG_FRAMES: usize = 32;
+const BACKLOG_FRAME_BYTES: usize = 256 * 1024;
+
+fn backlog_frame(i: usize) -> String {
+    let mut text = format!("backlog-{i}:");
+    text.extend(std::iter::repeat_n('x', BACKLOG_FRAME_BYTES));
+    text
+}
+
+/// Reads the backlog in order — each frame must arrive whole.
+async fn read_backlog(client: &mut Client, within: Duration) {
+    for i in 0..BACKLOG_FRAMES {
+        let text = text_of(next_data(client, within).await);
+        assert!(
+            text == backlog_frame(i),
+            "backlog frame {i} arrived wrong ({} bytes, starts {:?})",
+            text.len(),
+            &text[..text.len().min(16)]
+        );
+    }
+}
+
+/// Waits until the connection's cleanup ran — every close of the connection task is issued before `on_disconnect`.
+async fn wait_disconnected(fake: &FakeHandler) {
+    for _ in 0..1000 {
+        if fake.calls().iter().any(|c| c.starts_with("disconnect:")) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("on_disconnect did not run: {:?}", fake.calls());
+}
+
 #[tokio::test]
 async fn auth_rejects_version_mismatch_using_the_injected_expectation() {
     let fake = Arc::new(FakeHandler::new(None));
@@ -959,7 +1013,7 @@ async fn auth_rejects_version_mismatch_using_the_injected_expectation() {
 /// ★The honest range of detection power★ — ① is **probabilistic** (a wrongly early task leaves a trace only if it is polled inside
 ///   the gate window — the assertions sit before and after the gate to widen it); ② looks directly at the registry inside
 ///   `on_disconnect`, so it is deterministic. False positives 0.
-/// ★The net layer's third order (no writer during `on_connect`) is gone★ — the transport's writer runs from the moment the
+/// ★There is no third order (no writer during `on_connect`)★ — the transport's writer runs from the moment the
 ///   link is live, so the greeting may go out while `on_connect` is still running.
 #[tokio::test]
 async fn connect_comes_before_the_tasks_and_cleanup_before_unregister() {
@@ -1126,8 +1180,7 @@ async fn a_write_end_aborts_a_dispatch_stuck_in_a_handler() {
     drop(client);
 }
 
-/// ★A read end does not wait forever on a handler that never returns★ — the net layer's writer ended at its next ping on a
-/// dead link, so dispatch is aborted after one ping interval.
+/// ★A read end does not wait forever on a handler that never returns★ — dispatch is aborted after one ping interval.
 #[tokio::test]
 async fn a_read_end_aborts_a_stuck_dispatch_after_one_ping_interval() {
     let keepalive = KeepaliveConfig {
@@ -1161,10 +1214,14 @@ async fn a_read_end_aborts_a_stuck_dispatch_after_one_ping_interval() {
 }
 
 /// The three frame kinds ride the single writer queue in FIFO as they are — the close goes out after the frames put in before it.
+///
+/// ★The close is issued while frames are still queued★: the client reads nothing until the handler has put the close, and
+///   the backlog before it is more than the socket buffers hold — a `Frame::Close` that closed at once would drop the tail.
 #[tokio::test]
 async fn frames_go_out_in_order_and_the_close_comes_last() {
     let fake = Arc::new(FakeHandler {
         emit_on: Some("emit".into()),
+        backlog: BACKLOG_FRAMES,
         ..FakeHandler::new(None)
     });
     let (mut client, server, _conns) = serve_one(fake.clone(), KeepaliveConfig::default()).await;
@@ -1172,9 +1229,13 @@ async fn frames_go_out_in_order_and_the_close_comes_last() {
         .send(Message::Text("emit".to_string().into()))
         .await
         .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), fake.emitted.notified())
+        .await
+        .expect("the handler did not emit");
 
     let within = Duration::from_secs(5);
     assert_eq!(text_of(next_data(&mut client, within).await), "greeting");
+    read_backlog(&mut client, within).await;
     assert_eq!(text_of(next_data(&mut client, within).await), "hi");
     match next_data(&mut client, within).await {
         Some(Message::Binary(b)) => assert_eq!(b.as_ref(), &[1, 2, 3]),
@@ -1190,7 +1251,7 @@ async fn frames_go_out_in_order_and_the_close_comes_last() {
         .unwrap();
 }
 
-/// ★Per-connection saturation closes that connection★ (`frame_port::FrameSink::try_send`) — on the current-thread runtime the
+/// ★Per-connection saturation closes that connection★ (`conn_port::FrameSink::try_send`) — on the current-thread runtime the
 /// writer cannot drain while the handler pushes, so the outbound queue fills deterministically.
 #[tokio::test]
 async fn outbound_saturation_closes_the_connection() {
@@ -1225,7 +1286,7 @@ async fn outbound_saturation_closes_the_connection() {
     assert!(closed, "포화한 연결은 닫혀야");
 }
 
-/// ★The all-connection fan-out skips a saturated connection and neither stops at it nor closes it★ (`frame_port::FrameFanout`
+/// ★The all-connection fan-out skips a saturated connection and neither stops at it nor closes it★ (`conn_port::FrameFanout`
 /// duties 2 · 3 and the asymmetry with `try_send`).
 ///
 /// ★Deterministic★: the registry visits connections in id order, and the saturated one is id 1 — a fan-out that stopped at the
@@ -1287,10 +1348,15 @@ async fn the_fanout_skips_a_saturated_connection_without_closing_it() {
 }
 
 /// A handler's `ConnFlow::Close` closes the connection **after** what it queued went out — the stop `Ack` reaches the client.
+///
+/// ★The close is issued while frames are still queued★: the client reads nothing until the connection's cleanup ran (the
+///   close comes before it), and the backlog before the `ack` is more than the socket buffers hold — a close that did not
+///   wait for the queue would drop the tail and the `ack` with it.
 #[tokio::test]
 async fn a_close_from_dispatch_flushes_the_last_reply_first() {
     let fake = Arc::new(FakeHandler {
         ack_close_on: Some("stop".into()),
+        backlog: BACKLOG_FRAMES,
         ..FakeHandler::new(None)
     });
     let (mut client, server, _conns) = serve_one(fake.clone(), KeepaliveConfig::default()).await;
@@ -1298,9 +1364,11 @@ async fn a_close_from_dispatch_flushes_the_last_reply_first() {
         .send(Message::Text("stop".to_string().into()))
         .await
         .unwrap();
+    wait_disconnected(&fake).await;
 
     let within = Duration::from_secs(5);
     assert_eq!(text_of(next_data(&mut client, within).await), "greeting");
+    read_backlog(&mut client, within).await;
     assert_eq!(text_of(next_data(&mut client, within).await), "ack");
     assert!(
         next_data(&mut client, within).await.is_none(),
@@ -1312,7 +1380,7 @@ async fn a_close_from_dispatch_flushes_the_last_reply_first() {
         .unwrap();
 }
 
-/// The listener carries the net layer's Origin list: a listed Origin and no Origin pass, any other Origin gets 403.
+/// The listener applies the Origin allowlist ([`ALLOWED_ORIGINS`]): a listed Origin and no Origin pass, any other Origin gets 403.
 #[tokio::test]
 async fn the_listener_applies_the_net_origin_list() {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;

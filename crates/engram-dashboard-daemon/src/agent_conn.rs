@@ -452,14 +452,14 @@ impl ConnectionHandler for AgentConnection {
         //   사라진다. 맨 앞이면 그 창 자체가 없다(패닉으로 건너뛸 구간도 없어진다).
         // ★이 줄이 명부가 든 **프레임 출구 사본**도 함께 놓는다★ — `on_connect` 에서 명부에 넣은
         //   그 사본이고, 포트 계약이 「반환 시점까지 자기가 만든 사본을 전부 놓아야 한다」고 요구하는
-        //   대상 중 하나다(`frame_port::ConnectionHandler::on_disconnect`). 아래 구독 정리와 달리 이건
+        //   대상 중 하나다(`conn_port::ConnectionHandler::on_disconnect`). 아래 구독 정리와 달리 이건
         //   놓치는 경쟁이 없다 — 넣은 곳도 빼는 곳도 각각 한 곳이고 둘 다 명부의 한 잠금 안에서 돈다.
         // ADR-0154
         self.core.commands().detach(conn_id);
-        // ★명령 명부와 같은 자리에서 사용량 명부 칸도 지운다★ — 칸이 쥔 프레임 출구 사본(네트워크 행 `ws.rs`
-        //   「사본 전수」의 ⑥)은 이 호출 안에서 놓인다(위 포트 의무). 단 출구가 한 장 보내는 도중 잠깐 뜬 사본은
-        //   이 호출을 넘겨 살 수 있다 — `try_send` 한 번이 전부라 같은 목록이 무해한 쪽으로 꼽는다.
-        //   칸을 되살리는 곳이 없어 겹쳐 든 늦은 구독 교체는 버려진다(`UsageWatch::replace`).
+        // ★The usage roster cell goes at the same place as the command roster entry★ — the frame-outlet copy the cell holds is
+        //   released inside this call (the port duty above). A copy taken briefly while the outlet sends one frame can outlive
+        //   this call — harmless, since that send is a single `try_send`. Nothing revives a cell, so a late subscription
+        //   swap that overlaps this cleanup is dropped (`UsageWatch::replace`).
         self.core.usage().detach(conn_id);
 
         // ── 이 연결이 낸 명령 왕복 거두기(ADR-0154) ───────────────────────────────
@@ -622,7 +622,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     /// The network layer's real outlet (`link::server::ConnFrameSink`) needs a live transport peer and only that module
-    /// can build one (ADR-0129) — so this layer's tests use a double that depends only on the port contract (`frame_port`).
+    /// can build one (ADR-0129) — so this layer's tests use a double that depends only on the port contract (`conn_port`).
     fn frame_sink(tx: mpsc::Sender<Frame>) -> Arc<dyn FrameSink> {
         Arc::new(FakeFrameSink::new(tx))
     }

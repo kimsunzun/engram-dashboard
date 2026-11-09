@@ -867,10 +867,10 @@ async fn case08_epoch_mismatch_reset() {
 
 // ── 케이스 9: slow consumer → 그 연결만 close, 타 연결 무영향 ──────────────────────
 //
-// ★재현 메커니즘★: slow 소비자는 ReplayComplete 후 **소켓을 전혀 읽지 않는다**. 같은 agent 에
-//   대량 출력이 흐르면 slow 의 서버측 송신 mpsc(CONN_TX_CAP=4608) + OS 소켓 버퍼가 둘 다 차고,
-//   프레임 출구의 try_send 가 full 을 만나 close_signal 을 발동 → write_task 가 그 연결만 닫는다.
-//   good 소비자는 **백그라운드 task 로 계속 drain** 해 살아남아야 한다(타 연결 무영향).
+// ★Mechanism★: after ReplayComplete the slow consumer **never reads its socket**. With bulk output flowing on the same
+//   agent, slow's server-side outbound queue (`CONN_TX_CAP` = 4608 in `link::server`) and the OS socket buffers both fill,
+//   and the frame outlet's `try_send` meets a full queue and closes that connection only (`link::server::ConnFrameSink`).
+//   The good consumer **keeps draining in a background task** and must survive (other connections unaffected).
 #[tokio::test]
 async fn case09_slow_consumer_closed_others_unaffected() {
     let server = start_test_server().await.unwrap();
@@ -911,11 +911,11 @@ async fn case09_slow_consumer_closed_others_unaffected() {
         })
     };
 
-    // ★m1(견고화)★: 위양성(소켓 버퍼가 큰 환경에서 안 막힘) 회피를 위해 출력량을 키운다.
-    //   한 줄 ~140B(패딩) × 200000 ≈ 28MB. mpsc 4608칸(≈0.6MB) + 어떤 현실적 OS 소켓 송신
-    //   버퍼(보통 수십 KB~수 MB)를 합쳐도 28MB 를 흡수할 수 없어, slow 가 안 읽으면 try_send 가
-    //   확실히 full 을 만나 close_signal 이 발동한다. (한계 명시: 만약 OS 버퍼가 28MB 를 넘으면
-    //   이 테스트가 flaky 해질 수 있으나, 현실 기본값에선 일어나지 않는다.)
+    // ★m1 (hardening)★: the output volume is raised to avoid a false positive (no blocking where socket buffers are large).
+    //   One line ~140 B (padded) × 200000 ≈ 28 MB. The 4608-slot queue (≈0.6 MB) plus any realistic OS socket send buffer
+    //   (usually tens of KB to a few MB) cannot absorb 28 MB, so while slow does not read, `try_send` surely meets a full
+    //   queue and the connection is closed. (Stated limit: if the OS buffers exceeded 28 MB this test could turn flaky, but
+    //   that does not happen with realistic defaults.)
     server
         .manager
         .write_stdin(
@@ -924,9 +924,9 @@ async fn case09_slow_consumer_closed_others_unaffected() {
         )
         .unwrap();
 
-    // ★중요★: slow 가 곧바로 읽으면 소켓이 드레인돼 서버 큐가 안 찬다. 먼저 일정 시간 **읽지 않고**
-    //   대기해 서버 송신 mpsc + OS 버퍼가 가득 차 close_signal 이 발동하게 둔다. 그 뒤 backlog 를
-    //   읽어 내려가다 Close 를 만난다.
+    // ★Important★: if slow read right away the socket would drain and the server queue would not fill. It first waits a
+    //   while **without reading** so the server outbound queue + OS buffers fill and the connection is closed. Then it reads
+    //   down what reached its socket and meets the close.
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     // slow 는 서버가 닫은 연결이므로 backlog 소진 후 Close/None 에 도달한다 — 넉넉한 deadline.

@@ -11,7 +11,7 @@ path = "src/lib.rs"
 # ★`default = []` — same reason as `net`: a loud failure beats a silent regression★. A consumer that needs the harness
 #   turns on `features = ["test-support"]` explicitly, ★in its `[dev-dependencies]` only★ (precedent =
 #   `engram-dashboard-command` · base · platform). The release graph is checked by CI: `ci.yml` `shell gate 5` for the
-#   shell (the daemon line comes with 3-3 U4).
+#   shell (the daemon line was left out under the 3-3 replace-only scope).
 #   ★What the empty default buys in this repo★ — features are unified per cargo invocation under resolver 2: a plain
 #   `cargo build` (root or `--workspace`) leaves `test-support` off (measured 2026-11-04: lib features `default` · `ws`),
 #   and it turns on only when the call builds a consumer's dev graph that requests it (a root or `--workspace` test run —
@@ -40,15 +40,14 @@ ws = ["dep:tokio-tungstenite", "tokio/net"]
 #   queue depth with `len` (the `next_turn` call in `peer.rs`).
 tokio = { version = "1.37", features = ["rt", "sync", "time", "macros"] }
 # `BoxFuture` — the dyn seams (`Dialer`·`LinkTx`·`LinkRx`·`Clock`) cannot use `async fn` in trait, so boxing is manual
-#   (net's `frame_port` has the same shape for the same reason). The `select` of `with_deadline` also comes from here.
+#   (the daemon's `conn_port` has the same shape for the same reason). The `select` of `with_deadline` also comes from here.
 futures-util = "0.3"
 
 # Only for the real-socket WS adapter (`ws.rs`) — the dialing side's `connect_async_with_config`, the accepting side's `accept_hdr_async_with_config` (Origin ·
 #   Host header check · size settings), and `Message`.
-# ★Version 0.26 is the workspace pin★ — `net` (`crates/engram-dashboard-net/Cargo.toml`) · `daemon` ·
-#   `src-tauri` are all on that version, and two versions of the same crate standing in one graph is itself a defect.
+# ★Version 0.26 is the workspace pin★ — `daemon` · `src-tauri` (both dev) are on that version, and two versions of the same crate standing in one graph is itself a defect.
 # It uses the default features (`connect` + `handshake`) as they are — the dialing side and the accepting side each require those two.
-#   TLS is not turned on (local plain-text WS — same as `net`).
+#   TLS is not turned on (local plain-text WS).
 tokio-tungstenite = { version = "0.26", optional = true }
 
 # ★What is not brought in, and why (TRD §11)★:

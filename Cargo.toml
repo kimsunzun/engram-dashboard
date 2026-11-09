@@ -1,9 +1,9 @@
 # Cargo workspace root (S12 phase 1). Static linking.
-# 11 members: protocol (boundary contract) · base (bottom foundation layer — logging and general helpers, leaf crate, ADR-0175 · ADR-0269) ·
+# 10 members: protocol (boundary contract) · base (bottom foundation layer — logging and general helpers, leaf crate, ADR-0175 · ADR-0269) ·
 #   platform (OS layer — operational code that varies by OS, 0 workspace crate dependencies, ADR-0266 · ADR-0275) ·
 #   agent (agent core, 0 Tauri imports — the old core, ADR-0175) · command (command-bus tooling — 0 workspace
 #   crate dependencies, 0 commands, ADR-0155) · messaging (messaging kernel — no workspace crate
-#   dependencies, ADR-0110) · net (network layer — WS, frame port, single instance, portfile, ADR-0129) ·
+#   dependencies, ADR-0110) ·
 #   transport (reusable transport lib — 0 workspace crate dependencies, ADR-0177) ·
 #   daemon (agent host + assembly room) · cli (control-plane CLI engram.exe — bin only, ADR-0273) ·
 #   src-tauri (daemon client shell).
@@ -23,12 +23,9 @@ members = [
     "crates/engram-dashboard-command",
     # ADR-0110: messaging kernel lib (no workspace crate dependencies — fully mutually ignorant).
     "crates/engram-dashboard-messaging",
-    # ADR-0129 slice 1: network layer lib (it does not know the agent vocabulary even as types — **except the
-    #   two names in the auth handshake, carried over from 0-4**). The header of that crate's lib.rs is the source of truth for the isolation gate and the exception's rationale.
-    "crates/engram-dashboard-net",
     # ADR-0177: reusable transport lib (0 workspace crate dependencies · the type seam is the `Wire` generic · transport/time are dyn).
-    #   ★Do not tear apart the existing net★ — build this new, verify it independently, then attach it step by step. The isolation gates, including the
-    #   zero-lines-of-tokio gate on the pure layers (machine·pending·stream), are defined in the header of that crate's lib.rs.
+    #   The isolation gates, including the zero-lines-of-tokio gate on the pure layers (machine·pending·stream), are defined in the
+    #   header of that crate's lib.rs.
     "crates/engram-dashboard-transport",
     "crates/engram-dashboard-daemon",
     # ADR-0273: bin-only package that produces the control-plane CLI (engram.exe) — it does not depend on the daemon package.

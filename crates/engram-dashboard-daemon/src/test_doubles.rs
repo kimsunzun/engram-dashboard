@@ -2,9 +2,9 @@
 //!
 //! Their reason to exist is to keep agent layer tests from even calling the network layer's real objects (`ConnFrameSink` and
 //! `ConnRegistry` of `link::server`) by name — those need live transport peers, and only that module can build them.
-//! The doubles depend only on the port contract (`frame_port`).
+//! The doubles depend only on the port contract (`conn_port`).
 //!
-//! ★Network layer policy is not imitated★: things like the close signal (close_signal) on queue saturation or fan-out target management
+//! ★Network layer policy is not imitated★: things like closing the connection on queue saturation or fan-out target management
 //!   are network lifecycle management, and their real contract is guarded by the network layer's own tests. If reproduced
 //!   here the test would verify the double instead of the real thing.
 // ADR-0129

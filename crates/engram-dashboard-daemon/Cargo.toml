@@ -92,13 +92,6 @@ engram-dashboard-protocol = { path = "../engram-dashboard-protocol" }
 # ADR-0110: messaging kernel (lib). This crate has no workspace-crate dependency — every junction is a port trait, and
 #   the real adapters are owned by the daemon's `src/messaging_host.rs`.
 engram-dashboard-messaging = { path = "../engram-dashboard-messaging" }
-# ADR-0129 slice 1: network layer lib (WS server · opaque frame port). Only this direction
-#   (daemon → net) exists — net does not know the daemon even as a type, and the two layers meet only through the port trait
-#   (`frame_port`) that crate owns. The daemon is the side that plugs the real thing into that port (`agent_conn`) and is the assembly room.
-#   ★Do not delete `features = ["server"]`★: net's default feature is empty, so only `auth` comes out. This crate is the only one that uses
-#   the server layer (`ws` · `frame_port`), and this is where it is turned on.
-#   The rationale (why the default was emptied) is in the `[features]` comment of that crate's `Cargo.toml`, which is the source of truth.
-engram-dashboard-net = { path = "../engram-dashboard-net", features = ["server"] }
 # ADR-0310 (TRD S21 trd-3 §6-3 U4): the reusable transport — the daemon's accepting side (`src/link/`) runs on its
 #   registry, accepted-peer supervisors and real-socket listener (`ws`). The test harness (`test-support`) is not turned on:
 #   the adapter's tests drive it over synthetic inbox items and a real loopback listener.
@@ -112,7 +105,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync",
 #   is **0** (the WS server belongs to the transport crate), and the only remaining use is the harness (`tests/ws_e2e.rs` attaches as a WS
 #   **client** and drives the assembly). **Do not move it back up to [dependencies].**
 #   ★The working criterion is **not** "is it in the dependency graph" but "did this manifest declare it directly"★: `cargo tree -p
-#   engram-dashboard-daemon -e normal` still shows `tokio-tungstenite` through transport and net — judging by that output
+#   engram-dashboard-daemon -e normal` still shows `tokio-tungstenite` through transport — judging by that output
 #   gives the opposite conclusion. The real wall is that Rust 2018's extern prelude takes in **only directly declared dependencies**,
 #   so without a direct declaration the `use tokio_tungstenite::…` in production source **does not compile because
 #   that crate is not in scope**. That is how the rot of new daemon source growing a WS server back inside the agent layer (the path actually trodden by

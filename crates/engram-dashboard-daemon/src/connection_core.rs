@@ -7,8 +7,9 @@
 //!
 //! ★불변식(R1~R7, ADR-0020) 보존이 절대 원칙★:
 //! - **R1 Ack→replay→ReplayComplete FIFO** — 유지 기전은 `handle_subscribe`.
-//! - **R6 close_signal**: 큐 포화 out-of-band 종료는 WS-특정 → sink 구현(어댑터)이 SinkError
-//!   해석으로 처리한다. 코어는 SinkError 만 본다(이 모듈은 close_signal 을 모른다).
+//! - **R6 close on saturation**: closing the connection when its queue is full is carrier-specific → the sink
+//!   implementation (the adapter) handles it by interpreting `SinkError`. The core sees only `SinkError` (this module does
+//!   not know how the connection is closed).
 //!
 //! ★status fanout(broadcast)도 carrier-중립이다★: lease/profile 변경의 전-연결 브로드캐스트는
 //! per-conn 응답(OutboundSink)이 아니라 `crate::conn_port::FrameFanout`(전-연결
@@ -108,7 +109,7 @@ impl Outbound {
     }
 }
 
-/// sink enqueue 실패(큐 포화/닫힘). 어댑터가 carrier 별로 해석(WS=close_signal 발동 등, R6).
+/// Sink enqueue failure (queue full / closed). The adapter interprets it per carrier (WS = the connection is closed, R6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SinkError;
 
@@ -144,7 +145,7 @@ pub enum DispatchFlow {
 /// 한 명령을 **그 연결의 도착순 줄에서 떼어내** 별도 태스크로 돌려도 되는가.
 ///
 /// ★왜 분류가 필요한가★: 네트워크 행은 연결마다 소비자 하나로 프레임을 도착 순서대로 올린다
-///   (`frame_port::ConnectionHandler` 계약). 그 직렬성이 아래 순서 불변식들을 **공짜로** 지켜 주는
+///   (`conn_port::ConnectionHandler` 계약). 그 직렬성이 아래 순서 불변식들을 **공짜로** 지켜 주는
 ///   대신, 한 명령이 오래 걸리면 그 연결의 다음 명령도 함께 늦는다. 그래서 「순서가 뜻을 갖지 않는
 ///   것」만 골라 줄 밖으로 내보낸다.
 /// ★기본값은 [`DispatchOrder::InOrder`] 다 — 의심스러우면 줄에 남긴다★: 떼어 내는 쪽이 틀리면
@@ -1680,8 +1681,8 @@ impl ConnectionCore {
                 //   자식 유지)가 현 Job 모델에선 불가능하다. 플래그는 미래 detach 여지로 protocol 에
                 //   남겨두되 v1 동작은 값과 무관하다.
                 let _ = kill_agents;
-                // The shutdown runs in its own task, not in this handler: `net` aborts this connection's dispatch
-                //   task when the client closes, and an awaited `shutdown_all` would then never reach `shutdown_tx`
+                // The shutdown runs in its own task, not in this handler: the network layer (`link::server`) aborts this
+                //   connection's dispatch task when the client closes, and an awaited `shutdown_all` would then never reach `shutdown_tx`
                 //   — the daemon survived with its agents killed (TRD S21 trd-3-2-u5 §3-4). A second `StopDaemon`
                 //   while one runs only joins it. The `shutdown_tx` trigger is watched by `run()`'s `select!`.
                 if !self.stopping.swap(true, Ordering::SeqCst) {
@@ -2637,9 +2638,9 @@ fn note_claimed_owner(
 ///   `previous_owner`)처럼 길이·모양이 우리 것인 값은 안 거친다. 그 자리에 「저장하는 값을 바꾸는 커밋이
 ///   이 줄을 함께 고쳐야 한다」는 방아쇠가 달려 있다.
 /// - **예외 ② 타입드 값** — `Uuid`·`ErrorCode`·`http::Method`·`Path` 는 문자열이 아니라 타입이 모양을 진다.
-/// - **예외 ③ 이 crate 밖** — 네트워크 행(`engram-dashboard-net`)의 `Origin` 필드는 이 함수를 안 거치고
-///   **HTTP 헤더 문법 검사**에 의존한다(제어문자·개행이 헤더 값에 못 들어간다). 그 축을 이 함수가 지킨다고
-///   읽지 말 것.
+/// - **Exception ③ outside this crate** — the `Origin` · `Host` fields of a refused WS upgrade are masked by the transport
+///   (`AcceptRefusal`, logged by `link::server`) and do not pass through this function. Do not read this function as the
+///   guard of that axis.
 /// - **덮지 않는 축** = 메시지 문자열 끝의 `: {e}` 보간(로깅 컨벤션이 그것만 예외로 허용한다). 이 함수가
 ///   묶는 것은 **필드**다.
 ///
@@ -2737,7 +2738,7 @@ fn broadcast_preset_list(fanout: &dyn FrameFanout, manager: &Arc<AgentManager>) 
 /// ★enqueue 실패를 삼키지 않는다★: 이 한 장이 클라이언트의 single-flight 슬롯을 푸는 유일한 신호다.
 /// 큐 포화로 못 나가면 클라이언트는 거절을 영영 모르고 그 슬롯이 좀비로 남아 **그 에이전트의 Subscribe 가
 /// 두 번 다시 나가지 못한다**(데몬 재기동 뒤 출력 영구 두절 — 실측 2026-08-19). 회복은 어댑터가 R6
-/// close_signal 로 연결을 끊어줄 때뿐이라, 그 사이를 설명할 흔적을 여기서 남긴다.
+/// 으로 연결을 끊어줄 때뿐이라, 그 사이를 설명할 흔적을 여기서 남긴다.
 fn refuse_subscribe(sink: &dyn OutboundSink, agent_id: AgentId, reason: String) {
     tracing::debug!(agent = %agent_id, %reason, "Subscribe 거절");
     if let Err(e) = sink.enqueue(Outbound::event(AgentEvent::SubscribeFailed {

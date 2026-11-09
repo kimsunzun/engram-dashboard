@@ -14,7 +14,7 @@ What each module does, who it talks to and over what, and the runtime invariants
     │  (데몬 띄우기 = WMI 로 Job 밖에서 · 끄기 = StopDaemon 프레임)
     ▼
 [데몬 프로세스 engram-dashboard-daemon.exe]
-  net(WS 행) · agent(런타임) · 명령 버스 · messaging(우편) · 제어 평면(HTTP)
+  link(WS 행 — transport 위) · agent(런타임) · 명령 버스 · messaging(우편) · 제어 평면(HTTP)
     │  PTY(터미널 모드) · stdio(JSON 모드)
     ▼
 [에이전트 N — claude · codex · 셸]
@@ -26,10 +26,9 @@ Crate dependencies (arrow = depends on, the production graph):
 
 ```text
 src-tauri ─▶ protocol · command · base · platform · transport(ws)      (agent 는 의존하지 않는다)
-daemon    ─▶ agent · protocol · net(server) · messaging · command · base · platform
+daemon    ─▶ agent · protocol · transport(ws) · messaging · command · base · platform
 cli       ─▶ agent · command
 agent     ─▶ command · base · platform
-net       ─▶ protocol
 base · platform · command · messaging · transport · protocol ─▶ 워크스페이스 의존 0
 ```
 
@@ -39,16 +38,15 @@ base · platform · command · messaging · transport · protocol ─▶ 워크�
 
 - **Frontend (`src/`)** — only renders the screen. Communication with agents and the daemon goes through the shell over a single `agentClient` (`ProtocolClient` + `TauriTransport`) — commands = invoke (`forward_daemon_command` and others), output = Tauri Channel, broadcast = Tauri event. For state the shell owns (layout · window · settings · restore), the frontend invokes shell commands directly. The control surface = the `window.__engramCmd` registry (`src/commands/`), and a bus command comes down from the shell to the webview and rides the same `registry.run`.
 - **Shell (`src-tauri`)** — the daemon's resident client. It holds the window · tray · layout (the authority for windows · tabs · slots) · shell settings · screen state persistence · finding/launching/shutting down the daemon (`discovery`). It does not own agents. It talks to the daemon over one WS connection (`daemon_client` — one however many windows there are) and relays output frames to a Channel per window (`output_router`). It is registered on the daemon command bus as the owner of the layout commands (`window/tab/slot`). The only window is main, and pop-outs are created at run time.
-- **daemon** — the agent host that owns `AgentManager`, and the assembly room. It accepts shell connections in the WS accept loop, runs the command bus registry and delivery (`command_roster` · `command_delivery`), and plugs the real adapters into the messaging kernel (`messaging_host`). The control plane (`control`) = one HTTP server carrying MCP (`/mcp`) and the CLI route (`/control/*`) — an agent's identity comes only from the Bearer token. Data folder layout (`data_dir`) · single-instance guard (`instance`) · `daemon.json` (`portfile`) · usage query (`usage_service`) are here too.
+- **daemon** — the agent host that owns `AgentManager`, and the assembly room. It accepts shell connections on the transport (`link` — the WS accept loop and the connection port `conn_port` its upper layers see), runs the command bus registry and delivery (`command_roster` · `command_delivery`), and plugs the real adapters into the messaging kernel (`messaging_host`). The control plane (`control`) = one HTTP server carrying MCP (`/mcp`) and the CLI route (`/control/*`) — an agent's identity comes only from the Bearer token. Data folder layout (`data_dir`) · single-instance guard (`instance`) · `daemon.json` (`portfile`) · usage query (`usage_service`) are here too.
 - **agent** — the agent runtime (Tauri import 0). Session lifetime · output pump · `transport` (PTY · stdio) · `backend` (claude · codex · shell · a gemini stub — backend-specific knowledge lives only here) · turn observation · waiting input · profile persistence · `agent.*` command declarations. Output and state go out only through the `OutputSink`/`StatusSink` traits.
 - **cli** — `engram.exe`. A spawned agent attaches to the daemon control route over HTTP with `ENGRAM_TOKEN` · `ENGRAM_CONTROL_URL`. It only authenticates and delivers, and the daemon also produces the help screen. bin name = agent `CLI_EXE_NAME`.
 - **protocol** — the shell ↔ daemon wire contract (messages · output binary frame codec · ts-rs bindings). No domain logic.
 - **command** — command bus tooling (envelope · error · declaration macro · table · routing). There are zero commands here, and a command is declared next to its producer (`agent.*` = agent, `mail.*` = daemon, `window/tab/slot` = shell, webview commands = frontend).
-- **net** — the daemon's network layer (WS upgrade · Origin · token handshake · connection lifetime · single writer · keepalive · fan-out). Everything sits behind the `server` feature; without it only `auth` remains, a re-export of protocol's handshake frame. Only the daemon depends on net — the shell's edge was cut by ADR-0310 decision 9.
 - **messaging** — the mail kernel between agents (delivery · parking · bounced · ledger). Zero workspace dependencies; the only seam is the port traits the kernel owns, and the daemon holds the real adapters.
 - **base** — the bottom foundation leaf crate. General-purpose helpers with zero domain knowledge (data file read decision · atomic write · logging · clock seam · panic containment and so on). The canonical entry condition = the header of its `lib.rs`.
 - **platform** — the OS layer leaf crate. Operational code that varies by OS (process · Job Object · launching · window · input · file lock) is placed only here.
-- **transport** — reusable transport lib (ADR-0177). The shell depends on it (`ws` feature) for its daemon link `daemon_client/link/` (stage 3 3-2 · ADR-0310); the shell's daemon connection runs on it in every build (driver = `daemon_client/connection.rs`). The daemon attaches in 3-3.
+- **transport** — reusable transport lib (ADR-0177). The shell depends on it (`ws` feature) for its daemon link `daemon_client/link/` (stage 3 3-2 · ADR-0310); the shell's daemon connection runs on it in every build (driver = `daemon_client/connection.rs`). The daemon's accepting side runs on it too (`daemon/src/link/` — stage 3 3-3).
 
 ## Runtime invariants (런타임 불변식)
 

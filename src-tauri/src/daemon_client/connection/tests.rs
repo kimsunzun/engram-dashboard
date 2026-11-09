@@ -440,7 +440,7 @@ async fn a_daemon_error_in_the_handshake_stops_for_good_without_a_second_dial() 
     let h = Harness::new(live());
     let task = h.ensure();
     let (endpoint, _) = h.next_link().await;
-    // The real daemon's refusal: an `Error` frame and a close without a code (net `ws.rs`).
+    // A net-era daemon's refusal: an `Error` frame and a close without a code (the current daemon adds a code; this is the stricter case).
     endpoint.push(text(&AgentEvent::Error {
         request_id: None,
         message: "auth failed".into(),

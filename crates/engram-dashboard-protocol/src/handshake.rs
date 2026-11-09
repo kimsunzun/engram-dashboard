@@ -24,7 +24,7 @@
 use crate::Secret;
 
 /// The auth frame, valid only as the **first frame** of a connection. The daemon accepts exactly this one within
-/// net `ws::AUTH_TIMEOUT`; the layer above rejects the same frame arriving later.
+/// its auth window (`AUTH_TIMEOUT` in the daemon's `link::server`); the layer above rejects the same frame arriving later.
 ///
 /// `token` is daemon.json's 256-bit hex · `protocol_version` is **the version the sending side was compiled with** —
 /// if the value daemon.json gave were echoed back, the receiver's version comparison would always pass and the version gate would die.
@@ -105,7 +105,7 @@ mod tests {
 
     #[test]
     fn syntax_error_and_shape_error_are_distinguishable() {
-        // The failure branches of net `ws` (the first frame is not auth / not JSON at all) rely on this classification.
+        // The failure branches of the daemon's `link::auth` (the first frame is not auth / not JSON at all) rely on this classification.
         // It is a value serde_json has already computed, so the branches split without re-parsing.
         let shape = serde_json::from_str::<AuthFrame>(r#"{"NotACommand":true}"#).unwrap_err();
         assert!(shape.is_data(), "JSON 이지만 모양이 다름 = data 에러");
