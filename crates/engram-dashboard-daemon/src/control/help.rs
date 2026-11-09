@@ -918,7 +918,7 @@ mod tests {
         let source = HelpSource::new(repo_root());
         let dir = temp_dir("override");
         let custom = dir.join("custom-help.md");
-        let landmark = "이 팀에서 할 수 있는 것";
+        let landmark = "what you can do on this team";
         let shipped = shipped_file();
         assert!(shipped.contains(landmark), "최상위 화면의 표지가 바뀌었다");
 
