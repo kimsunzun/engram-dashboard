@@ -145,6 +145,11 @@ pub use secret::Secret;
 /// absent = the old bytes, and an old reader drops the unknown key. The other direction (an earlier v8 daemon, a new
 /// shell) is also safe: that daemon ran Noop launch kits, which neither block nor notify, so absent is the truth.
 ///
+/// v8 also gains `AgentCommand::SpawnByCwd.deliver_notices` and `AgentEvent::Error.created_agent_id` (TRD S25 step 20,
+/// ADR-0348) — optional both ways: absent = `false` / `None` = the old bytes, and an old peer drops the unknown key (an
+/// earlier v8 daemon answers withheld, which only shows the set again; an old shell still has the asleep agent named in
+/// the message text).
+///
 /// ★이 기준을 대고 **안 올리기로** 한 변경도 있다★ — 턴 경계 + 결말을 나르는
 /// [`StructuredEvent::TurnEnd`] 추가가 그것이다. 두 방향 분석과 그 결론은 그 변형 자신의 doc 에 산다 —
 /// 여기 되풀어 적지 않는다. **기준의 집은 이 자리, 그 판단의 집은 저쪽이다.**

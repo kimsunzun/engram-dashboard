@@ -22,7 +22,7 @@ use engram_dashboard_command::{
 };
 
 use crate::launch::{notice_text, LaunchBlocked, Notice};
-use crate::manager::{Activated, AgentManager, NoticeDelivery, RenameOutcome};
+use crate::manager::{Activated, AgentManager, NotStarted, NoticeDelivery, RenameOutcome};
 use crate::persistence::PROFILES_FILE;
 use crate::queued_input::{ListedState, QueuedListing};
 // 코어 enum과 아래 동명 선언 어휘를 구분하는 별칭.
@@ -40,7 +40,8 @@ declare_commands! {
     // v9 (2026-11-01): the old presets (working-folder bookmarks) were removed — `agent.new` lost its `preset` field
     //   and `cwd` became required (`NOT_FOUND` left its advertised errors), and the `agent.list` answer lost
     //   `store.presets` (TRD S25-preset-library §5-2 1). The same unreleased generation: the `agent.spawn` answer
-    //   gains `notices` (TRD S25 step 16).
+    //   gains `notices` (TRD S25 step 16), and with `cwd` a launch blocked before the add answers `CONFLICT` with
+    //   nothing created (TRD S25 step 20 — the `agent.spawn` summary).
     // v8(2026-10-26): 이름 하나가 늘었다 — `agent.resolve`(ADR-0307 · TRD S28 §6).
     // v7(2026-10-10): `agent.list` 의 답에 칸 `store` 가 늘었다 — 명부 저장소 둘(agents · presets)의 상태(ADR-0291
     //   R17 · D6). 이름은 그대로이고 답의 모양이 바뀌었다.
@@ -265,8 +266,9 @@ declare_commands! {
     /// A blocked launch starts nothing and is `CONFLICT` with `args.reasons`, one row per reason by `kind`:
     /// `missing`|`broken` {kind, item, via, code, args, line?} · `conflict` {kind, items: [{item, via}], code, args,
     /// line?} · `library_unavailable` {kind, code, args, line?}. Fix the listed items, then start again.
-    /// With `cwd` the agent is registered before its launch is checked, so any start failure after that is `INTERNAL`
-    /// with `args.agent_id` (plus `args.reasons` when blocked): start that agent by target — do not create another.
+    /// With `cwd`, a launch blocked before the agent is added answers `CONFLICT` with `args.reasons` and creates
+    /// nothing; a start failure after the add is `INTERNAL` with `args.agent_id` (plus `args.reasons` when blocked) —
+    /// start that agent by target, do not create another.
     #[effect(Write)]
     #[since(1)]
     "agent.spawn" => args AgentSpawnArgs {
@@ -486,6 +488,17 @@ pub struct StartedAgent {
     pub notices: Vec<Notice>,
 }
 
+impl From<Activated> for StartedAgent {
+    fn from(Activated { info, notices }: Activated) -> Self {
+        Self {
+            id: info.id,
+            name: info.name,
+            status: info.status,
+            notices,
+        }
+    }
+}
+
 /// `agent.*` 핸들러가 매니저에게 시키는 일 **전부**.
 ///
 /// ★왜 trait 인가★: `AgentManager` 를 그대로 받으면 핸들러 하나를 단언하려고 실제 PTY 프로세스가
@@ -501,8 +514,10 @@ pub trait AgentCommandHost: Send + Sync {
     // ADR-0291 R17 (D6)
     fn store_status(&self) -> StoreStatus;
     fn agent_snapshot(&self, id: AgentId) -> Option<AgentProfile>;
-    /// ★명부를 바꾸는 셋(`create_agent` · `rename_agent` · `reparent_agent`)은 부르는 쪽 있는 변경이다★ — 저장소가
-    ///   그 변경을 받지 않으면 명부를 그대로 두고 [`PtyError::Store`] 다(매니저의 `try_` 판 · ADR-0291 R17).
+    /// ★The roster-changing methods (`create_agent` · `rename_agent` · `reparent_agent` · `create_and_activate`) are
+    ///   changes with a caller★ — if the store refuses the change the roster stays as it was and the answer is
+    ///   [`PtyError::Store`] (the manager's `try_` variants · ADR-0291 R17). `create_and_activate` is partial: a refused
+    ///   add gives `created: false`; a failure after the add gives `created: true` and the row stays.
     fn create_agent(&self, profile: AgentProfile) -> Result<AgentProfile, PtyError>;
     /// The handler puts the returned notices on its success reply, so the activation counts as delivering them
     /// ([`crate::manager::NoticeDelivery::Delivered`] — a start marks the set as shown for this agent).
@@ -511,6 +526,15 @@ pub trait AgentCommandHost: Send + Sync {
         profile: &AgentProfile,
         mode: SpawnMode,
     ) -> Result<StartedAgent, PtyError>;
+    /// Create-and-start for a profile whose id is not in the roster ([`AgentManager::create_and_activate`]) — the
+    /// host call of [`create_and_start`]. `delivery` = whether the caller shows the returned notices.
+    /// `Err(NotStarted { created: true, .. })` = the agent was registered and stays asleep.
+    // ADR-0348
+    fn create_and_activate(
+        &self,
+        profile: &AgentProfile,
+        delivery: NoticeDelivery,
+    ) -> Result<Activated, NotStarted>;
     fn rename_agent(
         &self,
         id: AgentId,
@@ -644,12 +668,15 @@ impl AgentCommandHost for AgentManager {
         mode: SpawnMode,
     ) -> Result<StartedAgent, PtyError> {
         AgentManager::activate_profile_reporting(self, profile, mode, NoticeDelivery::Delivered)
-            .map(|Activated { info, notices }| StartedAgent {
-                id: info.id,
-                name: info.name,
-                status: info.status,
-                notices,
-            })
+            .map(StartedAgent::from)
+    }
+
+    fn create_and_activate(
+        &self,
+        profile: &AgentProfile,
+        delivery: NoticeDelivery,
+    ) -> Result<Activated, NotStarted> {
+        AgentManager::create_and_activate(self, profile, delivery)
     }
 
     fn rename_agent(
@@ -699,30 +726,39 @@ pub const NEW_AGENT_OUTPUT_FORMAT: CoreAgentOutputFormat = CoreAgentOutputFormat
 // 뒤집혀(app-server 통로엔 그 모달이 없다) 거절이 걷혔다 — 그 번복의 정본이 ADR-0219 다. 옛 좌표를
 // 근거로 이 표를 도로 닫지 말 것: 그 자리는 ADR-0219 「거부한 대안」이 (b) 로 이미 재고했다.
 //
-// ★정책의 집은 여기 하나다★ — 이 판정을 묻는 문이 둘이고 서로 다른 crate 에 산다:
-//   ① `agent.new`(이 파일) — 선언 어휘 `AgentBackend` 가 어휘 자체로 좁혀 서고, 그 위에 이 표가 한 겹
-//      더 선다(어휘를 넓히면서 정책을 안 넓히는 편집을 런타임에서 멈춘다 — 그 팔은 오늘 안 닿는다).
-//   ② 데몬 `SpawnByCwd` 처리부(`engram-dashboard-daemon` 의 `connection_core.rs`) — 스폰 패킷의 wire
-//      낱말을 이 표에 묻고 즉석 프로필이 명부·디스크에 오르기 전에 거절한다(ADR-0279). 셸
-//      `agent.spawnInto` 와 프론트 `slot.createAgentHere` · `agent.spawn` 이 모두 이 패킷을 보낸다.
-//      ★이 문은 호출자를 가리지 않는다 — 이름은 「LLM 제어 표면」이어도 사람 경로도 이 표를 본다★
-//      (데몬은 패킷을 누가 보냈는지 모른다 · ADR-0279 「감수한 대가」 · 오늘 영향 0 — 표가 아무것도 안
-//      닫는다).
+// ★This table is the policy's only home★ — the doors that ask it live in two crates:
+//   ① `agent.new` (this file) — the declared vocabulary `AgentBackend` narrows on its own, and this table stands one
+//      layer above it (it stops, at run time, an edit that widens the vocabulary without widening the policy — that
+//      arm is not reached today).
+//   ② the daemon `SpawnByCwd` arm (`engram-dashboard-daemon` `connection_core.rs`) — does not ask the table itself:
+//      it hands its policy (production = [`llm_creation_refusal`]) to body ③, which asks with the declared spelling
+//      before the ad-hoc profile reaches the roster or the disk (ADR-0279 · ADR-0348). The shell `agent.spawnInto`
+//      and the front `slot.createAgentHere` · `agent.spawn` all send that packet.
+//      ★This door does not tell callers apart — despite the name "LLM control surface", human paths see this table
+//      too★ (the daemon does not know who sent the packet · ADR-0279 "accepted cost" · no effect today — the table
+//      closes nothing).
+//   ③ the one creation body [`create_and_start`] (this file; bus `agent.spawn --cwd`) — asked with the declared
+//      spelling before anything is registered (ADR-0348 decision 4). Pinned by
+//      `tests::the_body_refuses_a_closed_backend_before_calling_the_host` (the body) and
+//      `tests::the_bus_cwd_arm_hands_the_production_policy_to_the_body` (the wiring).
 // ★셸은 문이 아니다★ — 셸 `agent.spawnInto` 는 오탈자 그물(`parse_backend` — wire enum 에 묻는다)만 지고
 // 이 표를 보지 않는다. 셸은 이 crate 를 의존하지 않는다(ADR-0270 결정 1).
-// ★표를 안 보는 생성 경로도 있다 — 문을 셀 때 빠뜨리지 말 것★(세지 못한 문은 표를 한 번도 안 보고 열려
-// 있게 된다): agent 버스 `agent.spawn`(claude 고정 — 그 동사의 주석) · 데몬 `CreateProfile`(프론트의 예약
-// 노드 생성 문 — `agentlist.createCodex` 등 — 이 그리로 간다). 프론트 command 레지스트리(`humanOnly`)는
-// 이 표를 보는 문이 아니다 — codex 문의 `humanOnly` 는 2026-09-22 에 걷혔다.
+// ★Some create paths do not see this table — do not miss them when counting doors★ (an uncounted door stays open
+// without ever asking): the daemon `CreateProfile` (the front's reserved-node create doors — `agentlist.createCodex`
+// and the like — go there). The front command registry (`humanOnly`) is not a door of this table — the codex door's
+// `humanOnly` was removed on 2026-09-22.
 // 문마다 각자 목록을 들면 「한 문으로는 만드는데 다른 문으로는 못 만드는 백엔드」가 생긴다. 어긋남을 재는
 // 자리 = ①은 `tests::new_creates_exactly_what_the_llm_backend_policy_opens` ·
 // `tests::new_advertises_exactly_the_backends_the_llm_policy_opens`(이 파일) · ②는 데몬
 // `connection_core.rs` 의 `every_wire_backend_declares_an_llm_policy` ·
 // `the_production_core_asks_the_agent_backend_policy` · `spawn_by_cwd_refuses_a_backend_the_policy_closes`.
 //
-// ★왜 타입이 아니라 낱말로 묻나★ — ②가 들고 오는 타입은 wire enum `protocol::AgentBackendKind` 인데 이
-// crate 는 protocol 을 의존하지 않는다(그 금지의 정본 = 이 crate `Cargo.toml` 의 `[dependencies]` 주석).
-// 두 crate 가 공유할 수 있는 것은 낱말뿐이고, 철자가 갈리는 것은 ② 의 첫 시험이 잡는다.
+// ★Why the table is keyed by a word, not a type★ — the wire vocabulary lives in `protocol::AgentBackendKind`, which
+// this crate does not depend on (the canon of that ban = the `[dependencies]` comment in this crate's `Cargo.toml`),
+// so the one thing the daemon and this crate can both read is the word. The daemon maps the wire enum onto the
+// declared [`AgentBackend`] (a match with no wildcard) and the doors ask with the declared spelling
+// ([`backend_word`]); the table compares ignoring case. A wire word with no row in the table is caught by ②'s first
+// test (`every_wire_backend_declares_an_llm_policy`).
 
 /// 정책 표의 한 줄.
 pub struct LlmBackendPolicy {
@@ -1135,7 +1171,27 @@ fn verb_spawn(
             "name does not apply when waking an existing agent ({token}) — changing a name is a separate verb, so drop this field"
         ))),
         (Some(token), None) => wake_existing(host, notify, token),
-        (None, Some(cwd)) => create_and_start(host, notify, cwd, name.map(str::to_string)),
+        // Claude fixed on purpose — `agent.new` is the one bus door that picks a backend; moves with front `agent.spawn`.
+        // ADR-0348
+        (None, Some(cwd)) => create_and_start(
+            host,
+            notify,
+            NewAgent {
+                cwd: cwd.to_string(),
+                name: name.map(str::to_string),
+                backend: AgentBackend::Claude,
+                policy: llm_creation_refusal,
+                delivery: NoticeDelivery::Delivered,
+            },
+        )
+        .map(|activated| started_payload(activated.into(), true))
+        .map_err(|refused| {
+            spawn_create_refusal(
+                refused,
+                &normalize_spelling(cwd),
+                &backend_word(&AgentBackend::Claude),
+            )
+        }),
     }
 }
 
@@ -1203,92 +1259,160 @@ fn wake_existing(
     Ok(started_payload(started, false))
 }
 
-// Every failure after the create answers INTERNAL with `args.agent_id`: the agent stays registered, and a
-//   CONFLICT would release the request id so a same-id retry creates an undeletable duplicate.
-// ADR-0122
-// TODO(TRD S25 §5-2 10a): check the profile before creating it (TRD §1-5 (가) 1 ②) so a block answers CONFLICT
-//   with nothing created; then revisit the `agent.spawn` summary ("registered before its launch is checked").
-fn create_and_start(
+/// A new agent to create in a folder and start — the input of [`create_and_start`].
+// ADR-0348
+pub struct NewAgent {
+    /// As the caller typed it — the body normalizes the spelling.
+    pub cwd: String,
+    /// The requested name; the registered one may differ (roster uniqueness suffix).
+    pub name: Option<String>,
+    pub backend: AgentBackend,
+    /// `None` = create · `Some(reason)` = refuse. Asked with the declared spelling (`"Claude"`, `"Codex"`).
+    /// Production = [`llm_creation_refusal`].
+    pub policy: fn(&str) -> Option<&'static str>,
+    /// Whether the caller shows the success reply's notices to a reader.
+    pub delivery: NoticeDelivery,
+}
+
+/// Why [`create_and_start`] did not answer with a started agent.
+// ADR-0348
+#[derive(Debug)]
+pub enum CreateRefused {
+    /// The backend policy refused — nothing registered, no last failure, the host was not called.
+    Policy { reason: &'static str },
+    /// Refused or failed with nothing registered now. In practice: a store refusal or write failure, the roster
+    /// ceiling, name space, or a launch block before the add (the pre-create check returns only `LaunchBlocked`); also
+    /// a failure after the add whose row a concurrent delete removed before the `created` probe (TRD §5).
+    NotCreated(PtyError),
+    /// The agent was registered and is asleep under `id` / `name`; `error` is why it did not start.
+    CreatedAsleep {
+        id: AgentId,
+        name: String,
+        error: PtyError,
+    },
+}
+
+/// ★The one creation body★ — every entrance that creates a new agent for a folder and starts it calls this; do not
+/// add a second body. Policy, spelling, the default launch command, the roster notify and the created/not-created
+/// split live here; the pre-create launch check, link verdict, last-failure record and notice delivery come from
+/// the host's Fresh activation path ([`AgentCommandHost::create_and_activate`]).
+///
+/// Notifies the roster once, after the activation, exactly when the agent was registered (success or
+/// [`CreateRefused::CreatedAsleep`]) — never for a refusal that left the roster as it was.
+/// Blocking — call it off async workers.
+// ADR-0348
+pub fn create_and_start(
     host: &dyn AgentCommandHost,
     notify: &dyn RosterChanged,
-    cwd: &str,
-    name: Option<String>,
-) -> Result<AgentSpawnOk, CommandError> {
-    // ★이 동사에는 형식·백엔드 칸이 없다 — 그래서 아래 두 값은 이제 **고른 것**이다★(2026-09-22 재확인).
-    //   어휘가 claude 하나뿐이던 시절엔 `Claude` 가 「유일한 값」이라 고를 것이 없었지만, `agent.new` 가
-    //   codex 를 열면서 이 자리는 **의도한 claude 고정**이 됐다.
-    // ★그래도 여기에 칸을 내지 않는다★ — 백엔드·모드를 고르는 입구는 `agent.new` 하나이고, 이 동사에
-    //   칸을 더하면 같은 선택이 두 문으로 갈린다(카탈로그 세대 상향·바인딩 재생성까지 딸려 온다).
-    //   codex 를 원하는 호출자는 `agent.new` 로 등록한 뒤 `agent.spawn {target}` 으로 깨운다.
-    // ★프론트의 동명 문(`src/commands/agentCommands.ts` 의 `agent.spawn`)도 같은 이유로 claude 에
-    //   박혀 있다 — 둘은 이름이 같으므로 함께 움직인다.★ 단 정책 표([`LLM_BACKEND_POLICY`])는 프론트 문만
-    //   본다 — 그쪽은 데몬 `SpawnByCwd` 를 지나고 이 동사는 안 묻는다(ADR-0279).
-    let stored = register(
-        host,
-        cwd,
-        name,
-        backend_command(AgentBackend::Claude, NEW_AGENT_OUTPUT_FORMAT),
-    )?;
-    notify.roster_changed();
-    let started = host.activate_profile(&stored, SpawnMode::Fresh);
-    // ★활성화 **뒤에도** 알린다 — 위 통지는 활성화 전 스냅샷이다★: 그 사이 「마지막 실패」가 기록되거나
-    //   지워지고(ADR-0172), 그 축은 프로필 목록으로만 흐른다. 실패 갈래에서 특히 중요하다 — 아래 Err 는
-    //   호출자에게만 가고 화면에는 아무 것도 남지 않는다.
-    // ADR-0172
-    notify.roster_changed();
-    let started = started.map_err(|e| {
-            // ★등록을 되돌리지 않는다★: 만들어진 에이전트는 잠든 상태로 명부에 남는다. 되감기는 두 번째
-            //   삭제 경로를 만드는데 삭제의 semantics 자체가 미결이다(ADR-0122).
-            // ★회복 경로를 문구가 나른다★: 만들어진 에이전트는 명부에 남아 있으므로 호출자가 할 일은
-            //   「다시 만들기」가 아니라 **그 이름으로 다시 띄우기**다. 안 적으면 같은 cwd 로 또 만들어
-            //   이름이 하나씩 늘어난다.
-            // A block does not clear by waiting — its tail says fix first; every other failure keeps "(in a moment)".
-            let created_but = |reason: &str, next: &str| {
-                format!(
-                    "agent '{}' ({}) was created but did not start: {reason} — it is registered and asleep, so {next} instead of creating another",
-                    stored.canonical_name_when_live(),
-                    stored.id
-                )
-            };
-            const AGAIN: &str = "start it again by that name (in a moment)";
-            // Every answer here names the created agent in `args.agent_id`, so the recovery targets it (TRD S25
-            //   §1-5 (가) 1 ②).
-            let mut args = serde_json::Map::new();
-            let error = match e {
-                // ★사유는 까닭만 싣는다([`store_error_cause`]) — 할 일 지시를 붙이지 않는다★: 여기서 「조금 뒤
-                //   다시」는 같은 `--cwd` 로 또 만들라는 말로 읽혀 중복을 낳고, 「다시 해도 소용없다」는 뒤의 「그
-                //   이름으로 다시 띄우라」와 어긋난다. 할 일은 뒤 꼬리 하나가 댄다.
-                // ★저장 거절이어도 `CONFLICT` 로 싣지 않는다 — 이 갈래는 이미 에이전트를 만들었다★: 데몬은
-                //   `CONFLICT` 를 「아무것도 적용 안 된 반려」로 읽어 그 요청 번호를 놓는다(daemon
-                //   `command_delivery::retains_the_id`). 놓으면 같은 번호의 재시도가 또 만들어 지울 수 없는
-                //   중복이 남는다(ADR-0122) — `INTERNAL` 이라야 번호를 붙든다.
+    req: NewAgent,
+) -> Result<Activated, CreateRefused> {
+    if let Some(reason) = (req.policy)(&backend_word(&req.backend)) {
+        return Err(CreateRefused::Policy { reason });
+    }
+    let profile = new_profile(
+        &req.cwd,
+        req.name,
+        backend_command(req.backend, NEW_AGENT_OUTPUT_FORMAT),
+    );
+    let id = profile.id;
+    match host.create_and_activate(&profile, req.delivery) {
+        Ok(activated) => {
+            notify.roster_changed();
+            Ok(activated)
+        }
+        Err(NotStarted {
+            error,
+            created: false,
+        }) => Err(CreateRefused::NotCreated(error)),
+        // Announced even though it failed: the asleep row and its last failure reach the screen only through the
+        //   roster frames (ADR-0172).
+        Err(NotStarted {
+            error,
+            created: true,
+        }) => {
+            notify.roster_changed();
+            let name = host
+                .agent_snapshot(id)
+                .map_or_else(|| id.to_string(), |p| p.canonical_name_when_live());
+            Err(CreateRefused::CreatedAsleep { id, name, error })
+        }
+    }
+}
+
+/// The text of a create that registered the agent but did not start it:
+/// `agent '<name>' (<id>) was created but did not start: <cause> — it is registered and asleep, so <next> instead of
+/// creating another`. `<cause>` carries no instruction of its own (a "try again" reads as "create again"); `<next>`
+/// says to start that agent by name — after fixing the listed items for a block, which does not clear by waiting.
+// ADR-0348
+pub fn created_but_not_started(name: &str, id: AgentId, error: &PtyError) -> String {
+    const AGAIN: &str = "start it again by that name (in a moment)";
+    let (cause, next) = match error {
+        PtyError::Store(store) => (store_error_cause(PROFILES_FILE, store), AGAIN),
+        PtyError::LaunchBlocked(blocked) => (
+            launch_blocked_reason(blocked),
+            "fix the listed items first, then start it by that name",
+        ),
+        // The cause only — `PtyError::LaunchRaced`'s text ends in "try again".
+        PtyError::LaunchRaced => (LAUNCH_RACED_CAUSE.to_string(), AGAIN),
+        other => (other.to_string(), AGAIN),
+    };
+    format!(
+        "agent '{name}' ({id}) was created but did not start: {cause} — it is registered and asleep, so {next} instead of creating another"
+    )
+}
+
+/// The bus answer of a [`create_and_start`] refusal. `cwd` names the folder in a block's text; `word` names the
+/// backend in the policy text.
+// Every failure after the add answers INTERNAL with `args.agent_id`: the agent stays registered, and a CONFLICT would
+//   release the request id so a same-id retry creates an undeletable duplicate. A refusal before the add is a
+//   CONFLICT so the fixed retry is not swallowed (`command_delivery::retains_the_id`).
+// ADR-0122
+// ADR-0348
+fn spawn_create_refusal(refused: CreateRefused, cwd: &str, word: &str) -> CommandError {
+    match refused {
+        CreateRefused::Policy { reason } => policy_refusal(word, reason),
+        CreateRefused::NotCreated(PtyError::LaunchBlocked(blocked)) => CommandError::of(
+            ErrorCode::Conflict,
+            format!(
+                "{LAUNCH_REFUSAL} for a new agent in '{cwd}': {}; nothing was created — fix the listed items, then try again",
+                launch_blocked_reason(&blocked)
+            ),
+        )
+        .with_args(blocked.to_args()),
+        // The pre-create check never races (it returns only a block); this arm is reached only when a concurrent
+        //   delete removed a row that raced after the add — "nothing was created" is then true of the end state.
+        CreateRefused::NotCreated(PtyError::LaunchRaced) => CommandError::with_retry(
+            ErrorCode::Conflict,
+            format!(
+                "{LAUNCH_REFUSAL} for a new agent in '{cwd}': {LAUNCH_RACED_CAUSE}; nothing was created — try again"
+            ),
+            RetryMode::AfterCondition,
+        ),
+        CreateRefused::NotCreated(other) => create_error(other, cwd),
+        CreateRefused::CreatedAsleep { id, name, error } => {
+            let text = created_but_not_started(&name, id, &error);
+            let (failure, mut args) = match error {
                 // ADR-0291 R17
-                PtyError::Store(error) => store_error(
-                    "start",
-                    &error,
-                    CommandError::internal(created_but(
-                        &store_error_cause(PROFILES_FILE, &error),
-                        AGAIN,
-                    )),
+                PtyError::Store(store) => (
+                    store_error("start", &store, CommandError::internal(text)),
+                    serde_json::Map::new(),
                 ),
-                // A block or race after the create stays `INTERNAL` for the same reason. The race passes its cause
-                //   only — `PtyError::LaunchRaced`'s text ends in "try again", an instruction the rule above forbids.
                 PtyError::LaunchBlocked(blocked) => {
-                    args = blocked.to_args();
-                    CommandError::internal(created_but(
-                        &launch_blocked_reason(&blocked),
-                        "fix the listed items first, then start it by that name",
-                    ))
+                    (CommandError::internal(text), blocked.to_args())
                 }
-                PtyError::LaunchRaced => {
-                    CommandError::internal(created_but(LAUNCH_RACED_CAUSE, AGAIN))
-                }
-                other => CommandError::internal(created_but(&other.to_string(), AGAIN)),
+                _ => (CommandError::internal(text), serde_json::Map::new()),
             };
-            args.insert("agent_id".into(), stored.id.to_string().into());
-            error.with_args(args)
-        })?;
-    Ok(started_payload(started, true))
+            args.insert("agent_id".into(), id.to_string().into());
+            failure.with_args(args)
+        }
+    }
+}
+
+/// A backend the policy closes — the same words on every door that asks it.
+fn policy_refusal(word: &str, reason: &str) -> CommandError {
+    CommandError::invalid_argument(format!(
+        "backend '{word}' 는 아는 낱말이지만 이 표면으로는 지금 만들지 않는다 — {reason}"
+    ))
 }
 
 fn verb_new(
@@ -1313,16 +1437,14 @@ fn verb_new(
     //   ★그래도 지우지 말 것★ — 이 팔이 막는 편집은 「어휘를 넓히면서 [`LLM_BACKEND_POLICY`] 는 안
     //   넓히는 것」이고, 그 편집이 오면 팔이 그날 살아난다. 그 사실을 시험이 잰다 =
     //   `tests::new_creates_exactly_what_the_llm_backend_policy_opens`(어휘를 넓히고 표를 안 열면
-    //   빨개진다). 형제 문의 자리 = 데몬 `SpawnByCwd` 처리부(`connection_core.rs` — 호출자를 안 가린다 ·
-    //   ADR-0279). ★**오늘은 그 문도 정책으로 아무것도 안 막는다**★(2026-09-22 · ADR-0219 — wire 어휘가
+    //   빨개진다). 형제 문의 자리 = 하나뿐인 생성 본체 [`create_and_start`](데몬 `SpawnByCwd` · 버스
+    //   `agent.spawn --cwd` 가 부른다 — 호출자를 안 가린다 · ADR-0279 · ADR-0348). ★**오늘은 그 문도 정책으로 아무것도 안 막는다**★(2026-09-22 · ADR-0219 — wire 어휘가
     //   claude·codex 둘뿐인데 표가 둘 다 열었다). 셸 `agent.spawnInto` 는 문이 아니다 — 거기 남는 거절은
     //   정책이 아니라 `parse_backend` 의 오탈자 그물이다(ADR-0270). 프론트 `commands/registry.ts` 는 형제 문이
     //   아니다 — codex 문의 `humanOnly` 사유 문자열이 그날 지워졌다. ★한때 이 자리에 「셸은 런타임
     //   거절이 오늘도 닿는다」고 적혀 있었는데 표가 열린 뒤로 거짓이다.★
     if let Some(reason) = llm_creation_refusal(&word) {
-        return Err(CommandError::invalid_argument(format!(
-            "backend '{word}' 는 아는 낱말이지만 이 표면으로는 지금 만들지 않는다 — {reason}"
-        )));
+        return Err(policy_refusal(&word, reason));
     }
     let stored = register(
         host,
@@ -1338,7 +1460,7 @@ fn verb_new(
     })
 }
 
-/// 명부 등록 공통부 — `agent.new` 와 `agent.spawn --cwd` 가 같은 자리를 쓴다.
+/// The registration of `agent.new` (create without starting).
 ///
 /// ★확정 이름은 요청 이름과 다를 수 있다★: 명부 전역 유일성 때문에 접미사가 붙는다(ADR-0120/0123).
 /// 그래서 응답은 **등록된 값**에서 이름을 읽는다 — 요청 이름을 되돌려주면 화면·주소와 어긋난다.
@@ -1348,18 +1470,36 @@ fn register(
     name: Option<String>,
     command: AgentCommand,
 ) -> Result<AgentProfile, CommandError> {
-    // ★친 철자를 여기서 고른다★: 이 칸을 채우는 것은 사람·LLM 이고 Windows 경로는 `C:\work\thing` 으로
-    //   친다. 셸에서 온 값은 공백 때문에 `"…"` 로 감싸인 채 그대로 실려 오기도 한다. 둘 다 여기서 안
-    //   흡수하면 「폴더 이름이 통째로 이상한」 에이전트가 명부에 앉고, 그것을 지우는 동사가 없다(ADR-0122).
-    //   철자만 고를 뿐 실재 판정은 여전히 뒤(spawn 의 `dunce::canonicalize`)에 있다. 안이 빈 따옴표 짝을
-    //   안 벗기는 규칙이 앞의 빈 값 검문(`reject_blanks`)을 지킨다.
-    let cwd = &normalize_spelling(cwd);
-    let mut profile =
-        AgentProfile::new(cwd.to_string(), command, PathBuf::from(cwd), vec![], false);
+    let profile = new_profile(cwd, name, command);
+    let cwd = profile.cwd.to_string_lossy().into_owned();
+    host.create_agent(profile)
+        .map_err(|e| create_error(e, &cwd))
+}
+
+/// A new agent's profile for the folder the caller typed — both create doors (`agent.new` · the one creation body)
+/// build it here.
+// ADR-0348
+fn new_profile(cwd: &str, name: Option<String>, command: AgentCommand) -> AgentProfile {
+    // ★The typed spelling is settled here★: people and LLMs fill this field, and Windows paths come as
+    //   `C:\work\thing`; values from a shell sometimes arrive still wrapped in `"…"` because of spaces. Absorb both
+    //   here, or an agent with a garbled folder name sits in the roster with no verb to remove it (ADR-0122).
+    //   Only the spelling is chosen here — whether the folder exists is not checked. For a stdio start a missing
+    //   folder fails the process spawn (a failure after the add · ADR-0348); a PTY profile (`agent.new` can build
+    //   one) has been observed to start with a missing folder — where that process then runs is unverified.
+    //   An empty quote pair is not stripped, so `reject_blanks` still holds.
+    let cwd = normalize_spelling(cwd);
+    let mut profile = AgentProfile::new(cwd.clone(), command, PathBuf::from(&cwd), vec![], false);
     profile.display_name = name;
+    profile
+}
+
+/// A create refused or failed with nothing registered. `cwd` = the normalized folder, for the
+/// out-of-workspace text. Shared by `agent.new` and the bus `agent.spawn --cwd` refusal.
+// ADR-0348
+fn create_error(e: PtyError, cwd: &str) -> CommandError {
     // ★실패 사유마다 호출자가 할 일이 다르다★ — 자리를 비워라(CONFLICT) · 인자를 고쳐라
     //   (INVALID_ARGUMENT) · 다시 시도해도 소용없다(INTERNAL). 한 코드로 뭉개면 그 갈림이 사라진다.
-    host.create_agent(profile).map_err(|e| match e {
+    match e {
         // ★상한의 **성격**을 문구가 밝힌다★: 이 줄이 없으면 상한에 부딪힌 호출자(사람·LLM)의 첫 반응이
         //   "숫자를 올린다" 가 된다 — 그건 폭주 생성 루프를 막으려고 둔 백스톱을 스스로 걷는 것이다.
         PtyError::RosterFull { current, limit } => CommandError::of(
@@ -1387,7 +1527,7 @@ fn register(
             ),
         ),
         other => CommandError::internal(format!("could not register a new agent: {other}")),
-    })
+    }
 }
 
 fn verb_rename(
@@ -1983,7 +2123,11 @@ mod tests {
         start_error: Mutex<Option<PtyError>>,
         /// The notices every successful activation returns.
         start_notices: Mutex<Vec<Notice>>,
+        /// The next create's error (taken once) — `create_agent`'s, and for `create_and_activate` a refusal before
+        /// the add (nothing registered).
         create_fails: Mutex<Option<PtyError>>,
+        /// Every `create_and_activate` call — the profile the body built and the delivery it asked for.
+        creates: Mutex<Vec<(AgentProfile, NoticeDelivery)>>,
         /// 켜져 있으면 명부를 바꾸는 셋과 활성화가 저장 거절(새 판이 쓴 파일)로 돌아온다 — 명부는 그대로다.
         // ADR-0291 R17
         store_refuses: Mutex<bool>,
@@ -2201,6 +2345,34 @@ mod tests {
             })
         }
 
+        /// The real split: a refusal before the add registers nothing; after the add every start failure leaves the
+        /// row (`created: true`).
+        fn create_and_activate(
+            &self,
+            profile: &AgentProfile,
+            delivery: NoticeDelivery,
+        ) -> Result<Activated, NotStarted> {
+            self.creates
+                .lock()
+                .unwrap()
+                .push((profile.clone(), delivery));
+            self.create_agent(profile.clone())
+                .map_err(|error| NotStarted {
+                    error,
+                    created: false,
+                })?;
+            let started = self
+                .activate_profile(profile, SpawnMode::Fresh)
+                .map_err(|error| NotStarted {
+                    error,
+                    created: true,
+                })?;
+            Ok(Activated {
+                info: fake_info(&started),
+                notices: started.notices,
+            })
+        }
+
         fn rename_agent(
             &self,
             _id: AgentId,
@@ -2277,6 +2449,58 @@ mod tests {
         // 표를 거쳐 부른다 — 인자를 선언 스키마에 맞추는 자리가 거기 하나뿐이다(`CommandTable::call`).
         let future = table.call(name, &mut args).expect("표에 있는 이름");
         block_on(future)
+    }
+
+    /// The `AgentInfo` of a fake start — only the fields this table reads come from `started`.
+    fn fake_info(started: &StartedAgent) -> crate::types::AgentInfo {
+        use crate::types::{
+            BackendCaps, Capabilities, ControlCaps, InputCaps, ModelCaps, OutputCaps, SessionCaps,
+            TransportCaps,
+        };
+        crate::types::AgentInfo {
+            id: started.id,
+            name: started.name.clone(),
+            cwd: String::new(),
+            status: started.status.clone(),
+            cols: 80,
+            rows: 24,
+            epoch: 1,
+            capabilities: Capabilities::compose(
+                TransportCaps {
+                    input: InputCaps {
+                        raw: true,
+                        message: false,
+                        attachment: false,
+                    },
+                    output: OutputCaps {
+                        terminal_bytes: true,
+                        structured: false,
+                        markdown: false,
+                        tool_events: false,
+                        usage: false,
+                    },
+                    control: ControlCaps {
+                        resize: true,
+                        interrupt: false,
+                        cancel: false,
+                        graceful_shutdown: false,
+                    },
+                },
+                BackendCaps {
+                    session: SessionCaps {
+                        resume: false,
+                        snapshot: false,
+                        cwd_env: true,
+                    },
+                    model: ModelCaps {
+                        select: false,
+                        temperature: false,
+                        max_tokens: false,
+                    },
+                },
+            ),
+            reads_messages: false,
+        }
     }
 
     #[test]
@@ -2559,6 +2783,10 @@ mod tests {
         assert_eq!(host.started.lock().unwrap().as_slice(), &[(id, false)]);
     }
 
+    /// The bus create goes through the one body: one `create_and_activate` (the Fresh activation path) that delivers
+    /// the notices, with the normalized folder, the given name and the shared default launch command — and one roster
+    /// notify, after the activation.
+    // ADR-0348
     #[test]
     fn spawn_by_cwd_creates_then_starts() {
         let host = FakeHost::new();
@@ -2567,16 +2795,27 @@ mod tests {
         let out = call(
             &table,
             "agent.spawn",
-            json!({ "cwd": "C:/work/gamma", "name": "gamma" }),
+            json!({ "cwd": r#"C:\work\gamma"#, "name": "gamma" }),
         )
         .expect("생성 + 띄우기");
         assert_eq!(out["created"], true);
         assert_eq!(out["name"], "gamma");
         assert_eq!(host.started.lock().unwrap().len(), 1);
+        let creates = host.creates.lock().unwrap();
+        assert_eq!(creates.len(), 1, "one create-and-activate call");
+        let (profile, delivery) = &creates[0];
+        assert_eq!(*delivery, NoticeDelivery::Delivered);
+        assert_eq!(profile.cwd, PathBuf::from("C:/work/gamma"));
+        assert_eq!(profile.display_name.as_deref(), Some("gamma"));
+        assert_eq!(
+            profile.command,
+            backend_command(AgentBackend::Claude, NEW_AGENT_OUTPUT_FORMAT)
+        );
+        assert_eq!(out["agent_id"], profile.id.to_string());
         assert_eq!(
             *notify.calls.lock().unwrap(),
-            2,
-            "등록 직후 한 번(새 항목) + 활성화 직후 한 번(「마지막 실패」 결말, ADR-0172)"
+            1,
+            "one notify after the activation (its last-failure outcome, ADR-0172) — none before it"
         );
     }
 
@@ -2584,12 +2823,17 @@ mod tests {
     fn a_created_agent_that_fails_to_start_is_not_rolled_back() {
         let host = FakeHost::new();
         *host.start_fails.lock().unwrap() = true;
-        let (table, _notify) = wiring(&host);
+        let (table, notify) = wiring(&host);
 
         let err =
             call(&table, "agent.spawn", json!({ "cwd": "C:/work/gamma" })).expect_err("기동 실패");
         assert_eq!(err.code(), ErrorCode::Internal);
         assert_eq!(host.rows.lock().unwrap().len(), 1, "명부에는 남는다");
+        assert_eq!(
+            *notify.calls.lock().unwrap(),
+            1,
+            "the asleep row is announced"
+        );
     }
 
     // ── Launch answers (TRD S25 step 16) ──
@@ -2721,7 +2965,11 @@ mod tests {
                 usize::from(tail == FIX_FIRST),
                 "{message}"
             );
-            assert_eq!(*notify.calls.lock().unwrap(), 2);
+            assert_eq!(
+                *notify.calls.lock().unwrap(),
+                1,
+                "once, after the activation"
+            );
         }
     }
 
@@ -2757,6 +3005,424 @@ mod tests {
             json!([notice_row(&lined), bare_row]),
             "{out}"
         );
+    }
+
+    // ── The one creation body (TRD S25 step 20 — ADR-0348) ──
+
+    fn open_policy(_word: &str) -> Option<&'static str> {
+        None
+    }
+
+    fn new_agent(backend: AgentBackend, policy: fn(&str) -> Option<&'static str>) -> NewAgent {
+        NewAgent {
+            cwd: "C:/work/gamma".into(),
+            name: Some("gamma".into()),
+            backend,
+            policy,
+            delivery: NoticeDelivery::Delivered,
+        }
+    }
+
+    /// A block found before the add creates nothing, so it is a `CONFLICT` — the daemon releases the request id and the
+    /// fixed retry runs — carrying every reason, with no notify and no row.
+    #[test]
+    fn a_cwd_launch_blocked_before_the_add_is_a_conflict_that_creates_nothing() {
+        let host = FakeHost::new();
+        *host.create_fails.lock().unwrap() = Some(PtyError::LaunchBlocked(blocked()));
+        let (table, notify) = wiring(&host);
+
+        let err = call(
+            &table,
+            "agent.spawn",
+            json!({ "cwd": r#"C:\work\gamma"#, "name": "gamma" }),
+        )
+        .expect_err("the launch is blocked before the add");
+
+        let message = err.message();
+        assert_eq!(err.code(), ErrorCode::Conflict, "{message}");
+        assert_eq!(err.retry(), RetryMode::Never, "{message}");
+        assert_eq!(err.args(), Some(&blocked().to_args()), "{message}");
+        assert!(
+            message.starts_with(&format!(
+                "{LAUNCH_REFUSAL} for a new agent in 'C:/work/gamma'"
+            )) && message.contains("2 reason(s)")
+                && message.contains("nothing was created")
+                && message.ends_with("fix the listed items, then try again"),
+            "{message}"
+        );
+        assert!(host.rows.lock().unwrap().is_empty(), "nothing registered");
+        assert!(host.started.lock().unwrap().is_empty(), "nothing started");
+        assert_eq!(*notify.calls.lock().unwrap(), 0);
+    }
+
+    /// *Defensive* — the real pre-create check returns only a block; the mapping stays total for a race.
+    #[test]
+    fn a_cwd_launch_raced_before_the_add_is_a_conflict_to_try_again() {
+        let host = FakeHost::new();
+        *host.create_fails.lock().unwrap() = Some(PtyError::LaunchRaced);
+        let (table, notify) = wiring(&host);
+
+        let err = call(&table, "agent.spawn", json!({ "cwd": "C:/work/gamma" }))
+            .expect_err("the launch raced before the add");
+
+        let message = err.message();
+        assert_eq!(err.code(), ErrorCode::Conflict, "{message}");
+        assert_eq!(err.retry(), RetryMode::AfterCondition, "{message}");
+        assert_eq!(err.args(), None, "{message}");
+        assert!(
+            message.starts_with(&format!(
+                "{LAUNCH_REFUSAL} for a new agent in 'C:/work/gamma'"
+            )) && message.contains("nothing was created")
+                && message.ends_with("try again"),
+            "{message}"
+        );
+        assert_eq!(*notify.calls.lock().unwrap(), 0);
+    }
+
+    /// The policy is asked before anything else: a closed backend never reaches the host and announces nothing. The
+    /// bus answer is `agent.new`'s policy wording (`INVALID_ARGUMENT`).
+    #[test]
+    fn the_body_refuses_a_closed_backend_before_calling_the_host() {
+        fn closes_claude(word: &str) -> Option<&'static str> {
+            word.eq_ignore_ascii_case("claude")
+                .then_some("closed for this test")
+        }
+        let host = FakeHost::new();
+        let notify = FakeNotify::default();
+
+        let refused = create_and_start(
+            host.as_ref(),
+            &notify,
+            new_agent(AgentBackend::Claude, closes_claude),
+        )
+        .expect_err("the policy closes claude");
+
+        assert!(
+            matches!(
+                refused,
+                CreateRefused::Policy {
+                    reason: "closed for this test"
+                }
+            ),
+            "{refused:?}"
+        );
+        assert!(host.creates.lock().unwrap().is_empty(), "host not called");
+        assert!(host.rows.lock().unwrap().is_empty());
+        assert_eq!(*notify.calls.lock().unwrap(), 0);
+
+        let err = spawn_create_refusal(refused, "C:/work/gamma", "Claude");
+        assert_eq!(err.code(), ErrorCode::InvalidArgument);
+        assert!(
+            err.message().contains("backend 'Claude'")
+                && err.message().ends_with("closed for this test"),
+            "{}",
+            err.message()
+        );
+        assert_eq!(err.args(), None);
+    }
+
+    /// The body asks with the declared spelling (`Claude`, `Codex`) — the same word `agent.new` asks with.
+    #[test]
+    fn the_body_asks_the_policy_with_the_declared_spelling() {
+        static ASKED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        fn recording(word: &str) -> Option<&'static str> {
+            ASKED.lock().unwrap().push(word.to_string());
+            None
+        }
+        for backend in [AgentBackend::Claude, AgentBackend::Codex] {
+            let host = FakeHost::new();
+            create_and_start(
+                host.as_ref(),
+                &FakeNotify::default(),
+                new_agent(backend, recording),
+            )
+            .expect("an open policy creates");
+        }
+        assert_eq!(*ASKED.lock().unwrap(), vec!["Claude", "Codex"]);
+    }
+
+    /// One roster notify, after the activation, exactly when the agent was registered — a start (1), a start failure
+    /// after the add (1, the asleep row and its last failure reach the screen only this way), a refusal before the add
+    /// (0) or by the policy (0).
+    #[test]
+    fn the_body_announces_the_roster_once_exactly_when_it_registered_an_agent() {
+        let started = FakeHost::new();
+        let notify = FakeNotify::default();
+        create_and_start(
+            started.as_ref(),
+            &notify,
+            new_agent(AgentBackend::Claude, open_policy),
+        )
+        .expect("starts");
+        assert_eq!(*notify.calls.lock().unwrap(), 1, "a start");
+
+        let asleep = FakeHost::new();
+        *asleep.start_fails.lock().unwrap() = true;
+        let notify = FakeNotify::default();
+        let refused = create_and_start(
+            asleep.as_ref(),
+            &notify,
+            new_agent(AgentBackend::Claude, open_policy),
+        )
+        .expect_err("the start fails after the add");
+        let rows = asleep.rows.lock().unwrap();
+        match refused {
+            CreateRefused::CreatedAsleep { id, name, .. } => {
+                assert_eq!(id, rows[0].id, "the registered agent");
+                assert_eq!(name, "gamma", "its registered name");
+            }
+            other => panic!("created asleep expected: {other:?}"),
+        }
+        assert_eq!(
+            *notify.calls.lock().unwrap(),
+            1,
+            "a start failure after the add"
+        );
+
+        let not_created = FakeHost::new();
+        *not_created.create_fails.lock().unwrap() = Some(PtyError::RosterFull {
+            current: 40,
+            limit: 40,
+        });
+        let notify = FakeNotify::default();
+        let refused = create_and_start(
+            not_created.as_ref(),
+            &notify,
+            new_agent(AgentBackend::Claude, open_policy),
+        )
+        .expect_err("refused before the add");
+        assert!(
+            matches!(
+                refused,
+                CreateRefused::NotCreated(PtyError::RosterFull { .. })
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(*notify.calls.lock().unwrap(), 0, "a refusal before the add");
+    }
+
+    /// The body hands the caller's delivery to the host as given — a withheld caller must not mark the set as shown.
+    #[test]
+    fn the_body_passes_the_callers_delivery_to_the_host() {
+        for delivery in [NoticeDelivery::Withheld, NoticeDelivery::Delivered] {
+            let host = FakeHost::new();
+            create_and_start(
+                host.as_ref(),
+                &FakeNotify::default(),
+                NewAgent {
+                    delivery,
+                    ..new_agent(AgentBackend::Claude, open_policy)
+                },
+            )
+            .expect("creates");
+            let creates = host.creates.lock().unwrap();
+            assert_eq!(creates.len(), 1);
+            assert_eq!(creates[0].1, delivery);
+        }
+    }
+
+    /// A created-asleep answer names the agent by the name it was registered under, which can differ from the
+    /// requested one (roster uniqueness suffix) — the caller wakes it by that name.
+    #[test]
+    fn a_created_asleep_answer_names_the_registered_name_not_the_requested_one() {
+        // Registers the agent under a suffixed name (as the real roster does when the name is taken), then fails to
+        // start it.
+        struct SuffixesThenFails(Arc<FakeHost>);
+        impl AgentCommandHost for SuffixesThenFails {
+            fn roster(&self) -> Vec<AgentRosterRow> {
+                self.0.roster()
+            }
+            fn store_status(&self) -> StoreStatus {
+                self.0.store_status()
+            }
+            fn agent_snapshot(&self, id: AgentId) -> Option<AgentProfile> {
+                self.0.agent_snapshot(id)
+            }
+            fn create_agent(&self, profile: AgentProfile) -> Result<AgentProfile, PtyError> {
+                self.0.create_agent(profile)
+            }
+            fn activate_profile(
+                &self,
+                profile: &AgentProfile,
+                mode: SpawnMode,
+            ) -> Result<StartedAgent, PtyError> {
+                self.0.activate_profile(profile, mode)
+            }
+            fn create_and_activate(
+                &self,
+                profile: &AgentProfile,
+                _delivery: NoticeDelivery,
+            ) -> Result<Activated, NotStarted> {
+                let mut registered = profile.clone();
+                registered.display_name = Some("gamma(2)".into());
+                self.0
+                    .create_agent(registered)
+                    .map_err(|error| NotStarted {
+                        error,
+                        created: false,
+                    })?;
+                Err(NotStarted {
+                    error: PtyError::SpawnFailed("fake".into()),
+                    created: true,
+                })
+            }
+            fn rename_agent(
+                &self,
+                id: AgentId,
+                display_name: Option<String>,
+            ) -> Result<RenameOutcome, PtyError> {
+                self.0.rename_agent(id, display_name)
+            }
+            fn reparent_agent(
+                &self,
+                child: AgentId,
+                parent: Option<AgentId>,
+            ) -> Result<bool, PtyError> {
+                self.0.reparent_agent(child, parent)
+            }
+            fn list_queued_inputs(&self, id: AgentId) -> Option<QueuedListing> {
+                self.0.list_queued_inputs(id)
+            }
+            fn cancel_queued_input(
+                &self,
+                id: AgentId,
+                input_id: &str,
+            ) -> Result<CancelOutcome, CancelError> {
+                self.0.cancel_queued_input(id, input_id)
+            }
+            fn interrupt_agent(&self, id: AgentId) -> Result<(), PtyError> {
+                self.0.interrupt_agent(id)
+            }
+        }
+
+        let host = FakeHost::new();
+        let refused = create_and_start(
+            &SuffixesThenFails(Arc::clone(&host)),
+            &FakeNotify::default(),
+            new_agent(AgentBackend::Claude, open_policy),
+        )
+        .expect_err("the start fails after the add");
+        let id = host.rows.lock().unwrap()[0].id;
+        match &refused {
+            CreateRefused::CreatedAsleep { id: got, name, .. } => {
+                assert_eq!(*got, id);
+                assert_eq!(
+                    name, "gamma(2)",
+                    "the registered name, not the requested 'gamma'"
+                );
+            }
+            other => panic!("created asleep expected: {other:?}"),
+        }
+        let err = spawn_create_refusal(refused, "C:/work/gamma", "Claude");
+        assert!(
+            err.message().starts_with(&format!(
+                "agent 'gamma(2)' ({id}) was created but did not start"
+            )),
+            "{}",
+            err.message()
+        );
+    }
+
+    /// Door ③ of the policy table: the bus cwd arm hands the production policy to the body. A behaviour test cannot
+    /// tell it from an always-open policy today (the table closes nothing), so the wiring is pinned in the source.
+    // ADR-0348
+    #[test]
+    fn the_bus_cwd_arm_hands_the_production_policy_to_the_body() {
+        let src = include_str!("commands.rs");
+        let production = src.split("mod tests {").next().expect("production part");
+        let arm: String = production
+            .split("fn verb_spawn(")
+            .nth(1)
+            .expect("`verb_spawn` body")
+            .split("fn wake_existing(")
+            .next()
+            .expect("up to the next function")
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.starts_with("//"))
+            .collect::<String>()
+            .split_whitespace()
+            .collect();
+        assert!(
+            arm.contains("(None,Some(cwd))=>create_and_start(")
+                && arm.contains("policy:llm_creation_refusal,"),
+            "the bus cwd arm does not hand `llm_creation_refusal` to the body: {arm}"
+        );
+    }
+
+    /// The body fills one shared default mode for every backend — the entrances carry no mode field, so the body
+    /// invents the value; [`NEW_AGENT_OUTPUT_FORMAT`] is its only home (its literal is pinned by
+    /// `the_new_agent_default_output_format_is_pinned_to_a_literal`).
+    #[test]
+    fn the_body_builds_one_shared_default_launch_command_for_every_backend() {
+        for backend in [AgentBackend::Claude, AgentBackend::Codex] {
+            let host = FakeHost::new();
+            create_and_start(
+                host.as_ref(),
+                &FakeNotify::default(),
+                new_agent(backend.clone(), open_policy),
+            )
+            .expect("creates");
+            let creates = host.creates.lock().unwrap();
+            let command = &creates[0].0.command;
+            match (&backend, command) {
+                (
+                    AgentBackend::Claude,
+                    AgentCommand::Claude {
+                        extra_args,
+                        output_format,
+                    },
+                )
+                | (
+                    AgentBackend::Codex,
+                    AgentCommand::Codex {
+                        extra_args,
+                        output_format,
+                    },
+                ) => {
+                    assert!(extra_args.is_empty(), "{command:?}");
+                    assert_eq!(*output_format, NEW_AGENT_OUTPUT_FORMAT, "{command:?}");
+                }
+                _ => panic!("{backend:?} built {command:?}"),
+            }
+        }
+    }
+
+    /// The created-asleep text names the agent, carries the cause without an instruction, and ends with the one next
+    /// step — fix first for a block (waiting does not clear it), start it again by that name otherwise.
+    #[test]
+    fn created_but_not_started_names_the_agent_and_says_what_to_do_per_error_kind() {
+        let id = AgentId::new_v4();
+        let head = format!("agent 'gamma' ({id}) was created but did not start: ");
+        const AGAIN: &str = " — it is registered and asleep, so start it again by that name (in a moment) instead of creating another";
+        let cases = [
+            (
+                PtyError::LaunchBlocked(blocked()),
+                format!(
+                    "{} — it is registered and asleep, so fix the listed items first, then start it by that name instead of creating another",
+                    launch_blocked_reason(&blocked())
+                ),
+            ),
+            (
+                PtyError::LaunchRaced,
+                format!("{LAUNCH_RACED_CAUSE}{AGAIN}"),
+            ),
+            (
+                PtyError::Store(StoreError::Refused(crate::profile::Refusal::Unreadable)),
+                format!("{PROFILES_FILE} could not be read just now and was not overwritten{AGAIN}"),
+            ),
+            (
+                PtyError::SpawnFailed("os error 267".into()),
+                format!("spawn failed: os error 267{AGAIN}"),
+            ),
+        ];
+        for (error, tail) in cases {
+            assert_eq!(
+                created_but_not_started("gamma", id, &error),
+                format!("{head}{tail}"),
+                "{error:?}"
+            );
+        }
     }
 
     #[test]
@@ -2823,7 +3489,7 @@ mod tests {
         );
     }
 
-    /// 등록 공통부를 지나는 두 문(`agent.new` · `agent.spawn --cwd`)이 같은 철자를 명부에 앉힌다.
+    /// Both create doors (`agent.new` · `agent.spawn --cwd`) put the same normalized spelling in the roster.
     #[test]
     fn a_windows_path_in_quotes_is_registered_with_the_normalized_spelling() {
         for verb in ["agent.new", "agent.spawn"] {
@@ -3211,7 +3877,9 @@ mod tests {
     // ADR-0291 R17
     #[test]
     fn a_created_agent_whose_start_the_store_refuses_stays_internal_with_the_recovery_hint() {
-        // 만들기는 저장되고 띄우기의 등록에서 거절된다 — 그 사이에 파일이 바뀐 모양. 둘째 칸이 거절의 까닭을 만든다.
+        // *Defensive* — the add is stored, then the start's registry write is refused. The real manager does not write
+        //   the registry after the add (`inserted` skips `register_for_spawn` · ADR-0348), so this pins the answer shape
+        //   only.
         struct RefuseOnStart(Arc<FakeHost>, fn() -> StoreError);
         impl AgentCommandHost for RefuseOnStart {
             fn roster(&self) -> Vec<AgentRosterRow> {
@@ -3237,6 +3905,23 @@ mod tests {
                     return Err(PtyError::Store((self.1)()));
                 }
                 self.0.activate_profile(profile, mode)
+            }
+            // The add is stored, then the start's own registry write is refused.
+            fn create_and_activate(
+                &self,
+                profile: &AgentProfile,
+                _delivery: NoticeDelivery,
+            ) -> Result<Activated, NotStarted> {
+                self.0
+                    .create_agent(profile.clone())
+                    .map_err(|error| NotStarted {
+                        error,
+                        created: false,
+                    })?;
+                Err(NotStarted {
+                    error: PtyError::Store((self.1)()),
+                    created: true,
+                })
             }
             fn rename_agent(
                 &self,
@@ -3319,8 +4004,8 @@ mod tests {
             assert!(host.started.lock().unwrap().is_empty());
             assert_eq!(
                 *notify.calls.lock().unwrap(),
-                2,
-                "만든 뒤 · 활성화 뒤(E2) — 지금 계약 그대로"
+                1,
+                "once, after the activation (E2) — the pre-activation frame is gone (ADR-0348)"
             );
         }
     }

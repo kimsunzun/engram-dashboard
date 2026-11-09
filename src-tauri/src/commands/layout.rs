@@ -21,13 +21,14 @@ use engram_dashboard_protocol::{AgentBackendKind, AgentCommand, AgentEvent, Requ
 use crate::commands::popout::{PopupCounter, TauriWindowHost};
 use crate::commands::settings::TauriSettingsEvents;
 use crate::commands::window_ctl::TauriWindowControl;
+use crate::daemon_client::protocol_state::CommandFailure;
 use crate::daemon_client::DaemonClient;
 use crate::layout::apply;
 use crate::layout::window_arg;
 use crate::layout::{
     AgentSpawner, LayoutEvents, LayoutState, MoveFailed, NewWindow, SlotContent, SpareClaim,
-    SplitDir, SplitRatioApplied, SubscriptionSync, UiMetrics, ViewManager, ViewSnapshot,
-    WindowHost, WindowPlace, WindowTabsPayload,
+    SpawnRefusal, SpawnedAgent, SplitDir, SplitRatioApplied, SubscriptionSync, UiMetrics,
+    ViewManager, ViewSnapshot, WindowHost, WindowPlace, WindowTabsPayload,
 };
 use crate::output_router::{OutputRouter, SubscriptionDelta};
 use crate::settings::SettingsService;
@@ -99,8 +100,12 @@ impl SubscriptionSync for RouterSubs<'_> {
 // Interpreting the spawn response (which frame is success) is a transport contract, so it is the adapter's job.
 //
 // backend puts the chosen word on the wire as is — if empty, the daemon rejects it (there is no default on either side).
-struct DaemonSpawner<'a> {
-    client: &'a DaemonClient,
+// `deliver_notices` = this caller shows the reply's notices to a reader (`SpawnByCwd.deliver_notices`): only the bus
+//   spawner does; the webview does not read them yet (TRD S25 step 20 §7-1 — step 11).
+// ADR-0348 (M13)
+pub(crate) struct DaemonSpawner<'a> {
+    pub(crate) client: &'a DaemonClient,
+    pub(crate) deliver_notices: bool,
 }
 
 impl AgentSpawner for DaemonSpawner<'_> {
@@ -108,23 +113,38 @@ impl AgentSpawner for DaemonSpawner<'_> {
         &'a self,
         cwd: String,
         backend: Option<AgentBackendKind>,
-    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<SpawnedAgent, SpawnRefusal>> + Send + 'a>> {
         Box::pin(async move {
             let reply = self
                 .client
-                .send_command(AgentCommand::SpawnByCwd {
+                .send_command_with_origin(AgentCommand::SpawnByCwd {
                     cwd,
                     backend,
                     request_id: RequestId::new(),
+                    deliver_notices: self.deliver_notices,
                 })
-                .await?;
+                .await;
             match reply {
-                AgentEvent::Spawned { agent, .. } => Ok(agent.id.to_string()),
-                // ADR-0279: daemon rejection messages (including policy rejections) go through without a prefix. Today `send_command`
-                //   folds `Error` first into `Err(message)` (the message text verbatim — the sibling that preserves the origin =
-                //   `send_command_with_origin` · ADR-0281) so it does not reach this arm, but if that folding changes it will arrive here.
-                AgentEvent::Error { message, .. } => Err(message),
-                other => Err(format!("spawn 응답 예상 밖(Spawned 기대): {other:?}")),
+                Ok(AgentEvent::Spawned { agent, notices, .. }) => Ok(SpawnedAgent {
+                    id: agent.id.to_string(),
+                    notices: notices.unwrap_or_default(),
+                }),
+                // ADR-0279: daemon rejection messages (including policy rejections) go through without a prefix.
+                // ADR-0348: the block reasons and the created-asleep id travel next to the text, as received.
+                Err(CommandFailure::Daemon {
+                    message,
+                    launch_blocked,
+                    created_agent_id,
+                }) => Err(SpawnRefusal {
+                    message,
+                    launch_blocked,
+                    created_agent_id,
+                    live_agent_id: None,
+                    notices: Vec::new(),
+                }),
+                // A reply timeout (the link's round-trip cap) arrives here too.
+                Err(CommandFailure::Local(message)) => Err(message.into()),
+                Ok(other) => Err(format!("spawn 응답 예상 밖(Spawned 기대): {other:?}").into()),
             }
         })
     }
@@ -226,8 +246,9 @@ impl WindowHost for OwnedWindowHost {
     }
 }
 
-struct OwnedSpawner {
-    client: Arc<DaemonClient>,
+/// The bus table's spawner (`agent.spawnInto`) — its answer carries the notices to the caller, so it asks for delivery.
+pub(crate) struct OwnedSpawner {
+    pub(crate) client: Arc<DaemonClient>,
 }
 
 impl AgentSpawner for OwnedSpawner {
@@ -235,10 +256,12 @@ impl AgentSpawner for OwnedSpawner {
         &'a self,
         cwd: String,
         backend: Option<AgentBackendKind>,
-    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<SpawnedAgent, SpawnRefusal>> + Send + 'a>> {
         Box::pin(async move {
+            // ADR-0348 (M13)
             DaemonSpawner {
                 client: &self.client,
+                deliver_notices: true,
             }
             .spawn_by_cwd(cwd, backend)
             .await
@@ -583,7 +606,11 @@ pub async fn spawn_into(
             client: &client,
         },
         &TauriEvents { app: &app },
-        &DaemonSpawner { client: &client },
+        // ADR-0348 (M13): the webview does not show `Spawned.notices` yet (step 11) — do not let the daemon record them.
+        &DaemonSpawner {
+            client: &client,
+            deliver_notices: false,
+        },
         &window,
         tab,
         slot,
@@ -591,6 +618,7 @@ pub async fn spawn_into(
         cwd,
     )
     .await
+    .map_err(|refusal| refusal.message)
 }
 
 // ── measurement reports (webview → shell) ─────────────────────────────────────────────────────
@@ -663,4 +691,34 @@ pub fn resolve_spatial(
         .map(|window| resolve_window(&state, &window))
         .transpose()?;
     apply::resolve_spatial(&state, &token, window.as_deref(), view_id)
+}
+
+#[cfg(test)]
+mod tests {
+    // The production part of this file, whitespace removed — the test module (which spells both values) cut off.
+    fn squashed_item(head: &str) -> String {
+        let source = include_str!("layout.rs");
+        let production = &source[..source.find("#[cfg(test)]").expect("the test module")];
+        let start = production
+            .find(head)
+            .unwrap_or_else(|| panic!("{head} not found"));
+        let item = &production[start..];
+        let end = item.find("\n}").expect("the item ends at column 0");
+        item[..end].split_whitespace().collect()
+    }
+
+    /// ★Only the bus spawner asks the daemon to record the notices as shown★ — the Tauri `spawn_into` answers the
+    /// webview, which does not show `Spawned.notices` yet (TRD S25 step 20 §7-1 — step 11). Flip it and the set is
+    /// recorded as shown with nobody having seen it.
+    // ADR-0348 (M13)
+    #[test]
+    fn only_the_bus_spawner_asks_for_notice_delivery() {
+        let tauri = squashed_item("pub async fn spawn_into(");
+        assert!(tauri.contains("deliver_notices:false"), "{tauri}");
+        assert!(!tauri.contains("deliver_notices:true"), "{tauri}");
+
+        let bus = squashed_item("impl AgentSpawner for OwnedSpawner");
+        assert!(bus.contains("deliver_notices:true"), "{bus}");
+        assert!(!bus.contains("deliver_notices:false"), "{bus}");
+    }
 }

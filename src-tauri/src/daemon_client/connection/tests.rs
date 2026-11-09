@@ -442,6 +442,7 @@ async fn a_daemon_error_in_the_handshake_stops_for_good_without_a_second_dial() 
         request_id: None,
         message: "auth failed".into(),
         launch_blocked: None,
+        created_agent_id: None,
     }));
     endpoint.close();
     let err = joined("ensure", task).await.expect_err("refused");
@@ -519,10 +520,11 @@ async fn command_round_trips_and_their_failures_read_as_the_shell_texts() {
         request_id: Some(rid),
         message: "no such agent".into(),
         launch_blocked: None,
+        created_agent_id: None,
     }));
     assert!(matches!(
         joined("the error reply", task).await,
-        Err(CommandFailure::Daemon { message }) if message == "no such agent"
+        Err(CommandFailure::Daemon { message, .. }) if message == "no such agent"
     ));
 
     // Written, then the link drops before the reply.
@@ -537,6 +539,102 @@ async fn command_round_trips_and_their_failures_read_as_the_shell_texts() {
             .await
             .expect_err("the link dropped"),
         crate::daemon_client::link::errors::SENT_OUTCOME_UNKNOWN
+    );
+}
+
+/// The spawn adapters over a real link (ADR-0348): the bus spawner (`OwnedSpawner`) asks the daemon to record the
+/// notices as shown, the webview's (`deliver_notices: false`) does not; `Spawned` keeps its notices (`[]` when absent);
+/// a daemon `Error` keeps its block reasons and created-agent id next to its text.
+#[tokio::test]
+async fn the_spawn_adapters_ask_for_delivery_as_built_and_keep_the_reply_structure() {
+    use crate::commands::layout::{DaemonSpawner, OwnedSpawner};
+    use crate::daemon_client::test_support::wire_agent;
+    use crate::layout::{AgentSpawner, SpawnRefusal, SpawnedAgent};
+    use engram_dashboard_protocol::AgentBackendKind;
+
+    let h = Harness::new(live());
+    let endpoint = h.connected().await;
+    let spawn = |bus: bool| {
+        let client = h.client.clone();
+        tokio::spawn(async move {
+            let backend = Some(AgentBackendKind::Claude);
+            if bus {
+                OwnedSpawner { client }
+                    .spawn_by_cwd("C:/work".into(), backend)
+                    .await
+            } else {
+                DaemonSpawner {
+                    client: &client,
+                    deliver_notices: false,
+                }
+                .spawn_by_cwd("C:/work".into(), backend)
+                .await
+            }
+        })
+    };
+    let sent = |command: AgentCommand| match command {
+        AgentCommand::SpawnByCwd {
+            request_id,
+            deliver_notices,
+            ..
+        } => (request_id, deliver_notices),
+        other => panic!("expected SpawnByCwd, got {other:?}"),
+    };
+    let agent = AgentId::new_v4();
+    let row = serde_json::json!({ "code": "skipped-field", "args": {}, "text": "t" });
+
+    let task = spawn(true);
+    let (rid, deliver) = sent(h.command(&endpoint).await);
+    assert!(deliver, "the bus spawner shows the notices");
+    endpoint.push(text(&AgentEvent::Spawned {
+        request_id: rid,
+        agent: wire_agent(agent, "a"),
+        notices: Some(vec![row.clone()]),
+    }));
+    assert_eq!(
+        joined("spawned with notices", task).await,
+        Ok(SpawnedAgent {
+            id: agent.to_string(),
+            notices: vec![row],
+        })
+    );
+
+    let task = spawn(false);
+    let (rid, deliver) = sent(h.command(&endpoint).await);
+    assert!(!deliver, "the webview spawner does not show them yet");
+    endpoint.push(text(&AgentEvent::Spawned {
+        request_id: rid,
+        agent: wire_agent(agent, "a"),
+        notices: None,
+    }));
+    assert_eq!(
+        joined("spawned without notices", task).await,
+        Ok(SpawnedAgent {
+            id: agent.to_string(),
+            notices: Vec::new(),
+        })
+    );
+
+    let blocked = serde_json::json!({ "reasons": [{ "kind": "missing" }] })
+        .as_object()
+        .cloned();
+    let task = spawn(true);
+    let (rid, _) = sent(h.command(&endpoint).await);
+    endpoint.push(text(&AgentEvent::Error {
+        request_id: Some(rid),
+        message: "INTERNAL: agent 'a' was created but did not start".into(),
+        launch_blocked: blocked.clone(),
+        created_agent_id: Some(agent),
+    }));
+    assert_eq!(
+        joined("created asleep", task).await,
+        Err(SpawnRefusal {
+            message: "INTERNAL: agent 'a' was created but did not start".into(),
+            launch_blocked: blocked,
+            created_agent_id: Some(agent),
+            live_agent_id: None,
+            notices: Vec::new(),
+        })
     );
 }
 
@@ -1897,6 +1995,7 @@ async fn every_connect_registers_once_and_a_refusal_shows_its_box_while_the_acto
         request_id: Some(request_id),
         message: REFUSAL.into(),
         launch_blocked: None,
+        created_agent_id: None,
     }));
     wait_for("the refusal box", || !h.refusals.shown().is_empty()).await;
     assert_eq!(
@@ -2851,6 +2950,7 @@ async fn a_drop_before_the_registration_reply_shows_no_box() {
         request_id: Some(request_id),
         message: REFUSAL.into(),
         launch_blocked: None,
+        created_agent_id: None,
     }));
     wait_for("the refusal box", || !h.refusals.shown().is_empty()).await;
     assert_eq!(
@@ -3220,6 +3320,7 @@ impl Harness {
             request_id: Some(request_id),
             message: message.into(),
             launch_blocked: None,
+            created_agent_id: None,
         }));
     }
 

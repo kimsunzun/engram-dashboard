@@ -107,13 +107,14 @@ fn commands() -> Vec<Command> {
     ]
 }
 
-/// 즉석 생성 길(wire `SpawnByCwd` · 스모크 bin — 명부에 없는 프로필을 `spawn_agent` 로 Fresh)의 명령 모양. env 가
+/// 즉석 생성 길(wire `SpawnByCwd` — `commands::create_and_start` → `AgentManager::create_and_activate` 로 Fresh ·
+/// 스모크 bin — 명부에 없는 프로필을 `spawn_agent` 로 Fresh)의 명령 모양. env 가
 /// 비어 있어 제어 채널 꼴은 `no-endpoint` 하나만 뜬다 — 제어 채널이 CLI 입구를 PATH 에 넣을 때 이 프로세스의 PATH 를
 /// 읽어 결정적이지 않다.
 // TRD S25 §5-2 4 「골든에 그 두 길을 넣는다」
 fn spawn_path_commands() -> Vec<(&'static str, AgentCommand)> {
     vec![
-        // 데몬 `spawn_command_by_cwd` — 받은 백엔드 · 공통 기본 모드 · 인자 없음.
+        // `commands::create_and_start` 의 기본 명령 — 받은 백엔드 · 공통 기본 모드 · 인자 없음.
         (
             "spawn-by-cwd/claude",
             AgentCommand::Claude {

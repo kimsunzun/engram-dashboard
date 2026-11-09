@@ -1491,6 +1491,7 @@ mod tests {
                 request_id: None,
                 message: "x".into(),
                 launch_blocked: None,
+                created_agent_id: None,
             },
         ] {
             let out = route(&mut st, &key(), token, event(4, ev));

@@ -124,7 +124,7 @@ async fn push_delta(
             tracing::info!(window = %label, "웹뷰 명령 차분 등록 완료");
             None
         }
-        Err(CommandFailure::Daemon { message }) => {
+        Err(CommandFailure::Daemon { message, .. }) => {
             tracing::warn!(
                 window = %label,
                 "웹뷰 명령 차분 등록 거절(셸이 그 이름을 쥔 채라 선언을 고치지 않으면 다음 재연결의 전량 등록도 거절될 수 있다): {message}"

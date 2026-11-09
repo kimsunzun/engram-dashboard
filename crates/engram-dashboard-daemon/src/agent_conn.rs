@@ -358,6 +358,7 @@ impl ConnectionHandler for AgentConnection {
                         request_id: None,
                         message: "already authenticated".into(),
                         launch_blocked: None,
+                        created_agent_id: None,
                     }));
                     ConnFlow::Continue
                 }
@@ -367,6 +368,7 @@ impl ConnectionHandler for AgentConnection {
                         request_id: None,
                         message: format!("invalid command: {e}"),
                         launch_blocked: None,
+                        created_agent_id: None,
                     }));
                     ConnFlow::Continue
                 }
@@ -388,6 +390,7 @@ impl ConnectionHandler for AgentConnection {
                 request_id: None,
                 message: "unexpected binary frame".into(),
                 launch_blocked: None,
+                created_agent_id: None,
             }));
             let _ = frames.send(Frame::Close("protocol error".into())).await;
             ConnFlow::Close
@@ -434,6 +437,7 @@ impl ConnectionHandler for AgentConnection {
             request_id: cmd.as_ref().and_then(command_request_id),
             message: SATURATED_REFUSAL.to_string(),
             launch_blocked: None,
+            created_agent_id: None,
         }));
         match refusal {
             Ok(()) => Saturated::Refused,
@@ -616,6 +620,7 @@ impl ConnectionHandlerFactory for AgentConnections {
             request_id: None,
             message: message.to_string(),
             launch_blocked: None,
+            created_agent_id: None,
         })
     }
 }
@@ -862,6 +867,7 @@ mod tests {
             request_id: None,
             message: "boom".into(),
             launch_blocked: None,
+            created_agent_id: None,
         }))
         .expect("event ok");
         sink.enqueue(Outbound::Binary(vec![1, 2, 3]))

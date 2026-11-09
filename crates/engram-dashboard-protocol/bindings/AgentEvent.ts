@@ -58,4 +58,10 @@ notices?: Array<unknown>, } } | { "CommandList": { request_id: RequestId, entrie
  * and its `via` chain (a conflict: `items: [{"item", "via"}, …]`), and the reason's `code`, `args` and
  * optional 1-based `line`.
  */
-launch_blocked?: Record<string, unknown>, } };
+launch_blocked?: Record<string, unknown>, 
+/**
+ * Present only when an activation that creates (`SpawnByCwd`) added the agent to the roster and it did not
+ * start — the agent stays registered and asleep under this id; wake it instead of creating another. The
+ * shell bus `agent.spawnInto` carries it as `args.agent_id`, the same shape as bus `agent.spawn`.
+ */
+created_agent_id?: string, } };

@@ -151,6 +151,18 @@ pub struct Activated {
     pub notices: Vec<Notice>,
 }
 
+/// A create ([`AgentManager::create_and_activate`]) that did not end in a started agent.
+// ADR-0348
+#[derive(Debug)]
+pub struct NotStarted {
+    pub error: PtyError,
+    /// This call added the agent to the roster; it stays there asleep. Every failure after the add records last
+    /// failure (ADR-0172) — except a user kill during the link handshake (`spawn_fresh_settled`'s
+    /// `Terminal { Killed }` arm). The row is not rolled back — a second delete path would need the unsettled delete
+    /// semantics (ADR-0122). `false` = nothing is registered now (incl. a concurrent delete before this probe).
+    pub created: bool,
+}
+
 /// The notices of a launch that started a process — only that call carries them out of the spawn; a moot spawn and
 /// every failure carry none.
 struct LaunchNotices {
@@ -1296,9 +1308,10 @@ impl AgentManager {
     /// 전처리는 늘 명부에 있는 항목을 읽는다. 있으면 아무것도 하지 않는다(갱신은 [`Self::register_for_spawn`]).
     /// 레지스트리 입구는 `entry` 가 고른다. 돌려주는 값 = 넣었나.
     ///
-    /// ★넣기 **전에** 호출자 사본으로 실행 재료를 점검한다 — 막히면 아무것도 넣지 않는다★(만드는 길은 만들기 전에
-    ///   점검한다): 넣은 뒤에 막히면 띄우지도 못할 항목이 명부에 남고, 그 답(wire `SpawnByCwd`)은 만든 id 를 싣지
-    ///   않아 아무도 그 항목을 겨누지 못한다. 넣은 뒤 다시 점검에서 막히는 경합은 남는다(부분 성공).
+    /// ★The launch material is checked on the caller's copy **before** the add — a block adds nothing★ (a create path
+    ///   checks before it creates): a block after the add would leave in the roster an entry that cannot start, which
+    ///   the caller then has to wake or delete by the id its answer names. A block on the re-check after the add can
+    ///   still happen (partial success).
     ///
     /// ★★유일성 · 상한은 **신규 등록에만** 건다 — epoch 교체는 개명 대상이 아니다(ADR-0115 §영향 · ADR-0007)★★.
     ///   restart / restore(`restore_all`·`restore_one`) / 재활성화(`activate_profile`) /
@@ -1387,11 +1400,9 @@ impl AgentManager {
     /// ★그래서 **이 동사로 띄운 화신의 연결 실패는 주인이 없다**★ — 활성화 입구
     /// ([`AgentManager::activate_profile`]·[`AgentManager::restore_one`])는 Fresh 도 Resume 도
     /// [`LinkWatch`] 를 쥐는 갈래로 들어가므로 그 구멍에 닿지 않는다.
-    /// ★Its production consumers today: none outside the smoke binaries★ — the daemon's ad-hoc by-cwd create now
-    ///   calls [`AgentManager::spawn_agent_reporting`] (same body, plus the launch notices). WS `Spawn` goes through
-    ///   `activate_profile` (its call site pins "one activation entrance"). Wherever this body is reached directly,
-    ///   **the codex that gets there today has a terminal output format and so no link axis** (the source of
-    ///   truth = the same hole comment in `backend/codex/transport.rs`).
+    /// ★Its production consumers today: none outside the smoke binaries★ — both create-and-start entrances (WS
+    ///   `SpawnByCwd`, bus `agent.spawn {cwd}`) go through [`AgentManager::create_and_activate`], which waits for the
+    ///   link verdict, and WS `Spawn` goes through `activate_profile` (its call site pins "one activation entrance").
     /// ★부르는 쪽 있는 입구다★ — 명부 등록 · 세션 id 비우기의 저장이 `Err` 면 띄우지 않고
     ///   [`PtyError::Store`] 다(부분 성공 = [`AgentManager::spawn_agent_watching_link`]).
     /// 실행 재료 점검이 막으면 [`PtyError::LaunchBlocked`] · 점검하는 사이 실행 입력이 두 번 다 바뀌거나 넘긴 사본의
@@ -1407,8 +1418,8 @@ impl AgentManager {
             .map(|(o, _, _)| o)
     }
 
-    /// The shared spawn body — the entries (`spawn_agent` · `spawn_agent_reporting` · `activate_profile_reporting` ·
-    /// `restore_one`) reach it directly or through the two verbs.
+    /// The shared spawn body — the entries (`spawn_agent` · `activate_profile_reporting` · `restore_one`) reach it
+    /// directly or through the two verbs.
     ///
     /// `entry` = 이 띄우기를 부른 쪽. 프로세스를 열기 전의 명부 변경 셋 중 ① 등록(없으면 점검 뒤 넣기 → 실행
     ///   전처리 → 있던 id 면 병합) · ③ Fresh 의 세션 id 비우기가 그 입구로 레지스트리를 바꾼다. ② 화신 표식은
@@ -2033,23 +2044,6 @@ impl AgentManager {
         }
     }
 
-    /// [`AgentManager::spawn_agent`] plus the launch notices — empty when the request was moot or the agent was
-    /// already shown this set.
-    ///
-    /// ★It never records the notice fingerprint★ — like `spawn_agent` it does not wait for a link verdict, so a link
-    ///   that fails after the start would leave the set marked as seen. Only
-    ///   [`AgentManager::activate_profile_reporting`] records.
-    // ADR-0341
-    pub fn spawn_agent_reporting(
-        &self,
-        profile: &AgentProfile,
-        mode: SpawnMode,
-    ) -> Result<(SpawnOutcome, Vec<Notice>), PtyError> {
-        let (outcome, _, launched) =
-            self.spawn_agent_watching_link(profile, mode, Entry::Caller)?;
-        Ok((outcome, launched.map(|l| l.notices).unwrap_or_default()))
-    }
-
     /// The reply's notices of a successful caller activation — and, when the caller delivers them, the record that
     /// this agent has been shown this set. `launched` is `None` when the activation launched nothing.
     /// ★Call only on a success the caller is answered with★ — a failure must not mark the set as seen.
@@ -2114,6 +2108,37 @@ impl AgentManager {
             .lock()
             .expect("spawning set poisoned")
             .contains(&id)
+    }
+
+    /// Create-and-start for a profile whose id is not in the roster — the Fresh activation path
+    /// ([`AgentManager::activate_profile_reporting`] → `spawn_fresh_settled`). The pre-create launch check, the add,
+    /// the prelaunch, the link verdict, the last-failure record and the notice delivery all come from that path.
+    ///
+    /// An id already in the roster is refused with nothing started (`created: false`) — a new agent needs a new id;
+    ///   waking an existing one is [`AgentManager::activate_profile_reporting`].
+    // ADR-0348
+    pub fn create_and_activate(
+        &self,
+        profile: &AgentProfile,
+        delivery: NoticeDelivery,
+    ) -> Result<Activated, NotStarted> {
+        // Without this, `ensure_registered` would see the id, skip the add, and the call would silently become a wake
+        //   that merges the caller's copy.
+        if self.profiles.get(profile.id).is_some() {
+            return Err(NotStarted {
+                error: PtyError::Unsupported(format!(
+                    "agent {} is already registered — a new agent needs a new id; wake the existing one instead",
+                    profile.id
+                )),
+                created: false,
+            });
+        }
+        self.activate_profile_reporting(profile, SpawnMode::Fresh, delivery)
+            .map_err(|error| NotStarted {
+                error,
+                // A delete landing between the add and this read reports `false` — the end state still matches.
+                created: self.profiles.get(profile.id).is_some(),
+            })
     }
 
     /// **spawn 한 번으로 결말이 나는** 갈래의 기록 — 띄웠으면 그 화신의 epoch 으로 지우고, 실패면
@@ -4887,6 +4912,17 @@ mod tests {
             production.matches("fn spawn_agent_watching_link(").count(),
             1,
             "띄우기 공유 본체가 둘 이상이다 — 입구별 사본은 판정을 가른다"
+        );
+        // ADR-0348: the create entrance is the Fresh activation path, not a third spawn body.
+        let create =
+            squashed_production_body("pub fn create_and_activate(", "fn note_spawn_result(");
+        assert!(
+            create.contains("self.activate_profile_reporting(profile,SpawnMode::Fresh,delivery)"),
+            "the create entrance does not run the Fresh activation path: {create}"
+        );
+        assert!(
+            !create.contains("spawn_agent"),
+            "the create entrance reaches a spawn verb directly — it skips the link verdict: {create}"
         );
         // 두 동사는 받은 값을 그대로 넘기고, 공유 본체는 그 값으로 ① 등록 · ③ 비우기의 입구를 고른다.
         let fresh = squashed_production_body("fn spawn_fresh_settled(", "fn spawn_session(");

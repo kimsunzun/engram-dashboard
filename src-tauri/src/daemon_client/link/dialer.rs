@@ -454,6 +454,7 @@ mod tests {
             request_id: None,
             message: "auth failed".into(),
             launch_blocked: None,
+            created_agent_id: None,
         })
     }
 

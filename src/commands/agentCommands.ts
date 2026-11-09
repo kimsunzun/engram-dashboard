@@ -86,7 +86,7 @@ register({
     //   띄우고 LLM 은 그것을 못 지난다」)는 실측으로 죽었다(그 근거의 자리 = 이 파일 머리 주석). 지금
     //   남는 사유는 **인자 표면을 늘리지 않는다**는 것 하나다: 이 command 에 backend 인자를 내면
     //   같은 id 의 백엔드 문(`engram-dashboard-agent` 의 `agent.spawn`)과 어휘가 갈린다 — 그쪽도 같은
-    //   이유로 claude 에 박혀 있다(`commands.rs` 의 `create_and_start`).
+    //   이유로 claude 에 박혀 있다(`commands.rs` 의 `verb_spawn` cwd 갈래).
     // ★codex 를 만드는 LLM 경로는 `agent.new` 다★ — backend 와 output_format 을 거기서 함께 고른다.
     return agentClient.spawnAgent(cwd.trim(), 'claude')
   },

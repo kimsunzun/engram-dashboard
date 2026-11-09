@@ -1071,8 +1071,9 @@ mod tests {
         }
     }
 
-    /// ★즉석 생성이 넣기 전 점검에서 막히면 아무것도 넣지 않는다★ — 넣은 뒤 막히면 띄우지도 못할 항목이 남고, 그 답
-    /// (wire `SpawnByCwd`)은 만든 id 를 싣지 않아 아무도 그 항목을 겨누지 못한다.
+    /// ★An ad-hoc create blocked by the pre-add check adds nothing★ — a block found before the add leaves no roster row
+    /// that cannot start. A create that fails after the add leaves the agent asleep, and the wire `SpawnByCwd` answer
+    /// names it by `created_agent_id` so the caller wakes it instead of creating another (ADR-0348).
     // TRD S25 §1-5 (가) 1 ②
     #[test]
     fn a_blocked_ad_hoc_spawn_registers_nothing_and_starts_nothing() {

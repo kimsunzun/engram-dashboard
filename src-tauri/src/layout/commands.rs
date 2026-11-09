@@ -58,8 +58,8 @@ use engram_dashboard_command::{
 };
 
 use super::apply::{
-    self, DockOutcome, SpawnAtError, TabBarSpot, TargetDest, TargetDockError, TargetDockRequest,
-    TargetError, WindowPlace,
+    self, DockOutcome, SpawnAtError, SpawnRefusal, TabBarSpot, TargetDest, TargetDockError,
+    TargetDockRequest, TargetError, WindowPlace,
 };
 use super::dock;
 use super::manager::{DockError, DockMove, FocusPolicy, LayoutError};
@@ -91,9 +91,10 @@ use crate::theme::{ThemeControl, ThemeError, UiTheme, WindowTheme};
 //   `window.setTheme`·`window.getTheme`(화면에는 테마를 바꾸는 UI 가 없다 — TRD S21-storage §10 F7) ·
 //   `split.setRatio`·`split.list`(화면의 구분선 드래그는 Tauri `set_split_ratio` 를 직접 부르고 레지스트리에
 //   이름을 싣지 않는다 — ADR-0227).
-// ★세대 22 = 슬롯 종류 `PresetPalette` 가 빠진 세대★(TRD S25-preset-library §5-2 1 · ADR-0314 결정 5) —
-//   `layout.setSlotContent` 의 `content` 가 그 낱말을 받지 않고 `layout.get` 줄의 `content` 가 그 낱말을 내지 않는다.
-//   이름 · 인자 칸은 그대로다.
+// ★Generation 22 = the slot kind `PresetPalette` is gone★ (TRD S25-preset-library §5-2 1 · ADR-0314 decision 5) —
+//   `layout.setSlotContent`'s `content` no longer takes that word and a `layout.get` row's `content` no longer gives it.
+//   Names and argument fields are unchanged. The same unreleased generation: the `agent.spawnInto` answer gains
+//   `notices`, and its refusals carry `args.reasons` / `args.agent_id` (TRD S25 step 20 · ADR-0348 — the summary).
 // ★세대 21 = LLM 레이아웃 명령의 세대★(TRD S28 §4 · §7 · ADR-0307) — 에이전트 이름 · 공간 낱말로 탭 · 칸을 고르고 바꾼
 //   뒤의 배치를 답에 싣는다. 이름이 넷 늘었고(`tab.move` · `tab.dock` · `tab.detach` · `layout.get`), 칸 동사(`slot.focus` ·
 //   `slot.close` · `slot.split` · `slot.popout` · `slot.assignAgent` · `layout.setSlotContent`)가 `slot_of` · `at` · `window`
@@ -282,6 +283,19 @@ declare_commands! {
         tab: Option<String>,
         slot_id: Option<String>,
         agent_id: Option<String>,
+    }
+
+    /// A launch notice (`agent.spawnInto`) — something the launch leaves out on purpose; not an error, nothing to fix.
+    /// The same row as the agent block's `agent.spawn` notices (ADR-0348).
+    struct LaunchNoticeRow {
+        /// Fixed notice code.
+        code: String,
+        /// The code's arguments (keys depend on `code`).
+        args: Json,
+        /// 1-based line in the file it names — `null` when it names none.
+        line: Option<u32>,
+        /// The notice as one readable line.
+        text: String,
     }
 
     /// 창에 빈 탭을 하나 더 만들고 활성화한다. name 을 빼면 자동 이름 — 그 탭의 포커스 칸(에이전트면 그 이름)을
@@ -693,6 +707,10 @@ declare_commands! {
     } errors [NOT_FOUND, CONFLICT];
 
     // ADR-0307
+    /// Spawns an agent and places it (no place = new tab). Answer: agent_id · layout · notices (agent.spawn rows).
+    /// Blocked: CONFLICT + args.reasons, nothing created. INTERNAL + args.agent_id (+ args.reasons): created asleep,
+    /// unplaced — fix reasons, agent.spawn --target it, then layout.setSlotContent --assign it; don't respawn.
+    /// Placement failed: CONFLICT + args.agent_id (running) + args.notices when any.
     /// 에이전트를 새로 띄우고 그 자리에 배치한다(스폰 + 필요하면 새 탭 + 슬롯 배정).
     /// view_id 를 빼면 새 탭을 만들어 거기 넣는다 — 그 경우 slot_id 는 줄 수 없다. at(공간 낱말 top-left · top-right ·
     /// bottom-left · bottom-right · left · right · up · down)을 주면 window 의 보이는 탭에서 그 낱말이 집는 빈 칸에 넣는다 —
@@ -701,7 +719,9 @@ declare_commands! {
     /// 거부되고, 빼면 데몬이 거절한다(기본 백엔드는 없다).
     /// window = window_id 또는 같은 실행 안 label(번호는 받지 않는다) — 빼면 view_id 를 준 경우 그 탭의 창, 아니면 main.
     /// view_id 가 window 의 탭이 아니면 스폰 전에 CONFLICT 다.
-    /// 답 = agent_id · layout(놓인 탭의 칸 줄 — layout.get rows 모양 · id 없음).
+    /// 답 = agent_id · layout(놓인 탭의 칸 줄 — layout.get rows 모양 · id 없음) · notices(같은 묶음은 에이전트마다 한 번만
+    /// 온다 · 없으면 []).
+    // ADR-0348
     #[effect(Write)]
     #[since(1)]
     "agent.spawnInto" => args AgentSpawnIntoArgs {
@@ -714,6 +734,7 @@ declare_commands! {
     } -> ok AgentSpawnIntoOk {
         agent_id: String,
         layout: Vec<LayoutRow>,
+        notices: Vec<LaunchNoticeRow>,
     } errors [NOT_FOUND, CONFLICT];
 
     /// 공간/방향 낱말(top-left·right·up …)을 슬롯 id 로 푼다. view_id 를 빼면 그 창의 활성 탭이 대상이고,
@@ -1747,8 +1768,10 @@ fn settings_error(error: SettingsError) -> CommandError {
     }
 }
 
-/// `agent.spawnInto` 의 핸들러 — ★async 라 [`blocking_handler`] 를 못 쓴다★. 답은 `null` 칸을 뺀 JSON 이다
+/// `agent.spawnInto` 의 핸들러 — ★async 라 [`blocking_handler`] 를 못 쓴다★. `layout` 은 `null` 칸을 뺀 JSON 이다
 /// ([`without_nulls`] — 배치 줄의 id 칸).
+/// ★Only `layout` is stripped★ — the `notices` rows keep the bus `agent.spawn` row shape (`"line": null` when a
+/// notice names no line, and `args` as sent), so the two answers carry the same row.
 ///
 /// 본문을 `call` 안이 아니라 future 안에서 도는 것은 계약이다(마감시각이 그 형태 위에 선다 —
 /// `blocking_handler` 의 같은 조항).
@@ -1765,9 +1788,13 @@ impl CommandHandler for SpawnInto {
             let args: AgentSpawnIntoArgs = serde_json::from_value(args)
                 .map_err(|e| CommandError::invalid_argument(e.to_string()))?;
             let ok = verb_spawn_into(&ports, args).await?;
-            serde_json::to_value(ok)
-                .map(without_nulls)
-                .map_err(|e| CommandError::internal(e.to_string()))
+            let mut answer =
+                serde_json::to_value(ok).map_err(|e| CommandError::internal(e.to_string()))?;
+            // ADR-0348
+            if let Some(layout) = answer.get_mut("layout") {
+                *layout = without_nulls(layout.take());
+            }
+            Ok(answer)
         })
     }
 }
@@ -1778,8 +1805,10 @@ async fn verb_spawn_into(
 ) -> Result<AgentSpawnIntoOk, CommandError> {
     // 빼면 낱말판은 main 을, id 판은 view_id 의 창을 쓴다(적용 서비스가 스폰 전에 고른다).
     let window = optional_window_label(ports, "window", args.window.as_deref())?;
-    // ★`agent.new`·`agent.spawn --cwd` 와 **같은 철자 규칙**을 받는다★ — 이 문은 그 셋의 공통 등록부
-    //   (`agent::commands::register`)를 안 지나므로, 여기서 안 부르면 같은 낱말이 문마다 다르게 읽힌다.
+    // ★The same spelling rule as `agent.new` · `agent.spawn --cwd`★ — the daemon's creation body settles it again
+    //   (WS `SpawnByCwd` → `commands::create_and_start` → `new_profile` → `normalize_spelling`). That pass is the one
+    //   the roster depends on; this one is idempotent and kept so the folder the shell sends is already
+    //   in the settled spelling, whichever entrance a person or an LLM typed it into.
     let cwd = normalize_spelling(text("cwd", &args.cwd)?);
     let tab = args
         .view_id
@@ -1836,9 +1865,25 @@ async fn verb_spawn_into(
         .map_err(spawn_not_applied)?,
     };
     Ok(AgentSpawnIntoOk {
-        agent_id: placed.out,
+        agent_id: placed.out.id,
         layout: layout_of(placed.rows),
+        notices: notice_rows(placed.out.notices),
     })
+}
+
+/// The daemon's notice rows as declared rows. A row that does not decode is dropped with a `warn` naming it — the
+/// rest of the answer still stands.
+// ADR-0348
+fn notice_rows(raw: Vec<serde_json::Value>) -> Vec<LaunchNoticeRow> {
+    raw.into_iter()
+        .filter_map(|row| match serde_json::from_value(row.clone()) {
+            Ok(decoded) => Some(decoded),
+            Err(error) => {
+                tracing::warn!(%row, %error, "agent.spawnInto: dropped a launch notice row that does not decode");
+                None
+            }
+        })
+        .collect()
 }
 
 /// 낱말판 스폰의 거절 → 버스 오류. 낱말이 칸을 못 집었으면(창 없음 포함) [`locate_error`] 의 코드 · 문구에 「띄운 것이
@@ -2916,15 +2961,54 @@ fn not_applied(detail: String) -> CommandError {
 /// ★겉에 `CONFLICT` 를 또 씌우지 않는다★ — 코드가 둘(`CONFLICT: INTERNAL: …`)이 되고, 쓰기 실패가 「아무것도 적용
 ///   안 된 반려」로 읽힌다. 이 명령이 광고하지 않는 코드나 코드 접두가 없는 문구(배치 실패 · 정책 거절 등)는
 ///   [`not_applied`] 다.
-// ADR-0291 R17
-fn spawn_not_applied(detail: String) -> CommandError {
-    let advertised = AgentSpawnIntoArgs::SPEC.advertised_errors();
-    if let Some((prefix, message)) = detail.split_once(": ") {
-        if let Some(code) = ErrorCode::from_wire(prefix).filter(|code| advertised.contains(code)) {
-            return CommandError::of(code, message);
-        }
+///
+/// `args` = the refusal's structured part (ADR-0348): the daemon's launch-block object verbatim (`reasons`), plus
+/// `agent_id` — the agent the daemon created that did not start (the same shape as bus `agent.spawn`), or the running
+/// agent a placement failure left unplaced — plus `notices` when that spawn had any (M11), as the same declared rows
+/// as the success answer ([`notice_rows`]). None of them = no `args`.
+/// A created-asleep refusal also says in its text that the agent was not placed — the daemon's text is
+/// `agent.spawn`'s, which has no slot to speak of.
+// ADR-0291 R17 · ADR-0348
+fn spawn_not_applied(refusal: SpawnRefusal) -> CommandError {
+    let SpawnRefusal {
+        message: detail,
+        launch_blocked,
+        created_agent_id,
+        live_agent_id,
+        notices,
+    } = refusal;
+    let mut args = launch_blocked.unwrap_or_default();
+    let asleep = created_agent_id.map(|id| id.to_string());
+    if let Some(id) = asleep.clone().or(live_agent_id) {
+        args.insert("agent_id".to_string(), serde_json::Value::String(id));
     }
-    not_applied(detail)
+    let rows: Vec<serde_json::Value> = notice_rows(notices)
+        .into_iter()
+        .filter_map(|row| serde_json::to_value(row).ok())
+        .collect();
+    if !rows.is_empty() {
+        args.insert("notices".to_string(), serde_json::Value::Array(rows));
+    }
+    let advertised = AgentSpawnIntoArgs::SPEC.advertised_errors();
+    let (code, text) = match detail.split_once(": ").and_then(|(prefix, message)| {
+        ErrorCode::from_wire(prefix)
+            .filter(|code| advertised.contains(code))
+            .map(|code| (code, message))
+    }) {
+        Some((code, message)) => (Some(code), message.to_string()),
+        None => (None, detail),
+    };
+    let text = match asleep {
+        Some(id) => format!(
+            "{text} — it was not placed in a slot either: once it runs, place it with layout.setSlotContent <slot> --content Agent --assign {id}"
+        ),
+        None => text,
+    };
+    match code {
+        Some(code) => CommandError::of(code, text),
+        None => not_applied(text),
+    }
+    .with_args(args)
 }
 
 /// ★공백만 있는 값은 부재로 접지 않고 반려한다★ — 셸에서 미설정 변수가 빈 인자로 펼쳐지는 형태

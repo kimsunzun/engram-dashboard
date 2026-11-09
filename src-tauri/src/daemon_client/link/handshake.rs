@@ -209,6 +209,7 @@ mod tests {
             request_id: None,
             message: "auth failed".into(),
             launch_blocked: None,
+            created_agent_id: None,
         });
         match handshake_with(TOKEN).on_frame(&error) {
             HandshakeStep::Reject {
@@ -227,6 +228,7 @@ mod tests {
             request_id: None,
             message: "protocol_version mismatch\r\nforged line\u{202e}".into(),
             launch_blocked: None,
+            created_agent_id: None,
         });
         capture(lines.clone(), || handshake_with(TOKEN).on_frame(&error));
         let lines = lines.lock().unwrap();
@@ -248,6 +250,7 @@ mod tests {
             request_id: None,
             message: format!("bad token {TOKEN}"),
             launch_blocked: None,
+            created_agent_id: None,
         });
         let step = capture(lines.clone(), || handshake_with(TOKEN).on_frame(&echo));
         let lines = lines.lock().unwrap();
@@ -265,6 +268,7 @@ mod tests {
             request_id: None,
             message: format!("{}{head}\u{200b}{tail}", "x".repeat(230)),
             launch_blocked: None,
+            created_agent_id: None,
         });
         capture(lines.clone(), || handshake_with(TOKEN).on_frame(&echo));
         let lines = lines.lock().unwrap();

@@ -19,13 +19,13 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-// ★만들기 기본 모드의 집은 코어 한 곳이다★ — 이 파일이 자기 상수를 두지 않는 이유는 그 상수의 doc 이
-//   진다(`spawn_command_by_cwd` 가 그것을 참조한다).
-use engram_dashboard_agent::commands::NEW_AGENT_OUTPUT_FORMAT;
+use engram_dashboard_agent::commands::{
+    create_and_start, created_but_not_started, AgentBackend, CreateRefused, NewAgent,
+};
 use engram_dashboard_agent::launch::{notice_row, Notice};
 use engram_dashboard_agent::manager::AgentManager;
-use engram_dashboard_agent::manager::NoticeDelivery;
 use engram_dashboard_agent::manager::RenameOutcome as CoreRenameOutcome;
+use engram_dashboard_agent::manager::{Activated, NoticeDelivery};
 use engram_dashboard_agent::profile::RestoreReport as CoreRestoreReport;
 use engram_dashboard_agent::profile::SpawnMode;
 use engram_dashboard_agent::queued_input::{ListedRow, ListedState, QueuedListing};
@@ -689,11 +689,10 @@ const MISSING_BACKEND: &str = "backend 칸이 비었다 — 스폰 패킷(SpawnB
 
 /// wire 백엔드 선택 → 코어 실행 명령. `None` = 칸이 비었다(호출자가 [`MISSING_BACKEND`] 로 거절한다).
 ///
-/// ★두 갈래 다 **받은** `output_format` 을 그대로 싣는다 — 이 함수는 기본값을 채우지 않는다★: 여기서
-/// 채우면 요청한 모드와 실제로 뜨는 모드가 갈리고, 그 어긋남은 에이전트가 떠서 다르게 굴 때까지 안 보인다.
-/// ★단 「받은 값」이 늘 사람이 고른 값인 것은 아니다★ — `CreateProfile` 은 패킷의 칸을 그대로 넘기지만,
-/// 그 칸이 없는 `SpawnByCwd` 는 [`spawn_command_by_cwd`] 가 지어낸 값을 넘긴다.
-/// ★와일드카드를 넣지 말 것★: wire 어휘가 늘면 이 match 가 컴파일 에러로 그 자리를 가리킨다.
+/// ★Both arms carry the `output_format` they were given — this function fills no default★: filling one here would
+/// split the requested mode from the launched one, unseen until the agent behaves differently. `CreateProfile` passes
+/// the packet's field; `SpawnByCwd`, which has no mode field, does not come here — the agent crate's creation body
+/// (`commands::create_and_start`) holds that default. ★No wildcard★: a new wire word stops the build at this match.
 fn spawn_command_for(
     backend: Option<WireBackendKind>,
     extra_args: Vec<String>,
@@ -711,38 +710,11 @@ fn spawn_command_for(
     }
 }
 
-/// `SpawnByCwd` 전용 조립 — 그 패킷에는 모드 칸이 없어서 **여기서 값을 지어낸다**.
-///
-/// ★2026-09-22 — 이 doc 이 기다리라고 적어 둔 그 날이 왔다★. `commands::LLM_BACKEND_POLICY` 가 codex 의
-/// 거절을 걷으면서 `agent.spawnInto` 가 codex 를 이리로 흘려보내기 시작했고, 그래서 codex 갈래의
-/// `Terminal` 은 이제 **닿는 값**이다. 그 값을 두 갈래 공통 기본([`NEW_AGENT_OUTPUT_FORMAT`])으로
-/// 맞춘다.
-///
-/// ★사유 = 기본값의 집은 하나여야 한다★. 그 상수의 doc 이 「만들기 동사를 여는 입구가 늘어도 자기
-/// 상수를 두지 않고 이것을 참조한다」고 못 박고 있고, `agent.new` 도 이 값을 쓴다 — 갈라 두면 같은
-/// 백엔드가 어느 입구로 만들어졌느냐에 따라 다른 모드로 뜬다.
-/// ★옛 `Terminal` 은 고른 값이 아니라 **보존된 값**이었다★: 옛 [`spawn_command_for`] 가 codex 갈래에서
-/// 받은 모드를 버리고 `Terminal` 을 박아 넣던 동작을 그 버림을 걷으면서 그대로 옮겨 둔 것이고, 이 doc
-/// 자신이 「어느 모드가 이 경로에 맞는지는 아직 아무도 정하지 않았다」고 적고 있었다. 즉 뒤집을 결정이
-/// 아니라 **아직 없던 결정**이다.
-///
-/// ★그래도 `match` 를 접지 말 것★ — 두 갈래가 같은 값을 내지만, 와일드카드로 접으면 wire 어휘가 늘 때
-/// 새 백엔드가 **아무 결정 없이** 이 기본값을 물려받는다. 지금 모양이면 컴파일 에러가 그 자리를 가리킨다.
-fn spawn_command_by_cwd(backend: Option<WireBackendKind>) -> Option<CoreSpawnCommand> {
-    let kind = backend?;
-    let output_format = match kind {
-        WireBackendKind::Claude => NEW_AGENT_OUTPUT_FORMAT,
-        WireBackendKind::Codex => NEW_AGENT_OUTPUT_FORMAT,
-    };
-    spawn_command_for(Some(kind), vec![], output_format)
-}
-
 /// 백엔드 생성 정책의 꼴 — 낱말 하나를 받아 `None` = 만든다, `Some(사유)` = 안 만든다.
 type BackendPolicyFn = fn(&str) -> Option<&'static str>;
 
-/// wire 백엔드의 낱말 — 정책 표에 물으려면 낱말이 필요하다(agent 는 protocol 을 의존하지 않아 둘이 공유할
-/// 수 있는 것은 낱말뿐이다). 손으로 적지 않고 enum 직렬화에서 받는다(늘 lowercase). 직렬화가 실패하면 빈
-/// 낱말이 되어 운영 정책이 닫는다(fail-closed).
+/// The wire backend's word, for the `SpawnByCwd` refusal text only — the policy itself is asked by the creation body
+/// with the declared spelling. Taken from the enum's serialization (always lowercase), not written by hand.
 fn wire_backend_word(kind: WireBackendKind) -> String {
     serde_json::to_value(kind)
         .ok()
@@ -750,7 +722,7 @@ fn wire_backend_word(kind: WireBackendKind) -> String {
         .unwrap_or_default()
 }
 
-/// `SpawnByCwd` 의 백엔드를 정책이 막으면 그 거절 문구 — `None` = 만든다.
+/// The refusal text when the policy closes a `SpawnByCwd` backend — `reason` is the policy's.
 ///
 /// ★문구는 혼자 서야 한다★ — 데몬 `Error` 의 글은 접두 없이 버스 호출자까지 그대로 간다(셸
 /// `agent.spawnInto` 는 그것을 `CONFLICT` 로 싣는다). 앞부분은 `agent.new` 의 정책 거절(agent `verb_new`)
@@ -759,13 +731,11 @@ fn wire_backend_word(kind: WireBackendKind) -> String {
 /// `INVALID_ARGUMENT` 고 이쪽은 셸이 `CONFLICT` 로 싣는다. 오탈자 그물의 「를 모른다」와는 갈린다 — 뭉치면
 /// 호출자가 있지도 않은 오탈자를 고치려 든다.
 // ADR-0279
-fn by_cwd_refusal(kind: WireBackendKind, policy: BackendPolicyFn) -> Option<String> {
+fn by_cwd_refusal(kind: WireBackendKind, reason: &str) -> String {
     let word = wire_backend_word(kind);
-    policy(&word).map(|reason| {
-        format!(
-            "backend '{word}' 는 아는 낱말이지만 이 표면으로는 지금 만들지 않는다 — {reason} 스폰 안 함."
-        )
-    })
+    format!(
+        "backend '{word}' 는 아는 낱말이지만 이 표면으로는 지금 만들지 않는다 — {reason} 스폰 안 함."
+    )
 }
 
 fn output_format_to_wire(f: CoreAgentOutputFormat) -> WireAgentOutputFormat {
@@ -1096,14 +1066,33 @@ fn activation_error(
     request_id: engram_dashboard_protocol::RequestId,
     e: PtyError,
 ) -> AgentEvent {
-    let launch_blocked = match &e {
-        PtyError::LaunchBlocked(blocked) => Some(blocked.to_args()),
-        _ => None,
-    };
     AgentEvent::Error {
         request_id: Some(request_id),
+        launch_blocked: launch_blocked_args(&e),
         message: profile_error_text(conn_id, verb, what, e),
-        launch_blocked,
+        // Only the `SpawnByCwd` created-asleep arm names an agent — every activation failure here created nothing.
+        // ADR-0348
+        created_agent_id: None,
+    }
+}
+
+/// A launch block's reasons as the `Error.launch_blocked` object (`LaunchBlocked::to_args`); `None` for any other
+/// failure.
+fn launch_blocked_args(e: &PtyError) -> Option<serde_json::Map<String, serde_json::Value>> {
+    match e {
+        PtyError::LaunchBlocked(blocked) => Some(blocked.to_args()),
+        _ => None,
+    }
+}
+
+/// `SpawnByCwd.deliver_notices` → the creation body's notice delivery: `true` = the sender shows the reply's notices
+/// to a reader, so the set may be marked as shown.
+// ADR-0348
+fn delivery_for(deliver_notices: bool) -> NoticeDelivery {
+    if deliver_notices {
+        NoticeDelivery::Delivered
+    } else {
+        NoticeDelivery::Withheld
     }
 }
 
@@ -1291,9 +1280,10 @@ pub struct ConnectionCore {
     locals: Arc<dyn LocalCommands>,
     usage: Arc<UsageService>,
     shutdown_tx: watch::Sender<bool>,
-    /// `SpawnByCwd` 처리부가 `spawn_agent_reporting` 전에 묻는 백엔드 생성 정책. 운영은 늘 agent
-    /// `commands::llm_creation_refusal` 이고 [`ConnectionCore::new`] 가 채운다 — 시험만 닫는 가짜로 갈아
-    /// 꽂는다(오늘 운영 표는 아무것도 안 닫아 실물 입력으로는 거절 갈래에 못 닿는다 · ADR-0012).
+    /// The backend creation policy the `SpawnByCwd` arm passes to the one creation body (agent
+    /// `commands::create_and_start`). Production is always agent `commands::llm_creation_refusal`, filled by
+    /// [`ConnectionCore::new`]; only tests swap in a closing fake (today's production table closes nothing, so real
+    /// input cannot reach the refusal arm · ADR-0012).
     /// ★공유 핸들이 아닌데도 여기 앉을 수 있다★ — 상태 없는 순수 함수 포인터라 연결마다 새로 채워도 갈릴
     /// 상태가 없다.
     // ADR-0279
@@ -1431,6 +1421,7 @@ impl ConnectionCore {
                     request_id: Some(request_id),
                     message,
                     launch_blocked: None,
+                    created_agent_id: None,
                 },
             };
             let _ = sink.enqueue(Outbound::event(ev));
@@ -1694,78 +1685,84 @@ impl ConnectionCore {
                 cwd,
                 backend,
                 request_id,
+                deliver_notices,
             } => {
-                // ★이 한 줄이 [`spawn_command_by_cwd`] 를 부른다는 사실은 **아무 테스트도 안 잰다**★ —
-                //   이 갈래의 성공 경로는 실 프로세스 spawn 이라(`manager.spawn_agent_reporting` 바로 아래) 단위
-                //   테스트가 못 들어오고, 여기를 옛 상수 호출로 되돌려도 전 스위트가 초록이다. 그러면
-                //   codex by-cwd 가 조용히 app-server 로 갈아탄다. 그 함수의 **내용**은
-                //   `by_cwd_fills_one_shared_default_mode_for_every_backend` 가 지키므로, 무방비인 것은
-                //   이 호출 한 줄이다.
-                let Some(command) = spawn_command_by_cwd(backend) else {
+                let Some(kind) = backend else {
                     reply(sink, request_id, Err(MISSING_BACKEND.to_string()));
                     return DispatchFlow::Continue;
                 };
-                // ★정책은 `spawn_agent_reporting` 보다 먼저 본다★ — 이 갈래의 즉석 프로필은 `spawn_agent_reporting` 이 명부에 올리고
-                //   디스크에 쓰므로, 판정을 그 뒤로 미루면 거절된 프로필이 남는다. `CoreProfile::new` 앞에 둔 것은
-                //   배치일 뿐이다(메모리 값만 만든다). 이 문은 호출자를 가리지 않는다 —
-                //   사람 경로도 같은 표를 본다(ADR-0279 「감수한 대가」). 거절은 「마지막 실패」를 쓰지 않는다 —
-                //   활성화도 즉석 생성도 일어나지 않았다(ADR-0172).
+                // No wildcard: a new wire word must stop the build here instead of inheriting a backend unasked.
+                let declared = match kind {
+                    WireBackendKind::Claude => AgentBackend::Claude,
+                    WireBackendKind::Codex => AgentBackend::Codex,
+                };
+                // The body asks the policy before anything is registered, so a refusal leaves no profile and writes no
+                //   last failure (ADR-0172). The gate does not tell callers apart — the person's path sees the same
+                //   table (ADR-0279 「감수한 대가」).
                 // ADR-0270 · ADR-0279
-                if let Some(message) =
-                    backend.and_then(|kind| by_cwd_refusal(kind, self.llm_policy))
-                {
-                    reply(sink, request_id, Err(message));
-                    return DispatchFlow::Continue;
-                }
-                let profile = CoreProfile::new(
-                    cwd.clone(),
-                    command,
-                    std::path::PathBuf::from(&cwd),
-                    vec![],
-                    false,
-                );
-                // ★이 갈래는 활성화가 아니라 **즉석 생성**이라 「마지막 실패」를 쓰지 않는다(ADR-0172)★:
-                //   방금 만든 uuid 라 지울 기록이 있을 수 없고, 저장된 항목을 깨우는 동사가 아니다.
-                //   ★그래서 남는 비대칭 하나는 알고 있다★: 명령 버스의 형제(`create_and_start`)는 만들고
-                //   띄우다 실패하면 기록한다. 이 동사를 그 모양으로 맞추려면 `activate_profile` 이 아직
-                //   등록되지 않은 프로필을 받아야 하는데 그건 그 함수의 전제(저장된 항목)를 바꾸는 일이라
-                //   별건이다 — 맞출 때 두 곳을 함께 본다.
+                let policy = self.llm_policy;
+                let roster = RosterFanout::new(self.fanout.clone(), manager.clone());
                 // ★blocking 풀로 넘긴다★ — 이 동사도 실행 재료 점검(라이브러리 락을 기다릴 수 있다)과 실 프로세스
                 //   생성을 yield 없이 동기로 한다. 사유의 정본은 위 `Spawn` 갈래의 같은 주석이다.
                 // TRD S25 §5-2 4
                 let mgr = manager.clone();
-                // `spawn_agent_reporting` records no notice fingerprint — why the WS must not: the `SpawnProfile` arm.
-                let spawned = tokio::task::spawn_blocking(move || {
-                    mgr.spawn_agent_reporting(&profile, SpawnMode::Fresh)
+                // ADR-0348
+                let joined = tokio::task::spawn_blocking(move || {
+                    create_and_start(
+                        mgr.as_ref(),
+                        &roster,
+                        NewAgent {
+                            cwd,
+                            name: None,
+                            backend: declared,
+                            policy,
+                            delivery: delivery_for(deliver_notices),
+                        },
+                    )
                 })
-                .await
-                .unwrap_or_else(|e| Err(PtyError::SpawnFailed(format!("spawn task failed: {e}"))));
-                match spawned {
-                    // 방금 만든 uuid 라 moot(이미 떠 있음)이 나올 수 없다 — 그래도 결말을 가려 받는다.
-                    Ok((outcome, notices)) => match outcome.into_info() {
-                        Some(info) => {
-                            let _ = sink.enqueue(Outbound::event(AgentEvent::Spawned {
-                                request_id,
-                                agent: agent_info_to_wire(&info),
-                                notices: notices_to_wire(&notices),
-                            }));
-                        }
-                        None => reply(
-                            sink,
-                            request_id,
-                            Err("ad-hoc spawn produced no session".to_string()),
-                        ),
+                .await;
+                let event = match joined {
+                    Ok(Ok(Activated { info, notices })) => AgentEvent::Spawned {
+                        request_id,
+                        agent: agent_info_to_wire(&info),
+                        notices: notices_to_wire(&notices),
                     },
-                    Err(e) => {
-                        let _ = sink.enqueue(Outbound::event(activation_error(
-                            conn_id,
-                            "SpawnByCwd",
-                            "the agent was not created or started",
-                            request_id,
-                            e,
-                        )));
+                    Ok(Err(CreateRefused::Policy { reason })) => AgentEvent::Error {
+                        request_id: Some(request_id),
+                        message: by_cwd_refusal(kind, reason),
+                        launch_blocked: None,
+                        created_agent_id: None,
+                    },
+                    Ok(Err(CreateRefused::NotCreated(e))) => activation_error(
+                        conn_id,
+                        "SpawnByCwd",
+                        "the agent was not created or started",
+                        request_id,
+                        e,
+                    ),
+                    // The agent stays registered and asleep — `INTERNAL` (the bus `agent.spawn` code for the same
+                    //   end) and its id, so the caller wakes it instead of creating another.
+                    // ADR-0348 · TRD S25 step 20 (U3)
+                    Ok(Err(CreateRefused::CreatedAsleep { id, name, error })) => {
+                        AgentEvent::Error {
+                            request_id: Some(request_id),
+                            launch_blocked: launch_blocked_args(&error),
+                            message: CommandError::internal(created_but_not_started(
+                                &name, id, &error,
+                            ))
+                            .to_string(),
+                            created_agent_id: Some(id),
+                        }
                     }
-                }
+                    Err(e) => activation_error(
+                        conn_id,
+                        "SpawnByCwd",
+                        "the agent was not created or started",
+                        request_id,
+                        PtyError::SpawnFailed(format!("spawn task failed: {e}")),
+                    ),
+                };
+                let _ = sink.enqueue(Outbound::event(event));
             }
 
             AgentCommand::ListProfiles { request_id } => {
@@ -1908,7 +1905,9 @@ impl ConnectionCore {
                         // ADR-0341
                         // TRD S25 §5-2 16
                         // TODO(TRD S25 §5-2 11): when the webview shows `Spawned.notices`, switch the WS activation
-                        //   paths to `Delivered` (and give by-cwd a recording path) — or "once per agent" breaks.
+                        //   paths to `Delivered` and make the webview's `SpawnByCwd` senders send
+                        //   `deliver_notices: true` — or "once per agent" breaks. (By-cwd already records through the
+                        //   one creation body — ADR-0348.)
                         let mgr = manager.clone();
                         let profile_for_task = profile.clone();
                         let started = tokio::task::spawn_blocking(move || {
@@ -2227,6 +2226,7 @@ impl ConnectionCore {
                             request_id: None,
                             message: format!("invalid command envelope: {e}"),
                             launch_blocked: None,
+                            created_agent_id: None,
                         }));
                         return DispatchFlow::Continue;
                     }
@@ -2271,6 +2271,7 @@ impl ConnectionCore {
                             request_id: None,
                             message: format!("invalid command reply: {e}"),
                             launch_blocked: None,
+                            created_agent_id: None,
                         }));
                         return DispatchFlow::Continue;
                     }
@@ -2303,6 +2304,7 @@ impl ConnectionCore {
                     request_id: None,
                     message: refusal.into(),
                     launch_blocked: None,
+                    created_agent_id: None,
                 }));
             }
 
@@ -2615,8 +2617,9 @@ pub(crate) fn broadcast_lease_changed(fanout: &dyn FrameFanout, agent_id: AgentI
 ///   `control/` 은 "명부가 바뀌었다" 만 안다. 반대로 두면 제어 라우트가 wire 매핑을 알게 된다.
 ///   이 배치를 처음 세운 사유는 ADR-0130 의 잎 성질(`control/` 의 나가는 간선 0)이었고 그 성질은
 ///   ADR-0236 이 내려놓았다 — 모양은 그대로 둔다.
-/// ★짝 불일치 방지★: 생성자를 통해 **한 조립에서 나온** 팬아웃과 매니저만 묶인다 —
-///   `DaemonWiring::roster_broadcast` 가 유일한 운영 생성 지점이다(그 struct 주석의 규칙).
+/// ★No mismatched pair★: the constructor binds only a fanout and a manager **from one assembly** — the production
+///   construction points are `DaemonWiring::roster_broadcast` (the rule in that struct's comment) and the WS
+///   `SpawnByCwd` arm, which builds one from the core's own `fanout` + `manager` (the same assembly).
 /// ★통지 한 번 = `ProfileListUpdated` 다음 `AgentListUpdated`★: 포트는 어느 동사가 불렀는지 모른다 — 버스 · CLI
 ///   `agent.rename` 이 산 에이전트의 목록 이름을 바꿔도 셸의 탭 자동 이름이 따라가게 에이전트 목록을 늘 함께 민다.
 ///   다른 동사(띄우기 · 만들기 · 옮기기 · 무변경 개명)가 덧붙여 내는 목록은 이름이 그대로면 셸의 이름 장부가 판도 알림도 없이
@@ -2636,6 +2639,15 @@ impl crate::control::agent::RosterBroadcast for RosterFanout {
     fn roster_changed(&self) {
         broadcast_profile_list(self.fanout.as_ref(), &self.manager);
         broadcast_agent_list(self.fanout.as_ref(), &self.manager);
+    }
+}
+
+/// The agent crate's roster port — the same two frames as [`crate::control::agent::RosterBroadcast`].
+// ADR-0348
+// Named by path, not imported — two `roster_changed` methods in scope would make a plain `.roster_changed()` ambiguous.
+impl engram_dashboard_agent::commands::RosterChanged for RosterFanout {
+    fn roster_changed(&self) {
+        crate::control::agent::RosterBroadcast::roster_changed(self);
     }
 }
 
@@ -2685,6 +2697,7 @@ fn send_error(
         request_id,
         message,
         launch_blocked: None,
+        created_agent_id: None,
     }));
 }
 
@@ -2804,6 +2817,7 @@ mod tests {
                 cwd: "C:/tmp".into(),
                 backend: None,
                 request_id: rid(),
+                deliver_notices: false,
             },
             AgentCommand::RefreshUsageLimits {
                 vendor: WireBackendKind::Claude,
@@ -2938,9 +2952,10 @@ mod tests {
         }
     }
 
-    /// ★즉석 생성(`SpawnByCwd`)의 띄우기도 async 워커에서 직접 부르지 않는다★ — 실행 재료 점검이 라이브러리 락을
-    /// 기다릴 수 있고 실 프로세스 생성이 yield 없이 돈다(TRD S25 §5-2 4). 소스에서 재는 사유 · 두 축 · 못 보는 것은
-    /// 위 활성화 형제와 같다.
+    /// ★The ad-hoc create's start (`SpawnByCwd`) is not called on an async worker either★ — the launch-material check
+    /// can wait on the library lock and the real process spawn runs without yielding (TRD S25 §5-2 4). Why it is
+    /// measured from the source, the two axes and what it cannot see are the same as the activation sibling above.
+    /// The call is the one creation body (`create_and_start(`, ADR-0348), and it waits for the codex link verdict too.
     #[test]
     fn the_by_cwd_spawn_hands_the_blocking_call_to_the_pool() {
         let src = include_str!("connection_core.rs");
@@ -2951,7 +2966,7 @@ mod tests {
             .iter()
             .enumerate()
             .filter(|(_, l)| {
-                (l.contains(".spawn_agent(") || l.contains(".spawn_agent_reporting("))
+                (l.contains("create_and_start(") || l.contains(".spawn_agent("))
                     && !l.trim_start().starts_with("//")
             })
             .map(|(i, _)| i)
@@ -2963,12 +2978,12 @@ mod tests {
         for i in call_sites {
             let line = lines[i];
             assert!(
-                line.contains("mgr.spawn_agent"),
-                "즉석 생성을 async 워커에서 직접 부른다 — 점검 · 프로세스 생성 동안 그 워커가 묶인다: {line}"
+                line.trim_start().starts_with("create_and_start("),
+                "the by-cwd create does not go through the one creation body: {line}"
             );
-            let window = lines[i.saturating_sub(4)..=i].join("\n");
+            let window = lines[i.saturating_sub(4)..=(i + 1).min(lines.len() - 1)].join("\n");
             assert!(
-                window.contains("spawn_blocking"),
+                window.contains("spawn_blocking") && window.contains("mgr.as_ref()"),
                 "수신자만 풀 사본 이름이고 인계가 없다 — 이름은 맞는데 여전히 async 워커에서 돈다:\n{window}"
             );
         }
@@ -5741,12 +5756,11 @@ mod tests {
     /// 정책 거절에 가려진다.
     #[tokio::test]
     async fn spawn_by_cwd_without_a_backend_is_refused() {
-        thread_local! {
-            // 정책 칸이 `fn` 포인터라 횟수를 갈무리할 수 없어 여기 둔다(형제 시험의 `CLOSED` 와 같은 이유).
-            static CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-        }
+        // The policy field is a `fn` pointer, so the count lives here — process-global, as in the sibling's `CLOSED`:
+        //   the creation body asks the policy on the blocking-pool thread, where a thread-local would not count.
+        static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         fn counts_and_closes_everything(_: &str) -> Option<&'static str> {
-            CALLS.with(|calls| calls.set(calls.get() + 1));
+            CALLS.fetch_add(1, Ordering::SeqCst);
             Some("시험이 모든 낱말을 닫았다.")
         }
         let (core, _rx) = test_core();
@@ -5760,6 +5774,7 @@ mod tests {
                 cwd: missing_cwd(),
                 backend: None,
                 request_id: req,
+                deliver_notices: false,
             },
             &session,
             &mock,
@@ -5776,7 +5791,7 @@ mod tests {
             }
             other => panic!("Error 기대: {other:?}"),
         }
-        assert_eq!(CALLS.with(std::cell::Cell::get), 0, "빈 칸에 정책을 물었다");
+        assert_eq!(CALLS.load(Ordering::SeqCst), 0, "빈 칸에 정책을 물었다");
         assert_eq!(
             core.manager.list_agents().len(),
             0,
@@ -5784,12 +5799,13 @@ mod tests {
         );
         // 세는 쪽이 실제로 센다 — 이것이 없으면 위 0 회는 늘지 않는 계수기로도 초록이다.
         assert!((core.llm_policy)("claude").is_some());
-        assert_eq!(CALLS.with(std::cell::Cell::get), 1);
+        assert_eq!(CALLS.load(Ordering::SeqCst), 1);
     }
 
-    /// wire 백엔드 전량과 그 낱말 — 낱말은 데몬이 정책에 묻는 그 함수([`wire_backend_word`])에서 받는다.
-    /// ★손으로 채우지만 변형이 늘면 `slot` 의 `match` 가 컴파일 에러로 이 자리를 가리킨다★ — 그때 배열에도
-    /// 그 변형을 넣을 것. 배열만 빠뜨리는 편집은 아래 단언이 못 잡는다(슬롯 수도 같은 배열에서 나온다).
+    /// Every wire backend and its word — the word comes from the function the refusal text names it with
+    /// ([`wire_backend_word`]; the creation body asks the policy with the declared spelling, compared ignoring case).
+    /// ★Filled by hand, but a new variant makes `slot`'s `match` stop the build here★ — add it to the array then. An
+    /// edit that only leaves the array short is not caught by the assert below (the slot count comes from the same array).
     fn every_wire_backend() -> Vec<(WireBackendKind, String)> {
         const ALL: [WireBackendKind; 2] = [WireBackendKind::Claude, WireBackendKind::Codex];
         fn slot(kind: WireBackendKind) -> usize {
@@ -5854,23 +5870,26 @@ mod tests {
         }
     }
 
-    /// ★정책이 닫은 백엔드는 프로필도 명부도 스폰도 없이 거절된다★ — 판정이 `spawn_agent` 보다 먼저여야
-    /// 한다는 불변식(ADR-0279)을 dispatch 수준에서 잰다. 오늘 운영 표는 아무것도 안 닫아 실물 입력으로는
-    /// 이 갈래에 못 닿으므로 닫는 가짜를 꽂는다(ADR-0012).
-    /// ★wire 백엔드마다, 그 낱말 하나만 닫는 가짜로 돈다★ — 한 백엔드로만 재면 「그 백엔드만 정책에
-    /// 묻는다」는 회귀가 초록으로 지나가고, 전부 닫는 가짜로 재면 처리부가 엉뚱한 낱말을 물어도 초록이다.
+    /// ★A backend the policy closes is refused with no profile, no roster row and no spawn★ — the invariant that the
+    /// verdict comes before anything is registered (ADR-0279), measured at dispatch level. Today's production table
+    /// closes nothing, so real input cannot reach this arm; a closing fake is plugged in (ADR-0012).
+    /// ★Run per wire backend, with a fake that closes that one word only★ — one backend alone lets "only that backend
+    /// asks the policy" pass green, and a fake that closes everything stays green when the arm asks the wrong word.
     #[tokio::test]
     async fn spawn_by_cwd_refuses_a_backend_the_policy_closes() {
-        thread_local! {
-            // 가짜가 닫을 낱말 — 정책 칸이 `fn` 포인터라 값을 갈무리할 수 없어 여기 둔다. `#[tokio::test]` 는
-            // 현재 스레드 런타임이고 처리부는 정책을 dispatch 안에서 동기로 부른다.
-            static CLOSED: std::cell::RefCell<String> = std::cell::RefCell::new(String::new());
-        }
+        // The word the fake closes. A process-global, not a thread-local: the creation body asks the policy on the
+        //   blocking-pool thread. The body asks with the declared spelling (`Codex`) and the refusal text names the
+        //   wire word (`codex`), so the fake compares ignoring case.
+        static CLOSED: StdMutex<String> = StdMutex::new(String::new());
         fn closes_the_chosen_word(word: &str) -> Option<&'static str> {
-            CLOSED.with(|closed| (*closed.borrow() == word).then_some("시험이 닫은 백엔드다."))
+            CLOSED
+                .lock()
+                .unwrap()
+                .eq_ignore_ascii_case(word)
+                .then_some("시험이 닫은 백엔드다.")
         }
         for (kind, word) in every_wire_backend() {
-            CLOSED.with(|closed| *closed.borrow_mut() = word.clone());
+            *CLOSED.lock().unwrap() = word.clone();
             let (core, _rx) = test_core();
             let core = core.with_llm_policy(closes_the_chosen_word);
             let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
@@ -5882,6 +5901,7 @@ mod tests {
                     cwd: missing_cwd(),
                     backend: Some(kind),
                     request_id: req,
+                    deliver_notices: false,
                 },
                 &session,
                 &mock,
@@ -5992,36 +6012,6 @@ mod tests {
                 assert_eq!(*output_format, CoreAgentOutputFormat::Terminal);
             }
             other => panic!("Codex 기대: {other:?}"),
-        }
-    }
-
-    /// `SpawnByCwd` 는 모드 칸이 없는 입구라 데몬이 값을 지어낸다 — 그 지어낸 값을 못 박는다.
-    /// ★2026-09-22 — 두 백엔드가 **같은 기본값**을 쓴다★: `NEW_AGENT_OUTPUT_FORMAT`. 옛 codex 의
-    /// `Terminal` 은 「이 경로엔 대화형이 맞다」는 의견이 아니라 옛 동작의 보존이었고, codex 가
-    /// LLM 생성 표면에서 열리면서 그 자리에 앉을 결정이 실제로 필요해졌다([`spawn_command_by_cwd`] 의
-    /// doc 이 정본).
-    /// ★구체 값을 여기 베끼지 않는다★ — 그 값의 집은 코어 상수 하나이고(그 doc 이 못 박는다), 여기서
-    /// 재는 것은 「두 갈래가 그 집을 함께 본다」는 것이다. 한 갈래만 딴 값으로 갈라놓는 편집이 이 항목을
-    /// 빨갛게 만든다.
-    #[test]
-    fn by_cwd_fills_one_shared_default_mode_for_every_backend() {
-        assert!(
-            spawn_command_by_cwd(None).is_none(),
-            "빈 backend 칸은 여기서도 거절로 이어진다"
-        );
-        match spawn_command_by_cwd(Some(WireBackendKind::Codex)) {
-            Some(CoreSpawnCommand::Codex { output_format, .. }) => assert_eq!(
-                output_format, NEW_AGENT_OUTPUT_FORMAT,
-                "by-cwd 입구의 codex 가 공통 기본값에서 갈라졌다"
-            ),
-            other => panic!("Codex 기대: {other:?}"),
-        }
-        match spawn_command_by_cwd(Some(WireBackendKind::Claude)) {
-            Some(CoreSpawnCommand::Claude { output_format, .. }) => assert_eq!(
-                output_format, NEW_AGENT_OUTPUT_FORMAT,
-                "by-cwd 입구의 claude 가 공통 기본값에서 갈라졌다"
-            ),
-            other => panic!("Claude 기대: {other:?}"),
         }
     }
 
@@ -7175,6 +7165,7 @@ mod tests {
                 cwd: missing.to_string_lossy().into_owned(),
                 backend: Some(WireBackendKind::Claude),
                 request_id: rid(),
+                deliver_notices: false,
             },
             &session,
             &mock,
@@ -7182,12 +7173,19 @@ mod tests {
         .await;
 
         match mock.events().as_slice() {
-            [AgentEvent::Error { message, .. }] => assert!(
-                message.starts_with(&format!(
-                    "CONFLICT: the agent was not created or started: {PROFILES_FILE}"
-                )),
-                "{message}"
-            ),
+            [AgentEvent::Error {
+                message,
+                created_agent_id,
+                ..
+            }] => {
+                assert!(
+                    message.starts_with(&format!(
+                        "CONFLICT: the agent was not created or started: {PROFILES_FILE}"
+                    )),
+                    "{message}"
+                );
+                assert_eq!(created_agent_id, &None, "nothing was created");
+            }
             other => panic!("Error 1건이어야: {other:?}"),
         }
         assert!(core.manager.list_agents().is_empty(), "뜬 것이 없다");
@@ -7750,6 +7748,7 @@ mod tests {
                         cwd: std::env::temp_dir().to_string_lossy().into_owned(),
                         backend: Some(WireBackendKind::Claude),
                         request_id: req,
+                        deliver_notices: false,
                     },
                 };
                 match dispatch_events(&core, cmd).await.as_slice() {
@@ -7757,6 +7756,7 @@ mod tests {
                         request_id,
                         message,
                         launch_blocked: Some(reasons),
+                        created_agent_id,
                     }] => {
                         assert_eq!(*request_id, Some(req), "{verb}");
                         assert_eq!(
@@ -7765,6 +7765,7 @@ mod tests {
                             "{verb}"
                         );
                         assert!(!message.is_empty(), "{verb}: the text stays");
+                        assert_eq!(created_agent_id, &None, "{verb}: nothing was created");
                     }
                     other => panic!("{verb}: one Error with the reasons expected: {other:?}"),
                 }
@@ -7814,6 +7815,175 @@ mod tests {
                     other => panic!("{verb}: one Error expected: {other:?}"),
                 }
             }
+        }
+
+        // ── WS create-and-start through the one creation body (ADR-0348 · TRD S25 step 20) ──
+
+        /// Passes the first launch check of a profile id (the pre-create check) and blocks every later one (the
+        /// prelaunch after the add) — a block after the add, with no process started.
+        struct BlocksAfterTheAdd {
+            blocked: LaunchBlocked,
+            passed_once: StdMutex<std::collections::HashSet<AgentId>>,
+        }
+
+        impl LaunchKitSource for BlocksAfterTheAdd {
+            fn check(&self, profile: &CoreProfile) -> Result<LaunchPlan, LaunchBlocked> {
+                if self.passed_once.lock().unwrap().insert(profile.id) {
+                    NoopLaunchKits.check(profile)
+                } else {
+                    Err(self.blocked.clone())
+                }
+            }
+            fn prepare(
+                &self,
+                plan: LaunchPlan,
+                id: AgentId,
+                epoch: u32,
+            ) -> Result<LaunchKit, PrepareError> {
+                NoopLaunchKits.prepare(plan, id, epoch)
+            }
+            fn release(&self, _id: AgentId, _epoch: u32) {}
+        }
+
+        fn by_cwd(req: RequestId) -> AgentCommand {
+            AgentCommand::SpawnByCwd {
+                cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+                backend: Some(WireBackendKind::Claude),
+                request_id: req,
+                deliver_notices: false,
+            }
+        }
+
+        /// A WS create blocked after the add answers `INTERNAL` with the shared created-asleep wording, the block's
+        /// reasons and the id of the row it left — registered, asleep, marked `Other` — and announces the roster once.
+        #[tokio::test]
+        async fn a_ws_create_blocked_after_the_add_names_the_asleep_agent() {
+            let (core, fanout) = test_core_with_kits(Arc::new(BlocksAfterTheAdd {
+                blocked: blocked(),
+                passed_once: StdMutex::default(),
+            }));
+            let core = core.with_llm_policy(|_| None);
+            let before = fanout.texts().len();
+            let req = rid();
+
+            let events = dispatch_events(&core, by_cwd(req)).await;
+
+            let rows = core.manager.agent_snapshots();
+            let [row] = rows.as_slice() else {
+                panic!("one registered row expected: {rows:?}");
+            };
+            match events.as_slice() {
+                [AgentEvent::Error {
+                    request_id,
+                    message,
+                    launch_blocked: Some(reasons),
+                    created_agent_id,
+                }] => {
+                    assert_eq!(*request_id, Some(req));
+                    assert_eq!(*created_agent_id, Some(row.id), "the row it left");
+                    assert!(
+                        message.starts_with("INTERNAL: agent '")
+                            && message
+                                .contains(&format!("({}) was created but did not start: ", row.id))
+                            && message.contains("fix the listed items first"),
+                        "{message}"
+                    );
+                    assert_eq!(reasons, &blocked().to_args());
+                }
+                other => panic!("one created-asleep Error expected: {other:?}"),
+            }
+            assert_eq!(row.last_failure, Some(CoreFailureKind::Other));
+            assert!(core.manager.list_agents().is_empty(), "nothing started");
+            assert_eq!(
+                broadcast_kinds(&fanout, before),
+                ["ProfileListUpdated", "AgentListUpdated"],
+                "the roster is announced once"
+            );
+        }
+
+        /// A WS create blocked before the add names no agent, leaves no row and announces nothing.
+        #[tokio::test]
+        async fn a_ws_create_blocked_before_the_add_names_no_agent_and_announces_nothing() {
+            let (core, fanout) = test_core_with_kits(Arc::new(BlockingKits(blocked())));
+            let core = core.with_llm_policy(|_| None);
+            let before = fanout.texts().len();
+
+            let events = dispatch_events(&core, by_cwd(rid())).await;
+
+            match events.as_slice() {
+                [AgentEvent::Error {
+                    launch_blocked: Some(_),
+                    created_agent_id: None,
+                    message,
+                    ..
+                }] => assert!(!message.starts_with("INTERNAL:"), "{message}"),
+                other => panic!("one pre-add block expected: {other:?}"),
+            }
+            assert!(core.manager.agent_snapshots().is_empty(), "no row");
+            assert!(broadcast_kinds(&fanout, before).is_empty(), "no announce");
+        }
+
+        #[test]
+        fn the_delivery_request_maps_to_the_notice_delivery() {
+            assert_eq!(delivery_for(true), NoticeDelivery::Delivered);
+            assert_eq!(delivery_for(false), NoticeDelivery::Withheld);
+        }
+
+        /// The production text up to the test module.
+        fn production_source() -> &'static str {
+            include_str!("connection_core.rs")
+                .split("mod tests {")
+                .next()
+                .expect("production part")
+        }
+
+        /// The production text of the `SpawnByCwd` arm — from its pattern to the next arm.
+        fn by_cwd_arm_source() -> &'static str {
+            let production = production_source();
+            let start = production
+                .find("AgentCommand::SpawnByCwd {\n                cwd,")
+                .or_else(|| production.find("AgentCommand::SpawnByCwd {\r\n                cwd,"))
+                .expect("the SpawnByCwd arm");
+            let end = start
+                + production[start..]
+                    .find("AgentCommand::ListProfiles")
+                    .expect("the next arm");
+            &production[start..end]
+        }
+
+        /// ★The arm passes the sender's request into the body★ — a literal `NoticeDelivery::` there would answer
+        /// every sender the same way (withheld never records the notices; delivered marks as shown a set the webview
+        /// does not show).
+        // ADR-0348 · TRD S25 step 20 (M13)
+        #[test]
+        fn the_by_cwd_arm_passes_the_sender_delivery_request_into_the_body() {
+            let arm = by_cwd_arm_source();
+            assert!(
+                arm.contains("delivery: delivery_for(deliver_notices)"),
+                "{arm}"
+            );
+            assert!(!arm.contains("NoticeDelivery::"), "{arm}");
+        }
+
+        /// ★Only the `SpawnByCwd` created-asleep arm names a created agent★ — every other `Error` (incl. every
+        /// [`activation_error`]) created nothing, and a stray id would send a caller to wake an agent that is not
+        /// there.
+        // ADR-0348 · TRD S25 step 20 (U3)
+        #[test]
+        fn only_the_by_cwd_created_asleep_arm_names_a_created_agent() {
+            let production = production_source();
+            assert_eq!(production.matches("created_agent_id: Some(").count(), 1);
+            let arm = by_cwd_arm_source();
+            assert!(
+                arm.contains("CreateRefused::CreatedAsleep")
+                    && arm.contains("created_agent_id: Some(id)"),
+                "{arm}"
+            );
+            let body = &production[production
+                .find("fn activation_error(")
+                .expect("activation_error")..];
+            let body = &body[..body.find("\n}").expect("end of activation_error")];
+            assert!(body.contains("created_agent_id: None"), "{body}");
         }
 
         /// `SpawnProfile`'s success carries the launch notices as rows (absent when there are none) and leaves the

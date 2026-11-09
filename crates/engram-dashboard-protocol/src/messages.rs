@@ -123,6 +123,13 @@ pub enum AgentCommand {
         #[serde(default)]
         backend: Option<AgentBackendKind>,
         request_id: RequestId,
+        /// The sender shows the reply's `notices` to a reader, so the daemon may mark the set as shown for the new
+        /// agent (agent `NoticeDelivery::Delivered`). Absent = `false` = withheld: nothing is recorded, and the next
+        /// delivering activation still gets the set.
+        // ADR-0348 · TRD S25 step 20 (M13)
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        #[ts(as = "Option<bool>", optional)]
+        deliver_notices: bool,
     },
 
     /// 응답은 request_id 동봉 [`AgentEvent::ProfileList`](전용 reply).
@@ -705,6 +712,13 @@ pub enum AgentEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional, type = "Record<string, unknown>")]
         launch_blocked: Option<serde_json::Map<String, serde_json::Value>>,
+        /// Present only when an activation that creates (`SpawnByCwd`) added the agent to the roster and it did not
+        /// start — the agent stays registered and asleep under this id; wake it instead of creating another. The
+        /// shell bus `agent.spawnInto` carries it as `args.agent_id`, the same shape as bus `agent.spawn`.
+        // ADR-0348 · TRD S25 step 20 (U3)
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        created_agent_id: Option<AgentId>,
     },
 }
 
@@ -1485,6 +1499,7 @@ mod tests {
             request_id: Some(RequestId(Uuid::nil())),
             message: "launch blocked".into(),
             launch_blocked: blocked.as_object().cloned(),
+            created_agent_id: None,
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(
@@ -1539,6 +1554,123 @@ mod tests {
         };
         assert_eq!(&serde_json::Value::Array(rows.clone()), &notices);
         assert_eq!(serde_json::to_value(&event).unwrap(), json);
+    }
+
+    // ── Create-and-start: delivery request · created-asleep id (TRD S25 step 20) ──
+
+    /// An old sender's create has no `deliver_notices` and reads as `false`; `false` keeps the old bytes.
+    #[test]
+    fn a_spawn_by_cwd_without_the_delivery_key_reads_as_false_and_keeps_the_old_bytes() {
+        let nil = "00000000-0000-0000-0000-000000000000";
+        let old = format!(
+            r#"{{"SpawnByCwd":{{"cwd":"C:/proj","backend":"claude","request_id":"{nil}"}}}}"#
+        );
+        let cmd: AgentCommand = serde_json::from_str(&old).expect("an old create decodes");
+        let AgentCommand::SpawnByCwd {
+            deliver_notices, ..
+        } = &cmd
+        else {
+            panic!("SpawnByCwd expected: {cmd:?}");
+        };
+        assert!(!deliver_notices);
+        assert_eq!(serde_json::to_string(&cmd).unwrap(), old);
+    }
+
+    #[test]
+    fn a_spawn_by_cwd_that_asks_for_delivery_round_trips() {
+        let cmd = AgentCommand::SpawnByCwd {
+            cwd: "C:/proj".into(),
+            backend: Some(AgentBackendKind::Codex),
+            request_id: RequestId(Uuid::nil()),
+            deliver_notices: true,
+        };
+        let json = serde_json::to_value(&cmd).unwrap();
+        assert_eq!(
+            json["SpawnByCwd"]["deliver_notices"],
+            serde_json::json!(true)
+        );
+        let back: AgentCommand = serde_json::from_value(json.clone()).unwrap();
+        assert!(matches!(
+            back,
+            AgentCommand::SpawnByCwd {
+                deliver_notices: true,
+                ..
+            }
+        ));
+        assert_eq!(serde_json::to_value(&back).unwrap(), json);
+    }
+
+    /// An old daemon's failure has no `created_agent_id` and reads as "nothing created"; `None` keeps the old bytes.
+    #[test]
+    fn an_error_without_a_created_agent_keeps_the_old_bytes() {
+        let nil = "00000000-0000-0000-0000-000000000000";
+        let old = format!(r#"{{"Error":{{"request_id":"{nil}","message":"boom"}}}}"#);
+        let event: AgentEvent = serde_json::from_str(&old).expect("an old failure decodes");
+        let AgentEvent::Error {
+            created_agent_id, ..
+        } = &event
+        else {
+            panic!("Error expected: {event:?}");
+        };
+        assert_eq!(created_agent_id, &None);
+        assert_eq!(serde_json::to_string(&event).unwrap(), old);
+    }
+
+    #[test]
+    fn an_error_carries_the_created_agent_next_to_the_launch_block_and_round_trips() {
+        let id = Uuid::from_u128(0x1111_1111_1111_1111_1111_1111_1111_1111);
+        let blocked = serde_json::json!({ "reasons": [{ "kind": "missing", "item": "a", "via": [], "code": "c", "args": {} }] });
+        let event = AgentEvent::Error {
+            request_id: None,
+            message: "INTERNAL: agent 'w' was created but did not start".into(),
+            launch_blocked: blocked.as_object().cloned(),
+            created_agent_id: Some(id),
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "Error": {
+                    "request_id": null,
+                    "message": "INTERNAL: agent 'w' was created but did not start",
+                    "launch_blocked": blocked,
+                    "created_agent_id": "11111111-1111-1111-1111-111111111111"
+                }
+            })
+        );
+        let back: AgentEvent = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&back).unwrap(), json);
+    }
+
+    /// A reader that predates `created_agent_id` still decodes a frame carrying it — the enums take no
+    /// `deny_unknown_fields`, so the key is dropped. Modeled as a local copy of the step-16 `Error` shape.
+    #[test]
+    fn a_reader_that_predates_the_created_agent_drops_the_key() {
+        #[derive(Debug, serde::Deserialize)]
+        enum OldEvent {
+            Error {
+                request_id: Option<RequestId>,
+                message: String,
+                #[serde(default)]
+                launch_blocked: Option<serde_json::Map<String, serde_json::Value>>,
+            },
+        }
+        let event = AgentEvent::Error {
+            request_id: None,
+            message: "asleep".into(),
+            launch_blocked: None,
+            created_agent_id: Some(Uuid::nil()),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("created_agent_id"), "{json}");
+        let OldEvent::Error {
+            request_id,
+            message,
+            launch_blocked,
+        } = serde_json::from_str::<OldEvent>(&json).expect("an old reader decodes the new frame");
+        assert_eq!(request_id, None);
+        assert_eq!(message, "asleep");
+        assert_eq!(launch_blocked, None);
     }
 
     /// ★옛 프리셋 wire 는 디코드되지 않는다 — 그래서 판이 8 이다★(`PROTOCOL_VERSION` 의 v8 항목). 이 판의 데몬이

@@ -160,6 +160,9 @@ describe('request_id pending 매칭', () => {
     expect(sent.cwd).toBe('C:/work')
     // 고른 낱말이 봉투에 실려야 한다 — 안 실으면 데몬이 거절한다(기본값 없음).
     expect(sent.backend).toBe('codex')
+    // The webview does not show `Spawned.notices` yet, so it must not ask the daemon to record them as shown
+    // (ADR-0348 — absent = false; TRD S25 step 20 §7-1, step 11 turns it on).
+    expect(sent).not.toHaveProperty('deliver_notices')
     t.control({ Spawned: { request_id: sent.request_id, agent: { id: 'a1' } } })
     expect(await p).toEqual({ id: 'a1' })
   })

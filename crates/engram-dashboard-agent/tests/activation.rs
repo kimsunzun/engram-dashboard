@@ -30,7 +30,7 @@ use engram_dashboard_agent::profile::{
 use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
 use engram_dashboard_agent::types::{
     AgentId, AgentInfo, AgentStatus, ControlChannel, ControlEndpoint, InputOrigin,
-    NoopControlChannel, ProvisionError, StatusSink,
+    NoopControlChannel, ProvisionError, PtyError, StatusSink,
 };
 use engram_dashboard_base::testing::wait_until;
 use engram_dashboard_command::testing::block_on;
@@ -1456,34 +1456,6 @@ fn a_post_start_failure_records_no_notice_fingerprint() {
     let _ = std::fs::remove_file(&batch);
 }
 
-/// `spawn_agent_reporting` carries the notices of a start and none of a moot request — and never records: it does
-/// not wait for a link verdict, so a link failing after the start would leave the set marked as seen.
-#[test]
-fn spawn_agent_reporting_carries_the_notices_of_a_start_and_never_records() {
-    let (manager, kits, profiles) = noticing_manager("notices-spawn");
-    let (profile, batch, count) = long_lived_profile("notices-spawn");
-    let id = profile.id;
-    profiles.try_upsert(profile.clone()).expect("저장 성공");
-    let x = vec![notice("omitted", json!({ "names": ["s"] }), None)];
-    kits.set(x.clone());
-
-    let (started, notices) = manager
-        .spawn_agent_reporting(&profile, SpawnMode::Fresh)
-        .expect("starts");
-    assert!(started.started());
-    assert_eq!(notices, x);
-    assert_eq!(recorded(&profiles, id), None, "this verb never records");
-
-    let (moot, notices) = manager
-        .spawn_agent_reporting(&profile, SpawnMode::Fresh)
-        .expect("moot");
-    assert!(!moot.started());
-    assert!(notices.is_empty());
-    kill_and_reap(&manager, id);
-    let _ = std::fs::remove_file(&count);
-    let _ = std::fs::remove_file(&batch);
-}
-
 /// A caller resume with no stored handle opens a new conversation (the `resume_no_fallback` head) — that start is a
 /// delivered success too: the notices come back and the fingerprint is recorded.
 #[test]
@@ -1600,5 +1572,223 @@ fn the_bus_spawn_delivers_the_notices_and_answers_a_block_with_its_reasons() {
     assert_eq!(run_count(&count), 2, "no third process");
 
     let _ = std::fs::remove_file(&count);
+    let _ = std::fs::remove_file(&batch);
+}
+
+// ── Create-and-start over the real manager (TRD S25 step 20 — ADR-0348) ──
+
+/// A delivering create of an unregistered profile registers it, starts it, answers the notices and marks the set as
+/// shown — so a later delivering wake of the same agent (after a kill) answers no notices (TRD S25 step 20 review finding 1).
+#[test]
+fn a_delivered_create_registers_starts_and_shows_the_notices_once() {
+    let (manager, kits, profiles) = noticing_manager("create-delivered");
+    let (profile, batch, count) = long_lived_profile("create-delivered");
+    let id = profile.id;
+    assert!(profiles.get(id).is_none(), "premise: not registered");
+    let x = vec![notice("omitted", json!({ "names": ["a.md"] }), Some(1))];
+    kits.set(x.clone());
+
+    let created = manager
+        .create_and_activate(&profile, NoticeDelivery::Delivered)
+        .expect("the create starts");
+    assert_eq!(created.info.id, id);
+    assert_eq!(created.notices, x);
+    assert!(profiles.get(id).is_some(), "registered");
+    assert_eq!(recorded(&profiles, id), Some(notice_fingerprint(&x)));
+    assert!(
+        wait_until(Duration::from_secs(10), || run_count(&count) == 1),
+        "premise: the process started"
+    );
+    kill_and_reap(&manager, id);
+
+    let woken = manager
+        .activate_profile_reporting(&profile, SpawnMode::Fresh, NoticeDelivery::Delivered)
+        .expect("the wake starts");
+    assert!(
+        woken.notices.is_empty(),
+        "the create already showed this set: {:?}",
+        woken.notices
+    );
+    kill_and_reap(&manager, id);
+    let _ = std::fs::remove_file(&count);
+    let _ = std::fs::remove_file(&batch);
+}
+
+/// A withheld create returns the notices but marks nothing — the next delivering wake still gets the set.
+#[test]
+fn a_withheld_create_records_nothing_and_the_next_delivered_wake_shows_the_set() {
+    let (manager, kits, profiles) = noticing_manager("create-withheld");
+    let (profile, batch, count) = long_lived_profile("create-withheld");
+    let id = profile.id;
+    let x = vec![notice("omitted", json!({ "names": ["a.md"] }), None)];
+    kits.set(x.clone());
+
+    let created = manager
+        .create_and_activate(&profile, NoticeDelivery::Withheld)
+        .expect("the create starts");
+    assert_eq!(created.notices, x, "returned either way");
+    assert_eq!(
+        recorded(&profiles, id),
+        None,
+        "a withheld create records nothing"
+    );
+    kill_and_reap(&manager, id);
+
+    assert_eq!(delivered(&manager, &profile, SpawnMode::Fresh).notices, x);
+    assert_eq!(recorded(&profiles, id), Some(notice_fingerprint(&x)));
+    kill_and_reap(&manager, id);
+    let _ = std::fs::remove_file(&count);
+    let _ = std::fs::remove_file(&batch);
+}
+
+/// A block found before the add leaves nothing: no roster row, no last failure, no process.
+#[test]
+fn a_create_blocked_before_the_add_leaves_no_row_and_no_last_failure() {
+    let (manager, kits, profiles) = noticing_manager("create-blocked-early");
+    let (profile, batch, count) = long_lived_profile("create-blocked-early");
+    let id = profile.id;
+    let blocked = LaunchBlocked {
+        reasons: vec![BlockReason::Broken {
+            item: "rules/a.md".into(),
+            via: vec!["team.yaml".into()],
+            reason: notice("yaml-syntax", json!({ "path": "rules/a.md" }), Some(7)),
+        }],
+    };
+    *kits.block.lock().unwrap() = Some(blocked);
+
+    let refused = manager
+        .create_and_activate(&profile, NoticeDelivery::Delivered)
+        .expect_err("the launch is blocked");
+    assert!(!refused.created, "nothing was registered");
+    assert!(
+        matches!(refused.error, PtyError::LaunchBlocked(_)),
+        "{:?}",
+        refused.error
+    );
+    assert!(profiles.get(id).is_none(), "no roster row");
+    assert!(manager.list_agents().is_empty(), "no process");
+    assert_eq!(run_count(&count), 0, "the batch never ran");
+    let _ = std::fs::remove_file(&batch);
+}
+
+/// Passes the first check (`check_before_create`) and blocks every later one (the prelaunch after the add).
+struct BlocksAfterTheAdd {
+    checks: AtomicUsize,
+    block: LaunchBlocked,
+}
+
+impl LaunchKitSource for BlocksAfterTheAdd {
+    fn check(&self, profile: &AgentProfile) -> Result<LaunchPlan, LaunchBlocked> {
+        if self.checks.fetch_add(1, Ordering::SeqCst) == 0 {
+            NoopLaunchKits.check(profile)
+        } else {
+            Err(self.block.clone())
+        }
+    }
+    fn prepare(
+        &self,
+        plan: LaunchPlan,
+        id: AgentId,
+        epoch: u32,
+    ) -> Result<LaunchKit, PrepareError> {
+        NoopLaunchKits.prepare(plan, id, epoch)
+    }
+    fn release(&self, _id: AgentId, _epoch: u32) {}
+}
+
+/// A block found after the add leaves the agent registered and asleep, marked `Other` (ADR-0172).
+#[test]
+fn a_create_blocked_after_the_add_leaves_an_asleep_row_marked_other() {
+    let (manager, _sink, profiles) = make_manager("create-blocked-late");
+    let kits = Arc::new(BlocksAfterTheAdd {
+        checks: AtomicUsize::new(0),
+        block: LaunchBlocked {
+            reasons: vec![BlockReason::Broken {
+                item: "rules/a.md".into(),
+                via: vec!["team.yaml".into()],
+                reason: notice("yaml-syntax", json!({ "path": "rules/a.md" }), Some(7)),
+            }],
+        },
+    });
+    let manager = manager.with_launch_ports(LaunchPorts {
+        kits: kits.clone(),
+        ..LaunchPorts::noop()
+    });
+    let (profile, batch, count) = long_lived_profile("create-blocked-late");
+    let id = profile.id;
+
+    let refused = manager
+        .create_and_activate(&profile, NoticeDelivery::Delivered)
+        .expect_err("the prelaunch is blocked");
+    assert!(refused.created, "the add happened");
+    assert!(
+        matches!(refused.error, PtyError::LaunchBlocked(_)),
+        "{:?}",
+        refused.error
+    );
+    assert!(
+        kits.checks.load(Ordering::SeqCst) >= 2,
+        "premise: checked before and after the add"
+    );
+    assert_eq!(
+        profiles.get(id).and_then(|p| p.last_failure),
+        Some(AgentFailureKind::Other)
+    );
+    assert!(manager.list_agents().is_empty(), "asleep — no process");
+    assert_eq!(run_count(&count), 0, "the batch never ran");
+    let _ = std::fs::remove_file(&batch);
+}
+
+/// A folder that does not exist is a failure after the add: the row stays asleep, marked `SpawnFailed`. The profile is
+/// the bus create's shape — a claude JSON agent (stdio transport, which sets the child's working folder; the PTY
+/// transport was observed to start anyway with a missing folder — where it runs is unverified), with a fake claude first on `PATH` so nothing real could start.
+#[test]
+fn a_create_in_a_missing_folder_leaves_an_asleep_row_marked_spawn_failed() {
+    let (manager, _sink, profiles) = make_manager("create-missing-cwd");
+    let (fake_dir, args_log) = fake_claude_dir("create-missing-cwd");
+    let (mut profile, made_cwd) = claude_on_fake_path("create-missing-cwd", &fake_dir);
+    profile.command = AgentCommand::Claude {
+        extra_args: vec![],
+        output_format: AgentOutputFormat::StreamJson,
+    };
+    profile.cwd = std::env::temp_dir().join(format!("engram-missing-cwd-{}", Uuid::new_v4()));
+    assert!(!profile.cwd.exists(), "premise: the folder is missing");
+    let id = profile.id;
+
+    let refused = manager
+        .create_and_activate(&profile, NoticeDelivery::Delivered)
+        .expect_err("the spawn fails");
+    assert!(refused.created, "the add happened: {:?}", refused.error);
+    assert_eq!(
+        profiles.get(id).and_then(|p| p.last_failure),
+        Some(AgentFailureKind::SpawnFailed)
+    );
+    assert!(manager.list_agents().is_empty(), "asleep — no process");
+    assert!(fake_spawns(&args_log).is_empty(), "the fake never ran");
+    let _ = std::fs::remove_dir_all(&fake_dir);
+    let _ = std::fs::remove_dir_all(&made_cwd);
+}
+
+/// An id already in the roster is refused before anything runs — a create never turns into a wake that merges the
+/// caller's copy.
+#[test]
+fn a_create_of_an_id_already_in_the_roster_is_refused_and_starts_nothing() {
+    let (manager, _sink, profiles) = make_manager("create-existing-id");
+    let (profile, batch, count) = long_lived_profile("create-existing-id");
+    let id = profile.id;
+    profiles.try_upsert(profile.clone()).expect("저장 성공");
+
+    let refused = manager
+        .create_and_activate(&profile, NoticeDelivery::Delivered)
+        .expect_err("the id is taken");
+    assert!(!refused.created, "this call registered nothing");
+    assert!(
+        matches!(refused.error, PtyError::Unsupported(_)),
+        "{:?}",
+        refused.error
+    );
+    assert!(manager.list_agents().is_empty(), "nothing started");
+    assert_eq!(profiles.get(id).and_then(|p| p.last_failure), None);
+    assert_eq!(run_count(&count), 0, "the batch never ran");
     let _ = std::fs::remove_file(&batch);
 }

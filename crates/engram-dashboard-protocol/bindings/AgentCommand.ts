@@ -4,7 +4,13 @@ import type { AgentOutputFormat } from "./AgentOutputFormat";
 import type { EnvelopeFormat } from "./EnvelopeFormat";
 import type { RequestId } from "./RequestId";
 
-export type AgentCommand = { "Spawn": { profile_id: string, request_id: RequestId, } } | { "Kill": { agent_id: string, request_id: RequestId, } } | { "Interrupt": { agent_id: string, request_id: RequestId, } } | { "WriteStdin": { agent_id: string, data: number[], request_id: RequestId, } } | { "Resize": { agent_id: string, cols: number, rows: number, viewport_id: string | null, } } | { "Subscribe": { agent_id: string, epoch: number | null, after_seq: number | null, } } | { "Unsubscribe": { agent_id: string, } } | { "AcquireInput": { agent_id: string, request_id: RequestId, } } | { "ReleaseInput": { agent_id: string, request_id: RequestId, } } | { "ListAgents": { request_id: RequestId, } } | { "StopDaemon": { force: boolean, kill_agents: boolean, request_id: RequestId, } } | { "SpawnByCwd": { cwd: string, backend: AgentBackendKind | null, request_id: RequestId, } } | { "ListProfiles": { request_id: RequestId, } } | { "CreateProfile": { name: string, cwd: string, extra_args: Array<string>, env: Array<[string, string]>, auto_restore: boolean, 
+export type AgentCommand = { "Spawn": { profile_id: string, request_id: RequestId, } } | { "Kill": { agent_id: string, request_id: RequestId, } } | { "Interrupt": { agent_id: string, request_id: RequestId, } } | { "WriteStdin": { agent_id: string, data: number[], request_id: RequestId, } } | { "Resize": { agent_id: string, cols: number, rows: number, viewport_id: string | null, } } | { "Subscribe": { agent_id: string, epoch: number | null, after_seq: number | null, } } | { "Unsubscribe": { agent_id: string, } } | { "AcquireInput": { agent_id: string, request_id: RequestId, } } | { "ReleaseInput": { agent_id: string, request_id: RequestId, } } | { "ListAgents": { request_id: RequestId, } } | { "StopDaemon": { force: boolean, kill_agents: boolean, request_id: RequestId, } } | { "SpawnByCwd": { cwd: string, backend: AgentBackendKind | null, request_id: RequestId, 
+/**
+ * The sender shows the reply's `notices` to a reader, so the daemon may mark the set as shown for the new
+ * agent (agent `NoticeDelivery::Delivered`). Absent = `false` = withheld: nothing is recorded, and the next
+ * delivering activation still gets the set.
+ */
+deliver_notices?: boolean, } } | { "ListProfiles": { request_id: RequestId, } } | { "CreateProfile": { name: string, cwd: string, extra_args: Array<string>, env: Array<[string, string]>, auto_restore: boolean, 
 /**
  * `#[serde(default)]` 라 이 필드 없는 옛 프론트/wire 는 Terminal 로 흡수(기존 동작 불변,
  * PROTOCOL_VERSION 유지 — sibling OutputCaps.structured 와 같은 additive·tolerant 접근).

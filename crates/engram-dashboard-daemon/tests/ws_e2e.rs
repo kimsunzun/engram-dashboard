@@ -2070,6 +2070,7 @@ async fn case40_ws_spawn_by_cwd() {
         cwd: std::env::temp_dir().to_string_lossy().into_owned(),
         backend: Some(WireBackendKind::Claude),
         request_id: req,
+        deliver_notices: false,
     })
     .await;
     let agent = c.await_spawned(req).await;

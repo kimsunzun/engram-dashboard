@@ -270,16 +270,174 @@ fn build_daemon_wiring_with_store(
 
     // TODO(TRD S25 §5-2 8): 실행 재료 포트를 여기서 꽂는다(`with_launch_ports`) — 꽂기 전에 남은 `launch\` 를 쓸어 낸다
     //   (그 쓸기는 `restore_all` 보다도 먼저 끝난다 · §5-2 4 (c2) ⑥).
-    let manager = Arc::new(AgentManager::new_with_control(
-        status_sink,
-        profiles,
-        tracker,
-        control,
-    ));
+    let manager = AgentManager::new_with_control(status_sink, profiles, tracker, control);
+    #[cfg(debug_assertions)]
+    let manager = qa_block::plug_from_env(manager);
+    let manager = Arc::new(manager);
     DaemonWiring {
         manager,
         registry,
         usage,
+    }
+}
+
+/// Debug builds only — a launch-kit source over `NoopLaunchKits` that blocks chosen folders, so a live QA run reaches
+/// the launch-block answers that no production source produces yet (no real `LaunchKitSource` is plugged — the TODO in
+/// [`build_daemon_wiring_with_store`]). Release builds do not contain it.
+// TODO(TRD S25 §5-2 8): remove this module, its env vars and its test in the commit that plugs the real
+//   `LaunchKitSource` (TRD S25 step 20 §7-1).
+// ADR-0348 · TRD S25 step 20 §3-7 (M12)
+#[cfg(debug_assertions)]
+mod qa_block {
+    use std::collections::HashSet;
+    use std::sync::{Arc, Mutex};
+
+    use engram_dashboard_agent::launch::{
+        BlockReason, LaunchBlocked, LaunchKit, LaunchKitSource, LaunchPlan, LaunchPorts,
+        NoopLaunchKits, PrepareError, Reason,
+    };
+    use engram_dashboard_agent::manager::AgentManager;
+    use engram_dashboard_agent::profile::AgentProfile;
+    use engram_dashboard_agent::types::AgentId;
+
+    /// A cwd containing this marker is blocked at every launch check — the pre-create check, so nothing is created.
+    const BEFORE_ADD_VAR: &str = "ENGRAM_QA_BLOCK_CWD";
+    /// A cwd containing this marker passes the first launch check of its profile id and is blocked at every later one
+    /// — the prelaunch after the add, so the agent stays registered and asleep with an `Other` mark.
+    const AFTER_ADD_VAR: &str = "ENGRAM_QA_BLOCK_AFTER_ADD_CWD";
+
+    pub(crate) struct QaBlockKits {
+        before_add: Option<String>,
+        after_add: Option<String>,
+        /// Ids whose first after-add check has passed.
+        passed_once: Mutex<HashSet<AgentId>>,
+    }
+
+    impl QaBlockKits {
+        pub(crate) fn new(before_add: Option<String>, after_add: Option<String>) -> Self {
+            Self {
+                before_add,
+                after_add,
+                passed_once: Mutex::new(HashSet::new()),
+            }
+        }
+    }
+
+    /// Plugs [`QaBlockKits`] when either env var is set (logged at `warn`); otherwise returns the manager as built.
+    pub(crate) fn plug_from_env(manager: AgentManager) -> AgentManager {
+        let read = |name| std::env::var(name).ok().filter(|v| !v.is_empty());
+        let (before_add, after_add) = (read(BEFORE_ADD_VAR), read(AFTER_ADD_VAR));
+        if before_add.is_none() && after_add.is_none() {
+            return manager;
+        }
+        tracing::warn!(
+            ?before_add,
+            ?after_add,
+            "QA launch-block hook active (debug build) — launches in matching folders are blocked"
+        );
+        manager.with_launch_ports(LaunchPorts {
+            kits: Arc::new(QaBlockKits::new(before_add, after_add)),
+            ..LaunchPorts::noop()
+        })
+    }
+
+    /// One reason ① `missing` naming the folder.
+    fn missing_folder(cwd: &str) -> LaunchBlocked {
+        LaunchBlocked {
+            reasons: vec![BlockReason::Missing {
+                item: cwd.to_string(),
+                via: Vec::new(),
+                reason: Reason {
+                    code: "not-found".into(),
+                    args: serde_json::json!({ "path": cwd }),
+                    line: None,
+                },
+            }],
+        }
+    }
+
+    impl LaunchKitSource for QaBlockKits {
+        fn check(&self, profile: &AgentProfile) -> Result<LaunchPlan, LaunchBlocked> {
+            let cwd = profile.cwd.to_string_lossy();
+            let names =
+                |marker: &Option<String>| marker.as_deref().is_some_and(|m| cwd.contains(m));
+            if names(&self.before_add) {
+                return Err(missing_folder(&cwd));
+            }
+            if names(&self.after_add)
+                && !self
+                    .passed_once
+                    .lock()
+                    .expect("QA kit set poisoned")
+                    .insert(profile.id)
+            {
+                return Err(missing_folder(&cwd));
+            }
+            NoopLaunchKits.check(profile)
+        }
+
+        fn prepare(
+            &self,
+            plan: LaunchPlan,
+            id: AgentId,
+            epoch: u32,
+        ) -> Result<LaunchKit, PrepareError> {
+            NoopLaunchKits.prepare(plan, id, epoch)
+        }
+
+        fn release(&self, id: AgentId, epoch: u32) {
+            NoopLaunchKits.release(id, epoch);
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use engram_dashboard_agent::profile::{AgentCommand, AgentOutputFormat};
+
+        fn profile_in(cwd: &str) -> AgentProfile {
+            AgentProfile::new(
+                "qa".into(),
+                AgentCommand::Claude {
+                    extra_args: Vec::new(),
+                    output_format: AgentOutputFormat::StreamJson,
+                },
+                cwd.into(),
+                Vec::new(),
+                false,
+            )
+        }
+
+        fn blocked_item(result: Result<LaunchPlan, LaunchBlocked>) -> String {
+            match result.expect_err("blocked").reasons.as_slice() {
+                [BlockReason::Missing { item, reason, .. }] if reason.code == "not-found" => {
+                    item.clone()
+                }
+                other => panic!("one missing reason expected: {other:?}"),
+            }
+        }
+
+        /// Built from the constructor, not the process env: the before-add marker blocks every check, the after-add
+        /// marker passes the first check per profile id and blocks the later ones, and other folders pass.
+        #[test]
+        fn the_qa_kit_blocks_the_marked_folders_on_the_right_check() {
+            let kits = QaBlockKits::new(Some("qa-block-me".into()), Some("qa-block-late".into()));
+
+            let early = profile_in("C:/qa/qa-block-me-1");
+            assert_eq!(blocked_item(kits.check(&early)), "C:/qa/qa-block-me-1");
+            assert_eq!(blocked_item(kits.check(&early)), "C:/qa/qa-block-me-1");
+
+            let late = profile_in("C:/qa/qa-block-late-1");
+            assert!(kits.check(&late).is_ok(), "the pre-create check passes");
+            assert_eq!(blocked_item(kits.check(&late)), "C:/qa/qa-block-late-1");
+            assert_eq!(blocked_item(kits.check(&late)), "C:/qa/qa-block-late-1");
+            let other_late = profile_in("C:/qa/qa-block-late-2");
+            assert!(kits.check(&other_late).is_ok(), "counted per profile id");
+
+            let plain = profile_in("C:/qa/plain");
+            assert!(kits.check(&plain).is_ok());
+            assert!(kits.check(&plain).is_ok());
+        }
     }
 }
 

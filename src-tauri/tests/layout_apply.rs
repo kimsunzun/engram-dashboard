@@ -42,8 +42,9 @@ use uuid::Uuid;
 use engram_dashboard_lib::commands::popout::{popup_label, PopupCounter};
 use engram_dashboard_lib::layout::apply::{
     self, AgentSpawner, DockDest, DockOutcome, DockRequest, LabelSource, LayoutEvents, MoveFailed,
-    MoveStep, NewWindow, SpareClaim, SubscriptionSync, TabBarSpot, TargetDest, TargetDockError,
-    TargetDockRequest, TargetError, WindowHost, WindowPlace, WindowTabsPayload,
+    MoveStep, NewWindow, SpareClaim, SpawnRefusal, SpawnedAgent, SubscriptionSync, TabBarSpot,
+    TargetDest, TargetDockError, TargetDockRequest, TargetError, WindowHost, WindowPlace,
+    WindowTabsPayload,
 };
 use engram_dashboard_lib::layout::bands::{attach_share, PointCss, SizeCss};
 use engram_dashboard_lib::layout::dock::{DockAnchor, DockSide, DOCK_NEW_SHARE};
@@ -410,7 +411,7 @@ impl LabelSource for Labels {
 
 struct Spawner {
     probe: Probe,
-    reply: Result<String, String>,
+    reply: Result<SpawnedAgent, SpawnRefusal>,
     calls: AtomicUsize,
     cwds: Mutex<Vec<String>>,
     /// ★Did the chosen backend reach the port★ — the spawn call count alone cannot tell whether that value flowed or not.
@@ -421,14 +422,20 @@ struct Spawner {
 
 impl Spawner {
     fn ok(state: &LayoutState, agent: Uuid) -> Self {
-        Spawner::new(state, Ok(agent.to_string()))
+        Spawner::new(
+            state,
+            Ok(SpawnedAgent {
+                id: agent.to_string(),
+                notices: Vec::new(),
+            }),
+        )
     }
 
     fn failing(state: &LayoutState) -> Self {
-        Spawner::new(state, Err("spawn 실패: 데몬 거절".to_string()))
+        Spawner::new(state, Err("spawn 실패: 데몬 거절".to_string().into()))
     }
 
-    fn new(state: &LayoutState, reply: Result<String, String>) -> Self {
+    fn new(state: &LayoutState, reply: Result<SpawnedAgent, SpawnRefusal>) -> Self {
         Spawner {
             probe: Probe::new(state),
             reply,
@@ -449,7 +456,7 @@ impl AgentSpawner for Spawner {
         &'a self,
         cwd: String,
         backend: Option<AgentBackendKind>,
-    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<SpawnedAgent, SpawnRefusal>> + Send + 'a>> {
         Box::pin(async move {
             // If one awaits inside the lock, the command future loses Send and does not even compile, but whether that wall stands is
             // also checked here (the same probe as the sibling port — with one wall it silently collapses).
@@ -2416,9 +2423,9 @@ async fn spawn_into_rejects_an_unknown_backend_before_spawning() {
     .await
     .unwrap_err();
 
-    assert!(err.contains("스폰 안 함"), "err={err}");
+    assert!(err.message.contains("스폰 안 함"), "err={err}");
     assert!(
-        err.contains("claude") && err.contains("codex"),
+        err.message.contains("claude") && err.message.contains("codex"),
         "무엇이 통하는지 말해야: {err}"
     );
     assert_eq!(spawner.calls(), 0, "★스폰 전에 거부★");
@@ -2531,7 +2538,7 @@ async fn spawn_into_rejects_slot_without_tab_before_spawning() {
     .await
     .unwrap_err();
 
-    assert!(err.contains("스폰 안 함"), "err={err}");
+    assert!(err.message.contains("스폰 안 함"), "err={err}");
     assert_eq!(spawner.calls(), 0, "orphan 탭 방지 가드 = pre-spawn");
 }
 
@@ -2561,7 +2568,7 @@ async fn spawn_into_reports_live_agent_when_placement_fails() {
 
     assert_eq!(spawner.calls(), 1, "스폰은 이미 일어났다(하드 롤백 없음)");
     assert!(
-        err.contains(&agent.to_string()),
+        err.message.contains(&agent.to_string()),
         "생존 agent id 를 오류에 박아 invisible 에이전트를 막는다: err={err}"
     );
 }
@@ -2594,7 +2601,7 @@ async fn spawn_into_takes_the_window_from_the_tab_and_refuses_a_foreign_one_befo
         .await
         .unwrap_err();
         assert_eq!(never.calls(), 0, "{tab}: 스폰하지 않는다");
-        assert!(err.contains("스폰 안 함"), "err={err}");
+        assert!(err.message.contains("스폰 안 함"), "err={err}");
         assert_eq!(w.version(), version);
     }
 
@@ -2613,7 +2620,7 @@ async fn spawn_into_takes_the_window_from_the_tab_and_refuses_a_foreign_one_befo
     )
     .await
     .unwrap();
-    assert_eq!(placed.out, agent.to_string());
+    assert_eq!(placed.out.id, agent.to_string());
     assert_eq!(
         (placed.at.window.as_str(), placed.at.view),
         (label.as_str(), foreign_tab)
@@ -2641,7 +2648,7 @@ async fn spawn_into_propagates_spawn_failure_untouched() {
     .await
     .unwrap_err();
 
-    assert_eq!(err, "spawn 실패: 데몬 거절");
+    assert_eq!(err, SpawnRefusal::from("spawn 실패: 데몬 거절".to_string()));
     assert_eq!(
         apply::list_tabs(&w.state, MAIN_WINDOW_LABEL)
             .unwrap()
@@ -2662,7 +2669,7 @@ async fn spawn_into_propagates_spawn_failure_untouched() {
 async fn spawn_into_passes_a_daemon_refusal_through_without_placing() {
     let w = World::new();
     let refusal = "backend 'codex' 는 아는 낱말이지만 이 표면으로는 지금 만들지 않는다 — 시험용 사유. 스폰 안 함.";
-    let spawner = Spawner::new(&w.state, Err(refusal.to_string()));
+    let spawner = Spawner::new(&w.state, Err(refusal.to_string().into()));
 
     let err = apply::spawn_into(
         &w.state,
@@ -2684,7 +2691,7 @@ async fn spawn_into_passes_a_daemon_refusal_through_without_placing() {
         &[Some(AgentBackendKind::Codex)],
         "고른 낱말이 포트까지 갔다"
     );
-    assert_eq!(err, refusal, "데몬 문구가 그대로 돌아온다");
+    assert_eq!(err.message, refusal, "데몬 문구가 그대로 돌아온다");
     assert_eq!(
         apply::list_tabs(&w.state, MAIN_WINDOW_LABEL)
             .unwrap()
@@ -2694,6 +2701,107 @@ async fn spawn_into_passes_a_daemon_refusal_through_without_placing() {
         "거절이면 탭도 안 만든다"
     );
     assert_eq!(w.resyncs(), 0);
+}
+
+/// ★The daemon's structured refusal reaches the caller whole★ (ADR-0348) — the block reasons and the created-asleep id
+/// travel next to the text, and the agent the daemon left asleep is not placed (it did not start).
+#[tokio::test]
+async fn spawn_into_passes_the_structured_daemon_refusal_through_without_placing() {
+    let w = World::new();
+    let asleep = Uuid::new_v4();
+    let refusal = SpawnRefusal {
+        message: format!("INTERNAL: agent 'a' ({asleep}) was created but did not start"),
+        launch_blocked: serde_json::json!({ "reasons": [{ "kind": "missing" }] })
+            .as_object()
+            .cloned(),
+        created_agent_id: Some(asleep),
+        live_agent_id: None,
+        notices: Vec::new(),
+    };
+    let spawner = Spawner::new(&w.state, Err(refusal.clone()));
+
+    let err = apply::spawn_into_placed(
+        &w.state,
+        &w.subs,
+        &w.ev,
+        &spawner,
+        None,
+        None,
+        None,
+        Some("claude".to_string()),
+        "C:/tmp".to_string(),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err, refusal);
+    assert_eq!(
+        apply::list_tabs(&w.state, MAIN_WINDOW_LABEL)
+            .unwrap()
+            .tabs
+            .len(),
+        1,
+        "the asleep agent is not placed"
+    );
+    assert_eq!(w.resyncs(), 0);
+}
+
+/// The notices of a spawn ride on its outcome — placed, or refused at placement (M11: the daemon may have recorded them
+/// as shown, so a placement failure must not drop them).
+// ADR-0348
+#[tokio::test]
+async fn the_spawn_notices_reach_the_caller_placed_or_not() {
+    let notices = vec![serde_json::json!({ "code": "skipped-field", "args": {}, "text": "t" })];
+    let started = |agent: Uuid| SpawnedAgent {
+        id: agent.to_string(),
+        notices: notices.clone(),
+    };
+
+    let w = World::new();
+    let agent = Uuid::new_v4();
+    let spawner = Spawner::new(&w.state, Ok(started(agent)));
+    let placed = apply::spawn_into_placed(
+        &w.state,
+        &w.subs,
+        &w.ev,
+        &spawner,
+        None,
+        None,
+        None,
+        None,
+        "C:/tmp".to_string(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(placed.out, started(agent));
+
+    let w = World::new();
+    let main = w.main_active();
+    let taken = w.empty_slot(main);
+    w.put_agent(main, taken);
+    let agent = Uuid::new_v4();
+    let spawner = Spawner::new(&w.state, Ok(started(agent)));
+    let err = apply::spawn_into_placed(
+        &w.state,
+        &w.subs,
+        &w.ev,
+        &spawner,
+        None,
+        Some(main),
+        Some(taken),
+        None,
+        "C:/tmp".to_string(),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.message.contains(&agent.to_string()), "{err}");
+    assert_eq!(err.notices, notices, "placement failed after the spawn");
+    assert_eq!(
+        err.live_agent_id,
+        Some(agent.to_string()),
+        "the running agent, by id"
+    );
+    assert_eq!((err.launch_blocked, err.created_agent_id), (None, None));
 }
 
 // ── set_split_ratio (ADR-0227 — the layout notification only on Applied) ──────
@@ -6079,7 +6187,7 @@ async fn spawn_into_at_places_the_agent_in_the_slot_the_word_picks() {
     )
     .await
     .unwrap();
-    let (id, found) = (placed.out, placed.at);
+    let (id, found) = (placed.out.id, placed.at);
     assert_eq!(id, agent.to_string());
     assert_eq!(found, at(MAIN_WINDOW_LABEL, main, Some(right)));
     assert_eq!(

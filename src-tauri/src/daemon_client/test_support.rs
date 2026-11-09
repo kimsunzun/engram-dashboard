@@ -20,7 +20,8 @@ use crate::layout::commands::{make_table, LayoutPorts, CATALOG_VERSION};
 use crate::layout::window_ctl::{Activation, Applied, OsWindowState, WindowAction, WindowControl};
 use crate::layout::{
     tree, AgentSpawner, LayoutEvents, LayoutState, MoveFailed, MoveStep, SlotContent, SpareClaim,
-    ViewManager, ViewSnapshot, WindowHost, WindowPlace, WindowTabsPayload, MAIN_WINDOW_LABEL,
+    SpawnRefusal, SpawnedAgent, ViewManager, ViewSnapshot, WindowHost, WindowPlace,
+    WindowTabsPayload, MAIN_WINDOW_LABEL,
 };
 use crate::settings::{SettingsEvents, SettingsService, SettingsSnapshot};
 use crate::theme::{EffectiveThemes, ThemeControl, ThemeWindows, UiSettingsPayload};
@@ -262,8 +263,9 @@ impl AgentSpawner for NoSpawner {
         &'a self,
         _cwd: String,
         _backend: Option<AgentBackendKind>,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send + 'a>> {
-        Box::pin(async { Err("이 시험은 스폰하지 않는다".to_string()) })
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<SpawnedAgent, SpawnRefusal>> + Send + 'a>>
+    {
+        Box::pin(async { Err("이 시험은 스폰하지 않는다".to_string().into()) })
     }
 }
 

@@ -20,7 +20,7 @@
 use std::fmt;
 
 use engram_dashboard_command::CommandEnvelope;
-use engram_dashboard_protocol::{AgentCommand, AgentEvent, RequestId};
+use engram_dashboard_protocol::{AgentCommand, AgentEvent, AgentId, RequestId};
 use serde_json::value::RawValue;
 
 // ── 명령 칸 끝자락 · request_id 추출(request/reply 상관) ──────────────────────────────
@@ -259,14 +259,21 @@ pub fn event_reply_request_id(ev: &AgentEvent) -> Option<RequestId> {
 /// 출처를 안 보는 호출자는 데몬 문구 원문 · 로컬 문구를 바이트 그대로 받는다.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandFailure {
-    Daemon { message: String },
+    /// `launch_blocked` · `created_agent_id` = the `AgentEvent::Error` fields of the same names, copied as received
+    /// (absent = the daemon sent none). `Display` shows `message` only.
+    // ADR-0348
+    Daemon {
+        message: String,
+        launch_blocked: Option<serde_json::Map<String, serde_json::Value>>,
+        created_agent_id: Option<AgentId>,
+    },
     Local(String),
 }
 
 impl fmt::Display for CommandFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            CommandFailure::Daemon { message } | CommandFailure::Local(message) => {
+            CommandFailure::Daemon { message, .. } | CommandFailure::Local(message) => {
                 f.write_str(message)
             }
         }
@@ -282,7 +289,16 @@ impl fmt::Display for CommandFailure {
 /// 답했으면 `Daemon` 이다(코드 추가는 허용된 확장 — `engram_dashboard_command::ErrorCode` doc).
 pub fn classify_reply(slot: Result<AgentEvent, String>) -> Result<AgentEvent, CommandFailure> {
     match slot {
-        Ok(AgentEvent::Error { message, .. }) => Err(CommandFailure::Daemon { message }),
+        Ok(AgentEvent::Error {
+            message,
+            launch_blocked,
+            created_agent_id,
+            ..
+        }) => Err(CommandFailure::Daemon {
+            message,
+            launch_blocked,
+            created_agent_id,
+        }),
         Ok(other) => Ok(other),
         Err(local) => Err(CommandFailure::Local(local)),
     }
@@ -534,6 +550,7 @@ mod tests {
                 request_id: Some(r),
                 message: "x".into(),
                 launch_blocked: None,
+                created_agent_id: None,
             }),
             Some(r),
             "Error{{Some}} 은 특정 명령 실패 — 매칭"
@@ -543,6 +560,7 @@ mod tests {
                 request_id: None,
                 message: "x".into(),
                 launch_blocked: None,
+                created_agent_id: None,
             }),
             None,
             "Error{{None}} 은 명령 무관 — 매칭 안 함"
@@ -585,6 +603,7 @@ mod tests {
                 request_id: Some(r),
                 message: message.into(),
                 launch_blocked: None,
+                created_agent_id: None,
             }));
             match classified {
                 Err(failure @ CommandFailure::Daemon { .. }) => {
@@ -606,6 +625,30 @@ mod tests {
             Ok(AgentEvent::Ack { request_id }) => assert_eq!(request_id, r),
             other => panic!("Ack 은 Ok 그대로여야: {other:?}"),
         }
+    }
+
+    /// The structured fields of a daemon `Error` survive the sort — the shell bus `agent.spawnInto` answers with them
+    /// (`args.reasons` · `args.agent_id`) and has nothing else to read them from.
+    // ADR-0348
+    #[test]
+    fn classify_reply_keeps_the_launch_block_and_the_created_agent() {
+        let blocked = serde_json::json!({ "reasons": [{ "kind": "missing", "item": "C:/gone" }] });
+        let blocked = blocked.as_object().cloned();
+        let created = uuid::Uuid::new_v4();
+        let classified = classify_reply(Ok(AgentEvent::Error {
+            request_id: Some(RequestId::new()),
+            message: "INTERNAL: agent 'a' was created but did not start".into(),
+            launch_blocked: blocked.clone(),
+            created_agent_id: Some(created),
+        }));
+        assert_eq!(
+            classified.expect_err("a daemon Error"),
+            CommandFailure::Daemon {
+                message: "INTERNAL: agent 'a' was created but did not start".into(),
+                launch_blocked: blocked,
+                created_agent_id: Some(created),
+            }
+        );
     }
 
     // ── 명령 칸 끝자락 · 명령↔답장 쌍(ADR-0272 결정 4) ──────────────────────────────────

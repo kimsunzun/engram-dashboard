@@ -2713,10 +2713,11 @@ fn writer_loop(
             //   않았다.** 지금은 활성화 입구 둘(`AgentManager::activate_profile` 의 Fresh 갈래 ·
             //   `AgentManager::restore_one` 의 비-이어받기 갈래)이 같은 판정을 돌므로 두 모드 모두
             //   주인이 있다(`AgentManager::spawn_fresh_settled`).
-            // ★주인이 없는 갈래가 하나 남지만 **오늘은 여기 닿지 않는다**★: `AgentManager::spawn_agent`
-            //   을 직접 부르는 즉석 생성(데몬의 by-cwd 갈래)은 배달함을 그대로 버린다. 그 입구가 codex 에
-            //   주는 출력 형식이 **터미널**이라 이 통로 자체가 안 뜨는 것이 그 갈래를 무해하게 만드는
-            //   전부다 — 그 기본값이 app-server 로 바뀌는 날 이 구멍이 그대로 열린다.
+            // ★The ad-hoc create has an owner too (TRD S25 step 20 · ADR-0348)★: the daemon's by-cwd create no
+            //   longer calls `AgentManager::spawn_agent` and drops the delivery box. It goes through the one creation
+            //   body (`commands::create_and_start` → `AgentManager::create_and_activate`), which takes the same Fresh
+            //   activation path as above, so the verdict sees this `Down` whatever output format the codex start
+            //   uses. Pinned by the manager test that reads `create_and_activate`'s body (no `spawn_agent`).
         }
     }
 

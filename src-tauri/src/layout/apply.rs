@@ -236,20 +236,62 @@ pub trait LabelSource: Send + Sync {
     fn next_label(&self) -> String;
 }
 
-/// 에이전트 스폰 포트 — 성공 시 agent id. ★락 미보유 상태에서 await 된다★(데몬 왕복).
+/// Agent spawn port — creates a new agent for `cwd` and starts it. ★Awaited with no lock held★ (a daemon round trip).
 ///
-/// 반환 오류는 그대로 호출자에게 나간다(fail-loud). 응답 해석(어떤 프레임이 성공인가)은 구현 몫이다 —
-/// 그건 전송 계약이라 이 서비스가 알 일이 아니다.
+/// The refusal goes out to the caller as is (fail-loud). Reading the reply (which frame is success) is the
+/// implementation's job — that is a transport contract this service does not know.
 ///
-/// `backend` 가 **wire 어휘 그대로**인 이유: 여기서 자체 어휘를 세우면 셸이 통과시킨 낱말과 데몬이 아는
-/// 낱말이 갈릴 수 있고, 그 갈림은 조용히 다른 백엔드가 뜨는 형태로만 발현한다. `None` = 고르지 않음 —
-/// **데몬이 거절한다**(셸은 기본값을 지어내지 않는다).
+/// `backend` is **the wire vocabulary as is**: a vocabulary of its own here could let the word the shell passes and
+/// the word the daemon knows drift apart, and that drift shows only as a different backend starting silently.
+/// `None` = not chosen — **the daemon refuses it** (the shell invents no default).
 pub trait AgentSpawner: Send + Sync {
     fn spawn_by_cwd<'a>(
         &'a self,
         cwd: String,
         backend: Option<AgentBackendKind>,
-    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = Result<SpawnedAgent, SpawnRefusal>> + Send + 'a>>;
+}
+
+/// A started agent. `notices` = the daemon's launch notice rows (`AgentEvent::Spawned.notices`, `[]` when absent),
+/// passed on undecoded — the shell does not know the agent types (ADR-0270).
+// ADR-0348
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpawnedAgent {
+    pub id: String,
+    pub notices: Vec<serde_json::Value>,
+}
+
+/// Why a spawn-and-place did not end placed. `message` is the whole text (`Display`); the other fields are the
+/// structured part a bus answer carries as `args`:
+/// - `launch_blocked` = the daemon's `{"reasons": […]}` object, verbatim;
+/// - `created_agent_id` = the daemon added this agent to the roster and it did not start — it is asleep and not placed;
+/// - `live_agent_id` = a spawn succeeded before the placement failed — this agent runs and is not placed;
+/// - `notices` = the rows of that spawn — the daemon may have recorded them as shown, so they must reach the caller
+///   with the failure.
+///
+/// A refusal of the shell's own (validation, placement) has only `message` and, after a spawn, `live_agent_id` and
+/// `notices`.
+// ADR-0348
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{message}")]
+pub struct SpawnRefusal {
+    pub message: String,
+    pub launch_blocked: Option<serde_json::Map<String, serde_json::Value>>,
+    pub created_agent_id: Option<engram_dashboard_protocol::AgentId>,
+    pub live_agent_id: Option<String>,
+    pub notices: Vec<serde_json::Value>,
+}
+
+impl From<String> for SpawnRefusal {
+    fn from(message: String) -> Self {
+        SpawnRefusal {
+            message,
+            launch_blocked: None,
+            created_agent_id: None,
+            live_agent_id: None,
+            notices: Vec::new(),
+        }
+    }
 }
 
 // 창이 이미 없으면 None → 탭 알림 스킵(예: 팝업 마지막 탭 close 로 창 엔트리가 방금 제거됨).
@@ -831,7 +873,7 @@ pub async fn spawn_into(
     slot: Option<Uuid>,
     backend: Option<String>,
     cwd: String,
-) -> Result<String, String> {
+) -> Result<String, SpawnRefusal> {
     spawn_into_placed(
         state,
         subs,
@@ -844,12 +886,13 @@ pub async fn spawn_into(
         cwd,
     )
     .await
-    .map(|placed| placed.out)
+    .map(|placed| placed.out.id)
 }
 
-/// [`spawn_into`] 의 결말판 — 띄운 에이전트 id(`out`) · 놓인 자리 · 그 탭의 배치 줄(놓은 그 락에서 뜬다 · TRD S28 §7).
-/// `window` = 놓을 창 — `None` 이면 `tab` 을 준 경우 그 탭의 창, 아니면 main. 거절 문구는 `spawn_into` 와 같다.
-// ADR-0307
+/// The outcome form of [`spawn_into`] — the started agent (`out`, with its launch notices), where it was placed and
+/// that tab's layout rows (taken under the lock that placed it · TRD S28 §7). `window` = the window to place in — `None`
+/// = the tab's window when `tab` is given, else main. The refusal texts are those of `spawn_into`.
+// ADR-0307 · ADR-0348
 pub async fn spawn_into_placed(
     state: &LayoutState,
     subs: &dyn SubscriptionSync,
@@ -860,7 +903,7 @@ pub async fn spawn_into_placed(
     slot: Option<Uuid>,
     backend: Option<String>,
     cwd: String,
-) -> Result<Wrote<String>, String> {
+) -> Result<Wrote<SpawnedAgent>, SpawnRefusal> {
     // ── 0) 스폰 전 검증(에이전트 생성 이전이라 alive_err 불필요 — 아직 아무것도 안 죽음) ──────────────
     let backend = match backend.as_deref().map(str::trim).filter(|b| !b.is_empty()) {
         None => None,
@@ -869,7 +912,8 @@ pub async fn spawn_into_placed(
     if tab.is_none() && slot.is_some() {
         return Err(
             "새로 생성될 탭에 특정 slot 을 지정할 수 없음 — slot 을 생략하거나 tab 을 지정하시오. 스폰 안 함."
-                .to_string(),
+                .to_string()
+                .into(),
         );
     }
     // 탭을 주면 그 탭의 창에 놓는다 — 창이 그 탭의 주인이 아니면 띄우지 않는다. 띄운 뒤에 알면 놓을 곳 없는 에이전트가
@@ -930,11 +974,12 @@ pub enum SpawnAtError {
     /// 그 밖 — 문구는 [`spawn_into`] 의 것과 같은 꼴이다(스폰 전 거절은 「스폰 안 함」, 스폰 뒤 배치 실패는 살아 있는
     /// 에이전트 id).
     #[error("{0}")]
-    Failed(String),
+    Failed(SpawnRefusal),
 }
 
-/// [`spawn_into`] 의 공간 낱말판 — 창 `window` 의 보이는 탭에서 `at` 이 집는 칸에 띄운다. 그 칸은 비어 있어야 한다
-/// (`resolve_spawn_slot` 의 점유 판정). 결말 = 에이전트 id(`out`) · 푼 자리 · 그 탭의 배치 줄(놓은 그 락에서 뜬다).
+/// The spatial-word form of [`spawn_into`] — starts the agent in the slot `at` picks in window `window`'s shown tab.
+/// That slot must be empty (`resolve_spawn_slot`'s occupancy check). Outcome = the started agent (`out`), the resolved
+/// place and that tab's layout rows (taken under the lock that placed it).
 ///
 /// 낱말은 두 번 푼다(TRD S28 §5-2): 스폰 전 락에서 한 번 — 못 집거나 점유면 스폰하지 않고 끝낸다 — 그리고 배치 락(스폰 뒤
 /// 첫 락)에서 다시 — 스폰하는 사이 배치가 바뀌어 그때 못 집거나 점유거나 ★확인한 칸과 다른 칸을 집으면★(상대 낱말은 포커스를
@@ -949,10 +994,10 @@ pub async fn spawn_into_at(
     at: SpatialToken,
     backend: Option<String>,
     cwd: String,
-) -> Result<Wrote<String>, SpawnAtError> {
+) -> Result<Wrote<SpawnedAgent>, SpawnAtError> {
     let backend = match backend.as_deref().map(str::trim).filter(|b| !b.is_empty()) {
         None => None,
-        Some(word) => Some(parse_backend(word).map_err(SpawnAtError::Failed)?),
+        Some(word) => Some(parse_backend(word).map_err(|e| SpawnAtError::Failed(e.into()))?),
     };
     let target = Target::At {
         token: at,
@@ -988,9 +1033,11 @@ fn spawn_slot_at(mgr: &ViewManager, target: &Target) -> Result<(ViewId, Uuid), T
     Ok((at.view, slot))
 }
 
-// 스폰(락 미보유 async — 데몬 왕복) 뒤 배치(락 보유 단일 임계구역). `place` = 그 락 안에서 (탭, 빈 칸)을 고른다 —
-//   실패 문구는 살아 있는 에이전트 id 를 붙여 낸다(spawn-first — 위 「실패 가시성」). 결말 = 에이전트 id · 놓인 자리 · 그
-//   탭의 배치 줄(같은 락).
+// Spawn (async with no lock held — a daemon round trip), then place (one critical section under the lock). `place`
+//   picks (tab, empty slot) under that lock. A placement failure names the live agent id (spawn-first — 「실패 가시성」
+//   above) and keeps the spawn's notices (M11). Outcome = the started agent · where it was placed · that tab's layout
+//   rows (same lock).
+// ADR-0348
 async fn spawn_then_place(
     state: &LayoutState,
     subs: &dyn SubscriptionSync,
@@ -1000,13 +1047,22 @@ async fn spawn_then_place(
     backend: Option<AgentBackendKind>,
     cwd: String,
     place: impl FnOnce(&mut ViewManager) -> Result<(ViewId, Uuid), String>,
-) -> Result<Wrote<String>, String> {
+) -> Result<Wrote<SpawnedAgent>, SpawnRefusal> {
     // ── 1) 스폰(락 미보유 async — 데몬 왕복) ──────────────────────────────────────────────────
-    let agent_id = spawner.spawn_by_cwd(cwd, backend).await?;
+    let spawned = spawner.spawn_by_cwd(cwd, backend).await?;
+    let agent_id = spawned.id.clone();
 
     // ── 2) 배치(락 보유 단일 임계구역) ────────────────────────────────────────────────────────
     let alive_err = |detail: String| {
-        format!("배치 실패({detail}) — 에이전트 {agent_id} 는 살아있음(list_agents 로 재부착 가능)")
+        SpawnRefusal {
+        message: format!(
+            "배치 실패({detail}) — 에이전트 {agent_id} 는 살아있음(다시 띄우지 말고 layout.setSlotContent <칸> --content Agent --assign {agent_id} 로 붙인다 · agent.list 에 있다)"
+        ),
+        launch_blocked: None,
+        created_agent_id: None,
+        live_agent_id: Some(agent_id.clone()),
+        notices: spawned.notices.clone(),
+    }
     };
     let (view_id, target_slot, layout, tabs, rows) = {
         // 락 획득 실패(mutex poison)도 생존 agent id 를 남긴다(FIX 4 — id 유실 금지).
@@ -1036,7 +1092,7 @@ async fn spawn_then_place(
             view: view_id,
             slot: Some(target_slot),
         },
-        out: agent_id,
+        out: spawned,
         rows,
     })
 }

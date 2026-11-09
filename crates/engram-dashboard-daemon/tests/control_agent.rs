@@ -609,24 +609,27 @@ async fn the_state_a_mutation_reports_is_the_state_the_roster_reports() {
     f.shutdown_agents();
 }
 
-/// 만들기+띄우기에서 **기계와 무관하게 확정적인 부분만** 엄격히 본다: 등록 1건 · 통지 **등록분 + 활성화
-/// 결말분** · 명부 등장 · 응답이 상태 어휘 안의 값만 싣는 것. 시동 성패 자체는 claude 유무에 달려 있어
-/// (claude 에이전트를 만든다) 여기서 단언하지 않는다 — 시동의 회귀는 위 셸 백엔드 테스트가 결정적으로 본다.
+/// Create-and-start, checking strictly only what does not depend on the machine: one registration · one roster
+/// announcement, after the activation (one `roster_changed` = one profile-list + agent-list frame pair) · the row in
+/// the roster · an answer whose state is a word of the vocabulary. Whether the start succeeds depends on claude being
+/// installed (this creates a claude agent), so it is not asserted here — the shell-backend tests above pin the start.
+// ADR-0348
 #[tokio::test]
-async fn spawn_with_cwd_registers_once_and_announces_both_steps() {
+async fn spawn_with_cwd_registers_once_and_announces_once_after_the_start() {
     let f = fixture("spawn-create").await;
     let cwd = std::env::temp_dir().to_string_lossy().to_string();
     let (status, body) = f
         .post(serde_json::json!({ "verb": "spawn", "cwd": cwd, "name": "newborn" }))
         .await;
     assert_eq!(status, reqwest::StatusCode::OK, "{body}");
-    // 등록 직후 한 번 + 활성화 결말 직후 한 번(ADR-0172). 둘 다 시동 성패와 무관하게 나간다 — 실패
-    //   갈래에서 특히 필요하다(그때 화면에 남는 것은 이 통지가 나른 「마지막 실패」뿐이다).
+    // Once, after the activation, whether the start succeeded or not — the failure branch needs it most (the
+    //   last failure this frame carries is all the screen shows then). No frame before the activation (TRD S25 step
+    //   20 M3).
     // ADR-0172
     assert_eq!(
         f.broadcast.count(),
-        2,
-        "등록 통지 + 활성화 결말 통지(시동 성패와 무관): {body}"
+        1,
+        "one announcement after the activation, whatever the start did: {body}"
     );
 
     match body["status"].as_str() {
