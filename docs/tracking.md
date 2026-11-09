@@ -10,6 +10,7 @@
 
 | ID | 제목(짧게) | 구역 | 상태 |
 |---|---|---|---|
+| T-81 | Split the tray out of the app (client) process | 메인 | Not started — idea/refactor; keep as is for now (user 2026-11-09) |
 | T-77 | LLM control — remaining gaps (moved from todo) | 메인 | Waiting for trigger — close each gap when its feature is touched |
 | T-66 | 창 크롬 · 이름(크롬식 제목 표시줄 · 창 번호 재사용 · 창 제목) | 메인 | 진행 — `v0.5.0/feat/window-chrome`(S26) · U1–U9 구현 · U10 문서 착지(2026-10-26) · 사람 손 GUI 확인 2026-10-26(S13 · S14 통과) · 남은 것 = push · CI · master 머지 |
 | T-65 | 슬롯 도킹 LLM 명령(`tab.dock` · `layout.get`) | 메인 | 진행 — S28 `v0.5.0/feat/llm-layout-commands` · U1–U3 구현 · push(`2710e14f` CI 진행 중) · `/qa standard` PASS · 남은 것 = U4 문서 커밋 · GUI 실측 · master 머지 · TRD §11 결정 일곱 사용자 확인 |
@@ -26,7 +27,7 @@
 | T-9 | claude 프로세스 풀링 | 메인 | 보류 |
 | T-6 | cwd 워크스페이스 검증 | 메인 | 보류 — 운영 단계 |
 | T-78 | In-app codex terminal on codex 0.163.0 — alt-screen · mouse tracking (S21 TRD §6-F) | 버그 | Open — user decision on the default |
-| T-52 | graceful 데몬 끄기 결과가 `Timeout` | 버그 | 미착수 · 원인 미규명(커밋 가름만) · 3단계 자리 추정 |
+| T-52 | Graceful daemon stop returned `Timeout` | 버그 | Closed by S21 3-2 U5a (`b85c0aaa`) — real-daemon stop test passes with `outcome=Closed`; remove once master has it |
 | T-45 | 스폰 이름 중복 · codex 가 claude 로 보임 | 버그 | 보류 — id 전환과 묶음 |
 | T-39 | 실패·거절된 사용량 값 흐리게 | 버그 | 보류 — 사용량 작업과 묶음 |
 | T-28 | 갓 스폰된 수신자가 편지 미제출 | 버그 | 원인 규명 · 미착수 |
@@ -48,8 +49,9 @@
 | T-58 | 메뉴발 명령 · 프리셋 변경 실패가 화면에 안 보인다 | 버그 | 미착수 · 선재(프론트) |
 | T-59 | Job 멤버 명단이 「멤버 수 ≠ 명단 수」로 4 번 안에 완전해지지 않는 flake | 버그 | 미착수 · 선재(platform) · CI 1 회 관측 |
 | T-64 | 합쳐진 replay 의 후속 Subscribe 가 창 닫힌 뒤 나가 구독이 샌다 | 버그 | 미착수 · 선재 |
-| T-79 | Shell–daemon link freezes while still showing "connected" (killing a PTY agent mid-burst) | 버그 | Fixed on `v0.5.0/fix/pty-kill-hang` (S34, `75de8476`) — not pushed/merged yet |
+| T-79 | Shell–daemon link freezes while still showing "connected" (killing a PTY agent mid-burst) | 버그 | Fixed — merged to master (S34, `baa97e41`); remove when convenient |
 | T-80 | A spewing agent shown in a slot makes the daemon close the connection on a full send queue → reconnect/replay storm | 버그 | Not started · pre-existing (old driver too) · found by S34 QA |
+| T-82 | Daemons from releases before ADR-0264 write `daemon.json` at the data-folder root — the current app cannot find them | 버그 | Investigating |
 | T-71 | 트래킹 번호를 가리키지 않기 — 해결되면 그냥 지우기 | 사소한 기능·정리 | 할 일 — 나중에 이슈로 |
 | T-70 | 브랜치 앞 버전 짐작 기준 — 기능이면 0.5.0 쪽 | 사소한 기능·정리 | 할 일 — 나중에 이슈로 |
 | T-69 | 스텝 번호 규약 — 새 주제마다 S번호 | 사소한 기능·정리 | 일부 됨 · 남은 것 = 자잘한 커밋 접두 |
@@ -66,6 +68,11 @@
 | T-16 | 프론트 종료 판정 · 세대 필터 | 사소한 기능·정리 | 잔존 · T-32 선결 |
 
 ## 메인
+
+### T-81. Split the tray out of the app (client) process
+- **Status:** not started — idea/refactor. Keep the current shape for now (user 2026-11-09: 「트레이는 지금 클라에 종속되어있는데 분리해야되긴함. 일단은 이대로」).
+- **Fact:** the tray is part of the app process today, so it lives and dies with the client. The user wants it split from the client later.
+- **Next:** when picked up, decide where the tray lives (its own process or with the daemon) and how its stop path relates to the shell's single stop path (ADR-0350).
 
 ### T-77. LLM control — operations the formal surfaces do not reach yet
 - **Status:** waiting for trigger — close each gap when work touches that feature. Moved from `docs/todo/llm-control-gaps.md` on 2026-11-03 (`docs/README.md`: new items go here, not to `todo.md`). Principle = CLAUDE.md 「LLM-우선 제어」. Formal surfaces = daemon bus · front `__engramCmd`.
@@ -177,13 +184,11 @@
 - **Problem:** `docs/process/S21-codex-backend/trd.md` §6-F assumed codex already runs inline without a flag. On codex 0.163.0 the operating codex terminal tab runs in alt-screen with mouse tracking (S31 qa, 2026-11-02).
 - **Observed in the app (S32 qa, 2026-11-03 — observation only):** the folder-trust prompt appears · the xterm has no scrollback · the mouse wheel goes to codex, not to the xterm buffer.
 
-### T-52. graceful 데몬 끄기(`send_stop`)의 결과가 `DaemonClosed` 대신 `Timeout` 이다 — 데몬은 실제로 내려간다
-- **상태:** 미착수(2026-10-07 발견 — 경계 리팩터링 2-2 U3 의 실 레인 · GUI 실측). 원인은 찾지 않았다. 2-2 에서 고치지 않았다 — 「데몬 수신 루프를 건드려야 해 3단계(transport) 자리」는 추정이다(가름이 수신 루프 커밋을 가리킬 뿐이고, 고칠 자리가 클라이언트 `stop.rs` 일 수도 있다).
-- **문제:** 트레이 「데몬 끄기」 · `quit_app` 이 부르는 `send_stop`(`src-tauri/src/daemon_client/stop.rs`)이 `Timeout` 을 돌려준다. 기대 = `DaemonClosed`(데몬이 연결을 닫는 꺼짐 확정 신호 — `src-tauri/tests/stop_smoke.rs` 의 `send_stop_makes_real_daemon_self_exit` 가 이것을 단언하고, 지금 이 시험이 진다). GUI `quit_app` 로그의 `outcome` 도 `Timeout` 이었다. 데몬 프로세스는 실제로 내려간다.
-- **가름(실측):** `e3e42de` 통과 · `73ecdb8`(ADR-0206 — 수신 루프가 명령을 붙들지 않게 · 2026-09-18) 실패 · `367a154`(2-2 착수 전) 실패 → 2-2 무관.
-- **영향(코드 읽기 · 미검):** ① 트레이 「데몬 끄기」는 `Timeout` 을 불확실로 보고 꺼짐 확정 경로(`force_daemon_down` — 회색 확정 + 억제창)를 건너뛰어 생존 probe(`refresh_tray_icon`)로 돌아간다(`src-tauri/src/tray/mod.rs` 의 끄기 분기 · `icon_state_for_stop_outcome`). 그 probe 경로가 `StopOutcome` 이 생긴 이유인 race 자리다 — 데몬이 죽기 직전 수 ms 동안 살아 보여 아이콘이 컬러로 고착된다(step-log 의 `71f3e00` 항목). ② `quit_app` 은 `app.exit` 전에 `send_stop` 을 동기로 부른다(`src-tauri/src/tray/actions.rs`). 코드상 `Timeout` 은 두 갈래다 — 읽기 시한 `STOP_WS_TIMEOUT`(3초 — `stop.rs` · IO `WouldBlock`/`TimedOut`)이 다 차거나, IO 가 아닌 WS 오류(`Err(_)` 갈래 — 예: 닫기 핸드셰이크 없는 끊김 같은 프로토콜 오류)에서 곧바로 — 시한 아닌 IO 오류는 `DaemonClosed` 다. QA 실측은 3초 대기가 아니라 이른 반환이었다(끊김이 같은 밀리초 · 시험 한 번 약 1.2초). 어느 갈래인지는 미검.
-- **다음:** 원인을 찾는다 — `73ecdb8` 이 바꾼 데몬 수신 루프와 클라이언트 `stop.rs` 의 drain read 양쪽.
-- **근거:** 커밋 `b42e139` · `d2f9822` 본문 · step-log 2-2 항목
+### T-52. Graceful daemon stop returned `Timeout` instead of `DaemonClosed` — the daemon did go down
+- **Status:** closed by S21 stage 3-2 U5a (`b85c0aaa`, 2026-11-09, on `v0.4.1/refactor/transport-attach`). Remove this entry once that branch is merged to master. Found 2026-10-07 (crate-boundary 2-2 U3 real-daemon lane and GUI check).
+- **What was wrong:** the tray "stop daemon" and `quit_app` called the old sync client `send_stop` (`src-tauri/src/daemon_client/stop.rs`), which returned `Timeout` although the daemon process exited. By code reading (not verified), the tray then skipped the confirmed-down path and fell back to the liveness probe.
+- **Root cause (evidence in `src-tauri/tests/stop_smoke.rs` diagnostics; TRD `docs/process/S21-crate-boundaries/trd-3-2-u5-stop-and-band.md` §2 / §3-4):** the old client closed its socket right behind `StopDaemon`; the daemon's reply write then failed and the daemon aborted its dispatch on that failed write, so the client never saw the clean close. Bisect from the time: `e3e42de` passes, `73ecdb8` (ADR-0206) fails.
+- **Fix:** U5a removed the old sync client. The shell's stop path now runs on the transport (`src-tauri/src/daemon_client/link/stop.rs`, `src-tauri/src/daemon_client/shutdown.rs`), and the daemon runs the `StopDaemon` shutdown in a task that a connection abort cannot cancel. The re-aimed real-daemon test `stop_flight_makes_a_real_daemon_exit_gracefully` passes with `outcome=Closed`.
 
 ### T-45. 에이전트가 에이전트를 스폰할 때 같은 이름이 통과한다 · codex 로 띄운 쪽이 메인 화면에서 claude 로 보인다
 - **상태:** 보류(사용자 결정 2026-09-28 — 이름 → 내부 id 전환 때 같이 묶는다 · T-29 가 그중 우편함 조각). 옛 번호 = T-39(`v0.3.3/feat/chat-ux` 브랜치 기록에서 이 주제를 가리키는 「T-39」).
@@ -321,7 +326,7 @@
 - **근거:** `process/S21-slot-docking/trd.md` 5.8판 §1-2 「닫히는 창」(지금 7판에는 그 절이 없다 — 백업 `.claude/handoff/attachments/trd-5.8-before-chrome-2026-10-18.md`) · 3단계 리뷰(codex FIX 1 · doc-aware 「추적만」)
 
 ### T-79. Shell–daemon link freezes while still showing "connected"
-- **Status:** fixed on branch `v0.5.0/fix/pty-kill-hang` (topic S34, commit `75de8476` — review + QA PASS; push/merge waits for the user). Remove this entry once merged. Reproduced on the old driver (`0d4f79d1`, 1/1) and on the 3-2 U4a tree (2/5); found 2026-11-07 by the U4a GUI QA.
+- **Status:** fixed and merged to master (topic S34, branch `v0.5.0/fix/pty-kill-hang`, fix commit `75de8476`, merge `baa97e41`, 2026-11-08). Remove this entry when convenient. Reproduced on the old driver (`0d4f79d1`, 1/1) and on the 3-2 U4a tree (2/5); found 2026-11-07 by the U4a GUI QA.
 - **Repro (QA, isolated data dir, non-token fixture agent printing a 20000-line burst then a line every 20 ms):** spawn it; open an extra `subscribeOutput` view on no slot (its watchdog asks for replay every 11 s); after ~30 s put the agent on a slot (replay gen 1); the stray view's next asks go out as real replays (gen 2, gen 3); ~0.3 s after gen 3 spawn and kill a second agent.
 - **Symptom:** the daemon carries out the kill but its reply never arrives; from then on every request fails at 30 s with the reply-timeout text; output freezes in every view; `daemon_connection_state` stays `connected` for 3–4+ minutes — neither the shell keepalive nor the daemon idle check cuts the link. Both sides idle on CPU; the shell actor still answers; the daemon still serves other clients but ignores commands on the stuck connection. `daemon_close` + `daemon_ensure` recovers on a new connection; the old socket stays in FinWait2 on the shell side.
 - **Cause (confirmed by investigation + probes; S34 TRD §2):** not the shell. The daemon ran `Kill` inline on the connection's async dispatch task; `PtyTransport::shutdown` stopped the pump's reads and then dropped the master, so `ClosePseudoConsole` blocked forever on undrained conhost output; the blocked worker also starved the connection's writer (tokio LIFO slot), and the daemon's read side kept answering pings, so neither keepalive fired. The earlier suspicion (shell stops reading / daemon blocked in a send) was refuted.
@@ -331,6 +336,11 @@
 - **Symptom:** while an agent that writes ~1.5 MB per call is shown in a slot, the connection drops and reconnects every ~20–35 ms; commands sent meanwhile fail fast ("connection lost" / handshake ended) and output stalls until the slot is emptied. No wedge — it stops once the agent is no longer shown.
 - **Observed mechanism (daemon log):** `ReplayComplete 를 큐에 못 실었다(포화) — 연결을 닫는다` (908×) then `연결 끊김` (1792×) — the daemon's per-connection send queue fills (by design: "포화면 이 연결이 끝난다"), the daemon closes, the shell reconnects and re-subscribes, the replay fills the queue again. Each cycle shows two dials accepted at once. Evidence: S34 QA logs (session scratchpad `t79/qa/gui`, `gui-base2`).
 - **Next:** design question — how the daemon should treat a slow/full consumer during a replay burst (backpressure vs close), likely within S21 stage 3-3 (daemon on the transport, byte budget / per-peer queue) or its own topic.
+
+### T-82. Daemons from releases before ADR-0264 cannot be found by the current app
+- **Status:** investigating (recorded 2026-11-09).
+- **Problem:** daemons from releases before ADR-0264 write their connection record `daemon.json` at the data-folder root. The current app looks for it only in the location ADR-0264 set, so it does not find such a running daemon.
+- **Next:** confirm which releases are affected and what the app does when an old daemon is running (e.g. starts a second daemon, or fails to attach), then decide whether the app should also read the old location.
 
 ## 사소한 기능·정리
 
