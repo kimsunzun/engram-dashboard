@@ -21,6 +21,8 @@
 //! - Outcome (R1 step 6): gone without a kill → `Closed`; gone after a kill (whatever the kill call returned) →
 //!   `Killed`; alive or unknown at the end → `Timeout`; nothing to stop → `NoTarget`. An unreadable process ("unknown")
 //!   is never reported as gone.
+//! - ★A stop sets no band★ (user decision 2026-11-09): only routing does, so what was shown stays after the flight
+//!   until the re-add's first answer.
 // ADR-0021
 // ADR-0026
 // ADR-0343
@@ -83,15 +85,72 @@ impl StopPlan {
 pub enum StopOrigin {
     Tray,
     AppExit,
+    /// The `daemon_shutdown` command — the band's stop button or the LLM `daemon.stop`.
+    Command,
 }
 
-/// How a stop ended — see the module doc.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// How a stop ended (the `daemon_shutdown` reply): `closed` — the daemon exited after the stop request · `killed` — it
+/// was killed after an identity check (the request could not be sent, or it did not exit in time) · `timeout` — it may still run (no identity, never
+/// killed, or the flight deadline passed; see the reason) · `no_target` — there was no daemon this app may stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum StopOutcome {
     Closed,
     Killed,
     Timeout,
     NoTarget,
+}
+
+/// Why a stop ended `no_target` or `timeout` — the `daemon_shutdown` reply's `reason`. Serialized snake_case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum StopReason {
+    /// `no_target`: no `daemon.json`.
+    NoRecord,
+    /// `no_target`: `daemon.json` could not be read.
+    RecordUnreadable,
+    /// `no_target`: `daemon.json` does not parse.
+    RecordBroken,
+    /// `no_target`: `daemon.json` stayed held by another process for every read.
+    RecordBusy,
+    /// `no_target`: the record names a pid that is not alive.
+    DeadPid,
+    /// `no_target`: the daemon is newer than this app — this app does not stop it.
+    NewerDaemon,
+    /// `timeout`: the daemon did not stop and its record has no start time, so it is not killed (TRD R1).
+    NoIdentity,
+    /// `timeout`: the daemon was not seen gone — still running or unreadable — and was not (or could not be) ended:
+    /// app exit never kills, or it outlived the kill.
+    StillRunning,
+    /// `timeout`: the flight deadline passed before the stop finished (or before the kill could run).
+    FlightExpired,
+    /// `timeout`: the stop task failed.
+    StopFailed,
+}
+
+/// How one flight ended — `reason` is `None` where the outcome says it all (`closed` · `killed`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StopResult {
+    pub outcome: StopOutcome,
+    pub reason: Option<StopReason>,
+}
+
+impl StopResult {
+    fn closed() -> Self {
+        Self {
+            outcome: StopOutcome::Closed,
+            reason: None,
+        }
+    }
+
+    fn timeout(reason: StopReason) -> Self {
+        Self {
+            outcome: StopOutcome::Timeout,
+            reason: Some(reason),
+        }
+    }
 }
 
 /// Whether the target process still runs, and ending it — the OS behind a seam (ADR-0012).
@@ -153,11 +212,17 @@ pub async fn stop_flight(
     clock: &Arc<dyn Clock>,
     plan: StopPlan,
     started: Instant,
-) -> StopOutcome {
+) -> StopResult {
     let graceful = started + plan.grace();
     let deadline = graceful + plan.margin();
-    let Some(target) = resolve(ports, clock.as_ref(), deadline).await else {
-        return StopOutcome::NoTarget;
+    let target = match resolve(ports, clock.as_ref(), deadline).await {
+        Ok(target) => target,
+        Err(why) => {
+            return StopResult {
+                outcome: StopOutcome::NoTarget,
+                reason: Some(why),
+            }
+        }
     };
     let presence = match dial(ports, clock, &target, graceful, deadline).await {
         // Finish as soon as it is gone; the kill waits for the graceful deadline.
@@ -167,7 +232,7 @@ pub async fn stop_flight(
     };
     if presence == Presence::Gone {
         tracing::info!(pid = target.pid, "the daemon stopped");
-        return StopOutcome::Closed;
+        return StopResult::closed();
     }
     match plan {
         StopPlan::Exit => {
@@ -176,14 +241,18 @@ pub async fn stop_flight(
                 ?presence,
                 "app exit: the daemon is still up — not killing"
             );
-            StopOutcome::Timeout
+            StopResult::timeout(StopReason::StillRunning)
         }
         StopPlan::User => kill(ports, clock.as_ref(), &target, deadline).await,
     }
 }
 
-/// The target from `daemon.json`, a busy record read again within the flight deadline. `None` = nothing to stop.
-async fn resolve(ports: &StopPorts, clock: &dyn Clock, deadline: Instant) -> Option<StopTarget> {
+/// The target from `daemon.json`, a busy record read again within the flight deadline. `Err` = nothing to stop, and why.
+async fn resolve(
+    ports: &StopPorts,
+    clock: &dyn Clock,
+    deadline: Instant,
+) -> Result<StopTarget, StopReason> {
     for read in 1..=BUSY_READS {
         let (reader, liveness) = (ports.reader.clone(), ports.liveness.clone());
         let resolved = tokio::task::spawn_blocking(move || {
@@ -191,15 +260,15 @@ async fn resolve(ports: &StopPorts, clock: &dyn Clock, deadline: Instant) -> Opt
         })
         .await;
         match resolved {
-            Ok(Resolved::Target(target)) => return Some(target),
-            Ok(Resolved::NoTarget(why)) => {
-                tracing::info!(%why, "no daemon to stop");
-                return None;
+            Ok(Resolved::Target(target)) => return Ok(target),
+            Ok(Resolved::NoTarget(reason, why)) => {
+                tracing::info!(%why, ?reason, "no daemon to stop");
+                return Err(reason);
             }
             Ok(Resolved::Busy) => {}
             Err(e) => {
                 tracing::warn!(error = %e, "reading the daemon record failed — no daemon to stop");
-                return None;
+                return Err(StopReason::RecordUnreadable);
             }
         }
         if read == BUSY_READS || clock.now() + BUSY_GAP >= deadline {
@@ -208,7 +277,7 @@ async fn resolve(ports: &StopPorts, clock: &dyn Clock, deadline: Instant) -> Opt
         clock.sleep(BUSY_GAP).await;
     }
     tracing::warn!("the daemon record stayed held by another process — no daemon to stop");
-    None
+    Err(StopReason::RecordBusy)
 }
 
 /// The stop client's one dial, bounded by the graceful time left minus [`DIAL_RESERVE`] (R13). No time left = nothing
@@ -266,18 +335,18 @@ async fn kill(
     clock: &dyn Clock,
     target: &StopTarget,
     deadline: Instant,
-) -> StopOutcome {
+) -> StopResult {
     if target.start_time == 0 {
         tracing::warn!(
             pid = target.pid,
             reason = "no_identity",
             "the daemon did not stop and its record has no start time — not killing"
         );
-        return StopOutcome::Timeout;
+        return StopResult::timeout(StopReason::NoIdentity);
     }
     if clock.now() >= deadline {
         tracing::warn!(pid = target.pid, "the flight deadline passed — not killing");
-        return StopOutcome::Timeout;
+        return StopResult::timeout(StopReason::FlightExpired);
     }
     match ports
         .process
@@ -291,14 +360,17 @@ async fn kill(
         Err(e) => tracing::warn!(pid = target.pid, error = %e, "terminating the daemon failed"),
     }
     match wait_gone(ports, clock, target, deadline).await {
-        Presence::Gone => StopOutcome::Killed,
+        Presence::Gone => StopResult {
+            outcome: StopOutcome::Killed,
+            reason: None,
+        },
         presence => {
             tracing::warn!(
                 pid = target.pid,
                 ?presence,
                 "the daemon is still up after the kill"
             );
-            StopOutcome::Timeout
+            StopResult::timeout(StopReason::StillRunning)
         }
     }
 }
@@ -328,6 +400,12 @@ impl StoppingMode {
 
     fn enter(&self, flight: u64, until: Instant) {
         *sync::lock(&self.state) = Some((flight, until));
+    }
+
+    /// Test-only: the mode as a flight with deadline `until` enters it.
+    #[cfg(test)]
+    pub(crate) fn hold_until(&self, until: Instant) {
+        self.enter(u64::MAX, until);
     }
 
     /// Leaves the mode if `flight` is the one in it — a late leave never ends a newer flight's mode.
@@ -427,8 +505,8 @@ pub(crate) struct Stopper {
 
 struct Flight {
     id: u64,
-    /// `None` until the supervisor publishes the outcome.
-    outcome: watch::Receiver<Option<StopOutcome>>,
+    /// `None` until the supervisor publishes the end.
+    outcome: watch::Receiver<Option<StopResult>>,
 }
 
 impl Stopper {
@@ -457,7 +535,7 @@ impl Stopper {
         &self.mode.clock
     }
 
-    /// Joins the flight in progress or starts one, then waits for its outcome — an `Exit` joiner at most its own bound.
+    /// Joins the flight in progress or starts one, then waits for its end — an `Exit` joiner at most its own bound.
     /// `started` = when the caller asked, on [`Self::clock`]: a flight this call starts measures its deadlines from it,
     /// and an `Exit` joiner its own bound. With no flight to join and its bound already over, it starts nothing and
     /// returns `Timeout`.
@@ -466,15 +544,16 @@ impl Stopper {
         plan: StopPlan,
         origin: StopOrigin,
         started: Instant,
-    ) -> StopOutcome {
+    ) -> StopResult {
         let (mut outcome, joined) = self.join_or_start(plan, origin, started);
+        let gave_up = || StopResult::timeout(StopReason::FlightExpired);
         let wait = async move {
             loop {
                 if let Some(done) = *outcome.borrow_and_update() {
                     return done;
                 }
                 if outcome.changed().await.is_err() {
-                    return StopOutcome::Timeout;
+                    return gave_up();
                 }
             }
         };
@@ -485,7 +564,7 @@ impl Stopper {
                 .await
                 .unwrap_or_else(|_| {
                     tracing::info!("app exit: stopped waiting for the daemon stop in flight");
-                    StopOutcome::Timeout
+                    gave_up()
                 })
         } else {
             wait.await
@@ -497,7 +576,7 @@ impl Stopper {
         plan: StopPlan,
         origin: StopOrigin,
         started: Instant,
-    ) -> (watch::Receiver<Option<StopOutcome>>, bool) {
+    ) -> (watch::Receiver<Option<StopResult>>, bool) {
         let mut slot = sync::lock(&self.flight);
         if let Some(flight) = slot.as_ref() {
             tracing::info!(
@@ -517,7 +596,8 @@ impl Stopper {
                 ?plan,
                 "the daemon stop request is past its flight deadline — not stopping"
             );
-            return (watch::channel(Some(StopOutcome::Timeout)).1, false);
+            let end = StopResult::timeout(StopReason::FlightExpired);
+            return (watch::channel(Some(end)).1, false);
         }
         let id = self.next_flight.fetch_add(1, Ordering::Relaxed);
         // ★The mode before the close★ — an `ensure` that read the close epoch after the close sees the mode on.
@@ -545,7 +625,7 @@ impl Stopper {
         plan: StopPlan,
         started: Instant,
         deadline: Instant,
-        outcome: watch::Sender<Option<StopOutcome>>,
+        outcome: watch::Sender<Option<StopResult>>,
     ) {
         let (ports, clock) = (self.ports.clone(), self.clock().clone());
         let mut flight = self
@@ -558,12 +638,12 @@ impl Stopper {
             biased;
             joined = &mut flight => joined.unwrap_or_else(|e| {
                 tracing::warn!(flight = id, error = %e, "the daemon stop task failed");
-                StopOutcome::Timeout
+                StopResult::timeout(StopReason::StopFailed)
             }),
             () = expiry => {
                 flight.abort();
                 tracing::warn!(flight = id, "the daemon stop passed its flight deadline — abandoned");
-                StopOutcome::Timeout
+                StopResult::timeout(StopReason::FlightExpired)
             }
         };
         self.mode.leave(id);
@@ -576,7 +656,7 @@ impl Stopper {
                 *slot = None;
             }
         }
-        tracing::info!(flight = id, ?plan, outcome = ?done, "daemon stop finished");
+        tracing::info!(flight = id, ?plan, outcome = ?done.outcome, reason = ?done.reason, "daemon stop finished");
         let _ = outcome.send(Some(done));
     }
 }
@@ -584,6 +664,11 @@ impl Stopper {
 impl DaemonClient {
     /// The one stop path — see the module doc. Returns when the flight this call started or joined ends.
     pub async fn stop_daemon(&self, plan: StopPlan, origin: StopOrigin) -> StopOutcome {
+        self.stop_daemon_with_reason(plan, origin).await.outcome
+    }
+
+    /// [`Self::stop_daemon`] with why it ended so.
+    pub async fn stop_daemon_with_reason(&self, plan: StopPlan, origin: StopOrigin) -> StopResult {
         let started = self.stopper.clock().now();
         self.stopper.stop(plan, origin, started).await
     }
@@ -609,7 +694,7 @@ impl DaemonClient {
         #[cfg(test)]
         stopper.mode().race.fire(RacePoint::BlockingStartTaken);
         self.rt.spawn(async move {
-            let _ = tx.send(stopper.stop(plan, origin, started).await);
+            let _ = tx.send(stopper.stop(plan, origin, started).await.outcome);
         });
         let left = deadline.saturating_duration_since(self.stopper.clock().now());
         rx.recv_timeout(left).unwrap_or_else(|e| {

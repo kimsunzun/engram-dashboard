@@ -64,8 +64,11 @@ use crate::layout::ViewManager;
 use crate::output_channel::WindowChannelRegistry;
 use crate::output_router::OutputRouter;
 
-/// The connection's lifetime state. On the link driver, routing (`link/route.rs`) is its only emitter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The connection's lifetime state. On the link driver, routing (`link/route.rs`) is its only emitter. ★Its serialized
+/// words (`connected` · `reconnecting` · `down`) are the frontend contract★ (`src/api/tauriTransport.ts`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export, rename = "ConnectionStateWord")]
 pub enum ConnectionState {
     /// Not attached, explicitly closed, refused, or a never-connected handle's first failure (the link may still retry
     /// in the background — ADR-0346, TRD rev 9 ①).
@@ -75,6 +78,39 @@ pub enum ConnectionState {
     // Retrying after an unintended loss (backoff … next attempt); the link driver never gives up on network failures.
     // Matches wsTransport's `reconnecting` — distinct from an explicit close (Down).
     Reconnecting,
+}
+
+/// What the frontend gets about the daemon link — the payload of the `daemon-connection-state` event and the reply of
+/// the `daemon_connection_state` pull (TRD S21 trd-3-2-u5 §4-2). Routing (`link/route.rs`) is its only producer and
+/// emits it when `(state, band)` changes — a band can change while `state` keeps its word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct ConnectionStatus {
+    pub state: ConnectionState,
+    /// The connection band the windows show; `null` = none.
+    pub band: Option<Band>,
+}
+
+impl ConnectionStatus {
+    /// Before routing showed anything.
+    pub const DOWN: Self = Self {
+        state: ConnectionState::Down,
+        band: None,
+    };
+}
+
+/// The two connection bands (TRD S21 trd-3-2-u5 §4-1). A reader that meets a `kind` it does not know treats it as
+/// `not_connected` without a cause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[ts(export)]
+pub enum Band {
+    /// ① Not connected. `refused` = the daemon refused this app's handshake for a reason other than the version
+    /// check (the token text — TRD U2).
+    NotConnected { refused: bool },
+    /// ② The running daemon speaks another protocol version. `can_stop` = the stop button is offered: the daemon is
+    /// older than this app and did not start after this app's process.
+    Version { can_stop: bool },
 }
 
 /// The shared handle to one shell's usage interest ([`UsageInterest`]) — the connection driver, the side that changes
@@ -182,7 +218,7 @@ pub(crate) const NO_REQUEST_ID: &str =
 // (`Arc<DaemonClient>`).
 //
 // The link driver (`connection`) owns the connection: its actor owns the routing and the transport peer owns the
-// socket; this struct holds the driver's caller side (`link`) and the state watch (`state_rx`) — never the stream.
+// socket; this struct holds the driver's caller side (`link`) and the status watch (`status_rx`) — never the stream.
 pub struct DaemonClient {
     // Runtime handle on which to spawn the connection task. Production = dedicated multi-thread (`_owned_rt`), tests = current runtime.
     rt: Handle,
@@ -198,8 +234,8 @@ pub struct DaemonClient {
     /// as long as the shell process (`RefusalAlerts` doc), so one per connection re-shows the box on every reconnect
     /// that gets the same refusal.
     refusals: Arc<RefusalAlerts>,
-    /// The connection state, read without a lock — the driver's watch, which routing publishes. Only borrowed here.
-    state_rx: watch::Receiver<ConnectionState>,
+    /// The connection status, read without a lock — the driver's watch, which routing publishes. Only borrowed here.
+    status_rx: watch::Receiver<ConnectionStatus>,
     /// The driver's output routing — tests set which windows show which agent here.
     #[cfg(test)]
     router: Arc<OutputRouter>,
@@ -213,7 +249,7 @@ pub struct DaemonClient {
     ///   with the driver.
     usage: SharedUsageInterest,
     /// The driver on the transport crate (`connection`) — connect, ensure, close, the command round trips,
-    /// fire-and-forget sends, unsubscribe, replay requests and usage nudges go there; `state_rx` is its watch.
+    /// fire-and-forget sends, unsubscribe, replay requests and usage nudges go there; `status_rx` is its watch.
     link: connection::LinkClient,
     /// The one stop path's single flight (`shutdown`) — it closes and re-adds `link` and owns its stopping mode.
     stopper: Arc<Stopper>,
@@ -353,7 +389,7 @@ impl DaemonClient {
         Self {
             rt,
             _owned_rt: owned_rt,
-            state_rx: link.state_rx(),
+            status_rx: link.status_rx(),
             #[cfg(test)]
             router,
             #[cfg(test)]
@@ -385,7 +421,7 @@ impl DaemonClient {
             .thread_name(CLIENT_THREAD_NAME)
             .build()?;
         let handle = rt.handle().clone();
-        Ok(Self::on_local_daemon(
+        let client = Self::on_local_daemon(
             handle,
             Some(Arc::new(rt)),
             crate::discovery::default_data_dir(),
@@ -394,7 +430,10 @@ impl DaemonClient {
             Arc::new(RefusalAlerts::new(Arc::new(TauriRefusalBox(app)))),
             router,
             registry,
-        ))
+        );
+        // TRD S21 trd-3-2-u5 R20: before any window exists, so no window's attach precedes it.
+        client.link.hold_bands_for_boot_start();
+        Ok(client)
     }
 
     /// [`Self::on_link`] on the local daemon of `data_dir`: the ws dialer, that folder's endpoint record
@@ -460,12 +499,31 @@ impl DaemonClient {
 
     // Snapshot of the current connection state (lock-free).
     pub fn state(&self) -> ConnectionState {
-        *self.state_rx.borrow()
+        self.status_rx.borrow().state
     }
 
-    // Subscribe to state changes (watch). The caller awaits the next transition or looks at the current value.
-    pub fn subscribe_state(&self) -> watch::Receiver<ConnectionState> {
-        self.state_rx.clone()
+    /// Snapshot of the current connection status — state and band (lock-free).
+    pub fn status(&self) -> ConnectionStatus {
+        *self.status_rx.borrow()
+    }
+
+    /// Subscribe to status changes (watch). The caller awaits the next change or looks at the current value.
+    pub fn subscribe_status(&self) -> watch::Receiver<ConnectionStatus> {
+        self.status_rx.clone()
+    }
+
+    /// The main window's boot daemon search began, with `timeout` for it: no band for a never-connected link is held
+    /// past that search and a margin, and the 60 s cap no longer applies (TRD S21 trd-3-2-u5 R20 · R24). Nothing once
+    /// the hold is over. Call it once the search really runs (after any wait for another window's search).
+    pub fn boot_start_began(&self, timeout: Duration) {
+        self.link.bound_boot_start(timeout);
+    }
+
+    /// The main window's boot start answered — its `daemon_start` failed or its `daemon_connect` returned: the band
+    /// hold of a cold boot ends (TRD S21 trd-3-2-u5 R20). Call it before the answer reaches the frontend: an attach the
+    /// frontend makes after it is then routed after the hold ended.
+    pub fn boot_start_answered(&self, why: &'static str) {
+        self.link.end_boot_start_hold(why);
     }
 
     /// Usage-interest state — the webview pull reads the cache. The side that changes the interest does not use this handle but calls the recompute set

@@ -185,6 +185,7 @@ fn stop_a_real_daemon(exe: &Path, record_at: RecordAt) -> Stopped {
             clock.now(),
         )
         .await
+        .outcome
     });
     let gone = wait_pid_gone(published, Duration::from_secs(10));
     let exit = guard.child.try_wait().ok().flatten();

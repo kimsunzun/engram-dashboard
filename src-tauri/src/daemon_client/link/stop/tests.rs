@@ -87,20 +87,37 @@ fn an_older_daemon_is_a_target() {
 
 #[test]
 fn a_newer_a_dead_an_absent_a_broken_or_an_unreadable_record_is_no_target() {
+    use crate::daemon_client::shutdown::StopReason;
     let cases = [
-        (record(1003, PROTOCOL_VERSION + 1), alive()),
+        (
+            record(1003, PROTOCOL_VERSION + 1),
+            alive(),
+            StopReason::NewerDaemon,
+        ),
         (
             record(1004, PROTOCOL_VERSION),
             FakeLiveness { dead: vec![1004] },
+            StopReason::DeadPid,
         ),
-        (RecordRead::Absent, alive()),
-        (RecordRead::Bytes(b"{ not json".to_vec()), alive()),
-        (RecordRead::Failed("access denied".into()), alive()),
+        (RecordRead::Absent, alive(), StopReason::NoRecord),
+        (
+            RecordRead::Bytes(b"{ not json".to_vec()),
+            alive(),
+            StopReason::RecordBroken,
+        ),
+        (
+            RecordRead::Failed("access denied".into()),
+            alive(),
+            StopReason::RecordUnreadable,
+        ),
     ];
-    for (read, liveness) in cases {
+    for (read, liveness, reason) in cases {
         let shown = format!("{read:?}");
         let got = resolve_stop_target(&OneRead::new(read), &liveness);
-        assert!(matches!(got, Resolved::NoTarget(_)), "{shown} → {got:?}");
+        assert!(
+            matches!(got, Resolved::NoTarget(r, _) if r == reason),
+            "{shown} → {got:?}"
+        );
     }
 }
 
@@ -112,7 +129,7 @@ fn a_dead_pid_wins_over_a_newer_version() {
         &FakeLiveness { dead: vec![1005] },
     );
     assert!(
-        matches!(&got, Resolved::NoTarget(why) if why.contains("not alive")),
+        matches!(&got, Resolved::NoTarget(_, why) if why.contains("not alive")),
         "{got:?}"
     );
 }

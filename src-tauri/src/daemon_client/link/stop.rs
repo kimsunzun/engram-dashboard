@@ -30,6 +30,7 @@ use engram_dashboard_transport::{
 
 use super::handshake::loggable;
 use super::wire::{json_class, ShellWire};
+use crate::daemon_client::shutdown::StopReason;
 use crate::discovery::layout::DAEMON_FILE;
 use crate::discovery::{check_acceptable, AcceptCheck, DataLayout, PidLiveness};
 
@@ -93,7 +94,7 @@ pub enum Resolved {
     Target(StopTarget),
     /// Nothing to stop — no record · a broken one · a dead pid · a daemon newer than this app. The text is a local
     /// diagnostic for the log.
-    NoTarget(String),
+    NoTarget(StopReason, String),
     /// The record is held by another process — read it again.
     Busy,
 }
@@ -103,32 +104,40 @@ pub enum Resolved {
 pub fn resolve_stop_target(reader: &dyn RecordReader, liveness: &dyn PidLiveness) -> Resolved {
     let bytes = match reader.read() {
         RecordRead::Bytes(bytes) => bytes,
-        RecordRead::Absent => return Resolved::NoTarget(format!("no {DAEMON_FILE}")),
+        RecordRead::Absent => {
+            return Resolved::NoTarget(StopReason::NoRecord, format!("no {DAEMON_FILE}"))
+        }
         RecordRead::Busy => return Resolved::Busy,
-        RecordRead::Failed(why) => return Resolved::NoTarget(why),
+        RecordRead::Failed(why) => return Resolved::NoTarget(StopReason::RecordUnreadable, why),
     };
     let info = match DaemonInfo::parse(&bytes) {
         Ok(info) => info,
         Err(e) => {
-            return Resolved::NoTarget(format!(
-                "{DAEMON_FILE} does not parse ({} at line {} column {})",
-                json_class(&e),
-                e.line(),
-                e.column()
-            ))
+            return Resolved::NoTarget(
+                StopReason::RecordBroken,
+                format!(
+                    "{DAEMON_FILE} does not parse ({} at line {} column {})",
+                    json_class(&e),
+                    e.line(),
+                    e.column()
+                ),
+            )
         }
     };
     match check_acceptable(&info, liveness) {
         AcceptCheck::DeadPid => {
-            return Resolved::NoTarget(format!(
-                "{DAEMON_FILE} names pid {} which is not alive",
-                info.pid
-            ))
+            return Resolved::NoTarget(
+                StopReason::DeadPid,
+                format!("{DAEMON_FILE} names pid {} which is not alive", info.pid),
+            )
         }
         AcceptCheck::VersionMismatch { daemon } if daemon > PROTOCOL_VERSION => {
-            return Resolved::NoTarget(format!(
-                "the daemon speaks protocol {daemon}, newer than this app's {PROTOCOL_VERSION}"
-            ))
+            return Resolved::NoTarget(
+                StopReason::NewerDaemon,
+                format!(
+                    "the daemon speaks protocol {daemon}, newer than this app's {PROTOCOL_VERSION}"
+                ),
+            )
         }
         AcceptCheck::Accept | AcceptCheck::VersionMismatch { .. } => {}
     }

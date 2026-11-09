@@ -3,11 +3,14 @@
 //! ADR-0029: mode removed → no AppState. data_dir is computed with `default_data_dir()` (no arguments, debug=repo root
 //! walk-up / release=`data` under the exe folder) — it looks at the same folder as the daemon (daemon.json shared).
 
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use tauri::async_runtime::Mutex;
+use tauri::Manager;
 
+use crate::daemon_client::shutdown::{StopOrigin, StopOutcome, StopPlan, StopReason, StopResult};
+use crate::daemon_client::{ConnectionStatus, DaemonClient};
 use crate::discovery::{self, locate_daemon_exe};
 
 // The ensure (spawn included) serialization lock — process-global (OnceLock+tokio async Mutex).
@@ -65,7 +68,7 @@ impl From<engram_dashboard_protocol::DaemonInfo> for DaemonInfoDto {
 // 5 seconds if timeout_ms is unspecified. Console visibility is daemon_start (console=true).
 #[tauri::command]
 pub async fn discover_daemon(timeout_ms: Option<u64>) -> Result<DaemonInfoDto, String> {
-    ensure_internal(timeout_ms, false).await
+    ensure_internal(timeout_ms, false, || {}).await
 }
 
 // Decided by daemon.json + PID liveness.
@@ -79,12 +82,58 @@ pub struct DaemonStatusDto {
 // ADR-0021 §5: explicit daemon start (ensure). If already alive, attach (return its connection info), otherwise spawn.
 // If `console=true`, spawn together with a console window (making debug logs visible).
 // ★Separated from reconnect★: only this command triggers a spawn — the frontend reconnect loop does not call it.
+// From the main window it is also the boot start the shell's band hold waits for (`BootStartWatch`).
 #[tauri::command]
 pub async fn daemon_start(
+    window: tauri::Window,
     timeout_ms: Option<u64>,
     console: Option<bool>,
 ) -> Result<DaemonInfoDto, String> {
-    ensure_internal(timeout_ms, console.unwrap_or(false)).await
+    let client = window.app_handle().try_state::<Arc<DaemonClient>>();
+    let watch = BootStartWatch::of(window.label(), client.as_deref().map(Arc::as_ref));
+    let started = ensure_internal(timeout_ms, console.unwrap_or(false), || {
+        watch.search_began(search_timeout(timeout_ms))
+    })
+    .await;
+    watch.start_answered(&started);
+    started
+}
+
+/// What a window's boot start tells the shell's band hold (TRD S21 trd-3-2-u5 R20 · R24) — ★only the main window's★:
+/// a popout's or the spare's start says nothing about the cold boot. The search's start bounds the hold; a failed
+/// `daemon_start` or a returned `daemon_connect` ends it, before the answer reaches the window.
+pub(crate) struct BootStartWatch<'a>(Option<&'a DaemonClient>);
+
+impl<'a> BootStartWatch<'a> {
+    /// `label` = the calling window; `client` = the shell's client, if setup built one.
+    pub(crate) fn of(label: &str, client: Option<&'a DaemonClient>) -> Self {
+        Self(client.filter(|_| label == crate::layout::MAIN_WINDOW_LABEL))
+    }
+
+    /// The daemon search runs now, with `timeout`.
+    pub(crate) fn search_began(&self, timeout: Duration) {
+        if let Some(client) = self.0 {
+            client.boot_start_began(timeout);
+        }
+    }
+
+    /// `daemon_start` answered — only a failure ends the hold (a success is followed by `daemon_connect`).
+    pub(crate) fn start_answered<T>(&self, started: &Result<T, String>) {
+        if let (Some(client), Err(_)) = (self.0, started) {
+            client.boot_start_answered("the main window's daemon_start failed");
+        }
+    }
+
+    /// `daemon_connect` returned, whatever its answer.
+    pub(crate) fn connect_answered(&self) {
+        if let Some(client) = self.0 {
+            client.boot_start_answered("the main window's daemon_connect answered");
+        }
+    }
+}
+
+fn search_timeout(timeout_ms: Option<u64>) -> Duration {
+    Duration::from_millis(timeout_ms.unwrap_or(5000))
 }
 
 #[tauri::command]
@@ -117,9 +166,12 @@ pub fn read_daemon_info() -> Result<Option<DaemonInfoDto>, String> {
 // The frontend TauriTransport.start() calls it with invoke (corresponds to WsTransport.openSocket(true)).
 #[tauri::command]
 pub async fn daemon_connect(
-    client: tauri::State<'_, std::sync::Arc<crate::daemon_client::DaemonClient>>,
+    window: tauri::Window,
+    client: tauri::State<'_, Arc<DaemonClient>>,
 ) -> Result<(), String> {
-    client.connect().await.map_err(|e| e.to_string())
+    let answer = client.connect().await;
+    BootStartWatch::of(window.label(), Some(client.inner().as_ref())).connect_answered();
+    answer.map_err(|e| e.to_string())
 }
 
 // ★T7c: the TauriTransport.ensureReady() entry point (attach-only, no-spawn)★.
@@ -139,26 +191,49 @@ pub fn daemon_close(client: tauri::State<'_, std::sync::Arc<crate::daemon_client
 
 // ★Reload self-heal pull (Fix-D)★.
 //
-// ★Why it is needed★: the Rust DaemonClient emits `daemon-connection-state` only on state *transitions* — a
-// connect()/ensure() on an already connected link answers Ok with no emit (the driver's routing emits on transitions
+// ★Why it is needed★: the Rust DaemonClient emits `daemon-connection-state` only on status *changes* — a
+// connect()/ensure() on an already connected link answers Ok with no emit (the driver's routing emits on changes
 // only). So after a webview reload (TauriTransport recreated, _state='down') the new window has no way to learn "already
 // connected", cannot register its output Channel, and replay/live are cut off (a per-window blind spot). The frontend
-// self-heal pulls this command once after registering its listeners to read the current state.
+// self-heal pulls this command once after registering its listeners to read the current status.
 //
-// ★Same vocabulary★: serialized with **the same words** as the `daemon-connection-state` payload ("connected" /
-// "reconnecting" / "down") so the frontend feeds it through the event handler's path — the frontend ConnectionState
-// vocabulary.
+// ★Same value★: the `daemon-connection-state` payload itself (`ConnectionStatus`), so the frontend feeds it through the
+// event handler's path.
 #[tauri::command]
-pub fn daemon_connection_state(
-    client: tauri::State<'_, std::sync::Arc<crate::daemon_client::DaemonClient>>,
-) -> String {
-    use crate::daemon_client::ConnectionState;
-    match client.state() {
-        ConnectionState::Connected => "connected",
-        ConnectionState::Reconnecting => "reconnecting",
-        ConnectionState::Down => "down",
+pub fn daemon_connection_state(client: tauri::State<'_, Arc<DaemonClient>>) -> ConnectionStatus {
+    client.status()
+}
+
+/// The reply of `daemon_shutdown` (TRD S21 trd-3-2-u5 §4-4): how the stop ended — the stop result only. The link's
+/// status is not in it (user decision 2026-11-09): a stop sets no band, and the caller reads the status separately.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct DaemonShutdownReply {
+    pub outcome: StopOutcome,
+    /// Why a `no_target` or `timeout` ended so; `null` for `closed` · `killed`.
+    pub reason: Option<StopReason>,
+}
+
+impl From<StopResult> for DaemonShutdownReply {
+    fn from(end: StopResult) -> Self {
+        Self {
+            outcome: end.outcome,
+            reason: end.reason,
+        }
     }
-    .to_string()
+}
+
+// The user's daemon stop (band button · LLM `daemon.stop`) — the shell's one stop path (`daemon_client::shutdown`,
+// plan `User`: graceful, then the identity-checked kill). Joins a stop already in flight. No confirm here: the band
+// asks before it calls (TRD S21 trd-3-2-u5 D5).
+#[tauri::command]
+pub async fn daemon_shutdown(
+    client: tauri::State<'_, Arc<DaemonClient>>,
+) -> Result<DaemonShutdownReply, String> {
+    let end = client
+        .stop_daemon_with_reason(StopPlan::User, StopOrigin::Command)
+        .await;
+    Ok(end.into())
 }
 
 // Force-kills the pid in daemon.json with its child tree (`/F /T` — platform `process::kill_tree`), with no graceful
@@ -174,18 +249,24 @@ pub async fn daemon_stop() -> Result<Option<u32>, String> {
         .map_err(|e| e.to_string())
 }
 
-async fn ensure_internal(timeout_ms: Option<u64>, console: bool) -> Result<DaemonInfoDto, String> {
+/// `on_search` runs once the search is about to run — after the wait for another window's search.
+async fn ensure_internal(
+    timeout_ms: Option<u64>,
+    console: bool,
+    on_search: impl FnOnce(),
+) -> Result<DaemonInfoDto, String> {
     let data_dir = discovery::default_data_dir();
     let exe = locate_daemon_exe().map_err(|e| {
         tracing::error!("데몬 실행 파일을 찾지 못함: {e}");
         e.to_string()
     })?;
-    let timeout = Duration::from_millis(timeout_ms.unwrap_or(5000));
+    let timeout = search_timeout(timeout_ms);
 
     // ★Multi-spawn serialization★: lines up simultaneous multi-WebView ensure with a process-global lock (see the ensure_lock
     // comment). The lock covers only the ensure (spawn included) section — the first call spawns + publishes daemon.json, and the calls that follow
     // only attach (no spawn). Unrelated to ADR-0024 C1 (no direct daemon spawn) — the WMI path is unchanged.
     let _guard = ensure_lock().lock().await;
+    on_search();
 
     // blocking (including polling · sleep) — to protect the async executor use the tauri runtime's spawn_blocking
     // (via tauri::async_runtime, without a direct tokio dependency).
@@ -237,8 +318,53 @@ mod tests {
         {
         }
         returns_dto(|timeout_ms, ()| discover_daemon(timeout_ms));
-        returns_dto(daemon_start);
+        // `daemon_start` takes the calling window first.
+        fn returns_dto_from_a_window<Fut>(
+            _: impl Fn(tauri::Window, Option<u64>, Option<bool>) -> Fut,
+        ) where
+            Fut: std::future::Future<Output = Result<DaemonInfoDto, String>>,
+        {
+        }
+        returns_dto_from_a_window(daemon_start);
         let _: fn() -> Result<Option<DaemonInfoDto>, String> = read_daemon_info;
+    }
+
+    // TRD S21 trd-3-2-u5 §4-4: the reply `daemon.stop` hands the LLM — outcome word and optional reason, no status.
+    #[test]
+    fn the_shutdown_reply_carries_the_outcome_word_and_the_reason_only() {
+        for (outcome, word) in [
+            (StopOutcome::Closed, "closed"),
+            (StopOutcome::Killed, "killed"),
+            (StopOutcome::Timeout, "timeout"),
+            (StopOutcome::NoTarget, "no_target"),
+        ] {
+            let reply = DaemonShutdownReply::from(StopResult {
+                outcome,
+                reason: None,
+            });
+            assert_eq!(
+                serde_json::to_value(reply).unwrap(),
+                serde_json::json!({"outcome": word, "reason": null})
+            );
+        }
+        for (reason, word) in [
+            (StopReason::NoRecord, "no_record"),
+            (StopReason::RecordUnreadable, "record_unreadable"),
+            (StopReason::RecordBroken, "record_broken"),
+            (StopReason::RecordBusy, "record_busy"),
+            (StopReason::DeadPid, "dead_pid"),
+            (StopReason::NewerDaemon, "newer_daemon"),
+            (StopReason::NoIdentity, "no_identity"),
+            (StopReason::StillRunning, "still_running"),
+            (StopReason::FlightExpired, "flight_expired"),
+            (StopReason::StopFailed, "stop_failed"),
+        ] {
+            let reply = DaemonShutdownReply::from(StopResult {
+                outcome: StopOutcome::Timeout,
+                reason: Some(reason),
+            });
+            assert_eq!(serde_json::to_value(reply).unwrap()["reason"], word);
+        }
     }
 
     // ADR-0310: D23 ① — all three commands (`discover_daemon` · `daemon_start` · `read_daemon_info`) return this DTO,
