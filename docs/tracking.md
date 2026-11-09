@@ -51,7 +51,6 @@
 | T-64 | 합쳐진 replay 의 후속 Subscribe 가 창 닫힌 뒤 나가 구독이 샌다 | 버그 | 미착수 · 선재 |
 | T-79 | Shell–daemon link freezes while still showing "connected" (killing a PTY agent mid-burst) | 버그 | Fixed — merged to master (S34, `baa97e41`); remove when convenient |
 | T-80 | A spewing agent shown in a slot makes the daemon close the connection on a full send queue → reconnect/replay storm | 버그 | Not started · pre-existing (old driver too) · found by S34 QA |
-| T-82 | Daemons from releases before ADR-0264 write `daemon.json` at the data-folder root — the current app cannot find them | 버그 | Investigating |
 | T-71 | 트래킹 번호를 가리키지 않기 — 해결되면 그냥 지우기 | 사소한 기능·정리 | 할 일 — 나중에 이슈로 |
 | T-70 | 브랜치 앞 버전 짐작 기준 — 기능이면 0.5.0 쪽 | 사소한 기능·정리 | 할 일 — 나중에 이슈로 |
 | T-69 | 스텝 번호 규약 — 새 주제마다 S번호 | 사소한 기능·정리 | 일부 됨 · 남은 것 = 자잘한 커밋 접두 |
@@ -336,11 +335,6 @@
 - **Symptom:** while an agent that writes ~1.5 MB per call is shown in a slot, the connection drops and reconnects every ~20–35 ms; commands sent meanwhile fail fast ("connection lost" / handshake ended) and output stalls until the slot is emptied. No wedge — it stops once the agent is no longer shown.
 - **Observed mechanism (daemon log):** `ReplayComplete 를 큐에 못 실었다(포화) — 연결을 닫는다` (908×) then `연결 끊김` (1792×) — the daemon's per-connection send queue fills (by design: "포화면 이 연결이 끝난다"), the daemon closes, the shell reconnects and re-subscribes, the replay fills the queue again. Each cycle shows two dials accepted at once. Evidence: S34 QA logs (session scratchpad `t79/qa/gui`, `gui-base2`).
 - **Next:** design question — how the daemon should treat a slow/full consumer during a replay burst (backpressure vs close), likely within S21 stage 3-3 (daemon on the transport, byte budget / per-peer queue) or its own topic.
-
-### T-82. Daemons from releases before ADR-0264 cannot be found by the current app
-- **Status:** investigating (recorded 2026-11-09).
-- **Problem:** daemons from releases before ADR-0264 write their connection record `daemon.json` at the data-folder root. The current app looks for it only in the location ADR-0264 set, so it does not find such a running daemon.
-- **Next:** confirm which releases are affected and what the app does when an old daemon is running (e.g. starts a second daemon, or fails to attach), then decide whether the app should also read the old location.
 
 ## 사소한 기능·정리
 
