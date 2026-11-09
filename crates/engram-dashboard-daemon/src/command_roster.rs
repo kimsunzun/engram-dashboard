@@ -33,12 +33,12 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
+use crate::conn_port::{ConnId, FrameSink};
 use engram_dashboard_base::sync;
 use engram_dashboard_command::{
     CommandDecl, CommandError, ErrorCode, OwnerLookup, OwnerLookupSource, OwnerToken, Roster,
     RosterEntry,
 };
-use engram_dashboard_net::frame_port::{ConnId, FrameSink};
 
 use crate::connection_core::sanitize_for_log;
 
@@ -131,7 +131,7 @@ impl CommandRoster {
     /// The connection is up — from here its registrations are accepted, and envelopes addressed to its owner go out through `frames`.
     ///
     /// ★Hold a clone of `frames`★: what the connection-lifetime hook hands over is a **borrowed reference**, so as it stands it cannot outlive
-    /// the connection (the `engram_dashboard_net::frame_port::ConnectionHandler::on_connect` contract). To put it in the table
+    /// the connection (the `crate::conn_port::ConnectionHandler::on_connect` contract). To put it in the table
     /// a `'static` shared handle is needed, and that clone is this one line.
     ///
     /// ★The path comes **before** the registry entry★: names get onto the registry through a registration packet, and that packet is
@@ -458,9 +458,9 @@ impl Shared {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::conn_port::{Frame, FrameError};
     use crate::test_doubles::FakeFrameSink;
     use engram_dashboard_command::OwnerLookup;
-    use engram_dashboard_net::frame_port::{Frame, FrameError};
     use futures_util::future::BoxFuture;
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::sync::mpsc;

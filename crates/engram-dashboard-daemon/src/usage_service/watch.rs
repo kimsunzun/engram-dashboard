@@ -17,9 +17,9 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use crate::conn_port::ConnId;
 use engram_dashboard_agent::usage::UsageVendorKey;
 use engram_dashboard_base::sync;
-use engram_dashboard_net::frame_port::ConnId;
 use engram_dashboard_protocol::UsageLimitSnapshot;
 
 /// The outlet of one connection — the real one is made fresh per connection by the connection layer in `on_connect`: it holds one cell

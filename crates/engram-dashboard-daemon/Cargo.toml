@@ -85,16 +85,18 @@ engram-dashboard-base = { path = "../engram-dashboard-base" }
 #   control-plane CLI sibling exe (`env::sibling_exe` — `locate_send_exe` · harness `roundtrip-smoke` · ADR-0282), and the file name carried in the
 #   warning when it is not found (`env::exe_file_name` — `locate_send_exe`). Tests also use the default
 #   shell (`shell::default_shell`). It is already linked through agent, so it is no new burden — only the direct edge is added.
+#   `portfile`'s stale decision uses `process::pid_alive_with_start_time`, and `instance`'s single-instance guard uses the
+#   shared-restricted open `fs::open_deny_write` and its failure classifiers `fs::is_sharing_violation` · `fs::is_access_denied`.
 engram-dashboard-platform = { path = "../engram-dashboard-platform" }
 engram-dashboard-protocol = { path = "../engram-dashboard-protocol" }
 # ADR-0110: messaging kernel (lib). This crate has no workspace-crate dependency — every junction is a port trait, and
 #   the real adapters are owned by the daemon's `src/messaging_host.rs`.
 engram-dashboard-messaging = { path = "../engram-dashboard-messaging" }
-# ADR-0129 slice 1: network layer lib (WS server · opaque frame port · single-instance guard · portfile). Only this direction
+# ADR-0129 slice 1: network layer lib (WS server · opaque frame port). Only this direction
 #   (daemon → net) exists — net does not know the daemon even as a type, and the two layers meet only through the port trait
 #   (`frame_port`) that crate owns. The daemon is the side that plugs the real thing into that port (`agent_conn`) and is the assembly room.
 #   ★Do not delete `features = ["server"]`★: net's default feature is empty, so only `auth` comes out. This crate is the only one that uses
-#   the server layer (`ws` · `frame_port` · `instance` · `portfile`), and this is where it is turned on.
+#   the server layer (`ws` · `frame_port`), and this is where it is turned on.
 #   The rationale (why the default was emptied) is in the `[features]` comment of that crate's `Cargo.toml`, which is the source of truth.
 engram-dashboard-net = { path = "../engram-dashboard-net", features = ["server"] }
 # ADR-0155: command bus tools (envelope · error · declaration macro · table · routing). This crate uses the tools **only for table assembly** —
@@ -154,7 +156,7 @@ tokio-util = { version = "0.7", features = ["rt"] }
 http = "1"
 
 # ★ADR-0129 slice 1 — the direct `windows` dependency was removed★: this crate's only consumer was the single-instance
-#   guard (`instance.rs`), and that went to the network crate. This crate's `windows::` use is now
+#   guard (`instance.rs`), whose OS calls now go through the platform crate's `fs::`. This crate's `windows::` use is now
 #   **0** (pid liveness belongs to the platform crate's `process::` — the old comment's "pid liveness (OpenProcess)"
 #   was never true of this crate). ★`#[cfg(windows)]` · `windows_subsystem` are **not** crate uses★ —
 #   do not revert on the token alone thinking "it's still used". If a need arises to use Win32 directly again, e.g. for a Job Object, add it anew then

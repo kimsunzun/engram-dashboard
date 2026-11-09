@@ -21,6 +21,7 @@ use engram_dashboard_agent::types::{
 use engram_dashboard_command::{CommandEnvelope, CommandReply};
 use engram_dashboard_daemon::command_delivery::{BusSweeper, CommandBus, CommandDeliveries};
 use engram_dashboard_daemon::command_roster::CommandRoster;
+use engram_dashboard_daemon::conn_port::{ConnId, Frame, FrameError, FrameSink};
 use engram_dashboard_daemon::control::agent::RosterBroadcast;
 use engram_dashboard_daemon::control::commands::{make_daemon_table, NoInputLeases, NoUsageLimits};
 use engram_dashboard_daemon::control::mcp_server::{
@@ -28,7 +29,6 @@ use engram_dashboard_daemon::control::mcp_server::{
     RosterBroadcastSlot,
 };
 use engram_dashboard_daemon::control::registry::ControlRegistry;
-use engram_dashboard_net::frame_port::{ConnId, Frame, FrameError, FrameSink};
 use futures_util::future::BoxFuture;
 
 // ── 하네스 ────────────────────────────────────────────────────────────────────────

@@ -5,25 +5,27 @@
 //! `start_test_server()`(기능 `test-support` 뒤 — 운영 빌드에는 없다)로 in-process 서버를 띄워 WS 클라이언트로
 //! 검증한다.
 //!
-//! ★이 crate 의 범위(ADR-0130)★ — 응용 층 + 조립. **데몬 살림의 *구현*은 여기 없다**: 단일 인스턴스
-//! 가드와 portfile 의 실물은 슬라이스 1 로 `engram-dashboard-net` 이 가져갔다. 여기 남은 건 그것들을
-//! 어느 순서로 부르는지(`run()`)와 응용 층이다. 이름과 내용물의 이 어긋남은 알고 남긴 것 —
-//! rename 하지 않는 이유와 재개 조건은 ADR-0130.
+//! ★Scope of this crate (ADR-0130)★ — the application layer, assembly (`run()` decides the order the parts are called in),
+//! and process housekeeping: the single-instance guard (`instance`) and `daemon.json` (`portfile`). The post-accept network
+//! layer is still in `engram-dashboard-net`.
 
 pub mod agent_conn;
 pub mod command_delivery;
 pub mod command_roster;
+pub mod conn_port;
 pub mod connection_core;
 pub mod control;
 pub mod data_dir;
 #[cfg(feature = "test-harness")]
 pub mod experiment;
 mod file_hooks;
+pub mod instance;
 #[cfg(test)]
 mod log_capture;
 pub mod messaging_host;
 #[cfg(test)]
 mod panic_hook_tests;
+pub mod portfile;
 pub mod status_fanout;
 #[cfg(test)]
 mod test_doubles;
@@ -44,10 +46,10 @@ use engram_dashboard_protocol::PROTOCOL_VERSION;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 
+use crate::conn_port::FrameFanout;
 use connection_core::MultiViewState;
 use data_dir::{ensure_data_dir_writable, DataLayout};
 use engram_dashboard_agent::usage::{OsProbeSpawner, ProbeSpawner, UsageProbe};
-use engram_dashboard_net::frame_port::FrameFanout;
 use engram_dashboard_net::ws::ConnRegistry;
 use status_fanout::DaemonStatusSink;
 use usage_service::clock::OsUsageClock;
@@ -70,7 +72,7 @@ use engram_dashboard_net::ws::KeepaliveConfig;
 
 // ★경로를 여기서 조립하지 마라★: 데몬이 **붙잡는** 파일과 **쓰는** 파일이 같아야 단일 인스턴스가
 //   성립한다(ADR-0135). 경로는 `data_dir::DataLayout` 하나가 내고, 쓰기는 붙잡은 guard 로만 한다. 이 이름은 로그 문구용이다.
-use engram_dashboard_net::portfile::DAEMON_FILE;
+use crate::portfile::DAEMON_FILE;
 
 // ── data dir / 토큰 ──────────────────────────────────────────────────────────────
 
@@ -363,7 +365,7 @@ async fn run_accept_loop(
         usage,
     } = wiring;
     let fanout: Arc<dyn FrameFanout> = Arc::new(registry.clone());
-    let handlers: Arc<dyn engram_dashboard_net::frame_port::ConnectionHandlerFactory> =
+    let handlers: Arc<dyn crate::conn_port::ConnectionHandlerFactory> =
         Arc::new(agent_conn::AgentConnections::new(
             manager,
             multiview,
@@ -481,9 +483,9 @@ pub async fn run() -> Result<(), i32> {
     //    ★세 갈래를 뭉치지 말 것★: 중복(정상 양보)·제3자 방해·시스템 오류는 사용자가 할 일이 서로
     //    다르다. 하나의 에러로 접으면 릴리스에서 "왜 안 뜨는지"가 사라진다(ADR-0134 결정 4).
     // ADR-0264
-    use engram_dashboard_net::instance::{AcquireError, Acquired};
+    use crate::instance::{AcquireError, Acquired};
     let daemon_path = layout.daemon_file();
-    let mut guard = match engram_dashboard_net::instance::acquire(&daemon_path) {
+    let mut guard = match crate::instance::acquire(&daemon_path) {
         Ok(Acquired::Held(g)) => g,
         Ok(Acquired::AlreadyRunning { pid }) => {
             // 어느 폴더가 잡혀 있었는지가 이 줄의 존재 이유다 — 없으면 "왜 안 뜨지"를 추적할 수 없다.
@@ -528,10 +530,10 @@ pub async fn run() -> Result<(), i32> {
     //   pid 생존 검사를 얹으면 무관한 프로세스가 옛 pid 를 재사용했을 때 데몬이 **영구히** 못 뜬다
     //   (사용자가 daemon.json 을 손으로 지우기 전까지 회복 경로가 없다). 보유가 권위다 — 여기서
     //   되돌리지 말 것.
-    if let Some(prev) = engram_dashboard_net::portfile::read(&daemon_path) {
+    if let Some(prev) = crate::portfile::read(&daemon_path) {
         tracing::info!(
             pid = prev.pid,
-            stale = engram_dashboard_net::portfile::is_stale(&prev),
+            stale = crate::portfile::is_stale(&prev),
             "기존 daemon.json 을 덮어씀(폴더 잠금은 우리 소유)"
         );
     }
@@ -730,7 +732,7 @@ pub async fn run() -> Result<(), i32> {
 
     // 8) daemon.json 기록.
     let start_time = engram_dashboard_platform::process::current_process_start_time().unwrap_or(0);
-    let info = engram_dashboard_net::portfile::DaemonInfo {
+    let info = crate::portfile::DaemonInfo {
         pid: std::process::id(),
         host: "127.0.0.1".to_string(),
         port,
@@ -1057,9 +1059,9 @@ mod tests {
     /// `UsageObserveSink` 를 받는다).
     #[test]
     fn the_status_chain_feeds_the_usage_service_and_the_fanout() {
+        use crate::conn_port::{Frame, FrameSink};
         use engram_dashboard_agent::types::{AgentStatus, StatusSink};
         use engram_dashboard_agent::usage::{UsageObservation, UsageSource, WindowObs};
-        use engram_dashboard_net::frame_port::{Frame, FrameSink};
 
         let real = engram_dashboard_agent::backend::usage_probes()[0];
         let (probe, _gate) = usage_service::fakes::gated_probe(real, 10.0, 2_000_000_000);

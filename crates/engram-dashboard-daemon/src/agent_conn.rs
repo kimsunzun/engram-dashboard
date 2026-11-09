@@ -30,6 +30,10 @@ use tokio::sync::watch;
 
 use crate::command_delivery::{CommandDeliveries, LocalCommands};
 use crate::command_roster::CommandRoster;
+use crate::conn_port::{
+    ConnFlow, ConnId, ConnectionHandler, ConnectionHandlerFactory, Frame, FrameFanout, FrameSink,
+    Saturated,
+};
 use crate::connection_core::{
     agent_list_event, broadcast_lease_changed, command_request_id, dispatch_order, event_json,
     hello_event, inbound_lane, output_event_to_wire, ConnectionCore, ConnectionSession,
@@ -39,10 +43,6 @@ use crate::connection_core::{
 use crate::usage_service::book::wire_vendor;
 use crate::usage_service::watch::{UsageEncoder, UsageFrame, UsageOutlet};
 use crate::usage_service::UsageService;
-use engram_dashboard_net::frame_port::{
-    ConnFlow, ConnId, ConnectionHandler, ConnectionHandlerFactory, Frame, FrameFanout, FrameSink,
-    Saturated,
-};
 
 // ── 출력 평면 sink ────────────────────────────────────────────────────────────────
 

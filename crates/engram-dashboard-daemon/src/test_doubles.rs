@@ -15,7 +15,7 @@ use std::sync::Mutex;
 use futures_util::future::BoxFuture;
 use tokio::sync::mpsc;
 
-use engram_dashboard_net::frame_port::{Frame, FrameError, FrameFanout, FrameSink};
+use crate::conn_port::{Frame, FrameError, FrameFanout, FrameSink};
 
 /// The channel capacity is itself the saturation condition, so a small cap can drive the upper layer's drop handling path.
 pub(crate) struct FakeFrameSink {

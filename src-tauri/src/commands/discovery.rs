@@ -30,7 +30,7 @@ use crate::discovery::{self, locate_daemon_exe};
 // The tray "데몬 켜기" (start daemon) (`tray/mod.rs` spawn_daemon_action) is a synchronous spawn_blocking worker so
 // it does not go through this async lock and calls `discovery::ensure_daemon` directly — that is, if tray-start and the boot ensure
 // happen at the same time they are outside serialization so multiple spawns can occur. **Even so, consistency is guaranteed down to the final 1 by the daemon's single-instance lock
-// (holding daemon.json in the data folder, net instance.rs — ADR-0134/0135)** — this lock is not a
+// (holding daemon.json in the data folder, daemon instance.rs — ADR-0134/0135)** — this lock is not a
 // consistency mechanism but an addendum that removes the console flicker (UX) of simultaneous multi-WebView ensure at boot. To bind the tray
 // path too, push the lock down into ensure_daemon (`crate::discovery`) or route the tray through the command — the cost is large against the benefit
 // (tray start is a one-off user click so it is separated in time from the boot race), so for now we delegate to that lock.

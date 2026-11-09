@@ -3,7 +3,7 @@
 //! killing one process tree ([`kill_tree`]) · whether one identity is still running ([`presence`]) and ending it only if it is
 //! ([`terminate_if_same`]).
 //!
-//! The place that decides "is that PID still that process" exists in several crates — e.g. `net` (stale
+//! The place that decides "is that PID still that process" exists in several crates — e.g. `daemon` (stale
 //! decision for the portfile) · the shell (daemon discovery in the `discovery` module) · `daemon` (records its own start time in daemon.json) · `agent` (identity
 //! decision for the codex child). All of them look at this module instead of keeping a copy of the decision logic — the source of truth for the callers is
 //! `rg "engram_dashboard_platform::process" crates src-tauri`. ★Do not move it back into the agent runtime★ — consumers

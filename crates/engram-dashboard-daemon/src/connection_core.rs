@@ -11,7 +11,7 @@
 //!   해석으로 처리한다. 코어는 SinkError 만 본다(이 모듈은 close_signal 을 모른다).
 //!
 //! ★status fanout(broadcast)도 carrier-중립이다★: lease/profile 변경의 전-연결 브로드캐스트는
-//! per-conn 응답(OutboundSink)이 아니라 `engram_dashboard_net::frame_port::FrameFanout`(전-연결
+//! per-conn 응답(OutboundSink)이 아니라 `crate::conn_port::FrameFanout`(전-연결
 //! 출구)으로 간다 — 인코딩된 text 하나를 넘길 뿐이라 연결이 몇 개인지도, 누가 등록돼 있는지도
 //! 이 모듈은 모른다(ADR-0129).
 
@@ -76,6 +76,7 @@ use tokio::sync::watch;
 
 use crate::command_delivery::{CommandDeliveries, LocalCommands, OutcomeLanding};
 use crate::command_roster::CommandRoster;
+use crate::conn_port::{ConnId, FrameFanout};
 use crate::control::registry::ControlRegistry;
 use crate::usage_service::book::RequestKind;
 use crate::usage_service::UsageService;
@@ -83,7 +84,6 @@ use engram_dashboard_command::{
     CommandDecl, CommandEnvelope, CommandError, CommandReply, ErrorCode, OwnerToken,
 };
 use engram_dashboard_messaging::envelope::EnvelopeFormat as CoreEnvelopeFormat;
-use engram_dashboard_net::frame_port::{ConnId, FrameFanout};
 use serde_json::value::RawValue;
 
 // ── OutboundSink seam(ADR-0003 OutputSink 결을 따름) ──────────────────────────────
@@ -2778,7 +2778,7 @@ pub fn agent_list_event(manager: &Arc<AgentManager>) -> AgentEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engram_dashboard_net::frame_port;
+    use crate::conn_port as frame_port;
     use engram_dashboard_protocol::{CommandListEntry, RequestId};
     use std::sync::atomic::AtomicU8;
     use std::sync::Mutex as StdMutex;
@@ -7708,7 +7708,7 @@ mod tests {
     //     동기 전송은 output_core.rs 단위테스트가 이미 커버.)
     #[tokio::test]
     async fn subscribe_control_order_ack_then_complete() {
-        use engram_dashboard_net::frame_port::Frame;
+        use crate::conn_port::Frame;
         use engram_dashboard_protocol::{encode_terminal_frame, SubscribeAction};
         use tokio::sync::mpsc;
         let (tx, mut rx) = mpsc::channel::<Frame>(16);

@@ -99,6 +99,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::conn_port::{ConnId, Frame, FrameError, FrameSink};
 use engram_dashboard_agent::commands::{resolve_in, AgentRosterRow};
 use engram_dashboard_base::sync;
 use engram_dashboard_base::time::{Clock, SystemClock};
@@ -106,7 +107,6 @@ use engram_dashboard_command::{
     route, CommandDecl, CommandEnvelope, CommandError, CommandLink, CommandReply, CommandTable,
     Effect, ErrorCode, OwnerToken, RequestId, RetryMode,
 };
-use engram_dashboard_net::frame_port::{ConnId, Frame, FrameError, FrameSink};
 use engram_dashboard_protocol::AgentEvent;
 use tokio::sync::{oneshot, watch};
 
@@ -2695,10 +2695,10 @@ impl FrameSink for ReplyCatcher {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::conn_port::FrameSink;
     use crate::test_doubles::FakeFrameSink;
     use engram_dashboard_base::time::ManualClock;
     use engram_dashboard_command::{CommandDecl, OwnerToken};
-    use engram_dashboard_net::frame_port::FrameSink;
     use serde_json::json;
     use tokio::sync::mpsc;
 

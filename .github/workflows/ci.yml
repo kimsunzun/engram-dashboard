@@ -1315,9 +1315,9 @@ jobs:
           crates/engram-dashboard-agent/src/usage/process.rs
           crates/engram-dashboard-agent/src/usage/scratch.rs
           crates/engram-dashboard-base/src/logging/mod.rs
+          crates/engram-dashboard-daemon/src/instance.rs
           crates/engram-dashboard-daemon/src/messaging_host.rs
-          crates/engram-dashboard-net/src/instance.rs
-          crates/engram-dashboard-net/src/portfile.rs
+          crates/engram-dashboard-daemon/src/portfile.rs
           src-tauri/src/discovery/tests.rs
           # 통합 시험(`tests/`)
           crates/engram-dashboard-agent/tests/activation.rs
@@ -1413,7 +1413,7 @@ jobs:
           crates/engram-dashboard-agent/src/usage/process.rs
           crates/engram-dashboard-agent/src/usage/scratch.rs
           crates/engram-dashboard-base/src/logging/mod.rs
-          crates/engram-dashboard-net/src/instance.rs
+          crates/engram-dashboard-daemon/src/instance.rs
           # 예제
           crates/engram-dashboard-agent/examples/spike_breakaway.rs
           STD_OS_FILES
@@ -1549,10 +1549,10 @@ jobs:
             *) echo "FAIL — rg errored (exit $rc)"; exit 1 ;;
           esac
 
-      # net gate 2a — platform 심볼 allowlist(심볼 단위): ① 뽑은 심볼 목록 = 아래 다섯 이름(정확히) ② crate 이름을
-      #   심볼 꼴이 아닌 모양으로 부르는 줄 0. 2b 와 짝이다(하나만 남기지 말 것). 근거 · 한계의 정본 =
-      #   `crates/engram-dashboard-net/src/lib.rs` 헤더 게이트 2.
-      - name: 'net gate 2a: platform symbol allowlist — exactly these 5 names, no hidden import forms'
+      # net gate 2a — platform symbol allowlist (per symbol): ① the extracted symbol list = the names below (exactly — now none:
+      #   net has no platform edge) ② 0 lines that call the crate name in a non-symbol form. Paired with 2b (do not keep only
+      #   one). Rationale · limits canonical = the `crates/engram-dashboard-net/src/lib.rs` header gate 2.
+      - name: 'net gate 2a: platform symbol allowlist — exactly 0 names, no hidden import forms'
         shell: bash
         run: |
           set +e
@@ -1562,17 +1562,12 @@ jobs:
           if [ "$rc" -gt 1 ]; then echo "FAIL — rg errored (exit $rc)"; exit 1; fi
           out=$(printf '%s\n' "$raw" | sed '/^$/d' | LC_ALL=C sort -u)
           expected=$(LC_ALL=C sort <<'NET_PLATFORM_SYMBOLS'
-          engram_dashboard_platform::fs::is_access_denied
-          engram_dashboard_platform::fs::is_sharing_violation
-          engram_dashboard_platform::fs::open_deny_write
-          engram_dashboard_platform::process::current_process_start_time
-          engram_dashboard_platform::process::pid_alive_with_start_time
           NET_PLATFORM_SYMBOLS
           )
           echo "found symbol(s):"
           printf '%s\n' "$out"
           if [ "$out" != "$expected" ]; then
-            echo "FAIL — expected exactly these 5:"
+            echo "FAIL — expected exactly these 0:"
             printf '%s\n' "$expected"
             exit 1
           fi
@@ -1581,7 +1576,7 @@ jobs:
           rc=$?
           set -e
           case "$rc" in
-            1) echo "PASS — 5 names, 0 hidden import forms" ;;
+            1) echo "PASS — 0 names, 0 hidden import forms" ;;
             0) echo "FAIL — platform 을 심볼 꼴이 아닌 모양(별칭 · 중괄호 · glob · 끊긴 경로)으로 부른다:"; printf '%s\n' "$hidden"; exit 1 ;;
             *) echo "FAIL — rg errored (exit $rc)"; exit 1 ;;
           esac
@@ -1606,7 +1601,7 @@ jobs:
       # 새므로(-e build↔build-deps · --target all↔비활성 target · --all-features↔optional) 줄이지 말 것.
       # --locked 는 커밋된 Cargo.lock 그대로 읽게 한다 — 없으면 새로 해석한 그래프를 단언해 소비자가
       # 실제로 보는 것과 다른 답을 낼 수 있다.
-      - name: 'net gate 3: direct workspace deps — exactly 3'
+      - name: 'net gate 3: direct workspace deps — exactly 2'
         shell: bash
         run: |
           set +e
@@ -1622,7 +1617,7 @@ jobs:
           if [ -z "$out" ]; then n=0; else n=$(printf '%s\n' "$out" | wc -l | tr -d '[:space:]'); fi
           echo "found $n direct workspace dep(s):"
           printf '%s\n' "$out"
-          if [ "$n" -ne 3 ]; then echo "FAIL — expected exactly 3"; exit 1; fi
+          if [ "$n" -ne 2 ]; then echo "FAIL — expected exactly 2"; exit 1; fi
           echo "PASS"
 
       # 패턴의 괄호는 오타가 아니다 — 맨 이름으로 적으면 이 게이트를 설명하는 net crate 의 헤더 주석이

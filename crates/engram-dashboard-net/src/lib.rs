@@ -2,9 +2,7 @@
 //!
 //! ★What it owns★: connection lifecycle management **after** socket accept — WS upgrade + Origin allowlist · token handshake ·
 //! connection lifetime · single writer per connection · keepalive (active Ping · half-open decision) · out-of-band close signal ·
-//! all-connection fan-out registry (`ws`) · the frame port contract with the layer above (`frame_port`) · process lifecycle management
-//! (`instance` single-instance guard · `portfile` daemon.json write/read · stale decision — since ADR-0135
-//! **the two deal with one and the same file**: the file the guard holds is the connection file the client reads).
+//! all-connection fan-out registry (`ws`) · the frame port contract with the layer above (`frame_port`).
 //! The per-module responsibility is owned by each file's header.
 //! ★All of it sits behind the `server` feature, and **the default is empty**★: if not turned on, what remains is `auth` (a re-export of the protocol
 //! handshake frame) alone — the boundary that keeps **consumers that need only the frame shape** from carrying an async runtime (that the default feature has no
@@ -43,13 +41,13 @@
 //! ★Confirmation recipe — look at the **workspace-local forward closure**★:
 //!   `cargo tree -p engram-dashboard-net -e normal --target all --all-features --prefix none`
 //!   `| rg "^engram-dashboard" | sort -u`
-//!   → itself + `command` + `platform` + `protocol` (`command` comes through `protocol`). The consumer (the daemon) is not in
+//!   → itself + `command` + `protocol` (`command` comes through `protocol`). The consumer (the daemon) is not in
 //!   the list = **this crate does not reach the consumer**. So adding `소비자 → 이 crate` closes
 //!   no loop.
 //!   ★Do not drop `--target all --all-features`★: looking at only the host target makes **inactive-target** (such as `cfg(unix)`)
 //!   dependencies and **optional** dependencies vanish from the output (measured). Printing everything including external crates is hundreds of lines, so only the workspace's
-//!   are filtered. `platform` (ADR-0266) · `command` (ADR-0155) are leaves that depend on no workspace crate at all,
-//!   so the closure does not grow further below them.
+//!   are filtered. `command` (ADR-0155) is a leaf that depends on no workspace crate at all,
+//!   so the closure does not grow further below it.
 //!   ★Do not use `--invert` (unsound)★: invert lists this crate's **ancestors**, but the condition for a cycle is
 //!   `이 crate →* 소비자`, so even in a world with a cycle the invert output is **byte-identical** — that is, that
 //!   command cannot tell whether a cycle exists.
@@ -61,17 +59,12 @@
 //! When you touch a gate, **re-measure the post-edit non-self-matching property**:
 //!   · **Gate 1 — source reference** (scope: `src/`):
 //!     `rg "engram_dashboard_(daemon|messaging)" crates/engram-dashboard-net/src/` → **0 lines**
-//!   · **Gate 2 — two pieces** (scope: `src/`). 2a pins down by name the five platform symbols this crate uses,
-//!     and 2b measures that the liveness helper's original place (the agent runtime — ADR-0175 decision 1 cut it) is not
-//!     refilled:
+//!   · **Gate 2 — two pieces** (scope: `src/`). 2a measures that this crate calls no platform symbol (the allowlist is
+//!     empty — the single-instance guard and `daemon.json`, the only users, are in the daemon crate), and 2b measures that
+//!     the agent runtime (ADR-0175 decision 1 cut it) does not come back:
 //!     · **2a — platform symbol allowlist (two checks)**:
 //!     ① `rg -o --no-filename "engram_dashboard_platform::[A-Za-z0-9_:]+" crates/engram-dashboard-net/src/`
-//!     `| sort -u` → **exactly these five lines** (compare names, not count) — two process
-//!     liveness helpers under `process::` (`pid_alive_with_start_time` · `current_process_start_time` — only for portfile's stale
-//!     decision), and one shared-restricted open and two of its failure classifiers under `fs::` (`open_deny_write` · `is_sharing_violation` ·
-//!     `is_access_denied` — all three only for instance's single-instance guard). Counting only the number lets a swapped symbol pass
-//!     as long as it is five, and one module import (`use …::fs;`) line covers that whole module — under name comparison both show up as names
-//!     outside the list.
+//!     `| sort -u` → **0 lines** (compare names, not count — the allowlist is empty).
 //!     ② `rg '^(?:[^/]|/[^/])*?\bengram_dashboard_platform(?:[^:]|:[^:]|::[^A-Za-z0-9_]|:{0,2}$)'`
 //!     `crates/engram-dashboard-net/src/` → **0 lines** — calls where `::이름글자` does not follow the crate name.
 //!     The regex of ① **misses such calls with 0 matches** — aliases (`… as p`) · braces (`…::{fs::x}`) · glob (`…::*`) ·
@@ -80,9 +73,8 @@
 //!     ★So when calling, use full paths or individual `use`★ — a grouped `use` (`…::process::{a, b}`) is printed by ① as the single line
 //!     `…::process::`, which is a name outside the list, and an alias is bitten by ②.
 //!     ★Limit★: if the dependency name is changed in the manifest (a different name given with `package = "engram-dashboard-platform"`),
-//!     this crate name does not appear in the source and ①② are both blind. ★Gate 3 does not back that up either★ — the resolved
-//!     graph prints the same package under the changed name and stays green with the allowed edge as is. Then nothing guards what is
-//!     called through this edge (the symbol range) — it is left to review.
+//!     this crate name does not appear in the source and ①② are both blind. Gate 3 backs that up: the resolved graph prints
+//!     the platform package under its real name, and platform is not an allowed edge.
 //!     · **2b — no re-entry of the agent runtime**:
 //!     `rg "engram_dashboard_(a)gent" crates/engram-dashboard-net/src/` → **0 lines**
 //!     (this crate does not know the agent runtime even as a dependency)
@@ -98,23 +90,21 @@
 //!     ★Do not inflate what 2b is worth keeping★: the living wall is gate 3 — net cannot even call an agent symbol
 //!     without declaring the dependency, so that side goes red first. What 2b takes on is **vocabulary leaking first through comments · test helpers**
 //!     and the gate running true to its name (`0줄`).
-//!     ★Even so, do not **delete** 2b★: detach only it and 2a's five-name expectation is left alone, and since 2a sees only platform
+//!     ★Even so, do not **delete** 2b★: detach only it and 2a is left alone, and since 2a sees only platform
 //!     names, it passes even if agent vocabulary newly sticks next to it. It is a wall only when standing as a pair.
-//!     ★Do not put the expectation on a **file name**★: "only `portfile.rs`" stays true even if an agent-vocabulary
+//!     ★Do not put the expectation on a **file name**★: "only file X" stays true even if an agent-vocabulary
 //!     import is newly put **inside** that file, so the gate passes. The invariant is per **symbol**, not per file
 //!     (ADR-0129 — isolation is per type, not per crate).
 //!   · **Gate 3 — direct workspace dependency ceiling** (scope: resolved dependency graph):
 //!     `cargo tree -p engram-dashboard-net --depth 1 --prefix none -e normal,dev,build --target all`
 //!     `--all-features | rg "^engram-dashboard" | sort -u`
-//!     → **exactly 3 lines** = itself · `engram-dashboard-platform` · `engram-dashboard-protocol`.
-//!     ★Do not try to reduce it★ — the `platform` slot is the edge that takes portfile's liveness helper and instance's shared-restricted open
-//!     (gate 2a), and the `protocol` slot is the `DaemonInfo` file-format contract · the handshake frame
-//!     re-export (the dependency comment in Cargo.toml).
+//!     → **exactly 2 lines** = itself · `engram-dashboard-protocol`.
+//!     ★Do not try to reduce it★ — the `protocol` slot is the handshake frame re-export (the dependency comment in Cargo.toml).
 //!     ★What this gate closes (exactly this much)★: **declared direct workspace dependencies** show up regardless of
 //!     manifest syntax — rename · `[dependencies.<이름>]` table form · indented declaration · `[build-dependencies]` ·
 //!     inactive target (`cfg(unix)`) · `optional`, all 6 forms were **measured by inject → observe → revert** and confirmed all caught.
-//!     ★What it does **not** close★: it does not see which symbols are used **inside** the allowed edges (protocol·platform) —
-//!     the platform side is bound by gate 2, and the protocol side is pinned by gate 4 to **only two names**. That is, there is still no allowlist for protocol symbols
+//!     ★What it does **not** close★: it does not see which symbols are used **inside** the allowed edge (protocol) —
+//!     the protocol side is pinned by gate 4 to **only two names**. That is, there is still no allowlist for protocol symbols
 //!     **in general** (a known gap — the ★known gap★ section inside the 2026-08-05 note of ADR-0129 §영향/불변식 [impact / invariants], an intentional
 //!     reservation. That ADR has no label "Note A"). Do not grow gate 4 into
 //!     that general allowlist — that is a separate decision (outside the scope of 0-4).
@@ -160,9 +150,5 @@
 pub mod auth;
 #[cfg(feature = "server")]
 pub mod frame_port;
-#[cfg(feature = "server")]
-pub mod instance;
-#[cfg(feature = "server")]
-pub mod portfile;
 #[cfg(feature = "server")]
 pub mod ws;
