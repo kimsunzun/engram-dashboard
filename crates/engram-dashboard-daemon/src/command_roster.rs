@@ -144,7 +144,7 @@ impl CommandRoster {
     /// one `error!` line is emitted.
     /// ★That unreachability depends on **two callers**, so both sequences must hold together★ — writing down only one is half a rationale:
     /// socket connections come from the network layer's monotonically increasing counter and are not reused (`ConnRegistry::alloc_id`
-    /// in `ws.rs`), and the control route's fake caller connection **counts down** from `u64::MAX`
+    /// in `link/server.rs`), and the control route's fake caller connection **counts down** from `u64::MAX`
     /// (`command_delivery::CommandBus::open_caller` — the calculation that the two sequences would meet only after 2^63 allocations is
     /// in that function's doc). If the nature of either of the two issuers changes, the precondition here breaks with it.
     /// ★Do not panic here — do not revive it★: this function runs inside `on_connect`. If it dies there, the production

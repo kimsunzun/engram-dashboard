@@ -6,7 +6,7 @@
 //! ★That the log of [`read`] does not leak the token is guarded by only this comment right now (known gap)★: on a parse failure
 //! it prints the serde error's `Display`, which holds only the position · expected type and not the value —
 //! because `token` is a `String`, there is no place for a value echo of the `invalid type` kind. Changing the field type
-//! breaks that premise. `engram-dashboard-net`'s `ws.rs` blocks the same trap with a regression test, but there is no test here.
+//! breaks that premise. `link/auth.rs` blocks the same trap with a regression test, but there is no test here.
 //!
 //! ★Do not revive atomic replacement (temp file + rename)★: the daemon holds this file without delete sharing, so
 //! rename is refused (measured `ERROR_SHARING_VIOLATION`). So [`write_in_place`] writes

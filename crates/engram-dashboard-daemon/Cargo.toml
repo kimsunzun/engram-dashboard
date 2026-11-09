@@ -99,16 +99,20 @@ engram-dashboard-messaging = { path = "../engram-dashboard-messaging" }
 #   the server layer (`ws` · `frame_port`), and this is where it is turned on.
 #   The rationale (why the default was emptied) is in the `[features]` comment of that crate's `Cargo.toml`, which is the source of truth.
 engram-dashboard-net = { path = "../engram-dashboard-net", features = ["server"] }
+# ADR-0310 (TRD S21 trd-3 §6-3 U4): the reusable transport — the daemon's accepting side (`src/link/`) runs on its
+#   registry, accepted-peer supervisors and real-socket listener (`ws`). The test harness (`test-support`) is not turned on:
+#   the adapter's tests drive it over synthetic inbox items and a real loopback listener.
+engram-dashboard-transport = { path = "../engram-dashboard-transport", features = ["ws"] }
 # ADR-0155: command bus tools (envelope · error · declaration macro · table · routing). This crate uses the tools **only for table assembly** —
 #   it does not declare its own commands, so `ts-rs` is not added (only the declaring crate emits bindings).
 engram-dashboard-command = { path = "../engram-dashboard-command" }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
 # ★ADR-0129 slice 1 — `tokio-tungstenite` was moved down to [dev-dependencies]★: its use in this crate's production code
-#   is **0** (the WS server belongs to the network crate), and the only remaining use is the harness (`tests/ws_e2e.rs` attaches as a WS
+#   is **0** (the WS server belongs to the transport crate), and the only remaining use is the harness (`tests/ws_e2e.rs` attaches as a WS
 #   **client** and drives the assembly). **Do not move it back up to [dependencies].**
 #   ★The working criterion is **not** "is it in the dependency graph" but "did this manifest declare it directly"★: `cargo tree -p
-#   engram-dashboard-daemon -e normal` still shows `tokio-tungstenite` through net — judging by that output
+#   engram-dashboard-daemon -e normal` still shows `tokio-tungstenite` through transport and net — judging by that output
 #   gives the opposite conclusion. The real wall is that Rust 2018's extern prelude takes in **only directly declared dependencies**,
 #   so without a direct declaration the `use tokio_tungstenite::…` in production source **does not compile because
 #   that crate is not in scope**. That is how the rot of new daemon source growing a WS server back inside the agent layer (the path actually trodden by
@@ -119,9 +123,10 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync",
 #   built the `use` in the non-test code under `src/` still breaks — **measured** (in a minimal 2-crate workspace
 #   `cargo test -p b` → `error[E0433]`). This daemon has both `tests/ws_e2e.rs` and a bin, so it applies as is.
 # In production code it is used for `future::BoxFuture` in the port trait signature (async fn in trait is not dyn
-#   compatible, so boxing is manual). ★The WS read/write split family (SplitSink/StreamExt/SinkExt) now has **0 uses** in this crate's production
-#   source★ — it went to the network crate (if that 0 breaks, also read the rot warning in the tokio-tungstenite comment above). The harness (`tests/`)
-#   is a WS client, so it uses more — see the exact uses with
+#   compatible, so boxing is manual), and `StreamExt` on the transport inbox (`src/link/server.rs` — not a socket).
+#   ★The WS write half (SplitSink/SinkExt) has **0 uses** in this crate's production source★ — the socket is the transport
+#   crate's (if that 0 breaks, also read the rot warning in the tokio-tungstenite comment above). The harness (`tests/` and
+#   the `link` unit tests) is a WS client, so it uses more — see the exact uses with
 #   `rg "futures_util|SinkExt|StreamExt" src/ tests/` (not listed here).
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
@@ -166,7 +171,7 @@ http = "1"
 [dev-dependencies]
 # ★ADR-0129 slice 1★: the WS stack is harness-only — `tests/ws_e2e.rs` becomes a WS **client** and attaches to the
 #   assembly started in-process (`start_test_server*`). Production code use is 0 (the comment under [dependencies] above is the
-#   source of truth for why it must be there). Same 0.26 pin as the network crate — the harness and the server must see the same wire
+#   source of truth for why it must be there). Same 0.26 pin as the transport crate — the harness and the server must see the same wire
 #   implementation.
 tokio-tungstenite = "0.26"
 # ★ADR-0088 self-dev-dependency trick★: redeclare this crate itself (the daemon lib) in the dev graph with the test features on

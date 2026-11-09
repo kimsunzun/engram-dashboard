@@ -1077,6 +1077,7 @@ dependencies = [
  "engram-dashboard-net",
  "engram-dashboard-platform",
  "engram-dashboard-protocol",
+ "engram-dashboard-transport",
  "futures-util",
  "getrandom 0.2.17",
  "http",

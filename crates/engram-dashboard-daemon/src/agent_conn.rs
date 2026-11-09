@@ -285,19 +285,18 @@ impl ConnectionHandler for AgentConnection {
         frames: &'a Arc<dyn FrameSink>,
     ) -> BoxFuture<'a, ()> {
         Box::pin(async move {
-            // ★2프레임 고정★: 이 호출 시점엔 큐 소비자가 없고 여유도 status fanout 과 나눠 쓰므로
-            //   상한을 숫자로 못 잡는다(포트 계약). 그래서 상수 개수만 넣는다.
+            // ★Two frames, fixed★: the queue room is shared with the status fanout, so no safe number of frames
+            //   can be named (port contract) — only a constant count goes in here.
             if let Some(text) = event_json(&hello_event(env!("CARGO_PKG_VERSION").into())) {
                 let _ = frames.send(Frame::Text(text)).await;
             }
             if let Some(text) = event_json(&agent_list_event(self.core.manager())) {
                 let _ = frames.send(Frame::Text(text)).await;
             }
-            // ★인사 **뒤에** 명단에 올린다★: 위 `send` 는 큐가 이미 찼으면 영영 반환하지 않을 수 있는데
-            //   (포트 계약 — 이 시점엔 소비자가 없다), 그 앞에 올려 두면 그렇게 멈춘 연결의 id 가
-            //   `on_disconnect` 없이 명단에 영구히 남는다. 뒤로 미뤄도 등록보다는 앞이다 — 네트워크 행이
-            //   수신 task 를 **이 호출이 반환한 뒤에** 띄우므로(`ws.rs` 의 on_connect await → read_task
-            //   spawn 순서) 여기 도달하지 못한 연결은 프레임 한 장도 못 보낸다.
+            // ★Registered **after** the greeting★: the greeting is queued before the attach; a failed greeting closes
+            //   the connection and `on_disconnect` removes the entry. Still before any command — the network layer spawns the read task only
+            //   **after this call returns** (`link/server.rs`: on_connect await → read_task spawn), so a connection
+            //   that did not get here cannot send a single frame.
             // ADR-0154
             self.core.commands().attach(conn_id, frames);
             // ★사용량 칸도 인사 **뒤에** 만든다★ — 칸이 서면 구독 교체의 첫 한 장이 이 출구로 곧장 나가므로, 인사
@@ -322,11 +321,11 @@ impl ConnectionHandler for AgentConnection {
             match serde_json::from_str::<AgentCommand>(text) {
                 Ok(cmd) if dispatch_order(&cmd) == DispatchOrder::Detached => {
                     // ★줄 밖으로 내보낸다 — 이 연결의 다음 명령을 막지 않게★.
-                    // ★답장은 그대로 **이 연결의 같은 프레임 출구**로 나간다★: sink 가 든 것은 연결당
-                    //   단일 writer 큐의 사본이라 이 태스크가 늦게 끝나도 답이 다른 데로 새지 않는다.
-                    //   대신 그 사본이 살아 있는 동안은 writer 의 송신단-드롭 자기종료가 성립하지
-                    //   않는다 — 네트워크 행 `ws.rs` 「사본 전수」가 `on_disconnect` 를 넘겨 사는 짧은 사본으로 꼽는
-                    //   것이 이것이고(⟳ 는 `REPLY_WAIT_MAX` 까지 든다), `handle_connection` 의 write abort 가 그래서 무해하게 만든다.
+                    // ★The reply still goes out on **this connection's own frame outlet**★: the sink holds a copy of the
+                    //   connection's single outbound queue, so even if this task ends late the reply cannot leak elsewhere.
+                    //   That copy may outlive `on_disconnect` (⟳ holds it up to `REPLY_WAIT_MAX`); it keeps only the transport
+                    //   handle alive, not the link — the network layer closes the peer itself in every teardown branch
+                    //   (`link/server.rs`), so a late send just fails.
                     // ★연결이 이미 정리된 뒤에도 이 태스크는 돈다★(네트워크 행의 abort 가 안 닿는다 —
                     //   포트 계약). 그래도 **이 연결의 상태를 되살리지 않는다**: 떼어 낸 명령이 건드리는 것은
                     //   전역 manager·사용량 서비스와 전-연결·구독자 브로드캐스트뿐이고, 명부·구독·lease 같은 연결
@@ -490,9 +489,10 @@ impl ConnectionHandler for AgentConnection {
         //   있는 동안 이 정리가 스냅샷을 뜨거나(`ConnectionHandler::on_disconnect` 문서의 abort-겹침
         //   경쟁) ② 그 구간에서 패닉하면(훅 없는 시험 빌드 — 운영 프로세스에서는 훅이 데몬을 끝낸다 ·
         //   ADR-0292) 코어에만 남고 여기엔 안 잡힌다.
-        // ★결과 2가지★: (a) 좀비 sink 가 다음 emit 까지 잔존(코어의 dead-sink 제거로 자연 회복)
-        //   (b) 그 sink 가 `Sender<Frame>` 사본을 붙들어 **write_task 의 송신단-드롭 자기종료가 깨진다**
-        //   — `handle_connection` 의 select! 가 write 쪽 `abort()` 를 지워선 안 되는 이유(거기 주석).
+        // ★Two outcomes★: (a) a zombie sink stays until the next emit (the core's dead-sink removal recovers it)
+        //   (b) that sink holds a copy of the connection's frame outlet — the transport handle outlives the connection, but
+        //   not the link: the network layer closes the peer itself and aborts the losing tasks (`link/server.rs`), which is
+        //   why those aborts must not be removed.
         let leftovers: Vec<(AgentId, SinkId)> = {
             let guard = self.session.subs.lock().expect("subs poisoned");
             guard.iter().map(|(a, s)| (*a, *s)).collect()
@@ -621,9 +621,8 @@ mod tests {
     use crate::test_doubles::FakeFrameSink;
     use tokio::sync::mpsc;
 
-    /// 네트워크 행 실물(`engram_dashboard_net::ws::ConnFrameSink`)은 네트워크 crate 내부
-    /// (`pub(crate)`)라 **부를 수 없다**(ADR-0129) — 그래서 이 행의 테스트는 포트 계약
-    /// (`frame_port`)에만 의존하는 더블을 쓴다.
+    /// The network layer's real outlet (`link::server::ConnFrameSink`) needs a live transport peer and only that module
+    /// can build one (ADR-0129) — so this layer's tests use a double that depends only on the port contract (`frame_port`).
     fn frame_sink(tx: mpsc::Sender<Frame>) -> Arc<dyn FrameSink> {
         Arc::new(FakeFrameSink::new(tx))
     }

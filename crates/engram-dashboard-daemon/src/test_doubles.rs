@@ -1,12 +1,11 @@
 //! Test doubles of the frame port — an isolation harness where the agent system layer runs without a socket (ADR-0129).
 //!
 //! Their reason to exist is to keep agent layer tests from even calling the network layer's real objects (`ConnFrameSink` and
-//! `ConnRegistry` of `engram_dashboard_net::ws`) by name — with slice 1 the crate was actually
-//! split so those names are in another lib (`ConnFrameSink` is `pub(crate)` there so it cannot even be called).
+//! `ConnRegistry` of `link::server`) by name — those need live transport peers, and only that module can build them.
 //! The doubles depend only on the port contract (`frame_port`).
 //!
 //! ★Network layer policy is not imitated★: things like the close signal (close_signal) on queue saturation or fan-out target management
-//!   are network lifecycle management, and their real contract is guarded by the network crate's own tests. If reproduced
+//!   are network lifecycle management, and their real contract is guarded by the network layer's own tests. If reproduced
 //!   here the test would verify the double instead of the real thing.
 // ADR-0129
 
@@ -40,7 +39,7 @@ impl FrameSink for FakeFrameSink {
 
 /// The all-connections fan-out double. It **records calls instead of imitating delivery** — what the upper layer passed to the fan-out and how many times is all
 /// that is observable at this layer, and how that text is copied per connection is the contract on the other side of the port
-/// (`engram_dashboard_net::ws::ConnRegistry`) and its tests guard it.
+/// (`link::server::ConnRegistry`) and its tests guard it.
 #[derive(Default)]
 pub(crate) struct RecordingFanout {
     texts: Mutex<Vec<String>>,

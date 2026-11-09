@@ -1695,7 +1695,8 @@ impl ConnectionCore {
                     });
                 }
 
-                // Best effort: on `Close` the net layer aborts the writer, so this Ack can be lost.
+                // `Close` flushes queued frames before closing (`link::server` → `close_after_flush`), so this Ack goes out first —
+                // still best effort: bounded by the 2 s flush and refused if the outbound queue is already full.
                 reply(sink, request_id, Ok(()));
                 return DispatchFlow::Close;
             }

@@ -45,8 +45,9 @@ impl std::error::Error for FrameError {}
 /// - `try_send` = **non-blocking only**. Called from paths where blocking is forbidden, such as the output pump thread and status callbacks.
 ///   On saturation it is an immediate `FrameError`, and the implementation must ring the close signal **outside** the queue at that moment — because in the saturated
 ///   state even `Frame::Close` cannot enter the queue and the connection becomes a zombie (the `ws` module header).
-/// - `send` = async context only, backpressure allowed (waits until a slot opens). It does **not ring** the close signal here
-///   — the caller can wait, so it is not a candidate for a slow-consumer decision.
+/// - `send` = async context only. ★Since 3-3 U4 the daemon's implementation (`link::server::ConnFrameSink`) does **not**
+///   wait for room★ — on saturation it closes the connection like `try_send`. Do not push a burst through it expecting
+///   backpressure; today it carries only `on_connect`'s two frames and the `Close`.
 pub trait FrameSink: Send + Sync {
     fn try_send(&self, frame: Frame) -> Result<(), FrameError>;
 
@@ -152,11 +153,10 @@ pub trait ConnectionHandler: Send + Sync {
     /// ★It does not mean the first frame of the whole connection★: registration precedes this call, so in between the all-connection
     ///   fanout (`FrameFanout`) may have put frames into the same queue first. Do not assume it holds the FIFO head.
     ///
-    /// ★No queue consumer yet — this is not a caller-side condition but an **implementation-side duty**★: this call
-    ///   is awaited **before the writer task starts**, so frames put in here are taken by nobody.
-    ///   So ① put in only a few frames and ② do not block for long for any other reason either. Violate this and
-    ///   `FrameSink::send` never returns, and that connection remains **authenticated and registered but with no reader, no writer, no
-    ///   timeout and no `on_disconnect`**.
+    /// ★Put in only a few frames and do not block for long★: the read task is spawned only after this call returns,
+    ///   so a long wait here delays everything the connection receives — and if it never returns, the connection is
+    ///   never cleaned up (no `on_disconnect`). (Since 3-3 U4 the writer already runs during
+    ///   this call and a saturated `send` closes the connection instead of waiting.)
     ///
     /// ★A safe upper bound cannot be nailed down as a number★: do not read the queue capacity (`ws::CONN_TX_CAP`) as that bound.
     ///   The connection is registered in the fanout registry already **before** this call, so from that moment the all-connection fanout

@@ -6,8 +6,9 @@
 //! 검증한다.
 //!
 //! ★Scope of this crate (ADR-0130)★ — the application layer, assembly (`run()` decides the order the parts are called in),
-//! and process housekeeping: the single-instance guard (`instance`) and `daemon.json` (`portfile`). The post-accept network
-//! layer is still in `engram-dashboard-net`.
+//! and process housekeeping: the single-instance guard (`instance`) and `daemon.json` (`portfile`). The accepting side runs
+//! on the transport crate (`link`); the connection port contract is still re-exported from `engram-dashboard-net`
+//! (`conn_port`).
 
 pub mod agent_conn;
 pub mod command_delivery;
@@ -20,6 +21,7 @@ pub mod data_dir;
 pub mod experiment;
 mod file_hooks;
 pub mod instance;
+mod link;
 #[cfg(test)]
 mod log_capture;
 pub mod messaging_host;
@@ -43,28 +45,25 @@ use engram_dashboard_agent::types::CLI_EXE_NAME;
 use engram_dashboard_base::logging;
 use engram_dashboard_protocol::PROTOCOL_VERSION;
 
-use tokio::net::TcpListener;
 use tokio::sync::watch;
 
 use crate::conn_port::FrameFanout;
 use connection_core::MultiViewState;
 use data_dir::{ensure_data_dir_writable, DataLayout};
 use engram_dashboard_agent::usage::{OsProbeSpawner, ProbeSpawner, UsageProbe};
-use engram_dashboard_net::ws::ConnRegistry;
+use link::server::{ConnRegistry, Listening};
 use status_fanout::DaemonStatusSink;
 use usage_service::clock::OsUsageClock;
 use usage_service::observe::UsageObserveSink;
 use usage_service::{OsProbeThreads, ProbeThreads, UsageParts, UsageService};
 
-// ADR-0129 슬라이스 1: 네트워크 행이 소유한 타입인데 **이 crate 의 공개 시그니처에 나타나므로**
-//   재수출한다(`start_test_server_with_keepalive` — `tests/ws_e2e.rs` 가 부른다). 표준 Rust API
-//   재수출 패턴이고, **모듈 통째 재수출이 아니다** — 옛 `crate::ws::` 경로를 되살리는 것은 금지다.
-//   그 시그니처가 기능 `test-support` 뒤에 있으므로 재수출도 그 뒤다(ADR-0286). 기능이 꺼지면 accept loop 가 쓰는
-//   비공개 import 만 남는다.
+// The link's keepalive settings appear in this crate's public signature (`start_test_server_with_keepalive` — called by
+//   `tests/ws_e2e.rs`), so the one type is re-exported, not the module. That signature is behind feature `test-support`,
+//   so the re-export is too (ADR-0286); without the feature only the private import the accept loop uses remains.
 #[cfg(feature = "test-support")]
-pub use engram_dashboard_net::ws::KeepaliveConfig;
+pub use link::server::KeepaliveConfig;
 #[cfg(not(feature = "test-support"))]
-use engram_dashboard_net::ws::KeepaliveConfig;
+use link::server::KeepaliveConfig;
 // ADR-0129 0-4: 핸드셰이크 프레임(protocol `handshake::AuthFrame`)은 **재수출하지 않는다** — 이 crate 의 공개
 //   시그니처에 나타나지 않으므로 위 재수출의 사유가 성립하지 않고, 한 타입에 import 경로가 둘이 생긴다.
 //   `tests/ws_e2e.rs` 는 protocol 을 직접 부른다(여기 normal 의존이라 테스트 타깃에서 그대로 보인다) —
@@ -164,17 +163,17 @@ fn init_logging_and_panic_hook(layout: &DataLayout) -> Option<PathBuf> {
 ///   받는 자리마다** 어긋난 짝이 표현 가능하다. `manager`(→ status sink)도 `handlers`(→ 공장 →
 ///   `AgentConnections.fanout`)도 전이적 운반자다. 그래서 **"팬아웃 타입을 파라미터로 안 받으니
 ///   안전" 은 판정 기준이 될 수 없다** — 무엇을 나르는지를 봐야 한다.
-///   지금 이 규칙에 걸리는 자리는 **조립 밖의 공개 진입점**(`engram_dashboard_net::ws::handle_connection` ·
-///   `AgentConnections::new` · `ConnectionCore::new`)과 **네트워크 crate 의** ws 테스트 하네스이고,
+///   지금 이 규칙에 걸리는 자리는 **조립 밖의 진입점**(`link::server::Server::new` ·
+///   `AgentConnections::new` · `ConnectionCore::new`)과 **`link::server` 의** 테스트 하네스이고,
 ///   **조립 안에는 없다** —
 ///   그게 이 struct 의 존재 이유다. 이 struct 를 손으로 조립해 남의 레지스트리를 끼우는 것도 한 모듈
 ///   안이라 타입으로 못 막는다.
-/// ★그 공개 진입점을 여기서 고치지 않는 이유★: `handle_connection` 은 레지스트리가 정당히 필요하고
+/// ★그 진입점을 여기서 고치지 않는 이유★: `Server::new` 는 레지스트리가 정당히 필요하고
 ///   **공장이 어떻게 조립됐는지는 알아선 안 된다** — 레지스트리에서 공장을 파생시키면 층이 뒤집힌다.
 ///   정공법은 슬라이스 3의 투영(`impl ConnRegistry { pub fn fanout(&self) -> Arc<dyn FrameFanout> }`)
 ///   이다 — **그 슬라이스는 ADR-0130 으로 보류됐으므로 예정 작업이 아니라 재개 시의 처방이다**:
 ///   팬아웃을 레지스트리에서만 얻게
-///   만들면 **모든** 호출 지점에서 맞는 짝이 곧 발견 가능한 짝이 된다 — `handle_connection` 도 포함.
+///   만들면 **모든** 호출 지점에서 맞는 짝이 곧 발견 가능한 짝이 된다 — `Server::new` 도 포함.
 /// ★사용량 서비스도 같은 짝이다★ — `manager` 의 status sink 사슬(`UsageObserveSink`)이 관측을 넘기는 서비스와
 ///   연결 계층이 구독·⟳ 를 거는 서비스가 **같은 것**이어야 한다. 어긋나면 관측은 한 서비스에 쌓이고 구독자는
 ///   다른 서비스에 걸려 한 장도 안 받는다 — 역시 실패 로그 없이 조용하다. 둘을 이 struct 가 한 조립에서 함께
@@ -337,7 +336,7 @@ fn status_chain(
 
 #[allow(clippy::too_many_arguments)]
 async fn run_accept_loop(
-    listener: TcpListener,
+    listening: Listening,
     wiring: DaemonWiring,
     multiview: MultiViewState,
     control_registry: Arc<control::registry::ControlRegistry>,
@@ -378,51 +377,40 @@ async fn run_accept_loop(
             usage,
             shutdown_tx,
         ));
+    let server = link::server::Server::new(
+        listening.clock(),
+        registry,
+        handlers,
+        &expected_token,
+        PROTOCOL_VERSION,
+        keepalive,
+    );
 
-    loop {
-        tokio::select! {
-            accepted = listener.accept() => {
-                match accepted {
-                    Ok((stream, peer)) => {
-                        tracing::debug!(%peer, "연결 수락 — WS 핸들러로 넘김");
-                        let registry = registry.clone();
-                        let handlers = handlers.clone();
-                        let expected_token = expected_token.clone();
-                        tokio::spawn(async move {
-                            engram_dashboard_net::ws::handle_connection(
-                                stream,
-                                peer,
-                                registry,
-                                handlers,
-                                expected_token,
-                                PROTOCOL_VERSION,
-                                keepalive,
-                            )
-                            .await;
-                        });
-                    }
-                    Err(e) => {
-                        tracing::warn!("accept 실패: {e}");
+    let stop = async move {
+        loop {
+            tokio::select! {
+                // StopDaemon 명령 수신 — watch 가 true 로 바뀌면 종료.
+                res = shutdown_rx.changed() => {
+                    match res {
+                        Ok(()) if *shutdown_rx.borrow() => {
+                            tracing::info!("종료 신호(watch=true) 수신 — accept loop 탈출");
+                            break;
+                        }
+                        Ok(()) => {} // false 로의 변경은 무시(현재 발생 안 함)
+                        Err(_) => break, // 모든 sender drop — 종료
                     }
                 }
-            }
-            // StopDaemon 명령 수신 — watch 가 true 로 바뀌면 종료.
-            res = shutdown_rx.changed() => {
-                match res {
-                    Ok(()) if *shutdown_rx.borrow() => {
-                        tracing::info!("종료 신호(watch=true) 수신 — accept loop 탈출");
-                        break;
-                    }
-                    Ok(()) => {} // false 로의 변경은 무시(현재 발생 안 함)
-                    Err(_) => break, // 모든 sender drop — 종료
+                _ = tokio::signal::ctrl_c(), if enable_ctrl_c => {
+                    tracing::info!("Ctrl-C 수신 — accept loop 탈출");
+                    break;
                 }
-            }
-            _ = tokio::signal::ctrl_c(), if enable_ctrl_c => {
-                tracing::info!("Ctrl-C 수신 — accept loop 탈출");
-                break;
             }
         }
-    }
+    };
+    // Returns after every connection was closed with what it had queued flushed (the stop `Ack` · a last `Error`), or
+    //   once the flush deadline passed. The process ends soon after `run()` returns, so without this wait those frames
+    //   could die with it (TRD trd-3 §3-0 ④).
+    server.run(listening, stop).await;
 
     // ── 명령 왕복 정리(ADR-0154) ───────────────────────────────────────────────────
     // ★수거기를 기다리는 것이 종료를 유계로 만든다★: 그 태스크가 나가는 길에 남은 자리를 전부 답하고
@@ -539,20 +527,14 @@ pub async fn run() -> Result<(), i32> {
     }
 
     // 3) bind → 실제 포트 취득.
-    let listener = match TcpListener::bind("127.0.0.1:0").await {
+    let listening = match Listening::bind_loopback() {
         Ok(l) => l,
         Err(e) => {
-            tracing::error!("TcpListener bind 실패: {e}");
+            tracing::error!("WS listener bind 실패: {e}");
             return Err(1);
         }
     };
-    let port = match listener.local_addr() {
-        Ok(addr) => addr.port(),
-        Err(e) => {
-            tracing::error!("local_addr 조회 실패: {e}");
-            return Err(1);
-        }
-    };
+    let port = listening.port();
 
     // 4) WS auth 토큰 생성.
     let token = match generate_token() {
@@ -644,7 +626,7 @@ pub async fn run() -> Result<(), i32> {
             tracing::error!(
                 "MCP 서버 기동 실패 — 제어 채널 없이는 데몬을 띄우지 않는다(fail-closed): {e}"
             );
-            drop(listener);
+            drop(listening);
             return Err(1);
         }
     };
@@ -772,7 +754,7 @@ pub async fn run() -> Result<(), i32> {
     // 11) accept loop.
     tracing::info!("accept loop 시작(WS 핸들링 활성)");
     run_accept_loop(
-        listener,
+        listening,
         wiring,
         multiview,
         control_registry,
@@ -886,8 +868,8 @@ async fn start_test_server_inner(
     store: Arc<dyn ProfileStore>,
     keepalive: KeepaliveConfig,
 ) -> std::io::Result<TestServerHandle> {
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let port = listener.local_addr()?.port();
+    let listening = Listening::bind_loopback().map_err(std::io::Error::other)?;
+    let port = listening.port();
 
     // getrandom::Error 는 std::error::Error 미구현이라 메시지로 변환해 io::Error 로 감싼다.
     let token =
@@ -978,7 +960,7 @@ async fn start_test_server_inner(
         let shutdown_tx = shutdown_tx.clone();
         tokio::spawn(async move {
             run_accept_loop(
-                listener,
+                listening,
                 wiring,
                 multiview,
                 control_registry,
