@@ -52,7 +52,6 @@
 | T-58 | 메뉴발 명령 · 프리셋 변경 실패가 화면에 안 보인다 | 버그 | 미착수 · 선재(프론트) |
 | T-59 | Job 멤버 명단이 「멤버 수 ≠ 명단 수」로 4 번 안에 완전해지지 않는 flake | 버그 | 미착수 · 선재(platform) · CI 1 회 관측 |
 | T-64 | 합쳐진 replay 의 후속 Subscribe 가 창 닫힌 뒤 나가 구독이 샌다 | 버그 | 미착수 · 선재 |
-| T-76 | 즉석 by-cwd codex 의 연결 실패에 주인이 없다(굳음) | 버그 | 미착수 · 선재 · S25 4 단계 리뷰가 찾음 |
 | T-79 | Shell–daemon link freezes while still showing "connected" (killing a PTY agent mid-burst) | 버그 | Fixed on `v0.5.0/fix/pty-kill-hang` (S34, `75de8476`) — not pushed/merged yet |
 | T-80 | A spewing agent shown in a slot makes the daemon close the connection on a full send queue → reconnect/replay storm | 버그 | Not started · pre-existing (old driver too) · found by S34 QA |
 | T-81 | A claude that exits right after launch is answered "started" with no failure mark | 버그 | Not started · known limit of S25 step 20 (ADR-0348 decision 6) |
@@ -351,13 +350,6 @@
 - **3단계가 막은 것과의 경계:** 3단계는 `daemon_client/connection.rs` 의 `RequestReplay` 갈래에 「`router.targets` 가 비면 Subscribe 안 보냄」 가드를 넣어 닫히는 창이 *새로* 내는 요청만 막았다. 이미 병합돼 대기 중인 후속은 그 가드를 지나지 않는다.
 - **다음(해법 스케치):** 병합된 후속 Subscribe 를 실제로 보내기 직전에 같은 가시성 검사(`router.targets` 비었나)를 하고, 비었으면 보내지 않고 버린다. ★함정 — 버릴 때 in-flight 슬롯 해제를 함께 해야 한다★: 슬롯을 남긴 채 버리면 그 에이전트의 다음 replay 요청이 영영 안 나가 출력이 안 나온다(`replay_flight` 헤더 「단일 outstanding」 전제 · 해제 경로 셋 = resolution · 거절 · disconnect). 대안 = 후속 Ack 때 보이지 않으면 즉시 Unsubscribe. 시험을 붙여 고친다.
 - **근거:** `process/S21-slot-docking/trd.md` 5.8판 §1-2 「닫히는 창」(지금 7판에는 그 절이 없다 — 백업 `.claude/handoff/attachments/trd-5.8-before-chrome-2026-10-18.md`) · 3단계 리뷰(codex FIX 1 · doc-aware 「추적만」)
-
-### T-76. 즉석 by-cwd 생성으로 띄운 codex 의 연결 실패를 아무도 안 본다 — `thread/start` 거절이 「Running 인데 입력 거절」 로 굳는다
-- **상태:** 미착수 · 선재(코드 읽기 — 재현 · 실측 없음) · S25 4 단계 P4a 리뷰(2026-11-01)가 찾았다.
-- **문제:** 데몬 `SpawnByCwd`(`crates/engram-dashboard-daemon/src/connection_core.rs` 의 `spawn_command_by_cwd` — 모든 백엔드에 `NEW_AGENT_OUTPUT_FORMAT` = `StreamJson`)는 codex 를 app-server(연결을 선언하는 통로)로 띄우는데, 부르는 `AgentManager::spawn_agent` 가 연결 결말 배달함(`LinkWatch`)을 버린다. 그래서 `thread/start` 가 거절돼도 그 결말을 판정하는 쪽이 없다 — 상대가 stdout 을 붙든 채 남으면 화면엔 Running 인데 입력은 전부 거절되는 굳음이 된다. 활성화 입구(`activate_profile` · `restore_one`)는 같은 구멍을 `spawn_fresh_settled` 로 닫았다(ADR-0200 · ADR-0201) — 이 갈래만 남았다.
-- **낡은 주석:** 「오늘 거기 닿는 codex 는 출력 형식이 터미널이라 연결 축이 없다」 — `manager.rs` 의 `spawn_agent` doc · `backend/codex/transport.rs` 의 「주인이 없는 갈래가 하나 남지만 오늘은 여기 닿지 않는다」(`:2716` 근처). 기본값이 이미 `StreamJson` 이라 둘 다 거짓이다 — 고칠 때 함께 고친다.
-- **다음:** by-cwd 갈래도 연결 결말을 보게 한다 — 후보 = 데몬이 `spawn_fresh_settled` 와 같은 판정을 거치게(즉석 생성은 「마지막 실패」 를 쓰지 않는 차이는 지키며 — ADR-0172) · 정하지 않았다.
-- **근거:** ADR-0200 · ADR-0201 · ADR-0202 · `manager.rs` 의 `spawn_fresh_settled` doc(이 구멍의 정본)
 
 ### T-79. Shell–daemon link freezes while still showing "connected"
 - **Status:** fixed on branch `v0.5.0/fix/pty-kill-hang` (topic S34, commit `75de8476` — review + QA PASS; push/merge waits for the user). Remove this entry once merged. Reproduced on the old driver (`0d4f79d1`, 1/1) and on the 3-2 U4a tree (2/5); found 2026-11-07 by the U4a GUI QA.

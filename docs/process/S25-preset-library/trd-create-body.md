@@ -2,8 +2,8 @@
 
 | Item | Value |
 |---|---|
-| **Status** | **Draft 3 — 2026-11-09 — canonical ADR-0348** (`docs/decisions/0348-creating-and-starting-a-new-agent-is-one-body-in-the-agent-crate-ws-spawnbycwd-and-bus-agentspawn-cwd-are-its-adapters.md`, errata `8cb86e55`, synced with this draft). ADR-0348 is the what/why (it stands in for a PRD). Draft 3 applies review round 2 (FIX). One user decision is pending: U2, re-opened (§8-2). U3 and U4 are decided. |
-| **Line pointers** | HEAD `a70e3ecd` (after the master merge `907449da`). Every anchor below was re-read at this commit. |
+| **Status** | **Landed 2026-11-09 at `0badd007` (P1–P3 in one commit) — canonical ADR-0348** (`docs/decisions/0348-creating-and-starting-a-new-agent-is-one-body-in-the-agent-crate-ws-spawnbycwd-and-bus-agentspawn-cwd-are-its-adapters.md`, errata `8cb86e55`). ADR-0348 is the what/why (it stands in for a PRD). Draft 3 (review round 2 applied) is the design that was built; the corrections found in code after landing are folded in below (§3-4, §3-6, §4-3, §5, §6-2 R7d) and the QA result is in §6-3. All user decisions are made: U2 decided 2026-11-09 (keep the 7 s bus seat — accept), U3 and U4 decided earlier (§8-2). |
+| **Line pointers** | HEAD `a70e3ecd` (after the master merge `907449da`). Every anchor below was re-read at this commit — the design-time anchors; the code moved in `0badd007`, so read them as pre-step-20 positions. |
 | **Parent TRD** | [`trd.md`](trd.md) (S25 preset library) — this file is one new step of it (§1) |
 
 ## 1. Scope and relation to the S25 TRD
@@ -46,7 +46,7 @@ Two optional wire fields are added: `AgentCommand::SpawnByCwd.deliver_notices` a
 - a caller axis on the spawn packet (ADR-0279 decision 4 — `deliver_notices` is not one: it says what the sender does with notices, not who the caller is);
 - a `backend` field on bus `agent.spawn` (ADR-0348 alternative (c));
 - the claude early-exit limit — U4, decided as a known limit, tracked as T-81;
-- a fix for the reply-cap `TIMEOUT` — U2, pending.
+- a fix for the reply-cap `TIMEOUT` — U2, decided 2026-11-09: keep the 7 s bus seat, no deadline change (§8-2).
 
 ## 2. Premises checked against code
 
@@ -78,7 +78,7 @@ Premise 5 in detail:
 
   So draft 2's "no cap" for `DaemonSpawner` no longer holds. A timeout comes back as `CommandFailure::Local(reply_timeout_text)` (`link/errors.rs:50`).
 - **Consequence:** a codex `agent.spawnInto` that fails slowly, or succeeds slowly, answers `TIMEOUT` at the 7 s bus seat deadline while the agent is created (and, on success, placed). The 30 s shell cap is never reached first. The ≈ 20 s worst case also stays under 30 s for the webview senders.
-- **A healthy codex can be slow too.** `backend/codex/usage_probe.rs:38-39` records a healthy `initialize` observed at ≈ **9.7 s** right after a daemon restart (cause unknown; normal total 0.74–0.94 s). So the `TIMEOUT` is not limited to hung codexes, and the 10 s `HANDSHAKE_BUDGET` itself may be tight. This is U2, re-opened (§8-2).
+- **A healthy codex can be slow too.** `backend/codex/usage_probe.rs:38-39` records a healthy `initialize` observed at ≈ **9.7 s** right after a daemon restart (cause unknown; normal total 0.74–0.94 s). So the `TIMEOUT` is not limited to hung codexes, and the 10 s `HANDSHAKE_BUDGET` itself may be tight. This is why U2 was re-opened. The live run did not reproduce it: healthy codex creates took 0.71–1.19 s, including right after a daemon restart (R8, §6-3). U2 was decided 2026-11-09 — keep the 7 s seat (§8-2).
 
 Premise 11 in detail — no `PROTOCOL_VERSION` bump for either field:
 - The wire enums take no `deny_unknown_fields` (`protocol/src/messages.rs:322`, `:458`), so both fields are additive in both directions.
@@ -209,7 +209,8 @@ It returns `Activated` (full `AgentInfo` plus notices) because the WS reply need
 ```
 
 - `spawn_create_refusal(refused, cwd, word) -> CommandError` maps per §4-2. `cwd` names the folder in the block text, and `word` names the backend in the policy text.
-- The register error mapping (`commands.rs:1366-1391`) moves into a shared `fn create_error(e: PtyError) -> CommandError`, used by `register` (for `agent.new`) and by the `NotCreated` arm.
+- The register error mapping (`commands.rs:1366-1391`) moves into a shared `fn create_error(e: PtyError, cwd: &str) -> CommandError`, used by `register` (for `agent.new`) and by the `NotCreated` arm. (As landed it takes the folder too — `commands.rs` `create_error`.)
+- As landed, the bus arm passes the normalized spelling (`normalize_spelling(cwd)`) to `spawn_create_refusal`, so the refusal text names the folder in the same spelling the body uses.
 - The old private `create_and_start` and its second `roster_changed()` go away.
 
 ### 3-5. WS adapter and wire fields — `protocol/src/messages.rs:121-126, :695-708` · `connection_core.rs:1693-1770`
@@ -267,7 +268,7 @@ That is 27 constructions plus 1 pattern. `tests/ws_e2e.rs` and `commands/layout.
 | webview `protocolClient.spawnAgent` (front `agent.spawn`, `slot.createAgentHere`) | absent (false) | `src/api/protocolClient.ts:980-982` unchanged |
 | Rust test literals | false | `connection_core.rs:2803, :5759, :5881, :7174, :7749`; `tests/ws_e2e.rs:2069` |
 
-**Arm.**
+**Arm.** One visible change follows from the body: the WS `cwd` is now spelling-normalized (`normalize_spelling` inside `create_and_start` — `\` becomes `/`, and one layer of wrapping quotes is stripped), as bus `agent.spawn` already was. Before step 20 the WS arm registered the folder as typed. This is intended (ADR-0348 decision 2, "cwd spelling normalization" for every create).
 1. `let Some(kind) = backend else { reply(MISSING_BACKEND) }` (unchanged).
 2. Map the backend with an exhaustive `match kind { WireBackendKind::Claude => AgentBackend::Claude, WireBackendKind::Codex => AgentBackend::Codex }`. No wildcard: a new wire word must fail to compile here.
 3. `let delivery = delivery_for(deliver_notices);`, where `fn delivery_for(bool) -> NoticeDelivery` is `true` ⇒ `Delivered`, `false` ⇒ `Withheld`.
@@ -285,7 +286,7 @@ That is 27 constructions plus 1 pattern. `tests/ws_e2e.rs` and `commands/layout.
 ### 3-6. Shell pass-through — `src-tauri`
 
 **`daemon_client/protocol_state.rs:261-270`:**
-- `CommandFailure::Daemon` becomes `{ message: String, launch_blocked: Option<serde_json::Value>, created_agent_id: Option<AgentId> }`.
+- `CommandFailure::Daemon` becomes `{ message: String, launch_blocked: Option<serde_json::Map<String, serde_json::Value>>, created_agent_id: Option<AgentId> }` (as landed, `protocol_state.rs` `CommandFailure` — the block is kept as the `{"reasons": […]}` object, not a bare `Value`).
 - `classify_reply` (`:283`, called from `connection.rs:516`) copies both fields from `AgentEvent::Error` (`:285`).
 - `Display` (`:269`) is unchanged, so `send_command`'s string stays byte-identical.
 - Sites to touch (6):
@@ -298,12 +299,14 @@ That is 27 constructions plus 1 pattern. `tests/ws_e2e.rs` and `commands/layout.
 **`layout/apply.rs`:**
 - `AgentSpawner::spawn_by_cwd` (`:247`) returns `Result<SpawnedAgent, SpawnRefusal>`, with:
   - `pub struct SpawnedAgent { pub id: String, pub notices: Vec<serde_json::Value> }`
-  - `pub struct SpawnRefusal { pub message: String, pub launch_blocked: Option<serde_json::Value>, pub created_agent_id: Option<AgentId> }`
+  - `pub struct SpawnRefusal { pub message: String, pub launch_blocked: Option<serde_json::Map<String, serde_json::Value>>, pub created_agent_id: Option<AgentId>, pub live_agent_id: Option<String>, pub notices: Vec<serde_json::Value> }` — as landed (`layout/apply.rs` `SpawnRefusal`). The draft had only the first three fields; the last two came with the P3 contract fixes (row shape = bus `agent.spawn` with `line: null`; a placement failure carries `args.agent_id`; the not-placed clause):
+    - `live_agent_id` — a spawn succeeded and then the placement failed: this agent runs and is not placed;
+    - `notices` — that spawn's rows, which the daemon may have recorded as shown, so they travel with the failure (M11).
 - `spawn_into` (`:824`), `spawn_into_placed` (`:853`), `spawn_into_at` (`:943`) and `spawn_then_place` (`:994`) carry `SpawnRefusal` as their error type throughout.
-- Local errors (pre-spawn validation, placement) are `SpawnRefusal { message, launch_blocked: None, created_agent_id: None }`.
+- Local errors (pre-spawn validation) are `SpawnRefusal::from(message)` — every structured field empty.
 - `SpawnAtError::Failed` carries `SpawnRefusal`.
 - `Wrote<String>` becomes `Wrote<SpawnedAgent>`.
-- A placement failure after a successful spawn keeps the spawn's `notices` (M11 — they were delivered, so they are recorded as shown).
+- A placement failure after a successful spawn is `SpawnRefusal { message, live_agent_id: Some(id), notices: <the spawn's rows>, .. }` (M11 — the notices were delivered, so they are recorded as shown).
 
 **`AgentSpawner` impls (5):**
 - `DaemonSpawner` (`commands/layout.rs:106`);
@@ -314,8 +317,8 @@ That is 27 constructions plus 1 pattern. `tests/ws_e2e.rs` and `commands/layout.
 
 **`commands/layout.rs:103-131` — `DaemonSpawner { client, deliver_notices }`** calls `send_command_with_origin` with `SpawnByCwd { …, deliver_notices }`:
 - `Ok(Spawned { agent, notices })` ⇒ `SpawnedAgent { id, notices: notices.unwrap_or_default() }`;
-- `Err(Daemon { message, launch_blocked, created_agent_id })` ⇒ `SpawnRefusal { message, launch_blocked, created_agent_id }`;
-- `Err(Local(m))` ⇒ `SpawnRefusal { message: m, launch_blocked: None, created_agent_id: None }`. A transport timeout (30 s, §2 premise 5) arrives here.
+- `Err(Daemon { message, launch_blocked, created_agent_id })` ⇒ `SpawnRefusal { message, launch_blocked, created_agent_id, live_agent_id: None, notices: [] }`;
+- `Err(Local(m))` ⇒ `SpawnRefusal::from(m)` (every structured field empty). A transport timeout (30 s, §2 premise 5) arrives here.
 
 The Tauri `spawn_into` (`:567`) keeps `Result<String, String>`.
 
@@ -325,11 +328,12 @@ The Tauri `spawn_into` (`:567`) keeps `Result<String, String>`.
 - `spawn_not_applied` (`:2920`) takes `SpawnRefusal`:
   - the code-prefix mapping is unchanged;
   - `args` = the `launch_blocked` object (its `reasons`) when present;
-  - plus `"agent_id": <created_agent_id>` when present;
-  - both keys together for a block after the add.
+  - plus `"agent_id"` = `created_agent_id` when present, otherwise `live_agent_id` when present;
+  - both `reasons` and `agent_id` together for a block after the add;
+  - plus `"notices"` (the same rows as the success answer) when the refusal carries any.
 
-  This is the same shape as bus `agent.spawn`'s created-asleep answer (`args = {agent_id, reasons?}`).
-- The placement-failure answer carries `args.notices` when the spawn returned any (M11).
+  This is the same shape as bus `agent.spawn`'s created-asleep answer (`args = {agent_id, reasons?}`). A created-asleep refusal also gets a not-placed clause in its text ("it was not placed in a slot either: once it runs, place it with `layout.setSlotContent … --assign <id>`").
+- The placement-failure answer carries `args.agent_id` (the running agent) and `args.notices` when the spawn returned any (M11).
 - The summary is updated (§4-3).
 - Catalog stays 22 with a note line. No TS bindings.
 
@@ -382,9 +386,9 @@ The `agent.spawn` summary (`commands.rs:264-269`) becomes: "With `cwd`, a launch
 |---|---|
 | started | `{agent_id, layout, notices: [...]}`. `notices` = the daemon's rows `{code, args, line, text}`; `[]` when none. A row that fails to decode is dropped, with a `warn` naming it. The set is recorded as shown (`deliver_notices: true`). |
 | daemon `Error` with `launch_blocked`, before the add | `CONFLICT` (the block text has no prefix ⇒ `not_applied`), message = daemon text, `args = launch_blocked` (`{"reasons":[…]}`) |
-| daemon `Error` `"INTERNAL: …"` with `created_agent_id` (created-asleep — R4b, R5b-style, R6 bus form) | `INTERNAL`, prefix stripped (`spawn_not_applied`), `args = {agent_id}` — plus `reasons` for a block after the add (R4b). The message names the agent too. |
+| daemon `Error` `"INTERNAL: …"` with `created_agent_id` (created-asleep — R4b, R5b-style, R6 bus form) | `INTERNAL`, prefix stripped (`spawn_not_applied`), `args = {agent_id}` — plus `reasons` for a block after the add (R4b). The message names the agent too, and (as landed) ends with a not-placed clause pointing at `layout.setSlotContent … --assign <id>`. |
 | daemon `Error` `"INTERNAL: …"` without `created_agent_id` | `INTERNAL`, prefix stripped, no `args`. A store write failure before the add: nothing was created. |
-| placement failed after the spawn | as today (`CONFLICT`, "배치 실패(…) — 에이전트 <id> 는 살아있음"), plus `args.notices` when present (M11) |
+| placement failed after the spawn | as today (`CONFLICT`, "배치 실패(…) — 에이전트 <id> 는 살아있음"), plus `args.agent_id` = the running agent (`SpawnRefusal.live_agent_id`, from the P3 contract fixes) and `args.notices` when present (M11) |
 | other daemon / local refusal | unchanged (`spawn_not_applied` / `spawn_at_error`) |
 
 Summary addition: "Answer adds `notices`. A blocked launch creates nothing and is `CONFLICT` with `args.reasons`. An `INTERNAL` with `args.agent_id` (plus `args.reasons` when blocked) means the agent was created but did not start — it is asleep and not placed: wake that id (`agent.spawn --target`), then place it with `layout.setSlotContent --assign`; do not spawn again." The catalog stays 22 with a note line.
@@ -395,12 +399,12 @@ Summary addition: "Answer adds `notices`. A blocked launch creates nothing and i
 - **Blocking.** Both adapters keep the body off async workers:
   - WS runs it in `spawn_blocking` (as today, `connection_core.rs:1738`). The pin `the_by_cwd_spawn_hands_the_blocking_call_to_the_pool` (`:2945`) is rewritten to find `create_and_start(` inside the `spawn_blocking` window.
   - Bus runs it in `blocking_handler` (`make_table`).
-  - On WS the body now waits for the link. A failed codex handshake normally takes ≤ 10 s (`HANDSHAKE_BUDGET`). The worst case is about 20 s including teardown, against a 15 s backstop that applies only to a blocked write. A healthy one was once seen at ≈ 9.7 s (§2 premise 5). All of these are under the shell's 30 s round-trip cap, but can exceed the bus's 7 s (U2).
+  - On WS the body now waits for the link. A failed codex handshake normally takes ≤ 10 s (`HANDSHAKE_BUDGET`). The worst case is about 20 s including teardown, against a 15 s backstop that applies only to a blocked write. A healthy one was once seen at ≈ 9.7 s (§2 premise 5; not reproduced in R8 — 0.71–1.19 s). All of these are under the shell's 30 s round-trip cap, but a slow one can exceed the bus's 7 s (U2 — decided: accepted, §8-2).
 - **The policy now runs on the blocking-pool thread** (inside the body), no longer on the dispatch thread. `spawn_by_cwd_refuses_a_backend_the_policy_closes` (`:5863`) keeps its closed word in a `thread_local!` (`:5864`; "the handler calls the policy synchronously inside dispatch"). That would read empty on the pool thread. The moved test therefore keeps the word in a process-global (`static … Mutex<String>`) and compares ignoring case (§3-2).
 - **Created check after `Err`.** If a delete lands between the add and the check, an agent that was created then deleted is reported as `NotCreated`. The end state is still what the answer says. Nobody knows the fresh uuid before the answer, except through a roster listing. Accepted.
 - **Existing-id refusal.** Without it, `ensure_registered` would return `inserted = false` and the call would silently become a wake that merges the caller's copy.
 - **Reservation.** The new id's `SpawnReservation` is taken before the add, so the `agent.setWorkspace` race named in `trd.md:252` (it can win between `create_agent` and `activate_profile`) disappears for this body.
-- **Roster frames.** The bus loses its pre-activation `roster_changed` (M3); WS gains one after activation. Bus `--cwd` is claude-only (no link axis), so its row appears right after the process starts. Codex rows come only through WS, and appear when the handshake settles (≤ 10 s normally).
+- **Roster frames.** The bus loses its pre-activation `roster_changed` (M3); WS gains one after activation. Bus `--cwd` is claude-only (no link axis), so its row appears right after the process starts. Codex rows come only through WS. (Corrected after the live run: the draft said a codex row appears only once the handshake settles. In the live run's codex fake scenes the row appeared within about 100 ms of the call, then turned `"blocked"` when the link failed — so the row does not wait for the body's one notify. The body's own roster notify still comes once, after activation.)
 
 ## 6. Test plan
 
@@ -535,9 +539,10 @@ The old daemon ignores `deliver_notices` and never sends `created_agent_id` (§2
 node scripts/cdp.mjs eval "(() => { const r = document.querySelector('[data-agent-row=\"ID\"]'); return r && { shape: r.querySelector('[data-agent-glyph-shape]').dataset.agentGlyphShape, title: r.title, text: r.innerText } })()"
 ```
 
-Probe values:
+Probe values (`src/components/agent/statusGlyph.ts` `statusGlyphIcon`):
 - running = `"filled-circle"`;
-- stopped = `"square"`;
+- stopped (`Exiting` / `Exited` / `Killed`) = `"square"`;
+- asleep, never started (`Reserved`) = `"circle"`, title `더블클릭으로 활성화(spawn)`;
 - marked = `"blocked"`, with the title giving the failure line (`src/i18n/ko.ts:111-118`): `SpawnFailed` = `에이전트를 띄우지 못했습니다 — 다시 시도해 보세요`, `Other` = `활성화에 실패했습니다 — 다시 시도해 보세요`.
 
 **Bus calls — two routes:**
@@ -652,7 +657,7 @@ R7b — *optional* — cap behaviour on the bus (U2):
 - Expected:
   - the reply is `TIMEOUT` at ≈ 7 s (seat deadline);
   - the row turns `"blocked"` at ≈ 10 s.
-- This records the U2 behaviour for the user.
+- This recorded the U2 behaviour for the user (measured: `TIMEOUT` at 7524 ms, row marked at 10101 ms — §6-3).
 
 R7d — kill during the handshake window:
 - Action:
@@ -663,7 +668,7 @@ R7d — kill during the handshake window:
 - Expected:
   - the created-asleep error, with cause `…(Killed)`;
   - (the webview Tauri `spawn_into` path returns `Result<String, String>` (M8), so `created_agent_id` is not observable here — `args.agent_id` is checked by R6's bus form);
-  - probe `"square"`, **no** `"blocked"` mark (a user kill is not an activation failure — §2 premise 12);
+  - probe `"circle"` (an asleep row — the agent never started, title `더블클릭으로 활성화(spawn)`), **no** `"blocked"` mark (a user kill is not an activation failure — §2 premise 12). (Corrected after the live run: the draft expected `"square"`.)
   - the `w7d` fake pid from `fakes.log` is not alive.
 
 R8 — codex app-server create success, timing:
@@ -674,7 +679,7 @@ R8 — codex app-server create success, timing:
 - Expected:
   - a uuid and `ms`; probe `"filled-circle"`;
   - CLI `rc=0`, with `real` recorded;
-  - record both durations, and attach them to U2 (§8-2) — they are the data for the pending decision. Restart the daemon once and repeat step 3 immediately to probe the ≈ 9.7 s cold `initialize` (§2 premise 5). If the CLI form answers `TIMEOUT` while the row is `"filled-circle"`, record that as the U2 symptom, not as a FAIL.
+  - record both durations, and attach them to U2 (§8-2) — they were the data for that decision (measured in §6-3; U2 decided 2026-11-09). Restart the daemon once and repeat step 3 immediately to probe the ≈ 9.7 s cold `initialize` (§2 premise 5). If the CLI form answers `TIMEOUT` while the row is `"filled-circle"`, record that as the U2 symptom, not as a FAIL.
 
 **Evidence.** Keep all of the following in the QA report:
 - the answers verbatim;
@@ -685,6 +690,32 @@ R8 — codex app-server create success, timing:
 - the before-run answers.
 
 Cleanup follows qa 「GUI 뒷정리」, including the grandchild scan (T-53) and removing `$QA_TMP/base` (qa 「뒷정리」).
+
+### 6-3. QA result (2026-11-09, `/engram-qa`, step 20 whole, tree `2a4501c7` — committed as `0badd007`)
+
+**PASS.**
+- Full regression: Rust 5584 passed / 0 failed · frontend vitest 2762 · `tsc` · 34/34 gates · bindings sync PASS.
+- codex lane PASS (`usage_probe_smoke` 2, `backend_contract --ignored` 11); claude lane not applicable.
+- Mutation spot 2/2 red: WS created-asleep `created_agent_id: Some → None`; shell `args.agent_id` insert removed.
+- Live run R1–R8 all PASS:
+  - R4 / R4b through the debug hook (§3-7);
+  - R5a / R5b through the CLI;
+  - R6 before / after, the "before" on a daemon built from `1d44d4b7`;
+  - R7c: the error-mode fake answered in 224 ms and the silent one in 10089 ms, and the scene's fake pid was torn down — the before-run daemon left it alive;
+  - R7d: kill during the handshake ⇒ `"circle"`, no mark (the draft's `"square"` was corrected, §6-2).
+- Evidence files went to the recycle bin with `$QA_TMP`.
+
+**R8 / R7b timing (the data for U2):**
+
+| Case | Measured |
+|---|---|
+| Healthy codex create (webview and CLI forms, every run) | 0.71–1.19 s |
+| Healthy codex create on the bus right after a daemon restart | 738 ms |
+| The ≈ 9.7 s healthy `initialize` (`backend/codex/usage_probe.rs:38-39`) | not reproduced |
+| Silent fake on the bus (R7b) — reply | `TIMEOUT` at 7524 ms |
+| Silent fake on the bus (R7b) — row marked `"blocked"` | 10101 ms |
+
+Two corrections came out of the run and are folded in above: R7d's glyph (§6-2) and when a codex row appears (§5).
 
 ## 7. Implementation units
 
@@ -752,7 +783,7 @@ Code comments to fix in passing:
 ### 7-1. Hand-over to the parent TRD (main copies these in)
 
 - **Step 8:** remove the debug-only `QaBlockKits` hook (`daemon/src/lib.rs`, the `ENGRAM_QA_BLOCK_CWD` and `ENGRAM_QA_BLOCK_AFTER_ADD_CWD` env vars, its test) in the same commit that plugs the real `LaunchKitSource` at `lib.rs:271`. Then re-run this TRD's R4 / R4b with a real trigger (a preset folder entry on a missing folder ⇒ block ①, before and after the add).
-- **Step 11:** the webview senders (`protocolClient.spawnAgent`, Tauri `spawn_into`) set `deliver_notices: true` once the webview shows `Spawned.notices`. Until then they stay false.
+- **Step 11:** the webview senders (`protocolClient.spawnAgent`, Tauri `spawn_into`) set `deliver_notices: true` once the webview shows `Spawned.notices`. Until then they stay false. The other WS activation paths (`SpawnProfile`, `Spawn`) move to `Delivered` at the same time. Also deferred here by the step-20 code review: the daemon's pre-add block wording on WS (`activation_error` text) does not yet match bus `agent.spawn`'s ("launch refused for a new agent in '<cwd>': …; nothing was created …") — align them when the webview reads the widened replies.
 
 ## 8. Decisions, open items, risks
 
@@ -778,25 +809,27 @@ Code comments to fix in passing:
 
   The name says *created*, so a reader cannot take it for "the agent this error is about" on other verbs.
 
-### 8-2. User decisions — one pending (U2), two decided (U3, U4)
+### 8-2. User decisions — all decided (U2, U3, U4)
 
-- **U2 — `TIMEOUT` on codex `agent.spawnInto`** (review H1). **Re-opened 2026-11-09 — pending user.** Design hooks are left neutral; this TRD changes no deadline.
-  - *Earlier decision:* (b) accept (user 2026-11-09, 「추천으로 가」). Its basis was "a healthy codex answers `initialize` in ≈ 130 ms and a refusal comes back at once (`codex/transport.rs` `HANDSHAKE_BUDGET` doc), so only a silently hung codex exceeds 7 s".
-  - *Why re-opened (review round 2):* `backend/codex/usage_probe.rs:38-39` records a **healthy** `initialize` observed at ≈ 9.7 s right after a daemon restart (cause unknown; normal 0.74–0.94 s). So:
+- **U2 — `TIMEOUT` on codex `agent.spawnInto`** (review H1). **Decided 2026-11-09 by the user: (b) — keep the 7 s bus seat (accept), no deadline change** (main's recommendation). This TRD changes no deadline.
+  - *Data the decision rests on (QA R8 / R7b, §6-3):* healthy codex creates took 0.71–1.19 s, including right after a daemon restart (738 ms on the bus); the ≈ 9.7 s case was not reproduced. A silent fake answers `TIMEOUT` on the bus at 7524 ms and its row is marked at 10101 ms.
+  - *Known gap that stays recorded:* on a slow success, or a link drop after `Spawned`, the notice set is recorded as shown while the caller gets `TIMEOUT` / `CONFLICT`. No live effect until step 8 (no production code emits notices today).
+  - *History:* first decided (b) (user 2026-11-09, 「추천으로 가」) on the basis "a healthy codex answers `initialize` in ≈ 130 ms and a refusal comes back at once (`codex/transport.rs` `HANDSHAKE_BUDGET` doc), so only a silently hung codex exceeds 7 s"; re-opened by review round 2 for the reason below; decided (b) again with the measured data.
+  - *Why it was re-opened (review round 2):* `backend/codex/usage_probe.rs:38-39` records a **healthy** `initialize` observed at ≈ 9.7 s right after a daemon restart (cause unknown; normal 0.74–0.94 s). So:
     - a healthy codex `agent.spawnInto` can answer `TIMEOUT` (bus seat 7 s, CLI read 10 s) while the agent is running and placed — the LLM may then spawn again;
     - the 10 s `HANDSHAKE_BUDGET` itself may be tight: a 9.7 s start is within 0.3 s of being torn down as a failure.
-  - *Known gap tied to U2 (notices):* on a slow success the daemon records the notice set as shown (`Delivered`, M13), while the bus caller receives `TIMEOUT` with no notices. That breaks the parent TRD rule "the fingerprint is recorded only when a success reply reaches a caller" (§1-5 「Notices once per agent」). No live effect until step 8, because no production code emits notices today. Option (a) removes it for spawns that settle inside the new deadline. Under (b) it stays a recorded gap.
+  - *Known gap tied to U2 (notices):* on a slow success the daemon records the notice set as shown (`Delivered`, M13), while the bus caller receives `TIMEOUT` with no notices. That breaks the parent TRD rule "the fingerprint is recorded only when a success reply reaches a caller" (§1-5 「Notices once per agent」). No live effect until step 8, because no production code emits notices today. Option (a) would have removed it for spawns that settle inside the new deadline. Under (b), the chosen option, it stays a recorded gap (it also covers a link drop after `Spawned`, which answers `CONFLICT`).
   - *Options:*
     - (a) a longer deadline for spawn verbs — the daemon seat for `agent.spawn` / `agent.spawnInto` plus the CLI read timeout, which must stay above the seat (`fits_caller_silence_window`, `command_delivery.rs`);
-    - (b) accept `TIMEOUT` as it is.
-  - *Data for the decision:* R7b (silent fake on the bus) and R8 (healthy codex timings, including one cold start right after a daemon restart).
+    - (b) accept `TIMEOUT` as it is — **chosen**.
+  - *Data for the decision:* R7b (silent fake on the bus) and R8 (healthy codex timings, including one cold start right after a daemon restart) — §6-3.
 - **U3 — `agent.spawnInto` created-asleep answer carries `args.agent_id`** (review H2). **Decided 2026-11-09 by the user: (a)** (「1번 a」, main's recommendation). Specified as M14 (§3-5 Wire 2, §3-6, §4-1, §4-3, §6-1). Same answer shape as bus `agent.spawn`; the LLM can wake that id and attach it instead of creating a duplicate.
 - **U4 — a claude that exits right after launch is answered "started" with no mark** (review H3). **Decided 2026-11-09 by the user: (a)** (「너 추천으로 해」) — a known limit. `cmd.exe /c claude` starts, and claude has no link verdict (ADR-0201 left claude Fresh early exit out of scope). ADR-0348 decision 6 states the limit; tracked as `docs/tracking.md` T-81. Not touched here.
-- **T-76 closes with this step** — 「즉석 by-cwd codex 의 연결 실패에 주인이 없다」 is the WS link-verdict gap this step fixes (R7c proves it); delete the T-76 row and section when step 20 lands (T-71 rule).
+- **T-76 closed with this step** — "nobody owns the link failure of an ad-hoc by-cwd codex" is the WS link-verdict gap this step fixes (R7c proves it: the fake is torn down and the row is marked). The T-76 row and section were deleted from `docs/tracking.md` in the step-20 doc pass (T-71 rule).
 
 ### 8-3. Risks
 
-- **R1 Reply caps** — see U2 (pending), including the notices gap. Timing: 10 s `HANDSHAKE_BUDGET` is the normal failure ceiling, and the 15 s backstop applies only to a blocked write. Worst case ≈ 20 s with teardown — under the shell's 30 s round-trip cap, over the bus's 7 s seat.
+- **R1 Reply caps** — see U2 (decided: accept the 7 s seat), including the notices gap that stays recorded. Timing: 10 s `HANDSHAKE_BUDGET` is the normal failure ceiling, and the 15 s backstop applies only to a blocked write. Worst case ≈ 20 s with teardown — under the shell's 30 s round-trip cap, over the bus's 7 s seat.
 - **R2 Retry duplicates on `agent.spawnInto`.** Delegated seats never hold ids (§2 premise 3), so a same-id retry after any failure re-runs. Mitigated by `args.agent_id` (U3/M14 — the caller can wake the asleep agent by id) and the created-asleep wording. A caller that ignores both still creates a duplicate.
 - **R3 Created check race** (§5). The end state is still truthful.
 - **R4 Source-pin tests break by design** (`connection_core.rs:2945`, the `squashed_production_body` windows, the policy test's thread-local at `:5864`). Review must confirm they were rewritten to pin the new shape, not deleted.
@@ -808,8 +841,9 @@ Code comments to fix in passing:
 
 ## 9. Review record
 
-- **2026-11-09 — PRD+TRD review PASSED** (`/engram-review trd deep`, rounds 1–3 + confirmation; final confirmation PASS on `c43b576c`). U2 stays pending with the user (design neutral).
-- 2026-11-09 — round 3 (lead reviewer, delta): FIX — one MUST (R7c/R7d scan filter assumed `--cd` on the app-server argv); fixed by main in place (pid log `fakes.log`), plus R7d observability and one anchor. Remaining: U2 pending with the user.
+- **2026-11-09 — landed at `0badd007`.** `/engram-review code` per piece — P1, P2, P3 PASS. `/engram-qa` PASS (§6-3). U2 decided by the user (keep 7 s — §8-2). Doc pass: this file, parent `trd.md` §5-2, ADR-0348 (U2 wording), `docs/tracking.md` (T-76 removed), step-log, `docs/reference/structure/session-path-ownership.md`.
+- **2026-11-09 — PRD+TRD review PASSED** (`/engram-review trd deep`, rounds 1–3 + confirmation; final confirmation PASS on `c43b576c`). U2 stayed pending with the user (design neutral) until after QA.
+- 2026-11-09 — round 3 (lead reviewer, delta): FIX — one MUST (R7c/R7d scan filter assumed `--cd` on the app-server argv); fixed by main in place (pid log `fakes.log`), plus R7d observability and one anchor. Remaining then: U2 pending with the user (decided later the same day, §8-2).
 - 2026-11-06 — draft 1 `/engram-review trd deep` (2 Claude reviewers + Codex): **FIX**. Five MUST, the recommended items and the batched wording were applied in draft 2. H1–H3 went to the user as U2–U4. One finding was refined rather than taken verbatim: "every failure after the add records last failure" now excludes a user kill during the handshake (§2 premise 12).
 - 2026-11-09 — round 2 delta review (Claude lead + Codex): round-1 findings 1–5 **FIXED**; new **FIX** → draft 3. Applied:
   - U3 fully specified (`Error.created_agent_id`, M14);
@@ -820,4 +854,4 @@ Code comments to fix in passing:
   - the shell round-trip cap pinned at 30 s (S21 `REQUEST_TIMEOUT`);
   - all anchors re-read after the master merge `907449da`.
 
-  U2 re-opened (pending user). Re-review pending.
+  U2 re-opened (then pending with the user; decided 2026-11-09 after QA, §8-2). Re-review pending at that point.

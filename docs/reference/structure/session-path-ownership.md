@@ -661,8 +661,10 @@ backend AND a stored sid, one shared helper (backend/mod.rs). A stored sid alone
 enough. The socket entrance keeps one bypass on top of it (the wire `resume` flag, below).
 
 1. **Command bus / LLM entrance** — `crates/engram-dashboard-agent/src/commands.rs`.
-   `agent.spawn` splits on its arguments (`target` xor `cwd`, commands.rs:485-501).
-   - `wake_existing` (commands.rs:510-529): `resolve(host, token)` → `host.agent_snapshot(id)` →
+   `agent.spawn` splits on its arguments (`target` xor `cwd`, `verb_spawn` commands.rs:1136, the
+   `match (target, cwd)` at :1159).
+   - `wake_existing` (commands.rs:1204-1260; mode derivation :1218, `activate_profile` :1223):
+     `resolve(host, token)` → `host.agent_snapshot(id)` →
      ```rust
      let mode = if crate::backend::can_resume_profile(&profile) { SpawnMode::Resume } else { SpawnMode::Fresh };
      let started = host.activate_profile(&profile, mode);
@@ -670,9 +672,16 @@ enough. The socket entrance keeps one bypass on top of it (the wire `resume` fla
      The doc above it states the rule is shared with the WS path (ADR-0076) and now points at the
      shared helper — "여기서 다른 규칙을 쓰면 같은 에이전트가 어느 입구로 깨우느냐에 따라 대화 이력을
      잃는다" [if a different rule is used here, the same agent loses its conversation history depending on which entrance wakes it]. Regression net: `commands::tests::waking_does_not_resume_a_profile_whose_backend_cannot_resume`.
-   - `create_and_start` (commands.rs:533-...): always `SpawnMode::Fresh` (:547), with the command
-     built from `backend_command(AgentBackend::Claude, NEW_AGENT_OUTPUT_FORMAT)` (:544) — the verb
-     has no backend or format field ("이 동사에는 형식·백엔드 칸이 없다" [this verb has no format or backend field], :537).
+   - `create_and_start` (commands.rs:1304) — **the one creation body** (ADR-0348) for a new agent in a
+     folder, called by bus `agent.spawn {cwd}` (the `(None, Some(cwd))` arm of `verb_spawn`, :1176) and
+     by the socket `SpawnByCwd` arm (connection_core.rs, inside `spawn_blocking`). It asks the backend
+     policy with the declared spelling, builds the profile through `new_profile` (:1482 — cwd spelling
+     normalized, command = `backend_command(req.backend, NEW_AGENT_OUTPUT_FORMAT)`, :1315), then calls
+     `host.create_and_activate` → `AgentManager::create_and_activate` (manager.rs:2120), which is
+     always **`SpawnMode::Fresh`** through `activate_profile_reporting` (no resume derivation — the
+     profile is new, so it has no stored sid). It notifies the roster once after activation when the
+     agent was registered. The bus arm fixes the backend to `AgentBackend::Claude` (the verb has no
+     backend field); the socket arm passes the wire `backend`.
 2. **Socket entrance** — `crates/engram-dashboard-daemon/src/connection_core.rs`.
    - `AgentCommand::SpawnProfile { profile_id, resume, request_id }` (:1109-1113):
      ```rust
