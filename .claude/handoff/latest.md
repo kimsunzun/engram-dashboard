@@ -1,49 +1,49 @@
-# Handoff: S25 step 6 TRD review passed (Draft 5) — next = code P1 (codex settings-check port); step 5 user confirmation still deferred
+# Handoff: S25 step 6 landed (code P1–P3 + ADR-0353..0355 + doc pass) — next = doc review of the pass, then step 7
 
 ## Know first
-- **Nothing is running.** All reviews landed; tree clean except `src-tauri/bindings/*.ts` line-ending noise (never stage) and the excluded, disposable review folders `.review-s25-5p1/`, `.review-s25-6trd/`.
-- **Step 5 user confirmation is deferred** (user: 「내 확인을 하면 되긴하는데 나중에 확인해야될것같아서 지금은 사정상 안됨」, then 「진행해」 for step 6). Ask when the user is available — material: commit `baf769ff` body (QA PASS list) and the trd.md "Step 5 landed" block.
-- Style: no translationese / AI tone in chat or app wording (「싣다/실리다」 …) — user correction 2026-11-09. Expand questions in plain terms; keep independent work running while one item waits.
-- auto-handoff hook now says: don't save at 55%, save once at the next hand-over point (Engram `c29064a`, user 「훅 문구를 바꾸면 되는거 아님? 고쳐.」). Not verified in a live session yet — this save is the first under it.
-- A test thread from step-6 measurements remains in the user's real `~/.codex` (preview "Use the $dup skill now …") — user informed; deletion is theirs.
-- No push (user: 「푸쉬없이」).
+- **Nothing is running.** Tree clean except `src-tauri/bindings/*.ts` line-ending noise (never stage).
+- No push (user: 「푸쉬없이」 — still in force). Ahead of origin by 237 + this handoff commit.
+- One open question to the user, unanswered: append 「그 밖의 막기는 실제로 불편이 생기면 그때 더한다.」 to the new CLAUDE.md principle line 「최소한만 막기」 (user said 「일단 너무 막지 말고 추가로 막는건 실제로 불편하면 막자고」). Ask once; do not edit without a yes.
+- Step 5 user confirmation is still deferred (from the previous handoff) — material: commit `baf769ff` body and the trd.md "Step 5 landed" block.
+- Codex test threads left in the user's real `~/.codex` (deletion is the user's): `01a1c24d-f65a-75a0-8b6b-1cd27dcaefe4`, `01a1c264-a0cb-70c3-8b1d-88d843ea9c05`, `01a1c26f-b831-7262-aef4-f057b9b33710`, `01a1c367-b0d7-75f1-9caf-01b81b9f98b3`, `01a1c3a0-d86f-7831-b260-e0d20109f5a5`, plus `usage_probe_smoke codex_` threads (one per lane run) and the step-6 measurement thread from 11-09.
+- This PC's codex 0.163.0 shows an update modal (→ 0.167.0) on terminal start; the live L4 test now disables the check by `-c`. Updating codex changes the codex lane version (lane re-runs).
+- Style: no translationese / AI tone in chat or app wording; expand questions in plain terms, one at a time, short lists (user asked repeatedly for 「간단하게」).
 
 ## One-line state · next first action
-Step 6 design is final: `docs/process/S25-preset-library/trd-codex-translation.md` Draft 5, review passed (deep, rounds 1–4, commit `a557bae5`). **Next:** /engram-implement §2 — spawn a fresh coder (worker-senior) for **P1** = settings-check port codex implementation + `-c` guard/budget (`backend/codex/settings.rs`, `backend/codex/cmdline.rs`, additive `backend/settings_check.rs`, `platform::shell::text_is_cli_safe`, registry → 2 slots, `toml` 1.1.2 dep, the no-token `codex.cmd` shim-line measurement that keeps or zeroes `SHIM_MARGIN`). Brief from TRD §8 P1 + §4-1..4-3 + §7-1 P1 + §9-1. Then `/engram-review code` (deep), then P2 (shared + terminal translation), P3 (JSON channel incl. the pre-existing resume fix), QA (full regression + codex lane + live run L1–L5), commit per piece, doc pass (TRD §8-1 hand-over into trd.md; ADR candidates (a)–(e) via /engram-adr — ADR-0215 d4/d5/d7, ADR-0337, ADR-0226/0231 note; PRD R37 wording; parent T9 reword).
+S25 step 6 (codex launch-material translation) is landed and QA-passed. **Next:** run `/engram-review doc` (full) on the doc pass commit `2070ebf9` (child TRD as-landed + §11 record, parent TRD hand-over + "Step 6 landed", PRD R37 addendum, tracking T-84..T-93, step-log) — it was committed without review. Then the two leftover ADR items (below), then step 7 per parent TRD §5-2 (its hand-over list (a)–(f)).
 
 ## Repo state (branch v0.5.0/feat/preset-library · wt1)
-- HEAD `a557bae5` + this handoff commit; ahead of origin by 225 (nothing pushed). Working tree clean (bindings noise only).
-- Since the last handoff: `d502f97f` TRD Draft 5 · `a557bae5` review passed. Earlier this session: `0badd007`/`a3a25be6` step 20 · `b631515e` engram-help English · `baf769ff`/`829f920a` step 5 · ADR-0351 (`e77d4f68`, `1e36176d`) · TRD drafts `21bc0063` `a96a8b46` `cc546b14` `f444dd36`.
+- HEAD `9f7c9195` + this handoff commit; origin is 237 behind before this commit (nothing pushed). Working tree clean (bindings noise only).
+- This session's commits: `7d1e0caa` qa lane paths · `9969ac60` CLAUDE.md principle · `090ed679` P1 · `a3891273` P2 · `abee6ebe` P3 (tree `f9cb17db` = QA tree) · `28b2bcf7` `b6223f08` `dc977a4d` ADR scaffolds · `45e06271` ADR bodies · `2070ebf9` doc pass · `9f7c9195` ledger/attachments.
 
 ## Verification state
-- Step 5 QA PASS on `baf769ff` (full regression 5629 Rust · 2762 frontend · tsc · 34 gates · claude + codex lanes · mutation 5/5 · GUI smoke). Real-material path is test-only until step 8.
-- Step 6: design only — no code. Measurements M1–M9: `docs/research/codex-launch-materials-measurements-2026-11-09.md` (codex-cli 0.163.0).
-- Rerun: `cargo test --workspace -- --test-threads=4`; QA procedure `.claude/skill-bindings/qa.md` + `qa-verify.md`.
+- QA (`/engram-qa`) on the P3 tree `f9cb17db`: full regression (5737 Rust · 2762 frontend · tsc · 34 gates) PASS; codex lane (usage probe 2 · backend_contract 11 · `codex_launch_live` L1–L5) PASS; claude lane PASS (rerun 4, fresh); mutation 2/2; GUI PASS (codex JSON turn + resume `resume_instructions=true`, terminal up after Esc on the update modal). One claude-lane timeout in rerun 3 under machine load (disk cleanup + other worktree builds) passed fresh in rerun 4 — no label (ADR-0038).
+- Intermediate commits P1 (`090ed679`) and P2 (`a3891273`) are the review-passed trees; QA ran only on the final tree.
+- **Not reviewed:** doc pass `2070ebf9` (gate 미통과 for docs — trust the code, not yet the prose). ADR bodies 0353–0355 written by main, not reviewed.
+- Rerun: `cargo test --workspace -- --test-threads=4`; lanes per `.claude/skill-bindings/qa.md` (codex live: `cargo test -p engram-dashboard-agent --test codex_launch_live -- --ignored --test-threads=1 --nocapture`, 2 real model turns).
 
 ## Failed approaches (do-not)
-- Command-line accounting kept producing new cases (quote expansion → program token → env PATH) — settled by a fixed bound (`PROGRAM_TOKEN_BOUND = 262`, #17) and R18 as a recorded exception; do not reopen with exact path resolution.
-- Do not stop the whole pipeline when one review class repeats; pause that class only.
-- Do not record a new decision by editing an ADR body — use /engram-adr.
+- Do not let the live L4 depend on the real `~/.codex` having no startup modal — it now passes `check_for_update_on_startup=false` as a preset raw line.
+- Do not mark a timing failure PASS by rerunning (binding rule) — it was reported FAIL, then the user asked for a rerun.
+- QA rerun 1 failed at CI platform gates 4/6: new files with test-only `#[cfg(windows)]` / `std::os` must be added to the `ci.yml` lists (feedback filed, Engram `8535305`).
+- The P1 coder hit bash heredoc backslash folding — write code with Edit/Write tools.
 
 ## Decisions
-User (step 6, 2026-11-09):
-- U1 priming that cannot go on the codex terminal command line · 선택지 block ★ / warn and launch without · 고른 것 「띄우지 말아」 · 같음.
-- U2 same-name skills across roots · 선택지 block / launch + notice ★ / silent · 고른 것 「같은 이름이 여러곳있으면 띄우되 알려.」 · 같음.
-- U3 notice wording · 고른 것 「그렇게 하던지」 (after rewording) · TRD §4-9.
-- `toml` crate addition · reported, no objection.
-- auto-handoff hook wording · (묻지 않음) · 고른 것 「훅 문구를 바꾸면 되는거 아님? 고쳐.」 · 근거: 「기준은 세션이 딱 바뀔때 한번 하면 되는건데」.
-Earlier user decisions this session are in history `20261109-190658-…`.
-Main (step 6): #1–#17 and rulings C1–C4 (TRD §9-1/§9-2), incl. #15 resume `developerInstructions` (≥ 0.155.0) — fixes a pre-existing defect: resumed codex JSON threads lose start instructions at compaction (M8); name it separately in the P3 commit body.
-Open (user): QA binding — add `crates/engram-dashboard-platform/src/shell.rs` to the claude lane paths (recommended; explained, no answer); run the codex lane on codex CLI version change (risk-axis suggestion; not yet put to the user as a choice).
+User (2026-11-10):
+- H1 codex-mirrored code · 상황: some code near-verbatim from openai/codex (Apache-2.0), same review finding two rounds · 선택지 A rewrite ★ / B keep + source pointer · 고른 것 「일단 다 만들어놓았으면 그냥 그대로 가던지」 · 갈림 · 조건: source + license pointer comments added; whether that is enough = user/legal, not main.
+- (묻지 않음) scope principle · 고른 것 「일단 어지간한건 그냥 그쪽 클로드나 코덱스 룰로 가고 우리는 최소한만 막자 이것저것 다 하려고 하지 말고.」 → CLAUDE.md line (「ㅇㅇ 한줄 언헝」) `9969ac60`; follow-up 「일단 너무 막지 말고 추가로 막는건 실제로 불편하면 막자고」 (append not yet confirmed).
+- Applied under that principle (presented, no objection): H2 Noop safety changes kept (space-less priming with `& ^ | < >` skipped; control URL with metachars refused); H3 real-terminal cwd guard minimal (2+ `%`, `"`, control, non-UTF-8, `& ^ | < >` without a space — single `%` measured intact); H4 `$<이름>(으)로`; H5 「지시서」, no count; no JSON size cap; retry rule unchanged.
+- QA rerun · 고른 것 「다시 실행해봐. 뭔가 아까 이상했었을듯?」 · 근거: the timeout looked environmental.
+Main: P1–P3 per TRD §9 (#1–#17, C1–C4); review fixes listed in the commit bodies; three commits built from the review-passed snapshot trees; ADRs: (a)+(b)+cwd → ADR-0353 (amends ADR-0215 d4/d5), (e)+(c) → ADR-0354 (amends ADR-0215 d7; ADR-0337/0226/0231 impact in its body), (d) → ADR-0355.
+Open: ADR-0337 decision 3 still says the notice "states intended behaviour" — needs an amend (`/engram-adr link` or a short supersede) ; check whether ADR-0216 needs an impact note for the Noop control-URL refusal; optionally add the single-`%` measurement to `docs/research/codex-launch-materials-measurements-2026-11-09.md`.
 
 ## Improvements
-- Filed this session: engram-review pause-only-the-class (`8ee61b2`) · global no-AI-tone (`de1734d`) · auto-handoff timing (rows applied by `c29064a`, archived).
+- Filed: code-conventions feedback — CI platform gate lists for test-only OS cfg in new files (Engram `8535305`).
 
 ## Resume command
-`git -C I:/Engram/apps/engram-dashboard-wt1 log --oneline -3 && git -C I:/Engram/apps/engram-dashboard-wt1 status --short | grep -v src-tauri/bindings`
+`git -C I:/Engram/apps/engram-dashboard-wt1 log --oneline -5 && git -C I:/Engram/apps/engram-dashboard-wt1 status --short | grep -v src-tauri/bindings`
 
 ## References
-- `docs/process/S25-preset-library/trd-codex-translation.md` (step 6 TRD — §8 units, §9 decisions, §8-1 hand-over)
-- `docs/research/codex-launch-materials-measurements-2026-11-09.md`
-- `.claude/handoff/attachments/20261109-s25-step6-material.md` (scout material: spec excerpts with parent-TRD line numbers, code state)
-- `docs/process/S25-preset-library/trd.md` §5-2 steps 5–8
+- `.claude/handoff/attachments/20261110-s25-step6-code/s25-step6-ledger.md` (every decision, hold, tracking item, QA run, thread id) · `p1/p2/p3-handover.md` (coder handovers) · `restore-points.txt`
+- `docs/process/S25-preset-library/trd-codex-translation.md` ("As landed", §11) · `trd.md` §5-2 step 6 landed, step 7/8 hand-over
+- `docs/decisions/0353-*.md`, `0354-*.md`, `0355-*.md`
