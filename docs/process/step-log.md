@@ -2223,6 +2223,7 @@
 ## S36 — connection band frontend (2026-11-10~, `v0.4.1/feat/connection-band`, autonomous session) · folder `docs/process/S36-connection-band/`
 
 - 2026-11-10 — Implemented and verified (`3592a84d`). ADR-0356 (version band only informs, 「다시 연결」 on both); PRD + TRD; PRD+TRD review full PASS (round 1 took the R21 cause guard back; boot start per window deferred → T-85); code review full PASS (2 rounds); QA PASS — CI three jobs locally, real-daemon lane + `v0.3.2` cross-version, mutation 3/3, release GUI AC1–AC7. Also: T-84 (update system), multi-daemon PRD/TRD get user-facing HTML (implement binding), review binding: screen-reader support is not a goal. Next: user's manual check → merge to master.
+- 2026-11-10 — User's release check: band too large → smaller band text (`a0aad975`, class-only, code review pending); tray 「데몬 켜기」 leaves the slots' daemon-down icon → T-86, deferred to multi-daemon. CI green on `a0aad975`; merged to master `a40aaefe` (`--no-ff`, no checkout).
 - 2026-11-10 — Topic opened. Number = S36. Version band = text + 「다시 연결」 only, no stop button (user 「높고 낮은거 빼고 안내만해」 · 「그냥 다시연결로해. 끄기 말고」).
 
 ## 다음 (미진행)
