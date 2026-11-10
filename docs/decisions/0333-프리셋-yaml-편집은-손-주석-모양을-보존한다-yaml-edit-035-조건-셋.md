@@ -1,6 +1,6 @@
 # ADR-0333: Preset YAML editing preserves hand-written comments · shape — `yaml-edit =0.3.5` + three conditions
 
-- 상태: 제안 (2026-10-31, basis: TRD decision T2 (2026-10-18 convention) · user 「없으면 관행대로 처리해」 · G48 (2026-10-31 「보통 메모 지킴은 맞는데 그걸 위해 별도로 노력할 필요는 없음 … 어쨋든 그 라이브러리에 맞게 하면 될것같음」) + main M61 (0b spike) · M68 (second measurement) · M73 (report) · spike `docs/research/yaml-comment-preserving-edit-spike-2026-10-31.md`)
+- 상태: **폐기 (Superseded by ADR-0358)** — TODO 사유. ~~제안 (2026-10-31, basis: TRD decision T2 (2026-10-18 convention) · user 「없으면 관행대로 처리해」 · G48 (2026-10-31 「보통 메모 지킴은 맞는데 그걸 위해 별도로 노력할 필요는 없음 … 어쨋든 그 라이브러리에 맞게 하면 될것같음」) + main M61 (0b spike) · M68 (second measurement) · M73 (report) · spike `docs/research/yaml-comment-preserving-edit-spike-2026-10-31.md`)~~
 - 관련: ADR-0338 · ADR-0318 · ADR-0336 (reading = serde-saphyr) · TRD §1-4 `format.rs` · §1-12 · §5 0b · §7 27 · earlier convention research `docs/research/yaml-comment-preserving-edit-2026-10-18.md`
 
 ## 맥락

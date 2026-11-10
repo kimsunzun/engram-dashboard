@@ -379,7 +379,7 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0330](0330-다시-연결-하나를-고르면-나머지를-이름으로-잇는다-훑기는-후보를-제안하지-않는다.md) | Relink = pick one and the rest are linked by name — the scan does not suggest candidates | 제안 |
 | [0331](0331-편집-칸-실행이-알리는-것은-충돌뿐이다-경고-범주가-없다.md) | What the edit area and a run report is conflicts only — there is no warning category | 제안 |
 | [0332](0332-설정-검사-프로세스-안에서-가볍게-문법-스키마-읽을-때마다.md) | Settings check = lightweight inside the process — syntax + schema, every time it is read | 제안 |
-| [0333](0333-프리셋-yaml-편집은-손-주석-모양을-보존한다-yaml-edit-035-조건-셋.md) | Preset YAML editing preserves hand-written comments · shape — `yaml-edit =0.3.5` + three conditions | 제안 |
+| [0333](0333-프리셋-yaml-편집은-손-주석-모양을-보존한다-yaml-edit-035-조건-셋.md) | Preset YAML editing preserves hand-written comments · shape — `yaml-edit =0.3.5` + three conditions | 폐기 (Superseded by ADR-0358) |
 | [0334](0334-실행-재료는-포트로-넘긴다-해석은-asset-library-플래그-번역-백엔드-설정-지식은-backend.md) | Launch materials are passed through a port — resolution in asset-library, flag translation and backend settings knowledge in backend | 제안 |
 | [0335](0335-파일-조작-계획-실행-참조-고침-진행-기록-없이-순서만-obsidian-꼴-남은-임시-파일도-저절로-치우지-않는다.md) | File operations = plan → execute → fix references, with order only and no progress record (Obsidian shape) — leftover temporary files are not cleaned up automatically either | 제안 (부분 폐기 by ADR-0339: replaces Decision 5 and extends Decisions 1 and 6) |
 | [0336](0336-서버-부품-선택-serde-saphyr-jsonschema-ureq-walkdir-junction-pulldown-cmark-sha2.md) | Server component choices — serde-saphyr · jsonschema · ureq · walkdir · junction · pulldown-cmark · sha2 | 제안 |
@@ -403,3 +403,4 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0355](0355-same-name-codex-skills-across-skill-roots-launch-with-a-notice.md) | Same-name codex skills across skill roots launch with a notice | 확정 |
 | [0356](0356-version-mismatch-band-only-informs-and-carries-다시-연결-no-stop-button.md) | Version-mismatch band only informs and carries 「다시 연결」, no stop button | 확정 |
 | [0357](0357-the-three-step-6-codex-notice-codes-state-facts-only-without-the-intended-behavior-sentence.md) | The three step-6 codex notice codes state facts only, without the intended-behavior sentence | 확정 |
+| [0358](0358-preset-yaml-edits-rewrite-the-whole-file-with-serde-saphyr-and-do-not-keep-hand-written-comments-yaml-edit-dropped.md) | Preset YAML edits rewrite the whole file with serde-saphyr and do not keep hand-written comments (yaml-edit dropped) | 확정 |
