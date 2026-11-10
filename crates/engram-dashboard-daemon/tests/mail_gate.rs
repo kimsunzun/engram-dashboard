@@ -105,12 +105,12 @@ fn known_help_dir(tag: &str) -> std::path::PathBuf {
 /// 얹은 이름을 **실제로 답하는** 주인 — 대시보드가 창·탭·슬롯 명령에 대해 하는 그 일이다.
 struct AnsweringSink(engram_dashboard_daemon::command_delivery::CommandDeliveries);
 
-impl engram_dashboard_net::frame_port::FrameSink for AnsweringSink {
+impl engram_dashboard_daemon::conn_port::FrameSink for AnsweringSink {
     fn try_send(
         &self,
-        frame: engram_dashboard_net::frame_port::Frame,
-    ) -> Result<(), engram_dashboard_net::frame_port::FrameError> {
-        let engram_dashboard_net::frame_port::Frame::Text(text) = frame else {
+        frame: engram_dashboard_daemon::conn_port::Frame,
+    ) -> Result<(), engram_dashboard_daemon::conn_port::FrameError> {
+        let engram_dashboard_daemon::conn_port::Frame::Text(text) = frame else {
             return Ok(());
         };
         if let Ok(engram_dashboard_protocol::AgentEvent::CommandRequest { envelope }) =
@@ -129,9 +129,11 @@ impl engram_dashboard_net::frame_port::FrameSink for AnsweringSink {
 
     fn send(
         &self,
-        frame: engram_dashboard_net::frame_port::Frame,
-    ) -> futures_util::future::BoxFuture<'_, Result<(), engram_dashboard_net::frame_port::FrameError>>
-    {
+        frame: engram_dashboard_daemon::conn_port::Frame,
+    ) -> futures_util::future::BoxFuture<
+        '_,
+        Result<(), engram_dashboard_daemon::conn_port::FrameError>,
+    > {
         Box::pin(std::future::ready(self.try_send(frame)))
     }
 }
@@ -140,10 +142,10 @@ impl Fixture {
     /// 붙어 있는 클라이언트가 자기 이름을 얹고 **답하는** 상태를 만든다.
     fn register_answering_owner(
         &self,
-        conn_id: engram_dashboard_net::frame_port::ConnId,
+        conn_id: engram_dashboard_daemon::conn_port::ConnId,
         name: &str,
     ) {
-        let sink: Arc<dyn engram_dashboard_net::frame_port::FrameSink> =
+        let sink: Arc<dyn engram_dashboard_daemon::conn_port::FrameSink> =
             Arc::new(AnsweringSink(self.bus.deliveries().clone()));
         self.bus.roster().attach(conn_id, &sink);
         self.bus

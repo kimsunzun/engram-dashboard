@@ -75,7 +75,6 @@ use std::io;
 use std::path::Path;
 use std::time::Duration;
 
-// It must be an individual `use` — a grouped `use` is something net gate 2a (lib.rs header) cannot count symbols in.
 use engram_dashboard_platform::fs::is_access_denied;
 use engram_dashboard_platform::fs::is_sharing_violation;
 use engram_dashboard_platform::fs::open_deny_write;
@@ -192,7 +191,7 @@ fn live_owner(path: &Path) -> Option<u32> {
 /// Attempt to acquire the lock. `lock_file` = the file to hold (created if absent).
 ///
 /// The folder of `lock_file` **must already exist** — creating the folder is the caller's job (daemon startup order).
-/// Path computation is also the caller's job (this crate does not know the data folder layout — the daemon's `data_dir::DataLayout` is the source of truth).
+/// Path computation is also the caller's job (the source of truth for the data folder layout is `data_dir::DataLayout`).
 ///
 /// ★The basis for "already running" is only when open failure + a live record both hold★: do not
 /// declare a duplicate from open failure alone. Opening also fails for reasons unrelated to the daemon, such as a third party's handle · permissions, and reading that as a duplicate

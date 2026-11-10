@@ -13,8 +13,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::portfile::DAEMON_FILE;
 use engram_dashboard_base::writable::{probe_write_in, retry_if_vanished};
-use engram_dashboard_net::portfile::DAEMON_FILE;
 
 // ★ENGRAM_DATA_DIR override (테스트 격리 탈출구 — 배포 노브 아님)★:
 //   - **유일한 용도 = 통합 테스트의 데이터 격리.** 실프로세스 통합 테스트(daemon `tests/ws_e2e.rs`)가

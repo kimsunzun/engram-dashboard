@@ -2,9 +2,10 @@
 //!
 //! This module is the shell's edge of the transport: the packet vocabulary ([`wire::ShellWire`]), the handshake
 //! ([`handshake::ShellHandshake`]), the dialer ([`dialer::LocalDaemonDialer`]), the endpoint source
-//! ([`endpoint::EndpointSource`]), the inbox consumer ([`pump`]), the routing of what it delivers ([`route`]) and the
-//! failure texts callers see ([`errors`]). The connection machine itself (dial · backoff · keepalive · pending replies
-//! · per-peer lossless inbox) is the transport crate's; this module only adapts it.
+//! ([`endpoint::EndpointSource`]), the inbox consumer ([`pump`]), the routing of what it delivers ([`route`]), the
+//! failure texts callers see ([`errors`]) and the one-shot stop client ([`stop`]). The connection machine itself
+//! (dial · backoff · keepalive · pending replies · per-peer lossless inbox) is the transport crate's; this module only
+//! adapts it.
 //!
 //! The shell's connection driver (`daemon_client::connection`) runs on it in every build. The one item whose
 //! signature names a crate-private port (`route::emit_broadcast` — `events::DaemonEvents`) is `pub(crate)`.
@@ -20,6 +21,7 @@ pub mod errors;
 pub mod handshake;
 pub mod pump;
 pub mod route;
+pub mod stop;
 #[cfg(test)]
 pub(crate) mod test_log;
 pub mod wire;

@@ -7,11 +7,12 @@
 //!
 //! ★불변식(R1~R7, ADR-0020) 보존이 절대 원칙★:
 //! - **R1 Ack→replay→ReplayComplete FIFO** — 유지 기전은 `handle_subscribe`.
-//! - **R6 close_signal**: 큐 포화 out-of-band 종료는 WS-특정 → sink 구현(어댑터)이 SinkError
-//!   해석으로 처리한다. 코어는 SinkError 만 본다(이 모듈은 close_signal 을 모른다).
+//! - **R6 close on saturation**: closing the connection when its queue is full is carrier-specific → the sink
+//!   implementation (the adapter) handles it by interpreting `SinkError`. The core sees only `SinkError` (this module does
+//!   not know how the connection is closed).
 //!
 //! ★status fanout(broadcast)도 carrier-중립이다★: lease/profile 변경의 전-연결 브로드캐스트는
-//! per-conn 응답(OutboundSink)이 아니라 `engram_dashboard_net::frame_port::FrameFanout`(전-연결
+//! per-conn 응답(OutboundSink)이 아니라 `crate::conn_port::FrameFanout`(전-연결
 //! 출구)으로 간다 — 인코딩된 text 하나를 넘길 뿐이라 연결이 몇 개인지도, 누가 등록돼 있는지도
 //! 이 모듈은 모른다(ADR-0129).
 
@@ -77,6 +78,7 @@ use tokio::sync::watch;
 
 use crate::command_delivery::{CommandDeliveries, LocalCommands, OutcomeLanding};
 use crate::command_roster::CommandRoster;
+use crate::conn_port::{ConnId, FrameFanout};
 use crate::control::registry::ControlRegistry;
 use crate::usage_service::book::RequestKind;
 use crate::usage_service::UsageService;
@@ -84,7 +86,6 @@ use engram_dashboard_command::{
     CommandDecl, CommandEnvelope, CommandError, CommandReply, ErrorCode, OwnerToken,
 };
 use engram_dashboard_messaging::envelope::EnvelopeFormat as CoreEnvelopeFormat;
-use engram_dashboard_net::frame_port::{ConnId, FrameFanout};
 use serde_json::value::RawValue;
 
 // ── OutboundSink seam(ADR-0003 OutputSink 결을 따름) ──────────────────────────────
@@ -109,7 +110,7 @@ impl Outbound {
     }
 }
 
-/// sink enqueue 실패(큐 포화/닫힘). 어댑터가 carrier 별로 해석(WS=close_signal 발동 등, R6).
+/// Sink enqueue failure (queue full / closed). The adapter interprets it per carrier (WS = the connection is closed, R6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SinkError;
 
@@ -145,7 +146,7 @@ pub enum DispatchFlow {
 /// 한 명령을 **그 연결의 도착순 줄에서 떼어내** 별도 태스크로 돌려도 되는가.
 ///
 /// ★왜 분류가 필요한가★: 네트워크 행은 연결마다 소비자 하나로 프레임을 도착 순서대로 올린다
-///   (`frame_port::ConnectionHandler` 계약). 그 직렬성이 아래 순서 불변식들을 **공짜로** 지켜 주는
+///   (`conn_port::ConnectionHandler` 계약). 그 직렬성이 아래 순서 불변식들을 **공짜로** 지켜 주는
 ///   대신, 한 명령이 오래 걸리면 그 연결의 다음 명령도 함께 늦는다. 그래서 「순서가 뜻을 갖지 않는
 ///   것」만 골라 줄 밖으로 내보낸다.
 /// ★기본값은 [`DispatchOrder::InOrder`] 다 — 의심스러우면 줄에 남긴다★: 떼어 내는 쪽이 틀리면
@@ -185,14 +186,16 @@ pub(crate) const SATURATED_REFUSAL: &str =
 ///   ① **어떤 순서 묶음에도 들지 않는가.** `Kill` 은 다섯 묶음 어디에도 없다. 앞서 줄에 든
 ///      `WriteStdin`(X) 을 추월해 그 바이트가 유실되지만, 그 에이전트를 죽이라는 것이 이 명령의 뜻이라
 ///      그 유실이 곧 요청된 결과다.
-///   ② **막힌 것과 다른 경로로 도는가.** ★한때 여기 적혀 있던 「줄이 막히는 현실적 원인은
-///      `write_stdin` 의 블로킹 PTY write 다」는 **더는 참이 아니다**★ — 콘솔 통로가 에이전트별 입력
-///      큐를 갖게 되면서 `send_input` 은 큐에 넣고 즉시 돌아온다(`transport::input_queue`). **그래도 이
-///      줄은 유효하다**: 오늘 도착순 줄을 실제로 오래 붙드는 것은 ㉮ `Kill` 자신
-///      (`AgentManager::kill_agent` 이 통로 종료와 pump join **5초**를 `spawn_blocking` 없이 동기로
-///      기다린다) ㉯ 프로필 CRUD 의 동기 파일 IO 다. 그리고 `Kill` 은 그 둘 중 어느 것도 타지 않는다 —
-///      `child.kill()` + Job 종료로 내려간다(`PtyTransport::shutdown`). 즉 **다른 경로로 돌 뿐 아니라,
-///      줄을 붙들고 있는 것을 끝내는 유일한 명령**이다.
+///   ② **Does it run on a different path from what is blocked?** The old line here — "the realistic
+///      cause of a blocked line is `write_stdin`'s blocking PTY write" — **is no longer true**: console
+///      transports have a per-agent input queue, so `send_input` queues and returns at once
+///      (`transport::input_queue`). **The rule still holds**: what holds the in-order line for long today
+///      is (a) an earlier `Kill` — its arm awaits `AgentManager::kill_agent` on the blocking pool, i.e. the
+///      transport shutdown plus the pump join (5 s ceiling; the shutdown has no bound of its own) — and
+///      (b) the synchronous file IO of profile CRUD. A `Kill` on the bypass lane skips both and goes down
+///      to `child.kill()` + the Job terminate (`PtyTransport::shutdown`), so it **runs on a different path
+///      and ends a stuck agent's I/O**; a second Kill of an agent whose kill is still running waits on that
+///      transport's master lock, so it does not end that first kill.
 /// ★`Interrupt` 를 여기 **넣지 않은 것은 의도다** — 둘 다 어긋난다★: ①로는 순서 묶음 ①에 정면으로
 ///   들고(`WriteStdin`(X) ↔ `Interrupt`(X)), ②로는 **건너뛰어도 도착 시점이 그대로다**.
 ///   ★②의 근거가 갈렸다 — 옛 문장(「`interrupt()` 가 `0x03` 을 **같은 PTY writer 로** 쓰므로 그 writer 에
@@ -270,11 +273,14 @@ pub(crate) fn command_request_id(
 
 /// [`DispatchOrder`] 판정.
 ///
-/// ★떼어 내는 것은 활성화 셋과 ⟳(`RefreshUsageLimits`)뿐이다★: 이것들만이 dispatch 안에서 **끝이 날 때까지**
-///   기다린다 — 활성화는 결말까지(전형 2s, 백스톱 15s, 실패 판정이면 teardown 까지 합쳐 약 20s — 그 사유의 정본은
-///   `Spawn` 갈래 주석), ⟳ 는 조회 끝까지(상한 = `usage_service::REPLY_WAIT_MAX`).
-///   나머지 전부는 await 지점이 없거나(맵 조회·PTY write·목록 인코딩) 이미 자기 태스크로 나간다
-///   (`Command` 의 배달). 그래서 줄에 남겨도 다음 명령을 재지 않는다.
+/// **Only the activation three and ⟳ (`RefreshUsageLimits`) are detached**: they wait inside dispatch
+///   **until an outcome** that may take seconds — activation until its result (typically 2 s, backstop
+///   15 s, about 20 s with the teardown on a failure verdict — the reason's source of truth is the
+///   `Spawn` arm comment), ⟳ until the query ends (cap = `usage_service::REPLY_WAIT_MAX`).
+///   In-order commands may await as well — `Kill` awaits its blocking task (transport shutdown + pump
+///   join) and holds the next command on this connection until it has replied. The rest have no await
+///   point (map lookup · input queue push · list encoding) or hand off to their own task (`Command`
+///   delivery · `StopDaemon`'s shutdown).
 /// ★떼어 내도 되는 근거는 「순서가 뜻을 갖지 않는다」 하나다★(⟳ 의 근거는 그 갈래 주석) — 중복 활성화를
 ///   막는 것은 dispatch 의 도착 순서가 아니라 manager 의 예약(`SpawnReservation`)과 재활성화 가드(`activation_in_flight`)이고,
 ///   그 둘은 연결을 모른다. 즉 이 셋을 줄에서 떼어도 **새로 열리는 창이 없다** — 같은 id 를 동시에
@@ -319,9 +325,8 @@ pub(crate) fn dispatch_order(cmd: &AgentCommand) -> DispatchOrder {
         //    `ReplayComplete` 는 코어 잠금을 놓은 **뒤** 큐에 드니, 겹치면 Ack/replay/Complete 가
         //    단일 writer 줄에서 뒤섞인다(R1 위반).
         // ④ `RegisterCommands`↔`UpdateCommands` — 앞은 전량 교체, 뒤는 그 결과에 대한 차분이다.
-        // ⑤ `StopDaemon` 은 이 연결의 **마지막**이어야 한다(`Close` 를 돌려주는 유일한 갈래).
-        //    ★그래서 이것만은 느린데도 줄에 남는다★ — 떼어 내면 연결을 끝내라는 답이 이미 다음
-        //    명령이 지나간 뒤에 나온다.
+        // ⑤ `StopDaemon` must be this connection's **last** command (the only arm that returns `Close`). Detached,
+        //    its answer to end the connection would come after the next command had already passed.
         AgentCommand::Kill { .. }
         | AgentCommand::Interrupt { .. }
         | AgentCommand::WriteStdin { .. }
@@ -1280,6 +1285,12 @@ pub struct ConnectionCore {
     locals: Arc<dyn LocalCommands>,
     usage: Arc<UsageService>,
     shutdown_tx: watch::Sender<bool>,
+    /// Set by the first `StopDaemon` — the daemon is shutting down; a later `StopDaemon` joins instead of
+    /// running `shutdown_all` again.
+    stopping: AtomicBool,
+    /// How many shutdown tasks `StopDaemon` spawned — each runs `shutdown_all` once.
+    #[cfg(test)]
+    shutdowns_spawned: std::sync::atomic::AtomicUsize,
     /// The backend creation policy the `SpawnByCwd` arm passes to the one creation body (agent
     /// `commands::create_and_start`). Production is always agent `commands::llm_creation_refusal`, filled by
     /// [`ConnectionCore::new`]; only tests swap in a closing fake (today's production table closes nothing, so real
@@ -1315,6 +1326,9 @@ impl ConnectionCore {
             locals,
             usage,
             shutdown_tx,
+            stopping: AtomicBool::new(false),
+            #[cfg(test)]
+            shutdowns_spawned: std::sync::atomic::AtomicUsize::new(0),
             llm_policy: llm_creation_refusal,
         }
     }
@@ -1474,16 +1488,16 @@ impl ConnectionCore {
                 // TRD S25 §5-2 16
                 match manager.agent_snapshot(profile_id) {
                     Some(profile) => {
-                        // ★★blocking 풀로 넘긴다 — 이 자리에서 직접 부르지 마라★★: `activate_profile`
-                        //   은 연결을 선언하는 통로에서 **결말이 날 때까지** 블록하고(최대 백스톱 15s),
-                        //   실패로 판정하면 그 뒤 teardown 의 `session.kill(5s)` 까지 탄다 — 합쳐 약 20s
-                        //   동안 **yield 지점이 하나도 없다.** async 워커에서 그대로 부르면 그 워커가
-                        //   통째로 묶이고, 막힌 codex 활성화 N 건이 워커 N 개를 가져간다(다른 연결의
-                        //   명령까지 함께 멈춘다). 같은 파일의 `Shutdown` 이 `shutdown_all` 을 같은
-                        //   이유로 감싼다.
-                        //   ★명령 버스 쪽 형제는 이미 보호돼 있다★ — `agent.*` 표가 `blocking_handler`
-                        //   뒤에 있다(`agent::commands::make_table` 의 blocking 계약). 보호가 없던 것은
-                        //   이 WS 표면뿐이다.
+                        // Hand this to the blocking pool — never call it here directly: `activate_profile`
+                        //   blocks **until an outcome** on a transport that declares a connection (backstop
+                        //   15 s), and on a failure verdict it then runs the teardown's `session.kill` (pump
+                        //   join bounded by 5 s) — about 20 s with **no yield point**. Called on an async
+                        //   worker it ties up that whole worker, and N stuck codex activations take N workers
+                        //   (other connections' commands stop too). The `Kill` and `StopDaemon` arms in this
+                        //   file use the blocking pool for the same reason.
+                        //   The command-bus sibling is already protected — the `agent.*` table sits behind
+                        //   `blocking_handler` (the blocking contract of `agent::commands::make_table`).
+                        //   Only this WS surface lacked that protection.
                         let mgr = manager.clone();
                         let started = tokio::task::spawn_blocking(move || {
                             mgr.activate_profile(&profile, SpawnMode::Fresh).map(|_| ())
@@ -1522,7 +1536,15 @@ impl ConnectionCore {
                 agent_id,
                 request_id,
             } => {
-                let result = manager.kill_agent(agent_id).map_err(|e| e.to_string());
+                // Off the async worker, like the activation arms: `kill_agent` blocks its thread until the
+                //   transport has shut down, and a blocked worker also starves tasks woken into its
+                //   unstealable LIFO slot — this connection's writer included (T-79). Awaited here, so the
+                //   reply still follows the kill and the next command waits for the reply.
+                let mgr = manager.clone();
+                let result = tokio::task::spawn_blocking(move || mgr.kill_agent(agent_id))
+                    .await
+                    .map_err(|e| format!("kill task failed: {e}"))
+                    .and_then(|killed| killed.map_err(|e| e.to_string()));
                 reply(sink, request_id, result);
             }
 
@@ -1667,12 +1689,24 @@ impl ConnectionCore {
                 //   자식 유지)가 현 Job 모델에선 불가능하다. 플래그는 미래 detach 여지로 protocol 에
                 //   남겨두되 v1 동작은 값과 무관하다.
                 let _ = kill_agents;
-                let mgr = manager.clone();
-                let _ = tokio::task::spawn_blocking(move || mgr.shutdown_all()).await;
+                // The shutdown runs in its own task, not in this handler: the network layer (`link::server`) aborts this
+                //   connection's dispatch task when the client closes, and an awaited `shutdown_all` would then never reach `shutdown_tx`
+                //   — the daemon survived with its agents killed (TRD S21 trd-3-2-u5 §3-4). A second `StopDaemon`
+                //   while one runs only joins it. The `shutdown_tx` trigger is watched by `run()`'s `select!`.
+                if !self.stopping.swap(true, Ordering::SeqCst) {
+                    #[cfg(test)]
+                    self.shutdowns_spawned.fetch_add(1, Ordering::SeqCst);
+                    let mgr = manager.clone();
+                    let shutdown_tx = self.shutdown_tx.clone();
+                    tokio::spawn(async move {
+                        let _ = tokio::task::spawn_blocking(move || mgr.shutdown_all()).await;
+                        let _ = shutdown_tx.send(true);
+                    });
+                }
 
+                // `Close` flushes queued frames before closing (`link::server` → `close_after_flush`), so this Ack goes out first —
+                // still best effort: bounded by the 2 s flush and refused if the outbound queue is already full.
                 reply(sink, request_id, Ok(()));
-                // main 종료 트리거(watch). 수신측은 run() 의 select! 가 감지.
-                let _ = self.shutdown_tx.send(true);
                 return DispatchFlow::Close;
             }
 
@@ -2574,9 +2608,9 @@ fn note_claimed_owner(
 ///   `previous_owner`)처럼 길이·모양이 우리 것인 값은 안 거친다. 그 자리에 「저장하는 값을 바꾸는 커밋이
 ///   이 줄을 함께 고쳐야 한다」는 방아쇠가 달려 있다.
 /// - **예외 ② 타입드 값** — `Uuid`·`ErrorCode`·`http::Method`·`Path` 는 문자열이 아니라 타입이 모양을 진다.
-/// - **예외 ③ 이 crate 밖** — 네트워크 행(`engram-dashboard-net`)의 `Origin` 필드는 이 함수를 안 거치고
-///   **HTTP 헤더 문법 검사**에 의존한다(제어문자·개행이 헤더 값에 못 들어간다). 그 축을 이 함수가 지킨다고
-///   읽지 말 것.
+/// - **Exception ③ outside this crate** — the `Origin` · `Host` fields of a refused WS upgrade are masked by the transport
+///   (`AcceptRefusal`, logged by `link::server`) and do not pass through this function. Do not read this function as the
+///   guard of that axis.
 /// - **덮지 않는 축** = 메시지 문자열 끝의 `: {e}` 보간(로깅 컨벤션이 그것만 예외로 허용한다). 이 함수가
 ///   묶는 것은 **필드**다.
 ///
@@ -2674,7 +2708,7 @@ fn broadcast_agent_list(fanout: &dyn FrameFanout, manager: &Arc<AgentManager>) {
 /// ★enqueue 실패를 삼키지 않는다★: 이 한 장이 클라이언트의 single-flight 슬롯을 푸는 유일한 신호다.
 /// 큐 포화로 못 나가면 클라이언트는 거절을 영영 모르고 그 슬롯이 좀비로 남아 **그 에이전트의 Subscribe 가
 /// 두 번 다시 나가지 못한다**(데몬 재기동 뒤 출력 영구 두절 — 실측 2026-08-19). 회복은 어댑터가 R6
-/// close_signal 로 연결을 끊어줄 때뿐이라, 그 사이를 설명할 흔적을 여기서 남긴다.
+/// 으로 연결을 끊어줄 때뿐이라, 그 사이를 설명할 흔적을 여기서 남긴다.
 fn refuse_subscribe(sink: &dyn OutboundSink, agent_id: AgentId, reason: String) {
     tracing::debug!(agent = %agent_id, %reason, "Subscribe 거절");
     if let Err(e) = sink.enqueue(Outbound::event(AgentEvent::SubscribeFailed {
@@ -2718,7 +2752,7 @@ pub fn agent_list_event(manager: &Arc<AgentManager>) -> AgentEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engram_dashboard_net::frame_port;
+    use crate::conn_port as frame_port;
     use engram_dashboard_protocol::{CommandListEntry, RequestId};
     use std::sync::atomic::AtomicU8;
     use std::sync::Mutex as StdMutex;
@@ -2883,7 +2917,7 @@ mod tests {
                 removed: vec![],
                 request_id: rid(),
             },
-            // ⑤ 연결을 끝내는 명령 — 느린데도 줄에 남는 유일한 것
+            // ⑤ the command that ends the connection
             AgentCommand::StopDaemon {
                 force: true,
                 kill_agents: true,
@@ -2905,9 +2939,10 @@ mod tests {
 
     /// ★★활성화를 async 워커에서 **직접 부르지 않는다**★★ — 그 워커가 최대 20 초 묶인다.
     ///
-    /// `AgentManager::activate_profile` 은 연결을 선언하는 통로에서 결말이 날 때까지 블록하고(백스톱
-    /// 15s), 실패로 판정하면 teardown 의 `session.kill(5s)` 까지 탄다 — 그 사이 yield 지점이 **없다.**
-    /// 막힌 활성화 N 건이 워커 N 개를 가져가면 다른 연결의 명령까지 함께 멈춘다.
+    /// `AgentManager::activate_profile` blocks until an outcome on a transport that declares a connection
+    /// (backstop 15 s), and on a failure verdict it then runs the teardown's `session.kill` (pump join
+    /// bounded by 5 s) — with **no** yield point in between. N stuck activations taking N workers stop other
+    /// connections' commands too.
     /// ★왜 소스에서 재나★: 워커 고갈은 멀티스레드 런타임에 그 수만큼 부하를 걸어야 관측되고, 그
     ///   시험대는 본질적으로 타이밍 의존이라 이 저장소가 피하는 모양이다(시계 단언 금지). 회귀했을 때
     ///   나는 것은 빨간 단언이 아니라 **부하 아래서만 보이는 정지**다.
@@ -3957,6 +3992,8 @@ mod tests {
         /// 수락 모름으로 쥔 id 만 답하는 통로 — 쓰기는 삼킨다.
         struct SeamTransport {
             unconfirmed: Vec<String>,
+            /// Runs inside `shutdown()` — lets a test hold the kill path on whichever thread runs it.
+            on_shutdown: Option<Box<dyn Fn() + Send + Sync>>,
         }
         impl AgentTransport for SeamTransport {
             fn start(&self, _core: Arc<OutputCore>) {}
@@ -3972,7 +4009,11 @@ mod tests {
             fn interrupt(&self) -> Result<(), PtyError> {
                 Ok(())
             }
-            fn shutdown(&self) {}
+            fn shutdown(&self) {
+                if let Some(on_shutdown) = &self.on_shutdown {
+                    on_shutdown();
+                }
+            }
             fn capabilities(&self) -> TransportCaps {
                 TransportCaps {
                     input: InputCaps {
@@ -4004,6 +4045,39 @@ mod tests {
             epoch: u32,
             events: Vec<QueuedInputEvent>,
             unconfirmed: &[&str],
+        ) -> AgentId {
+            insert_seam(
+                manager,
+                epoch,
+                events,
+                SeamTransport {
+                    unconfirmed: unconfirmed.iter().map(|id| id.to_string()).collect(),
+                    on_shutdown: None,
+                },
+            )
+        }
+
+        /// A live session whose transport runs `on_shutdown` when it is shut down (killed).
+        pub(super) fn insert_with_shutdown(
+            manager: &Arc<AgentManager>,
+            on_shutdown: impl Fn() + Send + Sync + 'static,
+        ) -> AgentId {
+            insert_seam(
+                manager,
+                0,
+                Vec::new(),
+                SeamTransport {
+                    unconfirmed: Vec::new(),
+                    on_shutdown: Some(Box::new(on_shutdown)),
+                },
+            )
+        }
+
+        fn insert_seam(
+            manager: &Arc<AgentManager>,
+            epoch: u32,
+            events: Vec<QueuedInputEvent>,
+            transport: SeamTransport,
         ) -> AgentId {
             let id = AgentId::new_v4();
             let core = Arc::new(OutputCore::new(
@@ -4037,9 +4111,7 @@ mod tests {
                 InputEncoder::ClaudeStreamJson,
                 true,
                 core,
-                Box::new(SeamTransport {
-                    unconfirmed: unconfirmed.iter().map(|id| id.to_string()).collect(),
-                }),
+                Box::new(transport),
             ));
             manager.insert_test_session(session);
             id
@@ -4056,6 +4128,72 @@ mod tests {
         let session = ConnectionSession::new(conn_id);
         core.dispatch(cmd, &session, &mock).await;
         mock.events()
+    }
+
+    /// A kill must not hold the async worker that runs the connection's dispatch (T-79): while the
+    /// transport's shutdown is still in progress, other tasks on that runtime must run.
+    ///
+    /// The fake shutdown signals "entered" and then waits up to 2 s for a release that only the canary
+    /// task sends. On a current-thread runtime an inline kill blocks the only thread, so the canary cannot
+    /// run until the wait has timed out; the canary waits for "entered" first, so the poll order of
+    /// `join!` does not matter.
+    #[tokio::test]
+    async fn a_kill_in_progress_leaves_the_runtime_free() {
+        use engram_dashboard_protocol::RequestId;
+        use std::sync::atomic::AtomicBool;
+        use std::sync::mpsc::{self, TryRecvError};
+
+        let (core, _rx) = test_core();
+        let (entered_tx, entered_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let release_rx = StdMutex::new(release_rx);
+        let released = Arc::new(AtomicBool::new(false));
+        let released_in_shutdown = released.clone();
+        let agent_id = queued_seam::insert_with_shutdown(&core.manager, move || {
+            let _ = entered_tx.send(());
+            let got = release_rx
+                .lock()
+                .expect("release poisoned")
+                .recv_timeout(Duration::from_secs(2));
+            released_in_shutdown.store(got.is_ok(), Ordering::SeqCst);
+        });
+
+        let canary = async move {
+            loop {
+                match entered_rx.try_recv() {
+                    Ok(()) => break,
+                    Err(TryRecvError::Empty) => tokio::time::sleep(Duration::from_millis(1)).await,
+                    Err(TryRecvError::Disconnected) => panic!("the kill never reached shutdown"),
+                }
+            }
+            let _ = release_tx.send(());
+        };
+        let req = RequestId(uuid::Uuid::new_v4());
+        let ((events, released_at_reply), ()) = tokio::join!(
+            async {
+                let events = dispatch_one(
+                    &core,
+                    1,
+                    AgentCommand::Kill {
+                        agent_id,
+                        request_id: req,
+                    },
+                )
+                .await;
+                (events, released.load(Ordering::SeqCst))
+            },
+            canary
+        );
+
+        assert!(
+            released_at_reply,
+            "the kill had not been released when its reply returned — Kill must run off the async worker and \
+             reply only after the kill finished"
+        );
+        match events.as_slice() {
+            [AgentEvent::Ack { request_id }] => assert_eq!(*request_id, req),
+            other => panic!("the kill must be answered with its Ack: {other:?}"),
+        }
     }
 
     /// ★목록 조회는 임대를 안 본다★ — 남이 임대를 쥔 에이전트도 그대로 읽힌다. 응답은 명부의 환원 상태를 빠짐없이
@@ -6071,8 +6209,125 @@ mod tests {
             matches!(mock.events().as_slice(), [AgentEvent::Ack { .. }]),
             "Ack 1건"
         );
-        assert!(rx.has_changed().unwrap_or(false));
+        // The shutdown runs in its own task — the signal follows it, not the handler's return.
+        tokio::time::timeout(Duration::from_secs(10), rx.changed())
+            .await
+            .expect("the shutdown signal fires")
+            .expect("the sender is alive");
         assert!(*rx.borrow_and_update());
+    }
+
+    /// TRD S21 trd-3-2-u5 §3-4: a client that closes right after `StopDaemon` makes `net` abort the dispatch task —
+    /// the handler is dropped after one poll here. The shutdown still runs and still signals.
+    #[tokio::test]
+    async fn stop_daemon_survives_a_dispatch_dropped_after_one_poll() {
+        use futures_util::FutureExt;
+
+        let (core, mut rx) = test_core();
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = ConnectionSession::new(1);
+        let polled_once = core
+            .dispatch(
+                AgentCommand::StopDaemon {
+                    force: true,
+                    kill_agents: true,
+                    request_id: rid(),
+                },
+                &session,
+                &mock,
+            )
+            .now_or_never();
+        assert_eq!(
+            polled_once,
+            Some(DispatchFlow::Close),
+            "the handler awaits nothing"
+        );
+        tokio::time::timeout(Duration::from_secs(10), rx.changed())
+            .await
+            .expect("the shutdown signal fires although the dispatch was dropped")
+            .expect("the sender is alive");
+        assert!(*rx.borrow_and_update());
+    }
+
+    /// TRD S21 trd-3-2-u5 §3-4: two `StopDaemon`s back to back — the second arrives before the first shutdown has
+    /// signalled (on this current-thread runtime its task has not even been polled) and starts no second one.
+    #[tokio::test]
+    async fn a_stop_daemon_before_the_first_shutdown_signals_joins_it() {
+        let (core, mut rx) = test_core();
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let stop = || AgentCommand::StopDaemon {
+            force: true,
+            kill_agents: true,
+            request_id: rid(),
+        };
+        let first = core
+            .dispatch(stop(), &ConnectionSession::new(1), &mock)
+            .await;
+        let second = core
+            .dispatch(stop(), &ConnectionSession::new(2), &mock)
+            .await;
+        assert_eq!((first, second), (DispatchFlow::Close, DispatchFlow::Close));
+        assert!(!*rx.borrow(), "the first shutdown had not signalled");
+        assert_eq!(
+            core.shutdowns_spawned.load(Ordering::SeqCst),
+            1,
+            "one shutdown_all"
+        );
+        tokio::time::timeout(Duration::from_secs(10), rx.changed())
+            .await
+            .expect("the shutdown signals")
+            .expect("the sender is alive");
+        assert!(*rx.borrow_and_update());
+    }
+
+    /// A `StopDaemon` once the daemon is stopping only joins — it answers and closes its connection but does not run
+    /// `shutdown_all` or signal again. Here it comes after the first shutdown signalled, so the latch is what is
+    /// checked, not an overlap with a running `shutdown_all`.
+    // Known limit: the negative half waits a bounded real time; a second run slower than that would pass unseen.
+    #[tokio::test]
+    async fn a_stop_daemon_after_the_shutdown_signalled_only_answers_and_closes() {
+        let (core, mut rx) = test_core();
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let stop = || AgentCommand::StopDaemon {
+            force: true,
+            kill_agents: true,
+            request_id: rid(),
+        };
+        let first = core
+            .dispatch(stop(), &ConnectionSession::new(1), &mock)
+            .await;
+        assert_eq!(first, DispatchFlow::Close);
+        tokio::time::timeout(Duration::from_secs(10), rx.changed())
+            .await
+            .expect("the first shutdown signals")
+            .expect("the sender is alive");
+        rx.borrow_and_update();
+
+        let second = core
+            .dispatch(stop(), &ConnectionSession::new(2), &mock)
+            .await;
+        assert_eq!(
+            second,
+            DispatchFlow::Close,
+            "the joiner's connection still ends"
+        );
+        assert_eq!(
+            mock.events()
+                .iter()
+                .filter(|e| matches!(e, AgentEvent::Ack { .. }))
+                .count(),
+            2,
+            "both get their Ack"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), rx.changed())
+                .await
+                .is_err(),
+            "a joiner must not run the shutdown again"
+        );
     }
 
     // ── kind_to_action 매핑(3 variant 전수) ──────────────────────────────────────
@@ -7428,7 +7683,7 @@ mod tests {
     //     동기 전송은 output_core.rs 단위테스트가 이미 커버.)
     #[tokio::test]
     async fn subscribe_control_order_ack_then_complete() {
-        use engram_dashboard_net::frame_port::Frame;
+        use crate::conn_port::Frame;
         use engram_dashboard_protocol::{encode_terminal_frame, SubscribeAction};
         use tokio::sync::mpsc;
         let (tx, mut rx) = mpsc::channel::<Frame>(16);

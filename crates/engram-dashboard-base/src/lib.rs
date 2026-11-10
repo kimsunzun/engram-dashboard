@@ -64,7 +64,7 @@
 //! a `{` sits between the prefix and the tenant name. rustfmt unfolds one-item groups, so only groups of two or more items slip through.
 //! ★It catches comments too★ — if a comment in this crate spells that path, that line is caught.
 //! ★Do not write that path as an example in this section★ — the moment you do, this header makes the gate bite itself. The command line above
-//! is not caught only thanks to the parentheses in the regex (the same defense as net gates 4 · 2b).
+//! is not caught only thanks to the parentheses in the regex (the same defense as CI `daemon gate 2`).
 //!
 //! ★This crate produces no generated artifacts★ — `serde_json` is here (the read decision of `file` looks at JSON documents —
 //! ADR-0291 decision 3), but there is no serde derive, no ts-rs, no `declare_commands!`, so there is no `bindings/` directory. Do not add it to the CI

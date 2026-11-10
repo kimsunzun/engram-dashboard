@@ -28,10 +28,16 @@
 //!   by a close" are answered there, in channel order after any earlier `Close`. A close bumps the close epoch at once;
 //!   a connect / ensure carries the epoch it began under, and an add older than the last close builds nothing (a close
 //!   during `connect`'s daemon search wins).
-//! - `connect` / `ensure` resolve on their handle's first answer — `Connected` (once it is shown: state watch and
+//! - `connect` / `ensure` resolve on their handle's first answer — `Connected` (once it is shown: status watch and
 //!   frontend event first — the frontend relies on that order), or its first failure; no live daemon (no or an unusable record)
 //!   answers `NoLiveDaemon`. A connect that a re-add overtakes gets the new handle's answer; a close before the answer
 //!   ends it with `ClosedBeforeHello`.
+//! - ★The boot hold★ (TRD S21 trd-3-2-u5 R20 · R24): the production client holds every band of a never-connected
+//!   handle from its construction until the main window's boot start answers — its failed `daemon_start`, or its
+//!   `daemon_connect` returning (`commands::discovery` gates both on the window) — or any handle connects, or a bound
+//!   passes: 60 s from construction until main's daemon search begins, then that search's timeout +
+//!   [`BOOT_START_MARGIN`] from its start instead. Its end is an actor step that shows what each current handle's last
+//!   answer calls for (`RouteState::end_boot_start_hold`).
 //! - ★Subscribe · Unsubscribe · RequestReplay go through this one actor, in order, onto one peer queue★ (TRD §6-2 U3 —
 //!   master re-check A1). A replay request checks the window routing when the actor takes it, so an `Unsubscribe`
 //!   queued before it is written first and the check sees the routing that `Unsubscribe` came from. The `Subscribe`
@@ -91,7 +97,7 @@ use futures_util::future::BoxFuture;
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot, watch};
 
-use super::events::{ConnectionStateEvent, DaemonEvents};
+use super::events::DaemonEvents;
 use super::frame_relay::{relay_binary_frame, FrameRelay, UnknownTagLog};
 use super::inbound::{registration_command, InboundSlot};
 use super::link::dialer::{no_live_daemon_cause, LocalDaemonDialer};
@@ -113,7 +119,7 @@ use super::replay_events::{
 };
 use super::replay_flight::{encode_marker_frame, ReplayFlightSet};
 use super::{
-    AgentNamesSink, ConnectionState, SharedUsageInterest, CHANNEL_GONE, DEFAULT_CONNECT_TIMEOUT,
+    AgentNamesSink, ConnectionStatus, SharedUsageInterest, CHANNEL_GONE, DEFAULT_CONNECT_TIMEOUT,
     NOT_CONNECTED, NO_REQUEST_ID, REPLAY_UNSENT,
 };
 use crate::output_channel::{send_to_windows, WindowChannelRegistry};
@@ -162,6 +168,13 @@ pub(super) const DAEMON: &str = "local";
 
 /// Room in the pumps → actor channel. A full channel is backpressure, not loss (`link::pump`).
 const ROUTABLE_QUEUE: usize = 256;
+
+/// The boot hold's bound from the client's construction — "the main window never booted" (TRD S21 trd-3-2-u5 R20).
+const BOOT_START_CAP: Duration = Duration::from_secs(60);
+/// Added to the main window's `daemon_start` search timeout for the boot hold's short bound — covers the `connect` that
+/// follows the search. The bound is armed once the search holds the ensure lock, so another window's search is not in
+/// it. Main's own value — the TRD sets none.
+const BOOT_START_MARGIN: Duration = Duration::from_secs(5);
 
 /// Fire-and-forget commands pending in the gate for a connection not opened yet. Past it the caller drops the command
 /// (logged).
@@ -243,15 +256,41 @@ pub(crate) struct LinkClient {
     /// Bumped by every `close` before it queues `Close` (module doc).
     closes: Arc<AtomicU64>,
     cmd_tx: mpsc::UnboundedSender<DriverCmd>,
-    state_rx: watch::Receiver<ConnectionState>,
+    status_rx: watch::Receiver<ConnectionStatus>,
     /// Shared with the actor (module doc).
     gate: Arc<Mutex<Gate>>,
     /// Changes whenever the actor changes the gate's opened connection — wakes round trips waiting for it.
     opened_rx: watch::Receiver<()>,
     /// The ⟳ pre-subscribe reads the interest here.
     usage: SharedUsageInterest,
-    /// Times the wait for an opened connection.
+    /// Times the wait for an opened connection; the stop path's flights run on it too.
     clock: Arc<dyn Clock>,
+}
+
+/// Re-adds the link from outside the client — the stop path (`shutdown::Stopper`) holds one. It does not keep the actor
+/// alive: after the client is gone it does nothing.
+pub(crate) struct LinkControl {
+    key: DaemonKey,
+    cmd_tx: mpsc::WeakUnboundedSender<DriverCmd>,
+    closes: Arc<AtomicU64>,
+}
+
+impl LinkControl {
+    /// [`LinkClient::ensure`] without waiting for its answer.
+    pub(crate) fn reattach(&self) {
+        let closes = self.closes.load(Ordering::SeqCst);
+        let Some(cmd_tx) = self.cmd_tx.upgrade() else {
+            return;
+        };
+        tracing::info!(peer = %self.key.peer_id(), "re-attaching to the daemon after a stop");
+        // Nobody waits for the first answer — the actor ignores a gone caller.
+        let (first, _answer) = oneshot::channel();
+        let _ = cmd_tx.send(DriverCmd::Add {
+            closes,
+            found: None,
+            first,
+        });
+    }
 }
 
 /// Nudges the actor's usage interest without keeping the actor alive — the usage shrink timer holds one
@@ -268,9 +307,7 @@ impl UsageNudger {
 
 enum DriverCmd {
     /// Is the key's current peer live?
-    IsLive {
-        reply: oneshot::Sender<bool>,
-    },
+    IsLive { reply: oneshot::Sender<bool> },
     /// Start a handle for the key — the first one or a re-add — unless the current peer is live (`first` gets `Ok`)
     /// or a close came after `closes` was read (`first` gets an error). Otherwise `first` gets the new handle's first
     /// answer.
@@ -280,12 +317,11 @@ enum DriverCmd {
         found: Option<Endpoint>,
         first: oneshot::Sender<Result<(), HandshakeError>>,
     },
+    /// The explicit close (`daemon_close`): no band for the rest of the handle.
     Close,
     /// Write `Unsubscribe` on the open connection. With none open there is nothing to undo — the daemon drops a
     /// connection's subscriptions with it.
-    Unsubscribe {
-        agent_id: AgentId,
-    },
+    Unsubscribe { agent_id: AgentId },
     /// Start the agent's replay or join the one in flight (single flight — ADR-0046 M1); `reply` gets the generation
     /// assigned (a joined request writes nothing and still gets one), or [`REPLAY_UNSENT`] / [`NOT_CONNECTED`] when no
     /// generation can be served: no open connection, no window shows the agent, or its `Subscribe` could not be written.
@@ -296,11 +332,21 @@ enum DriverCmd {
     /// The usage interest may have changed — the set is read when the actor takes this (TRD S21 usage-limit-slot §1-7
     /// "one serial path"), so it carries none.
     UsageNudge,
+    /// Start the boot hold (module doc) — bounded by [`BOOT_START_CAP`] from now.
+    HoldForBootStart,
+    /// The main window's daemon search began with timeout `search`: the hold now ends `search` + [`BOOT_START_MARGIN`]
+    /// from now — this bound replaces the 60 s cap. Nothing when no hold is on.
+    BoundBootStart { search: Duration },
+    /// The main window's boot start answered — the hold ends now. Nothing when no hold is on.
+    EndBootStartHold { why: &'static str },
     /// The key's current handle.
     #[cfg(test)]
     CurrentHandle {
         reply: oneshot::Sender<Option<HandleToken>>,
     },
+    /// Whether the boot hold is on.
+    #[cfg(test)]
+    BootStartHeld { reply: oneshot::Sender<bool> },
 }
 
 impl LinkClient {
@@ -340,7 +386,7 @@ impl LinkClient {
             link_policy(),
         );
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-        let (state_tx, state_rx) = watch::channel(ConnectionState::Down);
+        let (status_tx, status_rx) = watch::channel(ConnectionStatus::DOWN);
         let (routable_tx, routable_rx) = mpsc::channel(ROUTABLE_QUEUE);
         let closes = Arc::new(AtomicU64::new(0));
         let (opened_tx, opened_rx) = watch::channel(());
@@ -365,7 +411,7 @@ impl LinkClient {
             routable_tx: routable_tx.clone(),
             closes: closes.clone(),
             cmd_tx,
-            state_rx,
+            status_rx,
             gate: gate.clone(),
             opened_rx,
             usage: usage.clone(),
@@ -377,13 +423,14 @@ impl LinkClient {
             registry,
             dialer,
             route: RouteState::new(clock.clone()),
+            boot_deadline: None,
             clock,
             routable_tx,
             registrations: HashMap::new(),
             current: None,
             first: None,
             closes,
-            state_tx,
+            status_tx,
             events,
             names,
             router,
@@ -402,9 +449,48 @@ impl LinkClient {
         (client, driver, cmd_rx, routable_rx)
     }
 
-    /// The connection state routing last showed.
-    pub(crate) fn state_rx(&self) -> watch::Receiver<ConnectionState> {
-        self.state_rx.clone()
+    /// The connection status routing last showed.
+    pub(crate) fn status_rx(&self) -> watch::Receiver<ConnectionStatus> {
+        self.status_rx.clone()
+    }
+
+    /// Starts the boot hold (module doc) — call it at construction, before any window can attach.
+    pub(crate) fn hold_bands_for_boot_start(&self) {
+        let _ = self.cmd_tx.send(DriverCmd::HoldForBootStart);
+    }
+
+    /// The main window's daemon search began with timeout `search` (module doc).
+    pub(crate) fn bound_boot_start(&self, search: Duration) {
+        let _ = self.cmd_tx.send(DriverCmd::BoundBootStart { search });
+    }
+
+    /// The main window's boot start answered (module doc) — `why` is logged.
+    pub(crate) fn end_boot_start_hold(&self, why: &'static str) {
+        let _ = self.cmd_tx.send(DriverCmd::EndBootStartHold { why });
+    }
+
+    /// Whether the boot hold is on, as the actor sees it — every command sent before is applied by then.
+    #[cfg(test)]
+    pub(crate) async fn boot_start_held(&self) -> bool {
+        let (reply, answer) = oneshot::channel();
+        self.cmd_tx
+            .send(DriverCmd::BootStartHeld { reply })
+            .expect("the actor runs");
+        answer.await.expect("the actor answers")
+    }
+
+    /// The client's one clock — the stop path's flights run on it.
+    pub(crate) fn clock(&self) -> Arc<dyn Clock> {
+        self.clock.clone()
+    }
+
+    /// A re-add handle for the stop path.
+    pub(crate) fn control(&self) -> LinkControl {
+        LinkControl {
+            key: self.key.clone(),
+            cmd_tx: self.cmd_tx.downgrade(),
+            closes: self.closes.clone(),
+        }
     }
 
     /// Explicit connect (ADR-0021 — may start a daemon). A failed search still starts the handle — unless a close
@@ -710,13 +796,15 @@ struct Driver {
     /// The newest handle — the key's current one. `None` after a user close or a refusal stop, so a late event of
     /// that handle cannot act on the key again.
     current: Option<HandleToken>,
+    /// When the boot hold ends by itself — `None` while no hold is on.
+    boot_deadline: Option<std::time::Instant>,
     /// The current handle and the callers waiting for its first answer — callers of a handle it replaced included.
     first: Option<(
         HandleToken,
         Vec<oneshot::Sender<Result<(), HandshakeError>>>,
     )>,
     closes: Arc<AtomicU64>,
-    state_tx: watch::Sender<ConnectionState>,
+    status_tx: watch::Sender<ConnectionStatus>,
     events: Arc<dyn DaemonEvents>,
     names: Arc<dyn AgentNamesSink>,
     router: Arc<OutputRouter>,
@@ -752,11 +840,21 @@ impl Driver {
     ) {
         // Armed only while a replay waits for its deadline — an idle actor (no daemon, no replay) does not wake.
         let mut sweep: Option<BoxFuture<'static, ()>> = None;
+        // Armed for the boot hold's deadline, re-armed when it moves.
+        let mut boot_timer: Option<(std::time::Instant, BoxFuture<'static, ()>)> = None;
         loop {
             if !self.flight.awaits_deadline() {
                 sweep = None;
             } else if sweep.is_none() {
                 sweep = Some(self.clock.sleep(REPLAY_DEADLINE_TICK));
+            }
+            match self.boot_deadline {
+                None => boot_timer = None,
+                Some(at) if boot_timer.as_ref().is_some_and(|(armed, _)| *armed == at) => {}
+                Some(at) => {
+                    let left = at.saturating_duration_since(self.clock.now());
+                    boot_timer = Some((at, self.clock.sleep(left)));
+                }
             }
             tokio::select! {
                 cmd = cmd_rx.recv() => match cmd {
@@ -768,15 +866,22 @@ impl Driver {
                         found,
                         first,
                     }) => self.add(closes, found, first),
-                    Some(DriverCmd::Close) => self.close(),
+                    Some(DriverCmd::Close) => self.close_explicitly(),
                     Some(DriverCmd::Unsubscribe { agent_id }) => self.unsubscribe(agent_id),
                     Some(DriverCmd::RequestReplay { agent_id, reply }) => {
                         let _ = reply.send(self.request_replay(agent_id));
                     }
                     Some(DriverCmd::UsageNudge) => self.nudge_usage(),
+                    Some(DriverCmd::HoldForBootStart) => self.hold_for_boot_start(),
+                    Some(DriverCmd::BoundBootStart { search }) => self.bound_boot_start(search),
+                    Some(DriverCmd::EndBootStartHold { why }) => self.end_boot_start_hold(why),
                     #[cfg(test)]
                     Some(DriverCmd::CurrentHandle { reply }) => {
                         let _ = reply.send(self.current);
+                    }
+                    #[cfg(test)]
+                    Some(DriverCmd::BootStartHeld { reply }) => {
+                        let _ = reply.send(self.route.boot_start_held());
                     }
                     None => break,
                 },
@@ -790,6 +895,15 @@ impl Driver {
                 } => {
                     self.sweep_replay_deadlines();
                     sweep = None;
+                }
+                () = async {
+                    match boot_timer.as_mut() {
+                        Some((_, timer)) => timer.await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    boot_timer = None;
+                    self.end_boot_start_hold("its bound passed");
                 }
             }
         }
@@ -811,6 +925,37 @@ impl Driver {
                 .registry
                 .get(self.key.peer_id())
                 .is_some_and(|peer| peer.peer_state().is_live())
+    }
+
+    fn hold_for_boot_start(&mut self) {
+        tracing::info!(peer = %self.key.peer_id(), "holding connection bands until the boot start answers");
+        self.route.hold_for_boot_start();
+        self.boot_deadline = Some(self.clock.now() + BOOT_START_CAP);
+    }
+
+    // TRD R24: the search's own bound replaces the cap — a main start that begins late keeps its whole search.
+    fn bound_boot_start(&mut self, search: Duration) {
+        if !self.route.boot_start_held() {
+            return;
+        }
+        self.boot_deadline = Some(self.clock.now() + search + BOOT_START_MARGIN);
+    }
+
+    fn end_boot_start_hold(&mut self, why: &'static str) {
+        self.boot_deadline = None;
+        if !self.route.boot_start_held() {
+            return;
+        }
+        tracing::info!(peer = %self.key.peer_id(), why, "the boot hold of connection bands ended");
+        let out = self.route.end_boot_start_hold();
+        self.apply(out);
+    }
+
+    /// A queued explicit close. ★Routing hears it before the peer goes★ — what the removal routes later shows no band.
+    fn close_explicitly(&mut self) {
+        let out = self.route.close(&self.key);
+        self.close();
+        self.apply(out);
     }
 
     /// The link does not reconnect; a late item of the handle no longer counts as the current one's (no refusal
@@ -853,8 +998,9 @@ impl Driver {
         // Before the peer exists — a caller that sees it live must not read the previous handle's epoch.
         lock_gate(&self.gate).handle_closes = closes;
         let token = HandleToken::mint();
-        let (address, handshake) = self.dialer.register(&self.key, self.source.clone(), found);
-        let ended = self.route.adopt(self.key.clone(), token);
+        let (address, handshake, refusal) =
+            self.dialer.register(&self.key, self.source.clone(), found);
+        let ended = self.route.adopt(self.key.clone(), token, refusal);
         let (_peer, inbox) =
             self.registry
                 .add(self.key.peer_id().clone(), address.clone(), handshake);
@@ -878,8 +1024,13 @@ impl Driver {
             Routable::Item { key, token, item } => {
                 let connected = matches!(item, Incoming::Event(TransportEvent::Connected { .. }));
                 let out = self.route_item(&key, token, item);
+                let linked = out.iter().any(|r| matches!(r, Routed::LinkUp { .. }));
                 self.apply(out);
-                // After the state watch and the frontend's `connected` — the frontend registers its listeners before
+                // A link that connected ends a cold boot — the boot hold has nothing left to wait for (R-h).
+                if linked {
+                    self.end_boot_start_hold("a daemon link connected");
+                }
+                // After the status watch and the frontend's `connected` — the frontend registers its listeners before
                 //   it calls connect and relies on that order (`src/api/tauriTransport.ts` `doConnect`).
                 if connected {
                     self.answer_first_with(token, Ok(()));
@@ -960,14 +1111,20 @@ impl Driver {
                 Some(cause) => HandshakeError::NoLiveDaemon(cause),
                 None => HandshakeError::Connect(e.to_string()),
             }),
-            // The refusal's own text can be the daemon's — the fixed local text for its code instead (ADR-0342).
+            // The refusal's own text can be the daemon's — the fixed local text instead (ADR-0342), from the same
+            //   decision routing makes for the band (TRD S21 trd-3-2-u5 §4-3).
             TransportEvent::ConnectFailed {
                 cause: ConnectFailure::Rejected { code, .. },
                 ..
-            }
-            | TransportEvent::Rejected { code, .. } => Err(HandshakeError::AuthRejected(
-                refusal_message(*code).to_owned(),
+            } => Err(HandshakeError::AuthRejected(
+                refusal_message(*code, false).to_owned(),
             )),
+            TransportEvent::Rejected { code, .. } => {
+                let version = self.route.version_refusal(&self.key, token).is_some();
+                Err(HandshakeError::AuthRejected(
+                    refusal_message(*code, version).to_owned(),
+                ))
+            }
             TransportEvent::GaveUp { .. } | TransportEvent::Closed { .. } => {
                 Err(HandshakeError::ClosedBeforeHello)
             }
@@ -1480,15 +1637,14 @@ impl Driver {
     fn apply(&mut self, out: Vec<Routed>) {
         for routed in out {
             match routed {
-                Routed::State(state) => {
-                    self.state_tx.send_replace(state);
-                    self.events.connection_state(frontend_state(state));
+                Routed::Status(status) => {
+                    self.status_tx.send_replace(status);
+                    self.events.connection_status(&status);
                 }
                 Routed::Broadcast(event) => {
                     emit_broadcast(self.events.as_ref(), self.names.as_ref(), &event)
                 }
-                // The band / reconnect surface for notices is 3-2 U5 (ADR-0344/0345); routing already logged the
-                // refusal.
+                // Notices stay log-only — bands come from `Routed::Status`; routing already logged the refusal.
                 Routed::Notice(notice) => {
                     tracing::debug!(peer = %self.key.peer_id(), ?notice, "daemon link notice")
                 }
@@ -1657,14 +1813,6 @@ fn report_registration(
             "the shell's command registration failed — its commands stay off the daemon roster until the next \
              connection"
         ),
-    }
-}
-
-fn frontend_state(state: ConnectionState) -> ConnectionStateEvent {
-    match state {
-        ConnectionState::Connected => ConnectionStateEvent::Connected,
-        ConnectionState::Reconnecting => ConnectionStateEvent::Reconnecting,
-        ConnectionState::Down => ConnectionStateEvent::Down,
     }
 }
 

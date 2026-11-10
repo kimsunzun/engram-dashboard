@@ -19,6 +19,7 @@ use super::TrayIcons;
 use crate::commands::popout::is_popup_label;
 use crate::commands::spare::is_spare_window;
 use crate::commands::window_ctl::TauriOps;
+use crate::daemon_client::shutdown::{StopOrigin, StopOutcome, StopPlan};
 use crate::daemon_client::DaemonClient;
 use crate::layout::window_ctl::{self, Activation, WindowOps};
 use crate::layout::{LayoutState, MAIN_WINDOW_LABEL};
@@ -314,24 +315,50 @@ pub(crate) fn for_each_ui_window<'a>(
     }
 }
 
-// Quit the whole app. **Exit after a best-effort daemon graceful stop** (ADR-0026).
+// Quit the whole app — stop the daemon on the one stop path's `Exit` plan, then exit whatever the outcome (ADR-0026).
 //
-// ★Best-effort only (load-bearing)★: here the daemon is poked once gracefully, the result is ignored, and
-// exit happens at once. The precise C4 graceful order (ack wait · taskkill fallback · icon sync) is a later step —
-// waiting for the daemon to end here (blocking) would delay the exit, and the daemon is detached so it survives
-// independently even if we do not kill it (ADR-0024). send_stop may block for seconds → to try only briefly before exit, it is not fired
-// from a separate thread but called synchronously, and even on failure/no response it proceeds to exit.
+// `Exit` waits at most 4 s on this thread and never kills (TRD S21 trd-3-2-u5 §3-3): the daemon is detached and outlives
+// the app if the stop does not land (ADR-0024). The stop runs on the daemon client's runtime, which is the only runtime
+// the shell owns — with no client (setup failed to build it) there is no stop, only the exit (R10).
 pub fn quit_app(app: &AppHandle) {
-    // One-way daemon graceful fire (result ignored).
-    let data_dir = crate::discovery::default_data_dir();
-    match crate::daemon_client::stop::send_stop(&data_dir) {
-        Ok(outcome) => tracing::info!(
-            ?outcome,
-            "[tray] quit_app: 데몬 graceful stop 발사(best-effort)"
-        ),
-        Err(e) => tracing::warn!("[tray] quit_app: 데몬 stop 실패(무시하고 종료): {e}"),
-    }
+    let client = app.try_state::<Arc<DaemonClient>>();
+    stop_before_exit(
+        client
+            .as_ref()
+            .map(|client| client.inner() as &dyn TrayDaemonClient),
+    );
     app.exit(0);
+}
+
+/// What the tray's daemon on / off and quit ask of the daemon client — a seam so their order is tested without a
+/// runtime or a daemon (ADR-0012). The real one is the `Arc<DaemonClient>` impl; each call blocks or fires as the
+/// [`DaemonClient`] method it names.
+pub(crate) trait TrayDaemonClient {
+    /// [`DaemonClient::stop_daemon_blocking`].
+    fn stop(&self, plan: StopPlan, origin: StopOrigin) -> StopOutcome;
+    /// [`DaemonClient::ensure_in_background`].
+    fn attach_in_background(&self);
+}
+
+impl TrayDaemonClient for Arc<DaemonClient> {
+    fn stop(&self, plan: StopPlan, origin: StopOrigin) -> StopOutcome {
+        self.stop_daemon_blocking(plan, origin)
+    }
+
+    fn attach_in_background(&self) {
+        self.ensure_in_background();
+    }
+}
+
+// The stop half of [`quit_app`] — `None` = no client, nothing stopped (R10).
+fn stop_before_exit(client: Option<&dyn TrayDaemonClient>) -> Option<StopOutcome> {
+    let Some(client) = client else {
+        tracing::warn!("[tray] quit_app: no daemon client — exiting without stopping the daemon");
+        return None;
+    };
+    let outcome = client.stop(StopPlan::Exit, StopOrigin::AppExit);
+    tracing::info!(?outcome, "[tray] quit_app: daemon stop done — exiting");
+    Some(outcome)
 }
 
 // Probe daemon alive and feed it into the single publish entry point ([`publish_daemon_liveness`]).
@@ -464,6 +491,29 @@ mod tests {
     use std::cell::{Cell, RefCell};
 
     use super::*;
+
+    // R10: without a client quit skips the stop; with one it stops through the real client from a blocking thread (an
+    // unconnected client finds no daemon to stop). The plan it picks is `quit_stops_on_the_exit_plan`'s.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn quit_stops_through_the_client_and_skips_without_one() {
+        assert_eq!(stop_before_exit(None), None);
+        let client = Arc::new(DaemonClient::unconnected(tokio::runtime::Handle::current()));
+        let outcome = tokio::task::spawn_blocking(move || stop_before_exit(Some(&client)))
+            .await
+            .unwrap();
+        assert_eq!(outcome, Some(StopOutcome::NoTarget));
+    }
+
+    #[test]
+    fn quit_stops_on_the_exit_plan() {
+        let client = super::super::tests::FakeClient::new(StopOutcome::Timeout);
+        assert_eq!(
+            stop_before_exit(Some(&client)),
+            Some(StopOutcome::Timeout),
+            "the outcome does not change the exit"
+        );
+        assert_eq!(client.calls(), ["stop:Exit:AppExit"]);
+    }
 
     #[derive(Default)]
     struct Log(RefCell<Vec<String>>);

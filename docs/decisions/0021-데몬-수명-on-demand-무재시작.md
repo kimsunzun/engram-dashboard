@@ -1,7 +1,7 @@
 # ADR-0021: Daemon lifetime — on-demand spawn + no auto-restart (tmux/wezterm model)
 
-- 상태: 확정 (2026-06-17, basis: daemon-server prior-art survey [tmux/wezterm/emacs/gpg-agent/LSP] + user decision + extension of ADR-0015)
-- 관련: ADR-0015 (daemon persist-until-kill · console = detachable viewer · ensure-on-open) **extended/corrected** · ADR-0008 (S9 restore_all) · `crates/engram-dashboard-discovery/src/lib.rs` (ensure_daemon/Spawner — moved from src-tauri to the discovery crate in S12) · `src/api/wsTransport.ts` (connect/reconnect) · `crates/engram-dashboard-protocol` (StopDaemon)
+- 상태: 확정 (2026-06-17, basis: daemon-server prior-art survey [tmux/wezterm/emacs/gpg-agent/LSP] + user decision + extension of ADR-0015) · 부분 폐기 by ADR-0350 (결정 5 daemon_stop 명령과 영향의 stop 대체 순서)
+- 관련: ADR-0015 (daemon persist-until-kill · console = detachable viewer · ensure-on-open) **extended/corrected** · ADR-0008 (S9 restore_all) · `crates/engram-dashboard-discovery/src/lib.rs` (ensure_daemon/Spawner — moved from src-tauri to the discovery crate in S12) · `src/api/wsTransport.ts` (connect/reconnect) · `crates/engram-dashboard-protocol` (StopDaemon) · Amended by ADR-0350 (결정 5 daemon_stop 명령과 영향의 stop 대체 순서)
 - Scope: daemon (infrastructure) lifetime — auto-start / stop / crash handling. **A different axis from agent lifetime (ADR-0016/0019).**
 
 ## 맥락

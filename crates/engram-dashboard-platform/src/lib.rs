@@ -8,24 +8,27 @@
 //! 운영 OS 분기는 없다(ADR-0291 이 ADR-0275 결정 15 의 시한부 예외를 닫았다). `cfg` 없이 런타임에 OS 규칙을
 //! 쓰는 자리는 이 셈에 들지 않는다(④ 의 한계).
 //!
-//! 지금 입주자는 아홉이다 — [`process`](PID liveness · 프로세스 시작시각과 그 세 갈래 판정 · 프로세스 표 ·
-//! 자식 PID 열거 · 한 뿌리 아래 신원 목록 · 한 프로세스 트리 끄기 — Windows `taskkill`) · [`group`](프로세스
-//! 무리의 강한 주인 · 약한 손잡이 · 붙든 멤버 · 가입 알림 포트 — Windows Job Object) ·
-//! [`file_holders`](이 파일을 지금 연 프로세스 — Restart Manager) ·
-//! [`fs`](남의 쓰기를 막은 채 여는 열기 · 그 실패의 분류 — 공유 위반 · 접근 거부 · 남이 잠깐 쥐어 난 실패의
-//! 판정과 다시 하기 · 폴더 동기화 · 디렉터리 링크 만들기 · 걷기 — Windows 정션 · 경로 열쇠와 경로 비교 · 파일
-//! 신원) ·
-//! [`spawn`](창 없이 띄우기 · 트리 뿌리로 띄우기와 그 트리 kill 손잡이 — Windows = 멈춘 채 띄워 무리에 넣은 뒤
-//! 깨우기 · 실패한 셸의 「프로그램 없음」 판정 · 이 프로세스의 Job 밖에서 띄우기 — Windows = WMI) ·
-//! [`shell`](대화형 기본 셸 · CLI 를 콘솔 셸로 감싸기) ·
-//! [`env`](홈 디렉터리 · 실행 파일 이름 · 지금 실행 파일 옆 실행 파일 경로 · 환경변수 이름 비교) ·
-//! [`window`](창 정체 · 자리와 z 순서 한 번에 놓기 · 자리 되돌리기 · 커서 밑 맨 위 창 — 탭 놓기 끝 판정 · 창 진단
-//! 사실 · 전경 창이 이 프로세스의 것인가 · 그 창이 전경 창인가 · 제목 줄 크롬 모양 · 스냅 레이아웃 오버레이 — 기능
-//! `snap-overlay` 뒤) · [`input`](커서 자리 · 주 버튼 · Esc
-//! 상태). 모듈 헤더와 공개 함수 문서가 그
-//! 책임의 정본이다.
-//! 창을 받는 함수는 `raw-window-handle` 의 `HasWindowHandle` 를 받고 그 변이 맞추기도 여기서 한다(TRD
-//! S21-slot-docking 6.3판 §8 · B10 · 7판 §5-1).
+//! There are ten residents today — [`process`](PID liveness · process start time and its three-way verdict ·
+//! the process table · child PID enumeration · the identity list under one root · ending one process tree —
+//! Windows `taskkill` · whether one identity still runs and ending it only if it does — one handle) · [`group`](the strong owner of a process group · weak handles · held members · the
+//! join-notification port — Windows Job Object) · [`file_holders`](the processes that have this file open
+//! now — Restart Manager) · [`fs`](opening while denying others' writes · classifying that failure — sharing
+//! violation · access denied · the verdict and retry for a failure caused by someone holding it briefly ·
+//! folder sync · creating and walking directory links — Windows junction · path keys and path comparison ·
+//! file identity) · [`spawn`](spawning without a window · spawning as a tree root with a kill handle for that
+//! tree — Windows = spawn suspended, put in the group, then resume · the "program not found" verdict of a
+//! failed shell · spawning outside this process's Job — Windows = WMI) · [`shell`](the interactive default
+//! shell · wrapping a CLI in a console shell) · [`env`](home directory · executable file name · the path of
+//! an executable next to the current one · environment variable name comparison) · [`window`](window
+//! identity · placement and z-order in one call · restoring placement · the topmost window under the
+//! cursor — the tab-drop end verdict · window diagnostic facts · whether the foreground window belongs to
+//! this process · whether that window is the foreground window · title bar chrome shape · the snap layout
+//! overlay — behind feature `snap-overlay`) · [`input`](cursor position · primary button · Esc state) ·
+//! [`pty`](whether closing a pseudo-terminal waits for its output to be read). The module headers and
+//! public function docs are the source of truth for those responsibilities.
+//!
+//! Functions that take a window accept `raw-window-handle`'s `HasWindowHandle`, and the variant matching
+//! happens here too (TRD S21-slot-docking revision 6.3 §8 · B10 · revision 7 §5-1).
 //!
 //! ★`testing`(실프로세스 시험 도우미) · `group::GroupRef::gone`(주인이 처음부터 없는 손잡이) ·
 //! `spawn::wmi_create_raw`(WMI 띄우기의 원시 호출 — 진단 시험 몫)는 cargo 기능 `test-support` 뒤다★
@@ -188,15 +191,14 @@
 //! 센다.
 //! - **어디에 있나** — 명령 · 판정의 정본은 `.github/workflows/ci.yml` 의 `platform gate 7` 스텝이다. 이 헤더도
 //!   패턴을 적으므로, 패턴을 고치면 둘을 함께 고친다.
-//! - **대상 넷** — ① agent → 0줄: tokio 없는 동기 crate 이면서 이 crate · base · command 를 운영 의존으로 진다.
-//!   이 crate 에 든 런타임이 실제로 번질 자리가 여기라 이 crate 단독이 아니라 agent 를 잰다(agent 가 다른 경로로
-//!   들이는 런타임도 함께 잡힌다). ② net 기본 feature → 0줄: feature 0개 소비자에게 async 런타임이 딸려오는 것
-//!   — 실제로 한 번 터진 회귀이고 net 의 `default = []` 결정을 부른 원인이다(net `Cargo.toml` `[features]` 주석).
-//!   ③ cli → 0줄: 동기 CLI(`engram-dashboard-cli`)가 데몬 패키지를 떠난 이유가 tokio 를 끌고 오지 않는 것이다
-//!   (ADR-0273). 이 crate 를 직접 부르지 않는 소비자지만 같은 함수 · 같은 판정이라 이 게이트에 둔다 — ① 이 덮는
-//!   것에 더해 CLI 자신의 직접 서드파티(지금 serde_json)를 덮는다.
-//! - **짝** — net `--features server` → 1줄 이상(`server` 가 tokio · tokio-tungstenite · futures-util 을 켠다).
-//!   패턴이 깨지거나 `cargo tree` 출력 꼴이 바뀌면 0 기대 셋이 눈먼 채 통과한다.
+//! - **Two targets** — ① agent → 0 lines: a synchronous crate without tokio that carries this crate · base · command
+//!   as production dependencies. A runtime in this crate would actually spread there, so the gate measures agent rather
+//!   than this crate alone (a runtime agent pulls in by another path is caught too). ② cli → 0 lines: the synchronous
+//!   CLI (`engram-dashboard-cli`) left the daemon package so as not to pull tokio in (ADR-0273). It does not call this
+//!   crate directly, but it takes the same function and the same decision, so it sits in this gate — on top of what ①
+//!   covers it covers the CLI's own direct third-party dependencies (serde_json today).
+//! - **Pair** — transport → at least 1 line (its tokio dependency is unconditional). If the pattern breaks or the
+//!   `cargo tree` output form changes, the two 0 expectations pass blind.
 //! - ★**패턴의 `^…␣` 앵커(뒤 공백 포함)를 빼지 말 것**★ — `--prefix none` 이라 crate 이름이 줄 맨 앞에 와서
 //!   앵커가 정확하다. 떼면 agent 쪽이 `termios`(portable-pty 경유)를 물어 0 기대가 깨진다(실측).
 //! - ★**한계**★ — 정상 그래프만 본다(dev · build 의존의 런타임은 세지 않는다). 대상 밖의 동기 crate 가 새로
@@ -220,6 +222,7 @@ pub mod fs;
 pub mod group;
 pub mod input;
 pub mod process;
+pub mod pty;
 pub mod shell;
 pub mod spawn;
 #[cfg(all(test, windows))]

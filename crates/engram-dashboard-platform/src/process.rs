@@ -1,8 +1,9 @@
 //! PID liveness · process start time (creation time) query and its three outcomes (known, gone, unreadable) ·
 //! one process table (pid, ppid) · child PID enumeration · the list of identities of live processes under one root ([`subtree`]) ·
-//! killing one process tree ([`kill_tree`]).
+//! killing one process tree ([`kill_tree`]) · whether one identity is still running ([`presence`]) and ending it only if it is
+//! ([`terminate_if_same`]).
 //!
-//! The place that decides "is that PID still that process" exists in several crates — e.g. `net` (stale
+//! The place that decides "is that PID still that process" exists in several crates — e.g. `daemon` (stale
 //! decision for the portfile) · the shell (daemon discovery in the `discovery` module) · `daemon` (records its own start time in daemon.json) · `agent` (identity
 //! decision for the codex child). All of them look at this module instead of keeping a copy of the decision logic — the source of truth for the callers is
 //! `rg "engram_dashboard_platform::process" crates src-tauri`. ★Do not move it back into the agent runtime★ — consumers
@@ -152,34 +153,103 @@ pub fn pid_alive(pid: u32) -> bool {
     code == STILL_ACTIVE
 }
 
+/// Whether one process identity is still running — the three answers of [`presence`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Presence {
+    /// Running: the creation time matches (or none was given) and the exit code is still `STILL_ACTIVE`.
+    Alive,
+    /// Not that running process any more: the open failed with 87 (no process with that number), the creation time
+    /// differs from a nonzero `start_time` (the number was reused), or the process has exited although someone still
+    /// holds its object.
+    Gone,
+    /// Cannot tell — any other open failure (access denied · …) or a failed query. ★Never read it as gone★. PID 0 and an
+    /// OS without this means land here too.
+    Unknown,
+}
+
+/// Is `pid` still the running process born at `start_time` (the scale of [`process_creation_time`]) — decided on **one
+/// handle**: open, creation time, exit code. `start_time == 0` (unknown) skips the creation-time comparison, so only
+/// 87 or the exit code can say gone.
+///
+/// ★An exited process whose object someone still holds is gone here★ — [`process_start`] still reads its creation
+/// time (`Known`). Known residue: a process that exited with code 259 (`STILL_ACTIVE`) reads as running — the OS gives
+/// no other signal on this handle.
+// TRD S21 trd-3-2-u5 R4
+#[cfg(windows)]
+pub fn presence(pid: u32, start_time: u64) -> Presence {
+    use windows::Win32::Foundation::{CloseHandle, FILETIME, HANDLE};
+    use windows::Win32::System::Threading::{
+        GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    const STILL_ACTIVE: u32 = 259;
+
+    fn decide(handle: HANDLE, start_time: u64) -> Presence {
+        if start_time != 0 {
+            let mut created = FILETIME::default();
+            let mut exited = FILETIME::default();
+            let mut kernel = FILETIME::default();
+            let mut user = FILETIME::default();
+            // SAFETY: a valid handle opened by the caller + four outputs on the stack.
+            if unsafe { GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user) }
+                .is_err()
+            {
+                return Presence::Unknown;
+            }
+            let created =
+                (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime);
+            if created != start_time {
+                return Presence::Gone;
+            }
+        }
+        let mut code = 0u32;
+        // SAFETY: the same handle + an output on the stack.
+        if unsafe { GetExitCodeProcess(handle, &mut code) }.is_err() {
+            return Presence::Unknown;
+        }
+        if code == STILL_ACTIVE {
+            Presence::Alive
+        } else {
+            Presence::Gone
+        }
+    }
+
+    // The System Idle Process fails to open with 87 like an absent one (same guard as `process_start`).
+    if pid == 0 {
+        return Presence::Unknown;
+    }
+    // SAFETY: open the PID handle with minimum rights.
+    let handle = match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
+        Ok(h) => h,
+        Err(e) if alive_from_open_error(win32_from_hresult(e.code().0)) => {
+            return Presence::Unknown
+        }
+        Err(_) => return Presence::Gone,
+    };
+    let answer = decide(handle, start_time);
+    // SAFETY: close the valid handle once.
+    unsafe {
+        let _ = CloseHandle(handle);
+    }
+    answer
+}
+
 /// PID liveness decision (including the start-time comparison). true = alive (the very process we are looking for).
 ///
-/// Decision rules (M2 PID-reuse defense):
+/// Decision rules (M2 PID-reuse defense) — on [`presence`]:
 ///   - pid==0 → death (false). The system idle process cannot be our daemon.
-///   - expected_start==0 (unknown, old daemon.json compatibility) → the creation time cannot be compared, so
-///     **decide conservatively by PID liveness alone** (if alive, live). Do not recklessly label an old file stale.
-///   - expected_start!=0 → live only when the PID's current creation time matches expected_start exactly.
-///     A mismatch (reused PID) or a query failure (process absent) is dead.
+///   - [`Presence::Alive`] → live · [`Presence::Gone`] → dead — an exited process whose object is still held is dead.
+///   - [`Presence::Unknown`] → live only when expected_start==0 (unknown, old daemon.json compatibility): the creation
+///     time cannot be compared, so **decide conservatively** — do not recklessly label an old file stale. With a nonzero
+///     expected_start an unreadable process is dead.
 #[cfg(windows)]
 pub fn pid_alive_with_start_time(pid: u32, expected_start: u64) -> bool {
     if pid == 0 {
         return false;
     }
-    match process_creation_time(pid) {
-        Some(actual) => {
-            if expected_start == 0 {
-                true
-            } else {
-                actual == expected_start
-            }
-        }
-        None => {
-            if expected_start == 0 {
-                pid_alive(pid)
-            } else {
-                false
-            }
-        }
+    match presence(pid, expected_start) {
+        Presence::Alive => true,
+        Presence::Gone => false,
+        Presence::Unknown => expected_start == 0,
     }
 }
 
@@ -382,7 +452,73 @@ pub fn kill_tree(pid: u32) -> std::io::Result<()> {
     }
 }
 
+/// Ends that PID if it is still the very process born at `start_time` (the process creation FILETIME — the same scale as [`process_creation_time`])
+/// and is still running. The start-time check · liveness check · ending are done through the **same handle** — while the handle is
+/// held that PID does not pass to someone else, so there is no way to kill a wrong process after checking. It does not touch descendants.
+///
+/// `Ok(true)` = the ending was handed off (it does not wait) · `Ok(false)` = it is not that process (absent · start time differs · already
+/// ended) · `Err` = it could not open, read or end (including access denied · ending by itself between the check and the ending) — it was not killed.
+/// Outside Windows = `Err` of kind `Unsupported` — this means is absent ([`kill_tree`] has the same rule).
+// ADR-0343
+#[cfg(windows)]
+pub fn terminate_if_same(pid: u32, start_time: u64) -> std::io::Result<bool> {
+    use windows::core::HRESULT;
+    use windows::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, FILETIME, HANDLE};
+    use windows::Win32::System::Threading::{
+        GetExitCodeProcess, GetProcessTimes, OpenProcess, TerminateProcess,
+        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+    };
+    const STILL_ACTIVE: u32 = 259;
+
+    fn decide(handle: HANDLE, start_time: u64) -> windows::core::Result<bool> {
+        let mut created = FILETIME::default();
+        let mut exited = FILETIME::default();
+        let mut kernel = FILETIME::default();
+        let mut user = FILETIME::default();
+        // SAFETY: a valid handle opened by the caller + four outputs on the stack.
+        unsafe { GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user) }?;
+        let created = (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime);
+        if created != start_time {
+            return Ok(false);
+        }
+        let mut code = 0u32;
+        // SAFETY: the same handle + stack output.
+        unsafe { GetExitCodeProcess(handle, &mut code) }?;
+        if code != STILL_ACTIVE {
+            return Ok(false);
+        }
+        // SAFETY: the same handle — it was opened with the terminate right.
+        unsafe { TerminateProcess(handle, 1) }?;
+        Ok(true)
+    }
+
+    let access = PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE;
+    // SAFETY: opens only the query and terminate rights.
+    let handle = match unsafe { OpenProcess(access, false, pid) } {
+        Ok(h) => h,
+        Err(e) if e.code() == HRESULT::from_win32(ERROR_INVALID_PARAMETER.0) => return Ok(false),
+        Err(e) => return Err(std::io::Error::other(format!("PID {pid} 열기: {e}"))),
+    };
+    let outcome = decide(handle, start_time)
+        .map_err(|e| std::io::Error::other(format!("PID {pid} 확인 · 끝내기: {e}")));
+    // SAFETY: closes the handle opened above, once.
+    unsafe {
+        let _ = CloseHandle(handle);
+    }
+    outcome
+}
+
 // ── non-windows stub ─────────────────────────────────────────────────────────────
+
+#[cfg(not(windows))]
+pub fn presence(_pid: u32, _start_time: u64) -> Presence {
+    Presence::Unknown
+}
+
+#[cfg(not(windows))]
+pub fn terminate_if_same(_pid: u32, _start_time: u64) -> std::io::Result<bool> {
+    Err(std::io::ErrorKind::Unsupported.into())
+}
 
 #[cfg(not(windows))]
 pub fn process_start(_pid: u32) -> ProcessStart {
@@ -563,6 +699,73 @@ mod tests {
             ProcessStart::Known(other) if other != start => {}
             other => panic!("끝난 PID {pid} 가 {other:?} 로 읽혔다"),
         }
+    }
+
+    /// TRD S21 trd-3-2-u5 R4: a process that exited while we still hold its object is not alive — its creation time
+    /// still reads, so a creation-time check alone called it live.
+    #[cfg(windows)]
+    #[test]
+    fn an_exited_process_whose_object_is_held_is_gone() {
+        let mut child = crate::testing::spawn_gated_cmd("rem", 0);
+        let pid = child.id();
+        let start = process_creation_time(pid).expect("시작시각");
+        assert_eq!(presence(pid, start), Presence::Alive);
+        assert_eq!(presence(pid, 0), Presence::Alive);
+        assert!(pid_alive_with_start_time(pid, start));
+
+        crate::testing::open_gate(&mut child);
+        let _ = child.wait();
+        // `child` still holds the handle, so the process object (and its creation time) stays readable.
+        assert_eq!(process_start(pid), ProcessStart::Known(start));
+
+        assert_eq!(presence(pid, start), Presence::Gone);
+        assert_eq!(
+            presence(pid, 0),
+            Presence::Gone,
+            "the exit code decides without a start time"
+        );
+        assert!(!pid_alive_with_start_time(pid, start));
+        assert!(!pid_alive_with_start_time(pid, 0));
+        drop(child);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn presence_of_a_reused_number_is_gone_and_pid_zero_is_unknown() {
+        let me = std::process::id();
+        let start = current_process_start_time().unwrap();
+        assert_eq!(presence(me, start), Presence::Alive);
+        assert_eq!(
+            presence(me, start.wrapping_add(1)),
+            Presence::Gone,
+            "a nonzero start time that differs = another process on that number"
+        );
+        assert_eq!(
+            presence(0, start),
+            Presence::Unknown,
+            "PID 0 is never read as gone"
+        );
+    }
+
+    /// It does not kill with an identity whose start time differs and kills only with the same identity — after the ending even the same identity is 「그 프로세스가 아니다」 (not that process).
+    #[cfg(windows)]
+    #[test]
+    fn terminate_if_same_ends_only_the_matching_identity() {
+        let mut child = crate::testing::spawn_gated_cmd("rem", 0);
+        let pid = child.id();
+        let start = process_creation_time(pid).expect("시작시각");
+
+        let other = terminate_if_same(pid, start + 1);
+        let alive_after_other = pid_alive(pid);
+        let same = terminate_if_same(pid, start);
+        let _ = child.kill();
+        let _ = child.wait();
+        let after_exit = terminate_if_same(pid, start);
+
+        assert!(matches!(other, Ok(false)), "{other:?}");
+        assert!(alive_after_other, "시작시각이 다른 신원으로 껐다");
+        assert!(matches!(same, Ok(true)), "{same:?}");
+        assert!(matches!(after_exit, Ok(false)), "{after_exit:?}");
     }
 
     #[cfg(windows)]

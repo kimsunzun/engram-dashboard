@@ -1,4 +1,5 @@
-//! Unit tests of [`super`]. `info` · `FakeReader` · `FakeLiveness` are also used by the sibling [`crate::daemon_client::stop`] tests.
+//! Unit tests of [`super`]. `info` · `FakeLiveness` are also used by the stop path's tests ([`crate::daemon_client::link::stop`] ·
+//! [`crate::daemon_client::shutdown`]).
 
 use super::*;
 use std::cell::{Cell, RefCell};
@@ -257,12 +258,12 @@ impl PidLiveness for FakeLiveness {
     }
 }
 
-pub(crate) struct FakeReader {
+struct FakeReader {
     seq: RefCell<std::collections::VecDeque<Result<Option<DaemonInfo>, DiscoveryError>>>,
     calls: Cell<usize>,
 }
 impl FakeReader {
-    pub(crate) fn new(seq: Vec<Result<Option<DaemonInfo>, DiscoveryError>>) -> Self {
+    fn new(seq: Vec<Result<Option<DaemonInfo>, DiscoveryError>>) -> Self {
         Self {
             seq: RefCell::new(seq.into()),
             calls: Cell::new(0),

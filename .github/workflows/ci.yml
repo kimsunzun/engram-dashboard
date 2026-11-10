@@ -362,19 +362,6 @@ jobs:
         shell: bash
         run: cargo test --locked -p engram-dashboard-messaging
 
-      # net 게이트 5 — 두 feature 조합이 각각 컴파일·통과해야 한다.
-      # net 의 default feature 가 비어 있어 맨 명령은 `auth` 만 컴파일하고, `#[cfg(feature = "server")]`
-      # 아래 모듈은 컴파일 대상에서 아예 빠진다(가려진 코드는 오류를 내지 않는다).
-      # 반대로 워크스페이스 스코프 명령은 데몬이 server 를 켜므로 항상 ON 쪽만 본다.
-      # 각 줄이 상대가 못 보는 쪽을 맡으므로 한 줄로 줄이지 말 것.
-      - name: 'net gate 5a: cargo test -p engram-dashboard-net (features off)'
-        shell: bash
-        run: cargo test --locked -p engram-dashboard-net
-
-      - name: 'net gate 5b: cargo test -p engram-dashboard-net --all-features'
-        shell: bash
-        run: cargo test --locked -p engram-dashboard-net --all-features
-
       # ADR-0177: 재사용 전송 lib(`transport` — 신설). 워크스페이스 crate 의존 0 이 존재 이유라
       #   위 crate 들과 같은 단독 기립 축으로 확인한다 — 기대값의 정본은 그 crate lib.rs 헤더
       #   「격리 게이트」의 게이트 ④이고 아래 세 스텝(4a·4b·4d)은 부르기만 한다. 4c 는 같은 헤더의
@@ -563,7 +550,7 @@ jobs:
           esac
 
       # ADR-0134: 신규 crate 이름(`command`)이 알파벳에 없으면 메시징이 도구 crate 를 써도 안 잡힌다.
-      #   ADR-0175 의 `base` · ADR-0266 의 `platform` · ADR-0129 의 `net` · ADR-0177 의 `transport` 도 같은 이유로
+      #   ADR-0175 의 `base` · ADR-0266 의 `platform` · ADR-0177 의 `transport` 도 같은 이유로
       #   알파벳에 넣는다. ★새 워크스페이스 crate 가 생길 때마다 여기 이름을 더하고, 지운 crate 는 뺀다★(손으로
       #   박은 알파벳이 이 정규식의 가장 큰 구멍이고, 아래 상한 게이트가 그 구멍을 덮는다).
       #   단 lib 타깃이 없는 bin 전용 멤버(`engram-dashboard-cli`)는 더하지 않는다 — 부를 수 있는 crate 가 아니다(ADR-0285). 그런 멤버에 lib 를 세우는 날 여기 이름을 더한다.
@@ -571,7 +558,7 @@ jobs:
         shell: bash
         run: |
           set +e
-          hits=$(rg "engram_dashboard_(agent|base|daemon|protocol|command|platform|net|transport)" crates/engram-dashboard-messaging/src/)
+          hits=$(rg "engram_dashboard_(agent|base|daemon|protocol|command|platform|transport)" crates/engram-dashboard-messaging/src/)
           rc=$?
           set -e
           case "$rc" in
@@ -583,7 +570,7 @@ jobs:
       # 위 게이트는 소스의 심볼 경로만 본다 — 매니페스트 텍스트 정규식으로 이 구멍을 닫으려 했으나
       # (이전 버전: `rg 'package\s*=\s*"engram-dashboard-' Cargo.toml`) 교차 리뷰에서 같은 종류의
       # 구멍이 두 곳 더 확인됐다. **매니페스트도 결국 텍스트라 정규식이 못 보는 정상 TOML 문법이
-      # 항상 남는다** — 그래서 매니페스트 재작성 대신 net 게이트 3 과 같은 계기로 옮긴다:
+      # 항상 남는다** — 그래서 매니페스트 재작성 대신 다른 계기로 옮긴다:
       # 텍스트가 아니라 **해석된 의존 그래프**(`cargo tree`)를 읽으면 아래 문법 형태 자체가 무의미해진다.
       #   ① quoting — TOML literal string 은 작은따옴표도 유효하다: `package = 'engram-dashboard-command'`.
       #      정규식은 큰따옴표만 봤으므로 그대로 빠져나간다.
@@ -591,7 +578,7 @@ jobs:
       #      들어가고 rename 없이도 매니페스트 정규식(rename 이 없으면 `package =` 키 자체가 안 생긴다)과
       #      위 소스 정규식(스캔 범위가 `src/` 뿐이라 크레이트 루트의 `build.rs` 는 안 본다) 양쪽을 다
       #      빠져나간다.
-      # `-e normal,dev,build --target all --all-features` 를 줄이지 말 것 — net 게이트 3 과 동일 이유로
+      # `-e normal,dev,build --target all --all-features` 를 줄이지 말 것 — 줄이면 그만큼
       # (rename·비활성 target·optional 이 새어나간다) 형태가 샌다. 기존 소스 정규식 게이트는 그대로
       # 둔다 — 이건 additive.
       - name: 'Gate: messaging kernel isolation — direct workspace deps ceiling (exactly 1 = self)'
@@ -617,7 +604,7 @@ jobs:
       # (`crates/engram-dashboard-command/src/lib.rs` 헤더 불변식 1). 그 헤더가 적어 둔 게이트
       # (`rg "path\s*=" Cargo.toml`) 는 위 messaging 게이트가 방금 폐기한 매니페스트 정규식과 같은
       # 구멍(quoting·build-dependencies)을 처음부터 안고 있어, 텍스트 정규식으로 세웠다가 나중에 또
-      # 교체하지 않고 처음부터 해석된 그래프로 본다. net 게이트 3 과 같은 계기 — 자세한 이유는 그 게이트
+      # 교체하지 않고 처음부터 해석된 그래프로 본다. 위 messaging 상한 게이트와 같은 계기 — 자세한 이유는 그 게이트
       # 주석 참조.
       - name: 'Gate: command tool crate — direct workspace deps ceiling (exactly 1 = self)'
         shell: bash
@@ -1085,34 +1072,6 @@ jobs:
           } # end slot_label_gate
           slot_label_gate
 
-      # ADR-0310 결정 9 · TRD 3단계 3-1 U2 — 셸(`src-tauri`)은 데몬의 네트워크 행 crate(`engram-dashboard-net`)를 운영
-      #   의존하지 않는다. 셸이 그 crate 에서 쓰던 것은 첫 프레임(`AuthFrame`) 하나였고 그 모양이 protocol 로 와서 간선이
-      #   걷혔다 — 3단계 셸 작업(3-2)이 net 을 모른 채 시작하게 하는 벽이다. net crate 를 지우는 3-3 U6 에서 이 스텝도 걷는다.
-      #   셸(`engram-dashboard`)의 정상 · build 그래프에 `engram-dashboard-net` 이 0 줄이어야 PASS(짝: 데몬의 같은 그래프에
-      #   1 줄 이상). ★판정 함수(`shell_net_gate`)는 여기 하나에만 둔다★ — `/qa` 바인딩 4k 블록이 이것을 읽어 그대로 부른다.
-      # 꼴과 주의 넷(`-i` 금지 · `-e` 에 `dev` 금지 · 짝 · `^…␣` 앵커)은 `shell gate 1` 과 같다 — 근거의 정본은 그 스텝 주석이다.
-      #   ★dev 를 빼는 까닭도 같다★: 셸 → (dev) 데몬 → net 은 남는다(셸 통합 시험이 데몬을 쓴다).
-      # ★함수 본문에 `}` 한 글자뿐인 줄을 두지 말 것★ — 4k 블록은 함수 머리부터 첫 그런 줄까지를 함수로 읽는다.
-      - name: 'shell gate 3: no net crate in the shell release graph (shell = 0, daemon >= 1)'
-        shell: bash
-        run: |
-          shell_net_gate() {
-            local tree hits n rc
-            tree=$(cargo tree --locked -p engram-dashboard -e normal,build --target all --all-features --prefix none) || { echo "FAIL — cargo tree -p engram-dashboard errored"; return 1; }
-            rc=0; hits=$(printf '%s\n' "$tree" | rg '^engram-dashboard-net ') || rc=$?
-            [ "$rc" -le 1 ] || { echo "FAIL — rg errored (exit $rc)"; return 1; }
-            if [ -n "$hits" ]; then echo "FAIL — 셸 운영 그래프(normal · build)에 net 이 있다(ADR-0310 결정 9 — 셸은 첫 프레임을 protocol 에서 가져간다):"; printf '%s\n' "$hits"; return 1; fi
-            echo "shell normal/build graph: 0 net line(s)"
-            tree=$(cargo tree --locked -p engram-dashboard-daemon -e normal,build --target all --all-features --prefix none) || { echo "FAIL — cargo tree -p engram-dashboard-daemon errored"; return 1; }
-            rc=0; hits=$(printf '%s\n' "$tree" | rg '^engram-dashboard-net ') || rc=$?
-            [ "$rc" -le 1 ] || { echo "FAIL — rg errored (exit $rc)"; return 1; }
-            if [ -z "$hits" ]; then echo "FAIL — 짝: 데몬 운영 그래프에서도 net 0 줄 — crate 이름이 바뀌었나 · 패턴이 망가졌나(그러면 위 0 기대가 눈먼 채 통과한다)"; return 1; fi
-            n=$(printf '%s\n' "$hits" | wc -l | tr -d '[:space:]')
-            echo "daemon normal/build graph: $n net line(s)"
-            echo "PASS — 셸 운영 그래프에 net 없음(짝: 데몬 $n 줄)"
-          }
-          shell_net_gate
-
       # TRD S21 trd-3 §2-4 (edge vocabulary gate ①, shell half — 3-2 U2 · ADR-0310): the shell's daemon link
       #   (`src-tauri/src/daemon_client/link/`) names no `tauri` crate path and no agent crate. It adapts the transport and
       #   reaches the frontend only through the parent module's ports. PASS = 0 matches outside `//` comments.
@@ -1131,7 +1090,7 @@ jobs:
       #   before the path on the same line · a `/` right before the name (`x/tauri::`) · paths or `use` groups split
       #   across lines · a nested group earlier in a one-line `use {…}` group (`use {std::{fmt}, tauri};` — `[^}]*`
       #   stops at the inner `}`).
-      # The daemon half (`crates/engram-dashboard-daemon/src/link/`) lands with 3-3 U4.
+      # The daemon half = `daemon gate 1`.
       - name: 'shell gate 4: daemon link vocabulary — no tauri or agent crate paths in daemon_client/link'
         shell: bash
         run: |
@@ -1155,10 +1114,10 @@ jobs:
       #   someone turning it on in `[dependencies]`. Form = the base · platform test-support steps (resolved graph, `-e` with
       #   `build`, crate-qualified pair).
       # ★Shell only for now★ — `-i engram-dashboard-transport` exits 101 when transport is absent from the package's whole
-      #   resolve, dev included (measured: daemon · cli today); when it is reachable only through dev edges the normal-graph
-      #   query exits 0 with "nothing to print". The daemon does not depend on transport until 3-3 U4 (that unit adds the
-      #   daemon line). No cli line ever: the cli graph never holds transport (TRD §2-4).
-      # `--all-features` on the 0 check = the shell's own features are on too (as in `shell gate 1` · `shell gate 3`), so a
+      #   resolve, dev included (measured: cli today); when it is reachable only through dev edges the normal-graph
+      #   query exits 0 with "nothing to print". The daemon depends on transport since 3-3 U4; its line was left out under the
+      #   3-3 replace-only scope. No cli line ever: the cli graph never holds transport (TRD §2-4).
+      # `--all-features` on the 0 check = the shell's own features are on too (as in `shell gate 1`), so a
       #   shell feature that turned the harness on is caught.
       # ★Do not drop the pair (shell dev graph → at least 1)★ — if the feature is renamed, the 0 check loses its word and
       #   passes blind.
@@ -1195,6 +1154,47 @@ jobs:
           if [ -z "$hits" ]; then n=0; else n=$(printf '%s\n' "$hits" | wc -l | tr -d '[:space:]'); fi
           echo "shell dev graph: $n match(es)"
           if [ "$n" -lt 1 ]; then echo "FAIL — expected >= 1 — was the feature renamed? (then the 0 check above passes blind)"; printf '%s\n' "$tree"; exit 1; fi
+          echo "PASS"
+
+      # TRD S21 trd-3-2-u5 §3-5 (S11 — 3-2 U5a): the shell's stop client runs on the transport (`daemon_client::link::stop`),
+      #   so the shell names no `tungstenite` among its direct normal dependencies — the sync client it once used for the stop
+      #   must not come back beside the transport. PASS = 0 `tungstenite` lines at depth 1 of the shell's normal graph.
+      # ★Do not drop the pair (the same graph without the depth limit → at least 1)★ — the shell still links `tungstenite`
+      #   through the transport's `ws` feature; if the crate is renamed or the output form changes, the 0 check loses its
+      #   word and passes blind.
+      # `--all-features` on the 0 check = the shell's own features are on too (as in `shell gate 1`).
+      # ★Limit★ — direct edges only, by package name: a rename (`tws = { package = "tungstenite" }`) still prints the package
+      #   name and is caught; a dev edge is not counted (tests may use the sync client through `tokio-tungstenite`).
+      - name: 'shell gate 6: no direct tungstenite in the shell (shell depth 1 = 0, shell graph >= 1)'
+        shell: bash
+        run: |
+          set +e
+          tree=$(cargo tree --locked -p engram-dashboard -e normal --depth 1 --prefix none --target all --all-features)
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then echo "FAIL — cargo tree -p engram-dashboard --depth 1 exited $rc"; printf '%s\n' "$tree"; exit 1; fi
+          set +e
+          hits=$(printf '%s\n' "$tree" | rg '^tungstenite ')
+          rgrc=$?
+          set -e
+          case "$rgrc" in
+            1) echo "PASS — shell direct normal dependencies: 0 tungstenite lines" ;;
+            0) echo "FAIL — the shell depends on tungstenite directly (the stop client runs on the transport):"; printf '%s\n' "$hits"; exit 1 ;;
+            *) echo "FAIL — rg errored (exit $rgrc)"; exit 1 ;;
+          esac
+          set +e
+          tree=$(cargo tree --locked -p engram-dashboard -e normal --prefix none --target all --all-features)
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then echo "FAIL — cargo tree -p engram-dashboard exited $rc"; printf '%s\n' "$tree"; exit 1; fi
+          set +e
+          hits=$(printf '%s\n' "$tree" | rg '^tungstenite ')
+          rgrc=$?
+          set -e
+          if [ "$rgrc" -gt 1 ]; then echo "FAIL — rg errored (exit $rgrc)"; exit 1; fi
+          if [ -z "$hits" ]; then n=0; else n=$(printf '%s\n' "$hits" | wc -l | tr -d '[:space:]'); fi
+          echo "shell normal graph: $n tungstenite line(s)"
+          if [ "$n" -lt 1 ]; then echo "FAIL — pair: expected >= 1 through the transport — was the crate renamed or the output form changed? (then the 0 check above passes blind)"; exit 1; fi
           echo "PASS"
 
       # ADR-0273: CLI 패키지(`engram-dashboard-cli`)의 직접 워크스페이스 의존이 정확히 agent · cli(자기) · command
@@ -1277,9 +1277,9 @@ jobs:
           crates/engram-dashboard-agent/src/usage/process.rs
           crates/engram-dashboard-agent/src/usage/scratch.rs
           crates/engram-dashboard-base/src/logging/mod.rs
+          crates/engram-dashboard-daemon/src/instance.rs
           crates/engram-dashboard-daemon/src/messaging_host.rs
-          crates/engram-dashboard-net/src/instance.rs
-          crates/engram-dashboard-net/src/portfile.rs
+          crates/engram-dashboard-daemon/src/portfile.rs
           src-tauri/src/discovery/tests.rs
           # 통합 시험(`tests/`)
           crates/engram-dashboard-agent/tests/activation.rs
@@ -1378,7 +1378,7 @@ jobs:
           crates/engram-dashboard-agent/src/usage/process.rs
           crates/engram-dashboard-agent/src/usage/scratch.rs
           crates/engram-dashboard-base/src/logging/mod.rs
-          crates/engram-dashboard-net/src/instance.rs
+          crates/engram-dashboard-daemon/src/instance.rs
           # 통합 시험(`tests/`)
           crates/engram-dashboard-agent/tests/codex_launch_live.rs
           # 예제
@@ -1503,11 +1503,23 @@ jobs:
             *) echo "FAIL — rg errored (exit $rc)"; exit 1 ;;
           esac
 
-      - name: 'net gate 1: source refs — no daemon/messaging'
+      # TRD S21 trd-3 §2-4 (edge vocabulary gate ①, daemon half — 3-3 U6 · ADR-0129 · ADR-0310): the daemon's network row
+      #   (`crates/engram-dashboard-daemon/src/link/`) names neither the agent crate nor the messaging kernel — it reaches the
+      #   upper layers only through the `conn_port` contract. It takes over the deleted net gates 1 (no daemon · messaging
+      #   names) and 2b (no agent runtime) for the code that moved out of net. PASS = 0 matches.
+      # ★Comments are in scope (intended)★ — vocabulary leaks first through comments and test helpers. A comment that must
+      #   name the wall writes the name with a parenthesized letter (`engram_dashboard_(a)gent`).
+      # ★Do not drop the module-root check★ — a root at `link.rs` (instead of `link/mod.rs`) would sit outside the scanned
+      #   directory. A missing directory fails the same check.
+      # ★Known limit★ — the wall is on crate names: a path through another daemon module (`crate::agent_conn::…`) is not
+      #   caught, as in the shell half (`shell gate 4`).
+      - name: 'daemon gate 1: link vocabulary — no agent or messaging crate names in daemon link'
         shell: bash
         run: |
           set +e
-          hits=$(rg "engram_dashboard_(daemon|messaging)" crates/engram-dashboard-net/src/)
+          d=crates/engram-dashboard-daemon/src/link
+          if [ ! -f "$d/mod.rs" ]; then echo "FAIL — module root is not $d/mod.rs (moved or renamed? a root outside the directory escapes the scan)"; exit 1; fi
+          hits=$(rg -n "engram_dashboard_(agent|messaging)" "$d/")
           rc=$?
           set -e
           case "$rc" in
@@ -1516,50 +1528,20 @@ jobs:
             *) echo "FAIL — rg errored (exit $rc)"; exit 1 ;;
           esac
 
-      # net gate 2a — platform 심볼 allowlist(심볼 단위): ① 뽑은 심볼 목록 = 아래 다섯 이름(정확히) ② crate 이름을
-      #   심볼 꼴이 아닌 모양으로 부르는 줄 0. 2b 와 짝이다(하나만 남기지 말 것). 근거 · 한계의 정본 =
-      #   `crates/engram-dashboard-net/src/lib.rs` 헤더 게이트 2.
-      - name: 'net gate 2a: platform symbol allowlist — exactly these 5 names, no hidden import forms'
+      # TRD S21 trd-3 §2-4 (edge vocabulary gate ②, 3-3 U6 · ADR-0310 decision 9): the daemon network row's auth handshake
+      #   borrows neither the command enum nor the protocol version constant — the frame shape is protocol
+      #   `handshake::AuthFrame` and the expected version is injected (`link::server::Server::new`). It takes over the
+      #   deleted net gate 4. PASS = 0 matches.
+      # The parentheses in the pattern are not a typo — the bare names would make a comment that names this wall trip it.
+      #   ★No word boundary (intended)★ — partial names such as a test constant `TEST_(P)ROTOCOL_VERSION` are caught too;
+      #   rename them instead (`TEST_WIRE_VERSION`).
+      - name: 'daemon gate 2: link vocabulary — no auth vocabulary re-entry in daemon link'
         shell: bash
         run: |
           set +e
-          raw=$(rg -o --no-filename "engram_dashboard_platform::[A-Za-z0-9_:]+" crates/engram-dashboard-net/src/)
-          rc=$?
-          set -e
-          if [ "$rc" -gt 1 ]; then echo "FAIL — rg errored (exit $rc)"; exit 1; fi
-          out=$(printf '%s\n' "$raw" | sed '/^$/d' | LC_ALL=C sort -u)
-          expected=$(LC_ALL=C sort <<'NET_PLATFORM_SYMBOLS'
-          engram_dashboard_platform::fs::is_access_denied
-          engram_dashboard_platform::fs::is_sharing_violation
-          engram_dashboard_platform::fs::open_deny_write
-          engram_dashboard_platform::process::current_process_start_time
-          engram_dashboard_platform::process::pid_alive_with_start_time
-          NET_PLATFORM_SYMBOLS
-          )
-          echo "found symbol(s):"
-          printf '%s\n' "$out"
-          if [ "$out" != "$expected" ]; then
-            echo "FAIL — expected exactly these 5:"
-            printf '%s\n' "$expected"
-            exit 1
-          fi
-          set +e
-          hidden=$(rg -n '^(?:[^/]|/[^/])*?\bengram_dashboard_platform(?:[^:]|:[^:]|::[^A-Za-z0-9_]|:{0,2}$)' crates/engram-dashboard-net/src/)
-          rc=$?
-          set -e
-          case "$rc" in
-            1) echo "PASS — 5 names, 0 hidden import forms" ;;
-            0) echo "FAIL — platform 을 심볼 꼴이 아닌 모양(별칭 · 중괄호 · glob · 끊긴 경로)으로 부른다:"; printf '%s\n' "$hidden"; exit 1 ;;
-            *) echo "FAIL — rg errored (exit $rc)"; exit 1 ;;
-          esac
-
-      # net gate 2b — 에이전트 런타임 재유입 0줄(2a 의 짝). 패턴의 괄호 · 맨 crate 이름 · 값어치의 정본 =
-      #   `crates/engram-dashboard-net/src/lib.rs` 헤더 게이트 2b.
-      - name: 'net gate 2b: no agent runtime symbols — 0 matches'
-        shell: bash
-        run: |
-          set +e
-          hits=$(rg "engram_dashboard_(a)gent" crates/engram-dashboard-net/src/)
+          d=crates/engram-dashboard-daemon/src/link
+          if [ ! -f "$d/mod.rs" ]; then echo "FAIL — module root is not $d/mod.rs (moved or renamed? a root outside the directory escapes the scan)"; exit 1; fi
+          hits=$(rg -n "(A)gentCommand|(P)ROTOCOL_VERSION" "$d/")
           rc=$?
           set -e
           case "$rc" in
@@ -1568,62 +1550,21 @@ jobs:
             *) echo "FAIL — rg errored (exit $rc)"; exit 1 ;;
           esac
 
-      # 매니페스트 텍스트가 아니라 **해석된 의존 그래프**를 읽는다 — rename·테이블 형·비활성 target·
-      # optional 같은 정상 Cargo 문법이 텍스트 grep 을 빠져나가기 때문. 플래그를 줄이면 그만큼 형태가
-      # 새므로(-e build↔build-deps · --target all↔비활성 target · --all-features↔optional) 줄이지 말 것.
-      # --locked 는 커밋된 Cargo.lock 그대로 읽게 한다 — 없으면 새로 해석한 그래프를 단언해 소비자가
-      # 실제로 보는 것과 다른 답을 낼 수 있다.
-      - name: 'net gate 3: direct workspace deps — exactly 3'
-        shell: bash
-        run: |
-          set +e
-          tree=$(cargo tree --locked -p engram-dashboard-net --depth 1 --prefix none -e normal,dev,build --target all --all-features)
-          rc=$?
-          set -e
-          if [ "$rc" -ne 0 ]; then echo "FAIL — cargo tree exited $rc"; printf '%s\n' "$tree"; exit 1; fi
-          set +e
-          out=$(printf '%s\n' "$tree" | rg "^engram-dashboard" | sort -u)
-          rgrc=$?
-          set -e
-          if [ "$rgrc" -gt 1 ]; then echo "FAIL — rg errored (exit $rgrc)"; exit 1; fi
-          if [ -z "$out" ]; then n=0; else n=$(printf '%s\n' "$out" | wc -l | tr -d '[:space:]'); fi
-          echo "found $n direct workspace dep(s):"
-          printf '%s\n' "$out"
-          if [ "$n" -ne 3 ]; then echo "FAIL — expected exactly 3"; exit 1; fi
-          echo "PASS"
-
-      # 패턴의 괄호는 오타가 아니다 — 맨 이름으로 적으면 이 게이트를 설명하는 net crate 의 헤더 주석이
-      # 자기 자신에 걸려 영원히 통과하지 못한다. 단어 경계도 일부러 안 건다(부분 문자열까지 문다).
-      - name: 'net gate 4: no auth vocabulary re-entry'
-        shell: bash
-        run: |
-          set +e
-          hits=$(rg "(A)gentCommand|(P)ROTOCOL_VERSION" crates/engram-dashboard-net/src/)
-          rc=$?
-          set -e
-          case "$rc" in
-            1) echo "PASS — 0 matches" ;;
-            0) echo "FAIL — expected 0 matches, found:"; printf '%s\n' "$hits"; exit 1 ;;
-            *) echo "FAIL — rg errored (exit $rc)"; exit 1 ;;
-          esac
-
-      # platform 게이트 ⑦ — 동기 crate 에 async 런타임이 **조용히** 딸려오는 것을 잡는다(net 게이트 5 는 컴파일
-      #   여부만 보는데, 조용히 딸려온 의존은 컴파일을 깨지 않는다). 넷 다 정상 그래프(`-e normal`)를 읽는다:
-      #   1. agent → 0줄 — tokio 없는 동기 crate 이면서 base · command · platform 을 운영 의존으로 지므로 셋이 이 한
-      #      줄로 함께 덮인다.
-      #   2. cli → 0줄 — 동기 CLI 이고, 데몬 패키지를 떠난 이유가 tokio 를 끌고 오지 않는 것이다(ADR-0273). agent 줄이
-      #      덮는 것에 더해 CLI 자신의 직접 서드파티(지금 serde_json)를 덮는다.
-      #   3. net(기본 feature) → 0줄 — feature 0개 소비자에게 async 런타임이 딸려오는 것. 실제로 한 번 터진 회귀이고
-      #      net 의 `default = []` 결정을 부른 원인이다.
-      #   4. 짝: net `--features server` → 1줄 이상(ADR-0278 꼴) — `server` 가 tokio · tokio-tungstenite · futures-util
-      #      을 켠다.
-      #   대상 · 범위 · 한계의 정본 = `crates/engram-dashboard-platform/src/lib.rs` 헤더 게이트 ⑦.
-      # ★`^…␣` 앵커(뒤 공백 포함)를 빼지 말 것★: 맨 부분문자열로 적으면 ter(mio)s 가
-      #   걸려 기대값이 0 이 아니게 되고, 그러면 사람이 매번 판정해야 한다(= 게이트가 죽는다).
-      # ★짝을 지우지 말 것★ — 패턴이 깨지거나 `cargo tree` 출력 꼴이 바뀌면 0 기대 셋이 매치할 줄을 잃고 눈먼 채
-      #   통과한다. 짝이 그 눈먼 통과를 빨갛게 만든다. 대상 crate 를 개명하면 `cargo tree -p` 가 죽어 FAIL 이다.
+      # platform gate ⑦ — catches an async runtime riding **silently** into a synchronous crate (a compile check cannot: a
+      #   silently pulled dependency does not break compilation). Every line reads the normal graph (`-e normal`):
+      #   1. agent → 0 lines — a synchronous crate without tokio that carries base · command · platform as production
+      #      dependencies, so this one line covers all three.
+      #   2. cli → 0 lines — a synchronous CLI; leaving the daemon package was about not pulling tokio in (ADR-0273). On top
+      #      of what the agent line covers, it covers the CLI's own direct third-party dependencies (serde_json today).
+      #   3. Pair: transport → at least 1 line (ADR-0278 form) — its tokio dependency is unconditional.
+      #   Targets · scope · limits canonical = the `crates/engram-dashboard-platform/src/lib.rs` header gate ⑦.
+      # ★Do not drop the `^…␣` anchor (with its trailing space)★: as a bare substring the pattern catches ter(mio)s, the
+      #   expectation stops being 0, and a person has to judge every run (= the gate is dead).
+      # ★Do not delete the pair★ — if the pattern breaks or the `cargo tree` output form changes, the 0 expectations lose the
+      #   lines they would match and pass blind; the pair turns that blind pass red. Renaming a target crate makes
+      #   `cargo tree -p` die = FAIL.
       # ADR-0282
-      - name: 'platform gate 7: no async-runtime ingress (agent · cli · net default = 0, net server >= 1)'
+      - name: 'platform gate 7: no async-runtime ingress (agent · cli = 0, transport >= 1)'
         shell: bash
         run: |
           # $1 = 기대(zero = 0줄 · some = 1줄 이상) · 나머지 = `cargo tree` 의 대상 인자.
@@ -1644,8 +1585,7 @@ jobs:
           }
           async_ingress zero -p engram-dashboard-agent
           async_ingress zero -p engram-dashboard-cli
-          async_ingress zero -p engram-dashboard-net
-          async_ingress some -p engram-dashboard-net --features server
+          async_ingress some -p engram-dashboard-transport
 
       # ── 서드파티 고지 — release-build 가 부르는 것과 같은 생성기를 push 마다 돌리고 결과는 버린다 ──
       # 허용 밖 라이선스 · 본문 없는 패키지 · 목록에 없는 synthesized crate 같은 실패가 태그를 찍은 뒤 release-build 에서

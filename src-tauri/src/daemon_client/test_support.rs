@@ -11,9 +11,9 @@ use engram_dashboard_protocol::{
     UsageLimitSnapshot, UsageVendorState,
 };
 
-use super::events::{ConnectionStateEvent, DaemonEvents};
+use super::events::DaemonEvents;
 use super::usage_interest::InterestAction;
-use super::{DaemonClient, SharedUsageInterest};
+use super::{Band, ConnectionState, ConnectionStatus, DaemonClient, SharedUsageInterest};
 use crate::commands::layout::OwnedSubs;
 use crate::commands::popout::PopupCounter;
 use crate::layout::commands::{make_table, LayoutPorts, CATALOG_VERSION};
@@ -58,11 +58,53 @@ impl RecordingEvents {
     }
 }
 
+/// The tag of a connection status line. ★Only those lines carry it★ — an agent's status is an `agent_status:` line.
+const STATUS_TAG: &str = "status:";
+
+/// One emitted status as the record writes it: `status:<state word>:<band>` — the state's serialized word (what the
+/// frontend actually receives) and the band as `none` · `not_connected` · `refused` · `version` · `version_can_stop`.
+pub(crate) fn status_line(status: &ConnectionStatus) -> String {
+    let word = serde_json::to_value(status.state).expect("a state word");
+    let band = match status.band {
+        None => "none",
+        Some(Band::NotConnected { refused: false }) => "not_connected",
+        Some(Band::NotConnected { refused: true }) => "refused",
+        Some(Band::Version { can_stop: false }) => "version",
+        Some(Band::Version { can_stop: true }) => "version_can_stop",
+    };
+    format!("{STATUS_TAG}{}:{band}", word.as_str().expect("a string"))
+}
+
+/// The connection status lines among recorded lines, in order — one per emit.
+pub(crate) fn status_lines(lines: &[String]) -> Vec<String> {
+    lines
+        .iter()
+        .filter(|line| line.starts_with(STATUS_TAG))
+        .cloned()
+        .collect()
+}
+
+/// The state edges among recorded lines — `state:<word>` each time the word of a status line changes.
+pub(crate) fn state_edges(lines: &[String]) -> Vec<String> {
+    let mut edges: Vec<String> = Vec::new();
+    for line in lines {
+        let Some(rest) = line.strip_prefix(STATUS_TAG) else {
+            continue;
+        };
+        let word = rest.split(':').next().unwrap_or("");
+        let edge = format!("state:{word}");
+        if edges.last() != Some(&edge) {
+            edges.push(edge);
+        }
+    }
+    edges
+}
+
 impl DaemonEvents for RecordingEvents {
-    fn connection_state(&self, state: ConnectionStateEvent) {
-        // ★Written through `as_str()`★ — what we measure is **that string** the frontend actually receives, not the enum name.
-        self.record(format!("state:{}", state.as_str()));
-        if state == ConnectionStateEvent::Connected {
+    // Every emit is recorded raw — a duplicated emit shows as a repeated line.
+    fn connection_status(&self, status: &ConnectionStatus) {
+        self.record(status_line(status));
+        if status.state == ConnectionState::Connected {
             let hook = self
                 .on_connected
                 .lock()
@@ -79,7 +121,7 @@ impl DaemonEvents for RecordingEvents {
     }
 
     fn status_changed(&self, agent_id: &AgentId, status: &AgentStatus, epoch: u32) {
-        self.record(format!("status:{agent_id}:{status:?}:{epoch}"));
+        self.record(format!("agent_status:{agent_id}:{status:?}:{epoch}"));
     }
 
     fn restore_result(&self, _report: &RestoreReport) {
