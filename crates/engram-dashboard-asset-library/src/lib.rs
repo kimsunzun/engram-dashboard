@@ -37,4 +37,5 @@
 // ADR-0311
 
 pub mod backends;
+pub mod format;
 pub mod path;

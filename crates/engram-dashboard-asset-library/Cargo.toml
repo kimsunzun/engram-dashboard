@@ -20,4 +20,9 @@ engram-dashboard-command = { path = "../engram-dashboard-command" }
 engram-dashboard-base = { path = "../engram-dashboard-base" }
 # The library reference spelling `LibPath` wraps `RelativePathBuf` (ADR-0315).
 relative-path = "2.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# YAML read and the whole-file preset writer (`format` — ADR-0336 · ADR-0358). Pinned until the P3 goldens have run on a
+#   newer 2.x (TRD S25 step-7 B10).
+serde-saphyr = { version = "=2.0.0", default-features = false, features = ["deserialize", "serialize"] }
 thiserror = "1.0"

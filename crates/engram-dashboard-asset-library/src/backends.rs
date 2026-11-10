@@ -31,6 +31,135 @@ impl Backends for AgentBackends {
     }
 }
 
+/// A registry of backends that only know their word — for tests whose subject asks the registry nothing but whether a
+/// word is known (every other port method panics). A backend added here stands for a backend agent registers later.
+#[cfg(test)]
+pub(crate) mod fake {
+    use std::path::Path;
+
+    use engram_dashboard_agent::backend::settings_check::{
+        CommandLine, FolderEntry, FolderLoadSet, FrontMatterParser, ModeLoads, NativePlaces,
+        NativeSkillRoots, NoticeCodes, SchemaSource, SkillFormat, UnknownKeys, VersionProbe,
+    };
+    use engram_dashboard_agent::backend::SettingsCheck;
+    use engram_dashboard_agent::launch::Reason;
+    use engram_dashboard_agent::profile::AgentOutputFormat;
+    use serde_json::Value;
+
+    use super::Backends;
+
+    pub(crate) struct WordOnly(pub &'static str);
+
+    pub(crate) struct WordBackends(pub Vec<WordOnly>);
+
+    impl WordBackends {
+        pub(crate) fn new(words: &[&'static str]) -> Self {
+            Self(words.iter().map(|&word| WordOnly(word)).collect())
+        }
+    }
+
+    impl Backends for WordBackends {
+        fn for_word(&self, word: &str) -> Option<&dyn SettingsCheck> {
+            self.0
+                .iter()
+                .find(|check| check.0.eq_ignore_ascii_case(word))
+                .map(|check| check as &dyn SettingsCheck)
+        }
+
+        fn all(&self) -> Vec<&dyn SettingsCheck> {
+            self.0
+                .iter()
+                .map(|check| check as &dyn SettingsCheck)
+                .collect()
+        }
+    }
+
+    impl SettingsCheck for WordOnly {
+        fn backend(&self) -> &'static str {
+            self.0
+        }
+        fn schema_source(&self, _: &str) -> SchemaSource {
+            unimplemented!("word-only fake")
+        }
+        fn version_probe(&self) -> VersionProbe {
+            unimplemented!("word-only fake")
+        }
+        fn parse_version(&self, _: &str) -> Option<String> {
+            unimplemented!("word-only fake")
+        }
+        fn raw_to_json(&self, _: &Value) -> Result<Value, Reason> {
+            unimplemented!("word-only fake")
+        }
+        fn merge(&self, _: &[&Value]) -> Option<Value> {
+            unimplemented!("word-only fake")
+        }
+        fn merge_origins(&self, _: &[&Value]) -> Option<Vec<(String, usize)>> {
+            unimplemented!("word-only fake")
+        }
+        fn unknown_keys(&self) -> UnknownKeys {
+            unimplemented!("word-only fake")
+        }
+        fn loads(&self, _: AgentOutputFormat) -> ModeLoads {
+            unimplemented!("word-only fake")
+        }
+        fn accepts_skill_name(&self, _: &str, _: AgentOutputFormat) -> bool {
+            unimplemented!("word-only fake")
+        }
+        fn folder_entry_blocks(&self, _: &Path) -> bool {
+            unimplemented!("word-only fake")
+        }
+        fn working_folder_blocks(&self, _: &Path, _: AgentOutputFormat) -> Option<Reason> {
+            unimplemented!("word-only fake")
+        }
+        fn notice_codes(&self, _: AgentOutputFormat) -> NoticeCodes {
+            unimplemented!("word-only fake")
+        }
+        fn folder_listing_at_launch(&self, _: AgentOutputFormat) -> bool {
+            unimplemented!("word-only fake")
+        }
+        fn folder_load_set(
+            &self,
+            _: &[FolderEntry],
+            _: &dyn Fn(&Path) -> std::io::Result<String>,
+            _: &dyn FrontMatterParser,
+            _: AgentOutputFormat,
+        ) -> FolderLoadSet {
+            unimplemented!("word-only fake")
+        }
+        fn skill_format(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &dyn FrontMatterParser,
+            _: AgentOutputFormat,
+        ) -> SkillFormat {
+            unimplemented!("word-only fake")
+        }
+        fn command_line_args(&self, _: &Value) -> Result<Vec<String>, Reason> {
+            unimplemented!("word-only fake")
+        }
+        fn command_line_fits(&self, _: &CommandLine<'_>) -> Result<(), Reason> {
+            unimplemented!("word-only fake")
+        }
+        fn native_skill_roots(
+            &self,
+            _: &NativePlaces<'_>,
+            _: AgentOutputFormat,
+        ) -> NativeSkillRoots {
+            unimplemented!("word-only fake")
+        }
+        fn root_skills(
+            &self,
+            _: &[FolderEntry],
+            _: &dyn Fn(&Path) -> std::io::Result<String>,
+            _: &dyn FrontMatterParser,
+        ) -> FolderLoadSet {
+            unimplemented!("word-only fake")
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
