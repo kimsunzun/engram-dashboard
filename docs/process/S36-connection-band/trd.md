@@ -98,7 +98,7 @@ Main:
 - `kill_tree` kept (§3-7).
 - No clearing of `connectionError` on a stop result (PRD does not need it; it clears on `connected` and on the next start).
 
-User: see PRD §5.
+User: see PRD §5; plus (2026-11-10, PRD+TRD review hold H1) boot start stays in every window — ADR-0350 decisions 5 (R17) and 2's R15 do not land here; decided in the multi-daemon topic (T-85). User: 「나중에 다중에이전트 선택할때 결정하는게 좋을듯? 일단은 이대로 유지하자」.
 
 ## 7. Risks
 

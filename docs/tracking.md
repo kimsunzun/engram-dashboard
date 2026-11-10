@@ -10,6 +10,7 @@
 
 | ID | 제목(짧게) | 구역 | 상태 |
 |---|---|---|---|
+| T-85 | A new window starts a daemon the user stopped (boot start in every window) | 메인 | Deferred to the multi-daemon topic (user 2026-11-10) |
 | T-84 | Update system — replace a version-mismatched daemon | 메인 | Not started — deferred by the user (ADR-0356) |
 | T-81 | Split the tray out of the app (client) process | 메인 | Not started — idea/refactor; keep as is for now (user 2026-11-09) |
 | T-77 | LLM control — remaining gaps (moved from todo) | 메인 | Waiting for trigger — close each gap when its feature is touched |
@@ -69,6 +70,12 @@
 | T-16 | 프론트 종료 판정 · 세대 필터 | 사소한 기능·정리 | 잔존 · T-32 선결 |
 
 ## 메인
+
+### T-85. A new window starts a daemon the user stopped (boot start in every window)
+- **Status:** deferred to the multi-daemon topic — user 2026-11-10: 「나중에 다중에이전트 선택할때 결정하는게 좋을듯? 일단은 이대로 유지하자」.
+- **Fact (code trace by the S36 PRD+TRD review, not run):** every window runs the boot start (`bootstrapDaemonIfNeeded` → `daemon_start` → `ensure_daemon`, which spawns a daemon when none runs). After a tray 「데몬 끄기」 or LLM `daemon.stop`, opening a popout claims the spare, the rebuilt spare boots, and a daemon starts again; the main window's link reattaches. Pre-existing on master.
+- **Decided but not landed:** ADR-0350 decision 5 (boot start in the main window only, R17) and decision 2's attach-after-failed-start (R15) were to land in S21 U5b-2; S36 replaced U5b-2 without them. R17 needs the listener single-flight (parked `4d25dfa7`, `tauriTransport.ts`) with it. R15 looks unnecessary — the boot pulls already create the handle (S21 U5b-1).
+- **Next:** decide in the multi-daemon topic which window or component owns starting a daemon.
 
 ### T-84. Update system — replace a version-mismatched daemon
 - **Status:** not started — deferred by the user (2026-11-10: 「나중에 업데이트 시스템에서 자세히 다루면 될듯」).
