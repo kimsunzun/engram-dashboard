@@ -398,3 +398,4 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0351](0351-a-failed-write-of-the-merged-claude-settings-file-fails-the-spawn.md) | A failed write of the merged claude settings file fails the spawn | 확정 |
 | [0353](0353-codex-real-launch-materials-fail-closed-on-an-unreadable-instructions-file-a-priming-the-terminal-line-cannot-carry-or-a-working-folder-cmd-would-change.md) | Codex real launch materials fail closed on an unreadable instructions file, a priming the terminal line cannot carry, or a working folder cmd would change | 확정 |
 | [0354](0354-every-codex-app-server-thread-resume-carries-developerinstructions.md) | Every codex app-server thread resume carries developerInstructions | 확정 |
+| [0355](0355-same-name-codex-skills-across-skill-roots-launch-with-a-notice.md) | Same-name codex skills across skill roots launch with a notice | 확정 |
