@@ -10,6 +10,7 @@
 
 | ID | 제목(짧게) | 구역 | 상태 |
 |---|---|---|---|
+| T-84 | Update system — replace a version-mismatched daemon | 메인 | Not started — deferred by the user (ADR-0356) |
 | T-81 | Split the tray out of the app (client) process | 메인 | Not started — idea/refactor; keep as is for now (user 2026-11-09) |
 | T-77 | LLM control — remaining gaps (moved from todo) | 메인 | Waiting for trigger — close each gap when its feature is touched |
 | T-66 | 창 크롬 · 이름(크롬식 제목 표시줄 · 창 번호 재사용 · 창 제목) | 메인 | 진행 — `v0.5.0/feat/window-chrome`(S26) · U1–U9 구현 · U10 문서 착지(2026-10-26) · 사람 손 GUI 확인 2026-10-26(S13 · S14 통과) · 남은 것 = push · CI · master 머지 |
@@ -68,6 +69,11 @@
 | T-16 | 프론트 종료 판정 · 세대 필터 | 사소한 기능·정리 | 잔존 · T-32 선결 |
 
 ## 메인
+
+### T-84. Update system — replace a version-mismatched daemon
+- **Status:** not started — deferred by the user (2026-11-10: 「나중에 업데이트 시스템에서 자세히 다루면 될듯」).
+- **Fact:** on a version mismatch the app and the daemon do not talk; the band only informs and offers 「다시 연결」 (ADR-0356). The user stops the daemon themselves (tray 「데몬 끄기」 for an older daemon; a newer one from the newer app or the OS).
+- **Next:** design how the app moves to a matching daemon — stop the old one and start the new one, never downgrade a newer daemon from an older app.
 
 ### T-81. Split the tray out of the app (client) process
 - **Status:** not started — idea/refactor. Keep the current shape for now (user 2026-11-09: 「트레이는 지금 클라에 종속되어있는데 분리해야되긴함. 일단은 이대로」).
