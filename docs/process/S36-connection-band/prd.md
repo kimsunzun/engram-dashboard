@@ -17,7 +17,7 @@ Non-goals:
 - Replacing a mismatched daemon — update system, T-84.
 - Shell changes: the band rules, the stop path and their guards stay as merged.
 - Boot start in the main window only (TRD S21 R17) and the listener single-flight that goes with it.
-- Parked rare-ordering extras: closing an open confirm on a band change, focus management, the `connectionError` guard under ② (R21), attach after a failed start (R15), status re-pull for LLM replies, the special `connection.reconnect` error on ②.
+- Parked rare-ordering extras: closing an open confirm on a band change, focus management, attach after a failed start (R15), status re-pull for LLM replies, the special `connection.reconnect` error on ②.
 - Multi-daemon.
 
 ## 3. Requirements
@@ -28,7 +28,7 @@ Non-goals:
 - **R4 — 「다시 연결」** on both bands, main window only: runs the existing start (`DaemonControl.start()` — starts the local daemon if none runs, then attaches). While it runs the button reads 「연결 중…」 and is disabled; when it ends the button returns and the band follows the shell.
 - **R5 — ✕** hides the band; the same band kind with the same cause stays hidden until the next `connected`; a different band or cause shows.
 - **R6 — popouts** show the band text only — no button, no commands.
-- **R7 — `connectionError` lifetime:** set by a failed start (as today), cleared on `connected` (as today) and when a new start begins.
+- **R7 — `connectionError` lifetime:** set by a failed start (as today), cleared on `connected` (as today), when a new start begins, and when ② or ① `refused` arrives; not recorded while one of those holds (ADR-0350 decision 1). Otherwise the cause of a version-mismatch boot would show under the ① that follows the tray stop.
 - **R8 — LLM commands** on `window.__engramCmd`, main window only, no `help`:
   - `connection.status` → `{ state, band, text }` (`text` = the band sentence, `null` with no band).
   - `connection.reconnect` → the same call as R4; success → the `connection.status` reply; failure → an error carrying the start's cause.
@@ -56,4 +56,3 @@ Main defaults: rebuild from master instead of rebasing the parked branch (it pre
 
 - The parked code was written for the stop button and the stopping mode; copying it whole would bring both back. Take pieces, not the file.
 - AC2 needs a `v0.3.2` daemon build; if it cannot be built, AC2 is covered by unit tests only and reported as such.
-- `connectionError` without the R21 guard can, in a rare ordering, show an old start cause under a later ① — accepted (non-goal).

@@ -20,7 +20,8 @@ Implements PRD R1–R9. The shell side (band rules, `daemon_shutdown`, stop path
 
 - Add `readonly connectionBand: Band | null` to `Transport` (`transport.ts`), `WsTransport` (always `null` — the dev WS path has no shell), `ProtocolClient` (delegates to the transport) and `AgentClient`. `Band` = `src-tauri/bindings/Band.ts`. Parked hunks for this member only.
 - No new event: subscribers keep using `onConnectionStateChange` and read `connectionState`, `connectionBand`, `connectionError`.
-- Not taken from the parked API diff: `attach()` (R15), `refreshStatus` / `refreshConnectionStatus` (C10), `refusesCause` and the guarded `reportConnectionError` (R21), the `TauriTransport` listener single-flight (C14).
+- **Cause guard (R21, parked `ProtocolClient` hunk):** `refusesCause(band)` = band ② or ① `refused`. The transport listener clears `connError` when such a band arrives; `reportConnectionError` writes `null` while one holds. Without it the normal ② recovery shows a stale cause: a version-mismatch boot records 「protocol 버전 불일치 …」 from the failed `daemon_start`, ② hides it, and after the tray stop the plain ① shows it (review 2026-11-10, M1). The same holds for a token refusal followed by a stop.
+- Not taken from the parked API diff: `attach()` (R15), `refreshStatus` / `refreshConnectionStatus` (C10), the `TauriTransport` listener single-flight (C14).
 
 ### 3-2. Band model — `src/api/connectionBand.ts` (new, from parked)
 
@@ -52,13 +53,13 @@ export function bandText(view: BandView): string // head + (' ' + cause)?
 ### 3-5. `DaemonControl` (`src/api/daemonControl.ts`)
 
 - `start()`: first line `this.client.reportConnectionError(null)` (PRD R7 — a new attempt clears the old cause); the rest unchanged (single try/catch).
-- New `shutdownDaemon(client?)`: `invoke<DaemonShutdownReply>('daemon_shutdown')` → returns the reply. No `disconnect()`, no band write (ADR-0350 U6).
+- New `shutdownDaemon()`: `invoke<DaemonShutdownReply>('daemon_shutdown')` → returns the reply. No `disconnect()`, no band write (ADR-0350 U6).
 
 ### 3-6. LLM commands — `src/commands/connectionCommands.ts` (new, parked structure)
 
 - Registered only when `readWindowLabelFromHash() === MAIN_WINDOW_LABEL` (module-level gate); `import './connectionCommands'` in `contributions.ts`. No `help`.
 - `connection.status` → `{ state, band, text }` (`text` = `bandText(view)` or `null`).
-- `connection.reconnect` → `await start()`; success → the `connection.status` reply; failure → rethrow the start error (its message is the cause the band shows). Changed from PRD R8's "status after it ends" for failures: an error is the honest reply, and without the parked re-pull (C10) the band in a reply right after a failure can be one event behind. On success the state is `connected`, so the reply is exact.
+- `connection.reconnect` → `await start()`; success → the `connection.status` reply; failure → rethrow the start error (its message is the cause the band shows). Without the parked re-pull (C10) the band in a reply right after a failure can be one event behind, so a failure answers with the error rather than a status. On success the state is `connected`, so the reply is exact.
 - `daemon.stop` → `shutdownDaemon()` reply `{ outcome, reason }`.
 - Dependency injection as parked (`registerConnectionCommands({ client, start, shutdown })`) so tests use fakes.
 
@@ -73,7 +74,7 @@ Parked Rust hunks apply as-is: the command in `src-tauri/src/commands/discovery.
   - `ConnectionNotice.test.tsx` (rewrite): band-driven render per kind; button on both kinds only with `actions`; busy label and disabled during `start()`; button returns after a rejected `start()`; ✕ key (same key hidden, different key shown, cleared on `connected`); popout (no `actions`) shows text, no button.
   - `connectionCommands.test.ts` (new, trimmed from parked): status shape in each state; reconnect success → status, failure → rethrow; `daemon.stop` passes the reply through; not registered outside the main window.
   - `daemonControl.test.ts`: clear at the start of `start()`; `shutdownDaemon` invokes `daemon_shutdown`.
-  - `protocolClient.test.ts`: `connectionBand` delegates to the transport.
+  - `protocolClient.test.ts`: `connectionBand` delegates to the transport; a cause is cleared when ② or ① `refused` arrives and not recorded while one holds; a plain ① keeps it.
   - Fakes gain `connectionBand`: `protocolClient.test.ts`, `slotDaemonRestart.test.tsx`, `usageStore.test.ts`, `AppLayout.test.tsx`, `PopoutPage.test.tsx` (their alert cases move from `connectionError` to a band).
 - **Rust:** `cargo test -p engram-dashboard --test lib_unit` after the removal (the three `stop_*` tests go with the code).
 - **QA (`/engram-qa`):** full regression per the qa binding (frontend `npm test` + `npx tsc --noEmit`, backend lines, gates). GUI on a release build — PRD AC1–AC7 scenes: kill the daemon → ① → 「다시 연결」; `v0.3.2` daemon → ② → button keeps ② → tray stop → ① → reconnect (if the `v0.3.2` build is unavailable, say so — unit tests cover ②'s text and button); token rewrite in an isolated data dir → ① refused; start failure → ① with cause; ✕; popout text only; the three LLM commands through `__engramCmd`.
@@ -102,7 +103,7 @@ User: see PRD §5.
 ## 7. Risks
 
 - Copying parked files whole would bring back the stop button, the confirm and the guards — the coder brief lists the pieces to take.
-- `WsTransport` has no band → in the dev WS (browser) mode no band ever shows. Accepted: release and Tauri dev use `TauriTransport`.
+- `WsTransport` returns `null` for the band only to keep the interface complete — no production code builds it (`clientFactory` always builds `TauriTransport`, ADR-0029).
 - Boot: the shell's boot hold (R20) keeps a never-connected handle bandless until the main window's start answers; nothing here changes it.
 
 ## 8. Review record

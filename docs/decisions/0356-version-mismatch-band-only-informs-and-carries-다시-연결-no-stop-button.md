@@ -12,7 +12,7 @@ On a version mismatch the app and the daemon do not talk at all: the shell's att
 ## 결정
 
 1. **② only informs, for an older and a newer daemon alike.** Text: 「데몬에 연결하지 못했습니다.」 + 「실행 중인 데몬이 이 앱과 버전이 다릅니다. 데몬을 끈 뒤 다시 연결하세요」.
-2. **② carries one button, 「다시 연결」** — the same action as on ① (ADR-0350 decision 2: start the local daemon if none runs, then attach). If a mismatched daemon still runs, the attach is refused again and ② stays; nothing else happens.
+2. **② carries one button, 「다시 연결」** — the same action as on ① (ADR-0350 decision 2: start the local daemon if none runs, then attach). If a mismatched daemon still runs, the start fails again on the version check and ② stays; nothing else happens.
 3. **No stop on the band** — no 「데몬 끄기」 button, no confirm step, no 「끄는 중…」 state. The user stops the daemon themselves: the tray 「데몬 끄기」 still stops an older daemon (ADR-0344 decision 6); a newer daemon is stopped from the newer app or the OS.
 4. **Unchanged:** the shell's one stop path, the tray stop, app exit, and the LLM `daemon.stop` (ADR-0344 decisions 6–7, ADR-0350 decision 3). `connection.reconnect` acts on ② the same as the button.
 5. **Replacing a mismatched daemon (stop old, start new, never downgrade) belongs to a later update system** (T-84), not to the band.
