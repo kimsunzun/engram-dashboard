@@ -11,21 +11,17 @@ use std::collections::VecDeque;
 use std::sync::atomic::AtomicUsize;
 use std::sync::mpsc;
 
-use engram_dashboard_protocol::{Secret, PROTOCOL_VERSION};
+use engram_dashboard_protocol::{AgentEvent, AgentId, AgentStatus, Secret, PROTOCOL_VERSION};
 use engram_dashboard_transport::testing::{ClientMsg, ManualClock, MemoryEndpoint, MemoryNetwork};
-use engram_dashboard_transport::{
-    Address, ConnectFailure, Frame, Incoming, LinkError, TransportEvent,
-};
-use futures_util::FutureExt;
+use engram_dashboard_transport::{Address, Frame};
 use tokio::task::JoinHandle;
 
 use crate::daemon_client::link::endpoint::{Current, Endpoint, EndpointSource};
 use crate::daemon_client::link::stop::RecordRead;
-use crate::daemon_client::link::wire::ShellWire;
 use crate::daemon_client::link::DaemonKey;
 use crate::daemon_client::refusal::NoRefusalNotice;
 use crate::daemon_client::test_support::{status_lines, RecordingEvents};
-use crate::daemon_client::{Band, ConnectionState, ConnectionStatus, HandshakeError};
+use crate::daemon_client::{Band, ConnectionState, ConnectionStatus};
 use crate::discovery::tests::{info, FakeLiveness};
 
 const PID: u32 = 1001;
@@ -133,13 +129,10 @@ impl TargetProcess for Target {
     }
 }
 
-/// The shell link's endpoint source — counts the dials' record reads (a re-add shows here) and the daemon searches.
+/// The shell link's endpoint source — counts the dials' record reads (a re-add shows here).
 struct LinkSource {
     found: Mutex<Option<Endpoint>>,
     reads: AtomicUsize,
-    searches: AtomicUsize,
-    /// The next search waits for this release.
-    search_hold: Mutex<Option<mpsc::Receiver<()>>>,
     /// Set: what a dial's record read answers instead of `found`.
     current: Mutex<Option<Current>>,
 }
@@ -148,23 +141,10 @@ impl LinkSource {
     fn reads(&self) -> usize {
         self.reads.load(Ordering::SeqCst)
     }
-
-    /// Holds the next daemon search (`connect`'s): returns the release.
-    fn hold_search(&self) -> mpsc::Sender<()> {
-        let (release_tx, release_rx) = mpsc::channel();
-        *self.search_hold.lock().unwrap() = Some(release_rx);
-        release_tx
-    }
 }
 
 impl EndpointSource for LinkSource {
     fn ensure(&self, _timeout: Duration) -> Result<Endpoint, String> {
-        self.searches.fetch_add(1, Ordering::SeqCst);
-        let held = self.search_hold.lock().unwrap().take();
-        if let Some(release) = held {
-            // Bounded, so a failing test does not leave a blocked pool thread behind.
-            let _ = release.recv_timeout(Duration::from_secs(10));
-        }
         self.found
             .lock()
             .unwrap()
@@ -220,8 +200,6 @@ impl Stage {
         let source = Arc::new(LinkSource {
             found: Mutex::new(None),
             reads: AtomicUsize::new(0),
-            searches: AtomicUsize::new(0),
-            search_hold: Mutex::new(None),
             current: Mutex::new(None),
         });
         let events = Arc::new(RecordingEvents::default());
@@ -271,21 +249,6 @@ impl Stage {
                 .stop_daemon_with_reason(plan, StopOrigin::Command)
                 .await
         })
-    }
-
-    /// Starts a `User` flight at `at`, the way `stop_daemon` starts one — the returned channel gets its outcome watch.
-    fn start_a_flight_at(
-        &self,
-        at: RacePoint,
-    ) -> mpsc::Receiver<watch::Receiver<Option<StopResult>>> {
-        let (flight_tx, flight) = mpsc::channel();
-        let stopper = self.client.stopper.clone();
-        self.client.stopper.mode().race.arm(at, move || {
-            let started = stopper.clock().now();
-            let (outcome, _) = stopper.join_or_start(StopPlan::User, StopOrigin::Tray, started);
-            let _ = flight_tx.send(outcome);
-        });
-        flight
     }
 
     fn elapsed(&self) -> Duration {
@@ -345,14 +308,37 @@ async fn joined<T>(what: &str, task: JoinHandle<T>) -> T {
     task.await.expect("the task ran to its end")
 }
 
-/// The outcome of the flight [`Stage::start_a_flight_at`] started.
-async fn flight_outcome(
-    flight: &mpsc::Receiver<watch::Receiver<Option<StopResult>>>,
-) -> StopOutcome {
-    let outcome = flight.try_recv().expect("the race step started a flight");
-    wait_for("the flight ends", || outcome.borrow().is_some()).await;
-    let done = outcome.borrow().expect("published");
-    done.outcome
+/// `connect`s the shell's link to a daemon on the link network that answers `Hello` — returns the daemon's side.
+async fn connected_link(s: &Stage) -> Arc<MemoryEndpoint> {
+    *s.source.found.lock().unwrap() = Some(Endpoint {
+        key: DaemonKey::new("local"),
+        address: Address::new("ws://127.0.0.1:5123"),
+        credential: Secret::new("t".repeat(64)),
+    });
+    let connect = {
+        let client = s.client.clone();
+        tokio::spawn(async move { client.connect().await })
+    };
+    let hello = Frame::Text(
+        serde_json::to_string(&AgentEvent::Hello {
+            protocol_version: PROTOCOL_VERSION,
+            daemon_version: "0.0.0".into(),
+            capabilities: None,
+        })
+        .unwrap(),
+    );
+    let link = {
+        let mut link = None;
+        wait_for("the link is dialed", || {
+            link = link.take().or_else(|| s.link_net.accept());
+            link.is_some()
+        })
+        .await;
+        link.unwrap()
+    };
+    link.push(hello);
+    assert_eq!(joined("connect", connect).await, Ok(()));
+    link
 }
 
 /// A few real milliseconds for the runtime — for "this did not happen" checks.
@@ -579,14 +565,9 @@ async fn an_expired_flight_drops_its_late_read_dials_and_kills_nothing_and_fires
     let s = Stage::new(record);
     let task = s.stop(StopPlan::User);
     wait_for("the read started", || entered.try_recv().is_ok()).await;
-    assert!(s.client.stopper.mode().active());
 
     s.clock.advance(Duration::from_secs(13));
     assert_eq!(joined("stop", task).await, StopOutcome::Timeout);
-    assert!(
-        !s.client.stopper.mode().active(),
-        "expiry releases the mode"
-    );
     wait_for("the re-add dials", || s.source.reads() > 0).await;
 
     release.send(()).unwrap();
@@ -661,7 +642,7 @@ async fn exit_ends_as_soon_as_the_daemon_is_gone() {
     assert_eq!(s.elapsed(), Duration::ZERO);
 }
 
-// ── single flight · stopping mode ───────────────────────────────────────────────────────
+// ── single flight ───────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn joiners_share_one_flight_and_its_outcome() {
@@ -689,7 +670,6 @@ async fn an_exit_joiner_waits_only_its_own_bound() {
     s.clock.advance(Duration::from_secs(4));
     assert_eq!(joined("exit joiner", exit).await, StopOutcome::Timeout);
     assert!(!user.is_finished(), "the user's flight goes on");
-    assert!(s.client.stopper.mode().active());
     s.advance_until("the user's stop ends", Duration::from_millis(500), || {
         user.is_finished()
     })
@@ -697,137 +677,51 @@ async fn an_exit_joiner_waits_only_its_own_bound() {
     assert_eq!(joined("user", user).await, StopOutcome::Killed);
 }
 
-#[tokio::test]
-async fn during_a_stop_ensure_answers_not_connected_and_adds_nothing() {
-    let record = Record::new([our_daemon()]);
-    let (entered, release) = record.hold_next();
-    let s = Stage::new(record);
-    let task = s.stop(StopPlan::User);
-    wait_for("the read started", || entered.try_recv().is_ok()).await;
-
-    assert_eq!(s.client.ensure().await, Err(HandshakeError::Stopping));
-    let_it_run().await;
-    assert_eq!(s.source.reads(), 0, "nothing was added");
-    assert_eq!(s.link_net.dials(), 0);
-
-    s.daemons.fail_next(1);
-    release.send(()).unwrap();
-    assert_eq!(joined("stop", task).await, StopOutcome::Killed);
-    wait_for("the re-add after a stop dials", || s.source.reads() > 0).await;
-}
-
-// ★The two orderings below are what keeps a link from being added during a stop★ — each test lands the racing side
-//   between the two steps (`RacePoint`), so swapping those steps fails it.
+// ── the shell's link through a stop (user decision 2026-11-10) ──────────────────────────────────────
 
 #[tokio::test]
-async fn an_ensure_that_read_the_epoch_before_the_stop_began_answers_stopping_and_adds_nothing() {
-    let record = Record::new([RecordRead::Absent]);
-    let (entered, release) = record.hold_next();
-    let s = Stage::new(record);
-    // The stop's whole start (mode on, link closed) lands after this ensure read the close epoch, before its mode check.
-    let flight = s.start_a_flight_at(RacePoint::EnsureEpochRead);
-    let answer = tokio::time::timeout(Duration::from_secs(10), s.client.ensure())
-        .await
-        .expect("ensure answers");
-    assert_eq!(answer, Err(HandshakeError::Stopping));
-    wait_for("the stop's read started", || entered.try_recv().is_ok()).await;
-    let_it_run().await;
-    assert_eq!(s.source.reads(), 0, "nothing was added");
-    assert_eq!(s.link_net.dials(), 0);
-
-    release.send(()).unwrap();
-    assert_eq!(flight_outcome(&flight).await, StopOutcome::NoTarget);
-}
-
-#[tokio::test]
-async fn an_ensure_between_the_stops_mode_and_its_close_answers_stopping_and_adds_nothing() {
-    let record = Record::new([RecordRead::Absent]);
-    let (entered, release) = record.hold_next();
-    let s = Stage::new(record);
-    // One poll of `ensure` there: its epoch read and mode check run before its first await.
-    let (seen_tx, seen) = mpsc::channel();
-    let client = s.client.clone();
-    s.client
-        .stopper
-        .mode()
-        .race
-        .arm(RacePoint::StopModeEntered, move || {
-            let _ = seen_tx.send(client.ensure().now_or_never());
-        });
-    let task = s.stop(StopPlan::User);
-    wait_for("the stop's read started", || entered.try_recv().is_ok()).await;
-    assert_eq!(
-        seen.try_recv().expect("the step ran"),
-        Some(Err(HandshakeError::Stopping))
-    );
-    let_it_run().await;
-    assert_eq!(s.source.reads(), 0, "nothing was added");
-    assert_eq!(s.link_net.dials(), 0);
-
-    release.send(()).unwrap();
-    assert_eq!(joined("stop", task).await, StopOutcome::NoTarget);
-}
-
-#[tokio::test]
-async fn a_connect_that_read_the_epoch_before_the_stops_close_waits_it_out_and_connects_on_a_fresh_epoch(
+async fn during_a_user_stop_the_link_stays_open_and_the_daemons_shutdown_broadcasts_reach_the_frontend(
 ) {
-    let record = Record::new([RecordRead::Absent]);
-    let (entered, release) = record.hold_next();
-    let s = Stage::new(record);
-    *s.source.found.lock().unwrap() = Some(Endpoint {
-        key: DaemonKey::new("local"),
-        address: Address::new("ws://127.0.0.1:5123"),
-        credential: Secret::new("t".repeat(64)),
-    });
-    // The stop starts after this connect read the close epoch, before its mode check — so the stop's close bumps the
-    // epoch this connect already holds (R16).
-    let flight = s.start_a_flight_at(RacePoint::ConnectEpochRead);
-    let release_search = s.source.hold_search();
-    let connect = {
-        let client = s.client.clone();
-        tokio::spawn(async move { client.connect().await })
-    };
-    wait_for("the stop's read started", || entered.try_recv().is_ok()).await;
-    let_it_run().await;
-    assert!(!connect.is_finished(), "connect waits for the stop");
-    assert_eq!(s.source.searches.load(Ordering::SeqCst), 0);
+    let s = Stage::new(Record::new([our_daemon()]));
+    let main = connected_link(&s).await;
+    let task = s.stop(StopPlan::User);
+    let daemon = s.daemon().await;
+    s.hello_then_stop_daemon(&daemon).await;
+    // The daemon's `shutdown_all` after `StopDaemon`: its agent exits, then the emptied list — on the main link.
+    let agent = AgentId::new_v4();
+    for ev in [
+        AgentEvent::StatusChanged {
+            agent_id: agent,
+            status: AgentStatus::Exited { code: Some(0) },
+            epoch: 1,
+        },
+        AgentEvent::AgentListUpdated { agents: Vec::new() },
+    ] {
+        main.push(Frame::Text(serde_json::to_string(&ev).unwrap()));
+    }
+    let broadcasts = [
+        format!("agent_status:{agent}:Exited {{ code: Some(0) }}:1"),
+        "agent_list:0".to_owned(),
+    ];
+    wait_for("the shutdown broadcasts reach the frontend", || {
+        let seen = s.events.seen();
+        broadcasts.iter().all(|line| seen.contains(line))
+    })
+    .await;
+    assert_eq!(s.client.state(), ConnectionState::Connected);
 
-    release.send(()).unwrap();
-    assert_eq!(flight_outcome(&flight).await, StopOutcome::NoTarget);
-    // The stop's re-add dials before connect may add: a handle replaced before its dial closes without one, and the
-    // count below would never reach two.
-    wait_for("the stop's re-add dialed", || s.link_net.dials() >= 1).await;
-    release_search.send(()).unwrap();
-    // No `Hello` yet, so the stop's re-add is not live and connect adds its own handle (a second dial) — or, on the
-    // epoch it read before the stop, the add is refused and connect fails.
-    wait_for("connect added or failed", || {
-        connect.is_finished() || s.link_net.dials() >= 2
-    })
+    // The daemon exits: both of its links end, and the main link's redials find nothing.
+    s.link_net.fail_forever();
+    s.target.set(Presence::Gone);
+    daemon.close();
+    main.close();
+    assert_eq!(joined("stop", task).await, StopOutcome::Closed);
+    s.advance_until(
+        "band ① after the daemon exited",
+        Duration::from_millis(100),
+        || s.client.status().band == BAND_ONE,
+    )
     .await;
-    // Answer every link with `Hello`.
-    let hello = Frame::Text(
-        serde_json::to_string(&engram_dashboard_protocol::AgentEvent::Hello {
-            protocol_version: PROTOCOL_VERSION,
-            daemon_version: "0.0.0".into(),
-            capabilities: None,
-        })
-        .unwrap(),
-    );
-    // Held: a dropped endpoint is a failed link.
-    let mut links = Vec::new();
-    wait_for("connect resolves", || {
-        while let Some(link) = s.link_net.accept() {
-            link.push(hello.clone());
-            links.push(link);
-        }
-        connect.is_finished()
-    })
-    .await;
-    assert_eq!(
-        joined("connect", connect).await,
-        Ok(()),
-        "the stop's own close is not an overtaking close (R16)"
-    );
 }
 
 // ── blocking wrapper ────────────────────────────────────────────────────────────────────
@@ -835,34 +729,7 @@ async fn a_connect_that_read_the_epoch_before_the_stops_close_waits_it_out_and_c
 #[tokio::test]
 async fn a_request_past_its_flight_deadline_starts_nothing() {
     let s = Stage::new(Record::new([our_daemon()]));
-    *s.source.found.lock().unwrap() = Some(Endpoint {
-        key: DaemonKey::new("local"),
-        address: Address::new("ws://127.0.0.1:5123"),
-        credential: Secret::new("t".repeat(64)),
-    });
-    let connect = {
-        let client = s.client.clone();
-        tokio::spawn(async move { client.connect().await })
-    };
-    let hello = Frame::Text(
-        serde_json::to_string(&engram_dashboard_protocol::AgentEvent::Hello {
-            protocol_version: PROTOCOL_VERSION,
-            daemon_version: "0.0.0".into(),
-            capabilities: None,
-        })
-        .unwrap(),
-    );
-    let link = {
-        let mut link = None;
-        wait_for("the link is dialed", || {
-            link = link.take().or_else(|| s.link_net.accept());
-            link.is_some()
-        })
-        .await;
-        link.unwrap()
-    };
-    link.push(hello);
-    assert_eq!(joined("connect", connect).await, Ok(()));
+    let _link = connected_link(&s).await;
 
     // The wrapper took this instant, and its task ran only after the whole `User` bound.
     let asked = s.clock.now();
@@ -874,7 +741,6 @@ async fn a_request_past_its_flight_deadline_starts_nothing() {
         .await;
     assert_eq!(outcome.outcome, StopOutcome::Timeout);
     let_it_run().await;
-    assert!(!s.client.stopper.mode().active(), "no mode");
     assert_eq!(
         s.client.state(),
         ConnectionState::Connected,
@@ -891,11 +757,8 @@ async fn the_blocking_wrapper_measures_the_flight_from_its_call() {
     let clock = s.clock.clone();
     s.client
         .stopper
-        .mode()
-        .race
-        .arm(RacePoint::BlockingStartTaken, move || {
-            clock.advance(Duration::from_secs(5))
-        });
+        .blocking_start_taken
+        .arm(move || clock.advance(Duration::from_secs(5)));
     let task = {
         let client = s.client.clone();
         tokio::task::spawn_blocking(move || {
@@ -951,14 +814,14 @@ async fn the_blocking_wrapper_refuses_a_client_runtime_thread() {
     assert!(on_client_thread.is_err(), "the debug assertion stops it");
 }
 
-// ── bands around a stop (TRD S21 trd-3-2-u5 R8 · U4) ─────────────────────────────────────────
+// ── bands around a stop (TRD S21 trd-3-2-u5 U4) ─────────────────────────────────────────
 
 const BAND_ONE: Option<Band> = Some(Band::NotConnected { refused: false });
 
+// A stop with nothing to stop still fires the re-add — a link parked on ② has no other way to leave it.
 #[tokio::test]
-async fn a_stop_holds_the_shown_band_while_in_flight_and_its_re_add_shows_band_one() {
-    let record = Record::new([RecordRead::Absent]);
-    let s = Stage::new(record.clone());
+async fn a_stop_with_no_target_still_re_adds_and_its_first_failure_shows_band_one() {
+    let s = Stage::new(Record::new([RecordRead::Absent]));
     // The link's daemon speaks an older version: the attach is refused and shows ②.
     *s.source.current.lock().unwrap() = Some(Current::VersionMismatch {
         daemon: PROTOCOL_VERSION - 1,
@@ -972,37 +835,15 @@ async fn a_stop_holds_the_shown_band_while_in_flight_and_its_re_add_shows_band_o
     assert!(joined("attach", attach).await.is_err());
     let version = |status: ConnectionStatus| matches!(status.band, Some(Band::Version { .. }));
     wait_for("band ②", || version(s.client.status())).await;
-    let stopped = s
-        .client
-        .link
-        .current_handle()
-        .await
-        .expect("the attach's handle");
 
-    let (entered, release) = record.hold_next();
-    let task = s.stop_with_reason(StopPlan::User);
-    wait_for("the flight reads daemon.json", || {
-        entered.try_recv().is_ok()
-    })
-    .await;
-    // An answer of the stopped handle during the flight — without the hold it would show ①.
-    s.client.link.feed(stopped, failed_attempt()).await;
-    let_it_run().await;
-    assert!(
-        version(s.client.status()),
-        "② stays while the stop runs: {:?}",
-        s.client.status()
-    );
-    // The daemon is gone after the stop: the re-add finds nothing.
+    // No daemon by the time of the stop: the re-add finds nothing.
     *s.source.current.lock().unwrap() = Some(Current::Absent);
-    let _ = release.send(());
-    let end = joined("stop", task).await;
+    let end = joined("stop", s.stop_with_reason(StopPlan::User)).await;
     assert_eq!(
         (end.outcome, end.reason),
         (StopOutcome::NoTarget, Some(StopReason::NoRecord))
     );
-    // U4: ① can only come from the re-add's failure — ② was shown before, and the stopped handle's items were routed
-    //   while it held.
+    // U4: ① can only come from the re-add's failure — the ② handle is parked and never redials.
     wait_for("band ① after the re-add", || {
         s.client.status().band == BAND_ONE
     })
@@ -1034,9 +875,9 @@ async fn version_band_then_a_live_daemon_for_the_re_add(s: &Stage) {
     });
 }
 
-// A stop that did not end the daemon (`timeout`) keeps the held band until the re-add's first answer.
+// A stop that did not end the daemon (`timeout`) keeps the shown band until the re-add's first answer.
 #[tokio::test]
-async fn a_stop_that_times_out_keeps_the_held_band() {
+async fn a_stop_that_times_out_keeps_the_shown_band_until_the_re_add_answers() {
     let s = Stage::new(Record::new([record(PID, 0, PROTOCOL_VERSION)]));
     version_band_then_a_live_daemon_for_the_re_add(&s).await;
     s.daemons.fail_next(1);
@@ -1050,17 +891,6 @@ async fn a_stop_that_times_out_keeps_the_held_band() {
     wait_for("the re-add dials", || s.link_net.open_endpoints() > 0).await;
     let_it_run().await;
     assert!(version(s.client.status()), "{:?}", s.client.status());
-}
-
-/// A failed connection attempt of the shell's link.
-fn failed_attempt() -> Incoming<ShellWire> {
-    Incoming::Event(TransportEvent::ConnectFailed {
-        peer: DaemonKey::new("local").peer_id().clone(),
-        attempt: 2,
-        of: u32::MAX,
-        cause: ConnectFailure::Unreachable(LinkError::new("connection refused")),
-        retry_in: None,
-    })
 }
 
 /// Lets a running `User` stop end the daemon: `Hello`, `StopDaemon`, the daemon gone.

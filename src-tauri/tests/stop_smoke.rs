@@ -2,7 +2,7 @@
 //!
 //! Subject: does one stop flight (`daemon_client::shutdown::stop_flight` on production's ports — `daemon.json`, the ws
 //! dialer, the OS) make a live daemon exit gracefully: the stop handshake with the daemon's own version →
-//! `StopDaemon{force}` → the daemon's `shutdown_all` → self-exit. The single flight, stopping mode and the link around
+//! `StopDaemon{force}` → the daemon's `shutdown_all` → self-exit. The single flight and the link around
 //! it are unit-tested in memory (`daemon_client::shutdown` tests); this measures the wire and the process.
 //!
 //! ★ENGRAM_DATA_DIR isolation (unlike the WMI path)★: this test **spawns directly with std::process::Command**,

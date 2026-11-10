@@ -37,10 +37,9 @@
 //! handle's last answer: `Connected` · `Disconnected` → none; a failed attempt (`ConnectFailed`) → ① — for a handle
 //! that connected before this is the first failed reconnect, so ① appears while `state` stays `reconnecting` (D1);
 //! `Rejected` → ② when the handle's dial refused the daemon's version (its [`RefusalSlot`]), else ① `refused`; an
-//! explicit frontend close ([`RouteState::close`]) → none for the rest of that handle — the stop path's own close is
-//! not one, it keeps what is shown. Three holds sit on top: while a cold boot's start has not answered (R20) a
-//! never-connected handle shows none; while a daemon stop is in flight the shown band stays (R8) — except over
-//! `Connected`, which always shows none; and a re-add keeps the shown band until the new handle's first answer.
+//! explicit frontend close ([`RouteState::close`]) → none for the rest of that handle. Two holds sit on top: while a
+//! cold boot's start has not answered (R20) a never-connected handle shows none; and a re-add keeps the shown band
+//! until the new handle's first answer. A daemon stop holds nothing — the link's own answers show through it.
 //!
 //! ## Replies skip this path (§3-3 B2)
 //!
@@ -70,7 +69,6 @@ use super::wire::{ShellIn, ShellWire};
 use super::{DaemonKey, HandleToken};
 use crate::daemon_client::events::DaemonEvents;
 use crate::daemon_client::protocol_state;
-use crate::daemon_client::shutdown::StoppingMode;
 use crate::daemon_client::{AgentNamesSink, Band, ConnectionState, ConnectionStatus};
 
 /// One routed result, in the order the driver applies them.
@@ -238,21 +236,17 @@ pub struct RouteState {
 struct BandView {
     /// TRD R20 — a cold boot's start has not answered yet.
     boot_pending: bool,
-    /// The stop path's mode — while on, the shown band holds.
-    stopping: Arc<StoppingMode>,
     /// This app process's creation time ([`can_stop`]).
     own_start: Option<u64>,
 }
 
 impl RouteState {
-    /// `stopping` = the mode the stop path enters — the link's own.
-    pub(crate) fn new(clock: Arc<dyn Clock>, stopping: Arc<StoppingMode>) -> Self {
+    pub(crate) fn new(clock: Arc<dyn Clock>) -> Self {
         Self {
             keys: HashMap::new(),
             clock,
             view: BandView {
                 boot_pending: false,
-                stopping,
                 own_start: engram_dashboard_platform::process::current_process_start_time(),
             },
         }
@@ -342,8 +336,7 @@ impl RouteState {
     }
 
     /// An explicit frontend close of `key`'s link (`daemon_close`): its current handle shows no band from now on,
-    /// whatever else of it is still routed. ★Not for the stop path's close★ — a stop keeps what is shown (R8); its
-    /// late `Closed` routed after the flight must not blank the band before the re-add answers.
+    /// whatever else of it is still routed.
     #[must_use]
     pub fn close(&mut self, key: &DaemonKey) -> Vec<Routed> {
         let Some(route) = self.keys.get_mut(key) else {
@@ -535,12 +528,9 @@ impl KeyRoute {
         }
     }
 
-    /// The band to show with `state` now (module doc). `Connected` is never held — it always means no band.
-    fn band(&self, state: ConnectionState, view: &BandView) -> Option<Band> {
+    /// The band to show now (module doc).
+    fn band(&self, view: &BandView) -> Option<Band> {
         let shown = self.shown.and_then(|status| status.band);
-        if view.stopping.active() && state != ConnectionState::Connected {
-            return shown;
-        }
         match self.answer {
             Answer::None => shown,
             Answer::Band(_) if view.boot_pending && self.seen.is_none() => None,
@@ -551,7 +541,7 @@ impl KeyRoute {
     fn show(&mut self, state: ConnectionState, view: &BandView) -> Option<Routed> {
         let status = ConnectionStatus {
             state,
-            band: self.band(state, view),
+            band: self.band(view),
         };
         if self.shown == Some(status) {
             return None;
@@ -863,7 +853,6 @@ mod tests {
 
     use super::super::test_log::capture;
     use crate::daemon_client::replay_flight::ReplayFlightSet;
-    use crate::daemon_client::shutdown::StoppingMode;
     use crate::daemon_client::test_support::wire_agent;
 
     // ── item builders ──────────────────────────────────────────────────────────────────────────
@@ -1000,7 +989,7 @@ mod tests {
     }
 
     fn route_state_on(clock: &ManualClock) -> RouteState {
-        RouteState::new(clock.handle(), Arc::new(StoppingMode::new(clock.handle())))
+        RouteState::new(clock.handle())
     }
 
     fn adopted() -> (RouteState, HandleToken) {
@@ -1876,91 +1865,6 @@ mod tests {
             statuses(&out).last(),
             Some(&status(Reconnecting, Some(NOT_CONNECTED)))
         );
-    }
-
-    fn stopping_route_state(clock: &ManualClock) -> (RouteState, Arc<StoppingMode>) {
-        let stopping = Arc::new(StoppingMode::new(clock.handle()));
-        let st = RouteState::new(clock.handle(), stopping.clone()).with_own_start(Some(1_000));
-        (st, stopping)
-    }
-
-    // R8 — the shown band stays while a stop is in flight; past the flight deadline the last answer shows.
-    #[test]
-    fn the_shown_band_holds_while_a_stop_is_in_flight() {
-        use ConnectionState::*;
-        let clock = ManualClock::new();
-        let (mut st, stopping) = stopping_route_state(&clock);
-        let token = HandleToken::mint();
-        let _ = st.adopt(key(), token, slot());
-        let out = run(&mut st, token, [connect_failed(unreachable())]);
-        assert_eq!(statuses(&out), [status(Down, Some(NOT_CONNECTED))]);
-
-        stopping.hold_until(clock.now() + Duration::from_secs(13));
-        let held = run(
-            &mut st,
-            token,
-            [rejected("x"), gave_up(GaveUpReason::Rejected)],
-        );
-        assert!(
-            statuses(&held).is_empty(),
-            "① holds although the answer is now ① refused: {held:?}"
-        );
-
-        // The mode passed its flight deadline — it reads as off.
-        clock.advance(Duration::from_secs(14));
-        let out = run(&mut st, token, [closed(0)]);
-        assert_eq!(statuses(&out), [status(Down, Some(REFUSED))]);
-    }
-
-    // R-a — the stop's own close is not an explicit close: the stopped handle's `Closed` routed after the flight left
-    //   its mode, before the re-add's first answer, keeps the shown band; the re-add's failure then shows ①.
-    #[test]
-    fn a_late_closed_of_the_stopped_handle_keeps_the_shown_band_until_the_re_add_answers() {
-        use ConnectionState::*;
-        let clock = ManualClock::new();
-        let (mut st, stopping) = stopping_route_state(&clock);
-        let token = HandleToken::mint();
-        let version = slot();
-        let _ = st.adopt(key(), token, version.clone());
-        version.set(Some(VersionRefusal {
-            daemon: PROTOCOL_VERSION - 1,
-            pid: 7,
-            start_time: 0,
-        }));
-        let out = run(
-            &mut st,
-            token,
-            [rejected("x"), gave_up(GaveUpReason::Rejected)],
-        );
-        let shown = Some(Band::Version { can_stop: true });
-        assert_eq!(statuses(&out), [status(Down, shown)]);
-
-        stopping.hold_until(clock.now() + Duration::from_secs(13));
-        clock.advance(Duration::from_secs(14));
-        let late = run(&mut st, token, [closed(0)]);
-        assert!(late.is_empty(), "② stays: {late:?}");
-
-        let new = HandleToken::mint();
-        assert!(st.adopt(key(), new, slot()).is_empty());
-        let out = run(&mut st, new, [connect_failed(unreachable())]);
-        assert_eq!(statuses(&out), [status(Down, Some(NOT_CONNECTED))]);
-    }
-
-    // R-b — R7: `Connected` → no band, also while a stop is in flight.
-    #[test]
-    fn connected_shows_no_band_even_while_a_stop_is_in_flight() {
-        use ConnectionState::*;
-        let clock = ManualClock::new();
-        let (mut st, stopping) = stopping_route_state(&clock);
-        let token = HandleToken::mint();
-        let _ = st.adopt(key(), token, slot());
-        run(&mut st, token, [connect_failed(unreachable())]);
-        stopping.hold_until(clock.now() + Duration::from_secs(13));
-        let out = run(&mut st, token, [connected(1)]);
-        assert_eq!(statuses(&out), [status(Connected, None)]);
-        // A loss after it is held again — none stays none.
-        let out = run(&mut st, token, [disconnected(1, DisconnectCause::Explicit)]);
-        assert_eq!(statuses(&out), [status(Reconnecting, None)]);
     }
 
     #[test]

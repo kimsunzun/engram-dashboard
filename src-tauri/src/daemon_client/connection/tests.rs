@@ -792,10 +792,10 @@ async fn a_late_refusal_of_a_handle_the_user_closed_gives_no_notice() {
     );
 }
 
-// R-a — the stop's close is not an explicit close: with no stop in flight, the stopped handle's `Closed` shows the band
-//   its last answer called for (an explicit close would take the band away).
+// A stop leaves the link open: the daemon's exit is the link's normal loss, and its first failed reconnect shows ① while
+//   the state stays `reconnecting` (D1).
 #[tokio::test]
-async fn the_stops_close_leaves_the_band_to_the_stopped_handles_last_answer() {
+async fn after_the_daemon_exits_the_links_first_failed_reconnect_shows_band_one() {
     let mut b = Bench::new();
     let token = b.add();
     let key = b.key();
@@ -820,21 +820,12 @@ async fn the_stops_close_leaves_the_band_to_the_stopped_handles_last_answer() {
     for item in items {
         bench_route(&mut b, token, item);
     }
-    // No stopping mode on the bench — nothing holds the band.
-    b.driver.close_by(CloseBy::Stop);
-    let closed = Incoming::Event(TransportEvent::Closed {
-        peer: key.peer_id().clone(),
-        generation: g,
-        cause: DisconnectCause::Explicit,
-    });
-    bench_route(&mut b, token, closed);
     assert_eq!(
         status_lines(&b.events.seen()),
         [
             "status:connected:none",
             "status:reconnecting:none",
             "status:reconnecting:not_connected",
-            "status:down:not_connected",
         ]
     );
 }

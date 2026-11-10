@@ -223,16 +223,12 @@ fn spawn_daemon_action(app: &AppHandle, op: DaemonOp) {
     });
 }
 
-/// Tray 「데몬 켜기」 (R10): a stop in flight ends first — otherwise this start could attach to the daemon it is
-/// stopping — then `launch`, then the attach even when the launch failed or timed out: a daemon that comes up later is
-/// found by the link's background retries.
+/// Tray 「데몬 켜기」 (R10): `launch`, then the attach even when the launch failed or timed out — a daemon that comes up
+/// later is found by the link's background retries. A stop in flight is not waited out (`daemon_client::shutdown`).
 fn start_daemon(
     client: Option<&dyn TrayDaemonClient>,
     launch: impl FnOnce() -> Result<DaemonInfo, String>,
 ) {
-    if let Some(client) = client {
-        client.wait_stop_over();
-    }
     match launch() {
         Ok(info) => tracing::info!(pid = info.pid, port = info.port, "[tray] 데몬 ensure 완료"),
         Err(e) => tracing::warn!("[tray] {e}"),
@@ -345,10 +341,6 @@ mod tests {
     }
 
     impl TrayDaemonClient for FakeClient {
-        fn wait_stop_over(&self) {
-            self.note("wait_stop_over".into());
-        }
-
         fn stop(&self, plan: StopPlan, origin: StopOrigin) -> StopOutcome {
             self.note(format!("stop:{plan:?}:{origin:?}"));
             self.outcome
@@ -360,7 +352,7 @@ mod tests {
     }
 
     #[test]
-    fn start_waits_for_the_stop_then_launches_then_attaches_even_after_a_failed_launch() {
+    fn start_launches_then_attaches_even_after_a_failed_launch() {
         let launched: [Result<DaemonInfo, String>; 2] = [
             Ok(crate::discovery::tests::info(1001, PROTOCOL_VERSION)),
             Err("데몬 ensure 실패: timed out".into()),
@@ -372,7 +364,7 @@ mod tests {
                 calls.lock().unwrap().push("launch".into());
                 launch
             });
-            assert_eq!(client.calls(), ["wait_stop_over", "launch", "attach"]);
+            assert_eq!(client.calls(), ["launch", "attach"]);
         }
     }
 

@@ -29,7 +29,7 @@ pub(crate) mod refusal;
 pub mod replay_events;
 // ADR-0046 M1: single-flight replay numbering/fence state machine + replay boundary marker encoding (pure — zero socket/Tauri dependencies).
 pub mod replay_flight;
-// ADR-0343: the one stop path (single flight · stopping mode · identity-checked kill) — TRD S21 trd-3-2-u5 §3-3.
+// ADR-0343: the one stop path (single flight · identity-checked kill) — TRD S21 trd-3-2-u5 §3-3.
 pub mod shutdown;
 // Usage interest (layout → daemon subscription set) + subscription reconciliation · cache state machine (pure — TRD S21 usage-limit-slot §1-7).
 pub mod usage_interest;
@@ -251,7 +251,7 @@ pub struct DaemonClient {
     /// The driver on the transport crate (`connection`) — connect, ensure, close, the command round trips,
     /// fire-and-forget sends, unsubscribe, replay requests and usage nudges go there; `status_rx` is its watch.
     link: connection::LinkClient,
-    /// The one stop path's single flight (`shutdown`) — it closes and re-adds `link` and owns its stopping mode.
+    /// The one stop path's single flight (`shutdown`) — it re-adds `link` after a `User` stop.
     stopper: Arc<Stopper>,
 }
 
@@ -385,7 +385,7 @@ impl DaemonClient {
                 usage: usage.clone(),
             },
         );
-        let stopper = Stopper::new(rt.clone(), stop, link.control(), link.stopping());
+        let stopper = Stopper::new(rt.clone(), stop, link.control(), link.clock());
         Self {
             rt,
             _owned_rt: owned_rt,

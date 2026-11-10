@@ -32,9 +32,6 @@
 //!   frontend event first — the frontend relies on that order), or its first failure; no live daemon (no or an unusable record)
 //!   answers `NoLiveDaemon`. A connect that a re-add overtakes gets the new handle's answer; a close before the answer
 //!   ends it with `ClosedBeforeHello`.
-//! - ★While a daemon stop is in flight★ (its stopping mode — `shutdown`), `ensure` answers `HandshakeError::Stopping`
-//!   and builds no handle, and `connect` first waits for the stop to end and only then reads its close epoch — the
-//!   stop's own close never overtakes it (TRD S21 trd-3-2-u5 R2 · R16).
 //! - ★The boot hold★ (TRD S21 trd-3-2-u5 R20 · R24): the production client holds every band of a never-connected
 //!   handle from its construction until the main window's boot start answers — its failed `daemon_start`, or its
 //!   `daemon_connect` returning (`commands::discovery` gates both on the window) — or any handle connects, or a bound
@@ -121,9 +118,6 @@ use super::replay_events::{
     apply_replay_event, known_epoch, ReplayFollowUp, REPLAY_DEADLINE, REPLAY_DEADLINE_TICK,
 };
 use super::replay_flight::{encode_marker_frame, ReplayFlightSet};
-#[cfg(test)]
-use super::shutdown::RacePoint;
-use super::shutdown::StoppingMode;
 use super::{
     AgentNamesSink, ConnectionStatus, SharedUsageInterest, CHANNEL_GONE, DEFAULT_CONNECT_TIMEOUT,
     NOT_CONNECTED, NO_REQUEST_ID, REPLAY_UNSENT,
@@ -148,8 +142,6 @@ pub enum HandshakeError {
     ClosedBeforeHello,
     /// The driver ended or a close overtook the call before its first answer.
     TaskGone,
-    /// An attach-only connect while a daemon stop is in flight — nothing was added (TRD S21 trd-3-2-u5 R2).
-    Stopping,
 }
 
 impl std::fmt::Display for HandshakeError {
@@ -165,7 +157,6 @@ impl std::fmt::Display for HandshakeError {
                 write!(f, "daemon websocket closed before handshake")
             }
             HandshakeError::TaskGone => write!(f, "연결 task 가 핸드셰이크 전 종료됨"),
-            HandshakeError::Stopping => write!(f, "the daemon is being stopped — not attaching"),
         }
     }
 }
@@ -272,38 +263,22 @@ pub(crate) struct LinkClient {
     opened_rx: watch::Receiver<()>,
     /// The ⟳ pre-subscribe reads the interest here.
     usage: SharedUsageInterest,
-    /// Times the wait for an opened connection.
+    /// Times the wait for an opened connection; the stop path's flights run on it too.
     clock: Arc<dyn Clock>,
-    /// On while a daemon stop is in flight (`shutdown`) — `ensure` adds nothing, `connect` waits.
-    stopping: Arc<StoppingMode>,
 }
 
-/// Closes and re-adds the link from outside the client — the stop path (`shutdown::Stopper`) holds one. It does not keep
-/// the actor alive: after the client is gone both do nothing.
+/// Re-adds the link from outside the client — the stop path (`shutdown::Stopper`) holds one. It does not keep the actor
+/// alive: after the client is gone it does nothing.
 pub(crate) struct LinkControl {
     key: DaemonKey,
     cmd_tx: mpsc::WeakUnboundedSender<DriverCmd>,
     closes: Arc<AtomicU64>,
-    stopping: Arc<StoppingMode>,
 }
 
 impl LinkControl {
-    /// [`LinkClient::close`] for the stop path — not an explicit close: the shown band stays ([`CloseBy::Stop`]).
-    pub(crate) fn close(&self) {
-        if let Some(cmd_tx) = self.cmd_tx.upgrade() {
-            close_link(&self.key, &self.closes, &cmd_tx, CloseBy::Stop);
-        }
-    }
-
-    /// [`LinkClient::ensure`] without waiting for its answer — nothing while a stop is in flight. That check is
-    /// defensive: today's one caller, the stop's supervisor, calls this after its own flight left the mode and while
-    /// that flight still holds the single-flight slot, so no newer flight can be in the mode then.
+    /// [`LinkClient::ensure`] without waiting for its answer.
     pub(crate) fn reattach(&self) {
         let closes = self.closes.load(Ordering::SeqCst);
-        if self.stopping.active() {
-            tracing::debug!(peer = %self.key.peer_id(), "a daemon stop is in flight — not re-attaching");
-            return;
-        }
         let Some(cmd_tx) = self.cmd_tx.upgrade() else {
             return;
         };
@@ -316,27 +291,6 @@ impl LinkControl {
             first,
         });
     }
-}
-
-/// Bump the epoch before queueing `Close` — [`LinkClient::close`] holds why.
-fn close_link(
-    key: &DaemonKey,
-    closes: &AtomicU64,
-    cmd_tx: &mpsc::UnboundedSender<DriverCmd>,
-    by: CloseBy,
-) {
-    tracing::info!(peer = %key.peer_id(), ?by, "closing the daemon link");
-    closes.fetch_add(1, Ordering::SeqCst);
-    let _ = cmd_tx.send(DriverCmd::Close { by });
-}
-
-/// Who closes the link — the two differ only in the band (TRD S21 trd-3-2-u5 R7 · R8).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CloseBy {
-    /// The frontend's explicit close (`daemon_close`): no band for the rest of the handle.
-    Frontend,
-    /// The stop path: what is shown stays — a stop sets no band; the re-add's first answer does.
-    Stop,
 }
 
 /// Nudges the actor's usage interest without keeping the actor alive — the usage shrink timer holds one
@@ -353,9 +307,7 @@ impl UsageNudger {
 
 enum DriverCmd {
     /// Is the key's current peer live?
-    IsLive {
-        reply: oneshot::Sender<bool>,
-    },
+    IsLive { reply: oneshot::Sender<bool> },
     /// Start a handle for the key — the first one or a re-add — unless the current peer is live (`first` gets `Ok`)
     /// or a close came after `closes` was read (`first` gets an error). Otherwise `first` gets the new handle's first
     /// answer.
@@ -365,14 +317,11 @@ enum DriverCmd {
         found: Option<Endpoint>,
         first: oneshot::Sender<Result<(), HandshakeError>>,
     },
-    Close {
-        by: CloseBy,
-    },
+    /// The explicit close (`daemon_close`): no band for the rest of the handle.
+    Close,
     /// Write `Unsubscribe` on the open connection. With none open there is nothing to undo — the daemon drops a
     /// connection's subscriptions with it.
-    Unsubscribe {
-        agent_id: AgentId,
-    },
+    Unsubscribe { agent_id: AgentId },
     /// Start the agent's replay or join the one in flight (single flight — ADR-0046 M1); `reply` gets the generation
     /// assigned (a joined request writes nothing and still gets one), or [`REPLAY_UNSENT`] / [`NOT_CONNECTED`] when no
     /// generation can be served: no open connection, no window shows the agent, or its `Subscribe` could not be written.
@@ -387,13 +336,9 @@ enum DriverCmd {
     HoldForBootStart,
     /// The main window's daemon search began with timeout `search`: the hold now ends `search` + [`BOOT_START_MARGIN`]
     /// from now — this bound replaces the 60 s cap. Nothing when no hold is on.
-    BoundBootStart {
-        search: Duration,
-    },
+    BoundBootStart { search: Duration },
     /// The main window's boot start answered — the hold ends now. Nothing when no hold is on.
-    EndBootStartHold {
-        why: &'static str,
-    },
+    EndBootStartHold { why: &'static str },
     /// The key's current handle.
     #[cfg(test)]
     CurrentHandle {
@@ -401,9 +346,7 @@ enum DriverCmd {
     },
     /// Whether the boot hold is on.
     #[cfg(test)]
-    BootStartHeld {
-        reply: oneshot::Sender<bool>,
-    },
+    BootStartHeld { reply: oneshot::Sender<bool> },
 }
 
 impl LinkClient {
@@ -448,7 +391,6 @@ impl LinkClient {
         let closes = Arc::new(AtomicU64::new(0));
         let (opened_tx, opened_rx) = watch::channel(());
         let gate = Arc::new(Mutex::new(Gate::default()));
-        let stopping = Arc::new(StoppingMode::new(clock.clone()));
         let Ports {
             events,
             names,
@@ -474,14 +416,13 @@ impl LinkClient {
             opened_rx,
             usage: usage.clone(),
             clock: clock.clone(),
-            stopping: stopping.clone(),
         };
         let driver = Driver {
             key,
             source,
             registry,
             dialer,
-            route: RouteState::new(clock.clone(), stopping),
+            route: RouteState::new(clock.clone()),
             boot_deadline: None,
             clock,
             routable_tx,
@@ -538,61 +479,25 @@ impl LinkClient {
         answer.await.expect("the actor answers")
     }
 
-    /// The key's current handle, as the actor sees it.
-    #[cfg(test)]
-    pub(crate) async fn current_handle(&self) -> Option<HandleToken> {
-        let (reply, answer) = oneshot::channel();
-        self.cmd_tx
-            .send(DriverCmd::CurrentHandle { reply })
-            .expect("the actor runs");
-        answer.await.expect("the actor answers")
+    /// The client's one clock — the stop path's flights run on it.
+    pub(crate) fn clock(&self) -> Arc<dyn Clock> {
+        self.clock.clone()
     }
 
-    /// Hands `item` of handle `token` to the actor as if its pump had.
-    #[cfg(test)]
-    pub(crate) async fn feed(&self, token: HandleToken, item: Incoming<ShellWire>) {
-        self.routable_tx
-            .send(Routable::Item {
-                key: self.key.clone(),
-                token,
-                item,
-            })
-            .await
-            .expect("the actor runs");
-    }
-
-    /// The stopping mode this link reads — the stop path enters and leaves it.
-    pub(crate) fn stopping(&self) -> Arc<StoppingMode> {
-        self.stopping.clone()
-    }
-
-    /// A close / re-add handle for the stop path.
+    /// A re-add handle for the stop path.
     pub(crate) fn control(&self) -> LinkControl {
         LinkControl {
             key: self.key.clone(),
             cmd_tx: self.cmd_tx.downgrade(),
             closes: self.closes.clone(),
-            stopping: self.stopping.clone(),
         }
     }
 
     /// Explicit connect (ADR-0021 — may start a daemon). A failed search still starts the handle — unless a close
     /// overtook this connect, then nothing is built: it reads `daemon.json` on every attempt and connects once a
     /// daemon is there, and the caller gets the search's error.
-    ///
-    /// ★A daemon stop in flight is waited out first★ (at most its flight deadline), and the close epoch is read only
-    /// after that wait (TRD S21 trd-3-2-u5 R16) — the stop's own close is not a close that overtook this connect.
     pub(crate) async fn connect(&self) -> Result<(), HandshakeError> {
-        let closes = loop {
-            let closes = self.closes.load(Ordering::SeqCst);
-            #[cfg(test)]
-            self.stopping.race.fire(RacePoint::ConnectEpochRead);
-            if !self.stopping.active() {
-                break closes;
-            }
-            tracing::info!(peer = %self.key.peer_id(), "a daemon stop is in flight — connecting after it");
-            self.stopping.wait_over().await;
-        };
+        let closes = self.closes.load(Ordering::SeqCst);
         if self.is_live().await {
             return Ok(());
         }
@@ -620,19 +525,9 @@ impl LinkClient {
         }
     }
 
-    /// Attach-only connect (ADR-0021 — never starts a daemon). While a daemon stop is in flight it answers
-    /// [`HandshakeError::Stopping`] and adds nothing (TRD S21 trd-3-2-u5 R2).
-    ///
-    /// ★The epoch before the mode★ — the stop enters its mode before it closes, so an epoch read after that close
-    /// always finds the mode on.
+    /// Attach-only connect (ADR-0021 — never starts a daemon).
     pub(crate) async fn ensure(&self) -> Result<(), HandshakeError> {
         let closes = self.closes.load(Ordering::SeqCst);
-        #[cfg(test)]
-        self.stopping.race.fire(RacePoint::EnsureEpochRead);
-        if self.stopping.active() {
-            tracing::info!(peer = %self.key.peer_id(), "a daemon stop is in flight — not attaching");
-            return Err(HandshakeError::Stopping);
-        }
         tracing::info!(peer = %self.key.peer_id(), "attaching to a running daemon");
         self.add(closes, None).await
     }
@@ -672,7 +567,9 @@ impl LinkClient {
     /// captured the old epoch is seen as stale. The other order lets an `Add` queued behind `Close` still read the old
     /// value and revive the link.
     pub(crate) fn close(&self) {
-        close_link(&self.key, &self.closes, &self.cmd_tx, CloseBy::Frontend);
+        tracing::info!(peer = %self.key.peer_id(), "closing the daemon link");
+        self.closes.fetch_add(1, Ordering::SeqCst);
+        let _ = self.cmd_tx.send(DriverCmd::Close);
     }
 
     /// One command round trip on the caller's task, on the opened connection ([`Self::opened_generation`]); failure
@@ -969,7 +866,7 @@ impl Driver {
                         found,
                         first,
                     }) => self.add(closes, found, first),
-                    Some(DriverCmd::Close { by }) => self.close_by(by),
+                    Some(DriverCmd::Close) => self.close_explicitly(),
                     Some(DriverCmd::Unsubscribe { agent_id }) => self.unsubscribe(agent_id),
                     Some(DriverCmd::RequestReplay { agent_id, reply }) => {
                         let _ = reply.send(self.request_replay(agent_id));
@@ -1054,13 +951,9 @@ impl Driver {
         self.apply(out);
     }
 
-    /// A queued close. ★Routing hears an explicit frontend close before the peer goes★ — what the removal routes
-    /// later shows no band. The stop path's close leaves routing alone — a stop sets no band.
-    fn close_by(&mut self, by: CloseBy) {
-        let out = match by {
-            CloseBy::Frontend => self.route.close(&self.key),
-            CloseBy::Stop => Vec::new(),
-        };
+    /// A queued explicit close. ★Routing hears it before the peer goes★ — what the removal routes later shows no band.
+    fn close_explicitly(&mut self) {
+        let out = self.route.close(&self.key);
         self.close();
         self.apply(out);
     }

@@ -6,23 +6,25 @@
 //! - ★One absolute clock★ (R13): every deadline is measured from flight start — the `daemon.json` read and its retries
 //!   included — on the client's one clock. Flight start = the instant the starting caller asked (the blocking wrapper
 //!   takes it before its spawn). [`StopPlan::User`] = 10 s graceful + 3 s margin, [`StopPlan::Exit`] = 3 s + 1 s.
-//! - Order (R1): stopping mode on → the shell's link closed (no redials during the flight) → the target resolved once
-//!   (the kill uses this identity, never a re-read) → the stop client → "gone" polled → the identity-checked kill
-//!   (`User` only: at once when nothing was sent, at the graceful deadline when it was; never without a start time) →
-//!   stopping mode off → the attach-only re-add fired, not awaited (not for `Exit`). With no daemon that re-add fails
-//!   and the link keeps retrying in the background (U4 — no "intended stop" latch).
-//! - ★Stopping mode★ ([`StoppingMode`]) lasts until the flight ends or its flight deadline, whichever comes first — past
-//!   the deadline it reads as off even if nobody released it. While on, `ensure` answers `HandshakeError::Stopping` and
-//!   adds nothing, and `connect` waits it out (`connection.rs`).
+//! - Order (R1): the target resolved once (the kill uses this identity, never a re-read) → the stop client → "gone"
+//!   polled → the identity-checked kill (`User` only: at once when nothing was sent, at the graceful deadline when it
+//!   was; never without a start time) → the attach-only re-add fired, not awaited (not for `Exit`).
+//! - ★The shell's link is left alone★ (user decision 2026-11-10): it stays open through the flight, so the daemon's own
+//!   shutdown broadcasts (its agents exiting, the emptied agent list) reach the frontend. When the daemon exits the link
+//!   sees a normal disconnect and reconnects as always; its first failed reconnect shows band ①. ★Do not close it at
+//!   flight start★ — those broadcasts are then lost and the agent tree keeps showing running agents. Accepted instead: a
+//!   redial during the flight may reach the exiting daemon, and an attach or a tray 「데몬 켜기」 during the flight is
+//!   not held back — a failed redial just shows ①.
+//! - The re-add is for a link parked by a terminal refusal (band ② — a version refusal never redials): without it ②
+//!   would stay after the old daemon is gone. With a live link it does nothing; with no daemon it fails and the link
+//!   keeps retrying in the background (U4 — no "intended stop" latch).
 //! - ★Expiry (R19)★: a timer outside the flight task aborts it at the flight deadline. Every side effect (dial ·
 //!   `StopDaemon` · kill) checks that deadline before it runs, a `daemon.json` read still running is discarded, and the
-//!   supervisor releases the mode and fires the re-add. Joiners and the blocking wrapper get `Timeout`, never a dropped
-//!   sender.
+//!   supervisor fires the re-add. Joiners and the blocking wrapper get `Timeout`, never a dropped sender.
 //! - Outcome (R1 step 6): gone without a kill → `Closed`; gone after a kill (whatever the kill call returned) →
 //!   `Killed`; alive or unknown at the end → `Timeout`; nothing to stop → `NoTarget`. An unreadable process ("unknown")
 //!   is never reported as gone.
-//! - ★A stop sets no band★ (user decision 2026-11-09): only routing does, so what was shown stays after the flight
-//!   until the re-add's first answer.
+//! - ★A stop sets no band★ (user decision 2026-11-09): only routing does, from the link's own answers.
 // ADR-0021
 // ADR-0026
 // ADR-0343
@@ -74,7 +76,7 @@ impl StopPlan {
         }
     }
 
-    /// From flight start to the flight deadline — the longest a flight (and stopping mode) lasts.
+    /// From flight start to the flight deadline — the longest a flight lasts.
     pub fn flight_bound(self) -> Duration {
         self.grace() + self.margin()
     }
@@ -174,8 +176,8 @@ impl TargetProcess for OsProcess {
     }
 }
 
-/// Everything a stop flight touches outside memory. ★No clock★ — a client's flight runs on the client's clock, the one
-/// its stopping mode is judged on (`Stopper`), so the two can never differ.
+/// Everything a stop flight touches outside memory. ★No clock★ — a client's flight runs on the client's one clock, its
+/// link's (`Stopper`).
 #[derive(Clone)]
 pub struct StopPorts {
     pub reader: Arc<dyn RecordReader>,
@@ -205,7 +207,7 @@ const DIAL_RESERVE: Duration = Duration::from_millis(500);
 const GONE_POLL: Duration = Duration::from_millis(100);
 
 /// One stop flight without its single-flight bookkeeping: steps 2–6 of R1 against `ports`, every deadline measured from
-/// `started` (the flight's start on `clock`). The caller owns stopping mode, the link and expiry
+/// `started` (the flight's start on `clock`). The caller owns the re-add and expiry
 /// ([`DaemonClient::stop_daemon`]); a real-daemon test drives this directly (`tests/stop_smoke.rs`).
 pub async fn stop_flight(
     ports: &StopPorts,
@@ -375,117 +377,20 @@ async fn kill(
     }
 }
 
-/// See the module doc — shared by the stop path and the link (`LinkClient`), which reads it on `ensure` / `connect`.
-/// ★Its clock is the client's one clock★: the link's, and the stop flights run on it too (`Stopper`).
-pub(crate) struct StoppingMode {
-    clock: Arc<dyn Clock>,
-    /// The flight that entered the mode and its flight deadline.
-    state: Mutex<Option<(u64, Instant)>>,
-    /// Signalled when a flight leaves the mode.
-    left: watch::Sender<()>,
-    #[cfg(test)]
-    pub(crate) race: RaceHook,
-}
-
-impl StoppingMode {
-    pub(crate) fn new(clock: Arc<dyn Clock>) -> Self {
-        Self {
-            clock,
-            state: Mutex::new(None),
-            left: watch::channel(()).0,
-            #[cfg(test)]
-            race: RaceHook::default(),
-        }
-    }
-
-    fn enter(&self, flight: u64, until: Instant) {
-        *sync::lock(&self.state) = Some((flight, until));
-    }
-
-    /// Test-only: the mode as a flight with deadline `until` enters it.
-    #[cfg(test)]
-    pub(crate) fn hold_until(&self, until: Instant) {
-        self.enter(u64::MAX, until);
-    }
-
-    /// Leaves the mode if `flight` is the one in it — a late leave never ends a newer flight's mode.
-    fn leave(&self, flight: u64) {
-        {
-            let mut state = sync::lock(&self.state);
-            if state.is_some_and(|(id, _)| id == flight) {
-                *state = None;
-            }
-        }
-        self.left.send_replace(());
-    }
-
-    /// A flight is in the mode and its flight deadline has not passed.
-    pub(crate) fn active(&self) -> bool {
-        self.until().is_some()
-    }
-
-    fn until(&self) -> Option<Instant> {
-        let until = sync::lock(&self.state).map(|(_, until)| until)?;
-        (self.clock.now() < until).then_some(until)
-    }
-
-    /// Returns once the mode is off — at most until the flight deadline of the flight in it.
-    pub(crate) async fn wait_over(&self) {
-        loop {
-            // Subscribed before the check, so a leave after it wakes the wait.
-            let mut left = self.left.subscribe();
-            let Some(until) = self.until() else {
-                return;
-            };
-            let sleep = self
-                .clock
-                .sleep(until.saturating_duration_since(self.clock.now()));
-            tokio::select! {
-                _ = left.changed() => {}
-                () = sleep => {}
-            }
-        }
-    }
-}
-
-/// A point between the two steps of an ordering the stop path relies on (the ★ comments where
-/// [`RaceHook::fire`] is called).
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RacePoint {
-    /// `LinkClient::ensure`: the close epoch is read, the mode not yet.
-    EnsureEpochRead,
-    /// `LinkClient::connect`: the close epoch is read, the mode not yet.
-    ConnectEpochRead,
-    /// `Stopper::join_or_start`: the mode is on, the link not yet closed. Its step runs holding the `flight` slot lock,
-    /// so it must not start or join a stop.
-    StopModeEntered,
-    /// `DaemonClient::stop_daemon_blocking`: the flight start is taken, the stop not yet spawned.
-    BlockingStartTaken,
-}
-
-/// Test-only: a step run once when its [`RacePoint`] is reached — so a test lands the racing side exactly between the
-/// two steps an ordering keeps apart.
+/// Test-only: a step run once where [`Self::fire`] is called — so a test lands its step exactly there.
 #[cfg(test)]
 #[derive(Default)]
-pub(crate) struct RaceHook(Mutex<Option<(RacePoint, Box<dyn FnOnce() + Send>)>>);
+pub(crate) struct TestHook(Mutex<Option<Box<dyn FnOnce() + Send>>>);
 
 #[cfg(test)]
-impl RaceHook {
-    pub(crate) fn arm(&self, at: RacePoint, step: impl FnOnce() + Send + 'static) {
-        *sync::lock(&self.0) = Some((at, Box::new(step)));
+impl TestHook {
+    pub(crate) fn arm(&self, step: impl FnOnce() + Send + 'static) {
+        *sync::lock(&self.0) = Some(Box::new(step));
     }
 
-    pub(crate) fn fire(&self, at: RacePoint) {
-        let step = {
-            let mut armed = sync::lock(&self.0);
-            if armed.as_ref().is_some_and(|(point, _)| *point == at) {
-                armed.take().map(|(_, step)| step)
-            } else {
-                None
-            }
-        };
-        // Run outside the lock — the step may reach another point.
+    fn fire(&self) {
+        // Run outside the lock.
+        let step = sync::lock(&self.0).take();
         if let Some(step) = step {
             step();
         }
@@ -498,9 +403,13 @@ pub(crate) struct Stopper {
     rt: Handle,
     ports: StopPorts,
     link: LinkControl,
-    mode: Arc<StoppingMode>,
+    /// The client's one clock — its link's.
+    clock: Arc<dyn Clock>,
     flight: Mutex<Option<Flight>>,
     next_flight: AtomicU64,
+    /// [`DaemonClient::stop_daemon_blocking`]: the flight start is taken, the stop not yet spawned.
+    #[cfg(test)]
+    pub(crate) blocking_start_taken: TestHook,
 }
 
 struct Flight {
@@ -514,25 +423,23 @@ impl Stopper {
         rt: Handle,
         ports: StopPorts,
         link: LinkControl,
-        mode: Arc<StoppingMode>,
+        clock: Arc<dyn Clock>,
     ) -> Arc<Self> {
         Arc::new(Self {
             rt,
             ports,
             link,
-            mode,
+            clock,
             flight: Mutex::new(None),
             next_flight: AtomicU64::new(0),
+            #[cfg(test)]
+            blocking_start_taken: TestHook::default(),
         })
     }
 
-    pub(crate) fn mode(&self) -> &Arc<StoppingMode> {
-        &self.mode
-    }
-
-    /// The client's clock — flights, their deadlines and the mode all run on it.
+    /// The client's clock — flights and their deadlines run on it.
     pub(crate) fn clock(&self) -> &Arc<dyn Clock> {
-        &self.mode.clock
+        &self.clock
     }
 
     /// Joins the flight in progress or starts one, then waits for its end — an `Exit` joiner at most its own bound.
@@ -589,8 +496,8 @@ impl Stopper {
         }
         let deadline = started + plan.flight_bound();
         if self.clock().now() >= deadline {
-            // The caller's task ran only after its whole bound (a stalled runtime) — its wait is over, so nothing starts:
-            //   no mode, no close, no re-add.
+            // The caller's task ran only after its whole bound (a stalled runtime) — its wait is over, so nothing starts,
+            //   not even the re-add.
             tracing::warn!(
                 ?origin,
                 ?plan,
@@ -600,11 +507,6 @@ impl Stopper {
             return (watch::channel(Some(end)).1, false);
         }
         let id = self.next_flight.fetch_add(1, Ordering::Relaxed);
-        // ★The mode before the close★ — an `ensure` that read the close epoch after the close sees the mode on.
-        self.mode.enter(id, deadline);
-        #[cfg(test)]
-        self.mode.race.fire(RacePoint::StopModeEntered);
-        self.link.close();
         let (tx, rx) = watch::channel(None);
         *slot = Some(Flight {
             id,
@@ -618,7 +520,7 @@ impl Stopper {
         (rx, false)
     }
 
-    /// Runs the flight under its deadline, then ends the flight: mode off, re-add fired, outcome published.
+    /// Runs the flight under its deadline, then ends the flight: re-add fired, outcome published.
     async fn supervise(
         self: Arc<Self>,
         id: u64,
@@ -646,7 +548,6 @@ impl Stopper {
                 StopResult::timeout(StopReason::FlightExpired)
             }
         };
-        self.mode.leave(id);
         if plan != StopPlan::Exit {
             self.link.reattach();
         }
@@ -692,7 +593,7 @@ impl DaemonClient {
         let started = stopper.clock().now();
         let deadline = started + plan.flight_bound();
         #[cfg(test)]
-        stopper.mode().race.fire(RacePoint::BlockingStartTaken);
+        stopper.blocking_start_taken.fire();
         self.rt.spawn(async move {
             let _ = tx.send(stopper.stop(plan, origin, started).await.outcome);
         });
@@ -701,25 +602,6 @@ impl DaemonClient {
             tracing::warn!(?plan, error = %e, "stopped waiting for the daemon stop");
             StopOutcome::Timeout
         })
-    }
-
-    /// Blocks until no stop is in flight — at most a `User` flight bound (tray 「데몬 켜기」, R10). Same thread rule as
-    /// [`Self::stop_daemon_blocking`].
-    pub fn wait_stop_over_blocking(&self) {
-        debug_assert_ne!(
-            std::thread::current().name(),
-            Some(CLIENT_THREAD_NAME),
-            "wait_stop_over_blocking on the daemon client's own runtime"
-        );
-        let (tx, rx) = std::sync::mpsc::channel();
-        let mode = self.stopper.mode().clone();
-        self.rt.spawn(async move {
-            mode.wait_over().await;
-            let _ = tx.send(());
-        });
-        if rx.recv_timeout(StopPlan::User.flight_bound()).is_err() {
-            tracing::warn!("stopped waiting for the daemon stop in flight");
-        }
     }
 
     /// Fires [`Self::ensure`] on the client's runtime and logs a failure — for a caller that does not wait (tray).

@@ -334,8 +334,6 @@ pub fn quit_app(app: &AppHandle) {
 /// runtime or a daemon (ADR-0012). The real one is the `Arc<DaemonClient>` impl; each call blocks or fires as the
 /// [`DaemonClient`] method it names.
 pub(crate) trait TrayDaemonClient {
-    /// [`DaemonClient::wait_stop_over_blocking`].
-    fn wait_stop_over(&self);
     /// [`DaemonClient::stop_daemon_blocking`].
     fn stop(&self, plan: StopPlan, origin: StopOrigin) -> StopOutcome;
     /// [`DaemonClient::ensure_in_background`].
@@ -343,10 +341,6 @@ pub(crate) trait TrayDaemonClient {
 }
 
 impl TrayDaemonClient for Arc<DaemonClient> {
-    fn wait_stop_over(&self) {
-        self.wait_stop_over_blocking();
-    }
-
     fn stop(&self, plan: StopPlan, origin: StopOrigin) -> StopOutcome {
         self.stop_daemon_blocking(plan, origin)
     }
