@@ -1,7 +1,9 @@
-//! 파일 다루기의 OS 규칙 — 남의 쓰기를 막은 채 여는 열기와 그 실패의 분류 · 남이 잠깐 쥐어 난 실패의 판정과
-//! 다시 하기 · 폴더 동기화 · 디렉터리 링크 만들기 · 걷기(`link`) · 경로 열쇠와 경로 비교(`path_key`) · 파일
-//! 신원(`identity`). 이 파일의 열기는 std 만 쓴다 — `OpenOptionsExt::share_mode` 가 그대로 `CreateFileW` 의 공유
-//! 모드로 내려가 같은 커널 동작을 unsafe 없이 얻는다.
+//! The OS rules for handling files — opening while denying others' writes and classifying that failure · the verdict
+//! and retry for a failure caused by someone holding the file briefly · folder sync · creating and walking directory
+//! links (`link`) · path keys and path comparison (`path_key`) · folder-path normalization and the Win32
+//! reserved-device-name test (`normalize`) · file identity (`identity`). The opens in this file use std only —
+//! `OpenOptionsExt::share_mode` goes down as is to `CreateFileW`'s share mode, so the same kernel behaviour comes
+//! without unsafe.
 
 // ADR-0266
 // ADR-0291
@@ -13,10 +15,12 @@ use std::time::Duration;
 
 mod identity;
 mod link;
+mod normalize;
 mod path_key;
 
 pub use identity::{file_identity, FileIdentity};
 pub use link::{link_dir, unlink_dir};
+pub use normalize::{is_reserved_device_name, normalize_folder, NotAbsolute};
 pub use path_key::{path_key, same_path, PathKey};
 
 const ERROR_ACCESS_DENIED: i32 = 5;

@@ -15,7 +15,7 @@
 //! now — Restart Manager) · [`fs`](opening while denying others' writes · classifying that failure — sharing
 //! violation · access denied · the verdict and retry for a failure caused by someone holding it briefly ·
 //! folder sync · creating and walking directory links — Windows junction · path keys and path comparison ·
-//! file identity) · [`spawn`](spawning without a window · spawning as a tree root with a kill handle for that
+//! folder-path normalization · the Win32 reserved-device-name test · file identity) · [`spawn`](spawning without a window · spawning as a tree root with a kill handle for that
 //! tree — Windows = spawn suspended, put in the group, then resume · the "program not found" verdict of a
 //! failed shell · spawning outside this process's Job — Windows = WMI) · [`shell`](the interactive default
 //! shell · wrapping a CLI in a console shell) · [`env`](home directory · executable file name · the path of

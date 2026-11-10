@@ -1,0 +1,23 @@
+[package]
+name = "engram-dashboard-asset-library"
+version = "0.1.0"
+edition = "2021"
+description = "Engram Dashboard asset library — the preset library (instructions · skills · settings · presets) under one root: reference paths, reading and checking assets, resolving what an agent loads, launch materials. The daemon only wires it. Invariants and gates = the lib.rs header (ADR-0311)."
+
+# ADR-0311 decision 2: among workspace crates exactly agent · platform · command · base. The CI dependency-cap gate compares
+#   that name set (`.github/workflows/ci.yml`), so add a later dependency here only with that decision changed.
+# ★No test feature★ (ADR-0311 decision 4) — fakes are `#[cfg(test)]` inside this crate.
+# ★No network client and no process runner★ — the schema fetch and the CLI version read are seams the daemon plugs in.
+[dependencies]
+# The backend settings-check port and its registry (`backends.rs` — `AgentBackends`).
+engram-dashboard-agent = { path = "../engram-dashboard-agent" }
+# Path keys and folder-path normalization (`path.rs`).
+engram-dashboard-platform = { path = "../engram-dashboard-platform" }
+# Unused until the library commands land (step 10a) — kept now so the dependency-cap gate holds the final name set
+#   from the start (TRD S25 step-7 §3-1 · B1).
+engram-dashboard-command = { path = "../engram-dashboard-command" }
+# Unused until the store lands (step-7 P5 — `write_atomic` · `is_temp_name` · `sync::lock`) — kept now for the same gate.
+engram-dashboard-base = { path = "../engram-dashboard-base" }
+# The library reference spelling `LibPath` wraps `RelativePathBuf` (ADR-0315).
+relative-path = "2.0"
+thiserror = "1.0"

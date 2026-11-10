@@ -1,10 +1,11 @@
 //! Shared rules for data files — read decisions ([`parse`] · [`classify`] · [`load`]) · write decisions ([`Loaded::write_policy`] ·
 //! [`judge`] · [`check_cap`]) · capped reads ([`read_capped`] · [`read_file_capped`]) · atomic writes ([`write_atomic`] ·
-//! [`write_atomic_unless`]) · atomic copies ([`copy_atomic`] · [`copy_aside`]) · sweeping leftover temp files ([`sweep_temps`]).
+//! [`write_atomic_unless`]) · atomic copies ([`copy_atomic`] · [`copy_aside`]) · sweeping leftover temp files ([`sweep_temps`]) and the
+//! temp-name test ([`is_temp_name`]).
 //!
 //! It knows no file names · locations · schemas · version key names — each owner (store) owns those, and the part that
 //! belongs to the read rules is handed over as a [`Spec`]. The only names decided here sit next to the target: the temp file `<이름>.tmp<pid>.<번호>` · the set-aside copy
-//! `<이름>.corrupt`. ★Only here are the code that makes that shape (`temp_path` · [`copy_aside`]) and the code that reads it (`temp_owner`)★ — if the shape
+//! `<이름>.corrupt`. ★Only here are the code that makes that shape (`temp_path` · [`copy_aside`]) and the code that reads it (`split_temp_name`)★ — if the shape
 //! changes, fix all three together (the tests read back the names they made and compare).
 //!
 //! ★「덮어도 되나」 (may we overwrite?) is decided again for every write, right before it, from the current file★ — the decision rule is one [`Loaded::write_policy`] table,
@@ -513,10 +514,27 @@ fn temp_path(path: &Path) -> io::Result<PathBuf> {
 /// has never been written in that shape, so we cannot assert such a name is ours, and a file that may be someone else's is not deleted.
 /// If a target written in the old shape is to be swept, look at this rule first.
 fn temp_owner(file_name: &str, target: &str) -> Option<u32> {
-    let rest = file_name.strip_prefix(target)?.strip_prefix(TEMP_MARK)?;
-    let (pid, n) = rest.split_once('.')?;
+    let (name, pid) = split_temp_name(file_name)?;
+    (name == target).then_some(pid)
+}
+
+/// Whether `file_name` (a bare name, not a path) has the temp-name shape `temp_path` writes, `<name>.tmp<pid>.<n>`, for
+/// any non-empty `<name>` — so a set-aside's `<x>.corrupt.tmp<pid>.<n>` is one too. The pid · number rule is
+/// `temp_owner`'s (exact decimals). It reads the name only; it does not say whose file it is or whether it may be deleted
+/// (that is [`sweep_temps`]).
+pub fn is_temp_name(file_name: &str) -> bool {
+    split_temp_name(file_name).is_some()
+}
+
+/// `<name>.tmp<pid>.<n>` → (`<name>`, pid). The number has no `.`, so the last `.` ends `<pid>`; the pid has no `.tmp`,
+/// so the last `.tmp` before it ends `<name>`.
+fn split_temp_name(file_name: &str) -> Option<(&str, u32)> {
+    let (head, n) = file_name.rsplit_once('.')?;
     exact_decimal::<u64>(n)?;
-    exact_decimal::<u32>(pid)
+    let mark = head.rfind(TEMP_MARK)?;
+    let name = &head[..mark];
+    let pid = exact_decimal::<u32>(&head[mark + TEMP_MARK.len()..])?;
+    (!name.is_empty()).then_some((name, pid))
 }
 
 fn exact_decimal<T: std::str::FromStr + ToString>(digits: &str) -> Option<T> {
@@ -955,6 +973,51 @@ mod tests {
             "state.crash.json.tmp12.3",
         ] {
             assert_eq!(temp_owner(name, "state.json"), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_made_temp_name_is_a_temp_name_for_any_target() {
+        for target in ["state.json", "state.json.corrupt", "a", "x.tmp1.2"] {
+            let temp = temp_path(&Path::new("dir").join(target)).unwrap();
+            let name = temp.file_name().unwrap().to_str().unwrap();
+            assert!(is_temp_name(name), "{name}");
+        }
+    }
+
+    // TRD S25 step-7 §8-1 P1 base row.
+    #[test]
+    fn only_the_exact_numbered_shape_is_a_temp_name_whatever_the_name() {
+        for name in [
+            "state.json.tmp12.3",
+            "state.json.tmp12.0",
+            "state.json.corrupt.tmp12.3",
+            "preset.yaml.tmp4294967295.18446744073709551615",
+            "x.tmp1.2.tmp3.4",
+            "a.tmp0.0",
+        ] {
+            assert!(is_temp_name(name), "{name}");
+        }
+        for name in [
+            "state.json",
+            "state.json.tmpX",
+            "state.json.tmp12",
+            "state.json.tmp12.",
+            "state.json.tmp.3",
+            "state.json.tmp12.3.4",
+            "state.json.tmp12.x",
+            "state.json.tmp+12.3",
+            "state.json.tmp12.+3",
+            "state.json.tmp012.3",
+            "state.json.tmp12.03",
+            "state.json.tmp4294967296.3",
+            "state.json.tmp12.18446744073709551616",
+            "state.json.tmp-1.3",
+            "state.json.tmp 12.3",
+            ".tmp12.3",
+            "",
+        ] {
+            assert!(!is_temp_name(name), "{name}");
         }
     }
 
