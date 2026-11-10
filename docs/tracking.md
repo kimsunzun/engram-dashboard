@@ -50,6 +50,7 @@
 | T-59 | Job 멤버 명단이 「멤버 수 ≠ 명단 수」로 4 번 안에 완전해지지 않는 flake | 버그 | 미착수 · 선재(platform) · CI 1 회 관측 |
 | T-64 | 합쳐진 replay 의 후속 Subscribe 가 창 닫힌 뒤 나가 구독이 샌다 | 버그 | 미착수 · 선재 |
 | T-79 | Shell–daemon link freezes while still showing "connected" (killing a PTY agent mid-burst) | 버그 | Fixed — merged to master (S34, `baa97e41`); remove when convenient |
+| T-83 | Daemon test `ws_e2e case09_slow_consumer_closed_others_unaffected` fails intermittently | 버그 | Not started · flaky (3 failures 2026-11-09~10) |
 | T-80 | A spewing agent shown in a slot makes the daemon close the connection on a full send queue → reconnect/replay storm | 버그 | Not started · pre-existing · left out of 3-3 (replace-only scope, user 2026-11-10) |
 | T-71 | 트래킹 번호를 가리키지 않기 — 해결되면 그냥 지우기 | 사소한 기능·정리 | 할 일 — 나중에 이슈로 |
 | T-70 | 브랜치 앞 버전 짐작 기준 — 기능이면 0.5.0 쪽 | 사소한 기능·정리 | 할 일 — 나중에 이슈로 |
@@ -329,6 +330,12 @@
 - **Repro (QA, isolated data dir, non-token fixture agent printing a 20000-line burst then a line every 20 ms):** spawn it; open an extra `subscribeOutput` view on no slot (its watchdog asks for replay every 11 s); after ~30 s put the agent on a slot (replay gen 1); the stray view's next asks go out as real replays (gen 2, gen 3); ~0.3 s after gen 3 spawn and kill a second agent.
 - **Symptom:** the daemon carries out the kill but its reply never arrives; from then on every request fails at 30 s with the reply-timeout text; output freezes in every view; `daemon_connection_state` stays `connected` for 3–4+ minutes — neither the shell keepalive nor the daemon idle check cuts the link. Both sides idle on CPU; the shell actor still answers; the daemon still serves other clients but ignores commands on the stuck connection. `daemon_close` + `daemon_ensure` recovers on a new connection; the old socket stays in FinWait2 on the shell side.
 - **Cause (confirmed by investigation + probes; S34 TRD §2):** not the shell. The daemon ran `Kill` inline on the connection's async dispatch task; `PtyTransport::shutdown` stopped the pump's reads and then dropped the master, so `ClosePseudoConsole` blocked forever on undrained conhost output; the blocked worker also starved the connection's writer (tokio LIFO slot), and the daemon's read side kept answering pings, so neither keepalive fired. The earlier suspicion (shell stops reading / daemon blocked in a send) was refuted.
+
+### T-83. `ws_e2e case09_slow_consumer_closed_others_unaffected` fails intermittently
+- **Status:** not started (recorded 2026-11-10).
+- **Symptom:** in a full `cargo test --workspace -- --test-threads=4` run the daemon test panics at `crates/engram-dashboard-daemon/tests/ws_e2e.rs:933` 「느린 소비자 연결은 서버가 닫아야 함」 (the server did not close the slow consumer's connection in time); the same test run alone passes.
+- **Seen:** 2026-11-09 (S21 3-2 U5b-1 coder run, before any daemon change), 2026-11-10 (3-3 U5b coder run), 2026-11-10 (QA of the stop-order change — a shell-only change; the base copy passed it alone). Likely a timing bound under load; not investigated.
+- **Next:** find whether the test's wait bound or the daemon's slow-consumer close is load-sensitive.
 
 ### T-80. A spewing agent shown in a slot triggers a reconnect/replay storm
 - **Status:** not started · pre-existing — reproduced on master's daemon with the old shell driver (S34 QA base run: 67 reconnects in 4 s, no kill involved). Found 2026-11-07 by the S34 GUI QA.
