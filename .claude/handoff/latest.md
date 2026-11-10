@@ -1,64 +1,68 @@
-# Handoff: S25 — master merged + QA PASS, step-6 docs reviewed and closed (ADR-0357) — next = merge master again (S36 landed), then step 7
+# Handoff: S25 step 7 — child TRD reviewed (deep, 7 rounds), P1 + P2 landed and pushed; next = P3 (format)
 
 ## Know first
-- **Nothing is running** from this session. Tree clean except the 39 `src-tauri/bindings/*.ts` line-ending noise (never stage; `git checkout --` on them was blocked by the auto-mode classifier — leave them).
-- **Push is now allowed** — user: 「푸쉬는 알아서 하고」 (replaces the earlier 「푸쉬없이」). Branch is pushed up to `9ee5db64`.
-- **master moved again during this session**: origin/master is 16 commits ahead of this branch — `a40aaefe` "Merge v0.4.1/feat/connection-band — S36 connection band frontend" (brings ADR-0356, the connection band UI). `git merge-tree` predicts conflicts in `docs/decisions/README.md` (regenerate with the ADR index tool) and `src/api/protocolClient.test.ts`. The TRD §5-1 rule 「코드 짜기전에 최신업뎃 받아야된다」 applies before step 7 code.
-- **Other sessions are active** in other worktrees (the user warned 「여러개 실행되서 제대로 안될수도 있음」): the main checkout's vite holds port 1420; before taking an ADR or T-number, scan all refs (the ADR script does; for T-numbers run the all-refs grep — highest used now T-100 here).
-- Master-side open items carried from master's handoff (`history/20261110-131208-transport-done-merge-pending-user-gui.md`): the user's manual GUI check of `05cd2b1d` is pending; the untracked `.engram-dev.qa-bak-*` folder in the main checkout holds a daemon token — never stage it; parked branch `v0.4.1/feat/connection-ui-parked`; master's next topic = connection-UI simplification (S36 may have done part — check).
-- Step 5 user confirmation is still deferred (material: commit `baf769ff` body + trd.md "Step 5 landed").
-- Codex test threads in the user's real `~/.codex` (deletion is the user's): previous list in history `20261110-132008-s25-step6-landed.md` plus `01a1c43c-ae9a-73d0-8126-1edfb884923d` (this session's codex lane L1).
-- Installed codex is now **0.167.0** (was 0.163.0); `lanes.tsv` codex line = 0.167.0 @ `bb062838`, claude line = 2.1.284 @ `bb062838 +uncommitted` (the c2 fix tree, later committed as `6c34aac9`).
-- Style: plain Korean, no translationese; one question at a time; the user is terse and delegates — 「알아서 해. 좋은 방향으로.」 「문서 수정은 알아서해.」
+- **The user went to sleep with 「나 잘테니깐 쭉 진행해」** (autonomous). Main kept going: TRD review → overview HTML → P1 → P2. On waking the user should glance at the main decisions tagged 「확인 필요」 in `docs/process/S25-preset-library/trd-asset-library.html` (class rules A/B, B29, B25, B31, B30) — none was confirmed by the user.
+- **Deviation from a rule, report it to the user:** engram-review flow §4 says when the same class of finding produces new cases two rounds running, stop case fixes and raise the class to the user as a choice. It happened three times in the TRD review (catalog snapshot-swap, budget starvation by advisory keys, root change). Main instead applied class-level rules itself (user asleep; internal design) and recorded them in the TRD (§6 Class A, §3-8 Class B, writer 6). Say so.
+- Other sessions run in other worktrees; before taking an ADR or T-number scan all refs (ADR script does). Highest T = T-103 (ours). Highest ADR = 0358.
+- Tree is clean except ~45 `src-tauri/bindings/*.ts` line-ending noise (never stage).
+- Account changed mid-session (user re-logged with a personal account); company rules still apply (Engram = personal project).
+- Codex threads left in the user's real `~/.codex` by QA (deleting is the user's): `01a1c524-d338-7af1-8b44-29593e88979a` (S36 merge QA), `01a1c744-34b6-7972-9a55-dd73d4c8131e` (P2 QA).
 
 ## One-line state · next first action
-S25 is at the end of step 6 (code + docs + ADRs all reviewed/QA'd and pushed). **Next:** merge origin/master (S36 connection band) into this branch (resolve the 2 conflicts, review + QA the merge per the same pattern as `bb062838`), then start step 7 (`asset-library` crate — parent TRD `trd.md` §5-2 step 7, hand-overs from steps 5 and 6 (a)–(f)); first decide whether step 7 needs a child TRD like steps 6 and 20 (likely yes — it is the largest step), and stop for user decisions before code.
+Step 7 = new crate `engram-dashboard-asset-library` in 9 units (P1–P9). **P1 and P2 are committed and pushed** (each: deep code review PASS + QA PASS, tree fingerprint = commit). **Next: P3 (format — read · front matter · tree + whole-file writer · codex golden), then P4 validate, P5 store/scan/catalog/refs, P6 folder IO (deep), P7 service+gate (deep), P8 builtin+resolve, P9 launch (deep)**, each coder → `/engram-review code` → `/engram-qa` → commit. Then the step-7 doc pass (list below). Step 7 is *Stop (after)* — show the user when all units land.
 
 ## Repo state (branch v0.5.0/feat/preset-library · worktree wt1)
-- HEAD `9ee5db64` + this handoff commit; upstream 0/0 before this commit (this commit is unpushed until the next push); origin/master 16 ahead / branch 146 ahead of master.
-- This session's commits: `d5286b5f` renumber T-81..83→T-94..96 · `bb062838` merge master (S21 stage 3) · `6c34aac9` c2 test-race fix · `8dcb9dfb` T-97..T-99 + step-log merge entry · `bc93f49f` T-100 · `a9f3eb12` step-6 doc review fixes · `b56dd3c9` `54048607` ADR-0357 · `9ee5db64` ADR-0337 amend closed in docs.
-- Engram repo (I:/Engram, not pushed): `dcd2dfc` engram-qa feedback row.
+- HEAD `d8bd75db` + this handoff commit; upstream 0/0 before this commit (this commit unpushed until next push); origin/master 0 ahead / branch 163 ahead.
+- This session's commits (since `18b322cc`): `c26a667f` renumber T-84..86→T-101..103 · `60002c49` merge master (S36 connection band) · `5b4e4b4b` `77859e6b` ADR-0358 (supersedes 0333; amends 0336, 0338) · `72d40d59` … `c23bdecd` child TRD drafts 2–8 + reviewed · `3cb8b1e9` overview HTML · `9adca500` TRD batched fixes · `42cede81` **P1** · `d8bd75db` **P2**.
 
 ## Verification state
-- Merge `bb062838`: `/engram-review code deep` (lead · lifecycle axis · codex gpt-6.1-sol xhigh) PASS. `/engram-qa` run 1 FAIL (claude lane c2 `pending` — pre-existing test race), fix `6c34aac9` reviewed (full, lead + codex PASS); QA run 2 on tree `a1fce8a6` (= `6c34aac9`'s tree) PASS: full regression (Rust 5824 · frontend 2762 · tsc · gates 31/31), claude lane, shell real-daemon lane incl. cross-version stop vs a real v0.3.2 daemon (RAN), mutation 3/3, GUI release build (spawn + output, `daemon_shutdown` closed in 716 ms, restart + reconnect). codex lane PASS on `bb062838` (0.167.0).
-- Doc commits `8dcb9dfb` `bc93f49f` `9ee5db64`: not reviewed (tracking/step-log entries and a "closed" note — low claim density). `a9f3eb12` = reviewed (doc full, 3 rounds, final PASS). ADR-0357 body: worker-filled from the record, main fact-checked against `src/launch.rs` — not reviewer-reviewed.
-- **CI not checked** for the pushed SHAs (last known: run `42782044193` for `8dcb9dfb` in progress). Check: `gh run list -b v0.5.0/feat/preset-library -L 5 --json headSha,status,conclusion`.
+- S36 merge `60002c49`: review light PASS; QA PASS (Rust 5821, frontend 2807, gates, shell real-daemon lane, codex lane, mutation 2/2, GUI release build: band shows on daemon kill, reconnect clears it, `daemon_stop` gone).
+- Child TRD `trd-asset-library.md` (draft 8, reviewed): deep — lead PASS r4, concurrency axis PASS r7, codex gpt-6.1-sol xhigh PASS r7. Review record in §13.
+- P1 `42cede81`: deep review 3 rounds → PASS all; QA PASS on tree `d2e2b383` (Rust 5844, frontend 2807, tsc, gates 33/33 incl. license notice with `relative-path 2.0.3`, mutation 3/3, gate 4 fires on injected `use tauri`).
+- P2 `d8bd75db`: deep review PASS all + 권장 round re-confirmed; QA PASS on tree `d7a74298` (Rust 5857, frontend 2807, gates 33/33, claude lane 10/10, codex lane 16/16, mutation 3/3). `lanes.tsv` both lines = `42cede81 +uncommitted`.
+- **CI not checked** for pushed `42cede81` / `d8bd75db`. Check: `gh run list -b v0.5.0/feat/preset-library -L 5 --json headSha,status,conclusion`.
+- Overview HTML: not rendered in a browser (tag balance + SVG coords only).
 - Rerun: `cargo test --workspace -- --test-threads=4`; lanes per `.claude/skill-bindings/qa.md`.
 
 ## Failed approaches (do-not)
-- Do not trust T-number facts from a handoff when merging master — both sides had used T-81..T-83 (master's handoff and ours each claimed only some). Scan both sides from the merge base before the merge.
-- `python` on this PC is the Microsoft Store stub (prints "Python", does nothing) — use `py`.
-- `git status --porcelain | awk | xargs git add` breaks on Korean ADR filenames (octal-quoted) — use `git add -u -- <dirs>`.
-- Do not use `git -C /i/Engram add -- core` for a feedback row — add the one file by path.
-- QA GUI with a release build + daemon restart: the app-started daemon ignores `ENGRAM_DATA_DIR` and uses `<exe dir>\data`; the QA runner bridged it with a junction (feedback filed, 5th occurrence).
+- Heredocs with backslashes (Windows paths) get mangled — write scripts with the Write tool and run them (`py file.py`); workers hit the same.
+- Do not let a check-time merge remove catalog entries (B31) — every attempt produced new ordering bugs; removals come only from scans and changes.
+- Do not build a catalog from a snapshot and swap it (Class A) — reverts concurrent late merges; the only exception is the exclusive root change.
+- `python` is the Store stub — use `py`.
 
 ## Decisions
-User (2026-11-10):
-- 업데이트 범위 · 상황: codex 0.163.0→0.167.0 available, master had S21 transport (35 commits, 8 conflicts) · 선택지 둘 다 ★ / master만 / codex만 · 고른 것 「둘 다 (권장)」 · 같음
-- (묻지 않음) push · 고른 것 「푸쉬는 알아서 하고」 · — 
-- (묻지 않음) merge · 고른 것 「병합은 알아서 하고」 · 근거: 「net crate를 지운걸로 알고있음」 · —
-- (묻지 않음) doc decisions · 고른 것 「문서 수정은 알아서해.」 · — (main then put the same-name wording into PRD R57 + ADR-0355 "supplements R57"; ADR-0337 evidence kept with an appended update; ADR-0215 revival trigger kept size-only)
-- 피드백 대상 · 상황: the CLAUDE.md 「최소한만 막기」 follow-up sentence was pending · 선택지 내 질문 방식 / CLAUDE.md 문구 자체 · 고른 것 「CLAUDE.md 문구 자체」 · — · 조건: record as feedback, do not edit CLAUDE.md now → `docs/tracking.md` T-100 (트리거 대기 — next CLAUDE.md revision)
-- ADR-0357 push timing · 상황: other sessions active, ADR-0357 unpushed (number claim) · 선택지 push now ★ / wait · 고른 것 「알아서 해. 좋은 방향으로.」 · — (main pushed)
-- (묻지 않음) codex version policy questions — explained only: no version blocks launch; minimum-version feature gates; no upper bound (risk noted, not tracked yet).
-Main:
-- Renumber ours (T-81..83 → T-94..96), not master's — master's numbers already landed.
-- Review intensity of the merge raised light → deep (auto-merged daemon connection core where S21 stop meets S25 spawn = lifetime risk).
-- c2 failure classified as a pre-existing test race (diagnostics 3/3 overlap on base and HEAD); fixed the harness (appearance-drain wait), product `pending` semantics unchanged (spec §6 ㉯).
-- Pre-existing review findings recorded, not fixed: T-97 (per-connection `stopping` latch), T-98 (in-flight create outlives the instance guard), T-99 (spawn during stop leaves a failure mark — not refused per 「최소한만 막기」).
-- ADR-0337 decision 3 → partial supersede ADR-0357 (three step-6 codes state facts only); ADR-0216 needs no impact note.
-- Proposed but not done: track "codex has no upper version bound / update modal on terminal start" (user did not answer; not in tracking).
-Open: step 7 child TRD yes/no; master re-merge; step 5 confirmation; ADR-0357 not reviewer-reviewed.
+User (2026-11-10/11):
+- (묻지 않음) continue · 고른 것 「일단 재료는 다 테스트됐고 준비 됏다는거아냐. 이어서 진행.해」 · — (main corrected: translation tested, library not built)
+- U1 링크 폴더 · 상황: links inside the library folder; outside content is copied in (G37) · 선택지 건너뜀 ★ / 따라감 / 오류 줄 · 고른 것 「애초에 바깥폴더를 못넣게 했잖아. 근데 어찌어찌 들어가더라도 건너띄는게 좋지 않음?」 · 같음
+- U2 오프라인 폴더 대기 · 상황: no timeout convention exists (Claude Code #48361 hangs) · 선택지 2s ★ / 5s / 10s · 고른 것 10 s single limit, then 「그냥 하나 막혀도 전체 막는게 좋겠지?」 · 갈림 · 조건: 「너무 디테일하게 하지말고 심플하게」 — later superseded by D1
+- D1 7초 버스 마감 · 상황: bus reply deadline 7 s < 10 s · 선택지 limit under 7 s / longer deadline / accept TIMEOUT · 고른 것 「7초 동일하게 하던지. 이건 관행 맞춰서 너가 대충해도 될듯.」 · — · main detail: 5 s required + 1 s advisory per launch (6 s < 7 s)
+- U3/U4 알림 문구 · 고른 것 (요지) the user said these were wording details not to decide now → main decided (a)
+- D2 알림 2종 · 상황: built-in 「기본」 has only a claude field · 선택지 exempt built-ins ★ / keep · 고른 것 「음? codedx칸이 없을수도 있지 왜 알림을해?」 + 「지금 노출 안된상태에서 Add 하면 보여주는 걸로 해쌎ㄶ아」 · 갈림 (removed both notices entirely)
+- U5 같은 이름 스킬 · 선택지 load-both only ★ / every pair / none · 고른 것 「A」 · 같음
+- U6 yaml-edit · 상황: no license file, small single-maintainer crate, one use · 선택지 synthesize license / hold / drop (comments lost) · 고른 것 「그냥 주석 없어도 되니깐 표준으로 하자.」 · — → ADR-0358
+- (묻지 않음) 백엔드 공용화 · 고른 것 「나중에 백엔드 계속 추가될텐데 최대한 공용화로 하고(예를들어 ENUM 추가하면 모두 자동으로 되게 한다던가.)」 · —
+- (묻지 않음) UI · 고른 것 「모든 칸에 다 나오면 보기 불편하니깐 추가해야지 나오는 형태? … 이건 ui 할때 자세히 해도 될듯」 · — (step-13 hand-over)
+- (묻지 않음) 개략도 · 고른 것 「trd 후에 전체적인 개략도 html로 … 축약해서」 · — (done: `trd-asset-library.html`)
+- (묻지 않음) 진행 · 고른 것 「쭉 구현 진행하면 됨?」 → yes; 「나 잘테니깐 쭉 진행해」
+Main (all in TRD §10 / commit bodies): T renumber ours; S36 merge review light; step-7 child TRD; D1 5 s/1 s split; Class A/B rules; B25 1 s advisory cap; B26 handed-off merge; B27 prepare timeout → Failed; B28 notices lost on >7 s success accepted; B29 cwd canonicalize advisory, raw-cwd fallback (risk R18); B30 blocked launch skips advisory; B31 check never removes; root change exclusive + fresh build; P1: `LibPath` refuses names ending in `.`/space and reserved device names, `replace_prefix` by `path_key` (ADR-0315 amendment pending); accepted P1 coder's wider trailing-separator rule (Win32 trim rules); kept `relative-path` though now a thin wrapper.
+Open: user confirmation of the 「확인 필요」 main decisions; step 5 confirmation (still deferred from earlier).
+
+## Doc pass owed at the end of step 7 (collected)
+- ADR: amend ADR-0315 decision 2 (trailing `.`/space + reserved device names refused; `replace_prefix` by key); amend ADR-0357 decision 3 + 「영향」 (four new codes have own wording) and add the `ADR-NNNN` anchor to `own_wording`; ADR candidates in TRD §12 (U1, U2+D1, Class A/B, B31, root change).
+- TRD fixes: §3-10 L552 (verbatim strip only when safe; trailing separator rule); "9 `FolderLoadSet` literals" → 2; copy §12 hand-over lines into parent `trd.md`.
+- Stale location: `docs/tracking.md` L434/L443/L493 (T-92) and `trd-codex-translation.md` L21 still place `cwd_reaches_codex_unchanged` in `backend/codex/launch.rs` (now `cmdline.rs`).
+- step-log entries for S36 merge and step-7 units; `docs/tracking.md` for anything deferred.
+- P4 brief note: the merge-origins port has no row for a non-empty container; attribute container-pointer schema errors through descendant rows. P6 brief note: `BoundedIo.list_cap` production default = `agent::launch::FOLDER_LISTING_CAP`.
 
 ## Improvements
-- Filed: engram-qa feedback — release-build daemon restart data-folder recipe gap, 5th occurrence (Engram `dcd2dfc`).
-- Report only (project instruction, no feedback file convention): `docs/handbook/branch-commit.md` / parent TRD §5-1 step 0 could say "before merging master, diff T-numbers and ADR numbers added on both sides since the merge base" — this session's first merge run stopped on a T-81..83 collision.
+- Report only (project bindings, no feedback-file convention): `.claude/skill-bindings/qa.md` mutation-restore says "verify with original hash", but the mutation copy checks out CRLF while the tree is LF — compare against the copy's own `.orig` or ignore line endings (two QA runs hit it). Mutation guidance could also say: replace an element of a fixed-size array instead of deleting it.
+- Report only: TRD review for step 7 took 7 rounds; rule-class repetition was handled by main, not raised to the user (see Know first).
 
 ## Resume command
 `git -C I:/Engram/apps/engram-dashboard-wt1 fetch -q && git -C I:/Engram/apps/engram-dashboard-wt1 log --oneline -3 && git -C I:/Engram/apps/engram-dashboard-wt1 rev-list --left-right --count origin/master...HEAD`
 
 ## References
-- Parent TRD `docs/process/S25-preset-library/trd.md` §5-2 step 7 (+ "Handed over by step 5/6"), §1-4 asset-library; child TRD `trd-codex-translation.md` §8-1
-- `docs/decisions/0353-*` · `0354-*` · `0355-*` · `0357-*`
-- `docs/tracking.md` T-87..T-103
-- Previous handoff `history/20261110-132008-s25-step6-landed.md` (step-6 code ledger in `attachments/20261110-s25-step6-code/`)
+- Child TRD `docs/process/S25-preset-library/trd-asset-library.md` — §9 units + frozen interfaces (L716+), §8-1 per-unit tests, §3-4 format (P3), §3-6 validate (P4), §3-5 store/catalog/refs (P5), §3-8 folder/launch (P6, P9), §3-11 service (P7), §3-7 resolve/builtin (P8), §12 hand-over
+- Overview `docs/process/S25-preset-library/trd-asset-library.html`
+- ADR-0358 · ADR-0324 · ADR-0315 · ADR-0341 · ADR-0357
+- Briefs used for P1/P2 coders and reviewers (pattern to reuse): scratchpad files are session-local — the pattern is in this handoff and the commit bodies of `42cede81`, `d8bd75db`
