@@ -1,6 +1,7 @@
 //! Backend settings-check port — the settings knowledge that differs per backend (schema source · CLI version read ·
-//! raw text → JSON · merge · unknown-key policy · what a mode loads · folder-entry path guard · folder load set), in
-//! one trait. The registry is [`super::settings_checks`] / [`super::settings_check_for`].
+//! raw text → JSON · merge · unknown-key policy · what a mode loads · folder-entry path guard · folder load set ·
+//! skill format · command-line guard and budget · the backend's own skill folders), in one trait. The registry is
+//! [`super::settings_checks`] / [`super::settings_check_for`].
 //!
 //! ★Pure — an implementation never touches the disk, the network or a process★: the schema is fetched by the caller
 //!   (the port only names the address), the CLI version is read by the caller running [`VersionProbe`], and a folder's
@@ -13,8 +14,10 @@
 // ADR-0334
 // ADR-0004
 
-use std::path::{Path, PathBuf};
+use std::ffi::OsStr;
+use std::path::{Component, Path, PathBuf};
 
+use engram_dashboard_platform::fs::same_path;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
@@ -73,6 +76,95 @@ pub trait SettingsCheck: Send + Sync {
         parser: &dyn FrontMatterParser,
         mode: AgentOutputFormat,
     ) -> FolderLoadSet;
+
+    /// The format check this backend runs on one library skill in `mode` — the same rules the CLI uses to load or
+    /// skip a skill. `file_name` = the file's own name (the check requires exactly `SKILL.md` where the backend
+    /// does), `folder_name` = the skill folder's name (the fallback name), `text` = the whole file.
+    /// A backend or mode that loads skills without a format check answers [`SkillFormat::NotChecked`].
+    fn skill_format(
+        &self,
+        file_name: &str,
+        folder_name: &str,
+        text: &str,
+        parser: &dyn FrontMatterParser,
+        mode: AgentOutputFormat,
+    ) -> SkillFormat;
+
+    /// The command-line arguments one raw settings value of this backend adds, exactly as they go on the line
+    /// (codex: `-c`, `key=value`, `-c`, `key=value`, … — flag and value alternating), each passing this backend's
+    /// command-line guard. `Err` = a line the command line cannot carry (problem ②).
+    /// A backend whose raw settings never reach the command line answers `Ok(vec![])`.
+    fn command_line_args(&self, raw: &Value) -> Result<Vec<String>, Reason>;
+
+    /// Whether the launch command line holds all of `line`, counting the pieces only the launch knows (the control
+    /// channel, a resume id) at their upper-bound length. `Err` = over the budget, or an instructions text the
+    /// command line cannot carry (problem ②). A backend with no command-line budget answers `Ok(())`.
+    fn command_line_fits(&self, line: &CommandLine<'_>) -> Result<(), Reason>;
+
+    /// The skill folders this backend reads by itself in `mode`, besides the roots Engram passes — the input of the
+    /// same-name notice. Pure: candidate paths and rules only; the caller stats and lists them. Empty for a backend
+    /// or mode that needs no such notice.
+    fn native_skill_roots(
+        &self,
+        places: &NativePlaces<'_>,
+        mode: AgentOutputFormat,
+    ) -> NativeSkillRoots;
+
+    /// The skills this backend loads from one skill root, predicted from a listing of that root (paths relative to
+    /// the root) — the same walk and format check as the skill roots inside [`SettingsCheck::folder_load_set`].
+    /// Fills `loads` (`Skill` rows only), `skill_names`, `malformed` and `unsure`.
+    fn root_skills(
+        &self,
+        entries: &[FolderEntry],
+        read: &dyn Fn(&Path) -> std::io::Result<String>,
+        parser: &dyn FrontMatterParser,
+    ) -> FolderLoadSet;
+}
+
+/// Where a backend's own skill folders are looked for ([`SettingsCheck::native_skill_roots`]).
+pub struct NativePlaces<'a> {
+    pub home: &'a Path,
+    /// The agent's normalized working folder.
+    pub cwd: &'a Path,
+    /// An environment variable as the agent's process would see it (the profile env over the daemon's).
+    pub env: &'a dyn Fn(&str) -> Option<String>,
+}
+
+/// The candidates of [`SettingsCheck::native_skill_roots`]. All empty = no native roots to look at.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NativeSkillRoots {
+    /// Roots read as they are (absolute).
+    pub fixed: Vec<PathBuf>,
+    /// Root paths (relative) looked for in `cwd` and in each parent up to the project root.
+    pub per_folder: Vec<PathBuf>,
+    /// The names whose presence in a folder marks it as the project root. None found = `cwd` only.
+    pub project_markers: Vec<String>,
+}
+
+/// The result of [`SettingsCheck::skill_format`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkillFormat {
+    /// The backend loads the skill without a format check.
+    NotChecked,
+    /// The identity the backend gives the skill.
+    Valid { name: String, description: String },
+    /// The backend skips the skill. A front-matter parse failure carries the line of the file, from 1.
+    Invalid(Reason),
+}
+
+/// One launch command line as [`SettingsCheck::command_line_fits`] counts it.
+pub struct CommandLine<'a> {
+    pub mode: AgentOutputFormat,
+    /// The normalized working folder (codex terminal puts it on the line with `--cd`).
+    pub cwd: &'a Path,
+    /// The agent's pass-through arguments (`command.extra_args`).
+    pub extra_args: &'a [String],
+    /// What [`SettingsCheck::command_line_args`] returned for the attached raw values, concatenated in attach
+    /// order — the exact arguments (flags included) that go on the line.
+    pub config_args: &'a [String],
+    /// The instructions text this mode puts on the command line (codex terminal: the merged instructions file,
+    /// which holds only the built-in priming). `None` = none.
+    pub instructions: Option<&'a str>,
 }
 
 /// Address and refetch rule of one backend's settings schema.
@@ -87,6 +179,9 @@ pub enum SchemaRefetch {
     /// The address serves one latest copy whatever the CLI version. When the installed CLI version differs from the
     /// one last checked, fetch it again with a conditional request.
     LatestOnCliVersionChange,
+    /// The address names the schema of exactly this CLI version. Fetch it once per version; the same version never
+    /// needs a new fetch.
+    PerCliVersion,
 }
 
 /// A command to run once to read a CLI version — `(program, args)` already shaped for the OS (a CLI shim is wrapped),
@@ -135,6 +230,32 @@ pub trait FrontMatterParser {
     /// The front matter of a file whose `paths` field the port reads (a claude rule or skill file).
     fn paths(&self, text: &str) -> Result<PathsFrontMatter, FrontMatterError>;
     fn subagent(&self, text: &str) -> Result<SubagentFrontMatter, FrontMatterError>;
+    /// The front matter of a `SKILL.md` as codex reads it.
+    fn skill(&self, text: &str) -> Result<SkillFrontMatter, FrontMatterError>;
+    /// Whether `text` alone parses as a YAML document holding any value — the question codex's front-matter
+    /// repair asks of a value that starts with `[`, `{`, `@` or `` ` ``.
+    fn is_yaml_value(&self, text: &str) -> bool;
+}
+
+/// The fields codex reads from a `SKILL.md` front matter, typed the way codex deserializes them (`SkillFrontmatter`
+/// in `codex-rs/skills/src/parser.rs` at `rust-v0.163.0`). A value of the wrong type is a parse failure, so the
+/// codex repair runs. Unknown keys are ignored.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct SkillFrontMatter {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Absent = the default (no short description) — codex types it as a plain struct with a default, not an
+    /// `Option`.
+    #[serde(default)]
+    pub metadata: SkillMetadata,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct SkillMetadata {
+    #[serde(default, rename = "short-description")]
+    pub short_description: Option<String>,
 }
 
 /// The `paths` field of a claude rule or skill file's front matter.
@@ -185,11 +306,24 @@ pub struct FolderLoadSet {
     pub loads: Vec<FolderLoad>,
     /// Entries the backend may load from, whose answer the port could not decide.
     pub unsure: Vec<FolderUnsure>,
+    /// Skills under a skill root that fail the backend's format check — the backend skips them. A mark for the
+    /// preview, never a block (Engram passes the root, not the skill). Not `unsure`: `unsure` means "the backend's
+    /// finer rules were not predicted", this means "the format check failed".
+    pub malformed: Vec<FolderMalformed>,
+    /// The names the backend gives the skills in `loads` (codex: the front-matter `name`, else the folder name),
+    /// one row per loaded skill, in `loads` order. Empty for a backend that does not name folder skills.
+    /// Codex's plugin namespace (`plugin:name`, given when a plugin manifest sits on the skill's own ancestry
+    /// inside the root) and its cap on the qualified name are not predicted — for such a layout the names, the
+    /// same-name notice and the `loads` rows can differ from codex's.
+    pub skill_names: Vec<FolderSkillName>,
+    /// What another mode of the same backend loads from this folder and this mode does not (codex terminal: the
+    /// codex JSON set) — the input of the omission notice. Empty when nothing is omitted.
+    pub omitted: Vec<FolderLoad>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FolderLoad {
-    /// Relative to the folder, as listed.
+    /// Relative to the folder, as listed — for a [`FolderLoadKind::SkillRoot`], the root folder.
     pub path: PathBuf,
     pub kind: FolderLoadKind,
 }
@@ -201,6 +335,22 @@ pub enum FolderLoadKind {
     Skill,
     Agent,
     Command,
+    /// A folder the backend walks for skills by itself (codex: passed as an extra skill root).
+    SkillRoot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FolderMalformed {
+    /// Relative to the folder, as listed.
+    pub path: PathBuf,
+    pub reason: Reason,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FolderSkillName {
+    /// Relative to the folder, as listed — the skill's `SKILL.md`.
+    pub path: PathBuf,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -233,6 +383,34 @@ pub enum UnsureWhy {
     HookKeys,
     /// A command folder that holds a `skill.md` — the backend keeps only that file of the folder.
     SkillFileInCommandFolder,
+}
+
+/// `2.1.284` — dot-separated digit groups (at least two), optionally followed by `-` or `+` and a suffix.
+pub(super) fn is_version(word: &str) -> bool {
+    let core = word.split(['-', '+']).next().unwrap_or_default();
+    let groups: Vec<&str> = core.split('.').collect();
+    groups.len() >= 2
+        && groups
+            .iter()
+            .all(|g| !g.is_empty() && g.bytes().all(|b| b.is_ascii_digit()))
+        && word[core.len()..]
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
+}
+
+/// The components of a listed path — `None` = it has a component other than a normal one.
+pub(super) fn normal_parts(path: &Path) -> Option<Vec<&OsStr>> {
+    path.components()
+        .map(|component| match component {
+            Component::Normal(part) => Some(part),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A name the backend opens by a joined path — the OS decides whether case matters.
+pub(super) fn is(part: &OsStr, name: &str) -> bool {
+    same_path(Path::new(part), Path::new(name))
 }
 
 #[cfg(test)]

@@ -757,10 +757,10 @@ pub fn usage_probe_for(word: &str) -> Option<&'static dyn UsageProbe> {
 // ── Settings-check registry ────────────────────────────────────────────────────
 
 /// Every backend settings check — the caller (asset-library) gets each backend's settings knowledge only from here.
-/// A word with no entry gets no settings check — today only claude has one.
+/// A word with no entry gets no settings check — today claude and codex have one.
 // ADR-0334
-pub fn settings_checks() -> [&'static dyn SettingsCheck; 1] {
-    [&claude::CLAUDE_SETTINGS_CHECK]
+pub fn settings_checks() -> [&'static dyn SettingsCheck; 2] {
+    [&claude::CLAUDE_SETTINGS_CHECK, &codex::CODEX_SETTINGS_CHECK]
 }
 
 /// Backend word → its settings check, ASCII case-insensitive (the same entrances as [`usage_probe_for`]).
@@ -1991,11 +1991,19 @@ mod tests {
             extra_args: vec![],
             output_format: AgentOutputFormat::Terminal,
         });
+        let codex_word = crate::launch::backend_word(&AgentCommand::Codex {
+            extra_args: vec![],
+            output_format: AgentOutputFormat::Terminal,
+        });
         let keys: Vec<&str> = settings_checks().iter().map(|c| c.backend()).collect();
-        assert_eq!(keys, [claude_word.as_str()]);
+        assert_eq!(keys, [claude_word.as_str(), codex_word.as_str()]);
         assert!(std::ptr::addr_eq(
             settings_checks()[0],
             &claude::CLAUDE_SETTINGS_CHECK as &dyn SettingsCheck,
+        ));
+        assert!(std::ptr::addr_eq(
+            settings_checks()[1],
+            &codex::CODEX_SETTINGS_CHECK as &dyn SettingsCheck,
         ));
     }
 
@@ -2015,11 +2023,26 @@ mod tests {
 
     #[test]
     fn settings_check_for_ignores_ascii_case_and_refuses_unknown_words() {
-        for word in ["claude", "Claude", "CLAUDE"] {
+        for (word, backend) in [
+            ("claude", "claude"),
+            ("Claude", "claude"),
+            ("CLAUDE", "claude"),
+            ("codex", "codex"),
+            ("Codex", "codex"),
+            ("CODEX", "codex"),
+        ] {
             let check = settings_check_for(word).unwrap_or_else(|| panic!("{word}"));
-            assert_eq!(check.backend(), "claude", "{word}");
+            assert_eq!(check.backend(), backend, "{word}");
         }
-        for unknown in ["", "shell", "gemini", " claude", "claude ", "claud"] {
+        for unknown in [
+            "",
+            "shell",
+            "gemini",
+            " claude",
+            "claude ",
+            "claud",
+            "codex-cli",
+        ] {
             assert!(settings_check_for(unknown).is_none(), "{unknown:?}");
         }
     }

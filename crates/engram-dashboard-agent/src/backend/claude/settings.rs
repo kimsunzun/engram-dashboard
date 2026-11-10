@@ -7,16 +7,16 @@
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
-use std::path::{Component, Path};
+use std::path::Path;
 
-use engram_dashboard_platform::fs::same_path;
 use engram_dashboard_platform::shell::console_command;
 use serde_json::{Map, Value};
 
 use super::{CLAUDE_PROGRAM, NO_AUTOUPDATE_ENV};
 use crate::backend::settings_check::{
-    FolderEntry, FolderLoad, FolderLoadKind, FolderLoadSet, FolderUnsure, FrontMatterError,
-    FrontMatterParser, InstructionLoad, ModeLoads, SchemaRefetch, SchemaSource, SettingsCheck,
+    is, is_version, normal_parts, CommandLine, FolderEntry, FolderLoad, FolderLoadKind,
+    FolderLoadSet, FolderUnsure, FrontMatterError, FrontMatterParser, InstructionLoad, ModeLoads,
+    NativePlaces, NativeSkillRoots, SchemaRefetch, SchemaSource, SettingsCheck, SkillFormat,
     SubagentFrontMatter, UnknownKeys, UnsureWhy, VersionProbe,
 };
 use crate::launch::Reason;
@@ -118,7 +118,8 @@ impl SettingsCheck for ClaudeSettingsCheck {
     /// reserves for itself (e.g. sync-reserved names).
     ///
     /// Names claude opens by a joined path (the fixed folder and file names) compare by the OS path rule
-    /// ([`same_path`]); the `.md` suffix of walked files compares exactly, as claude's walker does.
+    /// ([`engram_dashboard_platform::fs::same_path`]); the `.md` suffix of walked files compares exactly, as
+    /// claude's walker does.
     // ADR-0341
     fn folder_load_set(
         &self,
@@ -165,6 +166,46 @@ impl SettingsCheck for ClaudeSettingsCheck {
             }
         }
         set
+    }
+
+    /// claude loads a library skill from its placed folder without a format check of ours.
+    fn skill_format(
+        &self,
+        _file_name: &str,
+        _folder_name: &str,
+        _text: &str,
+        _parser: &dyn FrontMatterParser,
+        _mode: AgentOutputFormat,
+    ) -> SkillFormat {
+        SkillFormat::NotChecked
+    }
+
+    /// The raw claude value goes into the merged `--settings` file, never onto the command line.
+    fn command_line_args(&self, _raw: &Value) -> Result<Vec<String>, Reason> {
+        Ok(vec![])
+    }
+
+    /// No claude command-line budget is claimed.
+    fn command_line_fits(&self, _line: &CommandLine<'_>) -> Result<(), Reason> {
+        Ok(())
+    }
+
+    /// No same-name notice for claude.
+    fn native_skill_roots(
+        &self,
+        _places: &NativePlaces<'_>,
+        _mode: AgentOutputFormat,
+    ) -> NativeSkillRoots {
+        NativeSkillRoots::default()
+    }
+
+    fn root_skills(
+        &self,
+        _entries: &[FolderEntry],
+        _read: &dyn Fn(&Path) -> std::io::Result<String>,
+        _parser: &dyn FrontMatterParser,
+    ) -> FolderLoadSet {
+        FolderLoadSet::default()
     }
 }
 
@@ -443,34 +484,6 @@ fn without_repeats(value: &Value) -> Value {
     }
 }
 
-/// `2.1.284` — dot-separated digit groups (at least two), optionally followed by `-` or `+` and a suffix.
-fn is_version(word: &str) -> bool {
-    let core = word.split(['-', '+']).next().unwrap_or_default();
-    let groups: Vec<&str> = core.split('.').collect();
-    groups.len() >= 2
-        && groups
-            .iter()
-            .all(|g| !g.is_empty() && g.bytes().all(|b| b.is_ascii_digit()))
-        && word[core.len()..]
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
-}
-
-/// The components of a listed path — `None` = it has a component other than a normal one.
-fn normal_parts(path: &Path) -> Option<Vec<&OsStr>> {
-    path.components()
-        .map(|component| match component {
-            Component::Normal(part) => Some(part),
-            _ => None,
-        })
-        .collect()
-}
-
-/// A name claude opens by a joined path — the OS decides whether case matters.
-fn is(part: &OsStr, name: &str) -> bool {
-    same_path(Path::new(part), Path::new(name))
-}
-
 /// claude's walkers keep a file when its name ends with `.md` — a plain, case-sensitive string test.
 fn is_md(part: &OsStr) -> bool {
     part.as_encoded_bytes().ends_with(b".md")
@@ -583,8 +596,10 @@ mod tests {
 
     use serde_json::json;
 
+    use engram_dashboard_platform::fs::same_path;
+
     use super::*;
-    use crate::backend::settings_check::PathsFrontMatter;
+    use crate::backend::settings_check::{PathsFrontMatter, SkillFrontMatter};
 
     const MODES: [AgentOutputFormat; 2] =
         [AgentOutputFormat::Terminal, AgentOutputFormat::StreamJson];
@@ -924,6 +939,17 @@ mod tests {
                     .map(|(key, value)| (key.clone(), value.clone()))
                     .collect(),
             })
+        }
+
+        fn skill(&self, _text: &str) -> Result<SkillFrontMatter, FrontMatterError> {
+            Err(FrontMatterError {
+                message: "not used by the claude tests".to_owned(),
+                line: None,
+            })
+        }
+
+        fn is_yaml_value(&self, _text: &str) -> bool {
+            unreachable!("not used by the claude tests")
         }
     }
 

@@ -1,10 +1,11 @@
 //! CodexBackend — codex CLI 전용 CommandSpec 산출.
 //!
-//! ★이 폴더가 세우는 규칙 = codex 지식은 여기 안에만 산다(ADR-0004)★. 근거·게이트·게이트가
-//! 못 보는 것의 정본은 `backend/claude/mod.rs` 헤더이고 여기 되풀어 적지 않는다 — 이름만 바꿔
-//! 읽는다. 밖으로 나가는 표면은 [`crate::backend::AgentBackend`] 구현 + 사용량 조회기 싱글턴
-//! [`CODEX_USAGE_PROBE`] 둘뿐이다(조회기가 trait 칸이 아닌 사유도 그 헤더) — 세션 id 회수의
-//! 폴링도 [`thread_lock`] 안에서 돌고 그 모듈을 부르는 자리는 이 폴더뿐이다(ADR-0218 결정 11).
+//! ★The rule this folder sets = codex knowledge lives only in here (ADR-0004)★. The rationale, the gates and
+//! what the gates cannot see are written once in the `backend/claude/mod.rs` header — read it with the names
+//! swapped. The surfaces that leave this folder are the [`crate::backend::AgentBackend`] impl and two singletons,
+//! the usage probe [`CODEX_USAGE_PROBE`] and the settings check [`CODEX_SETTINGS_CHECK`] (why they are not trait
+//! slots is in that header too) — the session-id recovery polling also runs inside [`thread_lock`], and only this
+//! folder calls that module (ADR-0218 decision 11).
 //!
 //! ★여기 적힌 codex 사실은 실측이다(codex-cli 0.153.4, 이 PC, 인증됨 — 2026-09-08 재확인)★.
 //! ★그 뒤에 잰 것은 **자기 자리에 버전을 달고 있다**★ — 이 한 줄이 파일 전체를 한 버전으로 묶는다고
@@ -46,20 +47,23 @@
 //!
 //! tauri import 0.
 
+mod cmdline;
 pub(crate) mod decoder;
 pub(crate) mod protocol;
+mod settings;
 // ADR-0218
 pub(crate) mod thread_lock;
 pub(crate) mod transport;
 mod usage;
 mod usage_probe;
 
+pub(crate) use settings::CODEX_SETTINGS_CHECK;
 pub(crate) use usage_probe::CODEX_USAGE_PROBE;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use engram_dashboard_platform::shell::console_command;
+use engram_dashboard_platform::shell::{console_command, text_is_cli_safe};
 use uuid::Uuid;
 
 use self::decoder::CodexAppServerDecoder;
@@ -356,41 +360,27 @@ fn priming_text(control: Option<&ControlEndpoint>) -> Option<String> {
     }
 }
 
-/// 터미널 모드 spawn 에 실을 `-c developer_instructions='…'` 값. `None` = 싣지 않는다 — ★경고만 남기고
-/// 스폰은 그대로 간다★(ADR-0216 의 「어떤 갈래로도 스폰을 실패시키지 않는다」와 같은 규율).
+/// The `-c developer_instructions='…'` value a Noop terminal spawn carries, or `None` — ★the spawn goes on without
+/// it and only a warning is left★ (the rule ADR-0216 hands down: no branch fails the spawn). Real launch materials
+/// are judged by `cmdline::fits` instead, which refuses on the same rule.
 ///
-/// `args_so_far` = 이 값 앞에 이미 조립된 인자들. 명령줄 예산 판정에만 쓴다.
-///
-/// ★TOML 리터럴 문자열(작은따옴표)로 감싼다★ — 이스케이프가 없어 값이 바이트 그대로 건너가고, 그 조합이
-///   `cmd.exe /c` + `.cmd` shim 두 겹을 견디는 것이 실측돼 있다(ADR-0210). 대신 작은따옴표 자체는 담을
-///   수 없다.
-/// ★실을 수 없는 문자를 만나면 지어낸 이스케이프로 밀어 넣지 않고 건너뛴다★ — 네 글자가 각각 다른 층을
-///   깬다: 작은따옴표는 TOML 리터럴을, 큰따옴표와 역슬래시는 그 바깥의 **명령줄 인용**(portable-pty 가
-///   `\"` 로 이스케이프하는데 `cmd` 는 그 규칙을 모르고 따옴표 수만 센다)을, `%` 는 cmd 의 환경변수
-///   치환을(**따옴표 안에서도 편다** — `build_spec` 의 같은 이름 한계 주석이 정본) 깬다.
-/// ★이 가드가 오늘 한 번도 안 걸린다고 걷어내지 말 것★ — 지금 지시서에는 그 넷이 0 개지만 이 문서는
-///   사람이 고치는 마크다운이고, 영어 축약형(`don't`) 한 번이면 작은따옴표가 들어온다.
-/// ★탭을 포함한 제어문자도 끊는다★ — 줄바꿈만 위 [`NEWLINE_REPLACEMENT`] 로 바꾸고, 나머지는 `cmd` 의
-///   토큰 분리와 인용 계층을 우리가 검증한 적이 없다. 증상이 전부 「조용히 어긋난 명령줄」이라 싣지
-///   않는 쪽을 고른다.
-/// ★가드는 **바꾸기 전 원문**을 본다★ — 뒤에 하면 우리가 넣은 역슬래시가 우리 가드에 걸린다.
+/// `args_so_far` = the arguments already assembled before this value; used only for the budget.
+/// What can be carried is [`cmdline::priming_value`]'s rule. The budget is [`command_line_cost`]'s count — an upper
+/// bound for this value, which holds no `"` and no `\` that the quoting doubles.
 // ADR-0215
 // ADR-0216
 fn developer_instructions_override(text: &str, args_so_far: &[String]) -> Option<String> {
-    if let Some(bad) = text.chars().find(|c| {
-        matches!(c, '\'' | '"' | '%' | '\\') || (c.is_control() && *c != '\n' && *c != '\r')
-    }) {
-        tracing::warn!(
-            "codex 프라이밍 미주입 — 지시서에 명령줄로 실을 수 없는 문자가 있다({bad:?})"
-        );
-        return None;
-    }
-    let single_line = text
-        .replace("\r\n", NEWLINE_REPLACEMENT)
-        .replace('\n', NEWLINE_REPLACEMENT)
-        .replace('\r', NEWLINE_REPLACEMENT);
-    let value = format!("{DEVELOPER_INSTRUCTIONS_KEY}='{single_line}'");
-    // `-c` 와 값 자신이 함께 드는 몫 — 위 [`command_line_cost`] 와 같은 셈법으로 센다.
+    let value = match cmdline::priming_value(text) {
+        Ok(value) => value,
+        Err(refusal) => {
+            tracing::warn!(
+                "codex 프라이밍 미주입 — 지시서에 명령줄로 실을 수 없는 문자가 있다({:?})",
+                refusal.bad
+            );
+            return None;
+        }
+    };
+    // The share of `-c` and the value together — counted the same way as [`command_line_cost`].
     let cost = CONFIG_OVERRIDE_FLAG.encode_utf16().count() + 3 + value.encode_utf16().count() + 3;
     let used = command_line_cost(args_so_far);
     if used + cost > CMD_LINE_LIMIT_UTF16 {
@@ -447,9 +437,12 @@ enum McpAttachment {
 ///   「우편이 조용히 안 된다」 하나라 여기서 소리를 낸다.
 ///   ★그 검사가 오늘 한 번도 안 걸리는 것이 정상이다★ — 이 url 은 데몬이 authoring 하는
 ///   `http://127.0.0.1:<port>/mcp` 이고 사용자 입력이 아니다. 검사는 그 형태가 바뀌는 날을 위한 것이다.
+/// ★`"` and `& ^ | < >` are refused as well★ — a `"` flips cmd's quote state for every later argument, and the
+///   metacharacters act wherever that state is off (the same set as the preset `-c` guard, `cmdline::config_args`).
 // ADR-0004
 // ADR-0128
 // ADR-0209
+// ADR-0337
 fn mcp_attachment(control: Option<&ControlEndpoint>) -> McpAttachment {
     let Some(endpoint) = control else {
         return McpAttachment::NotWanted;
@@ -461,17 +454,39 @@ fn mcp_attachment(control: Option<&ControlEndpoint>) -> McpAttachment {
         return McpAttachment::NotWanted;
     }
     let url = endpoint.url.as_str();
-    if let Some(bad) = url
-        .chars()
-        .find(|c| *c == '\'' || *c == '%' || c.is_control() || c.is_whitespace())
-    {
+    if let Some(bad) = url.chars().find(|c| {
+        *c == '\''
+            || *c == '%'
+            || c.is_control()
+            || c.is_whitespace()
+            || *c == '"'
+            || !text_is_cli_safe(c.encode_utf8(&mut [0; 4]))
+    }) {
         return McpAttachment::Unrepresentable(format!(
             "codex MCP 서버를 붙일 수 없다 — 제어 채널 주소에 실을 수 없는 문자가 있다({bad:?}): {url}"
         ));
     }
-    McpAttachment::Attach(format!(
+    // ADR-0337: the command-line count holds the URL to this bound.
+    if cmdline::units(url) > MCP_URL_BUDGET {
+        return McpAttachment::Unrepresentable(format!(
+            "codex MCP server cannot be attached — the control channel URL is over its command-line bound ({MCP_URL_BUDGET} units): {url}"
+        ));
+    }
+    McpAttachment::Attach(mcp_override_value(url))
+}
+
+/// The most a control channel URL may cost on the codex command line, in [`cmdline::units`]. The daemon's URL is
+/// `http://127.0.0.1:<port>/mcp` (at most 26); a longer one is refused by [`mcp_attachment`] — which
+/// `precheck_control_endpoint` turns into a failed spawn — so the bound the command-line count uses is never below
+/// the real value.
+// ADR-0337
+const MCP_URL_BUDGET: usize = 128;
+
+/// The `-c` value that attaches the daemon MCP server at `url`.
+fn mcp_override_value(url: &str) -> String {
+    format!(
         "{MCP_SERVER_OVERRIDE_PREFIX}{MCP_SERVER_NAME}={{url='{url}',{MCP_BEARER_ENV_KEY}='{TOKEN_ENV}',{MCP_APPROVAL_MODE_KEY}='{MCP_APPROVAL_MODE_VALUE}'}}"
-    ))
+    )
 }
 
 /// 상주 JSON 서버로 띄우는 하위 명령과 그 전송 선택(실측 0.154.0 — `--stdio` 는 `--listen stdio://` 와
@@ -3426,6 +3441,55 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         }
     }
 
+    /// The command-line count holds the control URL to [`MCP_URL_BUDGET`] (`"` and `\` counted twice) — a longer
+    /// one is unrepresentable, so the spawn fails closed instead of outgrowing the count.
+    #[test]
+    fn a_control_url_over_its_command_line_bound_is_unrepresentable() {
+        let attachment = |url: String| {
+            let mut ep = endpoint();
+            ep.url = url;
+            mcp_attachment(Some(&ep))
+        };
+        let prefix = "http://127.0.0.1:1/";
+        let room = MCP_URL_BUDGET - prefix.len();
+        assert!(matches!(
+            attachment(format!("{prefix}{}", "m".repeat(room))),
+            McpAttachment::Attach(_)
+        ));
+        for over in [
+            format!("{prefix}{}", "m".repeat(room + 1)),
+            format!("{prefix}\\{}", "m".repeat(room - 1)),
+        ] {
+            assert!(
+                matches!(attachment(over.clone()), McpAttachment::Unrepresentable(_)),
+                "{over}"
+            );
+        }
+        let mut ep = endpoint();
+        ep.url = format!("{prefix}{}", "m".repeat(room + 1));
+        assert!(CodexBackend
+            .precheck_control_endpoint(&codex(vec![]), Some(&ep))
+            .is_err());
+    }
+
+    /// A `"` or a cmd metacharacter in the control URL would change how cmd reads the rest of the line — the
+    /// attachment is unrepresentable instead.
+    #[test]
+    fn a_control_url_with_a_quote_or_a_cmd_metachar_is_unrepresentable() {
+        for bad in ['"', '&', '|', '<', '>', '^'] {
+            let mut ep = endpoint();
+            ep.url = format!("http://127.0.0.1:1/m{bad}cp");
+            assert!(
+                matches!(mcp_attachment(Some(&ep)), McpAttachment::Unrepresentable(_)),
+                "{bad:?}"
+            );
+        }
+        assert!(matches!(
+            mcp_attachment(Some(&endpoint())),
+            McpAttachment::Attach(_)
+        ));
+    }
+
     /// ★패스스루가 같은 키를 세워도 우리 것이 **뒤에** 실린다★ — 마지막 `-c` 가 이기므로 이 순서가
     /// 곧 우편 입구의 생사다. 그리고 사용자 인자를 지우지 않는다(거르는 것은 검열이다).
     #[test]
@@ -3591,6 +3655,31 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         );
         assert_argv_matches_a_spawn_without_priming(&argv);
         std::fs::remove_file(&path).expect("임시 지시서 삭제");
+    }
+
+    /// A priming with no space goes on the line unquoted, so cmd would act on its metacharacters (`a&calc&rem` runs
+    /// `calc`; `<reply>` becomes a redirection) — the Noop path skips it and the spawn still stands. With a space the
+    /// same characters ride inside the quotes and are carried.
+    #[test]
+    fn a_space_less_priming_with_a_cmd_metachar_is_skipped_and_the_spawn_still_stands() {
+        for text in ["a&calc&rem", "返信は<reply>タグで。"] {
+            let (ep, path) = bake_priming(text);
+            let s = spec_with_control(&codex(vec![]), Some(ep));
+            let argv = codex_argv(&s);
+            assert!(
+                developer_instructions_value(&argv).is_none(),
+                "{text}: {argv:?}"
+            );
+            assert_argv_matches_a_spawn_without_priming(&argv);
+            std::fs::remove_file(&path).expect("remove the temporary priming file");
+        }
+        let (ep, path) = bake_priming("reply in <reply> tags");
+        let s = spec_with_control(&codex(vec![]), Some(ep));
+        assert_eq!(
+            developer_instructions_value(&codex_argv(&s)).as_deref(),
+            Some("developer_instructions='reply in <reply> tags'")
+        );
+        std::fs::remove_file(&path).expect("remove the temporary priming file");
     }
 
     /// ★예산을 넘는 지시서는 **스폰을 죽이지 않고** 건너뛴다★ — 상한을 넘긴 명령줄은 오류가 아니라

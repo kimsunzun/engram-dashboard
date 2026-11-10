@@ -236,6 +236,47 @@ OA2 P2 resume(no field) + ctx + turn + compact + turn:
 
 **Verdict.** Extra roots are per app-server process: a set in one process is invisible to `skills/list`, to `skills/changed` and to the model input of another live process, in both directions, and B's set does not overwrite A's roots. Together with M4: every process must set its own roots, and two agents with different presets can run concurrent codex processes on the same `CODEX_HOME` without leaking roots into each other.
 
+## M10 — Does cmd apply the 8191 limit again to the `codex.cmd` shim line? — **Yes (certain)** · and `a=1` then `a.b=2` (2026-11-10, S25 step 6 P1)
+
+Third run, `codex-cli 0.163.0`, this PC, no model turns (`codex --version` and `config/read` only), an empty temporary `CODEX_HOME` per run (removed afterwards).
+
+### M10a — the shim line
+
+**Why.** `cmd.exe /c codex …` runs the npm shim `C:\Users\<name>\AppData\Roaming\npm\codex.cmd`, whose last line `endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\node_modules\@openai\codex\bin\codex.js" %*` is expanded again. The step-6 TRD (§4-3, R13) reserved `SHIM_MARGIN = 300` units in the command-line count until this is known.
+
+**Method.** A Python script built the command line `cmd.exe /c codex -c p0.pad=<A × n> --version` as one string (passed verbatim to `CreateProcessW`) at total lengths L, and ran it. On this install `%dp0%\node.exe` does not exist, so `_prog` = `node`; the expanded shim line is then E = L − 17 (`cmd.exe /c codex `) + 165 (the expanded prefix), i.e. E = L + 148.
+
+**Raw output** (stderr is cmd's Korean message, abridged; the success rows also print codex's `WARNING: proceeding, even though we could not create PATH aliases …` about the temporary home):
+
+```
+L=7900 E~8048 exit=0   stdout='codex-cli 0.163.0'
+L=8000 E~8148 exit=0   stdout='codex-cli 0.163.0'
+L=8040 E~8188 exit=0   stdout='codex-cli 0.163.0'
+L=8041 E~8189 exit=0   stdout='codex-cli 0.163.0'
+L=8042 E~8190 exit=0   stdout='codex-cli 0.163.0'
+L=8043 E~8191 exit=0   stdout='codex-cli 0.163.0'
+L=8044 E~8192 exit=255 stderr='입력 줄이 너무 깁니다. | 명령 구문이 올바르지 않습니다.'   (The input line is too long. | The syntax of the command is incorrect.)
+L=8045 E~8193 exit=255 stderr='명령 구문이 올바르지 않습니다.'
+L=8050 E~8198 exit=255 stderr='명령 구문이 올바르지 않습니다.'
+L=8100 E~8248 exit=255 stderr='명령 구문이 올바르지 않습니다.'
+L=8150 E~8298 exit=255 stderr='명령 구문이 올바르지 않습니다.'
+L=8191 E~8339 exit=255 stderr='명령 구문이 올바르지 않습니다.'
+L=8192 E~8340 exit=1   stderr='명령줄이 너무 깁니다.'   (The command line is too long. — cmd's own line limit)
+```
+
+**Verdict.** The limit applies a second time, to the expanded shim line, at exactly 8191 (E = 8191 runs, E = 8192 fails) — so a command line that fits cmd's own limit can still fail in the shim, with no codex process started. On this install the shim adds 148 units net; it grows with the npm folder (the user name) and when `node.exe` sits next to the shim (`_prog` is then its full path). **Decision for the code:** `SHIM_MARGIN` stays at 300 (TRD rule: keep it if the limit applies again). Not measured: the portable-pty spawn (whose program token is the resolved `cmd.exe` path, not `cmd.exe`) — the shim line does not contain the program token, so the second limit does not depend on it; the first limit with a longer program token is L5 (iii)'s.
+
+### M10b — a later `-c` line through an earlier scalar
+
+**Method.** `codex app-server --stdio -c <overrides>` through `cmd.exe /c`, `initialize` → `initialized` → `config/read {includeLayers: true}`; the `sessionFlags` layer is the effective `-c` value.
+
+```
+-c p0.a=1   -c p0.a.b=2  →  {"p0":{"a":{"b":2}}}
+-c p0.a.b=2 -c p0.a=1    →  {"p0":{"a":1}}
+```
+
+**Verdict.** A later line that goes through an earlier scalar replaces the scalar with a table, and a later scalar replaces an earlier table — the same as the source (`codex-rs/config/src/overrides.rs` `apply_toml_override` at `rust-v0.163.0`, read 2026-11-10). The P1 `raw_to_json` mirrors it.
+
 ---
 
 ## Summary by question
@@ -252,3 +293,5 @@ OA2 P2 resume(no field) + ctx + turn + compact + turn:
 | AGENTS pick | The M7 table. | certain |
 | `thread/resume.developerInstructions` | Accepted (stable field) but not in the next turn's input; held in the process only; used when a compaction in that process rebuilds the initial context (replaces the old text); not persisted. `additionalContext` is dropped by compaction. | certain (mock provider, manual compaction) |
 | Extra roots across concurrent processes | Not shared, either direction; no cross-process `skills/changed`. | certain |
+| 8191 limit on the expanded `codex.cmd` line | Applies again, at exactly 8191; the shim adds 148 units net on this install. `SHIM_MARGIN` stays 300. | certain |
+| `-c` line through an earlier scalar | The scalar becomes a table; a later scalar replaces a table. | certain |

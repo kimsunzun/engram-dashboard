@@ -236,8 +236,12 @@ fn codex_home() -> Option<PathBuf> {
     )
 }
 
-/// Only the rule of [`codex_home`] — split off so it can be measured without touching env.
-fn codex_home_from(override_var: Option<OsString>, user_home: Option<PathBuf>) -> Option<PathBuf> {
+/// Only the rule of [`codex_home`] — split off so it can be measured without touching env, and so the settings
+/// check can apply it to an agent's own env. `None` only when `user_home` is `None` and no override is set.
+pub(super) fn codex_home_from(
+    override_var: Option<OsString>,
+    user_home: Option<PathBuf>,
+) -> Option<PathBuf> {
     if let Some(dir) = override_var {
         if !dir.is_empty() {
             return Some(PathBuf::from(dir));

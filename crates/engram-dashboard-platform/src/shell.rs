@@ -1,5 +1,5 @@
 //! OS rules for launching console programs — the default interactive shell · wrapping a CLI in that OS's console shell ·
-//! which path values survive that wrapping. Uses only std.
+//! which path and text values survive that wrapping. Uses only std.
 
 use std::path::Path;
 
@@ -26,7 +26,7 @@ pub fn default_shell() -> &'static str {
 ///   or the `"` and `\` that cmd counts as quotes may reach it changed, as cmd interprets them. The decision not to fix it and its
 ///   rationale are authoritatively in the comment 「알려진 한계 — `%VAR%` 가 든 경로는 shim 을
 ///   지나며 치환된다」 inside `build_spec` in agent `backend/codex/mod.rs`. Mitigation is placed by the caller per value — e.g.
-///   [`path_is_cli_safe`] · codex's `developer_instructions_override` · `mcp_attachment`
+///   [`path_is_cli_safe`] · [`text_is_cli_safe`] · codex's `developer_instructions_override` · `mcp_attachment`
 ///   rejection · passing claude `--settings` as a file path instead of inline JSON.
 /// - A process launched with this command is, on Windows, the `cmd.exe` wrapper rather than that CLI — the CLI itself is a descendant under it.
 // ADR-0230
@@ -63,6 +63,19 @@ pub fn path_is_cli_safe(path: &Path) -> bool {
         return false;
     };
     !text.chars().any(|c| CMD_UNSAFE_CHARS.contains(&c))
+}
+
+/// Whether a text argument reaches a CLI wrapped by [`console_command`] unchanged — `false` when it holds one of
+/// `% & ^ | < >` or a control character (an LF silently truncates the rest of the command line).
+///
+/// `"` and `'` pass: a `"` survives the wrapping but flips cmd's quote state for every later argument, so a caller
+/// that places several texts on one line needs its own rule for `"` as well (e.g. an even count per argument).
+/// The rule is the same on every OS (no OS branch). A caller that gets `false` must not pass the text at all.
+// ADR-0092
+pub fn text_is_cli_safe(text: &str) -> bool {
+    !text
+        .chars()
+        .any(|c| CMD_UNSAFE_CHARS.contains(&c) || c.is_control())
 }
 
 #[cfg(test)]
@@ -103,6 +116,26 @@ mod tests {
         };
         assert!(path.to_str().is_none(), "the sample must not be UTF-8");
         assert!(!path_is_cli_safe(&path));
+    }
+
+    #[test]
+    fn text_is_cli_safe_rejects_each_metachar_and_every_control_char() {
+        let metachars = ['%', '&', '^', '|', '<', '>'];
+        let controls = ['\n', '\r', '\t', '\u{0}', '\u{1b}', '\u{7f}', '\u{85}'];
+        for c in metachars.into_iter().chain(controls) {
+            assert!(!text_is_cli_safe(&format!("model=o{c}3")), "{c:?}");
+        }
+        for text in [
+            r#"model="o3""#,
+            "p0.lit='it''s'",
+            "a b",
+            "",
+            "!bang",
+            r"\\server\x",
+            "한글",
+        ] {
+            assert!(text_is_cli_safe(text), "{text:?}");
+        }
     }
 
     /// ★Arguments are carried in order without changing a single character★ — arguments with spaces or cmd metacharacters also get no quotes or escapes
