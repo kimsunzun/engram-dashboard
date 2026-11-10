@@ -57,7 +57,16 @@
 | T-81 | A claude that exits right after launch is answered "started" with no failure mark | 버그 | Not started · known limit of S25 step 20 (ADR-0348 decision 6) |
 | T-82 | A pass-through `--settings` (or instructions / snapshot flag) in claude `extra_args` replaces the one Engram passes | 버그 | Not started · pre-existing (Noop fragment too) · found by S25 step 5 review |
 | T-83 | No cap on the number of claude `--add-dir` pairs vs the cmd.exe 8191-character line | 버그 | Not started · theoretical path · found by S25 step 5 review |
-| T-84 | `path_is_cli_safe` does not refuse `!` — a path holding `!` is altered under cmd `DelayedExpansion` | 버그 | Not started · pre-existing · theoretical path · found by S25 step 5 review |
+| T-84 | `path_is_cli_safe` does not refuse `!` — a path holding `!` is altered under cmd `DelayedExpansion` | 버그 | Not started · pre-existing · theoretical path · found by S25 step 5 review · widened by S25 step 6 (`text_is_cli_safe`, codex cwd guard) |
+| T-85 | Codex pass-through `extra_args` are not guarded on the cmd line (odd `"` · cmd metachars) | 버그 | Not started · pre-existing · recorded decision (S25 step 6 TRD R10) |
+| T-86 | Noop codex terminal `--cd` is not checked for cmd metachars (`C:\Work\R&D` runs `D`) | 버그 | Not started · pre-existing · found by S25 step 6 review |
+| T-87 | Noop codex terminal budget is not an upper bound (shim line, resolved `cmd.exe` path, quote doubling) | 버그 | Not started · latent (priming 1.3 KB vs ~7.8k window) · found by S25 step 6 review |
+| T-88 | Non-npm codex shims (pnpm · npm ≤ 6 · yarn v1) put `%*` inside `IF ( )` — an unquoted `)` in a `-c` line could break it | 버그 | Unverified (from memory) · found by S25 step 6 review |
+| T-89 | Codex first-turn delivery is confirmed by the turn window, not by `clientUserMessageId` | 버그 | Not started · theoretical path · found by S25 step 6 review |
+| T-90 | A mismatched-turnId echo on our thread consumes the codex first-turn report with `false` | 버그 | Not started · theoretical path (safe direction) · found by S25 step 6 review |
+| T-91 | Codex `thread/resume` deprecation notice — upstream may change resume semantics | 버그 | Watch · found by S25 step 6 measurements (TRD R9) |
+| T-93 | The codex live test L5 leaves its temporary folder on every run (os error 32) | 사소한 기능·정리 | Not started · found by S25 step 6 QA |
+| T-92 | The codex real-terminal cwd guard repeats `& ^ \| < >` instead of using the platform set | 사소한 기능·정리 | Not started · found by S25 step 6 review |
 | T-71 | 트래킹 번호를 가리키지 않기 — 해결되면 그냥 지우기 | 사소한 기능·정리 | 할 일 — 나중에 이슈로 |
 | T-70 | 브랜치 앞 버전 짐작 기준 — 기능이면 0.5.0 쪽 | 사소한 기능·정리 | 할 일 — 나중에 이슈로 |
 | T-69 | 스텝 번호 규약 — 새 주제마다 S번호 | 사소한 기능·정리 | 일부 됨 · 남은 것 = 자잘한 커밋 접두 |
@@ -386,8 +395,54 @@
 - **Status:** not started · pre-existing (the rule moved unchanged from daemon `control/priming.rs` to `platform::shell` in S25 step 5) · theoretical path · found 2026-11-09 by the S25 step 5 code review (`baf769ff`).
 - **Problem:** `CMD_UNSAFE_CHARS` = `% & ^ | < >` (`crates/engram-dashboard-platform/src/shell.rs`). When cmd delayed expansion is on (registry `DelayedExpansion=1` under `Command Processor` — off by default), cmd expands `!NAME!` and drops a lone `!`, so a path holding `!` reaches claude changed. `console_command` passes `/c` without `/V:OFF`. Affects every path the rule guards (the priming file in daemon `control/priming.rs`, and from S25 step 5 the claude merged instructions, settings file, plugin folder and preset folder entries) — and any other path on the same cmd line.
 - **Next:** add `!` to the rule (a folder holding `!` is then refused at `preset.add` and blocks with ②), or pass `/V:OFF` to cmd — check the shim side first (the npm `.cmd` shim runs under cmd too).
+- **Widened by S25 step 6** (2026-11-10): `platform::shell::text_is_cli_safe` (the codex preset `-c` lines and the priming value) sits on the same `CMD_UNSAFE_CHARS`, and the codex real-terminal working-folder guard (`backend/codex/launch.rs` `cwd_reaches_codex_unchanged`) repeats the set as a literal (T-92) — adding `!` to the platform set alone would not reach that guard.
+
+### T-85. Codex pass-through `extra_args` are not guarded on the cmd line
+- **Status:** not started · pre-existing · a recorded decision of S25 step 6 (`trd-codex-translation.md` R10 — the user's own input; not re-raised by the step-6 code review).
+- **Problem:** the codex `build_spec` appends `command.extra_args` before the preset `-c` lines and the priming argument. An argument with an odd number of `"` flips cmd's quote state for every later argument (measured M5), so the priming's `<` `>` can become redirections; a `% & ^ | < >` in it reaches cmd as is. The preset lines are guarded (odd `"` and the metachars refused), the pass-through is not — on Noop and real materials alike. The command-line count does include them (upper bound).
+- **Next:** decide whether `extra_args` get the same guard (refuse at agent edit or at launch) or stay the user's responsibility.
+
+### T-86. Noop codex terminal `--cd` is not checked for cmd metachars
+- **Status:** not started · pre-existing · found 2026-11-10 by the S25 step 6 code review (P1 risk axis).
+- **Problem:** the Noop codex terminal argv puts the working folder on the cmd line as `--cd <cwd>` (`backend/codex/mod.rs` `build_spec`) with no check. A path with no space goes on the line bare, so `C:\Work\R&D` makes cmd run `D`; two `%` expand as a variable. The real path is guarded since step 6 (`cwd_reaches_codex_unchanged` — refuses two or more `%`, `"`, a control char, non-UTF-8, or `& ^ | < >` without a space); Noop goes away when step 8 plugs real kits in.
+- **Next:** close with step 8 (every codex terminal launch then takes the real path), or apply the same rule to the Noop path if Noop stays.
+
+### T-87. Noop codex terminal budget is not an upper bound
+- **Status:** not started · latent · found 2026-11-10 by the S25 step 6 code review (P1 risk axis).
+- **Problem:** the Noop priming budget (`command_line_cost` in `backend/codex/mod.rs`) counts `cmd.exe /c codex` as 16 units and quotes as 3 per argument. Since research M10a, cmd is known to limit the expanded `codex.cmd` line to 8191 again (+148 units on the measured install), portable-pty writes the resolved `cmd.exe` path (27 units, not 7), and pass-through `"` and `\` are doubled by the quoting — none counted. A priming of about 7.8k characters could pass the Noop check and still fail the launch; today's priming is about 1.3 KB. The real path counts an upper bound (`cmdline::fits`).
+- **Next:** close with step 8 (real kits replace the Noop priming), or route the Noop budget through `cmdline::fits`.
+
+### T-88. Non-npm codex shims may put `%*` inside an `IF ( )` block
+- **Status:** unverified (from memory) · found 2026-11-10 by the S25 step 6 code review (P1 risk axis).
+- **Problem:** the step-6 guard and count were measured with the npm `codex.cmd` shim, which puts `%*` on a plain line. Shims from pnpm, npm ≤ 6 or yarn v1 are said to put `%*` inside `IF … ( … )` blocks, where an unquoted `)` in a `-c` line (allowed by the guard) could end the block early and break the launch.
+- **Next:** install codex through one of those managers and look at the generated shim; if confirmed, refuse an unquoted `)` (or `(`) in a preset line, or document npm as the supported install.
+
+### T-89. Codex first-turn delivery is confirmed by the turn window, not by `clientUserMessageId`
+- **Status:** not started · theoretical path · found 2026-11-10 by the S25 step 6 code review (P3).
+- **Problem:** the transport marks the changed-instructions context delivered when a `userMessage` echo is attributed to the open carrying turn (`backend/codex/transport.rs` `note_context_echo`). A server-originated `userMessage` in our thread during that turn would report `true` although our turn was not the one echoed (no known codex feature does this). Related, also unverified: if codex emits a live `userMessage` notification during the resume handshake (`excludeTurns: true`), the first-turn report would be `false` on every resume and the context re-sent on every launch.
+- **Next:** on codex versions above the client-id floor, match the echo's `clientUserMessageId` to the carrying turn; check the resume-handshake case in the step-8 real CLI lane.
+
+### T-90. A mismatched-turnId echo consumes the codex first-turn report with `false`
+- **Status:** not started · theoretical path · safe direction · found 2026-11-10 by the S25 step 6 code review (P3 fix round).
+- **Problem:** `witness_first_turn` (`backend/codex/transport.rs`) checks only the thread id, so an echo on our thread with another turn id (e.g. a late echo of an earlier turn after the carrying turn got its id) fires the one-shot `FirstTurnSink` with `false`. The context is still cleared by the matching echo, so step 8 records nothing and the next launch re-sends the context once (an accepted duplicate).
+- **Next:** if duplicates show up after step 8, let the report wait for the carrying turn's echo instead of the first echo on the thread.
+
+### T-91. Codex `thread/resume` deprecation notice
+- **Status:** watch · found by the S25 step 6 measurements (`trd-codex-translation.md` R9).
+- **Problem:** codex warns that full-history hydration on `thread/resume` is deprecated for paginated threads. Our resume already sends `excludeTurns: true`, so the warning seen in M4 came from the measurement harness; the remaining risk is upstream changing `thread/resume` semantics.
+- **Next:** re-check on each codex version change (the codex lane runs the live resume L2/L3).
 
 ## 사소한 기능·정리
+
+### T-93. The codex live test L5 leaves its temporary folder on every run
+- **Status:** not started · found 2026-11-10 by the S25 step 6 QA (main recycled the leftovers by hand).
+- **Problem:** `crates/engram-dashboard-agent/tests/codex_launch_live.rs` L5 cannot remove its temporary folder when the test drops it — os error 32, a codex child process still holds it. Each codex-lane run leaves one folder under the temp directory.
+- **Next:** wait for (or kill) the codex child before the cleanup, or retry the removal briefly.
+
+### T-92. The codex real-terminal cwd guard repeats the cmd metachar set
+- **Status:** not started · found 2026-11-10 by the S25 step 6 code review (the cwd-guard delta).
+- **Problem:** `backend/codex/launch.rs` `cwd_reaches_codex_unchanged` writes `& ^ | < >` as a literal instead of using the platform `CMD_UNSAFE_CHARS` (`crates/engram-dashboard-platform/src/shell.rs`), so a change to the platform set (e.g. `!` — T-84) would not reach it. There is also no separate test row for `>`.
+- **Next:** expose the set (or a space-aware helper) from `platform::shell` and use it in the guard; add the `>` row.
 
 ### T-71. 트래킹 번호를 가리키지 않기 — 해결되면 그냥 지우기
 - **옛 번호:** T-67 — 2026-10-23 슬롯 도킹 브랜치와 번호가 겹쳐 옮김.
