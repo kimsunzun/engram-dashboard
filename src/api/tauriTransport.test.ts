@@ -23,8 +23,8 @@ const h = vi.hoisted(() => {
     emitConnectedOnConnect: true,
     // A gate that makes the daemon_connect invoke wait forever (for the close generation guard test). Holds the resolve function.
     connectGate: null as null | (() => void),
-    // ★Fix-D self-heal★: the state string the daemon_connection_state invoke will return (imitates the reload pull query).
-    connectionStateReply: 'down',
+    // ★Fix-D self-heal★: the status the daemon_connection_state invoke will return (imitates the reload pull query).
+    connectionStateReply: { state: 'down', band: null } as unknown,
     // ★FIX 5 gate★: hold the daemon_connection_state invoke so an event can be slipped in before the pull response.
     //   Holds the resolve function (= releases the gate). If null, resolves immediately (existing behavior).
     connectionStateGate: null as null | (() => void),
@@ -49,6 +49,11 @@ const h = vi.hoisted(() => {
 
 function emit(name: string, payload: unknown): void {
   for (const cb of h.listeners.get(name) ?? []) cb({ payload })
+}
+
+/** The shell's `ConnectionStatus` payload (src-tauri binding) — what the event carries and the pull returns. */
+function status(state: string, band: unknown = null): unknown {
+  return { state, band }
 }
 
 // ★Yield many microtasks★: doConnect runs the chain registerListeners (6× await listen) → daemon_connect invoke →
@@ -80,7 +85,7 @@ const invokeMock = vi.fn(async (cmd: string, args?: Record<string, unknown>) => 
     }
     // ★Imitate a Rust emit★: the listeners were registered before the invoke (doConnect order), so emitting here
     //   makes u5 receive it and setState('connected') — isomorphic to Rust emitting connected right before connect Ok.
-    if (h.state.emitConnectedOnConnect) emit('daemon-connection-state', 'connected')
+    if (h.state.emitConnectedOnConnect) emit('daemon-connection-state', status('connected'))
     return undefined
   }
   if (cmd === 'daemon_close') return undefined
@@ -187,7 +192,7 @@ beforeEach(() => {
   h.state.forwardShouldReject = false
   h.state.emitConnectedOnConnect = true
   h.state.connectGate = null
-  h.state.connectionStateReply = 'down'
+  h.state.connectionStateReply = status('down')
   h.state.connectionStateGate = null
   h.state.subscribeOutputGate = false
   h.state.subscribeOutputResolvers = []
@@ -227,7 +232,7 @@ describe('TauriTransport 상태 단일 진실원(Fix-C ①)', () => {
     expect(t.connectionState).toBe('down')
     expect(h.state.capturedChannel).toBeNull()
     expect(h.state.subscribeOutputCalls).toBe(0)
-    emit('daemon-connection-state', 'connected')
+    emit('daemon-connection-state', status('connected'))
     expect(t.connectionState).toBe('connected')
     await Promise.resolve()
     await Promise.resolve()
@@ -239,8 +244,8 @@ describe('TauriTransport 상태 단일 진실원(Fix-C ①)', () => {
     const seen: string[] = []
     t.onConnectionStateChange((s) => seen.push(s))
     await t.start()
-    emit('daemon-connection-state', 'reconnecting')
-    emit('daemon-connection-state', 'down')
+    emit('daemon-connection-state', status('reconnecting'))
+    emit('daemon-connection-state', status('down'))
     expect(t.connectionState).toBe('down')
     expect(seen).toEqual(['down', 'connected', 'reconnecting', 'down'])
   })
@@ -290,8 +295,8 @@ describe('TauriTransport 재연결 출력 Channel 재등록(Fix-C ④)', () => {
     const t = new TauriTransport()
     await t.start()
     expect(h.state.subscribeOutputCalls).toBe(1)
-    emit('daemon-connection-state', 'reconnecting')
-    emit('daemon-connection-state', 'connected')
+    emit('daemon-connection-state', status('reconnecting'))
+    emit('daemon-connection-state', status('connected'))
     // registerOutputChannel is async (invoke await) — check after yielding one microtask tick.
     await Promise.resolve()
     await Promise.resolve()
@@ -303,7 +308,7 @@ describe('TauriTransport 리로드 self-heal(Fix-D)', () => {
   it('init → 조회가 connected 면 출력 Channel 을 1회 등록한다(전이 이벤트 없이도 복구)', async () => {
     const t = new TauriTransport()
     // Reload imitation: the daemon is already Connected, so no transition event comes. Only the pull query reports connected.
-    h.state.connectionStateReply = 'connected'
+    h.state.connectionStateReply = status('connected')
     await t.init()
     expect(invokeMock).toHaveBeenCalledWith('daemon_connection_state', undefined)
     expect(t.connectionState).toBe('connected')
@@ -313,7 +318,7 @@ describe('TauriTransport 리로드 self-heal(Fix-D)', () => {
 
   it('init → 조회가 down 이면 아무 것도 하지 않는다(연결 안 됨은 정상)', async () => {
     const t = new TauriTransport()
-    h.state.connectionStateReply = 'down'
+    h.state.connectionStateReply = status('down')
     await t.init()
     expect(t.connectionState).toBe('down')
     expect(h.state.subscribeOutputCalls).toBe(0)
@@ -321,11 +326,11 @@ describe('TauriTransport 리로드 self-heal(Fix-D)', () => {
 
   it('조회로 connected 등록 후 다시 connected 이벤트가 와도 이중 등록하지 않는다(멱등)', async () => {
     const t = new TauriTransport()
-    h.state.connectionStateReply = 'connected'
+    h.state.connectionStateReply = status('connected')
     await t.init()
     expect(t.connectionState).toBe('connected')
     expect(h.state.subscribeOutputCalls).toBe(1)
-    emit('daemon-connection-state', 'connected')
+    emit('daemon-connection-state', status('connected'))
     await Promise.resolve()
     await Promise.resolve()
     expect(h.state.subscribeOutputCalls).toBe(1)
@@ -333,10 +338,10 @@ describe('TauriTransport 리로드 self-heal(Fix-D)', () => {
 
   it('조회가 connected 를 반환해도 직후 down 이벤트가 오면 이벤트가 이긴다(last-write)', async () => {
     const t = new TauriTransport()
-    h.state.connectionStateReply = 'connected'
+    h.state.connectionStateReply = status('connected')
     await t.init()
     expect(t.connectionState).toBe('connected')
-    emit('daemon-connection-state', 'down')
+    emit('daemon-connection-state', status('down'))
     expect(t.connectionState).toBe('down')
   })
 
@@ -344,12 +349,12 @@ describe('TauriTransport 리로드 self-heal(Fix-D)', () => {
   it('조회 대기 중 down 이벤트가 끼면, 뒤늦게 온 connected 조회 결과를 폐기한다(이벤트 승)', async () => {
     const t = new TauriTransport()
     // Make the pull return a stale 'connected' but delay the response with the gate (placeholder → replaced by the real resolver).
-    h.state.connectionStateReply = 'connected'
+    h.state.connectionStateReply = status('connected')
     h.state.connectionStateGate = () => {}
     const initP = t.init()
     // init goes registerListeners → selfHeal (blocked on the invoke gate) in that order. Wait for listener registration + the pull invoke to enter.
     await flush()
-    emit('daemon-connection-state', 'down')
+    emit('daemon-connection-state', status('down'))
     expect(t.connectionState).toBe('down')
     const release = h.state.connectionStateGate
     h.state.connectionStateGate = null
@@ -362,7 +367,7 @@ describe('TauriTransport 리로드 self-heal(Fix-D)', () => {
 
   it('조회 대기 중 close() 가 끼면 뒤늦은 connected 조회로 되살아나거나 Channel 을 붙이지 않는다', async () => {
     const t = new TauriTransport()
-    h.state.connectionStateReply = 'connected'
+    h.state.connectionStateReply = status('connected')
     h.state.connectionStateGate = () => {}
     const initP = t.init()
     await flush()
@@ -384,13 +389,81 @@ describe('TauriTransport 미지 연결 상태 어휘(FIX 7)', () => {
     await t.start() // connected.
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
     // If Rust later emits a new vocabulary item ('connecting'), do not silently mistranslate — degrade to the safe side (down) + warn.
-    emit('daemon-connection-state', 'connecting')
+    emit('daemon-connection-state', status('connecting'))
     expect(t.connectionState).toBe('down')
     const unknownWarns = warnSpy.mock.calls.filter(
-      (c) => typeof c[0] === 'string' && c[0].includes('알 수 없는 연결 상태'),
+      (c) => typeof c[0] === 'string' && c[0].includes('unknown connection state'),
     )
     expect(unknownWarns.length).toBe(1)
     warnSpy.mockRestore()
+  })
+})
+
+// ── Connection bands (TRD S21 trd-3-2-u5 §4-2): the shell sends `{state, band}` on the event and the pull ──────────
+describe('TauriTransport connection status DTO', () => {
+  it('reads the band from the event and from the pull', async () => {
+    const t = new TauriTransport()
+    h.state.connectionStateReply = status('down', { kind: 'version', can_stop: true })
+    await t.init()
+    expect(t.connectionState).toBe('down')
+    expect(t.connectionBand).toEqual({ kind: 'version', can_stop: true })
+    emit('daemon-connection-state', status('reconnecting', { kind: 'not_connected', refused: false }))
+    expect(t.connectionState).toBe('reconnecting')
+    expect(t.connectionBand).toEqual({ kind: 'not_connected', refused: false })
+    emit('daemon-connection-state', status('down', { kind: 'not_connected', refused: true }))
+    expect(t.connectionBand).toEqual({ kind: 'not_connected', refused: true })
+    emit('daemon-connection-state', status('connected'))
+    expect(t.connectionState).toBe('connected')
+    expect(t.connectionBand).toBeNull()
+  })
+
+  it('notifies listeners when only the band changes, and not when nothing changed', async () => {
+    const t = new TauriTransport()
+    await t.start()
+    emit('daemon-connection-state', status('reconnecting'))
+    const seen: string[] = []
+    t.onConnectionStateChange((s) => seen.push(s))
+    expect(seen).toEqual(['reconnecting'])
+    emit('daemon-connection-state', status('reconnecting', { kind: 'not_connected', refused: false }))
+    expect(seen).toEqual(['reconnecting', 'reconnecting'])
+    emit('daemon-connection-state', status('reconnecting', { kind: 'not_connected', refused: false }))
+    expect(seen).toEqual(['reconnecting', 'reconnecting'])
+    emit('daemon-connection-state', status('reconnecting', { kind: 'not_connected', refused: true }))
+    expect(seen).toEqual(['reconnecting', 'reconnecting', 'reconnecting'])
+  })
+
+  it('reads an unknown band kind as band ① without a cause, with a warning', async () => {
+    const t = new TauriTransport()
+    await t.start()
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    emit('daemon-connection-state', status('down', { kind: 'identity', refused: true }))
+    expect(t.connectionState).toBe('down')
+    expect(t.connectionBand).toEqual({ kind: 'not_connected', refused: false })
+    expect(
+      warnSpy.mock.calls.filter((c) => typeof c[0] === 'string' && c[0].includes('unknown connection band')),
+    ).toHaveLength(1)
+    warnSpy.mockRestore()
+  })
+
+  it('reads a payload that is not a status as down without a band', async () => {
+    const t = new TauriTransport()
+    await t.start()
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    emit('daemon-connection-state', 'connected')
+    expect(t.connectionState).toBe('down')
+    expect(t.connectionBand).toBeNull()
+    warnSpy.mockRestore()
+  })
+
+  it('an explicit close shows no band', async () => {
+    const t = new TauriTransport()
+    await t.start()
+    emit('daemon-connection-state', status('down', { kind: 'not_connected', refused: false }))
+    const seen: string[] = []
+    t.onConnectionStateChange((s) => seen.push(s))
+    t.close()
+    expect(t.connectionBand).toBeNull()
+    expect(seen).toEqual(['down', 'down'])
   })
 })
 
@@ -403,8 +476,8 @@ describe('TauriTransport 출력 Channel 등록 single-flight(FIX 6)', () => {
     await flush()
     expect(h.state.subscribeOutputCalls).toBe(1)
     expect(h.state.subscribeOutputResolvers.length).toBe(1)
-    emit('daemon-connection-state', 'reconnecting')
-    emit('daemon-connection-state', 'connected')
+    emit('daemon-connection-state', status('reconnecting'))
+    emit('daemon-connection-state', status('connected'))
     await flush()
     expect(h.state.subscribeOutputCalls).toBe(1)
     h.state.subscribeOutputResolvers.shift()!()
@@ -423,8 +496,8 @@ describe('TauriTransport 출력 Channel 등록 single-flight(FIX 6)', () => {
     const startP = t.start()
     await flush()
     expect(h.state.subscribeOutputCalls).toBe(1)
-    emit('daemon-connection-state', 'reconnecting')
-    emit('daemon-connection-state', 'connected')
+    emit('daemon-connection-state', status('reconnecting'))
+    emit('daemon-connection-state', status('connected'))
     await flush()
     t.close()
     h.state.subscribeOutputResolvers.shift()!()
@@ -560,7 +633,7 @@ describe('TauriTransport replay 요청 ↔ 출력 Channel 등록 순서(ADR-0231
   it('ensure 가 전이 없이 Ok 면 doConnect 가 조회로 연결을 받고 등록을 마친 뒤에 풀린다 — replay 는 그 뒤', async () => {
     const t = new TauriTransport()
     h.state.emitConnectedOnConnect = false
-    h.state.connectionStateReply = 'connected'
+    h.state.connectionStateReply = status('connected')
     h.state.subscribeOutputGate = true
     let ready = false
     const p = t.ensureReady().then(() => {
@@ -595,8 +668,8 @@ describe('TauriTransport replay 요청 ↔ 출력 Channel 등록 순서(ADR-0231
     await t.start()
     expect(h.state.subscribeOutputCalls).toBe(1)
     h.state.subscribeOutputGate = true
-    emit('daemon-connection-state', 'reconnecting')
-    emit('daemon-connection-state', 'connected')
+    emit('daemon-connection-state', status('reconnecting'))
+    emit('daemon-connection-state', status('connected'))
     await flush()
     expect(h.state.subscribeOutputCalls).toBe(2)
     const replay = t.requestReplay(AGENT)

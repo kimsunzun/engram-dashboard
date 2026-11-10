@@ -27,37 +27,7 @@ use engram_dashboard_protocol::{
 };
 use tauri::Emitter;
 
-/// 연결 수명 상태 알림이 실을 수 있는 값 **전부**.
-///
-/// ★왜 문자열이 아니라 타입인가★: [`ConnectionStateEvent::as_str`] 이 내는 세 리터럴은 **프론트 계약**이다
-/// (`src/api/tauriTransport.ts` 의 `applyConnectionState` 가 그 값을 그대로 비교하고, `crate::commands::discovery`
-/// 의 상태 조회도 같은 어휘를 낸다). 호출부가 리터럴을 직접 적으면 오타가 컴파일에 안 걸리고 **화면만 조용히
-/// 멈춘다** — 이벤트 *이름*은 어댑터가 소유하면서 *payload 어휘*만 호출부에 흘려 두던 비대칭을 여기서 닫는다.
-///
-/// ★**이 경로에서** 문자열을 굽는 곳은 [`ConnectionStateEvent::as_str`] 하나다★ — 어댑터가 그것을 부른다.
-/// 저장소 전체로는 하나가 아니다: 위 문단이 가리킨 그 소비자 쪽, `crate::commands::discovery` 의 상태 조회
-/// invoke 가 같은 세 리터럴을 **독립으로** 굽어 같은 프론트에 낸다. 그쪽까지 이 타입으로 모으는 것은 별건이고,
-/// 여기서 보증하는 것은 「연결 태스크가 내는 알림에는 리터럴이 흩어지지 않는다」까지다.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ConnectionStateEvent {
-    /// Hello 수신 = 인증 성공(첫 연결·재연결 회복 공통).
-    Connected,
-    /// 비의도 끊김 후 백오프 재연결 진입.
-    Reconnecting,
-    /// 재연결 소진·stale 종료의 종착.
-    Down,
-}
-
-impl ConnectionStateEvent {
-    /// ★이 세 리터럴은 살아 있는 프론트 계약이다 — 바꾸면 `tauriTransport.ts` 와 **함께** 바꾼다.★
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            ConnectionStateEvent::Connected => "connected",
-            ConnectionStateEvent::Reconnecting => "reconnecting",
-            ConnectionStateEvent::Down => "down",
-        }
-    }
-}
+use super::ConnectionStatus;
 
 /// 데몬 연결이 프론트에 내는 알림 포트.
 ///
@@ -73,9 +43,10 @@ impl ConnectionStateEvent {
 /// 뿐이다 — 대조·재전송은 포트 밖(호출 자리와 `super::usage_interest`)에 있고 포트는 계산된 값만 받는다
 /// (TRD S21 usage-limit-slot §6 #23).
 pub(crate) trait DaemonEvents: Send + Sync {
-    /// 연결 수명 상태 한 줄. ★wire 에 실리는 payload 는 여전히 **문자열**이고 그것이 프론트와의 계약이다★
-    /// — 바뀐 것은 그 문자열을 **누가 짓나**뿐이다([`ConnectionStateEvent`] 가 어휘를 쥐고 어댑터가 굽는다).
-    fn connection_state(&self, state: ConnectionStateEvent);
+    /// The link's connection status changed — `(state, band)`, either part. ★The payload is the frontend contract★ —
+    /// the serialized [`ConnectionStatus`] (`src/api/tauriTransport.ts` parses it; the `daemon_connection_state` pull
+    /// returns the same value).
+    fn connection_status(&self, status: &ConnectionStatus);
 
     /// 전체 에이전트 목록 갱신. ★프론트의 terminal 판정은 이것으로만 선다★(status_changed 아님 —
     /// ADR-0005 「상태 알림 분담」).
@@ -125,9 +96,8 @@ struct UsageLimitsUpdatedPayload<'a> {
 pub(crate) struct TauriEmitter(pub(super) tauri::AppHandle);
 
 impl DaemonEvents for TauriEmitter {
-    fn connection_state(&self, state: ConnectionStateEvent) {
-        // ★문자열은 여기서 단 한 번 구워진다★ — 호출부는 어휘만 고른다.
-        let _ = self.0.emit("daemon-connection-state", state.as_str());
+    fn connection_status(&self, status: &ConnectionStatus) {
+        let _ = self.0.emit("daemon-connection-state", status);
     }
 
     fn agent_list_updated(&self, agents: &[AgentInfo]) {
@@ -194,7 +164,7 @@ pub(crate) struct NoDaemonEvents;
 
 #[cfg(test)]
 impl DaemonEvents for NoDaemonEvents {
-    fn connection_state(&self, _state: ConnectionStateEvent) {}
+    fn connection_status(&self, _status: &ConnectionStatus) {}
     fn agent_list_updated(&self, _agents: &[AgentInfo]) {}
     fn status_changed(&self, _agent_id: &AgentId, _status: &AgentStatus, _epoch: u32) {}
     fn restore_result(&self, _report: &RestoreReport) {}
@@ -253,14 +223,43 @@ mod tests {
         assert_eq!(wire["snapshot"]["revision"], 3);
     }
 
-    // ── 프론트 계약 문자열 고정 ──────────────────────────────────────────────────────────
-    // 어휘를 enum 으로 올린 뒤에도 **나가는 바이트는 그대로여야 한다** — 이 세 값은
-    // `src/api/tauriTransport.ts` 의 `applyConnectionState` 가 그대로 비교하는 것이고(`commands::discovery` 의
-    // 상태 조회도 같은 어휘를 낸다), 하나만 어긋나도 컴파일은 통과한 채 화면이 조용히 멈춘다.
+    // The `daemon-connection-state` payload and the pull reply, byte for byte — `src/api/tauriTransport.ts` reads these
+    //   words and keys; `tauriTransport.test.ts` feeds the same shapes as objects.
     #[test]
-    fn connection_state_event_strings_are_the_frontend_contract() {
-        assert_eq!(ConnectionStateEvent::Connected.as_str(), "connected");
-        assert_eq!(ConnectionStateEvent::Reconnecting.as_str(), "reconnecting");
-        assert_eq!(ConnectionStateEvent::Down.as_str(), "down");
+    fn connection_status_payload_is_the_frontend_contract() {
+        use crate::daemon_client::{Band, ConnectionState};
+        let golden = [
+            (
+                ConnectionStatus {
+                    state: ConnectionState::Connected,
+                    band: None,
+                },
+                r#"{"state":"connected","band":null}"#,
+            ),
+            (
+                ConnectionStatus {
+                    state: ConnectionState::Reconnecting,
+                    band: Some(Band::NotConnected { refused: false }),
+                },
+                r#"{"state":"reconnecting","band":{"kind":"not_connected","refused":false}}"#,
+            ),
+            (
+                ConnectionStatus {
+                    state: ConnectionState::Down,
+                    band: Some(Band::NotConnected { refused: true }),
+                },
+                r#"{"state":"down","band":{"kind":"not_connected","refused":true}}"#,
+            ),
+            (
+                ConnectionStatus {
+                    state: ConnectionState::Down,
+                    band: Some(Band::Version { can_stop: true }),
+                },
+                r#"{"state":"down","band":{"kind":"version","can_stop":true}}"#,
+            ),
+        ];
+        for (status, wire) in golden {
+            assert_eq!(serde_json::to_string(&status).unwrap(), wire);
+        }
     }
 }

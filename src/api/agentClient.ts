@@ -170,12 +170,11 @@ export interface AgentClient {
    * ★쓰는 곳은 지금 정확히 하나다★ — `DaemonControl.start()`. 부팅 bootstrap 과
    * `window.__ENGRAM_DAEMON__.start()` 가 그 한 곳을 지나므로 둘 다 덮인다.
    *
-   * ★덮이지 **않는** 경로(알려진 공백 — 넓혀 적지 말 것)★:
-   * - `AgentClient.connect()` — 공개 표면이고 내부적으로 spawn 까지 가지만 `DaemonControl` 을
-   *   거치지 않는다. LLM·cdp 가 이걸 직접 부르면 실패 이유가 화면에 안 실린다.
-   * - `DaemonControl.stop()` — 실패해도 기록하지 않는다(끄기 실패는 "연결 실패 이유"가 아니다).
-   * - 네이티브 트레이의 "데몬 켜기" — Rust 가 `discovery::ensure_daemon` 을 직접 부르므로 프론트를
-   *   아예 지나지 않는다(트레이는 자기 아이콘 상태로 표현한다).
+   * ★Paths **not** covered (known gaps — do not describe them as wider)★:
+   * - `AgentClient.connect()` — a public surface that goes as far as a spawn but does not pass through
+   *   `DaemonControl`. If the LLM or cdp calls it directly, the failure reason does not reach the screen.
+   * - The native tray's "start daemon" — Rust calls `discovery::ensure_daemon` directly, so it never
+   *   passes through the frontend (the tray shows it with its own icon state).
    */
   reportConnectionError(reason: string | null): void
 
@@ -187,7 +186,7 @@ export interface AgentClient {
    */
   connect(): Promise<void>
   /**
-   * **Explicit disconnect (stops reconnecting, ADR-0021 note3)** — called after a graceful daemon_stop:
+   * **Explicit disconnect (stops reconnecting, ADR-0021 note3)** —
    * closedByUser=true settles on 'down' at once, so the transport does not keep retrying a daemon that is gone
    * (the shell link retries without limit — ADR-0346). The ProtocolClient itself (subscription router, callback
    * registry) stays, so a later connect revives it (unlike close).
@@ -277,12 +276,6 @@ export interface AgentClient {
    * 거절은 ★코드 접두 없는★ [`INPUT_LOCKED_REFUSAL`] 문구 그대로다(`WriteStdin` 과 같다).
    */
   cancelQueuedInput(agentId: string, inputId: string): Promise<string>
-  /**
-   * 데몬 graceful 종료(ADR-0021 §5). StopDaemon AgentCommand 전송 — 데몬이 자식 PTY 를 정리하고
-   * 스스로 내려간다. force=false 면 실활성 에이전트가 있을 때 데몬이 거부(Error). DaemonControl.stop 이
-   * 이걸 graceful 단계로 부르고, 실패/연결없음 시 daemon_stop(fallback kill)로 보강한다.
-   */
-  stopDaemon(force: boolean): Promise<void>
 
   // ── 프로필 CRUD ────────────────────────────────────────────────────────────
   listProfiles(): Promise<AgentProfile[]>

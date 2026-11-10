@@ -1,10 +1,11 @@
-//! Opaque frame port — the contract between the network row and the upper layer (ADR-0129).
+//! Connection port — the contract between the daemon's network row (`link`) and its upper layers (ADR-0129).
 //!
-//! The frame vocabulary the contract defined here knows is only `Frame` below. Protocol decode/encode and its types do not
-//! enter this contract — the consumer of that vocabulary is the upper layer (`agent_conn` in the daemon crate), and the
-//! exception left inside this crate is recorded by the lib.rs header.
-//! The contract (trait) is owned by the lower layer, the network row, and the concrete parts are plugged in by both sides — `FrameSink` (the
-//! per-connection exit) and `FrameFanout` (the all-connection exit) are implemented by the network row (`ws::ConnFrameSink`·`ws::ConnRegistry`),
+//! Upper layers name the contract only through this module, so swapping the network row underneath does not touch them.
+//! The frame vocabulary this contract knows is only `Frame` below. Protocol decode/encode and its types do not enter it —
+//! the consumer of that vocabulary is the upper layer (`agent_conn`). The one frame the network row reads itself is the
+//! first auth frame (`link::auth`).
+//! The concrete parts are plugged in by both sides — `FrameSink` (the per-connection exit) and `FrameFanout` (the
+//! all-connection exit) are implemented by the network row (`link::server::ConnFrameSink` · `link::server::ConnRegistry`),
 //! `ConnectionHandler`/`ConnectionHandlerFactory` by the upper layer (the same vein as the port-ownership idiom
 //! of ADR-0110).
 
@@ -16,13 +17,14 @@ use futures_util::future::BoxFuture;
 /// port side, not in a carrier implementation.
 pub type ConnId = u64;
 
-/// The output unit flowing into the single per-connection writer queue — these three are the whole frame vocabulary.
+/// The output unit put on one connection's outbound queue — these three are the whole frame vocabulary.
 #[derive(Debug)]
 pub enum Frame {
     Text(String),
     Binary(Vec<u8>),
-    /// Connection end — when the writer receives this it closes and leaves the loop. It enters **into** the queue, so the
-    /// frames put in earlier all go out first (FIFO). `reason` is for logs/debugging and is not delivered to the client.
+    /// Connection end — it enters **into** the queue, so the frames put in earlier all go out first (FIFO) and then the
+    /// connection closes (`link::server` maps it to `Peer::close_after_flush`). `reason` is for logs/debugging and is not
+    /// delivered to the client.
     Close(String),
 }
 
@@ -43,10 +45,12 @@ impl std::error::Error for FrameError {}
 ///
 /// ★The two methods **behave differently** on saturation (load-bearing asymmetry)★:
 /// - `try_send` = **non-blocking only**. Called from paths where blocking is forbidden, such as the output pump thread and status callbacks.
-///   On saturation it is an immediate `FrameError`, and the implementation must ring the close signal **outside** the queue at that moment — because in the saturated
-///   state even `Frame::Close` cannot enter the queue and the connection becomes a zombie (the `ws` module header).
-/// - `send` = async context only, backpressure allowed (waits until a slot opens). It does **not ring** the close signal here
-///   — the caller can wait, so it is not a candidate for a slow-consumer decision.
+///   On saturation it is an immediate `FrameError`, and the implementation must close the connection at that moment **without going
+///   through** the queue — in the saturated state even `Frame::Close` cannot enter the queue, so the connection would stay open with
+///   nothing left to end it (`link::server::ConnFrameSink` closes the peer at once).
+/// - `send` = async context only. ★Since 3-3 U4 the daemon's implementation (`link::server::ConnFrameSink`) does **not**
+///   wait for room★ — on saturation it closes the connection like `try_send`. Do not push a burst through it expecting
+///   backpressure; today it carries only `on_connect`'s two frames and the `Close`.
 pub trait FrameSink: Send + Sync {
     fn try_send(&self, frame: Frame) -> Result<(), FrameError>;
 
@@ -72,8 +76,8 @@ pub trait FrameSink: Send + Sync {
 /// 3. **Failure is not reported to the caller** (no return value). Who failed to receive is not observable through this port, so the
 ///    caller must not presume delivery.
 ///
-/// ★Asymmetry with `FrameSink::try_send` (load-bearing)★: per-connection `try_send` rings that connection's
-///   close signal on saturation, but **fanout saturation does not lead to connection close**. Since the call targets no particular connection,
+/// ★Asymmetry with `FrameSink::try_send` (load-bearing)★: per-connection `try_send` closes that connection
+///   on saturation, but **fanout saturation does not lead to connection close**. Since the call targets no particular connection,
 ///   it means no slow-consumer decision is put on it here, and changing that needs a separate decision.
 pub trait FrameFanout: Send + Sync {
     fn broadcast_text(&self, text: String);
@@ -140,8 +144,7 @@ pub enum Saturated {
 ///   so it may keep running after the connection is cleaned up. Making sure the sent-out work cannot
 ///   revive this connection's state is the responsibility of the implementation that sent it out.
 ///   The implementation must synchronize its own state and must not assume "nobody touches it at this point".
-///   ★This race was not made by this port; HEAD has it too★ (even when the cleanup block was inline in `handle_connection`, it ran
-///   right after abort as is) — whether to close it is a separate decision outside this slice.
+///   ★This race is known and left open★ — closing it is a separate decision.
 ///
 /// ★Why `&Arc<dyn FrameSink>`★: for the implementation to build a sink that outlives this connection (an output sink
 ///   registered in the core subscribers) it needs a `'static` shared handle — a borrowed reference cannot do it.
@@ -152,13 +155,12 @@ pub trait ConnectionHandler: Send + Sync {
     /// ★It does not mean the first frame of the whole connection★: registration precedes this call, so in between the all-connection
     ///   fanout (`FrameFanout`) may have put frames into the same queue first. Do not assume it holds the FIFO head.
     ///
-    /// ★No queue consumer yet — this is not a caller-side condition but an **implementation-side duty**★: this call
-    ///   is awaited **before the writer task starts**, so frames put in here are taken by nobody.
-    ///   So ① put in only a few frames and ② do not block for long for any other reason either. Violate this and
-    ///   `FrameSink::send` never returns, and that connection remains **authenticated and registered but with no reader, no writer, no
-    ///   timeout and no `on_disconnect`**.
+    /// ★Put in only a few frames and do not block for long★: the read task is spawned only after this call returns,
+    ///   so a long wait here delays everything the connection receives — and if it never returns, the connection is
+    ///   never cleaned up (no `on_disconnect`). (Since 3-3 U4 the writer already runs during
+    ///   this call and a saturated `send` closes the connection instead of waiting.)
     ///
-    /// ★A safe upper bound cannot be nailed down as a number★: do not read the queue capacity (`ws::CONN_TX_CAP`) as that bound.
+    /// ★A safe upper bound cannot be nailed down as a number★: do not read the queue capacity (`CONN_TX_CAP` in `link::server`) as that bound.
     ///   The connection is registered in the fanout registry already **before** this call, so from that moment the all-connection fanout
     ///   (`FrameFanout`) puts slots into the same queue concurrently. So the real headroom is **smaller than the capacity and variable**.
     fn on_connect<'a>(
@@ -210,28 +212,25 @@ pub trait ConnectionHandler: Send + Sync {
     /// Connection cleanup (release subscriptions · return resources). Sync — the cleanup path has no await point.
     ///
     /// ★Implementation duty — by the time it returns, **all** copies of the `FrameSink` it made must be released★: if the sinks made
-    ///   through this port (especially those registered in a long-lived place) are not reclaimed here, the network row's send
-    ///   queue copy survives and the writer task cannot end by itself
-    ///   (a task that is not reclaimed even when the connection ends).
+    ///   through this port (especially those registered in a long-lived place) are not reclaimed here, each keeps the
+    ///   connection's transport handle (`Peer`) and its queues alive past the connection (memory that is not reclaimed when the
+    ///   connection ends).
     ///   How the current implementation keeps this duty, and the known race that misses that reclaim, are in the
     ///   comment of `agent_conn::AgentConnection::on_disconnect` in the daemon crate — the same root as the abort-overlap race above.
     ///
     /// ★At this point this connection is still in the fanout registry★ (the network row unregisters **after** this
-    /// call). Still, a broadcast going out from here **cannot be assumed to be delivered to itself**
-    /// — in practice it is usually dropped but that is not guaranteed:
-    /// - In the branch where the writer **ended first**, the queue's receiving end is already gone, so it is surely dropped.
-    /// - In the branch where the reader ended first, the writer is only **marked** for `abort()`, so before the cancel
-    ///   actually takes effect it may pick a frame already in the queue and send it out to the socket.
-    /// So only one safe direction needs keeping — **do not write cleanup logic that presumes self-delivery.**
+    /// call). Still, a broadcast going out from here **cannot be assumed to be delivered to itself** — in every branch
+    /// `link::server` has closed the peer, or seen its link end, before this call, so the transport refuses it in practice.
+    /// That is an observation of the current implementation, not a promise of this contract — so only one safe direction
+    /// needs keeping: **do not write cleanup logic that presumes self-delivery.**
     ///
     /// ★Delivery consistency does **not** hang on this order★: the broadcast takes a snapshot of the registry map and
-    /// walks it, so whether unregistration is moved earlier or later, **what the other connections receive is exactly the same**. The reason
-    /// to keep this order is only to keep the ADR-0129 slice a pure refactor (the same order as HEAD).
+    /// walks it, so whether unregistration is moved earlier or later, **what the other connections receive is exactly the same**.
     fn on_disconnect(&self, conn_id: ConnId);
 }
 
-/// The upper-layer factory that makes a handler per connection. Because `handle_connection` holds only this, it does not know the agent
-/// vocabulary even as a type.
+/// The upper-layer factory that makes a handler per connection. Because the network row (`link::server::Server`) holds only this, it
+/// does not know the agent vocabulary even as a type.
 pub trait ConnectionHandlerFactory: Send + Sync {
     fn handler_for(&self, conn_id: ConnId) -> Arc<dyn ConnectionHandler>;
 

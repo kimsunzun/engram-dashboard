@@ -99,6 +99,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::conn_port::{ConnId, Frame, FrameError, FrameSink};
 use engram_dashboard_agent::commands::{resolve_in, AgentRosterRow};
 use engram_dashboard_base::sync;
 use engram_dashboard_base::time::{Clock, SystemClock};
@@ -106,7 +107,6 @@ use engram_dashboard_command::{
     route, CommandDecl, CommandEnvelope, CommandError, CommandLink, CommandReply, CommandTable,
     Effect, ErrorCode, OwnerToken, RequestId, RetryMode,
 };
-use engram_dashboard_net::frame_port::{ConnId, Frame, FrameError, FrameSink};
 use engram_dashboard_protocol::AgentEvent;
 use tokio::sync::{oneshot, watch};
 
@@ -184,7 +184,7 @@ struct Pending {
     /// 답장을 되돌릴 연결. **세대 번호가 없다 — 그래서 연결 id 가 재사용되지 않는 데 기대고 있다.**
     ///
     /// ★안전한 이유는 배달 코드가 아니라 **할당기**에 있다(실측 2026-08-18)★: 연결 id 는 네트워크 행
-    /// `ws.rs` 의 `ConnRegistry::alloc_id` 가 `AtomicU64`(초기값 1)에서 `fetch_add(1)` 로 뽑고, 해제
+    /// `link/server.rs` 의 `ConnRegistry::alloc_id` 가 `AtomicU64`(초기값 1)에서 `fetch_add(1)` 로 뽑고, 해제
     /// (`unregister`)는 맵에서 지울 뿐 그 값을 되돌려 놓지 않는다. 레지스트리는 데몬 조립에서 한 번 나므로
     /// 그 카운터는 프로세스 수명 내내 단조 증가하고, u64 소진은 도달 불가다.
     /// ★그 성질이 바뀌면 여기가 깨진다★ — id 를 재사용(풀 반납·해시·클라이언트 제공 값)하게 되면, 마감
@@ -2296,7 +2296,7 @@ impl CommandBus {
     ///
     /// ★네트워크 행의 번호와 겹치면 안 된다★: 겹치면 [`CommandRoster::attach`] 가 산 연결의 프레임 출구를
     /// 덮어(그 함수가 못 박은 전제) 그 연결 앞으로 갈 봉투가 이 HTTP 요청으로 새고, 이쪽 답장은 반대로
-    /// 사라진다. 네트워크 행은 1부터 **올라가고**(`ws.rs` 의 `ConnRegistry::alloc_id` — 해제해도 되돌리지
+    /// 사라진다. 네트워크 행은 1부터 **올라가고**(`link/server.rs` 의 `ConnRegistry::alloc_id` — 해제해도 되돌리지
     /// 않는다) 여기는 `u64::MAX` 에서 **내려간다**. 두 수열이 만나려면 2^63 번을 할당해야 하므로 도달 불가다.
     /// ★한 프로세스에 이 발급기가 하나여야 한다★ — 그래서 [`CommandBus`] 를 clone 으로 나눠 준다(사본마다
     /// 새 발급기를 만들면 두 사본이 같은 번호를 낸다).
@@ -2695,10 +2695,10 @@ impl FrameSink for ReplyCatcher {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::conn_port::FrameSink;
     use crate::test_doubles::FakeFrameSink;
     use engram_dashboard_base::time::ManualClock;
     use engram_dashboard_command::{CommandDecl, OwnerToken};
-    use engram_dashboard_net::frame_port::FrameSink;
     use serde_json::json;
     use tokio::sync::mpsc;
 

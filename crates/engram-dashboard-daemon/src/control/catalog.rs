@@ -465,8 +465,8 @@ pub fn malformed_body(reason: &str, raw: &str) -> ControlQueryResult {
 
 #[cfg(test)]
 mod tests {
+    use crate::conn_port::ConnId;
     use engram_dashboard_command::{Effect, OwnerToken, RequestId};
-    use engram_dashboard_net::frame_port::ConnId;
 
     use super::*;
     use crate::command_delivery::NoLocalCommands;

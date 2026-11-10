@@ -6,7 +6,7 @@
 //! ★That the log of [`read`] does not leak the token is guarded by only this comment right now (known gap)★: on a parse failure
 //! it prints the serde error's `Display`, which holds only the position · expected type and not the value —
 //! because `token` is a `String`, there is no place for a value echo of the `invalid type` kind. Changing the field type
-//! breaks that premise. `ws.rs` blocks the same trap with a regression test, but there is no test here.
+//! breaks that premise. `link/auth.rs` blocks the same trap with a regression test, but there is no test here.
 //!
 //! ★Do not revive atomic replacement (temp file + rename)★: the daemon holds this file without delete sharing, so
 //! rename is refused (measured `ERROR_SHARING_VIOLATION`). So [`write_in_place`] writes
@@ -34,7 +34,8 @@ pub const DAEMON_FILE: &str = "daemon.json";
 
 /// Writes the connection record in place with the daemon's **held handle**.
 ///
-/// ★The only entry point from outside the crate is [`crate::instance::InstanceGuard::publish`]★ — that is why it is `pub(crate)`.
+/// ★The only entry point is [`crate::instance::InstanceGuard::publish`]★ — that is why it is `pub(crate)`. Since the move into
+/// the daemon crate, `pub(crate)` spans the whole daemon, so "only through the guard" is kept by review, not by the type.
 /// If this function is opened as `pub` or reverted to a form that takes a path (`&Path`), a side that has not proven ownership
 /// could emit, and two daemons' writes would mix.
 ///
@@ -228,5 +229,31 @@ mod tests {
         let real = engram_dashboard_platform::process::current_process_start_time().unwrap();
         info.start_time = real.wrapping_add(999);
         assert!(is_stale(&info), "creation time 불일치 = 재사용 PID → stale");
+    }
+
+    /// A record of a daemon that exited while someone still holds its process object is stale — the handle still
+    /// opens, so the open-process check alone kept it live (TRD S21 trd-3-2-u5 R4).
+    ///
+    /// Only with an unknown start time. The known-start-time case is platform's
+    /// `an_exited_process_whose_object_is_held_is_gone` — [`is_stale`] is the negation it checks.
+    #[cfg(windows)]
+    #[test]
+    fn an_exited_process_whose_object_is_held_is_stale() {
+        let mut child = std::process::Command::new("cmd.exe")
+            .args(["/c", "exit"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("cmd.exe spawn");
+        let mut info = sample();
+        info.pid = child.id();
+        info.start_time = 0;
+        let _ = child.wait();
+        // `child` still holds the handle, so the exited process can still be opened.
+        let stale = is_stale(&info);
+        drop(child);
+
+        assert!(stale, "the exit code decides — an exited daemon is stale");
     }
 }

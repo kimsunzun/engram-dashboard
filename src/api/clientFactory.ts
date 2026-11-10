@@ -27,7 +27,7 @@ export function getAgentClient(): AgentClient {
     // §5 LLM-first control: expose the control surface on window — so that cdp.mjs eval / a (future) backend-side LLM
     // can call the same entry points as a human click.
     ;(window as unknown as { __ENGRAM_AGENT__?: AgentClient }).__ENGRAM_AGENT__ = instance
-    // Expose daemon control (start/stop/status) the same way — the tray (#2) · the LLM · cdp all drive the same handle.
+    // Expose daemon control (start/status) the same way — the LLM and cdp drive the same handle as boot.
     ;(window as unknown as { __ENGRAM_DAEMON__?: DaemonControl }).__ENGRAM_DAEMON__ =
       daemonControlInstance
     // ★T7c: register the TauriTransport Tauri event listeners (async). Events arriving before the listeners are registered

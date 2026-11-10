@@ -35,12 +35,12 @@ use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
+use crate::conn_port::ConnId;
 use engram_dashboard_agent::usage::{
     ProbeEnv, ProbeError, ProbeFailure, ProbeSpawner, UsageAccountKey, UsageKey, UsageObservation,
     UsageProbe, UsageVendorKey,
 };
 use engram_dashboard_base::sync;
-use engram_dashboard_net::frame_port::ConnId;
 use engram_dashboard_protocol::UsageLimitSnapshot;
 
 use book::{Coalesce, Judgment, Now, RequestKind, TickPlan, UsageBook};

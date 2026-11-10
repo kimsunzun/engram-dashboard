@@ -5,7 +5,7 @@
 //!   [`UsageWatch::replace`] only fixes cells that exist. So a late replacement that arrives overlapping disconnect cleanup cannot revive an erased
 //!   cell (§3 #56 — the same shape as `attach` · `refuse_if_detached` of the command registry).
 //! ★Erasing a cell withdraws its outlet ([`UsageOutlet::revoke`])★ — the connection's frame outlet that the outlet holds is
-//!   dropped before [`UsageWatch::detach`] returns (the duty of the connection cleanup port — `net/src/frame_port.rs` `on_disconnect`),
+//!   dropped before [`UsageWatch::detach`] returns (the duty of the connection cleanup port — `conn_port::ConnectionHandler::on_disconnect`),
 //!   and any [`Target`] copy left outside goes quiet. What remains is only one temporary copy for each send in progress at that time.
 //! ★Never build or send while holding the registry lock★ — inside the lock only the targets (outlet copy + that connection's current set) are taken,
 //!   and encoding and sending are done by [`deliver`] without a lock. So there is no deadlock even if the outlet or encoder calls back into this registry.
@@ -17,9 +17,9 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use crate::conn_port::ConnId;
 use engram_dashboard_agent::usage::UsageVendorKey;
 use engram_dashboard_base::sync;
-use engram_dashboard_net::frame_port::ConnId;
 use engram_dashboard_protocol::UsageLimitSnapshot;
 
 /// The outlet of one connection — the real one is made fresh per connection by the connection layer in `on_connect`: it holds one cell
@@ -131,8 +131,8 @@ impl UsageWatch {
     }
 
     /// A connection dropped (`on_disconnect`) — erase the cell and withdraw its outlet **before returning** ([`UsageOutlet::revoke`]).
-    /// So the connection's frame outlet that the outlet holds is dropped inside this call (the duty of the connection cleanup port — `net/src/frame_port.rs`
-    /// `on_disconnect`) and any [`Target`] copy left outside goes quiet. ★This is the only place that erases cells★. Return = there was a cell.
+    /// So the connection's frame outlet that the outlet holds is dropped inside this call (the duty of the connection cleanup port —
+    /// `conn_port::ConnectionHandler::on_disconnect`) and any [`Target`] copy left outside goes quiet. ★This is the only place that erases cells★. Return = there was a cell.
     pub fn detach(&self, conn: ConnId) -> bool {
         // ★Withdrawing and dropping are done **outside** the lock★ — this registry does not know what withdrawing or destruction does (the real one = closing the connection queue sender · waking).
         //   The reason is the same as the command registry `detach`.

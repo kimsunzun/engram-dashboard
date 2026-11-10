@@ -1031,11 +1031,6 @@ export class ProtocolClient implements AgentClient {
       CancelQueuedInput: { agent_id: agentId, input_id: inputId, request_id },
     }))
   }
-  stopDaemon(force: boolean): Promise<void> {
-    return this.sendCommand<void>((request_id) => ({
-      StopDaemon: { force, kill_agents: true, request_id },
-    }))
-  }
 
   // ── 프로필 CRUD ────────────────────────────────────────────────────────────────
   listProfiles(): Promise<AgentProfile[]> {

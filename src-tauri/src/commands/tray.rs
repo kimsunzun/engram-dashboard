@@ -1,7 +1,7 @@
 //! tray command — a §5 control surface through which the LLM/cdp invokes tray menu actions.
 //!
-//! Daemon on/off reuses the existing daemon_start/daemon_stop/daemon_status (commands/discovery.rs), so it is
-//! not here.
+//! Daemon on/off is not here: start and status are `daemon_start` / `daemon_status` (commands/discovery.rs), and the stop
+//! is the shell's stop path (`daemon_client::shutdown`) that the tray menu calls.
 
 use crate::commands::window_ctl::TauriWindowControl;
 use crate::layout::window_ctl::{Activation, WindowControl};

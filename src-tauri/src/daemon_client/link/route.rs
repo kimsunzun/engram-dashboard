@@ -31,6 +31,16 @@
 //! an edge. Failed attempts are logged throttled (`FailureLog` — ADR-0346 decision 5): retries no longer run out, so
 //! a line per attempt would repeat for as long as the daemon is away.
 //!
+//! ## Bands (TRD S21 trd-3-2-u5 §4 · R7)
+//!
+//! The status routing shows is `(state, band)`, emitted when either part changes. The band comes from the current
+//! handle's last answer: `Connected` · `Disconnected` → none; a failed attempt (`ConnectFailed`) → ① — for a handle
+//! that connected before this is the first failed reconnect, so ① appears while `state` stays `reconnecting` (D1);
+//! `Rejected` → ② when the handle's dial refused the daemon's version (its [`RefusalSlot`]), else ① `refused`; an
+//! explicit frontend close ([`RouteState::close`]) → none for the rest of that handle. Two holds sit on top: while a
+//! cold boot's start has not answered (R20) a never-connected handle shows none; and a re-add keeps the shown band
+//! until the new handle's first answer. A daemon stop holds nothing — the link's own answers show through it.
+//!
 //! ## Replies skip this path (§3-3 B2)
 //!
 //! A reply wakes its `request` inside the transport and never reaches the inbox, so it can resolve before events the
@@ -50,12 +60,16 @@ use engram_dashboard_transport::{
     TransportEvent,
 };
 
-use super::dialer::{BUSY_UNKNOWN, NOT_REGISTERED, NO_RECORD, READ_FAILED, UNUSABLE};
+use engram_dashboard_protocol::PROTOCOL_VERSION;
+
+use super::dialer::{
+    RefusalSlot, VersionRefusal, BUSY_UNKNOWN, NOT_REGISTERED, NO_RECORD, READ_FAILED, UNUSABLE,
+};
 use super::wire::{ShellIn, ShellWire};
 use super::{DaemonKey, HandleToken};
 use crate::daemon_client::events::DaemonEvents;
 use crate::daemon_client::protocol_state;
-use crate::daemon_client::{AgentNamesSink, ConnectionState};
+use crate::daemon_client::{AgentNamesSink, Band, ConnectionState, ConnectionStatus};
 
 /// One routed result, in the order the driver applies them.
 #[cfg_attr(test, derive(Debug))]
@@ -66,10 +80,10 @@ pub enum Routed {
     /// Exactly one per `LinkUp`, also when a re-add ([`RouteState::adopt`]) or an abnormal inbox end ([`route_end`])
     /// ends it.
     LinkDown { generation: Generation },
-    /// A connection-state edge for the frontend: emitted only when the shown state changes.
-    /// ★Routing is the only emitter of the link's connection state★ — a driver that also emitted (e.g. `Down` from its
+    /// A status for the frontend and the status watch: emitted only when the shown `(state, band)` changes.
+    /// ★Routing is the only emitter of the link's connection status★ — a driver that also emitted (e.g. `Down` from its
     /// own `close()`) would double the edges; a close shows `Down` through the `Closed` it produces.
-    State(ConnectionState),
+    Status(ConnectionStatus),
     /// A value for the connection-failure surface (`ConnectionNotice` — ADR-0342).
     Notice(LinkNotice),
     /// An event for the frontend — the driver hands it to [`emit_broadcast`].
@@ -91,8 +105,8 @@ pub enum Routed {
 pub enum LinkNotice {
     /// The daemon refused for good — `GaveUp(Rejected)` follows for a terminal refusal; for a refusal the transport
     /// would retry, the driver removes the peer instead (`Closed` follows and the registry no longer holds the peer).
-    /// The UI text is [`refusal_message`]`(code)` —
-    /// never the daemon's own text (ADR-0342).
+    /// Log-only: the UI text comes from the band and [`refusal_message`], which also needs the handle's refusal slot
+    /// (token vs version) — never the daemon's own text (ADR-0342).
     Refused { code: CloseCode },
     /// The reconnect budget ran out (`GaveUp(BudgetExhausted)`). `last` = the cause of the last failed attempt since
     /// the handle's last `Connected` (`None` = none failed). ★The shell's driver never reaches it★ — it retries network
@@ -182,43 +196,86 @@ impl UnreachableClass {
     }
 }
 
-/// The fixed local text for a terminal refusal with `code` — ★the one place a close code becomes UI text★
-/// (ADR-0342). It states the cause only — ADR-0343: the restart action lands in 3-2 U5; until then add no instruction
-/// here (the tray stop does nothing on a version mismatch). ★4001 does not say why★: it is the daemon's refusal of the
-/// handshake, whatever the cause (the shell never reads the daemon's text — `ShellHandshake`: token, version or
-/// anything else), or a local version mismatch (`link::dialer`); 3-3 U7's identity refusal will close with it too. The
-/// text for it is a pending user decision.
-pub fn refusal_message(code: CloseCode) -> &'static str {
+/// The text for a version refusal — the dial refused the daemon's protocol version (`link::dialer`).
+pub const VERSION_REFUSED: &str = "실행 중인 데몬이 이 앱과 버전이 다릅니다";
+/// The text for any other 4001 refusal (TRD S21 trd-3-2-u5 U2): the daemon refused this app's handshake — a token
+/// refusal as far as the shell can tell (it never reads the daemon's text — `ShellHandshake`).
+pub const AUTH_REFUSED: &str = "데몬이 이 앱의 인증을 거절했습니다";
+
+/// The fixed local text for a refusal with `code` — ★the one place a refusal becomes UI text★ (ADR-0342). `version`
+/// = the handle's dial refused the daemon's version (its [`RefusalSlot`] holds a record) — decided from what the shell
+/// did, never from the daemon's text (TRD S21 trd-3-2-u5 §4-3). Without it, 4001 is the daemon's refusal of the
+/// handshake and reads as the token text; 3-3 U7's identity refusal will close with 4001 too.
+pub fn refusal_message(code: CloseCode, version: bool) -> &'static str {
     match code {
-        CloseCode::HANDSHAKE_REJECTED => "실행 중인 데몬이 이 앱과 버전이 다릅니다",
+        _ if version => VERSION_REFUSED,
+        CloseCode::HANDSHAKE_REJECTED => AUTH_REFUSED,
         _ => "데몬이 연결을 거절했습니다",
     }
+}
+
+/// Whether band ② offers the stop button (TRD S21 trd-3-2-u5 §4-2): the daemon is older than this app and did not
+/// start after this app's process (one that did is an old exe run by hand — `stale_exe`). `own_start` = this app
+/// process's creation time; `None` (an OS that gives none) → `false`. A record without a start time (0) is not stale.
+pub fn can_stop(refusal: &VersionRefusal, own_start: Option<u64>) -> bool {
+    let Some(own_start) = own_start else {
+        return false;
+    };
+    let stale_exe = refusal.start_time != 0 && refusal.start_time > own_start;
+    refusal.daemon < PROTOCOL_VERSION && !stale_exe
 }
 
 /// The routing state of every key — see the module doc. `clock` times the failure log only — pass the registry's.
 pub struct RouteState {
     keys: HashMap<DaemonKey, KeyRoute>,
     clock: Arc<dyn Clock>,
+    view: BandView,
+}
+
+/// What a band depends on besides the handle's own answers.
+struct BandView {
+    /// TRD R20 — a cold boot's start has not answered yet.
+    boot_pending: bool,
+    /// This app process's creation time ([`can_stop`]).
+    own_start: Option<u64>,
 }
 
 impl RouteState {
-    pub fn new(clock: Arc<dyn Clock>) -> Self {
+    pub(crate) fn new(clock: Arc<dyn Clock>) -> Self {
         Self {
             keys: HashMap::new(),
             clock,
+            view: BandView {
+                boot_pending: false,
+                own_start: engram_dashboard_platform::process::current_process_start_time(),
+            },
         }
     }
 
+    /// [`can_stop`] measured against `own_start` instead of this process's creation time.
+    #[cfg(test)]
+    pub fn with_own_start(mut self, own_start: Option<u64>) -> Self {
+        self.view.own_start = own_start;
+        self
+    }
+
     /// `token` is now the key's current handle (one `Registry::add`): every later item of an earlier handle of the key
-    /// is dropped, and the handle's generation watermark and failure memory start over.
+    /// is dropped, and the handle's generation watermark and failure memory start over. `refusal` = the slot of the
+    /// handle's dial registration (`LocalDaemonDialer::register`).
     ///
     /// ★Call it in the same driver step as the `Registry::add` and its `spawn_pump`, before any item of `token` is
     /// routed★ — an item routed earlier is dropped as foreign. ★Apply what it returns★: the earlier handle's open
     /// connection ends here (`LinkDown` — its own `Disconnected` is now foreign and gets dropped; `Registry::add` closes
     /// the displaced supervisor only after the new one is in the roster), and a shown `Connected` turns `Reconnecting`
-    /// so the new handle's `Connected` is an edge the frontend resyncs on.
+    /// so the new handle's `Connected` is an edge the frontend resyncs on. The shown band stays until the new handle's
+    /// first answer.
     #[must_use]
-    pub fn adopt(&mut self, key: DaemonKey, token: HandleToken) -> Vec<Routed> {
+    pub fn adopt(
+        &mut self,
+        key: DaemonKey,
+        token: HandleToken,
+        refusal: Arc<RefusalSlot>,
+    ) -> Vec<Routed> {
         let mut out = Vec::new();
         let mut shown = None;
         if let Some(old) = self.keys.remove(&key) {
@@ -227,36 +284,100 @@ impl RouteState {
                 out.push(Routed::LinkDown { generation });
             }
             shown = old.shown;
-            if shown == Some(ConnectionState::Connected) {
-                shown = Some(ConnectionState::Reconnecting);
-                out.push(Routed::State(ConnectionState::Reconnecting));
+            if let Some(status) = shown.as_mut() {
+                if status.state == ConnectionState::Connected {
+                    status.state = ConnectionState::Reconnecting;
+                    out.push(Routed::Status(*status));
+                }
             }
         }
         self.keys.insert(
             key,
             KeyRoute {
                 token,
+                refusal,
                 seen: None,
                 open: None,
                 last_failure: None,
                 failures: FailureLog::default(),
+                answer: Answer::None,
+                closed_by_user: false,
                 shown,
                 closed: false,
             },
         );
         out
     }
+
+    /// Holds every band of a never-connected handle until [`Self::end_boot_start_hold`] (TRD R20). Call it before any
+    /// handle is added.
+    pub fn hold_for_boot_start(&mut self) {
+        self.view.boot_pending = true;
+    }
+
+    /// The hold of [`Self::hold_for_boot_start`] is on.
+    pub fn boot_start_held(&self) -> bool {
+        self.view.boot_pending
+    }
+
+    /// Ends the boot hold and shows what each current handle's last answer calls for — a refusal routed while it held
+    /// shows now. Nothing when no hold is on.
+    #[must_use]
+    pub fn end_boot_start_hold(&mut self) -> Vec<Routed> {
+        if !self.view.boot_pending {
+            return Vec::new();
+        }
+        self.view.boot_pending = false;
+        let view = &self.view;
+        self.keys
+            .values_mut()
+            .filter_map(|route| route.refresh(view))
+            .collect()
+    }
+
+    /// An explicit frontend close of `key`'s link (`daemon_close`): its current handle shows no band from now on,
+    /// whatever else of it is still routed.
+    #[must_use]
+    pub fn close(&mut self, key: &DaemonKey) -> Vec<Routed> {
+        let Some(route) = self.keys.get_mut(key) else {
+            return Vec::new();
+        };
+        route.answer = Answer::Band(None);
+        route.closed_by_user = true;
+        route.refresh(&self.view).into_iter().collect()
+    }
+
+    /// The version refusal `token`'s dial recorded, when `token` is `key`'s current handle.
+    pub fn version_refusal(&self, key: &DaemonKey, token: HandleToken) -> Option<VersionRefusal> {
+        of_current_handle(self.keys.get(key), token).and_then(|route| route.refusal.get())
+    }
 }
+
+/// The band the handle's last answer calls for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Answer {
+    /// No answer yet — the shown band stays (a re-add).
+    None,
+    Band(Option<Band>),
+}
+
+const NOT_CONNECTED: Band = Band::NotConnected { refused: false };
 
 struct KeyRoute {
     token: HandleToken,
+    /// The handle's dial registration's version refusal (TRD §4-3).
+    refusal: Arc<RefusalSlot>,
     /// The newest `Connected` generation this handle's inbox delivered (rule ②).
     seen: Option<Generation>,
     /// The connection given to the driver as `LinkUp` and not yet as `LinkDown`.
     open: Option<Generation>,
     last_failure: Option<FailureCause>,
     failures: FailureLog,
-    shown: Option<ConnectionState>,
+    answer: Answer,
+    /// [`RouteState::close`] came — the answer stays "no band".
+    closed_by_user: bool,
+    /// What routing last emitted for the key (carried across a re-add); `None` = nothing yet.
+    shown: Option<ConnectionStatus>,
     /// `Closed` was routed — the inbox ends cleanly after it.
     closed: bool,
 }
@@ -320,7 +441,7 @@ pub fn route(
     token: HandleToken,
     item: Incoming<ShellWire>,
 ) -> Vec<Routed> {
-    let RouteState { keys, clock } = st;
+    let RouteState { keys, clock, view } = st;
     let Some(route) = of_current_handle(keys.get_mut(key), token) else {
         tracing::debug!(
             peer = %key.peer_id(),
@@ -331,17 +452,19 @@ pub fn route(
     };
     match item {
         Incoming::Message(arrival) => route.message(key, arrival),
-        Incoming::Event(event) => route.event(key, event, clock.as_ref()),
+        Incoming::Event(event) => route.event(key, event, clock.as_ref(), view),
     }
 }
 
 /// Routes the end of `key`'s handle `token` inbox (the pump's `Routable::Ended` — after the last item). After `Closed`
 /// that is the clean end and routes nothing. ★Without `Closed` the supervisor ended abnormally★ (transport invariant 5
-/// — cleanup over its bound, a panic, runtime shutdown): the open connection ends (`LinkDown`) and `Down` is shown.
+/// — cleanup over its bound, a panic, runtime shutdown): the open connection ends (`LinkDown`) and `Down` is shown with
+/// band ① — nothing retries that handle.
 /// The driver unregisters the handle's dial registration on every `Ended` — current or replaced handle — not only when
 /// this returns something (3-2 U3).
 pub fn route_end(st: &mut RouteState, key: &DaemonKey, token: HandleToken) -> Vec<Routed> {
-    let Some(route) = of_current_handle(st.keys.get_mut(key), token) else {
+    let RouteState { keys, view, .. } = st;
+    let Some(route) = of_current_handle(keys.get_mut(key), token) else {
         tracing::debug!(peer = %key.peer_id(), "the inbox of a replaced handle ended");
         return Vec::new();
     };
@@ -355,7 +478,8 @@ pub fn route_end(st: &mut RouteState, key: &DaemonKey, token: HandleToken) -> Ve
         "the daemon link inbox ended without Closed — the transport supervisor stopped abnormally"
     );
     let mut out: Vec<Routed> = route.link_down().into_iter().collect();
-    out.extend(route.show(ConnectionState::Down));
+    route.answered(Some(NOT_CONNECTED));
+    out.extend(route.show(ConnectionState::Down, view));
     out
 }
 
@@ -397,12 +521,39 @@ impl KeyRoute {
         Vec::new()
     }
 
-    fn show(&mut self, state: ConnectionState) -> Option<Routed> {
-        if self.shown == Some(state) {
+    /// Records the band the handle's last answer calls for — not after an explicit close.
+    fn answered(&mut self, band: Option<Band>) {
+        if !self.closed_by_user {
+            self.answer = Answer::Band(band);
+        }
+    }
+
+    /// The band to show now (module doc).
+    fn band(&self, view: &BandView) -> Option<Band> {
+        let shown = self.shown.and_then(|status| status.band);
+        match self.answer {
+            Answer::None => shown,
+            Answer::Band(_) if view.boot_pending && self.seen.is_none() => None,
+            Answer::Band(band) => band,
+        }
+    }
+
+    fn show(&mut self, state: ConnectionState, view: &BandView) -> Option<Routed> {
+        let status = ConnectionStatus {
+            state,
+            band: self.band(view),
+        };
+        if self.shown == Some(status) {
             return None;
         }
-        self.shown = Some(state);
-        Some(Routed::State(state))
+        self.shown = Some(status);
+        Some(Routed::Status(status))
+    }
+
+    /// The shown state again, with the band of now — nothing when nothing was shown yet or nothing changed.
+    fn refresh(&mut self, view: &BandView) -> Option<Routed> {
+        let state = self.shown?.state;
+        self.show(state, view)
     }
 
     fn link_down(&mut self) -> Option<Routed> {
@@ -428,6 +579,7 @@ impl KeyRoute {
         key: &DaemonKey,
         event: TransportEvent<ShellWire>,
         clock: &dyn Clock,
+        view: &BandView,
     ) -> Vec<Routed> {
         let peer = key.peer_id();
         match event {
@@ -445,8 +597,9 @@ impl KeyRoute {
                 self.seen = Some(generation);
                 self.open = Some(generation);
                 self.last_failure = None;
+                self.answered(None);
                 let mut out = vec![Routed::LinkUp { generation }];
-                out.extend(self.show(ConnectionState::Connected));
+                out.extend(self.show(ConnectionState::Connected, view));
                 out
             }
             // Every loss of a live connection shows `Reconnecting`, our own as well (`cause` `Explicit`): after
@@ -462,10 +615,13 @@ impl KeyRoute {
                 }
                 tracing::info!(%peer, generation = generation.0, ?cause, "daemon link lost");
                 let mut out: Vec<Routed> = self.link_down().into_iter().collect();
-                out.extend(self.show(ConnectionState::Reconnecting));
+                // No band until a reconnect attempt fails (D1).
+                self.answered(None);
+                out.extend(self.show(ConnectionState::Reconnecting, view));
                 out
             }
-            // No state edge per attempt — only a handle that never connected shows its first failure (module doc).
+            // No state edge per attempt — only a handle that never connected shows its first failure as `Down`; every
+            //   failure calls for band ① (module doc).
             TransportEvent::ConnectFailed {
                 attempt,
                 cause,
@@ -501,20 +657,30 @@ impl KeyRoute {
                     ),
                 }
                 self.last_failure = Some(failure);
+                self.answered(Some(NOT_CONNECTED));
                 if self.seen.is_none() {
-                    self.show(ConnectionState::Down).into_iter().collect()
+                    self.show(ConnectionState::Down, view).into_iter().collect()
                 } else {
-                    Vec::new()
+                    self.refresh(view).into_iter().collect()
                 }
             }
+            // The band shows with the `Down` of the `GaveUp(Rejected)` that follows.
             TransportEvent::Rejected { code, reason, .. } => {
+                let version = self.refusal.get();
                 // The daemon's text can echo what we sent (the Auth token) — its length only.
                 tracing::warn!(
                     %peer,
                     code = code.0,
                     reason_bytes = reason.len(),
+                    ?version,
                     "the daemon refused the connection for good"
                 );
+                self.answered(Some(match version {
+                    Some(refusal) => Band::Version {
+                        can_stop: can_stop(&refusal, view.own_start),
+                    },
+                    None => Band::NotConnected { refused: true },
+                }));
                 vec![Routed::Notice(LinkNotice::Refused { code })]
             }
             TransportEvent::GaveUp { reason, .. } => {
@@ -524,8 +690,9 @@ impl KeyRoute {
                     out.push(Routed::Notice(LinkNotice::BudgetExhausted {
                         last: self.last_failure,
                     }));
+                    self.answered(Some(NOT_CONNECTED));
                 }
-                out.extend(self.show(ConnectionState::Down));
+                out.extend(self.show(ConnectionState::Down, view));
                 out
             }
             TransportEvent::Closed {
@@ -536,7 +703,7 @@ impl KeyRoute {
                 }
                 tracing::info!(%peer, generation = generation.0, ?cause, "daemon link closed");
                 self.closed = true;
-                self.show(ConnectionState::Down).into_iter().collect()
+                self.show(ConnectionState::Down, view).into_iter().collect()
             }
             TransportEvent::DecodeFailed {
                 generation, reason, ..
@@ -685,7 +852,6 @@ mod tests {
     use serde_json::value::RawValue;
 
     use super::super::test_log::capture;
-    use crate::daemon_client::events::ConnectionStateEvent;
     use crate::daemon_client::replay_flight::ReplayFlightSet;
     use crate::daemon_client::test_support::wire_agent;
 
@@ -788,24 +954,49 @@ mod tests {
         }
     }
 
+    /// The state edges among the statuses in `out` — a status that changed only its band repeats no state here.
     fn states(out: &[Routed]) -> Vec<ConnectionState> {
+        let mut edges: Vec<ConnectionState> = Vec::new();
+        for status in statuses(out) {
+            if edges.last() != Some(&status.state) {
+                edges.push(status.state);
+            }
+        }
+        edges
+    }
+
+    fn statuses(out: &[Routed]) -> Vec<ConnectionStatus> {
         out.iter()
             .filter_map(|r| match r {
-                Routed::State(s) => Some(*s),
+                Routed::Status(s) => Some(*s),
                 _ => None,
             })
             .collect()
     }
 
+    fn status(state: ConnectionState, band: Option<Band>) -> ConnectionStatus {
+        ConnectionStatus { state, band }
+    }
+
+    const REFUSED: Band = Band::NotConnected { refused: true };
+
+    fn slot() -> Arc<RefusalSlot> {
+        Arc::default()
+    }
+
     fn route_state() -> RouteState {
-        RouteState::new(ManualClock::new().handle())
+        route_state_on(&ManualClock::new())
+    }
+
+    fn route_state_on(clock: &ManualClock) -> RouteState {
+        RouteState::new(clock.handle())
     }
 
     fn adopted() -> (RouteState, HandleToken) {
         let mut st = route_state();
         let token = HandleToken::mint();
         assert!(
-            st.adopt(key(), token).is_empty(),
+            st.adopt(key(), token, slot()).is_empty(),
             "a first handle ends nothing"
         );
         (st, token)
@@ -841,13 +1032,16 @@ mod tests {
         assert!(!run(&mut st, old, [connected(1)]).is_empty());
         // Re-add: the new handle has not connected yet, so only the handle tells the old tail apart.
         let new = HandleToken::mint();
-        let ended = st.adopt(key(), new);
+        let ended = st.adopt(key(), new, slot());
         assert!(
             matches!(
                 ended.as_slice(),
                 [
                     Routed::LinkDown { generation },
-                    Routed::State(ConnectionState::Reconnecting)
+                    Routed::Status(ConnectionStatus {
+                        state: ConnectionState::Reconnecting,
+                        band: None,
+                    })
                 ] if generation.0 == 1
             ),
             "the re-add ends the old connection: {ended:?}"
@@ -917,9 +1111,16 @@ mod tests {
             matches!(
                 out.as_slice(),
                 [
-                    Routed::State(ConnectionState::Down),
+                    Routed::Status(ConnectionStatus {
+                        state: ConnectionState::Down,
+                        band: Some(NOT_CONNECTED),
+                    }),
                     Routed::Notice(LinkNotice::Refused {
                         code: CloseCode::HANDSHAKE_REJECTED
+                    }),
+                    Routed::Status(ConnectionStatus {
+                        state: ConnectionState::Down,
+                        band: Some(REFUSED),
                     }),
                 ]
             ),
@@ -931,7 +1132,7 @@ mod tests {
         let (mut st, first) = adopted();
         run(&mut st, first, [connected(7)]);
         let second = HandleToken::mint();
-        let _ = st.adopt(key(), second);
+        let _ = st.adopt(key(), second, slot());
         let out = run(&mut st, second, [closed(7)]);
         assert_eq!(states(&out), [ConnectionState::Down]);
     }
@@ -1004,7 +1205,7 @@ mod tests {
         assert_eq!(states(&run(&mut st, old, [connected(1)])), [Connected]);
 
         let new = HandleToken::mint();
-        assert_eq!(states(&st.adopt(key(), new)), [Reconnecting]);
+        assert_eq!(states(&st.adopt(key(), new, slot())), [Reconnecting]);
         let out = run(
             &mut st,
             new,
@@ -1136,9 +1337,9 @@ mod tests {
     fn a_repeated_cause_is_debug_until_a_minute_passed_and_a_connect_reports_what_no_line_counted()
     {
         let clock = ManualClock::new();
-        let mut st = RouteState::new(clock.handle());
+        let mut st = route_state_on(&clock);
         let token = HandleToken::mint();
-        let _ = st.adopt(key(), token);
+        let _ = st.adopt(key(), token, slot());
         let lines = Arc::new(Mutex::new(Vec::new()));
         capture(lines.clone(), || {
             run(&mut st, token, [unreachable_with(NO_RECORD)]);
@@ -1281,7 +1482,10 @@ mod tests {
                 out.as_slice(),
                 [
                     Routed::LinkDown { generation },
-                    Routed::State(ConnectionState::Down)
+                    Routed::Status(ConnectionStatus {
+                        state: ConnectionState::Down,
+                        band: Some(NOT_CONNECTED),
+                    })
                 ] if generation.0 == 3
             ),
             "{out:?}"
@@ -1304,7 +1508,7 @@ mod tests {
         // The end of a replaced handle routes nothing.
         let (mut st, old) = adopted();
         run(&mut st, old, [connected(1)]);
-        let _ = st.adopt(key(), HandleToken::mint());
+        let _ = st.adopt(key(), HandleToken::mint(), slot());
         assert!(route_end(&mut st, &key(), old).is_empty());
     }
 
@@ -1330,7 +1534,10 @@ mod tests {
                 matches!(
                     out.as_slice(),
                     [
-                        Routed::State(ConnectionState::Down),
+                        Routed::Status(ConnectionStatus {
+                            state: ConnectionState::Down,
+                            band: Some(NOT_CONNECTED),
+                        }),
                         Routed::Notice(LinkNotice::BudgetExhausted { last: got }),
                     ] if *got == last
                 ),
@@ -1361,7 +1568,15 @@ mod tests {
 
     #[test]
     fn a_version_refusal_after_a_reconnect_reaches_the_fixed_refusal_text() {
-        let (mut st, token) = adopted();
+        let mut st = route_state().with_own_start(Some(1_000));
+        let token = HandleToken::mint();
+        let version = slot();
+        let _ = st.adopt(key(), token, version.clone());
+        version.set(Some(VersionRefusal {
+            daemon: PROTOCOL_VERSION + 1,
+            pid: 7,
+            start_time: 0,
+        }));
         let out = run(
             &mut st,
             token,
@@ -1393,11 +1608,263 @@ mod tests {
                 ConnectionState::Down
             ]
         );
-        // The text is the local one for the code — it names the cause and quotes nothing the daemon sent.
-        let text = refusal_message(CloseCode::HANDSHAKE_REJECTED);
+        assert_eq!(
+            statuses(&out).last().and_then(|s| s.band),
+            Some(Band::Version { can_stop: false }),
+            "a newer daemon: band ② without the stop button"
+        );
+        // The text is the local one for the refusal — it names the cause and quotes nothing the daemon sent.
+        let text = refusal_message(CloseCode::HANDSHAKE_REJECTED, true);
         assert!(text.contains("버전"), "{text}");
         assert!(!text.contains("999"));
-        assert_ne!(text, refusal_message(CloseCode(4100)));
+        assert_eq!(
+            refusal_message(CloseCode::HANDSHAKE_REJECTED, false),
+            AUTH_REFUSED
+        );
+        assert_ne!(text, refusal_message(CloseCode(4100), false));
+        assert_ne!(AUTH_REFUSED, refusal_message(CloseCode(4100), false));
+    }
+
+    // ── bands (TRD S21 trd-3-2-u5 §4 · R7) ─────────────────────────────────────────────────────
+
+    // Finding A: a runtime loss used to show nothing once the reconnect failed — `reconnecting` stayed the last word.
+    #[test]
+    fn a_runtime_loss_shows_band_one_after_the_first_failed_reconnect_with_the_state_unchanged() {
+        use ConnectionState::*;
+        let (mut st, token) = adopted();
+        run(&mut st, token, [connected(1)]);
+        let lost = run(
+            &mut st,
+            token,
+            [disconnected(1, DisconnectCause::PeerClosed)],
+        );
+        assert_eq!(
+            statuses(&lost),
+            [status(Reconnecting, None)],
+            "no band before a reconnect attempt failed"
+        );
+        let failed = run(&mut st, token, [connect_failed(unreachable())]);
+        assert_eq!(
+            statuses(&failed),
+            [status(Reconnecting, Some(NOT_CONNECTED))]
+        );
+        let again = run(&mut st, token, [connect_failed(unreachable())]);
+        assert!(statuses(&again).is_empty(), "deduped: {again:?}");
+        let back = run(&mut st, token, [connected(2)]);
+        assert_eq!(statuses(&back), [status(Connected, None)]);
+    }
+
+    #[test]
+    fn a_first_failure_shows_band_one_and_a_refusal_reads_the_handles_slot() {
+        use ConnectionState::*;
+        let (mut st, token) = adopted();
+        let out = run(&mut st, token, [connect_failed(unreachable())]);
+        assert_eq!(statuses(&out), [status(Down, Some(NOT_CONNECTED))]);
+
+        // A wire refusal — the slot is empty: ① refused (the token text).
+        let (mut st, token) = adopted();
+        let out = run(
+            &mut st,
+            token,
+            [rejected("bad token"), gave_up(GaveUpReason::Rejected)],
+        );
+        assert_eq!(statuses(&out), [status(Down, Some(REFUSED))]);
+
+        // The dial refused the version — ②.
+        let mut st = route_state().with_own_start(Some(1_000));
+        let token = HandleToken::mint();
+        let version = slot();
+        let _ = st.adopt(key(), token, version.clone());
+        version.set(Some(VersionRefusal {
+            daemon: PROTOCOL_VERSION - 1,
+            pid: 7,
+            start_time: 999,
+        }));
+        let out = run(
+            &mut st,
+            token,
+            [rejected("whatever"), gave_up(GaveUpReason::Rejected)],
+        );
+        assert_eq!(
+            statuses(&out),
+            [status(Down, Some(Band::Version { can_stop: true }))]
+        );
+        assert_eq!(
+            st.version_refusal(&key(), token).map(|r| r.pid),
+            Some(7),
+            "the driver reads the same record for connect()'s text"
+        );
+        assert_eq!(st.version_refusal(&key(), HandleToken::mint()), None);
+    }
+
+    #[test]
+    fn statuses_are_deduped_on_state_and_band() {
+        use ConnectionState::*;
+        let (mut st, token) = adopted();
+        let out = run(
+            &mut st,
+            token,
+            [
+                connect_failed(unreachable()),
+                connect_failed(unreachable()),
+                connect_failed(retryable_refusal()),
+                closed(0),
+            ],
+        );
+        assert_eq!(
+            statuses(&out),
+            [status(Down, Some(NOT_CONNECTED))],
+            "the same (state, band) is emitted once"
+        );
+        // A band-only change is emitted although the state word stays.
+        let out = run(
+            &mut st,
+            token,
+            [rejected("x"), gave_up(GaveUpReason::Rejected)],
+        );
+        assert_eq!(statuses(&out), [status(Down, Some(REFUSED))]);
+    }
+
+    #[test]
+    fn an_explicit_close_shows_no_band_for_the_rest_of_that_handle() {
+        use ConnectionState::*;
+        let (mut st, token) = adopted();
+        run(&mut st, token, [connect_failed(unreachable())]);
+        assert_eq!(statuses(&st.close(&key())), [status(Down, None)]);
+        // A failure of that handle still in its inbox, and its `Closed`, change nothing.
+        let late = run(&mut st, token, [connect_failed(unreachable()), closed(0)]);
+        assert!(statuses(&late).is_empty(), "{late:?}");
+
+        // From connected: the close's own `Disconnected` · `Closed` show no band.
+        let (mut st, token) = adopted();
+        run(&mut st, token, [connected(1)]);
+        assert!(st.close(&key()).is_empty(), "nothing to change yet");
+        let out = run(
+            &mut st,
+            token,
+            [disconnected(1, DisconnectCause::Explicit), closed(1)],
+        );
+        assert_eq!(
+            statuses(&out),
+            [status(Reconnecting, None), status(Down, None)]
+        );
+    }
+
+    #[test]
+    fn a_re_add_keeps_the_shown_band_until_the_new_handles_first_answer() {
+        use ConnectionState::*;
+        let (mut st, old) = adopted();
+        run(&mut st, old, [connect_failed(unreachable())]);
+        let new = HandleToken::mint();
+        assert!(st.adopt(key(), new, slot()).is_empty());
+        assert!(
+            st.end_boot_start_hold().is_empty(),
+            "no hold, nothing re-derived"
+        );
+        let out = run(&mut st, new, [connected(1)]);
+        assert_eq!(statuses(&out), [status(Connected, None)]);
+
+        // ② shown, then a re-add: ② stays until the new handle fails, which shows ①.
+        let mut st = route_state().with_own_start(Some(1_000));
+        let old = HandleToken::mint();
+        let version = slot();
+        let _ = st.adopt(key(), old, version.clone());
+        version.set(Some(VersionRefusal {
+            daemon: PROTOCOL_VERSION - 1,
+            pid: 7,
+            start_time: 0,
+        }));
+        let out = run(
+            &mut st,
+            old,
+            [rejected("x"), gave_up(GaveUpReason::Rejected)],
+        );
+        assert_eq!(
+            statuses(&out),
+            [status(Down, Some(Band::Version { can_stop: true }))]
+        );
+        let new = HandleToken::mint();
+        assert!(st.adopt(key(), new, slot()).is_empty(), "② stays");
+        let out = run(&mut st, new, [connect_failed(unreachable())]);
+        assert_eq!(statuses(&out), [status(Down, Some(NOT_CONNECTED))]);
+    }
+
+    #[test]
+    fn the_stop_button_is_offered_for_an_older_daemon_that_did_not_start_after_this_app() {
+        let refusal = |daemon, start_time| VersionRefusal {
+            daemon,
+            pid: 1,
+            start_time,
+        };
+        let own = Some(1_000);
+        assert!(can_stop(&refusal(PROTOCOL_VERSION - 1, 999), own), "older");
+        assert!(
+            can_stop(&refusal(PROTOCOL_VERSION - 1, 0), own),
+            "start_time 0 is not stale"
+        );
+        assert!(
+            !can_stop(&refusal(PROTOCOL_VERSION - 1, 1_001), own),
+            "stale exe: started after this app"
+        );
+        assert!(!can_stop(&refusal(PROTOCOL_VERSION + 1, 999), own), "newer");
+        assert!(
+            !can_stop(&refusal(PROTOCOL_VERSION - 1, 999), None),
+            "this app's own start time unknown"
+        );
+    }
+
+    // R20 — a cold boot: the spare's attach fails before main's start answers.
+    #[test]
+    fn the_boot_hold_keeps_a_never_connected_handle_bandless_and_its_end_shows_the_last_answer() {
+        use ConnectionState::*;
+        let mut st = route_state();
+        st.hold_for_boot_start();
+        assert!(st.boot_start_held());
+        let token = HandleToken::mint();
+        let _ = st.adopt(key(), token, slot());
+        let out = run(&mut st, token, [connect_failed(unreachable())]);
+        assert_eq!(statuses(&out), [status(Down, None)], "state only");
+        assert_eq!(
+            statuses(&st.end_boot_start_hold()),
+            [status(Down, Some(NOT_CONNECTED))]
+        );
+        assert!(!st.boot_start_held());
+        assert!(st.end_boot_start_hold().is_empty(), "once");
+
+        // A refusal while held shows on the end.
+        let mut st = route_state();
+        st.hold_for_boot_start();
+        let token = HandleToken::mint();
+        let _ = st.adopt(key(), token, slot());
+        let out = run(
+            &mut st,
+            token,
+            [rejected("x"), gave_up(GaveUpReason::Rejected)],
+        );
+        assert_eq!(statuses(&out), [status(Down, None)]);
+        assert_eq!(
+            statuses(&st.end_boot_start_hold()),
+            [status(Down, Some(REFUSED))]
+        );
+
+        // A handle that connected is not held.
+        let mut st = route_state();
+        st.hold_for_boot_start();
+        let token = HandleToken::mint();
+        let _ = st.adopt(key(), token, slot());
+        let out = run(
+            &mut st,
+            token,
+            [
+                connected(1),
+                disconnected(1, DisconnectCause::PeerClosed),
+                connect_failed(unreachable()),
+            ],
+        );
+        assert_eq!(
+            statuses(&out).last(),
+            Some(&status(Reconnecting, Some(NOT_CONNECTED)))
+        );
     }
 
     #[test]
@@ -1538,7 +2005,7 @@ mod tests {
     }
 
     impl DaemonEvents for Recorder {
-        fn connection_state(&self, _state: ConnectionStateEvent) {
+        fn connection_status(&self, _status: &ConnectionStatus) {
             self.push("state".into());
         }
         fn agent_list_updated(&self, agents: &[AgentInfo]) {
@@ -1606,7 +2073,7 @@ mod tests {
         let now = Instant::now();
 
         let old = HandleToken::mint();
-        apply(st.adopt(key(), old), &mut flight, &rec);
+        apply(st.adopt(key(), old, slot()), &mut flight, &rec);
         apply(
             run(
                 &mut st,
@@ -1619,7 +2086,7 @@ mod tests {
 
         // Re-add: the new handle connects and delivers its snapshot, then a replay starts on it.
         let new = HandleToken::mint();
-        apply(st.adopt(key(), new), &mut flight, &rec);
+        apply(st.adopt(key(), new, slot()), &mut flight, &rec);
         apply(
             run(
                 &mut st,
@@ -1669,7 +2136,7 @@ mod tests {
         let now = Instant::now();
 
         let old = HandleToken::mint();
-        apply(st.adopt(key(), old), &mut flight, &rec);
+        apply(st.adopt(key(), old, slot()), &mut flight, &rec);
         apply(run(&mut st, old, [connected(1)]), &mut flight, &rec);
         assert!(
             flight.request_replay(agent, now).send_now,
@@ -1678,7 +2145,7 @@ mod tests {
 
         // Re-add before that replay resolved — the old handle's own `Disconnected` will be dropped as foreign.
         let new = HandleToken::mint();
-        let ended = st.adopt(key(), new);
+        let ended = st.adopt(key(), new, slot());
         assert_eq!(states(&ended), [ConnectionState::Reconnecting]);
         apply(ended, &mut flight, &rec);
         let up = run(&mut st, new, [connected(2)]);

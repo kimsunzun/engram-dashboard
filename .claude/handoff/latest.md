@@ -1,66 +1,58 @@
-# Handoff: stage 3 transport — 3-2 U3c · U4a · U4b · U4c landed; T-79 fixed on S34 branch · next = user decisions, then 3-2 U5
+# Handoff: S21 stage 3 transport done (3-3 replace-only + stop-order fix) · next = user's GUI check, then master merge
 
 ## Know first
-- Nothing is in flight. Both worktrees clean. **Nothing pushed** this session (user decides push/merge).
-- Three user decisions are pending (see "Decisions → Open"); stop at U5 until they are answered.
-- User patterns this session: (1) check OSS convention / do a light research BEFORE asking a user-visible text/behaviour question — the user corrected me once (「일단 리서치 간단하게 하면 되는데」); (2) plain words in questions, no internal names (「뭔소리야」 at an `ensure` question); (3) do not spam "still running" replies — a worker that backgrounds long runs and ends its turn floods the main with interim notifications (user: 「너 무슨 메세지를 계속뿌려 일부로 토큰낭비한거?」). **Put in every worker brief: "if you background a long command, do not end your turn — wait in place until it completes (Monitor until-loop / foreground); report once."** Filed Engram `cdefe31`/`2ce8114`.
-- Auto-handoff prompt is turned off for this session's id only (`~/.claude/state/auto-handoff/31fa411b….off`).
-- Project rules unchanged: new comments/docs English (touched paragraph rewritten whole in English); commit subject Korean `S<n>: …`; full regression before commit; delete = `bash ~/.claude/references/recycle.sh`; user standing condition: QA known failures only (T-52 stop_smoke · ws_e2e ignored_daemon_kill_cleans_pty_child) → proceed.
+- **Mode: autonomous.** User wants plain words, no invented labels, no agenda items — 「뭐 자꾸 안건 꺼내지 말고」. Ask only what changes visible behaviour; decide internals and report.
+- **User's bar for fixes (2026-11-10):** fix only real breaks seen in normal use — **data loss, leftover processes, hangs**. Connection churn (an extra redial, a band a moment late) is accepted — 「연결 안되는건 그냥 다시 연결하면 되잖아」. Do not take review 권장 items for rare orderings (logged in Engram feedback `78c7435`); user called the earlier over-fixing 「별 필요없는 부분까지 다 수정하는 느낌」 · 「transport 그냥 연결만 하는 문제였는데 뭔 복잡하게 하냐고」.
+- **A release build of HEAD `05cd2b1d` is running for the user's manual check** (app PID 33644, daemon PID 35112) from `C:\Users\kimsunzun\AppData\Local\Temp\engram-check-05cd2b1d\` (data next to the exe, separate from `.engram-dev`). An older check build exists at `...\engram-check-df13d853\` — can be deleted.
+- **Untracked `.engram-dev.qa-bak-engram-qa-20261109-111846/` holds a daemon token** — never stage it (`git add -A -- . ':(exclude).engram-dev.qa-bak-*'`). `recycle.sh` fails on it (`code=0x78`); user will delete it after a restart.
+- Build script `scripts/build-release.ps1` needs **`pwsh`** (PowerShell 7); Windows PowerShell 5 fails on `GetFullPath` overload.
+- All cargo `target` folders under `I:\Engram\apps` were cleaned 2026-11-10 (≈ 456 GiB) — first builds are cold.
 
 ## One-line state · next first action
-3-2 shell attach: U2 · U3a/b/c · U4a/b/c done — production shell now runs on the transport link driver (`daemon_client/connection.rs` + `link/`); old driver deleted. Left in 3-2: **U5** (stop client on transport `link/stop.rs` + band buttons ADR-0344/0345) and **U6** (N-daemon seat — give the user the network/structure lecture first). Then 3-3 (daemon on transport, net removed). Rough progress: ~70% by unit count, ~60% by weight; shell side ~90%, daemon side 0%.
-**Next first action = ask the user the open decisions** (one at a time, plain words, convention checked first), then U5 via `/engram-implement`.
+Stage 3 transport is complete on branch `v0.4.1/refactor/transport-attach` (daemon on the transport, net crate deleted, stop-order regression fixed); CI for `05cd2b1d` was **in progress** at save time. **Next first action:** check CI (`gh run list -w ci.yml -c 05cd2b1d --json status,conclusion`), get the user's result of the manual GUI check (below), then merge to master per `docs/handbook/branch-commit.md` (push → CI green → `--no-ff`, merge without checkout via `merge-tree`/`commit-tree`/`update-ref`, list chunks in the merge body). The user already said 「이거 문제없으면 마스터푸쉬 하면 될듯」.
+- Manual GUI check items given to the user: (1) claude agent answers a real prompt to the end, (2) codex agent the same (never GUI-tested), (3) tray 「데몬 끄기」 → agent tree rows turn stopped (this was the regression) and icon gray; 「데몬 켜기」 → reconnects, (4) tray 「완전 종료」 with agents running → app exits at once.
 
-## Repo state (measured at save)
-- `I:\Engram\apps\engram-dashboard` — branch `v0.4.1/refactor/transport-attach`, HEAD `73031727`, ahead 93 / behind 0 vs origin (before this handoff commit), clean.
-  - This session: U3c `0d4f79d1` · U4a `7f841624` · T-79 tracking `31919dcb` · U4b `5257314f` · tracking T-79 cause/T-80 `269a24ba` · U4c `73031727`.
-- `I:\Engram\apps\engram-dashboard-wt4` — branch `v0.5.0/fix/pty-kill-hang` (topic **S34**, from master `1da73635`), HEAD `75de8476`, 5 commits ahead of master, clean, **not on origin** (S34 number not claimed by push yet).
-- Engram repo (feedback only): `c9c2a38`, `68772a1`, `cdefe31`, `2ce8114`.
+## Repo state (measured 2026-11-10 13:12)
+- Branch `v0.4.1/refactor/transport-attach`, HEAD `05cd2b1d`, **ahead 0 / behind 0** vs its origin branch (pushed; the handoff commit comes after this text), **24 ahead / 0 behind origin/master** (master already merged into the branch at `94777ae5`).
+- Commits this session: `3467d53d` T-82 closed · `093b0eff` 3-2 U5b-1 · `befab4a6` 3-3 U1·U2 · `70804191` 3-3 U4·U5 · `80d1fecf` 3-3 U6 · `94777ae5` merge master · `df13d853` step-log/tracking · `5b54db2e`/`fc1cd8c0` ADR-0352 · `7b86663a` T-83 · `05cd2b1d` stop-order fix.
+- Parked branch `v0.4.1/feat/connection-ui-parked` = `4d25dfa7` (3-2 U5b-2 frontend band buttons / confirm / LLM commands; review round 1 applied, not re-reviewed, no QA; local only, not pushed).
+- Working tree: clean except the token folder above. Engram repo: feedback commit `78c7435` (and later `8535305` by someone else) — not pushed.
 
 ## Verification state
-- U3c: review deep 3 fix rounds (gate redesign prescribed by main) → PASS; QA PASS (workspace 5477/0/35, mutations 2/2).
-- U4a: review deep PASS (codex 16 MiB must withdrawn — tungstenite default `max_frame_size` already 16 MiB); QA full **PARTIAL**: R7 real-socket checks NOT run (no shell↔daemon real-socket harness exists), tray click emulated (session locked), real other-version daemon not produced. GUI ①②④ + cold start + new ensure text passed.
-- U4b: review full PASS (2 rounds); QA PASS (workspace 5401/0/35, gates 34/34, mutations 2/2, GUI smoke; every one of the 97 deleted tests accounted for — fate list in `.claude/handoff/attachments/20261107-s21-3-2-u4-review/u4b-coder-report-with-test-fate.md`).
-- U4c: review deep PASS (1 fix round; secret-exposure lens tried 11 paths — closed); QA: only FAIL = known T-52 stop_smoke; all else PASS (token value 0 hits in all WebView paths).
-- S34: PRD+TRD review full 3 rounds PASS; code review deep PASS; QA PASS (AC1 base 5/5 fail → fix pass < 1 s; GUI kill mid-burst reply 14–161 ms; base reproduces the wedge).
-- Not run anywhere: clippy (component not installed for toolchain 1.95.0).
-- Rerun: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-detached.ps1 -Command "cargo test --workspace -- --test-threads=4" -WorkDir "I:/Engram/apps/engram-dashboard" -LogFile "<path>.log"`.
+- 3-3 U1·U2: review light PASS; QA full regression PASS + claude lane PASS.
+- 3-3 U4·U5: review deep (codex lifetime must withdrawn after ask-back); QA full regression PASS, mutation 1 survived → fixed in U6; GUI PARTIAL (tray not clickable — session locked).
+- 3-3 U6: review full, 1 FIX round → PASS; QA full regression PASS, mutation 3/3; GUI: launch/attach, spawn + I/O PASS, stop/start via `daemon_shutdown`/`daemon_start` IPC PASS, quit via `quit_app` PASS — **tray clicks not run**.
+- Stop-order fix `05cd2b1d`: review full PASS/PASS (bar = data loss / leftover processes / hangs); QA backend lines + gates 31 + frontend 2804 + tsc PASS; workspace run 1 failure `ws_e2e case09_slow_consumer_closed_others_unaffected` (daemon test, change is shell-only, passes alone on base → flaky, **T-83**); shell real-daemon lane 3/3 (cross-version skipped); mutation 2/2 killed. **Not verified: GUI** (user's manual check pending).
+- GUI smoke of `093b0eff` (pre-3-3) PASS 5/5 with real tray clicks.
+- Rerun full regression: per `.claude/skill-bindings/qa-verify.md` (backend lines, gates from ci.yml, frontend).
 
 ## Decisions
 User-decided (this session):
-- Failed-ensure text when no daemon · 상황: U4a switch changed it from an order ("connect 필요") to cause-only · 선택지 옛 문구 ★ / 새 문구 → after light research (Docker/kubectl/Tailscale = cause + question hint) · 고른 것 「ㅇㅇ 그렇게가」 (cause + "— is the daemon running?") · 갈림 · 근거: 「클라를 켰는데 데몬이 없다고 데몬을 키라는게 이상한데?」 · 조건: multi-daemon later needs a "no connection chosen" state — 「접속이 없는 상태가 있어야 될것같아」 (left to the multi-daemon PRD; `docs/research/client-without-daemon-message-2026-11-07.md`).
-- (묻지 않음) Commit · 「커밋이야 그냥 너가 알아서하고」.
-- (묻지 않음) Autonomous run while away, no handoff mid-way · 「쭉 진행해. 완료되면 브리핑해주고. 핸드오프 하지말고」.
-- (묻지 않음) Comments in English confirmed (user asked; current practice matches).
-Claude-decided:
-- U3c gate design (one leaf mutex: opened + pending fire-and-forgets) replacing the counter/hold-back after round-2 findings; dropping/closed-tail daemon CommandRequests skipped (daemon ends them at its 7 s deadline as TIMEOUT).
-- U4 split U4a/U4b/U4c; request timeout 30 s (D15 ①); module rename `connection_v2` → `connection`; `ConnectionState::Connecting` and `protocol_state::PendingMap` removed as dead.
-- T-79 fixed on a separate topic S34 (branch rule: one topic per branch, from master): Windows-only drain via platform fact `CLOSE_NEEDS_DRAIN`, daemon Kill on `spawn_blocking`; bounded-wait + Error reply rejected (no measured timeout value).
-- U4c: `WsTransport` keeps an explicit `authToken` constructor option (dev only) instead of losing Auth entirely.
-Open (ask the user):
-1. Push + merge S34 (`v0.5.0/fix/pty-kill-hang`) to master? (push → CI green → `--no-ff`, checkout-less merge per `docs/handbook/branch-commit.md`). Recommendation: yes — it fixes a wedge users hit today.
-2. Before U5: band text for a 4001 refusal (today every handshake refusal shows the version text); whether a band the user closed re-shows on the next failure.
-3. T-80 (spewing agent in a slot → daemon closes on full send queue → reconnect storm every ~20–35 ms; pre-existing): fix within 3-3 (daemon on transport, byte budget) or as its own topic?
-- Also pending from earlier: convention-first rule approval (Engram `b9c37dc` + 5th occurrence `68772a1`).
+- T-82 (old daemons' `daemon.json` at the root) · 상황: none of those releases matter · 선택지 C ★ release note / A / B · 고른 것 「아직 배포도 안했어. 그냥 무시하고 진행해」 · 갈림(no note) · 조건: 「뭐 남길 필요도 없고」.
+- Band after a successful stop (first: A ① at flight end) · 고른 것 「A: 끈 즉시 「연결 안 됨」」 · 같음 — then reversed: (묻지 않음, Claude proposed after two rounds of ordering findings) 「ㅇㅇ 빼. 구지 바로 할 필요없음.」 → U6: a stop sets no band; reply `{outcome, reason}` only.
+- U5b-1 GUI check · 선택지 combine with U5b-2 ★ / after work · 고른 것 「U5b-2와 묶기」 · 같음 (later done on `093b0eff`).
+- Version band keeps the 「데몬 끄기」 button (user questioned it, reminded of their 2026-11-05 ADR-0344 decision) · 고른 것 「그럼 있다치고 뭐가 이슈인데?」 — kept.
+- Failed band stop needs no text · (묻지 않음) 「버튼이 원래대로 돌아오는게 사인아님?」.
+- Park U5b-2, finish transport first · 「일단 transport 부터 끝내고 진행해 뭐하는거야」.
+- 3-3 scope = pure replacement · 「일단 기존거 교체하는 정도로 구현하라고 뭐 자꾸 안건 꺼내지 말고」 · 「배선 까지는 어쨋든 기존 동작이 되야해. 여기서 마스터 푸쉬 한번 가고 진행하면 될듯」 → 3-2 U6 deferred to multi-daemon, U7 out, T-80 out.
+- Order after transport: connection UI (simplified, own topic) → multi-daemon (user: 「배선하고 이상한 UI 한다음에 멀티데몬」).
+- Stop-order regression: discard the patch, restore the order · 선택지 root fix ★ / patch · 고른 것 「일단 땜질은 버리고」 · 같음 · 근거: 「연결 안되는건 그냥 다시 연결하면 되잖아. 데이터적으로 중요한 문제 없으면 상관이없을것같은데」 → ADR-0352.
+- Delete all build caches · 선택지 all / all but the working folder · 고른 것 「전부 (약 380 GB)」.
+- No handoff during the night run (「핸드오프 하지말고 쭉쭉 진행해」); now 「마무리 지을거 다 짓고 핸드오프 하면 될듯」.
+Claude-decided: daemon gate 1/2 replace net gates 1/2b/4 (net gate 2a's platform wall not carried); 3-3 parity differences accepted (close codes, Host check, 16 MiB both ways, send closes on saturation); `BOOT_START_MARGIN` 5 s; T-83 recorded instead of fixing.
+Open: none blocking. Next topic = connection UI simplification — inventory (Korean) at `.review-s33/connection-ui-audit.md` (git-excluded, local only): 56 mechanisms, 22 core, 26 removable (≈ 2,400 lines); the stopping-mode bundle it lists is already removed by `05cd2b1d`.
 
 ## Do-not / lessons
-- Don't hand a concurrency/ordering fix to the coder as a goal only — prescribe the mechanism (U3c cost a round). Filed `c9c2a38`.
-- Don't run two GUI QAs at once (single instance / ports) — serialize them.
-- QA workers recycle their temp folder; tell them to copy failure/hang evidence into the scratchpad first.
-- A synthetic `subscribeOutput` view gets no output unless a real slot shows the agent (QA note).
-
-## Open notes
-- U4a QA PARTIAL items stay open: R7 real-socket harness (TRD §6-2 U4 row) — consider it with 3-3.
-- `/engram-adr link` S34 → ADR-0001 (premise refined) — after S34 merges.
-- Remaining residues recorded in code: `write_refresh_subscribe` Err branch untested; a close with no live pump can still block (S34 TRD §3B).
-- Carried: tracing capture helper dedupe; step-log entries for 3-2 U2–U4c on the S21 branch; ADR-0272 landing notes.
+- Don't take review 권장 for rare orderings; ask back one-sided must instead of fixing by reflex (rule in Engram feedback `78c7435`).
+- Don't let a user decision add a second writer of the same state without saying so — the "① at flight end" override produced two rounds of ordering findings.
+- Don't bundle UI features into a plumbing topic (U5 grew from "move the stop client onto transport" into the whole connection UI).
+- QA drivers must have a deadline: a driver polling for `__EXIT` without a timeout hung the QA for ~1 h after its build was interrupted.
 
 ## Resume command
-`git -C I:/Engram/apps/engram-dashboard log --oneline -8 && git -C I:/Engram/apps/engram-dashboard status -sb && git -C I:/Engram/apps/engram-dashboard-wt4 log --oneline -3`
+`git -C I:/Engram/apps/engram-dashboard log --oneline -4 && gh run list -w ci.yml -c 05cd2b1d --json status,conclusion && git -C I:/Engram/apps/engram-dashboard rev-list --left-right --count HEAD...origin/master`
 
 ## References
-- TRD `docs/process/S21-crate-boundaries/trd-3-transport.md` §6-2 U5/U6 rows, §7; ADRs 0344–0347, 0310.
-- U4 review/QA artifacts `.claude/handoff/attachments/20261107-s21-3-2-u4-review/`; U3c `20261106-s21-3-2-u3c-review/`; U4 handover memo `20261106-s21-3-2-u3c-handover-for-u4.md` (U5 notes in §2/§3).
-- S34: `I:\Engram\apps\engram-dashboard-wt4\docs\process\S34-pty-kill-hang\{prd,trd}.md`.
-- Tracking `docs/tracking.md` T-79 (fixed on S34 branch), T-80.
-- Code: `src-tauri/src/daemon_client/connection.rs` (driver), `link/route.rs`, `mod.rs`; stop client today `daemon_client/stop.rs`.
+- ADR-0352 (stop leaves the link open; amends ADR-0350 decision 3), ADR-0350.
+- `docs/process/step-log.md` S21 stage-3 entry 2026-11-09~10; `docs/tracking.md` T-80, T-83.
+- `docs/process/S21-crate-boundaries/trd-3-transport.md` §6-3 (3-3 units), `trd-3-2-u5-stop-and-band.md` (edition 5.3).
+- Code: `crates/engram-dashboard-daemon/src/link/` (server, auth, handshake, wire), `crates/engram-dashboard-daemon/src/conn_port.rs`, `src-tauri/src/daemon_client/shutdown.rs` (stop path), `src-tauri/src/daemon_client/link/route.rs` (bands).

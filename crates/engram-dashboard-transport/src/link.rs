@@ -6,7 +6,7 @@
 //! A frame is already a `String`/`Vec<u8>` value, so a dyn call per frame is noise next to a syscall. (ADR-0177 decision 7)
 //!
 //! ★Why `async fn` in trait is not used★ — it is not dyn-compatible. So it is boxed manually with `BoxFuture`
-//! (`net::frame_port` in the same repo has the same shape for the same reason).
+//! (the daemon's `conn_port` in the same repo has the same shape for the same reason).
 
 use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};

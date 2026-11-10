@@ -2,7 +2,7 @@
 //!
 //! Only one **global `StatusSink`** injected into `AgentManager` lives. It encodes the state facts
 //! the core pushes up from a sync thread (status_changed / agent_list_updated / restore_result) as `AgentEvent` JSON
-//! and pushes them once into the fan-out port (`engram_dashboard_net::frame_port::FrameFanout`).
+//! and pushes them once into the fan-out port (`crate::conn_port::FrameFanout`).
 //!
 //! ★Why the agent system side (the separation axis)★: this file knows **both** the core vocabulary (`AgentId`·`AgentStatus`·`AgentInfo`·
 //!   `RestoreReport`) and the wire vocabulary (`AgentEvent`) — things the network layer must not know even by type (ADR-0129 decision 1). Conversely this file does not
@@ -26,10 +26,10 @@ use engram_dashboard_agent::types::{
 };
 use engram_dashboard_protocol::AgentEvent;
 
+use crate::conn_port::FrameFanout;
 use crate::connection_core::{
     core_agents_to_wire, core_report_to_wire, core_status_to_wire, event_json,
 };
-use engram_dashboard_net::frame_port::FrameFanout;
 use std::sync::Arc;
 
 // ── DaemonStatusSink(global) ─────────────────────────────────────────────────────
