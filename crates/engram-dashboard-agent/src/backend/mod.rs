@@ -2121,10 +2121,12 @@ mod tests {
     }
 
     /// An empty real kit places nothing and writes nothing on every backend, but `real` is carried as planned — the
-    /// default `materialize` and the claude override (which has nothing to place from an empty kit) alike.
+    /// default `materialize` and the claude and codex overrides (which have nothing to place from an empty kit) alike.
     #[test]
     fn the_default_materialize_carries_real_and_nothing_else() {
-        let cwd = std::env::temp_dir();
+        // A fixed cmd-safe absolute path: the codex terminal override guards the working folder, and the temp folder
+        //   may hold `&` or `%`. An empty kit touches no disk.
+        let cwd = std::path::absolute("/engram-fake/default-materialize").unwrap();
         let real_kit = |command: &AgentCommand| {
             let mut kit = noop_kit_for(command, &cwd);
             kit.plan.real = true;

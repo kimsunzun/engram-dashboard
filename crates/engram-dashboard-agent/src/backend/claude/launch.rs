@@ -22,11 +22,11 @@ use engram_dashboard_platform::shell::path_is_cli_safe;
 use serde_json::Value;
 
 use super::settings::merge;
-use crate::launch::{LaunchArtifacts, LaunchFs, LaunchKit, SkillRef};
+use crate::launch::{
+    LaunchArtifacts, LaunchFs, LaunchKit, SkillRef, SKILL_LINKS_DIR, SKILL_LINKS_PARENT,
+};
 
 const SETTINGS_FILE: &str = "settings.json";
-const PLUGIN_DIR: &str = "engram";
-const PLUGIN_SKILLS_DIR: &str = "skills";
 
 /// Without it claude loads no `CLAUDE.md` or rules from an `--add-dir` folder, silently.
 // ADR-0341
@@ -63,7 +63,7 @@ pub(super) fn materialize(kit: &LaunchKit, fs: &dyn LaunchFs) -> Result<LaunchAr
     let plugin_dir = if kit.skills.is_empty() {
         None
     } else {
-        Some(volatile()?.join(PLUGIN_DIR))
+        Some(volatile()?.join(SKILL_LINKS_PARENT))
     };
     let links = match &plugin_dir {
         Some(dir) => skill_links(dir, &kit.skills)?,
@@ -104,6 +104,10 @@ pub(super) fn materialize(kit: &LaunchKit, fs: &dyn LaunchFs) -> Result<LaunchAr
         settings_file: settings.map(|(path, _)| path),
         add_dirs: plan.folders.clone(),
         env,
+        config_args: Vec::new(),
+        instructions_override: None,
+        instructions_text: None,
+        instructions_changed: false,
     })
 }
 
@@ -133,7 +137,7 @@ fn skill_links<'a>(
                 }
             })
             .collect();
-        let link = plugin_dir.join(PLUGIN_SKILLS_DIR).join(name);
+        let link = plugin_dir.join(SKILL_LINKS_DIR).join(name);
         if let Some((taken, _)) = links.iter().find(|(other, _)| same_path(other, &link)) {
             return Err(format!(
                 "the claude skill {:?} lands on the plugin folder another skill already took: {taken:?}",
@@ -299,6 +303,10 @@ mod tests {
                     root().join("rules").join("alpha")
                 ],
                 env: vec![(FOLDER_ENV.to_string(), "1".to_string())],
+                config_args: Vec::new(),
+                instructions_override: None,
+                instructions_text: None,
+                instructions_changed: false,
             }
         );
 

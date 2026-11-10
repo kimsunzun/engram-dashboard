@@ -176,7 +176,6 @@ pub struct LaunchPlan {
     /// and `.codex/skills` that exist). Roots, not named skills — they join neither [`LaunchPlan::skills`] nor the
     /// conflict check. Only `backend/codex` reads them. Empty in a Noop plan.
     // ADR-0341
-    // TODO(TRD S25 §5-2 6): no backend translates this list yet — every plan today carries it empty.
     pub extra_skill_roots: Vec<PathBuf>,
 }
 
@@ -193,6 +192,11 @@ pub struct LaunchKit {
     pub skills: Vec<SkillRef>,
     /// 합친 지침의 해시 — codex JSON 이어받기가 지난 적용값과 견준다. `None` = 실을 지침이 없다.
     pub instructions_hash: Option<String>,
+    /// The hash of the instructions the agent's conversation last received
+    /// ([`AgentProfile::last_applied_instructions_hash`]). [`LaunchKitSource::prepare`] leaves it `None`; the manager
+    /// fills it from the registry re-read right after `prepare`. Read only by `backend/codex` (the resume context).
+    // ADR-0337
+    pub last_applied_instructions_hash: Option<String>,
 }
 
 // ── 막힘 ──────────────────────────────────────────────────────────────────────
@@ -340,15 +344,35 @@ fn put_reason(row: &mut Map<String, Value>, reason: &Reason) {
     }
 }
 
-/// The wording of a notice for a person or an LLM reading the reply — Korean, factual, says the omission is intended
-/// and recommends no fix (TRD S25 G28 · §2-4 8).
+/// Notice code: codex terminal mode does not load the preset instructions and skills. `args` =
+/// `{instructions: [library paths], skills: [names]}`.
+// ADR-0337
+pub const CODEX_TERMINAL_OMITTED: &str = "codex-terminal-omitted";
+
+/// Notice code: codex terminal mode does not load a folder entry. `args` = `{folder, items: [relative paths]}`.
+// ADR-0341
+pub const CODEX_TERMINAL_FOLDER_OMITTED: &str = "codex-terminal-folder-omitted";
+
+/// Notice code: skills of one name sit in several skill roots of a codex JSON agent, so `$name` selects none of them.
+/// `args` = `{name, paths: [...]}`.
+// ADR-0341
+pub const CODEX_SAME_NAME_SKILLS: &str = "codex-same-name-skills";
+
+/// The wording of a notice for a person or an LLM reading the reply — Korean, factual, recommends no fix (TRD S25
+/// G28 · §2-4 8).
 ///
-/// Every code takes the generic wording today — the code and the values listed in `args` (object keys in name order).
-/// No production code emits a notice yet (the producers arrive with the asset library and the codex translation); a
-/// code that needs its own sentence gets an arm here when it is defined.
+/// [`CODEX_TERMINAL_OMITTED`], [`CODEX_TERMINAL_FOLDER_OMITTED`] and [`CODEX_SAME_NAME_SKILLS`] have their own
+/// sentence (user wording, exact), filled from `args` with names joined by `, `; in the two terminal codes an empty
+/// list leaves its part out. When their `args` do not have the shape the constant documents (not an object, a missing
+/// `folder` or `name`, a list that is not of strings, no `paths`), they fall back to the generic wording. Every other
+/// code takes the generic wording — the code and the values listed in `args` (object keys in name order), saying the
+/// omission is intended.
 /// Control characters in the code and the listed values (file names from the library — outside input) are escaped
 /// (`\n`, `\u{1b}`), so the line stays one line and carries no terminal escape when the CLI prints it.
 pub fn notice_text(notice: &Notice) -> String {
+    if let Some(text) = own_wording(notice) {
+        return text;
+    }
     let mut listed = Vec::new();
     collect_listed(&notice.args, &mut listed);
     let code = escape_controls(&notice.code);
@@ -359,6 +383,65 @@ pub fn notice_text(notice: &Notice) -> String {
             "알림({code}): 의도된 동작입니다. 대상 — {}",
             listed.join(" · ")
         )
+    }
+}
+
+/// The sentence of a code that has its own wording, or `None` (another code, or `args` of another shape).
+// ADR-0337
+// ADR-0341
+fn own_wording(notice: &Notice) -> Option<String> {
+    let args = notice.args.as_object()?;
+    match notice.code.as_str() {
+        CODEX_TERMINAL_OMITTED => {
+            let mut parts = Vec::new();
+            for (key, label) in [("instructions", "지시서"), ("skills", "스킬")] {
+                let names = text_list(args, key)?;
+                if !names.is_empty() {
+                    parts.push(format!("{label} {}", names.join(", ")));
+                }
+            }
+            let head = "알림: codex 터미널 모드는 프리셋 지시서와 스킬을 지원하지 않습니다.";
+            Some(if parts.is_empty() {
+                head.to_string()
+            } else {
+                format!("{head} 적용되지 않은 항목: {}", parts.join(", "))
+            })
+        }
+        CODEX_TERMINAL_FOLDER_OMITTED => {
+            let folder = escape_controls(args.get("folder")?.as_str()?);
+            let items = text_list(args, "items")?;
+            let head =
+                "알림: codex 터미널 모드는 폴더 항목을 지원하지 않습니다. 적용되지 않은 폴더:";
+            Some(if items.is_empty() {
+                format!("{head} {folder}")
+            } else {
+                format!("{head} {folder} ({})", items.join(", "))
+            })
+        }
+        CODEX_SAME_NAME_SKILLS => {
+            let name = escape_controls(args.get("name")?.as_str()?);
+            let paths = text_list(args, "paths")?;
+            if paths.is_empty() {
+                return None;
+            }
+            Some(format!(
+                "알림: 같은 이름의 스킬이 여러 곳에 있습니다. codex에서 ${name}으로 부르면 어느 쪽도 선택되지 않습니다. {name}: {}",
+                paths.join(", ")
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// The strings of the list at `key`, escaped — empty when the key is absent, `None` when it is not a list of strings.
+fn text_list(args: &Map<String, Value>, key: &str) -> Option<Vec<String>> {
+    match args.get(key) {
+        None => Some(Vec::new()),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|item| item.as_str().map(escape_controls))
+            .collect(),
+        Some(_) => None,
     }
 }
 
@@ -533,6 +616,7 @@ impl LaunchKitSource for NoopLaunchKits {
             instructions_file: None,
             skills: Vec::new(),
             instructions_hash: None,
+            last_applied_instructions_hash: None,
         })
     }
 
@@ -815,6 +899,17 @@ impl LaunchFs for VolatileOnly<'_> {
     }
 }
 
+/// Where a backend placement links the kit's skills: `<volatile>/<SKILL_LINKS_PARENT>/<SKILL_LINKS_DIR>/<name>`, one
+/// directory link (Windows: a junction) per skill. claude passes `<volatile>/<SKILL_LINKS_PARENT>` as its plugin
+/// folder; codex passes `<volatile>/<SKILL_LINKS_PARENT>/<SKILL_LINKS_DIR>` as one extra skill root. One definition,
+/// so the links of both backends sit at the same depth. A release outside this crate cannot see these constants;
+/// it must detach every directory link under the volatile folder whatever its depth.
+// ADR-0316
+// ADR-0337
+pub(crate) const SKILL_LINKS_PARENT: &str = "engram";
+/// See [`SKILL_LINKS_PARENT`].
+pub(crate) const SKILL_LINKS_DIR: &str = "skills";
+
 /// backend 배치의 결과 — 그 backend 가 명령줄 · 통로에 실을 경로와 인자 조각. 기본값 = 실을 것 없음.
 #[derive(Default, Clone, Debug, PartialEq, Eq)]
 pub struct LaunchArtifacts {
@@ -822,7 +917,9 @@ pub struct LaunchArtifacts {
     pub real: bool,
     pub args: Vec<String>,
     pub instructions_file: Option<PathBuf>,
-    /// 스킬을 싣는 뿌리 폴더(휘발 폴더 안).
+    /// The skill roots. claude: the plugin folder (inside the volatile folder). codex JSON: the extra skill roots in
+    /// order — the junction root inside the volatile folder (only with ≥ 1 skill), then the plan's
+    /// [`LaunchPlan::extra_skill_roots`] (outside it).
     pub skill_roots: Vec<PathBuf>,
     /// The merged backend settings file (inside the volatile folder). `None` = no raw settings to load.
     // ADR-0328
@@ -834,6 +931,23 @@ pub struct LaunchArtifacts {
     /// meant to be applied after the profile env so they override a profile value for the same key.
     // ADR-0341
     pub env: Vec<(String, String)>,
+    /// codex: the arguments the preset raw settings add (`-c`, `key=value`, …), in plan order, exactly as placed on
+    /// the line — after the pass-through, before the MCP attachment. Both modes.
+    // ADR-0337
+    pub config_args: Vec<String>,
+    /// codex terminal: the `developer_instructions='…'` value built from the merged instructions file, placed last.
+    /// `None` = no priming on the line.
+    // ADR-0337
+    pub instructions_override: Option<String>,
+    /// codex JSON: the merged instructions text (read from [`LaunchKit::instructions_file`]). `None` = none or blank.
+    /// Sent as `developerInstructions` on `thread/start` and on every `thread/resume`.
+    // ADR-0337
+    pub instructions_text: Option<String>,
+    /// codex JSON: there is instructions text ([`LaunchArtifacts::instructions_text`] is `Some`), and the kit's
+    /// instructions hash is set and differs from [`LaunchKit::last_applied_instructions_hash`] — a resume then tells the
+    /// conversation the instructions changed. Never `true` without text.
+    // ADR-0337
+    pub instructions_changed: bool,
 }
 
 // ── 가드 · 묶음 ───────────────────────────────────────────────────────────────
@@ -1148,6 +1262,7 @@ mod tests {
                 instructions_file: None,
                 skills: Vec::new(),
                 instructions_hash: None,
+                last_applied_instructions_hash: None,
             }
         );
         NoopLaunchKits.release(p.id, 3);
@@ -1852,6 +1967,105 @@ mod tests {
             notice_row(&n)["args"],
             json!({ "names": ["a\nb.md", "\u{1b}[31mred", "탭\t이름"] }),
             "the args stay raw — only the display line is escaped"
+        );
+    }
+
+    /// The three codex notice codes give the user's wording exactly; an empty list leaves its part out.
+    // ADR-0337
+    // ADR-0341
+    #[test]
+    fn the_codex_notice_codes_give_the_exact_user_wording() {
+        let cases = [
+            (
+                json!({ "instructions": ["team/a.md", "team/b.md"], "skills": ["review", "lint"] }),
+                "알림: codex 터미널 모드는 프리셋 지시서와 스킬을 지원하지 않습니다. 적용되지 않은 항목: 지시서 team/a.md, team/b.md, 스킬 review, lint",
+            ),
+            (
+                json!({ "instructions": [], "skills": ["a", "b"] }),
+                "알림: codex 터미널 모드는 프리셋 지시서와 스킬을 지원하지 않습니다. 적용되지 않은 항목: 스킬 a, b",
+            ),
+            (
+                json!({ "instructions": ["team/a.md"], "skills": [] }),
+                "알림: codex 터미널 모드는 프리셋 지시서와 스킬을 지원하지 않습니다. 적용되지 않은 항목: 지시서 team/a.md",
+            ),
+        ];
+        for (args, text) in cases {
+            assert_eq!(
+                notice_text(&reason(CODEX_TERMINAL_OMITTED, args.clone(), None)),
+                text,
+                "{args}"
+            );
+        }
+
+        assert_eq!(
+            notice_text(&reason(
+                CODEX_TERMINAL_FOLDER_OMITTED,
+                json!({ "folder": "D:\\rules\\company", "items": ["AGENTS.md", ".agents\\skills"] }),
+                None,
+            )),
+            "알림: codex 터미널 모드는 폴더 항목을 지원하지 않습니다. 적용되지 않은 폴더: D:\\rules\\company (AGENTS.md, .agents\\skills)"
+        );
+        assert_eq!(
+            notice_text(&reason(
+                CODEX_SAME_NAME_SKILLS,
+                json!({ "name": "review", "paths": ["D:\\lib\\review", "C:\\Users\\u\\.agents\\skills\\review"] }),
+                None,
+            )),
+            "알림: 같은 이름의 스킬이 여러 곳에 있습니다. codex에서 $review으로 부르면 어느 쪽도 선택되지 않습니다. review: D:\\lib\\review, C:\\Users\\u\\.agents\\skills\\review"
+        );
+    }
+
+    /// Names and paths in the codex wording are outside input — control characters are escaped there too; `args` of
+    /// another shape fall back to the generic wording, and every other code keeps it.
+    #[test]
+    fn the_codex_notice_wording_escapes_names_and_falls_back_on_another_shape() {
+        let text = notice_text(&reason(
+            CODEX_SAME_NAME_SKILLS,
+            json!({ "name": "a\nb", "paths": ["\u{1b}[31mred"] }),
+            None,
+        ));
+        assert_eq!(
+            text,
+            "알림: 같은 이름의 스킬이 여러 곳에 있습니다. codex에서 $a\\nb으로 부르면 어느 쪽도 선택되지 않습니다. a\\nb: \\u{1b}[31mred"
+        );
+        assert!(!text.chars().any(char::is_control), "{text:?}");
+
+        assert_eq!(
+            notice_text(&reason(
+                CODEX_TERMINAL_FOLDER_OMITTED,
+                json!({ "items": ["x"] }),
+                None
+            )),
+            "알림(codex-terminal-folder-omitted): 의도된 동작입니다. 대상 — x"
+        );
+        assert_eq!(
+            notice_text(&reason(
+                CODEX_TERMINAL_OMITTED,
+                json!({ "skills": "one" }),
+                None
+            )),
+            "알림(codex-terminal-omitted): 의도된 동작입니다. 대상 — one"
+        );
+        for args in [
+            json!({ "name": "review" }),
+            json!({ "name": "review", "paths": [] }),
+        ] {
+            assert_eq!(
+                notice_text(&reason(CODEX_SAME_NAME_SKILLS, args.clone(), None)),
+                "알림(codex-same-name-skills): 의도된 동작입니다. 대상 — review",
+                "{args}"
+            );
+        }
+        for args in [json!(["team/a.md"]), json!("x"), json!(null)] {
+            let text = notice_text(&reason(CODEX_TERMINAL_OMITTED, args.clone(), None));
+            assert!(
+                text.starts_with("알림(codex-terminal-omitted): 의도된 동작입니다."),
+                "{args} · {text}"
+            );
+        }
+        assert_eq!(
+            notice_text(&reason("codex-other", json!({ "name": "x" }), None)),
+            "알림(codex-other): 의도된 동작입니다. 대상 — x"
         );
     }
 

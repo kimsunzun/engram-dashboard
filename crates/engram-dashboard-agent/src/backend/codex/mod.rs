@@ -49,6 +49,7 @@
 
 mod cmdline;
 pub(crate) mod decoder;
+mod launch;
 pub(crate) mod protocol;
 mod settings;
 // ADR-0218
@@ -60,7 +61,7 @@ mod usage_probe;
 pub(crate) use settings::CODEX_SETTINGS_CHECK;
 pub(crate) use usage_probe::CODEX_USAGE_PROBE;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use engram_dashboard_platform::shell::{console_command, text_is_cli_safe};
@@ -76,7 +77,7 @@ use crate::backend::{
     TransportShape, TurnClassifier,
 };
 use crate::failure::AgentFailureKind;
-use crate::launch::LaunchArtifacts;
+use crate::launch::{LaunchArtifacts, LaunchFs, LaunchKit};
 use crate::profile::{AgentCommand, AgentOutputFormat, SpawnMode};
 use crate::transport::pty::PtyTransport;
 use crate::transport::{AgentTransport, LinkSink, OutputDecoder};
@@ -670,10 +671,18 @@ impl AgentBackend for CodexBackend {
         false
     }
 
-    // TODO(TRD S25 §5-2 6): `materialize` 를 여기서 덮는다(JSON = `extraRoots` 정션 폴더 · 터미널 = 배치 없음) — 그때까지
-    //   트레이트 기본값(실을 것 없음 · 쓰기 없음)이다. 파일 · 링크 경로는 `kit.volatile_dir` 에 낱말을 이어 붙여서만 짓고,
-    //   실을 링크 경로는 `link_dir` 에 넘긴 바로 그 값이다 — 대소문자 · 접두를 바꾼 철자를 쓰지 않고 링크 아래에는 쓰지
-    //   않는다(가둠 포트가 막아 배치가 실패한다).
+    /// The translation and its refusals are [`launch::materialize`]'s; this reads the merged instructions file from
+    /// disk.
+    // ADR-0337
+    fn materialize(
+        &self,
+        command: &AgentCommand,
+        kit: &LaunchKit,
+        cwd: &Path,
+        fs: &dyn LaunchFs,
+    ) -> Result<LaunchArtifacts, String> {
+        launch::materialize(command, kit, cwd, fs, &|path| std::fs::read_to_string(path))
+    }
 
     /// ★한때 false 였다 — 그 사유와 그것을 버린 이유를 **함께** 남긴다(지우지 말 것)★: 옛 값의 근거는
     /// 「이 메서드가 `command` 를 안 받아 두 모드를 가를 수 없다」였다. app-server 모드는 턴 신호를
@@ -812,7 +821,7 @@ impl AgentBackend for CodexBackend {
         cwd: PathBuf,
         mut env: Vec<(String, String)>,
         control: Option<ControlEndpoint>,
-        _artifacts: &LaunchArtifacts,
+        artifacts: &LaunchArtifacts,
     ) -> CommandSpec {
         match command {
             AgentCommand::Codex {
@@ -879,7 +888,14 @@ impl AgentBackend for CodexBackend {
                 //   `console_command` 를 건드리므로, 틀리면 오늘 도는 스폰 전부가 죽는다.
                 //   ★고칠 때 무엇이 필요한가★: 위 셋을 뒤집을 실측(그 형태로 감싼 `cmd` 아래에서 claude·
                 //   codex 가 둘 다 뜨는가)이다. 그 전에는 이 한계를 아는 채로 둔다.
+                // On real materials the terminal working folder never holds `%`: `materialize` refuses a folder
+                //   `path_is_cli_safe` refuses, so there this limit is left to `extra_args` alone.
                 // ADR-0004
+
+                // Real materials: the preset `-c` lines (model and effort included — there is never a `-m`), after the
+                //   pass-through and before our overrides, so ours still come last and win. Empty for Noop materials.
+                // ADR-0337
+                args.extend(artifacts.config_args.iter().cloned());
 
                 // ★★오버라이드는 전부 패스스루 **뒤**다 — 이 자리가 그 규율의 정본이다★★(형제 블록이
                 //   여기를 가리킨다). 실측(codex-cli 0.155.0 · 2026-09-19): 같은 설정 키를 `-c` 로 두 번
@@ -907,12 +923,16 @@ impl AgentBackend for CodexBackend {
                 //   지시서 블록이 신고 자리를 조립점으로 미루는 것과 같은 규율).
                 match mcp_attachment(control.as_ref()) {
                     McpAttachment::Attach(value) => {
-                        if passthrough_overrides_key(
-                            extra_args,
-                            &format!("{MCP_SERVER_OVERRIDE_PREFIX}{MCP_SERVER_NAME}"),
-                        ) {
+                        let key = format!("{MCP_SERVER_OVERRIDE_PREFIX}{MCP_SERVER_NAME}");
+                        if passthrough_overrides_key(extra_args, &key) {
                             tracing::warn!(
                                 "codex 패스스루가 `{MCP_SERVER_OVERRIDE_PREFIX}{MCP_SERVER_NAME}` 을 직접 세웠다 — 우편 입구를 위해 우리 부착을 뒤에 실어 그 값을 덮는다(마지막 `-c` 가 이긴다)"
+                            );
+                        }
+                        // ADR-0337
+                        if passthrough_overrides_key(&artifacts.config_args, &key) {
+                            tracing::warn!(
+                                "a codex preset `-c` line sets `{key}` — our MCP attachment comes later and overrides it (the last `-c` wins)"
                             );
                         }
                         args.push(CONFIG_OVERRIDE_FLAG.to_string());
@@ -940,24 +960,40 @@ impl AgentBackend for CodexBackend {
                 //   app-server 쪽이 이유 없이 그 상한과 `%`·줄바꿈 위험을 진다.
                 // ★패스스루 **뒤**다★ — 같은 키를 `-c` 로 두 번 넘기면 마지막이 이긴다. 사유 정본은
                 //   위 MCP 부착 블록의 순서 주석이고 여기 되풀어 적지 않는다.
-                // ★어느 갈래로도 스폰을 실패시키지 않는다★ — 파일을 못 읽어도, 실을 수 없는 문자가 있어도,
-                //   예산을 넘어도 경고만 남기고 인자를 안 싣는다(ADR-0216 이 물려받은 규율). 프라이밍은
-                //   있으면 좋은 것이고 스폰은 필수다.
+                // ★Where the value comes from depends on the materials★: Noop — the control channel's priming file,
+                //   and no branch fails the spawn (an unreadable file, a character the line cannot carry or the budget
+                //   only leave a warning and no argument — the rule ADR-0216 hands down; priming is a nice-to-have and
+                //   the spawn is a must). Real — the value `materialize` built from the merged instructions file, and
+                //   the control channel's priming file is not read (as claude ignores it on the real path); a value the
+                //   line could not carry already failed the spawn there.
                 // ADR-0004
                 // ADR-0092
                 // ADR-0215
                 // ADR-0216
+                // ADR-0337
                 if matches!(output_format, AgentOutputFormat::Terminal) {
-                    if let Some(text) = priming_text(control.as_ref()) {
-                        if let Some(value) = developer_instructions_override(&text, &args) {
-                            if passthrough_overrides_key(extra_args, DEVELOPER_INSTRUCTIONS_KEY) {
-                                tracing::warn!(
-                                    "codex 패스스루가 `{DEVELOPER_INSTRUCTIONS_KEY}` 을 직접 세웠다 — 수신 계약 프라이밍을 위해 우리 값을 뒤에 실어 그 값을 덮는다(마지막 `-c` 가 이긴다)"
-                                );
-                            }
-                            args.push(CONFIG_OVERRIDE_FLAG.to_string());
-                            args.push(value);
+                    let priming = if artifacts.real {
+                        artifacts.instructions_override.clone()
+                    } else {
+                        priming_text(control.as_ref())
+                            .and_then(|text| developer_instructions_override(&text, &args))
+                    };
+                    if let Some(value) = priming {
+                        if passthrough_overrides_key(extra_args, DEVELOPER_INSTRUCTIONS_KEY) {
+                            tracing::warn!(
+                                "codex 패스스루가 `{DEVELOPER_INSTRUCTIONS_KEY}` 을 직접 세웠다 — 수신 계약 프라이밍을 위해 우리 값을 뒤에 실어 그 값을 덮는다(마지막 `-c` 가 이긴다)"
+                            );
                         }
+                        if passthrough_overrides_key(
+                            &artifacts.config_args,
+                            DEVELOPER_INSTRUCTIONS_KEY,
+                        ) {
+                            tracing::warn!(
+                                "a codex preset `-c` line sets `{DEVELOPER_INSTRUCTIONS_KEY}` — our priming comes later and overrides it (the last `-c` wins)"
+                            );
+                        }
+                        args.push(CONFIG_OVERRIDE_FLAG.to_string());
+                        args.push(value);
                     }
                 }
 
@@ -989,6 +1025,9 @@ impl AgentBackend for CodexBackend {
                 //   진다(이 폴더는 실려 온 경로를 읽을 뿐 어느 파일인지 고르지 않는다). 읽는 자리가
                 //   backend 폴더인 것은 ADR-0004 그대로다 — 「어느 키에 어떤 모양으로 싣나」가 여기 말고는
                 //   갈 데가 없다.
+                // The paragraph above is the Noop path. On real materials `priming_file` is not read: the priming
+                //   comes from the kit's merged instructions file (`artifacts.instructions_override` /
+                //   `instructions_text`), as claude ignores it on its real path.
                 // ADR-0086 / ADR-0092 / ADR-0133 / ADR-0209
                 //
                 // ★화신 표식도 같은 문 안이다 — 밖으로 꺼내지 말 것★: endpoint 가 없는 스폰은 우리

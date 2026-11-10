@@ -1543,7 +1543,7 @@ impl AgentManager {
         // ADR-0334
         // TRD S25 §1-5 (나) 4 · §5-2 4 (a) (c)
         let mut kit_guard = LaunchKitGuard::arm(self.launch.kits.clone(), profile.id, epoch);
-        let kit = self
+        let mut kit = self
             .launch
             .kits
             .prepare(plan, profile.id, epoch)
@@ -1559,6 +1559,8 @@ impl AgentManager {
             .get(profile.id)
             .ok_or_else(|| profile_vanished_mid_spawn(profile.id, "명부 다시 읽기"))?;
         let profile = &reread;
+        // ADR-0337: the stored hash from this re-read — the value the first-turn recording compares against.
+        kit.last_applied_instructions_hash = profile.last_applied_instructions_hash.clone();
 
         // cwd 정규화 — claude 세션 디렉토리 표기 고정(UNC 회피). 실패 시 원본 사용(best-effort).
         let cwd = dunce::canonicalize(&profile.cwd).unwrap_or_else(|_| profile.cwd.clone());
@@ -7788,5 +7790,74 @@ mod tests {
             );
             let _ = std::fs::remove_dir(&profile.cwd);
         }
+    }
+
+    // ── ADR-0337: the stored instructions hash reaches the codex translation ──
+
+    /// A real codex kit hashed `k` whose merged instructions file is `.0`; `prepare` leaves the stored hash `None`, as
+    /// every kit source does.
+    struct HashedKits(std::path::PathBuf);
+
+    impl crate::launch::LaunchKitSource for HashedKits {
+        fn check(
+            &self,
+            profile: &AgentProfile,
+        ) -> Result<crate::launch::LaunchPlan, crate::launch::LaunchBlocked> {
+            crate::launch::NoopLaunchKits.check(profile)
+        }
+
+        fn prepare(
+            &self,
+            plan: crate::launch::LaunchPlan,
+            id: AgentId,
+            epoch: u32,
+        ) -> Result<crate::launch::LaunchKit, crate::launch::PrepareError> {
+            let mut kit = crate::launch::NoopLaunchKits.prepare(plan, id, epoch)?;
+            kit.plan.real = true;
+            kit.instructions_hash = Some("k".to_string());
+            kit.instructions_file = Some(self.0.clone());
+            assert_eq!(kit.last_applied_instructions_hash, None);
+            Ok(kit)
+        }
+
+        fn release(&self, _id: AgentId, _epoch: u32) {}
+    }
+
+    /// ★The manager fills the kit's stored hash from the registry re-read★, not from the caller's copy — observed
+    /// through the real codex `materialize`: a stored `h` against the kit's `k` is a change, a stored `k` is not. The
+    /// caller's copy holds the other hash each time (the registration keeps the live value), so reading it fails.
+    // ADR-0337
+    #[test]
+    fn the_stored_instructions_hash_reaches_the_codex_translation() {
+        let instructions =
+            std::env::temp_dir().join(format!("engram-hash-instructions-{}.md", Uuid::new_v4()));
+        std::fs::write(&instructions, "merged instructions").unwrap();
+        for (stored, caller_copy, changed) in [("h", "k", true), ("k", "h", false)] {
+            let (manager, _store) = scripted_manager();
+            let manager = manager.with_launch_ports(LaunchPorts {
+                kits: Arc::new(HashedKits(instructions.clone())),
+                fs: Arc::new(crate::launch::MemLaunchFs::default()),
+            });
+            let (tx, specs) = std::sync::mpsc::channel();
+            *engram_dashboard_base::sync::lock(&manager.spec_probe) = Some(tx);
+            let mut profile = agent_profile("C:/hash/work", Some("hash"));
+            profile.command = AgentCommand::Codex {
+                extra_args: Vec::new(),
+                output_format: crate::profile::AgentOutputFormat::StreamJson,
+            };
+            profile.last_applied_instructions_hash = Some(stored.to_string());
+            manager.profiles.upsert(profile.clone());
+            profile.last_applied_instructions_hash = Some(caller_copy.to_string());
+
+            let _ = manager.activate_profile(&profile, SpawnMode::Fresh);
+            let (_, artifacts) = specs.try_recv().expect("the spawn assembled its command");
+            assert!(artifacts.real, "{stored}");
+            assert_eq!(
+                artifacts.instructions_text.as_deref(),
+                Some("merged instructions")
+            );
+            assert_eq!(artifacts.instructions_changed, changed, "{stored}");
+        }
+        let _ = std::fs::remove_file(instructions);
     }
 }
