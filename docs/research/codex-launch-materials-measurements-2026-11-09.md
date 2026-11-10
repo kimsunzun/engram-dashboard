@@ -285,7 +285,7 @@ L=8192 E~8340 exit=1   stderr='명령줄이 너무 깁니다.'   (The command li
 
 **Not recorded.** The exact folder names, how the argv of `codex.exe` was read, the spawn style (std or portable-pty quoting), the codex version, and who ran it.
 
-**Use.** The basis for letting a single `%` through the real-terminal working-folder guard (ADR-0353 decision 3). A `%` in the pass-through `extra_args` could still pair with it (`docs/tracking.md` T-85) — not measured.
+**Use.** The basis for letting a single `%` through the real-terminal working-folder guard (ADR-0353 decision 3). A `%` in the pass-through `extra_args` could still pair with it (`docs/tracking.md` T-102) — not measured.
 
 ---
 

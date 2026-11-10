@@ -60,5 +60,5 @@ Open: step 7 child TRD yes/no; master re-merge; step 5 confirmation; ADR-0357 no
 ## References
 - Parent TRD `docs/process/S25-preset-library/trd.md` §5-2 step 7 (+ "Handed over by step 5/6"), §1-4 asset-library; child TRD `trd-codex-translation.md` §8-1
 - `docs/decisions/0353-*` · `0354-*` · `0355-*` · `0357-*`
-- `docs/tracking.md` T-84..T-100
+- `docs/tracking.md` T-87..T-103
 - Previous handoff `history/20261110-132008-s25-step6-landed.md` (step-6 code ledger in `attachments/20261110-s25-step6-code/`)

@@ -937,7 +937,7 @@ impl AgentBackend for CodexBackend {
                 //   codex 가 둘 다 뜨는가)이다. 그 전에는 이 한계를 아는 채로 둔다.
                 // On real materials the terminal working folder never holds two `%` (`materialize` refuses it); a single
                 //   `%` passes, so there this limit is left to `extra_args` — a `%…%` of their own, or one `%` in them
-                //   pairing with the folder's lone `%` (tracking T-85).
+                //   pairing with the folder's lone `%` (tracking T-102).
                 // ADR-0004
                 // ADR-0353
 

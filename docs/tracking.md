@@ -59,9 +59,9 @@
 | T-94 | A claude that exits right after launch is answered "started" with no failure mark | 버그 | Not started · known limit of S25 step 20 (ADR-0348 decision 6) |
 | T-95 | A pass-through `--settings` (or instructions / snapshot flag) in claude `extra_args` replaces the one Engram passes | 버그 | Not started · pre-existing (Noop fragment too) · found by S25 step 5 review |
 | T-96 | No cap on the number of claude `--add-dir` pairs vs the cmd.exe 8191-character line | 버그 | Not started · theoretical path · found by S25 step 5 review |
-| T-84 | `path_is_cli_safe` does not refuse `!` — a path holding `!` is altered under cmd `DelayedExpansion` | 버그 | Not started · pre-existing · theoretical path · found by S25 step 5 review · widened by S25 step 6 (`text_is_cli_safe`, codex cwd guard) |
-| T-85 | Codex pass-through `extra_args` are not guarded on the cmd line (odd `"` · cmd metachars) | 버그 | Not started · pre-existing · recorded decision (S25 step 6 TRD R10) |
-| T-86 | Noop codex terminal `--cd` is not checked for cmd metachars (`C:\Work\R&D` runs `D`) | 버그 | Not started · pre-existing · found by S25 step 6 review |
+| T-101 | `path_is_cli_safe` does not refuse `!` — a path holding `!` is altered under cmd `DelayedExpansion` | 버그 | Not started · pre-existing · theoretical path · found by S25 step 5 review · widened by S25 step 6 (`text_is_cli_safe`, codex cwd guard) |
+| T-102 | Codex pass-through `extra_args` are not guarded on the cmd line (odd `"` · cmd metachars) | 버그 | Not started · pre-existing · recorded decision (S25 step 6 TRD R10) |
+| T-103 | Noop codex terminal `--cd` is not checked for cmd metachars (`C:\Work\R&D` runs `D`) | 버그 | Not started · pre-existing · found by S25 step 6 review |
 | T-87 | Noop codex terminal budget is not an upper bound (shim line, resolved `cmd.exe` path, quote doubling) | 버그 | Not started · latent (priming 1.3 KB vs ~7.8k window) · found by S25 step 6 review |
 | T-88 | Non-npm codex shims (pnpm · npm ≤ 6 · yarn v1) put `%*` inside `IF ( )` — an unquoted `)` in a `-c` line could break it | 버그 | Unverified (from memory) · found by S25 step 6 review |
 | T-89 | Codex first-turn delivery is confirmed by the turn window, not by `clientUserMessageId` | 버그 | Not started · theoretical path · found by S25 step 6 review |
@@ -407,18 +407,18 @@
 - **Problem:** claude runs as `cmd.exe /c claude …` on Windows (`platform::shell::console_command`), and cmd.exe refuses a command line over 8191 characters. Each preset folder entry adds `--add-dir <folder>`; nothing counts them (the S25 TRD claims no claude length budget — only codex has `CMD_LINE_LIMIT_UTF16`). Estimate, not measured: ≈ 70 entries of ≈ 100 characters fill the line together with the other flags. What claude does then is not measured (expected: cmd refuses and claude never starts — an early exit, see T-94).
 - **Next:** add a claude length check (a count at `check` time like the codex budget, block ②) or a cap on folder entries; measure first how the failure shows.
 
-### T-84. `path_is_cli_safe` does not refuse `!` — a path holding `!` is altered under cmd `DelayedExpansion`
+### T-101. `path_is_cli_safe` does not refuse `!` — a path holding `!` is altered under cmd `DelayedExpansion`
 - **Status:** not started · pre-existing (the rule moved unchanged from daemon `control/priming.rs` to `platform::shell` in S25 step 5) · theoretical path · found 2026-11-09 by the S25 step 5 code review (`baf769ff`).
 - **Problem:** `CMD_UNSAFE_CHARS` = `% & ^ | < >` (`crates/engram-dashboard-platform/src/shell.rs`). When cmd delayed expansion is on (registry `DelayedExpansion=1` under `Command Processor` — off by default), cmd expands `!NAME!` and drops a lone `!`, so a path holding `!` reaches claude changed. `console_command` passes `/c` without `/V:OFF`. Affects every path the rule guards (the priming file in daemon `control/priming.rs`, and from S25 step 5 the claude merged instructions, settings file, plugin folder and preset folder entries) — and any other path on the same cmd line.
 - **Next:** add `!` to the rule (a folder holding `!` is then refused at `preset.add` and blocks with ②), or pass `/V:OFF` to cmd — check the shim side first (the npm `.cmd` shim runs under cmd too).
 - **Widened by S25 step 6** (2026-11-10): `platform::shell::text_is_cli_safe` (the codex preset `-c` lines and the priming value) sits on the same `CMD_UNSAFE_CHARS`, and the codex real-terminal working-folder guard (`backend/codex/launch.rs` `cwd_reaches_codex_unchanged`) repeats the set as a literal (T-92) — adding `!` to the platform set alone would not reach that guard. Nor would it cover a priming with spaces: `backend/codex/cmdline.rs` `priming_value` consults `text_is_cli_safe` only when the text holds no space (a spaced value is quoted), and cmd's delayed expansion is believed to act inside quotes like `%` (not measured) — so `!` in the priming needs its own refusal there, or `/V:OFF`.
 
-### T-85. Codex pass-through `extra_args` are not guarded on the cmd line
+### T-102. Codex pass-through `extra_args` are not guarded on the cmd line
 - **Status:** not started · pre-existing · a recorded decision of S25 step 6 (`trd-codex-translation.md` R10 — the user's own input; not re-raised by the step-6 code review).
 - **Problem:** the codex `build_spec` appends `command.extra_args` before the preset `-c` lines and the priming argument. An argument with an odd number of `"` flips cmd's quote state for every later argument (measured M5), so the priming's `<` `>` can become redirections; a `% & ^ | < >` in it reaches cmd as is — including a `%` that pairs with a lone `%` in the real-terminal working folder, which the folder guard lets through (ADR-0353 decision 3). The preset lines are guarded (odd `"` and the metachars refused), the pass-through is not — on Noop and real materials alike. On real materials the command-line count does include them (an upper bound there); the Noop budget is not one (T-87).
 - **Next:** decide whether `extra_args` get the same guard (refuse at agent edit or at launch) or stay the user's responsibility.
 
-### T-86. Noop codex terminal `--cd` is not checked for cmd metachars
+### T-103. Noop codex terminal `--cd` is not checked for cmd metachars
 - **Status:** not started · pre-existing · found 2026-11-10 by the S25 step 6 code review (P1 risk axis).
 - **Problem:** the Noop codex terminal argv puts the working folder on the cmd line as `--cd <cwd>` (`backend/codex/mod.rs` `build_spec`) with no check. A path with no space goes on the line bare, so `C:\Work\R&D` makes cmd run `D`; two `%` expand as a variable — that half is the known limit the 2026-09-08 decision chose not to fix (`%VAR%` through the shim — the 「알려진 한계」 comment in `backend/codex/mod.rs` `build_spec`). The real path is guarded since step 6 (`cwd_reaches_codex_unchanged` — refuses two or more `%`, `"`, a control char, non-UTF-8, or `& ^ | < >` without a space); Noop goes away when step 8 plugs real kits in.
 - **Next:** close with step 8 (every codex terminal launch then takes the real path), or apply the same rule to the Noop path if Noop stays.
@@ -470,7 +470,7 @@
 
 ### T-92. The codex real-terminal cwd guard repeats the cmd metachar set
 - **Status:** not started · found 2026-11-10 by the S25 step 6 code review (the cwd-guard delta).
-- **Problem:** `backend/codex/launch.rs` `cwd_reaches_codex_unchanged` writes `& ^ | < >` as a literal instead of using the platform `CMD_UNSAFE_CHARS` (`crates/engram-dashboard-platform/src/shell.rs`), so a change to the platform set (e.g. `!` — T-84) would not reach it. There is also no separate test row for `>`.
+- **Problem:** `backend/codex/launch.rs` `cwd_reaches_codex_unchanged` writes `& ^ | < >` as a literal instead of using the platform `CMD_UNSAFE_CHARS` (`crates/engram-dashboard-platform/src/shell.rs`), so a change to the platform set (e.g. `!` — T-101) would not reach it. There is also no separate test row for `>`.
 - **Next:** expose the set (or a space-aware helper) from `platform::shell` and use it in the guard; add the `>` row.
 
 ### T-93. The codex live test L5 leaves its temporary folder on every run
