@@ -1,0 +1,8 @@
+P1 snapshot commit object (no branch): b2664ef4bd35db4ce8fc841cadb20919a69eb103 tree f29314cb
+P1-final tree (incl. main's batched docs): d987d06dd400b96f0ee1e674b820aa9d469c9f19
+P2 round1 tree: 493f5034b00f6c380c0e42c9af1fd93fd461edc2
+P2 round2 tree: d5a01ae53ddf181b59d45e5900992c15211ebf4b
+P2-final tree: edd113fc7f15b5d40ef3462f911c8f8fd4354cb2
+P3 round1 tree: a77c67eb902b39a8070b4ab801f095d7ad4e74b4
+P3 round2 tree: 2f85eb4b064d22fc067e48f750e41ba3a01ccbc8
+P3-final (review passed, QA target) tree: 7896e7895fe6c3f821d78cfbfbc35af73b1a7a09
