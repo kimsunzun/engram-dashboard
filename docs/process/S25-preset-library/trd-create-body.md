@@ -45,7 +45,7 @@ Two optional wire fields are added: `AgentCommand::SpawnByCwd.deliver_notices` a
 - request-id retention for shell-owned (delegated) commands (§2 premise 3);
 - a caller axis on the spawn packet (ADR-0279 decision 4 — `deliver_notices` is not one: it says what the sender does with notices, not who the caller is);
 - a `backend` field on bus `agent.spawn` (ADR-0348 alternative (c));
-- the claude early-exit limit — U4, decided as a known limit, tracked as T-81;
+- the claude early-exit limit — U4, decided as a known limit, tracked as T-94;
 - a fix for the reply-cap `TIMEOUT` — U2, decided 2026-11-09: keep the 7 s bus seat, no deadline change (§8-2).
 
 ## 2. Premises checked against code
@@ -824,7 +824,7 @@ Code comments to fix in passing:
     - (b) accept `TIMEOUT` as it is — **chosen**.
   - *Data for the decision:* R7b (silent fake on the bus) and R8 (healthy codex timings, including one cold start right after a daemon restart) — §6-3.
 - **U3 — `agent.spawnInto` created-asleep answer carries `args.agent_id`** (review H2). **Decided 2026-11-09 by the user: (a)** (「1번 a」, main's recommendation). Specified as M14 (§3-5 Wire 2, §3-6, §4-1, §4-3, §6-1). Same answer shape as bus `agent.spawn`; the LLM can wake that id and attach it instead of creating a duplicate.
-- **U4 — a claude that exits right after launch is answered "started" with no mark** (review H3). **Decided 2026-11-09 by the user: (a)** (「너 추천으로 해」) — a known limit. `cmd.exe /c claude` starts, and claude has no link verdict (ADR-0201 left claude Fresh early exit out of scope). ADR-0348 decision 6 states the limit; tracked as `docs/tracking.md` T-81. Not touched here.
+- **U4 — a claude that exits right after launch is answered "started" with no mark** (review H3). **Decided 2026-11-09 by the user: (a)** (「너 추천으로 해」) — a known limit. `cmd.exe /c claude` starts, and claude has no link verdict (ADR-0201 left claude Fresh early exit out of scope). ADR-0348 decision 6 states the limit; tracked as `docs/tracking.md` T-94. Not touched here.
 - **T-76 closed with this step** — "nobody owns the link failure of an ad-hoc by-cwd codex" is the WS link-verdict gap this step fixes (R7c proves it: the fake is torn down and the row is marked). The T-76 row and section were deleted from `docs/tracking.md` in the step-20 doc pass (T-71 rule).
 
 ### 8-3. Risks

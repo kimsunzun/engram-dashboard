@@ -256,7 +256,7 @@ pub struct FolderSkillName { pub path: PathBuf, pub name: String }
 
 `FolderLoad.path` doc changes from "as listed" to "as listed — for a `SkillRoot`, the root folder (relative to the entry folder)".
 
-**Claude answers** (`backend/claude/settings.rs`, one line each): `skill_format` → `NotChecked` · `command_line_args` → `Ok(vec![])` (the raw value goes into the merged `settings.json`) · `command_line_fits` → `Ok(())` (no claude budget is claimed — parent L314; T-83) · `native_skill_roots` → empty · `root_skills` → `FolderLoadSet::default()`. The claude test `FakeParser` gains `skill` as a stub that returns an error ("not used by the claude tests") (decision #9).
+**Claude answers** (`backend/claude/settings.rs`, one line each): `skill_format` → `NotChecked` · `command_line_args` → `Ok(vec![])` (the raw value goes into the merged `settings.json`) · `command_line_fits` → `Ok(())` (no claude budget is claimed — parent L314; T-96) · `native_skill_roots` → empty · `root_skills` → `FolderLoadSet::default()`. The claude test `FakeParser` gains `skill` as a stub that returns an error ("not used by the claude tests") (decision #9).
 
 ### 4-2. The codex implementation — `backend/codex/settings.rs` (new)
 
