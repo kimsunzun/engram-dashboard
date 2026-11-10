@@ -39,6 +39,7 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 - **코어 격리** — 에이전트 런타임(agent crate)은 Tauri 도 전송 방식도 모른다. 출력·상태는 코어가 정의한 계약으로만 흐른다. (ADR-0003)
 - **백엔드 확장** — 에이전트 백엔드 전용 지식(claude 의 `--session-id`·`--resume` 등)은 agent crate 의 `backend` 에만 둔다. manager 는 dispatch 만 부르고 transport 는 백엔드를 모른다. (ADR-0004)
 - **플랫폼 중립** — 운영 코드의 OS 분기는 `platform` crate 안에만 두고 부르는 쪽에 `cfg!(windows)` 를 흩뿌리지 않는다(ADR-0266). 시험 파일을 통째로 `#![cfg(windows)]` 로 막지 않는다(ADR-0230 결정 2).
+- **최소한만 막기** — 백엔드(claude·codex)가 스스로 처리하는 것은 그쪽 규칙에 맡기고, 우리는 실행이 깨지거나 보안 구멍이 되는 것만 막는다.
 - **LLM-우선 제어** — 모든 기능은 LLM으로 제어할 수 있어야 한다. 기존 표면(데몬 버스 · 프론트 `__engramCmd`) 위에 얹고 두 번째 표면을 만들지 않는다. 새 UI에는 LLM 경로를 같이 만들고, 모양은 `docs/reference/llm-command-conventions.md`를 따른다. (ADR-0055 · 0307)
 
 ## 모듈
