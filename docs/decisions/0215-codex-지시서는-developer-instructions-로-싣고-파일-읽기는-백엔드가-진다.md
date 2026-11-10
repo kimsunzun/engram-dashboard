@@ -1,7 +1,7 @@
 # ADR-0215: The codex instruction document is carried in developer_instructions, and the backend carries the file reading
 
-- 상태: 확정 (2026-09-20, basis: `docs/research/codex-instruction-injection-2026-09-20.md` — the canonical source for method and figures, not copied here) · 부분 폐기 by ADR-0219 (the clause blocking codex on the LLM creation surface)
-- 관련: ADR-0004(backend extension) · ADR-0210(do not fail the spawn) · ADR-0209 · ADR-0211(measured the same 8,191 wall first and is the decision that shrank the instruction document to this size) · ADR-0092(the original decision of the priming seam — this ADR does not violate it) · `crates/engram-dashboard-agent/src/backend/claude/mod.rs:238` · Amends ADR-0099 (codex carries content instead of a path) · Amended by ADR-0219 (the clause blocking codex on the LLM creation surface) · Amends ADR-0092 (the backend reads the priming content)
+- 상태: 확정 (2026-09-20, basis: `docs/research/codex-instruction-injection-2026-09-20.md` — the canonical source for method and figures, not copied here) · 부분 폐기 by ADR-0219 (the clause blocking codex on the LLM creation surface) · 부분 폐기 by ADR-0353 (결정 4와 5 실재료 한정)
+- 관련: ADR-0004(backend extension) · ADR-0210(do not fail the spawn) · ADR-0209 · ADR-0211(measured the same 8,191 wall first and is the decision that shrank the instruction document to this size) · ADR-0092(the original decision of the priming seam — this ADR does not violate it) · `crates/engram-dashboard-agent/src/backend/claude/mod.rs:238` · Amends ADR-0099 (codex carries content instead of a path) · Amended by ADR-0219 (the clause blocking codex on the LLM creation surface) · Amends ADR-0092 (the backend reads the priming content) · Amended by ADR-0353 (결정 4와 5 실재료 한정)
 
 ## 맥락
 
