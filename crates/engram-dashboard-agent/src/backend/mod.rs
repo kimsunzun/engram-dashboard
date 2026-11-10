@@ -181,17 +181,25 @@ pub(crate) fn inject_cli_entrance(env: &mut Vec<(String, String)>, endpoint: &Co
 // ADR-0185
 pub type SessionIdSink = Arc<dyn Fn(&str) + Send + Sync>;
 
-/// 「이 화신의 대화에 턴이 실제로 생겼다」를 조립점에 알리는 **한 동사** 포트 — 조립점은 세션 id 첫 제출
-/// 래치의 제출 입력을 여기 꽂는다.
+/// The one-verb port that tells the assembly point "this incarnation's conversation really has a turn now" — the
+/// assembly point plugs the submission input of the session-id first-submission latch in here.
 ///
-/// ★부르는 쪽은 턴을 통로가 지는(`MidTurnPolicy::TransportOwned`) backend 의 통로뿐이다★ — 그 모드의 세션은
-///   제출을 세지 않고, 통로가 상대의 **첫 유저 메시지 되울림**에서 이것을 부른다. 그 밖의 backend 는 세션이
-///   보내기 전에 세므로 이 포트를 무시한다. ★둘은 짝이다★: `TransportOwned` 를 신고하면서 이 포트를 통로에
-///   안 꽂으면 어느 화신도 id 를 영속하지 못한다(오류 없이 모든 이어받기가 새 대화가 된다).
-/// 여러 번 불려도 된다 — 받는 쪽(래치)이 첫 번만 센다.
+/// ★Only the transport of a backend whose transport carries the turn (`MidTurnPolicy::TransportOwned`) calls it★ —
+///   that mode's session does not count submissions, and the transport calls this at the peer's **first user-message
+///   echo**. Every other backend's session counts before sending, so it ignores this port. ★The two are a pair★: a
+///   backend that declares `TransportOwned` without plugging this port into its transport never persists an id (no
+///   error — every resume becomes a new conversation).
+/// The argument = whether the instructions reached the model: `true` when the echoed turn carried this incarnation's
+///   instructions-change context, or when there was none to deliver; `false` when a context was due and its delivery is
+///   not confirmed (the retry bound dropped it, or the first echo was not of a carrying turn — a carrying turn's late
+///   echo that arrives while idle also reports `false`). Session-id persistence does
+///   not depend on it.
+/// It may be called many times — the receiver (the latch) counts only the first call and keeps that call's argument;
+///   step 8 records the applied instructions hash only when it is `true` (`TODO(TRD S25 §5-2 4 (b))`).
 // ADR-0226
 // ADR-0231
-pub type FirstTurnSink = Arc<dyn Fn() + Send + Sync>;
+// ADR-0337
+pub type FirstTurnSink = Arc<dyn Fn(bool) + Send + Sync>;
 
 /// unit struct로 구현되어 &'static으로 사용된다 — 상태 없음.
 pub trait AgentBackend: Send + Sync {

@@ -30,6 +30,8 @@
 //   is made by chunk 2, and this allow is removed then.
 #![allow(dead_code)]
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -214,6 +216,11 @@ pub(crate) mod method {
     pub(crate) const INITIALIZE: &str = "initialize";
     pub(crate) const THREAD_START: &str = "thread/start";
     pub(crate) const THREAD_RESUME: &str = "thread/resume";
+    /// Set the extra skill roots of this app-server **process** (measured 0.163.0 — M4, M9): another live process,
+    /// even on the same `CODEX_HOME`, does not see them, and `thread/resume` does not restore them, so every process
+    /// sets them again before its `thread/start` / `thread/resume`. The response is `{}`.
+    // ADR-0337
+    pub(crate) const SKILLS_EXTRA_ROOTS_SET: &str = "skills/extraRoots/set";
     pub(crate) const TURN_START: &str = "turn/start";
     /// Put one input into a running turn — it does not open a turn (ADR-0231).
     pub(crate) const TURN_STEER: &str = "turn/steer";
@@ -337,10 +344,22 @@ pub(crate) const CLIENT_NAME: &str = "engram-dashboard";
 #[serde(rename_all = "camelCase")]
 pub(crate) struct InitializeParams {
     pub(crate) client_info: ClientInfo,
-    // ★Not carrying `capabilities` is intentional★ — every field is optional and all the values we want
-    //   are defaults. In particular `requestAttestation` defaults to false, so the unanswerable
-    //   `attestation/generate` request does not come (that request has no refusal shape at all). To turn it on,
-    //   code that can bear the consequence must be brought in together.
+    /// `None` = the field is absent — every capability at its default. `Some` only on a spawn whose first turn carries
+    /// `additionalContext`, which codex refuses (`-32600`) without `experimentalApi` (measured 0.163.0 — M3).
+    /// ★Only `experimentalApi` is ever sent★ — `requestAttestation` must stay at its default false: it would bring the
+    ///   `attestation/generate` request, which has no refusal shape at all. The opt-in also enables the server request
+    ///   `currentTime/read` (refused `-32601` like every server request) and the `thread/readState/changed`
+    ///   notification (not translated).
+    // ADR-0337
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) capabilities: Option<InitializeCapabilities>,
+}
+
+/// The capability set of `initialize` — only the one field we send (see [`InitializeParams::capabilities`]).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct InitializeCapabilities {
+    pub(crate) experimental_api: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -351,7 +370,7 @@ pub(crate) struct ClientInfo {
 }
 
 /// ★There is no protocol version here★ — `protocolVersion` appears 0 times in the whole schema.
-/// What `initialize` negotiates is not a version but a capability set, and we do not send that either.
+/// What `initialize` negotiates is not a version but a capability set ([`InitializeParams::capabilities`]).
 /// The only values that tell upstream drift after the fact are `user_agent` and `Thread.cliVersion`, so they are recorded once at
 /// startup (TRD §4-7 item 1).
 #[derive(Debug, Clone, Deserialize)]
@@ -418,11 +437,6 @@ pub(crate) struct ThreadStartParams {
     pub(crate) developer_instructions: Option<String>,
 }
 
-/// ★There is **no** `developerInstructions` counterpart here — leaving it absent is the decision★: we have not measured whether that field is in this request's
-/// schema either, and the price of putting an unknown field on JSON-RPC params is a 「거절당한 핸드셰이크」 (rejected handshake),
-/// so the resume spawn would die entirely. So **a resumed app-server thread gets no priming** —
-/// terminal mode is argv so it is carried on resume as well, so the gap is this one branch only. If the field's existence is
-/// confirmed by measurement, we add it then.
 // ADR-0215
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -437,6 +451,17 @@ pub(crate) struct ThreadResumeParams {
     /// If true, `thread.turns` is not filled in — upstream marks full-history hydration as deprecated.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) exclude_turns: Option<bool>,
+    /// The current full instructions text, on every resume. `None` = the field is absent.
+    ///
+    /// ★It does not reach the next turn★ (measured 0.163.0 — M8): codex holds it in the resumed process's session and
+    ///   uses it only when a compaction in that process rebuilds the initial context. Without it that rebuild has no
+    ///   instructions at all — so it is sent on every resume, changed or not; a change reaches the next turn only
+    ///   through the first turn's `additionalContext` ([`TurnStartParams::additional_context`]).
+    /// The field is in the stable schema from 0.155.0; the transport drops it for a codex below that or whose version
+    ///   it cannot read.
+    // ADR-0337
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) developer_instructions: Option<String>,
 }
 
 /// The **second request** of the handshake — open a new thread, or resume a saved thread.
@@ -565,6 +590,44 @@ pub(crate) struct TurnStartParams {
     // ADR-0231
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) client_user_message_id: Option<String>,
+    /// Context codex adds to this turn's model input as a developer message, tagged with the map key
+    /// (`<engram-instructions>…</engram-instructions>`) — not shown in the echoed user message. `None` = the field is
+    /// absent, byte-identical to the envelope before this field existed.
+    /// ★Needs `experimentalApi` at `initialize`★ (`-32600` without it — measured 0.163.0, M3). It lives in the history
+    ///   only, so every compaction drops it (M8).
+    // ADR-0337
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) additional_context: Option<BTreeMap<String, AdditionalContext>>,
+}
+
+/// The `additionalContext` map key of the instructions-change context — codex shows it as the tag of the developer
+/// message.
+// ADR-0337
+pub(crate) const INSTRUCTIONS_CONTEXT_KEY: &str = "engram-instructions";
+
+/// One `additionalContext` entry. `kind` is always `application` — the one kind we send.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct AdditionalContext {
+    pub(crate) kind: &'static str,
+    pub(crate) value: String,
+}
+
+impl AdditionalContext {
+    pub(crate) fn application(value: String) -> Self {
+        AdditionalContext {
+            kind: "application",
+            value,
+        }
+    }
+}
+
+/// `skills/extraRoots/set` — this process's extra skill roots, absolute paths (see [`method::SKILLS_EXTRA_ROOTS_SET`]).
+/// The `{}` response is not read.
+// ADR-0337
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SkillsExtraRootsSetParams {
+    pub(crate) extra_roots: Vec<String>,
 }
 
 /// `turn/steer` — put one input into a running turn. The success response is `{turnId}` and that is **acceptance**, not a receipt
@@ -1160,12 +1223,56 @@ mod tests {
                 name: "engram-dashboard".to_string(),
                 version: "0.1.0".to_string(),
             },
+            capabilities: None,
         })
         .unwrap();
         let info = field(&v, "clientInfo");
         assert_eq!(field(info, "name"), "engram-dashboard");
         assert_eq!(field(info, "version"), "0.1.0");
         assert!(v.get("capabilities").is_none());
+    }
+
+    /// The opt-in a spawn with a first-turn context sends — `experimentalApi` and nothing else (`requestAttestation`
+    /// stays absent, so at its default false).
+    // ADR-0337
+    #[test]
+    fn initialize_params_carry_only_the_experimental_api_opt_in() {
+        let line = request_line(
+            &RequestId::Num(0),
+            method::INITIALIZE,
+            &InitializeParams {
+                client_info: ClientInfo {
+                    name: "engram-dashboard".to_string(),
+                    version: "0.1.0".to_string(),
+                },
+                capabilities: Some(InitializeCapabilities {
+                    experimental_api: true,
+                }),
+            },
+        )
+        .unwrap();
+        let v: Value = serde_json::from_str(line.trim_end()).unwrap();
+        assert_eq!(
+            field(&v, "params")["capabilities"],
+            serde_json::json!({"experimentalApi": true})
+        );
+    }
+
+    // ADR-0337
+    #[test]
+    fn skills_extra_roots_set_params_field_names() {
+        let v = serde_json::to_value(SkillsExtraRootsSetParams {
+            extra_roots: vec![
+                "C:/v/engram/skills".to_string(),
+                "C:/f/.agents/skills".to_string(),
+            ],
+        })
+        .unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"extraRoots": ["C:/v/engram/skills", "C:/f/.agents/skills"]})
+        );
+        assert_eq!(method::SKILLS_EXTRA_ROOTS_SET, "skills/extraRoots/set");
     }
 
     #[test]
@@ -1219,6 +1326,7 @@ mod tests {
             approval_policy: None,
             sandbox: None,
             exclude_turns: Some(true),
+            developer_instructions: None,
         })
         .unwrap();
         assert_eq!(field(&v, "threadId"), "t-1");
@@ -1226,6 +1334,23 @@ mod tests {
         assert!(v.get("cwd").is_none());
         assert!(v.get("approvalPolicy").is_none());
         assert!(v.get("sandbox").is_none());
+        assert!(v.get("developerInstructions").is_none());
+    }
+
+    /// M8 — the resume carries the instructions under the same wire name as `thread/start`.
+    // ADR-0337
+    #[test]
+    fn thread_resume_params_carry_the_instructions_under_their_wire_name() {
+        let v = serde_json::to_value(ThreadResumeParams {
+            thread_id: "t-1".to_string(),
+            cwd: None,
+            approval_policy: None,
+            sandbox: None,
+            exclude_turns: Some(true),
+            developer_instructions: Some("be brief\n".to_string()),
+        })
+        .unwrap();
+        assert_eq!(field(&v, "developerInstructions"), "be brief\n");
     }
 
     #[test]
@@ -1236,6 +1361,7 @@ mod tests {
                 text: "hello".to_string(),
             }],
             client_user_message_id: None,
+            additional_context: None,
         })
         .unwrap();
         assert_eq!(field(&v, "threadId"), "t-1");
@@ -1245,6 +1371,32 @@ mod tests {
         assert!(
             v.get("clientUserMessageId").is_none(),
             "식별자 없는 봉투에 칸이 생겼다: {v}"
+        );
+        assert_eq!(
+            v.as_object().unwrap().len(),
+            2,
+            "the envelope without an identifier and without a context grew a field: {v}"
+        );
+    }
+
+    // ADR-0337
+    #[test]
+    fn turn_start_params_carry_the_instructions_context_under_its_wire_shape() {
+        let v = serde_json::to_value(TurnStartParams {
+            thread_id: "t-1".to_string(),
+            input: vec![UserInput::Text {
+                text: "hello".to_string(),
+            }],
+            client_user_message_id: None,
+            additional_context: Some(BTreeMap::from([(
+                INSTRUCTIONS_CONTEXT_KEY.to_string(),
+                AdditionalContext::application("new text".to_string()),
+            )])),
+        })
+        .unwrap();
+        assert_eq!(
+            field(&v, "additionalContext"),
+            &serde_json::json!({"engram-instructions": {"kind": "application", "value": "new text"}})
         );
     }
 
@@ -1257,6 +1409,7 @@ mod tests {
                 text: "hello".to_string(),
             }],
             client_user_message_id: Some("u-1".to_string()),
+            additional_context: None,
         })
         .unwrap();
         assert_eq!(field(&v, "clientUserMessageId"), "u-1");

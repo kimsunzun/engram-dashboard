@@ -425,7 +425,7 @@ fn own_wording(notice: &Notice) -> Option<String> {
                 return None;
             }
             Some(format!(
-                "알림: 같은 이름의 스킬이 여러 곳에 있습니다. codex에서 ${name}으로 부르면 어느 쪽도 선택되지 않습니다. {name}: {}",
+                "알림: 같은 이름의 스킬이 여러 곳에 있습니다. codex에서 ${name}(으)로 부르면 어느 쪽도 선택되지 않습니다. {name}: {}",
                 paths.join(", ")
             ))
         }
@@ -940,7 +940,8 @@ pub struct LaunchArtifacts {
     // ADR-0337
     pub instructions_override: Option<String>,
     /// codex JSON: the merged instructions text (read from [`LaunchKit::instructions_file`]). `None` = none or blank.
-    /// Sent as `developerInstructions` on `thread/start` and on every `thread/resume`.
+    /// Sent as `developerInstructions` on `thread/start`, and on a `thread/resume` when the transport's version gate
+    /// lets it through (`RESUME_INSTRUCTIONS_FLOOR` in `backend/codex/transport.rs`).
     // ADR-0337
     pub instructions_text: Option<String>,
     /// codex JSON: there is instructions text ([`LaunchArtifacts::instructions_text`] is `Some`), and the kit's
@@ -2011,7 +2012,7 @@ mod tests {
                 json!({ "name": "review", "paths": ["D:\\lib\\review", "C:\\Users\\u\\.agents\\skills\\review"] }),
                 None,
             )),
-            "알림: 같은 이름의 스킬이 여러 곳에 있습니다. codex에서 $review으로 부르면 어느 쪽도 선택되지 않습니다. review: D:\\lib\\review, C:\\Users\\u\\.agents\\skills\\review"
+            "알림: 같은 이름의 스킬이 여러 곳에 있습니다. codex에서 $review(으)로 부르면 어느 쪽도 선택되지 않습니다. review: D:\\lib\\review, C:\\Users\\u\\.agents\\skills\\review"
         );
     }
 
@@ -2026,7 +2027,7 @@ mod tests {
         ));
         assert_eq!(
             text,
-            "알림: 같은 이름의 스킬이 여러 곳에 있습니다. codex에서 $a\\nb으로 부르면 어느 쪽도 선택되지 않습니다. a\\nb: \\u{1b}[31mred"
+            "알림: 같은 이름의 스킬이 여러 곳에 있습니다. codex에서 $a\\nb(으)로 부르면 어느 쪽도 선택되지 않습니다. a\\nb: \\u{1b}[31mred"
         );
         assert!(!text.chars().any(char::is_control), "{text:?}");
 

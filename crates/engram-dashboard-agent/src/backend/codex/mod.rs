@@ -71,7 +71,7 @@ use self::decoder::CodexAppServerDecoder;
 use self::protocol::{
     AskForApproval, SandboxMode, ThreadOpen, ThreadResumeParams, ThreadStartParams,
 };
-use self::transport::CodexAppServerTransport;
+use self::transport::{AppServerOpen, CodexAppServerTransport};
 use crate::backend::{
     inject_cli_entrance, AgentBackend, FirstTurnSink, InputEncoder, SessionIdSink, SpawnParts,
     TransportShape, TurnClassifier,
@@ -127,14 +127,16 @@ fn is_app_server(command: &AgentCommand) -> bool {
 ///   wedge 가 된다(그래서 그 닫기가 갈래를 가리지 않는다 — `transport.rs` 의 그 자리).
 ///   ★즉 상류가 `excludeTurns` 를 무시하기 시작하면 이 인자는 아무 것도 못 막고, 남는 방어는 그 닫기
 ///   하나뿐이다★ — 이 인자를 「막아 뒀다」로 읽지 말 것. 상류가 실제로 존중하는지는 미검이다.
-/// ★`developer_instructions` 는 **여는 갈래에만** 실린다★ — [`ThreadResumeParams`] 에는 그 칸이 없고,
-///   없는 채로 두는 것이 결정이다(그 타입의 doc 이 사유의 정본). 그래서 이어받은 app-server 스레드는
-///   프라이밍을 못 받는다 — 터미널 모드는 argv 라 이어받기에도 그대로 실리므로 갭은 이 한 갈래뿐이다.
+/// ★`developer_instructions` goes on **both** branches★ — on a resume too, changed or not: codex holds it in the
+///   resumed process and rebuilds the initial context from it at a compaction there; without it that rebuild has no
+///   instructions at all (the reason and the version gate: the [`ThreadResumeParams`] field doc). It does not reach
+///   the next turn on a resume — a change reaches it through the first turn's context ([`app_server_open`]).
 /// ★받은 값을 **손대지 않고** 싣는다★ — JSON 본문에는 명령줄 상한도 `%` 치환도 줄바꿈 절단도 없다.
 ///   터미널 갈래의 변환([`developer_instructions_override`])을 여기로 가져오면 아무 위험도 막지 못한
 ///   채 에이전트가 읽는 문서만 망가진다.
 // ADR-0185
 // ADR-0215
+// ADR-0337
 fn thread_open(
     spec: &CommandSpec,
     resume_session_id: Option<Uuid>,
@@ -150,6 +152,7 @@ fn thread_open(
             approval_policy,
             sandbox,
             exclude_turns: Some(true),
+            developer_instructions,
         }),
         None => ThreadOpen::Start(ThreadStartParams {
             cwd,
@@ -160,14 +163,57 @@ fn thread_open(
     }
 }
 
-// app-server 스폰이 핸드셰이크에 싣는 값 — 시험이 이 함수로 그 값을 못 박는다(Noop 실행 재료 회귀 · TRD S25 §5-2 4).
-fn app_server_thread_open(
+/// What an app-server spawn opens with — the tests pin it through this function (the Noop handshake regression · TRD
+/// S25 §5-2 4).
+///
+/// - Noop (`!artifacts.real`): the control channel's priming text as the instructions, no roots, no context — a start
+///   is byte-identical to a spawn before launch materials; a resume carries the same text.
+/// - Real: the merged instructions text ([`LaunchArtifacts::instructions_text`]) — ★the control channel's priming file
+///   is not read★ (it is already merged into that text); the skill roots; and the instructions-change context only on
+///   a resume whose instructions changed. A Fresh spawn never carries it, even with `instructions_changed`: a new
+///   thread receives the full text through `developerInstructions` at `thread/start`.
+// ADR-0337
+fn app_server_open(
     spec: &CommandSpec,
     resume_session_id: Option<Uuid>,
     control: Option<&ControlEndpoint>,
-) -> ThreadOpen {
-    thread_open(spec, resume_session_id, priming_text(control))
+    artifacts: &LaunchArtifacts,
+) -> Result<AppServerOpen, PtyError> {
+    if !artifacts.real {
+        return Ok(AppServerOpen {
+            thread: thread_open(spec, resume_session_id, priming_text(control)),
+            extra_roots: Vec::new(),
+            first_turn_context: None,
+        });
+    }
+    let extra_roots = artifacts
+        .skill_roots
+        .iter()
+        .map(|root| {
+            root.to_str().map(str::to_owned).ok_or_else(|| {
+                PtyError::SpawnFailed(format!(
+                    "codex skill root is not valid UTF-8: {}",
+                    root.display()
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let first_turn_context = match &artifacts.instructions_text {
+        Some(text) if resume_session_id.is_some() && artifacts.instructions_changed => {
+            Some(format!("{INSTRUCTIONS_CHANGED_PREFACE}\n\n{text}"))
+        }
+        _ => None,
+    };
+    Ok(AppServerOpen {
+        thread: thread_open(spec, resume_session_id, artifacts.instructions_text.clone()),
+        extra_roots,
+        first_turn_context,
+    })
 }
+
+/// The line in front of the full instructions text in the instructions-change context (main's decision #3).
+// ADR-0337
+const INSTRUCTIONS_CHANGED_PREFACE: &str = "The instructions for this agent changed since its last launch. The current instructions follow and take precedence over earlier instructions in this conversation.";
 
 /// PATH 로 해석되는 이름 그대로 띄운다(사용자 결정 2026-09-07 · TRD §6-H).
 ///
@@ -888,8 +934,8 @@ impl AgentBackend for CodexBackend {
                 //   `console_command` 를 건드리므로, 틀리면 오늘 도는 스폰 전부가 죽는다.
                 //   ★고칠 때 무엇이 필요한가★: 위 셋을 뒤집을 실측(그 형태로 감싼 `cmd` 아래에서 claude·
                 //   codex 가 둘 다 뜨는가)이다. 그 전에는 이 한계를 아는 채로 둔다.
-                // On real materials the terminal working folder never holds `%`: `materialize` refuses a folder
-                //   `path_is_cli_safe` refuses, so there this limit is left to `extra_args` alone.
+                // On real materials the terminal working folder never holds `%`: `materialize` refuses such a folder,
+                //   so there this limit is left to `extra_args` alone.
                 // ADR-0004
 
                 // Real materials: the preset `-c` lines (model and effort included — there is never a `-m`), after the
@@ -1121,12 +1167,14 @@ impl AgentBackend for CodexBackend {
     /// ★`resume_session_id` 를 터미널 갈래에서는 쓰지 않는다 — 그런데 사유는 「손잡이가 없어서」가
     ///   **아니다**★: 그 모드의 이어받기는 이미 argv 에 실려 나갔다([`AgentBackend::build_spec`] 의
     ///   터미널 갈래). 같은 값을 여기서 또 쓰면 한 spawn 이 두 수단으로 이어받으려 든다.
-    /// ★`control` 도 **같은 규율로 app-server 갈래에서만 읽는다**★ — 여기서 꺼내는 것은 프라이밍 내용
-    ///   하나이고([`priming_text`]), 터미널 갈래는 그것을 이미 `-c developer_instructions=…` 로 실어
-    ///   보냈다. 그래서 PTY 쪽 생성자에는 이 칸이 닿지 않는다.
+    /// ★`control` and `artifacts` are read **only on the app-server branch, by the same rule**★ — what comes out of them
+    ///   is the open plan ([`app_server_open`]: the instructions — the control channel's priming text on a Noop spawn,
+    ///   the merged text on a real one —, the skill roots and the first-turn context). The terminal branch already put
+    ///   its instructions and settings on the command line (`build_spec`), so neither reaches the PTY constructor.
     // ADR-0185
     // ADR-0191
     // ADR-0215
+    // ADR-0337
     fn open_spawn(
         &self,
         command: &AgentCommand,
@@ -1138,7 +1186,7 @@ impl AgentBackend for CodexBackend {
         resume_session_id: Option<Uuid>,
         link_sink: Option<LinkSink>,
         control: Option<&ControlEndpoint>,
-        _artifacts: &LaunchArtifacts,
+        artifacts: &LaunchArtifacts,
     ) -> Result<SpawnParts, PtyError> {
         let (transport, child_pid, mid_turn, delivery_ack): (
             Box<dyn AgentTransport>,
@@ -1155,7 +1203,7 @@ impl AgentBackend for CodexBackend {
                 spec,
                 true,
                 decoder,
-                app_server_thread_open(spec, resume_session_id, control),
+                app_server_open(spec, resume_session_id, control, artifacts)?,
                 sid_sink,
                 link_sink,
             )?;
@@ -1342,6 +1390,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
     }
+    use super::protocol::method;
     use super::*;
     use crate::types::{ToolGrant, TurnOutcome, CLI_EXE_ENV};
 
@@ -2444,7 +2493,7 @@ mod tests {
 
     /// 가짜가 `thread/resume` 에 무엇으로 답하나.
     #[cfg(windows)]
-    enum FakeResume {
+    pub(super) enum FakeResume {
         /// 받은 `threadId` 에 접두를 붙여 돌려준다 — 우리가 보낸 값과 **다른** 값이 되는 것이 요점이다.
         EchoesTheThreadId,
         /// `-32600` 으로 거절한다. ★이 코드가 「모르는 스레드」 전용이 아니라는 것이 ADR-0082 의 codex 쪽
@@ -2466,39 +2515,78 @@ mod tests {
     #[cfg(windows)]
     const FAKE_READY_ENV: &str = "ENGRAM_FAKE_APP_SERVER_READY";
 
+    /// The environment variable that carries the path of the fake's received-line log ([`FakeAppServer::received`]).
+    #[cfg(windows)]
+    const FAKE_LOG_ENV: &str = "ENGRAM_FAKE_APP_SERVER_LOG";
+
     /// 구운 가짜 app-server 한 벌.
     ///
     /// ★두 경로를 함께 드는 것은 계약이다★ — 항목마다 [`FakeAppServer::remove`] 로 지워야 하고, 못 지운
     /// 사실을 단언으로 올려야 한다.
     #[cfg(windows)]
-    struct FakeAppServer {
-        spec: CommandSpec,
+    pub(super) struct FakeAppServer {
+        pub(super) spec: CommandSpec,
         script: std::path::PathBuf,
         /// 가짜가 읽기 루프에 들어서며 만드는 빈 파일 — [`wait_for_the_fake_to_listen`] 이 이것을 기다린다.
         ready: std::path::PathBuf,
+        /// Every line the fake received, in order, one per line — [`FakeAppServer::received`] reads it.
+        log: std::path::PathBuf,
     }
 
     #[cfg(windows)]
     impl FakeAppServer {
-        /// 스크립트와 표식을 지우고 **지우지 못한 경로**를 돌려준다 — 비었으면 둘 다 지웠다.
+        /// Removes the script, the marker and the method log, and returns the paths it **could not** remove — empty =
+        /// all removed.
         #[must_use = "지우지 못한 사실을 버리면 찌꺼기가 조용히 쌓인다 — 단언으로 올릴 것"]
-        fn remove(&self) -> Vec<&std::path::Path> {
-            [self.script.as_path(), self.ready.as_path()]
-                .into_iter()
-                .filter(|path| !remove_fake_file(path))
+        pub(super) fn remove(&self) -> Vec<&std::path::Path> {
+            [
+                self.script.as_path(),
+                self.ready.as_path(),
+                self.log.as_path(),
+            ]
+            .into_iter()
+            .filter(|path| !remove_fake_file(path))
+            .collect()
+        }
+
+        /// Every line the fake received so far, parsed, in order (requests and the `initialized` notification).
+        pub(super) fn received(&self) -> Vec<serde_json::Value> {
+            std::fs::read_to_string(&self.log)
+                .unwrap_or_default()
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(|line| serde_json::from_str(line).expect("the fake logged a non-JSON line"))
                 .collect()
         }
 
-        /// 이 가짜를 손으로 돌려 보는 **PowerShell** 한 줄(cmd·bash 에서는 그대로 돌지 않는다).
-        /// ★표식 경로 변수를 함께 적는다★ — 없으면 스크립트가 표식을 쓰는 줄에서 곧바로 죽어
-        /// (`$ErrorActionPreference = 'Stop'`) 실패가 재현되지 않는다.
-        /// 값은 전부 작은따옴표로 감싸고 안의 `'` 는 겹쳐 쓴다 — 경로의 공백·`$` 가 해석되지 않게.
+        /// The `method` of every received line, in order.
+        pub(super) fn methods(&self) -> Vec<String> {
+            self.received()
+                .iter()
+                .map(|v| v["method"].as_str().unwrap_or_default().to_string())
+                .collect()
+        }
+
+        /// The params of the first received request of `method_name`.
+        pub(super) fn params_of(&self, method_name: &str) -> Option<serde_json::Value> {
+            self.received()
+                .into_iter()
+                .find(|v| v["method"] == method_name)
+                .map(|v| v["params"].clone())
+        }
+
+        /// A **PowerShell** line that runs this fake by hand (it does not run as is in cmd or bash).
+        /// ★It sets the marker and log path variables too★ — without them the script dies at the line that writes
+        /// the marker or the log (`$ErrorActionPreference = 'Stop'`) and the failure is not reproduced.
+        /// Every value is wrapped in single quotes with an inner `'` doubled — so spaces and `$` in a path are not
+        /// interpreted.
         fn hand_run(&self) -> String {
             let quote = |s: &str| format!("'{}'", s.replace('\'', "''"));
             let args: Vec<String> = self.spec.args.iter().map(|a| quote(a)).collect();
             format!(
-                "$env:{FAKE_READY_ENV}={}; {} {}",
+                "$env:{FAKE_READY_ENV}={}; $env:{FAKE_LOG_ENV}={}; {} {}",
                 quote(&self.ready.to_string_lossy()),
+                quote(&self.log.to_string_lossy()),
                 self.spec.program,
                 args.join(" ")
             )
@@ -2508,6 +2596,54 @@ mod tests {
     /// 가짜 app-server 를 임시 파일로 굽는다. `start_thread_id` = 이 가짜가 `thread/start` 에 답할 id.
     #[cfg(windows)]
     fn bake_fake_app_server(start_thread_id: &str, resume: FakeResume) -> FakeAppServer {
+        bake_fake_app_server_with(start_thread_id, resume, FakeOptions::default())
+    }
+
+    /// What else the fake answers with — [`bake_fake_app_server_with`].
+    #[cfg(windows)]
+    pub(super) struct FakeOptions {
+        /// The `initialize` `userAgent`. The default `engram-fake/0` carries no version the transport can read.
+        pub(super) user_agent: &'static str,
+        pub(super) extra_roots: FakeExtraRoots,
+    }
+
+    #[cfg(windows)]
+    impl Default for FakeOptions {
+        fn default() -> Self {
+            FakeOptions {
+                user_agent: "engram-fake/0",
+                extra_roots: FakeExtraRoots::Answers,
+            }
+        }
+    }
+
+    /// How the fake answers `skills/extraRoots/set`.
+    #[cfg(windows)]
+    #[derive(Clone, Copy)]
+    pub(super) enum FakeExtraRoots {
+        /// `{}` — what codex 0.163.0 answers.
+        Answers,
+        /// `-32601` — what a codex without the method would answer (R16).
+        Rejects,
+    }
+
+    /// [`FakeExtraRoots::Rejects`]'s message.
+    #[cfg(windows)]
+    const FAKE_EXTRA_ROOTS_REJECTION: &str = "method not found: skills/extraRoots/set";
+
+    /// [`bake_fake_app_server`] with a chosen `userAgent` and `skills/extraRoots/set` answer.
+    #[cfg(windows)]
+    pub(super) fn bake_fake_app_server_with(
+        start_thread_id: &str,
+        resume: FakeResume,
+        options: FakeOptions,
+    ) -> FakeAppServer {
+        let extra_roots_reply = match options.extra_roots {
+            FakeExtraRoots::Answers => r#"'"result":{}'"#.to_string(),
+            FakeExtraRoots::Rejects => {
+                format!(r#"'"error":{{"code":-32601,"message":"{FAKE_EXTRA_ROOTS_REJECTION}"}}'"#)
+            }
+        };
         let resume_reply = match resume {
             FakeResume::EchoesTheThreadId => {
                 r#"'"result":{"thread":{"id":"resumed-' + $tid + '","cliVersion":"0.0.0-fake"}}'"#
@@ -2520,10 +2656,14 @@ mod tests {
         let script = FAKE_APP_SERVER_PS1
             .replace("THREAD_ID_PLACEHOLDER", start_thread_id)
             .replace("RESUME_REPLY_PLACEHOLDER", &resume_reply)
-            .replace("READY_ENV_PLACEHOLDER", FAKE_READY_ENV);
+            .replace("EXTRA_ROOTS_REPLY_PLACEHOLDER", &extra_roots_reply)
+            .replace("USER_AGENT_PLACEHOLDER", options.user_agent)
+            .replace("READY_ENV_PLACEHOLDER", FAKE_READY_ENV)
+            .replace("LOG_ENV_PLACEHOLDER", FAKE_LOG_ENV);
         let stem = format!("engram-fake-app-server-{}", Uuid::new_v4());
         let script_path = std::env::temp_dir().join(format!("{stem}.ps1"));
         let ready = std::env::temp_dir().join(format!("{stem}.ready"));
+        let log = std::env::temp_dir().join(format!("{stem}.log"));
         std::fs::write(&script_path, script).expect("가짜 app-server 기록");
 
         let spec = CommandSpec {
@@ -2535,13 +2675,17 @@ mod tests {
                 "-File".into(),
                 script_path.to_string_lossy().into_owned(),
             ],
-            env: vec![(FAKE_READY_ENV.into(), ready.to_string_lossy().into_owned())],
+            env: vec![
+                (FAKE_READY_ENV.into(), ready.to_string_lossy().into_owned()),
+                (FAKE_LOG_ENV.into(), log.to_string_lossy().into_owned()),
+            ],
             cwd: PathBuf::from("."),
         };
         FakeAppServer {
             spec,
             script: script_path,
             ready,
+            log,
         }
     }
 
@@ -2558,7 +2702,7 @@ mod tests {
     /// ★표식이 보증하는 것은 「스크립트가 돌기 시작했다」까지다★ — 요청마다의 응답 경로(정규식·쓰기)가 처음
     /// 도는 비용은 여전히 예산 안이다. 느린 러너에서 그 값은 미측정이고, 크면 증상은 같은 시한 만료다.
     #[cfg(windows)]
-    fn wait_for_the_fake_to_listen(fake: &FakeAppServer) {
+    pub(super) fn wait_for_the_fake_to_listen(fake: &FakeAppServer) {
         wait_until(
             || fake.ready.exists(),
             &format!(
@@ -2621,9 +2765,12 @@ mod tests {
         }
     }
 
-    /// 핸드셰이크의 두 요청에만 답하는 최소 app-server. ★실 codex 가 아니다★ — 재는 것은 「상대가 준
-    /// thread id 가 [`AgentBackend::open_spawn`] 에 건넨 동사까지 오나」 하나이고, 그 답에 실 CLI 는
-    /// 무관하다(ADR-0012 격리).
+    /// A minimal app-server: it answers the handshake requests (`initialize` with [`FakeOptions::user_agent`],
+    /// `skills/extraRoots/set` per [`FakeExtraRoots`], `thread/start`, `thread/resume`) and `turn/start` (then echoes a
+    /// user message on the thread it opened), and appends every line it receives to its log, in order
+    /// ([`FakeAppServer::received`]). ★Not the real codex★ — what the tests measure is our side of the wire (the thread
+    /// id reaching the verb handed to [`AgentBackend::open_spawn`], what the handshake sends and in which order); the real
+    /// CLI does not matter for that (ADR-0012 isolation).
     /// ★인자로 넘기지 않고 파일로 굽는다★ — 스크립트에 JSON 이 들어 있어 `"` 가 필수인데, 그 문자는
     /// Rust `Command` 의 인자 이스케이프와 powershell 의 명령줄 해석을 거치며 두 번 씹힌다.
     /// ★stdout 은 raw 바이트로 쓴다★ — `Write-Output` 은 인코딩·BOM 이 호스트 설정에 딸려 가고, BOM 한
@@ -2650,21 +2797,26 @@ function Send([string]$s) {
   $so.Write($b, 0, $b.Length)
   $so.Flush()
 }
+$current = 'THREAD_ID_PLACEHOLDER'
 [IO.File]::WriteAllText($env:READY_ENV_PLACEHOLDER, '')
 while ($null -ne ($line = [Console]::In.ReadLine())) {
+  [IO.File]::AppendAllText($env:LOG_ENV_PLACEHOLDER, $line + "`n")
   if ($line -match '"id":(-?\d+)') {
     $rid = $Matches[1]
     if ($line -match '"method":"initialize"') {
-      Send ('{"id":' + $rid + ',"result":{"codexHome":"h","platformFamily":"windows","platformOs":"windows","userAgent":"engram-fake/0"}}')
+      Send ('{"id":' + $rid + ',"result":{"codexHome":"h","platformFamily":"windows","platformOs":"windows","userAgent":"USER_AGENT_PLACEHOLDER"}}')
+    } elseif ($line -match '"method":"skills/extraRoots/set"') {
+      Send ('{"id":' + $rid + ',' + EXTRA_ROOTS_REPLY_PLACEHOLDER + '}')
     } elseif ($line -match '"method":"thread/start"') {
       Send ('{"id":' + $rid + ',"result":{"thread":{"id":"THREAD_ID_PLACEHOLDER","cliVersion":"0.0.0-fake"}}}')
     } elseif ($line -match '"method":"thread/resume"') {
       $tid = 'MISSING'
       if ($line -match '"threadId":"([^"]+)"') { $tid = $Matches[1] }
+      $current = 'resumed-' + $tid
       Send ('{"id":' + $rid + ',' + RESUME_REPLY_PLACEHOLDER + '}')
     } elseif ($line -match '"method":"turn/start"') {
       Send ('{"id":' + $rid + ',"result":{"turn":{"id":"fake-turn"}}}')
-      Send '{"method":"item/started","params":{"threadId":"THREAD_ID_PLACEHOLDER","turnId":"fake-turn","item":{"type":"userMessage","id":"fake-user-item","content":[{"type":"text","text":"echo"}]}}}'
+      Send ('{"method":"item/started","params":{"threadId":"' + $current + '","turnId":"fake-turn","item":{"type":"userMessage","id":"fake-user-item","content":[{"type":"text","text":"echo"}]}}}')
     }
   }
 }
@@ -3212,7 +3364,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         let first_turns = Arc::new(AtomicUsize::new(0));
         let first_turn: FirstTurnSink = {
             let first_turns = first_turns.clone();
-            Arc::new(move || {
+            Arc::new(move |_delivered: bool| {
                 first_turns.fetch_add(1, Ordering::SeqCst);
             })
         };
@@ -3811,27 +3963,32 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         std::fs::remove_file(&path).expect("임시 지시서 삭제");
     }
 
-    /// ★이어받은 app-server 스레드는 프라이밍을 못 받는다 — 회귀가 아니라 결정이다★
-    /// (`ThreadResumeParams` 의 doc 이 사유의 정본). 그 칸이 실측으로 확인돼 생기는 날 이 항목이
-    /// 빨개지면서 함께 고쳐진다.
+    /// ★A resumed app-server thread carries the instructions too★ — unmodified, like the start — so a compaction in the
+    /// resumed process rebuilds its initial context with them (M8; the reason's source = the `ThreadResumeParams` field
+    /// doc). Without the field that rebuild had no instructions at all.
+    // ADR-0337
     #[test]
-    fn a_resuming_app_server_handshake_carries_no_instructions_field() {
-        let (ep, path) = bake_priming("teach the reply contract");
+    fn a_resuming_app_server_handshake_carries_the_instructions_field() {
+        let text = "teach the reply contract\nyou can't skip 50% of it\n";
+        let (ep, path) = bake_priming(text);
         let s = spec_with_control(&codex_app_server(vec![]), Some(ep.clone()));
         let params = match thread_open(&s, Some(Uuid::new_v4()), priming_text(Some(&ep))) {
             ThreadOpen::Resume(p) => p,
             ThreadOpen::Start(_) => panic!("이어받기인데 start 가 골라졌다"),
         };
         let v = serde_json::to_value(&params).expect("직렬화");
-        assert!(
-            v.get("developerInstructions").is_none(),
-            "재 본 적 없는 칸이 이어받기 요청에 실렸다: {v}"
+        assert_eq!(
+            v.get("developerInstructions").and_then(|v| v.as_str()),
+            Some(text),
+            "the resume request does not carry the document as is: {v}"
         );
         std::fs::remove_file(&path).expect("임시 지시서 삭제");
     }
 
-    /// Noop 실행 재료의 app-server 핸드셰이크 — 새 대화 · 이어받기 × 프라이밍 있음 · 없음 · 제어 채널 없음마다 값을
-    /// 못 박는다. 실행 재료 포트가 들어와도 재료 없는 스폰은 이것과 같아야 한다(TRD S25 §5-2 4).
+    /// The Noop launch-material app-server handshake — pins the values per new thread · resume × priming · no priming · no
+    /// control channel, plus the open plan's empty roots and context. A spawn without launch materials must stay equal to
+    /// this (TRD S25 §5-2 4). The one deliberate change since launch materials: the resume with priming carries it as
+    /// `developerInstructions` (M8 — ADR-0337).
     #[test]
     fn the_app_server_handshake_is_pinned_for_a_spawn_without_launch_kit() {
         let text = "pinned priming\nsecond line\n";
@@ -3844,13 +4001,19 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             cwd: PathBuf::from("C:/workspace"),
         };
         let thread = Uuid::from_u128(0x2222_2222_2222_4222_8222_2222_2222_2222);
-        let handshake =
-            |resume: Option<Uuid>, control: Option<&ControlEndpoint>| match app_server_thread_open(
-                &spec, resume, control,
-            ) {
+        let handshake = |resume: Option<Uuid>, control: Option<&ControlEndpoint>| {
+            let open = app_server_open(&spec, resume, control, &LaunchArtifacts::default())
+                .expect("a Noop open plan");
+            assert!(open.extra_roots.is_empty(), "a Noop spawn sent skill roots");
+            assert!(
+                open.first_turn_context.is_none(),
+                "a Noop spawn carries a first-turn context"
+            );
+            match open.thread {
                 ThreadOpen::Start(p) => serde_json::json!({ "start": p }),
                 ThreadOpen::Resume(p) => serde_json::json!({ "resume": p }),
-            };
+            }
+        };
         let actual = [
             handshake(None, Some(&with_priming)),
             handshake(None, Some(&without_priming)),
@@ -3867,6 +4030,15 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             "approvalPolicy": "on-request",
             "sandbox": "workspace-write",
             "excludeTurns": true,
+        }});
+        // ADR-0337: M8 — the resume carries the priming text like the start does.
+        let resume_with_priming = serde_json::json!({ "resume": {
+            "threadId": "22222222-2222-4222-8222-222222222222",
+            "cwd": "C:/workspace",
+            "approvalPolicy": "on-request",
+            "sandbox": "workspace-write",
+            "excludeTurns": true,
+            "developerInstructions": "pinned priming\nsecond line\n",
         }});
         let expected = [
             serde_json::json!({ "start": {
@@ -3885,7 +4057,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
                 "approvalPolicy": "on-request",
                 "sandbox": "workspace-write",
             }}),
-            resume.clone(),
+            resume_with_priming,
             resume.clone(),
             resume,
         ];
@@ -3900,6 +4072,457 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         for ((label, actual), expected) in labels.iter().zip(&actual).zip(&expected) {
             assert_eq!(actual, expected, "{label}");
         }
+    }
+
+    // ── ADR-0337: the real JSON open plan (TRD S25 step 6 §4-7) ──────────────────────────────────
+
+    const MERGED: &str = "merged instructions\nsecond line\n";
+
+    fn real_json_artifacts(text: Option<&str>, changed: bool) -> LaunchArtifacts {
+        LaunchArtifacts {
+            real: true,
+            instructions_text: text.map(str::to_string),
+            instructions_changed: changed,
+            skill_roots: vec![
+                PathBuf::from("C:/vol/engram/skills"),
+                PathBuf::from("C:/rules/.agents/skills"),
+            ],
+            ..LaunchArtifacts::default()
+        }
+    }
+
+    fn open_plan(resume: Option<Uuid>, artifacts: &LaunchArtifacts) -> AppServerOpen {
+        // ★The control channel's priming file holds other text★ — a real plan that read it would show it.
+        let (ep, path) = bake_priming("control channel priming");
+        let s = spec_with_control(&codex_app_server(vec![]), Some(ep.clone()));
+        let plan = app_server_open(&s, resume, Some(&ep), artifacts).expect("an open plan");
+        std::fs::remove_file(&path).expect("remove the temporary priming file");
+        plan
+    }
+
+    fn developer_instructions_of(plan: &AppServerOpen) -> Option<String> {
+        let v = match &plan.thread {
+            ThreadOpen::Start(p) => serde_json::to_value(p),
+            ThreadOpen::Resume(p) => serde_json::to_value(p),
+        }
+        .expect("serialize");
+        v.get("developerInstructions")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    }
+
+    /// Start · resume × changed · unchanged: the merged text goes as `developerInstructions` on both branches (M8 — on
+    /// every resume, changed or not), the roots go as given, and the context = preface + text only on a changed
+    /// resume — a Fresh spawn never carries it, even with `instructions_changed` (B10). The control channel's priming
+    /// file is never read on real materials.
+    #[test]
+    fn a_real_open_plan_sends_the_merged_text_the_roots_and_a_context_only_on_a_changed_resume() {
+        let thread = Uuid::new_v4();
+        for (resume, changed, context) in [
+            (None, false, false),
+            (None, true, false),
+            (Some(thread), false, false),
+            (Some(thread), true, true),
+        ] {
+            let at = format!("resume={} changed={changed}", resume.is_some());
+            let plan = open_plan(resume, &real_json_artifacts(Some(MERGED), changed));
+            assert_eq!(
+                matches!(plan.thread, ThreadOpen::Resume(_)),
+                resume.is_some(),
+                "{at}"
+            );
+            assert_eq!(
+                developer_instructions_of(&plan).as_deref(),
+                Some(MERGED),
+                "{at}"
+            );
+            assert_eq!(
+                plan.extra_roots,
+                ["C:/vol/engram/skills", "C:/rules/.agents/skills"],
+                "{at}"
+            );
+            let expected = context.then(|| format!("{INSTRUCTIONS_CHANGED_PREFACE}\n\n{MERGED}"));
+            assert_eq!(plan.first_turn_context, expected, "{at}");
+        }
+        assert_eq!(
+            INSTRUCTIONS_CHANGED_PREFACE,
+            "The instructions for this agent changed since its last launch. The current instructions follow \
+             and take precedence over earlier instructions in this conversation."
+        );
+    }
+
+    /// A real kit with no instructions text sends no instructions field and no context — and does not fall back to the
+    /// control channel's priming file; with no skill roots it sends no roots.
+    #[test]
+    fn a_real_open_plan_without_instructions_carries_no_instructions_field() {
+        for resume in [None, Some(Uuid::new_v4())] {
+            let mut artifacts = real_json_artifacts(None, false);
+            artifacts.skill_roots.clear();
+            let plan = open_plan(resume, &artifacts);
+            assert_eq!(
+                developer_instructions_of(&plan),
+                None,
+                "resume={}",
+                resume.is_some()
+            );
+            assert!(plan.extra_roots.is_empty());
+            assert!(plan.first_turn_context.is_none());
+        }
+    }
+
+    /// What one run against the fake app-server saw.
+    #[cfg(windows)]
+    struct FakeRun {
+        methods: Vec<String>,
+        received: Vec<serde_json::Value>,
+        link: Vec<crate::transport::LinkResolution>,
+        /// The first-turn reports (`FirstTurnSink` arguments), in order.
+        reports: Vec<bool>,
+    }
+
+    /// Opens a transport on `fake` with `plan`, waits for the link, sends one turn when the link is `Ready` and
+    /// `send_turn` is set (and waits for the first-turn report), shuts it down and removes the fake.
+    #[cfg(windows)]
+    fn run_on_fake(fake: FakeAppServer, plan: AppServerOpen, send_turn: bool) -> FakeRun {
+        use crate::output_core::{OutputCore, TurnWiring};
+        use crate::types::{AgentInfo, AgentStatus, InputOrigin, StatusSink, TurnInput};
+        use std::sync::Mutex;
+
+        struct NoopStatus;
+        impl StatusSink for NoopStatus {
+            fn status_changed(&self, _id: Uuid, _s: AgentStatus, _e: u32) {}
+            fn agent_list_updated(&self, _a: Vec<AgentInfo>) {}
+        }
+
+        let reports = Arc::new(Mutex::new(Vec::new()));
+        let first_turn: FirstTurnSink = {
+            let reports = reports.clone();
+            Arc::new(move |delivered: bool| reports.lock().unwrap().push(delivered))
+        };
+        let (link_sink, delivered) = link_recorder();
+        let (t, _pid) =
+            CodexAppServerTransport::open(&fake.spec, true, None, plan, None, Some(link_sink))
+                .expect("open");
+        let t = t.with_first_turn(Some(first_turn));
+        wait_for_the_fake_to_listen(&fake);
+        t.start(Arc::new(OutputCore::new(
+            Uuid::new_v4(),
+            1,
+            Arc::new(NoopStatus),
+            TurnWiring::detached(),
+        )));
+        wait_until(
+            || !delivered.lock().unwrap().is_empty(),
+            "the link resolution is delivered",
+        );
+        let ready = matches!(
+            delivered.lock().unwrap().first(),
+            Some(crate::transport::LinkResolution::Ready)
+        );
+        if ready && send_turn {
+            t.send_turn(TurnInput {
+                id: "u-1".into(),
+                body: b"hi".to_vec(),
+                origin: InputOrigin::User,
+            })
+            .expect("accepted");
+            wait_until(
+                || !reports.lock().unwrap().is_empty(),
+                "the fake's echo calls the first-turn port",
+            );
+        }
+        t.shutdown();
+        let run = FakeRun {
+            methods: fake.methods(),
+            received: fake.received(),
+            link: delivered.lock().unwrap().clone(),
+            reports: reports.lock().unwrap().clone(),
+        };
+        let leftover = fake.remove();
+        assert!(
+            leftover.is_empty(),
+            "가짜 app-server 파일을 지우지 못했다: {leftover:?}"
+        );
+        run
+    }
+
+    #[cfg(windows)]
+    fn params_of(run: &FakeRun, method_name: &str) -> serde_json::Value {
+        run.received
+            .iter()
+            .find(|v| v["method"] == method_name)
+            .map(|v| v["params"].clone())
+            .unwrap_or_else(|| panic!("{method_name} was not sent: {:?}", run.methods))
+    }
+
+    #[cfg(windows)]
+    const FAKE_CODEX_0_163: &str =
+        "codex_cli_rs/0.163.0 (Windows 10.0.26200; x86_64) unknown (engram-dashboard; 0.1.0)";
+
+    /// The received order per start · resume × roots · no roots × context · no context: `initialize` (with
+    /// `experimentalApi` exactly when there is a context) → `initialized` → [`skills/extraRoots/set` with the roots —
+    /// on a resume too] → `thread/start` | `thread/resume`; with a context the first `turn/start` carries it and the
+    /// echo reports the instructions delivered.
+    #[cfg(windows)]
+    #[test]
+    fn the_handshake_sends_the_open_plan_in_order() {
+        for resume in [false, true] {
+            for roots in [false, true] {
+                for context in [false, true] {
+                    let at = format!("resume={resume} roots={roots} context={context}");
+                    let fake = bake_fake_app_server_with(
+                        "T-start",
+                        FakeResume::EchoesTheThreadId,
+                        FakeOptions {
+                            user_agent: FAKE_CODEX_0_163,
+                            ..FakeOptions::default()
+                        },
+                    );
+                    let s = spec(&codex_app_server(vec![]), "C:/workspace");
+                    let extra_roots: Vec<String> = if roots {
+                        vec![
+                            "C:/vol/engram/skills".into(),
+                            "C:/rules/.agents/skills".into(),
+                        ]
+                    } else {
+                        Vec::new()
+                    };
+                    let plan = AppServerOpen {
+                        thread: thread_open(
+                            &s,
+                            resume.then(Uuid::new_v4),
+                            Some("dev text".to_string()),
+                        ),
+                        extra_roots: extra_roots.clone(),
+                        first_turn_context: context.then(|| "ctx text".to_string()),
+                    };
+                    let run = run_on_fake(fake, plan, context);
+                    assert!(
+                        matches!(
+                            run.link.first(),
+                            Some(crate::transport::LinkResolution::Ready)
+                        ),
+                        "{at}: {:?}",
+                        run.link
+                    );
+
+                    let mut expected = vec!["initialize", "initialized"];
+                    if roots {
+                        expected.push(method::SKILLS_EXTRA_ROOTS_SET);
+                    }
+                    expected.push(if resume {
+                        method::THREAD_RESUME
+                    } else {
+                        method::THREAD_START
+                    });
+                    if context {
+                        expected.push(method::TURN_START);
+                    }
+                    assert_eq!(run.methods, expected, "{at}");
+
+                    let init = params_of(&run, method::INITIALIZE);
+                    if context {
+                        assert_eq!(
+                            init["capabilities"],
+                            serde_json::json!({"experimentalApi": true}),
+                            "{at}"
+                        );
+                    } else {
+                        assert!(init.get("capabilities").is_none(), "{at}: {init}");
+                    }
+                    if roots {
+                        assert_eq!(
+                            params_of(&run, method::SKILLS_EXTRA_ROOTS_SET),
+                            serde_json::json!({ "extraRoots": extra_roots }),
+                            "{at}"
+                        );
+                    }
+                    let opened = params_of(
+                        &run,
+                        if resume {
+                            method::THREAD_RESUME
+                        } else {
+                            method::THREAD_START
+                        },
+                    );
+                    assert_eq!(opened["developerInstructions"], "dev text", "{at}");
+                    if context {
+                        assert_eq!(
+                            params_of(&run, method::TURN_START)["additionalContext"],
+                            serde_json::json!({"engram-instructions": {"kind": "application", "value": "ctx text"}}),
+                            "{at}"
+                        );
+                        assert_eq!(run.reports, [true], "{at}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// M8 + the version gate (lead NS1): the resume carries `developerInstructions` for a codex at 0.155.0 or later read
+    /// from the `userAgent`; below it, or with a `userAgent` whose version cannot be read, the field is left out.
+    #[cfg(windows)]
+    #[test]
+    fn the_resume_carries_the_instructions_only_from_codex_0_155_0() {
+        for (user_agent, carried) in [
+            (FAKE_CODEX_0_163, true),
+            ("codex_cli_rs/0.154.0 (Windows 10.0.26200; x86_64)", false),
+            ("engram-fake/0", false),
+        ] {
+            let fake = bake_fake_app_server_with(
+                "T-start",
+                FakeResume::EchoesTheThreadId,
+                FakeOptions {
+                    user_agent,
+                    ..FakeOptions::default()
+                },
+            );
+            let s = spec(&codex_app_server(vec![]), "C:/workspace");
+            let plan = AppServerOpen {
+                thread: thread_open(&s, Some(Uuid::new_v4()), Some("dev text".to_string())),
+                extra_roots: Vec::new(),
+                first_turn_context: None,
+            };
+            let run = run_on_fake(fake, plan, false);
+            let resumed = params_of(&run, method::THREAD_RESUME);
+            assert_eq!(
+                resumed.get("developerInstructions").is_some(),
+                carried,
+                "{user_agent}: {resumed}"
+            );
+            assert_eq!(resumed["excludeTurns"], true, "{user_agent}");
+        }
+    }
+
+    /// An error answer to `skills/extraRoots/set` fails the link (fail closed — R16), and no thread is opened.
+    #[cfg(windows)]
+    #[test]
+    fn an_error_answer_to_the_extra_roots_fails_the_link() {
+        for resume in [false, true] {
+            let fake = bake_fake_app_server_with(
+                "T-start",
+                FakeResume::EchoesTheThreadId,
+                FakeOptions {
+                    user_agent: FAKE_CODEX_0_163,
+                    extra_roots: FakeExtraRoots::Rejects,
+                },
+            );
+            let s = spec(&codex_app_server(vec![]), "C:/workspace");
+            let plan = AppServerOpen {
+                thread: thread_open(&s, resume.then(Uuid::new_v4), None),
+                extra_roots: vec!["C:/vol/engram/skills".into()],
+                first_turn_context: None,
+            };
+            let run = run_on_fake(fake, plan, false);
+            match run.link.first() {
+                Some(crate::transport::LinkResolution::Failed { reason }) => assert!(
+                    reason.contains(FAKE_EXTRA_ROOTS_REJECTION),
+                    "resume={resume}: {reason}"
+                ),
+                other => panic!("resume={resume}: the link did not fail: {other:?}"),
+            }
+            assert_eq!(
+                run.methods,
+                ["initialize", "initialized", method::SKILLS_EXTRA_ROOTS_SET],
+                "resume={resume}"
+            );
+        }
+    }
+
+    /// A real resume with changed instructions, through `open_spawn`: both channels carry the same text — the resume's
+    /// `developerInstructions` and the first turn's context (preface + text), with the opt-in on — plus the roots; the
+    /// echo of that turn reports the instructions delivered.
+    #[cfg(windows)]
+    #[test]
+    fn a_real_changed_resume_through_open_spawn_sends_both_channels() {
+        use crate::output_core::{OutputCore, TurnWiring};
+        use crate::types::{AgentInfo, AgentStatus, InputOrigin, StatusSink, TurnInput};
+        use std::sync::Mutex;
+
+        struct NoopStatus;
+        impl StatusSink for NoopStatus {
+            fn status_changed(&self, _id: Uuid, _s: AgentStatus, _e: u32) {}
+            fn agent_list_updated(&self, _a: Vec<AgentInfo>) {}
+        }
+
+        let fake = bake_fake_app_server_with(
+            "T-start",
+            FakeResume::EchoesTheThreadId,
+            FakeOptions {
+                user_agent: FAKE_CODEX_0_163,
+                ..FakeOptions::default()
+            },
+        );
+        let reports = Arc::new(Mutex::new(Vec::new()));
+        let first_turn: FirstTurnSink = {
+            let reports = reports.clone();
+            Arc::new(move |delivered: bool| reports.lock().unwrap().push(delivered))
+        };
+        let (link_sink, delivered) = link_recorder();
+        let parts = crate::backend::open_spawn(
+            &codex_app_server(vec![]),
+            &fake.spec,
+            80,
+            24,
+            None,
+            Some(first_turn),
+            Some(Uuid::new_v4()),
+            Some(link_sink),
+            None,
+            &real_json_artifacts(Some(MERGED), true),
+        )
+        .expect("open_spawn");
+        wait_for_the_fake_to_listen(&fake);
+        parts.transport.start(Arc::new(OutputCore::new(
+            Uuid::new_v4(),
+            1,
+            Arc::new(NoopStatus),
+            TurnWiring::detached(),
+        )));
+        wait_until(
+            || !delivered.lock().unwrap().is_empty(),
+            "the link resolution is delivered",
+        );
+        parts
+            .transport
+            .send_turn(TurnInput {
+                id: "u-1".into(),
+                body: b"hi".to_vec(),
+                origin: InputOrigin::User,
+            })
+            .expect("accepted");
+        wait_until(
+            || !reports.lock().unwrap().is_empty(),
+            "the fake's echo calls the first-turn port",
+        );
+        parts.transport.shutdown();
+        let initialize = fake.params_of(method::INITIALIZE);
+        let roots = fake.params_of(method::SKILLS_EXTRA_ROOTS_SET);
+        let resumed = fake.params_of(method::THREAD_RESUME);
+        let turn = fake.params_of(method::TURN_START);
+        let leftover = fake.remove();
+
+        assert_eq!(
+            initialize.expect("initialize")["capabilities"],
+            serde_json::json!({"experimentalApi": true})
+        );
+        assert_eq!(
+            roots.expect("skills/extraRoots/set"),
+            serde_json::json!({"extraRoots": ["C:/vol/engram/skills", "C:/rules/.agents/skills"]})
+        );
+        assert_eq!(
+            resumed.expect("thread/resume")["developerInstructions"],
+            MERGED
+        );
+        assert_eq!(
+            turn.expect("turn/start")["additionalContext"]["engram-instructions"]["value"],
+            format!("{INSTRUCTIONS_CHANGED_PREFACE}\n\n{MERGED}")
+        );
+        assert_eq!(*reports.lock().unwrap(), [true]);
+        assert!(
+            leftover.is_empty(),
+            "가짜 app-server 파일을 지우지 못했다: {leftover:?}"
+        );
     }
 
     /// 데몬이 프라이밍을 안 실어 준 스폰(`wants_priming` 이 false 인 갈래)은 argv 가 한 칸도 늘지 않는다.

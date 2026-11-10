@@ -1622,7 +1622,7 @@ mod tests {
             "보내는 순간 영속했다 — ✕ 로 거둔 첫 입력도 0턴 id 를 남긴다"
         );
 
-        (latch.first_turn_sink())();
+        (latch.first_turn_sink())(true);
         assert_eq!(*events.lock().unwrap(), vec![Ev::Commit("sid-1".into())]);
     }
 

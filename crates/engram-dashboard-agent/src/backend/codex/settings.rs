@@ -1,7 +1,8 @@
 //! The codex implementation of the settings-check port ([`SettingsCheck`]) — [`CODEX_SETTINGS_CHECK`].
 //!
-//! ★Codex behaviour copied by hand, read in the codex source at `rust-v0.163.0`★: the `-c` parse
-//!   (`codex-rs/utils/cli/src/config_override.rs`, the path application in `codex-rs/config/src/overrides.rs`), the
+//! ★Codex behaviour copied by hand, read in the codex source (openai/codex, Apache-2.0) at `rust-v0.163.0`★: the `-c`
+//!   parse (`codex-rs/utils/cli/src/config_override.rs`, the path application in `codex-rs/config/src/overrides.rs`,
+//!   the structured-feature merge in `codex-rs/config/src/merge.rs`), the
 //!   `SKILL.md` front-matter split and repair (`codex-rs/skills/src/parser.rs`), the skill-root walk
 //!   (`codex-rs/ext/skills/src/loader/discovery.rs` over the exec-server `walk`) and codex's own skill roots
 //!   (`codex-rs/ext/skills/src/host_roots.rs`). Codex updates itself; a drift shows as a valid skill blocked or a
@@ -443,6 +444,7 @@ fn feature_switch(enabled: bool) -> Value {
 /// The paths where codex keeps a feature as a table with an `enabled` switch, so a boolean and a table given for
 /// it combine instead of replacing each other (`merge.rs` `is_structured_feature_path`): `features.<name>` and
 /// `profiles.<profile>.features.<name>` for the four names below.
+// Behaviour mirrors openai/codex codex-rs/config/src/merge.rs @ rust-v0.163.0 (Apache-2.0).
 fn is_structured_feature_path<S: AsRef<str>>(path: &[S]) -> bool {
     let (features, feature) = match path {
         [profiles, _, features, feature] if profiles.as_ref() == "profiles" => (features, feature),
@@ -564,7 +566,7 @@ fn is_fence(line: &str) -> bool {
 /// The front matter of a `SKILL.md`: the lines between an opening fence on the first line and the next fence,
 /// joined with `\n`. `None` = no opening fence, no closing fence, or nothing between them. A block of only
 /// whitespace is returned (codex goes on to parse it).
-// Behaviour mirrors codex-rs/skills/src/parser.rs `extract_frontmatter` @ rust-v0.163.0.
+// Behaviour mirrors codex-rs/skills/src/parser.rs `extract_frontmatter` @ rust-v0.163.0 (Apache-2.0).
 fn extract_front_matter(text: &str) -> Option<String> {
     let mut lines = text.lines();
     if !lines.next().is_some_and(is_fence) {
@@ -586,7 +588,7 @@ enum LineRepair {
 /// The front matter with every plain scalar value YAML would refuse wrapped in single quotes, or `None` when no line
 /// changed (codex then parses no second time). Lines inside a block scalar are left alone; every other `key: value`
 /// line, at any indent, goes through [`repair_line`].
-// Behaviour mirrors codex-rs/skills/src/parser.rs `repair_frontmatter_scalar_fields` @ rust-v0.163.0.
+// Behaviour mirrors codex-rs/skills/src/parser.rs `repair_frontmatter_scalar_fields` @ rust-v0.163.0 (Apache-2.0).
 fn repair_front_matter(front_matter: &str, parser: &dyn FrontMatterParser) -> Option<String> {
     let mut block_owner_indent: Option<usize> = None;
     let mut changed = false;

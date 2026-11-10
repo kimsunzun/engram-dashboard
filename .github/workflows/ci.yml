@@ -1261,7 +1261,10 @@ jobs:
           crates/engram-dashboard-agent/src/backend/claude/leftover.rs
           crates/engram-dashboard-agent/src/backend/claude/mod.rs
           crates/engram-dashboard-agent/src/backend/claude/usage_probe.rs
+          crates/engram-dashboard-agent/src/backend/codex/cmdline.rs
+          crates/engram-dashboard-agent/src/backend/codex/launch.rs
           crates/engram-dashboard-agent/src/backend/codex/mod.rs
+          crates/engram-dashboard-agent/src/backend/codex/settings.rs
           crates/engram-dashboard-agent/src/backend/codex/thread_lock.rs
           crates/engram-dashboard-agent/src/backend/codex/transport.rs
           crates/engram-dashboard-agent/src/backend/mod.rs
@@ -1282,6 +1285,7 @@ jobs:
           crates/engram-dashboard-agent/tests/activation.rs
           crates/engram-dashboard-agent/tests/backend_contract.rs
           crates/engram-dashboard-agent/tests/canonical_name_wiring.rs
+          crates/engram-dashboard-agent/tests/codex_launch_live.rs
           crates/engram-dashboard-agent/tests/pump_panic_cli_cleanup.rs
           crates/engram-dashboard-agent/tests/reaper.rs
           crates/engram-dashboard-agent/tests/stdio_physical_pipe.rs
@@ -1369,10 +1373,14 @@ jobs:
           list=$(cat <<'STD_OS_FILES'
           # 시험 분기뿐(`#[cfg(test)]` 모듈 안)
           crates/engram-dashboard-agent/src/backend/claude/usage_probe.rs
+          crates/engram-dashboard-agent/src/backend/codex/launch.rs
+          crates/engram-dashboard-agent/src/backend/codex/settings.rs
           crates/engram-dashboard-agent/src/usage/process.rs
           crates/engram-dashboard-agent/src/usage/scratch.rs
           crates/engram-dashboard-base/src/logging/mod.rs
           crates/engram-dashboard-net/src/instance.rs
+          # 통합 시험(`tests/`)
+          crates/engram-dashboard-agent/tests/codex_launch_live.rs
           # 예제
           crates/engram-dashboard-agent/examples/spike_breakaway.rs
           STD_OS_FILES

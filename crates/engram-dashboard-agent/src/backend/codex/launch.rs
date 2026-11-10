@@ -10,9 +10,9 @@
 //!
 //! ★Every refusal comes before the first write, and every refusal is `Err` (a failed spawn)★ — the launch check
 //!   blocks the same cases earlier, so reaching one here means an input changed between the check and the launch.
-//!   One exception: the terminal working-folder guard has no check-side counterpart yet (step 7), so a folder it
-//!   refuses fails every launch here. Real materials have no warn-and-launch path: a priming the terminal line
-//!   cannot carry blocks the launch.
+//!   One exception: the terminal working-folder guard ([`cwd_reaches_codex_unchanged`]) has no check-side
+//!   counterpart yet (step 7), so a folder it refuses fails every launch here. Real materials have no
+//!   warn-and-launch path: a priming the terminal line cannot carry blocks the launch.
 //! Every link path is `kit.volatile_dir` joined with words and is used exactly as passed to `link_dir` — the
 //! confinement refuses a respelled path or a path under a link, failing the placement.
 // ADR-0334
@@ -24,7 +24,6 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use engram_dashboard_platform::fs::same_path;
-use engram_dashboard_platform::shell::path_is_cli_safe;
 
 use super::{cmdline, CODEX_SETTINGS_CHECK};
 use crate::backend::settings_check::{CommandLine, SettingsCheck};
@@ -42,8 +41,8 @@ use crate::profile::{AgentCommand, AgentOutputFormat};
 ///   (only with ≥ 1 skill, then one link per skill) followed by the plan's extra skill roots.
 ///
 /// `Err`, nothing written: a raw setting `-c` guard refusal; an instructions file that cannot be read as UTF-8 text;
-/// terminal — a plan with instruction sources, a working folder [`path_is_cli_safe`] refuses (it goes on the line as
-/// `--cd`), a priming the line cannot carry; JSON — a skill root that is not absolute or not UTF-8, skills without a
+/// terminal — a plan with instruction sources, a working folder [`cwd_reaches_codex_unchanged`] refuses (it goes on
+/// the line as `--cd`), a priming the line cannot carry; JSON — a skill root that is not absolute or not UTF-8, skills without a
 /// volatile folder, a skill name codex JSON refuses, two skills on one link; both — a command line over the budget.
 /// `Err` after a partial write when a link fails; the caller's release removes the volatile folder.
 pub(super) fn materialize(
@@ -115,9 +114,9 @@ fn terminal(
             kit.plan.instructions.len()
         ));
     }
-    if !path_is_cli_safe(cwd) {
+    if !cwd_reaches_codex_unchanged(cwd) {
         return Err(format!(
-            "the codex working folder goes on the terminal command line (`--cd`) and holds a character cmd.exe interprets (% & ^ | < >) or is not UTF-8: {cwd:?}"
+            "the codex working folder goes on the terminal command line (`--cd`) and cmd.exe could change it (two `%`, a `\"`, a control character, or `& ^ | < >` without a space) or it is not UTF-8: {cwd:?}"
         ));
     }
     let instructions_override = text
@@ -143,6 +142,26 @@ fn terminal(
         instructions_override,
         ..LaunchArtifacts::default()
     })
+}
+
+/// Whether the terminal `--cd` value reaches codex as the folder it names — `false` when it is not UTF-8 (the line is
+/// text), holds two or more `%` (cmd expands `%NAME%` even inside quotes), holds a `"` (it would end portable-pty's
+/// quotes early; Win32 forbids it in a name, so no real folder is lost), holds a control character (an LF cuts the
+/// line), or holds one of `& ^ | < >` with no space (U+0020).
+///
+/// ★A single `%` passes★ — cmd keeps a lone `%`, the shim's `%*` is not expanded again, and nothing else on the line
+///   holds a `%` to pair with it (the preset lines and the priming refuse it); only `extra_args` could.
+/// ★`& ^ | < >` pass with a space★ — portable-pty then wraps the whole value in quotes, and cmd takes them literally
+///   inside quotes; the same reasoning as [`cmdline::priming_value`]. Every other cmd-related refusal is left out on
+///   purpose: block only what breaks the launch.
+fn cwd_reaches_codex_unchanged(cwd: &Path) -> bool {
+    let Some(text) = cwd.to_str() else {
+        return false;
+    };
+    let quoted_on_the_line = text.contains(' ');
+    text.matches('%').count() < 2
+        && !text.chars().any(|c| c == '"' || c.is_control())
+        && (quoted_on_the_line || !text.contains(['&', '^', '|', '<', '>']))
 }
 
 fn json(
@@ -399,6 +418,23 @@ mod tests {
         materialized_with(output_format, kit, &work(), &Reader::of(PRIMING))
     }
 
+    /// An absolute path that is not valid UTF-8.
+    fn not_utf8() -> PathBuf {
+        #[cfg(windows)]
+        let path = {
+            use std::os::windows::ffi::OsStringExt;
+            // A lone surrogate is a valid Windows file name but not valid UTF-8.
+            root().join(std::ffi::OsString::from_wide(&[u16::from(b'a'), 0xD800]))
+        };
+        #[cfg(unix)]
+        let path = {
+            use std::os::unix::ffi::OsStrExt;
+            root().join(std::ffi::OsStr::from_bytes(b"a\xFF"))
+        };
+        assert!(path.to_str().is_none(), "the sample must not be UTF-8");
+        path
+    }
+
     const MODES: [AgentOutputFormat; 2] =
         [AgentOutputFormat::Terminal, AgentOutputFormat::StreamJson];
 
@@ -607,18 +643,7 @@ mod tests {
     // ADR-0341
     #[test]
     fn a_skill_root_that_is_not_an_absolute_utf8_path_fails_before_any_write() {
-        #[cfg(windows)]
-        let not_utf8 = {
-            use std::os::windows::ffi::OsStringExt;
-            // A lone surrogate is a valid Windows file name but not valid UTF-8.
-            root().join(std::ffi::OsString::from_wide(&[u16::from(b'a'), 0xD800]))
-        };
-        #[cfg(unix)]
-        let not_utf8 = {
-            use std::os::unix::ffi::OsStrExt;
-            root().join(std::ffi::OsStr::from_bytes(b"a\xFF"))
-        };
-        assert!(not_utf8.to_str().is_none(), "the sample must not be UTF-8");
+        let not_utf8 = not_utf8();
 
         let mut relative = real_kit();
         relative
@@ -776,36 +801,55 @@ mod tests {
         assert!(error.contains("command-line-too-long"), "{error}");
     }
 
-    /// ★A working folder cmd would act on fails the real terminal launch★ — it goes on the line bare as `--cd`. JSON
-    /// does not put it on the line, and the Noop path is unchanged.
+    /// ★A working folder cmd would change fails the real terminal launch★ — two `%`, a `"`, a control character or a
+    /// non-UTF-8 path anywhere, and `& ^ | < >` only without a space (with one the `--cd` value is quoted); a single
+    /// `%` passes. JSON does not put the folder on the line, and the Noop path is unchanged.
     // ADR-0337
     #[test]
-    fn a_cmd_unsafe_working_folder_fails_the_real_terminal_launch_only() {
-        let unsafe_work = root().join("R&D");
+    fn a_working_folder_cmd_would_change_fails_the_real_terminal_launch_only() {
         let reader = Reader::of(PRIMING);
-        let (result, fs) = materialized_with(
-            AgentOutputFormat::Terminal,
-            &real_kit(),
-            &unsafe_work,
-            &reader,
-        );
-        let error = result.unwrap_err();
-        assert!(error.contains("R&D"), "{error}");
-        assert!(fs.paths().is_empty());
+        let refused = [
+            PathBuf::from(r"C:\Work\R&D"),
+            PathBuf::from(r"C:\Work\a^b"),
+            PathBuf::from(r"C:\Work\a|b"),
+            PathBuf::from(r"C:\Work\a<b>"),
+            PathBuf::from(r"D:\%USERNAME% Projects"),
+            PathBuf::from(r"C:\%A%\b"),
+            PathBuf::from(r#"D:\a b"&calc"#),
+            PathBuf::from("D:\\a b\u{7}"),
+            not_utf8(),
+        ];
+        for cwd in &refused {
+            let (result, fs) =
+                materialized_with(AgentOutputFormat::Terminal, &real_kit(), cwd, &reader);
+            let error = result.unwrap_err();
+            assert!(error.contains("--cd"), "{cwd:?}: {error}");
+            assert!(fs.paths().is_empty(), "{cwd:?}");
 
-        let (result, _) = materialized_with(
-            AgentOutputFormat::StreamJson,
-            &real_kit(),
-            &unsafe_work,
-            &reader,
-        );
-        assert!(result.is_ok(), "{result:?}");
+            let (result, _) =
+                materialized_with(AgentOutputFormat::StreamJson, &real_kit(), cwd, &reader);
+            assert!(result.is_ok(), "{cwd:?}: {result:?}");
 
-        let mut noop = real_kit();
-        noop.plan.real = false;
-        let (result, _) =
-            materialized_with(AgentOutputFormat::Terminal, &noop, &unsafe_work, &reader);
-        assert_eq!(result, Ok(LaunchArtifacts::default()));
+            let mut noop = real_kit();
+            noop.plan.real = false;
+            let (result, _) = materialized_with(AgentOutputFormat::Terminal, &noop, cwd, &reader);
+            assert_eq!(result, Ok(LaunchArtifacts::default()), "{cwd:?}");
+        }
+
+        for cwd in [
+            r"D:\R&D Projects",
+            r"D:\a ^ | < > b",
+            r"C:\Work\100%",
+            r"D:\100% Projects",
+        ] {
+            let (result, _) = materialized_with(
+                AgentOutputFormat::Terminal,
+                &real_kit(),
+                Path::new(cwd),
+                &reader,
+            );
+            assert!(result.is_ok(), "{cwd:?}: {result:?}");
+        }
     }
 
     // ── argv ──

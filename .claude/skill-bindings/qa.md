@@ -127,7 +127,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-detached.ps1 -Co
 | 레인 | 경로 |
 |---|---|
 | claude | `crates/engram-dashboard-agent/src/backend/claude/**` · `crates/engram-dashboard-agent/src/backend/mod.rs` · `crates/engram-dashboard-agent/src/usage/**` · `crates/engram-dashboard-daemon/src/control/**` · `crates/engram-dashboard-messaging/src/**` · `crates/engram-dashboard-daemon/tests/control_send.rs` · `crates/engram-dashboard-agent/tests/usage_probe_smoke.rs` · `crates/engram-dashboard-platform/src/shell.rs` |
-| codex | `crates/engram-dashboard-agent/src/backend/codex/**` · `crates/engram-dashboard-agent/src/backend/mod.rs` · `crates/engram-dashboard-agent/src/usage/**` · `crates/engram-dashboard-agent/tests/backend_contract.rs` · `crates/engram-dashboard-agent/tests/usage_probe_smoke.rs` · `crates/engram-dashboard-platform/src/shell.rs` |
+| codex | `crates/engram-dashboard-agent/src/backend/codex/**` · `crates/engram-dashboard-agent/src/backend/mod.rs` · `crates/engram-dashboard-agent/src/usage/**` · `crates/engram-dashboard-agent/tests/backend_contract.rs` · `crates/engram-dashboard-agent/tests/usage_probe_smoke.rs` · `crates/engram-dashboard-agent/tests/codex_launch_live.rs` · `crates/engram-dashboard-platform/src/shell.rs` |
 
 claude 레인 — 첫 줄의 이름 = CI `--skip` 목록에서 `#[ignore]` 가 아닌 것(목록이 바뀌면 여기도 고친다):
 
@@ -141,7 +141,10 @@ codex 레인:
 ```bash
 cargo test -p engram-dashboard-agent --test usage_probe_smoke -- --ignored --test-threads=1 codex_
 cargo test -p engram-dashboard-agent --test backend_contract -- --ignored --test-threads=4
+cargo test -p engram-dashboard-agent --test codex_launch_live -- --ignored --test-threads=1 --nocapture
 ```
+
+- `codex_launch_live` 는 사용자의 실제 `~/.codex` 에 대화 하나를 남긴다 — 출력에 찍힌 그 id 를 보고에 싣는다. 지우지 않는다(지우는 것은 사용자 몫).
 
 ### 비용 없는 `#[ignore]` 레인
 

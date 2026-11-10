@@ -149,7 +149,7 @@
 //!
 //! tauri import 0.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -169,10 +169,12 @@ use super::decoder::{
     MAX_ID_BYTES,
 };
 use super::protocol::{
-    self, method, ClientInfo, Inbound, InitializeParams, InitializeResponse, RequestId,
-    SortDirection, Thread, ThreadItemsListParams, ThreadItemsListResponse, ThreadOpen,
+    self, method, AdditionalContext, ClientInfo, Inbound, InitializeCapabilities, InitializeParams,
+    InitializeResponse, RequestId, SkillsExtraRootsSetParams, SortDirection, Thread,
+    ThreadItemsListParams, ThreadItemsListResponse, ThreadOpen, ThreadResumeParams,
     ThreadResumeResponse, ThreadStartResponse, TurnInterruptParams, TurnStartParams,
-    TurnStartResponse, TurnSteerParams, UserInput, CLIENT_NAME, METHOD_NOT_FOUND,
+    TurnStartResponse, TurnSteerParams, UserInput, CLIENT_NAME, INSTRUCTIONS_CONTEXT_KEY,
+    METHOD_NOT_FOUND,
 };
 use crate::backend::{FirstTurnSink, SessionIdSink};
 use crate::output_core::{estimate_cost_bytes, OutputCore, REPLAY_MAX_BYTES, REPLAY_MAX_EVENTS};
@@ -320,6 +322,19 @@ const MAX_TURN_ID_BYTES: usize = 128;
 // ADR-0231
 const CLIENT_MESSAGE_ID_FLOOR: (u64, u64, u64) = (0, 140, 0);
 
+/// The lowest codex version whose `thread/resume` takes `developerInstructions` (in the stable schema from this version
+/// — ADR-0215 decision 7). Read from the `initialize` `userAgent` the same way as [`floor_verdict`]; below it or
+/// unreadable ⇒ the field is dropped from the resume. The schema does not forbid unknown fields, so an older codex would
+/// most likely ignore it — the gate is insurance, not a known break.
+// ADR-0337
+const RESUME_INSTRUCTIONS_FLOOR: (u64, u64, u64) = (0, 155, 0);
+
+/// Consecutive `Rejected` `turn/start`s that carried the instructions-change context after which this incarnation stops
+/// attaching it ([`State::note_context_rejection`]). A codex that always refuses the field then costs two failed turns
+/// per launch, not every turn.
+// ADR-0337
+const CONTEXT_REJECTION_LIMIT: u8 = 2;
+
 // ★오류 코드로 분기하는 자리가 없는 것은 의도다 — 재시도 백오프 상수도 그래서 없다★.
 //   오류 응답은 코드가 무엇이든 그 요청의 대기자를 깨우므로 조용히 멎지 않는다. 그 위에 「특정 코드면
 //   같은 요청을 다시 보낸다」를 얹지 않은 이유는 셋이다: ① 과부하 코드가 실제로 이 봉투로 오는지
@@ -447,6 +462,26 @@ struct State {
     ///   쓰기가 또 실패할 것이므로) 같은 턴에 다시 보내는 고리를 만들지 않는다. 다음 턴은 표식이 달라 저절로 풀린다.
     // ADR-0231
     steer_refused: Option<u64>,
+    /// The instructions-change context still to deliver ([`AppServerOpen::first_turn_context`]) — attached to every
+    ///   `turn/start` [`take_turn_locked`] builds while it is held; never to a steer.
+    /// Cleared by the reader when the echo of a turn that carried it arrives ([`Reader::note_context_echo`]), or by the
+    ///   retry bound ([`State::note_context_rejection`]). An accepted turn that ends with no echo (interrupted, the
+    ///   early-completion and unusable-response branches) keeps it: the model may not have seen it, and a second copy
+    ///   is cheaper than a lost one. A rejected `turn/start` creates nothing (measured 0.163.0 — M3), so a resend cannot
+    ///   duplicate it.
+    // ADR-0337
+    first_turn_context: Option<String>,
+    /// The seq ([`TurnState::Active`]) of the last `turn/start` that carried [`State::first_turn_context`].
+    // ADR-0337
+    context_turn: Option<u64>,
+    /// Consecutive `Rejected` closes of carrying turns — `Unanswered` neither counts nor resets; any successful
+    ///   `turn/start` response resets it.
+    // ADR-0337
+    context_rejections: u8,
+    /// What the first-turn report says ([`crate::backend::FirstTurnSink`]): `true` when there was no context to deliver,
+    ///   or once the echo of a carrying turn arrived; stays `false` after the retry bound dropped it.
+    // ADR-0337
+    instructions_delivered: bool,
 }
 
 /// 처분 한 번이 낼 것 — 상태 락 아래서 모으고, 호출자가 락을 놓은 뒤 [`Disposal::emit`] 한다(ADR-0006 · 로그도 락
@@ -777,7 +812,49 @@ impl State {
             steer_due: false,
             halted: false,
             steer_refused: None,
+            first_turn_context: None,
+            context_turn: None,
+            context_rejections: 0,
+            instructions_delivered: true,
         }
+    }
+
+    /// A fresh state that holds `context` for the first turn — `None` is [`State::new`].
+    // ADR-0337
+    fn with_first_turn_context(context: Option<String>) -> Self {
+        State {
+            instructions_delivered: context.is_none(),
+            first_turn_context: context,
+            ..State::new()
+        }
+    }
+
+    /// The `additionalContext` of the next `turn/start` — `None` while no context is held.
+    // ADR-0337
+    fn turn_context(&self) -> Option<BTreeMap<String, AdditionalContext>> {
+        self.first_turn_context.as_ref().map(|value| {
+            BTreeMap::from([(
+                INSTRUCTIONS_CONTEXT_KEY.to_string(),
+                AdditionalContext::application(value.clone()),
+            )])
+        })
+    }
+
+    /// The turn `seq` closed `Rejected` — counts it when it carried the context. Returns `true` when this rejection
+    /// reached [`CONTEXT_REJECTION_LIMIT`] and the context was dropped for this incarnation
+    /// ([`State::instructions_delivered`] stays `false`). The caller logs it and names it in the turn's failure line.
+    // ADR-0337
+    fn note_context_rejection(&mut self, seq: u64) -> bool {
+        if self.first_turn_context.is_none() || self.context_turn != Some(seq) {
+            return false;
+        }
+        self.context_rejections += 1;
+        if self.context_rejections < CONTEXT_REJECTION_LIMIT {
+            return false;
+        }
+        self.first_turn_context = None;
+        self.context_turn = None;
+        true
     }
 
     /// Idle 이 다음에 여는 턴의 쥔 항목 자리 — TRD §5-5 「턴을 여는 순서 = 사용자 먼저」(PRD §3-9 · 사용자 결정 N6).
@@ -1207,21 +1284,29 @@ fn settle_floor(core: &OutputCore, state: &SharedState, announcer: &Announcer, f
 ///   하한과 같은 판의 선행판(`0.140.0-alpha`)도 미달이다(semver 순서).
 // ADR-0231
 fn floor_verdict(cli_version: Option<&str>, user_agent: &str) -> Floor {
-    let from_agent = || {
-        let (name, rest) = user_agent.split_once('/')?;
-        if name.is_empty() {
-            return None;
-        }
-        leading_semver(rest)
-    };
-    match cli_version.and_then(leading_semver).or_else(from_agent) {
-        Some((v, prerelease))
-            if v > CLIENT_MESSAGE_ID_FLOOR || (v == CLIENT_MESSAGE_ID_FLOOR && !prerelease) =>
-        {
-            Floor::Above
-        }
-        _ => Floor::Below,
+    let version = cli_version
+        .and_then(leading_semver)
+        .or_else(|| user_agent_version(user_agent));
+    if reaches(version, CLIENT_MESSAGE_ID_FLOOR) {
+        Floor::Above
+    } else {
+        Floor::Below
     }
+}
+
+/// The version right after the first `/` of an `initialize` `userAgent` — the reading rule is [`floor_verdict`]'s.
+fn user_agent_version(user_agent: &str) -> Option<((u64, u64, u64), bool)> {
+    let (name, rest) = user_agent.split_once('/')?;
+    if name.is_empty() {
+        return None;
+    }
+    leading_semver(rest)
+}
+
+/// Is `version` (from [`leading_semver`]) at or above `floor`? Unknown ⇒ no; a prerelease of `floor` itself ⇒ no
+/// (semver order).
+fn reaches(version: Option<((u64, u64, u64), bool)>, floor: (u64, u64, u64)) -> bool {
+    matches!(version, Some((v, prerelease)) if v > floor || (v == floor && !prerelease))
 }
 
 /// 문자열 머리의 `MAJOR.MINOR.PATCH` 와 그 뒤에 선행판 표시(`-`)가 이어지나.
@@ -1353,6 +1438,23 @@ impl Pending {
 
 // ── 통로 ──────────────────────────────────────────────────────────────────────
 
+/// What one app-server incarnation opens with — the backend decides all of it (`open_spawn`); the transport sends it as
+/// given, with one exception: it drops a resume's `developerInstructions` unless the codex is known to reach
+/// [`RESUME_INSTRUCTIONS_FLOOR`] (the rule is in its doc).
+// ADR-0337
+pub(crate) struct AppServerOpen {
+    /// The second request of the handshake (`thread/start` or `thread/resume`).
+    pub(crate) thread: ThreadOpen,
+    /// Sent with `skills/extraRoots/set` before `thread`, on every process — the roots are per process and
+    ///   `thread/resume` does not restore them (measured 0.163.0 — M4, M9). Empty = not sent. An error response or no
+    ///   answer fails the handshake.
+    pub(crate) extra_roots: Vec<String>,
+    /// Attached as `additionalContext` to this incarnation's `turn/start`s until the echo of one that carried it
+    ///   ([`State::first_turn_context`]). `Some` also turns on `experimentalApi` at `initialize`. `None` = no
+    ///   context, and `initialize` is byte-identical to a spawn without one.
+    pub(crate) first_turn_context: Option<String>,
+}
+
 pub(crate) struct CodexAppServerTransport {
     /// pump(try_wait)와 shutdown(kill+wait)이 공유. std Child 는 wait 후 status 를 캐시하므로 이중 wait
     /// 이 무해하다.
@@ -1364,8 +1466,8 @@ pub(crate) struct CodexAppServerTransport {
     stdout: Mutex<Option<ChildStdout>>,
     stderr: Mutex<Option<ChildStderr>>,
     decoder: Mutex<Option<Box<dyn OutputDecoder>>>,
-    /// `start()` 에서 take 해 라이터로 move — 핸드셰이크의 둘째 요청이 이 값 그대로 나간다.
-    open_params: Mutex<Option<ThreadOpen>>,
+    /// `start()` 에서 take 해 라이터로 move — 핸드셰이크가 이 값대로 나간다([`handshake`]).
+    open_params: Mutex<Option<AppServerOpen>>,
     shutdown: Arc<AtomicBool>,
     state: SharedState,
     pending: Arc<Pending>,
@@ -1402,15 +1504,16 @@ pub(crate) struct CodexAppServerTransport {
 impl CodexAppServerTransport {
     /// **pump 는 아직 안 띄운다**(`start` 에서). `child_pid` 를 함께 돌려준다.
     ///
-    /// `open_params` = 핸드셰이크의 둘째 요청으로 그대로 나갈 값([`ThreadOpen`]). ★정책도 이어받기
-    ///   여부도 통로가 하드코딩하지 않는다★ — 어느 폴더를 워크스페이스로 믿고 어떤 샌드박스·승인
-    ///   정책으로 돌 것인가도, 저장된 스레드를 이어받을 것인가도 backend 지식이라 주입받는다.
+    /// `open_params` = what the handshake sends and the first turn carries ([`AppServerOpen`]). ★The transport hard-codes
+    ///   neither the policy nor whether to resume★ — which folder to trust as the workspace, under which sandbox and
+    ///   approval policy, whether to resume a stored thread, which skill roots and instructions to load: all backend
+    ///   knowledge, injected.
     /// `sid_sink` = codex 가 발급한 thread id 를 기록할 곳. `None` = 기록할 곳이 없다.
     pub(crate) fn open(
         spec: &CommandSpec,
         structured: bool,
         decoder: Option<Box<dyn OutputDecoder>>,
-        open_params: ThreadOpen,
+        open_params: AppServerOpen,
         sid_sink: Option<SessionIdSink>,
         link_sink: Option<LinkSink>,
     ) -> Result<(CodexAppServerTransport, Option<u32>), PtyError> {
@@ -1422,6 +1525,7 @@ impl CodexAppServerTransport {
             group,
         } = spawn_piped(spec, "codex app-server")?;
         let child_pid = Some(child.id());
+        let state = State::with_first_turn_context(open_params.first_turn_context.clone());
 
         let transport = CodexAppServerTransport {
             child: Arc::new(Mutex::new(child)),
@@ -1431,7 +1535,7 @@ impl CodexAppServerTransport {
             decoder: Mutex::new(decoder),
             open_params: Mutex::new(Some(open_params)),
             shutdown: Arc::new(AtomicBool::new(false)),
-            state: Arc::new((Mutex::new(State::new()), Condvar::new())),
+            state: Arc::new((Mutex::new(state), Condvar::new())),
             pending: Arc::new(Pending::default()),
             announcer: Arc::new(Announcer {
                 order: Mutex::new(()),
@@ -1601,8 +1705,10 @@ fn request_blocking<P: Serialize, R: DeserializeOwned>(
     }
 }
 
-/// 핸드셰이크. 순서가 계약이다 — `initialize` → (`initialized`) → **`open` 이 고른 둘째 요청**
-/// (`thread/start` 또는 `thread/resume`).
+/// The handshake. The order is the contract — `initialize` (with `experimentalApi` only when the open plan holds a
+/// first-turn context) → (`initialized`) → `skills/extraRoots/set` when there are roots (before the thread opens, so the
+/// thread sees them — M4) → **the second request the plan chose** (`thread/start` or `thread/resume`; a resume's
+/// `developerInstructions` only for a codex known to reach [`RESUME_INSTRUCTIONS_FLOOR`]).
 ///
 /// ★`initialize` 는 한 번만 보낼 수 있다(실측 0.154.0)★ — 두 번째는 오류로 돌아온다. 그래서 이 함수는
 /// 화신마다 정확히 한 번 돌고, 실패해도 다시 부르지 않는다(ADR-0192).
@@ -1616,7 +1722,7 @@ fn handshake(
     state: &SharedState,
     pending: &Pending,
     next_id: &AtomicI64,
-    open: &ThreadOpen,
+    open: &AppServerOpen,
     deadline: Instant,
 ) -> Result<Opened, String> {
     // ★시한은 요청마다가 아니라 **구획 전체**에 건다★ — 요청별로 주면 왕복의 합이 상한의 배수가 되고,
@@ -1640,6 +1746,12 @@ fn handshake(
                 name: CLIENT_NAME.to_string(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
             },
+            capabilities: open
+                .first_turn_context
+                .is_some()
+                .then_some(InitializeCapabilities {
+                    experimental_api: true,
+                }),
         },
         remaining(),
     )?;
@@ -1656,10 +1768,26 @@ fn handshake(
     write_line(stdin, &protocol::notification_line(method::INITIALIZED))
         .map_err(|e| format!("initialized 쓰기 실패: {e}"))?;
 
+    // ADR-0337: fail closed — an error response (an old codex without the method — R16) or no answer fails the spawn.
+    if !open.extra_roots.is_empty() {
+        request_blocking::<_, Value>(
+            stdin,
+            state,
+            pending,
+            next_id,
+            method::SKILLS_EXTRA_ROOTS_SET,
+            &SkillsExtraRootsSetParams {
+                extra_roots: open.extra_roots.clone(),
+            },
+            remaining(),
+        )?;
+    }
+
     // ★두 갈래가 같은 `thread` 를 돌려주고, 그래서 이 함수의 반환은 하나다★ — 이어받기에서도 **상대가
     //   준 id 를 그대로** 올린다. 우리가 보낸 것과 같을 것이라 가정해 되쓰지 않는다: 다르면 그 다른
     //   값이 이 화신이 실제로 말하는 스레드이고, 기록 동사가 그것을 받아야 다음 이어받기가 맞는 곳을 연다.
-    let (thread, items_backwards_cursor): (Thread, Option<String>) = match open {
+    let mut resume_instructions = false;
+    let (thread, items_backwards_cursor): (Thread, Option<String>) = match &open.thread {
         ThreadOpen::Start(params) => {
             let started: ThreadStartResponse = request_blocking(
                 stdin,
@@ -1674,6 +1802,22 @@ fn handshake(
             (started.thread, None)
         }
         ThreadOpen::Resume(params) => {
+            // ADR-0337: only the `userAgent` is known before the thread opens — `thread.cliVersion` comes after.
+            let gated;
+            let params = if params.developer_instructions.is_some()
+                && !reaches(
+                    user_agent_version(&init.user_agent),
+                    RESUME_INSTRUCTIONS_FLOOR,
+                ) {
+                gated = ThreadResumeParams {
+                    developer_instructions: None,
+                    ..params.clone()
+                };
+                &gated
+            } else {
+                params
+            };
+            resume_instructions = params.developer_instructions.is_some();
             let resumed: ThreadResumeResponse = request_blocking(
                 stdin,
                 state,
@@ -1689,10 +1833,22 @@ fn handshake(
     let floor = floor_verdict(thread.cli_version.as_deref(), &init.user_agent);
     tracing::info!(
         cli_version = ?thread.cli_version.as_deref().map(|v| sanitize(v, LOG_STRING_LIMIT)),
-        resumed = matches!(open, ThreadOpen::Resume(_)),
+        resumed = matches!(open.thread, ThreadOpen::Resume(_)),
         history_cursor = items_backwards_cursor.is_some(),
         above_floor = floor == Floor::Above,
         "codex thread 개시"
+    );
+    // ADR-0337: counts and flags only — never a path or the text. The live run (§7-3 L2/L3) reads these fields.
+    tracing::info!(
+        experimental_api = if open.first_turn_context.is_some() {
+            "on"
+        } else {
+            "off"
+        },
+        extra_roots = open.extra_roots.len(),
+        resume_instructions,
+        first_turn_context = open.first_turn_context.is_some(),
+        "codex 실행 재료 적용"
     );
     Ok(Opened {
         thread_id: thread.id,
@@ -1998,12 +2154,17 @@ fn take_turn_locked(s: &mut State, next_id: &AtomicI64) -> Option<Job> {
             text: String::from_utf8_lossy(&head.body).into_owned(),
         }],
         client_user_message_id: if tracked { head.id.clone() } else { None },
+        additional_context: s.turn_context(),
     };
     let id = next_id.fetch_add(1, Ordering::Relaxed);
     match protocol::request_line(&RequestId::Num(id), method::TURN_START, &params) {
         Ok(line) => {
             let seq = s.next_turn_seq;
             s.next_turn_seq += 1;
+            // ADR-0337: the echo of this turn is the one that clears the context ([`Reader::note_context_echo`]).
+            if params.additional_context.is_some() {
+                s.context_turn = Some(seq);
+            }
             let item = if tracked {
                 let head = &mut s.pending[pos];
                 head.stage = Stage::InFlight {
@@ -2183,15 +2344,28 @@ fn end_turn_if(
                 s.early_completions.clear();
                 // ADR-0231
                 let drops = s.close_turn_items(seq, close);
+                // ADR-0337: only a rejection counts toward the retry bound — `Unanswered` may have been accepted.
+                let context_dropped = close == TurnClose::Rejected && s.note_context_rejection(seq);
                 cv.notify_all();
-                Some((turn_id, drops))
+                Some((turn_id, drops, context_dropped))
             }
             _ => None,
         }
     };
     match ended {
         // ★락을 놓은 뒤에 emit 한다★(ADR-0006) — 구독자는 이 호출 안에서 임의 코드를 돈다.
-        Some((turn_id, drops)) => {
+        Some((turn_id, drops, context_dropped)) => {
+            let detail = if context_dropped {
+                tracing::warn!(
+                    agent = %core.id(),
+                    turn = seq,
+                    rejections = CONTEXT_REJECTION_LIMIT,
+                    "codex app-server: 바뀐 지시서를 담은 turn/start 가 연달아 거절돼 이번 실행에서는 더 보내지 않는다"
+                );
+                format!("{detail} — {CONTEXT_DROPPED_NOTE}")
+            } else {
+                detail
+            };
             drops.emit(core, state);
             core.emit(OutputEvent::TurnEnd {
                 turn_id,
@@ -2204,6 +2378,11 @@ fn end_turn_if(
         None => false,
     }
 }
+
+/// What the failure line of the turn whose rejection hit [`CONTEXT_REJECTION_LIMIT`] adds — shown on the screen.
+// ADR-0337
+const CONTEXT_DROPPED_NOTE: &str =
+    "바뀐 지시서를 알리는 내용이 연달아 거절돼 이번 실행에서는 더 보내지 않는다";
 
 /// 라이터가 연 턴의 `turn/start` 를 못 썼다 — 대기표를 거두고 그 턴을 거절(`Rejected`)로 닫는다(벤더에 닿지
 /// 않았다 — 그 글은 쥔 자리로 돌아가 멈춤 뒤에서 기다린다 · [`State::close_turn_items`]).
@@ -2480,7 +2659,7 @@ fn writer_loop(
     next_id: Arc<AtomicI64>,
     shutdown: Arc<AtomicBool>,
     core: Arc<OutputCore>,
-    open_params: ThreadOpen,
+    open_params: AppServerOpen,
     sid_sink: Option<SessionIdSink>,
     link_sink: Option<LinkSink>,
     announcer: Arc<Announcer>,
@@ -3084,6 +3263,21 @@ fn refused_item_id<'a>(method_name: &str, params: Option<&'a Value>) -> Option<&
         .filter(|id| id.len() <= MAX_ID_BYTES)
 }
 
+/// The params of a live user-message echo — an `item/started` / `item/completed` notification whose item is a
+/// `userMessage`. `None` for every other line.
+fn user_message_echo<'a>(method_name: &str, params: Option<&'a Value>) -> Option<&'a Value> {
+    if method_name != method::ITEM_STARTED && method_name != method::ITEM_COMPLETED {
+        return None;
+    }
+    let params = params?;
+    let kind = params
+        .get("item")
+        .and_then(|i| i.get("type"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    is_user_message(kind).then_some(params)
+}
+
 struct Reader {
     core: Arc<OutputCore>,
     decoder: Option<Box<dyn OutputDecoder>>,
@@ -3271,6 +3465,11 @@ impl Reader {
     fn claims_our_turn(&self, params: Option<&Value>) -> bool {
         let (lock, _) = &*self.state;
         let s = sync::lock(lock);
+        Self::claims_locked(&s, params)
+    }
+
+    /// [`Reader::claims_our_turn`] with the state lock already held.
+    fn claims_locked(s: &State, params: Option<&Value>) -> bool {
         if let (Some(mine), Some(theirs)) = (
             s.thread_id.as_deref(),
             params
@@ -3297,6 +3496,15 @@ impl Reader {
         }
     }
 
+    /// A success response to a `turn/start` — decoded for [`Reader::resolve`]. Any success response, even one that
+    /// branch cannot use, ends a run of context rejections ([`State::context_rejections`]).
+    // ADR-0337
+    fn accepted_turn_start(&self, response: Value) -> Result<TurnStartResponse, serde_json::Error> {
+        let (lock, _) = &*self.state;
+        sync::lock(lock).context_rejections = 0;
+        serde_json::from_value(response)
+    }
+
     fn resolve(&self, id: &RequestId, outcome: Result<Value, String>) {
         let entry = match self.pending.take(id) {
             Some(e) => e,
@@ -3311,7 +3519,7 @@ impl Reader {
                 let _ = tx.send(outcome);
             }
             Waiter::TurnStart { seq } => match outcome {
-                Ok(v) => match serde_json::from_value::<TurnStartResponse>(v) {
+                Ok(v) => match self.accepted_turn_start(v) {
                     // ★응답이 정하는 id 에도 길이를 건다★ — 이 값은 그대로 `turn/interrupt` 의 params 와
                     //   [`OutputEvent::TurnEnd`] 의 칸으로 나가므로, 상한이 없으면 상대가 응답 하나로 replay
                     //   링의 단일 이벤트 상한을 넘는 경계를 만들고 그 링은 그 한 건으로 나머지를 전부 비운다.
@@ -3632,37 +3840,54 @@ impl Reader {
     ///   잡은 상태 락은 그 전에 놓는다. 화면 방출보다 **뒤에** 부른다: 디스크 쓰기가 말풍선을 붙잡지 않게.
     // ADR-0226 · ADR-0231 · ADR-0233: 사용자 결정 — id 는 진짜가 된 때(상대의 첫 유저 메시지 되울림) 영속한다.
     fn witness_first_turn(&mut self, method_name: &str, params: Option<&Value>) {
-        if self.first_turn.is_none()
-            || (method_name != method::ITEM_STARTED && method_name != method::ITEM_COMPLETED)
-        {
+        if self.first_turn.is_none() {
             return;
         }
-        let Some(params) = params else {
+        let Some(params) = user_message_echo(method_name, params) else {
             return;
         };
-        let kind = params
-            .get("item")
-            .and_then(|i| i.get("type"))
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        if !is_user_message(kind) {
-            return;
-        }
         let incoming_thread = params.get("threadId").and_then(|v| v.as_str());
-        let foreign = {
+        // ADR-0337: the report says whether the instructions were delivered — read under the same lock.
+        let (foreign, delivered) = {
             let (lock, _) = &*self.state;
             let s = sync::lock(lock);
-            matches!(
+            let foreign = matches!(
                 (s.thread_id.as_deref(), incoming_thread),
                 (Some(mine), Some(theirs)) if mine != theirs
-            )
+            );
+            (foreign, s.instructions_delivered)
         };
         if foreign {
             return;
         }
         if let Some(sink) = self.first_turn.take() {
             // ADR-0292 결정 3: 래치 commit 은 여러 에이전트가 쓰는 프로필 표를 고친다 — 펌프의 가둠 안이어도 표시를 끈다.
-            uncontained(|| sink());
+            uncontained(|| sink(delivered));
+        }
+    }
+
+    /// Clears the held instructions-change context when this line is the echo of the turn that carried it
+    /// ([`State::context_turn`] is the active turn and [`Reader::claims_our_turn`]'s attribution holds) — and marks the
+    /// instructions delivered.
+    ///
+    /// ★The reader's own step, independent of the first-turn port★ — that port is one-shot and may be absent or already
+    ///   consumed by an earlier echo; the context must still clear.
+    /// ★Runs before [`Reader::witness_first_turn`] on the same line★ — the echo of a carrying turn reports `true` there.
+    /// A late echo that arrives while the transport is Idle is not attributed, so it clears nothing — if it is the
+    ///   first echo the report is `false` and the next launch sends the context once more (the accepted duplicate).
+    // ADR-0337
+    fn note_context_echo(&self, method_name: &str, params: Option<&Value>) {
+        if user_message_echo(method_name, params).is_none() {
+            return;
+        }
+        let (lock, _) = &*self.state;
+        let mut s = sync::lock(lock);
+        let carrying = s.first_turn_context.is_some()
+            && matches!(s.turn, TurnState::Active { seq, .. } if s.context_turn == Some(seq));
+        if carrying && Self::claims_locked(&s, params) {
+            s.first_turn_context = None;
+            s.context_turn = None;
+            s.instructions_delivered = true;
         }
     }
 
@@ -3690,6 +3915,8 @@ impl Reader {
                 if let Some(t) = self.note_tool_item(&method, params.as_ref()) {
                     t.write(self.core.id());
                 }
+                // ADR-0337: before the first-turn report below reads what it set.
+                self.note_context_echo(&method, params.as_ref());
                 // ★번역기에는 **원본 줄 바이트**를 그대로 넣는다★ — 두 번째 입구를 만들면 그쪽의 라인
                 //   재조립·상한·마스킹 규율이 배송 경로 밖으로 나간다(사유 정본 = `decoder.rs` 헤더).
                 //   번역기는 개행으로 줄을 가르므로 종단을 함께 준다.
@@ -4319,6 +4546,15 @@ mod tests {
 
     fn shared() -> SharedState {
         Arc::new((Mutex::new(State::new()), Condvar::new()))
+    }
+
+    /// A Noop open plan — a new thread with no fields, no roots, no first-turn context.
+    fn start_open() -> AppServerOpen {
+        AppServerOpen {
+            thread: ThreadOpen::Start(ThreadStartParams::default()),
+            extra_roots: Vec::new(),
+            first_turn_context: None,
+        }
     }
 
     fn announcer() -> Arc<Announcer> {
@@ -5446,12 +5682,7 @@ mod tests {
             // 핸드셰이크 뒤 루프는 첫 검사에서 끝난다 — 이 항목들이 재는 것은 그 앞 구획이다.
             Arc::new(AtomicBool::new(true)),
             core,
-            ThreadOpen::Start(ThreadStartParams {
-                cwd: None,
-                approval_policy: None,
-                sandbox: None,
-                developer_instructions: None,
-            }),
+            start_open(),
             None,
             None,
             announcer(),
@@ -6121,28 +6352,13 @@ mod tests {
             env: vec![],
             cwd: std::path::PathBuf::from("."),
         };
-        CodexAppServerTransport::open(
-            &spec,
-            true,
-            None,
-            ThreadOpen::Start(ThreadStartParams::default()),
-            None,
-            None,
-        )
-        .expect("open")
+        CodexAppServerTransport::open(&spec, true, None, start_open(), None, None).expect("open")
     }
 
     #[cfg(windows)]
     fn open_probe(args: &[&str]) -> (CodexAppServerTransport, Option<u32>) {
-        CodexAppServerTransport::open(
-            &probe_spec(args),
-            true,
-            None,
-            ThreadOpen::Start(ThreadStartParams::default()),
-            None,
-            None,
-        )
-        .expect("open")
+        CodexAppServerTransport::open(&probe_spec(args), true, None, start_open(), None, None)
+            .expect("open")
     }
 
     #[cfg(windows)]
@@ -6165,7 +6381,7 @@ mod tests {
             &probe_spec(&["/c", "echo caps-probe"]),
             false,
             None,
-            ThreadOpen::Start(ThreadStartParams::default()),
+            start_open(),
             None,
             None,
         )
@@ -10108,7 +10324,7 @@ mod tests {
         let marks = Arc::new(Mutex::new(Vec::new()));
         let port: FirstTurnSink = {
             let marks = marks.clone();
-            Arc::new(move || marks.lock().unwrap().push(is_contained()))
+            Arc::new(move |_delivered: bool| marks.lock().unwrap().push(is_contained()))
         };
         h.reader.first_turn = Some(port);
 
@@ -11941,5 +12157,666 @@ mod tests {
                 result("exec-1", ToolOutcome::Failed)
             ]
         );
+    }
+
+    // ── First-turn instructions context (ADR-0337 · TRD S25 step 6 §4-7) ─────────────────────────
+
+    const CONTEXT: &str = "preface\n\nnew instructions";
+
+    /// The real-decoder harness whose state holds [`CONTEXT`] for the first turn — as `open` sets it from the plan.
+    fn harness_with_context() -> Harness {
+        let h = harness_with_real_decoder();
+        with_state(&h.state, |s| {
+            *s = State::with_first_turn_context(Some(CONTEXT.to_string()))
+        });
+        h
+    }
+
+    /// Whether a `turn/start`'s `params` carry the context — checking its exact wire shape when they do.
+    fn carries_context(params: &Value) -> bool {
+        match params.get("additionalContext") {
+            None => false,
+            Some(context) => {
+                assert_eq!(
+                    context,
+                    &serde_json::json!({"engram-instructions": {"kind": "application", "value": CONTEXT}})
+                );
+                true
+            }
+        }
+    }
+
+    fn context_held(h: &Harness) -> bool {
+        with_state(&h.state, |s| s.first_turn_context.is_some())
+    }
+
+    fn delivered_flag(h: &Harness) -> bool {
+        with_state(&h.state, |s| s.instructions_delivered)
+    }
+
+    /// Accepts the user item `id` and opens the next turn (the oldest held user item heads it) — (request, seq,
+    /// params).
+    fn open_user_turn(h: &Harness, ann: &Announcer, id: &str) -> (i64, u64, Value) {
+        accept_user(&h.state, id, "hi");
+        announce(&h.reader.core, &h.state, ann);
+        opens(h).expect("the turn did not open")
+    }
+
+    /// Plugs a first-turn port that records each report.
+    fn report_recorder(h: &mut Harness) -> Arc<Mutex<Vec<bool>>> {
+        let reports = Arc::new(Mutex::new(Vec::new()));
+        let port: FirstTurnSink = {
+            let reports = reports.clone();
+            Arc::new(move |delivered: bool| reports.lock().unwrap().push(delivered))
+        };
+        h.reader.first_turn = Some(port);
+        reports
+    }
+
+    /// Carried until the echo of a turn that carried it — the response alone does not clear it; after the echo the
+    /// next `turn/start` has none. Reader order: that echo clears the context and reports `true` on the same line.
+    #[test]
+    fn the_context_rides_every_turn_start_until_the_echo_of_one_that_carried_it() {
+        let mut h = harness_with_context();
+        let reports = report_recorder(&mut h);
+        let ann = above(&h);
+        let (request, _, params) = open_user_turn(&h, &ann, "q-1");
+        assert!(carries_context(&params));
+        reply(&mut h, request, "U1");
+        assert!(context_held(&h), "the turn/start response alone cleared it");
+
+        h.reader
+            .handle_line(echo_line("U1", "q-1", "hi").as_bytes());
+        assert!(!context_held(&h));
+        assert!(delivered_flag(&h));
+        assert_eq!(*reports.lock().unwrap(), [true]);
+
+        h.reader
+            .handle_line(completed_line("T", "U1", "completed").as_bytes());
+        let (_, _, params) = open_user_turn(&h, &ann, "q-2");
+        assert!(!carries_context(&params), "{params}");
+    }
+
+    /// C3 (a), refined: a turn that ends without its echo keeps the context for the next `turn/start` — rejected
+    /// (error reply · write failure), unanswered (deadline · unreadable success · oversized turn id), interrupted,
+    /// completed with no echo, and the early completion held before the response.
+    #[test]
+    fn a_turn_that_ends_without_its_echo_keeps_the_context_for_the_next_turn_start() {
+        for end in [
+            End::ErrorReply,
+            End::WriteFailed,
+            End::Deadline,
+            End::Unreadable,
+            End::LongTurnId,
+            End::Completed("interrupted"),
+            End::Completed("completed"),
+            End::Early("completed"),
+        ] {
+            let mut h = harness_with_context();
+            let reports = report_recorder(&mut h);
+            let ann = above(&h);
+            let (request, seq, params) = open_user_turn(&h, &ann, "q-1");
+            assert!(carries_context(&params), "{end:?}");
+            finish_turn(&mut h, request, seq, end);
+            assert_eq!(turn_seq(&h.state), None, "{end:?}: the turn did not end");
+            assert!(context_held(&h), "{end:?}: the context was dropped");
+
+            let (_, _, params) = open_user_turn(&h, &ann, "q-2");
+            assert!(
+                carries_context(&params),
+                "{end:?}: the next turn/start lost it"
+            );
+            assert!(reports.lock().unwrap().is_empty(), "{end:?}");
+            assert!(!delivered_flag(&h), "{end:?}");
+        }
+    }
+
+    /// A steer never carries the context — not even during a carrying turn.
+    #[test]
+    fn a_steer_never_carries_the_context() {
+        let mut h = harness_with_context();
+        let ann = above(&h);
+        running_turn(&mut h, &ann, "U1");
+        accept_user(&h.state, "q-2", "more");
+        announce(&h.reader.core, &h.state, &ann);
+        let steer = steer_at_tool_end(&h).expect("the steer did not go");
+        let v: Value = serde_json::from_str(&steer.line).unwrap();
+        assert_eq!(v["method"], "turn/steer");
+        assert!(v["params"].get("additionalContext").is_none(), "{v}");
+        assert!(context_held(&h));
+    }
+
+    /// Below the floor (no client id — the entry leaves at `turn/start`) the rule is the same, keyed to the echo.
+    #[test]
+    fn below_the_floor_the_context_is_keyed_to_the_echo_too() {
+        let mut h = harness_with_context();
+        make_ready(&h.state, "T");
+        settle_floor(&h.reader.core, &h.state, &announcer(), Floor::Below);
+        for body in ["one", "two"] {
+            accept_input(&h.state, None, body.as_bytes().to_vec(), InputOrigin::Mail).unwrap();
+        }
+        let (request, seq, params) = opens(&h).expect("the turn did not open");
+        assert!(carries_context(&params));
+        assert!(params.get("clientUserMessageId").is_none());
+        finish_turn(&mut h, request, seq, End::ErrorReply);
+        assert!(context_held(&h));
+
+        let (request, _, params) = opens(&h).expect("the turn did not open");
+        assert!(carries_context(&params));
+        reply(&mut h, request, "U2");
+        h.reader.handle_line(
+            anonymous_echo_line(method::ITEM_STARTED, "T", "U2", "codex-2").as_bytes(),
+        );
+        assert!(!context_held(&h));
+        assert!(delivered_flag(&h));
+    }
+
+    /// Clearing is the reader's own step (axis NS2) — with no first-turn port at all, the echo still clears it.
+    #[test]
+    fn the_echo_clears_the_context_without_a_first_turn_port() {
+        let mut h = harness_with_context();
+        assert!(h.reader.first_turn.is_none());
+        let ann = above(&h);
+        let (request, _, _) = open_user_turn(&h, &ann, "q-1");
+        reply(&mut h, request, "U1");
+        h.reader
+            .handle_line(echo_line("U1", "q-1", "hi").as_bytes());
+        assert!(!context_held(&h));
+        assert!(delivered_flag(&h));
+    }
+
+    /// The accepted duplicate (R3): a late echo of an unanswered carrying turn arrives while Idle — not attributed,
+    /// so it reports `false` and keeps the context; the next carrying turn's echo still clears it although the
+    /// one-shot port is already consumed.
+    #[test]
+    fn a_late_echo_while_idle_reports_undelivered_and_the_next_carrying_echo_still_clears() {
+        let mut h = harness_with_context();
+        let reports = report_recorder(&mut h);
+        let ann = above(&h);
+        let (request, seq, _) = open_user_turn(&h, &ann, "q-1");
+        finish_turn(&mut h, request, seq, End::Deadline);
+        assert_eq!(turn_seq(&h.state), None);
+
+        h.reader
+            .handle_line(echo_line("U1", "q-1", "hi").as_bytes());
+        assert_eq!(*reports.lock().unwrap(), [false]);
+        assert!(context_held(&h), "a late echo while Idle cleared it");
+
+        let (request, _, params) = open_user_turn(&h, &ann, "q-2");
+        assert!(carries_context(&params));
+        reply(&mut h, request, "U2");
+        h.reader
+            .handle_line(echo_line("U2", "q-2", "hi").as_bytes());
+        assert!(!context_held(&h));
+        assert!(delivered_flag(&h));
+        assert_eq!(*reports.lock().unwrap(), [false], "the port is one-shot");
+    }
+
+    /// Only an echo attributed to the carrying turn clears — during a carrying turn whose turn id is known, a
+    /// userMessage echo of a foreign thread (same turn id) or of another turn (our thread) keeps the context and the
+    /// instructions undelivered; the carrying turn's own echo then clears it. The foreign echo leaves the one-shot
+    /// port alone (the later echo reports `true`); the other turn's echo is our thread's first echo, so it takes the
+    /// port with `false`.
+    #[test]
+    fn an_echo_not_attributed_to_the_carrying_turn_keeps_the_context() {
+        for (stray, report_after_stray, report_at_end) in [
+            (
+                anonymous_echo_line(method::ITEM_STARTED, "X", "U1", "codex-stray"),
+                &[][..],
+                &[true][..],
+            ),
+            (
+                anonymous_echo_line(method::ITEM_STARTED, "T", "U9", "codex-stray"),
+                &[false][..],
+                &[false][..],
+            ),
+        ] {
+            let mut h = harness_with_context();
+            let reports = report_recorder(&mut h);
+            let ann = above(&h);
+            let (request, seq, params) = open_user_turn(&h, &ann, "q-1");
+            assert!(carries_context(&params));
+            reply(&mut h, request, "U1");
+            assert_eq!(turn_id_of(&h.state).as_deref(), Some("U1"));
+
+            h.reader.handle_line(stray.as_bytes());
+            assert_eq!(turn_seq(&h.state), Some(seq), "{stray}: the turn ended");
+            assert!(context_held(&h), "{stray}: an unattributed echo cleared it");
+            assert!(!delivered_flag(&h), "{stray}");
+            assert_eq!(*reports.lock().unwrap(), report_after_stray, "{stray}");
+
+            h.reader
+                .handle_line(echo_line("U1", "q-1", "hi").as_bytes());
+            assert!(
+                !context_held(&h),
+                "{stray}: the carrying echo did not clear"
+            );
+            assert!(delivered_flag(&h), "{stray}");
+            assert_eq!(*reports.lock().unwrap(), report_at_end, "{stray}");
+        }
+    }
+
+    /// Interpretation (b) of "which echo clears": a carrying turn ends unanswered at its deadline (the halt stands), a
+    /// user item lifts the halt and the next turn opens carrying the context with its turn id still unknown — the late
+    /// echo of the unanswered turn then lands in that turn's response wait, is attributed to it, and clears the
+    /// context with a `true` report: the earlier turn did carry it.
+    #[test]
+    fn a_late_echo_of_an_unanswered_carrying_turn_clears_during_the_next_carrying_turn_s_response_wait(
+    ) {
+        let mut h = harness_with_context();
+        let reports = report_recorder(&mut h);
+        let ann = above(&h);
+        let (request, seq, params) = open_user_turn(&h, &ann, "q-1");
+        assert!(carries_context(&params));
+        finish_turn(&mut h, request, seq, End::Deadline);
+        assert_eq!(turn_seq(&h.state), None);
+        assert!(halted(&h.state), "the deadline did not halt");
+
+        let (_, next, params) = open_user_turn(&h, &ann, "q-2");
+        assert!(!halted(&h.state), "the user item did not lift the halt");
+        assert!(carries_context(&params));
+        assert_eq!(turn_seq(&h.state), Some(next));
+        assert_eq!(turn_id_of(&h.state), None, "the response already arrived");
+
+        h.reader
+            .handle_line(echo_line("U1", "q-1", "hi").as_bytes());
+        assert!(!context_held(&h), "the late echo did not clear it");
+        assert!(delivered_flag(&h));
+        assert_eq!(*reports.lock().unwrap(), [true]);
+    }
+
+    /// The failure-line details of the closed turns, in order.
+    fn failure_details(seen: &Arc<Mutex<Vec<OutputEvent>>>) -> Vec<String> {
+        boundaries(seen)
+            .into_iter()
+            .filter_map(|(_, outcome)| match outcome {
+                TurnOutcome::Failed { detail } => Some(detail.unwrap_or_default()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The retry bound (axis NS3): two consecutive rejected carrying turns stop the context for the incarnation —
+    /// one warning, the second turn's failure line names it — and the next context-free turn's echo reports `false`.
+    #[test]
+    fn two_consecutive_rejections_stop_the_context_with_one_warning_and_a_named_failure_line() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let (reports, details, delivered, next_carries, agent) =
+            tracing::subscriber::with_default(LogCapture(captured.clone()), || {
+                let mut h = harness_with_context();
+                let agent = h.reader.core.id().to_string();
+                let reports = report_recorder(&mut h);
+                let ann = above(&h);
+                let (request, seq, params) = open_user_turn(&h, &ann, "q-1");
+                assert!(carries_context(&params));
+                finish_turn(&mut h, request, seq, End::ErrorReply);
+                assert!(context_held(&h), "one rejection dropped it");
+                let (request, seq, params) = open_user_turn(&h, &ann, "q-2");
+                assert!(carries_context(&params));
+                finish_turn(&mut h, request, seq, End::WriteFailed);
+                assert!(!context_held(&h));
+
+                let (request, _, params) = open_user_turn(&h, &ann, "q-3");
+                let next_carries = carries_context(&params);
+                reply(&mut h, request, "U3");
+                // The oldest held user item heads that turn.
+                h.reader
+                    .handle_line(echo_line("U3", "q-1", "hi").as_bytes());
+                let reports = reports.lock().unwrap().clone();
+                (
+                    reports,
+                    failure_details(&h.seen),
+                    delivered_flag(&h),
+                    next_carries,
+                    agent,
+                )
+            });
+
+        assert!(!next_carries, "the turn after the bound still carried it");
+        assert_eq!(reports, [false]);
+        assert!(!delivered);
+        assert_eq!(details.len(), 2, "{details:?}");
+        assert!(!details[0].contains(CONTEXT_DROPPED_NOTE), "{details:?}");
+        assert!(details[1].ends_with(CONTEXT_DROPPED_NOTE), "{details:?}");
+        let lines = captured.lock().unwrap();
+        let warned = logged(&lines, "바뀐 지시서를 담은");
+        assert_eq!(warned.len(), 1, "{lines:?}");
+        assert_eq!(warned[0].0, tracing::Level::WARN);
+        assert_eq!(warned[0].1.get("agent"), Some(&agent));
+    }
+
+    /// One rejection, then an accepted turn whose echo arrives — cleared and delivered.
+    #[test]
+    fn one_rejection_then_an_echoed_turn_clears_and_delivers() {
+        let mut h = harness_with_context();
+        let reports = report_recorder(&mut h);
+        let ann = above(&h);
+        let (request, seq, _) = open_user_turn(&h, &ann, "q-1");
+        finish_turn(&mut h, request, seq, End::ErrorReply);
+        let (request, _, params) = open_user_turn(&h, &ann, "q-2");
+        assert!(carries_context(&params));
+        reply(&mut h, request, "U2");
+        h.reader
+            .handle_line(echo_line("U2", "q-1", "hi").as_bytes());
+        assert!(!context_held(&h));
+        assert!(delivered_flag(&h));
+        assert_eq!(*reports.lock().unwrap(), [true]);
+    }
+
+    /// Only `Rejected` counts; any successful `turn/start` response resets the count; `Unanswered` neither counts nor
+    /// resets.
+    #[test]
+    fn the_rejection_count_resets_on_a_success_and_ignores_an_unanswered_turn() {
+        for (middle, still_attached) in [
+            (End::Completed("interrupted"), true),
+            (End::Unreadable, true),
+            (End::Deadline, false),
+        ] {
+            let mut h = harness_with_context();
+            let ann = above(&h);
+            let mut ids = ["q-1", "q-2", "q-3", "q-4"].into_iter();
+            for end in [End::ErrorReply, middle, End::ErrorReply] {
+                let (request, seq, params) = open_user_turn(&h, &ann, ids.next().unwrap());
+                assert!(carries_context(&params), "{middle:?}/{end:?}");
+                finish_turn(&mut h, request, seq, end);
+            }
+            let (_, _, params) = open_user_turn(&h, &ann, ids.next().unwrap());
+            assert_eq!(carries_context(&params), still_attached, "{middle:?}");
+        }
+    }
+
+    /// With no context to deliver, the first echo reports `true`.
+    #[test]
+    fn with_no_context_the_first_echo_reports_delivered() {
+        let mut h = harness_with_real_decoder();
+        let reports = report_recorder(&mut h);
+        let ann = above(&h);
+        let (request, _, params) = open_user_turn(&h, &ann, "q-1");
+        assert!(!carries_context(&params));
+        reply(&mut h, request, "U1");
+        h.reader
+            .handle_line(echo_line("U1", "q-1", "hi").as_bytes());
+        assert_eq!(*reports.lock().unwrap(), [true]);
+    }
+
+    /// End to end (MUST): two rejections stop the context → a context-free turn is echoed → the real latch keeps
+    /// `false` (the session id still commits) → nothing is recorded, so the next launch with the same stored hash still
+    /// sees changed instructions and sends the context again.
+    #[test]
+    fn an_undelivered_change_is_sent_again_by_the_next_launch() {
+        use crate::launch::{LaunchKit, LaunchPlan, MemLaunchFs};
+        use crate::profile::{AgentCommand, AgentOutputFormat};
+
+        let mut h = harness_with_context();
+        let commits = Arc::new(Mutex::new(Vec::new()));
+        let port: SessionIdSink = {
+            let commits = commits.clone();
+            Arc::new(move |raw: &str| commits.lock().unwrap().push(raw.to_owned()))
+        };
+        let latch = crate::session_id_latch::SessionIdLatch::new(AgentId::new_v4(), 1, port);
+        record_session_id(
+            &h.state,
+            &AtomicBool::new(false),
+            Some(&latch.offer_sink()),
+            "T",
+        )
+        .expect("the handshake's recording");
+        h.reader.first_turn = Some(latch.first_turn_sink());
+        let ann = above(&h);
+        for (id, end) in [("q-1", End::ErrorReply), ("q-2", End::ErrorReply)] {
+            let (request, seq, _) = open_user_turn(&h, &ann, id);
+            finish_turn(&mut h, request, seq, end);
+        }
+        let (request, _, params) = open_user_turn(&h, &ann, "q-3");
+        assert!(!carries_context(&params));
+        reply(&mut h, request, "U3");
+        h.reader
+            .handle_line(echo_line("U3", "q-1", "hi").as_bytes());
+        assert_eq!(latch.first_turn_delivered(), Some(false));
+        assert_eq!(
+            *commits.lock().unwrap(),
+            ["T"],
+            "the session id must still commit"
+        );
+
+        // Step 8 records only on `true`, so the stored hash is still the one before the change.
+        let kit = LaunchKit {
+            plan: LaunchPlan {
+                backend: "codex".to_string(),
+                instructions: Vec::new(),
+                skills: Vec::new(),
+                raw_settings: Vec::new(),
+                include_priming: false,
+                notices: Vec::new(),
+                real: true,
+                folders: Vec::new(),
+                extra_skill_roots: Vec::new(),
+            },
+            volatile_dir: None,
+            instructions_file: Some(std::path::PathBuf::from("C:/vol/instructions.md")),
+            skills: Vec::new(),
+            instructions_hash: Some("k".to_string()),
+            last_applied_instructions_hash: Some("h".to_string()),
+        };
+        let command = AgentCommand::Codex {
+            extra_args: Vec::new(),
+            output_format: AgentOutputFormat::StreamJson,
+        };
+        let artifacts = super::super::launch::materialize(
+            &command,
+            &kit,
+            std::path::Path::new("C:/workspace"),
+            &MemLaunchFs::default(),
+            &|_: &std::path::Path| Ok(CONTEXT.to_string()),
+        )
+        .expect("materialize");
+        assert!(artifacts.instructions_changed);
+        let spec = CommandSpec {
+            program: "codex".to_string(),
+            args: Vec::new(),
+            env: Vec::new(),
+            cwd: std::path::PathBuf::from("C:/workspace"),
+        };
+        let plan =
+            super::super::app_server_open(&spec, Some(uuid::Uuid::new_v4()), None, &artifacts)
+                .expect("the open plan");
+        let context = plan
+            .first_turn_context
+            .clone()
+            .expect("the next launch does not send the context");
+        assert!(context.ends_with(CONTEXT), "{context}");
+
+        let next = harness_with_real_decoder();
+        with_state(&next.state, |s| {
+            *s = State::with_first_turn_context(Some(context.clone()))
+        });
+        let ann = above(&next);
+        let (_, _, params) = open_user_turn(&next, &ann, "n-1");
+        assert_eq!(
+            params["additionalContext"]["engram-instructions"]["value"],
+            context.as_str()
+        );
+    }
+
+    /// The opt-in notifications (and `skills/changed`) emit nothing and leave the turn as it was.
+    #[test]
+    fn the_opt_in_notifications_emit_nothing_and_leave_the_turn_as_it_was() {
+        let mut h = harness_with_real_decoder();
+        let ann = above(&h);
+        let seq = running_turn(&mut h, &ann, "U1");
+        h.seen.lock().unwrap().clear();
+        for (method_name, params) in [
+            (
+                "thread/readState/changed",
+                serde_json::json!({"threadId": "T"}),
+            ),
+            (
+                "turn/moderationMetadata",
+                serde_json::json!({"threadId": "T", "turnId": "U1"}),
+            ),
+            ("skills/changed", serde_json::json!({})),
+        ] {
+            h.reader.handle_line(
+                serde_json::json!({"method": method_name, "params": params})
+                    .to_string()
+                    .as_bytes(),
+            );
+        }
+        assert!(
+            h.seen.lock().unwrap().is_empty(),
+            "{:?}",
+            h.seen.lock().unwrap()
+        );
+        assert_eq!(turn_seq(&h.state), Some(seq));
+        assert_eq!(turn_id_of(&h.state).as_deref(), Some("U1"));
+    }
+
+    /// The resume `developerInstructions` gate reads the `userAgent` version the way the floor does — 0.155.0 or later
+    /// passes; a prerelease of 0.155.0, an older version or an unreadable agent does not.
+    #[test]
+    fn the_resume_instructions_gate_reads_the_user_agent_version() {
+        for (user_agent, passes) in [
+            ("codex_cli_rs/0.163.0 (Windows 10.0.26200; x86_64) unknown (engram-dashboard; 0.200.0)", true),
+            ("codex_cli_rs/0.155.0", true),
+            ("codex_cli_rs/0.155.0-alpha.1", false),
+            ("codex_cli_rs/0.154.9", false),
+            ("engram-fake/0", false),
+            ("/0.163.0", false),
+            ("", false),
+        ] {
+            assert_eq!(
+                reaches(user_agent_version(user_agent), RESUME_INSTRUCTIONS_FLOOR),
+                passes,
+                "{user_agent}"
+            );
+        }
+    }
+
+    /// Runs [`handshake`] on this thread against the fake app-server (so a thread-local subscriber sees its logs) —
+    /// the handshake's result and the log lines.
+    #[cfg(windows)]
+    fn handshake_on_fake(
+        user_agent: &'static str,
+        open: &AppServerOpen,
+    ) -> (Result<Opened, String>, Vec<LogLine>) {
+        use super::super::tests::{
+            bake_fake_app_server_with, wait_for_the_fake_to_listen, FakeOptions, FakeResume,
+        };
+
+        let fake = bake_fake_app_server_with(
+            "T-start",
+            FakeResume::EchoesTheThreadId,
+            FakeOptions {
+                user_agent,
+                ..FakeOptions::default()
+            },
+        );
+        let PipedChild {
+            child,
+            stdin,
+            stdout,
+            stderr,
+            group,
+        } = spawn_piped(&fake.spec, "fake codex app-server").expect("spawn the fake");
+        let Harness {
+            reader,
+            state,
+            pending,
+            next_id,
+            ..
+        } = harness();
+        let child = Arc::new(Mutex::new(child));
+        let reading = {
+            let child = child.clone();
+            let stdout = stdout.expect("stdout");
+            std::thread::spawn(move || {
+                reader_loop(stdout, Arc::new(AtomicBool::new(false)), reader, child)
+            })
+        };
+        wait_for_the_fake_to_listen(&fake);
+        let stdin = Mutex::new(stdin);
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let opened = tracing::subscriber::with_default(LogCapture(captured.clone()), || {
+            handshake(
+                &stdin,
+                &state,
+                &pending,
+                &next_id,
+                open,
+                Instant::now() + HANDSHAKE_BUDGET,
+            )
+        });
+        // EOF ends the fake's read loop; the fake exits and the reader sees its stdout close.
+        *stdin.lock().unwrap() = None;
+        reading.join().expect("the reader thread");
+        drop((stderr, group));
+        let leftover = fake.remove();
+        assert!(
+            leftover.is_empty(),
+            "the fake's files are left: {leftover:?}"
+        );
+        let lines = captured.lock().unwrap().clone();
+        (opened, lines)
+    }
+
+    /// The §4-7 log line: opt-in on/off, the root count, whether the resume carried the instructions (after the version
+    /// gate) and whether a first-turn context is held — counts and flags only.
+    #[cfg(windows)]
+    #[test]
+    fn the_handshake_logs_what_the_open_plan_applied() {
+        let resume = |instructions: Option<&str>| {
+            ThreadOpen::Resume(ThreadResumeParams {
+                thread_id: "t-1".to_string(),
+                cwd: None,
+                approval_policy: None,
+                sandbox: None,
+                exclude_turns: Some(true),
+                developer_instructions: instructions.map(str::to_string),
+            })
+        };
+        let rows = [
+            (
+                "codex_cli_rs/0.163.0 (Windows 10.0.26200; x86_64)",
+                AppServerOpen {
+                    thread: resume(Some("dev text")),
+                    extra_roots: vec!["C:/a/skills".into(), "C:/b/skills".into()],
+                    first_turn_context: Some("ctx".into()),
+                },
+                ["on", "2", "true", "true"],
+            ),
+            (
+                "codex_cli_rs/0.154.0 (Windows 10.0.26200; x86_64)",
+                AppServerOpen {
+                    thread: resume(Some("dev text")),
+                    extra_roots: Vec::new(),
+                    first_turn_context: None,
+                },
+                ["off", "0", "false", "false"],
+            ),
+            (
+                "codex_cli_rs/0.163.0 (Windows 10.0.26200; x86_64)",
+                start_open(),
+                ["off", "0", "false", "false"],
+            ),
+        ];
+        for (user_agent, open, [api, roots, resumed, context]) in rows {
+            let (opened, lines) = handshake_on_fake(user_agent, &open);
+            opened.unwrap_or_else(|e| panic!("{user_agent}: the handshake failed: {e}"));
+            let applied = logged(&lines, "codex 실행 재료 적용");
+            assert_eq!(applied.len(), 1, "{user_agent}: {lines:?}");
+            let (level, fields) = applied[0];
+            assert_eq!(*level, tracing::Level::INFO);
+            let field = |name: &str| fields.get(name).map(String::as_str);
+            assert_eq!(field("experimental_api"), Some(api), "{user_agent}");
+            assert_eq!(field("extra_roots"), Some(roots), "{user_agent}");
+            assert_eq!(field("resume_instructions"), Some(resumed), "{user_agent}");
+            assert_eq!(field("first_turn_context"), Some(context), "{user_agent}");
+            assert!(
+                fields
+                    .values()
+                    .all(|v| !v.contains("dev text") && !v.contains("C:/")),
+                "{user_agent}: text or a path reached the log line: {fields:?}"
+            );
+        }
     }
 }

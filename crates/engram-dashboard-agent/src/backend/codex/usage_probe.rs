@@ -117,6 +117,7 @@ fn converse(child: &mut dyn ProbeChild, deadline: Instant) -> Result<Answer, Pro
             name: CLIENT_NAME.to_owned(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
         },
+        capabilities: None,
     };
     let initialize_line = request_text(INITIALIZE_ID, method::INITIALIZE, &initialize)?;
     // If the wrapping shell could not find the target and already exited, the first write fails first — returning right away misses the exit

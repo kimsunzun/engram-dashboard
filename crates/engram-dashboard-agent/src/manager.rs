@@ -3695,7 +3695,7 @@ mod tests {
         );
 
         (latch.offer_sink())(&stored.to_string());
-        (latch.first_turn_sink())();
+        (latch.first_turn_sink())(true);
 
         let p = profiles.get(id).expect("프로필");
         assert_eq!(p.backend_session_id, Some(stored));

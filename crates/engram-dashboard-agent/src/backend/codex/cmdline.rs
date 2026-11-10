@@ -583,7 +583,7 @@ mod tests {
     /// One argument as portable-pty writes it on a Windows command line (the MSVC argv quoting): bare unless it is
     /// empty or holds a space, TAB, LF, VT or `"`; otherwise wrapped in quotes, with a `\` before each `"` and the
     /// backslashes doubled where they come right before a `"` or the closing quote.
-    // Behaviour mirrors portable-pty 0.8.1 src/cmdbuilder.rs `CommandBuilder::append_quoted`.
+    // Behaviour mirrors portable-pty 0.8.1 src/cmdbuilder.rs `CommandBuilder::append_quoted` (MIT).
     fn pty_append_quoted(arg: &str, cmdline: &mut Vec<u16>) {
         if !arg.is_empty() && !arg.contains([' ', '\t', '\n', '\x0b', '"']) {
             cmdline.extend(arg.encode_utf16());
