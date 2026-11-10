@@ -10,6 +10,7 @@
 
 | ID | 제목(짧게) | 구역 | 상태 |
 |---|---|---|---|
+| T-86 | Tray 「데몬 켜기」 reconnects but slots keep the daemon-down icon | 메인 | Deferred to the multi-daemon topic with the tray work (user 2026-11-10) |
 | T-85 | A new window starts a daemon the user stopped (boot start in every window) | 메인 | Deferred to the multi-daemon topic (user 2026-11-10) |
 | T-84 | Update system — replace a version-mismatched daemon | 메인 | Not started — deferred by the user (ADR-0356) |
 | T-81 | Split the tray out of the app (client) process | 메인 | Not started — idea/refactor; keep as is for now (user 2026-11-09) |
@@ -70,6 +71,12 @@
 | T-16 | 프론트 종료 판정 · 세대 필터 | 사소한 기능·정리 | 잔존 · T-32 선결 |
 
 ## 메인
+
+### T-86. Tray 「데몬 켜기」 reconnects but slots keep the daemon-down icon
+- **Status:** deferred to the multi-daemon topic, together with the tray work — user 2026-11-10: 「어차피 멀티데몬할때 트레이도 개선해야되니 나중에 다시 오픈하자」.
+- **Observed (user, S36 release check build `3592a84d`):** kill the daemon → band ① → ✕ → tray 「데몬 켜기」 → a new daemon starts (shell log: a new daemon pid right after the last failed attempt), but the slots keep the daemon-down (power-off) icon.
+- **Not checked:** whether the band's 「다시 연결」 (the frontend `DaemonControl.start()` path) clears the icon; whether master before S36 behaves the same (likely — S36 did not touch the tray or slots).
+- **Guess (unverified):** the tray start reattaches only the shell link (`attach_in_background`); the frontend's reconnect path that re-reads agents and slot state does not run.
 
 ### T-85. A new window starts a daemon the user stopped (boot start in every window)
 - **Status:** deferred to the multi-daemon topic — user 2026-11-10: 「나중에 다중에이전트 선택할때 결정하는게 좋을듯? 일단은 이대로 유지하자」.

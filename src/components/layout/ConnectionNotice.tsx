@@ -70,12 +70,12 @@ export default function ConnectionNotice({ actions = false }: { actions?: boolea
     <div
       role="alert"
       data-band={view.kind}
-      className="flex shrink-0 items-start gap-3 border-b border-border bg-elevated px-4 py-2 text-sm text-foreground"
+      className="flex shrink-0 items-start gap-3 border-b border-border bg-elevated px-3 py-1 text-xs leading-5 text-foreground"
       style={{ borderLeft: '3px solid var(--status-danger)' }}
     >
       {/* `wrap-anywhere` = a requirement of the covering layer (the `NoticeOverlay` doc) — the cause can carry a long path. */}
       <div className="min-w-0 flex-1 wrap-anywhere">
-        <span className="font-semibold">{t('connection.head')}</span>
+        <span className="font-medium">{t('connection.head')}</span>
         {view.cause !== null && (
           <>
             {' '}
@@ -86,7 +86,7 @@ export default function ConnectionNotice({ actions = false }: { actions?: boolea
       {actions && (
         <button
           type="button"
-          className="shrink-0 rounded border border-border bg-surface px-2 hover:bg-background disabled:cursor-default disabled:opacity-50"
+          className="shrink-0 rounded border border-border bg-surface px-2 leading-5 hover:bg-background disabled:cursor-default disabled:opacity-50"
           disabled={busy}
           aria-busy={busy}
           onClick={reconnect}
