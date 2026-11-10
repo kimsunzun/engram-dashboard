@@ -1,7 +1,7 @@
 # ADR-0337: codex launch materials — JSON uses developerInstructions · extraRoots, the terminal only the 「기본」 priming and the settings `-c`
 
-- 상태: 제안 (2026-10-31, basis: user decisions P4-FINAL (2026-10-20 「프리셋은 베이스때문에 무조건 들어가야겠네. 그럼 안에 스킬이나 그런 지시서가 있을때 경고 띄우면 될듯」) · P7AC · G28 + main M8 · M13 · M19 · M20 · M29 · M97 (reported)) · 부분 폐기 by ADR-0341 (Decision 3, the notice count)
-- 관련: ADR-0215 (codex instructions = developer_instructions) · ADR-0216 (override order) · ADR-0329 · ADR-0334 · ADR-0331 · PRD R37 · TRD §1-3 6 · §1-5 table · §7 5 · research `docs/research/codex-instruction-channels-2026-10-20.md` · Amended by ADR-0341 (Decision 3, the notice count) · ADR-0354 (impact note: `experimentalApi` only with `additionalContext`, extra roots on every process, junction layout confirmed, the applied hash recorded only on a delivered first turn)
+- 상태: 제안 (2026-10-31, basis: user decisions P4-FINAL (2026-10-20 「프리셋은 베이스때문에 무조건 들어가야겠네. 그럼 안에 스킬이나 그런 지시서가 있을때 경고 띄우면 될듯」) · P7AC · G28 + main M8 · M13 · M19 · M20 · M29 · M97 (reported)) · 부분 폐기 by ADR-0341 (Decision 3, the notice count) · 부분 폐기 by ADR-0357 (Decision 3, the intended-behavior sentence)
+- 관련: ADR-0215 (codex instructions = developer_instructions) · ADR-0216 (override order) · ADR-0329 · ADR-0334 · ADR-0331 · PRD R37 · TRD §1-3 6 · §1-5 table · §7 5 · research `docs/research/codex-instruction-channels-2026-10-20.md` · Amended by ADR-0341 (Decision 3, the notice count) · ADR-0354 (impact note: `experimentalApi` only with `additionalContext`, extra roots on every process, junction layout confirmed, the applied hash recorded only on a delivered first turn) · Amended by ADR-0357 (Decision 3, the intended-behavior sentence)
 
 ## 맥락
 For codex, the instruction and skill channels differ between JSON (app-server) and terminal mode. In the terminal there is no way to give a skill folder per process (PRD R37 · research).
