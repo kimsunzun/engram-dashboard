@@ -67,6 +67,9 @@
 | T-89 | Codex first-turn delivery is confirmed by the turn window, not by `clientUserMessageId` | 버그 | Not started · theoretical path · found by S25 step 6 review |
 | T-90 | A mismatched-turnId echo on our thread consumes the codex first-turn report with `false` | 버그 | Not started · theoretical path (safe direction) · found by S25 step 6 review |
 | T-91 | Codex `thread/resume` deprecation notice — upstream may change resume semantics | 버그 | Watch · found by S25 step 6 measurements (TRD R9) |
+| T-97 | The daemon's `stopping` latch is per connection — a second `StopDaemon` on another connection does not join | 버그 | Not started · pre-existing (master S21) · no harm found · found by the master-merge review |
+| T-98 | An in-flight create can outlive the single-instance guard and write the roster after it is released | 버그 | Not started · pre-existing · rare ordering · found by the master-merge review |
+| T-99 | A spawn during daemon stop leaves an asleep agent with a last-failure mark | 버그 | Recorded, not planned (「최소한만 막기」) · pre-existing · found by the master-merge review |
 | T-93 | The codex live test L5 leaves its temporary folder on every run (os error 32) | 사소한 기능·정리 | Not started · found by S25 step 6 QA |
 | T-92 | The codex real-terminal cwd guard repeats `& ^ \| < >` instead of using the platform set | 사소한 기능·정리 | Not started · found by S25 step 6 review |
 | T-71 | 트래킹 번호를 가리키지 않기 — 해결되면 그냥 지우기 | 사소한 기능·정리 | 할 일 — 나중에 이슈로 |
@@ -443,6 +446,24 @@
 - **Status:** watch · found by the S25 step 6 measurements (`trd-codex-translation.md` R9).
 - **Problem:** codex warns that full-history hydration on `thread/resume` is deprecated for paginated threads. Our resume already sends `excludeTurns: true`, so the warning seen in M4 came from the measurement harness; the remaining risk is upstream changing `thread/resume` semantics.
 - **Next:** re-check on each codex version change (the codex lane runs the live resume L2/L3).
+
+### T-97. The daemon's `stopping` latch is per connection — a second `StopDaemon` on another connection does not join
+- **Status:** not started · pre-existing on master (S21 3-3) · found 2026-11-10 by the review of the master merge into S25 (`bb062838` — codex and lead reviewers independently).
+- **Problem:** `AgentConnections::build` (`daemon/src/agent_conn.rs`) creates a new `ConnectionCore` per connection and `ConnectionCore::new` starts `stopping: AtomicBool` at false; the `StopDaemon` arm returns `DispatchFlow::Close`, so one core never sees a second `StopDaemon`. A `StopDaemon` on another connection starts another `shutdown_all` alongside the first. The struct doc ("every field except `llm_policy` is a shared handle"), ADR-0350 decision 4 ("a second StopDaemon only joins") and the tests `a_stop_daemon_before_the_first_shutdown_signals_joins_it` / `a_stop_daemon_after_the_shutdown_signalled_only_answers_and_closes` (one core, two sessions — a shape production never builds) overstate it.
+- **Harm:** none found — kills serialize on the transport lock and `run()` runs `shutdown_all` again anyway (ADR-0352). Unreachable from our own clients today (the shell runs one stop flight with joiners).
+- **Next:** move the latch to a shared `Arc<AtomicBool>` on `AgentConnections` (and make the tests use two cores), or drop the "joins" claim from the doc, ADR-0350 and the test names.
+
+### T-98. An in-flight create can outlive the single-instance guard and write the roster after it is released
+- **Status:** not started · pre-existing (present at the merge base too) · rare ordering · found 2026-11-10 by the lifecycle-axis review of the master merge (`bb062838`).
+- **Problem:** the `InstanceGuard` (`daemon/src/lib.rs`) drops when `run()` returns, but `#[tokio::main]` then drops the runtime, which waits for running `spawn_blocking` work — the `SpawnByCwd` / `SpawnProfile` / `Spawn` creates (`connection_core.rs`). A create not yet inserted when the second `shutdown_all` ran finishes after the data-folder lock is released, and its roster writes (last failure ADR-0172, the `auto_restore` raise, the notice fingerprint record) land then. A daemon started in that window (ADR-0352 decision 2 does not hold back 「데몬 켜기」 during a stop) could load `agents.json` and have it overwritten by the old process. The child itself still dies with the old process's Job.
+- **Doc gap:** ADR-0352's "the single-instance guard holds `daemon.json` for the daemon's life" and the `lib.rs` comment hold for `run()`'s life, not the process's.
+- **Next:** drain or refuse in-flight creates before the guard drops (or hold the guard until the runtime is gone); fix the ADR-0352 wording either way.
+
+### T-99. A spawn that arrives while the daemon is stopping leaves an asleep agent with a last-failure mark
+- **Status:** recorded, not planned · pre-existing · found 2026-11-10 by the lifecycle-axis review of the master merge (`bb062838`).
+- **Problem:** ADR-0352 keeps the main link open during shutdown, so a WS `SpawnByCwd` or bus `agent.spawn` / `agent.spawnInto` whose child is killed mid-activation by `shutdown_all` takes the `CreatedAsleep` path and registers an asleep ad-hoc agent with a last-failure mark that survives a restart, although the cause was the stop. Master's `SpawnProfile` wake gets the same mark. No daemon-wide gate refuses creates: `AgentManager.shutting_down` is set first in `shutdown_all` but read only by the finish hook and the reaper; the per-connection `stopping` (T-97) cannot serve.
+- **Decision so far:** not refused — the CLAUDE.md principle 「최소한만 막기」 (block only what breaks a run or is a security hole); a misleading mark is neither.
+- **Next:** only if it bites — refuse creates once `shutting_down` is set, or skip the last-failure mark when the kill came from shutdown.
 
 ## 사소한 기능·정리
 
