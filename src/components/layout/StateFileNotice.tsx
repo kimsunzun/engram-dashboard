@@ -49,7 +49,7 @@ export default function StateFileNotice({
       role="status"
       data-state-file={stateFile}
       data-saves={saves === undefined ? undefined : String(saves)}
-      className="flex shrink-0 items-start gap-3 border-b border-border bg-elevated px-4 py-2 text-sm text-foreground"
+      className="flex shrink-0 items-start gap-3 border-b border-border bg-elevated px-3 py-1 text-xs leading-5 text-foreground"
       style={{ borderLeft: '3px solid var(--status-blocked)' }}
     >
       <div className="min-w-0 flex-1 wrap-anywhere">{message}</div>

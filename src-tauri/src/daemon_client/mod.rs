@@ -108,8 +108,8 @@ pub enum Band {
     /// ① Not connected. `refused` = the daemon refused this app's handshake for a reason other than the version
     /// check (the token text — TRD U2).
     NotConnected { refused: bool },
-    /// ② The running daemon speaks another protocol version. `can_stop` = the stop button is offered: the daemon is
-    /// older than this app and did not start after this app's process.
+    /// ② The running daemon speaks another protocol version. `can_stop` = a stop applies: the daemon is older than
+    /// this app and did not start after this app's process. No frontend reads it since ADR-0356.
     Version { can_stop: bool },
 }
 

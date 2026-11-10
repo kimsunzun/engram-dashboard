@@ -445,6 +445,9 @@ describe('eventBus — 방송 잇기 먼저, pull 나중', () => {
     get connectionState(): ConnectionState {
       return this._state
     }
+    get connectionBand(): null {
+      return null
+    }
     onConnectionStateChange(cb: (s: ConnectionState) => void): () => void {
       this.stateCbs.add(cb)
       cb(this._state)

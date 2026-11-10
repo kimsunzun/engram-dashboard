@@ -2226,6 +2226,11 @@
 - 2026-11-07 — Implementation landed. PTY pump drains while the console closes (Windows only — platform fact `CLOSE_NEEDS_DRAIN`; `master_closed` published after the master drop); daemon `Kill` runs on the blocking pool. PRD+TRD review full 3 rounds PASS; code review deep PASS (no must); QA PASS (AC1 base 5/5 fail → fix pass < 1 s; GUI kill mid-burst → reply 14–161 ms; base reproduces the wedge). Found in QA, separate and pre-existing: a spewing agent shown in a slot makes the daemon close the connection on a full send queue and the shell reconnect/replay every ~20–35 ms (tracked on the S21 branch). Follow-up: `/engram-adr link` to ADR-0001.
 - 2026-11-07 — Topic opened. Number = S34 (claim not pushed — push waits for the user). Source = S21 3-2 U4a GUI QA (the link froze while showing "connected"; also on the old driver) → investigation: `Kill` runs inline on the daemon connection task and `ClosePseudoConsole` blocks while the stopped PTY pump leaves conhost output undrained. PRD + TRD written.
 
+## S36 — connection band frontend (2026-11-10~, `v0.4.1/feat/connection-band`, autonomous session) · folder `docs/process/S36-connection-band/`
+
+- 2026-11-10 — Implemented and verified (`3592a84d`). ADR-0356 (version band only informs, 「다시 연결」 on both); PRD + TRD; PRD+TRD review full PASS (round 1 took the R21 cause guard back; boot start per window deferred → T-85); code review full PASS (2 rounds); QA PASS — CI three jobs locally, real-daemon lane + `v0.3.2` cross-version, mutation 3/3, release GUI AC1–AC7. Also: T-84 (update system), multi-daemon PRD/TRD get user-facing HTML (implement binding), review binding: screen-reader support is not a goal. Next: user's manual check → merge to master.
+- 2026-11-10 — Topic opened. Number = S36. Version band = text + 「다시 연결」 only, no stop button (user 「높고 낮은거 빼고 안내만해」 · 「그냥 다시연결로해. 끄기 말고」).
+
 ## 다음 (미진행)
 
 - **[✅ 결정 완료 2026-08-14 — ADR-0158] 버전 불일치는 끊지 않고 알린다.** 아래 방향 항목은 이 ADR로 닫혔다. 결정 = 프로토콜 버전 안 올림(상향 기준을 「봉투 문법이 깨질 때」로 좁힘) · 보내기 전 상대 능력 확인(데몬이 연결 직후 먼저 광고하므로 옛 데몬에게 모르는 것을 보낼 일이 없다 — 실측 확인) · 데몬 자동 종료 없음 · **고지 = 앱 시작 시 1회, 알리기만, 닫으면 작은 흔적**(행동 버튼 없음, 모달은 아예 못 붙을 때만) · 버전과 무관하게 마감 시한 + 오류의 상관관계 표시를 함께 깐다. 근거 조사 = `docs/research/daemon-version-mismatch-2026-08-14.md`(적대 리뷰 BLOCK → 추천 수정됨, 그 경위도 그 문서에).

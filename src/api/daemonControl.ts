@@ -2,8 +2,9 @@
 //
 // Boot bootstrap and window.__ENGRAM_DAEMON__ (LLM · cdp.mjs) go through this surface (§5 LLM-first control).
 //
-// ADR-0350: no stop here — the shell owns the one stop path (tray Stop / Quit; the LLM `daemon.stop` command comes
-// with U5b-2). A frontend stop that calls client.disconnect() or the `daemon_stop` pid kill races that path.
+// ADR-0350: no stop method on this surface — the shell owns the one stop path (tray Stop / Quit); the frontend only
+// asks it through `shutdownDaemon` below (the LLM `daemon.stop`). A frontend stop that calls client.disconnect()
+// races that path.
 //
 // ★ensure/reconnect separation (ADR-0021 invariant)★: only start triggers a spawn. The wsTransport reconnect
 // loop never calls this surface (attach-only). If the daemon is stopped, reconnect cannot attach and the state stays 'down'
@@ -13,6 +14,7 @@
 
 import { invoke } from '@tauri-apps/api/core'
 
+import type { DaemonShutdownReply } from '../../src-tauri/bindings/DaemonShutdownReply'
 import type { AgentClient } from './agentClient'
 
 /** daemon_status Tauri command return (mirror of DaemonStatusDto). */
@@ -50,11 +52,13 @@ export class DaemonDaemonControl implements DaemonControl {
     this.client = client
   }
 
-  // ★The single point where a failure reason reaches the screen (ADR-0134 decision 4)★: an explicit start goes through here from boot bootstrap and
-  //   window.__ENGRAM_DAEMON__ alike, so the reason is recorded in this one place too. If report calls are
-  //   scattered across callers, some path fails silently (the retry after the user fixed the folder and pressed again
-  //   was such a path).
+  // ★The single point where a start's failure cause reaches the screen (ADR-0134 decision 4)★: boot bootstrap,
+  //   window.__ENGRAM_DAEMON__, the band's 「다시 연결」 and the LLM `connection.reconnect` all start here, so the cause
+  //   is recorded in this one place. If report calls are scattered across callers, some path fails silently (the
+  //   retry after the user fixed the folder and pressed again was such a path).
   async start(opts?: { console?: boolean; timeoutMs?: number }): Promise<DaemonInfo> {
+    // TRD S21 trd-3-2-u5 R14: a new attempt drops the previous attempt's cause.
+    this.client.reportConnectionError(null)
     try {
       // 1) Spawn the daemon (if absent) — daemon_start Tauri command (WMI/CREATE_NO_WINDOW). console is a
       //    spawn-time parameter (a runtime toggle is follow-up — set_daemon_console not implemented, M-2). Attach if already alive.
@@ -79,4 +83,16 @@ export class DaemonDaemonControl implements DaemonControl {
   status(): Promise<DaemonStatus> {
     return invoke<DaemonStatus>('daemon_status')
   }
+}
+
+/**
+ * Stops the daemon through the shell's one stop path (`daemon_shutdown` — graceful, then an identity-checked kill;
+ * joins a stop already in flight). No confirm: the caller is the LLM `daemon.stop` (TRD S21 trd-3-2-u5 D5).
+ *
+ * ★Never `client.disconnect()`★ — the shell's link stays open through a stop and reports the next band itself
+ * (ADR-0352); a frontend close would leave the window with no band. A stop sets no band and no cause (TRD S21
+ * trd-3-2-u5 U6). A rejection = the command did not run (e.g. no shell client).
+ */
+export function shutdownDaemon(): Promise<DaemonShutdownReply> {
+  return invoke<DaemonShutdownReply>('daemon_shutdown')
 }

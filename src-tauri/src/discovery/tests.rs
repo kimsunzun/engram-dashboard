@@ -861,24 +861,7 @@ fn timeout_does_not_recover_if_old_daemon_really_dead() {
     assert!(matches!(err, DiscoveryError::Timeout(_)), "{err:?}");
 }
 
-// ── ADR-0021: daemon_status / daemon_stop (attach-only, spawn 0) ───────────────────
-
-struct CountingKiller {
-    killed: RefCell<Vec<u32>>,
-}
-impl CountingKiller {
-    fn new() -> Self {
-        Self {
-            killed: RefCell::new(Vec::new()),
-        }
-    }
-}
-impl ProcessKiller for CountingKiller {
-    fn kill(&self, pid: u32) -> Result<(), DiscoveryError> {
-        self.killed.borrow_mut().push(pid);
-        Ok(())
-    }
-}
+// ── ADR-0021: daemon_status (attach-only, spawn 0) ───────────────────
 
 #[test]
 fn status_live_file_reports_alive_with_pid_port() {
@@ -956,36 +939,6 @@ fn read_live_missing_or_broken_is_none() {
     assert!(read_live_with(&none_reader, &liveness).is_none());
     let broken_reader = FakeReader::new(vec![Err(DiscoveryError::Parse("bad".into()))]);
     assert!(read_live_with(&broken_reader, &liveness).is_none());
-}
-
-#[test]
-fn stop_live_daemon_kills_pid() {
-    let reader = FakeReader::new(vec![Ok(Some(info(444, PROTOCOL_VERSION)))]);
-    let liveness = FakeLiveness { dead: vec![] };
-    let killer = CountingKiller::new();
-    let got = stop_with(&reader, &liveness, &killer).unwrap();
-    assert_eq!(got, Some(444));
-    assert_eq!(killer.killed.borrow().as_slice(), &[444]);
-}
-
-#[test]
-fn stop_dead_daemon_does_not_kill() {
-    let reader = FakeReader::new(vec![Ok(Some(info(555, PROTOCOL_VERSION)))]);
-    let liveness = FakeLiveness { dead: vec![555] };
-    let killer = CountingKiller::new();
-    let got = stop_with(&reader, &liveness, &killer).unwrap();
-    assert_eq!(got, None);
-    assert!(killer.killed.borrow().is_empty(), "죽은 데몬은 kill 금지");
-}
-
-#[test]
-fn stop_missing_file_is_noop() {
-    let reader = FakeReader::new(vec![Ok(None)]);
-    let liveness = FakeLiveness { dead: vec![] };
-    let killer = CountingKiller::new();
-    let got = stop_with(&reader, &liveness, &killer).unwrap();
-    assert_eq!(got, None);
-    assert!(killer.killed.borrow().is_empty());
 }
 
 // ── locate_daemon_exe (branch injectable via tempfile) ─────────────────────────────────

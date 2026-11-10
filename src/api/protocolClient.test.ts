@@ -24,6 +24,7 @@ import {
   type UsageSnapshotPull,
 } from './agentClient'
 import type { InboundMessage, Transport } from './transport'
+import type { Band } from '../../src-tauri/bindings/Band'
 import type { AgentInfo, AgentProfile, RestoreReport } from './types'
 import type { UsageLimitSnapshot } from '../../crates/engram-dashboard-protocol/bindings/UsageLimitSnapshot'
 
@@ -48,8 +49,13 @@ class MockTransport implements Transport {
     this._state = initial
   }
 
+  private _band: Band | null = null
+
   get connectionState(): ConnectionState {
     return this._state
+  }
+  get connectionBand(): Band | null {
+    return this._band
   }
   onConnectionStateChange(cb: (s: ConnectionState) => void): () => void {
     this.stateCbs.add(cb)
@@ -124,6 +130,11 @@ class MockTransport implements Transport {
   setState(s: ConnectionState): void {
     this._state = s
     for (const cb of this.stateCbs) cb(s)
+  }
+  /** The shell's `(state, band)` status, as `TauriTransport` notifies it — a band change alone notifies too. */
+  setStatus(s: ConnectionState, band: Band | null): void {
+    this._band = band
+    this.setState(s)
   }
   lastSent<T = Record<string, unknown>>(key: string): T | undefined {
     for (let i = this.sent.length - 1; i >= 0; i--) {
@@ -1138,6 +1149,76 @@ describe('연결 실패 이유가 연결 상태 표면에 함께 실린다', () 
     c.reportConnectionError('이유')
     t.setState('connected')
     expect(seen).toEqual(['down'])
+  })
+})
+
+// ── Connection band and the start cause (TRD S36 §3-1 · TRD S21 trd-3-2-u5 R21) ─────────────────────────────
+describe('connection band and the start cause', () => {
+  const plain: Band = { kind: 'not_connected', refused: false }
+  const refused: Band = { kind: 'not_connected', refused: true }
+  const version: Band = { kind: 'version', can_stop: true }
+
+  it('notifies listeners on a band change with the same state word and reads the band through', () => {
+    const t = new MockTransport('down')
+    const c = new ProtocolClient(t)
+    const seen: Array<ConnectionState> = []
+    c.onConnectionStateChange((s) => seen.push(s))
+    expect(c.connectionBand).toBeNull()
+    t.setStatus('down', plain)
+    expect(seen).toEqual(['down', 'down'])
+    expect(c.connectionBand).toEqual(plain)
+    t.setStatus('down', version)
+    expect(seen).toEqual(['down', 'down', 'down'])
+    expect(c.connectionBand).toEqual(version)
+  })
+
+  it("keeps a failed start's cause through that attempt's own plain band ①", () => {
+    const t = new MockTransport('down')
+    const c = new ProtocolClient(t)
+    c.reportConnectionError('폴더 문제')
+    t.setStatus('down', plain)
+    expect(c.connectionError).toBe('폴더 문제')
+  })
+
+  it.each([
+    ['band ②', version],
+    ['band ① refused', refused],
+  ])('clears the cause when %s arrives', (_name, band) => {
+    const t = new MockTransport('down')
+    const c = new ProtocolClient(t)
+    c.reportConnectionError('폴더 문제')
+    t.setStatus('down', band)
+    expect(c.connectionError).toBeNull()
+  })
+
+  it.each([
+    ['band ②', version],
+    ['band ① refused', refused],
+  ])('ignores a cause set while %s holds', (_name, band) => {
+    const t = new MockTransport('down')
+    const c = new ProtocolClient(t)
+    t.setStatus('down', band)
+    const seen: Array<ConnectionState> = []
+    c.onConnectionStateChange((s) => seen.push(s))
+    c.reportConnectionError('늦게 온 이유')
+    expect(c.connectionError).toBeNull()
+    expect(seen).toEqual(['down']) // registration only — nothing changed
+  })
+
+  // Review 2026-11-10 M1: a version-mismatch boot records the failed start's text; ② hides it; the tray stop's
+  //   re-add then shows a plain ① — which must not carry that stale text.
+  it.each([
+    ['band ②', version],
+    ['band ① refused', refused],
+  ])('shows a plain ① with no stale cause after %s and a stop', (_name, band) => {
+    const t = new MockTransport('down')
+    const c = new ProtocolClient(t)
+    c.reportConnectionError('protocol 버전 불일치')
+    t.setStatus('down', band)
+    c.reportConnectionError('protocol 버전 불일치') // a retried start under the same band
+    t.setStatus('down', plain)
+    expect(c.connectionBand).toEqual(plain)
+    expect(c.connectionError).toBeNull()
   })
 })
 

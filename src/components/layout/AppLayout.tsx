@@ -45,7 +45,7 @@ export default function AppLayout({ restore = restoreClient }: Props) {
               // It covers below the title bar — the title bar is not covered (user decision 2026-10-26 · T-66).
               >
                 {/* The connection band is at the very top — if it cannot attach to the daemon nothing else works, so it must be read first (session judgment). */}
-                <ConnectionNotice />
+                <ConnectionNotice actions />
                 <StateFileNotice stateFile={status?.state_file} saves={status?.saves} />
               </NoticeOverlay>
             }

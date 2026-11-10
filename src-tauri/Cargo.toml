@@ -85,14 +85,16 @@ engram-dashboard-command = { path = "../crates/engram-dashboard-command" }
 # discovery: the daemon.json shared contract (DaemonInfo) + PROTOCOL_VERSION · the daemon WS first frame (`handshake::AuthFrame`).
 #   The first frame's shape lives in protocol (ADR-0310 decision 9), so the shell needs no daemon-side crate for it.
 engram-dashboard-protocol = { path = "../crates/engram-dashboard-protocol" }
-# ADR-0266: OS 층 — 이 셸의 OS 일은 전부 여기서 온다.
-#   데몬 찾기 · 띄우기 · 끄기(`crate::discovery`) — PID 생존 판정(`process::pid_alive_with_start_time`) · 데몬 exe 의
-#   경로 · 파일 이름(`env::sibling_exe` · `env::exe_file_name` — `locate_daemon_exe`) · Job 밖에서 띄우기
-#   (`spawn::spawn_outside_job` — WMI) · 끄기 fallback 의 트리 끄기(`process::kill_tree`).
-#   화면 상태(`crate::state`) — 상태 폴더 임시 파일 쓸기의 주인 생존 판정(`process::pid_alive` — `state::boot` 의
-#   `sweep_temps`) · 런타임 복원 수락 끝에 main 에 포커스를 줄지 가르는 전경 창 판정
-#   (`window::foreground_is_current_process` — `state::placement` 의 `foreground_is_ours`).
-#   스냅 레이아웃 오버레이(`window::snap`)는 위 `[features] snap-overlay` 를 켤 때만 — 그 기능이 platform 의 같은 이름을 켠다.
+# ADR-0266: OS layer — every OS task of this shell comes from here.
+#   Finding and starting the daemon (`crate::discovery`) — PID liveness (`process::pid_alive_with_start_time`), the
+#   daemon exe's path and file name (`env::sibling_exe` · `env::exe_file_name` — `locate_daemon_exe`), starting outside
+#   the Job (`spawn::spawn_outside_job` — WMI). Stopping it (`crate::daemon_client::shutdown`) — the identity-checked
+#   kill fallback (`process::terminate_if_same`).
+#   Screen state (`crate::state`) — liveness of a temp file's owner when sweeping the state folder (`process::pid_alive`
+#   — `state::boot`'s `sweep_temps`), and the foreground-window check that decides whether main gets focus at the end
+#   of a runtime-restore accept (`window::foreground_is_current_process` — `state::placement`'s `foreground_is_ours`).
+#   The snap layout overlay (`window::snap`) only with `[features] snap-overlay` above — that feature turns on
+#   platform's feature of the same name.
 #   The stop path (`daemon_client::shutdown`) — whether the target still runs (`process::presence`) and the
 #   identity-checked kill (`process::terminate_if_same` — ADR-0343).
 #   ★`windows` 를 이 셸에 직접 되살리지 말 것★ — OS crate 운영 의존은 platform 하나에만 둔다(CI `platform gate 5`).

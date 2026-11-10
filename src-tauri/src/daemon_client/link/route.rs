@@ -214,9 +214,10 @@ pub fn refusal_message(code: CloseCode, version: bool) -> &'static str {
     }
 }
 
-/// Whether band ② offers the stop button (TRD S21 trd-3-2-u5 §4-2): the daemon is older than this app and did not
-/// start after this app's process (one that did is an old exe run by hand — `stale_exe`). `own_start` = this app
-/// process's creation time; `None` (an OS that gives none) → `false`. A record without a start time (0) is not stale.
+/// Whether a stop applies to band ②'s daemon (TRD S21 trd-3-2-u5 §4-2; no frontend reads it since ADR-0356): the
+/// daemon is older than this app and did not start after this app's process (one that did is an old exe run by hand —
+/// `stale_exe`). `own_start` = this app process's creation time; `None` (an OS that gives none) → `false`. A record
+/// without a start time (0) is not stale.
 pub fn can_stop(refusal: &VersionRefusal, own_start: Option<u64>) -> bool {
     let Some(own_start) = own_start else {
         return false;

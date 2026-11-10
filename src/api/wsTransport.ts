@@ -15,6 +15,7 @@
 
 import { invoke } from '@tauri-apps/api/core'
 
+import type { Band } from '../../src-tauri/bindings/Band'
 import type { ConnectionState, UsageSnapshotPull } from './agentClient'
 import type { InboundMessage, Transport } from './transport'
 import {
@@ -136,6 +137,11 @@ export class WsTransport implements Transport {
   // ── Connection state ──────────────────────────────────────────────────────────────────
   get connectionState(): ConnectionState {
     return this._state
+  }
+
+  /** Always `null` — the shell decides the band, and this carrier talks to the daemon without one. */
+  get connectionBand(): Band | null {
+    return null
   }
 
   onConnectionStateChange(cb: (state: ConnectionState) => void): () => void {
