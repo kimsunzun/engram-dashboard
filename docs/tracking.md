@@ -72,6 +72,7 @@
 | T-99 | A spawn during daemon stop leaves an asleep agent with a last-failure mark | 버그 | Recorded, not planned (「최소한만 막기」) · pre-existing · found by the master-merge review |
 | T-93 | The codex live test L5 leaves its temporary folder on every run (os error 32) | 사소한 기능·정리 | Not started · found by S25 step 6 QA |
 | T-92 | The codex real-terminal cwd guard repeats `& ^ \| < >` instead of using the platform set | 사소한 기능·정리 | Not started · found by S25 step 6 review |
+| T-100 | CLAUDE.md 「최소한만 막기」 — add 「그 밖의 막기는 실제로 불편이 생기면 그때 더한다.」 | 사소한 기능·정리 | 트리거 대기 — the next CLAUDE.md revision |
 | T-71 | 트래킹 번호를 가리키지 않기 — 해결되면 그냥 지우기 | 사소한 기능·정리 | 할 일 — 나중에 이슈로 |
 | T-70 | 브랜치 앞 버전 짐작 기준 — 기능이면 0.5.0 쪽 | 사소한 기능·정리 | 할 일 — 나중에 이슈로 |
 | T-69 | 스텝 번호 규약 — 새 주제마다 S번호 | 사소한 기능·정리 | 일부 됨 · 남은 것 = 자잘한 커밋 접두 |
@@ -476,6 +477,11 @@
 - **Status:** not started · found 2026-11-10 by the S25 step 6 code review (the cwd-guard delta).
 - **Problem:** `backend/codex/launch.rs` `cwd_reaches_codex_unchanged` writes `& ^ | < >` as a literal instead of using the platform `CMD_UNSAFE_CHARS` (`crates/engram-dashboard-platform/src/shell.rs`), so a change to the platform set (e.g. `!` — T-84) would not reach it. There is also no separate test row for `>`.
 - **Next:** expose the set (or a space-aware helper) from `platform::shell` and use it in the guard; add the `>` row.
+
+### T-100. CLAUDE.md 「최소한만 막기」 — add the follow-up rule
+- **Status:** waiting for trigger — the next CLAUDE.md revision (user 2026-11-10: record it as feedback, do not edit CLAUDE.md now).
+- **Proposal:** append to the 「설계 원칙」 line 「최소한만 막기」 (added in `9969ac60`) the sentence 「그 밖의 막기는 실제로 불편이 생기면 그때 더한다.」 — from the user's follow-up 2026-11-10 「일단 너무 막지 말고 추가로 막는건 실제로 불편하면 막자고」.
+- **Next:** when CLAUDE.md is next revised, ask the user once and add it.
 
 ### T-71. 트래킹 번호를 가리키지 않기 — 해결되면 그냥 지우기
 - **옛 번호:** T-67 — 2026-10-23 슬롯 도킹 브랜치와 번호가 겹쳐 옮김.
