@@ -8,6 +8,7 @@
 
 import type { QueuedInputRow } from '../../crates/engram-dashboard-protocol/bindings/QueuedInputRow'
 import type { UsageLimitSnapshot } from '../../crates/engram-dashboard-protocol/bindings/UsageLimitSnapshot'
+import type { Band } from '../../src-tauri/bindings/Band'
 import type {
   AgentBackendKind,
   AgentInfo,
@@ -147,28 +148,37 @@ export interface AgentClient {
   // ── 연결 상태 ──────────────────────────────────────────────────────────────
   readonly connectionState: ConnectionState
   /**
-   * 연결이 끊긴 **이유**(사람이 읽는 문장). 이유를 모르면 null.
+   * The shell's connection band (TRD S21 trd-3-2-u5 §4-1) — `null` = none. The shell decides it; the frontend only
+   * renders it. A carrier without a shell never has one.
+   */
+  readonly connectionBand: Band | null
+  /**
+   * The cause text of one failed start attempt (a human-readable sentence, e.g. the unwritable data folder of
+   * ADR-0134), or null. It is only a cause shown under band ① (TRD S21 trd-3-2-u5 R14): it never raises a band.
    *
-   * ★왜 상태와 같은 표면에 두나(ADR-0134)★: 데이터 폴더에 쓸 수 없어 데몬이 못 뜨는 실패는
-   * 'down' 만으로는 원인 없는 시간 초과와 구분되지 않는다. 별도 핸들을 새로 파지 않고 이미 있는
-   * 연결 상태 표면에 이유를 실어, 상태를 그리는 쪽이 같은 구독으로 함께 받는다(§5 LLM-우선 제어 —
-   * 제어 표면은 하나다).
+   * ★Why it sits on the state surface (ADR-0134)★: a daemon that cannot start because its data folder is not writable
+   * is otherwise indistinguishable from a causeless timeout. The cause rides the existing connection state surface so
+   * the renderer gets it through the same subscription (§5 LLM-first control — one control surface).
+   *
+   * Cleared on `connected`, when band ② (`version`) or band ① `refused` arrives, and when a new start attempt begins.
    */
   readonly connectionError: string | null
   /**
-   * 상태 변화 구독. 반환은 해제 함수.
-   * ★[`connectionError`] 가 바뀔 때도 통지된다★ — 상태 문자열이 그대로여도(예: 'down' 인 채 이유만
-   * 밝혀져도) 구독자가 다시 그릴 수 있어야 한다.
+   * Subscribes to state changes; returns the release function.
+   * ★Also notified when [`connectionBand`] or [`connectionError`] changes★ — with the state word unchanged (e.g. still
+   * 'down' with only the cause found), the subscriber must still be able to redraw.
    */
   onConnectionStateChange(cb: (state: ConnectionState) => void): () => void
   /**
-   * 연결 실패 이유를 기록한다(null = 지움). 다음 'connected' 전이에서 자동으로 지워진다.
+   * Records the cause of a failed start (null = clear).
    *
-   * ★연결된 상태에서의 기록은 무시된다★: 지우는 계기가 'connected' 로의 *전이* 뿐이라, 이미
-   * 연결된 채로 기록하면 지울 전이가 오지 않아 영구 고착된다. 그래서 connected 면 null 로 접는다.
+   * ★Ignored while connected, under band ② and under band ① `refused`★ (TRD S21 trd-3-2-u5 R21): the automatic clears
+   * are the arrivals of those states, so a cause written while one already holds would never be cleared and would
+   * surface later as a stale cause of an unrelated ① (e.g. after a tray stop). This surface is public on
+   * `window.__ENGRAM_AGENT__`, so the LLM and cdp reach it too.
    *
-   * ★쓰는 곳은 지금 정확히 하나다★ — `DaemonControl.start()`. 부팅 bootstrap 과
-   * `window.__ENGRAM_DAEMON__.start()` 가 그 한 곳을 지나므로 둘 다 덮인다.
+   * ★Exactly one writer★ — `DaemonControl.start()`. Boot bootstrap, `window.__ENGRAM_DAEMON__.start()`, the band's
+   * 「다시 연결」 and the LLM `connection.reconnect` all go through it.
    *
    * ★Paths **not** covered (known gaps — do not describe them as wider)★:
    * - `AgentClient.connect()` — a public surface that goes as far as a spawn but does not pass through

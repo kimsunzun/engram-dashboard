@@ -27,6 +27,7 @@
 //   seq 를 건너뛰지 않는다(자리채움 · 끊기)는 것이 전제이고, 붙든 양은 붙듦 상한만 묶는다 — 넘치면 버퍼
 //   국면으로 돌아가 전량 replay 를 다시 청한다(`holdLive`).
 
+import type { Band } from '../../src-tauri/bindings/Band'
 import type {
   AgentClient,
   ConnectionState,
@@ -156,6 +157,11 @@ interface Pending {
 
 type WireEvent = Record<string, unknown>
 
+/** Band ② or ① `refused` — the bands a start attempt's cause never shows under (TRD S21 trd-3-2-u5 R21). */
+function refusesCause(band: Band | null): boolean {
+  return band !== null && (band.kind === 'version' || band.refused)
+}
+
 // ★ViewOutputState(§5 LLM 제어 표면 — ADR-0046)★는 AgentClient 인터페이스가 정본(agentClient.ts) —
 //   getViewOutputState 가 인터페이스 메서드라 타입도 거기 둔다(LLM 이 타입으로 발견).
 
@@ -211,6 +217,8 @@ export class ProtocolClient implements AgentClient {
         this.pending.clear()
         this.detachAllViews()
       }
+      // TRD S21 trd-3-2-u5 R21: a cause never shows under band ② or ① `refused` — drop it when one arrives.
+      if (refusesCause(transport.connectionBand)) this.connError = null
       this.notifyState()
     })
   }
@@ -220,15 +228,20 @@ export class ProtocolClient implements AgentClient {
     return this.transport.connectionState
   }
 
+  get connectionBand(): Band | null {
+    return this.transport.connectionBand
+  }
+
   get connectionError(): string | null {
     return this.connError
   }
 
   reportConnectionError(reason: string | null): void {
-    // ★연결돼 있으면 이유를 기록하지 않는다(load-bearing)★: 지우는 계기가 'connected' 로의 *전이*
-    //   하나뿐이라, 이미 connected 인 상태에서 기록을 허용하면 지울 전이가 영영 오지 않아 배너가
-    //   고착된다. 이 표면은 window.__ENGRAM_AGENT__ 로 공개돼 있어 LLM·cdp 호출로도 닿는다.
-    const next = this.transport.connectionState === 'connected' ? null : reason
+    // ★Not recorded while connected, under ② or under ① `refused` (load-bearing)★: the clears are transitions into
+    //   those states, so a cause written while one already holds would wait for a clear that never comes and show
+    //   later under an unrelated ① (the contract is on `AgentClient.reportConnectionError`).
+    const blocked = this.transport.connectionState === 'connected' || refusesCause(this.transport.connectionBand)
+    const next = blocked ? null : reason
     if (this.connError === next) return
     this.connError = next
     this.notifyState()

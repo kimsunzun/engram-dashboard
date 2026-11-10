@@ -42,6 +42,7 @@ const { connection } = vi.hoisted(() => {
   const connection = {
     listeners,
     connectionError: null as string | null,
+    connectionBand: null as Band | null,
     onConnectionStateChange(cb: () => void) {
       listeners.add(cb)
       cb()
@@ -57,6 +58,7 @@ vi.mock('../api/clientFactory', async importOriginal => ({
   agentClient: connection,
 }))
 
+import type { Band } from '../../src-tauri/bindings/Band'
 import PopoutPage from './PopoutPage'
 
 const POPUP_LABEL = 'slot-popup-1'
@@ -76,6 +78,7 @@ afterEach(() => {
   window.location.hash = origHash
   connection.listeners.clear()
   connection.connectionError = null
+  connection.connectionBand = null
 })
 
 describe('PopoutPage (탭 소유 모델, ADR-0057)', () => {
@@ -96,6 +99,8 @@ describe('PopoutPage (탭 소유 모델, ADR-0057)', () => {
 describe('PopoutPage — 연결 띠는 레이아웃을 덮는다(ADR-0277)', () => {
   function mount(connectionError: string | null) {
     connection.connectionError = connectionError
+    // The shell raises the band — a cause alone shows nothing.
+    connection.connectionBand = connectionError === null ? null : { kind: 'not_connected', refused: false }
     const r = render(<PopoutPage />)
     const root = r.container.firstElementChild as HTMLElement
     const windowLayout = screen.getByTestId('window-layout')
@@ -142,5 +147,17 @@ describe('PopoutPage — 연결 띠는 레이아웃을 덮는다(ADR-0277)', () 
     mount('폴더 문제')
     fireEvent.click(screen.getByLabelText('알림 닫기'))
     expect(screen.queryByRole('alert')).toBeNull()
+  })
+})
+
+describe('PopoutPage — the band is text only (TRD S36 §3-4)', () => {
+  it.each([
+    ['band ①', { kind: 'not_connected', refused: false } as Band, '데몬에 연결하지 못했습니다.'],
+    ['band ②', { kind: 'version', can_stop: true } as Band, '실행 중인 데몬이 이 앱과 버전이 다릅니다'],
+  ])('shows %s with no button but ✕', (_name, band, text) => {
+    connection.connectionBand = band
+    render(<PopoutPage />)
+    expect(screen.getByRole('alert').textContent).toContain(text)
+    expect(screen.getAllByRole('button').map(b => b.getAttribute('aria-label'))).toEqual(['알림 닫기'])
   })
 })

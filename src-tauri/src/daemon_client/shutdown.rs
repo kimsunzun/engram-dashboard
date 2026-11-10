@@ -87,7 +87,7 @@ impl StopPlan {
 pub enum StopOrigin {
     Tray,
     AppExit,
-    /// The `daemon_shutdown` command — the band's stop button or the LLM `daemon.stop`.
+    /// The `daemon_shutdown` command — the LLM `daemon.stop`.
     Command,
 }
 

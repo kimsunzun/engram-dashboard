@@ -6,6 +6,7 @@
 // (ADR-0046 amend: the trigger to re-attach is the authoritative registry, not the socket), so shaking the state makes
 // slots flicker to the absent display each time.
 
+import type { Band } from '../../src-tauri/bindings/Band'
 import type { ConnectionState, UsageSnapshotPull } from './agentClient'
 
 /**
@@ -40,6 +41,12 @@ export type InboundMessage =
 /** The carrier abstraction — the only transport surface ProtocolClient depends on (daemon connection only, ADR-0029). */
 export interface Transport {
   readonly connectionState: ConnectionState
+
+  /**
+   * The shell's connection band (TRD S21 trd-3-2-u5 §4) — `null` = none. A carrier without a shell never has one.
+   * A band change is notified through [`onConnectionStateChange`] with the state word, even when the word is unchanged.
+   */
+  readonly connectionBand: Band | null
 
   /** Notifies the current state once immediately on registration, then is called on change. Returns a release function. */
   onConnectionStateChange(cb: (state: ConnectionState) => void): () => void

@@ -84,6 +84,9 @@ class FakeTransport implements Transport {
   get connectionState(): ConnectionState {
     return this._state
   }
+  get connectionBand(): null {
+    return null
+  }
   onConnectionStateChange(cb: (s: ConnectionState) => void): () => void {
     this.stateCbs.add(cb)
     cb(this._state)
