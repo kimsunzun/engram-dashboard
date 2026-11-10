@@ -21,6 +21,7 @@ const { connection } = vi.hoisted(() => {
   const connection = {
     listeners,
     connectionError: null as string | null,
+    connectionBand: null as Band | null,
     onConnectionStateChange(cb: () => void) {
       listeners.add(cb)
       cb()
@@ -36,6 +37,7 @@ vi.mock('../../api/clientFactory', async importOriginal => ({
   agentClient: connection,
 }))
 
+import type { Band } from '../../../src-tauri/bindings/Band'
 import AppLayout from './AppLayout'
 import { createRestoreClient, type RestoreStatusView } from '../../api/restoreClient'
 import { fakeRestoreIpc, flush, view } from '../../api/testing/fakeRestoreIpc'
@@ -47,6 +49,8 @@ const idleRestore = () => createRestoreClient(fakeRestoreIpc(view('none')).ipc)
 
 async function mount(initial: RestoreStatusView, connectionError: string | null = null) {
   connection.connectionError = connectionError
+  // The shell raises the band — a cause alone shows nothing.
+  connection.connectionBand = connectionError === null ? null : { kind: 'not_connected', refused: false }
   const r = render(<AppLayout restore={createRestoreClient(fakeRestoreIpc(initial).ipc)} />)
   await act(async () => {
     await flush()
@@ -59,6 +63,7 @@ afterEach(() => {
   cleanup()
   connection.listeners.clear()
   connection.connectionError = null
+  connection.connectionBand = null
 })
 
 describe('AppLayout — 슬롯화된 셸(ADR-0063)', () => {
@@ -148,5 +153,12 @@ describe('AppLayout — 알림은 레이아웃을 덮는다(ADR-0276 · ADR-0277
 
     fireEvent.click(screen.getByLabelText(t('restore.dismissNotice')))
     expect(screen.queryByRole('status')).toBeNull()
+  })
+})
+
+describe('AppLayout — the main window band carries 「다시 연결」 (TRD S36 §3-4)', () => {
+  it('shows 「다시 연결」 on band ①', async () => {
+    await mount(view('none'), '폴더 문제')
+    expect(screen.getByRole('button', { name: '다시 연결' })).toBeTruthy()
   })
 })

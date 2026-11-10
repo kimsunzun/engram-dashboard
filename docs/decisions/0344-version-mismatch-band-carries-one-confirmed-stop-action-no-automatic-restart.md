@@ -1,7 +1,7 @@
 # ADR-0344: Version-mismatch band carries one confirmed stop action, no automatic restart
 
-- 상태: 확정 (2026-11-05, 근거: 사용자 결정 2026-11-05 「행동 버튼하나 둬 그럼」 + 조사 `docs/research/banner-action-buttons-2026-11-05.md` (light)) · 부분 폐기 by ADR-0350 (결정 4와 5의 안내 문구)
-- 관련: Amends ADR-0180 (결정 1 띠는 알리기만 한다) · Amends ADR-0343 (결정 1 재시작 행동과 결정 4 새 데몬 자동 시작) · ADR-0287 (band layer and ✕ close — unchanged) · ADR-0342 (version mismatch on the existing connection-failure surface) · ADR-0158 결정 3 (no automatic kill — kept) · `src/components/layout/ConnectionNotice.tsx` · `src-tauri/src/daemon_client/stop.rs` · TRD `docs/process/S21-crate-boundaries/trd-3-transport.md` §6-2 U5 · step-log S21 · Amended by ADR-0350 (결정 4와 5의 안내 문구)
+- 상태: 확정 (2026-11-05, 근거: 사용자 결정 2026-11-05 「행동 버튼하나 둬 그럼」 + 조사 `docs/research/banner-action-buttons-2026-11-05.md` (light)) · 부분 폐기 by ADR-0350 (결정 4와 5의 안내 문구) · 부분 폐기 by ADR-0356 (결정 1에서 4의 띠 끄기 버튼)
+- 관련: Amends ADR-0180 (결정 1 띠는 알리기만 한다) · Amends ADR-0343 (결정 1 재시작 행동과 결정 4 새 데몬 자동 시작) · ADR-0287 (band layer and ✕ close — unchanged) · ADR-0342 (version mismatch on the existing connection-failure surface) · ADR-0158 결정 3 (no automatic kill — kept) · `src/components/layout/ConnectionNotice.tsx` · `src-tauri/src/daemon_client/stop.rs` · TRD `docs/process/S21-crate-boundaries/trd-3-transport.md` §6-2 U5 · step-log S21 · Amended by ADR-0350 (결정 4와 5의 안내 문구) · Amended by ADR-0356 (결정 1에서 4의 띠 끄기 버튼)
 
 ## 맥락
 

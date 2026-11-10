@@ -150,7 +150,7 @@ pub fn daemon_status() -> Result<DaemonStatusDto, String> {
 // Reads the live daemon's address from daemon.json. ★Never spawns★ (ADR-0021: reconnect never wakes a daemon — it
 // only follows a daemon that moved to its new address). No daemon or a dead one → None.
 //
-// ★For hot-swap tracking on reconnect★: when daemon_stop→daemon_start (full replacement) or a crash respawn brings the
+// ★For hot-swap tracking on reconnect★: when a stop → daemon_start (full replacement) or a crash respawn brings the
 // daemon up on a new port, the frontend reconnect loop (wsTransport) re-reads the current daemon.json through this
 // command instead of its cached old address and attaches at the new one. Read-only, so it is kept apart from
 // discover_daemon (which spawns).
@@ -223,9 +223,9 @@ impl From<StopResult> for DaemonShutdownReply {
     }
 }
 
-// The user's daemon stop (band button · LLM `daemon.stop`) — the shell's one stop path (`daemon_client::shutdown`,
-// plan `User`: graceful, then the identity-checked kill). Joins a stop already in flight. No confirm here: the band
-// asks before it calls (TRD S21 trd-3-2-u5 D5).
+// The user's daemon stop from the LLM `daemon.stop` — the shell's one stop path (`daemon_client::shutdown`, plan
+// `User`: graceful, then the identity-checked kill). Joins a stop already in flight. No confirm (TRD S21 trd-3-2-u5
+// D5); the band has no stop button (ADR-0356).
 #[tauri::command]
 pub async fn daemon_shutdown(
     client: tauri::State<'_, Arc<DaemonClient>>,
@@ -234,19 +234,6 @@ pub async fn daemon_shutdown(
         .stop_daemon_with_reason(StopPlan::User, StopOrigin::Command)
         .await;
     Ok(end.into())
-}
-
-// Force-kills the pid in daemon.json with its child tree (`/F /T` — platform `process::kill_tree`), with no graceful
-// `StopDaemon` first. No frontend calls it; U5b-2 removes it (TRD S21 trd-3-2-u5 §3-5). The graceful stop with an
-// identity-checked kill is the shell's stop path (`daemon_client::shutdown`).
-// Returns: the pid it tried to kill (None if none).
-#[tauri::command]
-pub async fn daemon_stop() -> Result<Option<u32>, String> {
-    let data_dir = discovery::default_data_dir();
-    tauri::async_runtime::spawn_blocking(move || discovery::daemon_stop(&data_dir))
-        .await
-        .map_err(|e| format!("daemon_stop join 실패: {e}"))?
-        .map_err(|e| e.to_string())
 }
 
 /// `on_search` runs once the search is about to run — after the wait for another window's search.

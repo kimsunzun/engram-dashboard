@@ -10,6 +10,9 @@
 
 | ID | 제목(짧게) | 구역 | 상태 |
 |---|---|---|---|
+| T-86 | Tray 「데몬 켜기」 reconnects but slots keep the daemon-down icon | 메인 | Deferred to the multi-daemon topic with the tray work (user 2026-11-10) |
+| T-85 | A new window starts a daemon the user stopped (boot start in every window) | 메인 | Deferred to the multi-daemon topic (user 2026-11-10) |
+| T-84 | Update system — replace a version-mismatched daemon | 메인 | Not started — deferred by the user (ADR-0356) |
 | T-81 | Split the tray out of the app (client) process | 메인 | Not started — idea/refactor; keep as is for now (user 2026-11-09) |
 | T-77 | LLM control — remaining gaps (moved from todo) | 메인 | Waiting for trigger — close each gap when its feature is touched |
 | T-66 | 창 크롬 · 이름(크롬식 제목 표시줄 · 창 번호 재사용 · 창 제목) | 메인 | 진행 — `v0.5.0/feat/window-chrome`(S26) · U1–U9 구현 · U10 문서 착지(2026-10-26) · 사람 손 GUI 확인 2026-10-26(S13 · S14 통과) · 남은 것 = push · CI · master 머지 |
@@ -68,6 +71,23 @@
 | T-16 | 프론트 종료 판정 · 세대 필터 | 사소한 기능·정리 | 잔존 · T-32 선결 |
 
 ## 메인
+
+### T-86. Tray 「데몬 켜기」 reconnects but slots keep the daemon-down icon
+- **Status:** deferred to the multi-daemon topic, together with the tray work — user 2026-11-10: 「어차피 멀티데몬할때 트레이도 개선해야되니 나중에 다시 오픈하자」.
+- **Observed (user, S36 release check build `3592a84d`):** kill the daemon → band ① → ✕ → tray 「데몬 켜기」 → a new daemon starts (shell log: a new daemon pid right after the last failed attempt), but the slots keep the daemon-down (power-off) icon.
+- **Not checked:** whether the band's 「다시 연결」 (the frontend `DaemonControl.start()` path) clears the icon; whether master before S36 behaves the same (likely — S36 did not touch the tray or slots).
+- **Guess (unverified):** the tray start reattaches only the shell link (`attach_in_background`); the frontend's reconnect path that re-reads agents and slot state does not run.
+
+### T-85. A new window starts a daemon the user stopped (boot start in every window)
+- **Status:** deferred to the multi-daemon topic — user 2026-11-10: 「나중에 다중에이전트 선택할때 결정하는게 좋을듯? 일단은 이대로 유지하자」.
+- **Fact (code trace by the S36 PRD+TRD review, not run):** every window runs the boot start (`bootstrapDaemonIfNeeded` → `daemon_start` → `ensure_daemon`, which spawns a daemon when none runs). After a tray 「데몬 끄기」 or LLM `daemon.stop`, opening a popout claims the spare, the rebuilt spare boots, and a daemon starts again; the main window's link reattaches. Pre-existing on master.
+- **Decided but not landed:** ADR-0350 decision 5 (boot start in the main window only, R17) and decision 2's attach-after-failed-start (R15) were to land in S21 U5b-2; S36 replaced U5b-2 without them. R17 needs the listener single-flight (parked `4d25dfa7`, `tauriTransport.ts`) with it. R15 looks unnecessary — the boot pulls already create the handle (S21 U5b-1).
+- **Next:** decide in the multi-daemon topic which window or component owns starting a daemon.
+
+### T-84. Update system — replace a version-mismatched daemon
+- **Status:** not started — deferred by the user (2026-11-10: 「나중에 업데이트 시스템에서 자세히 다루면 될듯」).
+- **Fact:** on a version mismatch the app and the daemon do not talk; the band only informs and offers 「다시 연결」 (ADR-0356). The user stops the daemon themselves (tray 「데몬 끄기」 for an older daemon; a newer one from the newer app or the OS).
+- **Next:** design how the app moves to a matching daemon — stop the old one and start the new one, never downgrade a newer daemon from an older app.
 
 ### T-81. Split the tray out of the app (client) process
 - **Status:** not started — idea/refactor. Keep the current shape for now (user 2026-11-09: 「트레이는 지금 클라에 종속되어있는데 분리해야되긴함. 일단은 이대로」).

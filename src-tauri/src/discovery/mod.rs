@@ -431,7 +431,7 @@ fn read_live_with(reader: &dyn DaemonReader, liveness: &dyn PidLiveness) -> Opti
 
 /// Reads the live daemon's record (the token included) from `daemon.json` (real entry point).
 ///
-/// ★How the direct-path reconnect follows a moved daemon (ADR-0021)★: after a hot swap (daemon_stop → start) or a
+/// ★How the direct-path reconnect follows a moved daemon (ADR-0021)★: after a hot swap (stop → start) or a
 /// crash respawn the daemon comes up on a new port; the dev `wsTransport` reconnect re-reads the **current
 /// `daemon.json`** through this (via the `read_daemon_info` command, its only caller, which strips the token before it
 /// reaches the WebView — ADR-0310 D23 ①) instead of a cached address. The shell's own link reads `daemon.json` itself
@@ -441,65 +441,6 @@ pub fn read_live_daemon(data_dir: &Path) -> Option<DaemonInfo> {
         path: DataLayout::new(data_dir).daemon_file(),
     };
     read_live_with(&reader, &RealLiveness)
-}
-
-pub trait ProcessKiller {
-    /// Success is best-effort (treated as Ok if already dead).
-    fn kill(&self, pid: u32) -> Result<(), DiscoveryError>;
-}
-
-// ADR-0024: the pid kill behind the `daemon_stop` command. No frontend calls the command; U5b-2 removes it (TRD S21
-//   trd-3-2-u5 §3-5). The shell's stop path does not use it: its kill is handle-pinned (`daemon_client::shutdown` ·
-//   `platform::process::terminate_if_same`).
-//
-/// Daemon pid kill (real entry point).
-///
-/// It kills the pid in daemon.json directly, with no graceful `StopDaemon` first — the graceful stop is the shell's
-/// stop path (see the note above). The daemon holds its children in a KILL_ON_JOB_CLOSE Job, so when the daemon
-/// process dies the child PTYs are cleaned up with it (no detach possible, same as the connection_core StopDaemon comment).
-///
-/// Returns: Ok(Some(pid))=the pid a kill was attempted on, Ok(None)=no daemon to kill (no file/already dead).
-pub fn daemon_stop(data_dir: &Path) -> Result<Option<u32>, DiscoveryError> {
-    stop_with(
-        &FileReader {
-            path: DataLayout::new(data_dir).daemon_file(),
-        },
-        &RealLiveness,
-        &TaskKiller,
-    )
-}
-
-fn stop_with(
-    reader: &dyn DaemonReader,
-    liveness: &dyn PidLiveness,
-    killer: &dyn ProcessKiller,
-) -> Result<Option<u32>, DiscoveryError> {
-    match reader.read() {
-        Ok(Some(info)) => {
-            if liveness.is_dead(info.pid, info.start_time) {
-                return Ok(None);
-            }
-            killer.kill(info.pid)?;
-            Ok(Some(info.pid))
-        }
-        _ => Ok(None),
-    }
-}
-
-struct TaskKiller;
-
-// ADR-0266
-impl ProcessKiller for TaskKiller {
-    fn kill(&self, pid: u32) -> Result<(), DiscoveryError> {
-        // Stops down to the child tree — overlaps the daemon Job safety net but is harmless.
-        engram_dashboard_platform::process::kill_tree(pid).map_err(|e| {
-            DiscoveryError::Io(if e.kind() == std::io::ErrorKind::Unsupported {
-                "daemon_stop 은 Windows 전용".into()
-            } else {
-                e.to_string()
-            })
-        })
-    }
 }
 
 // ── public entry points ─────────────────────────────────────────────────────────
