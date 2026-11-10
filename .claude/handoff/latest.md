@@ -1,4 +1,4 @@
-# Handoff: S25 step 7 — child TRD reviewed (deep, 7 rounds), P1 + P2 landed and pushed; next = P3 (format)
+# Handoff: S25 step 7 — child TRD reviewed, P1 + P2 + P3 landed and pushed; next = P4 (validate)
 
 ## Know first
 - **The user went to sleep with 「나 잘테니깐 쭉 진행해」** (autonomous). Main kept going: TRD review → overview HTML → P1 → P2. On waking the user should glance at the main decisions tagged 「확인 필요」 in `docs/process/S25-preset-library/trd-asset-library.html` (class rules A/B, B29, B25, B31, B30) — none was confirmed by the user.
@@ -6,21 +6,22 @@
 - Other sessions run in other worktrees; before taking an ADR or T-number scan all refs (ADR script does). Highest T = T-103 (ours). Highest ADR = 0358.
 - Tree is clean except ~45 `src-tauri/bindings/*.ts` line-ending noise (never stage).
 - Account changed mid-session (user re-logged with a personal account); company rules still apply (Engram = personal project).
-- Codex threads left in the user's real `~/.codex` by QA (deleting is the user's): `01a1c524-d338-7af1-8b44-29593e88979a` (S36 merge QA), `01a1c744-34b6-7972-9a55-dd73d4c8131e` (P2 QA).
+- Codex threads left in the user's real `~/.codex` by QA/review (deleting is the user's): `01a1c524-d338-7af1-8b44-29593e88979a` (S36 merge QA), `01a1c744-34b6-7972-9a55-dd73d4c8131e` (P2 QA); review threads also live there (e.g. `01a1c772-8d7a-7ff1-98a0-ec3c123cafce`, P3 review).
 
 ## One-line state · next first action
-Step 7 = new crate `engram-dashboard-asset-library` in 9 units (P1–P9). **P1 and P2 are committed and pushed** (each: deep code review PASS + QA PASS, tree fingerprint = commit). **Next: P3 (format — read · front matter · tree + whole-file writer · codex golden), then P4 validate, P5 store/scan/catalog/refs, P6 folder IO (deep), P7 service+gate (deep), P8 builtin+resolve, P9 launch (deep)**, each coder → `/engram-review code` → `/engram-qa` → commit. Then the step-7 doc pass (list below). Step 7 is *Stop (after)* — show the user when all units land.
+Step 7 = new crate `engram-dashboard-asset-library` in 9 units (P1–P9). **P1, P2 and P3 are committed and pushed** (each: deep code review PASS + QA PASS, tree fingerprint = commit). **Next: P4 validate, P5 store/scan/catalog/refs, P6 folder IO (deep), P7 service+gate (deep), P8 builtin+resolve, P9 launch (deep)**, each coder → `/engram-review code` → `/engram-qa` → commit. Then the step-7 doc pass (list below). Step 7 is *Stop (after)* — show the user when all units land.
 
 ## Repo state (branch v0.5.0/feat/preset-library · worktree wt1)
-- HEAD `d8bd75db` + this handoff commit; upstream 0/0 before this commit (this commit unpushed until next push); origin/master 0 ahead / branch 163 ahead.
-- This session's commits (since `18b322cc`): `c26a667f` renumber T-84..86→T-101..103 · `60002c49` merge master (S36 connection band) · `5b4e4b4b` `77859e6b` ADR-0358 (supersedes 0333; amends 0336, 0338) · `72d40d59` … `c23bdecd` child TRD drafts 2–8 + reviewed · `3cb8b1e9` overview HTML · `9adca500` TRD batched fixes · `42cede81` **P1** · `d8bd75db` **P2**.
+- HEAD `1246253d` + this handoff commit; upstream 0/0 before this commit (this commit unpushed until next push); origin/master 0 ahead / branch 163 ahead.
+- This session's commits (since `18b322cc`): `c26a667f` renumber T-84..86→T-101..103 · `60002c49` merge master (S36 connection band) · `5b4e4b4b` `77859e6b` ADR-0358 (supersedes 0333; amends 0336, 0338) · `72d40d59` … `c23bdecd` child TRD drafts 2–8 + reviewed · `3cb8b1e9` overview HTML · `9adca500` TRD batched fixes · `42cede81` **P1** · `d8bd75db` **P2** · `6575d45b` handoff · `1246253d` **P3**.
 
 ## Verification state
 - S36 merge `60002c49`: review light PASS; QA PASS (Rust 5821, frontend 2807, gates, shell real-daemon lane, codex lane, mutation 2/2, GUI release build: band shows on daemon kill, reconnect clears it, `daemon_stop` gone).
 - Child TRD `trd-asset-library.md` (draft 8, reviewed): deep — lead PASS r4, concurrency axis PASS r7, codex gpt-6.1-sol xhigh PASS r7. Review record in §13.
 - P1 `42cede81`: deep review 3 rounds → PASS all; QA PASS on tree `d2e2b383` (Rust 5844, frontend 2807, tsc, gates 33/33 incl. license notice with `relative-path 2.0.3`, mutation 3/3, gate 4 fires on injected `use tauri`).
 - P2 `d8bd75db`: deep review PASS all + 권장 round re-confirmed; QA PASS on tree `d7a74298` (Rust 5857, frontend 2807, gates 33/33, claude lane 10/10, codex lane 16/16, mutation 3/3). `lanes.tsv` both lines = `42cede81 +uncommitted`.
-- **CI not checked** for pushed `42cede81` / `d8bd75db`. Check: `gh run list -b v0.5.0/feat/preset-library -L 5 --json headSha,status,conclusion`.
+- P3 `1246253d`: deep review — 3 rounds + one prescriptive round past the 3-round cap (main switched raw-span checks to whitelists) + a one-line main fix (raw-text display only for settings `description`), final PASS from lead, data-fidelity axis, codex; QA PASS on tree `84ab1f9c` (Rust 5946, frontend 2807, gates 33/33 incl. license notice listing all 12 new packages, mutation 6/6). **Report to the user: P3 exceeded the re-fix cap by one prescriptive round; the `...`/raw-span class kept producing new edge cases.**
+- **CI not checked** for pushed `42cede81` / `d8bd75db` / `1246253d`. Check: `gh run list -b v0.5.0/feat/preset-library -L 5 --json headSha,status,conclusion`.
 - Overview HTML: not rendered in a browser (tag balance + SVG coords only).
 - Rerun: `cargo test --workspace -- --test-threads=4`; lanes per `.claude/skill-bindings/qa.md`.
 
@@ -52,6 +53,7 @@ Open: user confirmation of the 「확인 필요」 main decisions; step 5 confir
 - TRD fixes: §3-10 L552 (verbatim strip only when safe; trailing separator rule); "9 `FolderLoadSet` literals" → 2; copy §12 hand-over lines into parent `trd.md`.
 - Stale location: `docs/tracking.md` L434/L443/L493 (T-92) and `trd-codex-translation.md` L21 still place `cwd_reaches_codex_unchanged` in `backend/codex/launch.rs` (now `cmdline.rs`).
 - step-log entries for S36 merge and step-7 units; `docs/tracking.md` for anything deferred.
+- P3 follow-ups for the doc pass: `rewrite_lists` takes `backends` (frozen interface changed); new reason codes `field-invalid`, `item-shape-invalid`, `item-path-invalid`, `backend-tag-not-allowed` (TRD B8); reader also uses `preset-multi-document`; settings files use `yaml-syntax` for a tail after `...`; TRD premise 22 says 5 new packages — actual 12; 9a hand-over: `preset.save` must carry origins (else a renamed item drops its map's other keys); P5 hand-over: let a successful parse win over `sniff_kind` (`kind: !!str preset`, anchors, block scalars).
 - P4 brief note: the merge-origins port has no row for a non-empty container; attribute container-pointer schema errors through descendant rows. P6 brief note: `BoundedIo.list_cap` production default = `agent::launch::FOLDER_LISTING_CAP`.
 
 ## Improvements
