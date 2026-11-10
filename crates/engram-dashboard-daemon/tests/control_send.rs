@@ -204,9 +204,12 @@ async fn post_send(
     (status, text)
 }
 
-fn spawn_json_agent(
+/// Returns once the agent is listed **and its appearance flush has returned** — the first send after this does not
+///   race that appearance drain.
+async fn spawn_json_agent(
     manager: &Arc<AgentManager>,
     registry: &Arc<ControlRegistry>,
+    messaging: &Arc<MessagingService>,
     name: &str,
 ) -> Option<(AgentInfo, String)> {
     let mut profile = AgentProfile::new(
@@ -232,6 +235,18 @@ fn spawn_json_agent(
     }) {
         return None;
     }
+    // The spawn's appearance flush can take the first send's letter into its batch, and that send then answers `pending` (spec §6 ㉯).
+    // Async wait: on a current-thread runtime the flush lane is polled only while this test awaits.
+    let settled = tokio::time::timeout(Duration::from_secs(5), async {
+        while messaging.async_drains_done_for_test(info.id) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        settled.is_ok(),
+        "[{name}] the appearance flush for the spawned agent did not return within 5s"
+    );
     // registry 에 발급 토큰 조회 API 가 없어 provision 이 이 (id, epoch) 에 발급한 토큰을 못 꺼낸다 —
     //   발신자용 토큰을 따로 issue 해 심는다(발신자 신원만 맞으면 relay 는 동일).
     let token = format!("sender-tok-{}", info.id);
@@ -434,9 +449,10 @@ async fn roster_excludes_a_terminal_session_still_in_the_map() {
 // ── relay happy path: json 에이전트에 보내면 래핑된 라인이 stdin 입력 에코로 관측된다 ────────────────
 #[tokio::test]
 async fn control_send_relays_wrapped_line_to_json_agent() {
-    let (manager, registry, base, data_dir, handle, _messaging, _busy) = wire("relay").await;
+    let (manager, registry, base, data_dir, handle, messaging, _busy) = wire("relay").await;
 
-    let Some((b_info, _b_tok)) = spawn_json_agent(&manager, &registry, "bee") else {
+    let Some((b_info, _b_tok)) = spawn_json_agent(&manager, &registry, &messaging, "bee").await
+    else {
         require_claude("control_send_relays_wrapped_line_to_json_agent");
     };
 
@@ -504,7 +520,9 @@ async fn control_send_revoked_sender_still_delivers_observation() {
     let (manager, registry, _base, data_dir, handle, messaging, _busy) =
         wire("revoked-delivers").await;
 
-    let Some((b_info, _b_tok)) = spawn_json_agent(&manager, &registry, "target-b") else {
+    let Some((b_info, _b_tok)) =
+        spawn_json_agent(&manager, &registry, &messaging, "target-b").await
+    else {
         require_claude("control_send_revoked_sender_still_delivers_observation");
     };
 
@@ -1284,7 +1302,9 @@ async fn control_send_delivery_observation_records_bytes_and_correlated_ids() {
 
     let (manager, registry, _base, data_dir, handle, messaging, _busy) = wire("delivery-obs").await;
 
-    let Some((b_info, _b_tok)) = spawn_json_agent(&manager, &registry, "obs-target") else {
+    let Some((b_info, _b_tok)) =
+        spawn_json_agent(&manager, &registry, &messaging, "obs-target").await
+    else {
         require_claude("control_send_delivery_observation_records_bytes_and_correlated_ids");
     };
 
@@ -1826,13 +1846,16 @@ async fn c1_park_then_spawn_auto_delivers() {
     //   부재가 **입구 반려(실패 행)** 가 되며 그 진입로가 없어졌다. 이 테스트가 지키는 건 부재가 아니라
     //   **"파킹된 메일이 flush 계기에 자동으로 배달된다"** 는 배선이라, 파킹 사유만 남은 유일한 경로
     //   (busy = 턴 진행 중)로 바꿨다 — 관측 대상(idle diff → flush 워커 → 주입 → 관측)은 그대로다.
-    // ★미커버 축의 정직한 표기(리뷰 C1)★: 그 교체로 **로스터 등장 diff → flush**(MessagingFlushSink 가
-    //   agent_list_updated 를 보고 그 이름 큐를 여는 배선) 축은 **통합 경로로는** 아무 테스트도 안 덮는다 —
-    //   양 끝만 단위로 덮인다(데몬 `flush_sink_appears_*` · 커널 `flush_on_appearance_*` 는 `flush_for` 를
-    //   직접 부른다). 되찾으려면 "산 수신자에게 파킹 → 그 에이전트의 epoch 교체(재활성화)" 로 등장 diff 를
-    //   만드는 데몬 레벨 테스트가 필요하다(백로그).
+    // ★Uncovered axis, stated honestly (review C1)★: that switch left **delivery of parked mail on roster appearance**
+    //   uncovered on the integration path. The appearance wiring itself (`MessagingFlushSink` sees `agent_list_updated` →
+    //   Appear → flush lane → `flush_for(id)` returns) is exercised end to end by `spawn_json_agent`'s wait, but only on the
+    //   claude lane, which CI skips; with an empty queue that drain delivers nothing. The units cover the two ends (daemon
+    //   `flush_sink_appears_*` · kernel `flush_on_appearance_*` call `flush_for` directly). Getting it back needs a
+    //   daemon-level test that parks for a live recipient and then swaps its epoch (reactivation) to make an appearance
+    //   diff (backlog).
     let target_name = "late-recv";
-    let Some((info, _tok)) = spawn_json_agent(&manager, &registry, target_name) else {
+    let Some((info, _tok)) = spawn_json_agent(&manager, &registry, &messaging, target_name).await
+    else {
         require_claude("c1_park_then_spawn_auto_delivers");
     };
 
@@ -2169,7 +2192,7 @@ async fn c2_live_mid_turn_send_parks_and_delivers_after_turn_end() {
     };
 
     let target = "c2-live-recv";
-    let Some((info, _tok)) = spawn_json_agent(&manager, &registry, target) else {
+    let Some((info, _tok)) = spawn_json_agent(&manager, &registry, &messaging, target).await else {
         require_claude("c2_live_mid_turn_send_parks_and_delivers_after_turn_end");
     };
 
@@ -2746,9 +2769,10 @@ async fn mcp_send_message_tool_happy_and_error() {
     };
     use rmcp::ServiceExt;
 
-    let (manager, registry, _base, data_dir, handle, _messaging, _busy) = wire("mcp-tool").await;
+    let (manager, registry, _base, data_dir, handle, messaging, _busy) = wire("mcp-tool").await;
 
-    let Some((b_info, _b_tok)) = spawn_json_agent(&manager, &registry, "recv") else {
+    let Some((b_info, _b_tok)) = spawn_json_agent(&manager, &registry, &messaging, "recv").await
+    else {
         require_claude("mcp_send_message_tool_happy_and_error");
     };
 
