@@ -1,7 +1,7 @@
 # ADR-0341: Preset folder entry — claude reads it natively through --add-dir, codex gets only what it lacks, a missing folder blocks launch
 
 - 상태: 확정 (2026-11-04, basis: user decisions 2026-11-04 · research `docs/research/preset-folder-entry-backend-loading-2026-11-04.md` (cross-family review FIX applied))
-- 관련: Amends ADR-0312 (decision 3 scope) · Amends ADR-0337 (decision 3 notice count) · ADR-0316 (claude launch materials) · ADR-0328 (one merged `--settings`) · PRD `docs/process/S25-preset-library/prd.md` R7 · E4 · TRD `docs/process/S25-preset-library/trd.md` §1-5
+- 관련: Amends ADR-0312 (decision 3 scope) · Amends ADR-0337 (decision 3 notice count) · ADR-0316 (claude launch materials) · ADR-0328 (one merged `--settings`) · PRD `docs/process/S25-preset-library/prd.md` R7 · E4 · TRD `docs/process/S25-preset-library/trd.md` §1-5 · ADR-0355 (same-name codex skills across skill roots, folder entries included — launch with a notice)
 
 ## 맥락
 The user asked for a preset option that names a folder (2026-11-01: 「폴더 경로 지정하면 거기있는 폴더를 해당 에이전트 룰로 파싱하는거하고, 고정경로 저장하는거. 결국 Claude 나 codex 가 폴더 지정하는것과 같은 옵션임」). Clarified 2026-11-04: the folder may be anywhere (a company-rules folder, a personal-rules folder); at launch it is attached automatically as `--add-dir`; its contents are read the way the backend reads a project folder at startup (「우리 클로드 맨처음에 읽을때 폴더 훓어서 읽잖아. 그것하고 같다고 생각하면 됨」). The earlier "no outside content" rule (ADR-0312 decision 3, user 2026-10-31 「외부에 두지말고 engram 안으로」) was about per-item links that break when an outside file moves, not about a folder entry (user 2026-11-04).

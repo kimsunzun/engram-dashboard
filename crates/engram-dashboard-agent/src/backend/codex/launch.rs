@@ -8,17 +8,19 @@
 //!   received, and the extra skill roots — `engram/skills/<name>` in the volatile folder is a directory link (Windows:
 //!   a junction) to each skill folder, passed as one root, followed by the plan's extra roots.
 //!
-//! ★Every refusal comes before the first write, and every refusal is `Err` (a failed spawn)★ — the launch check
-//!   blocks the same cases earlier, so reaching one here means an input changed between the check and the launch.
-//!   One exception: the terminal working-folder guard ([`cwd_reaches_codex_unchanged`]) has no check-side
-//!   counterpart yet (step 7), so a folder it refuses fails every launch here. Real materials have no
-//!   warn-and-launch path: a priming the terminal line cannot carry blocks the launch.
+//! ★Every refusal comes before the first write, and every refusal is `Err` (a failed spawn)★ — real materials have
+//!   no warn-and-launch path: a priming the terminal line cannot carry blocks the launch. Most refusals repeat a rule
+//!   the launch check (step 7) is to block earlier with `Broken`, so reaching one here means an input changed between the
+//!   check and the launch. Two have no check-side counterpart: a merged instructions file that cannot be read as
+//!   UTF-8 (`prepare` writes it after the check, so only this read sees it), and — until step 7 adds one — the
+//!   terminal working-folder guard ([`cwd_reaches_codex_unchanged`]), so a folder it refuses fails every launch here.
 //! Every link path is `kit.volatile_dir` joined with words and is used exactly as passed to `link_dir` — the
 //! confinement refuses a respelled path or a path under a link, failing the placement.
 // ADR-0334
 // ADR-0337
 // ADR-0341
 // ADR-0351
+// ADR-0353
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -89,6 +91,7 @@ fn preset_config_args(kit: &LaunchKit) -> Result<Vec<String>, String> {
 /// The merged instructions text — `None` without a file or when the text is blank. A read failure (including text
 /// that is not UTF-8) fails the launch.
 // ADR-0351
+// ADR-0353
 fn instructions_text(
     kit: &LaunchKit,
     read: &dyn Fn(&Path) -> io::Result<String>,
@@ -101,6 +104,7 @@ fn instructions_text(
     Ok(Some(text).filter(|text| !text.trim().is_empty()))
 }
 
+// ADR-0353
 fn terminal(
     kit: &LaunchKit,
     cwd: &Path,
@@ -154,6 +158,7 @@ fn terminal(
 /// ★`& ^ | < >` pass with a space★ — portable-pty then wraps the whole value in quotes, and cmd takes them literally
 ///   inside quotes; the same reasoning as [`cmdline::priming_value`]. Every other cmd-related refusal is left out on
 ///   purpose: block only what breaks the launch.
+// ADR-0353
 fn cwd_reaches_codex_unchanged(cwd: &Path) -> bool {
     let Some(text) = cwd.to_str() else {
         return false;

@@ -460,6 +460,7 @@ pub(crate) struct ThreadResumeParams {
     /// The field is in the stable schema from 0.155.0; the transport drops it for a codex below that or whose version
     ///   it cannot read.
     // ADR-0337
+    // ADR-0354
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) developer_instructions: Option<String>,
 }

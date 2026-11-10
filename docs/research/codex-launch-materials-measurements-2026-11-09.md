@@ -3,7 +3,7 @@
 - Status: measurement record · no decision. Inputs to the step-6 TRD (`docs/process/S25-preset-library/trd-codex-translation.md`), which records the decisions taken on them.
 - CLI: `codex-cli 0.163.0` (the installed version; the QA lane last passed on it).
 - Method: one measurement worker drove `codex app-server --stdio` over its JSON-RPC line protocol with a trimmed copy of the existing harness `.claude/handoff/attachments/20260925-midturn-phase0/codex_harness.js` (same `initialize {clientInfo: engram-dashboard}` → `initialized` handshake, server requests refused with `-32601`). `codex debug prompt-input` was used for the offline AGENTS check (M7). Nothing in the product was changed or launched.
-- Confidence labels: **certain** = observed directly in this run · **likely** = inferred from what was observed · **unknown** = not settled by this run.
+- Confidence labels: **certain** = observed directly in this run · **likely** = inferred from what was observed · **unknown** = not settled by this run · **reported** = an outcome stated in a record whose method and version were not recorded (M11).
 
 ## Run environment
 
@@ -277,6 +277,16 @@ L=8192 E~8340 exit=1   stderr='명령줄이 너무 깁니다.'   (The command li
 
 **Verdict.** A later line that goes through an earlier scalar replaces the scalar with a table, and a later scalar replaces an earlier table — the same as the source (`codex-rs/config/src/overrides.rs` `apply_toml_override` at `rust-v0.163.0`, read 2026-11-10). The P1 `raw_to_json` mirrors it.
 
+## M11 — A single `%` in the terminal `--cd` folder (2026-11-10, S25 step 6) — **Reaches codex intact; `%USERNAME%` expands (reported — method not recorded)**
+
+**Source.** One line in the S25 step-6 session ledger (`.claude/handoff/attachments/20261110-s25-step6-code/s25-step6-ledger.md`, among the notes of QA rerun 3 — HEAD `9969ac60`, tree `f9cb17db` — the tree with the user's 2026-11-10 working-folder rule in `backend/codex/launch.rs` `cwd_reaches_codex_unchanged`). This section carries only what that line says; "reported" = recorded as an outcome without its method, so weaker than **certain** above.
+
+**What was recorded.** No model tokens were used. A working folder holding a single `%`, passed as `--cd`, reached `codex.exe`'s argv intact through `cmd /c` and the npm `codex.cmd` shim, both with and without a space in the folder; a folder holding `%USERNAME%` was expanded (the reason two or more `%` are refused).
+
+**Not recorded.** The exact folder names, how the argv of `codex.exe` was read, the spawn style (std or portable-pty quoting), the codex version, and who ran it.
+
+**Use.** The basis for letting a single `%` through the real-terminal working-folder guard (ADR-0353 decision 3). A `%` in the pass-through `extra_args` could still pair with it (`docs/tracking.md` T-85) — not measured.
+
 ---
 
 ## Summary by question
@@ -295,3 +305,4 @@ L=8192 E~8340 exit=1   stderr='명령줄이 너무 깁니다.'   (The command li
 | Extra roots across concurrent processes | Not shared, either direction; no cross-process `skills/changed`. | certain |
 | 8191 limit on the expanded `codex.cmd` line | Applies again, at exactly 8191; the shim adds 148 units net on this install. `SHIM_MARGIN` stays 300. | certain |
 | `-c` line through an earlier scalar | The scalar becomes a table; a later scalar replaces a table. | certain |
+| A single `%` in the terminal `--cd` folder | Reaches `codex.exe` intact through `cmd /c` and the npm shim, with or without a space; `%USERNAME%` expands. | reported (M11 — method and version not recorded) |

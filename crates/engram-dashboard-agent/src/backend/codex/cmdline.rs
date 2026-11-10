@@ -299,8 +299,9 @@ mod tests {
         );
     }
 
-    /// codex's `-c` takes no value that looks like a flag, so clap would read such a line as an option and codex
-    /// would exit at startup.
+    /// A bare line starting with `-` is likely read by clap as an option, so codex would exit at startup (inferred: codex's `-c`
+    /// does not set `allow_hyphen_values`); a line with leading whitespace would reach codex, but no codex key starts
+    /// with `-`.
     #[test]
     fn a_line_that_starts_with_a_dash_is_refused() {
         for bad in [r#"-c model="o3""#, "--profile=x", "-x=1", "  -x=1"] {

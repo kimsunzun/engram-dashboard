@@ -70,8 +70,8 @@
 | T-97 | The daemon's `stopping` latch is per connection — a second `StopDaemon` on another connection does not join | 버그 | Not started · pre-existing (master S21) · no harm found · found by the master-merge review |
 | T-98 | An in-flight create can outlive the single-instance guard and write the roster after it is released | 버그 | Not started · pre-existing · rare ordering · found by the master-merge review |
 | T-99 | A spawn during daemon stop leaves an asleep agent with a last-failure mark | 버그 | Recorded, not planned (「최소한만 막기」) · pre-existing · found by the master-merge review |
-| T-93 | The codex live test L5 leaves its temporary folder on every run (os error 32) | 사소한 기능·정리 | Not started · found by S25 step 6 QA |
 | T-92 | The codex real-terminal cwd guard repeats `& ^ \| < >` instead of using the platform set | 사소한 기능·정리 | Not started · found by S25 step 6 review |
+| T-93 | The codex live test L5 leaves its temporary folder on every run (os error 32) | 사소한 기능·정리 | Not started · found by S25 step 6 QA |
 | T-100 | CLAUDE.md 「최소한만 막기」 — add 「그 밖의 막기는 실제로 불편이 생기면 그때 더한다.」 | 사소한 기능·정리 | 트리거 대기 — the next CLAUDE.md revision |
 | T-71 | 트래킹 번호를 가리키지 않기 — 해결되면 그냥 지우기 | 사소한 기능·정리 | 할 일 — 나중에 이슈로 |
 | T-70 | 브랜치 앞 버전 짐작 기준 — 기능이면 0.5.0 쪽 | 사소한 기능·정리 | 할 일 — 나중에 이슈로 |
@@ -411,16 +411,16 @@
 - **Status:** not started · pre-existing (the rule moved unchanged from daemon `control/priming.rs` to `platform::shell` in S25 step 5) · theoretical path · found 2026-11-09 by the S25 step 5 code review (`baf769ff`).
 - **Problem:** `CMD_UNSAFE_CHARS` = `% & ^ | < >` (`crates/engram-dashboard-platform/src/shell.rs`). When cmd delayed expansion is on (registry `DelayedExpansion=1` under `Command Processor` — off by default), cmd expands `!NAME!` and drops a lone `!`, so a path holding `!` reaches claude changed. `console_command` passes `/c` without `/V:OFF`. Affects every path the rule guards (the priming file in daemon `control/priming.rs`, and from S25 step 5 the claude merged instructions, settings file, plugin folder and preset folder entries) — and any other path on the same cmd line.
 - **Next:** add `!` to the rule (a folder holding `!` is then refused at `preset.add` and blocks with ②), or pass `/V:OFF` to cmd — check the shim side first (the npm `.cmd` shim runs under cmd too).
-- **Widened by S25 step 6** (2026-11-10): `platform::shell::text_is_cli_safe` (the codex preset `-c` lines and the priming value) sits on the same `CMD_UNSAFE_CHARS`, and the codex real-terminal working-folder guard (`backend/codex/launch.rs` `cwd_reaches_codex_unchanged`) repeats the set as a literal (T-92) — adding `!` to the platform set alone would not reach that guard.
+- **Widened by S25 step 6** (2026-11-10): `platform::shell::text_is_cli_safe` (the codex preset `-c` lines and the priming value) sits on the same `CMD_UNSAFE_CHARS`, and the codex real-terminal working-folder guard (`backend/codex/launch.rs` `cwd_reaches_codex_unchanged`) repeats the set as a literal (T-92) — adding `!` to the platform set alone would not reach that guard. Nor would it cover a priming with spaces: `backend/codex/cmdline.rs` `priming_value` consults `text_is_cli_safe` only when the text holds no space (a spaced value is quoted), and cmd's delayed expansion is believed to act inside quotes like `%` (not measured) — so `!` in the priming needs its own refusal there, or `/V:OFF`.
 
 ### T-85. Codex pass-through `extra_args` are not guarded on the cmd line
 - **Status:** not started · pre-existing · a recorded decision of S25 step 6 (`trd-codex-translation.md` R10 — the user's own input; not re-raised by the step-6 code review).
-- **Problem:** the codex `build_spec` appends `command.extra_args` before the preset `-c` lines and the priming argument. An argument with an odd number of `"` flips cmd's quote state for every later argument (measured M5), so the priming's `<` `>` can become redirections; a `% & ^ | < >` in it reaches cmd as is. The preset lines are guarded (odd `"` and the metachars refused), the pass-through is not — on Noop and real materials alike. The command-line count does include them (upper bound).
+- **Problem:** the codex `build_spec` appends `command.extra_args` before the preset `-c` lines and the priming argument. An argument with an odd number of `"` flips cmd's quote state for every later argument (measured M5), so the priming's `<` `>` can become redirections; a `% & ^ | < >` in it reaches cmd as is — including a `%` that pairs with a lone `%` in the real-terminal working folder, which the folder guard lets through (ADR-0353 decision 3). The preset lines are guarded (odd `"` and the metachars refused), the pass-through is not — on Noop and real materials alike. On real materials the command-line count does include them (an upper bound there); the Noop budget is not one (T-87).
 - **Next:** decide whether `extra_args` get the same guard (refuse at agent edit or at launch) or stay the user's responsibility.
 
 ### T-86. Noop codex terminal `--cd` is not checked for cmd metachars
 - **Status:** not started · pre-existing · found 2026-11-10 by the S25 step 6 code review (P1 risk axis).
-- **Problem:** the Noop codex terminal argv puts the working folder on the cmd line as `--cd <cwd>` (`backend/codex/mod.rs` `build_spec`) with no check. A path with no space goes on the line bare, so `C:\Work\R&D` makes cmd run `D`; two `%` expand as a variable. The real path is guarded since step 6 (`cwd_reaches_codex_unchanged` — refuses two or more `%`, `"`, a control char, non-UTF-8, or `& ^ | < >` without a space); Noop goes away when step 8 plugs real kits in.
+- **Problem:** the Noop codex terminal argv puts the working folder on the cmd line as `--cd <cwd>` (`backend/codex/mod.rs` `build_spec`) with no check. A path with no space goes on the line bare, so `C:\Work\R&D` makes cmd run `D`; two `%` expand as a variable — that half is the known limit the 2026-09-08 decision chose not to fix (`%VAR%` through the shim — the 「알려진 한계」 comment in `backend/codex/mod.rs` `build_spec`). The real path is guarded since step 6 (`cwd_reaches_codex_unchanged` — refuses two or more `%`, `"`, a control char, non-UTF-8, or `& ^ | < >` without a space); Noop goes away when step 8 plugs real kits in.
 - **Next:** close with step 8 (every codex terminal launch then takes the real path), or apply the same rule to the Noop path if Noop stays.
 
 ### T-87. Noop codex terminal budget is not an upper bound
@@ -468,15 +468,15 @@
 
 ## 사소한 기능·정리
 
-### T-93. The codex live test L5 leaves its temporary folder on every run
-- **Status:** not started · found 2026-11-10 by the S25 step 6 QA (main recycled the leftovers by hand).
-- **Problem:** `crates/engram-dashboard-agent/tests/codex_launch_live.rs` L5 cannot remove its temporary folder when the test drops it — os error 32, a codex child process still holds it. Each codex-lane run leaves one folder under the temp directory.
-- **Next:** wait for (or kill) the codex child before the cleanup, or retry the removal briefly.
-
 ### T-92. The codex real-terminal cwd guard repeats the cmd metachar set
 - **Status:** not started · found 2026-11-10 by the S25 step 6 code review (the cwd-guard delta).
 - **Problem:** `backend/codex/launch.rs` `cwd_reaches_codex_unchanged` writes `& ^ | < >` as a literal instead of using the platform `CMD_UNSAFE_CHARS` (`crates/engram-dashboard-platform/src/shell.rs`), so a change to the platform set (e.g. `!` — T-84) would not reach it. There is also no separate test row for `>`.
 - **Next:** expose the set (or a space-aware helper) from `platform::shell` and use it in the guard; add the `>` row.
+
+### T-93. The codex live test L5 leaves its temporary folder on every run
+- **Status:** not started · found 2026-11-10 by the S25 step 6 QA (main recycled the leftovers by hand).
+- **Problem:** `crates/engram-dashboard-agent/tests/codex_launch_live.rs` L5 cannot remove its temporary folder when the test drops it — os error 32, a codex child process still holds it. Each codex-lane run leaves one folder under the temp directory.
+- **Next:** wait for (or kill) the codex child before the cleanup, or retry the removal briefly.
 
 ### T-100. CLAUDE.md 「최소한만 막기」 — add the follow-up rule
 - **Status:** waiting for trigger — the next CLAUDE.md revision (user 2026-11-10: record it as feedback, do not edit CLAUDE.md now).

@@ -323,10 +323,11 @@ const MAX_TURN_ID_BYTES: usize = 128;
 const CLIENT_MESSAGE_ID_FLOOR: (u64, u64, u64) = (0, 140, 0);
 
 /// The lowest codex version whose `thread/resume` takes `developerInstructions` (in the stable schema from this version
-/// — ADR-0215 decision 7). Read from the `initialize` `userAgent` the same way as [`floor_verdict`]; below it or
+/// — ADR-0354 decision 1). Read from the `initialize` `userAgent` the same way as [`floor_verdict`]; below it or
 /// unreadable ⇒ the field is dropped from the resume. The schema does not forbid unknown fields, so an older codex would
 /// most likely ignore it — the gate is insurance, not a known break.
 // ADR-0337
+// ADR-0354
 const RESUME_INSTRUCTIONS_FLOOR: (u64, u64, u64) = (0, 155, 0);
 
 /// Consecutive `Rejected` `turn/start`s that carried the instructions-change context after which this incarnation stops

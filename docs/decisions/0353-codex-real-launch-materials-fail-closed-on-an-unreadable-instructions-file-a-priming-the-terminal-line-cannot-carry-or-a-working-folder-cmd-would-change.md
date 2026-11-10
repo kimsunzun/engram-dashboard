@@ -1,6 +1,6 @@
 # ADR-0353: Codex real launch materials fail closed on an unreadable instructions file, a priming the terminal line cannot carry, or a working folder cmd would change
 
-- 상태: 확정 (2026-11-10, 근거: user decisions U1 2026-11-09 and 2026-11-10 · main decision #5 — TRD `docs/process/S25-preset-library/trd-codex-translation.md` §9 · landed `a3891273`, `abee6ebe`)
+- 상태: 확정 (2026-11-10, 근거: user decision U1 2026-11-09 · the user's working-folder rule 2026-11-10 (H3) · main decision #5 — TRD `docs/process/S25-preset-library/trd-codex-translation.md` §9 · landed `a3891273`, `abee6ebe`)
 - 관련: Amends ADR-0215 (결정 4와 5 실재료 한정) · ADR-0351 (the claude precedent: a failed placement write fails the spawn — extended here to codex) · ADR-0337 (codex materials) · ADR-0334 (flag translation in backend `materialize`)
 
 ## 맥락
@@ -10,20 +10,22 @@ ADR-0215 made both codex instruction failures fail-open: decision 4 — in termi
 With real launch materials (`kit.plan.real`), the codex backend `materialize` (`backend/codex/launch.rs`) returns `Err` — which the manager turns into a failed spawn — before any write when:
 1. the merged instructions file cannot be read or is not UTF-8 (both modes);
 2. terminal mode: the 「기본」 priming cannot go on the command line — `cmdline::priming_value` refuses it (`' " % \`, a control character other than CR/LF, or, when the text holds no space, `& ^ | < >`) or `cmdline::fits` finds the line over the budget;
-3. terminal mode: the working folder would be changed by cmd — it is not UTF-8, holds two or more `%`, a `"`, a control character, or `& ^ | < >` without a space (with a space, portable-pty quotes the value and cmd takes them literally; a single `%` was measured to reach codex intact).
-The launch check (step 7) blocks the same cases earlier with `Broken`; reaching one in `materialize` is the residual case. The Noop path keeps ADR-0215's warn-and-drop for the priming.
+3. terminal mode: the working folder would be changed by cmd — it is not UTF-8, holds two or more `%`, a `"`, a control character, or `& ^ | < >` without a space (with a space, portable-pty quotes the value and cmd takes them literally). A single `%` passes: it was observed to reach codex intact (research M11, reported — method and version not recorded), and nothing else on the line our code builds holds a `%` to pair with it — only a `%` in the pass-through `extra_args`, which are not guarded (`docs/tracking.md` T-85), could.
+
+Which of these the launch check (step 7) can block earlier with `Broken`: case 2 — `check` calls `command_line_fits` on the plan (planned in step 7, U1 (a)); case 3 — once step 7 adds the check-side counterpart of the working-folder rule, judged on the canonicalized folder (until then a folder it refuses fails every launch in `materialize`). Case 1 only `materialize` can catch: `prepare` writes the merged instructions file after `check` (`docs/process/S25-preset-library/trd-codex-translation.md` §6). A case 2 or 3 reached in `materialize` after step 7 is the residual case (an input changed between the check and the launch). The Noop path keeps ADR-0215's warn-and-drop for the priming.
 
 ## 거부한 대안
 - **Warn and launch without the instructions (ADR-0215 decisions 4 and 5 kept for real materials)** — rejected by the user (U1, 「띄우지 말아」): the agent would run without the preset's instructions and nobody would notice.
-- **Refuse every cmd metacharacter in the working folder (`path_is_cli_safe`, the first P2 rule)** — rejected by the user's 2026-11-10 rule (CLAUDE.md 「최소한만 막기」): it blocked folders that launch correctly, such as `D:\R&D Projects`. Measured: a single `%` survives both cmd passes, two `%` around a defined name are expanded.
+- **Refuse every cmd metacharacter in the working folder (`path_is_cli_safe`, the first P2 rule)** — rejected by the user's 2026-11-10 rule (CLAUDE.md 「최소한만 막기」): it blocked folders that launch correctly, such as `D:\R&D Projects`. Observed: a single `%` survives both cmd passes, `%USERNAME%` is expanded (research M11, reported — method and version not recorded).
 - **No working-folder guard on the real path** — rejected: `C:\Work\R&D` reaches cmd unquoted and runs `D` (security; the Noop path still has this, tracked).
 
 ## 근거
 - U1: user 2026-11-09 「띄우지 말아」; working-folder rule: user 2026-11-10 「일단 너무 막지 말고 추가로 막는건 실제로 불편하면 막자고」.
-- Measurements: M5, M10a (`docs/research/codex-launch-materials-measurements-2026-11-09.md`); QA 2026-11-10 single-`%` measurement through `cmd.exe /c` + the npm shim.
+- Measurements: M5, M10a, M11 (`docs/research/codex-launch-materials-measurements-2026-11-09.md` — M11 is the single-`%` working-folder check through `cmd /c` and the npm shim, 2026-11-10, recorded in the step-6 session ledger; graded reported — method and version not recorded).
 - ADR-0351 precedent for claude (a failed placement write fails the spawn).
 
 ## 영향 / 불변식
 - Real-path refusals are `Err` → `SpawnFailed`, never a silent drop. Tests: `codex::launch` tests (`a_priming_the_terminal_line_cannot_carry_fails_the_launch`, `a_working_folder_cmd_would_change_fails_the_real_terminal_launch_only`, `an_unreadable_instructions_file_fails_before_any_write`).
 - Step 7's check must judge the same rules on the canonicalized working folder, or an affected agent fails every launch as `SpawnFailed` instead of `Broken`.
-- The Noop terminal path is unchanged except the P1 safety change (a space-less priming holding `& ^ | < >` is skipped with a warning).
+- The Noop terminal path is unchanged except three changes made in the same step, two of them safety changes the user accepted (user decision H2, 2026-11-10 — keep both): a space-less priming holding `& ^ | < >` is skipped with a warning; and a control URL holding `"` or one of `& ^ | < >` is refused (`backend/codex/mod.rs` `mcp_attachment` → `Unrepresentable`, `precheck_control_endpoint` → a failed spawn), on the Noop path too. Neither input occurs today. A third P1 change reaches the Noop path as well: a control URL over 128 units (`MCP_URL_BUDGET`, counted by `cmdline::units`) is refused the same way (`mcp_attachment` → `Unrepresentable`); the daemon's URL is at most 26 units (`http://127.0.0.1:65535/mcp`), so it never trips.
+- **What this amends in ADR-0215** — decisions 4 and 5, for real materials only; the Noop path keeps them. ADR-0215's rejected alternative `model_instructions_file` was to revive "once the size check of decision 4 actually starts emitting a skip warning". With real materials that size warning is now a block; the Noop warning path remains as long as the Noop path does (whether to withdraw it is undecided — parent TRD `docs/process/S25-preset-library/trd.md` §2-4 2). So the revival trigger is either that Noop size warning or a real codex terminal launch blocked by `command-line-too-long` (`cmdline::fits` — at step 7's check, or the residual `Err` in `materialize`, whose text carries that code).

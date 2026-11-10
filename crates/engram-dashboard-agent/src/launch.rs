@@ -356,6 +356,7 @@ pub const CODEX_TERMINAL_FOLDER_OMITTED: &str = "codex-terminal-folder-omitted";
 /// Notice code: skills of one name sit in several skill roots of a codex JSON agent, so `$name` selects none of them.
 /// `args` = `{name, paths: [...]}`.
 // ADR-0341
+// ADR-0355
 pub const CODEX_SAME_NAME_SKILLS: &str = "codex-same-name-skills";
 
 /// The wording of a notice for a person or an LLM reading the reply — Korean, factual, recommends no fix (TRD S25
@@ -389,6 +390,7 @@ pub fn notice_text(notice: &Notice) -> String {
 /// The sentence of a code that has its own wording, or `None` (another code, or `args` of another shape).
 // ADR-0337
 // ADR-0341
+// ADR-0355
 fn own_wording(notice: &Notice) -> Option<String> {
     let args = notice.args.as_object()?;
     match notice.code.as_str() {

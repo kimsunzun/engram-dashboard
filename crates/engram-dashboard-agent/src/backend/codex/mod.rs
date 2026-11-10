@@ -137,6 +137,7 @@ fn is_app_server(command: &AgentCommand) -> bool {
 // ADR-0185
 // ADR-0215
 // ADR-0337
+// ADR-0354
 fn thread_open(
     spec: &CommandSpec,
     resume_session_id: Option<Uuid>,
@@ -934,9 +935,11 @@ impl AgentBackend for CodexBackend {
                 //   `console_command` 를 건드리므로, 틀리면 오늘 도는 스폰 전부가 죽는다.
                 //   ★고칠 때 무엇이 필요한가★: 위 셋을 뒤집을 실측(그 형태로 감싼 `cmd` 아래에서 claude·
                 //   codex 가 둘 다 뜨는가)이다. 그 전에는 이 한계를 아는 채로 둔다.
-                // On real materials the terminal working folder never holds `%`: `materialize` refuses such a folder,
-                //   so there this limit is left to `extra_args` alone.
+                // On real materials the terminal working folder never holds two `%` (`materialize` refuses it); a single
+                //   `%` passes, so there this limit is left to `extra_args` — a `%…%` of their own, or one `%` in them
+                //   pairing with the folder's lone `%` (tracking T-85).
                 // ADR-0004
+                // ADR-0353
 
                 // Real materials: the preset `-c` lines (model and effort included — there is never a `-m`), after the
                 //   pass-through and before our overrides, so ours still come last and win. Empty for Noop materials.
