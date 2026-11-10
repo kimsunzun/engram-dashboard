@@ -12592,6 +12592,7 @@ mod tests {
                 real: true,
                 folders: Vec::new(),
                 extra_skill_roots: Vec::new(),
+                stamp: None,
             },
             volatile_dir: None,
             instructions_file: Some(std::path::PathBuf::from("C:/vol/instructions.md")),

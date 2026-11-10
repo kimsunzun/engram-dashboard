@@ -1,6 +1,7 @@
 //! Backend settings-check port — the settings knowledge that differs per backend (schema source · CLI version read ·
-//! raw text → JSON · merge · unknown-key policy · what a mode loads · folder-entry path guard · folder load set ·
-//! skill format · command-line guard and budget · the backend's own skill folders), in one trait. The registry is
+//! raw text → JSON · merge · unknown-key policy · what a mode loads · folder-entry path guard · working-folder guard ·
+//! launch notice codes · folder load set · skill format · command-line guard and budget · the backend's own skill
+//! folders), in one trait. The registry is
 //! [`super::settings_checks`] / [`super::settings_check_for`].
 //!
 //! ★Pure — an implementation never touches the disk, the network or a process★: the schema is fetched by the caller
@@ -48,6 +49,12 @@ pub trait SettingsCheck: Send + Sync {
     /// check — the caller checks only the single values. `Some` = check the merged value too.
     fn merge(&self, layers: &[&Value]) -> Option<Value>;
 
+    /// Which layer each part of [`SettingsCheck::merge`]'s value comes from, as `(JSON pointer, layer index)` pairs —
+    /// one per scalar, per list item (an item is not entered: a pointer below it belongs to its layer) and per empty
+    /// object or list (none when there is no layer). `None` exactly when `merge` answers `None`.
+    // ADR-0328
+    fn merge_origins(&self, layers: &[&Value]) -> Option<Vec<(String, usize)>>;
+
     /// What a key the schema does not know becomes.
     fn unknown_keys(&self) -> UnknownKeys;
 
@@ -60,6 +67,21 @@ pub trait SettingsCheck: Send + Sync {
     /// Whether a folder entry at `folder` (absolute) blocks this backend's agent (problem ②) because the path cannot
     /// be passed on its command line. A backend that never puts folder paths on its command line returns `false`.
     fn folder_entry_blocks(&self, folder: &Path) -> bool;
+
+    /// Whether the agent's working folder blocks this backend in `mode` (problem ②) — `cwd` = the folder the spawn
+    /// runs in ([`crate::launch::LaunchKitSource::working_folder`]). The rule is the one the backend's launch
+    /// translation applies to the same folder, so a folder refused here is also refused there. `None` = no block.
+    // ADR-0353
+    fn working_folder_blocks(&self, cwd: &Path, mode: AgentOutputFormat) -> Option<Reason>;
+
+    /// The notice codes this backend's launch check emits in `mode`.
+    fn notice_codes(&self, mode: AgentOutputFormat) -> NoticeCodes;
+
+    /// Whether a launch in `mode` needs a listing of each folder entry — to carry rows from it
+    /// ([`FolderLoadSet::carried`]) or to name what it omits ([`FolderLoadSet::omitted`]). `false` = the backend
+    /// reads the folder itself at launch; only the preview lists it.
+    // ADR-0341
+    fn folder_listing_at_launch(&self, mode: AgentOutputFormat) -> bool;
 
     /// What this backend loads by itself from a folder entry, predicted from a listing of that folder.
     ///
@@ -119,6 +141,17 @@ pub trait SettingsCheck: Send + Sync {
         read: &dyn Fn(&Path) -> std::io::Result<String>,
         parser: &dyn FrontMatterParser,
     ) -> FolderLoadSet;
+}
+
+/// The notice codes of [`SettingsCheck::notice_codes`]. `None` = this backend · mode never emits that notice.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NoticeCodes {
+    /// Library instructions or skills this mode does not load (e.g. [`crate::launch::CODEX_TERMINAL_OMITTED`]).
+    pub omitted: Option<&'static str>,
+    /// What this mode does not load from a folder entry ([`FolderLoadSet::omitted`]).
+    pub folder_omitted: Option<&'static str>,
+    /// Skills of one name in several skill roots the backend reads.
+    pub same_name: Option<&'static str>,
 }
 
 /// Where a backend's own skill folders are looked for ([`SettingsCheck::native_skill_roots`]).
@@ -319,6 +352,12 @@ pub struct FolderLoadSet {
     /// What another mode of the same backend loads from this folder and this mode does not (codex terminal: the
     /// codex JSON set) — the input of the omission notice. Empty when nothing is omitted.
     pub omitted: Vec<FolderLoad>,
+    /// The rows of `loads` the launch itself carries from this folder in this mode — an `Instructions` row joins the
+    /// merged instructions, a `SkillRoot` row is passed as an extra skill root. Empty when the backend reads the folder
+    /// itself (it gets the folder path) or loads nothing from it in this mode, and in a
+    /// [`SettingsCheck::root_skills`] answer.
+    // ADR-0341
+    pub carried: Vec<FolderLoad>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -129,6 +129,7 @@ impl LaunchKitSource for LiveKits {
             real: true,
             folders: scene.folders,
             extra_skill_roots: scene.extra_skill_roots,
+            stamp: None,
         })
     }
 

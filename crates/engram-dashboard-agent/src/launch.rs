@@ -7,6 +7,7 @@
 //! 프리셋 해석은 여기 없다(실물 = 데몬이 꽂는 asset-library 서비스). 플래그 번역도 없다(backend 몫).
 // ADR-0334
 
+use std::any::Any;
 use std::cmp::Ordering;
 use std::fmt;
 use std::io;
@@ -177,6 +178,9 @@ pub struct LaunchPlan {
     /// conflict check. Only `backend/codex` reads them. Empty in a Noop plan.
     // ADR-0341
     pub extra_skill_roots: Vec<PathBuf>,
+    /// What the check read of the plan's sources, for [`LaunchKitSource::prepare`] to tell a changed source
+    /// ([`PrepareError::Stale`]). Opaque to everyone else — the source that wrote it reads it. `None` in a Noop plan.
+    pub stamp: Option<String>,
 }
 
 /// [`LaunchKitSource::prepare`] 가 낸 이 화신의 재료.
@@ -359,15 +363,37 @@ pub const CODEX_TERMINAL_FOLDER_OMITTED: &str = "codex-terminal-folder-omitted";
 // ADR-0355
 pub const CODEX_SAME_NAME_SKILLS: &str = "codex-same-name-skills";
 
+/// Notice code: no schema was held for a settings asset's backend, so its values were not checked against one.
+/// `args` = `{settings}` — the settings asset's reference as the preset names it.
+pub const SETTINGS_SCHEMA_UNAVAILABLE: &str = "settings-schema-unavailable";
+
+/// Notice code: the held schema is older than the installed CLI, so the keys it does not know in a settings asset
+/// were not checked. `args` = `{settings}`.
+pub const SETTINGS_SCHEMA_OUTDATED: &str = "settings-schema-outdated";
+
+/// Notice code: a settings asset holds keys its backend's schema does not know, for a backend whose unknown keys are
+/// reported rather than ignored. `args` = `{settings, keys: [...]}`.
+pub const SETTINGS_UNKNOWN_KEY: &str = "settings-unknown-key";
+
+/// Notice code: a folder entry's listing stopped at [`FOLDER_LISTING_CAP`] entries, so only part of the folder was
+/// looked at. `args` = `{folder}`.
+pub const FOLDER_LISTING_PARTIAL: &str = "folder-listing-partial";
+
+/// How many entries a folder-entry listing reads before it stops — the one value the [`FOLDER_LISTING_PARTIAL`]
+/// sentence uses and the asset-library folder listing is to use (step 7 P6).
+pub const FOLDER_LISTING_CAP: usize = 10_000;
+
 /// The wording of a notice for a person or an LLM reading the reply — Korean, factual, recommends no fix (TRD S25
 /// G28 · §2-4 8).
 ///
 /// [`CODEX_TERMINAL_OMITTED`], [`CODEX_TERMINAL_FOLDER_OMITTED`] and [`CODEX_SAME_NAME_SKILLS`] have their own
 /// sentence (user wording, exact), filled from `args` with names joined by `, `; in the two terminal codes an empty
-/// list leaves its part out. When their `args` do not have the shape the constant documents (not an object, a missing
-/// `folder` or `name`, a list that is not of strings, no `paths`), they fall back to the generic wording. Every other
-/// code takes the generic wording — the code and the values listed in `args` (object keys in name order), saying the
-/// omission is intended.
+/// list leaves its part out. [`SETTINGS_SCHEMA_UNAVAILABLE`], [`SETTINGS_SCHEMA_OUTDATED`], [`SETTINGS_UNKNOWN_KEY`]
+/// and [`FOLDER_LISTING_PARTIAL`] have their own sentence too, naming no backend — the names come from `args`. When
+/// their `args` do not have the shape the constant documents (not an object, a missing `folder`, `name` or
+/// `settings`, a list that is not of strings, no `paths` or `keys`), they fall back to the generic wording. Every
+/// other code takes the generic wording — the code and the values listed in `args` (object keys in name order),
+/// saying the omission is intended.
 /// Control characters in the code and the listed values (file names from the library — outside input) are escaped
 /// (`\n`, `\u{1b}`), so the line stays one line and carries no terminal escape when the CLI prints it.
 pub fn notice_text(notice: &Notice) -> String {
@@ -431,8 +457,51 @@ fn own_wording(notice: &Notice) -> Option<String> {
                 paths.join(", ")
             ))
         }
+        SETTINGS_SCHEMA_UNAVAILABLE => {
+            let settings = escape_controls(args.get("settings")?.as_str()?);
+            Some(format!(
+                "알림: 설정 {settings}의 스키마를 확인하지 못했습니다(스키마 없음)."
+            ))
+        }
+        SETTINGS_SCHEMA_OUTDATED => {
+            let settings = escape_controls(args.get("settings")?.as_str()?);
+            Some(format!(
+                "알림: 설정 {settings}의 일부 키는 이 판 스키마로 확인하지 못했습니다."
+            ))
+        }
+        SETTINGS_UNKNOWN_KEY => {
+            let settings = escape_controls(args.get("settings")?.as_str()?);
+            let keys = text_list(args, "keys")?;
+            if keys.is_empty() {
+                return None;
+            }
+            Some(format!(
+                "알림: 설정 {settings}에 스키마에 없는 키가 있습니다: {}",
+                keys.join(", ")
+            ))
+        }
+        FOLDER_LISTING_PARTIAL => {
+            let folder = escape_controls(args.get("folder")?.as_str()?);
+            Some(format!(
+                "알림: 폴더 {folder}의 항목이 {}개를 넘어 일부만 확인했습니다.",
+                grouped(FOLDER_LISTING_CAP)
+            ))
+        }
         _ => None,
     }
+}
+
+/// `n` in decimal with a `,` between groups of three digits (`10000` → `10,000`).
+fn grouped(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
 }
 
 /// The strings of the list at `key`, escaped — empty when the key is absent, `None` when it is not a list of strings.
@@ -548,6 +617,10 @@ impl std::error::Error for PrepareError {}
 ///
 /// manager 는 명부 · 예약 락을 쥐지 않고 부른다 — 구현은 그 안에서 명부를 읽어도 된다(asset-library → manager
 /// 한 방향).
+///
+/// The four scope methods ([`LaunchKitSource::begin_launch`] · [`LaunchKitSource::check_in`] ·
+/// [`LaunchKitSource::prepare_in`] · [`LaunchKitSource::working_folder`]) are overridden all together or not at all,
+/// and a wrapper forwards all four.
 // ADR-0334
 // ADR-0324
 pub trait LaunchKitSource: Send + Sync + 'static {
@@ -583,6 +656,60 @@ pub trait LaunchKitSource: Send + Sync + 'static {
     /// - 라이브러리 쓰기 잠금을 잡지 않고, 수거를 기다리는 매니저 길로 되부르지 않는다(reaper 가 자기를 기다린다).
     // TRD S25 §5-2 4 (c2) ⑤
     fn release(&self, id: AgentId, epoch: u32);
+
+    /// Opens one launch's [`LaunchScope`]. The manager is to call it once per launch and pass the scope to every
+    /// [`LaunchKitSource::check_in`], [`LaunchKitSource::prepare_in`] and [`LaunchKitSource::working_folder`] of that
+    /// launch (step 8); until then it calls `check` / `prepare` directly and these defaults are not reached. The
+    /// default scope is empty.
+    fn begin_launch(&self) -> LaunchScope {
+        LaunchScope::default()
+    }
+
+    /// [`LaunchKitSource::check`] inside one launch. The default ignores the scope and calls `check` — a source whose
+    /// `check` delegates here must override this, or the two recurse.
+    fn check_in(
+        &self,
+        _scope: &LaunchScope,
+        profile: &AgentProfile,
+    ) -> Result<LaunchPlan, LaunchBlocked> {
+        self.check(profile)
+    }
+
+    /// [`LaunchKitSource::prepare`] inside one launch. The default ignores the scope and calls `prepare` — a source
+    /// whose `prepare` delegates here must override this, or the two recurse.
+    fn prepare_in(
+        &self,
+        _scope: &LaunchScope,
+        plan: LaunchPlan,
+        id: AgentId,
+        epoch: u32,
+    ) -> Result<LaunchKit, PrepareError> {
+        self.prepare(plan, id, epoch)
+    }
+
+    /// The working folder the launch spawns in, for the agent's `cwd` — the folder this launch's
+    /// [`LaunchKitSource::check_in`] judged for the same `cwd`, so the spawn runs where the check looked. The default
+    /// judges nothing and is the manager's own expression: the `dunce` canonical path, or `cwd` as given when that
+    /// fails — one blocking canonicalize, unbounded.
+    fn working_folder(&self, _scope: &LaunchScope, cwd: &Path) -> PathBuf {
+        dunce::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf())
+    }
+}
+
+/// One launch's shared context, opaque to the manager — a [`LaunchKitSource`] keeps its per-launch state in it
+/// ([`LaunchKitSource::begin_launch`]). The default scope holds nothing.
+#[derive(Clone, Default)]
+pub struct LaunchScope(Option<Arc<dyn Any + Send + Sync>>);
+
+impl LaunchScope {
+    pub fn new<T: Any + Send + Sync>(value: Arc<T>) -> Self {
+        Self(Some(value))
+    }
+
+    /// The value the scope holds when it is a `T` — `None` for an empty scope or a value of another type.
+    pub fn get<T: Any + Send + Sync>(&self) -> Option<Arc<T>> {
+        self.0.clone()?.downcast::<T>().ok()
+    }
 }
 
 /// 재료 없음 — 오늘과 같은 실행(백엔드 = 명령 변형, 지침 = 제어 채널의 프라이밍 그대로). 이 계획 · 재료로
@@ -603,6 +730,7 @@ impl LaunchKitSource for NoopLaunchKits {
             real: false,
             folders: Vec::new(),
             extra_skill_roots: Vec::new(),
+            stamp: None,
         })
     }
 
@@ -1247,6 +1375,7 @@ mod tests {
                     real: false,
                     folders: Vec::new(),
                     extra_skill_roots: Vec::new(),
+                    stamp: None,
                 }
             );
         }
@@ -2070,6 +2199,151 @@ mod tests {
             notice_text(&reason("codex-other", json!({ "name": "x" }), None)),
             "알림(codex-other): 의도된 동작입니다. 대상 — x"
         );
+    }
+
+    /// The four generic settings and folder codes give their own sentence, names from `args` with control characters
+    /// escaped; `args` of another shape fall back to the generic wording.
+    #[test]
+    fn the_settings_and_folder_notice_codes_give_their_own_wording() {
+        let cases = [
+            (
+                SETTINGS_SCHEMA_UNAVAILABLE,
+                json!({ "settings": "team/models.yaml" }),
+                "알림: 설정 team/models.yaml의 스키마를 확인하지 못했습니다(스키마 없음).",
+            ),
+            (
+                SETTINGS_SCHEMA_OUTDATED,
+                json!({ "settings": "team/models.yaml" }),
+                "알림: 설정 team/models.yaml의 일부 키는 이 판 스키마로 확인하지 못했습니다.",
+            ),
+            (
+                SETTINGS_UNKNOWN_KEY,
+                json!({ "settings": "team/models.yaml", "keys": ["model_x", "tools.y"] }),
+                "알림: 설정 team/models.yaml에 스키마에 없는 키가 있습니다: model_x, tools.y",
+            ),
+            (
+                FOLDER_LISTING_PARTIAL,
+                json!({ "folder": "D:\\rules\\big" }),
+                "알림: 폴더 D:\\rules\\big의 항목이 10,000개를 넘어 일부만 확인했습니다.",
+            ),
+            (
+                SETTINGS_UNKNOWN_KEY,
+                json!({ "settings": "a\nb", "keys": ["\u{1b}[31mk"] }),
+                "알림: 설정 a\\nb에 스키마에 없는 키가 있습니다: \\u{1b}[31mk",
+            ),
+            (
+                SETTINGS_SCHEMA_UNAVAILABLE,
+                json!({ "settings": "a\nb" }),
+                "알림: 설정 a\\nb의 스키마를 확인하지 못했습니다(스키마 없음).",
+            ),
+            (
+                SETTINGS_SCHEMA_OUTDATED,
+                json!({ "settings": "\u{1b}[31mx" }),
+                "알림: 설정 \\u{1b}[31mx의 일부 키는 이 판 스키마로 확인하지 못했습니다.",
+            ),
+            (
+                FOLDER_LISTING_PARTIAL,
+                json!({ "folder": "D:\\a\nb" }),
+                "알림: 폴더 D:\\a\\nb의 항목이 10,000개를 넘어 일부만 확인했습니다.",
+            ),
+        ];
+        for (code, args, text) in cases {
+            let rendered = notice_text(&reason(code, args.clone(), None));
+            assert!(!rendered.chars().any(char::is_control), "{rendered:?}");
+            assert_eq!(rendered, text, "{code} {args}");
+        }
+
+        let fallbacks = [
+            (SETTINGS_SCHEMA_UNAVAILABLE, json!({ "name": "x" })),
+            (SETTINGS_SCHEMA_OUTDATED, json!({ "settings": 1 })),
+            (SETTINGS_UNKNOWN_KEY, json!({ "settings": "x" })),
+            (SETTINGS_UNKNOWN_KEY, json!({ "settings": "x", "keys": [] })),
+            (
+                SETTINGS_UNKNOWN_KEY,
+                json!({ "settings": "x", "keys": "k" }),
+            ),
+            (FOLDER_LISTING_PARTIAL, json!({ "path": "D:\\x" })),
+            (FOLDER_LISTING_PARTIAL, json!("D:\\x")),
+        ];
+        for (code, args) in fallbacks {
+            let text = notice_text(&reason(code, args.clone(), None));
+            assert!(
+                text.starts_with(&format!("알림({code}): 의도된 동작입니다.")),
+                "{code} {args} · {text}"
+            );
+        }
+    }
+
+    // ── launch scope ──
+
+    /// Counts `check` and `prepare` and keeps every default scope method.
+    #[derive(Default)]
+    struct DelegatingKits {
+        checks: Mutex<usize>,
+        prepares: Mutex<usize>,
+    }
+
+    impl LaunchKitSource for DelegatingKits {
+        fn check(&self, profile: &AgentProfile) -> Result<LaunchPlan, LaunchBlocked> {
+            *self.checks.lock().unwrap() += 1;
+            NoopLaunchKits.check(profile)
+        }
+        fn prepare(
+            &self,
+            plan: LaunchPlan,
+            id: AgentId,
+            epoch: u32,
+        ) -> Result<LaunchKit, PrepareError> {
+            *self.prepares.lock().unwrap() += 1;
+            NoopLaunchKits.prepare(plan, id, epoch)
+        }
+        fn release(&self, _id: AgentId, _epoch: u32) {}
+    }
+
+    #[test]
+    fn the_default_scope_methods_delegate_to_check_and_prepare() {
+        let kits = DelegatingKits::default();
+        let scope = kits.begin_launch();
+        assert!(scope.get::<u32>().is_none(), "the default scope is empty");
+        let p = profile(claude());
+
+        let plan = kits.check_in(&scope, &p).unwrap();
+        assert_eq!(plan, NoopLaunchKits.check(&p).unwrap());
+        assert_eq!(*kits.checks.lock().unwrap(), 1);
+
+        let kit = kits.prepare_in(&scope, plan.clone(), p.id, 2).unwrap();
+        assert_eq!(kit, NoopLaunchKits.prepare(plan, p.id, 2).unwrap());
+        assert_eq!(*kits.prepares.lock().unwrap(), 1);
+    }
+
+    /// The default `working_folder` is the manager's expression: the `dunce` canonical path of a folder that exists
+    /// (a `..` step resolved), the path as given for one that does not.
+    #[test]
+    fn the_default_working_folder_is_the_dunce_canonical_path_or_the_path_as_given() {
+        let real = std::env::temp_dir();
+        let dotted = real
+            .join("..")
+            .join(real.file_name().expect("the temp folder has a name"));
+        let gone = real.join("engram-launch-scope-no-such-folder");
+        assert!(!gone.exists(), "the sample must not exist");
+        let scope = NoopLaunchKits.begin_launch();
+
+        let canonical = NoopLaunchKits.working_folder(&scope, &dotted);
+        assert_eq!(canonical, dunce::canonicalize(&real).unwrap());
+        assert!(!canonical.components().any(|c| c == Component::ParentDir));
+        assert_eq!(NoopLaunchKits.working_folder(&scope, &gone), gone);
+    }
+
+    #[test]
+    fn a_scope_gives_its_value_only_as_its_own_type() {
+        let value = Arc::new(7_u64);
+        let scope = LaunchScope::new(value.clone());
+        let got = scope.get::<u64>().expect("the scope holds a u64");
+        assert!(Arc::ptr_eq(&got, &value));
+        assert!(scope.get::<u32>().is_none());
+        assert!(scope.get::<String>().is_none());
+        assert!(Arc::ptr_eq(&scope.clone().get::<u64>().unwrap(), &value));
+        assert!(LaunchScope::default().get::<u64>().is_none());
     }
 
     #[test]

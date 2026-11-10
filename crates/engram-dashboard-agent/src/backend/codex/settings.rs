@@ -22,10 +22,12 @@ use super::{cmdline, CODEX_PROGRAM};
 use crate::backend::settings_check::{
     is, is_version, normal_parts, CommandLine, FolderEntry, FolderLoad, FolderLoadKind,
     FolderLoadSet, FolderMalformed, FolderSkillName, FolderUnsure, FrontMatterParser,
-    InstructionLoad, ModeLoads, NativePlaces, NativeSkillRoots, SchemaRefetch, SchemaSource,
-    SettingsCheck, SkillFormat, UnknownKeys, UnsureWhy, VersionProbe,
+    InstructionLoad, ModeLoads, NativePlaces, NativeSkillRoots, NoticeCodes, SchemaRefetch,
+    SchemaSource, SettingsCheck, SkillFormat, UnknownKeys, UnsureWhy, VersionProbe,
 };
-use crate::launch::Reason;
+use crate::launch::{
+    Reason, CODEX_SAME_NAME_SKILLS, CODEX_TERMINAL_FOLDER_OMITTED, CODEX_TERMINAL_OMITTED,
+};
 use crate::profile::AgentOutputFormat;
 
 /// Codex publishes one schema per release tag (`docs/research/settings-asset-validation-spike-2026-10-17.md`).
@@ -134,6 +136,11 @@ impl SettingsCheck for CodexSettingsCheck {
         None
     }
 
+    /// No merged value, so no origins.
+    fn merge_origins(&self, _layers: &[&Value]) -> Option<Vec<(String, usize)>> {
+        None
+    }
+
     /// codex warns on an unknown key and starts anyway.
     fn unknown_keys(&self) -> UnknownKeys {
         UnknownKeys::Warn
@@ -173,6 +180,48 @@ impl SettingsCheck for CodexSettingsCheck {
         false
     }
 
+    /// The terminal mode puts the working folder on its command line (`--cd`) — the rule
+    /// [`cmdline::cwd_reaches_codex_unchanged`], the same function the terminal launch translation applies. JSON
+    /// passes the folder in JSON.
+    // ADR-0353
+    fn working_folder_blocks(&self, cwd: &Path, mode: AgentOutputFormat) -> Option<Reason> {
+        match mode {
+            AgentOutputFormat::Terminal if !cmdline::cwd_reaches_codex_unchanged(cwd) => {
+                Some(reason(
+                    "codex-working-folder-unsafe",
+                    json!({ "cwd": cwd.to_string_lossy() }),
+                    None,
+                ))
+            }
+            AgentOutputFormat::Terminal | AgentOutputFormat::StreamJson => None,
+        }
+    }
+
+    /// The terminal mode loads neither library instructions and skills nor folder entries; JSON loads skills from
+    /// several roots, where one name can select none of them.
+    // ADR-0337
+    // ADR-0341
+    // ADR-0355
+    fn notice_codes(&self, mode: AgentOutputFormat) -> NoticeCodes {
+        match mode {
+            AgentOutputFormat::Terminal => NoticeCodes {
+                omitted: Some(CODEX_TERMINAL_OMITTED),
+                folder_omitted: Some(CODEX_TERMINAL_FOLDER_OMITTED),
+                same_name: None,
+            },
+            AgentOutputFormat::StreamJson => NoticeCodes {
+                same_name: Some(CODEX_SAME_NAME_SKILLS),
+                ..NoticeCodes::default()
+            },
+        }
+    }
+
+    /// JSON carries rows from the listing; the terminal mode names from it what it omits.
+    // ADR-0341
+    fn folder_listing_at_launch(&self, _mode: AgentOutputFormat) -> bool {
+        true
+    }
+
     /// codex JSON loads from a folder entry: the instruction file (`AGENTS.override.md` if it exists — even empty —
     /// else `AGENTS.md`, names compared by the OS rule; a blank file adds nothing) and the skill roots
     /// `.agents/skills` · `.codex/skills` with the skills codex's walk finds under them. Nothing else in the folder
@@ -180,8 +229,9 @@ impl SettingsCheck for CodexSettingsCheck {
     /// root is not seen). Only clear cases are predicted; a link where codex would follow it is `unsure`, a skill
     /// that fails the format check is `malformed`.
     ///
-    /// The terminal mode loads nothing from the folder; its `omitted` is the JSON `loads`, computed by the same
-    /// code, so the omission notice and the JSON launch cannot disagree.
+    /// JSON carries the instruction file and the skill roots itself (`carried`); the skills under a root reach
+    /// codex through the root. The terminal mode loads nothing from the folder; its `omitted` is the JSON `loads`,
+    /// computed by the same code, so the omission notice and the JSON launch cannot disagree.
     // ADR-0341
     fn folder_load_set(
         &self,
@@ -192,7 +242,20 @@ impl SettingsCheck for CodexSettingsCheck {
     ) -> FolderLoadSet {
         let json = json_folder_load_set(entries, read, parser);
         match mode {
-            AgentOutputFormat::StreamJson => json,
+            AgentOutputFormat::StreamJson => {
+                let carried = json
+                    .loads
+                    .iter()
+                    .filter(|row| {
+                        matches!(
+                            row.kind,
+                            FolderLoadKind::Instructions | FolderLoadKind::SkillRoot
+                        )
+                    })
+                    .cloned()
+                    .collect();
+                FolderLoadSet { carried, ..json }
+            }
             AgentOutputFormat::Terminal => FolderLoadSet {
                 omitted: json.loads,
                 ..FolderLoadSet::default()
@@ -990,6 +1053,95 @@ mod tests {
         assert_eq!(CODEX_SETTINGS_CHECK.unknown_keys(), UnknownKeys::Warn);
         for folder in [r"C:\rules\50%\x", r"C:\a&b", r"C:\plain"] {
             assert!(!CODEX_SETTINGS_CHECK.folder_entry_blocks(Path::new(folder)));
+        }
+    }
+
+    #[test]
+    fn codex_has_no_merge_origins() {
+        let layers = [json!(["a=1"]), json!(["b=2"])];
+        let refs: Vec<&Value> = layers.iter().collect();
+        assert_eq!(CODEX_SETTINGS_CHECK.merge_origins(&refs), None);
+        assert_eq!(CODEX_SETTINGS_CHECK.merge_origins(&[]), None);
+    }
+
+    /// ★The terminal working-folder rule is `cwd_reaches_codex_unchanged`★ — refused: two `%`, a `"`, a control
+    /// character, `& ^ | < >` without a space; passed: a single `%`, `& ^ | < >` with a space. JSON never blocks.
+    // ADR-0353
+    #[test]
+    fn the_working_folder_blocks_only_the_terminal_mode_by_the_cd_rule() {
+        let refused = [
+            r"C:\Work\R&D",
+            r"C:\Work\a^b",
+            r"C:\Work\a|b",
+            r"C:\Work\a<b>",
+            r"D:\%USERNAME% Projects",
+            r"C:\%A%\b",
+            r#"D:\a b"&calc"#,
+            "D:\\a b\u{7}",
+        ];
+        for cwd in refused {
+            assert_eq!(
+                CODEX_SETTINGS_CHECK.working_folder_blocks(Path::new(cwd), TERMINAL),
+                Some(reason(
+                    "codex-working-folder-unsafe",
+                    json!({ "cwd": cwd }),
+                    None
+                )),
+                "{cwd:?}"
+            );
+            assert_eq!(
+                CODEX_SETTINGS_CHECK.working_folder_blocks(Path::new(cwd), JSON),
+                None,
+                "{cwd:?}"
+            );
+        }
+        for cwd in [
+            r"D:\R&D Projects",
+            r"D:\a ^ | < > b",
+            r"C:\Work\100%",
+            r"D:\100% Projects",
+            r"C:\plain",
+        ] {
+            for mode in [TERMINAL, JSON] {
+                assert_eq!(
+                    CODEX_SETTINGS_CHECK.working_folder_blocks(Path::new(cwd), mode),
+                    None,
+                    "{cwd:?} {mode:?}"
+                );
+            }
+        }
+    }
+
+    // ADR-0337
+    // ADR-0341
+    // ADR-0355
+    #[test]
+    fn the_notice_codes_follow_the_mode() {
+        assert_eq!(
+            CODEX_SETTINGS_CHECK.notice_codes(TERMINAL),
+            NoticeCodes {
+                omitted: Some("codex-terminal-omitted"),
+                folder_omitted: Some("codex-terminal-folder-omitted"),
+                same_name: None,
+            }
+        );
+        assert_eq!(
+            CODEX_SETTINGS_CHECK.notice_codes(JSON),
+            NoticeCodes {
+                omitted: None,
+                folder_omitted: None,
+                same_name: Some("codex-same-name-skills"),
+            }
+        );
+    }
+
+    #[test]
+    fn every_mode_lists_the_folder_entries_at_launch() {
+        for mode in [TERMINAL, JSON] {
+            assert!(
+                CODEX_SETTINGS_CHECK.folder_listing_at_launch(mode),
+                "{mode:?}"
+            );
         }
     }
 
@@ -2025,6 +2177,42 @@ mod tests {
         );
     }
 
+    /// ★JSON carries the instruction file and the skill roots, the terminal mode nothing★ — the skills under a root
+    /// stay in `loads` only (codex finds them through the root).
+    // ADR-0341
+    #[test]
+    fn json_carries_the_instruction_file_and_the_roots_and_the_terminal_mode_nothing() {
+        use FolderLoadKind::*;
+        let files = [
+            ("README.md", Some("# readme")),
+            (".agents/skills/a/SKILL.md", Some(SKILL_OK)),
+            ("AGENTS.md", Some("# agents")),
+            (".codex/skills/b/SKILL.md", Some(SKILL_NO_NAME)),
+        ];
+        let json = load_set_of(&files, &[], JSON);
+        let carried: Vec<(String, FolderLoadKind)> = json
+            .carried
+            .iter()
+            .map(|row| (slash(&row.path), row.kind))
+            .collect();
+        assert_eq!(
+            carried,
+            [
+                (".agents/skills".to_owned(), SkillRoot),
+                ("AGENTS.md".to_owned(), Instructions),
+                (".codex/skills".to_owned(), SkillRoot),
+            ]
+        );
+        assert!(json.carried.iter().all(|row| json.loads.contains(row)));
+
+        let terminal = load_set_of(&files, &[], TERMINAL);
+        assert!(terminal.carried.is_empty());
+        assert_eq!(terminal.omitted, json.loads);
+
+        let only_skills_root = load_set_of(&[("skills/y/SKILL.md", Some(SKILL_OK))], &[], JSON);
+        assert!(only_skills_root.carried.is_empty());
+    }
+
     #[test]
     fn root_skills_walks_one_root_like_a_folder_entry_root() {
         let files = [
@@ -2078,6 +2266,7 @@ mod tests {
             ]
         );
         assert!(set.omitted.is_empty());
+        assert!(set.carried.is_empty());
     }
 
     // ── codex's own skill roots ──────────────────────────────────────────────────

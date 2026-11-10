@@ -10,6 +10,8 @@
 //!   fixed bound.
 // ADR-0337
 
+use std::path::Path;
+
 use engram_dashboard_platform::shell::text_is_cli_safe;
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -113,6 +115,28 @@ pub(super) fn priming_value(text: &str) -> Result<String, PrimingRefusal> {
         .replace('\n', NEWLINE_REPLACEMENT)
         .replace('\r', NEWLINE_REPLACEMENT);
     Ok(format!("{DEVELOPER_INSTRUCTIONS_KEY}='{single_line}'"))
+}
+
+/// Whether the terminal `--cd` value reaches codex as the folder it names — `false` when it is not UTF-8 (the line is
+/// text), holds two or more `%` (cmd expands `%NAME%` even inside quotes), holds a `"` (it would end portable-pty's
+/// quotes early; Win32 forbids it in a name, so no real folder is lost), holds a control character (an LF cuts the
+/// line), or holds one of `& ^ | < >` with no space (U+0020). The one rule of both the launch translation and the
+/// port's `working_folder_blocks`.
+///
+/// ★A single `%` passes★ — cmd keeps a lone `%`, the shim's `%*` is not expanded again, and nothing else on the line
+///   holds a `%` to pair with it (the preset lines and the priming refuse it); only `extra_args` could.
+/// ★`& ^ | < >` pass with a space★ — portable-pty then wraps the whole value in quotes, and cmd takes them literally
+///   inside quotes; the same reasoning as [`priming_value`]. Every other cmd-related refusal is left out on
+///   purpose: block only what breaks the launch.
+// ADR-0353
+pub(super) fn cwd_reaches_codex_unchanged(cwd: &Path) -> bool {
+    let Some(text) = cwd.to_str() else {
+        return false;
+    };
+    let quoted_on_the_line = text.contains(' ');
+    text.matches('%').count() < 2
+        && !text.chars().any(|c| c == '"' || c.is_control())
+        && (quoted_on_the_line || !text.contains(['&', '^', '|', '<', '>']))
 }
 
 /// Whether the whole launch command line of `line` fits in [`CMD_LINE_LIMIT_UTF16`], counted as an upper bound

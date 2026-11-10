@@ -11,9 +11,10 @@
 //! ★Every refusal comes before the first write, and every refusal is `Err` (a failed spawn)★ — real materials have
 //!   no warn-and-launch path: a priming the terminal line cannot carry blocks the launch. Most refusals repeat a rule
 //!   the launch check (step 7) is to block earlier with `Broken`, so reaching one here means an input changed between the
-//!   check and the launch. Two have no check-side counterpart: a merged instructions file that cannot be read as
-//!   UTF-8 (`prepare` writes it after the check, so only this read sees it), and — until step 7 adds one — the
-//!   terminal working-folder guard ([`cwd_reaches_codex_unchanged`]), so a folder it refuses fails every launch here.
+//!   check and the launch. One has no check-side counterpart: a merged instructions file that cannot be read as
+//!   UTF-8 (`prepare` writes it after the check, so only this read sees it). The terminal working-folder guard
+//!   ([`cmdline::cwd_reaches_codex_unchanged`]) has one — the port's `working_folder_blocks` applies the same
+//!   function — but no launch check calls it yet, so a folder it refuses fails every launch here.
 //! Every link path is `kit.volatile_dir` joined with words and is used exactly as passed to `link_dir` — the
 //! confinement refuses a respelled path or a path under a link, failing the placement.
 // ADR-0334
@@ -43,9 +44,10 @@ use crate::profile::{AgentCommand, AgentOutputFormat};
 ///   (only with ≥ 1 skill, then one link per skill) followed by the plan's extra skill roots.
 ///
 /// `Err`, nothing written: a raw setting `-c` guard refusal; an instructions file that cannot be read as UTF-8 text;
-/// terminal — a plan with instruction sources, a working folder [`cwd_reaches_codex_unchanged`] refuses (it goes on
-/// the line as `--cd`), a priming the line cannot carry; JSON — a skill root that is not absolute or not UTF-8, skills without a
-/// volatile folder, a skill name codex JSON refuses, two skills on one link; both — a command line over the budget.
+/// terminal — a plan with instruction sources, a working folder [`cmdline::cwd_reaches_codex_unchanged`] refuses (it
+/// goes on the line as `--cd`), a priming the line cannot carry; JSON — a skill root that is not absolute or not
+/// UTF-8, skills without a volatile folder, a skill name codex JSON refuses, two skills on one link; both — a command
+/// line over the budget.
 /// `Err` after a partial write when a link fails; the caller's release removes the volatile folder.
 pub(super) fn materialize(
     command: &AgentCommand,
@@ -118,7 +120,7 @@ fn terminal(
             kit.plan.instructions.len()
         ));
     }
-    if !cwd_reaches_codex_unchanged(cwd) {
+    if !cmdline::cwd_reaches_codex_unchanged(cwd) {
         return Err(format!(
             "the codex working folder goes on the terminal command line (`--cd`) and cmd.exe could change it (two `%`, a `\"`, a control character, or `& ^ | < >` without a space) or it is not UTF-8: {cwd:?}"
         ));
@@ -146,27 +148,6 @@ fn terminal(
         instructions_override,
         ..LaunchArtifacts::default()
     })
-}
-
-/// Whether the terminal `--cd` value reaches codex as the folder it names — `false` when it is not UTF-8 (the line is
-/// text), holds two or more `%` (cmd expands `%NAME%` even inside quotes), holds a `"` (it would end portable-pty's
-/// quotes early; Win32 forbids it in a name, so no real folder is lost), holds a control character (an LF cuts the
-/// line), or holds one of `& ^ | < >` with no space (U+0020).
-///
-/// ★A single `%` passes★ — cmd keeps a lone `%`, the shim's `%*` is not expanded again, and nothing else on the line
-///   holds a `%` to pair with it (the preset lines and the priming refuse it); only `extra_args` could.
-/// ★`& ^ | < >` pass with a space★ — portable-pty then wraps the whole value in quotes, and cmd takes them literally
-///   inside quotes; the same reasoning as [`cmdline::priming_value`]. Every other cmd-related refusal is left out on
-///   purpose: block only what breaks the launch.
-// ADR-0353
-fn cwd_reaches_codex_unchanged(cwd: &Path) -> bool {
-    let Some(text) = cwd.to_str() else {
-        return false;
-    };
-    let quoted_on_the_line = text.contains(' ');
-    text.matches('%').count() < 2
-        && !text.chars().any(|c| c == '"' || c.is_control())
-        && (quoted_on_the_line || !text.contains(['&', '^', '|', '<', '>']))
 }
 
 fn json(
@@ -855,6 +836,53 @@ mod tests {
             );
             assert!(result.is_ok(), "{cwd:?}: {result:?}");
         }
+    }
+
+    /// ★The port's working-folder check and `materialize` agree★ — fed the same cwd, the port blocks a mode exactly
+    /// when the real launch of that mode fails on the working folder, on every folder of the table.
+    // ADR-0353
+    #[test]
+    fn the_port_working_folder_check_and_materialize_agree() {
+        let reader = Reader::of(PRIMING);
+        let folders = [
+            PathBuf::from(r"C:\Work\R&D"),
+            PathBuf::from(r"C:\Work\a^b"),
+            PathBuf::from(r"C:\Work\a|b"),
+            PathBuf::from(r"C:\Work\a<b>"),
+            PathBuf::from(r"D:\%USERNAME% Projects"),
+            PathBuf::from(r"C:\%A%\b"),
+            PathBuf::from(r#"D:\a b"&calc"#),
+            PathBuf::from("D:\\a b\u{7}"),
+            PathBuf::from("D:\\a\nb"),
+            not_utf8(),
+            PathBuf::from(r"D:\R&D Projects"),
+            PathBuf::from(r"D:\a ^ | < > b"),
+            PathBuf::from(r"C:\Work\100%"),
+            PathBuf::from(r"D:\100% Projects"),
+            PathBuf::from(r"D:\%"),
+            work(),
+        ];
+        let mut blocked = 0;
+        for cwd in &folders {
+            for mode in MODES {
+                let port = CODEX_SETTINGS_CHECK.working_folder_blocks(cwd, mode);
+                let (launch, _) = materialized_with(mode, &real_kit(), cwd, &reader);
+                assert_eq!(
+                    port.is_some(),
+                    launch.is_err(),
+                    "{cwd:?} {mode:?}: {launch:?}"
+                );
+                if let (Some(reason), Err(error)) = (&port, &launch) {
+                    assert_eq!(reason.code, "codex-working-folder-unsafe", "{cwd:?}");
+                    assert!(error.contains("--cd"), "{cwd:?}: {error}");
+                    blocked += 1;
+                }
+            }
+        }
+        assert_eq!(
+            blocked, 10,
+            "every refused folder of the table blocks the terminal mode"
+        );
     }
 
     // ── argv ──
