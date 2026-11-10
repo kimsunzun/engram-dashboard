@@ -31,7 +31,7 @@ Non-goals:
 - **R7 — `connectionError` lifetime:** set by a failed start (as today), cleared on `connected` (as today) and when a new start begins.
 - **R8 — LLM commands** on `window.__engramCmd`, main window only, no `help`:
   - `connection.status` → `{ state, band, text }` (`text` = the band sentence, `null` with no band).
-  - `connection.reconnect` → the same call as R4; reply = the status after it ends.
+  - `connection.reconnect` → the same call as R4; success → the `connection.status` reply; failure → an error carrying the start's cause.
   - `daemon.stop` → the shell's stop (`daemon_shutdown`), no confirm; reply `{ outcome, reason }`.
 - **R9 — remove `daemon_stop`** (the old pid-kill command; no frontend caller since S21 U5a), as ADR-0350 decision 6 records.
 
