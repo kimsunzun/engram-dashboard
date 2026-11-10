@@ -18,7 +18,7 @@ Implements PRD R1–R9. The shell side (band rules, `daemon_shutdown`, stop path
 
 ### 3-1. Band plumbing (frontend API)
 
-- Add `readonly connectionBand: Band | null` to `Transport` (`transport.ts`), `WsTransport` (always `null` — the dev WS path has no shell), `ProtocolClient` (delegates to the transport) and `AgentClient`. `Band` = `src-tauri/bindings/Band.ts`. Parked hunks for this member only.
+- Add `readonly connectionBand: Band | null` to `Transport` (`transport.ts`), `WsTransport` (always `null` — keeps the interface complete), `ProtocolClient` (delegates to the transport) and `AgentClient`. `Band` = `src-tauri/bindings/Band.ts`. Parked hunks for this member only.
 - No new event: subscribers keep using `onConnectionStateChange` and read `connectionState`, `connectionBand`, `connectionError`.
 - **Cause guard (R21, parked `ProtocolClient` hunk):** `refusesCause(band)` = band ② or ① `refused`. The transport listener clears `connError` when such a band arrives; `reportConnectionError` writes `null` while one holds. Without it the normal ② recovery shows a stale cause: a version-mismatch boot records 「protocol 버전 불일치 …」 from the failed `daemon_start`, ② hides it, and after the tray stop the plain ① shows it (review 2026-11-10, M1). The same holds for a token refusal followed by a stop.
 - Not taken from the parked API diff: `attach()` (R15), `refreshStatus` / `refreshConnectionStatus` (C10), the `TauriTransport` listener single-flight (C14).
@@ -96,7 +96,7 @@ Main:
 - `connection.reconnect` failure = rethrow (§3-6); PRD R8 wording follows.
 - `can_stop` stays on the wire, unread (ADR-0356 영향).
 - `kill_tree` kept (§3-7).
-- No clearing of `connectionError` on a stop result (PRD does not need it; it clears on `connected` and on the next start).
+- No clearing of `connectionError` on a stop result (PRD does not need it; it clears on `connected`, on the next start, and when ② or ① `refused` arrives).
 
 User: see PRD §5; plus (2026-11-10, PRD+TRD review hold H1) boot start stays in every window — ADR-0350 decisions 5 (R17) and 2's R15 do not land here; decided in the multi-daemon topic (T-85). User: 「나중에 다중에이전트 선택할때 결정하는게 좋을듯? 일단은 이대로 유지하자」.
 
@@ -108,4 +108,4 @@ User: see PRD §5; plus (2026-11-10, PRD+TRD review hold H1) boot start stays in
 
 ## 8. Review record
 
-- (pending) PRD+TRD review.
+- 2026-11-10 · PRD+TRD review · full (Claude reviewer + codex) · round 1: Claude FIX (M1 stale cause under ① → R21 guard taken; H1 boot start per window → user deferred, T-85; B1–B4 wording), codex PASS (one 권장 — no handle after a failed cold-boot start hides the band; not taken: the boot pulls create the handle, traced by the Claude reviewer) · round 2 (delta, Claude): PASS, N1–N2 wording fixed · PASS at `fb24339d` + wording.
