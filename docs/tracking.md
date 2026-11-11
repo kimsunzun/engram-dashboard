@@ -10,6 +10,7 @@
 
 | ID | 제목(짧게) | 구역 | 상태 |
 |---|---|---|---|
+| T-104 | Library file watcher — show files changed outside Engram without a refresh | 메인 | Deferred by the user (2026-11-11) — target = UI step 13 or later |
 | T-86 | Tray 「데몬 켜기」 reconnects but slots keep the daemon-down icon | 메인 | Deferred to the multi-daemon topic with the tray work (user 2026-11-10) |
 | T-85 | A new window starts a daemon the user stopped (boot start in every window) | 메인 | Deferred to the multi-daemon topic (user 2026-11-10) |
 | T-84 | Update system — replace a version-mismatched daemon | 메인 | Not started — deferred by the user (ADR-0356) |
@@ -92,6 +93,11 @@
 | T-16 | 프론트 종료 판정 · 세대 필터 | 사소한 기능·정리 | 잔존 · T-32 선결 |
 
 ## 메인
+
+### T-104. Library file watcher — show files changed outside Engram without a refresh
+- **Status:** deferred — a separate feature, after S25 step 7; target = the UI step (S25 step 13) or later. User 2026-11-11, when confirming B31 as is: a file watcher later, as its own feature.
+- **Fact (design, S25 step 7 TRD `docs/process/S25-preset-library/trd-asset-library.md` §10-2 B31 · §6):** the in-memory `Catalog` changes only through scans (first scan, `library.refresh`, root change), Engram's own changes, `check`'s late merge and `list`'s safety net — and the late merge never removes. So a file deleted or added outside Engram shows in the library list only after a refresh. A launch is not affected: `check` reads the attached files fresh and blocks on a missing one.
+- **Next:** when picked up, decide the watcher (OS notifications vs polling), how its events enter `Catalog` under the step-7 rules (class A per-item writes, sequenced removals — ADR-0324), what happens on a network or removable root, and what the screen shows.
 
 ### T-86. Tray 「데몬 켜기」 reconnects but slots keep the daemon-down icon
 - **Status:** deferred to the multi-daemon topic, together with the tray work — user 2026-11-10: 「어차피 멀티데몬할때 트레이도 개선해야되니 나중에 다시 오픈하자」.
