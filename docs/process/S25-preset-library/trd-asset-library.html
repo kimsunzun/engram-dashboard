@@ -165,7 +165,7 @@ details .tbl{margin-top:4px}
   <div class="eyebrow">S25 프리셋 라이브러리 · 7단계 TRD 개요</div>
   <h1>asset-library 크레이트</h1>
   <div class="meta">
-    <span>원본 <code>trd-asset-library.md</code> 초안 11 재리뷰(2회차) — 반드시 고칠 것 없음, 모아 고칠 것 반영, N5(Engram이 갖지 않은 바깥 대기)는 step 8에서 codex 셸 도구 시간 제한을 실측해 정함 (2026-11-11)</span>
+    <span>원본 <code>trd-asset-library.md</code> 초안 12 · B29 알림을 거둠(로그만), 사용자 결정 · 리뷰 전(초안 9에 더했던 것을 되돌린 문서 변경) (2026-11-12) — 초안 11은 재리뷰 2회차에서 반드시 고칠 것 없음</span>
     <span>9조각 · 코드 약 <b>6,850</b>줄 · 테스트 약 <b>9,350</b>줄 (P4 agent 쪽 삭제 별도)</span>
   </div>
 </header>
@@ -392,7 +392,7 @@ details .tbl{margin-top:4px}
     <thead><tr><th></th><th>무엇을 확인하나</th><th>시간</th><th>답이 없으면</th></tr></thead>
     <tbody>
       <tr><td class="k"><span class="tag now">필수</span></td><td>프리셋의 폴더 항목(있는지·목록·파일 읽기), 라이브러리 프리셋이 붙었을 때 라이브러리 루트, prepare의 원본 다시 읽기</td><td>실행 하나에 합쳐서 최대 60초(Windows SMB가 요청 하나를 스스로 포기하는 시간). check가 여러 번 돌고 prepare까지 가도 이 60초를 나눠 쓴다. 이미 답을 받은 폴더는 다시 묻지 않는다. 실행이 아닌 읽기(목록에서 프리셋 풀어 보기 등)는 지금처럼 5초.</td><td><b>폴더 하나만 늦어도 실행 전체를 막는다.</b></td></tr>
-      <tr><td class="k"><span class="tag adv">참고</span></td><td>작업 폴더의 정식 경로(정션 풀기), 백엔드 기본 스킬 폴더(예: codex의 <code>&lt;CODEX_HOME&gt;/skills</code>), 같은 이름 스킬 비교용 정식 경로</td><td>실행 하나에 따로 최대 2초. 필수 60초에서 빼 쓰지 않는다.</td><td>건너뛴다. 대신할 값을 지어내지 않는다. 작업 폴더는 적힌 경로를 그대로 쓰고 실행 응답에 알림을 붙인다(B29). 스킬 폴더 비교는 이번 실행에서 뺀다.</td></tr>
+      <tr><td class="k"><span class="tag adv">참고</span></td><td>작업 폴더의 정식 경로(정션 풀기), 백엔드 기본 스킬 폴더(예: codex의 <code>&lt;CODEX_HOME&gt;/skills</code>), 같은 이름 스킬 비교용 정식 경로</td><td>실행 하나에 따로 최대 2초. 필수 60초에서 빼 쓰지 않는다.</td><td>건너뛴다. 대신할 값을 지어내지 않는다. 작업 폴더는 적힌 경로를 그대로 쓰고 로그에만 남긴다(B29). 스킬 폴더 비교는 이번 실행에서 뺀다.</td></tr>
     </tbody>
   </table>
   </div>
@@ -487,7 +487,7 @@ details .tbl{margin-top:4px}
       <tr><td class="k">P1</td><td>크레이트 뼈대, 경로 타입, 백엔드 창구(<code>Backends</code>), base·platform 작은 함수 둘, CI 게이트 넷</td><td class="num">500 / 500</td><td>—</td></tr>
       <tr><td class="k">P2</td><td>agent 쪽 포트 추가 (메서드 넷, 필드 둘, 실행 범위 <code>LaunchScope</code>)</td><td class="num">420 / 480</td><td>— <span class="note">P3·P6과 나란히</span></td></tr>
       <tr><td class="k">P3</td><td>YAML 읽기 · 앞머리(front matter) · 프리셋 쓰기 · codex 스킬 골든</td><td class="num">1,070 / 1,650</td><td>P1</td></tr>
-      <tr><td class="k">P4</td><td>넘기기 검사 (설정의 <code>-c</code> 줄, 스킬 형식) + agent 쪽 스키마 전용 메서드·알림 코드 정리, 새 알림 코드 하나(B29). 스키마 검사는 빠졌다(ADR-0359).<span class="note">agent 쪽은 지우기만 한다 (코드 약 400줄 · 테스트 약 430줄 삭제)</span></td><td class="num">110 / 250</td><td>P2 · P3</td></tr>
+      <tr><td class="k">P4</td><td>넘기기 검사 (설정의 <code>-c</code> 줄, 스킬 형식) + agent 쪽 스키마 전용 메서드·알림 코드 정리. 새 알림 코드는 없다(B29 알림은 초안 12에서 거둠). 스키마 검사는 빠졌다(ADR-0359).<span class="note">agent 쪽은 지우기만 한다 (코드 약 400줄 · 테스트 약 430줄 삭제)</span></td><td class="num">110 / 250</td><td>P2 · P3</td></tr>
       <tr><td class="k">P5</td><td>저장소 · 훑기 · 메모리 목록 · 발췌 · 참조 걷기</td><td class="num">1,150 / 1,430</td><td>P3 · P4</td></tr>
       <tr><td class="k">P6</td><td>폴더 IO (시간 제한, 동시 확인, 필수·참고 구분)</td><td class="num">580 / 900</td><td>P1 <span class="note">P3–P5와 나란히</span></td></tr>
       <tr><td class="k">P7</td><td>서비스 + 잠금 게이트 (목록, 새로고침, 규칙 A, 루트 변경)</td><td class="num">970 / 1,290</td><td>P5 · P6</td></tr>
@@ -523,13 +523,13 @@ details .tbl{margin-top:4px}
   </div>
 
   <h3>메인이 정하고 사용자가 확인한 것 <span class="tag done">확인됨 11-11</span></h3>
-  <p class="small">리뷰 중에 메인이 정했고, 2026-11-11 사용자가 모두 확인했다. B29는 알림을 더하는 조건으로 확인했다.</p>
+  <p class="small">리뷰 중에 메인이 정했고, 2026-11-11 사용자가 모두 확인했다. B29는 그때 알림을 더하는 조건으로 확인했지만, 2026-11-12 사용자가 그 알림을 거뒀다(로그만 남긴다).</p>
   <div class="tbl">
   <table>
     <thead><tr><th>번호</th><th class="w-what">정한 것</th><th>대가</th></tr></thead>
     <tbody>
       <tr><td class="k">규칙 A·B <span class="tag done">확인됨</span></td><td>위 「동시성 규칙 두 개」. 목록 쓰기는 항목 하나씩(루트 변경만 예외), 필수 확인 먼저·참고 확인은 따로.</td><td>구조 규칙이라 9a·9b의 편집·이동도 이 규칙을 따라야 한다.</td></tr>
-      <tr><td class="k">B29 <span class="tag done">확인됨</span></td><td>작업 폴더의 정식 경로 확인은 답이 없어도 실행을 막지 않는다. 적힌 경로 그대로 띄운다. 지금 매니저도 경로 풀기가 오류로 답하면 적힌 경로로 띄운다(느린 폴더면 지금은 끝없이 기다린다 — 참고 시간 2초가 그 대기를 끊는다). <b>사용자 확인 때 더한 것:</b> 이때 실행 응답에 알림 <code>working-folder-unchecked</code>를 붙여, 실행을 요청한 사람이나 LLM에게 알린다. 문구(메인 결정): 「알림: 작업 폴더 &lt;폴더&gt;이(가) 늦게 응답해 경로 확인을 건너뛰었습니다.」 사실만 적는다. 이어 하기가 이전 대화를 못 찾을 수 있다는 말은 claude에만 해당해서(codex는 스레드 id로 이어 한다) 알림에는 넣지 않는다.</td><td>늦게 깨는 매핑 네트워크 드라이브면 적힌 경로로 띄워지고, claude 세션 이어 하기가 세션 폴더를 못 찾을 수 있다. 다음 실행에선 정상(R18). 기다리는 쪽이 먼저 포기한 뒤에 성공 응답이 오면 이 알림도 잃는다(B28 — 바로 기다리는 쪽은 88초, 데몬 자리와 그 바깥은 8단계가 정하는 값).</td></tr>
+      <tr><td class="k">B29 <span class="tag done">확인됨</span></td><td>작업 폴더의 정식 경로 확인은 답이 없어도 실행을 막지 않는다. 적힌 경로 그대로 띄운다. 지금 매니저도 경로 풀기가 오류로 답하면 적힌 경로로 띄운다(느린 폴더면 지금은 끝없이 기다린다 — 참고 시간 2초가 그 대기를 끊는다). <b>로그에만 남긴다.</b> 2026-11-11 사용자 확인 때 실행 응답에 알림 <code>working-folder-unchecked</code>를 붙이기로 했다가(초안 9~11), 2026-11-12 사용자가 거뒀다(<q>뭔지 이해안된다. 나 자야되니 A로 너가 해</q> — 메인 권고 A). 그 알림은 요청한 쪽이 할 수 있는 일을 알려 주지 못했고, 생길 수 있는 일(경로 표기가 달라 claude 이어 하기가 세션 폴더를 못 찾음)은 claude에만 해당하고 드물다(codex는 스레드 id로 이어 한다).</td><td>늦게 깨는 매핑 네트워크 드라이브면 적힌 경로로 띄워지고, claude 세션 이어 하기가 세션 폴더를 못 찾을 수 있다. 다음 실행에선 정상(R18). 알려 주지 않고 로그에만 남는다.</td></tr>
       <tr><td class="k">B25 <span class="tag done">확인됨</span></td><td>참고 확인은 실행당 따로 자른다. 값은 ADR-0360으로 1초에서 2초가 됐다.</td><td>기본 스킬 폴더가 죽은 공유에 있으면 그 에이전트는 실행할 때마다 최대 2초 늦어진다. 상한이 없으면 더 오래 늦어진다.</td></tr>
       <tr><td class="k">B31 <span class="tag done">확인됨</span></td><td>실행 검사는 메모리 목록에서 항목을 지우지 않는다. 지우는 것은 훑기와 변경뿐이다.</td><td>밖에서 지운 파일은 다음 새로고침까지 목록에 남는다. 실행 자체는 새로 읽은 내용으로 판단하므로 실행 결과는 맞다. 파일 감시는 나중에 따로(T-104).</td></tr>
       <tr><td class="k">B30 <span class="tag done">확인됨</span></td><td>필수 확인에서 이미 막힌 실행은 참고 확인을 건너뛴다.</td><td>그 응답의 작업 폴더 관련 ② 줄은 정식 경로 대신 적힌 경로로 판정한다. 고친 뒤 다음 실행에서 다시 판정한다.</td></tr>
@@ -571,7 +571,7 @@ details .tbl{margin-top:4px}
   </ul>
 </section>
 
-<p class="foot">이 페이지는 TRD 초안 11의 요약이다(2026-11-11 초안 11 재리뷰(2회차) — 반드시 고칠 것 없음, 모아 고칠 것 반영, N5는 step 8에서 실측해 정함. 조건(실행 하나 85초 · 바로 기다리는 쪽 88초)과 겹친 대기의 순서 규칙만 남기고 입구별 값은 8단계로, 셸 연결은 ADR-0181대로 공용 시한을 올린다, 값은 agent <code>types.rs</code>). 세부 규칙·근거·테스트 목록은 <code>docs/process/S25-preset-library/trd-asset-library.md</code>에 있다 (§3-6 넘기기 검사, §3-8 폴더 IO, §3-9a agent 쪽 정리, §6 동시성, §9 조각, §10 결정, §11 위험).</p>
+<p class="foot">이 페이지는 TRD 초안 12의 요약이다(2026-11-12 초안 12 — B29 알림을 거두고 로그만 남긴다, 사용자 결정, 리뷰 전. 초안 11 재리뷰(2회차) — 반드시 고칠 것 없음, 모아 고칠 것 반영, N5는 step 8에서 실측해 정함. 조건(실행 하나 85초 · 바로 기다리는 쪽 88초)과 겹친 대기의 순서 규칙만 남기고 입구별 값은 8단계로, 셸 연결은 ADR-0181대로 공용 시한을 올린다, 값은 agent <code>types.rs</code>). 세부 규칙·근거·테스트 목록은 <code>docs/process/S25-preset-library/trd-asset-library.md</code>에 있다 (§3-6 넘기기 검사, §3-8 폴더 IO, §3-9a agent 쪽 정리, §6 동시성, §9 조각, §10 결정, §11 위험).</p>
 
 </main>
 </body>
