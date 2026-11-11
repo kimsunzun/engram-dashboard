@@ -1,7 +1,7 @@
 # ADR-0323: `daemon\cache\` = only data that can be rebuilt — it may be deleted at any time
 
-- 상태: 제안 (2026-10-31, basis: user decisions B14 (2026-10-19 「cache로 하자. 그래야 유저가 인지하고 삭제하지」) · P10)
-- 관련: Amends ADR-0264 (adds a third category) · ADR-0332 (settings check) · TRD `docs/process/S25-preset-library/trd.md` §1-1 · §1-4 `validate.rs` · §7 29
+- 상태: 제안 (2026-10-31, basis: user decisions B14 (2026-10-19 「cache로 하자. 그래야 유저가 인지하고 삭제하지」) · P10) · 부분 폐기 by ADR-0359 (decisions 2 and 3)
+- 관련: Amends ADR-0264 (adds a third category) · ADR-0332 (settings check) · TRD `docs/process/S25-preset-library/trd.md` §1-1 · §1-4 `validate.rs` · §7 29 · Amended by ADR-0359 (decisions 2 and 3)
 
 ## 맥락
 Where does the daemon put the settings schema it downloaded? Today the data root is split into the protected `state\` and the run-time volatile `run\` (ADR-0264).
