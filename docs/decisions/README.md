@@ -357,7 +357,7 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0308](0308-데몬은-화면-내용을-모른다-셸이-에이전트-참조로-표시한-인자는-데몬이-중계-전에-id-로-바꾼다.md) | The daemon does not know screen content — an argument the shell marks as an agent reference is converted to an id by the daemon before relaying | 확정 |
 | [0309](0309-우편-내부-키는-에이전트-id-가장자리-주소는-이름-그대로.md) | The internal mail key is the agent id — the edge address stays the name | 확정 |
 | [0310](0310-3단계-transport-붙이기-결정-d1d26.md) | Stage 3 attaching transport — decisions D1~D26 | 확정 (부분 폐기 by ADR-0342: decision 12: immediate popup on version mismatch / ADR-0346: decision 12: retry on token mismatch, and decision 20: injecting the reconnect count / ADR-0347: decision 11: auth deadline of 1 second) |
-| [0311](0311-라이브러리는-따로-된-얇은-crate-engram-dashboard-asset-library-다-데몬은-배선만.md) | The library is a separate thin crate `engram-dashboard-asset-library` — the daemon only wires it | 제안 |
+| [0311](0311-라이브러리는-따로-된-얇은-crate-engram-dashboard-asset-library-다-데몬은-배선만.md) | The library is a separate thin crate `engram-dashboard-asset-library` — the daemon only wires it | 제안 (부분 폐기 by ADR-0359: decision 4 schema fetch port) |
 | [0312](0312-라이브러리-루트는-하나다-바깥-내용은-루트-안으로-들인다.md) | There is one library root — outside content is brought inside the root | 제안 (부분 폐기 by ADR-0341: Decision 3 scope) |
 | [0313](0313-구현은-서버-먼저-데몬-라이브러리-기능은-늘-켜져-있고-화면만-끄고-켠다.md) | Implement the server first — the daemon library feature is always on, and only the screen is toggled | 제안 |
 | [0314](0314-프리셋-라이브러리는-데몬이-소유하는-에셋이고-클라이언트가-요청해-읽는다.md) | Presets and the library are assets owned by the daemon, and the client requests and reads them | 제안 |
