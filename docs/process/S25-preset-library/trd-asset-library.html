@@ -165,7 +165,7 @@ details .tbl{margin-top:4px}
   <div class="eyebrow">S25 프리셋 라이브러리 · 7단계 TRD 개요</div>
   <h1>asset-library 크레이트</h1>
   <div class="meta">
-    <span>원본 <code>trd-asset-library.md</code> 초안 9 · 사용자 결정 반영, 리뷰 1차 지적 반영 (2026-11-11, 재리뷰 전) — 초안 8은 리뷰 통과</span>
+    <span>원본 <code>trd-asset-library.md</code> 초안 9 · 사용자 결정 반영, 리뷰 1·2차 지적 반영 (2026-11-11, 재리뷰 전) — 초안 8은 리뷰 통과</span>
     <span>9조각 · 코드 약 <b>6,850</b>줄 · 테스트 약 <b>9,350</b>줄 (P4 agent 쪽 삭제 별도)</span>
   </div>
 </header>
@@ -492,7 +492,7 @@ details .tbl{margin-top:4px}
       <tr><td class="k">D2</td><td>알림 두 개를 없앴다. 이 백엔드 칸이 없는 설정, 다른 백엔드 태그가 달린 항목은 알림 없이 건너뛴다.</td><td><q>음? codedx칸이 없을수도 있지 왜 알림을해?</q></td></tr>
       <tr><td class="k">확장성</td><td>백엔드를 추가할 때 agent 쪽만 고치면 된다 (<code>AgentCommand</code> 변형, <code>backend_word</code>, <code>SettingsCheck</code>). asset-library는 고치지 않는다. 그래서 asset-library 코드는 테스트와 내장 내용 파일 밖에서 claude·codex라는 이름을 쓰지 않는다.</td><td><q>나중에 백엔드 계속 추가될텐데 최대한 공용화로 하고</q></td></tr>
       <tr><td class="k">UI</td><td>프리셋 편집 화면의 백엔드별 칸은 사용자가 추가할 때만 나타난다. 13단계에서 자세히 정한다.</td><td><q>ui 기준으로는 모든 칸에 다 나오면 보기 불편하니깐 추가해야지 나오는 형태?</q></td></tr>
-      <tr><td class="k">ADR-0359 <span class="tag now">11-11</span></td><td>설정은 스키마로 검사하지 않는다. claude·codex·앞으로 붙을 백엔드 모두 같다. 잘 조합해서 넘기는 데 필요한 검사(YAML 문법, 읽는 모양, codex 스킬 형식, 명령줄 검사와 길이)만 남긴다. 스키마 받기(19단계), 배포판 스키마, 스키마 알림 세 개, 흐리게 표시가 모두 빠진다. 원칙: Engram은 자기가 조합하면서 생기는 문제만 본다(명령줄 길이·못 넘기는 글자, 같은 이름 스킬, 못 읽는 폴더, 우리가 넣는 값, 합치기). 작성자가 값을 잘못 쓴 것은 CLI 몫이다. claude가 틀린 설정을 조용히 통째로 버린다는 실측을 보고도 이 결정을 유지했다. 합친 설정 하나에 틀린 값이 있으면 그 실행의 설정 전체가 빠진다.</td><td><q>우리는 잘 조합해서 넘기는 것에 집중하자. 문제 생기면 codex claude가 알아서 그쪽룰로 처리하게.</q> <q>셋팅 잘못해서 넘어가는건 기존 클로드에도 있던 버그잖아. 그런거 말고 조합을 잘못해서 문제라던가 그런것 위주로 봐야지</q> <q>클로드나 코덱스 독립적으로 하는거 말고 우리가 해서 문제가 되는부분만 체크로하면 될것같음.</q></td></tr>
+      <tr><td class="k">ADR-0359 <span class="tag now">11-11</span></td><td>설정은 스키마로 검사하지 않는다. claude·codex·앞으로 붙을 백엔드 모두 같다. 잘 조합해서 넘기는 데 필요한 검사(YAML 문법, 읽는 모양, codex 스킬 형식, 명령줄 검사와 길이)만 남긴다. 스키마 받기(19단계), 배포판 스키마, 스키마 알림 세 개, 흐리게 표시가 모두 빠진다. 원칙: Engram은 자기가 조합하면서 생기는 문제만 본다(명령줄 길이·못 넘기는 글자 — codex 터미널 줄로 합친 지침 파일(기본 priming)을 넘길 수 있는지 포함, 같은 이름 스킬, 못 읽는 폴더). claude 설정 합치기와 우리가 넣는 설정(<code>engram:/settings/default</code>)은 실행 때 검사하지 않는다 — 합치기는 단위 테스트로 지키는 정해진 코드다. codex <code>-c</code> 줄 모양 검사(<code>=</code> 없음·빈 키·<code>-</code>로 시작)는 값 검사가 아니라 줄을 만들기 위한 모양 검사다. 작성자가 값을 잘못 쓴 것은 CLI 몫이다. claude가 틀린 설정을 조용히 통째로 버린다는 실측을 보고도 이 결정을 유지했다. 합친 설정 하나에 틀린 값이 있으면 그 실행의 설정 전체가 빠진다.</td><td><q>우리는 잘 조합해서 넘기는 것에 집중하자. 문제 생기면 codex claude가 알아서 그쪽룰로 처리하게.</q> <q>셋팅 잘못해서 넘어가는건 기존 클로드에도 있던 버그잖아. 그런거 말고 조합을 잘못해서 문제라던가 그런것 위주로 봐야지</q> <q>클로드나 코덱스 독립적으로 하는거 말고 우리가 해서 문제가 되는부분만 체크로하면 될것같음.</q></td></tr>
       <tr><td class="k">파일 감시 <span class="tag now">11-11</span></td><td>밖에서 바꾼 파일을 새로고침 없이 목록에 보여 주는 감시는 나중에 따로 만든다. 13단계(화면) 이후로 미뤘다(T-104). 7단계는 B31 그대로 간다.</td><td>B31을 확인하면서 정함</td></tr>
     </tbody>
   </table>
@@ -547,7 +547,7 @@ details .tbl{margin-top:4px}
   </ul>
 </section>
 
-<p class="foot">이 페이지는 TRD 초안 9의 요약이다(2026-11-11 사용자 결정 반영, 리뷰 1차 지적 반영, 재리뷰 전). 세부 규칙·근거·테스트 목록은 <code>docs/process/S25-preset-library/trd-asset-library.md</code>에 있다 (§3-6 넘기기 검사, §3-8 폴더 IO, §3-9a agent 쪽 정리, §6 동시성, §9 조각, §10 결정, §11 위험).</p>
+<p class="foot">이 페이지는 TRD 초안 9의 요약이다(2026-11-11 사용자 결정 반영, 리뷰 1·2차 지적 반영, 재리뷰 전). 세부 규칙·근거·테스트 목록은 <code>docs/process/S25-preset-library/trd-asset-library.md</code>에 있다 (§3-6 넘기기 검사, §3-8 폴더 IO, §3-9a agent 쪽 정리, §6 동시성, §9 조각, §10 결정, §11 위험).</p>
 
 </main>
 </body>
