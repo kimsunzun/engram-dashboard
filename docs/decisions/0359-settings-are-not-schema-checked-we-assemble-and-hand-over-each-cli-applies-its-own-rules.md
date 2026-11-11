@@ -1,7 +1,7 @@
 # ADR-0359: Settings are not schema-checked — we assemble and hand over, each CLI applies its own rules
 
 - 상태: 확정 (2026-11-11, 근거: user decision 2026-11-11 (S25 step 7, P4 review question 1))
-- 관련: Supersedes ADR-0332 · ADR-0334 · ADR-0336 · ADR-0323 · ADR-0331 · ADR-0324 · ADR-0311 · ADR-0314 · child TRD `docs/process/S25-preset-library/trd-asset-library.md` §3-6 · parked P4 branch `v0.5.0/wip/s25-p4-schema-validate-parked` (`002cd9f9`)
+- 관련: Supersedes ADR-0332 · ADR-0334 · ADR-0336 · ADR-0323 · ADR-0331 · ADR-0324 · ADR-0311 · ADR-0314 · child TRD `docs/process/S25-preset-library/trd-asset-library.md` §3-6 · parked P4 branch `v0.5.0/wip/s25-p4-schema-validate-parked` (`002cd9f9`) · Amends ADR-0334 (decision 3 schema source and unknown-key handling)
 
 ## 맥락
 ADR-0332 had Engram check every settings asset (claude raw-text JSON · codex `-c` lines) against the CLI's JSON schema and block the run on a type or range error. Step 7 P4 implemented it (`validate.rs`, `jsonschema` 0.60.2, +26 packages) and needed nine deep-review rounds: a supported-keyword gate, `$ref` limits, work and copy budgets, merged-value attribution, a refresh mutex. Its open questions showed the check is stricter than the CLIs (a value the CLI may accept is refused) and adds policy of its own (split settings failing `required` per asset, refused newer schema copies, keywords outside the gate). Asked whether a wrong value should keep blocking the run, the user asked why Engram filters at all when the CLI already reports a broken settings file.
