@@ -360,7 +360,7 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0311](0311-라이브러리는-따로-된-얇은-crate-engram-dashboard-asset-library-다-데몬은-배선만.md) | The library is a separate thin crate `engram-dashboard-asset-library` — the daemon only wires it | 제안 (부분 폐기 by ADR-0359: decision 4 schema fetch port) |
 | [0312](0312-라이브러리-루트는-하나다-바깥-내용은-루트-안으로-들인다.md) | There is one library root — outside content is brought inside the root | 제안 (부분 폐기 by ADR-0341: Decision 3 scope) |
 | [0313](0313-구현은-서버-먼저-데몬-라이브러리-기능은-늘-켜져-있고-화면만-끄고-켠다.md) | Implement the server first — the daemon library feature is always on, and only the screen is toggled | 제안 |
-| [0314](0314-프리셋-라이브러리는-데몬이-소유하는-에셋이고-클라이언트가-요청해-읽는다.md) | Presets and the library are assets owned by the daemon, and the client requests and reads them | 제안 |
+| [0314](0314-프리셋-라이브러리는-데몬이-소유하는-에셋이고-클라이언트가-요청해-읽는다.md) | Presets and the library are assets owned by the daemon, and the client requests and reads them | 제안 (부분 폐기 by ADR-0359: decision 7 schema errors) |
 | [0315](0315-참조-라이브러리-루트부터의-경로-한-꼴-기본-제공-engram.md) | A reference = one form, the `/` path from the library root + built-in `engram:/` | 제안 |
 | [0316](0316-claude-실행-재료-합친-지침-파일-system-prompt-snapshot-off-plugin-dir-정션-합친-settings-하나.md) | claude launch materials = one merged instruction file + `--system-prompt-snapshot off` + `--plugin-dir` junction + one merged `--settings` | 제안 |
 | [0317](0317-백엔드는-에이전트-값-설정은-백엔드별-원문-칸만-모델-충돌-검사-없음-기본-제공은-기본-하나.md) | The backend is an agent value — settings are only per-backend raw-text fields, no model conflict check, the built-in is one 「기본」 | 제안 |
