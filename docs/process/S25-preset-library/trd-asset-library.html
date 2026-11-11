@@ -132,7 +132,7 @@ td q{quotes:"「" "」";color:var(--muted);font-size:13px}
 .track span{position:absolute;left:0;top:0;bottom:0;border-radius:3px 0 0 3px}
 .track .ok{background:var(--accent)}
 .track .bad{background:var(--err)}
-.track::after{content:"";position:absolute;top:0;bottom:0;left:92.31%;border-left:1.5px dashed var(--muted)}
+.track::after{content:"";position:absolute;top:0;bottom:0;left:68.18%;border-left:1.5px dashed var(--muted)}
 .sc .res{color:var(--ink)}
 .sc .res small{color:var(--muted);font-size:12.5px;display:block}
 @media (max-width:620px){.sc{grid-template-columns:1fr}}
@@ -165,7 +165,7 @@ details .tbl{margin-top:4px}
   <div class="eyebrow">S25 프리셋 라이브러리 · 7단계 TRD 개요</div>
   <h1>asset-library 크레이트</h1>
   <div class="meta">
-    <span>원본 <code>trd-asset-library.md</code> 초안 10 · ADR-0360 반영, 리뷰 전 (2026-11-11) — 초안 9는 리뷰 통과</span>
+    <span>원본 <code>trd-asset-library.md</code> 초안 11 · 리뷰 지적 반영, 재리뷰 전 (2026-11-11) — 초안 10(ADR-0360) 리뷰에서 고칠 것이 나와 반영했다</span>
     <span>9조각 · 코드 약 <b>6,850</b>줄 · 테스트 약 <b>9,350</b>줄 (P4 agent 쪽 삭제 별도)</span>
   </div>
 </header>
@@ -340,41 +340,51 @@ details .tbl{margin-top:4px}
 <!-- 5. folder time -->
 <section aria-labelledby="s-time">
   <h2 id="s-time">폴더 확인 시간 규칙</h2>
-  <p>라이브러리의 항목(프리셋·지침·스킬·설정)은 모두 라이브러리 폴더 안에 있다. 라이브러리 밖을 가리킬 수 있는 것은 프리셋의 <b>폴더 항목</b> 하나뿐이다(ADR-0341 — 예: 공유 드라이브의 규칙 폴더). 그 폴더가 느리거나 꺼져 있어도 실행 응답은 정해진 시간 안에 나가야 해서, 확인 시간을 두 갈래로 나눴다. 실행을 돌리는 명령(만들고 시작, 시작, 이어 하기)은 응답 한도가 65초이고(ADR-0360, 다른 명령은 7초), <code>engram</code> CLI는 그 명령에 68초까지 기다린다. 느린 PC나 잠든 디스크·NAS가 깨어날 시간을 주려고 늘렸다.</p>
+  <p>라이브러리의 항목(프리셋·지침·스킬·설정)은 모두 라이브러리 폴더 안에 있다. 라이브러리 밖을 가리킬 수 있는 것은 프리셋의 <b>폴더 항목</b> 하나뿐이다(ADR-0341 — 예: 공유 드라이브의 규칙 폴더). 그 폴더가 느리거나 꺼져 있어도 실행 응답은 정해진 시간 안에 나가야 해서, 확인 시간을 두 갈래로 나눴다. 실행을 돌리는 명령(만들고 시작, 시작, 이어 하기)은 응답 한도가 85초이고, 실행을 요청한 쪽은 88초까지 기다린다(ADR-0360, 다른 명령은 그대로 7초). 85초 = 폴더 확인 62초 + 이어 하기의 조기 종료 감시 3초 + codex 연결 대기 상한 15초 + 여유 5초. 느린 PC나 잠든 디스크·NAS가 깨어날 시간을 주려고 늘렸다.</p>
   <figure class="fig-time">
     <div class="scroll">
-    <svg viewBox="0 0 640 176" role="img" aria-label="필수 확인은 실행 하나에 최대 60초, 참고 확인은 필수 확인이 끝난 뒤 별도로 최대 2초. 최악 62초로 실행 명령의 응답 한도 65초 안에 든다.">
-      <!-- grid -->
-      <line class="ln-grid" x1="173.5" y1="20" x2="173.5" y2="124"/>
-      <line class="ln-grid" x1="251.1" y1="20" x2="251.1" y2="124"/>
-      <line class="ln-grid" x1="328.6" y1="20" x2="328.6" y2="124"/>
-      <line class="ln-grid" x1="406.2" y1="20" x2="406.2" y2="124"/>
-      <line class="ln-grid" x1="483.7" y1="20" x2="483.7" y2="124"/>
-      <line class="ln-grid" x1="561.2" y1="20" x2="561.2" y2="124"/>
+    <svg viewBox="0 0 640 220" role="img" aria-label="필수 확인은 실행 하나에 최대 60초, 참고 확인은 필수 확인이 끝난 뒤 별도로 최대 2초. 막히는 실행은 최악 62초 뒤에 답한다. 성공하는 실행은 이어 하기 감시 3초와 codex 연결 대기 최대 15초가 더해져 최악 80초이고, 실행 응답 한도 85초 안에 든다. 실행을 요청한 쪽은 88초까지 기다린다.">
+      <!-- grid: 0–88 s over x 96–600 (5.727 px/s) -->
+      <line class="ln-grid" x1="153.3" y1="20" x2="153.3" y2="170"/>
+      <line class="ln-grid" x1="210.5" y1="20" x2="210.5" y2="170"/>
+      <line class="ln-grid" x1="267.8" y1="20" x2="267.8" y2="170"/>
+      <line class="ln-grid" x1="325.1" y1="20" x2="325.1" y2="170"/>
+      <line class="ln-grid" x1="382.4" y1="20" x2="382.4" y2="170"/>
+      <line class="ln-grid" x1="439.6" y1="20" x2="439.6" y2="170"/>
+      <line class="ln-grid" x1="496.9" y1="20" x2="496.9" y2="170"/>
+      <line class="ln-grid" x1="554.2" y1="20" x2="554.2" y2="170"/>
       <!-- rows -->
       <text class="t-title" x="86" y="49" text-anchor="end">필수</text>
-      <rect class="fill-acc" x="96" y="32" width="465.2" height="26" rx="4"/>
-      <text class="t-on" x="108" y="50">붙인 폴더 · 라이브러리 루트 · 원본 다시 읽기 · 합쳐서 최대 60초</text>
+      <rect class="fill-acc" x="96" y="32" width="343.6" height="26" rx="4"/>
+      <text class="t-on" x="106" y="50">붙인 폴더 · 라이브러리 루트 · 원본 다시 읽기 · 최대 60초</text>
       <text class="t-title" x="86" y="95" text-anchor="end">참고</text>
-      <rect class="fill-warn" x="561.2" y="78" width="15.5" height="26" rx="2"/>
-      <text class="t-lab" x="553.2" y="96" text-anchor="end">필수가 끝난 뒤에야 시작 · 최대 2초</text>
-      <!-- limit -->
-      <line class="ln-err ln-dash" x1="600" y1="14" x2="600" y2="124"/>
-      <text class="t-err" x="596" y="26" text-anchor="end" style="font-size:11.5px">실행 명령 응답 한도 65초</text>
+      <rect class="fill-warn" x="439.6" y="78" width="11.5" height="26" rx="2"/>
+      <text class="t-lab" x="431.6" y="96" text-anchor="end">필수가 끝난 뒤에야 시작 · 최대 2초</text>
+      <text class="t-title" x="86" y="141" text-anchor="end">활성화</text>
+      <rect class="bx-done" x="451.1" y="124" width="103.1" height="26" rx="4"/>
+      <text class="t-lab" x="443.1" y="142" text-anchor="end">성공할 때만 · 이어 하기 감시 3초 + codex 연결 최대 15초</text>
+      <!-- limits -->
+      <line class="ln-err ln-dash" x1="582.8" y1="16" x2="582.8" y2="170"/>
+      <text class="t-err" x="578.8" y="26" text-anchor="end" style="font-size:11.5px">응답 한도 85초</text>
+      <line class="ln ln-dash" x1="600" y1="2" x2="600" y2="170"/>
+      <text class="t-lab" x="596" y="12" text-anchor="end">요청한 쪽 기다림 88초</text>
       <!-- axis -->
-      <line class="ln" x1="96" y1="124" x2="600" y2="124"/>
-      <text class="t-lab" x="96.0" y="142" text-anchor="middle">0</text>
-      <text class="t-lab" x="173.5" y="142" text-anchor="middle">10</text>
-      <text class="t-lab" x="251.1" y="142" text-anchor="middle">20</text>
-      <text class="t-lab" x="328.6" y="142" text-anchor="middle">30</text>
-      <text class="t-lab" x="406.2" y="142" text-anchor="middle">40</text>
-      <text class="t-lab" x="483.7" y="142" text-anchor="middle">50</text>
-      <text class="t-lab" x="561.2" y="142" text-anchor="middle">60</text>
-      <text class="t-lab" x="600" y="142" text-anchor="middle">65초</text>
-      <text class="t-lab" x="576.7" y="164" text-anchor="middle" style="fill:var(--ink);font-weight:600">최악 62초</text>
+      <line class="ln" x1="96" y1="170" x2="600" y2="170"/>
+      <text class="t-lab" x="96.0" y="188" text-anchor="middle">0</text>
+      <text class="t-lab" x="153.3" y="188" text-anchor="middle">10</text>
+      <text class="t-lab" x="210.5" y="188" text-anchor="middle">20</text>
+      <text class="t-lab" x="267.8" y="188" text-anchor="middle">30</text>
+      <text class="t-lab" x="325.1" y="188" text-anchor="middle">40</text>
+      <text class="t-lab" x="382.4" y="188" text-anchor="middle">50</text>
+      <text class="t-lab" x="439.6" y="188" text-anchor="middle">60</text>
+      <text class="t-lab" x="496.9" y="188" text-anchor="middle">70</text>
+      <text class="t-lab" x="554.2" y="188" text-anchor="middle">80</text>
+      <text class="t-lab" x="600" y="188" text-anchor="middle">88초</text>
+      <text class="t-lab" x="451.1" y="208" text-anchor="middle" style="fill:var(--ink);font-weight:600">막히면 최악 62초</text>
+      <text class="t-lab" x="554.2" y="208" text-anchor="middle" style="fill:var(--ink);font-weight:600">성공 최악 80초</text>
     </svg>
     </div>
-    <figcaption>그림은 최악의 경우다. 필수 확인이 0.3초에 끝나면 참고 확인은 0.3~2.3초 사이에 돈다. 시간은 IO를 기다린 만큼만 센다. 잠금 대기나 파싱 시간은 세지 않는다.</figcaption>
+    <figcaption>그림은 최악의 경우다. 폴더가 죽어 막히는 실행은 62초 뒤에 답한다(에이전트를 띄우지 않으므로 활성화 대기가 없다). 성공하는 실행은 활성화 대기까지 더해 최대 80초이고, 남은 5초는 파싱·잠금·띄우기·응답 몫이다. 필수 확인이 0.3초에 끝나면 참고 확인은 0.3~2.3초 사이에 돈다. 폴더 시간은 IO를 기다린 만큼만 센다. 잠금 대기나 파싱 시간은 세지 않는다.</figcaption>
   </figure>
 
   <div class="tbl">
@@ -391,10 +401,25 @@ details .tbl{margin-top:4px}
   <h3>붙인 폴더가 공유 드라이브에 있을 때</h3>
   <div class="scen" role="list">
     <div class="sc" role="listitem"><span class="name">서버 정상</span><div class="track" aria-hidden="true"><span class="ok" style="width:2%"></span></div><span class="res">바로 실행</span></div>
-    <div class="sc" role="listitem"><span class="name">NAS가 40초 걸려 깨어남</span><div class="track" aria-hidden="true"><span class="ok" style="width:61.54%"></span></div><span class="res">40초 늦게 실행<small>남은 20초 안에 목록·파일 읽기까지 끝나야 한다</small></span></div>
-    <div class="sc" role="listitem"><span class="name">서버 꺼짐</span><div class="track" aria-hidden="true"><span class="bad" style="width:92.31%"></span></div><span class="res">약 60초 뒤 실행 막힘<small>① 폴더 줄(<code>folder-not-found</code>), 로그에 timeout. 화면 문구는 13단계에서 정한다</small></span></div>
+    <div class="sc" role="listitem"><span class="name">NAS가 40초 걸려 깨어남</span><div class="track" aria-hidden="true"><span class="ok" style="width:45.45%"></span></div><span class="res">40초 늦게 실행<small>남은 20초 안에 목록·파일 읽기까지 끝나야 한다</small></span></div>
+    <div class="sc" role="listitem"><span class="name">서버 꺼짐</span><div class="track" aria-hidden="true"><span class="bad" style="width:68.18%"></span></div><span class="res">약 60초 뒤 실행 막힘<small>① 폴더 줄(<code>folder-not-found</code>), 로그에 timeout. 화면 문구는 13단계에서 정한다</small></span></div>
   </div>
-  <p class="small">막대 전체가 65초, 점선이 60초다. 이미 필수 확인에서 막힌 실행은 참고 확인을 건너뛰므로(B30), 막히는 응답은 보통 60초 안에 나간다. 죽은 폴더를 가리키는 프리셋은 그 폴더를 쓰는 실행마다 최대 60초를 쓴 뒤 막힌다(받아들임).</p>
+  <p class="small">막대 전체가 88초(요청한 쪽이 기다리는 시간), 점선이 60초다. 이미 필수 확인에서 막힌 실행은 참고 확인을 건너뛰므로(B30), 막히는 응답은 보통 60초 안에 나간다. 죽은 폴더를 가리키는 프리셋은 그 폴더를 쓰는 실행마다 최대 60초를 쓴 뒤 막힌다(받아들임).</p>
+
+  <h3>실행 입구마다 기다리는 시간 — 8단계가 맞춘다</h3>
+  <p>ADR-0360은 방법이 아니라 조건을 정한다. 실행을 돌리는 입구는 모두 요청한 쪽이 88초 이상 기다리게 하고, 데몬이 응답 자리를 잡는 입구는 그 자리의 한도를 85초로 한다. 입구마다 어떻게 맞출지는 8단계가 설계한다. 지금은 입구마다 기다리는 시간이 다르고, 8단계 전에는 오래 걸리는 실행에서 아래 증상이 난다.</p>
+  <div class="tbl">
+  <table>
+    <thead><tr><th>입구</th><th>지금</th><th>8단계 전 증상</th><th>8단계가 할 일</th></tr></thead>
+    <tbody>
+      <tr><td class="k">CLI <code>engram agent spawn</code> · <code>engram call agent.spawn</code></td><td>데몬이 바로 처리한다. 응답 자리도 한도도 없고, CLI가 10초만 기다린다.</td><td>10초를 넘기면 CLI가 「데몬에 닿지 못했다」고 보고하지만 데몬은 계속 띄운다.</td><td>이 동사들에서 CLI가 88초까지 기다린다. 그 뒤에 끊기는 것은 잠금이 오래 잡힌 경우뿐이다(R15, 받아들임).</td></tr>
+      <tr><td class="k">셸 동사 <code>agent.spawnInto</code>를 CLI가 부를 때(중계)</td><td>데몬 응답 자리 7초</td><td>7초를 넘기면 CLI는 <code>TIMEOUT</code>을 받지만 셸은 계속 띄운다.</td><td>이 동사의 자리 한도를 85초로, CLI는 88초까지 기다린다. 방법(동사에 한도를 적기, 명령 봉투에 칸 더하기 등)은 8단계가 고른다.</td></tr>
+      <tr><td class="k">소켓 입구로 온 실행 명령</td><td>데몬 응답 자리 7초</td><td>7초를 넘기면 <code>TIMEOUT</code>, 실행은 계속된다.</td><td>실행 이름이면 자리 한도 85초.</td></tr>
+      <tr><td class="k">셸 → 데몬 연결 (<code>Spawn</code> · <code>SpawnByCwd</code> · <code>SpawnProfile</code>)</td><td>모든 요청 30초</td><td>폴더 대기가 들어오면 30초를 넘길 수 있다. 화면은 실패로 보이는데 실행은 성공할 수 있다.</td><td>이 요청들은 88초 이상 기다린다. 셸은 agent 크레이트를 쓰지 않으므로(ADR-0270) 자기 값을 두고, 둘 다 보이는 테스트로 agent 값과 묶는다.</td></tr>
+      <tr><td class="k">부팅 때 복원</td><td>기다리는 쪽이 없다</td><td>—</td><td>—</td></tr>
+    </tbody>
+  </table>
+  </div>
 </section>
 
 <!-- 6. concurrency -->
@@ -491,7 +516,7 @@ details .tbl{margin-top:4px}
       <tr><td class="k">확장성</td><td>백엔드를 추가할 때 agent 쪽만 고치면 된다 (<code>AgentCommand</code> 변형, <code>backend_word</code>, <code>SettingsCheck</code>). asset-library는 고치지 않는다. 그래서 asset-library 코드는 테스트와 내장 내용 파일 밖에서 claude·codex라는 이름을 쓰지 않는다.</td><td><q>나중에 백엔드 계속 추가될텐데 최대한 공용화로 하고</q></td></tr>
       <tr><td class="k">UI</td><td>프리셋 편집 화면의 백엔드별 칸은 사용자가 추가할 때만 나타난다. 13단계에서 자세히 정한다.</td><td><q>ui 기준으로는 모든 칸에 다 나오면 보기 불편하니깐 추가해야지 나오는 형태?</q></td></tr>
       <tr><td class="k">ADR-0359 <span class="tag now">11-11</span></td><td>설정은 스키마로 검사하지 않는다. claude·codex·앞으로 붙을 백엔드 모두 같다. 잘 조합해서 넘기는 데 필요한 검사(YAML 문법, 읽는 모양, codex 스킬 형식, 명령줄 검사와 길이)만 남긴다. 스키마 받기(19단계), 배포판 스키마, 스키마 알림 세 개, 흐리게 표시가 모두 빠진다. 원칙: Engram은 자기가 조합하면서 생기는 문제만 본다(명령줄 길이·못 넘기는 글자 — codex 터미널 줄로 합친 지침 파일(기본 priming)을 넘길 수 있는지 포함, 같은 이름 스킬, 못 읽는 폴더). claude 설정 합치기와 우리가 넣는 설정(<code>engram:/settings/default</code>)은 실행 때 검사하지 않는다 — 합치기는 단위 테스트로 지키는 정해진 코드다. codex <code>-c</code> 줄 모양 검사(<code>=</code> 없음·빈 키·<code>-</code>로 시작)는 값 검사가 아니라 줄을 만들기 위한 모양 검사다. 작성자가 값을 잘못 쓴 것은 CLI 몫이다. claude가 틀린 설정을 조용히 통째로 버린다는 실측을 보고도 이 결정을 유지했다. 합친 설정 하나에 틀린 값이 있으면 그 실행의 설정 전체가 빠진다.</td><td><q>우리는 잘 조합해서 넘기는 것에 집중하자. 문제 생기면 codex claude가 알아서 그쪽룰로 처리하게.</q> <q>셋팅 잘못해서 넘어가는건 기존 클로드에도 있던 버그잖아. 그런거 말고 조합을 잘못해서 문제라던가 그런것 위주로 봐야지</q> <q>클로드나 코덱스 독립적으로 하는거 말고 우리가 해서 문제가 되는부분만 체크로하면 될것같음.</q></td></tr>
-      <tr><td class="k">ADR-0360 <span class="tag now">11-11</span></td><td>실행을 돌리는 명령(만들고 시작, 시작, 이어 하기)은 응답 한도가 65초다. 다른 명령은 그대로 7초. <code>engram</code> CLI는 그 명령에 68초까지 기다린다(8단계에서 명령 봉투에 한도 칸을 넣는다). 실행 전 폴더 확인은 필수 60초 + 참고 2초로 늘렸다(최악 62초 &lt; 65초). 실행이 아닌 읽기는 5초 그대로. 이 시간 값들은 <code>base</code> 크레이트의 공용 모듈 한 곳에 두고, 응답 한도와 CLI 대기 시간은 폴더 대기 시간에서 계산한다. 설정으로 바꾸게 하는 것은 나중에(T-105).</td><td><q>느리거나 제대로 동작되지 않는 pc가 있는데 사람이 없을때 에이전트가 실패하면 무한 막히는거잖아.</q> <q>시간을 늘려</q> <q>시간은 60초로 하던지</q> <q>Base 쪽에 공용으로</q></td></tr>
+      <tr><td class="k">ADR-0360 <span class="tag now">11-11</span></td><td>실행을 돌리는 입구(만들고 시작, 시작, 이어 하기)는 모두 요청한 쪽이 88초 이상 기다리게 하고, 데몬이 응답 자리를 잡으면 그 한도는 85초다. 다른 명령은 그대로 7초. 85초 = 폴더 60 + 2 + 이어 하기 감시 3 + codex 연결 대기 상한 15 + 여유 5, 88초 = 85 + 수거 주기 1 + 여유 2. 입구마다 맞추는 방법은 8단계가 정한다(위 「실행 입구마다 기다리는 시간」). 실행 전 폴더 확인은 필수 60초 + 참고 2초로 늘렸다(막히면 최악 62초, 성공은 최악 80초). 실행이 아닌 읽기는 5초 그대로. 이 시간 값들은 지금은 agent <code>types.rs</code>의 내부 상수로 두고(CLI 10초 상수 옆), 응답 한도와 기다림은 폴더 대기 시간과 활성화 상수에서 계산한다. <code>base</code>는 건드리지 않는다. 나중에 설정 파일을 읽는 공용 구조가 <code>base</code>에 생기면 값은 파일로 옮긴다(공용 설정 하나로 할지 크레이트마다 둘지는 그때 정한다 — T-105). 리뷰에서 처음의 65초 · 68초가 활성화 대기를 빼먹은 것이 드러나 다시 셈했다.</td><td><q>느리거나 제대로 동작되지 않는 pc가 있는데 사람이 없을때 에이전트가 실패하면 무한 막히는거잖아.</q> <q>시간을 늘려</q> <q>시간은 60초로 하던지</q> <q>파일 읽어노는 구조? 자체는 base에 있고, 설정은 공용 설정으로 할지 crate 당 설정으로할지 어쨋든 파일로 빠지는거잖아.</q></td></tr>
       <tr><td class="k">파일 감시 <span class="tag now">11-11</span></td><td>밖에서 바꾼 파일을 새로고침 없이 목록에 보여 주는 감시는 나중에 따로 만든다. 13단계(화면) 이후로 미뤘다(T-104). 7단계는 B31 그대로 간다.</td><td>B31을 확인하면서 정함</td></tr>
     </tbody>
   </table>
@@ -504,7 +529,7 @@ details .tbl{margin-top:4px}
     <thead><tr><th>번호</th><th class="w-what">정한 것</th><th>대가</th></tr></thead>
     <tbody>
       <tr><td class="k">규칙 A·B <span class="tag done">확인됨</span></td><td>위 「동시성 규칙 두 개」. 목록 쓰기는 항목 하나씩(루트 변경만 예외), 필수 확인 먼저·참고 확인은 따로.</td><td>구조 규칙이라 9a·9b의 편집·이동도 이 규칙을 따라야 한다.</td></tr>
-      <tr><td class="k">B29 <span class="tag done">확인됨</span></td><td>작업 폴더의 정식 경로 확인은 답이 없어도 실행을 막지 않는다. 적힌 경로 그대로 띄운다. 지금 매니저도 경로 풀기가 오류로 답하면 적힌 경로로 띄운다(느린 폴더면 지금은 끝없이 기다린다 — 참고 시간 2초가 그 대기를 끊는다). <b>사용자 확인 때 더한 것:</b> 이때 실행 응답에 알림 <code>working-folder-unchecked</code>를 붙여, 실행을 요청한 사람이나 LLM에게 알린다. 문구(메인 결정): 「알림: 작업 폴더 &lt;폴더&gt;이(가) 늦게 응답해 경로 확인을 건너뛰었습니다.」 사실만 적는다. 이어 하기가 이전 대화를 못 찾을 수 있다는 말은 claude에만 해당해서(codex는 스레드 id로 이어 한다) 알림에는 넣지 않는다.</td><td>늦게 깨는 매핑 네트워크 드라이브면 적힌 경로로 띄워지고, claude 세션 이어 하기가 세션 폴더를 못 찾을 수 있다. 다음 실행에선 정상(R18). 성공 응답이 7초를 넘기면 이 알림도 잃는다(B28).</td></tr>
+      <tr><td class="k">B29 <span class="tag done">확인됨</span></td><td>작업 폴더의 정식 경로 확인은 답이 없어도 실행을 막지 않는다. 적힌 경로 그대로 띄운다. 지금 매니저도 경로 풀기가 오류로 답하면 적힌 경로로 띄운다(느린 폴더면 지금은 끝없이 기다린다 — 참고 시간 2초가 그 대기를 끊는다). <b>사용자 확인 때 더한 것:</b> 이때 실행 응답에 알림 <code>working-folder-unchecked</code>를 붙여, 실행을 요청한 사람이나 LLM에게 알린다. 문구(메인 결정): 「알림: 작업 폴더 &lt;폴더&gt;이(가) 늦게 응답해 경로 확인을 건너뛰었습니다.」 사실만 적는다. 이어 하기가 이전 대화를 못 찾을 수 있다는 말은 claude에만 해당해서(codex는 스레드 id로 이어 한다) 알림에는 넣지 않는다.</td><td>늦게 깨는 매핑 네트워크 드라이브면 적힌 경로로 띄워지고, claude 세션 이어 하기가 세션 폴더를 못 찾을 수 있다. 다음 실행에선 정상(R18). 성공 응답이 실행 응답 한도(85초)를 넘기면 이 알림도 잃는다(B28).</td></tr>
       <tr><td class="k">B25 <span class="tag done">확인됨</span></td><td>참고 확인은 실행당 따로 자른다. 값은 ADR-0360으로 1초에서 2초가 됐다.</td><td>기본 스킬 폴더가 죽은 공유에 있으면 그 에이전트는 실행할 때마다 최대 2초 늦어진다. 상한이 없으면 더 오래 늦어진다.</td></tr>
       <tr><td class="k">B31 <span class="tag done">확인됨</span></td><td>실행 검사는 메모리 목록에서 항목을 지우지 않는다. 지우는 것은 훑기와 변경뿐이다.</td><td>밖에서 지운 파일은 다음 새로고침까지 목록에 남는다. 실행 자체는 새로 읽은 내용으로 판단하므로 실행 결과는 맞다. 파일 감시는 나중에 따로(T-104).</td></tr>
       <tr><td class="k">B30 <span class="tag done">확인됨</span></td><td>필수 확인에서 이미 막힌 실행은 참고 확인을 건너뛴다.</td><td>그 응답의 작업 폴더 관련 ② 줄은 정식 경로 대신 적힌 경로로 판정한다. 고친 뒤 다음 실행에서 다시 판정한다.</td></tr>
@@ -525,7 +550,7 @@ details .tbl{margin-top:4px}
         <tr><td class="k">B7</td><td>check가 쓴 원본마다 SHA-256을 계획에 적고, prepare가 다시 읽어 비교한다.</td><td>크기·수정 시각이 같은 제자리 수정도 잡으려고.</td></tr>
         <tr><td class="k">B26</td><td>실행 검사가 읽은 최신 내용을 목록에 반영하는 일은 별도 작업으로 넘긴다. 실행은 쓰기 잠금을 기다리지 않고, 반영은 건너뛰지 않는다.</td><td>응답 시간과 목록 신선도를 둘 다 지키려고.</td></tr>
         <tr><td class="k">B27</td><td>prepare에서 폴더 읽기가 시간을 넘으면 <code>Failed</code>. <code>Stale</code>(원본이 바뀜)이 아니다.</td><td>느린 것과 바뀐 것은 다른 일이라서.</td></tr>
-        <tr><td class="k">B28</td><td>성공 응답이 응답 한도(실행 명령은 65초 — ADR-0360)를 넘겨 버스가 포기하면 그 알림은 잃는다. 받아들인다.</td><td>드문 일이고, 막으려면 층을 건너는 변경이 필요해서. 로그에는 남는다.</td></tr>
+        <tr><td class="k">B28</td><td>성공 응답이 한도(실행은 응답 한도 85초, 바로 기다리는 CLI는 88초 — ADR-0360)를 넘겨 데몬 자리나 요청한 쪽이 포기하면 그 알림은 잃는다. 받아들인다.</td><td>드문 일이고, 막으려면 층을 건너는 변경이 필요해서. 로그에는 남는다.</td></tr>
         <tr><td class="k">B23</td><td>기본 제공 id는 세 개로 닫는다. priming 파일을 하나 더 두려면 id를 새로 만든다.</td><td>아무도 요청하지 않은 기능을 미리 열지 않으려고.</td></tr>
         <tr><td class="k">B13</td><td>설정 검사가 없는 백엔드(Shell)는 지금처럼 Noop 계획.</td><td>Shell은 프리셋을 받지 않아서.</td></tr>
         <tr><td class="k">B10</td><td>serde-saphyr 최신판(2.1.x)은 P3 골든을 통과할 때만 쓰고, 아니면 2.0.0으로 고정한다. jsonschema는 넣지 않는다(ADR-0359).</td><td>읽기·쓰기 골든으로 싸게 확인할 수 있어서.</td></tr>
@@ -546,7 +571,7 @@ details .tbl{margin-top:4px}
   </ul>
 </section>
 
-<p class="foot">이 페이지는 TRD 초안 10의 요약이다(2026-11-11 ADR-0360 반영, 리뷰 전 — 초안 9는 리뷰 통과). 세부 규칙·근거·테스트 목록은 <code>docs/process/S25-preset-library/trd-asset-library.md</code>에 있다 (§3-6 넘기기 검사, §3-8 폴더 IO, §3-9a agent 쪽 정리, §6 동시성, §9 조각, §10 결정, §11 위험).</p>
+<p class="foot">이 페이지는 TRD 초안 11의 요약이다(2026-11-11 초안 11 · 리뷰 지적 반영, 재리뷰 전 — 실행 입구 표, 응답 한도 85초 · 기다림 88초, 값은 agent <code>types.rs</code>). 세부 규칙·근거·테스트 목록은 <code>docs/process/S25-preset-library/trd-asset-library.md</code>에 있다 (§3-6 넘기기 검사, §3-8 폴더 IO, §3-9a agent 쪽 정리, §6 동시성, §9 조각, §10 결정, §11 위험).</p>
 
 </main>
 </body>

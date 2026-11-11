@@ -10,7 +10,7 @@
 
 | ID | 제목(짧게) | 구역 | 상태 |
 |---|---|---|---|
-| T-105 | Launch folder wait as one advanced setting (needs a daemon-side settings path) | 메인 | Deferred by the user (2026-11-11 — ADR-0360 decision 6) |
+| T-105 | Launch folder wait as an advanced setting (once file-based settings loading exists) | 메인 | Deferred by the user (2026-11-11 — ADR-0360 decision 6) |
 | T-104 | Library file watcher — show files changed outside Engram without a refresh | 메인 | Deferred by the user (2026-11-11) — target = UI step 13 or later |
 | T-86 | Tray 「데몬 켜기」 reconnects but slots keep the daemon-down icon | 메인 | Deferred to the multi-daemon topic with the tray work (user 2026-11-10) |
 | T-85 | A new window starts a daemon the user stopped (boot start in every window) | 메인 | Deferred to the multi-daemon topic (user 2026-11-10) |
@@ -95,10 +95,10 @@
 
 ## 메인
 
-### T-105. Launch folder wait as one advanced setting
+### T-105. Launch folder wait as an advanced setting
 - **Status:** deferred — user 2026-11-11 「어 나중에 한다고 치고」 (ADR-0360 decision 6 · 거부한 대안 "User settings for the waits now").
-- **Fact:** the launch folder waits (60 s required · 2 s advisory) are internal constants in `base::launch_time`; the launch command deadline (65 s) and the CLI's launch wait (68 s) are derived from them (S25 step 7 TRD `docs/process/S25-preset-library/trd-asset-library.md` §3-10). Engram has no daemon-side settings path — the only settings are the shell's UI keys (ADR-0265).
-- **Next:** once a daemon-side settings path exists, expose the required folder wait as one advanced setting; the derived values must follow it (deadline, CLI wait, the `fits_caller_silence_window` check), so the setting cannot be a plain constant swap.
+- **Fact:** the launch folder waits (60 s required · 2 s advisory) are internal constants in agent `crates/engram-dashboard-agent/src/types.rs` (`LAUNCH_REQUIRED_FOLDER_WAIT_SECS` · `LAUNCH_ADVISORY_FOLDER_WAIT_SECS`, beside `CLI_CONTROL_READ_TIMEOUT_SECS`); the launch reply bound (85 s) and the launch caller wait (88 s) are derived from them and from two activation constants in agent `manager.rs` (S25 step 7 TRD `docs/process/S25-preset-library/trd-asset-library.md` §3-10). Engram has no file-based settings loading for such values — the only settings are the shell's UI keys (ADR-0265).
+- **Next:** later, a generic settings-file loading mechanism lives in `base` (domain-free file loading, which fits ADR-0269); the setting values live in files — one common settings file or per-crate settings files, decided then. User 2026-11-11: 「파일 읽어노는 구조? 자체는 base에 있고, 설정은 공용 설정으로 할지 crate 당 설정으로할지 어쨋든 파일로 빠지는거잖아.」 Once that exists, expose the launch folder wait as an advanced setting read from that file instead of the agent constant. The derived values must follow it (the reply bound, the caller wait, the `fits_caller_silence_window` check, the shell's pinned copy), so the setting cannot be a plain constant swap. Nothing moves to `base` before then.
 
 ### T-104. Library file watcher — show files changed outside Engram without a refresh
 - **Status:** deferred — a separate feature, after S25 step 7; target = the UI step (S25 step 13) or later. User 2026-11-11, when confirming B31 as is: a file watcher later, as its own feature.
