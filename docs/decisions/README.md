@@ -405,3 +405,4 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0357](0357-the-three-step-6-codex-notice-codes-state-facts-only-without-the-intended-behavior-sentence.md) | The three step-6 codex notice codes state facts only, without the intended-behavior sentence | 확정 |
 | [0358](0358-preset-yaml-edits-rewrite-the-whole-file-with-serde-saphyr-and-do-not-keep-hand-written-comments-yaml-edit-dropped.md) | Preset YAML edits rewrite the whole file with serde-saphyr and do not keep hand-written comments (yaml-edit dropped) | 확정 |
 | [0359](0359-settings-are-not-schema-checked-we-assemble-and-hand-over-each-cli-applies-its-own-rules.md) | Settings are not schema-checked — we assemble and hand over, each CLI applies its own rules | 확정 |
+| [0360](0360-launch-commands-carry-their-own-longer-deadline-launch-folder-checks-wait-60-s-required-and-2-s-advisory.md) | Launch commands carry their own longer deadline — launch folder checks wait 60 s required and 2 s advisory | 제안 |
