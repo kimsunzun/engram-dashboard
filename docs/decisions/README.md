@@ -377,7 +377,7 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0328](0328-숨은-settings-조각을-없앤다-claude-원문은-붙인-순서로-settings-파일-하나에-합친다.md) | Remove the hidden settings fragment — merge the claude raw text into one `--settings` file in attached order | 제안 (부분 폐기 by ADR-0351: 쓰기 실패 처리) |
 | [0329](0329-지침-스킬의-백엔드-꼬리표는-프리셋-항목에-단다-에셋-파일은-손대지-않는다.md) | The backend tag of instructions and skills is attached to the preset entry — asset files are not touched | 제안 |
 | [0330](0330-다시-연결-하나를-고르면-나머지를-이름으로-잇는다-훑기는-후보를-제안하지-않는다.md) | Relink = pick one and the rest are linked by name — the scan does not suggest candidates | 제안 |
-| [0331](0331-편집-칸-실행이-알리는-것은-충돌뿐이다-경고-범주가-없다.md) | What the edit area and a run report is conflicts only — there is no warning category | 제안 |
+| [0331](0331-편집-칸-실행이-알리는-것은-충돌뿐이다-경고-범주가-없다.md) | What the edit area and a run report is conflicts only — there is no warning category | 제안 (부분 폐기 by ADR-0359: decision 3 schema dimming) |
 | [0332](0332-설정-검사-프로세스-안에서-가볍게-문법-스키마-읽을-때마다.md) | Settings check = lightweight inside the process — syntax + schema, every time it is read | 폐기 (Superseded by ADR-0359) |
 | [0333](0333-프리셋-yaml-편집은-손-주석-모양을-보존한다-yaml-edit-035-조건-셋.md) | Preset YAML editing preserves hand-written comments · shape — `yaml-edit =0.3.5` + three conditions | 폐기 (Superseded by ADR-0358) |
 | [0334](0334-실행-재료는-포트로-넘긴다-해석은-asset-library-플래그-번역-백엔드-설정-지식은-backend.md) | Launch materials are passed through a port — resolution in asset-library, flag translation and backend settings knowledge in backend | 제안 (부분 폐기 by ADR-0359: decision 3 schema source and unknown-key handling) |
