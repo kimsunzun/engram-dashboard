@@ -10,6 +10,7 @@
 
 | ID | 제목(짧게) | 구역 | 상태 |
 |---|---|---|---|
+| T-105 | Launch folder wait as one advanced setting (needs a daemon-side settings path) | 메인 | Deferred by the user (2026-11-11 — ADR-0360 decision 6) |
 | T-104 | Library file watcher — show files changed outside Engram without a refresh | 메인 | Deferred by the user (2026-11-11) — target = UI step 13 or later |
 | T-86 | Tray 「데몬 켜기」 reconnects but slots keep the daemon-down icon | 메인 | Deferred to the multi-daemon topic with the tray work (user 2026-11-10) |
 | T-85 | A new window starts a daemon the user stopped (boot start in every window) | 메인 | Deferred to the multi-daemon topic (user 2026-11-10) |
@@ -93,6 +94,11 @@
 | T-16 | 프론트 종료 판정 · 세대 필터 | 사소한 기능·정리 | 잔존 · T-32 선결 |
 
 ## 메인
+
+### T-105. Launch folder wait as one advanced setting
+- **Status:** deferred — user 2026-11-11 「어 나중에 한다고 치고」 (ADR-0360 decision 6 · 거부한 대안 "User settings for the waits now").
+- **Fact:** the launch folder waits (60 s required · 2 s advisory) are internal constants in `base::launch_time`; the launch command deadline (65 s) and the CLI's launch wait (68 s) are derived from them (S25 step 7 TRD `docs/process/S25-preset-library/trd-asset-library.md` §3-10). Engram has no daemon-side settings path — the only settings are the shell's UI keys (ADR-0265).
+- **Next:** once a daemon-side settings path exists, expose the required folder wait as one advanced setting; the derived values must follow it (deadline, CLI wait, the `fits_caller_silence_window` check), so the setting cannot be a plain constant swap.
 
 ### T-104. Library file watcher — show files changed outside Engram without a refresh
 - **Status:** deferred — a separate feature, after S25 step 7; target = the UI step (S25 step 13) or later. User 2026-11-11, when confirming B31 as is: a file watcher later, as its own feature.
