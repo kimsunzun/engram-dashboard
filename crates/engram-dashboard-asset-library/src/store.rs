@@ -137,7 +137,7 @@ pub fn admits(rel: &LibPath) -> bool {
 pub struct FsStore;
 
 // ADR-0291
-const OS_HOOKS: OsHooks = OsHooks {
+pub(crate) const OS_HOOKS: OsHooks = OsHooks {
     retry: retry_locked,
     sync_dir,
 };

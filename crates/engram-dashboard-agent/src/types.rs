@@ -520,6 +520,61 @@ pub const CLI_GROUP_MAIL: &str = "mail";
 /// 각자 자기 타입으로 감싸는 편이 이 상수를 순수한 **숫자**로 남긴다.
 pub const CLI_CONTROL_READ_TIMEOUT_SECS: u64 = 10;
 
+// The launch time values (ADR-0360 decision 6). Whole seconds as `u64`, like `CLI_CONTROL_READ_TIMEOUT_SECS` — each
+// consumer wraps them in its own type. Internal constants: they become settings only once file-based settings loading
+// exists (tracking T-105). The two folder waits are the inputs; the reply bound and the caller wait are derived as
+// `const`s so the chain cannot drift.
+
+/// How long one launch waits, in total, for the folder IO whose failure blocks it — the library-root stat, the
+/// folder-entry stats, listings and file reads, `prepare`'s material reads. What has not answered when it is spent
+/// counts as unreadable and blocks the launch. 60 s = where the Windows SMB client gives up on a request by itself.
+// ADR-0360
+pub const LAUNCH_REQUIRED_FOLDER_WAIT_SECS: u64 = 60;
+
+/// The separate allowance, per launch, for folder IO that only feeds a notice or a best-effort value (working-folder
+/// canonicalize, the backend's own skill roots). Never taken from [`LAUNCH_REQUIRED_FOLDER_WAIT_SECS`]; what does not
+/// answer in it is skipped, never a block.
+// ADR-0360
+pub const LAUNCH_ADVISORY_FOLDER_WAIT_SECS: u64 = 2;
+
+/// The longest one launch may take to reply: the two folder waits + the resume early-exit window + the link
+/// backstop (both in `manager.rs`, after the folder checks — summed as an upper bound; a launch takes at most
+/// one of the two), plus a 5 s slack for parsing, locks, spawning and the reply (a failed link's 5 s teardown join
+/// falls inside it) = 85.
+// ADR-0360
+pub const LAUNCH_REPLY_BOUND_SECS: u64 = LAUNCH_REQUIRED_FOLDER_WAIT_SECS
+    + LAUNCH_ADVISORY_FOLDER_WAIT_SECS
+    + crate::manager::EARLY_EXIT_WINDOW.as_secs()
+    + crate::manager::LINK_RESOLUTION_BACKSTOP.as_secs()
+    + LAUNCH_REPLY_SLACK_SECS;
+
+/// How long a caller that waits **directly** on one launch waits: [`LAUNCH_REPLY_BOUND_SECS`] + the daemon's 1 s
+/// expiry sweep + its 2 s caller margin = 88. A nested path (a relay seat and the waits around it) does not take its
+/// values from this constant alone — they follow ADR-0360 decision 1 (b), outer wait ≥ inner wait + hop margin.
+///
+/// ★A deliberate exception to the `CLI_CONTROL_READ_TIMEOUT_SECS` doc's clause 「여기서 그 셈을 다시 적지 말 것」★:
+/// the sweep and margin terms restate the daemon's private `SWEEP_INTERVAL` · `CALLER_MARGIN` (agent cannot see the
+/// daemon), because the CLI and the shell need the derived value as a constant. The pin is step 8's parameterized
+/// `fits_caller_silence_window` in the daemon, which checks (85, 88) at compile time; until step 8 lands, only this
+/// crate's unit test pins the value.
+// ADR-0360
+pub const LAUNCH_CALLER_WAIT_SECS: u64 =
+    LAUNCH_REPLY_BOUND_SECS + DAEMON_SWEEP_SECS + DAEMON_CALLER_MARGIN_SECS;
+
+/// Parsing, locks, spawning and the reply itself inside [`LAUNCH_REPLY_BOUND_SECS`].
+const LAUNCH_REPLY_SLACK_SECS: u64 = 5;
+/// Restates daemon `CommandDeliveries::SWEEP_INTERVAL` (see [`LAUNCH_CALLER_WAIT_SECS`]).
+const DAEMON_SWEEP_SECS: u64 = 1;
+/// Restates daemon `CommandDeliveries::CALLER_MARGIN` (see [`LAUNCH_CALLER_WAIT_SECS`]).
+const DAEMON_CALLER_MARGIN_SECS: u64 = 2;
+
+// `as_secs` above drops any fraction, so both activation waits must be whole seconds.
+const _: () = assert!(
+    crate::manager::EARLY_EXIT_WINDOW.subsec_nanos() == 0
+        && crate::manager::LINK_RESOLUTION_BACKSTOP.subsec_nanos() == 0,
+    "an activation wait has a fraction of a second — LAUNCH_REPLY_BOUND_SECS would drop it"
+);
+
 /// CLI 실행파일의 **절대경로**를 스폰 env 로 실어 보낼 때 쓰는 변수 이름.
 ///
 /// backend 가 이 이름으로 값을 넣고(claude), 프라이밍 판정자들은 본문에서 이 이름을 찾아 "CLI 표면이
@@ -1228,6 +1283,15 @@ pub trait StatusSink: Send + Sync + 'static {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── launch time constants (ADR-0360) ──
+    #[test]
+    fn launch_time_constants_hold_their_values() {
+        assert_eq!(LAUNCH_REQUIRED_FOLDER_WAIT_SECS, 60);
+        assert_eq!(LAUNCH_ADVISORY_FOLDER_WAIT_SECS, 2);
+        assert_eq!(LAUNCH_REPLY_BOUND_SECS, 85);
+        assert_eq!(LAUNCH_CALLER_WAIT_SECS, 88);
+    }
 
     // ── Capabilities::compose — 출처가 올바른 영역으로 합쳐지는지(소유권 합성 검증) ──
     #[test]

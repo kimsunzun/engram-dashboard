@@ -58,7 +58,7 @@ const DEFAULT_ROWS: u16 = 24;
 ///   그러면 멀쩡한 이어받기가 전부 그만큼 느려진다. 그래서 판정 근거를 「죽음」에서 「죽음 또는 증거」로
 ///   바꿨다(`EarlyVerdict`) — 오히려 실패를 더 **빨리** 확정한다.
 // ADR-0172
-const EARLY_EXIT_WINDOW: Duration = Duration::from_secs(3);
+pub(crate) const EARLY_EXIT_WINDOW: Duration = Duration::from_secs(3);
 
 /// 통로가 **연결의 결말을 아예 안 내는** 경우에만 쓰이는 liveness 백스톱.
 ///

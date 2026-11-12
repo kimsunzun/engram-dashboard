@@ -1091,6 +1091,7 @@ dependencies = [
 name = "engram-dashboard-asset-library"
 version = "0.1.0"
 dependencies = [
+ "dunce",
  "engram-dashboard-agent",
  "engram-dashboard-base",
  "engram-dashboard-command",

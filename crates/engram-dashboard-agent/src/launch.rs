@@ -371,14 +371,22 @@ pub const FOLDER_LISTING_PARTIAL: &str = "folder-listing-partial";
 /// sentence uses and the asset-library folder listing is to use (step 7 P6).
 pub const FOLDER_LISTING_CAP: usize = 10_000;
 
+/// Notice code: subfolders or entries below a folder entry could not be read and were left out of its listing.
+/// `args` = `{folder, paths: [folder-relative paths, walk order]}`.
+pub const FOLDER_LISTING_SKIPPED: &str = "folder-listing-skipped";
+
+/// How many of [`FOLDER_LISTING_SKIPPED`]'s paths its sentence names; the rest are counted.
+const FOLDER_LISTING_SKIPPED_NAMED: usize = 3;
+
 /// The wording of a notice for a person or an LLM reading the reply — Korean, factual, recommends no fix (TRD S25
 /// G28 · §2-4 8).
 ///
 /// [`CODEX_TERMINAL_OMITTED`], [`CODEX_TERMINAL_FOLDER_OMITTED`] and [`CODEX_SAME_NAME_SKILLS`] have their own
 /// sentence (user wording, exact), filled from `args` with names joined by `, `; in the two terminal codes an empty
-/// list leaves its part out. [`FOLDER_LISTING_PARTIAL`] has its own sentence too, naming no backend — the folder
-/// comes from `args`. When their `args` do not have the shape the constant documents (not an object, a missing
-/// `folder` or `name`, a list that is not of strings, no `paths`), they fall back to the generic wording. Every other
+/// list leaves its part out. [`FOLDER_LISTING_PARTIAL`] and [`FOLDER_LISTING_SKIPPED`] have their own sentence too,
+/// naming no backend — the folder (and the skipped paths, the first three named and the rest counted) come from
+/// `args`. When their `args` do not have the shape the constant documents (not an object, a missing `folder` or
+/// `name`, a list that is not of strings, no `paths`), they fall back to the generic wording. Every other
 /// code takes the generic wording — the code and the values listed in `args` (object keys in name order), saying the
 /// omission is intended.
 /// Control characters in the code and the listed values (file names from the library — outside input) are escaped
@@ -450,6 +458,22 @@ fn own_wording(notice: &Notice) -> Option<String> {
                 "알림: 폴더 {folder}의 항목이 {}개를 넘어 일부만 확인했습니다.",
                 grouped(FOLDER_LISTING_CAP)
             ))
+        }
+        FOLDER_LISTING_SKIPPED => {
+            let folder = escape_controls(args.get("folder")?.as_str()?);
+            let paths = text_list(args, "paths")?;
+            if paths.is_empty() {
+                return None;
+            }
+            let named = paths.len().min(FOLDER_LISTING_SKIPPED_NAMED);
+            let mut text = format!(
+                "알림: 폴더 {folder}에서 읽을 수 없는 항목을 건너뛰었습니다: {}",
+                paths[..named].join(", ")
+            );
+            if paths.len() > named {
+                text.push_str(&format!(" 외 {}개", grouped(paths.len() - named)));
+            }
+            Some(text)
         }
         _ => None,
     }
@@ -2163,6 +2187,57 @@ mod tests {
             notice_text(&reason("codex-other", json!({ "name": "x" }), None)),
             "알림(codex-other): 의도된 동작입니다. 대상 — x"
         );
+    }
+
+    /// The folder-skip code names at most three paths and counts the rest, with control characters escaped; `args` of
+    /// another shape fall back to the generic wording.
+    #[test]
+    fn the_folder_skip_notice_names_three_paths_counts_the_rest_and_falls_back_on_another_shape() {
+        for (args, text) in [
+            (
+                json!({ "folder": "D:\\rules", "paths": ["a", "b/c"] }),
+                "알림: 폴더 D:\\rules에서 읽을 수 없는 항목을 건너뛰었습니다: a, b/c",
+            ),
+            (
+                json!({ "folder": "D:\\rules", "paths": ["a", "b", "c"] }),
+                "알림: 폴더 D:\\rules에서 읽을 수 없는 항목을 건너뛰었습니다: a, b, c",
+            ),
+            (
+                json!({ "folder": "D:\\rules", "paths": ["a", "b", "c", "d", "e"] }),
+                "알림: 폴더 D:\\rules에서 읽을 수 없는 항목을 건너뛰었습니다: a, b, c 외 2개",
+            ),
+            (
+                json!({ "folder": "D:\\a\nb", "paths": ["x\u{1b}y"] }),
+                "알림: 폴더 D:\\a\\nb에서 읽을 수 없는 항목을 건너뛰었습니다: x\\u{1b}y",
+            ),
+        ] {
+            let rendered = notice_text(&reason(FOLDER_LISTING_SKIPPED, args.clone(), None));
+            assert!(!rendered.chars().any(char::is_control), "{rendered:?}");
+            assert_eq!(rendered, text, "{args}");
+        }
+        let many: Vec<String> = (0..1_006).map(|n| format!("p{n}")).collect();
+        assert_eq!(
+            notice_text(&reason(
+                FOLDER_LISTING_SKIPPED,
+                json!({ "folder": "D:\\rules", "paths": many }),
+                None
+            )),
+            "알림: 폴더 D:\\rules에서 읽을 수 없는 항목을 건너뛰었습니다: p0, p1, p2 외 1,003개"
+        );
+        for args in [
+            json!({ "paths": ["a"] }),
+            json!({ "folder": "D:\\x" }),
+            json!({ "folder": "D:\\x", "paths": [] }),
+            json!({ "folder": "D:\\x", "paths": [1] }),
+            json!({ "folder": "D:\\x", "paths": "a" }),
+            json!("D:\\x"),
+        ] {
+            let text = notice_text(&reason(FOLDER_LISTING_SKIPPED, args.clone(), None));
+            assert!(
+                text.starts_with("알림(folder-listing-skipped): 의도된 동작입니다."),
+                "{args} · {text}"
+            );
+        }
     }
 
     /// The folder-listing code gives its own sentence, the folder from `args` with control characters escaped;

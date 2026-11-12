@@ -40,6 +40,7 @@
 pub mod backends;
 pub mod catalog;
 pub mod excerpt;
+pub mod folder;
 pub mod format;
 pub mod path;
 pub mod refs;
