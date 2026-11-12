@@ -38,6 +38,10 @@
 // ADR-0311
 
 pub mod backends;
+pub mod catalog;
+pub mod excerpt;
 pub mod format;
 pub mod path;
+pub mod refs;
+pub mod store;
 pub mod validate;

@@ -769,7 +769,7 @@ const PROCESS_TIMEOUT: Duration = Duration::from_secs(60);
 /// Budget for getting past the startup screen (loading · modal) until the composer takes
 /// keys; probes repeat within it. ★Not a hard cap★ — it is checked only at the head of
 /// each round, and a round already started (probe windows · waiting for quiet · the
-/// post-CR trust-record wait) runs to its end, so a run can overrun it (~54 s observed).
+/// post-CR trust-record wait) runs to its end, so a run can overrun it (~54 s observed with the 45 s budget).
 /// 120 s, not 45 s: codex 0.167 starts its background app server before the composer, and
 /// with several real codex PTYs starting together the screen stayed on "loading" past 45 s
 /// on the baseline too (S25 P4 QA, 2026-11-12). A codex that exits on its own app-server

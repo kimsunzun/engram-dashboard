@@ -133,6 +133,7 @@ impl LibPath {
     }
 
     /// The platform path key of [`LibPath::to_path`] — two references name the same file when their keys are equal.
+    /// Catalog lookups take `catalog::key` (the spelling from the root), not this key.
     pub fn key(&self, root: &Path) -> PathKey {
         path_key(&self.to_path(root))
     }

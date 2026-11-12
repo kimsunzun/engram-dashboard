@@ -16,8 +16,15 @@ engram-dashboard-platform = { path = "../engram-dashboard-platform" }
 # Unused until the library commands land (step 10a) — kept now so the dependency-cap gate holds the final name set
 #   from the start (TRD S25 step-7 §3-1 · B1).
 engram-dashboard-command = { path = "../engram-dashboard-command" }
-# Unused until the store lands (step-7 P5 — `write_atomic` · `is_temp_name` · `sync::lock`) — kept now for the same gate.
+# The store's atomic write and copy and the temp-name rule (`store.rs` — `write_atomic` · `copy_atomic` · `is_temp_name`).
 engram-dashboard-base = { path = "../engram-dashboard-base" }
+# The library scan (`store.rs`): `follow_root_links` / `follow_links` / `filter_entry` give the link policy directly, and
+#   it opens a folder inside the `next()` call that yields it, which the per-folder listing sequence relies on (TRD S25
+#   step-7 premise 47).
+walkdir = "2.5"
+# The instruction excerpt (`excerpt.rs`) — an event walk; HTML output is not used, so default features are off.
+pulldown-cmark = { version = "0.13.6", default-features = false }
+tracing = "0.1"
 # The library reference spelling `LibPath` wraps `RelativePathBuf` (ADR-0315).
 relative-path = "2.0"
 serde = { version = "1", features = ["derive"] }
@@ -26,3 +33,7 @@ serde_json = "1"
 #   newer 2.x (TRD S25 step-7 B10).
 serde-saphyr = { version = "=2.0.0", default-features = false, features = ["deserialize", "serialize"] }
 thiserror = "1.0"
+
+[dev-dependencies]
+# Real-folder store tests (`store.rs`).
+tempfile = "3"

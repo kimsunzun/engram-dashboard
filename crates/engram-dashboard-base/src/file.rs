@@ -1,5 +1,5 @@
 //! Shared rules for data files — read decisions ([`parse`] · [`classify`] · [`load`]) · write decisions ([`Loaded::write_policy`] ·
-//! [`judge`] · [`check_cap`]) · capped reads ([`read_capped`] · [`read_file_capped`]) · atomic writes ([`write_atomic`] ·
+//! [`judge`] · [`check_cap`]) · capped reads ([`read_capped`] · [`read_capped_bytes`] · [`read_file_capped`]) · atomic writes ([`write_atomic`] ·
 //! [`write_atomic_unless`]) · atomic copies ([`copy_atomic`] · [`copy_aside`]) · sweeping leftover temp files ([`sweep_temps`]) and the
 //! temp-name test ([`is_temp_name`]).
 //!
@@ -295,18 +295,25 @@ fn retrying<T>(retry: RetryHook, mut attempt: impl FnMut() -> io::Result<T>) -> 
 /// are IO failures of the read itself, and what tells them apart is [`classify`] — if the content is unusable it is corrupt, if it is an IO failure it is left
 /// alone. There is no lock retry — whoever opens the file uses [`read_file_capped`] if needed.
 pub fn read_capped(source: impl io::Read, cap: u64) -> io::Result<String> {
+    let buf = read_capped_bytes(source, cap)?;
+    String::from_utf8(buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
+}
+
+/// [`read_capped`] without the UTF-8 step — the bytes of `source`, read only up to `cap + 1`; over the cap =
+/// `ErrorKind::InvalidData`, other kinds = IO failures of the read itself. No lock retry.
+pub fn read_capped_bytes(source: impl io::Read, cap: u64) -> io::Result<Vec<u8>> {
     use std::io::Read;
 
     let mut buf = Vec::new();
     // cap + 1 = the smallest amount that can tell 「넘었나」 (did it go over?). Even if it went over, the amount read stops here.
-    source.take(cap + 1).read_to_end(&mut buf)?;
+    source.take(cap.saturating_add(1)).read_to_end(&mut buf)?;
     if buf.len() as u64 > cap {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("{cap} 바이트 상한을 넘었다"),
         ));
     }
-    String::from_utf8(buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
+    Ok(buf)
 }
 
 /// Opens the file and reads it with [`read_capped`] — if the open or read fails on a lock, it opens again via [`OsHooks::retry`] and
@@ -803,6 +810,32 @@ mod tests {
             read <= cap + 1,
             "상한을 넘겨 {read} 바이트를 읽었다(허용 {}) — 끊지 않으면 원문 전체가 메모리에 올라온다",
             cap + 1
+        );
+    }
+
+    #[test]
+    fn the_byte_form_keeps_the_cap_and_takes_any_bytes() {
+        let cap = 8u64;
+        let bytes = read_capped_bytes(io::Cursor::new(vec![0xff; cap as usize]), cap).unwrap();
+        assert_eq!(
+            bytes,
+            vec![0xff; cap as usize],
+            "not UTF-8 is not refused here"
+        );
+        let over = read_capped_bytes(io::Cursor::new(vec![b'x'; cap as usize + 1]), cap)
+            .expect_err("over the cap is refused");
+        assert_eq!(over.kind(), io::ErrorKind::InvalidData);
+        let produced = Cell::new(0u64);
+        let reader = Counting {
+            inner: io::Cursor::new(vec![b'x'; 1024]),
+            produced: &produced,
+        };
+        assert!(read_capped_bytes(reader, cap).is_err());
+        assert!(produced.get() <= cap + 1, "read {} bytes", produced.get());
+        // The largest cap reads everything (`cap + 1` must not wrap to a read of nothing).
+        assert_eq!(
+            read_capped_bytes(io::Cursor::new(b"abc".to_vec()), u64::MAX).unwrap(),
+            b"abc"
         );
     }
 
