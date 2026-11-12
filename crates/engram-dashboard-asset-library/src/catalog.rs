@@ -662,7 +662,8 @@ fn skill_file_key(item: &Item) -> Option<PathKey> {
         .map(|file| key(&file))
 }
 
-fn within(path: &LibPath, range: Option<&LibPath>) -> bool {
+/// Whether `path` is `range` or below it (`None` = the whole library), name by name by the platform path key.
+pub(crate) fn within(path: &LibPath, range: Option<&LibPath>) -> bool {
     range.is_none_or(|range| path.replace_prefix(range, range).is_some())
 }
 

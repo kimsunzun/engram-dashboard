@@ -322,6 +322,11 @@ impl BoundedIo {
         }
     }
 
+    /// The spawner of the workers — the library service starts its short-lived merge jobs with it too.
+    pub(crate) fn spawner(&self) -> &dyn Spawn {
+        &*self.spawn
+    }
+
     /// A launch: a fresh required budget and advisory allowance from [`LaunchWaits`], no answers.
     pub fn begin_launch(&self) -> Arc<LaunchIo> {
         Arc::new(LaunchIo::new(self.launch.required, self.launch.advisory))
