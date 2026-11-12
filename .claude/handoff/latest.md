@@ -1,25 +1,23 @@
-# Handoff: S25 step 7 — P4 (rescoped, ADR-0359) reviewed + QA'd, UNCOMMITTED; waiting on one user decision (pre-existing codex lane failure); then commit P4 → P5
+# Handoff: S25 step 7 — P4 committed + pushed; next = P5 (store/scan/catalog/refs); the codex start-wait test change awaits review+QA with P5
 
-## STOP — ask the user first (do not commit P4 before the answer)
-**Pre-existing failure decision (implement flow §4 — must be asked even in autonomous mode):** QA's codex lane fails `backend_contract` q4 / q11 / q12 ("codex: 시작 화면을 45s 안에 못 지났다 … the startup-done signal never came"; q11 once showed codex's own `Error: app server did not become ready … timed out probing app-server control socket … rerun with --no-daemon`). Triage: with all 11 tests under `--test-threads=4` the **baseline `70c35894` fails the same 3 at the same asserts** (`backend_contract.rs:1720:9`, `:2632:13`) → labelled `FAIL(선재)` (caveat: the `모달=` field was `Passed` on baseline vs `NotShown` on P4 — treated as a run-varying value; strict reading = unlabelled, but it reproduces on baseline either way). Which tests fail varies run to run (3, 3, 1). Run alone (3 tests) they pass. Related records: tracking **T-56** (same file, codex stuck on "loading", pre-existing, cause unknown — but T-56 says they fail even one at a time) and step-log `:2201` (S31: same app-server socket mechanism, `SUN_LEN`). The changed P4 code is not on that path (argv has no `-c` lines; the delta was `launch.rs` notice text).
-Question to put to the user (one line each, recommend ★):
-- ★ Skip for P4 and record it: append to T-56 (or a new T-entry) "fails when 11 run under 4 threads; passes when 3 run alone; app-server readiness timeout seen (`--no-daemon` hint)"; commit P4 with the label in the body.
-- Fix now: harness change (longer start wait or `--no-daemon` for these tests) — a separate small unit before P4's commit.
-After "skip": commit P4 (see Resume), push, then continue to P5.
+## STATE AT SAVE — read first
+- **P4 landed** as `2a70d1ee` (pushed): code review deep PASS, QA PASS except the codex lane `backend_contract` q4/q11/q12, which fail the same way on the baseline (`FAIL(선재)`, codex start screen stuck on "loading" > 45 s — app-server readiness).
+- **User decision (2026-11-12):** 「아니 그냥하드코딩으로 길게 하던가. 변수하나 바꾸면 되는거잖아. 구지 그걸 트래킹으로해야됨?」 → `a55195b4` raises `STARTUP_TIMEOUT` in `crates/engram-dashboard-agent/tests/backend_contract.rs` 45 s → 120 s (small-fix path, **"리뷰 대기"**: build checked only). **Its review + QA ride with P5's** (it is in the codex lane path, so P5's QA runs the codex lane). No tracking entry (user). If the three still fail at 120 s, report it with the codex output (one failure mode is codex exiting on its own app-server timeout — a longer wait cannot fix that).
+- Local backup branches no longer needed (both unpushed): `v0.5.0/wip/s25-p4-final-pending` (`27543d0e`, = P4 code) and `v0.5.0/wip/s25-p4-schema-validate-parked` (`002cd9f9`, old schema P4). Deleting them is the user's call.
 
 ## Know first
-- **Working tree = P4, uncommitted, gated** (code tree `7bd62bc7` = HEAD `8c93c881` + 12 files). Backup of exactly this tree: local branch `v0.5.0/wip/s25-p4-final-pending` (`27543d0e`, unpushed). The old schema P4 is parked on local branch `v0.5.0/wip/s25-p4-schema-validate-parked` (`002cd9f9`, unpushed). Neither is to be merged.
+- Working tree is clean except the ~45 `src-tauri/bindings/*.ts` line-ending entries (never stage).
 - `src-tauri/bindings/*.ts` (~45) line-ending noise — never stage.
 - Codex threads left in the user's real `~/.codex` by this session's QA (deleting is the user's): `01a1ca2a-9a73-7263-9784-3631b2d761a6`, `01a1cbe5-124a-7993-b288-facabe32db77` (plus older ones listed in previous handoffs).
 - The user went to sleep with 「쭉 진행해. 그냥」 (autonomous). Report at wake-up: the decision above, and today's decisions below.
 - Deviations to report (already told the user, keep for the record): the step-7 TRD amendment rounds raised a class of timing findings two rounds running → raised to the user as a class choice (they chose "requirement + ordering rule; per-entrance values in step 8"); a P4 coder re-ran a classifier-denied `git checkout` after self-verifying the backup (no harm; recorded in global feedback).
 
 ## One-line state · next first action
-Step 7 = new crate `engram-dashboard-asset-library` in 9 units. P1–P3 committed (`42cede81`, `d8bd75db`, `1246253d`). **P4 rescoped by ADR-0359 is done and gated except the codex-lane pre-existing failure decision.** Next: ask the user (above) → commit P4 → push → P5 store/scan/catalog/refs → P6 folder IO (deep; now 60 s / 2 s per ADR-0360) → P7 service+gate (deep) → P8 builtin+resolve → P9 launch (deep) → step-7 doc pass. Step 7 is *Stop (after)*.
+Step 7 = new crate `engram-dashboard-asset-library` in 9 units. P1–P4 committed (`42cede81`, `d8bd75db`, `1246253d`, `2a70d1ee`). Next: P5 store/scan/catalog/refs → P6 folder IO (deep; now 60 s / 2 s per ADR-0360) → P7 service+gate (deep) → P8 builtin+resolve → P9 launch (deep) → step-7 doc pass. Step 7 is *Stop (after)*.
 
 ## Repo state (branch v0.5.0/feat/preset-library · worktree wt1)
-- HEAD `8c93c881` + this handoff commit; pushed up to `8c93c881` (upstream 0/0 before this commit — this commit is unpushed until the next push); vs origin/master: 0 behind / 193 ahead.
-- Uncommitted (P4, gated, NOT committed): `Cargo.lock`; agent `Cargo.toml`, `src/backend/settings_check.rs`, `src/backend/claude/settings.rs`, `src/backend/codex/settings.rs`, `src/backend/codex/cmdline.rs`, `src/launch.rs`; asset-library `Cargo.toml`, `src/lib.rs`, `src/backends.rs`, `src/format/frontmatter.rs`, `src/validate.rs` (new).
+- HEAD `a55195b4` + this handoff commit; pushed up to `a55195b4` (upstream 0/0 before this commit — this commit is unpushed until the next push); vs origin/master: 0 behind / ~196 ahead.
+- P4 = `2a70d1ee` (12 files: agent settings-check port removals + `toml` drop + Cargo.lock edge; asset-library `validate.rs`, fakes, P3 golden routing). Test wait change = `a55195b4` (리뷰 대기).
 - This session's commits (since `b53ef8ba`): ADR-0359 (`ead83a79` scaffold, `062eb4dc` body, `a8906754`…`c305a7a2` partial links to 0334/0336/0323/0331/0324/0311/0314, `38b8413f`, `02022f7a` 0334 clause widened); TRD draft 9 `4a173811` + review fixes `2dc83bbe` `7f3dd8f6` `30491ace`; HTML clarifications; ADR-0360 (`69e931c4` scaffold, `483a14bc` body, `30c8be6d` confirmed); TRD draft 10 `fa386bbf`, draft 11 `ac99be15` `7bfa9f8f` `16241706` `70c35894`; draft 12 `8c93c881` (B29 notice withdrawn).
 - `.review-s25-d9/` (excluded via `.git/info/exclude`) holds briefs, diffs, the P4 TRD extract and QA/review briefs — reusable patterns.
 
@@ -49,7 +47,8 @@ User (2026-11-11/12):
 - codex 셸 도구 바깥 대기(N5) · 고른 것 「너가 알아서해. 가장 좋은 방향으로.」 → main: step 8 measures it
 - 휴지통 규칙 피드백 · 고른 것 「이거 수정은 몰아서 할거야 다른거랑 합쳐서.」
 Main: P4 coder plan (one coder, sequential); B32 remove `raw_to_json` + port `merge` (+ agent `toml`); launch values in agent `types.rs` (85 s reply bound, 88 s caller wait); shell link follows ADR-0181 (raise the shared timeout in step 8); review intensities (TRD full, P4 code deep); `pub mod validate` accepted.
-Open: the pre-existing codex-lane failure decision (top).
+- (2026-11-12) codex lane pre-existing failure · 선택지 record + skip ★ / fix the wait · 고른 것 「아니 그냥하드코딩으로 길게 하던가. 변수하나 바꾸면 되는거잖아. 구지 그걸 트래킹으로해야됨?」 · 갈림 → 120 s constant, no tracking entry.
+Open: none from the user. Pending gate: review + QA of `a55195b4` (with P5).
 
 ## Doc pass owed at the end of step 7 (collected, add to the previous list)
 - Previous list (ADR-0315 amendment, ADR-0357 amendment for the four codes, TRD fixes, stale `cwd_reaches_codex_unchanged` location, step-log for S36 merge and step-7 units, P3 follow-ups, P4/P6 brief notes) still stands — see history `20261111-122129-*`.
@@ -60,8 +59,8 @@ Open: the pre-existing codex-lane failure decision (top).
 - Report only: CLAUDE.md 「관례를 먼저 확인한다」 should also cover external CLI behaviour (grep `docs/research/` first).
 
 ## Resume command
-`git -C I:/Engram/apps/engram-dashboard-wt1 status --short | grep -v bindings/ && git -C I:/Engram/apps/engram-dashboard-wt1 log --oneline -3`
-To commit P4 after the user's answer: stage exactly the 12 P4 paths above (never `src-tauri/bindings/*.ts`), verify `read-tree HEAD` + `add -A -- crates Cargo.lock` + `write-tree` = `7bd62bc7…`, commit `S25: feat(asset-library,agent): step 7 P4 — hand-over checks; schema-only settings-check members removed (ADR-0359)` with review/QA/label in the body, push.
+`git -C I:/Engram/apps/engram-dashboard-wt1 log --oneline -3 && git -C I:/Engram/apps/engram-dashboard-wt1 status --short | grep -v bindings/`
+Next: `/engram-implement` for P5 (child TRD §3-5, §8-1 P5 row, §9 P5 row) — include `a55195b4` and the qa.md known-failure note (none needed if q4/q11/q12 now pass) in P5's review/QA payload.
 
 ## References
 - Child TRD `docs/process/S25-preset-library/trd-asset-library.md` (draft 12) — §3-6, §3-9a (P4), §3-5 (P5), §3-8 + §6 (P6/P9, ADR-0360 values), §12 hand-over incl. the step-8 entrance table; overview `trd-asset-library.html`.
