@@ -218,8 +218,8 @@ pub enum BlockReason {
         via: Vec<String>,
         reason: Reason,
     },
-    /// 읽히지 않거나 실을 수 없다 — YAML 문법 · 순환 · 설정 스키마 오류 · codex 가 못 싣는 스킬 · 명령줄 가드 ·
-    /// 명령줄 길이 넘침.
+    /// Cannot be read or handed over — YAML syntax · a cycle · a skill codex cannot load · the command-line guard ·
+    /// a command line over its length.
     Broken {
         item: String,
         via: Vec<String>,
@@ -363,18 +363,6 @@ pub const CODEX_TERMINAL_FOLDER_OMITTED: &str = "codex-terminal-folder-omitted";
 // ADR-0355
 pub const CODEX_SAME_NAME_SKILLS: &str = "codex-same-name-skills";
 
-/// Notice code: no schema was held for a settings asset's backend, so its values were not checked against one.
-/// `args` = `{settings}` — the settings asset's reference as the preset names it.
-pub const SETTINGS_SCHEMA_UNAVAILABLE: &str = "settings-schema-unavailable";
-
-/// Notice code: the held schema is older than the installed CLI, so the keys it does not know in a settings asset
-/// were not checked. `args` = `{settings}`.
-pub const SETTINGS_SCHEMA_OUTDATED: &str = "settings-schema-outdated";
-
-/// Notice code: a settings asset holds keys its backend's schema does not know, for a backend whose unknown keys are
-/// reported rather than ignored. `args` = `{settings, keys: [...]}`.
-pub const SETTINGS_UNKNOWN_KEY: &str = "settings-unknown-key";
-
 /// Notice code: a folder entry's listing stopped at [`FOLDER_LISTING_CAP`] entries, so only part of the folder was
 /// looked at. `args` = `{folder}`.
 pub const FOLDER_LISTING_PARTIAL: &str = "folder-listing-partial";
@@ -388,12 +376,11 @@ pub const FOLDER_LISTING_CAP: usize = 10_000;
 ///
 /// [`CODEX_TERMINAL_OMITTED`], [`CODEX_TERMINAL_FOLDER_OMITTED`] and [`CODEX_SAME_NAME_SKILLS`] have their own
 /// sentence (user wording, exact), filled from `args` with names joined by `, `; in the two terminal codes an empty
-/// list leaves its part out. [`SETTINGS_SCHEMA_UNAVAILABLE`], [`SETTINGS_SCHEMA_OUTDATED`], [`SETTINGS_UNKNOWN_KEY`]
-/// and [`FOLDER_LISTING_PARTIAL`] have their own sentence too, naming no backend — the names come from `args`. When
-/// their `args` do not have the shape the constant documents (not an object, a missing `folder`, `name` or
-/// `settings`, a list that is not of strings, no `paths` or `keys`), they fall back to the generic wording. Every
-/// other code takes the generic wording — the code and the values listed in `args` (object keys in name order),
-/// saying the omission is intended.
+/// list leaves its part out. [`FOLDER_LISTING_PARTIAL`] has its own sentence too, naming no backend — the folder
+/// comes from `args`. When their `args` do not have the shape the constant documents (not an object, a missing
+/// `folder` or `name`, a list that is not of strings, no `paths`), they fall back to the generic wording. Every other
+/// code takes the generic wording — the code and the values listed in `args` (object keys in name order), saying the
+/// omission is intended.
 /// Control characters in the code and the listed values (file names from the library — outside input) are escaped
 /// (`\n`, `\u{1b}`), so the line stays one line and carries no terminal escape when the CLI prints it.
 pub fn notice_text(notice: &Notice) -> String {
@@ -455,29 +442,6 @@ fn own_wording(notice: &Notice) -> Option<String> {
             Some(format!(
                 "알림: 같은 이름의 스킬이 여러 곳에 있습니다. codex에서 ${name}(으)로 부르면 어느 쪽도 선택되지 않습니다. {name}: {}",
                 paths.join(", ")
-            ))
-        }
-        SETTINGS_SCHEMA_UNAVAILABLE => {
-            let settings = escape_controls(args.get("settings")?.as_str()?);
-            Some(format!(
-                "알림: 설정 {settings}의 스키마를 확인하지 못했습니다(스키마 없음)."
-            ))
-        }
-        SETTINGS_SCHEMA_OUTDATED => {
-            let settings = escape_controls(args.get("settings")?.as_str()?);
-            Some(format!(
-                "알림: 설정 {settings}의 일부 키는 이 판 스키마로 확인하지 못했습니다."
-            ))
-        }
-        SETTINGS_UNKNOWN_KEY => {
-            let settings = escape_controls(args.get("settings")?.as_str()?);
-            let keys = text_list(args, "keys")?;
-            if keys.is_empty() {
-                return None;
-            }
-            Some(format!(
-                "알림: 설정 {settings}에 스키마에 없는 키가 있습니다: {}",
-                keys.join(", ")
             ))
         }
         FOLDER_LISTING_PARTIAL => {
@@ -2201,75 +2165,49 @@ mod tests {
         );
     }
 
-    /// The four generic settings and folder codes give their own sentence, names from `args` with control characters
-    /// escaped; `args` of another shape fall back to the generic wording.
+    /// The folder-listing code gives its own sentence, the folder from `args` with control characters escaped;
+    /// `args` of another shape fall back to the generic wording.
     #[test]
-    fn the_settings_and_folder_notice_codes_give_their_own_wording() {
-        let cases = [
+    fn the_folder_listing_notice_gives_its_own_wording_and_falls_back_on_another_shape() {
+        for (args, text) in [
             (
-                SETTINGS_SCHEMA_UNAVAILABLE,
-                json!({ "settings": "team/models.yaml" }),
-                "알림: 설정 team/models.yaml의 스키마를 확인하지 못했습니다(스키마 없음).",
-            ),
-            (
-                SETTINGS_SCHEMA_OUTDATED,
-                json!({ "settings": "team/models.yaml" }),
-                "알림: 설정 team/models.yaml의 일부 키는 이 판 스키마로 확인하지 못했습니다.",
-            ),
-            (
-                SETTINGS_UNKNOWN_KEY,
-                json!({ "settings": "team/models.yaml", "keys": ["model_x", "tools.y"] }),
-                "알림: 설정 team/models.yaml에 스키마에 없는 키가 있습니다: model_x, tools.y",
-            ),
-            (
-                FOLDER_LISTING_PARTIAL,
                 json!({ "folder": "D:\\rules\\big" }),
                 "알림: 폴더 D:\\rules\\big의 항목이 10,000개를 넘어 일부만 확인했습니다.",
             ),
             (
-                SETTINGS_UNKNOWN_KEY,
-                json!({ "settings": "a\nb", "keys": ["\u{1b}[31mk"] }),
-                "알림: 설정 a\\nb에 스키마에 없는 키가 있습니다: \\u{1b}[31mk",
-            ),
-            (
-                SETTINGS_SCHEMA_UNAVAILABLE,
-                json!({ "settings": "a\nb" }),
-                "알림: 설정 a\\nb의 스키마를 확인하지 못했습니다(스키마 없음).",
-            ),
-            (
-                SETTINGS_SCHEMA_OUTDATED,
-                json!({ "settings": "\u{1b}[31mx" }),
-                "알림: 설정 \\u{1b}[31mx의 일부 키는 이 판 스키마로 확인하지 못했습니다.",
-            ),
-            (
-                FOLDER_LISTING_PARTIAL,
                 json!({ "folder": "D:\\a\nb" }),
                 "알림: 폴더 D:\\a\\nb의 항목이 10,000개를 넘어 일부만 확인했습니다.",
             ),
-        ];
-        for (code, args, text) in cases {
-            let rendered = notice_text(&reason(code, args.clone(), None));
+        ] {
+            let rendered = notice_text(&reason(FOLDER_LISTING_PARTIAL, args.clone(), None));
             assert!(!rendered.chars().any(char::is_control), "{rendered:?}");
-            assert_eq!(rendered, text, "{code} {args}");
+            assert_eq!(rendered, text, "{args}");
         }
-
-        let fallbacks = [
-            (SETTINGS_SCHEMA_UNAVAILABLE, json!({ "name": "x" })),
-            (SETTINGS_SCHEMA_OUTDATED, json!({ "settings": 1 })),
-            (SETTINGS_UNKNOWN_KEY, json!({ "settings": "x" })),
-            (SETTINGS_UNKNOWN_KEY, json!({ "settings": "x", "keys": [] })),
-            (
-                SETTINGS_UNKNOWN_KEY,
-                json!({ "settings": "x", "keys": "k" }),
-            ),
-            (FOLDER_LISTING_PARTIAL, json!({ "path": "D:\\x" })),
-            (FOLDER_LISTING_PARTIAL, json!("D:\\x")),
-        ];
-        for (code, args) in fallbacks {
-            let text = notice_text(&reason(code, args.clone(), None));
+        for args in [json!({ "path": "D:\\x" }), json!("D:\\x")] {
+            let text = notice_text(&reason(FOLDER_LISTING_PARTIAL, args.clone(), None));
             assert!(
-                text.starts_with(&format!("알림({code}): 의도된 동작입니다.")),
-                "{code} {args} · {text}"
+                text.starts_with("알림(folder-listing-partial): 의도된 동작입니다."),
+                "{args} · {text}"
+            );
+        }
+    }
+
+    /// No settings code has its own sentence: the codes a settings schema check would emit take the generic wording
+    /// like any unnamed code (ADR-0359 — no such check exists).
+    #[test]
+    fn the_former_settings_schema_codes_take_the_generic_wording() {
+        for code in [
+            "settings-schema-unavailable",
+            "settings-schema-outdated",
+            "settings-unknown-key",
+        ] {
+            assert_eq!(
+                notice_text(&reason(
+                    code,
+                    json!({ "settings": "team/models.yaml" }),
+                    None
+                )),
+                format!("알림({code}): 의도된 동작입니다. 대상 — team/models.yaml")
             );
         }
     }

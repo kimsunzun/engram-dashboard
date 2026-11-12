@@ -258,17 +258,17 @@ mod tests {
     // `docs/research/skill-md-recognition-claude-codex-2026-10-20.md` (fixtures). Where serde-saphyr and
     // codex's serde_yaml 0.9.34 may differ, the row says so.
 
+    /// Through [`crate::validate::check_skill`], so every golden row also pins that it passes this parser.
     fn codex_format(file: &str, folder: &str, text: &str) -> SkillFormat {
-        AgentBackends
-            .for_word("codex")
-            .expect("codex is registered")
-            .skill_format(
-                file,
-                folder,
-                text,
-                &YamlFrontMatter,
-                AgentOutputFormat::StreamJson,
-            )
+        crate::validate::check_skill(
+            AgentBackends
+                .for_word("codex")
+                .expect("codex is registered"),
+            AgentOutputFormat::StreamJson,
+            file,
+            folder,
+            text,
+        )
     }
 
     fn skill(text: &str) -> SkillFormat {

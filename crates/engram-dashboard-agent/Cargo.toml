@@ -50,10 +50,6 @@ ts-rs = "10"   # 선언 매크로가 인자·반환 struct 에 TS derive 를 단
 #   RFC 3339 해석은 기능 없이 서고, 시계·시간대 데이터베이스(`clock`)는 필요 없다. 잠금 파일에 이미 있는 판이다
 #   (데몬은 `rmcp` 를 거쳐 이미 링크한다) — 새 패키지를 끌어오지 않는다.
 chrono = { version = "0.4", default-features = false }
-# The value side of a codex `-c key=value` override is parsed as TOML, the way codex parses it
-#   (`backend/codex/settings.rs`). Already in the lock file through the shell's graph — no new package. `display`
-#   is off: nothing here writes TOML.
-toml = { version = "1.1.2", default-features = false, features = ["std", "serde", "parse"] }
 
 # 하네스 전용 실행기(`engram_dashboard_command::testing::block_on`)를 테스트 빌드에서만 켠다 —
 #   기능 요청이 dev 그래프에만 있어 운영 바이너리엔 유니피케이션되지 않는다.

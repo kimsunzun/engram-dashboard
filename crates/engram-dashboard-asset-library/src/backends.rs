@@ -31,15 +31,16 @@ impl Backends for AgentBackends {
     }
 }
 
-/// A registry of backends that only know their word — for tests whose subject asks the registry nothing but whether a
-/// word is known (every other port method panics). A backend added here stands for a backend agent registers later.
+/// Test registries. [`fake::WordBackends`] — backends that only know their word, for tests whose subject asks the
+/// registry nothing but whether a word is known (every other port method panics). [`fake::Registry`] — agent's real
+/// checks plus [`fake::Scripted`] backends. A fake backend stands for a backend agent registers later.
 #[cfg(test)]
 pub(crate) mod fake {
     use std::path::Path;
 
     use engram_dashboard_agent::backend::settings_check::{
         CommandLine, FolderEntry, FolderLoadSet, FrontMatterParser, ModeLoads, NativePlaces,
-        NativeSkillRoots, NoticeCodes, SchemaSource, SkillFormat, UnknownKeys, VersionProbe,
+        NativeSkillRoots, NoticeCodes, SkillFormat,
     };
     use engram_dashboard_agent::backend::SettingsCheck;
     use engram_dashboard_agent::launch::Reason;
@@ -77,27 +78,6 @@ pub(crate) mod fake {
     impl SettingsCheck for WordOnly {
         fn backend(&self) -> &'static str {
             self.0
-        }
-        fn schema_source(&self, _: &str) -> SchemaSource {
-            unimplemented!("word-only fake")
-        }
-        fn version_probe(&self) -> VersionProbe {
-            unimplemented!("word-only fake")
-        }
-        fn parse_version(&self, _: &str) -> Option<String> {
-            unimplemented!("word-only fake")
-        }
-        fn raw_to_json(&self, _: &Value) -> Result<Value, Reason> {
-            unimplemented!("word-only fake")
-        }
-        fn merge(&self, _: &[&Value]) -> Option<Value> {
-            unimplemented!("word-only fake")
-        }
-        fn merge_origins(&self, _: &[&Value]) -> Option<Vec<(String, usize)>> {
-            unimplemented!("word-only fake")
-        }
-        fn unknown_keys(&self) -> UnknownKeys {
-            unimplemented!("word-only fake")
         }
         fn loads(&self, _: AgentOutputFormat) -> ModeLoads {
             unimplemented!("word-only fake")
@@ -156,6 +136,140 @@ pub(crate) mod fake {
             _: &dyn FrontMatterParser,
         ) -> FolderLoadSet {
             unimplemented!("word-only fake")
+        }
+    }
+
+    /// A registry of any checks — agent's real ones beside [`Scripted`] fakes that stand for a backend agent registers
+    /// later. Fakes are leaked so every slot is `'static` like the real registry's.
+    pub(crate) struct Registry(pub Vec<&'static dyn SettingsCheck>);
+
+    impl Registry {
+        /// agent's real checks, then `extra` in order.
+        pub(crate) fn real_and(extra: Vec<Scripted>) -> Self {
+            let real: &'static super::AgentBackends = &super::AgentBackends;
+            let mut checks: Vec<&'static dyn SettingsCheck> = real.all();
+            checks.extend(extra.into_iter().map(|check| {
+                let leaked: &'static Scripted = Box::leak(Box::new(check));
+                leaked as &'static dyn SettingsCheck
+            }));
+            Self(checks)
+        }
+    }
+
+    impl Backends for Registry {
+        fn for_word(&self, word: &str) -> Option<&dyn SettingsCheck> {
+            self.0
+                .iter()
+                .find(|check| check.backend().eq_ignore_ascii_case(word))
+                .copied()
+        }
+
+        fn all(&self) -> Vec<&dyn SettingsCheck> {
+            self.0.clone()
+        }
+    }
+
+    /// A fake backend with simple, fixed answers — what a test needs from a backend no code here knows by name:
+    ///
+    /// - `command_line_args`: an object holding the key `unsafe` is refused (`<word>-line-unsafe`), carrying the line
+    ///   that key's value names when it is a number (a line the port cannot know — the check must replace it), else
+    ///   no line; anything else is `Ok([])`.
+    /// - `skill_format`: `Invalid(<word>-skill-refused)` when the text holds `refuse`, else `Valid` named after the
+    ///   folder.
+    ///
+    /// Every other port method panics.
+    pub(crate) struct Scripted {
+        pub word: &'static str,
+    }
+
+    impl Scripted {
+        pub(crate) fn new(word: &'static str) -> Self {
+            Self { word }
+        }
+
+        fn reason(&self, what: &str, line: Option<u32>) -> Reason {
+            Reason {
+                code: format!("{}-{what}", self.word),
+                args: serde_json::json!({}),
+                line,
+            }
+        }
+    }
+
+    impl SettingsCheck for Scripted {
+        fn backend(&self) -> &'static str {
+            self.word
+        }
+        fn loads(&self, _: AgentOutputFormat) -> ModeLoads {
+            unimplemented!("scripted fake")
+        }
+        fn accepts_skill_name(&self, _: &str, _: AgentOutputFormat) -> bool {
+            unimplemented!("scripted fake")
+        }
+        fn folder_entry_blocks(&self, _: &Path) -> bool {
+            unimplemented!("scripted fake")
+        }
+        fn working_folder_blocks(&self, _: &Path, _: AgentOutputFormat) -> Option<Reason> {
+            unimplemented!("scripted fake")
+        }
+        fn notice_codes(&self, _: AgentOutputFormat) -> NoticeCodes {
+            unimplemented!("scripted fake")
+        }
+        fn folder_listing_at_launch(&self, _: AgentOutputFormat) -> bool {
+            unimplemented!("scripted fake")
+        }
+        fn folder_load_set(
+            &self,
+            _: &[FolderEntry],
+            _: &dyn Fn(&Path) -> std::io::Result<String>,
+            _: &dyn FrontMatterParser,
+            _: AgentOutputFormat,
+        ) -> FolderLoadSet {
+            unimplemented!("scripted fake")
+        }
+        fn skill_format(
+            &self,
+            _: &str,
+            folder_name: &str,
+            text: &str,
+            _: &dyn FrontMatterParser,
+            _: AgentOutputFormat,
+        ) -> SkillFormat {
+            if text.contains("refuse") {
+                SkillFormat::Invalid(self.reason("skill-refused", None))
+            } else {
+                SkillFormat::Valid {
+                    name: folder_name.to_owned(),
+                    description: String::new(),
+                }
+            }
+        }
+        fn command_line_args(&self, raw: &Value) -> Result<Vec<String>, Reason> {
+            match raw.get("unsafe") {
+                Some(at) => {
+                    let line = at.as_u64().and_then(|n| u32::try_from(n).ok());
+                    Err(self.reason("line-unsafe", line))
+                }
+                None => Ok(vec![]),
+            }
+        }
+        fn command_line_fits(&self, _: &CommandLine<'_>) -> Result<(), Reason> {
+            unimplemented!("scripted fake")
+        }
+        fn native_skill_roots(
+            &self,
+            _: &NativePlaces<'_>,
+            _: AgentOutputFormat,
+        ) -> NativeSkillRoots {
+            unimplemented!("scripted fake")
+        }
+        fn root_skills(
+            &self,
+            _: &[FolderEntry],
+            _: &dyn Fn(&Path) -> std::io::Result<String>,
+            _: &dyn FrontMatterParser,
+        ) -> FolderLoadSet {
+            unimplemented!("scripted fake")
         }
     }
 }

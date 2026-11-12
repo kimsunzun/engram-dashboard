@@ -1,30 +1,23 @@
 //! The claude implementation of the settings-check port ([`SettingsCheck`]) — [`CLAUDE_SETTINGS_CHECK`].
 //!
-//! [`merge`] is also what the claude launch translation (`launch.rs`) writes as its one `--settings` file, so the
-//! check and the launch see the same merged value.
+//! [`merge`] is what the claude launch translation (`launch.rs`) writes as its one `--settings` file; claude judges
+//! the merged value by its own rules.
 // ADR-0334
 // ADR-0328
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::Path;
 
-use engram_dashboard_platform::shell::console_command;
 use serde_json::{Map, Value};
 
-use super::{CLAUDE_PROGRAM, NO_AUTOUPDATE_ENV};
 use crate::backend::settings_check::{
-    is, is_version, normal_parts, CommandLine, FolderEntry, FolderLoad, FolderLoadKind,
-    FolderLoadSet, FolderUnsure, FrontMatterError, FrontMatterParser, InstructionLoad, ModeLoads,
-    NativePlaces, NativeSkillRoots, NoticeCodes, SchemaRefetch, SchemaSource, SettingsCheck,
-    SkillFormat, SubagentFrontMatter, UnknownKeys, UnsureWhy, VersionProbe,
+    is, normal_parts, CommandLine, FolderEntry, FolderLoad, FolderLoadKind, FolderLoadSet,
+    FolderUnsure, FrontMatterError, FrontMatterParser, InstructionLoad, ModeLoads, NativePlaces,
+    NativeSkillRoots, NoticeCodes, SettingsCheck, SkillFormat, SubagentFrontMatter, UnsureWhy,
 };
 use crate::launch::Reason;
 use crate::profile::AgentOutputFormat;
-
-/// The SchemaStore copy the claude settings docs point to. It is maintained by hand and lags behind the CLI —
-/// `docs/research/claude-settings-schema-source-2026-10-18.md`.
-const SCHEMA_URL: &str = "https://json.schemastore.org/claude-code-settings.json";
 
 /// Characters whose NFKC form contains `:` (Unicode 16.0) — claude refuses a subagent `name` that contains `:` after
 /// NFKC normalization (claude 2.1.284 binary).
@@ -37,53 +30,6 @@ pub(crate) struct ClaudeSettingsCheck;
 impl SettingsCheck for ClaudeSettingsCheck {
     fn backend(&self) -> &'static str {
         "claude"
-    }
-
-    fn schema_source(&self, _cli_version: &str) -> SchemaSource {
-        SchemaSource {
-            url: SCHEMA_URL.to_owned(),
-            refetch: SchemaRefetch::LatestOnCliVersionChange,
-        }
-    }
-
-    /// Carries [`NO_AUTOUPDATE_ENV`] for the same reason as the agent spawn and the usage probe.
-    fn version_probe(&self) -> VersionProbe {
-        let (program, args) = console_command(CLAUDE_PROGRAM, vec!["--version".to_owned()]);
-        let (key, value) = NO_AUTOUPDATE_ENV;
-        VersionProbe {
-            program,
-            args,
-            env: vec![(key.to_owned(), value.to_owned())],
-        }
-    }
-
-    /// `claude --version` prints `2.1.284 (Claude Code)` (2.1.284). The first line whose first word is a dotted
-    /// version wins.
-    fn parse_version(&self, stdout: &str) -> Option<String> {
-        stdout
-            .lines()
-            .filter_map(|line| line.split_whitespace().next())
-            .find(|word| is_version(word))
-            .map(str::to_owned)
-    }
-
-    /// The raw claude value is the settings JSON as it is — a non-object is returned unchanged too.
-    fn raw_to_json(&self, raw: &Value) -> Result<Value, Reason> {
-        Ok(raw.clone())
-    }
-
-    /// claude loads one merged `--settings`, so there is always a merged value to check.
-    fn merge(&self, layers: &[&Value]) -> Option<Value> {
-        Some(merge(layers))
-    }
-
-    fn merge_origins(&self, layers: &[&Value]) -> Option<Vec<(String, usize)>> {
-        Some(merge_origins(layers))
-    }
-
-    /// The SchemaStore copy misses many keys the CLI knows, so an unknown key is no evidence of a mistake.
-    fn unknown_keys(&self) -> UnknownKeys {
-        UnknownKeys::Ignore
     }
 
     fn loads(&self, _mode: AgentOutputFormat) -> ModeLoads {
@@ -99,7 +45,7 @@ impl SettingsCheck for ClaudeSettingsCheck {
     }
 
     /// Each folder entry goes on the claude command line as `--add-dir <folder>`, and claude runs through
-    /// `cmd.exe /c` on Windows ([`console_command`]).
+    /// `cmd.exe /c` on Windows ([`engram_dashboard_platform::shell::console_command`]).
     // ADR-0341
     fn folder_entry_blocks(&self, folder: &Path) -> bool {
         !engram_dashboard_platform::shell::path_is_cli_safe(folder)
@@ -445,8 +391,8 @@ fn subagent_is_valid(front_matter: &SubagentFrontMatter) -> bool {
 /// the same key, or two whole layers) are concatenated · any other pair, a type mismatch included, takes the later
 /// value. Every list in the result (reached through objects) holds each value once — the first occurrence stays,
 /// repeats inside one layer included. No key is treated specially, so a later list cannot remove an item a former
-/// layer put into a list; a later value of another type (`null`, an object, a string …) does replace the list — the
-/// schema check of the merged value is the net for that. No layer = an empty object.
+/// layer put into a list; a later value of another type (`null`, an object, a string …) does replace the list. No
+/// layer = an empty object.
 // ADR-0328
 pub(super) fn merge(layers: &[&Value]) -> Value {
     layers
@@ -456,7 +402,6 @@ pub(super) fn merge(layers: &[&Value]) -> Value {
         })
 }
 
-// Mirrored by `merge_two_traced` — change both.
 fn merge_two(former: Value, later: &Value) -> Value {
     match (former, later) {
         (Value::Object(mut former), Value::Object(later)) => {
@@ -502,119 +447,6 @@ fn without_repeats(value: &Value) -> Value {
             Value::Array(kept)
         }
         other => other.clone(),
-    }
-}
-
-/// The origins of [`merge`]'s value ([`SettingsCheck::merge_origins`]): the same fold and the same rule, with the index
-/// of the layer each part came from. A test runs both on the same tables.
-// ADR-0328
-pub(super) fn merge_origins(layers: &[&Value]) -> Vec<(String, usize)> {
-    let start = Traced::Object {
-        layer: None,
-        entries: BTreeMap::new(),
-    };
-    let merged = layers
-        .iter()
-        .enumerate()
-        .fold(start, |merged, (index, layer)| {
-            merge_two_traced(merged, layer, index)
-        });
-    let mut origins = Vec::new();
-    collect_origins(&merged, "", &mut origins);
-    origins
-}
-
-/// A merged value reduced to where its parts came from.
-enum Traced {
-    Scalar(usize),
-    /// `layer` = the last layer that put an object here — `None` only for the empty start of the fold.
-    Object {
-        layer: Option<usize>,
-        entries: BTreeMap<String, Traced>,
-    },
-    /// `layer` = the last layer that put a list here; each item with the layer that contributed it.
-    List {
-        layer: usize,
-        items: Vec<(Value, usize)>,
-    },
-}
-
-/// [`merge_two`] with origins.
-fn merge_two_traced(former: Traced, later: &Value, layer: usize) -> Traced {
-    match (former, later) {
-        (Traced::Object { mut entries, .. }, Value::Object(later)) => {
-            for (key, value) in later {
-                let merged = match entries.remove(key) {
-                    Some(slot) => merge_two_traced(slot, value, layer),
-                    None => traced(value, layer),
-                };
-                entries.insert(key.clone(), merged);
-            }
-            Traced::Object {
-                layer: Some(layer),
-                entries,
-            }
-        }
-        (Traced::List { items: former, .. }, Value::Array(later)) => {
-            let mut items: Vec<(Value, usize)> = Vec::with_capacity(former.len() + later.len());
-            for (item, origin) in former
-                .into_iter()
-                .chain(later.iter().map(|item| (item.clone(), layer)))
-            {
-                if !items.iter().any(|(kept, _)| *kept == item) {
-                    items.push((item, origin));
-                }
-            }
-            Traced::List { layer, items }
-        }
-        (_, later) => traced(later, layer),
-    }
-}
-
-/// [`without_repeats`] with origins — every part from `layer`.
-fn traced(value: &Value, layer: usize) -> Traced {
-    match value {
-        Value::Object(map) => Traced::Object {
-            layer: Some(layer),
-            entries: map
-                .iter()
-                .map(|(key, value)| (key.clone(), traced(value, layer)))
-                .collect(),
-        },
-        Value::Array(items) => {
-            let mut kept: Vec<(Value, usize)> = Vec::with_capacity(items.len());
-            for item in items {
-                if !kept.iter().any(|(other, _)| other == item) {
-                    kept.push((item.clone(), layer));
-                }
-            }
-            Traced::List { layer, items: kept }
-        }
-        _ => Traced::Scalar(layer),
-    }
-}
-
-fn collect_origins(node: &Traced, pointer: &str, out: &mut Vec<(String, usize)>) {
-    match node {
-        Traced::Scalar(layer) => out.push((pointer.to_owned(), *layer)),
-        Traced::Object { layer, entries } if entries.is_empty() => {
-            out.extend(layer.map(|layer| (pointer.to_owned(), layer)));
-        }
-        Traced::Object { entries, .. } => {
-            for (key, child) in entries {
-                // RFC 6901: `~` and `/` are escaped in a pointer token.
-                let token = key.replace('~', "~0").replace('/', "~1");
-                collect_origins(child, &format!("{pointer}/{token}"), out);
-            }
-        }
-        Traced::List { layer, items } if items.is_empty() => {
-            out.push((pointer.to_owned(), *layer));
-        }
-        Traced::List { items, .. } => {
-            for (index, (_, layer)) in items.iter().enumerate() {
-                out.push((format!("{pointer}/{index}"), *layer));
-            }
-        }
     }
 }
 
@@ -740,9 +572,7 @@ mod tests {
 
     fn merged(layers: &[Value]) -> Value {
         let refs: Vec<&Value> = layers.iter().collect();
-        CLAUDE_SETTINGS_CHECK
-            .merge(&refs)
-            .expect("claude always has a merged value")
+        merge(&refs)
     }
 
     /// The merge tables — `(name, layers, merged value)`.
@@ -882,134 +712,6 @@ mod tests {
         );
     }
 
-    /// The pointers of the parts [`SettingsCheck::merge_origins`] names in `value` — read off the value itself: every
-    /// scalar, every list item (not entered) and every empty object or list.
-    fn parts(value: &Value, pointer: &str, out: &mut Vec<String>) {
-        match value {
-            Value::Object(map) if !map.is_empty() => {
-                for (key, child) in map {
-                    let token = key.replace('~', "~0").replace('/', "~1");
-                    parts(child, &format!("{pointer}/{token}"), out);
-                }
-            }
-            Value::Array(items) if !items.is_empty() => {
-                out.extend((0..items.len()).map(|index| format!("{pointer}/{index}")));
-            }
-            _ => out.push(pointer.to_owned()),
-        }
-    }
-
-    /// ★`merge_origins` agrees with `merge` on every merge table★ — every part of the merged value has exactly one
-    /// origin, and the layer it names holds that part there (a list item: the layer's list at that place holds it).
-    #[test]
-    fn merge_origins_agree_with_merge_on_every_merge_table() {
-        let mut tables: Vec<(&str, Vec<Value>)> = merge_cases()
-            .into_iter()
-            .map(|(name, layers, _)| (name, layers))
-            .collect();
-        tables.extend([
-            (
-                "the default preset's list survives a later empty list",
-                vec![
-                    json!({"env": {"DISABLE_AUTOUPDATER": "1"}, "allowedMcpServers": [{"serverName": "engram"}]}),
-                    json!({"allowedMcpServers": [], "model": "opus"}),
-                ],
-            ),
-            (
-                "a later list adds to the default preset's list",
-                vec![
-                    json!({"allowedMcpServers": [{"serverName": "engram"}]}),
-                    json!({"allowedMcpServers": [{"serverName": "other"}, {"serverName": "engram"}]}),
-                ],
-            ),
-            (
-                "empty containers and escaped keys",
-                vec![
-                    json!({"m": {}, "l": [], "a/b~c": 1}),
-                    json!({"m": {}, "n": {}}),
-                ],
-            ),
-        ]);
-        for (name, layers) in tables {
-            let refs: Vec<&Value> = layers.iter().collect();
-            let merged = merged(&layers);
-            let origins = CLAUDE_SETTINGS_CHECK
-                .merge_origins(&refs)
-                .expect("claude always has a merged value");
-
-            let mut named: Vec<&str> = origins.iter().map(|(p, _)| p.as_str()).collect();
-            named.sort_unstable();
-            let mut expected = Vec::new();
-            if !layers.is_empty() {
-                parts(&merged, "", &mut expected);
-            }
-            expected.sort_unstable();
-            assert_eq!(named, expected, "{name}");
-
-            for (pointer, layer) in &origins {
-                let part = merged.pointer(pointer).expect("a part of the merged value");
-                let source = &layers[*layer];
-                let list_place = pointer
-                    .rfind('/')
-                    .map(|cut| &pointer[..cut])
-                    .filter(|parent| merged.pointer(parent).is_some_and(Value::is_array));
-                match list_place {
-                    Some(parent) => assert!(
-                        source
-                            .pointer(parent)
-                            .and_then(Value::as_array)
-                            .is_some_and(|items| items.contains(part)),
-                        "{name}: {pointer} from layer {layer}"
-                    ),
-                    None => assert_eq!(
-                        source.pointer(pointer),
-                        Some(part),
-                        "{name}: {pointer} from layer {layer}"
-                    ),
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn merge_origins_name_the_layer_each_part_comes_from() {
-        let origins = |layers: &[Value]| {
-            let refs: Vec<&Value> = layers.iter().collect();
-            let mut origins = CLAUDE_SETTINGS_CHECK.merge_origins(&refs).unwrap();
-            origins.sort();
-            origins
-        };
-        let owned = |pairs: &[(&str, usize)]| -> Vec<(String, usize)> {
-            pairs.iter().map(|(p, l)| ((*p).to_owned(), *l)).collect()
-        };
-        assert_eq!(origins(&[]), owned(&[]));
-        assert_eq!(
-            origins(&[
-                json!({"env": {"A": "1", "B": "1"}, "l": ["a", "b"]}),
-                json!({"env": {"B": "2"}, "l": ["b", "c"], "m": {}}),
-            ]),
-            owned(&[
-                ("/env/A", 0),
-                ("/env/B", 1),
-                ("/l/0", 0),
-                ("/l/1", 0),
-                ("/l/2", 1),
-                ("/m", 1),
-            ])
-        );
-        assert_eq!(
-            origins(&[json!({"k": ["a"]}), json!({"k": {"x": 1}})]),
-            owned(&[("/k/x", 1)])
-        );
-        assert_eq!(origins(&[json!({"a/b~c": 1})]), owned(&[("/a~1b~0c", 0)]));
-        assert_eq!(
-            origins(&[json!({"a": 1}), json!(["x"]), json!(["x", "y"])]),
-            owned(&[("/0", 1), ("/1", 2)])
-        );
-        assert_eq!(origins(&[json!("x")]), owned(&[("", 0)]));
-        assert_eq!(origins(&[json!({}), json!({})]), owned(&[("", 1)]));
-    }
-
     #[test]
     fn claude_has_no_working_folder_block_no_notice_codes_and_lists_no_folder_at_launch() {
         for mode in MODES {
@@ -1030,76 +732,6 @@ mod tests {
                 "{mode:?}"
             );
         }
-    }
-
-    #[test]
-    fn the_raw_claude_value_is_its_json_as_it_is() {
-        for raw in [
-            json!({"model": "opus", "unknownKey": {"deep": [1]}}),
-            json!({}),
-            json!(["not", "an", "object"]),
-            json!("text"),
-        ] {
-            assert_eq!(CLAUDE_SETTINGS_CHECK.raw_to_json(&raw), Ok(raw.clone()));
-        }
-    }
-
-    #[test]
-    fn the_schema_is_the_schemastore_copy_fetched_again_when_the_cli_version_changes() {
-        for version in ["2.1.284", "2.1.300", ""] {
-            assert_eq!(
-                CLAUDE_SETTINGS_CHECK.schema_source(version),
-                SchemaSource {
-                    url: "https://json.schemastore.org/claude-code-settings.json".to_owned(),
-                    refetch: SchemaRefetch::LatestOnCliVersionChange,
-                },
-                "{version:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn the_version_probe_is_claude_version_shaped_for_the_os_without_autoupdate() {
-        let probe = CLAUDE_SETTINGS_CHECK.version_probe();
-        let (program, args) = console_command("claude", vec!["--version".to_owned()]);
-        assert_eq!(
-            probe,
-            VersionProbe {
-                program,
-                args,
-                env: vec![("DISABLE_AUTOUPDATER".to_owned(), "1".to_owned())],
-            }
-        );
-    }
-
-    #[test]
-    fn parse_version_reads_the_dotted_version() {
-        let cases = [
-            ("2.1.284 (Claude Code)", Some("2.1.284")),
-            ("2.1.284 (Claude Code)\r\n", Some("2.1.284")),
-            ("  2.1.284\n", Some("2.1.284")),
-            ("2.2.0-beta.1 (Claude Code)", Some("2.2.0-beta.1")),
-            ("Update available\n2.1.300 (Claude Code)\n", Some("2.1.300")),
-            ("", None),
-            ("(Claude Code)", None),
-            ("v2.1.284", None),
-            ("2", None),
-            ("2..1", None),
-            ("2.x.1", None),
-            ("2.1.284;rm", None),
-        ];
-        for (stdout, expected) in cases {
-            assert_eq!(
-                CLAUDE_SETTINGS_CHECK.parse_version(stdout).as_deref(),
-                expected,
-                "{stdout:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn unknown_keys_are_not_reported() {
-        assert_eq!(CLAUDE_SETTINGS_CHECK.unknown_keys(), UnknownKeys::Ignore);
     }
 
     #[test]

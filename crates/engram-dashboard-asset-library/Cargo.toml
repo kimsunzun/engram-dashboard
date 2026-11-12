@@ -7,7 +7,7 @@ description = "Engram Dashboard asset library — the preset library (instructio
 # ADR-0311 decision 2: among workspace crates exactly agent · platform · command · base. The CI dependency-cap gate compares
 #   that name set (`.github/workflows/ci.yml`), so add a later dependency here only with that decision changed.
 # ★No test feature★ (ADR-0311 decision 4) — fakes are `#[cfg(test)]` inside this crate.
-# ★No network client and no process runner★ — the schema fetch and the CLI version read are seams the daemon plugs in.
+# ★No network client and no process runner★ — settings are not schema-checked, so nothing is fetched or probed (ADR-0359).
 [dependencies]
 # The backend settings-check port and its registry (`backends.rs` — `AgentBackends`).
 engram-dashboard-agent = { path = "../engram-dashboard-agent" }

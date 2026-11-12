@@ -1,9 +1,8 @@
 //! The codex implementation of the settings-check port ([`SettingsCheck`]) — [`CODEX_SETTINGS_CHECK`].
 //!
 //! ★Codex behaviour copied by hand, read in the codex source (openai/codex, Apache-2.0) at `rust-v0.163.0`★: the `-c`
-//!   parse (`codex-rs/utils/cli/src/config_override.rs`, the path application in `codex-rs/config/src/overrides.rs`,
-//!   the structured-feature merge in `codex-rs/config/src/merge.rs`), the
-//!   `SKILL.md` front-matter split and repair (`codex-rs/skills/src/parser.rs`), the skill-root walk
+//!   line split (`codex-rs/utils/cli/src/config_override.rs`), the `SKILL.md` front-matter split and repair
+//!   (`codex-rs/skills/src/parser.rs`), the skill-root walk
 //!   (`codex-rs/ext/skills/src/loader/discovery.rs` over the exec-server `walk`) and codex's own skill roots
 //!   (`codex-rs/ext/skills/src/host_roots.rs`). Codex updates itself; a drift shows as a valid skill blocked or a
 //!   bad one passed. The real-YAML golden of the skill format runs with the caller's parser, not here.
@@ -14,32 +13,19 @@
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
 
-use engram_dashboard_platform::shell::console_command;
-use serde_json::{json, Map, Number, Value};
+use serde_json::{json, Value};
 
+use super::cmdline;
 use super::thread_lock::{codex_home_from, CODEX_HOME_ENV};
-use super::{cmdline, CODEX_PROGRAM};
 use crate::backend::settings_check::{
-    is, is_version, normal_parts, CommandLine, FolderEntry, FolderLoad, FolderLoadKind,
-    FolderLoadSet, FolderMalformed, FolderSkillName, FolderUnsure, FrontMatterParser,
-    InstructionLoad, ModeLoads, NativePlaces, NativeSkillRoots, NoticeCodes, SchemaRefetch,
-    SchemaSource, SettingsCheck, SkillFormat, UnknownKeys, UnsureWhy, VersionProbe,
+    is, normal_parts, CommandLine, FolderEntry, FolderLoad, FolderLoadKind, FolderLoadSet,
+    FolderMalformed, FolderSkillName, FolderUnsure, FrontMatterParser, InstructionLoad, ModeLoads,
+    NativePlaces, NativeSkillRoots, NoticeCodes, SettingsCheck, SkillFormat, UnsureWhy,
 };
 use crate::launch::{
     Reason, CODEX_SAME_NAME_SKILLS, CODEX_TERMINAL_FOLDER_OMITTED, CODEX_TERMINAL_OMITTED,
 };
 use crate::profile::AgentOutputFormat;
-
-/// Codex publishes one schema per release tag (`docs/research/settings-asset-validation-spike-2026-10-17.md`).
-const SCHEMA_URL_PREFIX: &str = "https://github.com/openai/codex/releases/download/rust-v";
-const SCHEMA_URL_FILE: &str = "/config-schema.json";
-
-/// `codex --version` prints `codex-cli 0.163.0`.
-const VERSION_WORD: &str = "codex-cli";
-
-/// The one key codex renames before applying a `-c` line (`canonicalize_override_key`).
-const LEGACY_LANDLOCK_KEY: &str = "use_legacy_landlock";
-const LEGACY_LANDLOCK_CANONICAL_KEY: &str = "features.use_legacy_landlock";
 
 /// The longest skill name codex accepts, in characters.
 const MAX_SKILL_NAME_CHARS: usize = 64;
@@ -78,72 +64,6 @@ pub(crate) struct CodexSettingsCheck;
 impl SettingsCheck for CodexSettingsCheck {
     fn backend(&self) -> &'static str {
         "codex"
-    }
-
-    fn schema_source(&self, cli_version: &str) -> SchemaSource {
-        SchemaSource {
-            url: format!("{SCHEMA_URL_PREFIX}{cli_version}{SCHEMA_URL_FILE}"),
-            refetch: SchemaRefetch::PerCliVersion,
-        }
-    }
-
-    /// Whether `codex --version` ever prints an update banner is unknown — [`Self::parse_version`] tolerates extra
-    /// lines.
-    fn version_probe(&self) -> VersionProbe {
-        let (program, args) = console_command(CODEX_PROGRAM, vec!["--version".to_owned()]);
-        VersionProbe {
-            program,
-            args,
-            env: vec![],
-        }
-    }
-
-    /// The word right after a `codex-cli` word, when it is a dotted version. A line that holds a version of
-    /// something else is not taken.
-    fn parse_version(&self, stdout: &str) -> Option<String> {
-        stdout.lines().find_map(|line| {
-            let words: Vec<&str> = line.split_whitespace().collect();
-            words
-                .windows(2)
-                .find(|pair| pair[0] == VERSION_WORD && is_version(pair[1]))
-                .map(|pair| pair[1].to_owned())
-        })
-    }
-
-    /// The raw codex value is a JSON array of `key=value` strings, one `-c` override each, applied in order the way
-    /// codex applies them: split at the first `=`, both sides trimmed, the key split on `.` with no quoting (empty
-    /// segments allowed), the value parsed as a TOML value or else taken as text with every leading and trailing
-    /// `"` / `'` stripped, a later line replacing an earlier value at the same path (and a scalar it passes
-    /// through) — except at a structured feature path, where a boolean and a table combine
-    /// ([`is_structured_feature_path`]).
-    fn raw_to_json(&self, raw: &Value) -> Result<Value, Reason> {
-        let mut root = Map::new();
-        for (index, line) in config_lines(raw)?.into_iter().enumerate() {
-            let (key, value) = split_config_line(index, line)?;
-            let key = if key == LEGACY_LANDLOCK_KEY {
-                LEGACY_LANDLOCK_CANONICAL_KEY
-            } else {
-                key
-            };
-            insert_at_path(&mut root, key, parse_config_value(value));
-        }
-        Ok(Value::Object(root))
-    }
-
-    /// codex loads each `-c` line on its own and a later line wins key by key, so a type error is always in one
-    /// preset's own value — there is no merged value to check.
-    fn merge(&self, _layers: &[&Value]) -> Option<Value> {
-        None
-    }
-
-    /// No merged value, so no origins.
-    fn merge_origins(&self, _layers: &[&Value]) -> Option<Vec<(String, usize)>> {
-        None
-    }
-
-    /// codex warns on an unknown key and starts anyway.
-    fn unknown_keys(&self) -> UnknownKeys {
-        UnknownKeys::Warn
     }
 
     // ADR-0337
@@ -381,11 +301,11 @@ pub(super) fn config_lines(raw: &Value) -> Result<Vec<&str>, Reason> {
         .collect()
 }
 
-/// One `-c` line split the way codex splits it: at the first `=`, both sides trimmed. `Err` = no `=`, an empty key,
-/// or a line that starts with `-` after trimming. codex exits at startup on the first two. A bare line starting
+/// Whether codex can split one `-c` line (at the first `=`, the key trimmed). `Err` = no `=`, an empty key, or a line
+/// that starts with `-` after trimming. codex exits at startup on the first two. A bare line starting
 /// with `-` is likely read by clap as an option (inferred: codex's `-c` does not set `allow_hyphen_values`); one with leading
 /// whitespace would reach codex, but no codex key starts with `-`, so it is refused too.
-pub(super) fn split_config_line(index: usize, line: &str) -> Result<(&str, &str), Reason> {
+pub(super) fn split_config_line(index: usize, line: &str) -> Result<(), Reason> {
     let invalid = || {
         reason(
             "codex-config-line-invalid",
@@ -396,163 +316,11 @@ pub(super) fn split_config_line(index: usize, line: &str) -> Result<(&str, &str)
     if line.trim_start().starts_with('-') {
         return Err(invalid());
     }
-    let (key, value) = line.split_once('=').ok_or_else(invalid)?;
-    let key = key.trim();
-    if key.is_empty() {
+    let (key, _) = line.split_once('=').ok_or_else(invalid)?;
+    if key.trim().is_empty() {
         return Err(invalid());
     }
-    Ok((key, value.trim()))
-}
-
-/// A `-c` value as codex reads it: the value wrapped as `_x_ = <value>` and parsed as a TOML table with the same
-/// TOML crate family codex uses (`toml` 1.1.2 here, 0.9.11 in codex — both TOML 1.1.0; differences between the two
-/// crate versions are not known), else the text with every leading and trailing `"` / `'` stripped.
-fn parse_config_value(text: &str) -> Value {
-    match toml::from_str::<toml::Table>(&format!("_x_ = {text}"))
-        .ok()
-        .and_then(|mut table| table.remove("_x_"))
-    {
-        Some(value) => toml_to_json(value),
-        None => Value::String(text.trim_matches(|c| c == '"' || c == '\'').to_owned()),
-    }
-}
-
-/// A TOML value as the JSON the schema checks. A datetime becomes its TOML text; a float JSON cannot hold
-/// (`inf`, `nan`) becomes its TOML text too — the schema then decides.
-fn toml_to_json(value: toml::Value) -> Value {
-    match value {
-        toml::Value::String(text) => Value::String(text),
-        toml::Value::Integer(number) => Value::from(number),
-        toml::Value::Float(number) => Number::from_f64(number)
-            .map_or_else(|| Value::String(float_text(number)), Value::Number),
-        toml::Value::Boolean(flag) => Value::Bool(flag),
-        toml::Value::Datetime(datetime) => Value::String(datetime.to_string()),
-        toml::Value::Array(items) => Value::Array(items.into_iter().map(toml_to_json).collect()),
-        toml::Value::Table(table) => Value::Object(
-            table
-                .into_iter()
-                .map(|(key, value)| (key, toml_to_json(value)))
-                .collect(),
-        ),
-    }
-}
-
-/// TOML's spelling of a non-finite float.
-fn float_text(number: f64) -> String {
-    let sign = if number.is_sign_negative() { "-" } else { "" };
-    let word = if number.is_nan() { "nan" } else { "inf" };
-    format!("{sign}{word}")
-}
-
-/// The key a structured feature keeps its on/off switch under.
-const FEATURE_ENABLED_KEY: &str = "enabled";
-
-/// Puts `value` at the dotted `key` the way codex applies one `-c` line (`apply_toml_override`): tables are made on
-/// the way and a scalar in the way becomes a table; the value at the last segment is replaced — except at a
-/// structured feature path, where a boolean and a table combine (see [`is_structured_feature_path`]).
-fn insert_at_path(root: &mut Map<String, Value>, key: &str, value: Value) {
-    let segments: Vec<&str> = key.split('.').collect();
-    let (last, parents) = segments
-        .split_last()
-        .expect("str::split yields at least one segment");
-    let mut table = root;
-    for (depth, segment) in parents.iter().enumerate() {
-        let slot = table
-            .entry(*segment)
-            .or_insert_with(|| Value::Object(Map::new()));
-        if is_structured_feature_path(&segments[..=depth]) {
-            if let Value::Bool(enabled) = *slot {
-                *slot = feature_switch(enabled);
-            }
-        }
-        if !slot.is_object() {
-            *slot = Value::Object(Map::new());
-        }
-        let Value::Object(next) = slot else {
-            unreachable!("the slot was made an object above");
-        };
-        table = next;
-    }
-    if is_structured_feature_path(&segments) {
-        if let Some(existing) = table.get_mut(*last) {
-            match (&mut *existing, &value) {
-                (Value::Object(feature), Value::Bool(enabled)) => {
-                    feature.insert(FEATURE_ENABLED_KEY.to_owned(), Value::Bool(*enabled));
-                    return;
-                }
-                (Value::Bool(enabled), Value::Object(_)) => {
-                    *existing = feature_switch(*enabled);
-                    merge_values(existing, value, &mut Vec::new());
-                    return;
-                }
-                (Value::Object(_), Value::Object(_)) => {
-                    merge_values(existing, value, &mut Vec::new());
-                    return;
-                }
-                _ => {}
-            }
-        }
-    }
-    table.insert((*last).to_owned(), value);
-}
-
-/// A feature given as a bare boolean, as the table it stands for.
-fn feature_switch(enabled: bool) -> Value {
-    Value::Object(Map::from_iter([(
-        FEATURE_ENABLED_KEY.to_owned(),
-        Value::Bool(enabled),
-    )]))
-}
-
-/// The paths where codex keeps a feature as a table with an `enabled` switch, so a boolean and a table given for
-/// it combine instead of replacing each other (`merge.rs` `is_structured_feature_path`): `features.<name>` and
-/// `profiles.<profile>.features.<name>` for the four names below.
-// Behaviour mirrors openai/codex codex-rs/config/src/merge.rs @ rust-v0.163.0 (Apache-2.0).
-fn is_structured_feature_path<S: AsRef<str>>(path: &[S]) -> bool {
-    let (features, feature) = match path {
-        [profiles, _, features, feature] if profiles.as_ref() == "profiles" => (features, feature),
-        [features, feature] => (features, feature),
-        _ => return false,
-    };
-    features.as_ref() == "features"
-        && matches!(
-            feature.as_ref(),
-            "code_mode" | "multi_agent_v2" | "network_proxy" | "sleep_tool"
-        )
-}
-
-/// `overlay` merged into `base` the way codex merges one table into an existing one at a structured feature path
-/// (`merge_toml_values`, which starts again from an empty path): tables merge key by key, anything else is replaced,
-/// and the structured-feature rule holds at the paths relative to the merge start.
-///
-/// Not mirrored: codex's other path rules in that merge (key aliases, `shell_environment_policy` filters, network
-/// domains, feature `credentials`) — inside a feature table they apply only to keys such a table does not hold.
-fn merge_values(base: &mut Value, overlay: Value, path: &mut Vec<String>) {
-    if is_structured_feature_path(path) {
-        match (&mut *base, &overlay) {
-            (Value::Bool(enabled), Value::Object(_)) => *base = feature_switch(*enabled),
-            (Value::Object(table), Value::Bool(enabled)) => {
-                table.insert(FEATURE_ENABLED_KEY.to_owned(), Value::Bool(*enabled));
-                return;
-            }
-            _ => {}
-        }
-    }
-    match (base, overlay) {
-        (Value::Object(base_table), Value::Object(overlay_table)) => {
-            for (key, value) in overlay_table {
-                path.push(key.clone());
-                match base_table.get_mut(&key) {
-                    Some(existing) => merge_values(existing, value, path),
-                    None => {
-                        base_table.insert(key, value);
-                    }
-                }
-                path.pop();
-            }
-        }
-        (base, overlay) => *base = overlay,
-    }
+    Ok(())
 }
 
 /// The codex skill check of [`SettingsCheck::skill_format`] — `Ok((name, description))`.
@@ -952,56 +720,6 @@ mod tests {
     // ── simple answers ───────────────────────────────────────────────────────────
 
     #[test]
-    fn the_schema_is_the_per_release_file_fetched_once_per_cli_version() {
-        assert_eq!(
-            CODEX_SETTINGS_CHECK.schema_source("0.163.0"),
-            SchemaSource {
-                url: "https://github.com/openai/codex/releases/download/rust-v0.163.0/config-schema.json"
-                    .to_owned(),
-                refetch: SchemaRefetch::PerCliVersion,
-            }
-        );
-    }
-
-    #[test]
-    fn the_version_probe_is_codex_version_shaped_for_the_os_with_no_env() {
-        let (program, args) = console_command("codex", vec!["--version".to_owned()]);
-        assert_eq!(
-            CODEX_SETTINGS_CHECK.version_probe(),
-            VersionProbe {
-                program,
-                args,
-                env: vec![],
-            }
-        );
-    }
-
-    #[test]
-    fn parse_version_reads_the_word_after_codex_cli() {
-        let cases = [
-            ("codex-cli 0.163.0", Some("0.163.0")),
-            ("codex-cli 0.163.0\r\n", Some("0.163.0")),
-            ("node 22.1.0 detected\ncodex-cli 0.163.0\n", Some("0.163.0")),
-            ("codex-cli 0.164.0-alpha.3", Some("0.164.0-alpha.3")),
-            ("note: codex-cli 0.163.0 is installed", Some("0.163.0")),
-            ("codex-cli latest\ncodex-cli 0.163.0", Some("0.163.0")),
-            ("node 22.1.0 detected", None),
-            ("0.163.0", None),
-            ("codex-cli", None),
-            ("codex-cli v0.163.0", None),
-            ("codex 0.163.0", None),
-            ("", None),
-        ];
-        for (stdout, expected) in cases {
-            assert_eq!(
-                CODEX_SETTINGS_CHECK.parse_version(stdout).as_deref(),
-                expected,
-                "{stdout:?}"
-            );
-        }
-    }
-
-    #[test]
     fn codex_json_loads_everything_and_the_terminal_only_the_builtin_priming() {
         assert_eq!(
             CODEX_SETTINGS_CHECK.loads(JSON),
@@ -1048,20 +766,10 @@ mod tests {
     }
 
     #[test]
-    fn codex_has_no_merged_value_warns_on_unknown_keys_and_never_blocks_a_folder() {
-        assert_eq!(CODEX_SETTINGS_CHECK.merge(&[&json!(["a=1"])]), None);
-        assert_eq!(CODEX_SETTINGS_CHECK.unknown_keys(), UnknownKeys::Warn);
+    fn codex_never_blocks_a_folder_entry() {
         for folder in [r"C:\rules\50%\x", r"C:\a&b", r"C:\plain"] {
             assert!(!CODEX_SETTINGS_CHECK.folder_entry_blocks(Path::new(folder)));
         }
-    }
-
-    #[test]
-    fn codex_has_no_merge_origins() {
-        let layers = [json!(["a=1"]), json!(["b=2"])];
-        let refs: Vec<&Value> = layers.iter().collect();
-        assert_eq!(CODEX_SETTINGS_CHECK.merge_origins(&refs), None);
-        assert_eq!(CODEX_SETTINGS_CHECK.merge_origins(&[]), None);
     }
 
     /// ★The terminal working-folder rule is `cwd_reaches_codex_unchanged`★ — refused: two `%`, a `"`, a control
@@ -1141,180 +849,6 @@ mod tests {
             assert!(
                 CODEX_SETTINGS_CHECK.folder_listing_at_launch(mode),
                 "{mode:?}"
-            );
-        }
-    }
-
-    // ── raw text → JSON ──────────────────────────────────────────────────────────
-
-    fn to_json(lines: &[&str]) -> Result<Value, Reason> {
-        CODEX_SETTINGS_CHECK.raw_to_json(&json!(lines))
-    }
-
-    /// One row per line of the M6 table (`docs/research/codex-launch-materials-measurements-2026-11-09.md`), plus
-    /// the rules read in the codex source.
-    #[test]
-    fn raw_to_json_applies_each_line_the_way_codex_does() {
-        let cases: Vec<(Vec<&str>, Value)> = vec![
-            (vec!["p0.a.b=1"], json!({"p0": {"a": {"b": 1}}})),
-            (vec!["p0.arr=[1,2]"], json!({"p0": {"arr": [1, 2]}})),
-            (vec![r#"p0.str="s""#], json!({"p0": {"str": "s"}})),
-            (vec!["p0.bare=s"], json!({"p0": {"bare": "s"}})),
-            (vec!["p0.sp = 5"], json!({"p0": {"sp": 5}})),
-            (vec!["p0.bad=[1,"], json!({"p0": {"bad": "[1,"}})),
-            (vec![r#"p0.q="s"#], json!({"p0": {"q": "s"}})),
-            (vec!["p0.lit='it''s'"], json!({"p0": {"lit": "it''s"}})),
-            (vec!["p0.eq=a=b"], json!({"p0": {"eq": "a=b"}})),
-            (
-                vec![r#"p0.tbl={x=1,y="z"}"#],
-                json!({"p0": {"tbl": {"x": 1, "y": "z"}}}),
-            ),
-            (
-                vec![r#""p0.quoted.key"=1"#],
-                json!({"\"p0": {"quoted": {"key\"": 1}}}),
-            ),
-            (vec!["p0.dup=1", "p0.dup=2"], json!({"p0": {"dup": 2}})),
-            (vec!["a..b=1"], json!({"a": {"": {"b": 1}}})),
-            (vec![".a=1"], json!({"": {"a": 1}})),
-            (vec![r#"p0.q=""s''"#], json!({"p0": {"q": "s"}})),
-            (vec!["p0.empty="], json!({"p0": {"empty": ""}})),
-            (
-                vec!["use_legacy_landlock=true"],
-                json!({"features": {"use_legacy_landlock": true}}),
-            ),
-            (
-                vec!["d=1979-05-27T07:32:00Z", "t=07:32:00"],
-                json!({"d": "1979-05-27T07:32:00Z", "t": "07:32:00"}),
-            ),
-            (
-                vec!["f=inf", "g=-inf", "h=nan", "i=1.5"],
-                json!({"f": "inf", "g": "-inf", "h": "nan", "i": 1.5}),
-            ),
-            // A later line through an earlier scalar replaces it with a table, and a later scalar replaces an
-            // earlier table (`apply_toml_override`; measured with `config/read` — M10).
-            (vec!["a=1", "a.b=2"], json!({"a": {"b": 2}})),
-            (vec!["a.b=2", "a=1"], json!({"a": 1})),
-            // A later table replaces an earlier one whole — no merge.
-            (vec!["a.b=1", "a={c=2}"], json!({"a": {"c": 2}})),
-            (vec![], json!({})),
-        ];
-        for (lines, expected) in cases {
-            assert_eq!(to_json(&lines), Ok(expected), "{lines:?}");
-        }
-    }
-
-    /// At a structured feature path a boolean and a table combine (`apply_toml_override` + `merge_toml_values`);
-    /// anywhere else the later value replaces the earlier one.
-    #[test]
-    fn raw_to_json_merges_tables_and_switches_at_structured_feature_paths() {
-        let cases: Vec<(Vec<&str>, Value)> = vec![
-            (
-                vec![
-                    "features.code_mode={enabled='bad'}",
-                    "features.code_mode={}",
-                ],
-                json!({"features": {"code_mode": {"enabled": "bad"}}}),
-            ),
-            (
-                vec!["features.code_mode={a=1}", "features.code_mode={b={c=2}}"],
-                json!({"features": {"code_mode": {"a": 1, "b": {"c": 2}}}}),
-            ),
-            // A key both tables hold merges again, one level down (deep, not shallow).
-            (
-                vec![
-                    "features.code_mode={x={a=1}}",
-                    "features.code_mode={x={b=2}}",
-                ],
-                json!({"features": {"code_mode": {"x": {"a": 1, "b": 2}}}}),
-            ),
-            (
-                vec![
-                    "profiles.p.features.code_mode={x={a=1}}",
-                    "profiles.p.features.code_mode={x={b=2}}",
-                ],
-                json!({"profiles": {"p": {"features": {"code_mode": {"x": {"a": 1, "b": 2}}}}}}),
-            ),
-            (
-                vec!["features.sleep_tool=true", "features.sleep_tool={x=1}"],
-                json!({"features": {"sleep_tool": {"enabled": true, "x": 1}}}),
-            ),
-            (
-                vec![
-                    "features.network_proxy={x=1}",
-                    "features.network_proxy=false",
-                ],
-                json!({"features": {"network_proxy": {"x": 1, "enabled": false}}}),
-            ),
-            (
-                vec![
-                    "features.multi_agent_v2=true",
-                    "features.multi_agent_v2.x=1",
-                ],
-                json!({"features": {"multi_agent_v2": {"enabled": true, "x": 1}}}),
-            ),
-            (
-                vec![
-                    "profiles.p.features.code_mode={a=1}",
-                    "profiles.p.features.code_mode={b=2}",
-                    "profiles.p.features.code_mode=true",
-                ],
-                json!({"profiles": {"p": {"features": {"code_mode": {"a": 1, "b": 2, "enabled": true}}}}}),
-            ),
-            // Not structured: another feature name, another depth, a scalar over a scalar.
-            (
-                vec!["features.other={a=1}", "features.other={b=2}"],
-                json!({"features": {"other": {"b": 2}}}),
-            ),
-            (
-                vec![
-                    "profiles.p.x.features.code_mode={a=1}",
-                    "profiles.p.x.features.code_mode={b=2}",
-                ],
-                json!({"profiles": {"p": {"x": {"features": {"code_mode": {"b": 2}}}}}}),
-            ),
-            (
-                vec!["features.code_mode=true", "features.code_mode=false"],
-                json!({"features": {"code_mode": false}}),
-            ),
-            (
-                vec!["features.other=true", "features.other.x=1"],
-                json!({"features": {"other": {"x": 1}}}),
-            ),
-        ];
-        for (lines, expected) in cases {
-            assert_eq!(to_json(&lines), Ok(expected), "{lines:?}");
-        }
-    }
-
-    #[test]
-    fn raw_to_json_refuses_what_codex_refuses_at_startup() {
-        for (index, lines) in [
-            (0, vec!["foo"]),
-            (0, vec!["=1"]),
-            (0, vec![" =1"]),
-            (1, vec!["ok=1", "  "]),
-            (0, vec!["--profile=x"]),
-            (0, vec![" -x=1"]),
-        ] {
-            assert_eq!(
-                to_json(&lines),
-                Err(reason(
-                    "codex-config-line-invalid",
-                    json!({"index": index, "line": lines[index]}),
-                    None
-                )),
-                "{lines:?}"
-            );
-        }
-        for (raw, args) in [
-            (json!({"model": "o3"}), json!({})),
-            (json!("model=o3"), json!({})),
-            (json!(["a=1", 2]), json!({"index": 1})),
-        ] {
-            assert_eq!(
-                CODEX_SETTINGS_CHECK.raw_to_json(&raw),
-                Err(reason("codex-config-not-a-list", args, None)),
-                "{raw}"
             );
         }
     }

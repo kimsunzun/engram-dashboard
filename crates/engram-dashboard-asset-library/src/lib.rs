@@ -9,14 +9,15 @@
 //! - Among workspace crates exactly agent · platform · command · base (ADR-0311 decision 2). agent defines the ports this
 //!   crate implements or calls; agent does not know this crate. This crate calls no daemon internals.
 //! - No test feature (ADR-0311 decision 4): fakes are `#[cfg(test)]` inside the crate.
-//! - No network client, no process runner: the schema fetch and the CLI version read are seams.
+//! - No network client, no process runner — settings are not schema-checked, so nothing is fetched or probed
+//!   (ADR-0359).
 //! - No OS `cfg`: OS behaviour comes from platform (the platform gates 4 · 6 file lists do not name this crate).
 //!
 //! ## Backend extensibility (invariant — TRD S25 step-7 §1-1)
 //!
 //! Adding a backend to agent (its `AgentCommand` variant, backend word and settings check in the registry) must make
-//! tags, raw settings fields, the selection of what an agent loads, the schema check and the notices work with no change
-//! here. So:
+//! tags, raw settings fields, the selection of what an agent loads, the hand-over checks and the notices work with no
+//! change here. So:
 //!
 //! - A backend tag and a raw-field name are strings, accepted only when the registry knows the word (ASCII
 //!   case-insensitive). There is no backend enum here.
@@ -39,3 +40,4 @@
 pub mod backends;
 pub mod format;
 pub mod path;
+pub mod validate;

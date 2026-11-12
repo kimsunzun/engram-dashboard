@@ -323,6 +323,38 @@ mod tests {
         );
     }
 
+    /// codex exits at startup on a line without `=` or with an empty key (`config_override.rs`); a raw value that is
+    /// not a list of strings is refused by Engram's own shape check (`config_lines`).
+    #[test]
+    fn a_line_without_a_key_or_an_equals_sign_or_a_non_list_value_is_refused() {
+        for (index, lines) in [
+            (0, vec!["foo"]),
+            (0, vec!["=1"]),
+            (0, vec![" =1"]),
+            (1, vec!["ok=1", "  "]),
+        ] {
+            assert_eq!(
+                config_args(&json!(lines)),
+                Err(reason(
+                    "codex-config-line-invalid",
+                    json!({"index": index, "line": lines[index]}),
+                    None
+                )),
+                "{lines:?}"
+            );
+        }
+        for (raw, args) in [
+            (json!("model=o3"), json!({})),
+            (json!(["a=1", 2]), json!({"index": 1})),
+        ] {
+            assert_eq!(
+                config_args(&raw),
+                Err(reason("codex-config-not-a-list", args, None)),
+                "{raw}"
+            );
+        }
+    }
+
     /// A bare line starting with `-` is likely read by clap as an option, so codex would exit at startup (inferred: codex's `-c`
     /// does not set `allow_hyphen_values`); a line with leading whitespace would reach codex, but no codex key starts
     /// with `-`.

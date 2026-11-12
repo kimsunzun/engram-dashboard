@@ -1081,7 +1081,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 1.0.69",
- "toml 1.1.2+spec-1.1.0",
  "tracing",
  "ts-rs",
  "uuid",

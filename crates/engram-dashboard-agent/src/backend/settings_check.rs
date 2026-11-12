@@ -1,17 +1,19 @@
-//! Backend settings-check port — the settings knowledge that differs per backend (schema source · CLI version read ·
-//! raw text → JSON · merge · unknown-key policy · what a mode loads · folder-entry path guard · working-folder guard ·
-//! launch notice codes · folder load set · skill format · command-line guard and budget · the backend's own skill
-//! folders), in one trait. The registry is
+//! Backend settings-check port — the settings knowledge that differs per backend (what a mode loads · folder-entry
+//! path guard · working-folder guard · launch notice codes · folder load set · skill format · command-line guard and
+//! budget · the backend's own skill folders), in one trait. The registry is
 //! [`super::settings_checks`] / [`super::settings_check_for`].
 //!
-//! ★Pure — an implementation never touches the disk, the network or a process★: the schema is fetched by the caller
-//!   (the port only names the address), the CLI version is read by the caller running [`VersionProbe`], and a folder's
-//!   file text and its YAML front matter reach the port only through the reader closure and the [`FrontMatterParser`]
-//!   the caller passes (agent has no YAML dependency — the front-matter types are defined here and the caller only
-//!   deserializes into them).
+//! ★No schema check★: a settings value is handed to the CLI as it is and the CLI judges it by its own rules — the
+//!   port answers only what Engram's own assembly of the launch materials needs.
+//!
+//! ★Pure — an implementation never touches the disk, the network or a process★: a folder's file text and its YAML
+//!   front matter reach the port only through the reader closure and the [`FrontMatterParser`] the caller passes
+//!   (agent has no YAML dependency — the front-matter types are defined here and the caller only deserializes into
+//!   them).
 //!
 //! Callers reach it without an agent (checking a settings asset, previewing a folder), so it is not an
 //! [`super::AgentBackend`] method — the same reason as [`super::usage_probes`].
+// ADR-0359
 // ADR-0334
 // ADR-0004
 
@@ -29,34 +31,6 @@ use crate::profile::AgentOutputFormat;
 pub trait SettingsCheck: Send + Sync {
     /// The backend word this check belongs to — the same spelling as [`crate::launch::backend_word`] (lowercase).
     fn backend(&self) -> &'static str;
-
-    /// Where the settings schema for `cli_version` is fetched from and when to fetch it again. The port never fetches.
-    fn schema_source(&self, cli_version: &str) -> SchemaSource;
-
-    /// The command whose output [`SettingsCheck::parse_version`] reads. The caller runs it; the port never spawns.
-    fn version_probe(&self) -> VersionProbe;
-
-    /// The CLI version in the probe's stdout. `None` = the output does not carry a version this port recognizes.
-    fn parse_version(&self, stdout: &str) -> Option<String>;
-
-    /// One raw settings value of this backend (a preset's raw text for this backend) as the JSON value the schema
-    /// checks. It need not be an object — a backend may hand a non-object through unchanged for the schema to
-    /// reject. `Err` = the raw value cannot be turned into JSON by this backend's rules.
-    fn raw_to_json(&self, raw: &Value) -> Result<Value, Reason>;
-
-    /// The JSON values of the attached presets, in attach order, merged into the one value the backend loads.
-    /// `None` = this backend loads each preset's value on its own: there is no merged value and nothing merged to
-    /// check — the caller checks only the single values. `Some` = check the merged value too.
-    fn merge(&self, layers: &[&Value]) -> Option<Value>;
-
-    /// Which layer each part of [`SettingsCheck::merge`]'s value comes from, as `(JSON pointer, layer index)` pairs —
-    /// one per scalar, per list item (an item is not entered: a pointer below it belongs to its layer) and per empty
-    /// object or list (none when there is no layer). `None` exactly when `merge` answers `None`.
-    // ADR-0328
-    fn merge_origins(&self, layers: &[&Value]) -> Option<Vec<(String, usize)>>;
-
-    /// What a key the schema does not know becomes.
-    fn unknown_keys(&self) -> UnknownKeys;
 
     /// What an agent of this backend in `mode` loads from its launch materials.
     fn loads(&self, mode: AgentOutputFormat) -> ModeLoads;
@@ -198,40 +172,6 @@ pub struct CommandLine<'a> {
     /// The instructions text this mode puts on the command line (codex terminal: the merged instructions file,
     /// which holds only the built-in priming). `None` = none.
     pub instructions: Option<&'a str>,
-}
-
-/// Address and refetch rule of one backend's settings schema.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SchemaSource {
-    pub url: String,
-    pub refetch: SchemaRefetch,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SchemaRefetch {
-    /// The address serves one latest copy whatever the CLI version. When the installed CLI version differs from the
-    /// one last checked, fetch it again with a conditional request.
-    LatestOnCliVersionChange,
-    /// The address names the schema of exactly this CLI version. Fetch it once per version; the same version never
-    /// needs a new fetch.
-    PerCliVersion,
-}
-
-/// A command to run once to read a CLI version — `(program, args)` already shaped for the OS (a CLI shim is wrapped),
-/// plus env pairs to set on top of the inherited environment.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VersionProbe {
-    pub program: String,
-    pub args: Vec<String>,
-    pub env: Vec<(String, String)>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UnknownKeys {
-    /// Not reported at any depth.
-    Ignore,
-    /// Reported as a warning; never blocks a launch.
-    Warn,
 }
 
 /// What one backend · mode loads from the launch materials.
@@ -422,19 +362,6 @@ pub enum UnsureWhy {
     HookKeys,
     /// A command folder that holds a `skill.md` — the backend keeps only that file of the folder.
     SkillFileInCommandFolder,
-}
-
-/// `2.1.284` — dot-separated digit groups (at least two), optionally followed by `-` or `+` and a suffix.
-pub(super) fn is_version(word: &str) -> bool {
-    let core = word.split(['-', '+']).next().unwrap_or_default();
-    let groups: Vec<&str> = core.split('.').collect();
-    groups.len() >= 2
-        && groups
-            .iter()
-            .all(|g| !g.is_empty() && g.bytes().all(|b| b.is_ascii_digit()))
-        && word[core.len()..]
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'))
 }
 
 /// The components of a listed path — `None` = it has a component other than a normal one.
