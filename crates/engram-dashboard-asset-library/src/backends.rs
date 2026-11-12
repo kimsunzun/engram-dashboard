@@ -39,8 +39,8 @@ pub(crate) mod fake {
     use std::path::Path;
 
     use engram_dashboard_agent::backend::settings_check::{
-        CommandLine, FolderEntry, FolderLoadSet, FrontMatterParser, ModeLoads, NativePlaces,
-        NativeSkillRoots, NoticeCodes, SkillFormat,
+        CommandLine, FolderEntry, FolderLoadSet, FrontMatterParser, InstructionLoad, ModeLoads,
+        NativePlaces, NativeSkillRoots, NoticeCodes, SkillFormat,
     };
     use engram_dashboard_agent::backend::SettingsCheck;
     use engram_dashboard_agent::launch::Reason;
@@ -176,15 +176,20 @@ pub(crate) mod fake {
     ///   no line; anything else is `Ok([])`.
     /// - `skill_format`: `Invalid(<word>-skill-refused)` when the text holds `refuse`, else `Valid` named after the
     ///   folder.
+    /// - `loads`: `StreamJson` every instruction and skill; `Terminal` only the built-in priming and no skill.
+    /// - `accepts_skill_name`: a name not holding `bad`. `folder_entry_blocks`: a path holding `blocked`.
+    /// - `notice_codes`: `Terminal` → `omitted` = `<word>-omitted`; `StreamJson` → none.
     ///
     /// Every other port method panics.
     pub(crate) struct Scripted {
         pub word: &'static str,
+        omitted: &'static str,
     }
 
     impl Scripted {
         pub(crate) fn new(word: &'static str) -> Self {
-            Self { word }
+            let omitted = Box::leak(format!("{word}-omitted").into_boxed_str());
+            Self { word, omitted }
         }
 
         fn reason(&self, what: &str, line: Option<u32>) -> Reason {
@@ -200,20 +205,35 @@ pub(crate) mod fake {
         fn backend(&self) -> &'static str {
             self.word
         }
-        fn loads(&self, _: AgentOutputFormat) -> ModeLoads {
-            unimplemented!("scripted fake")
+        fn loads(&self, mode: AgentOutputFormat) -> ModeLoads {
+            match mode {
+                AgentOutputFormat::StreamJson => ModeLoads {
+                    instructions: InstructionLoad::All,
+                    skills: true,
+                },
+                AgentOutputFormat::Terminal => ModeLoads {
+                    instructions: InstructionLoad::BuiltinPrimingOnly,
+                    skills: false,
+                },
+            }
         }
-        fn accepts_skill_name(&self, _: &str, _: AgentOutputFormat) -> bool {
-            unimplemented!("scripted fake")
+        fn accepts_skill_name(&self, name: &str, _: AgentOutputFormat) -> bool {
+            !name.contains("bad")
         }
-        fn folder_entry_blocks(&self, _: &Path) -> bool {
-            unimplemented!("scripted fake")
+        fn folder_entry_blocks(&self, folder: &Path) -> bool {
+            folder.to_string_lossy().contains("blocked")
         }
         fn working_folder_blocks(&self, _: &Path, _: AgentOutputFormat) -> Option<Reason> {
             unimplemented!("scripted fake")
         }
-        fn notice_codes(&self, _: AgentOutputFormat) -> NoticeCodes {
-            unimplemented!("scripted fake")
+        fn notice_codes(&self, mode: AgentOutputFormat) -> NoticeCodes {
+            match mode {
+                AgentOutputFormat::Terminal => NoticeCodes {
+                    omitted: Some(self.omitted),
+                    ..NoticeCodes::default()
+                },
+                AgentOutputFormat::StreamJson => NoticeCodes::default(),
+            }
         }
         fn folder_listing_at_launch(&self, _: AgentOutputFormat) -> bool {
             unimplemented!("scripted fake")

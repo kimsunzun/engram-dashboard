@@ -289,7 +289,7 @@ impl FileKind {
 }
 
 /// The item a `.yaml` / `.yml` makes, or `None` when it declares no `kind` (not ours).
-fn yaml_item(bytes: &[u8], backends: &dyn Backends) -> Option<(ItemKind, ItemContent)> {
+pub(crate) fn yaml_item(bytes: &[u8], backends: &dyn Backends) -> Option<(ItemKind, ItemContent)> {
     let lossy = String::from_utf8_lossy(bytes);
     let claimed = match sniff_kind(&lossy) {
         Sniff::Absent => return None,

@@ -45,6 +45,7 @@
 // ADR-0324
 
 pub mod backends;
+pub mod builtin;
 pub mod catalog;
 pub mod excerpt;
 pub mod folder;
@@ -52,6 +53,7 @@ pub mod format;
 mod gate;
 pub mod path;
 pub mod refs;
+pub mod resolve;
 pub mod store;
 pub mod validate;
 
@@ -60,19 +62,22 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
-use engram_dashboard_agent::launch::Reason;
-use engram_dashboard_agent::profile::ProfileRegistry;
+use engram_dashboard_agent::launch::{backend_word, BlockReason, Reason};
+use engram_dashboard_agent::profile::{AgentCommand, AgentOutputFormat, ProfileRegistry};
+use engram_dashboard_agent::types::AgentId;
 use engram_dashboard_base::sync::lock;
 use engram_dashboard_platform::fs::{path_key, PathKey};
 use serde_json::json;
 
 use crate::backends::Backends;
+use crate::builtin::Builtins;
 use crate::catalog::{key, Catalog, Item, ItemContent, ItemKind, ScanItem, ScanResult};
 use crate::folder::{BoundedIo, FolderStatus, Need};
 use crate::gate::{Gate, Tags};
 pub use crate::gate::{Numbers, State, NOT_FOUND};
-use crate::path::LibPath;
+use crate::path::{AssetRef, LibPath, PathError};
 use crate::refs::reference_count;
+use crate::resolve::{resolve, CatalogLookup, Resolution, RootState, Target};
 use crate::store::LibraryStore;
 
 /// The largest library file a scan or the list safety net reads. A longer file is a failed read: its item is kept as
@@ -85,7 +90,8 @@ pub const LIBRARY_READ_CAP: u64 = 16 * 1024 * 1024;
 pub const PATH_THROUGH_LINK: &str = "path-through-link";
 
 /// The code of a catalog read that could not be answered because no full scan of the library could be applied — no
-/// root is set, or the root could not be walked (`args` = `{message}`, the reason).
+/// root is set, or the root could not be walked — and of block ④, a library preset attached while the root is unset or
+/// cannot be used (`args` = `{message}`, the reason).
 // TRD S25 step-7 B8
 pub const LIBRARY_UNAVAILABLE: &str = "library-unavailable";
 
@@ -99,7 +105,7 @@ pub struct LibraryValues {
     /// The library root at construction; `None` = none is set (nothing is scanned). Read only by `new` — after a
     /// `change_root` the live root is the gate's, not this field. Step 9a replaces it with the library config.
     pub root: Option<PathBuf>,
-    /// The built-in assets folder — read by the built-ins (step-7 P8).
+    /// The built-in assets folder (`builtin::Builtins`) — read once by `new`; `None` = there is none.
     pub builtin_dir: Option<PathBuf>,
     /// The volatile launch folder — written by the launch materials (step-7 P9).
     pub launch_root: PathBuf,
@@ -115,6 +121,16 @@ pub struct LibraryService {
     store: Arc<dyn LibraryStore>,
     io: BoundedIo,
     gate: Arc<Gate>,
+    builtins: Builtins,
+}
+
+/// What one read computation resolves, before the root state is known.
+struct Want {
+    backend: Option<String>,
+    mode: Option<AgentOutputFormat>,
+    default_preset: bool,
+    presets: Vec<AssetRef>,
+    unparsed: Vec<(String, PathError)>,
 }
 
 /// The answer of [`LibraryService::list`].
@@ -125,7 +141,7 @@ pub struct ListAnswer {
     pub rows: Vec<ListRow>,
     /// The plain folders directly in the folder (not skill folders), by path.
     pub folders: Vec<FolderRow>,
-    /// The built-in rows — filled by the built-ins (step-7 P8); empty until then.
+    /// The built-in rows — always empty for now; what fills them is not decided here.
     pub builtins: Vec<ListRow>,
 }
 
@@ -143,7 +159,8 @@ pub struct ListRow {
     pub kind: ItemKind,
     /// A skill's name; every other item's file name.
     pub name: String,
-    /// A broken file's reason, or [`PATH_THROUGH_LINK`]; `None` = it reads.
+    /// A broken file's reason, a settings asset's first refusal (in any backend's field), or [`PATH_THROUGH_LINK`];
+    /// `None` = it reads.
     pub state: Option<Reason>,
     /// Presets that reach it plus agents that attach it (`refs::reference_count`).
     pub references: usize,
@@ -180,15 +197,182 @@ enum Observed {
 }
 
 impl LibraryService {
-    /// `io` bounds every folder operation outside the library and spawns the service's short-lived jobs.
+    /// `io` bounds every folder operation outside the library and spawns the service's short-lived jobs. The built-ins
+    /// are read here, once.
     pub fn new(values: LibraryValues, store: Arc<dyn LibraryStore>, io: BoundedIo) -> Self {
         let gate = Arc::new(Gate::new(values.root.clone()));
+        let builtins = Builtins::new(values.builtin_dir.as_deref(), &*values.backends);
         LibraryService {
             values,
             store,
             io,
             gate,
+            builtins,
         }
+    }
+
+    /// One library preset on its own (the edit area — no agent: everything is shown, no format verdict), after the
+    /// first-scan entrance, over the catalog under one read lock; its folder entries are stat'ed afterwards, outside
+    /// the lock, on one read-computation budget. A first scan that could not be applied is block ④ with its reason.
+    pub fn resolve_preset(&self, preset: &LibPath) -> Resolution {
+        let want = Want {
+            backend: None,
+            mode: None,
+            default_preset: false,
+            presets: vec![AssetRef::Library(preset.clone())],
+            unparsed: Vec::new(),
+        };
+        self.resolve_wants(&[&want]).remove(0)
+    }
+
+    /// What agent `id` gets ([`LibraryService::resolve_agents`] for one agent).
+    pub fn resolve_agent(&self, id: AgentId) -> Option<Resolution> {
+        self.resolve_agents(&[id])
+            .pop()
+            .and_then(|(_, resolution)| resolution)
+    }
+
+    /// What each agent gets (`agent.presets`, tree ⛔): one first-scan entrance, the root stat (when a library preset
+    /// is attached), one read lock for all of them, then the folder stats — all on one read-computation budget, each
+    /// distinct folder stat'ed once; then, with no lock, a link probe for each ① `not-found` library row. `None` = no
+    /// such agent, or its backend has no settings check (it takes no preset — B13).
+    pub fn resolve_agents(&self, ids: &[AgentId]) -> Vec<(AgentId, Option<Resolution>)> {
+        let found: Vec<(AgentId, Option<Want>)> =
+            ids.iter().map(|&id| (id, self.agent_want(id))).collect();
+        let wants: Vec<&Want> = found.iter().filter_map(|(_, want)| want.as_ref()).collect();
+        let mut resolved = self.resolve_wants(&wants).into_iter();
+        found
+            .into_iter()
+            .map(|(id, want)| (id, want.and_then(|_| resolved.next())))
+            .collect()
+    }
+
+    /// One resolution per want, in order. Locks: the first-scan entrance, a brief read lock for the root, the root stat
+    /// (only when a library preset is attached somewhere — otherwise it decides nothing) with no lock, one read lock for
+    /// every resolution, the folder stats with no lock, then the link probes of `mark_links` with no lock. A block-④
+    /// resolution has no folder and no `not-found` row, so it is neither stat'ed nor probed.
+    fn resolve_wants(&self, wants: &[&Want]) -> Vec<Resolution> {
+        let joined = self.first_scan_join();
+        let root = self.gate.with_read(|state| state.root.clone());
+        let io = self.io.begin_read();
+        let library_attached = wants
+            .iter()
+            .flat_map(|want| &want.presets)
+            .any(|preset| matches!(preset, AssetRef::Library(_)));
+        let root_state = match (&root, joined) {
+            (None, _) => RootState::Unset,
+            (Some(_), Err(why)) => RootState::Unavailable(why),
+            (Some(root), Ok(())) if library_attached => {
+                let status = self
+                    .io
+                    .stat_all(&io, &[(root.clone(), Need::Required)])
+                    .remove(&path_key(root))
+                    .expect("stat_all answers every path it is asked");
+                match status {
+                    FolderStatus::Ok => RootState::Ok,
+                    FolderStatus::Missing => RootState::Unavailable("missing".to_owned()),
+                    FolderStatus::NotADirectory => {
+                        RootState::Unavailable("not a folder".to_owned())
+                    }
+                    FolderStatus::Unreadable(why) => RootState::Unavailable(why),
+                }
+            }
+            (Some(_), Ok(())) => RootState::Ok,
+        };
+        let targets: Vec<Target> = wants
+            .iter()
+            .map(|want| Target {
+                backend: want.backend.clone(),
+                mode: want.mode,
+                default_preset: want.default_preset,
+                presets: want.presets.clone(),
+                unparsed: want.unparsed.clone(),
+                root: root_state.clone(),
+            })
+            .collect();
+        let backends = &*self.values.backends;
+        let mut resolved: Vec<Resolution> = self.gate.with_read(|state| {
+            let lookup = CatalogLookup {
+                catalog: &state.catalog,
+                root: state.root.as_deref(),
+                builtins: &self.builtins,
+            };
+            targets
+                .iter()
+                .map(|target| resolve(target, &lookup, backends))
+                .collect()
+        });
+        let folders: Vec<(PathBuf, Need)> = resolved
+            .iter()
+            .flat_map(Resolution::folder_paths)
+            .map(|path| (path, Need::Required))
+            .collect();
+        let statuses = self.io.stat_all(&io, &folders);
+        for resolution in &mut resolved {
+            resolution.attach_folder_status(&statuses);
+            if let Some(root) = &root {
+                self.mark_links(root, resolution);
+            }
+        }
+        resolved
+    }
+
+    /// Turns each ① `not-found` row of a library reference that lies at or below a link inside the library into ②
+    /// [`PATH_THROUGH_LINK`] (R11): the scan never enters such a link, so the catalog lacks the item. Asks the store's
+    /// `first_link` per row — call it outside every lock.
+    fn mark_links(&self, root: &Path, resolution: &mut Resolution) {
+        for problem in &mut resolution.problems {
+            let BlockReason::Missing { item, via, reason } = problem else {
+                continue;
+            };
+            let Ok(AssetRef::Library(path)) = AssetRef::parse(item) else {
+                continue;
+            };
+            if reason.code != NOT_FOUND {
+                continue;
+            }
+            match self.store.first_link(root, &path) {
+                Ok(Some(_)) => {
+                    let through = BlockReason::Broken {
+                        item: item.clone(),
+                        via: via.clone(),
+                        reason: Reason {
+                            code: PATH_THROUGH_LINK.to_owned(),
+                            args: json!({ "path": item }),
+                            line: reason.line,
+                        },
+                    };
+                    *problem = through;
+                }
+                Ok(None) => {}
+                Err(e) => tracing::debug!(
+                    path = path.as_str(),
+                    "링크 아래 경로인지 확인하지 못해 찾을 수 없음으로 둔다: {e}"
+                ),
+            }
+        }
+    }
+
+    /// What agent `id` attaches, read from the registry (outside every library lock).
+    fn agent_want(&self, id: AgentId) -> Option<Want> {
+        let profile = self.values.registry.get(id)?;
+        let backend = backend_word(&profile.command);
+        self.values.backends.for_word(&backend)?;
+        let mut presets = Vec::new();
+        let mut unparsed = Vec::new();
+        for attached in &profile.presets {
+            match AssetRef::parse(&attached.path) {
+                Ok(preset) => presets.push(preset),
+                Err(why) => unparsed.push((attached.path.clone(), why)),
+            }
+        }
+        Some(Want {
+            backend: Some(backend),
+            mode: Some(output_format(&profile.command)),
+            default_preset: profile.default_preset,
+            presets,
+            unparsed,
+        })
     }
 
     /// The items and plain subfolders directly in `folder` (`None` = the root), after the first-scan entrance, under
@@ -258,8 +442,9 @@ impl LibraryService {
             .first_scan_join(&|root, range, tags| self.build_scan(root, range, tags))
     }
 
-    /// `f` over the catalog and the root under one read lock. `f` may read the profile registry and nothing else
-    /// outward; it must not call back into the service.
+    /// `f` over the catalog and the root under one read lock. `f` may read the profile registry and call pure backend
+    /// port answers (no IO, no lock — TRD S25 step-7 §3-8 step 4) and nothing else outward; it must not call back into
+    /// the service.
     pub fn with_read<R>(&self, f: impl FnOnce(&State) -> R) -> R {
         self.gate.with_read(f)
     }
@@ -417,6 +602,17 @@ impl LibraryService {
     }
 }
 
+/// The mode of an agent command, read through the command's serde shape the way `agent::launch::backend_word` reads
+/// the backend word, so no backend variant is named here (TRD S25 step-7 §1-1). A command without one is `Terminal`,
+/// as the profile reads an absent `output_format`.
+fn output_format(command: &AgentCommand) -> AgentOutputFormat {
+    serde_json::to_value(command)
+        .ok()
+        .and_then(|value| value.get("output_format").cloned())
+        .and_then(|mode| serde_json::from_value(mode).ok())
+        .unwrap_or_default()
+}
+
 fn merge_from(gate: &Gate, noted: Numbers, slot: &Mutex<Option<Vec<Item>>>) {
     let work = lock(slot).take();
     if let Some(items) = work {
@@ -451,10 +647,11 @@ fn row(item: &Item, references: usize) -> ListRow {
             doc.description.clone().unwrap_or_default(),
             None,
         ),
-        ItemContent::Settings { doc, .. } => (
+        // TRD S25 step-7 §3-6: a refusal in any backend's field shows on the asset's own row.
+        ItemContent::Settings { doc, verdict } => (
             file_name(),
             doc.description.clone().unwrap_or_default(),
-            None,
+            verdict.problems.first().map(|(_, refusal)| refusal.clone()),
         ),
         ItemContent::Broken { reason } => (file_name(), String::new(), Some(reason.clone())),
     };
@@ -491,9 +688,7 @@ mod tests {
     use std::thread::{self, JoinHandle};
     use std::time::{Duration, Instant};
 
-    use engram_dashboard_agent::profile::{
-        AgentCommand, AgentProfile, AttachedPreset, ProfileStore, StoreError,
-    };
+    use engram_dashboard_agent::profile::{AgentProfile, AttachedPreset, ProfileStore, StoreError};
     use engram_dashboard_base::sync::wait_timeout;
 
     use super::*;
@@ -502,6 +697,7 @@ mod tests {
     use crate::folder::{
         FolderListing, FolderOps, LaunchWaits, Spawn, ThreadSpawn, IO_LIMIT, LIST_CAP,
     };
+    use crate::path::BuiltinId;
     use crate::store::mem::{ListFailure, MemStore, OLD};
     use crate::store::{ContentTag, ScanListing, TrashBundle};
 
@@ -780,16 +976,26 @@ mod tests {
         ops: Arc<dyn FolderOps>,
         spawn: Arc<dyn Spawn>,
     ) -> Arc<LibraryService> {
+        let io = BoundedIo::new(IO_LIMIT, LaunchWaits::LAUNCH, LIST_CAP, ops, spawn);
+        service_io(root, store, profiles, None, io)
+    }
+
+    fn service_io(
+        root: Option<&str>,
+        store: &Arc<TestStore>,
+        profiles: Vec<AgentProfile>,
+        builtin_dir: Option<&Path>,
+        io: BoundedIo,
+    ) -> Arc<LibraryService> {
         let values = LibraryValues {
             registry: Arc::new(ProfileRegistry::new(Arc::new(Fixed(profiles)))),
             backends: Arc::new(AgentBackends),
             root: root.map(PathBuf::from),
-            builtin_dir: None,
+            builtin_dir: builtin_dir.map(Path::to_path_buf),
             launch_root: PathBuf::from("/launch"),
             home: None,
             env: Arc::new(|_| None),
         };
-        let io = BoundedIo::new(IO_LIMIT, LaunchWaits::LAUNCH, LIST_CAP, ops, spawn);
         let store: Arc<dyn LibraryStore> = Arc::clone(store) as Arc<dyn LibraryStore>;
         Arc::new(LibraryService::new(values, store, io))
     }
@@ -1504,5 +1710,461 @@ mod tests {
         assert!(svc.change_root(PathBuf::from("/lib2")).is_err());
         assert!(store.scans().is_empty());
         assert_eq!(root_of(&svc), Some(PathBuf::from("/lib")));
+    }
+
+    // ── resolution entrances ─────────────────────────────────────────────────────────────────────────────
+
+    /// Folder ops that count every stat by path, answer from a table (default `Ok`), and hold the stat of a held path
+    /// until the test releases it.
+    #[derive(Default)]
+    struct CountOps {
+        statuses: HashMap<PathBuf, FolderStatus>,
+        held: Vec<PathBuf>,
+        stats: Mutex<HashMap<PathBuf, usize>>,
+        released: Mutex<bool>,
+        moved: Condvar,
+    }
+
+    impl CountOps {
+        fn stats_of(&self, path: &Path) -> usize {
+            lock(&self.stats).get(path).copied().unwrap_or(0)
+        }
+
+        fn release(&self) {
+            *lock(&self.released) = true;
+            self.moved.notify_all();
+        }
+    }
+
+    impl FolderOps for CountOps {
+        fn stat(&self, p: &Path) -> FolderStatus {
+            *lock(&self.stats).entry(p.to_path_buf()).or_default() += 1;
+            if self.held.iter().any(|held| held == p) {
+                let deadline = Instant::now() + Duration::from_secs(20);
+                let mut released = lock(&self.released);
+                while !*released && Instant::now() < deadline {
+                    released = wait_timeout(&self.moved, released, deadline - Instant::now()).0;
+                }
+            }
+            self.statuses.get(p).cloned().unwrap_or(FolderStatus::Ok)
+        }
+
+        fn list(&self, _: &Path, _: usize) -> Result<FolderListing, FolderStatus> {
+            Err(FolderStatus::Unreadable("not modeled".to_owned()))
+        }
+
+        fn canonical(&self, _: &Path) -> io::Result<PathBuf> {
+            Err(io::Error::other("not modeled"))
+        }
+
+        fn read(&self, _: &Path, _: u64) -> io::Result<String> {
+            Err(io::Error::other("not modeled"))
+        }
+    }
+
+    fn coded(command: AgentCommand, presets: &[&str]) -> AgentProfile {
+        let mut profile = agent(presets);
+        profile.command = command;
+        profile
+    }
+
+    fn claude_json(presets: &[&str]) -> AgentProfile {
+        let command = AgentCommand::Claude {
+            extra_args: Vec::new(),
+            output_format: AgentOutputFormat::StreamJson,
+        };
+        coded(command, presets)
+    }
+
+    /// An absolute folder path on this OS (under the temp folder) and its normalized form.
+    fn folder_at(rel: &str) -> (String, PathBuf) {
+        let spelled = format!("{}/{rel}", std::env::temp_dir().display());
+        let normalized =
+            engram_dashboard_platform::fs::normalize_folder(Path::new(&spelled)).unwrap();
+        (spelled, normalized)
+    }
+
+    fn codes(resolution: &Resolution) -> Vec<&str> {
+        resolution
+            .problems
+            .iter()
+            .map(|problem| match problem {
+                BlockReason::Missing { reason, .. }
+                | BlockReason::Broken { reason, .. }
+                | BlockReason::Conflict { reason, .. }
+                | BlockReason::LibraryUnavailable { reason } => reason.code.as_str(),
+            })
+            .collect()
+    }
+
+    fn library_unavailable(message: &str) -> BlockReason {
+        BlockReason::LibraryUnavailable {
+            reason: Reason {
+                code: LIBRARY_UNAVAILABLE.to_owned(),
+                args: json!({ "message": message }),
+                line: None,
+            },
+        }
+    }
+
+    #[test]
+    fn resolve_preset_passes_the_first_scan_and_stats_its_folders_and_the_root() {
+        let store = TestStore::new(&["/lib"]);
+        let ops = Arc::new(CountOps::default());
+        let io = BoundedIo::new(
+            IO_LIMIT,
+            LaunchWaits::LAUNCH,
+            LIST_CAP,
+            Arc::clone(&ops) as Arc<dyn FolderOps>,
+            Arc::new(ThreadSpawn),
+        );
+        let svc = service_io(Some("/lib"), &store, Vec::new(), None, io);
+        let (spelled, folder) = folder_at("work");
+        let mem = store.mem("/lib");
+        mem.file(
+            "P.yaml",
+            &format!(
+                "kind: preset\nversion: 1\ninstructions:\n  - a.md\nfolders:\n  - '{spelled}'\n"
+            ),
+        );
+        mem.file("a.md", "a");
+        let resolution = svc.resolve_preset(&lp("P.yaml"));
+        assert_eq!(
+            store.scans(),
+            [scan("/lib", None)],
+            "the first scan, joined"
+        );
+        assert_eq!(
+            resolution.instructions,
+            [("a.md".to_owned(), Path::new("/lib").join("a.md"))]
+        );
+        assert_eq!(resolution.folders[0].status, Some(FolderStatus::Ok));
+        assert!(resolution.problems.is_empty(), "{:?}", resolution.problems);
+        assert_eq!(
+            (ops.stats_of(Path::new("/lib")), ops.stats_of(&folder)),
+            (1, 1)
+        );
+        svc.resolve_preset(&lp("P.yaml"));
+        assert_eq!(store.scans(), [scan("/lib", None)], "no second scan");
+    }
+
+    #[test]
+    fn resolve_agent_answers_an_agent_with_a_settings_check_and_reads_the_builtins_once() {
+        let dir = crate::builtin::tests::full();
+        let store = TestStore::new(&["/lib"]);
+        store.mem("/lib").file(
+            "P.yaml",
+            "kind: preset\nversion: 1\ninstructions:\n  - a.md\n",
+        );
+        store.mem("/lib").file("a.md", "a");
+        let claude = claude_json(&["P.yaml"]);
+        let shell = agent(&["P.yaml"]);
+        let stranger = agent(&[]);
+        let io = BoundedIo::new(
+            IO_LIMIT,
+            LaunchWaits::LAUNCH,
+            LIST_CAP,
+            Arc::new(StatOps::default()),
+            Arc::new(ThreadSpawn),
+        );
+        let svc = service_io(
+            Some("/lib"),
+            &store,
+            vec![claude.clone(), shell.clone()],
+            Some(dir.path()),
+            io,
+        );
+        let resolution = svc.resolve_agent(claude.id).expect("a claude agent");
+        assert!(
+            resolution.include_priming,
+            "the built-in default is attached"
+        );
+        assert_eq!(resolution.instructions[0].0, "a.md");
+        assert_eq!(
+            resolution.raw_settings.len(),
+            1,
+            "the built-in settings' claude field"
+        );
+        assert!(resolution.problems.is_empty(), "{:?}", resolution.problems);
+        // Read once, in `new`: later changes to the files do not reach the service.
+        std::fs::remove_file(dir.path().join(crate::builtin::file_of(BuiltinId::Priming))).unwrap();
+        std::fs::write(
+            dir.path()
+                .join(crate::builtin::file_of(BuiltinId::DefaultSettings)),
+            "kind: settings
+version: 1
+claude: {changed: true}
+",
+        )
+        .unwrap();
+        assert_eq!(svc.resolve_agent(claude.id).as_ref(), Some(&resolution));
+        assert_eq!(
+            svc.resolve_agent(shell.id),
+            None,
+            "no settings check — no preset"
+        );
+        assert_eq!(svc.resolve_agent(stranger.id), None, "not in the registry");
+        let all = svc.resolve_agents(&[shell.id, claude.id, stranger.id]);
+        let ids: Vec<AgentId> = all.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, [shell.id, claude.id, stranger.id]);
+        assert!(all[0].1.is_none() && all[2].1.is_none());
+        assert_eq!(all[1].1.as_ref(), Some(&resolution));
+    }
+
+    #[test]
+    fn resolve_agents_spends_one_read_budget_on_every_held_folder_and_stats_each_once() {
+        let (one, held_one) = folder_at("held-one");
+        let (two, held_two) = folder_at("held-two");
+        let store = TestStore::new(&["/lib"]);
+        let mem = store.mem("/lib");
+        mem.file(
+            "P.yaml",
+            &format!("kind: preset\nversion: 1\nfolders:\n  - '{one}'\n  - '{two}'\n"),
+        );
+        mem.file(
+            "Q.yaml",
+            &format!("kind: preset\nversion: 1\nfolders:\n  - '{one}'\n"),
+        );
+        let agents = [
+            claude_json(&["P.yaml"]),
+            claude_json(&["Q.yaml"]),
+            claude_json(&["Q.yaml", "P.yaml"]),
+        ];
+        let ops = Arc::new(CountOps {
+            held: vec![held_one.clone(), held_two.clone()],
+            ..CountOps::default()
+        });
+        let limit = Duration::from_secs(1);
+        let io = BoundedIo::new(
+            limit,
+            LaunchWaits::LAUNCH,
+            LIST_CAP,
+            Arc::clone(&ops) as Arc<dyn FolderOps>,
+            Arc::new(ThreadSpawn),
+        );
+        let svc = service_io(Some("/lib"), &store, agents.to_vec(), None, io);
+        svc.first_scan_join().unwrap();
+        let ids: Vec<AgentId> = agents.iter().map(|profile| profile.id).collect();
+        let started = Instant::now();
+        let all = svc.resolve_agents(&ids);
+        let spent = started.elapsed();
+        ops.release();
+        // One budget for all three agents; a budget per agent would wait at least three limits.
+        assert!(spent < limit + Duration::from_secs(1), "{spent:?}");
+        assert_eq!((ops.stats_of(&held_one), ops.stats_of(&held_two)), (1, 1));
+        for (id, resolution) in &all {
+            let resolution = resolution.as_ref().expect("a claude agent");
+            assert!(!resolution.problems.is_empty(), "{id}");
+            for problem in &resolution.problems {
+                let BlockReason::Missing { reason, .. } = problem else {
+                    panic!("{problem:?}")
+                };
+                assert_eq!(reason.code, resolve::FOLDER_NOT_FOUND);
+                assert_eq!(reason.args["why"], folder::TIMEOUT);
+            }
+        }
+        assert_eq!(
+            codes(all[2].1.as_ref().unwrap()).len(),
+            2,
+            "each folder once"
+        );
+    }
+
+    #[test]
+    fn a_library_preset_without_a_usable_root_is_block_four_and_the_root_is_stat_ed_only_for_one() {
+        // A root that stats as missing after a good first scan: the stale catalog's preset lists a missing folder.
+        let (spelled, folder) = folder_at("gone");
+        let store = TestStore::new(&["/lib"]);
+        store.mem("/lib").file(
+            "P.yaml",
+            &format!("kind: preset\nversion: 1\nfolders:\n  - '{spelled}'\n"),
+        );
+        let ops = Arc::new(CountOps {
+            statuses: HashMap::from([
+                (PathBuf::from("/lib"), FolderStatus::Missing),
+                (folder.clone(), FolderStatus::Missing),
+            ]),
+            ..CountOps::default()
+        });
+        let io = BoundedIo::new(
+            IO_LIMIT,
+            LaunchWaits::LAUNCH,
+            LIST_CAP,
+            Arc::clone(&ops) as Arc<dyn FolderOps>,
+            Arc::new(ThreadSpawn),
+        );
+        let library = claude_json(&["P.yaml"]);
+        let builtin_only = claude_json(&[]);
+        let svc = service_io(
+            Some("/lib"),
+            &store,
+            vec![library.clone(), builtin_only.clone()],
+            None,
+            io,
+        );
+        assert!(svc
+            .resolve_agent(builtin_only.id)
+            .unwrap()
+            .problems
+            .is_empty());
+        assert_eq!(
+            ops.stats_of(Path::new("/lib")),
+            0,
+            "no library preset — not asked"
+        );
+        assert_eq!(
+            svc.resolve_agent(library.id).unwrap(),
+            Resolution {
+                problems: vec![library_unavailable("missing")],
+                ..Resolution::default()
+            },
+            "block ④ alone — no folder, no folder row"
+        );
+        assert_eq!(ops.stats_of(Path::new("/lib")), 1);
+        assert_eq!(
+            ops.stats_of(&folder),
+            0,
+            "block ④'s folders are not stat'ed"
+        );
+
+        // No root at all: block ④ alone — the empty catalog's not-found row for the preset is not shown.
+        let (unset, _) = service_on(&["/lib"], None);
+        let resolution = unset.resolve_preset(&lp("P.yaml"));
+        assert_eq!(resolution.problems, [library_unavailable(gate::NO_ROOT)]);
+
+        // A first scan that could not be applied answers its reason alone, with no root stat; the preset under a link
+        //   gets no path-through-link row.
+        let store = TestStore::new(&["/lib"]);
+        store.mem("/lib").link("lnk");
+        let ops = Arc::new(CountOps::default());
+        let io = BoundedIo::new(
+            IO_LIMIT,
+            LaunchWaits::LAUNCH,
+            LIST_CAP,
+            Arc::clone(&ops) as Arc<dyn FolderOps>,
+            Arc::new(ThreadSpawn),
+        );
+        let svc = service_io(Some("/lib"), &store, Vec::new(), None, io);
+        *lock(&store.fail_next_scan) = true;
+        let resolution = svc.resolve_preset(&lp("lnk/P.yaml"));
+        let [BlockReason::LibraryUnavailable { reason }] = resolution.problems.as_slice() else {
+            panic!("{:?}", resolution.problems)
+        };
+        let message = reason.args["message"].as_str().unwrap();
+        assert!(!message.is_empty() && message != gate::NO_ROOT, "{message}");
+        assert_eq!(ops.stats_of(Path::new("/lib")), 0);
+    }
+
+    #[test]
+    fn a_settings_rows_state_shows_a_refusal_in_any_backends_field() {
+        let (svc, store) = library();
+        store.mem("/lib").file(
+            "s.yaml",
+            "kind: settings\nversion: 1\nclaude: {}\ncodex:\n  - foo\n",
+        );
+        let rows = svc.list(None).unwrap().rows;
+        let state = rows[0].state.as_ref().expect("a refusal");
+        assert_eq!(
+            (state.code.as_str(), state.line),
+            ("codex-config-line-invalid", Some(4))
+        );
+    }
+
+    #[test]
+    fn a_reference_through_a_link_inside_the_library_is_path_through_link() {
+        let (svc, store) = library();
+        let mem = store.mem("/lib");
+        mem.link("lnk");
+        mem.file(
+            "P.yaml",
+            "kind: preset\nversion: 1\ninstructions:\n  - lnk/x.md\n  - gone.md\n",
+        );
+        let resolution = svc.resolve_preset(&lp("P.yaml"));
+        assert_eq!(
+            resolution.problems,
+            [
+                BlockReason::Broken {
+                    item: "lnk/x.md".to_owned(),
+                    via: vec!["P.yaml".to_owned()],
+                    reason: Reason {
+                        code: PATH_THROUGH_LINK.to_owned(),
+                        args: json!({ "path": "lnk/x.md" }),
+                        line: Some(4),
+                    },
+                },
+                BlockReason::Missing {
+                    item: "gone.md".to_owned(),
+                    via: vec!["P.yaml".to_owned()],
+                    reason: Reason {
+                        code: NOT_FOUND.to_owned(),
+                        args: json!({ "path": "gone.md" }),
+                        line: Some(5),
+                    },
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn an_attached_preset_path_that_does_not_parse_blocks_the_agent() {
+        let store = TestStore::new(&["/lib"]);
+        let claude = claude_json(&["../outside.yaml"]);
+        let svc = service(
+            Some("/lib"),
+            &store,
+            vec![claude.clone()],
+            Arc::new(StatOps::default()),
+            Arc::new(ThreadSpawn),
+        );
+        let resolution = svc.resolve_agent(claude.id).unwrap();
+        let [BlockReason::Broken { item, via, reason }] = resolution.problems.as_slice() else {
+            panic!("{:?}", resolution.problems)
+        };
+        assert_eq!((item.as_str(), via.len()), ("../outside.yaml", 0));
+        assert_eq!(reason.code, "item-path-invalid");
+        assert_eq!(reason.args["path"], "../outside.yaml");
+        assert!(resolution.blocked().is_some());
+    }
+
+    #[test]
+    fn a_codex_agents_mode_decides_whether_its_skills_are_judged() {
+        let store = TestStore::new(&["/lib"]);
+        store
+            .mem("/lib")
+            .file("P.yaml", "kind: preset\nversion: 1\nskills:\n  - s\n");
+        store
+            .mem("/lib")
+            .file("s/SKILL.md", "---\nname: s\ndescription: \"\"\n---\n");
+        let codex = |mode| {
+            coded(
+                AgentCommand::Codex {
+                    extra_args: Vec::new(),
+                    output_format: mode,
+                },
+                &["P.yaml"],
+            )
+        };
+        let json_agent = codex(AgentOutputFormat::StreamJson);
+        let terminal_agent = codex(AgentOutputFormat::Terminal);
+        let svc = service(
+            Some("/lib"),
+            &store,
+            vec![json_agent.clone(), terminal_agent.clone()],
+            Arc::new(StatOps::default()),
+            Arc::new(ThreadSpawn),
+        );
+        let json_mode = svc.resolve_agent(json_agent.id).unwrap();
+        assert_eq!(codes(&json_mode), ["codex-skill-description-empty"]);
+        let terminal = svc.resolve_agent(terminal_agent.id).unwrap();
+        assert!(terminal.problems.is_empty(), "{:?}", terminal.problems);
+        let notices: Vec<&str> = terminal.notices.iter().map(|n| n.code.as_str()).collect();
+        assert_eq!(
+            notices,
+            [
+                engram_dashboard_agent::launch::BUILTIN_UNAVAILABLE,
+                "codex-terminal-omitted"
+            ],
+            "the default preset's stand-in (no built-in folder) is told, and the skill is named as left out"
+        );
     }
 }

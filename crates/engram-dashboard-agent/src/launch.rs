@@ -251,14 +251,18 @@ impl fmt::Display for LaunchBlocked {
                 f.write_str(" · ")?;
             }
             match r {
-                BlockReason::Missing { item, reason, .. } => {
-                    write!(f, "찾을 수 없음 {item} ({})", reason.code)?
-                }
+                BlockReason::Missing { item, reason, .. } => write!(
+                    f,
+                    "찾을 수 없음 {} ({})",
+                    escape_controls(item),
+                    reason.code
+                )?,
                 BlockReason::Broken { item, reason, .. } => {
-                    write!(f, "오류 {item} ({})", reason.code)?
+                    write!(f, "오류 {} ({})", escape_controls(item), reason.code)?
                 }
                 BlockReason::Conflict { reason, items } => {
-                    let paths: Vec<&str> = items.iter().map(|(p, _)| p.as_str()).collect();
+                    let paths: Vec<String> =
+                        items.iter().map(|(p, _)| escape_controls(p)).collect();
                     write!(f, "충돌 {} ({})", paths.join(", "), reason.code)?
                 }
                 BlockReason::LibraryUnavailable { reason } => {
@@ -378,6 +382,11 @@ pub const FOLDER_LISTING_SKIPPED: &str = "folder-listing-skipped";
 /// How many of [`FOLDER_LISTING_SKIPPED`]'s paths its sentence names; the rest are counted.
 const FOLDER_LISTING_SKIPPED_NAMED: usize = 3;
 
+/// Notice code: a built-in asset could not be read, so the resolution applied an empty stand-in for it. `args` =
+/// `{path, why}` — `path` = the built-in's spelling (`engram:/default`), `why` = why it could not be read.
+// TRD S25 step-7 §3-7
+pub const BUILTIN_UNAVAILABLE: &str = "builtin-unavailable";
+
 /// The wording of a notice for a person or an LLM reading the reply — Korean, factual, recommends no fix (TRD S25
 /// G28 · §2-4 8).
 ///
@@ -385,8 +394,9 @@ const FOLDER_LISTING_SKIPPED_NAMED: usize = 3;
 /// sentence (user wording, exact), filled from `args` with names joined by `, `; in the two terminal codes an empty
 /// list leaves its part out. [`FOLDER_LISTING_PARTIAL`] and [`FOLDER_LISTING_SKIPPED`] have their own sentence too,
 /// naming no backend — the folder (and the skipped paths, the first three named and the rest counted) come from
-/// `args`. When their `args` do not have the shape the constant documents (not an object, a missing `folder` or
-/// `name`, a list that is not of strings, no `paths`), they fall back to the generic wording. Every other
+/// `args`. [`BUILTIN_UNAVAILABLE`] has its own sentence, naming the built-in and why from `args`. When their `args` do
+/// not have the shape the constant documents (not an object, a missing `folder`, `name`, `path` or `why`, a value
+/// that is not a string, no `paths`), they fall back to the generic wording. Every other
 /// code takes the generic wording — the code and the values listed in `args` (object keys in name order), saying the
 /// omission is intended.
 /// Control characters in the code and the listed values (file names from the library — outside input) are escaped
@@ -475,6 +485,13 @@ fn own_wording(notice: &Notice) -> Option<String> {
             }
             Some(text)
         }
+        BUILTIN_UNAVAILABLE => {
+            let path = escape_controls(args.get("path")?.as_str()?);
+            let why = escape_controls(args.get("why")?.as_str()?);
+            Some(format!(
+                "알림: 기본 제공 {path}을(를) 읽지 못해 빈 내용으로 적용했습니다. 이유: {why}"
+            ))
+        }
         _ => None,
     }
 }
@@ -504,7 +521,8 @@ fn text_list(args: &Map<String, Value>, key: &str) -> Option<Vec<String>> {
     }
 }
 
-fn escape_controls(s: &str) -> String {
+/// `s` with every control character escaped (`\n`, `\u{1b}`) — outside text put into a line that is printed or logged.
+pub fn escape_controls(s: &str) -> String {
     s.chars()
         .map(|c| {
             if c.is_control() {
@@ -1544,6 +1562,35 @@ mod tests {
         );
     }
 
+    // An item can be a hand-edited spelling from the profile file; the manager logs this line.
+    #[test]
+    fn blocked_display_escapes_control_characters_in_items() {
+        let blocked = LaunchBlocked {
+            reasons: vec![
+                BlockReason::Missing {
+                    item: "a\nb.yaml".to_string(),
+                    via: Vec::new(),
+                    reason: reason("not-found", Value::Null, None),
+                },
+                BlockReason::Broken {
+                    item: "../x\u{1b}[31m".to_string(),
+                    via: Vec::new(),
+                    reason: reason("item-path-invalid", Value::Null, None),
+                },
+                BlockReason::Conflict {
+                    reason: reason("skill-name", json!({"name": "s"}), None),
+                    items: vec![("x\r/s".to_string(), Vec::new())],
+                },
+            ],
+        };
+        let line = blocked.to_string();
+        assert_eq!(
+            line,
+            "실행 막힘: 찾을 수 없음 a\\nb.yaml (not-found) · 오류 ../x\\u{1b}[31m (item-path-invalid) · 충돌 x\\r/s (skill-name)"
+        );
+        assert!(!line.chars().any(char::is_control), "{line:?}");
+    }
+
     // ── 배치 ──
 
     fn mem_root() -> PathBuf {
@@ -2262,6 +2309,39 @@ mod tests {
             let text = notice_text(&reason(FOLDER_LISTING_PARTIAL, args.clone(), None));
             assert!(
                 text.starts_with("알림(folder-listing-partial): 의도된 동작입니다."),
+                "{args} · {text}"
+            );
+        }
+    }
+
+    /// The built-in code gives its own sentence, the path and why from `args` with control characters escaped; `args`
+    /// of another shape fall back to the generic wording.
+    #[test]
+    fn the_builtin_unavailable_notice_gives_its_own_wording_and_falls_back_on_another_shape() {
+        for (args, text) in [
+            (
+                json!({ "path": "engram:/default", "why": "yaml-syntax: bad" }),
+                "알림: 기본 제공 engram:/default을(를) 읽지 못해 빈 내용으로 적용했습니다. 이유: yaml-syntax: bad",
+            ),
+            (
+                json!({ "path": "engram:/priming", "why": "a\nb\u{1b}" }),
+                "알림: 기본 제공 engram:/priming을(를) 읽지 못해 빈 내용으로 적용했습니다. 이유: a\\nb\\u{1b}",
+            ),
+        ] {
+            let rendered = notice_text(&reason(BUILTIN_UNAVAILABLE, args.clone(), None));
+            assert!(!rendered.chars().any(char::is_control), "{rendered:?}");
+            assert_eq!(rendered, text, "{args}");
+        }
+        for args in [
+            json!({ "path": "engram:/default" }),
+            json!({ "why": "no `kind`" }),
+            json!({ "path": "engram:/default", "why": 1 }),
+            json!({ "path": ["engram:/default"], "why": "x" }),
+            json!("engram:/default"),
+        ] {
+            let text = notice_text(&reason(BUILTIN_UNAVAILABLE, args.clone(), None));
+            assert!(
+                text.starts_with("알림(builtin-unavailable): 의도된 동작입니다."),
                 "{args} · {text}"
             );
         }
