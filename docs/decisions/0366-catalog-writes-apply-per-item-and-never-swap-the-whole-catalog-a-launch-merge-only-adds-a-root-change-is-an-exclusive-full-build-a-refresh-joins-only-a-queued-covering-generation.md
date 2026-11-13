@@ -1,20 +1,35 @@
 # ADR-0366: Catalog writes apply per item and never swap the whole catalog; a launch merge only adds; a root change is an exclusive full build; a refresh joins only a queued covering generation
 
-- 상태: 확정 (2026-11-13, 근거: TODO)
-- 관련: Amends ADR-0324 (decisions 4, 5 and 7, catalog writes and late merges and refresh folding) · TODO 나머지 관련
+- 상태: 확정 (2026-11-13, 근거: S25 step-7 child TRD — class A (main, round 3, user-confirmed 2026-11-11) · B31 (main, round 5, user-confirmed 2026-11-11) · the root change (main, rounds 6–7) · the refresh-folding reading (P7, main confirmed 2026-11-13) · landed `0525a5b5` (P7) · `d445f03e` (P9))
+- 관련: Amends ADR-0324 (decisions 4, 5 and 7, catalog writes and late merges and refresh folding) · ADR-0312 (one root; decision 5 and 「라이브러리 폴더 바꾸기」) · ADR-0359 (decision 8 of ADR-0324 — the schema re-check writer is gone) · ADR-0365 (links — the admission every write passes) · child TRD `docs/process/S25-preset-library/trd-asset-library.md` §6 (class A, writers 1–6, ⑤) · §10-2 class A · B31 · tracking T-104
 
 ## 맥락
-TODO — 무슨 문제를 풀어야 했나.
+ADR-0324 settled the library locking rules in six review rounds. Its text speaks of the scan "swapping in" a built `Catalog` (decisions 1 and 4), of the late merge as a conditional insert of the launch check's new bytes (decision 5), and of refreshes that "fold into one generation before walking" (decision 7). Writing the step-7 code against it raised four points:
+- **Whole-catalog swap.** A scan that builds a whole `Catalog` and swaps it in reverts every late merge and `list` safety-net insert that landed while it was built, because those writes do not move the change generation (draft 4 still let the scan do this — review round 3).
+- **Removals by the launch check.** Draft 6 let the launch check's merge record a file it found missing as a sequenced absence. A check-time removal is not remembered, so an older delayed positive merge resurrected the file; and a removable or network root that vanishes between the root stat and the opens (Windows reports `NotFound`) would have emptied every attached item, against "a missing root removes nothing".
+- **The root change.** ADR-0324 raises a root generation on `setRoot` but does not say how the new root's catalog is built and published. Draft 6 cleared before scanning, so readers saw an empty catalog (ADR-0324 M48); draft 7 scanned first but let later changes in during the walk (a 9a edit ordered after `setRoot` could write into the old library) and reused the old catalog's tags (changing `D:\lib` to `D:\lib\team` made `X.md` `Unchanged`, and the clear then dropped it — round 6).
+- **"Fold".** The TRD (§6 ⑤) and the P7 code read decision 7 narrowly — a refresh joins a covering generation that is queued and not yet walking — while the ADR sentence can be read as widening queued generations into one.
 
 ## 결정
-TODO — 무엇으로 정했나.
+1. **No whole-catalog swap, ever (class A).** Every write to `Catalog` is applied per item onto the current catalog under the write lock: the later `read_seq` wins per item, items outside a scan's range are untouched, and derived data (`used_by`) is recomputed for the touched items only. Walking, reading and parsing stay outside the lock. The writers: the scan apply (only if the change generation did not move since the walk started, else rescan; it raises the swap-in count), the launch check's late merge, the `list` safety net, and later changes (9a edits, 9b operations, relink) with ticket, in-progress count and change generation. Where ADR-0324 says "swap-in" (decisions 1, 4 and 5), read this per-item apply; the swap-in count keeps its name and role.
+2. **The launch check's late merge only adds (B31).** It carries positive observations only — new or newer bytes of files it read — and never removes. Removals come only from scans (listing absences, sequenced absent ranges) and changes (deletes and moves, the root change); `remove` refuses a removal whose number is not later than the item's `read_seq`. A file deleted outside Engram stays listed until a refresh. The merge is handed off to a short job that takes the write lock normally — a contended lock delays it, nothing skips it, and the launch never waits on it. ADR-0324 decision 5's conditions stay: a moved change or root generation discards the merge; a swap-in in between discards inserts of paths not in `Catalog`.
+3. **A root change is the one exclusive full build.** It stats the new root first, outside the gate (missing, not a folder, unreadable or unanswered: refused at once). It is exclusive from its ticket to its publish — later changes and scans wait behind it (FIFO); readers keep the old root's catalog meanwhile, never an empty one. The new root is walked fresh with empty tags (nothing reused from the old catalog). One write lock then clears the catalog, applies the build, publishes the root, raises the root generation and marks the first scan raised. A walk that fails at the root publishes nothing: the old root and catalog stay and the change is refused. The ticket and the in-progress mark are released on every exit by a drop guard. A merge noted before the publish is discarded afterwards by the raised root generation.
+4. **"Fold" means join (ADR-0324 decision 7).** A `library.refresh` joins a queued generation that covers its range and has not started walking; it never widens a queued generation that does not cover it, and a covering walk already in progress means its own ticket (unchanged). A folder refresh before the first scan goes through the first-scan entrance (ADR-0324 decision 6, unchanged).
 
 ## 거부한 대안
-- TODO 대안 A — 왜 버렸나.
-- TODO 대안 B — 왜 버렸나.
+- **The scan builds a whole catalog and swaps it in** (ADR-0324's wording; draft 4) — reverts late merges and safety-net inserts that landed during the build, since they do not move the change generation (review round 3 scenario).
+- **The launch check records a missing file as a sequenced absence** (draft 6) — an older delayed positive merge resurrects the file, and a root that vanishes mid-read empties every attached item (review round 5 scenarios). The user wants a file watcher later instead (T-104).
+- **Clear the catalog, then scan the new root** (draft 6) — readers see an empty catalog during the walk (ADR-0324 M48).
+- **Scan the new root first, let changes in during the walk, reuse the old tags** (draft 7) — an edit ordered after `setRoot` writes into the old library, and an `Unchanged` file is dropped by the clear (review round 6, cross-family).
+- **Widen a queued generation that does not cover the new refresh** (a broad reading of "fold into one generation") — not built; the narrow reading keeps a queued generation's range fixed once others have joined it. Main confirmed the narrow reading 2026-11-13; no measured cost either way. 약함.
 
 ## 근거
-TODO — 실측·리뷰 등 결정의 뒷받침.
+- Child TRD §6 (class A, writers 1–6, the removal list, refresh merging ⑤) and §10-2 (class A · class B row: main round 3, user-confirmed 2026-11-11; B31: main round 5, user-confirmed 2026-11-11).
+- P7 (`0525a5b5`): the gate (`refresh`, `change_root`, `late_merge`) and `Catalog::apply_items` / `apply_scan`; test `refreshes_join_only_a_covering_generation_that_has_not_started_walking`; code review deep, 2 rounds PASS. P9 (`d445f03e`): the handed-off merge from `check_in`.
+- Main's confirmation of the narrow "fold" reading (2026-11-13), after the P7 coder reported it (`.review-s25-d9/p7-coder-report.md` item 7).
 
 ## 영향 / 불변식
-TODO — 이 결정이 묶는 코드·게이트. 어기면 무엇이 깨지나.
+- No writer may build a catalog and swap it in; the only catalog replacement is the root change's full build under its exclusive ticket. 9a and 9b changes write per item under the write lock with ticket, count and change generation.
+- Nothing the launch check does removes an item; a fix that "cleans up" a missing file at launch reintroduces the resurrection and root-outage cases.
+- 9a's `setRoot` and the first-start default root call `change_root`; step 8 / 9a tests: a new root that fails at a folder leaves no old-root rows and reports that folder; one that fails at the root keeps the old root and its rows; a reader during the walk sees the old rows.
+- What the conservative insert rule costs is unchanged from ADR-0324 decision 5 (an insert discarded after a swap-in leaves one stale list row until the next refresh).
