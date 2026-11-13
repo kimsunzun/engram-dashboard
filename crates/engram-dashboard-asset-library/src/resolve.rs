@@ -75,9 +75,10 @@ pub const FOLDER_NOT_FOUND: &str = "folder-not-found";
 pub const FOLDER_PATH_CLI_UNSAFE: &str = "folder-path-cli-unsafe";
 
 /// One problem row — the launch block row itself, so the problem list and the block are the same rows. `item` = a
-/// library path, `engram:/…` or `folder:<normalized path>`; `via` = the presets from the expansion start (for an agent,
-/// the attached preset) down to the one that lists the item — empty for an attached preset itself. A conflict carries
-/// every skill involved with its own chain. `reason.line` is a line of the referencing preset (`via.last()`; a row
+/// library path, `engram:/…` or `folder:<normalized path>` (the launch check adds `command-line:<backend word>` and
+/// `working-folder:<path>` rows — `agent::launch::BlockReason`); `via` = the presets from the expansion start (for an
+/// agent, the attached preset) down to the one that lists the item — empty for an attached preset itself. A conflict
+/// carries every skill involved with its own chain. `reason.line` is a line of the referencing preset (`via.last()`; a row
 /// for an attached preset itself has `None`) for a row about a reference — `not-found`, `wrong-kind`, `preset-cycle`,
 /// `builtin-in-library-preset`, `path-through-link`, a folder entry — and a line of the item's own file for a row about
 /// its content when the content gives one (line problems, `yaml-syntax`, settings refusals, skill format). Rows
@@ -175,6 +176,9 @@ pub struct ResolvedFolder {
     pub via: Vec<String>,
     /// The line of its first-place entry in the last preset of `via`.
     pub line: u32,
+    /// Where its instruction file goes in [`Resolution::instructions`]: the index right after the own instruction lines
+    /// of the preset that lists it at its first place (parent TRD S25 §1-5 「at its place」).
+    pub instructions_at: usize,
     /// Phase 2 — `None` until [`Resolution::attach_folder_status`] gets this folder's status.
     pub status: Option<FolderStatus>,
 }
@@ -677,6 +681,8 @@ impl<'l> Walk<'l> {
             key: folder_key,
             via: via.to_vec(),
             line: folder.line,
+            // `own_lists` takes a preset's folders after its instructions, so this is the end of its own lines.
+            instructions_at: self.out.instructions.len(),
             status: None,
         });
     }
@@ -785,8 +791,8 @@ fn reason(code: &str, args: Value, line: Option<u32>) -> Reason {
     }
 }
 
-/// The `item` of a folder entry's problem.
-fn folder_item(path: &Path) -> String {
+/// The `item` of a folder entry's problem, and the `path` of its instruction source (`agent::launch::SourceRef`).
+pub(crate) fn folder_item(path: &Path) -> String {
     format!("folder:{}", path.to_string_lossy())
 }
 

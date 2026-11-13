@@ -208,7 +208,10 @@ pub struct LaunchKit {
 /// 실행을 막는 사유 하나. 변형 순서가 보이는 순서다 — `Ord` 가 이 순서로 가른다(TRD S25 §1-3 8).
 ///
 /// `item` = the blocked item: its library path, or for a folder entry `folder:` + the normalized absolute folder path
-/// (the same third form as [`SourceRef::path`]). `via` = the presets that reference it (the chain it came through).
+/// (the same third form as [`SourceRef::path`]). A row about no library item names what it is about with a kind tag
+/// in the same way: `command-line:` + the backend word (the command line does not fit) and `working-folder:` + the
+/// working folder's path (the backend refuses that folder). `via` = the presets that reference it (the chain it came
+/// through) — empty for the two tagged rows.
 // ADR-0341
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BlockReason {

@@ -39,8 +39,8 @@ pub(crate) mod fake {
     use std::path::Path;
 
     use engram_dashboard_agent::backend::settings_check::{
-        CommandLine, FolderEntry, FolderLoadSet, FrontMatterParser, InstructionLoad, ModeLoads,
-        NativePlaces, NativeSkillRoots, NoticeCodes, SkillFormat,
+        CommandLine, FolderEntry, FolderLoad, FolderLoadKind, FolderLoadSet, FrontMatterParser,
+        InstructionLoad, ModeLoads, NativePlaces, NativeSkillRoots, NoticeCodes, SkillFormat,
     };
     use engram_dashboard_agent::backend::SettingsCheck;
     use engram_dashboard_agent::launch::Reason;
@@ -178,18 +178,33 @@ pub(crate) mod fake {
     ///   folder.
     /// - `loads`: `StreamJson` every instruction and skill; `Terminal` only the built-in priming and no skill.
     /// - `accepts_skill_name`: a name not holding `bad`. `folder_entry_blocks`: a path holding `blocked`.
-    /// - `notice_codes`: `Terminal` → `omitted` = `<word>-omitted`; `StreamJson` → none.
-    ///
-    /// Every other port method panics.
+    /// - `notice_codes`: `Terminal` → `omitted` = `<word>-omitted`, `folder_omitted` = `<word>-folder-omitted`;
+    ///   `StreamJson` → `same_name` = `<word>-same-name`.
+    /// - `folder_listing_at_launch`: always. `folder_load_set`: a top-level `RULES.md` that reads is an instruction row
+    ///   — `StreamJson` loads and carries it, `Terminal` omits it; nothing else.
+    /// - `working_folder_blocks`: never. `command_line_fits`: always fits, and records the line's `instructions` in
+    ///   [`Scripted::lines`]. No native skill roots; `root_skills` finds nothing.
     pub(crate) struct Scripted {
         pub word: &'static str,
         omitted: &'static str,
+        folder_omitted: &'static str,
+        same_name: &'static str,
+        /// The `instructions` of every line `command_line_fits` was asked about, in order.
+        pub lines: std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>,
     }
 
     impl Scripted {
         pub(crate) fn new(word: &'static str) -> Self {
-            let omitted = Box::leak(format!("{word}-omitted").into_boxed_str());
-            Self { word, omitted }
+            let code = |what: &str| -> &'static str {
+                Box::leak(format!("{word}-{what}").into_boxed_str())
+            };
+            Self {
+                word,
+                omitted: code("omitted"),
+                folder_omitted: code("folder-omitted"),
+                same_name: code("same-name"),
+                lines: Default::default(),
+            }
         }
 
         fn reason(&self, what: &str, line: Option<u32>) -> Reason {
@@ -224,28 +239,54 @@ pub(crate) mod fake {
             folder.to_string_lossy().contains("blocked")
         }
         fn working_folder_blocks(&self, _: &Path, _: AgentOutputFormat) -> Option<Reason> {
-            unimplemented!("scripted fake")
+            None
         }
         fn notice_codes(&self, mode: AgentOutputFormat) -> NoticeCodes {
             match mode {
                 AgentOutputFormat::Terminal => NoticeCodes {
                     omitted: Some(self.omitted),
+                    folder_omitted: Some(self.folder_omitted),
+                    same_name: None,
+                },
+                AgentOutputFormat::StreamJson => NoticeCodes {
+                    same_name: Some(self.same_name),
                     ..NoticeCodes::default()
                 },
-                AgentOutputFormat::StreamJson => NoticeCodes::default(),
             }
         }
         fn folder_listing_at_launch(&self, _: AgentOutputFormat) -> bool {
-            unimplemented!("scripted fake")
+            true
         }
         fn folder_load_set(
             &self,
-            _: &[FolderEntry],
-            _: &dyn Fn(&Path) -> std::io::Result<String>,
+            entries: &[FolderEntry],
+            read: &dyn Fn(&Path) -> std::io::Result<String>,
             _: &dyn FrontMatterParser,
-            _: AgentOutputFormat,
+            mode: AgentOutputFormat,
         ) -> FolderLoadSet {
-            unimplemented!("scripted fake")
+            let rows: Vec<FolderLoad> = entries
+                .iter()
+                .filter_map(|entry| match entry {
+                    FolderEntry::File(path) if path == Path::new("RULES.md") => Some(path),
+                    _ => None,
+                })
+                .filter(|path| read(path).is_ok())
+                .map(|path| FolderLoad {
+                    path: path.clone(),
+                    kind: FolderLoadKind::Instructions,
+                })
+                .collect();
+            match mode {
+                AgentOutputFormat::StreamJson => FolderLoadSet {
+                    loads: rows.clone(),
+                    carried: rows,
+                    ..FolderLoadSet::default()
+                },
+                AgentOutputFormat::Terminal => FolderLoadSet {
+                    omitted: rows,
+                    ..FolderLoadSet::default()
+                },
+            }
         }
         fn skill_format(
             &self,
@@ -273,15 +314,17 @@ pub(crate) mod fake {
                 None => Ok(vec![]),
             }
         }
-        fn command_line_fits(&self, _: &CommandLine<'_>) -> Result<(), Reason> {
-            unimplemented!("scripted fake")
+        fn command_line_fits(&self, line: &CommandLine<'_>) -> Result<(), Reason> {
+            let instructions = line.instructions.map(str::to_owned);
+            engram_dashboard_base::sync::lock(&self.lines).push(instructions);
+            Ok(())
         }
         fn native_skill_roots(
             &self,
             _: &NativePlaces<'_>,
             _: AgentOutputFormat,
         ) -> NativeSkillRoots {
-            unimplemented!("scripted fake")
+            NativeSkillRoots::default()
         }
         fn root_skills(
             &self,
@@ -289,7 +332,7 @@ pub(crate) mod fake {
             _: &dyn Fn(&Path) -> std::io::Result<String>,
             _: &dyn FrontMatterParser,
         ) -> FolderLoadSet {
-            unimplemented!("scripted fake")
+            FolderLoadSet::default()
         }
     }
 }

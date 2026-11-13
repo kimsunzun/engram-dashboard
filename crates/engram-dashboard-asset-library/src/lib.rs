@@ -51,6 +51,7 @@ pub mod excerpt;
 pub mod folder;
 pub mod format;
 mod gate;
+pub mod launch;
 pub mod path;
 pub mod refs;
 pub mod resolve;
@@ -62,8 +63,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
-use engram_dashboard_agent::launch::{backend_word, BlockReason, Reason};
-use engram_dashboard_agent::profile::{AgentCommand, AgentOutputFormat, ProfileRegistry};
+use engram_dashboard_agent::launch::{backend_word, escape_controls, BlockReason, Reason};
+use engram_dashboard_agent::profile::{
+    AgentCommand, AgentOutputFormat, AgentProfile, ProfileRegistry,
+};
 use engram_dashboard_agent::types::AgentId;
 use engram_dashboard_base::sync::lock;
 use engram_dashboard_platform::fs::{path_key, PathKey};
@@ -72,7 +75,7 @@ use serde_json::json;
 use crate::backends::Backends;
 use crate::builtin::Builtins;
 use crate::catalog::{key, Catalog, Item, ItemContent, ItemKind, ScanItem, ScanResult};
-use crate::folder::{BoundedIo, FolderStatus, Need};
+use crate::folder::{BoundedIo, FolderStatus, LaunchIo, Need};
 use crate::gate::{Gate, Tags};
 pub use crate::gate::{Numbers, State, NOT_FOUND};
 use crate::path::{AssetRef, LibPath, PathError};
@@ -259,26 +262,7 @@ impl LibraryService {
             .iter()
             .flat_map(|want| &want.presets)
             .any(|preset| matches!(preset, AssetRef::Library(_)));
-        let root_state = match (&root, joined) {
-            (None, _) => RootState::Unset,
-            (Some(_), Err(why)) => RootState::Unavailable(why),
-            (Some(root), Ok(())) if library_attached => {
-                let status = self
-                    .io
-                    .stat_all(&io, &[(root.clone(), Need::Required)])
-                    .remove(&path_key(root))
-                    .expect("stat_all answers every path it is asked");
-                match status {
-                    FolderStatus::Ok => RootState::Ok,
-                    FolderStatus::Missing => RootState::Unavailable("missing".to_owned()),
-                    FolderStatus::NotADirectory => {
-                        RootState::Unavailable("not a folder".to_owned())
-                    }
-                    FolderStatus::Unreadable(why) => RootState::Unavailable(why),
-                }
-            }
-            (Some(_), Ok(())) => RootState::Ok,
-        };
+        let root_state = self.root_state(&io, root.as_deref(), joined, library_attached);
         let targets: Vec<Target> = wants
             .iter()
             .map(|want| Target {
@@ -317,6 +301,38 @@ impl LibraryService {
         resolved
     }
 
+    /// The root as block ④ needs it: unset; unusable because no full scan could be applied (`joined`); or, when a
+    /// library preset is attached (otherwise the root decides nothing and is not asked), stat'ed as a required ask on
+    /// `io`.
+    fn root_state(
+        &self,
+        io: &LaunchIo,
+        root: Option<&Path>,
+        joined: Result<(), String>,
+        library_attached: bool,
+    ) -> RootState {
+        match (root, joined) {
+            (None, _) => RootState::Unset,
+            (Some(_), Err(why)) => RootState::Unavailable(why),
+            (Some(root), Ok(())) if library_attached => {
+                let status = self
+                    .io
+                    .stat_all(io, &[(root.to_path_buf(), Need::Required)])
+                    .remove(&path_key(root))
+                    .expect("stat_all answers every path it is asked");
+                match status {
+                    FolderStatus::Ok => RootState::Ok,
+                    FolderStatus::Missing => RootState::Unavailable("missing".to_owned()),
+                    FolderStatus::NotADirectory => {
+                        RootState::Unavailable("not a folder".to_owned())
+                    }
+                    FolderStatus::Unreadable(why) => RootState::Unavailable(why),
+                }
+            }
+            (Some(_), Ok(())) => RootState::Ok,
+        }
+    }
+
     /// Turns each ① `not-found` row of a library reference that lies at or below a link inside the library into ②
     /// [`PATH_THROUGH_LINK`] (R11): the scan never enters such a link, so the catalog lacks the item. Asks the store's
     /// `first_link` per row — call it outside every lock.
@@ -347,7 +363,7 @@ impl LibraryService {
                 Ok(None) => {}
                 Err(e) => tracing::debug!(
                     path = path.as_str(),
-                    "링크 아래 경로인지 확인하지 못해 찾을 수 없음으로 둔다: {e}"
+                    "first_link 실패, not-found 행을 그대로 둠: {e}"
                 ),
             }
         }
@@ -355,7 +371,11 @@ impl LibraryService {
 
     /// What agent `id` attaches, read from the registry (outside every library lock).
     fn agent_want(&self, id: AgentId) -> Option<Want> {
-        let profile = self.values.registry.get(id)?;
+        self.want_of(&self.values.registry.get(id)?)
+    }
+
+    /// What `profile` attaches; `None` = its backend has no settings check (it takes no preset — B13).
+    fn want_of(&self, profile: &AgentProfile) -> Option<Want> {
         let backend = backend_word(&profile.command);
         self.values.backends.for_word(&backend)?;
         let mut presets = Vec::new();
@@ -478,7 +498,7 @@ impl LibraryService {
             Box::new(move || merge_from(&gate, noted, &slot))
         };
         if let Err(e) = self.io.spawner().spawn(MERGE_JOB, job) {
-            tracing::warn!("라이브러리 늦은 합치기: 작업을 띄우지 못해 이 자리에서 합친다: {e}");
+            tracing::warn!("library-merge spawn 실패, 호출 스레드에서 합침: {e}");
             merge_from(&self.gate, noted, &slot);
         }
     }
@@ -522,15 +542,26 @@ impl LibraryService {
         range: Option<&LibPath>,
         tags: &Tags,
     ) -> io::Result<ScanResult> {
+        let read = |path: &Path| self.store.read(path, LIBRARY_READ_CAP);
+        self.build_scan_reading(root, range, tags, &read)
+    }
+
+    /// [`LibraryService::build_scan`] with the file reads going through `read` (the launch overlay keeps the bytes).
+    fn build_scan_reading(
+        &self,
+        root: &Path,
+        range: Option<&LibPath>,
+        tags: &Tags,
+        read: &dyn Fn(&Path) -> io::Result<Vec<u8>>,
+    ) -> io::Result<ScanResult> {
         // The racy rule's reference — taken before the walk (`ScanResult::build`).
         let now = SystemTime::now();
         let listing = self.store.scan(root, range, &|| self.gate.next_seq())?;
-        let read = |path: &Path| self.store.read(path, LIBRARY_READ_CAP);
         Ok(ScanResult::build(
             listing,
             range,
             tags,
-            &read,
+            read,
             &*self.values.backends,
             now,
         ))
@@ -543,7 +574,8 @@ impl LibraryService {
             Err(e) => {
                 tracing::debug!(
                     path = path.as_str(),
-                    "라이브러리 안전망: 훑기가 받지 않는 이름이라 읽지 않았다: {e}"
+                    "build_scan 실패, Observed::Refused로 읽지 않음: {}",
+                    escape_controls(&e.to_string())
                 );
                 Observed::Refused
             }
@@ -602,15 +634,25 @@ impl LibraryService {
     }
 }
 
-/// The mode of an agent command, read through the command's serde shape the way `agent::launch::backend_word` reads
-/// the backend word, so no backend variant is named here (TRD S25 step-7 §1-1). A command without one is `Terminal`,
-/// as the profile reads an absent `output_format`.
+/// The mode of an agent command (`command_field`). A command without one is `Terminal`, as the profile reads an
+/// absent `output_format`.
 fn output_format(command: &AgentCommand) -> AgentOutputFormat {
+    command_field(command, "output_format").unwrap_or_default()
+}
+
+/// The pass-through arguments of an agent command (`command_field`); none for a command without them.
+fn extra_args(command: &AgentCommand) -> Vec<String> {
+    command_field(command, "extra_args").unwrap_or_default()
+}
+
+/// A field of an agent command, read through the command's serde shape the way `agent::launch::backend_word` reads
+/// the backend word, so no backend variant is named here (TRD S25 step-7 §1-1). `None` = the command has no such
+/// field.
+fn command_field<T: serde::de::DeserializeOwned>(command: &AgentCommand, name: &str) -> Option<T> {
     serde_json::to_value(command)
         .ok()
-        .and_then(|value| value.get("output_format").cloned())
-        .and_then(|mode| serde_json::from_value(mode).ok())
-        .unwrap_or_default()
+        .and_then(|value| value.get(name).cloned())
+        .and_then(|field| serde_json::from_value(field).ok())
 }
 
 fn merge_from(gate: &Gate, noted: Numbers, slot: &Mutex<Option<Vec<Item>>>) {

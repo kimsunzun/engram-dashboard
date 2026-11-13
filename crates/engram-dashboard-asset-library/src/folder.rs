@@ -206,6 +206,16 @@ impl LaunchIo {
     }
 }
 
+#[cfg(test)]
+impl LaunchIo {
+    /// (required budget left, advisory allowance left).
+    pub(crate) fn left(&self) -> (Duration, Duration) {
+        let required = *lock(&self.budget.left);
+        let advisory = *lock(&self.budget.advisory_left);
+        (required, advisory)
+    }
+}
+
 #[derive(Clone, Debug)]
 enum IoAnswer {
     Stat(FolderStatus),
@@ -275,7 +285,7 @@ impl Drop for Completion {
             } else {
                 SPAWN_FAILED
             };
-            unanswered(&self.key, reason, io::ErrorKind::Other)
+            unanswered(&self.key, reason)
         });
         {
             let mut slot = lock(&self.pending.answer);
@@ -384,8 +394,9 @@ impl BoundedIo {
     }
 
     /// The text of the file at the absolute `path`, at most [`READ_CAP`] bytes. `fresh` = ignore a stored answer and
-    /// any read in flight — start a new read. An op that did not answer, or a key not checked because the allowance
-    /// was spent, is `ErrorKind::TimedOut` with [`TIMEOUT`] or [`NOT_CHECKED`] as its text.
+    /// any read in flight — start a new read. A read that gave no answer about the file is `ErrorKind::TimedOut`, its
+    /// text saying why: [`TIMEOUT`] (the op did not answer in time), [`NOT_CHECKED`] (the allowance was spent) or a
+    /// failed worker ("spawn failed", "worker panicked") — the launch check treats them alike.
     pub fn read_one(
         &self,
         io: &LaunchIo,
@@ -464,7 +475,7 @@ impl BoundedIo {
         let allowance = io.budget.allowance(need);
         if lock(allowance).is_zero() {
             for (key, _) in todo {
-                let answer = unanswered(&key, NOT_CHECKED, io::ErrorKind::TimedOut);
+                let answer = unanswered(&key, NOT_CHECKED);
                 out.insert(key, answer);
             }
             return out;
@@ -478,7 +489,7 @@ impl BoundedIo {
                 if !fresh {
                     if let Some(pending) = inflight.get(&key) {
                         if need == Need::Advisory && pending.started.elapsed() > self.limit {
-                            let answer = unanswered(&key, NOT_CHECKED, io::ErrorKind::TimedOut);
+                            let answer = unanswered(&key, NOT_CHECKED);
                             out.insert(key, answer);
                         } else {
                             waits.push((key, Arc::clone(pending)));
@@ -509,7 +520,7 @@ impl BoundedIo {
             match pending.wait_until(deadline) {
                 Some(answer) => answered.push((key, answer, true)),
                 None => {
-                    let answer = unanswered(&key, TIMEOUT, io::ErrorKind::TimedOut);
+                    let answer = unanswered(&key, TIMEOUT);
                     answered.push((key, answer, need == Need::Required));
                 }
             }
@@ -548,7 +559,10 @@ impl BoundedIo {
             guard.answer = Some(run_op(&*ops, &guard.key, &job_path, list_cap));
         });
         if let Err(e) = self.spawn.spawn(WORKER_NAME, job) {
-            tracing::warn!(?path, "폴더 IO: 작업 스레드를 띄우지 못했다: {e}");
+            tracing::warn!(
+                ?path,
+                "folder-io spawn 실패, unanswered(SPAWN_FAILED)로 처리: {e}"
+            );
         }
     }
 }
@@ -565,15 +579,16 @@ fn run_op(ops: &dyn FolderOps, key: &IoKey, path: &Path, list_cap: usize) -> IoA
     }
 }
 
-/// The answer of a key whose op gave none — `reason` as the status text, or as a read error of `read_kind`.
-fn unanswered(key: &IoKey, reason: &str, read_kind: io::ErrorKind) -> IoAnswer {
+/// The answer of a key whose op gave none — `reason` as the status text, or as a `TimedOut` read error: a read with no
+/// answer about the file is one kind, whatever stopped it.
+fn unanswered(key: &IoKey, reason: &str) -> IoAnswer {
     let status = FolderStatus::Unreadable(reason.to_owned());
     match key {
         IoKey::Stat(_) => IoAnswer::Stat(status),
         IoKey::List(_) => IoAnswer::List(Err(status)),
         IoKey::Canonical(_) => IoAnswer::Canonical(Err(status)),
         IoKey::Read(_) => IoAnswer::Read(Err(ReadFail {
-            kind: read_kind,
+            kind: io::ErrorKind::TimedOut,
             text: reason.to_owned(),
         })),
     }
@@ -752,7 +767,7 @@ fn walk(
             ?path,
             count,
             error = %error,
-            "폴더 목록: 읽을 수 없는 하위 폴더 · 항목을 건너뛰었다"
+            "walk: 읽기 실패한 항목을 skipped에 넣고 건너뜀"
         );
     }
     Ok(FolderListing {
@@ -763,7 +778,7 @@ fn walk(
 }
 
 /// `path`'s components joined with `/` — the same spelling on every OS.
-fn slash_path(path: &Path) -> String {
+pub(crate) fn slash_path(path: &Path) -> String {
     path.components()
         .map(|part| part.as_os_str().to_string_lossy())
         .collect::<Vec<_>>()

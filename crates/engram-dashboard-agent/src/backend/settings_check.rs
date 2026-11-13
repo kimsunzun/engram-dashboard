@@ -295,7 +295,8 @@ pub struct FolderLoadSet {
     /// The rows of `loads` the launch itself carries from this folder in this mode — an `Instructions` row joins the
     /// merged instructions, a `SkillRoot` row is passed as an extra skill root. Empty when the backend reads the folder
     /// itself (it gets the folder path) or loads nothing from it in this mode, and in a
-    /// [`SettingsCheck::root_skills`] answer.
+    /// [`SettingsCheck::root_skills`] answer. An `Instructions` row is carried only after `read` of that file
+    /// succeeded — the launch check takes the file's text from that read.
     // ADR-0341
     pub carried: Vec<FolderLoad>,
 }

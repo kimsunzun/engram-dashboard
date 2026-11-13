@@ -13,6 +13,8 @@
 
 use std::path::{Path, PathBuf};
 
+use engram_dashboard_agent::launch::escape_controls;
+
 use crate::backends::Backends;
 use crate::catalog::{yaml_item, ItemContent, ItemKind};
 use crate::excerpt::excerpt;
@@ -43,6 +45,8 @@ struct Entry {
     content: ItemContent,
     /// `Err` = the stand-in, with why.
     file: Result<PathBuf, String>,
+    /// The file's text as read (not UTF-8 → U+FFFD) — empty for a stand-in.
+    text: String,
 }
 
 impl Builtins {
@@ -50,21 +54,23 @@ impl Builtins {
     /// `backends`, as in a library preset.
     pub fn new(dir: Option<&Path>, backends: &dyn Backends) -> Self {
         if dir.is_none() {
-            tracing::warn!("기본 제공 폴더가 없어 기본 제공 자산 없이 시작한다");
+            tracing::warn!("built-in 폴더 없음, 모든 built-in을 stand-in으로 시작");
         }
         let entry = |id| match dir.map(|dir| dir.join(file_of(id))) {
             None => stand_in(id, NO_FOLDER.to_owned()),
             Some(path) => match load(id, &path, backends) {
-                Ok((kind, content)) => Entry {
+                Ok((kind, content, text)) => Entry {
                     kind,
                     content,
                     file: Ok(path),
+                    text,
                 },
                 Err(why) => {
                     tracing::warn!(
                         builtin = id.id(),
                         path = ?path,
-                        "기본 제공 자산을 읽지 못해 없이 시작한다: {why}"
+                        "built-in load 실패, stand-in으로 대체: {}",
+                        escape_controls(&why)
                     );
                     stand_in(id, why)
                 }
@@ -75,6 +81,12 @@ impl Builtins {
             priming: entry(BuiltinId::Priming),
             default_settings: entry(BuiltinId::DefaultSettings),
         }
+    }
+
+    /// The priming's text as read when the service was made — what the merged instructions start with when a
+    /// resolution includes the priming. Empty for its stand-in (a resolution never includes a stand-in).
+    pub fn priming_text(&self) -> &str {
+        &self.priming.text
     }
 
     pub fn view(&self, id: BuiltinId) -> ItemView<'_> {
@@ -98,21 +110,21 @@ const NO_FOLDER: &str = "기본 제공 폴더 없음";
 /// Why a built-in YAML file that declares no `kind` stands in.
 const NO_KIND: &str = "`kind` 없음";
 
-/// The built-in `id` read from `path`, or why it cannot be used — a file that does not parse gives its reader's code
-/// and message.
+/// The built-in `id` read from `path` with the file's text, or why it cannot be used — a file that does not parse
+/// gives its reader's code and message.
 fn load(
     id: BuiltinId,
     path: &Path,
     backends: &dyn Backends,
-) -> Result<(ItemKind, ItemContent), String> {
+) -> Result<(ItemKind, ItemContent, String), String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let text = String::from_utf8_lossy(&bytes).into_owned();
     match id {
         BuiltinId::Priming => {
-            let text = String::from_utf8_lossy(&bytes);
             let content = ItemContent::Instruction {
                 excerpt: excerpt(&text),
             };
-            Ok((ItemKind::Instruction, content))
+            Ok((ItemKind::Instruction, content, text))
         }
         BuiltinId::DefaultPreset | BuiltinId::DefaultSettings => {
             match yaml_item(&bytes, backends) {
@@ -122,7 +134,7 @@ fn load(
                     let message = reason.args["message"].as_str().unwrap_or_default();
                     Err(format!("{}: {message}", reason.code))
                 }
-                Some(item) => Ok(item),
+                Some((kind, content)) => Ok((kind, content, text)),
             }
         }
     }
@@ -168,6 +180,7 @@ fn stand_in(id: BuiltinId, why: String) -> Entry {
         kind,
         content,
         file: Err(why),
+        text: String::new(),
     }
 }
 
