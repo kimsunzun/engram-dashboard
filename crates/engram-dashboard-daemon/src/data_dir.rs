@@ -177,6 +177,7 @@ fn install_root_of(exe: &Path) -> Option<PathBuf> {
 /// (the asset library stands in for what it cannot read).
 // ADR-0092
 // ADR-0361
+// ADR-0368
 // TRD S25 step-17
 pub fn find_builtin_dir() -> Option<PathBuf> {
     builtin_dir_of(&std::env::current_exe().ok()?)
@@ -188,6 +189,7 @@ fn builtin_dir_of(exe: &Path) -> Option<PathBuf> {
 
 /// The built-in folder's name under the install root — `scripts/build-release.ps1` ships a folder of this name beside
 /// the exes.
+// ADR-0368
 const BUILTIN_DIR: &str = "builtin";
 
 fn find_workspace_root(start: &Path) -> Option<PathBuf> {

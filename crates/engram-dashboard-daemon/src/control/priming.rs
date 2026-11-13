@@ -241,6 +241,7 @@ pub struct FilePrimingProvider {
     base_dir: PathBuf,
 }
 
+// ADR-0368
 const REL_MCP_PRIMARY: &str = "builtin/instructions/priming.md";
 const ENV_OVERRIDE: &str = "ENGRAM_PRIMING_FILE";
 

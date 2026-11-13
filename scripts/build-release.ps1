@@ -58,6 +58,7 @@ $BuiltinSrc  = Join-Path $ProjectRoot $BuiltinDirName
 $ExpectedExes    = @('engram-dashboard.exe', 'engram-dashboard-daemon.exe', 'engram.exe')
 $ExpectedPrompts = @('engram-help.md')
 # Paths relative to builtin/, '/'-separated — the file names are the asset library's builtin::file_of (B14).
+# ADR-0368
 $ExpectedBuiltins = @('presets/default.yaml', 'instructions/priming.md', 'settings/default.yaml')
 # ADR-0294 · ADR-0100: third-party license notices — the runtime does not read them, so they are unrelated to the co-location invariant above, and are only
 #   shipped at the top level next to the exes (the manifest tripwire sees them together with the other items). Not kept in the repository — step (0) below regenerates them on every build.

@@ -81,8 +81,8 @@
 //! ★Two holes remain★ — because members are identified by the `engram-dashboard` **name prefix** (ADR-0151 「개명 함정」 (the rename trap)).
 //! (a) Depending on a workspace member without that prefix passes this gate untouched. (b) If this crate drops that
 //! prefix, this gate turns red (`-p` dies or its own line loses the prefix), but the cap gates and messaging name
-//! regex of **other** crates can no longer see edges going to this crate (the list is in CLAUDE.md
-//! 「빌드·검증 명령」 (build and verification commands) — not copied here).
+//! regex of **other** crates can no longer see edges going to this crate (the list is in `ci.yml` — the
+//! messaging isolation step — and `docs/testing-strategy.md`; not copied here).
 //!
 //! **② Tauri import 0** (ADR-0003):
 //! `rg "^\s*use tauri" crates/engram-dashboard-transport/src/` → **0 lines**.
