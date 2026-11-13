@@ -1,7 +1,7 @@
 # ADR-0334: Launch materials are passed through a port — resolution in asset-library, flag translation and backend settings knowledge in backend
 
-- 상태: 제안 (2026-10-31, basis: main decisions M2 · M16 · M18 (reported — the user may object) · M63 · M72 (re-review r7 · r8 — reported) · TRD review #2 · #3 · CLAUDE.md 「백엔드 확장」) · 부분 폐기 by ADR-0359 (decision 3 schema source and CLI version check and raw text to JSON and the port merge and unknown-key handling and the fetch port)
-- 관련: ADR-0004 (backend knowledge isolation) · ADR-0311 · ADR-0327 · ADR-0316 · ADR-0337 · TRD §1-4 port table · §1-5 · §7 3 · Amended by ADR-0359 (decision 3 schema source and CLI version check and raw text to JSON and the port merge and unknown-key handling and the fetch port)
+- 상태: 제안 (2026-10-31, basis: main decisions M2 · M16 · M18 (reported — the user may object) · M63 · M72 (re-review r7 · r8 — reported) · TRD review #2 · #3 · CLAUDE.md 「백엔드 확장」) · 부분 폐기 by ADR-0359 (decision 3 schema source and CLI version check and raw text to JSON and the port merge and unknown-key handling and the fetch port) · 부분 폐기 by ADR-0367 (decision 3 and 영향, the port members and what a new backend adds)
+- 관련: ADR-0004 (backend knowledge isolation) · ADR-0311 · ADR-0327 · ADR-0316 · ADR-0337 · TRD §1-4 port table · §1-5 · §7 3 · Amended by ADR-0359 (decision 3 schema source and CLI version check and raw text to JSON and the port merge and unknown-key handling and the fetch port) · Amended by ADR-0367 (decision 3 and 영향, the port members and what a new backend adds)
 
 ## 맥락
 When an agent starts, the attached presets are expanded and the instructions, skills and settings are turned into CLI flags and loaded. Who knows the expansion, the flags, and the settings format that differs per backend?
