@@ -615,6 +615,7 @@ fn status_of(error: &io::Error) -> FolderStatus {
 /// entries already read are kept) or an entry whose type cannot be read is left out and named in
 /// [`FolderListing::skipped`], and the walk goes on; one warning per listing names the first item left out and the
 /// count.
+// ADR-0363
 pub struct StdFolderOps;
 
 impl FolderOps for StdFolderOps {
@@ -693,6 +694,7 @@ fn read_level(dir: &Path) -> io::Result<Level> {
 }
 
 /// The walk of [`StdFolderOps::list`] over a level reader (tests count the entries it reads).
+// ADR-0363
 fn walk(
     root: &Path,
     cap: usize,

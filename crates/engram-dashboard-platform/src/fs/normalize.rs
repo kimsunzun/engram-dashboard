@@ -60,6 +60,7 @@ const RESERVED_NAMES: [&str; 28] = [
 /// trailing spaces trimmed, is compared — stricter than Win32 for a few spellings, never looser. `CONSOLE` ·
 /// `nulx.md` · `com10.txt` are not reserved. The rule is the same on every OS: a caller that keeps names usable on
 /// Windows asks it whatever OS it runs on.
+// ADR-0362
 pub fn is_reserved_device_name(name: &str) -> bool {
     let stem = name.split('.').next().unwrap_or(name).trim_end_matches(' ');
     RESERVED_NAMES

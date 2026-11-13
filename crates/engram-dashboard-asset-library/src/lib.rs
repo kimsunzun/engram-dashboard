@@ -89,6 +89,7 @@ pub const LIBRARY_READ_CAP: u64 = 16 * 1024 * 1024;
 
 /// The code of a path that lies at or below a link inside the library (`args` = `{path}`) — such a path is never read
 /// or merged (U1).
+// ADR-0365
 // TRD S25 step-7 B8
 pub const PATH_THROUGH_LINK: &str = "path-through-link";
 
@@ -182,6 +183,7 @@ pub struct RefreshReport {
     /// Re-read `.yaml` / `.yml` files that declare no `kind` — not listed.
     pub no_kind: Vec<LibPath>,
     /// Links below the root that were not entered.
+    // ADR-0365
     pub skipped_links: Vec<LibPath>,
     /// Where the walk or a read failed (`None` = the root), with the error; those items are kept as they were. When
     /// nothing could be scanned (no root, the root unreadable, or a refresh's own scan of a folder with a dot or temp

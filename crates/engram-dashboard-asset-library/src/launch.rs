@@ -70,7 +70,7 @@ use crate::{extra_args, output_format, LibraryService, Want, LIBRARY_READ_CAP};
 
 /// The code of a library file a launch check reached but could not read (`args` = `{path, why}`) — problem ②: the
 /// launch never runs on what an earlier read held.
-// Added in step-7 P9 where the TRD is silent; the doc pass adds it to TRD S25 step-7 B8.
+// Added in step-7 P9 where the TRD was silent — TRD S25 step-7 B8 · B38.
 pub const LIBRARY_READ_FAILED: &str = "library-read-failed";
 
 /// The `PrepareError::Failed` prefix of a folder file `prepare` could not get an answer for — a slow read is not a
@@ -446,6 +446,7 @@ impl LibraryService {
             };
             resolve(&target, &lookup, backends)
         });
+        // ADR-0361
         // User decision 2026-11-12: block ④ is the whole answer — no folder IO, no command-line judgment.
         if resolution
             .problems
@@ -459,6 +460,7 @@ impl LibraryService {
         if let Some(root) = &root {
             self.mark_links(root, &mut resolution);
         }
+        // ADR-0366
         // B26: the merge needs nothing the later steps find, so it is handed off as soon as the overlay is complete.
         if !overlay.items.is_empty() {
             self.hand_off_merge(noted, overlay.items.clone());
@@ -600,6 +602,7 @@ impl LibraryService {
             config_args: &config_args,
             instructions: (!merged.is_empty()).then_some(merged.as_str()),
         };
+        // ADR-0361
         if let Err(reason) = check.command_line_fits(&line) {
             resolution.problems.push(BlockReason::Broken {
                 item: format!("command-line:{word}"),
@@ -608,6 +611,7 @@ impl LibraryService {
             });
         }
         // ADR-0353: the backend's translation applies the same rule to the folder the spawn gets.
+        // ADR-0361
         if let Some(reason) = check.working_folder_blocks(&cwd, mode) {
             resolution.problems.push(BlockReason::Broken {
                 item: format!("working-folder:{}", cwd.to_string_lossy()),
@@ -659,6 +663,7 @@ impl LibraryService {
     /// Step 3's library half: every library preset `want` reaches and every library file those presets list, read
     /// fresh with the store through the partial scan a refresh of that path runs — so a path is admitted exactly as
     /// the scan admits it (names, links, kinds) and each read draws its number first.
+    // ADR-0365
     fn read_overlay(&self, root: &Path, want: &Want) -> Overlay {
         let mut overlay = Overlay {
             root: root.to_path_buf(),
@@ -1059,6 +1064,7 @@ impl Overlay {
 }
 
 /// The notices of one folder entry's listing: entries left out, and a listing cut at its cap. Neither blocks.
+// ADR-0363
 fn listing_notices(folder: &Path, listing: &FolderListing) -> Vec<Notice> {
     let folder = folder.to_string_lossy();
     let mut notices = Vec::new();

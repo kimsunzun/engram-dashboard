@@ -1,6 +1,6 @@
 # ADR-0364: Six notice codes have their own facts-only wording: the three step-6 codes, folder-listing-partial, folder-listing-skipped, builtin-unavailable
 
-- 상태: 확정 (2026-11-13, 근거: S25 step 7 — main's wording for the three new codes (B22 · P6 · P8 hold 2); user decisions D2 (2026-11-11) and B29 (2026-11-12) on the codes not added · landed `72effa1d` (P6) · `f42d8538` (P8))
+- 상태: 확정 (2026-11-13, 근거: S25 step 7 — main's wording for the three new codes (B22 · P6 · P8 hold 2); user decisions D2 (2026-11-11) and B29 (2026-11-12) on the codes not added · landed `d8bd75db` (P2 — `folder-listing-partial`) · `72effa1d` (P6) · `f42d8538` (P8))
 - 관련: Amends ADR-0357 (decision 3 and the 영향 wording arms, the codes with their own wording) · ADR-0337 (decision 3 — facts only, no fix) · ADR-0341 (decision 5 — notices once per agent) · ADR-0361 (`builtin-unavailable`) · ADR-0363 (`folder-listing-skipped`) · child TRD `docs/process/S25-preset-library/trd-asset-library.md` B22 · D2 · B29
 
 ## 맥락
@@ -9,7 +9,7 @@ ADR-0357 decision 3 gives three codes their own wording (`codex-terminal-omitted
 - `folder-listing-skipped` — folders or entries below a folder entry could not be read and were left out (ADR-0363);
 - `builtin-unavailable` — a built-in could not be used and an empty stand-in was applied (ADR-0361).
 Two of them report a failure, and all three need a value (the folder, the skipped paths, the built-in and why) to be useful. The generic wording says the notice is intended behavior and lists bare values; for a failure that sentence is false. ADR-0357 「영향」 names the wording arms of `own_wording` as the three step-6 constants only.
-Step 7 also dropped notices that earlier drafts planned: D2 removed `settings-backend-field-absent` and `item-other-backend`, and the user withdrew `working-folder-unchecked` (B29), which had departed from ADR-0357 decision 3 with a fallback of its own.
+Step 7 also dropped notices that earlier drafts planned: D2 removed `settings-backend-field-absent` and `item-other-backend`, and the user withdrew `working-folder-unchecked` (B29), which had departed from ADR-0357 decision 3 with a fallback of its own. P2 (`d8bd75db`) had also given three schema codes their own wording — `settings-schema-unavailable`, `settings-schema-outdated`, `settings-unknown-key` — and P4 (`2a70d1ee`) removed them with the schema check (ADR-0359).
 
 ## 결정
 1. **Six codes have their own wording** in agent `launch.rs` `own_wording`: the three of ADR-0357 decision 1 (unchanged) and
@@ -26,7 +26,7 @@ Step 7 also dropped notices that earlier drafts planned: D2 removed `settings-ba
 - **A `working-folder-unchecked` notice when the working-folder canonicalize does not answer** (drafts 9–11, with its own fallback for malformed `args`) — it told the caller nothing actionable; its one consequence (a resumed claude session may miss an earlier conversation when the cwd spelling differs) is claude-only and rare. User 2026-11-12: 「뭔지 이해안된다. 나 자야되니 A로 너가 해」, taking main's recommendation to log only. 약함 — 사용자 직접 기각.
 
 ## 근거
-- Wording: `folder-listing-partial` — main (child TRD B22, "wording = main's call (as U3)"); `folder-listing-skipped` — main with the user's skip-and-tell decision (ADR-0363; P6 `72effa1d`); `builtin-unavailable` — main with the user's run-and-tell decision (ADR-0361; P8 `f42d8538`).
+- Wording: `folder-listing-partial` — main (child TRD B22, "wording = main's call (as U3)"; P2 `d8bd75db`); `folder-listing-skipped` — main with the user's skip-and-tell decision (ADR-0363; P6 `72effa1d`); `builtin-unavailable` — main with the user's run-and-tell decision (ADR-0361; P8 `f42d8538`).
 - User decisions D2 (2026-11-11) and B29 (2026-11-12) — child TRD §10.
 - Code: agent `launch.rs` `own_wording` (six arms), `notice_text` (the generic branch and the fallback), the constants `FOLDER_LISTING_PARTIAL` · `FOLDER_LISTING_SKIPPED` · `BUILTIN_UNAVAILABLE` and their wording and fallback tests.
 

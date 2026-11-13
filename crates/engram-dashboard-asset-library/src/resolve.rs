@@ -237,6 +237,7 @@ impl Resolution {
 /// catalog cannot be trusted, so nothing computed from it is in the answer. The rows of unparsed attached paths (from
 /// the profile) and the built-in stand-in notice go too: while the root is unusable the block is one line (user
 /// decision 2026-11-12).
+// ADR-0361
 pub fn resolve(target: &Target, lookup: &dyn Lookup, backends: &dyn Backends) -> Resolution {
     let library_attached = target
         .presets

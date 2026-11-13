@@ -213,6 +213,7 @@ pub struct LaunchKit {
 /// working folder's path (the backend refuses that folder). `via` = the presets that reference it (the chain it came
 /// through) — empty for the two tagged rows.
 // ADR-0341
+// ADR-0361
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BlockReason {
     /// 붙은 파일이 없다.
@@ -372,6 +373,7 @@ pub const CODEX_SAME_NAME_SKILLS: &str = "codex-same-name-skills";
 
 /// Notice code: a folder entry's listing stopped at [`FOLDER_LISTING_CAP`] entries, so only part of the folder was
 /// looked at. `args` = `{folder}`.
+// ADR-0364
 pub const FOLDER_LISTING_PARTIAL: &str = "folder-listing-partial";
 
 /// How many entries a folder-entry listing reads before it stops — the one value the [`FOLDER_LISTING_PARTIAL`]
@@ -380,6 +382,8 @@ pub const FOLDER_LISTING_CAP: usize = 10_000;
 
 /// Notice code: subfolders or entries below a folder entry could not be read and were left out of its listing.
 /// `args` = `{folder, paths: [folder-relative paths, walk order]}`.
+// ADR-0363
+// ADR-0364
 pub const FOLDER_LISTING_SKIPPED: &str = "folder-listing-skipped";
 
 /// How many of [`FOLDER_LISTING_SKIPPED`]'s paths its sentence names; the rest are counted.
@@ -387,7 +391,8 @@ const FOLDER_LISTING_SKIPPED_NAMED: usize = 3;
 
 /// Notice code: a built-in asset could not be read, so the resolution applied an empty stand-in for it. `args` =
 /// `{path, why}` — `path` = the built-in's spelling (`engram:/default`), `why` = why it could not be read.
-// TRD S25 step-7 §3-7
+// ADR-0361
+// ADR-0364
 pub const BUILTIN_UNAVAILABLE: &str = "builtin-unavailable";
 
 /// The wording of a notice for a person or an LLM reading the reply — Korean, factual, recommends no fix (TRD S25
@@ -404,6 +409,7 @@ pub const BUILTIN_UNAVAILABLE: &str = "builtin-unavailable";
 /// omission is intended.
 /// Control characters in the code and the listed values (file names from the library — outside input) are escaped
 /// (`\n`, `\u{1b}`), so the line stays one line and carries no terminal escape when the CLI prints it.
+// ADR-0364
 pub fn notice_text(notice: &Notice) -> String {
     if let Some(text) = own_wording(notice) {
         return text;
@@ -425,6 +431,7 @@ pub fn notice_text(notice: &Notice) -> String {
 // ADR-0337
 // ADR-0341
 // ADR-0355
+// ADR-0364
 fn own_wording(notice: &Notice) -> Option<String> {
     let args = notice.args.as_object()?;
     match notice.code.as_str() {

@@ -21,6 +21,7 @@
 //!   name-surrogate reparse point, junctions included) and identity comes from platform `file_identity`.
 // ADR-0324
 // ADR-0335
+// ADR-0365
 // TRD S25 step-7 §3-5
 
 use std::collections::HashMap;
@@ -56,6 +57,7 @@ pub trait LibraryStore: Send + Sync {
     ) -> io::Result<ScanListing>;
     /// The first folder or file of `rel`, from the root down, that is a link (U1). The root itself is not counted.
     /// `Ok(None)` = no link, including when a name of `rel` does not exist (nothing below it can be a link).
+    // ADR-0365
     fn first_link(&self, root: &Path, rel: &LibPath) -> io::Result<Option<LibPath>>;
     /// The bytes of the file at `path`, at most `cap` bytes — a longer file is `InvalidData` (base `read_capped`'s
     /// rule), read only up to `cap + 1`.

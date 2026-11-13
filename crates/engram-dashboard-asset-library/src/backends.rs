@@ -7,6 +7,7 @@
 use engram_dashboard_agent::backend::{settings_check_for, settings_checks, SettingsCheck};
 
 /// The registered backend settings checks.
+// ADR-0367
 pub trait Backends: Send + Sync {
     /// The settings check of the backend named `word`, ASCII case-insensitive. `None` = no backend of that word has one
     /// (an unknown tag or raw-field word).
@@ -18,6 +19,7 @@ pub trait Backends: Send + Sync {
 
 /// The production registry: agent's `settings_check_for` / `settings_checks()`. ★The only caller of those two in this
 /// crate★ — everything else takes `&dyn Backends`.
+// ADR-0367
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AgentBackends;
 

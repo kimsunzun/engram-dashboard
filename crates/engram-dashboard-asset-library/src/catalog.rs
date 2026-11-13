@@ -424,6 +424,7 @@ impl Catalog {
     /// decision 5). Every item applied here is marked racy, so the next scan re-reads it: when the read happened is
     /// not known here, and a merge can land long after it (behind the write lock). Returns the touched keys — pass
     /// them to [`Catalog::recompute_derived`].
+    // ADR-0366
     pub fn apply_items(&mut self, items: Vec<Item>, may_insert: bool) -> Vec<PathKey> {
         items
             .into_iter()
@@ -437,6 +438,7 @@ impl Catalog {
     /// its nearest listed folder (for a skill: its own folder first) is later than its `read_seq`, and not when that
     /// folder or the file is in `kept`; an item inside an absent range is removed when the range's number is later.
     /// Items outside the range are untouched. Returns the touched keys (removed ones included).
+    // ADR-0366
     pub fn apply_scan(&mut self, result: ScanResult) -> Vec<PathKey> {
         let ScanResult {
             range,
@@ -517,6 +519,7 @@ impl Catalog {
 
     /// Removes the item at `key` only when `absent_at` is later than its `read_seq`. `true` = removed; pass a removed
     /// key to [`Catalog::recompute_derived`].
+    // ADR-0366
     pub fn remove(&mut self, key: &PathKey, absent_at: u64) -> bool {
         match self.items.get(key) {
             Some(item) if absent_at > item.read_seq => {

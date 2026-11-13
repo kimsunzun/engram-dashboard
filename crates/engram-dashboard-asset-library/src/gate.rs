@@ -286,6 +286,7 @@ impl Gate {
     /// queued full scan or runs one itself and takes its share (decision 6); one that finds a full scan (or a
     /// first-start root change) already walking waits for it and then scans its folder like any refresh. When the one
     /// it joined or waited for is not published it goes through a full scan once more.
+    // ADR-0366
     pub(crate) fn refresh(&self, range: Option<&LibPath>, build: Build) -> Outcome {
         let mut turns = lock(&self.turns);
         let mut went_again = false;
@@ -342,6 +343,7 @@ impl Gate {
     /// the new root outside every lock with empty tags; one write lock clears the catalog, applies that build,
     /// publishes the root, raises the root generation and marks the first scan raised. A walk that fails at the root
     /// publishes nothing. (Step 0, the stat of the new root, is the caller's — before this call.)
+    // ADR-0366
     pub(crate) fn change_root(
         &self,
         new_root: PathBuf,
@@ -357,6 +359,7 @@ impl Gate {
     /// generation moved since `noted`; else `f(catalog, may_insert)` with `may_insert` false when a swap-in landed in
     /// between. `f` applies per item (the later `read_seq` wins — `Catalog::apply_items`) and returns the touched
     /// keys, whose derived data is recomputed here. Takes no ticket and never waits for a scan.
+    // ADR-0366
     pub(crate) fn late_merge(
         &self,
         noted: Numbers,

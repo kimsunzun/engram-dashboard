@@ -2,13 +2,14 @@
 //! folder (a constructor value), read once when the service is made.
 //!
 //! - The id set is closed ([`BuiltinId`] — B23); file names per [`file_of`] (B14).
-//! - **A built-in that cannot be read never blocks** (M7 · B15): with no folder, or a file that cannot be read,
-//!   declares no `kind` or does not parse, that built-in is an empty in-memory stand-in with no file — the built-in
-//!   preset lists nothing, the priming loads nothing (`include_priming` stays false), the settings carry no field — a
-//!   warning is logged, and the stand-in keeps why, which a resolution that reaches it tells as a
+//! - **A built-in that cannot be read never blocks** (ADR-0361 decision 2): with no folder, or a file that cannot be
+//!   read, declares no `kind` or does not parse, that built-in is an empty in-memory stand-in with no file — the
+//!   built-in preset lists nothing, the priming loads nothing (`include_priming` stays false), the settings carry no
+//!   field — a warning is logged, and the stand-in keeps why, which a resolution that reaches it tells as a
 //!   `builtin-unavailable` notice.
 // ADR-0315
 // ADR-0327
+// ADR-0361
 // TRD S25 step-7 §3-7
 
 use std::path::{Path, PathBuf};

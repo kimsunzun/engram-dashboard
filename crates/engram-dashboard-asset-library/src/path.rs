@@ -50,8 +50,8 @@ pub enum PathError {
 /// The trailing `.` / space rule and the reserved-name rule hold on every OS. Win32 trims a trailing `.` or space, so
 /// `rules/a.md.` would open `rules\a.md` and `.. ` would name a different entry than the one spelled; a reserved device
 /// name (platform `fs::is_reserved_device_name` — `rules/CON`, `nul.md`, `COM1.txt`, `COM¹.md`) would make
-/// [`LibPath::to_path`] open a device. Both amend ADR-0315 decision 2 (main 2026-11-11, recorded in the step-7 doc
-/// pass).
+/// [`LibPath::to_path`] open a device. Both amend ADR-0315 decision 2 (ADR-0362).
+// ADR-0362
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct LibPath(RelativePathBuf);
 
@@ -142,6 +142,7 @@ impl LibPath {
     /// this reference along. `None` = `self` is not `from` or below it. The leading names are matched name by name by
     /// the platform path key (on Windows `Team/rules/a.md` is below `team/rules`); the answer is `to` as spelled
     /// followed by the rest of `self` as spelled.
+    // ADR-0362
     pub fn replace_prefix(&self, from: &LibPath, to: &LibPath) -> Option<LibPath> {
         let mut names = self.names();
         for want in from.names() {
