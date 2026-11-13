@@ -1,7 +1,7 @@
 # ADR-0315: A reference = one form, the `/` path from the library root + built-in `engram:/`
 
-- 상태: 제안 (2026-10-31, basis: user decisions memos 101–103 (2026-10-15 「ㅇㅇ 지정한 폴더로 확정」) · PRD R3 · Δ1)
-- 관련: ADR-0312 · ADR-0335 (place = identity) · ADR-0325 · TRD `docs/process/S25-preset-library/trd.md` §1-2 `LibPath` · §7 2 · research `docs/research/preset-asset-reference-base-survey-2026-10-14.md` (+ 2026-10-15 addendum)
+- 상태: 제안 (2026-10-31, basis: user decisions memos 101–103 (2026-10-15 「ㅇㅇ 지정한 폴더로 확정」) · PRD R3 · Δ1) · 부분 폐기 by ADR-0362 (decision 2, the LibPath name rules)
+- 관련: ADR-0312 · ADR-0335 (place = identity) · ADR-0325 · TRD `docs/process/S25-preset-library/trd.md` §1-2 `LibPath` · §7 2 · research `docs/research/preset-asset-reference-base-survey-2026-10-14.md` (+ 2026-10-15 addendum) · Amended by ADR-0362 (decision 2, the LibPath name rules)
 
 ## 맥락
 In what form do we write a reference inside a preset (skill, instruction, settings, another preset)?
