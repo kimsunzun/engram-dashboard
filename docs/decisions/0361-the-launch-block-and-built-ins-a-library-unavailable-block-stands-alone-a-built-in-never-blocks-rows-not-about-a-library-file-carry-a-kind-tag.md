@@ -1,20 +1,38 @@
 # ADR-0361: The launch block and built-ins: a library-unavailable block stands alone, a built-in never blocks, rows not about a library file carry a kind tag
 
-- 상태: 확정 (2026-11-13, 근거: TODO)
-- 관련: Amends ADR-0327 (decision 4, a built-in that cannot be used) · Amends ADR-0360 (decision 5, failures listed together in one reply) · TODO 나머지 관련
+- 상태: 확정 (2026-11-13, 근거: user decisions 2026-11-12 (S25 step 7 P8 holds 1 and 2) and 2026-11-13 (P9 — item tags) · landed `f42d8538` (P8) · `d445f03e` (P9))
+- 관련: Amends ADR-0327 (decision 4, a built-in that cannot be used) · Amends ADR-0360 (decision 5, failures listed together in one reply) · ADR-0315 (decision 3 — `engram:/` never parses as a `LibPath`; the tags below follow the same separation) · ADR-0341 (folder entries — the `folder:<path>` item form) · ADR-0357 (notice wording) · ADR-0324 (the in-memory `Catalog`) · parent TRD `docs/process/S25-preset-library/trd.md` §1-3 8 (block reasons) · child TRD `docs/process/S25-preset-library/trd-asset-library.md` §3-7 · §3-8 steps 5–7 and 9 · B15
 
 ## 맥락
-TODO — 무슨 문제를 풀어야 했나.
+Step 7 P8 built the resolution (`resolve`), the built-ins (`Builtins`) and the read entrances; P9 built the launch check (`check_in`). Three rules written before the code turned out wrong once it ran.
+
+1. **Block ④ beside ①–③.** The parent TRD §1-3 8 lists four block reasons in one category, shown together, and the agent's problem list carries ④ next to the other rows; ADR-0360 decision 5 says the launch's failures are listed together in one reply. With a library preset attached and the library root unusable, the catalog cannot be trusted: with the root unset it is empty, so every attached library preset also became a ① `not-found` row next to ④; after the root went away, the stale catalog still answered and rows computed from it sat next to ④. The launch check (TRD §3-8 steps 5–7) would also have added folder rows and command-line or working-folder rows to the same block.
+2. **A built-in that does not parse blocks.** Child TRD §3-7 made a built-in file that reads but does not parse a broken item. The built-in preset 「기본」 is attached by default, so one defective distribution file would block every launch of every agent. A missing built-in folder already started without priming and logged a warning only (ADR-0327 decision 4 · B15), so the caller was never told.
+3. **Untagged refusal rows.** The command-line fit refusal used the backend word as `BlockReason.item` and the working-folder refusal the bare cwd path. The `BlockReason` doc allowed only a library path, `engram:/…` or `folder:<path>`, and a row `codex` could not be told apart from a library file named `codex`.
 
 ## 결정
-TODO — 무엇으로 정했나.
+1. **Block ④ stands alone.** When a library preset is attached and the library root is not usable (`RootState` not `Ok` — unset, missing, not a folder, or a root stat that does not answer), the resolution is exactly one row, ④ `library-unavailable`: no expansion, no item rows, no folder rows, no rows for unparsed attached paths, no notices. Nothing is computed from the catalog while the root is unusable. The launch check treats a ④ resolution as the whole block: it runs no folder IO (required or advisory) and adds no command-line or working-folder row beside it. The read entrances (problem list, `agent.presets`, tree ⛔) give the same one row, because they come from the same `resolve`. ADR-0360 decision 5 ("failures are listed together in one reply") holds whenever the root is usable; with ④ the reply is ④ alone.
+2. **A built-in never blocks.** A built-in that cannot be used — no built-in folder, its file missing or unreadable, a YAML file with no `kind`, or a file that does not parse — is an empty in-memory stand-in: the built-in preset lists nothing, the priming loads nothing, the settings carry no field. The stand-in keeps why it stands in; construction logs a warning. A resolution that reaches a stand-in gives the notice `builtin-unavailable` with `args` `{path, why}` (`path` = the built-in's spelling, e.g. `engram:/default`; `why` = the reason) once per reached built-in. A built-in that is not reached gives no notice. The `why` words Engram writes itself are Korean (`기본 제공 폴더 없음`, `` `kind` 없음 ``); a file that does not parse gives its reader's code and message. The notice has its own wording (the wording record amending ADR-0357 decision 3). This replaces ADR-0327 decision 4 ("if `builtin\` is absent, it comes up without priming — it does not block"): the no-block rule now covers every way a built-in can fail, and the caller is told.
+3. **Refusal rows not about a library file carry a kind tag** in `BlockReason.item`, the way a folder entry carries `folder:<path>`: `command-line:<backend word>` for the command-line fit refusal and `working-folder:<path>` for the working-folder rule. The tags are machine-readable English data; the screen localizes them. The item forms are therefore: a library path, `engram:/…`, `folder:<path>`, `command-line:<backend word>`, `working-folder:<path>`.
 
 ## 거부한 대안
-- TODO 대안 A — 왜 버렸나.
-- TODO 대안 B — 왜 버렸나.
+- **Show ④ beside ①–③** (parent TRD §1-3 8 as written; P8 before the holds) — the empty catalog turned every attached library preset into a ① row next to ④. User: 「줄 하나만 나오게 하는게 맞음.」 약함 — 사용자 직접 기각.
+- **Drop only the ① `not-found` rows on library references that follow from an empty catalog, keep the other rows** (the first scope of hold 1 — only `NOT_FOUND` rows on library references, only while the root is not `Ok`) — with a stale catalog, rows computed from it still sat next to ④. User on the stale case: 「라이브러리 폴더가 통째로 사라졌으면 한줄 얘기하면 되는거 아님?」 약함 — 사용자 직접 기각.
+- **A built-in that does not parse is a broken item that blocks** (child TRD §3-7 as written; P8 before the holds) — with 「기본」 attached by default, one defective distribution file blocks every launch. User: 「그냥 실행하고 알림만 하면 될듯」. 약함 — 사용자 직접 기각.
+- **A missing or failing built-in is logged only, with no notice** (B15 for a missing built-in) — the caller launches without priming and is never told; the user asked for a notice (「알림만」). Main made one rule for every stand-in cause instead of a notice for the parse failure only.
+- **Keep the bare backend word and cwd path as `item`** — `codex` cannot be told apart from a library file named `codex`; the agent `BlockReason` doc allowed no such form (code: agent `launch.rs` `BlockReason`).
+- **Localized (Korean) tags** — `item` is data an LLM caller reads and the screen renders, and the existing form `folder:` is English; main chose English tags like `folder:` and left localization to the screen (user: 「관행으로 너가 A가 좋다고 하면 그렇게하면됨」). 약함 — 사용자 직접 기각 (the user delegated the choice).
 
 ## 근거
-TODO — 실측·리뷰 등 결정의 뒷받침.
+- User decisions: hold 1 (2026-11-12) 「줄 하나만 나오게 하는게 맞음.」, then 「라이브러리 폴더가 통째로 사라졌으면 한줄 얘기하면 되는거 아님?」; hold 2 (2026-11-12) 「그냥 실행하고 알림만 하면 될듯」; item tags (2026-11-13) 「관행으로 너가 A가 좋다고 하면 그렇게하면됨」 — main chose `command-line:` / `working-folder:` as machine-readable English tags like `folder:`.
+- Main: one rule for every stand-in cause; the notice code, its `args` and its wording; P9 treats a ④ resolution as the whole block (`.review-s25-d9/p8-holds-carry.md`).
+- Review: the two holds — delta review full (lead + cross-family) PASS and lead re-reviews PASS (P8 `f42d8538`); item tags — code review deep, round 4 PASS (P9 `d445f03e`).
+- Code: asset-library `resolve.rs` `resolve` (the early return for ④), `builtin.rs` (`Builtins`, the stand-in and its reason), `launch.rs` `check_in` (the ④ resolution as the whole block; the two tagged rows); agent `launch.rs` `BUILTIN_UNAVAILABLE`, `BlockReason`.
 
 ## 영향 / 불변식
-TODO — 이 결정이 묶는 코드·게이트. 어기면 무엇이 깨지나.
+- `resolve` must not add any row or notice beside ④; a new block kind or notice computed from the catalog must stay behind the root check. A ④ resolution has no rows, so the read entrances' link probe (`mark_links`) has nothing to probe there.
+- `check_in` must not run folder IO or judge the command line or the working folder for a ④ resolution; otherwise the block becomes `[②…, ④]` against decision 1.
+- Built-ins never produce a block row. Not covered by decision 2, and unchanged: a built-in preset that parses but has a bad line, and a built-in settings file the backend refuses.
+- The `why` of `builtin-unavailable` is a diagnostic, and it is part of the notice fingerprint (agent `launch.rs`), so a changed failure shows the notice again under ADR-0341 decision 5. Deliberate: built-ins are read once, at construction.
+- Until the built-in folder ships (step 17), every launch carries a `builtin-unavailable` notice.
+- A new refusal row that is not about a library file must carry its own kind tag; an untagged `item` means a library path. The daemon's QA-only `QaBlockKits` still produces an untagged cwd item — step 8 aligns it. The screen wording for `command-line:` / `working-folder:` / `folder:` items is step 13's.
