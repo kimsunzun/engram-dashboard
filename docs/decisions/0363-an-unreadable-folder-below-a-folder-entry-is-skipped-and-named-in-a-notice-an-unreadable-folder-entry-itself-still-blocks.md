@@ -9,7 +9,7 @@ Main first proposed skipping, then proposed blocking after the lead reviewer poi
 
 ## 결정
 1. **Below a folder entry, a folder whose read fails (at open or part-way — the entries already read are kept) or an entry whose type cannot be read is left out of the listing, and the walk goes on.** The listing records the skipped paths (folder-relative, in walk order — `FolderListing.skipped`); the daemon log names the first one and the count.
-2. **The launch reply names what was skipped** with the notice `folder-listing-skipped`, `args` `{folder, paths}`. Its sentence names the first three paths and counts the rest (「외 n개」); the wording is its own (the wording record amending ADR-0357 decision 3). It does not block.
+2. **The launch reply names what was skipped** with the notice `folder-listing-skipped`, `args` `{folder, paths}`. Its sentence names the first three paths and counts the rest (「외 n개」); the wording is its own (ADR-0364). It does not block.
 3. **The folder entry itself still blocks when it cannot be read** — at open or part-way through its own top level — and when it is missing: ADR-0341 decision 6 stands for the entry. Only folders and entries below it are skipped.
 
 ## 거부한 대안
