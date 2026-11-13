@@ -23,7 +23,7 @@ on:
     # ★제외 목록(denylist)이다★ — 첫 줄 `'**'` 가 전부를 넣고(경로 필터가 없을 때의 기본 동작과 같다) `!` 줄이
     # 빼므로, 모르는 경로는 전부 "돈다"로 떨어진다. 포함 목록은 한 항목을 빠뜨리면 그 경로에서 게이트가
     # **조용히 사라지고**, 제외 목록은 빠뜨려도 **한 번 더 돌 뿐**이다. CI 에 닿는 경로는 흩어져 있고 이름만으로는
-    # 안 보인다(`prompts/` · `rust-toolchain.toml` · `vitest.config.ts` 같은 것).
+    # 안 보인다(`prompts/` · `builtin/` · `rust-toolchain.toml` · `vitest.config.ts` 같은 것).
     # `paths-ignore` 가 아니라 `paths` 인 것은 되살리기 때문이다 — 문서는 제외만 할 때 `paths-ignore`, 포함과
     # 제외를 섞을 때 `!` 를 붙인 `paths` 를 권하고, 한 이벤트에 둘을 함께 둘 수 없다(GitHub 문서 "Workflow
     # syntax" — `paths`/`paths-ignore` 절).
@@ -31,9 +31,11 @@ on:
     # `!` 줄을 더하면 도로 빠진다.
     # ★제외를 더하기 전에 그 경로 아래를 CI·빌드 스크립트·코드·테스트가 읽는지부터 본다 — 읽는 파일이 있으면
     # 끝에서 그 파일을 되살린다★. 빠진 경로만 바뀐 push 는 어떤 게이트도 보지 않는다.
-    # ★`**/*.md` 로 넓히지 말 것★ — `prompts/engram-help.md` 는 데몬이 실행 중에 읽어 help 화면으로 내고
-    # 데몬 시험이 그 파일을 읽으며(`crates/engram-dashboard-daemon/src/control/help.rs`), `prompts/` 의 두 파일은
-    # 배포판에 실린다(`scripts/build-release.ps1:50` manifest). 둘 다 확장자로는 문서와 구분되지 않는다.
+    # ★Do not widen this to `**/*.md`★ — the daemon reads `prompts/engram-help.md` at run time as the help screen and
+    # a daemon test reads it (`crates/engram-dashboard-daemon/src/control/help.rs`); tests read the priming
+    # `builtin/instructions/priming.md` (daemon `control/priming.rs` · asset-library `builtin.rs`); and both ship in the
+    # release (`scripts/build-release.ps1` manifest — `$ExpectedPrompts` · `$ExpectedBuiltins`). Neither is told apart
+    # from a doc by its extension.
     # 태그 push 에는 경로 필터가 평가되지 않는다(같은 절) — 위 `v*` 릴리즈 트리거는 이 목록과 무관하게 돈다.
     # `workflow_dispatch` 에는 경로 필터가 없다.
     # 받아들인 예외(같은 절): diff 가 3,000 파일을 넘고 필터에 맞는 파일이 앞 3,000 개 안에 없으면 돌지 않는다.
@@ -1801,7 +1803,7 @@ jobs:
             *..*) echo "FAIL — 태그에 '..' 이 있다(경로 상위 이동)"; exit 1 ;;
             *.)   echo "FAIL — 태그가 '.' 로 끝난다(Windows 가 파일명 끝 점을 잘라낸다)"; exit 1 ;;
           esac
-          # 경로 길이 상한 여유분. RUNNER_TEMP + 조립 폴더 + prompts/agent-priming.md 가 MAX_PATH 를
+          # 경로 길이 상한 여유분. RUNNER_TEMP + 조립 폴더 + builtin/instructions/priming.md 가 MAX_PATH 를
           # 넘지 않게 하는 안전 한도지 버전 형식 규칙이 아니다.
           if [ "${#TAG}" -gt 64 ]; then echo "FAIL — 태그가 64자를 넘는다(${#TAG})"; exit 1; fi
           echo "PASS — tag name is usable as a path/file name"
@@ -1972,7 +1974,7 @@ jobs:
       # 프로세스 종료코드다. $ErrorActionPreference 는 네이티브 종료코드를 잡지 않으므로 명시 확인도 둔다.
       #
       # -OutDir 를 주는 이유: 조립 폴더 이름이 곧 zip 의 루트 폴더 이름이 된다. 버전이 박힌 폴더로
-      # 조립해 두면 사용자가 압축을 풀었을 때 3 exe + prompts/ 가 한 폴더에 함께 떨어진다
+      # 조립해 두면 사용자가 압축을 풀었을 때 3 exe + prompts/ · builtin/ 이 한 폴더에 함께 떨어진다
       # (= ADR-0100 co-location 이 사용자 손에서 깨지지 않는다).
       - name: Package portable release (scripts/build-release.ps1)
         shell: pwsh

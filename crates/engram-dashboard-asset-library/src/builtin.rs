@@ -189,12 +189,13 @@ fn stand_in(id: BuiltinId, why: String) -> Entry {
 pub(crate) mod tests {
     use std::fs;
 
+    use engram_dashboard_agent::types::MCP_SERVER_NAME;
     use serde_json::json;
     use tempfile::TempDir;
 
     use super::*;
     use crate::backends::AgentBackends;
-    use crate::path::AssetRef;
+    use crate::path::{AssetRef, PresetItem};
 
     pub(crate) const DEFAULT_PRESET: &str = "kind: preset\nversion: 1\ndescription: the default\ninstructions:\n  - engram:/priming\nsettings:\n  - engram:/settings/default\n";
     pub(crate) const PRIMING: &str = "# Engram\n\nYou run inside Engram.\n";
@@ -273,6 +274,78 @@ pub(crate) mod tests {
             json!({ "env": { "DISABLE_AUTOUPDATER": "1" } })
         );
         assert!(verdict.problems.is_empty());
+    }
+
+    /// The repo's `builtin\` source folder, which `scripts/build-release.ps1` copies into the release — none of the
+    /// three may be a stand-in.
+    // TRD S25 step-17
+    #[test]
+    fn the_repo_builtin_folder_reads_without_a_stand_in() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../builtin");
+        let builtins = Builtins::new(Some(&dir), &AgentBackends);
+        for id in BuiltinId::ALL {
+            assert_eq!(builtins.view(id).stand_in, None, "{id:?}");
+        }
+
+        let preset = builtins.view(BuiltinId::DefaultPreset);
+        let ItemContent::Preset { doc } = preset.content else {
+            panic!("{:?}", preset.content)
+        };
+        assert!(doc.description.is_some());
+        let targets = |items: &[PresetItem]| -> Vec<AssetRef> {
+            items.iter().map(|item| item.target.clone()).collect()
+        };
+        assert_eq!(
+            targets(&doc.instructions),
+            [AssetRef::BuiltIn(BuiltinId::Priming)]
+        );
+        assert_eq!(
+            targets(&doc.settings),
+            [AssetRef::BuiltIn(BuiltinId::DefaultSettings)]
+        );
+        assert!(doc.presets.is_empty() && doc.skills.is_empty() && doc.folders.is_empty());
+        assert!(doc.unmodeled.is_empty() && doc.line_problems.is_empty());
+
+        let priming = fs::read_to_string(dir.join(file_of(BuiltinId::Priming))).unwrap();
+        assert!(!priming.trim().is_empty());
+        assert_eq!(builtins.priming_text(), priming);
+
+        let settings = builtins.view(BuiltinId::DefaultSettings);
+        let ItemContent::Settings { doc, verdict } = settings.content else {
+            panic!("{:?}", settings.content)
+        };
+        assert_eq!(doc.raw.len(), 1, "{:?}", doc.raw);
+        assert_eq!(doc.raw[0].name, "claude");
+        assert_eq!(
+            doc.raw[0].value,
+            json!({
+                "env": { "DISABLE_AUTOUPDATER": "1" },
+                "allowedMcpServers": [{ "serverName": MCP_SERVER_NAME }],
+            })
+        );
+        assert!(verdict.problems.is_empty());
+    }
+
+    /// The release manifest (`$ExpectedBuiltins` in `scripts/build-release.ps1`) lists exactly the files of
+    /// [`BuiltinId::ALL`] — the direction no other test sees: the test above reads the repo folder through the same
+    /// [`file_of`], so a built-in added to the code and the repo but not to the manifest stays green there, and the
+    /// release then ships without it and that built-in silently stands in (ADR-0361).
+    // TRD S25 step-17
+    #[test]
+    fn the_release_manifest_lists_every_builtin_file() {
+        let script = fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/build-release.ps1"),
+        )
+        .unwrap();
+        let line = script
+            .lines()
+            .find(|line| line.trim_start().starts_with("$ExpectedBuiltins "))
+            .expect("`$ExpectedBuiltins = @(...)` line");
+        let mut manifest: Vec<&str> = line.split('\'').skip(1).step_by(2).collect();
+        manifest.sort_unstable();
+        let mut code: Vec<&str> = BuiltinId::ALL.into_iter().map(file_of).collect();
+        code.sort_unstable();
+        assert_eq!(manifest, code, "{line}");
     }
 
     #[test]

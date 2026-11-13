@@ -1,0 +1,8 @@
+kind: settings
+version: 1
+description: 자동 업데이트 끄기 · Engram 메시지·제어 통로 허용
+claude:
+  env:
+    DISABLE_AUTOUPDATER: "1"
+  allowedMcpServers:
+    - serverName: engram

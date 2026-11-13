@@ -679,7 +679,7 @@ fn codex_mails_over_mcp_and_the_cli_mirror_closes() {
 
     let data_dir =
         std::env::temp_dir().join(format!("engram-mail-gate-codex-{}", AgentId::new_v4()));
-    let priming = std::path::PathBuf::from("C:/engram/prompts/agent-priming.md");
+    let priming = std::path::PathBuf::from("C:/engram/builtin/instructions/priming.md");
     let channel = DaemonControlChannel::new(
         Arc::new(ControlRegistry::new()),
         "http://127.0.0.1:1/mcp".to_string(),

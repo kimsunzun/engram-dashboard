@@ -23,7 +23,7 @@
 //!
 //! ## 플래그(전부 test-only 노브 — 운영 스위치 아님)
 //! - `--priming <path|C0>` — 프라이밍 파일 직접 지정(절대면 그대로, 상대면 repo 루트 기준). 미지정·`C0`
-//!   = 운영 A `prompts/agent-priming.md`. 옛 C1~C3 별칭은 ADR-0099 로 제거됐다 — 지금 넘기면 특수 매핑
+//!   = 운영 A `builtin/instructions/priming.md`. 옛 C1~C3 별칭은 ADR-0099 로 제거됐다 — 지금 넘기면 특수 매핑
 //!   없이 "그 이름의 파일 경로"로 해석돼 부재로 걸린다.
 //! - `--model <name>` — 기본 sonnet.
 //! - `--disallow-mcp` — MCP `eg_send` grant 만 뺀다. ★이 노브로는 CLI 라우팅을 만들 수 없다
@@ -118,7 +118,7 @@ const TASK_PROMPT_B: &str =
 
 /// ★씨앗 A→B(ADR-0092 — 자연 팀원 질문, 기계적 "툴 X 써라" 아님)★: A 가 B 에게 진행 상황을 묻는
 ///   평범한 협업 질문 → 답을 A 에게 돌려주는 게 자연스러운 반응이 되도록 만든다. 발신 방법(툴/CLI)은
-///   본문이 아니라 **프라이밍 변형**이 가르친다(C0/기본 = 프로덕션 A `prompts/agent-priming.md` —
+///   본문이 아니라 **프라이밍 변형**이 가르친다(C0/기본 = 프로덕션 A `builtin/instructions/priming.md` —
 ///   ADR-0126 결정 1 이후 eg_send 만 가르친다).
 const SEED_A_TO_B: &str =
     "Can you share the status of the auth module? If you're stuck anywhere on the login path, tell me what you need too.";
@@ -833,7 +833,7 @@ fn take_flag_value<I: Iterator<Item = String>>(it: &mut std::iter::Peekable<I>) 
 /// 반환은 항상 절대경로 — 존재 검사는 하지 않는다(`FilePrimingProvider` 가 최종 존재·CLI-안전 검사).
 fn resolve_priming_path(selector: Option<&str>, repo_root: &std::path::Path) -> Option<PathBuf> {
     let rel: &str = match selector {
-        None | Some("C0") | Some("c0") => "prompts/agent-priming.md",
+        None | Some("C0") | Some("c0") => "builtin/instructions/priming.md",
         Some(path) => {
             let p = PathBuf::from(path);
             let joined = if p.is_absolute() {
@@ -1198,7 +1198,8 @@ mod tests {
         let got = resolve_priming_path(None, &root).expect("C0 경로");
         assert!(got.is_absolute());
         assert!(
-            got.ends_with("prompts/agent-priming.md") || got.ends_with("prompts\\agent-priming.md"),
+            got.ends_with("builtin/instructions/priming.md")
+                || got.ends_with("builtin\\instructions\\priming.md"),
             "C0 은 현행 priming: {got:?}"
         );
         let got2 = resolve_priming_path(Some("C0"), &root).expect("C0 경로");

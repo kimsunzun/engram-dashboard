@@ -485,9 +485,9 @@ fn one_turn(manager: &AgentManager, id: AgentId, events: &Events, prompt: &str) 
 fn shipped_priming() -> String {
     std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../prompts/agent-priming.md"
+        "/../../builtin/instructions/priming.md"
     ))
-    .expect("read prompts/agent-priming.md")
+    .expect("read builtin/instructions/priming.md")
 }
 
 // ── L1 · L2 · L3 — codex JSON: fresh, changed resume, unchanged resume ──────────────────────────

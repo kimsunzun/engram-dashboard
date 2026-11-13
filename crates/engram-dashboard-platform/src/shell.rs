@@ -89,7 +89,7 @@ mod tests {
             assert!(!path_is_cli_safe(&path), "{c:?}");
         }
         assert!(path_is_cli_safe(Path::new(
-            "C:/base/prompts/agent-priming.md"
+            "C:/base/builtin/instructions/priming.md"
         )));
         assert!(path_is_cli_safe(Path::new(
             r"C:\Users\a b\AppData\Local\engram\vol (1)\settings.json"

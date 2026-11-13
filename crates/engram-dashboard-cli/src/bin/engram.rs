@@ -4050,8 +4050,9 @@ mod tests {
     // ADR-0092
     #[test]
     fn the_priming_pointer_lines_parse_as_help_requests() {
-        let priming = std::fs::read_to_string(help_repo_root().join("prompts/agent-priming.md"))
-            .expect("프라이밍 파일 존재");
+        let priming =
+            std::fs::read_to_string(help_repo_root().join("builtin/instructions/priming.md"))
+                .expect("프라이밍 파일 존재");
         let pointer = format!("{CLI_EXE_NAME} help ");
         assert_eq!(help_word(&["help"]), None, "맨 `help` 는 목차에 닿아야");
         let words: Vec<&str> = priming

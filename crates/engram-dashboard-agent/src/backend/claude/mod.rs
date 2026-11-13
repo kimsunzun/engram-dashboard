@@ -2277,7 +2277,7 @@ mod tests {
     /// 프라이밍 파일 경로를 담은 변주(ADR-0092) — `--append-system-prompt-file` 주입 검증용.
     fn ep_with_priming() -> ControlEndpoint {
         ControlEndpoint {
-            priming_file: Some(PathBuf::from("C:/repo/prompts/agent-priming.md")),
+            priming_file: Some(PathBuf::from("C:/repo/builtin/instructions/priming.md")),
             ..ep()
         }
     }
@@ -2749,7 +2749,7 @@ mod tests {
             .expect("프라이밍 파일 있으면 --append-system-prompt-file 주입");
         assert_eq!(
             s.args.get(pos + 1).map(|s| s.as_str()),
-            Some("C:/repo/prompts/agent-priming.md"),
+            Some("C:/repo/builtin/instructions/priming.md"),
             "플래그 다음 인자 = 프라이밍 MD 절대경로: {:?}",
             s.args
         );

@@ -39,9 +39,9 @@ use super::ingress::ControlQueryResult;
 /// 배우는 유일한 자리라, 여기 적힌 이름이 실제 실행파일과 갈리면 배운 대로 쳐도 명령을 못 찾는다.
 const HELP_TOOL_SLOT: &str = "{tool}";
 
-/// 화면 본문의 고정 상대경로 — 프라이밍과 같은 `prompts/` 폴더에 산다. ADR-0100 이 그 폴더를 exe 옆으로
-/// 통째 배송하고 manifest tripwire 가 부족·여분을 둘 다 잡으므로, 새 폴더를 만들면 그 두 장치를 한 벌 더
-/// 지어야 한다.
+/// The screen body's fixed relative path, in `prompts/`. ADR-0100 ships that folder whole beside the exes and the
+/// manifest tripwire (`scripts/build-release.ps1`) catches both a missing and an extra file there, so moving the body
+/// to a new folder needs both of those built again for it.
 const REL_HELP_FILE: &str = "prompts/engram-help.md";
 
 /// 운영자·하네스가 본문을 갈아끼우는 자리(이 **데몬 프로세스**의 env) — 프라이밍의 `ENGRAM_PRIMING_FILE`
@@ -683,7 +683,7 @@ mod tests {
     #[test]
     fn the_priming_pointer_names_help_entries_that_actually_render() {
         let _env = env_guard();
-        let priming = std::fs::read_to_string(repo_root().join("prompts/agent-priming.md"))
+        let priming = std::fs::read_to_string(repo_root().join("builtin/instructions/priming.md"))
             .expect("프라이밍 파일 존재");
         let pointer = format!("{CLI_EXE_NAME} help");
         assert!(

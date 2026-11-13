@@ -1,0 +1,7 @@
+kind: preset
+version: 1
+description: Engram 기본 — 프라이밍과 기본 설정
+instructions:
+  - engram:/priming
+settings:
+  - engram:/settings/default

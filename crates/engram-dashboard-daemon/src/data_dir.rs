@@ -151,7 +151,7 @@ pub fn ensure_data_dir_writable(dir: &Path) -> Result<(), DataDirUnwritable> {
 }
 
 /// exe 기준으로 해석한 **설치/repo 루트 절대경로**(빌드모드 무관). 데몬이 상대 리소스(예: ADR-0092
-/// 프라이밍 `prompts/agent-priming.md`)를 붙일 **신뢰 가능한 base** 로 쓴다.
+/// 프라이밍 `builtin/instructions/priming.md`)를 붙일 **신뢰 가능한 base** 로 쓴다.
 ///
 /// 해석(default_data_dir 의 디버그/릴리즈 분기와 동형):
 ///   - exe 에서 위로 올라가 workspace 루트(`.git` 또는 `Cargo.toml [workspace]`)를 찾으면 그것
@@ -160,12 +160,35 @@ pub fn ensure_data_dir_writable(dir: &Path) -> Result<(), DataDirUnwritable> {
 ///   - exe 조차 못 얻으면 None(호출자가 처리 — 프라이밍은 그때 None 을 산출).
 /// ★절대경로 보장★: current_exe 는 절대경로를 주고 walk-up/parent 는 그 절대성을 보존한다.
 pub fn find_install_root() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    if let Some(root) = find_workspace_root(&exe) {
+    install_root_of(&std::env::current_exe().ok()?)
+}
+
+fn install_root_of(exe: &Path) -> Option<PathBuf> {
+    if let Some(root) = find_workspace_root(exe) {
         return Some(root);
     }
     exe.parent().map(|p| p.to_path_buf())
 }
+
+/// The distribution's built-in asset folder (`engram:/…` — the asset library's `builtin_dir` value):
+/// `<install root>\builtin`, on the same anchor as [`find_install_root`] — the repo root for a dev build, the exe's
+/// folder for a release (the release zip puts `builtin\` beside the exes). An install resource, not data, so
+/// `ENGRAM_DATA_DIR` does not move it. `None` = the exe path cannot be read; whether the folder exists is not checked
+/// (the asset library stands in for what it cannot read).
+// ADR-0092
+// ADR-0361
+// TRD S25 step-17
+pub fn find_builtin_dir() -> Option<PathBuf> {
+    builtin_dir_of(&std::env::current_exe().ok()?)
+}
+
+fn builtin_dir_of(exe: &Path) -> Option<PathBuf> {
+    install_root_of(exe).map(|root| root.join(BUILTIN_DIR))
+}
+
+/// The built-in folder's name under the install root — `scripts/build-release.ps1` ships a folder of this name beside
+/// the exes.
+const BUILTIN_DIR: &str = "builtin";
 
 fn find_workspace_root(start: &Path) -> Option<PathBuf> {
     let mut cur: Option<&Path> = if start.is_dir() {
@@ -466,6 +489,64 @@ mod tests {
         assert!(
             root.is_absolute(),
             "find_install_root 는 절대경로여야(cwd 불신 계약): {root:?}"
+        );
+    }
+
+    #[test]
+    fn a_dev_build_finds_builtin_at_the_repo_root() {
+        let root = unique_tmp("builtin-dev");
+        let deps = root.join("target").join("debug").join("deps");
+        std::fs::create_dir_all(&deps).unwrap();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+
+        let got = builtin_dir_of(&deps.join("engram-dashboard-daemon.exe")).unwrap();
+        assert_eq!(got, root.join("builtin"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Assumes no `.git` / `[workspace]` marker above the temp dir, as find_workspace_root_none_when_no_marker does —
+    // with TEMP inside a checkout the walk-up finds that checkout and this test fails.
+    #[test]
+    fn a_release_finds_builtin_beside_the_exe() {
+        let root = unique_tmp("builtin-release");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let got = builtin_dir_of(&root.join("engram-dashboard-daemon.exe")).unwrap();
+        assert_eq!(
+            got,
+            root.join("builtin"),
+            "no marker above — the exe's folder"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The release puts the built-in folder beside the exes under the name this daemon looks for
+    /// (`$BuiltinDirName` in `scripts/build-release.ps1` = [`BUILTIN_DIR`]) — the direction no other test sees: the
+    /// tests above pin the daemon side only, so renaming the script's folder alone stays green there, and the release
+    /// daemon then finds no built-in folder and every built-in stands in (ADR-0361).
+    // TRD S25 step-17
+    #[test]
+    fn the_release_ships_builtin_under_the_folder_name_the_daemon_reads() {
+        let script = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/build-release.ps1"),
+        )
+        .unwrap();
+        let line = script
+            .lines()
+            .find(|line| line.trim_start().starts_with("$BuiltinDirName "))
+            .expect("`$BuiltinDirName = '...'` line");
+        let names: Vec<&str> = line.split('\'').skip(1).step_by(2).collect();
+        assert_eq!(names, [BUILTIN_DIR], "{line}");
+    }
+
+    #[test]
+    fn find_builtin_dir_hangs_off_the_install_root() {
+        let got = find_builtin_dir().expect("current_exe is readable under test");
+        assert_eq!(
+            Some(got),
+            find_install_root().map(|root| root.join("builtin"))
         );
     }
 

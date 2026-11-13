@@ -57,7 +57,7 @@ required-features = ["test-harness"]
 
 # ★ADR-0092/0099 A→B→A round-trip (reply round-trip) measurement driver★: spawns two real primed claudes (A·B) and measures whether B calls the sending
 #   half (MCP eg_send) on its own and A accepts the reply. Priming is parameterized with
-#   `--priming <경로>` (e.g. prompts/agent-priming.md) (the old C1~C3 experiment aliases were removed by ADR-0099 ·
+#   `--priming <경로>` (e.g. builtin/instructions/priming.md) (the old C1~C3 experiment aliases were removed by ADR-0099 ·
 #   `--cli-only`, which forced the CLI false-path, was removed together with the CLI-mirror priming). required-features keeps release builds from
 #   compiling it (experiment/verification only, same family as priming-smoke · saturation-pilot).
 [[bin]]

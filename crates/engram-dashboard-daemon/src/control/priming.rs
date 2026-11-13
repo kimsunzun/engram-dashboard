@@ -3,7 +3,7 @@
 //!
 //! ★Role★: at every spawn (provision) the daemon asks this seam for the priming file path, and if there is one sends that absolute path
 //!   as `ControlEndpoint.priming_file`. This module deals with the **path only** — it does not read the file
-//!   content (no hardcoding, ADR-0092: the content lives only in the external MD `prompts/agent-priming.md`).
+//!   content (no hardcoding, ADR-0092: the content lives only in the external MD `builtin/instructions/priming.md`).
 //!
 //! ★Why a seam (ADR-0092 "leave the road open")★: the current implementation (`FilePrimingProvider`) gives **one shared file
 //!   regardless of agent** (a stopgap). When a per-agent prompt injection / skill registration system arrives in the future, only this
@@ -241,7 +241,7 @@ pub struct FilePrimingProvider {
     base_dir: PathBuf,
 }
 
-const REL_MCP_PRIMARY: &str = "prompts/agent-priming.md";
+const REL_MCP_PRIMARY: &str = "builtin/instructions/priming.md";
 const ENV_OVERRIDE: &str = "ENGRAM_PRIMING_FILE";
 
 impl FilePrimingProvider {
@@ -351,9 +351,9 @@ mod tests {
     fn make_fixture_dir() -> PathBuf {
         let dir =
             std::env::temp_dir().join(format!("engram-priming-test-{}", uuid::Uuid::new_v4()));
-        let prompts = dir.join("prompts");
-        std::fs::create_dir_all(&prompts).unwrap();
-        let mut f = std::fs::File::create(prompts.join("agent-priming.md")).unwrap();
+        let instructions = dir.join("builtin").join("instructions");
+        std::fs::create_dir_all(&instructions).unwrap();
+        let mut f = std::fs::File::create(instructions.join("priming.md")).unwrap();
         writeln!(f, "# 테스트 프라이밍 (mcp-primary)").unwrap();
         dir
     }
@@ -367,7 +367,8 @@ mod tests {
         let got = provider.priming_file().expect("고정 파일이 있으면 Some");
         assert!(got.is_absolute(), "해석 결과는 절대경로여야: {got:?}");
         assert!(
-            got.ends_with("prompts/agent-priming.md") || got.ends_with("prompts\\agent-priming.md")
+            got.ends_with("builtin/instructions/priming.md")
+                || got.ends_with("builtin\\instructions\\priming.md")
         );
         assert!(got.is_file(), "실제 파일을 가리켜야");
         let _ = std::fs::remove_dir_all(&dir);
@@ -440,9 +441,9 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("engram-priming-meta-{}", uuid::Uuid::new_v4()));
         let meta_base = root.join("we&ird%dir");
-        let prompts = meta_base.join("prompts");
-        std::fs::create_dir_all(&prompts).unwrap();
-        let mut f = std::fs::File::create(prompts.join("agent-priming.md")).unwrap();
+        let instructions = meta_base.join("builtin").join("instructions");
+        std::fs::create_dir_all(&instructions).unwrap();
+        let mut f = std::fs::File::create(instructions.join("priming.md")).unwrap();
         writeln!(f, "# meta").unwrap();
         std::env::remove_var(ENV_OVERRIDE);
         let provider = FilePrimingProvider::new(meta_base.clone());

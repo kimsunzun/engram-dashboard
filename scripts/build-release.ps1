@@ -2,7 +2,7 @@
 # scripts/build-release.ps1 — ADR-0100 release packaging (portable-folder-only).
 #
 # ★ADR-0100 invariant (this script owns it) — co-location★
-#   A release ships not as an installer/sidecar but as "only what is needed in one folder". The three exes and prompts/
+#   A release ships not as an installer/sidecar but as "only what is needed in one folder". The three exes, prompts/ and builtin/
 #   **must live together in the same directory (release/)** so that they can find each other at runtime:
 #     - The running app (engram-dashboard.exe) spawns the sibling engram-dashboard-daemon.exe.
 #     - The daemon finds the sibling engram.exe (control-plane CLI) with locate_send_exe(current_exe().parent()) (ADR-0086 F1).
@@ -13,10 +13,14 @@
 #       clean target/release, so if an exe with the old name is left over and you fix only the manifest below to that old name,
 #       both the existence check and the tripwire pass and **that stale binary gets packaged as is** (even though the build did not
 #       update that file). When you fix the manifest, check the output directory too.
-#     - The daemon resolves the priming file prompts/agent-priming.md relative to find_install_root (ADR-0092).
+#     - The daemon resolves the priming file builtin/instructions/priming.md relative to find_install_root (ADR-0092 · ADR-0327).
+#       builtin/ is also the asset library's built-in folder (engram:/…) on the same anchor (data_dir::find_builtin_dir); the
+#       daemon starts reading it there once the library is wired in (TRD S25 step 8). The file list is $ExpectedBuiltins below,
+#       which tests keep equal to the code's set (asset-library builtin.rs · daemon data_dir.rs). A missing built-in will not
+#       block a launch (it is stood in for — ADR-0361), so the tripwire below is what keeps a release from shipping without one.
 #       That rule looks for .git·[workspace] markers among the exe's ancestors regardless of build mode — for a release folder assembled
 #       outside the checkout there is no marker, so install_root = the exe directory, and for one inside a checkout like launch\release of launch\빌드.bat,
-#       it is that checkout's root, so it reads the repository's prompts/ rather than the distribution folder's.
+#       it is that checkout's root, so it reads the repository's prompts/ and builtin/ rather than the distribution folder's.
 #     - The daemon reads prompts/engram-help.md, the body of the `engram help` screen, with the **same anchor** on every request and serves it as /control/help
 #       (ADR-0092-family externalization · ADR-0285 — engram.exe only asks the daemon for the screen and does not read this file).
 #       ★There is no copy★ — in a distribution missing this file, every help call is answered with a bounce (INTERNAL). The tripwire below is the
@@ -45,11 +49,16 @@ if (-not [string]::IsNullOrWhiteSpace($OutDir)) {
     $ReleaseDir = Join-Path $ProjectRoot 'release'
 }
 $PromptsSrc  = Join-Path $ProjectRoot 'prompts'
+# The daemon's data_dir::BUILTIN_DIR — a daemon test reads this line.
+$BuiltinDirName = 'builtin'
+$BuiltinSrc  = Join-Path $ProjectRoot $BuiltinDirName
 # $TargetRel (the cargo output release directory) is not hardcoded — it is fixed below by measuring with cargo metadata (FIX-2).
 
-# ── manifest: the exact set that goes into the release folder (single source). exe = from target/release, prompt = from prompts/, doc = from the step (0) output. ──
+# ── manifest: the exact set that goes into the release folder (single source). exe = from target/release, prompt = from prompts/, built-in = from builtin/, doc = from the step (0) output. ──
 $ExpectedExes    = @('engram-dashboard.exe', 'engram-dashboard-daemon.exe', 'engram.exe')
-$ExpectedPrompts = @('agent-priming.md', 'engram-help.md')
+$ExpectedPrompts = @('engram-help.md')
+# Paths relative to builtin/, '/'-separated — the file names are the asset library's builtin::file_of (B14).
+$ExpectedBuiltins = @('presets/default.yaml', 'instructions/priming.md', 'settings/default.yaml')
 # ADR-0294 · ADR-0100: third-party license notices — the runtime does not read them, so they are unrelated to the co-location invariant above, and are only
 #   shipped at the top level next to the exes (the manifest tripwire sees them together with the other items). Not kept in the repository — step (0) below regenerates them on every build.
 $NoticeName      = 'THIRD_PARTY_LICENSES.txt'
@@ -172,7 +181,11 @@ foreach ($exe in $ExpectedExes) {
 }
 foreach ($md in $ExpectedPrompts) {
     $p = Join-Path $PromptsSrc $md
-    if (-not (Test-Path $p)) { Fail "프라이밍 원본 부재: $p" }
+    if (-not (Test-Path $p)) { Fail "prompt source missing: $p" }
+}
+foreach ($rel in $ExpectedBuiltins) {
+    $p = Join-Path $BuiltinSrc $rel
+    if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { Fail "built-in source missing: $p" }
 }
 foreach ($doc in $ExpectedDocs) {
     $p = Join-Path $DocsSrc $doc
@@ -222,16 +235,23 @@ if (Test-Path $ReleaseDir) {
 New-Item -ItemType Directory -Path $ReleaseDir | Out-Null
 $ReleasePrompts = Join-Path $ReleaseDir 'prompts'
 New-Item -ItemType Directory -Path $ReleasePrompts | Out-Null
+$ReleaseBuiltin = Join-Path $ReleaseDir $BuiltinDirName
+New-Item -ItemType Directory -Path $ReleaseBuiltin | Out-Null
 
 # ── (c) Copy only the manifest (nothing else) ───────────────────────────────────────────
 foreach ($exe in $ExpectedExes)    { Copy-Item (Join-Path $TargetRel $exe) $ReleaseDir }
 foreach ($md in $ExpectedPrompts)  { Copy-Item (Join-Path $PromptsSrc $md) $ReleasePrompts }
+foreach ($rel in $ExpectedBuiltins) {
+    $dest = Join-Path $ReleaseBuiltin $rel
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dest) | Out-Null
+    Copy-Item -LiteralPath (Join-Path $BuiltinSrc $rel) -Destination $dest
+}
 foreach ($doc in $ExpectedDocs)    { Copy-Item (Join-Path $DocsSrc $doc) $ReleaseDir }
 
 # ── (d) Verify the manifest (tripwire): whether release/ is exactly the expected set — both missing and extra fail ───────
 $errors = @()
 
-# Top level: exactly the $ExpectedExes + $ExpectedDocs files + one prompts/ directory. Any other file or directory is a stray.
+# Top level: exactly the $ExpectedExes + $ExpectedDocs files + the prompts/ and builtin/ directories. Any other file or directory is a stray.
 # FIX-3: only enumerating hidden/system items too with -Force makes the tripwire's strictness actually hold (prevents evading it with a hidden stray).
 $topFiles = @(Get-ChildItem -Force -File      -Path $ReleaseDir | ForEach-Object Name)
 $topDirs  = @(Get-ChildItem -Force -Directory -Path $ReleaseDir | ForEach-Object Name)
@@ -243,10 +263,13 @@ foreach ($top in $ExpectedTopFiles) {
 foreach ($f in $topFiles) {
     if ($ExpectedTopFiles -notcontains $f) { $errors += "여분(top file): $f" }
 }
+$ExpectedTopDirs = @('prompts', $BuiltinDirName)
 foreach ($d in $topDirs) {
-    if ($d -ne 'prompts') { $errors += "여분(top dir): $d" }
+    if ($ExpectedTopDirs -notcontains $d) { $errors += "여분(top dir): $d" }
 }
-if ($topDirs -notcontains 'prompts') { $errors += '누락(top dir): prompts/' }
+foreach ($d in $ExpectedTopDirs) {
+    if ($topDirs -notcontains $d) { $errors += "누락(top dir): $d/" }
+}
 
 # prompts/: exactly the .md files of $ExpectedPrompts, no subdirectories. ★Do not count them here★ — a number that was counted
 #   falls behind every time the manifest grows (it actually did). The source of truth is the $ExpectedPrompts array above itself.
@@ -260,6 +283,29 @@ if (Test-Path $ReleasePrompts) {
         if ($ExpectedPrompts -notcontains $f) { $errors += "여분(prompts file): $f" }
     }
     foreach ($d in $pDirs) { $errors += "여분(prompts dir): $d" }
+}
+
+# builtin/: exactly the files of $ExpectedBuiltins (compared as '/'-separated relative paths), and no directory that is
+#   not the parent of one of them — an empty stray folder would pass a file-only comparison.
+if (Test-Path $ReleaseBuiltin) {
+    $relOf = { param($full) $full.Substring($ReleaseBuiltin.Length + 1).Replace('\', '/') }
+    $bFiles = @(Get-ChildItem -Force -Recurse -File      -Path $ReleaseBuiltin | ForEach-Object { & $relOf $_.FullName })
+    $bDirs  = @(Get-ChildItem -Force -Recurse -Directory -Path $ReleaseBuiltin | ForEach-Object { & $relOf $_.FullName })
+    $expectedBDirs = @()
+    foreach ($rel in $ExpectedBuiltins) {
+        for ($cut = $rel.LastIndexOf('/'); $cut -gt 0; $cut = $rel.LastIndexOf('/', $cut - 1)) {
+            $expectedBDirs += $rel.Substring(0, $cut)
+        }
+    }
+    foreach ($rel in $ExpectedBuiltins) {
+        if ($bFiles -notcontains $rel) { $errors += "missing (builtin): $rel" }
+    }
+    foreach ($f in $bFiles) {
+        if ($ExpectedBuiltins -notcontains $f) { $errors += "extra (builtin file): $f" }
+    }
+    foreach ($d in $bDirs) {
+        if ($expectedBDirs -notcontains $d) { $errors += "extra (builtin dir): $d" }
+    }
 }
 
 if ($errors.Count -gt 0) {
