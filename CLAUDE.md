@@ -56,6 +56,7 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 - **protocol** — 셸 ↔ 데몬 wire 계약 + codec + ts-rs 바인딩(워크스페이스 의존 0).
 - **command** — 명령 버스 도구(명령 0개 — 명령은 생산자 옆에서 선언).
 - **messaging** — 에이전트 간 우편 커널(워크스페이스 의존 0, 포트 trait 로만 접합).
+- **asset-library** — 프리셋 라이브러리. 한 루트 폴더 아래 지시서·스킬·설정·프리셋 파일을 읽고 검사·해석해 에이전트 실행 재료를 만든다(Tauri 0 · 네트워크 0).
 - **base** · **platform** — 잎 crate. 범용 도우미 · OS 에 따라 갈리는 운영 코드.
 - **transport** — 재사용 전송 lib. 셸의 데몬 연결(`daemon_client/link/` · 구동 = `daemon_client/connection.rs`)과 데몬의 접속 받기(`daemon/src/link/` · 연결 포트 = `daemon/src/conn_port.rs`)가 그 위에서 돈다.
 

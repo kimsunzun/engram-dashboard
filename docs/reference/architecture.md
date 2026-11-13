@@ -25,11 +25,13 @@ What each module does, who it talks to and over what, and the runtime invariants
 Crate dependencies (arrow = depends on, the production graph):
 
 ```text
-src-tauri ─▶ protocol · command · base · platform · transport(ws)      (agent 는 의존하지 않는다)
-daemon    ─▶ agent · protocol · transport(ws) · messaging · command · base · platform
-cli       ─▶ agent · command
-agent     ─▶ command · base · platform
-base · platform · command · messaging · transport · protocol ─▶ 워크스페이스 의존 0
+src-tauri     ─▶ protocol · command · base · platform · transport(ws)      (agent 는 의존하지 않는다)
+daemon        ─▶ agent · protocol · transport(ws) · messaging · command · base · platform
+cli           ─▶ agent · command
+agent         ─▶ command · base · platform
+asset-library ─▶ agent · command · base · platform
+base · platform · command · messaging · transport · protocol
+              ─▶ 워크스페이스 의존 0
 ```
 
 ## Modules
@@ -40,6 +42,7 @@ base · platform · command · messaging · transport · protocol ─▶ 워크�
 - **Shell (`src-tauri`)** — the daemon's resident client. It holds the window · tray · layout (the authority for windows · tabs · slots) · shell settings · screen state persistence · finding/launching/shutting down the daemon (`discovery`). It does not own agents. It talks to the daemon over one WS connection (`daemon_client` — one however many windows there are) and relays output frames to a Channel per window (`output_router`). It is registered on the daemon command bus as the owner of the layout commands (`window/tab/slot`). The only window is main, and pop-outs are created at run time.
 - **daemon** — the agent host that owns `AgentManager`, and the assembly room. It accepts shell connections on the transport (`link` — the WS accept loop and the connection port `conn_port` its upper layers see), runs the command bus registry and delivery (`command_roster` · `command_delivery`), and plugs the real adapters into the messaging kernel (`messaging_host`). The control plane (`control`) = one HTTP server carrying MCP (`/mcp`) and the CLI route (`/control/*`) — an agent's identity comes only from the Bearer token. Data folder layout (`data_dir`) · single-instance guard (`instance`) · `daemon.json` (`portfile`) · usage query (`usage_service`) are here too.
 - **agent** — the agent runtime (Tauri import 0). Session lifetime · output pump · `transport` (PTY · stdio) · `backend` (claude · codex · shell · a gemini stub — backend-specific knowledge lives only here) · turn observation · waiting input · profile persistence · `agent.*` command declarations. Output and state go out only through the `OutputSink`/`StatusSink` traits.
+- **asset-library** — the preset library (ADR-0311). It reads, checks and resolves the instruction · skill · settings · preset files under one library root folder and makes an agent's launch materials; the service (`LibraryService`) owns the catalog and its scans. Tauri import 0, no network client and no process runner (ADR-0359), no OS `cfg` (OS behaviour comes from platform). Its workspace dependencies are exactly agent · platform · command · base — agent defines the ports this crate implements or calls, and agent does not know this crate. The daemon's part is to create the service, plug its ports in and pass it values, nothing more; no workspace member depends on it yet (the daemon edge comes with the daemon wiring, TRD S25 step 8). The canonical boundary and gates = the header of its `lib.rs`.
 - **cli** — `engram.exe`. A spawned agent attaches to the daemon control route over HTTP with `ENGRAM_TOKEN` · `ENGRAM_CONTROL_URL`. It only authenticates and delivers, and the daemon also produces the help screen. bin name = agent `CLI_EXE_NAME`.
 - **protocol** — the shell ↔ daemon wire contract (messages · output binary frame codec · ts-rs bindings). No domain logic.
 - **command** — command bus tooling (envelope · error · declaration macro · table · routing). There are zero commands here, and a command is declared next to its producer (`agent.*` = agent, `mail.*` = daemon, `window/tab/slot` = shell, webview commands = frontend).
