@@ -1,7 +1,7 @@
 # ADR-0368: The built-in folder is found on the install-root anchor, and the priming file moves into it now
 
 - 상태: 확정 (2026-11-13, 근거: main decision 2026-11-13 (internal — reported to the user) · TRD S25 step 17)
-- 관련: ADR-0092 (the priming path and the install-root anchor) · ADR-0100 (release assembly ships `builtin\`) · ADR-0361 (a missing built-in never blocks) · TRD S25 §2-4 1 · §5 17
+- 관련: ADR-0092 (the priming path and the install-root anchor) · ADR-0100 (release assembly ships `builtin\`) · ADR-0361 (a missing built-in never blocks) · TRD S25 §2-4 1 · §5 17 · Amends ADR-0327 (decision 5 lookup rule)
 
 ## 맥락
 ADR-0327 put the built-in assets (the preset 「기본」, its priming instructions and its settings) in one distribution `builtin\` folder and left open how a development build, the tests and `ENGRAM_DATA_DIR` find it (decision 5 · TRD §2-4 1). Step 17 ships the folder in the release zip, so the rule has to exist before it. Until now the priming file lived at `prompts/agent-priming.md`, read by the Noop launch path (`FilePrimingProvider`) relative to `data_dir::find_install_root`, the same anchor the help screen (`prompts/engram-help.md`) uses.
