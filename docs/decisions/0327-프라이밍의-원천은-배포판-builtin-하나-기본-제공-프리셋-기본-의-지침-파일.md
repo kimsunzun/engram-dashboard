@@ -1,7 +1,7 @@
 # ADR-0327: The source of priming is one distribution `builtin\` — the instruction file of the built-in preset 「기본」
 
-- 상태: 제안 (2026-10-31, basis: main session decision G1 (2026-10-20 · reported) · M7 (2026-10-21 · reported · TRD review #4 · #8) · M18 (reported) · G46 (2026-10-31 — main decision · delegated by the user: a partial amendment, not a discard))
-- 관련: Amends ADR-0092 (Decision 1, the priming source path) (see 「바뀌는 조항」 below) · ADR-0099 · ADR-0100 · ADR-0211 · ADR-0215 (points at the same path or delivery — an item to confirm in 「영향」) · ADR-0329 · ADR-0337 · ADR-0328 · TRD §1-1 · §1-2 · §2-4 1 · 2 · §5 17 · §7 35
+- 상태: 제안 (2026-10-31, basis: main session decision G1 (2026-10-20 · reported) · M7 (2026-10-21 · reported · TRD review #4 · #8) · M18 (reported) · G46 (2026-10-31 — main decision · delegated by the user: a partial amendment, not a discard)) · 부분 폐기 by ADR-0361 (decision 4, a built-in that cannot be used)
+- 관련: Amends ADR-0092 (Decision 1, the priming source path) (see 「바뀌는 조항」 below) · ADR-0099 · ADR-0100 · ADR-0211 · ADR-0215 (points at the same path or delivery — an item to confirm in 「영향」) · ADR-0329 · ADR-0337 · ADR-0328 · TRD §1-1 · §1-2 · §2-4 1 · 2 · §5 17 · §7 35 · Amended by ADR-0361 (decision 4, a built-in that cannot be used)
 
 ## 맥락
 Today priming is a shared markdown file at a fixed path (`prompts/agent-priming.md` · cover `ENGRAM_PRIMING_FILE`) that a loader reads at spawn and injects into the system prompt — for everyone unconditionally (ADR-0092 Decision 1). S25 keeps built-in assets (the preset 「기본」 and its instructions and settings) as files of the same shape as the library and points to them with the fake path `engram:/…` (Δ1). The source that had been split across 「코드 + 배포판 `prompts\agent-priming.md`」 is gathered into one (G1).
