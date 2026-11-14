@@ -11,6 +11,7 @@
 | ID | 제목(짧게) | 구역 | 상태 |
 |---|---|---|---|
 | T-105 | Launch folder wait as an advanced setting (once file-based settings loading exists) | 메인 | Deferred by the user (2026-11-11 — ADR-0360 decision 6) |
+| T-110 | Launch waiting cue — ADR-0181 decision 5 never built; launch waits grow to 88 s in S25 step 8 | 메인 | Deferred by the user to the UI work (2026-11-15) |
 | T-109 | The S25 library screen as a plugin-shaped extension (public surfaces only); a plugin system later | 메인 | 트리거 대기 — S25 client stage (steps 11–13 TRD) · user 2026-11-14 |
 | T-104 | Library file watcher — show files changed outside Engram without a refresh | 메인 | Deferred by the user (2026-11-11) — target = UI step 13 or later |
 | T-86 | Tray 「데몬 켜기」 reconnects but slots keep the daemon-down icon | 메인 | Deferred to the multi-daemon topic with the tray work (user 2026-11-10) |
@@ -98,6 +99,12 @@
 | T-16 | 프론트 종료 판정 · 세대 필터 | 사소한 기능·정리 | 잔존 · T-32 선결 |
 
 ## 메인
+
+### T-110. Launch waiting cue — ADR-0181 decision 5 never built
+- **Status:** deferred — user 2026-11-15 「일단 나중에 UI할때 함께하고」; the requirement itself: 「뭐가됐건 기다리면 뭔가 기다리는 사인이 있어야되는데 이건 관용으로 확인하고 맞추면 될듯?」 — match the convention.
+- **Fact (code at `5b79b821`):** the only human launch path (double-click a reserved row in `src/components/agent/AgentList.tsx` → `activateReserved` → `spawnProfile`) already shows a row pending state from 0 s until the reply settles (`beginInFlight` / `busyIds`, `statusGlyph.ts` `rowPhase` → `'pending'`, `PENDING_GLYPH` spinning, 「진행 중…」, row dimmed, menu disabled). No ~1 s delay, no elapsed time, no cancel. Command-registry launches (`agent.spawn`, `agent.spawnInto`, `slot.createAgentHere`) show nothing. ADR-0181 decision 5 (a 「기다리는 중」 cue at ~1 s, separate from give-up) has no implementation and no ADR records the row spinner.
+- **Why now:** S25 step 8 (ADR-0369) raises the shell's launch wait from 30 s to 88 s (+ up to 30 s while the connection opens), so the gap between the cue and give-up grows.
+- **Next:** at the UI work, check the convention (delay before showing, inline vs global, long-wait handling, give-up message) and align the row cue and the command-path launches with it.
 
 ### T-109. The S25 library screen as a plugin-shaped extension; a plugin system later
 - **Status:** 트리거 대기 — S25 client stage (steps 11–13 TRD). User 2026-11-14: 「결국 작업은 llm이 하는거고 UI는 보여주고 유저가 조작할 수 있는 확장기능? 개념으로 가면 좋지 않나 해서.」 · 「일단 대강 저장해두고 어디까지 할지는 UI 구현때 보자고.」
