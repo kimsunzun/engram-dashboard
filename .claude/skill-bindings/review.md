@@ -9,6 +9,7 @@
 - **명령 핸들러는 패닉하지 않고 `CommandError` 값으로 실패한다** — 가둔 자리(에이전트 펌프·입력 라이터) 밖의 패닉은 프로세스를 끝낸다. (ADR-0292 · ADR-0293)
 - **새 전역 핸들을 늘리지 않는다** — LLM 제어는 데몬 버스와 `__engramCmd`에 얹는다. 확인 = `rg "\)\.__ENGRAM_|\)\.__engram" src/ -g '!*.test.*'` — 결과 중 `__engramCmd`는 정식 표면이고 나머지는 갭이다. 변경 전보다 줄이 늘면 지적한다.
 - **로깅이 걸린 변경이면 `docs/reference/logging-conventions.md`를 준다** — 레벨·계측 의무·토큰 비노출 판정의 정본.
+- **이 변경이 `docs/reference/` 문장이나 크레이트 `lib.rs` 머리 주석을 틀리게 만들면 같은 커밋에서 고쳤나.**
 
 ## 화면 확인 조건
 
@@ -20,4 +21,3 @@
 ## 결정 기록
 
 - 굵은 설계 결정 → ADR(`docs/decisions/`) — `/engram-adr`로 쓴다.
-- 흐름(언제·무엇) → `docs/process/step-log.md`.

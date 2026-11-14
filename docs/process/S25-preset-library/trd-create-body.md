@@ -841,7 +841,7 @@ Code comments to fix in passing:
 
 ## 9. Review record
 
-- **2026-11-09 — landed at `0badd007`.** `/engram-review code` per piece — P1, P2, P3 PASS. `/engram-qa` PASS (§6-3). U2 decided by the user (keep 7 s — §8-2). Doc pass: this file, parent `trd.md` §5-2, ADR-0348 (U2 wording), `docs/tracking.md` (T-76 removed), step-log, `docs/reference/structure/session-path-ownership.md`.
+- **2026-11-09 — landed at `0badd007`.** `/engram-review code` per piece — P1, P2, P3 PASS. `/engram-qa` PASS (§6-3). U2 decided by the user (keep 7 s — §8-2). Doc pass: this file, parent `trd.md` §5-2, ADR-0348 (U2 wording), `docs/tracking.md` (T-76 removed), step-log, `docs/research/session-path-ownership.md`.
 - **2026-11-09 — PRD+TRD review PASSED** (`/engram-review trd deep`, rounds 1–3 + confirmation; final confirmation PASS on `c43b576c`). U2 stayed pending with the user (design neutral) until after QA.
 - 2026-11-09 — round 3 (lead reviewer, delta): FIX — one MUST (R7c/R7d scan filter assumed `--cd` on the app-server argv); fixed by main in place (pid log `fakes.log`), plus R7d observability and one anchor. Remaining then: U2 pending with the user (decided later the same day, §8-2).
 - 2026-11-06 — draft 1 `/engram-review trd deep` (2 Claude reviewers + Codex): **FIX**. Five MUST, the recommended items and the batched wording were applied in draft 2. H1–H3 went to the user as U2–U4. One finding was refined rather than taken verbatim: "every failure after the add records last failure" now excludes a user kill during the handshake (§2 premise 12).

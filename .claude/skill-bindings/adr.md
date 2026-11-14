@@ -42,7 +42,3 @@ node <skill>/scripts/adr.mjs index --write --anchor-roots crates,src,src-tauri,s
 ## 채번 push
 
 - push하지 않는다(`--push` 없음). 이 저장소의 워크트리들은 `.git` 하나를 같이 써서, 스크립트의 커밋은 다른 워크트리의 채번 스캔(`git log --all`)에 바로 보인다.
-
-## 연동
-
-- 흐름(언제·무엇)은 메인이 `docs/process/step-log.md`에 적는다. 스킬·스크립트는 step-log를 쓰지 않는다.
