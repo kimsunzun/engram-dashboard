@@ -56,7 +56,7 @@ Non-goals (v1):
 
 Measured on two PCs (A, B) unless stated.
 
-- AC1 — On A, the app and `peer.my_id` show the same ID; after a daemon restart it is unchanged.
+- AC1 — On A, the app and `peer.list` show the same ID; after a daemon restart it is unchanged.
 - AC2 — After adding each other's ID on A and B (same LAN, no address typed), both show the other online within 30 s.
 - AC3 — An agent on A sends to `<agent>@<B name>`; the B agent receives it; A's sender gets "delivered"; the B agent's reply reaches the A agent.
 - AC4 — Mail to an asleep B agent returns "held" and is delivered when it wakes, as local mail does today.
