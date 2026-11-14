@@ -11,6 +11,7 @@
 | ID | 제목(짧게) | 구역 | 상태 |
 |---|---|---|---|
 | T-105 | Launch folder wait as an advanced setting (once file-based settings loading exists) | 메인 | Deferred by the user (2026-11-11 — ADR-0360 decision 6) |
+| T-109 | The S25 library screen as a plugin-shaped extension (public surfaces only); a plugin system later | 메인 | 트리거 대기 — S25 client stage (steps 11–13 TRD) · user 2026-11-14 |
 | T-104 | Library file watcher — show files changed outside Engram without a refresh | 메인 | Deferred by the user (2026-11-11) — target = UI step 13 or later |
 | T-86 | Tray 「데몬 켜기」 reconnects but slots keep the daemon-down icon | 메인 | Deferred to the multi-daemon topic with the tray work (user 2026-11-10) |
 | T-85 | A new window starts a daemon the user stopped (boot start in every window) | 메인 | Deferred to the multi-daemon topic (user 2026-11-10) |
@@ -97,6 +98,12 @@
 | T-16 | 프론트 종료 판정 · 세대 필터 | 사소한 기능·정리 | 잔존 · T-32 선결 |
 
 ## 메인
+
+### T-109. The S25 library screen as a plugin-shaped extension; a plugin system later
+- **Status:** 트리거 대기 — S25 client stage (steps 11–13 TRD). User 2026-11-14: 「결국 작업은 llm이 하는거고 UI는 보여주고 유저가 조작할 수 있는 확장기능? 개념으로 가면 좋지 않나 해서.」 · 「일단 대강 저장해두고 어디까지 할지는 UI 구현때 보자고.」
+- **Already decided:** the daemon's library features are always on and the screen is a package that can be turned off (parent TRD `docs/process/S25-preset-library/trd.md` §1-7 — user 2026-10-29 「데몬은 디폴트로 제공하는거고 UI는 그냥 패키지? 형식으로 온오프」); every feature is LLM-controllable on the daemon bus / `__engramCmd` (CLAUDE.md 「LLM-우선 제어」).
+- **Proposal discussed (main, not decided):** build the library screen only on public surfaces (daemon bus commands, `__engramCmd`, slot registration) — no screen-only shortcuts — so it is a plugin in shape; extract a plugin API from that boundary later. Not now: install / isolation / permissions / distribution / API versioning of third-party plugins (one consumer is too few to design the API). Missing axes for a general plugin system noted: event subscription (hooks), declarative contributions (menus · keys · settings), server-side extension (backends / daemon commands without rebuild), isolation and permissions, API stability. Content-level extension (presets · skills) already covers much of what users would want (main's judgment).
+- **Next:** when the client-stage TRD is written, decide how far to go; check whether the steps 11–13 design already uses only public surfaces.
 
 ### T-105. Launch folder wait as an advanced setting
 - **Status:** deferred — user 2026-11-11 「어 나중에 한다고 치고」 (ADR-0360 decision 6 · 거부한 대안 "User settings for the waits now").
