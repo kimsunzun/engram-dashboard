@@ -3,17 +3,22 @@
 //! (`ensure_registered` 단독 호출). 재료 준비의 실패를 스폰 실패로 옮기는 것(`prepare_failed`)도 여기다 — 준비를
 //! 부르는 자리는 스폰 길의 화신 표식 뒤다.
 //!
-//! 점검([`crate::launch::LaunchKitSource::check`])은 명부 · 예약 · 세션 · 이름 배정 락을 하나도 쥐지 않고 부른다 —
+//! 점검([`crate::launch::LaunchKitSource::check_in`])은 명부 · 예약 · 세션 · 이름 배정 락을 하나도 쥐지 않고 부른다 —
 //! asset-library 락 → manager 락 한 방향이라, 쥔 채 부르면 라이브러리 쓰기와 교착한다. 명부에 쓰지 않고 비교만
 //! 한다(무인 기본값 채움은 다음 주제 — M16): 점검하는 사이 실행 입력(붙임 · 명령 · env)이 바뀌었으면 막힘이든
 //! 통과든 그 답을 버리고 한 번 다시 하고, 또 바뀌었으면 끊는다.
+//!
+//! Every check here runs inside the launch's scope, which the spawn body opens and passes in — this file never opens
+//! one (contract = `LaunchKitSource::begin_launch`).
 // ADR-0319
 // ADR-0324
 // ADR-0334
 // TRD S25 §1-5 (가)
 
 use super::{profile_vanished_mid_spawn, AgentManager};
-use crate::launch::{notice_fingerprint, LaunchBlocked, LaunchPlan, Notice, PrepareError};
+use crate::launch::{
+    notice_fingerprint, LaunchBlocked, LaunchPlan, LaunchScope, Notice, PrepareError,
+};
 use crate::profile::{AgentProfile, LaunchInputs};
 use crate::types::{AgentId, PtyError};
 
@@ -24,9 +29,16 @@ const PRELAUNCH_ATTEMPTS: u32 = 2;
 impl AgentManager {
     /// 명부에 없는 프로필을 넣기 **전에** 호출자 사본으로 점검한다 — 막히면 아무것도 넣지 않는다. 통과한 계획은
     /// 버린다(넣은 뒤 [`Self::prelaunch`] 가 명부 값으로 다시 점검한다).
+    ///
+    /// `scope` = this launch's scope — the one the prelaunch and the prepare of the same launch get.
+    // ADR-0360
     // TRD S25 §1-5 (가) 1 ②
-    pub(super) fn check_before_create(&self, profile: &AgentProfile) -> Result<(), PtyError> {
-        match self.launch.kits.check(profile) {
+    pub(super) fn check_before_create(
+        &self,
+        scope: &LaunchScope,
+        profile: &AgentProfile,
+    ) -> Result<(), PtyError> {
+        match self.launch.kits.check_in(scope, profile) {
             Ok(_) => Ok(()),
             Err(blocked) => Err(launch_blocked(profile.id, blocked)),
         }
@@ -41,9 +53,12 @@ impl AgentManager {
     /// 그대로다.
     /// With the plan comes its notice comparison against the fingerprint on the same roster read ([`PlanNotices`]) —
     ///   compared here, recorded by nobody here.
+    /// `scope` = this launch's scope — both attempts check inside it.
     // ADR-0341
+    // ADR-0360
     pub(super) fn prelaunch(
         &self,
+        scope: &LaunchScope,
         caller: &AgentProfile,
     ) -> Result<(LaunchPlan, PlanNotices), PtyError> {
         let id = caller.id;
@@ -56,7 +71,7 @@ impl AgentManager {
             let seen = LaunchInputs::of(&profile);
             // ★답을 쥔 채 대조부터 한다 — 막힘도 대조가 맞을 때만 답이다★: 점검하는 사이 바뀐 붙임으로 막혔으면 그
             //   막힘은 이미 낡았다(고친 붙임이 낡은 막힘에 걸려 끊긴다).
-            let checked = self.launch.kits.check(&profile);
+            let checked = self.launch.kits.check_in(scope, &profile);
             match self.profiles.launch_inputs_unchanged(id, &seen) {
                 Some(true) => {
                     return settle(caller, &seen, checked).map(|plan| {
@@ -145,7 +160,7 @@ fn launch_blocked(id: AgentId, blocked: LaunchBlocked) -> PtyError {
     PtyError::LaunchBlocked(blocked)
 }
 
-/// 재료 준비([`crate::launch::LaunchKitSource::prepare`])의 실패를 스폰 실패로 옮긴다 — 원본이 점검 뒤 바뀐 것은
+/// 재료 준비([`crate::launch::LaunchKitSource::prepare_in`])의 실패를 스폰 실패로 옮긴다 — 원본이 점검 뒤 바뀐 것은
 /// 경합([`PtyError::LaunchRaced`] — 프로세스를 열려고 한 적이 없다), 그 밖은 `SpawnFailed`.
 // TRD S25 §5-2 4 (c)
 pub(super) fn prepare_failed(id: AgentId, e: PrepareError) -> PtyError {
@@ -204,7 +219,8 @@ mod tests {
     use crate::failure::AgentFailureKind;
     use crate::launch::{
         BlockReason, LaunchArtifacts, LaunchBlocked, LaunchFs, LaunchKit, LaunchKitSource,
-        LaunchLease, LaunchPlan, LaunchPorts, MemLaunchFs, NoopLaunchKits, PrepareError, Reason,
+        LaunchLease, LaunchPlan, LaunchPorts, LaunchScope, MemLaunchFs, NoopLaunchKits,
+        PrepareError, Reason,
     };
     use crate::profile::scripted_store::ScriptedStore;
     use crate::profile::{
@@ -1362,7 +1378,10 @@ mod tests {
         roster.notice_fingerprint = Some(shown_before.clone());
         rig.manager.profiles.upsert(roster);
 
-        let (_, notices) = rig.manager.prelaunch(&p).expect("passes");
+        let (_, notices) = rig
+            .manager
+            .prelaunch(&LaunchScope::default(), &p)
+            .expect("passes");
         assert!(
             notices.shown.is_empty(),
             "the roster was already shown this set"
@@ -1374,7 +1393,10 @@ mod tests {
             .update_with(p.id, |q| q.notice_fingerprint = None);
         let mut stale_copy = p.clone();
         stale_copy.notice_fingerprint = Some(shown_before);
-        let (_, notices) = rig.manager.prelaunch(&stale_copy).expect("passes");
+        let (_, notices) = rig
+            .manager
+            .prelaunch(&LaunchScope::default(), &stale_copy)
+            .expect("passes");
         assert_eq!(notices.shown, x, "nothing recorded on the roster");
     }
 
@@ -1761,6 +1783,246 @@ mod tests {
         assert!(manager.sessions.read().unwrap().contains_key(&id));
     }
 
+    // ── Launch scope ──
+
+    /// One kit call made inside a launch scope.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum ScopedCall {
+        Check,
+        Prepare,
+        /// `working_folder` with this `cwd`.
+        WorkingFolder(PathBuf),
+    }
+
+    /// What one launch scope saw — the kit calls made inside it, in order.
+    #[derive(Default)]
+    struct ScopeTally {
+        calls: Mutex<Vec<ScopedCall>>,
+    }
+
+    /// A kit source whose scope counts the IO made in it: `begin_launch` hands out a fresh tally each time, the scoped
+    /// methods record into the scope they are given, and a call outside any scope (the unscoped `check` / `prepare`, or
+    /// a scoped method given a scope this source did not open) is recorded apart. `working_folder` answers `folder`, a
+    /// path neither the profile nor the default canonicalize would produce.
+    struct ScopedKits {
+        scopes: Mutex<Vec<Arc<ScopeTally>>>,
+        unscoped: Mutex<Vec<&'static str>>,
+        folder: PathBuf,
+        /// Runs during the check with this 1-based number (counted over every check) — a roster change between that
+        /// check and its comparison.
+        change_at: Mutex<Option<(usize, Meanwhile)>>,
+        checks: AtomicUsize,
+        profiles: OnceLock<Arc<ProfileRegistry>>,
+    }
+
+    impl ScopedKits {
+        fn new(change_at: Option<(usize, Meanwhile)>) -> Arc<Self> {
+            Arc::new(Self {
+                scopes: Mutex::new(Vec::new()),
+                unscoped: Mutex::new(Vec::new()),
+                folder: PathBuf::from("/scoped/working-folder"),
+                change_at: Mutex::new(change_at),
+                checks: AtomicUsize::new(0),
+                profiles: OnceLock::new(),
+            })
+        }
+
+        fn rig(self: &Arc<Self>) -> Rig {
+            let rig = Rig::new(self.clone());
+            assert!(self.profiles.set(rig.manager.profiles.clone()).is_ok());
+            rig
+        }
+
+        /// Each scope this source opened, with the calls made inside it.
+        fn scopes(&self) -> Vec<Vec<ScopedCall>> {
+            sync::lock(&self.scopes)
+                .iter()
+                .map(|tally| sync::lock(&tally.calls).clone())
+                .collect()
+        }
+
+        fn unscoped(&self) -> Vec<&'static str> {
+            sync::lock(&self.unscoped).clone()
+        }
+
+        fn record(&self, scope: &LaunchScope, call: ScopedCall, outside: &'static str) {
+            match scope.get::<ScopeTally>() {
+                Some(tally) => sync::lock(&tally.calls).push(call),
+                None => sync::lock(&self.unscoped).push(outside),
+            }
+        }
+    }
+
+    impl LaunchKitSource for ScopedKits {
+        fn check(&self, profile: &AgentProfile) -> Result<LaunchPlan, LaunchBlocked> {
+            sync::lock(&self.unscoped).push("check");
+            NoopLaunchKits.check(profile)
+        }
+
+        fn prepare(
+            &self,
+            plan: LaunchPlan,
+            id: AgentId,
+            epoch: u32,
+        ) -> Result<LaunchKit, PrepareError> {
+            sync::lock(&self.unscoped).push("prepare");
+            NoopLaunchKits.prepare(plan, id, epoch)
+        }
+
+        fn release(&self, _id: AgentId, _epoch: u32) {}
+
+        fn begin_launch(&self) -> LaunchScope {
+            let tally = Arc::new(ScopeTally::default());
+            sync::lock(&self.scopes).push(tally.clone());
+            LaunchScope::new(tally)
+        }
+
+        fn check_in(
+            &self,
+            scope: &LaunchScope,
+            profile: &AgentProfile,
+        ) -> Result<LaunchPlan, LaunchBlocked> {
+            self.record(scope, ScopedCall::Check, "check_in outside a scope");
+            let number = self.checks.fetch_add(1, Ordering::SeqCst) + 1;
+            let change = {
+                let mut slot = sync::lock(&self.change_at);
+                match slot.as_ref() {
+                    Some((at, _)) if *at == number => slot.take(),
+                    _ => None,
+                }
+            };
+            if let Some((_, change)) = change {
+                change(
+                    self.profiles.get().expect("the rig set the roster"),
+                    profile.id,
+                );
+            }
+            NoopLaunchKits.check(profile)
+        }
+
+        fn prepare_in(
+            &self,
+            scope: &LaunchScope,
+            plan: LaunchPlan,
+            id: AgentId,
+            epoch: u32,
+        ) -> Result<LaunchKit, PrepareError> {
+            self.record(scope, ScopedCall::Prepare, "prepare_in outside a scope");
+            NoopLaunchKits.prepare(plan, id, epoch)
+        }
+
+        fn working_folder(&self, scope: &LaunchScope, cwd: &std::path::Path) -> PathBuf {
+            self.record(
+                scope,
+                ScopedCall::WorkingFolder(cwd.to_path_buf()),
+                "working_folder outside a scope",
+            );
+            self.folder.clone()
+        }
+    }
+
+    /// ★One launch opens one scope, and every kit call of that launch runs in it★ — an ad-hoc create checks before the
+    /// add, checks twice more when the presets change during the first prelaunch check, then prepares and asks the
+    /// working folder, all in the same scope; the spawn runs in the folder the scope answered.
+    // ADR-0360
+    #[test]
+    fn one_scope_spans_the_pre_create_check_both_prelaunch_attempts_the_prepare_and_the_working_folder(
+    ) {
+        let kits = ScopedKits::new(Some((2, set_presets(&["/team/b.md"]))));
+        let rig = kits.rig();
+        let adhoc = profile_of(spawn_path_commands().remove(0).1, Vec::new());
+
+        let _ = rig.manager.spawn_agent(&adhoc, SpawnMode::Fresh);
+
+        let spec = rig.spec();
+        assert_eq!(
+            kits.scopes(),
+            vec![vec![
+                ScopedCall::Check,
+                ScopedCall::Check,
+                ScopedCall::Check,
+                ScopedCall::Prepare,
+                ScopedCall::WorkingFolder(PathBuf::from(WORK)),
+            ]],
+            "not one scope holding pre-create check → two prelaunch checks → prepare → working folder"
+        );
+        assert!(kits.unscoped().is_empty(), "{:?}", kits.unscoped());
+        assert_eq!(
+            spec.cwd, kits.folder,
+            "the spawn does not run in the scope's working folder"
+        );
+    }
+
+    /// ★Every launch kind asks the working folder for the re-read roster cwd, in its one scope, and spawns there★ —
+    /// activation (fresh · resume · resume without a handle) and boot restore (fresh · resume); the caller's copy holds
+    /// a stale cwd.
+    // ADR-0353
+    // ADR-0360
+    #[test]
+    fn every_launch_kind_spawns_in_the_working_folder_of_the_reread_cwd_inside_one_scope() {
+        let moved = PathBuf::from("/golden/moved");
+        let mut cases: Vec<(String, Way, bool)> = Way::ALL
+            .iter()
+            .map(|way| (format!("activate {way:?}"), *way, false))
+            .collect();
+        cases.push(("restore Fresh".to_string(), Way::Fresh, true));
+        cases.push(("restore Resume".to_string(), Way::Resume, true));
+        for (case, way, restore) in cases {
+            let kits = ScopedKits::new(None);
+            let rig = kits.rig();
+            let mut stored = way.profile();
+            stored.cwd = moved.clone();
+            rig.manager.profiles.upsert(stored.clone());
+            let mut stale = stored.clone();
+            stale.cwd = PathBuf::from(WORK);
+
+            if restore {
+                let _ = rig.manager.restore_one(&stale);
+            } else {
+                let _ = rig.manager.activate_profile(&stale, way.mode());
+            }
+
+            let spec = rig.spec();
+            assert_eq!(
+                kits.scopes(),
+                vec![vec![
+                    ScopedCall::Check,
+                    ScopedCall::Prepare,
+                    ScopedCall::WorkingFolder(moved.clone()),
+                ]],
+                "{case}"
+            );
+            assert!(kits.unscoped().is_empty(), "{case}: {:?}", kits.unscoped());
+            assert_eq!(spec.cwd, kits.folder, "{case}");
+        }
+    }
+
+    /// ★A moot request opens no scope★ — the scope comes after the reservation and the running check, so a request
+    /// that finds the agent starting or running does no launch IO.
+    #[test]
+    fn a_moot_request_opens_no_scope() {
+        let kits = ScopedKits::new(None);
+        let rig = kits.rig();
+        let p = profile_of(claude_terminal(), golden_env());
+        rig.manager.profiles.upsert(p.clone());
+
+        {
+            let _held =
+                SpawnReservation::reserve(rig.manager.spawning.clone(), p.id).expect("reserve");
+            assert!(matches!(
+                rig.manager.spawn_agent(&p, SpawnMode::Fresh),
+                Ok(SpawnOutcome::Moot(None))
+            ));
+        }
+        put_live_session(&rig.manager, p.id, 1);
+        assert!(matches!(
+            rig.manager.spawn_agent(&p, SpawnMode::Fresh),
+            Ok(SpawnOutcome::Moot(Some(_)))
+        ));
+        assert!(kits.scopes().is_empty(), "{:?}", kits.scopes());
+        assert!(kits.unscoped().is_empty());
+    }
+
     // ── 소스 순서 ──
 
     /// 운영 구획에서 `start` 와 `end` 사이를 잘라 주석 줄을 빼고 공백을 전부 지운다(`manager.rs` 시험의 같은 이름
@@ -1819,13 +2081,14 @@ mod tests {
             &[
                 "SpawnReservation::reserve(",
                 "self.get_session(profile.id)",
-                "letinserted=self.ensure_registered(profile,entry)?;",
-                "self.prelaunch(profile)?;",
+                "letscope=self.launch.kits.begin_launch();",
+                "letinserted=self.ensure_registered(&scope,profile,entry)?;",
+                "self.prelaunch(&scope,profile)?;",
                 "if!inserted{self.register_for_spawn(profile,entry)?;}",
                 ".epoch_for_spawn(profile.id)",
                 "letreread=self.profiles.get(profile.id)",
                 "letprofile=&reread;",
-                "dunce::canonicalize(&profile.cwd)",
+                "letcwd=self.launch.kits.working_folder(&scope,&profile.cwd);",
                 "fresh_spawn_release_session_id(",
                 "self.control.provision(",
                 "backend::build_command_spec(",
@@ -1842,7 +2105,7 @@ mod tests {
             &[
                 "self.profiles.get(id)",
                 // 답(막힘 포함)을 쥔 채 곧바로 대조한다 — 사이에서 풀면 바뀐 입력의 막힘이 그대로 나간다.
-                "letchecked=self.launch.kits.check(&profile);matchself.profiles.launch_inputs_unchanged(id,&seen)",
+                "letchecked=self.launch.kits.check_in(scope,&profile);matchself.profiles.launch_inputs_unchanged(id,&seen)",
                 "Some(true)=>{returnsettle(caller,&seen,checked)",
             ],
         );
@@ -1852,21 +2115,32 @@ mod tests {
             &ensure,
             &[
                 "self.profiles.get(profile.id).is_some()",
-                "self.check_before_create(profile)?;",
+                "self.check_before_create(scope,profile)?;",
                 "self.lock_name_allocation()",
                 ".upsert_preserving_hierarchy(&self.profiles,fresh)",
             ],
         );
 
-        // 점검을 부르는 자리는 이 파일의 둘(넣기 전 점검 · 전처리)뿐 — 다른 자리에서 부르면 명부 사본 · 락 규율이
-        //   갈린다.
+        // The check is called from this file's two places only (pre-create check, prelaunch), both inside the launch's
+        //   scope — another caller would split the roster-copy and lock rules, and an unscoped `check` would leave the
+        //   scope. The scope is opened once, in the spawn body, and not here; the spawn path keeps no canonicalize of
+        //   its own (the working folder is the kit source's answer).
+        // ADR-0360
         let production = manager.split("mod tests {").next().expect("운영 구획");
         assert!(!production.contains(".kits.check("));
+        assert!(!production.contains(".kits.check_in("));
+        assert_eq!(production.matches(".begin_launch()").count(), 1);
+        assert!(
+            !spawn.contains("dunce::canonicalize("),
+            "the spawn path canonicalizes the cwd itself instead of asking the working folder"
+        );
         let own = include_str!("prelaunch.rs")
             .split("mod tests {")
             .next()
             .expect("운영 구획");
-        assert_eq!(own.matches(".kits.check(").count(), 2);
+        assert!(!own.contains(".kits.check("));
+        assert_eq!(own.matches(".kits.check_in(scope,").count(), 2);
+        assert!(!own.contains(".begin_launch()"));
     }
 
     /// ★재료 가드 자리를 소스에서 못 박는다★ — 무장은 준비 **앞**(준비 실패도 거둔다 — Err 경로는 정확히 한 번 ·
@@ -1887,10 +2161,10 @@ mod tests {
         assert_in_order(
             &spawn,
             &[
-                "let(plan,plan_notices)=self.prelaunch(profile)?;",
+                "let(plan,plan_notices)=self.prelaunch(&scope,profile)?;",
                 ".epoch_for_spawn(profile.id)",
                 "letmutkit_guard=LaunchKitGuard::arm(self.launch.kits.clone(),profile.id,epoch);",
-                ".kits.prepare(plan,profile.id,epoch)",
+                ".kits.prepare_in(&scope,plan,profile.id,epoch)",
                 "letreread=self.profiles.get(profile.id)",
                 "fresh_spawn_release_session_id(",
                 "self.control.provision(",
@@ -1924,7 +2198,8 @@ mod tests {
             "조립 · 탐침 · 띄우기 말고 재료를 넘기는 자리가 있다"
         );
 
-        // 준비를 부르는 자리는 스폰 길 하나뿐이다.
+        // The prepare is called from the spawn path only, inside the launch's scope.
+        // ADR-0360
         let production: String = manager
             .split("mod tests {")
             .next()
@@ -1935,7 +2210,8 @@ mod tests {
             .collect::<String>()
             .split_whitespace()
             .collect();
-        assert_eq!(production.matches(".kits.prepare(").count(), 1);
+        assert_eq!(production.matches(".kits.prepare(").count(), 0);
+        assert_eq!(production.matches(".kits.prepare_in(").count(), 1);
 
         // TRD S25 §5-2 4 (c2) ② · ④: 세션 등록 뒤 거두는 자리는 reaper 하나다 — 이 crate 의 다른 운영 소스(kill · 실패
         //   정리 포함)는 거두지 않는다. 출처를 직접 부르는 자리는 가드 · 열쇠(`launch.rs`)뿐이고, 열쇠를 꺼내는 자리는

@@ -646,16 +646,19 @@ pub trait LaunchKitSource: Send + Sync + 'static {
     /// [`crate::profile_edit::ProfileEditPort::set_attachments`] 를 비롯한 프로필 쓰기는 부르지 않는다: manager 가
     /// 이 호출 전후의 붙임 · 명령 · env 를 견주므로, 여기서 쓰면 그 대조가 늘 어긋나 실행이 경합 실패
     /// ([`crate::types::PtyError::LaunchRaced`])로 끝난다.
-    /// ★띄우는 바로 그 에이전트의 `workspace_lock` 은 `Preparing` 이다★ — 이 호출 동안 그 실행의 스폰 예약이 잡혀
-    /// 있어 자기 예약을 보는 것이다. 바깥 잠김으로 읽어 막지 말 것(모든 실행이 막힌다). 명부에 아직 없는 프로필(즉석
-    /// 생성의 넣기 전 점검)도 이 호출로 온다 — 그 id 의 `workspace_lock` 은 `NotFound` 다(막힘 사유로 읽지 말 것).
+    /// ★The launching agent's own `workspace_lock` reads `Preparing`★ — the launch's spawn reservation is held during
+    /// this call, so the check sees its own reservation. Do not read it as an outside lock and block (every launch would
+    /// block). A profile not yet in the roster (the pre-create check of an ad-hoc create) also comes here — through
+    /// [`LaunchKitSource::check_in`], which the manager calls for every check — and its id's `workspace_lock` is
+    /// `NotFound` (not a block reason).
     fn check(&self, profile: &AgentProfile) -> Result<LaunchPlan, LaunchBlocked>;
 
     /// `plan` 대로 이 화신의 재료를 준비한다(휘발 폴더 · 합친 지침 · 스킬 목록). 그 사이 만든 것은 성패와 무관하게
     /// [`LaunchKitSource::release`] 가 거둔다(부르는 쪽은 준비 **앞**에서 거둘 채비를 한다).
     ///
-    /// `plan` = 이 실행의 [`LaunchKitSource::check`] 가 낸 그것 — 프로필에서 다시 풀지 않는다. 원본이 점검 뒤 사라졌거나
-    /// 바뀌었으면 [`PrepareError::Stale`] 이다(그 밖의 실패와 가른다).
+    /// `plan` = the one this launch's check ([`LaunchKitSource::check_in`]) returned — not resolved again from the
+    /// profile. If a source vanished or changed after the check, the answer is [`PrepareError::Stale`] (kept apart from
+    /// every other failure). The manager reaches this through [`LaunchKitSource::prepare_in`].
     fn prepare(&self, plan: LaunchPlan, id: AgentId, epoch: u32)
         -> Result<LaunchKit, PrepareError>;
 
@@ -673,10 +676,11 @@ pub trait LaunchKitSource: Send + Sync + 'static {
     // TRD S25 §5-2 4 (c2) ⑤
     fn release(&self, id: AgentId, epoch: u32);
 
-    /// Opens one launch's [`LaunchScope`]. The manager is to call it once per launch and pass the scope to every
-    /// [`LaunchKitSource::check_in`], [`LaunchKitSource::prepare_in`] and [`LaunchKitSource::working_folder`] of that
-    /// launch (step 8); until then it calls `check` / `prepare` directly and these defaults are not reached. The
-    /// default scope is empty.
+    /// Opens one launch's [`LaunchScope`]. The manager calls it once per launch — after the spawn reservation and the
+    /// running check, before any check — and passes the scope to every [`LaunchKitSource::check_in`],
+    /// [`LaunchKitSource::prepare_in`] and [`LaunchKitSource::working_folder`] of that launch; it calls `check` /
+    /// `prepare` only through those. The scope ends when the launch returns. The default scope is empty.
+    // ADR-0360
     fn begin_launch(&self) -> LaunchScope {
         LaunchScope::default()
     }
@@ -705,8 +709,8 @@ pub trait LaunchKitSource: Send + Sync + 'static {
 
     /// The working folder the launch spawns in, for the agent's `cwd` — the folder this launch's
     /// [`LaunchKitSource::check_in`] judged for the same `cwd`, so the spawn runs where the check looked. The default
-    /// judges nothing and is the manager's own expression: the `dunce` canonical path, or `cwd` as given when that
-    /// fails — one blocking canonicalize, unbounded.
+    /// judges nothing: the `dunce` canonical path, or `cwd` as given when that fails — one blocking canonicalize,
+    /// unbounded.
     fn working_folder(&self, _scope: &LaunchScope, cwd: &Path) -> PathBuf {
         dunce::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf())
     }
@@ -2419,7 +2423,7 @@ mod tests {
         assert_eq!(*kits.prepares.lock().unwrap(), 1);
     }
 
-    /// The default `working_folder` is the manager's expression: the `dunce` canonical path of a folder that exists
+    /// The default `working_folder` is the `dunce` canonical path of a folder that exists
     /// (a `..` step resolved), the path as given for one that does not.
     #[test]
     fn the_default_working_folder_is_the_dunce_canonical_path_or_the_path_as_given() {

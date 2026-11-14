@@ -25,7 +25,7 @@ use crate::failure::AgentFailureKind;
 use crate::inputs_pending::InputsPendingTable;
 #[cfg(test)]
 use crate::launch::LaunchArtifacts;
-use crate::launch::{LaunchKitGuard, LaunchLease, LaunchPorts, Notice};
+use crate::launch::{LaunchKitGuard, LaunchLease, LaunchPorts, LaunchScope, Notice};
 use crate::output_core::{OutputCore, QueuedWiring, TurnWiring};
 use crate::profile::{
     AgentCommand, AgentProfile, ProfileRegistry, RestoreOutcome, RestoreReport, SpawnMode,
@@ -1311,7 +1311,7 @@ impl AgentManager {
     /// ★The launch material is checked on the caller's copy **before** the add — a block adds nothing★ (a create path
     ///   checks before it creates): a block after the add would leave in the roster an entry that cannot start, which
     ///   the caller then has to wake or delete by the id its answer names. A block on the re-check after the add can
-    ///   still happen (partial success).
+    ///   still happen (partial success). That check runs in `scope`, the launch's one scope.
     ///
     /// ★★유일성 · 상한은 **신규 등록에만** 건다 — epoch 교체는 개명 대상이 아니다(ADR-0115 §영향 · ADR-0007)★★.
     ///   restart / restore(`restore_all`·`restore_one`) / 재활성화(`activate_profile`) /
@@ -1334,7 +1334,12 @@ impl AgentManager {
     // ADR-0291 R17 (E3)
     // ADR-0319
     // TRD S25 §1-5 (가) 1 ②
-    fn ensure_registered(&self, profile: &AgentProfile, entry: Entry) -> Result<bool, PtyError> {
+    fn ensure_registered(
+        &self,
+        scope: &LaunchScope,
+        profile: &AgentProfile,
+        entry: Entry,
+    ) -> Result<bool, PtyError> {
         // 있는 id 면 이름 배정 자체가 없으므로 게이트를 잡지 않는다. 「있나」와 「넣나」 사이는 이 id 의 스폰
         //   예약이 덮는다 — 같은 id 의 두 스폰이 함께 여기 오지 않는다.
         if self.profiles.get(profile.id).is_some() {
@@ -1342,7 +1347,7 @@ impl AgentManager {
         }
         // 이름 배정 게이트를 잡기 **전**이다 — 점검은 manager 락을 하나도 쥐지 않고 부른다(asset-library 락 →
         //   manager 락 한 방향).
-        self.check_before_create(profile)?;
+        self.check_before_create(scope, profile)?;
         let mut fresh = profile.clone();
         fresh.display_name = normalize_display_name(fresh.display_name.take());
         let _gate = self.lock_name_allocation();
@@ -1483,13 +1488,19 @@ impl AgentManager {
             ));
         }
 
+        // One scope for this whole launch, opened after the reservation and the running check (a moot request opens
+        //   none) and passed to every kit call below; every launch kind passes through here. Contract =
+        //   `LaunchKitSource::begin_launch`.
+        // ADR-0360: the folder budgets are per launch.
+        // ADR-0334
+        let scope = self.launch.kits.begin_launch();
         // 전처리가 명부의 항목을 읽으므로 없는 id(즉석 생성)를 먼저 넣는다(넣기 전 점검은 그 안에서).
         // TRD S25 §1-5 (가) 0
-        let inserted = self.ensure_registered(profile, entry)?;
+        let inserted = self.ensure_registered(&scope, profile, entry)?;
         // ★실행 전처리는 이 자리다 — 예약 · 떠 있음 확인 **뒤**, 화신 표식 · 세션 파생 **앞**(ADR-0319)★: 예약 앞이면
         //   같은 에이전트의 두 실행이 함께 점검하고, 표식 · 세션 파생 뒤면 래치 · 표식이 맞추기 전 사본을 본다. 막히면
         //   제어 채널을 발급하기 전에 끊는다.
-        let (plan, plan_notices) = self.prelaunch(profile)?;
+        let (plan, plan_notices) = self.prelaunch(&scope, profile)?;
 
         // 방금 넣은 id 는 병합하지 않는다 — 넣은 값이 곧 사본이고, 앞 화신이 없어 아래 표식까지 사이에 낄 지각
         //   기록도 없다.
@@ -1546,7 +1557,7 @@ impl AgentManager {
         let mut kit = self
             .launch
             .kits
-            .prepare(plan, profile.id, epoch)
+            .prepare_in(&scope, plan, profile.id, epoch)
             .map_err(|e| prelaunch::prepare_failed(profile.id, e))?;
 
         // ★여기부터는 호출자 사본이 아니라 **명부의 지금 값**에서 파생한다★ — 위 등록 병합은 명부의 작업 폴더 ·
@@ -1562,8 +1573,12 @@ impl AgentManager {
         // ADR-0337: the stored hash from this re-read — the value the first-turn recording compares against.
         kit.last_applied_instructions_hash = profile.last_applied_instructions_hash.clone();
 
-        // cwd 정규화 — claude 세션 디렉토리 표기 고정(UNC 회피). 실패 시 원본 사용(best-effort).
-        let cwd = dunce::canonicalize(&profile.cwd).unwrap_or_else(|_| profile.cwd.clone());
+        // The folder the process runs in comes from the kit source, for the re-read profile's cwd — the folder this
+        //   launch's check judged, so the spawn runs where the check looked. The default is the `dunce` canonical path
+        //   (a fixed spelling for claude's session folder, no UNC prefix), or the cwd as given when that fails.
+        // ADR-0353: the check judges the working-folder rules on this same folder — a different one here lets a folder
+        //   the check passed fail the spawn instead of blocking.
+        let cwd = self.launch.kits.working_folder(&scope, &profile.cwd);
 
         // ★세션 id 규칙(ADR-0226 — 「저장된 id 가 있다 ⟺ 이어받을 대화가 있다」)★: 여기서는 **아무것도
         //   새로 영속하지 않는다**. 이 화신의 id 는 첫 제출 래치가 첫 사용자 턴이 나가기 직전에 적는다
@@ -5614,7 +5629,7 @@ mod tests {
     impl AgentManager {
         /// 스폰의 등록 두 걸음(없으면 넣기 · 있던 id 면 사본 병합) — 실행 전처리는 운영에서 그 사이에 돈다.
         fn register_like_spawn(&self, profile: &AgentProfile) -> Result<(), PtyError> {
-            if self.ensure_registered(profile, Entry::Caller)? {
+            if self.ensure_registered(&LaunchScope::default(), profile, Entry::Caller)? {
                 return Ok(());
             }
             self.register_for_spawn(profile, Entry::Caller)
@@ -5742,7 +5757,11 @@ mod tests {
 
         // ad-hoc spawn 의 신규 등록 경로도 같은 답 — 이쪽이 뚫려 있으면 "총량" 이 거짓이 된다.
         let err = manager
-            .ensure_registered(&agent_profile("C:/adhoc", Some("adhoc")), Entry::Caller)
+            .ensure_registered(
+                &LaunchScope::default(),
+                &agent_profile("C:/adhoc", Some("adhoc")),
+                Entry::Caller,
+            )
             .expect_err("ad-hoc 신규 등록도 거부");
         assert!(matches!(err, PtyError::RosterFull { .. }), "{err}");
         assert_eq!(
@@ -5754,7 +5773,7 @@ mod tests {
         // ★기존 에이전트는 인질이 아니다★: 같은 id 재등록(복원·재spawn)과 개명은 상한에서도 계속 된다.
         assert!(
             !manager
-                .ensure_registered(&last, Entry::Caller)
+                .ensure_registered(&LaunchScope::default(), &last, Entry::Caller)
                 .expect("기존 id 는 넣지 않고 지난다 — 상한과 무관"),
             "기존 id 를 넣었다고 답한다"
         );
