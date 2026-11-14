@@ -1,6 +1,6 @@
 # Test Strategy
 
-> This document is a **living operating map** — "what verifies each layer, how far, and how, and where the blanks are". The *rationale (why)* of the decisions is in **ADR-0012** (test strategy — isolation harness + TDD), and this document tracks the actual inventory, division of roles and gaps on top of it. The progress flow is in `docs/process/step-log.md`.
+> This document is a **living operating map** — "what verifies each layer, how far, and how, and where the blanks are". The *rationale (why)* of the decisions is in **ADR-0012** (test strategy — isolation harness + TDD), and this document tracks the actual inventory, division of roles and gaps on top of it. The progress flow is in git log (`S<n>:` commit titles) + each work folder's `README.md`.
 >
 > When adding a new module or feature, write the test that fits the "role per layer" of this document **together** (TDD, ADR-0012). If the way of testing changes, update this document.
 

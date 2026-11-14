@@ -15,7 +15,7 @@ This is **jump-style consumption**, not a read-through — narrow down to the ar
 2. This `docs/README.md` — the hub for status and structure.
 3. Narrow down the area you are touching — the `decisions/README.md` index + the `// ADR-NNNN` anchors in code (`rg "ADR-"`).
 4. Why → `decisions/` — ADRs (decision + rejected alternatives).
-5. When/what → `process/step-log.md` — the timeline.
+5. When/what → git log (`S<n>:` commit titles) + each work folder's `README.md` (one status line per TRD) — the timeline. `process/step-log.md` is frozen (old history only).
 6. Evidence → `research/` — prior research.
 7. Canon/conventions → `reference/` — the code-synchronized canon.
 
@@ -23,8 +23,8 @@ This is **jump-style consumption**, not a read-through — narrow down to the ar
 
 | Folder/file | What it is |
 |---|---|
-| `process/SN-name/` | "How we have built it" — **a folder is a step** (self-evident from the name alone). The real list is `ls docs/process/`, the flow is `step-log.md`. *Do not copy the step list here by hand — a copy drifts (rot).* |
-| `process/step-log.md` | ★ Timeline — when, what, how. **The single source for the step flow.** |
+| `process/SN-name/` | "How we have built it" — **a folder is a step** (self-evident from the name alone). The real list is `ls docs/process/`, the flow is git log (`S<n>:` commit titles) + each folder's `README.md`. *Do not copy the step list here by hand — a copy drifts (rot).* |
+| `process/step-log.md` | **Frozen** old timeline — no new entries. Read it only for history before the freeze. |
 | `decisions/` | "Why we decided this way" — decisions + rejected alternatives (ADRs). Accumulates permanently. |
 | `tracking.md` | Open deferred items (T-). The "re-introduction point" is the trigger. When one is resolved, remove it, and if anything points to its number, move it to `tracking-archive.md` as one line. |
 | `tracking-archive.md` | Only those items resolved or closed in `tracking.md` that other documents or code point to by number, one line each. Full text = git history. |
@@ -39,7 +39,7 @@ This is **jump-style consumption**, not a read-through — narrow down to the ar
 
 - You made a design **decision** (+ discarded alternatives) → an ADR in `decisions/` (read the related ADRs before working)
 - Something to handle **later**, not now, or an open question → `tracking.md` (T-/D-)
-- **What was done, when** → `step-log.md`
+- **What was done, when** → the commit message (`S<n>:` title) + the work folder's `README.md` TRD status line
 - **Research** before a step starts → `research/`
 - **Refactoring** boundary measurements · structural-debt measurements · plans → `refactoring/` (not a decision — if you decide, record it in `decisions/` and link from there. 「나중에 다룬다」 (handle later) goes to `tracking.md` as a T-)
 - **Canon (evolving canon)** synchronized with code → `reference/` (edited in place, not an ADR — if an ADR is the *why*, canon is the *practice convention*)
@@ -50,6 +50,6 @@ This is **jump-style consumption**, not a read-through — narrow down to the ar
 ## Progress status
 
 Do not maintain this in duplicate in this file (to prevent rot). Single sources:
-- **When/what (timeline):** `process/step-log.md` ★ always latest
+- **When/what (timeline):** git log (`S<n>:` commit titles) + each work folder's `README.md` (one status line per TRD)
 - **Why (decisions, rejected alternatives):** `decisions/`
 - **Deferred (T-/D-):** `tracking.md`

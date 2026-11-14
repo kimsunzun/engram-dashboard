@@ -4,14 +4,15 @@ The rules are in `../../CLAUDE.md` 「브랜치·커밋」. This document is the
 
 ## Starting a topic — getting `S<n>`
 
-- When you cut your own topic branch, you get a number. Use that number together in the commit prefix · the design folder `docs/process/S<n>-<슬러그>/` · the step-log heading `## S<n> — …`.
-- How to pick = after `git fetch`, scan all refs, take the largest integer n found, and use n + 1. Looking only at the current branch gives the same number in different worktrees. The step-log is not in time order, so do not continue from its last heading. n is the integer part (`S20.19` = 20).
+- When you cut your own topic branch, you get a number. Use that number together in the commit prefix · the work folder `docs/process/S<n>-<슬러그>/`.
+- How to pick = after `git fetch`, take the largest integer n across all refs and use n + 1. Sources = `S<n>:` commit titles · `docs/process/S*` folder names · the frozen step-log headings (old numbers only) — the three lines below, in that order. Looking only at the current branch gives the same number in different worktrees. n is the integer part (`S20.19` = 20).
   ```bash
   git log --all --format=%s | grep -oE '^S[0-9]+' | tr -d S | sort -n | tail -1
   git log --all --name-only --format= -- docs/process | grep -oE 'docs/process/S[0-9]+' | tr -dc '0-9\n' | sort -n | tail -1
   for r in $(git for-each-ref --format='%(refname)' refs/heads refs/remotes); do MSYS_NO_PATHCONV=1 git show "$r:docs/process/step-log.md" 2>/dev/null | grep -oE '^## S[0-9]+'; done | tr -dc '0-9\n' | sort -n | tail -1
   ```
-- Once you have it, commit and push the step-log heading and one file inside the design folder (git does not carry empty folders) right away to claim it.
+- Once you have it, commit and push the new work folder's `README.md` right away to claim it (git does not carry empty folders).
+- Step numbers inside a topic (`S<n>.<m>`, stage names) continue from that topic's `README.md` TRD list and its `S<n>:` commit titles — not from the step-log.
 - Small commits on a miscellany branch (`v<다음 릴리스>/chore/misc`) do not get a new number — use the number that branch has been using, and for a newly cut miscellany branch use the largest number at that time (until `docs/tracking.md` T-69 decides).
 - When work that was going on in a miscellany branch grows into a topic, split it off into its own branch at that point and get a number.
 - Do not rename existing `docs/process/S21-*` folders — code comments and handoff records point to those paths.

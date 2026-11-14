@@ -25,7 +25,7 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 # ADR-NNNN: <한 줄 제목>
 
 - 상태: 확정 (YYYY-MM-DD, 근거: spike/commit)
-- 관련: CLAUDE.md §X · <파일:라인> · step-log SN
+- 관련: CLAUDE.md §X · <파일:라인> · `docs/process/S<n>-…/`
 
 ## 맥락
 무슨 문제를 풀어야 했나.

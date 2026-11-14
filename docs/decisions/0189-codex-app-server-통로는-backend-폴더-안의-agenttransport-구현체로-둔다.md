@@ -1,7 +1,7 @@
 # ADR-0189: The codex app-server channel is placed as an AgentTransport implementation inside the backend folder
 
 - 상태: 확정 (2026-09-09, basis: user decision + ownership-trace verification + re-reading the original comment text) · 부분 폐기 by ADR-0191 (it decided where the channel lives but did not decide the creation path)
-- 관련: Amends ADR-0044 (the shared clause on the byte channel) · ADR-0004 (backend knowledge isolation) · ADR-0045 (output cleaning moves to the backend) · ADR-0030 (transport ⊕ backend caps composition) · ADR-0187 (app-server channel settled) · ADR-0190 (input queue) · `docs/reference/structure/session-path-ownership.md` · `docs/process/S21-codex-backend/trd-phase2a.md` §5 · step-log S21 · Amended by ADR-0191 (it decided where the channel lives but did not decide the creation path)
+- 관련: Amends ADR-0044 (the shared clause on the byte channel) · ADR-0004 (backend knowledge isolation) · ADR-0045 (output cleaning moves to the backend) · ADR-0030 (transport ⊕ backend caps composition) · ADR-0187 (app-server channel settled) · ADR-0190 (input queue) · `docs/research/session-path-ownership.md` · `docs/process/S21-codex-backend/trd-phase2a.md` §5 · step-log S21 · Amended by ADR-0191 (it decided where the channel lives but did not decide the creation path)
 
 ## 맥락
 

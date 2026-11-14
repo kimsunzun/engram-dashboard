@@ -4,7 +4,7 @@
 
 **트리거 대기 = 어떤 사건(예: 스킬 · CLAUDE.md 개편)이 오면 꺼낼 항목** — 상태 칸에 「트리거 대기 — <사건>」으로 적고, 꺼낼 땐 `rg -n "트리거 대기" docs/tracking.md` 한 번으로 전부 본다(사용자 2026-10-14 — 사용자가 「트래킹에서 트리거 대기 꺼내」라고 하면 이것을 돌린다).
 
-해결되면 여기서 뺀다 — 다른 문서·코드가 그 번호를 가리키면 [`tracking-archive.md`](tracking-archive.md) 에 한 줄로 옮기고, 아니면 지운다(해결 기록은 ADR·step-log·커밋이 진다).
+해결되면 여기서 뺀다 — 다른 문서·코드가 그 번호를 가리키면 [`tracking-archive.md`](tracking-archive.md) 에 한 줄로 옮기고, 아니면 지운다(해결 기록은 ADR·커밋 메시지·작업 폴더 `README.md` 가 진다).
 
 간소화 전 전문(조사 기록·되돌린 시도·실측 상세) = `git show 8671e5c:docs/tracking.md`
 
@@ -116,7 +116,7 @@
 - **근거:** `research/window-naming-titlebar-2026-10-17.md` · 제목 표시줄 구현 선택지 `research/custom-titlebar-tauri-2026-10-18.md`(추천 = HTML 단추 + `data-tauri-drag-region` · 스냅 메뉴는 `platform` 에 오버레이 — 메뉴 필요 여부는 사용자 결정) · 탭 끌기와의 맞물림(빈 탭바 `app-region: drag` · 탭 하나 창 = 창 이동 — ★이 뒤쪽은 PRD 4.9 Q34 가 대신했다(탭 하나뿐인 팝아웃도 다른 탭처럼 끈다)★) `research/slot-docking-chrome-desktop-drag-2026-10-18.md` B6 · A12(슬롯 도킹 9c 실측 불합격 뒤 데스크톱 Chrome 모델 재조사 · 코드 점검 = `refactoring/slot-docking-drag-code-audit-2026-10-18.md`)
 
 ### T-65. 슬롯 도킹의 LLM 명령(`tab.dock` · `layout.get`) — CLAUDE.md 「LLM-우선 제어」의 의식적 예외
-- **상태:** 구현 · 문서 착지 — S28(2026-10-26~27 · `v0.5.0/feat/llm-layout-commands` · TRD = `process/S28-llm-layout-commands/trd.md` 4판). U1 `7b587e99`(데몬 `agent.resolve` · 후보 문구) · U2 `4cb8caed`(셸 적용 층) · ADR-0308 `de6f652c`(에이전트 이름은 데몬이 중계 전에 id 로) · U3 `2710e14f`(`tab.move` · `tab.dock` · `tab.detach` · `layout.get` · 칸 · 탭 명령 이름 · 공간 낱말 지목 · 답에 바뀐 배치) · U4 문서(help 「## window」 · CLAUDE.md — 미커밋). `/qa standard` PASS. U3 까지 push · `2710e14f` CI 진행 중. **남은 것 = U4 문서 커밋 · GUI 실측 · master 머지** — 머지하면 여기서 빼고 `tracking-archive.md` 에 한 줄(코드 주석 · step-log 가 이 번호를 가리킨다).
+- **상태:** 구현 · 문서 착지 — S28(2026-10-26~27 · `v0.5.0/feat/llm-layout-commands` · TRD = `process/S28-llm-layout-commands/trd.md` 4판). U1 `7b587e99`(데몬 `agent.resolve` · 후보 문구) · U2 `4cb8caed`(셸 적용 층) · ADR-0308 `de6f652c`(에이전트 이름은 데몬이 중계 전에 id 로) · U3 `2710e14f`(`tab.move` · `tab.dock` · `tab.detach` · `layout.get` · 칸 · 탭 명령 이름 · 공간 낱말 지목 · 답에 바뀐 배치) · U4 문서(help 「## window」 · CLAUDE.md — 미커밋). `/qa standard` PASS. U3 까지 push · `2710e14f` CI 진행 중. **남은 것 = U4 문서 커밋 · GUI 실측 · master 머지** — 머지하면 여기서 빼고 `tracking-archive.md` 에 한 줄(코드 주석 · 커밋 메시지가 이 번호를 가리킨다).
 - **문제(S28 이 닫음):** 슬롯 도킹은 마우스 경로만 만든다(PRD 4.3 Q10 · R16 · R17 · AC10). 적용 서비스 `apply::dock_tab` 은 남아 명령이 그 위에 선다(TRD 7판 §3-6 — 옛 5판 §3). 그 사이 LLM 은 탭을 도킹할 수 없다.
 - **사용자 확인 대기(메인이 기본값으로 진행 — S28 TRD §11):** ① 칸이 여럿인 탭은 탭째 옮긴다 ② `tab.dock` 붙임 몫 기본 = 마우스와 같은 값(크기를 모르면 0.5) ③ 풀리지 않는 에이전트를 `slot.assignAgent` · `layout.setSlotContent` 가 거절한다(전엔 빈 칸) ④ 보이는 탭을 안 바꾸는 규칙(슬롯 도킹 PRD R11b)의 예외 셋 ⑤ 끄는 중 LLM 이 옮긴 탭을 웹뷰 밖에 놓으면 새 창이 안 생긴다(그대로 둠) ⑥ LLM 의 새 창 크기 · 붙임 몫이 마우스와 조금 다르다 ⑦ 칸 하나만 다른 칸 옆에 붙이는 길이 없다.
 - **후속(지금 코드에 없음):** ⑦ 칸 단위 도킹(지금은 `slot.popout` → `tab.dock` 두 호출) · ⑥ 모니터 작업 영역 · 창 틀 입력을 셸로 올리는 포트(마우스와 같게 하려면) · 「크면 파일로」 안전장치(ADR-0307 결정 6 · 자리 미정 — S28 범위 밖) · `agent.spawnInto` 가 `slot_id` 단독을 받게(`slot.assignAgent` 처럼) — 지금은 `view_id` 가 필요해 칸을 나눠 그 반쪽에 띄우기가 3 호출(`slot.split` → `layout.get --ids true` → `agent.spawnInto`).
