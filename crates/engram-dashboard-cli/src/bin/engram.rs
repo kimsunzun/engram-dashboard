@@ -128,8 +128,9 @@ use engram_dashboard_agent::types::{
     AGENT_STATE_LIVE, AGENT_STATE_SLEEPING, CLI_AGENT_FLAGS, CLI_AGENT_VERBS,
     CLI_CONTROL_READ_TIMEOUT_SECS, CLI_EXE_NAME, CLI_GROUP_AGENT, CLI_GROUP_MAIL, CLI_HELP_ROUTE,
     CLI_HELP_SCREEN_KEY, CLI_HELP_TOPIC_KEY, CLI_MAIL_FLAGS, CLI_MAIL_VERBS,
-    RENAME_OUTCOME_RENAMED, RENAME_OUTCOME_UNCHANGED,
+    LAUNCH_RELAY_CALLER_WAIT_SECS, RENAME_OUTCOME_RENAMED, RENAME_OUTCOME_UNCHANGED,
 };
+use engram_dashboard_command::DeadlineClass;
 
 /// The control socket's **silence limit** (short because the daemon is local) — if the daemon is dead, fail fast so the agent retries/reports.
 ///
@@ -148,6 +149,12 @@ use engram_dashboard_agent::types::{
 /// nothing before its answer (the source of truth for that fact = the constant's doc on the agent side).
 // ADR-0161
 const TIMEOUT: Duration = Duration::from_secs(CLI_CONTROL_READ_TIMEOUT_SECS);
+
+/// The silence window for a launch verb — `engram agent spawn` and the call form of a launch-class command (the class
+/// read from its catalog entry, never from a list of names here). One value whether the daemon answers the launch
+/// itself or relays it: the end of the launch-wait chain (agent `types.rs`).
+// ADR-0369
+const LAUNCH_TIMEOUT: Duration = Duration::from_secs(LAUNCH_RELAY_CALLER_WAIT_SECS);
 
 /// The help verb. `--help`/`-h` are also accepted in the same slot — `is_help_token`.
 const HELP_VERB: &str = "help";
@@ -258,7 +265,7 @@ fn read_credentials() -> Result<(String, String), (&'static str, &'static str)> 
 fn run_legacy(base: &str, token: &str, command: Command) -> i32 {
     let route = command.route();
     let request_body = command.request_body();
-    match post_json(base, route, token, &request_body) {
+    match post_json(base, route, token, &request_body, command.silence_window()) {
         Ok(resp) => {
             // Print the body even for non-2xx — it carries correction JSON that the sending agent parses.
             println!("{}", resp.body);
@@ -279,7 +286,13 @@ fn run_legacy(base: &str, token: &str, command: Command) -> i32 {
 /// Ask the daemon for one help screen and print it. The word is carried unchecked — the vocabulary belongs to the daemon.
 // ADR-0285
 fn run_help(base: &str, token: &str, topic: Option<&str>) -> i32 {
-    match post_json(base, CLI_HELP_ROUTE, token, &help_request_body(topic)) {
+    match post_json(
+        base,
+        CLI_HELP_ROUTE,
+        token,
+        &help_request_body(topic),
+        TIMEOUT,
+    ) {
         Ok(resp) => {
             let verdict = exit_code_for_help_response(resp.status, &resp.body);
             println!("{}", verdict.stdout);
@@ -509,6 +522,16 @@ impl Command {
             Command::Send(_) => "/control/send",
             Command::Status { .. } | Command::Pending => "/control/messages",
             Command::Agent(_) => "/control/agent",
+        }
+    }
+
+    /// How long this verb's socket may stay silent — a launch waits [`LAUNCH_TIMEOUT`], every other verb [`TIMEOUT`].
+    fn silence_window(&self) -> Duration {
+        match self {
+            Command::Agent(ParsedAgent::Spawn { .. }) => LAUNCH_TIMEOUT,
+            Command::Send(_) | Command::Status { .. } | Command::Pending | Command::Agent(_) => {
+                TIMEOUT
+            }
         }
     }
 
@@ -1572,7 +1595,7 @@ fn read_catalog(v: &serde_json::Value) -> Result<CatalogRead, String> {
 ///   command's own rejection — on a single 401 the caller (LLM) starts fixing perfectly good arguments. One line
 ///   says which request failed.
 fn fetch_catalog(base: &str, token: &str, for_command: Option<&str>) -> Result<CatalogRead, i32> {
-    let resp = match post_json(base, ROUTE_COMMANDS, token, "{}") {
+    let resp = match post_json(base, ROUTE_COMMANDS, token, "{}", TIMEOUT) {
         Ok(r) => r,
         Err(e) => {
             let code = fail_unreached(&e);
@@ -1699,7 +1722,13 @@ fn run_invoke(base: &str, token: &str, invoke: ParsedInvoke) -> i32 {
         "request_id": new_request_id(),
     })
     .to_string();
-    match post_json(base, ROUTE_CALL, token, &body) {
+    match post_json(
+        base,
+        ROUTE_CALL,
+        token,
+        &body,
+        call_silence_window(blob.as_ref()),
+    ) {
         Ok(resp) => {
             println!("{}", resp.body);
             // ★Measure by the declared return — the material already came in the same round trip★: if the lenient query decider is used,
@@ -1784,6 +1813,16 @@ fn exit_code_for_call_response(
         "{CLI_EXE_NAME}: one possible cause is a daemon from an older build — rebuilding this CLI does not relink a daemon that is already running, so restart the daemon and retry before reporting it (`cargo build` alone is not enough)"
     );
     EXIT_MALFORMED_SUCCESS
+}
+
+/// The silence window of a call — [`LAUNCH_TIMEOUT`] when the catalog entry `run_invoke` already fetched states the
+/// launch class, [`TIMEOUT`] otherwise (no entry blob · no class · an unknown word).
+// ADR-0369
+fn call_silence_window(entry: Option<&serde_json::Value>) -> Duration {
+    match entry.map(DeadlineClass::of_schema_entry) {
+        Some(DeadlineClass::Launch) => LAUNCH_TIMEOUT,
+        Some(DeadlineClass::Ordinary) | None => TIMEOUT,
+    }
 }
 
 /// The `required` list of a schema fragment (strings only).
@@ -2446,11 +2485,15 @@ struct HttpResponse {
 ///
 /// ★Route parameterization (D)★: send and query use the same server, same auth and same framing, so only the path is swapped
 ///   (if the HTTP client were duplicated per verb, truncation handling and header conventions would exist in three copies).
+///
+/// `silence_window` = the read/write timeout of the socket ([`TIMEOUT`] · [`LAUNCH_TIMEOUT`] — a silence window, not a
+/// total budget).
 fn post_json(
     base: &str,
     route: &str,
     token: &str,
     request_body: &str,
+    silence_window: Duration,
 ) -> Result<HttpResponse, SendError> {
     let (host, port) = parse_host_port(base).map_err(SendError::Connect)?;
     let path = format!("{}{route}", base_path(base));
@@ -2458,8 +2501,8 @@ fn post_json(
     let mut stream = TcpStream::connect((host.as_str(), port))
         .map_err(|e| SendError::Connect(format!("connect {host}:{port} failed: {e}")))?;
     stream
-        .set_read_timeout(Some(TIMEOUT))
-        .and_then(|_| stream.set_write_timeout(Some(TIMEOUT)))
+        .set_read_timeout(Some(silence_window))
+        .and_then(|_| stream.set_write_timeout(Some(silence_window)))
         .map_err(|e| SendError::Connect(format!("set timeout failed: {e}")))?;
 
     // Content-Length is required (so the server knows the body boundary), Connection: close (ends after the response → the server
@@ -3463,6 +3506,55 @@ mod tests {
             ParsedCommand::Agent(a) => Ok(a),
             other => Err(format!("제어 커맨드가 아니다: {other:?}")),
         }
+    }
+
+    /// ADR-0369: `agent spawn` (no catalog on its route) waits the launch wait; every other group verb the shared 10 s.
+    #[test]
+    fn agent_spawn_waits_the_launch_wait_and_every_other_verb_the_shared_one() {
+        assert_eq!(
+            LAUNCH_TIMEOUT,
+            Duration::from_secs(LAUNCH_RELAY_CALLER_WAIT_SECS)
+        );
+        assert!(LAUNCH_TIMEOUT > TIMEOUT);
+        let window = |args: &[&str]| {
+            Command::Agent(parse_agent_command(args).expect("parse")).silence_window()
+        };
+        assert_eq!(window(&["agent", "spawn", "w"]), LAUNCH_TIMEOUT);
+        assert_eq!(
+            window(&["agent", "spawn", "--cwd", "C:/work"]),
+            LAUNCH_TIMEOUT
+        );
+        for args in [
+            &["agent", "list"][..],
+            &["agent", "new", "--cwd", "C:/work"],
+            &["agent", "rename", "a", "b"],
+            &["agent", "move", "a", "--parent", "none"],
+        ] {
+            assert_eq!(window(args), TIMEOUT, "{args:?}");
+        }
+        assert_eq!(Command::Pending.silence_window(), TIMEOUT);
+    }
+
+    /// ADR-0369: a call's wait comes from the class in the catalog entry already fetched — a launch-class entry waits the
+    /// launch wait; an ordinary entry, an unknown word or an unreadable blob the shared one.
+    #[test]
+    fn a_call_waits_by_the_class_its_catalog_entry_states() {
+        let entry = |text: &str| serde_json::from_str::<serde_json::Value>(text).expect("json");
+        assert_eq!(
+            call_silence_window(Some(&entry(
+                r#"{"name":"agent.spawnInto","deadline":"Launch"}"#
+            ))),
+            LAUNCH_TIMEOUT
+        );
+        assert_eq!(
+            call_silence_window(Some(&entry(r#"{"name":"tab.create"}"#))),
+            TIMEOUT
+        );
+        assert_eq!(
+            call_silence_window(Some(&entry(r#"{"name":"x.y","deadline":"Someday"}"#))),
+            TIMEOUT
+        );
+        assert_eq!(call_silence_window(None), TIMEOUT);
     }
 
     /// Per-verb wire (route + body) — the whole family rides one route.

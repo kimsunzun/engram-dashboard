@@ -136,7 +136,8 @@ fn sane_secs(value: f64, fallback: f64) -> f64 {
 /// All the policy that applies to one peer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Policy {
-    /// The upper limit on waiting for a reply. One shared value regardless of command kind (ADR-0181 decision 1).
+    /// The upper limit on waiting for a reply, for every request that does not carry its own ([`crate::Peer::request_in`]'s
+    /// `reply_deadline` — ADR-0369 amends ADR-0181 decision 1 for launch requests only).
     ///
     /// ★Unverified — the real time agent spawn takes has never been measured★. It is the place that ADR wrote down as the only real risk of 8 seconds.
     pub request_timeout: Duration,

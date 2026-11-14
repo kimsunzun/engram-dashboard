@@ -217,6 +217,7 @@ mod tests {
         args_type: "AgentListArgs",
         ok_type: "AgentListOk",
         agent_args: &[],
+        deadline: crate::DeadlineClass::Ordinary,
     };
     static DECLARED: &[&CommandSpec] = &[&AGENT_LIST];
 
@@ -288,6 +289,7 @@ mod tests {
                     name: "tab.create".to_string(),
                     help: "{}".to_string(),
                     agent_args: Vec::new(),
+                    deadline: crate::DeadlineClass::Ordinary,
                 }],
             )
             .expect("한 이름은 상한 안이다");
@@ -321,6 +323,7 @@ mod tests {
                     name: "tab.create".to_string(),
                     help: "{}".to_string(),
                     agent_args: Vec::new(),
+                    deadline: crate::DeadlineClass::Ordinary,
                 }],
             )
             .expect("한 이름은 상한 안이다");
@@ -460,6 +463,7 @@ mod tests {
                     name: "tab.create".to_string(),
                     help: "{}".to_string(),
                     agent_args: Vec::new(),
+                    deadline: crate::DeadlineClass::Ordinary,
                 }],
             )
             .expect("한 이름은 상한 안이다");
@@ -514,6 +518,7 @@ mod tests {
                     name: "tab.create".to_string(),
                     help: "{}".to_string(),
                     agent_args: Vec::new(),
+                    deadline: crate::DeadlineClass::Ordinary,
                 }],
             )
             .expect("한 이름은 상한 안이다");
@@ -566,6 +571,7 @@ mod tests {
                     name: "tab.create".to_string(),
                     help: "{}".to_string(),
                     agent_args: Vec::new(),
+                    deadline: crate::DeadlineClass::Ordinary,
                 }],
             )
             .expect("한 이름은 상한 안이다");

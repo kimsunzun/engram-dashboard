@@ -1172,6 +1172,7 @@ mod tests {
                 name: "tab.create".to_string(),
                 help: "{}".to_string(),
                 agent_args: Vec::new(),
+                deadline: engram_dashboard_command::DeadlineClass::Ordinary,
             }])
             .unwrap(),
             catalog_version: 1,
@@ -1263,6 +1264,7 @@ mod tests {
                 name: "tab.create".to_string(),
                 help: "{}".to_string(),
                 agent_args: Vec::new(),
+                deadline: engram_dashboard_command::DeadlineClass::Ordinary,
             }])
             .unwrap(),
             catalog_version: 1,

@@ -470,7 +470,7 @@ pub fn malformed_body(reason: &str, raw: &str) -> ControlQueryResult {
 #[cfg(test)]
 mod tests {
     use crate::conn_port::ConnId;
-    use engram_dashboard_command::{Effect, OwnerToken, RequestId};
+    use engram_dashboard_command::{DeadlineClass, Effect, OwnerToken, RequestId};
 
     use super::*;
     use crate::command_delivery::NoLocalCommands;
@@ -484,8 +484,8 @@ mod tests {
     struct Holds(&'static str);
 
     impl LocalCommands for Holds {
-        fn claim(&self, name: &str) -> Option<Effect> {
-            (name == self.0).then_some(Effect::Read)
+        fn claim(&self, name: &str) -> Option<(Effect, DeadlineClass)> {
+            (name == self.0).then_some((Effect::Read, DeadlineClass::Ordinary))
         }
 
         fn run(
@@ -512,6 +512,7 @@ mod tests {
             name: name.to_string(),
             help: help.to_string(),
             agent_args: Vec::new(),
+            deadline: engram_dashboard_command::DeadlineClass::Ordinary,
         }
     }
 
@@ -702,8 +703,8 @@ mod tests {
     fn a_table_that_claims_a_name_but_answers_nothing_is_not_relayed() {
         struct ClaimsButAnswersNothing;
         impl LocalCommands for ClaimsButAnswersNothing {
-            fn claim(&self, _name: &str) -> Option<Effect> {
-                Some(Effect::Write)
+            fn claim(&self, _name: &str) -> Option<(Effect, DeadlineClass)> {
+                Some((Effect::Write, DeadlineClass::Ordinary))
             }
             fn run(
                 &self,
@@ -937,8 +938,8 @@ mod tests {
     struct Refuses(&'static str, CommandError);
 
     impl LocalCommands for Refuses {
-        fn claim(&self, name: &str) -> Option<Effect> {
-            (name == self.0).then_some(Effect::Write)
+        fn claim(&self, name: &str) -> Option<(Effect, DeadlineClass)> {
+            (name == self.0).then_some((Effect::Write, DeadlineClass::Ordinary))
         }
 
         fn run(

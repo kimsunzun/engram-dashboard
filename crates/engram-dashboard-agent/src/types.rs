@@ -500,7 +500,8 @@ pub const MCP_SERVER_NAME: &str = "engram";
 // ADR-0132
 pub const CLI_GROUP_MAIL: &str = "mail";
 
-/// CLI 가 제어 라우트에서 견디는 **침묵의 한도**(초) — 데몬 마감의 상한이다.
+/// The CLI's **silence window** on a control route (seconds) for every call that is not a launch — the upper bound of the
+/// daemon's ordinary seat deadline. A launch waits [`LAUNCH_RELAY_CALLER_WAIT_SECS`] instead (ADR-0360, ADR-0369).
 ///
 /// ★「총 예산」이 아니다★: 소비자는 이것을 `set_read_timeout`(+`set_write_timeout`)에 넣으므로, 발동
 /// 조건은 「요청을 보낸 뒤 **한 번의 read 가** 이 시간 안에 바이트를 하나도 못 받는 것」이다 — 왕복 전체의
@@ -522,8 +523,8 @@ pub const CLI_CONTROL_READ_TIMEOUT_SECS: u64 = 10;
 
 // The launch time values (ADR-0360 decision 6). Whole seconds as `u64`, like `CLI_CONTROL_READ_TIMEOUT_SECS` — each
 // consumer wraps them in its own type. Internal constants: they become settings only once file-based settings loading
-// exists (tracking T-105). The two folder waits are the inputs; the reply bound and the caller wait are derived as
-// `const`s so the chain cannot drift.
+// exists (tracking T-105). The two folder waits are the inputs; the reply bound and every launch wait are derived as
+// `const` sums of one base and one margin so the chain cannot drift (ADR-0369 — a literal launch wait is a defect).
 
 /// How long one launch waits, in total, for the folder IO whose failure blocks it — the library-root stat, the
 /// folder-entry stats, listings and file reads, `prepare`'s material reads. What has not answered when it is spent
@@ -548,24 +549,38 @@ pub const LAUNCH_REPLY_BOUND_SECS: u64 = LAUNCH_REQUIRED_FOLDER_WAIT_SECS
     + crate::manager::LINK_RESOLUTION_BACKSTOP.as_secs()
     + LAUNCH_REPLY_SLACK_SECS;
 
-/// How long a caller that waits **directly** on one launch waits: [`LAUNCH_REPLY_BOUND_SECS`] + the daemon's 1 s
-/// expiry sweep + its 2 s caller margin = 88. A nested path (a relay seat and the waits around it) does not take its
-/// values from this constant alone — they follow ADR-0360 decision 1 (b), outer wait ≥ inner wait + hop margin.
+/// The one margin of the launch-wait chain: the daemon's 1 s expiry sweep + its 2 s caller margin = 3 — the same
+/// quantity as two daemon↔shell hops. Every step of the chain adds exactly this; where waits nest, outer = inner + this
+/// (ADR-0360 decision 1 (b)).
 ///
 /// ★A deliberate exception to the `CLI_CONTROL_READ_TIMEOUT_SECS` doc's clause 「여기서 그 셈을 다시 적지 말 것」★:
-/// the sweep and margin terms restate the daemon's private `SWEEP_INTERVAL` · `CALLER_MARGIN` (agent cannot see the
-/// daemon), because the CLI and the shell need the derived value as a constant. The pin is step 8's parameterized
-/// `fits_caller_silence_window` in the daemon, which checks (85, 88) at compile time; until step 8 lands, only this
-/// crate's unit test pins the value.
+/// the two terms restate the daemon's private `SWEEP_INTERVAL` · `CALLER_MARGIN` (agent cannot see the daemon),
+/// because the CLI and the shell need the derived values as constants. The pin is the daemon's
+/// `fits_caller_silence_window`, which checks (bound, caller wait) and (relay seat, relay caller wait) at compile time.
+// ADR-0369
+pub const LAUNCH_MARGIN_SECS: u64 = DAEMON_SWEEP_SECS + DAEMON_CALLER_MARGIN_SECS;
+
+/// How long a caller that waits **directly** on one launch waits: [`LAUNCH_REPLY_BOUND_SECS`] + [`LAUNCH_MARGIN_SECS`]
+/// = 88 — the shell's wait for `Spawn` · `SpawnByCwd` · `SpawnProfile`, also inside the `agent.spawnInto` relay.
 // ADR-0360
-pub const LAUNCH_CALLER_WAIT_SECS: u64 =
-    LAUNCH_REPLY_BOUND_SECS + DAEMON_SWEEP_SECS + DAEMON_CALLER_MARGIN_SECS;
+// ADR-0369
+pub const LAUNCH_CALLER_WAIT_SECS: u64 = LAUNCH_REPLY_BOUND_SECS + LAUNCH_MARGIN_SECS;
+
+/// The daemon's seat for a relayed launch-class name (`agent.spawnInto`): the owner's inner wait
+/// [`LAUNCH_CALLER_WAIT_SECS`] + [`LAUNCH_MARGIN_SECS`] = 91.
+// ADR-0369
+pub const LAUNCH_RELAY_SEAT_SECS: u64 = LAUNCH_CALLER_WAIT_SECS + LAUNCH_MARGIN_SECS;
+
+/// The CLI's wait for every launch verb: [`LAUNCH_RELAY_SEAT_SECS`] + [`LAUNCH_MARGIN_SECS`] = 94 — one value whether
+/// the daemon answers the launch itself or relays it.
+// ADR-0369
+pub const LAUNCH_RELAY_CALLER_WAIT_SECS: u64 = LAUNCH_RELAY_SEAT_SECS + LAUNCH_MARGIN_SECS;
 
 /// Parsing, locks, spawning and the reply itself inside [`LAUNCH_REPLY_BOUND_SECS`].
 const LAUNCH_REPLY_SLACK_SECS: u64 = 5;
-/// Restates daemon `CommandDeliveries::SWEEP_INTERVAL` (see [`LAUNCH_CALLER_WAIT_SECS`]).
+/// Restates daemon `CommandDeliveries::SWEEP_INTERVAL` (see [`LAUNCH_MARGIN_SECS`]).
 const DAEMON_SWEEP_SECS: u64 = 1;
-/// Restates daemon `CommandDeliveries::CALLER_MARGIN` (see [`LAUNCH_CALLER_WAIT_SECS`]).
+/// Restates daemon `CommandDeliveries::CALLER_MARGIN` (see [`LAUNCH_MARGIN_SECS`]).
 const DAEMON_CALLER_MARGIN_SECS: u64 = 2;
 
 // `as_secs` above drops any fraction, so both activation waits must be whole seconds.
@@ -1291,6 +1306,47 @@ mod tests {
         assert_eq!(LAUNCH_ADVISORY_FOLDER_WAIT_SECS, 2);
         assert_eq!(LAUNCH_REPLY_BOUND_SECS, 85);
         assert_eq!(LAUNCH_CALLER_WAIT_SECS, 88);
+    }
+
+    /// ADR-0369: every launch wait is the previous step + the one margin, and every nested pair holds
+    /// outer ≥ inner + margin — so moving the base or the margin moves every wait and keeps the order.
+    #[test]
+    fn launch_waits_are_derived_from_one_base_and_one_margin() {
+        assert_eq!(
+            LAUNCH_MARGIN_SECS,
+            DAEMON_SWEEP_SECS + DAEMON_CALLER_MARGIN_SECS
+        );
+        assert_eq!(
+            LAUNCH_CALLER_WAIT_SECS,
+            LAUNCH_REPLY_BOUND_SECS + LAUNCH_MARGIN_SECS
+        );
+        assert_eq!(
+            LAUNCH_RELAY_SEAT_SECS,
+            LAUNCH_CALLER_WAIT_SECS + LAUNCH_MARGIN_SECS
+        );
+        assert_eq!(
+            LAUNCH_RELAY_CALLER_WAIT_SECS,
+            LAUNCH_RELAY_SEAT_SECS + LAUNCH_MARGIN_SECS
+        );
+        assert!(
+            LAUNCH_MARGIN_SECS > 0,
+            "a zero margin makes the order prose"
+        );
+        for (inner, outer) in [
+            (LAUNCH_REPLY_BOUND_SECS, LAUNCH_CALLER_WAIT_SECS),
+            (LAUNCH_CALLER_WAIT_SECS, LAUNCH_RELAY_SEAT_SECS),
+            (LAUNCH_RELAY_SEAT_SECS, LAUNCH_RELAY_CALLER_WAIT_SECS),
+        ] {
+            assert!(outer >= inner + LAUNCH_MARGIN_SECS, "({inner}, {outer})");
+        }
+        assert_eq!(
+            (
+                LAUNCH_MARGIN_SECS,
+                LAUNCH_RELAY_SEAT_SECS,
+                LAUNCH_RELAY_CALLER_WAIT_SECS
+            ),
+            (3, 91, 94)
+        );
     }
 
     // ── Capabilities::compose — 출처가 올바른 영역으로 합쳐지는지(소유권 합성 검증) ──

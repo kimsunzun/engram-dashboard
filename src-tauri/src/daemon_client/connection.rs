@@ -209,8 +209,8 @@ fn lock_gate(gate: &Mutex<Gate>) -> MutexGuard<'_, Gate> {
 
 /// The transport policy of the shell's daemon link: the crate defaults (TRD §7 — every other value there is the
 /// default), except two. Network-class failures retry without limit (ADR-0346 decision 1 — production never reaches
-/// `GaveUp(BudgetExhausted)`), and a reply is awaited [`REQUEST_TIMEOUT`] — one value for every round trip, the
-/// registration and the wait for a connection to open included.
+/// `GaveUp(BudgetExhausted)`), and a reply is awaited [`REQUEST_TIMEOUT`] — the value of every round trip but a launch
+/// ([`reply_deadline_of`]), the registration and the wait for a connection to open included.
 pub(crate) fn link_policy() -> Policy {
     let mut policy = Policy::default();
     policy.reconnect.max_attempts = u32::MAX;
@@ -221,7 +221,40 @@ pub(crate) fn link_policy() -> Policy {
 // ADR-0181 · ADR-0310 (decision 21, D15 ①): one shared request timeout. 30 s, not the crate's 8 s — D15 ① keeps the
 //   frontend command path's
 //   former 30 s until agent spawn time is measured (ADR-0181 "검증 안 된 것" 1).
+// ADR-0369: launch requests carry their own reply deadline (`reply_deadline_of`); every other request keeps this one.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The daemon's launch reply bound (agent `LAUNCH_REPLY_BOUND_SECS`), restated: the shell does not depend on agent
+/// (ADR-0270 decision 1). `tests/layout_commands.rs` pins it equal to the daemon's re-export, so a budget change in
+/// agent fails the shell's tests until this follows.
+// ADR-0360
+// ADR-0369
+pub const LAUNCH_REPLY_BOUND_SECS: u64 = 85;
+
+/// The one margin of the launch-wait chain (agent `LAUNCH_MARGIN_SECS`), restated and pinned like
+/// [`LAUNCH_REPLY_BOUND_SECS`].
+// ADR-0369
+pub const LAUNCH_MARGIN_SECS: u64 = 3;
+
+/// How long a launch request (`Spawn` · `SpawnByCwd` · `SpawnProfile`) waits for its reply once written: the launch
+/// bound + the margin, the same sum agent derives — never a literal of its own.
+// ADR-0369
+pub const LAUNCH_CALLER_WAIT: Duration =
+    Duration::from_secs(LAUNCH_REPLY_BOUND_SECS + LAUNCH_MARGIN_SECS);
+
+/// The reply deadline `cmd` carries on the link: [`LAUNCH_CALLER_WAIT`] for a launch, `None` (= [`REQUEST_TIMEOUT`])
+/// for every other command — a bus envelope (`Command`) included, whatever name it carries: the shell does not learn a
+/// daemon-owned name's class (no Engram caller sends a launch-class envelope; the first one must add that).
+// ADR-0369
+fn reply_deadline_of(cmd: &AgentCommand) -> Option<Duration> {
+    matches!(
+        cmd,
+        AgentCommand::Spawn { .. }
+            | AgentCommand::SpawnByCwd { .. }
+            | AgentCommand::SpawnProfile { .. }
+    )
+    .then_some(LAUNCH_CALLER_WAIT)
+}
 
 /// Where the actor hands what it routes.
 pub(crate) struct Ports {
@@ -575,6 +608,10 @@ impl LinkClient {
     /// One command round trip on the caller's task, on the opened connection ([`Self::opened_generation`]); failure
     /// texts are `link::errors`', plus one for a connection that did not open in time.
     ///
+    /// ★Two waits, one after the other★: the wait for the connection to open is the shared [`REQUEST_TIMEOUT`] for every
+    /// command, then the reply is bounded by the command's own deadline ([`reply_deadline_of`]). Nothing is sent while it
+    /// waits to open, so failing there is definite; a launch waits at most that + [`LAUNCH_CALLER_WAIT`].
+    ///
     /// ★⟳ (`RefreshUsageLimits`) is one act with the usage subscribe★ (TRD S21 usage-limit-slot §1-7 "⟳"): the interest
     /// goes out first on the same connection, even when it equals what was sent; when it cannot be queued the refresh
     /// is not sent either.
@@ -598,7 +635,8 @@ impl LinkClient {
             self.write_refresh_subscribe(&peer, generation)
                 .map_err(Local)?;
         }
-        match peer.request_in(generation, cmd).await {
+        let reply_deadline = reply_deadline_of(&cmd);
+        match peer.request_in(generation, cmd, reply_deadline).await {
             Ok(ShellIn::Event(event)) => protocol_state::classify_reply(Ok(event)),
             // `ShellWire::reply_tag` never tags an output frame, so none answers a request.
             Ok(ShellIn::Output(bytes)) => Err(Local(format!(
@@ -1588,7 +1626,7 @@ impl Driver {
         };
         let refusals = self.refusals.clone();
         let peer = peer.clone();
-        match start_now(async move { peer.request_in(generation, cmd).await }) {
+        match start_now(async move { peer.request_in(generation, cmd, None).await }) {
             Ok(answer) => report_registration(answer, names, generation, &refusals),
             Err(reply) => {
                 tokio::spawn(async move {

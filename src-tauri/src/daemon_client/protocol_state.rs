@@ -929,11 +929,13 @@ mod tests {
                 name: "slot.focus".into(),
                 help: "{}".into(),
                 agent_args: vec!["agent".into(), "after_tab".into()],
+                deadline: engram_dashboard_command::DeadlineClass::Ordinary,
             },
             engram_dashboard_command::CommandDecl {
                 name: "tab.focus".into(),
                 help: "{}".into(),
                 agent_args: Vec::new(),
+                deadline: engram_dashboard_command::DeadlineClass::Ordinary,
             },
         ]
     }
@@ -952,7 +954,7 @@ mod tests {
         use ts_rs::TS;
 
         // 두 attribute(`RegisterCommands.decls` · `UpdateCommands.added`)에 적은 것과 같은 문자열.
-        const DECLS_TS: &str = "Array<{ name: string, help: string, agent_args?: Array<string> }>";
+        const DECLS_TS: &str = r#"Array<{ name: string, help: string, agent_args?: Array<string>, deadline?: "Ordinary" | "Launch" }>"#;
 
         let inlined = <AgentCommand as TS>::inline();
         assert!(
@@ -965,9 +967,12 @@ mod tests {
             name: "agent.spawn".into(),
             help: r#"{"name":"agent.spawn"}"#.into(),
             agent_args: vec!["target".into()],
+            deadline: engram_dashboard_command::DeadlineClass::Launch,
         };
         let ts_type_of = |key: &str, value: &serde_json::Value| -> &'static str {
             match value {
+                // The deadline class is a closed word set — the TS text spells its words.
+                serde_json::Value::String(_) if key == "deadline" => r#""Ordinary" | "Launch""#,
                 serde_json::Value::String(_) => "string",
                 serde_json::Value::Array(items) if items.iter().all(|item| item.is_string()) => {
                     "Array<string>"
@@ -989,6 +994,7 @@ mod tests {
         // 비었을 때 직렬화에서 빠지는 칸 — TS 쪽에서는 `?` 로 적혀야 한다.
         let sparse = object_of(&CommandDecl {
             agent_args: Vec::new(),
+            deadline: engram_dashboard_command::DeadlineClass::Ordinary,
             ..decl.clone()
         });
         let skipped_when_empty: BTreeSet<String> = rust_fields

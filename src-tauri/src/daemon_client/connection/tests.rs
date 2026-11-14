@@ -4310,3 +4310,362 @@ async fn a_main_search_that_begins_late_bounds_the_hold_from_its_own_start_past_
     h.clock.advance(Duration::from_secs(4));
     wait_for("band ①", || h.client.status().band == BAND_ONE).await;
 }
+
+// ── launch reply deadlines (ADR-0369) ───────────────────────────────────────────────────────────
+
+/// Moves the manual clock by `by` in steps under the idle limit; the daemon side sends a keepalive after each, as a
+/// live daemon answers the shell's pings — so a long wait does not drop the link for silence.
+async fn advance_keeping_alive(h: &Harness, endpoint: &MemoryEndpoint, by: Duration) {
+    let step = Duration::from_secs(20);
+    assert!(step * 2 < link_policy().idle_timeout);
+    let mut left = by;
+    while !left.is_zero() {
+        let now = left.min(step);
+        h.clock.advance(now);
+        endpoint.push(Frame::Keepalive);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        left -= now;
+    }
+}
+
+impl Harness {
+    /// Reads what the shell writes on `endpoint` until a command matches `wanted`, and returns it (the ones before it
+    /// are skipped).
+    async fn command_until(
+        &self,
+        endpoint: &MemoryEndpoint,
+        wanted: impl Fn(&AgentCommand) -> bool,
+    ) -> AgentCommand {
+        loop {
+            for cmd in self.commands(endpoint, 1).await {
+                if wanted(&cmd) {
+                    return cmd;
+                }
+            }
+        }
+    }
+}
+
+/// A shell round trip from one sender, its failure as text.
+type Sent = JoinHandle<Result<(), String>>;
+
+/// `Spawn` · `SpawnByCwd` · `SpawnProfile` wait the launch deadline from every sender — the typed `send_command`
+/// (`agent_spawn`), the webview/bus spawner (`DaemonSpawner`) and the webview's forward (`forward_to_daemon`) — while
+/// every other request keeps the shared 30 s, a bus envelope included even when it names a launch verb (the shell does
+/// not learn a daemon-owned name's class). Each expiry reports its own wait.
+#[tokio::test]
+async fn launch_requests_wait_the_launch_deadline_from_every_sender_and_every_other_request_keeps_30_s(
+) {
+    use crate::commands::agent::forward_to_daemon;
+    use crate::commands::layout::DaemonSpawner;
+    use crate::daemon_client::link::errors::reply_timeout_text;
+    use crate::layout::AgentSpawner;
+
+    let h = Harness::new(live());
+    let endpoint = h.connected().await;
+    let forward = |cmd: AgentCommand| -> Sent {
+        let client = h.client.clone();
+        let cmd = serde_json::to_value(cmd).unwrap();
+        tokio::spawn(async move { forward_to_daemon(&client, cmd).await.map(|_| ()) })
+    };
+    let typed_spawn: Sent = {
+        let client = h.client.clone();
+        tokio::spawn(async move {
+            client
+                .send_command(AgentCommand::Spawn {
+                    profile_id: uuid::Uuid::new_v4(),
+                    request_id: RequestId::new(),
+                })
+                .await
+                .map(|_| ())
+        })
+    };
+    let spawner: Sent = {
+        let client = h.client.clone();
+        tokio::spawn(async move {
+            DaemonSpawner {
+                client: &client,
+                deliver_notices: false,
+            }
+            .spawn_by_cwd("C:/work".into(), None)
+            .await
+            .map(|_| ())
+            .map_err(|refusal| refusal.message)
+        })
+    };
+    let launches = [
+        ("send_command Spawn", typed_spawn),
+        ("DaemonSpawner SpawnByCwd", spawner),
+        (
+            "forward SpawnByCwd",
+            forward(AgentCommand::SpawnByCwd {
+                cwd: "C:/work".into(),
+                backend: None,
+                request_id: RequestId::new(),
+                deliver_notices: false,
+            }),
+        ),
+        (
+            "forward SpawnProfile",
+            forward(AgentCommand::SpawnProfile {
+                profile_id: uuid::Uuid::new_v4(),
+                resume: false,
+                request_id: RequestId::new(),
+            }),
+        ),
+    ];
+    let (_, envelope) = command_request("agent.spawn");
+    let envelope = match envelope {
+        AgentEvent::CommandRequest { envelope } => envelope,
+        other => panic!("{other:?}"),
+    };
+    let ordinary = [
+        ("forward ListAgents", forward(list())),
+        (
+            "forward Command envelope",
+            forward(AgentCommand::Command { envelope }),
+        ),
+    ];
+    let sent = h.commands(&endpoint, launches.len() + ordinary.len()).await;
+    assert_eq!(sent.len(), launches.len() + ordinary.len(), "{sent:?}");
+
+    advance_keeping_alive(&h, &endpoint, REQUEST_TIMEOUT + Duration::from_secs(1)).await;
+    for (sender, task) in ordinary {
+        assert_eq!(
+            joined(sender, task).await,
+            Err(reply_timeout_text(REQUEST_TIMEOUT)),
+            "{sender}"
+        );
+    }
+    for (sender, task) in &launches {
+        assert!(
+            !task.is_finished(),
+            "{sender} waits past the shared timeout"
+        );
+    }
+    assert_eq!(h.peer_state(), Some(PeerState::Live), "the link stays up");
+
+    let elapsed = REQUEST_TIMEOUT + Duration::from_secs(1);
+    advance_keeping_alive(
+        &h,
+        &endpoint,
+        LAUNCH_CALLER_WAIT - elapsed - Duration::from_secs(1),
+    )
+    .await;
+    for (sender, task) in &launches {
+        assert!(!task.is_finished(), "{sender}: not before its own deadline");
+    }
+    advance_keeping_alive(&h, &endpoint, Duration::from_secs(1)).await;
+    for (sender, task) in launches {
+        assert_eq!(
+            joined(sender, task).await,
+            Err(reply_timeout_text(LAUNCH_CALLER_WAIT)),
+            "{sender} — the expiry reports the launch wait, not the shared one"
+        );
+    }
+}
+
+/// A launch first waits the shared timeout for its connection to open, then its own reply deadline (ADR-0369) — the open
+/// wait does not eat into the reply wait, and the total is at most the two summed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // Holding the usage lock is the device: it stops the actor in its `LinkUp` step.
+async fn a_launch_waits_for_the_open_then_its_own_reply_deadline() {
+    use crate::daemon_client::link::errors::reply_timeout_text;
+
+    let h = Harness::new(live());
+    let connect = h.connect();
+    let (endpoint, _) = h.next_link().await;
+    let usage = h.client.usage_interest().lock();
+    endpoint.push(hello());
+    wait_for("the peer is live", || {
+        h.peer_state() == Some(PeerState::Live)
+    })
+    .await;
+
+    let launch = {
+        let client = h.client.clone();
+        tokio::spawn(async move {
+            client
+                .send_command(AgentCommand::Spawn {
+                    profile_id: uuid::Uuid::new_v4(),
+                    request_id: RequestId::new(),
+                })
+                .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let open_delay = REQUEST_TIMEOUT - Duration::from_secs(1);
+    advance_keeping_alive(&h, &endpoint, open_delay).await;
+    assert!(!launch.is_finished(), "still waiting for the open");
+    drop(usage);
+
+    h.command_until(&endpoint, |cmd| matches!(cmd, AgentCommand::Spawn { .. }))
+        .await;
+
+    advance_keeping_alive(&h, &endpoint, LAUNCH_CALLER_WAIT - Duration::from_secs(1)).await;
+    assert!(
+        !launch.is_finished(),
+        "the open wait is not taken from the reply wait"
+    );
+    advance_keeping_alive(&h, &endpoint, Duration::from_secs(1)).await;
+    assert_eq!(
+        joined("the launch", launch).await.map(|_| ()),
+        Err(reply_timeout_text(LAUNCH_CALLER_WAIT))
+    );
+    joined("connect", connect).await.expect("connected");
+}
+
+/// A daemon command that runs `OwnedSpawner` — the stand-in for `agent.spawnInto` arriving on the link.
+struct SpawnsInto {
+    client: Arc<DaemonClient>,
+}
+
+impl ViewCommandPort for SpawnsInto {
+    fn declarations(&self) -> Vec<CommandDecl> {
+        Vec::new()
+    }
+
+    fn lookup(&self, name: &str) -> OwnerLookup {
+        if name == "agent.spawnInto" {
+            OwnerLookup::Available(OwnerToken::new("view"))
+        } else {
+            OwnerLookup::Unknown
+        }
+    }
+
+    fn dispatch(
+        &self,
+        env: CommandEnvelope,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = BusReply> + Send>> {
+        use crate::commands::layout::OwnedSpawner;
+        use crate::layout::AgentSpawner;
+        let client = self.client.clone();
+        Box::pin(async move {
+            let spawned = OwnedSpawner { client }
+                .spawn_by_cwd("C:/work".into(), None)
+                .await;
+            match spawned {
+                Ok(agent) => {
+                    BusReply::ok(env.request_id, serde_json::json!({ "agent_id": agent.id }))
+                }
+                Err(refusal) => {
+                    BusReply::err(env.request_id, CommandError::internal(refusal.message))
+                }
+            }
+        })
+    }
+}
+
+/// On the relay: the link that delivered the `agent.spawnInto` envelope is already open, so `OwnedSpawner`'s
+/// `SpawnByCwd` is written with no open wait (no clock advance at all), and its reply wait is the launch deadline —
+/// past the shared timeout it still answers the envelope.
+#[tokio::test]
+async fn the_relayed_spawn_goes_out_with_no_open_wait_and_waits_the_launch_deadline() {
+    use crate::daemon_client::test_support::wire_agent;
+
+    let h = Harness::new(live());
+    h.client.inbound.set(Arc::new(InboundReceiver::with_view(
+        CommandTable::new(&[]),
+        Arc::new(CountingSpawner::default()),
+        CATALOG_VERSION,
+        Arc::new(SpawnsInto {
+            client: h.client.clone(),
+        }),
+    )));
+    let endpoint = h.connected().await;
+
+    let (asked, request) = command_request("agent.spawnInto");
+    endpoint.push(text(&request));
+    let request_id = match h
+        .command_until(&endpoint, |cmd| {
+            matches!(cmd, AgentCommand::SpawnByCwd { .. })
+        })
+        .await
+    {
+        AgentCommand::SpawnByCwd { request_id, .. } => request_id,
+        other => unreachable!("{other:?}"),
+    };
+
+    advance_keeping_alive(&h, &endpoint, REQUEST_TIMEOUT + Duration::from_secs(1)).await;
+    let agent = AgentId::new_v4();
+    endpoint.push(text(&AgentEvent::Spawned {
+        request_id,
+        agent: wire_agent(agent, "a"),
+        notices: None,
+    }));
+    let outcome = match h
+        .command_until(&endpoint, |cmd| {
+            matches!(cmd, AgentCommand::CommandOutcome { .. })
+        })
+        .await
+    {
+        AgentCommand::CommandOutcome { reply } => reply,
+        other => unreachable!("{other:?}"),
+    };
+    let reply = protocol_state::reply_from_wire(&outcome).unwrap();
+    assert_eq!(reply.request_id, asked);
+    assert_eq!(
+        reply
+            .outcome
+            .expect("the spawn answered inside its launch wait"),
+        serde_json::json!({ "agent_id": agent.to_string() })
+    );
+}
+
+/// Pinned in the source: `on_link_up` queues the command registration before it publishes the connection as opened, so
+/// the on-open writes go out before any caller write (module doc). The relay's zero open wait itself comes from the
+/// actor applying `LinkUp` (which publishes `opened`) before it routes any command of that generation — this guard does
+/// not pin that.
+#[test]
+fn on_link_up_registers_the_commands_before_it_publishes_the_connection_as_opened() {
+    let source = include_str!("../connection.rs");
+    let body = &source[source.find("fn on_link_up(").expect("on_link_up")..];
+    let body = &body[..body.find("\n    fn ").expect("the next method")];
+    let registered = body
+        .find("self.register_commands(")
+        .expect("the registration");
+    let published = body
+        .find("self.opened_tx.send_replace(")
+        .expect("the publish");
+    let opened = body.find("gate.opened = Some(").expect("the gate's opened");
+    assert!(registered < opened && registered < published, "{body}");
+}
+
+/// The open wait of a launch is the shared timeout, not its reply deadline (ADR-0369) — a launch whose connection does not
+/// open within it gives up unsent, like any other command.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // Holding the usage lock is the device: it stops the actor in its `LinkUp` step.
+async fn a_launch_whose_connection_does_not_open_within_the_shared_timeout_gives_up_unsent() {
+    let h = Harness::new(live());
+    let connect = h.connect();
+    let (endpoint, _) = h.next_link().await;
+    let usage = h.client.usage_interest().lock();
+    endpoint.push(hello());
+    wait_for("the peer is live", || {
+        h.peer_state() == Some(PeerState::Live)
+    })
+    .await;
+
+    let mut call = Box::pin(h.link().send_command(AgentCommand::Spawn {
+        profile_id: uuid::Uuid::new_v4(),
+        request_id: RequestId::new(),
+    }));
+    let mut cx = Context::from_waker(Waker::noop());
+    assert!(
+        call.as_mut().poll(&mut cx).is_pending(),
+        "waits for the open"
+    );
+    h.clock.advance(REQUEST_TIMEOUT + Duration::from_secs(1));
+    match call.as_mut().poll(&mut cx) {
+        Poll::Ready(Err(CommandFailure::Local(text))) => assert_eq!(
+            text,
+            format!(
+                "{SEND_FAILED_PREFIX}: the daemon connection did not finish opening within {}s",
+                REQUEST_TIMEOUT.as_secs()
+            )
+        ),
+        other => panic!("expected the open timeout, got {other:?}"),
+    }
+    drop(usage);
+    joined("connect", connect).await.expect("connected");
+}

@@ -36,8 +36,8 @@ use std::sync::{Arc, Mutex};
 use crate::conn_port::{ConnId, FrameSink};
 use engram_dashboard_base::sync;
 use engram_dashboard_command::{
-    CommandDecl, CommandError, ErrorCode, OwnerLookup, OwnerLookupSource, OwnerToken, Roster,
-    RosterEntry,
+    CommandDecl, CommandError, DeadlineClass, ErrorCode, OwnerLookup, OwnerLookupSource,
+    OwnerToken, Roster, RosterEntry,
 };
 
 use crate::connection_core::sanitize_for_log;
@@ -396,6 +396,13 @@ impl CommandRoster {
         self.lock().roster.agent_args(name).to_vec()
     }
 
+    /// The deadline class this name's owner registered — delivery sizes a relayed seat by it before opening it
+    /// ([`Roster::deadline`]; unknown name = ordinary). The lock ends inside this call.
+    // ADR-0369
+    pub fn class_of(&self, name: &str) -> DeadlineClass {
+        self.lock().roster.deadline(name)
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Shared> {
         self.inner.lock().expect("command roster poisoned")
     }
@@ -470,6 +477,7 @@ mod tests {
             name: name.to_string(),
             help: "{}".to_string(),
             agent_args: Vec::new(),
+            deadline: engram_dashboard_command::DeadlineClass::Ordinary,
         }
     }
 

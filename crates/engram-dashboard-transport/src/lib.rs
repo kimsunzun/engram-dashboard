@@ -40,7 +40,8 @@
 //! These are the rules that follow from that choice.
 //!
 //! 1. ★Do not await [`Peer::request`] on the task that drains the [`Inbox`]★ — if backpressure stops that peer's reading,
-//!    the reply cannot get in either, so that request hangs until its deadline ([`Policy::request_timeout`]) and ends in a timeout.
+//!    the reply cannot get in either, so that request hangs until its deadline ([`Policy::request_timeout`] or its own
+//!    `reply_deadline`) and ends in a timeout.
 //!    Make the request on a separately spawned task.
 //! 2. ★While held by backpressure, that peer's silence decision and the resume window's deadline stop★ — we are the ones who blocked it. The supervisor
 //!    restarts the count, taking the moment it notices the release as the last receipt, and an open window closes later by the time it was held — a hold that started while the supervisor

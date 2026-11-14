@@ -105,7 +105,7 @@ use engram_dashboard_base::sync;
 use engram_dashboard_base::time::{Clock, SystemClock};
 use engram_dashboard_command::{
     route, CommandDecl, CommandEnvelope, CommandError, CommandLink, CommandReply, CommandTable,
-    Effect, ErrorCode, OwnerToken, RequestId, RetryMode,
+    DeadlineClass, Effect, ErrorCode, OwnerToken, RequestId, RetryMode,
 };
 use engram_dashboard_protocol::AgentEvent;
 use tokio::sync::{oneshot, watch};
@@ -156,27 +156,62 @@ fn no_retry(code: ErrorCode, detail: impl Into<String>) -> CommandError {
     CommandError::with_retry(code, detail, RetryMode::Never)
 }
 
-/// 마감이 호출자의 **침묵 한도** 안에 드는가 — ★부등식은 이 함수 하나에만 있다★(ADR-0161 결정 3).
+/// Does a seat of `deadline` fit inside its caller's **silence window** `caller_window` — ★the inequality lives only in
+/// this function★ (ADR-0161 decision 3): deadline + the expiry sweep + the caller margin ≤ the caller's window.
 ///
-/// 산문으로 두면 어느 한쪽을 고치는 편집이 관계를 조용히 뒤집는다 — 실제로 뒤집혀 있었고, 증상은
-/// 「데몬에 닿지 못했다」라는 **거짓 보고**였다(근거 전문 = [`CommandDeliveries::DEFAULT_DEADLINE`]).
-/// ★그런데 상수만 재는 것으로는 **도는 값**을 못 문다★: 운영이 보는 마감은 [`CommandDeliveries`] 의
-/// 필드이고 그 값은 [`CommandDeliveries::with_clock`] 이 정한다. 그래서 이 술어를 두 곳에 건다 —
-/// 기본값은 아래 `const` 단언이(컴파일 단계), 주입값은 그 생성자가(구성 단계) 같은 함수로 판정한다.
-/// ★밀리초로 견준다 — 초로 견주면 이 판정이 자기 산문보다 **느슨해진다**★: `as_secs()` 는 버리는 절삭이라
-/// 마감 8.5초 + 주기 1.4초가 `8 + 1 < 10` 으로 통과하는데 실제 최악은 9.9초다. 아래 곱은 `u128` 산술이라
-/// 넘칠 수 없다.
-const fn fits_caller_silence_window(deadline: Duration) -> bool {
+/// As prose, an edit to either side silently inverted the relation — it really was inverted, and the symptom was the
+/// **false report** "could not reach the daemon" (full rationale = [`CommandDeliveries::DEFAULT_DEADLINE`]).
+/// ★Checking constants alone does not bind the **running value**★: the default seat production sees is a field of
+/// [`CommandDeliveries`] set by [`CommandDeliveries::with_clock`]. So the predicate is applied twice — the constant
+/// pairs below at compile time (the default seat with the CLI's 10 s, and each launch seat with the wait derived around
+/// it — ADR-0360 decision 2 · ADR-0369), the injected default in that constructor at assembly.
+/// ★Compared in milliseconds — in seconds the check would be **looser** than its own prose★: `as_secs()` truncates, so a
+/// deadline of 8.5 s + a sweep of 1.4 s would pass as `8 + 1 < 10` while the real worst case is 9.9 s. The `u128`
+/// arithmetic below cannot overflow.
+// ADR-0360
+const fn fits_caller_silence_window(deadline: Duration, caller_window: Duration) -> bool {
     deadline.as_millis()
         + CommandDeliveries::SWEEP_INTERVAL.as_millis()
         + CommandDeliveries::CALLER_MARGIN.as_millis()
-        <= (engram_dashboard_agent::types::CLI_CONTROL_READ_TIMEOUT_SECS as u128) * 1_000
+        <= caller_window.as_millis()
 }
 
+/// The CLI's silence window for every ordinary command — the caller of the default seat.
+const CLI_CALLER_WINDOW: Duration =
+    Duration::from_secs(engram_dashboard_agent::types::CLI_CONTROL_READ_TIMEOUT_SECS);
+
 const _: () = assert!(
-    fits_caller_silence_window(CommandDeliveries::DEFAULT_DEADLINE),
+    fits_caller_silence_window(CommandDeliveries::DEFAULT_DEADLINE, CLI_CALLER_WINDOW),
     "명령 마감 + 수거 주기 + 여유가 CLI 의 침묵 한도를 넘는다 — 답장이 나가기 전에 호출자가 끊는다"
 );
+const _: () = assert!(
+    fits_caller_silence_window(LAUNCH_REPLY_BOUND, LAUNCH_CALLER_WAIT),
+    "the local launch seat + sweep + margin exceeds the direct launch caller's wait"
+);
+const _: () = assert!(
+    fits_caller_silence_window(LAUNCH_RELAY_SEAT, LAUNCH_RELAY_CALLER_WAIT),
+    "the relayed launch seat + sweep + margin exceeds the CLI's launch wait"
+);
+
+// The launch-wait chain (ADR-0369) as `Duration`s. agent `types.rs` owns the values; the seats below read them, and the
+//   shell — which does not depend on agent (ADR-0270) — pins its own restatement against these through its daemon
+//   dev-dependency.
+
+/// The longest one launch takes to reply — the seat of a launch-class name this daemon answers itself.
+pub const LAUNCH_REPLY_BOUND: Duration =
+    Duration::from_secs(engram_dashboard_agent::types::LAUNCH_REPLY_BOUND_SECS);
+/// The one margin every step of the chain adds.
+pub const LAUNCH_MARGIN: Duration =
+    Duration::from_secs(engram_dashboard_agent::types::LAUNCH_MARGIN_SECS);
+/// The direct launch caller's wait — the shell's `Spawn` · `SpawnByCwd` · `SpawnProfile`.
+pub const LAUNCH_CALLER_WAIT: Duration =
+    Duration::from_secs(engram_dashboard_agent::types::LAUNCH_CALLER_WAIT_SECS);
+/// The seat of a relayed launch-class name (`agent.spawnInto`).
+pub const LAUNCH_RELAY_SEAT: Duration =
+    Duration::from_secs(engram_dashboard_agent::types::LAUNCH_RELAY_SEAT_SECS);
+/// The CLI's wait for every launch verb.
+pub const LAUNCH_RELAY_CALLER_WAIT: Duration =
+    Duration::from_secs(engram_dashboard_agent::types::LAUNCH_RELAY_CALLER_WAIT_SECS);
 
 /// 진행 중인 왕복 하나 — **원 연결**과 **마감시각**, 그리고 답장을 받아 갈 자리.
 ///
@@ -194,6 +229,10 @@ struct Pending {
     /// 칸에 세대 번호를 붙이는 것이고, 지금 미리 붙이지 않는 이유는 도달 불가한 위험에 대한 값이라서다.
     origin: ConnId,
     deadline: Instant,
+    /// This seat's own duration ([`CommandDeliveries::seat_span`]) — `deadline` is its open time + this, and an applied
+    /// stage-1 seat is retained for this long ([`SeatState::Retained`]).
+    // ADR-0369
+    span: Duration,
     /// ★자리의 신분증 — **키가 아니라 이것이 그 왕복을 가리킨다**★.
     ///
     /// 없으면 뒷정리가 `request_id` 하나로 자리를 집는데, 그 사이 먼저 열린 자리가 사라지고 **같은 키로 새
@@ -260,7 +299,8 @@ enum SeatState {
     /// ★번호를 붙드는 곳이 **자리 하나뿐**인 것이 요점이다★ — 같은 일을 하는 두 번째 표(번호만 따로 모으는
     /// 기억)를 두면 두 권위가 한 이름 공간을 두고 갈린다: 실행하지 않은 자리가 기억에 남거나, 무관한 읽기
     /// 트래픽이 기억을 밀어내거나, 둘의 수명이 어긋난다. 자리가 곧 그 번호의 임자다.
-    /// ★보유 기간은 마감 한 창이다★(`until`) — 그 창이 지나면 수거기가 놓는다([`CommandDeliveries::expire`]).
+    /// ★It is held for one window of **that seat's own deadline**★ (`until` — [`Pending::span`]: 7 s for an ordinary
+    /// name, the launch bound for a launch-class one), then the sweeper lets it go ([`CommandDeliveries::expire`]).
     /// ★끊긴 호출자의 것도 창이 지날 때까지 **남는다**★: [`CommandDeliveries::drop_origin`] 은 1단계 자리를
     /// 건드리지 않는다(그 필터의 사유가 그 함수에 있다 — 끊김은 오히려 그 보유가 가장 필요한 사건이다).
     /// 놓는 자리는 수거기 하나뿐이다.
@@ -339,17 +379,18 @@ enum Seat {
 ///
 /// ## 상주 — **한 축만 닫혀 있다**
 ///
-/// - **진행 중인 자리**: 이 표 자체에는 상한이 없다. 열 수 있는 자리는 왕복 하나당 하나이고 마감
-///   ([`CommandDeliveries::DEFAULT_DEADLINE`])이 걷어 가므로 무한정 자라지는 않지만, **상한이 있는 것과는
-///   다르다** — 자리 수도, 자리가 드는 이름·인자([`Pending::name`]·[`Pending::args`]) 크기도 안 잰다.
-///   ★입구별로 사정이 갈린다★: 제어 라우트 쪽은 그 문이 자기 상한을 진다([`MAX_RELAYED_IN_FLIGHT`] —
-///   전역 64). 소켓 쪽은 상한 없이 남아 있고, 그것을 견디는 근거는 **연결 수명**이다 — 그 입구의 자리는
-///   연결 하나에 매달려 있어 끊김 정리가 함께 거둔다([`CommandDeliveries::drop_origin`]).
-///   ★「인증 경계 안이니 신뢰하는 클라이언트 하나」로 읽지 말 것 — 그 전제는 이제 소켓 쪽만의 것이다★:
-///   두 입구가 다 인증 경계 안이긴 하지만(ADR-0153 — 소켓은 데몬 토큰, 제어 라우트는 발급된 에이전트
-///   자격증명) 뒤쪽 열쇠는 **에이전트마다 하나씩 여럿**이고 서로를 모른다. 그래서 그 문의 상한은 신뢰가
-///   아니라 그 상수가 진다. 이 표에 상한을 두게 되면 선례는 명부의 것이다
-///   (`engram_dashboard_command::Roster::MAX_NAMES`).
+/// - **Seats in flight**: the table itself has no cap. A round trip opens at most one seat and the seat's own deadline
+///   reaps it (its class's span — [`CommandDeliveries::DEFAULT_DEADLINE`] for an ordinary name, the launch spans for a
+///   launch-class name, ADR-0360), so the table does not grow without end — but **that is not a cap**: neither the seat
+///   count nor the size of a seat's name and arguments ([`Pending::name`] · [`Pending::args`]) is measured.
+///   ★The two entrances differ★: the control route carries its own cap ([`MAX_RELAYED_IN_FLIGHT`] — 64 in total). The
+///   socket has none, and what bounds it is **the connection's life** — its seats hang on one connection, and the
+///   disconnect cleanup reaps them with it ([`CommandDeliveries::drop_origin`]).
+///   ★Do not read it as "inside the auth boundary, so one trusted client" — that premise now holds for the socket
+///   only★: both entrances are inside the auth boundary (ADR-0153 — the socket with the daemon token, the control route
+///   with an issued agent credential), but behind the second there are **many keys, one per agent**, that do not know
+///   each other, so that door's cap is carried by the constant, not by trust. If this table ever gets a cap, the
+///   precedent is the roster's (`engram_dashboard_command::Roster::MAX_NAMES`).
 /// - **보유 중인 자리**: 닫혀 있다. 이쪽은 왕복이 끝난 **뒤에도** 한 창을 더 살아서 상주가 「동시성」이 아니라
 ///   **도착률 × 창**이 된다 — 그래서 시각(창)과 개수([`MAX_RETAINED_LOCAL`]) 둘로 묶고, 넘길 때 페이로드를
 ///   버린다([`CommandDeliveries::settle_local`]). ★이 축을 「마감이 걷어 가니 괜찮다」로 읽지 말 것★ —
@@ -406,7 +447,9 @@ struct Seats {
 }
 
 impl Seats {
-    /// 보유 자리 수를 [`MAX_RETAINED_LOCAL`] 아래로 되돌린다 — **오래된 것부터** 놓는다.
+    /// Brings the retained seats back under [`MAX_RETAINED_LOCAL`] — releasing first the ones whose retention ends
+    /// soonest (`until`). With one span for every seat that is the oldest; with launch seats retained longer (their own
+    /// span — ADR-0360), it keeps the launch ids longest.
     ///
     /// ★시각 경계만으로는 표가 안 닫힌다★: 창 안에 들어올 수 있는 요청 수에는 상한이 없어(도착률 × 창)
     /// 개수도 함께 묶어야 상주가 유계다. `agent.rename` 을 빠르게 도는 클라이언트 하나가 그 곱을 실제로
@@ -461,6 +504,8 @@ impl CommandDeliveries {
     /// ★소켓 입구도 같은 값을 쓴다 — 그게 요점이다★: 마감은 자리 표 하나의 성질이고 입구마다 갈리면
     /// 두 기계가 된다(모듈 헤더). 셸 쪽에는 이 값에 묶인 상수가 없다(실측 — `HANDSHAKE_TIMEOUT` 은 핸드셰이크
     /// 전용이다).
+    /// ★Ordinary names only★ — a launch-class name gets a launch seat instead ([`CommandDeliveries::seat_span`] ·
+    /// ADR-0369).
     pub const DEFAULT_DEADLINE: Duration = Duration::from_secs(7);
 
     /// 만료 수거 주기 — 마감 초과가 이 간격만큼 늦게 관측될 수 있다.
@@ -485,7 +530,7 @@ impl CommandDeliveries {
     /// ★`pub(crate)` 인 것도 그 일부다★ — 이 문을 crate 밖으로 열면 부등식을 아는 곳 밖에서 마감이 정해진다.
     pub(crate) fn with_clock(clock: Arc<dyn Clock>, deadline: Duration) -> Self {
         assert!(
-            fits_caller_silence_window(deadline),
+            fits_caller_silence_window(deadline, CLI_CALLER_WINDOW),
             "주입된 명령 마감이 호출자의 침묵 한도를 넘는다 — 답장이 나가기 전에 호출자가 끊어 TIMEOUT 이 도달 불가가 된다(CommandDeliveries::DEFAULT_DEADLINE doc)"
         );
         Self {
@@ -525,10 +570,11 @@ impl CommandDeliveries {
     /// ★수거가 없으면 「불명」이 「영원한 무응답」이 된다★(TRD §4-④). 이 한 줄이 빠져도 정상 왕복은 전부
     /// 도므로 **증상이 답 없는 요청 하나로만 나타난다** — 조립에서 빠뜨리기 쉬운 자리다.
     ///
-    /// ★나가는 길에 [`CommandDeliveries::drain`] 을 부르는 것이 종료를 유계로 만든다★: 배달 태스크는
-    /// 자기 답장 자리를 기다리는데 그 자리의 **보내는 쪽이 이 표 안에** 있다. 비우지 않고 끝내면 그
-    /// 태스크들은 마감([`CommandDeliveries::DEFAULT_DEADLINE`])까지 깨어날 계기가 없고, 그동안 표와 태스크가 「종료했다」고 보고된
-    /// 시점보다 오래 산다. 비우면 전부 **즉시** 풀린다.
+    /// ★Calling [`CommandDeliveries::drain`] on the way out is what bounds the shutdown★: a delivery task waits on its
+    /// reply seat, and the **sending half of that seat lives in this table**. Ending without draining leaves those tasks
+    /// with nothing to wake them until their seat's deadline (7 s for an ordinary name, up to 91 s for a launch — ADR-0360),
+    /// so the table and the tasks outlive the moment the daemon reported it had stopped. Draining frees them all
+    /// **at once**.
     /// ★반환한 핸들을 버리지 말 것★ — 조립부가 이것을 기다려야 「수거기가 멈췄다」가 관측된다.
     ///
     /// ★한 표에 수거기는 **하나뿐이고, 그것을 지는 것은 가시성이 아니라 표의 표식이다**★
@@ -640,6 +686,8 @@ impl CommandDeliveries {
     ///
     /// `local` = 이 이름을 **데몬이 스스로 답하나**([`LocalCommands::owns`]). 자리가 날 때 정해야 하는
     /// 이유는 [`Pending::local`].
+    /// `class` = the name's declared deadline class — the seat is sized from it here, when it opens
+    /// ([`CommandDeliveries::seat_span`]).
     fn open(
         &self,
         request_id: RequestId,
@@ -647,6 +695,7 @@ impl CommandDeliveries {
         name: &str,
         args: &serde_json::Value,
         local: bool,
+        class: DeadlineClass,
     ) -> Seat {
         // ★마감 지난 자리를 **여기서 먼저** 정산한다★(잠그기 전에 — `expire` 가 스스로 잠근다).
         //
@@ -663,7 +712,8 @@ impl CommandDeliveries {
 
         let (waiter, rx) = oneshot::channel();
         let now = self.clock.now();
-        let deadline = now + self.deadline;
+        let span = self.seat_span(class, local);
+        let deadline = now + span;
         let mut table = self.lock();
         // 닫힌 표는 아무 자리도 열지 않는다 — 열어 봐야 깨워 줄 눈이 없다([`CommandDeliveries::drain`]).
         if table.closed {
@@ -727,6 +777,7 @@ impl CommandDeliveries {
             Pending {
                 origin,
                 deadline,
+                span,
                 token,
                 name: name.to_string(),
                 args: args.clone(),
@@ -737,13 +788,24 @@ impl CommandDeliveries {
         Seat::Opened { rx, token }
     }
 
-    /// [`SeatState::Retained`] 가 번호를 붙들고 있는 시간 — **마감 한 창**.
+    /// How long one seat waits for its answer — and, once an applied stage-1 seat is retained
+    /// ([`SeatState::Retained`]), how long it holds the request id.
     ///
-    /// 닫아야 하는 창은 「마감에 `TIMEOUT` 을 받은 호출자가 같은 번호로 다시 묻기까지」이고, 그 창의 자연
-    /// 길이가 마감이다. 더 길게 잡을 이유가 없다 — 그 뒤의 재질의는 규약을 어긴 호출자의 것이고
-    /// (이 경로는 재시도를 아예 지시하지 않는다 — [`no_retry`]) 자리 상주는 그만큼 늘어난다.
-    fn retention(&self) -> Duration {
-        self.deadline
+    /// A launch-class name gets the launch budget: [`LAUNCH_REPLY_BOUND`] when this daemon answers it itself (it runs the
+    /// launch), [`LAUNCH_RELAY_SEAT`] when it relays it (the owner's own launch wait sits inside); every other name the
+    /// default seat. ★The retention window is the same span★: the window to close is "deadline → `TIMEOUT` → same-id
+    /// retry", whose natural length is that seat's deadline — the default 7 s would release an applied launch's id while
+    /// its caller was told to wait up to the launch bound, and a retry inside that wait would launch again (ADR-0122).
+    /// Longer is not needed — a later retry is a caller breaking the contract (this path never asks for one —
+    /// [`no_retry`]).
+    // ADR-0360
+    // ADR-0369
+    fn seat_span(&self, class: DeadlineClass, local: bool) -> Duration {
+        match (class, local) {
+            (DeadlineClass::Launch, true) => LAUNCH_REPLY_BOUND,
+            (DeadlineClass::Launch, false) => LAUNCH_RELAY_SEAT,
+            (DeadlineClass::Ordinary, _) => self.deadline,
+        }
     }
 
     /// 1단계 본문을 시작해도 되나 — 상한 안이면 셈을 올리고 **되돌릴 표식지기**를 낸다.
@@ -859,7 +921,7 @@ impl CommandDeliveries {
     /// 호출자가 **돌지도 않은 명령**을 「이미 적용됐다」로 돌려받는다. 판정은 [`retains_the_id`].
     /// ★발권으로 집는다★ — 이 호출이 늦어 같은 키에 다른 왕복이 앉았다면 그 왕복을 건드리면 안 된다.
     fn settle_local(&self, request_id: RequestId, token: SeatToken, retain: bool) {
-        let until = self.clock.now() + self.retention();
+        let now = self.clock.now();
         let mut table = self.lock();
         // 셈 반환이 **같은 잠금 안**이라 그 사이에 상한 한 칸이 비어 보이는 창이 없다.
         table.local_running = table.local_running.saturating_sub(1);
@@ -874,7 +936,9 @@ impl CommandDeliveries {
             table.open.remove(&request_id);
             return;
         }
-        pending.state = SeatState::Retained { until };
+        pending.state = SeatState::Retained {
+            until: now + pending.span,
+        };
         // ★보유 자리는 **번호로만** 답한다 — 페이로드를 들고 있을 이유가 없다★: 처지 판정이 인자 비교보다
         //   앞서므로([`Seat::LocalAlreadyRan`]) 이 둘은 다시 읽히지 않는데, 그대로 두면 호출자가 준 JSON 이
         //   창 내내 상주에 얹힌다. 지우면 보유 한 칸의 크기가 고정된다.
@@ -1230,7 +1294,9 @@ pub trait LocalCommands: Send + Sync {
     /// ★효과를 여기서 받는 이유★: 적용된 Write 만 번호를 붙들고([`SeatState::Retained`]) 읽기는 안 붙든다.
     /// 그 판정을 결말이 난 뒤에 하려면 이름으로 선언을 다시 뒤져야 하는데, 그때는 이미 표가 바뀌었을 수도
     /// 있는 값이다 — 자리와 함께 태어난 값을 쓰는 편이 어긋날 수 없다.
-    fn claim(&self, name: &str) -> Option<Effect>;
+    /// The declared [`DeadlineClass`] comes with the effect for the same reason: the seat is sized from it when it
+    /// opens ([`CommandDeliveries::seat_span`] — ADR-0369).
+    fn claim(&self, name: &str) -> Option<(Effect, DeadlineClass)>;
 
     /// 검문하고 실행해 결말을 낸다.
     ///
@@ -1275,7 +1341,7 @@ pub trait LocalCommands: Send + Sync {
 pub struct NoLocalCommands;
 
 impl LocalCommands for NoLocalCommands {
-    fn claim(&self, _name: &str) -> Option<Effect> {
+    fn claim(&self, _name: &str) -> Option<(Effect, DeadlineClass)> {
         None
     }
 
@@ -1350,10 +1416,10 @@ const CEILING_WARN_INTERVAL: Duration = Duration::from_secs(60);
 /// 번호를 붙들고 있을 수 있는 자리 수의 상한([`Seats::evict_oldest_retained`]).
 ///
 /// ★값의 셈★: 보유 한 칸은 처지·시각·발권·연결 id 뿐이다(페이로드는 보유로 넘길 때 버린다 —
-/// [`CommandDeliveries::settle_local`]). 256 칸이면 수십 KiB 안쪽이고, 정상 사용에서 한 창(마감 하나) 안에
-/// 끝나는 쓰기 왕복 수보다 넉넉하다 — 그 왕복들은 프로필 락 하나를 두고 줄을 서므로 창당 처리량이 그리
-/// 크지 않다. 이 수를 넘겼다면 그것은 정상 사용이 아니라 **폭주하는 호출자**이고, 그때 지켜야 할 것은
-/// 표의 유계함이다.
+/// [`CommandDeliveries::settle_local`]). 256 entries stay within tens of KiB and exceed the write round trips that
+/// finish within one retention window in normal use (a seat's own span — 7 s ordinary, longer for a launch) — those
+/// round trips queue on one profile lock, so the throughput per window is small. Passing this count means a **runaway
+/// caller**, not normal use, and what must hold then is the table's bound.
 const MAX_RETAINED_LOCAL: usize = 256;
 
 /// 도는 1단계 하나를 나타내는 표식 — ★`Drop` 이 셈을 **반드시** 되돌린다★.
@@ -1709,12 +1775,21 @@ pub async fn deliver(
     // ★자리를 열기 **전에** 이 이름이 내 것인지 정한다★: 그 사실이 자리와 함께 태어나야 남이 보낸 결말이
     //   끼어들 틈이 없다([`Pending::local`]). 이 물음은 순수하다 — 실행도 잠금도 없다.
     let claim = locals.claim(&envelope.name);
+    // The seat is sized when it opens, so a relayed name's class is read before `open` — the roster lock is taken and
+    //   released inside `class_of`, then `open` takes the seat table's: never nested. Accepted: a re-registration
+    //   between this read and `route`'s own lookup can mis-size one seat.
+    // ADR-0369
+    let class = match claim {
+        Some((_, class)) => class,
+        None => roster.class_of(&envelope.name),
+    };
     let (rx, token) = match deliveries.open(
         request_id,
         origin,
         &envelope.name,
         &envelope.args,
         claim.is_some(),
+        class,
     ) {
         Seat::Opened { rx, token } => (rx, token),
         // 답장은 먼저 열린 그 왕복이 낸다 — 여기서 내면 같은 키에 둘이 된다(근거 = [`Seat::Coalesced`]).
@@ -1841,7 +1916,7 @@ pub async fn deliver(
     };
 
     // ── 1단계 — 내 표(위 doc 의 「1단계는 route 밖에 있다」) ──────────────────────────
-    if let Some(effect) = claim {
+    if let Some((effect, _)) = claim {
         // ★떠난 호출자를 위해 **일을 시작하지 않는다**★ — 2단계가 봉투를 넘기기 직전에 하는 검사와 같은
         //   것이고(`OwnerLink::send`), 여기 것은 **일찍** 보는 쪽이다: 통과 못 할 일을 풀에 넣지 않고
         //   상한 한 칸도 안 쓴다. 실제로 부수효과 직전에 보는 **늦은** 검사는 본문 안에 있다
@@ -2175,11 +2250,12 @@ fn send_reply(roster: &CommandRoster, origin: ConnId, name: &str, mut reply: Com
 ///
 /// ★이 상수가 묶는 것은 **동시성 하나뿐이다** — 상주 바이트가 아니다★
 ///
-/// 상한이 필요한 이유는 이 문에 연결 수명이 없어서다: 소켓 입구의 왕복은 **연결 하나에** 매달려 있어 그
-/// 연결이 끊기면 자리가 정리되지만([`CommandDeliveries::drop_origin`]), 이 문의 호출자는 요청 하나마다 새로
-/// 선다. 중계 왕복 하나는 마감([`CommandDeliveries::DEFAULT_DEADLINE`]) 동안 **태스크 + 자리 + 명부 한
-/// 칸**을 물고, 취소로 떠나도 그 셋이 다 돌아온다(셈은 [`RelaySlot`], 나머지 둘은 [`CallerSeat`]) — 그래서
-/// 이 수가 세는 것이 실제로 「지금 동시에 물고 있는 왕복」이다.
+/// The cap is needed because this door has no connection lifetime: a socket round trip hangs on **one connection**
+/// and is cleaned up when it drops ([`CommandDeliveries::drop_origin`]), but a caller of this door stands up anew per
+/// request. One relayed round trip holds **a task + a seat + one roster slot** for its seat's deadline
+/// ([`CommandDeliveries::seat_span`] — the default seat, or the relay seat for a launch-class name), and all three come
+/// back even when it leaves by cancellation (the count via [`RelaySlot`], the other two via [`CallerSeat`]) — so what
+/// this number counts really is "the round trips held at the same time now".
 /// ★넷째가 하나 더 있다 — 에이전트 참조 칸을 표시한 명령의 명부 읽기(blocking 풀)★: 그것은 취소로 돌아오지 않고
 /// 읽기가 끝날 때까지 남는다(`spawn_blocking`). 그래서 이 수로는 못 묶고 [`MAX_RESOLVING_IN_FLIGHT`] 가 따로 묶는다.
 ///
@@ -2805,6 +2881,7 @@ pub(crate) mod tests {
                     name: name.to_string(),
                     help: "{}".to_string(),
                     agent_args: Vec::new(),
+                    deadline: engram_dashboard_command::DeadlineClass::Ordinary,
                 }],
             )
             .expect("등록");
@@ -2844,6 +2921,8 @@ pub(crate) mod tests {
         panic_after_gate: bool,
         /// 이 이름의 효과 — 번호를 붙드는지(Write) 아닌지(Read)를 가른다([`retains_the_id`]).
         effect: Effect,
+        /// This name's declared deadline class — sizes its seat ([`CommandDeliveries::seat_span`]).
+        deadline: DeadlineClass,
     }
 
     impl FakeLocal {
@@ -2860,6 +2939,7 @@ pub(crate) mod tests {
                 gate: Mutex::new(None),
                 panic_after_gate: false,
                 effect: Effect::Write,
+                deadline: DeadlineClass::Ordinary,
             }
         }
 
@@ -2921,8 +3001,8 @@ pub(crate) mod tests {
     }
 
     impl LocalCommands for Arc<FakeLocal> {
-        fn claim(&self, name: &str) -> Option<Effect> {
-            (name == self.name).then_some(self.effect)
+        fn claim(&self, name: &str) -> Option<(Effect, DeadlineClass)> {
+            (name == self.name).then_some((self.effect, self.deadline))
         }
 
         fn run(
@@ -3419,6 +3499,246 @@ pub(crate) mod tests {
         assert_eq!(deliveries.in_flight(), 0);
     }
 
+    // ── seat sizing by deadline class (ADR-0369) ─────────────────────────────────────────
+
+    /// A seat's duration comes from the class it opened with and who answers: an ordinary name gets the default,
+    /// a launch-class name this daemon runs the launch bound, a relayed one the relay seat. Each expires exactly at
+    /// its own duration, not before.
+    #[test]
+    fn a_seat_expires_at_the_duration_of_its_class() {
+        let cases = [
+            (
+                DeadlineClass::Ordinary,
+                true,
+                CommandDeliveries::DEFAULT_DEADLINE,
+            ),
+            (
+                DeadlineClass::Ordinary,
+                false,
+                CommandDeliveries::DEFAULT_DEADLINE,
+            ),
+            (DeadlineClass::Launch, true, LAUNCH_REPLY_BOUND),
+            (DeadlineClass::Launch, false, LAUNCH_RELAY_SEAT),
+        ];
+        for (class, local, span) in cases {
+            let clock = Arc::new(ManualClock::new());
+            let deliveries = deliveries_with(clock.clone());
+            let Seat::Opened { .. } =
+                deliveries.open(RequestId::new(), 1, "agent.spawn", &json!({}), local, class)
+            else {
+                panic!("an empty table opens the seat");
+            };
+            clock.advance(span - Duration::from_millis(1));
+            assert_eq!(
+                deliveries.expire(),
+                0,
+                "{class:?} local={local}: not before"
+            );
+            clock.advance(Duration::from_millis(1));
+            assert_eq!(
+                deliveries.expire(),
+                1,
+                "{class:?} local={local}: at {span:?}"
+            );
+        }
+    }
+
+    /// A launch-class name this daemon answers itself is not cut at the default seat: the launch runs past 7 s and its
+    /// answer goes out as the round trip's one reply.
+    #[tokio::test]
+    async fn a_local_launch_class_name_outlives_the_default_seat_and_is_answered() {
+        let roster = CommandRoster::new();
+        let mut caller_inbox = attach_caller(&roster, 2);
+        let clock = Arc::new(ManualClock::new());
+        let deliveries = deliveries_with(clock.clone());
+        let (open, gate) = std::sync::mpsc::channel::<()>();
+        let (entered_tx, mut entered) = mpsc::unbounded_channel::<()>();
+        let local = Arc::new(FakeLocal {
+            entered: Mutex::new(Some(entered_tx)),
+            gate: Mutex::new(Some(gate)),
+            deadline: DeadlineClass::Launch,
+            ..FakeLocal::answering("agent.spawn", Ok(json!({ "agent_id": "a" })))
+        });
+        let env = envelope("agent.spawn", &OwnerToken::new("whatever"));
+        let request_id = env.request_id;
+
+        let round_trip = tokio::spawn(super::deliver(
+            roster.clone(),
+            deliveries.clone(),
+            Arc::new(Arc::clone(&local)),
+            2,
+            env,
+            ENTRANCE_SOCKET,
+        ));
+        entered.recv().await.expect("the launch started");
+        clock.advance(CommandDeliveries::DEFAULT_DEADLINE + Duration::from_secs(1));
+        assert_eq!(
+            deliveries.expire(),
+            0,
+            "the launch seat is not the default one"
+        );
+
+        open.send(()).expect("open the gate");
+        finished(round_trip).await;
+        match next_event(&mut caller_inbox).await {
+            AgentEvent::CommandReply { reply } => {
+                let reply = opened_reply(&reply);
+                assert_eq!(reply.request_id, request_id);
+                assert_eq!(reply.outcome.expect("answered"), json!({ "agent_id": "a" }));
+            }
+            other => panic!("the reply must come: {other:?}"),
+        }
+        assert!(caller_inbox.try_recv().is_err(), "one reply only");
+        assert_eq!(local.runs(), 1);
+    }
+
+    /// The retention window of an applied launch is its seat's duration: a same-id retry sent more than the default
+    /// seat but less than the launch bound after the body completed still finds the retained id and is not run again
+    /// (with the default 7 s retention it would launch a second time), and the id is let go once that window passes.
+    #[tokio::test]
+    async fn a_launch_retry_after_the_default_window_still_finds_the_retained_id() {
+        let roster = CommandRoster::new();
+        let mut caller_inbox = attach_caller(&roster, 2);
+        let clock = Arc::new(ManualClock::new());
+        let deliveries = deliveries_with(clock.clone());
+        let local = Arc::new(FakeLocal {
+            deadline: DeadlineClass::Launch,
+            ..FakeLocal::answering("agent.spawn", Ok(json!({ "agent_id": "a" })))
+        });
+        let env = envelope("agent.spawn", &OwnerToken::new("whatever"));
+        let again = CommandEnvelope {
+            request_id: env.request_id,
+            ..env.clone()
+        };
+
+        super::deliver(
+            roster.clone(),
+            deliveries.clone(),
+            Arc::new(Arc::clone(&local)),
+            2,
+            env,
+            ENTRANCE_SOCKET,
+        )
+        .await;
+        let _answered = next_event(&mut caller_inbox).await;
+
+        let later = CommandDeliveries::DEFAULT_DEADLINE + Duration::from_secs(1);
+        assert!(later < LAUNCH_REPLY_BOUND);
+        clock.advance(later);
+        assert_eq!(deliveries.expire(), 0);
+        super::deliver(
+            roster.clone(),
+            deliveries.clone(),
+            Arc::new(Arc::clone(&local)),
+            2,
+            again,
+            ENTRANCE_SOCKET,
+        )
+        .await;
+        match next_event(&mut caller_inbox).await {
+            AgentEvent::CommandReply { reply } => {
+                let err = opened_reply(&reply).outcome.expect_err("not run again");
+                assert_eq!(err.code(), ErrorCode::AlreadyApplied);
+            }
+            other => panic!("the retry gets an answer: {other:?}"),
+        }
+        assert_eq!(local.runs(), 1, "no second launch");
+
+        clock.advance(LAUNCH_REPLY_BOUND - later);
+        assert_eq!(
+            deliveries.expire(),
+            0,
+            "a retained seat is not an unanswered one"
+        );
+        assert_eq!(
+            deliveries.in_flight(),
+            0,
+            "let go once its own window passed"
+        );
+    }
+
+    /// A relayed name's seat is sized from the class its owner registered, read before the seat opens: a launch-class
+    /// name holds past the default seat and times out at the relay seat; an ordinary one keeps the default.
+    #[tokio::test]
+    async fn a_relayed_seat_is_sized_from_the_class_its_owner_registered() {
+        for (class, span) in [
+            (DeadlineClass::Launch, LAUNCH_RELAY_SEAT),
+            (DeadlineClass::Ordinary, CommandDeliveries::DEFAULT_DEADLINE),
+        ] {
+            let clock = Arc::new(ManualClock::new());
+            let roster = CommandRoster::new();
+            let (sink, mut owner_inbox) = sink_with_inbox();
+            roster.attach(1, &sink);
+            roster
+                .register(
+                    1,
+                    vec![CommandDecl {
+                        name: "agent.spawnInto".to_string(),
+                        help: "{}".to_string(),
+                        agent_args: Vec::new(),
+                        deadline: class,
+                    }],
+                )
+                .expect("register");
+            assert_eq!(roster.class_of("agent.spawnInto"), class);
+            let mut caller_inbox = attach_caller(&roster, 2);
+            let deliveries = deliveries_with(clock.clone());
+            let env = envelope("agent.spawnInto", &OwnerToken::new("whatever"));
+
+            let round_trip = tokio::spawn(deliver(roster.clone(), deliveries.clone(), 2, env));
+            assert!(matches!(
+                next_event(&mut owner_inbox).await,
+                AgentEvent::CommandRequest { .. }
+            ));
+            clock.advance(span - Duration::from_millis(1));
+            assert_eq!(deliveries.expire(), 0, "{class:?}: not before {span:?}");
+            clock.advance(Duration::from_millis(1));
+            assert_eq!(deliveries.expire(), 1, "{class:?}: at {span:?}");
+            finished(round_trip).await;
+            match next_event(&mut caller_inbox).await {
+                AgentEvent::CommandReply { reply } => assert_eq!(
+                    opened_reply(&reply).outcome.expect_err("timed out").code(),
+                    ErrorCode::Timeout
+                ),
+                other => panic!("{class:?}: {other:?}"),
+            }
+        }
+    }
+
+    /// The daemon's re-exports of the launch-wait chain are agent's values, and each launch seat fits its caller's
+    /// window by the one inequality (the compile-time asserts restated as a test for the mutation run).
+    #[test]
+    fn the_launch_seats_fit_inside_the_waits_derived_around_them() {
+        use engram_dashboard_agent::types as t;
+        assert_eq!(LAUNCH_REPLY_BOUND.as_secs(), t::LAUNCH_REPLY_BOUND_SECS);
+        assert_eq!(LAUNCH_MARGIN.as_secs(), t::LAUNCH_MARGIN_SECS);
+        assert_eq!(LAUNCH_CALLER_WAIT.as_secs(), t::LAUNCH_CALLER_WAIT_SECS);
+        assert_eq!(LAUNCH_RELAY_SEAT.as_secs(), t::LAUNCH_RELAY_SEAT_SECS);
+        assert_eq!(
+            LAUNCH_RELAY_CALLER_WAIT.as_secs(),
+            t::LAUNCH_RELAY_CALLER_WAIT_SECS
+        );
+        assert_eq!(
+            LAUNCH_MARGIN,
+            CommandDeliveries::SWEEP_INTERVAL + CommandDeliveries::CALLER_MARGIN,
+            "agent's margin restates this daemon's sweep + caller margin"
+        );
+        for (seat, caller) in [
+            (CommandDeliveries::DEFAULT_DEADLINE, CLI_CALLER_WINDOW),
+            (LAUNCH_REPLY_BOUND, LAUNCH_CALLER_WAIT),
+            (LAUNCH_RELAY_SEAT, LAUNCH_RELAY_CALLER_WAIT),
+        ] {
+            assert!(
+                fits_caller_silence_window(seat, caller),
+                "({seat:?}, {caller:?})"
+            );
+            assert!(
+                !fits_caller_silence_window(seat, caller - Duration::from_millis(1)),
+                "the pair is tight — the guard reads the caller window it is given"
+            );
+        }
+    }
+
     /// ★보유는 **개수로도** 닫혀 있다★ — 창만으로는 도착률 × 창만큼 자란다(빠르게 도는 클라이언트 하나가
     /// 그 곱을 실제로 만든다). 넘치면 **오래된 것부터** 밀려나고, 밀려난 번호는 보호를 잃는다.
     #[tokio::test]
@@ -3734,8 +4054,8 @@ pub(crate) mod tests {
     struct PanickingLocal;
 
     impl LocalCommands for PanickingLocal {
-        fn claim(&self, name: &str) -> Option<Effect> {
-            (name == "agent.new").then_some(Effect::Write)
+        fn claim(&self, name: &str) -> Option<(Effect, DeadlineClass)> {
+            (name == "agent.new").then_some((Effect::Write, DeadlineClass::Ordinary))
         }
 
         fn run(
@@ -4187,7 +4507,7 @@ pub(crate) mod tests {
     }
 
     impl LocalCommands for Arc<AgentsOnly> {
-        fn claim(&self, _name: &str) -> Option<Effect> {
+        fn claim(&self, _name: &str) -> Option<(Effect, DeadlineClass)> {
             None
         }
 
@@ -4245,6 +4565,7 @@ pub(crate) mod tests {
                     name: name.to_string(),
                     help: "{}".to_string(),
                     agent_args: agent_args.iter().map(|arg| arg.to_string()).collect(),
+                    deadline: engram_dashboard_command::DeadlineClass::Ordinary,
                 }],
             )
             .expect("등록");
@@ -4868,6 +5189,7 @@ pub(crate) mod tests {
                     name: "tab.create".to_string(),
                     help: "{}".to_string(),
                     agent_args: Vec::new(),
+                    deadline: engram_dashboard_command::DeadlineClass::Ordinary,
                 }],
             )
             .expect("등록");
@@ -5462,9 +5784,9 @@ pub(crate) mod tests {
 
     /// ★종료는 유계다 — 남은 자리를 전부 답하고 그 답이 배달 태스크를 즉시 푼다★
     ///
-    /// 비우지 않으면 배달 태스크는 자기 답장 자리를 기다리는데 그 **보내는 쪽이 이 표 안에** 있어, 마감
-    /// ([`CommandDeliveries::DEFAULT_DEADLINE`])까지 깨어날 계기가 없다. 그동안 표도 태스크도 「종료했다」고
-    /// 보고된 시점보다 오래 산다.
+    /// Without the drain a delivery task waits on its reply seat whose **sending half lives in this table**, so nothing
+    /// wakes it until the seat's deadline (7 s ordinary, up to 91 s for a launch); meanwhile the table and the task
+    /// outlive the moment the daemon reported it had stopped.
     /// 수거기를 **기다려** 그 사실을 관측한다 — 핸들을 버리면 이 단언이 설 자리가 없다.
     #[tokio::test]
     async fn shutdown_answers_every_outstanding_round_trip_and_stops_the_sweeper() {
@@ -5513,9 +5835,14 @@ pub(crate) mod tests {
     fn draining_twice_answers_each_seat_once() {
         let deliveries = deliveries_with(Arc::new(ManualClock::new()));
         let request_id = RequestId::new();
-        let Seat::Opened { rx: _rx, .. } =
-            deliveries.open(request_id, 1, "tab.create", &json!({}), false)
-        else {
+        let Seat::Opened { rx: _rx, .. } = deliveries.open(
+            request_id,
+            1,
+            "tab.create",
+            &json!({}),
+            false,
+            DeadlineClass::Ordinary,
+        ) else {
             panic!("자리를 얻어야 한다");
         };
 
@@ -5535,7 +5862,14 @@ pub(crate) mod tests {
 
         assert!(
             matches!(
-                deliveries.open(RequestId::new(), 1, "tab.create", &json!({}), false),
+                deliveries.open(
+                    RequestId::new(),
+                    1,
+                    "tab.create",
+                    &json!({}),
+                    false,
+                    DeadlineClass::Ordinary
+                ),
                 Seat::Closed
             ),
             "닫힌 표는 자리를 내주지 않는다"
@@ -5555,22 +5889,41 @@ pub(crate) mod tests {
         let deliveries = deliveries_with(Arc::new(ManualClock::new()));
         let request_id = RequestId::new();
         let args = json!({ "window": "main" });
-        let Seat::Opened { rx: _first, .. } =
-            deliveries.open(request_id, 1, "tab.create", &args, false)
-        else {
+        let Seat::Opened { rx: _first, .. } = deliveries.open(
+            request_id,
+            1,
+            "tab.create",
+            &args,
+            false,
+            DeadlineClass::Ordinary,
+        ) else {
             panic!("첫 왕복은 자리를 얻는다");
         };
 
         assert!(
             matches!(
-                deliveries.open(request_id, 1, "tab.create", &args, false),
+                deliveries.open(
+                    request_id,
+                    1,
+                    "tab.create",
+                    &args,
+                    false,
+                    DeadlineClass::Ordinary
+                ),
                 Seat::Coalesced
             ),
             "같은 연결의 같은 요청은 합친다"
         );
         assert!(
             matches!(
-                deliveries.open(request_id, 1, "theme.set", &args, false),
+                deliveries.open(
+                    request_id,
+                    1,
+                    "theme.set",
+                    &args,
+                    false,
+                    DeadlineClass::Ordinary
+                ),
                 Seat::Conflict
             ),
             "이름이 다르면 딴 요청이다 — 합치면 안 된다"
@@ -5582,7 +5935,8 @@ pub(crate) mod tests {
                     1,
                     "tab.create",
                     &json!({ "window": "other" }),
-                    false
+                    false,
+                    DeadlineClass::Ordinary,
                 ),
                 Seat::Conflict
             ),
@@ -5590,7 +5944,14 @@ pub(crate) mod tests {
         );
         assert!(
             matches!(
-                deliveries.open(request_id, 2, "tab.create", &args, false),
+                deliveries.open(
+                    request_id,
+                    2,
+                    "tab.create",
+                    &args,
+                    false,
+                    DeadlineClass::Ordinary
+                ),
                 Seat::Taken { holder: 1 }
             ),
             "다른 연결이면 그쪽에 답해야 한다"
@@ -5607,9 +5968,14 @@ pub(crate) mod tests {
         let deliveries = deliveries_with(Arc::new(ManualClock::new()));
         let request_id = RequestId::new();
         let args = json!({});
-        let Seat::Opened { rx: _rx, token } =
-            deliveries.open(request_id, 1, "tab.create", &args, false)
-        else {
+        let Seat::Opened { rx: _rx, token } = deliveries.open(
+            request_id,
+            1,
+            "tab.create",
+            &args,
+            false,
+            DeadlineClass::Ordinary,
+        ) else {
             panic!("자리를 얻어야 한다");
         };
 
@@ -5619,7 +5985,14 @@ pub(crate) mod tests {
         );
         assert!(
             matches!(
-                deliveries.open(request_id, 1, "tab.create", &args, false),
+                deliveries.open(
+                    request_id,
+                    1,
+                    "tab.create",
+                    &args,
+                    false,
+                    DeadlineClass::Ordinary
+                ),
                 Seat::Coalesced
             ),
             "결말이 붙었어도 프레임 전이면 자리는 아직 그 왕복 것이다"
@@ -5628,7 +6001,14 @@ pub(crate) mod tests {
         deliveries.release(request_id, token);
         assert!(
             matches!(
-                deliveries.open(request_id, 1, "tab.create", &args, false),
+                deliveries.open(
+                    request_id,
+                    1,
+                    "tab.create",
+                    &args,
+                    false,
+                    DeadlineClass::Ordinary
+                ),
                 Seat::Opened { .. }
             ),
             "프레임이 나간 뒤에는 같은 id 로 새 왕복을 열 수 있다"
@@ -5648,7 +6028,14 @@ pub(crate) mod tests {
         let Seat::Opened {
             rx: _first,
             token: stale,
-        } = deliveries.open(request_id, 1, "tab.create", &args, false)
+        } = deliveries.open(
+            request_id,
+            1,
+            "tab.create",
+            &args,
+            false,
+            DeadlineClass::Ordinary,
+        )
         else {
             panic!("첫 왕복은 자리를 얻는다");
         };
@@ -5658,9 +6045,14 @@ pub(crate) mod tests {
         assert_eq!(deliveries.expire(), 1);
 
         // 계약이 막지 않는 같은 번호의 재질의 — 새 왕복이 같은 키에 앉아야 한다.
-        let Seat::Opened { rx: _second, .. } =
-            deliveries.open(request_id, 1, "tab.create", &args, false)
-        else {
+        let Seat::Opened { rx: _second, .. } = deliveries.open(
+            request_id,
+            1,
+            "tab.create",
+            &args,
+            false,
+            DeadlineClass::Ordinary,
+        ) else {
             panic!("재질의가 새 자리를 얻는다");
         };
 

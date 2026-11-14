@@ -263,6 +263,7 @@ impl Fixture {
                     name: name.to_string(),
                     help: help.to_string(),
                     agent_args: Vec::new(),
+                    deadline: engram_dashboard_command::DeadlineClass::Ordinary,
                 }],
             )
             .expect("붙어 있는 연결의 등록");

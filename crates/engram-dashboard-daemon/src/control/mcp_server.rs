@@ -1112,7 +1112,8 @@ async fn control_commands_handler(
 ///   that comment is canonical. The two routes run the same table through the same function, so the treatment must be the same.
 ///
 /// ★This route **may be delayed until the deadline** (ADR-0160 impact section)★: another party's name is relayed to its owner, and if the owner
-///   does not answer, the delivery deadline (`CommandDeliveries::DEFAULT_DEADLINE`) yields `TIMEOUT`. The daemon's own names
+///   does not answer, the seat's deadline (`CommandDeliveries::DEFAULT_DEADLINE`, or the relay launch seat for a
+///   launch-class name — ADR-0369) yields `TIMEOUT`. The daemon's own names
 ///   finish on the spot as before, so they do not bear this delay.
 /// ★`request_id` **may be sent by the caller**★ (ADR-0161 decision 1) — if not sent, the decider issues one
 ///   (`catalog::handle_call`). That split is not recreated here.

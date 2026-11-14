@@ -67,6 +67,20 @@
 /// 중계하기 전에 그 칸의 문자열을 자기 해석기로 에이전트 id 로 바꾼다 — 받는 쪽 핸들러는 그 칸에서 **id 만** 본다.
 /// 다른 타입 · 블록 안 선언 타입의 칸에 달면 컴파일 에러다. 스키마 · TS 바인딩은 표시와 무관하게 같다.
 ///
+/// ## Deadline class — `#[deadline(Launch)]` (ADR-0369)
+///
+/// Written after `#[since(...)]` on a command that creates and starts an agent or starts / resumes one:
+///
+/// ```ignore
+///     #[effect(Write)]
+///     #[since(1)]
+///     #[deadline(Launch)]
+///     "agent.spawn" => args AgentSpawnArgs { … } -> ok AgentSpawnOk { … } errors [NOT_FOUND];
+/// ```
+///
+/// It lands in [`crate::CommandSpec::deadline`] → the registration's `deadline` and the schema entry's `"deadline"`;
+/// the daemon sizes the seat by it and the CLI its wait. Leaving it out = `Ordinary`.
+///
 /// ★`Option<Option<T>>` 가 있는 이유★: `null` 이 **적극적 지시**인 자리(예: 부모를 떼라)에서 평범한
 /// `Option<T>` 은 「안 줬다」와 「null 을 줬다」를 같은 값으로 접는다 — 오타 필드 하나가 조용히 그 지시로
 /// 실행된다. 바깥은 **실렸나**, 안쪽은 **값이 있나**를 뜻하고, 부재는 역직렬화 단계에서 반려된다.
@@ -330,6 +344,23 @@ macro_rules! __engram_declare {
         /// 이 블록이 선언한 전량 — `CommandTable::new` 이 받는 「자기 crate 선언 집합」.
         pub const COMMAND_SPECS: &[&$crate::CommandSpec] = &[ $( &$declared::SPEC, )* ];
     };
+    // A deadline class is declared after `#[since]`; without it the command is `Ordinary` (next arm).
+    (@commands [$($declared:ident)*]
+        $(#[doc = $summary:literal])*
+        #[effect($effect:ident)]
+        #[since($since:literal)]
+        #[deadline($deadline:ident)]
+        $name:literal => args $args:ident { $($afields:tt)* }
+                      -> ok  $ok:ident   { $($ofields:tt)* }
+                      errors [ $($code:ident),* $(,)? ] ;
+        $($rest:tt)*
+    ) => {
+        $crate::__engram_declare!(@agent_refs
+            [ [$($summary)*] $effect $since $deadline $name $args $ok [$($ofields)*] [$($code)*] ]
+            [] [] $($afields)* ,);
+
+        $crate::__engram_declare!(@commands [$($declared)* $args] $($rest)*);
+    };
     (@commands [$($declared:ident)*]
         $(#[doc = $summary:literal])*
         #[effect($effect:ident)]
@@ -341,7 +372,7 @@ macro_rules! __engram_declare {
     ) => {
         // 인자 칸의 `#[agent_ref]` 표시를 먼저 걷어 낸다 — 걷힌 칸 목록과 나머지 선언이 `@command` 로 간다.
         $crate::__engram_declare!(@agent_refs
-            [ [$($summary)*] $effect $since $name $args $ok [$($ofields)*] [$($code)*] ]
+            [ [$($summary)*] $effect $since Ordinary $name $args $ok [$($ofields)*] [$($code)*] ]
             [] [] $($afields)* ,);
 
         $crate::__engram_declare!(@commands [$($declared)* $args] $($rest)*);
@@ -403,8 +434,8 @@ macro_rules! __engram_declare {
     };
 
     // 명령 하나 — 표시를 걷어 낸 인자 칸과 걷힌 칸 이름을 받는다.
-    (@command [ [$($summary:literal)*] $effect:ident $since:literal $name:literal $args:ident $ok:ident
-                [$($ofields:tt)*] [$($code:ident)*] ]
+    (@command [ [$($summary:literal)*] $effect:ident $since:literal $deadline:ident $name:literal $args:ident
+                $ok:ident [$($ofields:tt)*] [$($code:ident)*] ]
         [$($afields:tt)*] [$($refs:ident)*]) => {
         $crate::__engram_declare!(@struct_def $args [] [] $($afields)* ,);
         $crate::__engram_declare!(@struct_def $ok [] [] $($ofields)* ,);
@@ -424,6 +455,8 @@ macro_rules! __engram_declare {
                 args_type: stringify!($args),
                 ok_type: stringify!($ok),
                 agent_args: &[ $( stringify!($refs) ),* ],
+                // A word outside `DeadlineClass` fails to compile here.
+                deadline: $crate::DeadlineClass::$deadline,
             };
         }
 

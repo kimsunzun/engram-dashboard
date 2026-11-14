@@ -566,10 +566,10 @@ async fn run_accept_loop(
     server.run(listening, stop).await;
 
     // ── 명령 왕복 정리(ADR-0154) ───────────────────────────────────────────────────
-    // ★수거기를 기다리는 것이 종료를 유계로 만든다★: 그 태스크가 나가는 길에 남은 자리를 전부 답하고
-    //   (`CommandDeliveries::drain`) 그 답이 배달 태스크들의 기다림을 **즉시** 푼다. 안 기다리면
-    //   「종료했다」고 적은 뒤에도 그 자리들과 태스크가 마감(`CommandDeliveries::DEFAULT_DEADLINE`)까지
-    //   살아 있다.
+    // ★Waiting for the sweeper is what bounds the shutdown★: on its way out it answers every remaining seat
+    //   (`CommandDeliveries::drain`) and those answers free the delivery tasks **at once**. Without the wait the seats
+    //   and tasks live on after "stopped" is logged, until each seat's own deadline (7 s ordinary, up to 91 s for a
+    //   launch — ADR-0360).
     // ★탈출 이유와 무관하게 여기 한 번 온다★ — 종료 갈래가 셋인데(StopDaemon · Ctrl-C · 송신단 소멸)
     //   그중 Ctrl-C 는 데몬 종료 watch 를 건드리지 않는다.
     sweeper.stop().await;

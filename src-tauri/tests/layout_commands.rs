@@ -5235,6 +5235,79 @@ fn the_webview_deadline_fits_inside_the_daemon_seat() {
     );
 }
 
+// ── launch-wait chain pins (ADR-0369 · ADR-0360 decision 6) ─────────────────────────────────
+
+/// Pin 1: the shell's restated launch base and margin equal the daemon's re-exports of agent's values — a budget
+/// change in agent turns this red until the shell's restatement follows.
+#[test]
+fn the_shell_restates_the_daemons_launch_base_and_margin() {
+    use engram_dashboard_daemon::command_delivery as daemon;
+    use engram_dashboard_lib::daemon_client::{LAUNCH_MARGIN_SECS, LAUNCH_REPLY_BOUND_SECS};
+
+    assert_eq!(
+        Duration::from_secs(LAUNCH_REPLY_BOUND_SECS),
+        daemon::LAUNCH_REPLY_BOUND
+    );
+    assert_eq!(
+        Duration::from_secs(LAUNCH_MARGIN_SECS),
+        daemon::LAUNCH_MARGIN
+    );
+}
+
+/// Pin 2: every nested pair of the chain holds outer ≥ inner + margin — over the shell's derived wait and over the
+/// daemon's re-exports — and the shell's launch wait is the daemon's direct caller wait.
+#[test]
+fn every_launch_wait_fits_around_the_one_inside_it() {
+    use engram_dashboard_daemon::command_delivery as daemon;
+    use engram_dashboard_lib::daemon_client::{
+        LAUNCH_CALLER_WAIT, LAUNCH_MARGIN_SECS, LAUNCH_REPLY_BOUND_SECS,
+    };
+
+    let base = Duration::from_secs(LAUNCH_REPLY_BOUND_SECS);
+    let margin = Duration::from_secs(LAUNCH_MARGIN_SECS);
+    assert!(!margin.is_zero(), "a zero margin makes the order prose");
+    assert_eq!(LAUNCH_CALLER_WAIT, daemon::LAUNCH_CALLER_WAIT);
+    for (inner, outer, what) in [
+        (
+            base,
+            LAUNCH_CALLER_WAIT,
+            "shell launch wait around the launch",
+        ),
+        (
+            LAUNCH_CALLER_WAIT,
+            daemon::LAUNCH_RELAY_SEAT,
+            "relay seat around the shell's wait",
+        ),
+        (
+            daemon::LAUNCH_RELAY_SEAT,
+            daemon::LAUNCH_RELAY_CALLER_WAIT,
+            "CLI wait around the relay seat",
+        ),
+        (
+            daemon::LAUNCH_REPLY_BOUND,
+            daemon::LAUNCH_CALLER_WAIT,
+            "daemon: caller wait around the launch",
+        ),
+    ] {
+        assert!(
+            outer >= inner + margin,
+            "{what}: {outer:?} < {inner:?} + {margin:?}"
+        );
+    }
+}
+
+/// Pin 3: the shell's `agent.spawnInto` declaration carries the launch class, so the daemon seats its relay — and the
+/// CLI waits for it — by the launch budget.
+#[test]
+fn agent_spawn_into_is_declared_with_the_launch_deadline() {
+    use engram_dashboard_command::DeadlineClass;
+    let spec = COMMAND_SPECS
+        .iter()
+        .find(|spec| spec.name == "agent.spawnInto")
+        .expect("declared");
+    assert_eq!(spec.deadline, DeadlineClass::Launch);
+}
+
 /// ★같은 번호가 도는 중이면 **안 보낸다**★ — 조용히 덮으면 부수효과가 두 번 일어나고, 먼저 온 옛 결말이
 /// 새 시도의 답으로 붙는다. 위 부등식이 이 상황을 막지만 그물은 둘이어야 한다.
 #[tokio::test]

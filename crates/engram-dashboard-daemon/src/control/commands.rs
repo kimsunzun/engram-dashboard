@@ -25,7 +25,8 @@ use engram_dashboard_agent::commands::{
 use engram_dashboard_agent::manager::AgentManager;
 use engram_dashboard_agent::types::AgentId;
 use engram_dashboard_command::{
-    CommandDecl, CommandError, CommandFuture, CommandSpec, CommandTable, Effect, ErrorCode,
+    CommandDecl, CommandError, CommandFuture, CommandSpec, CommandTable, DeadlineClass, Effect,
+    ErrorCode,
 };
 use futures_util::FutureExt as _;
 
@@ -296,12 +297,12 @@ impl LocalCommands for DaemonLocalCommands {
     /// 적어 놓고 본문이 상태를 바꾸는 동사**는 이중 적용 보호를 조용히 잃는다 — 에러도 로그도 없다.
     /// ★그 어긋남은 여기서 못 잡는다★: 선언은 의도이고 본문은 행위라, 선언만 보고 본문을 검증할 방법이
     /// 없다. 동사를 더하는 사람이 `#[effect(...)]` 를 **광고 문구가 아니라 계약으로** 적는 수밖에 없다.
-    fn claim(&self, name: &str) -> Option<Effect> {
+    fn claim(&self, name: &str) -> Option<(Effect, DeadlineClass)> {
         self.0
             .get()?
             .specs()
             .find(|spec| spec.name == name)
-            .map(|spec| spec.effect)
+            .map(|spec| (spec.effect, spec.deadline))
     }
 
     /// ★입구 라벨과 호출자를 여기서 지어내지 않고 **받아서 넘긴다**★ — 이 어댑터를 부르는 입구는 둘이다:
@@ -629,6 +630,7 @@ mod tests {
             args_type: "FixturePendingArgs",
             ok_type: "FixturePendingOk",
             agent_args: &[],
+            deadline: engram_dashboard_command::DeadlineClass::Ordinary,
         };
 
     static PENDING_DECLARED: &[&engram_dashboard_command::CommandSpec] = &[&PENDING_SPEC];
@@ -1031,7 +1033,15 @@ mod tests {
         )));
         let bus = DaemonLocalCommands::new(slot);
 
-        assert_eq!(bus.claim("agent.resolve"), Some(Effect::Read));
+        assert_eq!(
+            bus.claim("agent.resolve"),
+            Some((Effect::Read, DeadlineClass::Ordinary))
+        );
+        // ADR-0369: the seat of the daemon's own launch verb is sized from its declaration.
+        assert_eq!(
+            bus.claim("agent.spawn"),
+            Some((Effect::Write, DeadlineClass::Launch))
+        );
         let out = bus
             .run(
                 "agent.resolve",

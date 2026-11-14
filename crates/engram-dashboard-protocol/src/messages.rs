@@ -260,7 +260,9 @@ pub enum AgentCommand {
     RegisterCommands {
         #[ts(type = "string")]
         owner: OwnerToken,
-        #[ts(type = "Array<{ name: string, help: string, agent_args?: Array<string> }>")]
+        #[ts(
+            type = "Array<{ name: string, help: string, agent_args?: Array<string>, deadline?: \"Ordinary\" | \"Launch\" }>"
+        )]
         decls: Box<RawValue>,
         catalog_version: u32,
         request_id: RequestId,
@@ -276,7 +278,9 @@ pub enum AgentCommand {
     UpdateCommands {
         #[ts(type = "string")]
         owner: OwnerToken,
-        #[ts(type = "Array<{ name: string, help: string, agent_args?: Array<string> }>")]
+        #[ts(
+            type = "Array<{ name: string, help: string, agent_args?: Array<string>, deadline?: \"Ordinary\" | \"Launch\" }>"
+        )]
         added: Box<RawValue>,
         removed: Vec<String>,
         request_id: RequestId,

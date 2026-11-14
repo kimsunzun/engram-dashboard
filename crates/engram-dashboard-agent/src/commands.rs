@@ -41,7 +41,8 @@ declare_commands! {
     //   and `cwd` became required (`NOT_FOUND` left its advertised errors), and the `agent.list` answer lost
     //   `store.presets` (TRD S25-preset-library §5-2 1). The same unreleased generation: the `agent.spawn` answer
     //   gains `notices` (TRD S25 step 16), and with `cwd` a launch blocked before the add answers `CONFLICT` with
-    //   nothing created (TRD S25 step 20 — the `agent.spawn` summary).
+    //   nothing created (TRD S25 step 20 — the `agent.spawn` summary). Also: `agent.spawn` is declared with the launch
+    //   deadline class (ADR-0369 — the schema entry gains `"deadline":"Launch"`).
     // v8(2026-10-26): 이름 하나가 늘었다 — `agent.resolve`(ADR-0307 · TRD S28 §6).
     // v7(2026-10-10): `agent.list` 의 답에 칸 `store` 가 늘었다 — 명부 저장소 둘(agents · presets)의 상태(ADR-0291
     //   R17 · D6). 이름은 그대로이고 답의 모양이 바뀌었다.
@@ -269,8 +270,10 @@ declare_commands! {
     /// With `cwd`, a launch blocked before the agent is added answers `CONFLICT` with `args.reasons` and creates
     /// nothing; a start failure after the add is `INTERNAL` with `args.agent_id` (plus `args.reasons` when blocked) —
     /// start that agent by target, do not create another.
+    // ADR-0369
     #[effect(Write)]
     #[since(1)]
+    #[deadline(Launch)]
     "agent.spawn" => args AgentSpawnArgs {
         /// 깨울 대상(이름 또는 id). cwd 와 상호배타.
         target: Option<String>,
@@ -2524,6 +2527,18 @@ mod tests {
             ]
         );
         assert_eq!(names.len(), COMMAND_SPECS.len());
+    }
+
+    /// ADR-0369: `agent.spawn` launches, so the daemon seats it and the CLI waits for it by the launch budget; every
+    /// other verb here keeps the shared waits.
+    #[test]
+    fn only_agent_spawn_is_declared_with_the_launch_deadline() {
+        let launches: Vec<&str> = COMMAND_SPECS
+            .iter()
+            .filter(|spec| spec.deadline == engram_dashboard_command::DeadlineClass::Launch)
+            .map(|spec| spec.name)
+            .collect();
+        assert_eq!(launches, ["agent.spawn"]);
     }
 
     #[test]

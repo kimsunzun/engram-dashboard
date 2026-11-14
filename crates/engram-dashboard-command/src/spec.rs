@@ -20,6 +20,54 @@ impl Effect {
     }
 }
 
+/// How long the waits around one call of a command are — declared with the verb (`#[deadline(Launch)]`), carried in
+/// the registration ([`CommandDecl::deadline`]) and in the schema entry ([`spec_item_json`]).
+///
+/// `Ordinary` = the shared waits (the daemon's default seat · the CLI's default wait). `Launch` = the command creates
+/// and starts an agent or starts / resumes one: the daemon's seat and the CLI's wait are derived from the launch budget
+/// (agent `types.rs`). The shell does not classify a socket envelope — its wait for a launch-class `Command{envelope}`
+/// stays the shared one until a sender needs it (ADR-0369). The daemon sizes the seat by this class, never by the name;
+/// a client reads it from the schema entry.
+// ADR-0360
+// ADR-0369
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub enum DeadlineClass {
+    #[default]
+    Ordinary,
+    Launch,
+}
+
+impl DeadlineClass {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ordinary => "Ordinary",
+            Self::Launch => "Launch",
+        }
+    }
+
+    pub const fn is_ordinary(&self) -> bool {
+        matches!(self, Self::Ordinary)
+    }
+
+    /// The class one schema entry ([`spec_item_json`] — a catalog row's parsed `help`) states. No field · not a known
+    /// word = `Ordinary`: an entry from an older build or another owner carries none, and an unknown word must not make a
+    /// client wait longer than the shared waits.
+    pub fn of_schema_entry(entry: &serde_json::Value) -> Self {
+        match entry
+            .get(DEADLINE_FIELD)
+            .and_then(serde_json::Value::as_str)
+        {
+            Some(word) if word == Self::Launch.as_str() => Self::Launch,
+            _ => Self::Ordinary,
+        }
+    }
+}
+
+/// The schema entry's field that carries a non-ordinary [`DeadlineClass`] — absent for the ordinary class.
+const DEADLINE_FIELD: &str = "deadline";
+
 /// The static contract of one command.
 ///
 /// ★This is as much as linker collection may hold (rule T-1)★ — the real handler is injected by `make_table(deps)` at assembly.
@@ -50,6 +98,8 @@ pub struct CommandSpec {
     /// before relaying (ADR-0308). The fields are only the top-level argument's `String` and `Option<String>` (the macro blocks anything else).
     // ADR-0308
     pub agent_args: &'static [&'static str],
+    /// The declared [`DeadlineClass`] — the declaration macro fills it from `#[deadline(...)]` (default `Ordinary`).
+    pub deadline: DeadlineClass,
 }
 
 /// Errors the table adds automatically to **every command**.
@@ -146,6 +196,11 @@ pub struct CommandDecl {
     // ADR-0308
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agent_args: Vec<String>,
+    /// The command's [`DeadlineClass`] — the daemon sizes the seat of a relayed name by it without opening `help`.
+    /// Omitted on the wire for `Ordinary`; an old packet without this field reads as `Ordinary` (`default`).
+    // ADR-0369
+    #[serde(default, skip_serializing_if = "DeadlineClass::is_ordinary")]
+    pub deadline: DeadlineClass,
 }
 
 /// One schema entry — an element of the derived file and the `help` of the registration packet.
@@ -156,12 +211,12 @@ pub fn spec_item_json(spec: &CommandSpec) -> String {
     let mut out = String::new();
     out.push_str("{\"name\":");
     push_json_string(&mut out, spec.name);
-    let _ = write!(
-        out,
-        ",\"effect\":\"{}\",\"since\":{}",
-        spec.effect.as_str(),
-        spec.since
-    );
+    let _ = write!(out, ",\"effect\":\"{}\"", spec.effect.as_str());
+    // Ordinary is omitted, so every entry but a launch's keeps its bytes.
+    if !spec.deadline.is_ordinary() {
+        let _ = write!(out, ",\"{DEADLINE_FIELD}\":\"{}\"", spec.deadline.as_str());
+    }
+    let _ = write!(out, ",\"since\":{}", spec.since);
     out.push_str(",\"summary\":");
     push_json_string(&mut out, spec.summary.trim());
     out.push_str(",\"args\":");
@@ -346,6 +401,7 @@ mod tests {
             args_type: "LintArgs",
             ok_type: "LintOk",
             agent_args: &[],
+            deadline: crate::DeadlineClass::Ordinary,
         }
     }
 
@@ -468,6 +524,71 @@ mod tests {
         );
     }
 
+    /// The class goes in the schema entry only when it is not ordinary, and a client reads back what was declared;
+    /// an entry without the field or with an unknown word reads as ordinary.
+    #[test]
+    fn the_schema_entry_carries_a_launch_class_and_omits_the_ordinary_one() {
+        let schema = "{\"type\":\"object\",\"properties\":{},\"required\":[]}";
+        let launch = CommandSpec {
+            deadline: DeadlineClass::Launch,
+            ..spec(schema)
+        };
+        let ordinary = spec(schema);
+
+        let launch_entry = spec_item_json(&launch);
+        let ordinary_entry = spec_item_json(&ordinary);
+        assert!(
+            launch_entry.contains(",\"effect\":\"Read\",\"deadline\":\"Launch\",\"since\":1,"),
+            "{launch_entry}"
+        );
+        assert!(!ordinary_entry.contains("deadline"), "{ordinary_entry}");
+        assert_eq!(
+            launch_entry.replace(",\"deadline\":\"Launch\"", ""),
+            ordinary_entry,
+            "the class is the only difference"
+        );
+
+        let read = |entry: &str| {
+            DeadlineClass::of_schema_entry(&serde_json::from_str(entry).expect("entry is JSON"))
+        };
+        assert_eq!(read(&launch_entry), DeadlineClass::Launch);
+        assert_eq!(read(&ordinary_entry), DeadlineClass::Ordinary);
+        assert_eq!(
+            read("{\"deadline\":\"Eventually\"}"),
+            DeadlineClass::Ordinary
+        );
+        assert_eq!(read("{\"deadline\":7}"), DeadlineClass::Ordinary);
+    }
+
+    /// The registration carries the class beside `help`; the ordinary class is left off the wire, and a packet from an
+    /// older build (no field) reads as ordinary.
+    #[test]
+    fn the_registration_round_trips_the_class_and_an_old_packet_reads_as_ordinary() {
+        let launch = CommandDecl {
+            name: "agent.spawn".into(),
+            help: "{}".into(),
+            agent_args: Vec::new(),
+            deadline: DeadlineClass::Launch,
+        };
+        let wire = serde_json::to_value(&launch).expect("serialize");
+        assert_eq!(wire["deadline"], "Launch");
+        assert_eq!(
+            serde_json::from_value::<CommandDecl>(wire).expect("deserialize"),
+            launch
+        );
+
+        let ordinary = CommandDecl {
+            deadline: DeadlineClass::Ordinary,
+            ..launch
+        };
+        let wire = serde_json::to_value(&ordinary).expect("serialize");
+        assert!(wire.get("deadline").is_none(), "{wire}");
+
+        let old: CommandDecl =
+            serde_json::from_str(r#"{"name":"tab.close","help":"{}"}"#).expect("old packet");
+        assert_eq!(old.deadline, DeadlineClass::Ordinary);
+    }
+
     /// ★The file states the partial-schema dialect★ — if it did not, a consumer would read the meaning of `{"type":"integer"}` differently
     /// per edition (the table's argument coercion stands on that property).
     #[test]
@@ -483,6 +604,7 @@ mod tests {
             args_type: "OneArgs",
             ok_type: "OneOk",
             agent_args: &[],
+            deadline: crate::DeadlineClass::Ordinary,
         };
 
         let body = catalog_json(1, &[&ONE]);

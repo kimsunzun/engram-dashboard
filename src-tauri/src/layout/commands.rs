@@ -95,6 +95,7 @@ use crate::theme::{ThemeControl, ThemeError, UiTheme, WindowTheme};
 //   `layout.setSlotContent`'s `content` no longer takes that word and a `layout.get` row's `content` no longer gives it.
 //   Names and argument fields are unchanged. The same unreleased generation: the `agent.spawnInto` answer gains
 //   `notices`, and its refusals carry `args.reasons` / `args.agent_id` (TRD S25 step 20 · ADR-0348 — the summary).
+//   Also: `agent.spawnInto` is declared with the launch deadline class (ADR-0369 — its registration carries it).
 // ★세대 21 = LLM 레이아웃 명령의 세대★(TRD S28 §4 · §7 · ADR-0307) — 에이전트 이름 · 공간 낱말로 탭 · 칸을 고르고 바꾼
 //   뒤의 배치를 답에 싣는다. 이름이 넷 늘었고(`tab.move` · `tab.dock` · `tab.detach` · `layout.get`), 칸 동사(`slot.focus` ·
 //   `slot.close` · `slot.split` · `slot.popout` · `slot.assignAgent` · `layout.setSlotContent`)가 `slot_of` · `at` · `window`
@@ -722,8 +723,10 @@ declare_commands! {
     /// 답 = agent_id · layout(놓인 탭의 칸 줄 — layout.get rows 모양 · id 없음) · notices(같은 묶음은 에이전트마다 한 번만
     /// 온다 · 없으면 []).
     // ADR-0348
+    // ADR-0369
     #[effect(Write)]
     #[since(1)]
+    #[deadline(Launch)]
     "agent.spawnInto" => args AgentSpawnIntoArgs {
         window: Option<String>,
         cwd: String,

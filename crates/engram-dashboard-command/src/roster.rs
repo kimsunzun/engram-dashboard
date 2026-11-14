@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::{CommandDecl, CommandError, ErrorCode, OwnerToken};
+use crate::{CommandDecl, CommandError, DeadlineClass, ErrorCode, OwnerToken};
 
 /// A registry entry for one name — the registry holds **only names that have an owner** (ADR-0150).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +71,8 @@ struct Registration {
     help: String,
     /// The agent-reference fields the registration packet marked — delivery reads them before relaying ([`Roster::agent_args`]).
     agent_args: Vec<String>,
+    /// The deadline class the registration packet carried — delivery sizes the seat by it ([`Roster::deadline`]).
+    deadline: DeadlineClass,
 }
 
 impl Roster {
@@ -145,6 +147,7 @@ impl Roster {
                     owner: owner.clone(),
                     help: decl.help,
                     agent_args: decl.agent_args,
+                    deadline: decl.deadline,
                 },
             );
         }
@@ -203,6 +206,7 @@ impl Roster {
                     owner: owner.clone(),
                     help: decl.help,
                     agent_args: decl.agent_args,
+                    deadline: decl.deadline,
                 },
             );
         }
@@ -387,6 +391,14 @@ impl Roster {
             .unwrap_or(&[])
     }
 
+    /// The deadline class the owner of this name registered. Unknown name = `Ordinary`.
+    // ADR-0369
+    pub fn deadline(&self, name: &str) -> DeadlineClass {
+        self.entries
+            .get(name)
+            .map_or(DeadlineClass::Ordinary, |reg| reg.deadline)
+    }
+
     pub fn entries(&self) -> impl Iterator<Item = RosterEntry> + '_ {
         self.entries.iter().map(|(name, reg)| RosterEntry {
             name: name.clone(),
@@ -428,6 +440,7 @@ mod tests {
             name: name.to_string(),
             help: format!("{{\"name\":\"{name}\"}}"),
             agent_args: Vec::new(),
+            deadline: crate::DeadlineClass::Ordinary,
         }
     }
 
@@ -507,6 +520,7 @@ mod tests {
                     name: "tab.create".to_string(),
                     help: "{\"name\":\"tab.create\",\"since\":2}".to_string(),
                     agent_args: Vec::new(),
+                    deadline: crate::DeadlineClass::Ordinary,
                 }],
             )
             .expect("상한 안");
@@ -605,6 +619,7 @@ mod tests {
             name: "n".repeat(Roster::MAX_NAME_BYTES),
             help: "h".repeat(Roster::MAX_HELP_BYTES),
             agent_args: Vec::new(),
+            deadline: crate::DeadlineClass::Ordinary,
         };
         roster
             .register(&owner, vec![at_cap])
@@ -615,6 +630,7 @@ mod tests {
             name: "n".repeat(Roster::MAX_NAME_BYTES + 1),
             help: "{}".to_string(),
             agent_args: Vec::new(),
+            deadline: crate::DeadlineClass::Ordinary,
         };
         let err = roster
             .register(&owner, vec![long_name])
@@ -625,6 +641,7 @@ mod tests {
             name: "tab.create".to_string(),
             help: "h".repeat(Roster::MAX_HELP_BYTES + 1),
             agent_args: Vec::new(),
+            deadline: crate::DeadlineClass::Ordinary,
         };
         let err = roster
             .register(&owner, vec![decl("tab.close"), long_help])
@@ -691,6 +708,40 @@ mod tests {
             roster.agent_args("slot.focus").is_empty(),
             "끊긴 주인의 표시는 안 남는다"
         );
+    }
+
+    /// The class delivery sizes a seat by follows registration · diff · re-registration · disconnect; an unknown name
+    /// is ordinary.
+    #[test]
+    fn the_deadline_class_follows_register_and_update() {
+        let launch = |name: &str| CommandDecl {
+            deadline: DeadlineClass::Launch,
+            ..decl(name)
+        };
+        let owner = OwnerToken::new("shell-1");
+        let mut roster = Roster::new();
+        roster
+            .register(&owner, vec![launch("agent.spawnInto"), decl("tab.close")])
+            .expect("within the caps");
+        assert_eq!(roster.deadline("agent.spawnInto"), DeadlineClass::Launch);
+        assert_eq!(roster.deadline("tab.close"), DeadlineClass::Ordinary);
+        assert_eq!(roster.deadline("never.seen"), DeadlineClass::Ordinary);
+
+        roster
+            .update(&owner, vec![launch("tab.close")], Vec::new())
+            .expect("own diff");
+        assert_eq!(roster.deadline("tab.close"), DeadlineClass::Launch);
+
+        roster
+            .register(&owner, vec![decl("agent.spawnInto")])
+            .expect("full re-registration");
+        assert_eq!(roster.deadline("agent.spawnInto"), DeadlineClass::Ordinary);
+
+        roster
+            .register(&owner, vec![launch("agent.spawnInto")])
+            .expect("full re-registration");
+        roster.disconnect(&owner);
+        assert_eq!(roster.deadline("agent.spawnInto"), DeadlineClass::Ordinary);
     }
 
     /// The marking fields are also resident packet strings — count and length are measured, and if exceeded the packet is rejected whole.

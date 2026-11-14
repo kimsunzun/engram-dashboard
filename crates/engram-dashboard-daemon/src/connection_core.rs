@@ -4483,6 +4483,7 @@ mod tests {
             name: name.to_string(),
             help: format!("{{\"name\":\"{name}\"}}"),
             agent_args: Vec::new(),
+            deadline: engram_dashboard_command::DeadlineClass::Ordinary,
         }
     }
 
@@ -4726,6 +4727,30 @@ mod tests {
         );
     }
 
+    /// ADR-0369: a registration slot carries the deadline class into the roster (the seat reads it from there); an old
+    /// item without the field registers as ordinary.
+    #[test]
+    fn a_registered_deadline_class_reaches_the_roster_and_an_old_item_is_ordinary() {
+        use engram_dashboard_command::DeadlineClass;
+        let raw = RawValue::from_string(
+            r#"[{"name":"agent.spawnInto","help":"{}","deadline":"Launch"},{"name":"tab.focus","help":"{}"}]"#
+                .to_string(),
+        )
+        .unwrap();
+        let decls = decls_from_wire(&raw).expect("the list unpacks");
+        let commands = CommandRoster::new();
+        let (sink, _inbox) = {
+            let (tx, rx) = tokio::sync::mpsc::channel::<crate::conn_port::Frame>(4);
+            let sink: Arc<dyn crate::conn_port::FrameSink> =
+                Arc::new(crate::test_doubles::FakeFrameSink::new(tx));
+            (sink, rx)
+        };
+        commands.attach(1, &sink);
+        commands.register(1, decls).expect("register");
+        assert_eq!(commands.class_of("agent.spawnInto"), DeadlineClass::Launch);
+        assert_eq!(commands.class_of("tab.focus"), DeadlineClass::Ordinary);
+    }
+
     /// ★칸이 빠진 옛 항목은 빈 `agent_args` 로 풀린다★(ADR-0308 — 「바꿀 칸 없음」) · 칸이 든 목록은 선언 그대로
     /// 풀린다. protocol `decl_agent_args_are_optional_on_the_wire` 가 패킷 쪽(칸 바이트가 그대로 건넌다)을 잰다.
     #[test]
@@ -4831,6 +4856,92 @@ mod tests {
         );
     }
 
+    /// An unknown deadline class breaks the item, so the whole packet is refused with its own number — the valid item
+    /// beside it and the diff's `removed` are not applied, and the connection lives.
+    // ADR-0272
+    #[tokio::test]
+    async fn an_unknown_deadline_class_refuses_the_whole_packet_with_its_request_id() {
+        let (core, _rx) = test_core();
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = attached(&core, 1);
+        core.dispatch(register(vec![decl("tab.create")], rid()), &session, &mock)
+            .await;
+
+        let registered = rid();
+        let flow = core
+            .dispatch(
+                AgentCommand::RegisterCommands {
+                    owner: WireOwnerToken::new("shell"),
+                    decls: RawValue::from_string(
+                        r#"[{"name":"tab.focus","help":"{}"},{"name":"agent.spawnInto","help":"{}","deadline":"Someday"}]"#
+                            .to_string(),
+                    )
+                    .unwrap(),
+                    catalog_version: 1,
+                    request_id: registered,
+                },
+                &session,
+                &mock,
+            )
+            .await;
+        assert_eq!(flow, DispatchFlow::Continue, "the connection lives");
+        let updated = rid();
+        let flow = core
+            .dispatch(
+                AgentCommand::UpdateCommands {
+                    owner: WireOwnerToken::new("shell"),
+                    added: RawValue::from_string(
+                        r#"[{"name":"agent.spawnInto","help":"{}","deadline":"Someday"}]"#
+                            .to_string(),
+                    )
+                    .unwrap(),
+                    removed: vec!["tab.create".to_string()],
+                    request_id: updated,
+                },
+                &session,
+                &mock,
+            )
+            .await;
+        assert_eq!(flow, DispatchFlow::Continue, "the connection lives");
+
+        match mock.events().as_slice() {
+            [AgentEvent::Ack { .. }, AgentEvent::Error {
+                request_id: Some(a),
+                message: first,
+                ..
+            }, AgentEvent::Error {
+                request_id: Some(b),
+                message: second,
+                ..
+            }] => {
+                assert_eq!(
+                    (*a, *b),
+                    (registered, updated),
+                    "answered with that packet's number"
+                );
+                for message in [first, second] {
+                    assert!(
+                        message.starts_with("INVALID_ARGUMENT: invalid command declarations"),
+                        "{message}"
+                    );
+                }
+            }
+            other => panic!("an unknown deadline class is an Error carrying the number: {other:?}"),
+        }
+        let names: Vec<String> = core
+            .commands()
+            .entries()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(
+            names,
+            vec!["tab.create".to_string()],
+            "the refused packets leave the roster as it was"
+        );
+    }
+
     /// ★`help` 는 데몬에게 불투명 문자열 한 칸이다★ — JSON 이 아닌 값을 넣어도 등록·조회가 그대로
     /// 성공해야 한다. 데몬이 파싱·검증을 끼우면 여기서 깨진다(TRD §3-7 하드 제약 · §7 seam 표).
     #[tokio::test]
@@ -4846,6 +4957,7 @@ mod tests {
                     name: "tab.create".to_string(),
                     help: opaque.to_string(),
                     agent_args: Vec::new(),
+                    deadline: engram_dashboard_command::DeadlineClass::Ordinary,
                 }],
                 rid(),
             ),
@@ -4905,6 +5017,7 @@ mod tests {
                         name: "agent.list".to_string(),
                         help: "stolen".to_string(),
                         agent_args: Vec::new(),
+                        deadline: engram_dashboard_command::DeadlineClass::Ordinary,
                     },
                 ],
                 rid(),
@@ -5645,6 +5758,7 @@ mod tests {
             name: "n".repeat(Roster::MAX_NAME_BYTES + 1),
             help: "{}".to_string(),
             agent_args: Vec::new(),
+            deadline: engram_dashboard_command::DeadlineClass::Ordinary,
         };
 
         core.dispatch(register(vec![too_long], req), &session, &mock)

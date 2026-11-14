@@ -1934,3 +1934,106 @@ fn a_daemon_that_does_not_serve_the_route_is_reported_as_a_version_mismatch() {
         );
     }
 }
+
+// ── launch waits (ADR-0369) ─────────────────────────────────────────────────────────────────
+
+/// A stub that answers requests in order, each after its own silence — for measuring the CLI's silence window.
+fn spawn_slow_stub(
+    script: Vec<(std::time::Duration, &'static str)>,
+) -> (String, u16, thread::JoinHandle<Vec<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind stub");
+    let addr = listener.local_addr().expect("addr");
+    let handle = thread::spawn(move || {
+        let mut seen = Vec::new();
+        for (silence, response) in script {
+            let Ok((mut stream, _)) = listener.accept() else {
+                break;
+            };
+            seen.push(read_request(&mut stream));
+            thread::sleep(silence);
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        }
+        seen
+    });
+    (addr.ip().to_string(), addr.port(), handle)
+}
+
+/// A catalog with one launch-class entry (`agent.spawnInto`, as the shell registers it) and one ordinary entry.
+fn launch_catalog() -> &'static str {
+    let args = serde_json::json!({
+        "type": "object",
+        "properties": { "cwd": { "type": "string" } },
+        "required": ["cwd"]
+    });
+    let ok = serde_json::json!({ "type": "object", "properties": {}, "required": [] });
+    let mut launch: serde_json::Value = serde_json::from_str(&schema_blob(
+        "agent.spawnInto",
+        "spawn and place",
+        args.clone(),
+        ok.clone(),
+    ))
+    .expect("blob");
+    launch["deadline"] = serde_json::json!("Launch");
+    catalog_response(vec![
+        catalog_row("agent.spawnInto", &launch.to_string(), true),
+        catalog_row(
+            "tab.create",
+            &schema_blob("tab.create", "open a tab", args, ok),
+            true,
+        ),
+    ])
+}
+
+/// The CLI waits past its shared 10 s silence window for a launch — `engram agent spawn`, and a call whose catalog entry
+/// states the launch class — while an ordinary call still gives up at 10 s. The three run side by side (the stub's
+/// silence is real time: 11 s).
+#[test]
+fn launch_verbs_wait_past_the_shared_silence_window_and_ordinary_calls_do_not() {
+    let silence = std::time::Duration::from_secs(11);
+    let run = |script: Vec<(std::time::Duration, &'static str)>, args: &'static [&'static str]| {
+        thread::spawn(move || {
+            let (host, port, stub) = spawn_slow_stub(script);
+            let url = format!("http://{host}:{port}");
+            let started = std::time::Instant::now();
+            let (stdout, code) = run_cli(&url, args, None);
+            let took = started.elapsed();
+            drop(stub);
+            (stdout, code, took)
+        })
+    };
+    let spawn = run(
+        vec![(
+            silence,
+            ok_response(r#"{"agent_id":"i","name":"w","state":"live","created":false}"#),
+        )],
+        &["agent", "spawn", "w"],
+    );
+    let launch_call = run(
+        vec![
+            (std::time::Duration::ZERO, launch_catalog()),
+            (silence, ok_response("{}")),
+        ],
+        &["agent.spawnInto", "--cwd", "C:/work"],
+    );
+    let ordinary_call = run(
+        vec![
+            (std::time::Duration::ZERO, launch_catalog()),
+            (silence, ok_response("{}")),
+        ],
+        &["tab.create", "--cwd", "C:/work"],
+    );
+
+    let (stdout, code, took) = spawn.join().expect("agent spawn");
+    assert_eq!(code, 0, "agent spawn waits past 10 s: {stdout}");
+    assert!(took >= silence, "{took:?}");
+    let (stdout, code, took) = launch_call.join().expect("launch call");
+    assert_eq!(code, 0, "a launch-class call waits past 10 s: {stdout}");
+    assert!(took >= silence, "{took:?}");
+    // Exit 1 shows the CLI did not wait for the reply (a CLI that waited would get `{}` and exit 0) — not by itself that
+    // the failure was the 10 s window; a wall-clock upper bound here would count process start-up too and flake.
+    let (stdout, code, _took) = ordinary_call.join().expect("ordinary call");
+    assert_eq!(code, 1, "an ordinary call gives up at its 10 s: {stdout}");
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("stdout json");
+    assert_eq!(v["status"], "error", "{stdout}");
+}
