@@ -8,5 +8,5 @@ Engram daemons on the user's own PCs (same LAN, or home ↔ office across NAT) l
 
 ## Documents
 
-- `prd.md` — not written.
+- `prd.md` — draft 1, awaiting user approval (D1–D7 open).
 - `trd.md` — not written.
