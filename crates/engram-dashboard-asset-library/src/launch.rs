@@ -1101,7 +1101,7 @@ pub struct SweepReport {
 }
 
 /// Removes every launch's volatile folder under `launch_root` (module rules), keeping `launch_root` itself. A missing
-/// `launch_root` is an empty report. The daemon is to call it at boot, before the service serves any launch (step 8).
+/// `launch_root` is an empty report. The daemon calls it at boot, before the service serves any launch.
 pub fn sweep_launch_dir(launch_root: &Path) -> SweepReport {
     let mut report = SweepReport::default();
     // The root gets the per-node rule too: a link is never enumerated — its target's entries are not launch folders.
@@ -1368,7 +1368,7 @@ mod tests {
         skipped: HashMap<PathBuf, Vec<String>>,
     }
 
-    type Probe = Box<dyn Fn() + Send + Sync>;
+    type Probe = Box<dyn Fn(&Path) + Send + Sync>;
 
     /// The real folder ops on the temp folders; a test can hold any path's ops (until it releases them or the world
     /// ends), make a path's op panic, add skipped entries to a listing, and count the ops.
@@ -1376,7 +1376,7 @@ mod tests {
     struct Gated {
         state: Mutex<GatedState>,
         moved: Condvar,
-        /// Runs as every op starts.
+        /// Runs as every op starts, with its path.
         probe: Mutex<Option<Probe>>,
     }
 
@@ -1431,7 +1431,7 @@ mod tests {
 
         fn enter(&self, op: &'static str, path: &Path) {
             if let Some(probe) = lock(&self.probe).as_ref() {
-                probe();
+                probe(path);
             }
             let mut state = lock(&self.state);
             state.calls.push((op, path.to_path_buf()));
@@ -2348,7 +2348,7 @@ mod tests {
             }
         };
         let on_ops = probe(Arc::downgrade(&w.svc), Arc::clone(&held));
-        *lock(&w.ops.probe) = Some(Box::new(on_ops));
+        *lock(&w.ops.probe) = Some(Box::new(move |_: &Path| on_ops()));
         let on_store = probe(Arc::downgrade(&w.svc), Arc::clone(&held));
         *lock(&w.store.probe) = Some(Box::new(move |_: &Path| on_store()));
         let folder = w.folder("rules", &[("AGENTS.md", "rules")]);
@@ -3051,5 +3051,134 @@ mod tests {
             assert!(!volatile_dir(&w.at("launch"), profile.id, 1).exists());
             assert!(skill_md.exists(), "the library skill survives the release");
         }
+    }
+
+    // ── the manager over this service: launch blocks at create (R4 · R4b) ──────────────────────────────────────
+
+    struct NoStatus;
+
+    impl engram_dashboard_agent::types::StatusSink for NoStatus {
+        fn status_changed(
+            &self,
+            _id: AgentId,
+            _status: engram_dashboard_agent::types::AgentStatus,
+            _epoch: u32,
+        ) {
+        }
+        fn agent_list_updated(&self, _agents: Vec<engram_dashboard_agent::types::AgentInfo>) {}
+    }
+
+    /// An agent manager whose launch kits are this world's service, over its own empty roster.
+    fn manager_over(
+        w: &World,
+    ) -> (
+        engram_dashboard_agent::manager::AgentManager,
+        Arc<ProfileRegistry>,
+    ) {
+        use engram_dashboard_agent::launch::LaunchPorts;
+        use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
+
+        let profiles = Arc::new(ProfileRegistry::new(Arc::new(NoProfiles)));
+        let tracker = Arc::new(SessionTracker::new(
+            TrackerConfig {
+                enabled: false,
+                poll_interval: Duration::from_secs(1),
+            },
+            Arc::new(|_, _| {}),
+        ));
+        let manager = engram_dashboard_agent::manager::AgentManager::new(
+            Arc::new(NoStatus),
+            Arc::clone(&profiles),
+            tracker,
+        )
+        .with_launch_ports(LaunchPorts {
+            kits: Arc::clone(&w.svc) as Arc<dyn LaunchKitSource>,
+            fs: Arc::new(StdLaunchFs),
+        });
+        (manager, profiles)
+    }
+
+    /// The one missing-folder reason of a blocked create, as (item, code).
+    fn blocked_folder(error: &engram_dashboard_agent::types::PtyError) -> (String, String) {
+        match error {
+            engram_dashboard_agent::types::PtyError::LaunchBlocked(blocked) => {
+                match blocked.reasons.as_slice() {
+                    [BlockReason::Missing { item, reason, .. }] => {
+                        (item.clone(), reason.code.clone())
+                    }
+                    other => panic!("one missing reason expected: {other:?}"),
+                }
+            }
+            other => panic!("a launch block expected: {other:?}"),
+        }
+    }
+
+    /// R4 — a create whose library preset names a folder entry that is missing is blocked by the pre-create check:
+    /// nothing is added to the roster and nothing starts.
+    // ADR-0348
+    #[test]
+    fn a_create_with_a_missing_folder_entry_is_blocked_before_the_add() {
+        use engram_dashboard_agent::manager::NoticeDelivery;
+
+        let w = World::new();
+        let gone = w.at("gone");
+        w.put("lib/P.yaml", &preset(&[], &[], &[], &[&gone]));
+        let (manager, profiles) = manager_over(&w);
+        let profile = agent(claude(JSON), &["P.yaml"], &w.at("work"));
+
+        let not_started = manager
+            .create_and_activate(&profile, NoticeDelivery::Withheld)
+            .expect_err("blocked");
+
+        assert_eq!(
+            blocked_folder(&not_started.error),
+            (
+                folder_item(&gone),
+                crate::resolve::FOLDER_NOT_FOUND.to_owned()
+            )
+        );
+        assert!(!not_started.created, "nothing was added");
+        assert!(profiles.get(profile.id).is_none());
+        assert!(manager.list_agents().is_empty());
+    }
+
+    /// R4b — the check after the add asks a folder key the pre-create check did not: the first answer about folder `a`
+    /// rewrites the preset to add a missing folder `b` (the overlay re-reads presets on every check), so the
+    /// prelaunch blocks after the add. The agent stays registered and asleep; `a` was asked once in the whole launch
+    /// (one launch scope keeps its answer).
+    // ADR-0348
+    // ADR-0360
+    #[test]
+    fn a_folder_entry_added_between_the_checks_blocks_after_the_add() {
+        use engram_dashboard_agent::manager::NoticeDelivery;
+
+        let w = World::new();
+        let a = w.folder("a", &[]);
+        let b = w.at("b");
+        let preset_file = w.put("lib/P.yaml", &preset(&[], &[], &[], &[&a]));
+        let rewritten = preset(&[], &[], &[], &[&a, &b]);
+        let done = AtomicBool::new(false);
+        let a_probe = a.clone();
+        *lock(&w.ops.probe) = Some(Box::new(move |path: &Path| {
+            if path == a_probe && !done.swap(true, Ordering::SeqCst) {
+                fs::write(&preset_file, &rewritten).unwrap();
+            }
+        }));
+        let (manager, profiles) = manager_over(&w);
+        let profile = agent(claude(JSON), &["P.yaml"], &w.at("work"));
+
+        let not_started = manager
+            .create_and_activate(&profile, NoticeDelivery::Withheld)
+            .expect_err("blocked after the add");
+
+        assert_eq!(
+            blocked_folder(&not_started.error),
+            (folder_item(&b), crate::resolve::FOLDER_NOT_FOUND.to_owned())
+        );
+        assert!(not_started.created, "created asleep");
+        assert!(profiles.get(profile.id).is_some());
+        assert!(manager.list_agents().is_empty(), "nothing started");
+        assert_eq!(w.ops.count("stat", &a), 1, "one launch, one answer per key");
+        assert_eq!(w.ops.count("stat", &b), 1);
     }
 }

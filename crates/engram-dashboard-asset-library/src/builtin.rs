@@ -326,6 +326,34 @@ pub(crate) mod tests {
         assert!(verdict.problems.is_empty());
     }
 
+    /// The shipped priming, merged the way a launch merges it, passes the codex terminal command-line check (its
+    /// characters and length) — on real launch materials a refusal there blocks every codex terminal launch, where the
+    /// old priming path only warned. The built-in settings carry no codex field, so the priming is the line's only
+    /// instructions and nothing else is added for a plain agent.
+    // ADR-0353
+    // ADR-0361
+    #[test]
+    fn the_shipped_priming_fits_the_codex_terminal_command_line() {
+        use engram_dashboard_agent::backend::settings_check::CommandLine;
+        use engram_dashboard_agent::profile::AgentOutputFormat;
+
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../builtin");
+        let builtins = Builtins::new(Some(&dir), &AgentBackends);
+        assert_eq!(builtins.view(BuiltinId::Priming).stand_in, None);
+        let merged = crate::launch::merge_instructions(Some(builtins.priming_text()), &[]);
+        let check = AgentBackends
+            .for_word("codex")
+            .expect("codex has a settings check");
+        let line = CommandLine {
+            mode: AgentOutputFormat::Terminal,
+            cwd: Path::new(r"C:\Users\someone\work\project"),
+            extra_args: &[],
+            config_args: &[],
+            instructions: Some(&merged),
+        };
+        assert_eq!(check.command_line_fits(&line), Ok(()));
+    }
+
     /// The release manifest (`$ExpectedBuiltins` in `scripts/build-release.ps1`) lists exactly the files of
     /// [`BuiltinId::ALL`] — the direction no other test sees: the test above reads the repo folder through the same
     /// [`file_of`], so a built-in added to the code and the repo but not to the manifest stays green there, and the

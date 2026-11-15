@@ -52,6 +52,7 @@ const RUN_DIR: &str = "run";
 const LOGS_DIR: &str = "logs";
 const MCP_CONFIG_DIR: &str = "mcp-config";
 const USAGE_PROBE_DIR: &str = "usage-probe";
+const LAUNCH_DIR: &str = "launch";
 
 /// engram 프로세스의 데이터 디렉토리(ADR-0024/0029).
 ///
@@ -262,6 +263,12 @@ impl DataLayout {
 
     pub fn usage_probe_dir(&self) -> PathBuf {
         self.daemon_run_dir().join(USAGE_PROBE_DIR)
+    }
+
+    /// The launch materials' volatile folder — one `<id>-<epoch>` folder per live agent (the asset library's
+    /// `launch_root`), swept at daemon boot.
+    pub fn launch_dir(&self) -> PathBuf {
+        self.daemon_run_dir().join(LAUNCH_DIR)
     }
 
     /// 데몬 · 셸이 함께 쓰는 로그 폴더(파일은 프로세스마다 따로 — ADR-0264 결정 2). 셸도 사본을 갖는다.
@@ -596,6 +603,10 @@ mod tests {
         assert_eq!(
             l.usage_probe_dir(),
             root.join("daemon").join("run").join("usage-probe")
+        );
+        assert_eq!(
+            l.launch_dir(),
+            root.join("daemon").join("run").join("launch")
         );
         assert_eq!(l.logs_dir(), root.join("logs"));
     }

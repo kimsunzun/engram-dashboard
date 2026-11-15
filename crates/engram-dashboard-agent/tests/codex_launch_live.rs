@@ -5,11 +5,11 @@
 //!   it — deleting the user's codex data is the user's call. L3 and L4 spawn real codex without a model turn; L5 spends
 //!   no tokens and uses a temporary `CODEX_HOME`.
 //!
-//! ★The manager is driven directly★ — real kits cannot reach the app before step 8, so a test [`LaunchKitSource`]
-//!   writes a real kit into a temporary volatile folder, and the manager is built with a control endpoint so the MCP
-//!   `-c` attachment is on the line too (B13). The endpoint's URL has no server behind it.
-//! ★The stored instructions hash is set by hand★ — step 8 (not landed) records it at the first-turn event; L2 and L3
-//!   stand in for that record by writing it into the test registry before each resume.
+//! ★The manager is driven directly★ — a test [`LaunchKitSource`] writes a scripted kit (skills, roots, raw lines,
+//!   instructions with a marker) into a temporary volatile folder, and the manager is built with a control endpoint so
+//!   the MCP `-c` attachment is on the line too (B13). The endpoint's URL has no server behind it.
+//! ★The stored instructions hash is the manager's own record★ — the first echo of a delivered turn records the kit's
+//!   hash; L2 and L3 read it before each resume instead of writing it.
 //!
 //! Run: `cargo test -p engram-dashboard-agent --test codex_launch_live -- --ignored --test-threads=1 --nocapture`
 //!   (`--nocapture` shows the codex thread id L1 leaves in `~/.codex`).
@@ -603,12 +603,13 @@ fn l1_l2_l3_codex_json_fresh_then_changed_then_unchanged_resume() {
         .expect("L1's thread id was not persisted");
     println!("L1 left codex thread {thread} in ~/.codex — removing it is the user's call");
 
-    // ── L2 ── step 8 would have recorded L1's hash at the first echo; stand in for it.
-    let mut stored = profiles.get(id).expect("profile");
-    stored.last_applied_instructions_hash = Some(format!("l1-{n}"));
-    profiles
-        .try_upsert(stored.clone())
-        .expect("store L1's hash");
+    // ── L2 ── L1's first echo recorded L1's hash.
+    let stored = profiles.get(id).expect("profile");
+    assert_eq!(
+        stored.last_applied_instructions_hash,
+        Some(format!("l1-{n}")),
+        "L2: L1's delivered first turn did not record its hash"
+    );
     {
         let mut scene = kits.scene.lock().unwrap();
         let mut text = shipped_priming();
@@ -661,12 +662,13 @@ fn l1_l2_l3_codex_json_fresh_then_changed_then_unchanged_resume() {
     );
     kill_and_reap(&manager, id);
 
-    // ── L3 ── the stored hash now equals the kit's.
-    let mut stored = profiles.get(id).expect("profile");
-    stored.last_applied_instructions_hash = Some(format!("l2-{n}"));
-    profiles
-        .try_upsert(stored.clone())
-        .expect("store L2's hash");
+    // ── L3 ── L2's first echo recorded L2's hash, which now equals the kit's.
+    let stored = profiles.get(id).expect("profile");
+    assert_eq!(
+        stored.last_applied_instructions_hash,
+        Some(format!("l2-{n}")),
+        "L3: L2's delivered first turn did not record its hash"
+    );
     manager
         .activate_profile(&stored, SpawnMode::Resume)
         .expect("L3 activation");

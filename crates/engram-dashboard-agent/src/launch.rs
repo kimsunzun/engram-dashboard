@@ -732,8 +732,10 @@ impl LaunchScope {
     }
 }
 
-/// 재료 없음 — 오늘과 같은 실행(백엔드 = 명령 변형, 지침 = 제어 채널의 프라이밍 그대로). 이 계획 · 재료로
-/// backend 는 오늘과 바이트 같은 argv 를 낸다(골든 = `tests/launch_argv_golden.rs`).
+/// No materials — the launch as it was before real kits (backend = the command variant, instructions = the control
+/// channel's priming as is). With this plan and kit the backend emits the argv byte for byte as the golden
+/// (`tests/launch_argv_golden.rs`). The production daemon plugs the library instead; this stays the manager default
+/// (tests, harness bins) and the library's fallback for a backend without a settings check (ADR-0328).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoopLaunchKits;
 
@@ -1193,7 +1195,7 @@ pub struct LaunchPorts {
 }
 
 impl LaunchPorts {
-    /// 재료 없음 + 운영 배치 — 오늘과 같은 실행.
+    /// No materials + the production placement — the launch as it was before real kits ([`NoopLaunchKits`]).
     pub fn noop() -> Self {
         Self {
             kits: Arc::new(NoopLaunchKits),

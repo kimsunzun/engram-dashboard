@@ -231,8 +231,10 @@ pub struct RosterEntry {
     pub canonical_name: String,
     /// `Some` = 살아 있음(Running|Exiting 세션 부착) · `None` = 잠듦(프로필만 있음).
     pub live: Option<AgentInfo>,
-    /// 작업 폴더. 산 항목은 세션 cwd(spawn 시 canonicalize), 잠든 항목은 저장된 raw cwd — **이름 파생이
-    /// 보는 재료와 같은 것**이다(`roster()` 의 "산/잠듦 출처가 다르다" 규율). 세션도 프로필도 없으면 빈 문자열.
+    /// The working folder. A live entry gives the session cwd (the launch's working folder — the canonical path when
+    /// the canonicalize answered, the cwd as given otherwise), a sleeping one the stored raw cwd — **the same material
+    /// the name derivation reads** (`roster()`'s "live and sleeping sources differ" rule). Empty when there is neither
+    /// a session nor a profile.
     pub cwd: String,
     /// 트리 부모. 저장 계층이 유일한 출처이므로 산 항목도 프로필에서 읽는다 — `None` = 최상위.
     pub parent: Option<AgentId>,
@@ -697,6 +699,34 @@ fn session_id_sink(
     })
 }
 
+/// The first-turn port the transport gets: the latch's port ([`SessionIdLatch::first_turn_sink`]), then the applied
+/// instructions hash — recorded at most once per incarnation, after the latch has run, and only when the latch's kept
+/// first report says the instructions were delivered ([`SessionIdLatch::first_turn_delivered`] `Some(true)`). A
+/// `false` first report records nothing for the whole incarnation, so the next launch still compares against the old
+/// value and carries the instructions again. `hash` = the launch kit's instructions hash; `None` = nothing to record.
+/// Separate from the session-id commit and backend-neutral (ADR-0004).
+// ADR-0337
+fn first_turn_sink_recording_hash(
+    latch: &Arc<SessionIdLatch>,
+    profiles: Arc<ProfileRegistry>,
+    id: AgentId,
+    incarnation: u32,
+    hash: Option<String>,
+) -> backend::FirstTurnSink {
+    let inner = latch.first_turn_sink();
+    let Some(hash) = hash else {
+        return inner;
+    };
+    let latch = Arc::clone(latch);
+    let recorded = AtomicBool::new(false);
+    Arc::new(move |delivered: bool| {
+        inner(delivered);
+        if latch.first_turn_delivered() == Some(true) && !recorded.swap(true, Ordering::AcqRel) {
+            profiles.record_instructions_hash(id, incarnation, &hash);
+        }
+    })
+}
+
 /// spawn 이 세션에 싣는 화신 사실 — [`AgentManager::spawn_session`] 의 **필수** 인자다.
 ///
 /// ★`Option` 으로 바꾸거나 기본값을 두지 말 것★: 래치가 세션에 안 실리면 제출이 한 번도 안 세어져 어느
@@ -953,9 +983,10 @@ impl AgentManager {
     ///   판정을 조용히 바꾼다).
     /// ★산/잠듦 이름 출처가 **다르다**(의도 — 합치지 말 것)★: 산 항목은 `list_agents()` 가 만든
     ///   `AgentInfo.name`(= `resolve_canonical_name`, session.cwd 기반), 잠든 항목은
-    ///   `AgentProfile::canonical_name_when_live()`(profile.cwd + 같은 정규화). 두 파생을 하나로 합치면
-    ///   파킹 키 동작이 바뀐다 — 산 세션은 `session.cwd`(spawn 시 canonicalize)를, 잠든 프로필은 raw
-    ///   `profile.cwd` 를 정규화해 쓰는 서로 다른 재료를 본다.
+    ///   `AgentProfile::canonical_name_when_live()` (profile.cwd + the same normalization). Merging the two derivations
+    ///   changes the parking-key behaviour — the live session reads `session.cwd` (the launch's working folder,
+    ///   canonical when the canonicalize answered), the sleeping profile normalizes the raw `profile.cwd`: different
+    ///   material.
     /// ★fs 접근은 override 없는 잠든 프로필에서만★: `canonical_name_when_live()` 의 단축(display_name 이
     ///   비공백이면 syscall 0)을 **여기서 무력화하지 말 것** — 이 조회는 발송 임계 경로에 있고, cwd 가 죽은
     ///   네트워크 공유면 canonicalize 한 번이 수십 초 블록이다. 그래서 그 함수를 재구현하지 않고 그대로 쓴다.
@@ -1570,12 +1601,14 @@ impl AgentManager {
             .get(profile.id)
             .ok_or_else(|| profile_vanished_mid_spawn(profile.id, "명부 다시 읽기"))?;
         let profile = &reread;
-        // ADR-0337: the stored hash from this re-read — the value the first-turn recording compares against.
+        // ADR-0337: the stored hash from this re-read — the value the codex translation compares against to decide
+        //   whether to resend the instructions (the first-turn recording writes the new hash under the registry lock).
         kit.last_applied_instructions_hash = profile.last_applied_instructions_hash.clone();
 
         // The folder the process runs in comes from the kit source, for the re-read profile's cwd — the folder this
         //   launch's check judged, so the spawn runs where the check looked. The default is the `dunce` canonical path
-        //   (a fixed spelling for claude's session folder, no UNC prefix), or the cwd as given when that fails.
+        //   (no UNC prefix), or the cwd as given when that fails; a source with a bounded canonicalize also answers the
+        //   cwd as given when the folder answers too slowly (`LaunchKitSource::working_folder`).
         // ADR-0353: the check judges the working-folder rules on this same folder — a different one here lets a folder
         //   the check passed fail the spawn instead of blocking.
         let cwd = self.launch.kits.working_folder(&scope, &profile.cwd);
@@ -1794,8 +1827,6 @@ impl AgentManager {
         // ★commit 이 비교할 값 = 이 화신이 시작할 때 본 칸의 값(`stored_handle` — Fresh 는 위에서 비운 뒤라
         //   `None`)★: 그 사이 다른 기록자(claude 파일 감시자)가 칸을 바꿨으면 commit 은 되감지 않고 거절한다.
         // ADR-0226
-        // TODO(TRD S25 §5-2 4 (b)): `kit.instructions_hash` 를 아직 `last_applied_instructions_hash` 에 적지 않는다 —
-        //   적을 때 다시 읽은 명부가 아니라 재료에서 받는다.
         let latch = SessionIdLatch::new(
             profile.id,
             epoch,
@@ -1813,7 +1844,14 @@ impl AgentManager {
             // ★턴을 통로가 지는 backend 는 여기로 제출을 센다★ — 그 모드의 세션은 세지 않는다. 꽂을지는
             //   backend 가 정한다(나머지는 버린다).
             // ADR-0226 · ADR-0231: 사용자 결정 — id 는 진짜가 된 때(상대의 첫 유저 메시지 되울림) 영속한다.
-            Some(latch.first_turn_sink()),
+            // ADR-0337: the hash recorded is the kit's (what this launch carried), not the re-read roster's.
+            Some(first_turn_sink_recording_hash(
+                &latch,
+                self.profiles.clone(),
+                profile.id,
+                epoch,
+                kit.instructions_hash.clone(),
+            )),
             resume_session_id,
             link_sink,
             // ★위 `build_command_spec` 에 넘긴 것과 **같은 endpoint** 다★ — 명령줄로 번역할 것은 거기서
@@ -3496,10 +3534,10 @@ impl AgentManager {
     ///   라우팅(resolve_recipient)·로스터·봉투 sender·프론트 트리가 **같은 문자열**을 써야 "보이는
     ///   이름으로 지목하면 그 에이전트에게 간다"가 성립한다.
     ///
-    /// ★cwd 출처 = session.cwd(profile.cwd 아님)★: 프론트 트리는 `display_name ?? basename(AgentInfo.cwd)`
-    ///   로 그리고 AgentInfo.cwd = session.cwd(spawn 시 canonicalize). profile.cwd 는 raw("."·".."·심링크)
-    ///   라 여기서 파생하면 basename 이 갈려 트리 표시 ≠ 라우팅 주소가 된다. 그래서 AgentInfo.cwd 와
-    ///   **같은 값**(session.cwd)에서 파생한다.
+    /// ★The cwd source is session.cwd, not profile.cwd★: the frontend tree draws `display_name ?? basename(AgentInfo.cwd)`
+    ///   and AgentInfo.cwd = session.cwd (the launch's working folder). profile.cwd may be raw (`.` · `..` · a link), so
+    ///   deriving from it would split the basename and the tree label would differ from the routing address. So the
+    ///   name derives from **the same value** (session.cwd).
     // ADR-0101
     fn resolve_canonical_name(&self, session: &Arc<AgentSession>) -> String {
         let cwd = session.cwd.to_string_lossy();
@@ -3718,6 +3756,121 @@ mod tests {
         let p = profiles.get(id).expect("프로필");
         assert_eq!(p.backend_session_id, Some(stored));
         assert_eq!(p.old_session_ids, history, "같은 값인데 이력이 움직였다");
+    }
+
+    // ── The first-turn instructions hash (ADR-0337) ──
+
+    fn stored_hash(profiles: &crate::profile::ProfileRegistry, id: AgentId) -> Option<String> {
+        profiles
+            .get(id)
+            .expect("profile")
+            .last_applied_instructions_hash
+    }
+
+    /// `true` first → the kit's hash is recorded at the report, not when the port is built, and only once: a later call
+    /// does not write again. The latch still counts the submission (the session id commits through the same port).
+    #[test]
+    fn a_delivered_first_turn_records_the_kit_hash_once() {
+        let (profiles, id, epoch) = sink_fixture();
+        let latch = SessionIdLatch::new(
+            id,
+            epoch,
+            session_id_sink(profiles.clone(), id, epoch, None),
+        );
+        let sink = first_turn_sink_recording_hash(
+            &latch,
+            profiles.clone(),
+            id,
+            epoch,
+            Some("k".to_string()),
+        );
+        assert_eq!(
+            stored_hash(&profiles, id),
+            None,
+            "recorded before the first turn"
+        );
+
+        let sid = Uuid::new_v4();
+        (latch.offer_sink())(&sid.to_string());
+        sink(true);
+        assert_eq!(stored_hash(&profiles, id).as_deref(), Some("k"));
+        assert_eq!(
+            profiles.get(id).expect("profile").backend_session_id,
+            Some(sid),
+            "the wrapped port no longer reaches the latch"
+        );
+
+        assert!(profiles.record_instructions_hash(id, epoch, "other"));
+        sink(true);
+        assert_eq!(
+            stored_hash(&profiles, id).as_deref(),
+            Some("other"),
+            "a later call recorded again"
+        );
+    }
+
+    /// `false` first → nothing is recorded, so the stored value stays the old one and the next launch's translation
+    /// still sees a change (`the_stored_instructions_hash_reaches_the_codex_translation`); a later `true` through the same
+    /// port records nothing either — the latch keeps the first report.
+    #[test]
+    fn an_undelivered_first_turn_records_nothing_even_if_a_true_follows() {
+        let (profiles, id, epoch) = sink_fixture();
+        assert!(profiles.record_instructions_hash(id, epoch, "old"));
+        let latch = SessionIdLatch::new(
+            id,
+            epoch,
+            session_id_sink(profiles.clone(), id, epoch, None),
+        );
+        let sink = first_turn_sink_recording_hash(
+            &latch,
+            profiles.clone(),
+            id,
+            epoch,
+            Some("k".to_string()),
+        );
+
+        sink(false);
+        assert_eq!(stored_hash(&profiles, id).as_deref(), Some("old"));
+        sink(true);
+        assert_eq!(stored_hash(&profiles, id).as_deref(), Some("old"));
+    }
+
+    /// A port of an earlier incarnation reporting after a later one started records nothing; a kit with no instructions
+    /// hash records nothing (the stored value is not cleared).
+    #[test]
+    fn a_stale_incarnation_or_a_kit_without_a_hash_records_nothing() {
+        let (profiles, id, epoch) = sink_fixture();
+        let latch = SessionIdLatch::new(
+            id,
+            epoch,
+            session_id_sink(profiles.clone(), id, epoch, None),
+        );
+        let stale = first_turn_sink_recording_hash(
+            &latch,
+            profiles.clone(),
+            id,
+            epoch,
+            Some("k".to_string()),
+        );
+        let later = profiles.epoch_for_spawn(id).expect("a later incarnation");
+        assert_ne!(later, epoch);
+        stale(true);
+        assert_eq!(stored_hash(&profiles, id), None, "the incarnation guard");
+
+        assert!(profiles.record_instructions_hash(id, later, "old"));
+        let latch = SessionIdLatch::new(
+            id,
+            later,
+            session_id_sink(profiles.clone(), id, later, None),
+        );
+        let no_hash = first_turn_sink_recording_hash(&latch, profiles.clone(), id, later, None);
+        no_hash(true);
+        assert_eq!(stored_hash(&profiles, id).as_deref(), Some("old"));
+        assert_eq!(
+            latch.first_turn_delivered(),
+            Some(true),
+            "the latch still got the report"
+        );
     }
 
     /// ★우리 sid 는 발급 축 backend 에만 나간다(ADR-0185 · ADR-0226)★ — 선언 표를 **읽어서** 잰다.
@@ -7193,8 +7346,12 @@ mod tests {
         );
         // ★턴을 통로가 지는 모드(codex JSON)의 제출은 이 포트로만 온다★ — 빠지면 그 모드의 어느 화신도 id 를
         //   영속하지 못한다(세션은 그 모드에서 세지 않는다 — ADR-0226 개정).
+        // The latch's port reaches the transport inside the hash-recording wrapper, bound to this incarnation and the
+        //   kit's hash (what the wrapper does = `first_turn_sink_recording_hash` tests).
         assert!(
-            spawning.contains("Some(latch.first_turn_sink())"),
+            spawning.contains(
+                "Some(first_turn_sink_recording_hash(&latch,self.profiles.clone(),profile.id,epoch,kit.instructions_hash.clone()))"
+            ),
             "`open_spawn` 에 래치의 첫 턴 포트가 안 실린다 — 통로가 턴을 지는 모드의 id 가 영영 영속되지 않는다"
         );
         assert!(

@@ -34,8 +34,6 @@
 //! base · command · platform} and no direct `tauri*` package · ③ `asset_library` in the messaging isolation regex ·
 //! ④ zero `use tauri` lines under `src/`.
 //!
-//! Nothing calls this crate yet — the daemon wiring is step 8.
-//!
 //! ## The service
 //!
 //! [`LibraryService`] owns the catalog behind the ADR-0324 gate (`gate.rs` — the lock order and the ticket rules are

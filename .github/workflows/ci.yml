@@ -1368,6 +1368,7 @@ jobs:
           crates/engram-dashboard-agent/tests/stdio_physical_pipe.rs
           crates/engram-dashboard-agent/tests/stdio_smoke.rs
           crates/engram-dashboard-agent/tests/submit_delivery_boundary.rs
+          crates/engram-dashboard-daemon/tests/launch_kits_live.rs
           crates/engram-dashboard-daemon/tests/ws_e2e.rs
           src-tauri/tests/stop_smoke.rs
           # 시험 하네스 bin · 예제
@@ -1581,22 +1582,22 @@ jobs:
           esac
 
       # TRD S21 trd-3 §2-4 (edge vocabulary gate ①, daemon half — 3-3 U6 · ADR-0129 · ADR-0310): the daemon's network row
-      #   (`crates/engram-dashboard-daemon/src/link/`) names neither the agent crate nor the messaging kernel — it reaches the
-      #   upper layers only through the `conn_port` contract. It takes over the deleted net gates 1 (no daemon · messaging
-      #   names) and 2b (no agent runtime) for the code that moved out of net. PASS = 0 matches.
+      #   (`crates/engram-dashboard-daemon/src/link/`) names neither the agent crate, the asset library nor the messaging
+      #   kernel — it reaches the upper layers only through the `conn_port` contract. It takes over the deleted net gates 1
+      #   (no daemon · messaging names) and 2b (no agent runtime) for the code that moved out of net. PASS = 0 matches.
       # ★Comments are in scope (intended)★ — vocabulary leaks first through comments and test helpers. A comment that must
       #   name the wall writes the name with a parenthesized letter (`engram_dashboard_(a)gent`).
       # ★Do not drop the module-root check★ — a root at `link.rs` (instead of `link/mod.rs`) would sit outside the scanned
       #   directory. A missing directory fails the same check.
       # ★Known limit★ — the wall is on crate names: a path through another daemon module (`crate::agent_conn::…`) is not
       #   caught, as in the shell half (`shell gate 4`).
-      - name: 'daemon gate 1: link vocabulary — no agent or messaging crate names in daemon link'
+      - name: 'daemon gate 1: link vocabulary — no agent, asset-library or messaging crate names in daemon link'
         shell: bash
         run: |
           set +e
           d=crates/engram-dashboard-daemon/src/link
           if [ ! -f "$d/mod.rs" ]; then echo "FAIL — module root is not $d/mod.rs (moved or renamed? a root outside the directory escapes the scan)"; exit 1; fi
-          hits=$(rg -n "engram_dashboard_(agent|messaging)" "$d/")
+          hits=$(rg -n "engram_dashboard_(agent|asset_library|messaging)" "$d/")
           rc=$?
           set -e
           case "$rc" in

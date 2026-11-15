@@ -99,6 +99,10 @@ engram-dashboard-transport = { path = "../engram-dashboard-transport", features 
 # ADR-0155: command bus tools (envelope · error · declaration macro · table · routing). This crate uses the tools **only for table assembly** —
 #   it does not declare its own commands, so `ts-rs` is not added (only the declaring crate emits bindings).
 engram-dashboard-command = { path = "../engram-dashboard-command" }
+# ADR-0311 decision 2: the preset library — the daemon builds `LibraryService` from the crate's parts and its own values,
+#   plugs it in as the manager's launch-kit source (`lib.rs` `build_library_service` · `build_daemon_wiring_with_store`)
+#   and sweeps the launch folder at boot (`launch::sweep_launch_dir`); it calls nothing else in the crate.
+engram-dashboard-asset-library = { path = "../engram-dashboard-asset-library" }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
 # ★ADR-0129 slice 1 — `tokio-tungstenite` was moved down to [dev-dependencies]★: its use in this crate's production code
@@ -201,3 +205,6 @@ engram-dashboard-base = { path = "../engram-dashboard-base", features = ["test-s
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 # The happy-path handshake (initialize + tools/list + tools/call) is verified honestly with the rmcp client role.
 rmcp = { version = "2.2.0", features = ["client", "transport-streamable-http-client", "transport-streamable-http-client-reqwest"] }
+# `tests/launch_kits_live.rs` finds the codex terminal command line by the working folder as the launch spells it — the
+#   asset library canonicalizes it with this crate (`folder.rs` `StdFolderOps::canonical`), so the test does the same.
+dunce = "1.0"

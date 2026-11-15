@@ -35,6 +35,7 @@ pub mod usage_service;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use engram_dashboard_agent::launch::{LaunchPorts, StdLaunchFs};
 use engram_dashboard_agent::manager::AgentManager;
 use engram_dashboard_agent::persistence::FileProfileStore;
 use engram_dashboard_agent::profile::{ProfileRegistry, ProfileStore};
@@ -49,6 +50,12 @@ use crate::conn_port::FrameFanout;
 use connection_core::MultiViewState;
 use data_dir::{ensure_data_dir_writable, DataLayout};
 use engram_dashboard_agent::usage::{OsProbeSpawner, ProbeSpawner, UsageProbe};
+use engram_dashboard_asset_library::backends::AgentBackends;
+use engram_dashboard_asset_library::folder::{
+    BoundedIo, LaunchWaits, StdFolderOps, ThreadSpawn, IO_LIMIT, LIST_CAP,
+};
+use engram_dashboard_asset_library::store::FsStore;
+use engram_dashboard_asset_library::{LibraryService, LibraryValues};
 use link::server::{ConnRegistry, Listening};
 use status_fanout::DaemonStatusSink;
 use usage_service::clock::OsUsageClock;
@@ -184,6 +191,11 @@ struct DaemonWiring {
     registry: ConnRegistry,
     /// `manager` 의 status sink 사슬이 관측을 넘기는 그 서비스 — 연결 계층이 구독·⟳ 를 같은 것에 건다.
     usage: Arc<UsageService>,
+    /// The library service plugged in as `manager`'s launch-kit source — the same one, for the library commands.
+    /// `None` = the Noop kits (the test server). No production code reads it yet.
+    // ADR-0311
+    #[cfg_attr(not(test), allow(dead_code))]
+    library: Option<Arc<LibraryService>>,
 }
 
 impl DaemonWiring {
@@ -213,6 +225,12 @@ fn build_daemon_wiring(
     //   없다)이고 스케줄러·조회가 하나도 뜨기 **전**(제 조회의 폴더를 지우지 않는다)이다. 잠금 앞이나
     //   [`build_usage_service`] 뒤로 옮기면 살아 있는 조회의 폴더를 지울 수 있다.
     engram_dashboard_agent::usage::sweep_stale_scratch(&scratch_root);
+    // The launch folders left by an earlier daemon go on the same timing: after the instance lock, and before the
+    //   library service is plugged in below (boot restore is off, so nothing launches before). Plugged first, a launch
+    //   could have its fresh folder removed.
+    let launch_root = layout.launch_dir();
+    engram_dashboard_asset_library::launch::sweep_launch_dir(&launch_root);
+    warn_if_priming_file_set();
     build_daemon_wiring_with_store(
         profile_store,
         UsageInputs {
@@ -221,9 +239,67 @@ fn build_daemon_wiring(
             threads: Arc::new(OsProbeThreads),
             scratch_root,
         },
+        Some(LaunchInputs {
+            launch_root,
+            builtin_dir: data_dir::find_builtin_dir(),
+        }),
         control,
         flush_tx,
         idle_coalescer,
+    )
+}
+
+/// `ENGRAM_PRIMING_FILE` still changes the old priming path only (harness bins, the Noop kits); claude and codex
+/// launches take the priming from the built-in folder — say so once at boot when it is set.
+// ADR-0327
+fn warn_if_priming_file_set() {
+    warn_if_priming_override(std::env::var_os(control::priming::ENV_OVERRIDE).as_deref());
+}
+
+/// The boot warn of [`warn_if_priming_file_set`] for the value read — set and not empty warns once.
+fn warn_if_priming_override(value: Option<&std::ffi::OsStr>) {
+    let var = control::priming::ENV_OVERRIDE;
+    if value.is_some_and(|v| !v.is_empty()) {
+        tracing::warn!(
+            var,
+            "priming file override set; claude/codex launches ignore it"
+        );
+    }
+}
+
+/// What the launch kits take from outside the assembly — production passes it ([`build_daemon_wiring`]); the test
+/// server passes none and keeps the Noop kits.
+struct LaunchInputs {
+    /// The volatile launch folder (`DataLayout::launch_dir`).
+    launch_root: PathBuf,
+    /// The built-in assets folder (`data_dir::find_builtin_dir`); `None` = none could be found.
+    builtin_dir: Option<PathBuf>,
+}
+
+/// The library service over the real folders — no library root (nothing is scanned until one is configured), the
+/// daemon's environment and home, the production folder waits.
+// ADR-0311
+// ADR-0360
+// ADR-0368
+fn build_library_service(registry: Arc<ProfileRegistry>, inputs: LaunchInputs) -> LibraryService {
+    LibraryService::new(
+        LibraryValues {
+            registry,
+            backends: Arc::new(AgentBackends),
+            root: None,
+            builtin_dir: inputs.builtin_dir,
+            launch_root: inputs.launch_root,
+            home: engram_dashboard_platform::env::home_dir(),
+            env: Arc::new(|name| std::env::var(name).ok()),
+        },
+        Arc::new(FsStore),
+        BoundedIo::new(
+            IO_LIMIT,
+            LaunchWaits::LAUNCH,
+            LIST_CAP,
+            Arc::new(StdFolderOps),
+            Arc::new(ThreadSpawn),
+        ),
     )
 }
 
@@ -240,6 +316,7 @@ struct UsageInputs {
 fn build_daemon_wiring_with_store(
     store: Arc<dyn ProfileStore>,
     usage_inputs: UsageInputs,
+    launch_inputs: Option<LaunchInputs>,
     control: Arc<dyn engram_dashboard_agent::types::ControlChannel>,
     flush_tx: tokio::sync::mpsc::UnboundedSender<messaging_host::FlushMsg>,
     idle_coalescer: Arc<messaging_host::IdleCoalescer>,
@@ -268,176 +345,23 @@ fn build_daemon_wiring_with_store(
     ));
     tracker.start();
 
-    // TODO(TRD S25 §5-2 8): 실행 재료 포트를 여기서 꽂는다(`with_launch_ports`) — 꽂기 전에 남은 `launch\` 를 쓸어 낸다
-    //   (그 쓸기는 `restore_all` 보다도 먼저 끝난다 · §5-2 4 (c2) ⑥).
-    let manager = AgentManager::new_with_control(status_sink, profiles, tracker, control);
-    #[cfg(debug_assertions)]
-    let manager = qa_block::plug_from_env(manager);
-    let manager = Arc::new(manager);
+    let manager = AgentManager::new_with_control(status_sink, profiles.clone(), tracker, control);
+    let (manager, library) = match launch_inputs {
+        Some(inputs) => {
+            let library = Arc::new(build_library_service(profiles, inputs));
+            let manager = manager.with_launch_ports(LaunchPorts {
+                kits: library.clone(),
+                fs: Arc::new(StdLaunchFs),
+            });
+            (manager, Some(library))
+        }
+        None => (manager, None),
+    };
     DaemonWiring {
-        manager,
+        manager: Arc::new(manager),
         registry,
         usage,
-    }
-}
-
-/// Debug builds only — a launch-kit source over `NoopLaunchKits` that blocks chosen folders, so a live QA run reaches
-/// the launch-block answers that no production source produces yet (no real `LaunchKitSource` is plugged — the TODO in
-/// [`build_daemon_wiring_with_store`]). Release builds do not contain it.
-// TODO(TRD S25 §5-2 8): remove this module, its env vars and its test in the commit that plugs the real
-//   `LaunchKitSource` (TRD S25 step 20 §7-1).
-// ADR-0348 · TRD S25 step 20 §3-7 (M12)
-#[cfg(debug_assertions)]
-mod qa_block {
-    use std::collections::HashSet;
-    use std::sync::{Arc, Mutex};
-
-    use engram_dashboard_agent::launch::{
-        BlockReason, LaunchBlocked, LaunchKit, LaunchKitSource, LaunchPlan, LaunchPorts,
-        NoopLaunchKits, PrepareError, Reason,
-    };
-    use engram_dashboard_agent::manager::AgentManager;
-    use engram_dashboard_agent::profile::AgentProfile;
-    use engram_dashboard_agent::types::AgentId;
-
-    /// A cwd containing this marker is blocked at every launch check — the pre-create check, so nothing is created.
-    const BEFORE_ADD_VAR: &str = "ENGRAM_QA_BLOCK_CWD";
-    /// A cwd containing this marker passes the first launch check of its profile id and is blocked at every later one
-    /// — the prelaunch after the add, so the agent stays registered and asleep with an `Other` mark.
-    const AFTER_ADD_VAR: &str = "ENGRAM_QA_BLOCK_AFTER_ADD_CWD";
-
-    pub(crate) struct QaBlockKits {
-        before_add: Option<String>,
-        after_add: Option<String>,
-        /// Ids whose first after-add check has passed.
-        passed_once: Mutex<HashSet<AgentId>>,
-    }
-
-    impl QaBlockKits {
-        pub(crate) fn new(before_add: Option<String>, after_add: Option<String>) -> Self {
-            Self {
-                before_add,
-                after_add,
-                passed_once: Mutex::new(HashSet::new()),
-            }
-        }
-    }
-
-    /// Plugs [`QaBlockKits`] when either env var is set (logged at `warn`); otherwise returns the manager as built.
-    pub(crate) fn plug_from_env(manager: AgentManager) -> AgentManager {
-        let read = |name| std::env::var(name).ok().filter(|v| !v.is_empty());
-        let (before_add, after_add) = (read(BEFORE_ADD_VAR), read(AFTER_ADD_VAR));
-        if before_add.is_none() && after_add.is_none() {
-            return manager;
-        }
-        tracing::warn!(
-            ?before_add,
-            ?after_add,
-            "QA launch-block hook active (debug build) — launches in matching folders are blocked"
-        );
-        manager.with_launch_ports(LaunchPorts {
-            kits: Arc::new(QaBlockKits::new(before_add, after_add)),
-            ..LaunchPorts::noop()
-        })
-    }
-
-    /// One reason ① `missing` naming the folder.
-    fn missing_folder(cwd: &str) -> LaunchBlocked {
-        LaunchBlocked {
-            reasons: vec![BlockReason::Missing {
-                item: cwd.to_string(),
-                via: Vec::new(),
-                reason: Reason {
-                    code: "not-found".into(),
-                    args: serde_json::json!({ "path": cwd }),
-                    line: None,
-                },
-            }],
-        }
-    }
-
-    impl LaunchKitSource for QaBlockKits {
-        fn check(&self, profile: &AgentProfile) -> Result<LaunchPlan, LaunchBlocked> {
-            let cwd = profile.cwd.to_string_lossy();
-            let names =
-                |marker: &Option<String>| marker.as_deref().is_some_and(|m| cwd.contains(m));
-            if names(&self.before_add) {
-                return Err(missing_folder(&cwd));
-            }
-            if names(&self.after_add)
-                && !self
-                    .passed_once
-                    .lock()
-                    .expect("QA kit set poisoned")
-                    .insert(profile.id)
-            {
-                return Err(missing_folder(&cwd));
-            }
-            NoopLaunchKits.check(profile)
-        }
-
-        fn prepare(
-            &self,
-            plan: LaunchPlan,
-            id: AgentId,
-            epoch: u32,
-        ) -> Result<LaunchKit, PrepareError> {
-            NoopLaunchKits.prepare(plan, id, epoch)
-        }
-
-        fn release(&self, id: AgentId, epoch: u32) {
-            NoopLaunchKits.release(id, epoch);
-        }
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-        use engram_dashboard_agent::profile::{AgentCommand, AgentOutputFormat};
-
-        fn profile_in(cwd: &str) -> AgentProfile {
-            AgentProfile::new(
-                "qa".into(),
-                AgentCommand::Claude {
-                    extra_args: Vec::new(),
-                    output_format: AgentOutputFormat::StreamJson,
-                },
-                cwd.into(),
-                Vec::new(),
-                false,
-            )
-        }
-
-        fn blocked_item(result: Result<LaunchPlan, LaunchBlocked>) -> String {
-            match result.expect_err("blocked").reasons.as_slice() {
-                [BlockReason::Missing { item, reason, .. }] if reason.code == "not-found" => {
-                    item.clone()
-                }
-                other => panic!("one missing reason expected: {other:?}"),
-            }
-        }
-
-        /// Built from the constructor, not the process env: the before-add marker blocks every check, the after-add
-        /// marker passes the first check per profile id and blocks the later ones, and other folders pass.
-        #[test]
-        fn the_qa_kit_blocks_the_marked_folders_on_the_right_check() {
-            let kits = QaBlockKits::new(Some("qa-block-me".into()), Some("qa-block-late".into()));
-
-            let early = profile_in("C:/qa/qa-block-me-1");
-            assert_eq!(blocked_item(kits.check(&early)), "C:/qa/qa-block-me-1");
-            assert_eq!(blocked_item(kits.check(&early)), "C:/qa/qa-block-me-1");
-
-            let late = profile_in("C:/qa/qa-block-late-1");
-            assert!(kits.check(&late).is_ok(), "the pre-create check passes");
-            assert_eq!(blocked_item(kits.check(&late)), "C:/qa/qa-block-late-1");
-            assert_eq!(blocked_item(kits.check(&late)), "C:/qa/qa-block-late-1");
-            let other_late = profile_in("C:/qa/qa-block-late-2");
-            assert!(kits.check(&other_late).is_ok(), "counted per profile id");
-
-            let plain = profile_in("C:/qa/plain");
-            assert!(kits.check(&plain).is_ok());
-            assert!(kits.check(&plain).is_ok());
-        }
+        library,
     }
 }
 
@@ -515,6 +439,7 @@ async fn run_accept_loop(
         manager,
         registry,
         usage,
+        library: _,
     } = wiring;
     let fanout: Arc<dyn FrameFanout> = Arc::new(registry.clone());
     let handlers: Arc<dyn crate::conn_port::ConnectionHandlerFactory> =
@@ -1052,6 +977,8 @@ async fn start_test_server_inner(
             threads: Arc::new(OsProbeThreads),
             scratch_root: std::env::temp_dir(),
         },
+        // ADR-0311: real kits stay out of the WS tests — tests that need them build `LibraryService` themselves.
+        None,
         control,
         flush_tx.clone(),
         idle_coalescer.clone(),
@@ -1225,5 +1152,246 @@ mod tests {
         let a = generate_token().unwrap();
         let b = generate_token().unwrap();
         assert_ne!(a, b);
+    }
+
+    /// The production text of `lib.rs` up to its test module.
+    fn production_source() -> &'static str {
+        include_str!("lib.rs")
+            .split("mod tests {")
+            .next()
+            .expect("production part")
+    }
+
+    /// The production text of one function — from its signature to the next top-level `fn`.
+    fn body_of(signature: &str) -> &'static str {
+        let production = production_source();
+        let start = production
+            .find(signature)
+            .unwrap_or_else(|| panic!("`{signature}` is not in the production part"));
+        let rest = &production[start + signature.len()..];
+        let end = rest.find("\nfn ").unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// ★The boot sweep runs before the library service is plugged in★ — moved after it, a launch could have its fresh
+    /// folder removed; no runtime test sees that (boot restore is off, so nothing launches at boot), only this one.
+    /// ★The boot also gives the `ENGRAM_PRIMING_FILE` warn the variable's real value★ — the warn itself is
+    /// [`a_set_priming_override_value_warns_once`]; no runtime test sets the process env, so only this one sees the call
+    /// and the read.
+    #[test]
+    fn the_boot_sweeps_before_the_plug_and_warns_on_the_priming_override() {
+        let boot = body_of("fn build_daemon_wiring(");
+        let sweep = boot
+            .find("sweep_launch_dir(&launch_root)")
+            .expect("the boot sweep of the launch folder");
+        let plug = boot
+            .find("build_daemon_wiring_with_store(")
+            .expect("the assembly that plugs the library");
+        assert!(sweep < plug, "the sweep runs after the plug");
+        assert!(
+            body_of("fn build_daemon_wiring_with_store(").contains(".with_launch_ports("),
+            "the assembly no longer plugs the launch kits"
+        );
+        assert!(
+            boot.contains("warn_if_priming_file_set();"),
+            "the boot no longer warns on the priming override"
+        );
+        let warn = body_of("fn warn_if_priming_file_set(");
+        assert!(
+            warn.contains(
+                "warn_if_priming_override(std::env::var_os(control::priming::ENV_OVERRIDE)"
+            ),
+            "the boot warn does not read the priming override: {warn}"
+        );
+    }
+
+    /// The debug launch-block hook is gone with the real kits (its env vars included).
+    #[test]
+    fn the_debug_launch_block_hook_is_gone() {
+        let production = production_source();
+        for symbol in ["qa_block", "QaBlockKits", "ENGRAM_QA_BLOCK"] {
+            assert!(!production.contains(symbol), "{symbol}");
+        }
+    }
+
+    /// ★The production assembly plugs the real kits★ (WS tests run the Noop kits, so nothing else sees this): built
+    /// over a temp data folder, it sweeps what an earlier daemon left in the launch folder, and the plugged service
+    /// launches a plain claude agent with 「기본」 from the repo `builtin\` — a real plan whose merged instructions file,
+    /// in this launch's volatile folder, is the shipped priming. No process is spawned.
+    #[test]
+    fn the_production_wiring_plugs_the_library_with_the_builtin_priming() {
+        use engram_dashboard_agent::launch::LaunchKitSource;
+        use engram_dashboard_agent::profile::{AgentCommand, AgentOutputFormat, AgentProfile};
+
+        let temp = std::env::temp_dir().join(format!("engram-wiring-{}", uuid::Uuid::new_v4()));
+        let layout = DataLayout::new(&temp);
+        let leftover = layout.launch_dir().join("stale-0");
+        std::fs::create_dir_all(&leftover).unwrap();
+        std::fs::write(leftover.join("instructions.md"), "old").unwrap();
+        let work = temp.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+
+        let wiring = production_wiring(&layout);
+        let leftover_gone = !leftover.exists();
+        let library = wiring
+            .library
+            .clone()
+            .expect("production plugs the library");
+
+        let profile = AgentProfile::new(
+            "wired".into(),
+            AgentCommand::Claude {
+                extra_args: Vec::new(),
+                output_format: AgentOutputFormat::StreamJson,
+            },
+            work.clone(),
+            Vec::new(),
+            false,
+        );
+        let scope = library.begin_launch();
+        let plan = library.check_in(&scope, &profile).expect("「기본」 passes");
+        let kit = library
+            .prepare_in(&scope, plan, profile.id, 1)
+            .expect("prepared");
+        let written = kit
+            .instructions_file
+            .as_deref()
+            .map(std::fs::read_to_string)
+            .transpose()
+            .unwrap();
+        let volatile = kit.volatile_dir.clone();
+        library.release(profile.id, 1);
+        wiring.manager.shutdown_all();
+        let _ = std::fs::remove_dir_all(&temp);
+
+        assert!(leftover_gone, "the boot sweep did not run");
+        assert!(kit.plan.real && kit.plan.include_priming, "{:?}", kit.plan);
+        assert_eq!(
+            volatile,
+            Some(layout.launch_dir().join(format!("{}-1", profile.id)))
+        );
+        let priming = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../builtin/instructions/priming.md"),
+        )
+        .unwrap();
+        assert_eq!(
+            written,
+            Some(engram_dashboard_asset_library::launch::merge_instructions(
+                Some(&priming),
+                &[]
+            ))
+        );
+        assert!(kit.instructions_hash.is_some());
+    }
+
+    /// The production assembly over `layout`. ★Built inside a log capture★ — the boot warn's callsite is hit only
+    /// inside one ([`log_capture`] 「관측 조건」 ①), even when the test process has `ENGRAM_PRIMING_FILE` set.
+    fn production_wiring(layout: &DataLayout) -> DaemonWiring {
+        let (flush_tx, _flush_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (wiring, _logged) = log_capture::capture_loud(|| {
+            build_daemon_wiring(
+                layout,
+                Arc::new(engram_dashboard_agent::types::NoopControlChannel),
+                flush_tx,
+                Arc::new(messaging_host::IdleCoalescer::new()),
+            )
+        });
+        wiring
+    }
+
+    /// ★The production manager launches through the very library service the wiring keeps★ (the Noop kits, or a
+    /// second service, would pass every other non-ignored test): a claude agent with a library preset and no library
+    /// root is refused by the manager with the library's block, before the add; once the kept service moves to a root
+    /// without that preset, the manager's refusal follows it. A cwd that does not exist — no process is spawned.
+    #[test]
+    fn the_production_manager_launches_through_the_kept_library_service() {
+        use engram_dashboard_agent::launch::BlockReason;
+        use engram_dashboard_agent::manager::NoticeDelivery;
+        use engram_dashboard_agent::profile::{
+            AgentCommand, AgentOutputFormat, AgentProfile, AttachedPreset,
+        };
+
+        let temp = std::env::temp_dir().join(format!("engram-wiring-{}", uuid::Uuid::new_v4()));
+        let layout = DataLayout::new(&temp);
+        let library_root = temp.join("library");
+        std::fs::create_dir_all(&library_root).unwrap();
+        let wiring = production_wiring(&layout);
+        let mut profile = AgentProfile::new(
+            "wired-preset".into(),
+            AgentCommand::Claude {
+                extra_args: Vec::new(),
+                output_format: AgentOutputFormat::StreamJson,
+            },
+            temp.join("no-such-folder"),
+            Vec::new(),
+            false,
+        );
+        profile.presets = vec![AttachedPreset {
+            path: "P.yaml".to_string(),
+        }];
+        let reasons_of = |profile: &AgentProfile| {
+            let refused = wiring
+                .manager
+                .create_and_activate(profile, NoticeDelivery::Withheld)
+                .expect_err("the launch is refused");
+            assert!(!refused.created, "the refused launch was added");
+            match refused.error {
+                engram_dashboard_agent::types::PtyError::LaunchBlocked(blocked) => blocked.reasons,
+                other => panic!("not the library's block: {other:?}"),
+            }
+        };
+
+        let without_root = reasons_of(&profile);
+        let moved = wiring
+            .library
+            .as_ref()
+            .map(|l| l.change_root(library_root.clone()));
+        let with_root = reasons_of(&profile);
+        wiring.manager.shutdown_all();
+        let _ = std::fs::remove_dir_all(&temp);
+
+        assert!(
+            matches!(
+                without_root.as_slice(),
+                [BlockReason::LibraryUnavailable { .. }]
+            ),
+            "{without_root:?}"
+        );
+        assert!(
+            matches!(moved, Some(Ok(_))),
+            "the kept service did not move: {moved:?}"
+        );
+        assert!(
+            with_root.iter().any(
+                |reason| matches!(reason, BlockReason::Missing { item, .. } if item.contains("P.yaml"))
+            ),
+            "{with_root:?}"
+        );
+        assert!(
+            !with_root
+                .iter()
+                .any(|reason| matches!(reason, BlockReason::LibraryUnavailable { .. })),
+            "the manager does not see the kept service's root: {with_root:?}"
+        );
+    }
+
+    /// The boot warn for `ENGRAM_PRIMING_FILE` (ADR-0327), given the value: a set value warns once and names the
+    /// variable; an unset or empty one says nothing. That the boot calls it with the env value =
+    /// [`the_boot_sweeps_before_the_plug_and_warns_on_the_priming_override`].
+    #[test]
+    fn a_set_priming_override_value_warns_once() {
+        let ((), set) = log_capture::capture_loud(|| {
+            warn_if_priming_override(Some(std::ffi::OsStr::new("C:\\custom\\priming.md")))
+        });
+        assert_eq!(set.len(), 1, "{set:?}");
+        assert!(
+            set[0].contains(&format!("var={:?}", control::priming::ENV_OVERRIDE)),
+            "{set:?}"
+        );
+        for quiet in [None, Some(std::ffi::OsStr::new(""))] {
+            let ((), logged) = log_capture::capture_loud(|| warn_if_priming_override(quiet));
+            assert!(logged.is_empty(), "{quiet:?}: {logged:?}");
+        }
     }
 }

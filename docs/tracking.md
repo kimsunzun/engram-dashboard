@@ -37,6 +37,7 @@
 | T-11 | child별 권한 스코프(R7) | 메인 | 보류 — 원격 단계 |
 | T-9 | claude 프로세스 풀링 | 메인 | 보류 |
 | T-6 | cwd 워크스페이스 검증 | 메인 | 보류 — 운영 단계 |
+| T-111 | A stopping daemon releases its instance lock before its launch bodies finish — a successor's boot sweeps can remove an in-progress launch folder | 버그 | Open — theoretical path, found in the S25 step 8 review |
 | T-78 | In-app codex terminal on codex 0.163.0 — alt-screen · mouse tracking (S21 TRD §6-F) | 버그 | Open — user decision on the default |
 | T-52 | Graceful daemon stop returned `Timeout` | 버그 | Closed by S21 3-2 U5a (`b85c0aaa`) — real-daemon stop test passes with `outcome=Closed`; remove once master has it |
 | T-45 | 스폰 이름 중복 · codex 가 claude 로 보임 | 버그 | 보류 — id 전환과 묶음 |
@@ -277,6 +278,12 @@
 - **재도입:** 운영 단계에서 허용 cwd 정책(예: Engram 워크스페이스 하위만) 결정 후 manager.spawn_agent 또는 command 층에서 검증.
 
 ## 버그
+
+### T-111. A stopping daemon releases its instance lock before its launch bodies finish
+- **Status:** open — theoretical path (S25 step 8 U3 code review, lens reviewer; no live occurrence).
+- **Fact:** the instance guard is a local of daemon `lib.rs` `run()` and drops when `run()` returns; the `#[tokio::main]` runtime is dropped after that and waits for detached `spawn_blocking` launch bodies (`connection_core.rs` `SpawnByCwd`). So a stop during a launch lingers **without** the lock — a few seconds today, up to about 20 s for a codex JSON link backstop, about 62–85 s once library presets land. The spawn path has no `shutting_down` check, so a launch finishing after `shutdown_all` can register a session nobody reaps.
+- **Effect:** a successor daemon started within the linger runs its boot sweeps (`usage::sweep_stale_scratch`, asset-library `launch::sweep_launch_dir`), which assume nobody else uses those folders once the lock is held — it can remove the predecessor's in-progress `launch\<id>-<e>\`, or a folder created after the sweep stays until the boot after next.
+- **Options:** keep the guard alive until the runtime has dropped (delays a successor — user-visible on restart) · stop new launch bodies once shutdown starts · accept. Step-8 TRD K11 records the corrected linger.
 
 ### T-78. In-app codex terminal on codex 0.163.0 — alt-screen and mouse tracking
 - **Status:** open — the S21 TRD §6-F default (`--no-alt-screen` or not) is a user decision; reopen it with the evidence below.

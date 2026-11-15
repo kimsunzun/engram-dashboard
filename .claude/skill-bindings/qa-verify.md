@@ -108,6 +108,7 @@ for f in "$QA_TMP"/gate-*.sh; do ( set -eo pipefail; RUNNER_TEMP="$QA_TMP"; sour
 
 - 창마다 하나이고 릴리스 빌드에도 있다. 레지스트리에 없는 프로필 일을 여기서 한다.
 - `createClaudeProfile(name, cwd, extraArgs, env, autoRestore, outputFormat?)` · `createCodexProfile(…같은 인자)` → 프로필. `spawnProfile(id, resume)` · `deleteProfile(id)` · `setProfileAutoRestore(id, bool)`.
+- `env` 는 객체가 아니라 `[키, 값]` 쌍의 배열이다 — 없으면 `[]` 를 넘긴다.
 - `outputFormat` 을 빼면 `'Terminal'` 이다 — 레지스트리 경로의 기본(`'StreamJson'`)과 다르다.
 - `window.__engram`(store 스냅샷)은 DEV 빌드에만 있다.
 - view 캐시(`useViewStore`)는 `__engram` 에 없다 — `performance.getEntriesByType('resource')` 에서 페이지가 받은 `/src/store/viewStore.ts…` URL 을 찾아 그 URL 그대로 `import()` 한다(DEV). 쿼리를 뗀 URL 은 빈 새 스토어를 연다.

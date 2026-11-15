@@ -192,8 +192,9 @@ fn list_agents(
 ///   agent_info 와 동일하게 display_name(override) ?? basename(session.cwd) 로 파생하고, 프로필 부재
 ///   fallback 도 같은 공유 코어(name::canonical_name_or_id_fallback)로 맞춘다(로직 복제 금지).
 ///
-/// ★cwd 출처 = session.cwd★: AgentInfo.cwd 에 넣는 값과 동일(canonical). profile.cwd(raw)에서
-///   파생하면 트리 basename 과 어긋난다 — agent_info 와 같은 이유(manager.rs resolve_canonical_name 참조).
+/// ★The cwd source is session.cwd★: the same value AgentInfo.cwd carries (the launch's working folder). Deriving from
+///   the raw profile.cwd would split the tree basename — the same reason as agent_info (see manager.rs
+///   resolve_canonical_name).
 // ADR-0101
 fn session_info(session: &Arc<AgentSession>, profiles: &Arc<ProfileRegistry>) -> AgentInfo {
     use std::sync::atomic::Ordering;

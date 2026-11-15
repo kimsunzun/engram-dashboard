@@ -103,8 +103,6 @@ impl SessionIdLatch {
     }
 
     /// The first first-turn report — `None` = not reported yet.
-    // TODO(TRD S25 §5-2 4 (b)): step 8 reads this to record the applied instructions hash only when it is `Some(true)`.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn first_turn_delivered(&self) -> Option<bool> {
         self.first_turn_delivered.get().copied()
     }

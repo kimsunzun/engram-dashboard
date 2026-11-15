@@ -307,10 +307,14 @@ impl AgentProfile {
     ///   - `manager::resolve_canonical_name` 이 산 세션에 쓰는 그 함수다. `name::resolve_display_name` 은
     ///     **아니다** — 그건 빈/공백-only override 를 그대로 이름으로 쓰고 basename 이 placeholder(경로 없음)
     ///     일 때 id 로 degrade 하지도 않아, 두 엣지에서 산 이름과 갈린다.
-    ///   - cwd 도 산 세션과 같은 표기여야 한다: spawn 은 `dunce::canonicalize(profile.cwd)` 한 값을
-    ///     session.cwd 로 쓰고, 프로필 쪽 `cwd` 에는 raw 값(`.`·`..`·심링크·대소문자 다른 Windows 경로)이
-    ///     들어올 수 있다. 그래서 여기서도 **같은 정규화**를 하고, 실패하면(경로가 이미 사라졌으면)
-    ///     spawn 과 동일하게 원본으로 degrade 한다.
+    ///   - The cwd must have the live session's spelling too: the spawn's session.cwd is the launch's working
+    ///     folder (`LaunchKitSource::working_folder` — the `dunce` canonical path, or the cwd as given when that has
+    ///     no answer), while the profile's `cwd` may be raw (`.` · `..` · a link · a Windows path in another case).
+    ///     So this applies the same canonicalize and degrades to the raw cwd when it fails. Known gap: with the
+    ///     library plugged, the working folder comes from a bounded canonicalize (the advisory allowance — ADR-0360);
+    ///     when the folder answers too slowly the spawn runs in the raw cwd, so the live name (from that raw spelling)
+    ///     and this name (from the canonical path) differ whenever their basenames differ (case, a link name, `.`).
+    ///     Not closed here — closing it needs the spawn's folder stored.
     /// ★fs 접근은 **override 가 없을 때만** 있다(순수 아님)★: canonicalize 는 실제 파일시스템을 본다 —
     ///   그래서 이 동사는 이름 파생 순수 코어(`name.rs`)가 아니라 프로필 쪽에 있다.
     /// ★override 단축은 최적화가 아니다 — 지우지 말 것★: `display_name` 이 비공백이면 canonical 이름은
@@ -904,6 +908,47 @@ impl ProfileRegistry {
                 epoch = incarnation,
                 why,
                 "notice fingerprint not recorded — a later delivered launch may show this set again"
+            );
+        }
+        written
+    }
+
+    /// Records the instructions hash an incarnation's first turn delivered ([`AgentProfile::last_applied_instructions_hash`]).
+    /// `true` = the in-memory map changed.
+    ///
+    /// Written only while `incarnation` is still the profile's current one — a late report of an earlier incarnation
+    /// is skipped (logged at debug). The hash already stored → no write. An internal roster write, like
+    /// [`Self::record_notice_fingerprint`]: a save failure keeps the change in memory, dirty (no `Err`). Backend-neutral
+    /// — a backend that never reads the stored value is unaffected.
+    // ADR-0337
+    pub(crate) fn record_instructions_hash(
+        &self,
+        id: AgentId,
+        incarnation: u32,
+        hash: &str,
+    ) -> bool {
+        let mut skipped = None;
+        let written = self.mutate_if(|m| {
+            let Some(p) = m.get_mut(&id) else {
+                skipped = Some("the profile is gone");
+                return false;
+            };
+            if p.epoch != incarnation {
+                skipped = Some("a later incarnation is current");
+                return false;
+            }
+            if p.last_applied_instructions_hash.as_deref() == Some(hash) {
+                return false;
+            }
+            p.last_applied_instructions_hash = Some(hash.to_owned());
+            true
+        });
+        if let Some(why) = skipped {
+            tracing::debug!(
+                agent = %id,
+                epoch = incarnation,
+                why,
+                "instructions hash not recorded"
             );
         }
         written
@@ -2623,6 +2668,61 @@ mod tests {
         assert_eq!(reg.launch_inputs_unchanged(id, &seen), Some(true));
     }
 
+    /// Written for the current incarnation only (a later one is current → skipped, a gone profile → skipped), saved
+    /// when it changes, and the same value writes nothing.
+    #[test]
+    fn record_instructions_hash_is_guarded_by_the_incarnation_and_saves_a_change() {
+        let (reg, store, id, live) = registry_with_live_incarnation();
+        let before = saves(&store);
+
+        assert!(!reg.record_instructions_hash(id, live.wrapping_sub(1), "h"));
+        assert_eq!(
+            reg.get(id).unwrap().last_applied_instructions_hash,
+            None,
+            "an earlier incarnation's late report"
+        );
+        assert_eq!(saves(&store), before, "a skipped record writes nothing");
+        assert!(!reg.record_instructions_hash(Uuid::new_v4(), live, "h"));
+
+        assert!(reg.record_instructions_hash(id, live, "h"));
+        assert_eq!(saves(&store), before + 1, "a change is saved");
+        assert_eq!(
+            store
+                .load()
+                .into_iter()
+                .find(|p| p.id == id)
+                .unwrap()
+                .last_applied_instructions_hash
+                .as_deref(),
+            Some("h")
+        );
+        assert!(!reg.record_instructions_hash(id, live, "h"), "same value");
+        assert_eq!(saves(&store), before + 1, "the same value writes nothing");
+
+        let next = reg.epoch_for_spawn(id).unwrap();
+        assert!(
+            !reg.record_instructions_hash(id, live, "old"),
+            "a later incarnation is current"
+        );
+        assert!(reg.record_instructions_hash(id, next, "k"));
+        assert_eq!(
+            reg.get(id)
+                .unwrap()
+                .last_applied_instructions_hash
+                .as_deref(),
+            Some("k")
+        );
+    }
+
+    /// Not a launch input — the record lands after the spawn and must not race the next launch's check.
+    #[test]
+    fn the_instructions_hash_is_not_a_launch_input() {
+        let (reg, _store, id, live) = registry_with_live_incarnation();
+        let seen = LaunchInputs::of(&reg.get(id).unwrap());
+        assert!(reg.record_instructions_hash(id, live, "h"));
+        assert_eq!(reg.launch_inputs_unchanged(id, &seen), Some(true));
+    }
+
     #[test]
     fn preserving_upsert_inserts_snapshot_when_no_live_entry() {
         let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
@@ -2934,6 +3034,27 @@ mod tests {
                 "버리면 부팅 복원의 Fresh 가 앞 대화의 손잡이를 쥔 채 뜬다 — {failure:?}"
             );
             assert_eq!(mem.old_session_ids.last(), Some(&sid), "{failure:?}");
+            assert!(reg.is_dirty(), "{failure:?}");
+        }
+    }
+
+    /// The first-turn hash record is an internal write too — a failed save keeps it in memory, dirty.
+    #[test]
+    fn a_failed_save_keeps_the_instructions_hash_dirty() {
+        for failure in FAILURES {
+            let (reg, store, id) = scripted();
+            let live = reg.epoch_for_spawn(id).unwrap();
+            store.set(failure);
+
+            assert!(reg.record_instructions_hash(id, live, "h"), "{failure:?}");
+            assert_eq!(
+                reg.get(id)
+                    .unwrap()
+                    .last_applied_instructions_hash
+                    .as_deref(),
+                Some("h"),
+                "{failure:?}"
+            );
             assert!(reg.is_dirty(), "{failure:?}");
         }
     }

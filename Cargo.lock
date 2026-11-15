@@ -1142,7 +1142,9 @@ name = "engram-dashboard-daemon"
 version = "0.4.0"
 dependencies = [
  "axum",
+ "dunce",
  "engram-dashboard-agent",
+ "engram-dashboard-asset-library",
  "engram-dashboard-base",
  "engram-dashboard-command",
  "engram-dashboard-daemon",

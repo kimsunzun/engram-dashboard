@@ -4,6 +4,8 @@
 //! ★Role★: at every spawn (provision) the daemon asks this seam for the priming file path, and if there is one sends that absolute path
 //!   as `ControlEndpoint.priming_file`. This module deals with the **path only** — it does not read the file
 //!   content (no hardcoding, ADR-0092: the content lives only in the external MD `builtin/instructions/priming.md`).
+//!   Only a Noop-kit launch loads that path — real launch materials take the priming from the built-in folder and
+//!   ignore it, `ENGRAM_PRIMING_FILE` included (ADR-0327).
 //!
 //! ★Why a seam (ADR-0092 "leave the road open")★: the current implementation (`FilePrimingProvider`) gives **one shared file
 //!   regardless of agent** (a stopgap). When a per-agent prompt injection / skill registration system arrives in the future, only this
@@ -243,7 +245,7 @@ pub struct FilePrimingProvider {
 
 // ADR-0368
 const REL_MCP_PRIMARY: &str = "builtin/instructions/priming.md";
-const ENV_OVERRIDE: &str = "ENGRAM_PRIMING_FILE";
+pub(crate) const ENV_OVERRIDE: &str = "ENGRAM_PRIMING_FILE";
 
 impl FilePrimingProvider {
     pub fn new(base_dir: PathBuf) -> Self {

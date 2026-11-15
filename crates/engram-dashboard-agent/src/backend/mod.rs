@@ -195,7 +195,7 @@ pub type SessionIdSink = Arc<dyn Fn(&str) + Send + Sync>;
 ///   echo that arrives while idle also reports `false`). Session-id persistence does
 ///   not depend on it.
 /// It may be called many times — the receiver (the latch) counts only the first call and keeps that call's argument;
-///   step 8 records the applied instructions hash only when it is `true` (`TODO(TRD S25 §5-2 4 (b))`).
+///   the manager records the applied instructions hash only when that first argument is `true`.
 // ADR-0226
 // ADR-0231
 // ADR-0337
@@ -1193,6 +1193,46 @@ mod tests {
                 expected_writes,
                 "variant {:?}: writes_mcp_config_file 불일치 — 이 칸이 true 면 스폰마다 평문 토큰 JSON 이 디스크에 쓰이고 그 write 실패가 스폰을 끊는다. 위 체크리스트 ⑤ 를 따라 의식적으로 선언할 것(ADR-0209)",
                 c
+            );
+        }
+    }
+
+    /// ★Tripwire — every backend with a settings check is MCP-capable and uses mail★. Real launch materials add the
+    /// built-in priming whenever 「기본」 is attached, past the control channel's own priming decision, and that
+    /// priming teaches the Engram MCP tools and mail — what priming teaches must be what the spawn has. A backend that
+    /// gains a settings check without both must decide how its agents get (or skip) the priming first.
+    // ADR-0126
+    // ADR-0133
+    #[test]
+    fn every_backend_with_a_settings_check_has_what_the_priming_teaches() {
+        let variants = [
+            AgentCommand::Claude {
+                extra_args: vec![],
+                output_format: AgentOutputFormat::Terminal,
+            },
+            AgentCommand::Shell {
+                program: "cmd.exe".into(),
+                args: vec![],
+            },
+            AgentCommand::Codex {
+                extra_args: vec![],
+                output_format: AgentOutputFormat::Terminal,
+            },
+        ];
+        for check in settings_checks() {
+            let command = variants
+                .iter()
+                .find(|c| crate::launch::backend_word(c).eq_ignore_ascii_case(check.backend()))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "settings check `{}` has no command variant here — add it to this list",
+                        check.backend()
+                    )
+                });
+            assert!(
+                accepts_mcp_config(command) && uses_mail(command),
+                "`{}` has a settings check, so its agents get the built-in priming, but it lacks MCP or mail",
+                check.backend()
             );
         }
     }
