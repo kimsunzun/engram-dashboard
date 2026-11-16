@@ -29,6 +29,7 @@ import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 
 import type { UsageLimitSnapshot } from '../../crates/engram-dashboard-protocol/bindings/UsageLimitSnapshot'
+import type { Band } from '../../src-tauri/bindings/Band'
 import type { ConnectionState, UsageSnapshotPull } from './agentClient'
 import type { InboundMessage, Transport } from './transport'
 import { decodeOutputFrame, decodeReplayMarker } from './wsFrame'
@@ -46,8 +47,46 @@ interface ShellUsageLimitsUpdated {
   snapshot: UsageLimitSnapshot
 }
 
+/**
+ * One `daemon-connection-state` payload or `daemon_connection_state` reply (`ConnectionStatus`), read defensively —
+ * an unknown `state` reads as `down` and an unknown `band.kind` as band ① without a cause, each with a warning
+ * (TRD S21 trd-3-2-u5 §4-2), so a word the shell adds later is never misread as `connected` or as no band.
+ */
+function parseConnectionStatus(raw: unknown): { state: ConnectionState; band: Band | null } {
+  const status = isRecord(raw) ? raw : {}
+  let state: ConnectionState
+  if (status.state === 'connected' || status.state === 'reconnecting' || status.state === 'down') {
+    state = status.state
+  } else {
+    console.warn(`[TauriTransport] unknown connection state '${String(status.state)}' — treated as down`)
+    state = 'down'
+  }
+  return { state, band: parseBand(status.band) }
+}
+
+function parseBand(raw: unknown): Band | null {
+  if (raw === null || raw === undefined) return null
+  const band = isRecord(raw) ? raw : {}
+  if (band.kind === 'not_connected') return { kind: 'not_connected', refused: band.refused === true }
+  if (band.kind === 'version') return { kind: 'version', can_stop: band.can_stop === true }
+  console.warn(`[TauriTransport] unknown connection band '${String(band.kind)}' — treated as not connected`)
+  return { kind: 'not_connected', refused: false }
+}
+
+function isRecord(raw: unknown): raw is Record<string, unknown> {
+  return typeof raw === 'object' && raw !== null
+}
+
+function sameBand(a: Band | null, b: Band | null): boolean {
+  if (a === null || b === null) return a === b
+  if (a.kind === 'not_connected' && b.kind === 'not_connected') return a.refused === b.refused
+  if (a.kind === 'version' && b.kind === 'version') return a.can_stop === b.can_stop
+  return false
+}
+
 export class TauriTransport implements Transport {
   private _state: ConnectionState = 'down'
+  private _band: Band | null = null
   private stateListeners = new Set<(s: ConnectionState) => void>()
   private messageCb: ((msg: InboundMessage) => void) | null = null
 
@@ -80,13 +119,13 @@ export class TauriTransport implements Transport {
   //   시점 세대(myGen)를 캡처하고, invoke resolve 후 출력 Channel 등록 전에 자기 세대가 여전히 current
   //   인지(=그 사이 close() 가 끼지 않았는지) 재확인한다. 뒤늦게 완료된 stale doConnect 가 출력 Channel
   //   을 등록(좀비)하거나 연결을 부활시키지 않게 한다. ★상태(connected) 부활 자체는 Rust emit 단일
-  //   진실원이라 doConnect 가 setState 를 안 하므로 구조적으로 막히지만, 출력 Channel 등록·side-effect
+  //   진실원이라 doConnect 가 setStatus 를 안 하므로 구조적으로 막히지만, 출력 Channel 등록·side-effect
   //   는 이 가드로 막는다.
   private generation = 0
 
-  // ★상태 적용 버전(selfHeal pull-vs-event 레이스 가드, FIX 5)★: applyConnectionState 가 실제로 상태를
+  // ★상태 적용 버전(selfHeal pull-vs-event 레이스 가드, FIX 5)★: applyConnectionStatus 가 실제로 상태를
   //   반영할 때마다 +1. selfHeal 은 invoke 전 이 값을 캡처하고, pull 결과를 적용하기 직전 값이 그대로인지
-  //   본다 — 그 사이 실제 daemon-connection-state 이벤트가 하나라도 끼어 applyConnectionState 를 돌렸으면
+  //   본다 — 그 사이 실제 daemon-connection-state 이벤트가 하나라도 끼어 applyConnectionStatus 를 돌렸으면
   //   pull 스냅샷은 이벤트보다 오래된 것이라 폐기한다. (기존 last-write 는 순서가 pull 뒤 이벤트일 때만
   //   맞고, 이벤트 뒤 pull 이면 낡은 스냅샷이 새 상태를 덮어써 역전된다.)
   private stateVersion = 0
@@ -111,42 +150,36 @@ export class TauriTransport implements Transport {
     }
   }
 
-  private setState(s: ConnectionState): void {
-    if (this._state === s) return
+  /** The shell's connection band (TRD S21 trd-3-2-u5 §4) — `null` = none. Listeners hear a band change as a call with
+   *  the state word, even when the word did not change. */
+  get connectionBand(): Band | null {
+    return this._band
+  }
+
+  private setStatus(s: ConnectionState, band: Band | null): void {
+    if (this._state === s && sameBand(this._band, band)) return
     this._state = s
+    this._band = band
     for (const cb of this.stateListeners) cb(s)
   }
 
-  // ── 연결 상태 반영(단일 진실원 핸들러) ───────────────────────────────────────
-  // `daemon-connection-state` 이벤트 핸들러와 self-heal pull 조회가 *공유* 하는 단일 경로다.
-  // Rust emit 과 pull command 반환은 같은 어휘를 쓴다(connected/reconnecting/down).
-  // 첫 연결·Rust 내부 재연결·리로드 self-heal 을 한 경로로 통일한다(중복 등록 없음).
+  // ── Applying the shell's connection status (the single source of truth) ────────────────────────
+  // The one path the `daemon-connection-state` event handler and the self-heal pull share: both carry the shell's
+  //   `ConnectionStatus` ({state, band} — src-tauri binding). First connect, the shell's own reconnects and the reload
+  //   self-heal all go through here (no double registration).
   //
-  // ★멱등(더블 등록/이벤트 레이스 가드)★: 이미 connected 였으면(wasConnected) 출력 Channel 등록을
-  //   생략한다 — self-heal pull 과 실제 전이 이벤트가 겹쳐도 등록은 정확히 전이당 1회다. self-heal 은
-  //   조회 결과를 캐시하지 않고 이 핸들러에 즉시 흘려보내되, 조회와 응답 사이에 이벤트가 끼면 그 pull
-  //   결과가 stateVersion 비교로 폐기된다(FIX 5 — 이벤트가 항상 이긴다. 아래 selfHeal 참조).
-  private applyConnectionState(raw: string): void {
-    let state: ConnectionState
-    if (raw === 'connected') {
-      state = 'connected'
-    } else if (raw === 'reconnecting') {
-      state = 'reconnecting'
-    } else if (raw === 'down') {
-      state = 'down'
-    } else {
-      // ★미지 어휘 방어(retrofit 함정)★: Rust 가 나중에 새 상태(예: 'connecting')를 emit 하면 조용히
-      //   오역하지 않게, 알 수 없는 문자열은 안전측(down)으로 강등하고 1회 경고한다. 셋 중 하나로 좁혀야
-      //   ConnectionState 계약이 깨지지 않는다.
-      console.warn(`[TauriTransport] 알 수 없는 연결 상태 '${raw}' — down 으로 처리`)
-      state = 'down'
-    }
+  // ★Idempotent (double registration / event race guard)★: when already connected (wasConnected) the output Channel
+  //   is not registered again — a self-heal pull and a real event that overlap register exactly once per transition.
+  //   The self-heal does not cache its reply but feeds it here at once; when an event lands between its query and the
+  //   reply, the pull result is dropped by the stateVersion compare (FIX 5 — the event always wins; see selfHeal).
+  private applyConnectionStatus(raw: unknown): void {
+    const { state, band } = parseConnectionStatus(raw)
     // ★버전 bump(FIX 5)★: 상태를 실제로 반영하는 매 호출마다 +1 — selfHeal 이 이걸로 "내 pull 이후
-    //   이벤트가 끼었나"를 판별한다. setState 가 no-op(동일 상태)이어도 이벤트가 온 사실 자체를 표시해야
-    //   하므로 setState 여부와 무관하게 올린다.
+    //   이벤트가 끼었나"를 판별한다. setStatus 가 no-op(동일 상태)이어도 이벤트가 온 사실 자체를 표시해야
+    //   하므로 setStatus 여부와 무관하게 올린다.
     this.stateVersion += 1
     const wasConnected = this._state === 'connected'
-    this.setState(state)
+    this.setStatus(state, band)
     if (state === 'connected' && !wasConnected) {
       this.registerOutputChannel().catch((err: unknown) => {
         console.warn('[TauriTransport] 출력 Channel 등록 실패:', err)
@@ -164,21 +197,21 @@ export class TauriTransport implements Transport {
   //
   //   전이 emit(push) 모델의 사각지대를 pull 조회로 1회 메운다: 리스너 등록이 끝난 뒤 현재 상태를
   //   직접 물어, connected 인데 _state 가 아직 그렇지 않으면 이벤트 핸들러와 *같은 경로*
-  //   (applyConnectionState)로 흘려보내 setState('connected') + 출력 Channel 등록을 유발한다.
+  //   (applyConnectionStatus)로 흘려보내 setStatus('connected') + 출력 Channel 등록을 유발한다.
   //
   // ★레이스 가드(critical, FIX 5)★: 조회와 응답 사이에 실제 `daemon-connection-state` 이벤트가 끼어들
   //   수 있다(진짜 전이). 두 순서 다 방어한다: (1) event→pull(이벤트 먼저): stateVersion 캡처-비교로
-  //   pull 결과를 폐기한다 — invoke 대기 중 이벤트가 applyConnectionState 를 돌리면 버전이 바뀌어 낡은
+  //   pull 결과를 폐기한다 — invoke 대기 중 이벤트가 applyConnectionStatus 를 돌리면 버전이 바뀌어 낡은
   //   pull 스냅샷이 최신 상태를 덮어쓰지 못한다(이벤트 승). (2) pull→event(pull 먼저): pull 이 반영된 뒤
   //   온 이벤트는 정상 경로로 그대로 이긴다(pull 은 no-op 아니라 실제 전이 이벤트가 나중에 반영). 또한
-  //   applyConnectionState 의 wasConnected 가드가 이미 connected 면 출력 Channel 재등록을 생략하므로
+  //   applyConnectionStatus 의 wasConnected 가드가 이미 connected 면 출력 Channel 재등록을 생략하므로
   //   이중 등록도 없다. 조회가 non-connected 를 반환하면 아무 것도 하지 않는다(이후 전이 이벤트가 처리).
   private async selfHeal(): Promise<void> {
     const versionBefore = this.stateVersion
     const genBefore = this.generation
-    let raw: string
+    let raw: unknown
     try {
-      raw = await invoke<string>('daemon_connection_state')
+      raw = await invoke<unknown>('daemon_connection_state')
     } catch (e) {
       // 조회 실패(초기화 레이스 등)는 치명적 아님 — 이후 실제 전이 이벤트가 상태를 채운다.
       console.warn('[TauriTransport] 연결 상태 self-heal 조회 실패:', e)
@@ -190,7 +223,7 @@ export class TauriTransport implements Transport {
     // 조회 대기 중 close() 가 끼었으면 버린다 — close 는 이벤트가 아니라 버전을 안 올리므로, 이 가드가 없으면
     //   닫힌 transport 가 connected 로 되살아나 좀비 Channel 을 등록한다.
     if (this.generation !== genBefore) return
-    this.applyConnectionState(raw)
+    this.applyConnectionStatus(raw)
   }
 
   // ── Tauri 이벤트 구독 등록 ──────────────────────────────────────────────────
@@ -290,8 +323,8 @@ export class TauriTransport implements Transport {
       //   와의 멱등 *중복* 등록도 없앤다. Rust 주도 재연결도 doConnect 를 안 거치므로(디커플) 이 단일
       //   경로가 그 갭까지 메운다. 멱등이라(같은 window_label 덮어쓰기, 옛 onmessage delete) 안전.
       registered.push(
-        await listen<string>('daemon-connection-state', (e) => {
-          this.applyConnectionState(e.payload)
+        await listen<unknown>('daemon-connection-state', (e) => {
+          this.applyConnectionStatus(e.payload)
         }),
       )
       if (myGen !== this.generation) {
@@ -475,7 +508,7 @@ export class TauriTransport implements Transport {
       await invoke(allowSpawn ? 'daemon_connect' : 'daemon_ensure')
       // ★세대 가드★: invoke await 동안 close() 가 끼었으면(generation 증가) 이 연결은 stale 이다.
       //   상태·출력 Channel 부활은 구조적으로 이미 막혀 있다 — 상태는 u5(Rust emit) 단일 진실원이고
-      //   doConnect 는 setState 를 안 하며, 출력 Channel 등록도 u5 가 하는데 close() 가 cleanupListeners
+      //   doConnect 는 setStatus 를 안 하며, 출력 Channel 등록도 u5 가 하는데 close() 가 cleanupListeners
       //   로 u5 를 제거했으므로 close 후 도착하는 connected emit 은 무시된다. 여기선 추가 side-effect 가
       //   없어 별도 분기는 불필요하나, 가독성을 위해 stale 이면 조용히 빠진다.
       if (myGen !== this.generation || this.closedByUser) {
@@ -566,7 +599,9 @@ export class TauriTransport implements Transport {
     invoke('daemon_close').catch((e: unknown) => {
       console.warn('[TauriTransport] daemon_close 실패:', e)
     })
-    this.setState('down')
+    // An explicit close shows no band (TRD S21 trd-3-2-u5 R7) — and its listener is gone, so the shell's status for it
+    //   never arrives here.
+    this.setStatus('down', null)
   }
 
   // ProtocolClient 는 transport 를 생성자에서 받는다. 리스너 등록은 async 이므로 별도 init 을

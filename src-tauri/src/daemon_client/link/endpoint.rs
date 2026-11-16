@@ -45,8 +45,13 @@ pub enum Current {
     /// A record that cannot be used: empty · broken · a dead pid · access denied · any other read error. The text is
     /// a local diagnostic and quotes no file content.
     Unusable(String),
-    /// A live daemon on another protocol version. Dialing it can only be refused.
-    VersionMismatch { daemon: u32 },
+    /// A live daemon on another protocol version. Dialing it can only be refused. `pid` / `start_time` = the record's
+    /// identity of that daemon (`start_time` 0 = the record carries none).
+    VersionMismatch {
+        daemon: u32,
+        pid: u32,
+        start_time: u64,
+    },
 }
 
 /// See the module doc. `current` runs blocking file I/O — async callers run it on the blocking pool.
@@ -123,7 +128,11 @@ impl LocalEndpointSource {
                 "{DAEMON_FILE} names pid {} which is not alive",
                 info.pid
             )),
-            AcceptCheck::VersionMismatch { daemon } => Current::VersionMismatch { daemon },
+            AcceptCheck::VersionMismatch { daemon } => Current::VersionMismatch {
+                daemon,
+                pid: info.pid,
+                start_time: info.start_time,
+            },
         }
     }
 }
@@ -273,7 +282,9 @@ mod tests {
         assert_eq!(
             source(dir.path(), false).current(),
             Current::VersionMismatch {
-                daemon: PROTOCOL_VERSION + 1
+                daemon: PROTOCOL_VERSION + 1,
+                pid: 4242,
+                start_time: 0,
             }
         );
     }

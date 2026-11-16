@@ -749,7 +749,7 @@ describe('WsTransport B-1: ensureReady(attach-only) / start(spawn) 분리 (ADR-0
     const ws1 = await connect(t) // 캐시 = 9999
     invokeMock.mockClear()
 
-    // The daemon was replaced wholesale and came up on a new port (daemon_stop→daemon_start). daemon.json was updated.
+    // The daemon was replaced wholesale and came up on a new port (a stop → daemon_start). daemon.json was updated.
     liveDaemonInfo = { ...discoverInfo, port: 7777 }
 
     ws1.fireClose() // Old connection drops → reconnect

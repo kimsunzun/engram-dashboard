@@ -13,6 +13,7 @@
 pub mod actions;
 pub mod core;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use tauri::image::Image;
@@ -20,12 +21,14 @@ use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{App, AppHandle, Manager};
 
+use engram_dashboard_protocol::DaemonInfo;
 use tauri_plugin_autostart::ManagerExt;
 
-use actions::{AutostartCheck, TRAY_ID};
+use actions::{AutostartCheck, TrayDaemonClient, TRAY_ID};
 use core::{IconState, MenuAction};
 
-use crate::daemon_client::stop::StopOutcome;
+use crate::daemon_client::shutdown::{StopOrigin, StopOutcome, StopPlan};
+use crate::daemon_client::DaemonClient;
 
 // Two tray icon sets: color (daemon alive) · gray (dead). Created once in setup and managed as state.
 //
@@ -169,7 +172,8 @@ pub fn spawn_daemon_observer(app: &AppHandle) {
 
 // Menu click id → MenuAction → action. Every action calls only actions (shared side effects).
 //
-// ★Daemon on/off = blocking → worker (load-bearing)★: ensure/send_stop block for seconds on WMI polling/WS connection.
+// ★Daemon on/off = blocking → worker (load-bearing)★: ensure_daemon and the stop block for seconds (WMI polling · the stop
+// flight's bound).
 // on_menu_event is on the main thread, so calling it directly freezes the tray · windows meanwhile → send it to a spawn_blocking
 // worker and, on completion, update the icon with refresh_tray_icon (main-thread set_icon).
 fn dispatch_menu(app: &AppHandle, menu_id: &str) {
@@ -191,86 +195,217 @@ enum DaemonOp {
 }
 
 // Run daemon on/off in a worker and update the icon on completion.
-//
-// ★Do not spawn the daemon directly with std::process::Command (ADR-0024 C1)★: ensure_daemon spawns only via WMI
-// (Win32_Process.Create) inside — as a child of WmiPrvSE it does not inherit the app Job (KILL_ON_JOB_CLOSE) = the
-// detached/breakaway requirement is met automatically. A direct Command spawn here would kill the daemon along with the app on exit.
 fn spawn_daemon_action(app: &AppHandle, op: DaemonOp) {
     let app = app.clone();
     // ★A worker panic is not guarded (intentional)★: in the production shell a panic in the closure below is turned into a shell exit by the hook
     // (ADR-0292) — there is no place for an RAII drop guard (SignalOnDrop) to revive the icon update. In a test build without the hook,
-    // a panic before reaching set/refresh only misses that click's icon update, and with the one-way fire-and-refire model the probe of the next
-    // on/off click recovers the state.
+    // a panic before reaching set/refresh only misses that click's icon update, and the probe of the next on/off click
+    // recovers the state.
     tauri::async_runtime::spawn_blocking(move || {
-        let data_dir = crate::discovery::default_data_dir();
+        // R10: the stop path runs on the daemon client's runtime — none when setup failed to build the client.
+        let client = app
+            .try_state::<Arc<DaemonClient>>()
+            .map(|client| client.inner().clone());
+        let client = client
+            .as_ref()
+            .map(|client| client as &dyn TrayDaemonClient);
         match op {
-            DaemonOp::Start => match crate::discovery::locate_daemon_exe() {
-                Ok(exe) => {
-                    // console=false: windowless. Never log the token (discovery guarantees it).
-                    match crate::discovery::ensure_daemon(&data_dir, &exe, ENSURE_TIMEOUT, false) {
-                        Ok(info) => tracing::info!(
-                            pid = info.pid,
-                            port = info.port,
-                            "[tray] 데몬 ensure 완료"
-                        ),
-                        Err(e) => tracing::warn!("[tray] 데몬 ensure 실패: {e}"),
-                    }
-                }
-                Err(e) => tracing::warn!("[tray] daemon exe 탐색 실패: {e}"),
-            },
-            DaemonOp::Stop => match crate::daemon_client::stop::send_stop(&data_dir) {
-                Ok(outcome) => {
-                    tracing::info!(?outcome, "[tray] 데몬 graceful stop 발사");
-                    // ★Icon confirmation after turn-off branches on StopOutcome (load-bearing — prevents the S13/M-1 race)★:
-                    // DaemonClosed = confirmed off → force_daemon_down. Timeout/NoTarget = uncertain → probe
-                    // fallback (refresh_tray_icon).
-                    if is_daemon_closed(outcome) {
-                        actions::force_daemon_down(&app);
-                    } else {
-                        actions::refresh_tray_icon(&app);
-                    }
-                    return; // Stop already confirmed the icon above, so it does not take the common refresh below.
-                }
-                Err(e) => tracing::warn!("[tray] 데몬 stop 실패: {e}"),
+            DaemonOp::Start => {
+                start_daemon(client, launch_daemon);
+                // A probe suits confirming alive (posted to the main thread set_icon).
+                actions::refresh_tray_icon(&app);
+            }
+            DaemonOp::Stop => match stop_daemon(client) {
+                AfterStop::ForceDown => actions::force_daemon_down(&app),
+                AfterStop::Probe => actions::refresh_tray_icon(&app),
             },
         }
-        // Start and Stop-failure (Err) fallback: probe-based update (posted to the main thread set_icon).
-        // ★The Stop success path exits above with return★ — the StopOutcome branch bypasses the probe race, so
-        // it must not take the common refresh (probe) here. For Start, a probe suits confirming alive.
-        actions::refresh_tray_icon(&app);
     });
 }
 
-// [`StopOutcome`] → the icon state after turn-off (impure layer — depends on the `daemon_client::stop` type).
+/// Tray 「데몬 켜기」 (R10): `launch`, then the attach even when the launch failed or timed out — a daemon that comes up
+/// later is found by the link's background retries. A stop in flight is not waited out (`daemon_client::shutdown`).
+fn start_daemon(
+    client: Option<&dyn TrayDaemonClient>,
+    launch: impl FnOnce() -> Result<DaemonInfo, String>,
+) {
+    match launch() {
+        Ok(info) => tracing::info!(pid = info.pid, port = info.port, "[tray] 데몬 ensure 완료"),
+        Err(e) => tracing::warn!("[tray] {e}"),
+    }
+    match client {
+        Some(client) => client.attach_in_background(),
+        None => tracing::warn!("[tray] no daemon client — not attaching after the start"),
+    }
+}
+
+/// Finds the daemon exe and starts it if none runs — blocks up to [`ENSURE_TIMEOUT`]. `Err` = the log text.
+///
+/// ★Do not spawn the daemon directly with std::process::Command (ADR-0024 C1)★: ensure_daemon spawns only via WMI
+/// (Win32_Process.Create) inside — as a child of WmiPrvSE it does not inherit the app Job (KILL_ON_JOB_CLOSE) = the
+/// detached/breakaway requirement is met automatically. A direct Command spawn here would kill the daemon along with the
+/// app on exit.
+fn launch_daemon() -> Result<DaemonInfo, String> {
+    let exe =
+        crate::discovery::locate_daemon_exe().map_err(|e| format!("daemon exe 탐색 실패: {e}"))?;
+    // console=false: windowless. Never log the token (discovery guarantees it).
+    crate::discovery::ensure_daemon(
+        &crate::discovery::default_data_dir(),
+        &exe,
+        ENSURE_TIMEOUT,
+        false,
+    )
+    .map_err(|e| format!("데몬 ensure 실패: {e}"))
+}
+
+/// The icon update after 「데몬 끄기」.
+#[derive(Debug, PartialEq, Eq)]
+enum AfterStop {
+    /// The daemon process is gone — `force_daemon_down` (gray and the suppression window).
+    ForceDown,
+    /// Uncertain, or nothing was stopped — the probe (`refresh_tray_icon`).
+    Probe,
+}
+
+/// Tray 「데몬 끄기」 (R10) — the `User` plan; with no client the stop is skipped with a warn and the icon is probed.
+///
+/// ★The icon after a stop branches on [`StopOutcome`] (load-bearing — prevents the S13/M-1 race)★: `Closed` / `Killed`
+/// = the daemon process is gone → [`AfterStop::ForceDown`], which bypasses the probe race; `Timeout` / `NoTarget` =
+/// uncertain → the probe.
+fn stop_daemon(client: Option<&dyn TrayDaemonClient>) -> AfterStop {
+    let Some(client) = client else {
+        tracing::warn!("[tray] no daemon client — the daemon stop is skipped");
+        return AfterStop::Probe;
+    };
+    let outcome = client.stop(StopPlan::User, StopOrigin::Tray);
+    tracing::info!(?outcome, "[tray] daemon stop done");
+    if is_daemon_down(outcome) {
+        AfterStop::ForceDown
+    } else {
+        AfterStop::Probe
+    }
+}
+
+// [`StopOutcome`] → the icon state after turn-off (impure layer — depends on the `daemon_client::shutdown` type).
 //
-// ★Why it is here and not in core (load-bearing)★: StopOutcome is the type of `daemon_client::stop`, which turns the daemon off over WS, so
-// putting it in core.rs (zero tauri/discovery imports, knows only IconState) would break purity. So only this mapping
-// is placed in the impure layer.
-// - `DaemonClosed` (connection closed = confirmed off) → `Some(Inactive)`: gray confirmed (on the turn-off path, force_daemon_down
-//   sets even the death-window suppression window on top of this confirmation — prevents the M-1 race).
+// ★Why it is here and not in core (load-bearing)★: StopOutcome is the type of `daemon_client::shutdown`, which turns the
+// daemon off, so putting it in core.rs (zero tauri/discovery imports, knows only IconState) would break purity. So only
+// this mapping is placed in the impure layer.
+// - `Closed | Killed` (the stop saw the daemon process gone — R12 B2: a kill maps like a close) → `Some(Inactive)`: gray
+//   confirmed (on the turn-off path, force_daemon_down sets even the death-window suppression window on top of this
+//   confirmation — prevents the M-1 race).
 // - `Timeout | NoTarget` (uncertain/no daemon to turn off) → `None`: the caller takes the existing probe fallback (refresh).
 fn icon_state_for_stop_outcome(outcome: StopOutcome) -> Option<IconState> {
     match outcome {
-        StopOutcome::DaemonClosed => Some(IconState::Inactive),
+        StopOutcome::Closed | StopOutcome::Killed => Some(IconState::Inactive),
         StopOutcome::Timeout | StopOutcome::NoTarget => None,
     }
 }
 
-// Whether the turn-off result is "confirmed off (DaemonClosed)". Reuses the mapping (icon_state_for_stop_outcome) and
-// is used for the turn-off path branch — if confirmed, force_daemon_down (gray + suppression window), otherwise the probe fallback.
-fn is_daemon_closed(outcome: StopOutcome) -> bool {
+// Whether the turn-off result is "the daemon is gone". Reuses the mapping (icon_state_for_stop_outcome) and is used for
+// the turn-off path branch — if gone, force_daemon_down (gray + suppression window), otherwise the probe fallback.
+fn is_daemon_down(outcome: StopOutcome) -> bool {
     icon_state_for_stop_outcome(outcome).is_some()
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
+    use engram_dashboard_protocol::PROTOCOL_VERSION;
+
     use super::*;
 
+    /// A daemon client that records what the tray asked of it, in order, with the calls `launch` adds.
+    pub(super) struct FakeClient {
+        calls: Arc<Mutex<Vec<String>>>,
+        outcome: StopOutcome,
+    }
+
+    impl FakeClient {
+        /// Its stops end with `outcome`.
+        pub(super) fn new(outcome: StopOutcome) -> Self {
+            Self {
+                calls: Arc::default(),
+                outcome,
+            }
+        }
+
+        pub(super) fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+
+        fn note(&self, call: String) {
+            self.calls.lock().unwrap().push(call);
+        }
+    }
+
+    impl TrayDaemonClient for FakeClient {
+        fn stop(&self, plan: StopPlan, origin: StopOrigin) -> StopOutcome {
+            self.note(format!("stop:{plan:?}:{origin:?}"));
+            self.outcome
+        }
+
+        fn attach_in_background(&self) {
+            self.note("attach".into());
+        }
+    }
+
     #[test]
-    fn stop_outcome_daemon_closed_forces_gray_others_fall_back() {
-        // DaemonClosed = confirmed off → set gray (Inactive) directly (bypassing the probe).
+    fn start_launches_then_attaches_even_after_a_failed_launch() {
+        let launched: [Result<DaemonInfo, String>; 2] = [
+            Ok(crate::discovery::tests::info(1001, PROTOCOL_VERSION)),
+            Err("데몬 ensure 실패: timed out".into()),
+        ];
+        for launch in launched {
+            let client = FakeClient::new(StopOutcome::NoTarget);
+            let calls = client.calls.clone();
+            start_daemon(Some(&client), move || {
+                calls.lock().unwrap().push("launch".into());
+                launch
+            });
+            assert_eq!(client.calls(), ["launch", "attach"]);
+        }
+    }
+
+    #[test]
+    fn start_without_a_client_still_launches() {
+        let mut launched = false;
+        start_daemon(None, || {
+            launched = true;
+            Err("daemon exe 탐색 실패: none".into())
+        });
+        assert!(launched);
+    }
+
+    #[test]
+    fn stop_runs_the_user_plan_and_forces_gray_only_when_the_daemon_is_gone() {
+        for (outcome, after) in [
+            (StopOutcome::Closed, AfterStop::ForceDown),
+            (StopOutcome::Killed, AfterStop::ForceDown),
+            (StopOutcome::Timeout, AfterStop::Probe),
+            (StopOutcome::NoTarget, AfterStop::Probe),
+        ] {
+            let client = FakeClient::new(outcome);
+            assert_eq!(stop_daemon(Some(&client)), after, "{outcome:?}");
+            assert_eq!(client.calls(), ["stop:User:Tray"]);
+        }
+    }
+
+    #[test]
+    fn stop_without_a_client_skips_and_probes() {
+        assert_eq!(stop_daemon(None), AfterStop::Probe);
+    }
+
+    #[test]
+    fn a_closed_or_killed_stop_forces_gray_others_fall_back() {
+        // Closed / Killed = the daemon process is gone → set gray (Inactive) directly (bypassing the probe).
         assert_eq!(
-            icon_state_for_stop_outcome(StopOutcome::DaemonClosed),
+            icon_state_for_stop_outcome(StopOutcome::Closed),
+            Some(IconState::Inactive),
+        );
+        assert_eq!(
+            icon_state_for_stop_outcome(StopOutcome::Killed),
             Some(IconState::Inactive),
         );
         // Timeout/NoTarget = uncertain → None (the caller does a probe-fallback refresh).

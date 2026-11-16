@@ -19,7 +19,7 @@
 | Tauri command · IPC 응답 형식이 바뀌는 셸 변경 | 전체 회귀 | 켬 · GUI |
 | 에이전트 수명 · 출력 경로(띄우기 · 끄기 · 출력 펌프 · 이벤트 버스 · transport · epoch · replay→live) | 전체 회귀 | 켬 · GUI |
 | claude · codex 레인 경로(「로컬 레인」) | 전체 회귀 + 그 레인 | 행대로 |
-| `src-tauri/src/discovery/**` · `src-tauri/src/daemon_client/stop.rs` | 전체 회귀 + 셸 실 데몬 레인 | 행대로 |
+| `src-tauri/src/discovery/**` · `src-tauri/src/daemon_client/shutdown.rs` · `src-tauri/src/daemon_client/link/stop.rs` | 전체 회귀 + 셸 실 데몬 레인 | 행대로 |
 | 그 밖 · 판정 불가 | 전체 회귀 | 끔 |
 
 - 문서 · 바인딩 diff 가 명령을 바꿨으면 바뀐 명령만 문자 그대로 한 번 돌려 본다.
@@ -84,10 +84,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-detached.ps1 -Co
   grep -oE 'test result: [a-zA-Z]+\. [0-9]+ passed' "$QA_TMP/<이름>.log" | awk '{s+=$4} END {print "passed=" s+0; exit !(s>0)}'
   ```
 - `--exact` 로 이름을 집은 줄은 통과 수가 집은 이름 수와 같아야 PASS 다.
-- net 기능 끔 줄(`cargo test -p engram-dashboard-net`)은 시험이 0개다 — 시험은 protocol 로 옮겼다(ADR-0310 결정 9). 그 줄은 기능 끔 조합의 컴파일 확인(CI `net gate 5a`)이라 통과 수 규칙을 쓰지 않는다:
-  - PASS = `__EXIT=0` + 로그에 `running 0 tests` 줄이 1개 이상. 보고에는 「컴파일 PASS (시험 0개)」로 적고 시험 통과로 세지 않는다.
-  - 로그에 통과 수가 1 이상인 `test result:` 줄이 있으면 이 예외를 쓰지 않고 위 통과 수 규칙으로 판정한다.
-  - net crate 를 지우는 3단계 3-3 U6 에서 이 항목도 걷는다.
 - 실패가 나면 로그의 `failures:` 이름 목록을 그대로 옮긴다.
 - 타이밍 · flaky 실패는 다시 돌려 통과시키지 않는다 — FAIL 로 보고하고 ADR-0038(`docs/reference/debugging-conventions.md`)을 단다.
 
@@ -98,7 +94,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-detached.ps1 -Co
 | base · command · protocol · messaging | `cargo test -p engram-dashboard-<이름>` |
 | platform · agent · daemon | `cargo test -p engram-dashboard-<이름> -- --test-threads=4` |
 | cli | `cargo test -p engram-dashboard-cli --bins --test engram_cli -- --test-threads=4` |
-| net | `cargo test -p engram-dashboard-net` 와 그 줄에 `--all-features` 를 붙인 줄 — 둘 다 |
 | transport | `cargo test -p engram-dashboard-transport` · 그 줄에 `--all-features` · `cargo check -p engram-dashboard-transport --features ws` — 셋 다 |
 | 셸(`src-tauri`) | `cargo test -p engram-dashboard --test <타깃>` — 타깃 = `layout_apply` · `layout_commands` · `daemon_client_pending` · `daemon_client_replay` · `lib_unit` |
 | 프론트 | `npm test` · `npx tsc --noEmit` |
@@ -147,10 +142,11 @@ cargo test -p engram-dashboard-agent --test backend_contract -- --ignored --test
 
 | 레인 | 켜는 변경 | 명령 |
 |---|---|---|
-| 셸 실 데몬 | 표의 `discovery` · `stop.rs` 행 | `cargo build -p engram-dashboard-daemon` 뒤 `cargo test -p engram-dashboard --test stop_smoke -- --ignored --test-threads=1` |
+| 셸 실 데몬 | 표의 `discovery` · `shutdown.rs` · `link/stop.rs` 행 | `cargo build -p engram-dashboard-daemon` 뒤 `cargo test -p engram-dashboard --test stop_smoke -- --ignored --test-threads=1` |
 | 실 프로세스 Job | `crates/engram-dashboard-platform/src/group/**` · `crates/engram-dashboard-agent/src/reaper.rs` | `cargo test -p engram-dashboard-daemon --test ws_e2e -- --ignored --test-threads=4` · `cargo test -p engram-dashboard-platform -- --ignored msys --test-threads=4`(Git Bash 필요) |
 
-- 이 두 레인에 알려진 실패가 있다 — 「알려진 실패 목록」.
+- 실 프로세스 Job 레인에 알려진 실패가 있다 — 「알려진 실패 목록」.
+- 셸 실 데몬 레인의 교차 버전 시험(`stop_flight_makes_an_older_daemon_exit`)은 `ENGRAM_OLD_DAEMON_EXE` 에 태그 `v0.3.2` 로 지은 데몬 exe 경로를 줘야 돈다 — 없으면 `SKIPPED` 를 찍고 통과로 끝난다(아무것도 재지 않았다 — 보고에 「건너뜀」으로 적는다). 지어서 돌리는 때 = 변경이 `src-tauri/src/daemon_client/link/stop.rs` 의 핸드셰이크(데몬 버전에 맞춘 접속)를 건드릴 때만이다(사용자 결정 2026-11-09). 짓기 = `git archive v0.3.2` 를 `$QA_TMP` 아래 풀고 거기서 `cargo build --offline -p engram-dashboard-daemon`.
 - `lib_unit` 의 실 WMI 시험(`--ignored real_wmi`)은 표가 켜지 않는다 — 운영 데이터 폴더 `.engram-dev` 를 건드린다. 메인이 사용자에게 돌릴지 묻고, 돌리면 앱을 띄우기 전에 `cargo test -p engram-dashboard --test lib_unit -- --ignored real_wmi --test-threads=1`.
 - `lib_unit` 에 맨 `--ignored` 를 쓰지 않는다 — 실 WMI 와 골든 다시 뜨기(`regenerate_bands_golden`)가 함께 돈다.
 
@@ -158,7 +154,6 @@ cargo test -p engram-dashboard-agent --test backend_contract -- --ignored --test
 
 깨진 테스트를 가를 때 이름과 메시지가 둘 다 맞으면 `FAIL(알려진 실패)` 다 — 기준점에서 재현하지 않는다. 메시지는 실행마다 바뀌는 값(pid · 시각 · 임시 경로)을 빼고 비교한다. 그래도 다르면 목록 밖이다.
 
-- `stop_smoke` `send_stop_makes_real_daemon_self_exit` — `assert_eq` 실패 `left: Timeout` · `right: DaemonClosed`. 기록 = `docs/tracking.md` T-52.
 - `ws_e2e` `real_process::ignored_daemon_kill_cleans_pty_child` — panic `… PTY child(cmd.exe)를 OS 트리 열거로 식별하지 못함`(데몬 부팅 자동 복원을 꺼 자식이 안 뜬다). 기록 = `docs/process/step-log.md` 「부팅 자동 resume OFF」.
 
 ## 추적 기록 위치

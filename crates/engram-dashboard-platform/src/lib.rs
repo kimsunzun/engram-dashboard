@@ -10,7 +10,7 @@
 //!
 //! There are ten residents today — [`process`](PID liveness · process start time and its three-way verdict ·
 //! the process table · child PID enumeration · the identity list under one root · ending one process tree —
-//! Windows `taskkill`) · [`group`](the strong owner of a process group · weak handles · held members · the
+//! Windows `taskkill` · whether one identity still runs and ending it only if it does — one handle) · [`group`](the strong owner of a process group · weak handles · held members · the
 //! join-notification port — Windows Job Object) · [`file_holders`](the processes that have this file open
 //! now — Restart Manager) · [`fs`](opening while denying others' writes · classifying that failure — sharing
 //! violation · access denied · the verdict and retry for a failure caused by someone holding it briefly ·
@@ -186,15 +186,14 @@
 //! 센다.
 //! - **어디에 있나** — 명령 · 판정의 정본은 `.github/workflows/ci.yml` 의 `platform gate 7` 스텝이다. 이 헤더도
 //!   패턴을 적으므로, 패턴을 고치면 둘을 함께 고친다.
-//! - **대상 넷** — ① agent → 0줄: tokio 없는 동기 crate 이면서 이 crate · base · command 를 운영 의존으로 진다.
-//!   이 crate 에 든 런타임이 실제로 번질 자리가 여기라 이 crate 단독이 아니라 agent 를 잰다(agent 가 다른 경로로
-//!   들이는 런타임도 함께 잡힌다). ② net 기본 feature → 0줄: feature 0개 소비자에게 async 런타임이 딸려오는 것
-//!   — 실제로 한 번 터진 회귀이고 net 의 `default = []` 결정을 부른 원인이다(net `Cargo.toml` `[features]` 주석).
-//!   ③ cli → 0줄: 동기 CLI(`engram-dashboard-cli`)가 데몬 패키지를 떠난 이유가 tokio 를 끌고 오지 않는 것이다
-//!   (ADR-0273). 이 crate 를 직접 부르지 않는 소비자지만 같은 함수 · 같은 판정이라 이 게이트에 둔다 — ① 이 덮는
-//!   것에 더해 CLI 자신의 직접 서드파티(지금 serde_json)를 덮는다.
-//! - **짝** — net `--features server` → 1줄 이상(`server` 가 tokio · tokio-tungstenite · futures-util 을 켠다).
-//!   패턴이 깨지거나 `cargo tree` 출력 꼴이 바뀌면 0 기대 셋이 눈먼 채 통과한다.
+//! - **Two targets** — ① agent → 0 lines: a synchronous crate without tokio that carries this crate · base · command
+//!   as production dependencies. A runtime in this crate would actually spread there, so the gate measures agent rather
+//!   than this crate alone (a runtime agent pulls in by another path is caught too). ② cli → 0 lines: the synchronous
+//!   CLI (`engram-dashboard-cli`) left the daemon package so as not to pull tokio in (ADR-0273). It does not call this
+//!   crate directly, but it takes the same function and the same decision, so it sits in this gate — on top of what ①
+//!   covers it covers the CLI's own direct third-party dependencies (serde_json today).
+//! - **Pair** — transport → at least 1 line (its tokio dependency is unconditional). If the pattern breaks or the
+//!   `cargo tree` output form changes, the two 0 expectations pass blind.
 //! - ★**패턴의 `^…␣` 앵커(뒤 공백 포함)를 빼지 말 것**★ — `--prefix none` 이라 crate 이름이 줄 맨 앞에 와서
 //!   앵커가 정확하다. 떼면 agent 쪽이 `termios`(portable-pty 경유)를 물어 0 기대가 깨진다(실측).
 //! - ★**한계**★ — 정상 그래프만 본다(dev · build 의존의 런타임은 세지 않는다). 대상 밖의 동기 crate 가 새로

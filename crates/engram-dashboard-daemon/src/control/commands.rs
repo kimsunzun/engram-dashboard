@@ -17,6 +17,7 @@
 
 use std::sync::Arc;
 
+use crate::conn_port::ConnId;
 use engram_dashboard_agent::commands::{
     make_table, resolve_in, AgentBackend, AgentCommandHost, AgentRosterRow, RosterChanged,
     UsageCommandHost, UsageVendorRow, INPUT_AFFECTING,
@@ -26,7 +27,6 @@ use engram_dashboard_agent::types::AgentId;
 use engram_dashboard_command::{
     CommandDecl, CommandError, CommandFuture, CommandSpec, CommandTable, Effect, ErrorCode,
 };
-use engram_dashboard_net::frame_port::ConnId;
 use futures_util::FutureExt as _;
 
 use crate::command_delivery::LocalCommands;

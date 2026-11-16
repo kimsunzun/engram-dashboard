@@ -461,7 +461,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::discover_daemon,
             commands::daemon_start,
-            commands::daemon_stop,
+            commands::daemon_shutdown,
             commands::daemon_status,
             commands::read_daemon_info,
             commands::daemon_connect,

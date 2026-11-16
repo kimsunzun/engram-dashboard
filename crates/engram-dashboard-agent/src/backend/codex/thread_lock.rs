@@ -1260,4 +1260,28 @@ mod tests {
 
         assert_eq!(outcome, found(ID_A));
     }
+
+    /// The real [`ChildClock`] stops the capture loop for a child that exited while its object is still held (the
+    /// spawner keeps the handle) — the start time alone still matched it (TRD S21 trd-3-2-u5 R4).
+    #[cfg(windows)]
+    #[test]
+    fn the_real_child_clock_sees_an_exited_child_as_gone() {
+        let mut child = engram_dashboard_platform::testing::spawn_gated_cmd("rem", 0);
+        let pid = child.id();
+        let start_time =
+            engram_dashboard_platform::process::process_creation_time(pid).expect("시작시각");
+        let clock = ChildClock { pid, start_time };
+        let alive_before = clock.child_alive();
+
+        engram_dashboard_platform::testing::open_gate(&mut child);
+        let _ = child.wait();
+        let alive_after = clock.child_alive();
+        drop(child);
+
+        assert!(alive_before, "a running child is alive");
+        assert!(
+            !alive_after,
+            "an exited child whose handle is held must read as gone"
+        );
+    }
 }

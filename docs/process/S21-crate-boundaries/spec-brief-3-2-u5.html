@@ -1,0 +1,349 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>연결 띠 상황표</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a header, a two-band legend, a grid of situation cards (each with a band mock), then two step strips. Dark first. */
+:root {
+  --bg: #111418;
+  --surface: #181c21;
+  --elevated: #20252c;
+  --line: #2c323b;
+  --fg: #e4e7eb;
+  --muted: #949cab;
+  --danger: #e5534b;
+  --accent: #6ea4ef;
+  --ok: #4fb47a;
+  --font-body: "IBM Plex Sans KR", "Malgun Gothic", "Apple SD Gothic Neo", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, Consolas, monospace;
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: #f3f5f7; --surface: #ffffff; --elevated: #f8f9fb; --line: #d9dee5;
+    --fg: #1a1e24; --muted: #5a6371; --danger: #c43a35; --accent: #2c67c4; --ok: #24834d;
+    color-scheme: light;
+  }
+}
+:root[data-theme="light"] {
+  --bg: #f3f5f7; --surface: #ffffff; --elevated: #f8f9fb; --line: #d9dee5;
+  --fg: #1a1e24; --muted: #5a6371; --danger: #c43a35; --accent: #2c67c4; --ok: #24834d;
+  color-scheme: light;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font-family: var(--font-body); font-size: 15px; line-height: 1.6;
+}
+.wrap { max-width: 1120px; margin: 0 auto; padding-inline: 16px; padding-block: 32px 64px; display: grid; gap: 40px; }
+h1, h2, h3 { text-wrap: balance; margin: 0; line-height: 1.3; }
+h1 { font-size: 1.75rem; font-weight: 700; }
+h2 { font-size: 1.2rem; font-weight: 700; }
+h3 { font-size: 1rem; font-weight: 700; }
+p { margin: 0; }
+.muted { color: var(--muted); }
+code, .mono { font-family: var(--font-mono); font-size: 0.85em; }
+
+header { display: grid; gap: 10px; }
+.notice {
+  border: 1px dashed var(--line); border-radius: 6px; padding: 8px 12px;
+  color: var(--muted); font-size: 0.9rem; max-width: 72ch;
+}
+.src { font-size: 0.8rem; color: var(--muted); }
+
+section { display: grid; gap: 16px; }
+.lead { color: var(--muted); max-width: 70ch; }
+
+/* band mock — mirrors ConnectionNotice: elevated fill, red left edge, bold title + reason, close */
+.band {
+  display: flex; align-items: flex-start; gap: 10px;
+  background: var(--elevated); border: 1px solid var(--line); border-left: 3px solid var(--danger);
+  padding: 8px 10px 8px 12px; font-size: 0.875rem; line-height: 1.5;
+}
+.band .txt { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.band .txt b { font-weight: 700; }
+.band .txt span { opacity: 0.9; }
+.band .acts { display: flex; gap: 6px; align-items: center; flex-shrink: 0; }
+.btn {
+  font: inherit; font-size: 0.8rem; font-weight: 500; color: var(--fg);
+  background: transparent; border: 1px solid var(--line); border-radius: 4px; padding: 2px 10px; white-space: nowrap;
+}
+.btn.primary { border-color: var(--accent); color: var(--accent); }
+.btn.busy { opacity: 0.55; border-style: dashed; }
+.x { color: var(--muted); padding: 0 4px; }
+.noband {
+  border: 1px dashed var(--line); padding: 8px 12px; font-size: 0.85rem; color: var(--muted); text-align: center;
+}
+.tag {
+  font-size: 0.72rem; font-weight: 500; letter-spacing: 0.03em; color: var(--muted);
+}
+.tag.b1::before, .tag.b2::before { font-weight: 700; color: var(--danger); margin-right: 4px; }
+.tag.b1::before { content: "①"; }
+.tag.b2::before { content: "②"; }
+
+/* legend */
+.legend { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: 16px; }
+.legend > div { display: grid; gap: 8px; align-content: start; }
+.legend .note { font-size: 0.85rem; color: var(--muted); }
+
+/* situation cards */
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr)); gap: 14px; }
+.card {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 8px;
+  padding: 14px; display: grid; gap: 10px; align-content: start; min-width: 0;
+}
+.card .when { font-size: 0.875rem; color: var(--muted); }
+.card .then { font-size: 0.85rem; }
+.card .then b { font-weight: 500; color: var(--accent); }
+.mini { display: grid; gap: 6px; }
+.mini .step { font-size: 0.75rem; color: var(--muted); }
+
+/* step strips */
+.strip { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 10px; counter-reset: s; }
+.strip > li {
+  counter-increment: s; flex: 1 1 190px; min-width: 0;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px;
+  display: grid; gap: 8px; align-content: start; position: relative; font-size: 0.875rem;
+}
+.strip > li::before {
+  content: counter(s); font-family: var(--font-mono); font-size: 0.75rem; color: var(--muted);
+}
+.strip > li.end { border-color: var(--ok); }
+.res { display: grid; gap: 4px; }
+.res div { padding-left: 10px; border-left: 2px solid var(--line); }
+.res .good { border-left-color: var(--ok); }
+.flowhead { display: grid; gap: 4px; }
+
+/* in-app confirm mock */
+.modal {
+  background: var(--elevated); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px;
+  display: grid; gap: 10px; font-size: 0.82rem; box-shadow: 0 6px 18px rgb(0 0 0 / 0.25);
+}
+.modal .row { display: flex; gap: 6px; justify-content: flex-end; }
+.modal .btn.danger { border-color: var(--danger); color: var(--danger); }
+.side { font-size: 0.8rem; color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>연결 띠 상황표</h1>
+  <p class="lead">Engram Dashboard 창 위쪽에 뜨는 「데몬에 연결하지 못했습니다.」 띠가 상황마다 어떻게 보이고, 버튼을 누르면 어떻게 되는지 정리했습니다.</p>
+  <p class="notice">설계 3판 기준 — 재리뷰 중이라 내부 동작은 바뀔 수 있음, 화면에 보이는 부분은 사용자 결정으로 확정</p>
+  <p class="src">기준 문서: <span class="mono">trd-3-2-u5-stop-and-band.md</span> 3판 (<span class="mono">e4922deb</span>) §4 · §7</p>
+</header>
+
+<section>
+  <h2>띠는 두 종류뿐입니다</h2>
+  <div class="legend">
+    <div>
+      <span class="tag b1">연결 안 됨</span>
+      <div class="band">
+        <div class="txt"><b>데몬에 연결하지 못했습니다.</b> <span>(원인 한 줄 — 있을 때만)</span></div>
+        <div class="acts"><span class="btn primary">다시 연결</span><span class="x">✕</span></div>
+      </div>
+      <p class="note">원인 줄은 토큰 거절 문구나 데몬 시작 실패 문구가 있을 때만 붙습니다.</p>
+    </div>
+    <div>
+      <span class="tag b2">버전 다름</span>
+      <div class="band">
+        <div class="txt"><b>데몬에 연결하지 못했습니다.</b> <span>실행 중인 데몬이 이 앱과 버전이 다릅니다</span></div>
+        <div class="acts"><span class="btn primary">데몬 끄기</span><span class="x">✕</span></div>
+      </div>
+      <p class="note">「데몬 끄기」는 끌 수 있는 경우에만 보입니다 (떠 있는 데몬이 이 앱보다 이전 버전일 때).</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>상황별 화면</h2>
+  <div class="grid">
+
+    <article class="card">
+      <h3>연결됨</h3>
+      <p class="when">정상 사용 중.</p>
+      <div class="noband">띠 없음</div>
+    </article>
+
+    <article class="card">
+      <h3>앱 시작, 데몬에 닿지 않음</h3>
+      <p class="when">앱을 켰는데 첫 연결 시도가 실패했을 때. 바로 뜹니다.</p>
+      <span class="tag b1">연결 안 됨</span>
+      <div class="band">
+        <div class="txt"><b>데몬에 연결하지 못했습니다.</b></div>
+        <div class="acts"><span class="btn primary">다시 연결</span><span class="x">✕</span></div>
+      </div>
+      <p class="then">누르면 → <b>「다시 연결」 흐름</b> (아래)</p>
+    </article>
+
+    <article class="card">
+      <h3>쓰는 중에 연결이 끊김</h3>
+      <p class="when">데몬이 죽거나 연결이 끊긴 경우. 끊긴 순간에는 띠가 뜨지 않고, 첫 재연결이 실패한 뒤에 뜹니다.</p>
+      <div class="mini">
+        <span class="step">끊긴 직후 (재연결 시도 중)</span>
+        <div class="noband">띠 없음</div>
+        <span class="step">첫 재연결 실패 후</span>
+        <div class="band">
+          <div class="txt"><b>데몬에 연결하지 못했습니다.</b></div>
+          <div class="acts"><span class="btn primary">다시 연결</span><span class="x">✕</span></div>
+        </div>
+      </div>
+      <p class="then">누르면 → <b>「다시 연결」 흐름</b>. 꺼진 데몬도 다시 켭니다.</p>
+    </article>
+
+    <article class="card">
+      <h3>토큰 거절</h3>
+      <p class="when">데몬이 이 앱의 인증을 받아 주지 않을 때.</p>
+      <span class="tag b1">연결 안 됨</span>
+      <div class="band">
+        <div class="txt"><b>데몬에 연결하지 못했습니다.</b> <span>데몬이 이 앱의 인증을 거절했습니다</span></div>
+        <div class="acts"><span class="btn primary">다시 연결</span><span class="x">✕</span></div>
+      </div>
+      <p class="then">누르면 → <b>「다시 연결」 흐름</b></p>
+    </article>
+
+    <article class="card">
+      <h3>데이터 폴더에 쓸 수 없음</h3>
+      <p class="when">데몬을 켜려는데 데이터 폴더가 쓰기 금지일 때. 지금 쓰는 문구가 원인 줄로 그대로 붙습니다 (경로는 예시).</p>
+      <span class="tag b1">연결 안 됨</span>
+      <div class="band">
+        <div class="txt"><b>데몬에 연결하지 못했습니다.</b> <span>데이터 폴더에 쓸 수 없음(C:\Program Files\Engram\data): 액세스가 거부되었습니다 — 쓰기 가능한 위치에 압축을 풀어 주세요</span></div>
+        <div class="acts"><span class="btn primary">다시 연결</span><span class="x">✕</span></div>
+      </div>
+      <p class="then">누르면 → <b>「다시 연결」 흐름</b> (폴더 문제가 그대로면 같은 띠)</p>
+    </article>
+
+    <article class="card">
+      <h3>이전 버전 데몬이 떠 있음</h3>
+      <p class="when">옛 앱이 켜 둔 데몬이 남아 있는 경우.</p>
+      <span class="tag b2">버전 다름</span>
+      <div class="band">
+        <div class="txt"><b>데몬에 연결하지 못했습니다.</b> <span>실행 중인 데몬이 이 앱과 버전이 다릅니다</span></div>
+        <div class="acts"><span class="btn primary">데몬 끄기</span><span class="x">✕</span></div>
+      </div>
+      <p class="then">누르면 → 확인 창 → <b>「데몬 끄기」 흐름</b> (아래). 꺼지면 ① 띠로 바뀌고 「다시 연결」로 새 데몬이 켜집니다.</p>
+    </article>
+
+    <article class="card">
+      <h3>더 새 버전 데몬, 또는 앱보다 나중에 켜진 다른 버전 데몬</h3>
+      <p class="when">이 앱이 끌 수 없는 데몬. 띠만 보이고 버튼은 없습니다.</p>
+      <span class="tag b2">버전 다름</span>
+      <div class="band">
+        <div class="txt"><b>데몬에 연결하지 못했습니다.</b> <span>실행 중인 데몬이 이 앱과 버전이 다릅니다</span></div>
+        <div class="acts"><span class="x">✕</span></div>
+      </div>
+      <p class="then muted">버튼 없음. 추가 안내 문구도 없습니다 (사용자 결정으로 뺌).</p>
+    </article>
+
+    <article class="card">
+      <h3>✕로 띠를 닫음</h3>
+      <p class="when">같은 띠 · 같은 원인이 이어지는 동안은 다시 뜨지 않습니다. 띠 종류나 원인 문구가 바뀌면 새로 뜹니다. 한 번 연결되면 닫은 기억이 지워져, 다음에 같은 이유로 끊기면 다시 뜹니다.</p>
+      <div class="noband">띠 없음 (닫은 이유가 그대로인 동안)</div>
+    </article>
+
+    <article class="card">
+      <h3>트레이 「데몬 끄기」 · 트레이 「종료」</h3>
+      <p class="when">사용자가 일부러 끈 것이라 띠를 띄우지 않습니다. 상태는 트레이 아이콘이 보여 줍니다. 두 경우 모두 이전 버전 데몬도 끕니다.</p>
+      <div class="noband">띠 없음</div>
+      <p class="then">「데몬 끄기」 뒤에는 트레이 「데몬 켜기」나 앱의 「다시 연결」로 다시 붙습니다. 「종료」는 데몬을 끄고 앱도 닫습니다.</p>
+    </article>
+
+    <article class="card">
+      <h3>팝아웃 창</h3>
+      <p class="when">메인 창과 같은 띠 문구가 보이지만 버튼은 없습니다. 버튼은 메인 창에서만 누릅니다.</p>
+      <span class="tag b2">예: 버전 다름</span>
+      <div class="band">
+        <div class="txt"><b>데몬에 연결하지 못했습니다.</b> <span>실행 중인 데몬이 이 앱과 버전이 다릅니다</span></div>
+        <div class="acts"><span class="x">✕</span></div>
+      </div>
+    </article>
+
+  </div>
+</section>
+
+<section>
+  <div class="flowhead">
+    <h2>「다시 연결」을 누르면</h2>
+    <p class="lead">앱을 처음 켤 때와 같은 동작입니다. 데몬이 없으면 이 PC의 데몬을 켜고 붙습니다.</p>
+  </div>
+  <ol class="strip">
+    <li>
+      <div class="band">
+        <div class="txt"><b>데몬에 연결하지 못했습니다.</b></div>
+        <div class="acts"><span class="btn primary">다시 연결</span></div>
+      </div>
+      <span>① 띠에서 누름</span>
+    </li>
+    <li>
+      <div class="band">
+        <div class="txt"><b>데몬에 연결하지 못했습니다.</b></div>
+        <div class="acts"><span class="btn busy">연결 중…</span></div>
+      </div>
+      <span>버튼이 「연결 중…」으로 바뀜</span>
+    </li>
+    <li>
+      <span>떠 있는 데몬이 없으면 이 PC의 데몬을 켬, 그다음 연결</span>
+    </li>
+    <li class="end">
+      <div class="res">
+        <div class="good">연결됨 → 띠 사라짐</div>
+        <div>여전히 안 됨 → ① 띠 그대로</div>
+        <div>버전 다른 데몬이 떠 있음 → ② 띠</div>
+      </div>
+    </li>
+  </ol>
+</section>
+
+<section>
+  <div class="flowhead">
+    <h2>「데몬 끄기」를 누르면</h2>
+    <p class="lead">② 띠에서 이전 버전 데몬을 끄고, 새 데몬으로 넘어가는 순서입니다.</p>
+  </div>
+  <ol class="strip">
+    <li>
+      <div class="band">
+        <div class="txt"><b>데몬에 연결하지 못했습니다.</b> <span>실행 중인 데몬이 이 앱과 버전이 다릅니다</span></div>
+        <div class="acts"><span class="btn primary">데몬 끄기</span></div>
+      </div>
+      <span>② 띠에서 누름</span>
+    </li>
+    <li>
+      <div class="modal" role="presentation">
+        <p>이전 데몬을 끕니다. 실행 중인 에이전트가 멈춥니다 — 나중에 이어서 실행할 수 있지만 진행 중인 응답은 사라집니다</p>
+        <div class="row"><span class="btn">취소</span><span class="btn danger">끄기</span></div>
+      </div>
+      <span>앱 안의 확인 창. 「취소」면 아무것도 바뀌지 않음</span>
+    </li>
+    <li>
+      <div class="band">
+        <div class="txt"><b>데몬에 연결하지 못했습니다.</b> <span>실행 중인 데몬이 이 앱과 버전이 다릅니다</span></div>
+        <div class="acts"><span class="btn busy">끄는 중…</span></div>
+      </div>
+      <span>「끄기」 → 띠는 그대로, 버튼이 「끄는 중…」(누를 수 없음)</span>
+    </li>
+    <li>
+      <span>이전 데몬을 정상 종료. 안 꺼지면 같은 데몬인지 확인한 뒤 강제 종료 (정상 종료는 최대 10초 기다림)</span>
+    </li>
+    <li>
+      <div class="band">
+        <div class="txt"><b>데몬에 연결하지 못했습니다.</b></div>
+        <div class="acts"><span class="btn primary">다시 연결</span></div>
+      </div>
+      <span>꺼짐 → ① 띠로 바뀜</span>
+    </li>
+    <li class="end">
+      <span>「다시 연결」 → 새 데몬을 켜고 연결 → 띠 사라짐</span>
+    </li>
+  </ol>
+  <p class="side">끄기에 실패하면 (데몬이 끝까지 남음) 앱이 다시 붙어 보고, 그 결과에 맞는 띠가 보입니다. 보통은 ② 띠 그대로입니다.</p>
+</section>
+
+</div>
+</body>
+</html>

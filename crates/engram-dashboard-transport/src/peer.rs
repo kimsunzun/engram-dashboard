@@ -12,7 +12,7 @@
 //!   phase**. If even one is missed, that slot waits forever: the given-up state
 //!   has no loop to run the deadline, and the waiting caller holds the handle, so the channel never closes either.
 //! - ★Every write carries a deadline★ — `write_deadline < ping_interval`, so a write in progress cannot
-//!   starve keepalive. The real defect in `net` today is exactly that starvation.
+//!   starve keepalive. The deleted `net` crate had exactly that starvation.
 //! - ★The handle is immortal across reconnects★ — a generation boundary does not kill the handle;
 //!   it shows up as a marker on [`crate::Arrival::generation`].
 //! - ★A command never leaves the generation it is bound to (TRD 3 §3-0 ③)★ — every command the handle queues is stamped with a generation (for `*_in`,
@@ -146,9 +146,9 @@ pub(crate) const CLOSE_DRAIN_LIMIT: Duration = Duration::from_secs(60);
 /// (`budget::split` · the reason is in the `budget.rs` header). Reading decides by the 「더하기 전 물높이」 (fill level before adding), so either way one supervisor's
 /// ceiling is this + one message (TRD 3 §3-0 ① 「B + M」).
 ///
-/// Why 16 MiB = the same value as net's per-connection receive-line budget (`CONN_RX_MAX_BYTES`) — shell · daemon use the same value
+/// Why 16 MiB = the same value as the daemon's per-connection receive-lane budget (`CONN_RX_MAX_BYTES` in `link::server`) — shell · daemon use the same value
 /// (TRD 3 §3-0 ① draft · an internal constant the main session decides and reports). The two consumers that do not use streams (ADR-0310 decision 16) get
-/// a read gate of the same 16 MiB as net, which is why the split is deferred. A flood of small frames is handled by the count limits
+/// a read gate of the same 16 MiB as that lane, which is why the split is deferred. A flood of small frames is handled by the count limits
 /// ([`Policy::frame_buffer`] · [`Policy::inbound_queue`]).
 pub(crate) const BYTE_BUDGET: usize = 16 << 20;
 
@@ -3803,6 +3803,23 @@ mod tests {
             h.clock.advance(Duration::from_secs(40));
             endpoint.push(Frame::Keepalive);
             settle().await;
+        }
+        assert_eq!(h.peer.peer_state(), PeerState::Live);
+    }
+
+    // Text and binary alternate 40 s apart, so the same kind recurs only after 80 s — each kind must reset the clock itself.
+    #[tokio::test]
+    async fn inbound_text_and_binary_data_keep_the_idle_timer_from_firing() {
+        let (mut h, endpoint) = live().await;
+        let text = TestIn::Notice("alive".into());
+        let binary = TestIn::Blob(vec![7]);
+        for _ in 0..2 {
+            for msg in [&text, &binary] {
+                h.clock.advance(Duration::from_secs(40));
+                endpoint.push(TestWire::encode_in(msg));
+                settle().await;
+                assert_eq!(h.messages(), vec![msg.clone()]);
+            }
         }
         assert_eq!(h.peer.peer_state(), PeerState::Live);
     }

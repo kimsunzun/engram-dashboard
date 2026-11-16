@@ -146,7 +146,7 @@ pub struct Policy {
     pub connect_timeout: Duration,
     /// The limit allowed for pushing one frame. ★Unverified — only industry reference values★ (NATS 10s · nginx 60s · gRPC keepalive
     /// timeout 20s). Invariant: `write_deadline < ping_interval` — otherwise one write starves
-    /// keepalive entirely (the real defect in `net` today has exactly that shape).
+    /// keepalive entirely (the deleted `net` crate had exactly that shape).
     pub write_deadline: Duration,
     /// Active ping interval (current daemon value preserved).
     pub ping_interval: Duration,

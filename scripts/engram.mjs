@@ -207,7 +207,7 @@ async function connect() {
   // ★Detach onerror after open★: otherwise a later socket reset fires this handler again, rejecting in vain on the already
   //   settled promise above and also running probeTcpReason (up to 800ms) again, which only delays the Hello wait.
   ws.onerror = null
-  // First frame = Auth. The daemon drops the connection if Auth does not arrive within its AUTH_TIMEOUT (net ws.rs).
+  // First frame = Auth. The daemon drops the connection if Auth does not arrive within its AUTH_TIMEOUT (daemon link/server.rs).
   ws.send(JSON.stringify({ Auth: { token: info.token, protocol_version: info.protocol_version } }))
   const waitFor = (match, ms = 5000) => new Promise((res, rej) => {
     const found = texts.find(match)

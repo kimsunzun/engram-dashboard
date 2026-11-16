@@ -23,18 +23,20 @@ use tokio::task::JoinHandle;
 
 use engram_dashboard_command::{CommandDecl, CommandTable, OwnerLookup, OwnerToken};
 
+use crate::commands::discovery::BootStartWatch;
 use crate::commands::layout::RouterSubs;
 use crate::commands::popout::{close_requested_popup_window, drop_window_in_model, PopupCounter};
 use crate::daemon_client::inbound::{BoxedTask, InboundReceiver, TaskSpawner, ViewCommandPort};
 use crate::daemon_client::link::endpoint::{Current, Endpoint};
+use crate::daemon_client::link::route::{AUTH_REFUSED, VERSION_REFUSED};
 use crate::daemon_client::refusal::RecordingRefusals;
 use crate::daemon_client::replay_flight::MARKER_TAG;
 use crate::daemon_client::test_support::{
-    active_slot, bus_request, bus_table, relayout, usage_update, wire_agent, NoLayoutEvents,
-    OpenWindows, RecordingEvents, POPUP,
+    active_slot, bus_request, bus_table, relayout, state_edges, status_lines, usage_update,
+    wire_agent, NoLayoutEvents, OpenWindows, RecordingEvents, POPUP,
 };
 use crate::daemon_client::usage_interest::{InterestAction, USAGE_INTEREST_SHRINK_DELAY};
-use crate::daemon_client::DaemonClient;
+use crate::daemon_client::{Band, ConnectionState, ConnectionStatus, DaemonClient};
 use crate::layout::commands::CATALOG_VERSION;
 use crate::layout::{apply, LayoutState, MAIN_WINDOW_LABEL};
 use crate::output_channel::register_window;
@@ -214,13 +216,14 @@ impl Harness {
         tokio::spawn(async move { client.ensure().await })
     }
 
-    /// The connection states the frontend got, in order.
+    /// The state edges the frontend got, in order (`state:<word>`).
     fn states(&self) -> Vec<String> {
-        self.events
-            .seen()
-            .into_iter()
-            .filter(|line| line.starts_with("state:"))
-            .collect()
+        state_edges(&self.events.seen())
+    }
+
+    /// Every status the frontend got, in order, one line per emit (`status:<word>:<band>`).
+    fn statuses(&self) -> Vec<String> {
+        status_lines(&self.events.seen())
     }
 
     /// The daemon side of the next link and the Auth text it got.
@@ -353,10 +356,10 @@ async fn a_first_connect_resolves_on_hello_and_broadcasts_reach_the_frontend_bef
     assert_eq!(
         h.events.seen(),
         [
-            "state:connected".to_owned(),
+            "status:connected:none".to_owned(),
             "agent_list:1".to_owned(),
             format!("names:{agent}=alpha"),
-            format!("status:{agent}:Killed:1"),
+            format!("agent_status:{agent}:Killed:1"),
         ]
     );
 }
@@ -381,9 +384,9 @@ async fn a_cold_start_failure_shows_down_at_once_and_retries_without_limit_until
         h.peer_state()
     );
     assert_eq!(
-        h.states(),
-        ["state:down"],
-        "no Reconnecting, no second Down"
+        h.statuses(),
+        ["status:down:not_connected"],
+        "one status: no Reconnecting, no second Down"
     );
 
     h.record.set(live());
@@ -437,7 +440,7 @@ async fn a_daemon_error_in_the_handshake_stops_for_good_without_a_second_dial() 
     let h = Harness::new(live());
     let task = h.ensure();
     let (endpoint, _) = h.next_link().await;
-    // The real daemon's refusal: an `Error` frame and a close without a code (net `ws.rs`).
+    // A net-era daemon's refusal: an `Error` frame and a close without a code (the current daemon adds a code; this is the stricter case).
     endpoint.push(text(&AgentEvent::Error {
         request_id: None,
         message: "auth failed".into(),
@@ -452,7 +455,7 @@ async fn a_daemon_error_in_the_handshake_stops_for_good_without_a_second_dial() 
         h.peer_state() == Some(PeerState::GaveUp(GaveUpReason::Rejected))
     })
     .await;
-    assert_eq!(h.states(), ["state:down"]);
+    assert_eq!(h.statuses(), ["status:down:refused"]);
 
     for _ in 0..10 {
         h.clock.advance(Duration::from_secs(60));
@@ -551,13 +554,15 @@ async fn close_shows_down_only_through_routing_and_the_ended_handle_gives_its_di
         h.link().dialer.registered() == 0
     })
     .await;
-    let states = h.states();
     assert_eq!(
-        states.iter().filter(|s| *s == "state:down").count(),
-        1,
-        "{states:?}"
+        h.statuses(),
+        [
+            "status:connected:none",
+            "status:reconnecting:none",
+            "status:down:none",
+        ],
+        "one emit each — an explicit close shows no band"
     );
-    assert_eq!(states.last().map(String::as_str), Some("state:down"));
 
     for _ in 0..5 {
         h.clock.advance(Duration::from_secs(60));
@@ -587,7 +592,7 @@ async fn a_refusal_the_transport_would_retry_stops_the_link_after_one_dial() {
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
     assert_eq!(h.net.dials(), 1, "no refusal is retried (ADR-0346)");
-    assert_eq!(h.states(), ["state:down"]);
+    assert_eq!(h.statuses(), ["status:down:not_connected"]);
 }
 
 #[tokio::test]
@@ -760,7 +765,10 @@ async fn a_retryable_refusal_on_a_first_connect_gives_its_notice_before_down() {
                 Routed::Notice(LinkNotice::Refused {
                     code: CloseCode::HANDSHAKE_RETRYABLE
                 }),
-                Routed::State(ConnectionState::Down),
+                Routed::Status(ConnectionStatus {
+                    state: ConnectionState::Down,
+                    band: Some(Band::NotConnected { refused: false }),
+                }),
             ]
         ),
         "the order of a terminal refusal: {out:?}"
@@ -781,6 +789,44 @@ async fn a_late_refusal_of_a_handle_the_user_closed_gives_no_notice() {
     assert!(
         !out.iter().any(|r| matches!(r, Routed::Notice(_))),
         "{out:?}"
+    );
+}
+
+// A stop leaves the link open: the daemon's exit is the link's normal loss, and its first failed reconnect shows ① while
+//   the state stays `reconnecting` (D1).
+#[tokio::test]
+async fn after_the_daemon_exits_the_links_first_failed_reconnect_shows_band_one() {
+    let mut b = Bench::new();
+    let token = b.add();
+    let key = b.key();
+    let g = Generation(1);
+    let items = [
+        bench_connected(&b, g),
+        Incoming::Event(TransportEvent::Disconnected {
+            peer: key.peer_id().clone(),
+            generation: g,
+            cause: DisconnectCause::PeerClosed,
+        }),
+        Incoming::Event(TransportEvent::ConnectFailed {
+            peer: key.peer_id().clone(),
+            attempt: 1,
+            of: u32::MAX,
+            cause: ConnectFailure::Unreachable(engram_dashboard_transport::LinkError::new(
+                "connection refused",
+            )),
+            retry_in: Some(Duration::from_millis(500)),
+        }),
+    ];
+    for item in items {
+        bench_route(&mut b, token, item);
+    }
+    assert_eq!(
+        status_lines(&b.events.seen()),
+        [
+            "status:connected:none",
+            "status:reconnecting:none",
+            "status:reconnecting:not_connected",
+        ]
     );
 }
 
@@ -808,7 +854,7 @@ async fn a_handle_routed_as_connected_counts_as_live_until_its_loss_is_routed() 
     assert_eq!(b.driver.dialer.registered(), 1);
 }
 
-// The order the frontend relies on (`src/api/tauriTransport.ts` `doConnect`): the state watch and
+// The order the frontend relies on (`src/api/tauriTransport.ts` `doConnect`): the status watch and
 // the frontend's `connected` come before the connect resolves.
 #[tokio::test]
 async fn a_connect_resolves_only_after_its_connected_is_shown() {
@@ -819,13 +865,13 @@ async fn a_connect_resolves_only_after_its_connected_is_shown() {
     let answer = Arc::new(Mutex::new(answer));
     let seen = Arc::new(Mutex::new(None));
     {
-        let (answer, seen, state) = (answer.clone(), seen.clone(), b._client.state_rx());
+        let (answer, seen, status) = (answer.clone(), seen.clone(), b._client.status_rx());
         b.events.then_on_connected(move || {
             let unanswered = matches!(
                 answer.lock().unwrap().try_recv(),
                 Err(oneshot::error::TryRecvError::Empty)
             );
-            *seen.lock().unwrap() = Some((unanswered, *state.borrow()));
+            *seen.lock().unwrap() = Some((unanswered, status.borrow().state));
         });
     }
     let key = b.key();
@@ -948,7 +994,7 @@ async fn close_then_failed_reconnect(old_tail_first: bool) -> ConnectionState {
     });
     let out = b.driver.route_item(&key, new, failed);
     b.driver.apply(out);
-    let state = *b.driver.state_tx.borrow();
+    let state = b.driver.status_tx.borrow().state;
     state
 }
 
@@ -1261,10 +1307,10 @@ async fn agent_names_sink_receives_each_daemon_list_after_the_frontend_event() {
     assert_eq!(
         h.events.seen(),
         [
-            "state:connected".to_owned(),
+            "status:connected:none".to_owned(),
             "agent_list:2".to_owned(),
             format!("names:{a1}=myproj,{a2}=myproj(1)"),
-            format!("status:{a1}:Killed:1"),
+            format!("agent_status:{a1}:Killed:1"),
             "agent_list:1".to_owned(),
             format!("names:{a1}=renamed"),
         ]
@@ -1998,7 +2044,7 @@ async fn a_usage_broadcast_notifies_once_with_labels_and_socket_epoch() {
     assert_eq!(
         h.events.seen(),
         [
-            "state:connected".to_owned(),
+            "status:connected:none".to_owned(),
             format!("usage:Claude:7:{MAIN_WINDOW_LABEL}:{socket}"),
         ]
     );
@@ -2028,7 +2074,7 @@ async fn a_mismatched_broadcast_writes_the_interest_back_on_its_socket() {
     assert_eq!(
         h.events.seen(),
         [
-            "state:connected".to_owned(),
+            "status:connected:none".to_owned(),
             format!("usage:Claude:1:{MAIN_WINDOW_LABEL}:{socket}"),
         ]
     );
@@ -3001,7 +3047,9 @@ async fn the_production_transport_attaches_answers_and_follows_the_daemon_to_a_n
     assert!(auth.contains(TOKEN_B), "the new record's credential");
     // A command needs the link live on the shell's side — the daemon's `Hello` may not be read yet.
     wait_for("the loss is shown", || {
-        events.seen().contains(&"state:reconnecting".to_owned())
+        events
+            .seen()
+            .contains(&"status:reconnecting:none".to_owned())
     })
     .await;
     wait_for("connected again", || {
@@ -3062,7 +3110,8 @@ async fn connect_discovery_join_failure_tells_every_window_down() {
     );
     wait_for("Down", || client.state() == ConnectionState::Down).await;
     wait_for("the down event", || !events.seen().is_empty()).await;
-    assert_eq!(events.seen(), ["state:down"]);
+    // One status — `down` with band ① (TRD S21 trd-3-2-u5 R7: a never-connected handle's first failure).
+    assert_eq!(events.seen(), ["status:down:not_connected"]);
 }
 
 // A webview `UsageSubscribe` never reaches the daemon (usage subscriptions are the shell's alone) — having no request
@@ -3322,6 +3371,7 @@ fn idle_client() -> Idle {
         Arc::new(RefusalAlerts::new(Arc::new(RecordingRefusals::new()))),
         Arc::new(OutputRouter::new()),
         WindowChannelRegistry::default(),
+        crate::daemon_client::shutdown::inert_ports(MemoryNetwork::new().dialer()),
         |rt, ports| {
             let (link, driver, cmds, routable_rx) = LinkClient::build(
                 rt,
@@ -3352,11 +3402,15 @@ fn kinds(cmds: &[DriverCmd]) -> Vec<&'static str> {
         .map(|cmd| match cmd {
             DriverCmd::IsLive { .. } => "IsLive",
             DriverCmd::Add { .. } => "Add",
-            DriverCmd::Close => "Close",
+            DriverCmd::Close { .. } => "Close",
             DriverCmd::Unsubscribe { .. } => "Unsubscribe",
             DriverCmd::RequestReplay { .. } => "RequestReplay",
             DriverCmd::UsageNudge => "UsageNudge",
+            DriverCmd::HoldForBootStart => "HoldForBootStart",
+            DriverCmd::BoundBootStart { .. } => "BoundBootStart",
+            DriverCmd::EndBootStartHold { .. } => "EndBootStartHold",
             DriverCmd::CurrentHandle { .. } => "CurrentHandle",
+            DriverCmd::BootStartHeld { .. } => "BootStartHeld",
         })
         .collect()
 }
@@ -3883,4 +3937,268 @@ async fn a_command_during_the_reconnect_backoff_fails_at_once_and_never_reaches_
         m,
         "the failed command never reaches the next connection"
     );
+}
+
+// ── bands on the client (TRD S21 trd-3-2-u5 §4) ───────────────────────────────────────────────
+
+const BAND_ONE: Option<Band> = Some(Band::NotConnected { refused: false });
+
+impl Harness {
+    /// A client that holds its bands for the boot start, as the production constructor does.
+    fn held(now: Current) -> Self {
+        let h = Self::new(now);
+        h.client.link.hold_bands_for_boot_start();
+        h
+    }
+
+    /// The boot hold is on, as the actor sees it — every command sent before is applied by then.
+    async fn boot_start_held(&self) -> bool {
+        self.link().boot_start_held().await
+    }
+}
+
+/// A few real milliseconds for the actor — for "this did not happen" checks.
+async fn let_the_actor_run() {
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+}
+
+// Finding A: the shell showed `reconnecting` and nothing more once the reconnect failed.
+#[tokio::test]
+async fn a_daemon_that_dies_while_connected_shows_band_one_after_the_first_failed_reconnect() {
+    let h = Harness::new(live());
+    let endpoint = h.connected().await;
+    h.record.set(Current::Absent);
+    endpoint.close();
+    wait_for("reconnecting", || {
+        h.client.state() == ConnectionState::Reconnecting
+    })
+    .await;
+    assert_eq!(
+        h.client.status().band,
+        None,
+        "no band before a reconnect failed"
+    );
+    h.advance_until("the first failed reconnect", || {
+        h.client.status().band.is_some()
+    })
+    .await;
+    assert_eq!(
+        h.client.status(),
+        ConnectionStatus {
+            state: ConnectionState::Reconnecting,
+            band: BAND_ONE,
+        }
+    );
+    assert_eq!(
+        h.statuses(),
+        [
+            "status:connected:none",
+            "status:reconnecting:none",
+            "status:reconnecting:not_connected",
+        ],
+        "the band came without a new state word"
+    );
+}
+
+#[tokio::test]
+async fn a_refusal_tells_the_token_from_the_version_in_the_band_and_in_the_answer() {
+    // The daemon refuses the handshake — the token text, ① refused.
+    let h = Harness::new(live());
+    let task = h.connect();
+    let (endpoint, _) = h.next_link().await;
+    endpoint.push(text(&AgentEvent::Error {
+        request_id: None,
+        message: "auth failed".into(),
+    }));
+    assert_eq!(
+        joined("connect", task).await,
+        Err(HandshakeError::AuthRejected(AUTH_REFUSED.to_owned()))
+    );
+    wait_for("the band", || h.client.status().band.is_some()).await;
+    assert_eq!(
+        h.client.status(),
+        ConnectionStatus {
+            state: ConnectionState::Down,
+            band: Some(Band::NotConnected { refused: true }),
+        }
+    );
+
+    // The dial refused the daemon's version — the version text, ②. Finding B's shell half: the attach-only ensure a
+    //   failed boot start still leaves (the boot pulls' `ensureReady`) surfaces it.
+    let h = Harness::new(Current::VersionMismatch {
+        daemon: PROTOCOL_VERSION - 1,
+        pid: 9,
+        start_time: 0,
+    });
+    assert_eq!(
+        joined("ensure", h.ensure()).await,
+        Err(HandshakeError::AuthRejected(VERSION_REFUSED.to_owned()))
+    );
+    wait_for("the band", || h.client.status().band.is_some()).await;
+    assert!(
+        matches!(
+            h.client.status(),
+            ConnectionStatus {
+                state: ConnectionState::Down,
+                band: Some(Band::Version { .. }),
+            }
+        ),
+        "{:?}",
+        h.client.status()
+    );
+}
+
+#[tokio::test]
+async fn an_explicit_close_takes_the_band_away() {
+    let h = Harness::new(Current::Absent);
+    assert!(joined("attach", h.ensure()).await.is_err());
+    wait_for("band ①", || h.client.status().band == BAND_ONE).await;
+    h.client.close();
+    wait_for("no band", || h.client.status().band.is_none()).await;
+    assert_eq!(h.client.state(), ConnectionState::Down);
+}
+
+// R20 — a cold boot with a spare: the spare's attach fails before main's start answers.
+#[tokio::test]
+async fn a_cold_boot_shows_no_band_until_the_main_windows_start_answers() {
+    let h = Harness::held(Current::Absent);
+    assert!(joined("the spare's attach", h.ensure()).await.is_err());
+    wait_for("down", || h.states() == ["state:down"]).await;
+    assert!(h.boot_start_held().await);
+    assert_eq!(h.statuses(), ["status:down:none"]);
+
+    main_window(&h).start_answered::<()>(&Err("no daemon exe".into()));
+    wait_for("band ①", || h.client.status().band == BAND_ONE).await;
+    assert!(!h.boot_start_held().await);
+}
+
+#[tokio::test]
+async fn a_refusal_while_the_boot_hold_is_on_shows_when_it_ends() {
+    let h = Harness::held(Current::VersionMismatch {
+        daemon: PROTOCOL_VERSION - 1,
+        pid: 9,
+        start_time: 0,
+    });
+    assert!(joined("attach", h.ensure()).await.is_err());
+    wait_for("down", || h.states() == ["state:down"]).await;
+    assert!(h.boot_start_held().await);
+    assert_eq!(h.client.status().band, None);
+    main_window(&h).start_answered::<()>(&Err("version mismatch".into()));
+    wait_for("band ②", || {
+        matches!(h.client.status().band, Some(Band::Version { .. }))
+    })
+    .await;
+}
+
+fn main_window(h: &Harness) -> BootStartWatch<'_> {
+    BootStartWatch::of(MAIN_WINDOW_LABEL, Some(&h.client))
+}
+
+fn popout(h: &Harness) -> BootStartWatch<'_> {
+    BootStartWatch::of(POPUP, Some(&h.client))
+}
+
+// M1 — only the main window's boot start answers for the cold boot: a popout's (or the spare's) failed connect keeps
+//   the hold; main's answer ends it.
+#[tokio::test]
+async fn a_non_main_connect_failure_keeps_the_boot_hold_and_mains_connect_answer_ends_it() {
+    let h = Harness::held(Current::Absent);
+    assert!(joined("attach", h.ensure()).await.is_err());
+    h.record.fail_search("no daemon exe");
+    assert!(matches!(
+        joined("the popout's connect", h.connect()).await,
+        Err(HandshakeError::Discovery(_))
+    ));
+    popout(&h).connect_answered();
+    assert!(
+        h.boot_start_held().await,
+        "a popout's connect is not the boot start"
+    );
+    let_the_actor_run().await;
+    assert_eq!(h.client.status().band, None);
+
+    assert!(joined("main's connect", h.connect()).await.is_err());
+    main_window(&h).connect_answered();
+    wait_for("band ①", || h.client.status().band == BAND_ONE).await;
+    assert!(!h.boot_start_held().await);
+}
+
+// R-d — the window gate of each boot-start step.
+#[tokio::test]
+async fn only_the_main_windows_boot_start_steps_reach_the_hold() {
+    let h = Harness::held(Current::Absent);
+    // A popout's search start does not bound the hold — only the 60 s cap does.
+    popout(&h).search_began(Duration::from_secs(5));
+    assert!(h.boot_start_held().await);
+    h.clock.advance(Duration::from_secs(30));
+    let_the_actor_run().await;
+    assert!(h.boot_start_held().await, "no bound armed by a popout");
+    // A popout's failure, and main's success, end nothing.
+    popout(&h).start_answered::<()>(&Err("x".into()));
+    main_window(&h).start_answered(&Ok(()));
+    assert!(h.boot_start_held().await);
+    // No client — nothing to tell, nothing breaks.
+    BootStartWatch::of(MAIN_WINDOW_LABEL, None).connect_answered();
+    // Main's search start bounds it.
+    main_window(&h).search_began(Duration::from_secs(5));
+    assert!(h.boot_start_held().await, "armed");
+    h.clock.advance(Duration::from_secs(5) + BOOT_START_MARGIN);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while h.boot_start_held().await {
+        assert!(Instant::now() < deadline, "the bound did not end the hold");
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+}
+
+// R-h — the first `Connected` of any handle ends the cold boot: a later handle that never connected is not held.
+#[tokio::test]
+async fn a_link_that_connected_ends_the_boot_hold() {
+    let h = Harness::held(live());
+    let task = h.ensure();
+    let (endpoint, _) = h.next_link().await;
+    endpoint.push(hello());
+    joined("attach", task).await.expect("attached");
+    assert!(!h.boot_start_held().await, "the cold boot is over");
+
+    h.client.close();
+    wait_for("down", || h.client.state() == ConnectionState::Down).await;
+    drop(endpoint);
+    h.record.set(Current::Absent);
+    assert!(joined("a re-add", h.ensure()).await.is_err());
+    wait_for("band ①", || h.client.status().band == BAND_ONE).await;
+}
+
+#[tokio::test]
+async fn the_boot_hold_ends_by_itself_60_s_after_construction() {
+    let h = Harness::held(Current::Absent);
+    assert!(joined("attach", h.ensure()).await.is_err());
+    wait_for("down", || h.states() == ["state:down"]).await;
+    h.clock.advance(Duration::from_secs(59));
+    let_the_actor_run().await;
+    assert_eq!(h.client.status().band, None, "not yet");
+    h.clock.advance(Duration::from_secs(1));
+    wait_for("band ①", || h.client.status().band == BAND_ONE).await;
+}
+
+// R-g (TRD R24) — main's search bound replaces the cap: a search that begins at +55 s keeps its whole bound past +60 s.
+#[tokio::test]
+async fn a_main_search_that_begins_late_bounds_the_hold_from_its_own_start_past_the_cap() {
+    let h = Harness::held(Current::Absent);
+    assert!(joined("attach", h.ensure()).await.is_err());
+    wait_for("down", || h.states() == ["state:down"]).await;
+    h.clock.advance(Duration::from_secs(55));
+    let_the_actor_run().await;
+    assert_eq!(h.client.status().band, None, "no band before main's search");
+
+    main_window(&h).search_began(Duration::from_secs(5));
+    assert!(h.boot_start_held().await, "the bound is armed");
+    // +61 s: past the cap, within the search and its margin (+55 + 5 + 5 = +65).
+    h.clock.advance(Duration::from_secs(6));
+    let_the_actor_run().await;
+    assert!(h.boot_start_held().await, "the cap no longer applies");
+    assert_eq!(h.client.status().band, None);
+    h.clock.advance(Duration::from_secs(4));
+    wait_for("band ①", || h.client.status().band == BAND_ONE).await;
 }

@@ -1,10 +1,10 @@
 //! The shell side of the daemon handshake as a transport [`Handshake`] (TRD S21 trd-3 §6-2 U2 · §3-0 ⑤ · D20 ①).
 //!
 //! Two steps: `start` sends the Auth frame, the daemon's `Hello` ends the handshake. ★An `Error` frame before `Hello`
-//! ends the handshake as a terminal refusal★ (`HANDSHAKE_REJECTED` — no retry, no budget): the daemon closes without
-//! a close code after it (net `ws.rs` `send_error_and_close`), which the transport would read as "could not connect"
-//! and retry without limit, and no refusal is retried on the local path (ADR-0346). Which refusal it was (token ·
-//! version · anything else) is never read from the daemon's text — the text is only logged, masked. Anything else that
+//! ends the handshake as a terminal refusal★ (`HANDSHAKE_REJECTED` — no retry, no budget): a net-era daemon closed without
+//! a close code after it (the current one sends a code), which the transport would read as "could not connect" and
+//! retry without limit — the Error frame ends the handshake either way, and no refusal is retried on the local path
+//! (ADR-0346). Which refusal it was (token · version · anything else) is never read from the daemon's text — the text is only logged, masked. Anything else that
 //! arrives before `Hello` is dropped.
 //!
 //! The credential comes from a [`CredentialSlot`] that the dialer of the same registration fills on every dial
@@ -48,18 +48,23 @@ impl ShellHandshake {
         Self { slot }
     }
 
-    /// The daemon's text as it may be logged — masked (`mask_reason`), or `None` when it carries the token we sent, as
-    /// it is or once the hidden characters masking drops are gone (they can split a token that masking then joins).
-    /// ★Both checks run before masking truncates★ — a token past the cut would survive in part.
     fn loggable(&self, message: &str) -> Option<String> {
-        if let Some(token) = self.slot.get().filter(|t| !t.expose().is_empty()) {
-            let token = token.expose();
-            if message.contains(token) || without_hidden(message).contains(token) {
-                return None;
-            }
-        }
-        Some(mask_reason(message))
+        loggable(self.slot.get().as_ref(), message)
     }
+}
+
+/// The daemon's text as it may be logged — masked (`mask_reason`), or `None` when it carries `token` (the one we sent),
+/// as it is or once the hidden characters masking drops are gone (they can split a token that masking then joins).
+/// ★Both checks run before masking truncates★ — a token past the cut would survive in part. The stop handshake
+/// (`link::stop`) logs its refusals through this too.
+pub(super) fn loggable(token: Option<&Secret>, message: &str) -> Option<String> {
+    if let Some(token) = token.filter(|t| !t.expose().is_empty()) {
+        let token = token.expose();
+        if message.contains(token) || without_hidden(message).contains(token) {
+            return None;
+        }
+    }
+    Some(mask_reason(message))
 }
 
 /// `text` without the characters [`mask_reason`] drops. ★`mask_reason` stays the one source of what is hidden★ (the

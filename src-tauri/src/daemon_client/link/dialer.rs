@@ -11,7 +11,9 @@
 //!   attempt.
 //! - `Absent` · `Unusable` → forget the last-known endpoint, one failed attempt (budget), no dial.
 //! - `VersionMismatch` → forget the last-known endpoint, a terminal refusal (`HANDSHAKE_REJECTED`) without a dial: the
-//!   transport gives up as `Rejected` and spends no budget (ADR-0180 decision 5). Logged here at warn.
+//!   transport gives up as `Rejected` and spends no budget (ADR-0180 decision 5). Logged here at warn. The refusal is
+//!   recorded in the registration's [`RefusalSlot`] first — the one way routing tells a version refusal from the
+//!   daemon's own refusal, which carries the same close code (TRD S21 trd-3-2-u5 §4-3).
 //!
 //! The last-known endpoint is forgotten on every answer but `Live` and `Busy` because those answers say its daemon is
 //! gone or unusable (TRD §3-6) — a later `Busy` must not send that daemon's token to whoever holds its old port now.
@@ -62,9 +64,36 @@ pub(crate) fn no_live_daemon_cause(failure: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// The daemon a dial refused for its protocol version, as its endpoint record names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VersionRefusal {
+    /// The daemon's protocol version.
+    pub daemon: u32,
+    pub pid: u32,
+    /// The daemon's process creation time from its record — 0 = the record carries none.
+    pub start_time: u64,
+}
+
+/// What the last dial of one registration refused for the protocol version — written before that dial's
+/// `DialFailure::Refused` returns, so the `Rejected` it becomes is routed after the write, and cleared by every other
+/// answer of the endpoint record. Empty = the refusal (if any) did not come from the version check.
+#[derive(Debug, Default)]
+pub struct RefusalSlot(Mutex<Option<VersionRefusal>>);
+
+impl RefusalSlot {
+    pub fn get(&self) -> Option<VersionRefusal> {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub(super) fn set(&self, refusal: Option<VersionRefusal>) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = refusal;
+    }
+}
+
 struct Registration {
     source: Arc<dyn EndpointSource>,
     credential: Arc<CredentialSlot>,
+    refusal: Arc<RefusalSlot>,
     last_known: Mutex<Option<Endpoint>>,
 }
 
@@ -84,30 +113,32 @@ impl LocalDaemonDialer {
         }
     }
 
-    /// Registers one `Registry::add` of `key` and returns the logical address and the handshake to pass to it. Every
-    /// call makes a new registration, also for a key registered before. `found` = the endpoint the daemon search of
-    /// this connect just returned (`EndpointSource::ensure`) — the registration starts with it as its last-known
-    /// endpoint, so a record held busy right after the search (a daemon it just spawned) still dials that daemon. Every
-    /// dial still reads the record first.
+    /// Registers one `Registry::add` of `key` and returns the logical address and the handshake to pass to it, and the
+    /// registration's [`RefusalSlot`]. Every call makes a new registration, also for a key registered before. `found` =
+    /// the endpoint the daemon search of this connect just returned (`EndpointSource::ensure`) — the registration
+    /// starts with it as its last-known endpoint, so a record held busy right after the search (a daemon it just
+    /// spawned) still dials that daemon. Every dial still reads the record first.
     pub fn register(
         &self,
         key: &DaemonKey,
         source: Arc<dyn EndpointSource>,
         found: Option<Endpoint>,
-    ) -> (Address, Arc<dyn Handshake>) {
+    ) -> (Address, Arc<dyn Handshake>, Arc<RefusalSlot>) {
         let n = self.next.fetch_add(1, Ordering::Relaxed);
         let address = Address::new(format!("engram-local:{}#{n}", key.peer_id().as_str()));
         let credential = Arc::new(CredentialSlot::default());
+        let refusal = Arc::new(RefusalSlot::default());
         let registration = Arc::new(Registration {
             source,
             credential: credential.clone(),
+            refusal: refusal.clone(),
             last_known: Mutex::new(found),
         });
         self.registrations
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(address.clone(), registration);
-        (address, Arc::new(ShellHandshake::new(credential)))
+        (address, Arc::new(ShellHandshake::new(credential)), refusal)
     }
 
     /// Drops a registration once its peer has ended. A dial of it that is still running finishes against what it
@@ -141,6 +172,19 @@ impl LocalDaemonDialer {
         let current = tokio::task::spawn_blocking(move || source.current())
             .await
             .map_err(|e| LinkError::new(format!("{READ_FAILED}: {e}")))?;
+        let version_refusal = match current {
+            Current::VersionMismatch {
+                daemon,
+                pid,
+                start_time,
+            } => Some(VersionRefusal {
+                daemon,
+                pid,
+                start_time,
+            }),
+            _ => None,
+        };
+        registration.refusal.set(version_refusal);
         let mut last_known = registration
             .last_known
             .lock()
@@ -167,7 +211,7 @@ impl LocalDaemonDialer {
                 *last_known = None;
                 return Err(LinkError::new(format!("{UNUSABLE}: {why}")).into());
             }
-            Current::VersionMismatch { daemon } => {
+            Current::VersionMismatch { daemon, .. } => {
                 *last_known = None;
                 tracing::warn!(
                     daemon,
@@ -328,7 +372,7 @@ mod tests {
             });
             let dialer = Arc::new(LocalDaemonDialer::new(recording.clone()));
             let key = DaemonKey::new("local");
-            let (address, handshake) = dialer.register(&key, source, None);
+            let (address, handshake, _) = dialer.register(&key, source, None);
             let clock = ManualClock::new();
             let registry = Registry::new(
                 Arc::new(ShellWire),
@@ -427,6 +471,14 @@ mod tests {
             address: ws(port),
             credential: Secret::new(token),
         })
+    }
+
+    fn version_mismatch(daemon: u32) -> Current {
+        Current::VersionMismatch {
+            daemon,
+            pid: 4242,
+            start_time: 77,
+        }
     }
 
     fn ws(port: u16) -> Address {
@@ -530,9 +582,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_version_mismatch_gives_up_rejected_without_a_dial_or_budget() {
-        let source = ScriptedSource::new([Current::VersionMismatch {
-            daemon: PROTOCOL_VERSION + 1,
-        }]);
+        let source = ScriptedSource::new([version_mismatch(PROTOCOL_VERSION + 1)]);
         let mut h = Harness::start(source.clone());
         wait_for("gave up", || h.state().is_terminal()).await;
 
@@ -688,14 +738,12 @@ mod tests {
         for gone in [
             Current::Absent,
             Current::Unusable("daemon.json names pid 7 which is not alive".into()),
-            Current::VersionMismatch {
-                daemon: PROTOCOL_VERSION + 1,
-            },
+            version_mismatch(PROTOCOL_VERSION + 1),
         ] {
             let net = MemoryNetwork::new();
             let dialer = LocalDaemonDialer::new(net.dialer());
             let source = ScriptedSource::new([live(5123, TOKEN_A), gone.clone(), Current::Busy]);
-            let (address, _) = dialer.register(&DaemonKey::new("local"), source.clone(), None);
+            let (address, _, _) = dialer.register(&DaemonKey::new("local"), source.clone(), None);
             assert!(dialer.dial(&address).await.is_ok(), "{gone:?}");
             assert!(dialer.dial(&address).await.is_err(), "{gone:?}");
             let busy = dialer.dial(&address).await.err();
@@ -725,8 +773,8 @@ mod tests {
             entered: Mutex::new(entered_tx),
             release: Mutex::new(release_rx),
         });
-        let (old_address, old_handshake) = dialer.register(&key, old_source, None);
-        let (new_address, new_handshake) =
+        let (old_address, old_handshake, _) = dialer.register(&key, old_source, None);
+        let (new_address, new_handshake, _) =
             dialer.register(&key, ScriptedSource::new([live(6234, TOKEN_B)]), None);
         assert_ne!(old_address, new_address);
 
@@ -761,7 +809,7 @@ mod tests {
         let net = MemoryNetwork::new();
         let dialer = LocalDaemonDialer::new(net.dialer());
         let source = ScriptedSource::new([live(5123, TOKEN_A)]);
-        let (address, _) = dialer.register(&DaemonKey::new("local"), source.clone(), None);
+        let (address, _, _) = dialer.register(&DaemonKey::new("local"), source.clone(), None);
         dialer.unregister(&address);
         for target in [address, Address::new("engram-local:nobody#0")] {
             let failure = dialer.dial(&target).await.err();
@@ -772,6 +820,52 @@ mod tests {
         }
         assert_eq!(net.dials(), 0);
         assert_eq!(source.reads(), 0);
+    }
+
+    // TRD S21 trd-3-2-u5 §4-3 (D4): the slot is how routing tells a version refusal from the daemon's own refusal.
+    #[tokio::test]
+    async fn a_version_refusal_is_recorded_in_the_slot_before_the_dial_fails_and_any_other_answer_clears_it(
+    ) {
+        let net = MemoryNetwork::new();
+        let dialer = LocalDaemonDialer::new(net.dialer());
+        let source = ScriptedSource::new([
+            version_mismatch(PROTOCOL_VERSION - 1),
+            live(5123, TOKEN_A),
+            version_mismatch(PROTOCOL_VERSION - 1),
+            Current::Absent,
+        ]);
+        let (address, _, slot) = dialer.register(&DaemonKey::new("local"), source.clone(), None);
+        assert_eq!(slot.get(), None, "nothing dialed yet");
+
+        let refused = dialer.dial(&address).await.err();
+        assert!(matches!(
+            refused,
+            Some(DialFailure::Refused {
+                code: CloseCode::HANDSHAKE_REJECTED,
+                ..
+            })
+        ));
+        let recorded = Some(VersionRefusal {
+            daemon: PROTOCOL_VERSION - 1,
+            pid: 4242,
+            start_time: 77,
+        });
+        assert_eq!(slot.get(), recorded);
+
+        assert!(dialer.dial(&address).await.is_ok());
+        assert_eq!(slot.get(), None, "a live answer clears it");
+
+        assert!(dialer.dial(&address).await.is_err());
+        assert_eq!(slot.get(), recorded);
+        assert!(matches!(
+            dialer.dial(&address).await.err(),
+            Some(DialFailure::Unreachable(_))
+        ));
+        assert_eq!(slot.get(), None, "an absent record clears it");
+
+        // Each registration has its own slot.
+        let (_, _, other) = dialer.register(&DaemonKey::new("local"), source, None);
+        assert_eq!(other.get(), None);
     }
 
     #[test]

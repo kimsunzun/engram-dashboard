@@ -1,7 +1,7 @@
 # ADR-0025: Keep the one UI-boot daemon ensure — discard ADR-0024 C3 ("no UI ensure")
 
-- 상태: 확정 (2026-06-18, dashboard7 session — user decision)
-- 관련: ADR-0024 (C3 is the discard target) · ADR-0023 (topology) · ADR-0021 (on-demand · no restart) · CLAUDE.md §5 · `src/api/clientFactory.ts` (bootstrapDaemonIfNeeded) · `src/App.tsx` · Amends ADR-0024 (C3 UI ensure ban)
+- 상태: 확정 (2026-06-18, dashboard7 session — user decision) · 부분 폐기 by ADR-0350 (부팅 1회 ensure 범위와 죽은 데몬 되살리기 수단)
+- 관련: ADR-0024 (C3 is the discard target) · ADR-0023 (topology) · ADR-0021 (on-demand · no restart) · CLAUDE.md §5 · `src/api/clientFactory.ts` (bootstrapDaemonIfNeeded) · `src/App.tsx` · Amends ADR-0024 (C3 UI ensure ban) · Amended by ADR-0350 (부팅 1회 ensure 범위와 죽은 데몬 되살리기 수단)
 - Scope: the decision on "may the UI start the daemon" in daemon mode. It reverses only C3 of ADR-0024 (C1 · C2 · C4 · data location remain valid).
 
 ## 맥락

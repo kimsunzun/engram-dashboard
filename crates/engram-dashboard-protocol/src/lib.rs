@@ -87,7 +87,7 @@ pub use secret::Secret;
 /// ★출시 뒤가 아니라 로컬 개발에서 먼저 온다★ — 데몬은 설계상 셸 재빌드보다 오래 산다(셸을 다시 지어도
 /// 떠 있던 데몬에 그대로 붙는다). 그래서 위 두 조합은 개발 중에 일상적으로 만들어진다. 「출시 전이라
 /// 지켜 줄 상대가 없다」로 이 bump 를 건너뛰려던 판단이 틀렸던 지점이 여기다.
-/// bump 가 둘 다 시끄럽게 만든다: auth 의 version check(`net` 의 `ws.rs`) + discovery 의
+/// bump 가 둘 다 시끄럽게 만든다: auth 의 version check(데몬 `link/auth.rs`) + discovery 의
 /// version-mismatch 거부(셸 `discovery` 모듈의 `check_acceptable`)가 짝이 안 맞는 데몬을 **재사용하지 않고
 /// 거부/재기동**한다. 그 강제를 재는 자리 = 셸 `discovery` 시험의
 /// `version_mismatch_live_daemon_errors_without_spawn`.

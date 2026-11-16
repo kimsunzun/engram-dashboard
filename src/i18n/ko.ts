@@ -292,6 +292,18 @@ export const ko = {
       '정상적으로 종료되지 않은 이전 실행의 화면을 따로 보관하지 못해 이번 실행에서는 화면 상태를 저장하지 않습니다. 다음 실행 때 다시 묻습니다.',
     dismissNotice: '화면 상태 알림 닫기',
   },
+  // The two connection bands, their 「다시 연결」 and the LLM command titles (TRD S36 §3-3 · ADR-0356).
+  connection: {
+    head: '데몬에 연결하지 못했습니다.',
+    refusedCause: '데몬이 이 앱의 인증을 거절했습니다',
+    versionCause: '실행 중인 데몬이 이 앱과 버전이 다릅니다. 데몬을 끈 뒤 다시 연결하세요',
+    reconnect: '다시 연결',
+    reconnecting: '연결 중…',
+    dismiss: '알림 닫기',
+    statusCmd: '연결 상태',
+    reconnectCmd: '다시 연결',
+    stopCmd: '데몬 끄기',
+  },
   /** 네이티브 OS 다이얼로그 제목 — webview 밖 사용자 노출 텍스트. */
   dialog: {
     pickAgentCwd: '에이전트 작업 디렉토리 선택',
