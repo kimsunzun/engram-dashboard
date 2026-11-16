@@ -2,11 +2,11 @@
 
 | Item | Value |
 |---|---|
-| **Status** | **Draft 2** (2026-11-16) — review round 1 (full) PASS on draft 1; draft 2 applies its 권장 / batched and two user decisions (D4, D5). Closes parent [`trd.md`](trd.md) §2-4 item 2. |
+| **Status** | **Draft 3** (2026-11-16) — review round 1 (full) PASS on draft 1; draft 2 applied its 권장 / batched and two user decisions (D4, D5); draft 3 applies round 2 (M1 + batched). Closes parent [`trd.md`](trd.md) §2-4 item 2. |
 | **Canonical ADRs** | new ADR (§5 D1) amending: ADR-0092 d1 · ADR-0327 d5 + 「영향」 · ADR-0368 d4 · ADR-0215 d2 · d4 · d5 (+ its rejected-alternative revival trigger) · ADR-0353 (decision on the Noop warn-and-drop + 「영향」 revival trigger) · ADR-0328 d3 + the last line of 「바뀌는 조항」 + the last 「영향」 bullet · ADR-0316 「영향」 (Noop argv byte for byte) · ADR-0209 「영향」 (the `uses_mail` split now held by agent `backend/mod.rs` `every_backend_with_a_settings_check_has_what_the_priming_teaches`) · ADR-0099 d5 (`--priming <직접 경로>`) · ADR-0093 (C0–C3 as `roundtrip_smoke` parameters) · ADR-0216 (codex Noop read) |
 | **Origin** | User 2026-11-16 「기존건 지워」 on the step-8 QA finding (`trd-daemon-wiring.md` §3 row "Old priming path", §8 B2 · B3). |
-| **PRD relation** | No PRD requirement changes; nothing user-visible on the screen. Operator-visible: `ENGRAM_PRIMING_FILE` (read by released v0.4.0 daemons, never in user docs) is no longer read and no longer warned about; the per-spawn missing-file `WARN` goes away. |
-| **Reference files to fix** | `docs/reference/structure/agent-backend.md` — claude · codex argv rows (Noop priming / settings fragment), the `accepts_mcp_config` row, the `writes_mcp_config_file` row (the session-settings fragment), the `provision` anchor sentence (`wants_priming`). `agent-backend.html` is not redrawn (the project accepts html drift — `agent-backend.md`). |
+| **PRD relation** | No PRD requirement changes; nothing user-visible on the screen. Operator-visible: `ENGRAM_PRIMING_FILE` (read by every released daemon up to v0.4.0, never in user docs) is no longer read and no longer warned about; the per-spawn missing-file `WARN` goes away. |
+| **Reference files to fix** | `docs/reference/structure/agent-backend.md` — all four claude · codex argv rows (terminal and stream-json / app-server — their Noop priming / settings fragment text), the `accepts_mcp_config` row, the `writes_mcp_config_file` row (the session-settings fragment), the `provision` anchor sentence (`wants_priming`). `agent-backend.html` — the one `accepts_mcp_config` cell that says priming loading splits on it (a cell edit, not a redraw). |
 
 ## 0. Scope
 
@@ -22,7 +22,7 @@ Not here: `NoopLaunchKits` / `LaunchPorts::noop()` themselves (they stay — man
 |---|---|
 | `PrimingProvider` trait, `FilePrimingProvider`, `NoopPrimingProvider`, `FixedPrimingProvider`, `ENV_OVERRIDE` (`ENGRAM_PRIMING_FILE`) and their unit tests. `REL_MCP_PRIMARY` leaves the provider; the kept content checks (§2) keep the path for themselves | daemon `control/priming.rs` |
 | The provider field and constructor argument, the `wants_priming` gate, the endpoint's `priming_file` | daemon `control/mod.rs` `DaemonControlChannel` · `provision` |
-| `warn_if_priming_file_set` · `warn_if_priming_override`, `a_set_priming_override_value_warns_once`, the warn half of `the_boot_sweeps_before_the_plug_and_warns_on_the_priming_override` (§2); the provider construction in production wiring | daemon `lib.rs` |
+| `warn_if_priming_file_set` · `warn_if_priming_override`, `a_set_priming_override_value_warns_once`, the warn half of `the_boot_sweeps_before_the_plug_and_warns_on_the_priming_override` (§2 — the kept test is renamed so it no longer claims a warn); the provider construction in production wiring | daemon `lib.rs` |
 | `ControlEndpoint.priming_file` | agent `types.rs` |
 | Noop-branch consumers: claude `--append-system-prompt-file` from the endpoint; codex `priming_text` · `developer_instructions_override` (terminal `-c developer_instructions` and app-server `developerInstructions` on the Noop branch) | agent `backend/claude/mod.rs` · `backend/codex/mod.rs` |
 | Settings fragment (D2): `ControlEndpoint.settings_file`, `mcp_config::write_settings`, the Noop claude `--settings` from the endpoint | agent `types.rs` · daemon `control/mcp_config.rs` · `control/mod.rs` · agent `backend/claude/mod.rs` |
@@ -46,7 +46,7 @@ Not here: `NoopLaunchKits` / `LaunchPorts::noop()` themselves (they stay — man
 
 ## 4. Implementation units
 
-One unit, one commit: removing the endpoint fields breaks both crates at once, so the agent and daemon edits land together. Order inside the unit so each step compiles: (1) roundtrip_smoke onto kits (D4) and priming_smoke removal, (2) fields, provider and consumers, (3) tests and golden, (4) docs: the reference file, code comments that describe the removed path (agent `launch.rs` `include_priming` / `NoopLaunchKits` docs, agent `backend/mod.rs` tripwire doc, daemon `lib.rs` `HelpSource` comment, `control/help.rs` · `mcp_server.rs` analogies, `launch_argv_golden.rs` comment naming `priming_smoke`, daemon `Cargo.toml` bin blocks, `scripts/build-release.ps1` bin list and priming comment), parent `trd.md` §1-5 (나) 4 line on `priming_file`, and §2-4 item 2 closed with a pointer here.
+One unit, one commit: removing the endpoint fields breaks both crates at once, so the agent and daemon edits land together. Order inside the unit so each step compiles: (1) roundtrip_smoke onto kits (D4) and priming_smoke removal, (2) fields, provider and consumers, (3) tests and golden, (4) docs: the reference file, code comments that describe the removed path (agent `launch.rs` `include_priming` / `NoopLaunchKits` docs, agent `backend/mod.rs` tripwire doc, daemon `lib.rs` `HelpSource` comment, `control/help.rs` · `mcp_server.rs` analogies, `launch_argv_golden.rs` comment naming `priming_smoke`, daemon `Cargo.toml` bin blocks, `scripts/build-release.ps1` bin list and priming comment), parent `trd.md` §1-5 (나) item 5 (the `provision` line on `priming_file`), §3 「claude `--system-prompt-snapshot off` goes only to real materials」 and the §4 test-table line 「Noop = argv byte-identical to today」 (the golden is regenerated), and §2-4 item 2 closed with a pointer here.
 
 ## 5. Decisions
 
@@ -59,7 +59,7 @@ One unit, one commit: removing the endpoint fields breaks both crates at once, s
 - **D1** One new ADR records the withdrawal and amends the listed ADRs; written after this review, before coding.
 - **D2** Remove the settings fragment in the same change. — Step-8 B2 tied it to this withdrawal ("Revisit with §2-4 2") and ADR-0328 d3 keeps it only on the Noop path "until it is withdrawn"; it is written on every claude spawn and read by no production launch, the same shape as the priming path, and doing both now regenerates the golden once instead of twice.
 - **D3** Delete `priming_smoke`. — It measured whether an agent accepts a natural teammate message under the priming (ADR-0092 d4 acceptance baseline); `roundtrip_smoke`'s A→B half, built on top of it, carries that measurement on.
-- **D4 shape** `roundtrip_smoke` builds `LibraryService` (template: `tests/launch_kits_live.rs`) with `LibraryValues.builtin_dir` = `--builtin-dir <dir>`, default the repo `builtin\`. Built-ins are read once when the service is built, so a variant is fixed for the run. The harness keeps reading the effective priming file itself (its CLI-surface check needs the text) and stays SETUP-FAIL when the file is missing or unreadable — the kit itself would launch unprimed with a `builtin-unavailable` notice (ADR-0361 d2), which must not pass as a primed run.
+- **D4 shape** `roundtrip_smoke` builds `LibraryService` (template: `tests/launch_kits_live.rs`) with `LibraryValues.builtin_dir` = `--builtin-dir <dir>`, default the repo `builtin\`. Built-ins are read once when the service is built, so a variant is fixed for the run. The harness keeps reading the effective priming file itself (its CLI-surface check needs the text) and stays SETUP-FAIL when the file is missing or unreadable. It is also SETUP-FAIL when the launch reports any `builtin-unavailable` notice: a partial `--builtin-dir` (no `presets/default.yaml`, or no `settings/default.yaml`) makes the kit launch unprimed or without its settings while the priming file itself reads fine (ADR-0361 d2 stand-ins), and such a run must not pass as a primed one. An empty but present priming file is not a setup failure (K3).
 
 ## 6. Test plan
 
@@ -70,7 +70,7 @@ One unit, one commit: removing the endpoint fields breaks both crates at once, s
 | Mail gate still holds | `tests/mail_gate.rs` grant assertions (unchanged) |
 | Boot sweep order still pinned | the kept sweep-order assertions in daemon `lib.rs` |
 | Noop argv | regenerated golden; reviewed as a diff (only the listed flags disappear) |
-| roundtrip_smoke still runs | build + its unit tests in the workspace run; one live run with the repo `builtin\`; `--builtin-dir` with a missing priming file → SETUP-FAIL |
+| roundtrip_smoke still runs | build + its unit tests in the workspace run; one live run with the repo `builtin\`; `--builtin-dir` with a missing priming file → SETUP-FAIL; `--builtin-dir` with the priming file but no `presets/default.yaml` → SETUP-FAIL (the `builtin-unavailable` notice) |
 | Full regression | `cargo test --workspace` per the qa binding |
 
 ## 7. Risks
