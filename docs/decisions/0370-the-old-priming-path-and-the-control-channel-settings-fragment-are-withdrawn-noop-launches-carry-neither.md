@@ -34,7 +34,7 @@ Since S25 step 8 every production claude and codex launch takes its priming from
 - **`roundtrip_smoke` keeps `--priming <file>` and builds an internal temp copy of `builtin\`** — about 30 more lines for a rarely used measurement. 사용자 직접 기각 (D4, 「ㅇㅇ 별도로 복사해서해.」, 2026-11-16).
 - **Edit the tracked `builtin\instructions\priming.md` for a variant run** — the kept content checks read that file and fail mid-experiment, a dev daemon on the same tree picks it up, and the edit risks being committed.
 - **Keep a boot warn for `ENGRAM_PRIMING_FILE`** (step-8 B3 / K6) — 사용자 직접 기각 (D5, 「v0.4.0 이전은 필요없는데? 그냥 지우면 될듯? 앞으로 나올일 없으면」, 2026-11-16).
-- **Port `priming_smoke` to the kits** — its acceptance measurement (ADR-0092 decision 4 baseline) is carried by `roundtrip_smoke`'s A→B half, which is built on top of it. 약함 (no measurement or code ground beyond that coverage claim — main decision D3).
+- **Port `priming_smoke` to the kits** — its acceptance measurement (ADR-0092 decision 4 baseline) is carried by `roundtrip_smoke`'s A→B half, which is built on top of it. Code ground: the `roundtrip_smoke` header states it runs on top of the A→B receipt that priming-smoke proved (`crates/engram-dashboard-daemon/src/bin/roundtrip_smoke.rs` module doc).
 
 ## 근거
 User 2026-11-16 「기존건 지워」 on the step-8 QA finding (`trd-daemon-wiring.md` §3 row "Old priming path", §8 B2 · B3); scope including the settings fragment — 「ㅇㅇ 이대로 가면 되긴하는데」. TRD `trd-old-priming-removal.md` PRD+TRD review full (Claude lead + codex) PASS on draft 3, recorded at `91f25c33`.

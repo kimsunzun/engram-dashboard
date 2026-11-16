@@ -11,7 +11,7 @@ No change. No priming line and no CLI launch-wait change (and no codex config). 
 
 ## 거부한 대안
 - **(1) A priming line telling the agent a launch can take up to 94 s and to run it in the background** (step-8 TRD C1 option (1), main's own first recommendation — it touches only `builtin\instructions\priming.md`) — 사용자 직접 기각: 「구지 지시문에 하드코딩 해야됨? 공용룰같은 느낌인데?」, then 「ㅇㅇ 이대로 닫아」 (2026-11-16).
-- **(3) Shortening the CLI launch wait** (step-8 TRD C1 option (3)) — TODO(main): the research note gives no reason for rejecting this option; the step-8 TRD §8 C1 lists its cost as "breaks ADR-0360 d1".
+- **(3) Shortening the CLI launch wait** (step-8 TRD C1 option (3)) — it breaks ADR-0360 decision 1 (a): a caller that waits directly on one launch must wait at least the launch caller wait (88 s), so the CLI cannot give up sooner without reporting failure for a launch that may still succeed (step-8 TRD §8 C1).
 
 ## 근거
 `docs/research/codex-tool-yield-limits-2026-11-16.md`:
