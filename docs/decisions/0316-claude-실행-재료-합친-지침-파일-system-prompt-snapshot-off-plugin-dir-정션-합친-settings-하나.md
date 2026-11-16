@@ -1,7 +1,7 @@
 # ADR-0316: claude launch materials = one merged instruction file + `--system-prompt-snapshot off` + `--plugin-dir` junction + one merged `--settings`
 
-- 상태: 제안 (2026-10-31, basis: TRD decision T7 (confirmed 2026-10-18 — recommendation as is) · T10 (user 2026-10-18) · R35 · G42 (2026-10-31) · measured (TRD §1-5 table · §6-1))
-- 관련: ADR-0334 · ADR-0327 · ADR-0328 · ADR-0109 Decision 9 · TRD `docs/process/S25-preset-library/trd.md` §1-5 「backend 번역」 · §7 4
+- 상태: 제안 (2026-10-31, basis: TRD decision T7 (confirmed 2026-10-18 — recommendation as is) · T10 (user 2026-10-18) · R35 · G42 (2026-10-31) · measured (TRD §1-5 table · §6-1)) · 부분 폐기 by ADR-0370 (Noop argv byte for byte)
+- 관련: ADR-0334 · ADR-0327 · ADR-0328 · ADR-0109 Decision 9 · TRD `docs/process/S25-preset-library/trd.md` §1-5 「backend 번역」 · §7 4 · Amended by ADR-0370 (Noop argv byte for byte)
 
 ## 맥락
 With which flags do we load the preset material into the two claude modes (JSON and terminal)?

@@ -1,7 +1,7 @@
 # ADR-0353: Codex real launch materials fail closed on an unreadable instructions file, a priming the terminal line cannot carry, or a working folder cmd would change
 
-- 상태: 확정 (2026-11-10, 근거: user decision U1 2026-11-09 · the user's working-folder rule 2026-11-10 (H3) · main decision #5 — TRD `docs/process/S25-preset-library/trd-codex-translation.md` §9 · landed `a3891273`, `abee6ebe`)
-- 관련: Amends ADR-0215 (결정 4와 5 실재료 한정) · ADR-0351 (the claude precedent: a failed placement write fails the spawn — extended here to codex) · ADR-0337 (codex materials) · ADR-0334 (flag translation in backend `materialize`)
+- 상태: 확정 (2026-11-10, 근거: user decision U1 2026-11-09 · the user's working-folder rule 2026-11-10 (H3) · main decision #5 — TRD `docs/process/S25-preset-library/trd-codex-translation.md` §9 · landed `a3891273`, `abee6ebe`) · 부분 폐기 by ADR-0370 (Noop warn-and-drop)
+- 관련: Amends ADR-0215 (결정 4와 5 실재료 한정) · ADR-0351 (the claude precedent: a failed placement write fails the spawn — extended here to codex) · ADR-0337 (codex materials) · ADR-0334 (flag translation in backend `materialize`) · Amended by ADR-0370 (Noop warn-and-drop)
 
 ## 맥락
 ADR-0215 made both codex instruction failures fail-open: decision 4 — in terminal mode, an instruction text that does not fit on the command line (8,191 units) or holds a refused character is dropped with a warning and the spawn proceeds; decision 5 — an unreadable priming file is skipped and the spawn proceeds. That fit the Noop launch, where the only instructions are the built-in priming and the spawn matters more. With real launch materials (S25), the merged instructions file carries what the user put in the preset; launching without it silently runs a different agent than the one the user asked for. The codex terminal command line also goes through `cmd.exe /c` and the npm `codex.cmd` shim, so a working folder holding cmd metacharacters can reach codex as a different folder or run a command.
