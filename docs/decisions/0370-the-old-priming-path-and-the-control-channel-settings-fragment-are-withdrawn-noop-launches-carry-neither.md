@@ -1,20 +1,48 @@
 # ADR-0370: The old priming path and the control-channel settings fragment are withdrawn; Noop launches carry neither
 
-- 상태: 확정 (2026-11-16, 근거: TODO)
-- 관련: Amends ADR-0327 (decision 5 old path withdrawal) · Amends ADR-0092 (Decision 1 loader seam) · Amends ADR-0368 (decision 4 Noop read and override) · Amends ADR-0215 (decisions 2, 4 and 5) · Amends ADR-0353 (Noop warn-and-drop) · Amends ADR-0328 (decision 3 Noop settings fragment) · Amends ADR-0316 (Noop argv byte for byte) · Amends ADR-0209 (uses_mail priming split anchor) · Amends ADR-0099 (decision 5 kept --priming path) · Amends ADR-0093 (C0 to C3 as roundtrip_smoke parameters) · Amends ADR-0216 (codex instruction-sheet fail-open reliance) · TODO 나머지 관련
+- 상태: 확정 (2026-11-16, 근거: user 2026-11-16 「기존건 지워」 · TRD S25 `docs/process/S25-preset-library/trd-old-priming-removal.md` §5, reviewed full PASS `91f25c33`)
+- 관련: Amends ADR-0327 (decision 5 old path withdrawal) · Amends ADR-0092 (Decision 1 loader seam) · Amends ADR-0368 (decision 4 Noop read and override) · Amends ADR-0215 (decisions 2, 4 and 5) · Amends ADR-0353 (Noop warn-and-drop) · Amends ADR-0328 (decision 3 Noop settings fragment) · Amends ADR-0316 (Noop argv byte for byte) · Amends ADR-0209 (uses_mail priming split anchor) · Amends ADR-0099 (decision 5 kept --priming path) · Amends ADR-0093 (C0 to C3 as roundtrip_smoke parameters) · Amends ADR-0216 (codex instruction-sheet fail-open reliance) · ADR-0361 (built-in stand-ins and the `builtin-unavailable` notice) · TRD S25 `trd.md` §2-4 2 · `trd-daemon-wiring.md` §3 · §8 B2 · B3
 
 ## 맥락
-TODO — 무슨 문제를 풀어야 했나.
+Since S25 step 8 every production claude and codex launch takes its priming from the real launch materials (`LibraryService`; the built-in `builtin\instructions\priming.md` merged into the instructions). The old path — the daemon's priming provider → `ControlEndpoint.priming_file` → the Noop launch branch — and its sibling `ControlEndpoint.settings_file` (the control-channel settings fragment) are read by no production launch, yet they still run on every spawn: the control provision stats the priming file (and `ENGRAM_PRIMING_FILE`) on every claude and codex MCP spawn and logs a `WARN` when it is missing, and the settings fragment is written on every claude spawn. Only the Noop branch reads either (the Noop argv golden, the test server, the harness bins). When to withdraw the old path was left open (parent TRD §2-4 item 2; step-8 TRD B2 tied the settings fragment to the same withdrawal, B3 kept it open). The user decided to remove it.
 
 ## 결정
-TODO — 무엇으로 정했나.
+1. **The old priming path is removed end to end**: the priming provider (`PrimingProvider` and its file / noop / fixed implementations), `ENGRAM_PRIMING_FILE`, the `wants_priming` gate in the control provision, and `ControlEndpoint.priming_file` with its Noop-branch consumers (claude `--append-system-prompt-file` from the endpoint; codex terminal `-c developer_instructions` and app-server `developerInstructions` on the Noop branch).
+2. **The control-channel settings fragment is removed in the same change**: `ControlEndpoint.settings_file`, `mcp_config::write_settings` and the Noop claude `--settings` from the endpoint.
+3. **Noop launches carry neither priming nor a settings fragment.** The Noop argv golden (`tests/launch_argv_golden.rs` + its fixture) is regenerated once; it is no longer byte-identical to the pre-kits argv.
+4. **`priming_smoke` is deleted** (the bin and its `[[bin]]` block).
+5. **`roundtrip_smoke` launches through `LibraryService`** with `--builtin-dir <dir>` (default: the repo `builtin\`); `--priming` is dropped. A priming variant is a separately copied folder passed by `--builtin-dir`. The run is SETUP-FAIL when the effective priming file is missing or unreadable, or when the launch reports any `builtin-unavailable` notice (a partial `--builtin-dir` would launch unprimed or without its settings while the priming file reads fine). An empty but present priming file is not a setup failure.
+6. **No boot warn for a leftover `ENGRAM_PRIMING_FILE`** — the variable is simply no longer read.
+7. **What stays**: the mail-CLI decider (`teaches_mail_cli`, `mentions_mail_cli_surface` and helpers) and the content checks on the shipped priming in `control/priming.rs` (with the built-in priming path as their own constant); `NoopLaunchKits` / `LaunchPorts::noop()` (manager default, `LibraryService` fallback for shell and gemini); the `uses_mail` / `accepts_mcp_config` axis for grants and `mail_allowed`. Production launches (argv, files, notices) do not change.
+
+**Clauses that change:**
+- **ADR-0092 decision 1** — the loader seam (the daemon's priming provider) dies; the launch-materials port `LaunchKitSource` (ADR-0327) is the only priming seam. No hardcoding and "the daemon reads it and passes it toward the system prompt" stay.
+- **ADR-0327 decision 5** — "when to withdraw the old path" is decided: withdrawn now. Its 「영향」 line "the old path stays … the Noop regression golden relies on it" dies — the golden is regenerated (decision 3).
+- **ADR-0368 decision 4** — "the Noop path reads it there; its `ENGRAM_PRIMING_FILE` override stays" dies: nothing on the Noop path reads the priming and the override is not read. The move of the file itself stays.
+- **ADR-0215 decisions 2, 4 and 5** — decision 2 (the provider emits only the path, `ControlEndpoint.priming_file` kept) dies with the provider and the field. Decisions 4 and 5 were already limited to the Noop path by ADR-0353; that Noop half dies because the Noop branch carries no instructions. The real path stays fail-closed (ADR-0353). The revival trigger of its rejected alternative `model_instructions_file` is now only the real-path one ADR-0353 names: a real codex terminal launch blocked by `command-line-too-long`.
+- **ADR-0353** — "the Noop path keeps ADR-0215's warn-and-drop for the priming", and the Noop size warning as a revival trigger in its 「영향」, die: there is no Noop priming to warn about or drop.
+- **ADR-0328 decision 3** — "`NoopLaunchKits` still loads it", the last line of 「바뀌는 조항」 (the Noop path runs as in ADR-0109 decision 9 until it is withdrawn) and the last 「영향」 bullet (the `mcp_config.rs` settings-fragment anchor remains on the Noop path) die: there is no control-channel settings fragment on any path.
+- **ADR-0316 「영향」** — "Noop material emits the argv byte for byte as today" dies (decision 3).
+- **ADR-0209 「영향」** — the priming half of the `uses_mail` split (`needs.uses_mail.then_some(…)` in the control provision) goes with the provider. The rule "authorization, teaching and grant must not diverge" is held on the real path by agent `backend/mod.rs` `every_backend_with_a_settings_check_has_what_the_priming_teaches`; grants and `mail_allowed` still split on the axis.
+- **ADR-0099 decision 5** — "`--priming <직접 경로>` is kept" in `roundtrip_smoke` dies; variants go through `--builtin-dir` (decision 5).
+- **ADR-0093 「영향」** — C0 to C3 stay `roundtrip_smoke` parameters, now as `--builtin-dir` copies; C0 (no priming) = a copy with an empty priming file.
+- **ADR-0216** — its reliance of codex instruction-sheet injection on the fail-open rule pointed at the codex Noop priming read, which no longer exists; the real path fails closed (ADR-0353). The fail-open rule it carries on for mail attachment (ADR-0214) is untouched.
 
 ## 거부한 대안
-- TODO 대안 A — 왜 버렸나.
-- TODO 대안 B — 왜 버렸나.
+- **Keep the old path for the Noop golden** — it costs a file stat and a missing-file `WARN` on every production spawn for a path no production launch reads (code: step-8 TRD `trd-daemon-wiring.md` §3 row "Old priming path").
+- **Remove the priming path only and keep the settings fragment** — the fragment has the same shape (written on every claude spawn, read by no production launch); removing both regenerates the golden once instead of twice (step-8 TRD B2 tied them: "Revisit with §2-4 2").
+- **`roundtrip_smoke` keeps `--priming <file>` and builds an internal temp copy of `builtin\`** — about 30 more lines for a rarely used measurement. 사용자 직접 기각 (D4, 「ㅇㅇ 별도로 복사해서해.」, 2026-11-16).
+- **Edit the tracked `builtin\instructions\priming.md` for a variant run** — the kept content checks read that file and fail mid-experiment, a dev daemon on the same tree picks it up, and the edit risks being committed.
+- **Keep a boot warn for `ENGRAM_PRIMING_FILE`** (step-8 B3 / K6) — 사용자 직접 기각 (D5, 「v0.4.0 이전은 필요없는데? 그냥 지우면 될듯? 앞으로 나올일 없으면」, 2026-11-16).
+- **Port `priming_smoke` to the kits** — its acceptance measurement (ADR-0092 decision 4 baseline) is carried by `roundtrip_smoke`'s A→B half, which is built on top of it. 약함 (no measurement or code ground beyond that coverage claim — main decision D3).
 
 ## 근거
-TODO — 실측·리뷰 등 결정의 뒷받침.
+User 2026-11-16 「기존건 지워」 on the step-8 QA finding (`trd-daemon-wiring.md` §3 row "Old priming path", §8 B2 · B3); scope including the settings fragment — 「ㅇㅇ 이대로 가면 되긴하는데」. TRD `trd-old-priming-removal.md` PRD+TRD review full (Claude lead + codex) PASS on draft 3, recorded at `91f25c33`.
 
 ## 영향 / 불변식
-TODO — 이 결정이 묶는 코드·게이트. 어기면 무엇이 깨지나.
+- Lands as one commit (`S25: refactor(agent,daemon): remove the old priming path`): removing the endpoint fields breaks the agent and daemon crates together.
+- `ENGRAM_PRIMING_FILE` is read nowhere and warned about nowhere. Without `builtin\`, a launch shows only the `builtin-unavailable` notice (ADR-0361) and no priming-file `WARN`.
+- The Noop argv golden is regenerated once: the claude endpoint cases lose `--append-system-prompt-file` and `--settings`, the codex terminal endpoint cases lose `-c developer_instructions=…`, `fixtures/launch_golden_priming.md` is deleted. The manager-level golden does not change.
+- The codex Noop terminal and app-server launches carry no instructions; a Noop claude launch gets neither instructions nor `--settings` from the control channel (affects tests and `saturation_pilot`, nothing in production).
+- ADR-0209's rule (authorization, teaching and grant move together) is held on the real path by agent `backend/mod.rs` `every_backend_with_a_settings_check_has_what_the_priming_teaches`; the mail-gate grant assertions (`tests/mail_gate.rs`) stay.
+- Reference: `docs/reference/structure/agent-backend.md` — the four claude and codex argv rows, the `accepts_mcp_config` row, the `writes_mcp_config_file` row and the `provision` anchor sentence; `agent-backend.html` — the `accepts_mcp_config` cell.
