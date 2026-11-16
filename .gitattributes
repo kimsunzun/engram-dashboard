@@ -12,3 +12,6 @@
 # PowerShell is tolerant of LF, but these sit next to the launchers and are edited together —
 # keeping them uniform avoids mixed-ending diffs in the same directory.
 *.ps1 text eol=crlf
+
+# Git hooks run under sh — a CRLF checkout breaks them (and with them every commit in that worktree).
+scripts/git-hooks/* text eol=lf
