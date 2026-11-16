@@ -8,7 +8,13 @@ qa 의 전체 회귀다. `ci.yml` 의 세 잡을 로컬에서 돈다. 잡끼리�
 
 ### backend 잡
 
-분리 실행으로 하나씩 돈다:
+먼저 툴체인 단언을 래퍼 없이 워크트리 루트의 bash 에서 돈다 — CI 스텝 `Resolve and assert pinned toolchain` 의 로컬판이다. `PASS toolchain` 이 나와야 PASS 다:
+
+```bash
+expected=$(sed -nE 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' rust-toolchain.toml); actual=$(rustc --version | awk '{print $2}'); [ -n "$expected" ] && [ "$actual" = "$expected" ] && echo "PASS toolchain $actual" || echo "FAIL toolchain active=$actual pinned=$expected"
+```
+
+그다음 분리 실행으로 하나씩 돈다:
 
 ```bash
 cargo build
@@ -25,7 +31,7 @@ cargo test -p engram-dashboard-platform --features snap-overlay -- window::snap 
 - `--list` 네 줄은 줄마다 `: test` 로 끝나는 줄이 1개 이상이어야 PASS 다.
 - `window::snap` 줄은 `test window::snap::` … `ok` 줄이 1개 이상이어야 PASS 다.
 - 로컬 워크스페이스 회귀는 실 claude 시험을 빼지 않는다 — claude 가 없거나 미로그인이면 그 시험은 수단 없음 PARTIAL 이다(`qa.md` 「claude · codex 레인」과 같다).
-- 빠진 스텝이 없는지 backend 잡 스텝 이름과 대조한다:
+- 빠진 스텝이 없는지 backend 잡 스텝 이름과 대조하고, 이 절(툴체인 단언 · 위 블록 · `qa.md` 「모듈별 명령」의 crate 줄 · 아래 「생성물 동기」)에 대응하는 줄이 없는 스텝 이름을 보고에 싣는다(없으면 「빠진 스텝 없음」):
   ```bash
   PYTHONIOENCODING=utf-8 py -c "import yaml; w=yaml.safe_load(open('.github/workflows/ci.yml',encoding='utf-8')); [print(s['name']) for s in w['jobs']['backend']['steps'] if 'run' in s]"
   ```
@@ -51,7 +57,7 @@ git ls-files -co -- $B | while read -r f; do echo "$(git hash-object "$f") $f"; 
 - `npm ls --depth=0` 이 빠짐(`missing`) · 어긋남(`invalid`)을 찍을 때만 분리 실행으로 `npm ci` 를 돈다.
 - 이 워크트리의 vite 가 떠 있으면 `npm ci` 를 돌지 않는다 — vite 가 쥔 `esbuild.exe` 때문에 `EPERM` 으로 죽고 `node_modules` 가 반쯤 지워진다. 확인 = `qa.md` 「띄우기 전 점검」 넷째 줄(포트와 무관). 떠 있으면 끄지 않고 사용자에게 알린다.
 - 변경이 `package.json` · `package-lock.json` 을 건드리면(`git diff --name-only <기준점>`) 따로 만든 사본 `$QA_TMP/npm` 에서도 분리 실행으로 `npm ci` 를 돈다 — 설치된 패키지가 멀쩡하면 위 조건이 `npm ci` 를 건너뛰어 불일치가 안 드러난다. 사용자 트리에서는 이 이유로 `npm ci` 를 돌지 않는다.
-- 그 사본은 `qa.md` 「변이 확인 — 격리 사본」 세 줄의 `$QA_TMP/wt` 를 `$QA_TMP/npm` 으로 바꿔 만들고, `npm ci` 판정 직후 `git worktree remove --force "$QA_TMP/npm"` 으로 지운다 — `$QA_TMP/wt` 는 변이 확인 몫이라 쓰지 않는다.
+- 그 사본은 `qa.md` 「변이 확인」 › 「격리 사본 — 대체」 세 줄의 `$QA_TMP/wt` 를 `$QA_TMP/npm` 으로 바꿔 만들고, `npm ci` 판정 직후 `git worktree remove --force "$QA_TMP/npm"` 으로 지운다 — `$QA_TMP/wt` 는 변이 확인 몫이라 쓰지 않는다.
 - `npm ci` 가 `EUSAGE`(`package.json` · `package-lock.json` 불일치)로 죽으면 사용자 트리든 사본이든 FAIL 이다 — CI 도 같은 데서 죽는 저장소 결함이다.
 
 그 뒤 `ci.yml` 의 bash 스텝을 뽑아 현재 셸의 서브셸에서 그대로 돈다(하네스의 `rg` 는 셸 함수라 새 `bash` 에는 없다):

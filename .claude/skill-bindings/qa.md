@@ -189,7 +189,29 @@ git worktree add --detach "$QA_TMP/base" <기준점>
 - 프론트: 사본에서 분리 실행으로 `npm ci` 뒤 `npx vitest run <깨진 시험 파일>`.
 - 라벨 규칙 = qa 골격 `references/flow.md` §2 「깨진 테스트 가르기」. `FAIL(선재)` 는 「추적 기록 위치」로 찾는다.
 
-## 변이 확인 — 격리 사본
+## 변이 확인
+
+작업 트리에서 깬다(qa flow §변이 확인 「작업 트리 변이」를 이 프로젝트가 허용한다). 지시서가 「같은 트리를 쓰는 다른 작업자 없음」을 밝히지 않았거나, 진행 중인 rebase · merge · cherry-pick 이 있거나(`git status` — 이어 가는 커밋은 pre-commit 을 건너뛴다), 커밋 차단이 걸려 있지 않으면(`git config core.hooksPath` 가 `scripts/git-hooks` 가 아니거나, `scripts/git-hooks/pre-commit` 이 없거나, `grep -c $'' scripts/git-hooks/pre-commit` 이 0 이 아니면) 「격리 사본 — 대체」로 간다.
+
+- 커밋 차단 = `scripts/git-hooks/pre-commit` — 스테이지에 줄 끝 표식이 든 커밋을 거부한다. 설치 = 저장소 루트에서 `git config core.hooksPath scripts/git-hooks` 한 번(모든 워크트리에 걸린다).
+
+- `#[ignore]` 시험은 `--` 뒤에 `--ignored` 를 붙인다 — 안 붙이면 0개가 돈다. `real_wmi` 는 사용자 확인 뒤에만 돈다(「비용 없는 `#[ignore]` 레인」).
+
+### 작업 트리
+
+```bash
+mkdir -p "$QA_TMP/mut" && cp <파일> "$QA_TMP/mut/" && sha256sum <파일> > "$QA_TMP/mut/before.sha"
+```
+
+- 한 번에 한 줄을 깨고, 깬 줄 끝에 `// QA-MUTATION` 을 단다.
+- Rust: 분리 실행(작업 트리 · 기본 target)으로 `cargo test -p <crate> <시험 이름>` — 실패해야 한다. 데몬 exe 를 띄우는 시험(`stop_smoke` · `lib_unit` 의 `real_wmi`)은 그 앞에 `cargo build -p engram-dashboard-daemon` 을 돈다.
+- 프론트: 작업 트리에서 `npx vitest run <시험 파일>`.
+- 원복 전 = `diff "$QA_TMP/mut/<파일 이름>" <파일>` 에 표식 단 한 줄만 나와야 한다 — 아니면 덮어쓰지 않고 멈춘다.
+- 원복 = `cp "$QA_TMP/mut/<파일 이름>" <파일>` 로 덮어쓴다 — 수정 시각이 바뀌어 다음 빌드가 그 crate 를 다시 짓는다.
+- 원복 확인 = `sha256sum -c "$QA_TMP/mut/before.sha"` 가 `OK` 이고 `git grep --untracked -n -E '(//|#)[[:space:]]*QA-MUTATION[[:space:]]*$' -- ':!*.md'` 가 비어야 한다. 아니면 멈춘다.
+- 멈출 때는 `$QA_TMP/mut` 를 「뒷정리」에서 지우지 않고, 그 경로와 깬 줄을 보고에 싣는다.
+
+### 격리 사본 — 대체
 
 ```bash
 git worktree add --detach "$QA_TMP/wt" HEAD
@@ -203,8 +225,8 @@ git ls-files -o --exclude-standard -z | xargs -0 -r cp --parents -t "$QA_TMP/wt"
 - 줄끝만 다른 ` M` 파일은 `git diff` 에 안 나와 사본에 건너가지 않는다 — 내용은 같다. `-c core.safecrlf=false` 는 그 파일마다 찍히는 LF→CRLF 경고만 끈다(오류는 그대로 찍힌다).
 - Rust: 사본 줄을 깬 뒤 분리 실행을 `-WorkDir "$QA_TMP/wt"` 로 `cargo test --target-dir "$QA_TMP/target" -p <crate> <시험 이름>` — 실패해야 한다.
 - 셸 패키지 시험 중 데몬 exe 를 띄우는 것(`stop_smoke` · `lib_unit` 의 `real_wmi`)은 `<target-dir>/<profile>/` 의 데몬을 쓴다 — 그 앞에 같은 사본 · 같은 `--target-dir` 로 `cargo build -p engram-dashboard-daemon` 을 돈다. daemon crate 시험은 cargo 가 데몬을 같이 짓는다.
-- `#[ignore]` 시험(위 둘 포함)은 `--` 뒤에 `--ignored` 를 붙인다 — 안 붙이면 0개가 돈다. `real_wmi` 는 사용자 확인 뒤에만 돈다(「비용 없는 `#[ignore]` 레인」).
 - 프론트: 사본에서 `npm ci` 뒤 `npx vitest run <시험 파일>`.
+- 저장소 밖 `--target-dir` 를 쓰면 `builtin\` 을 `<target-dir>/debug/deps/` 옆에 복사한다 — 데몬이 설치 루트 기준으로 찾는다.
 - 사본은 뒷정리 때 통째로 지운다. 작업 트리 대조는 「뒷정리」 첫 줄이다.
 
 ## GUI 실측
