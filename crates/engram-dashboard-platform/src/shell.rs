@@ -26,7 +26,7 @@ pub fn default_shell() -> &'static str {
 ///   or the `"` and `\` that cmd counts as quotes may reach it changed, as cmd interprets them. The decision not to fix it and its
 ///   rationale are authoritatively in the comment 「알려진 한계 — `%VAR%` 가 든 경로는 shim 을
 ///   지나며 치환된다」 inside `build_spec` in agent `backend/codex/mod.rs`. Mitigation is placed by the caller per value — e.g.
-///   [`path_is_cli_safe`] · [`text_is_cli_safe`] · codex's `developer_instructions_override` · `mcp_attachment`
+///   [`path_is_cli_safe`] · [`text_is_cli_safe`] · codex's `cmdline::priming_value` · `mcp_attachment`
 ///   rejection · passing claude `--settings` as a file path instead of inline JSON.
 /// - A process launched with this command is, on Windows, the `cmd.exe` wrapper rather than that CLI — the CLI itself is a descendant under it.
 // ADR-0230

@@ -743,7 +743,7 @@ mod tests {
     }
 
     /// ★No warn-and-launch on real materials★ — a priming the rule refuses, and a line over the budget only because of
-    /// the priming, both fail the launch (the Noop path keeps warn-and-drop — its pins are in `codex/mod.rs`).
+    /// the priming, both fail the launch (the Noop path carries no priming at all — ADR-0370).
     // ADR-0337
     #[test]
     fn a_priming_the_terminal_line_cannot_carry_fails_the_launch() {
@@ -889,7 +889,7 @@ mod tests {
 
     const SID: Uuid = Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
 
-    fn endpoint(priming_file: Option<PathBuf>) -> ControlEndpoint {
+    fn endpoint() -> ControlEndpoint {
         ControlEndpoint {
             agent_id: Uuid::nil(),
             epoch: 1,
@@ -897,12 +897,10 @@ mod tests {
             token: "deadbeef".to_string(),
             config_path: None,
             send_exe: None,
-            priming_file,
             grants: vec![ToolGrant::Mcp {
                 server: MCP_SERVER_NAME.to_string(),
                 tool: "eg_send".to_string(),
             }],
-            settings_file: None,
             mail_allowed: false,
         }
     }
@@ -933,15 +931,11 @@ mod tests {
         words.iter().map(|w| w.to_string()).collect()
     }
 
-    /// ★Real argv order★ — base args, pass-through, preset `-c` lines, MCP, priming (terminal); the control channel's
-    /// priming file is not read on the real path (a baked one that would show up does not); never `-m`.
+    /// ★Real argv order★ — base args, pass-through, preset `-c` lines, MCP, priming (terminal); never `-m`.
     // ADR-0337
     #[test]
     fn real_materials_produce_the_pinned_codex_argv() {
-        let noop_priming =
-            std::env::temp_dir().join(format!("engram-codex-noop-priming-{}.md", Uuid::new_v4()));
-        std::fs::write(&noop_priming, "noop priming text").unwrap();
-        let control = endpoint(Some(noop_priming.clone()));
+        let control = endpoint();
 
         let (terminal, _) = materialized(AgentOutputFormat::Terminal, &real_kit());
         let terminal = terminal.unwrap();
@@ -1004,13 +998,9 @@ mod tests {
             assert_eq!(spec.program, program, "{case}");
             assert_eq!(spec.args, args, "{case}");
             assert!(!spec.args.iter().any(|a| a == "-m"), "{case}");
-            assert!(
-                !spec.args.iter().any(|a| a.contains("noop priming text")),
-                "{case}"
-            );
         }
 
-        // A real terminal kit without instructions carries no priming at all — still not the control channel's.
+        // A real terminal kit without instructions carries no priming at all.
         let bare = LaunchArtifacts {
             instructions_override: None,
             ..terminal
@@ -1029,7 +1019,6 @@ mod tests {
             "{:?}",
             spec.args
         );
-        let _ = std::fs::remove_file(noop_priming);
     }
 
     /// A preset line that sets `developer_instructions` or the engram MCP server stays on the line, and ours come later
@@ -1049,7 +1038,7 @@ mod tests {
         let spec = real_spec(
             AgentOutputFormat::Terminal,
             SpawnMode::Fresh,
-            Some(endpoint(None)),
+            Some(endpoint()),
             &artifacts.unwrap(),
         );
         let theirs = spec

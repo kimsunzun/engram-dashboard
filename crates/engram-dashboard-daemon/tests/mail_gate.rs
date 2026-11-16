@@ -26,7 +26,6 @@ use engram_dashboard_daemon::control::mcp_server::{
     start_mcp_server_with_help, start_mcp_server_without_help, CommandTableSlot, ManagerSlot,
     McpServerHandle, MessagingSlot, RosterBroadcastSlot,
 };
-use engram_dashboard_daemon::control::priming::NoopPrimingProvider;
 use engram_dashboard_daemon::control::registry::ControlRegistry;
 use engram_dashboard_daemon::control::DaemonControlChannel;
 
@@ -527,7 +526,6 @@ async fn a_credential_minted_by_the_real_provision_path_is_refused_end_to_end() 
         handle.url.clone(),
         engram_dashboard_daemon::control::mcp_config::McpDir::new(data_dir.join("mcp-config")),
         Some(std::path::PathBuf::from("C:/app/engram.exe")),
-        Arc::new(NoopPrimingProvider),
     );
 
     // claude 백엔드의 실제 capability 를 그대로 넘긴다 — 여기 리터럴을 적으면 그 판정이 다시
@@ -573,9 +571,9 @@ async fn a_credential_minted_by_the_real_provision_path_is_refused_end_to_end() 
 /// ★우편 평면 **밖**인 backend 는 제어 채널을 받아도 우편 인가를 못 받는다★ — `supports_control_channel`
 /// 을 켠 부수효과로 보내기만 열렸던 상태를 되돌린 자리다(사용자 결정 2026-09-18).
 ///
-/// ★두 층을 함께 잰다★: ① 자격증명(HTTP 우편 라우트가 거절하나) ② endpoint 가 나르는 것들(우편 인가·발신
-///   grant·프라이밍). 한 층만 재면 「거절은 하는데 가르치기는 한다」가 그대로 통과한다 — 그 어긋남이
-///   ADR-0099 가 실측한 발신 freeze 의 모양이다.
+/// ★Two layers are measured together★: ① the credential (do the HTTP mail routes refuse it) ② what the endpoint
+///   carries (the mail authorization and the send grants). Measuring one layer lets 「refuses, yet grants」 through —
+///   that mismatch is the shape of the send freeze ADR-0099 measured.
 #[tokio::test]
 async fn a_backend_outside_the_mail_plane_gets_control_but_no_mail() {
     let registry = Arc::new(ControlRegistry::new());
@@ -604,14 +602,13 @@ async fn a_backend_outside_the_mail_plane_gets_control_but_no_mail() {
         handle.url.clone(),
         engram_dashboard_daemon::control::mcp_config::McpDir::new(data_dir.join("mcp-config")),
         Some(std::path::PathBuf::from("C:/app/engram.exe")),
-        Arc::new(NoopPrimingProvider),
     );
 
     // ★축을 **합성으로** 세운다 — 오늘 `uses_mail=false` 를 선언하는 backend 가 하나도 없기 때문이다★
     //   (codex 가 마지막이었고 ADR-0209 의 MCP 배선과 함께 true 로 갔다). 실 backend 를 읽던 옛 형태로
     //   되돌리면 이 테스트는 **우편 평면 안** 스폰을 재면서 이름만 밖이라고 말하게 된다.
-    //   ★그래도 이 축을 지우지 말 것★: 데몬의 파생·게이트·프라이밍 세 갈래가 이 조합에서만 함께
-    //   드러나고, 다음 backend 가 그 조합으로 들어올 때 회귀망이 이미 서 있어야 한다.
+    //   ★Do not delete this axis anyway★: the daemon's derivation and gate show together only in this combination, and
+    //   the net must already stand when the next backend arrives with it.
     // ADR-0209
     let needs = ControlChannelNeeds {
         accepts_mcp_config: false,
@@ -642,17 +639,12 @@ async fn a_backend_outside_the_mail_plane_gets_control_but_no_mail() {
         );
     }
 
-    // ② endpoint — 우편 불가 · 발신 grant 0 · 프라이밍 없음. 「인가를 안 주면 기록도 그렇게 말한다」.
+    // ② endpoint — no mail · zero send grants. 「No authorization, and the record says so」.
     assert!(!ep.mail_allowed, "인가를 안 줬는데 기록은 가능이라 말한다");
     assert!(
         ep.grants.is_empty(),
         "발신 입구가 없는데 grant 가 실렸다: {:?}",
         ep.grants
-    );
-    assert!(
-        ep.priming_file.is_none(),
-        "못 쓰는 채널을 가르치는 프라이밍이 실렸다: {:?}",
-        ep.priming_file
     );
     // ③ 제어 CLI 입구는 그대로 받는다 — 이 칸이 닫는 것은 우편뿐이다(ADR-0132 결정 5).
     assert!(ep.send_exe.is_some(), "제어 CLI 배선은 유지돼야");
@@ -665,28 +657,23 @@ async fn a_backend_outside_the_mail_plane_gets_control_but_no_mail() {
 /// 못 박은 것이 실 선언에서 그대로 서는지 잰다.
 ///
 /// ★실 backend 선언을 읽는 것이 요점이다 — 리터럴을 적으면 그 판정이 테스트 사본이 된다★: 이 조각이
-///   건드린 두 칸(`accepts_mcp_config`·`uses_mail`)이 **함께** 움직여야 아래 셋이 동시에 선다. 한쪽만
-///   되돌리면 셋 중 하나가 조용히 무너진다 — `uses_mail` 을 되돌리면 grant 0 · 프라이밍 없음(툴을 쥔 채
-///   아무도 안 가르친 상태), `accepts_mcp_config` 를 되돌리면 CLI 미러가 인가돼 열린다.
-/// ★프라이밍은 **파일 선택까지만** 잰다★ — 그 파일이 codex argv 에 실리는지는 여기 범위가 아니다
-///   (실리지 않는다. 사유의 정본은 `backend/codex/` 의 emission 자리 주석).
+///   the two fields this piece touched (`accepts_mcp_config` · `uses_mail`) must move **together** for both
+///   assertions below to stand. Revert one and one of them quietly falls — revert `uses_mail` and the grant is gone
+///   (the tool in hand with no grant); revert `accepts_mcp_config` and the CLI mirror is authorized open.
 // ADR-0209
 #[test]
 fn codex_mails_over_mcp_and_the_cli_mirror_closes() {
     use engram_dashboard_agent::types::ToolGrant;
     use engram_dashboard_daemon::control::mcp_config::MCP_SERVER_NAME;
     use engram_dashboard_daemon::control::mcp_server::SEND_MESSAGE_TOOL;
-    use engram_dashboard_daemon::control::priming::FixedPrimingProvider;
 
     let data_dir =
         std::env::temp_dir().join(format!("engram-mail-gate-codex-{}", AgentId::new_v4()));
-    let priming = std::path::PathBuf::from("C:/engram/builtin/instructions/priming.md");
     let channel = DaemonControlChannel::new(
         Arc::new(ControlRegistry::new()),
         "http://127.0.0.1:1/mcp".to_string(),
         engram_dashboard_daemon::control::mcp_config::McpDir::new(data_dir.join("mcp-config")),
         Some(std::path::PathBuf::from("C:/app/engram.exe")),
-        Arc::new(FixedPrimingProvider(priming.clone())),
     );
     let command = AgentCommand::Codex {
         extra_args: vec![],
@@ -720,20 +707,14 @@ fn codex_mails_over_mcp_and_the_cli_mirror_closes() {
         }],
         "발신 입구 grant 가 MCP send_message 하나여야"
     );
-    assert_eq!(
-        ep.priming_file.as_deref(),
-        Some(priming.as_path()),
-        "우편 평면 안이면 프라이밍 파일이 선택돼야(`uses_mail` 게이트가 살아 있다는 증거)"
-    );
     let _ = std::fs::remove_dir_all(&data_dir);
 }
 
 /// ★`engram` 실행파일이 없어도 우편 평면 **밖** 스폰은 끊기지 않는다★ — fail-closed 가 지키는 짝
 /// (데몬이 낸 CLI 우편 인가 `mail_allowed`·[Cli] grant ↔ 부를 실행파일)이 그 스폰에는 애초에 없기
-/// 때문이다. ★그 짝의 한쪽은 프라이밍이 아니다★ — CLI 판 지시서는 삭제됐고 비-MCP 갈래는 아무것도
-/// 배우지 못한 채 뜨지만 인가는 그대로 나가므로, 짝도 판정도 그대로다(ADR-0209 · `control/mod.rs`).
-/// 이 갈래를 함께 끊으면
-/// 그 설치에서 우편과 무관한 backend 의 스폰이 통째로 중단된다.
+/// 때문이다. ★Neither side of that pair is priming★ — a non-MCP spawn learns nothing yet still gets the
+/// authorization, so the pair and the verdict stand as they are (ADR-0209 · `control/mod.rs`). Cutting this branch too
+/// would abort, in that install, every spawn of a backend that has nothing to do with mail.
 #[test]
 fn a_backend_outside_the_mail_plane_survives_a_missing_cli_binary() {
     let registry = Arc::new(ControlRegistry::new());
@@ -744,7 +725,6 @@ fn a_backend_outside_the_mail_plane_survives_a_missing_cli_binary() {
         "http://127.0.0.1:1/mcp".to_string(),
         engram_dashboard_daemon::control::mcp_config::McpDir::new(data_dir.join("mcp-config")),
         None, // ← CLI 실행파일을 못 찾은 데몬
-        Arc::new(NoopPrimingProvider),
     );
 
     let no_mail = ControlChannelNeeds {

@@ -1,30 +1,16 @@
-//! PrimingProvider seam (ADR-0092 receive contract) — yields the **absolute path** of the priming file to inject
-//! into the system prompt at spawn.
+//! The mail-CLI decider for priming text ([`teaches_mail_cli`] · [`mentions_mail_cli_surface`]) and the content checks
+//! on the shipped built-in priming (`builtin/instructions/priming.md` — the launch materials' priming source, ADR-0327).
 //!
-//! ★Role★: at every spawn (provision) the daemon asks this seam for the priming file path, and if there is one sends that absolute path
-//!   as `ControlEndpoint.priming_file`. This module deals with the **path only** — it does not read the file
-//!   content (no hardcoding, ADR-0092: the content lives only in the external MD `builtin/instructions/priming.md`).
-//!   Only a Noop-kit launch loads that path — real launch materials take the priming from the built-in folder and
-//!   ignore it, `ENGRAM_PRIMING_FILE` included (ADR-0327).
-//!
-//! ★Why a seam (ADR-0092 "leave the road open")★: the current implementation (`FilePrimingProvider`) gives **one shared file
-//!   regardless of agent** (a stopgap). When a per-agent prompt injection / skill registration system arrives in the future, only this
-//!   trait's implementation is swapped (per-agent · per-capability priming) and it is absorbed without changing the wiring.
-//!   So provision is made to depend only on the `PrimingProvider` trait.
-//!
-//! ★Graceful (does not block the spawn)★: if there is no resolved file it returns `None` and leaves only a warn log — the absence of
-//!   priming is not a reason for spawn failure (a **different** policy from the control channel provision's fail-closed). The agent
-//!   comes up without priming (the receive contract is not applied, but it works functionally).
+//! ★No priming provider lives here — do not revive one★: the daemon resolves no priming path per spawn and
+//!   `ENGRAM_PRIMING_FILE` is read nowhere; the launch materials (`LaunchKitSource`) are the only priming seam.
 //!
 //! tauri import 0 (daemon crate).
 // ADR-0092
-
-use std::path::PathBuf;
+// ADR-0370
 
 use engram_dashboard_agent::types::{
     CLI_EXE_ENV, CLI_EXE_NAME, CLI_GROUP_MAIL, CLI_MAIL_FLAGS, CLI_MAIL_VERBS,
 };
-use engram_dashboard_platform::shell::path_is_cli_safe;
 
 /// A character that continues a token — if this character is attached on either side of a match, it is **part of another word**.
 ///
@@ -215,247 +201,15 @@ pub fn mentions_mail_cli_surface(content: &str) -> bool {
         .any(|f| contains_bounded(&normalized, &normalized_token(f)))
 }
 
-/// Send+Sync+'static — DaemonControlChannel holds it as an Arc and calls it at every provision.
-pub trait PrimingProvider: Send + Sync + 'static {
-    /// The **absolute path** of the priming MD file to inject into this spawn. `None` if it is absent (file missing) or unconfigured.
-    /// ★Absolute path contract★: the agent's cwd differs from the daemon/repo (each workspace), so it must be an absolute path
-    ///   for claude to find the file — a relative path would be resolved against the agent's cwd and miss.
-    ///
-    /// ★**Who gets the injection is not decided by this seam**★: the material for deciding the consistency invariant (the mail
-    ///   channel priming **teaches** == the mail channel that spawn can actually **use** — violate it and you get the send freeze ADR-0099 measured)
-    ///   is `uses_mail` and `accepts_mcp_config`, and only the daemon knows them. So provision first chooses **whether to call**,
-    ///   and this seam answers only 「줄 파일이 있나」 (is there a file to give). The authority for that pairing is
-    ///   `DaemonControlChannel::provision`.
-    // ADR-0126
-    // ADR-0133
-    fn priming_file(&self) -> Option<PathBuf>;
-}
-
-/// ★Why base is taken as the exe-based root (ADR-0092, both reviewers PRIMARY)★: earlier, base was the daemon process cwd
-///   (`from_cwd`) — but the production daemon is launched through WMI Win32_Process.Create and **does not inherit the parent cwd**
-///   (cwd=System32), so priming was **quietly disabled**. The fix = reuse the **same exe-walk-up pattern**
-///   (`data_dir::find_install_root`) that `default_data_dir` uses to anchor `.engram-dev`, and take a
-///   trustworthy absolute root as base (distrust cwd).
-///
-/// ★Why base injection (new)★: this module does not resolve the root itself but takes base at construction — so tests can
-///   swap base for a temp dir and verify deterministically without cwd/exe contamination (seam-like). The production wiring is from_install_root.
-pub struct FilePrimingProvider {
-    base_dir: PathBuf,
-}
-
-// ADR-0368
-const REL_MCP_PRIMARY: &str = "builtin/instructions/priming.md";
-pub(crate) const ENV_OVERRIDE: &str = "ENGRAM_PRIMING_FILE";
-
-impl FilePrimingProvider {
-    pub fn new(base_dir: PathBuf) -> Self {
-        Self { base_dir }
-    }
-
-    /// If the root cannot be obtained (current_exe failure etc.), base is set to `.` (relative) — in that case absolutize fails to
-    ///   make it absolute and yields None (a relative path is never injected).
-    pub fn from_install_root() -> Self {
-        let base = crate::data_dir::find_install_root().unwrap_or_else(|| PathBuf::from("."));
-        Self::new(base)
-    }
-
-    /// ★absolute-or-None contract (ADR-0092, Codex #3)★: earlier, if base was relative it **tried** to make it absolute once more with current_dir,
-    ///   and if even that failed it returned the relative PathBuf as it was.
-    ///   Now the cwd fallback is removed, and if it cannot be made absolute it strictly yields None (a relative path never becomes Some).
-    fn absolutize(&self, p: PathBuf) -> Option<PathBuf> {
-        if p.is_absolute() {
-            return Some(p);
-        }
-        let joined = self.base_dir.join(&p);
-        joined.is_absolute().then_some(joined)
-    }
-
-    fn resolve_checked(&self, raw: PathBuf, label: &str) -> Option<PathBuf> {
-        let Some(abs) = self.absolutize(raw) else {
-            tracing::warn!(
-                label,
-                "프라이밍 경로를 절대경로로 해석 못 함(base 가 절대 아님) — 프라이밍 없이 스폰 진행(ADR-0092 graceful)"
-            );
-            return None;
-        };
-        if !path_is_cli_safe(&abs) {
-            tracing::warn!(
-                label,
-                path = %abs.display(),
-                "프라이밍 경로가 비-UTF8 이거나 cmd.exe 메타문자(% & ^ | < >)를 포함 — 부패 위험으로 미주입(ADR-0092)"
-            );
-            return None;
-        }
-        // ★TOCTOU residue (accepted, ADR-0092 Codex #4)★: if the file disappears between the moment is_file passes here and the moment claude
-        //   actually opens the file (after spawn), claude comes up without priming or raises an error. The priming
-        //   file is stable infrastructure (version-controlled MD), not a racing target, so the risk is low — accepted as a best-effort existence check and
-        //   no lock is taken (not worth the cost). The residual risk is on par with graceful absence (the spawn still comes up).
-        if abs.is_file() {
-            return Some(abs);
-        }
-        tracing::warn!(
-            label,
-            path = %abs.display(),
-            "프라이밍 파일을 못 찾음 — 프라이밍 없이 스폰 진행(ADR-0092 graceful)"
-        );
-        None
-    }
-}
-
-impl PrimingProvider for FilePrimingProvider {
-    fn priming_file(&self) -> Option<PathBuf> {
-        // ★An override failure does not fall back to fixed★: quietly swapping an explicit override for a different file is
-        //   confusing. Whichever gate it is caught at, None (proceed without priming — resolve_checked warns).
-        // ★The env override beats the fixed file (ADR-0099 test-seam)★: a harness/operator can
-        //   force a specific priming (roundtrip_smoke `--priming` passes it through this env). Production leaves it unset so the fixed
-        //   file below lives. ★But a spawn that provision has **decided not to call** this seam is not revived by this override either★ —
-        //   that decision is one body with the mail authorization, so it must not be flipped by a single env (the trait doc is the authority).
-        if let Some(v) = std::env::var_os(ENV_OVERRIDE) {
-            if !v.is_empty() {
-                return self.resolve_checked(PathBuf::from(v), "override");
-            }
-        }
-
-        self.resolve_checked(PathBuf::from(REL_MCP_PRIMARY), "fixed")
-    }
-}
-
-/// Fills the seam in tests and paths unrelated to priming while keeping `--append-system-prompt-file` from being attached.
-/// Removing the dependence on a real file keeps the test deterministic.
-pub struct NoopPrimingProvider;
-
-impl PrimingProvider for NoopPrimingProvider {
-    fn priming_file(&self) -> Option<PathBuf> {
-        None
-    }
-}
-
-/// Fixed-path provider (test only) — returns the given absolute path as is (no existence check). Used in integration tests that
-/// confirm priming is carried down through the spawn wiring.
-pub struct FixedPrimingProvider(pub PathBuf);
-
-impl PrimingProvider for FixedPrimingProvider {
-    fn priming_file(&self) -> Option<PathBuf> {
-        Some(self.0.clone())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use engram_dashboard_agent::types::CLI_EXE_NAME;
-    use std::io::Write as _;
-    use std::sync::Mutex;
+    use std::path::PathBuf;
 
-    /// ★env is process-global★: when tests that touch `ENGRAM_PRIMING_FILE` run in parallel, set/remove
-    ///   erase each other (flaky). This mutex serializes those tests (cargo is parallel by default so it is required).
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    fn make_fixture_dir() -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("engram-priming-test-{}", uuid::Uuid::new_v4()));
-        let instructions = dir.join("builtin").join("instructions");
-        std::fs::create_dir_all(&instructions).unwrap();
-        let mut f = std::fs::File::create(instructions.join("priming.md")).unwrap();
-        writeln!(f, "# 테스트 프라이밍 (mcp-primary)").unwrap();
-        dir
-    }
-
-    #[test]
-    fn resolves_fixed_relative_to_absolute_under_base() {
-        let _env = ENV_LOCK.lock().unwrap();
-        let dir = make_fixture_dir();
-        let provider = FilePrimingProvider::new(dir.clone());
-        std::env::remove_var(ENV_OVERRIDE);
-        let got = provider.priming_file().expect("고정 파일이 있으면 Some");
-        assert!(got.is_absolute(), "해석 결과는 절대경로여야: {got:?}");
-        assert!(
-            got.ends_with("builtin/instructions/priming.md")
-                || got.ends_with("builtin\\instructions\\priming.md")
-        );
-        assert!(got.is_file(), "실제 파일을 가리켜야");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn missing_fixed_file_yields_none_no_panic() {
-        let _env = ENV_LOCK.lock().unwrap();
-        let dir =
-            std::env::temp_dir().join(format!("engram-priming-empty-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::env::remove_var(ENV_OVERRIDE);
-        let provider = FilePrimingProvider::new(dir.clone());
-        assert!(provider.priming_file().is_none(), "부재 파일 → None");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn env_override_wins_over_fixed() {
-        let _env = ENV_LOCK.lock().unwrap();
-        let dir = make_fixture_dir();
-        let override_file = dir.join("custom-priming.md");
-        {
-            let mut f = std::fs::File::create(&override_file).unwrap();
-            writeln!(f, "# override 프라이밍").unwrap();
-        }
-        std::env::set_var(ENV_OVERRIDE, &override_file);
-        let provider = FilePrimingProvider::new(dir.clone());
-        let got = provider.priming_file().expect("override 파일 존재 → Some");
-        assert!(got.is_absolute());
-        assert!(
-            got.ends_with("custom-priming.md"),
-            "override 경로가 이겨야: {got:?}"
-        );
-        std::env::remove_var(ENV_OVERRIDE);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn env_override_missing_file_yields_none_not_fallback() {
-        let _env = ENV_LOCK.lock().unwrap();
-        let dir = make_fixture_dir();
-        let ghost = dir.join("does-not-exist.md");
-        std::env::set_var(ENV_OVERRIDE, &ghost);
-        let provider = FilePrimingProvider::new(dir.clone());
-        assert!(
-            provider.priming_file().is_none(),
-            "override 파일 부재 → None(fixed 폴백 안 함)"
-        );
-        std::env::remove_var(ENV_OVERRIDE);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    // ── ADR-0092 hardening: absolute-or-None contract (Codex #3) ──────────────────────────────
-    #[test]
-    fn relative_base_yields_none_never_relative_path() {
-        let _env = ENV_LOCK.lock().unwrap();
-        std::env::remove_var(ENV_OVERRIDE);
-        let provider = FilePrimingProvider::new(PathBuf::from("relative-base"));
-        assert!(
-            provider.priming_file().is_none(),
-            "상대 base → 절대화 불가 → None(상대경로 유출 금지)"
-        );
-    }
-
-    // ── ADR-0092 hardening: cmd.exe metacharacter path → None (Codex #1+#5) ────────────────────
-    #[test]
-    fn cmd_metachar_in_path_yields_none() {
-        let _env = ENV_LOCK.lock().unwrap();
-        let root =
-            std::env::temp_dir().join(format!("engram-priming-meta-{}", uuid::Uuid::new_v4()));
-        let meta_base = root.join("we&ird%dir");
-        let instructions = meta_base.join("builtin").join("instructions");
-        std::fs::create_dir_all(&instructions).unwrap();
-        let mut f = std::fs::File::create(instructions.join("priming.md")).unwrap();
-        writeln!(f, "# meta").unwrap();
-        std::env::remove_var(ENV_OVERRIDE);
-        let provider = FilePrimingProvider::new(meta_base.clone());
-        assert!(
-            provider.priming_file().is_none(),
-            "cmd 메타문자(% &) 포함 경로 → None(부패 위험 미주입)"
-        );
-        let _ = std::fs::remove_dir_all(&root);
-    }
+    /// The built-in priming the launch materials merge into every claude and codex launch — these checks guard it.
+    // ADR-0368
+    const BUILTIN_PRIMING: &str = "builtin/instructions/priming.md";
 
     // ── ADR-0099/0126: consistency invariant pin (content-based) — the channel the production priming file actually teaches ──────
     /// Tests always run inside the compile-time source tree, so MANIFEST_DIR is trustworthy.
@@ -616,7 +370,7 @@ mod tests {
     #[test]
     fn production_priming_file_carries_no_mail_cli_surface() {
         let root = repo_root();
-        let a = std::fs::read_to_string(root.join(REL_MCP_PRIMARY)).expect("A 프라이밍 파일 존재");
+        let a = std::fs::read_to_string(root.join(BUILTIN_PRIMING)).expect("A 프라이밍 파일 존재");
         // **Total** absence of A's CLI surface — exactly the check list of the ADR-0126 impact/invariant (command notation + accompanying flags).
         //   If only the name is erased and flag notation remains, the roundabout teaching survives in half.
         // ★Do not revert to a bare `contains`★: even merely scrambling the notation with case, line breaks or markdown emphasis
@@ -642,7 +396,7 @@ mod tests {
     #[test]
     fn production_priming_files_point_at_the_control_surface() {
         let root = repo_root();
-        let a = std::fs::read_to_string(root.join(REL_MCP_PRIMARY)).expect("A 프라이밍 파일 존재");
+        let a = std::fs::read_to_string(root.join(BUILTIN_PRIMING)).expect("A 프라이밍 파일 존재");
         let discovery = format!("{CLI_EXE_NAME} help");
         assert!(
             a.contains(&discovery),

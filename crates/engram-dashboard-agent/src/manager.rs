@@ -1698,10 +1698,11 @@ impl AgentManager {
         //   토큰/config 를 회수한다(FIX 3 leak 방지). supports_control_channel=false 인 backend 는 provision
         //   을 건너뛰므로 None(부재)과 동일하게 흐른다 — 그 backend 엔 fail-closed 계약이 적용되지 않는다.
         let control_endpoint = if backend::supports_control_channel(&profile.command) {
-            // ADR-0099: backend 의 MCP-capability 를 provision 에 넘겨 채널 물리 배선·프라이밍 적재 여부
-            //   (변형이 아니다 — 비-MCP 갈래는 지시서를 아예 안 받는다, ADR-0209)·grant 를
-            //   한꺼번에 가르게 한다(정합 불변식 = 가르치는 채널 ⊆ 깐 채널 — ADR-0126 결정 4 로 단방향 개정).
-            //   판정은 backend dispatch(ADR-0004) — manager 는 command 를 직접 matches! 하지 않는다.
+            // ADR-0099: hand the backend's MCP capability to provision so the channel's physical wiring, the grants
+            //   and the mail permission split together (consistency invariant = taught channels ⊆ wired channels —
+            //   made one-directional by ADR-0126 decision 4). Priming does not split here: it comes only from the
+            //   launch materials, and a non-MCP spawn gets none (ADR-0209 · ADR-0370). The decision is backend
+            //   dispatch (ADR-0004) — the manager does not `matches!` on the command itself.
             // ADR-0126
             // ★두 축을 **각각** 묻는다 — 한쪽에서 다른 쪽을 파생하지 않는다★: 그 접힘이 「제어는 쓰지만
             //   우편 평면 밖」인 backend 에 보내기 인가를 조용히 열었던 자리다([`ControlChannelNeeds`] doc).
@@ -1854,10 +1855,11 @@ impl AgentManager {
             )),
             resume_session_id,
             link_sink,
-            // ★위 `build_command_spec` 에 넘긴 것과 **같은 endpoint** 다★ — 명령줄로 번역할 것은 거기서
-            //   끝났고, 이 자리는 **통로 핸드셰이크로** 실어야 하는 backend 를 위해 같은 값을 한 번 더
-            //   건넨다(codex app-server 가 `thread/start` 에 프라이밍을 싣는다). 무엇을 어디에 싣는지는
-            //   backend 가 정한다 — 이 자리는 두 수단 중 어느 쪽인지 모른다(ADR-0004).
+            // ★The **same endpoint** passed to `build_command_spec` above★ — the command-line translation is done
+            //   there; this hands the same value over again for a backend whose channel needs control-plane data
+            //   when it opens (today only claude's leftover cleaner, which reads the agent id; codex ignores it —
+            //   its priming comes from the kit, ADR-0370). What a backend reads from it is the backend's call —
+            //   this site does not know (ADR-0004).
             control_endpoint.as_ref(),
             &artifacts,
         )?;

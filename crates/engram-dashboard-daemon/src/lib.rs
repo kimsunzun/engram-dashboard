@@ -230,7 +230,6 @@ fn build_daemon_wiring(
     //   could have its fresh folder removed.
     let launch_root = layout.launch_dir();
     engram_dashboard_asset_library::launch::sweep_launch_dir(&launch_root);
-    warn_if_priming_file_set();
     build_daemon_wiring_with_store(
         profile_store,
         UsageInputs {
@@ -249,24 +248,6 @@ fn build_daemon_wiring(
     )
 }
 
-/// `ENGRAM_PRIMING_FILE` still changes the old priming path only (harness bins, the Noop kits); claude and codex
-/// launches take the priming from the built-in folder — say so once at boot when it is set.
-// ADR-0327
-fn warn_if_priming_file_set() {
-    warn_if_priming_override(std::env::var_os(control::priming::ENV_OVERRIDE).as_deref());
-}
-
-/// The boot warn of [`warn_if_priming_file_set`] for the value read — set and not empty warns once.
-fn warn_if_priming_override(value: Option<&std::ffi::OsStr>) {
-    let var = control::priming::ENV_OVERRIDE;
-    if value.is_some_and(|v| !v.is_empty()) {
-        tracing::warn!(
-            var,
-            "priming file override set; claude/codex launches ignore it"
-        );
-    }
-}
-
 /// What the launch kits take from outside the assembly — production passes it ([`build_daemon_wiring`]); the test
 /// server passes none and keeps the Noop kits.
 struct LaunchInputs {
@@ -276,21 +257,46 @@ struct LaunchInputs {
     builtin_dir: Option<PathBuf>,
 }
 
-/// The library service over the real folders — no library root (nothing is scanned until one is configured), the
-/// daemon's environment and home, the production folder waits.
+/// The home folder and environment a library service reads the native skill roots through
+/// ([`LibraryValues::home`] · [`LibraryValues::env`]).
+pub struct LibraryHost {
+    pub home: Option<PathBuf>,
+    pub env: Arc<dyn Fn(&str) -> Option<String> + Send + Sync>,
+}
+
+impl LibraryHost {
+    /// The daemon process's own home folder and environment — what production launches read.
+    pub fn process() -> Self {
+        LibraryHost {
+            home: engram_dashboard_platform::env::home_dir(),
+            env: Arc::new(|name| std::env::var(name).ok()),
+        }
+    }
+}
+
+/// The library service the daemon launches through — no library root (nothing is scanned until one is configured),
+/// the production folder waits. `builtin_dir` = the built-in assets folder (`None` = there is none), `launch_root` =
+/// the volatile launch folder. The one builder for production wiring and the harness bin `roundtrip-smoke`, so the two
+/// cannot drift.
 // ADR-0311
 // ADR-0360
 // ADR-0368
-fn build_library_service(registry: Arc<ProfileRegistry>, inputs: LaunchInputs) -> LibraryService {
+// ADR-0370
+pub fn build_library_service(
+    registry: Arc<ProfileRegistry>,
+    builtin_dir: Option<PathBuf>,
+    launch_root: PathBuf,
+    host: LibraryHost,
+) -> LibraryService {
     LibraryService::new(
         LibraryValues {
             registry,
             backends: Arc::new(AgentBackends),
             root: None,
-            builtin_dir: inputs.builtin_dir,
-            launch_root: inputs.launch_root,
-            home: engram_dashboard_platform::env::home_dir(),
-            env: Arc::new(|name| std::env::var(name).ok()),
+            builtin_dir,
+            launch_root,
+            home: host.home,
+            env: host.env,
         },
         Arc::new(FsStore),
         BoundedIo::new(
@@ -348,7 +354,12 @@ fn build_daemon_wiring_with_store(
     let manager = AgentManager::new_with_control(status_sink, profiles.clone(), tracker, control);
     let (manager, library) = match launch_inputs {
         Some(inputs) => {
-            let library = Arc::new(build_library_service(profiles, inputs));
+            let library = Arc::new(build_library_service(
+                profiles,
+                inputs.builtin_dir,
+                inputs.launch_root,
+                LibraryHost::process(),
+            ));
             let manager = manager.with_launch_ports(LaunchPorts {
                 kits: library.clone(),
                 fs: Arc::new(StdLaunchFs),
@@ -674,8 +685,8 @@ pub async fn run() -> Result<(), i32> {
         messaging_slot.clone(),
         command_table_slot.clone(),
         command_bus.clone(),
-        // ADR-0285: help 본문 원천은 아래 프라이밍과 같은 앵커(설치 위치)다 — 원천을 여기서 짓는 것은
-        //   서버가 안에서 짓지 않게 하려는 것이다(시험이 알려진 본문을 넣는다).
+        // ADR-0285: the help body source is anchored at the install location — it is built here so the server does not
+        //   build it inside (a test passes a known body).
         control::help::HelpSource::from_install_root(),
     )
     .await
@@ -683,14 +694,11 @@ pub async fn run() -> Result<(), i32> {
         Ok(handle) => {
             let url = handle.url.clone();
             let send_exe = locate_send_exe();
-            let priming: Arc<dyn control::priming::PrimingProvider> =
-                Arc::new(control::priming::FilePrimingProvider::from_install_root());
             let channel = Arc::new(control::DaemonControlChannel::new(
                 control_registry.clone(),
                 url,
                 mcp_dir,
                 send_exe,
-                priming,
             ));
             (channel, Some(handle))
         }
@@ -1175,11 +1183,8 @@ mod tests {
 
     /// ★The boot sweep runs before the library service is plugged in★ — moved after it, a launch could have its fresh
     /// folder removed; no runtime test sees that (boot restore is off, so nothing launches at boot), only this one.
-    /// ★The boot also gives the `ENGRAM_PRIMING_FILE` warn the variable's real value★ — the warn itself is
-    /// [`a_set_priming_override_value_warns_once`]; no runtime test sets the process env, so only this one sees the call
-    /// and the read.
     #[test]
-    fn the_boot_sweeps_before_the_plug_and_warns_on_the_priming_override() {
+    fn the_boot_sweeps_before_the_plug() {
         let boot = body_of("fn build_daemon_wiring(");
         let sweep = boot
             .find("sweep_launch_dir(&launch_root)")
@@ -1191,17 +1196,6 @@ mod tests {
         assert!(
             body_of("fn build_daemon_wiring_with_store(").contains(".with_launch_ports("),
             "the assembly no longer plugs the launch kits"
-        );
-        assert!(
-            boot.contains("warn_if_priming_file_set();"),
-            "the boot no longer warns on the priming override"
-        );
-        let warn = body_of("fn warn_if_priming_file_set(");
-        assert!(
-            warn.contains(
-                "warn_if_priming_override(std::env::var_os(control::priming::ENV_OVERRIDE)"
-            ),
-            "the boot warn does not read the priming override: {warn}"
         );
     }
 
@@ -1285,8 +1279,8 @@ mod tests {
         assert!(kit.instructions_hash.is_some());
     }
 
-    /// The production assembly over `layout`. ★Built inside a log capture★ — the boot warn's callsite is hit only
-    /// inside one ([`log_capture`] 「관측 조건」 ①), even when the test process has `ENGRAM_PRIMING_FILE` set.
+    /// The production assembly over `layout`. ★Built inside a log capture★ — a boot log callsite is then hit only inside
+    /// one ([`log_capture`] 「관측 조건」 ①).
     fn production_wiring(layout: &DataLayout) -> DaemonWiring {
         let (flush_tx, _flush_rx) = tokio::sync::mpsc::unbounded_channel();
         let (wiring, _logged) = log_capture::capture_loud(|| {
@@ -1374,24 +1368,5 @@ mod tests {
                 .any(|reason| matches!(reason, BlockReason::LibraryUnavailable { .. })),
             "the manager does not see the kept service's root: {with_root:?}"
         );
-    }
-
-    /// The boot warn for `ENGRAM_PRIMING_FILE` (ADR-0327), given the value: a set value warns once and names the
-    /// variable; an unset or empty one says nothing. That the boot calls it with the env value =
-    /// [`the_boot_sweeps_before_the_plug_and_warns_on_the_priming_override`].
-    #[test]
-    fn a_set_priming_override_value_warns_once() {
-        let ((), set) = log_capture::capture_loud(|| {
-            warn_if_priming_override(Some(std::ffi::OsStr::new("C:\\custom\\priming.md")))
-        });
-        assert_eq!(set.len(), 1, "{set:?}");
-        assert!(
-            set[0].contains(&format!("var={:?}", control::priming::ENV_OVERRIDE)),
-            "{set:?}"
-        );
-        for quiet in [None, Some(std::ffi::OsStr::new(""))] {
-            let ((), logged) = log_capture::capture_loud(|| warn_if_priming_override(quiet));
-            assert!(logged.is_empty(), "{quiet:?}: {logged:?}");
-        }
     }
 }

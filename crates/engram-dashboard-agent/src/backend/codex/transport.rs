@@ -12619,9 +12619,8 @@ mod tests {
             env: Vec::new(),
             cwd: std::path::PathBuf::from("C:/workspace"),
         };
-        let plan =
-            super::super::app_server_open(&spec, Some(uuid::Uuid::new_v4()), None, &artifacts)
-                .expect("the open plan");
+        let plan = super::super::app_server_open(&spec, Some(uuid::Uuid::new_v4()), &artifacts)
+            .expect("the open plan");
         let context = plan
             .first_turn_context
             .clone()

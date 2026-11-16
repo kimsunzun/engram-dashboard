@@ -162,12 +162,12 @@ pub struct LaunchPlan {
     pub skills: Vec<SkillRef>,
     /// 그 백엔드 원문 — 붙인 순서대로. 모델 · 강도도 여기 든다(따로 된 칸이 없다).
     pub raw_settings: Vec<RawSetting>,
-    /// 합친 지침에 「기본」 의 프라이밍(배포판 `builtin\`)을 넣나. [`LaunchPlan::real`] 일 때만 뜻이 있다 —
-    /// `false` 면 아무도 이 칸을 읽지 않고, 프라이밍은 제어 채널이 내는 `priming_file` 그대로다(그 파일은
-    /// 백엔드가 제어 채널을 지원하고 · 우편을 쓰고 · MCP 설정을 받고 · 프라이밍 파일이 있을 때만 실린다).
+    /// Whether the merged instructions take 「기본」's priming (the shipped `builtin\`). Meaningful only when
+    /// [`LaunchPlan::real`] — otherwise nobody reads it, and the launch carries no priming at all (ADR-0370).
     pub include_priming: bool,
     pub notices: Vec<Notice>,
-    /// 실 재료인가. `false` 면 backend 번역이 재료를 하나도 싣지 않아 오늘과 바이트 같은 argv 를 낸다.
+    /// Real materials? `false` → the backend translation carries no material at all (the Noop argv golden,
+    /// `tests/launch_argv_golden.rs`).
     pub real: bool,
     /// Folder entries — absolute normalized paths in expansion order, deduplicated. Only `backend/claude` reads them
     /// (the backend loads each folder itself). Empty in a Noop plan.
@@ -732,10 +732,10 @@ impl LaunchScope {
     }
 }
 
-/// No materials — the launch as it was before real kits (backend = the command variant, instructions = the control
-/// channel's priming as is). With this plan and kit the backend emits the argv byte for byte as the golden
-/// (`tests/launch_argv_golden.rs`). The production daemon plugs the library instead; this stays the manager default
-/// (tests, harness bins) and the library's fallback for a backend without a settings check (ADR-0328).
+/// No materials — backend = the command variant, no instructions, no settings (ADR-0370). With this plan and kit the
+/// backend emits the argv byte for byte as the golden (`tests/launch_argv_golden.rs`). The production daemon plugs the
+/// library instead; this stays the manager default (tests, harness bins) and the library's fallback for a backend
+/// without a settings check (ADR-0328).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoopLaunchKits;
 
@@ -746,7 +746,7 @@ impl LaunchKitSource for NoopLaunchKits {
             instructions: Vec::new(),
             skills: Vec::new(),
             raw_settings: Vec::new(),
-            // `real` 이 false 라 읽히지 않는다 — 프라이밍을 실을지는 오늘처럼 제어 채널이 정한다(칸 doc).
+            // Not read: `real` is false (the field doc).
             include_priming: true,
             notices: Vec::new(),
             real: false,
@@ -1195,7 +1195,7 @@ pub struct LaunchPorts {
 }
 
 impl LaunchPorts {
-    /// No materials + the production placement — the launch as it was before real kits ([`NoopLaunchKits`]).
+    /// No materials ([`NoopLaunchKits`]) + the production placement.
     pub fn noop() -> Self {
         Self {
             kits: Arc::new(NoopLaunchKits),

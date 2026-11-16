@@ -214,6 +214,13 @@ impl LibraryService {
         }
     }
 
+    /// The built-in priming text read when the service was made — what a launch whose plan includes the priming merges
+    /// in first. Empty for its stand-in; then no plan includes it, and the launch check tells `builtin-unavailable` when
+    /// the preset reaches `engram:/priming` (a preset that does not list it includes no priming and tells nothing).
+    pub fn builtin_priming_text(&self) -> &str {
+        self.builtins.priming_text()
+    }
+
     /// One library preset on its own (the edit area — no agent: everything is shown, no format verdict), after the
     /// first-scan entrance, over the catalog under one read lock; its folder entries are stat'ed afterwards, outside
     /// the lock, on one read-computation budget. A first scan that could not be applied is block ④ with its reason.

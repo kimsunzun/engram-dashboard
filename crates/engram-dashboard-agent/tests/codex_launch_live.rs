@@ -76,8 +76,6 @@ impl ControlChannel for LiveControl {
             config_path: None,
             send_exe: None,
             mail_allowed: false,
-            priming_file: None,
-            settings_file: None,
             // Without an MCP grant for our server the codex backend leaves the `-c mcp_servers.…` line off.
             grants: vec![ToolGrant::Mcp {
                 server: MCP_SERVER_NAME.to_string(),

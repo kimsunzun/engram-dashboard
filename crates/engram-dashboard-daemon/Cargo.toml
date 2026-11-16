@@ -47,19 +47,10 @@ name = "saturation-pilot"
 path = "src/bin/saturation_pilot.rs"
 required-features = ["test-harness"]
 
-# ★ADR-0092 priming acceptance baseline smoke driver★: spawns one real primed claude, sends a natural 1:1
-#   message through the real control path (handle_send), then PRINTs the response (for the acceptance decision — not a pass/fail assertion).
-#   required-features keeps release builds from compiling it (experiment/verification only, same family as saturation-pilot).
-[[bin]]
-name = "priming-smoke"
-path = "src/bin/priming_smoke.rs"
-required-features = ["test-harness"]
-
 # ★ADR-0092/0099 A→B→A round-trip (reply round-trip) measurement driver★: spawns two real primed claudes (A·B) and measures whether B calls the sending
-#   half (MCP eg_send) on its own and A accepts the reply. Priming is parameterized with
-#   `--priming <경로>` (e.g. builtin/instructions/priming.md) (the old C1~C3 experiment aliases were removed by ADR-0099 ·
-#   `--cli-only`, which forced the CLI false-path, was removed together with the CLI-mirror priming). required-features keeps release builds from
-#   compiling it (experiment/verification only, same family as priming-smoke · saturation-pilot).
+#   half (MCP eg_send) on its own and A accepts the reply. The agents launch through the launch materials over
+#   `--builtin-dir <dir>` (default the repo builtin/); a priming variant is a copied folder (ADR-0370). required-features keeps release builds from
+#   compiling it (experiment/verification only, same family as saturation-pilot).
 [[bin]]
 name = "roundtrip-smoke"
 path = "src/bin/roundtrip_smoke.rs"
@@ -101,7 +92,9 @@ engram-dashboard-transport = { path = "../engram-dashboard-transport", features 
 engram-dashboard-command = { path = "../engram-dashboard-command" }
 # ADR-0311 decision 2: the preset library — the daemon builds `LibraryService` from the crate's parts and its own values,
 #   plugs it in as the manager's launch-kit source (`lib.rs` `build_library_service` · `build_daemon_wiring_with_store`)
-#   and sweeps the launch folder at boot (`launch::sweep_launch_dir`); it calls nothing else in the crate.
+#   and sweeps the launch folder at boot (`launch::sweep_launch_dir`); it calls nothing else in the crate. The harness
+#   bin `roundtrip-smoke` builds its service through the same `build_library_service` over `--builtin-dir` and
+#   reads the loaded built-in priming (`builtin::file_of`, `LibraryService::builtin_priming_text` — ADR-0370).
 engram-dashboard-asset-library = { path = "../engram-dashboard-asset-library" }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }

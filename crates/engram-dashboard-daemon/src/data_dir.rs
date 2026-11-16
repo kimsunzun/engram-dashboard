@@ -151,15 +151,17 @@ pub fn ensure_data_dir_writable(dir: &Path) -> Result<(), DataDirUnwritable> {
     })
 }
 
-/// exe 기준으로 해석한 **설치/repo 루트 절대경로**(빌드모드 무관). 데몬이 상대 리소스(예: ADR-0092
-/// 프라이밍 `builtin/instructions/priming.md`)를 붙일 **신뢰 가능한 base** 로 쓴다.
+/// The **install / repo root** resolved from the exe, as an absolute path (any build mode) — the trusted base the
+/// daemon joins relative install resources onto (`HelpSource::from_install_root` reads the `prompts/` help text from
+/// it; [`find_builtin_dir`] resolves on the same anchor).
 ///
-/// 해석(default_data_dir 의 디버그/릴리즈 분기와 동형):
-///   - exe 에서 위로 올라가 workspace 루트(`.git` 또는 `Cargo.toml [workspace]`)를 찾으면 그것
-///     (개발: `<repo>` — target/debug 어느 exe 에서 올라가도 repo 루트로 수렴).
-///   - 루트 못 찾으면 exe 디렉토리(릴리즈: 번들 exe 들이 co-located 되는 폴더 — 리소스도 동거).
-///   - exe 조차 못 얻으면 None(호출자가 처리 — 프라이밍은 그때 None 을 산출).
-/// ★절대경로 보장★: current_exe 는 절대경로를 주고 walk-up/parent 는 그 절대성을 보존한다.
+/// Resolution (same shape as the debug/release split of `default_data_dir`):
+///   - walk up from the exe to the workspace root (`.git` or a `Cargo.toml` with `[workspace]`) and take it (dev:
+///     `<repo>` — any exe under target/debug converges on the repo root);
+///   - no root found → the exe's folder (release: the bundled exes are co-located, and so are the resources);
+///   - the exe path cannot be read → `None` (the caller decides — `engram help` then reads only an absolute
+///     `ENGRAM_HELP_FILE`).
+/// ★Absolute★: `current_exe` returns an absolute path and the walk-up / parent keep it absolute.
 pub fn find_install_root() -> Option<PathBuf> {
     install_root_of(&std::env::current_exe().ok()?)
 }

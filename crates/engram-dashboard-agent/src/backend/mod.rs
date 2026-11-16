@@ -245,12 +245,14 @@ pub trait AgentBackend: Send + Sync {
     /// ★backend 지식(ADR-0004)★: "어느 프로그램이 MCP 를 어떻게 먹나"는 backend-kind 지식이라 여기서
     /// 선언한다 — manager 가 `matches!` 로 직접 분기하지 않는다.
     ///
-    /// 이 플래그가 provision 의 grant·**프라이밍 적재 여부**·**우편 가부**를 구동한다(정합 불변식 =
-    /// 프라이밍이 가르치는 우편 채널 **=** 그 스폰이 쓸 수 있는 우편 채널. 못 쓰는 채널을 가르치면
-    /// 발신 freeze 가 재발하고, 쓸 수 있는데 안 가르치면 통제 없는 우회 표면이 남는다). true 면
-    /// `DaemonControlChannel::provision` 이 MCP bits 를 endpoint 에 실으며 MCP-only 교육 프라이밍
-    /// (`eg_send` 만 — ADR-0126 결정 1)과 CLI 우편 불가를, false 면 **프라이밍 미주입** + CLI 우편
-    /// 가능을 고른다(ADR-0133). 제어 CLI 배선은 이 축과 무관하게 전원에게 간다.
+    /// This flag drives the provision's grants and **mail permission** (`mail_allowed`). True →
+    /// `DaemonControlChannel::provision` puts the MCP bits on the endpoint (with the MCP send grant when the backend
+    /// uses mail) and refuses CLI mail;
+    /// false → no MCP bits, and CLI mail is allowed when the backend uses mail (ADR-0133). It does not decide priming —
+    /// the priming comes only from the launch materials (ADR-0370). Consistency invariant: the mail channel the priming
+    /// teaches **=** the mail channel the spawn can use — teaching a channel it cannot use brings back the send freeze,
+    /// and not teaching one it can use leaves an uncontrolled bypass surface. The control-CLI wiring goes to every spawn
+    /// regardless of this axis.
     ///
     /// ★**mcp-config 파일 write 는 더 이상 이 칸이 가르지 않는다 — 이 문장을 되돌리지 말 것**★
     ///   (ADR-0209 · `control/mod.rs` 의 `writes_mcp_config_file` 게이트): 「우리가 쓴 파일을 읽나」가
@@ -271,11 +273,12 @@ pub trait AgentBackend: Send + Sync {
     ///   않는다. 증상은 오류가 아니라 「툴이 없다」는 침묵이다. 새 backend 를 들일 때 **두 칸을 함께
     ///   답할 것** — 첫 칸은 「MCP 로 우편을 쓰나」, 둘째 칸은 「그 입구가 우리가 쓴 **파일**인가」다.
     ///
-    /// ★false 쪽이 고르는 것은 「다른 프라이밍」이 아니라 「프라이밍 없음」이다 — 변형 축을 되살리지 말 것★:
-    ///   CLI 전용 사본(`prompts/agent-priming-cli.md`)은 커밋 `2ef6902` 에서 삭제됐고 판정식은
-    ///   `wants_priming = uses_mail && accepts_mcp_config` 하나다(`control/mod.rs`). 그래서 비-MCP 스폰은
-    ///   지시서를 한 글자도 못 받고, 위 정합 불변식은 **아무것도 안 가르쳐서** 성립한다(없는 툴을 설명하는
-    ///   문서를 주는 것이 거짓말이고 침묵은 아니다 — ADR-0209 결정 3).
+    /// ★false picks 「no priming」, not 「another priming」 — do not revive a variant axis★: the CLI-only copy
+    ///   (`prompts/agent-priming-cli.md`) was deleted in commit `2ef6902`. A non-MCP spawn gets no instructions, and the
+    ///   consistency invariant above holds by **teaching nothing** (a document that describes a missing tool is a lie;
+    ///   silence is not — ADR-0209 decision 3). The priming comes only from the launch materials, and the tripwire
+    ///   `tests::every_backend_with_a_settings_check_has_what_the_priming_teaches` keeps every backend that can take it
+    ///   MCP- and mail-capable (ADR-0370).
     ///
     /// ★`supports_control_channel` 과의 관계★: 후자는 "provision 을 **부르나**"(제어 채널 자체를 소비하나),
     ///   이것은 "provision 이 붙일 채널 중 **MCP 를 낄 수 있나**"다 — 직교 축이다. 오늘 claude 와 codex 가
@@ -466,14 +469,13 @@ pub trait AgentBackend: Send + Sync {
     ///   구현하지 않으면 조용히 터미널로 뜬다. 선언 표 트립와이어(`tests::expected_codec_axis`)는
     ///   `transport_shape` 의 신고값만 재므로 그 어긋남을 못 본다.
     ///
-    /// `control` = [`AgentBackend::build_spec`] 이 받은 것과 **같은 endpoint**. 명령줄이 아니라 **통로
-    ///   핸드셰이크로** 제어 평면 데이터를 실어야 하는 backend 를 위해 온다(codex app-server 가
-    ///   `thread/start` 의 `developerInstructions` 에 프라이밍 내용을 싣는다).
-    /// ★그쪽에서 이미 썼다고 여기서 다시 쓰지 말 것★ — 한 spawn 이 같은 값을 두 수단으로 보내면 상대가
-    ///   그 둘을 어떻게 합치는지에 우리 동작이 매달린다. 조립하는 자리는 모드마다 하나여야 한다
-    ///   (`resume_session_id` 가 argv 와 핸드셰이크로 갈리는 것과 같은 규율).
-    /// ★대부분의 backend 는 이 칸을 무시한다★ — 명령줄로 번역해 끝나는 backend 는 `build_spec` 에서
-    ///   이미 다 했다.
+    /// `control` = the **same endpoint** [`AgentBackend::build_spec`] received — for a backend whose channel needs
+    ///   control-plane data when it opens (claude's leftover cleaner reads the agent id from it).
+    /// ★Do not send again here what `build_spec` already put on the command line★ — when one spawn sends the same
+    ///   value by two means, our behavior hangs on how the other side merges them. Each mode has one assembly point
+    ///   (the same rule that splits `resume_session_id` between argv and the handshake).
+    /// ★Most backends ignore this field★ — a backend that translates everything into the command line is done in
+    ///   `build_spec`.
     ///
     /// `artifacts` = [`AgentBackend::build_spec`] 이 받은 것과 **같은** [`AgentBackend::materialize`] 결과 —
     ///   통로로 실을 재료가 있는 backend 를 위해 온다. 명령줄로 다 싣는 backend 는 무시한다.
@@ -1127,9 +1129,11 @@ mod tests {
     // 새 variant 배선 시 체크리스트:
     //   ① 새 백엔드의 두 capability는 stub 복붙 금지 — CLI spike로 실측한 값으로 채울 것.
     //   ② supports_control_channel=false로 연결하면 메시징 없는 단독 에이전트가 된다(의도인지 확인).
-    //   ③ 비-MCP(accepts_mcp_config=false)면 provision이 [Cli] grant를 자동 선택하고 **프라이밍은 아예
-    //      안 싣는다**(CLI판 사본은 커밋 `2ef6902`에서 삭제됐고 `roundtrip-smoke --cli-only` 노브도 함께
-    //      사라졌다 — 되살리려 하지 말 것). 그 갈래는 오늘 실측 수단이 없다 — ADR-0209.
+    //   ③ Non-MCP (accepts_mcp_config=false): provision picks the [Cli] grant on its own (when the backend uses
+    //      mail), and the spawn gets **no priming at all** — only a backend with a settings check gets real launch
+    //      materials, and Noop kits carry none (ADR-0370). The CLI copy was deleted in commit `2ef6902` together
+    //      with the `roundtrip-smoke --cli-only` knob — do not revive it. That branch has no measuring tool
+    //      today — ADR-0209.
     //   ④ MCP-capable이면 기본 roundtrip으로 실측.
     //   ⑤ 셋째 칸(writes_mcp_config_file)은 **둘째 칸에서 파생하지 말 것** — 「MCP 로 우편을 쓰나」와
     //      「우리가 쓴 mcp-config 파일을 읽나」는 별개다. 그 프로그램에 그 파일을 가리킬 플래그가 실제로
@@ -1198,9 +1202,9 @@ mod tests {
     }
 
     /// ★Tripwire — every backend with a settings check is MCP-capable and uses mail★. Real launch materials add the
-    /// built-in priming whenever 「기본」 is attached, past the control channel's own priming decision, and that
-    /// priming teaches the Engram MCP tools and mail — what priming teaches must be what the spawn has. A backend that
-    /// gains a settings check without both must decide how its agents get (or skip) the priming first.
+    /// built-in priming whenever 「기본」 is attached, and that priming teaches the Engram MCP tools and mail — what
+    /// priming teaches must be what the spawn has. A backend that gains a settings check without both must decide how
+    /// its agents get (or skip) the priming first.
     // ADR-0126
     // ADR-0133
     #[test]

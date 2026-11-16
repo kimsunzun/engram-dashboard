@@ -135,14 +135,18 @@ impl AgentBackend for ClaudeBackend {
         // ★이 값이 가르는 것 — 배선이 아니라 교육과 강제다(ADR-0133)★:
         //   - **배선은 전원에게 간다.** `engram` 실행파일·크레덴셜·PATH 는 MCP 가능 스폰에도 깔린다 —
         //     제어 동사가 전원 개방이고(ADR-0132 결정 5) 실행파일이 하나뿐이라 계열 단위로 갈라 깔 수 없다.
-        //   - **교육만 갈린다.** 프라이밍 적재 여부가 이 값으로 갈린다. ★갈리는 것은 「어느 변형이냐」가
-        //     아니라 「싣느냐 마느냐」다★ — CLI 전용 사본은 커밋 `2ef6902` 에서 삭제됐고, 지금 프라이밍을
-        //     받는 것은 MCP 가능 스폰뿐이다(비-MCP 는 지시서 0줄 — ADR-0209 결정 3).
+        //   - **Teaching follows this value, but this value does not load it.** The priming comes only from the
+        //     launch materials (ADR-0370), and the tripwire
+        //     `every_backend_with_a_settings_check_has_what_the_priming_teaches` (backend `mod.rs`) keeps every
+        //     backend that gets it MCP- and mail-capable; a non-MCP spawn gets no instructions (ADR-0209
+        //     decision 3). The CLI-only copy was deleted in commit `2ef6902`.
         //   - **강제는 데몬 거절 하나뿐이다.** MCP 가능 스폰의 자격증명으로 온 우편 요청은 데몬이 거절한다.
         //     ★`engram help` 의 우편 화면은 이 값과 무관하게 열린다★ — 스폰 env 로 화면을 고르던 표식은
         //     제거됐다(사용자 결정 2026-09-23). 되살리면 에이전트가 지울 수 있는 값이 화면을 정하게 된다.
-        // ★못 쓰는 채널을 가르치면 ADR-0099 가 실측한 발신 freeze 가 재현된다★ — 프라이밍 적재와 우편
-        //   가부는 반드시 같은 값에서 갈려야 한다(오늘 비-MCP 쪽은 **아무것도 안 가르쳐서** 그 등호가 선다).
+        // ★Teaching a channel the spawn cannot use brings back the send freeze ADR-0099 measured★ — what the priming
+        //   teaches and the mail permission must agree. Mail permission splits on this value; the priming is not
+        //   loaded by it (ADR-0370), so on the real path the tripwire above holds the agreement, and a non-MCP spawn
+        //   agrees by **teaching nothing**.
         // ★이 플래그가 구현하는 살아 있는 불변식은 여전히 채널 단일화다(ADR-0128 결정 1)★: 우편 채널은
         //   백엔드 capability 로만 갈리고 런타임 스위칭·폴백이 없다. ADR-0133 이 바꾼 것은 그 단일화를
         //   **어떻게 강제하느냐**뿐이다.
@@ -151,6 +155,7 @@ impl AgentBackend for ClaudeBackend {
         // ADR-0128
         // ADR-0133
         // ADR-0209
+        // ADR-0370
         true
     }
 
@@ -301,12 +306,12 @@ impl AgentBackend for ClaudeBackend {
                         args.push(config_path.to_string_lossy().into_owned());
                     }
                 }
-                // ADR-0092: 프라이밍(수신 계약) 주입 — `--append-system-prompt-file <abs-path>`.
-                //   claude CLI(2.1.170)가 그 파일을 **직접 읽어** 기본 시스템 프롬프트 **뒤에** 덧붙인다.
-                //   터미널·json 둘 다 시스템 프롬프트를 받으므로 mode 무관 동일 주입.
+                // Instructions — `--append-system-prompt-file <abs-path>`: claude CLI (2.1.170) reads the file itself
+                //   and appends it after its default system prompt, in both modes.
                 // ADR-0092
-                // ADR-0316: real materials load the merged instructions here instead of the control channel's priming,
-                //   and turn the system-prompt snapshot off so a resumed session also gets the current text.
+                // ADR-0316: real materials load the merged instructions here and turn the system-prompt snapshot off,
+                //   so a resumed session also gets the current text.
+                // ADR-0370: without real materials nothing is loaded — the control channel carries no priming file.
                 if artifacts.real {
                     if let Some(instructions) = &artifacts.instructions_file {
                         args.push("--append-system-prompt-file".to_string());
@@ -314,25 +319,12 @@ impl AgentBackend for ClaudeBackend {
                     }
                     args.push("--system-prompt-snapshot".to_string());
                     args.push("off".to_string());
-                } else if let Some(endpoint) = &control {
-                    if let Some(priming) = &endpoint.priming_file {
-                        args.push("--append-system-prompt-file".to_string());
-                        args.push(priming.to_string_lossy().into_owned());
-                    }
                 }
-                // S18 D(spec §6): 세션 한정 설정 조각 주입 — `--settings <abs-path>`. (ADR-0109)
-                //
-                // ★인라인 JSON 이 아니라 **파일 경로**를 쓰는 이유(load-bearing — Windows 인용 지옥)★:
-                //   claude 의 `--settings` 는 JSON 문자열도 받지만, Windows 스폰은 `console_command` 가
-                //   cmd.exe 를 한 겹 더 끼운다. 그 argv 에 `{"allowedMcpServers":[…]}` 같은 따옴표·중괄호
-                //   덩어리를 실으면 cmd 의 인용/이스케이프 규칙(따옴표 소실·`&`/`^` 특수문자)에 조용히
-                //   깨지기 쉽고, 깨진 결과는 "설정이 무시된 채 정상 기동"(= MCP 툴 부재 재발)이라 발현이
-                //   늦다. 파일 경로는 공백만 다루면 되고, 같은 경로 전달 방식(`--mcp-config`/
-                //   `--append-system-prompt-file`)이 이미 실측으로 검증돼 있다(M3 심의 기록) — 그래서
-                //   경로를 택한다. 대가는 파일 하나의 수명 관리인데, 그건 mcp-config 파일과 **같은 폴더·
-                //   같은 생성/삭제/부팅스윕 경로**를 그대로 재사용해 흡수한다(mcp_config.rs).
-                // ADR-0328: real materials carry no hidden settings fragment — the control channel's `settings_file` is
-                //   not loaded; the merged raw settings (in the volatile folder) are the one `--settings`.
+                // `--settings` takes a **file path**, not inline JSON: a Windows spawn goes through one more cmd.exe
+                //   layer (`console_command`), whose quoting silently breaks a `{"…":[…]}` argument, and the result is
+                //   "settings ignored, normal start" (ADR-0109).
+                // ADR-0328: the merged raw settings (in the volatile folder) are the one `--settings`.
+                // ADR-0370: without real materials there is none — the control-channel settings fragment is withdrawn.
                 // ADR-0316: the skills ride in as a plugin folder here.
                 if artifacts.real {
                     for root in &artifacts.skill_roots {
@@ -340,11 +332,6 @@ impl AgentBackend for ClaudeBackend {
                         args.push(root.to_string_lossy().into_owned());
                     }
                     if let Some(settings) = &artifacts.settings_file {
-                        args.push("--settings".to_string());
-                        args.push(settings.to_string_lossy().into_owned());
-                    }
-                } else if let Some(endpoint) = &control {
-                    if let Some(settings) = &endpoint.settings_file {
                         args.push("--settings".to_string());
                         args.push(settings.to_string_lossy().into_owned());
                     }
@@ -2237,24 +2224,11 @@ mod tests {
             config_path: Some(PathBuf::from("C:/data/mcp/agent-x.json")),
             // 기본 헬퍼는 send_exe 를 담아 ENGRAM_CLI_EXE 주입 경로를 검증할 수 있게 한다.
             send_exe: Some(PathBuf::from("C:/app/engram.exe")),
-            // 기본 헬퍼는 프라이밍 파일을 담지 않는다(ADR-0092) — 프라이밍 주입 테스트가 명시로 채운다.
-            priming_file: None,
-            // ADR-0094: 기본 헬퍼는 grants 를 비워둔다 — grant 주입 테스트가 명시로 채운다(회귀 격리:
-            //   기존 mcp-config/priming 테스트가 --allowedTools 영향을 안 받게).
+            // ADR-0094: the base helper leaves grants empty — the grant tests fill them (so the mcp-config tests are
+            //   not affected by --allowedTools).
             grants: vec![],
-            // S18 D: 기본 헬퍼는 설정 조각을 담지 않는다 — `--settings` 주입 테스트가 명시로 채운다
-            //   (기존 arg-golden 테스트가 새 플래그의 영향을 안 받게 — priming_file 과 같은 규율).
-            settings_file: None,
             // ADR-0133: MCP 가능 갈래(config_path=Some)의 데몬 산출값과 같은 짝 — 우편 불가.
             mail_allowed: false,
-        }
-    }
-
-    /// 세션 한정 설정 조각 경로를 담은 변주(S18 D · spec §6) — `--settings` 주입 검증용.
-    fn ep_with_settings() -> ControlEndpoint {
-        ControlEndpoint {
-            settings_file: Some(PathBuf::from("C:/data/mcp/agent-x.settings.json")),
-            ..ep()
         }
     }
 
@@ -2270,14 +2244,6 @@ mod tests {
                     exe: CLI_EXE_NAME.to_string(),
                 },
             ],
-            ..ep()
-        }
-    }
-
-    /// 프라이밍 파일 경로를 담은 변주(ADR-0092) — `--append-system-prompt-file` 주입 검증용.
-    fn ep_with_priming() -> ControlEndpoint {
-        ControlEndpoint {
-            priming_file: Some(PathBuf::from("C:/repo/builtin/instructions/priming.md")),
             ..ep()
         }
     }
@@ -2733,51 +2699,18 @@ mod tests {
         );
     }
 
-    // ── ADR-0092: 프라이밍 주입(`--append-system-prompt-file`) ──────────────────────────
+    // ── ADR-0370: a Noop launch carries no instructions and no `--settings`, control channel or not ───────────
+    // ADR-0370
     #[test]
-    fn claude_priming_file_injects_append_system_prompt_flag_terminal() {
-        let s = spec_with_control(
-            &terminal(vec![]),
-            SpawnMode::Fresh,
-            None,
-            Some(ep_with_priming()),
-        );
-        let pos = s
-            .args
-            .iter()
-            .position(|a| a == "--append-system-prompt-file")
-            .expect("프라이밍 파일 있으면 --append-system-prompt-file 주입");
-        assert_eq!(
-            s.args.get(pos + 1).map(|s| s.as_str()),
-            Some("C:/repo/builtin/instructions/priming.md"),
-            "플래그 다음 인자 = 프라이밍 MD 절대경로: {:?}",
-            s.args
-        );
-    }
-
-    #[test]
-    fn claude_priming_file_injects_flag_json_mode() {
-        let s = spec_with_control(
-            &json(vec![]),
-            SpawnMode::Fresh,
-            None,
-            Some(ep_with_priming()),
-        );
-        assert!(
-            s.args.iter().any(|a| a == "--append-system-prompt-file"),
-            "json 모드에도 프라이밍 주입: {:?}",
-            s.args
-        );
-    }
-
-    #[test]
-    fn claude_no_priming_file_no_append_flag() {
-        let s = spec_with_control(&terminal(vec![]), SpawnMode::Fresh, None, Some(ep()));
-        assert!(
-            !s.args.iter().any(|a| a == "--append-system-prompt-file"),
-            "프라이밍 없으면 append-system-prompt-file 없음: {:?}",
-            s.args
-        );
+    fn claude_noop_spawn_with_a_control_endpoint_has_no_append_flag() {
+        for command in [terminal(vec![]), json(vec![])] {
+            let s = spec_with_control(&command, SpawnMode::Fresh, None, Some(ep()));
+            assert!(
+                !s.args.iter().any(|a| a == "--append-system-prompt-file"),
+                "{command:?}: {:?}",
+                s.args
+            );
+        }
     }
 
     #[test]
@@ -2790,52 +2723,17 @@ mod tests {
         );
     }
 
-    // ── S18 D(spec §6): 세션 한정 설정 조각 주입(`--settings`) ────────────────────────────
+    // ADR-0370
     #[test]
-    fn claude_settings_file_injects_settings_flag_terminal() {
-        let s = spec_with_control(
-            &terminal(vec![]),
-            SpawnMode::Fresh,
-            None,
-            Some(ep_with_settings()),
-        );
-        let pos = s
-            .args
-            .iter()
-            .position(|a| a == "--settings")
-            .expect("settings_file 있으면 --settings 주입");
-        assert_eq!(
-            s.args.get(pos + 1).map(|s| s.as_str()),
-            Some("C:/data/mcp/agent-x.settings.json"),
-            "플래그 다음 인자 = 설정 조각 절대경로: {:?}",
-            s.args
-        );
-    }
-
-    #[test]
-    fn claude_settings_file_injects_flag_json_mode() {
-        // json(stream-json) 헤드리스가 실제 스폰 경로다 — 여기 안 붙으면 대책 자체가 무의미.
-        let s = spec_with_control(
-            &json(vec![]),
-            SpawnMode::Fresh,
-            None,
-            Some(ep_with_settings()),
-        );
-        assert!(
-            s.args.iter().any(|a| a == "--settings"),
-            "json 모드에도 설정 조각 주입: {:?}",
-            s.args
-        );
-    }
-
-    #[test]
-    fn claude_no_settings_file_no_settings_flag() {
-        let s = spec_with_control(&terminal(vec![]), SpawnMode::Fresh, None, Some(ep()));
-        assert!(
-            !s.args.iter().any(|a| a == "--settings"),
-            "설정 조각 없으면 --settings 없음: {:?}",
-            s.args
-        );
+    fn claude_noop_spawn_with_a_control_endpoint_has_no_settings_flag() {
+        for command in [terminal(vec![]), json(vec![])] {
+            let s = spec_with_control(&command, SpawnMode::Fresh, None, Some(ep()));
+            assert!(
+                !s.args.iter().any(|a| a == "--settings"),
+                "{command:?}: {:?}",
+                s.args
+            );
+        }
     }
 
     #[test]
@@ -2844,32 +2742,6 @@ mod tests {
         assert!(
             !s.args.iter().any(|a| a == "--settings"),
             "control 없으면 --settings 없음: {:?}",
-            s.args
-        );
-    }
-
-    #[test]
-    fn claude_settings_flag_does_not_disturb_the_allowed_tools_tail() {
-        let ep = ControlEndpoint {
-            settings_file: Some(PathBuf::from("C:/data/mcp/a.settings.json")),
-            ..ep_with_grants()
-        };
-        let s = spec_with_control(&json(vec![]), SpawnMode::Fresh, None, Some(ep));
-        let settings_pos = s.args.iter().position(|a| a == "--settings").expect("주입");
-        let allowed_pos = s
-            .args
-            .iter()
-            .position(|a| a == "--allowedTools")
-            .expect("grant 그룹 주입");
-        assert!(
-            settings_pos < allowed_pos,
-            "--settings 는 --allowedTools 그룹보다 앞: {:?}",
-            s.args
-        );
-        assert_eq!(
-            s.args.last().map(|s| s.as_str()),
-            Some(format!("PowerShell({CLI_EXE_NAME}:*)").as_str()),
-            "grant 그룹이 여전히 맨 끝: {:?}",
             s.args
         );
     }

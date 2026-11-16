@@ -121,8 +121,6 @@ async fn wire(
         url.clone(),
         engram_dashboard_daemon::control::mcp_config::McpDir::new(data_dir.join("mcp-config")),
         None, // send_exe: relay 테스트는 CLI 경로 불요(직접 HTTP/MCP 호출).
-        // ADR-0092: 기존 relay 테스트는 프라이밍 무관 — Noop 으로 오늘 동작과 byte-identical.
-        Arc::new(engram_dashboard_daemon::control::priming::NoopPrimingProvider),
     ));
 
     let (flush_tx, flush_rx) =

@@ -13,9 +13,8 @@
 #       clean target/release, so if an exe with the old name is left over and you fix only the manifest below to that old name,
 #       both the existence check and the tripwire pass and **that stale binary gets packaged as is** (even though the build did not
 #       update that file). When you fix the manifest, check the output directory too.
-#     - The daemon resolves the priming file builtin/instructions/priming.md relative to find_install_root (ADR-0092 · ADR-0327).
-#       builtin/ is also the asset library's built-in folder (engram:/…) on the same anchor (data_dir::find_builtin_dir); the
-#       daemon starts reading it there once the library is wired in (TRD S25 step 8). The file list is $ExpectedBuiltins below,
+#     - builtin/ is the asset library's built-in folder (engram:/…, the priming builtin/instructions/priming.md included),
+#       found relative to find_install_root (data_dir::find_builtin_dir — ADR-0327 · ADR-0370). The file list is $ExpectedBuiltins below,
 #       which tests keep equal to the code's set (asset-library builtin.rs · daemon data_dir.rs). A missing built-in will not
 #       block a launch (it is stood in for — ADR-0361), so the tripwire below is what keeps a release from shipping without one.
 #       That rule looks for .git·[workspace] markers among the exe's ancestors regardless of build mode — for a release folder assembled
@@ -155,7 +154,7 @@ if (-not (Test-Path (Join-Path $ProjectRoot 'dist\index.html'))) {
 # ── (a) Release binaries: daemon + CLI ─────────────────────────────────────────────────────────
 #   The daemon and the CLI are **two packages** separate from the UI app (engram-dashboard-daemon · engram-dashboard-cli — ADR-0273)
 #    — tauri build does not build them, so they are compiled separately.
-#   Build only with an **explicit --bin** (the measurement-only bins (saturation-pilot/priming-smoke/roundtrip-smoke)
+#   Build only with an **explicit --bin** (the measurement-only bins (saturation-pilot/roundtrip-smoke)
 #    are already excluded from the release graph by required-features=test-harness, but an explicit --bin shuts out any chance of them flowing in).
 #   ★--all-targets forbidden★: through the unification of the daemon crate's self-dev-dependency (test-harness · test-support), the
 #    yield-seam hook can get baked into the operational binary, and the daemon lib of that call is built holding even the in-process test server

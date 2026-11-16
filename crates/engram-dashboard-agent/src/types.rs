@@ -720,8 +720,12 @@ pub enum ToolGrant {
 ///
 /// ★칸마다 소비자가 다르다 — 「backend 가 번역한다」를 「칸 전부를 한 backend 가 쓴다」로 읽지 말 것★:
 /// 아래 `token`·`send_exe`·`mail_allowed` 는 **백엔드 공용 주입**(`backend::inject_cli_entrance`)이
-/// 쓰고, `config_path`·`priming_file`·`settings_file`·`grants` 는 그것을 받아들이는 프로그램의 폴더가
+/// 쓰고, `config_path`·`grants` 는 그것을 받아들이는 프로그램의 폴더가
 /// 자기 플래그로만 번역한다. 그 분담의 근거는 바로 아래 `config_path` doc 이 이미 적어 둔 문장이다.
+///
+/// ★No priming file and no settings fragment ride here — do not add them back★: the launch materials carry the
+/// instructions and the one `--settings`, and a launch without materials carries neither.
+// ADR-0370
 #[derive(Debug, Clone)]
 pub struct ControlEndpoint {
     /// 이 endpoint 를 발급받은 에이전트와 그 화신 — 아래 `token` 의 수명 단위(`(AgentId,epoch)`)를
@@ -771,26 +775,10 @@ pub struct ControlEndpoint {
     ///   경고하지 않으므로, 이 문장이 "왜 남았나" 의 유일한 기록이다.
     // ADR-0133
     pub mail_allowed: bool,
-    /// ADR-0092(수신 계약 프라이밍): 스폰 시 시스템 프롬프트에 주입할 **프라이밍 MD 파일의 절대경로**
-    /// (있으면). 데몬의 `PrimingProvider` seam 이 해석해 실어 보낸다 — 파일 부재/미구성이면 `None`.
-    /// backend/claude/ 가 이 경로를 `--append-system-prompt-file <abs-path>` 로 주입한다(claude 가
-    /// 파일을 **직접 읽음** — 데몬/agent 는 내용을 안 읽는다). MCP 와 직교하는 broker-주입 데이터지만,
-    /// 데몬이 이미 모든 claude 스폰에 대해 채우는 이 descriptor 를 재사용해 별도 threading 경로를 만들지
-    /// 않는다.
-    pub priming_file: Option<std::path::PathBuf>,
     /// 사전 승인할 툴 목록(ADR-0094 — 계약은 `ToolGrant`). 데몬 컨트롤 채널이 발신 입구(MCP
     /// `eg_send` / `engram` CLI)를 채운다. 빈 Vec 이면 backend 가 아무 것도 주입하지 않는다
     /// (권한 플래그 없음 = 기존 게이트 유지).
     pub grants: Vec<ToolGrant>,
-    /// S18 D(spec §6 allowedMcpServers 대책): 스폰 세션에만 얹을 **설정 조각 파일의 절대경로**(있으면).
-    /// 데몬이 provision 때 `<data_dir>/mcp-config/<id>-<epoch>.settings.json` 에 쓰고 revoke 때 지운다.
-    /// backend/claude/ 가 `--settings <abs-path>` 로 번역한다(그 플래그 지식은 거기 단독 — ADR-0004).
-    ///
-    /// ★왜 필요한가(실측 2026-07-24)★: 유저 전역 설정의 `allowedMcpServers: []`(= 전면 차단)가 **스폰
-    ///   에이전트에도 그대로 적용**돼 engram MCP 서버가 툴 목록에 뜨지 않았다. 이 조각이 그 세션에만
-    ///   engram 서버를 허용한다 — **전역 설정 파일은 절대 건드리지 않는다**(허용 범위 = 엔그램이 스폰한
-    ///   에이전트뿐). config_path 와 같은 수명(epoch 단위 생성·폐기)이라 같은 descriptor 에 태운다.
-    pub settings_file: Option<std::path::PathBuf>,
 }
 
 impl ControlEndpoint {
@@ -853,15 +841,14 @@ impl std::error::Error for ProvisionError {}
 pub struct ControlChannelNeeds {
     /// 이 backend 가 **우리가 만든 mcp-config 파일을 먹을 수 있나**(ADR-0099).
     ///
-    /// true → mcp-config + 세션 설정 조각 기록 + MCP endpoint bits. false → 그 셋 다 안 만든다.
+    /// true → the MCP endpoint bits (the MCP send grant; `mail_allowed` false). false → none of them.
     /// ★"MCP 를 쓸 수 있나" 가 아니다★ — 다른 기제로 MCP 를 켜는 프로그램도 이 칸은 false 다
     ///   (판정의 정본은 각 backend 폴더).
     pub accepts_mcp_config: bool,
     /// 데몬이 이 스폰에 **mcp-config 파일을 써 줄까**(`AgentBackend::writes_mcp_config_file`).
     ///
-    /// true → `<data_dir>/mcp-config/<id>-<epoch>.json`(평문 Bearer 토큰)과 세션 설정 조각을 기록하고,
-    /// 그 write 실패는 **fail-closed**(스폰 중단)다. false → 둘 다 안 만들고 `config_path`·
-    /// `settings_file` 이 `None` 으로 나간다.
+    /// true → the daemon writes `<data_dir>/mcp-config/<id>-<epoch>.json` (a plaintext Bearer token), and a failed
+    /// write is **fail-closed** (the spawn is aborted). false → no file, and `config_path` goes out as `None`.
     /// ★위 칸과 **한 칸으로 접지 말 것**★: 위는 우편 채널 판정(`mail_allowed`)을 파생하는 축이고,
     ///   이 칸은 **디스크에 평문 토큰을 쓸까** 하나만 묻는다. 「MCP 는 쓰지만 우리 파일은 안 읽는다」
     ///   (codex)가 그 조합의 정상값이다 — 타입 doc 의 셋째 칸 항목이 사유의 정본.
@@ -869,7 +856,8 @@ pub struct ControlChannelNeeds {
     pub writes_mcp_config_file: bool,
     /// 이 스폰에 **우편 채널을 배정하나**(`AgentBackend::uses_mail`).
     ///
-    /// false → 우편 교육(프라이밍)도 발신 grant 도 안 실리고, 데몬이 이 자격증명의 우편 요청을 거절한다.
+    /// false → no send grant goes out, and the daemon refuses this credential's mail requests. Mail teaching is
+    /// not decided here — the priming comes only from the launch materials (ADR-0370).
     /// ★그래도 제어 동사와 CLI 입구는 받는다★ — 위 타입 doc 의 마지막 항.
     // ADR-0209
     pub uses_mail: bool,

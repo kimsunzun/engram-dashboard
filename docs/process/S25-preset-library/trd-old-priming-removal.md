@@ -2,7 +2,7 @@
 
 | Item | Value |
 |---|---|
-| **Status** | **Draft 3** (2026-11-16) — reviewed (§8). Closes parent [`trd.md`](trd.md) §2-4 item 2. |
+| **Status** | **Implemented** (2026-11-16) — draft 3, reviewed (§8). Closes parent [`trd.md`](trd.md) §2-4 item 2. |
 | **Canonical ADRs** | new ADR (§5 D1) amending: ADR-0092 d1 · ADR-0327 d5 + 「영향」 · ADR-0368 d4 · ADR-0215 d2 · d4 · d5 (+ its rejected-alternative revival trigger) · ADR-0353 (decision on the Noop warn-and-drop + 「영향」 revival trigger) · ADR-0328 d3 + the last line of 「바뀌는 조항」 + the last 「영향」 bullet · ADR-0316 「영향」 (Noop argv byte for byte) · ADR-0209 「영향」 (the `uses_mail` split now held by agent `backend/mod.rs` `every_backend_with_a_settings_check_has_what_the_priming_teaches`) · ADR-0099 d5 (`--priming <직접 경로>`) · ADR-0093 (C0–C3 as `roundtrip_smoke` parameters) · ADR-0216 (codex Noop read) |
 | **Origin** | User 2026-11-16 「기존건 지워」 on the step-8 QA finding (`trd-daemon-wiring.md` §3 row "Old priming path", §8 B2 · B3). |
 | **PRD relation** | No PRD requirement changes; nothing user-visible on the screen. Operator-visible: `ENGRAM_PRIMING_FILE` (read by every released daemon up to v0.4.0, never in user docs) is no longer read and no longer warned about; the per-spawn missing-file `WARN` goes away. |

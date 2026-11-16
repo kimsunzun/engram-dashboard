@@ -108,11 +108,8 @@ impl ControlChannel for CountingControl {
             // ADR-0099: config_path 는 Option — 이 테스트 double 은 MCP 채널 물리를 검증하지 않으므로 None.
             config_path: None,
             send_exe: None,
-            priming_file: None,
             // ADR-0094: 이 테스트는 grant 번역을 검증하지 않으므로 빈 목록.
             grants: vec![],
-            // S18 D: 설정 조각도 이 테스트의 관심사가 아니다(spec 조립이 아니라 spawn 인과 격리).
-            settings_file: None,
             // ADR-0133: 우편 인가 산출도 관심사 밖 — 데몬 산출 규칙만 흉내 낸다(재료가 둘이다).
             mail_allowed: needs.uses_mail && !needs.accepts_mcp_config,
         }))

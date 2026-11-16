@@ -268,7 +268,6 @@ async fn live(root: &Path, library: Option<PathBuf>) -> Live {
         mcp.url.clone(),
         engram_dashboard_daemon::control::mcp_config::McpDir::new(root.join("mcp")),
         None,
-        Arc::new(engram_dashboard_daemon::control::priming::NoopPrimingProvider),
     ));
     let profiles = Arc::new(ProfileRegistry::new(Arc::new(FileProfileStore::new(
         root.join("store"),

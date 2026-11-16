@@ -33,7 +33,6 @@ use engram_dashboard_daemon::control::mcp_config;
 use engram_dashboard_daemon::control::mcp_server::{
     start_mcp_server_without_help, CommandTableSlot, ManagerSlot, MessagingSlot,
 };
-use engram_dashboard_daemon::control::priming::NoopPrimingProvider;
 use engram_dashboard_daemon::control::registry::ControlRegistry;
 use engram_dashboard_daemon::control::DaemonControlChannel;
 
@@ -92,7 +91,6 @@ async fn make_manager_with_control(
         handle.url.clone(),
         engram_dashboard_daemon::control::mcp_config::McpDir::new(data_dir.join("mcp-config")),
         None, // send_exe: 이 파일의 테스트는 CLI 입구를 쓰지 않는다.
-        Arc::new(NoopPrimingProvider),
     ));
 
     let (manager, registry, data_dir, handle) =
@@ -273,7 +271,6 @@ async fn provision_guard_revoke_reclaims_real_token_and_config_file() {
         handle.url.clone(),
         engram_dashboard_daemon::control::mcp_config::McpDir::new(data_dir.join("mcp-config")),
         None,
-        Arc::new(NoopPrimingProvider),
     );
     let id = AgentId::new_v4();
 

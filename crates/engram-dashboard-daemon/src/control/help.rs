@@ -44,11 +44,10 @@ const HELP_TOOL_SLOT: &str = "{tool}";
 /// to a new folder needs both of those built again for it.
 const REL_HELP_FILE: &str = "prompts/engram-help.md";
 
-/// 운영자·하네스가 본문을 갈아끼우는 자리(이 **데몬 프로세스**의 env) — 프라이밍의 `ENGRAM_PRIMING_FILE`
-/// 과 같은 계약이다.
+/// Where an operator or a harness swaps the body (this **daemon process**'s env).
 ///
-/// ★실패해도 고정 파일로 폴백하지 않는다(프라이밍과 같은 규율)★: 명시 지정을 조용히 다른 파일로
-///   갈아치우면 무엇을 읽었는지 알 수 없다. 반려하고 사유에 그 경로를 싣는다.
+/// ★A failure does not fall back to the fixed file★: quietly swapping an explicit choice for another file hides what
+///   was read. The request is refused, and the reason carries that path.
 const ENV_HELP_FILE: &str = "ENGRAM_HELP_FILE";
 
 /// 구획 표시 줄의 앞. ★**줄 전체**가 표시여야 한다★ — substring 으로 보면 형식을 설명하는 산문 한 줄이
@@ -223,10 +222,9 @@ fn render_help_from(text: &HelpText, topic: HelpTopic) -> String {
 /// help 화면의 원천 — 본문 파일을 어디서 찾나. 조립부가 지어 서버에 넘긴다
 /// (`mcp_server::start_mcp_server_with_help`).
 ///
-/// ★경로 모양은 프라이밍과 같다(ADR-0092)★: 고정 상대경로를 base 에 붙이고, `ENGRAM_HELP_FILE` 이 비어
-///   있지 않으면 그것이 먼저이고 실패해도 고정 경로로 안 내려가며, 절대경로만 읽는다. ★cwd 는 쓰지
-///   않는다★ — WMI 로 뜬 데몬의 cwd 는 System32 다. 다른 반쪽은 **내용을 이 프로세스가 읽는다**는 것이다
-///   (프라이밍은 경로만 넘기고 claude 가 읽는다).
+/// ★Path shape★: the fixed relative path is joined to base; a non-empty `ENGRAM_HELP_FILE` comes first and does not
+///   fall back to the fixed path when it fails; only an absolute path is read. ★cwd is not used★ — a daemon launched
+///   through WMI has System32 as its cwd. This process reads the content itself.
 /// ★base 를 받는 이유★: 시험이 알려진 본문을 담은 폴더를 넘겨 시험 exe 의 자리 · `CARGO_TARGET_DIR` 와
 ///   무관하게 화면을 잰다. 서버 안에서 설치 위치로 짓지 않는 것도 그래서다.
 // ADR-0092
@@ -251,8 +249,8 @@ impl HelpSource {
         }
     }
 
-    /// 운영 생성자 — 프라이밍과 같은 앵커(`data_dir::find_install_root`). 릴리스에서는 exe 폴더이고 거기
-    /// `prompts/` 가 함께 배송된다(ADR-0100).
+    /// The production constructor — anchored at the install location (`data_dir::find_install_root`). In a release that
+    /// is the exe folder, and `prompts/` ships beside it (ADR-0100).
     pub fn from_install_root() -> Self {
         match crate::data_dir::find_install_root() {
             Some(root) => Self::new(root),
@@ -906,9 +904,9 @@ mod tests {
         assert_eq!(no_trailing_newline.section("s"), "last");
     }
 
-    /// ★env override 는 고정 파일을 이기고, 실패하면 **반려다** — 고정 파일로 되돌아가지 않는다★(프라이밍과
-    ///   같은 규율 — 명시 지정을 조용히 다른 파일로 갈아치우면 무엇을 읽었는지 알 수 없다). base 에는 멀쩡한
-    ///   고정 파일을 둬서, 되돌아가면 화면이 나와 이 단언이 빨개지게 한다.
+    /// ★The env override beats the fixed file, and its failure is a **refusal** — no fallback to the fixed file★
+    ///   (quietly swapping an explicit choice for another file hides what was read). base holds a sound fixed file, so a
+    ///   fallback would render a screen and turn this assertion red.
     /// ★요청마다 읽는다★: 같은 원천에서 파일만 바꾼 뒤의 다음 요청이 바뀐 글을 내야 한다 — 캐시를 두면
     ///   데몬을 다시 띄울 때까지 옛 글이 나간다.
     // ADR-0092

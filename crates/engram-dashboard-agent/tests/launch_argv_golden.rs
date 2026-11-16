@@ -10,7 +10,7 @@
 //! 감싸기가 보이는 OS(Windows)에서만 된다.
 // ADR-0334
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use engram_dashboard_agent::backend;
 use engram_dashboard_agent::commands::NEW_AGENT_OUTPUT_FORMAT;
@@ -25,11 +25,6 @@ const GOLDEN: &str = include_str!("fixtures/launch_argv_golden.json");
 const GOLDEN_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/launch_argv_golden.json"
-);
-// codex 터미널은 프라이밍 파일의 **내용**을 argv 에 싣는다 — 그래서 그 경우만 실제 파일을 준다(경로는 argv 에 안 실린다).
-const PRIMING_FIXTURE: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/tests/fixtures/launch_golden_priming.md"
 );
 
 const FRESH_SID: Uuid = Uuid::from_u128(0x1111_1111_1111_4111_8111_1111_1111_1111);
@@ -58,7 +53,7 @@ fn commands() -> Vec<Command> {
     let claude_endpoints = || {
         vec![
             ("endpoint", full_endpoint()),
-            ("endpoint-no-priming-no-settings", claude_bare_endpoint()),
+            ("endpoint-mcp-grant-only", claude_mcp_grant_only_endpoint()),
         ]
     };
     vec![
@@ -129,7 +124,7 @@ fn spawn_path_commands() -> Vec<(&'static str, AgentCommand)> {
                 output_format: NEW_AGENT_OUTPUT_FORMAT,
             },
         ),
-        // 스모크 bin(`priming_smoke` 등) — `--model <m>` 을 싣는 claude JSON.
+        // 하네스 bin(`saturation_pilot` 등) — `--model <m>` 을 싣는 claude JSON.
         (
             "smoke-bin/claude-json",
             AgentCommand::Claude {
@@ -147,8 +142,8 @@ fn mcp_send_grant() -> ToolGrant {
     }
 }
 
-/// 칸을 전부 채운 꼴 — 경로를 argv 에 그대로 싣는 백엔드 몫이라 프라이밍은 읽히지 않는 고정 경로다. CLI grant 는
-/// 운영의 claude 갈래에 없다(MCP 설정을 받는 백엔드는 CLI grant 를 받지 않는다 — 데몬 `build_grants`).
+/// Every field filled. The CLI grant is not in production's claude branch (a backend that takes the MCP config gets no
+/// CLI grant — the daemon's `build_grants`).
 fn full_endpoint() -> ControlEndpoint {
     ControlEndpoint {
         agent_id: AGENT_ID,
@@ -158,33 +153,28 @@ fn full_endpoint() -> ControlEndpoint {
         config_path: Some(PathBuf::from("/golden/mcp/agent.mcp.json")),
         send_exe: Some(PathBuf::from("/golden/bin/engram.exe")),
         mail_allowed: false,
-        priming_file: Some(PathBuf::from("/golden/priming.md")),
         grants: vec![
             mcp_send_grant(),
             ToolGrant::Cli {
                 exe: "engram".to_string(),
             },
         ],
-        settings_file: Some(PathBuf::from("/golden/mcp/agent.settings.json")),
     }
 }
 
-/// 데몬이 claude 에 내는 꼴 중 프라이밍 파일이 없고 설정 조각 쓰기가 실패한 것(데몬 `control/mod.rs` 의 provision).
-fn claude_bare_endpoint() -> ControlEndpoint {
+/// The shape the daemon gives claude — the MCP send grant only (the daemon's `control/mod.rs` provision).
+fn claude_mcp_grant_only_endpoint() -> ControlEndpoint {
     ControlEndpoint {
-        priming_file: None,
-        settings_file: None,
         grants: vec![mcp_send_grant()],
         ..full_endpoint()
     }
 }
 
-/// 데몬이 codex 에 내는 꼴 — 파일을 쓰지 않는 백엔드라(`writes_mcp_config_file` = false) 경로 두 칸이 빈다.
+/// The shape the daemon gives codex — a backend that takes no file (`writes_mcp_config_file` = false), so the config
+/// path is empty.
 fn codex_endpoint() -> ControlEndpoint {
     ControlEndpoint {
         config_path: None,
-        settings_file: None,
-        priming_file: Some(PathBuf::from(PRIMING_FIXTURE)),
         grants: vec![mcp_send_grant()],
         ..full_endpoint()
     }
@@ -204,10 +194,6 @@ fn profile_env() -> Vec<(String, String)> {
 
 /// 경우마다 manager 가 넘기는 꼴 그대로(세션 id 두 칸은 백엔드 축 dispatch 로 가른다).
 fn actual_cases() -> Vec<(String, CommandSpec)> {
-    assert!(
-        Path::new(PRIMING_FIXTURE).is_file(),
-        "프라이밍 고정물이 없다: {PRIMING_FIXTURE}"
-    );
     let mut out = Vec::new();
     for (name, command, endpoints) in commands() {
         for (mode_name, mode) in [("fresh", SpawnMode::Fresh), ("resume", SpawnMode::Resume)] {

@@ -494,12 +494,10 @@ mod tests {
             token: "deadbeef".to_string(),
             config_path: Some(root().join("data").join("mcp.json")),
             send_exe: None,
-            priming_file: Some(root().join("data").join("priming.md")),
             grants: vec![ToolGrant::Mcp {
                 server: "engram".to_string(),
                 tool: "eg_send".to_string(),
             }],
-            settings_file: Some(root().join("data").join("fragment.json")),
             mail_allowed: false,
         }
     }
@@ -545,10 +543,8 @@ mod tests {
     /// ★Real-material argv golden★ — both modes × Fresh/Resume × control/none:
     /// - `--add-dir` pairs in plan order, first, so the always-present `--permission-mode` ends the variadic group and a
     ///   bare `extra_args` value (`stray`) never joins it;
-    /// - the merged instructions at the priming spot + `--system-prompt-snapshot off`; the control channel's priming
-    ///   file and settings fragment are not loaded;
-    /// - `--plugin-dir` + one `--settings` at the fragment spot; `--allowedTools` last; no `--model` (the model rides in
-    ///   the merged settings).
+    /// - the merged instructions + `--system-prompt-snapshot off`;
+    /// - `--plugin-dir` + one `--settings`; `--allowedTools` last; no `--model` (the model rides in the merged settings).
     // ADR-0316
     // ADR-0328
     // ADR-0341
@@ -623,12 +619,11 @@ mod tests {
         }
     }
 
-    /// A real kit with no materials still drops the control channel's priming file and settings fragment and still
-    /// turns the snapshot off; nothing else appears.
+    /// A real kit with no materials only turns the snapshot off; nothing else appears.
     // ADR-0316
     // ADR-0328
     #[test]
-    fn an_empty_real_kit_drops_the_priming_and_the_fragment_and_turns_the_snapshot_off() {
+    fn an_empty_real_kit_only_turns_the_snapshot_off() {
         let spec = real_spec(
             AgentOutputFormat::Terminal,
             SpawnMode::Fresh,
