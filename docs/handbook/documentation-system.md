@@ -28,7 +28,7 @@ The **definition** of the whole development flow is in `../../CLAUDE.md` 「개�
 - **No orphans** — a new document must connect to at least one link in the discovery chain (`README.md` · `tracking.md` · code anchor).
 - **soft + hard** — pair documents (intent and reason, soft) with tools (lint/test/CI, hard). Pin invariants down in the hard form too.
 - **Lifetime** — immutable and cumulative (ADR) vs living (README · reference, git is the history). Research becomes a snapshot after approval and freezes.
-  - Step docs (PRD · TRD) are workspaces. At the step's last commit only the TRD lines that differ from the code (names · values · locations) are fixed and a 「구현됨」 line is added — then the TRD is frozen for good.
+  - Step docs (PRD · TRD) are workspaces. At the step's last commit an `Implemented` line is added and the TRD is frozen for good — its body is not aligned to the code, and later steps do not read it (history only). Decisions later work relies on go to ADR; decisions still open go to `tracking.md`.
   - Reference md is edited in the same commit as the code change that makes a sentence wrong.
   - Basis: `../research/design-doc-lifecycle-after-implementation-2026-11-13.md` · `../research/living-reference-dual-audience-structure-2026-11-14.md`.
 

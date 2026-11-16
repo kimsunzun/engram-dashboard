@@ -19,4 +19,4 @@
 
 ## 결정 기록
 
-- 굵은 설계 결정 → ADR(`docs/decisions/`) — `/engram-adr`로 쓴다.
+- 굵은 설계 결정 · 뒤 작업이 기대는 결정(implement flow §0-1 대상) → ADR(`docs/decisions/`) — `/engram-adr`로 쓴다.
