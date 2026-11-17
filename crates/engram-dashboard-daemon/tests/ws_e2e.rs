@@ -1235,7 +1235,7 @@ async fn case16_ws_interrupt_refused_on_terminal_process_alive() {
     .await;
     let msg = c.await_error(req_int).await;
     assert!(
-        msg.contains("터미널 모드는 끊기 명령을 받지 않는다"),
+        msg.contains("terminal mode does not accept the interrupt command"),
         "PTY 끊기는 거절 문구로 답해야 한다: {msg}"
     );
     assert!(

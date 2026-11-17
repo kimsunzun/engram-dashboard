@@ -3,10 +3,10 @@ import type { QueuedInputRow } from "./QueuedInputRow";
 
 export type AgentListQueuedInputsOk = { inputs: Array<QueuedInputRow>, 
 /**
- * 행이 환원한 마지막 목록 사건의 seq(`null` = 아직 없다). `epoch` 안에서만 견준다 — 재부착 대조용.
+ * The seq of the last list event the rows reduced (`null` = none yet). Compared only within `epoch` — for reattach comparison.
  */
 as_of_seq?: bigint | null, 
 /**
- * 화신 표식 — 일치/불일치로만 견준다.
+ * Incarnation marker — compared only for match/mismatch.
  */
 epoch: number, stopped_after_error: boolean, };

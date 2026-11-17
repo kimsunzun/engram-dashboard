@@ -2,7 +2,7 @@
 //! spawned is that child's thread id (ADR-0218 decision 1).
 //!
 //! ★This file holds only two pieces of codex knowledge★ — the location of the lock directory ([`lock_dir`]) and that the file name is the id.
-//! 「이 파일을 누가 쥐고 있나」 (who holds this file) and 「이 PID 아래 무엇이 살아 있나」 (what is alive under this PID) need zero domain knowledge, so the OS-layer crate's
+//! 「who holds this file」 and 「what is alive under this PID」 need zero domain knowledge, so the OS-layer crate's
 //! [`engram_dashboard_platform::file_holders`] and [`engram_dashboard_platform::process::subtree`] answer them
 //! (ADR-0004 · ADR-0218 decision 11 · ADR-0266). ★**The file content is never read**★ — it is 0 bytes, and starting to read it would make us depend on the vendor
 //! storage format (ADR-0203).
@@ -29,8 +29,8 @@ use crate::backend::SessionIdSink;
 
 /// The name of the folder under the codex home where the writer locks live.
 ///
-/// ★This is an undocumented layout★ — if upstream changes it, we silently get 0 candidates instead of an error (ADR-0218 「근거」 (rationale),
-/// unmeasured item ③). The failure mode is 「못 받음」 (not received), so that silence does not spread into false detections.
+/// ★This is an undocumented layout★ — if upstream changes it, we silently get 0 candidates instead of an error (ADR-0218 rationale section,
+/// unmeasured item ③). The failure mode is 「not received」, so that silence does not spread into false detections.
 const LOCK_DIR: &str = "thread-writer-locks";
 
 /// The extension of the lock file. The rest of the name is the thread id.
@@ -49,7 +49,7 @@ pub(super) const CODEX_HOME_ENV: &str = "CODEX_HOME";
 /// without a single real file or a single real process (ADR-0012).
 pub(crate) trait LockHolderProbe {
     /// **No distinction** between "could not ask" and "no holders" — both are an empty list. The decision lands in the same
-    /// place either way (「후보 아님」 (not a candidate)), and polling asks again on the next round.
+    /// place either way (「not a candidate」), and polling asks again on the next round.
     fn holders(&self, path: &Path) -> Vec<Holder>;
 
     /// The identities of the child we spawned and every **live** descendant under it. An empty list = that PID is no longer our
@@ -57,7 +57,7 @@ pub(crate) trait LockHolderProbe {
     ///
     /// ★Why a tree — the PID we hold is not codex★: on Windows the spawn passes through a `cmd.exe /c codex …`
     ///   layer ([`engram_dashboard_platform::shell::console_command`]), so the PID the path returned is
-    ///   **that wrapper**. The one holding the lock is the `codex.exe` below it (ADR-0218 「근거」 (rationale) — the holder was neither the wrapper nor the child but
+    ///   **that wrapper**. The one holding the lock is the `codex.exe` below it (ADR-0218 rationale section — the holder was neither the wrapper nor the child but
     ///   codex.exe). ★Compare only the wrapper PID and a match **never** shows up, and the symptom is silence, not an error★
     ///   — the thread spins empty-handed for the whole agent lifetime (measured 2026-09-21: `cmd.exe /c …` →
     ///   wrapper 38240 · 4816,19468 below it).
@@ -70,13 +70,13 @@ pub(crate) trait LockHolderProbe {
     ///     `P` intact, and Windows **reuses** `P` for our wrapper. Without the rule that stranger is
     ///     enumerated as our child, and since the stranger's own identity matches its own lock holder, it becomes **the only candidate for 0.7–21 seconds
     ///     before our codex creates its lock** — not even `Ambiguous` shows up, and another party's thread is written into our
-    ///     handle (the silent failure ADR-0218 「영향/불변식」 (impact/invariants) names).
+    ///     handle (the silent failure the ADR-0218 impact/invariants section names).
     ///   - ★**We accept residue ①②③ (do not argue it again — decision of 2026-09-21)**★. ① PID reuse between enumeration and start-time reading
     ///     has no atomic fix and the window is microseconds. ② Blocking the same tick would lose a normal
     ///     child. ③ For an explicit-parent case to become a **real false detection**, the stranger would have to hold a `<uuid>.lock` under our `CODEX_HOME`
     ///     as well — closing the common path (an orphan with a reused ppid) keeps the rule's
     ///     worth intact.
-    ///   - A tree enumeration that fails and returns less is also not treated as an error — there is no way to handle it differently from 「후보 아님」 (not a candidate),
+    ///   - A tree enumeration that fails and returns less is also not treated as an error — there is no way to handle it differently from 「not a candidate」,
     ///     and the next round asks again.
     fn our_processes(&self, root_pid: u32, root_start_time: u64) -> Vec<ProcessIdentity> {
         process::subtree(root_pid, root_start_time)
@@ -109,7 +109,7 @@ impl LockHolderProbe for RestartManagerProbe {
         match file_holders::holders_of(path) {
             Ok(holders) => holders,
             Err(err) => {
-                tracing::debug!(path = %path.display(), %err, "락 파일 홀더 조회 실패");
+                tracing::debug!(path = %path.display(), %err, "lock file holder lookup failed");
                 Vec::new()
             }
         }
@@ -125,7 +125,7 @@ pub(crate) enum ScanOutcome {
     NotYet,
     /// n (≥2) candidates — ★adopt nothing this round★. It is unmeasured whether one codex process can hold two or more locks,
     /// so we refuse instead of guessing (ADR-0218 decision 3 · not receiving is
-    /// better than receiving wrongly). ★「거절」 (refusal) is not 「포기」 (giving up) — polling continues★ (this outcome is not in decision 4's list of stops).
+    /// better than receiving wrongly). ★「refusal」 is not 「giving up」 — polling continues★ (this outcome is not in decision 4's list of stops).
     Ambiguous(usize),
 }
 
@@ -139,20 +139,20 @@ pub(crate) enum ScanOutcome {
 ///   ★A match on only one of them is not a candidate★ — PIDs are reused, so that decision would write another party's thread
 ///   into our handle (decision 2). Widening the tree does not loosen this pair: the start time of descendants is
 ///   read together at the same place where they are enumerated.
-/// - ★**What we count is not files but 「맞은 홀더」 (matched holders)**★ — decision 3's 「후보가 정확히 하나」 (exactly one candidate) is the number of **pairs**, not
-///   the number of file names. If two of our processes hold one file together, 「그 락이 누구 것인가」 (who owns that lock) is
+/// - ★**What we count is not files but 「matched holders」**★ — decision 3's 「exactly one candidate」 is the number of **pairs**, not
+///   the number of file names. If two of our processes hold one file together, 「who owns that lock」 is
 ///   not narrowed to one, and counting only files lets that state pass as `Found`.
 ///   ★We chose this knowing its cost★: if a child inherits the handle (a tool launched by codex inherits the same lock handle),
 ///   adoption does not happen during that whole span. It is tolerable because [`run_capture`] does **not stop** on `Ambiguous`
 ///   — once the inheriting side ends, we adopt on the next round. Whether inheritance really happens is
-///   unmeasured, and if it does, the symptom is 「회수가 늦어진다」 (recovery gets late), not a false detection.
-///   ★**There is dissent on this cost — read this line before raising it again**★ (2026-09-21): there was a counterargument 「둘 다 **우리** 것이면
-///   그 락은 우리 것이니 채택이 옳다」 (if both are ours, the lock is ours so adopting is right), and that decision itself was outside this round's scope, so the code was
+///   unmeasured, and if it does, the symptom is 「recovery gets late」, not a false detection.
+///   ★**There is dissent on this cost — read this line before raising it again**★ (2026-09-21): there was a counterargument 「if both are **ours**,
+///   the lock is ours, so adopting is right」, and that decision itself was outside this round's scope, so the code was
 ///   left as is. That is, the current shape is **a hold, not a decision**. To change it, first measure whether inheritance exists and
 ///   reopen ADR-0218 decision 3 on top of that measurement — do not flip it silently here.
 /// - Exactly one matched holder gives [`ScanOutcome::Found`], 0 gives [`ScanOutcome::NotYet`], two or more give
 ///   [`ScanOutcome::Ambiguous`] (decision 3).
-/// - If `child_pid` or `child_start_time` is 0, the answer is `NotYet` **without even asking**. 0 means 「미상」 (unknown), and counting unknown as
+/// - If `child_pid` or `child_start_time` is 0, the answer is `NotYet` **without even asking**. 0 means 「unknown」, and counting unknown as
 ///   a match leaves a PID-only comparison, which is the decision decision 2 forbids.
 /// - If the tree is empty (the child died or the PID was reused), `NotYet` without asking about a single file —
 ///   the holder query opens one Restart Manager session per candidate file per round and is an expensive question, so we do not burn it
@@ -247,7 +247,7 @@ fn codex_home_from(override_var: Option<OsString>, user_home: Option<PathBuf>) -
 }
 
 /// The wait until the first scan. ★Non-zero is intended★ — the measured minimum of the spawn→lock-creation delay is 0.735 s
-/// (ADR-0218 「근거」 (rationale)), so scanning right at launch buys one certain empty-handed round for free.
+/// (ADR-0218 rationale section), so scanning right at launch buys one certain empty-handed round for free.
 const FIRST_DELAY: Duration = Duration::from_millis(500);
 
 /// The cap when the wait is doubled after each empty-handed round.
@@ -264,8 +264,8 @@ const MAX_DELAY: Duration = Duration::from_secs(15);
 
 /// The other two places where the polling loop meets the OS — whether the child is still alive, and the wait until the next round.
 ///
-/// ★It is split from [`LockHolderProbe`] because the axis differs★ — that one is 「무엇이 보이나」 (what is visible), this one is
-///   「언제 다시 보나 · 볼 이유가 남았나」 (when to look again, and whether a reason to look remains). Merging them mixes a place where measuring the loop rules would force faking the clock too
+/// ★It is split from [`LockHolderProbe`] because the axis differs★ — that one is 「what is visible」, this one is
+///   「when to look again, and whether a reason to look remains」. Merging them mixes a place where measuring the loop rules would force faking the clock too
 ///   with a place where only the list needs to change.
 pub(crate) trait CaptureClock {
     /// `false` = that PID is no longer **our child** (it died or the PID was reused). It is the loop's normal exit
@@ -293,7 +293,7 @@ impl CaptureClock for ChildClock {
     }
 }
 
-/// One set of inputs for running recovery in this spawn. ★That it was built at all means 「돌릴 조건을 다 채웠다」 (all conditions to run are met)★ —
+/// One set of inputs for running recovery in this spawn. ★That it was built at all means 「all conditions to run are met」★ —
 /// if [`plan_capture`] misses even one it is `None`, so no conditional is left inside [`run_capture`].
 pub(crate) struct CapturePlan {
     /// The lock folder used by this **child** — not ours (the contract of [`plan_capture`]).
@@ -308,7 +308,7 @@ pub(crate) struct CapturePlan {
     ///   ends when the child dies (the stop condition of [`run_capture`]).
     ///   ★Why it is not a `Weak`★: there is no place to hold the strong side — the assembly point passes this verb to
     ///   `open_spawn` and lets go. To make the session hold it, the ownership split of `AgentSession` (the
-    ///   「소유권 분할」 (ownership split) invariant) would have to change, and that is not a change this recovery path alone should demand.
+    ///   「ownership split」 invariant) would have to change, and that is not a change this recovery path alone should demand.
     pub(crate) sink: SessionIdSink,
 }
 
@@ -316,9 +316,9 @@ pub(crate) struct CapturePlan {
 ///
 /// Conditions (if any one is missing, `None`):
 /// - **This spawn does not emit resume argv** (`resumes_by_argv == false`). ★The point is that what is asked is
-///   not 「저장된 손잡이가 있나」 (is there a stored handle) but 「그 손잡이가 실제로 argv 로 나갔나」 (did that handle actually go out as argv)★ —
+///   not 「is there a stored handle」 but 「did that handle actually go out as argv」★ —
 ///   even with a handle, if its value cannot be loaded (a value `resume_argument` refuses) codex comes up as a **new conversation**,
-///   and nobody writes the id of that incarnation. The old form that decided on 「있다」 (there is one) was exactly that hole
+///   and nobody writes the id of that incarnation. The old form that decided on 「there is one」 was exactly that hole
 ///   (found 2026-09-21). We make the two decisions look at the **same single predicate** to remove that mismatch
 ///   (ADR-0218 decision 5 · source of record for the predicate = `super::resume_argument`).
 ///   ★The combination of Fresh with a handle coming along is blocked by the assembly point★ — `manager::resume_handle_for`
@@ -330,7 +330,7 @@ pub(crate) struct CapturePlan {
 ///
 /// ★Resolve the lock folder from the **child's** environment — do not substitute ours★: `CODEX_HOME` applies only to the process that sets it,
 ///   so if the profile sets that value, the child's lock **never** appears in the folder we look at. That mismatch is
-///   not an error but 「계속 빈손」 (still empty-handed), so there is no signal on screen.
+///   not an error but 「still empty-handed」, so there is no signal on screen.
 /// `our_lock_dir` = the value to use when the child inherited our environment as is ([`lock_dir`]). It is taken as an argument
 ///   so this decision can be measured without env.
 // ADR-0218
@@ -358,9 +358,9 @@ pub(crate) fn plan_capture(
 /// ★Pick the **last** entry★ — the spawn env is a list and the same key can be loaded twice, and the path pushes that list
 ///   into `cmd.env` in order, so what the child actually receives is the later one.
 /// ★Key comparison follows the OS rule for environment variable names ([`env_key_eq`])★ — on Windows case is not distinguished.
-/// ★An empty value counts as 「안 걸었다」 (not set)★ — [`codex_home_from`] reads our side's env that way, so we use the same rule.
+/// ★An empty value counts as 「not set」★ — [`codex_home_from`] reads our side's env that way, so we use the same rule.
 /// ★Known hole — relative paths★: such a value is resolved later against **our** cwd, but the child would resolve it
-///   against its own cwd, so the two can diverge. The symptom is not a false detection but 「계속 빈손」 (still empty-handed) — candidate decision still requires the child's
+///   against its own cwd, so the two can diverge. The symptom is not a false detection but 「still empty-handed」 — candidate decision still requires the child's
 ///   PID and start time. Whether such a profile really exists is unconfirmed, so we do not fix it and only write it down.
 fn child_lock_dir(
     child_env: &[(String, String)],
@@ -383,7 +383,7 @@ fn child_lock_dir(
 /// ★It blocks neither the spawn path nor the pump★: this thread only does `sleep` and OS queries and holds none of the session's
 ///   locks. It does not hold the session either — what it holds is just one record verb, so the agent is not reaped late
 ///   because this thread remains.
-/// ★If the thread cannot be started, only a warning is left and it ends★ — the failure mode is 「id 를 못 받음」 (cannot receive the id) and that is not a reason
+/// ★If the thread cannot be started, only a warning is left and it ends★ — the failure mode is 「cannot receive the id」 and that is not a reason
 ///   to cut the spawn (the same handling as ADR-0218 decision 10).
 pub(crate) fn spawn_capture(plan: CapturePlan) {
     let clock = ChildClock {
@@ -393,13 +393,13 @@ pub(crate) fn spawn_capture(plan: CapturePlan) {
     tracing::debug!(
         pid = plan.child_pid,
         lock_dir = %plan.lock_dir.display(),
-        "codex 세션 id 회수 폴링을 시작한다"
+        "starting codex session id recovery polling"
     );
     let spawned = std::thread::Builder::new()
         .name("codex-thread-lock".to_string())
         .spawn(move || run_capture(&plan, &RestartManagerProbe, &clock));
     if let Err(err) = spawned {
-        tracing::warn!(%err, "codex 세션 id 회수 스레드를 띄우지 못했다 — 이 화신은 id 를 못 받는다");
+        tracing::warn!(%err, "could not start the codex session id recovery thread — this incarnation does not receive an id");
     }
 }
 
@@ -408,9 +408,9 @@ pub(crate) fn spawn_capture(plan: CapturePlan) {
 /// 1. [`ScanOutcome::Found`] — adopt and stop.
 /// 2. The child died ([`CaptureClock::child_alive`]).
 /// 3. The session goes down — ★having no separate signal is intended★: shutdown starts with the path killing the child
-///    (「kill 인과」 (kill causality)), so its outcome arrives as item 2. Attaching a second signal would put this observer into the shutdown order.
+///    (「kill causality」), so its outcome arrives as item 2. Attaching a second signal would put this observer into the shutdown order.
 ///
-/// ★[`ScanOutcome::Ambiguous`] is not a stop — it means 「이번 바퀴에 채택 안 함」 (not adopted this round)★: what ADR-0218 decision 3
+/// ★[`ScanOutcome::Ambiguous`] is not a stop — it means 「not adopted this round」★: what ADR-0218 decision 3
 ///   says is **refusal**, and this outcome is not in decision 4's list of stops. The overlap may be momentary
 ///   (a short overlap at the moment the thread switches), and if the thread ended there the agent would lose recovery **forever**.
 ///   The warning is emitted only on the first round — emitting it every round would bury the log under that one fact.
@@ -422,24 +422,24 @@ pub(crate) fn spawn_capture(plan: CapturePlan) {
 ///   after the liveness check, this round's record still goes out. **That is correct** — the written value is the thread id
 ///   that incarnation, which just died, actually used, and the point is for the next activation to resume that conversation. The only harmful combination is
 ///   the case where **the next incarnation is already up** in between, and then the markers differ and the assembly point's incarnation guard refuses.
-///   ★Why that 「거절한다」 (refuses) has no gap — we leave the grounds, not only the conclusion (so the next reader does not derive it
+///   ★Why that 「refuses」 has no gap — we leave the grounds, not only the conclusion (so the next reader does not derive it
 ///   again)★:
 ///     1. The only place that **raises** the incarnation marker is `ProfileRegistry::epoch_for_spawn`. The one other
 ///        write (`merge_preserving_live`) only **preserves** the live value and does not raise it.
 ///     2. `AgentManager::spawn_agent` calls it exactly once per spawn, and that call is **before** `release_session_id`,
 ///        where Fresh clears the handle.
-///     So there is no span where 「표식은 그대로인데 손잡이만 비워진」 (the marker is unchanged but only the handle is cleared) exists. At the moment a late record can arrive with the old marker,
+///     So there is no span where 「the marker is unchanged but only the handle is cleared」 exists. At the moment a late record can arrive with the old marker,
 ///     the clearing has not yet happened, and if the clearing has happened the marker has already changed. When the profile is
 ///     deleted entirely, the lookup itself fails in the assembly point's record verb (`commit_session_id`) and it
 ///     drops out at the same place.
-///   ★「기록이 나간다」 (the record goes out) means it is **handed** to this incarnation's first-submission latch (ADR-0226)★ — it is written to the registry only
+///   ★「the record goes out」 means it is **handed** to this incarnation's first-submission latch (ADR-0226)★ — it is written to the registry only
 ///     when there was a submission. The value of an incarnation that died without a submission is not written (there is no conversation to resume).
 ///   That is why we did not add a new cancellation signal here — it is not a hole to close but an **intended outcome**.
 ///
 /// ★Once caught, it does not follow later thread changes — a known unconfirmed item★: if the user opens
 ///   a new thread mid-conversation, codex will take over the lock anew (unmeasured), but this loop has already stopped, so the profile keeps the first
 ///   thread id. Resuming in that state opens that first conversation, not the conversation the user was last looking at.
-///   「잡으면 즉시 멈춘다」 (stop immediately once caught) is a choice of ADR-0218 decision 4, so we do not flip it here.
+///   「stop immediately once caught」 is a choice of ADR-0218 decision 4, so we do not flip it here.
 fn run_capture(plan: &CapturePlan, probe: &dyn LockHolderProbe, clock: &dyn CaptureClock) {
     let mut delay = FIRST_DELAY;
     let mut warned_ambiguous = false;
@@ -448,7 +448,7 @@ fn run_capture(plan: &CapturePlan, probe: &dyn LockHolderProbe, clock: &dyn Capt
         if !clock.child_alive() {
             tracing::debug!(
                 pid = plan.child_pid,
-                "codex 자식이 먼저 끝나 세션 id 회수를 접는다"
+                "the codex child ended first, folding session id recovery"
             );
             return;
         }
@@ -464,7 +464,7 @@ fn run_capture(plan: &CapturePlan, probe: &dyn LockHolderProbe, clock: &dyn Capt
                         pid = plan.child_pid,
                         candidates = n,
                         lock_dir = %plan.lock_dir.display(),
-                        "codex 나무가 쥔 락이 둘 이상이라 이번 바퀴에는 세션 id 를 채택하지 않는다"
+                        "the codex tree holds two or more locks, so the session id is not adopted this round"
                     );
                 }
                 delay = next_delay(delay);
@@ -486,7 +486,7 @@ mod tests {
 
     // ★The fake tree is **the shape that actually appears in production** — if it is flat, the whole test becomes a lie★:
     //   the PID we hold is the `cmd.exe` wrapper (`engram_dashboard_platform::shell::console_command`) and the one holding the lock is the
-    //   `codex.exe` below it. If the holder is planted with the wrapper PID, even an implementation that 「래퍼만 대조하는」 (compares only the wrapper) goes green — we actually
+    //   `codex.exe` below it. If the holder is planted with the wrapper PID, even an implementation that 「compares only the wrapper」 goes green — we actually
     //   planted it that way once and it passed an implementation whose recovery never happens (found 2026-09-21).
     const WRAPPER_PID: u32 = 4242;
     const WRAPPER_START: u64 = 134_344_468_098_866_343;
@@ -598,7 +598,7 @@ mod tests {
 
     // ── Adoption ────────────────────────────────────────────────────────────────────
 
-    /// ★What this entry guards = 「래퍼 PID 하나만 대조하면 안 된다」 (do not compare only the wrapper PID)★: the PID asked is the wrapper but the holder is its
+    /// ★What this entry guards = 「do not compare only the wrapper PID」★: the PID asked is the wrapper but the holder is its
     /// child. Unless the comparison target is widened to the tree, `NotYet` comes out here.
     #[test]
     fn a_lock_held_by_our_childs_child_is_found() {
@@ -711,7 +711,7 @@ mod tests {
         assert_eq!(
             scan_for_child(Path::new("Z:/locks"), WRAPPER_PID, 0, &probe),
             ScanOutcome::NotYet,
-            "시작시각 미상(0)이면 남는 것이 PID 단독 대조라 채택하지 않는다"
+            "with an unknown start time (0), only a PID-alone comparison remains, so it is not adopted"
         );
     }
 
@@ -764,7 +764,7 @@ mod tests {
         assert_eq!(
             scan(&probe),
             found(ID_A),
-            "id 가 아닌 이름은 후보 수를 늘리지 않는다"
+            "a name that is not an id does not increase the candidate count"
         );
     }
 
@@ -788,7 +788,7 @@ mod tests {
             assert_eq!(
                 scan(&probe),
                 ScanOutcome::NotYet,
-                "{name} 이 후보로 올라왔다"
+                "{name} came up as a candidate"
             );
         }
     }
@@ -800,7 +800,7 @@ mod tests {
         assert_eq!(scan(&probe), found(ID_A));
     }
 
-    /// ★What we count is not files but matched **holders**★ — if two of our processes hold one lock, 「그 락이 누구 것인가」 (who owns that lock)
+    /// ★What we count is not files but matched **holders**★ — if two of our processes hold one lock, 「who owns that lock」
     /// has not been narrowed to one yet. Counting only files lets that state pass as `Found`.
     #[test]
     fn two_of_our_processes_on_one_lock_are_ambiguous() {
@@ -870,7 +870,7 @@ mod tests {
     use std::rc::Rc;
     use std::sync::{Arc, Mutex};
 
-    /// The field that counts rounds — the fake clock raises it and the fake probe reads it, writing 「n 번째 바퀴에는 이것이 보인다」 (this is visible on round n).
+    /// The field that counts rounds — the fake clock raises it and the fake probe reads it, writing 「this is visible on round n」.
     /// Both fakes looking at the same field is the whole of this bundle.
     type Ticks = Rc<Cell<usize>>;
 
@@ -923,7 +923,7 @@ mod tests {
             self.rounds
                 .get(at)
                 .or_else(|| self.rounds.last())
-                .expect("적어도 한 바퀴는 적어 둔다")
+                .expect("at least one round is recorded")
         }
     }
 
@@ -984,12 +984,11 @@ mod tests {
             ],
             FakeClock::immortal,
         );
+        assert_eq!(got, vec![ID_A.to_string()], "must adopt on the third round");
         assert_eq!(
-            got,
-            vec![ID_A.to_string()],
-            "세 번째 바퀴에서 채택해야 한다"
+            rounds, 3,
+            "must stop on the third round after two empty-handed rounds"
         );
-        assert_eq!(rounds, 3, "빈손 두 바퀴를 지나 세 번째에 멈춰야 한다");
     }
 
     /// ★A refusal, not a giving up (ADR-0218 decision 3 vs decision 4)★ — once the overlap clears, we adopt on the next round.
@@ -1009,12 +1008,12 @@ mod tests {
         assert_eq!(
             got,
             vec![ID_A.to_string()],
-            "겹침이 풀린 다음 바퀴에 채택해야 한다"
+            "must adopt on the round after the overlap clears"
         );
-        assert_eq!(rounds, 2, "겹친 바퀴에서 스레드를 끝내 버렸다");
+        assert_eq!(rounds, 2, "ended the thread on the overlapping round");
     }
 
-    /// If the overlap never clears, adoption never happens — the 「거절」 (refusal) side stays as is.
+    /// If the overlap never clears, adoption never happens — the 「refusal」 side stays as is.
     #[test]
     fn an_ambiguous_scan_that_never_clears_adopts_nothing() {
         let (got, rounds) = drive(
@@ -1023,8 +1022,11 @@ mod tests {
                 .file(&format!("{ID_B}.lock"), &[codex()])],
             |ticks| FakeClock::dies_after(ticks, 3),
         );
-        assert!(got.is_empty(), "둘 이상인데 채택했다: {got:?}");
-        assert_eq!(rounds, 4, "자식이 죽을 때까지는 계속 돌아야 한다");
+        assert!(
+            got.is_empty(),
+            "adopted although there are two or more: {got:?}"
+        );
+        assert_eq!(rounds, 4, "must keep going until the child dies");
     }
 
     #[test]
@@ -1032,8 +1034,11 @@ mod tests {
         let (got, rounds) = drive(vec![FakeProbe::default()], |ticks| {
             FakeClock::dies_after(ticks, 2)
         });
-        assert!(got.is_empty(), "자식이 죽었는데 채택했다: {got:?}");
-        assert_eq!(rounds, 3, "생존 확인이 실패한 바퀴에서 끝나야 한다");
+        assert!(got.is_empty(), "adopted although the child died: {got:?}");
+        assert_eq!(
+            rounds, 3,
+            "must end on the round where the liveness check failed"
+        );
     }
 
     /// ★Adoption goes out through the handed-over verb **alone** — even if that verb discards the value there is no second path★.
@@ -1061,9 +1066,13 @@ mod tests {
         assert_eq!(
             *calls.lock().expect("sink poisoned"),
             1,
-            "기록 동사가 정확히 한 번 불려야 한다"
+            "the record verb must be called exactly once"
         );
-        assert_eq!(clock.rounds(), 1, "거절을 재시도로 읽고 계속 돌면 안 된다");
+        assert_eq!(
+            clock.rounds(),
+            1,
+            "must not read the refusal as a retry and keep going"
+        );
     }
 
     #[test]
@@ -1117,33 +1126,33 @@ mod tests {
             Some(sink),
             ours(),
         )
-        .expect("fresh 는 돈다");
+        .expect("fresh runs");
 
         (made.sink)("probe");
 
         assert_eq!(
             *seen.lock().expect("sink poisoned"),
             vec!["probe".to_string()],
-            "계획이 다른 동사를 들고 있다"
+            "the plan carries a different verb"
         );
     }
 
     #[test]
     fn a_fresh_incarnation_gets_a_plan() {
-        let made = plan(&[], false, Some(WRAPPER_PID), Some(WRAPPER_START)).expect("fresh 는 돈다");
+        let made = plan(&[], false, Some(WRAPPER_PID), Some(WRAPPER_START)).expect("fresh runs");
         assert_eq!(made.child_pid, WRAPPER_PID);
         assert_eq!(made.child_start_time, WRAPPER_START);
         assert_eq!(made.lock_dir, lock_dir_under(Path::new(OUR_HOME)));
     }
 
-    /// ★What the gate looks at is 「argv 가 실제로 이어받았나」 (did argv actually resume)★ — not 「손잡이가 있나」 (is there a handle). The spot that
+    /// ★What the gate looks at is 「did argv actually resume」★ — not 「is there a handle」. The spot that
     /// tells the two apart (a handle that cannot be loaded) is measured by this folder's
     /// `tests::a_handle_we_refuse_to_resume_with_is_still_captured`.
     #[test]
     fn a_resume_incarnation_never_starts_the_loop() {
         assert!(
             plan(&[], true, Some(WRAPPER_PID), Some(WRAPPER_START)).is_none(),
-            "이어받기 화신은 id 를 argv 로 이미 들고 나갔다 — 회수할 것이 없다"
+            "a resume incarnation already went out carrying the id as argv — there is nothing to recover"
         );
     }
 
@@ -1152,7 +1161,7 @@ mod tests {
         assert!(plan(&[], false, None, Some(WRAPPER_START)).is_none());
         assert!(
             plan(&[], false, Some(WRAPPER_PID), None).is_none(),
-            "시작시각을 모르면 남는 것이 PID 단독 대조다"
+            "without the start time, only a PID-alone comparison remains"
         );
     }
 
@@ -1168,7 +1177,7 @@ mod tests {
                 ours()
             )
             .is_none(),
-            "받아도 남길 데가 없다"
+            "even if received, there is nowhere to keep it"
         );
         assert!(plan_capture(
             &[],
@@ -1191,7 +1200,7 @@ mod tests {
             Some(WRAPPER_PID),
             Some(WRAPPER_START),
         )
-        .expect("fresh 는 돈다");
+        .expect("fresh runs");
         assert_eq!(made.lock_dir, lock_dir_under(Path::new("D:/alt-codex")));
     }
 
@@ -1207,7 +1216,7 @@ mod tests {
             Some(WRAPPER_PID),
             Some(WRAPPER_START),
         )
-        .expect("fresh 는 돈다");
+        .expect("fresh runs");
         let expected = if env_key_eq("codex_home", CODEX_HOME_ENV) {
             "D:/third"
         } else {
@@ -1216,7 +1225,7 @@ mod tests {
         assert_eq!(
             made.lock_dir,
             lock_dir_under(Path::new(expected)),
-            "통로가 순서대로 env 를 밀어 넣으므로 자식이 받는 것은 같은 키로 보는 것 중 뒤엣것이다"
+            "the path pushes env in order, so what the child receives is the later of those seen as the same key"
         );
     }
 
@@ -1228,7 +1237,7 @@ mod tests {
             Some(WRAPPER_PID),
             Some(WRAPPER_START),
         )
-        .expect("fresh 는 돈다");
+        .expect("fresh runs");
         assert_eq!(made.lock_dir, lock_dir_under(Path::new(OUR_HOME)));
     }
 
@@ -1245,14 +1254,14 @@ mod tests {
             std::process::id(),
             Uuid::new_v4()
         ));
-        std::fs::create_dir_all(&dir).expect("임시 락 폴더 생성");
-        std::fs::write(dir.join(format!("{ID_B}.lock")), b"").expect("안 쥔 락");
-        std::fs::write(dir.join(".coordination.lock"), b"").expect("id 아닌 이름");
-        let file = std::fs::File::create(dir.join(format!("{ID_A}.lock"))).expect("쥔 락");
+        std::fs::create_dir_all(&dir).expect("create the temp lock folder");
+        std::fs::write(dir.join(format!("{ID_B}.lock")), b"").expect("unheld lock");
+        std::fs::write(dir.join(".coordination.lock"), b"").expect("a name that is not an id");
+        let file = std::fs::File::create(dir.join(format!("{ID_A}.lock"))).expect("held lock");
 
         let me = std::process::id();
         let start = engram_dashboard_platform::process::process_creation_time(me)
-            .expect("자기 creation time 조회 가능");
+            .expect("own creation time is readable");
         let outcome = scan_for_child(&dir, me, start, &RestartManagerProbe);
 
         drop(file);
@@ -1269,7 +1278,7 @@ mod tests {
         let mut child = engram_dashboard_platform::testing::spawn_gated_cmd("rem", 0);
         let pid = child.id();
         let start_time =
-            engram_dashboard_platform::process::process_creation_time(pid).expect("시작시각");
+            engram_dashboard_platform::process::process_creation_time(pid).expect("start time");
         let clock = ChildClock { pid, start_time };
         let alive_before = clock.child_alive();
 

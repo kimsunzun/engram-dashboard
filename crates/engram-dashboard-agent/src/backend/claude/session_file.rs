@@ -165,7 +165,7 @@ impl SessionIdSource for ClaudeSessionIdSource {
                     ResolveOutcome::DirectMatch { pid } => {
                         self.resolved_pid = Some(pid);
                         self.last_seen_sid = self.expected_sid;
-                        tracing::info!(agent = %self.agent_id, pid, "session_tracker: PID 직접 일치(shim 없음)");
+                        tracing::info!(agent = %self.agent_id, pid, "session_tracker: PID matched directly (no shim)");
                         SessionIdPoll::Unchanged
                     }
                     ResolveOutcome::ScanMatch { pid } => {
@@ -176,7 +176,7 @@ impl SessionIdSource for ClaudeSessionIdSource {
                             agent = %self.agent_id,
                             child_pid = self.child_pid,
                             resolved_pid = pid,
-                            "session_tracker: PID shim 감지 — 스캔으로 실제 PID 학습"
+                            "session_tracker: PID shim detected — learning the real PID by scanning"
                         );
                         SessionIdPoll::Unchanged
                     }
@@ -186,7 +186,7 @@ impl SessionIdSource for ClaudeSessionIdSource {
                                 agent = %self.agent_id,
                                 child_pid = self.child_pid,
                                 attempts = self.attempts,
-                                "session_tracker: 세션 파일 미발견 — 추적 degraded(무손상, 복원은 정상 동작)"
+                                "session_tracker: session file not found — tracking degraded (without damage; restore works normally)"
                             );
                             return SessionIdPoll::Degraded;
                         }
@@ -214,7 +214,7 @@ impl SessionIdSource for ClaudeSessionIdSource {
                         agent = %self.agent_id,
                         %old,
                         new = %current,
-                        "session_tracker: 세션 id 변경 감지(/clear 등)"
+                        "session_tracker: session id change detected (/clear etc.)"
                     );
                     SessionIdPoll::Changed(current)
                 } else {
@@ -319,7 +319,7 @@ mod tests {
         assert_eq!(
             source.poll(),
             SessionIdPoll::Degraded,
-            "MAX_RESOLVE_ATTEMPTS 번째 시도에서 포기해야 함"
+            "must give up on the MAX_RESOLVE_ATTEMPTS-th attempt"
         );
         let _ = fs::remove_dir_all(&dir);
     }

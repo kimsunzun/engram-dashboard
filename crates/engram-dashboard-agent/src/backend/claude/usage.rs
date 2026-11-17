@@ -26,7 +26,7 @@ pub const USAGE_VENDOR: UsageVendorKey = UsageVendorKey::new("claude");
 /// account · credential · endpoint other than the daemon's default login.
 ///
 /// - `CLAUDE_CONFIG_DIR` = the folder that holds its own state (including the account login) (the very key that [`super::config_dir`] reads).
-///   ★An empty value is treated differently from that side★ — that side folds an empty value into 「없음」 (none), but this decision sees it as 「있다」 (present) and compares it with the daemon value
+///   ★An empty value is treated differently from that side★ — that side folds an empty value into 「none」, but this decision sees it as 「present」 and compares it with the daemon value
 ///   byte for byte (if the daemon has no such key, they differ). If it errs, it was chosen to err on the side of not picking up
 ///   ([`env_overrides_daemon`]).
 /// - The rest = credentials (`CLAUDE_CODE_OAUTH_TOKEN`·`ANTHROPIC_API_KEY`·`ANTHROPIC_AUTH_TOKEN`) and endpoints
@@ -116,7 +116,7 @@ fn prefer(primary: WindowObs, fallback: WindowObs) -> WindowObs {
     }
 }
 
-/// If both fields are empty, that window is 「안 실렸다」 (not carried) — in a pickup observation, a `None` window leaves the receiver's held value in place.
+/// If both fields are empty, that window is 「not carried」 — in a pickup observation, a `None` window leaves the receiver's held value in place.
 fn carried(window: WindowObs) -> Option<WindowObs> {
     (window.used_pct.is_some() || window.resets_at.is_some()).then_some(window)
 }
@@ -127,7 +127,7 @@ fn note_unknown_window_type() {
         return;
     }
     tracing::debug!(
-        "claude rate_limit_event 의 모르는 창 종류라 버린다(프로세스당 한 번만 적는다)"
+        "skipping an unknown window kind in claude rate_limit_event (logged only once per process)"
     );
 }
 
@@ -136,7 +136,7 @@ fn note_empty_window() {
         return;
     }
     tracing::debug!(
-        "claude rate_limit_event 의 창에 읽히는 칸이 하나도 없어 버린다(프로세스당 한 번만 적는다)"
+        "skipping a claude rate_limit_event window with no readable field (logged only once per process)"
     );
 }
 
@@ -166,7 +166,9 @@ pub(super) fn gate_decoder(
         return decoder;
     }
     // Neither which key it was nor the value is logged — they contain credentials and user folder names.
-    tracing::debug!("claude 기본 계정이 아닐 수 있는 env — 이 에이전트의 사용량 줍기를 끈다");
+    tracing::debug!(
+        "env that may not be the default claude account — turning off usage pickup for this agent"
+    );
     Box::new(UsageGate::blocking(decoder))
 }
 
@@ -175,7 +177,7 @@ mod tests {
     use super::*;
 
     fn parse(line: &str) -> Option<UsageObservation> {
-        let value: Value = serde_json::from_str(line).expect("시험 줄은 JSON 이다");
+        let value: Value = serde_json::from_str(line).expect("the test line is JSON");
         observation_from_rate_limit_event(&value)
     }
 
@@ -193,12 +195,15 @@ mod tests {
 
     #[test]
     fn new_shape_carries_both_windows() {
-        let obs = parse(NEW_SHAPE).expect("관측");
+        let obs = parse(NEW_SHAPE).expect("observation");
         assert_eq!(obs.vendor, USAGE_VENDOR);
         assert_eq!(obs.source, UsageSource::Passive);
         assert_eq!(obs.five_hour, window(Some(67.0), Some(1_790_425_800)));
         assert_eq!(obs.weekly, window(Some(83.0), Some(1_790_856_000)));
-        assert_eq!(obs.model_scoped, None, "줍기는 모델별 창을 싣지 않는다");
+        assert_eq!(
+            obs.model_scoped, None,
+            "pickup does not carry per-model windows"
+        );
         assert_eq!(obs.plan, None);
     }
 
@@ -208,9 +213,12 @@ mod tests {
         let line = include_str!("fixtures/claude_text.jsonl")
             .lines()
             .nth(2)
-            .expect("fixture 3번째 줄");
-        assert!(line.contains("rate_limit_event"), "전제: 그 줄이 맞다");
-        let obs = parse(line).expect("관측");
+            .expect("fixture line 3");
+        assert!(
+            line.contains("rate_limit_event"),
+            "premise: it is that line"
+        );
+        let obs = parse(line).expect("observation");
         assert_eq!(obs.five_hour, window(None, Some(1_782_567_000)));
         assert_eq!(obs.weekly, None);
     }
@@ -218,7 +226,7 @@ mod tests {
     #[test]
     fn top_level_only_window_without_unified() {
         let obs = parse(r#"{"rate_limit_info":{"rateLimitType":"five_hour","utilization":0.55,"resetsAt":1790425800}}"#)
-            .expect("관측");
+            .expect("observation");
         assert_eq!(obs.five_hour, window(Some(55.0), Some(1_790_425_800)));
         assert_eq!(obs.weekly, None);
     }
@@ -226,7 +234,7 @@ mod tests {
     #[test]
     fn unified_only_without_rate_limit_type() {
         let obs = parse(r#"{"rate_limit_info":{"unifiedWindows":{"seven_day":{"utilization":0.1,"resetsAt":1790856000}}}}"#)
-            .expect("관측");
+            .expect("observation");
         assert_eq!(obs.five_hour, None);
         assert_eq!(obs.weekly, window(Some(10.0), Some(1_790_856_000)));
     }
@@ -234,12 +242,12 @@ mod tests {
     #[test]
     fn unified_wins_field_by_field() {
         let obs = parse(r#"{"rate_limit_info":{"rateLimitType":"seven_day","utilization":0.5,"resetsAt":1790000000,"unifiedWindows":{"seven_day":{"utilization":0.6,"resetsAt":1790856000}}}}"#)
-            .expect("관측");
+            .expect("observation");
         assert_eq!(obs.weekly, window(Some(60.0), Some(1_790_856_000)));
 
         // If its field is wrong, only that field falls back to the top level.
         let obs = parse(r#"{"rate_limit_info":{"rateLimitType":"seven_day","utilization":0.5,"resetsAt":1790000000,"unifiedWindows":{"seven_day":{"utilization":"0.6","resetsAt":1790856000}}}}"#)
-            .expect("관측");
+            .expect("observation");
         assert_eq!(obs.weekly, window(Some(50.0), Some(1_790_856_000)));
     }
 
@@ -273,7 +281,7 @@ mod tests {
         );
         // Even for an unknown kind, an accompanying `unifiedWindows` is accepted.
         let obs = parse(r#"{"rate_limit_info":{"rateLimitType":"seven_day_opus","utilization":0.9,"unifiedWindows":{"five_hour":{"utilization":0.2}}}}"#)
-            .expect("관측");
+            .expect("observation");
         assert_eq!(obs.five_hour, window(Some(20.0), None));
         assert_eq!(obs.weekly, None);
     }
@@ -281,11 +289,11 @@ mod tests {
     #[test]
     fn wrong_typed_fields_drop_only_that_field() {
         let obs = parse(r#"{"rate_limit_info":{"rateLimitType":"five_hour","utilization":"55%","resetsAt":1790425800}}"#)
-            .expect("관측");
+            .expect("observation");
         assert_eq!(obs.five_hour, window(None, Some(1_790_425_800)));
 
         let obs = parse(r#"{"rate_limit_info":{"rateLimitType":"five_hour","utilization":0.4,"resetsAt":"2026-09-27T00:00:00Z"}}"#)
-            .expect("관측");
+            .expect("observation");
         assert_eq!(obs.five_hour, window(Some(40.0), None));
 
         // If the window kind field itself is wrong, there is no top-level window.
@@ -297,11 +305,11 @@ mod tests {
         );
         // If `unifiedWindows` is not an object, or that window is not an object, it is as if only that side is absent.
         let obs = parse(r#"{"rate_limit_info":{"rateLimitType":"five_hour","utilization":0.4,"unifiedWindows":{"five_hour":[0.9],"seven_day":null}}}"#)
-            .expect("관측");
+            .expect("observation");
         assert_eq!(obs.five_hour, window(Some(40.0), None));
         assert_eq!(obs.weekly, None);
         let obs = parse(r#"{"rate_limit_info":{"rateLimitType":"five_hour","utilization":0.4,"unifiedWindows":"x"}}"#)
-            .expect("관측");
+            .expect("observation");
         assert_eq!(obs.five_hour, window(Some(40.0), None));
     }
 
@@ -309,7 +317,7 @@ mod tests {
     fn broken_numbers_never_panic() {
         // Negative · over 1 → clamp · huge number → clamp · out-of-range epoch → that field absent.
         let obs = parse(r#"{"rate_limit_info":{"unifiedWindows":{"five_hour":{"utilization":-0.3,"resetsAt":-5},"seven_day":{"utilization":1e308,"resetsAt":99999999999999999}}}}"#)
-            .expect("관측");
+            .expect("observation");
         assert_eq!(obs.five_hour, window(Some(0.0), None));
         assert_eq!(obs.weekly, window(Some(100.0), None));
 
@@ -337,7 +345,7 @@ mod tests {
             .collect()
     }
 
-    /// Daemon env stand-in — a key not in the given pairs is 「데몬에 없다」 (absent from the daemon).
+    /// Daemon env stand-in — a key not in the given pairs is 「absent from the daemon」.
     fn daemon(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<OsString> {
         let pairs: Vec<(String, OsString)> = pairs
             .iter()
@@ -362,11 +370,11 @@ mod tests {
         for key in EXPECTED_KEYS {
             assert!(
                 !collects_default_account_usage(&env(&[(key, "x")]), daemon(&[])),
-                "{key}: 데몬에 없는데 명세에 있다"
+                "{key}: in the spec but not in the daemon"
             );
             assert!(
                 !collects_default_account_usage(&env(&[(key, "x")]), daemon(&[(key, "y")])),
-                "{key}: 데몬 값과 다르다"
+                "{key}: differs from the daemon value"
             );
         }
     }
@@ -391,7 +399,7 @@ mod tests {
         ));
     }
 
-    /// `super::config_dir` folds an empty value into 「없음」 (none), but this decision sees it as 「있다」 (present) — the side of not picking up.
+    /// `super::config_dir` folds an empty value into 「none」, but this decision sees it as 「present」 — the side of not picking up.
     #[test]
     fn empty_value_counts_as_overridden() {
         assert!(!collects_default_account_usage(
@@ -411,7 +419,7 @@ mod tests {
         d.decode(line.as_bytes());
         assert_eq!(d.take_usage().len(), 1);
 
-        // A value that cannot be in the process env — so always 「다르다」 (different).
+        // A value that cannot be in the process env — so always 「different」.
         let spec = env(&[(
             "ANTHROPIC_BASE_URL",
             "http://engram-usage-gate-test.invalid",

@@ -75,7 +75,9 @@ mod tests {
         assert_eq!(display_text("   ", 32), None);
         assert_eq!(display_text("pl\u{7}us", 32), None);
         assert_eq!(display_text("a\nb", 32), None);
+        // hangul-ok-begin
         assert_eq!(display_text(&"가".repeat(10), 3).as_deref(), Some("가가가"));
+        // hangul-ok-end
     }
 
     #[test]

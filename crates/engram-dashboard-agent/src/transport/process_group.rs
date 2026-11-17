@@ -122,7 +122,7 @@ impl ProcessGroup {
         }
     }
 
-    /// A complete list of member PIDs (including the root). `Ok(빈 목록)` if the path is gone · `Err` if incomplete.
+    /// A complete list of member PIDs (including the root). `Ok(empty list)` if the path is gone · `Err` if incomplete.
     ///
     /// ★A member that just ended may remain briefly★ — whether it is alive is seen not from the list but from the held handle ([`Pinned::exited`]).
     pub(crate) fn member_pids(&self) -> io::Result<Vec<u32>> {
@@ -275,10 +275,10 @@ pub(crate) mod tests {
     /// group. Nobody sets the retiring marker.
     #[cfg(windows)]
     pub(crate) fn new_group() -> (GroupOwner, ProcessGroup) {
-        let owner = GroupOwner::new().expect("무리 만들기");
+        let owner = GroupOwner::new().expect("create group");
         let group = owner
             .downgrade()
-            .expect("Windows 주인은 약한 손잡이를 낸다");
+            .expect("the Windows owner hands out a weak handle");
         (
             owner,
             ProcessGroup::new(group, RetiringSignal::of(&Arc::default())),
@@ -296,18 +296,18 @@ pub(crate) mod tests {
 
         let (owner, group) = new_group();
         let mut x = spawn_gated_cmd("rem adapter-exit-code", CREATE_NO_WINDOW);
-        owner.adopt(x.id()).expect("무리 편입");
+        owner.adopt(x.id()).expect("adopt into group");
 
         let member = group
             .pin(x.id(), true)
-            .expect("붙들기")
-            .expect("우리 무리의 멤버");
+            .expect("hold on")
+            .expect("a member of our group");
         let raw = member.terminate_raw(EXIT_CODE);
         assert_eq!(
-            member.classify(raw).expect("끝내기"),
+            member.classify(raw).expect("finish"),
             MemberKill::Terminated
         );
-        let status = x.wait().expect("종료 대기");
+        let status = x.wait().expect("wait for exit");
         assert_eq!(status.code(), Some(EXIT_CODE as i32));
     }
 }

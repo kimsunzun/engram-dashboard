@@ -14,13 +14,13 @@
 //!   the axis of this side's cap is bytes ([`INPUT_QUEUE_MAX_BYTES`]).
 //!
 //! ★★We state precisely the contract this queue changes — this is the most important sentence of this file★★:
-//!   The meaning of `Ok` **has moved from 「바이트가 자식에게 갔다」 (the bytes went to the child) to 「전량을 순서까지 확정해 받았다」 (we accepted all of it with its order fixed)**.
-//!   A write that fails after being accepted **has no way back to that caller** (the same place as the 「알려진
-//!   한계」 (known limitation) of the codex-side `send_input`). What that failure leaves is ⓐ a `warn` log ⓑ an `Err` that returns from the **next** `send_input`
+//!   The meaning of `Ok` **has moved from 「the bytes went to the child」 to 「we accepted all of it with its order fixed」**.
+//!   A write that fails after being accepted **has no way back to that caller** (the same place as the 「known limitation」
+//!   of the codex-side `send_input`). What that failure leaves is ⓐ a `warn` log ⓑ an `Err` that returns from the **next** `send_input`
 //!   on as the queue closes ⓒ and usually the pump's terminal transition that follows soon — a broken pipe means the reader will
 //!   see EOF soon too, so the signal people see is ultimately that termination.
 //!
-//! Each chunk can carry a 「실제로 나간 뒤 부를 것」 (callback to call after it actually goes out) ([`OnWritten`]) — a door used by a side that, even after `Ok` no longer means 「나갔다」 (it went out),
+//! Each chunk can carry a 「callback to call after it actually goes out」 ([`OnWritten`]) — a door used by a side that, even after `Ok` no longer means 「it went out」,
 //! needs to know the moment a chunk goes out.
 //!
 //! tauri import 0.
@@ -52,18 +52,18 @@ pub type OnWritten = Box<dyn FnOnce() + Send>;
 /// The cap (bytes) on input that has not yet gone out to the OS. ★If exceeded, that call returns `Err` — it is not discarded★
 /// (ADR-0190's handling as is. The branch that silently discards was already rejected by that ADR).
 ///
-/// ★「아직 나가지 못한」 (not yet gone out) **also includes the chunk the writer has taken out and is writing**★ — the source of record of the accounting is
+/// ★「not yet gone out」 **also includes the chunk the writer has taken out and is writing**★ — the source of record of the accounting is
 ///   [`Inner::bytes`]. If counted without that one chunk, the ceiling this constant declares actually becomes double
 ///   (it is counted as 0 the moment it is taken out so a producer can put in another cap's worth). The time it is bitten is exactly the span this cap
 ///   targets, so if that span is not counted, this value measures nothing.
 ///
 /// ★Why the axis is bytes★: one entry here is not a complete unit — it can be a single keystroke or an entire pasted
-///   body. Counted by entries, 「32 칸」 (32 entries) can be 32 bytes or 32MiB, so it **measures
+///   body. Counted by entries, 「32 entries」 can be 32 bytes or 32MiB, so it **measures
 ///   nothing.** What this cap actually measures is **the memory one agent can hold when the child does not read stdin**,
 ///   and the honest unit on that axis is only bytes.
 /// ★Ground for the value = symmetry with a number this repository already chose★: the ceiling at which one agent's **output** can sit in memory
-///   is 2MiB (the replay ring of [`crate::output_core`]). Giving the input side a larger ceiling would become 「출력은
-///   2MiB 로 자르면서 입력은 무제한에 가깝게 문다」 (output is cut at 2MiB while input is held nearly unbounded), so we give the same number.
+///   is 2MiB (the replay ring of [`crate::output_core`]). Giving the input side a larger ceiling would become 「output is cut at 2MiB while input is held nearly unbounded」,
+///   so we give the same number.
 /// ★Which way it errs if it is off★: too small and a legitimately large paste is rejected (a person knows immediately and
 ///   can retry), too large and every bitten agent silently locks up that much memory. A body sent at once exceeding 2MiB is not normal use of this path
 ///   (a 2MiB prompt ≈ 500k tokens), so we picked a spot where the cost of the smaller side
@@ -87,16 +87,16 @@ struct Inner {
     /// ★The point is that the place that subtracts is **not** [`InputQueue::pop`]★: the chunk taken out may from that moment be bitten by a blocking
     ///   OS write, and that time is exactly the span this cap targets. Subtracting at pop would make the bitten chunk
     ///   **count as 0** so a producer can put in another cap's worth — the real ceiling becomes double the declared value. So it counts throughout
-    ///   「받았다 → 나갔다」 (received → gone out), and the closing ([`InputQueue::close`]) discards the remaining
+    ///   「received → gone out」, and the closing ([`InputQueue::close`]) discards the remaining
     ///   waiting part, so it resets to 0 there.
     bytes: usize,
-    /// `None` = open. `Some(사유)` = closed — that reason is the `Err` text of later [`InputQueue::push`].
+    /// `None` = open. `Some(reason)` = closed — that reason is the `Err` text of later [`InputQueue::push`].
     closed: Option<String>,
     /// The number of chunks **received** so far. This is where the target that [`InputQueue::wait_drained`] waits for is taken.
     pushed_seq: u64,
     /// The number of chunks that have **actually gone out to the OS** so far. The writer raises it by one per successful write.
     ///
-    /// ★The difference of the two is the distance between 「받았다」 (received) and 「나갔다」 (gone out)★ — making that distance visible from outside is
+    /// ★The difference of the two is the distance between 「received」 and 「gone out」★ — making that distance visible from outside is
     ///   the reason these two fields exist, and without it the receipt reports acceptance as delivery (the two
     ///   cases ADR-0088 wants to tell apart get flipped). Chunks go out in FIFO so **the k-th received is the k-th to go out** — so
     ///   two monotonic counters are enough and there is no need to attach a ticket to each chunk.
@@ -147,7 +147,7 @@ impl InputQueue {
         let after = inner.bytes.saturating_add(bytes.len());
         if after > INPUT_QUEUE_MAX_BYTES {
             return Err(PtyError::WriteFailed(format!(
-                "입력 대기열 상한({INPUT_QUEUE_MAX_BYTES} bytes)을 넘는다 — 대기 {} + 요청 {} — 이 입력은 받지 않았다(버린 것이 아니다)",
+                "input queue cap ({INPUT_QUEUE_MAX_BYTES} bytes) exceeded — queued {} + requested {} — this input was not accepted (it was not discarded)",
                 inner.bytes,
                 bytes.len()
             )));
@@ -163,7 +163,7 @@ impl InputQueue {
     /// Take out the next chunk. `None` if the queue is closed — the writer sees it and ends the loop.
     ///
     /// ★Closing is decided **before** the remaining waiting part — so input that has not gone out yet at the moment of closing is lost★.
-    ///   Every place that closes is 「이 자식은 더 이상 읽지 않는다」 (this child no longer reads) (kill · stream end · write failure), so even trying to
+    ///   Every place that closes is 「this child no longer reads」 (kill · stream end · write failure), so even trying to
     ///   write the rest would all fail. The same as the codex writer's handling.
     /// ★Taking out **does not reduce** [`Inner::bytes`]★ — the chunk taken out has not gone out yet. The only thing that
     ///   releases that accounting is [`mark_written`](Self::mark_written), and the ground is that field's doc.
@@ -188,7 +188,7 @@ impl InputQueue {
     ///   call this before kill, and reversing the order is also safe but **the side that closes first**
     ///   feeds a dying child one line less.
     /// ★Why the first reason wins★: the real cause always comes first (write failure → termination after). Overwriting
-    ///   with a later reason would smear the diagnosis into 「에이전트를 종료했다」 (the agent was terminated).
+    ///   with a later reason would smear the diagnosis into 「the agent was terminated」.
     pub(crate) fn close(&self, reason: &str) {
         let abandoned = {
             let mut inner = sync::lock(&self.inner);
@@ -218,13 +218,13 @@ impl InputQueue {
     /// ★Wait until **everything accepted up to the time of this call has gone out**★ — `Ok` = gone out.
     ///
     /// ★Why it exists — this is the place that restores the meaning of the receipt★: with the queue, `send_input`'s `Ok` dropped to
-    ///   「받았다」 (received), and putting that as is on the delivery receipt would **record a body that has not gone out yet as 「배달 성공」
-    ///   (delivery succeeded)** (the "transmission failure" and "model ignored" that ADR-0088 wants to tell apart get flipped). If only the delivery verb
-    ///   passes this check, the meaning becomes 「나갔다」 (gone out) again. ★The keystroke path does not call this★ — waiting there
+    ///   「received」, and putting that as is on the delivery receipt would **record a body that has not gone out yet as 「delivery succeeded」**
+    ///   (the "transmission failure" and "model ignored" that ADR-0088 wants to tell apart get flipped). If only the delivery verb
+    ///   passes this check, the meaning becomes 「gone out」 again. ★The keystroke path does not call this★ — waiting there
     ///   would bring back the very head-of-line blocking this queue meant to remove.
-    /// ★Take the target inside the lock★: that way 「내가 넣은 것까지」 (up to what I put in) is surely included. If someone else puts in more in between,
+    /// ★Take the target inside the lock★: that way 「up to what I put in」 is surely included. If someone else puts in more in between,
     ///   we wait for that too (over-waiting) but it is not short — the side it errs toward is the safe one.
-    /// ★Even past the deadline, **what is in the queue is not cancelled**★: so 「확인 실패」 (confirmation failed) and 「안 나갔다」 (did not go out) are not the same —
+    /// ★Even past the deadline, **what is in the queue is not cancelled**★: so 「confirmation failed」 and 「did not go out」 are not the same —
     ///   a branch that goes out late remains. The handling of that residue (a retry may become a duplicate delivery) is the job of the calling side, not this layer,
     ///   and the call site writes that fact down.
     pub(crate) fn wait_drained(&self, timeout: Duration) -> Result<(), PtyError> {
@@ -236,16 +236,16 @@ impl InputQueue {
                 return Ok(());
             }
             // ★Closing comes first★ — once closed, the remaining waiting part is discarded ([`pop`]) so the target is never reached.
-            //   That reason is exactly 「왜 못 나갔나」 (why it did not go out), so we carry it as is (if it was a write failure, that text arrives here).
+            //   That reason is exactly 「why it did not go out」, so we carry it as is (if it was a write failure, that text arrives here).
             if let Some(reason) = &inner.closed {
                 return Err(PtyError::WriteFailed(format!(
-                    "쓰기 확인 실패 — 통로가 닫혔다: {reason}"
+                    "write confirmation failed — the link closed: {reason}"
                 )));
             }
             let now = Instant::now();
             if now >= deadline {
                 return Err(PtyError::WriteFailed(format!(
-                    "쓰기 확인 시한({timeout:?})을 넘겼다 — {} 덩이가 아직 안 나갔다(취소하지는 않았다)",
+                    "passed the write confirmation time limit ({timeout:?}) — {} chunks have not gone out yet (not cancelled)",
                     target - inner.written_seq
                 )));
             }
@@ -274,11 +274,11 @@ impl InputQueue {
 /// ★★Panic gets the same handling — this is what `contain` is for★★: if it panics during a write, the queue lock
 ///   is **not poisoned** (the write is done after releasing the lock). So if this branch is not caught, only the writer dies and the queue stays
 ///   **open**, and later `send_input` keeps returning `Ok` and from the moment it reaches the cap it rejects with the **wrong
-///   reason** (「상한 초과」 (cap exceeded)) — the real cause is nowhere in that log. Meanwhile not a single byte
+///   reason** (「cap exceeded」) — the real cause is nowhere in that log. Meanwhile not a single byte
 ///   goes out. It is the same place as the discipline the `spawn` failure branch (`pty.rs` · `stdio.rs`) already chose: **if there is no
 ///   writer, close the queue and reject honestly from that moment.** A panic in the chunk's callback ([`OnWritten`]) is outside this containment
 ///   (that type's doc · ADR-0292 decision 3).
-/// ★`agent` is for log attribution★ — these warnings are the **only trace** of a 「받아 둔 뒤 실패한 쓰기」 (write that failed after being accepted), so with
+/// ★`agent` is for log attribution★ — these warnings are the **only trace** of a 「write that failed after being accepted」, so with
 ///   several agents, without whose it is, it is not a trace (the format convention of `docs/reference/logging-conventions.md`).
 pub(crate) fn drain(
     queue: &InputQueue,
@@ -292,7 +292,7 @@ pub(crate) fn drain(
             match write(&chunk) {
                 Ok(()) => {
                     // ★This one line that counts successes is the only progress signal of [`InputQueue::wait_drained`]★.
-                    //   The same line also releases the [`Inner::bytes`] accounting — 「나갔다」 (gone out) carries both meanings together.
+                    //   The same line also releases the [`Inner::bytes`] accounting — 「gone out」 carries both meanings together.
                     queue.mark_written(chunk.len());
                     // ADR-0292 decision 3: the callback changes shared state (the door of claude residue cleanup) and relies on abort for its protection
                     //   (ADR-0262 K7) — it turns off the marker, and a panic inside is not contained. The inner catch is the place that keeps a panic from reaching the outer guard and
@@ -307,7 +307,7 @@ pub(crate) fn drain(
                                 // Level = error — even when isolated, a panic is an error (the level table of `docs/reference/logging-conventions.md`).
                                 tracing::error!(
                                     agent = %agent,
-                                    "{label} 입력 덩이가 나간 뒤 부를 것이 panic 했다 — 다음 덩이는 계속 쓴다: {}",
+                                    "{label}: the callback after an input chunk went out panicked — the next chunks keep being written: {}",
                                     payload_text(&*payload)
                                 );
                             }
@@ -318,7 +318,7 @@ pub(crate) fn drain(
                     // ★This failure has no way back to the caller that sent those bytes★ — that call already left
                     //   having received `Ok`. All that can be done here is to leave the reason and close the path so that **from the next** call on
                     //   it is honest (the contract paragraph of the module header).
-                    let reason = format!("{label} 입력 쓰기 실패: {e}");
+                    let reason = format!("{label} input write failed: {e}");
                     tracing::warn!(agent = %agent, "{reason}");
                     queue.close(&reason);
                     return;
@@ -328,7 +328,7 @@ pub(crate) fn drain(
     }));
 
     if let Err(caught) = outcome {
-        let reason = format!("{label} 입력 라이터가 panic 했다: {caught}");
+        let reason = format!("{label} input writer panicked: {caught}");
         // Level = error. This agent's input path died **unrecoverably** and a person must look
         //   (the level table of `docs/reference/logging-conventions.md` — a panic is error).
         tracing::error!(agent = %agent, "{reason}");
@@ -355,18 +355,18 @@ mod tests {
         queue.push(b"first".to_vec()).expect("push 1");
         queue.push(b"second".to_vec()).expect("push 2");
         queue.push(b"third".to_vec()).expect("push 3");
-        queue.close("시험 종료");
+        queue.close("test end");
 
         // Closing is decided before the waiting part (the `pop` contract above), so if you drain after closing nothing comes out —
         // so this item that measures order runs the writer **before** closing. The item below is that shape.
         let written: Arc<std::sync::Mutex<Vec<Vec<u8>>>> = Arc::new(std::sync::Mutex::new(vec![]));
-        drain(&queue, "시험", test_agent(), |b| {
+        drain(&queue, "test", test_agent(), |b| {
             written.lock().unwrap().push(b.to_vec());
             Ok(())
         });
         assert!(
             written.lock().unwrap().is_empty(),
-            "닫힌 뒤에는 남은 대기분을 쓰지 않는다(계약)"
+            "after closing, the remaining queued items are not written (contract)"
         );
 
         // The real item — start the writer first and close after writing.
@@ -375,7 +375,7 @@ mod tests {
         let seen = written.clone();
         let writer_queue = queue.clone();
         let handle = std::thread::spawn(move || {
-            drain(&writer_queue, "시험", test_agent(), |b| {
+            drain(&writer_queue, "test", test_agent(), |b| {
                 seen.lock().unwrap().push(b.to_vec());
                 Ok(())
             });
@@ -387,17 +387,20 @@ mod tests {
 
         let deadline = Instant::now() + Duration::from_secs(5);
         while written.lock().unwrap().len() < 3 {
-            assert!(Instant::now() < deadline, "5s 안에 3 덩이가 안 나갔다");
+            assert!(
+                Instant::now() < deadline,
+                "3 chunks did not go out within 5s"
+            );
             std::thread::sleep(Duration::from_millis(5));
         }
-        queue.close("시험 종료");
-        handle.join().expect("라이터 스레드 panic");
+        queue.close("test end");
+        handle.join().expect("writer thread panic");
 
         let got = written.lock().unwrap().clone();
         assert_eq!(
             got,
             vec![b"first".to_vec(), b"second".to_vec(), b"third".to_vec()],
-            "FIFO 순서·덩이 경계 보존"
+            "FIFO order and chunk boundaries preserved"
         );
     }
 
@@ -406,38 +409,43 @@ mod tests {
     fn push_over_the_bound_is_refused_not_dropped() {
         let queue = InputQueue::new();
         let half = INPUT_QUEUE_MAX_BYTES / 2;
-        queue.push(vec![b'a'; half]).expect("절반은 들어간다");
+        queue.push(vec![b'a'; half]).expect("half goes in");
         queue
             .push(vec![b'b'; half])
-            .expect("나머지 절반도 들어간다");
+            .expect("the other half goes in too");
         assert_eq!(queue.queued_bytes(), INPUT_QUEUE_MAX_BYTES);
 
         let err = queue
             .push(vec![b'c'; 1])
-            .expect_err("상한을 1 바이트라도 넘으면 거절");
+            .expect_err("exceeding the cap by even 1 byte is refused");
         match err {
             PtyError::WriteFailed(msg) => {
-                assert!(msg.contains("상한"), "사유가 상한임을 말해야: {msg}");
                 assert!(
-                    msg.contains("받지 않았다"),
-                    "거절이지 유실이 아님을 말해야: {msg}"
+                    msg.contains("cap"),
+                    "the reason must say it is the cap: {msg}"
+                );
+                assert!(
+                    msg.contains("not accepted"),
+                    "must say it is a refusal, not a loss: {msg}"
                 );
             }
-            other => panic!("WriteFailed 여야: {other:?}"),
+            other => panic!("must be WriteFailed: {other:?}"),
         }
         assert_eq!(
             queue.queued_bytes(),
             INPUT_QUEUE_MAX_BYTES,
-            "거절이 앞서 받아 둔 것을 건드리지 않는다"
+            "the refusal does not touch what was accepted before"
         );
 
         // Once one **actually goes out**, that much is accepted again — the cap is not a permanent death sentence.
         // ★Taking out alone does not free room★ — the source of record for that accounting and its regression net is
         //   `in_flight_bytes_still_count_against_the_bound` below.
-        let (popped, _) = queue.pop().expect("하나 꺼내기");
+        let (popped, _) = queue.pop().expect("pop one");
         assert_eq!(popped.len(), half);
         queue.mark_written(popped.len());
-        queue.push(vec![b'c'; 1]).expect("자리가 나면 다시 받는다");
+        queue
+            .push(vec![b'c'; 1])
+            .expect("accepts again once there is room");
     }
 
     /// ★A chunk that was taken out but has not gone out yet is also **counted** against the cap★ — if not counted, the ceiling becomes double the declared value.
@@ -451,32 +459,34 @@ mod tests {
         let queue = InputQueue::new();
         queue
             .push(vec![b'a'; INPUT_QUEUE_MAX_BYTES])
-            .expect("상한 전량은 들어간다");
+            .expect("the full cap goes in");
 
-        let (in_flight, _) = queue.pop().expect("라이터가 하나 꺼낸다");
+        let (in_flight, _) = queue.pop().expect("the writer pops one");
         assert_eq!(in_flight.len(), INPUT_QUEUE_MAX_BYTES);
         assert_eq!(
             queue.queued_bytes(),
             INPUT_QUEUE_MAX_BYTES,
-            "꺼냈다고 회계가 풀리면 안 된다 — 아직 OS 로 나가지 않았다"
+            "the accounting must not be released just because it was popped — it has not gone out to the OS yet"
         );
 
         let err = queue
             .push(vec![b'b'; 1])
-            .expect_err("쓰는 중인 덩이를 0 으로 세면 여기서 상한이 두 배가 된다");
+            .expect_err("if the chunk being written were counted as 0, the cap would double here");
         match err {
-            PtyError::WriteFailed(msg) => assert!(msg.contains("상한"), "{msg}"),
-            other => panic!("WriteFailed 여야: {other:?}"),
+            PtyError::WriteFailed(msg) => assert!(msg.contains("cap"), "{msg}"),
+            other => panic!("must be WriteFailed: {other:?}"),
         }
 
         // Room is freed only after it has actually gone out.
         queue.mark_written(in_flight.len());
         assert_eq!(queue.queued_bytes(), 0);
-        queue.push(vec![b'b'; 1]).expect("나간 뒤엔 받는다");
+        queue
+            .push(vec![b'b'; 1])
+            .expect("accepts after it went out");
     }
 
     /// ★Even if the writer panics, the queue **closes**★ — if not closed, later `send_input` keeps returning `Ok` and from the moment it
-    /// reaches the cap rejects with the **wrong reason** (「상한 초과」 (cap exceeded)). The real cause remains nowhere.
+    /// reaches the cap rejects with the **wrong reason** (「cap exceeded」). The real cause remains nowhere.
     ///
     /// ★Lock poison does not do it for us★: the write is done **after releasing** the queue lock (after `pop` returns), so even on panic
     ///   the `Mutex` is fine — so without `contain` there is no place for this transition to happen.
@@ -487,24 +497,32 @@ mod tests {
 
         let writer_queue = queue.clone();
         let handle = std::thread::spawn(move || {
-            drain(&writer_queue, "시험", test_agent(), |_| {
-                panic!("라이터 폭발");
+            drain(&writer_queue, "test", test_agent(), |_| {
+                panic!("writer blew up");
             });
         });
         handle
             .join()
-            .expect("drain 이 panic 을 흡수해 라이터 스레드가 정상 종료해야");
+            .expect("drain must absorb the panic so the writer thread exits normally");
 
         match queue.push(b"after".to_vec()) {
             Err(PtyError::WriteFailed(msg)) => {
-                assert!(msg.contains("panic"), "사유가 panic 임을 말해야: {msg}");
-                assert!(msg.contains("라이터 폭발"), "원 payload 보존: {msg}");
                 assert!(
-                    !msg.contains("상한"),
-                    "상한 초과로 둔갑하면 진단이 반대 방향으로 간다: {msg}"
+                    msg.contains("panic"),
+                    "the reason must say it is a panic: {msg}"
+                );
+                assert!(
+                    msg.contains("writer blew up"),
+                    "original payload preserved: {msg}"
+                );
+                assert!(
+                    !msg.contains("cap"),
+                    "if it masquerades as a cap overflow, diagnosis goes in the opposite direction: {msg}"
                 );
             }
-            other => panic!("panic 뒤 push 는 닫힌 큐의 WriteFailed 여야: {other:?}"),
+            other => {
+                panic!("a push after the panic must be the closed queue's WriteFailed: {other:?}")
+            }
         }
     }
 
@@ -513,7 +531,7 @@ mod tests {
     fn single_oversized_payload_is_refused_on_an_empty_queue() {
         let queue = InputQueue::new();
         assert!(queue.push(vec![b'x'; INPUT_QUEUE_MAX_BYTES + 1]).is_err());
-        assert_eq!(queue.queued_bytes(), 0, "거절된 것은 쌓이지 않는다");
+        assert_eq!(queue.queued_bytes(), 0, "refused items do not pile up");
     }
 
     /// ★Writer termination contract★: `close` ends `drain` — whether waiting or writing.
@@ -526,24 +544,27 @@ mod tests {
         let writer_queue = queue.clone();
         let writer_finished = finished.clone();
         let handle = std::thread::spawn(move || {
-            drain(&writer_queue, "시험", test_agent(), |_| Ok(()));
+            drain(&writer_queue, "test", test_agent(), |_| Ok(()));
             writer_finished.store(true, Ordering::Release);
         });
 
         // Yield briefly so the writer surely enters its wait.
         std::thread::sleep(Duration::from_millis(50));
-        assert!(!finished.load(Ordering::Acquire), "닫기 전엔 안 끝난다");
+        assert!(
+            !finished.load(Ordering::Acquire),
+            "does not finish before closing"
+        );
 
-        queue.close("시험 종료");
+        queue.close("test end");
         let deadline = Instant::now() + Duration::from_secs(5);
         while !handle.is_finished() {
             assert!(
                 Instant::now() < deadline,
-                "close 후 5s 안에 라이터가 안 끝났다 — shutdown 이 스레드를 못 거둔다"
+                "the writer did not finish within 5s after close — shutdown cannot collect the thread"
             );
             std::thread::sleep(Duration::from_millis(5));
         }
-        handle.join().expect("라이터 스레드 panic");
+        handle.join().expect("writer thread panic");
         assert!(finished.load(Ordering::Acquire));
     }
 
@@ -551,12 +572,15 @@ mod tests {
     #[test]
     fn push_after_close_reports_the_close_reason() {
         let queue = InputQueue::new();
-        queue.close("에이전트를 종료했다");
+        queue.close("the agent was terminated");
         match queue.push(b"late".to_vec()) {
             Err(PtyError::WriteFailed(msg)) => {
-                assert!(msg.contains("에이전트를 종료했다"), "사유 전달: {msg}")
+                assert!(
+                    msg.contains("the agent was terminated"),
+                    "reason passed on: {msg}"
+                )
             }
-            other => panic!("닫힌 큐는 WriteFailed 여야: {other:?}"),
+            other => panic!("a closed queue must be WriteFailed: {other:?}"),
         }
     }
 
@@ -565,18 +589,24 @@ mod tests {
     fn write_failure_closes_the_queue_with_its_reason() {
         let queue = InputQueue::new();
         queue.push(b"doomed".to_vec()).expect("push");
-        drain(&queue, "시험", test_agent(), |_| {
+        drain(&queue, "test", test_agent(), |_| {
             Err(std::io::Error::new(
                 std::io::ErrorKind::BrokenPipe,
-                "파이프가 끊겼다",
+                "the pipe broke",
             ))
         });
         match queue.push(b"after".to_vec()) {
             Err(PtyError::WriteFailed(msg)) => {
-                assert!(msg.contains("입력 쓰기 실패"), "사유 전달: {msg}");
-                assert!(msg.contains("파이프가 끊겼다"), "원 오류 보존: {msg}");
+                assert!(
+                    msg.contains("input write failed"),
+                    "reason passed on: {msg}"
+                );
+                assert!(
+                    msg.contains("the pipe broke"),
+                    "original error preserved: {msg}"
+                );
             }
-            other => panic!("쓰기 실패 뒤 push 는 WriteFailed 여야: {other:?}"),
+            other => panic!("a push after a write failure must be WriteFailed: {other:?}"),
         }
     }
 
@@ -584,10 +614,10 @@ mod tests {
     #[test]
     fn first_close_reason_wins() {
         let queue = InputQueue::new();
-        queue.close("진짜 원인");
-        queue.close("나중에 온 종료");
+        queue.close("the real cause");
+        queue.close("an exit that came later");
         match queue.push(b"x".to_vec()) {
-            Err(PtyError::WriteFailed(msg)) => assert!(msg.contains("진짜 원인"), "{msg}"),
+            Err(PtyError::WriteFailed(msg)) => assert!(msg.contains("the real cause"), "{msg}"),
             other => panic!("{other:?}"),
         }
     }
@@ -603,7 +633,7 @@ mod tests {
     ) -> std::thread::JoinHandle<()> {
         let (seen, writer_queue) = (written.clone(), queue.clone());
         std::thread::spawn(move || {
-            drain(&writer_queue, "시험", test_agent(), |b| {
+            drain(&writer_queue, "test", test_agent(), |b| {
                 seen.lock().unwrap().push(b.to_vec());
                 Ok(())
             });
@@ -613,7 +643,10 @@ mod tests {
     fn wait_until(mut done: impl FnMut() -> bool, what: &str) {
         let deadline = Instant::now() + Duration::from_secs(5);
         while !done() {
-            assert!(Instant::now() < deadline, "5 초 안에 안 됐다: {what}");
+            assert!(
+                Instant::now() < deadline,
+                "did not happen within 5 seconds: {what}"
+            );
             std::thread::sleep(Duration::from_millis(5));
         }
     }
@@ -639,14 +672,14 @@ mod tests {
         queue.push(b"after".to_vec()).expect("push");
 
         let handle = spawn_recording_writer(&queue, &written);
-        wait_until(|| written.lock().unwrap().len() == 3, "세 덩이가 나가기");
-        queue.close("시험 종료");
-        handle.join().expect("라이터 스레드 panic");
+        wait_until(|| written.lock().unwrap().len() == 3, "three chunks go out");
+        queue.close("test end");
+        handle.join().expect("writer thread panic");
 
         assert_eq!(
             *calls.lock().unwrap(),
             vec![(vec![b"plain".to_vec(), b"marked".to_vec()], b"after".len())],
-            "부를 것은 제 덩이가 적히고 회계가 풀린 뒤 한 번만 불린다"
+            "the callback is called only once, after its chunk is written and the accounting is released"
         );
     }
 
@@ -672,31 +705,31 @@ mod tests {
 
         let queue = InputQueue::new();
         queue.push_with(b"a".to_vec(), marked()).expect("push_with");
-        queue.close("시험 종료");
+        queue.close("test end");
         assert_eq!(
             drops.load(Ordering::SeqCst),
             1,
-            "닫힘이 부를 것을 쥐고 있다"
+            "the close is holding the callback"
         );
         let mut wrote = false;
-        drain(&queue, "시험", test_agent(), |_| {
+        drain(&queue, "test", test_agent(), |_| {
             wrote = true;
             Ok(())
         });
-        assert!(!wrote, "닫힌 뒤에 썼다");
+        assert!(!wrote, "wrote after closing");
 
         let queue = InputQueue::new();
         queue.push_with(b"b".to_vec(), marked()).expect("push_with");
-        drain(&queue, "시험", test_agent(), |_| {
+        drain(&queue, "test", test_agent(), |_| {
             Err(std::io::Error::new(
                 std::io::ErrorKind::BrokenPipe,
-                "파이프가 끊겼다",
+                "the pipe broke",
             ))
         });
         assert_eq!(
             drops.load(Ordering::SeqCst),
             2,
-            "쓰기 실패 뒤에도 쥐고 있다"
+            "still holding after a write failure"
         );
 
         assert!(queue.push_with(b"c".to_vec(), marked()).is_err());
@@ -707,13 +740,13 @@ mod tests {
         assert_eq!(
             drops.load(Ordering::SeqCst),
             4,
-            "받지 않은 부를 것이 남았다"
+            "an unaccepted callback remained"
         );
 
         assert_eq!(
             calls.load(Ordering::SeqCst),
             0,
-            "나가지 못한 덩이의 부를 것이 불렸다"
+            "the callback of a chunk that did not go out was called"
         );
     }
 
@@ -735,17 +768,21 @@ mod tests {
         queue.push(b"left".to_vec()).expect("push");
 
         let mut wrote = Vec::new();
-        drain(&queue, "시험", test_agent(), |b| {
+        drain(&queue, "test", test_agent(), |b| {
             wrote.push(b.to_vec());
-            queue.close("쓰는 사이 닫힘");
+            queue.close("closed while writing");
             Ok(())
         });
 
-        assert_eq!(wrote, vec![b"popped".to_vec()], "닫힌 뒤 남은 덩이를 썼다");
+        assert_eq!(
+            wrote,
+            vec![b"popped".to_vec()],
+            "wrote a remaining chunk after closing"
+        );
         assert_eq!(
             calls.load(Ordering::SeqCst),
             1,
-            "꺼낸 뒤 닫혀도 쓰기가 성공했으면 한 번 불려야 한다"
+            "if the write succeeded, it must be called once even when closed after popping"
         );
     }
 
@@ -760,7 +797,7 @@ mod tests {
                 Some(Box::new(move || {
                     again
                         .push(b"from-callback".to_vec())
-                        .expect("부를 것 안의 push");
+                        .expect("push inside the callback");
                 })),
             )
             .expect("push_with");
@@ -769,10 +806,10 @@ mod tests {
         let handle = spawn_recording_writer(&queue, &written);
         wait_until(
             || written.lock().unwrap().len() == 2,
-            "부를 것 안에서 넣은 덩이가 나가기 — 큐 락을 쥔 채 불렀으면 여기서 매달린다",
+            "a chunk pushed inside the callback goes out — if it were called holding the queue lock, it would hang here",
         );
-        queue.close("시험 종료");
-        handle.join().expect("라이터 스레드 panic");
+        queue.close("test end");
+        handle.join().expect("writer thread panic");
         assert_eq!(
             *written.lock().unwrap(),
             vec![b"first".to_vec(), b"from-callback".to_vec()]
@@ -786,22 +823,28 @@ mod tests {
     fn a_panicking_on_written_does_not_stop_later_chunks() {
         let queue = Arc::new(InputQueue::new());
         queue
-            .push_with(b"first".to_vec(), Some(Box::new(|| panic!("부를 것 폭발"))))
+            .push_with(
+                b"first".to_vec(),
+                Some(Box::new(|| panic!("callback blew up"))),
+            )
             .expect("push_with");
         queue.push(b"second".to_vec()).expect("push");
 
         let written: Written = Arc::new(Mutex::new(Vec::new()));
         let handle = spawn_recording_writer(&queue, &written);
-        wait_until(|| written.lock().unwrap().len() == 2, "뒤 덩이가 나가기");
+        wait_until(
+            || written.lock().unwrap().len() == 2,
+            "the later chunk goes out",
+        );
         queue
             .push(b"third".to_vec())
-            .expect("부를 것의 panic 이 큐를 닫았다");
+            .expect("the callback's panic closed the queue");
         wait_until(
             || written.lock().unwrap().len() == 3,
-            "그 뒤에 넣은 덩이가 나가기",
+            "a chunk pushed after that goes out",
         );
-        queue.close("시험 종료");
-        handle.join().expect("라이터 스레드 panic");
+        queue.close("test end");
+        handle.join().expect("writer thread panic");
         assert_eq!(
             *written.lock().unwrap(),
             vec![b"first".to_vec(), b"second".to_vec(), b"third".to_vec()]
@@ -824,21 +867,21 @@ mod tests {
                     at_callback
                         .lock()
                         .unwrap()
-                        .push(("부를 것", is_contained()));
+                        .push(("callback", is_contained()));
                 })),
             )
             .expect("push_with");
 
-        drain(&queue, "시험", test_agent(), |_| {
-            marks.lock().unwrap().push(("쓰기", is_contained()));
-            queue.close("한 덩이만");
+        drain(&queue, "test", test_agent(), |_| {
+            marks.lock().unwrap().push(("write", is_contained()));
+            queue.close("only one chunk");
             Ok(())
         });
 
         assert_eq!(
             *marks.lock().unwrap(),
-            vec![("쓰기", true), ("부를 것", false)]
+            vec![("write", true), ("callback", false)]
         );
-        assert!(!is_contained(), "drain 이 끝난 뒤 표시가 남았다");
+        assert!(!is_contained(), "the marker remained after drain finished");
     }
 }

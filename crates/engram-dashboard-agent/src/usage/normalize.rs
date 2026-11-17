@@ -44,8 +44,8 @@ pub fn used_pct_from_fraction(fraction: f64) -> Option<f64> {
 }
 
 /// epoch seconds → reset-time field value. 1970 and below (0 · negative) and above [`MAX_EPOCH_SECS`] → `None`.
-/// ★Not accepting 0 is intended★ — a real reset cannot be in 1970, and 0 is commonly used as a 「값 없음」 (no value) placeholder.
-///   If accepted, the receiver would draw that window as 「이미 리셋됨」 (already reset).
+/// ★Not accepting 0 is intended★ — a real reset cannot be in 1970, and 0 is commonly used as a 「no value」 placeholder.
+///   If accepted, the receiver would draw that window as 「already reset」.
 pub fn resets_at_from_epoch_secs(secs: i64) -> Option<i64> {
     (1..=MAX_EPOCH_SECS).contains(&secs).then_some(secs)
 }
@@ -73,7 +73,7 @@ mod tests {
         assert_eq!(
             0.55_f64 * 100.0,
             55.00000000000001,
-            "전제: 오차가 실제로 붙는다"
+            "premise: the error really appears"
         );
         assert_eq!(used_pct_from_fraction(0.55), Some(55.0));
         assert_eq!(used_pct_from_fraction(0.67), Some(67.0));
@@ -108,7 +108,7 @@ mod tests {
 
     #[test]
     fn negative_zero_is_folded_to_positive_zero() {
-        let pct = used_pct_from_fraction(-0.0).expect("유한수");
+        let pct = used_pct_from_fraction(-0.0).expect("finite number");
         assert!(pct == 0.0 && pct.is_sign_positive(), "{pct:?}");
     }
 
@@ -142,7 +142,7 @@ mod tests {
         assert_eq!(parse("null"), None);
         assert_eq!(parse("true"), None);
         assert_eq!(parse("-1790856000"), None);
-        assert_eq!(parse("18446744073709551615"), None, "u64 최대 = i64 밖");
+        assert_eq!(parse("18446744073709551615"), None, "u64 max = outside i64");
         assert_eq!(parse("1e300"), None);
     }
 }

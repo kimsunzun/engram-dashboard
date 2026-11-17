@@ -106,7 +106,7 @@ pub(super) fn names_default_bucket(limit_id: Option<&Value>) -> bool {
     }
 }
 
-/// The snapshot's two slots → `(5시간, 주간)`. Rule = the first item of [`observation_from_rate_limits_updated`].
+/// The snapshot's two slots → `(5 hours, weekly)`. Rule = the first item of [`observation_from_rate_limits_updated`].
 pub(super) fn windows_by_duration(
     snapshot: &RateLimitSnapshot,
 ) -> (Option<WindowObs>, Option<WindowObs>) {
@@ -151,7 +151,7 @@ fn note_unknown_duration(minutes: Option<i64>) {
     }
     tracing::debug!(
         window_duration_mins = ?minutes,
-        "codex 사용량 한도 스냅숏의 모르는 창 길이를 버린다(프로세스당 한 번만 적는다)"
+        "dropping an unknown window length in a codex usage-limit snapshot (logged only once per process)"
     );
 }
 
@@ -160,7 +160,7 @@ fn note_empty_window() {
         return;
     }
     tracing::debug!(
-        "codex 사용량 한도 스냅숏의 창에 읽히는 칸이 하나도 없어 버린다(프로세스당 한 번만 적는다)"
+        "dropping a codex usage-limit snapshot window with no readable field (logged only once per process)"
     );
 }
 
@@ -169,7 +169,7 @@ fn note_missing_limit_id() {
         return;
     }
     tracing::debug!(
-        "codex account/rateLimits/updated 에 limitId 가 없어 기본 버킷으로 읽는다 — 미측정 가정(프로세스당 한 번만 적는다)"
+        "codex account/rateLimits/updated has no limitId, reading it as the default bucket — unmeasured assumption (logged only once per process)"
     );
 }
 
@@ -179,7 +179,7 @@ fn note_other_bucket() {
         return;
     }
     tracing::debug!(
-        "codex account/rateLimits/updated 의 기본이 아닌 버킷이라 버린다(프로세스당 한 번만 적는다)"
+        "dropping a non-default bucket of codex account/rateLimits/updated (logged only once per process)"
     );
 }
 
@@ -222,7 +222,9 @@ pub(super) fn gate_decoder(
         return decoder;
     }
     // Neither which key it was nor its value is written — credentials and user folder names are in there.
-    tracing::debug!("codex 기본 계정이 아닐 수 있는 env — 이 에이전트의 사용량 줍기를 끈다");
+    tracing::debug!(
+        "codex env may not be the default account — turning off usage pickup for this agent"
+    );
     Box::new(UsageGate::blocking(decoder))
 }
 
@@ -231,9 +233,9 @@ mod tests {
     use super::*;
 
     fn parse(params: &str) -> Option<UsageObservation> {
-        let value: Value = serde_json::from_str(params).expect("시험 params 는 JSON 이다");
+        let value: Value = serde_json::from_str(params).expect("test params are JSON");
         let notification: AccountRateLimitsUpdatedNotification =
-            serde_json::from_value(value).expect("봉투는 읽힌다");
+            serde_json::from_value(value).expect("the envelope reads");
         observation_from_rate_limits_updated(&notification)
     }
 
@@ -256,13 +258,16 @@ mod tests {
 
     #[test]
     fn default_bucket_carries_both_windows_by_duration() {
-        let obs = parse_snapshot(DEFAULT_BUCKET).expect("관측");
+        let obs = parse_snapshot(DEFAULT_BUCKET).expect("observation");
         assert_eq!(obs.vendor, USAGE_VENDOR);
         assert_eq!(obs.source, UsageSource::Passive);
         assert_eq!(obs.five_hour, window(Some(37.0), Some(1_790_424_706)));
         assert_eq!(obs.weekly, window(Some(58.0), Some(1_790_739_378)));
-        assert_eq!(obs.model_scoped, None, "줍기는 모델별 창을 싣지 않는다");
-        assert_eq!(obs.plan, None, "플랜은 조회가 싣는다");
+        assert_eq!(
+            obs.model_scoped, None,
+            "pickup does not carry per-model windows"
+        );
+        assert_eq!(obs.plan, None, "the query carries the plan");
     }
 
     /// ★Duration tells them apart, not slot name★ — a bucket where `primary` is weekly was measured (research doc §4-1).
@@ -271,14 +276,14 @@ mod tests {
         let obs = parse_snapshot(
             r#"{"primary":{"usedPercent":12,"windowDurationMins":10080,"resetsAt":1791018755},"secondary":null}"#,
         )
-        .expect("관측");
+        .expect("observation");
         assert_eq!(obs.five_hour, None);
         assert_eq!(obs.weekly, window(Some(12.0), Some(1_791_018_755)));
 
         let obs = parse_snapshot(
             r#"{"primary":{"usedPercent":58,"windowDurationMins":10080},"secondary":{"usedPercent":37,"windowDurationMins":300}}"#,
         )
-        .expect("관측");
+        .expect("observation");
         assert_eq!(obs.five_hour, window(Some(37.0), None));
         assert_eq!(obs.weekly, window(Some(58.0), None));
     }
@@ -286,22 +291,22 @@ mod tests {
     #[test]
     fn a_missing_limit_id_reads_as_the_default_bucket() {
         let obs = parse_snapshot(r#"{"primary":{"usedPercent":5,"windowDurationMins":300}}"#)
-            .expect("관측");
+            .expect("observation");
         assert_eq!(obs.five_hour, window(Some(5.0), None));
         let obs = parse_snapshot(
             r#"{"limitId":null,"primary":{"usedPercent":5,"windowDurationMins":300}}"#,
         )
-        .expect("관측");
+        .expect("observation");
         assert_eq!(obs.five_hour, window(Some(5.0), None));
     }
 
-    /// Sparse update — if only one window comes, the other window is 「안 실렸다」 (not carried).
+    /// Sparse update — if only one window comes, the other window is 「not carried」.
     #[test]
     fn a_sparse_update_carries_only_what_came() {
         let obs = parse_snapshot(
             r#"{"limitId":"codex","secondary":{"usedPercent":90,"windowDurationMins":10080}}"#,
         )
-        .expect("관측");
+        .expect("observation");
         assert_eq!(obs.five_hour, None);
         assert_eq!(obs.weekly, window(Some(90.0), None));
     }
@@ -311,7 +316,7 @@ mod tests {
         let obs = parse_snapshot(
             r#"{"primary":{"usedPercent":10,"windowDurationMins":300},"secondary":{"usedPercent":99,"windowDurationMins":300}}"#,
         )
-        .expect("관측");
+        .expect("observation");
         assert_eq!(obs.five_hour, window(Some(10.0), None));
         assert_eq!(obs.weekly, None);
 
@@ -319,7 +324,7 @@ mod tests {
         let obs = parse_snapshot(
             r#"{"primary":{"usedPercent":"10","windowDurationMins":300},"secondary":{"usedPercent":99,"windowDurationMins":300}}"#,
         )
-        .expect("관측");
+        .expect("observation");
         assert_eq!(obs.five_hour, window(Some(99.0), None));
     }
 
@@ -340,7 +345,7 @@ mod tests {
         assert_eq!(
             parse_snapshot(r#"{"primary":{"usedPercent":40,"windowDurationMins":43200}}"#),
             None,
-            "월간 창 — 우리 칸에 없다"
+            "monthly window — not one of our fields"
         );
         assert_eq!(
             parse_snapshot(r#"{"primary":{"usedPercent":40,"windowDurationMins":60}}"#),
@@ -349,7 +354,7 @@ mod tests {
         assert_eq!(
             parse_snapshot(r#"{"primary":{"usedPercent":40,"resetsAt":1790424706}}"#),
             None,
-            "길이가 없으면 자리 이름으로 추측하지 않는다"
+            "without a length, do not guess from the slot name"
         );
         assert_eq!(
             parse_snapshot(r#"{"primary":{"usedPercent":40,"windowDurationMins":null}}"#),
@@ -359,7 +364,7 @@ mod tests {
         let obs = parse_snapshot(
             r#"{"primary":{"usedPercent":40,"windowDurationMins":43200},"secondary":{"usedPercent":7,"windowDurationMins":10080}}"#,
         )
-        .expect("관측");
+        .expect("observation");
         assert_eq!(obs.five_hour, None);
         assert_eq!(obs.weekly, window(Some(7.0), None));
     }
@@ -379,7 +384,7 @@ mod tests {
                 r#"{"limitId":"Codex","primary":{"usedPercent":1,"windowDurationMins":300}}"#
             ),
             None,
-            "버킷 id 는 글자 그대로 대조한다"
+            "the bucket id is compared character for character"
         );
         // If the type of the bucket field is wrong, we cannot tell which bucket it is.
         for bad in ["5", "true", "[\"codex\"]", "{\"id\":\"codex\"}"] {
@@ -398,20 +403,20 @@ mod tests {
         let obs = parse_snapshot(
             r#"{"primary":{"usedPercent":"37","windowDurationMins":300,"resetsAt":1790424706}}"#,
         )
-        .expect("관측");
+        .expect("observation");
         assert_eq!(obs.five_hour, window(None, Some(1_790_424_706)));
 
         let obs = parse_snapshot(
             r#"{"primary":{"usedPercent":37,"windowDurationMins":300,"resetsAt":"2026-09-27T00:00:00Z"}}"#,
         )
-        .expect("관측");
+        .expect("observation");
         assert_eq!(obs.five_hour, window(Some(37.0), None));
 
         // A reset or duration with a fractional part is not an integer — only that field is missing (without a duration the window cannot be told apart).
         let obs = parse_snapshot(
             r#"{"primary":{"usedPercent":37.5,"windowDurationMins":300,"resetsAt":1790424706.0}}"#,
         )
-        .expect("관측");
+        .expect("observation");
         assert_eq!(obs.five_hour, window(Some(37.5), None));
         assert_eq!(
             parse_snapshot(r#"{"primary":{"usedPercent":37,"windowDurationMins":300.0}}"#),
@@ -427,7 +432,7 @@ mod tests {
             let obs = parse_snapshot(&format!(
                 r#"{{"primary":{bad},"secondary":{{"usedPercent":7,"windowDurationMins":10080}}}}"#
             ))
-            .unwrap_or_else(|| panic!("{bad}: 옆 창은 산다"));
+            .unwrap_or_else(|| panic!("{bad}: the neighbouring window survives"));
             assert_eq!(obs.five_hour, None, "{bad}");
             assert_eq!(obs.weekly, window(Some(7.0), None), "{bad}");
         }
@@ -439,15 +444,15 @@ mod tests {
         let obs = parse_snapshot(
             r#"{"primary":{"usedPercent":-30,"windowDurationMins":300,"resetsAt":-5},"secondary":{"usedPercent":1e308,"windowDurationMins":10080,"resetsAt":99999999999999999}}"#,
         )
-        .expect("관측");
+        .expect("observation");
         assert_eq!(obs.five_hour, window(Some(0.0), None));
         assert_eq!(obs.weekly, window(Some(100.0), None));
 
         let obs = parse_snapshot(
             r#"{"primary":{"usedPercent":18446744073709551615,"windowDurationMins":300,"resetsAt":18446744073709551615}}"#,
         )
-        .expect("관측");
-        assert_eq!(obs.five_hour, window(Some(100.0), None), "u64 최대");
+        .expect("observation");
+        assert_eq!(obs.five_hour, window(Some(100.0), None), "u64 max");
 
         // If the window duration is outside i64, it is an unknown duration.
         assert_eq!(
@@ -461,7 +466,7 @@ mod tests {
             None
         );
 
-        // If all fields are wrong, there is no window and no observation (epoch 0 is the 「값 없음」 (no value) placeholder).
+        // If all fields are wrong, there is no window and no observation (epoch 0 is the 「no value」 placeholder).
         assert_eq!(
             parse_snapshot(
                 r#"{"primary":{"usedPercent":null,"windowDurationMins":300,"resetsAt":0}}"#
@@ -477,7 +482,7 @@ mod tests {
         assert_eq!(
             parse_snapshot(r#"{"primary":{"windowDurationMins":300}}"#),
             None,
-            "required 칸 `usedPercent` 가 빠져도 패닉하지 않는다"
+            "no panic even if the required field `usedPercent` is missing"
         );
     }
 
@@ -490,7 +495,7 @@ mod tests {
             .collect()
     }
 
-    /// Daemon env stand-in — a key not in the given pairs is 「데몬에 없다」 (absent in the daemon).
+    /// Daemon env stand-in — a key not in the given pairs is 「absent in the daemon」.
     fn daemon(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<OsString> {
         let pairs: Vec<(String, OsString)> = pairs
             .iter()
@@ -512,11 +517,11 @@ mod tests {
         for key in EXPECTED_KEYS {
             assert!(
                 !collects_default_account_usage(&env(&[(key, "x")]), daemon(&[])),
-                "{key}: 데몬에 없는데 명세에 있다"
+                "{key}: absent in the daemon but present in the spec"
             );
             assert!(
                 !collects_default_account_usage(&env(&[(key, "x")]), daemon(&[(key, "y")])),
-                "{key}: 데몬 값과 다르다"
+                "{key}: differs from the daemon value"
             );
         }
         // Key case is not distinguished — the spawn loads it into the child env under that name.
@@ -563,7 +568,7 @@ mod tests {
         d.decode(line.as_bytes());
         assert_eq!(d.take_usage().len(), 1);
 
-        // A value that cannot be in the process env — so it is always 「다르다」 (different).
+        // A value that cannot be in the process env — so it is always 「different」.
         let spec = env(&[("OPENAI_BASE_URL", "http://engram-usage-gate-test.invalid")]);
         let mut d = gate_decoder(Box::new(CodexAppServerDecoder::new()), &spec);
         d.decode(line.as_bytes());

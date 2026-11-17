@@ -1,5 +1,5 @@
-//! 프리셋 영속화 — `presets.json` 저장소. 규칙 · 구현은 `agents.json` 과 같은 내부 저장소다(모듈 머리 —
-//! [`super`]). 이 파일이 쥐는 것은 파일 이름 · 버전 키 · 상한 · 목록 칸뿐이다. (ADR-0061)
+//! Preset persistence — the `presets.json` store. Rules and implementation are the same internal store as `agents.json` (module head —
+//! [`super`]). What this file holds is only the file name, version key, cap and list field. (ADR-0061)
 // ADR-0291
 
 use std::path::PathBuf;
@@ -12,7 +12,7 @@ use super::{list_shape, FileKind, FileStore};
 use crate::preset::{Preset, PresetStore};
 use crate::profile::{StoreError, StoreStatus};
 
-/// 프리셋 저장소의 파일 이름 — 저장 거절 · 실패를 호출자에게 알리는 문구가 이 이름을 댄다.
+/// File name of the preset store — the text that tells the caller of a save refusal or failure names this file.
 pub const PRESETS_FILE: &str = "presets.json";
 
 const PRESETS: FileKind = FileKind {
@@ -22,13 +22,13 @@ const PRESETS: FileKind = FileKind {
     spec: file::Spec {
         version_key: "schema_version",
         current: 1,
-        // ADR-0291 R6: 프로필보다 작은 단위(경로 북마크)라 상한도 작게 — 정상이면 안 닿는 선.
+        // ADR-0291 R6: a smaller unit than profiles (path bookmarks), so the cap is smaller too — a line never reached in normal use.
         cap: 4 * 1024 * 1024,
         shape: presets_shape,
     },
 };
 
-/// 쓰기 쪽 디스크 표현 — 버전 키를 늘 싣는다.
+/// Write-side disk representation — always carries the version key.
 #[derive(Serialize)]
 struct PresetFile<'a> {
     schema_version: u64,

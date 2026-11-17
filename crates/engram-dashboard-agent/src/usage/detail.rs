@@ -1,4 +1,4 @@
-//! The grounds of an abnormal result (query failure · 「한도 정보 없음」 (no limit information)) — [`UsageDetail`] and [`UpstreamText`], which carries the upstream original text (ADR-0255).
+//! The grounds of an abnormal result (query failure · 「no limit information」) — [`UsageDetail`] and [`UpstreamText`], which carries the upstream original text (ADR-0255).
 //!
 //! ★The destinations of the upstream original text are only the screen and the LLM read path — it is not put in logs (logs may be shared)★. That wall
 //!   stands on the shape of [`UpstreamText`]: the constructor masks, replaces and truncates, and there is no `Debug` · `Display` that prints the original text.
@@ -9,7 +9,7 @@ use engram_dashboard_base::logging::mask_secrets;
 
 use super::text::is_unprintable;
 
-/// Character-count bound of one piece of [`UpstreamText`] (TRD §1-4 「실패 추적」).
+/// Character-count bound of one piece of [`UpstreamText`] (TRD §1-4 「failure tracking」).
 const UPSTREAM_MAX_CHARS: usize = 200;
 
 /// The grounds of an abnormal result — not mixed: our classification = `kind` · the upstream number = `code` · the upstream text = `upstream`.
@@ -71,7 +71,7 @@ impl UpstreamText {
 
 impl fmt::Debug for UpstreamText {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "UpstreamText(<{}자>)", self.0.chars().count())
+        write!(f, "UpstreamText(<{} chars>)", self.0.chars().count())
     }
 }
 
@@ -89,12 +89,14 @@ mod tests {
 
     #[test]
     fn long_multibyte_text_is_cut_at_a_char_boundary() {
+        // hangul-ok-begin
         for unit in ["가", "😀", "a가😀"] {
+            // hangul-ok-end
             let text = UpstreamText::new(&unit.repeat(300));
             assert_eq!(text.as_str().chars().count(), UPSTREAM_MAX_CHARS, "{unit}");
             assert!(unit.repeat(300).starts_with(text.as_str()), "{unit}");
         }
-        assert_eq!(UpstreamText::new("짧다").as_str(), "짧다");
+        assert_eq!(UpstreamText::new("짧다").as_str(), "짧다"); // hangul-ok
         assert_eq!(UpstreamText::new("").as_str(), "");
     }
 
@@ -180,8 +182,8 @@ mod tests {
 
     #[test]
     fn debug_shows_only_the_length() {
-        let text = UpstreamText::new("someone@example.com 계정");
-        assert_eq!(format!("{text:?}"), "UpstreamText(<22자>)");
+        let text = UpstreamText::new("someone@example.com 계정"); // hangul-ok
+        assert_eq!(format!("{text:?}"), "UpstreamText(<22 chars>)");
         let detail = UsageDetail {
             kind: "vendor_class",
             code: Some(7),

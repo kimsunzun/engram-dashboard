@@ -46,19 +46,18 @@ pub struct PtyTransport {
     master_closed: Arc<AtomicBool>,
     /// Taken in start() and moved to the pump. If None, already started.
     reader: Mutex<Option<Box<dyn Read + Send>>>,
-    /// ★Has this path ever **accepted** input — the latch of 「자식이 아직 사용자·모델 내용을 찍은 적이 없다」
-    /// (the child has not yet printed any user · model content)★.
+    /// ★Has this path ever **accepted** input — the latch of 「the child has not yet printed any user · model content」★.
     ///
     /// ★Today the only place reading this value is tests — still do not delete it★: the fact it carries can be known only by the path
     ///   (this is the only place that sees both the input side and the output side) and cannot be rebuilt. The only production
     ///   consumer, the pre-input observation window, was withdrawn by ADR-0217.
     /// ★Raise it the moment the queue **accepts** — not the moment the OS write finishes★: the fact to be kept shakes from the moment
     ///   it enters the queue (we do not know when the writer will write). If raised late, bytes read in between
-    ///   would be wrongly counted as 「입력 전」 (before input).
+    ///   would be wrongly counted as 「before input」.
     /// ★**Do not raise** it for rejected input★ — bytes the queue sent back because it was closed or over the cap never
     ///   reach the PTY, so the premise stays (exceeding the cap is a branch that can actually be reached —
     ///   `tests/transport_smoke.rs`).
-    /// ★Write is `Release`★ — the reading side must receive with `Acquire` so order stands between 「입력을 받아들였다」 (input was accepted) and the side that observes it.
+    /// ★Write is `Release`★ — the reading side must receive with `Acquire` so order stands between 「input was accepted」 and the side that observes it.
     ///   If left `Relaxed`, that claim would lean on an accidental barrier.
     input_seen: Arc<AtomicBool>,
     /// The owner of the process group this path launched. ★Put it as the last field★ — fields are dropped in declaration order so the moment the group closes when the path is dropped
@@ -166,7 +165,7 @@ struct WriterStop(Arc<InputQueue>);
 
 impl Drop for WriterStop {
     fn drop(&mut self) {
-        self.0.close("PTY 스트림이 끝났다 — 더 보낼 곳이 없다");
+        self.0.close("the PTY stream ended — nowhere left to send");
     }
 }
 
@@ -235,8 +234,8 @@ impl AgentTransport for PtyTransport {
         //   and waiting inside `shutdown()` violates ADR-0001's 2-verb contract. This thread ends by itself when the queue closes
         //   (the `Drop` of `WriterStop` and `shutdown()` are those two), and if there is a hanging `write_all`,
         //   kill+master drop releases it as an error. ★So this thread **cannot delay the kill causality**★.
-        // ★Why it is launched in `start()` (= not in `open()`)★: put in the same place as the codex writer to separate 「통로를 만든
-        //   것」 (what made the path) from 「통로를 돌리기 시작한 것」 (what started running the path). Input that came before `start()` stands in the queue as is and
+        // ★Why it is launched in `start()` (= not in `open()`)★: put in the same place as the codex writer to separate 「what made the path」
+        //   from 「what started running the path」. Input that came before `start()` stands in the queue as is and
         //   flows out here — the caller need not know whether it is ready (ADR-0190 discipline 1).
         if let Some(mut writer) = self.writer.lock().expect("writer poisoned").take() {
             let queue = self.input.clone();
@@ -255,7 +254,7 @@ impl AgentTransport for PtyTransport {
             if let Err(e) = spawn_result {
                 // ★Not left silent★: if there is no writer, `send_input` keeps returning `Ok` while bytes
                 //   never go out — a silent loss itself. Close the queue and **reject honestly from that moment**.
-                let reason = format!("PTY 입력 라이터 스레드 기동 실패: {e}");
+                let reason = format!("failed to start the PTY input writer thread: {e}");
                 tracing::warn!(agent = %core.id(), "{reason}");
                 self.input.close(&reason);
             }
@@ -378,7 +377,7 @@ impl AgentTransport for PtyTransport {
 
     /// Puts into the queue and returns **immediately** — the OS write is the dedicated writer thread's job.
     ///
-    /// ★The source of record for the contract · cap · 「받아 둔 뒤의 실패」 (failure after being accepted) is the [`crate::transport::input_queue`] module header★. It is
+    /// ★The source of record for the contract · cap · 「failure after being accepted」 is the [`crate::transport::input_queue`] module header★. It is
     ///   not repeated here.
     fn send_input(&self, input: InputEvent) -> Result<(), PtyError> {
         let InputEvent::Raw(bytes) = input;
@@ -412,12 +411,12 @@ impl AgentTransport for PtyTransport {
     ///
     /// ★Do not put Ctrl-C (0x03) in on its behalf★: the path does not know whether a turn is running, and the claude · codex TUI can **exit** on a second
     ///   Ctrl-C when idle (likely — read from the codex source · claude unmeasured, ADR-0245) — the bus
-    ///   `agent.interrupt` could break the contract 「≠ kill — 프로세스는 산다」 (≠ kill — the process lives) and kill the agent. A person who wants to interrupt types Esc · Ctrl-C directly in the terminal slot, and those keys flow as ordinary input
+    ///   `agent.interrupt` could break the contract 「≠ kill — the process lives」 and kill the agent. A person who wants to interrupt types Esc · Ctrl-C directly in the terminal slot, and those keys flow as ordinary input
     ///   (`send_input`). The rejection is translated to CONFLICT on the bus.
     // ADR-0245
     fn interrupt(&self) -> Result<(), PtyError> {
         Err(PtyError::Unsupported(
-            "PtyTransport::interrupt (터미널 모드는 끊기 명령을 받지 않는다 — 터미널이 키를 직접 받는다)"
+            "PtyTransport::interrupt (terminal mode does not accept the interrupt command — the terminal takes keys directly)"
                 .into(),
         ))
     }
@@ -431,7 +430,7 @@ impl AgentTransport for PtyTransport {
         // 1b. Close the input queue — the writer thread sees this and ends. ★All that is taken here is the queue's lock, so
         //     it cannot hang★ (a writer in a blocking write has released that lock — the `InputQueue::close` doc).
         //     ★Cost = input that has not gone out yet is lost★: this child dies on the next line so writing the rest would fail anyway.
-        self.input.close("에이전트를 종료했다");
+        self.input.close("the agent was terminated");
 
         // 2~3. wait is a reap (zombie prevention). The second call is Err since it already died — ignored (idempotent).
         {
@@ -555,7 +554,7 @@ mod tests {
                 ("COLORTERM".to_string(), "truecolor".to_string()),
                 ("TERM".to_string(), SENTINEL_TERM.to_string()),
             ],
-            "프로필 키는 기본값 미주입(정확히 1개) · 프로필이 안 준 키는 기본값 유지"
+            "profile keys get no default injected (exactly 1) · keys the profile did not give keep the default"
         );
     }
 
@@ -591,10 +590,10 @@ mod tests {
                 assert!(msg.starts_with("pump panicked:"), "Error prefix: {msg}");
                 assert!(
                     msg.contains("boom in pump"),
-                    "원래 panic 메시지 보존: {msg}"
+                    "original panic message preserved: {msg}"
                 );
             }
-            other => panic!("panic 은 Error 로 매핑돼야: {other:?}"),
+            other => panic!("a panic must map to Error: {other:?}"),
         }
     }
 
@@ -637,15 +636,15 @@ mod tests {
         core.finish(TerminalReason::Exited { code: Some(0) });
 
         let statuses = status_sink.statuses();
-        assert_eq!(statuses.len(), 1, "finalize 1회 — status 변경 1건만");
+        assert_eq!(statuses.len(), 1, "finalize once — only 1 status change");
         match &statuses[0] {
             AgentStatus::Failed { message } => {
                 assert!(
                     message.contains("pump panicked"),
-                    "Failed 메시지: {message}"
+                    "Failed message: {message}"
                 );
             }
-            other => panic!("panic 은 Failed 로 전이해야: {other:?}"),
+            other => panic!("a panic must transition to Failed: {other:?}"),
         }
         assert!(matches!(core.status(), AgentStatus::Failed { .. }));
     }
@@ -678,13 +677,13 @@ mod tests {
 
         assert!(
             matches!(core_a.status(), AgentStatus::Failed { .. }),
-            "A 는 Failed"
+            "A is Failed"
         );
         assert!(
             matches!(core_b.status(), AgentStatus::Exited { code: Some(0) }),
-            "B 는 영향 없이 정상 Exited"
+            "B exits normally, unaffected"
         );
-        assert_eq!(sink_b.statuses().len(), 1, "B status 변경 1건(정상)");
+        assert_eq!(sink_b.statuses().len(), 1, "B has 1 status change (normal)");
     }
 
     // ── run_pump: the stop rules, driven by a scripted reader ──
@@ -872,21 +871,20 @@ mod input_seen_latch {
         }
     }
 
-    /// ★The first accepted input raises the latch★ — without it the path can no longer say 「자식이 아직 사용자·모델 내용을 찍은 적이
-    /// 없다」 (the child has not yet printed any user · model content).
+    /// ★The first accepted input raises the latch★ — without it the path can no longer say 「the child has not yet printed any user · model content」.
     #[test]
     fn the_first_accepted_input_raises_the_latch() {
         let (transport, _pid) = PtyTransport::open(&echo("x"), 80, 24).expect("open");
         assert!(
             !transport.input_seen.load(Ordering::Acquire),
-            "입력 전인데 빗장이 이미 올라가 있다"
+            "the latch is already raised before any input"
         );
         transport
             .send_input(InputEvent::Raw(vec![b'x']))
-            .expect("큐 상한 이내");
+            .expect("within the queue cap");
         assert!(
             transport.input_seen.load(Ordering::Acquire),
-            "입력이 들어왔는데 빗장이 안 올라갔다"
+            "input came in but the latch was not raised"
         );
         transport.shutdown();
     }
@@ -896,23 +894,23 @@ mod input_seen_latch {
     #[test]
     fn interrupt_is_refused_and_writes_nothing() {
         let (transport, _pid) = PtyTransport::open(&echo("x"), 80, 24).expect("open");
-        // ★Measure before `start()`★ — with no writer, what is in the queue is not removed so 「안 썼다」 (did not write) is deterministic.
+        // ★Measure before `start()`★ — with no writer, what is in the queue is not removed so 「did not write」 is deterministic.
         assert!(
             matches!(transport.interrupt(), Err(PtyError::Unsupported(_))),
-            "터미널 모드 끊기는 `Unsupported` 여야 한다"
+            "interrupt in terminal mode must be `Unsupported`"
         );
         assert_eq!(
             transport.input.queued_bytes(),
             0,
-            "거절한 끊기가 입력 큐에 바이트를 남겼다"
+            "the refused interrupt left bytes in the input queue"
         );
         assert!(
             !transport.input_seen.load(Ordering::Acquire),
-            "거절한 끊기가 입력 빗장을 올렸다"
+            "the refused interrupt raised the input latch"
         );
         assert!(
             !transport.capabilities().control.interrupt,
-            "끊기를 거절하는 통로가 끊기 능력을 신고한다"
+            "a link that refuses interrupt reports the interrupt capability"
         );
         transport.shutdown();
     }
@@ -925,19 +923,19 @@ mod input_seen_latch {
         //   `tests/transport_smoke.rs`).
         transport
             .send_input(InputEvent::Raw(vec![b'z'; INPUT_QUEUE_MAX_BYTES + 1]))
-            .expect_err("상한 초과는 거절돼야 한다");
+            .expect_err("exceeding the cap must be refused");
         assert!(
             !transport.input_seen.load(Ordering::Acquire),
-            "거절당한 입력이 빗장을 올렸다"
+            "the refused input raised the latch"
         );
         transport.shutdown();
         // Rejection after the queue is closed is the same.
         transport
             .send_input(InputEvent::Raw(b"late".to_vec()))
-            .expect_err("닫힌 큐는 거절돼야 한다");
+            .expect_err("a closed queue must refuse");
         assert!(
             !transport.input_seen.load(Ordering::Acquire),
-            "닫힌 큐의 거절이 빗장을 올렸다"
+            "the closed queue's refusal raised the latch"
         );
     }
 }
@@ -998,7 +996,7 @@ mod conpty_wedge {
             .lock()
             .expect("writer poisoned")
             .take()
-            .expect("open 직후엔 writer 가 있다");
+            .expect("right after open there is a writer");
 
         let in_write = Arc::new(AtomicBool::new(false));
         let drain_done = Arc::new(AtomicBool::new(false));
@@ -1023,7 +1021,7 @@ mod conpty_wedge {
                 });
                 w_done.store(true, Ordering::Release);
             })
-            .expect("계측 라이터 spawn");
+            .expect("spawn the instrumented writer");
 
         let core = Arc::new(OutputCore::new(
             uuid::Uuid::new_v4(),
@@ -1035,21 +1033,21 @@ mod conpty_wedge {
 
         transport
             .send_input(InputEvent::Raw(vec![b'x'; INPUT_QUEUE_MAX_BYTES]))
-            .expect("상한 이내");
+            .expect("within the cap");
 
         // ① Did it really hang — this must be true for the decision below not to be vacuous.
         let enter_deadline = Instant::now() + Duration::from_secs(5);
         while !in_write.load(Ordering::Acquire) {
             assert!(
                 Instant::now() < enter_deadline,
-                "라이터가 5s 안에 write 에 진입조차 못했다 — 실험이 성립하지 않는다"
+                "the writer did not even enter write within 5s — the experiment does not hold"
             );
             std::thread::sleep(Duration::from_millis(10));
         }
         std::thread::sleep(Duration::from_secs(1));
         assert!(
             in_write.load(Ordering::Acquire) && !drain_done.load(Ordering::Acquire),
-            "★공허한 통과★ — {INPUT_QUEUE_MAX_BYTES} 바이트가 매달리지 않고 그냥 나갔다. 이 크기로는              wedge 가 만들어지지 않으므로 아래 판정이 아무것도 재지 못한다. 기록: {:?}",
+            "★vacuous pass★ — {INPUT_QUEUE_MAX_BYTES} bytes went out without hanging. At this size no wedge is created, so the decision below measures nothing. Record: {:?}",
             outcome.lock().unwrap()
         );
 
@@ -1060,7 +1058,7 @@ mod conpty_wedge {
         while !drain_done.load(Ordering::Acquire) {
             assert!(
                 Instant::now() < deadline,
-                "★shutdown 이 매달린 write 를 5s 안에 풀지 못했다★ — 죽은 에이전트마다 라이터 스레드와                  ConPTY 쓰기 핸들이 샌다(in_write={}). 백스톱 논의를 다시 열 것. 기록: {:?}",
+                "★shutdown did not release the hung write within 5s★ — every dead agent leaks a writer thread and a ConPTY write handle (in_write={}). Reopen the backstop discussion. Record: {:?}",
                 in_write.load(Ordering::Acquire),
                 outcome.lock().unwrap()
             );

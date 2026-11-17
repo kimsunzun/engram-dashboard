@@ -3,6 +3,6 @@ import type { AgentBackend } from "./AgentBackend";
 
 export type UsageGetArgs = { 
 /**
- * 어느 백엔드의 한도인가 — `agent.new` 와 같은 낱말.
+ * Whose backend's limits — the same word as `agent.new`.
  */
 backend: AgentBackend, };

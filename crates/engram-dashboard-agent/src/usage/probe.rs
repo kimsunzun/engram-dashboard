@@ -2,8 +2,8 @@
 //! ([`ProbeSpawner`]·[`ProbeChild`]).
 //!
 //! ★Vendor knowledge (command · arguments · env · conversation shape · cooldown · deadline values) is not here★ — the `usage_probe.rs` of each vendor backend
-//!   carries it by implementing [`UsageProbe`]. This module fixes only the shape 「짧게 뜨는 자식 하나와 줄 단위로 말하고, 마감 하나 안에
-//!   끝낸다」 (talks line by line with one short-lived child and finishes within one deadline). The real spawner is [`super::OsProbeSpawner`], the test double is `usage::testing`.
+//!   carries it by implementing [`UsageProbe`]. This module fixes only the shape 「talks line by line with one short-lived child and finishes within one deadline」.
+//!   The real spawner is [`super::OsProbeSpawner`], the test double is `usage::testing`.
 // ADR-0004
 
 use std::fmt;
@@ -186,7 +186,7 @@ pub trait ProbeSpawner: Send + Sync {
     /// Spawns one child with three pipes open.
     ///
     /// - If the deadline has already passed, do not spawn and return [`ProbeError::Timeout`].
-    /// - If startup itself fails as 「그런 프로그램 없음」 (no such program), [`ProbeError::NotInstalled`] (POSIX etc.). ★A command wrapped in a shell
+    /// - If startup itself fails as 「no such program」, [`ProbeError::NotInstalled`] (POSIX etc.). ★A command wrapped in a shell
     ///   (Windows `cmd.exe /c <prog>`) starts successfully★ — that the wrapped target is missing arrives as the exit status
     ///   ([`ExitInfo::looks_not_installed`]). We do not look for it before spawning.
     fn spawn(
@@ -201,8 +201,7 @@ pub trait ProbeSpawner: Send + Sync {
 /// ★All three actions are under the same rule of deadline★: if not finished by the deadline (or if already past), the child is cut **tree and all**
 ///   and it is [`ProbeError::Timeout`]. Once cut by the deadline, every action is immediately `Timeout`.
 /// ★drop = tree kill + bounded wait for exit ([`super::KILL_WAIT`])★ — once the querier has the answer it ends the child with [`finish_after_answer`]
-///   (that end is the drop). The scratch folder must be declared **before** the child so the drop order (child → folder) becomes 「죽인 뒤
-///   지운다」 (delete after killing).
+///   (that end is the drop). The scratch folder must be declared **before** the child so the drop order (child → folder) becomes 「delete after killing」.
 pub trait ProbeChild: Send {
     /// Appends `\n` to the end of `line` and writes it to stdin. stdin stays open until [`ProbeChild::close_stdin`] or drop.
     fn write_line(&mut self, line: &str, deadline: Instant) -> Result<(), ProbeError>;
@@ -217,11 +216,11 @@ pub trait ProbeChild: Send {
 
     /// Waits for the child (the directly spawned process) to end. A child still alive after stdout closes is also cut at the deadline.
     /// ★Call it after seeing stdout EOF★ — if you wait with unread output, the child may be blocked on output and not end until the deadline.
-    /// The 「프로그램 없음」 (program missing) decision ([`ExitInfo::looks_not_installed`]) also runs inside this under the same deadline — if the answer has already
+    /// The 「program missing」 decision ([`ExitInfo::looks_not_installed`]) also runs inside this under the same deadline — if the answer has already
     /// been received, use [`ProbeChild::wait_exit_code`], which makes no decision.
     fn wait_exit(&mut self, deadline: Instant) -> Result<ExitInfo, ProbeError>;
 
-    /// Same as [`ProbeChild::wait_exit`] but makes no 「프로그램 없음」 (program missing) decision (`None` = ended without a code). The decision
+    /// Same as [`ProbeChild::wait_exit`] but makes no 「program missing」 decision (`None` = ended without a code). The decision
     /// may run a file-system search (the spawner's share), so the wait for exit after the answer ([`finish_after_answer`]) uses this.
     fn wait_exit_code(&mut self, deadline: Instant) -> Result<Option<i32>, ProbeError>;
 
@@ -241,7 +240,7 @@ pub struct ExitInfo {
 }
 
 impl ExitInfo {
-    /// `not_installed` = whether the spawner decided this exit means 「띄우려던 프로그램이 없다」 (the program it tried to spawn is missing) (the OS rules are the spawner's share).
+    /// `not_installed` = whether the spawner decided this exit means 「the program it tried to spawn is missing」 (the OS rules are the spawner's share).
     pub const fn new(code: Option<i32>, not_installed: bool) -> Self {
         Self {
             code,
@@ -254,7 +253,7 @@ impl ExitInfo {
         self.code
     }
 
-    /// Whether the wrapping shell ended with 「그런 명령이 없다」 (no such command) — after the querier sees stdout EOF with no response, if this is true it folds to
+    /// Whether the wrapping shell ended with 「no such command」 — after the querier sees stdout EOF with no response, if this is true it folds to
     /// [`ProbeError::NotInstalled`]. ★False does not mean it is installed★ — the spawner may not have finished the decision within the
     /// deadline, or an earlier decision on the same target may still be running so it did not decide anew (the decision rule = the spawner's
     /// share).
@@ -278,14 +277,14 @@ pub fn finish_after_answer(mut child: Box<dyn ProbeChild>, deadline: Instant) {
             Ok(None) => break,
             Err(_) => {
                 tracing::debug!(
-                    "사용량 조회: 답을 받은 뒤 자식이 유예 안에 stdout 을 닫지 않아 끊는다"
+                    "usage query: after receiving the answer the child did not close stdout within the grace period, cutting it off"
                 );
                 return;
             }
         }
     }
     if child.wait_exit_code(grace).is_err() {
-        tracing::debug!("사용량 조회: 답을 받은 뒤 자식이 유예 안에 끝나지 않아 끊는다");
+        tracing::debug!("usage query: after receiving the answer the child did not exit within the grace period, cutting it off");
     }
 }
 
@@ -315,23 +314,23 @@ mod tests {
     #[test]
     fn finish_closes_stdin_drains_stdout_and_waits_for_the_exit() {
         let spawner = ScriptedSpawner::new(ChildScript::new().line("late line").exit_code(0));
-        let child = spawner.spawn(&command(), far()).expect("기동");
+        let child = spawner.spawn(&command(), far()).expect("start");
         let started = Instant::now();
         finish_after_answer(child, far());
         assert!(
             started.elapsed() < FINISH_GRACE,
-            "스스로 끝난 자식을 기다렸다"
+            "waited for a child that exited on its own"
         );
         assert!(spawner.stdin_closed());
         assert!(!spawner.cut_at_deadline());
         assert!(spawner.child_dropped());
     }
 
-    /// ★After the answer is received, do not call the 「프로그램 없음」 (program missing) decision★ — even for a non-zero exit (the decision is where a search would run).
+    /// ★After the answer is received, do not call the 「program missing」 decision★ — even for a non-zero exit (the decision is where a search would run).
     #[test]
     fn finish_never_asks_for_the_not_installed_judgment() {
         let spawner = ScriptedSpawner::new(ChildScript::new().exit_code(1));
-        let child = spawner.spawn(&command(), far()).expect("기동");
+        let child = spawner.spawn(&command(), far()).expect("start");
         finish_after_answer(child, far());
         assert!(!spawner.exit_judged());
         assert!(!spawner.cut_at_deadline());
@@ -346,12 +345,18 @@ mod tests {
             ChildScript::new().never_exit(),
         ] {
             let spawner = ScriptedSpawner::new(script);
-            let child = spawner.spawn(&command(), far()).expect("기동");
+            let child = spawner.spawn(&command(), far()).expect("start");
             let started = Instant::now();
             finish_after_answer(child, far());
             let took = started.elapsed();
-            assert!(took >= FINISH_GRACE, "유예 전에 끊었다: {took:?}");
-            assert!(took < FINISH_GRACE * 4, "유예를 넘겨 기다렸다: {took:?}");
+            assert!(
+                took >= FINISH_GRACE,
+                "cut off before the grace period: {took:?}"
+            );
+            assert!(
+                took < FINISH_GRACE * 4,
+                "waited past the grace period: {took:?}"
+            );
             assert!(spawner.stdin_closed());
             assert!(spawner.cut_at_deadline());
             assert!(spawner.child_dropped());
@@ -361,10 +366,10 @@ mod tests {
     #[test]
     fn the_grace_never_outlasts_the_deadline() {
         let spawner = ScriptedSpawner::new(ChildScript::new().hang_after_lines());
-        let child = spawner.spawn(&command(), far()).expect("기동");
+        let child = spawner.spawn(&command(), far()).expect("start");
         let started = Instant::now();
         finish_after_answer(child, Instant::now() + Duration::from_millis(100));
-        assert!(started.elapsed() < FINISH_GRACE, "마감을 넘겨 기다렸다");
+        assert!(started.elapsed() < FINISH_GRACE, "waited past the deadline");
         assert!(spawner.cut_at_deadline());
     }
 
@@ -418,7 +423,7 @@ mod tests {
     #[test]
     fn display_and_debug_carry_the_kind_but_never_the_upstream_text() {
         let failure = ProbeFailure::with_detail(
-            ProbeError::Upstream("우리 문장".into()),
+            ProbeError::Upstream("our sentence".into()),
             UsageDetail {
                 kind: "vendor_class",
                 code: Some(-32600),
@@ -428,7 +433,7 @@ mod tests {
             },
         );
         let shown = failure.to_string();
-        assert_eq!(shown, "upstream error: 우리 문장 [vendor_class]");
+        assert_eq!(shown, "upstream error: our sentence [vendor_class]");
         let all = format!("{failure} {failure:?} {failure:#?}");
         assert!(
             !all.contains("example.com") && !all.contains("org-1234"),

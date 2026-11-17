@@ -1,13 +1,13 @@
-//! # Pending-input registry — the list of an incarnation's 「아직 전달되지 않은 입력」 (inputs not yet delivered)
+//! # Pending-input registry — the list of an incarnation's 「inputs not yet delivered」
 //!
 //! It reduces the [`QueuedInputEvent`] standing in the ring in ring order and holds the list (items) and tombstones. Since the core
 //! feeds it inside the replay lock, **registry state = the reduced value of the ring prefix** — we do not make another way to change the registry (the session's cancel · classification
 //! only emit events too).
 //!
-//! - ★Pure · leaf★: the reducer calls nothing outside — in the lock order `input_order → replay → 명부(이 모듈) → 대기 목록
-//!   표(`inputs_pending`)` the registry and the table are both leaves under replay (the registry guard is released before writing the table —
+//! - ★Pure · leaf★: the reducer calls nothing outside — in the lock order `input_order → replay → registry (this module) → waiting-list
+//!   table (`inputs_pending`)` the registry and the table are both leaves under replay (the registry guard is released before writing the table —
 //!   `OutputCore::record_list_event`).
-//! - ★The rules stand on the current state, not on history★ — since it does not trace back 「앞에 무엇이 왔었나」 (what came before), the same event sequence always
+//! - ★The rules stand on the current state, not on history★ — since it does not trace back 「what came before」, the same event sequence always
 //!   lands in the same state. The two fields of cancel-pending (`answer` · `vendor_closed`) are state too.
 //! - ★It is a set with the frontend accumulator★: the same rules are rewritten in TS, and both feed on the golden `queued_input_golden.json` (next to this
 //!   file). When a rule changes, the golden and the TS edition are fixed in the same change — if they diverge, one side goes red.
@@ -27,8 +27,8 @@ use crate::types::{DeliveredCopy, DropCause, QueuedInputEvent};
 // ADR-0231
 pub const TOMBSTONE_CAP: usize = 1024;
 
-/// The 「응답」 (answer) field of a cancel-pending item — what happened to our cancel request.
-/// 「뺐다」 (removed) (`removed:true`) does not stay in the field — that response closes it as cancelled right away.
+/// The 「answer」 field of a cancel-pending item — what happened to our cancel request.
+/// 「removed」 (`removed:true`) does not stay in the field — that response closes it as cancelled right away.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CancelAnswer {
     /// No response yet.
@@ -74,7 +74,7 @@ pub enum Verdict {
 
 impl Verdict {
     /// ★Revival definition — one set★: if the terminal cause is `Unknown`, it is a revivable tombstone. It does not matter which event
-    /// produced that unknown (vendor closing · cancel response · acceptance unknown) — 「벤더가 준 사실이 모름을 이긴다」 (a fact the vendor gave beats unknown).
+    /// produced that unknown (vendor closing · cancel response · acceptance unknown) — 「a fact the vendor gave beats unknown」.
     fn resurrectable(self) -> bool {
         self == Verdict::Discarded(DropCause::Unknown)
     }
@@ -89,13 +89,13 @@ impl Verdict {
 
 /// The registry body — items (non-terminal · in entry order) + tombstones + two incarnation fields.
 ///
-/// The slot of one id is one of three: **item** · **tombstone** (terminal — no body, just the id and one 「되살림 가능」 (revivable) flag)
+/// The slot of one id is one of three: **item** · **tombstone** (terminal — no body, just the id and one 「revivable」 flag)
 /// · **unknown** (neither).
 #[derive(Debug, Default)]
 pub struct Registry {
     items: Vec<QueuedRow>,
     tombstones: Tombstones,
-    /// The 「받음 불가 판명」 (acceptance-impossible finding) marker — `AckUnavailable` was reduced. ★The reduction rules do not read this field★ — it is only the material
+    /// The 「acceptance-impossible finding」 marker — `AckUnavailable` was reduced. ★The reduction rules do not read this field★ — it is only the material
     /// for the core to rewrite a `Queued` that stood late after the finding.
     ack_unavailable_seen: bool,
     /// The seq of the last list event reduced (including dropped events — those also entered the ring prefix).
@@ -116,7 +116,7 @@ impl Registry {
     pub(crate) fn reduce(&mut self, seq: u64, event: &QueuedInputEvent) -> Vec<(String, Verdict)> {
         debug_assert!(
             self.as_of_seq.is_none_or(|last| seq > last),
-            "링 순서가 아닌 환원: {seq} <= {:?}",
+            "reduction not in ring order: {seq} <= {:?}",
             self.as_of_seq
         );
         self.as_of_seq = Some(seq);
@@ -268,7 +268,7 @@ impl Registry {
                 self.tombstones.insert(id, false);
                 closed.push((id.to_owned(), Verdict::Delivered));
             }
-            // A vendor receipt arrived late for an item dropped as 「모름」 (unknown). The bubble is drawn by the vendor echo that follows.
+            // A vendor receipt arrived late for an item dropped as 「unknown」. The bubble is drawn by the vendor echo that follows.
             Some(true) => {
                 self.tombstones.clear_resurrectable(id);
                 closed.push((id.to_owned(), Verdict::Delivered));
@@ -287,7 +287,7 @@ impl Registry {
                     RowPhase::Cancelling { .. },
                     cause @ (DropCause::Interrupted | DropCause::AgentEnded | DropCause::Rejected),
                 ) => self.close(at, Verdict::Discarded(cause), closed),
-                // A failed · interrupted turn closed it — our cancel had already answered 「못 뺐다」 (could not remove).
+                // A failed · interrupted turn closed it — our cancel had already answered 「could not remove」.
                 (
                     RowPhase::Cancelling {
                         answer: CancelAnswer::NotRemoved,
@@ -402,7 +402,7 @@ impl QueuedInputs {
     /// Poison is unwrapped: the reducer calls nothing outside so the only way poison gets in is the reducer's own panic, and at that price there is no reason
     /// to kill the callers that read the list.
     /// ★Not opened outside the crate (`reduce` too)★ — if the reducer is reached through the guard, the registry can be changed outside the replay lock,
-    /// which breaks 「명부 = 링 접두의 환원값」 (registry = the reduced value of the ring prefix). Outside, read with [`Self::snapshot`].
+    /// which breaks 「registry = the reduced value of the ring prefix」. Outside, read with [`Self::snapshot`].
     pub(crate) fn lock(&self) -> MutexGuard<'_, Registry> {
         sync::lock(&self.registry)
     }
@@ -511,7 +511,7 @@ mod tests {
     fn text(v: &Value, key: &str) -> String {
         v[key]
             .as_str()
-            .unwrap_or_else(|| panic!("골든 사건에 `{key}` 가 없다: {v}"))
+            .unwrap_or_else(|| panic!("golden event has no `{key}`: {v}"))
             .to_owned()
     }
 
@@ -522,7 +522,7 @@ mod tests {
             "AgentEnded" => DropCause::AgentEnded,
             "Rejected" => DropCause::Rejected,
             "Unknown" => DropCause::Unknown,
-            other => panic!("모르는 원인: {other}"),
+            other => panic!("unknown cause: {other}"),
         }
     }
 
@@ -570,7 +570,7 @@ mod tests {
                     })
                     .collect(),
             },
-            other => panic!("모르는 사건: {other}"),
+            other => panic!("unknown event: {other}"),
         }
     }
 
@@ -626,24 +626,24 @@ mod tests {
         }
 
         let rows: Vec<Value> = registry.rows().iter().map(row_json).collect();
-        assert_eq!(&Value::Array(rows), &expect["items"], "[{name}] 목록");
+        assert_eq!(&Value::Array(rows), &expect["items"], "[{name}] list");
         assert_eq!(
             registry.tombstone_count() as u64,
             expect["tombstone_count"].as_u64().expect("tombstone_count"),
-            "[{name}] 묘비 수"
+            "[{name}] tombstone count"
         );
         for (id, resurrectable) in expect["tombstones"].as_object().expect("tombstones") {
             assert_eq!(
                 registry.tombstone(id),
                 Some(resurrectable.as_bool().expect("bool")),
-                "[{name}] 묘비 `{id}`"
+                "[{name}] tombstone `{id}`"
             );
         }
         for id in expect["absent"].as_array().expect("absent") {
             let id = id.as_str().expect("id");
             assert!(
                 registry.tombstone(id).is_none() && registry.rows().iter().all(|r| r.id != id),
-                "[{name}] `{id}` 는 항목도 묘비도 아니어야 한다"
+                "[{name}] `{id}` must be neither an entry nor a tombstone"
             );
         }
         assert_eq!(
@@ -651,17 +651,17 @@ mod tests {
             expect["ack_unavailable"]
                 .as_bool()
                 .expect("ack_unavailable"),
-            "[{name}] 받음 불가 표식"
+            "[{name}] cannot-accept marker"
         );
         for (id, want) in expect["outcomes"].as_object().expect("outcomes") {
             let want: Vec<String> = want
                 .as_array()
-                .expect("결말 목록")
+                .expect("outcome list")
                 .iter()
-                .map(|v| v.as_str().expect("결말").to_owned())
+                .map(|v| v.as_str().expect("outcome").to_owned())
                 .collect();
             let got = outcomes.get(id).cloned().unwrap_or_default();
-            assert_eq!(got, want, "[{name}] `{id}` 의 결말 이력");
+            assert_eq!(got, want, "[{name}] outcome history of `{id}`");
         }
     }
 
@@ -669,7 +669,7 @@ mod tests {
 
     #[test]
     fn golden_sequences_reduce_to_the_expected_state() {
-        let golden: Value = serde_json::from_str(GOLDEN).expect("골든 JSON");
+        let golden: Value = serde_json::from_str(GOLDEN).expect("golden JSON");
         let cases = golden["cases"].as_array().expect("cases");
         assert!(!cases.is_empty());
         for case in cases {
@@ -679,14 +679,14 @@ mod tests {
 
     #[test]
     fn the_golden_header_carries_the_tombstone_cap() {
-        let golden: Value = serde_json::from_str(GOLDEN).expect("골든 JSON");
+        let golden: Value = serde_json::from_str(GOLDEN).expect("golden JSON");
         assert_eq!(golden["tombstone_cap"].as_u64(), Some(TOMBSTONE_CAP as u64));
     }
 
     /// The golden feeds the vocabulary at least once without omission — it blocks a new event · cause from entering without a golden.
     #[test]
     fn the_golden_feeds_every_event_kind_and_cause() {
-        let golden: Value = serde_json::from_str(GOLDEN).expect("골든 JSON");
+        let golden: Value = serde_json::from_str(GOLDEN).expect("golden JSON");
         let mut seen: Vec<String> = Vec::new();
         for case in golden["cases"].as_array().expect("cases") {
             for ev in case["events"].as_array().expect("events") {
@@ -720,7 +720,7 @@ mod tests {
         ] {
             assert!(
                 seen.iter().any(|s| s == want),
-                "골든에 `{want}` 사건이 없다"
+                "golden has no `{want}` event"
             );
         }
     }
@@ -740,8 +740,8 @@ mod tests {
         assert_eq!(inputs.snapshot(), (vec![], None));
         {
             let mut registry = inputs.lock();
-            registry.reduce(4, &queued("a", "하나"));
-            registry.reduce(9, &queued("b", "둘"));
+            registry.reduce(4, &queued("a", "one"));
+            registry.reduce(9, &queued("b", "two"));
             registry.reduce(12, &QueuedInputEvent::CancelRequested { id: "b".into() });
         }
         let (rows, as_of) = inputs.snapshot();
@@ -751,13 +751,13 @@ mod tests {
             vec![
                 QueuedRow {
                     id: "a".into(),
-                    text: "하나".into(),
+                    text: "one".into(),
                     phase: RowPhase::Queued,
                     sent: false,
                 },
                 QueuedRow {
                     id: "b".into(),
-                    text: "둘".into(),
+                    text: "two".into(),
                     phase: RowPhase::Cancelling {
                         answer: CancelAnswer::Unanswered,
                         vendor_closed: false,
@@ -784,8 +784,8 @@ mod tests {
     #[test]
     fn open_copies_are_the_rows_an_ack_unavailable_closes() {
         let mut registry = Registry::new();
-        registry.reduce(1, &queued("a", "하나"));
-        registry.reduce(2, &queued("b", "둘"));
+        registry.reduce(1, &queued("a", "one"));
+        registry.reduce(2, &queued("b", "two"));
         registry.reduce(3, &QueuedInputEvent::CancelRequested { id: "b".into() });
         let copies = registry.open_copies();
         assert_eq!(
@@ -793,11 +793,11 @@ mod tests {
             vec![
                 DeliveredCopy {
                     id: "a".into(),
-                    text: "하나".into()
+                    text: "one".into()
                 },
                 DeliveredCopy {
                     id: "b".into(),
-                    text: "둘".into()
+                    text: "two".into()
                 },
             ]
         );
@@ -808,7 +808,7 @@ mod tests {
                 ("a".to_owned(), Verdict::Delivered),
                 ("b".to_owned(), Verdict::Delivered)
             ],
-            "사본이 이미 닫힌 항목을 두 번 닫지 않는다"
+            "the copy does not close an already-closed entry twice"
         );
         assert!(registry.is_empty() && registry.ack_unavailable_seen());
     }
@@ -867,7 +867,7 @@ mod tests {
                     }
                 ),
             ],
-            "취소 대기가 두 표지를 이기고, 넘김 표지가 수락 모름을 이기며, 명부에 없는 id 는 행이 되지 않는다"
+            "pending cancel beats both markers, the handed-over marker beats acceptance-unknown, and an id not in the registry does not become a row"
         );
         assert_eq!(listed[1].text, "text of held");
     }

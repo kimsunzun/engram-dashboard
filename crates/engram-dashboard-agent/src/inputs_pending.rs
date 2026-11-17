@@ -1,10 +1,10 @@
 //! inputs_pending — a **pending-list table** per (agent, epoch): "this incarnation's user pending list is not empty".
 //!
 //! ★A leaf table of the same shape as the turn-observation table (`turn`), and it is separate because the place that uses it differs★: the places that use
-//!   the turn-observation table's `in_turn` must be only two points, the classifier and cleanup (ADR-0127 「세 번째 호출자」 (the third caller)). This fact is
+//!   the turn-observation table's `in_turn` must be only two points, the classifier and cleanup (ADR-0127 「the third caller」). This fact is
 //!   written by the core inside the emit that reduced the registry, so we do not add a field to that table.
 //! ★Reader = mail busyness (daemon adapter)★ — while this value is true, mail does not go in, and ★there is no fail-open cap★
-//!   (user decision N8 — an intended exception to ADR-0104's 「늦게 가는 것 < 안 가는 것」 (going late < not going)).
+//!   (user decision N8 — an intended exception to ADR-0104's 「going late < not going」).
 //! ★Lock = this one table, a leaf★: we do not call outward while holding it (ADR-0006). Entries are keyed by `AgentId` and the epoch is held
 //!   as the value — the grounds are the same as the `turn` module header.
 // ADR-0231
@@ -62,8 +62,8 @@ impl InputsPendingTable {
 
     /// Record the list going empty↔full. `seq` = the output seq of the list event that produced that value.
     ///
-    /// ★Drop writes with a smaller seq★: 「비었다」 (became empty) is written deferred outside the replay lock, so it must not overwrite a later
-    ///   「찼다」 (became full) that another thread wrote inside the lock in between.
+    /// ★Drop writes with a smaller seq★: 「became empty」 is written deferred outside the replay lock, so it must not overwrite a later
+    ///   「became full」 that another thread wrote inside the lock in between.
     /// ★Drop it if the marker differs or the entry is missing (unlike the turn-observation table)★: this fact has no cap, so if a write that arrives
     ///   late after cleanup revives the entry, there is no trigger to erase it. That is why the verb that creates an entry is `register` alone.
     pub fn set(&self, id: AgentId, epoch: u32, seq: u64, pending: bool) {
@@ -115,7 +115,7 @@ mod tests {
         assert_eq!(t.get(id, 0), Some(true));
         t.set(id, 0, 4, false);
         assert_eq!(t.get(id, 0), Some(false));
-        assert_eq!(t.get(id, 1), None, "다른 epoch 은 항목 없음");
+        assert_eq!(t.get(id, 1), None, "a different epoch has no entry");
     }
 
     #[test]
@@ -127,7 +127,7 @@ mod tests {
         t.set(id, 0, 7, false);
         assert_eq!(t.get(id, 0), Some(true));
         t.set(id, 0, 8, false);
-        assert_eq!(t.get(id, 0), Some(false), "같은 seq 는 받는다");
+        assert_eq!(t.get(id, 0), Some(false), "the same seq is accepted");
     }
 
     #[test]
@@ -135,7 +135,11 @@ mod tests {
         let t = InputsPendingTable::new();
         let id = AgentId::new_v4();
         t.set(id, 0, 1, true);
-        assert_eq!(t.get(id, 0), None, "등록 없는 쓰기는 자리를 만들지 않는다");
+        assert_eq!(
+            t.get(id, 0),
+            None,
+            "a write without registration does not create an entry"
+        );
         assert_eq!(t.len(), 0);
 
         t.register(id, 5);
@@ -143,7 +147,7 @@ mod tests {
         assert_eq!(
             t.get(id, 5),
             Some(false),
-            "옛 표식의 쓰기는 산 화신을 덮지 않는다"
+            "a write from an old marker does not overwrite the live incarnation"
         );
         assert_eq!(t.get(id, 9), None);
     }
@@ -158,14 +162,14 @@ mod tests {
         assert_eq!(
             t.get(id, 1),
             Some(true),
-            "지각 정리가 산 화신을 지우지 않는다"
+            "a late cleanup does not erase the live incarnation"
         );
         t.forget(id, 1);
         t.set(id, 1, 2, true);
         assert_eq!(
             t.get(id, 1),
             None,
-            "정리 뒤 늦은 쓰기가 항목을 되살리지 않는다"
+            "a late write after cleanup does not revive the entry"
         );
         assert_eq!(t.len(), 0);
     }
@@ -183,7 +187,7 @@ mod tests {
         assert_eq!(
             t.get(id, 2),
             Some(true),
-            "새 화신의 seq 는 0 부터 — 옛 seq 와 비교하지 않는다"
+            "the new incarnation's seq starts from 0 — it is not compared with the old seq"
         );
         assert_eq!(t.len(), 1);
     }

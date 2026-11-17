@@ -2,7 +2,7 @@
 //! by the AND of four rules ([`select`]). Hook command lines and taskkill markers are in [`is_hook_command`] · [`taskkill_names`].
 //!
 //! ★The rules are pure★ — no OS calls, no locks, no threads, and they compile on every OS (ADR-0012 · ADR-0230). They look only at facts
-//!   already read through held handles ([`ProcessFacts`]); 「끝났나」 (has it exited) is injected through [`Chain::exited`].
+//!   already read through held handles ([`ProcessFacts`]); 「has it exited」 is injected through [`Chain::exited`].
 //! ★Narrowing only★ — if any one cannot be trusted (a link not found · an empty field · a query error · outside the expected shape), the decision is not to kill. No marker
 //!   ever widens the candidates — if claude changes how it wraps hooks or how it interrupts, all of them miss (the safe side).
 //!
@@ -53,11 +53,11 @@ pub(super) struct Link<'a> {
     pub killable: bool,
 }
 
-/// A view over one record — the snapshot plus the births of the same record are all of the 「알려진 고리」 (known links).
+/// A view over one record — the snapshot plus the births of the same record are all of the 「known links」.
 ///
 /// - `root_pid` = the root of the path (`cmd /c`) — the link whose recorded parent is this number is taken to be claude. `0` = unknown.
 /// - The order of `births` has no meaning — `seq` decides the order.
-/// - `exited` = has one known link exited now. `Err` is a query failure, and the selection reads it as 「모름」 (unknown).
+/// - `exited` = has one known link exited now. `Err` is a query failure, and the selection reads it as 「unknown」.
 pub(super) struct Chain<'a> {
     pub root_pid: u32,
     pub snapshot: &'a [Link<'a>],
@@ -65,7 +65,7 @@ pub(super) struct Chain<'a> {
     pub exited: &'a dyn Fn(&Link<'_>) -> io::Result<bool>,
 }
 
-/// The decision of [`select`] — everything except `Cleanup` means 「끝내지 않는다」 (do not kill), and the names pair with the log reasons (TRD §3-4 · §3-8).
+/// The decision of [`select`] — everything except `Cleanup` means 「do not kill」, and the names pair with the log reasons (TRD §3-4 · §3-8).
 ///
 /// - `Cleanup.chain` = numbers from candidate C up to the top T (C first · T last · claude is left out).
 /// - `AncestorAlive.pid` = the first live ancestor.
@@ -169,7 +169,7 @@ pub(super) fn select(c: &Link<'_>, view: &Chain<'_>) -> Verdict {
     }
 }
 
-/// Is it a hook command shape — the command line is 「첫 토큰 · `-c` · 큰따옴표로 감싼 인자 S」 (first token, the -c flag, a double-quoted argument S) and S starts with `bash ` and
+/// Is it a hook command shape — the command line is 「first token, the -c flag, a double-quoted argument S」 and S starts with `bash ` and
 /// does not contain `shell-snapshots`. This is the shape in which claude 2.1.284 wraps `.sh` hooks (291 hooks vs 6 Bash tool · 0 ambiguous).
 ///
 /// False if S has a line break — the measured comparison (the regex in `r4sim.py`) did not accept such an S, and accepting one would widen.
@@ -350,7 +350,7 @@ impl Birth {
 /// receiver drops it after the lock is released. A poisoned lock is used as it is.
 // ADR-0262
 pub(super) struct Recorder {
-    /// Write only inside the lock — the 「같은 기록인가」 (is it the same record) decision and the insert · take-out form one section.
+    /// Write only inside the lock — the 「is it the same record」 decision and the insert · take-out form one section.
     active: AtomicU64,
     port_failed: AtomicBool,
     inner: Mutex<RecInner>,
@@ -644,24 +644,24 @@ fn acquire<G: Group>(
             tracing::debug!(
                 agent = tag.agent(),
                 root_pid = tag.root_pid,
-                "무리가 없어 가입 알림 포트를 만들지 않았다: {e}"
+                "no group, so the join notification port was not created: {e}"
             );
             return Err(());
         }
         Stage::BeforeStart => tracing::warn!(
             agent = tag.agent(),
             root_pid = tag.root_pid,
-            "가입 알림 포트를 만들지 못했다 — 이 화신은 끊기 잔여물을 정리하지 않는다: {e}"
+            "could not create the join notification port — this incarnation does not clean up interrupt leftovers: {e}"
         ),
         Stage::StartFailed => tracing::warn!(
             agent = tag.agent(),
             root_pid = tag.root_pid,
-            "가입 알림 듣는 스레드를 띄우지 못해 포트를 붙이지 않았다 — 이 화신은 끊기 잔여물을 정리하지 않는다: {e}"
+            "could not start the thread listening for join notifications, so the port was not attached — this incarnation does not clean up interrupt leftovers: {e}"
         ),
         Stage::Started => tracing::warn!(
             agent = tag.agent(),
             root_pid = tag.root_pid,
-            "무리를 가입 알림 포트에 붙이지 못했다 — 듣는 스레드는 끝나고 이 화신은 끊기 잔여물을 정리하지 않는다: {e}"
+            "could not attach the group to the join notification port — the listening thread ends and this incarnation does not clean up interrupt leftovers: {e}"
         ),
     }
     recorder.fail_port();
@@ -693,15 +693,15 @@ enum Failure {
 impl fmt::Display for Failure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Failure::Take(e) => write!(f, "꺼내기 {e}"),
-            Failure::Panic(message) => write!(f, "패닉 {message}"),
+            Failure::Take(e) => write!(f, "take {e}"),
+            Failure::Panic(message) => write!(f, "panic {message}"),
         }
     }
 }
 
 /// Listener thread body — runs for the incarnation's lifetime. Only join notifications that arrive while the record is on are held and put in right away; the rest are dropped.
 ///
-/// - Start: first receive the opener's 「붙었나」 (did it attach). `false` = it never attached → nothing to detach, so it just ends. If the sender is
+/// - Start: first receive the opener's 「did it attach」. `false` = it never attached → nothing to detach, so it just ends. If the sender is
 ///   gone (the opener panicked after attaching and before sending), it may have attached, so it runs as usual.
 /// - End: at each notification · timeout, check whether the group is gone · retiring → turn off the record that was on and end (when retiring, detach first).
 /// - Failure mode: take-out error · panic in a round → latch the port, turn off the record that was on, and detach → if detached, end · if not, do not end and only
@@ -736,7 +736,7 @@ fn listen<G: Group>(l: Listener<G>) {
             tracing::debug!(
                 agent = l.tag.agent(),
                 root_pid = l.tag.root_pid,
-                "떼지 못한 가입 알림 포트를 비우다 실패해 듣기를 끝낸다: {failure}"
+                "failed to drain the join notification port that could not be detached, ending the listening: {failure}"
             );
             return;
         }
@@ -796,7 +796,7 @@ impl<G: Group> Listener<G> {
                 killable,
                 born_ago_us,
                 since_attach_ms = millis(attached_at.elapsed()),
-                "가입한 프로세스를 붙들어 탄생 기록에 넣었다"
+                "held a joined process and put it in the birth record"
             ),
             Admit::Full { caught, first } => {
                 drop(caught);
@@ -805,7 +805,7 @@ impl<G: Group> Listener<G> {
                         agent = self.tag.agent(),
                         root_pid = self.tag.root_pid,
                         limit = BIRTH_MAX,
-                        "탄생 기록이 상한에 닿아 더 넣지 않는다 — 넘친 고리는 알려지지 않는다"
+                        "the birth record reached its cap, no more are added — overflowing links are not known"
                     );
                 }
             }
@@ -825,7 +825,7 @@ impl<G: Group> Listener<G> {
                     agent = self.tag.agent(),
                     root_pid = self.tag.root_pid,
                     pid,
-                    "끝내기 권한이 거절돼 고리로만 붙들었다: {refused}"
+                    "kill access was refused, so it is held only as a link: {refused}"
                 );
                 Some((pin, false))
             }
@@ -835,7 +835,7 @@ impl<G: Group> Listener<G> {
                     agent = self.tag.agent(),
                     root_pid = self.tag.root_pid,
                     pid,
-                    "가입한 프로세스를 붙들지 못했다: {e}"
+                    "could not hold a joined process: {e}"
                 );
                 None
             }
@@ -853,7 +853,7 @@ impl<G: Group> Listener<G> {
                     tracing::debug!(
                         agent = self.tag.agent(),
                         root_pid = self.tag.root_pid,
-                        "물러나는 무리에서 가입 알림 포트를 못 뗐다: {e}"
+                        "could not detach the join notification port from the retreating group: {e}"
                     );
                 }
                 "retiring"
@@ -863,7 +863,7 @@ impl<G: Group> Listener<G> {
             agent = self.tag.agent(),
             root_pid = self.tag.root_pid,
             reason,
-            "가입 알림 듣기를 끝낸다"
+            "ending the join notification listening"
         );
     }
 
@@ -872,29 +872,29 @@ impl<G: Group> Listener<G> {
         self.recorder.fail_port();
         drop(self.recorder.stop(self.recorder.active()));
         let (detached, port) = match self.group.unwatch_births() {
-            Ok(()) => (true, "뗐다".to_owned()),
-            Err(e) if e.kind() == GROUP_GONE => (true, "무리가 이미 없다".to_owned()),
-            Err(e) => (false, format!("못 떼어 비우기만 한다({e})")),
+            Ok(()) => (true, "detached".to_owned()),
+            Err(e) if e.kind() == GROUP_GONE => (true, "the group is already gone".to_owned()),
+            Err(e) => (false, format!("could not detach, only draining ({e})")),
         };
         match failure {
             Failure::Take(e) => tracing::warn!(
                 agent = self.tag.agent(),
                 root_pid = self.tag.root_pid,
                 detached,
-                "가입 알림을 꺼내지 못해 탄생 기록을 멈췄다 — 이 화신은 끊기 잔여물을 정리하지 않는다 · 포트: {port}: {e}"
+                "could not take a join notification, so the birth record stopped — this incarnation does not clean up interrupt leftovers · port: {port}: {e}"
             ),
             Failure::Panic(message) => tracing::error!(
                 agent = self.tag.agent(),
                 root_pid = self.tag.root_pid,
                 detached,
-                "가입 알림 듣기가 패닉해 탄생 기록을 멈췄다 — 이 화신은 끊기 잔여물을 정리하지 않는다 · 포트: {port}: {message}"
+                "the join notification listening panicked, so the birth record stopped — this incarnation does not clean up interrupt leftovers · port: {port}: {message}"
             ),
         }
         detached
     }
 }
 
-/// Time from creation until now (µs) — used only for the 「가입 → 엶」 (join → open) delay field in the log (selection does not look at the wall clock — TRD §3-6). If creation could not be
+/// Time from creation until now (µs) — used only for the 「join → open」 delay field in the log (selection does not look at the wall clock — TRD §3-6). If creation could not be
 /// read or the clock is before it, `None`.
 fn born_ago_us(create: u64) -> Option<u64> {
     if create == 0 {
@@ -1400,7 +1400,7 @@ impl GateState {
                             snap: ep.snap.clone(),
                         });
                     }
-                    // A spot where 「쓰였으면 명단이 있다」 (if written, a list exists) broke — there is no list to set up a pass.
+                    // A spot where 「if written, a list exists」 broke — there is no list to set up a pass.
                     ep.phase = Phase::Done;
                     ep.release()
                 }
@@ -1487,7 +1487,7 @@ impl GateState {
     }
 
     /// The worker is gone (start failure · panic) — whatever the generation, bring the current episode down to `Done`. Because an episode another interrupt set up in the meantime
-    /// also believed 「일꾼이 떠 있다」 (a worker is up) and nobody started one. Do not immediately start again.
+    /// also believed 「a worker is up」 and nobody started one. Do not immediately start again.
     fn abandon(&mut self) -> Released {
         self.worker = false;
         match self.episode.as_mut() {
@@ -1605,8 +1605,8 @@ enum Unlisted {
 impl fmt::Display for Unlisted {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Unlisted::List(e) => write!(f, "명단 {e}"),
-            Unlisted::Gone => f.write_str("무리가 없다"),
+            Unlisted::List(e) => write!(f, "list {e}"),
+            Unlisted::Gone => f.write_str("no group"),
         }
     }
 }
@@ -1745,7 +1745,7 @@ impl<G: Group> GateCell<G> {
                 tracing::debug!(
                     agent = cleaner.tag.agent(),
                     root_pid = cleaner.tag.root_pid,
-                    "다른 끊기가 에피소드를 여는 중이라 끊기 줄만 준다"
+                    "another interrupt is opening an episode, so only the interrupt line is given"
                 );
                 return Some(InterruptOut {
                     bytes,
@@ -1795,7 +1795,7 @@ impl<G: Group> GateCell<G> {
                     snapshot,
                     members,
                     births = cleaner.recorder.len(),
-                    "끊기 에피소드를 열었다"
+                    "opened an interrupt episode"
                 );
                 Some(InterruptOut {
                     bytes,
@@ -1808,7 +1808,7 @@ impl<G: Group> GateCell<G> {
                 tracing::debug!(
                     agent = cleaner.tag.agent(),
                     root_pid = cleaner.tag.root_pid,
-                    "에피소드를 여는 사이 턴이 닫혀 끊기 줄을 주지 않는다"
+                    "the turn closed while the episode was being opened, so the interrupt line is not given"
                 );
                 None
             }
@@ -1819,17 +1819,17 @@ impl<G: Group> GateCell<G> {
                     tracing::warn!(
                         agent = cleaner.tag.agent(),
                         root_pid = cleaner.tag.root_pid,
-                        "여는 이가 하나인데 에피소드를 세우는 자리에 산 에피소드가 있다 — 줄만 준다"
+                        "there is one opener, yet a live episode sits where the episode is set up — only the line is given"
                     );
                 } else {
                     tracing::debug!(
                         agent = cleaner.tag.agent(),
                         root_pid = cleaner.tag.root_pid,
                         reason = why.label(),
-                        "stale — 에피소드를 여는 사이 기록 · 입력이 바뀌어 끊기 줄만 준다"
+                        "stale — the record or input changed while the episode was being opened, so only the interrupt line is given"
                     );
                 }
-                debug_assert!(why != Stale::Live, "여는 이가 둘이었다");
+                debug_assert!(why != Stale::Live, "there were two openers");
                 Some(InterruptOut {
                     bytes,
                     on_written: None,
@@ -1869,7 +1869,7 @@ impl<G: Group> GateCell<G> {
                 gen,
                 w_len,
                 w_us,
-                "끊기 줄이 쓰여 쓰기 명단을 찍었다"
+                "the interrupt line was written and the write list was captured"
             ),
             (WriteNote::Unlisted, Some(e)) => {
                 if cleaner.unlisted_warned.swap(true, Ordering::AcqRel) {
@@ -1877,14 +1877,14 @@ impl<G: Group> GateCell<G> {
                         agent = cleaner.tag.agent(),
                         root_pid = cleaner.tag.root_pid,
                         gen,
-                        "끊기 줄이 쓰였지만 쓰기 명단을 못 찍었다: {e}"
+                        "the interrupt line was written but the write list could not be captured: {e}"
                     );
                 } else {
                     tracing::warn!(
                         agent = cleaner.tag.agent(),
                         root_pid = cleaner.tag.root_pid,
                         gen,
-                        "끊기 줄이 쓰였지만 쓰기 명단을 못 찍어 이 끊기는 잔여물을 정리하지 않는다: {e}"
+                        "the interrupt line was written but the write list could not be captured, so this interrupt does not clean up leftovers: {e}"
                     );
                 }
             }
@@ -1909,7 +1909,7 @@ impl<G: Group> GateCell<G> {
             tracing::warn!(
                 agent = cleaner.tag.agent(),
                 root_pid = cleaner.tag.root_pid,
-                "잔여물 정리 일꾼을 띄우지 못해 이 끊기는 정리하지 않는다: {e}"
+                "could not start the leftover cleanup worker, so this interrupt does not clean up: {e}"
             );
         }
     }
@@ -1931,7 +1931,7 @@ impl<G: Group> GateCell<G> {
                     agent = cleaner.tag.agent(),
                     root_pid = cleaner.tag.root_pid,
                     gen = ep.gen,
-                    "delivered — 새 입력이 닿아 끊기 에피소드를 버렸다"
+                    "delivered — new input arrived, so the interrupt episode was dropped"
                 );
             }
         }
@@ -1996,7 +1996,7 @@ impl<G: Group> Drop for WorkerGuard<'_, G> {
             tracing::error!(
                 agent = cleaner.tag.agent(),
                 root_pid = cleaner.tag.root_pid,
-                "잔여물 정리 일꾼이 패닉해 이 끊기는 정리하지 않는다"
+                "the leftover cleanup worker panicked, so this interrupt does not clean up"
             );
         }
     }
@@ -2017,7 +2017,7 @@ fn worker_turn<G: Group>(cell: &Arc<GateCell<G>>, cleaner: &Arc<Cleaner<G>>) -> 
                 tracing::debug!(
                     agent = cleaner.tag.agent(),
                     root_pid = cleaner.tag.root_pid,
-                    "retiring — 물러나는 무리라 끊기 에피소드를 치우고 정리 일꾼이 끝난다"
+                    "retiring — the group is retreating, so the interrupt episode is cleared and the cleanup worker ends"
                 );
             }
             false
@@ -2031,7 +2031,7 @@ fn worker_turn<G: Group>(cell: &Arc<GateCell<G>>, cleaner: &Arc<Cleaner<G>>) -> 
                 agent = cleaner.tag.agent(),
                 root_pid = cleaner.tag.root_pid,
                 waited_ms = millis(waited),
-                "잔여물을 끝낸 판 뒤에도 턴 끝이 없다 — 더 하지 않는다"
+                "still no turn end after the pass that ended leftovers — not doing more"
             );
             true
         }
@@ -2130,7 +2130,7 @@ struct PassReport {
     gone: usize,
 }
 
-/// One cleanup pass (TRD §3-3 「판의 차례」 (rounds of a pass) · §3-4 「판의 순서」 (steps of a pass)) — if steps 1–3 hold, it goes through the rounds. If any one does not hold,
+/// One cleanup pass (TRD §3-3 「rounds of a pass」 · §3-4 「steps of a pass」) — if steps 1–3 hold, it goes through the rounds. If any one does not hold,
 /// nothing is killed.
 ///
 /// One round = copy the record → candidates · rules → kill commit of the `Cleanup` items in ascending `seq` order → confirm the ones killed in that round within one deadline
@@ -2217,7 +2217,7 @@ fn kill_rounds<G: Group>(
                 report.stop = Some(PassStop::NotReady(why));
                 break;
             }
-            // ★Kill commit — only the recheck and one kill call are inside the lock★ (TRD §3-3 「자물쇠 규칙」 (lock rules) ⓑ). Deciding · logging ·
+            // ★Kill commit — only the recheck and one kill call are inside the lock★ (TRD §3-3 「lock rules」 ⓑ). Deciding · logging ·
             //   dropping handles come after release. The marker is read once more here — the remaining overlap is the single kill right after this read.
             // ADR-0262
             let committed = {
@@ -2264,7 +2264,7 @@ fn kill_rounds<G: Group>(
                         root_pid = cleaner.tag.root_pid,
                         pid = birth.pid,
                         round,
-                        "끊기 잔여물 하나를 끝내지 못했다: {e}"
+                        "could not end one interrupt leftover: {e}"
                     );
                 }
             }
@@ -2387,17 +2387,17 @@ fn log_pass<G: Group>(cleaner: &Cleaner<G>, report: &PassReport, waited: Duratio
             not_hook = x.not_hook,
             no_taskkill = x.no_taskkill,
             unknown = x.unknown,
-            "끊기 뒤 턴 끝이 없어 우리 Job 안의 훅 잔여물을 끝냈다"
+            "no turn end after the interrupt, so the hook leftovers inside our Job were ended"
         );
     }
-    const NOTHING: &str = "끊기 뒤 턴 끝이 없는데 잔여물을 끝내지 않았다";
+    const NOTHING: &str = "no turn end after the interrupt, yet no leftover was ended";
     match &report.stop {
         Some(PassStop::NotReady(NotReady::Retiring)) => tracing::debug!(
             agent,
             root_pid,
             reason = "retiring",
             killed,
-            "잔여물 정리 — 물러나는 무리라 판을 멈췄다"
+            "leftover cleanup — the group is retreating, so the pass stopped"
         ),
         Some(PassStop::NotReady(NotReady::Snapshot(cause))) => tracing::warn!(
             agent,
@@ -2405,21 +2405,21 @@ fn log_pass<G: Group>(cleaner: &Cleaner<G>, report: &PassReport, waited: Duratio
             waited_ms,
             reason = "snapshot_failed",
             cause = cause.label(),
-            "{NOTHING} — 스냅숏이 서지 않았다"
+            "{NOTHING} — the snapshot was not set up"
         ),
         Some(PassStop::NotReady(NotReady::Released)) => tracing::warn!(
             agent,
             root_pid,
             waited_ms,
             reason = "released",
-            "{NOTHING} — 스냅숏을 이미 놓았다"
+            "{NOTHING} — the snapshot was already released"
         ),
         Some(PassStop::NotReady(NotReady::RootGone)) => tracing::debug!(
             agent,
             root_pid,
             reason = "root_gone",
             killed,
-            "잔여물 정리 — 뿌리가 끝나 판을 멈췄다"
+            "leftover cleanup — the root ended, so the pass stopped"
         ),
         Some(PassStop::NotReady(NotReady::RootUnknown(e))) => tracing::warn!(
             agent,
@@ -2427,21 +2427,21 @@ fn log_pass<G: Group>(cleaner: &Cleaner<G>, report: &PassReport, waited: Duratio
             waited_ms,
             reason = "root_unknown",
             killed,
-            "뿌리가 끝났는지 몰라 잔여물 정리 판을 멈췄다: {e}"
+            "not knowing whether the root ended, the leftover cleanup pass stopped: {e}"
         ),
         Some(PassStop::Superseded) => tracing::debug!(
             agent,
             root_pid,
             reason = "superseded",
             killed,
-            "잔여물 정리 — 판 도중 턴 끝 · 새 끊기 · 새 입력이 와 남은 후보와 다음 차례를 버렸다"
+            "leftover cleanup — a turn end, a new interrupt or new input came during the pass, so the remaining candidates and the next round were dropped"
         ),
         Some(PassStop::RecordGone) => tracing::debug!(
             agent,
             root_pid,
             reason = "record_gone",
             killed,
-            "잔여물 정리 — 판 도중 탄생 기록이 꺼져 판을 멈췄다"
+            "leftover cleanup — the birth record was turned off during the pass, so the pass stopped"
         ),
         Some(PassStop::RoundsExhausted) => tracing::warn!(
             agent,
@@ -2450,7 +2450,7 @@ fn log_pass<G: Group>(cleaner: &Cleaner<G>, report: &PassReport, waited: Duratio
             reason = "rounds_exhausted",
             rounds = report.rounds,
             killed,
-            "잔여물 정리가 차례 상한에 닿아 남은 후보를 끝내지 않았다"
+            "leftover cleanup reached the round cap, so the remaining candidates were not ended"
         ),
         None if killed > 0 => {}
         None if report.candidates == 0 => tracing::warn!(
@@ -2460,7 +2460,7 @@ fn log_pass<G: Group>(cleaner: &Cleaner<G>, report: &PassReport, waited: Duratio
             reason = "no_new_member",
             births = report.births,
             full = report.full,
-            "{NOTHING} — 쓰기 명단 뒤에 태어난 산 프로세스가 없다"
+            "{NOTHING} — no live process was born after the write list"
         ),
         None if report.cleanups == 0 => tracing::warn!(
             agent,
@@ -2476,7 +2476,7 @@ fn log_pass<G: Group>(cleaner: &Cleaner<G>, report: &PassReport, waited: Duratio
             not_hook = x.not_hook,
             no_taskkill = x.no_taskkill,
             unknown = x.unknown,
-            "{NOTHING} — 후보가 모두 규칙에서 빠졌다"
+            "{NOTHING} — every candidate was excluded by the rules"
         ),
         None => tracing::warn!(
             agent,
@@ -2485,7 +2485,7 @@ fn log_pass<G: Group>(cleaner: &Cleaner<G>, report: &PassReport, waited: Duratio
             reason = "all_failed",
             failed = report.failed,
             gone = report.gone,
-            "{NOTHING} — 고른 잔여물을 하나도 끝내지 못했다"
+            "{NOTHING} — could not end any of the chosen leftovers"
         ),
     }
 }
@@ -2507,7 +2507,7 @@ enum NotReady {
 
 /// Pass steps 1–3 — no marker → the port is not latched as failed (`port_failed`) · the snapshot was set up and that record is still on
 /// (`active` = the number now on) → the held root is alive. If the port is latched, new members may have been missed, so it is `snapshot_failed(port)` instead of
-/// 「새 멤버 없음」 (no new members). The root exit query is an OS call, so it is called outside both locks.
+/// 「no new members」. The root exit query is an OS call, so it is called outside both locks.
 fn precheck(
     ticket: &Ticket,
     active: u64,
@@ -2690,7 +2690,7 @@ mod tests {
             self.procs
                 .iter_mut()
                 .find(|p| p.pid == pid && p.born_ms == born_ms)
-                .expect("세계에 있는 프로세스")
+                .expect("a process that is in the world")
         }
 
         fn lose(&mut self, pid: u32, born_ms: i64) -> &mut Self {
@@ -2741,13 +2741,15 @@ mod tests {
 
         fn exited(&self, link: &Link<'_>, killed: &[u32]) -> io::Result<bool> {
             if self.failing.contains(&link.pid) {
-                return Err(io::Error::new(io::ErrorKind::Other, "가짜 조회 실패"));
+                return Err(io::Error::new(io::ErrorKind::Other, "fake query failure"));
             }
             let p = self
                 .procs
                 .iter()
                 .find(|p| p.pid == link.pid && p.facts.create == link.facts.create)
-                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "세계에 없는 고리"))?;
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::NotFound, "a link not in the world")
+                })?;
             Ok(killed.contains(&p.pid) || p.exit_ms.is_some_and(|e| e <= PASS_MS))
         }
 
@@ -2764,7 +2766,7 @@ mod tests {
                 .iter()
                 .rev()
                 .find(|l| l.pid == pid)
-                .expect("후보는 탄생 기록에 있다");
+                .expect("the candidate is in the birth record");
             select(c, &view)
         }
 
@@ -2988,15 +2990,19 @@ mod tests {
         assert_eq!(
             w.judge(29864, &[]),
             Verdict::ParentAlive,
-            "다른 훅의 taskkill"
+            "another hook's taskkill"
         );
         assert_eq!(
             w.judge(39424, &[]),
             Verdict::ParentAlive,
-            "taskkill 의 conhost"
+            "taskkill's conhost"
         );
-        assert_eq!(w.judge(9032, &[]), Verdict::NotHookCopy, "반복의 sleep");
-        assert_eq!(w.judge(30144, &[]), Verdict::NotHookCopy, "훅이 띄운 cat");
+        assert_eq!(w.judge(9032, &[]), Verdict::NotHookCopy, "the loop's sleep");
+        assert_eq!(
+            w.judge(30144, &[]),
+            Verdict::NotHookCopy,
+            "cat launched by the hook"
+        );
     }
 
     // ── taskkill markers ─────────────────────────────────────────────────────────────
@@ -3190,27 +3196,35 @@ mod tests {
     fn liveness_errors_and_empty_fields_are_unknown() {
         let mut w = p1();
         w.failing.push(36088);
-        assert_eq!(w.judge(38108, &[]), Verdict::Unknown, "D 의 끝남 조회 실패");
+        assert_eq!(
+            w.judge(38108, &[]),
+            Verdict::Unknown,
+            "D's exit query failed"
+        );
 
         let mut w = p1();
         w.failing.push(22700);
         assert_eq!(
             w.judge(38108, &[]),
             Verdict::Unknown,
-            "조상의 끝남 조회 실패"
+            "an ancestor's exit query failed"
         );
 
         let mut w = p1();
         w.proc_mut(38108, 298).facts.cmdline.clear();
-        assert_eq!(w.judge(38108, &[]), Verdict::Unknown, "후보 명령줄 빈 칸");
+        assert_eq!(
+            w.judge(38108, &[]),
+            Verdict::Unknown,
+            "candidate command line empty"
+        );
 
         let mut w = p1();
         w.proc_mut(36088, -56).facts.image.clear();
-        assert_eq!(w.judge(38108, &[]), Verdict::Unknown, "D 실행 파일 빈 칸");
+        assert_eq!(w.judge(38108, &[]), Verdict::Unknown, "D executable empty");
 
         let mut w = p1();
         w.root = 0;
-        assert_eq!(w.judge(38108, &[]), Verdict::Unknown, "뿌리 번호 모름");
+        assert_eq!(w.judge(38108, &[]), Verdict::Unknown, "root pid unknown");
     }
 
     #[test]
@@ -3231,7 +3245,7 @@ mod tests {
     // ── Finding the parent ─────────────────────────────────────────────────────────
 
     fn never(_: &Link<'_>) -> io::Result<bool> {
-        Err(io::Error::new(io::ErrorKind::Other, "부르지 않는다"))
+        Err(io::Error::new(io::ErrorKind::Other, "not called"))
     }
 
     #[test]
@@ -3252,12 +3266,16 @@ mod tests {
             parent_of(&view, 20, &child).map(|l| l.facts.create)
         };
         assert_eq!(parent(350), Some(300));
-        assert_eq!(parent(300), Some(300), "같은 생성은 부모가 될 수 있다");
+        assert_eq!(
+            parent(300),
+            Some(300),
+            "the same creation can be the parent"
+        );
         assert_eq!(parent(200), Some(100));
         assert_eq!(parent(50), None);
 
         let child = facts(10, 350, USR_BASH, "x");
-        assert!(parent_of(&view, 10, &child).is_none(), "자기 번호");
+        assert!(parent_of(&view, 10, &child).is_none(), "its own pid");
     }
 
     #[test]
@@ -3308,7 +3326,7 @@ mod tests {
         ];
         let exited = |l: &Link<'_>| match l.pid {
             64 => Ok(true),
-            65 => Err(io::Error::new(io::ErrorKind::Other, "조회 실패")),
+            65 => Err(io::Error::new(io::ErrorKind::Other, "query failure")),
             _ => Ok(false),
         };
         let view = Chain {
@@ -3403,12 +3421,16 @@ mod tests {
         for cmdline in rejected {
             assert_eq!(tk(TASKKILL, 40848, cmdline), None, "{cmdline}");
         }
-        assert_eq!(tk(CMD, 40848, &taskkill(35688)), None, "다른 실행 파일");
-        assert_eq!(tk("", 40848, &taskkill(35688)), None, "실행 파일 빈 칸");
+        assert_eq!(
+            tk(CMD, 40848, &taskkill(35688)),
+            None,
+            "a different executable"
+        );
+        assert_eq!(tk("", 40848, &taskkill(35688)), None, "executable empty");
         assert_eq!(
             tk(TASKKILL, 40849, &taskkill(35688)),
             None,
-            "부모가 claude 가 아님"
+            "the parent is not claude"
         );
     }
 }
@@ -3453,7 +3475,7 @@ mod birth_tests {
     fn recorded(recorder: &Recorder, r: u64, c: Caught) -> u64 {
         match recorder.admit(r, c) {
             Admit::Recorded { seq } => seq,
-            _ => panic!("넣어야 할 탄생이 안 들어갔다"),
+            _ => panic!("a birth that should have gone in did not"),
         }
     }
 
@@ -3499,7 +3521,7 @@ mod birth_tests {
                 .recv_timeout(PATIENCE);
             match fed {
                 Ok(Feed::Event(event)) => Ok(event),
-                Ok(Feed::Fail) => Err(io::Error::other("꺼내기 실패 흉내")),
+                Ok(Feed::Fail) => Err(io::Error::other("imitated take failure")),
                 // There is no one to feed — it loops on timeouts like the real one (resting a little so it does not spin).
                 Err(_) => {
                     thread::sleep(Duration::from_millis(10));
@@ -3553,7 +3575,7 @@ mod birth_tests {
                 None => Ok(None),
                 Some(Answer::Ours(facts)) => Ok(Some(Box::new(FakePin::new(facts, &self.probe)))),
                 Some(Answer::Denied) => Err(io::Error::from(io::ErrorKind::PermissionDenied)),
-                Some(Answer::Panic) => panic!("붙들기 패닉 흉내"),
+                Some(Answer::Panic) => panic!("imitated hold panic"),
             }
         }
 
@@ -3563,20 +3585,20 @@ mod birth_tests {
         ) -> io::Result<()> {
             let refused = *self.refuse_watch.lock().unwrap();
             if let Some(kind) = refused {
-                return Err(io::Error::new(kind, "무리 없음 흉내"));
+                return Err(io::Error::new(kind, "imitated missing group"));
             }
             let port = self
                 .port
                 .lock()
                 .unwrap()
                 .take()
-                .expect("포트는 한 번만 만든다");
+                .expect("the port is created only once");
             push(&self.calls, Call::Port);
             let shared: Arc<dyn Births> = Arc::clone(&port) as Arc<dyn Births>;
             start(shared)?;
             push(&self.calls, Call::Attach);
             let attached = if self.attach_fails.load(Ordering::SeqCst) {
-                Err(io::Error::other("붙이기 실패 흉내"))
+                Err(io::Error::other("imitated attach failure"))
             } else {
                 Ok(())
             };
@@ -3587,9 +3609,9 @@ mod birth_tests {
         fn unwatch_births(&self) -> io::Result<()> {
             push(&self.calls, Call::Unwatch);
             if self.job.strong_count() == 0 {
-                Err(io::Error::new(GROUP_GONE, "무리 없음 흉내"))
+                Err(io::Error::new(GROUP_GONE, "imitated missing group"))
             } else if self.unwatch_fails.load(Ordering::SeqCst) {
-                Err(io::Error::other("떼기 실패 흉내"))
+                Err(io::Error::other("imitated detach failure"))
             } else {
                 Ok(())
             }
@@ -3687,7 +3709,7 @@ mod birth_tests {
             move |body| {
                 push(&calls, Call::Spawn);
                 drop(body);
-                Err(io::Error::other("기동 실패 흉내"))
+                Err(io::Error::other("imitated start failure"))
             }
         }
 
@@ -3712,34 +3734,36 @@ mod birth_tests {
         fn wait_next(&self) -> usize {
             self.waits
                 .recv_timeout(PATIENCE)
-                .expect("듣는 스레드가 꺼내기로 돌아오지 않았다")
+                .expect("the listening thread did not come back to take")
         }
 
         /// Feed one notification and wait for its handling to finish.
         fn feed(&self, event: PortEvent) -> usize {
-            self.feed.send(Feed::Event(event)).expect("먹이기");
+            self.feed.send(Feed::Event(event)).expect("feed");
             self.wait_next()
         }
 
         /// Feed one take-out error, and wait for the thread to enter the next take-out without ending.
         fn fail_take(&self) {
-            self.feed.send(Feed::Fail).expect("먹이기");
+            self.feed.send(Feed::Fail).expect("feed");
             self.wait_next();
         }
 
         /// Feed and wait for the listener thread to end.
         fn feed_last(&self, feed: Feed) {
-            self.feed.send(feed).expect("먹이기");
+            self.feed.send(feed).expect("feed");
             self.ended();
         }
 
         fn ended(&self) {
             self.done
                 .recv_timeout(PATIENCE)
-                .expect("듣는 스레드가 끝나지 않았다");
+                .expect("the listening thread did not end");
             let handle = self.thread.lock().unwrap().take();
             if let Some(handle) = handle {
-                handle.join().expect("듣는 스레드가 패닉으로 죽었다");
+                handle
+                    .join()
+                    .expect("the listening thread died with a panic");
             }
         }
 
@@ -3808,7 +3832,7 @@ mod birth_tests {
         assert!(first < second);
         match recorder.admit(r, caught(10, 100, &probe)) {
             Admit::Known(again) => drop(again),
-            _ => panic!("같은 (번호, 생성)이 두 번 들었다"),
+            _ => panic!("the same (pid, creation) went in twice"),
         }
         assert_eq!(probe.drops(), 1);
 
@@ -3842,7 +3866,7 @@ mod birth_tests {
                     assert_eq!(first, expect_first);
                     drop(caught);
                 }
-                _ => panic!("상한을 넘었는데 들었다"),
+                _ => panic!("went in past the cap"),
             }
         }
         assert!(recorder.full());
@@ -3875,7 +3899,7 @@ mod birth_tests {
         assert_eq!(recorder.active(), r);
         match recorder.admit(old, caught(2, 1, &probe)) {
             Admit::Stale(late) => drop(late),
-            _ => panic!("꺼진 기록에 들었다"),
+            _ => panic!("went into a record that was off"),
         }
         recorded(&recorder, r, caught(3, 1, &probe));
         assert_eq!(recorder.copy(r).len(), 1);
@@ -3888,7 +3912,7 @@ mod birth_tests {
         assert!(recorder.copy(r).is_empty());
         match recorder.admit(r, caught(4, 1, &probe)) {
             Admit::Stale(late) => drop(late),
-            _ => panic!("끈 기록에 들었다"),
+            _ => panic!("went into a record that was turned off"),
         }
         drop(stopped);
         assert_eq!(probe.held_drops(), 0);
@@ -3901,7 +3925,7 @@ mod birth_tests {
         let probe = Probe::new(&recorder);
         let poisoned = panic::catch_unwind(AssertUnwindSafe(|| {
             let _held = recorder.inner.lock();
-            panic!("독 흉내");
+            panic!("imitated poison");
         }));
         assert!(poisoned.is_err());
         assert!(recorder.inner.is_poisoned());
@@ -3926,7 +3950,7 @@ mod birth_tests {
         rig.listening();
 
         assert_eq!(rig.feed(PortEvent::Joined(10)), 1);
-        assert!(rig.pins().is_empty(), "꺼진 동안 붙들었다");
+        assert!(rig.pins().is_empty(), "held while off");
 
         let (r, _) = rig.recorder.start();
         for event in [
@@ -3938,7 +3962,7 @@ mod birth_tests {
             assert_eq!(
                 rig.feed(event),
                 1,
-                "꺼내기에 들어설 때 Job 을 강하게 쥐었다"
+                "held the Job strongly when entering take"
             );
         }
         assert_eq!(rig.pins(), [Call::Pin(10, true), Call::Pin(11, true)]);
@@ -4004,7 +4028,7 @@ mod birth_tests {
             exited: &alive,
         };
         let picked: Vec<u32> = candidates(&view, &[]).iter().map(|l| l.pid).collect();
-        assert_eq!(picked, [30], "고리 전용이 후보가 됐다");
+        assert_eq!(picked, [30], "a link-only entry became a candidate");
         assert_eq!(parent_of(&view, 30, &child).map(|l| l.pid), Some(20));
     }
 
@@ -4027,7 +4051,7 @@ mod birth_tests {
         assert!(!rig.calls().contains(&Call::Unwatch));
         assert!(
             rig.port.upgrade().is_none(),
-            "끝난 스레드가 포트를 쥐고 있다"
+            "the ended thread is holding the port"
         );
         assert!(!rig.recorder.port_failed());
         assert_eq!(rig.ensure(rig.spawner()), Ok(()));
@@ -4071,7 +4095,7 @@ mod birth_tests {
 
         assert_eq!(rig.ensure(rig.spawner()), Err(()));
         let ports = rig.calls().iter().filter(|c| **c == Call::Port).count();
-        assert_eq!(ports, 1, "포트를 두 번 만들었다");
+        assert_eq!(ports, 1, "created the port twice");
     }
 
     /// If even detaching fails in the failure mode, it does not end and only takes out and discards (it does not put into a record turned on later either) — it ends when the group
@@ -4090,7 +4114,7 @@ mod birth_tests {
 
         let (r, _) = rig.recorder.start();
         rig.feed(PortEvent::Joined(10));
-        assert!(rig.pins().is_empty(), "비우기만 하는 중에 붙들었다");
+        assert!(rig.pins().is_empty(), "held while only draining");
         assert_eq!(rig.recorder.len(), 0);
         assert_eq!(rig.recorder.active(), r);
 
@@ -4119,12 +4143,12 @@ mod birth_tests {
         assert_eq!(rig.count(Level::WARN), 0);
     }
 
-    /// If the opener disappears before sending 「붙었나」 (did it attach) (it may have attached), the thread runs as usual.
+    /// If the opener disappears before sending 「did it attach」 (it may have attached), the thread runs as usual.
     #[test]
     fn a_lost_attached_sender_keeps_the_listener_running() {
         let mut rig = Rig::new();
         rig.answer(10, true, Answer::Ours(facts(5, 100)));
-        let port = rig.group.port.lock().unwrap().take().expect("포트");
+        let port = rig.group.port.lock().unwrap().take().expect("port");
         let (attached_tx, attached) = mpsc::sync_channel::<bool>(1);
         drop(attached_tx);
         let listener = Listener {
@@ -4134,7 +4158,7 @@ mod birth_tests {
             recorder: Arc::clone(&rig.recorder),
             tag: LogTag::new(None, ROOT),
         };
-        (rig.spawner())(Box::new(move || listen(listener))).expect("기동");
+        (rig.spawner())(Box::new(move || listen(listener))).expect("start");
         rig.wait_next();
 
         let (r, _) = rig.recorder.start();
@@ -4148,7 +4172,7 @@ mod birth_tests {
 
     // ── Port acquisition ─────────────────────────────────────────────────────────────────
 
-    /// The order is port → start the listener thread → attach, and the thread enters take-out after receiving 「붙었다」 (attached). A second acquisition only
+    /// The order is port → start the listener thread → attach, and the thread enters take-out after receiving 「attached」. A second acquisition only
     /// reads the result.
     #[test]
     fn the_port_comes_first_then_the_listener_then_the_attach() {
@@ -4177,7 +4201,7 @@ mod birth_tests {
         assert_eq!(rig.calls(), [Call::Port, Call::Spawn, Call::PortDrop]);
     }
 
-    /// If attaching fails, it latches, and the running thread receives 「안 붙었다」 (did not attach) and ends without taking out or detaching.
+    /// If attaching fails, it latches, and the running thread receives 「did not attach」 and ends without taking out or detaching.
     #[test]
     fn a_failed_attach_latches_and_the_listener_ends_without_detaching() {
         let rig = Rig::new();
@@ -4185,7 +4209,10 @@ mod birth_tests {
         assert_eq!(rig.ensure(rig.spawner()), Err(()));
         rig.ended();
 
-        assert!(rig.waits.try_recv().is_err(), "붙지 않은 포트에서 꺼냈다");
+        assert!(
+            rig.waits.try_recv().is_err(),
+            "took from a port that was not attached"
+        );
         assert_eq!(
             rig.calls(),
             [Call::Port, Call::Spawn, Call::Attach, Call::PortDrop]
@@ -4221,7 +4248,7 @@ mod birth_tests {
         let (job, group) = new_group();
         let group = Arc::new(group);
         let mut x = spawn_gated_cmd("ping -n 30 127.0.0.1", CREATE_NO_WINDOW);
-        job.adopt(x.id()).expect("Job 편입");
+        job.adopt(x.id()).expect("adopt into Job");
         let recorder = Arc::new(Recorder::new());
         let watch = BirthWatch::new();
         assert_eq!(
@@ -4233,33 +4260,34 @@ mod birth_tests {
         let (r, _) = recorder.start();
         open_gate(&mut x);
 
-        let ping = wait_until("기록된 ping", || {
+        let ping = wait_until("recorded ping", || {
             recorder
                 .copy(r)
                 .into_iter()
                 .find(|b| b.facts.image.to_ascii_lowercase().ends_with("\\ping.exe"))
         });
-        assert_eq!(ping.facts.ppid, x.id(), "부모: {:?}", ping.facts);
+        assert_eq!(ping.facts.ppid, x.id(), "parent: {:?}", ping.facts);
         assert_ne!(ping.facts.create, 0);
         assert!(
             ping.facts.cmdline.contains("ping"),
-            "명령줄: {:?}",
+            "command line: {:?}",
             ping.facts
         );
         assert!(ping.killable);
-        assert!(!ping.pin.exited().expect("끝났나"));
+        assert!(!ping.pin.exited().expect("exited?"));
         drop(ping);
         drop(recorder.stop(r));
 
-        job.terminate(1).expect("Job 끝내기");
+        job.terminate(1).expect("end the Job");
         let _ = x.wait();
         // Turn the record on **before** releasing the Job — the listener thread turns off only the record that was on when it saw the group disappear. If it is turned on after releasing,
         // a thread that woke in between may end without a record on, and nobody is left to turn off a record turned on later.
         let (after, _) = recorder.start();
         drop(job);
-        wait_until("무리가 사라져 듣는 스레드가 끈 기록", || {
-            (recorder.active() != after).then_some(())
-        });
+        wait_until(
+            "a record the listening thread turned off because the group disappeared",
+            || (recorder.active() != after).then_some(()),
+        );
         assert_eq!(recorder.active(), 0);
         assert!(!recorder.port_failed());
     }
@@ -4466,7 +4494,7 @@ mod test_support {
             match self.exit.load(Ordering::SeqCst) {
                 ALIVE => Ok(false),
                 EXITED => Ok(true),
-                _ => Err(io::Error::other("끝남 조회 실패 흉내")),
+                _ => Err(io::Error::other("imitated exit query failure")),
             }
         }
     }
@@ -4499,7 +4527,7 @@ mod test_support {
             let cost = *self.probe.terminate_cost.lock().unwrap();
             self.probe.spend(cost);
             if exit_code != LEFTOVER_EXIT_CODE {
-                return Err(io::Error::other(format!("종료 코드 {exit_code:#x}")));
+                return Err(io::Error::other(format!("exit code {exit_code:#x}")));
             }
             match self.kill {
                 Kill::Refuse => Err(io::Error::from(io::ErrorKind::PermissionDenied)),
@@ -4631,7 +4659,7 @@ mod gate_tests {
         }
 
         fn advance(&self, d: Duration) {
-            let nanos = u64::try_from(d.as_nanos()).expect("시험 시각");
+            let nanos = u64::try_from(d.as_nanos()).expect("test time");
             self.nanos.fetch_add(nanos, Ordering::SeqCst);
         }
 
@@ -4672,7 +4700,7 @@ mod gate_tests {
         fn sleep(&self, d: Duration) {
             self.sleeps.lock().unwrap().push(d);
             if self.panic_in_sleep.load(Ordering::SeqCst) {
-                panic!("잠 패닉 흉내");
+                panic!("imitated sleep panic");
             }
             self.advance(d);
         }
@@ -4680,7 +4708,7 @@ mod gate_tests {
         fn spawn(&self, name: &str, body: Box<dyn FnOnce() + Send>) -> io::Result<()> {
             if name == WORKER_THREAD {
                 if self.refuse_worker.load(Ordering::SeqCst) {
-                    return Err(io::Error::other("기동 실패 흉내"));
+                    return Err(io::Error::other("imitated start failure"));
                 }
                 if !self.keep_workers.load(Ordering::SeqCst) {
                     drop(body);
@@ -4740,7 +4768,7 @@ mod gate_tests {
                 }
             }
             let listing = self.listing.lock().unwrap().clone();
-            listing.ok_or_else(|| io::Error::other("명단 실패 흉내"))
+            listing.ok_or_else(|| io::Error::other("imitated list failure"))
         }
 
         fn pin(&self, pid: u32, _kill: bool) -> io::Result<Option<Box<dyn Pinned>>> {
@@ -4755,7 +4783,7 @@ mod gate_tests {
                     FakePin::with_exit(facts, &self.probe, self.exit_of(pid)).named(pid),
                 ))),
                 Some(Answer::Denied) => Err(io::Error::from(io::ErrorKind::PermissionDenied)),
-                Some(Answer::Panic) => panic!("붙들기 패닉 흉내"),
+                Some(Answer::Panic) => panic!("imitated hold panic"),
             }
         }
 
@@ -4766,7 +4794,7 @@ mod gate_tests {
             self.watches.fetch_add(1, Ordering::SeqCst);
             let refused = *self.refuse_watch.lock().unwrap();
             if let Some(kind) = refused {
-                return Err(io::Error::new(kind, "포트 거절 흉내"));
+                return Err(io::Error::new(kind, "imitated port refusal"));
             }
             start(Arc::new(IdlePort))
         }
@@ -4887,9 +4915,9 @@ mod gate_tests {
 
         /// An interrupt that receives write confirmation — both the line and the thing to call must be present.
         fn esc_with_check(&self) -> InterruptOut {
-            let out = self.esc().expect("끊기 줄");
+            let out = self.esc().expect("interrupt line");
             assert_eq!(out.bytes, LINE);
-            assert!(out.on_written.is_some(), "쓰기 확인이 없다");
+            assert!(out.on_written.is_some(), "no write confirmation");
             out
         }
 
@@ -4923,7 +4951,7 @@ mod gate_tests {
         }
 
         fn episode<R>(&self, f: impl FnOnce(&Episode) -> R) -> R {
-            self.state(|st| f(st.episode.as_ref().expect("에피소드")))
+            self.state(|st| f(st.episode.as_ref().expect("episode")))
         }
 
         fn has_episode(&self) -> bool {
@@ -5014,7 +5042,7 @@ mod gate_tests {
                 state.next_step(self.clock.now(), self.cleaner.retiring.is_set())
             };
             let Step::Pass(ticket) = step else {
-                panic!("판이 서야 한다");
+                panic!("a pass must stand");
             };
             self.logged(|| run_pass(&self.cell, &self.cleaner, ticket))
         }
@@ -5046,11 +5074,11 @@ mod gate_tests {
             let mut outside_since_last = true;
             for (pid, call, held) in self.probe.calls() {
                 if call == PinCall::Terminate {
-                    assert!(held, "자물쇠 밖에서 끝냈다: {pid}");
-                    assert!(outside_since_last, "한 구간에서 둘을 끝냈다: {pid}");
+                    assert!(held, "ended outside the lock: {pid}");
+                    assert!(outside_since_last, "ended two in one section: {pid}");
                     outside_since_last = false;
                 } else {
-                    assert!(!held, "자물쇠 안에서 {call:?}: {pid}");
+                    assert!(!held, "{call:?} inside the lock: {pid}");
                     outside_since_last = true;
                 }
             }
@@ -5083,35 +5111,43 @@ mod gate_tests {
             self.state(|st| {
                 if let Some(ep) = &st.episode {
                     if ep.is_live() {
-                        assert!(st.open, "산 에피소드인데 문이 닫혔다: {ep:?}");
+                        assert!(st.open, "a live episode but the gate is closed: {ep:?}");
                     }
                     if ep.written {
-                        assert!(ep.w.is_some(), "쓰였는데 쓰기 명단이 없다: {ep:?}");
+                        assert!(ep.w.is_some(), "written but no write list: {ep:?}");
                     }
                     if (ep.written && ep.is_live()) || matches!(ep.phase, Phase::Spent { .. }) {
-                        assert!(st.worker, "일꾼 없이 {ep:?}");
+                        assert!(st.worker, "{ep:?} without a worker");
                     }
                     if matches!(ep.snap, SnapState::Taken(_)) || ep.rec != 0 {
                         assert!(
                             ep.is_live(),
-                            "끝난 에피소드가 스냅숏 · 기록을 쥐었다: {ep:?}"
+                            "an ended episode held the snapshot or the record: {ep:?}"
                         );
                     }
                     assert!(ep.last_mono >= ep.first_mono);
                 }
-                assert!(!st.opening, "여는 이가 없는데 opening 이 섰다");
+                assert!(!st.opening, "opening is set with no opener");
                 if active != 0 {
                     assert!(
                         st.episode
                             .as_ref()
                             .is_some_and(|ep| ep.is_live() && ep.rec == active),
-                        "켜진 기록 {active} 을 쥔 산 에피소드가 없다: {:?}",
+                        "no live episode holds the active record {active}: {:?}",
                         st.episode
                     );
                 }
             });
-            assert_eq!(self.probe.held_drops(), 0, "자물쇠 안에서 핸들을 닫았다");
-            assert_eq!(self.probe.held_calls(), 0, "자물쇠 안에서 무리에게 물었다");
+            assert_eq!(
+                self.probe.held_drops(),
+                0,
+                "closed a handle inside the lock"
+            );
+            assert_eq!(
+                self.probe.held_calls(),
+                0,
+                "asked the group inside the lock"
+            );
         }
     }
 
@@ -5151,7 +5187,7 @@ mod gate_tests {
         };
         match recorder.admit(rec, caught) {
             Admit::Recorded { .. } => {}
-            _ => panic!("탄생이 기록에 안 들었다"),
+            _ => panic!("the birth did not go into the record"),
         }
     }
 
@@ -5178,7 +5214,7 @@ mod gate_tests {
         let cell = GateCell::<GateGroup>::new(None);
         assert!(cell.interrupt(LINE.to_vec()).is_none());
         cell.open_turn();
-        let out = cell.interrupt(LINE.to_vec()).expect("열린 문");
+        let out = cell.interrupt(LINE.to_vec()).expect("open gate");
         assert_eq!(out.bytes, LINE);
         assert!(out.on_written.is_none());
         cell.deliver();
@@ -5217,7 +5253,7 @@ mod gate_tests {
         assert_eq!(
             at_snapshot.load(Ordering::SeqCst),
             rec,
-            "스냅숏 때 기록이 꺼져 있었다"
+            "the record was off at snapshot time"
         );
         rig.episode(|ep| {
             assert_eq!(ep.gen, 0);
@@ -5229,7 +5265,7 @@ mod gate_tests {
                 (rig.clock.at(ms(0)), rig.clock.at(ms(0)))
             );
             let SnapState::Taken(snap) = &ep.snap else {
-                panic!("스냅숏: {:?}", ep.snap);
+                panic!("snapshot: {:?}", ep.snap);
             };
             let links = snap.links();
             let pids: Vec<u32> = links.iter().map(|l| l.pid).collect();
@@ -5243,10 +5279,10 @@ mod gate_tests {
         assert_eq!(
             rig.clock.spawned(WORKER_THREAD),
             0,
-            "쓰이기 전에 일꾼을 띄웠다"
+            "started the worker before it was written"
         );
         assert!(!rig.worker());
-        assert!(rig.logged_text("끊기 에피소드를 열었다"));
+        assert!(rig.logged_text("opened an interrupt episode"));
         rig.check();
     }
 
@@ -5263,7 +5299,7 @@ mod gate_tests {
             assert_eq!(ep.gen, 0);
             assert_eq!(ep.last_mono, rig.clock.at(ms(500)));
         });
-        rig.cell.lock().episode.as_mut().expect("에피소드").phase = Phase::Cleaning;
+        rig.cell.lock().episode.as_mut().expect("episode").phase = Phase::Cleaning;
         rig.clock.advance(ms(100));
         rig.esc_with_check();
         rig.episode(|ep| {
@@ -5314,11 +5350,11 @@ mod gate_tests {
                 let recorder = Arc::clone(&rig.recorder);
                 rig.on_list(move || drop(recorder.stop(recorder.active())));
             }
-            let out = rig.esc().expect("줄만");
+            let out = rig.esc().expect("line only");
             assert_eq!(out.bytes, LINE);
             assert!(
                 out.on_written.is_none(),
-                "{reason}: 에피소드 없는 줄에 쓰기 확인"
+                "{reason}: write confirmation on a line without an episode"
             );
             assert!(!rig.has_episode(), "{reason}");
             assert_eq!(rig.recorder.active(), 0, "{reason}");
@@ -5345,7 +5381,7 @@ mod gate_tests {
         assert_eq!(rig.group.lists.load(Ordering::SeqCst), 1);
         assert_eq!(rig.group.watches.load(Ordering::SeqCst), 1);
         assert_eq!(rig.next_rec(), 1);
-        assert!(rig.logged_text("여는 중"));
+        assert!(rig.logged_text("is opening"));
 
         rig.esc_with_check();
         rig.episode(|ep| assert_eq!(ep.gen, 0));
@@ -5365,7 +5401,11 @@ mod gate_tests {
         assert!(caught.is_err());
         assert!(!rig.has_episode());
         assert_eq!(rig.recorder.active(), 0);
-        assert_eq!(rig.probe.drops(), 2, "찍다 만 스냅숏(claude · 뿌리)");
+        assert_eq!(
+            rig.probe.drops(),
+            2,
+            "a half-captured snapshot (claude · root)"
+        );
         rig.check();
 
         rig.answer(CONHOST, Answer::Ours(facts(ROOT, 20)));
@@ -5384,14 +5424,14 @@ mod gate_tests {
             ..GateState::default()
         };
         let Begin::Open(mark) = st.begin_interrupt(t) else {
-            panic!("여는 이가 돼야 한다");
+            panic!("must become the opener");
         };
         st.episode = Some(written_episode(7, t, 3));
         match st.settle_interrupt(mark, 5, 5, SnapState::Failed(SnapCause::List), t) {
             Settle::LineOnly {
                 why: Stale::Live, ..
             } => {}
-            _ => panic!("산 에피소드를 갈아 끼웠다"),
+            _ => panic!("replaced a live episode"),
         }
         assert!(!st.opening);
         assert_eq!(st.episode.as_ref().map(|ep| ep.gen), Some(7));
@@ -5401,7 +5441,7 @@ mod gate_tests {
             ..GateState::default()
         };
         let Begin::Open(mark) = st.begin_interrupt(t) else {
-            panic!("여는 이가 돼야 한다");
+            panic!("must become the opener");
         };
         st.next_gen = 9;
         assert!(matches!(
@@ -5486,7 +5526,7 @@ mod gate_tests {
             assert_eq!(
                 rig.probe.drops(),
                 drops,
-                "{name}: 붙든 것은 스냅숏을 세우지 못한 채 버린다"
+                "{name}: what was held is dropped without setting up the snapshot"
             );
             rig.check();
         }
@@ -5553,7 +5593,7 @@ mod gate_tests {
         assert_eq!(noted.note, WriteNote::Again);
         assert!(noted.back.is_some_and(|back| Arc::ptr_eq(&back, &later)));
         assert!(!noted.spawn);
-        let ep = st.episode.as_ref().expect("에피소드");
+        let ep = st.episode.as_ref().expect("episode");
         assert_eq!(ep.w.as_deref(), Some(&[ROOT][..]));
         assert_eq!(ep.last_mono, t + ms(10));
 
@@ -5582,7 +5622,7 @@ mod gate_tests {
         let again = rig.esc_with_check();
         rig.write(again);
         rig.episode(|ep| assert!(!ep.written));
-        assert_eq!(rig.count(Level::WARN), 1, "warn 은 한 번");
+        assert_eq!(rig.count(Level::WARN), 1, "warn once");
         rig.check();
 
         rig.listing(Some(vec![ROOT, CONHOST, CLAUDE]));
@@ -5657,11 +5697,11 @@ mod gate_tests {
 
         let step = rig.cell.lock().next_step(rig.clock.now(), false);
         let Step::Pass(ticket) = step else {
-            panic!("판이 서야 한다");
+            panic!("a pass must stand");
         };
         assert_eq!(&*ticket.w, &[ROOT, CONHOST, CLAUDE, X, Z, P][..]);
         let snapshot =
-            precheck(&ticket, rig.recorder.active(), false, false).expect("판의 순서 1–3");
+            precheck(&ticket, rig.recorder.active(), false, false).expect("steps 1–3 of the pass");
         let births = rig.recorder.copy(ticket.rec);
         let snapshot_links = snapshot.links();
         let birth_links: Vec<Link<'_>> = births.iter().map(|b| b.link()).collect();
@@ -5749,7 +5789,7 @@ mod gate_tests {
             ..GateState::default()
         };
         let Step::Pass(ticket) = st.next_step(t + N, false) else {
-            panic!("판");
+            panic!("pass");
         };
         assert!(matches!(
             st.begin_interrupt(t + N + ms(5)),
@@ -5757,7 +5797,7 @@ mod gate_tests {
         ));
         let released = st.finish_pass(ticket.gen, true, t + N + ms(9));
         assert_eq!(released.rec, 0);
-        let ep = st.episode.as_ref().expect("에피소드");
+        let ep = st.episode.as_ref().expect("episode");
         assert_eq!((ep.phase, ep.rec), (Phase::Waiting, 6));
         assert!(ep.killed_any);
         // Waits for N again.
@@ -5776,7 +5816,7 @@ mod gate_tests {
             ..GateState::default()
         };
         let Step::Pass(ticket) = st.next_step(t + N, false) else {
-            panic!("판");
+            panic!("pass");
         };
         let at = t + N + ms(300);
         let released = st.finish_pass(ticket.gen, true, at);
@@ -5807,7 +5847,7 @@ mod gate_tests {
             ..GateState::default()
         };
         let Step::Pass(ticket) = st.next_step(t + N, false) else {
-            panic!("판");
+            panic!("pass");
         };
         let _ = st.finish_pass(ticket.gen, false, t + N);
         assert!(st.episode.as_ref().is_some_and(|ep| !ep.killed_any));
@@ -5836,9 +5876,9 @@ mod gate_tests {
         assert_eq!(st.commit_check(4, t + N, false), Commit::Superseded);
         assert_eq!(st.commit_check(3, t + N, true), Commit::Retiring);
         st.note_kill(4);
-        assert!(!st.episode.as_ref().expect("에피소드").killed_any);
+        assert!(!st.episode.as_ref().expect("episode").killed_any);
         st.note_kill(3);
-        assert!(st.episode.as_ref().expect("에피소드").killed_any);
+        assert!(st.episode.as_ref().expect("episode").killed_any);
         let _ = st.close_turn();
         assert_eq!(st.commit_check(3, t + N, false), Commit::Superseded);
     }
@@ -5926,7 +5966,7 @@ mod gate_tests {
         rig.check();
 
         rig.esc_with_check();
-        assert!(!rig.turn(), "쓰이지 않은 에피소드에서 일꾼이 남았다");
+        assert!(!rig.turn(), "a worker remained on an unwritten episode");
         rig.episode(|ep| assert!(ep.is_live() && !ep.written));
         assert_ne!(rig.recorder.active(), 0);
         rig.check();
@@ -5963,7 +6003,7 @@ mod gate_tests {
         rig.clock.advance(N);
         let step = rig.cell.lock().next_step(rig.clock.now(), false);
         let Step::Pass(ticket) = step else {
-            panic!("판");
+            panic!("pass");
         };
         let active = rig.recorder.active();
         assert!(precheck(&ticket, active, false, false).is_ok());
@@ -6001,7 +6041,7 @@ mod gate_tests {
         failed.clock.advance(N);
         let step = failed.cell.lock().next_step(failed.clock.now(), false);
         let Step::Pass(ticket) = step else {
-            panic!("판");
+            panic!("pass");
         };
         assert!(matches!(
             precheck(&ticket, failed.recorder.active(), false, false),
@@ -6020,7 +6060,7 @@ mod gate_tests {
         rig.clock.advance(N);
         let step = rig.cell.lock().next_step(rig.clock.now(), false);
         let Step::Pass(ticket) = step else {
-            panic!("판");
+            panic!("pass");
         };
         let active = rig.recorder.active();
         assert!(precheck(&ticket, active, false, rig.recorder.port_failed()).is_ok());
@@ -6067,7 +6107,7 @@ mod gate_tests {
             assert_eq!(rig.terminates(), [owner], "{name}");
             assert!(
                 rig.probe.waits().is_empty(),
-                "{name}: 끝난 것은 기다리지 않는다"
+                "{name}: what has ended is not waited for"
             );
             assert!(
                 matches!(rig.episode(|ep| ep.phase), Phase::Spent { .. }),
@@ -6109,7 +6149,7 @@ mod gate_tests {
             w.births
                 .iter()
                 .position(|(p, _, _)| *p == pid)
-                .expect("탄생")
+                .expect("birth")
         };
         let (a, b) = (at(38108), at(38200));
         w.births.swap(a, b);
@@ -6134,7 +6174,7 @@ mod gate_tests {
         assert_eq!(pids_rounds(&report), [(38108, 1), (38200, 1)]);
         assert_eq!((report.rounds, report.confirmed), (1, 0));
         assert_eq!(rig.terminates(), [38108, 38200]);
-        assert_eq!(rig.cleaned_line().expect("정리함")["unconfirmed"], "2");
+        assert_eq!(rig.cleaned_line().expect("cleaned")["unconfirmed"], "2");
         rig.assert_lock_sections();
     }
 
@@ -6146,9 +6186,12 @@ mod gate_tests {
         assert_eq!(pids_rounds(&report), [(32228, 1)]);
         assert_eq!(rig.terminates(), [32228]);
         assert_eq!(rig.probe.waits(), [KILL_CONFIRM]);
-        assert_eq!(report.excluded.parent_alive, 5, "24776 의 부모가 산다");
+        assert_eq!(
+            report.excluded.parent_alive, 5,
+            "the parent of 24776 is alive"
+        );
         assert!(report.stop.is_none(), "{:?}", report.stop);
-        assert_eq!(rig.cleaned_line().expect("정리함")["unconfirmed"], "1");
+        assert_eq!(rig.cleaned_line().expect("cleaned")["unconfirmed"], "1");
         rig.assert_lock_sections();
     }
 
@@ -6165,7 +6208,7 @@ mod gate_tests {
             .line_with_reason("rounds_exhausted")
             .expect("rounds_exhausted");
         assert_eq!((level, fields["rounds"].as_str()), (Level::WARN, "3"));
-        assert_eq!(rig.count(Level::WARN), 2, "정리함 + rounds_exhausted");
+        assert_eq!(rig.count(Level::WARN), 2, "cleaned + rounds_exhausted");
         rig.assert_lock_sections();
     }
 
@@ -6277,7 +6320,7 @@ mod gate_tests {
         assert!(report.terminated.is_empty());
         assert_eq!((report.cleanups, report.failed, report.gone), (1, 1, 0));
         assert_eq!(rig.terminates(), [38108]);
-        assert!(rig.logged_text("하나를 끝내지 못했다"));
+        assert!(rig.logged_text("could not end one"));
         let (level, fields) = rig.line_with_reason("all_failed").expect("all_failed");
         assert_eq!((level, fields["failed"].as_str()), (Level::WARN, "1"));
         assert_eq!(rig.count(Level::WARN), 2);
@@ -6355,7 +6398,7 @@ mod gate_tests {
         let rig = GateRig::staged(&p3bg().staged(), &[]);
         rig.probe.set_terminate_cost(Duration::from_micros(150));
         rig.pass();
-        let line = rig.cleaned_line().expect("정리함");
+        let line = rig.cleaned_line().expect("cleaned");
         for key in [
             "agent",
             "root_pid",
@@ -6374,7 +6417,10 @@ mod gate_tests {
             "no_taskkill",
             "unknown",
         ] {
-            assert!(line.contains_key(key), "{key} 칸이 없다: {line:?}");
+            assert!(
+                line.contains_key(key),
+                "the {key} field is missing: {line:?}"
+            );
         }
         assert_eq!(line["agent"], AgentId::from_u128(0x7440).to_string());
         assert_eq!(line["root_pid"], "37152");
@@ -6402,7 +6448,7 @@ mod gate_tests {
         assert!(rig.turn());
         assert_eq!(rig.clock.sleeps(), [N]);
         assert!(rig.turn());
-        assert!(rig.logged_text("더 하지 않는다"));
+        assert!(rig.logged_text("not doing more"));
         assert!(!rig.turn());
         assert_eq!(rig.count(Level::WARN), 2);
         assert_eq!(rig.recorder.active(), 0);
@@ -6551,8 +6597,9 @@ mod gate_tests {
             assert_eq!(rig.recorder.active(), 0);
             assert!(!rig.has_episode());
         }
-        let seen =
-            format!("판 {passes} · 에피소드 {opened} · 줄만 {line_only} · 줄 없음 {no_line}");
+        let seen = format!(
+            "passes {passes} · episodes {opened} · line only {line_only} · no line {no_line}"
+        );
         assert!(
             passes > 40 && opened > 500 && line_only > 50 && no_line > 50,
             "{seen}"
@@ -6593,7 +6640,7 @@ mod real_tests {
 
     impl LeftoverClock for SkipClock {
         fn sleep(&self, d: Duration) {
-            let ns = u64::try_from(d.as_nanos()).expect("시험 잠");
+            let ns = u64::try_from(d.as_nanos()).expect("test sleep");
             self.skipped_ns.fetch_add(ns, Ordering::SeqCst);
         }
 
@@ -6627,15 +6674,15 @@ mod real_tests {
     /// Returns = that episode's record number.
     fn interrupt_and_write(cell: &Arc<GateCell>, cleaner: &Cleaner, clock: &SkipClock) -> u64 {
         cell.open_turn();
-        let out = cell.interrupt(LINE.to_vec()).expect("끊기 줄");
+        let out = cell.interrupt(LINE.to_vec()).expect("interrupt line");
         let rec = cleaner.recorder.active();
-        assert_ne!(rec, 0, "기록이 켜지지 않았다");
-        let on_written = out.on_written.expect("쓰기 확인");
+        assert_ne!(rec, 0, "the record did not turn on");
+        let on_written = out.on_written.expect("write confirmation");
         on_written();
         assert_eq!(
             clock.workers.lock().unwrap().len(),
             1,
-            "쓰인 끊기가 일꾼을 부르지 않았다"
+            "the written interrupt did not call the worker"
         );
         rec
     }
@@ -6657,20 +6704,23 @@ mod real_tests {
             !lines
                 .iter()
                 .any(|(_, fields)| fields.contains_key("terminated")),
-            "무언가를 끝냈다: {lines:?}"
+            "ended something: {lines:?}"
         );
         let mut reasons = lines
             .iter()
             .filter(|(_, fields)| fields.contains_key("reason"));
-        let (_, fields) = reasons.next().expect("판의 사유 줄");
-        assert!(reasons.next().is_none(), "사유 줄이 둘이다: {lines:?}");
+        let (_, fields) = reasons.next().expect("the pass's reason line");
+        assert!(
+            reasons.next().is_none(),
+            "there are two reason lines: {lines:?}"
+        );
         fields.clone()
     }
 
     /// Wait until R in the windowless console starts the console host — before the gate opens, that is R's only child. That host
     /// is sometimes born after R enters the Job (measured), so if not waited for, it slips in as a live birth after the write list (parent R alive).
     fn console_host_born(r: &std::process::Child) {
-        wait_until("R 의 콘솔 호스트", || {
+        wait_until("R's console host", || {
             (!engram_dashboard_platform::process::child_pids(r.id()).is_empty()).then_some(())
         });
     }
@@ -6686,14 +6736,14 @@ mod real_tests {
             r#"cmd /d /c "start "" /b ping -n 30 127.0.0.1 >nul & set /p _=" & set /p _="#,
             CREATE_NO_WINDOW,
         );
-        job.adopt(r.id()).expect("Job 편입");
+        job.adopt(r.id()).expect("adopt into Job");
         console_host_born(&r);
         let (clock, cleaner, cell) = cleaner_for(&group, r.id());
         let rec = interrupt_and_write(&cell, &cleaner, &clock);
 
-        let mut stdin = r.stdin.take().expect("stdin 파이프");
-        stdin.write_all(b"go\r\n").expect("R 의 문");
-        let (b, p) = wait_until("기록된 B · P", || {
+        let mut stdin = r.stdin.take().expect("stdin pipe");
+        stdin.write_all(b"go\r\n").expect("R's gate");
+        let (b, p) = wait_until("recorded B · P", || {
             let births = cleaner.recorder.copy(rec);
             let b = births
                 .iter()
@@ -6706,8 +6756,8 @@ mod real_tests {
             Some((b, p))
         });
         assert!(b.killable && p.killable);
-        stdin.write_all(b"b\r\n").expect("B 의 줄");
-        wait_until("끝난 B", || {
+        stdin.write_all(b"b\r\n").expect("B's line");
+        wait_until("ended B", || {
             matches!(b.pin.exited(), Ok(true)).then_some(())
         });
 
@@ -6715,10 +6765,10 @@ mod real_tests {
         assert_eq!(pass["reason"], "parent_rule", "{pass:?}");
         assert_eq!(pass["not_hook_copy"], "1", "{pass:?}");
         assert_eq!(pass["parent_alive"], "0", "{pass:?}");
-        assert!(!p.pin.exited().expect("끝났나"), "P 가 끝났다");
+        assert!(!p.pin.exited().expect("exited?"), "P ended");
 
         drop((b, p));
-        job.terminate(1).expect("Job 끝내기");
+        job.terminate(1).expect("end the Job");
         drop(stdin);
         let _ = r.wait();
     }
@@ -6730,9 +6780,9 @@ mod real_tests {
         let (job, group) = new_group();
         let group = Arc::new(group);
         let mut r = spawn_gated_cmd("ping -n 30 127.0.0.1 >nul", CREATE_NO_WINDOW);
-        job.adopt(r.id()).expect("Job 편입");
+        job.adopt(r.id()).expect("adopt into Job");
         open_gate(&mut r);
-        wait_until("명단의 ping", || {
+        wait_until("ping in the list", || {
             group
                 .member_pids()
                 .ok()?
@@ -6745,7 +6795,7 @@ mod real_tests {
         let pass = the_pass_line(&run_workers(&clock));
         assert_eq!(pass["reason"], "no_new_member", "{pass:?}");
 
-        job.terminate(1).expect("Job 끝내기");
+        job.terminate(1).expect("end the Job");
         let _ = r.wait();
     }
 
@@ -6755,13 +6805,13 @@ mod real_tests {
         let (job, group) = new_group();
         let group = Arc::new(group);
         let mut r = spawn_gated_cmd("ping -n 30 127.0.0.1 >nul", CREATE_NO_WINDOW);
-        job.adopt(r.id()).expect("Job 편입");
+        job.adopt(r.id()).expect("adopt into Job");
         console_host_born(&r);
         let (clock, cleaner, cell) = cleaner_for(&group, r.id());
         let rec = interrupt_and_write(&cell, &cleaner, &clock);
 
         open_gate(&mut r);
-        let p = wait_until("기록된 ping", || {
+        let p = wait_until("recorded ping", || {
             cleaner
                 .recorder
                 .copy(rec)
@@ -6773,10 +6823,10 @@ mod real_tests {
         assert_eq!(pass["reason"], "parent_rule", "{pass:?}");
         assert_eq!(pass["parent_alive"], "1", "{pass:?}");
         assert_eq!(pass["not_hook_copy"], "0", "{pass:?}");
-        assert!(!p.pin.exited().expect("끝났나"), "P 가 끝났다");
+        assert!(!p.pin.exited().expect("exited?"), "P ended");
 
         drop(p);
-        job.terminate(1).expect("Job 끝내기");
+        job.terminate(1).expect("end the Job");
         let _ = r.wait();
     }
 }

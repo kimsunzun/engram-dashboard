@@ -134,7 +134,7 @@ fn session_compose_resize_exiting_kill() {
     let _sid = session.subscribe(Arc::new(out_sink.clone()));
     assert!(
         wait_until(Duration::from_secs(2), || out_sink.output_len() > 0),
-        "2s 내 PTY 초기 출력 미수신"
+        "did not receive the initial PTY output within 2s"
     );
 
     session
@@ -143,21 +143,24 @@ fn session_compose_resize_exiting_kill() {
     assert!(
         wait_until(Duration::from_secs(3), || out_sink
             .output_contains("session-test")),
-        "echo 입력이 PTY 출력에 반영되지 않음(session-test 미수신)"
+        "the echo input was not reflected in the PTY output (session-test not received)"
     );
 
     session.resize(100, 30).expect("resize failed");
     assert_eq!(
         (session.cols(), session.rows()),
         (100, 30),
-        "resize 후 cols/rows 미반영"
+        "cols/rows not reflected after resize"
     );
 
     let entered = session.enter_exiting();
-    assert!(entered, "enter_exiting 가 false(Running 이었어야)");
+    assert!(
+        entered,
+        "enter_exiting returned false (it should have been Running)"
+    );
     assert!(
         matches!(session.status(), AgentStatus::Exiting),
-        "enter_exiting 후 status 가 Exiting 이어야 함: {:?}",
+        "after enter_exiting the status must be Exiting: {:?}",
         session.status()
     );
 
@@ -166,28 +169,28 @@ fn session_compose_resize_exiting_kill() {
     let kill_elapsed = kill_started.elapsed();
     assert!(
         kill_elapsed < Duration::from_secs(5),
-        "kill(shutdown+join) 이 5s 안에 끝나지 않음(hang 의심): {kill_elapsed:?}"
+        "kill (shutdown+join) did not finish within 5s (suspected hang): {kill_elapsed:?}"
     );
 
     assert!(
         matches!(session.status(), AgentStatus::Killed),
-        "kill 후 status 가 Killed 가 아님: {:?}",
+        "after kill the status is not Killed: {:?}",
         session.status()
     );
 
     let seq = status_sink.statuses();
     assert!(
         seq.iter().any(|s| matches!(s, AgentStatus::Exiting)),
-        "전이에 Exiting 과도기 없음: {seq:?}"
+        "no transitional Exiting in the transitions: {seq:?}"
     );
     assert!(
         matches!(seq.last(), Some(AgentStatus::Killed)),
-        "전이 종점이 Killed 가 아님: {seq:?}"
+        "the transition end is not Killed: {seq:?}"
     );
 
     assert!(
         started.elapsed() < Duration::from_secs(20),
-        "전체 흐름이 비정상적으로 오래 걸림: {:?}",
+        "the whole flow took abnormally long: {:?}",
         started.elapsed()
     );
 }

@@ -162,7 +162,7 @@ fn main() {
     match done_rx.recv_timeout(Duration::from_secs(5)) {
         Ok((total, why)) => {
             eprintln!(
-                "[spike] ✅ reader 종료 ({why}) — join {:?} after master-drop, kill-seq {:?}, total {}B",
+                "[spike] ✅ reader exited ({why}) — join {:?} after master-drop, kill-seq {:?}, total {}B",
                 reader_t0.elapsed(),
                 k0.elapsed(),
                 total
@@ -170,7 +170,7 @@ fn main() {
             eprintln!("[spike] RESULT: PASS");
         }
         Err(_) => {
-            eprintln!("[spike] ❌ reader 5초 내 종료 안 됨 — 가정 2 깨짐");
+            eprintln!("[spike] ❌ reader did not exit within 5s — assumption 2 broken");
             eprintln!("[spike] RESULT: FAIL");
         }
     }

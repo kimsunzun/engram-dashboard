@@ -2,7 +2,7 @@
 
 export type AgentMoveArgs = { target: string, 
 /**
- * 새 부모(이름 또는 id). ★`null` = 최상위로 뗀다 · **필드 부재는 반려**★ — 오타 필드 하나가
- * 조용히 계층 해제로 실행되면 안 되므로 부재와 `null` 을 가른다(바깥 Option = 실렸나).
+ * The new parent (name or id). ★`null` = detach to top level · **an absent field is rejected**★ — so that a single typo field
+ * does not silently run as a hierarchy release, absence and `null` are told apart (the outer Option = whether it was carried).
  */
 parent: string | null | null, };

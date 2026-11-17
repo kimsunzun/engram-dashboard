@@ -124,7 +124,7 @@ fn session_over(script: &str) -> (AgentSession, TextSink) {
 ///   the very property `backend::SUBMIT_PACING` is meant to keep by measurement (without the interval the
 ///   claude TUI reads CR as part of the pasted text and **does not start the turn** — ADR-0038).
 ///
-/// ★Oracle★: per `Read()` the child echoes one line `READ <바이트수> <마지막바이트>`. If the last line is
+/// ★Oracle★: per `Read()` the child echoes one line `READ <byte count> <last byte>`. If the last line is
 ///   `READ 1 13`, the CR was read alone. If any line has last byte 13 but length not 1, it was read
 ///   together with the body, and = this defect.
 ///
@@ -133,7 +133,7 @@ fn session_over(script: &str) -> (AgentSession, TextSink) {
 ///   going out even after 500ms, so the writer writes the CR right after finishing the body → the CR rides in the same read as the tail of the body.
 ///   After the fix, it first confirms the body's OS landing and then sleeps 500ms, so the pipe is empty and the CR stands alone.
 ///
-/// ★★This child shows that the reviewer's counterexample was right — the excuse 「자식이 stdin 을 안 읽으니 어차피 안 먹힌다」 (the child does not read stdin, so it would not work anyway)
+/// ★★This child shows that the reviewer's counterexample was right — the excuse 「the child does not read stdin, so it would not work anyway」
 ///   does not hold★★: the child below **reads normally without rest.** Even so, the body is far larger than the pipe
 ///   buffer, so draining takes several cycles, and the interval collapses to 0 in between.
 #[test]
@@ -158,7 +158,7 @@ Start-Sleep -Milliseconds 10}";
     let started = Instant::now();
     session
         .submit_input_observed(&body)
-        .expect("정상 수신자 상대 배달은 성공해야 한다");
+        .expect("delivery to a normal receiver must succeed");
     let elapsed = started.elapsed();
 
     // Leeway for the child to report its last read after finishing through submit.
@@ -172,7 +172,7 @@ Start-Sleep -Milliseconds 10}";
         }
         assert!(
             Instant::now() < deadline,
-            "20s 안에 CR(13) 보고가 안 왔다 — 제출 바이트가 도착하지 않았다. 지금까지: {}",
+            "no CR (13) report within 20s — the submit byte did not arrive. So far: {}",
             tail(&text)
         );
         std::thread::sleep(Duration::from_millis(20));
@@ -186,22 +186,22 @@ Start-Sleep -Milliseconds 10}";
             Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
         })
         .collect();
-    assert!(!reads.is_empty(), "자식이 read 를 하나도 보고하지 않았다");
+    assert!(!reads.is_empty(), "the child reported not a single read");
 
     let total: usize = reads.iter().map(|(n, _)| *n).sum();
     assert_eq!(
         total,
         BODY + 1,
-        "수신 총량이 본문+CR 과 다르다 — 유실/중복(읽은 줄: {})",
+        "the total received differs from body+CR — loss/duplication (lines read: {})",
         tail(&text)
     );
 
-    let (last_n, last_b) = *reads.last().expect("비지 않음");
+    let (last_n, last_b) = *reads.last().expect("not empty");
     assert_eq!(
         (last_n, last_b),
         (1, 13),
-        "★제출 바이트가 자기만의 read 로 도착하지 않았다★ — 본문 꼬리와 한 덩이로 묶였다(마지막 read = {last_n} 바이트, 끝 바이트 {last_b}). \
-         본문 드레인 {elapsed:?}. 이것이 SUBMIT_PACING 이 막으려는 바로 그 상태다. 읽은 줄: {}",
+        "★the submit byte did not arrive in its own read★ — it was bundled with the body tail into one chunk (last read = {last_n} bytes, last byte {last_b}). \
+         body drain {elapsed:?}. This is exactly the state SUBMIT_PACING is meant to prevent. Lines read: {}",
         tail(&text)
     );
 
@@ -243,7 +243,7 @@ while(($n=$stdin.Read($buf,0,$buf.Length)) -gt 0){}";
         let (session, _sink) = session_over(script);
         session
             .submit_input_observed(b"healthy-recipient")
-            .expect("★대조군★ 정상 수신자 상대 배달은 영수증이 나와야 한다");
+            .expect("★control group★ delivery to a normal receiver must produce a receipt");
         session.kill(Duration::from_secs(5));
     }
 
@@ -266,7 +266,7 @@ exit 0"
     let result = session.submit_input_observed(&vec![b'y'; 512 * 1024]);
     assert!(
         result.is_err(),
-        "★안 나간 본문에 배달 영수증이 나왔다★ — 원장이 '전송 실패' 를 '모델이 무시' 로 뒤집어 적는다: {result:?}"
+        "★a delivery receipt came out for a body that did not go out★ — the ledger records 'send failure' flipped as 'ignored by the model': {result:?}"
     );
 
     session.kill(Duration::from_secs(5));

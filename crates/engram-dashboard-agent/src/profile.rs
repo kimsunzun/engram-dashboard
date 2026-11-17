@@ -1,10 +1,10 @@
-//! 에이전트 프로필 — 재시작·세션 복원의 단일 진실원(single source of truth).
+//! Agent profiles — the single source of truth for restart and session restore.
 //!
-//! 이 모듈은 의도적으로 transport·claude 중립이다. claude 전용 인자 조립
-//! (`--session-id` / `--resume`)은 `backend/claude/`가 맡고, 여기엔 "무엇을 실행하고
-//! 어떤 세션을 이어받을지"라는 중립 데이터만 둔다.
+//! This module is intentionally transport- and claude-neutral. claude-only argument assembly
+//! (`--session-id` / `--resume`) is handled by `backend/claude/`, and here only neutral data about "what to run and
+//! which session to resume" is kept.
 //!
-//! tauri import 0 — 격리 규칙 준수.
+//! zero tauri imports — the isolation rule is kept.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -17,11 +17,11 @@ use uuid::Uuid;
 use crate::failure::AgentFailureKind;
 use crate::types::AgentId;
 
-// ── 중립 실행 명령 ─────────────────────────────────────────────────────────────
+// ── Neutral run command ─────────────────────────────────────────────────────────────
 
-/// 에이전트 출력 모드 — backend별 transport·codec 선택에 들어가는 프로필 축이다(ADR-0044).
-/// `Terminal` = PTY 대화형. `StreamJson` = JSON 기반 비터미널 모드이며 구체적인 교환
-/// 모양은 backend 가 정한다.
+/// Agent output mode — the profile axis that goes into per-backend transport and codec choice (ADR-0044).
+/// `Terminal` = PTY interactive. `StreamJson` = a JSON-based non-terminal mode, and the concrete exchange
+/// shape is decided by the backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum AgentOutputFormat {
     #[default]
@@ -29,16 +29,16 @@ pub enum AgentOutputFormat {
     StreamJson,
 }
 
-/// 여기선 분기 태그와 사용자 추가 인자만 보관한다.
+/// Here only the branch tag and the user's extra arguments are kept.
 ///
-/// ★이름 충돌★ — `protocol::AgentCommand` 는 뜻이 다르다(데몬에 보내는 wire 명령).
-/// 이 타입의 wire 미러는 `protocol::AgentSpawnCommand`, 프론트 미러는 `src/api/types.ts`
-/// 의 동명 타입이다. crate 를 빼고 "AgentCommand" 라 부르면 뜻이 안 정해진다.
+/// ★Name collision★ — `protocol::AgentCommand` means something different (the wire command sent to the daemon).
+/// The wire mirror of this type is `protocol::AgentSpawnCommand`, and the frontend mirror is the type of the same name in
+/// `src/api/types.ts`. Saying "AgentCommand" without the crate leaves the meaning undecided.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum AgentCommand {
-    /// claude CLI. `extra_args`는 세션 인자(`--session-id` 등)를 제외한 사용자 추가 인자.
-    /// `output_format` 은 `#[serde(default)]` 라 옛 프로필·기존 호출자는 Terminal 로 흡수돼 동작 불변.
+    /// claude CLI. `extra_args` are the user's extra arguments excluding session arguments (`--session-id` etc.).
+    /// `output_format` is `#[serde(default)]`, so old profiles and existing callers are absorbed as Terminal with behavior unchanged.
     Claude {
         extra_args: Vec<String>,
         #[serde(default)]
@@ -48,14 +48,14 @@ pub enum AgentCommand {
         program: String,
         args: Vec<String>,
     },
-    /// codex CLI. `extra_args` 는 backend 가 조립하는 인자(`--cd`·`-s`·`-a`)를 제외한
-    /// 사용자 추가 인자. `output_format` 이 없는 저장 JSON 은 `Terminal` 로 역직렬화한다.
+    /// codex CLI. `extra_args` are the user's extra arguments excluding the arguments the backend assembles
+    /// (`--cd`·`-s`·`-a`). Stored JSON without `output_format` deserializes as `Terminal`.
     ///
-    /// ★칸을 함부로 늘리지 않는다★: 이 enum 은 `#[serde(tag = "kind")]` 라 여기 적은 모양이 그대로
-    /// `agents.json` 에 앉는다 — 디스크에 박히는 계약이라 **덜 얼릴수록 싸다**. 샌드박스·승인 모드
-    /// 같은 값은 아직 `--help` 텍스트 등급이라(TRD §2) 지금 타입으로 굳히면 그 등급인 채로 굳는다.
-    /// 칸이 `extra_args` 하나뿐이던 것도 그 사유의 결정이었고(사용자 결정 2026-09-07), 모드 축을
-    /// 더하며 ADR-0194 가 그 자리만 갱신했다 — 사유는 그대로 산다.
+    /// ★Do not grow the fields carelessly★: this enum is `#[serde(tag = "kind")]`, so the shape written here sits
+    /// in `agents.json` as is — it is a contract baked onto disk, so **the less frozen, the cheaper**. Values such as the sandbox or approval mode
+    /// are still at the grade of `--help` text (TRD §2), and fixing them as types now would freeze them at that grade.
+    /// Having only the one field `extra_args` was also a decision for that reason (user decision 2026-09-07), and adding the mode axis,
+    /// ADR-0194 updated only that place — the reason still lives.
     Codex {
         extra_args: Vec<String>,
         #[serde(default)]
@@ -65,18 +65,18 @@ pub enum AgentCommand {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpawnMode {
-    /// 새 세션 시작(claude면 `--session-id <새 uuid>`).
+    /// Start a new session (for claude, `--session-id <new uuid>`).
     Fresh,
-    /// 기존 세션 이어받기(claude면 `--resume <backend_session_id>`).
+    /// Resume an existing session (for claude, `--resume <backend_session_id>`).
     Resume,
 }
 
-/// 자동 재시작 정책. **예약(reserved) — 죽은 필드 아님.** 동작은 미구현(게이트)이나
-/// ADR-0016이 "부팅 복원·가드 카운터·Failed 영속은 유효(추후 재검토)"로 명시한 미래 기능용
-/// seam이다. 미리 필드를 둬서 추후 schema/wire 마이그레이션 비용을 아낀다(H-3).
-/// ※제거 금지: agent→protocol wire(domain.rs)→ts-rs 바인딩→daemon 변환→프론트까지 걸쳐
-/// PROTOCOL_VERSION bump를 유발하고 ADR-0016 "추후 재검토" 의도와 충돌한다.
-/// "런타임 자동재시작" 해석만 폐기(ADR-0019) — 부팅 복원/가드/Failed는 유효.
+/// Auto-restart policy. **Reserved — not a dead field.** The behavior is unimplemented (gated), but it is the seam for a future feature
+/// that ADR-0016 states as "boot restore, guard counter and Failed persistence remain valid (to be revisited later)".
+/// Keeping the field in advance saves later schema/wire migration costs (H-3).
+/// ※Do not remove: it spans agent→protocol wire (domain.rs)→ts-rs bindings→daemon conversion→frontend,
+/// would cause a PROTOCOL_VERSION bump, and conflicts with the "to be revisited later" intent of ADR-0016.
+/// Only the "runtime auto-restart" interpretation is discarded (ADR-0019) — boot restore/guard/Failed remain valid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum RestartPolicy {
     Never,
@@ -85,7 +85,7 @@ pub enum RestartPolicy {
     Always,
 }
 
-// ── 복원 결과 ──────────────────────────────────────────────────────────────────
+// ── Restore result ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize)]
 pub struct RestoreReport {
@@ -94,139 +94,139 @@ pub struct RestoreReport {
     pub outcome: RestoreOutcome,
 }
 
-/// 프론트와 공유되므로 internally-tagged(discriminated union)로 직렬화.
+/// Shared with the frontend, so serialized internally-tagged (discriminated union).
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type")]
 pub enum RestoreOutcome {
-    /// `--resume` 성공 — 기존 대화 그대로 이어받음.
+    /// `--resume` succeeded — the existing conversation resumed as is.
     Resumed,
-    /// 이어받기 대상이 아니라 새 세션을 시작함(shell, 또는 sid 없는 claude). resume 아님(fable Mn-2).
+    /// Started a new session rather than a resume target (shell, or claude without a sid). Not a resume (fable Mn-2).
     Started,
-    /// resume 실패 → 새 세션으로 fallback. 어떤 sid가 폐기되고 새로 생겼는지 명시한다.
-    /// (silent stale 금지 — 무엇이 바뀌었는지 항상 가시화)
+    /// resume failed → fallback to a new session. States which sid was discarded and which was newly created.
+    /// (no silent stale — always make visible what changed)
     FreshFallback {
         old_sid: Option<Uuid>,
         new_sid: Uuid,
         reason: String,
     },
-    /// `auto_restore=false` 등으로 복원 대상이 아니어서 건너뜀.
+    /// Skipped because it is not a restore target, e.g. `auto_restore=false`.
     Blocked { reason: String },
-    /// fresh조차 실패 → 정지. 재귀 재시도 없는 종점(H-1.7).
+    /// Even fresh failed → stop. A terminal point without recursive retry (H-1.7).
     Failed { reason: String },
 }
 
-// ── 영속 프로필 ────────────────────────────────────────────────────────────────
+// ── Persistent profiles ────────────────────────────────────────────────────────────────
 
-/// 에이전트 1개의 영속 프로필 — `agents.json`에 저장되는 단위.
+/// The persistent profile of one agent — the unit stored in `agents.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentProfile {
-    /// 불변 키. 프로세스·세션이 바뀌어도 이 id는 평생 유지된다(프론트 구독 키).
+    /// Immutable key. This id stays for life even as processes and sessions change (the frontend subscription key).
     pub id: AgentId,
     pub name: String,
 
-    /// 사용자 지정 표시명 override(ADR-0061 리치화 — 트리 rename). **기존 `name` 과 별개 축**: `name` 은
-    /// CreateProfile 시 넘어온 이름(claude 프로필) 또는 ad-hoc spawn 의 cwd 문자열이라 "깔끔한 표시명"이
-    /// 아니다. `Some` → 그대로 표시, `None` → cwd basename 파생.
-    /// `#[serde(default)]` 라 이 필드 없는 옛 agents.json 은 `None` 으로 흡수(마이그레이션 불필요).
+    /// User-set display name override (ADR-0061 enrichment — tree rename). **A separate axis from the existing `name`**: `name` is
+    /// the name passed at CreateProfile (claude profiles) or the cwd string of an ad-hoc spawn, so it is not "a clean display
+    /// name". `Some` → shown as is, `None` → derived from the cwd basename.
+    /// `#[serde(default)]`, so an old agents.json without this field is absorbed as `None` (no migration needed).
     #[serde(default)]
     pub display_name: Option<String>,
 
-    /// 트리 계층의 부모 프로필 id. `Some(pid)` → 이 프로필은
-    /// pid 의 자식(트리에서 pid 밑에 들여쓰기), `None` → 최상위(루트). **1단 중첩만 허용**: 자식은 다시
-    /// 부모가 될 수 없고(cycle 방지 단순화), 부모는 반드시 루트여야 한다 — 검증은 `ProfileRegistry::try_reparent`.
-    /// `#[serde(default)]` 라 이 필드 없는 옛 agents.json 은 `None`(루트)으로 흡수(마이그레이션 불필요).
+    /// The parent profile id in the tree hierarchy. `Some(pid)` → this profile is
+    /// a child of pid (indented under pid in the tree), `None` → top level (root). **Only one level of nesting is allowed**: a child cannot become
+    /// a parent again (a simplification to prevent cycles), and the parent must be a root — validation is in `ProfileRegistry::try_reparent`.
+    /// `#[serde(default)]`, so an old agents.json without this field is absorbed as `None` (root) (no migration needed).
     // ADR-0072
     #[serde(default)]
     pub parent_id: Option<AgentId>,
 
     pub command: AgentCommand,
 
-    /// ★저장된 값은 **raw** 다 — 정규화되지 않는다(리뷰 fix N3 · load-bearing)★: 이 필드를 canonicalize
-    /// 하는 코드는 없다. 그래서 `"."`·`".."`·심링크·대소문자 다른 Windows 경로가 그대로 앉아 있을 수
-    /// 있고, 정규화는 이 값을 쓰는 쪽(spawn 의 `session.cwd`, `canonical_name_when_live`)이 각자 한다.
+    /// ★The stored value is **raw** — it is not normalized (review fix N3 · load-bearing)★: no code canonicalizes this field.
+    /// So `"."`·`".."`, symlinks and Windows paths with different case can sit as is,
+    /// and normalization is done by each side that uses this value (spawn's `session.cwd`, `canonical_name_when_live`).
     pub cwd: PathBuf,
 
-    /// ※자격증명 금지. persist 시 `*_KEY`/`*_TOKEN` 패턴은 경고한다(persistence).
+    /// ※No credentials. On persist, `*_KEY`/`*_TOKEN` patterns are warned about (persistence).
     pub env: Vec<(String, String)>,
 
-    /// 현재 백엔드 세션 id. **가변** — 화신의 첫 사용자 턴이 나가기 직전에 적히고(ADR-0226), `/clear`
-    /// 등으로 바뀌면 session_tracker watcher가 갱신한다. None이면 이어받을 대화가 없다는 뜻.
+    /// The current backend session id. **Mutable** — written right before the incarnation's first user turn goes out (ADR-0226), and when it changes via `/clear`
+    /// etc. the session_tracker watcher updates it. None means there is no conversation to resume.
     ///
-    /// ★이름이 중립인 것은 의도★ — **누가 id 를 뽑는지를 말하지 않는다.** claude 는 우리가 정한
-    /// id 를 `--session-id` 로 건네받고, codex 는 자기가 뽑은 id 를 우리에게 알린다. 어느 쪽이든
-    /// 「그 백엔드의 세션 이름공간에 있는 id」라는 뜻은 같다.
-    /// ※2026-09-07 까지 이 칸의 이름은 `claude_session_id` 였다(디스크·wire 포함).
-    ///   하위호환 shim 을 두지 않은 근거 = `docs/tracking.md` T-33 · S21 TRD §6-1.
+    /// ★The name being neutral is intended★ — **it does not say who draws the id.** claude receives the id we chose
+    /// through `--session-id`, and codex tells us the id it drew itself. Either way,
+    /// the meaning 「an id in that backend's session namespace」 is the same.
+    /// ※Until 2026-09-07 this field was named `claude_session_id` (including disk and wire).
+    ///   The grounds for having no backward-compatibility shim = `docs/tracking.md` T-33 · S21 TRD §6-1.
     pub backend_session_id: Option<Uuid>,
 
-    /// fallback·clear로 폐기된 과거 세션 id 이력(감사·디버깅용).
+    /// History of past session ids discarded by fallback or clear (for audit and debugging).
     pub old_session_ids: Vec<Uuid>,
 
-    /// ★화신(incarnation) 하나를 가리키는 **불투명 표식**★ — 순서에 뜻이 없다. 물어야 할 질문은 오직
-    /// "지금 읽고 있는 출력 스트림이 아까 그 스트림과 같은가" 이고, 답은 같다/다르다 둘뿐이다. 그래서
-    /// 비교는 **일치/불일치만** 쓴다 — 두 값의 대소로 "더 새 것" 을 유도하지 말 것(값은 화신마다 새로
-    /// 뽑은 난수라 그 유도가 성립하지 않는다 — `ProfileRegistry::epoch_for_spawn`).
+    /// ★**An opaque marker** pointing at one incarnation★ — its order has no meaning. The only question to ask is
+    /// "is the output stream being read now the same as that earlier stream", and the answer is only same/different. So
+    /// comparison uses **only match/mismatch** — do not derive "newer" from the ordering of two values (the value is a random number drawn anew
+    /// per incarnation, so that derivation does not hold — `ProfileRegistry::epoch_for_spawn`).
     ///
-    /// ★읽기를 건너뛰는 것이 의미의 일부다★: 화신은 이 데몬 프로세스보다 오래 살지 못하므로 그 표식을
-    ///   디스크에서 되살리지 않는다. 되살리면 재기동한 데몬이 복원한 에이전트에 **옛 표식**을 다시 입혀,
-    ///   붙어 있던 클라이언트가 "같은 스트림" 으로 오인하고 옛 진도 커서를 유지한다 — 새 세션의 프레임은
-    ///   0 부터 다시 매겨지므로 통째로 dedup 탈락하고 그 슬롯은 앱을 다시 띄울 때까지 빈 채로 남는다.
-    ///   값이 안 실린 옛 `agents.json` 도, 옛 카운터가 실려 있는 `agents.json` 도 그대로 읽힌다
-    ///   (읽기를 건너뛰므로 그 값은 무시된다 — 마이그레이션 불요).
-    /// ★그런데 쓰기는 건너뛰지 않는다 — 키는 `0` 으로 실어 보낸다★: 앞 릴리스의 구조체는 이 필드를
-    ///   **필수**로 선언했으므로 키가 없는 파일을 읽으면 `missing field` 로 파싱이 깨진다. 그러면 그
-    ///   릴리스의 persistence 가 파일을 `.corrupt-<ts>` 로 치우고 빈 목록으로 시작하고, 다음 save 가 그 빈
-    ///   목록을 덮어써 프로필·세션 id·트리 부모가 통째로 사라진다(이 빌드를 한 번 돌린 뒤 되돌리기·재설치하는
-    ///   경로에서 실제로 성립한다). `0` 인 이유 = 옛 카운터의 "한 번도 재spawn 안 함" 상태라 옛
-    ///   바이너리가 그대로 믿어도 무해하다 — 산 난수를 실어 보내면 그게 카운터 자리에 앉는다.
-    /// 프론트 구독 deps 에는 이 값을 넣지 않는다 — 재부착 계기는 화신 표식이 아니라 권위 명부
-    /// 관측이다(ADR-0164 결정 8).
+    /// ★Skipping the read is part of the meaning★: an incarnation cannot outlive this daemon process, so its marker
+    ///   is not revived from disk. Reviving it would have a restarted daemon put **the old marker** back on restored agents,
+    ///   and an attached client would mistake it for "the same stream" and keep its old progress cursor — the new session's frames
+    ///   are numbered again from 0, so they are dropped wholesale by dedup and that slot stays empty until the app is relaunched.
+    ///   An old `agents.json` without the value and an `agents.json` carrying the old counter are both read as is
+    ///   (the read is skipped, so that value is ignored — no migration needed).
+    /// ★But the write is not skipped — the key is sent as `0`★: the previous release's struct declared this field
+    ///   as **required**, so reading a file without the key breaks parsing with `missing field`. Then that
+    ///   release's persistence moves the file aside to `.corrupt-<ts>` and starts with an empty list, and the next save overwrites with that empty
+    ///   list, making the profiles, session ids and tree parents disappear wholesale (this actually holds on the path of running this build once and then
+    ///   reverting or reinstalling). Why `0` = it is the old counter's "never respawned" state, so an old
+    ///   binary trusting it as is is harmless — sending a live random number would make it sit in the counter's place.
+    /// This value is not put into the frontend subscription deps — the reattach trigger is not the incarnation marker but observation of the authoritative
+    /// roster (ADR-0164 decision 8).
     // ADR-0007, ADR-0163, ADR-0164
     #[serde(skip_deserializing, serialize_with = "serialize_zero_placeholder")]
     pub epoch: u32,
 
-    /// ★이 항목이 마지막으로 활성화에 실패한 종류★ — `None` = 실패 기록 없음. 사전 판정 결과가 아니라
-    /// **시도한 자리에서 관측된 사실**이고(ADR-0172 결정 1), 지금 상태(`AgentStatus`)와 별개 축이다.
+    /// ★The kind of the last activation failure of this entry★ — `None` = no failure record. Not a pre-decision result but
+    /// **a fact observed at the place it was attempted** (ADR-0172 decision 1), and an axis separate from the current state (`AgentStatus`).
     ///
-    /// ★`#[serde(skip)]` 가 의미의 일부다(위 `epoch` 의 읽기 건너뛰기와 결이 같다, 다른 근거)★: 데몬을 내리면 그
-    ///   세션들도 함께 죽으므로 옛 실패를 디스크로 붙들 이유가 없다 — 수명을 **데몬 수명**으로 못박는
-    ///   것이 이 skip 이다(ADR-0171 3층). 파일 규격 변경·하위 호환 처리도 함께 면제된다.
-    /// ★타입에 serde 파생이 아예 없다★ — 그래서 이 skip 을 지우는 변경은 컴파일에 실패한다
-    ///   (`failure::AgentFailureKind` 주석).
-    /// ★쓰는 지점은 하나뿐★: `manager::AgentManager::note_activation_result`(활성화 성공=지움 /
-    ///   실패=기록). 그 함수 주석이 「왜 활성화 성공인가」의 정본이다. 호출자를 늘리면 인과가 갈라진다 —
-    ///   턴 관측 정리 지점을 둘로 못박은 ADR-0127 과 같은 이유다.
-    /// ★스냅샷이 되돌리지 못한다★: `upsert_preserving_hierarchy` 가 live 값을 보존한다(화신 표식
-    ///   `epoch` 과 같은 인과 — spawn 호출부가 넘기는 옛 사본이 그 사이 기록된 실패나 지움을 덮으면 안 된다).
+    /// ★`#[serde(skip)]` is part of the meaning (in the same vein as the read skip of `epoch` above, on different grounds)★: when the daemon is brought down,
+    ///   those sessions die with it, so there is no reason to hold old failures on disk — this skip pins the lifetime
+    ///   to **the daemon's lifetime** (ADR-0171 layer 3). It also exempts file format changes and backward-compatibility handling.
+    /// ★The type has no serde derive at all★ — so a change deleting this skip fails to compile
+    ///   (the `failure::AgentFailureKind` comment).
+    /// ★There is only one writing point★: `manager::AgentManager::note_activation_result` (activation success = clear /
+    ///   failure = record). That function's comment is the canonical source of 「why activation success」. Adding callers splits the causality —
+    ///   the same reason as ADR-0127 pinning the turn observation cleanup points to two.
+    /// ★A snapshot cannot revert it★: `upsert_preserving_hierarchy` keeps the live value (the same causality as the incarnation marker
+    ///   `epoch` — the old copy the spawn caller passes must not overwrite a failure or clear recorded in between).
     // ADR-0172
     #[serde(skip)]
     pub last_failure: Option<AgentFailureKind>,
 
     pub auto_restore: bool,
 
-    /// 자동 재시작 정책. **예약(reserved)** — 동작 미구현(게이트), 제거 금지(RestartPolicy 주석 참조).
+    /// Auto-restart policy. **Reserved** — behavior unimplemented (gated), do not remove (see the RestartPolicy comment).
     #[serde(default)]
     pub restart_policy: RestartPolicy,
 
-    /// 크래시 가드 카운터. **예약(reserved)** — 동작 미구현, ADR-0016 "추후 재검토" 유효.
+    /// Crash guard counter. **Reserved** — behavior unimplemented, ADR-0016 "to be revisited later" valid.
     #[serde(default)]
     pub restart_count: u32,
 
-    /// Failed(자동복원 suspend) 사유 — 콜드부팅 넘어 영속, 수동 깨우기 전까지 자동복원 제외(ADR-0016).
-    /// **예약(reserved)** — 동작 미구현이나 ADR-0016에서 유효, 제거 금지(wire/바인딩 동반 + 버전 bump).
+    /// Failed (auto-restore suspend) reason — persisted across cold boots, excluded from auto-restore until a manual wake-up (ADR-0016).
+    /// **Reserved** — behavior unimplemented but valid in ADR-0016, do not remove (comes with wire/bindings + version bump).
     #[serde(default)]
     pub failed_reason: Option<String>,
 
     pub created_at: i64,
     pub last_active: i64,
 
-    /// 마지막 프로세스 기동 시각(기록·디버깅용, 리셋 판정엔 미사용). epoch millis. 없으면 None.
+    /// Last process start time (for records and debugging, not used for reset decisions). epoch millis. None if absent.
     #[serde(default)]
     pub last_start_at: Option<i64>,
 }
 
 impl AgentProfile {
-    /// 세션 id는 최초 spawn 시 ProfileRegistry가 생성한다(여기서 만들지 않음).
+    /// The session id is created by ProfileRegistry at the first spawn (not made here).
     pub fn new(
         name: String,
         command: AgentCommand,
@@ -257,38 +257,38 @@ impl AgentProfile {
         }
     }
 
-    /// ★이 프로필이 **다시 뜨면 갖게 될 canonical 이름**(load-bearing)★ — 복원된 세션이 갖는 산 canonical
-    /// 이름과 **글자 그대로 같아야** 한다(갈리면 이 값을 키로 쓴 잠듦 파킹이 주인을 못 찾는다).
+    /// ★The **canonical name this profile will have when it comes up again** (load-bearing)★ — it must be **literally the same** as the live canonical
+    /// name the restored session has (if they diverge, asleep parking keyed by this value cannot find its owner).
     ///
-    /// ★산 세션과 같은 규칙 = `canonical_name_or_id_fallback`(+ canonicalize 된 cwd)★:
-    ///   - `manager::resolve_canonical_name` 이 산 세션에 쓰는 그 함수다. `name::resolve_display_name` 은
-    ///     **아니다** — 그건 빈/공백-only override 를 그대로 이름으로 쓰고 basename 이 placeholder(경로 없음)
-    ///     일 때 id 로 degrade 하지도 않아, 두 엣지에서 산 이름과 갈린다.
-    ///   - cwd 도 산 세션과 같은 표기여야 한다: spawn 은 `dunce::canonicalize(profile.cwd)` 한 값을
-    ///     session.cwd 로 쓰고, 프로필 쪽 `cwd` 에는 raw 값(`.`·`..`·심링크·대소문자 다른 Windows 경로)이
-    ///     들어올 수 있다. 그래서 여기서도 **같은 정규화**를 하고, 실패하면(경로가 이미 사라졌으면)
-    ///     spawn 과 동일하게 원본으로 degrade 한다.
-    /// ★fs 접근은 **override 가 없을 때만** 있다(순수 아님)★: canonicalize 는 실제 파일시스템을 본다 —
-    ///   그래서 이 동사는 이름 파생 순수 코어(`name.rs`)가 아니라 프로필 쪽에 있다.
-    /// ★override 단축은 최적화가 아니다 — 지우지 말 것★: `display_name` 이 비공백이면 canonical 이름은
-    ///   **파일시스템에 전혀 의존하지 않는다**(산 세션 규칙도 override 를 그대로 쓴다). 그래서 그 경우
-    ///   syscall 을 아예 하지 않는다. 지우면 ① cwd 디렉터리가 사라진 프로필의 이름이 raw 로 degrade 해
-    ///   잠듦 시점에 파생된 이름과 갈리고 ② cwd 가 죽은 네트워크 공유(SMB)면 canonicalize 한 번이 수십 초
-    ///   블록이라 호출자 경로에 그 지연이 붙는다.
-    /// ★남는 갭(알고 수용)★: **override 가 없는데 cwd 가 사라진** 프로필은 여전히 raw degrade 라 잠듦 시점
-    ///   이름과 갈릴 수 있다. 막으려면 이름 키 파킹 자체를 재설계해야 해서(새 결정 소관) 여기서 몰래
-    ///   바꾸지 않는다.
-    // ADR-0101 (WYSIWYA) / ADR-0116 (결정 1 — 잠듦 파킹 키)
+    /// ★The same rule as a live session = `canonical_name_or_id_fallback` (+ the canonicalized cwd)★:
+    ///   - It is the function `manager::resolve_canonical_name` uses for live sessions. `name::resolve_display_name` is
+    ///     **not** it — that one uses an empty/whitespace-only override as the name as is and does not degrade to the id when the basename is
+    ///     the placeholder (no path), so it diverges from the live name on two edges.
+    ///   - The cwd must also be in the same notation as the live session: spawn uses the value of `dunce::canonicalize(profile.cwd)` as
+    ///     session.cwd, while the profile-side `cwd` can hold a raw value (`.`·`..`, symlinks, Windows paths with different case).
+    ///     So **the same normalization** is done here too, and if it fails (the path is already gone), it
+    ///     degrades to the original just like spawn.
+    /// ★There is fs access **only when there is no override** (not pure)★: canonicalize looks at the real file system —
+    ///   so this verb is on the profile side, not in the pure name-derivation core (`name.rs`).
+    /// ★The override shortcut is not an optimization — do not delete it★: when `display_name` is non-blank, the canonical name
+    ///   **does not depend on the file system at all** (the live session rule also uses the override as is). So in that case
+    ///   no syscall is made at all. Deleting it would ① make the name of a profile whose cwd directory vanished degrade to raw and
+    ///   diverge from the name derived at asleep time, and ② if the cwd is a dead network share (SMB), one canonicalize blocks for tens of seconds
+    ///   and that delay attaches to the caller's path.
+    /// ★The remaining gap (known and accepted)★: a profile **without an override whose cwd vanished** still degrades to raw, so it can diverge from the asleep-time
+    ///   name. Preventing it would require redesigning name-keyed parking itself (a new decision's concern), so it is not changed
+    ///   secretly here.
+    // ADR-0101 (WYSIWYA) / ADR-0116 (decision 1 — the asleep parking key)
     pub fn canonical_name_when_live(&self) -> String {
-        // 산 세션 규칙(`canonical_name_or_id_fallback`)의 첫 분기와 **글자 그대로 같다**(비공백이면 trim
-        //   하지 않고 원본 그대로가 이름).
+        // **Literally the same** as the first branch of the live session rule (`canonical_name_or_id_fallback`) (if non-blank, no trim
+        //   — the original as is is the name).
         if let Some(n) = self.display_name.as_deref() {
             if !n.trim().is_empty() {
                 return n.to_string();
             }
         }
-        // ★답을 바꿀 수 없는 syscall 은 하지 않는다★: cwd 가 빈/공백-only 면 basename 이 placeholder 라
-        //   결과는 canonicalize 성공/실패와 무관하게 id 앞 8자다(`canonical_name_or_id_fallback` degrade).
+        // ★Syscalls that cannot change the answer are not made★: if the cwd is empty/whitespace-only, the basename is the placeholder, so
+        //   the result is the first 8 characters of the id regardless of canonicalize success/failure (`canonical_name_or_id_fallback` degrade).
         let raw = self.cwd.to_string_lossy();
         if raw.trim().is_empty() {
             return crate::name::canonical_name_or_id_fallback(None, &raw, self.id);
@@ -298,84 +298,87 @@ impl AgentProfile {
     }
 }
 
-// ── 영속화 추상화 ──────────────────────────────────────────────────────────────
+// ── Persistence abstraction ──────────────────────────────────────────────────────────────
 
-/// 저장소가 판정으로 저장을 거절한 까닭. [`crate::preset::PresetStore`] 도 같은 타입을 쓴다.
+/// The reason the store refused a save by decision. [`crate::preset::PresetStore`] uses the same type.
 // ADR-0291 R2 · R8
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
-    /// 이 빌드보다 새 판(`found`)이 쓴 파일이다 — 읽지도 덮지도 떠 두지도 않는다.
+    /// A file written by a newer edition (`found`) than this build — it is neither read, overwritten nor copied aside.
     Newer { found: u64 },
-    /// 파일을 못 읽었다(잠김 예산 뒤 · 권한 · 그 밖 IO) — 무엇이 들었는지 몰라 덮지 않는다.
+    /// The file could not be read (after the lock budget · permissions · other IO) — not knowing what it holds, it is not overwritten.
     Unreadable,
 }
 
 impl std::fmt::Display for Refusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Refusal::Newer { found } => write!(f, "이 빌드보다 새 판({found})이 쓴 파일"),
-            Refusal::Unreadable => f.write_str("파일을 못 읽음"),
+            Refusal::Newer { found } => write!(
+                f,
+                "a file written by a newer edition ({found}) than this build"
+            ),
+            Refusal::Unreadable => f.write_str("the file could not be read"),
         }
     }
 }
 
-/// [`ProfileStore::save`] · [`crate::preset::PresetStore::save`] 의 실패.
+/// Failure of [`ProfileStore::save`] · [`crate::preset::PresetStore::save`].
 ///
-/// ★거절은 어디서 났나로 두 변형이다★ — 호출자에게 할 일이 갈린다: 적재 거절은 데몬을 다시 띄워야 풀리고, 재판정
-/// 거절은 다음 저장이 다시 판정한다(못 읽음은 대개 잠깐 쥔 잠김이라 조금 뒤 다시 하면 된다).
+/// ★A refusal has two variants by where it came from★ — what the caller should do differs: a load refusal clears only when the daemon is restarted, and a re-decision
+/// refusal is decided again by the next save (unreadable is usually a briefly held lock, so retrying a little later works).
 // ADR-0291 R17
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
-    /// 적재 판정이 거절한 저장소다 — 이 실행 내내 저장하지 않는다(저장소 `status()` 의 [`StoreStatus::ReadOnly`]).
-    #[error("저장 거절(적재 때부터 이 실행 내내) — {0}")]
+    /// A store the load decision refused — it does not save for this whole run (the [`StoreStatus::ReadOnly`] of the store's `status()`).
+    #[error("save refused (since load, for this whole run) — {0}")]
     ReadOnly(Refusal),
-    /// 이번 저장 직전의 재판정이 거절했다 — 다음 저장이 다시 판정한다(저장소 `status()` 의
+    /// The re-decision right before this save refused — the next save decides again (of the store's `status()`
     /// [`StoreStatus::Refusing`]).
-    #[error("저장 거절(쓰기 직전 재판정) — {0}")]
+    #[error("save refused (re-decision right before writing) — {0}")]
     Refused(Refusal),
-    /// 쓰기(덮기 전 떠 두기 · 쓰기 상한 포함)가 실패했다 — 파일은 그대로다.
-    #[error("저장 실패 — {0}")]
+    /// The write (including the copy-aside before overwriting · the write cap) failed — the file is left as is.
+    #[error("save failed — {0}")]
     Io(std::io::Error),
 }
 
-/// 저장소의 지금 상태.
+/// The current state of the store.
 // ADR-0291 R17 (D6)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StoreStatus {
     #[default]
     Writable,
-    /// 적재 판정이 거절했다 — 이 실행 내내 저장하지 않는다. 데몬을 다시 띄워야 풀린다.
+    /// The load decision refused — it does not save for this whole run. Restarting the daemon clears it.
     ReadOnly(Refusal),
-    /// 적재는 됐는데 마지막 저장의 재판정이 거절했다 — 다음 저장이 다시 판정하고, 성공하면 풀린다.
+    /// Loaded, but the re-decision of the last save refused — the next save decides again and clears it on success.
     Refusing(Refusal),
 }
 
-/// persistence 모듈이 구현한다. trait 주입으로 headless 테스트 시 in-memory store를 끼울 수 있다.
+/// Implemented by the persistence module. Trait injection lets headless tests plug in an in-memory store.
 pub trait ProfileStore: Send + Sync + 'static {
-    /// 전체 스냅샷을 atomic하게 저장한다. 실패의 로그는 구현이 낸다 — 호출자는 `Err` 로 흐름만 가른다.
+    /// Saves the whole snapshot atomically. The implementation logs the failure — the caller only branches the flow on `Err`.
     fn save(&self, profiles: &[AgentProfile]) -> Result<(), StoreError>;
-    /// 부팅 시 1회 로드. 없음 · 손상 · 거절이면 빈 목록.
+    /// Loaded once at boot. Empty list if missing, damaged or refused.
     fn load(&self) -> Vec<AgentProfile>;
-    /// 기본 = 늘 쓸 수 있음(거절하지 않는 저장소).
+    /// Default = always usable (a store that never refuses).
     fn status(&self) -> StoreStatus {
         StoreStatus::Writable
     }
 }
 
-// ── 계층 정규화(ADR-0072) ────────────────────────────────────────────────────────
+// ── Hierarchy normalization (ADR-0072) ────────────────────────────────────────────────────────
 
-/// 맵 전체를 "유효한 1단 forest" 불변식으로 강제 복구한다 — **변경을 저장 · 커밋하기 직전**(`mutate` ·
-/// `mutate_if` · `try_mutate` · `try_mutate_if`)에 lock 보유 중 호출된다.
+/// Forcibly restores the whole map to the "valid one-level forest" invariant — called while holding the lock **right before saving and committing a change**
+/// (`mutate` · `mutate_if` · `try_mutate` · `try_mutate_if`).
 ///
-/// ★왜 경로마다가 아니라 경계에서★: reparent 는 자체 검증이 있지만 upsert/update_with 는 임의
-/// parent_id 를 받고(cycle·dangling), spawn 은 stale 스냅샷을 재삽입해 그 사이 삭제된 부모를 되살린다.
-/// 검증을 reparent 에만 두면 이 경로들이 우회해 cycle·dangling 을 persist 한다.
+/// ★Why at the boundary and not per path★: reparent has its own validation, but upsert/update_with accept arbitrary
+/// parent_ids (cycle · dangling), and spawn reinserts a stale snapshot, reviving a parent deleted in between.
+/// Keeping validation only in reparent would let these paths bypass it and persist cycles and dangling references.
 ///
-/// **idempotent**: 이미 유효한 1단 forest(정상 reparent 결과)는 어떤 규칙에도 걸리지 않아 그대로
-/// 살아남는다 — 두 번 돌려도 결과가 같다.
+/// **idempotent**: an already-valid one-level forest (the result of a normal reparent) trips none of the rules and survives
+/// as is — running it twice gives the same result.
 fn normalize_hierarchy(map: &mut HashMap<AgentId, AgentProfile>) {
-    // 판정은 변경 전 스냅샷 기준(같은 pass 안에서의 clear 가 다른 노드 판정을 오염시키지 않게).
-    // has_own_parent(= 자식) 과 is_a_parent(= 자식을 가진 노드) 를 섞으면 정상 자식이 오검출된다.
+    // The decision is based on the pre-change snapshot (so a clear within the same pass does not pollute the decision of other nodes).
+    // Mixing has_own_parent (= a child) and is_a_parent (= a node that has children) would misdetect normal children.
     let existing: std::collections::HashSet<AgentId> = map.keys().copied().collect();
     let has_own_parent: std::collections::HashSet<AgentId> = map
         .values()
@@ -406,35 +409,35 @@ fn normalize_hierarchy(map: &mut HashMap<AgentId, AgentProfile>) {
 
 // ── ProfileRegistry ────────────────────────────────────────────────────────────
 
-/// 프로필 인메모리 **단일 소유자**. 모든 CRUD·세션 id 갱신이 이곳을 거치고,
-/// 변경 즉시 store로 영속화한다. 세션 id의 생성·갱신 책임도 여기 있다(spawn_agent 아님 — H-1.4).
+/// The in-memory **single owner** of profiles. All CRUD and session id updates go through here and
+/// are persisted to the store immediately on change. The responsibility for creating and updating session ids is also here (not spawn_agent — H-1.4).
 ///
-/// **변경 입구는 둘이다 — 저장의 `Err` 를 누가 받나로 가른다:**
-/// - `try_` 로 시작하는 동사 = **부르는 쪽 있는 변경**(버스 · WS · 그 둘이 부른 띄우기). 사본에 적용 → 계층
-///   정규화 → 저장 → 성공일 때만 커밋한다. `Err`(거절 · 쓰기 실패 어느 쪽이든)면 메모리를 그대로 두고 돌려준다
-///   — 「바꿨다」고 믿은 변경이 재시작에 사라지지 않게. 저장을 먼저 묻고 적용하는 꼴로 바꾸지 말 것 — 묻기와
-///   저장 사이의 쓰기 실패(디스크 가득 · rename 잠김 예산 초과)가 다시 「메모리만 바뀜」을 만든다.
-/// - 그 밖의 변경 동사 = **부르는 쪽 없는 변경**(첫 제출 래치 · 파일 감시자 · reaper · 띄운 뒤 `auto_restore`
-///   올리기 · 부팅 복원). 저장의 어떤 `Err` 에도 커밋하고 dirty 를 세운다 — 결과를 받아 되돌릴 요청이 없고,
-///   버리면 reaper 의 `auto_restore=false` 가 사라져 죽은 에이전트가 다음 부팅 복원에 되살아나고 래치의 세션
-///   id 가 사라진다. 새 판 · 못 읽는 파일 위에 dirty 명부를 쓰지 않는 것은 매 저장의 재판정(저장소)이 지킨다.
+/// **There are two change entries — split by who receives the save's `Err`:**
+/// - Verbs starting with `try_` = **changes with a caller** (bus · WS · launches those two called). Applied to a copy → hierarchy
+///   normalization → save → committed only on success. On `Err` (either refusal or write failure), memory is left as is and the error returned
+///   — so a change believed to be 「changed」 does not vanish on restart. Do not change it into the shape of asking about the save first and then applying — a write failure
+///   between asking and saving (disk full · rename lock budget exceeded) would again create 「only memory changed」.
+/// - Other change verbs = **changes without a caller** (first-submission latch · file watcher · reaper · raising `auto_restore` after launching
+///   · boot restore). They commit on any save `Err` and set dirty — there is no request to receive the result and revert,
+///   and dropping them would lose the reaper's `auto_restore=false`, reviving dead agents at the next boot restore, and lose the latch's session
+///   id. Not writing a dirty registry over a newer-edition or unreadable file is guarded by the re-decision of every save (the store).
 ///
-/// 불변식 = 메모리 명부 = 마지막으로 성공한 저장 + (dirty 면) 그 뒤에 커밋한 변경.
+/// Invariant = in-memory registry = the last successful save + (if dirty) the changes committed after it.
 ///
-/// 락 규율: 디스크 IO(`store.save`)를 profiles lock **보유 중에** 한다.
-/// ★save 를 lock 밖으로 빼지 말 것(§5 동시성 정합성 > lock-hold 시간)★: lock 안에서 스냅샷만 뜨고 푼 뒤
-/// save 하면 두 mutation 이 겹칠 때 "A 스냅샷 → unlock → B 스냅샷 → unlock → B save → A save"
-/// 순서로 인메모리·broadcast 는 최신(B)인데 디스크는 stale(A)로 남아, 재시작 시 옛 값이 로드된다
-/// (persisted ≠ observed). §5 로 LLM/오케스트레이터가 rename/create/delete 를
-/// **프로그래밍적으로 동시·연속** 호출하면 사람은 못 여는 이 창을 실제로 친다.
-/// **데드락 없음(ADR-0006 무관):** `store.save` 는 저장소 상태 칸(잎 락 — 쥔 채 IO 를 하지 않는다)만 잡고
-/// registry 로 재진입하지 않는다 → 락 순서는 `profiles(dirty 포함) → 저장소 상태 칸` 단방향, 순환 없음. profiles lock 은
-/// 세션(sessions/core/status) 락 도메인과도 분리라 그 순서에 얽히지 않는다. lock 보유 중 IO 는 보통 작은 파일
-/// 읽기(저장 직전 재판정) 한 번 + 쓰기이고, 그 파일이 잠긴 동안만 다시 하기로 최악 약 0.4 초 길어진다
+/// Lock discipline: disk IO (`store.save`) happens **while holding** the profiles lock.
+/// ★Do not move save outside the lock (§5 concurrency consistency > lock-hold time)★: taking only a snapshot inside the lock and saving
+/// after releasing it would, when two mutations overlap in the order "A snapshot → unlock → B snapshot → unlock → B save → A save",
+/// leave the in-memory state and broadcast at the latest (B) while the disk stays stale (A), loading the old value on restart
+/// (persisted ≠ observed). Under §5, when an LLM/orchestrator calls rename/create/delete
+/// **programmatically, concurrently and in succession**, it actually hits this window that a human cannot open.
+/// **No deadlock (unrelated to ADR-0006):** `store.save` takes only the store-state field (a leaf lock — it does no IO while held) and
+/// does not re-enter the registry → the lock order is `profiles (including dirty) → store-state field` one-way, no cycle. The profiles lock is
+/// also separate from the session (sessions/core/status) lock domain, so it does not tangle with that order. IO while holding the lock is usually one small file
+/// read (the re-decision right before saving) + a write, and only while that file is locked does retrying make it longer, about 0.4 seconds at worst
 /// (ADR-0291 · D4).
-/// ★**「그래도 lock-hold 를 줄이자」는 재론은 ADR-0207 이 닫았다**★ — 그 비용을 *수용*한 자리는
-/// ADR-0071:27 이고(이 주석이 아니다 — 여기는 IO 비용만 말한다), 0207 은 ① 줄일 대상이 측정된 적이
-/// 없고 ② 이 save 가 수명 이벤트에서만 돈다는 근거로 현상 유지를 재확인했다. 되열리는 조건도 거기 있다.
+/// ★**Reopening 「let us reduce lock-hold anyway」 was closed by ADR-0207**★ — the place that *accepted* that cost is
+/// ADR-0071:27 (not this comment — here only the IO cost is discussed), and 0207 reconfirmed the status quo on the grounds that ① what would be reduced has never been
+/// measured and ② this save runs only on lifetime events. The conditions for reopening are there too.
 // ADR-0291 R17 (D2 · E1)
 pub struct ProfileRegistry {
     profiles: Mutex<Profiles>,
@@ -443,12 +446,12 @@ pub struct ProfileRegistry {
 
 type ProfileMap = HashMap<AgentId, AgentProfile>;
 
-/// 명부와 그 저장 상태 — 한 락 아래 둔다(세우고 지우는 자리가 전부 그 락을 쥔 변경 경로 안이다).
+/// The registry and its save state — kept under one lock (every place that sets and clears them is inside a change path holding that lock).
 struct Profiles {
     map: ProfileMap,
-    /// 커밋한 변경의 저장이 실패했다 — 메모리가 디스크보다 앞섰을 수 있다. 다음 성공 저장(어느 입구든 — 저장은
-    /// 늘 맵 전체를 쓴다)이 싣고 지운다. 부르는 쪽 있는 변경의 `Err` 는 지우지 않는다(그 메모리는 그대로라).
-    /// ★종료 때 남은 것은 잃는다 — 종료 경로에 마지막 저장을 더하지 않는다(지금 동작 그대로)★.
+    /// The save of a committed change failed — memory may be ahead of the disk. The next successful save (from any entry — a save
+    /// always writes the whole map) carries it and clears this. The `Err` of a change with a caller does not clear it (that memory is left as is).
+    /// ★What remains at exit is lost — no last save is added to the exit path (current behavior as is)★.
     // ADR-0291 (D2 · E1)
     dirty: bool,
 }
@@ -467,7 +470,7 @@ impl ProfileRegistry {
         self.profiles.lock().expect("profiles poisoned")
     }
 
-    /// 부르는 쪽 없는 변경의 공통 경로 — 클로저 커밋과 save 가 한 임계구역이고, 저장 결과와 무관하게 커밋한다.
+    /// The common path of changes without a caller — the closure commit and save are one critical section, and it commits regardless of the save result.
     fn mutate<R>(&self, f: impl FnOnce(&mut ProfileMap) -> R) -> R {
         let mut guard = self.lock();
         let result = f(&mut guard.map);
@@ -477,16 +480,16 @@ impl ProfileRegistry {
         result
     }
 
-    /// `mutate` 의 조건부 변형 — 클로저가 `true`(실제 변경 있음)를 반환하거나 dirty 일 때만 save 한다.
-    /// ★dirty 동안에는 변경 없는 호출도 profiles 락을 쥔 채 디스크 IO(재판정 읽기 + 쓰기)를 한다★ — 밀린 변경을
-    /// 싣는 대가다(ADR-0291 D4 의 락 안 시간이 그만큼 잦아진다).
+    /// The conditional variant of `mutate` — saves only when the closure returns `true` (there was an actual change) or when dirty.
+    /// ★While dirty, even calls without a change do disk IO (re-decision read + write) while holding the profiles lock★ — the price of carrying
+    /// the pending change (the in-lock time of ADR-0291 D4 becomes that much more frequent).
     fn mutate_if(&self, f: impl FnOnce(&mut ProfileMap) -> bool) -> bool {
         let mut guard = self.lock();
         let changed = f(&mut guard.map);
         if changed {
             normalize_hierarchy(&mut guard.map);
         }
-        // 밀린 변경을 다음 「변경 있는」 저장까지 미루지 않는다.
+        // The pending change is not deferred until the next save 「with a change」.
         // ADR-0291 (D2)
         if changed || guard.dirty {
             self.persist(&mut guard);
@@ -494,18 +497,18 @@ impl ProfileRegistry {
         changed
     }
 
-    /// 커밋된 맵을 저장한다 — 실패하면 메모리 변경은 남기고 dirty 를 세운다. 실패 로그는 저장소가 낸다.
+    /// Saves the committed map — on failure the memory change is kept and dirty is set. The store logs the failure.
     fn persist(&self, profiles: &mut Profiles) {
         match self.store.save(&snapshot(&profiles.map)) {
             Ok(()) => profiles.dirty = false,
             Err(error) => {
                 profiles.dirty = true;
-                tracing::debug!(%error, "프로필 저장 실패 — 메모리 변경은 남기고 다음 저장이 싣는다");
+                tracing::debug!(%error, "profile save failed — the memory change is kept and the next save carries it");
             }
         }
     }
 
-    /// 부르는 쪽 있는 변경의 공통 경로 — 사본에 적용하고, 저장이 성공해야 커밋한다.
+    /// The common path of changes with a caller — applies to a copy and commits only if the save succeeds.
     // ADR-0291 R17
     fn try_mutate<R>(&self, f: impl FnOnce(&mut ProfileMap) -> R) -> Result<R, StoreError> {
         let mut guard = self.lock();
@@ -515,13 +518,13 @@ impl ProfileRegistry {
         Ok(result)
     }
 
-    /// `try_mutate` 의 조건부 변형 — 클로저가 `false` 면 이 요청은 바꾼 것이 없어 `Ok(false)` 다.
-    /// ★dirty 동안에는 그 변경 없는 요청도 profiles 락을 쥔 채 밀린 변경을 저장한다(디스크 IO)★ — `mutate_if` 와 같다.
+    /// The conditional variant of `try_mutate` — if the closure returns `false`, this request changed nothing and it is `Ok(false)`.
+    /// ★While dirty, even that request without a change saves the pending change while holding the profiles lock (disk IO)★ — the same as `mutate_if`.
     fn try_mutate_if(&self, f: impl FnOnce(&mut ProfileMap) -> bool) -> Result<bool, StoreError> {
         let mut guard = self.lock();
         let mut draft = guard.map.clone();
         if !f(&mut draft) {
-            // 밀린 변경을 싣는 이 저장의 실패는 이 요청의 실패가 아니다 — 이 요청은 바꾼 것이 없다.
+            // A failure of this save carrying the pending change is not this request's failure — this request changed nothing.
             if guard.dirty {
                 self.persist(&mut guard);
             }
@@ -531,7 +534,7 @@ impl ProfileRegistry {
         Ok(true)
     }
 
-    /// 사본은 커밋된 맵(밀린 dirty 변경 포함)에서 떴으므로 성공 저장이 그것까지 싣는다.
+    /// The copy was taken from the committed map (including pending dirty changes), so a successful save carries those too.
     fn commit_if_saved(
         &self,
         profiles: &mut Profiles,
@@ -544,13 +547,13 @@ impl ProfileRegistry {
         Ok(())
     }
 
-    /// 커밋한 변경 중 디스크에 못 실린 것이 있을 수 있다 — 다음 성공 저장이 지운다. 변경 없는 저장의 실패도
-    /// 세우므로 `true` 가 밀린 변경의 존재를 보장하지는 않는다.
+    /// Some committed changes may not have made it to disk — the next successful save clears this. Failures of saves without changes also
+    /// set it, so `true` does not guarantee the existence of a pending change.
     pub fn is_dirty(&self) -> bool {
         self.lock().dirty
     }
 
-    /// 저장소의 지금 상태 — 명부 락을 잡지 않는다(저장소 상태 칸은 락 순서의 끝이다).
+    /// The store's current state — does not take the registry lock (the store-state field is the end of the lock order).
     // ADR-0291 R17 (D6)
     pub fn store_status(&self) -> StoreStatus {
         self.store.status()
@@ -573,9 +576,9 @@ impl ProfileRegistry {
             .collect()
     }
 
-    /// 명부에 넣거나 통째로 바꾼다 — 내부 입구(저장의 어떤 `Err` 에도 커밋 + dirty). ★운영 경로에는 부르는 쪽이
-    ///   없다★ — 시험과 하네스 seam(`AgentManager::seed_agent_bypassing_uniqueness`)이 명부를 심을 때만 쓴다. 운영의
-    ///   등록은 [`ProfileRegistry::try_upsert`] 다.
+    /// Inserts into the registry or replaces wholesale — the internal entry (commits + dirty on any save `Err`). ★There is no caller on the
+    ///   production path★ — only tests and the harness seam (`AgentManager::seed_agent_bypassing_uniqueness`) use it to plant the registry. Production
+    ///   registration is [`ProfileRegistry::try_upsert`].
     // ADR-0291 R17
     #[cfg(any(test, feature = "test-harness"))]
     pub(crate) fn upsert(&self, profile: AgentProfile) {
@@ -584,7 +587,7 @@ impl ProfileRegistry {
         });
     }
 
-    /// 명부에 넣거나 통째로 바꾼다 — 부르는 쪽 있는 입구: 사본에 적용해 저장이 성공해야 커밋한다.
+    /// Inserts into the registry or replaces wholesale — the entry with a caller: applied to a copy and committed only if the save succeeds.
     // ADR-0291 R17
     pub fn try_upsert(&self, profile: AgentProfile) -> Result<(), StoreError> {
         self.try_mutate(|m| {
@@ -592,23 +595,23 @@ impl ProfileRegistry {
         })
     }
 
-    /// spawn 전용 upsert — 스냅샷을 삽입하되 **런타임이 저자인 칸은 이미 맵에 있는 live 엔트리 값을
-    /// 보존**한다. 없던 id(ad-hoc spawn)면 스냅샷 그대로.
+    /// Spawn-only upsert — inserts the snapshot but **keeps the values of the live entry already in the map for fields
+    /// whose author is the runtime**. For an id that did not exist (ad-hoc spawn), the snapshot as is.
     ///
-    /// ★보존 목록의 정본은 아래 본문이다 — 이 문단에서 개수를 세지 말 것★(세던 「그 두 필드」가 실제로
-    /// 두 번 뒤처졌다). 가름 규칙은 하나다: **그 칸을 누가 쓰나.** 호출자가 뜬 사본이 저자가 아닌 칸은
-    /// 전부 live 가 이기고, spawn 이 실제로 확정하는 칸(cwd·command·env 등)만 스냅샷을 반영한다.
+    /// ★The canonical preservation list is the body below — do not count them in this paragraph★ (the counted 「those two fields」 actually
+    /// fell behind twice). There is one splitting rule: **who writes that field.** For every field whose author is not the copy the caller took,
+    /// live wins, and only fields the spawn actually settles (cwd · command · env etc.) reflect the snapshot.
     ///
-    /// ★왜 spawn 스냅샷을 그대로 안 쓰나(lost-update 봉인)★: 넘어오는 프로필은 호출 시점에 뜬
-    /// **스냅샷**이라, 그 사이 다른 연결이 reparent/rename 을 커밋했다면 옛 `parent_id`/`display_name` 이
-    /// 최신 값을 덮어써 동시 편집이 유실된다(lost update). 그 둘은 프로세스 기동과 무관한 순수 트리 메타라
-    /// spawn 이 author 할 이유가 없으므로, live 엔트리가 있으면 그 값을 보존한다.
+    /// ★Why the spawn snapshot is not used as is (sealing lost updates)★: the incoming profile is a **snapshot** taken at call
+    /// time, so if another connection committed a reparent/rename in between, the old `parent_id`/`display_name`
+    /// would overwrite the latest value and the concurrent edit would be lost (lost update). Those two are pure tree metadata unrelated to process startup,
+    /// so there is no reason for spawn to author them, and the live entry's values are kept if it exists.
     ///
-    /// ★화신 표식(epoch)도 live 보존(ADR-0084)★: 그 값은 프로세스 기동과 무관한 순수 런타임 메타로,
-    ///   spawn 이 넘긴 **스냅샷**이 author 하면 안 된다. spawn 은 이 upsert **직후** `epoch_for_spawn` 으로
-    ///   registry 표식을 새로 확정하는데, 옛 스냅샷 값을 여기서 그대로 삽입하면 앞선 확정이 되돌려져
-    ///   (lost update) 산 세션이 죽은 세션의 표식을 쓴다 → 프론트 재구독 누락(빈 슬롯) + 턴 관측·제어
-    ///   토큰이 두 세대를 구분 못 함. 그래서 parent_id/display_name 과 동일하게 live 값을 보존한다.
+    /// ★The incarnation marker (epoch) is also kept live (ADR-0084)★: that value is pure runtime metadata unrelated to process startup,
+    ///   and the **snapshot** spawn passes must not author it. Spawn newly settles the registry marker with `epoch_for_spawn` **right after** this upsert,
+    ///   and inserting the old snapshot value as is here would revert the earlier settlement
+    ///   (lost update), making the live session use the dead session's marker → the frontend misses the resubscription (empty slot) + turn observation and the control
+    ///   token cannot tell the two generations apart. So, the same as parent_id/display_name, the live value is kept.
     // ADR-0070 ADR-0072 ADR-0084
     pub fn upsert_preserving_hierarchy(&self, profile: AgentProfile) {
         self.mutate(|m| {
@@ -616,30 +619,30 @@ impl ProfileRegistry {
         });
     }
 
-    /// 부르는 쪽 있는 입구 — [`ProfileRegistry::upsert_preserving_hierarchy`] 와 같고 저장이 성공해야 커밋한다.
+    /// The entry with a caller — the same as [`ProfileRegistry::upsert_preserving_hierarchy`] and commits only if the save succeeds.
     pub fn try_upsert_preserving_hierarchy(&self, profile: AgentProfile) -> Result<(), StoreError> {
         self.try_mutate(|m| {
             merge_preserving_live(m, profile);
         })
     }
 
-    /// 같은 병합을 하되 **없는 id 는 만들지 않는다** — 있으면 갱신하고 `true`, 없으면 no-op 에 `false`.
+    /// Does the same merge but **does not create a missing id** — if present, updates it and `true`; if absent, a no-op and `false`.
     ///
-    /// ★존재하는 이유 = 지워진 프로필의 **부활**을 막는 것★: spawn 등록은 「이미 있나」를 보고 갈리는데,
-    ///   그 조회와 쓰기가 따로면 사이에 낀 삭제가 무시된다 — 삭제가 성공으로 보고된 뒤 그 프로필이
-    ///   **되살아나고 자식 프로세스까지 따라 뜬다.** 판정과 쓰기를 한 임계구역에 넣는 것이 그 창을 닫는
-    ///   유일한 방법이고, 이 저장소의 다른 TOCTOU 봉인과 같은 모양이다(`reparent`·`epoch_for_spawn`).
-    /// ★`false` 를 삼키지 말 것★ — 호출자는 그것을 「그 사이 지워졌다」로 읽고 spawn 을 끊어야 한다.
-    ///   그냥 넘기면 프로필 없는 세션이 명부에 오른다.
-    /// ★**이것이 부활 경로를 전부 닫지는 않는다**★ — 등록이 **시작되기 전에** 삭제가 끝난 경우는 조회가
-    ///   애초에 `None` 이라 신규 등록(ad-hoc spawn) 갈래로 간다. 그 둘을 가르려면 호출자가 「이건 원래
-    ///   있던 항목이다」를 들고 와야 하는데, 그 신호는 지금 `spawn_agent` 의 시그니처에 없다.
+    /// ★Why it exists = to prevent the **resurrection** of a deleted profile★: spawn registration branches on 「does it already exist」,
+    ///   and if that lookup and the write are separate, a deletion slipping in between is ignored — after the deletion is reported as successful, that profile
+    ///   **comes back to life and even its child process launches with it.** Putting the decision and the write into one critical section is the
+    ///   only way to close that window, and it is the same shape as this store's other TOCTOU seals (`reparent` · `epoch_for_spawn`).
+    /// ★Do not swallow `false`★ — the caller must read it as 「deleted in the meantime」 and cut the spawn.
+    ///   Letting it pass would put a session without a profile onto the roster.
+    /// ★**This does not close every resurrection path**★ — when the deletion finished **before registration started**, the lookup is
+    ///   `None` in the first place, so it goes to the new-registration (ad-hoc spawn) branch. Telling those two apart would require the caller to bring
+    ///   「this is an entry that existed」, and that signal is not in the signature of `spawn_agent` now.
     pub fn update_preserving_hierarchy(&self, profile: AgentProfile) -> bool {
         self.mutate_if(|m| merge_if_present(m, profile))
     }
 
-    /// 부르는 쪽 있는 입구 — [`ProfileRegistry::update_preserving_hierarchy`] 와 같고 저장이 성공해야 커밋한다.
-    /// `Ok(false)` 는 그 사이 지워졌다는 뜻 그대로다.
+    /// The entry with a caller — the same as [`ProfileRegistry::update_preserving_hierarchy`] and commits only if the save succeeds.
+    /// `Ok(false)` means exactly that it was deleted in the meantime.
     pub fn try_update_preserving_hierarchy(
         &self,
         profile: AgentProfile,
@@ -656,37 +659,37 @@ fn merge_if_present(m: &mut ProfileMap, profile: AgentProfile) -> bool {
     true
 }
 
-/// `upsert_preserving_hierarchy` 계열의 병합 본체 — live 엔트리가 있으면 **런타임이 저자인 칸**을 지킨다.
+/// The merge body of the `upsert_preserving_hierarchy` family — if there is a live entry, it guards **the fields whose author is the runtime**.
 ///
-/// ★보존 목록의 정본이 이 함수다★ — 가름 규칙은 「그 칸을 누가 쓰나」이고, 호출자가 뜬 사본이 저자가
-/// 아닌 칸은 전부 live 가 이긴다. 근거는 각 줄 옆에 있다.
+/// ★This function is the canonical preservation list★ — the splitting rule is 「who writes that field」, and for every field whose author is not
+/// the copy the caller took, live wins. The grounds are next to each line.
 fn merge_preserving_live(m: &mut HashMap<AgentId, AgentProfile>, mut profile: AgentProfile) {
     if let Some(live) = m.get(&profile.id) {
         profile.parent_id = live.parent_id;
         profile.display_name = live.display_name.clone();
         profile.epoch = live.epoch;
-        // 마지막 실패도 같은 이유로 live 값이 이긴다 — 그 사실을 쓰는 곳은 활성화 관측뿐이고,
-        //   spawn 이 넘긴 옛 사본이 그것을 되돌리면 이미 지워진 실패가 화면에 되살아난다.
+        // The last failure also has live win for the same reason — the only place writing that fact is activation observation,
+        //   and if the old copy spawn passes reverted it, an already-cleared failure would come back on screen.
         // ADR-0172
         profile.last_failure = live.last_failure;
-        // ★backend 세션 손잡이와 그 이력도 live 가 이긴다(사용자 결정)★ — 위 넷과 **같은 사유**다:
-        //   이 칸을 쓰는 것은 런타임이지 spawn 스냅샷이 아니다. 어느 backend 든 그 화신의 첫 제출
-        //   래치가 **이 upsert 뒤에** 적고(ADR-0226), claude 파일 감시자도 따로 적는다. 어느 쪽이든
-        //   호출자가 뜬 사본은 그 값의 저자가 아니다.
-        // ★무엇을 막나★: 사본을 뜬 뒤 도착한 손잡이가 여기서 덮이고 **그대로 디스크에 영속된다**.
-        //   그러면 그 대화로 돌아갈 길이 사라진다 — 되돌릴 방법이 없는 유실이라, 덮어쓰기와
-        //   보존 중 틀렸을 때 싼 쪽을 고른다(보존). 남는 것은 낡은 값을 한 번 더 들고 가는 것이고,
-        //   그건 다음 관측이 고친다.
-        // ★이력도 함께 보존한다 — 둘은 한 덩어리다★: 기록 동사들이
-        //   옛 값을 `old_session_ids` 로 밀어 넣으며 짝으로 갱신하므로, 새 값만 지키고 이력을
-        //   스냅샷으로 되돌리면 그 사이 밀려난 손잡이가 목록에서 사라진다.
-        // ★Fresh spawn 이 이것 때문에 옛 대화를 재사용하지는 않는다★ — spawn 이 이 upsert **뒤에** 옛
-        //   값을 이력으로 밀어 칸을 비우고, 발급하는 backend 에는 새 uuid 를 뽑아 건넨다(ADR-0076).
-        // ★**claude 에서도 동작이 바뀐다 — 「받아 적는 backend 만의 일」로 읽지 말 것**★: 발급 축
-        //   backend 의 Resume 도 이 칸을 **명부에서** 읽는데, 예전에는 그 직전
-        //   등록이 스냅샷으로 덮어써서 낡은 값이 읽혔다. 이제는 `SessionTracker` 가 관측해 넣은 드리프트
-        //   sid 가 읽힌다(그 관측기는 화신 축 없이 무조건 쓰고 — `observe_session_id(id, None, ..)` —
-        //   발급 축 backend 에만 붙는다). 방향은 개선이지만 **무변화가 아니다**.
+        // ★The backend session handle and its history also have live win (user decision)★ — **the same reason** as the four above:
+        //   what writes this field is the runtime, not the spawn snapshot. For any backend, that incarnation's first-submission
+        //   latch writes it **after this upsert** (ADR-0226), and the claude file watcher also writes it separately. Either way,
+        //   the copy the caller took is not the author of that value.
+        // ★What it prevents★: a handle that arrived after the copy was taken would be overwritten here and **persisted to disk as is**.
+        //   Then the way back to that conversation would vanish — it is a loss with no way to undo, so of overwriting and
+        //   keeping, the cheaper one when wrong is chosen (keeping). What remains is carrying a stale value one more time,
+        //   and the next observation fixes that.
+        // ★The history is kept too — the two are one lump★: the record verbs
+        //   push the old value into `old_session_ids` and update them as a pair, so keeping only the new value while reverting the history
+        //   to the snapshot would make handles pushed out in between vanish from the list.
+        // ★A Fresh spawn does not reuse the old conversation because of this★ — spawn pushes the old
+        //   value into the history and empties the field **after** this upsert, and hands a new uuid to an issuing backend (ADR-0076).
+        // ★**Behavior changes for claude too — do not read this as 「something only for recording backends」**★: the Resume of an issuing-axis
+        //   backend also reads this field **from the registry**, and previously the registration right before
+        //   overwrote it with the snapshot so a stale value was read. Now the drift sid observed and put in by `SessionTracker`
+        //   is read (that observer writes unconditionally without the incarnation axis — `observe_session_id(id, None, ..)` —
+        //   and attaches only to issuing-axis backends). The direction is an improvement, but **it is not no change**.
         profile.backend_session_id = live.backend_session_id;
         profile.old_session_ids = live.old_session_ids.clone();
     }
@@ -694,25 +697,25 @@ fn merge_preserving_live(m: &mut HashMap<AgentId, AgentProfile>, mut profile: Ag
 }
 
 impl ProfileRegistry {
-    /// **부모 삭제 시 자식 루트 승격(orphan-to-root):**
-    /// 삭제 대상을 부모로 가리키던 자식들의 `parent_id` 를 **같은 임계구역에서** `None` 으로 푼다 —
-    /// 존재하지 않는 부모를 가리키는 고아 참조(dangling parent)를 남기지 않는다(트리 렌더·복원 불변식).
-    /// cascade 삭제가 아니라 승격이라 자식 데이터는 보존된다(사용자 결정 — 실수로 그룹 전체 소실 방지).
+    /// **Promoting children to root on parent deletion (orphan-to-root):**
+    /// The `parent_id` of children that pointed at the deletion target as their parent is cleared to `None` **in the same critical section** —
+    /// no orphan reference pointing at a nonexistent parent (dangling parent) is left (tree render and restore invariant).
+    /// It is promotion, not cascade deletion, so the children's data is preserved (user decision — prevents losing a whole group by mistake).
     ///
-    /// 부르는 쪽 있는 입구다 — 사본에 적용해 저장이 성공해야 커밋한다. 없는 id 도 저장을 시도한다.
+    /// The entry with a caller — applied to a copy and committed only if the save succeeds. A save is attempted even for a missing id.
     // ADR-0072
     // ADR-0291 R17
     pub fn try_remove(&self, id: AgentId) -> Result<(), StoreError> {
         self.try_mutate(|m| remove_promoting_children(m, id))
     }
 
-    /// 표시명 override 설정/해제(ADR-0061 리치화 — 트리 rename). `Some(name)` → override 저장, `None` →
-    /// 해제(cwd basename 파생 복귀). 존재하면 변경 후 persist·true, 없는 id 면 no-op·false.
-    /// ★정규화는 저장 게이트(`AgentManager::try_rename_agent`) 책임★: 양끝 공백 제거와 "공백만 남으면 override
-    /// 없음" 판정은 이름 유일성 판정 **전에** 거기서 끝난다(`normalize_display_name`) — 여기서 또 깎으면
-    /// 판정이 본 값과 저장되는 값이 갈린다. 여기엔 이미 정규화된 값 또는 명시적 None 만 온다.
+    /// Sets/clears the display name override (ADR-0061 enrichment — tree rename). `Some(name)` → save the override, `None` →
+    /// clear (back to deriving from the cwd basename). If it exists, persists after the change and true; for a missing id, no-op and false.
+    /// ★Normalization is the responsibility of the save gate (`AgentManager::try_rename_agent`)★: trimming both ends and the decision "if only whitespace remains, no override"
+    /// finish there **before** the name uniqueness decision (`normalize_display_name`) — trimming again here would make
+    /// the value the decision saw and the value saved diverge. Only an already-normalized value or an explicit None comes here.
     ///
-    /// 부르는 쪽 있는 입구다 — 사본에 적용해 저장이 성공해야 커밋한다.
+    /// The entry with a caller — applied to a copy and committed only if the save succeeds.
     // ADR-0291 R17
     pub fn try_rename(
         &self,
@@ -722,21 +725,21 @@ impl ProfileRegistry {
         self.try_update_with(id, |p| p.display_name = display_name)
     }
 
-    /// 트리 부모 지정/해제(ADR-0072 — 계층 reparent). `Some(pid)` → child_id 를 pid 의 자식으로,
-    /// `None` → 루트로 승격. 검증 전부를 **한 임계구역(try_mutate)** 안에서 하고 성공 시에만 persist·true,
-    /// 위반이면 no-op·false(try_rename/try_update_with 와 동형 bool 반환).
+    /// Sets/clears the tree parent (ADR-0072 — hierarchy reparent). `Some(pid)` → makes child_id a child of pid,
+    /// `None` → promotes to root. Does all validation inside **one critical section (try_mutate)** and only on success persists and returns true;
+    /// on a violation, no-op and false (a bool return of the same shape as try_rename/try_update_with).
     ///
-    /// **1단 중첩 규칙(cycle 방지):**
-    /// - child 가 존재해야 한다(없으면 false).
-    /// - `Some(pid)`: ① pid 프로필이 실존해야 함 ② `pid != child_id`(self-parent 금지) ③ child 가 현재
-    ///   누군가의 부모가 아니어야 함(부모를 가진 노드는 자식이 될 수 없음 — 1단 상한) ④ 대상 부모 pid
-    ///   자신이 루트여야 함(`parent_id == None` — 부모가 부모를 갖는 2단 금지). 하나라도 위반이면 false.
-    /// - `None`: child 가 존재하면 항상 허용(루트 승격).
+    /// **One-level nesting rule (cycle prevention):**
+    /// - child must exist (false if not).
+    /// - `Some(pid)`: ① the pid profile must exist ② `pid != child_id` (no self-parent) ③ child must not currently
+    ///   be anyone's parent (a node with children cannot become a child — one-level cap) ④ the target parent pid
+    ///   must itself be a root (`parent_id == None` — no two levels where a parent has a parent). false if any is violated.
+    /// - `None`: always allowed if child exists (promotion to root).
     ///
-    /// ★검증을 lock 안에서★: 존재/부모여부 판정과 쓰기가 한 임계구역이라, 동시 reparent/delete 와
-    /// TOCTOU(검사-후-변경 사이 상태 변동)로 cycle·고아가 새는 창을 닫는다(ADR-0071 락 규율 경유).
+    /// ★Validation inside the lock★: the existence/parenthood decision and the write are one critical section, closing the window where cycles and orphans leak
+    /// through TOCTOU (state changes between check and change) with concurrent reparent/delete (via the ADR-0071 lock discipline).
     ///
-    /// 부르는 쪽 있는 입구다 — 사본에 적용해 저장이 성공해야 커밋한다. 규칙 위반(`Ok(false)`)도 저장을 시도한다.
+    /// The entry with a caller — applied to a copy and committed only if the save succeeds. A save is attempted even on a rule violation (`Ok(false)`).
     // ADR-0072
     // ADR-0291 R17
     pub fn try_reparent(
@@ -747,12 +750,12 @@ impl ProfileRegistry {
         self.try_mutate(|m| reparent_one_level(m, child_id, parent_id))
     }
 
-    /// 존재하면 클로저 적용 후 persist, 없으면 false.
+    /// If it exists, applies the closure and persists; otherwise false.
     pub fn update_with(&self, id: AgentId, f: impl FnOnce(&mut AgentProfile)) -> bool {
         self.mutate(|m| update_present(m, id, f))
     }
 
-    /// 부르는 쪽 있는 입구 — [`ProfileRegistry::update_with`] 와 같고 저장이 성공해야 커밋한다.
+    /// The entry with a caller — the same as [`ProfileRegistry::update_with`] and commits only if the save succeeds.
     pub fn try_update_with(
         &self,
         id: AgentId,
@@ -761,28 +764,28 @@ impl ProfileRegistry {
         self.try_mutate(|m| update_present(m, id, f))
     }
 
-    /// 「마지막 실패」 기록/해제. 값이 실제로 바뀌었으면 `true`, 없는 id·epoch 불일치·같은 값이면 `false`.
+    /// Records/clears 「the last failure」. `true` if the value actually changed, `false` for a missing id · epoch mismatch · same value.
     ///
     /// `incarnation`:
-    /// - `Some(epoch)` — 이 관측이 **그 화신**에 대한 것이다. 프로필의 현재 epoch 과 같을 때만 쓴다.
-    /// - `None` — 화신이 만들어지기 전에 실패했다(예약 거절·PTY open 실패). 비교할 대상이 없다.
+    /// - `Some(epoch)` — this observation is about **that incarnation**. Written only when it equals the profile's current epoch.
+    /// - `None` — it failed before the incarnation was made (reservation refusal · PTY open failure). There is nothing to compare against.
     ///
-    /// ★epoch 비교가 막는 것(load-bearing)★: resume 관측은 조기종료 창(현 3s)만큼 **늦게** 쓴다. 그 사이
-    ///   reaper 가 그 세션을 거두고 다른 연결이 같은 프로필을 성공적으로 활성화하면(epoch +1 · 지움 완료),
-    ///   뒤늦게 깨어난 옛 관측이 **산 새 화신에 죽은 화신의 실패를 찍는다**. 이 저장소의 다른 지각-쓰기
-    ///   방어와 같은 모양이다(`reaper` 의 세션 제거 가드 · `TurnObservations::forget`).
-    /// ★판정과 쓰기가 한 임계구역이어야 한다★ — 그래서 비교를 호출자에 두지 않고 이 lock 안에서 한다
-    ///   (`epoch_for_spawn` 과 같은 이유).
-    /// ★`None` 갈래의 잔여(알고 수용)★: 화신이 없어 비교할 축이 없으므로 무조건 쓴다. 이 갈래의 쓰기는
-    ///   관측 **직후**(대기 없음)라 창이 명령 몇 개 폭이고, 방향도 안전한 쪽이 아니다 — 즉 이론상 남는
-    ///   구멍이다. 닫으려면 실패한 spawn 도 자기 세대를 들고 나와야 하는데 그건 `spawn_agent` 의 오류 타입
-    ///   변경이라 별건이다.
-    /// ★호출자는 하나뿐이다★: `AgentManager::note_activation_result`. `pub(crate)` 로 좁혀 데몬·셸에서
-    ///   두 번째 쓰기 경로가 생기는 것을 **컴파일러가** 막는다(crate 안에서는 규약과 리뷰가 지킨다 —
-    ///   그 이상을 주장하지 않는다).
-    /// ★디스크에 쓰지 않는다 — `mutate` 를 타지 않는 쓰기다(같은 꼴 = `epoch_for_spawn`)★: 이 필드는 `#[serde(skip)]` 이라
-    ///   저장해도 파일 내용이 한 바이트도 달라지지 않는다. `mutate` 를 타면 활성화마다 `agents.json`
-    ///   전체를 다시 쓰는 순수 비용만 붙는다.
+    /// ★What the epoch comparison prevents (load-bearing)★: the resume observation writes **late**, by the early-exit window (currently 3s). If in between
+    ///   the reaper collects that session and another connection successfully activates the same profile (epoch +1 · clear done),
+    ///   the old observation waking up late **stamps the dead incarnation's failure on the live new incarnation**. It is the same shape as this store's other late-write
+    ///   defenses (the session removal guard of `reaper` · `TurnObservations::forget`).
+    /// ★The decision and the write must be one critical section★ — so the comparison is not left to the caller but done inside this lock
+    ///   (the same reason as `epoch_for_spawn`).
+    /// ★The residual of the `None` branch (known and accepted)★: there is no incarnation and so no axis to compare, so it writes unconditionally. A write of this branch
+    ///   happens **right after** the observation (no wait), so the window is a few commands wide, and the direction is not the safe side either — that is, it is a hole that remains
+    ///   in theory. Closing it would require failed spawns to carry their own generation too, which is a change to `spawn_agent`'s error type
+    ///   and a separate matter.
+    /// ★There is only one caller★: `AgentManager::note_activation_result`. Narrowing it to `pub(crate)` lets **the compiler** prevent a second write path
+    ///   from appearing in the daemon or shell (within the crate, convention and review guard it —
+    ///   no more than that is claimed).
+    /// ★It does not write to disk — a write that does not take `mutate` (same shape = `epoch_for_spawn`)★: this field is `#[serde(skip)]`, so
+    ///   saving would not change a single byte of the file content. Taking `mutate` would only add the pure cost of rewriting the whole `agents.json`
+    ///   on every activation.
     // ADR-0172
     pub(crate) fn set_last_failure(
         &self,
@@ -801,26 +804,26 @@ impl ProfileRegistry {
         }
     }
 
-    /// 세션 id 를 관측한 자리에서 호출 — 옛 sid 를 이력으로 넘기고 새 값으로 교체,
-    /// 변경 즉시 persist한다(1-b: clear→관측→persist 전 크래시 시 stale 복원 방지).
-    /// 같은 값으로의 호출은 no-op(불필요한 디스크 쓰기 회피).
+    /// Called where the session id is observed — moves the old sid into the history and replaces it with the new value,
+    /// persisting immediately on change (1-b: prevents stale restore on a crash before clear→observe→persist).
+    /// A call with the same value is a no-op (avoids unnecessary disk writes).
     ///
     /// `incarnation`:
-    /// - `Some(epoch)` — 이 관측은 **그 화신**의 것이다. 프로필의 현재 epoch 과 같을 때만 쓴다.
-    /// - `None` — 대조할 화신 축이 호출자에게 없다. 무조건 쓴다.
+    /// - `Some(epoch)` — this observation belongs to **that incarnation**. Written only when it equals the profile's current epoch.
+    /// - `None` — the caller has no incarnation axis to compare. Written unconditionally.
     ///
-    /// ★`None` 갈래는 잔여다(알고 수용 — 선례 [`ProfileRegistry::set_last_failure`])★: 오늘 그 갈래로
-    ///   들어오는 것은 파일 감시자([`crate::session_tracker::SessionTracker`]) 하나이고, 그 관측기는
-    ///   화신 표식을 나르지 않는다. 닫으려면 `SessionTracker::on_change`·`WatchEntry` 를 넓혀 그 생성
-    ///   지점을 전부 고쳐야 하는데 — 운영 호출부는 **하나뿐**이고(데몬 조립점) 나머지는 전부 시험대와
-    ///   실험용 bin 이다 — 그것으로 **오늘의 claude 동작은 한 가지도 달라지지 않는다**.
-    /// ★비교는 일치/불일치뿐★ — 표식으로 "더 새 것" 을 유도하지 않는다(ADR-0007/0163).
-    /// ★이 가드가 막는 것은 「더 새 화신이 이미 섰다」 하나다 — 「늦은 쓰기를 막는다」로 넓혀 읽지 말 것★:
-    ///   종료 경로 중 어느 것도 `epoch` 을 건드리지 않으므로(reaper 는 `auto_restore` 만 쓰고 통로의
-    ///   teardown 은 프로필을 안 만진다), **끝나기만 하고 다시 뜨지 않은** 세션의 표식은 산 세션의 것과
-    ///   같다. 그 창으로 들어온 관측은 그대로 통과해 죽은 세션의 프로필에 적힌다.
-    /// ★`bool` 이 뜻하는 것은 「메모리 맵이 바뀌었다」다 — 「디스크에 남았다」가 아니다★:
-    ///   [`ProfileStore::save`] 가 실패 · 거절해도 메모리 변경은 남는다(dirty — 다음 성공 저장이 싣는다).
+    /// ★The `None` branch is a residual (known and accepted — precedent [`ProfileRegistry::set_last_failure`])★: what comes into that branch today
+    ///   is only the file watcher ([`crate::session_tracker::SessionTracker`]), and that observer
+    ///   does not carry the incarnation marker. Closing it would require widening `SessionTracker::on_change`·`WatchEntry` and fixing all their creation
+    ///   points — there is **only one** production call site (the daemon assembly point) and the rest are all test rigs and
+    ///   experimental bins — and **not one thing about today's claude behavior changes** with it.
+    /// ★Comparison is match/mismatch only★ — "newer" is not derived from the marker (ADR-0007/0163).
+    /// ★What this guard prevents is only 「a newer incarnation already stands」 — do not widen it to 「it blocks late writes」★:
+    ///   none of the exit paths touches `epoch` (the reaper writes only `auto_restore`, and the link's
+    ///   teardown does not touch the profile), so the marker of a session that **only ended and did not come up again** is the same as that of the live session.
+    ///   An observation arriving through that window passes as is and is written to the dead session's profile.
+    /// ★What `bool` means is 「the in-memory map changed」 — not 「it stayed on disk」★:
+    ///   even if [`ProfileStore::save`] fails or refuses, the memory change remains (dirty — the next successful save carries it).
     // ADR-0007
     // ADR-0163
     // ADR-0185
@@ -831,22 +834,22 @@ impl ProfileRegistry {
         })
     }
 
-    /// 이 화신의 **첫 제출**이 세션 id 를 영속하는 비교-교체 동사.
+    /// The compare-and-swap verb by which this incarnation's **first submission** persists the session id.
     ///
-    /// 프로필 뮤텍스 안에서 차례로 본다:
-    /// - 화신 표식이 `incarnation` 과 다르다 → `false`
-    /// - 칸이 이미 `Some(new)` → `false` — 쓸 것이 없다(디스크 쓰기 없음)
-    /// - 칸이 `expected` → 옛 값을 이력으로 밀고 `new` 를 써서 영속, `true`
-    /// - 그 밖 → `false` — 다른 기록자가 먼저 칸을 바꿨다
+    /// Looked at in order inside the profile mutex:
+    /// - the incarnation marker differs from `incarnation` → `false`
+    /// - the field is already `Some(new)` → `false` — nothing to write (no disk write)
+    /// - the field is `expected` → push the old value into the history, write `new` and persist, `true`
+    /// - otherwise → `false` — another writer changed the field first
     ///
-    /// `expected` = **이 화신이 시작할 때 본 칸의 값**(Fresh = 칸을 비운 뒤라 `None` · Resume = 저장값).
+    /// `expected` = **the value of the field this incarnation saw when it started** (Fresh = `None`, since the field was emptied · Resume = the stored value).
     ///
-    /// ★덮어쓰기([`ProfileRegistry::observe_session_id`])로 바꾸지 말 것★: 첫 제출 **전에** 다른 기록자가
-    ///   칸을 바꿨으면 덮어쓰기는 그 값을 스폰 때 값으로 되감는다. 그 기록자가 실재한다 — claude 파일
-    ///   감시자가 대조 없이 쓴다.
-    /// ★「빈 칸에만 쓴다」(ADR-0216 이 기각한 규칙)가 아니다★: `expected` 가 빈 칸이 아니라 시작 때 본
-    ///   값이라, 이어받기 화신의 재개가 저장값과 다른 id 를 내면 그대로 교체된다.
-    /// ★`bool` 은 메모리 맵 기준이다★ — [`ProfileStore::save`] 가 실패 · 거절해도 메모리 변경은 남는다(dirty).
+    /// ★Do not change it into an overwrite ([`ProfileRegistry::observe_session_id`])★: if another writer changed the field **before** the first submission,
+    ///   an overwrite would rewind that value to the value at spawn. That writer exists — the claude file
+    ///   watcher writes without comparison.
+    /// ★It is not 「write only into an empty field」 (the rule ADR-0216 rejected)★: `expected` is not the empty field but the value seen at the start,
+    ///   so if the resume of a resuming incarnation yields an id different from the stored value, it is replaced as is.
+    /// ★`bool` is in terms of the in-memory map★ — even if [`ProfileStore::save`] fails or refuses, the memory change remains (dirty).
     // ADR-0226
     // ADR-0216
     // ADR-0217
@@ -870,30 +873,30 @@ impl ProfileRegistry {
             tracing::debug!(
                 agent = %id,
                 epoch = incarnation,
-                "세션 id 칸을 다른 기록자가 먼저 바꿨다 — 첫 제출의 영속을 거절한다"
+                "another writer changed the session id field first — refusing the persistence of the first submission"
             );
         }
         written
     }
 
-    /// 새 세션 id 를 뽑는다 — ★명부를 건드리지 않는다(영속하지 않는다)★.
+    /// Draws a new session id — ★does not touch the registry (does not persist)★.
     ///
-    /// 발급 단일점을 registry 에 남기려고 여기 둔다. 매번 새 uuid 라 Fresh 의 「언제나 새 sid」
-    /// 봉인(ADR-0076 — 「Session ID already in use」)이 그대로다. 영속은 첫 제출 때
-    /// [`ProfileRegistry::commit_session_id`] 가 한다.
+    /// Kept here to leave the single issuing point in the registry. It is a new uuid every time, so the Fresh seal 「always a new sid」
+    /// (ADR-0076 — 「Session ID already in use」) stays as is. Persistence is done at the first submission by
+    /// [`ProfileRegistry::commit_session_id`].
     // ADR-0226
     // ADR-0076
     pub fn mint_session_id() -> Uuid {
         Uuid::new_v4()
     }
 
-    /// Fresh 스폰이 칸을 비우고 시작하는 동사 — 옛 값을 이력으로 밀고 빈 칸을 영속한다.
+    /// The verb with which a Fresh spawn starts by emptying the field — pushes the old value into the history and persists the empty field.
     ///
-    /// `None` = 프로필이 없다(그 사이 지워졌다) · `Some(true)` = 밀었다 · `Some(false)` = 칸이 이미 비었다.
-    /// ★`None` 을 「밀 것이 없었다」와 가르는 이유★ — spawn 은 프로필이 사라진 것을 보면 끊어야 한다.
-    /// ★Fresh 전용이다 — Resume 에서 부르면 이어받을 손잡이를 지운다★. 호출 조건의 정본은 `manager` 의
-    ///   `fresh_spawn_release_session_id`(crate 내부 항목이라 링크가 아니라 이름으로 적는다). 이력 밀기라
-    ///   ADR-0202 가 금한 파괴가 아니다.
+    /// `None` = no profile (deleted in the meantime) · `Some(true)` = pushed · `Some(false)` = the field was already empty.
+    /// ★Why `None` is told apart from 「there was nothing to push」★ — spawn must cut off when it sees the profile vanished.
+    /// ★Fresh only — calling it on Resume erases the handle to resume★. The canonical call condition is `manager`'s
+    ///   `fresh_spawn_release_session_id` (a crate-internal item, so written by name rather than as a link). It pushes into the history, so
+    ///   it is not the destruction ADR-0202 forbids.
     // ADR-0226
     // ADR-0185
     pub fn release_session_id(&self, id: AgentId) -> Option<bool> {
@@ -905,7 +908,7 @@ impl ProfileRegistry {
         outcome
     }
 
-    /// 부르는 쪽 있는 입구 — [`ProfileRegistry::release_session_id`] 와 같고 저장이 성공해야 커밋한다.
+    /// The entry with a caller — the same as [`ProfileRegistry::release_session_id`] and commits only if the save succeeds.
     pub fn try_release_session_id(&self, id: AgentId) -> Result<Option<bool>, StoreError> {
         let mut outcome = None;
         self.try_mutate_if(|m| {
@@ -915,31 +918,31 @@ impl ProfileRegistry {
         Ok(outcome)
     }
 
-    /// ★spawn 이 쓸 **화신 표식**을 한 임계구역에서 확정한다(ADR-0007)★ — 화신마다 새로 뽑은 난수다.
+    /// ★Settles in one critical section the **incarnation marker** spawn will use (ADR-0007)★ — a random number drawn anew per incarnation.
     ///
-    /// `None` = 그 사이 프로필이 사라졌다(동시 삭제) → **호출자는 spawn 을 중단해야 한다**.
+    /// `None` = the profile vanished in the meantime (concurrent deletion) → **the caller must abort the spawn**.
     ///
-    /// ★왜 순서 있는 카운터가 아닌가★: 이 값이 답해야 하는 질문은 "같은 스트림인가" 하나이고 순서는
-    ///   거기 필요 없다. 반면 카운터로 구현하면 **그 카운터가 어디에 사는가**가 문제가 된다 — 디스크에
-    ///   남기면 옛 표식이 새 화신에 다시 붙고(그 필드 주석), 안 남기면 재기동한 데몬이 0 부터 다시 세어
-    ///   **복원된 에이전트가 죽은 화신의 값을 결정론적으로 물려받는다**. 난수는 그 결정론을 없앤다.
-    /// ★단 "새 프로세스면 다르다" 는 보장이 **아니다**(정직 표기)★: 이 필드는 디스크에서 읽히지 않으므로
-    ///   (`skip_deserializing`) 재기동 뒤 복원된 프로필의 비교 대상은 0 이고, 죽은 데몬이 쓰던 값은 어디에도
-    ///   남아 있지 않아 **대조 자체가 일어나지 않는다**. 여기서 실제로 보장되는 것은 **인접 보장** 하나다 —
-    ///   같은 프로세스 안에서 직전 화신과 다르다(아래 while 루프). 프로세스를 넘는 충돌은 2^-32 로 남고,
-    ///   걸리면 그 한 에이전트의 화신 가드들이 한 화신 동안 무력해진다(관측 오염·토큰 충돌·재구독 누락).
-    /// ★직전 값과는 반드시 다르다★: 모든 소비자 가드가 일치/불일치 하나로 두 화신을 가르므로(reap
-    ///   epoch-guard ADR-0084 · 제어 채널 토큰 ADR-0086 · 턴 관측 표 ADR-0113), 배출 중인 앞선 화신과
-    ///   값이 겹치면 그 가드들이 통째로 무력해진다. 확률은 2^-32 지만 공짜로 닫히므로 닫는다.
-    /// ★판정과 커밋이 한 락 안이어야 하는 이유(load-bearing)★: 둘로 나누면 그 사이 `remove` 가 끼어들어
-    ///   사라진 프로필에 표식을 심거나, 직전 값과의 대조가 옛 맵을 보고 이뤄진다.
-    /// ★현 프로덕션 호출점은 `AgentManager::spawn_agent` **하나**다★ — 모드(Fresh/Resume)를 가리지 않고
-    ///   그 지점만 지나간다. 호출부마다 흩뿌리면 새 호출부가 또 빠뜨리므로(실측: WS `Spawn`·부팅 복원이
-    ///   그렇게 빠졌다) 여기 단일 진입점을 유지할 것. dead code 아님(오인해 지우지 말 것 — 지우면 화신
-    ///   교체가 표식을 재사용해 프론트 재구독 누락·관측 오염·토큰 충돌이 한꺼번에 난다).
-    /// ★디스크에 쓰지 않는다 — 락만 잡고 표식을 간다(`set_last_failure` 와 같은 꼴)★: 이 필드는 읽기를
-    ///   건너뛰고 쓰기는 `0` 자리채움이라(`AgentProfile::epoch`) 저장해도 파일이 한 바이트도 달라지지 않는다.
-    ///   그래서 이 동사에는 저장 거절 · 실패가 없고, 입구(부르는 쪽 있음 · 내부)를 가르지 않는다.
+    /// ★Why not an ordered counter★: the only question this value must answer is "is it the same stream", and order is
+    ///   not needed for that. Implementing it as a counter instead raises the problem of **where that counter lives** — leaving it on disk
+    ///   puts the old marker back on a new incarnation (that field's comment), and not leaving it has a restarted daemon count again from 0, so
+    ///   **restored agents deterministically inherit the value of a dead incarnation**. A random number removes that determinism.
+    /// ★But "different if it is a new process" is **not** a guarantee (stated honestly)★: this field is not read from disk
+    ///   (`skip_deserializing`), so after a restart the comparison target of a restored profile is 0, and the value the dead daemon used remains
+    ///   nowhere, so **the comparison itself does not happen**. What is actually guaranteed here is only **the adjacency guarantee** —
+    ///   it differs from the immediately previous incarnation within the same process (the while loop below). A collision across processes remains at 2^-32, and
+    ///   if hit, that one agent's incarnation guards are disabled for one incarnation (observation pollution · token collision · missed resubscription).
+    /// ★It always differs from the immediately previous value★: every consumer guard tells two incarnations apart by match/mismatch alone (reap
+    ///   epoch-guard ADR-0084 · control channel token ADR-0086 · turn observation table ADR-0113), so if the value overlapped with the
+    ///   previous incarnation being drained, those guards would be disabled entirely. The probability is 2^-32, but it closes for free, so it is closed.
+    /// ★Why the decision and the commit must be in one lock (load-bearing)★: split in two, a `remove` slipping in between would
+    ///   plant a marker on a vanished profile, or the comparison with the previous value would be made against an old map.
+    /// ★The current production call site is **only** `AgentManager::spawn_agent`★ — regardless of mode (Fresh/Resume),
+    ///   only that point passes here. Scattering it per call site makes a new call site miss it again (measured: WS `Spawn` and boot restore
+    ///   missed it that way), so keep the single entry point here. Not dead code (do not delete it by mistake — deleting it makes incarnation
+    ///   replacement reuse the marker, causing missed frontend resubscription, observation pollution and token collisions all at once).
+    /// ★It does not write to disk — it only takes the lock and replaces the marker (the same shape as `set_last_failure`)★: this field skips reads
+    ///   and writes a `0` placeholder (`AgentProfile::epoch`), so saving does not change a single byte of the file.
+    ///   So this verb has no save refusal or failure, and does not distinguish entries (with a caller · internal).
     // ADR-0084
     // ADR-0007
     // ADR-0291 (D8)
@@ -957,7 +960,7 @@ impl ProfileRegistry {
 
 fn remove_promoting_children(m: &mut ProfileMap, id: AgentId) {
     m.remove(&id);
-    // 1단 중첩이라 자식은 부모가 아니므로 재귀 승격은 불필요 — 한 번의 훑기로 충분하다.
+    // With one-level nesting, children are not parents, so recursive promotion is unnecessary — one sweep is enough.
     for p in m.values_mut() {
         if p.parent_id == Some(id) {
             p.parent_id = None;
@@ -965,7 +968,7 @@ fn remove_promoting_children(m: &mut ProfileMap, id: AgentId) {
     }
 }
 
-/// 규칙 = [`ProfileRegistry::try_reparent`] doc.
+/// Rules = the [`ProfileRegistry::try_reparent`] doc.
 fn reparent_one_level(m: &mut ProfileMap, child_id: AgentId, parent_id: Option<AgentId>) -> bool {
     if !m.contains_key(&child_id) {
         return false;
@@ -1005,14 +1008,14 @@ fn snapshot(map: &ProfileMap) -> Vec<AgentProfile> {
     map.values().cloned().collect()
 }
 
-/// 화신 가드를 거는 세션 id 기록 동사 둘([`ProfileRegistry::observe_session_id`] ·
-/// [`ProfileRegistry::commit_session_id`])의 **공통 본체** — 그 둘의 화신 가드와 이력 밀기는 여기 한 벌뿐이다.
-/// 가드 없는 비우기([`ProfileRegistry::release_session_id`])도 이력 밀기는 같은 `retire_session_id` 를 쓴다.
+/// The **common body** of the two session id record verbs that apply the incarnation guard ([`ProfileRegistry::observe_session_id`] ·
+/// [`ProfileRegistry::commit_session_id`]) — the incarnation guard and history push of those two exist only here, once.
+/// The unguarded clear ([`ProfileRegistry::release_session_id`]) also uses the same `retire_session_id` for the history push.
 ///
-/// ★새 기록 동사가 이 도우미를 거치지 않고 가드를 따로 적지 말 것★ — 두 벌이 되면 한쪽만 고쳐져 가드가
-///   갈린다. ADR-0217 결정 6(ADR-0218 결정 6 이 승계)이 금한 「우회로를 새로 만든다」가 그것이다.
+/// ★A new record verb must not write the guard separately without going through this helper★ — with two copies, only one gets fixed and the guards
+///   diverge. That is 「making a new bypass」, which ADR-0217 decision 6 (inherited by ADR-0218 decision 6) forbids.
 ///
-/// `admits` 는 가드와 「이미 같은 값」 확인을 **통과한 뒤에만** 불린다(인자 = 지금 칸의 값).
+/// `admits` is called **only after passing** the guard and the 「already the same value」 check (argument = the current value of the field).
 // ADR-0217
 // ADR-0226
 fn replace_session_id(
@@ -1033,7 +1036,7 @@ fn replace_session_id(
     true
 }
 
-/// 칸의 값을 이력(`old_session_ids`)으로 밀고 칸을 비운다. 민 것이 있었으면 `true`.
+/// Pushes the field's value into the history (`old_session_ids`) and empties the field. `true` if there was something pushed.
 fn retire_session_id(p: &mut AgentProfile) -> bool {
     match p.backend_session_id.take() {
         Some(old) => {
@@ -1044,19 +1047,19 @@ fn retire_session_id(p: &mut AgentProfile) -> bool {
     }
 }
 
-/// 앞 릴리스 리더용 자리채움 — 산 표식과 무관하게 항상 `0` 을 쓴다(근거 = `AgentProfile::epoch` 주석).
+/// Placeholder for previous-release readers — always writes `0` regardless of the live marker (grounds = the `AgentProfile::epoch` comment).
 fn serialize_zero_placeholder<S: serde::Serializer>(_tag: &u32, s: S) -> Result<S::Ok, S::Error> {
     s.serialize_u32(0)
 }
 
-/// 화신 표식 1개 발급. ★난수 crate 를 들이지 않으려고 uuid v4 의 바이트를 쓴다★ — v4 는 OS CSPRNG 로
-/// 채워지고 버전·variant 비트가 박히는 자리는 6·8 바이트째라, 앞 4 바이트는 온전히 난수다.
+/// Issues one incarnation marker. ★Uses the bytes of a uuid v4 to avoid bringing in a random-number crate★ — v4 is filled by the OS CSPRNG
+/// and the version/variant bits sit in bytes 6 and 8, so the first 4 bytes are fully random.
 fn random_incarnation_tag() -> u32 {
     let b = Uuid::new_v4().into_bytes();
     u32::from_be_bytes([b[0], b[1], b[2], b[3]])
 }
 
-/// 저장 결과를 시험이 정하는 프로필 저장소 — 레지스트리 · 매니저 시험이 함께 쓴다.
+/// A profile store whose save results the test decides — shared by the registry and manager tests.
 #[cfg(test)]
 pub(crate) mod scripted_store {
     use std::collections::VecDeque;
@@ -1072,15 +1075,15 @@ pub(crate) mod scripted_store {
         Refuses(Refusal),
     }
 
-    /// 쓰기 IO 실패 · 재판정 거절 둘 — 입구 처리는 `StoreError` 의 변형을 가르지 않는다.
+    /// Both write IO failure and re-decision refusal — entry handling does not distinguish the variants of `StoreError`.
     pub(crate) const FAILURES: [Outcome; 3] = [
         Outcome::FailsIo,
         Outcome::Refuses(Refusal::Unreadable),
         Outcome::Refuses(Refusal::Newer { found: 2 }),
     ];
 
-    /// 줄 세운 결과부터 한 번씩 쓰고 다 쓰면 `then` 이다(`cycle` 이면 쓴 결과를 줄 끝에 다시 세워 끝없이 돈다).
-    /// 성공한 저장만 `disk` 에 남는다.
+    /// Uses the queued results once each from the front and is `then` once they run out (with `cycle`, used results are queued again at the end and it loops forever).
+    /// Only successful saves remain in `disk`.
     pub(crate) struct ScriptedStore {
         queue: Mutex<VecDeque<Outcome>>,
         repeat: AtomicBool,
@@ -1124,7 +1127,7 @@ pub(crate) mod scripted_store {
                 .cloned()
         }
 
-        /// 마지막으로 성공한 저장 전체.
+        /// The whole of the last successful save.
         pub(crate) fn disk_all(&self) -> Vec<AgentProfile> {
             self.disk.lock().unwrap().clone()
         }
@@ -1150,7 +1153,7 @@ pub(crate) mod scripted_store {
                     *self.disk.lock().unwrap() = profiles.to_vec();
                     Ok(())
                 }
-                Outcome::FailsIo => Err(StoreError::Io(std::io::Error::other("디스크 가득"))),
+                Outcome::FailsIo => Err(StoreError::Io(std::io::Error::other("disk full"))),
                 Outcome::Refuses(refusal) => Err(StoreError::Refused(refusal)),
             }
         }
@@ -1168,7 +1171,7 @@ mod tests {
     #[derive(Default)]
     struct MemStore {
         saved: Mutex<Vec<AgentProfile>>,
-        /// 「디스크 쓰기 없음」을 재는 항목이 본다.
+        /// Looked at by the entry that measures 「no disk write」.
         saves: std::sync::atomic::AtomicUsize,
     }
     impl ProfileStore for MemStore {
@@ -1197,19 +1200,19 @@ mod tests {
 
     #[test]
     fn canonical_name_when_live_mirrors_the_live_session_rule() {
-        // ★상대 경로가 이 테스트의 핵심★: `PathBuf::from(".")` 은 raw 라 basename 이 `"."` 이 되지만, 산
-        //   세션은 canonicalize 된 절대경로의 basename 을 쓴다. 두 값이 같아야 한다는 것을 여기서 못 박는다
-        //   (`resolve_display_name(None, ".")` 로 뽑으면 `"."` 이 나와 조용히 어긋난다).
+        // ★The relative path is the core of this test★: `PathBuf::from(".")` is raw, so its basename becomes `"."`, but the live
+        //   session uses the basename of the canonicalized absolute path. This pins down that the two values must be the same
+        //   (drawing it with `resolve_display_name(None, ".")` gives `"."` and silently diverges).
         let p = sample(); // cwd = "."
         let expected = {
-            let abs = dunce::canonicalize(".").expect("cwd 는 실재한다");
+            let abs = dunce::canonicalize(".").expect("the cwd exists");
             crate::name::canonical_name_or_id_fallback(None, &abs.to_string_lossy(), p.id)
         };
         assert_eq!(p.canonical_name_when_live(), expected);
         assert_ne!(
             p.canonical_name_when_live(),
             ".",
-            "raw cwd basename 을 쓰면 산 이름과 갈린다"
+            "using the raw cwd basename diverges from the live name"
         );
 
         let mut named = sample();
@@ -1220,17 +1223,17 @@ mod tests {
         assert_eq!(
             blank.canonical_name_when_live(),
             expected,
-            "공백-only override 는 무시된다(산 세션 규칙과 동일 — resolve_display_name 은 이 가드가 없다)"
+            "a whitespace-only override is ignored (same as the live session rule — resolve_display_name lacks this guard)"
         );
     }
 
     #[test]
     fn canonical_name_when_live_survives_a_vanished_cwd_when_an_override_exists() {
-        // ★리뷰 fix(D3)★: override 가 있으면 이름이 fs 에 전혀 의존하지 않아야 한다.
+        // ★Review fix (D3)★: with an override, the name must not depend on fs at all.
         let vanished = PathBuf::from("C:/engram-does-not-exist-9f1c/never/created");
         assert!(
             dunce::canonicalize(&vanished).is_err(),
-            "이 테스트의 전제 — 이 경로는 실재하지 않아야 canonicalize 실패 경로를 탄다"
+            "the premise of this test — this path must not exist so it takes the canonicalize failure path"
         );
 
         let mut named = sample();
@@ -1239,7 +1242,7 @@ mod tests {
         assert_eq!(
             named.canonical_name_when_live(),
             "Renamed",
-            "override 가 있으면 fs 를 보지 않는다(canonicalize 실패가 이름을 흔들면 안 된다)"
+            "with an override fs is not looked at (a canonicalize failure must not sway the name)"
         );
 
         let mut anon = sample();
@@ -1248,7 +1251,7 @@ mod tests {
         assert_eq!(
             anon.canonical_name_when_live(),
             "created",
-            "override 없음 + cwd 소멸 → raw basename(알고 수용한 갭)"
+            "no override + cwd gone → raw basename (a known and accepted gap)"
         );
 
         let mut blank = sample();
@@ -1258,7 +1261,7 @@ mod tests {
         assert_eq!(
             blank.canonical_name_when_live(),
             id8,
-            "빈 cwd 는 canonicalize 결과와 무관하게 id degrade 다"
+            "an empty cwd degrades to the id regardless of the canonicalize result"
         );
     }
 
@@ -1288,7 +1291,7 @@ mod tests {
         assert_eq!(got.backend_session_id, Some(sid2));
         assert!(
             got.old_session_ids.contains(&sid1),
-            "옛 sid가 이력에 남아야 함"
+            "the old sid must remain in the history"
         );
 
         assert!(!reg.observe_session_id(id, None, sid2));
@@ -1297,10 +1300,10 @@ mod tests {
         assert_eq!(persisted[0].backend_session_id, Some(sid2));
     }
 
-    // ── 화신 가드 (ADR-0007/0163 · ADR-0185) ──
+    // ── Incarnation guard (ADR-0007/0163 · ADR-0185) ──
 
-    /// ★죽은 화신의 뒤늦은 관측이 산 화신의 값을 덮지 못한다★ — 덮이면 그 프로필은 다른 대화를 자기
-    /// 것으로 믿고, 이어받기가 남의 스레드를 연다.
+    /// ★A dead incarnation's late observation cannot overwrite the live incarnation's value★ — if overwritten, that profile believes another conversation is
+    /// its own, and resume opens someone else's thread.
     #[test]
     fn observe_session_id_rejects_a_stale_incarnation() {
         let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
@@ -1315,16 +1318,16 @@ mod tests {
         let intruder = Uuid::new_v4();
         assert!(
             !reg.observe_session_id(id, Some(stale), intruder),
-            "표식이 다른 관측이 통과했다"
+            "an observation with a different marker passed"
         );
         assert_eq!(
             reg.get(id).unwrap().backend_session_id,
             Some(held),
-            "거절했는데 값이 바뀌었다"
+            "refused but the value changed"
         );
     }
 
-    /// 짝 방향 — 표식이 같으면 쓴다. 이것 없이는 위 항목이 「언제나 거절」로도 초록이다.
+    /// The paired direction — with the same marker it writes. Without this, the entry above is green even as 「always refuse」.
     #[test]
     fn observe_session_id_accepts_a_matching_incarnation() {
         let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
@@ -1338,7 +1341,7 @@ mod tests {
         assert_eq!(reg.get(id).unwrap().backend_session_id, Some(sid));
     }
 
-    /// `None` = 대조할 축이 없다 → 표식과 무관하게 쓴다(claude 쪽 파일 감시자 갈래).
+    /// `None` = no axis to compare → writes regardless of the marker (the claude-side file watcher branch).
     #[test]
     fn observe_session_id_without_an_incarnation_writes_unconditionally() {
         let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
@@ -1348,16 +1351,16 @@ mod tests {
         let live = reg.epoch_for_spawn(id).unwrap();
         let sid = Uuid::new_v4();
 
-        // ★같은 자리에서 표식을 붙이면 거절된다는 것까지 함께 잰다★ — 이 짝이 없으면 이 항목은 가드가
-        //   통째로 사라져도 초록이다.
+        // ★It also measures that attaching a marker at the same place gets refused★ — without this pair, this entry is green even if the guard
+        //   disappears entirely.
         assert!(!reg.observe_session_id(id, Some(live.wrapping_add(1)), sid));
         assert!(reg.observe_session_id(id, None, sid));
         assert_eq!(reg.get(id).unwrap().backend_session_id, Some(sid));
     }
 
-    // ── 첫 제출 영속 — 비교-교체(ADR-0226) ──
+    // ── First-submission persistence — compare-and-swap (ADR-0226) ──
 
-    /// 프로필 하나를 넣고 그 화신 표식을 확정한다 — 아래 항목들의 공통 출발점.
+    /// Puts in one profile and settles its incarnation marker — the common starting point of the entries below.
     fn registry_with_live_incarnation() -> (ProfileRegistry, Arc<MemStore>, AgentId, u32) {
         let store = Arc::new(MemStore::default());
         let reg = ProfileRegistry::new(store.clone());
@@ -1372,7 +1375,7 @@ mod tests {
         store.saves.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// Fresh 화신 — 칸을 비우고 시작했으므로 `expected = None` 이고, 첫 제출이 뽑아 둔 값을 적는다.
+    /// Fresh incarnation — it started by emptying the field, so `expected = None`, and the first submission writes the value drawn beforehand.
     #[test]
     fn commit_session_id_writes_when_the_slot_is_what_the_incarnation_saw() {
         let (reg, store, id, live) = registry_with_live_incarnation();
@@ -1383,17 +1386,17 @@ mod tests {
         assert_eq!(
             store.load()[0].backend_session_id,
             Some(minted),
-            "비교-교체가 성공하면 그 자리에서 영속한다"
+            "when the compare-and-swap succeeds, it persists on the spot"
         );
         assert!(
             reg.get(id).unwrap().old_session_ids.is_empty(),
-            "빈 칸에서 시작했으니 밀 옛 값이 없다"
+            "it started from an empty field, so there is no old value to push"
         );
     }
 
-    /// ★ADR-0216 이 기각한 「빈 칸에만 쓴다」가 아님을 재는 짝★ — 이어받기 화신의 첫 offer 가 저장값과
-    ///   다른 id 면(재개가 새 id 를 돌려준 경우) 칸 == `expected` == 저장값이라 **교체된다**. 빈 칸에만
-    ///   쓰는 규칙이면 여기서 거절돼 손잡이가 낡는다.
+    /// ★The pair measuring that it is not 「write only into an empty field」, which ADR-0216 rejected★ — if a resuming incarnation's first offer is an id
+    ///   different from the stored value (the resume returned a new id), field == `expected` == stored value, so **it is replaced**. Under a rule
+    ///   writing only into empty fields, it would be refused here and the handle would go stale.
     #[test]
     fn a_resumed_incarnations_first_offer_with_a_different_id_replaces_the_stored_one() {
         let (reg, store, id, live) = registry_with_live_incarnation();
@@ -1406,12 +1409,12 @@ mod tests {
         assert_eq!(got.backend_session_id, Some(resumed_as));
         assert!(
             got.old_session_ids.contains(&stored),
-            "옛 값은 이력으로 밀린다"
+            "the old value is pushed into the history"
         );
         assert_eq!(store.load()[0].backend_session_id, Some(resumed_as));
     }
 
-    /// 이어받기 화신의 offer 가 저장값 그대로면 쓸 것이 없다 — 디스크를 건드리지 않는다.
+    /// If a resuming incarnation's offer is the stored value as is, there is nothing to write — the disk is not touched.
     #[test]
     fn commit_session_id_with_the_value_already_in_the_slot_does_not_write() {
         let (reg, store, id, live) = registry_with_live_incarnation();
@@ -1423,21 +1426,21 @@ mod tests {
         assert_eq!(
             saves(&store),
             before,
-            "같은 값이면 디스크 쓰기가 없어야 한다"
+            "with the same value there must be no disk write"
         );
         let got = reg.get(id).unwrap();
         assert_eq!(got.backend_session_id, Some(stored));
         assert!(
             !got.old_session_ids.contains(&stored),
-            "같은 값을 이력으로 밀지 않는다"
+            "the same value is not pushed into the history"
         );
     }
 
-    /// ★추적기가 첫 제출 **전에** 쓴 값을 commit 이 되감지 않는다★ — 추적기(claude 파일 감시자)는
-    ///   대조 없이 쓴다. 덮어쓰기였다면 여기서 스폰 때 값으로 되감기고 추적기 값은 이력으로 밀린다.
+    /// ★commit does not rewind the value the tracker wrote **before** the first submission★ — the tracker (claude file watcher)
+    ///   writes without comparison. With an overwrite, it would be rewound here to the value at spawn and the tracker value pushed into the history.
     #[test]
     fn commit_session_id_does_not_rewind_a_value_the_tracker_wrote_before_the_first_submission() {
-        // 이어받기 화신: 시작 때 저장값 S 를 봤는데, 첫 제출 전에 추적기가 Y 를 적었다.
+        // Resuming incarnation: saw the stored value S at the start, but before the first submission the tracker wrote Y.
         let (reg, store, id, live) = registry_with_live_incarnation();
         let stored = Uuid::new_v4();
         assert!(reg.observe_session_id(id, Some(live), stored));
@@ -1447,9 +1450,9 @@ mod tests {
 
         assert!(!reg.commit_session_id(id, live, Some(stored), stored));
         assert_eq!(reg.get(id).unwrap().backend_session_id, Some(drifted));
-        assert_eq!(saves(&store), before, "거절이면 디스크 쓰기가 없다");
+        assert_eq!(saves(&store), before, "a refusal means no disk write");
 
-        // Fresh 화신: 시작 때 빈 칸을 봤는데, 첫 제출 전에 추적기가 Y 를 적었다.
+        // Fresh incarnation: saw an empty field at the start, but before the first submission the tracker wrote Y.
         let (reg, _store, id, live) = registry_with_live_incarnation();
         let drifted = Uuid::new_v4();
         assert!(reg.observe_session_id(id, None, drifted));
@@ -1458,11 +1461,11 @@ mod tests {
         assert_eq!(
             reg.get(id).unwrap().backend_session_id,
             Some(drifted),
-            "추적기 값이 그대로 선다"
+            "the tracker value stands as is"
         );
     }
 
-    /// 짝 방향 — 표식이 다르면 칸이 `expected` 여도 쓰지 않는다. 이것 없이는 위 항목들이 가드 없이도 초록이다.
+    /// The paired direction — with a different marker it does not write even if the field is `expected`. Without this, the entries above are green even without the guard.
     #[test]
     fn commit_session_id_rejects_a_stale_incarnation() {
         let (reg, store, id, live) = registry_with_live_incarnation();
@@ -1479,42 +1482,45 @@ mod tests {
         assert!(!reg.commit_session_id(AgentId::new_v4(), 0, None, Uuid::new_v4()));
     }
 
-    /// ★두 기록 동사가 **한** 가드 도우미를 거친다★ — 새 동사가 가드를 따로 적으면 ADR-0217 결정 6 이
-    ///   금한 우회로가 된다. 실행으로는 「같은 결과」만 보이고 「같은 코드」는 안 보이므로 소스에서 잰다.
+    /// ★The two record verbs go through **one** guard helper★ — a new verb writing the guard separately would be the bypass ADR-0217 decision 6
+    ///   forbids. Running shows only 「the same result」, not 「the same code」, so it is measured in the source.
     #[test]
     fn the_two_session_id_writers_share_one_guard_helper() {
         let src = include_str!("profile.rs");
-        let production = src.split("mod tests {").next().expect("운영 구획");
+        let production = src.split("mod tests {").next().expect("production section");
         let body_of = |sig: &str, next: &str| -> String {
             assert_eq!(
                 production.matches(sig).count(),
                 1,
-                "`{sig}` 가 운영 구획에 정확히 하나여야 이 항목이 본문을 특정한다"
+                "`{sig}` must be exactly one in the production section for this entry to pin down the body"
             );
-            let rest = production.split(sig).nth(1).expect("본문");
+            let rest = production.split(sig).nth(1).expect("body");
             let end = rest.find(next).unwrap_or_else(|| {
-                panic!("`{next}` 가 `{sig}` 뒤에 없다 — 이 항목의 전제가 낡았다")
+                panic!("`{next}` is not after `{sig}` — this entry's premise is stale")
             });
             rest[..end].to_string()
         };
-        let observe = body_of("pub fn observe_session_id(", "/// 이 화신의 **첫 제출**");
-        let commit = body_of("pub fn commit_session_id(", "/// 새 세션 id 를 뽑는다");
+        let observe = body_of(
+            "pub fn observe_session_id(",
+            "/// The compare-and-swap verb by which this incarnation's **first submission**",
+        );
+        let commit = body_of("pub fn commit_session_id(", "/// Draws a new session id");
         for (name, body) in [
             ("observe_session_id", &observe),
             ("commit_session_id", &commit),
         ] {
             assert!(
                 body.contains("replace_session_id("),
-                "`{name}` 가 공통 도우미를 거치지 않는다: {body}"
+                "`{name}` does not go through the common helper: {body}"
             );
             assert!(
                 !body.contains("p.epoch"),
-                "`{name}` 가 화신 가드를 따로 적었다 — 도우미 밖의 둘째 가드다: {body}"
+                "`{name}` wrote the incarnation guard separately — a second guard outside the helper: {body}"
             );
         }
     }
 
-    // ── Fresh 가 칸을 비우는 동사(ADR-0226) ──
+    // ── The verb by which Fresh empties the field (ADR-0226) ──
 
     #[test]
     fn release_session_id_pushes_the_old_value_and_persists_an_empty_slot() {
@@ -1525,8 +1531,15 @@ mod tests {
         assert_eq!(reg.release_session_id(id), Some(true));
         let got = reg.get(id).unwrap();
         assert_eq!(got.backend_session_id, None);
-        assert!(got.old_session_ids.contains(&old), "옛 값은 이력으로");
-        assert_eq!(store.load()[0].backend_session_id, None, "빈 칸이 영속된다");
+        assert!(
+            got.old_session_ids.contains(&old),
+            "the old value goes into the history"
+        );
+        assert_eq!(
+            store.load()[0].backend_session_id,
+            None,
+            "the empty field is persisted"
+        );
     }
 
     #[test]
@@ -1534,29 +1547,36 @@ mod tests {
         let (reg, store, id, _live) = registry_with_live_incarnation();
         let before = saves(&store);
         assert_eq!(reg.release_session_id(id), Some(false));
-        assert_eq!(saves(&store), before, "바뀐 것이 없으면 쓰지 않는다");
+        assert_eq!(
+            saves(&store),
+            before,
+            "nothing changed, so nothing is written"
+        );
     }
 
-    /// ★`None` 은 「밀 것이 없었다」가 아니라 「프로필이 없다」다★ — spawn 이 이 둘을 갈라 끊는다.
+    /// ★`None` is not 「there was nothing to push」 but 「there is no profile」★ — spawn cuts off by telling these apart.
     #[test]
     fn release_session_id_tells_a_vanished_profile_apart() {
         let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
         assert_eq!(reg.release_session_id(AgentId::new_v4()), None);
     }
 
-    /// 뽑기는 명부를 건드리지 않는다 — 영속은 첫 제출의 몫이다.
+    /// Drawing does not touch the registry — persistence is the first submission's job.
     #[test]
     fn mint_session_id_touches_nothing_and_never_repeats() {
         let (reg, store, id, _live) = registry_with_live_incarnation();
         let before = saves(&store);
         let a = ProfileRegistry::mint_session_id();
         let b = ProfileRegistry::mint_session_id();
-        assert_ne!(a, b, "매번 새 uuid(Fresh 의 「언제나 새 sid」 봉인)");
-        assert_eq!(saves(&store), before, "디스크 쓰기 없음");
+        assert_ne!(
+            a, b,
+            "a new uuid every time (the Fresh seal of always a new sid)"
+        );
+        assert_eq!(saves(&store), before, "no disk write");
         assert_eq!(
             reg.get(id).unwrap().backend_session_id,
             None,
-            "명부 칸도 그대로"
+            "the registry field is unchanged too"
         );
     }
 
@@ -1567,37 +1587,37 @@ mod tests {
         let id = p.id;
         reg.upsert(p);
 
-        // 인접 보장 = while 루프가 실제로 지키는 유일한 것. 소비자 가드가 전부 일치/불일치 하나로 두
-        //   화신을 가르므로, 배출 중인 앞 화신과 값이 겹치면 그 가드들이 통째로 무력해진다.
+        // Adjacency guarantee = the only thing the while loop actually guards. Every consumer guard tells two
+        //   incarnations apart by match/mismatch alone, so if the value overlapped with the previous incarnation being drained, those guards would be disabled entirely.
         let mut seen = Vec::new();
         for _ in 0..64 {
-            let tag = reg.epoch_for_spawn(id).expect("프로필 존재");
+            let tag = reg.epoch_for_spawn(id).expect("profile exists");
             assert!(
                 seen.last() != Some(&tag),
-                "직전 화신과 같은 표식이 나오면 안 된다: {tag}"
+                "the same marker as the immediately previous incarnation must not come out: {tag}"
             );
             seen.push(tag);
         }
         assert_ne!(
             seen[0], 0,
-            "새 프로필의 기본값이 0 이라 첫 발급만은 0 을 피한다(그 뒤 발급엔 이 보장이 없다)"
+            "a new profile's default is 0, so only the first issue avoids 0 (later issues have no such guarantee)"
         );
 
-        reg.try_remove(id).expect("저장 성공");
+        reg.try_remove(id).expect("save succeeds");
         assert_eq!(
             reg.epoch_for_spawn(id),
             None,
-            "프로필이 없으면 None — 없는 프로필에 표식을 심으면 spawn 이 유령 화신을 만든다"
+            "without a profile, None — planting a marker on a missing profile would have spawn make a ghost incarnation"
         );
     }
 
-    // ★이 테스트가 겨냥하는 것 = 발급이 **결정론적이지 않다**★. 인접 보장(위 테스트)만으로는 카운터
-    //   회귀가 안 잡힌다 — 증가든 감소든 카운터도 직전 값과는 늘 다르다. 갈리는 지점은 **새 프로세스의
-    //   첫 발급**이다: 카운터는 매번 같은 값(0 에서 한 칸)을 내주므로, 재기동한 데몬이 복원한 에이전트에
-    //   죽은 화신의 표식을 그대로 다시 입힌다(그 결말 = 붙어 있던 클라이언트가 "같은 스트림" 으로 오인
-    //   → 옛 커서 유지 → 새 프레임 통째 dedup 탈락 = 빈 슬롯). 난수라야 그 결정론이 없다.
-    // ★단 이건 확률적 단언이다★: 32비트 공간에서 64개를 뽑아 절반도 안 겹치는 사건은 ~1e-7 이하라
-    //   실질 0 이지만, 정직하게는 "구성상 보장" 이 아니라 확률이다(`epoch_for_spawn` 문단이 그 정본).
+    // ★What this test targets = the issuing is **not deterministic**★. The adjacency guarantee (test above) alone does not catch a counter
+    //   regression — a counter, whether incrementing or decrementing, also always differs from the immediately previous value. The point where they differ is **a new process's
+    //   first issue**: a counter hands out the same value every time (one step from 0), so a restarted daemon puts a dead
+    //   incarnation's marker back as is on restored agents (the outcome = an attached client mistakes it for "the same stream"
+    //   → keeps the old cursor → new frames dropped wholesale by dedup = empty slot). Only a random number lacks that determinism.
+    // ★But this is a probabilistic assertion★: drawing 64 from a 32-bit space with fewer than half distinct is an event of ~1e-7 or less,
+    //   effectively 0, but honestly it is a probability, not "guaranteed by construction" (the `epoch_for_spawn` paragraph is canonical for it).
     #[test]
     fn a_fresh_registry_does_not_hand_out_the_same_first_tag_every_time() {
         let first_tags: Vec<u32> = (0..64)
@@ -1606,13 +1626,13 @@ mod tests {
                 let p = sample();
                 let id = p.id;
                 reg.upsert(p);
-                reg.epoch_for_spawn(id).expect("프로필 존재")
+                reg.epoch_for_spawn(id).expect("profile exists")
             })
             .collect();
         let distinct: std::collections::HashSet<u32> = first_tags.iter().copied().collect();
         assert!(
             distinct.len() >= 32,
-            "프로세스마다 같은 첫 표식이 나오면 재기동 복원이 죽은 화신의 값을 물려받는다(카운터 회귀): {distinct:?}"
+            "if every process gave the same first marker, restart restore would inherit the dead incarnation's value (counter regression): {distinct:?}"
         );
     }
 
@@ -1622,13 +1642,13 @@ mod tests {
         let p = sample();
         let id = p.id;
         reg.upsert(p.clone());
-        let live_tag = reg.epoch_for_spawn(id).expect("프로필 존재");
-        // spawn 호출부가 들고 있던 옛 스냅샷(표식 = 기본값 0)으로 upsert.
+        let live_tag = reg.epoch_for_spawn(id).expect("profile exists");
+        // upsert with the old snapshot the spawn caller held (marker = default 0).
         reg.upsert_preserving_hierarchy(p);
         assert_eq!(
-            reg.get(id).expect("존재").epoch,
+            reg.get(id).expect("exists").epoch,
             live_tag,
-            "live 값이 이겨야(스냅샷이 표식을 되돌리면 산 세션이 죽은 화신의 표식을 쓴다)"
+            "the live value must win (if the snapshot reverted the marker, the live session would use the dead incarnation's marker)"
         );
     }
 
@@ -1637,32 +1657,32 @@ mod tests {
         let (reg, store, id, before_tag) = registry_with_live_incarnation();
         let before = saves(&store);
 
-        let tag = reg.epoch_for_spawn(id).expect("프로필 존재");
+        let tag = reg.epoch_for_spawn(id).expect("profile exists");
 
         assert_ne!(tag, before_tag);
         assert_eq!(reg.get(id).unwrap().epoch, tag);
         assert_eq!(
             saves(&store),
             before,
-            "표식 발급이 저장을 부르면 파일에 실리지도 않는 값 때문에 저장 거절 · 실패가 띄우기를 끊는다(D8)"
+            "if marker issuing called save, a save refusal or failure caused by a value not even carried in the file would cut the launch (D8)"
         );
     }
 
-    // ── 마지막 실패(ADR-0172) ────────────────────────────────────────────────────
+    // ── Last failure (ADR-0172) ────────────────────────────────────────────────────
 
     #[test]
     fn last_failure_never_reaches_the_serialized_profile() {
         let mut p = sample();
         p.last_failure = Some(AgentFailureKind::NoConversationToResume);
-        let json = serde_json::to_string(&p).expect("직렬화");
+        let json = serde_json::to_string(&p).expect("serialize");
         assert!(
             !json.contains("last_failure"),
-            "agents.json 에 이 필드가 나가면 데몬 수명 제약이 깨진다 — got {json}"
+            "if this field went out to agents.json, the daemon-lifetime constraint would break — got {json}"
         );
-        let back: AgentProfile = serde_json::from_str(&json).expect("역직렬화");
+        let back: AgentProfile = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(
             back.last_failure, None,
-            "디스크에서 돌아온 값은 늘 비어 있다"
+            "the value coming back from disk is always empty"
         );
     }
 
@@ -1677,53 +1697,59 @@ mod tests {
         assert!(reg.set_last_failure(id, None, Some(AgentFailureKind::SpawnFailed)));
         assert!(
             !reg.set_last_failure(id, None, Some(AgentFailureKind::SpawnFailed)),
-            "같은 값 재기록은 변경 아님"
+            "rewriting the same value is not a change"
         );
         assert_eq!(
             reg.get(id).unwrap().last_failure,
             Some(AgentFailureKind::SpawnFailed)
         );
-        assert!(reg.set_last_failure(id, None, None), "지움도 변경이다");
+        assert!(
+            reg.set_last_failure(id, None, None),
+            "clearing is also a change"
+        );
         assert_eq!(reg.get(id).unwrap().last_failure, None);
         assert!(
             !reg.set_last_failure(Uuid::new_v4(), None, Some(AgentFailureKind::Other)),
-            "없는 id 는 no-op"
+            "a missing id is a no-op"
         );
 
         assert!(
             store.load().iter().all(|p| p.last_failure.is_none()),
-            "store 로 나간 스냅샷에도 값이 실리지 않는다"
+            "the value is not carried in the snapshot that went out to the store either"
         );
     }
 
-    /// ★지각-쓰기 가드★: resume 관측은 조기종료 창(3s)만큼 늦게 쓴다. 그 사이 다른 연결이 같은 프로필을
-    /// 성공적으로 활성화하면(새 화신 표식) 뒤늦은 옛 관측이 **산 새 화신**에 죽은 화신의 실패를 찍는다.
+    /// ★Late-write guard★: the resume observation writes late, by the early-exit window (3s). If in between another connection
+    /// successfully activates the same profile (a new incarnation marker), the late old observation stamps the dead incarnation's failure on **the live new incarnation**.
     ///
-    /// ★표식을 상수로 적지 않는다★: 화신 표식은 화신마다 새로 뽑은 난수라(ADR-0163) `0 → 1` 같은
-    ///   순서가 없다. 그래서 옛 값·새 값을 **발급받아 들고** 비교하고, 가드도 대소가 아니라
-    ///   일치/불일치로만 선다.
+    /// ★Markers are not written as constants★: incarnation markers are random numbers drawn anew per incarnation (ADR-0163), so there is no order
+    ///   like `0 → 1`. So the old and new values are **issued and held** for the comparison, and the guard also stands on
+    ///   match/mismatch only, not ordering.
     #[test]
     fn a_late_write_from_an_older_incarnation_is_rejected() {
         let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
         let p = sample();
         let id = p.id;
         reg.upsert(p);
-        // 화신 교체 두 번 — 앞 화신의 표식과 산 화신의 표식을 각각 손에 쥔다.
-        let old = reg.epoch_for_spawn(id).expect("첫 화신 표식");
-        let live = reg.epoch_for_spawn(id).expect("둘째 화신 표식");
-        assert_ne!(old, live, "전제: 인접 화신은 서로 다른 표식을 받는다");
+        // Two incarnation replacements — holding the previous incarnation's marker and the live incarnation's marker each in hand.
+        let old = reg.epoch_for_spawn(id).expect("first incarnation marker");
+        let live = reg.epoch_for_spawn(id).expect("second incarnation marker");
+        assert_ne!(
+            old, live,
+            "premise: adjacent incarnations get different markers"
+        );
 
         assert!(
             !reg.set_last_failure(id, Some(old), Some(AgentFailureKind::EarlyExitAfterResume)),
-            "옛 화신의 지각 관측은 거부돼야 한다"
+            "the old incarnation's late observation must be rejected"
         );
         assert_eq!(reg.get(id).unwrap().last_failure, None);
 
         assert!(
             reg.set_last_failure(id, Some(live), Some(AgentFailureKind::EarlyExitAfterResume)),
-            "현 화신의 관측은 그대로 쓰인다"
+            "the current incarnation's observation is written as is"
         );
-        // 지움도 같은 가드를 탄다 — 옛 화신의 성공 관측이 새 화신의 기록을 지우면 안 된다.
+        // Clearing takes the same guard — the old incarnation's success observation must not clear the new incarnation's record.
         assert!(!reg.set_last_failure(id, Some(old), None));
         assert_eq!(
             reg.get(id).unwrap().last_failure,
@@ -1731,10 +1757,10 @@ mod tests {
         );
         assert!(
             reg.set_last_failure(id, Some(live), None),
-            "현 화신은 지운다"
+            "the current incarnation clears it"
         );
 
-        // 화신 전에 끝난 실패는 비교할 세대가 없어 무조건 쓴다(계약의 `None` 갈래).
+        // A failure that ended before the incarnation has no generation to compare, so it writes unconditionally (the `None` branch of the contract).
         assert!(reg.set_last_failure(id, None, Some(AgentFailureKind::SpawnFailed)));
         assert_eq!(
             reg.get(id).unwrap().last_failure,
@@ -1749,16 +1775,16 @@ mod tests {
         let id = p.id;
         reg.upsert(p.clone());
         reg.set_last_failure(id, None, Some(AgentFailureKind::NoConversationToResume));
-        // spawn 호출부가 들고 있던 옛 스냅샷(last_failure=None)으로 upsert.
+        // upsert with the old snapshot the spawn caller held (last_failure=None).
         reg.upsert_preserving_hierarchy(p);
         assert_eq!(
-            reg.get(id).expect("존재").last_failure,
+            reg.get(id).expect("exists").last_failure,
             Some(AgentFailureKind::NoConversationToResume),
-            "live 값이 이겨야(스냅샷이 실패 기록을 지우면 표시가 조용히 사라진다)"
+            "the live value must win (if the snapshot cleared the failure record, the display would silently disappear)"
         );
     }
 
-    // ── 표시명 override(ADR-0061 리치화 — 트리 rename) ──────────────────────────────
+    // ── Display name override (ADR-0061 enrichment — tree rename) ──────────────────────────────
 
     #[test]
     fn new_profile_has_no_display_name_override() {
@@ -1773,16 +1799,13 @@ mod tests {
         let id = p.id;
         reg.upsert(p);
         assert!(reg
-            .try_rename(id, Some("내 에이전트".to_string()))
-            .expect("저장 성공"));
+            .try_rename(id, Some("my agent".to_string()))
+            .expect("save succeeds"));
         assert_eq!(
             reg.get(id).unwrap().display_name,
-            Some("내 에이전트".to_string())
+            Some("my agent".to_string())
         );
-        assert_eq!(
-            store.load()[0].display_name,
-            Some("내 에이전트".to_string())
-        );
+        assert_eq!(store.load()[0].display_name, Some("my agent".to_string()));
     }
 
     #[test]
@@ -1792,8 +1815,8 @@ mod tests {
         let id = p.id;
         reg.upsert(p);
         reg.try_rename(id, Some("x".to_string()))
-            .expect("저장 성공");
-        assert!(reg.try_rename(id, None).expect("저장 성공"));
+            .expect("save succeeds");
+        assert!(reg.try_rename(id, None).expect("save succeeds"));
         assert_eq!(reg.get(id).unwrap().display_name, None);
     }
 
@@ -1802,10 +1825,10 @@ mod tests {
         let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
         assert!(!reg
             .try_rename(Uuid::new_v4(), Some("y".to_string()))
-            .expect("저장 성공"));
+            .expect("save succeeds"));
     }
 
-    // ── 트리 계층 reparent(ADR-0072) ────────────────────────────────────────────
+    // ── Tree hierarchy reparent (ADR-0072) ────────────────────────────────────────────
 
     #[test]
     fn reparent_sets_and_persists() {
@@ -1817,7 +1840,7 @@ mod tests {
         reg.upsert(parent);
         reg.upsert(child);
 
-        assert!(reg.try_reparent(cid, Some(pid)).expect("저장 성공"));
+        assert!(reg.try_reparent(cid, Some(pid)).expect("save succeeds"));
         assert_eq!(reg.get(cid).unwrap().parent_id, Some(pid));
         let disk = store.load();
         let persisted_child = disk.iter().find(|p| p.id == cid).unwrap();
@@ -1832,8 +1855,8 @@ mod tests {
         let (pid, cid) = (parent.id, child.id);
         reg.upsert(parent);
         reg.upsert(child);
-        reg.try_reparent(cid, Some(pid)).expect("저장 성공");
-        assert!(reg.try_reparent(cid, None).expect("저장 성공"));
+        reg.try_reparent(cid, Some(pid)).expect("save succeeds");
+        assert!(reg.try_reparent(cid, None).expect("save succeeds"));
         assert_eq!(reg.get(cid).unwrap().parent_id, None);
     }
 
@@ -1844,8 +1867,8 @@ mod tests {
         let id = p.id;
         reg.upsert(p);
         assert!(
-            !reg.try_reparent(id, Some(id)).expect("저장 성공"),
-            "self-parent 는 거부"
+            !reg.try_reparent(id, Some(id)).expect("save succeeds"),
+            "self-parent is refused"
         );
         assert_eq!(reg.get(id).unwrap().parent_id, None);
     }
@@ -1858,8 +1881,8 @@ mod tests {
         reg.upsert(child);
         assert!(
             !reg.try_reparent(cid, Some(Uuid::new_v4()))
-                .expect("저장 성공"),
-            "없는 부모 지정은 거부"
+                .expect("save succeeds"),
+            "specifying a missing parent is refused"
         );
         assert_eq!(reg.get(cid).unwrap().parent_id, None);
     }
@@ -1872,25 +1895,25 @@ mod tests {
         reg.upsert(parent);
         assert!(
             !reg.try_reparent(Uuid::new_v4(), Some(pid))
-                .expect("저장 성공"),
-            "없는 child 는 거부"
+                .expect("save succeeds"),
+            "a missing child is refused"
         );
     }
 
     #[test]
     fn reparent_rejects_making_a_node_with_children_a_child() {
         let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
-        let a = sample(); // 미래의 부모
-        let b = sample(); // a 의 자식
-        let c = sample(); // a 를 자식으로 만들려는 새 루트
+        let a = sample(); // future parent
+        let b = sample(); // child of a
+        let c = sample(); // a new root trying to make a its child
         let (aid, bid, cid) = (a.id, b.id, c.id);
         reg.upsert(a);
         reg.upsert(b);
         reg.upsert(c);
-        assert!(reg.try_reparent(bid, Some(aid)).expect("저장 성공"));
+        assert!(reg.try_reparent(bid, Some(aid)).expect("save succeeds"));
         assert!(
-            !reg.try_reparent(aid, Some(cid)).expect("저장 성공"),
-            "자식을 가진 노드는 자식이 될 수 없음(1단)"
+            !reg.try_reparent(aid, Some(cid)).expect("save succeeds"),
+            "a node with children cannot become a child (one level)"
         );
         assert_eq!(reg.get(aid).unwrap().parent_id, None);
     }
@@ -1898,17 +1921,17 @@ mod tests {
     #[test]
     fn reparent_rejects_parent_that_has_a_parent() {
         let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
-        let a = sample(); // 루트
-        let b = sample(); // a 의 자식
-        let c = sample(); // b 를 부모로 삼으려는 노드
+        let a = sample(); // root
+        let b = sample(); // child of a
+        let c = sample(); // a node trying to take b as its parent
         let (aid, bid, cid) = (a.id, b.id, c.id);
         reg.upsert(a);
         reg.upsert(b);
         reg.upsert(c);
-        assert!(reg.try_reparent(bid, Some(aid)).expect("저장 성공"));
+        assert!(reg.try_reparent(bid, Some(aid)).expect("save succeeds"));
         assert!(
-            !reg.try_reparent(cid, Some(bid)).expect("저장 성공"),
-            "부모가 부모를 가진 경우 자식 지정 거부(1단)"
+            !reg.try_reparent(cid, Some(bid)).expect("save succeeds"),
+            "specifying a child is refused when the parent has a parent (one level)"
         );
         assert_eq!(reg.get(cid).unwrap().parent_id, None);
     }
@@ -1924,13 +1947,21 @@ mod tests {
         reg.upsert(a);
         reg.upsert(b);
         reg.upsert(c);
-        reg.try_reparent(bid, Some(aid)).expect("저장 성공");
-        reg.try_reparent(cid, Some(aid)).expect("저장 성공");
+        reg.try_reparent(bid, Some(aid)).expect("save succeeds");
+        reg.try_reparent(cid, Some(aid)).expect("save succeeds");
 
-        reg.try_remove(aid).expect("저장 성공");
+        reg.try_remove(aid).expect("save succeeds");
         assert!(reg.get(aid).is_none());
-        assert_eq!(reg.get(bid).unwrap().parent_id, None, "b 는 루트 승격");
-        assert_eq!(reg.get(cid).unwrap().parent_id, None, "c 는 루트 승격");
+        assert_eq!(
+            reg.get(bid).unwrap().parent_id,
+            None,
+            "b is promoted to root"
+        );
+        assert_eq!(
+            reg.get(cid).unwrap().parent_id,
+            None,
+            "c is promoted to root"
+        );
 
         let disk = store.load();
         assert!(!disk.iter().any(|p| p.id == aid));
@@ -1940,12 +1971,12 @@ mod tests {
             .all(|p| p.parent_id.is_none()));
     }
 
-    // ── 쓰기 경계 정규화(ADR-0072) ────────────────────────────────────────────────
+    // ── Write-boundary normalization (ADR-0072) ────────────────────────────────────────────────
 
-    /// ★재현 경로★: store 에 이미 cyclic 쌍이 있는 상태(손상된/손편집 agents.json, 또는 reparent 검증을
-    /// 우회하는 legacy write)를 load 로 그대로 들여온 뒤(load 는 정규화 안 함), 아무 write 나 한 번 트리거하면
-    /// 경계 정규화가 cycle 을 healing 한다. **normalize_hierarchy 없이는 실패한다** — 두 parent_id 가 그대로
-    /// 남아 인메모리·디스크에 cycle 이 persist 된다.
+    /// ★Reproduction path★: bring in by load as is a state where the store already has a cyclic pair (a damaged/hand-edited agents.json, or a legacy write
+    /// bypassing reparent validation) (load does not normalize), then trigger any one write, and
+    /// boundary normalization heals the cycle. **It fails without normalize_hierarchy** — both parent_ids stay
+    /// and the cycle persists in memory and on disk.
     #[test]
     fn cycle_in_map_is_normalized_at_write_boundary() {
         let mut a = sample();
@@ -1954,23 +1985,31 @@ mod tests {
         a.parent_id = Some(bid);
         b.parent_id = Some(aid);
         let store = Arc::new(MemStore::default());
-        store.save(&[a, b]).expect("메모리 저장");
+        store.save(&[a, b]).expect("memory save");
         let reg = ProfileRegistry::new(store.clone());
         assert_eq!(
             reg.get(aid).unwrap().parent_id,
             Some(bid),
-            "로드 직후엔 cycle 잔존"
+            "right after load the cycle remains"
         );
 
         reg.try_rename(aid, Some("touch".into()))
-            .expect("저장 성공");
+            .expect("save succeeds");
 
-        assert_eq!(reg.get(aid).unwrap().parent_id, None, "cycle 참여 A→루트");
-        assert_eq!(reg.get(bid).unwrap().parent_id, None, "cycle 참여 B→루트");
+        assert_eq!(
+            reg.get(aid).unwrap().parent_id,
+            None,
+            "cycle participant A → root"
+        );
+        assert_eq!(
+            reg.get(bid).unwrap().parent_id,
+            None,
+            "cycle participant B → root"
+        );
         let disk = store.load();
         assert!(
             disk.iter().all(|p| p.parent_id.is_none()),
-            "디스크에도 cycle 없음"
+            "no cycle on disk either"
         );
     }
 
@@ -1987,7 +2026,7 @@ mod tests {
         assert_eq!(
             reg.get(cid).unwrap().parent_id,
             None,
-            "dangling 참조는 루트로 정규화"
+            "a dangling reference is normalized to root"
         );
         assert!(
             store
@@ -1997,7 +2036,7 @@ mod tests {
                 .unwrap()
                 .parent_id
                 .is_none(),
-            "디스크에도 dangling 없음"
+            "no dangling on disk either"
         );
     }
 
@@ -2009,13 +2048,15 @@ mod tests {
         let (pid, cid) = (parent.id, child.id);
         reg.upsert(parent);
         reg.upsert(child);
-        assert!(reg.try_reparent(cid, Some(pid)).expect("저장 성공"));
-        reg.try_rename(cid, Some("x".into())).expect("저장 성공");
-        reg.try_rename(pid, Some("y".into())).expect("저장 성공");
+        assert!(reg.try_reparent(cid, Some(pid)).expect("save succeeds"));
+        reg.try_rename(cid, Some("x".into()))
+            .expect("save succeeds");
+        reg.try_rename(pid, Some("y".into()))
+            .expect("save succeeds");
         assert_eq!(
             reg.get(cid).unwrap().parent_id,
             Some(pid),
-            "정상 부모 관계는 정규화로 훼손되지 않음(idempotent)"
+            "a normal parent relation is not damaged by normalization (idempotent)"
         );
     }
 
@@ -2023,7 +2064,7 @@ mod tests {
     fn concurrent_reparent_vs_remove_no_dangling() {
         use std::thread;
 
-        // 반복해 인터리빙을 넓게 흔든다(레이스 재현 확률↑).
+        // Repeats to shake the interleaving widely (raises the race reproduction probability).
         for _ in 0..200 {
             let store = Arc::new(MemStore::default());
             let reg = Arc::new(ProfileRegistry::new(store.clone()));
@@ -2036,21 +2077,21 @@ mod tests {
             let r1 = reg.clone();
             let r2 = reg.clone();
             let h1 = thread::spawn(move || {
-                r1.try_reparent(cid, Some(pid)).expect("저장 성공");
+                r1.try_reparent(cid, Some(pid)).expect("save succeeds");
             });
             let h2 = thread::spawn(move || {
-                r2.try_remove(pid).expect("저장 성공");
+                r2.try_remove(pid).expect("save succeeds");
             });
             h1.join().unwrap();
             h2.join().unwrap();
 
             let disk = store.load();
-            assert!(!disk.iter().any(|p| p.id == pid), "부모는 삭제됨");
+            assert!(!disk.iter().any(|p| p.id == pid), "the parent is deleted");
             if let Some(c) = disk.iter().find(|p| p.id == cid) {
                 assert_ne!(
                     c.parent_id,
                     Some(pid),
-                    "삭제된 부모를 가리키는 dangling 참조가 persist 되면 안 됨"
+                    "a dangling reference pointing at the deleted parent must not persist"
                 );
             }
             let ids: std::collections::HashSet<_> = disk.iter().map(|p| p.id).collect();
@@ -2058,7 +2099,7 @@ mod tests {
                 disk.iter()
                     .filter_map(|p| p.parent_id)
                     .all(|pp| ids.contains(&pp)),
-                "persisted 계층에 dangling 부모 참조 없음"
+                "no dangling parent reference in the persisted hierarchy"
             );
         }
     }
@@ -2076,30 +2117,32 @@ mod tests {
         assert_eq!(stale_snapshot.parent_id, None);
         assert_eq!(stale_snapshot.display_name, None);
 
-        // 그 사이 다른 연결이 reparent + rename 을 커밋.
-        assert!(reg.try_reparent(cid, Some(rid)).expect("저장 성공"));
-        assert!(reg.try_rename(cid, Some("live".into())).expect("저장 성공"));
+        // In between, another connection commits a reparent + rename.
+        assert!(reg.try_reparent(cid, Some(rid)).expect("save succeeds"));
+        assert!(reg
+            .try_rename(cid, Some("live".into()))
+            .expect("save succeeds"));
 
         reg.upsert_preserving_hierarchy(stale_snapshot);
         let after = reg.get(cid).unwrap();
         assert_eq!(
             after.parent_id,
             Some(rid),
-            "stale spawn 스냅샷이 최신 parent_id 를 되돌리면 안 됨(lost update 봉인)"
+            "a stale spawn snapshot must not revert the latest parent_id (sealing lost updates)"
         );
         assert_eq!(
             after.display_name,
             Some("live".into()),
-            "stale spawn 스냅샷이 최신 display_name 을 되돌리면 안 됨(ADR-0070 latent)"
+            "a stale spawn snapshot must not revert the latest display_name (ADR-0070 latent)"
         );
     }
 
-    /// ★지워진 프로필은 spawn 등록으로 **되살아나지 않는다**★.
+    /// ★A deleted profile is **not revived** by spawn registration★.
     ///
-    /// 이 병합은 삭제와 경합한다: 「있나」를 보고 「쓴다」가 따로면 그 사이에 낀 삭제가 무시돼, 삭제가
-    /// 성공으로 보고된 뒤 항목이 목록에 돌아오고 자식 프로세스까지 따라 뜬다. 판정을 락 안으로 넣은 것이
-    /// 그 창을 닫는 유일한 방법이고, `false` 는 호출자가 spawn 을 끊는 신호다.
-    /// ★있을 때는 평소대로 병합한다★ — 없을 때만 갈리는 것이 이 동사의 전부라, 그 절반도 함께 잰다.
+    /// This merge races with deletion: if 「is it there」 and 「write」 are separate, a deletion slipping in between is ignored, and after the deletion
+    /// is reported as successful the entry comes back to the list and even its child process launches with it. Putting the decision inside the lock is
+    /// the only way to close that window, and `false` is the signal for the caller to cut the spawn.
+    /// ★When present, it merges as usual★ — splitting only when absent is all this verb does, so that half is measured too.
     #[test]
     fn update_preserving_hierarchy_never_resurrects_a_removed_profile() {
         let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
@@ -2110,28 +2153,28 @@ mod tests {
 
         assert!(
             reg.update_preserving_hierarchy(snapshot.clone()),
-            "있는 id 를 갱신하지 못했다 — 이 동사의 정상 갈래가 죽었다"
+            "could not update an existing id — the normal branch of this verb died"
         );
 
-        reg.try_remove(id).expect("저장 성공");
+        reg.try_remove(id).expect("save succeeds");
         assert!(
             !reg.update_preserving_hierarchy(snapshot),
-            "지워진 프로필에 spawn 등록이 값을 다시 넣었다"
+            "spawn registration put a value back into a deleted profile"
         );
         assert!(
             reg.get(id).is_none(),
-            "지워진 프로필이 되살아났다 — 삭제가 성공으로 보고된 뒤 항목과 자식이 함께 돌아온다"
+            "a deleted profile came back to life — after the deletion is reported as successful, the entry and its child come back together"
         );
     }
 
-    /// ★사본을 뜬 **뒤에** 도착한 backend 손잡이가 spawn 등록에 덮이지 않는다(사용자 결정)★.
+    /// ★A backend handle arriving **after** the copy was taken is not overwritten by spawn registration (user decision)★.
     ///
-    /// 이 칸을 쓰는 것은 런타임이다 — 어느 backend 든 그 화신의 첫 제출 래치가 이 upsert **뒤에** 적는다.
-    /// 호출자가 든 사본은 저자가 아니다.
-    /// ★덮이면 그냥 낡은 값이 아니라 **되돌릴 수 없는 유실**이다★ — 이 upsert 는 `mutate` 라 그대로
-    ///   디스크에 영속되고, 그 대화로 돌아갈 손잡이가 어디에도 안 남는다.
-    /// ★이력을 함께 재는 것이 요점이다★ — 새 값만 지키고 `old_session_ids` 를 스냅샷으로 되돌리면 그
-    ///   사이 밀려난 손잡이가 목록에서 사라져, 유실을 절반만 막은 것이 된다.
+    /// What writes this field is the runtime — for any backend, that incarnation's first-submission latch writes it **after** this upsert.
+    /// The copy the caller holds is not the author.
+    /// ★If overwritten, it is not just a stale value but **an irreversible loss**★ — this upsert is `mutate`, so it is persisted to disk
+    ///   as is, and no handle to return to that conversation remains anywhere.
+    /// ★Measuring the history together is the point★ — keeping only the new value while reverting `old_session_ids` to the snapshot would make
+    ///   handles pushed out in between vanish from the list, preventing only half the loss.
     #[test]
     fn spawn_preserving_upsert_does_not_revert_a_handle_recorded_after_the_snapshot() {
         let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
@@ -2145,7 +2188,7 @@ mod tests {
         assert_eq!(stale_snapshot.backend_session_id, Some(first));
         assert!(stale_snapshot.old_session_ids.is_empty());
 
-        // 그 사이 상대가 새 손잡이를 줬고 기록 포트가 명부에 적었다.
+        // In between, the other side gave a new handle and the record port wrote it to the registry.
         let arrived = Uuid::new_v4();
         assert!(reg.observe_session_id(id, None, arrived));
 
@@ -2155,12 +2198,12 @@ mod tests {
         assert_eq!(
             after.backend_session_id,
             Some(arrived),
-            "스냅샷 뒤에 도착한 손잡이가 spawn 등록에 덮였다 — 그 대화로 돌아갈 길이 없어진다"
+            "a handle arriving after the snapshot was overwritten by spawn registration — the way back to that conversation is gone"
         );
         assert_eq!(
             after.old_session_ids,
             vec![first],
-            "손잡이는 지켰는데 이력이 스냅샷으로 되돌아갔다 — 밀려난 손잡이가 목록에서 사라진다"
+            "the handle was kept but the history reverted to the snapshot — pushed-out handles vanish from the list"
         );
     }
 
@@ -2189,8 +2232,9 @@ mod tests {
             "created_at": 1,
             "last_active": 1
         }"#;
-        let p: AgentProfile = serde_json::from_str(json).expect("parent_id 없는 프로필 역직렬화");
-        assert_eq!(p.parent_id, None, "parent_id 부재 → None(루트)");
+        let p: AgentProfile =
+            serde_json::from_str(json).expect("deserialize a profile without parent_id");
+        assert_eq!(p.parent_id, None, "parent_id absent → None (root)");
     }
 
     #[test]
@@ -2211,7 +2255,7 @@ mod tests {
                     let child = sample();
                     let cid = child.id;
                     r.upsert(child);
-                    r.try_reparent(cid, Some(root_id)).expect("저장 성공");
+                    r.try_reparent(cid, Some(root_id)).expect("save succeeds");
                 }
             }));
         }
@@ -2221,16 +2265,23 @@ mod tests {
 
         let mem = reg.list();
         let disk = store.load();
-        assert_eq!(mem.len(), 201, "루트 1 + 자식 200");
-        assert_eq!(disk.len(), mem.len(), "디스크 개수 == 인메모리(누락 없음)");
+        assert_eq!(mem.len(), 201, "1 root + 200 children");
+        assert_eq!(
+            disk.len(),
+            mem.len(),
+            "disk count == in-memory (nothing missing)"
+        );
         let children_ok = mem
             .iter()
             .filter(|p| p.id != root_id)
             .all(|p| p.parent_id == Some(root_id));
-        assert!(children_ok, "동시 reparent 후 모든 자식이 루트를 부모로");
+        assert!(
+            children_ok,
+            "after concurrent reparents every child has the root as parent"
+        );
     }
 
-    // ── 동시성: persisted == latest (stale-overwrite race 봉인) ────────────────────
+    // ── Concurrency: persisted == latest (sealing the stale-overwrite race) ────────────────────
 
     #[test]
     fn save_writes_current_map_not_stale_snapshot() {
@@ -2240,7 +2291,7 @@ mod tests {
         let id = p.id;
         reg.upsert(p);
         reg.try_rename(id, Some("final".to_string()))
-            .expect("저장 성공");
+            .expect("save succeeds");
         let disk = store.load();
         let mem = reg.list();
         assert_eq!(disk.len(), mem.len());
@@ -2267,7 +2318,7 @@ mod tests {
                     let id = p.id;
                     r.upsert(p);
                     r.try_rename(id, Some(format!("t{t}-{i}")))
-                        .expect("저장 성공");
+                        .expect("save succeeds");
                 }
             }));
         }
@@ -2277,11 +2328,11 @@ mod tests {
 
         let mem = reg.list();
         let disk = store.load();
-        assert_eq!(mem.len(), 200, "인메모리 upsert 200건");
+        assert_eq!(mem.len(), 200, "200 in-memory upserts");
         assert_eq!(
             disk.len(),
             mem.len(),
-            "디스크 개수 == 인메모리 개수 (stale 스냅샷으로 엔트리 누락 없음)"
+            "disk count == in-memory count (no entry missing through a stale snapshot)"
         );
 
         let mut mem_sorted: Vec<_> = mem.iter().map(|p| (p.id, p.display_name.clone())).collect();
@@ -2293,11 +2344,11 @@ mod tests {
         disk_sorted.sort();
         assert_eq!(
             disk_sorted, mem_sorted,
-            "동시 mutation 후 디스크 == 최신 인메모리 (persisted == observed)"
+            "after concurrent mutations disk == latest in-memory (persisted == observed)"
         );
     }
 
-    /// 옛 `last_restore` 키는 알려지지 않은 필드로 무시된다(serde 기본 deny_unknown 미적용).
+    /// The old `last_restore` key is ignored as an unknown field (serde's default deny_unknown not applied).
     #[test]
     fn deserializes_legacy_profile_without_new_fields() {
         let legacy = r#"{
@@ -2316,8 +2367,8 @@ mod tests {
         }"#;
         let p: AgentProfile =
             serde_json::from_str(legacy).expect("legacy profile must deserialize");
-        // 옛 파일이 실어 둔 `"epoch": 3` 도 같은 취급(알려지지 않은 필드)이라 그냥 무시된다 — 화신 표식은
-        //   프로세스를 넘겨 살지 못하므로 디스크 값을 되살리면 안 된다(그 필드 주석). 마이그레이션 불요.
+        // The `"epoch": 3` an old file carried is treated the same (an unknown field) and just ignored — the incarnation marker
+        //   cannot live across processes, so the disk value must not be revived (that field's comment). No migration needed.
         assert_eq!(p.epoch, 0);
         assert_eq!(p.restart_policy, RestartPolicy::Always);
         assert_eq!(p.restart_count, 0);
@@ -2327,66 +2378,66 @@ mod tests {
         assert_eq!(p.parent_id, None);
     }
 
-    /// ★디스크에 **산** 화신 표식이 실리면 안 된다★: 실리면 재기동한 데몬이 복원한 에이전트에 옛 표식을
-    /// 다시 입혀, 살아남은 클라이언트가 "같은 스트림" 으로 오인하고 옛 진도 커서를 유지한다 — 새 화신의
-    /// 프레임은 0 부터 다시 매겨지므로 통째로 dedup 탈락하고 그 슬롯이 빈 채로 남는다.
-    /// (키 자체는 실린다 — 앞 릴리스 리더용 자리채움 `0`. 그 근거는 아래 forward-compat 테스트.)
+    /// ★A **live** incarnation marker must not be carried on disk★: if it were, a restarted daemon would put the old marker back
+    /// on restored agents, and a surviving client would mistake it for "the same stream" and keep its old progress cursor — the new incarnation's
+    /// frames are numbered again from 0, so they are dropped wholesale by dedup and that slot stays empty.
+    /// (The key itself is carried — a `0` placeholder for previous-release readers. The grounds are in the forward-compat test below.)
     #[test]
     fn the_live_incarnation_tag_never_reaches_disk() {
         let mut p = sample();
         p.epoch = 0xDEAD_BEEF;
-        let json = serde_json::to_string(&p).expect("프로필 직렬화");
+        let json = serde_json::to_string(&p).expect("serialize profile");
         assert!(
             !json.contains("3735928559") && !json.to_lowercase().contains("deadbeef"),
-            "산 화신 표식이 디스크에 실렸다: {json}"
+            "a live incarnation marker was carried on disk: {json}"
         );
-        let back: AgentProfile = serde_json::from_str(&json).expect("역직렬화");
+        let back: AgentProfile = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(
             back.epoch, 0,
-            "읽어 들인 프로필은 표식 없이 시작한다(다음 spawn 이 새로 발급)"
+            "a profile read in starts without a marker (the next spawn issues a new one)"
         );
     }
 
-    /// ★옛 카운터가 실려 있어도 인메모리 값은 파일에서 오지 않는다★ — 앞 릴리스가 남긴
-    /// `agents.json`(이 빌드로 올렸다 되돌렸다 다시 올린 경로)은 0 아닌 카운터를 들고 있다. 그 값이
-    /// 복원되면 위 테스트가 막는 것과 같은 결말(옛 커서 유지 → 새 프레임 통째 dedup 탈락)이 난다.
+    /// ★Even if an old counter is carried, the in-memory value does not come from the file★ — an `agents.json` a previous release left
+    /// (the path of upgrading to this build, reverting and upgrading again) holds a nonzero counter. If that value
+    /// were restored, the same outcome as what the test above prevents would happen (old cursor kept → new frames dropped wholesale by dedup).
     #[test]
     fn a_persisted_non_zero_tag_is_never_restored_into_memory() {
         let mut v: serde_json::Value =
-            serde_json::from_str(&serde_json::to_string(&sample()).expect("프로필 직렬화"))
-                .expect("JSON 파싱");
+            serde_json::from_str(&serde_json::to_string(&sample()).expect("serialize profile"))
+                .expect("JSON parse");
         v["epoch"] = serde_json::json!(7);
-        let back: AgentProfile = serde_json::from_value(v).expect("역직렬화");
+        let back: AgentProfile = serde_json::from_value(v).expect("deserialize");
         assert_eq!(
             back.epoch, 0,
-            "파일의 옛 카운터가 인메모리 표식으로 복원되면 안 된다"
+            "the file's old counter must not be restored as the in-memory marker"
         );
     }
 
-    /// ★키는 남기고 값만 0 으로 박는다★ — 앞 릴리스로 되돌아간 바이너리의 구조체는 `epoch` 를
-    /// **필수** 필드로 선언했으므로, 키가 아예 없는 `agents.json` 은 `missing field` 로 파싱이 깨진다.
-    /// 그러면 그 릴리스의 persistence 가 파일을 `.corrupt-<ts>` 로 치우고 빈 목록으로 시작하고, 다음 save 가
-    /// 그 빈 목록을 덮어써 프로필·세션 id·트리 부모가 통째로 사라진다.
-    /// 실어 보내는 값이 **산 표식이 아니라 0** 인 이유: 0 은 옛 카운터의 "한 번도 재spawn 안 함" 상태라
-    /// 옛 바이너리가 그대로 믿어도 무해하다 — 난수를 실어 보내면 그게 카운터 자리에 앉는다.
+    /// ★The key stays and only the value is pinned to 0★ — the struct of a binary reverted to the previous release declares `epoch`
+    /// as a **required** field, so an `agents.json` with no key at all breaks parsing with `missing field`.
+    /// Then that release's persistence moves the file aside to `.corrupt-<ts>` and starts with an empty list, and the next save
+    /// overwrites with that empty list, making the profiles, session ids and tree parents disappear wholesale.
+    /// Why the value sent is **0, not the live marker**: 0 is the old counter's "never respawned" state, so
+    /// an old binary trusting it as is is harmless — sending a random number would make it sit in the counter's place.
     #[test]
     fn the_persisted_incarnation_tag_is_a_fixed_zero_so_older_readers_still_parse() {
         let mut p = sample();
         p.epoch = 0xDEAD_BEEF;
         let v: serde_json::Value =
-            serde_json::from_str(&serde_json::to_string(&p).expect("프로필 직렬화"))
-                .expect("JSON 파싱");
+            serde_json::from_str(&serde_json::to_string(&p).expect("serialize profile"))
+                .expect("JSON parse");
         assert_eq!(
             v.get("epoch"),
             Some(&serde_json::json!(0)),
-            "옛 리더가 필수로 읽는 키가 0 으로 실려 있어야 한다: {v}"
+            "the key that old readers read as required must be carried as 0: {v}"
         );
     }
 
-    // ── ADR-0044: output_format serde 하위호환 ─────────────────────────────────
+    // ── ADR-0044: output_format serde backward compatibility ─────────────────────────────────
     #[test]
     fn claude_command_without_output_format_defaults_terminal() {
-        // 옛 wire/agents.json 은 output_format 필드가 없다 → #[serde(default)] = Terminal.
+        // Old wire/agents.json has no output_format field → #[serde(default)] = Terminal.
         let legacy = r#"{ "kind": "Claude", "extra_args": ["--foo"] }"#;
         let cmd: AgentCommand =
             serde_json::from_str(legacy).expect("legacy claude cmd deserialize");
@@ -2396,7 +2447,7 @@ mod tests {
                 AgentCommand::Claude { output_format: AgentOutputFormat::Terminal, extra_args }
                     if extra_args == &vec!["--foo".to_string()]
             ),
-            "output_format 부재 → Terminal + extra_args 보존"
+            "output_format absent → Terminal + extra_args preserved"
         );
     }
 
@@ -2410,7 +2461,7 @@ mod tests {
                 AgentCommand::Codex { output_format: AgentOutputFormat::Terminal, extra_args }
                     if extra_args == &vec!["--foo".to_string()]
             ),
-            "output_format 부재 → Terminal + extra_args 보존"
+            "output_format absent → Terminal + extra_args preserved"
         );
     }
 
@@ -2436,11 +2487,11 @@ mod tests {
         assert_eq!(reg2.list().len(), 1);
     }
 
-    // ── 변경 입구 둘 · dirty(ADR-0291 R17 · D2 · E1) ─────────────────────────────
+    // ── The two change entries · dirty (ADR-0291 R17 · D2 · E1) ─────────────────────────────
 
     use super::scripted_store::{Outcome, ScriptedStore, FAILURES};
 
-    /// 프로필 하나를 저장해 둔 레지스트리.
+    /// A registry with one profile saved.
     fn scripted() -> (ProfileRegistry, Arc<ScriptedStore>, AgentId) {
         let store = ScriptedStore::new();
         let reg = ProfileRegistry::new(store.clone());
@@ -2450,7 +2501,7 @@ mod tests {
         (reg, store, id)
     }
 
-    /// `mutate` 길(reaper 의 내리기)과 `mutate_if` 길(첫 제출 래치 · 부팅 복원의 세션 id 비우기) 둘 다 본다.
+    /// Looks at both the `mutate` path (the reaper's lowering) and the `mutate_if` path (first-submission latch · boot restore's session id clearing).
     #[test]
     fn an_internal_change_commits_and_marks_dirty_on_any_save_error() {
         for failure in FAILURES {
@@ -2465,12 +2516,12 @@ mod tests {
             let mem = reg.get(id).unwrap();
             assert!(
                 !mem.auto_restore,
-                "버리면 죽은 에이전트가 다음 부팅 복원에 되살아난다 — {failure:?}"
+                "dropping it revives the dead agent at the next boot restore — {failure:?}"
             );
             assert_eq!(
                 mem.backend_session_id,
                 Some(sid),
-                "버리면 래치의 세션 id 가 사라진다 — {failure:?}"
+                "dropping it loses the latch's session id — {failure:?}"
             );
             assert!(reg.is_dirty(), "{failure:?}");
 
@@ -2478,7 +2529,7 @@ mod tests {
             let mem = reg.get(id).unwrap();
             assert_eq!(
                 mem.backend_session_id, None,
-                "버리면 부팅 복원의 Fresh 가 앞 대화의 손잡이를 쥔 채 뜬다 — {failure:?}"
+                "dropping it makes boot restore's Fresh launch holding the previous conversation's handle — {failure:?}"
             );
             assert_eq!(mem.old_session_ids.last(), Some(&sid), "{failure:?}");
             assert!(reg.is_dirty(), "{failure:?}");
@@ -2507,22 +2558,25 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             newer,
-            "거절 동안 dirty 명부는 새 판 파일에 닿지 않는다"
+            "during the refusal the dirty registry does not touch the newer-edition file"
         );
 
-        // 누가 쓸 만한 파일로 되돌려 거절이 풀렸다.
+        // Someone put a usable file back and the refusal cleared.
         std::fs::write(&path, r#"{"schema_version":1,"profiles":[]}"#).unwrap();
         assert!(reg
-            .try_rename(id, Some("다음 변경".into()))
-            .expect("저장 성공"));
+            .try_rename(id, Some("next change".into()))
+            .expect("save succeeds"));
         assert!(!reg.is_dirty());
         let on_disk = FileProfileStore::new(dir.clone()).load();
-        let saved = on_disk.iter().find(|p| p.id == id).expect("명부가 실렸다");
+        let saved = on_disk
+            .iter()
+            .find(|p| p.id == id)
+            .expect("the registry was carried");
         assert!(
             !saved.auto_restore,
-            "거절 동안 커밋한 내부 변경이 다음 저장에 실렸다"
+            "internal changes committed during the refusal were carried by the next save"
         );
-        assert_eq!(saved.display_name.as_deref(), Some("다음 변경"));
+        assert_eq!(saved.display_name.as_deref(), Some("next change"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2537,7 +2591,7 @@ mod tests {
         assert_eq!(
             store.attempts(),
             before,
-            "밀린 변경이 없으면 변경 없는 쓰기는 저장하지 않는다"
+            "without pending changes, a write without a change does not save"
         );
 
         store.set(Outcome::FailsIo);
@@ -2545,12 +2599,12 @@ mod tests {
         store.set(Outcome::Saves);
         assert!(
             !reg.commit_session_id(id, stale, None, sid),
-            "이 쓰기 자체는 여전히 거절이다"
+            "this write itself is still a refusal"
         );
         assert!(!reg.is_dirty());
         assert!(
             !store.disk(id).unwrap().auto_restore,
-            "밀린 변경이 다음 「변경 있는」 저장을 기다리지 않았다"
+            "the pending change did not wait for the next save with a change"
         );
     }
 
@@ -2569,14 +2623,14 @@ mod tests {
             moved.cwd = PathBuf::from("C:/elsewhere");
             store.set(failure);
 
-            let err = reg.try_rename(id, Some("새 이름".into())).unwrap_err();
+            let err = reg.try_rename(id, Some("new name".into())).unwrap_err();
             assert!(
                 matches!(
                     (failure, &err),
                     (Outcome::FailsIo, StoreError::Io(_))
                         | (Outcome::Refuses(_), StoreError::Refused(_))
                 ),
-                "저장소의 `Err` 를 그대로 돌려준다 — {failure:?} → {err}"
+                "the store's `Err` is returned as is — {failure:?} → {err}"
             );
             assert!(reg.try_reparent(id, Some(parent_id)).is_err());
             assert!(reg.try_update_with(id, |p| p.auto_restore = false).is_err());
@@ -2592,10 +2646,14 @@ mod tests {
             assert!(after.auto_restore);
             assert_eq!(after.cwd, before.cwd);
             assert_eq!(after.backend_session_id, Some(sid));
-            assert_eq!(reg.list().len(), 2, "만들기 · 지우기도 커밋되지 않았다");
+            assert_eq!(
+                reg.list().len(),
+                2,
+                "create and delete were not committed either"
+            );
             assert!(
                 !reg.is_dirty(),
-                "부르는 쪽 있는 변경의 실패는 dirty 를 세우지 않는다 — 메모리가 그대로다"
+                "the failure of a change with a caller does not set dirty — memory is unchanged"
             );
         }
     }
@@ -2607,22 +2665,22 @@ mod tests {
         reg.update_with(id, |p| p.auto_restore = false);
 
         store.set(Outcome::Refuses(Refusal::Unreadable));
-        assert!(reg.try_rename(id, Some("거절됨".into())).is_err());
+        assert!(reg.try_rename(id, Some("refused".into())).is_err());
         assert!(
             reg.is_dirty(),
-            "거절된 요청 하나가 밀린 내부 변경을 지우지 않는다"
+            "one refused request does not clear the pending internal change"
         );
         assert!(!reg.get(id).unwrap().auto_restore);
 
         store.set(Outcome::Saves);
-        assert!(reg.try_rename(id, Some("이름".into())).unwrap());
+        assert!(reg.try_rename(id, Some("name".into())).unwrap());
         assert!(!reg.is_dirty());
         let disk = store.disk(id).unwrap();
         assert!(
             !disk.auto_restore,
-            "사본은 커밋된 맵에서 떴으므로 밀린 변경까지 실린다"
+            "the copy was taken from the committed map, so the pending change is carried too"
         );
-        assert_eq!(disk.display_name.as_deref(), Some("이름"));
+        assert_eq!(disk.display_name.as_deref(), Some("name"));
     }
 
     #[test]
@@ -2635,7 +2693,7 @@ mod tests {
         assert!(
             !reg.try_update_preserving_hierarchy(vanished.clone())
                 .unwrap(),
-            "바꾼 것이 없는 요청 — 밀린 변경을 싣는 저장의 실패는 이 요청의 실패가 아니다"
+            "a request that changed nothing — the failure of the save carrying the pending change is not this request's failure"
         );
         assert!(reg.is_dirty());
 
@@ -2652,7 +2710,7 @@ mod tests {
         let parent_id = parent.id;
         reg.try_upsert(parent).unwrap();
         assert!(reg.try_reparent(id, Some(parent_id)).unwrap());
-        assert!(reg.try_rename(id, Some("이름".into())).unwrap());
+        assert!(reg.try_rename(id, Some("name".into())).unwrap());
         assert!(!reg.try_rename(Uuid::new_v4(), None).unwrap());
         assert!(reg.try_update_with(id, |p| p.auto_restore = false).unwrap());
         let mut moved = reg.get(id).unwrap();
@@ -2669,7 +2727,7 @@ mod tests {
 
         let disk = store.disk(id).unwrap();
         assert_eq!(disk.parent_id, Some(parent_id));
-        assert_eq!(disk.display_name.as_deref(), Some("이름"));
+        assert_eq!(disk.display_name.as_deref(), Some("name"));
         assert!(!disk.auto_restore);
         assert_eq!(disk.cwd, PathBuf::from("C:/elsewhere"));
         assert_eq!(disk.backend_session_id, None);
@@ -2680,7 +2738,7 @@ mod tests {
         assert_eq!(
             store.disk(id).unwrap().parent_id,
             None,
-            "자식은 루트로 승격된다"
+            "children are promoted to root"
         );
         assert!(reg
             .try_update_with(id, |p| p.parent_id = Some(Uuid::new_v4()))
@@ -2688,7 +2746,7 @@ mod tests {
         assert_eq!(
             store.disk(id).unwrap().parent_id,
             None,
-            "계층 정규화도 사본에 선다"
+            "hierarchy normalization also stands on the copy"
         );
 
         let fresh = sample();
@@ -2697,9 +2755,9 @@ mod tests {
         assert!(store.disk(fresh_id).is_some());
     }
 
-    /// ★부르는 쪽 변경은 사본을 뜬 그 락을 쥔 채 저장 · 커밋한다 — 결정적으로 본다★: 사본 위에서 도는 클로저
-    ///   안에서 내부 변경을 다른 스레드로 시작시킨다. 한 락 안이면 내부 변경은 그 커밋 뒤로 밀려 남고, 사본을 락
-    ///   밖에서 뜨는 꼴로 회귀하면 내부 변경이 먼저 커밋된 뒤 옛 사본에 덮여 사라진다.
+    /// ★A change with a caller saves and commits while holding the lock it took the copy under — looked at deterministically★: inside the closure running on the copy
+    ///   it starts an internal change on another thread. Within one lock, the internal change is pushed behind that commit and remains, and if it regressed to taking
+    ///   the copy outside the lock, the internal change would commit first and then vanish, overwritten by the old copy.
     #[test]
     fn a_caller_change_copies_saves_and_commits_under_one_lock() {
         let (reg, _store, id) = scripted();
@@ -2717,9 +2775,9 @@ mod tests {
             assert!(reg
                 .try_update_with(id, |p| {
                     go.send(()).unwrap();
-                    // 한 락 안이면 내부 변경은 이 동안 락을 기다린다 — 락 밖이면 이 사이에 커밋된다.
+                    // Within one lock, the internal change waits for the lock meanwhile — outside the lock, it commits in between.
                     std::thread::sleep(std::time::Duration::from_millis(50));
-                    p.display_name = Some("부르는 쪽".into());
+                    p.display_name = Some("caller".into());
                 })
                 .unwrap());
             assert!(internal.join().unwrap());
@@ -2727,19 +2785,16 @@ mod tests {
 
         assert!(
             !reg.get(other_id).unwrap().auto_restore,
-            "내부 변경이 부르는 쪽의 옛 사본에 덮였다"
+            "the internal change was overwritten by the caller's old copy"
         );
-        assert_eq!(
-            reg.get(id).unwrap().display_name.as_deref(),
-            Some("부르는 쪽")
-        );
+        assert_eq!(reg.get(id).unwrap().display_name.as_deref(), Some("caller"));
     }
 
-    /// ★두 입구가 겹쳐도 내부 변경은 하나도 안 빠지고, dirty 가 아니면 디스크 = 메모리다★ — 부르는 쪽 입구의
-    ///   사본 뜨기 → 저장 → 커밋이 한 락 안이어야 성립한다. 사본을 락 밖에서 뜨면 그 사이 커밋된 내부 변경을
-    ///   뒤이은 부르는 쪽 커밋이 옛 사본으로 덮는다. 저장 결과를 성공 · 실패로 번갈아 내 두 입구의 갈래를 섞는다.
-    /// ★확률적 회귀망이다★ — 겹침을 강제하지 못하므로 그 꼴로 회귀해도 매번 빨개지지는 않는다(사본을 락 밖에서
-    ///   뜨는 꼴을 실측 5회 중 2회 잡았다). 결정적인 짝 = `a_caller_change_copies_saves_and_commits_under_one_lock`.
+    /// ★Even when the two entries overlap, no internal change is lost, and if not dirty, disk = memory★ — this holds only if the caller entry's
+    ///   copy → save → commit is within one lock. Taking the copy outside the lock would let the following caller commit overwrite with the old copy
+    ///   an internal change committed in between. Save results alternate between success and failure to mix the branches of the two entries.
+    /// ★A probabilistic regression net★ — it cannot force the overlap, so even if it regresses into that shape it does not turn red every time (it caught the shape of taking the copy
+    ///   outside the lock 2 out of 5 measured runs). The deterministic pair = `a_caller_change_copies_saves_and_commits_under_one_lock`.
     #[test]
     fn racing_caller_and_internal_changes_never_lose_an_internal_commit() {
         const ROUNDS: usize = 200;
@@ -2765,7 +2820,7 @@ mod tests {
             Outcome::Refuses(Refusal::Unreadable),
         ]);
 
-        // 부르는 쪽 스레드는 내부 쪽이 끝날 때까지 쉬지 않고 돈다 — 겹치는 구간이 내부 변경 전부를 덮게.
+        // The caller thread loops without rest until the internal side finishes — so the overlapping interval covers all the internal changes.
         let internal_done = std::sync::atomic::AtomicBool::new(false);
         let start = std::sync::Barrier::new(2);
         std::thread::scope(|s| {
@@ -2796,7 +2851,7 @@ mod tests {
             .collect();
         assert!(
             lost.is_empty(),
-            "내부 변경 {}건이 메모리에서 사라졌다 — 부르는 쪽 커밋이 옛 사본으로 덮었다",
+            "{} internal changes vanished from memory — the caller commit overwrote them with an old copy",
             lost.len()
         );
 
@@ -2807,14 +2862,14 @@ mod tests {
         if !reg.is_dirty() {
             assert_eq!(as_json(store.disk_all()), as_json(reg.list()));
         }
-        // 밀린 변경은 다음 성공 저장이 싣는다 — 변경 없는 내부 쓰기로 한 번 더 저장시킨다.
+        // The pending change is carried by the next successful save — one more save is triggered by an internal write without a change.
         store.set(Outcome::Saves);
         assert_eq!(reg.release_session_id(lead_id), Some(false));
         assert!(!reg.is_dirty());
         assert_eq!(
             as_json(store.disk_all()),
             as_json(reg.list()),
-            "dirty 가 아니면 마지막 저장 = 메모리"
+            "if not dirty, the last save = memory"
         );
     }
 }
