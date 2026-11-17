@@ -1,20 +1,45 @@
 # ADR-0382: The daemon never walks the library before it is reachable — the first start publishes the root without a walk and a background boot scan walks it on every start; launches do not wait for it
 
-- 상태: 확정 (2026-11-18, 근거: TODO)
-- 관련: Amends ADR-0381 (the first start order in decisions 1 and 5) · Amends ADR-0335 (the rejected boot sweep citing the 2026-10-17 no-pre-scan rule) · TODO 나머지 관련 · Amends ADR-0375 (first start order) · Amends ADR-0366 (the first start no longer goes through change_root)
+- 상태: 확정 (2026-11-18, 근거: user decision U-D3 2026-11-18 「ㅇㅇ 백그라운드로 훑는게 좋은데 일단 서버쪽 작업하고 UI 쪽은 나중에 작업하면 되려나」 after a light convention check (JetBrains IDEs and rust-analyzer come up first and index in the background; a startup-blocking load is rare — Obsidian's 「Loading cache」 is the complained-about exception), then, when told it reverses the 2026-10-17 rule, 「백그라운드로 해. 데이터가 필요할때 훓는건 백그라운드 없을때 얘기이고.」; S25 step-9a TRD §8 (c) U-D3 · §8 (b) B4 · B18 · B23, TRD draft 6/7 re-reviews (Claude + codex, wording and test fixes applied))
+- 관련: Amends ADR-0381 (the first start order in decisions 1 and 5) · Amends ADR-0335 (the rejected boot sweep citing the 2026-10-17 no-pre-scan rule) · ADR-0324 (decisions 6 and 7: readers attach to the walking scan at the first-scan entrance) · ADR-0292 · ADR-0293 (an uncontained panic is logged, then aborts — risk K9) · PRD `docs/process/S25-preset-library/prd.md` R19 · parent TRD `docs/process/S25-preset-library/trd.md` §1-4 · step-9a TRD `docs/process/S25-preset-library/trd-library-edit.md` (draft 8) §0 · §1 · §3.2 · §4 · §6 · §7 U1b · §8 (b) B4 · B18 · B23 · §8 (c) U-D3 · §9 U1b · §10 K8 · K9 · Amends ADR-0375 (first start order) · Amends ADR-0366 (the first start no longer goes through change_root)
 
 ## 맥락
-TODO — 무슨 문제를 풀어야 했나.
+Until now the library was walked lazily: the first request that needed the catalog started the first scan at the first-scan entrance (the user's 2026-10-17 rule 「데몬이 켜질 때 미리 훑지 않는다」 / 「데이터가 필요할때 훓어야지」, PRD R19, parent TRD §1-4, cited by ADR-0335). Step 9a's first start (ADR-0381) went through `change_root`, which walks the root on the boot path before the daemon is reachable. After U1 landed the user chose a background scan instead (U-D3), after a light convention check: JetBrains IDEs and rust-analyzer come up first and index in the background, requests during indexing are not blocked by startup, a progress cue sits in a status bar, and a startup-blocking loading screen is rare (Obsidian's 「Loading cache」 is the exception users complain about). Told that this reverses the 2026-10-17 rule, the user confirmed: that rule was about a world without a background scan.
 
 ## 결정
-TODO — 무엇으로 정했나.
+1. **The daemon never walks the library before it is reachable.** Other boot disk work stays as at `7e764daa`: `config::load`, `Builtins::new`, and at first start the create and the root stat.
+2. **First start** (`library.json` Missing) = create `default_root` → root stat (the same stat `change_root` uses: exists, is a folder, answers within the one read budget) → **no-walk publish** → write `"root": "default"`. ADR-0381's 「persist only after success」 now means after the root stat succeeded and the root was published. A create or root-stat failure publishes and writes nothing; the root stays `unset`, the daemon starts, and the next start tries again.
+3. **The no-walk publish is a new gate Root-ticket primitive** (`gate.rs`): it draws a Root ticket (exclusive, FIFO); precondition: no root published yet; inside the write lock it sets the root and raises `Numbers.root`; it leaves the first scan **un-raised** (and preferably not counted as a pending first scan), so the first scan is a real walk. `change_root` with an empty build is not used: it marks the first scan raised, so nothing would ever walk a folder that may already hold files (a first start re-run after a failed save).
+4. **A background boot-scan job joins the first scan on every start** (not only the first): inside `build_daemon_wiring`, right after the library service is built and the first-start step has run whatever its outcome, and so before `command_table_slot.set` and `daemon.json` (production wiring only), the daemon calls one asset-library method that starts the first scan of the published root as a background job on the service's spawner and returns at once. Its body joins `first_scan_join`, not `refresh(None)` (which would draw a second full walk behind a reader's); its receiver is `self: &Arc<Self>`. With no published root the job is not started. A spawn failure logs a `warn` and the first reader starts the scan at the entrance, as before.
+5. **Catalog requests wait at the first-scan entrance** until the first scan ends (unchanged — they attach to the walking scan, ADR-0324 decisions 6 and 7); a failed first scan answers them as it does today.
+6. **Launch checks do not wait**: they skip the first-scan entrance and read the files the profile reaches fresh (the overlay in `launch.rs`); only the per-item applies take the write lock, briefly.
+7. **A walk failure after the publish** (the first scan or any later scan) is a root that fails later: `library.json` stays written (never unwritten); `status` answers the root stat; before the first scan is raised the entrance answers `library-unavailable` until a scan succeeds (the next reader walks again); after it is raised a vanished root answers per-file `not-found`.
+8. **`set_root` is unchanged**: stat + walk through `change_root`, then write (ADR-0381) — a user request answered after its walk.
+9. **An 「indexing…」 cue** on the screens is screen work later (step 13), not 9a.
+
+**Clauses that change:**
+- **ADR-0381 decision 1** (second and third bullets) — the first start no longer goes create → `change_root` → write; it is create → root stat → no-walk publish → write, and for the first start only a failed create or root stat publishes and writes nothing; a walk failure comes after the file is written. `set_root`'s order is unchanged.
+- **ADR-0381 decision 5** — 「Missing ⇒ the first start runs again (idempotent: the folder exists, so it walks it and writes)」 becomes: it stats, publishes and writes; the boot scan walks.
+- **ADR-0375 and ADR-0381 관련 lines** — 「ADR-0366 decision 3: `set_root` and the first start go through `change_root`」 now holds for `set_root` only.
+- **ADR-0366 「영향」** — 「9a's `setRoot` and the first-start default root call `change_root`」 now holds for `setRoot` only; decision 3 itself stays true.
+- **ADR-0335 거부한 대안 「Sweeping leftover temporary files at boot」** — the cited 2026-10-17 rule 「데몬이 켜질 때 미리 훑지 않는다」 is superseded by U-D3. The alternative stays rejected on its other ground: the user removed cleanup itself (G40 「남기고 알아서 치우라그래」 — not at boot, not at scan).
+- **PRD R19** 「the daemon does not pre-scan at startup」 and the parent TRD §1-4 lines are superseded (amended in the same step's docs commit).
 
 ## 거부한 대안
-- TODO 대안 A — 왜 버렸나.
-- TODO 대안 B — 왜 버렸나.
+- **Walk before the daemon is reachable** (the old first start through `change_root`) — a large library delays the daemon past the shell's discovery window. Basis: descriptive (weak).
+- **Walk lazily only at the first request** (the 2026-10-17 rule, and the normal start before this) — it leaves the first request to pay the walk. 사용자 직접 기각 (U-D3: 「백그라운드로 해. 데이터가 필요할때 훓는건 백그라운드 없을때 얘기이고.」).
+- **A startup loading screen** — rare in the surveyed apps (JetBrains IDEs, rust-analyzer; Obsidian's 「Loading cache」 is the complained-about exception). Basis: light convention check (not a full research report).
 
 ## 근거
-TODO — 실측·리뷰 등 결정의 뒷받침.
+- User decision U-D3 (2026-11-18), quoted in the 상태 line; TRD §8 (c) U-D3, applied in §0, §1, §3.2, §4, §6, §7 U1b, §8 (a) · (b) B4 · B18 · B23, §9 U1b, §10 K8 · K9.
+- B23: follows the convention of IDEs and language servers that come up first and index in the background; the entrance already makes early readers wait, so no new waiting rule is needed.
+- Launches not blocked: asked next by the user; main answered from the code (the launch check skips the entrance and reads its overlay fresh).
+- TRD draft 6 re-review 2026-11-18: Claude FIX, codex FIX — wording and test fixes applied in draft 7; draft 8 (the user's answer to the U-D3 hold) closed by main's diff check (TRD §13).
 
 ## 영향 / 불변식
-TODO — 이 결정이 묶는 코드·게이트. 어기면 무엇이 깨지나.
+- **Concurrency**: the boot scan is a full scan like any other — FIFO ticket, write lock only to apply (ADR-0324 · ADR-0366 decision 1). No lock is held across the boot; the job does not hold the root-change mutex. A `set_root` or edit during the walk queues behind its ticket; readers attach at the entrance (TRD §4).
+- **Risk K8**: a large library still makes the first catalog request wait for the first walk — the same wait as before, now usually hidden because the walk starts at boot; a request right after boot still waits at the entrance.
+- **Risk K9** (accepted): an uncontained panic in the walk / parse code ends the daemon at every start (ADR-0292 · ADR-0293), not only at the first catalog reader; the walk / parse code is not in the containment list.
+- `status` has no scan-state field; the step-13 「indexing…」 cue will need one (not invented in 9a).
+- Tests that must hold (TRD §9 U1b): a first start with files already in the default place publishes without a walk and writes `"default"`, with the walk parked; the first scan then fills the catalog; an early reader waits at the entrance; a walk failure after a published first start leaves `library.json` written and readers answering `library-unavailable` until a scan succeeds; the boot scan also starts on a normal start; a spawn failure leaves the scan to the first reader; a daemon source-order guard: `build_daemon_wiring` calls no catalog reader and the boot-scan call comes after the first start regardless of its outcome. QA mutations: the no-walk publish raising the first scan; the first start walking on the boot path; the boot scan joined before `build_daemon_wiring` returns; the boot scan started only at first start; the boot scan drawing `refresh(None)`; `library.json` unwritten on a later walk failure.
+- Implemented in step 9a U1b (asset-library `gate.rs`, `lib.rs`; daemon `lib.rs`), between U1 and U2.
