@@ -25,7 +25,7 @@
 
 ## 3. Argument names — separate per kind, with no overlapping meaning
 
-| What is selected | by id (id 로) | by agent (에이전트로) (name or id — the daemon resolves) | by spatial word (공간 낱말로) |
+| What is selected | by id | by agent (name or id — the daemon resolves) | by spatial word |
 |---|---|---|---|
 | tab | `tab` | `tab_of` | — |
 | pane | `slot_id` | `slot_of` | `at` (+ `window`) |

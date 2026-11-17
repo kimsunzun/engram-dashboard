@@ -30,9 +30,9 @@ New `src-tauri/src/tray/` (or `tray.rs`):
 - The two icon sets (color/gray) are embedded with `include_bytes!` and included in the app build (existing method kept).
 
 ## 3. Core behavior design
-- **Menu 6→simplified:** 데몬 켜기 (turn daemon on) / 데몬 끄기 (turn daemon off) / UI 보이기 (show UI) / UI 숨기기 (hide UI) / ── / 완전 종료 (full quit). ("트레이 종료" (quit tray) is meaningless after the merge — the tray is the app, so the tray alone cannot be turned off. Only "완전 종료".)
+- **Menu 6→simplified:** Turn daemon on / Turn daemon off / Show UI / Hide UI / ── / Full quit. ("Quit tray" is meaningless after the merge — the tray is the app, so the tray alone cannot be turned off. Only "Full quit".)
 - **Window show/hide:** `app.get_webview_window("main")` → `show()`+`unminimize()`+`set_focus()` / `hide()`. **In-process call, no IPC.**
-- **X = hide:** in the main `CloseRequested` of `on_window_event`, `api.prevent_close()` + `window.hide()`. (Replaces the current `app.exit(0)` — ADR-0026.) The only real quit is the `app.exit(0)` of the tray's "완전 종료".
+- **X = hide:** in the main `CloseRequested` of `on_window_event`, `api.prevent_close()` + `window.hide()`. (Replaces the current `app.exit(0)` — ADR-0026.) The only real quit is the `app.exit(0)` of the tray's "Full quit".
 - **Daemon on/off:** call the existing `discovery::ensure_daemon` (WMI) · `send_stop` (WS). **Because it is a WMI spawn, the daemon is a child of WmiPrvSE = does not inherit the app Job = detached/breakaway is satisfied automatically (ADR-0024 C1 kept).** Never spawn the daemon directly with `std::process::Command`.
 - **Avoiding blocking:** ensure/send_stop block for several seconds (WMI polling/WS). Calling them directly from the tray event handler (main thread) freezes the tray and window → send them off with `tauri::async_runtime::spawn` (or spawn_blocking), and update the status color with `tray.set_icon()` after completion. Mind that set_icon has a main-thread constraint (post to main via AppHandle). (Replaces tray-host's worker + collect pattern with Tauri async — simpler.)
 - **Status color:** daemon alive = color / dead = gray. Updated with `discovery::daemon_status().alive` right after an action. Periodic detection of external/crash death is non-scope (absorbed by the persistent connection at the flip).
@@ -58,7 +58,7 @@ New `src-tauri/src/tray/` (or `tray.rs`):
 ## 7. Tests / verification
 - **Unit (moved):** MenuAction id mapping · icon state · grayscale (the existing tray-host tests as is).
 - **build/test:** `cargo build` green, `cargo test` green, `rg "use tauri" crates/engram-dashboard-core/src/`=0.
-- **GUI measurement (cdp):** window show/hide invoke; after X=hide the window disappears and the process survives; return with "UI 보이기". Tray menu clicks are manual (native popup) — instead verify by invoking the tray commands directly.
+- **GUI measurement (cdp):** window show/hide invoke; after X=hide the window disappears and the process survives; return with "Show UI". Tray menu clicks are manual (native popup) — instead verify by invoking the tray commands directly.
 - **spike (ADR-0026, measured before/during implementation):** ① WebView2 hidden memory, ② hidden raise focus-stealing, ③ daemon reconnect during an updater restart (non-scope but a memo), ④ daemon rediscovery after an app crash.
 
 ## 8. Implementation execution (CLAUDE.md conventions)
