@@ -1,20 +1,34 @@
 # ADR-0379: Step-9a refusals are a class plus a Reason with a store pass-through, and a refusal that applied nothing maps onto a bus code that does not keep the request id, with two INTERNAL exceptions
 
-- 상태: 확정 (2026-11-17, 근거: TODO)
-- 관련: TODO
+- 상태: 확정 (2026-11-17, 근거: S25 step-9a TRD §8 (b) B8 and B11, PRD+TRD review PASS 2026-11-17 (full))
+- 관련: ADR-0291 (decision 6 R17: the store's read-only answers) · ADR-0365 (`path-through-link`) · ADR-0377 (`root-generation-stale`) · ADR-0378 (`rev-mismatch`) · ADR-0380 (`profile-edit-unavailable`) · step-9a TRD `docs/process/S25-preset-library/trd-library-edit.md` §1 · §3 · §5 · §8 (b) B8 · B11 · parent TRD `docs/process/S25-preset-library/trd.md` §1-5
 
 ## 맥락
-TODO — 무슨 문제를 풀어야 했나.
+Step 9a builds every library, preset and agent-preset command body as inherent `LibraryService` methods returning crate-local types; step 10a declares the commands and maps the types (TRD B2). The command vocabulary stays in agent (parent §1-5). So 9a needs a refusal value 10a can map, the code strings the parent left to implementation, and a fixed class → bus-code map. The bus layer matters for retries: daemon `command_delivery::retains_the_id` keeps the request id for some codes, and a retry with a kept id is answered `ALREADY_APPLIED`. Command `ErrorCode` has no unavailable code.
 
 ## 결정
-TODO — 무엇으로 정했나.
+1. **Refusal shape**: a crate-local value holding a **class** (`Conflict` · `NotFound` · `InvalidArgument` · `Unavailable` · `Internal`) plus a `Reason {code, args, line}` (agent `launch::Reason`). Bodies take an `AgentId`, not a name. 10a maps the class onto the bus code and passes the `Reason` as args.
+2. **Store pass-through**: one more variant holds the agent `StoreError` from the profile-edit port unchanged. 10a answers it with agent `store_command_error` + `store_error_reason(PROFILES_FILE, …)`, as every other registry-writing command does; class, code and retry mode (`RetryMode::AfterCondition` for an unreadable registry) are the agent's: read-only or newer ⇒ `CONFLICT` · never; unreadable at the pre-write re-judge ⇒ `CONFLICT` · after-condition; write IO ⇒ `INTERNAL`.
+3. **Class → bus code**: `Conflict` → `CONFLICT`, `NotFound` → `NOT_FOUND`, `InvalidArgument` → `INVALID_ARGUMENT`, `Unavailable` → `CONFLICT`, `Internal` → `INTERNAL`.
+4. **Rule**: every 9a refusal that applied nothing to the library or the registry maps onto a code `retains_the_id` does not retain (`INVALID_ARGUMENT` · `NOT_FOUND` · `CONFLICT`), so a retry with the same request id is not answered `ALREADY_APPLIED`. Two leftovers do not count as applied: folders a `set_root {create}` made before it refused (`library-root-unusable` · `library-config-write-failed`), and a `library.json` the K3 restore could not put back.
+5. **Two exceptions, both `INTERNAL`** (they retain the id although nothing changed): a port store write IO failure (passed through, decision 2) and an empty or dead port cell (`profile-edit-unavailable`, a wiring bug — ADR-0380).
+6. **Code strings** (TRD §5): kebab-case, a const beside the code that refuses, with the visibility its users need, each with its `args` in the doc comment; existing codes are reused where they fit.
+   - New: `root-generation-stale` (Conflict, `{given, current}`) · `library-write-failed` (Unavailable, `{path, why}`) · `library-root-unusable` (Unavailable, `{path, why}`) · `library-config-read-only` (Unavailable, `{why}`) · `library-config-write-failed` (Unavailable, `{why}`) · `rev-mismatch` (Conflict, `{rev}`) · `preset-save-refused` (InvalidArgument, `{items: [{list, path, code}]}`, inner codes existing + new `item-duplicate`) · `preset-folders-refused` (InvalidArgument, `{folders: [{path, code, why?}]}`) · `reorder-order-mismatch` (InvalidArgument, `{expected}`) · `default-preset-detach` (Conflict, `{agent}`) · `name-exists` (Conflict, `{path}`) · `relink-kind-mismatch` (InvalidArgument, `{from, to, expected, found}`) · `profile-edit-unavailable` (Internal, `{}`) · skip reason `already-present`.
+   - Reused: `library-unavailable` (Unavailable, `{message}`) · `path-through-link` (InvalidArgument, `{path}`) · `library-read-failed` (Unavailable, `{path, why}`) · `backend-tag-unknown` (InvalidArgument, `{backend}`) · folder-add inner codes `folder-not-found` · `folder-path-cli-unsafe` · `folder-path-relative` · skip reasons `not-found` · `wrong-kind` · `item-path-invalid` · `backend-tag-not-allowed` · `backend-tag-unknown` · `preset-cycle` · writer refusals `preset-write-mismatch` · `preset-multi-document` · `preset-write-number-range` and the reader codes `WriteError::Parse` passes through (`yaml-syntax`, `field-invalid`, `kind-unknown`, `wrong-kind` and the other `format/read.rs` codes), all InvalidArgument via `WriteError::to_reason`.
+   - Not refusals: a relink per-file refusal is skipped (`skipped[].code`), and a relink stopped after something was applied is an answer (`stopped.code`) (TRD §3.6).
 
 ## 거부한 대안
-- TODO 대안 A — 왜 버렸나.
-- TODO 대안 B — 왜 버렸나.
+- **Map a refusal that applied nothing onto a code that retains the request id** — a retry with the same request id would be answered `ALREADY_APPLIED` although nothing was applied (TRD §1; code: daemon `command_delivery::retains_the_id`).
+- **asset-library answers bus codes itself** — the command vocabulary stays in agent (parent §1-5; TRD §1 「agent owns the command vocabulary; 10a maps 9a's types onto it」). Basis: descriptive (weak) — an ownership rule from the parent TRD.
+- **9a classifies the port store error itself** — the TRD names this only by negation: class, code and retry mode are the agent's, not 9a's, so the agent's retry modes (`AfterCondition` for an unreadable registry) are kept (TRD §1, B11). Basis: descriptive (weak).
 
 ## 근거
-TODO — 실측·리뷰 등 결정의 뒷받침.
+- B11: keeps the vocabulary in agent (parent §1-5) while 9a fixes codes, args and the retry meaning; `ErrorCode` has no unavailable code, and agent `commands.rs` already maps `PtyError::LaunchBlocked` to `CONFLICT` (the precedent for `Unavailable` → `CONFLICT`).
+- B8: kebab-case beside the refusing code, reusing existing codes; the parent left the strings to implementation; the user delegated command details and wording to main (`docs/reference/llm-command-conventions.md` §1 header, 2026-10-26).
+- Step-9a PRD+TRD review (full, Claude lead + codex) PASS on `43f64c4f`, 2026-11-17 (TRD §13).
 
 ## 영향 / 불변식
-TODO — 이 결정이 묶는 코드·게이트. 어기면 무엇이 깨지나.
+- No wire or ts-rs change in 9a: the types are Rust-only until 10a maps them (TRD §1).
+- 10a maps classes exactly as decision 3; a new 9a-style refusal that applied nothing must not be given a retaining code.
+- Per `docs/reference/llm-command-conventions.md` §4, answers carry the post-change state: every preset edit answers the `preset.get` view, every agent-preset edit the `agent.presets` view (TRD §1).
+- Implemented from step 9a U1 (the refusal type; `set_root` and the root-checked `change` answer with it) on; U2 to U4 add their codes. `docs/reference/structure/asset-library.md` describes the refusal shape from U1 on.
