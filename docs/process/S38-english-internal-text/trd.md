@@ -1,6 +1,6 @@
 # S38 TRD — English-only internal text
 
-- Status: edition 2 · 2026-11-18 · canonical ADR = the S38 ADR written after review (decisions D1–D8 below) · PRD = `prd.md`.
+- Status: edition 2.1 · 2026-11-18 · canonical ADR = the S38 ADR written after review (decisions D1–D8 below) · PRD = `prd.md`.
 - Edition 2 replaces edition 1 after the PRD+TRD review (full): screen errors become English causes inside the translated head (no shell table entries); the placeholder accepts the old marker too; the Hangul check covers code and config only; units follow packages.
 
 ## 1. Scope and PRD relation
@@ -49,13 +49,13 @@ Each unit runs in its own git worktree based on the topic branch at the time the
 | U1 | crates `protocol`, `base`, `command`, `platform`, `transport`, `messaging`, `cli` (incl. marker in `placeholder.rs` + `src/api/wsFrame.ts` mirror + `wsFrame.test.ts`) | 5.7k |
 | U2 | `crates/engram-dashboard-agent/**` (src incl. codex backend, tests, examples, `Cargo.toml`, bindings, `commands.schema.json`) — split in two coders by directory (`src/backend/codex/**` vs the rest) only for editing, tested and committed together | 14k |
 | U3 | `crates/engram-dashboard-daemon/**` | 8.8k |
-| U4 | `src-tauri/**` (keeps the Korean column of `ui_text.rs` and Rust tests asserting it, marked) | 6.3k |
+| U4 | `src-tauri/**` (keeps the Korean column of `ui_text.rs` and Rust tests asserting it, marked; rewords the `link/errors.rs` head claim that the texts stay byte-identical to the old shell texts) | 6.3k |
 | U5 | `src/**` except U1's `src/api/wsFrame.ts` and `src/api/wsFrame.test.ts` (in `ko.ts` only comments); `index.html`, `vite.config.*`, `vitest.config.*`, `tsconfig*.json`, `package.json`; marker dual-accept in `StructuredTextView.tsx` with its test run over both markers | 5.9k |
-| U6 | `scripts/**`, `.github/**`, `launch/**`, `_wip/**` (translate text dumps too), other root files not in U5; `check-hangul.mjs` + its test under `src/` (vitest only collects `src/**`; planted Hangul built from `\u` escapes) + CI step | 1.0k |
+| U6 | `scripts/**`, `.github/**`, `launch/**`, `_wip/**` (translate text dumps too), other root files not in U5; `check-hangul.mjs` (scans `git ls-files -z` by default, or explicit paths / a root given as arguments) + its test under `src/` (vitest only collects `src/**`; planted Hangul built from `\u` escapes) | 1.0k |
 | W1 | docs: `docs/process/step-log.md`, `docs/tracking.md`, `docs/todo/**` | |
 | W2a | docs: `docs/process/S21-codex-backend/**`, `docs/process/S21-crate-boundaries/**` (md only) | |
 | W2b | docs: `docs/process/**` rest (md only), except `S33-english-translation/glossary.md` and `S38-english-internal-text/**` | |
-| W3 | docs: `docs/research/**`, `docs/decisions/**` prose (not lint tokens, not `README.md` index), `docs/reference/**` except `logging-conventions.md` and `structure/i18n.md`, `docs/handbook/**`, other `docs/**` md | |
+| W3 | docs: `docs/research/**`, `docs/decisions/**` prose (not lint tokens; `docs/decisions/README.md` untouched — the held ADR tooling cites and writes it), `docs/reference/**` except `logging-conventions.md` and `structure/i18n.md`, `docs/handbook/**`, other `docs/**` md | |
 | U9 | integration: glossary rows (harmonize duplicates), `logging-conventions.md` rewrite, `structure/i18n.md` line, `.git-blame-ignore-revs`, `check-hangul.mjs` to zero, one-time docs scan (§6 AC7), full regression, ADR | — |
 
 Waves (at most 4 building worktrees at once; docs units do not build):
@@ -63,7 +63,7 @@ Waves (at most 4 building worktrees at once; docs units do not build):
 - Wave B (base has U1, U2): U3, U4, U5, U6. (U4 waits for U1: `src-tauri/src/state/codec.rs` tests match text from `crates/engram-dashboard-base/src/file.rs` — U1 edits those test lines.)
 - U9 last.
 
-Commits: one per unit. `.git-blame-ignore-revs` gets the docs commits (W1–W3) and unit commits that change only comments and strings; the marker dual-accept, `check-hangul.mjs` + CI step and the logging rule are separate commits and do not go there.
+Commits: one per unit. The CI step of the Hangul check lands after U9 brought the check to zero (U6 delivers the script and its test; U9 commits the CI step). After W3, U9 runs `adr.mjs index --write` as its own commit (W3 translates `- 관련:` clauses the index cells are built from). `.git-blame-ignore-revs` gets the docs commits (W1–W3) and unit commits that change only comments and strings; the marker dual-accept, `check-hangul.mjs` + CI step and the logging rule are separate commits and do not go there.
 
 ## 6. Test plan
 
@@ -76,7 +76,7 @@ Commits: one per unit. `.git-blame-ignore-revs` gets the docs commits (W1–W3) 
   - AC4: GUI — daemon-missing case on the connection band: `en` shows no Korean in our own text; `ko` shows the Korean head with an English cause; a live switch leaves no old-language text.
   - AC5: `git diff master -- prompts/` empty; schema summaries English.
   - AC6: test counts per crate / vitest file vs master.
-  - AC7: one-time docs scan (inventory docs rules) — remaining Hangul in `docs/**` md only inside 「」, backticks, code fences, links, ADR lint tokens, the ADR index, the glossary and S38's own docs.
+  - AC7: one-time markdown scan over every tracked `.md` outside the hold list (`.s38-review/s38_docs.py` rules, copied into the repo as `scripts/` is not its place — U9 runs it from the topic folder) — remaining Hangul only inside 「」, backticks, code fences, links, ADR lint tokens, `docs/decisions/README.md`, the glossary and S38's own docs.
 
 ## 7. Decisions
 
@@ -97,4 +97,4 @@ Commits: one per unit. `.git-blame-ignore-revs` gets the docs commits (W1–W3) 
 
 ## Review record
 
-(none yet)
+- 2026-11-18 · full (Claude + Codex) · PASS · reviewed edition 2.1 at `1d9b5459`; the round-3 wording items applied after it.
