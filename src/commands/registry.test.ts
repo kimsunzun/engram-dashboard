@@ -13,7 +13,7 @@ afterEach(() => {
 
 describe('command registry (ADR-0055)', () => {
   it('register + run: handler 를 호출하고 반환을 그대로 흘려보낸다', () => {
-    register({ id: 'a.b', title: 'A B', run: () => 42 })
+    register({ id: 'a.b', title: () => 'A B', run: () => 42 })
     expect(run('a.b')).toBe(42)
   })
 
@@ -23,7 +23,7 @@ describe('command registry (ADR-0055)', () => {
 
   it('인자 = 단일 객체 가방으로 전달된다(가변인자 아님)', () => {
     const spy = vi.fn((args?: Record<string, unknown>) => args?.theme)
-    register({ id: 'demo.theme', title: 'set', run: spy })
+    register({ id: 'demo.theme', title: () => 'set', run: spy })
     const result = run('demo.theme', { theme: 'light', extra: 1 })
     expect(spy).toHaveBeenCalledTimes(1)
     expect(spy).toHaveBeenCalledWith({ theme: 'light', extra: 1 })
@@ -32,13 +32,13 @@ describe('command registry (ADR-0055)', () => {
 
   it('run(args 없음): handler 는 undefined 를 받는다', () => {
     const spy = vi.fn(() => 'ok')
-    register({ id: 'x', title: 'x', run: spy })
+    register({ id: 'x', title: () => 'x', run: spy })
     run('x')
     expect(spy).toHaveBeenCalledWith(undefined)
   })
 
   it('Promise 반환 handler: run 이 그 Promise 를 그대로 반환(await 가능)', async () => {
-    register({ id: 'async.cmd', title: 'async', run: () => Promise.resolve('done') })
+    register({ id: 'async.cmd', title: () => 'async', run: () => Promise.resolve('done') })
     const result = run('async.cmd')
     expect(result).toBeInstanceOf(Promise)
     await expect(result as Promise<string>).resolves.toBe('done')
@@ -46,16 +46,16 @@ describe('command registry (ADR-0055)', () => {
 
   it('중복 id: warn 하지만 그래도 등록(마지막이 이김)', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    register({ id: 'dup', title: 'first', run: () => 1 })
-    register({ id: 'dup', title: 'second', run: () => 2 })
+    register({ id: 'dup', title: () => 'first', run: () => 1 })
+    register({ id: 'dup', title: () => 'second', run: () => 2 })
     expect(warn).toHaveBeenCalledOnce()
     expect(warn.mock.calls[0][0]).toContain("'dup'")
     expect(run('dup')).toBe(2)
   })
 
   it('list: 등록된 command 의 메타 스냅샷 반환(run 함수 제외)', () => {
-    register({ id: 'c1', title: 'C1', category: 'cat', keybinding: 'Ctrl+K', run: () => {} })
-    register({ id: 'c2', title: 'C2', run: () => {} })
+    register({ id: 'c1', title: () => 'C1', category: 'cat', keybinding: 'Ctrl+K', run: () => {} })
+    register({ id: 'c2', title: () => 'C2', run: () => {} })
     const items = list()
     expect(items).toHaveLength(2)
     const c1 = items.find(i => i.id === 'c1')!
@@ -77,8 +77,8 @@ describe('command registry (ADR-0055)', () => {
       effect: 'write' as const,
       args: { theme: { type: 'string' as const } },
     }
-    register({ id: 'demo.theme', title: 'set', help, run: () => {} })
-    register({ id: 'local.only', title: 'local', run: () => {} })
+    register({ id: 'demo.theme', title: () => 'set', help, run: () => {} })
+    register({ id: 'local.only', title: () => 'local', run: () => {} })
 
     const items = list()
     expect(items.find(i => i.id === 'demo.theme')!.help).toEqual(help)
@@ -91,7 +91,7 @@ describe('command registry (ADR-0055)', () => {
   it('list/getCommand: help 는 사본이라 소비자가 고쳐도 레지스트리가 안 바뀐다', () => {
     register({
       id: 'demo.theme',
-      title: 'set',
+      title: () => 'set',
       help: {
         summary: '원본',
         effect: 'write',
@@ -119,7 +119,7 @@ describe('command registry (ADR-0055)', () => {
   })
 
   it('getCommand: 사본을 반환 → cmd.run 변조가 레지스트리로 새지 않는다(FIX-C)', () => {
-    register({ id: 'guarded', title: 'g', run: () => 'original' })
+    register({ id: 'guarded', title: () => 'g', run: () => 'original' })
     getCommand('guarded')!.run = () => 'hijacked'
     expect(run('guarded')).toBe('original')
     expect(getCommand('guarded')!.id).toBe('guarded')
@@ -135,20 +135,20 @@ describe('command registry (ADR-0055)', () => {
 describe('humanOnly 게이트', () => {
   it('run(LLM 진입점): 사유를 실어 throw 하고 handler 를 부르지 않는다', () => {
     const spy = vi.fn(() => 'ran')
-    register({ id: 'closed.door', title: 'c', humanOnly: '사람이 지나야 하는 문이다', run: spy })
+    register({ id: 'closed.door', title: () => 'c', humanOnly: '사람이 지나야 하는 문이다', run: spy })
     expect(() => run('closed.door')).toThrow(/사람이 지나야 하는 문이다/)
     expect(spy).not.toHaveBeenCalled()
   })
 
   it('runAsHuman(사람 진입점): 같은 항목을 그대로 실행한다', () => {
     const spy = vi.fn(() => 'ran')
-    register({ id: 'closed.door', title: 'c', humanOnly: '사람이 지나야 하는 문이다', run: spy })
+    register({ id: 'closed.door', title: () => 'c', humanOnly: '사람이 지나야 하는 문이다', run: spy })
     expect(runAsHuman('closed.door')).toBe('ran')
     expect(spy).toHaveBeenCalledTimes(1)
   })
 
   it('humanOnly 가 없는 항목은 두 진입점이 같다', () => {
-    register({ id: 'open.door', title: 'o', run: () => 'ran' })
+    register({ id: 'open.door', title: () => 'o', run: () => 'ran' })
     expect(run('open.door')).toBe('ran')
     expect(runAsHuman('open.door')).toBe('ran')
   })
@@ -158,8 +158,8 @@ describe('humanOnly 게이트', () => {
   })
 
   it('list: humanOnly 사유를 함께 낸다(부르기 전에 닫힌 것을 알 수 있게)', () => {
-    register({ id: 'closed.door', title: 'c', humanOnly: '이유', run: () => 1 })
-    register({ id: 'open.door', title: 'o', run: () => 1 })
+    register({ id: 'closed.door', title: () => 'c', humanOnly: '이유', run: () => 1 })
+    register({ id: 'open.door', title: () => 'o', run: () => 1 })
     const items = list()
     expect(items.find(i => i.id === 'closed.door')!.humanOnly).toBe('이유')
     expect(items.find(i => i.id === 'open.door')!.humanOnly).toBeUndefined()

@@ -12,7 +12,7 @@ import { registerSlotMenu } from './slotMenu'
 
 register({
   id: 'preset.list',
-  title: t('preset.list'),
+  title: () => t('preset.list'),
   category: 'preset',
   // store 미러 교체는 안 한다(조회 표면).
   run: () => agentClient.listPresets(),
@@ -20,7 +20,7 @@ register({
 
 register({
   id: 'preset.create',
-  title: t('preset.create'),
+  title: () => t('preset.create'),
   category: 'preset',
   // 이름은 안 넘긴다 — 백엔드가 {id,cwd}만 저장하고 표시명은 프론트가 cwd basename 으로 파생한다(ADR-0061).
   run: (args) => {
@@ -34,7 +34,7 @@ register({
 
 register({
   id: 'preset.delete',
-  title: t('preset.delete'),
+  title: () => t('preset.delete'),
   category: 'preset',
   // 없는 id 는 백엔드 no-op(Ack) — 프론트에서 존재 검증 안 함(ADR-0061).
   run: (args) => {
@@ -48,7 +48,7 @@ register({
 
 register({
   id: 'preset.rename',
-  title: t('preset.rename'),
+  title: () => t('preset.rename'),
   category: 'preset',
   // ADR-0061 리치화(§5 LLM 제어): 프리셋 표시명 override set/clear.
   //   - name 문자열 → override 저장. name 이 null/빈문자열/미지정 → override 해제(cwd basename 파생 복귀).
@@ -67,7 +67,7 @@ register({
 
 register({
   id: 'preset.add',
-  title: t('preset.add'),
+  title: () => t('preset.add'),
   category: 'preset',
   // ★네이티브 폴더 다이얼로그 → createPreset★(ADR-0061 / ADR-0064): 옛 PresetPalette 의 pane "추가" 메뉴
   //   로직을 command 로 승격한다. store 반영은 PresetListUpdated broadcast(낙관 갱신 X). 다이얼로그는

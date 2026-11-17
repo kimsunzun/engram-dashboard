@@ -1,6 +1,6 @@
 // App 부팅 배선 — 탭 창은 전역 배선(설정 · 키 · 버스 명령 보고 · 스크롤 · 데몬 부팅 · 목록 조회)을 돌린다.
 
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const wiring = vi.hoisted(() => ({
@@ -27,10 +27,15 @@ vi.mock('./api/clientFactory', () => ({
 }))
 vi.mock('./store/eventBus', () => ({ initEventBus: wiring.initEventBus }))
 vi.mock('./commands/contributions', () => ({}))
-vi.mock('./components/layout/AppLayout', () => ({ default: () => <div data-testid="app-layout" /> }))
+// The layout stand-in renders a table string and has no language subscription of its own — only `App` re-renders it.
+vi.mock('./components/layout/AppLayout', async () => {
+  const { t } = await import('./i18n')
+  return { default: () => <div data-testid="app-layout">{t('tab.create')}</div> }
+})
 vi.mock('./pages/PopoutPage', () => ({ default: () => <div data-testid="popout-page" /> }))
 
 import App from './App'
+import { setLanguage } from './i18n'
 
 const origHash = window.location.hash
 
@@ -50,5 +55,29 @@ describe('App — 부팅 배선', () => {
     expect(screen.getByTestId('app-layout')).toBeTruthy()
     await waitFor(() => expect(wiring.getAgents).toHaveBeenCalled())
     for (const [name, fn] of Object.entries(wiring)) expect(fn, name).toHaveBeenCalled()
+  })
+})
+
+// ADR-0373: a language switch re-renders the tree from `App`.
+describe('App — language switch', () => {
+  afterEach(() => {
+    act(() => {
+      setLanguage('ko')
+    })
+  })
+
+  it('text below App follows setLanguage without a remount', async () => {
+    window.location.hash = '#/'
+    render(<App />)
+    const layout = screen.getByTestId('app-layout')
+    expect(layout.textContent).toBe('새 탭')
+
+    act(() => {
+      setLanguage('en')
+    })
+
+    expect(screen.getByTestId('app-layout')).toBe(layout)
+    expect(layout.textContent).toBe('New tab')
+    await waitFor(() => expect(wiring.getAgents).toHaveBeenCalled())
   })
 })

@@ -1,6 +1,6 @@
 # TODO — To-Do List
 
-**This file is an index** — one line per item; the detail lives in the individual documents under `todo/`. Decision records (`decisions/`) hold *why we decided that*, `process/step-log.md` holds *when we did what*, and this file holds **what has not been done yet**.
+**This file is an index** — one line per item; the detail lives in the individual documents under `todo/`. Decision records (`decisions/`) hold *why we decided that*, git log (`S<n>:` commit titles) + each work folder's `README.md` hold *when we did what*, and this file holds **what has not been done yet**.
 
 **Four rules**
 
@@ -8,12 +8,12 @@
 2. **Always write "왜 지금 안 하나" (why not now).** Without it, the next reader cannot judge and the item just piles up.
 3. ★When resolved, **delete it**★. Decision records are append-only, but this is a living list, and it stays short only if resolved items are removed.
    - **When deleting, delete the detail file under `todo/` too.** If you delete only the index line, orphans pile up in the folder.
-   - ★**Before deleting, verify that the content was actually moved into its canonical home**★ — the destination differs per item (a decision goes to `decisions/`, when/what goes to `process/step-log.md`, a code-sync convention goes to `reference/`). Delete without moving it and the item survives nowhere and evaporates. 「확인만 됨」 (observed only) items are not *resolved*; a **judgment is made** on them, so the time to delete is when that judgment is recorded as an ADR.
+   - ★**Before deleting, verify that the content was actually moved into its canonical home**★ — the destination differs per item (a decision goes to `decisions/`, when/what goes to the commit message (`S<n>:` title) + the work folder's `README.md`, a code-sync convention goes to `reference/`). Delete without moving it and the item survives nowhere and evaporates. 「확인만 됨」 (observed only) items are not *resolved*; a **judgment is made** on them, so the time to delete is when that judgment is recorded as an ADR.
 4. Do not write rationale or rejected alternatives here — keep them in decision records and point to the number only.
 
 **Boundary with `tracking.md`**
 
-Both are deleted when resolved — `tracking.md` keeps only open T- items, and of the resolved ones moves to `tracking-archive.md` in a single line only those that other documents or code point to by number (the record of resolution is borne by ADRs, step-log and commits). So *deferred matters that must carry rationale, investigation and re-introduction triggers* go to T- items in `tracking.md`, and *work that disappears once done* comes here. When a matter spans both, keep the T- number as canonical and leave only one line plus a pointer here.
+Both are deleted when resolved — `tracking.md` keeps only open T- items, and of the resolved ones moves to `tracking-archive.md` in a single line only those that other documents or code point to by number (the record of resolution is borne by ADRs, commit messages and work-folder `README.md`s). So *deferred matters that must carry rationale, investigation and re-introduction triggers* go to T- items in `tracking.md`, and *work that disappears once done* comes here. When a matter spans both, keep the T- number as canonical and leave only one line plus a pointer here.
 
 **Four status values**
 

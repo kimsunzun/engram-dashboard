@@ -14,15 +14,20 @@ import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent
 import type { RestoreView } from '../../api/restoreClient'
 import { setKeybindingsPaused } from '../../commands/keybindings'
 import { t } from '../../i18n'
+import { perLanguage } from '../../i18n/intlLocale'
 
-const SAVED_AT = new Intl.DateTimeFormat('ko-KR', {
-  year: 'numeric',
-  month: 'numeric',
-  day: 'numeric',
-  hour: '2-digit',
-  minute: '2-digit',
-  hourCycle: 'h23',
-})
+// ADR-0373: in the locale of the UI language.
+const savedAtFormat = perLanguage(
+  locale =>
+    new Intl.DateTimeFormat(locale, {
+      year: 'numeric',
+      month: 'numeric',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    }),
+)
 
 /**
  * Unix milliseconds → date · time in this PC's time zone. `null` for a value that cannot be represented as a `Date` (outside ±8.64e15 · not finite).
@@ -31,7 +36,7 @@ export function formatSavedAt(ms: number): string | null {
   const at = new Date(ms)
   // ★If the value is passed on unfiltered `format` throws a RangeError and not the modal but the whole screen goes to the error boundary★ — the shell carries the copy's
   //   `saved_at_ms` as a u64 as is and the copy is the disk bytes as is, so a corrupted or hand-edited file exceeds this range.
-  return Number.isNaN(at.getTime()) ? null : SAVED_AT.format(at)
+  return Number.isNaN(at.getTime()) ? null : savedAtFormat().format(at)
 }
 
 const BUTTON =

@@ -25,6 +25,7 @@ import PresetPalette, { presetDisplayName } from './PresetPalette'
 import { OVERLAY_SELECTOR } from './interruptKey'
 import { useAgentStore } from '../../store/agentStore'
 import type { Preset } from '../../api/types'
+import { setLanguage } from '../../i18n'
 
 beforeEach(() => {
   clientMock.createPreset.mockClear()
@@ -186,6 +187,21 @@ describe('PresetPalette 렌더', () => {
     expect(document.querySelector('[data-preset-rename-input="pr1"]')).toBeNull() // 편집 종료
   })
 
+  // ADR-0373 `draftStart` (the same rule as TabBar's seed): the baseline is the name the edit started from.
+  it('the name changes from outside while editing, then Enter without editing → no renamePreset', () => {
+    seedPresets(preset('pr1', 'C:/work/engram', '고정'))
+    render(<PresetPalette />)
+    fireEvent.contextMenu(document.querySelector('[data-preset-id="pr1"]') as HTMLElement)
+    fireEvent.click(screen.getByText('이름 변경'))
+    act(() => {
+      seedPresets(preset('pr1', 'C:/work/engram', '바깥에서 바꾼 이름'))
+    })
+    const input = document.querySelector('[data-preset-rename-input="pr1"]') as HTMLInputElement
+    expect(input.value).toBe('고정')
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(clientMock.renamePreset).not.toHaveBeenCalled()
+  })
+
   it('이름 변경 미변경(현재 표시명과 동일) → renamePreset 미발화', () => {
     seedPresets(preset('pr1', 'C:/work/engram', '고정'))
     render(<PresetPalette />)
@@ -272,5 +288,30 @@ describe('PresetPalette 렌더', () => {
     })
     expect(clientMock.deletePreset).toHaveBeenCalledWith('pr1')
     expect(refreshPresetsMock).toHaveBeenCalledTimes(1)
+  })
+})
+
+// ADR-0373: the "unchanged" check compares with the name the edit started from, not a name derived again in another language.
+describe('PresetPalette — language switch', () => {
+  afterEach(() => {
+    act(() => {
+      setLanguage('ko')
+    })
+  })
+
+  it('a draft being edited is not saved by a switch (a blank-path name changes language under it)', () => {
+    seedPresets(preset('pr1', ''))
+    render(<PresetPalette />)
+    fireEvent.contextMenu(document.querySelector('[data-preset-id="pr1"]') as HTMLElement)
+    fireEvent.click(screen.getByText('이름 변경'))
+    const input = document.querySelector('[data-preset-rename-input="pr1"]') as HTMLInputElement
+    expect(input.value).toBe('(경로 없음)')
+
+    act(() => {
+      setLanguage('en')
+    })
+    fireEvent.keyDown(input, { key: 'Enter' })
+
+    expect(clientMock.renamePreset).not.toHaveBeenCalled()
   })
 })

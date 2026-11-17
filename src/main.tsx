@@ -7,12 +7,15 @@ import { useAgentStore } from "./store/agentStore";
 import { applyBootTheme } from "./theme/bootTheme";
 import { settingsClient } from "./api/settingsClient";
 import { installChatStyleApplier } from "./store/chatStyleStore";
+import { installLanguageApplier } from "./i18n/languageSetting";
 
 // ADR-0265: take the shell settings and paint the chat style — independent of daemon bootstrap (the owner of the settings is the shell), hooked before the first render.
 // Values arrive asynchronously, and the first paint before that is the `--chat-*` fallback in `theme.css` (TRD S21-storage §10 F6 (a)).
 // It runs once per page so no disposer is held — moving it into an App effect would make the effect return two disposers
 // (StrictMode double run).
 installChatStyleApplier();
+// ADR-0373: the setting `ui.language` switches this window's UI language live — same once-per-page rule as above.
+installLanguageApplier();
 settingsClient.install();
 
 // ★Always plant data-theme before the first paint★ — color tokens exist only inside `:root[data-theme='…']` in `styles/theme.css`

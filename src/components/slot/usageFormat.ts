@@ -9,12 +9,10 @@ import type { UsageStateDetail } from '../../../crates/engram-dashboard-protocol
 import type { UsageVendorState } from '../../../crates/engram-dashboard-protocol/bindings/UsageVendorState'
 import type { UsageWindow } from '../../../crates/engram-dashboard-protocol/bindings/UsageWindow'
 import { t } from '../../i18n'
+import { perLanguage } from '../../i18n/intlLocale'
 
 /** If a value's age **exceeds** this many seconds it is shown as an old value (R32) — exactly 1800 seconds is still a new value. */
 export const STALE_AFTER_SECS = 1800
-
-/** Locale for printing times — the phrase table (`i18n/ko.ts`) is a single Korean sheet, so match the same locale. */
-export const USAGE_LOCALE = 'ko-KR'
 
 export type UsageLevel = 'ok' | 'warn' | 'danger' | 'none'
 
@@ -140,13 +138,14 @@ export function formatAge(ageSecs: number): string {
   return t('usage.ageDays', { days: String(Math.floor(hours / 24)) })
 }
 
-const CLOCK = new Intl.DateTimeFormat(USAGE_LOCALE, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
+// ADR-0373: in the locale of the UI language.
+const clock = perLanguage(locale => new Intl.DateTimeFormat(locale, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }))
 
 export function formatClock(epochSecs: number): string {
-  return CLOCK.format(new Date(epochSecs * 1000))
+  return clock().format(new Date(epochSecs * 1000))
 }
 
-// Dates are told apart by `Date`'s local getters — `CLOCK`, which prints the time, is in the same default time zone, so the two do not disagree.
+// Dates are told apart by `Date`'s local getters — `clock`, which prints the time, is in the same default time zone, so the two do not disagree.
 function sameLocalDay(a: Date, b: Date): boolean {
   return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate()
 }
@@ -158,7 +157,7 @@ function sameLocalDay(a: Date, b: Date): boolean {
  */
 export function formatResetAt(epochSecs: number, nowWallSecs: number): string {
   const at = new Date(epochSecs * 1000)
-  const time = CLOCK.format(at)
+  const time = clock().format(at)
   if (sameLocalDay(at, new Date(nowWallSecs * 1000))) return time
   return t('usage.resetDateTime', { month: String(at.getMonth() + 1), day: String(at.getDate()), time })
 }

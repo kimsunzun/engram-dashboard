@@ -64,7 +64,7 @@ function listTabsOf(cmd: string, window: string): Promise<WindowTabsPayload> {
 
 register({
   id: 'tab.create',
-  title: t('tab.create'),
+  title: () => t('tab.create'),
   category: 'tab',
   // name 은 tab.rename 과 같게 다듬고 공백뿐이면 invoke 전에 throw 한다 — 빠지면 자동 이름.
   run: args => {
@@ -79,7 +79,7 @@ register({
 
 register({
   id: 'tab.switch',
-  title: t('tab.switch'),
+  title: () => t('tab.switch'),
   category: 'tab',
   run: args => {
     const view = args?.view
@@ -90,7 +90,7 @@ register({
 
 register({
   id: 'tab.close',
-  title: t('tab.closeCmd'),
+  title: () => t('tab.closeCmd'),
   category: 'tab',
   // view 생략 = 지정된 창(window)의 활성 탭 — 이 웹뷰의 활성이 아니다(S4-F1).
   run: async args => {
@@ -104,7 +104,7 @@ register({
 
 register({
   id: 'tab.next',
-  title: t('tab.next'),
+  title: () => t('tab.next'),
   category: 'tab',
   keybinding: 'Ctrl+Tab',
   // ★생략 시 무엇이 바뀌나를 정확히 적는다★: 버스 호출자에겐 「자기 창」이 없고, 실제 대상은 셸이 고른
@@ -134,7 +134,7 @@ register({
 
 register({
   id: 'tab.rename',
-  title: t('tab.rename'),
+  title: () => t('tab.rename'),
   category: 'tab',
   // ★rename(ADR-0057)★: 사람 더블클릭 인라인 편집 = LLM 한 표면(§5). 빈/공백 name 은 invoke 전에 throw
   //   (백엔드로 흘려보내지 않음 — TabBar 경계와 동일 정규화). view 는 백엔드 view_owner 파생이라 window 불필요.
@@ -151,7 +151,7 @@ register({
 
 register({
   id: 'window.create',
-  title: t('window.create'),
+  title: () => t('window.create'),
   category: 'window',
   // 빈 새 창(빈 탭 1개) 생성(D-6) → {window, window_id, number} 반환(셸 버스 `window.create` 의 답과 같은 셋 — TRD
   //   S26-window-chrome §5-3).
@@ -172,7 +172,7 @@ const CLOSE_OUTCOME: Record<WindowCloseResult, 'Closed' | 'HiddenAll' | 'Kept'> 
 
 function registerWindowControl(
   id: string,
-  title: string,
+  title: () => string,
   action: WindowControlAction,
   answer: (outcome: WindowControlOutcome) => Record<string, unknown>,
 ): void {
@@ -194,20 +194,20 @@ function registerWindowControl(
   })
 }
 
-registerWindowControl('window.minimize', t('window.minimize'), 'minimize', () => ({}))
-registerWindowControl('window.maximize', t('window.maximize'), 'maximize', o => ({ deferred: o.deferred }))
-registerWindowControl('window.unmaximize', t('window.unmaximize'), 'unmaximize', o => ({ deferred: o.deferred }))
-registerWindowControl('window.raise', t('window.raise'), 'raise', o => ({
+registerWindowControl('window.minimize', () => t('window.minimize'), 'minimize', () => ({}))
+registerWindowControl('window.maximize', () => t('window.maximize'), 'maximize', o => ({ deferred: o.deferred }))
+registerWindowControl('window.unmaximize', () => t('window.unmaximize'), 'unmaximize', o => ({ deferred: o.deferred }))
+registerWindowControl('window.raise', () => t('window.raise'), 'raise', o => ({
   shown_all: o.shown_all,
   focused: o.focused,
   pending: o.pending,
 }))
-registerWindowControl('window.hideAll', t('window.hideAll'), 'hide_all', () => ({}))
-registerWindowControl('window.showAll', t('window.showAll'), 'show_all', o => ({ focused: o.focused }))
+registerWindowControl('window.hideAll', () => t('window.hideAll'), 'hide_all', () => ({}))
+registerWindowControl('window.showAll', () => t('window.showAll'), 'show_all', o => ({ focused: o.focused }))
 
 register({
   id: 'window.close',
-  title: t('window.close'),
+  title: () => t('window.close'),
   category: 'window',
   // 팝아웃 = 닫기 · main = 모든 창 숨기기(셸이 가른다 — TRD §5-4). `if_empty` 는 버스와 같은 이름 · 같은 뜻(§5-5)이고, 그때
   //   `window` 를 생략하면 이 창 label 로 떨어져 window_id 로만 찾는 셸이 아무것도 닫지 않으므로(답 `Kept`) 던진다.
@@ -312,7 +312,7 @@ function validateSlotContent(content: { type: string } & Record<string, unknown>
 
 register({
   id: 'layout.setSlotContent',
-  title: t('slot.setContent'),
+  title: () => t('slot.setContent'),
   category: 'layout',
   // ★set_slot_content(ADR-0063)★: 사람 우클릭 = LLM 한 표면(§5).
   run: args => {
@@ -337,7 +337,7 @@ register({
 
 register({
   id: 'agent.spawnInto',
-  title: t('agent.spawnInto'),
+  title: () => t('agent.spawnInto'),
   category: 'agent',
   // ★spawn_into(D-7, TRD §6 G9)★: 스폰(데몬) + 탭 생성(필요 시) + 슬롯 배정을 한 방으로 조립하는 백엔드
   //   합성 command 를 직접 invoke 한다(store 상태 없이 backend 권위 — ADR-0057). 성공 시 새 AgentId 반환.

@@ -17,6 +17,7 @@ import { installViewCommandBridge } from './commands/viewCommandBridge'
 //   입힌다. 스타일 배선이라 슬롯 컴포넌트가 아니라 앱 루트에서 한 번 설치한다(탭 창마다 이 배선이 뜬다).
 import { installNativeScrollActivity } from './components/ui/nativeScrollActivity'
 import { RootErrorBoundary } from './components/ui/RootErrorBoundary'
+import { useLanguage } from './i18n/react'
 
 function bootPull<T>(name: string, fetch: () => Promise<T>, apply: (value: T) => void): void {
   retryAsync(fetch, {
@@ -29,6 +30,10 @@ function bootPull<T>(name: string, fetch: () => Promise<T>, apply: (value: T) =>
 }
 
 function App() {
+  // ADR-0373: a language change re-renders the whole tree from here (no remount — component state stays). A `memo` boundary
+  //   below that renders `t()` text reads the language itself.
+  useLanguage()
+
   // 테마는 셸이 정한다 — 창 테마(`window.setTheme`) ?? 셸 설정 `theme.default`(ADR-0265). 부팅 조회가 돌아오기
   // 전까지는 셸이 창을 만들며 박은 그 창의 테마가 보인다(`theme/bootTheme.ts`).
   // ★값만 갈아끼운다 — 리마운트 없음(ADR-0149)★.

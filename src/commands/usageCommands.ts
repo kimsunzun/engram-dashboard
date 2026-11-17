@@ -47,7 +47,7 @@ function requireUsageContent(args: CommandArgs | undefined, cmd: string): UsageC
 
 register({
   id: 'usageSlot.refresh',
-  title: t('usage.refreshAll'),
+  title: () => t('usage.refreshAll'),
   category: 'usage',
   run: args => {
     const cmd = 'usageSlot.refresh'
@@ -76,7 +76,7 @@ register({
 function registerToggle(id: string, vendor: AgentBackendKind): void {
   register({
     id,
-    title: t('usage.showVendor', { vendor: vendor === 'claude' ? t('usage.vendorClaude') : t('usage.vendorCodex') }),
+    title: () => t('usage.showVendor', { vendor: vendor === 'claude' ? t('usage.vendorClaude') : t('usage.vendorCodex') }),
     category: 'usage',
     run: args => {
       const viewId = args?.viewId

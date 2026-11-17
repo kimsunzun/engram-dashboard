@@ -22,22 +22,14 @@ pub enum MenuAction {
 }
 
 impl MenuAction {
-    // Stable id — unchanged even if the label changes (click mapping stays stable).
+    // Stable id — unchanged even if the label changes or follows the UI language (click mapping stays stable). The label is
+    //   `ui_text::tray_label`.
     pub const fn menu_id(self) -> &'static str {
         match self {
             MenuAction::StartDaemon => "start_daemon",
             MenuAction::StopDaemon => "stop_daemon",
             MenuAction::QuitApp => "quit_app",
             MenuAction::ToggleAutostart => "toggle_autostart",
-        }
-    }
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            MenuAction::StartDaemon => "데몬 켜기",
-            MenuAction::StopDaemon => "데몬 끄기",
-            MenuAction::QuitApp => "완전 종료",
-            MenuAction::ToggleAutostart => "부팅 시 자동 시작",
         }
     }
 
@@ -155,7 +147,15 @@ mod tests {
     #[test]
     fn toggle_autostart_id_label_roundtrip() {
         assert_eq!(MenuAction::ToggleAutostart.menu_id(), "toggle_autostart");
-        assert_eq!(MenuAction::ToggleAutostart.label(), "부팅 시 자동 시작");
+        use crate::ui_text::{tray_label, Lang};
+        assert_eq!(
+            tray_label(Lang::Ko, MenuAction::ToggleAutostart),
+            "부팅 시 자동 시작"
+        );
+        assert_eq!(
+            tray_label(Lang::En, MenuAction::ToggleAutostart),
+            "Start at sign-in"
+        );
         assert_eq!(
             action_for_menu_id("toggle_autostart"),
             Some(MenuAction::ToggleAutostart)
@@ -205,12 +205,17 @@ mod tests {
 
     #[test]
     fn labels_are_unique_and_nonempty() {
-        let labels: Vec<&str> = MenuAction::ALL.iter().map(|a| a.label()).collect();
-        assert!(labels.iter().all(|l| !l.is_empty()), "빈 라벨: {labels:?}");
-        let mut dedup = labels.clone();
-        dedup.sort_unstable();
-        dedup.dedup();
-        assert_eq!(labels.len(), dedup.len(), "label 중복: {labels:?}");
+        for lang in crate::ui_text::Lang::ALL {
+            let labels: Vec<&str> = MenuAction::ALL
+                .iter()
+                .map(|&a| crate::ui_text::tray_label(lang, a))
+                .collect();
+            assert!(labels.iter().all(|l| !l.is_empty()), "빈 라벨: {labels:?}");
+            let mut dedup = labels.clone();
+            dedup.sort_unstable();
+            dedup.dedup();
+            assert_eq!(labels.len(), dedup.len(), "label 중복: {labels:?}");
+        }
     }
 
     // ── Target windows for show·hide ──

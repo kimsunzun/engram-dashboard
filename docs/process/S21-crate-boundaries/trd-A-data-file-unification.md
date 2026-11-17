@@ -156,7 +156,7 @@
 | The daemon `usage_service/reject_store.rs` in the copy list of TRD 1-3 §5-1 U-W row · ADR-0266 decision 8 · ADR-0269 「영향」 | does not exist (ADR-0284 commit `9ab15231` removed it) |
 | TRD 1-1 §8 D2 「`settings/store.rs:122` epoch ms(`u128`)」 | does not exist (ADR-0274 removed the timestamp name) |
 | 「ADR-0269 결정 2 의 「무거운 의존을 들이지 않는다」」 in §3-1 of this TRD's 2nd edition | that sentence is the first item of decision 6 「지킬 것」 (review round 1) |
-| `docs/reference/structure/session-path-ownership.md:821 · 887-888 · 2000` · `docs/reference/structure/agent-backend.md:237` · comment `profile.rs:178 · 2013` · agent `commands.rs:69`'s `.corrupt-<ms>` · 「밀어낸다」 | become stale after this TRD (U5a · U9) |
+| `docs/research/session-path-ownership.md:821 · 887-888 · 2000` · `docs/reference/structure/agent-backend.md:237` · comment `profile.rs:178 · 2013` · agent `commands.rs:69`'s `.corrupt-<ms>` · 「밀어낸다」 | become stale after this TRD (U5a · U9) |
 
 ### 2-4. What to leave as it is
 
@@ -636,7 +636,7 @@ The workspace regression for every unit is result lines 59 · 0 failed · 31 ign
 5. TRD 1-1 §8 D1 · D2 · D3 · TRD 1-3 §5-1 U-W row · §9 「storage P3 착지 시점」 — 「→ TRD A」 mark (do not fix body text with a date in it).
 6. Memo `docs/refactoring/architecture-discussion-2026-09-26.md` §11 (`:336` stdio · pty guard row closed).
 7. `docs/tracking.md` T-47 status · one line 「새 판 몫만 닫혔다」 in T-33 (§8-2 4) · one follow-up line in transport 3-3 — 「net 단일 인스턴스 열기 재시도는 3-3 에서 platform `retry_busy` 를 쓴다(예산 4 × 100 ms · TRD A §3-6 의 메모)」 (when the 3-3 TRD is written, move it there).
-8. `docs/reference/structure/session-path-ownership.md:821 · 887-888 · 2000` · `docs/reference/structure/agent-backend.md:237` — corrupt-copy name · newer-version overwrite description · read-only mode.
+8. `docs/research/session-path-ownership.md:821 · 887-888 · 2000` · `docs/reference/structure/agent-backend.md:237` — corrupt-copy name · newer-version overwrite description · read-only mode.
 9. `docs/process/step-log.md` — landing entry (one entry for all of A, not per unit).
 10. Code anchors — base `file` header · `write_policy` · platform `is_busy` · `sync_dir` · the registry `mutate` two entries · dirty (new ADR · ADR-0071) · policy argument `Entry` of the launch shared function (new ADR · ADR-0082 — E3) · `epoch_for_spawn` (new ADR · ADR-0207 · ADR-0163) · `// ADR-0274` follows `copy_aside`. Do not fix the latch head (E1 — the premise is true again).
 

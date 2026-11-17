@@ -13,7 +13,7 @@ import { register } from './registry'
 
 register({
   id: 'chat.toolGroup.setExpanded',
-  title: t('chat.toolGroupSetExpanded'),
+  title: () => t('chat.toolGroupSetExpanded'),
   category: 'chat',
   // Arguments = `{ slotId, groupKey, expanded }` · `groupKey` = the DOM `data-tool-group` value of the group root · return value = `{ expanded }`.
   run: args => {

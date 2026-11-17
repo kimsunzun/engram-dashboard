@@ -6,7 +6,8 @@
 //! - [`actions`] — **impure shared side effects**: so the tray handler and the command call the same function (no duplication).
 //!   show/hide windows, quit_app, refresh_tray_icon.
 //! - This file (`mod.rs`) — Tauri wiring (impure): TrayIconBuilder, menu creation, on_menu_event dispatch,
-//!   creating·keeping the two icon sets (TrayIcons state).
+//!   creating·keeping the two icon sets (TrayIcons state) and the four menu item handles (TrayItems state — relabelled when the
+//!   UI language changes).
 //!
 //! Windows only (tray GUI). build_tray(app) is called once in setup().
 
@@ -19,7 +20,7 @@ use std::time::Duration;
 use tauri::image::Image;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{App, AppHandle, Manager};
+use tauri::{App, AppHandle, Manager, Wry};
 
 use engram_dashboard_protocol::DaemonInfo;
 use tauri_plugin_autostart::ManagerExt;
@@ -29,6 +30,8 @@ use core::{IconState, MenuAction};
 
 use crate::daemon_client::shutdown::{StopOrigin, StopOutcome, StopPlan};
 use crate::daemon_client::DaemonClient;
+use crate::ui_language::TrayMenuText;
+use crate::ui_text::{tray_label, Lang};
 
 // Two tray icon sets: color (daemon alive) · gray (dead). Created once in setup and managed as state.
 //
@@ -62,10 +65,80 @@ fn build_icons() -> tauri::Result<TrayIcons> {
     Ok(TrayIcons { active, inactive })
 }
 
+/// The four menu item handles — kept so a `ui.language` change can relabel them ([`TauriTrayText`]). [`build_tray`] manages them
+/// right after it makes the menu, before `TrayIconBuilder::build` — so they stay managed even if that last call fails.
+// ADR-0373
+pub(crate) struct TrayItems {
+    start: MenuItem<Wry>,
+    stop: MenuItem<Wry>,
+    autostart: CheckMenuItem<Wry>,
+    quit: MenuItem<Wry>,
+}
+
+impl TrayItems {
+    // Called on the main thread, where `set_text` runs in place (from another thread it would wait for the main thread).
+    fn relabel(&self, lang: Lang) {
+        let results = [
+            (
+                MenuAction::StartDaemon,
+                self.start
+                    .set_text(tray_label(lang, MenuAction::StartDaemon)),
+            ),
+            (
+                MenuAction::StopDaemon,
+                self.stop.set_text(tray_label(lang, MenuAction::StopDaemon)),
+            ),
+            (
+                MenuAction::ToggleAutostart,
+                self.autostart
+                    .set_text(tray_label(lang, MenuAction::ToggleAutostart)),
+            ),
+            (
+                MenuAction::QuitApp,
+                self.quit.set_text(tray_label(lang, MenuAction::QuitApp)),
+            ),
+        ];
+        for (action, result) in results {
+            if let Err(e) = result {
+                tracing::warn!(
+                    module = "tray",
+                    item = action.menu_id(),
+                    "could not relabel a menu item: {e}"
+                );
+            }
+        }
+    }
+}
+
+/// The tray side of a `ui.language` change — posts the relabel to the main thread and returns without waiting, so the settings
+/// reply is not held by a busy main thread. The main thread runs posts first in, first out, so they land in the hook's order.
+pub(crate) struct TauriTrayText<'a>(pub &'a AppHandle);
+
+impl TrayMenuText for TauriTrayText<'_> {
+    fn relabel(&self, lang: Lang) {
+        let app = self.0.clone();
+        let posted = self.0.run_on_main_thread(move || {
+            // Looked up when the post runs — after setup, so a change racing `build_tray` still finds the items. No items =
+            //   `build_tray` failed before it made the menu (tolerated — the app runs without a tray).
+            if let Some(items) = app.try_state::<TrayItems>() {
+                items.relabel(lang);
+            }
+        });
+        if let Err(e) = posted {
+            tracing::warn!(
+                module = "tray",
+                lang = lang.code(),
+                "could not post the menu relabel to the main thread: {e}"
+            );
+        }
+    }
+}
+
 // Create and wire the tray (once in setup). Manage the two icon sets and attach the menu · handler.
 //
 // Menu (order): daemon on / daemon off / start at boot / ──separator── / full quit.
-// Menu ids and labels come from core::MenuAction (pure). Click → action_for_menu_id → dispatch.
+// Menu ids come from core::MenuAction (pure) and labels from `ui_text::tray_label` in the effective UI language. Click →
+// action_for_menu_id → dispatch.
 // There are no menu items for UI show·hide — show is **tray left click (single)** (on_tray_icon_event), and hide is main's X.
 pub fn build_tray(app: &App) -> tauri::Result<()> {
     let icons = build_icons()?;
@@ -73,9 +146,12 @@ pub fn build_tray(app: &App) -> tauri::Result<()> {
     let initial = icons.inactive.clone();
     app.manage(icons);
 
-    // ── Menu items (using core's id/label — pure separation) ──────────────────────────────────
+    // ── Menu items (core's id · ui_text's label — pure separation) ──────────────────────────────
     let handle = app.handle();
-    let mi = |a: MenuAction| MenuItem::with_id(handle, a.menu_id(), a.label(), true, None::<&str>);
+    let lang = crate::ui_language::current(handle);
+    let mi = |a: MenuAction| {
+        MenuItem::with_id(handle, a.menu_id(), tray_label(lang, a), true, None::<&str>)
+    };
     let start = mi(MenuAction::StartDaemon)?;
     let stop = mi(MenuAction::StopDaemon)?;
     // ADR-0027 §55: autostart is a checkable item (CheckMenuItem). Initial check = whether it is currently registered in the registry.
@@ -86,7 +162,7 @@ pub fn build_tray(app: &App) -> tauri::Result<()> {
     let autostart = CheckMenuItem::with_id(
         handle,
         autostart_action.menu_id(),
-        autostart_action.label(),
+        tray_label(lang, autostart_action),
         true,
         autostart_checked,
         None::<&str>,
@@ -97,7 +173,14 @@ pub fn build_tray(app: &App) -> tauri::Result<()> {
     let menu = Menu::with_items(handle, &[&start, &stop, &autostart, &sep, &quit])?;
 
     // Keep the CheckMenuItem handle for set_checked sync on toggle (actions::toggle_autostart looks it up again).
-    app.manage(AutostartCheck(autostart));
+    app.manage(AutostartCheck(autostart.clone()));
+    app.manage(TrayItems {
+        start,
+        stop,
+        autostart,
+        quit,
+    });
+    // A language change racing this build is not lost — its relabel is posted to this (main) thread and runs after setup.
 
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(initial)

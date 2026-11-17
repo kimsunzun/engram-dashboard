@@ -74,7 +74,7 @@ function requireMode(args: RenderModeCtx | undefined, cmd: string): RenderMode {
 
 register({
   id: 'slot.renderMode.set',
-  title: t('slot.renderModeSet'),
+  title: () => t('slot.renderModeSet'),
   category: 'slot',
   run: args => {
     const cmd = 'slot.renderMode.set'
@@ -87,7 +87,7 @@ register({
 
 register({
   id: 'slot.renderMode.clear',
-  title: t('slot.renderModeClear'),
+  title: () => t('slot.renderModeClear'),
   category: 'slot',
   run: args => {
     useViewStore.getState().clearRenderMode(requireSlotId(args, 'slot.renderMode.clear'))
@@ -98,7 +98,7 @@ register({
 
 register({
   id: 'slot.domMode.enable',
-  title: t('slot.domModeEnable'),
+  title: () => t('slot.domModeEnable'),
   category: 'slot',
   run: args => {
     useViewStore.getState().enableDomMode(requireSlotId(args, 'slot.domMode.enable'))
@@ -107,7 +107,7 @@ register({
 
 register({
   id: 'slot.domMode.disable',
-  title: t('slot.domModeDisable'),
+  title: () => t('slot.domModeDisable'),
   category: 'slot',
   run: args => {
     useViewStore.getState().disableDomMode(requireSlotId(args, 'slot.domMode.disable'))
@@ -116,7 +116,7 @@ register({
 
 register({
   id: 'slot.domMode.toggle',
-  title: t('slot.domModeToggle'),
+  title: () => t('slot.domModeToggle'),
   category: 'slot',
   // ★The toggle decision is made by the store★ — reading the current value here and branching would make the registry a second
   //   place that interprets state (ADR-0055 「상태 권위 아님」 — not a state authority). Read-decide-write must finish inside a single store action.

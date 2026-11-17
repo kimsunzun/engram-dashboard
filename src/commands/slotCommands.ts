@@ -32,7 +32,7 @@ function requireCoords(args: SlotCtx | undefined, cmd: string): { viewId: string
   return { viewId, slotId }
 }
 
-function registerSplit(id: string, title: string, dir: SplitDir): void {
+function registerSplit(id: string, title: () => string, dir: SplitDir): void {
   register({
     id,
     title,
@@ -48,12 +48,12 @@ function registerSplit(id: string, title: string, dir: SplitDir): void {
 // ★Label↔direction wiring = vim convention (ADR-0140)★: `가로 분할` = a horizontal line (a horizontal split line) appears, dividing into top/bottom →
 //   `top_bottom`. Reading only the label word it looks reversed, but flipping it would break the convention the user chose
 //   (reverting to the tmux axis convention = the alternative ADR-0140 rejected). This is the only point where the two vocabularies meet.
-registerSplit('slot.split.topBottom', t('slot.splitTopBottom'), 'top_bottom')
-registerSplit('slot.split.leftRight', t('slot.splitLeftRight'), 'left_right')
+registerSplit('slot.split.topBottom', () => t('slot.splitTopBottom'), 'top_bottom')
+registerSplit('slot.split.leftRight', () => t('slot.splitLeftRight'), 'left_right')
 
 register({
   id: 'slot.focus',
-  title: t('slot.focus'),
+  title: () => t('slot.focus'),
   category: 'slot',
   // ADR-0066: click-to-focus — viewStore.focusSlot → invoke(focus_slot) → emit(layout:updated) updates the ring
   //   (no optimistic update, §5 single control surface). The slot onClick of LayoutLeaf calls the same handle.
@@ -65,7 +65,7 @@ register({
 
 register({
   id: 'slot.popout',
-  title: t('slot.popout'),
+  title: () => t('slot.popout'),
   category: 'slot',
   // ADR-0057/0064: MOVE (detach) a slot to a new tab of a new runtime popup window — viewStore.moveSlotToWindow →
   //   invoke(move_slot_to_window, toWindow=null). Independent of content kind (agent gating removed, ADR-0064).
@@ -82,7 +82,7 @@ register({
 
 register({
   id: 'slot.empty',
-  title: t('slot.empty'),
+  title: () => t('slot.empty'),
   category: 'slot',
   help: {
     summary: '그 슬롯을 빈 칸으로 되돌린다(슬롯 자체는 남는다 — 없애려면 slot.close).',
@@ -102,7 +102,7 @@ register({
 
 register({
   id: 'slot.close',
-  title: t('slot.close'),
+  title: () => t('slot.close'),
   category: 'slot',
   // ADR-0035: viewStore.closeSlot → invoke(close_slot) (sibling promotion).
   run: args => {
@@ -113,7 +113,7 @@ register({
 
 register({
   id: 'slot.resolveSpatial',
-  title: t('slot.resolveSpatial'),
+  title: () => t('slot.resolveSpatial'),
   category: 'slot',
   // ★Spatial/directional token → slot id resolution (ADR-0068 — §5 backend authority resolver)★: maps a spatial reference such as "bottom right" · "right of this slot"
   //   to a slot id through derivation from the logical plan (split direction · ratio) (independent of pixels · getBoundingClientRect —
