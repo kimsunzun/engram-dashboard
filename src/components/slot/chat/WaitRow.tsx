@@ -65,7 +65,7 @@ export function WaitRow({ interrupting = false }: { interrupting?: boolean }) {
 
   return (
     <div className="flex items-center gap-1 text-[13px] text-muted select-none">
-      <span className="animate-pulse">Wait</span>
+      <span className="animate-pulse">{t('chat.wait')}</span>
       <span className="animate-pulse" aria-hidden>
         …
       </span>

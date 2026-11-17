@@ -169,7 +169,7 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
   it('비편집 타겟(document.body)에서 ctrl+tab → 바인딩 command 실행 + preventDefault', () => {
     const spy = vi.fn()
     // Swap the default binding (ctrl+tab → tab.next) for this test's spy command.
-    register({ id: 'tab.next', title: 'next', run: spy })
+    register({ id: 'tab.next', title: () => 'next', run: spy })
     dispose = installKeybindings()
 
     const e = fireCtrlTab(document.body)
@@ -187,7 +187,7 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
     const THEMES = ['dark', 'light', 'e-ink'] as const
     register({
       id: 'tab.next',
-      title: 'next',
+      title: () => 'next',
       run: () => {
         const cur = useThemeStore.getState().theme
         const next = THEMES[(THEMES.indexOf(cur) + 1) % THEMES.length]
@@ -201,7 +201,7 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
 
   it('타겟이 <input> 이면 command 실행 안 함(가드가 리스너에 배선됨)', () => {
     const spy = vi.fn()
-    register({ id: 'tab.next', title: 'next', run: spy })
+    register({ id: 'tab.next', title: () => 'next', run: spy })
     dispose = installKeybindings()
 
     const input = document.createElement('input')
@@ -213,7 +213,7 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
 
   it('타겟이 .xterm 자손이면 command 실행 안 함', () => {
     const spy = vi.fn()
-    register({ id: 'tab.next', title: 'next', run: spy })
+    register({ id: 'tab.next', title: () => 'next', run: spy })
     dispose = installKeybindings()
 
     const term = document.createElement('div')
@@ -227,7 +227,7 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
 
   it('타겟이 contenteditable="plaintext-only" 면 command 실행 안 함', () => {
     const spy = vi.fn()
-    register({ id: 'tab.next', title: 'next', run: spy })
+    register({ id: 'tab.next', title: () => 'next', run: spy })
     dispose = installKeybindings()
 
     const editable = document.createElement('div')
@@ -241,7 +241,7 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
   // ── Stops while the restore modal is up (TRD S21-storage §6-7 N4) ──
   it('멈춘 동안에는 발화하지 않고 preventDefault 도 안 한다', () => {
     const spy = vi.fn()
-    register({ id: 'tab.next', title: 'next', run: spy })
+    register({ id: 'tab.next', title: () => 'next', run: spy })
     dispose = installKeybindings()
 
     setKeybindingsPaused(true)
@@ -252,7 +252,7 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
 
   it('다시 켜면 발화한다', () => {
     const spy = vi.fn()
-    register({ id: 'tab.next', title: 'next', run: spy })
+    register({ id: 'tab.next', title: () => 'next', run: spy })
     dispose = installKeybindings()
 
     setKeybindingsPaused(true)
@@ -264,7 +264,7 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
 
   it('disposer 호출 후엔 더 이상 발화하지 않는다', () => {
     const spy = vi.fn()
-    register({ id: 'tab.next', title: 'next', run: spy })
+    register({ id: 'tab.next', title: () => 'next', run: spy })
     const d = installKeybindings()
     d()
     fireCtrlTab(document.body)
@@ -273,7 +273,7 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
 
   it('StrictMode 식 install→dispose→install → 정확히 1회만 발화(중복 등록 누수 없음)', () => {
     const spy = vi.fn()
-    register({ id: 'tab.next', title: 'next', run: spy })
+    register({ id: 'tab.next', title: () => 'next', run: spy })
     const d1 = installKeybindings()
     d1()
     dispose = installKeybindings()
@@ -283,7 +283,7 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
 
   it('when:()=>false 로 바인딩된 command 는 키로 발화 안 함(FIX-5)', () => {
     const spy = vi.fn()
-    register({ id: 'tab.next', title: 'next', when: () => false, run: spy })
+    register({ id: 'tab.next', title: () => 'next', when: () => false, run: spy })
     dispose = installKeybindings()
 
     const e = fireCtrlTab(document.body)
@@ -293,7 +293,7 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
 
   it('when:()=>true 로 바인딩된 command 는 정상 발화(FIX-5)', () => {
     const spy = vi.fn()
-    register({ id: 'tab.next', title: 'next', when: () => true, run: spy })
+    register({ id: 'tab.next', title: () => 'next', when: () => true, run: spy })
     dispose = installKeybindings()
 
     const e = fireCtrlTab(document.body)
@@ -305,7 +305,7 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
     const spy = vi.fn()
     register({
       id: 'tab.next',
-      title: 'next',
+      title: () => 'next',
       when: () => {
         throw new Error('x')
       },

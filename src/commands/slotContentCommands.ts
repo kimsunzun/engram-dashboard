@@ -28,7 +28,7 @@ function requireCoords(
 
 register({
   id: 'slot.fill.agentList',
-  title: t('slot.fillAgentList'),
+  title: () => t('slot.fillAgentList'),
   category: 'slot',
   // ADR-0063: setSlotContent → invoke(set_slot_content) → emit 반영.
   run: args => {
@@ -39,7 +39,7 @@ register({
 
 register({
   id: 'slot.fill.presetPalette',
-  title: t('slot.fillPresetPalette'),
+  title: () => t('slot.fillPresetPalette'),
   category: 'slot',
   run: args => {
     const { viewId, slotId } = requireCoords(args, 'slot.fill.presetPalette')
@@ -49,7 +49,7 @@ register({
 
 register({
   id: 'slot.fill.usage',
-  title: t('slot.fillUsage'),
+  title: () => t('slot.fillUsage'),
   category: 'slot',
   // 두 회사를 켠 채로 놓는다 — 끄기는 팝업의 「슬롯에 표시」 줄이 `usageSlot.toggle*` 로 한다(ADR-0258).
   run: args => {
@@ -62,7 +62,7 @@ register({
 
 register({
   id: 'slot.createAgentHere',
-  title: t('agent.create'),
+  title: () => t('agent.create'),
   category: 'slot',
   // ★spawn + 이 슬롯에 배정★(ADR-0011 + ADR-0035): spawnAgent 는 데몬 권위, assignAgent 는 레이아웃 권위
   //   invoke — 두 권위가 분리돼 있다. 폴더 다이얼로그는 preset.add·PresetPalette 와 동일
@@ -85,7 +85,7 @@ register({
 
 register({
   id: 'slot.assignRunningAgent',
-  title: t('agent.monitor'),
+  title: () => t('agent.monitor'),
   category: 'slot',
   // ★배치 타깃 = 우클릭한 slot(명시)★(ADR-0067): ctx.viewId/slotId 가 우클릭한 slot 좌표다(포커스 비의존
   //   — focus-steal 원천 차단). 여기선 팝업을 그 좌표로 열기만 하고, 실제 배치(assign_agent)는 팝업의
@@ -106,7 +106,8 @@ register({
 //   agent_list 슬롯 메뉴 agentlist.createAgent). command 정의 자체는 남긴다(직접 호출·향후 재사용 가능).
 registerSlotMenu('empty', [
   {
-    title: t('slot.newContent'),
+    id: 'slot.newContent',
+    title: () => t('slot.newContent'),
     group: 'content',
     order: 10,
     children: [
@@ -134,7 +135,7 @@ registerSlotMenu('*', [
 
 register({
   id: 'agent.kill',
-  title: t('agent.kill'),
+  title: () => t('agent.kill'),
   category: 'agent',
   // ADR-0011: 슬롯은 그대로 두고(레이아웃 불변) agent 만 kill.
   //   agentId 는 실행 컨텍스트(ctx)에서 온다 — 메뉴가 슬롯의 배정 agentId 를 넘긴다.

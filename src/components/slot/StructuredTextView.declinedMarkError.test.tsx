@@ -40,7 +40,7 @@ describe("DECLINED_MARK = 'error'", () => {
       [t('chat.toolGroupCommand', { count: '2' }), t('chat.toolGroupErrors', { count: '2' })].join(' · '),
     )
     fireEvent.click(header)
-    expect(screen.getAllByText('Error')).toHaveLength(2)
+    expect(screen.getAllByText(t('chat.toolErrorBadge'))).toHaveLength(2)
     expect(screen.queryByText(t('chat.toolDeclined'))).toBeNull()
     expect(container.querySelector('[data-tool-declined-reason]')).toBeNull()
     const marks = Array.from(container.querySelectorAll('[data-tool-mark]')).map((el) => el.getAttribute('data-tool-mark'))

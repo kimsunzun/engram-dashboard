@@ -1,7 +1,7 @@
 // ADR-0050: verifies deterministic adapter behavior (mapping · absorption · filtering), and checks the leaf's internal render (chat/*) only at smoke level
 //   (details like react-markdown are the leaf's own tests' job).
 
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { StructuredEvent } from '../../../crates/engram-dashboard-protocol/bindings/StructuredEvent'
@@ -12,7 +12,8 @@ import {
   type ToolCategory,
   type ToolItem,
 } from './structuredAccumulator'
-import { t } from '../../i18n'
+import { PLACEHOLDER_ERROR_MESSAGE } from '../../api/wsFrame'
+import { setLanguage, t } from '../../i18n'
 import { useToolGroupStore } from '../../store/toolGroupStore'
 
 // The tool bundle expansion store is a zustand singleton, so isolate between tests.
@@ -115,7 +116,7 @@ describe('StructuredTextView dispatch (ADR-0050)', () => {
     expect(container.querySelector('pre')).toBeNull()
     fireEvent.click(header)
     expect(header.getAttribute('aria-expanded')).toBe('true')
-    expect(screen.getByText('In')).toBeTruthy()
+    expect(screen.getByText(t('chat.toolInput'))).toBeTruthy()
     const pre = container.querySelector('pre')
     expect(pre).toBeTruthy()
     expect(pre?.textContent).toContain('a.ts')
@@ -134,7 +135,7 @@ describe('StructuredTextView dispatch (ADR-0050)', () => {
     const { container } = render(<StructuredTextView items={items} />)
     const header = screen.getByRole('button', { name: /Bash/ })
     fireEvent.click(header)
-    expect(screen.getByText('Out')).toBeTruthy()
+    expect(screen.getByText(t('chat.toolOutput'))).toBeTruthy()
     const pres = Array.from(container.querySelectorAll('pre'))
     expect(pres.some((p) => p.textContent?.includes('FILE_LISTING'))).toBe(true)
   })
@@ -225,7 +226,7 @@ describe('StructuredTextView dispatch (ADR-0050)', () => {
   it('streaming 이어도 목록 안에 대기 표시를 그리지 않고, 마지막 행이 그쪽으로 레일을 잇지 않는다', () => {
     const items: StructuredItem[] = [{ kind: 'text', text: 'working', itemId: 0 }]
     const { container } = render(<StructuredTextView items={items} streaming />)
-    expect(screen.queryByText('Wait')).toBeNull()
+    expect(screen.queryByText(t('chat.wait'))).toBeNull()
     expect(container.querySelector('[data-wait-strip]')).toBeNull()
     expect(container.querySelector('.w-px.bg-border')).toBeNull() // One row = single — no connector
   })
@@ -308,8 +309,8 @@ describe('StructuredTextView dispatch (ADR-0050)', () => {
     expect(() => render(<StructuredTextView items={items} />)).not.toThrow()
     const header = screen.getByRole('button', { name: /Glob/ })
     fireEvent.click(header)
-    expect(screen.getByText('In')).toBeTruthy()
-    expect(screen.queryByText('Out')).toBeNull()
+    expect(screen.getByText(t('chat.toolInput'))).toBeTruthy()
+    expect(screen.queryByText(t('chat.toolOutput'))).toBeNull()
   })
 
   // ── unmatched tool_result: not rendered standalone ───────────────────────────────
@@ -690,17 +691,17 @@ describe('StructuredTextView 도구 끝 표식 (ADR-0241)', () => {
     )
     const row = container.querySelector('[data-tool-mark]') as HTMLElement
     expect(row.getAttribute('data-tool-mark')).toBe('failed')
-    expect(screen.getByText('Error').className).toContain('text-red-500')
+    expect(screen.getByText(t('chat.toolErrorBadge')).className).toContain('text-red-500')
     fireEvent.click(screen.getByRole('button', { name: 'commandExecution' }))
-    expect(screen.getByText('In')).toBeTruthy()
-    expect(screen.queryByText('Out')).toBeNull()
+    expect(screen.getByText(t('chat.toolInput'))).toBeTruthy()
+    expect(screen.queryByText(t('chat.toolOutput'))).toBeNull()
   })
 
   it('claude 벤더 오류(is_error) → 붉은 Error 배지 · data-tool-mark 는 없다(표식이 아니다)', () => {
     const { container } = render(
       <StructuredTextView items={[toolItem('Bash', 'b1', 'Command'), resultCarrier('b1', true)]} />,
     )
-    expect(screen.getByText('Error').className).toContain('text-red-500')
+    expect(screen.getByText(t('chat.toolErrorBadge')).className).toContain('text-red-500')
     expect(container.querySelector('[data-tool-mark]')).toBeNull()
   })
 
@@ -714,7 +715,7 @@ describe('StructuredTextView 도구 끝 표식 (ADR-0241)', () => {
     const badge = screen.getByText(t('chat.toolDeclined'))
     expect(badge.style.color).toBe('var(--status-blocked)')
     expect(badge.style.borderColor).toBe('var(--status-blocked)')
-    expect(screen.queryByText('Error')).toBeNull()
+    expect(screen.queryByText(t('chat.toolErrorBadge'))).toBeNull()
     expect(container.querySelector('.text-red-500, .border-red-500, .border-red-500\\/60')).toBeNull()
     // The head (tool name) is the default tone.
     expect(screen.getByText('commandExecution').className).toContain('text-foreground')
@@ -787,7 +788,7 @@ describe('StructuredTextView 도구 끝 표식 (ADR-0241)', () => {
     )
     fireEvent.click(groupHeader(g))
     expect(screen.getByText(t('chat.toolDeclined'))).toBeTruthy()
-    expect(screen.queryByText('Error')).toBeNull()
+    expect(screen.queryByText(t('chat.toolErrorBadge'))).toBeNull()
   })
 
   it('사유 줄은 행이 아니다 — 레일 행 · 점 수가 표식 없는 같은 목록과 같다(ADR-0051)', () => {
@@ -826,7 +827,7 @@ describe('StructuredTextView 도구 끝 표식 (ADR-0241)', () => {
       ),
     )
     fireEvent.click(groupHeader(g))
-    expect(screen.getByText('Error').className).toContain('text-red-500')
+    expect(screen.getByText(t('chat.toolErrorBadge')).className).toContain('text-red-500')
     expect(container.querySelector('[data-tool-mark]')).toBeNull()
     const outcome = screen.getByText(t('chat.turnInterrupted'))
     expect(g.compareDocumentPosition(outcome) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
@@ -872,7 +873,7 @@ describe('StructuredTextView 도구 끝 표식 (ADR-0241)', () => {
       ),
     )
     fireEvent.click(groupHeader(g))
-    expect(screen.getByText('Error').className).toContain('text-red-500')
+    expect(screen.getByText(t('chat.toolErrorBadge')).className).toContain('text-red-500')
     const note = container.querySelector('[data-interrupt-note]') as HTMLElement
     expect(note.textContent).toBe('[Request interrupted by user for tool use]')
     expect(g.compareDocumentPosition(note) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
@@ -909,7 +910,7 @@ describe('StructuredTextView 도구 끝 표식 (ADR-0241)', () => {
     fireEvent.click(groupHeader(g))
     const marks = Array.from(container.querySelectorAll('[data-tool-mark]')).map((el) => el.getAttribute('data-tool-mark'))
     expect(marks).toEqual(['failed'])
-    expect(screen.getByText('Error').className).toContain('text-red-500')
+    expect(screen.getByText(t('chat.toolErrorBadge')).className).toContain('text-red-500')
     const outcome = screen.getByText(t('chat.turnInterrupted'))
     expect(g.compareDocumentPosition(outcome) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
@@ -1012,5 +1013,38 @@ describe('StructuredTextView 끊김 표시 행 (ADR-0243)', () => {
     // bundle · display row · bundle = three rows.
     expect(railRows(container)).toBe(3)
     expect(railDots(container)).toBe(3)
+  })
+})
+
+// ADR-0373: the dropped-output placeholder is a marker — shown in the UI language, re-rendered on a switch; other errors as they came.
+describe('error row — the dropped-output placeholder', () => {
+  afterEach(() => {
+    act(() => {
+      setLanguage('ko')
+    })
+  })
+
+  it('shows chat.droppedOutput instead of the marker text, and follows a language switch', () => {
+    const items: StructuredItem[] = [{ kind: 'error', message: PLACEHOLDER_ERROR_MESSAGE, itemId: 0 }]
+    const { rerender } = render(<StructuredTextView items={items} />)
+    expect(screen.getByText(t('chat.droppedOutput'))).toBeTruthy()
+    expect(screen.getByText('오류')).toBeTruthy()
+
+    act(() => {
+      setLanguage('en')
+    })
+    rerender(<StructuredTextView items={items} />)
+
+    expect(screen.getByText('This output could not be delivered.')).toBeTruthy()
+    expect(screen.queryByText(PLACEHOLDER_ERROR_MESSAGE)).toBeNull()
+    expect(screen.getByText('Error')).toBeTruthy()
+  })
+
+  it('any other message is shown as it came, in either language', () => {
+    act(() => {
+      setLanguage('en')
+    })
+    render(<StructuredTextView items={[{ kind: 'error', message: '이 출력 사건을 싣지 못했습니다!', itemId: 0 }]} />)
+    expect(screen.getByText('이 출력 사건을 싣지 못했습니다!')).toBeTruthy()
   })
 })

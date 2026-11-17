@@ -61,6 +61,13 @@ pub(super) const SETTINGS: &[SettingDef] = &[
         default: "dark",
         desc: "창별 덮어쓰기가 없는 창의 테마",
     },
+    // ADR-0372 — values and default are an LLM-facing contract once shipped
+    SettingDef {
+        key: "ui.language",
+        kind: Kind::Choice(&["en", "ko"]),
+        default: "en",
+        desc: "UI language (en = English, ko = Korean) — applied live to every window, the tray, tab names, and window titles",
+    },
     spacing(
         "chat.style.railRowPt",
         "0.8rem",
@@ -313,12 +320,12 @@ mod tests {
     // ── table ──
 
     #[test]
-    fn the_table_has_twelve_unique_keys() {
-        assert_eq!(SETTINGS.len(), 12);
+    fn the_table_has_thirteen_unique_keys() {
+        assert_eq!(SETTINGS.len(), 13);
         let mut keys: Vec<&str> = SETTINGS.iter().map(|d| d.key).collect();
         keys.sort_unstable();
         keys.dedup();
-        assert_eq!(keys.len(), 12, "키가 겹친다");
+        assert_eq!(keys.len(), 13, "키가 겹친다");
     }
 
     #[test]
@@ -354,6 +361,19 @@ mod tests {
         assert_eq!(def("theme.default").default, "dark");
     }
 
+    #[test]
+    fn the_ui_language_is_en_or_ko_and_defaults_to_en() {
+        let lang = def("ui.language");
+        assert_eq!(lang.kind_name(), "choice");
+        assert_eq!(lang.default, "en");
+        assert_eq!(lang.choices(), Some(vec!["en".into(), "ko".into()]));
+        assert_eq!(ok("ui.language", " KO "), "ko");
+        let e = refused("ui.language", "fr");
+        assert!(e.contains("en · ko"), "{e}");
+        refused("ui.language", "en-US");
+        refused("ui.language", "");
+    }
+
     // ── selector ──
 
     #[test]
@@ -366,6 +386,7 @@ mod tests {
             "점 없는 접두는 키가 아니다"
         );
         assert!(select("theme.").iter().all(|d| d.key == "theme.default"));
+        assert!(select("ui.").iter().map(|d| d.key).eq(["ui.language"]));
         assert!(select("").is_empty());
         assert!(select(".").is_empty());
         assert!(select("THEME.DEFAULT").is_empty(), "키는 대소문자를 가린다");

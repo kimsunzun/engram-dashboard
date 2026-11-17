@@ -2,10 +2,11 @@
 //   the contract "swallows sync throw · async reject · thenable with no leak" is owned by dispatch.test.ts (structural inheritance).
 //   The only concern here is "does the menu route through that shared helper".
 
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { ResolvedSlotMenuItem } from '../../commands/slotMenu'
+import { setLanguage } from '../../i18n'
 
 const dispatchMock = vi.hoisted(() => ({ fireAndForget: vi.fn() }))
 vi.mock('../../commands/dispatch', () => ({
@@ -99,7 +100,7 @@ describe('SlotContextMenu — 공유 dispatch 경로(FIX-3)', () => {
 
   it('컨테이너(children) 항목: hover 로 flyout 이 열리고 자식 클릭 → fireAndForget(child.id, ctx)', () => {
     const onClose = vi.fn()
-    const container = item('container:새 콘텐츠', {
+    const container = item('container:slot.newContent', {
       title: '새 콘텐츠',
       children: [item('slot.fill.agentList', { title: '트리' })],
     })
@@ -437,5 +438,50 @@ describe('SlotContextMenu — 마운트 후 뷰포트 배치 적용(Bug1)', () =
     expect(topPx + 300).toBeLessThanOrEqual(vh)
     // The menu bottom is ANCHOR_GAP above the anchor (y) = no item under the cursor, and the second click of a double-click cannot reach it either.
     expect(topPx + 300).toBe(vh - 50 - ANCHOR_GAP)
+  })
+})
+
+// ADR-0373: a language switch changes the titles' width, so the open menu and its flyout are placed again.
+describe('SlotContextMenu — placement after a language switch', () => {
+  const origRect = HTMLElement.prototype.getBoundingClientRect
+  afterEach(() => {
+    HTMLElement.prototype.getBoundingClientRect = origRect
+    act(() => {
+      setLanguage('ko')
+    })
+  })
+
+  it('measures the menu and the open flyout again', () => {
+    // The sizes the titles would give in each language.
+    let size = { menuH: 300, flyW: 100 }
+    HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement) {
+      const w = this.hasAttribute('data-slot-menu-flyout') ? size.flyW : 150
+      const h = this.hasAttribute('data-slot-menu-flyout') ? 50 : size.menuH
+      return { width: w, height: h, top: 0, left: 0, right: w, bottom: h, x: 0, y: 0, toJSON() {} } as DOMRect
+    }
+    const vh = window.innerHeight
+    const vw = window.innerWidth
+    render(
+      <SlotContextMenu
+        x={10}
+        y={vh - 50}
+        items={[item('container:c', { title: 'c', children: [item('kid')] })]}
+        ctx={{ viewId: 'v1', slotId: 's1', agentId: null }}
+        onClose={vi.fn()}
+      />,
+    )
+    fireEvent.mouseEnter(document.querySelector('[data-slot-menu-container="container:c"]') as HTMLElement)
+    const menu = document.querySelector('[role="menu"][data-engram-overlay]') as HTMLElement
+    const flyout = () => document.querySelector('[data-slot-menu-flyout="container:c"]') as HTMLElement
+    expect(parseInt(menu.style.top, 10)).toBe(vh - 50 - ANCHOR_GAP - 300)
+    expect(parseInt(flyout().style.left, 10)).toBe(150)
+
+    size = { menuH: 200, flyW: vw - 100 }
+    act(() => {
+      setLanguage('en')
+    })
+
+    expect(parseInt(menu.style.top, 10)).toBe(vh - 50 - ANCHOR_GAP - 200)
+    expect(parseInt(flyout().style.left, 10)).not.toBe(150)
   })
 })

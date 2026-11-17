@@ -178,7 +178,7 @@ describe('RichSlot(live) — send() 실패 시 awaiting 해제', () => {
 
     // Inject one completed turn → turnDone=true & content present. In this state streaming = awaiting.
     feedCompletedTurn()
-    expect(screen.queryByText('Wait')).toBeNull()
+    expect(screen.queryByText(t('chat.wait'))).toBeNull()
 
     // send() turns the streaming hint on at once with awaiting=true.
     const textarea = screen.getByPlaceholderText(/메시지 입력/)
@@ -190,7 +190,7 @@ describe('RichSlot(live) — send() 실패 시 awaiting 해제', () => {
     // Flush the microtask for the reject taking effect (catch → setAwaiting(false)).
     await flush()
 
-    expect(screen.queryByText('Wait')).toBeNull()
+    expect(screen.queryByText(t('chat.wait'))).toBeNull()
     expect(warn).toHaveBeenCalled()
   })
 
@@ -201,7 +201,7 @@ describe('RichSlot(live) — send() 실패 시 awaiting 해제', () => {
     await flush()
 
     feedCompletedTurn()
-    expect(screen.queryByText('Wait')).toBeNull()
+    expect(screen.queryByText(t('chat.wait'))).toBeNull()
 
     const textarea = screen.getByPlaceholderText(/메시지 입력/)
     fireEvent.change(textarea, { target: { value: 'hello' } })
@@ -209,7 +209,7 @@ describe('RichSlot(live) — send() 실패 시 awaiting 해제', () => {
     await flush()
 
     // Success path — there is no response event yet, so streaming is kept by the awaiting bridge.
-    expect(screen.getByText('Wait')).toBeTruthy()
+    expect(screen.getByText(t('chat.wait'))).toBeTruthy()
   })
 })
 
@@ -228,12 +228,12 @@ describe('RichSlot(live) — 대기 표시 줄', () => {
     expect(strip.nextElementSibling?.contains(textarea)).toBe(true)
     expect(strip.contains(label)).toBe(true) // The identity label is this row's right-hand area — it does not float and overlap
     expect(label.className).not.toContain('absolute')
-    expect(screen.queryByText('Wait')).toBeNull()
+    expect(screen.queryByText(t('chat.wait'))).toBeNull()
 
     fireEvent.change(textarea, { target: { value: 'hello' } })
     fireEvent.keyDown(textarea, { key: 'Enter' })
     await flush()
-    const wait = screen.getByText('Wait')
+    const wait = screen.getByText(t('chat.wait'))
     expect(document.querySelector('[data-wait-strip="1"]')).toBe(strip)
     expect(strip.contains(wait)).toBe(true)
     expect(viewport.contains(wait)).toBe(false)
@@ -267,14 +267,14 @@ describe('RichSlot(live) — 후속 전송 시 합성 user 에코가 "Wait" 을 
 
     // Previous turn complete (turnDone=true) + content present.
     feedCompletedTurn()
-    expect(screen.queryByText('Wait')).toBeNull()
+    expect(screen.queryByText(t('chat.wait'))).toBeNull()
 
     // Follow-up send — streaming hint on with awaiting=true.
     const textarea = screen.getByPlaceholderText(/메시지 입력/)
     fireEvent.change(textarea, { target: { value: 'follow-up' } })
     fireEvent.keyDown(textarea, { key: 'Enter' })
     await flush()
-    expect(screen.getByText('Wait')).toBeTruthy()
+    expect(screen.getByText(t('chat.wait'))).toBeTruthy()
 
     // The synthetic user echo arrives before the first assistant token (right after write_input in json mode). The subscription callback does
     //   setAwaiting(false), but the accumulator lowers turnDone to false, so the derived streaming holds.
@@ -288,7 +288,7 @@ describe('RichSlot(live) — 후속 전송 시 합성 user 에코가 "Wait" 을 
       ),
     )
 
-    expect(screen.getByText('Wait')).toBeTruthy()
+    expect(screen.getByText(t('chat.wait'))).toBeTruthy()
   })
 })
 
@@ -305,23 +305,23 @@ describe('RichSlot(live) — 모르는 종류의 프레임이 "Wait" 을 끄지 
     await flush()
 
     feedCompletedTurn() // turnDone=true + content present
-    expect(screen.queryByText('Wait')).toBeNull()
+    expect(screen.queryByText(t('chat.wait'))).toBeNull()
 
     const textarea = screen.getByPlaceholderText(/메시지 입력/)
     fireEvent.change(textarea, { target: { value: 'follow-up' } })
     fireEvent.keyDown(textarea, { key: 'Enter' })
     await flush()
-    expect(screen.getByText('Wait')).toBeTruthy()
+    expect(screen.getByText(t('chat.wait'))).toBeTruthy()
 
     // A kind sent by a newer daemon that is not in this shell's bindings.
     act(() => captured.onChunk!(tag1(2, JSON.stringify({ type: 'SomethingNewer', whatever: 1 }))))
-    expect(screen.getByText('Wait')).toBeTruthy()
+    expect(screen.getByText(t('chat.wait'))).toBeTruthy()
 
     // When a known frame arrives, control of the indicator passes to turnDone, and the boundary turns it off normally.
     act(() => captured.onChunk!(tag1(3, JSON.stringify({ type: 'TextDelta', text: 'answer' }))))
-    expect(screen.getByText('Wait')).toBeTruthy()
+    expect(screen.getByText(t('chat.wait'))).toBeTruthy()
     act(() => captured.onChunk!(tag1(4, JSON.stringify({ type: 'MessageDone' }))))
-    expect(screen.queryByText('Wait')).toBeNull()
+    expect(screen.queryByText(t('chat.wait'))).toBeNull()
     expect(warn).toHaveBeenCalled() // The diagnostic name goes to console only
   })
 
@@ -333,7 +333,7 @@ describe('RichSlot(live) — 모르는 종류의 프레임이 "Wait" 을 끄지 
     feedCompletedTurn()
     act(() => captured.onChunk!(tag1(2, JSON.stringify({ type: 'SomethingNewer', whatever: 1 }))))
 
-    expect(screen.queryByText('Wait')).toBeNull()
+    expect(screen.queryByText(t('chat.wait'))).toBeNull()
     expect(warn).toHaveBeenCalled()
   })
 })
@@ -348,20 +348,20 @@ describe('RichSlot(live) — 턴 한복판의 Error 가 "Wait" 을 끄지 않는
     await flush()
 
     act(() => captured.onChunk!(tag1(0, JSON.stringify({ type: 'TextDelta', text: 'thinking' }))))
-    expect(screen.getByText('Wait')).toBeTruthy()
+    expect(screen.getByText(t('chat.wait'))).toBeTruthy()
 
     act(() =>
       captured.onChunk!(
         tag1(1, JSON.stringify({ type: 'Error', message: 'overloaded (serverOverloaded) [willRetry]' })),
       ),
     )
-    expect(screen.getByText('Wait')).toBeTruthy() // Before the fix: it went off here
+    expect(screen.getByText(t('chat.wait'))).toBeTruthy() // Before the fix: it went off here
 
     act(() => captured.onChunk!(tag1(2, JSON.stringify({ type: 'TextDelta', text: ' resumed' }))))
-    expect(screen.getByText('Wait')).toBeTruthy()
+    expect(screen.getByText(t('chat.wait'))).toBeTruthy()
 
     act(() => captured.onChunk!(tag1(3, JSON.stringify({ type: 'MessageDone' }))))
-    expect(screen.queryByText('Wait')).toBeNull()
+    expect(screen.queryByText(t('chat.wait'))).toBeNull()
   })
 })
 
@@ -505,7 +505,7 @@ describe('RichSlot(live) — ADR-0145 첫 실행 빈 상태', () => {
     fireEvent.keyDown(textarea(), { key: 'Enter' })
     await flush()
     expect(emptyState()).toBeNull()
-    expect(screen.getByText('Wait')).toBeTruthy() // wait indicator (awaiting)
+    expect(screen.getByText(t('chat.wait'))).toBeTruthy() // wait indicator (awaiting)
 
     // Another incarnation attached — if it ends with 0 history items, the first-run screen is correct.
     fireReset()
@@ -526,7 +526,7 @@ describe('RichSlot(live) — ADR-0145 첫 실행 빈 상태', () => {
     fireState('buffering')
     fireState('live')
     expect(emptyState()).toBeNull()
-    expect(screen.getByText('Wait')).toBeTruthy()
+    expect(screen.getByText(t('chat.wait'))).toBeTruthy()
   })
 
   // Leaves absence on the surface — while the registry has no such agent, the slot must not look "alive but quiet"
@@ -686,7 +686,7 @@ describe('RichSlot(live) — ADR-0145 빈 상태 억제는 전송 사실을 따�
     rejectA(new Error('write failed'))
     await flush()
     expect(emptyState()).toBeNull()
-    expect(screen.getByText('Wait')).toBeTruthy()
+    expect(screen.getByText(t('chat.wait'))).toBeTruthy()
     expect(warn).toHaveBeenCalled()
   })
 
@@ -708,7 +708,7 @@ describe('RichSlot(live) — ADR-0145 빈 상태 억제는 전송 사실을 따�
     fireEvent.change(textarea(), { target: { value: 'send A' } })
     fireEvent.keyDown(textarea(), { key: 'Enter' })
     await flush()
-    expect(screen.getByText('Wait')).toBeTruthy()
+    expect(screen.getByText(t('chat.wait'))).toBeTruthy()
 
     // Send B (success) — the latest send passes to B.
     clientMock.writeStdin = vi.fn(async () => undefined)
@@ -719,7 +719,7 @@ describe('RichSlot(live) — ADR-0145 빈 상태 억제는 전송 사실을 따�
     // Belated A failure — it is not the latest send, so it touches no indicator (B is still waiting for a response).
     rejectA(new Error('write failed'))
     await flush()
-    expect(screen.getByText('Wait')).toBeTruthy()
+    expect(screen.getByText(t('chat.wait'))).toBeTruthy()
     expect(emptyState()).toBeNull()
     expect(warn).toHaveBeenCalled()
   })
@@ -743,7 +743,7 @@ describe('RichSlot(live) — ADR-0145 빈 상태 억제는 전송 사실을 따�
     // It comes back once the failure is confirmed — if not, the first-run screen never shows until resubscribe.
     await flush()
     expect(emptyState()).not.toBeNull()
-    expect(screen.queryByText('Wait')).toBeNull()
+    expect(screen.queryByText(t('chat.wait'))).toBeNull()
     expect(warn).toHaveBeenCalled()
   })
 
@@ -814,7 +814,7 @@ describe('RichSlot(live) — ADR-0145 빈 상태 억제는 전송 사실을 따�
     await flush()
 
     expect(emptyState()).not.toBeNull()
-    expect(screen.queryByText('Wait')).toBeNull()
+    expect(screen.queryByText(t('chat.wait'))).toBeNull()
     expect(warn).toHaveBeenCalled()
   })
 })
@@ -1019,7 +1019,7 @@ describe('RichSlot(live) — ADR-0226 이어받기 화신의 이력 대기', () 
     expect(textarea().disabled).toBe(false)
     expect(textarea().className).toContain('flex-1')
     expect(textarea().placeholder).toBe(t('agent.inputPlaceholder'))
-    expect(screen.queryByText('Wait')).toBeNull()
+    expect(screen.queryByText(t('chat.wait'))).toBeNull()
   })
 
   // As measured, the first live frame of a resume is usage. Ending the wait on it shows an empty list before history arrives,
@@ -1030,11 +1030,11 @@ describe('RichSlot(live) — ADR-0226 이어받기 화신의 이력 대기', () 
     act(() => captured.onChunk!(tag1(0, USAGE))) // The replay is delivered before 'live'
     fireLive(true)
     expect(loadingPanel()).not.toBeNull()
-    expect(screen.queryByText('Wait')).toBeNull()
+    expect(screen.queryByText(t('chat.wait'))).toBeNull()
 
     act(() => captured.onChunk!(tag1(1, USAGE))) // Live usage
     expect(loadingPanel()).not.toBeNull()
-    expect(screen.queryByText('Wait')).toBeNull()
+    expect(screen.queryByText(t('chat.wait'))).toBeNull()
     expect(emptyState()).toBeNull()
   })
 
@@ -1046,15 +1046,15 @@ describe('RichSlot(live) — ADR-0226 이어받기 화신의 이력 대기', () 
     act(() => captured.onChunk!(tag1(0, USAGE))) // The turn stays open (turnDone=false)
     fireLive(true)
     expect(loadingPanel()).not.toBeNull()
-    expect(screen.queryByText('Wait')).toBeNull()
+    expect(screen.queryByText(t('chat.wait'))).toBeNull()
 
     fireState('buffering')
     expect(loadingPanel()).toBeNull()
-    expect(screen.queryByText('Wait')).toBeNull()
+    expect(screen.queryByText(t('chat.wait'))).toBeNull()
 
     fireLive(true)
     expect(loadingPanel()).not.toBeNull()
-    expect(screen.queryByText('Wait')).toBeNull()
+    expect(screen.queryByText(t('chat.wait'))).toBeNull()
   })
 
   it.each<[string, () => void]>([
@@ -1069,7 +1069,7 @@ describe('RichSlot(live) — ADR-0226 이어받기 화신의 이력 대기', () 
     goUnavailable()
     expect(deadOverlay()).not.toBeNull()
     expect(loadingPanel()).toBeNull()
-    expect(screen.queryByText('Wait')).toBeNull()
+    expect(screen.queryByText(t('chat.wait'))).toBeNull()
   })
 
   // A turn boundary attaches a divider even when the preceding item is only usage. The divider is an empty spacer, not history — ending
@@ -1086,7 +1086,7 @@ describe('RichSlot(live) — ADR-0226 이어받기 화신의 이력 대기', () 
     expect(document.querySelector('[data-rich-live="1"] .h-3')).not.toBeNull() // The divider really did stand
     expect(loadingPanel()).not.toBeNull()
     expect(emptyState()).toBeNull()
-    expect(screen.queryByText('Wait')).toBeNull()
+    expect(screen.queryByText(t('chat.wait'))).toBeNull()
   })
 
   // Opposite direction: dropping all 'boundary' rows would leave even history in which only a user bubble was restored stuck in the wait.
@@ -1136,13 +1136,13 @@ describe('RichSlot(live) — ADR-0226 이어받기 화신의 이력 대기', () 
     act(() => captured.onChunk!(queuedFrame(0, { kind: 'Queued', id: 'X', text: 'hello' })))
     expect(loadingPanel()).not.toBeNull()
     expect(listedIds()).toEqual(['X'])
-    expect(screen.queryByText('Wait')).toBeNull()
+    expect(screen.queryByText(t('chat.wait'))).toBeNull()
 
     act(() => captured.onChunk!(queuedFrame(1, { kind: 'Delivered', id: 'X' })))
     expect(loadingPanel()).toBeNull()
     expect(queuedList()).toBeNull()
     expect(screen.getByText('hello')).toBeTruthy()
-    expect(screen.getByText('Wait')).toBeTruthy()
+    expect(screen.getByText(t('chat.wait'))).toBeTruthy()
   })
 
   it('한가할 때 친 글의 합성 말풍선도 행이라 로딩을 걷는다 — 전송 자체는 걷지 않는다', async () => {
@@ -1162,7 +1162,7 @@ describe('RichSlot(live) — ADR-0226 이어받기 화신의 이력 대기', () 
     act(() => captured.onChunk!(tag1(0, echo)))
     expect(loadingPanel()).toBeNull()
     expect(screen.getByText('hi')).toBeTruthy()
-    expect(screen.getByText('Wait')).toBeTruthy()
+    expect(screen.getByText(t('chat.wait'))).toBeTruthy()
   })
 
   it('연결이 끊기면 부재 막이 이기고 로딩은 없다', async () => {
@@ -1277,7 +1277,7 @@ describe('RichSlot(live) — ADR-0226 이어받기 화신의 이력 대기', () 
     act(() => captured.onState!('live', info))
     expect(loadingPanel()).toBeNull()
     expect(emptyState()).toBeNull()
-    expect(screen.getByText('Wait')).toBeTruthy()
+    expect(screen.getByText(t('chat.wait'))).toBeTruthy()
   })
 })
 
@@ -1333,9 +1333,9 @@ describe('RichSlot(live) — 대기 입력 목록(ADR-0231)', () => {
     fireEvent.change(textarea(), { target: { value: 'again' } })
     fireEvent.keyDown(textarea(), { key: 'Enter' })
     await flush()
-    expect(screen.queryByText('Wait')).toBeTruthy()
+    expect(screen.queryByText(t('chat.wait'))).toBeTruthy()
     act(() => captured.onChunk!(queuedFrame(2, { kind: 'Queued', id: 'Y', text: 'again' })))
-    expect(screen.queryByText('Wait')).toBeNull()
+    expect(screen.queryByText(t('chat.wait'))).toBeNull()
   })
 
   // P1b decision 2: placing a receipt turns the wait indicator on even if it arrives after the turn closed — codex hands text typed mid-turn to the head of the next turn,
@@ -1352,10 +1352,10 @@ describe('RichSlot(live) — 대기 입력 목록(ADR-0231)', () => {
     await flush()
     act(() => captured.onChunk!(queuedFrame(1, { kind: 'Queued', id: 'Q', text: 'also this' })))
     expect(listedIds()).toEqual(['Q'])
-    expect(screen.getByText('Wait')).toBeTruthy()
+    expect(screen.getByText(t('chat.wait'))).toBeTruthy()
 
     act(() => captured.onChunk!(tag1(2, turnEnd)))
-    expect(screen.queryByText('Wait')).toBeNull()
+    expect(screen.queryByText(t('chat.wait'))).toBeNull()
     expect(listedIds()).toEqual(['Q'])
 
     const echo = JSON.stringify({
@@ -1367,11 +1367,11 @@ describe('RichSlot(live) — 대기 입력 목록(ADR-0231)', () => {
     act(() => captured.onChunk!(tag1(4, echo)))
     expect(queuedList()).toBeNull()
     expect(screen.getAllByText('also this')).toHaveLength(1)
-    expect(screen.getByText('Wait')).toBeTruthy()
+    expect(screen.getByText(t('chat.wait'))).toBeTruthy()
 
     act(() => captured.onChunk!(tag1(5, JSON.stringify({ type: 'TextDelta', text: 'answer' }))))
     act(() => captured.onChunk!(tag1(6, turnEnd)))
-    expect(screen.queryByText('Wait')).toBeNull()
+    expect(screen.queryByText(t('chat.wait'))).toBeNull()
   })
 
   it("'live'(표식 실림)마다 목록을 물어 링에 없던 대기 항목을 되찾는다", async () => {
@@ -1572,7 +1572,7 @@ describe('RichSlot(live) — Esc 는 도는 턴을 끊는다(ADR-0237)', () => {
     render(<RichSlot viewId="v1" agentId={AGENT} />)
     await flush()
     act(() => captured.onChunk!(tag1(0, JSON.stringify({ type: 'TextDelta', text: 'streaming reply' }))))
-    expect(screen.queryByText('Wait')).not.toBeNull()
+    expect(screen.queryByText(t('chat.wait'))).not.toBeNull()
   }
 
   it('조건이 전부 참이면 명령을 한 번 부르고 키를 먹는다 — 낙관 상태도 입력창 글도 그대로다', async () => {
@@ -1584,7 +1584,7 @@ describe('RichSlot(live) — Esc 는 도는 턴을 끊는다(ADR-0237)', () => {
     expect(notPrevented).toBe(false)
     expect(interrupts()).toEqual([['agent.interrupt', { agentId: AGENT }]])
     expect(input().value).toBe('초안')
-    expect(screen.queryByText('Wait')).not.toBeNull()
+    expect(screen.queryByText(t('chat.wait'))).not.toBeNull()
   })
 
   it.each<[string, Record<string, unknown>]>([
@@ -1640,7 +1640,7 @@ describe('RichSlot(live) — Esc 는 도는 턴을 끊는다(ADR-0237)', () => {
   it('턴이 안 돌면 부르지 않는다(턴 끝 뒤)', async () => {
     await mountStreaming()
     act(() => captured.onChunk!(tag1(1, JSON.stringify({ type: 'MessageDone' }))))
-    expect(screen.queryByText('Wait')).toBeNull()
+    expect(screen.queryByText(t('chat.wait'))).toBeNull()
     fireEvent.keyDown(input(), { key: 'Escape' })
     expect(interrupts()).toEqual([])
   })
@@ -1738,7 +1738,7 @@ describe('RichSlot(live) — Esc 뒤 「중단하는 중…」 · 턴 끝까지 
     await flush()
     act(() => captured.onState!('live'))
     act(() => captured.onChunk!(delta(0, 'streaming reply')))
-    expect(screen.getByText('Wait')).toBeTruthy()
+    expect(screen.getByText(t('chat.wait'))).toBeTruthy()
   }
 
   it('Esc 한 번 = 끊기 한 번 · 대기 표시가 곧바로 「중단하는 중…」 · 그동안 Esc 는 보내지도 먹지도 않는다', async () => {
@@ -1748,7 +1748,7 @@ describe('RichSlot(live) — Esc 뒤 「중단하는 중…」 · 턴 끝까지 
     expect(clientMock.interruptAgent).toHaveBeenCalledWith(AGENT)
     expect(indicator()).not.toBeNull()
     expect(screen.getByText(t('chat.interrupting'))).toBeTruthy()
-    expect(screen.queryByText('Wait')).toBeNull()
+    expect(screen.queryByText(t('chat.wait'))).toBeNull()
 
     // Even if the interrupt is accepted, it stays as is until the turn end arrives.
     await flush()
@@ -1773,7 +1773,7 @@ describe('RichSlot(live) — Esc 뒤 「중단하는 중…」 · 턴 끝까지 
     expect(indicator()).toBeNull()
 
     act(() => captured.onChunk!(delta(2, 'next turn')))
-    expect(screen.getByText('Wait')).toBeTruthy()
+    expect(screen.getByText(t('chat.wait'))).toBeTruthy()
     expect(fireEvent.keyDown(input(), { key: 'Escape' })).toBe(false)
     expect(clientMock.interruptAgent).toHaveBeenCalledTimes(2)
     expect(indicator()).not.toBeNull()
@@ -1789,7 +1789,7 @@ describe('RichSlot(live) — Esc 뒤 「중단하는 중…」 · 턴 끝까지 
       captured.onChunk!(delta(2, 'queued message reply'))
     })
     expect(indicator()).toBeNull()
-    expect(screen.getByText('Wait')).toBeTruthy()
+    expect(screen.getByText(t('chat.wait'))).toBeTruthy()
     fireEvent.keyDown(input(), { key: 'Escape' })
     expect(clientMock.interruptAgent).toHaveBeenCalledTimes(2)
   })
@@ -1802,7 +1802,7 @@ describe('RichSlot(live) — Esc 뒤 「중단하는 중…」 · 턴 끝까지 
     fireEvent.change(input(), { target: { value: 'hello' } })
     fireEvent.keyDown(input(), { key: 'Enter' })
     await flush()
-    expect(screen.getByText('Wait')).toBeTruthy()
+    expect(screen.getByText(t('chat.wait'))).toBeTruthy()
 
     fireEvent.keyDown(input(), { key: 'Escape' })
     await flush()
@@ -1810,7 +1810,7 @@ describe('RichSlot(live) — Esc 뒤 「중단하는 중…」 · 턴 끝까지 
 
     // Only the end arrives with no frame that opened the turn (the accumulator goes end → end) — it is lifted by the end event itself.
     act(() => captured.onChunk!(turnEnd(2)))
-    expect(screen.queryByText('Wait')).toBeNull()
+    expect(screen.queryByText(t('chat.wait'))).toBeNull()
     expect(interrupting()).toBe(false)
   })
 
@@ -1832,7 +1832,7 @@ describe('RichSlot(live) — Esc 뒤 「중단하는 중…」 · 턴 끝까지 
     })
     expect(interrupting()).toBe(false)
     expect(indicator()).toBeNull()
-    expect(screen.getByText('Wait')).toBeTruthy()
+    expect(screen.getByText(t('chat.wait'))).toBeTruthy()
     expect(fireEvent.keyDown(input(), { key: 'Escape' })).toBe(false)
     expect(clientMock.interruptAgent).toHaveBeenCalledTimes(2)
     expect(indicator()).not.toBeNull()
@@ -1851,7 +1851,7 @@ describe('RichSlot(live) — Esc 뒤 「중단하는 중…」 · 턴 끝까지 
     expect(interrupting()).toBe(true)
 
     act(() => captured.onChunk!(queuedFrame(2, { kind: 'Queued', id: 'M', text: 'hello' })))
-    expect(screen.queryByText('Wait')).toBeNull()
+    expect(screen.queryByText(t('chat.wait'))).toBeNull()
     expect(interrupting()).toBe(false)
   })
 
@@ -1869,7 +1869,7 @@ describe('RichSlot(live) — Esc 뒤 「중단하는 중…」 · 턴 끝까지 
 
     await flush()
     expect(indicator()).toBeNull()
-    expect(screen.getByText('Wait')).toBeTruthy()
+    expect(screen.getByText(t('chat.wait'))).toBeTruthy()
     expect(warn).toHaveBeenCalled()
     fireEvent.keyDown(input(), { key: 'Escape' })
     expect(clientMock.interruptAgent).toHaveBeenCalledTimes(2)
@@ -2017,7 +2017,7 @@ describe('RichSlot(live) — Esc 뒤 「중단하는 중…」 · 턴 끝까지 
       captured.onChunk!(delta(0, 'new incarnation'))
     })
     expect(interrupting()).toBe(false)
-    expect(screen.getByText('Wait')).toBeTruthy()
+    expect(screen.getByText(t('chat.wait'))).toBeTruthy()
     fireEvent.keyDown(input(), { key: 'Escape' })
     expect(clientMock.interruptAgent).toHaveBeenCalledTimes(2)
   })
@@ -2218,22 +2218,22 @@ describe('RichSlot(live) — 도구 묶음 접착(ADR-0239)', () => {
     await flush()
     act(() => captured.onChunk!(toolCallFrame(0, 'c1')))
     act(() => captured.onChunk!(turnEndFrame(1)))
-    expect(screen.queryByText('Wait')).toBeNull()
+    expect(screen.queryByText(t('chat.wait'))).toBeNull()
 
     const input = screen.getByPlaceholderText(/메시지 입력/)
     fireEvent.change(input, { target: { value: 'next' } })
     fireEvent.keyDown(input, { key: 'Enter' })
     await flush()
-    expect(screen.getByText('Wait')).toBeTruthy()
+    expect(screen.getByText(t('chat.wait'))).toBeTruthy()
 
     act(() => captured.onChunk!(tag1(2, JSON.stringify({ type: 'ToolResult', id: 'c1', outcome: 'Failed' }))))
-    expect(screen.getByText('Wait')).toBeTruthy()
+    expect(screen.getByText(t('chat.wait'))).toBeTruthy()
     expect(document.querySelector('[data-tool-mark="failed"]')).not.toBeNull()
 
     // First real reply — awaiting is released and the indicator is held up by the open turn. The turn boundary turns it off (if awaiting were stuck it would not go off).
     act(() => captured.onChunk!(tag1(3, JSON.stringify({ type: 'TextDelta', text: 'answer' }))))
-    expect(screen.getByText('Wait')).toBeTruthy()
+    expect(screen.getByText(t('chat.wait'))).toBeTruthy()
     act(() => captured.onChunk!(turnEndFrame(4)))
-    expect(screen.queryByText('Wait')).toBeNull()
+    expect(screen.queryByText(t('chat.wait'))).toBeNull()
   })
 })

@@ -1,11 +1,10 @@
 // usageFormat — numbers and phrasing of the usage slot (the pure-computation share of the 「프론트 표시」 (frontend display) rows of TRD S21 usage-limit-slot §4).
 
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { UsageWindow } from '../../../crates/engram-dashboard-protocol/bindings/UsageWindow'
 import {
   STALE_AFTER_SECS,
-  USAGE_LOCALE,
   elapsedSecs,
   formatAge,
   formatClock,
@@ -154,7 +153,7 @@ describe('시간 문구', () => {
   })
 
   it('시각은 Intl 로캘 포맷(R28) — 24시간 「HH:MM」', () => {
-    const clock = new Intl.DateTimeFormat(USAGE_LOCALE, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
+    const clock = new Intl.DateTimeFormat('ko-KR', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
     expect(formatClock(NOW)).toBe(clock.format(new Date(NOW * 1000)))
   })
 })
@@ -298,5 +297,36 @@ describe('상태 문장', () => {
       '조회 실패',
     )
     expect(stateHead({ kind: 'Rejected', retry_in_secs: 600, detail: null }, 0)).toBe('거절됨 — 10분 뒤')
+  })
+})
+
+// ADR-0373: the clock formatter follows the UI language — made per language when used, never once at module load. The
+//   24-hour 「HH:MM」 text is the same in both locales, so the test reads the locale each formatter is made with.
+describe('clock — locale of the UI language', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.resetModules()
+  })
+
+  it('formatClock / formatResetAt build their formatter in the current language, after a switch too', async () => {
+    vi.resetModules()
+    const Real = Intl.DateTimeFormat
+    const made = vi.spyOn(Intl, 'DateTimeFormat').mockImplementation(function (
+      ...args: ConstructorParameters<typeof Intl.DateTimeFormat>
+    ) {
+      return new Real(...args)
+    } as typeof Intl.DateTimeFormat)
+    const i18n = await import('../../i18n')
+    const fresh = await import('./usageFormat')
+    i18n.setLanguage('ko')
+    expect(made).not.toHaveBeenCalled()
+
+    fresh.formatClock(NOW)
+    expect(made.mock.calls.map(c => c[0])).toEqual(['ko-KR'])
+
+    i18n.setLanguage('en')
+    fresh.formatResetAt(NOW, NOW)
+    fresh.formatClock(NOW)
+    expect(made.mock.calls.map(c => c[0])).toEqual(['ko-KR', 'en-US'])
   })
 })

@@ -10,6 +10,7 @@ import type { CSSProperties, SyntheticEvent } from 'react'
 import { fireAndForget } from '../../commands/dispatch'
 import type { CommandArgs } from '../../commands/registry'
 import type { ResolvedSlotMenuItem, SlotMenuCtx } from '../../commands/slotMenu'
+import { useLanguage } from '../../i18n/react'
 
 /** 메뉴가 창 테두리에 딱 붙지 않게. */
 const MENU_MARGIN = 4
@@ -88,6 +89,8 @@ interface SlotContextMenuProps {
 export default function SlotContextMenu({ x, y, items, ctx, onClose }: SlotContextMenuProps) {
   const ref = useRef<HTMLDivElement>(null)
   const [pos, setPos] = useState<{ top: number; left: number }>({ top: y, left: x })
+  // ADR-0373: a language switch changes the titles and so the menu size — measure again.
+  const lang = useLanguage()
 
   // ★페인트 전 위치 보정(Bug1)★: useLayoutEffect 라 브라우저 페인트 전에 반영돼 시각적 점프를 최소화한다
   //   (측정엔 마운트가 필요하므로 최대 1프레임 재배치는 감수 — 지시서 허용 범위).
@@ -98,7 +101,7 @@ export default function SlotContextMenu({ x, y, items, ctx, onClose }: SlotConte
     // deps 에 items.length 포함(Codex 리뷰 LOW): 메뉴가 같은 x/y 로 열린 채 항목 수가 바뀌면(외부 콘텐츠
     //   변경) 높이가 달라져 재측정이 필요하다. items 는 매 렌더 새 배열 참조라 length 로 안정 트리거(내용만
     //   바뀌고 개수 동일하면 높이 거의 불변 → 무시 가능).
-  }, [x, y, items.length])
+  }, [x, y, items.length, lang])
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -216,6 +219,8 @@ function MenuRow({ item, ctx, onClose }: { item: ResolvedSlotMenuItem; ctx: Slot
   const flyoutRef = useRef<HTMLDivElement>(null)
   const [open, setOpen] = useState(false)
   const [flyoutPos, setFlyoutPos] = useState<{ top: number; left: number } | null>(null)
+  // ADR-0373: the flyout's size follows its titles' language — measure again on a switch.
+  const lang = useLanguage()
 
   useLayoutEffect(() => {
     if (!isContainer || !open || !rowRef.current || !flyoutRef.current) return
@@ -224,7 +229,7 @@ function MenuRow({ item, ctx, onClose }: { item: ResolvedSlotMenuItem; ctx: Slot
     setFlyoutPos(
       flyoutPosition(anchor.left, anchor.right, anchor.top, fly.width, fly.height, window.innerWidth, window.innerHeight),
     )
-  }, [isContainer, open])
+  }, [isContainer, open, lang])
 
   if (!isContainer) return <LeafRow item={item} ctx={ctx} onClose={onClose} />
 

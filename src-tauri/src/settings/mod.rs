@@ -37,6 +37,11 @@ pub use store::SettingsFiles;
 /// ([`SettingsEvents::theme_default_changed`]).
 pub const THEME_DEFAULT: &str = "theme.default";
 
+/// The UI language (`en` | `ko`) — when this key changes, the shell relabels its own text: automatic tab names · OS window titles ·
+/// the tray ([`SettingsEvents::ui_language_changed`]).
+// ADR-0372
+pub const UI_LANGUAGE: &str = "ui.language";
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SettingsError {
     /// An unknown key, or a prefix with no matching key at all.
@@ -522,6 +527,16 @@ pub trait SettingsEvents: Send + Sync {
     /// locks★ — the push takes the theme gate → state lock, so holding another lock here would become the place
     /// where a cycle arises.
     fn theme_default_changed(&self);
+    /// The changed keys include [`UI_LANGUAGE`] — once, after [`Self::changed`] of the same write and after
+    /// [`Self::theme_default_changed`] if that is called too. ★Called while holding none of the service's locks★, like
+    /// [`Self::theme_default_changed`]. It does not carry the value — the implementation reads the current effective value, so hooks
+    /// of two writes that run in the reverse order still end on the last stored value.
+    ///
+    /// ★Never called on the main thread★ — its callers (the `settings_set` · `settings_reset` commands and the bus verbs) run on the
+    /// blocking pool. The production implementation does not wait for the main thread either: it posts the tray relabel there and
+    /// returns, so the write's reply is not held by a busy main thread.
+    // ADR-0373
+    fn ui_language_changed(&self);
 }
 
 /// [`SettingsService::set`] + notification — the write that the human path (Tauri command) and the LLM path (bus command) both call.
@@ -552,6 +567,9 @@ pub fn set_and_notify(
     if outcome.changed && outcome.key == THEME_DEFAULT {
         events.theme_default_changed();
     }
+    if outcome.changed && outcome.key == UI_LANGUAGE {
+        events.ui_language_changed();
+    }
     Ok(outcome)
 }
 
@@ -572,6 +590,9 @@ pub fn reset_and_notify(
     })?;
     if outcome.changed.iter().any(|item| item.key == THEME_DEFAULT) {
         events.theme_default_changed();
+    }
+    if outcome.changed.iter().any(|item| item.key == UI_LANGUAGE) {
+        events.ui_language_changed();
     }
     Ok(outcome)
 }

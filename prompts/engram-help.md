@@ -213,9 +213,10 @@ from 이 없는 <notice> 는 팀원이 아니라 중개 데몬이 보낸 것이�
   {tool} settings.schema [--key <키|접두>]
       키마다 kind · default · choices · min · max · description. 어떤 키가 있고 무엇을 받는지는 여기서 본다
 
-key 는 정확한 키(theme.default)이거나 점으로 끝나는 접두(chat.style.)다. 키는 두 무리다.
+key 는 정확한 키(theme.default)이거나 점으로 끝나는 접두(chat.style.)다. 키는 세 무리다.
 
   theme.default    창별 테마가 없는 창의 테마. dark · light · e-ink 중 하나이고 기본은 dark. 바꾸면 그 창들이 바로 바뀐다
+  ui.language      화면(UI) 언어. en · ko 중 하나이고 기본은 en. 바꾸면 모든 창 · 트레이 · 탭 이름이 바로 바뀐다. 로그 · LLM 용 문구는 바뀌지 않는다
   chat.style.*     챗 화면의 글자 크기 · 줄 높이 · 여백 11개. 임시 이름이라 챗 화면을 다시 짜면 바뀌거나 없어진다
 
 값은 언제나 문자열 하나이고 받는 꼴은 kind 가 정한다. 답은 정규형으로 온다(E-INK → e-ink, 15.0PX → 15px).

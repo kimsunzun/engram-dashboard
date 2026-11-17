@@ -1,18 +1,15 @@
-// ADR-0069: UI 문자열 중앙화 — 네임스페이스드 `key → 한국어 문자열` 테이블(단일 언어).
+// ADR-0372: the Korean UI string table — a translation of `en.ts`, which is the source of keys and placeholders.
 //
-// ★역할★: 사용자 노출 UI 문자열의 단일 소스(command 제목·우클릭 메뉴 라벨·컴포넌트 텍스트·aria-label·
-//   기본 탭명·빈상태 등). drift(aria-label ↔ 표시 텍스트 불일치) 방지 + §5(LLM 이 라벨을 한 곳에서 읽기/수정)
-//   + 튜토리얼 문자열 소스. 나중 로컬화 = `t()` 백엔드를 locale-aware 로 교체(이 테이블이 그 base).
-//
-// ★시드 전용(이 커밋)★: 인프라 형태를 증명하는 대표 엔트리만 담는다. 기존 ~100개 인라인 문자열의
-//   실제 마이그레이션은 후속 커밋(command → 컴포넌트 점진). 여기 나열된 것이 전부가 아니다.
-//
-// ★네임스페이스 = UI 도메인★: 도메인별 1단 그룹(tab/slot/agent/preset/common …).
+// Same keys as `en` and, per key, the same `{word}` placeholder set — checked at compile time by the `satisfies` line
+//   below (a missing key, an extra key or a different placeholder set fails `tsc`). A label meant to stay English in Korean
+//   mode keeps its English text here (ADR-0372).
+// `slot.foreignContent` is read as source text by the shell test `foreign_word_is_the_one_the_frontend_shows`
+//   (`src-tauri/src/layout/tab_name.rs`): keep the file path and the one-line form `foreignContent: '…'`.
 
-/**
- * `as const` 로 값을 리터럴 타입으로 고정한다 — index.ts 가 placeholder 유무를 값 리터럴에서 추론해
- * params 타입을 만든다(값을 넓은 `string` 으로 두면 그 추론이 불가능하므로 `as const` 는 필수).
- */
+import { deepFreeze } from './deepFreeze'
+import type { Translation } from './index'
+
+/** `as const` keeps every value a literal type — the placeholder-set check against `en` reads the value literals. */
 export const ko = {
   tab: {
     create: '새 탭',
@@ -250,6 +247,13 @@ export const ko = {
     //   되면 그 결과도 이 문구를 쓴다.
     toolRefusedReason: '대시보드가 승인 요청을 처리하지 않아 실행되지 않음',
     toolDeclinedReason: '실행되지 않음',
+    errorTitle: '오류',
+    toolErrorBadge: '오류',
+    toolInput: '입력',
+    toolOutput: '출력',
+    toolNoArgs: '인수',
+    wait: 'Wait',
+    droppedOutput: '이 출력 사건을 싣지 못했습니다',
   },
   /**
    * 비정상 종료 뒤 「복원할까요?」 모달과 상태 파일 알림(TRD S21-storage §6-7). 문장이 주장하는 것은 셸의 계약
@@ -322,19 +326,10 @@ export const ko = {
     copy: '복사',
     codeCopy: '코드 복사',
     contentPrivate: '내용 비공개',
+    noPath: '(경로 없음)',
   },
 } as const
 
-export type KoTable = typeof ko
+ko satisfies Translation<typeof ko>
 
-// ★단일 소스 무결성(FIX E)★: `as const` 는 컴파일 타임 readonly 일 뿐 — JS 소비자(또는 역직렬화 경계)는
-//   런타임에 `ko.tab.close = ...` 로 변조해 t() 백엔드를 오염시킬 수 있다. deep-freeze 로 런타임에도 잠근다.
-//   (타입 추론은 위 `as const` 가 계속 담당 — freeze 는 값만 동결하고 타입엔 영향 없다.)
-function deepFreeze<T>(obj: T): T {
-  if (obj && typeof obj === 'object') {
-    for (const value of Object.values(obj)) deepFreeze(value)
-    Object.freeze(obj)
-  }
-  return obj
-}
 deepFreeze(ko)
