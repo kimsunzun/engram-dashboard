@@ -10,7 +10,7 @@ ADR-0349 put i18next behind `t()` with `ko.ts` as the only, typed source, Korean
 - `en.ts` is the typed source of keys and placeholders. `ko.ts` stays, with exactly the same keys and placeholder sets, enforced at compile time. A label meant to stay English in Korean mode keeps its English text in `ko.ts` (status labels such as `Wait`, user 2026-11-17).
 - One settings key selects the UI language: values `en` | `ko`, default `en`. It is read and changed only through the existing LLM settings commands; no new command and no UI control for now.
 - A change applies immediately, with no restart: the React UI in every window, the slot right-click menu, the tray menu, the refusal dialog (when shown), auto tab names and OS window titles. Component state is kept.
-- The Rust shell's visible strings are in scope and follow the same key, in both languages.
+- The Rust shell's visible strings are in scope and follow the same key, in both languages. The shell keeps its own small en/ko table (it does not read the frontend tables), which replaces ADR-0301 decision 2's plan to merge the shell word table into the web i18n.
 - Unchanged from ADR-0349: i18next is the lookup backend behind `t()`; the public `t()` signature stays; only `src/i18n/` imports i18next.
 
 ## 거부한 대안
@@ -28,5 +28,5 @@ ADR-0349 put i18next behind `t()` with `ko.ts` as the only, typed source, Korean
 - A new UI string is added to `en.ts` and `ko.ts` together; a key only in `ko.ts` (e.g. from a branch made before this change) fails the type check.
 - No code keeps a translated string across a language change: titles and labels are resolved when shown, and stored state holds keys or raw values, not translated text.
 - State files must not depend on the UI language: an auto tab name saved in either language, or in today's Korean, is still recognized as auto.
-- Logs, thrown error text and LLM-facing text are not UI strings and do not follow this key.
+- Logs, thrown error text and LLM-facing text are not UI strings and do not follow this key. Known exceptions until the topic that makes LLM-facing text English-only: `window.__engramCmd.list()` titles, the `connection.status` reply text and `layout.rows` `tab_name` follow the UI language.
 - The settings key's name and values are an LLM-facing contract once shipped.
