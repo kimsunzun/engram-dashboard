@@ -1,7 +1,7 @@
 # ADR-0345: Reconnect action sits on the disconnected band, not a popup, so the app stays operable while disconnected
 
-- 상태: 확정 (2026-11-05, 근거: 사용자 결정 2026-11-05 「재연결 버튼이 있어야지」 · 「일단 음.. 띠에두자. 연결안되도 클라는 조작되게.」 + 조사 `docs/research/reconnect-give-up-ui-2026-11-05.md` (light) · `docs/research/banner-action-buttons-2026-11-05.md` (light)) · 부분 폐기 by ADR-0346 (결정 4 재시도 3회로 내림)
-- 관련: Amends ADR-0180 (결정 2 예산 소진 팝업 자격과 결정 7 다시 연결 팝업) · ADR-0344 (same shape — one action button on the band) · ADR-0180 결정 4 (count 3 rests on this button) · ADR-0180 결정 8 (per-connection reconnect on the band — kept) · ADR-0342 (version mismatch on the band) · `src/components/layout/ConnectionNotice.tsx` · `src-tauri/src/daemon_client/connection.rs` (`MAX_RECONNECT_ATTEMPTS`) · TRD `docs/process/S21-crate-boundaries/trd-3-transport.md` D14 · §6-2 U5 · step-log S21 · Amended by ADR-0346 (결정 4 재시도 3회로 내림)
+- 상태: 확정 (2026-11-05, basis: user decision 2026-11-05 「재연결 버튼이 있어야지」 · 「일단 음.. 띠에두자. 연결안되도 클라는 조작되게.」 + survey `docs/research/reconnect-give-up-ui-2026-11-05.md` (light) · `docs/research/banner-action-buttons-2026-11-05.md` (light)) · 부분 폐기 by ADR-0346 (decision 4: retries lowered to 3)
+- 관련: Amends ADR-0180 (decision 2: eligibility of the budget-exhausted popup; decision 7: the reconnect popup) · ADR-0344 (same shape — one action button on the band) · ADR-0180 decision 4 (count 3 rests on this button) · ADR-0180 decision 8 (per-connection reconnect on the band — kept) · ADR-0342 (version mismatch on the band) · `src/components/layout/ConnectionNotice.tsx` · `src-tauri/src/daemon_client/connection.rs` (`MAX_RECONNECT_ATTEMPTS`) · TRD `docs/process/S21-crate-boundaries/trd-3-transport.md` D14 · §6-2 U5 · step-log S21 · Amended by ADR-0346 (decision 4: retries lowered to 3)
 
 ## 맥락
 
@@ -20,8 +20,8 @@ The transport rewrite (stage 3-2) now produces `GaveUp(BudgetExhausted)` from th
 
 ## 거부한 대안
 
-- **Popup with the button (ADR-0180 decision 7 as written)** — a popup covers the app while disconnected; the user wants the client operable without a connection. It would also need a new reusable popup component (none exists — ADR-0180 맥락). 강도: 약함 — 사용자 직접 기각.
-- **No button; keep today's permanent Down band (restart the app)** — the user rejected it outright (「재연결 버튼이 있어야지」). It also leaves ADR-0180 decision 4's count of 3 meaning only "give up sooner" (ADR-0180 decision 7). 강도: 약함 — 사용자 직접 기각.
+- **Popup with the button (ADR-0180 decision 7 as written)** — a popup covers the app while disconnected; the user wants the client operable without a connection. It would also need a new reusable popup component (none exists — ADR-0180 Context). Strength: weak — rejected directly by the user.
+- **No button; keep today's permanent Down band (restart the app)** — the user rejected it outright (「재연결 버튼이 있어야지」). It also leaves ADR-0180 decision 4's count of 3 meaning only "give up sooner" (ADR-0180 decision 7). Strength: weak — rejected directly by the user.
 
 ## 근거
 
@@ -31,6 +31,6 @@ The transport rewrite (stage 3-2) now produces `GaveUp(BudgetExhausted)` from th
 ## 영향 / 불변식
 
 - **The band shows at most one action at a time** (ADR-0344): stop (version mismatch, daemon older than the app) or reconnect (budget exhausted) — the two states do not overlap.
-- **Change the count everywhere it lives, together with the button:** `connection.rs` `MAX_RECONNECT_ATTEMPTS` and the 「5회」 prose in `src/api/agentClient.ts` and `src/api/daemonControl.ts` (ADR-0180 영향; `src/api/wsTransport.ts` is the non-production direct path).
+- **Change the count everywhere it lives, together with the button:** `connection.rs` `MAX_RECONNECT_ATTEMPTS` and the 「5회」 prose in `src/api/agentClient.ts` and `src/api/daemonControl.ts` (ADR-0180 Impact; `src/api/wsTransport.ts` is the non-production direct path).
 - **Landing unit:** proposed for stage 3-2 U5 alongside ADR-0344's button (same band, same files); the TRD records the final unit.
 - Main's inference, not a decision: with this ADR and ADR-0342, no connection event remains popup-eligible under ADR-0180 decision 2, so decision 8's "popup only when every daemon is lost" has nothing to judge until a new popup case appears.

@@ -1,6 +1,6 @@
 # Feedback and rapid repeated presses after pressing interrupt — peer precedents (light)
 
-- 상태: Research complete (light · no adversarial review) · decision = ADR-0244 (2026-09-28 · A adopted) — the choice this research supported was the re-examination of TRD `docs/process/S21-chat-ux/trd.md` §3-2 「낙관 상태를 바꾸지 않는다」 (§11 ⑬).
+- Status: Research complete (light · no adversarial review) · decision = ADR-0244 (2026-09-28 · A adopted) — the choice this research supported was the re-examination of TRD `docs/process/S21-chat-ux/trd.md` §3-2 「낙관 상태를 바꾸지 않는다」 (§11 ⑬).
 - Method: 1 collector (reading local clone sources + public docs) · main spot-checked the key three (paseo · vibe-kanban · t3code) against the sources.
 - Date: 2026-09-28
 - Confidence legend: certain · likely · uncertain

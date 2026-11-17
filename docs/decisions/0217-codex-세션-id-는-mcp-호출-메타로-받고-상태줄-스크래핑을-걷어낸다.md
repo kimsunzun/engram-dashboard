@@ -5,7 +5,7 @@
 
 ## 맥락
 
-codex issues its own thread id by itself (ADR-0185), and terminal mode has no channel through which it could tell us that value (ADR-0208 맥락). ADR-0216 chose the **TUI status line** (`-c tui.status_line=['thread-id']`) as that channel, and the recovery itself does actually work.
+codex issues its own thread id by itself (ADR-0185), and terminal mode has no channel through which it could tell us that value (ADR-0208 Context). ADR-0216 chose the **TUI status line** (`-c tui.status_line=['thread-id']`) as that channel, and the recovery itself does actually work.
 
 ★**The price differed from the premise on which it was approved**★ — the user approved it understanding it as 「정보가 한 번 뜨고 사라진다」 (the information shows up once and disappears), but the status line is **a resident single line redrawn on every frame**. Recovery is needed once per incarnation, yet for that one time a line of the screen is given up for the whole session. The user confirmed this mismatch of premise and decided to choose the channel again (user decision 2026-09-21).
 

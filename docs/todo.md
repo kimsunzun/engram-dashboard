@@ -5,7 +5,7 @@
 **Four rules**
 
 1. One to three lines per item. When it grows longer, promote it to `todo/<이름>.md` and leave only one line plus a pointer here.
-2. **Always write "왜 지금 안 하나" (why not now).** Without it, the next reader cannot judge and the item just piles up.
+2. **Always write "why not now".** Without it, the next reader cannot judge and the item just piles up.
 3. ★When resolved, **delete it**★. Decision records are append-only, but this is a living list, and it stays short only if resolved items are removed.
    - **When deleting, delete the detail file under `todo/` too.** If you delete only the index line, orphans pile up in the folder.
    - ★**Before deleting, verify that the content was actually moved into its canonical home**★ — the destination differs per item (a decision goes to `decisions/`, when/what goes to the commit message (`S<n>:` title) + the work folder's `README.md`, a code-sync convention goes to `reference/`). Delete without moving it and the item survives nowhere and evaporates. 「확인만 됨」 (observed only) items are not *resolved*; a **judgment is made** on them, so the time to delete is when that judgment is recorded as an ADR.
@@ -17,10 +17,10 @@ Both are deleted when resolved — `tracking.md` keeps only open T- items, and o
 
 **Four status values**
 
-- **Ready to start (착수 가능)** — anyone with free hands may pick it up.
-- **Waiting for trigger (트리거 대기)** — opened only when a condition arrives.
-- **Owned (소유됨)** — someone holds it right now.
-- **Observed only (확인만 됨)** — only observed; judgment deferred.
+- **Ready to start** — anyone with free hands may pick it up.
+- **Waiting for trigger** — opened only when a condition arrives.
+- **Owned** — someone holds it right now.
+- **Observed only** — only observed; judgment deferred.
 
 **Work size — there is no fixed standard; whoever picks it up judges again**
 

@@ -11,15 +11,15 @@ The B3 concurrency review raised the risk of that gap (not measured). If the use
 Peer research (light — the research document above): 4 of 5 GUI peers change the screen the moment it is pressed, and among them paseo · vibe-kanban · cline ignore a re-press or block the button while stopping. The terminal UIs (codex TUI · Claude Code) have no immediate indicator. t3code attaches a turn id to every interrupt, but our claude interrupt line has no turn-id field, so that method cannot be used (TRD §3-4 residual race).
 
 ## 결정
-Notation — **[사용자]** = a decision the user answered · **[메인]** = an orchestrator decision (delegated · can be reversed).
+Notation — **[User]** = a decision the user answered · **[Main]** = an orchestrator decision (delegated · can be reversed).
 
 The user's original words (2026-09-28, after the main agent put up A 「즉시 표시 + 무시」 · B 「표시 없이 연타만 무시」 · C 「그대로 둔다」 together with the peer research): 「ㅇㅇ 중단하는중 나오고 그동안 esc 무시.」
 
-1. **Pressing the Esc interrupt immediately shows 「중단하는 중…」 and ignores Esc until that agent stops** [사용자 — A · paseo's shape].
-2. **The backend does not change — the place that blocks is the frontend** [메인]. The earlier-proposed 「턴마다 끊기 한 번(`TurnGate` 의 `sent` 표식)」 is replaced by this decision. B3 stays as is.
-3. **This indicator means 「멈춰 달라고 했다」, not 「멈췄다」** [메인]. TRD §3-2's 「낙관 상태를 바꾸지 않는다」 is reversed **only for the indicator** — that the turn actually stopped is still announced by the turn-end event (interrupt row · interrupt marker row — ADR-0243).
+1. **Pressing the Esc interrupt immediately shows 「중단하는 중…」 and ignores Esc until that agent stops** [User — A · paseo's shape].
+2. **The backend does not change — the place that blocks is the frontend** [Main]. The earlier-proposed 「턴마다 끊기 한 번(`TurnGate` 의 `sent` 표식)」 is replaced by this decision. B3 stays as is.
+3. **This indicator means 「멈춰 달라고 했다」, not 「멈췄다」** [Main]. TRD §3-2's 「낙관 상태를 바꾸지 않는다」 is reversed **only for the indicator** — that the turn actually stopped is still announced by the turn-end event (interrupt row · interrupt marker row — ADR-0243).
 
-Implementation details [메인]:
+Implementation details [Main]:
 
 - **a. One small 「끊는 중」 state per agent** (`src/store/interruptStore.ts` — one pending request per agent + the number of that agent's chat views mounted in this window). ★Each window has its own★ — a pop-out window does not see another window's state.
   - **Set** — set **synchronously in the same tick** in which the window command `agent.interrupt` sends (before the reply · frames). So a human's Esc and an LLM calling the window command share one state (CLAUDE.md 「LLM-우선 제어」).

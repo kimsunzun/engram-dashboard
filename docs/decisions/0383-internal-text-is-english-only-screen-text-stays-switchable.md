@@ -1,6 +1,6 @@
 # ADR-0383: Internal text is English-only; screen text stays switchable
 
-- 상태: 확정 (2026-11-18, 근거: user rule 2026-11-18 + S38 PRD/TRD review PASS)
+- 상태: 확정 (2026-11-18, basis: user rule 2026-11-18 + S38 PRD/TRD review PASS)
 - 관련: ADR-0372 · ADR-0373 · ADR-0342 · `docs/process/S38-english-internal-text/trd.md`
 
 ## 맥락

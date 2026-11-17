@@ -1,7 +1,7 @@
 # ADR-0005: finalize exactly once (pump alone)
 
 - 상태: 확정 (S3, S10 moved into OutputCore)
-- 관련: CLAUDE.md 핵심 불변식 · `output_core.rs::{finalized,finish}`
+- 관련: CLAUDE.md core invariants · `output_core.rs::{finalized,finish}`
 
 ## 맥락
 The terminal transition and notification can arise from several paths (kill, natural exit, fallback), so there is a risk of duplicates and races.

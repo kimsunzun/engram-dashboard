@@ -13,7 +13,7 @@ How it was found: after a user report that the guidance text of the empty state 
 
 1. **Delete the reset block.** Tailwind preflight already does the same job, and it is inside `@layer base`, so it loses to utilities — our block was a duplicate that was not needed.
 2. With this, the places that used spacing utilities (7 source files, about 25 tokens) are actually applied for the first time — the left and right indentation of chat rows, menu margins and so on come alive together.
-3. **Do not put a global `*` padding·margin reset outside a layer again.** A unit test that keeps this prohibition is added (§영향).
+3. **Do not put a global `*` padding·margin reset outside a layer again.** A unit test that keeps this prohibition is added (§Impact).
 
 ## 거부한 대안
 
@@ -24,7 +24,7 @@ How it was found: after a user report that the guidance text of the empty state 
 ## 근거
 
 - **Measured (2026-08-18)** — in the running release build, the computed value of a `px-6` element was `0px` and the inline specification was `24px`. That is, the class is generated but loses in the cascade.
-- **User decision (2026-08-18)** — the user did not know the global rule existed, and after confirming chose the side of "그냥 푸는" (gloss: just releasing it).
+- **User decision (2026-08-18)** — the user did not know the global rule existed, and after confirming chose the side of 「그냥 푸는」 ("just releasing it").
 - **Preflight comparison (review measurement 2026-08-18)** — the ground for being allowed to delete is not a guess but was confirmed by opening the installed Tailwind file (the path and range in 「거부한 대안」 item 1 above).
 
 ## 영향 / 불변식

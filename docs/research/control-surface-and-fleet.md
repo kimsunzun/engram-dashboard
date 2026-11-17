@@ -133,7 +133,7 @@ The seams are already designed to be extension-friendly. Distinguishes what can 
   - **A per-folder pool** (boot in advance for each active folder instead of retargeting) is possible even with headless + needs no `/cd`. But it requires the premise that "working folders are predictable and few."
   - **Memory vs speed = the two ends of the same dial.** A warm pool = pay memory cost to gain speed / idle kill = sacrifice speed to gain memory. With claude.exe, both cannot be maxed.
 - Effective levers for fast spawn (instead of pooling): `--bare`(less boot via removing autoload) + a warm tier (do not kill hot agents). The fundamental way out = **API transport** (does not use claude.exe → agent = in-process task → the memory/speed dial itself disappears, §2 · candidate ADRs).
-- 관련: §1 ③ (headless limits) · §2 (fleet hosting) · §4 candidate ADRs.
+- Related: §1 ③ (headless limits) · §2 (fleet hosting) · §4 candidate ADRs.
 
 ## Sources
 - code.claude.com/docs: headless · cli-reference · sessions · permission-modes · hooks-guide · settings · agent-sdk/overview

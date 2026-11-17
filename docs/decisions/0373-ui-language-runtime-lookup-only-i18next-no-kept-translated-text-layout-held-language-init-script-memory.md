@@ -1,6 +1,6 @@
 # ADR-0373: UI language runtime — lookup-only i18next, no kept translated text, layout-held language, init-script language memory
 
-- 상태: 확정 (2026-11-17, 근거: S35 TRD edition 2.3, PRD+TRD deep review PASS on f7868b2a — main-agent design decisions)
+- 상태: 확정 (2026-11-17, basis: S35 TRD edition 2.3, PRD+TRD deep review PASS on f7868b2a — main-agent design decisions)
 - 관련: ADR-0372 (English source, Korean selectable, live switch) · ADR-0349 (i18next behind `t()`) · ADR-0301 (shell builds tab names; a write that changes an effective name bumps the version) · ADR-0265 (shell settings, theme pushed live) · `docs/process/S35-i18next-backend/trd.md` · `docs/reference/structure/i18n.md` · Amends ADR-0065 (container descriptor gets a required id and a lazy title)
 
 ## 맥락

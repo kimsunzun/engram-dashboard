@@ -1,6 +1,6 @@
 # Output subscription and size-reporting policy for hidden-tab terminals — industry survey
 
-- 상태: **확정 — user decision 2026-09-25: the PC keeps keep-alive (ADR-0056); the hidden-tab size problem is fixed with a guard 「잴 수 없는 크기는 보내지 않는다」 (never send a size that cannot be measured); mobile power saving (unsubscribe when hidden) is designed when the mobile client is built** · Date: 2026-09-25
+- Status: **confirmed — user decision 2026-09-25: the PC keeps keep-alive (ADR-0056); the hidden-tab size problem is fixed with a guard 「잴 수 없는 크기는 보내지 않는다」 (never send a size that cannot be measured); mobile power saving (unsubscribe when hidden) is designed when the mobile client is built** · Date: 2026-09-25
 - Method: medium (design-decision mode) · 2 collectors (lead, light) in parallel — A hidden-tab subscription policy · B size reporting while hidden · local clones (`I:\Engram_Workspace\opensource\`) first · main grounding (source-text cross-check) · one cross-family adversarial review (FIX — incorporated below).
 - Confidence: certain (independently cross-confirmed) · likely (single primary source) · uncertain (unchecked · knowledge-based).
 - Trigger: a hidden-tab terminal sends the PTY size right after subscribing without having been able to measure its size (`src/components/slot/TerminalSlot.tsx:304-305` — the other three send paths `:99-101` · `:285` · `:355` are skipped when hidden). The user's proposal 「숨은 탭은 구독하지 않다가 전환 때 구독」 (do not subscribe in a hidden tab, subscribe when switching to it) was checked against industry rules.

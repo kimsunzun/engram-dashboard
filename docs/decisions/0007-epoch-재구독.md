@@ -1,7 +1,7 @@
 # ADR-0007: Resubscribe on epoch map replacement
 
 - 상태: 확정 (S9 §18-d) · 부분 폐기 by ADR-0163 (the two clauses: epoch +1 increment on every map replacement and the resubscribe deps)
-- 관련: CLAUDE.md 핵심 불변식·프론트 통합 규칙 · `output_core.rs(epoch)` · `TerminalSlot.tsx` · Amended by ADR-0046 (frontend epoch authority clause: SubscribeAck alone → src-tauri decide_epoch as the first-stage filter + adopt the epoch of the filtered frame/marker — it left the [agentId, epoch] resubscribe principle as is at that time, but ADR-0163 later discarded that deps clause) · Amended by ADR-0163 (the two clauses: epoch +1 increment on every map replacement and the resubscribe deps)
+- 관련: CLAUDE.md core invariants·frontend integration rules · `output_core.rs(epoch)` · `TerminalSlot.tsx` · Amended by ADR-0046 (frontend epoch authority clause: SubscribeAck alone → src-tauri decide_epoch as the first-stage filter + adopt the epoch of the filtered frame/marker — it left the [agentId, epoch] resubscribe principle as is at that time, but ADR-0163 later discarded that deps clause) · Amended by ADR-0163 (the two clauses: epoch +1 increment on every map replacement and the resubscribe deps)
 
 ## 맥락
 On restart/fresh fallback, the session map is replaced **under the same AgentId**. If the frontend keeps the old subscription, it either never receives output from the new session or receives stale notifications from the old one.

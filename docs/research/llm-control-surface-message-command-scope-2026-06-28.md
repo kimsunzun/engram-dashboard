@@ -1,7 +1,7 @@
 # LLM control surface — message/command system: process & research scope (draft)
 
 **Status:** draft plan — awaiting owner approval. A scope document before research starts (prep for the preliminary survey).
-**Written by:** dashboard1 (worktree `engram-dashboard-a1`, branch wip/a1). Written in answer to the owner's "프로세스 짜봐" (draw up a process) request while the owner was away.
+**Written by:** dashboard1 (worktree `engram-dashboard-a1`, branch wip/a1). Written in answer to the owner's 「프로세스 짜봐」 (draw up a process) request while the owner was away.
 **Next action:** owner returns → reviews this scope → decides research intensity (`/research`) → option set → PRD decision.
 
 ## 1. Target scenario (the first milestone the owner described)
@@ -16,7 +16,7 @@ The LLM must be able to do the following **by command** (the human UI is seconda
 
 ## 2. Essence
 
-This is the first implementation of CLAUDE.md §5 **"LLM 제어 표면"** — gather the backend + all of the UI/layout into a **single intent command bus** that the LLM calls, with human clicks as a secondary input that shakes the same handle. Three pieces:
+This is the first implementation of CLAUDE.md §5 **"LLM control surface"** — gather the backend + all of the UI/layout into a **single intent command bus** that the LLM calls, with human clicks as a secondary input that shakes the same handle. Three pieces:
 - **Command bus** — the LLM calls layout split · slot placement · popup · agent spawn/placement.
 - **Message system** — communication between agents (scenario step 6).
 - **Layout control** — quadrants/popup/split (scenario steps 2·3·5).

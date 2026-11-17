@@ -1,7 +1,7 @@
 # ADR-0062: AgentList MVP status display = 5-glyph vocabulary / mapping to the current backend's 3 states
 
 - 상태: 확정 (2026-07-10, basis: pre-PRD user decision (5-glyph vocabulary) + the actual status enum confirmed by grounding) · Color decision partially amended by ADR-0075 (color allowed, e-ink neutralized) · 부분 폐기 by ADR-0168 (status display changed from characters to icons)
-- 관련: CLAUDE.md §5 · ADR-0005 (status notification split) · ADR-0002/0030 (capability) · `crates/engram-dashboard-core/src/agent/*` (AgentStatus enum) · `src/components/agent/AgentList.tsx` (statusGlyph) · step-log "에이전트 트리·프리셋" · Amended by ADR-0168 (status display changed from characters to icons)
+- 관련: CLAUDE.md §5 · ADR-0005 (status notification split) · ADR-0002/0030 (capability) · `crates/engram-dashboard-core/src/agent/*` (AgentStatus enum) · `src/components/agent/AgentList.tsx` (statusGlyph) · step-log "Agent tree·presets" · Amended by ADR-0168 (status display changed from characters to icons)
 
 ## 맥락
 

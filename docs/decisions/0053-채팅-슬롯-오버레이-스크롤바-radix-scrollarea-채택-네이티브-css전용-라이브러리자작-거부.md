@@ -1,7 +1,7 @@
 # ADR-0053: Chat slot overlay scrollbar = adopt Radix ScrollArea (native CSS, a dedicated library and a DIY build rejected)
 
 - 상태: 확정 (2026-07-07, basis: /research medium + Codex cross-family adversarial review + package.json measurement)
-- 관련: CLAUDE.md §기술스택(Tailwind+shadcn) · §5 LLM control · package.json:19 · src/components/ui/scroll-area.tsx (promoted app-wide 2026-07-12 — formerly slot/chat/ChatScrollArea.tsx) · RichSlot.tsx · ADR-0047·0051 · step-log S15
+- 관련: CLAUDE.md §Tech stack(Tailwind+shadcn) · §5 LLM control · package.json:19 · src/components/ui/scroll-area.tsx (promoted app-wide 2026-07-12 — formerly slot/chat/ChatScrollArea.tsx) · RichSlot.tsx · ADR-0047·0051 · step-log S15
 
 ## 맥락
 Five scrollbar requirements for the scroll area of the chat slot (structured/JSON output):

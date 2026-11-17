@@ -48,11 +48,11 @@ base · platform · command · messaging · transport · protocol ─▶ 워크�
 - **platform** — the OS layer leaf crate. Operational code that varies by OS (process · Job Object · launching · window · input · file lock) is placed only here.
 - **transport** — reusable transport lib (ADR-0177). The shell depends on it (`ws` feature) for its daemon link `daemon_client/link/` (stage 3 3-2 · ADR-0310); the shell's daemon connection runs on it in every build (driver = `daemon_client/connection.rs`). The daemon's accepting side runs on it too (`daemon/src/link/` — stage 3 3-3).
 
-## Runtime invariants (런타임 불변식)
+## Runtime invariants
 
 The 「리뷰」 column = what a reviewer checks in a change that touches that area. ★ = check for any agent·daemon runtime change, regardless of area.
 
-| # | Invariant | Review (리뷰) |
+| # | Invariant | Review |
 |---|---|---|
 | I1 | **kill causality (2 verbs):** `transport.shutdown()` (child.kill+wait → group owner `GroupOwner::terminate` → master drop) → `core.join_pump(5s)`. master drop → reader EOF → pump break → `core.finish`. The first line of `kill_agent` is `session.begin_retire()` — it only sets the retirement field and does not withdraw resources, so the causality above is unchanged. (ADR-0001 · ADR-0262) | kill · transport changes |
 | I2 | **finalize once:** `OutputCore.finalized.swap(AcqRel)` — terminal transition · notification exactly once (pump alone). (ADR-0005) | ★ |
@@ -66,7 +66,7 @@ The 「리뷰」 column = what a reviewer checks in a change that touches that a
 | I10 | **Registration order:** the sessions insert comes before the pump start — if reversed, a session that exits immediately is not reaped (the reaper test catches it). (ADR-0019) | spawn path changes |
 | I11 | **Session id persistence = one point, the first-submit latch, by compare-and-swap:** the backend session id is persisted to the profile only when the incarnation's first-submit latch commits (it is not an overwrite `observe_session_id`). Do not revive other record paths (issue at spawn and persist, etc.) — a 0-turn id would be persisted and the next activation would fail. Exception = claude `/clear` tracking. In codex JSON mode the link commits with `FirstTurnSink` from the echo of the peer's first user message (it is not persisted before the first turn). A save failure is recorded in the in-memory registry and marked dirty — the next successful save carries it. (ADR-0226 · ADR-0233 · ADR-0291) | session id · profile persistence changes |
 
-### Session restore · activation (세션 복원 · 활성화)
+### Session restore · activation
 
 - Restore relies on the single backend session id stored in the profile — who issues it is up to the backend (claude = we issue it with `--session-id` · codex = received from the thread creation response). (ADR-0008 · ADR-0185)
 - Activation is resume only. On failure it does not fall back to a new conversation; it ends in the observed exit state and records the failure in the profile. (ADR-0082 · ADR-0172)

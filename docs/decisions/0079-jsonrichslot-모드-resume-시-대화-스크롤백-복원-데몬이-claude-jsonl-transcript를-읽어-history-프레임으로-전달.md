@@ -1,7 +1,7 @@
 # ADR-0079: Restoring the conversation scrollback on JSON (RichSlot) mode resume — the daemon reads the Claude `.jsonl` and seeds the OutputCore buffer (single source · before the pump)
 
 - 상태: 확정 (2026-07-13, basis: /research OSS survey + Codex adversarial review + live CLI measurement)
-- 관련: ADR-0044 (json mode wiring, stream-json decoder) · ADR-0008 (session restore, controlled sid) · ADR-0007 (epoch resubscribe) · ADR-0046 (view-scoped replay, gen fence) · ADR-0049 (thinking) · ADR-0052 (user echo uuid dedup) · CLAUDE.md §5(LLM-우선 제어)·§1(OutputSink) · `backend/claude.rs` (decoder, build_spec) · `agent/output_core.rs` (Ring/replay) · `agent/manager.rs` (spawn_session) · step-log S(복원 UX)
+- 관련: ADR-0044 (json mode wiring, stream-json decoder) · ADR-0008 (session restore, controlled sid) · ADR-0007 (epoch resubscribe) · ADR-0046 (view-scoped replay, gen fence) · ADR-0049 (thinking) · ADR-0052 (user echo uuid dedup) · CLAUDE.md §5(LLM-first control)·§1(OutputSink) · `backend/claude.rs` (decoder, build_spec) · `agent/output_core.rs` (Ring/replay) · `agent/manager.rs` (spawn_session) · step-log S(restore UX)
 
 ## 맥락
 When a session is resumed in JSON (RichSlot) mode, the chat window comes up as a blank screen (new turns only). Two layers of cause (live measurement 2026-07-13, claude 2.1.170):

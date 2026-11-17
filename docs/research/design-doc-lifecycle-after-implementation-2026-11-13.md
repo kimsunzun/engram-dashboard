@@ -4,41 +4,41 @@
 - Method: `/engram-research` medium — two collectors (branch A: established proposal processes · branch B: AI-coding-agent spec workflows), main grounding (raw re-check of the load-bearing quotes marked ✔raw), codex review (see 「Review」).
 - Starts from: `documentation-architecture-research-2026-06-24.md` (design doc = "snapshot on approval"), which `docs/handbook/documentation-system.md` §3 adopted ("design/research become a snapshot after approval and freeze"). This report adds what that one did not cover: where deviations and hand-overs go, and the agent-workflow angle.
 - Trigger: S25 steps 7 and 17 — the doc pass after each step (adding 「as landed」 blocks to the child TRD, copying them into the parent TRD, step-log, ADR anchors) cost about as much review as the code (step 17: two doc-review rounds vs two code-review rounds).
-- Confidence legend: 확실 (two independent primary sources or raw-verified primary rule) · 가능성 높음 (one primary source, grounded) · 불확실.
+- Confidence legend: certain (two independent primary sources or raw-verified primary rule) · likely (one primary source, grounded) · uncertain.
 
 ## 1. Findings
 
-### 1-1. Proposal processes freeze the document once it is resolved — 확실
+### 1-1. Proposal processes freeze the document once it is resolved — certain
 - **Python PEP 1** ✔raw: "In general, PEPs are no longer substantially modified after they have reached the Accepted, Final, Rejected or Superseded state. Once resolution is reached, a PEP is considered a historical document rather than a living specification." (https://peps.python.org/pep-0001/)
 - **Rust RFCs** ✔raw: "In general, once accepted, RFCs should not be substantially changed. Only very minor changes should be submitted as amendments. More substantial changes should be new RFCs, with a note added to the original RFC." (https://github.com/rust-lang/rfcs/blob/master/README.md)
-- **Kubernetes KEPs** (collector-relayed): status `implemented` = "The KEP has been implemented and is no longer actively changed."; `replaced` points at the new KEP with `superseded-by`. (KEP-0000 process README) — 가능성 높음.
-- **ADRs** (collector-relayed): Fowler — "Once an ADR is accepted, it should never be reopened or changed - instead it should be superseded."; Nygard — reversed decisions are kept and marked superseded. — 가능성 높음 (matches this repo's ADR practice).
+- **Kubernetes KEPs** (collector-relayed): status `implemented` = "The KEP has been implemented and is no longer actively changed."; `replaced` points at the new KEP with `superseded-by`. (KEP-0000 process README) — likely.
+- **ADRs** (collector-relayed): Fowler — "Once an ADR is accepted, it should never be reopened or changed - instead it should be superseded."; Nygard — reversed decisions are kept and marked superseded. — likely (matches this repo's ADR practice).
 
-### 1-2. The middle ground: update during implementation, freeze at "final" — 가능성 높음
+### 1-2. The middle ground: update during implementation, freeze at "final" — likely
 - **PEP 1** ✔raw: "If changes based on implementation experience and user feedback are made to Standards track PEPs while in the Provisional or (with SC approval) Accepted state, they should be noted in the PEP, such that the PEP accurately describes the implementation at the point where it is marked Final." — changes are recorded while the PEP is Provisional/Accepted so that it is accurate when marked Final, after which it is historical. PEP 1 does not say the corrections are made in one pass at the end; doing them once per step is this repo's option (section 3), not PEP's rule.
 - **Google design docs (Malte Ubl)** ✔raw: "If the designed system hasn't shipped yet, then definitely update the doc. In practice we humans are bad at updating documents, and for other practical reasons changes are often isolated into new documents." (https://www.industrialempathy.com/posts/design-docs-at-google/)
-- **KEP template** (collector-relayed, paraphrase): one KEP per feature for its whole lifecycle, edited as details emerge, with an 「Implementation History」 section for milestones. — 불확실 on the exact rule.
+- **KEP template** (collector-relayed, paraphrase): one KEP per feature for its whole lifecycle, edited as details emerge, with an 「Implementation History」 section for milestones. — uncertain on the exact rule.
 
-### 1-3. The as-built truth lives somewhere else — 확실 for PEP, 가능성 높음 for Rust
+### 1-3. The as-built truth lives somewhere else — certain for PEP, likely for Rust
 - **PEP 1** ✔raw: "Formal documentation of the expected behavior should be maintained elsewhere, such as the Language Reference … the Library Reference … or the PyPA Specifications".
 - **Rust** (collector-relayed; the stabilization guide page did not open for main): stabilization needs "a complete PR to the Reference describing the feature", and the stabilization report lists "The main design decisions and deviations since the RFC was accepted". Every accepted RFC has a tracking issue (RFC README ✔raw: "Every accepted RFC has an associated issue tracking its implementation").
 - **Go** (collector-relayed): once accepted, "the issue is repurposed to track the work of implementing the proposal".
 
-### 1-4. Follow-ups are named sections or new documents — 가능성 높음
+### 1-4. Follow-ups are named sections or new documents — likely
 - Rust RFC template (collector-relayed): 「Unresolved questions」 ("What parts of the design do you expect to resolve through the implementation of this feature before stabilization?") and 「Future possibilities」.
 - Substantial later change = a new RFC/KEP/ADR that points back (1-1).
 
-### 1-5. AI-coding-agent workflows: no settled practice; the reported failure is duplicated, repetitive spec text — 가능성 높음
+### 1-5. AI-coding-agent workflows: no settled practice; the reported failure is duplicated, repetitive spec text — likely
 - **Three levels** (Böckeler, martinfowler.com, 2025-10-15, collector-relayed): spec-first (spec discarded or left to drift after the task) · spec-anchored (kept and updated for evolution) · spec-as-source (only the spec is edited). She found Spec Kit's output "repetitive" and preferred "to review code than all these markdown files". An academic overview (arXiv 2602.00180) adds: spec-anchored "teams must commit to updating specs whenever behavior changes", kept aligned by tests derived from the spec; risks = specification rot, over-specification ("essentially becoming pseudo-code").
 - **Anthropic's long-running-agent harness** (2025-11-26, collector-relayed): a frozen feature list where agents may change only the `passes` field ("It is unacceptable to remove or edit tests…"), a progress file, and the git log; a fresh session reads "the git logs and progress files to get up to speed".
 - **Claude Code best practices** ✔raw: write the spec to `SPEC.md`, then "start a fresh session to build from it, so the build begins with a clean context and a written definition of done". CLAUDE.md should hold only what Claude cannot work out from the code (collector-relayed wording).
 - **Spec Kit** (vendor doc, collector-relayed) claims specs are the living source with code "continuously regenerated", and keeps plans "high-level and readable" with detail pushed to `implementation-details/`. **Kiro** (collector-relayed summary): specs "designed for continuous refinement", one spec per feature, "Sync Files" to reconcile tasks with work done.
-- **OpenSpec** ✔raw (https://github.com/Fission-AI/OpenSpec, `docs/editing-changes.md`, `docs/getting-started.md`) — a reconcile-then-archive workflow: each change has its own folder with delta specs; when the code is right and the spec stale, "Update the delta spec (and tasks, if relevant) to describe the behavior you actually shipped. The spec should match reality before you archive"; `/opsx:verify` lists where artifacts and code diverge; "at archive time, your specs become the truth of record"; on archive the change's specs merge into `specs/` ("The source of truth. These specs describe how your system currently behaves") and the change folder moves to `changes/archive/` for audit history. — 확실 (raw-read).
-- Apart from OpenSpec, no primary source read gives a dedicated "what actually landed" section — 불확실 (not a complete-corpus search).
+- **OpenSpec** ✔raw (https://github.com/Fission-AI/OpenSpec, `docs/editing-changes.md`, `docs/getting-started.md`) — a reconcile-then-archive workflow: each change has its own folder with delta specs; when the code is right and the spec stale, "Update the delta spec (and tasks, if relevant) to describe the behavior you actually shipped. The spec should match reality before you archive"; `/opsx:verify` lists where artifacts and code diverge; "at archive time, your specs become the truth of record"; on archive the change's specs merge into `specs/` ("The source of truth. These specs describe how your system currently behaves") and the change folder moves to `changes/archive/` for audit history. — certain (raw-read).
+- Apart from OpenSpec, no primary source read gives a dedicated "what actually landed" section — uncertain (not a complete-corpus search).
 
-### 1-6. Duplication — 가능성 높음
+### 1-6. Duplication — likely
 - arc42 tip 4-4 (collector-relayed): "Avoid redundancy, don't repeat information from views or concepts" — link instead. This repo's own rule already says the same: `documentation-system.md` §3 「SSoT — link, do not copy. Duplication = stale cost.」
-- None of the proposal processes states an explicit no-copy rule for design docs; they avoid it structurally (one proposal + one reference + one tracking issue). — 불확실 as an absence claim.
+- None of the proposal processes states an explicit no-copy rule for design docs; they avoid it structurally (one proposal + one reference + one tracking issue). — uncertain as an absence claim.
 
 ## 2. What this repo does today (fact, from the tree)
 - Child TRD per big step (e.g. `docs/process/S25-preset-library/trd-asset-library.md`) is written before coding, then after landing it gets 「as landed」 rewrites of its sections, a §12 hand-over list and a §13 review record.
