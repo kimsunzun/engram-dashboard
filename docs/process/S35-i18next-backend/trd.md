@@ -8,7 +8,7 @@
 
 Implements PRD R1–R11 / AC1–AC7 with the D1–D5 defaults: key `ui.language`; the root re-renders on a change (no `react-i18next`); frontend tests pinned to Korean; a small en/ko table inside the shell; the dropped-output placeholder translated in the frontend.
 
-English labels use sentence-style capitalization ("Close tab"), the Microsoft Writing Style Guide rule for button labels, menu items, dialog titles and tab labels (learn.microsoft.com/style-guide/capitalization). Placeholders keep the same `{word}` names as the Korean value. Status labels: see §10 (open — H1).
+English labels use sentence-style capitalization ("Close tab"), the Microsoft Writing Style Guide rule for button labels, menu items, dialog titles and tab labels (learn.microsoft.com/style-guide/capitalization). Placeholders keep the same `{word}` names as the Korean value. Status labels: only `Wait` keeps English text in `ko.ts`; see §10 H1.
 
 ## 2. Module boundary
 
@@ -121,7 +121,7 @@ Order: U1 first. Then U2 (frontend) and U3 (shell) in parallel — they touch no
 
 - User (PRD edition 2): English source, Korean selectable, one LLM-only key, default `en`, live switch, shell strings in scope, status labels English in `ko.ts`, D1–D5 defaults (ADR-0372).
 - Main: lookup-only i18next with our own interpolation (closes the 2026-11-08 hold H1 — user confirmed 「ㅇㅇ 그렇게 하면 될것같은데?」); boot language from the per-window memory, then `<html lang>` planted like `data-theme`; no process-global language in the shell, the layout's language in `ViewManager` and a version bump when an auto name changes; the hook serialized and reading the latest stored value; `is_word` over both languages as a seed filter (auto vs named stays `TabEntry.named`); lazy title thunks and container ids; untranslated inputs for every key, id and comparison baseline; date formatters follow the UI language.
-- Open — H1 (review 2026-11-17): which labels count as "status labels" kept English in `ko.ts`. Today's Korean values include `chat.interrupting` (중단하는 중…), `chat.toolGroupRunning` (진행 중…), `chat.toolDeclined` (거부됨), `connection.reconnecting` (연결 중…), `common.loading` (로딩 중…) and others. Main default: only the newly moved wait label (`Wait`) keeps English; the newly moved captions (`Error`, `In` / `Out`, `arguments`) are translated as PRD §2 says; existing Korean values stay Korean and are tuned later by editing `ko.ts`.
+- Closed — H1 (review 2026-11-17; user 2026-11-17 chose the main default: 「ㅇㅇ 그렇게 해. 나중에 이상하면 수정지시하면 어차피 테이블만 수정하면 되니」): which labels count as "status labels" kept English in `ko.ts`. Today's Korean values include `chat.interrupting` (중단하는 중…), `chat.toolGroupRunning` (진행 중…), `chat.toolDeclined` (거부됨), `connection.reconnecting` (연결 중…), `common.loading` (로딩 중…) and others. Main default: only the newly moved wait label (`Wait`) keeps English; the newly moved captions (`Error`, `In` / `Out`, `arguments`) are translated as PRD §2 says; existing Korean values stay Korean and are tuned later by editing `ko.ts`.
 
 ## 11. Risks
 
