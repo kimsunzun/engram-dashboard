@@ -1718,7 +1718,16 @@ mod tests {
             let values = LibraryValues {
                 registry: Arc::new(ProfileRegistry::new(Arc::new(NoProfiles))),
                 backends: setup.backends,
-                root: setup.root.then(|| base.join("lib")),
+                config: match setup.root {
+                    true => crate::config::LibraryConfig::usable(
+                        &base.join("state"),
+                        crate::config::RootSetting::Explicit(base.join("lib")),
+                    ),
+                    false => crate::config::LibraryConfig::missing(&base.join("state")),
+                },
+                default_root: base.join("default-library"),
+                daemon_id: "test-daemon".to_owned(),
+                root_generation_base: 7,
                 builtin_dir: setup.priming.map(|_| base.join("builtin")),
                 launch_root: base.join("launch"),
                 home: Some(base.join("home")),

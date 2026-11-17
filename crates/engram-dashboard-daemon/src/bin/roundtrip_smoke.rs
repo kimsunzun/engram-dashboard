@@ -115,7 +115,7 @@ use engram_dashboard_daemon::control::priming::mentions_mail_cli_surface;
 use engram_dashboard_daemon::control::registry::{BoundIdentity, ControlRegistry};
 use engram_dashboard_daemon::control::DaemonControlChannel;
 use engram_dashboard_daemon::messaging_host::messaging_for_manager;
-use engram_dashboard_daemon::{build_library_service, LibraryHost};
+use engram_dashboard_daemon::{build_library_service, LibraryHost, LibraryStart};
 use engram_dashboard_messaging::envelope::{DeliveryObservation, DeliveryObserver, Entrance};
 use engram_dashboard_platform::shell::console_command;
 use engram_dashboard_platform::spawn::{prepare_tree_root, TreeRoot};
@@ -211,6 +211,18 @@ fn under_root(value: &str, repo_root: &Path) -> PathBuf {
 /// The built-in folder of this run: `--builtin-dir` resolved by [`under_root`], unset = the repo `builtin\`.
 fn resolve_builtin_dir(selector: Option<&str>, repo_root: &Path) -> PathBuf {
     under_root(selector.unwrap_or("builtin"), repo_root)
+}
+
+/// What the run's library service starts with: `library.json` read from `<data_dir>\state` (none there — the root
+/// stays unset; the run reads the built-ins only and runs no first start), the default place `<data_dir>\library`, a
+/// run-only identity and a root generation base drawn as production draws it.
+fn library_start(data_dir: &Path) -> LibraryStart {
+    LibraryStart {
+        config: engram_dashboard_asset_library::config::load(&data_dir.join("state")),
+        default_root: data_dir.join("library"),
+        daemon_id: uuid::Uuid::new_v4().to_string(),
+        root_generation_base: engram_dashboard_daemon::root_generation_base(),
+    }
 }
 
 /// The priming file under `builtin_dir` — the file the library reads it from.
@@ -577,6 +589,7 @@ async fn run() -> i32 {
         Some(builtin_dir.clone()),
         data_dir.join("launch"),
         LibraryHost::process(),
+        library_start(&data_dir),
     ));
     let profile_a = agent_profile(NAME_A, &args.model, &ws_a);
     let profile_b = agent_profile(NAME_B, &args.model, &ws_b);
@@ -1524,6 +1537,7 @@ mod tests {
                 home: Some(root.join("home")),
                 env: Arc::new(|_| None),
             },
+            library_start(root),
         )
     }
 

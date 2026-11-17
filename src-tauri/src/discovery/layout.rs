@@ -36,7 +36,7 @@ const RUN_DIR: &str = "run";
 const WEBVIEW_DIR: &str = "webview";
 const LOGS_DIR: &str = "logs";
 
-/// The data directory of the engram process — a copy of the daemon's `data_dir::default_data_dir` (priority · branch explanation is there).
+/// The data directory of the engram process — a copy of the daemon's `data_dir::default_data_dir` (priority · branch explanation is on `default_data_root` there).
 pub fn default_data_dir() -> PathBuf {
     if let Some(path) = data_dir_env_override() {
         return path;

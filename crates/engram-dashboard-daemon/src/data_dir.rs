@@ -1,10 +1,12 @@
-//! 데이터 폴더 — 루트 찾기 · 폴더를 만드는 쓰기 확인 · 설치 위치 · 데몬 쪽 배치([`DataLayout`]).
+//! The data folder — finding the root and which rule found it ([`default_data_root`]) · the write check that creates
+//! the folder · the install location · the daemon's layout ([`DataLayout`], which also computes the library root
+//! setting's default place from that rule).
 //!
 //! ★루트 규칙과 `daemon.json` · `logs\` 자리의 정본이 여기다★ — 셸은 데몬 crate 를 운영 의존하지 않으므로 그
 //! 셋의 사본을 따로 갖고, 두 벌이 같은 경로를 내는지는 시험이 묶는다(ADR-0271 결정 4 · ADR-0282 결정 3). 규칙을 고치면 셸 사본도
 //! 같은 변경에서 고친다 — 갈리면 셸이 데몬이 쓰지 않는 폴더에서 `daemon.json` 을 찾는다.
 //!
-//! ★OS 가름은 [`default_data_dir`] 안에만 있다★ — 배치는 `Path::join` 뿐이다(CLAUDE.md 「플랫폼 중립」).
+//! ★The OS split lives only in [`default_data_root`]★ — the layout is `Path::join` only (CLAUDE.md 「플랫폼 중립」).
 //!
 //! ★배치의 이름들은 디스크 계약이다★ — 바꾸면 기존 폴더의 데이터는 읽히지 않고 남는다. 옮겨 주는 코드는 없다
 //! (ADR-0264 — 옛 데이터는 버린다).
@@ -29,7 +31,7 @@ use engram_dashboard_base::writable::{probe_write_in, retry_if_vanished};
 const DATA_DIR_ENV: &str = "ENGRAM_DATA_DIR";
 
 // ADR-0029: debug 분기(walk-up `.engram-dev`)와 그 단위테스트에서만 쓰인다 — release
-// default_data_dir 은 exe 옆 `data` 만 쓰므로 release 비-test 빌드에선 dead_code.
+// default_data_root 은 exe 옆 `data` 만 쓰므로 release 비-test 빌드에선 dead_code.
 // ADR-0264
 #[cfg_attr(not(debug_assertions), allow(dead_code))]
 const LOCAL_DATA_DIR: &str = ".engram-dev";
@@ -53,8 +55,27 @@ const LOGS_DIR: &str = "logs";
 const MCP_CONFIG_DIR: &str = "mcp-config";
 const USAGE_PROBE_DIR: &str = "usage-probe";
 const LAUNCH_DIR: &str = "launch";
+const LIBRARY_DIR: &str = "library";
 
-/// engram 프로세스의 데이터 디렉토리(ADR-0024/0029).
+/// The data folder [`default_data_root`] finds — the path only.
+pub fn default_data_dir() -> PathBuf {
+    default_data_root().0
+}
+
+/// Which rule found the data folder — the library root setting's default place depends on it
+/// ([`DataLayout::default_library_root`]).
+// ADR-0375
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataRootOrigin {
+    /// `ENGRAM_DATA_DIR`, or a folder handed to [`DataLayout::new`].
+    Given,
+    /// The debug rule: `<repo>\.engram-dev` or its fallbacks.
+    Dev,
+    /// The release rule: `<exe>\data` or its fallback.
+    Release,
+}
+
+/// The engram process's data folder (ADR-0024/0029) and the rule that found it.
 ///
 /// 우선순위:
 /// 1. **`ENGRAM_DATA_DIR`(설정+non-empty)** → 그 경로 그대로(테스트 격리 탈출구 — 배포 노브 아님).
@@ -65,9 +86,9 @@ const LAUNCH_DIR: &str = "launch";
 ///    ([`release_data_dir`]). 배포판 폴더를 지우면 흔적이 남지 않는다 — 완전 포터블(ADR-0134 결정 1).
 ///
 /// 어느 경로든 **절대 패닉하지 않는다**(배포·루트 미발견 상황에서도 PathBuf 를 반드시 반환).
-pub fn default_data_dir() -> PathBuf {
+pub fn default_data_root() -> (PathBuf, DataRootOrigin) {
     if let Some(path) = data_dir_env_override() {
-        return path;
+        return (path, DataRootOrigin::Given);
     }
 
     #[cfg(debug_assertions)]
@@ -77,15 +98,14 @@ pub fn default_data_dir() -> PathBuf {
         // 산출물은 같은 repo 의 target/ 아래라 어느 exe 에서 올라가도 같은 repo 루트로 수렴한다.
         if let Ok(exe) = std::env::current_exe() {
             if let Some(root) = find_workspace_root(&exe) {
-                return root.join(LOCAL_DATA_DIR);
+                return (root.join(LOCAL_DATA_DIR), DataRootOrigin::Dev);
             }
             if let Some(dir) = exe.parent() {
-                return dir.join(LOCAL_DATA_DIR);
+                return (dir.join(LOCAL_DATA_DIR), DataRootOrigin::Dev);
             }
         }
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(LOCAL_DATA_DIR)
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        (cwd.join(LOCAL_DATA_DIR), DataRootOrigin::Dev)
     }
 
     #[cfg(not(debug_assertions))]
@@ -94,12 +114,11 @@ pub fn default_data_dir() -> PathBuf {
         // 분기의 walk-up 이 exe 에서 출발하는 것과 같은 이유.
         if let Ok(exe) = std::env::current_exe() {
             if let Some(dir) = exe.parent() {
-                return release_data_dir(dir);
+                return (release_data_dir(dir), DataRootOrigin::Release);
             }
         }
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(RELEASE_DATA_DIR)
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        (cwd.join(RELEASE_DATA_DIR), DataRootOrigin::Release)
     }
 }
 
@@ -114,7 +133,7 @@ fn data_dir_env_override() -> Option<PathBuf> {
 
 /// 릴리스 데이터 폴더 = `<exe 폴더>/data`(ADR-0134 결정 1·2).
 ///
-/// ★cfg 를 걸지 않는다(load-bearing)★: 호출부인 [`default_data_dir`] 의 릴리즈 분기는
+/// ★cfg 를 걸지 않는다(load-bearing)★: 호출부인 [`default_data_root`] 의 릴리즈 분기는
 /// `not(debug_assertions)` 아래에 있고 **테스트는 항상 debug 로 돈다** — 이 함수까지 cfg 로 가리면
 /// 릴리스 규칙을 단언할 수단이 사라진다.
 pub fn release_data_dir(exe_dir: &Path) -> PathBuf {
@@ -222,8 +241,9 @@ fn is_workspace_root(dir: &Path) -> bool {
     }
 }
 
-/// 한 데이터 폴더(`root`)의 데몬 쪽 배치. 경로 계산만 하고 디스크를 보지 않는다 — 예외는
-/// [`ensure_daemon_dirs`](Self::ensure_daemon_dirs) 하나다.
+/// The daemon's layout of one data folder (`root`), with the rule that found it. It only computes paths and never
+/// looks at the disk — the one exception is [`ensure_daemon_dirs`](Self::ensure_daemon_dirs); nothing here creates
+/// the default library place.
 ///
 /// ★셸 폴더(`shell\…` · `webview\`)는 여기 없다★ — 셸이 자기 배치로 갖는다(ADR-0271 결정 4).
 ///
@@ -234,15 +254,49 @@ fn is_workspace_root(dir: &Path) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DataLayout {
     root: PathBuf,
+    origin: DataRootOrigin,
 }
 
 impl DataLayout {
+    /// A layout over a data folder given directly ([`DataRootOrigin::Given`]).
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self::with_origin(root, DataRootOrigin::Given)
+    }
+
+    pub fn with_origin(root: impl Into<PathBuf>, origin: DataRootOrigin) -> Self {
+        Self {
+            root: root.into(),
+            origin,
+        }
+    }
+
+    /// The layout over [`default_data_root`] — the daemon's production entry point.
+    pub fn resolve() -> Self {
+        let (root, origin) = default_data_root();
+        Self::with_origin(root, origin)
     }
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    pub fn origin(&self) -> DataRootOrigin {
+        self.origin
+    }
+
+    /// The library root setting's default place (the asset library's `default_root`): beside the data folder for the
+    /// release rule (`<dist>\library`), inside it otherwise. Decided by the rule that found the folder, never by its
+    /// name.
+    // ADR-0312
+    // ADR-0375
+    pub fn default_library_root(&self) -> PathBuf {
+        let place = match (self.origin, self.root.parent()) {
+            (DataRootOrigin::Release, Some(dist)) => dist.join(LIBRARY_DIR),
+            _ => self.root.join(LIBRARY_DIR),
+        };
+        // A relative data folder (a relative `ENGRAM_DATA_DIR`) is made absolute against the working folder, so a
+        //   `set_root` to the default place compares equal and the first start never publishes a relative root.
+        std::path::absolute(&place).unwrap_or(place)
     }
 
     pub fn daemon_state_dir(&self) -> PathBuf {
@@ -370,12 +424,75 @@ mod tests {
         let prev = std::env::var_os(DATA_DIR_ENV);
         let want = std::env::temp_dir().join("engram-daemon-resolve-override-test");
         std::env::set_var(DATA_DIR_ENV, &want);
-        let got = crate::resolve_data_dir();
+        let got = DataLayout::resolve();
         match &prev {
             Some(v) => std::env::set_var(DATA_DIR_ENV, v),
             None => std::env::remove_var(DATA_DIR_ENV),
         }
-        assert_eq!(got, want, "ENGRAM_DATA_DIR set 시 그 경로로 격리돼야");
+        assert_eq!(
+            got.root(),
+            want,
+            "ENGRAM_DATA_DIR set 시 그 경로로 격리돼야"
+        );
+        assert_eq!(got.origin(), DataRootOrigin::Given);
+        assert_eq!(got.default_library_root(), want.join("library"));
+    }
+
+    /// The debug rule is the branch a test build takes with no override; its default library place is inside the
+    /// data folder (`<repo>\.engram-dev\library`). Only computed — the real folder is never touched.
+    #[test]
+    fn the_debug_rule_puts_the_default_library_inside_the_data_folder() {
+        let _g = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let prev = std::env::var_os(DATA_DIR_ENV);
+        std::env::remove_var(DATA_DIR_ENV);
+        let got = DataLayout::resolve();
+        if let Some(v) = &prev {
+            std::env::set_var(DATA_DIR_ENV, v);
+        }
+        assert_eq!(got.origin(), DataRootOrigin::Dev);
+        assert_eq!(got.default_library_root(), got.root().join("library"));
+    }
+
+    /// The default place follows the rule that found the data folder, not the folder's name: a release `data` folder
+    /// puts it beside, a given or debug folder named `data` keeps it inside, and a release folder with another name
+    /// still puts it beside.
+    #[test]
+    fn the_default_library_place_follows_the_origin_never_the_folder_name() {
+        // An absolute place on every OS, so the comparisons below are not made absolute against the working folder.
+        let dist = &std::env::temp_dir().join("portable").join("engram");
+        let release = DataLayout::with_origin(release_data_dir(dist), DataRootOrigin::Release);
+        assert_eq!(release.default_library_root(), dist.join("library"));
+        let renamed = DataLayout::with_origin(dist.join("elsewhere"), DataRootOrigin::Release);
+        assert_eq!(renamed.default_library_root(), dist.join("library"));
+        for origin in [DataRootOrigin::Given, DataRootOrigin::Dev] {
+            let named_data = DataLayout::with_origin(dist.join("data"), origin);
+            assert_eq!(
+                named_data.default_library_root(),
+                dist.join("data").join("library"),
+                "{origin:?}"
+            );
+        }
+        assert_eq!(
+            DataLayout::new(dist.join("data")).origin(),
+            DataRootOrigin::Given
+        );
+    }
+
+    /// A relative data folder (a relative `ENGRAM_DATA_DIR`) gives an absolute default place, against the working
+    /// folder. Only computed.
+    #[test]
+    fn a_relative_data_folder_gives_an_absolute_default_library_place() {
+        let got = DataLayout::new("relative-data").default_library_root();
+        assert!(got.is_absolute(), "{got:?}");
+        assert_eq!(
+            got,
+            std::env::current_dir()
+                .unwrap()
+                .join("relative-data")
+                .join("library")
+        );
     }
 
     // ── 데이터 폴더 쓰기 가능 프로브(ADR-0134 결정 4) ─────────────────────────────────

@@ -37,14 +37,39 @@
 //! ## The service
 //!
 //! [`LibraryService`] owns the catalog behind the ADR-0324 gate (`gate.rs` — the lock order and the ticket rules are
-//! there). Library files under the root are read with the store directly (local by assumption); every folder operation
-//! outside it goes through [`folder::BoundedIo`], never under the library lock.
+//! there). Library files under the root are read with the store directly (local by assumption). Every stat, list,
+//! canonicalize or read of a folder outside the library — folder entries, native skill roots, the working folder, the
+//! library root itself — goes through [`folder::BoundedIo`], never under the library lock. The built-ins
+//! (`Builtins::new`), the launch folder (`prepare_in`, the sweep, `release`), `library.json` (`config.rs`) and the
+//! folder `set_root {create}` or the first start creates use std `fs`.
+//!
+//! ## The root
+//!
+//! The root is one setting persisted in `library.json` (`config.rs` — ADR-0375 · ADR-0376), read by the daemon before
+//! [`LibraryService::new`]; `new` does no disk work beyond the built-ins. [`LibraryService::set_root`] and
+//! [`LibraryService::first_start`] are the only writers of the setting. Each publishes the root through
+//! [`LibraryService::change_root`] first and writes `library.json` only after that succeeded (ADR-0381): a refused root
+//! change writes nothing, and a write that fails leaves the new root live and the setting `unsaved` — nothing is undone.
+//! One root-change mutex serializes them across the root change and the write; under it they take only the gate's locks
+//! and the config's state mutex, a leaf held for no IO.
+//!
+//! The root generation starts each run at the base the daemon draws (`LibraryValues::root_generation_base`), so a
+//! generation kept from an earlier run does not match; generations are compared only for equality (ADR-0381).
+//!
+//! ## Refusals
+//!
+//! A body refuses with [`LibraryRefusal`]: a [`RefusalClass`] plus an agent `launch::Reason`, or the profile store's
+//! own error passed through. The command layer maps the class onto the bus code (ADR-0379); every refusal that
+//! applied nothing must map onto a code that does not keep the request id.
 // ADR-0311
 // ADR-0324
+// ADR-0379
+// ADR-0381
 
 pub mod backends;
 pub mod builtin;
 pub mod catalog;
+pub mod config;
 pub mod excerpt;
 pub mod folder;
 pub mod format;
@@ -58,26 +83,30 @@ pub mod validate;
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::SystemTime;
 
 use engram_dashboard_agent::launch::{backend_word, escape_controls, BlockReason, Reason};
 use engram_dashboard_agent::profile::{
-    AgentCommand, AgentOutputFormat, AgentProfile, ProfileRegistry,
+    AgentCommand, AgentOutputFormat, AgentProfile, ProfileRegistry, StoreError,
 };
 use engram_dashboard_agent::types::AgentId;
 use engram_dashboard_base::sync::lock;
-use engram_dashboard_platform::fs::{path_key, PathKey};
+use engram_dashboard_platform::fs::{normalize_folder, path_key, same_path, PathKey};
 use serde_json::json;
 
 use crate::backends::Backends;
 use crate::builtin::Builtins;
-use crate::catalog::{key, Catalog, Item, ItemContent, ItemKind, ScanItem, ScanResult};
+use crate::catalog::{
+    key, preset_refs, Catalog, Item, ItemContent, ItemKind, ScanItem, ScanResult,
+};
+use crate::config::{ConfigFile, ConfigHealth, LibraryConfig, RootSetting};
 use crate::folder::{BoundedIo, FolderStatus, LaunchIo, Need};
+use crate::format::read::ITEM_PATH_INVALID;
 use crate::gate::{Gate, Tags};
 pub use crate::gate::{Numbers, State, NOT_FOUND};
 use crate::path::{AssetRef, LibPath, PathError};
-use crate::refs::reference_count;
+use crate::refs::{reference_count, referrers_of};
 use crate::resolve::{resolve, CatalogLookup, Resolution, RootState, Target};
 use crate::store::LibraryStore;
 
@@ -97,16 +126,91 @@ pub const PATH_THROUGH_LINK: &str = "path-through-link";
 // TRD S25 step-7 B8
 pub const LIBRARY_UNAVAILABLE: &str = "library-unavailable";
 
+/// The code of an edit whose root generation is not the current one (`args` = `{given, current}`).
+// ADR-0377
+pub const ROOT_GENERATION_STALE: &str = "root-generation-stale";
+
+/// The code of a `set_root` whose folder cannot be used — it could not be created, its stat did not answer `Ok`, or
+/// its walk failed at the root; nothing published, `library.json` not written (`args` = `{path, why}`).
+// ADR-0379
+// ADR-0381
+pub const LIBRARY_ROOT_UNUSABLE: &str = "library-root-unusable";
+
+/// The code of a `set_root` while `library.json` is read-only for the run — newer or unreadable at load (`args` =
+/// `{why}`).
+// ADR-0376
+pub const LIBRARY_CONFIG_READ_ONLY: &str = "library-config-read-only";
+
+/// The code of a `set_root` whose `library.json` write was refused or failed after the new root was published —
+/// published but not saved: the root stays live this run, the file keeps its setting, and the next start follows the
+/// file that is left (`args` = `{why}`, which says so).
+// ADR-0379
+// ADR-0381
+pub const LIBRARY_CONFIG_WRITE_FAILED: &str = "library-config-write-failed";
+
 const MERGE_JOB: &str = "library-merge";
+
+/// The class of a [`LibraryRefusal`] — the command layer maps it onto the bus code: `Unavailable` onto `CONFLICT`,
+/// the others onto their namesakes (ADR-0379 decision 3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RefusalClass {
+    Conflict,
+    NotFound,
+    InvalidArgument,
+    Unavailable,
+    Internal,
+}
+
+/// Why a body refused. A refusal applied nothing to the library or the registry — folders a `set_root {create}` made
+/// before it refused [`LIBRARY_ROOT_UNUSABLE`] do not count as applied (ADR-0379 decision 4) — except
+/// [`LIBRARY_CONFIG_WRITE_FAILED`], which comes after the new root was published and still maps onto a code that does
+/// not keep the request id, so a retry saves again (ADR-0381).
+#[derive(Debug)]
+pub enum LibraryRefusal {
+    Refused {
+        class: RefusalClass,
+        reason: Reason,
+    },
+    /// The profile-edit port's store error, unchanged — answered as agent `store_command_error` answers every
+    /// registry-writing command (ADR-0379 decision 2).
+    Store(StoreError),
+}
+
+impl LibraryRefusal {
+    fn new(class: RefusalClass, code: &str, args: serde_json::Value) -> Self {
+        LibraryRefusal::Refused {
+            class,
+            reason: Reason {
+                code: code.to_owned(),
+                args,
+                line: None,
+            },
+        }
+    }
+
+    fn unavailable(why: String) -> Self {
+        Self::new(
+            RefusalClass::Unavailable,
+            LIBRARY_UNAVAILABLE,
+            json!({ "message": why }),
+        )
+    }
+}
 
 /// What the daemon hands the service.
 pub struct LibraryValues {
     pub registry: Arc<ProfileRegistry>,
     /// `AgentBackends` in production.
     pub backends: Arc<dyn Backends>,
-    /// The library root at construction; `None` = none is set (nothing is scanned). Read only by `new` — after a
-    /// `change_root` the live root is the gate's, not this field. Step 9a replaces it with the library config.
-    pub root: Option<PathBuf>,
+    /// `library.json` as `config::load` read it — read only by `new`; after that the service's own copy is live.
+    pub config: LibraryConfig,
+    /// The place the root setting's default value names this run (ADR-0375) — also `status`'s `suggested_new`.
+    pub default_root: PathBuf,
+    /// The daemon identity (`status`), owned by the daemon.
+    pub daemon_id: String,
+    /// The root generation this run starts at — drawn by the daemon at random below 2^52, so a generation kept from an
+    /// earlier run does not match; compared only for equality (ADR-0381).
+    pub root_generation_base: u64,
     /// The built-in assets folder (`builtin::Builtins`) — read once by `new`; `None` = there is none.
     pub builtin_dir: Option<PathBuf>,
     /// The volatile launch folder — written by the launch materials (step-7 P9).
@@ -124,6 +228,101 @@ pub struct LibraryService {
     io: BoundedIo,
     gate: Arc<Gate>,
     builtins: Builtins,
+    config: ConfigFile,
+    /// Serializes `set_root` and the first start (module header).
+    root_change: Mutex<()>,
+    /// How many root-change takes found it held — tests observe a waiter.
+    #[cfg(test)]
+    root_change_blocked: std::sync::atomic::AtomicUsize,
+}
+
+/// The answer of [`LibraryService::status`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LibraryStatus {
+    pub daemon_id: String,
+    /// The published root; `None` = unset.
+    pub root: Option<PathBuf>,
+    /// `None` = `library.json` could not be read (`config` is read-only or corrupt); while `config` is unsaved, the
+    /// live root's setting.
+    pub root_setting: Option<RootSettingKind>,
+    pub state: RootStatus,
+    pub config: ConfigHealth,
+    /// The default place.
+    pub suggested_new: PathBuf,
+    /// The value an edit may carry ([`LibraryService::change_at`]).
+    pub root_generation: u64,
+}
+
+/// What the root setting holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RootSettingKind {
+    /// The default value — `library.json` says `"default"` or is not written yet.
+    Default,
+    /// A path the user set.
+    Explicit,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RootStatus {
+    /// No root is published.
+    Unset,
+    Ok,
+    /// The root's stat answered anything but `Ok` — missing, not a folder, unreadable, timed out.
+    Missing {
+        why: String,
+    },
+}
+
+/// The answer of [`LibraryService::first_start`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FirstStart {
+    /// `library.json` was not missing at load, or the step already published this run — nothing done. A `Failed`
+    /// step stays due, so a second call in the same run would retry.
+    NotDue,
+    /// The default place was created, the root published and then the setting written at its default value.
+    Published,
+    /// The default root was published but `library.json` was not written (`why`): live this run, `config: unsaved`;
+    /// the next start follows the file that is left (with none left, the first start runs again).
+    // ADR-0381
+    Unsaved(String),
+    /// The default place could not be created or the root change refused: nothing published or written, the root
+    /// unset; the next start tries again.
+    Failed(String),
+}
+
+/// The answer of [`LibraryService::folders`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FoldersAnswer {
+    /// Every folder of the library, by path; a skill folder is marked.
+    pub folders: Vec<FolderNode>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FolderNode {
+    pub path: String,
+    pub name: String,
+    pub skill: bool,
+}
+
+/// The answer of [`LibraryService::read`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReadAnswer {
+    /// Kind, name, state, description and reference count as `list` shows it.
+    pub row: ListRow,
+    /// The item on disk under the published root.
+    pub absolute: PathBuf,
+    /// Presets that list it.
+    pub presets_direct: Vec<String>,
+    /// Presets that reach it only through nested presets.
+    pub presets_indirect: Vec<String>,
+    /// Agents that attach it (a preset only).
+    pub agents_direct: Vec<AgentId>,
+    /// Agents that attach a preset reaching it, and do not attach it.
+    pub agents_indirect: Vec<AgentId>,
+    /// An instruction's excerpt (`excerpt::EXCERPT_CHARS`).
+    pub excerpt: Option<String>,
+    /// A settings asset's raw-field names, in file order.
+    pub settings_fields: Vec<String>,
 }
 
 /// What one read computation resolves, before the root state is known.
@@ -203,14 +402,20 @@ impl LibraryService {
     /// `io` bounds every folder operation outside the library and spawns the service's short-lived jobs. The built-ins
     /// are read here, once.
     pub fn new(values: LibraryValues, store: Arc<dyn LibraryStore>, io: BoundedIo) -> Self {
-        let gate = Arc::new(Gate::new(values.root.clone()));
+        let root = ConfigFile::initial_root(&values.config, &values.default_root);
+        let gate = Arc::new(Gate::new(root, values.root_generation_base));
         let builtins = Builtins::new(values.builtin_dir.as_deref(), &*values.backends);
+        let config = ConfigFile::new(&values.config);
         LibraryService {
             values,
             store,
             io,
             gate,
             builtins,
+            config,
+            root_change: Mutex::new(()),
+            #[cfg(test)]
+            root_change_blocked: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -321,22 +526,26 @@ impl LibraryService {
         match (root, joined) {
             (None, _) => RootState::Unset,
             (Some(_), Err(why)) => RootState::Unavailable(why),
-            (Some(root), Ok(())) if library_attached => {
-                let status = self
-                    .io
-                    .stat_all(io, &[(root.to_path_buf(), Need::Required)])
-                    .remove(&path_key(root))
-                    .expect("stat_all answers every path it is asked");
-                match status {
-                    FolderStatus::Ok => RootState::Ok,
-                    FolderStatus::Missing => RootState::Unavailable("missing".to_owned()),
-                    FolderStatus::NotADirectory => {
-                        RootState::Unavailable("not a folder".to_owned())
-                    }
-                    FolderStatus::Unreadable(why) => RootState::Unavailable(why),
-                }
-            }
+            (Some(root), Ok(())) if library_attached => match self.stat_root(io, root) {
+                Ok(()) => RootState::Ok,
+                Err(why) => RootState::Unavailable(why),
+            },
             (Some(_), Ok(())) => RootState::Ok,
+        }
+    }
+
+    /// The root stat'ed as a required ask on `io`; `Err(why)` = anything but `Ok`.
+    fn stat_root(&self, io: &LaunchIo, root: &Path) -> Result<(), String> {
+        let status = self
+            .io
+            .stat_all(io, &[(root.to_path_buf(), Need::Required)])
+            .remove(&path_key(root))
+            .expect("stat_all answers every path it is asked");
+        match status {
+            FolderStatus::Ok => Ok(()),
+            FolderStatus::Missing => Err("missing".to_owned()),
+            FolderStatus::NotADirectory => Err("not a folder".to_owned()),
+            FolderStatus::Unreadable(why) => Err(why),
         }
     }
 
@@ -526,20 +735,286 @@ impl LibraryService {
     /// read-computation budget, outside the gate; then, exclusive behind every earlier ticket, it is walked with empty
     /// tags and published with a fresh catalog in one write lock. `Err` = refused, nothing published: the stat did not
     /// answer `Ok`, or the walk failed at the root.
+    ///
+    /// It neither records the root in `library.json` nor takes the root-change mutex: every caller outside this crate
+    /// goes through [`LibraryService::set_root`] or [`LibraryService::first_start`] (tests excepted).
     pub fn change_root(&self, new_root: PathBuf) -> Result<RefreshReport, String> {
         let io = self.io.begin_read();
-        let status = self
-            .io
-            .stat_all(&io, &[(new_root.clone(), Need::Required)])
-            .remove(&path_key(&new_root));
-        match status {
-            Some(FolderStatus::Ok) => {}
-            other => return Err(format!("the new library root cannot be used: {other:?}")),
-        }
+        self.stat_root(&io, &new_root)
+            .map_err(|why| format!("the new library root cannot be used: {why}"))?;
         let walk = |root: &Path| self.build_scan(root, None, &Tags::new());
         self.gate
             .change_root(new_root, walk)
             .map(|report| report.share(None))
+    }
+
+    /// [`LibraryService::change`] for an edit that carries the root generation it read from `status` (`None` = the
+    /// current root). The generation is compared inside the change's own write-lock take, so an edit queued behind a
+    /// root change sees it: a stale one refuses `Conflict` · [`ROOT_GENERATION_STALE`] before `f` runs, nothing
+    /// applied.
+    // ADR-0377
+    pub fn change_at<R>(
+        &self,
+        root_generation: Option<u64>,
+        f: impl FnOnce(&mut Catalog, Option<&Path>, &dyn Fn() -> u64) -> (R, Vec<PathKey>),
+    ) -> Result<R, LibraryRefusal> {
+        self.gate
+            .change_checked(root_generation, f)
+            .map_err(|current| {
+                LibraryRefusal::new(
+                    RefusalClass::Conflict,
+                    ROOT_GENERATION_STALE,
+                    json!({ "given": root_generation, "current": current }),
+                )
+            })
+    }
+
+    /// The root, its setting and `library.json` now. The root is stat'ed on one read budget outside every lock; the
+    /// root and its generation are read in one read lock.
+    pub fn status(&self) -> LibraryStatus {
+        let (root, root_generation) = self
+            .gate
+            .with_read(|state| (state.root.clone(), self.gate.numbers().root));
+        let state = match &root {
+            None => RootStatus::Unset,
+            Some(root) => match self.stat_root(&self.io.begin_read(), root) {
+                Ok(()) => RootStatus::Ok,
+                Err(why) => RootStatus::Missing { why },
+            },
+        };
+        let (setting, config) = self.config.view();
+        LibraryStatus {
+            daemon_id: self.values.daemon_id.clone(),
+            root,
+            root_setting: setting.map(|setting| match setting {
+                RootSetting::Default => RootSettingKind::Default,
+                RootSetting::Explicit(_) => RootSettingKind::Explicit,
+            }),
+            state,
+            config,
+            suggested_new: self.values.default_root.clone(),
+            root_generation,
+        }
+    }
+
+    /// Moves the library to `path`, creating it first when `create`, and records it: in order the path is normalized
+    /// (it must be absolute), the root-change mutex taken, a read-only `library.json` refused, the folder created, the
+    /// root changed and — only after that succeeded — `library.json` written: the default value when `path` is the
+    /// default place, else the path. Answers the status after the change.
+    ///
+    /// Refusals: a relative path `InvalidArgument` · `item-path-invalid`; a read-only `library.json` `Unavailable` ·
+    /// [`LIBRARY_CONFIG_READ_ONLY`] before anything is created; a folder that cannot be created or used `Unavailable` ·
+    /// [`LIBRARY_ROOT_UNUSABLE`] — nothing published or written, folders `create` made stay; a write refused or failed
+    /// after the publish `Unavailable` · [`LIBRARY_CONFIG_WRITE_FAILED`] — the new root stays live, the file keeps its
+    /// setting and `status` says `unsaved`.
+    // ADR-0366
+    // ADR-0375
+    // ADR-0376
+    // ADR-0381
+    pub fn set_root(&self, path: &Path, create: bool) -> Result<LibraryStatus, LibraryRefusal> {
+        let root = normalize_folder(path).map_err(|why| {
+            LibraryRefusal::new(
+                RefusalClass::InvalidArgument,
+                ITEM_PATH_INVALID,
+                json!({
+                    "path": escape_controls(&path.display().to_string()),
+                    "why": why.to_string(),
+                }),
+            )
+        })?;
+        let _serial = self.take_root_change();
+        if let Some(why) = self.config.read_only() {
+            return Err(LibraryRefusal::new(
+                RefusalClass::Unavailable,
+                LIBRARY_CONFIG_READ_ONLY,
+                json!({ "why": why }),
+            ));
+        }
+        if create {
+            std::fs::create_dir_all(&root).map_err(|e| root_unusable(&root, e.to_string()))?;
+        }
+        self.change_root(root.clone())
+            .map_err(|why| root_unusable(&root, why))?;
+        let setting = if same_path(&root, &self.default_place()) {
+            RootSetting::Default
+        } else {
+            RootSetting::Explicit(root.clone())
+        };
+        if let Err(why) = self.config.save(&setting) {
+            return Err(LibraryRefusal::new(
+                RefusalClass::Unavailable,
+                LIBRARY_CONFIG_WRITE_FAILED,
+                json!({
+                    "why": format!(
+                        "the library root {} is live but not saved; the next start follows library.json as it is: {why}",
+                        root.display()
+                    )
+                }),
+            ));
+        }
+        let status = self.status();
+        tracing::info!(
+            root = %root.display(),
+            setting = ?status.root_setting,
+            "library root set"
+        );
+        Ok(status)
+    }
+
+    /// The first-start step: when `library.json` was missing at load, creates the default place, publishes it as the
+    /// root and only then writes the setting at its default value. A failed create or root change writes nothing and
+    /// leaves the root unset, and the next start tries again; a failed write leaves the default root live this run
+    /// (`unsaved`, logged), and the next start follows the file that is left. A configured root that vanished is never
+    /// re-created (only a missing `library.json` makes the step due). The daemon calls it once, before the commands are
+    /// served.
+    // ADR-0312
+    // ADR-0366
+    // ADR-0375
+    // ADR-0381
+    pub fn first_start(&self) -> FirstStart {
+        let _serial = self.take_root_change();
+        if !self.config.first_start_due() {
+            return FirstStart::NotDue;
+        }
+        let root = self.values.default_root.clone();
+        let failed = |why: String| {
+            tracing::warn!(root = %root.display(), "library first start failed; root unset: {why}");
+            FirstStart::Failed(why)
+        };
+        if let Err(e) = std::fs::create_dir_all(&root) {
+            return failed(format!("create failed: {e}"));
+        }
+        if let Err(why) = self.change_root(root.clone()) {
+            return failed(why);
+        }
+        match self.config.save(&RootSetting::Default) {
+            Ok(()) => {
+                tracing::info!(root = %root.display(), "library first start: default root published");
+                FirstStart::Published
+            }
+            Err(why) => {
+                tracing::warn!(
+                    root = %root.display(),
+                    "library first start: default root live but not saved: {why}"
+                );
+                FirstStart::Unsaved(why)
+            }
+        }
+    }
+
+    /// The default place spelled as `set_root` compares paths.
+    fn default_place(&self) -> PathBuf {
+        normalize_folder(&self.values.default_root)
+            .unwrap_or_else(|_| self.values.default_root.clone())
+    }
+
+    fn take_root_change(&self) -> MutexGuard<'_, ()> {
+        #[cfg(test)]
+        if matches!(
+            self.root_change.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        ) {
+            self.root_change_blocked
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        lock(&self.root_change)
+    }
+
+    /// The whole folder tree: every folder the catalog holds plus every skill folder, by path; a skill folder is
+    /// marked. After the first-scan entrance, under one read lock; with no published root `Unavailable` ·
+    /// [`LIBRARY_UNAVAILABLE`].
+    pub fn folders(&self) -> Result<FoldersAnswer, LibraryRefusal> {
+        self.first_scan_join()
+            .map_err(LibraryRefusal::unavailable)?;
+        Ok(self.gate.with_read(|state| {
+            let catalog = &state.catalog;
+            let mut seen = std::collections::HashSet::new();
+            let skills = catalog
+                .items()
+                .filter(|item| item.kind == ItemKind::Skill)
+                .map(|item| &item.path);
+            let mut folders: Vec<FolderNode> = catalog
+                .folders()
+                .chain(skills)
+                .filter(|folder| seen.insert(key(folder)))
+                .map(|folder| FolderNode {
+                    path: folder.as_str().to_owned(),
+                    name: folder.file_name().to_owned(),
+                    skill: catalog
+                        .get(&key(folder))
+                        .is_some_and(|item| item.kind == ItemKind::Skill),
+                })
+                .collect();
+            folders.sort_by(|a, b| a.path.cmp(&b.path));
+            FoldersAnswer { folders }
+        }))
+    }
+
+    /// One item's detail from the catalog (no disk read): its `list` row, its absolute path under the published root,
+    /// who refers to it directly and indirectly, an instruction's excerpt and a settings asset's raw-field names.
+    /// After the first-scan entrance; with no published root `Unavailable` · [`LIBRARY_UNAVAILABLE`]; a path the
+    /// catalog does not hold `NotFound` · `not-found`.
+    pub fn read(&self, path: &LibPath) -> Result<ReadAnswer, LibraryRefusal> {
+        self.first_scan_join()
+            .map_err(LibraryRefusal::unavailable)?;
+        self.gate.with_read(|state| {
+            let catalog = &state.catalog;
+            let Some(root) = state.root.as_deref() else {
+                return Err(LibraryRefusal::unavailable(gate::NO_ROOT.to_owned()));
+            };
+            let item = catalog.get(&key(path)).ok_or_else(|| {
+                LibraryRefusal::new(
+                    RefusalClass::NotFound,
+                    NOT_FOUND,
+                    json!({ "path": path.as_str() }),
+                )
+            })?;
+            let registry = &self.values.registry;
+            let (reaching, agents_direct) = referrers_of(catalog, registry, &item.path);
+            let lists_it = |preset: &LibPath| match catalog.get(&key(preset)).map(|p| &p.content) {
+                Some(ItemContent::Preset { doc }) => {
+                    preset_refs(doc).any(|target| key(target) == key(&item.path))
+                }
+                _ => false,
+            };
+            let (direct, indirect): (Vec<&LibPath>, Vec<&LibPath>) =
+                reaching.iter().partition(|preset| lists_it(preset));
+            let mut agents_indirect: Vec<AgentId> = registry
+                .attachments()
+                .into_iter()
+                .filter(|(id, attached)| {
+                    !agents_direct.contains(id)
+                        && attached.presets.iter().any(|preset| {
+                            reaching.iter().any(|reached| {
+                                same_path(Path::new(&preset.path), Path::new(reached.as_str()))
+                            })
+                        })
+                })
+                .map(|(id, _)| id)
+                .collect();
+            agents_indirect.sort_unstable();
+            let names = |paths: Vec<&LibPath>| -> Vec<String> {
+                paths.into_iter().map(|p| p.as_str().to_owned()).collect()
+            };
+            let (excerpt, settings_fields) = match &item.content {
+                ItemContent::Instruction { excerpt } => (Some(excerpt.clone()), Vec::new()),
+                ItemContent::Settings { doc, .. } => (
+                    None,
+                    doc.raw.iter().map(|field| field.name.clone()).collect(),
+                ),
+                _ => (None, Vec::new()),
+            };
+            Ok(ReadAnswer {
+                row: row(item, reaching.len() + agents_direct.len()),
+                absolute: item.path.to_path(root),
+                presets_direct: names(direct),
+                presets_indirect: names(indirect),
+                agents_direct,
+                agents_indirect,
+                excerpt,
+                settings_fields,
+            })
+        })
     }
 
     /// Walks and reads `range` under `root` outside every lock.
@@ -674,6 +1149,14 @@ fn merge_from(gate: &Gate, noted: Numbers, slot: &Mutex<Option<Vec<Item>>>) {
 fn is_known(catalog: &Catalog, path: &LibPath) -> bool {
     let want = key(path);
     catalog.get(&want).is_some() || catalog.folders().any(|folder| key(folder) == want)
+}
+
+fn root_unusable(root: &Path, why: String) -> LibraryRefusal {
+    LibraryRefusal::new(
+        RefusalClass::Unavailable,
+        LIBRARY_ROOT_UNUSABLE,
+        json!({ "path": root.display().to_string(), "why": why }),
+    )
 }
 
 fn failed(why: String) -> RefreshReport {
@@ -1018,6 +1501,9 @@ mod tests {
         profile
     }
 
+    /// The root generation the test services start at — not 0, so an absolute value cannot pass by chance.
+    const ROOT_BASE: u64 = 1_000;
+
     fn service(
         root: Option<&str>,
         store: &Arc<TestStore>,
@@ -1036,10 +1522,18 @@ mod tests {
         builtin_dir: Option<&Path>,
         io: BoundedIo,
     ) -> Arc<LibraryService> {
+        let state = Path::new("/state");
+        let config = match root {
+            Some(root) => LibraryConfig::usable(state, RootSetting::Explicit(PathBuf::from(root))),
+            None => LibraryConfig::missing(state),
+        };
         let values = LibraryValues {
             registry: Arc::new(ProfileRegistry::new(Arc::new(Fixed(profiles)))),
             backends: Arc::new(AgentBackends),
-            root: root.map(PathBuf::from),
+            config,
+            default_root: PathBuf::from("/default-library"),
+            daemon_id: "test-daemon".to_owned(),
+            root_generation_base: ROOT_BASE,
             builtin_dir: builtin_dir.map(Path::to_path_buf),
             launch_root: PathBuf::from("/launch"),
             home: None,
@@ -2215,5 +2709,896 @@ claude: {changed: true}
             ],
             "the default preset's stand-in (no built-in folder) is told, and the skill is named as left out"
         );
+    }
+
+    // ── the root setting: status · set_root · first start ────────────────────────────────────────────────
+
+    /// A service whose `library.json` lives in a real temp folder (`<temp>/state`). The test store's roots are
+    /// absolute paths under the temp folder (named by [`OnDisk::at`]); nothing of them is on disk unless a test makes
+    /// it, and their stats answer from `ops` (default `Ok`).
+    struct OnDisk {
+        temp: tempfile::TempDir,
+        store: Arc<TestStore>,
+        ops: Arc<StatOps>,
+        default_root: PathBuf,
+    }
+
+    impl OnDisk {
+        /// `roots` = the test store's roots by name; `default` = the default place's name; `config` = the
+        /// `library.json` text (`None` = no file).
+        fn new(roots: &[&str], default: &str, config: Option<&str>) -> OnDisk {
+            let temp = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(temp.path().join("state")).unwrap();
+            let at = |name: &str| normalize_folder(&temp.path().join(name)).unwrap();
+            let names: Vec<String> = roots
+                .iter()
+                .map(|name| at(name).display().to_string())
+                .collect();
+            let names: Vec<&str> = names.iter().map(String::as_str).collect();
+            let disk = OnDisk {
+                default_root: at(default),
+                store: TestStore::new(&names),
+                ops: Arc::new(StatOps::default()),
+                temp,
+            };
+            if let Some(text) = config {
+                std::fs::write(disk.config_path(), text).unwrap();
+            }
+            disk
+        }
+
+        fn at(&self, name: &str) -> PathBuf {
+            normalize_folder(&self.temp.path().join(name)).unwrap()
+        }
+
+        fn mem(&self, name: &str) -> &MemStore {
+            self.store.at_root(&self.at(name))
+        }
+
+        fn state(&self) -> PathBuf {
+            self.temp.path().join("state")
+        }
+
+        fn config_path(&self) -> PathBuf {
+            self.state().join(config::LIBRARY_CONFIG_FILE)
+        }
+
+        /// `library.json` as JSON; `None` = no file.
+        fn config(&self) -> Option<serde_json::Value> {
+            let text = std::fs::read_to_string(self.config_path()).ok()?;
+            Some(serde_json::from_str(&text).unwrap())
+        }
+
+        fn explicit(&self, name: &str) -> String {
+            json!({ "schema_version": 1, "root": self.at(name).to_str().unwrap() }).to_string()
+        }
+
+        /// A new service over a fresh `config::load` of the state folder — one daemon start, at [`ROOT_BASE`].
+        fn start(&self) -> Arc<LibraryService> {
+            self.start_at(ROOT_BASE)
+        }
+
+        /// [`OnDisk::start`] at the root generation base `base`.
+        fn start_at(&self, base: u64) -> Arc<LibraryService> {
+            let io = BoundedIo::new(
+                IO_LIMIT,
+                LaunchWaits::LAUNCH,
+                LIST_CAP,
+                Arc::clone(&self.ops) as Arc<dyn FolderOps>,
+                Arc::new(ThreadSpawn),
+            );
+            let values = LibraryValues {
+                registry: Arc::new(ProfileRegistry::new(Arc::new(Fixed(Vec::new())))),
+                backends: Arc::new(AgentBackends),
+                config: config::load(&self.state()),
+                default_root: self.default_root.clone(),
+                daemon_id: "daemon-1".to_owned(),
+                root_generation_base: base,
+                builtin_dir: None,
+                launch_root: PathBuf::from("/launch"),
+                home: None,
+                env: Arc::new(|_| None),
+            };
+            let store: Arc<dyn LibraryStore> = Arc::clone(&self.store) as Arc<dyn LibraryStore>;
+            Arc::new(LibraryService::new(values, store, io))
+        }
+    }
+
+    fn refused(refusal: LibraryRefusal) -> (RefusalClass, Reason) {
+        match refusal {
+            LibraryRefusal::Refused { class, reason } => (class, reason),
+            LibraryRefusal::Store(e) => panic!("not a library refusal: {e}"),
+        }
+    }
+
+    fn word(disk: &OnDisk) -> serde_json::Value {
+        disk.config().expect("library.json")["root"].clone()
+    }
+
+    #[test]
+    fn a_status_answers_the_daemon_id_root_setting_state_config_suggestion_and_generation() {
+        let disk = OnDisk::new(&["lib"], "library", None);
+        let svc = disk.start();
+        let base = svc.numbers().root;
+        assert_eq!(base, ROOT_BASE, "the run starts at the base it was given");
+        assert_eq!(
+            svc.status(),
+            LibraryStatus {
+                daemon_id: "daemon-1".to_owned(),
+                root: None,
+                root_setting: Some(RootSettingKind::Default),
+                state: RootStatus::Unset,
+                config: ConfigHealth::Ok,
+                suggested_new: disk.default_root.clone(),
+                root_generation: base,
+            },
+            "a missing library.json holds the default value, with no root before the first start"
+        );
+        lock(&disk.ops.0).insert(disk.at("lib"), FolderStatus::NotADirectory);
+        let refusal = refused(svc.set_root(&disk.at("lib"), false).unwrap_err()).1;
+        assert_eq!(refusal.code, LIBRARY_ROOT_UNUSABLE);
+        lock(&disk.ops.0).clear();
+        let status = svc.set_root(&disk.at("lib"), false).unwrap();
+        assert_eq!(
+            (
+                status.root,
+                status.root_setting,
+                status.state,
+                status.root_generation
+            ),
+            (
+                Some(disk.at("lib")),
+                Some(RootSettingKind::Explicit),
+                RootStatus::Ok,
+                base + 1
+            )
+        );
+        lock(&disk.ops.0).insert(
+            disk.at("lib"),
+            FolderStatus::Unreadable("denied".to_owned()),
+        );
+        // The stat worker of the status `set_root` answered may still be in flight, and a required ask joins it
+        //   (`folder.rs` — one worker per key): ask until it has ended.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let state = loop {
+            let state = svc.status().state;
+            if state != RootStatus::Ok || Instant::now() > deadline {
+                break state;
+            }
+            thread::sleep(Duration::from_millis(2));
+        };
+        assert_eq!(
+            state,
+            RootStatus::Missing {
+                why: "denied".to_owned()
+            },
+            "every stat answer but Ok is missing, with why"
+        );
+    }
+
+    #[test]
+    fn set_root_writes_an_explicit_path_publishes_it_and_answers_the_status_after() {
+        let disk = OnDisk::new(&["lib", "lib2"], "library", None);
+        disk.mem("lib2").file("b.md", "b");
+        let svc = disk.start();
+        let status = svc.set_root(&disk.at("lib2"), false).unwrap();
+        assert_eq!(word(&disk), json!(disk.at("lib2").to_str().unwrap()));
+        assert_eq!(status.root, Some(disk.at("lib2")));
+        assert_eq!(status.root_setting, Some(RootSettingKind::Explicit));
+        assert_eq!(status.config, ConfigHealth::Ok);
+        assert_eq!(paths(&svc.list(None).unwrap()), ["b.md"]);
+        assert_eq!(
+            disk.start().status().root,
+            Some(disk.at("lib2")),
+            "the next start reads it"
+        );
+    }
+
+    #[test]
+    fn set_root_to_the_default_place_stores_the_default_value_however_it_is_spelled() {
+        let disk = OnDisk::new(&["library", "lib2"], "library", None);
+        let svc = disk.start();
+        svc.set_root(&disk.at("lib2"), false).unwrap();
+        let spelled = disk.temp.path().join("state").join("..").join("library");
+        let status = svc.set_root(&spelled, false).unwrap();
+        assert_eq!(word(&disk), json!("default"), "not the absolute path");
+        assert_eq!(status.root_setting, Some(RootSettingKind::Default));
+        assert_eq!(status.root, Some(disk.at("library")));
+    }
+
+    #[test]
+    fn set_root_refuses_a_path_that_is_not_absolute_and_writes_nothing() {
+        let disk = OnDisk::new(&["lib"], "library", None);
+        let svc = disk.start();
+        let (class, reason) = refused(svc.set_root(Path::new("relative/lib"), true).unwrap_err());
+        assert_eq!(
+            (class, reason.code.as_str()),
+            (RefusalClass::InvalidArgument, "item-path-invalid")
+        );
+        assert!(disk.config().is_none());
+        assert!(!Path::new("relative").exists());
+    }
+
+    #[test]
+    fn set_root_on_a_read_only_config_refuses_before_creating_anything() {
+        let newer = r#"{"schema_version": 2, "root": "default"}"#;
+        for unreadable in [false, true] {
+            let disk = OnDisk::new(&["lib", "new"], "library", None);
+            match unreadable {
+                false => std::fs::write(disk.config_path(), newer).unwrap(),
+                true => std::fs::create_dir(disk.config_path()).unwrap(),
+            }
+            let svc = disk.start();
+            let (class, reason) = refused(svc.set_root(&disk.at("new"), true).unwrap_err());
+            assert_eq!(
+                (class, reason.code.as_str()),
+                (RefusalClass::Unavailable, LIBRARY_CONFIG_READ_ONLY),
+                "unreadable: {unreadable}"
+            );
+            assert!(
+                unreadable || reason.args["why"].as_str().unwrap().contains("newer"),
+                "{reason:?}"
+            );
+            assert!(!disk.at("new").exists(), "nothing was created");
+            match unreadable {
+                false => assert_eq!(std::fs::read_to_string(disk.config_path()).unwrap(), newer),
+                true => assert!(disk.config_path().is_dir()),
+            }
+            let status = svc.status();
+            assert!(
+                matches!(status.config, ConfigHealth::ReadOnly { .. }),
+                "{status:?}"
+            );
+            assert_eq!((status.root_setting, status.root), (None, None));
+            assert_eq!(svc.first_start(), FirstStart::NotDue);
+        }
+    }
+
+    #[test]
+    fn set_root_with_create_makes_the_folder_and_its_ancestors() {
+        let disk = OnDisk::new(&["a/b/c"], "library", None);
+        let svc = disk.start();
+        svc.set_root(&disk.at("a/b/c"), true).unwrap();
+        assert!(disk.at("a/b/c").is_dir());
+        assert_eq!(svc.status().root, Some(disk.at("a/b/c")));
+    }
+
+    #[test]
+    fn a_set_root_with_create_whose_create_fails_is_root_unusable_with_nothing_published_or_written(
+    ) {
+        let disk = OnDisk::new(&["blocker/lib"], "library", None);
+        std::fs::write(disk.temp.path().join("blocker"), "a file").unwrap();
+        let svc = disk.start();
+        let (class, reason) = refused(svc.set_root(&disk.at("blocker/lib"), true).unwrap_err());
+        assert_eq!(
+            (class, reason.code.as_str()),
+            (RefusalClass::Unavailable, LIBRARY_ROOT_UNUSABLE)
+        );
+        assert_eq!(
+            reason.args["path"],
+            json!(disk.at("blocker/lib").display().to_string())
+        );
+        assert!(disk.config().is_none(), "nothing written");
+        assert_eq!(svc.status().root, None, "nothing published");
+        assert_eq!(svc.numbers().root, ROOT_BASE, "no root change ran");
+    }
+
+    #[test]
+    fn a_set_root_whose_stat_is_refused_publishes_nothing_and_writes_nothing() {
+        for old in [None, Some("lib")] {
+            let disk = OnDisk::new(&["lib", "gone"], "library", None);
+            if let Some(old) = old {
+                std::fs::write(disk.config_path(), disk.explicit(old)).unwrap();
+            }
+            let svc = disk.start();
+            let before = svc.status();
+            lock(&disk.ops.0).insert(disk.at("gone"), FolderStatus::Missing);
+            let (class, reason) = refused(svc.set_root(&disk.at("gone"), false).unwrap_err());
+            assert_eq!(
+                (class, reason.code.as_str()),
+                (RefusalClass::Unavailable, LIBRARY_ROOT_UNUSABLE),
+                "{old:?}"
+            );
+            assert_eq!(
+                reason.args,
+                json!({ "path": disk.at("gone").display().to_string(), "why": reason.args["why"] }),
+                "{old:?}: path and why only"
+            );
+            assert!(
+                reason.args["why"].as_str().unwrap().contains("missing"),
+                "{old:?}: {reason:?}"
+            );
+            match old {
+                None => assert!(disk.config().is_none(), "no file is written"),
+                Some(old) => assert_eq!(
+                    std::fs::read_to_string(disk.config_path()).unwrap(),
+                    disk.explicit(old),
+                    "the file keeps its setting"
+                ),
+            }
+            let after = svc.status();
+            assert_eq!(
+                (
+                    after.root,
+                    after.root_setting,
+                    after.config,
+                    after.root_generation
+                ),
+                (
+                    before.root,
+                    before.root_setting,
+                    before.config,
+                    before.root_generation
+                ),
+                "{old:?}: nothing published, the state as before"
+            );
+        }
+    }
+
+    #[test]
+    fn a_set_root_whose_walk_fails_at_the_root_leaves_library_json_as_it_was() {
+        let disk = OnDisk::new(&["lib", "lib2"], "library", None);
+        let old = disk.explicit("lib");
+        std::fs::write(disk.config_path(), &old).unwrap();
+        disk.mem("lib").file("a.md", "a");
+        let svc = disk.start();
+        svc.list(None).unwrap();
+        disk.mem("lib2").fail_listing("", ListFailure::Open);
+        let reason = refused(svc.set_root(&disk.at("lib2"), false).unwrap_err()).1;
+        assert_eq!(reason.code, LIBRARY_ROOT_UNUSABLE);
+        assert_eq!(
+            std::fs::read_to_string(disk.config_path()).unwrap(),
+            old,
+            "the exact old bytes"
+        );
+        assert_eq!(svc.status().root, Some(disk.at("lib")));
+        assert_eq!(svc.numbers().root, ROOT_BASE);
+        assert_eq!(paths(&svc.list(None).unwrap()), ["a.md"]);
+    }
+
+    #[test]
+    fn a_library_json_write_refused_or_failed_after_the_publish_leaves_the_new_root_live_and_unsaved(
+    ) {
+        let default_doc = r#"{"schema_version": 1, "root": "default"}"#;
+        for judged in [true, false] {
+            let disk = OnDisk::new(&["library", "lib2"], "library", Some(default_doc));
+            disk.mem("lib2").file("b.md", "b");
+            let svc = disk.start();
+            match judged {
+                // Unreadable now (a folder in its place): the judge before the write refuses.
+                true => {
+                    std::fs::remove_file(disk.config_path()).unwrap();
+                    std::fs::create_dir(disk.config_path()).unwrap();
+                }
+                false => svc.config.fail_writes(Some("disk full")),
+            }
+            let (class, reason) = refused(svc.set_root(&disk.at("lib2"), false).unwrap_err());
+            assert_eq!(
+                (class, reason.code.as_str()),
+                (RefusalClass::Unavailable, LIBRARY_CONFIG_WRITE_FAILED),
+                "judged: {judged}"
+            );
+            let why = reason.args["why"].as_str().unwrap();
+            assert!(why.contains("live but not saved"), "{why}");
+            assert!(judged || why.contains("disk full"), "{why}");
+            match judged {
+                true => assert!(disk.config_path().is_dir(), "left as it was"),
+                false => assert_eq!(
+                    std::fs::read_to_string(disk.config_path()).unwrap(),
+                    default_doc,
+                    "the file keeps its setting"
+                ),
+            }
+            let status = svc.status();
+            assert_eq!(
+                (
+                    status.root.clone(),
+                    status.root_setting,
+                    status.root_generation
+                ),
+                (
+                    Some(disk.at("lib2")),
+                    Some(RootSettingKind::Explicit),
+                    ROOT_BASE + 1
+                ),
+                "judged: {judged}: the new root is live and nothing was undone"
+            );
+            assert!(
+                matches!(&status.config, ConfigHealth::Unsaved { why } if !why.is_empty()),
+                "{status:?}"
+            );
+            assert_eq!(paths(&svc.list(None).unwrap()), ["b.md"]);
+            if !judged {
+                assert_eq!(
+                    disk.start().status().root,
+                    Some(disk.at("library")),
+                    "the next start follows the file that is left"
+                );
+                svc.config.fail_writes(None);
+                let status = svc.set_root(&disk.at("lib2"), false).unwrap();
+                assert_eq!(
+                    status.config,
+                    ConfigHealth::Ok,
+                    "a later save clears unsaved"
+                );
+                assert_eq!(word(&disk), json!(disk.at("lib2").to_str().unwrap()));
+            }
+        }
+    }
+
+    #[test]
+    fn a_failed_save_over_a_corrupt_file_is_unsaved_not_corrupt_and_the_next_start_follows_the_corrupt_file(
+    ) {
+        let disk = OnDisk::new(&["library", "lib2"], "library", Some("not json"));
+        let svc = disk.start();
+        svc.config.fail_writes(Some("disk full"));
+        let reason = refused(svc.set_root(&disk.at("lib2"), false).unwrap_err()).1;
+        assert_eq!(reason.code, LIBRARY_CONFIG_WRITE_FAILED);
+        assert_eq!(
+            std::fs::read_to_string(disk.config_path()).unwrap(),
+            "not json"
+        );
+        let status = svc.status();
+        assert!(
+            matches!(&status.config, ConfigHealth::Unsaved { .. }),
+            "the live state wins: {status:?}"
+        );
+        assert_eq!(
+            (status.root, status.root_setting),
+            (Some(disk.at("lib2")), Some(RootSettingKind::Explicit)),
+            "root and setting describe the live root"
+        );
+        let next = disk.start().status();
+        assert_eq!(
+            (next.root, next.root_setting, next.config),
+            (None, None, ConfigHealth::Corrupt)
+        );
+    }
+
+    /// Waits (at most 10 s) until a root-change take has found the mutex held.
+    fn wait_blocked(svc: &LibraryService) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while svc
+            .root_change_blocked
+            .load(std::sync::atomic::Ordering::SeqCst)
+            == 0
+        {
+            assert!(
+                Instant::now() < deadline,
+                "no set_root waited on the root-change mutex"
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn set_root_calls_serialize_across_the_root_change_and_the_library_json_write() {
+        let disk = OnDisk::new(&["lib", "a", "b"], "library", None);
+        std::fs::write(disk.config_path(), disk.explicit("lib")).unwrap();
+        let svc = disk.start();
+        svc.list(None).unwrap();
+        let (a, b) = (disk.at("a"), disk.at("b"));
+        disk.store.hold_at(At::Start, a.to_str().unwrap());
+        let first = {
+            let a = a.clone();
+            on_thread(&svc, move |svc| svc.set_root(&a, false))
+        };
+        disk.store.wait_held();
+        disk.store.hold_at(At::Start, b.to_str().unwrap());
+        let second = {
+            let b = b.clone();
+            on_thread(&svc, move |svc| svc.set_root(&b, false))
+        };
+        wait_blocked(&svc);
+        svc.gate
+            .wait_for("only the first root change is in line", |line, _| {
+                line == [("root", true)]
+            });
+        assert_eq!(
+            word(&disk),
+            json!(disk.at("lib").to_str().unwrap()),
+            "nothing is written before a publish"
+        );
+        disk.store.release();
+        join(first).unwrap();
+        assert_eq!(
+            word(&disk),
+            json!(a.to_str().unwrap()),
+            "the first wrote after its publish"
+        );
+        disk.store.wait_held();
+        assert_eq!(
+            word(&disk),
+            json!(a.to_str().unwrap()),
+            "the second walks only after the first's write"
+        );
+        disk.store.release();
+        join(second).unwrap();
+        assert_eq!(word(&disk), json!(b.to_str().unwrap()));
+        assert_eq!(svc.status().root, Some(b));
+    }
+
+    // ── first start ──────────────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn the_first_start_creates_the_default_place_writes_the_default_value_and_publishes_it() {
+        let disk = OnDisk::new(&["library"], "library", None);
+        let svc = disk.start();
+        assert_eq!(svc.first_start(), FirstStart::Published);
+        assert!(disk.at("library").is_dir());
+        assert_eq!(
+            disk.config(),
+            Some(json!({ "schema_version": 1, "root": "default" })),
+            "the default value, not the path"
+        );
+        let status = svc.status();
+        assert_eq!(
+            (
+                status.root,
+                status.root_setting,
+                status.state,
+                status.config
+            ),
+            (
+                Some(disk.at("library")),
+                Some(RootSettingKind::Default),
+                RootStatus::Ok,
+                ConfigHealth::Ok
+            )
+        );
+        assert!(svc.list(None).unwrap().rows.is_empty());
+        assert_eq!(svc.first_start(), FirstStart::NotDue, "once");
+        assert_eq!(
+            disk.start().first_start(),
+            FirstStart::NotDue,
+            "the next start"
+        );
+    }
+
+    #[test]
+    fn an_uncreatable_default_place_leaves_the_root_unset_and_no_file_and_the_next_start_retries() {
+        let disk = OnDisk::new(&["blocker/library"], "blocker/library", None);
+        std::fs::write(disk.temp.path().join("blocker"), "a file").unwrap();
+        let svc = disk.start();
+        assert!(matches!(svc.first_start(), FirstStart::Failed(_)));
+        assert!(disk.config().is_none());
+        let status = svc.status();
+        assert_eq!(
+            (
+                status.root,
+                status.root_setting,
+                status.state,
+                status.config
+            ),
+            (
+                None,
+                Some(RootSettingKind::Default),
+                RootStatus::Unset,
+                ConfigHealth::Ok
+            )
+        );
+        std::fs::remove_file(disk.temp.path().join("blocker")).unwrap();
+        let next = disk.start();
+        assert_eq!(next.first_start(), FirstStart::Published);
+        assert_eq!(next.status().root, Some(disk.at("blocker/library")));
+    }
+
+    #[test]
+    fn a_first_start_whose_root_change_is_refused_writes_nothing_and_the_next_start_retries() {
+        let disk = OnDisk::new(&["library"], "library", None);
+        lock(&disk.ops.0).insert(
+            disk.at("library"),
+            FolderStatus::Unreadable("denied".to_owned()),
+        );
+        let svc = disk.start();
+        assert!(matches!(svc.first_start(), FirstStart::Failed(why) if why.contains("denied")));
+        assert!(disk.config().is_none());
+        assert_eq!(svc.status().root, None);
+        assert_eq!(svc.numbers().root, ROOT_BASE);
+        lock(&disk.ops.0).clear();
+        assert_eq!(disk.start().first_start(), FirstStart::Published);
+    }
+
+    #[test]
+    fn a_first_start_whose_write_fails_keeps_the_default_root_live_unsaved_and_the_next_start_runs_it_again(
+    ) {
+        let disk = OnDisk::new(&["library"], "library", None);
+        let svc = disk.start();
+        svc.config.fail_writes(Some("disk full"));
+        assert!(matches!(svc.first_start(), FirstStart::Unsaved(why) if why.contains("disk full")));
+        assert!(disk.config().is_none(), "no file");
+        let status = svc.status();
+        assert_eq!(
+            (
+                status.root.clone(),
+                status.root_setting,
+                status.state.clone()
+            ),
+            (
+                Some(disk.at("library")),
+                Some(RootSettingKind::Default),
+                RootStatus::Ok
+            ),
+            "the default root is live this run"
+        );
+        assert!(
+            matches!(&status.config, ConfigHealth::Unsaved { .. }),
+            "{status:?}"
+        );
+        assert_eq!(svc.first_start(), FirstStart::NotDue, "once a run");
+        let next = disk.start();
+        assert_eq!(
+            next.first_start(),
+            FirstStart::Published,
+            "no file is left: the first start runs again"
+        );
+        assert_eq!(
+            disk.config(),
+            Some(json!({ "schema_version": 1, "root": "default" }))
+        );
+        assert_eq!(next.status().root, Some(disk.at("library")));
+    }
+
+    #[test]
+    fn a_first_start_that_finds_a_newer_file_at_its_write_stays_live_and_the_next_start_is_read_only(
+    ) {
+        let disk = OnDisk::new(&["library", "lib2"], "library", None);
+        let svc = disk.start();
+        let newer = r#"{"schema_version": 9, "root": "default"}"#;
+        std::fs::write(disk.config_path(), newer).unwrap();
+        assert!(matches!(svc.first_start(), FirstStart::Unsaved(why) if why.contains("newer")));
+        assert_eq!(std::fs::read_to_string(disk.config_path()).unwrap(), newer);
+        assert_eq!(svc.status().root, Some(disk.at("library")));
+        let next = disk.start();
+        assert_eq!(next.first_start(), FirstStart::NotDue);
+        let status = next.status();
+        assert_eq!(status.root, None);
+        assert!(
+            matches!(&status.config, ConfigHealth::ReadOnly { .. }),
+            "{status:?}"
+        );
+        let reason = refused(next.set_root(&disk.at("lib2"), false).unwrap_err()).1;
+        assert_eq!(reason.code, LIBRARY_CONFIG_READ_ONLY);
+    }
+
+    #[test]
+    fn a_configured_root_that_vanished_is_missing_not_recreated_and_the_setting_is_unchanged() {
+        for root in ["library", "chosen"] {
+            let disk = OnDisk::new(&["library", "chosen"], "library", None);
+            let config = match root {
+                "library" => r#"{"schema_version": 1, "root": "default"}"#.to_owned(),
+                _ => disk.explicit(root),
+            };
+            std::fs::write(disk.config_path(), &config).unwrap();
+            lock(&disk.ops.0).insert(disk.at(root), FolderStatus::Missing);
+            let svc = disk.start();
+            assert_eq!(svc.first_start(), FirstStart::NotDue, "{root}");
+            let status = svc.status();
+            assert_eq!(status.root, Some(disk.at(root)), "{root}");
+            assert_eq!(
+                status.state,
+                RootStatus::Missing {
+                    why: "missing".to_owned()
+                },
+                "{root}"
+            );
+            assert!(!disk.at(root).exists(), "{root}: never re-created");
+            assert_eq!(
+                std::fs::read_to_string(disk.config_path()).unwrap(),
+                config,
+                "{root}"
+            );
+            let setting = match root {
+                "library" => RootSettingKind::Default,
+                _ => RootSettingKind::Explicit,
+            };
+            assert_eq!(status.root_setting, Some(setting), "{root}");
+        }
+    }
+
+    #[test]
+    fn a_corrupt_config_is_no_first_start_and_a_set_root_over_it_copies_it_aside_and_makes_it_ok() {
+        let disk = OnDisk::new(&["library", "lib2"], "library", Some("not json"));
+        let svc = disk.start();
+        assert_eq!(svc.first_start(), FirstStart::NotDue);
+        let status = svc.status();
+        assert_eq!(
+            (status.root, status.root_setting, status.config),
+            (None, None, ConfigHealth::Corrupt)
+        );
+        let status = svc.set_root(&disk.at("lib2"), false).unwrap();
+        assert_eq!(status.config, ConfigHealth::Ok);
+        assert_eq!(status.root_setting, Some(RootSettingKind::Explicit));
+        assert_eq!(
+            std::fs::read_to_string(disk.state().join("library.json.corrupt")).unwrap(),
+            "not json"
+        );
+    }
+
+    // ── the root generation on a change ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn a_stale_root_generation_is_refused_inside_the_changes_own_lock_take_even_when_queued_behind_a_root_change(
+    ) {
+        let (svc, store) = service_on(&["/lib", "/lib2"], Some("/lib"));
+        svc.list(None).unwrap();
+        let given = svc.status().root_generation;
+        store.hold_at(At::Start, "/lib2");
+        let root_change = on_thread(&svc, |svc| svc.change_root(PathBuf::from("/lib2")));
+        store.wait_held();
+        let ran = Arc::new(Mutex::new(false));
+        let edit = {
+            let ran = Arc::clone(&ran);
+            on_thread(&svc, move |svc| {
+                svc.change_at(Some(given), |_, _, _| {
+                    *lock(&ran) = true;
+                    ((), Vec::new())
+                })
+            })
+        };
+        svc.gate
+            .wait_for("the edit is queued behind the root change", |line, _| {
+                line == [("root", true), ("change", false)]
+            });
+        store.release();
+        join(root_change).unwrap();
+        let changes = svc.numbers().change;
+        let (class, reason) = refused(join(edit).unwrap_err());
+        assert_eq!(
+            (class, reason.code.as_str(), reason.args.clone()),
+            (
+                RefusalClass::Conflict,
+                ROOT_GENERATION_STALE,
+                json!({ "given": given, "current": given + 1 })
+            )
+        );
+        assert!(!*lock(&ran), "nothing applied");
+        assert_eq!(svc.numbers().change, changes, "no generation moved");
+        let current = svc.status().root_generation;
+        let root = svc.change_at(Some(current), |_, root, _| {
+            (root.map(Path::to_path_buf), Vec::new())
+        });
+        assert_eq!(root.unwrap(), Some(PathBuf::from("/lib2")));
+        assert!(svc.change_at(None, |_, _, _| ((), Vec::new())).is_ok());
+        assert_eq!(svc.numbers().change, changes + 2);
+    }
+
+    #[test]
+    fn a_generation_kept_from_an_earlier_run_with_another_base_is_refused() {
+        let disk = OnDisk::new(&["lib", "lib2"], "library", None);
+        let first = disk.start_at(ROOT_BASE);
+        let kept = first
+            .set_root(&disk.at("lib"), false)
+            .unwrap()
+            .root_generation;
+        let next = disk.start_at(ROOT_BASE + 50_000);
+        assert_eq!(next.status().root_generation, ROOT_BASE + 50_000);
+        let moved = next
+            .set_root(&disk.at("lib2"), false)
+            .unwrap()
+            .root_generation;
+        assert_eq!(moved, ROOT_BASE + 50_001, "one root change in each run");
+        let (class, reason) = refused(
+            next.change_at(Some(kept), |_, _, _| ((), Vec::new()))
+                .unwrap_err(),
+        );
+        assert_eq!(
+            (class, reason.code.as_str()),
+            (RefusalClass::Conflict, ROOT_GENERATION_STALE),
+            "a generation kept from the earlier run is stale"
+        );
+        assert!(next
+            .change_at(Some(moved), |_, _, _| ((), Vec::new()))
+            .is_ok());
+    }
+
+    // ── folders · read ───────────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn folders_answers_every_folder_by_path_and_marks_skill_folders() {
+        let (svc, store) = library();
+        let mem = store.mem("/lib");
+        mem.file("rules/a.md", "a");
+        mem.file("deep/er/x.md", "x");
+        mem.file(
+            "skills/s/SKILL.md",
+            "---\nname: s\ndescription: does s\n---\nbody\n",
+        );
+        let answer = svc.folders().unwrap();
+        let tree: Vec<(&str, &str, bool)> = answer
+            .folders
+            .iter()
+            .map(|node| (node.path.as_str(), node.name.as_str(), node.skill))
+            .collect();
+        assert_eq!(
+            tree,
+            [
+                ("deep", "deep", false),
+                ("deep/er", "er", false),
+                ("rules", "rules", false),
+                ("skills", "skills", false),
+                ("skills/s", "s", true),
+            ]
+        );
+    }
+
+    #[test]
+    fn folders_and_read_answer_library_unavailable_with_no_published_root() {
+        let (svc, _store) = service_on(&["/lib"], None);
+        for refusal in [
+            svc.folders().unwrap_err(),
+            svc.read(&lp("a.md")).unwrap_err(),
+        ] {
+            let (class, reason) = refused(refusal);
+            assert_eq!(
+                (class, reason.code.as_str()),
+                (RefusalClass::Unavailable, LIBRARY_UNAVAILABLE)
+            );
+        }
+    }
+
+    #[test]
+    fn read_answers_the_row_absolute_path_direct_and_indirect_references_excerpt_and_settings_fields(
+    ) {
+        let store = TestStore::new(&["/lib"]);
+        let top_agent = agent(&["top.yaml"]);
+        let mut inner_agent = agent(&["inner.yaml"]);
+        inner_agent.name = "b".to_owned();
+        let svc = service(
+            Some("/lib"),
+            &store,
+            vec![top_agent.clone(), inner_agent.clone()],
+            Arc::new(StatOps::default()),
+            Arc::new(ThreadSpawn),
+        );
+        let mem = store.mem("/lib");
+        let rules = "# Rules\n\nKeep it short.\n";
+        mem.file("rules/a.md", rules);
+        mem.file(
+            "inner.yaml",
+            "kind: preset\nversion: 1\ninstructions:\n  - rules/a.md\n",
+        );
+        mem.file(
+            "top.yaml",
+            "kind: preset\nversion: 1\npresets:\n  - inner.yaml\n",
+        );
+        mem.file(
+            "set.yaml",
+            "kind: settings\nversion: 1\nclaude: {}\ncodex: {}\n",
+        );
+
+        let a = svc.read(&lp("rules/a.md")).unwrap();
+        assert_eq!(a.row.path, "rules/a.md");
+        assert_eq!(
+            (a.row.kind.clone(), a.row.references),
+            (ItemKind::Instruction, 2)
+        );
+        assert_eq!(a.absolute, lp("rules/a.md").to_path(Path::new("/lib")));
+        assert_eq!(a.presets_direct, ["inner.yaml"]);
+        assert_eq!(a.presets_indirect, ["top.yaml"]);
+        assert!(a.agents_direct.is_empty());
+        let mut both = vec![top_agent.id, inner_agent.id];
+        both.sort_unstable();
+        assert_eq!(a.agents_indirect, both);
+        assert_eq!(a.excerpt, Some(excerpt(rules)));
+        assert!(a.settings_fields.is_empty());
+
+        let inner = svc.read(&lp("inner.yaml")).unwrap();
+        assert_eq!(inner.presets_direct, ["top.yaml"]);
+        assert!(inner.presets_indirect.is_empty());
+        assert_eq!(inner.agents_direct, [inner_agent.id]);
+        assert_eq!(inner.agents_indirect, [top_agent.id]);
+        assert_eq!(inner.row.references, 2);
+        assert_eq!(inner.excerpt, None);
+
+        let settings = svc.read(&lp("set.yaml")).unwrap();
+        assert_eq!(settings.settings_fields, ["claude", "codex"]);
+
+        let (class, reason) = refused(svc.read(&lp("missing.md")).unwrap_err());
+        assert_eq!(
+            (class, reason.code.as_str()),
+            (RefusalClass::NotFound, NOT_FOUND)
+        );
+        assert_eq!(reason.args, json!({ "path": "missing.md" }));
     }
 }

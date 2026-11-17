@@ -272,11 +272,22 @@ async fn live(root: &Path, library: Option<PathBuf>) -> Live {
     let profiles = Arc::new(ProfileRegistry::new(Arc::new(FileProfileStore::new(
         root.join("store"),
     ))));
+    // The library root as production reads it: `library.json` in the scene's state folder, naming `library`; no file
+    //   (and no first start) leaves the root unset.
+    let state = root.join("state");
+    if let Some(library) = &library {
+        std::fs::create_dir_all(&state).expect("create the state folder");
+        let config = serde_json::json!({ "schema_version": 1, "root": library.to_str().unwrap() });
+        std::fs::write(state.join("library.json"), config.to_string()).expect("write library.json");
+    }
     let library = Arc::new(LibraryService::new(
         LibraryValues {
             registry: profiles.clone(),
             backends: Arc::new(AgentBackends),
-            root: library,
+            config: engram_dashboard_asset_library::config::load(&state),
+            default_root: root.join("default-library"),
+            daemon_id: Uuid::new_v4().to_string(),
+            root_generation_base: 1,
             builtin_dir: Some(repo_builtin()),
             launch_root: root.join("launch"),
             home: Some(root.join("home")),

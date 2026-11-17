@@ -19,6 +19,7 @@ pub mod data_dir;
 #[cfg(feature = "test-harness")]
 pub mod experiment;
 mod file_hooks;
+pub mod identity;
 pub mod instance;
 mod link;
 #[cfg(test)]
@@ -51,6 +52,7 @@ use connection_core::MultiViewState;
 use data_dir::{ensure_data_dir_writable, DataLayout};
 use engram_dashboard_agent::usage::{OsProbeSpawner, ProbeSpawner, UsageProbe};
 use engram_dashboard_asset_library::backends::AgentBackends;
+use engram_dashboard_asset_library::config::LibraryConfig;
 use engram_dashboard_asset_library::folder::{
     BoundedIo, LaunchWaits, StdFolderOps, ThreadSpawn, IO_LIMIT, LIST_CAP,
 };
@@ -80,15 +82,34 @@ use crate::portfile::DAEMON_FILE;
 
 // ── data dir / 토큰 ──────────────────────────────────────────────────────────────
 
-fn resolve_data_dir() -> PathBuf {
-    data_dir::default_data_dir()
-}
-
 /// 보안: 반환값은 로그에 찍지 말 것(daemon.json 에만 기록).
 pub fn generate_token() -> Result<String, getrandom::Error> {
     let mut buf = [0u8; 32];
     getrandom::getrandom(&mut buf)?;
     Ok(engram_dashboard_base::text::hex_lower(&buf))
+}
+
+/// The root generation a run's library service starts at ([`LibraryStart::root_generation_base`]): random below 2^52,
+/// so the base plus a run's root changes stays an exact JSON number and a generation kept from an earlier run does not
+/// match. Should the OS source fail (the boot token draws from it first and stops the daemon then), std's per-process
+/// random hash keys stand in — never the clock.
+// ADR-0381
+pub fn root_generation_base() -> u64 {
+    const BELOW: u64 = 1 << 52;
+    let mut buf = [0u8; 8];
+    let drawn = match getrandom::getrandom(&mut buf) {
+        Ok(()) => u64::from_le_bytes(buf),
+        Err(e) => {
+            tracing::warn!(
+                "root generation base: OS random source failed; using std hash keys: {e}"
+            );
+            use std::hash::{BuildHasher, Hasher};
+            std::collections::hash_map::RandomState::new()
+                .build_hasher()
+                .finish()
+        }
+    };
+    drawn % BELOW
 }
 
 // ── 제어 평면 CLI 위치 탐색 (ADR-0086 스텝 2 · F1) ─────────────────────────────────
@@ -192,9 +213,9 @@ struct DaemonWiring {
     /// `manager` 의 status sink 사슬이 관측을 넘기는 그 서비스 — 연결 계층이 구독·⟳ 를 같은 것에 건다.
     usage: Arc<UsageService>,
     /// The library service plugged in as `manager`'s launch-kit source — the same one, for the library commands.
-    /// `None` = the Noop kits (the test server). No production code reads it yet.
+    /// `None` = the Noop kits (the test server). Production reads it only for the first-start step
+    /// ([`build_daemon_wiring`]).
     // ADR-0311
-    #[cfg_attr(not(test), allow(dead_code))]
     library: Option<Arc<LibraryService>>,
 }
 
@@ -219,7 +240,7 @@ fn build_daemon_wiring(
     idle_coalescer: Arc<messaging_host::IdleCoalescer>,
 ) -> DaemonWiring {
     let state_dir = layout.daemon_state_dir();
-    let profile_store = Arc::new(FileProfileStore::new(state_dir));
+    let profile_store = Arc::new(FileProfileStore::new(state_dir.clone()));
     let scratch_root = layout.usage_probe_dir();
     // ★이 쓸기의 안전은 시점에 기댄다★ — 인스턴스 잠금을 쥔 **뒤**(다른 데몬이 같은 폴더에서 조회 중일 수
     //   없다)이고 스케줄러·조회가 하나도 뜨기 **전**(제 조회의 폴더를 지우지 않는다)이다. 잠금 앞이나
@@ -230,7 +251,13 @@ fn build_daemon_wiring(
     //   could have its fresh folder removed.
     let launch_root = layout.launch_dir();
     engram_dashboard_asset_library::launch::sweep_launch_dir(&launch_root);
-    build_daemon_wiring_with_store(
+    let start = LibraryStart {
+        config: engram_dashboard_asset_library::config::load(&state_dir),
+        default_root: layout.default_library_root(),
+        daemon_id: identity::load_or_create(&state_dir),
+        root_generation_base: root_generation_base(),
+    };
+    let wiring = build_daemon_wiring_with_store(
         profile_store,
         UsageInputs {
             probes: engram_dashboard_agent::backend::usage_probes().to_vec(),
@@ -241,11 +268,21 @@ fn build_daemon_wiring(
         Some(LaunchInputs {
             launch_root,
             builtin_dir: data_dir::find_builtin_dir(),
+            start,
         }),
         control,
         flush_tx,
         idle_coalescer,
-    )
+    );
+    // After the service is built and before `run()` sets the command table, so no command meets a first start
+    //   halfway; production only — the test server builds no service. The step logs its own failure or unsaved root.
+    // ADR-0375
+    // ADR-0381
+    if let Some(library) = &wiring.library {
+        let outcome = library.first_start();
+        tracing::debug!(?outcome, "library first start");
+    }
+    wiring
 }
 
 /// What the launch kits take from outside the assembly — production passes it ([`build_daemon_wiring`]); the test
@@ -255,6 +292,21 @@ struct LaunchInputs {
     launch_root: PathBuf,
     /// The built-in assets folder (`data_dir::find_builtin_dir`); `None` = none could be found.
     builtin_dir: Option<PathBuf>,
+    start: LibraryStart,
+}
+
+/// The root setting, the identity and the root generation base a library service starts with
+/// ([`LibraryValues::config`] · [`LibraryValues::default_root`] · [`LibraryValues::daemon_id`] ·
+/// [`LibraryValues::root_generation_base`]).
+pub struct LibraryStart {
+    /// `asset_library::config::load` over the daemon state folder — read before the service is built.
+    pub config: LibraryConfig,
+    /// `DataLayout::default_library_root`.
+    pub default_root: PathBuf,
+    /// `identity::load_or_create`.
+    pub daemon_id: String,
+    /// [`root_generation_base`], drawn once per run.
+    pub root_generation_base: u64,
 }
 
 /// The home folder and environment a library service reads the native skill roots through
@@ -274,25 +326,31 @@ impl LibraryHost {
     }
 }
 
-/// The library service the daemon launches through — no library root (nothing is scanned until one is configured),
-/// the production folder waits. `builtin_dir` = the built-in assets folder (`None` = there is none), `launch_root` =
-/// the volatile launch folder. The one builder for production wiring and the harness bin `roundtrip-smoke`, so the two
-/// cannot drift.
+/// The library service the daemon launches through, over the production folder waits. `builtin_dir` = the built-in
+/// assets folder (`None` = there is none), `launch_root` = the volatile launch folder, `start` = the root setting read
+/// from `library.json` and the daemon identity. Building it does no disk work beyond the built-ins; the first-start
+/// step is the caller's ([`build_daemon_wiring`]). The one builder for production wiring and the harness bin
+/// `roundtrip-smoke`, so the two cannot drift.
 // ADR-0311
 // ADR-0360
 // ADR-0368
 // ADR-0370
+// ADR-0375
 pub fn build_library_service(
     registry: Arc<ProfileRegistry>,
     builtin_dir: Option<PathBuf>,
     launch_root: PathBuf,
     host: LibraryHost,
+    start: LibraryStart,
 ) -> LibraryService {
     LibraryService::new(
         LibraryValues {
             registry,
             backends: Arc::new(AgentBackends),
-            root: None,
+            config: start.config,
+            default_root: start.default_root,
+            daemon_id: start.daemon_id,
+            root_generation_base: start.root_generation_base,
             builtin_dir,
             launch_root,
             home: host.home,
@@ -359,6 +417,7 @@ fn build_daemon_wiring_with_store(
                 inputs.builtin_dir,
                 inputs.launch_root,
                 LibraryHost::process(),
+                inputs.start,
             ));
             let manager = manager.with_launch_ports(LaunchPorts {
                 kits: library.clone(),
@@ -518,7 +577,7 @@ pub async fn run() -> Result<(), i32> {
     // 0) ★data_dir 해석이 로깅보다 먼저다★ — 파일 로그가 그 폴더 안에 살기 때문이다. 이 함수는
     //    순수(env 조회 + 경로 조립)라 로깅 없이 돌려도 잃는 줄이 없다. 이 순서를 뒤집으면
     //    아래 1)~2) 의 기동 실패가 다시 stdout 으로만 가고, 릴리즈에서 stdout 은 아무 데도 없다.
-    let layout = DataLayout::new(resolve_data_dir());
+    let layout = DataLayout::resolve();
     let data_dir = layout.root().to_path_buf();
 
     // 0.1) 파일 로그 → 패닉 훅.
@@ -1156,6 +1215,13 @@ mod tests {
     }
 
     #[test]
+    fn root_generation_bases_are_random_below_2_pow_52() {
+        let bases: Vec<u64> = (0..4).map(|_| root_generation_base()).collect();
+        assert!(bases.iter().all(|&base| base < 1 << 52), "{bases:?}");
+        assert!(bases.windows(2).any(|pair| pair[0] != pair[1]), "{bases:?}");
+    }
+
+    #[test]
     fn tokens_are_unique() {
         let a = generate_token().unwrap();
         let b = generate_token().unwrap();
@@ -1279,6 +1345,77 @@ mod tests {
         assert!(kit.instructions_hash.is_some());
     }
 
+    /// ★The production assembly reads the root setting and the identity from the state folder and runs the first
+    /// start★: over a fresh data folder the default place `<data>\library` is created, `library.json` holds the
+    /// setting at its default value, the kept service publishes that root, and its status carries the id
+    /// `identity.json` holds. A second assembly over the same folder keeps both, and starts at another root generation
+    /// base: after the same number of root changes, the first run's generation is stale.
+    #[test]
+    fn the_production_wiring_runs_the_first_start_over_the_state_folder() {
+        use engram_dashboard_asset_library::{RootSettingKind, RootStatus};
+
+        let temp = std::env::temp_dir().join(format!("engram-wiring-{}", uuid::Uuid::new_v4()));
+        let layout = DataLayout::new(&temp);
+        let state = layout.daemon_state_dir();
+        // `kept` = a generation from an earlier run, tried after one root change of this run (the first run's
+        //   first start made one).
+        let status_of = |layout: &DataLayout, kept: Option<u64>| {
+            let wiring = production_wiring(layout);
+            let library = wiring
+                .library
+                .as_ref()
+                .expect("production plugs the library");
+            let kept_accepted = kept.map(|kept| {
+                library
+                    .set_root(&layout.default_library_root(), false)
+                    .expect("re-set the same root");
+                library
+                    .change_at(Some(kept), |_, _, _| ((), Vec::new()))
+                    .is_ok()
+            });
+            let status = library.status();
+            wiring.manager.shutdown_all();
+            (status, kept_accepted)
+        };
+        let (first, _) = status_of(&layout, None);
+        let config: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(state.join("library.json")).unwrap())
+                .unwrap();
+        let identity: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(state.join("identity.json")).unwrap())
+                .unwrap();
+        let library_made = temp.join("library").is_dir();
+        let (second, kept_accepted) = status_of(&layout, Some(first.root_generation));
+        let _ = std::fs::remove_dir_all(&temp);
+
+        assert!(library_made);
+        assert_eq!(
+            config,
+            serde_json::json!({ "schema_version": 1, "root": "default" })
+        );
+        assert_eq!(first.root, Some(temp.join("library")));
+        assert_eq!(first.root, Some(layout.default_library_root()));
+        assert_eq!(
+            (first.state.clone(), first.root_setting),
+            (RootStatus::Ok, Some(RootSettingKind::Default))
+        );
+        assert_eq!(
+            identity["daemon_id"].as_str(),
+            Some(first.daemon_id.as_str())
+        );
+        assert_ne!(second.root_generation, first.root_generation);
+        assert_eq!(
+            kept_accepted,
+            Some(false),
+            "a generation kept from the earlier run is stale"
+        );
+        assert_eq!(
+            (second.root, second.daemon_id),
+            (first.root, first.daemon_id),
+            "the next start reads both back"
+        );
+    }
+
     /// The production assembly over `layout`. ★Built inside a log capture★ — a boot log callsite is then hit only inside
     /// one ([`log_capture`] 「관측 조건」 ①).
     fn production_wiring(layout: &DataLayout) -> DaemonWiring {
@@ -1296,8 +1433,9 @@ mod tests {
 
     /// ★The production manager launches through the very library service the wiring keeps★ (the Noop kits, or a
     /// second service, would pass every other non-ignored test): a claude agent with a library preset and no library
-    /// root is refused by the manager with the library's block, before the add; once the kept service moves to a root
-    /// without that preset, the manager's refusal follows it. A cwd that does not exist — no process is spawned.
+    /// root (a corrupt `library.json` leaves it unset) is refused by the manager with the library's block, before the
+    /// add; once the kept service moves to a root without that preset, the manager's refusal follows it. A cwd that
+    /// does not exist — no process is spawned.
     #[test]
     fn the_production_manager_launches_through_the_kept_library_service() {
         use engram_dashboard_agent::launch::BlockReason;
@@ -1310,6 +1448,8 @@ mod tests {
         let layout = DataLayout::new(&temp);
         let library_root = temp.join("library");
         std::fs::create_dir_all(&library_root).unwrap();
+        std::fs::create_dir_all(layout.daemon_state_dir()).unwrap();
+        std::fs::write(layout.daemon_state_dir().join("library.json"), "not json").unwrap();
         let wiring = production_wiring(&layout);
         let mut profile = AgentProfile::new(
             "wired-preset".into(),

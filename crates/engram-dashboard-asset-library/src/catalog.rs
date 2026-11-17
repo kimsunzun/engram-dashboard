@@ -393,6 +393,11 @@ impl Catalog {
         self.folders.values()
     }
 
+    /// Every item, in no order.
+    pub fn items(&self) -> impl Iterator<Item = &Item> {
+        self.items.values().map(Arc::as_ref)
+    }
+
     /// The tag and racy mark of every item in `range` (`None` = all) — what [`ScanResult::build`] compares against.
     pub fn tags(&self, range: Option<&LibPath>) -> HashMap<PathKey, (ContentTag, bool)> {
         self.items

@@ -171,7 +171,8 @@ const FIELD_INVALID: &str = "field-invalid";
 pub(crate) const MULTI_DOCUMENT: &str = "preset-multi-document";
 const ITEM_SHAPE_INVALID: &str = "item-shape-invalid";
 /// An item spelling that is not a library reference: the reader answers `args {list, index, path (raw), why}`; an
-/// unparsed attached path (resolve) answers `args {path (controls escaped), why}`.
+/// unparsed attached path (resolve) and a `set_root` path that is not absolute answer `args {path (controls escaped),
+/// why}`.
 pub(crate) const ITEM_PATH_INVALID: &str = "item-path-invalid";
 const BACKEND_TAG_UNKNOWN: &str = "backend-tag-unknown";
 const BACKEND_TAG_NOT_ALLOWED: &str = "backend-tag-not-allowed";

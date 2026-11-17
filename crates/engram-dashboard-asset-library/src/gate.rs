@@ -19,7 +19,9 @@
 //! - **Numbers**: a scan's apply raises the swap-in count, a change the change generation, a root change the root
 //!   generation — each inside its write lock. A scan applies only if the change generation has not moved since its
 //!   walk started (else it walks again). A late merge applies only if neither generation moved since the caller noted
-//!   them before its disk read; if only the swap-in count moved it may update items but not insert paths.
+//!   them before its disk read; if only the swap-in count moved it may update items but not insert paths. A change
+//!   given a root generation compares it inside its own write-lock take; a stale one writes and raises nothing
+//!   ([`Gate::change_checked`] — ADR-0377).
 //! - **First scan**: "raised" = one full scan or one root change has been applied. A reader starts one or waits for one
 //!   pending; a reader whose waited-for scan was not published goes through once more, and that failure is its answer.
 //! - **Refresh merging**: a refresh joins a covering scan generation that is queued and not yet walking; a covering
@@ -67,7 +69,8 @@ pub struct State {
 pub struct Numbers {
     /// Raised by every change, inside its write lock.
     pub change: u64,
-    /// Raised by every root change, inside the write lock that publishes the new root.
+    /// Raised by every root change, inside the write lock that publishes the new root; starts at the per-run base
+    /// the daemon passes (`Gate::new`), not 0, and is compared only for equality (ADR-0381).
     pub root: u64,
     /// Raised by every scan's apply.
     pub swap_ins: u64,
@@ -220,7 +223,8 @@ impl Drop for Turn<'_> {
 }
 
 impl Gate {
-    pub(crate) fn new(root: Option<PathBuf>) -> Self {
+    /// `root_generation` = the root generation this run starts at (`Numbers::root`).
+    pub(crate) fn new(root: Option<PathBuf>, root_generation: u64) -> Self {
         Gate {
             lib: RwLock::new(State {
                 catalog: Arc::new(Catalog::default()),
@@ -231,7 +235,7 @@ impl Gate {
                 line: VecDeque::new(),
                 numbers: Numbers {
                     change: 0,
-                    root: 0,
+                    root: root_generation,
                     swap_ins: 0,
                 },
                 first: First::default(),
@@ -323,20 +327,45 @@ impl Gate {
     /// A change (TRD S25 step-7 §6 writer 5): its own ticket, then `f` under the write lock with the catalog, the root
     /// and the sequence (a removal draws its number there, so it is later than every read noted before). `f` writes
     /// per item and returns the touched keys; their derived data is recomputed and the change generation is raised
-    /// before the write lock is released. `f` may call the profile edit port and read the profile registry — nothing
+    /// before the write lock is released. `f` may read the profile registry and do the change's own disk IO — nothing
     /// else outward (ADR-0324 decision 1). The change's disk effect must be finished inside `f` (or before the call).
     pub(crate) fn change<R>(
         &self,
         f: impl FnOnce(&mut Catalog, Option<&Path>, &dyn Fn() -> u64) -> (R, Vec<PathKey>),
     ) -> R {
+        match self.change_checked(None, f) {
+            Ok(answer) => answer,
+            Err(_) => unreachable!("a change given no root generation is never stale"),
+        }
+    }
+
+    /// [`Gate::change`] that first compares `given` (`None` = any) with the root generation inside the same write-lock
+    /// take, so a root change queued before it is seen. `Err(current)` = stale: `f` is not called and no generation
+    /// moves.
+    // ADR-0377
+    pub(crate) fn change_checked<R>(
+        &self,
+        given: Option<u64>,
+        f: impl FnOnce(&mut Catalog, Option<&Path>, &dyn Fn() -> u64) -> (R, Vec<PathKey>),
+    ) -> Result<R, u64> {
         let _turn = self.take_turn(Kind::Change);
         let mut state = write(&self.lib);
+        let current = lock(&self.turns).numbers.root;
+        if let Some(given) = given.filter(|&given| given != current) {
+            drop(state);
+            tracing::debug!(
+                given,
+                current,
+                "library change: root generation stale; refused"
+            );
+            return Err(current);
+        }
         let State { catalog, root } = &mut *state;
         let catalog = Arc::make_mut(catalog);
         let (answer, touched) = f(catalog, root.as_deref(), &|| self.next_seq());
         catalog.recompute_derived(&touched);
         lock(&self.turns).numbers.change += 1;
-        answer
+        Ok(answer)
     }
 
     /// The root change (TRD S25 step-7 §6 writer 6, steps 1–4): exclusive from its ticket to its publish; `walk` builds
@@ -759,8 +788,11 @@ mod tests {
         }
     }
 
+    /// The root generation the test gates start at — not 0, so an absolute value cannot pass by chance.
+    const BASE: u64 = 7_000;
+
     fn gate() -> Arc<Gate> {
-        Arc::new(Gate::new(Some(PathBuf::from("/lib"))))
+        Arc::new(Gate::new(Some(PathBuf::from("/lib")), BASE))
     }
 
     /// A gate whose first scan is already raised, so a folder refresh scans only its folder.
@@ -924,7 +956,7 @@ mod tests {
         join(root_change).unwrap();
         assert_eq!(join(change), Some(PathBuf::from("/new")));
         assert_eq!(log.take(), ["root walked", "c enters"]);
-        assert_eq!(gate.numbers().root, 1);
+        assert_eq!(gate.numbers().root, BASE + 1);
     }
 
     #[test]
@@ -938,7 +970,7 @@ mod tests {
             gate.with_read(|state| state.root.clone()),
             Some(PathBuf::from("/lib"))
         );
-        assert_eq!(gate.numbers().root, 0);
+        assert_eq!(gate.numbers().root, BASE);
         join(change_thread(&gate, &log, "c", None));
         assert_eq!(log.take(), ["c enters"]);
     }

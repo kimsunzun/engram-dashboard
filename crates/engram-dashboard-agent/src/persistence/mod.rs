@@ -124,11 +124,13 @@ const DATA_HOOKS: OsHooks = OsHooks {
     sync_dir,
 };
 
-/// 적재 읽기 — 따로 긴 예산을 쓴다.
-// ADR-0291 R14 (D7): 거기서 남은 잠김은 이 실행 내내 읽기 전용이 되므로(R17) 잠깐 쥐기 하나가 실행 전체를 묶지
-//   않게 길게 둔다. 위 끝은 셸의 데몬 찾기 마감(5 초 — 실패면 재시도 없이 `Down`)이 정한다: 적재는 접속 정보
-//   발행 앞이라 두 파일 합 최악 약 2 초면 기동의 나머지 몫이 남는다.
-const LOAD_HOOKS: OsHooks = OsHooks {
+/// The load-read budget — longer than the data-file one. Every data file the daemon reads once at boot uses it: this
+/// store's file, asset-library `library.json` and daemon `identity.json`.
+// ADR-0291 R14 (D7): a lock still held after it makes the file read-only for the whole run (R17), so it is long enough
+//   that one brief hold does not bind the run. The upper end is the shell's daemon-discovery deadline (5 s — on
+//   failure `Down` with no retry): the boot loads run before the connection record is published, about 1 s each in
+//   the worst case, about 3 s for the three files, which leaves the rest of the boot its share.
+pub const LOAD_HOOKS: OsHooks = OsHooks {
     retry: retry_load,
     sync_dir,
 };
