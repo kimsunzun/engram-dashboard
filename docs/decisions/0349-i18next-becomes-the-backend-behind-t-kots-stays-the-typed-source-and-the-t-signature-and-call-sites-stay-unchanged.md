@@ -1,7 +1,7 @@
 # ADR-0349: i18next becomes the backend behind t(); ko.ts stays the typed source and the t() signature and call sites stay unchanged
 
-- 상태: 확정 (2026-11-08, basis: user decision 「ㅇㅇ 교체하고」 after the research report below)
-- 관련: Amends ADR-0069 (full i18n deferred) · `src/i18n/` · `docs/research/i18n-oss-library-reevaluation-2026-11-07.md` · ADR-0055 (command registry, LLM addresses commands by id) · step-log S35
+- 상태: 확정 (2026-11-08, basis: user decision 「ㅇㅇ 교체하고」 after the research report below) · 부분 폐기 by ADR-0372 (ko.ts as the source, Korean only, Rust strings excluded)
+- 관련: Amends ADR-0069 (full i18n deferred) · `src/i18n/` · `docs/research/i18n-oss-library-reevaluation-2026-11-07.md` · ADR-0055 (command registry, LLM addresses commands by id) · step-log S35 · Amended by ADR-0372 (ko.ts as the source, Korean only, Rust strings excluded)
 
 ## 맥락
 ADR-0069 centralized UI strings into `src/i18n/` (`ko.ts` table + a typed `t(key, params?)`) and deferred full i18n (react-i18next) as YAGNI, "deferred, not discarded". The user now wants real localization later (Korean stays the default, English added later) and prefers an OSS library over growing the home-made layer. The home-made backend only looks a key up in `ko.ts` and fills `{name}` placeholders; it has no plurals, language switching or fallback.
