@@ -13,7 +13,7 @@ import { t } from '../../i18n'
 /** If a value's age **exceeds** this many seconds it is shown as an old value (R32) — exactly 1800 seconds is still a new value. */
 export const STALE_AFTER_SECS = 1800
 
-/** Locale for printing times — the phrase table (`i18n/ko.ts`) is a single Korean sheet, so match the same locale. */
+/** Locale for printing times. Fixed to Korean for now — it does not follow the UI language yet (ADR-0373 decision 2). */
 export const USAGE_LOCALE = 'ko-KR'
 
 export type UsageLevel = 'ok' | 'warn' | 'danger' | 'none'

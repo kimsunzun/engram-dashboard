@@ -1,8 +1,9 @@
 // Type assertions are gated by tsc, not the runtime — that is the `@ts-expect-error` in the 「컴파일 타임 회귀 방어」 (compile-time regression defense) block below.
 
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { __test__, t } from './index'
+import { en } from './en'
+import { __test__, getLanguage, isLang, setLanguage, subscribeLanguage, t, type Translation } from './index'
 import { ko } from './ko'
 
 describe('t() — 중앙 문자열 조회', () => {
@@ -133,6 +134,194 @@ describe('t() — 보간 엣지(값 재스캔·정규식 특수문자·문법)',
       }
     }
   })
+
+  it('en table values have no malformed or unmatched braces (FIX③ contract dev-guard)', () => {
+    for (const [ns, group] of Object.entries(en)) {
+      for (const [key, value] of Object.entries(group as Record<string, string>)) {
+        expect(hasMalformedBrace(value), `${ns}.${key} has a malformed or unmatched brace: ${value}`).toBe(false)
+      }
+    }
+  })
+})
+
+describe('en ↔ ko tables at run time', () => {
+  // The type gate in ko.ts misses a `ko` value widened to `string` (a variable, a cast) when its `en` value has no token,
+  //   and an `en` value that is itself widened. This scan holds whatever the values are.
+  const tokens = (value: string): string[] => [...new Set([...value.matchAll(/\{(\w+)\}/g)].map(m => m[1]))].sort()
+
+  it('every key has the same {word} token set in en and ko', () => {
+    const koGroups = ko as unknown as Record<string, Record<string, string>>
+    for (const [ns, group] of Object.entries(en as unknown as Record<string, Record<string, string>>)) {
+      for (const [key, value] of Object.entries(group)) {
+        const koValue = koGroups[ns]?.[key]
+        expect(typeof koValue, `${ns}.${key} in ko`).toBe('string')
+        expect(tokens(koValue ?? ''), `${ns}.${key}`).toEqual(tokens(value))
+      }
+    }
+  })
+})
+
+describe('en table — runtime immutability (FIX E)', () => {
+  it('is deep-frozen', () => {
+    expect(Object.isFrozen(en)).toBe(true)
+    expect(Object.isFrozen(en.tab)).toBe(true)
+  })
+})
+
+describe('UI language (ADR-0372 · ADR-0373)', () => {
+  // The setup file starts every test file in Korean; each case here leaves it that way.
+  afterEach(() => {
+    setLanguage('ko')
+    document.documentElement.lang = 'ko'
+  })
+
+  /** A fresh copy of the module graph, booted from whatever `<html lang>` holds now. */
+  async function bootFresh(): Promise<typeof import('./index')> {
+    vi.resetModules()
+    return import('./index')
+  }
+
+  it('boots in English when <html lang> holds nothing', async () => {
+    document.documentElement.removeAttribute('lang')
+    const fresh = await bootFresh()
+    expect(fresh.getLanguage()).toBe('en')
+    expect(fresh.t('tab.create')).toBe('New tab')
+  })
+
+  it('boots in English when <html lang> holds an unknown value', async () => {
+    document.documentElement.lang = 'ko-KR'
+    const fresh = await bootFresh()
+    expect(fresh.getLanguage()).toBe('en')
+  })
+
+  it('boots in Korean when <html lang="ko"> is planted', async () => {
+    document.documentElement.lang = 'ko'
+    const fresh = await bootFresh()
+    expect(fresh.getLanguage()).toBe('ko')
+    expect(fresh.t('tab.create')).toBe('새 탭')
+  })
+
+  it('a module-scope t() right after import already resolves (synchronous init)', async () => {
+    document.documentElement.lang = 'ko'
+    vi.resetModules()
+    const { MODULE_SCOPE_TITLE } = await import('./moduleScopeTitle.fixture')
+    expect(MODULE_SCOPE_TITLE).toBe('새 탭')
+  })
+
+  it('setLanguage changes t() output, updates <html lang> and notifies once', () => {
+    const listener = vi.fn()
+    const unsubscribe = subscribeLanguage(listener)
+    try {
+      setLanguage('en')
+      expect(getLanguage()).toBe('en')
+      expect(t('tab.create')).toBe('New tab')
+      expect(t('tab.close', { name: 'X' })).toBe('Close tab: X')
+      expect(document.documentElement.lang).toBe('en')
+      expect(listener).toHaveBeenCalledTimes(1)
+
+      setLanguage('ko')
+      expect(t('tab.create')).toBe('새 탭')
+      expect(document.documentElement.lang).toBe('ko')
+      expect(listener).toHaveBeenCalledTimes(2)
+    } finally {
+      unsubscribe()
+    }
+  })
+
+  it('setLanguage with the current value does nothing', () => {
+    const listener = vi.fn()
+    const unsubscribe = subscribeLanguage(listener)
+    try {
+      document.documentElement.lang = 'marker'
+      setLanguage('ko')
+      expect(listener).not.toHaveBeenCalled()
+      expect(document.documentElement.lang).toBe('marker')
+    } finally {
+      unsubscribe()
+    }
+  })
+
+  it('setLanguage rejects a value that is not a known language and changes nothing', () => {
+    const listener = vi.fn()
+    const unsubscribe = subscribeLanguage(listener)
+    const setAny = setLanguage as (lang: string) => boolean
+    try {
+      document.documentElement.lang = 'marker'
+      expect(setAny('fr')).toBe(false)
+      expect(setAny('KO')).toBe(false)
+      expect(getLanguage()).toBe('ko')
+      expect(t('tab.create')).toBe('새 탭')
+      expect(document.documentElement.lang).toBe('marker')
+      expect(listener).not.toHaveBeenCalled()
+
+      expect(setLanguage('ko')).toBe(true) // The current value — accepted, nothing to do.
+      expect(setLanguage('en')).toBe(true)
+      expect(listener).toHaveBeenCalledTimes(1)
+    } finally {
+      unsubscribe()
+    }
+  })
+
+  it('isLang accepts exactly en and ko', () => {
+    expect(isLang('en')).toBe(true)
+    expect(isLang('ko')).toBe(true)
+    for (const other of ['', 'fr', 'KO', 'ko-KR', ' en', null, undefined, 1]) expect(isLang(other)).toBe(false)
+  })
+
+  it('a direct changeLanguage on the instance does not split the miss check and the lookup', () => {
+    const { i18n } = __test__
+    try {
+      void i18n.changeLanguage('en')
+      expect(t('tab.create')).toBe('새 탭')
+    } finally {
+      void i18n.changeLanguage('ko')
+    }
+  })
+
+  it('an unsubscribed listener is not called', () => {
+    const listener = vi.fn()
+    subscribeLanguage(listener)()
+    setLanguage('en')
+    expect(listener).not.toHaveBeenCalled()
+  })
+
+  it('params named like i18next options (count, lng, context, defaultValue, ns) are plain values', () => {
+    expect(t('chat.queuedMore', { count: '3' })).toBe('외 3개')
+    const call = t as unknown as (k: string, p: Record<string, string>) => string
+    expect(call('tab.close', { name: 'X', lng: 'en' })).toBe('탭 닫기: X')
+    expect(call('tab.create', { context: 'c', defaultValue: 'd', ns: 'other', count: '2' })).toBe('새 탭')
+  })
+
+  it('<b>& in a param is not escaped', () => {
+    expect(t('tab.close', { name: '<b>&' })).toBe('탭 닫기: <b>&')
+  })
+
+  it('a bare namespace or a key that is not exactly ns.key returns the key unchanged', () => {
+    const call = t as unknown as (k: string) => string
+    expect(call('tab')).toBe('tab')
+    expect(call('tab.')).toBe('tab.')
+    expect(call('.close')).toBe('.close')
+    expect(call('tab.close.extra')).toBe('tab.close.extra')
+    expect(call('tab.constructor')).toBe('tab.constructor')
+  })
+
+  describe('values no table holds (planted on the instance and restored)', () => {
+    const { i18n } = __test__
+    const original = ko.tab.create
+    afterEach(() => {
+      i18n.addResource('ko', 'translation', 'tab.create', original)
+    })
+
+    it('$t(...) in a value stays literal (no nesting)', () => {
+      i18n.addResource('ko', 'translation', 'tab.create', 'pre $t(tab.closeCmd) post')
+      expect(t('tab.create')).toBe('pre $t(tab.closeCmd) post')
+    })
+
+    it('an empty value returns an empty string', () => {
+      i18n.addResource('ko', 'translation', 'tab.create', '')
+      expect(t('tab.create')).toBe('')
+    })
+  })
 })
 
 describe('ko 테이블 — 런타임 불변(FIX E)', () => {
@@ -176,3 +365,44 @@ function __typeGate__(): void {
   t('tab.close', { other: 'x' })
 }
 void __typeGate__ // Reference only — no real call.
+
+// ADR-0372: a translated table must have exactly the keys of `en` and, per key, the same placeholder set. Each case derives a
+//   broken copy of the `ko` type; the control line shows the real `ko` passes, so the gate is not failing everything.
+type Ko = typeof ko
+type KoWithTab<Tab> = { readonly [N in keyof Ko]: N extends 'tab' ? Tab : Ko[N] }
+type MissingKey = KoWithTab<Omit<Ko['tab'], 'close'>>
+type ExtraKey = KoWithTab<Ko['tab'] & { readonly extra: '추가' }>
+type RenamedPlaceholder = KoWithTab<Omit<Ko['tab'], 'close'> & { readonly close: '탭 닫기: {title}' }>
+type DroppedPlaceholder = KoWithTab<Omit<Ko['tab'], 'close'> & { readonly close: '탭 닫기' }>
+type AddedPlaceholder = KoWithTab<Omit<Ko['tab'], 'create'> & { readonly create: '새 탭 {name}' }>
+type MissingNamespace = Omit<Ko, 'dialog'>
+type ExtraNamespace = Ko & { readonly extra: { readonly a: '가' } }
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- scope for type gate verification (never called)
+function __translationGate__(
+  missingKey: MissingKey,
+  extraKey: ExtraKey,
+  renamed: RenamedPlaceholder,
+  dropped: DroppedPlaceholder,
+  added: AddedPlaceholder,
+  missingNs: MissingNamespace,
+  extraNs: ExtraNamespace,
+): void {
+  ko satisfies Translation<Ko> // Control.
+
+  // @ts-expect-error tab.close is missing
+  missingKey satisfies Translation<MissingKey>
+  // @ts-expect-error tab.extra is not in en
+  extraKey satisfies Translation<ExtraKey>
+  // @ts-expect-error tab.close has {title} instead of {name}
+  renamed satisfies Translation<RenamedPlaceholder>
+  // @ts-expect-error tab.close lost {name}
+  dropped satisfies Translation<DroppedPlaceholder>
+  // @ts-expect-error tab.create gained {name}
+  added satisfies Translation<AddedPlaceholder>
+  // @ts-expect-error the dialog namespace is missing
+  missingNs satisfies Translation<MissingNamespace>
+  // @ts-expect-error the extra namespace is not in en
+  extraNs satisfies Translation<ExtraNamespace>
+}
+void __translationGate__ // Reference only — no real call.
