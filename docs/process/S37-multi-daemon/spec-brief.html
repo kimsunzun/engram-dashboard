@@ -1,0 +1,536 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>S37 멀티 데몬 큰 그림</title>
+<style>
+/* Layout: one reading column, each section = one diagram + a few lines under it.
+   Dark-first; light via prefers-color-scheme. Status encoding: new = accent blue, changed = amber, unchanged = grey. */
+:root {
+  --bg: #14161b;
+  --surface: #1c1f26;
+  --elevated: #252932;
+  --fg: #e6e8ee;
+  --muted: #9aa1b0;
+  --line: #3a404c;
+  --new: #7fb0ff;
+  --chg: #e7b65c;
+  --ok: #5fc98f;
+  --bad: #f06a6a;
+  --code-bg: #10131a;
+  --font-body: "Malgun Gothic", "Apple SD Gothic Neo", "Noto Sans KR", system-ui, sans-serif;
+  --font-mono: Consolas, "D2Coding", "JetBrains Mono", monospace;
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: #f5f6f9; --surface: #ffffff; --elevated: #eef0f5; --fg: #1b1e25; --muted: #5d6474;
+    --line: #cdd2dc; --new: #2a62c9; --chg: #a86f00; --ok: #1f8a54; --bad: #c93a3a;
+    --code-bg: #eef0f5; color-scheme: light;
+  }
+}
+:root[data-theme="light"] {
+  --bg: #f5f6f9; --surface: #ffffff; --elevated: #eef0f5; --fg: #1b1e25; --muted: #5d6474;
+  --line: #cdd2dc; --new: #2a62c9; --chg: #a86f00; --ok: #1f8a54; --bad: #c93a3a;
+  --code-bg: #eef0f5; color-scheme: light;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; overflow-x: hidden; }
+body { background: var(--bg); color: var(--fg); font-family: var(--font-body); font-size: 15px; line-height: 1.65; }
+.wrap { max-width: 980px; margin: 0 auto; padding-inline: 16px; padding-block: 36px 64px; display: grid; gap: 44px; }
+h1, h2 { line-height: 1.3; margin: 0; text-wrap: balance; }
+h1 { font-size: 26px; }
+h2 { font-size: 19px; }
+h2 .n { color: var(--new); margin-right: 8px; font-variant-numeric: tabular-nums; }
+p { margin: 0; max-width: 72ch; }
+section { display: grid; gap: 14px; min-width: 0; }
+.eyebrow { font-size: 12px; letter-spacing: .08em; color: var(--muted); }
+.draft { display: inline-block; font-size: 12.5px; padding: 1px 10px; border-radius: 10px; border: 1px solid var(--chg); color: var(--chg); font-weight: 600; }
+.lead { font-size: 17px; }
+.lead b { color: var(--new); }
+.muted { color: var(--muted); font-size: 13.5px; }
+code { font-family: var(--font-mono); font-size: 13px; background: var(--code-bg); padding: 1px 5px; border-radius: 4px; overflow-wrap: anywhere; }
+.star { color: var(--chg); font-weight: 700; }
+
+figure { margin: 0; display: grid; gap: 8px; min-width: 0; }
+.fig { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px; overflow-x: auto; }
+svg.d { display: block; width: 100%; min-width: 640px; height: auto; font-family: var(--font-body); }
+figcaption { font-size: 13.5px; color: var(--muted); }
+
+/* SVG vocabulary */
+svg .frame { fill: none; stroke: var(--muted); stroke-dasharray: 5 4; stroke-width: 1.2; }
+svg .dmn { fill: var(--bg); stroke: var(--muted); stroke-width: 1.3; }
+svg .box { fill: var(--elevated); stroke: var(--line); stroke-width: 1.3; }
+svg .box.new { stroke: var(--new); stroke-width: 2; }
+svg .box.chg { stroke: var(--chg); stroke-width: 2; }
+svg .box.ext { fill: var(--surface); stroke: var(--chg); stroke-dasharray: 5 3; stroke-width: 1.4; }
+svg .box.ok { stroke: var(--ok); stroke-width: 1.8; }
+svg .box.bad { stroke: var(--bad); stroke-width: 1.8; }
+svg .box.note { fill: var(--surface); stroke: var(--line); stroke-dasharray: 3 3; }
+svg .t { fill: var(--fg); font-size: 13.5px; font-weight: 700; }
+svg .s { fill: var(--muted); font-size: 12px; }
+svg .s.fg { fill: var(--fg); }
+svg .s.n { fill: var(--new); font-weight: 600; }
+svg .s.c { fill: var(--chg); font-weight: 600; }
+svg .s.g { fill: var(--ok); font-weight: 600; }
+svg .s.r { fill: var(--bad); font-weight: 600; }
+svg .xs { font-size: 11.5px; }
+svg .halo { paint-order: stroke; stroke: var(--surface); stroke-width: 5px; stroke-linejoin: round; }
+svg .mono { font-family: var(--font-mono); }
+svg .ln { stroke: var(--muted); stroke-width: 1.4; fill: none; }
+svg .ln.n { stroke: var(--new); stroke-width: 3; }
+svg .ln.n2 { stroke: var(--new); stroke-width: 1.8; }
+svg .ln.g { stroke: var(--ok); stroke-width: 1.8; }
+svg .ln.r { stroke: var(--bad); stroke-width: 1.8; }
+svg .ln.ret { stroke-dasharray: 5 4; }
+svg .ln.dot { stroke: var(--chg); stroke-width: 1.4; stroke-dasharray: 2 3; }
+svg .life { stroke: var(--line); stroke-width: 1.2; stroke-dasharray: 2 4; }
+svg .ah-m { fill: var(--muted); }
+svg .ah-n { fill: var(--new); }
+svg .ah-g { fill: var(--ok); }
+svg .ah-r { fill: var(--bad); }
+svg .dotc { fill: var(--muted); }
+svg .dotc.g { fill: var(--ok); }
+svg .sw-new { fill: var(--elevated); stroke: var(--new); stroke-width: 2; }
+svg .sw-chg { fill: var(--elevated); stroke: var(--chg); stroke-width: 2; }
+svg .sw-same { fill: var(--elevated); stroke: var(--line); stroke-width: 1.3; }
+
+/* Tables and chips */
+.tbl { border: 1px solid var(--line); border-radius: 8px; overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+th, td { text-align: left; vertical-align: top; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+td { overflow-wrap: anywhere; }
+th { background: var(--surface); font-weight: 600; font-size: 13px; color: var(--muted); white-space: nowrap; }
+tr:last-child td { border-bottom: 0; }
+td.k { font-weight: 600; white-space: nowrap; }
+td.u { white-space: nowrap; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+.chip { display: inline-block; font-size: 12px; padding: 0 8px; border-radius: 10px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+.chip.new { border-color: var(--new); color: var(--new); }
+.chip.chg { border-color: var(--chg); color: var(--chg); }
+tr.same td { color: var(--muted); }
+
+.results { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 8px; }
+.results > div { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; display: grid; gap: 2px; min-width: 0; }
+.results b { font-size: 14px; }
+.results span { font-size: 13px; color: var(--muted); }
+.results .g b { color: var(--ok); }
+.results .w b { color: var(--chg); }
+.results .r b { color: var(--bad); }
+
+.files { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }
+.files > div { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px 16px; display: grid; gap: 6px; min-width: 0; }
+.files h3 { margin: 0; font-size: 15px; }
+</style>
+</head>
+<body>
+<main class="wrap">
+
+<header style="display:grid;gap:10px">
+  <div class="eyebrow">engram-dashboard · S37 multi-daemon · 코딩 전 큰 그림</div>
+  <h1>S37 멀티 데몬 큰 그림</h1>
+  <p><span class="draft">PRD·TRD 초안 기준 (리뷰 전)</span> <span class="muted">— <code>prd.md</code> · <code>trd.md</code> draft 1 (2026-11-15). TRD는 PRD D1–D7의 ★ 기본값을 가정하고 쓰였다.</span></p>
+</header>
+
+<!-- 1 -->
+<section>
+  <h2><span class="n">1</span>한 줄</h2>
+  <p class="lead">내 PC끼리 <b>데몬이 iroh로 이어지고</b>, 에이전트 우편이 PC를 넘는다. 앱은 보여 주기만 하고, <b>연결·우편은 전부 데몬</b>이 한다.</p>
+  <p class="muted">데몬 = 시스템·LLM 실행, 앱(클라이언트) = 보여 주기. v1은 우편만 — 앱이 다른 PC의 데몬을 직접 보는 것은 다음 단계이고, 같은 링크 위에 구조 변경 없이 얹는다.</p>
+</section>
+
+<!-- 2 -->
+<section>
+  <h2><span class="n">2</span>전체 그림</h2>
+  <figure>
+    <div class="fig">
+      <svg class="d" viewBox="0 0 960 540" role="img" aria-label="PC-A와 PC-B. 각 PC에서 앱과 데몬은 기존 loopback으로 그대로 이어진다. 데몬 안에 link/peer와 iroh 어댑터가 새로 생기고, 두 데몬의 iroh 어댑터끼리 iroh 링크로 이어진다. messaging은 원격 분기가 추가되어 변경된다. 에이전트와 shell 연결은 그대로다.">
+        <defs>
+          <marker id="g-m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah-m" d="M0,0 L10,5 L0,10 z"/></marker>
+          <marker id="g-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path class="ah-n" d="M0,0 L10,5 L0,10 z"/></marker>
+        </defs>
+
+        <!-- PC-A -->
+        <rect class="frame" x="16" y="16" width="400" height="470" rx="10"/>
+        <text class="s" x="32" y="38">PC-A · 집 (예)</text>
+        <rect class="box chg" x="36" y="52" width="360" height="56" rx="6"/>
+        <text class="t" x="52" y="76">앱 (shell + frontend)</text>
+        <text class="s" x="52" y="96">보여 주기만 · PC 목록 패널 추가 (U4)</text>
+        <text class="s c" x="382" y="76" text-anchor="end">변경</text>
+        <line class="ln" x1="330" y1="110" x2="330" y2="204" marker-start="url(#g-m)" marker-end="url(#g-m)"/>
+        <text class="s" x="318" y="134" text-anchor="end">loopback WS — 그대로</text>
+        <text class="s" x="318" y="152" text-anchor="end">(앱용 PC 상태 방송 1종만 추가)</text>
+
+        <rect class="dmn" x="36" y="172" width="360" height="214" rx="8"/>
+        <text class="t" x="52" y="194">daemon</text>
+        <text class="s" x="118" y="194">연결·우편 전부 여기</text>
+        <rect class="box" x="52" y="206" width="328" height="40" rx="6"/>
+        <text class="s fg" x="66" y="231">link (shell 연결) · transport ws</text>
+        <text class="s" x="366" y="231" text-anchor="end">그대로</text>
+        <rect class="box chg" x="52" y="258" width="328" height="48" rx="6"/>
+        <text class="t" x="66" y="279">messaging</text>
+        <text class="s" x="66" y="297">원격 분기 · 원격 배달 포트 · 받는 한도</text>
+        <text class="s c" x="366" y="279" text-anchor="end">변경</text>
+        <rect class="box new" x="120" y="318" width="142" height="52" rx="6"/>
+        <text class="t" x="132" y="340">link/peer</text>
+        <text class="s" x="132" y="358">신규 · 키·목록·게이트</text>
+        <rect class="box new" x="272" y="318" width="108" height="52" rx="6"/>
+        <text class="t" x="284" y="340">iroh 어댑터</text>
+        <text class="s xs" x="284" y="358">신규 · transport</text>
+        <line class="ln n2" x1="190" y1="306" x2="190" y2="318"/>
+        <line class="ln n2" x1="262" y1="344" x2="272" y2="344"/>
+
+        <rect class="box" x="52" y="412" width="170" height="48" rx="6"/>
+        <text class="t" x="66" y="433">에이전트</text>
+        <text class="s" x="66" y="451">그대로 (agent crate)</text>
+        <line class="ln" x1="80" y1="306" x2="80" y2="410" marker-end="url(#g-m)"/>
+        <text class="s" x="88" y="400">우편 주입</text>
+
+        <!-- PC-B (mirror) -->
+        <rect class="frame" x="544" y="16" width="400" height="470" rx="10"/>
+        <text class="s" x="560" y="38">PC-B · 회사 (예)</text>
+        <rect class="box chg" x="564" y="52" width="360" height="56" rx="6"/>
+        <text class="t" x="580" y="76">앱 (shell + frontend)</text>
+        <text class="s" x="580" y="96">보여 주기만 · PC 목록 패널 추가 (U4)</text>
+        <text class="s c" x="910" y="76" text-anchor="end">변경</text>
+        <line class="ln" x1="630" y1="110" x2="630" y2="204" marker-start="url(#g-m)" marker-end="url(#g-m)"/>
+        <text class="s" x="642" y="134">loopback WS — 그대로</text>
+        <text class="s" x="642" y="152">(앱용 PC 상태 방송 1종만 추가)</text>
+
+        <rect class="dmn" x="564" y="172" width="360" height="214" rx="8"/>
+        <text class="t" x="580" y="194">daemon</text>
+        <text class="s" x="646" y="194">연결·우편 전부 여기</text>
+        <rect class="box" x="580" y="206" width="328" height="40" rx="6"/>
+        <text class="s fg" x="594" y="231">link (shell 연결) · transport ws</text>
+        <text class="s" x="894" y="231" text-anchor="end">그대로</text>
+        <rect class="box chg" x="580" y="258" width="328" height="48" rx="6"/>
+        <text class="t" x="594" y="279">messaging</text>
+        <text class="s" x="594" y="297">원격 분기 · 원격 배달 포트 · 받는 한도</text>
+        <text class="s c" x="894" y="279" text-anchor="end">변경</text>
+        <rect class="box new" x="580" y="318" width="108" height="52" rx="6"/>
+        <text class="t" x="592" y="340">iroh 어댑터</text>
+        <text class="s xs" x="592" y="358">신규 · transport</text>
+        <rect class="box new" x="698" y="318" width="142" height="52" rx="6"/>
+        <text class="t" x="710" y="340">link/peer</text>
+        <text class="s" x="710" y="358">신규 · 키·목록·게이트</text>
+        <line class="ln n2" x1="770" y1="306" x2="770" y2="318"/>
+        <line class="ln n2" x1="688" y1="344" x2="698" y2="344"/>
+
+        <rect class="box" x="738" y="412" width="170" height="48" rx="6"/>
+        <text class="t" x="752" y="433">에이전트</text>
+        <text class="s" x="752" y="451">그대로 (agent crate)</text>
+        <line class="ln" x1="880" y1="306" x2="880" y2="410" marker-end="url(#g-m)"/>
+        <text class="s" x="872" y="400" text-anchor="end">우편 주입</text>
+
+        <!-- between -->
+        <rect class="box ext" x="420" y="200" width="120" height="64" rx="6"/>
+        <text class="s fg" x="480" y="222" text-anchor="middle">relay · 주소 조회</text>
+        <text class="s xs" x="480" y="240" text-anchor="middle">n0 기본</text>
+        <text class="s xs" x="480" y="256" text-anchor="middle">내 서버로 교체 가능</text>
+        <line class="ln dot" x1="480" y1="264" x2="480" y2="312"/>
+        <line class="ln n" x1="382" y1="344" x2="578" y2="344" marker-start="url(#g-n)" marker-end="url(#g-n)"/>
+        <text class="t" x="480" y="332" text-anchor="middle">iroh 링크</text>
+        <text class="s" x="480" y="364" text-anchor="middle">암호화</text>
+        <text class="s" x="480" y="380" text-anchor="middle">키 = PC 신원</text>
+
+        <!-- legend -->
+        <rect class="sw-new" x="36" y="504" width="22" height="14" rx="3"/>
+        <text class="s fg" x="66" y="516">신규</text>
+        <rect class="sw-chg" x="130" y="504" width="22" height="14" rx="3"/>
+        <text class="s fg" x="160" y="516">변경</text>
+        <rect class="sw-same" x="224" y="504" width="22" height="14" rx="3"/>
+        <text class="s fg" x="254" y="516">그대로</text>
+        <rect class="box ext" x="332" y="504" width="22" height="14" rx="3"/>
+        <text class="s fg" x="362" y="516">외부 helper 서버 (직접 연결이 안 될 때 찾기·경유)</text>
+      </svg>
+    </div>
+    <figcaption>새로 생기는 길은 하나 — 데몬 안의 link/peer → iroh 어댑터 → 상대 데몬. 앱↔데몬 연결과 에이전트는 손대지 않는다. 같은 LAN이면 자동 발견(mDNS), 주소를 직접 적으면 helper 서버 없이도 붙는다.</figcaption>
+  </figure>
+</section>
+
+<!-- 3 -->
+<section>
+  <h2><span class="n">3</span>크레이트별 바뀌는 것</h2>
+  <div class="tbl">
+    <table>
+      <thead><tr><th>크레이트 / 자리</th><th>상태</th><th>바뀌는 것</th><th>단위</th></tr></thead>
+      <tbody>
+        <tr><td class="k">transport</td><td><span class="chip new">신규 모듈</span></td><td><code>iroh</code> feature (기본 꺼짐) + iroh 어댑터. iroh 타입은 이 모듈 밖으로 안 나간다 — 데몬은 iroh를 직접 모르고, 어댑터는 갈아 끼울 수 있다.</td><td class="u">U1</td></tr>
+        <tr><td class="k">daemon <code>link/peer/</code></td><td><span class="chip new">신규</span></td><td>신원 키 파일 · <code>peers.json</code> · PeerWire(데몬끼리 쓰는 메시지) · 수락 게이트 · 목록의 PC 전부에 dial · <code>peer.*</code> 명령. shell용 <code>link/</code> 옆에 따로 둔다.</td><td class="u">U2 · U3b</td></tr>
+        <tr><td class="k">messaging</td><td><span class="chip chg">변경</span></td><td>수신자 해석 지점 한 곳에 원격 분기 · 기다리지 않는 원격 배달 포트 · 받는 쪽 한도.</td><td class="u">U3a</td></tr>
+        <tr><td class="k">platform</td><td><span class="chip chg">변경</span></td><td>소유자만 읽을 수 있는 파일 쓰기 (신원 키용).</td><td class="u">U2</td></tr>
+        <tr><td class="k">protocol</td><td><span class="chip chg">추가만</span></td><td>앱에 PC 상태를 알리는 방송 1종. 데몬↔데몬 메시지는 여기 두지 않는다.</td><td class="u">U4</td></tr>
+        <tr><td class="k">shell · frontend</td><td><span class="chip chg">변경</span></td><td>PC 상태 방송 중계 · PC 목록 패널.</td><td class="u">U4</td></tr>
+        <tr class="same"><td class="k">agent · cli · base</td><td><span class="chip">그대로</span></td><td>cli의 보내기 경로도 그대로 — 원격 주소는 그냥 문자열이다.</td><td class="u">—</td></tr>
+        <tr class="same"><td class="k">shell↔daemon 링크</td><td><span class="chip">그대로</span></td><td>loopback 규칙 · <code>ShellWire</code> / <code>DaemonWire</code> 손대지 않음.</td><td class="u">—</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- 4 -->
+<section>
+  <h2><span class="n">4</span>우편 한 통</h2>
+  <figure>
+    <div class="fig">
+      <svg class="d" viewBox="0 0 960 610" role="img" aria-label="A의 에이전트가 name@pc 주소로 보내면 A messaging이 로컬을 먼저 찾고 없으면 원격으로 돌려 원격 배달 포트에 넘긴다. link/peer가 iroh 링크로 Mail을 보내고, B의 link/peer가 원격 입구로 넘기면 B messaging이 한도를 검사한 뒤 바로 전달하거나 보관한다. 판정이 같은 길로 돌아와 A 에이전트가 결과를 받는다.">
+        <defs>
+          <marker id="q-m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah-m" d="M0,0 L10,5 L0,10 z"/></marker>
+          <marker id="q-n" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path class="ah-n" d="M0,0 L10,5 L0,10 z"/></marker>
+        </defs>
+        <rect class="frame" x="8" y="8" width="462" height="594" rx="10"/>
+        <rect class="frame" x="490" y="8" width="462" height="594" rx="10"/>
+        <text class="s" x="24" y="28">PC-A (보내는 쪽)</text>
+        <text class="s" x="506" y="28">PC-B (받는 쪽)</text>
+
+        <!-- headers -->
+        <rect class="box" x="25" y="40" width="120" height="40" rx="6"/><text class="t" x="85" y="65" text-anchor="middle">에이전트</text>
+        <rect class="box chg" x="185" y="40" width="120" height="40" rx="6"/><text class="t" x="245" y="65" text-anchor="middle">messaging</text>
+        <rect class="box new" x="335" y="40" width="130" height="40" rx="6"/><text class="t" x="400" y="65" text-anchor="middle">link/peer · iroh</text>
+        <rect class="box new" x="495" y="40" width="130" height="40" rx="6"/><text class="t" x="560" y="65" text-anchor="middle">link/peer · iroh</text>
+        <rect class="box chg" x="655" y="40" width="120" height="40" rx="6"/><text class="t" x="715" y="65" text-anchor="middle">messaging</text>
+        <rect class="box" x="815" y="40" width="120" height="40" rx="6"/><text class="t" x="875" y="65" text-anchor="middle">에이전트</text>
+        <line class="life" x1="85" y1="80" x2="85" y2="592"/>
+        <line class="life" x1="245" y1="80" x2="245" y2="592"/>
+        <line class="life" x1="400" y1="80" x2="400" y2="592"/>
+        <line class="life" x1="560" y1="80" x2="560" y2="592"/>
+        <line class="life" x1="715" y1="80" x2="715" y2="592"/>
+        <line class="life" x1="875" y1="80" x2="875" y2="592"/>
+
+        <!-- 1 send -->
+        <text class="s fg" x="165" y="112" text-anchor="middle"><tspan class="mono">codex@office</tspan> 에게</text>
+        <line class="ln" x1="85" y1="120" x2="243" y2="120" marker-end="url(#q-m)"/>
+
+        <!-- 2 resolve -->
+        <rect class="box note" x="160" y="138" width="232" height="52" rx="5"/>
+        <text class="s fg xs" x="172" y="159">로컬에서 먼저 찾는다. 없고,</text>
+        <text class="s fg xs" x="172" y="178">@ 뒤가 목록의 PC 이름이면 → 원격</text>
+
+        <!-- 3 port -->
+        <text class="s fg" x="322" y="216" text-anchor="middle">원격 배달 포트</text>
+        <line class="ln" x1="245" y1="224" x2="398" y2="224" marker-end="url(#q-m)"/>
+        <text class="s r xs" x="392" y="250" text-anchor="end">링크가 없으면</text>
+        <text class="s r xs" x="392" y="267" text-anchor="end">즉시 「PC 꺼짐」 회신</text>
+
+        <!-- 4 mail over iroh -->
+        <text class="s n halo" x="480" y="296" text-anchor="middle">Mail (iroh 링크)</text>
+        <line class="ln n" x1="400" y1="306" x2="556" y2="306" marker-end="url(#q-n)"/>
+
+        <!-- 5 gate note -->
+        <rect class="box note" x="488" y="322" width="144" height="52" rx="5"/>
+        <text class="s fg xs" x="560" y="343" text-anchor="middle">보낸 PC = 링크의 키</text>
+        <text class="s xs" x="560" y="362" text-anchor="middle">(연결 때 게이트 통과)</text>
+
+        <!-- 6 to messaging -->
+        <text class="s fg" x="637" y="392" text-anchor="middle">원격 입구</text>
+        <line class="ln" x1="560" y1="400" x2="713" y2="400" marker-end="url(#q-m)"/>
+
+        <!-- 7 limits -->
+        <rect class="box note" x="628" y="414" width="176" height="62" rx="5"/>
+        <text class="s fg xs" x="716" y="434" text-anchor="middle">한도 검사 <tspan class="s c xs">★</tspan></text>
+        <text class="s xs" x="716" y="451" text-anchor="middle">PC당 60통/분 · 쌍당 12통/10분</text>
+        <text class="s xs" x="716" y="468" text-anchor="middle">본문 64KB</text>
+
+        <!-- 8 deliver -->
+        <text class="s fg" x="795" y="496" text-anchor="middle">바로 전달 / 보관</text>
+        <line class="ln" x1="715" y1="504" x2="873" y2="504" marker-end="url(#q-m)"/>
+        <text class="s xs" x="795" y="522" text-anchor="middle">잠듦·바쁨이면 보관 (로컬과 같음)</text>
+
+        <!-- 9 verdict back -->
+        <text class="s n halo" x="480" y="544" text-anchor="middle">MailVerdict (판정)</text>
+        <line class="ln n2 ret" x1="713" y1="552" x2="247" y2="552" marker-end="url(#q-n)"/>
+
+        <!-- 10 result -->
+        <text class="s fg" x="165" y="572" text-anchor="middle">결과 (아래 6가지)</text>
+        <line class="ln ret" x1="245" y1="580" x2="87" y2="580" marker-end="url(#q-m)"/>
+      </svg>
+    </div>
+    <figcaption>보내는 쪽은 로컬을 먼저 찾고, 없을 때만 PC를 넘긴다. 받는 쪽은 한도만 더 보고 나머지는 로컬 우편과 같은 길이다. 답장은 기존 reply로 같은 길을 거꾸로 탄다. (<code>codex@office</code>는 예시 주소 — 형식은 D2)</figcaption>
+  </figure>
+  <div class="results">
+    <div class="g"><b>전달됨</b><span>받는 에이전트에 들어감</span></div>
+    <div class="w"><b>보관됨</b><span>상대가 잠듦·바쁨 — 깨면 전달</span></div>
+    <div class="r"><b>거절</b><span>한도 초과 등, 이유가 같이 옴</span></div>
+    <div class="r"><b>받는 이 없음</b><span>그 PC에 그 이름이 없음</span></div>
+    <div class="r"><b>PC 꺼짐</b><span>링크 없음 — 바로 실패</span></div>
+    <div class="w"><b>미확인</b><span>8초 안에 판정 없음 — 갔을 수도 있으니 무작정 재전송 금지</span></div>
+  </div>
+  <p class="muted">v1은 자동 재전송이 없다.</p>
+</section>
+
+<!-- 5 -->
+<section>
+  <h2><span class="n">5</span>연결이 맺어지는 순간</h2>
+  <figure>
+    <div class="fig">
+      <svg class="d" viewBox="0 0 960 340" role="img" aria-label="B가 연결을 받으면 iroh가 확인한 상대 키를 읽는다. 목록에 없으면 데이터를 읽기 전에 거절하고, 있으면 링크를 유지한다. 양쪽이 동시에 걸면 작은 ID가 건 링크만 남기고, 끊기면 간격을 늘려 다시 건다.">
+        <defs>
+          <marker id="c-m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah-m" d="M0,0 L10,5 L0,10 z"/></marker>
+          <marker id="c-g" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah-g" d="M0,0 L10,5 L0,10 z"/></marker>
+          <marker id="c-r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah-r" d="M0,0 L10,5 L0,10 z"/></marker>
+        </defs>
+        <!-- gate flow -->
+        <rect class="box" x="20" y="30" width="160" height="50" rx="6"/>
+        <text class="t" x="100" y="60" text-anchor="middle">B가 연결을 받음</text>
+        <line class="ln" x1="180" y1="55" x2="216" y2="55" marker-end="url(#c-m)"/>
+        <rect class="box" x="218" y="30" width="200" height="50" rx="6"/>
+        <text class="t" x="318" y="52" text-anchor="middle">상대 키 읽기</text>
+        <text class="s xs" x="318" y="70" text-anchor="middle">iroh가 핸드셰이크에서 확인한 키</text>
+        <line class="ln" x1="418" y1="55" x2="452" y2="55" marker-end="url(#c-m)"/>
+        <polygon class="box chg" points="530,20 610,55 530,90 450,55"/>
+        <text class="t" x="530" y="60" text-anchor="middle">목록에 있나?</text>
+        <line class="ln g" x1="610" y1="55" x2="650" y2="55" marker-end="url(#c-g)"/>
+        <text class="s g" x="630" y="46" text-anchor="middle">예</text>
+        <rect class="box ok" x="652" y="30" width="288" height="50" rx="6"/>
+        <text class="t" x="668" y="52">링크 유지 → online</text>
+        <text class="s xs" x="668" y="70">PeerWire 인사 후 우편을 주고받는다</text>
+        <line class="ln r" x1="530" y1="90" x2="530" y2="120" marker-end="url(#c-r)"/>
+        <text class="s r" x="540" y="110">아니오</text>
+        <rect class="box bad" x="400" y="122" width="300" height="50" rx="6"/>
+        <text class="t" x="416" y="144">거절 — 데이터 한 바이트도 안 읽음</text>
+        <text class="s xs" x="416" y="162">거는 쪽은 재시도를 멈춘다 · B는 그 ID를 로그에</text>
+
+        <!-- tie-break -->
+        <rect class="frame" x="20" y="196" width="440" height="128" rx="8"/>
+        <text class="t" x="36" y="220">양쪽이 동시에 걸면 → 작은 ID가 건 링크만 남김</text>
+        <rect class="box" x="44" y="238" width="70" height="50" rx="6"/><text class="t" x="79" y="268" text-anchor="middle">A</text>
+        <rect class="box" x="366" y="238" width="70" height="50" rx="6"/><text class="t" x="401" y="268" text-anchor="middle">B</text>
+        <line class="ln g" x1="114" y1="250" x2="364" y2="250" marker-end="url(#c-g)"/>
+        <text class="s g xs" x="240" y="244" text-anchor="middle">A가 건 링크 — 유지</text>
+        <line class="ln ret" x1="366" y1="278" x2="116" y2="278" marker-end="url(#c-m)"/>
+        <line class="ln r" x1="232" y1="270" x2="248" y2="286"/><line class="ln r" x1="248" y1="270" x2="232" y2="286"/>
+        <text class="s r xs" x="240" y="304" text-anchor="middle">B가 건 링크 — 닫음</text>
+        <text class="s xs" x="36" y="316">(A의 ID가 더 작을 때)</text>
+
+        <!-- redial -->
+        <rect class="frame" x="500" y="196" width="440" height="128" rx="8"/>
+        <text class="t" x="516" y="220">끊기면 → 다시 건다</text>
+        <line class="ln" x1="530" y1="268" x2="910" y2="268"/>
+        <line class="ln r" x1="530" y1="260" x2="546" y2="276"/><line class="ln r" x1="546" y1="260" x2="530" y2="276"/>
+        <text class="s r xs" x="538" y="250" text-anchor="middle">끊김</text>
+        <circle class="dotc" cx="572" cy="268" r="5"/>
+        <circle class="dotc" cx="604" cy="268" r="5"/>
+        <circle class="dotc" cx="656" cy="268" r="5"/>
+        <circle class="dotc" cx="748" cy="268" r="5"/>
+        <circle class="dotc g" cx="888" cy="268" r="6"/>
+        <text class="s g xs" x="888" y="250" text-anchor="middle">다시 online</text>
+        <text class="s xs" x="516" y="300">간격을 늘려 재시도 (최대 60초) · 횟수 제한 없음</text>
+        <text class="s xs" x="516" y="316">한쪽 데몬이 재시작해도 같은 방식으로 돌아온다</text>
+      </svg>
+    </div>
+    <figcaption>누가 보냈는지는 연결 때 확인된 키로만 정한다 — 우편 안의 필드는 믿지 않는다. 목록에서 PC를 지우면 1초 안에 그 링크를 끊고 이후 연결도 거절한다. 믿는 PC가 하나도 없으면 iroh endpoint 자체를 켜지 않는다 (D7 ★).</figcaption>
+  </figure>
+</section>
+
+<!-- 6 -->
+<section>
+  <h2><span class="n">6</span>데몬에 생기는 파일 2개</h2>
+  <p class="muted">자리: 데몬 state 폴더 <code>&lt;data root&gt;\daemon\state\</code></p>
+  <div class="files">
+    <div>
+      <h3><code>peer-key</code> — 신원 키</h3>
+      <p>이 PC의 비밀 키. 공개 절반이 곧 PC ID다. 처음 필요할 때 한 번 만들고 다시 쓰지 않으며, 소유자만 읽을 수 있게 쓴다.</p>
+    </div>
+    <div>
+      <h3><code>peers.json</code> — 믿는 PC 목록 + 네트워크 설정</h3>
+      <p>믿는 PC(ID · 이름 · 선택 주소)와 포트 · relay · 주소 조회 · mDNS 설정. 앱 없이도 데몬이 혼자 연결해야 해서 데몬이 가진다.</p>
+    </div>
+  </div>
+</section>
+
+<!-- 7 -->
+<section>
+  <h2><span class="n">7</span>구현 순서</h2>
+  <figure>
+    <div class="fig">
+      <svg class="d" viewBox="0 0 960 260" role="img" aria-label="구현 순서. 위 줄은 U0 ADR, U1 iroh 어댑터, U2 신원·목록·peer 링크, U4 앱 패널, U5 PC 2대 실측. 아래 줄 U3a messaging 원격 분기는 U1·U2와 병행, U3b 데몬 배선은 U2 뒤. 각 단위 아래 걸린 미결정 항목.">
+        <defs>
+          <marker id="u-m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah-m" d="M0,0 L10,5 L0,10 z"/></marker>
+        </defs>
+        <!-- main track -->
+        <rect class="box" x="15" y="20" width="170" height="90" rx="6"/>
+        <text class="t" x="29" y="44">U0 · ADR 5개</text>
+        <text class="s" x="29" y="64">리뷰 뒤, 코딩 전</text>
+        <text class="s xs mono" x="29" y="96">결정 —</text>
+
+        <rect class="box new" x="200" y="20" width="170" height="90" rx="6"/>
+        <text class="t" x="214" y="44">U1 · iroh 어댑터</text>
+        <text class="s" x="214" y="64">데몬은 아직 안 씀</text>
+        <text class="s c xs mono" x="214" y="96">결정 D4 D6 X1</text>
+
+        <rect class="box new" x="385" y="20" width="170" height="90" rx="6"/>
+        <text class="t" x="399" y="44">U2 · peer 링크</text>
+        <text class="s" x="399" y="64">키 · 목록 · 게이트 · peer.*</text>
+        <text class="s c xs mono" x="399" y="96">결정 D1 D4 D6 D7 X1 X5</text>
+
+        <rect class="box chg" x="570" y="20" width="170" height="90" rx="6"/>
+        <text class="t" x="584" y="44">U4 · 앱 패널</text>
+        <text class="s" x="584" y="64">PC 목록 · 상태 방송</text>
+        <text class="s c xs mono" x="584" y="96">결정 X2</text>
+
+        <rect class="box" x="755" y="20" width="185" height="90" rx="6"/>
+        <text class="t" x="769" y="44">U5 · PC 2대 실측</text>
+        <text class="s" x="769" y="64">LAN · 집↔회사 · 방화벽</text>
+        <text class="s xs mono" x="769" y="96">결정 —</text>
+
+        <line class="ln" x1="185" y1="65" x2="198" y2="65" marker-end="url(#u-m)"/>
+        <line class="ln" x1="370" y1="65" x2="383" y2="65" marker-end="url(#u-m)"/>
+        <line class="ln" x1="555" y1="65" x2="568" y2="65" marker-end="url(#u-m)"/>
+        <line class="ln" x1="740" y1="65" x2="753" y2="65" marker-end="url(#u-m)"/>
+
+        <!-- U3 lane -->
+        <text class="s fg" x="15" y="150">U3 · 우편 동작</text>
+        <text class="s c xs mono" x="15" y="168">결정 D2 D3 D5 X3 X4</text>
+        <rect class="box chg" x="200" y="140" width="355" height="72" rx="6"/>
+        <text class="t" x="214" y="164">U3a · messaging 원격 분기</text>
+        <text class="s" x="214" y="186">messaging만 건드림 → U1·U2와 병행 가능</text>
+        <rect class="box new" x="570" y="140" width="170" height="72" rx="6"/>
+        <text class="t" x="584" y="164">U3b · 데몬 배선</text>
+        <text class="s" x="584" y="186">U2 뒤 (같은 폴더)</text>
+        <line class="ln" x1="555" y1="176" x2="568" y2="176" marker-end="url(#u-m)"/>
+        <line class="ln" x1="470" y1="110" x2="600" y2="138" marker-end="url(#u-m)"/>
+        <line class="ln" x1="740" y1="176" x2="800" y2="176"/>
+        <line class="ln" x1="800" y1="176" x2="800" y2="112" marker-end="url(#u-m)"/>
+
+        <text class="s xs" x="15" y="244">각 단위는 빌드 통과 + 그 단위 테스트로 끝난다. 「결정」= 8번의 미결정 중 그 단위 코드가 기대는 항목 (모두 ★ 기본값 가정으로 쓰임).</text>
+      </svg>
+    </div>
+    <figcaption>순서는 U0 → U1 → U2 → U4, U3a는 옆에서 병행, U3b는 U2 뒤, 마지막에 U5. 미결정은 U3(우편 동작)·U4(패널 자리)뿐 아니라 U1·U2(페어링 방식 · helper 서버 · mDNS · 켜는 시점 · 포트 · 키 손상)에도 걸려 있다.</figcaption>
+  </figure>
+</section>
+
+<!-- 8 -->
+<section>
+  <h2><span class="n">8</span>아직 안 정한 것</h2>
+  <p class="muted"><span class="star">★</span> = 초안의 기본안. TRD는 ★을 가정하고 쓰였고, 사용자 승인은 아직이다.</p>
+  <div class="tbl">
+    <table>
+      <thead><tr><th>PRD</th><th>무엇</th><th>★ 기본안 / 다른 안</th><th>단위</th></tr></thead>
+      <tbody>
+        <tr><td class="k">D1</td><td>페어링</td><td><span class="star">★</span> 양쪽 PC에 서로의 ID 붙여넣기 / 일회용 짧은 코드</td><td class="u">U2</td></tr>
+        <tr><td class="k">D2</td><td>에이전트가 쓰는 원격 주소</td><td><span class="star">★</span> <code>name@pc-name</code> / 이름만 쓰고 다른 PC까지 검색</td><td class="u">U3</td></tr>
+        <tr><td class="k">D3</td><td>상대 PC가 꺼져 있을 때</td><td><span class="star">★</span> 즉시 실패를 알림 / 보관했다가 나중에 보냄</td><td class="u">U3</td></tr>
+        <tr><td class="k">D4</td><td>helper 서버</td><td><span class="star">★</span> n0 기본 + 내 서버 설정 + 주소 직접 입력 / n0만 / 없음</td><td class="u">U1 · U2</td></tr>
+        <tr><td class="k">D5</td><td>받는 쪽 한도</td><td><span class="star">★</span> PC당 60통/분 · 쌍당 12통/10분 · 본문 64KB / 다른 값 / 없음</td><td class="u">U3</td></tr>
+        <tr><td class="k">D6</td><td>같은 LAN 자동 발견 (mDNS)</td><td><span class="star">★</span> 켬 / 끔</td><td class="u">U1 · U2</td></tr>
+        <tr><td class="k">D7</td><td>기능이 켜지는 때</td><td><span class="star">★</span> 믿는 PC가 1대 이상일 때만 / 항상</td><td class="u">U2</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="tbl">
+    <table>
+      <thead><tr><th>TRD</th><th>무엇</th><th>초안 / 다른 안</th><th>단위</th></tr></thead>
+      <tbody>
+        <tr><td class="k">X1</td><td>기본 수신 포트</td><td>설정 안 하면 무작위 (재시작마다 「내 주소」가 바뀜) / 고정 기본값</td><td class="u">U1 · U2</td></tr>
+        <tr><td class="k">X2</td><td>앱에서 PC 목록 자리</td><td>usage 슬롯 같은 새 슬롯 종류 (설정 화면이 없음)</td><td class="u">U4</td></tr>
+        <tr><td class="k">X3</td><td>보관된 우편이 나중에 전달될 때</td><td>보낸 쪽에 알리지 않음 (알리려면 메시지 1종 추가)</td><td class="u">U3</td></tr>
+        <tr><td class="k">X4</td><td>PC를 넘는 요청 기한</td><td>기한은 받는 PC가 관리 · 기한 초과 알림은 best-effort · 보낸 쪽 「답 기다림」 목록엔 안 보임</td><td class="u">U3</td></tr>
+        <tr><td class="k">X5</td><td>신원 키가 손상됐을 때</td><td>치워 두고 새 ID + 경고 (페어링 다시) / 사용자가 처리할 때까지 기능 멈춤</td><td class="u">U2</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+</main>
+</body>
+</html>
