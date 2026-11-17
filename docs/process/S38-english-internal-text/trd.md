@@ -19,9 +19,9 @@ Implements PRD R1–R8. Keep / hold lists are the PRD's (§2). Reference files c
 ## 3. Boundaries
 
 - **Screen errors (D1).** Every error string becomes English, including the ones the shell builds (`src-tauri/src/discovery/mod.rs` `DiscoveryError` and helpers, `daemon_client/connection.rs` `HandshakeError`, `daemon_client/link/route.rs` refusal texts, `daemon_client/mod.rs` constants, `link/errors.rs`, `commands/agent.rs`) and crate causes (`profile.rs` refusals, codex `headline()` and queue-full text). They keep travelling as plain strings; the frontend keeps showing them inside its translated head (`connectionBand.ts` `causeText`, `AgentList` `rowErrorText`, the chat error header). No wire or IPC shape changes. In Korean mode the head is Korean and the cause is English — the default the user accepted with the plan (2026-11-18). The frontend's own translated `connection.refusedCause` / `versionCause` stay the table entries for refusals.
-- **Command catalog (D2).** `///` summaries inside `declare_commands!` become English. `CATALOG_VERSION` is not bumped: it marks vocabulary changes (`crates/engram-dashboard-command/src/macros.rs`), is diagnostic only, and a translation changes no vocabulary. The unit owning the declarations commits the regenerated `commands.schema.json` and bindings.
-- **Generated bindings (D3).** Each unit runs its package's tests, which regenerate that package's ts-rs bindings (`crates/engram-dashboard-agent/bindings`, `crates/engram-dashboard-protocol/bindings`, `src-tauri/bindings`, `commands.schema.json`); the unit includes the regenerated files in its diff so the CI sync gate stays green.
-- **Placeholder marker (D4).** `placeholder_message!` in `crates/engram-dashboard-protocol/src/placeholder.rs` and its byte mirror in `src/api/wsFrame.ts` change to an English marker. The frontend comparison (`StructuredTextView.tsx` `errorMessageText`) also accepts the old Korean marker (one `hangul-ok` line): the handshake checks only `PROTOCOL_VERSION`, and a pre-S38 daemon can keep running across an app update (ADR-0342), so an old daemon would otherwise show the raw Korean marker.
+- **Command catalog (D2).** `///` summaries inside `declare_commands!` become English. `CATALOG_VERSION` is not bumped: the rule is "bump when the declaration changes" (`crates/engram-dashboard-command/src/macros.rs`), the value is diagnostic only, and a translation-only summary change is not a declaration change. The unit owning the declarations commits the regenerated `commands.schema.json` and bindings.
+- **Generated bindings (D3).** Each unit runs its package's tests or build, which regenerate that package's generated files (`crates/engram-dashboard-agent/bindings`, `crates/engram-dashboard-protocol/bindings`, `src-tauri/bindings`, `commands.schema.json`, `src-tauri/gen/schemas/capabilities.json` from capability `description`); the unit includes the regenerated files in its diff so the CI sync gate stays green.
+- **Placeholder marker (D4).** `placeholder_message!` in `crates/engram-dashboard-protocol/src/placeholder.rs` and its byte mirror in `src/api/wsFrame.ts` change to an English marker. The frontend comparison (`StructuredTextView.tsx` `errorMessageText`) also accepts the old Korean marker (one `hangul-ok` line, removed at the next `PROTOCOL_VERSION` bump): the handshake checks only `PROTOCOL_VERSION`, and a pre-S38 daemon can keep running across an app update (ADR-0342), so an old daemon would otherwise show the raw Korean marker.
 - **Tests that match product text.** Product and tests of one package are in one unit, so the unit changes both together (PRD R6). A test in another package that matches the producer's text: if that package's unit runs in a later wave, the producer unit edits that test line too (same commit as the text); if it runs in the same wave, the producer reports it and main commits the two units together as one commit with the line fixed.
 
 ## 4. Hangul check (D5)
@@ -36,6 +36,7 @@ Implements PRD R1–R8. Keep / hold lists are the PRD's (§2). Reference files c
   - `**/fixtures/*.jsonl` (recorded transcripts).
   - Lines carrying `hangul-ok`, and blocks between `hangul-ok-begin` / `hangul-ok-end`.
   - The path text itself of Korean file names (references to them in code, with `/` or `\`).
+- After `cargo fmt`, re-run the check: a wrapped statement can separate a trailing marker from its literal — use block markers there.
 - Accepted residual: Korean inside a frontend test's assertion diagnostic or a multi-line `console.*` argument in a test file passes the check; review covers it.
 - Output: `file:line: text` per hit, exit 1 if any. The script has its own small test (planted hits in a temp dir: comment in `.rs`, `console.warn` in `src/*.ts`, allowed ko.ts value, allowed marker line).
 
@@ -49,17 +50,17 @@ Each unit runs in its own git worktree based on the topic branch at the time the
 | U2 | `crates/engram-dashboard-agent/**` (src incl. codex backend, tests, examples, `Cargo.toml`, bindings, `commands.schema.json`) — split in two coders by directory (`src/backend/codex/**` vs the rest) only for editing, tested and committed together | 14k |
 | U3 | `crates/engram-dashboard-daemon/**` | 8.8k |
 | U4 | `src-tauri/**` (keeps the Korean column of `ui_text.rs` and Rust tests asserting it, marked) | 6.3k |
-| U5 | `src/**` except U1's `src/api/wsFrame.ts` and `src/api/wsFrame.test.ts` (in `ko.ts` only comments); `index.html`, root config; marker dual-accept in `StructuredTextView.tsx` with its test run over both markers | 5.9k |
-| U6 | `scripts/**`, `.github/**`, `launch/**`, `_wip/**`, root files; `check-hangul.mjs` + CI step | 1.0k |
+| U5 | `src/**` except U1's `src/api/wsFrame.ts` and `src/api/wsFrame.test.ts` (in `ko.ts` only comments); `index.html`, `vite.config.*`, `vitest.config.*`, `tsconfig*.json`, `package.json`; marker dual-accept in `StructuredTextView.tsx` with its test run over both markers | 5.9k |
+| U6 | `scripts/**`, `.github/**`, `launch/**`, `_wip/**` (translate text dumps too), other root files not in U5; `check-hangul.mjs` + its test under `src/` (vitest only collects `src/**`; planted Hangul built from `\u` escapes) + CI step | 1.0k |
 | W1 | docs: `docs/process/step-log.md`, `docs/tracking.md`, `docs/todo/**` | |
 | W2a | docs: `docs/process/S21-codex-backend/**`, `docs/process/S21-crate-boundaries/**` (md only) | |
 | W2b | docs: `docs/process/**` rest (md only), except `S33-english-translation/glossary.md` and `S38-english-internal-text/**` | |
 | W3 | docs: `docs/research/**`, `docs/decisions/**` prose (not lint tokens, not `README.md` index), `docs/reference/**` except `logging-conventions.md` and `structure/i18n.md`, `docs/handbook/**`, other `docs/**` md | |
-| U9 | integration: glossary rows, `logging-conventions.md` rewrite, `i18n.md` line, `check-hangul.mjs` to zero, full regression, ADR | — |
+| U9 | integration: glossary rows (harmonize duplicates), `logging-conventions.md` rewrite, `structure/i18n.md` line, `.git-blame-ignore-revs`, `check-hangul.mjs` to zero, one-time docs scan (§6 AC7), full regression, ADR | — |
 
 Waves (at most 4 building worktrees at once; docs units do not build):
-- Wave A: U1, U2, U4, W1, W2a, W2b, W3.
-- Wave B (base has U1, U2): U3, U5, U6.
+- Wave A: U1, U2, W1, W2a, W2b, W3.
+- Wave B (base has U1, U2): U3, U4, U5, U6. (U4 waits for U1: `src-tauri/src/state/codec.rs` tests match text from `crates/engram-dashboard-base/src/file.rs` — U1 edits those test lines.)
 - U9 last.
 
 Commits: one per unit. `.git-blame-ignore-revs` gets the docs commits (W1–W3) and unit commits that change only comments and strings; the marker dual-accept, `check-hangul.mjs` + CI step and the logging rule are separate commits and do not go there.
@@ -75,6 +76,7 @@ Commits: one per unit. `.git-blame-ignore-revs` gets the docs commits (W1–W3) 
   - AC4: GUI — daemon-missing case on the connection band: `en` shows no Korean in our own text; `ko` shows the Korean head with an English cause; a live switch leaves no old-language text.
   - AC5: `git diff master -- prompts/` empty; schema summaries English.
   - AC6: test counts per crate / vitest file vs master.
+  - AC7: one-time docs scan (inventory docs rules) — remaining Hangul in `docs/**` md only inside 「」, backticks, code fences, links, ADR lint tokens, the ADR index, the glossary and S38's own docs.
 
 ## 7. Decisions
 
