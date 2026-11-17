@@ -360,7 +360,7 @@ fn get_returns_items_in_table_order_with_default_flags() {
     let svc = service(&files);
     let all = svc.get(None).unwrap();
     assert_eq!(all.rev, 0);
-    assert_eq!(all.items.len(), 12);
+    assert_eq!(all.items.len(), 13);
     assert_eq!(all.items[0].key, "theme.default");
     let line = all
         .items
@@ -385,7 +385,7 @@ fn get_returns_items_in_table_order_with_default_flags() {
 #[test]
 fn schema_describes_each_key() {
     let svc = service(&MemFiles::default());
-    assert_eq!(svc.schema(None).unwrap().len(), 12);
+    assert_eq!(svc.schema(None).unwrap().len(), 13);
     let theme = svc.schema(Some("theme.default")).unwrap();
     assert_eq!(
         theme,
@@ -437,7 +437,7 @@ fn outcomes_serialize_with_snake_case_fields() {
 #[derive(Default)]
 struct Heard {
     changed: Mutex<Vec<SettingsSnapshot>>,
-    /// Notification order — `theme` must come after `changed`.
+    /// Notification order — `theme` and `language` must come after `changed`.
     order: Mutex<Vec<&'static str>>,
 }
 
@@ -449,6 +449,10 @@ impl SettingsEvents for Heard {
 
     fn theme_default_changed(&self) {
         self.order.lock().unwrap().push("theme");
+    }
+
+    fn ui_language_changed(&self) {
+        self.order.lock().unwrap().push("language");
     }
 }
 
@@ -554,6 +558,63 @@ fn a_reset_announces_only_the_keys_it_changed() {
 
     reset_and_notify(&svc, &heard, "theme.").unwrap();
     assert_eq!(heard.order(), vec!["changed", "changed", "theme"]);
+}
+
+#[test]
+fn the_ui_language_key_constant_names_a_key_whose_choices_are_the_shell_languages() {
+    let svc = service(&MemFiles::default());
+    let schema = svc.schema(Some(UI_LANGUAGE)).unwrap();
+    let codes: Vec<String> = crate::ui_text::Lang::ALL
+        .iter()
+        .map(|lang| lang.code().to_string())
+        .collect();
+    assert_eq!(schema.len(), 1);
+    assert_eq!(schema[0].key, UI_LANGUAGE);
+    assert_eq!(schema[0].choices, Some(codes));
+    assert_eq!(schema[0].default, crate::ui_text::Lang::default().code());
+}
+
+#[test]
+fn the_ui_language_hook_fires_on_a_changing_set_and_reset_of_that_key_only() {
+    let files = MemFiles::default();
+    let svc = service(&files);
+    let heard = Heard::default();
+
+    set_and_notify(&svc, &heard, "ui.language", "KO").unwrap();
+    assert_eq!(heard.order(), vec!["changed", "language"]);
+
+    // The same value again — nothing changed, so no hook.
+    set_and_notify(&svc, &heard, "ui.language", "ko").unwrap();
+    assert!(set_and_notify(&svc, &heard, "ui.language", "fr").is_err());
+    set_and_notify(&svc, &heard, "theme.default", "light").unwrap();
+    assert_eq!(
+        heard.order(),
+        vec!["changed", "language", "changed", "theme"],
+        "another key does not call the language hook"
+    );
+
+    reset_and_notify(&svc, &heard, "ui.language").unwrap();
+    assert_eq!(heard.order()[4..], ["changed", "language"]);
+    reset_and_notify(&svc, &heard, "ui.language").unwrap();
+    assert_eq!(heard.order().len(), 6, "already the default — no hook");
+}
+
+#[test]
+fn a_prefix_reset_that_covers_the_ui_language_fires_its_hook() {
+    let files = MemFiles::with_text(r#"{"ui.language":"ko","chat.style.fontSize":"15px"}"#);
+    let svc = service(&files);
+    let heard = Heard::default();
+
+    reset_and_notify(&svc, &heard, "chat.").unwrap();
+    assert_eq!(
+        heard.order(),
+        vec!["changed"],
+        "a prefix that does not cover the language key"
+    );
+
+    reset_and_notify(&svc, &heard, "ui.").unwrap();
+    assert_eq!(heard.order(), vec!["changed", "changed", "language"]);
+    assert_eq!(value_of(&svc, "ui.language"), "en");
 }
 
 // ── real disk ──
@@ -1068,6 +1129,8 @@ struct ReadingEvents {
     seen: Mutex<Vec<(u64, u64, Option<String>, bool, bool)>>,
     /// At the theme push point, were (the notification order lock, the write serialization lock, the state lock) held.
     theme: Mutex<Vec<(bool, bool, bool)>>,
+    /// The same three at the language hook, and the effective `ui.language` it read there.
+    language: Mutex<Vec<(bool, bool, bool, Option<String>)>>,
 }
 
 impl SettingsEvents for ReadingEvents {
@@ -1093,6 +1156,18 @@ impl SettingsEvents for ReadingEvents {
         );
         self.theme.lock().unwrap().push(held);
     }
+
+    fn ui_language_changed(&self) {
+        // Read first — a `try_lock` guard lives to the end of its statement, and `effective` takes the state lock.
+        let effective = self.svc.effective(UI_LANGUAGE);
+        let held = (
+            self.svc.announce.try_lock().is_err(),
+            self.svc.io.try_lock().is_err(),
+            self.svc.state.try_lock().is_err(),
+            effective,
+        );
+        self.language.lock().unwrap().push(held);
+    }
 }
 
 #[test]
@@ -1102,6 +1177,7 @@ fn a_notification_may_read_the_service_and_sees_its_own_write() {
         svc: Arc::clone(&svc),
         seen: Mutex::default(),
         theme: Mutex::default(),
+        language: Mutex::default(),
     };
 
     set_and_notify(&svc, &events, "theme.default", "light").unwrap();
@@ -1119,6 +1195,28 @@ fn a_notification_may_read_the_service_and_sees_its_own_write() {
         *events.theme.lock().unwrap(),
         vec![(false, false, false); 2],
         "테마 밀기는 락을 하나도 쥐지 않은 채 불린다"
+    );
+}
+
+#[test]
+fn the_language_hook_holds_no_service_lock_and_sees_the_stored_value() {
+    let svc = Arc::new(service(&MemFiles::default()));
+    let events = ReadingEvents {
+        svc: Arc::clone(&svc),
+        seen: Mutex::default(),
+        theme: Mutex::default(),
+        language: Mutex::default(),
+    };
+
+    set_and_notify(&svc, &events, "ui.language", "ko").unwrap();
+    reset_and_notify(&svc, &events, "ui.").unwrap();
+
+    assert_eq!(
+        *events.language.lock().unwrap(),
+        vec![
+            (false, false, false, Some("ko".to_string())),
+            (false, false, false, Some("en".to_string())),
+        ]
     );
 }
 
@@ -1142,6 +1240,8 @@ impl SettingsEvents for HoldingEvents {
     }
 
     fn theme_default_changed(&self) {}
+
+    fn ui_language_changed(&self) {}
 }
 
 /// ★It does not catch the regression every time★ — if the order lock is missing, B's notification may go out before A is released or after.

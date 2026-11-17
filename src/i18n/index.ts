@@ -1,45 +1,45 @@
-// ★Interim implementation — own lightweight t()★: for now it is Korean-only, so zero dependencies with no external i18n library
-//   is enough (research conclusion — for single-language · internal tools an own t() is justified, not an anti-pattern). When real multilingual support (plurals · ICU ·
-//   dates · translator TMS etc.) gets serious, we plan to replace what is behind this t() (the backend) via the seam of the "stable API contract" below with a public library (Lingui = lightweight · Vite official /
-//   i18next = largest ecosystem) — call sites · key · signature unchanged. This file is a transitional stopgap until then.
-//   Basis: /research medium survey (2026-07-12, ADR-0069 reconfirmed).
+// ADR-0069: `t(key, params?)` is the stable API for UI strings — the signature, the keys and every call site stay unchanged
+//   when what is behind it changes.
+// ADR-0373: behind `t()` is a private i18next instance used for lookup only. Interpolation is ours (`interpolate`) — i18next's
+//   own interpolation, with its prefix set to `{`, would also substitute `{한글}`, `{first-name}` and `{ name }`, which this
+//   file's grammar leaves as text.
 //
-// ADR-0069: the `t(key, params?)` accessor — the stable API for centralizing UI strings.
+// The only importer of i18next. Imports neither React (`react.ts` holds `useLanguage`) nor Tauri (the per-window language
+//   memory is `langMemory.ts`, written by its caller), so modules that only need `t` stay free of both.
+// Boot language = `<html lang>`, read at module evaluation; absent or unknown → `en`. The shell's init script plants it per
+//   window before the page runs (ADR-0373 decision 6); outside the shell it is `index.html`'s static value.
+//   The instance is initialized synchronously at module evaluation, so `t()` works at module scope right after import.
 //
-// ★Stable API contract★: for now it returns only a single language (`ko`), but later localization only needs to replace the *inside* of this function (the backend) with
-//   locale-aware, and the `(key, params)` signature · all call sites · keys stay unchanged. So this shape is
-//   the localization base (ADR-0069 §consequences/invariants).
-//
-// ★Type-safe key (required)★: make the `key` type a union derived from the `ko` table so tsc catches typos · nonexistent keys
-//   at compile time (safety net of the mass migration — ADR-0069 rationale).
-//
-// ★Type-safe params★: extract `{placeholder}` tokens from value literals as a template-literal type and split params into
-//   required/forbidden. `as const` in ko.ts is the premise of this inference.
+// Type-safe keys: `StringKey` is the union of `ns.key` paths of `en` — typos and unknown keys fail tsc (ADR-0069).
+// Type-safe params: the `{placeholder}` tokens of the `en` value literal make `params` required or forbidden. `ko` has the same
+//   placeholder set per key (`Translation`, checked in `ko.ts`), so the params type holds for both languages.
 
-import { ko, type KoTable } from './ko'
+import { createInstance } from 'i18next'
+
+import { en, type EnTable } from './en'
+import { ko } from './ko'
 
 export type StringKey = {
-  [N in keyof KoTable]: `${N & string}.${keyof KoTable[N] & string}`
-}[keyof KoTable]
+  [N in keyof EnTable]: `${N & string}.${keyof EnTable[N] & string}`
+}[keyof EnTable]
 
 /**
- * ★per-key precise indexing★: a key-remap mapped type crushes sub-values into a union (placeholder presence gets mixed), so
- *   it is not used.
+ * Per-key precise indexing: a key-remap mapped type would crush the values into a union (placeholder presence gets mixed),
+ * so it is not used.
  */
 type ValueOf<K extends StringKey> = K extends `${infer N}.${infer S}`
-  ? N extends keyof KoTable
-    ? S extends keyof KoTable[N]
-      ? KoTable[N][S]
+  ? N extends keyof EnTable
+    ? S extends keyof EnTable[N]
+      ? EnTable[N][S]
       : never
     : never
   : never
 
 /**
- * ★Grammar sync (FIX A — top priority)★: the two definitions below (type extraction `Placeholders` ⊕ runtime `WORD_PLACEHOLDER`)
- *   **must see the same grammar**. If they diverge, a split arises where the type *requires* a param but the runtime *does not* substitute (or the reverse)
- *   (keys are a stable API, so this is fatal). The adopted grammar = **a non-empty word char (`[A-Za-z0-9_]`, i.e. `\w`) token**.
- *   `{한글}`·`{first-name}`·`{ }`·`{}` are *not recognized* as placeholders by either side (no param required + the original text is kept).
- *   If the runtime matcher (WORD_PLACEHOLDER) is changed, this type must be changed together.
+ * Grammar sync (FIX A): the type extraction `Placeholders` and the runtime `WORD_PLACEHOLDER` must see the same grammar. If
+ *   they diverge, the type requires a param the runtime does not substitute (or the reverse). The grammar = a non-empty token
+ *   of word chars (`[A-Za-z0-9_]`, i.e. `\w`). `{한글}` · `{first-name}` · `{ }` · `{}` are placeholders for neither side (no
+ *   param required, the text is kept). Change both together.
  */
 type WordChar =
   | 'a' | 'b' | 'c' | 'd' | 'e' | 'f' | 'g' | 'h' | 'i' | 'j' | 'k' | 'l' | 'm'
@@ -58,66 +58,125 @@ type IsWord<T extends string> = T extends ''
     : false
 
 /**
- * A token inside `{...}` is accepted as a param only when it is a **non-empty token made only of word chars (`\w`)**
- * (same grammar as the runtime `WORD_PLACEHOLDER = /\{(\w+)\}/g` — FIX A).
+ * The names of the `{word}` tokens in `S` (same grammar as `WORD_PLACEHOLDER` — FIX A).
  *
- * ★Beware non-greedy matching★: `${string}{${infer P}}${infer Rest}` matches `P` minimally up to the first `}` in TS.
- *   When `P` fails word validation, like `{ }`·`{first-name}`, that token is dropped but `Rest` is scanned on so valid later tokens survive.
+ * Non-greedy matching: `${string}{${infer P}}${infer Rest}` matches `P` up to the first `}`. When `P` fails the word check,
+ *   like `{ }` or `{first-name}`, that token is dropped but `Rest` is still scanned, so valid later tokens survive.
  */
 type Placeholders<S extends string> = S extends `${string}{${infer P}}${infer Rest}`
   ? (IsWord<P> extends true ? P : never) | Placeholders<Rest>
   : never
 
+type SameSet<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false
+
+type SamePlaceholders<A, B> = A extends string ? (B extends string ? SameSet<Placeholders<A>, Placeholders<B>> : false) : false
+
+/** One namespace of a translation: `S` = the `en` namespace, `T` = the translated one. */
+type TranslatedNamespace<S, T> = {
+  readonly [K in keyof S | keyof T]: K extends keyof S
+    ? K extends keyof T
+      ? SamePlaceholders<S[K], T[K]> extends true
+        ? T[K]
+        : { readonly placeholdersMustBe: S[K] extends string ? Placeholders<S[K]> : never }
+      : S[K]
+    : never
+}
+
+/**
+ * ADR-0372: the shape a translated table `T` must satisfy (`table satisfies Translation<typeof table>`) — exactly the
+ * namespaces and keys of `en`, and per key the same placeholder set. A missing namespace or key is a missing property, an
+ * extra one has type `never`, and a different placeholder set names the expected set (`placeholdersMustBe`).
+ */
+export type Translation<T> = {
+  readonly [N in keyof EnTable | keyof T]: N extends keyof EnTable
+    ? N extends keyof T
+      ? TranslatedNamespace<EnTable[N], T[N]>
+      : EnTable[N]
+    : never
+}
+
 type ParamsFor<K extends StringKey> = { [P in Placeholders<ValueOf<K>>]: string }
 
 /**
- * ★Tuple rest approach★: with `t<K>(key: K, ...rest: ParamsArg<K>)` K is inferred straight from the first argument
- *   (not buried in a conditional type, so no inference failure), and params required/forbidden is enforced by the rest tuple length.
- * ★Beware extra fields (FIX F)★: TS's excess-property check blocks extra fields only when an **inline object literal** is passed.
- *   If a pre-built object variable is passed, extra fields pass through under structural typing (a TS limit — full blocking is not attempted).
- *   At runtime extra fields with no matching token are ignored, so it is harmless (see 「여분 param」 (extra param) in index.test.ts).
+ * Tuple rest: with `t<K>(key: K, ...rest: ParamsArg<K>)` K is inferred straight from the first argument, and required or
+ *   forbidden params are enforced by the tuple length.
+ * Extra fields (FIX F): TS blocks extra fields only for an inline object literal; a pre-built object passes them under
+ *   structural typing. At run time a field with no matching token is ignored (see 「여분 param」 in index.test.ts).
  */
 type ParamsArg<K extends StringKey> = Placeholders<ValueOf<K>> extends never ? [] : [params: ParamsFor<K>]
 
 /**
- * ★Runtime placeholder grammar (FIX A)★: a single matcher that **must match** the type extraction `Placeholders`/`IsWord` above.
- *   `\w+` = only a non-empty word char (`[A-Za-z0-9_]`) token is seen as a placeholder. If you change this, change the type side too.
+ * Runtime placeholder grammar (FIX A): must match the type extraction `Placeholders` / `IsWord` above.
  *
- * ★Type↔runtime grammar contract (FIX③ — sealing nested/unmatched `{`)★: if an opening `{` gets caught unmatched inside, as in `{a{b}c`,
- *   this runtime matcher substitutes the inner `{b}`, but the type-side `Placeholders` (consumes the first `{` as the opening brace →
- *   `a{b` fails word validation) extracts `never` → a split where **only the runtime silently substitutes**. This cannot be
- *   blocked with a pure regex (tracking unmatched opening braces is not regular — it cannot be expressed with a fixed-width lookbehind).
- *   So **we seal it with a contract**: *a table value's placeholder is only a matched single `{\w+}` and nested/unmatched
- *   `{` is not put in* (ko.ts value-writing convention). This contract is enforced by the dev-guard in index.test.ts (full ko scan), so
- *   if a violating value comes in the future the test fails at once → there is no silent split reachable from real table values.
+ * Nested or unmatched `{` (FIX③): in `{a{b}c` this matcher substitutes the inner `{b}` while `Placeholders` extracts nothing
+ *   (it takes the first `{` as the opener and `a{b` fails the word check). A regex cannot track unmatched braces, so this is
+ *   sealed by a contract instead: a table value holds only matched single `{\w+}` placeholders, enforced by the brace scan
+ *   over both tables in index.test.ts.
  */
 const WORD_PLACEHOLDER = /\{(\w+)\}/g
 
-/** Test seam (FIX①): expose the production matcher/interpolation as is — the test rides this real thing instead of a local copy. */
-export const __test__ = { WORD_PLACEHOLDER, interpolate }
+export type Lang = 'en' | 'ko'
+
+/** Whether `value` is a UI language this build has a table for — the check for a value from outside (a setting, `<html lang>`). */
+export function isLang(value: unknown): value is Lang {
+  return value === 'en' || value === 'ko'
+}
+
+/** `globalThis.document` is absent in a node-environment test file. */
+function bootLanguage(): Lang {
+  const planted = globalThis.document?.documentElement?.lang
+  return isLang(planted) ? planted : 'en'
+}
+
+let current: Lang = bootLanguage()
+const listeners = new Set<() => void>()
+
+const NS = 'translation'
+
+const i18n = createInstance()
+// Synchronous with inline resources and `initAsync: false`; the returned promise is already settled.
+//   No nesting option is needed — the per-call `skipInterpolation` skips nesting too. `fallbackLng: false`: `ko` has every key
+//   by type, so a miss stays a miss. `returnEmptyString: true`: an empty value stays `''` instead of turning into the key.
+//   The resources are copies because the tables are frozen.
+void i18n.init({
+  lng: current,
+  fallbackLng: false,
+  initAsync: false,
+  resources: {
+    en: { [NS]: structuredClone(en) },
+    ko: { [NS]: structuredClone(ko) },
+  },
+  keySeparator: '.',
+  nsSeparator: false,
+  returnNull: false,
+  returnEmptyString: true,
+  returnObjects: false,
+})
 
 /**
- * ★Runtime query seam★: for now it takes values from the single `ko` sheet only. Later localization only needs to change here (active locale selection) —
- *   signature · call sites unchanged (ADR-0069). `found` lets the call site (t) skip interpolation on a miss (FIX②).
+ * Test seam (FIX①): the production matcher and interpolation, so tests run the real thing instead of a copy; the
+ * instance, so a test can plant a value no table holds (`$t(…)`, `''`) and restore it; and the subscriber count, so a test
+ * can see an unsubscribe.
  */
-function lookup(key: StringKey): [value: string, found: boolean] {
+export const __test__ = { WORD_PLACEHOLDER, interpolate, i18n, listenerCount: (): number => listeners.size }
+
+/**
+ * The value of `key` in the current language, uninterpolated; `undefined` on a miss (FIX E — a key that bypassed the type
+ * gate through a cast or a JS caller). A miss = the key is not exactly `ns.key`, or its resolved resource value is not a
+ * string (a namespace object, or nothing). The check and the lookup both name `current`, so they cannot disagree on the
+ * language even if the instance's own language were changed elsewhere.
+ */
+function lookup(key: string): string | undefined {
   const dot = key.indexOf('.')
-  // ★no-dot early return (FIX②)★: if there is no dot, do not make a garbage namespace with slice(0,-1) but return the key as is at once.
-  //   (A key outside the format that came through the unsafe-boundary — treated as a miss and the original text is kept loudly.)
-  if (dot < 0) return [key, false]
-  const ns = key.slice(0, dot) as keyof KoTable
-  const sub = key.slice(dot + 1)
-  // ★unsafe-boundary backstop (FIX E)★: on the normal path the StringKey union above guarantees at compile time that the key exists.
-  //   But at the JS/deserialization boundary (a runtime call that bypassed the type gate) a nonexistent key can come in — then
-  //   so it does not blow up with `undefined.replace(...)`, the key string itself is returned as the fallback (loud-visible, no-throw).
-  const value = (ko[ns] as Record<string, string> | undefined)?.[sub]
-  return value === undefined ? [key, false] : [value, true]
+  if (dot <= 0 || dot === key.length - 1 || key.includes('.', dot + 1)) return undefined
+  if (typeof i18n.getResource(current, NS, key) !== 'string') return undefined
+  return i18n.t(key, { lng: current, skipInterpolation: true })
 }
 
 /**
- * A token not in params is left as the original text (prevents loud-blank).
- * Grammar = `WORD_PLACEHOLDER` (= synchronized with the type-side `Placeholders`). The replace callback does not rescan substituted values, so
- * `{token}` · regex special characters (`$&`·`$1`·`\`) inside a substituted value go in as literals (no backreference interpretation).
+ * A token not in params is left as the original text (no silent blank).
+ * Grammar = `WORD_PLACEHOLDER`. The replace callback does not rescan substituted values, so `{token}` and regex specials
+ * (`$&` · `$1` · `\`) inside a substituted value go in as literals.
  */
 function interpolate(template: string, params: Record<string, string>): string {
   return template.replace(WORD_PLACEHOLDER, (whole, name: string) =>
@@ -125,12 +184,47 @@ function interpolate(template: string, params: Record<string, string>): string {
   )
 }
 
+/**
+ * The text of `key` in the current language with `{word}` tokens filled from `params`. Params never reach i18next, so names
+ * like `count`, `lng` or `context` are plain values.
+ *
+ * A miss returns the key itself, uninterpolated (FIX②) — otherwise `missing.{name}` would become `missing.X` and the
+ * "unknown key" signal would be lost.
+ */
 export function t<K extends StringKey>(key: K, ...rest: ParamsArg<K>): string {
-  const [template, found] = lookup(key)
+  const template = lookup(key)
+  if (template === undefined) return key
   const params = rest[0] as Record<string, string> | undefined
-  // ★A miss stays loud (FIX②)★: if the key is not found, the fallback raw key string is **not interpolated**. Otherwise
-  //   `missing.{name}` that came through the unsafe-boundary would be substituted into `missing.X` and the "nonexistent key" signal erased.
-  //   On a miss, return the original text (the key as is) so it stays identifiable.
-  if (!found) return template
   return params ? interpolate(template, params) : template
+}
+
+export function getLanguage(): Lang {
+  return current
+}
+
+/**
+ * Switches the UI language: `t()` returns the new language from the next call, `<html lang>` follows (when there is a
+ * document), and every subscriber is called once. Does nothing when `lang` is already current. Does not write the
+ * per-window memory — that is `langMemory.ts`, called by whoever applies the setting.
+ *
+ * Returns `false` and changes nothing (no state, no `<html lang>`, no notification) when `lang` is not a known language —
+ * a value that bypassed the type through a cast or a JS caller; `true` otherwise, including the no-op for the current value.
+ */
+export function setLanguage(lang: Lang): boolean {
+  if (!isLang(lang)) return false
+  if (lang === current) return true
+  current = lang
+  void i18n.changeLanguage(lang)
+  const root = globalThis.document?.documentElement
+  if (root) root.lang = lang
+  for (const listener of [...listeners]) listener()
+  return true
+}
+
+/** Calls `listener` after each language change; returns the unsubscribe function. */
+export function subscribeLanguage(listener: () => void): () => void {
+  listeners.add(listener)
+  return () => {
+    listeners.delete(listener)
+  }
 }

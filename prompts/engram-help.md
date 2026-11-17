@@ -213,9 +213,10 @@ The limits that the usage area (content Usage) draws can be read directly with t
   {tool} settings.schema [--key <key|prefix>]
       Per key kind · default · choices · min · max · description. See here which keys exist and what they accept
 
-key is an exact key (theme.default) or a prefix ending in a dot (chat.style.). Keys come in two groups.
+key is an exact key (theme.default) or a prefix ending in a dot (chat.style.). Keys come in three groups.
 
   theme.default    the theme of windows with no per-window theme. One of dark · light · e-ink; default dark. Changing it changes those windows at once
+  ui.language      the screen (UI) language. One of en · ko; default en. Changing it changes every window · the tray · tab names at once. Log and LLM-facing text does not change
   chat.style.*     11 font size · line height · spacing values of the chat screen. Provisional names, so they change or go away when the chat screen is redone
 
 A value is always one string, and kind sets the accepted form. Replies come in canonical form (E-INK → e-ink, 15.0PX → 15px).

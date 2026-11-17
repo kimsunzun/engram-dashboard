@@ -23,6 +23,8 @@ export default defineConfig({
     // The rest of the CSS (chat.css etc.) is stubbed as is, so existing test behavior is unchanged.
     css: { include: [/index\.css/] },
     include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
+    // ADR-0372: the app boots in English; the frontend tests assert Korean text, so every test file starts in Korean.
+    setupFiles: ['./src/i18n/vitest.setup.ts'],
     globals: false,
   },
 })

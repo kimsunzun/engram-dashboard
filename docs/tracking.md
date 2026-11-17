@@ -38,6 +38,7 @@
 | T-11 | child별 권한 스코프(R7) | 메인 | 보류 — 원격 단계 |
 | T-9 | claude 프로세스 풀링 | 메인 | 보류 |
 | T-6 | cwd 워크스페이스 검증 | 메인 | 보류 — 운영 단계 |
+| T-113 | Agent tree rename input may remount on every keystroke (suspected, pre-existing) | 버그 | Open — not reproduced; found by S35 review |
 | T-111 | A stopping daemon releases its instance lock before its launch bodies finish — a successor's boot sweeps can remove an in-progress launch folder | 버그 | Open — theoretical path, found in the S25 step 8 review |
 | T-78 | In-app codex terminal on codex 0.163.0 — alt-screen · mouse tracking (S21 TRD §6-F) | 버그 | Open — user decision on the default |
 | T-52 | Graceful daemon stop returned `Timeout` | 버그 | Closed by S21 3-2 U5a (`b85c0aaa`) — real-daemon stop test passes with `outcome=Closed`; remove once master has it |
@@ -284,6 +285,11 @@
 - **재도입:** 운영 단계에서 허용 cwd 정책(예: Engram 워크스페이스 하위만) 결정 후 manager.spawn_agent 또는 command 층에서 검증.
 
 ## 버그
+
+### T-113. Agent tree rename input may remount on every keystroke (suspected, pre-existing)
+- **Status:** open — not reproduced on screen (S35 code review, 2026-11-17). Predates S35.
+- **Suspicion:** `AgentList` defines `NodeRenderer` inside its render and passes it to react-arborist `<Tree>` as children; the rename draft is `AgentList` state, so every keystroke re-renders `AgentList` and creates a new `NodeRenderer` identity. If react-arborist mounts it as a component, the row and its rename input remount per keystroke, which could reset the caret or break Korean IME composition. A UI-language switch re-renders the same way.
+- **Check first:** rename an agent in the tree typing Korean; watch the caret and composition. If it reproduces, stabilize the renderer identity (e.g. a stable component reading changing values from context or refs).
 
 ### T-111. A stopping daemon releases its instance lock before its launch bodies finish
 - **Status:** open — theoretical path (S25 step 8 U3 code review, lens reviewer; no live occurrence).

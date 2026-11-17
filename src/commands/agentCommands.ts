@@ -67,7 +67,7 @@ function coerceOutputFormat(raw: unknown): AgentOutputFormat {
 
 register({
   id: 'agent.spawn',
-  title: t('agent.spawn'),
+  title: () => t('agent.spawn'),
   category: 'agent',
   //   - parent 는 SIGNATURE-ONLY: 중첩(부모 아래 스폰)은 아직 미지원 — 세팅되면 명시 throw(조용한
   //     무시 금지, LLM/cdp 디버깅 위해). 향후 트리 중첩 도입 시 여기서 배선한다.
@@ -94,7 +94,7 @@ register({
 
 register({
   id: 'agent.rename',
-  title: t('agent.rename'),
+  title: () => t('agent.rename'),
   category: 'agent',
   // ADR-0061 리치화(§5 LLM 제어): 에이전트(프로필) 표시명 override set/clear.
   //   - name 문자열 → override 저장. name 이 null/빈문자열/미지정 → override 해제(cwd basename 파생 복귀).
@@ -131,7 +131,7 @@ async function withLeaseConflict<T>(call: () => Promise<T>): Promise<T> {
 
 register({
   id: 'agent.cancelQueuedInput',
-  title: t('agent.cancelQueuedInput'),
+  title: () => t('agent.cancelQueuedInput'),
   category: 'agent',
   // ★`help` 를 달지 말 것★ — 같은 이름을 데몬이 이미 버스에서 답한다(`engram-dashboard-agent` 의 선언). help 가
   //   있으면 셸이 이 이름을 창 command 등록 묶음에 싣고, 그 이름 충돌 검사가 **묶음 전체**를 거절해 이 창의 모든
@@ -153,7 +153,7 @@ register({
 
 register({
   id: 'agent.interrupt',
-  title: t('agent.interrupt'),
+  title: () => t('agent.interrupt'),
   category: 'agent',
   // ★`help` 를 달지 말 것★ — 사유는 위 `agent.cancelQueuedInput` 과 같다(데몬이 같은 이름을 버스에서 답한다).
   // ADR-0237: 채팅 칸 Esc 와 LLM 이 같은 핸들을 흔든다. `requested` = 끊기를 보냈다 — 턴이 실제로 멈췄는지는 턴 끝
@@ -188,7 +188,7 @@ register({
 
 register({
   id: 'agentlist.createAgent',
-  title: t('agent.create'),
+  title: () => t('agent.create'),
   category: 'agent',
   // ★ADR-0064★: agent_list(트리) 슬롯 pane 메뉴 "에이전트 생성" 계열의 파라미터형 §5 LLM 프리미티브 —
   //   폴더 다이얼로그로 cwd 를 고른 뒤 claude reserved(비활성) 프로필을 등록한다(스폰하지 않음). 트리에 예약
@@ -209,7 +209,7 @@ register({
 
 register({
   id: 'agentlist.createTerminal',
-  title: t('agent.createTerminal'),
+  title: () => t('agent.createTerminal'),
   category: 'agent',
   // ★ADR-0078★: 렌더 모드 Terminal(xterm PTY) 고정 생성 — 서브메뉴 leaf. 생성 시점에 모드 확정·이후 불변.
   run: async () => createReservedProfile('Terminal'),
@@ -217,7 +217,7 @@ register({
 
 register({
   id: 'agentlist.createCodex',
-  title: t('agent.createCodex'),
+  title: () => t('agent.createCodex'),
   category: 'agent',
   // ★사람이 codex 대화형 TUI 를 고르는 문★ — 여기서 만들어진 예약 노드를 활성화하면 codex 가 그
   //   폴더에서 뜬다. ★첫 방문 폴더에서는 codex 자신의 신뢰 확인 모달이 화면에 그대로 뜨고 사람이
@@ -229,7 +229,7 @@ register({
 
 register({
   id: 'agentlist.createCodexJson',
-  title: t('agent.createCodexJson'),
+  title: () => t('agent.createCodexJson'),
   category: 'agent',
   // ★사람이 codex 상주 JSON 서버(`codex app-server`)를 고르는 문★ — 형제 `createCodex` 와 같은
   //   백엔드이고 가르는 것은 출력 모드 하나다. 그 모드가 통로·입력 인코딩·출력 decoder 를 함께
@@ -242,7 +242,7 @@ register({
 
 register({
   id: 'agentlist.createJson',
-  title: t('agent.createJson'),
+  title: () => t('agent.createJson'),
   category: 'agent',
   // ★ADR-0078★: 렌더 모드 StreamJson(headless NDJSON→RichSlot) 고정 생성 — 서브메뉴 leaf. 생성 시점 확정·불변.
   run: async () => createReservedProfile('StreamJson'),
@@ -253,7 +253,8 @@ register({
 // ADR-0064: group='content' — 공통 slot-ops 위에 렌더.
 registerSlotMenu('agent_list', [
   {
-    title: t('agent.create'),
+    id: 'agentlist.create',
+    title: () => t('agent.create'),
     group: 'content',
     order: 10,
     children: [

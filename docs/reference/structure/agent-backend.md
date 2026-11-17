@@ -22,17 +22,17 @@ There is one plumbing for launching an agent. Whether claude, codex or gemini, t
 
 ## Two gestures — creating and launching are separated
 
-**Creating** an agent and actually **launching the program** are separated into two clicks. The first click only writes a 「예약」 (reserved) entry into the registry after choosing a folder, so at this point there is no process. Only when you double-click that reserved node shown in the tree or press 「활성화」 (activate) does the real CLI come up. The reason for separating them is that **choosing a folder and launching a program fail in different ways** — if they are glued together, then when the wrong folder is chosen, the process has to be cleaned up together with it.
+**Creating** an agent and actually **launching the program** are separated into two clicks. The first click only writes a 「예약」 (reserved) entry into the registry after choosing a folder, so at this point there is no process. Only when you double-click that reserved node shown in the tree or press **Activate (spawn)** does the real CLI come up. The reason for separating them is that **choosing a folder and launching a program fail in different ways** — if they are glued together, then when the wrong folder is chosen, the process has to be cleaned up together with it.
 
 ```mermaid
 flowchart TD
   subgraph G1["제스처 1 — 만든다 (프로세스 없음)"]
-    A["에이전트 목록 패널의 빈 곳 우클릭"] -->|"에이전트 생성 ▶ 백엔드 항목"| B["agentlist.create* 명령"]
+    A["에이전트 목록 패널의 빈 곳 우클릭"] -->|"Create agent ▶ 백엔드 항목"| B["agentlist.create* 명령"]
     B -->|"사람 경로만 통과"| C["폴더 선택 대화상자"]
     C -->|"CreateProfile · backend 칸"| D["데몬: 프로필 등록 + agents.json 영속"]
   end
   subgraph G2["제스처 2 — 띄운다"]
-    E["예약 노드 더블클릭 · 활성화"] -->|"SpawnProfile"| F["데몬: 모드 유도"]
+    E["예약 노드 더블클릭 · Activate (spawn)"] -->|"SpawnProfile"| F["데몬: 모드 유도"]
     F -->|"activate_profile"| G["AgentManager.spawn_agent"]
   end
   D -.->|"사람이 한 번 더 누를 때까지 아무 일도 없다"| E
@@ -230,7 +230,7 @@ If you add one backend, the word has to stand in **four places** each. The core'
 | Declared vocabulary `AgentBackend` (the `agent.new` entrance) | `Claude` | `Codex` (2026-09-22 · ADR-0219) | none |
 | Dispatch wiring (`backend_for`) | present | present | **absent** — there is no variant so it is not routed to this backend (a stub for securing structure) |
 
-**`PROTOCOL_VERSION = 6`.** The 6 was raised after this work by the pending-input list command (ADR-0231 — reason = the v6 entry in `crates/engram-dashboard-protocol/src/lib.rs`). This work raised it twice, to 4 and 5, and **the reasons differ from each other**. 4 = the spawn command is an enum split by a `kind` tag, so adding a variant is a hard break — an unknown variant is not ignored but becomes a deserialization failure. 5 = the codex output mode is an axis that crosses the wire, but this one **does not break the shape** (the new field is `#[serde(default)]`, so both sides parse alive). ★So 「모양이 깨질 때만 올린다」 is not the criterion★ — the criterion for raising is **a silent malfunction**, and an old daemon that drops that value passes the handshake while launching the interactive TUI behind the 「코덱스 JSON」 label. The daemon outliving a shell rebuild is by design, so 「릴리스 상대가 없다」 does not prevent either failure. Canonical source for the per-version reasons = the doc of that constant.
+**`PROTOCOL_VERSION = 6`.** The 6 was raised after this work by the pending-input list command (ADR-0231 — reason = the v6 entry in `crates/engram-dashboard-protocol/src/lib.rs`). This work raised it twice, to 4 and 5, and **the reasons differ from each other**. 4 = the spawn command is an enum split by a `kind` tag, so adding a variant is a hard break — an unknown variant is not ignored but becomes a deserialization failure. 5 = the codex output mode is an axis that crosses the wire, but this one **does not break the shape** (the new field is `#[serde(default)]`, so both sides parse alive). ★So 「모양이 깨질 때만 올린다」 is not the criterion★ — the criterion for raising is **a silent malfunction**, and an old daemon that drops that value passes the handshake while launching the interactive TUI behind the **Codex JSON** label. The daemon outliving a shell rebuild is by design, so 「릴리스 상대가 없다」 does not prevent either failure. Canonical source for the per-version reasons = the doc of that constant.
 
 ★**A version mismatch with a live daemon is refused by discovery — it is not a silent malfunction**★. If the `protocol_version` in `daemon.json` differs from this client and the recorded pid is **alive**, the decision does not overwrite that daemon with a spawn but fails with `DiscoveryError::VersionMismatch { daemon, expected }`. If the pid is already dead, that record is stale regardless of version and is not a target for refusal — a new daemon is launched. What the decision looks at is only same or different, so it does not ask which side is newer. **The value of the two bumps is here — 「분명한 거부」 (a clear refusal).** If we had not raised it, this would be the place where two builds passed the handshake and read different words · different modes as the same.
 

@@ -21,6 +21,7 @@ import { SlotUnavailableVeil } from '../slot/SlotUnavailableVeil'
 import { buildSlotMenu } from '../../commands/slotMenu'
 import { defaultRenderMode, type RenderMode } from '../slot/renderMode'
 import { t } from '../../i18n'
+import { useLanguage } from '../../i18n/react'
 import { reportUiMetrics, SLOT_FRAME_BORDER } from './uiMetricsReport'
 
 type SlotNode = Extract<LayoutNode, { type: 'slot' }>
@@ -48,6 +49,8 @@ function LayoutLeaf({
   isForeign: boolean
   viewIdOverride?: string | null
 }) {
+  // ADR-0373: memo boundary over `t()` text — re-render on a language change.
+  useLanguage()
   // ★우클릭 슬롯 메뉴 상태(§5)★: 잎은 슬롯 하나당 하나라 여기 useState 는 그 슬롯 전용 메뉴 좌표다.
   //   열림 시 SlotContextMenu 를 이 잎 안에서 직접 마운트한다.
   const [contextMenu, setContextMenu] = useState<MenuAnchor | null>(null)
@@ -131,6 +134,8 @@ const SlotBody = memo(function SlotBody({
   contextMenu: MenuAnchor | null
   onCloseMenu: () => void
 }) {
+  // ADR-0373: memo boundary over `t()` text, the slot menu titles included — re-render on a language change.
+  useLanguage()
   const renderModeOverride = useViewStore(s => s.renderModeOverride)
   // ★M2 caps 분기(ADR-0044)★: agent 배정 슬롯의 렌더러는 그 agent 의 output caps 로 고른다. caps 는
   // AgentInfo 로 이미 wire 를 건너와 store 에 있다(M1) — 여기선 조회만(추가 배선 불필요).

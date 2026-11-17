@@ -2,6 +2,7 @@
 
 import { describe, expect, it } from 'vitest'
 
+import { setLanguage, t } from '../i18n'
 import { basename, PATH_NAME_PLACEHOLDER } from './basename'
 
 describe('basename (cwd 표시명 파생)', () => {
@@ -25,12 +26,25 @@ describe('basename (cwd 표시명 파생)', () => {
     expect(basename('C:')).toBe('C:')
   })
   it('빈/공백-only cwd → placeholder(비어있지 않은 안정적 문자열)', () => {
-    expect(basename('')).toBe(PATH_NAME_PLACEHOLDER)
-    expect(basename('   ')).toBe(PATH_NAME_PLACEHOLDER)
+    expect(basename('')).toBe(t(PATH_NAME_PLACEHOLDER))
+    expect(basename('   ')).toBe(t(PATH_NAME_PLACEHOLDER))
     expect(basename('').trim().length).toBeGreaterThan(0)
   })
   it('UNC share 는 마지막 세그먼트 파생', () => {
     expect(basename('\\\\server\\share')).toBe('share')
     expect(basename('\\\\server\\share\\')).toBe('share')
+  })
+})
+
+// ADR-0373: the blank-path name is resolved on each call, so it follows the UI language.
+describe('basename — blank path in the current UI language', () => {
+  it('follows a language switch', () => {
+    try {
+      expect(basename('')).toBe('(경로 없음)')
+      setLanguage('en')
+      expect(basename('')).toBe('(no path)')
+    } finally {
+      setLanguage('ko')
+    }
   })
 })

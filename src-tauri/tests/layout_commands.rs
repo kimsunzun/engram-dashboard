@@ -87,6 +87,7 @@ use engram_dashboard_lib::theme::{
     global_theme, EffectiveThemes, ThemeControl, ThemeWindows, UiSettingsPayload, UiTheme,
     DEFAULT_THEME,
 };
+use engram_dashboard_lib::ui_text::Lang;
 use engram_dashboard_lib::view_commands::{
     reserved_names, ViewArgSchema, ViewCommandBridge, ViewCommandDecl, ViewCommandHelp,
     ViewCommandRequest, ViewDispatch, ViewEffect, VIEW_HOP_MARGIN, VIEW_REPLY_DEADLINE,
@@ -422,6 +423,8 @@ impl SettingsEvents for FakeSettingsEvents {
     fn theme_default_changed(&self) {
         *self.theme_pushes.lock().unwrap() += 1;
     }
+
+    fn ui_language_changed(&self) {}
 }
 
 impl FakeSettingsEvents {
@@ -1070,7 +1073,7 @@ async fn tab_list_says_whether_each_tab_name_was_set() {
     let listed = list(&receiver, &queue).await;
     assert_eq!(
         row(&listed, &auto["view_id"]),
-        json!({ "id": auto["view_id"], "name": "빈 칸", "named": false })
+        json!({ "id": auto["view_id"], "name": "Empty slot", "named": false })
     );
     assert_eq!(
         row(&listed, &named["view_id"]),
@@ -1082,14 +1085,14 @@ async fn tab_list_says_whether_each_tab_name_was_set() {
         &queue,
         &Mailbox::default(),
         "tab.rename",
-        json!({ "view_id": auto["view_id"], "name": "빈 칸" }),
+        json!({ "view_id": auto["view_id"], "name": "Empty slot" }),
     )
     .await
     .outcome
     .expect("같은 글자로 이름 바꾸기");
     assert_eq!(
         row(&list(&receiver, &queue).await, &auto["view_id"]),
-        json!({ "id": auto["view_id"], "name": "빈 칸", "named": true })
+        json!({ "id": auto["view_id"], "name": "Empty slot", "named": true })
     );
 }
 
@@ -2650,7 +2653,7 @@ async fn settings_get_answers_from_the_shared_service() {
         .expect("성공 답장");
     assert_eq!(all["rev"], 0);
     let items = all["items"].as_array().expect("items");
-    assert_eq!(items.len(), 12);
+    assert_eq!(items.len(), 13);
     assert_eq!(
         items[0],
         json!({"key": "theme.default", "value": "dark", "is_default": true})
@@ -3101,7 +3104,100 @@ async fn settings_schema_describes_the_keys() {
         .await
         .outcome
         .expect("성공 답장");
-    assert_eq!(all["items"].as_array().expect("items").len(), 12);
+    assert_eq!(all["items"].as_array().expect("items").len(), 13);
+}
+
+/// ADR-0373 — the LLM path of a `ui.language` write reaches the language hook. The hook here does what the production one does
+/// to the layout (read the stored value, `apply::language_changed`), so `tab.list` answers in the new language.
+#[tokio::test]
+async fn a_bus_ui_language_write_reaches_the_language_hook_and_renames_auto_tabs() {
+    struct Applying {
+        settings: Arc<SettingsService>,
+        state: LayoutState,
+        events: Arc<dyn LayoutEvents>,
+        heard: Mutex<usize>,
+    }
+
+    impl SettingsEvents for Applying {
+        fn changed(&self, _change: &SettingsSnapshot) {}
+
+        fn theme_default_changed(&self) {}
+
+        fn ui_language_changed(&self) {
+            *self.heard.lock().unwrap() += 1;
+            apply::language_changed(
+                &self.state,
+                self.events.as_ref(),
+                Lang::from_settings(&self.settings),
+            )
+            .unwrap();
+        }
+    }
+
+    let (world, mut ports) = World::build();
+    let hook = Arc::new(Applying {
+        settings: Arc::clone(&world.settings),
+        state: world.state.clone(),
+        events: Arc::clone(&world.events) as Arc<dyn LayoutEvents>,
+        heard: Mutex::default(),
+    });
+    ports.settings_events = Arc::clone(&hook) as Arc<dyn SettingsEvents>;
+    let queue = Arc::new(Queued::default());
+    let receiver = InboundReceiver::new(
+        make_table(ports),
+        Arc::clone(&queue) as Arc<dyn TaskSpawner>,
+        CATALOG_VERSION,
+    );
+    let main_tab_name = |listed: serde_json::Value| listed["tabs"][0]["name"].clone();
+    async fn verb(
+        receiver: &InboundReceiver,
+        queue: &Queued,
+        name: &str,
+        args: serde_json::Value,
+    ) -> serde_json::Value {
+        call(receiver, queue, &Mailbox::default(), name, args)
+            .await
+            .outcome
+            .expect("success reply")
+    }
+    let list = json!({ "window": MAIN_WINDOW_LABEL });
+
+    assert_eq!(
+        main_tab_name(verb(&receiver, &queue, "tab.list", list.clone()).await),
+        "Empty slot"
+    );
+    verb(
+        &receiver,
+        &queue,
+        "settings.set",
+        json!({"key": "ui.language", "value": "ko"}),
+    )
+    .await;
+    assert_eq!(*hook.heard.lock().unwrap(), 1);
+    assert_eq!(
+        main_tab_name(verb(&receiver, &queue, "tab.list", list.clone()).await),
+        "빈 칸"
+    );
+
+    verb(
+        &receiver,
+        &queue,
+        "settings.set",
+        json!({"key": "theme.default", "value": "light"}),
+    )
+    .await;
+    assert_eq!(
+        *hook.heard.lock().unwrap(),
+        1,
+        "another key does not reach it"
+    );
+
+    verb(&receiver, &queue, "settings.reset", json!({"key": "ui."})).await;
+    assert_eq!(*hook.heard.lock().unwrap(), 2);
+    assert_eq!(
+        main_tab_name(verb(&receiver, &queue, "tab.list", list).await),
+        "Empty slot"
+    );
 }
 
 /// ★버스 쓰기 → 알림 → 유효 테마 밀기를 한 줄로★ — 운영 어댑터(`TauriSettingsEvents`)와 같은 배선을 창 없이
@@ -3116,6 +3212,8 @@ async fn a_bus_theme_default_write_reaches_every_window_without_its_own_theme() 
         fn theme_default_changed(&self) {
             self.0.push();
         }
+
+        fn ui_language_changed(&self) {}
     }
 
     let (world, mut ports) = World::build();

@@ -1,107 +1,84 @@
-//! 탭 · 창 이름의 순수 셈(TRD S26-window-chrome §4-2 · §4-4 · PRD R3 · R4) — 탭 유효 이름(`effective_tab_name`) ·
-//! 슬롯 표시 이름(`slot_label`) · OS 창 제목(`window_title`) · 셸 낱말 표(`word`). Tauri 를 모른다 — 모델은 읽기만
-//! 한다(`effective_tab_name` 이 `View` 와 `ViewManager` 의 이름 장부 · 모르는 내용 곁표를 읽는다).
+//! Pure computation of tab and window names (TRD S26-window-chrome §4-2 · §4-4 · PRD R3 · R4) — the effective tab name
+//! (`effective_tab_name`), the slot display name (`slot_label`) and the OS window title (`window_title`). It does not know Tauri
+//! and only reads the model (`effective_tab_name` reads the `View`, and the name ledger, unknown-content side table and language of
+//! the `ViewManager`). The words themselves live in `crate::ui_text` in both UI languages; the language is passed explicitly —
+//! the layout's language is the `ViewManager` field, there is no process-global one.
 //!
-//! ★D17 — `slot_label` 은 0 열 함수로 두고 본문에 `SlotContent` 위 `match` 하나만 담는다★: 갈래는 모두
-//! `SlotContent::<변형>` 경로 패턴으로 시작하고(`|` 로 이은 갈래도 — 와일드카드 · 이름 묶기 · `x @ …` · `crate::…`
-//! 경로 없음), 가드는 짧게 두고 `||` 를 쓰지 않으며(rustfmt 가 다음 줄로 내린 가드는 ② 에 걸린다), 한 줄에 갈래를
-//! 하나만 두고, 본문에 다른 `=>`(중첩 `match` 등)를 두지 않는다. 이 파일에는 rustfmt 를 건너뛰게 하는 attribute 를
-//! 두지 않는다(② 가 rustfmt 꼴에 기댄다 — 게이트가 파일 전체에서 그 이름을 찾는다). 게이트(CI `shell gate 2`)가
-//! 그 본문(0 열 `pub fn slot_label` 줄부터 첫 0 열 `}` 까지 · 주석 밖)을 보고 ① `types.rs` 의 모든
-//! 변형이 `SlotContent::<변형>` 으로 나오는지 ② 갈래 줄이 위 꼴인지 잰다 — CI 가 clippy 를 돌리지 않아 lint
-//! attribute 만으로는 지켜지지 않는다. `match` 를 다른 함수로 떼어 내면 게이트가 못 본다.
+//! ★D17 — keep `slot_label` a column-0 function whose body holds a single `match` over `SlotContent`★: every arm starts with a
+//! `SlotContent::<variant>` path pattern (arms joined by `|` too — no wildcard · name binding · `x @ …` · `crate::…` path), guards
+//! stay short and never use `||` (a guard rustfmt moves to the next line trips ②), one arm per line, and no other `=>` in the
+//! body (a nested `match` etc.). Keep no attribute in this file that makes rustfmt skip anything (② relies on the rustfmt shape —
+//! the gate looks for that name in the whole file). The gate (CI `shell gate 2`) reads that body (from the column-0
+//! `pub fn slot_label` line to the first column-0 `}`, outside comments) and checks ① that every variant of `types.rs` appears as
+//! `SlotContent::<variant>` and ② that the arm lines have the shape above — CI does not run clippy, so the lint attribute alone does
+//! not hold it. Moving the `match` into another function hides it from the gate.
 
 use super::manager::ViewManager;
 use super::tree;
 use super::types::{SlotContent, TabName, View};
+use crate::ui_text::{tab_word, Lang, TabWord};
 
 const PRODUCT: &str = "Engram";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Word {
-    EmptySlot,
-    AgentUnknown,
-    AgentTree,
-    Usage,
-    /// 이 판이 모르는 내용의 슬롯 — `SlotContent` 의 갈래가 아니다(메모리 내용은 `Empty` · 원문은 곁표).
-    Foreign,
-}
-
-/// 사람에게 보이는 낱말의 셸 정본(사용자 결정 T2 · 2026-10-24) — 셸에는 i18n 층이 없어 여기 한 곳에 둔다.
-/// 웹 i18n 과 합치는 것은 T-68 몫이다. `Foreign` 의 글자는 웹 `ko.ts` 의 `slot.foreignContent` 와 같아야 한다.
-// ADR-0301 — 탭 이름 · OS 제목
-const fn word(w: Word) -> &'static str {
-    match w {
-        Word::EmptySlot => "빈 칸",
-        Word::AgentUnknown => "에이전트",
-        Word::AgentTree => "에이전트 트리",
-        Word::Usage => "사용량",
-        Word::Foreign => "알 수 없는 내용",
-    }
-}
-
-impl Word {
-    // 변형을 더하면 여기에도 더한다 — 빠진 낱말은 [`is_word`] 를 지나 에이전트 이름 시드로 심긴다.
-    const ALL: [Word; 5] = [
-        Word::EmptySlot,
-        Word::AgentUnknown,
-        Word::AgentTree,
-        Word::Usage,
-        Word::Foreign,
-    ];
-}
-
-/// `text` 가 낱말 표의 글자 그대로인가. 저장 파일의 자동 탭 이름은 그 순간의 [`slot_label`] 이라, 이름 장부에 없던
-/// 에이전트의 탭은 「에이전트」로 적혀 있다 — 그 글자를 장부 시드로 심지 않으려고 거른다(TRD S26-window-chrome §4-3).
+/// Whether `text` is exactly a shell word of either language. A saved automatic tab name is the [`slot_label`] of that moment, so
+/// the tab of an agent missing from the name ledger was saved as the agent word — this keeps such words (of a run in either
+/// language, including today's Korean files) out of the ledger seed (TRD S26-window-chrome §4-3). Auto vs named is decided by
+/// `TabEntry.named`, not by this.
+// ADR-0373 — a seed filter over both languages
 pub(crate) fn is_word(text: &str) -> bool {
-    Word::ALL.iter().any(|&w| word(w) == text)
+    Lang::ALL
+        .iter()
+        .any(|&lang| TabWord::ALL.iter().any(|&w| tab_word(lang, w) == text))
 }
 
-/// 탭의 보이는 이름(R4 · AC4 · AC35) — 정한 이름이면 그 이름이고, 자동이면 포커스 슬롯의 [`slot_label`] 이다. 포커스가
-/// 없거나 트리에 없는 슬롯을 가리키면 트리 첫 슬롯을 쓴다(`ViewManager::fixup_focus` 와 같은 규칙). 그 슬롯이 이 판이
-/// 모르는 내용을 쥐었으면 「알 수 없는 내용」이다 — 메모리 내용(`Empty`)대로 「빈 칸」이라 하면 점유된 칸을 비었다고
-/// 말한다. 에이전트 이름은 `mgr` 의 이름 장부에서 읽는다. 결과를 저장하지 않는다 — 부를 때마다 셈한다.
-// ADR-0301 — 탭 이름 · OS 제목
+/// The visible name of a tab (R4 · AC4 · AC35) in the manager's language — a named tab's name, or for an automatic tab the
+/// [`slot_label`] of its focused slot. A focus that is missing or points outside the tree falls back to the tree's first slot (the
+/// same rule as `ViewManager::fixup_focus`). A slot holding content this build does not know is the `Foreign` word — the in-memory
+/// content (`Empty`) would call an occupied slot empty. Agent names come from `mgr`'s name ledger. Nothing is stored — it is
+/// computed on every call.
+// ADR-0301 — tab names and OS titles
 pub fn effective_tab_name(mgr: &ViewManager, view: &View) -> String {
     match &view.name {
         TabName::Named(name) => name.clone(),
         TabName::Auto => {
+            let lang = mgr.language();
             let slot = view
                 .focused_slot_id
                 .filter(|&id| tree::contains_slot(&view.layout, id))
                 .unwrap_or_else(|| tree::first_slot_id(&view.layout));
             if mgr.unknown_content(view.id, slot).is_some() {
-                return word(Word::Foreign).to_owned();
+                return tab_word(lang, TabWord::Foreign).to_owned();
             }
             match tree::find_slot(&view.layout, slot) {
-                Some(content) => slot_label(content, |id: &str| mgr.agent_name(id)),
-                None => word(Word::EmptySlot).to_owned(),
+                Some(content) => slot_label(lang, content, |id: &str| mgr.agent_name(id)),
+                None => tab_word(lang, TabWord::EmptySlot).to_owned(),
             }
         }
     }
 }
 
-/// 슬롯 하나의 표시 이름 — 탭 자동 이름의 재료. 에이전트 슬롯은 `agent(agent_id)` 가 준 이름이고, 그것이
-/// `None`(장부에 없음)이거나 빈 글자 · 공백뿐이면 「에이전트」다(빈 탭 이름 · 「 - Engram:<n>」 제목을 막는다).
-/// 준 이름은 다듬지 않고 그대로 쓴다.
-// D17: 와일드카드 · 묶음 이름 갈래를 두지 않는다 — 슬롯 종류를 더하면 이름을 짓기 전에는 컴파일이 안 된다.
-// ADR-0301 — 탭 이름 · OS 제목
+/// The display name of one slot in `lang` — what an automatic tab name is made of. An agent slot is the name `agent(agent_id)`
+/// gives; if that is `None` (not in the ledger) or empty · blank, it is the agent word (no empty tab name, no 「 - Engram:<n>」
+/// title). A given name is used as is, untrimmed.
+// D17: no wildcard or grouped-name arm — adding a slot kind does not compile until it is named.
+// ADR-0301 — tab names and OS titles
 #[deny(clippy::wildcard_enum_match_arm)]
 pub fn slot_label<'n>(
+    lang: Lang,
     content: &SlotContent,
     agent: impl for<'a> Fn(&'a str) -> Option<&'n str>,
 ) -> String {
     match content {
-        SlotContent::Empty => word(Word::EmptySlot).to_owned(),
+        SlotContent::Empty => tab_word(lang, TabWord::EmptySlot).to_owned(),
         SlotContent::Agent { agent_id } => agent(agent_id)
             .filter(|name| !name.trim().is_empty())
-            .unwrap_or(word(Word::AgentUnknown))
+            .unwrap_or(tab_word(lang, TabWord::AgentUnknown))
             .to_owned(),
-        SlotContent::AgentList => word(Word::AgentTree).to_owned(),
+        SlotContent::AgentList => tab_word(lang, TabWord::AgentTree).to_owned(),
         SlotContent::Usage {
             show_claude: _,
             show_codex: _,
-        } => word(Word::Usage).to_owned(),
+        } => tab_word(lang, TabWord::Usage).to_owned(),
     }
 }
 
@@ -133,24 +110,55 @@ mod tests {
         }
     }
 
+    fn korean() -> ViewManager {
+        let mut mgr = ViewManager::new();
+        mgr.set_language(Lang::Ko);
+        mgr
+    }
+
     // ── word ──
 
     #[test]
     fn words_are_the_t2_table() {
-        assert_eq!(word(Word::EmptySlot), "빈 칸");
-        assert_eq!(word(Word::AgentUnknown), "에이전트");
-        assert_eq!(word(Word::AgentTree), "에이전트 트리");
-        assert_eq!(word(Word::Usage), "사용량");
-        assert_eq!(word(Word::Foreign), "알 수 없는 내용");
+        assert_eq!(tab_word(Lang::Ko, TabWord::EmptySlot), "빈 칸");
+        assert_eq!(tab_word(Lang::Ko, TabWord::AgentUnknown), "에이전트");
+        assert_eq!(tab_word(Lang::Ko, TabWord::AgentTree), "에이전트 트리");
+        assert_eq!(tab_word(Lang::Ko, TabWord::Usage), "사용량");
+        assert_eq!(tab_word(Lang::Ko, TabWord::Foreign), "알 수 없는 내용");
     }
 
     #[test]
+    fn english_words() {
+        assert_eq!(tab_word(Lang::En, TabWord::EmptySlot), "Empty slot");
+        assert_eq!(tab_word(Lang::En, TabWord::AgentUnknown), "Agent");
+        assert_eq!(tab_word(Lang::En, TabWord::AgentTree), "Agent tree");
+        assert_eq!(tab_word(Lang::En, TabWord::Usage), "Usage");
+        assert_eq!(tab_word(Lang::En, TabWord::Foreign), "Unknown content");
+    }
+
+    // Reads the frontend tables as source text — so it pins their paths and the one-line form `foreignContent: '…'`.
+    #[test]
     fn foreign_word_is_the_one_the_frontend_shows() {
-        let ko = include_str!("../../../src/i18n/ko.ts");
-        assert!(
-            ko.contains(&format!("foreignContent: '{}'", word(Word::Foreign))),
-            "src/i18n/ko.ts 의 slot.foreignContent"
-        );
+        for (lang, table, path) in [
+            (
+                Lang::En,
+                include_str!("../../../src/i18n/en.ts"),
+                "src/i18n/en.ts",
+            ),
+            (
+                Lang::Ko,
+                include_str!("../../../src/i18n/ko.ts"),
+                "src/i18n/ko.ts",
+            ),
+        ] {
+            assert!(
+                table.contains(&format!(
+                    "foreignContent: '{}'",
+                    tab_word(lang, TabWord::Foreign)
+                )),
+                "slot.foreignContent of {path}"
+            );
+        }
     }
 
     #[test]
@@ -161,6 +169,11 @@ mod tests {
             "에이전트 트리",
             "사용량",
             "알 수 없는 내용",
+            "Empty slot",
+            "Agent",
+            "Agent tree",
+            "Usage",
+            "Unknown content",
         ] {
             assert!(is_word(text), "{text}");
         }
@@ -171,6 +184,9 @@ mod tests {
             "에이전트1",
             "View 3",
             "",
+            "agent",
+            "Agent ",
+            "AGENT",
         ] {
             assert!(!is_word(text), "{text:?}");
         }
@@ -180,10 +196,18 @@ mod tests {
 
     #[test]
     fn non_agent_slots_use_their_word() {
-        assert_eq!(slot_label(&SlotContent::Empty, no_names), "빈 칸");
+        assert_eq!(slot_label(Lang::Ko, &SlotContent::Empty, no_names), "빈 칸");
         assert_eq!(
-            slot_label(&SlotContent::AgentList, no_names),
+            slot_label(Lang::Ko, &SlotContent::AgentList, no_names),
             "에이전트 트리"
+        );
+        assert_eq!(
+            slot_label(Lang::En, &SlotContent::Empty, no_names),
+            "Empty slot"
+        );
+        assert_eq!(
+            slot_label(Lang::En, &SlotContent::AgentList, no_names),
+            "Agent tree"
         );
     }
 
@@ -196,7 +220,8 @@ mod tests {
                 show_claude,
                 show_codex,
             };
-            assert_eq!(slot_label(&usage, no_names), "사용량");
+            assert_eq!(slot_label(Lang::Ko, &usage, no_names), "사용량");
+            assert_eq!(slot_label(Lang::En, &usage, no_names), "Usage");
         }
     }
 
@@ -204,22 +229,25 @@ mod tests {
     fn agent_slot_uses_the_ledger_name() {
         let names = HashMap::from([("a1".to_owned(), "myproj".to_owned())]);
         let lookup = |id: &str| names.get(id).map(String::as_str);
-        assert_eq!(slot_label(&agent("a1"), lookup), "myproj");
+        for lang in Lang::ALL {
+            assert_eq!(slot_label(lang, &agent("a1"), lookup), "myproj");
+        }
     }
 
     #[test]
     fn agent_slot_missing_from_ledger_is_agent_word() {
         let names = HashMap::from([("a1".to_owned(), "myproj".to_owned())]);
         let lookup = |id: &str| names.get(id).map(String::as_str);
-        assert_eq!(slot_label(&agent("a2"), lookup), "에이전트");
-        assert_eq!(slot_label(&agent("a1"), no_names), "에이전트");
+        assert_eq!(slot_label(Lang::Ko, &agent("a2"), lookup), "에이전트");
+        assert_eq!(slot_label(Lang::Ko, &agent("a1"), no_names), "에이전트");
+        assert_eq!(slot_label(Lang::En, &agent("a2"), lookup), "Agent");
     }
 
     #[test]
     fn agent_slot_with_blank_ledger_name_is_agent_word() {
         for blank in ["", " ", "   ", "\t\n", "\u{3000}"] {
             assert_eq!(
-                slot_label(&agent("a1"), |_: &str| Some(blank)),
+                slot_label(Lang::Ko, &agent("a1"), |_: &str| Some(blank)),
                 "에이전트",
                 "{blank:?}"
             );
@@ -228,13 +256,16 @@ mod tests {
 
     #[test]
     fn agent_slot_name_with_surrounding_spaces_is_kept_as_given() {
-        assert_eq!(slot_label(&agent("a1"), |_: &str| Some(" a b ")), " a b ");
+        assert_eq!(
+            slot_label(Lang::En, &agent("a1"), |_: &str| Some(" a b ")),
+            " a b "
+        );
     }
 
     #[test]
     fn agent_lookup_receives_the_slot_agent_id() {
         let seen = std::cell::RefCell::new(Vec::new());
-        let label = slot_label(&agent("id-42"), |id: &str| {
+        let label = slot_label(Lang::En, &agent("id-42"), |id: &str| {
             seen.borrow_mut().push(id.to_owned());
             Some("n")
         });
@@ -257,7 +288,7 @@ mod tests {
                 show_codex: true,
             },
         ] {
-            slot_label(&content, lookup);
+            slot_label(Lang::En, &content, lookup);
         }
         assert!(!called.get());
     }
@@ -274,7 +305,7 @@ mod tests {
 
     // 왼쪽 = 에이전트 a1 · 오른쪽 = 에이전트 트리. 포커스는 새 칸(오른쪽)이다(`split_slot`).
     fn agent_and_tree() -> (ViewManager, Uuid, Uuid, Uuid) {
-        let mut mgr = ViewManager::new();
+        let mut mgr = korean();
         let view = main_tab(&mgr);
         let left = tree::first_slot_id(&mgr.views[&view].layout);
         let right = mgr.split_slot(view, left, SplitDir::LeftRight).unwrap();
@@ -316,7 +347,7 @@ mod tests {
 
     #[test]
     fn an_agent_missing_from_the_ledger_is_the_agent_word() {
-        let mut mgr = ViewManager::new();
+        let mut mgr = korean();
         let view = main_tab(&mgr);
         let slot = tree::first_slot_id(&mgr.views[&view].layout);
         mgr.assign_agent(view, slot, "a-unknown".into()).unwrap();
@@ -324,8 +355,24 @@ mod tests {
     }
 
     #[test]
-    fn a_slot_holding_unknown_content_is_the_foreign_word_not_empty() {
+    fn auto_names_follow_the_managers_language() {
         let mut mgr = ViewManager::new();
+        assert_eq!(mgr.language(), Lang::En, "English by default");
+        let view = main_tab(&mgr);
+        assert_eq!(name_of(&mgr, view), "Empty slot");
+        mgr.set_language(Lang::Ko);
+        assert_eq!(name_of(&mgr, view), "빈 칸");
+        let slot = tree::first_slot_id(&mgr.views[&view].layout);
+        let raw = serde_json::json!({ "type": "from_the_future" });
+        mgr.set_unknown_content(view, slot, raw.as_object().unwrap().clone())
+            .unwrap();
+        mgr.set_language(Lang::En);
+        assert_eq!(name_of(&mgr, view), "Unknown content");
+    }
+
+    #[test]
+    fn a_slot_holding_unknown_content_is_the_foreign_word_not_empty() {
+        let mut mgr = korean();
         let view = main_tab(&mgr);
         let slot = tree::first_slot_id(&mgr.views[&view].layout);
         let raw = serde_json::json!({ "type": "from_the_future" });
@@ -340,7 +387,7 @@ mod tests {
     // 새 탭 · 새 창의 하나뿐인 빈 칸은 처음부터 포커스 칸이다 — 거기 놓은 내용이 곧 탭 이름이다(§4-2).
     #[test]
     fn placing_content_in_a_new_tabs_only_slot_names_the_tab() {
-        let mut mgr = ViewManager::new();
+        let mut mgr = korean();
         let view = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
         assert_eq!(name_of(&mgr, view), "빈 칸");
         let slot = tree::first_slot_id(&mgr.views[&view].layout);
@@ -352,7 +399,7 @@ mod tests {
     // 기본 이름(「View N」 · 「Popup N」 · 「Tab」)을 짓지 않는다 — 새로 서는 탭은 모두 자동 이름이다.
     #[test]
     fn new_tabs_are_auto_named_everywhere() {
-        let mut mgr = ViewManager::new();
+        let mut mgr = korean();
         let boot = main_tab(&mgr);
         let tab = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
         let popout = mgr.create_window("slot-popup-1").unwrap();

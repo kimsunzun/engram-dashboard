@@ -1010,9 +1010,9 @@ mod tests {
         assert_eq!(
             tabs,
             [
-                (auto, "에이전트 트리", Some(false)),
+                (auto, "Agent tree", Some(false)),
                 (named, "작업", Some(true)),
-                (foreign, "알 수 없는 내용", Some(false)),
+                (foreign, "Unknown content", Some(false)),
             ]
         );
     }
@@ -1078,11 +1078,13 @@ mod tests {
             agent_tab("a2", "정함", Some(true)),
             agent_tab("a2", "에이전트", Some(false)),
             agent_tab("a3", "View 3", None),
+            agent_tab("a4", "Agent", Some(false)),
         ])]);
         assert_eq!(back.warnings, vec![]);
         assert_eq!(
             listed_names(&back.layout),
-            ["myproj", "정함", "에이전트", "에이전트"]
+            ["myproj", "정함", "Agent", "Agent", "Agent"],
+            "neither language's agent word is seeded as a name"
         );
     }
 
@@ -1138,6 +1140,11 @@ mod tests {
             "에이전트 트리",
             "사용량",
             "알 수 없는 내용",
+            "Empty slot",
+            "Agent",
+            "Agent tree",
+            "Usage",
+            "Unknown content",
             "",
             "  ",
         ] {
@@ -1180,7 +1187,7 @@ mod tests {
             back.warnings.as_slice(),
             [RestoreWarning::DuplicateTab { .. }]
         ));
-        assert_eq!(listed_names(&back.layout), ["에이전트"]);
+        assert_eq!(listed_names(&back.layout), ["Agent"]);
     }
 
     #[test]

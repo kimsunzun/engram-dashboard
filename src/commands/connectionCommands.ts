@@ -39,14 +39,14 @@ function statusReply(client: AgentClient): ConnectionStatusReply {
 export function registerConnectionCommands({ client, start, shutdown }: ConnectionCommandDeps): void {
   register({
     id: 'connection.status',
-    title: t('connection.statusCmd'),
+    title: () => t('connection.statusCmd'),
     category: 'connection',
     run: (): ConnectionStatusReply => statusReply(client),
   })
 
   register({
     id: 'connection.reconnect',
-    title: t('connection.reconnectCmd'),
+    title: () => t('connection.reconnectCmd'),
     category: 'connection',
     // A failure rethrows the start's error rather than replying a status: the band in a status read right after a
     //   failure can still be the one before it — the shell answers before it emits that answer's band.
@@ -58,7 +58,7 @@ export function registerConnectionCommands({ client, start, shutdown }: Connecti
 
   register({
     id: 'daemon.stop',
-    title: t('connection.stopCmd'),
+    title: () => t('connection.stopCmd'),
     category: 'connection',
     // No confirm on the LLM path. The reply carries no status (TRD S21 trd-3-2-u5 U6) — read `connection.status`.
     run: (): Promise<DaemonShutdownReply> => shutdown(),

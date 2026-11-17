@@ -61,6 +61,7 @@ use super::types::{
     SlotContent, SplitDir, SplitRatioApplied, SplitRatioOutcome, UiMetrics, ViewMeta, ViewSnapshot,
 };
 use super::LayoutState;
+use crate::ui_text::Lang;
 
 /// 창별 탭바 알림 페이로드(ADR-0057). 프론트는 `label` 이 자기 창과 일치할 때만 반응하고(§7-1),
 /// `version` 으로 stale 알림을 폐기한다(G10). 필드 이름은 wire 계약 — 프론트가 이 이름으로 읽는다.
@@ -725,13 +726,37 @@ pub fn agent_names_updated(
     events: &dyn LayoutEvents,
     names: &[(String, String)],
 ) -> Result<(), String> {
+    announce_renamed_windows(state, events, |mgr| mgr.update_agent_names(names))
+}
+
+/// Makes automatic tab names (and so OS window titles) in `lang` and announces, at a new version, only the windows where an
+/// automatic tab's visible name actually changed — the same shape as [`agent_names_updated`]. Nothing changed (the same language,
+/// or only named tabs) = no bump and no notification. Not [`sync_titles`]: that one does not bump, so the web and the OS title would
+/// drop the payload as not newer.
+// ★Tab notifications only★ — like `agent_names_updated`.
+// ADR-0373
+pub fn language_changed(
+    state: &LayoutState,
+    events: &dyn LayoutEvents,
+    lang: Lang,
+) -> Result<(), String> {
+    announce_renamed_windows(state, events, |mgr| mgr.set_language(lang))
+}
+
+// Under the layout lock `rename` changes what automatic tab names are made of and returns the windows whose name changed (the
+//   manager has already bumped the version for them); their tab lists are announced after the lock is dropped.
+fn announce_renamed_windows(
+    state: &LayoutState,
+    events: &dyn LayoutEvents,
+    rename: impl FnOnce(&mut ViewManager) -> Vec<WindowLabel>,
+) -> Result<(), String> {
     let tabs: Vec<WindowTabsPayload> = {
         let mut mgr = state.0.lock().map_err(|e| e.to_string())?;
-        mgr.update_agent_names(names)
+        rename(&mut mgr)
             .iter()
             .filter_map(|label| tabs_payload(&mgr, label))
             .collect()
-    }; // ← 락 드롭
+    }; // ← the lock is dropped here
     announce(events, None::<&ViewSnapshot>, &tabs);
     Ok(())
 }

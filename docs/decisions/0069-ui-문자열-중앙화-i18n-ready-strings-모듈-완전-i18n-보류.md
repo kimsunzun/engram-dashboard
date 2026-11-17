@@ -1,7 +1,7 @@
 # ADR-0069: Centralizing UI strings — an i18n-ready strings module (full i18n deferred)
 
-- 상태: 확정 (2026-07-12, basis: user decision — "centralize for now, localize later on top of that central source")
-- 관련: CLAUDE.md §5 (LLM control) · §0 (low-risk, long-horizon seam) · `src/i18n/` (new) · step-log "UI 문자열 중앙화" entry · backlog "data-driven 우클릭 메뉴"
+- 상태: 확정 (2026-07-12, basis: user decision — "centralize for now, localize later on top of that central source") · 부분 폐기 by ADR-0349 (full i18n deferred)
+- 관련: CLAUDE.md §5 (LLM control) · §0 (low-risk, long-horizon seam) · `src/i18n/` (new) · step-log "UI 문자열 중앙화" entry · backlog "data-driven 우클릭 메뉴" · Amended by ADR-0349 (full i18n deferred)
 
 ## 맥락
 Dashboard UI strings (command titles, right-click menu labels, component text, aria-labels, the default tab name `View 1`, the empty state `- empty -`, etc.) are **hardcoded inline** in Korean across the code. There is no i18n/locale infrastructure (checked package.json and `src/` — 0 libraries, `t()`, locale files). `src/commands/` alone has ~59 spots. The user pointed out: "we are hardcoding things like menu names in Korean, shouldn't they be moved to a local table?"

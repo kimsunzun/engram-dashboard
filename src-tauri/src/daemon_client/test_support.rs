@@ -327,6 +327,7 @@ struct NoSettingsEvents;
 impl SettingsEvents for NoSettingsEvents {
     fn changed(&self, _change: &SettingsSnapshot) {}
     fn theme_default_changed(&self) {}
+    fn ui_language_changed(&self) {}
 }
 
 // A command table for layout that includes the same subscription-resync adapter as the production bus table (`OwnedSubs` — passed to the human path's `RouterSubs`).

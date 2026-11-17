@@ -12,7 +12,7 @@ import { register } from './registry'
 
 register({
   id: 'slot.scrollToBottom',
-  title: t('slot.scrollToBottom'),
+  title: () => t('slot.scrollToBottom'),
   category: 'slot',
   // Return value = `{ pinned: true }`. For a hidden tab, only set the pinned state and do the scroll write when that tab is shown.
   run: args => {

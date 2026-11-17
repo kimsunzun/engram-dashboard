@@ -15,7 +15,7 @@
 //! - ★The folder that is checked and the folder that is passed are the same absolute path★ — the data root may be a relative path (`ENGRAM_DATA_DIR` is
 //!   used as is). What WebView2 resolves a relative path against was not checked — if a relative path is passed, the checked folder and the
 //!   folder in use may diverge.
-//! - ★The window background and first theme ([`Backdrop`]) are also attached by the finishing step★ — it is not an environment option but a value that differs per window (that window's effective theme),
+//! - ★The window background, first theme and first UI language ([`Backdrop`]) are also attached by the finishing step★ — it is not an environment option but a value that differs per window (that window's effective theme),
 //!   but since all code that creates windows passes through here, it is taken as an argument and attached without omission.
 //! - ★The OS frame (title bar · buttons) is also lifted by the finishing step★ — on an OS where the app draws the title bar · window buttons (platform
 //!   `drawn_buttons` of `window::caption_style`) it is `decorations(false)` · `shadow(true)` (TRD S26-window-chrome §8-1).
@@ -32,6 +32,7 @@ use tauri::{Manager, Runtime, WebviewWindow, WebviewWindowBuilder};
 
 use crate::discovery::DataLayout;
 use crate::theme::{EffectiveThemes, UiTheme, DEFAULT_THEME};
+use crate::ui_text::Lang;
 
 /// The WebView2 browser arguments — this value is the only source. The config window also receives this value, so it is not written in `tauri.conf.json`
 /// (if written, this module's test catches it — config JSON cannot carry comments, so the reason is put here).
@@ -53,13 +54,19 @@ type WriteCheck = fn(&Path) -> Result<(), String>;
 pub(crate) enum Backdrop {
     /// Paint that theme's page background color ([`UiTheme::page_background`]) and embed `data-theme` with an initialization
     /// script that runs before the page script — if the theme that window `label` last painted in this webview ([`THEME_MEMORY_PREFIX`]) exists
-    /// use that value, otherwise `theme`.
-    Theme { label: String, theme: UiTheme },
+    /// use that value, otherwise `theme`. The same way, embed `<html lang>` — the language that window last applied
+    /// ([`LANG_MEMORY_PREFIX`]) if it is `en` or `ko`, otherwise `lang`.
+    Theme {
+        label: String,
+        theme: UiTheme,
+        lang: Lang,
+    },
 }
 
 impl Backdrop {
     /// Paint with that window's effective theme — for a window not yet in the model it is the window's theme decided in advance (`EffectiveThemes::stage`), and if none,
     /// the global theme. If there is no theme state it is the default theme (the shell registers it in the builder so this is never reached).
+    /// The language is the effective `ui.language` now.
     pub(crate) fn for_window<R: Runtime, M: Manager<R>>(manager: &M, label: &str) -> Self {
         let theme = manager
             .try_state::<Arc<EffectiveThemes>>()
@@ -67,6 +74,7 @@ impl Backdrop {
         Backdrop::Theme {
             label: label.to_string(),
             theme,
+            lang: crate::ui_language::current(manager),
         }
     }
 }
@@ -83,6 +91,15 @@ impl Backdrop {
 /// starts with an empty storage was not measured (even if not, labels are not reused within a run, so a new window does not
 /// read someone else's key).
 pub(crate) const THEME_MEMORY_PREFIX: &str = "engram.theme.";
+
+/// The head of the key under which the UI language a window last applied is written into that webview's `sessionStorage` — the
+/// window label is appended. The frontend writes it after it applies a language (`src/i18n/langMemory.ts`), and the initialization
+/// script reads it first, so a reload does not paint once in the language of the window's creation. Same storage choice and the
+/// same reasons as [`THEME_MEMORY_PREFIX`].
+///
+/// ★It must have the same spelling as `LANG_KEY_PREFIX` of `src/i18n/langMemory.ts`★ — this module's test puts them side by side.
+// ADR-0373
+pub(crate) const LANG_MEMORY_PREFIX: &str = "engram.lang.";
 
 /// Repaint the background of a window that is up with that theme — called per window when pushing the theme (`commands::settings`).
 ///
@@ -118,6 +135,20 @@ fn theme_script(label: &str, theme: UiTheme) -> String {
          new MutationObserver(function(_,o){{var e=document.documentElement;if(e){{e.dataset.theme=t;o.disconnect();}}}})\
          .observe(document,{{childList:true}});}})();",
         theme = theme.as_wire(),
+    )
+}
+
+// The `<html lang>` counterpart of `theme_script` — same shape, same reasons; only `en` · `ko` are taken from memory.
+// ADR-0373
+fn lang_script(label: &str, lang: Lang) -> String {
+    let key = serde_json::Value::from(format!("{LANG_MEMORY_PREFIX}{label}"));
+    let codes = serde_json::Value::from(Lang::ALL.map(Lang::code).to_vec());
+    format!(
+        "(function(){{var l='{lang}';try{{var s=sessionStorage.getItem({key});if({codes}.indexOf(s)>=0)l=s;}}catch(_){{}}\
+         var r=document.documentElement;if(r){{r.lang=l;return;}}\
+         new MutationObserver(function(_,o){{var e=document.documentElement;if(e){{e.lang=l;o.disconnect();}}}})\
+         .observe(document,{{childList:true}});}})();",
+        lang = lang.code(),
     )
 }
 
@@ -242,10 +273,11 @@ fn attach<B: EnvOptions>(
         Some(dir) => builder.data_dir(dir.to_path_buf()),
         None => builder,
     };
-    let Backdrop::Theme { label, theme } = backdrop;
+    let Backdrop::Theme { label, theme, lang } = backdrop;
     let builder = builder
         .background(color(theme))
-        .init_script(theme_script(&label, theme));
+        .init_script(theme_script(&label, theme))
+        .init_script(lang_script(&label, lang));
     // An OS where the app does not draw buttons (macOS's share — none for now) leaves the OS frame as is (TRD S26-window-chrome §7-11).
     // ADR-0303 — Chrome-style title bar
     if caption.drawn_buttons {
@@ -515,13 +547,15 @@ mod tests {
         Backdrop::Theme {
             label: label.to_owned(),
             theme: UiTheme::Dark,
+            lang: Lang::En,
         }
     }
 
-    fn painted_dark(label: &str) -> [Attached; 2] {
+    fn painted_dark(label: &str) -> [Attached; 3] {
         [
             Attached::Background(color(UiTheme::Dark)),
             Attached::InitScript(theme_script(label, UiTheme::Dark)),
+            Attached::InitScript(lang_script(label, Lang::En)),
         ]
     }
 
@@ -592,10 +626,12 @@ mod tests {
             let mut painted = common();
             painted.push(Attached::Background(expected));
             painted.push(Attached::InitScript(theme_script("slot-popup-3", theme)));
+            painted.push(Attached::InitScript(lang_script("slot-popup-3", Lang::Ko)));
             painted.extend(frameless());
             let backdrop = Backdrop::Theme {
                 label: "slot-popup-3".to_owned(),
                 theme,
+                lang: Lang::Ko,
             };
             assert_eq!(
                 attach(Recorder::default(), None, backdrop, DRAWN).0,
@@ -647,6 +683,61 @@ mod tests {
                 "export const THEME_KEY_PREFIX = '{THEME_MEMORY_PREFIX}'"
             )),
             "src/theme/themeMemory.ts 의 THEME_KEY_PREFIX"
+        );
+    }
+
+    #[test]
+    fn the_lang_script_plants_the_language_at_creation() {
+        for lang in Lang::ALL {
+            let script = lang_script("slot-popup-3", lang);
+            assert!(
+                script.contains(&format!("var l='{}';", lang.code())),
+                "{script}"
+            );
+            assert_eq!(
+                script.matches(".lang=l;").count(),
+                2,
+                "both when the root element exists and when it attaches: {script}"
+            );
+        }
+    }
+
+    /// The per-window memory beats the setting the window was created with — but only an `en` · `ko` value, and an unreadable
+    /// storage keeps the setting.
+    #[test]
+    fn the_lang_script_reads_the_windows_remembered_language_first() {
+        let script = lang_script("slot-popup-3", Lang::Ko);
+        let read = r#"try{var s=sessionStorage.getItem("engram.lang.slot-popup-3");if(["en","ko"].indexOf(s)>=0)l=s;}catch(_){}"#;
+        assert!(script.contains(read), "{script}");
+        let baked = script
+            .find("var l='ko';")
+            .expect("the language at creation");
+        let first_write = script.find(".lang=l;").expect("planting");
+        let memory = script.find(read).unwrap();
+        assert!(
+            baked < memory && memory < first_write,
+            "creation language → memory → planting: {script}"
+        );
+    }
+
+    #[test]
+    fn the_lang_script_quotes_the_label_as_a_json_string() {
+        let script = lang_script(r#"a"b\c"#, Lang::En);
+        assert!(
+            script.contains(r#"sessionStorage.getItem("engram.lang.a\"b\\c")"#),
+            "{script}"
+        );
+    }
+
+    /// The key the frontend writes and the key the initialization script reads have the same head.
+    #[test]
+    fn the_lang_memory_prefix_is_the_one_the_frontend_writes() {
+        let ts = include_str!("../../src/i18n/langMemory.ts");
+        assert!(
+            ts.contains(&format!(
+                "export const LANG_KEY_PREFIX = '{LANG_MEMORY_PREFIX}'"
+            )),
+            "src/i18n/langMemory.ts LANG_KEY_PREFIX"
         );
     }
 

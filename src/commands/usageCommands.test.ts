@@ -68,7 +68,7 @@ afterEach(() => {
 
 describe('등록점', () => {
   it('셋이 등록되고 제목은 리터럴 그대로다', () => {
-    expect(IDS.map(id => getCommand(id)?.title)).toEqual(['사용량 새로고침', 'Claude 표시', 'Codex 표시'])
+    expect(IDS.map(id => getCommand(id)?.title())).toEqual(['사용량 새로고침', 'Claude 표시', 'Codex 표시'])
   })
 
   it('셋 다 help 가 없다 — 버스에 오르지 않는다(TRD §3 #26 · 버스의 usage.refresh 와 겹치지 않게)', () => {

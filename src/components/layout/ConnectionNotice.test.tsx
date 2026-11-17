@@ -35,6 +35,8 @@ vi.mock('../../api/clientFactory', () => ({
 }))
 
 import ConnectionNotice from './ConnectionNotice'
+import { setLanguage } from '../../i18n'
+import { useLanguage } from '../../i18n/react'
 
 const PLAIN: Band = { kind: 'not_connected', refused: false }
 const REFUSED: Band = { kind: 'not_connected', refused: true }
@@ -243,5 +245,52 @@ describe('ConnectionNotice', () => {
 
     emit('down', PLAIN, same)
     expect(screen.getByRole('alert').textContent).toContain('쓰기 가능한 위치')
+  })
+})
+
+// ADR-0373: the ✕ memory is built from untranslated inputs, so a language switch does not bring a closed band back.
+describe('ConnectionNotice — language switch', () => {
+  /** Stands in for `App`, which re-renders the tree on a switch. */
+  function Root() {
+    useLanguage()
+    return <ConnectionNotice />
+  }
+
+  afterEach(() => {
+    act(() => {
+      setLanguage('ko')
+    })
+  })
+
+  it.each([
+    ['refused', REFUSED, null],
+    ['version', VERSION, null],
+    ['a raw start cause', PLAIN, '폴더 문제'],
+  ] as const)('a dismissed band (%s) stays dismissed across a switch', (_name, band, error) => {
+    render(<Root />)
+    emit('down', band, error)
+    fireEvent.click(screen.getByLabelText('알림 닫기'))
+    expect(screen.queryByRole('alert')).toBeNull()
+
+    act(() => {
+      setLanguage('en')
+    })
+    emit('reconnecting', band, error)
+
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('a band left open follows the switch', () => {
+    render(<Root />)
+    emit('down', REFUSED)
+    expect(screen.getByRole('alert').textContent).toContain('데몬이 이 앱의 인증을 거절했습니다')
+
+    act(() => {
+      setLanguage('en')
+    })
+
+    expect(screen.getByRole('alert').textContent).toContain(
+      'Could not connect to the daemon. The daemon refused authentication from this app.',
+    )
   })
 })

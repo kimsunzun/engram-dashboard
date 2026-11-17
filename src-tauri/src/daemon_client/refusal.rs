@@ -20,6 +20,8 @@ use std::sync::{Arc, Mutex};
 use engram_dashboard_base::sync;
 use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 
+use crate::ui_text::{self, Lang};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum RefusalSite {
     /// Full registration per connection (`RegisterCommands`) — if rejected, none of this shell's commands are in the daemon registry.
@@ -52,7 +54,9 @@ pub(crate) struct TauriRefusalBox(pub(super) tauri::AppHandle);
 
 impl RefusalNotice for TauriRefusalBox {
     fn show(&self, site: RefusalSite, daemon_message: &str) {
-        let (title, body) = refusal_text(site, daemon_message);
+        // ADR-0373 — the language in effect when the box is shown
+        let lang = crate::ui_language::current(&self.0);
+        let (title, body) = refusal_text(lang, site, daemon_message);
         self.0
             .dialog()
             .message(body)
@@ -136,22 +140,16 @@ impl RefusalAlerts {
     }
 }
 
-/// The box's (title, body). The daemon text is carried verbatim — the code prefix and the cause (an overlapping name · an overflowing size · the cap
-/// value) are in it, and so no per-code text is kept separately.
-pub(crate) fn refusal_text(site: RefusalSite, daemon_message: &str) -> (String, String) {
-    let lead = match site {
-        RefusalSite::Register => {
-            "데몬이 이 셸의 명령 등록을 통째로 거절했습니다.\nLLM 이 창 · 탭 · 슬롯 명령을 하나도 쓸 수 없습니다(원인이 고쳐질 때까지)."
-        }
-        RefusalSite::Update => {
-            "데몬이 화면 명령 명단 갱신을 거절했습니다.\n바뀐 화면 명령을 LLM 이 쓸 수 없고, 원인을 고치지 않은 채 재연결하면 이 셸의 명령 등록 전체가 거절될 수 있습니다."
-        }
-    };
+/// The box's (title, body) in `lang`. The daemon text is carried verbatim — the code prefix and the cause (an overlapping name · an
+/// overflowing size · the cap value) are in it, and so no per-code text is kept separately.
+pub(crate) fn refusal_text(
+    lang: Lang,
+    site: RefusalSite,
+    daemon_message: &str,
+) -> (String, String) {
     (
-        "Engram — 명령 등록 거절".to_owned(),
-        format!(
-            "{lead}\n\n데몬 답:\n{daemon_message}\n\n원인이 된 명령 선언을 고친 뒤 다시 빌드하세요."
-        ),
+        ui_text::refusal_title(lang).to_owned(),
+        ui_text::refusal_body(lang, ui_text::refusal_lead(lang, site), daemon_message),
     )
 }
 
@@ -262,7 +260,7 @@ mod tests {
         let daemon_message =
             "CONFLICT: names already answered by the daemon: agent.rename, {x}\n둘째 줄";
         for site in [RefusalSite::Register, RefusalSite::Update] {
-            let (title, body) = refusal_text(site, daemon_message);
+            let (title, body) = refusal_text(Lang::Ko, site, daemon_message);
             assert_eq!(title, "Engram — 명령 등록 거절");
             assert!(
                 body.contains(&format!("\n\n데몬 답:\n{daemon_message}\n\n")),
@@ -272,17 +270,38 @@ mod tests {
                 body.ends_with("원인이 된 명령 선언을 고친 뒤 다시 빌드하세요."),
                 "{site:?}: 할 일 줄 — {body}"
             );
+
+            let (title, body) = refusal_text(Lang::En, site, daemon_message);
+            assert_eq!(title, "Engram — Command registration refused");
+            assert!(
+                body.contains(&format!("\n\nDaemon reply:\n{daemon_message}\n\n")),
+                "{site:?}: the daemon text verbatim — {body}"
+            );
+            assert!(
+                body.ends_with("Fix the command declaration that caused it, then rebuild."),
+                "{site:?}: the action line — {body}"
+            );
         }
-        let (_, register) = refusal_text(RefusalSite::Register, daemon_message);
-        let (_, update) = refusal_text(RefusalSite::Update, daemon_message);
+        let (_, register) = refusal_text(Lang::Ko, RefusalSite::Register, daemon_message);
+        let (_, update) = refusal_text(Lang::Ko, RefusalSite::Update, daemon_message);
         assert!(register.starts_with("데몬이 이 셸의 명령 등록을 통째로 거절했습니다.\n"));
         assert!(update.starts_with("데몬이 화면 명령 명단 갱신을 거절했습니다.\n"));
         assert!(register.contains("(원인이 고쳐질 때까지)"));
         // The shell bridge holds the rejected name without reverting it, so if the declaration stays the same, that name may be carried again on the next full registration
         // and rejected. But if the webview reports a changed list again, or the rejection stands only on the delta (CONFLICT with someone else's name, etc.), it does not repeat, so it is 「될 수 있다」 (may be) —
-        // do not revert it to 「셸 명령은 그대로」 (shell commands stay as they are), nor to a definitive form.
+        // do not revert it to 「셸 명령은 그대로」 (shell commands stay as they are), nor to a definitive form. The English "may" is the same.
         assert!(update.contains(
             "원인을 고치지 않은 채 재연결하면 이 셸의 명령 등록 전체가 거절될 수 있습니다."
+        ));
+        let (_, register) = refusal_text(Lang::En, RefusalSite::Register, daemon_message);
+        let (_, update) = refusal_text(Lang::En, RefusalSite::Update, daemon_message);
+        assert!(
+            register.starts_with("The daemon refused all of this shell's command registrations.\n")
+        );
+        assert!(update.starts_with("The daemon refused to update the list of screen commands.\n"));
+        assert!(register.contains("until the cause is fixed."));
+        assert!(update.contains(
+            "If the shell reconnects before the cause is fixed, the daemon may refuse all of its command registrations."
         ));
     }
 }

@@ -1,7 +1,7 @@
 # ADR-0065: Slot menu descriptor extension — hideOn exclusion condition + children 1-level submenu (empty-slot trimming + folding of content-fill items)
 
-- 상태: 확정 (2026-07-10, basis: user decision (option "trim + content submenu") + `/research light` OSS survey (VS Code, JetBrains, iTerm2, Windows Terminal, GNOME HIG)) · 부분 폐기 by ADR-0228 (the slot.popout empty-cell trimming in Decision 1)
-- 관련: Amends ADR-0064 (descriptor schema extension: hideOn exclusion condition + children 1-level submenu (partially realizes the deferred when-DSL through hideOn)) · CLAUDE.md §5 (LLM-first control) · ADR-0060 (SlotContent union) · `src/commands/slotMenu.ts` (SlotMenuItem/buildSlotMenu) · `src/commands/{slotCommands,slotContentCommands}.ts` (contributions) · `src/components/slot/SlotContextMenu.tsx` (render) · Amended by ADR-0228 (the slot.popout empty-cell trimming in Decision 1)
+- 상태: 확정 (2026-07-10, basis: user decision (option "trim + content submenu") + `/research light` OSS survey (VS Code, JetBrains, iTerm2, Windows Terminal, GNOME HIG)) · 부분 폐기 by ADR-0228 (the slot.popout empty-cell trimming in Decision 1) · 부분 폐기 by ADR-0373 (container descriptor gets a required id and a lazy title)
+- 관련: Amends ADR-0064 (descriptor schema extension: hideOn exclusion condition + children 1-level submenu (partially realizes the deferred when-DSL through hideOn)) · CLAUDE.md §5 (LLM-first control) · ADR-0060 (SlotContent union) · `src/commands/slotMenu.ts` (SlotMenuItem/buildSlotMenu) · `src/commands/{slotCommands,slotContentCommands}.ts` (contributions) · `src/components/slot/SlotContextMenu.tsx` (render) · Amended by ADR-0228 (the slot.popout empty-cell trimming in Decision 1) · Amended by ADR-0373 (container descriptor gets a required id and a lazy title)
 
 ## 맥락
 

@@ -15,6 +15,9 @@ pub mod state;
 pub mod tab_drop;
 pub mod theme;
 mod tray;
+// The shell-made UI text in both UI languages, and applying a `ui.language` change to it (ADR-0373).
+mod ui_language;
+pub mod ui_text;
 // ADR-0155: 웹뷰가 주인인 명령의 셸쪽 다리(등록 대리 + 2단 배달의 마지막 홉).
 pub mod view_commands;
 mod webview_env;
@@ -77,6 +80,14 @@ pub fn run() {
         labels.clone(),
     ));
 
+    // ── Shell settings load — before the boot stage plugin, which reads the UI language (ADR-0373) ──
+    // ★여기서는 읽기만 한다★ — 적재는 파일·폴더를 만들지도 고치지도 않고, 쓰기는 setup 의 `enable_writes`
+    //   뒤에만 열린다. 단일 인스턴스 관문(아래 플러그인)은 build 안에서 판정되므로, 여기서 디스크를 바꾸면 곧
+    //   종료될 두 번째 인스턴스도 그것을 바꾼다.
+    let settings = std::sync::Arc::new(crate::settings::SettingsService::load_from_dir(
+        &crate::discovery::DataLayout::resolve().shell_config_dir(),
+    ));
+
     let mut builder = tauri::Builder::default();
     // single-instance 플러그인은 가장 먼저 등록(플러그인 규약). ADR-0029: 앱은 데몬 클라 전역 단일 —
     // 무조건 등록.
@@ -96,6 +107,7 @@ pub fn run() {
             labels: labels.clone(),
             session: state_session.clone(),
             restore: restore.clone(),
+            settings: settings.clone(),
         },
     ));
     builder = builder.plugin(tauri_plugin_opener::init());
@@ -158,12 +170,6 @@ pub fn run() {
     // ── 셸 설정 + 유효 테마(TRD S21-storage §5-3 · §5-6) ─────────────────────────────
     // ★위 LayoutState 와 같은 이유로 빌더에서 manage 한다(ADR-0102)★ — 웹뷰의 첫 `get_ui_settings` ·
     //   `settings_get` 때 상태가 없으면 그 창은 기본값으로 굳는다.
-    // ★여기서는 읽기만 한다★ — 적재는 파일·폴더를 만들지도 고치지도 않고, 쓰기는 setup 의 `enable_writes`
-    //   뒤에만 열린다. 단일 인스턴스 관문(위 플러그인)은 build 안에서 판정되므로, 여기서 디스크를 바꾸면 곧
-    //   종료될 두 번째 인스턴스도 그것을 바꾼다.
-    let settings = std::sync::Arc::new(crate::settings::SettingsService::load_from_dir(
-        &crate::discovery::DataLayout::resolve().shell_config_dir(),
-    ));
     // ★셸에 하나★ — 밀기 순서를 지키는 락이 이 안에 있다(사람 경로·LLM 경로가 같은 인스턴스를 본다). 창 테마는 위
     //   화면 상태 모델에서 읽는다(TRD S21-storage §5-6).
     let themes = std::sync::Arc::new(crate::theme::EffectiveThemes::new(
@@ -171,6 +177,10 @@ pub fn run() {
         setup_layout.clone(),
     ));
     builder = builder.manage(settings.clone()).manage(themes.clone());
+    // One `ui.language` hook — the human path's and the LLM path's settings writes queue on the same instance (ADR-0373).
+    builder = builder.manage(std::sync::Arc::new(
+        crate::ui_language::LanguageHook::default(),
+    ));
 
     // ── 웹뷰 환경(TRD S21-storage §4) — 창을 만드는 코드가 전부 이 인스턴스에서 폴더 · 인자를 받는다 ──
     // ★빌더에서 manage 한다(위 LayoutState 와 같은 까닭 — ADR-0102)★ — 팝아웃을 만드는 invoke 보다 먼저 있어야 한다.
@@ -368,7 +378,7 @@ pub fn run() {
             Ok(())
         })
         // ADR-0026 2단계: main X(WM_CLOSE)=hide(창만 숨기고 트레이 상주) — 진짜 종료는 트레이
-        // "완전 종료"(app.exit(0))뿐.
+        // 종료 항목(app.exit(0))뿐.
         // tauri.conf.json 이 첫 창 label 을 "main" 으로 명시한다.
         // 주의: CloseRequested 는 Rust 측 이벤트 관찰이라 JS capability(core:window:allow-close) 불필요.
         .on_window_event(move |window, event| {
@@ -543,7 +553,7 @@ pub fn run() {
         .expect("error while building tauri application")
         // ADR-0029: 앱은 in-proc 에이전트를 호스팅하지 않으므로 종료 때 거둘 manager 가 없다(데몬이 자기 에이전트
         // graceful 을 담당). 여기서 하는 일은 화면 상태의 정상 종료 쓰기와 셸 실행 잠금 놓기(TRD S21-storage §6-6),
-        // 그리고 시작이 실패했으면 종료 코드 정하기다 — 트레이 「완전 종료」(`app.exit(0)`)도 이 사건을 낸다.
+        // 그리고 시작이 실패했으면 종료 코드 정하기다 — 트레이의 종료 항목(`app.exit(0)`)도 이 사건을 낸다.
         .run(move |handle, event| {
             // 끝나는 중에는 사라진 예비 창을 다시 짓지 않는다(TRD S21-slot-docking §3-9 「다시 짓기」). 종료를
             //   막는 코드가 없어(`rg "prevent[_]exit" src-tauri/src/` → 0줄) 요청이 곧 종료다 — 막는 길이 생기면 이 표지를

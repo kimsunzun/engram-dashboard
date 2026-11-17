@@ -47,6 +47,27 @@ type RowMenu = {
   kind: 'running' | 'reserved'
 }
 
+/**
+ * A row's action failure, untranslated — the message is made where it is shown (`rowErrorText`), so it follows a language
+ * switch (ADR-0373). `err` is the raw error as text.
+ */
+type RowError =
+  | { key: 'agent.openFailedNoSlot' | 'agent.openFailedNoEmptySlot' }
+  | {
+      key:
+        | 'agent.activateFailed'
+        | 'agent.openFailed'
+        | 'agent.killFailed'
+        | 'agent.cancelReservedFailed'
+        | 'agent.renameFailed'
+        | 'agent.reparentFailed'
+      err: string
+    }
+
+function rowErrorText(error: RowError): string {
+  return 'err' in error ? t(error.key, { err: error.err }) : t(error.key)
+}
+
 /** react-arborist 행 높이·들여쓰기(px). */
 const ROW_HEIGHT = 28
 const INDENT = 12
@@ -66,7 +87,7 @@ export default function AgentList() {
   const busyRef = useRef<Set<string>>(new Set())
   const [busyIds, setBusyIds] = useState<Set<string>>(new Set())
   // 액션 실패 메시지 — 토스트/StatusBar 가 없어 행 옆 인라인 표시(AgentTree MAJOR-3 패턴).
-  const [errorById, setErrorById] = useState<Record<string, string>>({})
+  const [errorById, setErrorById] = useState<Record<string, RowError>>({})
   // ★활성화가 거절당한 행★ — 「마지막 실패」기록의 *대역*이 아니라 이 화면이 직접 받은 답이다.
   //   백엔드는 세션이 생기는 순간 status 를 낙관적으로 Running 으로 올리고 프로세스가 죽어 관측될
   //   때까지 그대로 둔다 → 거절을 이미 손에 쥔 뒤에도 몇 초간 초록이 남았다(실측 2026-08-24).
@@ -79,6 +100,9 @@ export default function AgentList() {
   //   확정(Enter/blur) 시에만 renameProfile.
   const [editingId, setEditingId] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
+  // ADR-0373: the name the edit started from — the "unchanged" check compares with this, not with a name derived again at
+  //   commit, which can change under the edit (a language switch turns a blank-path name into another language's word).
+  const [draftStart, setDraftStart] = useState('')
   // ★안정 ref★: 편집 진입 시점에만 정확히 1회 select() — 인라인 콜백 ref 는 매 렌더 재부착돼 타이핑을 깬다(TabBar FIX 1).
   const inputRef = useRef<HTMLInputElement>(null)
   useEffect(() => {
@@ -165,7 +189,7 @@ export default function AgentList() {
       next.delete(id)
       return next
     })
-  const setError = (id: string, msg: string) => setErrorById(prev => ({ ...prev, [id]: msg }))
+  const setError = (id: string, error: RowError) => setErrorById(prev => ({ ...prev, [id]: error }))
   const clearError = (id: string) =>
     setErrorById(prev => {
       if (!(id in prev)) return prev
@@ -188,7 +212,7 @@ export default function AgentList() {
       .then(() => refreshProfiles())
       .catch(e => {
         console.error('[spawnProfile]', e)
-        setError(agentId, t('agent.activateFailed', { err: String(e) }))
+        setError(agentId, { key: 'agent.activateFailed', err: String(e) })
         // 「실패」배지를 띄우는 바로 그 자리 — 기호도 같은 순간에 갈린다(둘이 어긋나던 것이 결함이었다).
         markActivationRejected(agentId)
       })
@@ -205,13 +229,13 @@ export default function AgentList() {
     const viewId = currentViewId()
     const view = selectView(vs, viewId)
     if (!viewId || !view) {
-      setError(agentId, t('agent.openFailedNoSlot'))
+      setError(agentId, { key: 'agent.openFailedNoSlot' })
       endInFlight(agentId) // 조기 반환에도 lock 해제(영구 잠금 방지)
       return
     }
     const slotId = selectOpenTarget(view.layout, view.focusedSlotId, view.foreignSlots)
     if (!slotId) {
-      setError(agentId, t('agent.openFailedNoEmptySlot'))
+      setError(agentId, { key: 'agent.openFailedNoEmptySlot' })
       endInFlight(agentId)
       return
     }
@@ -220,7 +244,7 @@ export default function AgentList() {
       .assignAgent(viewId, slotId, agentId)
       .catch(e => {
         console.error('[assignAgent]', e)
-        setError(agentId, t('agent.openFailed', { err: String(e) }))
+        setError(agentId, { key: 'agent.openFailed', err: String(e) })
       })
       .finally(() => endInFlight(agentId))
   }
@@ -232,7 +256,7 @@ export default function AgentList() {
       .killAgent(agentId)
       .catch(e => {
         console.error('[kill]', e)
-        setError(agentId, t('agent.killFailed', { err: String(e) }))
+        setError(agentId, { key: 'agent.killFailed', err: String(e) })
       })
       .finally(() => endInFlight(agentId))
   }
@@ -247,7 +271,7 @@ export default function AgentList() {
       .then(() => refreshProfiles())
       .catch(e => {
         console.error('[deleteProfile]', e)
-        setError(agentId, t('agent.cancelReservedFailed', { err: String(e) }))
+        setError(agentId, { key: 'agent.cancelReservedFailed', err: String(e) })
       })
       .finally(() => endInFlight(agentId))
   }
@@ -267,19 +291,21 @@ export default function AgentList() {
       .then(() => refreshProfiles())
       .catch(e => {
         console.error('[reparentProfile]', e)
-        setError(childId, t('agent.reparentFailed', { err: String(e) }))
+        setError(childId, { key: 'agent.reparentFailed', err: String(e) })
       })
       .finally(() => endInFlight(childId))
   }
 
-  // 표시명 = display_name override ?? cwd basename(ADR-0061 리치화 — 트리 rename). rename 시작·확정 시 이 값을
-  //   draft 시드/미변경 판정에 쓴다.
+  // Display name = display_name override ?? cwd basename (ADR-0061 enrichment — tree rename). Starting a rename seeds the
+  //   draft and `draftStart` with it.
   const displayNameOf = (node: AgentTreeNode): string => node.displayName ?? basename(node.cwd)
 
   // 행 메뉴는 호출부에서 닫는다.
   const beginEdit = (node: AgentTreeNode) => {
+    const name = displayNameOf(node)
     setEditingId(node.id)
-    setDraft(displayNameOf(node))
+    setDraft(name)
+    setDraftStart(name)
   }
   const cancelEdit = () => setEditingId(null)
   // ★멱등★: editingId 가 이 행이 아니면 즉시 return — Enter 가 언마운트→blur→commitEdit 재발화를 막는다(TabBar 동형).
@@ -293,7 +319,7 @@ export default function AgentList() {
     if (editingId !== node.id) return
     const trimmed = draft.trim()
     setEditingId(null)
-    if (trimmed.length === 0 || trimmed === displayNameOf(node)) return
+    if (trimmed.length === 0 || trimmed === draftStart) return
     if (!beginInFlight(node.id)) return
     clearError(node.id)
     agentClient
@@ -301,48 +327,54 @@ export default function AgentList() {
       .then(() => refreshProfiles())
       .catch(e => {
         console.error('[renameProfile]', e)
-        setError(node.id, t('agent.renameFailed', { err: String(e) }))
+        setError(node.id, { key: 'agent.renameFailed', err: String(e) })
       })
       .finally(() => endInFlight(node.id))
   }
 
   const menuNode = rowMenu ? flatRows.find(r => r.id === rowMenu.agentId) : undefined
-  const rowMenuItems: Array<{ label: string; disabled: boolean; action: () => void }> = !rowMenu
+  // ADR-0373: `id` is the React key — a label is translated text and must not be one.
+  const rowMenuItems: Array<{ id: string; label: string; disabled: boolean; action: () => void }> = !rowMenu
     ? []
     : rowMenu.kind === 'reserved'
       ? [
           {
+            id: 'activate',
             label: t('agent.rowActivate'),
             disabled: busyIds.has(rowMenu.agentId),
             action: () => activateReserved(rowMenu.agentId),
           },
           {
+            id: 'rename',
             label: t('agent.rowRename'),
             disabled: busyIds.has(rowMenu.agentId) || !menuNode,
             action: () => menuNode && beginEdit(menuNode),
           },
           {
+            id: 'cancelReserved',
             label: t('agent.rowCancelReserved'),
             disabled: busyIds.has(rowMenu.agentId),
             action: () => cancelReserved(rowMenu.agentId),
           },
         ]
       : [
-          { label: t('agent.rowOpen'), disabled: busyIds.has(rowMenu.agentId), action: () => openInFocusedSlot(rowMenu.agentId) },
+          { id: 'open', label: t('agent.rowOpen'), disabled: busyIds.has(rowMenu.agentId), action: () => openInFocusedSlot(rowMenu.agentId) },
           {
+            id: 'kill',
             label: t('agent.rowKill'),
             disabled: busyIds.has(rowMenu.agentId),
             action: () => killAgentGuarded(rowMenu.agentId),
           },
           // ad-hoc(프로필 없는 running)도 항목을 열되, 백엔드가 no-profile 이면 Error 를 인라인 표시한다(날조 아님).
           {
+            id: 'rename',
             label: t('agent.rowRename'),
             disabled: busyIds.has(rowMenu.agentId) || !menuNode,
             action: () => menuNode && beginEdit(menuNode),
           },
           // ★준비 중(백엔드 command 없음)★: 재시작 전용 command 가 protocolClient 에 없다(kill→re-spawn 조합뿐).
           //   날조 금지 — 실제 command 가 생기면 배선한다(ADR-0011).
-          { label: t('agent.rowRestart'), disabled: true, action: () => {} },
+          { id: 'restart', label: t('agent.rowRestart'), disabled: true, action: () => {} },
         ]
 
   // NodeRenderer — 컴포넌트 안에 두어 select/busy/error/편집 핸들러를 클로저로 접근(옛 AgentTree 동형).
@@ -350,7 +382,8 @@ export default function AgentList() {
     const data = node.data
     const isReserved = data.kind === 'reserved'
     const isBusy = busyIds.has(data.id)
-    const err = errorById[data.id]
+    const rowError = errorById[data.id]
+    const err = rowError === undefined ? undefined : rowErrorText(rowError)
     const hasChildren = data.children.length > 0
     // ADR-0173: 문구는 종류 표에서만 나온다(컴포넌트에 박지 않는다).
     const failureTitle = isFailureBlocked(data.status, data.lastFailure)
@@ -657,7 +690,7 @@ export default function AgentList() {
         >
           {rowMenuItems.map(item => (
             <div
-              key={item.label}
+              key={item.id}
               style={MENU_ITEM_STYLE(item.disabled)}
               onMouseEnter={e => {
                 if (!item.disabled) e.currentTarget.style.background = 'color-mix(in srgb, var(--accent) 20%, transparent)'

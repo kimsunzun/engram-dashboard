@@ -54,6 +54,7 @@ use super::types::{
     ViewSnapshot,
 };
 use crate::theme::UiTheme;
+use crate::ui_text::Lang;
 
 pub const MAIN_WINDOW_LABEL: &str = "main";
 
@@ -363,6 +364,10 @@ pub struct ViewManager {
     // `update_agent_names`(데몬 목록 — 덮어쓴다) · `seed_agent_names`(부팅 · 사본 수락 — 빈 칸만) 둘뿐이고, 항목을 지우는
     // 길은 없다.
     agent_names: HashMap<String, String>,
+    // The language automatic tab names (and so OS window titles) are made in. Not saved — it is the effective `ui.language`
+    //   setting, set before the boot model is swapped in and changed only through `set_language`; `adopt_restored` keeps it.
+    // ADR-0373
+    lang: Lang,
 }
 
 impl Default for ViewManager {
@@ -451,6 +456,7 @@ impl ViewManager {
             closed_labels: HashSet::new(),
             closing: HashMap::new(),
             agent_names: HashMap::new(),
+            lang: Lang::default(),
         }
     }
 
@@ -657,6 +663,29 @@ impl ViewManager {
     /// label(정렬 · 겹침 없음). 하나라도 있으면 `version` 을 올리고, 없으면 `version` 도 그대로다 — 웹은 같은 판
     /// 번호의 탭 알림을 버리고 기록기는 판이 바뀌어야 파일의 탭 이름을 다시 쓴다.
     pub(crate) fn update_agent_names(&mut self, names: &[(String, String)]) -> Vec<WindowLabel> {
+        self.rename_auto_tabs(|mgr| {
+            for (agent_id, name) in names {
+                mgr.agent_names.insert(agent_id.clone(), name.clone());
+            }
+        })
+    }
+
+    /// The language automatic tab names are made in.
+    pub fn language(&self) -> Lang {
+        self.lang
+    }
+
+    /// Makes automatic tab names in `lang` from now on. Returns the labels of the windows where an automatic tab's visible name
+    /// actually changed (sorted · unique) and bumps `version` if there is any — the same contract as [`Self::update_agent_names`]
+    /// (ADR-0301 invariant 2: without the bump the web and the OS title drop the notification as not newer). Only named tabs, or
+    /// the same language, change nothing.
+    // ADR-0373
+    pub(crate) fn set_language(&mut self, lang: Lang) -> Vec<WindowLabel> {
+        self.rename_auto_tabs(|mgr| mgr.lang = lang)
+    }
+
+    // Runs `change` and reports which windows' automatic tab names it changed — see `update_agent_names` for the contract.
+    fn rename_auto_tabs(&mut self, change: impl FnOnce(&mut Self)) -> Vec<WindowLabel> {
         let before: Vec<(WindowLabel, ViewId, String)> = self
             .windows
             .iter()
@@ -666,9 +695,7 @@ impl ViewManager {
                 (!v.name.is_named()).then(|| (label.clone(), v.id, effective_tab_name(self, v)))
             })
             .collect();
-        for (agent_id, name) in names {
-            self.agent_names.insert(agent_id.clone(), name.clone());
-        }
+        change(self);
         let mut changed: Vec<WindowLabel> = before
             .into_iter()
             .filter(|(_, view, old)| {
@@ -1644,6 +1671,8 @@ impl ViewManager {
             closed_labels: _,
             closing: _,
             agent_names: seeds,
+            // ADR-0373 — the live manager's language stays; the restored model was built without the setting
+            lang: _,
         } = restored;
         let main = windows
             .remove(MAIN_WINDOW_LABEL)
@@ -2640,14 +2669,15 @@ mod tests {
         let view = main_active(&mgr);
         assert_eq!(
             mgr.list_tabs(MAIN_WINDOW_LABEL).unwrap().tabs[0].name,
-            "빈 칸"
+            "Empty slot"
         );
-        mgr.rename_tab(view, "빈 칸".into()).unwrap();
-        assert_eq!(mgr.views[&view].name, TabName::Named("빈 칸".into()));
+        mgr.rename_tab(view, "Empty slot".into()).unwrap();
+        assert_eq!(mgr.views[&view].name, TabName::Named("Empty slot".into()));
         mgr.assign_agent(view, first_slot_of(&mgr, view), "a1".into())
             .unwrap();
+        mgr.set_language(Lang::Ko);
         let meta = &mgr.list_tabs(MAIN_WINDOW_LABEL).unwrap().tabs[0];
-        assert_eq!((meta.name.as_str(), meta.named), ("빈 칸", true));
+        assert_eq!((meta.name.as_str(), meta.named), ("Empty slot", true));
     }
 
     #[test]
@@ -2713,7 +2743,7 @@ mod tests {
     #[test]
     fn a_name_update_reports_only_windows_whose_auto_tab_name_changed_and_bumps_the_version() {
         let mut mgr = agents_in_two_windows();
-        assert_eq!(tab_names(&mgr, MAIN_WINDOW_LABEL), ["에이전트", "작업"]);
+        assert_eq!(tab_names(&mgr, MAIN_WINDOW_LABEL), ["Agent", "작업"]);
         let ver = mgr.version;
 
         assert_eq!(
@@ -2722,7 +2752,7 @@ mod tests {
         );
         assert_eq!(mgr.version, ver + 1);
         assert_eq!(tab_names(&mgr, MAIN_WINDOW_LABEL), ["myproj", "작업"]);
-        assert_eq!(tab_names(&mgr, "slot-popup-1"), ["에이전트"]);
+        assert_eq!(tab_names(&mgr, "slot-popup-1"), ["Agent"]);
 
         assert_eq!(
             mgr.update_agent_names(&names(&[("a1", "other"), ("a2", "beta")])),
@@ -2750,6 +2780,51 @@ mod tests {
         assert!(mgr.update_agent_names(&[]).is_empty());
         assert_eq!(mgr.version, ver);
         assert_eq!(mgr.agent_name("a9"), Some("nowhere"), "장부에는 적는다");
+    }
+
+    // ADR-0373 — the same contract as a name-ledger update: only windows with a changed automatic name, one bump.
+    #[test]
+    fn a_language_change_reports_the_windows_with_auto_tabs_and_bumps_the_version_once() {
+        let mut mgr = agents_in_two_windows();
+        let ver = mgr.version;
+
+        assert_eq!(
+            mgr.set_language(Lang::Ko),
+            [MAIN_WINDOW_LABEL, "slot-popup-1"]
+        );
+        assert_eq!(mgr.language(), Lang::Ko);
+        assert_eq!(mgr.version, ver + 1);
+        assert_eq!(tab_names(&mgr, MAIN_WINDOW_LABEL), ["에이전트", "작업"]);
+        assert_eq!(tab_names(&mgr, "slot-popup-1"), ["에이전트"]);
+
+        assert!(mgr.set_language(Lang::Ko).is_empty(), "the same language");
+        assert_eq!(mgr.version, ver + 1);
+        assert_invariants(&mgr);
+    }
+
+    #[test]
+    fn a_language_change_over_named_tabs_and_ledger_names_keeps_the_version() {
+        let mut mgr = agents_in_two_windows();
+        mgr.update_agent_names(&names(&[("a1", "myproj"), ("a2", "beta")]));
+        let ver = mgr.version;
+
+        assert!(mgr.set_language(Lang::Ko).is_empty());
+        assert_eq!(mgr.language(), Lang::Ko, "the language is kept even so");
+        assert_eq!(mgr.version, ver);
+        assert_eq!(tab_names(&mgr, MAIN_WINDOW_LABEL), ["myproj", "작업"]);
+    }
+
+    #[test]
+    fn adopt_restored_keeps_the_live_language() {
+        let mut live = ViewManager::new();
+        live.set_language(Lang::Ko);
+        let restored = ViewManager::new();
+        assert_eq!(restored.language(), Lang::En);
+
+        live.adopt_restored(restored).unwrap();
+
+        assert_eq!(live.language(), Lang::Ko);
+        assert_eq!(tab_names(&live, MAIN_WINDOW_LABEL), ["빈 칸"]);
     }
 
     // 포커스 밖 에이전트 슬롯은 탭 이름이 아니다 — 그 이름이 바뀌어도 그 창은 바뀐 창이 아니다.
@@ -2934,7 +3009,7 @@ mod tests {
         assert_eq!(snap.tabs[1].name, "Second");
         assert!(snap.tabs[1].named);
         assert_eq!(
-            snap.tabs[0].name, "빈 칸",
+            snap.tabs[0].name, "Empty slot",
             "자동 이름 탭 = 포커스 칸의 낱말"
         );
         assert!(!snap.tabs[0].named);

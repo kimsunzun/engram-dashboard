@@ -34,7 +34,8 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({
 
 import './slotCommands' // side-effect register
 import './slotContentCommands' // side-effect register
-import { run } from './registry'
+import { setLanguage } from '../i18n'
+import { list, run } from './registry'
 import { buildSlotMenu } from './slotMenu'
 
 const CTX = { viewId: 'v1', slotId: 's1' }
@@ -125,7 +126,7 @@ describe('코어 콘텐츠(slotContentCommands) 라우팅', () => {
     const items = buildSlotMenu('empty')
     expect(items.map(i => i.id)).toEqual([
       'slot.assignRunningAgent',
-      'container:새 콘텐츠',
+      'container:slot.newContent',
       'slot.split.topBottom',
       'slot.split.leftRight',
       'slot.popout',
@@ -150,5 +151,42 @@ describe('코어 콘텐츠(slotContentCommands) 라우팅', () => {
     const items = buildSlotMenu('agent')
     expect(items[0].id).toBe('slot.assignRunningAgent')
     expect(items[1].id).toBe('agent.kill')
+  })
+})
+
+// ADR-0373: titles are resolved when the menu or the list is built — a switch shows the new language with the same items.
+describe('language switch — slot menu and list() titles', () => {
+  afterEach(() => {
+    setLanguage('ko')
+  })
+
+  type Shape = { id: string; title: string; children?: Shape[] }
+  const shape = (items: ReturnType<typeof buildSlotMenu>): Shape[] =>
+    items.map(i => ({
+      id: i.id,
+      title: i.title,
+      ...(i.children ? { children: i.children.map(c => ({ id: c.id, title: c.title })) } : {}),
+    }))
+
+  it('the empty-slot menu: same ids in the same order, titles in the current language', () => {
+    const before = shape(buildSlotMenu('empty'))
+    setLanguage('en')
+    const after = shape(buildSlotMenu('empty'))
+
+    const ids = (s: Shape[]) => s.map(i => [i.id, i.children?.map(c => c.id)])
+    expect(ids(after)).toEqual(ids(before))
+    const container = after.find(i => i.id === 'container:slot.newContent')!
+    expect(container.title).toBe('New content')
+    expect(container.children!.map(c => c.title)).toEqual(['Open agent tree', 'Open usage limits'])
+    expect(after.find(i => i.id === 'slot.split.topBottom')!.title).toBe('Split horizontally')
+    expect(before.find(i => i.id === 'container:slot.newContent')!.title).toBe('새 콘텐츠')
+  })
+
+  it('list() returns titles in the current language', () => {
+    const title = (id: string) => list().find(c => c.id === id)?.title
+    expect(title('slot.close')).toBe('닫기')
+    setLanguage('en')
+    expect(title('slot.close')).toBe('Close')
+    expect(title('slot.split.leftRight')).toBe('Split vertically')
   })
 })

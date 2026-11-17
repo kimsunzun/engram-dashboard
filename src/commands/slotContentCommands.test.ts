@@ -23,7 +23,7 @@ describe('slot.assignRunningAgent 등록·라우팅 (ADR-0067)', () => {
     expect(getCommand('slot.assignRunningAgent')).toBeDefined()
     // 리터럴 기대값 — t('agent.monitor')로 비교하면 production·assert 둘 다 ko.ts 참조라 순환(잘못된 값도 통과).
     //   화면에 실제로 나가는 문자열을 리터럴로 못 박아 ko.ts 값 회귀를 잡는다.
-    expect(getCommand('slot.assignRunningAgent')!.title).toBe('에이전트 모니터링')
+    expect(getCommand('slot.assignRunningAgent')!.title()).toBe('에이전트 모니터링')
   })
 
   it('run(ctx) 이 우클릭한 slot 좌표로 monitoringPickerStore.open 을 부른다', () => {
@@ -61,7 +61,7 @@ describe('슬롯 메뉴 기여 — 가시성 hideOn (ADR-0067)', () => {
 
 describe('스폰 정리 — "생성" 제거 회귀 (ADR-0067)', () => {
   it('empty "새 콘텐츠" 서브메뉴는 트리·사용량만(생성 제거)', () => {
-    const container = buildSlotMenu('empty').find(i => i.id === 'container:새 콘텐츠')
+    const container = buildSlotMenu('empty').find(i => i.id === 'container:slot.newContent')
     expect(container).toBeDefined()
     const childIds = container!.children!.map(c => c.id)
     expect(childIds).toEqual(['slot.fill.agentList', 'slot.fill.usage'])
