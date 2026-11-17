@@ -1,67 +1,65 @@
-# Handoff: S33 follow-up merged; S35/S36/test-name translation fully decided and queued — run sequentially when tokens allow
+# Handoff: S35 (UI language — English source, Korean selectable, live switch) merged to master; next = English-only internal text topic
 
 ## Read first
 
-- S35 is **paused by the user** (「나중에 토큰 남을때」). Do not start coding. Resume = revise PRD/TRD/ADR for the English-source decision below, then re-review.
-- `preset-library` (worktree `wt1`) is still open. Its session translates its own files after pulling master (user agreed). Guide: `.claude/handoff/attachments/s33-translation-kit/GUIDE-translate-your-branch.md` (untracked kit, absolute path readable from other worktrees). Do not translate files in `git diff origin/master...v0.5.0/feat/preset-library`.
-- Review is Claude + codex now (codex worked this session). Keep ≤4 workers in parallel.
+- S35 is done and on master (`36a055da`). Do not reopen it. The next topic is the one queued before S35's scope grew: logs · panic/assert messages · internal error strings · LLM-facing text (MCP descriptions, `engram help`, `#[tool(description)]`, settings `desc`) to **English only** (not switchable), plus rewriting `docs/reference/logging-conventions.md` ("log = one line of Korean") and Korean prose in reference docs' fenced blocks. The number S36 is taken (connection band) — get a new `S<n>` per `docs/handbook/branch-commit.md`. After it: test names and test messages to English.
+- The user wants the LLM help (`prompts/engram-help.md`) reorganized wholesale in that next topic (「도움말도 나중에 한꺼번에 고쳐야」). S35 only added one `ui.language` line.
+- Two other sessions were told to pull master and adapt (cross-session messages sent 2026-11-18 ~02:00): `engram-dashboard-wt1-67` (preset-library, wt1) and `engram-dashboard-80` (main worktree). Nothing to do here unless they report problems.
+- Integration lesson: after a red CI run, a docs-only push creates **no** CI run (path filter). Check that a run exists right after push; if not, `gh workflow run ci.yml --ref <branch>` (handbook). A 5-hour wait was lost to this.
 
 ## One-line state · next first action
 
-- State: S33 translation fully merged for everything except preset-library's files (master `d4b31567`). S35 branch has ADR-0349, research report, approved PRD, TRD ed.1 with the deep-review findings recorded but not applied. No S35 code.
-- Next first action (when the user says to run it): nothing left to ask. S35: revise PRD/TRD for the confirmed decisions + write the ADR amending ADR-0349 + edit CLAUDE.md 「언어」 (app screen text = English source, Korean translation later), re-run `/engram-review trd` (deep), then `/engram-implement` coding (units: en.ts → i18next lookup-only swap + Rust tray/dialog → test expectations), HTML ko/en comparison table for the user before commit. Then S36, then test names — sequentially.
+- State: S35 merged (`36a055da`, CI green run 44127577152 on `0ab01c9d`). Branch `v0.5.0/feat/i18next-backend` is fully pushed and merged (not deleted, per rule).
+- Next first action (when the user asks): start the English-only internal text topic — get `S<n>`, cut `v0.5.0/<type>/<slug>` from master, PRD first (`/engram-implement`). The earlier scope notes are in `docs/process/S35-i18next-backend/log-localization-notes-2026-11-08.md` (OSS practice: logs stay English, user-facing errors localized via keys).
 
-## Repo state (measured 2026-11-08 01:12)
+## Repo state (measured 2026-11-18 02:00)
 
-- Worktree `wt2`, branch `v0.5.0/feat/i18next-backend`, HEAD `64e3262e`, 5 ahead / 0 behind `origin/master`, pushed (0/0 vs its remote). Working tree clean (only pre-existing untracked `.claude/handoff/attachments/*` and old `.claude/handoff/history/*` from other sessions). This handoff's commit comes after this text.
-- master = `d4b31567` (S33 follow-up merge), pushed. Branches `v0.5.0/docs/english-translation`, `-sweep`, `-2` are merged (not deleted).
+- Worktree `wt2`, branch `v0.5.0/feat/i18next-backend`, HEAD `0ab01c9d`; 0/0 vs its remote; vs `origin/master` 1 behind (the merge commit) / 0 ahead. Working tree clean (untracked `.claude/handoff/**` and `bindings/` are old, not ours). This handoff's commit comes after this text.
+- master = `36a055da` (S35 merge), pushed.
+- Engram repo (I:/Engram) got feedback commits `36af747`, `54493ff` (not pushed — feedback rule says no push).
 
 ## Verification
 
-- S33 follow-up (merged): per batch `comments.py verify` (code byte-identical minus comments), crate tests, `npx vitest run` 124 files / 2804 tests, CI green on `v0.5.0/docs/english-translation-2` (run 42382655206). Docs: `check_doc.py` per batch; 3 accepted ERR lines (TRDs whose source has unbalanced backticks: trd-2-3 part03 L16, trd-1-3 §5-1, trd-2-1 L232 — prose inside pseudo-spans translated, identifiers checked byte-identical).
-- S35: no code, nothing to run. TRD review = deep, FIX ×3 (details in `docs/process/S35-i18next-backend/trd.md` §10).
+- S35 QA PASS: U1 tree `72b43e2d`; U2+U3 tree `9cdedfa6` — CI three jobs locally (cargo workspace 5513, vitest 2912, tsc 0, 31 gate steps), mutation caught on 4 lines, GUI scene (fresh English; live `ko` with popout + running terminal: menus, open flyout, tray, tab names, OS titles switch, terminal kept; reload paints Korean first; restart keeps Korean; reset → English; `fr` refused; Korean state file loads as auto names).
+- CI green on `0ab01c9d` (workflow_dispatch run 44127577152). Re-run: `gh run view 44127577152`.
+- Not verified: T-113 (below) on screen; the connection band in the GUI (never shown during QA; unit-tested).
 
 ## Failed approaches (do not repeat)
 
-- `finalize.sh` copies `<b>/out/*.md` into `docs/decisions/` by **flat name**; with staging that uses `docs__decisions__…` flat names it created bogus files. For flat-named batches use the `${n//__//}` copy (as `finalize_other.sh`), then `adr.mjs index --write`.
-- i18next's own interpolation cannot keep our `{\w+}` grammar (matcher `\{(.+?)\}`, trims names, `{-x}`, `{x,fmt}`) — reproduced by a probe (`scratchpad/s35-parity-probe.mjs`, may be gone).
-- `rm -rf` is blocked; use `bash ~/.claude/references/recycle.sh`. Foreground `sleep N && …` is blocked; use `until …; do sleep 5; done` in background.
+- Long ADR titles: `adr.mjs` makes the file name from the H1 with no length cap; a 238-char name broke the GitHub Windows checkout (`Filename too long`). Keep ADR H1s short (fixed by renaming ADR-0373; feedback row in engram-adr).
+- Waiting on `gh run list -c <sha>` for a run that was never created (see "Read first").
+- QA "token-free terminal agent": there is no shell backend in production and the `engram` CLI needs an agent token; use `invoke('forward_daemon_command', …)` from the webview for settings commands in GUI QA (feedback row in engram-qa).
 
 ## Resume command
 
-`git -C I:/Engram/apps/engram-dashboard-wt2 log --oneline origin/master..v0.5.0/feat/i18next-backend`
+`git -C I:/Engram/apps/engram-dashboard-wt2 log --oneline -3 origin/master`
 
 ## Decisions
 
-User decisions:
-- (묻지 않음) LLM-facing doc comments · 상황: schemars / declare_commands doc comments become runtime text an LLM reads · 선택지 translate ★ / keep Korean · 고른 것 「맞긴한데 … 어쨋든 진행해」 · 추천과 같음.
-- integrate S33 now · 상황: S33 avoided open-branch files, merge clean · 선택지 integrate now ★ / wait for open branches · 고른 것 「ㅇㅇ 이번에 하고 다른데 업뎃 받으라고하고 다른데 다 되면 말하면 그때 번역하면 될듯. 진행해.」 · 추천과 같음.
-- other branch translates itself · 상황: preset-library session asked to translate its own files · 선택지 S33 translates after merge ★ / that branch translates · 고른 것 「저쪽에서 번역한다고하네」 + 「다른한개 번역은 너가 가이드 줘봐」 · 갈림.
-- localization library · 상황: home-made `t()` + `ko.ts` (ADR-0069), research shows i18next majority · 선택지 i18next now / later ★(main's second view) / react-intl · 고른 것 「ㅇㅇ 교체하고」 · 갈림 (main first recommended now, then later; user chose now) · 근거: 「반대로 얼마 안되면 그냥 지금 바꾸면 되는거아님?」.
-- S35 scope stage 1 only · 고른 것 「1단계 부터 해. 로컬라이제이션은 나중에 토큰 여유있을때.」 · 추천과 같음.
-- UI source / default language · 상황: CLAUDE.md says app screen text = Korean · 선택지 logs only / English source shown as Korean ★ / English source and default · 고른 것 「화면 원본 언어도 영어로 하고 한국어 보이는걸 나중에」 · 갈림.
-- logs to English · 고른 것 「로그 영어화는 하고」 · 추천과 같음.
-- pause S35 · 고른 것 「이거 나중에 토큰 남을때 하면 될것같아서」, 「핸드오프 하면 될듯」.
+User decisions (this session):
+- (묻지 않음) localization now · 상황: S35 was paused as "English source only" · 선택지 없음 · 고른 것 「로컬라이징? 그냥 진행시키는게 좋을것같은데 디폴트 영어 선택 한국으로」 · —.
+- language switch surface · 상황: no settings screen exists, settings are LLM commands · 선택지 settings UI / LLM command only · 고른 것 「언어를 고르는 설정이 있긴한데 llm 명령으로만 일단 하자고」 · 미상.
+- apply timing · 상황: main recommended restart (VS Code style) · 선택지 restart ★ / live · 고른 것 「보통은 로컬적용될때 재부팅하는경우는 없는데」 (live) · 갈림.
+- what is localized · 고른 것 「로그는 로컬라이징 대상이 아니고, 내부 코드나 시스템은 다 영어로 하고 내가 보는 UI쪽은 전환되는게 맞고(이것도 기본 영어로 해줘…)」 · —.
+- status labels in Korean mode · 상황: Roo/OpenWebUI/LibreChat translate them · 선택지 only `Wait` English ★ / all status labels English · 고른 것 「ㅇㅇ 그렇게 해. 나중에 이상하면 수정지시하면 어차피 테이블만 수정하면 되니」 · 같음 · 조사 결과(번역한다)와 다르게 정함.
+- split labels · 고른 것 「가로분할 세로분할이 영어에서는 영문으로 되야지」 (keep literal `Split horizontally/vertically`) · 미상.
+- restore modal wording · 선택지 keep "screen" ★ / browser "session" · 고른 것 「관행으로 처리해. 다른곳에 많잖아.」 (session) · 갈림.
+- punctuation · 고른 것 「마침표는 공용 룰이니깐 간단하게 리서치하고」 → 「ㅇㅇ 기준대로 해」 (Microsoft/Apple: sentences end with a period; labels/buttons/fragments do not).
+- LLM help line · 선택지 add one line ★ / defer · 고른 것 「어쨋든 만들면 되긴하는데 도움말도 나중에 한꺼번에 고쳐야되긴하지」 · 같음.
+- unfixed 권장 + T-113 + merge · 선택지 defaults ★ · 고른 것 「ㅇㅇ 기본안대로 하고 마스터에 넣어.」 · 같음.
+- other branches · 고른 것 「그냥 우리 작업은 어쨋든 다 하고 다른데서 맞추라고 하는게 맞아보여서」, later 「통합한뒤에 너가 세션에 보내면되고」.
 
-Claude decisions:
-- S35 interpolation: keep our own `{\w+}` interpolate and use i18next for lookup only (`skipInterpolation: true`) — exact parity; rejected filtering param names (leaves trim / `{x,fmt}` gaps). Lead reviewer filed it as `hold` (PRD/ADR say "replace lookup-and-interpolate") → confirm with user.
-- S35 includes the Rust tray (4) + refusal dialog strings under "English UI source" (main default, user may veto).
-- 앞잡이 줄 = read-ahead queue etc.: glossary extended (transport terms, resume marker).
+Claude decisions: recorded in ADR-0373 (lookup-only i18next, no kept translated text, layout-held language with version bump, serialized hook off the main thread with posted tray relabel, init-script language memory, `is_word` as a bilingual seed filter); kept `LayoutLeaf`'s `useLanguage()`; accepted the coder's punctuation exception for values ending in `{err}`/`{url}`.
 
-- confirm all pending choices · 상황: main listed 5 recommendations · 고른 것 「ㅇㅇ 그렇게 하면 될것같은데? 마지막 작업으로 테스트 이름 제외 추가하고. 어차피 토큰남을때 돌리는거니깐 순차적으로 하면 되지.」 · 추천과 같음 (+ test names added as a last topic):
-  1. S35 i18next for lookup only, own `{\w+}` interpolate stays (`skipInterpolation: true`) — closes review hold H1.
-  2. S35 includes Rust tray (4) + refusal-dialog strings in English.
-  3. English labels in sentence case ("Close tab") — 관례 미확인, check the Microsoft style guide first.
-  4. HTML ko/en comparison table for the user to skim before the S35 commit.
-  5. S36 = logs + panic/assert messages + internal error strings + LLM-facing strings (MCP descriptions, `engram help`, `#[tool(description)]`) to English, change `docs/reference/logging-conventions.md` ("log = one line of Korean"), translate Korean prose in fenced ```text blocks.
-  6. Last topic after S36: test names and test messages to English.
-  7. Order: S35 → S36 → test names, sequentially.
+Open (not decided): none blocking. Left as is by the user's "defaults": unfixed recommended items — a flyout left open while its menu moves on a switch keeps its old anchor until re-hovered; a usageFormat test leaves `<html lang>` as `en` at file end; `MenuRow` subscribes to the language on leaf rows too. T-113 (suspected per-keystroke remount of the agent-tree rename input; pre-existing; not reproduced) is in `docs/tracking.md`.
 
-Open (not decided): none. Korean display + language setting = later, not in these three topics.
+## Process notes for the user's flow review (asked this session)
+
+- TRD carried code-level detail (counts, file inventories) against implement flow §0-1 ("TRD에 코드를 보면 아는 세부는 쓰지 않는다"); those belonged in coder briefs. Counts were corrected twice in a doc nobody reads after freezing — wasted rounds.
+- Feedback rows written: engram-qa (token-free CLI path in GUI QA), engram-implement (HTML rule scope ambiguity), engram-adr (slug length cap, 2nd occurrence).
 
 ## References
 
-- `docs/process/S35-i18next-backend/` — `prd.md`, `trd.md` (§10 review record + pending decisions), `log-localization-notes-2026-11-08.md`.
-- `docs/decisions/0349-*.md` (amends ADR-0069); `docs/research/i18n-oss-library-reevaluation-2026-11-07.md`.
-- `docs/process/step-log.md` § S33 and § S35.
-- Kit: `.claude/handoff/attachments/s33-translation-kit/` (`progress.md`, `GUIDE-translate-your-branch.md`, tools).
+- `docs/process/S35-i18next-backend/` (`prd.md`, `trd.md` Implemented, `README.md`); `docs/reference/structure/i18n.md`; ADR-0372, ADR-0373.
+- `docs/process/S35-i18next-backend/log-localization-notes-2026-11-08.md` — input for the next topic.
+- `docs/reference/logging-conventions.md` — to be rewritten by the next topic.
