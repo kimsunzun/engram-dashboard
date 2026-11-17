@@ -1,6 +1,6 @@
 # S35 TRD — UI language: English source, Korean on request (i18next behind `t()`)
 
-- Status: edition 2.2 (2026-11-17, deep-review rounds 1–2 applied) · canonical ADR = ADR-0372 (amends ADR-0349) · PRD = `prd.md` edition 2 (approved 2026-11-17)
+- Status: edition 2.3 (2026-11-17, deep review passed) · canonical ADR = ADR-0372 (amends ADR-0349) · PRD = `prd.md` edition 2 (approved 2026-11-17)
 - Reference this step changes: `docs/reference/structure/i18n.md` (made from the pre-S35 code in `46504260`; its `is_word` sentence and its inventory are corrected in the edition-2.1 commit, then rewritten to the new behaviour in U2). Also edited where a sentence turns wrong: `docs/reference/structure/agent-backend.md` (quoted Korean labels), the `crates/engram-dashboard-protocol/src/lib.rs` header (quoted labels), the `placeholder.rs` doc and the `src/api/wsFrame.ts` comment ("consumers do not branch on this value"), the `src-tauri/src/layout/tab_name.rs` header, the `USAGE_LOCALE` comment in `src/components/slot/usageFormat.ts`, CLAUDE.md 「언어」.
 - Edition 1 (Korean-only lookup swap) and its review record are history; the 2026-11-08 deep-review findings that still apply are folded in (§3, §4).
 
@@ -20,7 +20,7 @@ Frontend (`src/i18n/`):
 
 Frontend wiring:
 - Boot language: `index.ts` reads only `<html lang>` (through `globalThis.document?.documentElement?.lang`, so node-environment test files still load it); absent or unknown → `en`. The shell's init script decides that value, exactly like `data-theme` (`theme_script` in `webview_env.rs`): the per-window memory in `sessionStorage` under the prefix `engram.lang.` + window label wins (so a reload — e.g. `RootErrorBoundary`'s reload button — does not flash the old language), else the effective `ui.language` at window creation.
-- `setLanguage` updates `<html lang>` (guarded like the read). The per-window memory is written by a small helper outside `src/i18n` (shaped like `src/theme/themeMemory.ts`, guarded against a missing or throwing `sessionStorage`), called by the `main.tsx` subscriber after it applies a value.
+- `setLanguage` updates `<html lang>` (guarded like the read). The per-window memory is written by `src/i18n/langMemory.ts` (shaped like `src/theme/themeMemory.ts`, guarded against a missing or throwing `sessionStorage`; `index.ts` does not import it), called by the `main.tsx` subscriber after it applies a value. Its key prefix constant is `LANG_KEY_PREFIX = 'engram.lang.'`. The init script uses a remembered value only if it is `en` or `ko`.
 - Live changes: a subscriber installed in `src/main.tsx` next to `installChatStyleApplier()` listens to `settingsClient` for `ui.language` and calls `setLanguage`. `settingsClient` replays the current value on subscribe and pulls after listening, so a stale boot value corrects itself.
 - Re-render: `App` reads `useLanguage()`, so a change re-renders the tree under it (no remount — component state stays). Every `memo` boundary whose subtree renders `t()` text also reads `useLanguage()` (today: `LayoutLeaf` and its inner `SlotBody`).
 - Rule (goes into the reference): no code keeps a `t()` result across renders or calls, and no translated text is used as a key, id or comparison baseline. Labels are resolved where they are shown.
@@ -110,10 +110,10 @@ Shell (Rust):
 
 ## 9. Implementation units
 
-Order: U1 first. Then U2 (frontend) and U3 (shell) in parallel — they touch no common file. Contract: key `ui.language`, values `en` | `ko`, default `en`; `<html lang>` planted at window creation by the init script, which reads the per-window memory `sessionStorage['engram.lang.' + label]` first; the frontend helper writes that key; `slot.foreignContent` = `Unknown content` in `en.ts` and `알 수 없는 내용` in `ko.ts` (equal to the shell's `Foreign` word in each language).
+Order: U1 first. Then U2 (frontend) and U3 (shell) in parallel — they touch no common file. Contract: key `ui.language`, values `en` | `ko`, default `en`; `<html lang>` planted at window creation by the init script, which reads the per-window memory `sessionStorage['engram.lang.' + label]` first; `src/i18n/langMemory.ts` exports `LANG_KEY_PREFIX = 'engram.lang.'` (created in U1 so U3's pin test compiles) and writes that key; `slot.foreignContent` = `Unknown content` in `en.ts` and `알 수 없는 내용` in `ko.ts` (equal to the shell's `Foreign` word in each language).
 
-- U1 — Frontend tables and backend: `en.ts`, `ko.ts` typing, `index.ts` on i18next with `getLanguage` / `setLanguage` / `subscribeLanguage`, `react.ts`, vitest setup pin, `index.test.ts`, the i18next dependency. Ends green with the app in English (no switch wiring yet).
-- U2 — Frontend live switch: `<html lang>` read, the memory-writing helper, settings subscriber, `App` / memo re-render, §5, §6, switch tests. Reference `i18n.md` rewritten to the new behaviour in this unit's commit.
+- U1 — Frontend tables and backend: `en.ts`, `ko.ts` typing, `index.ts` on i18next with `getLanguage` / `setLanguage` / `subscribeLanguage`, `react.ts`, `langMemory.ts` with the `LANG_KEY_PREFIX` constant (the writer may stay a stub until U2), vitest setup pin, `index.test.ts`, the i18next dependency. Ends green with the app in English (no switch wiring yet).
+- U2 — Frontend live switch: `<html lang>` read, the memory writer in `langMemory.ts`, settings subscriber, `App` / memo re-render, §5, §6, switch tests. Reference `i18n.md` rewritten to the new behaviour in this unit's commit.
 - U3 — Shell: settings key and hook, `ui_text`, `ViewManager` language (boot value, `adopt_restored`) and version bump, tray `set_text`, refusal text, `is_word` over both languages, plant `<html lang>` and the theme-style memory at window creation, Rust tests; header and doc comments in `tab_name.rs`, `placeholder.rs`, the protocol `lib.rs`, `agent-backend.md` labels.
 - Last commit of the topic: CLAUDE.md 「언어」 (app screen text = English source, Korean translation selectable) and the `Implemented` line.
 
@@ -132,4 +132,4 @@ Order: U1 first. Then U2 (frontend) and U3 (shell) in parallel — they touch no
 
 ## 12. Review record
 
-- (no pass yet)
+- 2026-11-17 · PRD+TRD review, deep · PASS (round 3) · f7868b2a
