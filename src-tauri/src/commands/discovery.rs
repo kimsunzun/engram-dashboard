@@ -27,7 +27,7 @@ use crate::discovery::{self, locate_daemon_exe};
 // inside the lock does not block the executor.)
 //
 // ★Scope limit (load-bearing)★: this lock serializes **the command path only (discover_daemon/daemon_start=ensure_internal)**.
-// The tray "데몬 켜기" (start daemon) (`tray/mod.rs` spawn_daemon_action) is a synchronous spawn_blocking worker so
+// The tray's start-daemon item (`tray/mod.rs` spawn_daemon_action) is a synchronous spawn_blocking worker so
 // it does not go through this async lock and calls `discovery::ensure_daemon` directly — that is, if tray-start and the boot ensure
 // happen at the same time they are outside serialization so multiple spawns can occur. **Even so, consistency is guaranteed down to the final 1 by the daemon's single-instance lock
 // (holding daemon.json in the data folder, daemon instance.rs — ADR-0134/0135)** — this lock is not a

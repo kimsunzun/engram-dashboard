@@ -1,4 +1,5 @@
-//! The Tauri adapter of shell settings · per-window theme — four settings commands · a boot query command · the settings notification · theme push.
+//! The Tauri adapter of shell settings · per-window theme — four settings commands · a boot query command · the settings notification · theme push
+//! · the UI language hook's ports.
 //!
 //! ★There is no logic in this file★: setting values · validation · storage are owned by `crate::settings`, the per-window effective theme by `crate::theme`,
 //! and what remains here is only translation into the Tauri world (query response · **counting live webviews** · `emit`/`emit_to`)
@@ -20,11 +21,15 @@ use std::sync::Arc;
 
 use tauri::{AppHandle, Emitter, Manager, State, Window};
 
+use crate::commands::layout::TauriEvents;
+use crate::layout::LayoutState;
 use crate::settings::{
     reset_and_notify, set_and_notify, ResetOutcome, SetOutcome, SettingsEvents, SettingsSchema,
     SettingsService, SettingsSnapshot,
 };
 use crate::theme::{EffectiveThemes, ThemeControl, ThemeWindows, UiSettingsPayload, UiTheme};
+use crate::tray::TauriTrayText;
+use crate::ui_language::LanguageHook;
 use crate::webview_env;
 
 /// Each window receives **its own value** — it is sent by pointing at the destination, so the receiving side must also subscribe by its own label
@@ -189,5 +194,27 @@ impl SettingsEvents for TauriSettingsEvents {
 
     fn theme_default_changed(&self) {
         self.themes.push();
+    }
+
+    // Runs on the blocking pool (the callers' contract). The tray relabel inside is posted to the main thread, not waited for.
+    fn ui_language_changed(&self) {
+        let (Some(hook), Some(settings), Some(layout)) = (
+            self.app.try_state::<Arc<LanguageHook>>(),
+            self.app.try_state::<Arc<SettingsService>>(),
+            self.app.try_state::<LayoutState>(),
+        ) else {
+            // All three are managed in the builder (`lib.rs`) — reaching here means that registration is gone.
+            tracing::error!(
+                module = "settings",
+                "no language hook, settings or layout state — the new UI language was not applied to the shell text"
+            );
+            return;
+        };
+        hook.apply(
+            &settings,
+            &layout,
+            &TauriEvents { app: &self.app },
+            &TauriTrayText(&self.app),
+        );
     }
 }

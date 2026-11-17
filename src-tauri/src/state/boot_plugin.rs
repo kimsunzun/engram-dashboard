@@ -35,6 +35,8 @@ use super::saver::{self, CloseFlag, RequestOutcome, SaveOutcome, SaverClock, Sav
 use super::schema::WindowEntry;
 use crate::discovery::DataLayout;
 use crate::layout::{LabelSource, LayoutState, ViewManager, MAIN_WINDOW_LABEL};
+use crate::settings::SettingsService;
+use crate::ui_text::Lang;
 
 const PLUGIN_NAME: &str = "engram-state-boot";
 
@@ -46,6 +48,8 @@ pub struct Boot {
     pub session: Arc<StateSession>,
     /// ⑥ decides the state. The notification is inserted by plugin setup before the boot stage — it announces from the decision of ⑥.
     pub restore: Arc<RestoreService>,
+    /// The loaded settings — the boot model takes the effective `ui.language` before anything reads a name from it.
+    pub settings: Arc<SettingsService>,
 }
 
 pub fn init<R: Runtime>(boot: Boot) -> TauriPlugin<R> {
@@ -104,7 +108,7 @@ impl Boot {
         let files = FsBootFiles::in_dir(state_dir);
         let mut plan = boot::prepare(&files);
 
-        let model = match &plan.model {
+        let mut model = match &plan.model {
             BootModel::Default => ViewManager::new(),
             BootModel::Restore(file) => {
                 let restored =
@@ -113,6 +117,10 @@ impl Boot {
                 restored.layout
             }
         };
+        // Before the run marker (it saves the names) and the swap — so a restart in Korean shows Korean names and titles from the
+        //   first frame. Nobody has seen this model, so the windows it reports need no notification.
+        // ADR-0373
+        model.set_language(Lang::from_settings(&self.settings));
         let marker = boot::write_run_marker(
             &files,
             &mut plan,
@@ -533,6 +541,9 @@ mod tests {
             labels: Arc::new(PopupCounter::default()),
             session: session.clone(),
             restore: Arc::new(RestoreService::new()),
+            settings: Arc::new(SettingsService::load_from_dir(
+                &temp_dir("settings").join("absent"),
+            )),
         };
         (boot, session)
     }
@@ -719,6 +730,48 @@ mod tests {
             marker.windows,
             to_persisted(&layout.0.lock().unwrap()),
             "표식이 담은 것이 메모리 모델이다"
+        );
+    }
+
+    #[test]
+    fn a_korean_setting_names_the_boot_model_in_korean_before_any_write() {
+        let run_dir = temp_dir("run");
+        let state_dir = temp_dir("state").join("absent");
+        let config = temp_dir("settings-ko");
+        std::fs::write(config.join("settings.json"), r#"{"ui.language":"ko"}"#).unwrap();
+        let layout = LayoutState::new();
+        let (mut boot, _session) = boot(&layout);
+        boot.settings = Arc::new(SettingsService::load_from_dir(&config));
+        boot.run_steps(&run_dir, &state_dir);
+
+        let mgr = layout.0.lock().unwrap();
+        assert_eq!(mgr.language(), Lang::Ko);
+        let tabs = mgr.list_tabs(MAIN_WINDOW_LABEL).unwrap();
+        assert_eq!(tabs.tabs[0].name, "빈 칸");
+        assert_eq!(
+            crate::layout::apply::WindowTabsPayload::from(tabs).title,
+            "빈 칸 - Engram:1"
+        );
+        assert_eq!(
+            read_state(&state_dir).windows,
+            to_persisted(&mgr),
+            "the run marker saved the Korean names"
+        );
+    }
+
+    #[test]
+    fn the_default_setting_boots_in_english() {
+        let run_dir = temp_dir("run");
+        let state_dir = temp_dir("state").join("absent");
+        let layout = LayoutState::new();
+        let (boot, _session) = boot(&layout);
+        boot.run_steps(&run_dir, &state_dir);
+
+        let mgr = layout.0.lock().unwrap();
+        assert_eq!(mgr.language(), Lang::En);
+        assert_eq!(
+            mgr.list_tabs(MAIN_WINDOW_LABEL).unwrap().tabs[0].name,
+            "Empty slot"
         );
     }
 

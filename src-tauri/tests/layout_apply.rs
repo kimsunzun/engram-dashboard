@@ -63,6 +63,7 @@ use engram_dashboard_lib::tab_drop::plan::{
     self as drop_plan, InputNow, PhysPoint, Plan, SourceFrame, TopAt,
 };
 use engram_dashboard_lib::tab_drop::wire::{DropAnchor, DropTo, NewWindowBy, TabDrop};
+use engram_dashboard_lib::ui_text::Lang;
 
 // ── lock position probe ───────────────────────────────────────────────────────
 
@@ -723,7 +724,7 @@ fn create_window_registers_model_and_opens_os_window() {
     assert_eq!(w.tab_events(), 1);
     let notified = w.last_tabs();
     assert_eq!(notified, apply::list_tabs(&w.state, &label).unwrap());
-    assert_eq!(notified.title, "빈 칸 - Engram:2");
+    assert_eq!(notified.title, "Empty slot - Engram:2");
     assert!(notified.version > version, "새 판으로 알린다");
 }
 
@@ -941,13 +942,13 @@ fn every_new_window_path_numbers_the_window_and_the_tabs_payload_carries_it() {
     let w = World::new();
     let main = apply::list_tabs(&w.state, MAIN_WINDOW_LABEL).unwrap();
     assert_eq!((main.number, main.window_id.as_str()), (1, "main"));
-    assert_eq!(main.title, "빈 칸 - Engram:1");
+    assert_eq!(main.title, "Empty slot - Engram:1");
 
     let mut labels = Vec::new();
     for prewarmed in [true, false] {
         let spare = prewarmed.then(|| w.prewarm());
         let created = apply::create_window(&w.state, &w.subs, &w.ev, &w.host, &w.labels).unwrap();
-        assert_new_window_announced(&w, &created.window, "빈 칸");
+        assert_new_window_announced(&w, &created.window, "Empty slot");
         assert_answer_names(&w, &created);
         if let Some(spare) = spare {
             assert_eq!(created.window, spare, "예열 창의 label 로 답한다");
@@ -960,7 +961,7 @@ fn every_new_window_path_numbers_the_window_and_the_tabs_payload_carries_it() {
             &w.state, &w.subs, &w.ev, &w.host, &w.labels, view, slot, None,
         )
         .unwrap();
-        assert_new_window_announced(&w, &moved.window, "에이전트");
+        assert_new_window_announced(&w, &moved.window, "Agent");
         assert_answer_names(
             &w,
             &NewWindow {
@@ -980,7 +981,7 @@ fn every_new_window_path_numbers_the_window_and_the_tabs_payload_carries_it() {
             .dock(source, DockDest::NewWindow { at: AT }, FocusPolicy::Keep)
             .unwrap();
         assert_eq!(out.prewarmed, prewarmed);
-        assert_new_window_announced(&w, &out.window, "빈 칸");
+        assert_new_window_announced(&w, &out.window, "Empty slot");
         let opened = out
             .identity
             .clone()
@@ -1931,7 +1932,7 @@ fn move_slot_to_window_opens_the_prewarmed_window_and_commits_after_the_notifica
     let tab = &apply::list_tabs(&w.state, &spare).unwrap().tabs[0];
     assert_eq!(
         (tab.name.as_str(), tab.named),
-        ("에이전트", false),
+        ("Agent", false),
         "새 창의 탭은 자동 이름 — 옮긴 칸의 이름이다(장부에 없는 에이전트)"
     );
     let moved_layout = w.snapshot(moved.tab).layout;
@@ -3035,7 +3036,7 @@ async fn every_write_that_changes_a_window_title_announces_that_window_at_a_new_
     let first = w.main_active();
     let slot = w.empty_slot(first);
     let agent = Uuid::new_v4().to_string();
-    assert_eq!(titles(&w)[MAIN_WINDOW_LABEL], "빈 칸 - Engram:1");
+    assert_eq!(titles(&w)[MAIN_WINDOW_LABEL], "Empty slot - Engram:1");
 
     let popup = title_write(&w, "create_window", true, || {
         apply::create_window(&w.state, &w.subs, &w.ev, &w.host, &w.labels)
@@ -3154,7 +3155,64 @@ async fn every_write_that_changes_a_window_title_announces_that_window_at_a_new_
     .await
     .unwrap();
     check.after(&w, "spawn_into", true);
+    assert_eq!(titles(&w)[MAIN_WINDOW_LABEL], "Agent - Engram:1");
+    title_write(&w, "language_changed", true, || {
+        apply::language_changed(&w.state, &w.ev, Lang::Ko).unwrap()
+    });
     assert_eq!(titles(&w)[MAIN_WINDOW_LABEL], "에이전트 - Engram:1");
+}
+
+// ADR-0373 — a language change renames automatic tabs, so it is a title write: a new version, every affected window announced.
+#[test]
+fn a_language_change_with_auto_named_tabs_bumps_and_announces_every_affected_window() {
+    let w = World::new();
+    let popup = w.popup();
+    w.forget();
+    let version = w.version();
+
+    apply::language_changed(&w.state, &w.ev, Lang::Ko).unwrap();
+
+    let mut sent: Vec<(String, String, u64)> =
+        w.ev.tabs
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|t| (t.label.clone(), t.title.clone(), t.version))
+            .collect();
+    sent.sort();
+    assert_eq!(
+        sent,
+        [
+            (
+                MAIN_WINDOW_LABEL.to_string(),
+                "빈 칸 - Engram:1".to_string(),
+                version + 1
+            ),
+            (popup, "빈 칸 - Engram:2".to_string(), version + 1),
+        ]
+    );
+    assert_eq!(w.version(), version + 1, "one bump for the whole change");
+    assert_eq!(w.layout_events(), 0, "tab notifications only");
+
+    w.forget();
+    apply::language_changed(&w.state, &w.ev, Lang::Ko).unwrap();
+    assert_eq!(w.tab_events(), 0, "the same language changes nothing");
+    assert_eq!(w.version(), version + 1);
+}
+
+#[test]
+fn a_language_change_with_only_named_tabs_does_not_bump() {
+    let w = World::new();
+    let main = w.main_active();
+    apply::rename_tab(&w.state, &w.ev, main, "작업".to_string()).unwrap();
+    w.forget();
+    let version = w.version();
+
+    apply::language_changed(&w.state, &w.ev, Lang::Ko).unwrap();
+
+    assert_eq!(w.tab_events(), 0);
+    assert_eq!(w.version(), version);
+    assert_eq!(titles(&w)[MAIN_WINDOW_LABEL], "작업 - Engram:1");
 }
 
 // One time at boot — announces all windows at the current version as it is and changes neither the version nor the model (TRD S26-window-chrome §4-4 ③).
@@ -3180,10 +3238,10 @@ fn sync_titles_announces_every_window_once_at_the_current_version() {
         [
             (
                 MAIN_WINDOW_LABEL.to_string(),
-                "빈 칸 - Engram:1".to_string(),
+                "Empty slot - Engram:1".to_string(),
                 version
             ),
-            (popup, "빈 칸 - Engram:2".to_string(), version),
+            (popup, "Empty slot - Engram:2".to_string(), version),
         ]
     );
     assert_eq!(w.layout_events(), 0);

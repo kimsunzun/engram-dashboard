@@ -22,7 +22,8 @@ macro_rules! placeholder_message {
     };
 }
 
-/// Wording of the placeholder `Error`. A human-readable opaque string — consumers do not branch on this value.
+/// Wording of the placeholder `Error` — a fixed marker. The chat view compares an error item's message with it (byte-equal mirror in
+/// `src/api/wsFrame.ts`) and shows its own translated text instead; no other consumer branches on it.
 pub const PLACEHOLDER_ERROR_MESSAGE: &str = placeholder_message!();
 
 /// Exactly the JSON serialization of `StructuredEvent::Error { message: PLACEHOLDER_ERROR_MESSAGE }`.

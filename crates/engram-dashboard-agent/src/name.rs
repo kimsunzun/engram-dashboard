@@ -8,8 +8,9 @@
 //!
 //! The edge behaviors below mirror `basename.ts` verbatim — if the frontend rule changes, change this side together.
 
-/// A stable placeholder for when the cwd is empty or has no segment to derive (prevents a blank label).
-/// It must be the same string as the frontend `PATH_NAME_PLACEHOLDER` (display consistency).
+/// A stable placeholder for when the cwd is empty or has no segment to derive (prevents a blank label). Production callers go
+/// through [`canonical_name_or_id_fallback`], which turns it into the id prefix, so it never becomes a name. Not coupled to the
+/// frontend at run time — the frontend's blank-path label is the UI-language key `common.noPath`.
 pub const PATH_NAME_PLACEHOLDER: &str = "(경로 없음)";
 
 /// ★The return value is never blank (empty / whitespace-only)★: the upper layer (display name) draws from this one value alone, so if it is blank
