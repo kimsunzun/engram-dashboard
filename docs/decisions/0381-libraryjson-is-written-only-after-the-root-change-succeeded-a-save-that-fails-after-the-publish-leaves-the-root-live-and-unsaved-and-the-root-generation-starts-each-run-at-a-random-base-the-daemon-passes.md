@@ -1,20 +1,43 @@
 # ADR-0381: library.json is written only after the root change succeeded; a save that fails after the publish leaves the root live and unsaved, and the root generation starts each run at a random base the daemon passes
 
-- 상태: 확정 (2026-11-17, 근거: TODO)
-- 관련: Amends ADR-0379 (decision 4 leftovers and decision 6 config write failed) · Amends ADR-0377 (the starting value of the root generation) · Amends ADR-0376 (the config states listed in its impact) · TODO 나머지 관련
+- 상태: 확정 (2026-11-17, 근거: user decision 2026-11-17 U-D2 「아니 성공해야 적는게맞지. 왜 먼저적어?」 (after the code review of U1 found repeated rollback failures in the write-then-undo order), S25 step-9a TRD §8 (c) U-D2 · §8 (b) B4 · B5 · B6 · B11, TRD draft 4/5 delta re-review (Claude PASS, codex FIX on wording — fixed))
+- 관련: Amends ADR-0379 (decision 4 leftovers and decision 6 config write failed) · Amends ADR-0377 (the starting value of the root generation) · Amends ADR-0376 (the config states listed in its impact) · ADR-0375 (what `library.json` stores) · ADR-0366 (decision 3: `set_root` and the first start go through `change_root`) · ADR-0311 (decision 5: values the daemon carries) · ADR-0291 (the base data-file rules) · step-9a TRD `docs/process/S25-preset-library/trd-library-edit.md` (draft 5, `fc199a9f`) §1 · §2 「Values the daemon passes」 and 「In memory」 · §3.1 · §3.2 · §5 · §8 (b) B4 · B5 · B6 · B11 · §8 (c) U-D2 · §9 U1 · §10 K7
 
 ## 맥락
-TODO — 무슨 문제를 풀어야 했나.
+Draft 3 of the step-9a TRD (and ADR-0379 decision 4) had `set_root` and the first start write `library.json` first, then call `change_root`, and restore the previous file when `change_root` refused (risk K3: the restore itself can fail). The code review of U1 found repeated rollback failures in that write-then-undo order, and the user decided that the file is written only after the root change succeeded (U-D2). The TRD (drafts 4 and 5) also fixes the starting value of the root generation (`Numbers.root`), which ADR-0377 left open, so that a generation a client kept from an earlier run does not match the current run (B6).
 
 ## 결정
-TODO — 무엇으로 정했나.
+1. **Persist only after success (U-D2)**, for `set_root` and the first start alike — there is no write-then-undo.
+   - `set_root` = normalize + absolute check → root-change mutex → read-only check → create (if asked) → `change_root` (stat + walk) → only after a successful publish, write `library.json` (`judge` first, then the atomic write; `"default"` when the path is the default place, else the absolute path — ADR-0375). One mutex serializes `set_root` and the first start.
+   - First start (`library.json` Missing) = create `default_root` → `change_root` → write `"root": "default"`.
+   - A create failure or a refused `change_root` (stat or walk) publishes nothing and writes nothing (the file keeps its setting); `set_root` answers `Unavailable` · `library-root-unusable` `{path, why}`; folders partly created may remain and do not count as applied. At first start the root stays `unset`, the daemon starts, and the next start tries again.
+2. **A save that fails after the publish leaves the root live and unsaved.** A `library.json` write failure after a successful publish (a `judge` refusal or the atomic write failing) leaves the new root live for this run and the file at its old setting (or unwritten); nothing is undone.
+   - `set_root` answers `Unavailable` · `library-config-write-failed` `{why}` = **published but not saved**; `why` (and 10a's message) says the change is live but not saved and the next start follows the file that is left (`Reason.line` is a file line number, not this text).
+   - The first start logs a `warn` instead (it has no caller).
+3. **`library-config-write-failed` maps onto the non-retaining `CONFLICT`** (class `Unavailable`) although the root was applied: a same-id retry re-runs `set_root` and retries the save instead of being answered `ALREADY_APPLIED`; a re-run republishes the same root and writes again (TRD §1, B11).
+4. **`status.config` gains `unsaved`** with `why`: this run published a root (`set_root` or the first start) whose `library.json` write failed. The live root may differ from the file's setting (a re-set of the same root whose save fails is `unsaved` with both equal). It clears at the next successful write. When two states apply, the live state wins: a `set_root` over a corrupt file whose save fails is `unsaved`, not `corrupt`. While `unsaved`, `root` and `root_setting` describe the live root.
+5. **Restart rule by the file left**: after a failed save, or a crash between the publish and the write (no answer reaches the caller), the next start loads whatever `library.json` is left and follows the load table (ADR-0376 decision 2) — Missing ⇒ the first start runs again (idempotent: the folder exists, so it walks it and writes); Usable ⇒ that setting; Corrupt ⇒ `unset` (copied aside at the next write); Newer / read failed ⇒ `unset`, read-only for that run. When the first start's pre-write `judge` found a file that appeared meanwhile, the next start loads that file. No automatic retry is promised beyond that table.
+6. **The root generation starts each run at a random per-run base** — not the clock, not 0 — drawn by the daemon from its existing random source (`getrandom`) below 2^52 and passed as a value in `LibraryValues.root_generation_base`, like `daemon_id` (ADR-0311 decision 5); asset-library adds no randomness dependency. Below 2^52, the base plus the run's increments stays below 2^53, so a JSON client reads every value exactly. A generation kept from an earlier run is therefore not accepted. Generations are compared only for equality, never by order, within a run or across runs.
+
+**Clauses that change:**
+- **ADR-0379 decision 4** — the leftovers: only folders a `set_root {create}` made (wholly or partly) before it refused `library-root-unusable` (the create step failing, or `change_root` refusing) do not count as applied. Folders made before a `library-config-write-failed` are no longer a leftover (that refusal comes after the publish), and the 「`library.json` the K3 restore could not put back」 leftover dies (there is no restore). Added: `library-config-write-failed` did apply the live root and still maps non-retaining (decision 3 here). The two `INTERNAL` exceptions are unchanged.
+- **ADR-0379 decision 6** — `library-config-write-failed` now means a write failure after `set_root` published the new root (published but not saved), not a write before the root change; `library-root-unusable` also covers a failed create step.
+- **ADR-0377** — adds the starting value of the root generation (decision 6 here); the check inside the edit's own write-lock take and `root-generation-stale` are unchanged.
+- **ADR-0376 「영향」** — the `config` states listed there gain `unsaved` (decision 4 here). The load table and the read-only rule are unchanged.
 
 ## 거부한 대안
-- TODO 대안 A — 왜 버렸나.
-- TODO 대안 B — 왜 버렸나.
+- **Write `library.json` first and undo on refusal** (TRD draft 3 / old B5) — the undo can fail (stale state, a `.corrupt` copy overwritten), can clobber a file someone else wrote in the window, and a byte-compare before the undo still leaves a window. 사용자 직접 기각 (U-D2, 「아니 성공해야 적는게맞지. 왜 먼저적어?」).
+- **A clock-based generation base** — a clock that repeats (or a pre-epoch clock giving 0) can accept another run's generation (code review). The TRD also rules out 0 (B6).
+- **A retaining bus code for `library-config-write-failed`** — a same-id retry would answer `ALREADY_APPLIED` and never retry the save the caller was told failed (TRD §1, B11; code: daemon `command_delivery::retains_the_id`).
 
 ## 근거
-TODO — 실측·리뷰 등 결정의 뒷받침.
+- User decision U-D2 (2026-11-17), quoted in the 상태 line; TRD §8 (c) U-D2, applied in §1, §3.1, §3.2, §4, §5, §7 U1, §8 (b) B4 · B5 · B11, §9 U1, §10.
+- B5: the file only ever records a root that was actually published; the mutex prevents two calls from interleaving publish and file order.
+- B6: a per-run random base keeps a generation from an earlier run from matching.
+- Draft 4 (U-D2 order) re-review 2026-11-17: Claude PASS, codex FIX on the restart wording — fixed in draft 5 and closed by main's diff check (TRD §13).
 
 ## 영향 / 불변식
-TODO — 이 결정이 묶는 코드·게이트. 어기면 무엇이 깨지나.
+- Risk K3 (rollback of `library.json` fails) is gone; risk K7 replaces it: a published-but-unsaved root for one run — the live root may differ from the file's setting, and the next start follows the file that is left. Signals: the `library-config-write-failed` answer, `status` `config: unsaved`, U1 tests with write-failure injection.
+- `LibraryValues` gains `root_generation_base: u64`; `build_library_service` and the harness bin `roundtrip_smoke.rs` pass it.
+- Tests that must hold (TRD §9 U1): a refused `change_root` (stat and walk alike) writes nothing; a write failure after the publish answers `library-config-write-failed` with the new root live, the file unchanged and `config: unsaved` (also over a corrupt file); the next start (a service rebuilt over the same files) follows the file that is left; `unsaved` clears after a later successful `set_root`; a create failure answers `library-root-unusable` with nothing published or written; a first-start write failure ⇒ the default root live, `config: unsaved`, and the next start follows the file left; failure injection for `library.json` writes goes through a write seam in `config.rs`; a generation kept from an earlier run (a rebuilt service) is refused; gate tests assert generations relative to the base. QA mutations: `library.json` written before the root change; the per-run generation base made a constant.
+- Implemented in step 9a U1 (TRD §7 U1).
