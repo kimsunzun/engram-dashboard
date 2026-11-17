@@ -22,11 +22,14 @@
 //!   them before its disk read; if only the swap-in count moved it may update items but not insert paths. A change
 //!   given a root generation compares it inside its own write-lock take; a stale one writes and raises nothing
 //!   ([`Gate::change_checked`] — ADR-0377).
-//! - **First scan**: "raised" = one full scan or one root change has been applied. A reader starts one or waits for one
-//!   pending; a reader whose waited-for scan was not published goes through once more, and that failure is its answer.
+//! - **First scan**: "raised" = one full scan or one walked root change has been applied. A reader starts one or waits
+//!   for one pending; a reader whose waited-for scan was not published goes through once more, and that failure is its
+//!   answer. The first start's publish without a walk ([`Gate::publish_root_unwalked`]) leaves it un-raised and is not
+//!   pending, so the first scan of that root is a real walk — the daemon's boot scan or a reader (ADR-0382).
 //! - **Refresh merging**: a refresh joins a covering scan generation that is queued and not yet walking; a covering
 //!   walk already in progress does not count — the caller may have changed files before calling (PRD R41).
 // ADR-0324
+// ADR-0382
 // TRD S25 step-7 §6
 
 use std::collections::{HashMap, VecDeque};
@@ -152,7 +155,7 @@ struct Turns {
 #[derive(Default)]
 struct First {
     raised: bool,
-    /// Full scans and root changes drawn before the first scan was raised that have not ended.
+    /// Full scans and walked root changes drawn before the first scan was raised that have not ended.
     pending: usize,
     /// How many of those have ended — a waiter wakes when it moves.
     ended: u64,
@@ -174,7 +177,10 @@ struct Ticket {
 enum Kind {
     Scan(Arc<Generation>),
     Change,
-    Root,
+    /// `walks` = a root change that walks the new root; one that does not is never a pending first scan.
+    Root {
+        walks: bool,
+    },
 }
 
 /// One scan generation: its range and, once its ticket is released, its answer.
@@ -288,8 +294,8 @@ impl Gate {
     /// A ticketed scan of `range` (ADR-0324 decision 7 — refresh merging). Joins a covering generation that is queued
     /// and not walking; otherwise draws its own ticket. A folder refresh before the first scan is raised joins a
     /// queued full scan or runs one itself and takes its share (decision 6); one that finds a full scan (or a
-    /// first-start root change) already walking waits for it and then scans its folder like any refresh. When the one
-    /// it joined or waited for is not published it goes through a full scan once more.
+    /// root change drawn before the first scan was raised) already walking waits for it and then scans its folder
+    /// like any refresh. When the one it joined or waited for is not published it goes through a full scan once more.
     // ADR-0366
     pub(crate) fn refresh(&self, range: Option<&LibPath>, build: Build) -> Outcome {
         let mut turns = lock(&self.turns);
@@ -378,10 +384,34 @@ impl Gate {
         new_root: PathBuf,
         walk: impl FnOnce(&Path) -> io::Result<ScanResult>,
     ) -> Outcome {
-        let mut turn = self.take_turn(Kind::Root);
+        let mut turn = self.take_turn(Kind::Root { walks: true });
         let outcome = self.publish_root(new_root, walk);
         turn.outcome = Some(outcome.clone());
         outcome
+    }
+
+    /// Publishes `new_root` as the first root without walking it: a Root ticket, exclusive behind every earlier ticket;
+    /// one write lock sets the root and raises the root generation. The first scan stays un-raised and this ticket is
+    /// not counted as pending, so the first scan of `new_root` is a real walk. `Err` = a root is already published:
+    /// nothing changed. (The stat of the new root is the caller's — before this call.)
+    ///
+    /// Unlike [`Gate::change_root`] it does not clear the catalog: it relies on the invariant that while no root is
+    /// published the catalog is empty — a scan, the list safety net and a launch overlay read under a root, and a merge
+    /// noted before this publish is dropped by the raised root generation. Every change body must keep refusing when no
+    /// root is published, or it could leave an item this publish would carry into the new root.
+    // ADR-0382
+    pub(crate) fn publish_root_unwalked(&self, new_root: PathBuf) -> Result<(), String> {
+        let _turn = self.take_turn(Kind::Root { walks: false });
+        let mut state = write(&self.lib);
+        if let Some(published) = &state.root {
+            return Err(format!(
+                "a library root is already published: {}",
+                published.display()
+            ));
+        }
+        state.root = Some(new_root);
+        lock(&self.turns).numbers.root += 1;
+        Ok(())
     }
 
     /// The conditional late merge (ADR-0324 decision 5): under the write lock, nothing when the change or root
@@ -423,7 +453,7 @@ impl Gate {
         let pending_first = !turns.first.raised
             && match &kind {
                 Kind::Scan(generation) => generation.range.is_none(),
-                Kind::Root => true,
+                Kind::Root { walks } => *walks,
                 Kind::Change => false,
             };
         if pending_first {
@@ -579,7 +609,7 @@ fn may_enter(line: &VecDeque<Ticket>, no: u64) -> bool {
             .iter()
             .take(at)
             .all(|ticket| ticket.entered && matches!(ticket.kind, Kind::Change)),
-        Kind::Scan(_) | Kind::Root => at == 0,
+        Kind::Scan(_) | Kind::Root { .. } => at == 0,
     }
 }
 
@@ -704,7 +734,7 @@ impl Gate {
                     let kind = match ticket.kind {
                         Kind::Scan(_) => "scan",
                         Kind::Change => "change",
-                        Kind::Root => "root",
+                        Kind::Root { .. } => "root",
                     };
                     (kind, ticket.entered)
                 })
@@ -973,6 +1003,103 @@ mod tests {
         assert_eq!(gate.numbers().root, BASE);
         join(change_thread(&gate, &log, "c", None));
         assert_eq!(log.take(), ["c enters"]);
+    }
+
+    #[test]
+    fn an_unwalked_first_publish_waits_behind_earlier_tickets_and_leaves_the_first_scan_to_a_real_walk(
+    ) {
+        let gate = Arc::new(Gate::new(None, BASE));
+        let (log, door) = (Arc::new(Log::default()), Arc::new(Door::default()));
+        let blocker = change_thread(&gate, &log, "blocker", Some(Arc::clone(&door)));
+        gate.wait_for("blocker in", |line, _| line == [("change", true)]);
+        let publish = {
+            let gate = Arc::clone(&gate);
+            thread::spawn(move || gate.publish_root_unwalked(PathBuf::from("/lib")))
+        };
+        gate.wait_for("the publish waits behind the change", |line, _| {
+            line == [("change", true), ("root", false)]
+        });
+        door.open();
+        join(blocker);
+        join(publish).unwrap();
+        assert_eq!(
+            gate.with_read(|state| state.root.clone()),
+            Some(PathBuf::from("/lib"))
+        );
+        assert_eq!(
+            (gate.numbers().root, gate.numbers().swap_ins),
+            (BASE + 1, 0),
+            "the root generation moved; nothing was walked or applied"
+        );
+        let walks = Log::default();
+        let walk = |root: &Path, range: Option<&LibPath>, _: &Tags| -> io::Result<ScanResult> {
+            walks.push(format!("walks {}", root.display()));
+            Ok(empty(range))
+        };
+        gate.first_scan_join(&walk).unwrap();
+        assert_eq!(
+            walks.take(),
+            [format!("walks {}", Path::new("/lib").display())],
+            "the first scan was left un-raised"
+        );
+        gate.first_scan_join(&walk).unwrap();
+        assert_eq!(walks.take().len(), 1, "raised by that walk");
+
+        let refused = gate.publish_root_unwalked(PathBuf::from("/other"));
+        assert!(refused.unwrap_err().contains("already published"));
+        assert_eq!(
+            (
+                gate.with_read(|state| state.root.clone()),
+                gate.numbers().root
+            ),
+            (Some(PathBuf::from("/lib")), BASE + 1),
+            "a refused publish changes nothing"
+        );
+        join(change_thread(&gate, &log, "after", None));
+        assert_eq!(
+            log.take(),
+            ["blocker enters", "after enters"],
+            "tickets released"
+        );
+    }
+
+    #[test]
+    fn a_reader_arriving_while_an_unwalked_publish_waits_draws_its_own_scan_and_walks_the_new_root()
+    {
+        let gate = Arc::new(Gate::new(None, BASE));
+        let (log, door) = (Arc::new(Log::default()), Arc::new(Door::default()));
+        let blocker = change_thread(&gate, &log, "blocker", Some(Arc::clone(&door)));
+        gate.wait_for("blocker in", |line, _| line == [("change", true)]);
+        let publish = {
+            let gate = Arc::clone(&gate);
+            thread::spawn(move || gate.publish_root_unwalked(PathBuf::from("/lib")))
+        };
+        gate.wait_for("the publish queued", |line, _| line.len() == 2);
+        let reader = {
+            let (gate, log) = (Arc::clone(&gate), Arc::clone(&log));
+            thread::spawn(move || {
+                gate.first_scan_join(&|root, range, _| {
+                    log.push(format!("reader walks {}", root.display()));
+                    Ok(empty(range))
+                })
+            })
+        };
+        // Not a pending first scan: the reader does not wait on it, it queues its own full scan behind it.
+        gate.wait_for("the reader's own scan queued", |line, waiting| {
+            line == [("change", true), ("root", false), ("scan", false)] && waiting == 0
+        });
+        door.open();
+        join(blocker);
+        join(publish).unwrap();
+        join(reader).unwrap();
+        assert_eq!(
+            log.take(),
+            [
+                "blocker enters".to_owned(),
+                format!("reader walks {}", Path::new("/lib").display())
+            ]
+        );
+        assert_eq!(gate.numbers().swap_ins, 1);
     }
 
     #[test]

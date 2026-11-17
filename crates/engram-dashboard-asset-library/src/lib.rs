@@ -1,8 +1,8 @@
 //! # engram-dashboard-asset-library — the preset library
 //!
 //! The library holds instruction, skill, settings and preset files under one root folder. This crate reads, checks and
-//! resolves them and makes the launch materials; the daemon creates the service, plugs its ports in and passes it values,
-//! nothing more (ADR-0311).
+//! resolves them and makes the launch materials; the daemon creates the service, plugs its ports in, passes it values and
+//! calls the first start and the boot scan (ADR-0311 · ADR-0382).
 //!
 //! ## Dependency rule (invariant)
 //!
@@ -47,11 +47,16 @@
 //!
 //! The root is one setting persisted in `library.json` (`config.rs` — ADR-0375 · ADR-0376), read by the daemon before
 //! [`LibraryService::new`]; `new` does no disk work beyond the built-ins. [`LibraryService::set_root`] and
-//! [`LibraryService::first_start`] are the only writers of the setting. Each publishes the root through
-//! [`LibraryService::change_root`] first and writes `library.json` only after that succeeded (ADR-0381): a refused root
-//! change writes nothing, and a write that fails leaves the new root live and the setting `unsaved` — nothing is undone.
-//! One root-change mutex serializes them across the root change and the write; under it they take only the gate's locks
-//! and the config's state mutex, a leaf held for no IO.
+//! [`LibraryService::first_start`] are the only writers of the setting. `set_root` publishes the root through
+//! [`LibraryService::change_root`] (stat, then walk); the first start stats the default place and publishes it without a
+//! walk (ADR-0382). Each writes `library.json` only after its publish succeeded (ADR-0381): a refused publish writes
+//! nothing, and a write that fails leaves the new root live and the setting `unsaved` — nothing is undone. One
+//! root-change mutex serializes them across the publish and the write; under it they take only the gate's locks and the
+//! config's state mutex, a leaf held for no IO.
+//!
+//! The daemon never walks the library before it is reachable (ADR-0382): on every start, after the first-start step,
+//! it calls [`LibraryService::start_boot_scan`], which runs the first scan on a background job and returns at once.
+//! Catalog readers wait for that scan at the first-scan entrance; launch checks skip the entrance and do not wait.
 //!
 //! The root generation starts each run at the base the daemon draws (`LibraryValues::root_generation_base`), so a
 //! generation kept from an earlier run does not match; generations are compared only for equality (ADR-0381).
@@ -65,6 +70,7 @@
 // ADR-0324
 // ADR-0379
 // ADR-0381
+// ADR-0382
 
 pub mod backends;
 pub mod builtin;
@@ -149,6 +155,7 @@ pub const LIBRARY_CONFIG_READ_ONLY: &str = "library-config-read-only";
 pub const LIBRARY_CONFIG_WRITE_FAILED: &str = "library-config-write-failed";
 
 const MERGE_JOB: &str = "library-merge";
+const BOOT_SCAN_JOB: &str = "library-boot-scan";
 
 /// The class of a [`LibraryRefusal`] — the command layer maps it onto the bus code: `Unavailable` onto `CONFLICT`,
 /// the others onto their namesakes (ADR-0379 decision 3).
@@ -279,14 +286,17 @@ pub enum FirstStart {
     /// `library.json` was not missing at load, or the step already published this run — nothing done. A `Failed`
     /// step stays due, so a second call in the same run would retry.
     NotDue,
-    /// The default place was created, the root published and then the setting written at its default value.
+    /// The default place was created, stat'ed and published without a walk, and then the setting written at its default
+    /// value; the boot scan walks it ([`LibraryService::start_boot_scan`]).
+    // ADR-0382
     Published,
     /// The default root was published but `library.json` was not written (`why`): live this run, `config: unsaved`;
     /// the next start follows the file that is left (with none left, the first start runs again).
     // ADR-0381
     Unsaved(String),
-    /// The default place could not be created or the root change refused: nothing published or written, the root
-    /// unset; the next start tries again.
+    /// The default place could not be created, its root stat did not answer `Ok`, or a root was already published
+    /// (only a test publishes one before the first start): nothing published or written, the root as it was (unset
+    /// unless already published); the next start tries again.
     Failed(String),
 }
 
@@ -399,7 +409,7 @@ enum Observed {
 }
 
 impl LibraryService {
-    /// `io` bounds every folder operation outside the library and spawns the service's short-lived jobs. The built-ins
+    /// `io` bounds every folder operation outside the library and spawns the service's jobs (short merge jobs and the boot scan). The built-ins
     /// are read here, once.
     pub fn new(values: LibraryValues, store: Arc<dyn LibraryStore>, io: BoundedIo) -> Self {
         let root = ConfigFile::initial_root(&values.config, &values.default_root);
@@ -658,8 +668,8 @@ impl LibraryService {
 
     /// Re-scans `folder` (`None` = the whole library) on its own ticket, or joins a covering scan queued and not yet
     /// walking (ADR-0324 decision 7). Before the first scan is raised a folder refresh passes through a full scan
-    /// (decision 6): it joins a queued one or runs its own and takes its share; if a full scan (or a first-start root
-    /// change) is already walking, it waits for it and then scans its folder like any refresh — or, when what it
+    /// (decision 6): it joins a queued one or runs its own and takes its share; if a full scan (or a root change drawn
+    /// before the first scan was raised) is already walking, it waits for it and then scans its folder like any refresh — or, when what it
     /// waited for failed, goes through a full scan once more.
     pub fn refresh(&self, folder: Option<&LibPath>) -> RefreshReport {
         match self.gate.refresh(folder, &|root, range, tags| {
@@ -737,15 +747,21 @@ impl LibraryService {
     /// answer `Ok`, or the walk failed at the root.
     ///
     /// It neither records the root in `library.json` nor takes the root-change mutex: every caller outside this crate
-    /// goes through [`LibraryService::set_root`] or [`LibraryService::first_start`] (tests excepted).
+    /// goes through [`LibraryService::set_root`] (tests excepted). The first start does not walk: it publishes after the
+    /// same stat ([`LibraryService::first_start`]).
     pub fn change_root(&self, new_root: PathBuf) -> Result<RefreshReport, String> {
-        let io = self.io.begin_read();
-        self.stat_root(&io, &new_root)
-            .map_err(|why| format!("the new library root cannot be used: {why}"))?;
+        self.stat_new_root(&new_root)?;
         let walk = |root: &Path| self.build_scan(root, None, &Tags::new());
         self.gate
             .change_root(new_root, walk)
             .map(|report| report.share(None))
+    }
+
+    /// The stat a new root must pass before it is published: one read budget, outside the gate. `Err(why)` = it did not
+    /// answer `Ok`.
+    fn stat_new_root(&self, root: &Path) -> Result<(), String> {
+        self.stat_root(&self.io.begin_read(), root)
+            .map_err(|why| format!("the new library root cannot be used: {why}"))
     }
 
     /// [`LibraryService::change`] for an edit that carries the root generation it read from `status` (`None` = the
@@ -861,16 +877,18 @@ impl LibraryService {
         Ok(status)
     }
 
-    /// The first-start step: when `library.json` was missing at load, creates the default place, publishes it as the
-    /// root and only then writes the setting at its default value. A failed create or root change writes nothing and
-    /// leaves the root unset, and the next start tries again; a failed write leaves the default root live this run
-    /// (`unsaved`, logged), and the next start follows the file that is left. A configured root that vanished is never
-    /// re-created (only a missing `library.json` makes the step due). The daemon calls it once, before the commands are
-    /// served.
+    /// The first-start step: when `library.json` was missing at load, creates the default place, stats it as
+    /// [`LibraryService::change_root`] does, publishes it as the root without a walk and only then writes the setting at
+    /// its default value; the boot scan walks it ([`LibraryService::start_boot_scan`]). A failed create or stat writes
+    /// nothing and leaves the root unset, and the next start tries again; a failed write leaves the default root live this
+    /// run (`unsaved`, logged), and the next start follows the file that is left. A walk that fails later leaves the file
+    /// written. A configured root that vanished is never re-created (only a missing `library.json` makes the step due).
+    /// The daemon calls it once, before the commands are served.
     // ADR-0312
     // ADR-0366
     // ADR-0375
     // ADR-0381
+    // ADR-0382
     pub fn first_start(&self) -> FirstStart {
         let _serial = self.take_root_change();
         if !self.config.first_start_due() {
@@ -878,13 +896,18 @@ impl LibraryService {
         }
         let root = self.values.default_root.clone();
         let failed = |why: String| {
-            tracing::warn!(root = %root.display(), "library first start failed; root unset: {why}");
+            tracing::warn!(root = %root.display(), "library first start failed; nothing published: {why}");
             FirstStart::Failed(why)
         };
         if let Err(e) = std::fs::create_dir_all(&root) {
             return failed(format!("create failed: {e}"));
         }
-        if let Err(why) = self.change_root(root.clone()) {
+        if let Err(why) = self.stat_new_root(&root) {
+            return failed(why);
+        }
+        // ADR-0382: not `change_root` with an empty build — that raises the first scan, so a default place that already
+        //   holds files (a first start run again after a failed save) would never be walked.
+        if let Err(why) = self.gate.publish_root_unwalked(root.clone()) {
             return failed(why);
         }
         match self.config.save(&RootSetting::Default) {
@@ -906,6 +929,40 @@ impl LibraryService {
     fn default_place(&self) -> PathBuf {
         normalize_folder(&self.values.default_root)
             .unwrap_or_else(|_| self.values.default_root.clone())
+    }
+
+    /// Starts the first scan of the published root as a background job on the service's spawner and returns at once.
+    /// The job passes the first-scan entrance ([`LibraryService::first_scan_join`]), so it joins a first scan a reader
+    /// already started instead of walking again, and readers arriving during its walk wait for it there. With no
+    /// published root no job is started; a job that cannot be started is logged, and the first reader starts the scan at
+    /// the entrance. A failed scan is logged; the next reader walks again. The daemon calls it on every start, after the
+    /// first-start step, and never waits for it.
+    // ADR-0382
+    pub fn start_boot_scan(self: &Arc<Self>) {
+        let Some(root) = self.gate.with_read(|state| state.root.clone()) else {
+            tracing::debug!("library boot scan: no root; not started");
+            return;
+        };
+        let service = Arc::clone(self);
+        let job = Box::new(move || {
+            tracing::info!(root = %root.display(), "library boot scan started");
+            let started = std::time::Instant::now();
+            match service.first_scan_join() {
+                Ok(()) => tracing::info!(
+                    root = %root.display(),
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "library boot scan done"
+                ),
+                Err(why) => tracing::warn!(
+                    root = %root.display(),
+                    "library boot scan failed; the next reader scans again: {}",
+                    escape_controls(&why)
+                ),
+            }
+        });
+        if let Err(e) = self.io.spawner().spawn(BOOT_SCAN_JOB, job) {
+            tracing::warn!("library-boot-scan spawn failed; the first reader scans: {e}");
+        }
     }
 
     fn take_root_change(&self) -> MutexGuard<'_, ()> {
@@ -2213,7 +2270,7 @@ mod tests {
     }
 
     #[test]
-    fn a_first_start_root_change_raises_the_first_scan_for_the_readers_waiting_on_it() {
+    fn a_root_change_on_an_unset_root_raises_the_first_scan_for_the_readers_waiting_on_it() {
         let (svc, store) = service_on(&["/lib"], None);
         store.mem("/lib").file("a.md", "a");
         store.hold_at(At::Start, "/lib");
@@ -3284,7 +3341,8 @@ claude: {changed: true}
     }
 
     #[test]
-    fn a_first_start_whose_root_change_is_refused_writes_nothing_and_the_next_start_retries() {
+    fn a_first_start_whose_root_stat_is_refused_publishes_and_writes_nothing_and_the_next_start_retries(
+    ) {
         let disk = OnDisk::new(&["library"], "library", None);
         lock(&disk.ops.0).insert(
             disk.at("library"),
@@ -3295,6 +3353,7 @@ claude: {changed: true}
         assert!(disk.config().is_none());
         assert_eq!(svc.status().root, None);
         assert_eq!(svc.numbers().root, ROOT_BASE);
+        assert!(disk.store.scans().is_empty(), "nothing walked");
         lock(&disk.ops.0).clear();
         assert_eq!(disk.start().first_start(), FirstStart::Published);
     }
@@ -3362,6 +3421,120 @@ claude: {changed: true}
     }
 
     #[test]
+    fn a_first_start_over_files_already_in_the_default_place_publishes_without_a_walk_and_the_boot_scan_fills_the_catalog(
+    ) {
+        let disk = OnDisk::new(&["library"], "library", None);
+        disk.mem("library").file("a.md", "a");
+        let root = disk.at("library");
+        let root_text = root.to_str().unwrap();
+        disk.store.hold_at(At::Start, root_text);
+        let svc = disk.start();
+        assert_eq!(
+            join(on_thread(&svc, |svc| svc.first_start())),
+            FirstStart::Published,
+            "returned with a walk of the default place armed to park"
+        );
+        assert!(
+            disk.store.scans().is_empty(),
+            "the first start walked nothing"
+        );
+        assert_eq!(
+            disk.config(),
+            Some(json!({ "schema_version": 1, "root": "default" }))
+        );
+        assert_eq!(root_of(&svc), Some(root.clone()));
+        let numbers = svc.numbers();
+        assert_eq!((numbers.root, numbers.swap_ins), (ROOT_BASE + 1, 0));
+
+        svc.start_boot_scan();
+        disk.store.wait_held();
+        assert!(
+            !has(&svc, "a.md"),
+            "the boot-scan method returned with its walk parked"
+        );
+        let reader = on_thread(&svc, |svc| svc.list(None).unwrap());
+        svc.gate.wait_for(
+            "the reader waits at the first-scan entrance",
+            |_, waiting| waiting == 1,
+        );
+        disk.store.release();
+        assert_eq!(paths(&join(reader)), ["a.md"]);
+        assert_eq!(
+            disk.store.scans(),
+            [scan(root_text, None)],
+            "one walk: the boot scan's"
+        );
+        assert_eq!(svc.numbers().swap_ins, 1);
+    }
+
+    #[test]
+    fn a_walk_that_fails_after_a_published_first_start_leaves_library_json_written_and_readers_unavailable_until_a_scan_succeeds(
+    ) {
+        let disk = OnDisk::new(&["library"], "library", None);
+        disk.mem("library").file("a.md", "a");
+        let root = disk.at("library");
+        let svc = disk.start();
+        assert_eq!(svc.first_start(), FirstStart::Published);
+        let written = disk.config();
+        *lock(&disk.store.fail_next_scan) = true;
+        disk.store.hold_at(At::Start, root.to_str().unwrap());
+        svc.start_boot_scan();
+        disk.store.wait_held();
+        disk.store.release();
+        svc.gate
+            .wait_for("the failed boot scan ended", |line, _| line.is_empty());
+        assert_eq!(
+            disk.config(),
+            written,
+            "library.json stays written after the walk failed"
+        );
+        assert_eq!(
+            root_of(&svc),
+            Some(root.clone()),
+            "the root stays published"
+        );
+        assert_eq!(
+            svc.status().state,
+            RootStatus::Ok,
+            "status answers the root stat"
+        );
+
+        *lock(&disk.store.fail_next_scan) = true;
+        let (class, reason) = refused(svc.folders().unwrap_err());
+        assert_eq!(
+            (class, reason.code.as_str()),
+            (RefusalClass::Unavailable, LIBRARY_UNAVAILABLE),
+            "the reader walked again and that walk failed too"
+        );
+        lock(&disk.ops.0).insert(root.clone(), FolderStatus::Missing);
+        // A stat worker of the status above may still be in flight, and a required ask joins it (`folder.rs` — one
+        //   worker per key): ask until it has ended.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let state = loop {
+            let state = svc.status().state;
+            if state != RootStatus::Ok || Instant::now() > deadline {
+                break state;
+            }
+            thread::sleep(Duration::from_millis(2));
+        };
+        assert_eq!(
+            state,
+            RootStatus::Missing {
+                why: "missing".to_owned()
+            }
+        );
+        lock(&disk.ops.0).clear();
+
+        assert_eq!(
+            paths(&svc.list(None).unwrap()),
+            ["a.md"],
+            "a scan succeeded"
+        );
+        assert_eq!(disk.store.scans().len(), 3);
+        assert_eq!(disk.config(), written);
+    }
+
+    #[test]
     fn a_configured_root_that_vanished_is_missing_not_recreated_and_the_setting_is_unchanged() {
         for root in ["library", "chosen"] {
             let disk = OnDisk::new(&["library", "chosen"], "library", None);
@@ -3413,6 +3586,94 @@ claude: {changed: true}
             std::fs::read_to_string(disk.state().join("library.json.corrupt")).unwrap(),
             "not json"
         );
+    }
+
+    // ── the boot scan ────────────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn the_boot_scan_also_runs_on_a_normal_start_and_fills_the_catalog_with_no_reader() {
+        let store = TestStore::new(&["/lib"]);
+        store.mem("/lib").file("a.md", "a");
+        let spawn = Arc::new(JoinSpawn::default());
+        let svc = service(
+            Some("/lib"),
+            &store,
+            Vec::new(),
+            Arc::new(StatOps::default()),
+            Arc::clone(&spawn) as Arc<dyn Spawn>,
+        );
+        assert_eq!(svc.first_start(), FirstStart::NotDue);
+        svc.start_boot_scan();
+        spawn.join_all();
+        assert_eq!(store.scans(), [scan("/lib", None)]);
+        assert_eq!(svc.numbers().swap_ins, 1);
+        assert!(has(&svc, "a.md"));
+        assert_eq!(paths(&svc.list(None).unwrap()), ["a.md"]);
+        assert_eq!(
+            store.scans().len(),
+            1,
+            "the reader found the first scan raised"
+        );
+    }
+
+    #[test]
+    fn the_boot_scan_starts_no_job_without_a_published_root() {
+        let store = TestStore::new(&["/lib"]);
+        let spawn = Arc::new(JoinSpawn::default());
+        let svc = service(
+            None,
+            &store,
+            Vec::new(),
+            Arc::new(StatOps::default()),
+            Arc::clone(&spawn) as Arc<dyn Spawn>,
+        );
+        svc.start_boot_scan();
+        assert!(lock(&spawn.0).is_empty(), "no job was started");
+        assert!(store.scans().is_empty());
+    }
+
+    #[test]
+    fn a_boot_scan_whose_job_cannot_start_leaves_the_first_scan_to_the_first_reader() {
+        let store = TestStore::new(&["/lib"]);
+        store.mem("/lib").file("a.md", "a");
+        let svc = service(
+            Some("/lib"),
+            &store,
+            Vec::new(),
+            Arc::new(StatOps::default()),
+            Arc::new(FailingSpawn),
+        );
+        svc.start_boot_scan();
+        assert!(store.scans().is_empty(), "not walked in place");
+        assert_eq!(svc.numbers().swap_ins, 0);
+        assert_eq!(paths(&svc.list(None).unwrap()), ["a.md"]);
+        assert_eq!(store.scans(), [scan("/lib", None)]);
+    }
+
+    #[test]
+    fn the_boot_scan_joins_a_first_scan_a_reader_already_started_instead_of_walking_again() {
+        let store = TestStore::new(&["/lib"]);
+        store.mem("/lib").file("a.md", "a");
+        let spawn = Arc::new(JoinSpawn::default());
+        let svc = service(
+            Some("/lib"),
+            &store,
+            Vec::new(),
+            Arc::new(StatOps::default()),
+            Arc::clone(&spawn) as Arc<dyn Spawn>,
+        );
+        store.hold_at(At::Start, "/lib");
+        let reader = on_thread(&svc, |svc| svc.list(None).unwrap());
+        store.wait_held();
+        svc.start_boot_scan();
+        svc.gate.wait_for(
+            "the boot scan waits on the reader's walk",
+            |line, waiting| line == [("scan", true)] && waiting == 1,
+        );
+        store.release();
+        assert_eq!(paths(&join(reader)), ["a.md"]);
+        spawn.join_all();
+        assert_eq!(store.scans(), [scan("/lib", None)]);
     }
 
     // ── the root generation on a change ──────────────────────────────────────────────────────────────────

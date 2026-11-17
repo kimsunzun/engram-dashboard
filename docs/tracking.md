@@ -39,6 +39,7 @@
 | T-9 | claude 프로세스 풀링 | 메인 | 보류 |
 | T-6 | cwd 워크스페이스 검증 | 메인 | 보류 — 운영 단계 |
 | T-113 | Agent tree rename input may remount on every keystroke (suspected, pre-existing) | 버그 | Open — not reproduced; found by S35 review |
+| T-114 | codex `backend_contract` Q10 counts a pre-existing process as a survivor when its dead parent's PID was reused | 버그 | Open — flaky, environmental · found by S25 step 9a U1b QA (2026-11-18) |
 | T-111 | A stopping daemon releases its instance lock before its launch bodies finish — a successor's boot sweeps can remove an in-progress launch folder | 버그 | Open — theoretical path, found in the S25 step 8 review |
 | T-78 | In-app codex terminal on codex 0.163.0 — alt-screen · mouse tracking (S21 TRD §6-F) | 버그 | Open — user decision on the default |
 | T-52 | Graceful daemon stop returned `Timeout` | 버그 | Closed by S21 3-2 U5a (`b85c0aaa`) — real-daemon stop test passes with `outcome=Closed`; remove once master has it |
@@ -285,6 +286,13 @@
 - **재도입:** 운영 단계에서 허용 cwd 정책(예: Engram 워크스페이스 하위만) 결정 후 manager.spawn_agent 또는 command 층에서 검증.
 
 ## 버그
+
+### T-114. codex `backend_contract` Q10 counts a pre-existing process as a survivor (stale parent PID)
+- **Status:** open — flaky, environmental; 「넘어감(잠정)」 in the S25 step 9a U1b QA (2026-11-18), user not asked yet.
+- **Symptom:** `cargo test -p engram-dashboard-agent --test backend_contract -- --ignored --test-threads=4 --exact q10_shutdown_empties_the_process_tree` failed once: `[Q10 codex] … 생존=[41176]`, panic at `backend_contract.rs:2533` 「codex: shutdown 뒤에도 [41176] 가 살아 있다」. It passed at the baseline commit `a8ea6cb1` right after.
+- **Facts:** the change under test did not touch the agent crate (and agent does not depend on it); PID 41176 was `vctip.exe` (MSVC telemetry) created before the QA run, whose ParentProcessId 42092 was a PID in the codex tree during the test.
+- **Likely cause (unverified):** the survivor check walks parent PIDs and counts a process whose dead parent's PID was reused by a codex child — the same class as T-54.
+- **Next:** decide whether the Q10 survivor check should compare creation times (child created after the root) before counting a descendant.
 
 ### T-113. Agent tree rename input may remount on every keystroke (suspected, pre-existing)
 - **Status:** open — not reproduced on screen (S35 code review, 2026-11-17). Predates S35.

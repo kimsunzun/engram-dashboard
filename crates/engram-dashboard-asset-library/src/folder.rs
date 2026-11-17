@@ -332,7 +332,8 @@ impl BoundedIo {
         }
     }
 
-    /// The spawner of the workers — the library service starts its short-lived merge jobs with it too.
+    /// The spawner of the workers — the library service starts its short-lived merge jobs and its boot scan (a whole
+    /// walk, not short) with it too.
     pub(crate) fn spawner(&self) -> &dyn Spawn {
         &*self.spawn
     }

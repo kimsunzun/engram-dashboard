@@ -213,7 +213,7 @@ struct DaemonWiring {
     /// `manager` 의 status sink 사슬이 관측을 넘기는 그 서비스 — 연결 계층이 구독·⟳ 를 같은 것에 건다.
     usage: Arc<UsageService>,
     /// The library service plugged in as `manager`'s launch-kit source — the same one, for the library commands.
-    /// `None` = the Noop kits (the test server). Production reads it only for the first-start step
+    /// `None` = the Noop kits (the test server). Production reads it only for the first-start step and the boot scan
     /// ([`build_daemon_wiring`]).
     // ADR-0311
     library: Option<Arc<LibraryService>>,
@@ -276,11 +276,15 @@ fn build_daemon_wiring(
     );
     // After the service is built and before `run()` sets the command table, so no command meets a first start
     //   halfway; production only — the test server builds no service. The step logs its own failure or unsaved root.
+    //   Then the boot scan starts on every start, whatever the first start answered, and is never waited for: the
+    //   daemon does not walk the library before it is reachable (catalog readers wait for the walk at the entrance).
     // ADR-0375
     // ADR-0381
+    // ADR-0382
     if let Some(library) = &wiring.library {
         let outcome = library.first_start();
         tracing::debug!(?outcome, "library first start");
+        library.start_boot_scan();
     }
     wiring
 }
@@ -1265,6 +1269,38 @@ mod tests {
         );
     }
 
+    /// ★The boot path never walks the library★ (ADR-0382): neither `build_daemon_wiring` nor the assembly it calls,
+    /// `build_daemon_wiring_with_store`, calls a catalog reader (each would run or wait for the first scan before the
+    /// daemon is reachable), and the boot scan starts right after the first start, unconditionally — not only when the
+    /// first start published. `build_daemon_wiring` hard-codes the real store, so only the source shows this; the runtime
+    /// side is the production-wiring tests below.
+    #[test]
+    fn the_boot_scan_starts_after_the_first_start_and_the_boot_path_reads_no_catalog() {
+        let boot = body_of("fn build_daemon_wiring(");
+        let assembly = body_of("fn build_daemon_wiring_with_store(");
+        for reader in [
+            ".first_scan_join(",
+            ".refresh(",
+            ".list(",
+            ".folders(",
+            ".read(",
+            ".resolve_",
+        ] {
+            assert!(!boot.contains(reader), "the boot path calls `{reader}`");
+            assert!(!assembly.contains(reader), "the assembly calls `{reader}`");
+        }
+        let first = boot.find(".first_start()").expect("the first-start step");
+        let scan = boot.find(".start_boot_scan()").expect("the boot scan");
+        assert!(first < scan, "the boot scan starts before the first start");
+        let between = &boot[first..scan];
+        for branch in ["if ", "match ", "else"] {
+            assert!(
+                !between.contains(branch),
+                "the boot scan depends on the first start's outcome: {between}"
+            );
+        }
+    }
+
     /// The debug launch-block hook is gone with the real kits (its env vars included).
     #[test]
     fn the_debug_launch_block_hook_is_gone() {
@@ -1297,6 +1333,7 @@ mod tests {
             .library
             .clone()
             .expect("production plugs the library");
+        wait_boot_scan(&library);
 
         let profile = AgentProfile::new(
             "wired".into(),
@@ -1365,6 +1402,8 @@ mod tests {
                 .library
                 .as_ref()
                 .expect("production plugs the library");
+            // The first run's boot scan follows its first start; the second run's is a normal start's.
+            wait_boot_scan(library);
             let kept_accepted = kept.map(|kept| {
                 library
                     .set_root(&layout.default_library_root(), false)
@@ -1414,6 +1453,19 @@ mod tests {
             (first.root, first.daemon_id),
             "the next start reads both back"
         );
+    }
+
+    /// Waits (at most 10 s, then fails) until the boot scan `build_daemon_wiring` started has applied the first scan —
+    /// nothing else scans in these tests — so no detached walk outlives the test's temp folder.
+    fn wait_boot_scan(library: &LibraryService) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while library.numbers().swap_ins == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the boot scan never applied a scan"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
     }
 
     /// The production assembly over `layout`. ★Built inside a log capture★ — a boot log callsite is then hit only inside
