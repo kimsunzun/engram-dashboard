@@ -1,6 +1,6 @@
 # S35 TRD — UI language: English source, Korean on request (i18next behind `t()`)
 
-- Status: edition 2.3 (2026-11-17, deep review passed) · canonical ADR = ADR-0372 (amends ADR-0349) · PRD = `prd.md` edition 2 (approved 2026-11-17)
+- Status: edition 2.3 (2026-11-17, deep review passed) · Implemented · canonical ADR = ADR-0372 (amends ADR-0349) · PRD = `prd.md` edition 2 (approved 2026-11-17)
 - Reference this step changes: `docs/reference/structure/i18n.md` (made from the pre-S35 code in `46504260`; its `is_word` sentence and its inventory are corrected in the edition-2.1 commit, then rewritten to the new behaviour in U2). Also edited where a sentence turns wrong: `docs/reference/structure/agent-backend.md` (quoted Korean labels), the `crates/engram-dashboard-protocol/src/lib.rs` header (quoted labels), the `placeholder.rs` doc and the `src/api/wsFrame.ts` comment ("consumers do not branch on this value"), the `src-tauri/src/layout/tab_name.rs` header, the `USAGE_LOCALE` comment in `src/components/slot/usageFormat.ts`, CLAUDE.md 「언어」.
 - Edition 1 (Korean-only lookup swap) and its review record are history; the 2026-11-08 deep-review findings that still apply are folded in (§3, §4).
 
