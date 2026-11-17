@@ -370,3 +370,4 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0356](0356-version-mismatch-band-only-informs-and-carries-다시-연결-no-stop-button.md) | Version-mismatch band only informs and carries 「다시 연결」, no stop button | 확정 |
 | [0372](0372-ui-text-source-becomes-english-and-korean-is-selectable-through-one-llm-only-settings-key-applied-live-to-every-window-the-tray-and-shell-made-names.md) | UI text source becomes English and Korean is selectable through one LLM-only settings key, applied live to every window, the tray and shell-made names | 확정 |
 | [0373](0373-ui-language-runtime-lookup-only-i18next-no-kept-translated-text-layout-held-language-init-script-memory.md) | UI language runtime — lookup-only i18next, no kept translated text, layout-held language, init-script language memory | 확정 |
+| [0383](0383-internal-text-is-english-only-screen-text-stays-switchable.md) | Internal text is English-only; screen text stays switchable | 확정 |
