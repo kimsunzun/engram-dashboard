@@ -71,7 +71,7 @@ describe('offeredCommands — help 를 가진 것만 밖으로 나간다', () =>
   it('help 있는 것만 골라 {name, help} 로 투영한다', () => {
     register({
       id: 'tab.next',
-      title: 'next',
+      title: () => 'next',
       help: {
         summary: '다음 탭으로 옮긴다',
         effect: 'write',
@@ -80,7 +80,7 @@ describe('offeredCommands — help 를 가진 것만 밖으로 나간다', () =>
       },
       run: () => {},
     })
-    register({ id: 'slot.focus', title: 'focus', run: () => {} })
+    register({ id: 'slot.focus', title: () => 'focus', run: () => {} })
 
     expect(offeredCommands()).toEqual([
       {
@@ -96,7 +96,7 @@ describe('offeredCommands — help 를 가진 것만 밖으로 나간다', () =>
   })
 
   it('summary 가 공백뿐이면 내놓지 않는다 — 이름만으로는 부를 수 없다', () => {
-    register({ id: 'tab.next', title: 'next', help: { summary: '   ', effect: 'write' }, run: () => {} })
+    register({ id: 'tab.next', title: () => 'next', help: { summary: '   ', effect: 'write' }, run: () => {} })
     expect(offeredCommands()).toEqual([])
   })
 })
@@ -112,7 +112,7 @@ describe('installViewCommandBridge — 봉투가 registry 를 지나 답으로 �
   })
 
   it('구독을 건 뒤에 보고한다 — 순서가 뒤집히면 첫 봉투가 이 창에 도착조차 안 한다', async () => {
-    register({ id: 'slot.empty', title: 'empty', help: { summary: '슬롯을 비운다', effect: 'write' }, run: () => {} })
+    register({ id: 'slot.empty', title: () => 'empty', help: { summary: '슬롯을 비운다', effect: 'write' }, run: () => {} })
     installViewCommandBridge()
     await flush()
 
@@ -130,7 +130,7 @@ describe('installViewCommandBridge — 봉투가 registry 를 지나 답으로 �
 
   it('봉투 → run(id, args) → 성공 결말(같은 상관 키)', async () => {
     const spy = vi.fn((args?: Record<string, unknown>) => ({ got: args?.window }))
-    register({ id: 'tab.next', title: 'next', help: { summary: '다음 탭', effect: 'write' }, run: spy })
+    register({ id: 'tab.next', title: () => 'next', help: { summary: '다음 탭', effect: 'write' }, run: spy })
     installViewCommandBridge()
     await flush()
 
@@ -144,7 +144,7 @@ describe('installViewCommandBridge — 봉투가 registry 를 지나 답으로 �
   it('handler 가 던지면 실패 결말을 낸다 — 답 없이 끝나면 셸이 마감까지 매단다', async () => {
     register({
       id: 'slot.empty',
-      title: 'empty',
+      title: () => 'empty',
       help: { summary: '슬롯 비우기', effect: 'write' },
       run: () => {
         throw new Error('[slot.empty] viewId 필요')
@@ -176,7 +176,7 @@ describe('installViewCommandBridge — 봉투가 registry 를 지나 답으로 �
   })
 
   it('정리한 뒤에 온 봉투는 답하지 않는다 — 죽은 인스턴스가 답하면 한 봉투에 답이 둘이 된다', async () => {
-    register({ id: 'slot.empty', title: 'empty', help: { summary: '슬롯을 비운다', effect: 'write' }, run: () => {} })
+    register({ id: 'slot.empty', title: () => 'empty', help: { summary: '슬롯을 비운다', effect: 'write' }, run: () => {} })
     const dispose = installViewCommandBridge()
     await flush()
     dispose()

@@ -3,18 +3,23 @@
 // ★단일 출처★: 프리셋 표시명(PresetPalette)과 에이전트 행 표시명(AgentList)이 같은 규칙으로 이름을
 //   파생해야 한다. 각자 복제하면 win/posix·root 엣지 처리가 갈려 표시가 어긋나므로 여기 한 곳에 둔다.
 
-/** blank 라벨 방지용 안정적 placeholder. */
-export const PATH_NAME_PLACEHOLDER = '(경로 없음)'
+import { t } from '../i18n'
+
+/** Key of the name shown for a blank path — resolved on each `basename` call, never kept (ADR-0373). */
+export const PATH_NAME_PLACEHOLDER = 'common.noPath'
 
 /**
- * ★반환값은 절대 blank(빈/공백-only) 가 아니다★: 상위(라벨)는 이 값 하나로만 그리므로 blank 면 행이 빈
- *   칸으로 보인다.
+ * The display name derived from `cwd`, in the current UI language when the path is blank — call it where the name is shown,
+ *   and do not keep the result as a key or a comparison baseline (ADR-0373).
  *
- * root·drive-root 처럼 basename 이 없거나 misleading 한 엣지는 파생하지 않고 raw cwd 로 degrade 한다
- *   ("C:" 로 collapse 하면 오해 소지).
+ * ★The result is never blank (empty or whitespace only)★: the label above draws only this value, so a blank one would show
+ *   the row as an empty cell.
+ *
+ * Edges with no basename or a misleading one, like a root or a drive root, are not derived and fall back to the raw cwd
+ *   (collapsing to "C:" would mislead).
  */
 export function basename(cwd: string): string {
-  if (!cwd || cwd.trim().length === 0) return PATH_NAME_PLACEHOLDER
+  if (!cwd || cwd.trim().length === 0) return t(PATH_NAME_PLACEHOLDER)
   const trimmed = cwd.replace(/[\\/]+$/, '')
   if (trimmed.length === 0) return cwd
   const idx = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'))

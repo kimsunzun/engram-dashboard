@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 // ── Tauri / transport 계층 stub ────────────────────────────────────────────────
@@ -138,6 +138,7 @@ vi.mock('@xterm/addon-fit', () => ({
 //   레지스트리에 등록돼 있어야 한다. 매니페스트를 side-effect import 해 부팅과 동일하게 등록한다.
 import '../../commands/contributions'
 import ViewLayoutRenderer from './ViewLayoutRenderer'
+import { setLanguage } from '../../i18n'
 // 메뉴 배치의 앵커 간격(ADR-0143 결정 4)은 SlotContextMenu 소관 — 여기선 좌표 기대값을 그 상수에서 파생시킨다.
 import { ANCHOR_GAP } from '../slot/SlotContextMenu'
 import type { LayoutNode, SlotContent, SplitDir } from '../../api/layoutTypes'
@@ -1287,5 +1288,51 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     openMenu('slot-main', null)
     fireEvent.click(screen.getByText('가로 분할'))
     expect(splitSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-main', 'top_bottom')
+  })
+})
+
+// ── ADR-0373: a language switch re-renders the memo leaves (no remount) ─────────────────────────────
+// Nothing above the leaf re-renders here (no App), so only `useLanguage()` in the memo boundaries can bring the new text.
+describe('ViewLayoutRenderer — language switch', () => {
+  afterEach(() => {
+    act(() => {
+      setLanguage('ko')
+    })
+  })
+
+  it('a rendered SlotBody shows the new language, on the same node', () => {
+    render(<ViewLayoutRenderer node={slotNode('s1', 'not-in-store')} focusedSlotId={null} />)
+    const before = screen.getByText('에이전트 연결 중…')
+
+    act(() => {
+      setLanguage('en')
+    })
+
+    expect(screen.getByText('Connecting to agent…')).toBeTruthy()
+    expect(screen.queryByText('에이전트 연결 중…')).toBeNull()
+    // Same DOM node, re-rendered — not a remount.
+    expect(before.isConnected).toBe(true)
+    expect(before.textContent).toBe('Connecting to agent…')
+  })
+
+  it('the open slot menu shows translated command and container titles, and an open flyout stays open', () => {
+    render(<ViewLayoutRenderer node={slotNode('s1', null)} focusedSlotId={null} />)
+    fireEvent.contextMenu(frameOf('s1'))
+    fireEvent.mouseEnter(screen.getByText('새 콘텐츠'))
+    expect(screen.getByText('에이전트 트리 열기')).toBeTruthy()
+    const flyout = document.querySelector('[data-slot-menu-flyout="container:slot.newContent"]')
+    expect(flyout).not.toBeNull()
+
+    act(() => {
+      setLanguage('en')
+    })
+
+    expect(screen.getByText('New content')).toBeTruthy()
+    expect(screen.getByText('Split horizontally')).toBeTruthy()
+    expect(screen.getByText('Close')).toBeTruthy()
+    // The flyout survived the switch (same node, still open) and its children are translated too.
+    expect(document.querySelector('[data-slot-menu-flyout="container:slot.newContent"]')).toBe(flyout)
+    expect(screen.getByText('Open agent tree')).toBeTruthy()
+    expect(screen.queryByText('새 콘텐츠')).toBeNull()
   })
 })

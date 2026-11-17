@@ -1,6 +1,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { setLanguage, t } from '../i18n'
 import { __resetRegistryForTest, register } from './registry'
 import {
   __resetSlotMenuForTest,
@@ -18,7 +19,7 @@ afterEach(() => {
 })
 
 function reg(id: string, title = id): void {
-  register({ id, title, run: vi.fn() })
+  register({ id, title: () => title, run: vi.fn() })
 }
 
 describe('buildSlotMenu — 병합 + 결정적 정렬', () => {
@@ -68,7 +69,7 @@ describe('buildSlotMenu — 병합 + 결정적 정렬', () => {
 
   it('resolve 는 registry 의 title/run 을 그대로 싣는다', () => {
     const runSpy = vi.fn(() => 'ran')
-    register({ id: 'x', title: '엑스', run: runSpy })
+    register({ id: 'x', title: () => '엑스', run: runSpy })
     registerSlotMenu('*', [{ commandId: 'x', group: 'slot-ops', order: 10 }])
     const [item] = buildSlotMenu('empty')
     expect(item.title).toBe('엑스')
@@ -149,7 +150,7 @@ describe('hideOn 제외 조건 (ADR-0065)', () => {
     reg('fill.keep'); reg('fill.hidden')
     registerSlotMenu('empty', [
       {
-        title: '새 콘텐츠',
+        id: 'newContent', title: () => '새 콘텐츠',
         group: 'content',
         order: 10,
         children: [
@@ -160,7 +161,7 @@ describe('hideOn 제외 조건 (ADR-0065)', () => {
     ])
     registerSlotMenu('agent', [
       {
-        title: '새 콘텐츠',
+        id: 'newContent', title: () => '새 콘텐츠',
         group: 'content',
         order: 10,
         children: [
@@ -178,7 +179,7 @@ describe('hideOn 제외 조건 (ADR-0065)', () => {
     reg('fill.only')
     registerSlotMenu('empty', [
       {
-        title: '새 콘텐츠',
+        id: 'newContent', title: () => '새 콘텐츠',
         group: 'content',
         order: 10,
         children: [{ commandId: 'fill.only', group: 'content', order: 10, hideOn: ['empty'] }],
@@ -190,13 +191,13 @@ describe('hideOn 제외 조건 (ADR-0065)', () => {
 })
 
 describe('children 1단 서브메뉴 (ADR-0065)', () => {
-  it('컨테이너는 title passthrough + 각 자식 commandId 를 registry title/run 으로 resolve 한다', () => {
+  it('컨테이너는 title 을 resolve + 각 자식 commandId 를 registry title/run 으로 resolve 한다', () => {
     const r1 = vi.fn(() => 'r1'); const r2 = vi.fn(() => 'r2')
-    register({ id: 'fill.a', title: '트리', run: r1 })
-    register({ id: 'fill.b', title: '팔레트', run: r2 })
+    register({ id: 'fill.a', title: () => '트리', run: r1 })
+    register({ id: 'fill.b', title: () => '팔레트', run: r2 })
     registerSlotMenu('empty', [
       {
-        title: '새 콘텐츠',
+        id: 'newContent', title: () => '새 콘텐츠',
         group: 'content',
         order: 10,
         children: [
@@ -207,7 +208,7 @@ describe('children 1단 서브메뉴 (ADR-0065)', () => {
     ])
     const [container] = buildSlotMenu('empty')
     expect(container.title).toBe('새 콘텐츠')
-    expect(container.id).toBe('container:새 콘텐츠')
+    expect(container.id).toBe('container:newContent')
     expect(container.children).toBeDefined()
     expect(container.children!.map(c => c.id)).toEqual(['fill.a', 'fill.b'])
     expect(container.children!.map(c => c.title)).toEqual(['트리', '팔레트'])
@@ -219,7 +220,7 @@ describe('children 1단 서브메뉴 (ADR-0065)', () => {
     reg('fill.a'); reg('fill.b'); reg('fill.c')
     registerSlotMenu('empty', [
       {
-        title: '새 콘텐츠',
+        id: 'newContent', title: () => '새 콘텐츠',
         group: 'content',
         order: 10,
         children: [
@@ -237,7 +238,7 @@ describe('children 1단 서브메뉴 (ADR-0065)', () => {
     reg('s1')
     registerSlotMenu('empty', [
       {
-        title: '새 콘텐츠',
+        id: 'newContent', title: () => '새 콘텐츠',
         group: 'content',
         order: 10,
         children: [
@@ -250,18 +251,18 @@ describe('children 1단 서브메뉴 (ADR-0065)', () => {
     let items!: ReturnType<typeof buildSlotMenu>
     expect(() => { items = buildSlotMenu('empty') }).not.toThrow()
     expect(items.map(i => i.id)).toEqual(['s1'])
-    expect(items.some(i => i.id === 'container:새 콘텐츠')).toBe(false)
+    expect(items.some(i => i.id === 'container:newContent')).toBe(false)
     expect(error).toHaveBeenCalledWith(expect.stringMatching(/자식이 모두 skip 되어 빈 컨테이너/))
   })
 
   it('컨테이너 + leaf 혼재 시 leaf 는 children 없이 그대로(하위호환)', () => {
     reg('fill.a'); reg('s1')
     registerSlotMenu('empty', [
-      { title: '새 콘텐츠', group: 'content', order: 10, children: [{ commandId: 'fill.a', group: 'content', order: 10 }] },
+      { id: 'newContent', title: () => '새 콘텐츠', group: 'content', order: 10, children: [{ commandId: 'fill.a', group: 'content', order: 10 }] },
     ])
     registerSlotMenu('*', [{ commandId: 's1', group: 'slot-ops', order: 10 }])
     const items = buildSlotMenu('empty')
-    expect(items.map(i => i.id)).toEqual(['container:새 콘텐츠', 's1'])
+    expect(items.map(i => i.id)).toEqual(['container:newContent', 's1'])
     expect(items[0].children).toBeDefined()
     expect(items[1].children).toBeUndefined()
     expect(items[1].separatorBefore).toBe(true)
@@ -274,12 +275,12 @@ describe('형태 검증 — 실행 항목 XOR 컨테이너 (ADR-0065, fail-loud 
     reg('ok.child'); reg('deep')
     registerSlotMenu('empty', [
       {
-        title: '새 콘텐츠',
+        id: 'newContent', title: () => '새 콘텐츠',
         group: 'content',
         order: 10,
         children: [
           { commandId: 'ok.child', group: 'content', order: 10 },
-          { title: '더깊이', group: 'content', order: 20, children: [{ commandId: 'deep', group: 'content', order: 10 }] },
+          { id: 'deeper', title: () => '더깊이', group: 'content', order: 20, children: [{ commandId: 'deep', group: 'content', order: 10 }] },
         ],
       },
     ])
@@ -293,7 +294,7 @@ describe('형태 검증 — 실행 항목 XOR 컨테이너 (ADR-0065, fail-loud 
     const error = vi.spyOn(console, 'error').mockImplementation(() => {})
     reg('both'); reg('kid')
     registerSlotMenu('empty', [
-      { commandId: 'both', title: '둘다', group: 'content', order: 10, children: [{ commandId: 'kid', group: 'content', order: 10 }] },
+      { commandId: 'both', title: () => '둘다', group: 'content', order: 10, children: [{ commandId: 'kid', group: 'content', order: 10 }] },
     ])
     let items!: ReturnType<typeof buildSlotMenu>
     expect(() => { items = buildSlotMenu('empty') }).not.toThrow()
@@ -303,7 +304,7 @@ describe('형태 검증 — 실행 항목 XOR 컨테이너 (ADR-0065, fail-loud 
 
   it('commandId 도 children 도 없음(둘 다 없음) → console.error + skip', () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {})
-    registerSlotMenu('empty', [{ title: '유령', group: 'content', order: 10 }])
+    registerSlotMenu('empty', [{ title: () => '유령', group: 'content', order: 10 }])
     let items!: ReturnType<typeof buildSlotMenu>
     expect(() => { items = buildSlotMenu('empty') }).not.toThrow()
     expect(items).toHaveLength(0)
@@ -313,11 +314,38 @@ describe('형태 검증 — 실행 항목 XOR 컨테이너 (ADR-0065, fail-loud 
   it('컨테이너인데 title 없음 → console.error + skip', () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {})
     reg('kid')
-    registerSlotMenu('empty', [{ group: 'content', order: 10, children: [{ commandId: 'kid', group: 'content', order: 10 }] }])
+    registerSlotMenu('empty', [{ id: 'c', group: 'content', order: 10, children: [{ commandId: 'kid', group: 'content', order: 10 }] }])
     let items!: ReturnType<typeof buildSlotMenu>
     expect(() => { items = buildSlotMenu('empty') }).not.toThrow()
     expect(items).toHaveLength(0)
-    expect(error).toHaveBeenCalledWith(expect.stringMatching(/컨테이너는 title 필수/))
+    expect(error).toHaveBeenCalledWith(expect.stringMatching(/needs a title function/))
+  })
+
+  // ADR-0373: a title kept as text would stay in the language it was made in.
+  it('a container whose title is text, not a function (a cast or a JS caller), is skipped', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    reg('kid')
+    registerSlotMenu('empty', [
+      {
+        id: 'c',
+        title: 'text' as unknown as () => string,
+        group: 'content',
+        order: 10,
+        children: [{ commandId: 'kid', group: 'content', order: 10 }],
+      },
+    ])
+    expect(buildSlotMenu('empty')).toHaveLength(0)
+    expect(error).toHaveBeenCalledWith(expect.stringMatching(/needs a title function/))
+  })
+
+  it('a container without an id is skipped', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    reg('kid')
+    registerSlotMenu('empty', [
+      { title: () => '묶음', group: 'content', order: 10, children: [{ commandId: 'kid', group: 'content', order: 10 }] },
+    ])
+    expect(buildSlotMenu('empty')).toHaveLength(0)
+    expect(error).toHaveBeenCalledWith(expect.stringMatching(/needs an id/))
   })
 })
 
@@ -332,7 +360,7 @@ describe('checked · enabled — 켜고 끄는 항목과 비활성 (ADR-0252)', 
       { commandId: 'top', group: 'content', order: 10, checked: topChecked, enabled: topEnabled },
       { commandId: 'plain', group: 'content', order: 20 },
       {
-        title: '묶음',
+        id: 'bundle', title: () => '묶음',
         group: 'content',
         order: 30,
         children: [{ commandId: 'kid', group: 'content', order: 10, checked: kidChecked, enabled: kidEnabled }],
@@ -345,7 +373,7 @@ describe('checked · enabled — 켜고 끄는 항목과 비활성 (ADR-0252)', 
   })
 
   it('command 의 when 은 메뉴로 넘어오지 않는다 — 메뉴의 활성은 기여의 enabled 만 정한다', () => {
-    register({ id: 'gated', title: 'gated', when: () => false, run: vi.fn() })
+    register({ id: 'gated', title: () => 'gated', when: () => false, run: vi.fn() })
     registerSlotMenu('usage', [{ commandId: 'gated', group: 'content', order: 10 }])
     const [gated] = buildSlotMenu('usage')
     expect('when' in gated).toBe(false)
@@ -356,7 +384,7 @@ describe('checked · enabled — 켜고 끄는 항목과 비활성 (ADR-0252)', 
     const error = vi.spyOn(console, 'error').mockImplementation(() => {})
     reg('kid')
     registerSlotMenu('usage', [
-      { title: '묶음', group: 'content', order: 10, [field]: () => true, children: [{ commandId: 'kid', group: 'content', order: 10 }] },
+      { id: 'bundle', title: () => '묶음', group: 'content', order: 10, [field]: () => true, children: [{ commandId: 'kid', group: 'content', order: 10 }] },
     ])
     expect(buildSlotMenu('usage')).toHaveLength(0)
     validateSlotMenuContributions()
@@ -401,7 +429,7 @@ describe('validateSlotMenuContributions — 부팅 전수 검증 (FIX-1)', () =>
     const error = vi.spyOn(console, 'error').mockImplementation(() => {})
     reg('both'); reg('kid')
     registerSlotMenu('empty', [
-      { commandId: 'both', title: '둘다', group: 'content', order: 10, children: [{ commandId: 'kid', group: 'content', order: 10 }] },
+      { commandId: 'both', title: () => '둘다', group: 'content', order: 10, children: [{ commandId: 'kid', group: 'content', order: 10 }] },
     ])
     validateSlotMenuContributions()
     expect(error).toHaveBeenCalledWith(expect.stringMatching(/commandId 와 children 을 동시에/))
@@ -412,12 +440,12 @@ describe('validateSlotMenuContributions — 부팅 전수 검증 (FIX-1)', () =>
     reg('ok.child')
     registerSlotMenu('empty', [
       {
-        title: '새 콘텐츠',
+        id: 'newContent', title: () => '새 콘텐츠',
         group: 'content',
         order: 10,
         children: [
           { commandId: 'ok.child', group: 'content', order: 10 },
-          { title: '더깊이', group: 'content', order: 20, children: [{ commandId: 'x', group: 'content', order: 10 }] },
+          { id: 'deeper', title: () => '더깊이', group: 'content', order: 20, children: [{ commandId: 'x', group: 'content', order: 10 }] },
           { commandId: 'typo.child', group: 'content', order: 30 },
         ],
       },
@@ -425,5 +453,43 @@ describe('validateSlotMenuContributions — 부팅 전수 검증 (FIX-1)', () =>
     validateSlotMenuContributions()
     expect(error).toHaveBeenCalledWith(expect.stringMatching(/2단\+ 중첩 금지/))
     expect(error).toHaveBeenCalledWith(expect.stringMatching(/unregistered commandId "typo\.child"/))
+  })
+})
+
+// ADR-0373: a container's identity is its id — the key, the resolved id and the sort tie-break do not change with the title's language.
+describe('container identity across a language switch', () => {
+  afterEach(() => {
+    setLanguage('ko')
+  })
+
+  it('two containers tied on (group, order) keep their ids and order; only the titles change', () => {
+    reg('kid.a'); reg('kid.b')
+    // In Korean 「새 콘텐츠」 sorts before 「에이전트 생성」, in English "Create agent" before "New content" — a title
+    //   tie-break would flip the order.
+    registerSlotMenu('empty', [
+      { id: 'b.new', title: () => t('slot.newContent'), group: 'content', order: 10, children: [{ commandId: 'kid.a', group: 'content', order: 10 }] },
+      { id: 'a.create', title: () => t('agent.create'), group: 'content', order: 10, children: [{ commandId: 'kid.b', group: 'content', order: 10 }] },
+    ])
+
+    const ko = buildSlotMenu('empty')
+    setLanguage('en')
+    const en = buildSlotMenu('empty')
+
+    expect(ko.map(i => i.id)).toEqual(['container:a.create', 'container:b.new'])
+    expect(en.map(i => i.id)).toEqual(['container:a.create', 'container:b.new'])
+    expect(ko.map(i => i.title)).toEqual(['에이전트 생성', '새 콘텐츠'])
+    expect(en.map(i => i.title)).toEqual(['Create agent', 'New content'])
+  })
+
+  it('re-registering a container with the same id replaces it, whatever its title', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    reg('kid')
+    const container = { id: 'c', group: 'content', order: 10, children: [{ commandId: 'kid', group: 'content', order: 10 }] }
+    registerSlotMenu('empty', [{ ...container, title: () => t('slot.newContent') }])
+    setLanguage('en')
+    registerSlotMenu('empty', [{ ...container, title: () => t('slot.newContent') }])
+
+    expect(buildSlotMenu('empty')).toHaveLength(1)
+    expect(warn).toHaveBeenCalledTimes(1)
   })
 })

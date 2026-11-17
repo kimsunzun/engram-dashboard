@@ -25,7 +25,8 @@ const MARKER_FLAG_CONTINUES = 0x04
 
 /**
  * The text of the placeholder `Error` — **byte-identical** to `PLACEHOLDER_ERROR_MESSAGE` in the protocol `placeholder.rs` (a test
- * measures it). It is an opaque human-readable string — do not branch on this value.
+ * measures it). It is a marker: the chat view shows `chat.droppedOutput` in the UI language for an error whose message equals
+ * it (`StructuredTextView`), so changing the text on either side alone makes the placeholder show untranslated.
  */
 // ADR-0231
 export const PLACEHOLDER_ERROR_MESSAGE = '이 출력 사건을 싣지 못했습니다'

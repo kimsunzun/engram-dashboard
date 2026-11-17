@@ -66,6 +66,8 @@ import AgentList, { statusGlyphColor, statusGlyphIcon } from './AgentList'
 //   옛 importer 를 위한 통로일 뿐이라 새 축을 거기로 늘리지 않는다.
 import { rowGlyphColor, rowGlyphIcon, rowPhase } from './statusGlyph'
 import { useAgentStore } from '../../store/agentStore'
+import { setLanguage, t } from '../../i18n'
+import { useLanguage } from '../../i18n/react'
 import { OVERLAY_SELECTOR } from '../slot/interruptKey'
 import type { AgentInfo, AgentProfile, Capabilities } from '../../api/types'
 import type { LayoutNode } from '../../api/layoutTypes'
@@ -510,6 +512,20 @@ describe('행 우클릭 메뉴', () => {
     expect(document.querySelector('[data-agent-rename-input="p1"]')).toBeNull()
   })
 
+  // ADR-0373 `draftStart` (the same rule as TabBar's seed): the baseline is the name the edit started from.
+  it('the name changes from outside while editing, then Enter without editing → no renameProfile', () => {
+    useAgentStore.setState({ profiles: [profile('p2', 'C:/x', 0, '고정명')] })
+    render(<AgentList />)
+    fireEvent.contextMenu(document.querySelector('[data-agent-row="p2"]') as HTMLElement)
+    fireEvent.click(screen.getByText('이름 변경'))
+    act(() => {
+      useAgentStore.setState({ profiles: [profile('p2', 'C:/x', 0, '바깥에서 바꾼 이름')] })
+    })
+    expect((document.querySelector('[data-agent-rename-input="p2"]') as HTMLInputElement).value).toBe('고정명')
+    fireEvent.keyDown(document.querySelector('[data-agent-row="p2"]') as HTMLElement, { key: 'Enter' })
+    expect(clientMock.renameProfile).not.toHaveBeenCalled()
+  })
+
   it('이름변경 미변경(표시명과 동일) → renameProfile 미발화', () => {
     useAgentStore.setState({ profiles: [profile('p2', 'C:/x', 0, '고정명')] })
     render(<AgentList />)
@@ -949,3 +965,71 @@ describe('계층 중첩(parent_id → 부모 밑 자식, ADR-0072)', () => {
   })
 })
 
+
+// ── ADR-0373: a language switch neither freezes a shown error nor saves an untouched draft ──────────────────
+describe('AgentList — language switch', () => {
+  afterEach(() => {
+    act(() => {
+      setLanguage('ko')
+    })
+  })
+
+  const rowTitle = (id: string) =>
+    (document.querySelector(`[data-agent-row="${id}"]`) as HTMLElement).getAttribute('title')
+
+  /** Stands in for `App`, which re-renders the tree on a switch — AgentList itself does not subscribe. */
+  function Root() {
+    useLanguage()
+    return <AgentList />
+  }
+
+  it('an error shown before the switch is shown in the new language after it', () => {
+    selectViewMock.mockReturnValue(null)
+    useAgentStore.setState({ agents: [agent('a1', 'C:/w')] })
+    render(<Root />)
+    fireEvent.contextMenu(document.querySelector('[data-agent-row="a1"]') as HTMLElement)
+    fireEvent.click(screen.getByText('열기'))
+    expect(rowTitle('a1')).toBe(t('agent.openFailedNoSlot'))
+    expect(rowTitle('a1')).not.toBe('Open failed: no active view or focused slot.')
+
+    act(() => {
+      setLanguage('en')
+    })
+
+    expect(rowTitle('a1')).toBe('Open failed: no active view or focused slot.')
+  })
+
+  it('an error with a raw cause keeps the cause and translates the frame', async () => {
+    clientMock.killAgent.mockRejectedValueOnce(new Error('boom'))
+    useAgentStore.setState({ agents: [agent('a1', 'C:/w')] })
+    render(<Root />)
+    fireEvent.contextMenu(document.querySelector('[data-agent-row="a1"]') as HTMLElement)
+    fireEvent.click(screen.getByText('종료'))
+    await act(async () => {
+      for (let i = 0; i < 5; i++) await Promise.resolve()
+    })
+    expect(rowTitle('a1')).toBe(t('agent.killFailed', { err: 'Error: boom' }))
+
+    act(() => {
+      setLanguage('en')
+    })
+
+    expect(rowTitle('a1')).toBe('Stop failed: Error: boom')
+  })
+
+  it('a draft being edited is not saved by a switch (a blank-path name changes language under it)', () => {
+    useAgentStore.setState({ profiles: [profile('p1', '')] })
+    render(<Root />)
+    fireEvent.contextMenu(document.querySelector('[data-agent-row="p1"]') as HTMLElement)
+    fireEvent.click(screen.getByText('이름 변경'))
+    const input = document.querySelector('[data-agent-rename-input="p1"]') as HTMLInputElement
+    expect(input.value).toBe('(경로 없음)')
+
+    act(() => {
+      setLanguage('en')
+    })
+    fireEvent.keyDown(document.querySelector('[data-agent-row="p1"]') as HTMLElement, { key: 'Enter' })
+
+    expect(clientMock.renameProfile).not.toHaveBeenCalled()
+  })
+})

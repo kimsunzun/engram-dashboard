@@ -24,7 +24,7 @@ import { createRestoreClient, type RestoreStatusView } from '../../api/restoreCl
 import { deferred, fakeRestoreIpc, flush, view } from '../../api/testing/fakeRestoreIpc'
 import { installKeybindings } from '../../commands/keybindings'
 import { __resetRegistryForTest, register } from '../../commands/registry'
-import { t } from '../../i18n'
+import { setLanguage, t } from '../../i18n'
 import type { AnswerReply } from '../../../src-tauri/bindings/AnswerReply'
 
 async function settle(): Promise<void> {
@@ -59,7 +59,7 @@ let shortcut: Mock<() => void>
 beforeEach(() => {
   __resetRegistryForTest()
   shortcut = vi.fn<() => void>()
-  register({ id: 'tab.next', title: 'next', run: shortcut })
+  register({ id: 'tab.next', title: () => 'next', run: shortcut })
   disposeKeys = installKeybindings()
   vi.spyOn(console, 'warn').mockImplementation(() => {})
 })
@@ -173,6 +173,20 @@ describe('RestoreModal — 덮고 막는다', () => {
     expect(fireEvent.mouseDown(overlay)).toBe(false)
     expect(fireEvent.mouseDown(screen.getByRole('heading'))).toBe(false)
     expect(fireEvent.mouseDown(acceptBtn())).toBe(true)
+  })
+
+  // ADR-0373: the formatter follows the UI language, made per language when used.
+  it('formatSavedAt — in the locale of the UI language', () => {
+    const at = new Date(2026, 9, 21, 14, 3).getTime()
+    const options = { year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' } as const
+    try {
+      expect(formatSavedAt(at)).toBe(new Intl.DateTimeFormat('ko-KR', options).format(at))
+      setLanguage('en')
+      expect(formatSavedAt(at)).toBe(new Intl.DateTimeFormat('en-US', options).format(at))
+      expect(formatSavedAt(at)).not.toBe(new Intl.DateTimeFormat('ko-KR', options).format(at))
+    } finally {
+      setLanguage('ko')
+    }
   })
 
   it('formatSavedAt — Date 범위(±8.64e15) 안은 형식화하고 밖 · 유한하지 않은 값은 null', () => {

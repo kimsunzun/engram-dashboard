@@ -52,6 +52,9 @@ export default function PresetPalette() {
   // ★인라인 편집 로컬 상태(프론트 전용 — 백엔드 권위 이름과 별개의 임시 draft, TabBar 패턴)★
   const [editingId, setEditingId] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
+  // ADR-0373: the name the edit started from — the "unchanged" check compares with this, not with a name derived again at
+  //   commit, which can change under the edit (a language switch turns a blank-path name into another language's word).
+  const [draftStart, setDraftStart] = useState('')
   // ★안정 ref★: 편집 진입(editingId 변화) 시점에만 정확히 1회 select() — 인라인 콜백 ref 로 select 하면
   //   매 렌더 재부착돼 타이핑이 깨진다(TabBar FIX 1 동형).
   const inputRef = useRef<HTMLInputElement>(null)
@@ -115,8 +118,10 @@ export default function PresetPalette() {
   }
 
   const beginEdit = (preset: Preset) => {
+    const name = presetDisplayName(preset)
     setEditingId(preset.id)
-    setDraft(presetDisplayName(preset))
+    setDraft(name)
+    setDraftStart(name)
   }
   const cancelEdit = () => setEditingId(null)
   // ★멱등★: editingId 가 이 preset 이 아니면 즉시 return — Enter 가 setEditingId(null) 로 input 을 언마운트하면
@@ -127,7 +132,7 @@ export default function PresetPalette() {
     const trimmed = draft.trim()
     setEditingId(null)
     // 미변경·빈 문자열이면 백엔드에 불필요한 RenamePreset 을 안 보낸다.
-    if (trimmed.length === 0 || trimmed === presetDisplayName(preset)) return
+    if (trimmed.length === 0 || trimmed === draftStart) return
     if (renamingRef.current.has(preset.id)) return // 동기 권위 가드(rename 중복 제출 차단)
     renamingRef.current.add(preset.id)
     setRenaming(prev => {
@@ -283,7 +288,8 @@ export default function PresetPalette() {
           >
             {rowMenuItems(rowMenu, presets, { beginEdit, removePreset, deleting, renaming }).map(item => (
               <div
-                key={item.label}
+                // ADR-0373: `id`, not the translated label.
+                key={item.id}
                 style={MENU_ITEM_STYLE(item.disabled)}
                 onMouseEnter={e => {
                   if (!item.disabled) e.currentTarget.style.background = 'color-mix(in srgb, var(--accent) 20%, transparent)'
@@ -316,14 +322,14 @@ function rowMenuItems(
     deleting: ReadonlySet<string>
     renaming: ReadonlySet<string>
   },
-): Array<{ label: string; disabled: boolean; action: () => void }> {
+): Array<{ id: string; label: string; disabled: boolean; action: () => void }> {
   const preset = presets.find(p => p.id === rowMenu.presetId)
   if (!preset) return []
   const busy = ctx.deleting.has(preset.id) || ctx.renaming.has(preset.id)
   return [
-    { label: t('preset.rename'), disabled: busy, action: () => ctx.beginEdit(preset) },
+    { id: 'rename', label: t('preset.rename'), disabled: busy, action: () => ctx.beginEdit(preset) },
     // 메뉴 라벨은 짧은 '삭제'(preset.deleteBtn) — command 제목 '프리셋 삭제'(preset.delete)와 구분.
-    { label: t('preset.deleteBtn'), disabled: busy, action: () => ctx.removePreset(preset.id) },
+    { id: 'delete', label: t('preset.deleteBtn'), disabled: busy, action: () => ctx.removePreset(preset.id) },
   ]
 }
 

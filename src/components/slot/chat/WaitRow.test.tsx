@@ -24,7 +24,7 @@ describe('WaitStrip — 자리', () => {
 
     rerender(<WaitStrip streaming interrupting={false} />)
     expect(strip(container)).toBe(node)
-    expect(screen.getByText('Wait')).toBeTruthy()
+    expect(screen.getByText(t('chat.wait'))).toBeTruthy()
     expect(node.style.height).toBe('var(--chat-wait-strip-h)')
 
     rerender(<WaitStrip streaming={false} interrupting={false} />)
@@ -40,7 +40,7 @@ describe('WaitStrip — 자리', () => {
 
     rerender(<WaitStrip streaming interrupting={false} label={label} />)
     expect(container.querySelector('[data-test-label="1"]')).toBe(node)
-    expect(screen.getByText('Wait').compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(screen.getByText(t('chat.wait')).compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
 
     rerender(<WaitStrip streaming={false} interrupting={false} label={label} />)
     expect(container.querySelector('[data-test-label="1"]')).toBe(node)
@@ -55,7 +55,7 @@ describe('WaitStrip — 중단하는 중(ADR-0244)', () => {
     expect(row).not.toBeNull()
     expect(row.textContent).toBe(t('chat.interrupting'))
     expect(row.querySelector('svg')?.getAttribute('class')).toContain('lucide-circle-stop')
-    expect(screen.queryByText('Wait')).toBeNull()
+    expect(screen.queryByText(t('chat.wait'))).toBeNull()
   })
 
   it('streaming 이 아니면 interrupting 이어도 아무것도 그리지 않는다', () => {
@@ -72,10 +72,10 @@ describe('WaitStrip — 경과 초', () => {
     act(() => vi.advanceTimersByTime(3000))
     expect(screen.getByText('3s')).toBeTruthy()
     rerender(<WaitStrip streaming interrupting />)
-    expect(screen.queryByText('Wait')).toBeNull()
+    expect(screen.queryByText(t('chat.wait'))).toBeNull()
     act(() => vi.advanceTimersByTime(2000))
     rerender(<WaitStrip streaming interrupting={false} />)
-    expect(screen.getByText('Wait')).toBeTruthy()
+    expect(screen.getByText(t('chat.wait'))).toBeTruthy()
     expect(screen.getByText('5s')).toBeTruthy()
   })
 

@@ -28,7 +28,7 @@ ADR-0372 makes the UI language switchable at run time with no restart, in every 
 - Code paths checked by the reviewers: `viewStore.ts` `applyWindowTabsUpdated`, `chrome/book.rs` `accept_title`, `ViewManager::update_agent_names`, `apply::agent_names_updated` / `sync_titles`, `boot_plugin.rs` swap, `ViewManager::adopt_restored`, `convert.rs` `restored_name` / `agent_name_seed`, `webview_env.rs` `theme_script` and its prefix pin test, tauri 2.11.3 `set_text` (waits for the main thread), `settings_set` / bus verbs on `spawn_blocking`.
 
 ## 영향 / 불변식
-- A new UI string goes through `t()` at the point of display; storing a `t()` result, or using one as a key, id, sort key or comparison baseline, is a defect.
+- A new UI string goes through `t()` at the point of display; storing a `t()` result, or using one as a key, id, sort key or comparison baseline, is a defect. The one exception is an edit baseline captured when editing starts (`TabBar` seed, `draftStart` in `AgentList` / `PresetPalette`): it is compared with the draft only, so a switch during the edit does not count as a change.
 - A new `memo` boundary over `t()` text reads `useLanguage()`.
 - A shell change to tab-name words or their language must keep the version bump; a new `ViewManager` constructor or swap path must set the language from the setting.
 - The language hook must not run on the main thread and must not hold the layout lock while calling tray APIs.

@@ -18,9 +18,9 @@
 // ★The ✕ and the closed memory are load-bearing★ — the area the band covers (the top of the canvas) cannot receive clicks.
 //   - Without the ✕, while the band holds the covered top of the canvas (slot content · split lines) is blocked.
 //   - Without the closed memory the ✕ is powerless — the state surface notifies on every status change, so the same
-//     band would be drawn again right away. The memory is the band kind + cause text: a different band or cause shows
-//     again, and `connected` releases it — a recurrence of the same cause later is the common case, so closing must not
-//     mute it for good.
+//     band would be drawn again right away. The memory is the band kind + the untranslated cause (ADR-0373 — a language
+//     switch must not bring a closed band back): a different band or cause shows again, and `connected` releases it — a
+//     recurrence of the same cause later is the common case, so closing must not mute it for good.
 //
 // ★Not always-on chrome (ADR-0063)★: it draws only when there is a band. With none it is null so the DOM is empty, and this
 //   does not revive the always-on StatusBar that ADR-0063 removed.
@@ -28,7 +28,7 @@
 import { useEffect, useState } from 'react'
 
 import { agentClient, getDaemonControl } from '../../api/clientFactory'
-import { bandView } from '../../api/connectionBand'
+import { bandView, causeText } from '../../api/connectionBand'
 import { t } from '../../i18n'
 
 function readStatus() {
@@ -53,7 +53,8 @@ export default function ConnectionNotice({ actions = false }: { actions?: boolea
 
   const view = bandView(status.band, status.error)
   if (view === null) return null
-  const key = `${view.kind}|${view.cause ?? ''}`
+  // `bandView` builds the object in a fixed field order, so equal views give equal keys.
+  const key = JSON.stringify(view)
   if (key === dismissed) return null
 
   const reconnect = (): void => {
@@ -79,7 +80,7 @@ export default function ConnectionNotice({ actions = false }: { actions?: boolea
         {view.cause !== null && (
           <>
             {' '}
-            <span className="opacity-90">{view.cause}</span>
+            <span className="opacity-90">{causeText(view.cause)}</span>
           </>
         )}
       </div>

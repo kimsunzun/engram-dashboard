@@ -3,6 +3,7 @@
 //
 // Namespace = UI domain, one level deep (tab/slot/agent/preset/common …).
 // Labels use sentence-style capitalization ("Close tab"). Placeholder grammar: `WORD_PLACEHOLDER` in `index.ts`.
+// Punctuation: complete sentences (messages, tooltips, notices, body text) end with a period; labels, buttons, menu items, titles, fragments, values ending in outside text (`{err}`, `{url}`) and values embedded into other values (`{status}`, `{sentence}`) do not.
 // `slot.foreignContent` must equal the shell's `Foreign` tab-name word. The shell test `foreign_word_is_the_one_the_frontend_shows`
 //   (`src-tauri/src/layout/tab_name.rs`) reads `ko.ts` as text today and is to read this file too (ADR-0373): keep the file
 //   path and the one-line form `foreignContent: '…'`, with no `'` in the value.
@@ -42,7 +43,7 @@ export const en = {
     domModeEnable: 'Turn on DOM mode',
     domModeDisable: 'Turn off DOM mode',
     domModeToggle: 'Toggle DOM mode',
-    renderFailed: 'Could not display this slot — you can clear or close it from the right-click menu',
+    renderFailed: 'Could not display this slot — you can clear or close it from the right-click menu.',
     scrollToBottom: 'Scroll to bottom',
     // A slot kind this build does not know — the screen draws only an icon; this text is its name and tooltip.
     foreignContent: 'Unknown content',
@@ -65,7 +66,7 @@ export const en = {
     captionClose: 'Close window',
     // ADR-0102: surfaces the final failure after the bounded boot pull (list_tabs) retries run out (never stuck on loading silently).
     loadFailed: 'Could not load the window (label: {label}). Check the backend connection.',
-    renderFailed: 'An error occurred while drawing the screen',
+    renderFailed: 'An error occurred while drawing the screen.',
     redraw: 'Redraw',
     reload: 'Reload',
   },
@@ -93,14 +94,14 @@ export const en = {
     //   two keys, the Enter/Shift+Enter hint must not disappear (user-specified wording).
     emptyInputPlaceholder: 'Type a message',
     treeLabel: 'Agent tree',
-    emptyList: 'No agents — right-click to create one',
+    emptyList: 'No agents — right-click to create one.',
     rowActivate: 'Activate (spawn)', // Reserved row.
     rowCancelReserved: 'Delete', // Reserved row — same word as preset.deleteBtn.
     rowOpen: 'Open', // Running row.
     rowKill: 'Stop', // Running row.
     rowRename: 'Rename', // Running/reserved row (ADR-0061).
     rowRestart: 'Restart (coming soon)', // Disabled — no backend command yet.
-    doubleClickToActivate: 'Double-click to activate (spawn)', // Reserved-row title hint.
+    doubleClickToActivate: 'Double-click to activate (spawn).', // Reserved-row title hint.
     rowFailedBadge: 'Failed',
     // Row glyph (spinning) while waiting for the answer — hover text and accessible name. Reading the optimistic `Running`
     //   aloud would bring back by sound the lie removed from the screen, so this span replaces the status word.
@@ -117,12 +118,12 @@ export const en = {
     failureOther: 'Activation failed',
     failureOtherAction: 'Try again',
     // One-line form (text + suggested action) shared by the tree hover and the slot's exit screen.
-    failureLine: '{reason}. {action}',
+    failureLine: '{reason}. {action}.',
     // Inline messages for AgentList action failures — one distinct key per action; do not collapse them.
     activateFailed: 'Activation failed: {err}',
     openFailed: 'Open failed: {err}',
-    openFailedNoSlot: 'Open failed: no active view or focused slot', // Text distinct from openFailed.
-    openFailedNoEmptySlot: 'Open failed: no empty slot — clear a slot or split a new one', // Never clobbers a control or another agent's slot.
+    openFailedNoSlot: 'Open failed: no active view or focused slot.', // Text distinct from openFailed.
+    openFailedNoEmptySlot: 'Open failed: no empty slot — clear a slot or split a new one.', // Never clobbers a control or another agent's slot.
     killFailed: 'Stop failed: {err}',
     cancelReservedFailed: 'Delete failed: {err}', // Same word as rowCancelReserved.
     renameFailed: 'Rename failed: {err}', // ADR-0061.
@@ -218,14 +219,14 @@ export const en = {
   chat: {
     // The three turn endings are different facts — do not merge them into one key. An interruption is not a failure, and
     //   unknown means "we could not read the ending", not "it failed".
-    turnFailed: 'The response failed',
-    turnInterrupted: 'The response was interrupted',
-    turnUnknown: 'The response ended — the reason is unknown',
+    turnFailed: 'The response failed.',
+    turnInterrupted: 'The response was interrupted.',
+    turnUnknown: 'The response ended — the reason is unknown.',
     // ADR-0244: the interrupt was sent and the end of the turn is awaited — it does not mean it stopped (turnInterrupted says that).
     interrupting: 'Interrupting…',
     // An event this shell does not know arrived. The direction is one-way, so the cause can be stated — unknown vocabulary
     //   comes from the daemon, so the side that lags is always the shell.
-    unsupportedEvent: 'Signals that cannot be displayed: {count} — the app may be older than the daemon',
+    unsupportedEvent: 'Signals that cannot be displayed: {count} — the app may be older than the daemon.',
     // Queued input list (ADR-0231). The ✕ text is the same for both backends and every item — whether the text is withdrawn
     //   is decided by the backend, so no warning is added ("discarded" would be wrong for a handed-over codex item — user 2026-09-26).
     queuedRemove: 'Remove from list',
@@ -253,6 +254,14 @@ export const en = {
     //   end this way, they use this text too.
     toolRefusedReason: 'Not run because the dashboard did not handle the approval request',
     toolDeclinedReason: 'Not run',
+    errorTitle: 'Error', // Head of an error row.
+    toolErrorBadge: 'Error', // Badge of a tool call that failed.
+    toolInput: 'In', // Caption over a tool call's arguments.
+    toolOutput: 'Out', // Caption over a tool call's result.
+    toolNoArgs: 'arguments', // Stands in for the argument hint when there is none.
+    wait: 'Wait', // ADR-0372: stays English in `ko.ts`. The wait indicator above the input.
+    // The chat view shows this for the dropped-output placeholder (`PLACEHOLDER_ERROR_MESSAGE` in `src/api/wsFrame.ts`).
+    droppedOutput: 'This output could not be delivered.',
   },
   /**
    * The "Restore?" modal after an abnormal exit and the state-file notices. What the sentences claim
@@ -260,45 +269,45 @@ export const en = {
    * `StateFileStatus.ts`) — change these together when that contract changes.
    */
   restore: {
-    title: 'Restore the previous screen?',
-    intro: 'A screen from a run that did not exit normally was saved.',
+    title: 'Restore previous session?',
+    intro: 'The previous session did not end normally and was saved.',
     savedAt: 'Saved at',
     windows: 'Windows',
     tabs: 'Tabs',
     count: '{count}',
-    accept: 'Restore previous screen',
-    reject: 'Start fresh',
-    rejectWarning: 'Choosing "Start fresh" deletes the saved previous screen. This cannot be undone.',
+    accept: 'Restore session',
+    reject: 'Start new session',
+    rejectWarning: 'Choosing "Start new session" deletes the saved session. This cannot be undone.',
     // `durable:false` — this run saves nothing, so rejecting cannot delete the copy. There are several causes (`state.json`
     //   unreadable · a `state.json` saved by a newer version · the copy could not be made), so no file name is given.
     rejectWarningNotSaving:
-      'This run does not save the screen state. Choosing "Start fresh" keeps the saved previous screen, and you will be asked again on the next run.',
+      'This session is not being saved. Choosing "Start new session" keeps the saved session, and you will be asked again the next time the app starts.',
     working: 'Working…',
     // Error kinds are not told apart — the shell's error string is not a contract that carries the kind.
     answerFailed: 'Could not apply your choice. Try again in a moment.',
     stateFileUnreadable:
-      'Could not read the screen state file (state.json), so the app started with the default screen. This run does not save the screen state; the file is read again on the next run.',
+      'Could not read the session file (state.json), so the app started a new session. This session is not being saved; the file is read again the next time the app starts.',
     // ADR-0291: a file written by a newer build is neither copied aside nor overwritten — it is a guard, so this run does not save (`saves:false`).
     stateFileNewer:
-      'The screen state file (state.json) was saved by a newer version of this app, so the app started with the default screen. This run does not save the screen state and leaves the file as is.',
+      'The session file (state.json) was saved by a newer version of this app, so the app started a new session. This session is not being saved, and the file is left as is.',
     // An "unusable file" is not only damage — an unknown format, exceeding the size limit and so on count too. Do not name one cause.
     //   A file saved by a newer version does not come this way (`stateFileNewer`).
     stateFileCorruptCopiedAside:
-      'The screen state file (state.json) is unusable (damaged, unknown format or similar), so the app started with the default screen. The original file contents were kept in state.json.corrupt in the same folder.',
+      'The session file (state.json) is unusable (damaged, unknown format or similar), so the app started a new session. The original file contents were kept in state.json.corrupt in the same folder.',
     // Do not call the `.corrupt` of this case this run's backup — a file with that name was made by an earlier run.
     stateFileCorruptNotCopied:
-      'The screen state file (state.json) is unusable (damaged, unknown format or similar), so the app started with the default screen. The original file could not be kept aside. A state.json.corrupt in the same folder was left by an earlier run and is not a backup of this file.',
+      'The session file (state.json) is unusable (damaged, unknown format or similar), so the app started a new session. The original file could not be kept aside. A state.json.corrupt in the same folder was left by an earlier session and is not a backup of this file.',
     // Guard ii (`saves:false` · `state_file:'ok'`). There are several causes (write failure · the copy is unreadable · a newer
     //   build's copy is in place), so do not name one. "Asked again" = this run does not touch `state.json`, so it stays
     //   without a clean-exit mark and the next boot judges it again.
     stateFileNotSaving:
-      'The screen of the previous run, which did not exit normally, could not be kept aside, so this run does not save the screen state. You will be asked again on the next run.',
-    dismissNotice: 'Dismiss screen state notice',
+      'The previous session, which did not end normally, could not be kept aside, so this session is not being saved. You will be asked again the next time the app starts.',
+    dismissNotice: 'Dismiss session notice',
   },
   // The two connection bands, their "Reconnect" and the LLM command titles (ADR-0356).
   connection: {
     head: 'Could not connect to the daemon.',
-    refusedCause: 'The daemon refused authentication from this app',
+    refusedCause: 'The daemon refused authentication from this app.',
     versionCause: 'The running daemon is a different version from this app. Stop the daemon, then reconnect.',
     reconnect: 'Reconnect',
     reconnecting: 'Reconnecting…',
@@ -325,6 +334,7 @@ export const en = {
     copy: 'Copy',
     codeCopy: 'Copy code',
     contentPrivate: 'Content hidden',
+    noPath: '(no path)', // Name of a path-derived label when the path is blank (`basename` in `src/util/basename.ts`).
   },
 } as const
 

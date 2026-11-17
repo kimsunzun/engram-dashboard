@@ -247,6 +247,13 @@ export const ko = {
     //   되면 그 결과도 이 문구를 쓴다.
     toolRefusedReason: '대시보드가 승인 요청을 처리하지 않아 실행되지 않음',
     toolDeclinedReason: '실행되지 않음',
+    errorTitle: '오류',
+    toolErrorBadge: '오류',
+    toolInput: '입력',
+    toolOutput: '출력',
+    toolNoArgs: '인수',
+    wait: 'Wait',
+    droppedOutput: '이 출력 사건을 싣지 못했습니다',
   },
   /**
    * 비정상 종료 뒤 「복원할까요?」 모달과 상태 파일 알림(TRD S21-storage §6-7). 문장이 주장하는 것은 셸의 계약
@@ -319,6 +326,7 @@ export const ko = {
     copy: '복사',
     codeCopy: '코드 복사',
     contentPrivate: '내용 비공개',
+    noPath: '(경로 없음)',
   },
 } as const
 

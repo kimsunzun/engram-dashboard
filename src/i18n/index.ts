@@ -6,8 +6,8 @@
 //
 // The only importer of i18next. Imports neither React (`react.ts` holds `useLanguage`) nor Tauri (the per-window language
 //   memory is `langMemory.ts`, written by its caller), so modules that only need `t` stay free of both.
-// Boot language = `<html lang>`, read at module evaluation; absent or unknown → `en`. Today the value is `index.html`'s static
-//   one; per ADR-0373 decision 6 the shell's init script is to plant it per window.
+// Boot language = `<html lang>`, read at module evaluation; absent or unknown → `en`. The shell's init script plants it per
+//   window before the page runs (ADR-0373 decision 6); outside the shell it is `index.html`'s static value.
 //   The instance is initialized synchronously at module evaluation, so `t()` works at module scope right after import.
 //
 // Type-safe keys: `StringKey` is the union of `ns.key` paths of `en` — typos and unknown keys fail tsc (ADR-0069).

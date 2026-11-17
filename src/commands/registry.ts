@@ -42,8 +42,11 @@ export interface CommandHelp {
 export interface Command {
   /** Globally unique id (e.g. 'tab.next'). Consumers direct execution by this id alone. */
   id: string
-  /** Human-readable name (for palette · menu display, a follow-up consumer). */
-  title: string
+  /**
+   * Human-readable name (menu display · `list()`), as a function called each time the name is shown, so it is in the current UI
+   * language. Do not call `t()` at registration and close over the result (ADR-0373).
+   */
+  title: () => string
   /** Category for grouping (palette sections, etc.). */
   category?: string
   /** Default key combination hint (e.g. 'Ctrl+Shift+T'). Referenced by the keybinding consumer. */
@@ -176,19 +179,21 @@ export function getCommand(id: string): Command | undefined {
   return cmd ? { ...cmd, help: copyHelp(cmd.help) } : undefined
 }
 
+/** A command as `list()` gives it — the title resolved to text. */
+type CommandSummary = Pick<Command, 'id' | 'category' | 'keybinding' | 'help' | 'humanOnly'> & { title: string }
+
 /**
- * A meta snapshot of registered commands (for discovery — palette · LLM introspection).
+ * A meta snapshot of registered commands (for discovery — palette · LLM introspection). Titles are resolved at the call, in the
+ * current UI language (ADR-0373).
  *
  * ★`humanOnly` is carried too★ — whoever reads this list is exactly who [`run`] will block, so if not carried the LLM learns it is closed only
  * after calling what it saw in the list (that round trip is the very asking-back §5 meant to remove).
  */
-export function list(): Array<
-  Pick<Command, 'id' | 'title' | 'category' | 'keybinding' | 'help' | 'humanOnly'>
-> {
+export function list(): CommandSummary[] {
   return Array.from(registry.values()).map(
     ({ id, title, category, keybinding, help, humanOnly }) => ({
       id,
-      title,
+      title: title(),
       category,
       keybinding,
       help: copyHelp(help),

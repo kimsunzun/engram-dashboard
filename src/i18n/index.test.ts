@@ -147,7 +147,8 @@ describe('t() — 보간 엣지(값 재스캔·정규식 특수문자·문법)',
 describe('en ↔ ko tables at run time', () => {
   // The type gate in ko.ts misses a `ko` value widened to `string` (a variable, a cast) when its `en` value has no token,
   //   and an `en` value that is itself widened. This scan holds whatever the values are.
-  const tokens = (value: string): string[] => [...new Set([...value.matchAll(/\{(\w+)\}/g)].map(m => m[1]))].sort()
+  const tokens = (value: string): string[] =>
+    [...new Set([...value.matchAll(__test__.WORD_PLACEHOLDER)].map(m => m[1]))].sort()
 
   it('every key has the same {word} token set in en and ko', () => {
     const koGroups = ko as unknown as Record<string, Record<string, string>>

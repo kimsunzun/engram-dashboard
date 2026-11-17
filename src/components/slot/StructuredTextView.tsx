@@ -28,6 +28,7 @@ import {
 } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
+import { PLACEHOLDER_ERROR_MESSAGE } from '../../api/wsFrame'
 import { t } from '../../i18n'
 import {
   normalizeToolCategory,
@@ -200,6 +201,11 @@ function toolIconFor(name: string): LucideIcon {
   return Wrench
 }
 
+/** An error row's body — the dropped-output placeholder (a fixed marker text) in the UI language, any other message as it came. */
+function errorMessageText(message: string): string {
+  return message === PLACEHOLDER_ERROR_MESSAGE ? t('chat.droppedOutput') : message
+}
+
 /** Icons are size-3.5 (≈14px) to match our font scale. */
 function RowHeader({
   icon: Icon,
@@ -304,11 +310,11 @@ function ToolItemRow({
           {hint ? (
             <span className="truncate font-mono text-xs">{hint}</span>
           ) : (
-            <span className="truncate font-mono text-xs opacity-70">arguments</span>
+            <span className="truncate font-mono text-xs opacity-70">{t('chat.toolNoArgs')}</span>
           )}
           {isErr && (
             <span className="ml-auto flex-none rounded border border-red-500 px-1.5 text-[10px] text-red-500">
-              Error
+              {t('chat.toolErrorBadge')}
             </span>
           )}
           {isDeclined && (
@@ -329,7 +335,7 @@ function ToolItemRow({
         {open && (
           <div className="space-y-2 border-t border-border px-2.5 py-2">
             <div>
-              <div className="mb-1 text-[10px] uppercase tracking-wide text-muted">In</div>
+              <div className="mb-1 text-[10px] uppercase tracking-wide text-muted">{t('chat.toolInput')}</div>
               <InertCode code={pretty(argsJson)} />
             </div>
             {result && (
@@ -340,7 +346,7 @@ function ToolItemRow({
                     isErr ? 'text-red-500' : 'text-muted',
                   )}
                 >
-                  Out
+                  {t('chat.toolOutput')}
                 </div>
                 <InertCode code={result.content || t('common.emptyResult')} />
               </div>
@@ -608,8 +614,8 @@ function renderItem(
     case 'error':
       return (
         <ChatRow key={k} rail tone="error" runPos={pos}>
-          <RowHeader icon={AlertTriangle} title="Error" tone="error" />
-          <div className="text-red-500 whitespace-pre-wrap break-words">{item.message}</div>
+          <RowHeader icon={AlertTriangle} title={t('chat.errorTitle')} tone="error" />
+          <div className="text-red-500 whitespace-pre-wrap break-words">{errorMessageText(item.message)}</div>
         </ChatRow>
       )
 
