@@ -1,7 +1,7 @@
 # ADR-0379: Step-9a refusals are a class plus a Reason with a store pass-through, and a refusal that applied nothing maps onto a bus code that does not keep the request id, with two INTERNAL exceptions
 
-- 상태: 확정 (2026-11-17, 근거: S25 step-9a TRD §8 (b) B8 and B11, PRD+TRD review PASS 2026-11-17 (full))
-- 관련: ADR-0291 (decision 6 R17: the store's read-only answers) · ADR-0365 (`path-through-link`) · ADR-0377 (`root-generation-stale`) · ADR-0378 (`rev-mismatch`) · ADR-0380 (`profile-edit-unavailable`) · step-9a TRD `docs/process/S25-preset-library/trd-library-edit.md` §1 · §3 · §5 · §8 (b) B8 · B11 · parent TRD `docs/process/S25-preset-library/trd.md` §1-5
+- 상태: 확정 (2026-11-17, 근거: S25 step-9a TRD §8 (b) B8 and B11, PRD+TRD review PASS 2026-11-17 (full)) · 부분 폐기 by ADR-0381 (decision 4 leftovers and decision 6 config write failed)
+- 관련: ADR-0291 (decision 6 R17: the store's read-only answers) · ADR-0365 (`path-through-link`) · ADR-0377 (`root-generation-stale`) · ADR-0378 (`rev-mismatch`) · ADR-0380 (`profile-edit-unavailable`) · step-9a TRD `docs/process/S25-preset-library/trd-library-edit.md` §1 · §3 · §5 · §8 (b) B8 · B11 · parent TRD `docs/process/S25-preset-library/trd.md` §1-5 · Amended by ADR-0381 (decision 4 leftovers and decision 6 config write failed)
 
 ## 맥락
 Step 9a builds every library, preset and agent-preset command body as inherent `LibraryService` methods returning crate-local types; step 10a declares the commands and maps the types (TRD B2). The command vocabulary stays in agent (parent §1-5). So 9a needs a refusal value 10a can map, the code strings the parent left to implementation, and a fixed class → bus-code map. The bus layer matters for retries: daemon `command_delivery::retains_the_id` keeps the request id for some codes, and a retry with a kept id is answered `ALREADY_APPLIED`. Command `ErrorCode` has no unavailable code.

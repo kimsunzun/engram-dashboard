@@ -1,7 +1,7 @@
 # ADR-0377: Edits take the root generation as an optional argument checked inside the edit's own write-lock take; a stale one is refused with root-generation-stale
 
-- 상태: 확정 (2026-11-17, 근거: S25 step-9a TRD §8 (b) B6, PRD+TRD review PASS 2026-11-17 (full))
-- 관련: ADR-0324 (library lock, generation tickets) · ADR-0366 (decision 1 per-item writes, decision 3 exclusive root change) · ADR-0379 (refusal shape and bus-code map) · step-9a TRD `docs/process/S25-preset-library/trd-library-edit.md` §1 · §3.3 step 3 · §4 · §5 · §8 (a) · §8 (b) B6 · §9 U1
+- 상태: 확정 (2026-11-17, 근거: S25 step-9a TRD §8 (b) B6, PRD+TRD review PASS 2026-11-17 (full)) · 부분 폐기 by ADR-0381 (the starting value of the root generation)
+- 관련: ADR-0324 (library lock, generation tickets) · ADR-0366 (decision 1 per-item writes, decision 3 exclusive root change) · ADR-0379 (refusal shape and bus-code map) · step-9a TRD `docs/process/S25-preset-library/trd-library-edit.md` §1 · §3.3 step 3 · §4 · §5 · §8 (a) · §8 (b) B6 · §9 U1 · Amended by ADR-0381 (the starting value of the root generation)
 
 ## 맥락
 Step 9a makes `set_root` live, so the root can change while edits are queued. That the root generation enters edits as an optional argument was already decided (M14 · M26, TRD §8 (a)); what was open is where it is checked. The root generation lives in the gate's `Numbers.root` (not in the config) and `status` answers it as `root_generation`. `change_root` is exclusive from its ticket to its publish, and edits queued behind it run against the new root (ADR-0366 decision 3).

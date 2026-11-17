@@ -1,7 +1,7 @@
 # ADR-0376: library.json and identity.json follow the base data-file rules; a newer or unreadable library.json makes set_root read-only for the run, and a newer or unwritable identity.json gives a run-only daemon id with a warn
 
-- 상태: 확정 (2026-11-17, 근거: S25 step-9a TRD §8 (b) B3, PRD+TRD review PASS 2026-11-17 (full))
-- 관련: ADR-0291 (the base data-file rules, decision 6 R17) · ADR-0264 (decision 4: a file name used by one store belongs to that store) · ADR-0311 (decision 5: `daemon_id` owned by the daemon and carried as a value) · ADR-0375 (what `library.json` stores) · step-9a TRD `docs/process/S25-preset-library/trd-library-edit.md` §1 · §2 · §3.1 · §8 (b) B3 · §10 K4
+- 상태: 확정 (2026-11-17, 근거: S25 step-9a TRD §8 (b) B3, PRD+TRD review PASS 2026-11-17 (full)) · 부분 폐기 by ADR-0381 (the config states listed in its impact)
+- 관련: ADR-0291 (the base data-file rules, decision 6 R17) · ADR-0264 (decision 4: a file name used by one store belongs to that store) · ADR-0311 (decision 5: `daemon_id` owned by the daemon and carried as a value) · ADR-0375 (what `library.json` stores) · step-9a TRD `docs/process/S25-preset-library/trd-library-edit.md` §1 · §2 · §3.1 · §8 (b) B3 · §10 K4 · Amended by ADR-0381 (the config states listed in its impact)
 
 ## 맥락
 Step 9a adds two persisted state files. `<data>\daemon\state\library.json` holds the library root setting (ADR-0375); asset-library owns its name and format, joined onto the state folder the daemon hands in. `<data>\daemon\state\identity.json` holds the daemon identity `{"schema_version": 1, "daemon_id": "<uuid v4, lowercase hyphenated>"}`; the daemon owns its name and format in a daemon module, not `DataLayout` (ADR-0264 decision 4). Each needs a rule for what happens when the file is missing, corrupt, written by a newer version, or cannot be read or written.
