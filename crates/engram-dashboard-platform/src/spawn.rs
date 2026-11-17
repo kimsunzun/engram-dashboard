@@ -1,5 +1,5 @@
 //! OS settings when launching child processes — launching without a window · launching as a tree root and the handle that cuts that tree at once ·
-//! deciding 「프로그램 없음」 (program not found) for a failed shell · launching outside this process's Job (WMI).
+//! deciding 「program not found」 for a failed shell · launching outside this process's Job (WMI).
 // ADR-0230
 // ADR-0266
 
@@ -138,13 +138,13 @@ impl TreeRoot {
     }
 }
 
-/// The 「띄우려던 프로그램이 없다」 (the program we tried to launch is missing) decision — what it needs from the command is captured at launch, and when a non-zero exit is received it is decided by
+/// The 「the program we tried to launch is missing」 decision — what it needs from the command is captured at launch, and when a non-zero exit is received it is decided by
 /// [`Self::judge`].
 ///
-/// ★On Windows the exit code alone cannot tell apart★ — the exit code of `cmd.exe /c <없는 이름>` differs per build
+/// ★On Windows the exit code alone cannot tell apart★ — the exit code of `cmd.exe /c <missing name>` differs per build
 ///   (measured 2026-09-27, Windows 11 26200 = **1**, the errorlevel inside it is 9009 · the widely known value is 9009). 1 is
-///   indistinguishable from the target program's own failure. So for a failure that is not 9009, it looks up the target of `cmd.exe /c <대상> …` by the same
-///   rules as cmd (working folder → `PATH`, extension = `PATHEXT`), and only when it is absent is it 「없다」 (missing). If the shape is one where the target cannot be singled out,
+///   indistinguishable from the target program's own failure. So for a failure that is not 9009, it looks up the target of `cmd.exe /c <target> …` by the same
+///   rules as cmd (working folder → `PATH`, extension = `PATHEXT`), and only when it is absent is it 「missing」. If the shape is one where the target cannot be singled out,
 ///   only 9009 remains.
 /// ★Do not look it up before launching — do not revive that★: one unresponsive remote `PATH` entry held startup past the deadline
 ///   (measured 21 s), and if cmd's AutoRun changes `PATH`, a decision before launching is always wrong. The decision after the failure sees the same env too, so
@@ -161,7 +161,7 @@ pub struct MissingProgramCheck {
     gate: &'static cmd_lookup::LookupGate,
 }
 
-/// The exit code when `cmd.exe` ends with 「내부 또는 외부 명령 … 이 아닙니다」 (is not an internal or external command).
+/// The exit code when `cmd.exe` ends with 「is not an internal or external command」.
 #[cfg(windows)]
 const CMD_NOT_FOUND_EXIT: i32 = 9009;
 
@@ -209,7 +209,7 @@ impl MissingProgramCheck {
         }
     }
 
-    /// Was the child that ended with `code` a 「없다」 (missing) one. Looking up the target waits only until `deadline` — if it cannot finish within the deadline, unknown.
+    /// Was the child that ended with `code` a 「missing」 one. Looking up the target waits only until `deadline` — if it cannot finish within the deadline, unknown.
     /// If successful (`Some(0)`), no decision is made.
     pub fn judge(&self, code: Option<i32>, deadline: Instant) -> MissingProgramVerdict {
         #[cfg(windows)]
@@ -235,20 +235,20 @@ impl MissingProgramCheck {
     }
 }
 
-/// The answer of [`MissingProgramCheck::judge`]. Whether it is 「없다」 (missing) is [`Self::is_missing`], and the rest is material for the caller to log
+/// The answer of [`MissingProgramCheck::judge`]. Whether it is 「missing」 is [`Self::is_missing`], and the rest is material for the caller to log
 /// (this crate does not log).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MissingProgramVerdict {
     /// Nothing to decide — it did not go through a shell · it succeeded · the shell's target cannot be singled out as a one-word program name.
     NotJudged,
-    /// The shell ended with the 「없는 명령」 (missing command) exit code — 「없다」 (missing).
+    /// The shell ended with the 「missing command」 exit code — 「missing」.
     NotFoundExitCode,
     /// The failed shell's target was looked up.
     Looked(TargetLookup),
 }
 
 impl MissingProgramVerdict {
-    /// Is it 「없다」 (missing) — if unknown, false.
+    /// Is it 「missing」 — if unknown, false.
     pub fn is_missing(&self) -> bool {
         matches!(
             self,
@@ -257,7 +257,7 @@ impl MissingProgramVerdict {
     }
 }
 
-/// The result of looking up the failed shell's target. ★The unknown branches (`Unknown` · `Busy` · `NoThread`) are not folded into 「없다」 (missing)★.
+/// The result of looking up the failed shell's target. ★The unknown branches (`Unknown` · `Busy` · `NoThread`) are not folded into 「missing」★.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TargetLookup {
     Found,
@@ -335,7 +335,7 @@ mod tests {
         Instant::now() + Duration::from_secs(20)
     }
 
-    /// There are only two 「없다」 (missing) cases — neither the unknown branches (`Unknown` · `Busy` · `NoThread`) nor "nothing to decide" fold into 「없다」 (missing).
+    /// There are only two 「missing」 cases — neither the unknown branches (`Unknown` · `Busy` · `NoThread`) nor "nothing to decide" fold into 「missing」.
     #[test]
     fn only_a_not_found_exit_or_a_missing_target_is_missing() {
         use MissingProgramVerdict::{Looked, NotFoundExitCode, NotJudged};
@@ -346,13 +346,13 @@ mod tests {
             Looked(TargetLookup::Found),
             Looked(TargetLookup::Unknown),
             Looked(TargetLookup::Busy),
-            Looked(TargetLookup::NoThread("스레드 없음".to_owned())),
+            Looked(TargetLookup::NoThread("no thread".to_owned())),
         ] {
             assert!(!verdict.is_missing(), "{verdict:?}");
         }
     }
 
-    /// 9009 is 「없다」 (missing) right away; any other failure looks up the target first; success, not-cmd and past-deadline are never 「없다」 (missing).
+    /// 9009 is 「missing」 right away; any other failure looks up the target first; success, not-cmd and past-deadline are never 「missing」.
     #[cfg(windows)]
     #[test]
     fn the_judgment_reads_9009_and_looks_only_after_a_failure() {
@@ -373,24 +373,21 @@ mod tests {
         assert!(absent.judge(Some(9009), far()).is_missing());
         assert!(
             absent.judge(Some(1), far()).is_missing(),
-            "없는 대상 + 실패"
+            "missing target + failure"
         );
-        assert!(!absent.judge(Some(0), far()).is_missing(), "성공");
+        assert!(!absent.judge(Some(0), far()).is_missing(), "success");
         assert!(
             !absent.judge(Some(1), Instant::now()).is_missing(),
-            "마감이 지나면 모른다 — 「없다」가 아니다"
+            "past the deadline it is unknown — not 「missing」"
         );
         let present = check("ping", r"C:\Windows\System32\CMD.EXE");
         assert!(present.judge(Some(9009), far()).is_missing());
         assert!(
             !present.judge(Some(1), far()).is_missing(),
-            "있는 대상의 실패는 대상 자신의 실패다"
+            "a failure of an existing target is the target's own failure"
         );
         let direct = check(&missing, "other.exe");
-        assert!(
-            !direct.judge(Some(9009), far()).is_missing(),
-            "cmd 가 아니다"
-        );
+        assert!(!direct.judge(Some(9009), far()).is_missing(), "not cmd");
         assert!(!direct.judge(Some(1), far()).is_missing());
     }
 
@@ -404,31 +401,31 @@ mod tests {
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
         prepare_tree_root(&mut cmd);
-        let mut child = cmd.spawn().expect("기동");
-        let tree = TreeRoot::attach(&child).expect("무리에 넣기");
-        tree.start(&child).expect("깨우기");
+        let mut child = cmd.spawn().expect("launch");
+        let tree = TreeRoot::attach(&child).expect("put into the group");
+        tree.start(&child).expect("wake");
         assert!(
             crate::group::resume_suspended_process(child.id()).is_err(),
-            "깨운 뒤에도 멈춘 스레드가 남았다"
+            "a suspended thread remains even after waking"
         );
 
-        let mut stdin = child.stdin.take().expect("stdin 파이프");
-        stdin.write_all(b"hello\n").expect("쓰기");
+        let mut stdin = child.stdin.take().expect("stdin pipe");
+        stdin.write_all(b"hello\n").expect("write");
         drop(stdin);
         let mut out = String::new();
         child
             .stdout
             .take()
-            .expect("stdout 파이프")
+            .expect("stdout pipe")
             .read_to_string(&mut out)
-            .expect("읽기");
+            .expect("read");
         assert_eq!(out.lines().collect::<Vec<_>>(), ["got:hello"]);
         let _ = child.wait();
     }
 
     /// ★The whole tree is inside the group★ — cmd and its child `ping` are members of the group. It is launched suspended, put in, and then woken, so a grandchild launched right away
-    ///   is not left out either. Before cutting it is not 「다 끝났다」 (all ended), and only after cutting does the group empty and that `ping` end —
-    ///   if the member count cannot be read or is undercounted, 「다 끝났다」 (all ended) stands early and the caller stops waiting early.
+    ///   is not left out either. Before cutting it is not 「all ended」, and only after cutting does the group empty and that `ping` end —
+    ///   if the member count cannot be read or is undercounted, 「all ended」 stands early and the caller stops waiting early.
     #[cfg(windows)]
     #[test]
     fn the_tree_holds_every_member_until_it_is_killed() {
@@ -440,21 +437,21 @@ mod tests {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         prepare_tree_root(&mut cmd);
-        let mut child = cmd.spawn().expect("기동");
+        let mut child = cmd.spawn().expect("launch");
         let tree = match TreeRoot::attach(&child) {
             Ok(tree) => tree,
             Err(e) => {
                 // Reaps the child left suspended outside the group and fails.
                 let _ = child.kill();
                 let _ = child.wait();
-                panic!("무리에 넣기: {e}");
+                panic!("put into the group: {e}");
             }
         };
-        tree.start(&child).expect("깨우기");
+        tree.start(&child).expect("wake");
 
-        let members = tree.group.downgrade().expect("무리의 약한 손잡이");
-        // See the ending by the pinned handle — by number, someone else's process that took over the number after the end would read as 「산다」 (alive).
-        let ping = wait_until("무리 안의 ping", || {
+        let members = tree.group.downgrade().expect("the group's weak handle");
+        // See the ending by the pinned handle — by number, someone else's process that took over the number after the end would read as 「alive」.
+        let ping = wait_until("ping inside the group", || {
             let pid = members
                 .member_pids()
                 .ok()?
@@ -462,25 +459,29 @@ mod tests {
                 .find(|&pid| is_ping(pid))?;
             members.pin_member(pid, false).ok()?
         });
-        assert_eq!(ping.facts().ppid, child.id(), "cmd 가 띄운 ping 이 아니다");
+        assert_eq!(ping.facts().ppid, child.id(), "not a ping cmd launched");
         assert!(
-            members.member_pids().expect("명단").contains(&child.id()),
-            "cmd 가 무리 밖이다"
+            members.member_pids().expect("list").contains(&child.id()),
+            "cmd is outside the group"
         );
         assert!(
-            !ping.exited().expect("ping 생존 확인"),
-            "kill 전에 ping 이 이미 끝났다"
+            !ping.exited().expect("check ping is alive"),
+            "ping already ended before kill"
         );
-        assert!(tree.group.active_processes().expect("멤버 수") >= 2);
-        assert!(!tree.members_gone(), "멤버가 사는데 다 끝났다고 했다");
+        assert!(tree.group.active_processes().expect("member count") >= 2);
+        assert!(
+            !tree.members_gone(),
+            "said everything ended while members are alive"
+        );
 
-        tree.kill(&mut child).expect("트리 kill");
-        wait_until("무리가 빈다", || {
+        tree.kill(&mut child).expect("tree kill");
+        wait_until("the group empties", || {
             matches!(tree.group.active_processes(), Ok(0)).then_some(())
         });
         assert!(
-            ping.wait_exit(Duration::from_secs(10)).expect("ping 대기"),
-            "트리 kill 뒤에도 그 ping 이 산다"
+            ping.wait_exit(Duration::from_secs(10))
+                .expect("wait for ping"),
+            "that ping is alive even after the tree kill"
         );
         assert!(tree.members_gone());
         let _ = child.wait();
@@ -497,10 +498,13 @@ mod tests {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         hide_console_window(&mut cmd);
-        let mut running = cmd.spawn().expect("기동");
+        let mut running = cmd.spawn().expect("launch");
         let result = crate::group::resume_suspended_process(running.id());
         let _ = running.kill();
         let _ = running.wait();
-        assert!(result.is_err(), "멈추지 않은 프로세스를 깨웠다고 했다");
+        assert!(
+            result.is_err(),
+            "said it woke a process that was not suspended"
+        );
     }
 }

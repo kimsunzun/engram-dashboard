@@ -23,7 +23,7 @@
 //!   makes the same comparison first, but that is the fast path; the authority is on the supervisor side.
 //! - ★Everything sent upward passes through the ordering area (the supervisor-local queue) and is never dropped★ (TRD 3 §3-0 ②) — the place that
 //!   enqueues (event · packet · deadline event · loss report) only enqueues synchronously, and if the line has room it loads right there. If the line
-//!   is full it holds the item back, and the 「줄에 자리 → 순서 칸 비우기」 (room in the line → drain the ordering area) branch of **every waiting loop** (connection
+//!   is full it holds the item back, and the 「room in the line → drain the ordering area」 branch of **every waiting loop** (connection
 //!   establishment · operating · backoff · given-up) does the loading — if even one is missing, what was held back does not go out while staying in that state. While a write is being pushed
 //!   that branch is absent, so loading stops — for one write up to `write_deadline`, and at a place that pushes writes
 //!   back to back (draining the queue in `Turn::Outbound` · `reissue_resumes`), up to that number of writes × `write_deadline`.
@@ -51,8 +51,8 @@
 //!   The window may close later than the held time but never earlier (the safe side — see `track_pause`).
 //!   Our ping goes out even meanwhile — the peer does not cut us for silence.
 //!   The cost is that that peer's replies cannot come in either — if you wait on [`Peer::request`] on the task that drains the receiving side, that
-//!   request hangs until its deadline (crate header 「받는 쪽 불변식」 (receiver invariants) 1).
-//! - ★If the receiving side drops or closes the receiver end, fold immediately★ (crate header 「받는 쪽 불변식」 (receiver invariants) 5) — every waiting loop (connection
+//!   request hangs until its deadline (crate header 「Receiver-side invariants」 1).
+//! - ★If the receiving side drops or closes the receiver end, fold immediately★ (crate header 「Receiver-side invariants」 5) — every waiting loop (connection
 //!   establishment · operating · backoff · given-up) and writes (`write` · `ping`) watch for the receiver being closed (`Sender::closed`), so even with nothing to enqueue
 //!   (even if the peer is quiet) they go straight to closing on the spot — they do not reconnect. The channel and handshake being dialed are discarded
 //!   as the closed arm wins — if the handshake has just finished and the finished arm wins (`select!` is not biased), `shake_hands` draws a
@@ -75,18 +75,18 @@
 //!   side is only the draining of the ordering area (`teardown`). The enqueue end is held by one supervisor alone (`PeerConfig::inbound`), so when the supervisor
 //!   ends, the next `recv` on that handle's receiver end is `None`.
 //! - ★An accepted peer (`Registry::attach`) does not reconnect (TRD 3 §3-1 ①)★ — it starts from the handshake already holding the channel
-//!   (the machine's dial is repaid on the spot as 「열렸다」 (opened) — `Supervisor::run`), and every end where the machine would go to reconnect · give up
+//!   (the machine's dial is repaid on the spot as 「opened」 — `Supervisor::run`), and every end where the machine would go to reconnect · give up
 //!   (handshake failure · disconnect during operation) is closed immediately with the same fold as the pre-close flush (`Supervisor::fold_into_close`).
 //!   ★The machine (pure layer) keeps its dialing-side shape★ — putting an accepted-peer branch in the machine would make every one of those ends (reject · deadline · disconnect ·
-//!   reconnect) carry one more branch each, while the supervisor side already has the 「다시 걸지 않고 닫는다」 (close without reconnecting) fold. The handshake deadline
+//!   reconnect) carry one more branch each, while the supervisor side already has the 「close without reconnecting」 fold. The handshake deadline
 //!   runs from the end of the upgrade (`Supervisor::shake_hands`). The end cause rides on [`TransportEvent::Closed`]
 //!   (`Supervisor::end_cause`) and when it ends it removes itself from the registry (`RosterExit`).
 //! - ★The pre-close flush is done with one marker in the data queue (TRD 3 §3-0 ④)★ — [`Peer::close_after_flush`] first writes the close to
-//!   be loaded (that is the 「비우는 중」 (draining) indication — after that the handle's sends are rejected) and puts the marker at the end of the data queue. While
+//!   be loaded (that is the 「draining」 indication — after that the handle's sends are rejected) and puts the marker at the end of the data queue. While
 //!   operating, the supervisor writes the commands before the marker in order and closes at the marker (`Supervisor::on_cmd` — the marker is not bound to a generation). The waiting loops outside
 //!   operation (connection establishment · backoff · given-up) see that indication and fold immediately — even if disconnected mid-drain it does not reconnect:
 //!   it withdraws the part the machine produced for reconnect · give-up (waiting · `GaveUp` · `ConnectFailed` reports) and folds straight into the close
-//!   (`Supervisor::fold_into_close` — the machine is left pure). While draining, 「지금 다시 해라」 (retry now) is dropped too (even
+//!   (`Supervisor::fold_into_close` — the machine is left pure). While draining, 「retry now」 is dropped too (even
 //!   one that entered before it and has not been read yet — `Supervisor::drain_ctl`). One deadline ([`Policy::flush_timeout`]) covers, from when the supervisor
 //!   notices, the later writes · keepalive · close frame together (`Supervisor::guard` · `drop_link` — even if the drain starts during that
 //!   wait, it shortens on the spot) — that deadline runs even when the receiving line is backed up (`wake_at`).
@@ -102,7 +102,7 @@
 //!
 //! ## Why there are two channels
 //!
-//! The data queue (bounded) and the control queue (unbounded) are separated. ★Even at the moment the queue is full, 「닫아라」 (close) and 「지금 다시 붙어라」 (reconnect now) must
+//! The data queue (bounded) and the control queue (unbounded) are separated. ★Even at the moment the queue is full, 「close」 and 「reconnect now」 must
 //! get in★ — with one channel, backpressure blocks control too.
 
 use std::collections::VecDeque;
@@ -143,7 +143,7 @@ pub(crate) const CLOSE_DRAIN_LIMIT: Duration = Duration::from_secs(60);
 /// The budget of payload bytes one supervisor may hold (B in `budget.rs`). One count is split between the read share and the window cap —
 /// the read gate measures by the read share (if the received bytes minus the resume-window share reach it, the read task stops reading the channel).
 /// ★If streams are not used, read share = all of this (window cap 0), and after the first stream piece is seen, it is half and half★
-/// (`budget::split` · the reason is in the `budget.rs` header). Reading decides by the 「더하기 전 물높이」 (fill level before adding), so either way one supervisor's
+/// (`budget::split` · the reason is in the `budget.rs` header). Reading decides by the 「fill level before adding」, so either way one supervisor's
 /// ceiling is this + one message (TRD 3 §3-0 ① 「B + M」).
 ///
 /// Why 16 MiB = the same value as the daemon's per-connection receive-lane budget (`CONN_RX_MAX_BYTES` in `link::server`) — shell · daemon use the same value
@@ -177,8 +177,7 @@ fn next_turn(
     outbound_cap: usize,
 ) -> Turn {
     // TODO(stream-replay-vs-timer): the deadline is ahead of frames, so if the window deadline passes mid-write and replay arrived in the read-ahead
-    //   queue in the meantime, the resume window closes before that replay is processed — even without backpressure (crate header 「알려진
-    //   한계」 (known limits)).
+    //   queue in the meantime, the resume window closes before that replay is processed — even without backpressure (crate header 「known limits」).
     if wake <= now {
         return Turn::Timer;
     }
@@ -252,7 +251,7 @@ enum PeerOp<W: Wire> {
     /// commands before the marker each still get the generation comparison as is (the old generation's are not written).
     ///
     /// ★It holds the control channel's sender end — it does not send★: when all handles are gone the control channel closes and the supervisor
-    /// reads that as 「닫아라」 (close) and folds immediately. While the marker is in the queue that channel does not close, so the drain of a side that released its handle
+    /// reads that as 「close」 and folds immediately. While the marker is in the queue that channel does not close, so the drain of a side that released its handle
     /// to flush and leave is not cut off before the marker.
     Close {
         _keep_ctl: mpsc::UnboundedSender<Ctl>,
@@ -310,7 +309,7 @@ struct PeerInner<W: Wire> {
     /// ★It does not cut the connection★ — the bound connection is already not attached.
     refused: Arc<AtomicU64>,
     /// Wake the supervisor because `overflow` · `refused` was raised — given-up · backoff waits are not woken by that count alone, and without waking, that
-    /// report would not come out until the next 「다시 연결」 (reconnect) (if given up) · the end of the backoff (if backing off). The leftover ticket is at most one so it does not pile up,
+    /// report would not come out until the next 「reconnect」 (if given up) · the end of the backoff (if backing off). The leftover ticket is at most one so it does not pile up,
     /// and a leftover wake-up is harmless (the start of the turn collects again). The connection-establishment phase (dial · handshake) does not listen to this —
     /// what was counted in that phase is reported by the first turn after the phase ends.
     loss_wake: Arc<Notify>,
@@ -320,8 +319,8 @@ struct PeerInner<W: Wire> {
     /// The app called [`Peer::close`] · [`Peer::close_after_flush`]. It is set at the moment of the call, regardless of whether the supervisor has
     /// handled it.
     close_requested: AtomicBool,
-    /// The close that [`Peer::close_after_flush`] asked to be loaded — only the first call is written. ★What is written is itself the 「비우는 중」
-    /// (draining) indication★: when this stands, the handle's sends are rejected and the supervisor does not reconnect. It is written before the marker — so that it is visible
+    /// The close that [`Peer::close_after_flush`] asked to be loaded — only the first call is written. ★What is written is itself the 「draining」
+    /// indication★: when this stands, the handle's sends are rejected and the supervisor does not reconnect. It is written before the marker — so that it is visible
     /// when the supervisor takes the marker out.
     goodbye: Arc<OnceLock<Close>>,
     /// Wake the supervisor because `goodbye` was written — for the places that do not read the data queue (the connection-establishment phase · mid-write).
@@ -377,7 +376,7 @@ impl<W: Wire> Peer<W> {
     /// Error conditions: deadline expiry · disconnect · queue saturation · number clash · reuse of an expired number ·
     /// [`Wire::request_tag`] is `None` ([`RequestError::NotARequest`] — meaning use `notify`).
     ///
-    /// ★The only case where the deadline really arrives is 「연결은 멀쩡한데 그 요청만 침묵」 (the connection is fine but only that request is silent)★ — because
+    /// ★The only case where the deadline really arrives is 「the connection is fine but only that request is silent」★ — because
     /// any branch that drops the connection wakes the waiters immediately.
     ///
     /// ★A call that overlaps a reconnect does not carry over to the new connection★ — the generation is read first and whether it is operating is checked after, so if it
@@ -436,7 +435,7 @@ impl<W: Wire> Peer<W> {
             }
         }
         // Even if the supervisor vanishes and the slot is dropped with it, it wakes here with an error. ★The sent field is true★ — there is no way to know whether it was in the queue or in the wait table,
-        //   so it is written toward 「갔을 수 있다」 (it may have gone) (the 「부풀 수 있다」 (may be inflated) of the `sent` field).
+        //   so it is written toward 「it may have gone」 (the 「may be inflated」 of the `sent` field).
         rx.await
             .unwrap_or_else(|_| Err(self.disconnected(generation, true)))
     }
@@ -511,7 +510,7 @@ impl<W: Wire> Peer<W> {
         self.inner.goodbye.get().is_some()
     }
 
-    /// ★The 「지금 다시 해라」 (retry now) entry★ — resets the budget and tries at once (ADR-0180 decision 7). It listens even in the given-up state.
+    /// ★The 「retry now」 entry★ — resets the budget and tries at once (ADR-0180 decision 7). It listens even in the given-up state.
     /// ★It does not listen after [`Peer::close_after_flush`]★ — that is a peer we decided to drain and close. Even if called before it, if the supervisor
     /// has not read it yet it is dropped (the supervisor drops a reconnect it read after seeing the drain — listening would drop the channel, so what was to be drained is rejected too and
     /// it ends without the close it was given). If the supervisor already read it and went to drop the channel, that drain closes at once with no connection to write on.
@@ -581,14 +580,14 @@ impl<W: Wire> Peer<W> {
     ///
     /// ★A send after the marker is rejected on every clone★ — `notify` · `notify_in` · fanout = [`SendError::Closed`] ·
     /// `request` · `request_in` = [`RequestError::Disconnected`] (`cause` = [`DisconnectCause::Explicit`] · `sent`
-    /// false) · `resume_stream` = not sent. Since this is after the app said it would close, this rejection is not counted (that decision in `lib.rs` 「알려진 한계」 (known limits)). `reconnect_now` is not
+    /// false) · `resume_stream` = not sent. Since this is after the app said it would close, this rejection is not counted (that decision in `lib.rs` 「known limits」). `reconnect_now` is not
     /// listened to — even what was called before this call and the supervisor has not read yet is dropped. Another clone's send that crosses with this call may land after the marker — the supervisor
     /// rejects it while closing and counts it as [`TransportEvent::Dropped`].
     ///
-    /// ★Until it ends, hold and drain that handle's receiver end★ (crate header 「받는 쪽 불변식」 (receiver invariants) 5) — if you drop or close it, the supervisor folds
+    /// ★Until it ends, hold and drain that handle's receiver end★ (crate header 「Receiver-side invariants」 5) — if you drop or close it, the supervisor folds
     /// at once and the commands before the marker are dropped too. ★Do not await this future on the task that drains that receiver end★ — the supervisor's end
     /// depends on loading everything teardown holds (on the receiving side draining), so if the side that would drain stands in this wait, it
-    /// stalls up to the teardown limit (crate header 「알려진 한계」 (known limits)).
+    /// stalls up to the teardown limit (crate header 「known limits」).
     ///
     /// Calling again leaves the first close as is and waits for the same end. Calling [`Peer::close`] after that closes at once without waiting for the marker,
     /// but loads the first close. Even if all handles are released, the drain continues (the marker holds the control channel).
@@ -657,12 +656,11 @@ impl<W: Wire> Peer<W> {
     }
 
     /// One fanout frame (`Registry::broadcast`). ★What could not be put in is counted by this peer's supervisor and reported to this handle's receiver end as
-    /// [`TransportEvent::Dropped`]★ — the registry does not hold the receiver's enqueue end (if it did, 「`Closed` 가 마지막
-    /// → 넣는 끝을 놓음 → `None`」 (Closed is last → release the enqueue end → None) would break — TRD 3 §3-0 ②). Queue saturation is already counted by the enqueue (`push`). For a peer whose supervisor
+    /// [`TransportEvent::Dropped`]★ — the registry does not hold the receiver's enqueue end (if it did, 「Closed is last → release the enqueue end → None」 would break — TRD 3 §3-0 ②). Queue saturation is already counted by the enqueue (`push`). For a peer whose supervisor
     /// is gone (`SendError::Closed`), the receiver end to report to has already ended.
     ///
     /// ★What could not be put in because it is not the operating phase after the app called [`Peer::close`] is not counted★ — the count of losses after the app said it would close
-    /// has no reader and a clean shutdown comes first (user decision 2026-09-26 — `lib.rs` 「알려진 한계」 (known limits)). What
+    /// has no reader and a clean shutdown comes first (user decision 2026-09-26 — `lib.rs` 「known limits」). What
     /// was in the queue before that is counted by the supervisor.
     ///
     /// Bound to the current generation — if the generation changes before writing, the supervisor does not write and counts it (the same comparison as [`Peer::notify_in`]).
@@ -768,7 +766,7 @@ pub(crate) struct PeerConfig<W: Wire> {
     pub policy: Policy,
     /// ★The enqueue end of this handle's receiver end — only this one supervisor holds it★ (`registry.rs` header). If shared with other supervisors, behind a line filled by a noisy
     /// peer a quiet peer's items would be held in the ordering area, and even if the supervisor releases this when it ends, the receiver end does not
-    /// end (「`Closed` 가 마지막 → 넣는 끝을 놓음 → `None`」 (Closed is last → release the enqueue end → None) — TRD 3 §3-0 ②). Each item carries the byte share of the supervisor that
+    /// end (「Closed is last → release the enqueue end → None」 — TRD 3 §3-0 ②). Each item carries the byte share of the supervisor that
     /// enqueued it and it is released when the receiving side takes it out (`budget.rs`).
     pub inbound: mpsc::Sender<Charged<Incoming<W>>>,
     /// The byte budget to hold — the registry puts in [`BYTE_BUDGET`]. It is a field so that tests can put in a small value.
@@ -975,7 +973,7 @@ enum Connecting<T> {
 /// The wake of one write (`Supervisor::guard`).
 enum Guarded {
     Done(Result<(), Input>),
-    /// The pre-close flush started (or a 「지금 다시 해라」 (retry now) that came during the drain was dropped) — put a deadline and keep
+    /// The pre-close flush started (or a 「retry now」 that came during the drain was dropped) — put a deadline and keep
     /// waiting on the same write.
     Flush,
 }
@@ -1005,7 +1003,7 @@ enum Mode {
 /// ★It removes on drop too★ — so that no ended handle is left in the registry even if the supervisor panics or the runtime folds before teardown finishes.
 struct RosterExit<W: Wire> {
     leave: Option<LeaveRoster<W>>,
-    /// ★It is a weak handle★ — if strong, the control channel would not close even when the consumer releases all handles, and the supervisor could not hear it as 「닫아라」 (close).
+    /// ★It is a weak handle★ — if strong, the control channel would not close even when the consumer releases all handles, and the supervisor could not hear it as 「close」.
     me: Weak<PeerInner<W>>,
 }
 
@@ -1102,8 +1100,8 @@ impl<W: Wire> Supervisor<W> {
         let now = self.clock.now();
         let mut acts = self.machine.on(now, Input::Start);
         if self.accepted() {
-            // ★An accepted peer already holds the channel★ (`new_peer`) — the machine's dial is repaid on the spot as 「열렸다」 (opened) and it goes to the handshake.
-            //   The machine is left in its dialing-side shape (pure layer), and 「걸기 중」 (dialing) passes before being published.
+            // ★An accepted peer already holds the channel★ (`new_peer`) — the machine's dial is repaid on the spot as 「opened」 and it goes to the handshake.
+            //   The machine is left in its dialing-side shape (pure layer), and 「dialing」 passes before being published.
             debug_assert!(matches!(acts.as_slice(), [Action::Dial { .. }]), "{acts:?}");
             acts = self.machine.on(now, Input::Dialed);
         }
@@ -1128,8 +1126,8 @@ impl<W: Wire> Supervisor<W> {
                     other => {
                         // For Dialing/Backoff/Handshaking, `apply` always emits a follow-up input.
                         // ★We do not kill the peer here★ — if we got here, that is our mistake, and paying for it by
-                        //   「이 연결을 영구히 끝냄」 (ending this connection permanently) is the most destructive default.
-                        debug_assert!(false, "후속 입력 없이 {other:?} 로 떨어졌다");
+                        //   「ending this connection permanently」 is the most destructive default.
+                        debug_assert!(false, "fell to {other:?} without a follow-up input");
                         Input::ReconnectNow
                     }
                 },
@@ -1170,7 +1168,7 @@ impl<W: Wire> Supervisor<W> {
     /// (`drop_link`).
     ///
     /// ★Filtering out `GaveUp` is the point★ — the shell sees it and shows the reconnect popup (ADR-0180). That popup must not appear for a peer the app said it would
-    /// close, and announcing 「n 초 뒤 다시」 (retry in n seconds) for a peer that will not redial is false too. The machine is already
+    /// close, and announcing 「retry in n seconds」 for a peer that will not redial is false too. The machine is already
     /// `Closed`, so the intermediate state (`Backoff` · `GaveUp`) is not published (`run` calls this before the publish). A drain that started during the channel drop of
     /// a batch that decided to give up is not caught here — `apply` collects that report.
     ///
@@ -1219,7 +1217,7 @@ impl<W: Wire> Supervisor<W> {
                     // `drop_link` splits the close code by the cause (`last_cause`) that the same batch's `FailPending` wrote.
                     debug_assert!(
                         self.tx.is_none() || failed_pending,
-                        "통로를 쥔 채 FailPending 없이 DropLink 가 왔다"
+                        "DropLink came without FailPending while holding the link"
                     );
                     self.drop_link(code).await;
                 }
@@ -1234,7 +1232,7 @@ impl<W: Wire> Supervisor<W> {
     /// Collects the piled-up control signals at once. `Close` beats `ReconnectNow`.
     ///
     /// ★Folding consecutive `ReconnectNow` into one is the point★ — without folding, when the shell
-    /// presses faster than the supervisor, each time the dial is canceled **before it is even polled**, and 「끊고 → 걸다 말고」 (cut → stop mid-dial) repeats forever.
+    /// presses faster than the supervisor, each time the dial is canceled **before it is even polled**, and 「cut → stop mid-dial」 repeats forever.
     ///
     /// ★During a pre-close flush, `ReconnectNow` is dropped★ — also one called before the drain and not yet read. The handle
     /// does not accept calls after the drain (`Peer::reconnect_now`), but what entered before it stays in this queue, and listening would drop the channel and
@@ -1260,11 +1258,11 @@ impl<W: Wire> Supervisor<W> {
         let Mode::Dial { addr, dialer } = &self.mode else {
             // The paths that make an accepted peer dial (reconnect · end of backoff) are all blocked by the supervisor — the fold in `run` ·
             //   `Peer::reconnect_now`. If we got here, it is our mistake, and since there is no address to dial, we fold.
-            debug_assert!(false, "받은 상대에 걸기가 왔다");
+            debug_assert!(false, "a dial came to an accepted peer");
             return Input::Close;
         };
         let (addr, dialer) = (addr.clone(), dialer.clone());
-        // A 「지금 다시 붙어라」 (reconnect now) that was already piled up is exactly what we are about to do, so we swallow it.
+        // A 「reconnect now」 that was already piled up is exactly what we are about to do, so we swallow it.
         if let Some(Ctl::Close) = self.drain_ctl() {
             return Input::Close;
         }
@@ -1285,7 +1283,7 @@ impl<W: Wire> Supervisor<W> {
     }
 
     async fn shake_hands(&mut self, deadline: Instant) -> Input {
-        // ★Pairs with the same line in `dial`★ — it folds the piled-up 「지금 다시 붙어라」 (reconnect now) here too.
+        // ★Pairs with the same line in `dial`★ — it folds the piled-up 「reconnect now」 here too.
         if let Some(Ctl::Close) = self.drain_ctl() {
             return Input::Close;
         }
@@ -1316,7 +1314,7 @@ impl<W: Wire> Supervisor<W> {
                 self.attach_reader(rx);
                 // The accepted peer's upgrade field is released now that it has entered the operating phase (`Supervisor::admission`).
                 self.admission = None;
-                // The number is drawn here — this place is the only point of 「이 통로가 운영 단계에 들어섰다」 (this channel entered the operating phase).
+                // The number is drawn here — this place is the only point of 「this link entered the operating phase」.
                 let minted = Generation(self.generations.fetch_add(1, Ordering::AcqRel) + 1);
                 Input::Connected(minted)
             }
@@ -1357,8 +1355,8 @@ impl<W: Wire> Supervisor<W> {
                 let ctl = &mut self.ctl_rx;
                 let (lane, order) = (&self.inbound, &mut self.order);
                 let flush = &self.flush_wake;
-                // ★Wakes when the receiver end closes (`closed`)★ — folds at once even with nothing to put in (crate header 「받는 쪽 불변식」
-                //   (receiver invariants) 5). It is cancel-safe — calling it again checks whether it is closed first (external fact — tokio `Sender::closed`).
+                // ★Wakes when the receiver end closes (`closed`)★ — folds at once even with nothing to put in (crate header 「Receiver-side invariants」
+                //   5). It is cancel-safe — calling it again checks whether it is closed first (external fact — tokio `Sender::closed`).
                 // ★Also listens for the drain start★ — this phase does not read the data queue, so the marker does not wake it.
                 tokio::select! {
                     signal = ctl.recv() => Connecting::Ctl(signal),
@@ -1374,7 +1372,7 @@ impl<W: Wire> Supervisor<W> {
                     self.consumer_gone.store(true, Ordering::Release);
                     return Connecting::Room(false);
                 }
-                // A 「지금 다시 해라」 (retry now) read during a drain is dropped (`Self::drain_ctl`) — there is no connection to drain, so it folds.
+                // A 「retry now」 read during a drain is dropped (`Self::drain_ctl`) — there is no connection to drain, so it folds.
                 Connecting::Ctl(Some(Ctl::ReconnectNow)) if self.flushing() => {
                     return Connecting::Flush;
                 }
@@ -1399,7 +1397,7 @@ impl<W: Wire> Supervisor<W> {
     async fn wait(&mut self, until: Instant) -> Input {
         loop {
             // ★It reports here too★ — otherwise losses piled up during backoff · give-up come out nowhere until the user presses
-            //   「다시 연결」 (reconnect).
+            //   「reconnect」.
             let _ = self.drain_overflow();
             self.report_drops();
             // If the receiving side is gone or the app said to drain and close, it does not re-attach and folds — this wait is outside operation so there is no
@@ -1580,7 +1578,7 @@ impl<W: Wire> Supervisor<W> {
                     if self.wake_at() <= now {
                         debug_assert!(
                             false,
-                            "타이머가 자기 시한을 못 밀었다 — 운영 루프가 await 없이 돈다"
+                            "the timer could not push its own deadline — the operating loop spins without await"
                         );
                         tokio::task::yield_now().await;
                     }
@@ -1616,7 +1614,7 @@ impl<W: Wire> Supervisor<W> {
                 let (lane, order) = (&self.inbound, &mut self.order);
                 let ledger = &self.ledger;
                 // ★Do not re-attach `biased`★ — declaration-order polling under a frame flood starves the later arms
-                //   entirely (「운영 루프의 우선순위」 (priority of the operating loop) in this file's header).
+                //   entirely (「priority of the operating loop」 in this file's header).
                 // ★If the ordering area holds anything, pull the frame arm (backpressure)★ — what that frame would produce could not be loaded into the line either, so
                 //   it is better left in the channel. The threshold is set at one item because the ordering area exists for the places that put in synchronously (events · deadline events),
                 //   not as a second buffer for frames. In exchange, the drain arm always stands alongside.
@@ -1745,7 +1743,7 @@ impl<W: Wire> Supervisor<W> {
     /// The silence decision takes the time it noticed the clearing as the last receive, so it is independent of the start time.
     ///
     /// It is also called at the start of `on_timer` — if it cleared while asleep (the clearing arm and the deadline arm were ready together and the deadline arm won),
-    /// it makes that decision use the current state instead of the stale 「붙듦」 (held) seen at the start of the turn.
+    /// it makes that decision use the current state instead of the stale 「held」 seen at the start of the turn.
     /// ★The silence decision is made
     /// with this field (`paused`) — re-looking at the hold at that place would measure with the old `last_rx` at the moment of clearing and cut a peer held for over 50 s straight to `Idle`★.
     fn track_pause(&mut self, now: Instant) {
@@ -2070,7 +2068,7 @@ impl<W: Wire> Supervisor<W> {
         }
     }
 
-    // ── 쓰기 ────────────────────────────────────────────────────────────────
+    // ── Writing ────────────────────────────────────────────────────────────────
 
     /// ★Also listens for control and receiver-end closing while writing★ — if not, `close()` · the receiving side's disappearance is heard late by `write_deadline`
     /// (multiplied by the number of writes where the queue is drained back to back). If that side wins, it drops the future being written and
@@ -2112,9 +2110,9 @@ impl<W: Wire> Supervisor<W> {
     ///
     /// ★The flush deadline cuts the write even if it is set mid-write★ — it hears the wake announcing the start (`flush_wake`), sets the deadline, and
     /// keeps waiting on the same write. If it does not listen, one write set before the drain started holds the close until `write_deadline`
-    /// (TRD 3 §3-0 ④ 「시한 하나」 (one deadline)). If the deadline has already passed, it does not start the write.
+    /// (TRD 3 §3-0 ④ 「one deadline」). If the deadline has already passed, it does not start the write.
     ///
-    /// ★During a drain, 「지금 다시 해라」 (retry now) is dropped★ — also one called before the drain and not yet read (`Self::drain_ctl`).
+    /// ★During a drain, 「retry now」 is dropped★ — also one called before the drain and not yet read (`Self::drain_ctl`).
     /// If heard, it would drop what was being written and go to redial, so that drain would end without the close it was given ([`Peer::close_after_flush`]).
     async fn guard(
         &mut self,
@@ -2169,7 +2167,7 @@ impl<W: Wire> Supervisor<W> {
         }
     }
 
-    // ── 정리 ────────────────────────────────────────────────────────────────
+    // ── Cleanup ────────────────────────────────────────────────────────────────
 
     /// Drops the channel — tries to send a close code, and folds the reading task.
     ///
@@ -2178,15 +2176,15 @@ impl<W: Wire> Supervisor<W> {
     /// is left in the queue** that arm is immediately `Ready`, so the close future is dropped without being polled even once.
     /// Measured 2026-09-07: if `reconnect_now()` is called twice (the second signal stays in the queue), the goodbye did not go out
     /// in 41 · 54 · 49 · 49 of 100 runs even with no congestion at all. ★Do not revert★ — that loss flips not the text but the value the consumer
-    /// branches on: if the close frame goes out, the peer reads 「말하고 갔다」 (said goodbye and left), and if not, tungstenite raises
-    /// `ResetWithoutClosingHandshake` and it reads 「통로 오류」 (channel error).
+    /// branches on: if the close frame goes out, the peer reads 「said goodbye and left」, and if not, tungstenite raises
+    /// `ResetWithoutClosingHandshake` and it reads 「link error」.
     ///
     /// ★What the control arm earned was only delay, and that delay was already bounded★ — even if control cuts a pending close, the close code
     /// does not go out anyway, and if it does not cut, it is cut at `write_deadline`. So that arm was **delivering not one more frame**
     /// while dropping half of the frames that are delivered.
     ///
-    /// ★When congested, the code is still lost★ — `write_deadline` cuts this wait (`lib.rs` 「닫기 코드가
-    /// 상대에게 닿는 자리는 좁다」 — the place where the close code reaches the peer is narrow).
+    /// ★When congested, the code is still lost★ — `write_deadline` cuts this wait (`lib.rs` 「The place where a close code reaches
+    /// the peer is narrow」).
     ///
     /// ★The only thing we listen for while waiting is the start of the pre-close flush★ — during a pre-close flush this wait is the shorter of `write_deadline`
     /// and the time left on that deadline (that deadline covers through the close frame — [`Peer::close_after_flush`]). If the drain starts during this
@@ -2260,7 +2258,7 @@ impl<W: Wire> Supervisor<W> {
     /// ★Fold the read task first★ — that task reads only after taking a read-ahead queue slot (`read_link`), so after folding
     /// what is in the queue is all that was read. If we drained without folding, it would read more of the channel into the freed slots.
     /// ★We wait for nothing except one turn for that cancellation★ (that same wait of `drop_link` moved earlier — TRD 3
-    /// §3-0 ② 「여기까지 기다림 없이」 (no waiting up to here)). It does not write re-requests either — that window stays open and goes out again on the next channel
+    /// §3-0 ② 「no waiting up to here」). It does not write re-requests either — that window stays open and goes out again on the next link
     /// (`reissue_resumes`).
     ///
     /// What it returns = the frontmost reader's end already in the read-ahead queue (the one frame that cuts on decode failure · the peer's close · channel
@@ -2444,7 +2442,7 @@ impl<W: Wire> Supervisor<W> {
     ///
     /// ★A full line does not cut or drop this connection★ — that line belongs to this handle (`PeerConfig::inbound`), so
     /// being full means the consumer cannot keep up with this peer, not that the connection is at fault (ADR-0310 decision 17). Instead, while the ordering
-    /// area holds, the operating loop stops that peer's reading (「배압」 (backpressure) in this file's header).
+    /// area holds, the operating loop stops that peer's reading (「backpressure」 in this file's header).
     fn put(&mut self, item: Charged<Incoming<W>>) {
         if self.consumer_gone.load(Ordering::Acquire) {
             return;
@@ -2484,13 +2482,12 @@ impl<W: Wire> Supervisor<W> {
 
     /// Collects and handles what the handle could not put in.
     ///
-    /// ★Only outbound-queue saturation cuts the connection★ — 「내 큐가 찼다」 (my queue is full) is this connection's problem, and 「위로 올라가는 줄이
-    /// 찼다」 (the upward line is full) is the consumer's speed (`put`). Merging the two into one count field would cut the connection just because the consumer is slow.
+    /// ★Only outbound-queue saturation cuts the connection★ — 「my queue is full」 is this connection's problem, and 「the upward line is full」 is the consumer's speed (`put`). Merging the two into one count field would cut the connection just because the consumer is slow.
     ///
     /// ★Cut only when that overflow belongs to the current generation★ — the count outlives generations: an overflow counted in generation G is collected by G+1's first turn after that generation ended,
     /// passing the connection-establishment phase (which does not call this). Enforcing the policy there would
     /// cut the connection that just attached over the old connection's overflow. The count is reported regardless of generation.
-    #[must_use = "운영 중에는 이 판정이 연결을 끊는다"]
+    #[must_use = "during operation this decision cuts the connection"]
     fn drain_overflow(&mut self) -> Option<Input> {
         let refused = self.refused.swap(0, Ordering::AcqRel);
         if refused > 0 {
@@ -2517,7 +2514,7 @@ impl<W: Wire> Supervisor<W> {
 /// The input to feed the machine when leaving the operating phase — if the reader's end was already in the read-ahead queue salvaged while dropping the channel ([`Supervisor::salvage_read_ahead`])
 /// (the frontmost one — it may be the one frame in the middle of the line that cuts on decode failure), that end is written as the disconnect cause instead of the
 /// reason we left (write failure · silence · overflow …) — it is an end that was already read before dropping the channel. If the peer closes while the frame arm is pulled by backpressure, the supervisor may notice that closing
-/// first as a write that failed because of it (the line item in crate header 「알려진 한계」 (known limits)).
+/// first as a write that failed because of it (the line item in crate header 「known limits」).
 ///
 /// ★What is not rewritten★ — if the app closed (`Input::Close`) or asked to reconnect (`Input::ReconnectNow`), it stays as is: in both
 /// the disconnect cause is [`DisconnectCause::Explicit`] and the caller knows that reason. Turning a reconnect into a disconnect would lose that entry point's promise to refill the budget
@@ -2590,7 +2587,7 @@ async fn dial_once(
             debug_assert_eq!(
                 RejectKind::of(code),
                 Some(RejectKind::Terminal),
-                "DialFailure::Refused 는 종결 거절 코드만 싣는다: {code:?}"
+                "DialFailure::Refused carries only terminal reject codes: {code:?}"
             );
             Err(ConnectFailure::Rejected {
                 kind: RejectKind::Terminal,
@@ -2679,8 +2676,8 @@ async fn handshake_once(
                 Ok(Ok(LinkRead::Frame(Frame::Keepalive))) => step = HandshakeStep::Await,
                 Ok(Ok(LinkRead::Frame(frame))) => step = handshake.on_frame(&frame),
                 // ★The peer closed carrying a code = a reject, and the kind is decided by that code★ (TRD 3 §3-0 ⑤ — text does not
-                //   decide). Without this code, 「종결 거절은 예산을 안 쓴다」 (a terminal reject does not use budget) (ADR-0180 decision 5) does not hold in code.
-                //   ★A bare close · a normal close code is not a 「거절」 (reject)★ — a silent drop is 「못 붙었다」 (failed to attach), so it uses budget (if the daemon
+                //   decide). Without this code, 「a terminal reject does not use budget」 (ADR-0180 decision 5) does not hold in code.
+                //   ★A bare close · a normal close code is not a 「reject」★ — a silent drop is 「failed to attach」, so it uses budget (if the daemon
                 //   is restarting, the next attempt attaches).
                 Ok(Ok(LinkRead::Closed(close))) => {
                     let failure = match close {
@@ -2725,7 +2722,7 @@ fn peer_closed_during_handshake() -> ConnectFailure {
 /// ★Why a separate task★ — if `recv()` were put directly on a `select!` arm, each time another arm wins that future is
 /// canceled, and on a transport that is not cancel-safe a frame vanishes at that moment.
 ///
-/// ★If the read gate is closed, it does not do the next read★ (「더하기 전 물높이」 (fill level before adding) — `budget.rs`) — with only the slot count of the read-ahead queue,
+/// ★If the read gate is closed, it does not do the next read★ (「fill level before adding」 — `budget.rs`) — with only the slot count of the read-ahead queue,
 /// that line would hold up to slot count × one-message limit. The share is added right where it is read.
 ///
 /// ★Take the read-ahead queue slot before reading★ — it does not wait for a slot holding one frame it read. So when the supervisor
@@ -2771,7 +2768,7 @@ mod tests {
         inbound: mpsc::Receiver<Charged<Incoming<TestWire>>>,
         /// Things taken out in advance to look at the fence. The assertion that follows reads these first.
         buffered: Vec<Incoming<TestWire>>,
-        /// The supervisor task. ★Channels and the clock cannot tell 「끝났다」 (finished) from 「패닉했다」 (panicked)★ — a panic also drops the supervisor,
+        /// The supervisor task. ★Channels and the clock cannot tell 「finished」 from 「panicked」★ — a panic also drops the supervisor,
         /// closes all channels and releases all sleeping clocks.
         task: tokio::task::JoinHandle<()>,
     }
@@ -2840,7 +2837,7 @@ mod tests {
             self.peer.inner.data_tx.is_closed()
         }
 
-        /// Did the supervisor take everything out of the outbound queue. ★「통로로 아무것도 안 나갔다」 (nothing went out on the channel) alone does not make 「쓰는 중」 (writing)
+        /// Did the supervisor take everything out of the outbound queue. ★「nothing went out on the link」 alone does not make 「writing」
         /// stand★ — it is true even with things left in the queue, and what is left in the queue is counted or woken separately by `fail_pending`. Then
         /// an assertion that measures the count mid-write holds regardless of the write.
         fn queue_drained(&self) -> bool {
@@ -2908,16 +2905,19 @@ mod tests {
 
     async fn live() -> (Harness, Arc<MemoryEndpoint>) {
         let mut h = build(Policy::default(), Arc::new(ImmediateHandshake));
-        settle_until("첫 연결", || h.peer.peer_state() == PeerState::Live).await;
+        settle_until("first connection", || {
+            h.peer.peer_state() == PeerState::Live
+        })
+        .await;
         assert_eq!(h.kinds(), vec!["Connected"]);
-        let endpoint = h.net.accept().expect("통로가 열렸어야 한다");
+        let endpoint = h.net.accept().expect("the link must have opened");
         (h, endpoint)
     }
 
     /// Creates a state where frames **never stop**.
     ///
     /// ★A finite bundle cannot create starvation★ — once the supervisor drains it all, the frame arm becomes `Pending`
-    /// and the later arms get polled then. So a test that does 「1000개를 밀어 넣고 settle」 (push in 1000 and settle) **passes the same
+    /// and the later arms get polled then. So a test that does 「push in 1000 and settle」 **passes the same
     /// whether `biased` or not** (measured — the first edition written in that form caught not a single mutant). Starvation arises
     /// only when **fill rate ≥ drain rate**, so we keep the supply running.
     fn flood(endpoint: &Arc<MemoryEndpoint>) -> tokio::task::JoinHandle<()> {
@@ -2949,8 +2949,8 @@ mod tests {
     ) -> Result<TestIn, RequestError> {
         tokio::time::timeout(Duration::from_secs(5), task)
             .await
-            .expect("요청이 안 깨어났다 — 영구 대기 회귀다")
-            .expect("요청 태스크가 패닉했다")
+            .expect("the request did not wake — a permanent wait regression")
+            .expect("the request task panicked")
     }
 
     fn spawn_request(
@@ -2969,8 +2969,7 @@ mod tests {
 
     // ── C2/F1: anti-starvation rule ──
     //
-    // ★These eight are the regression net for C2·F1★ — not the flood tests below. The flood side checks 「부하 아래에서 살아
-    //   있나」 (does it stay alive under load), and **starvation itself cannot be created with this harness** (the read task is a structural bottleneck so
+    // ★These eight are the regression net for C2·F1★ — not the flood tests below. The flood side checks 「does it stay alive under load」, and **starvation itself cannot be created with this harness** (the read task is a structural bottleneck so
     //   the frame queue is always empty — the measurement in the `next_turn` comment).
     const CAP: usize = 512;
 
@@ -2993,7 +2992,7 @@ mod tests {
                         CAP
                     ),
                     Turn::Timer,
-                    "이미 지난 시한은 더 급하다"
+                    "a deadline already passed is more urgent"
                 );
             }
         }
@@ -3042,7 +3041,7 @@ mod tests {
         // ★Search with a limit★ — an unbounded search hangs when the rule is broken.
         let first_yield = (0..FRAME_BURST * 4)
             .find(|n| matches!(next_turn(t0, future, *n, 1, CAP), Turn::Outbound(_)))
-            .expect("연달아 처리하는 프레임 수에 상한이 없으면 나가는 큐가 영원히 굶는다");
+            .expect("without a cap on the number of frames processed in a row, the outbound queue starves forever");
         assert_eq!(first_yield, FRAME_BURST);
     }
 
@@ -3056,13 +3055,13 @@ mod tests {
             assert_eq!(
                 next_turn(t0, future, 0, outbound, CAP),
                 Turn::Outbound(outbound),
-                "★깊이를 안 보면 비율을 넘는 생산자 앞에서 큐가 계속 자라 QueueFull 로 끝난다★"
+                "★without looking at depth, the queue keeps growing in front of a producer above the ratio and ends in QueueFull★"
             );
         }
         assert_eq!(
             next_turn(t0, future, 0, half - 1, CAP),
             Turn::Wait,
-            "절반 아래에서는 평소대로 기다린다"
+            "below half, it waits as usual"
         );
     }
 
@@ -3074,7 +3073,7 @@ mod tests {
             assert_eq!(
                 next_turn(t0, future, FRAME_BURST, outbound, CAP),
                 Turn::Outbound(outbound),
-                "한 바퀴에 한 개씩만 빼면 문턱만 32배 높아진 같은 결함이다"
+                "taking out only one per round is the same defect with a threshold only 32x higher"
             );
         }
     }
@@ -3090,17 +3089,20 @@ mod tests {
     #[tokio::test]
     async fn a_two_step_handshake_round_trips_before_going_live() {
         let h = build(Policy::default(), Arc::new(HelloHandshake));
-        settle_until("핸드셰이크 진입", || {
+        settle_until("handshake entered", || {
             h.peer.peer_state() == PeerState::Handshaking
         })
         .await;
-        let endpoint = h.net.accept().expect("통로");
+        let endpoint = h.net.accept().expect("link");
         assert_eq!(
             endpoint.frames(),
             vec![Frame::Text(HelloHandshake::HELLO.into())]
         );
         endpoint.push(Frame::Text(HelloHandshake::WELCOME.into()));
-        settle_until("운영 진입", || h.peer.peer_state() == PeerState::Live).await;
+        settle_until("operation entered", || {
+            h.peer.peer_state() == PeerState::Live
+        })
+        .await;
     }
 
     // A dial that lands but whose handshake never answers fails at the connect deadline (dial and handshake share it)
@@ -3161,12 +3163,12 @@ mod tests {
             byte_budget: BYTE_BUDGET,
             generations: counter.clone(),
         });
-        settle_until("연결", || peer.peer_state() == PeerState::Live).await;
+        settle_until("connection", || peer.peer_state() == PeerState::Live).await;
         assert_eq!(peer.generation(), Generation(42));
         assert_eq!(
             counter.load(Ordering::Acquire),
             42,
-            "계수기가 함께 올라간다"
+            "the counter goes up together"
         );
     }
 
@@ -3195,14 +3197,14 @@ mod tests {
         // A situation where a new supervisor attaches while the old supervisor is still alive (a succession race on the same name tag).
         let first = spawn("d1");
         let second = spawn("d1");
-        settle_until("둘 다 연결", || {
+        settle_until("both connected", || {
             first.peer_state() == PeerState::Live && second.peer_state() == PeerState::Live
         })
         .await;
         assert_ne!(
             first.generation(),
             second.generation(),
-            "★같은 번호를 두 감독이 발행하면 소비자가 어느 소켓의 것인지 못 가린다★"
+            "★if two supervisors issue the same number, the consumer cannot tell which socket it belongs to★"
         );
     }
 
@@ -3254,7 +3256,7 @@ mod tests {
         assert_eq!(
             h.peer.peer_state(),
             PeerState::Live,
-            "시한 만료는 연결을 건드리지 않는다"
+            "a deadline expiry does not touch the connection"
         );
     }
 
@@ -3273,10 +3275,13 @@ mod tests {
 
         endpoint.push(TestWire::reply(9));
         settle().await;
-        assert!(h.messages().is_empty(), "늦은 답장은 조용히 버려진다");
+        assert!(
+            h.messages().is_empty(),
+            "a late reply is silently discarded"
+        );
         assert!(
             !h.kinds().contains(&"UnmatchedReply"),
-            "설계된 늦은 답장은 신고 대상이 아니다"
+            "a designed late reply is not reported"
         );
 
         let again = h.peer.request(TestOut::Request {
@@ -3324,7 +3329,7 @@ mod tests {
                 joined(pending).await,
                 Err(RequestError::Disconnected { .. })
             ),
-            "reconnect_now 만 FailPending 을 안 내면 이 슬롯은 영구 대기가 된다"
+            "if only reconnect_now does not emit FailPending, this slot waits forever"
         );
     }
 
@@ -3464,19 +3469,19 @@ mod tests {
         assert_eq!(
             texts(first.frames()),
             vec!["req|1|body1"],
-            "첫 요청이 나가 답을 기다린다"
+            "the first request goes out and waits for the answer"
         );
 
         first.stall_writes(true);
         h.peer
             .notify(TestOut::Notice("stuck".into()))
-            .expect("운영 중이다");
+            .expect("operating");
         settle().await;
         let queued = spawn_request(&h.peer, 2);
         settle().await;
         assert!(
             !h.queue_drained(),
-            "감독이 막힌 쓰기 위에 서 있어 둘째 요청은 큐에 있다"
+            "the supervisor is stuck on a blocked write, so the second request is in the queue"
         );
 
         // The channel is cut — the blocked write ends in failure.
@@ -3493,7 +3498,7 @@ mod tests {
                     ..
                 }) if generation == g1
             ),
-            "★답을 기다리던 요청은 보냄이다★ — 상대가 처리했을 수 있다: {waiting:?}"
+            "★a request that was waiting for an answer is sent★ — the peer may have processed it: {waiting:?}"
         );
         let queued = joined(queued).await;
         assert!(
@@ -3505,20 +3510,20 @@ mod tests {
                     ..
                 }) if generation == g1
             ),
-            "★큐에 든 채였던 요청은 안 보냄이다★ — 다시 보내도 두 번 적용되지 않는다: {queued:?}"
+            "★a request that stayed in the queue is not sent★ — sending it again does not apply it twice: {queued:?}"
         );
 
         h.clock.advance(Duration::from_millis(500));
-        settle_until("재연결", || {
+        settle_until("reconnect", || {
             h.peer.peer_state() == PeerState::Live && h.peer.generation() != g1
         })
         .await;
-        let next = h.net.accept().expect("둘째 통로");
+        let next = h.net.accept().expect("second link");
         settle().await;
         assert_eq!(
             texts(next.frames()),
             Vec::<String>::new(),
-            "끊긴 명령이 다음 연결에서 실행되면 안 된다(ADR-0195)"
+            "a cut command must not run on the next connection (ADR-0195)"
         );
     }
 
@@ -3529,18 +3534,21 @@ mod tests {
     #[tokio::test]
     async fn a_command_stamped_before_a_reconnect_is_not_written_on_the_next_link() {
         let mut h = build(Policy::default(), Arc::new(ListeningHandshake));
-        settle_until("핸드셰이크 대기", || {
+        settle_until("waiting for handshake", || {
             h.peer.peer_state() == PeerState::Handshaking
         })
         .await;
         // ★Keep hold of the other side★ — if dropped, it is a channel that vanished silently, so it is cut as a read error (`MemoryEndpoint::close`).
-        let first = h.net.accept().expect("첫 통로");
+        let first = h.net.accept().expect("first link");
         first.push(Frame::Text("go".into()));
-        settle_until("첫 연결", || h.peer.peer_state() == PeerState::Live).await;
+        settle_until("first connection", || {
+            h.peer.peer_state() == PeerState::Live
+        })
+        .await;
         let g1 = h.peer.generation();
 
         h.peer.reconnect_now();
-        settle_until("다음 핸드셰이크 대기", || {
+        settle_until("waiting for the next handshake", || {
             h.net.dials() == 2 && h.peer.peer_state() == PeerState::Handshaking
         })
         .await;
@@ -3581,12 +3589,12 @@ mod tests {
         settle().await;
         assert!(
             matches!(woken.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
-            "★틈이 실재한다★ — 연결 수립 구간은 큐를 안 읽어 낡은 명령이 다음 운영 단계까지 남는다"
+            "★the gap is real★ — the connection setup section does not read the queue, so stale commands remain until the next operating phase"
         );
 
-        let next = h.net.accept().expect("둘째 통로");
+        let next = h.net.accept().expect("second link");
         next.push(Frame::Text("go".into()));
-        settle_until("재연결", || h.peer.peer_state() == PeerState::Live).await;
+        settle_until("reconnect", || h.peer.peer_state() == PeerState::Live).await;
         settle().await;
         assert_ne!(h.peer.generation(), g1);
         let woken = woken.try_recv();
@@ -3599,12 +3607,12 @@ mod tests {
                     ..
                 })) if generation == g1
             ),
-            "낡은 요청은 안 보냄으로 깨어난다: {woken:?}"
+            "a stale request wakes as not sent: {woken:?}"
         );
         assert_eq!(
             texts(next.frames()),
             Vec::<String>::new(),
-            "★옛 세대에 묶인 명령은 다음 연결에 안 쓰인다★"
+            "★a command bound to an old generation is not written to the next connection★"
         );
         assert_eq!(
             h.peer.peer_state(),
@@ -3622,7 +3630,7 @@ mod tests {
         assert_eq!(
             outbound_dropped(&events),
             3,
-            "★부르는 쪽이 `Ok` 를 받아 간 알림 · 팬아웃 · 이어받기는 버린 만큼 센다★ — 안 세면 조용한 유실이다"
+            "★notifications · fan-outs · resumes for which the caller took `Ok` are counted as much as they were dropped★ — not counting them is a silent loss"
         );
     }
 
@@ -3637,10 +3645,10 @@ mod tests {
             body: "early".into(),
         }));
         first.close();
-        settle_until("백오프", || h.peer.peer_state() == PeerState::Backoff).await;
+        settle_until("backoff", || h.peer.peer_state() == PeerState::Backoff).await;
         h.clock.advance(Duration::from_millis(500));
-        settle_until("재연결", || h.peer.peer_state() == PeerState::Live).await;
-        let next = h.net.accept().expect("둘째 통로");
+        settle_until("reconnect", || h.peer.peer_state() == PeerState::Live).await;
+        let next = h.net.accept().expect("second link");
         assert_ne!(h.peer.generation(), g1);
 
         let first_poll = poll_immediate(&mut asked).await;
@@ -3653,17 +3661,17 @@ mod tests {
                     ..
                 })) if generation == g1
             ),
-            "★처음 폴링이 다시 붙은 뒤여도 만든 때의 세대에 묶인다★: {first_poll:?}"
+            "★bound to the generation of its creation even if first polled after reattaching★: {first_poll:?}"
         );
         settle().await;
         assert_eq!(
             texts(next.frames()),
             Vec::<String>::new(),
-            "만든 때의 연결이 끝났으니 다음 연결에 안 쓰인다"
+            "the connection of its creation ended, so it is not written to the next connection"
         );
     }
 
-    // A queue filled in an ended generation only reports and does not cut the next connection (`Supervisor::drain_overflow`). 「지금 다시 붙어라」 (reconnect now)
+    // A queue filled in an ended generation only reports and does not cut the next connection (`Supervisor::drain_overflow`). 「reconnect now」
     //   dials straight away without going through the backoff wait, so the first turn of the new connection is the first to collect that overflow count.
     #[tokio::test]
     async fn a_queue_that_overflowed_on_the_old_generation_does_not_cut_the_next_link() {
@@ -3674,8 +3682,11 @@ mod tests {
             },
             Arc::new(ImmediateHandshake),
         );
-        settle_until("첫 연결", || h.peer.peer_state() == PeerState::Live).await;
-        let first = h.net.accept().expect("첫 통로");
+        settle_until("first connection", || {
+            h.peer.peer_state() == PeerState::Live
+        })
+        .await;
+        let first = h.net.accept().expect("first link");
         let g1 = h.peer.generation();
 
         // Stand the supervisor on a blocked write and fill the queue.
@@ -3691,18 +3702,18 @@ mod tests {
         settle().await;
         // The close that drops the channel is standing on a blocked write — release it.
         first.stall_writes(false);
-        settle_until("재연결", || {
+        settle_until("reconnect", || {
             h.peer.peer_state() == PeerState::Live && h.peer.generation() != g1
         })
         .await;
-        let _next = h.net.accept().expect("둘째 통로");
+        let _next = h.net.accept().expect("second link");
         settle().await;
 
         let g2 = h.peer.generation();
         assert_eq!(
             h.peer.peer_state(),
             PeerState::Live,
-            "★옛 세대의 넘침이 새 연결을 끊으면 안 된다★"
+            "★an overflow of an old generation must not cut the new connection★"
         );
         let events = h.events();
         assert!(
@@ -3710,13 +3721,13 @@ mod tests {
                 e,
                 TransportEvent::Disconnected { generation, .. } if *generation == g2
             )),
-            "새 연결은 끊기지 않았다: {:?}",
+            "the new connection was not cut: {:?}",
             events.iter().map(|e| e.kind()).collect::<Vec<_>>()
         );
         assert_eq!(
             outbound_dropped(&events),
             4,
-            "쓰다 버린 n1 · 큐에 든 채 버린 n2 · n3 · 넘친 n4 — 신고는 한다"
+            "n1 dropped mid-write · n2 · n3 dropped while queued · n4 overflowed — still reported"
         );
     }
 
@@ -3726,10 +3737,10 @@ mod tests {
         let (mut h, first) = live().await;
         let g1 = h.peer.generation();
         first.close();
-        settle_until("백오프", || h.peer.peer_state() == PeerState::Backoff).await;
+        settle_until("backoff", || h.peer.peer_state() == PeerState::Backoff).await;
         h.clock.advance(Duration::from_millis(500));
-        settle_until("재연결", || h.peer.peer_state() == PeerState::Live).await;
-        let next = h.net.accept().expect("둘째 통로");
+        settle_until("reconnect", || h.peer.peer_state() == PeerState::Live).await;
+        let next = h.net.accept().expect("second link");
         let g2 = h.peer.generation();
         assert_ne!(g1, g2);
         h.drain();
@@ -3737,7 +3748,7 @@ mod tests {
         assert_eq!(
             h.peer.notify_in(g1, TestOut::Notice("old".into())),
             Err(SendError::Disconnected),
-            "옛 연결의 답은 입구에서 거절된다"
+            "an answer for an old connection is refused at the entrance"
         );
         let old = joined(spawn_request_in(&h.peer, g1, 1)).await;
         assert!(
@@ -3755,7 +3766,7 @@ mod tests {
         assert_eq!(texts(next.frames()), Vec::<String>::new());
         assert!(
             !h.kinds().contains(&"Dropped"),
-            "입구의 거절은 부르는 쪽이 오류로 받았으니 세지 않는다"
+            "a refusal at the entrance was received by the caller as an error, so it is not counted"
         );
         assert_eq!(h.peer.refused_count(), 0);
 
@@ -3773,7 +3784,7 @@ mod tests {
         );
     }
 
-    // ── keepalive · 시한 ──
+    // ── keepalive · deadline ──
     #[tokio::test]
     async fn silence_past_the_idle_timeout_cuts_the_link() {
         let (mut h, _endpoint) = live().await;
@@ -3836,7 +3847,7 @@ mod tests {
         feeder.abort();
         assert!(
             endpoint.drain().contains(&ClientMsg::Ping),
-            "★출력이 가장 많을 때 ping 이 멎으면 상대가 우리를 침묵으로 끊는다★"
+            "★if pings stop when output is heaviest, the peer cuts us for silence★"
         );
         assert_eq!(h.peer.peer_state(), PeerState::Live);
     }
@@ -3853,7 +3864,7 @@ mod tests {
             endpoint
                 .frames()
                 .contains(&Frame::Text("not|let-me-out".into())),
-            "★프레임 팔이 계속 준비돼 있어도 나가는 큐가 굶으면 안 된다★"
+            "★the outbound queue must not starve even if the frame arm stays ready★"
         );
     }
 
@@ -3869,7 +3880,7 @@ mod tests {
         feeder.abort();
         assert!(
             matches!(joined(pending).await, Err(RequestError::TimedOut { .. })),
-            "★시한이 안 돌면 요청이 상한을 넘겨 매달린다★"
+            "★if the deadline does not run, the request hangs past the cap★"
         );
     }
 
@@ -3897,7 +3908,7 @@ mod tests {
         assert_eq!(
             endpoint.frames(),
             vec![Frame::Text("res|1|1".into())],
-            "구멍을 만나면 그 지점부터 다시 청한다"
+            "on hitting a gap, it requests again from that point"
         );
     }
 
@@ -3910,17 +3921,17 @@ mod tests {
         settle().await;
         h.drain();
 
-        // A piece the peer had already sent before receiving the re-request. ★Then put up one fence after it★ — if we just assert 「없다」 (there is none) right after
+        // A piece the peer had already sent before receiving the re-request. ★Then put up one fence after it★ — if we just assert 「there is none」 right after
         //   `settle()`, it passes even when processing has not happened yet, and the test blesses the defect.
         endpoint.push(TestWire::chunk(1, 4, 6));
         endpoint.push(TestWire::encode_in(&TestIn::Notice("fence".into())));
-        settle_until("6번 조각과 울타리가 처리될 때까지", || {
+        settle_until("until piece 6 and the fence are processed", || {
             h.seen_notice("fence")
         })
         .await;
         assert!(
             !h.kinds().contains(&"StreamTruncated"),
-            "★상대가 못 준다★ 가 아니라 ★아직 안 왔다★ 다"
+            "it is ★not here yet★, not ★the peer cannot give it★"
         );
 
         // The peer's replay comes up in order.
@@ -3936,7 +3947,11 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(seqs, vec![2, 3, 4, 5, 6], "잃은 구간이 실제로 돌아온다");
+        assert_eq!(
+            seqs,
+            vec![2, 3, 4, 5, 6],
+            "the lost section actually comes back"
+        );
     }
 
     #[tokio::test]
@@ -3956,7 +3971,11 @@ mod tests {
             Some(TransportEvent::StreamTruncated { oldest_valid, .. }) => Some(*oldest_valid),
             _ => None,
         });
-        assert_eq!(oldest, Some(5), "★붙들고 있던 첫 번호가 하한이다★");
+        assert_eq!(
+            oldest,
+            Some(5),
+            "★the first number held is the lower bound★"
+        );
         let seqs: Vec<u64> = items
             .iter()
             .filter_map(|i| match i.as_message().map(|a| &a.msg) {
@@ -3967,7 +3986,7 @@ mod tests {
         assert_eq!(
             seqs,
             vec![5],
-            "★신고한 하한부터 실제로 배달해야 그 값이 참이다★"
+            "★the reported lower bound is true only if delivery actually starts from it★"
         );
     }
 
@@ -3983,13 +4002,13 @@ mod tests {
         endpoint.close();
         settle().await;
         h.clock.advance(Duration::from_millis(500));
-        settle_until("재연결", || h.peer.peer_state() == PeerState::Live).await;
+        settle_until("reconnect", || h.peer.peer_state() == PeerState::Live).await;
 
-        let reconnected = h.net.accept().expect("새 통로");
+        let reconnected = h.net.accept().expect("new link");
         assert_eq!(
             reconnected.frames(),
             vec![Frame::Text("res|1|1".into())],
-            "★재연결 뒤 다시 청하지 않으면 그 구멍은 영영 안 메워진다★"
+            "★without requesting again after reconnecting, that gap never gets filled★"
         );
     }
 
@@ -4003,7 +4022,7 @@ mod tests {
             },
             Arc::new(ImmediateHandshake),
         );
-        settle_until("연결", || h.peer.peer_state() == PeerState::Live).await;
+        settle_until("connection", || h.peer.peer_state() == PeerState::Live).await;
         let endpoint = h.net.accept().unwrap();
 
         endpoint.push(TestWire::chunk(1, 4, 1));
@@ -4021,11 +4040,11 @@ mod tests {
             .collect();
         assert!(
             kinds.contains(&"StreamForgotten"),
-            "★무엇을 잊었는지 말하지 않으면 그 스트림의 장부가 조용히 처음부터 다시 시작된다★"
+            "★without saying what was forgotten, that stream's ledger silently restarts from the beginning★"
         );
         assert!(
             kinds.contains(&"StreamTruncated"),
-            "붙들고 있던 조각이 축출과 함께 사라지면 안 된다"
+            "held pieces must not vanish with the eviction"
         );
         let seqs: Vec<u64> = items
             .iter()
@@ -4034,7 +4053,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(seqs, vec![5], "붙들고 있던 5 를 돌려받는다");
+        assert_eq!(seqs, vec![5], "gets back the 5 it was holding");
     }
 
     #[tokio::test]
@@ -4072,7 +4091,7 @@ mod tests {
         }));
         settle().await;
         assert!(h.kinds().contains(&"AmbiguousRole"));
-        assert!(joined(waiting).await.is_ok(), "답장으로 먼저 처리한다");
+        assert!(joined(waiting).await.is_ok(), "handled first as a reply");
     }
 
     #[tokio::test]
@@ -4095,7 +4114,7 @@ mod tests {
 
         h.peer.resume_stream(7, Some(1));
         h.clock.advance(Duration::from_millis(500));
-        settle_until("재연결", || h.peer.peer_state() == PeerState::Live).await;
+        settle_until("reconnect", || h.peer.peer_state() == PeerState::Live).await;
 
         let dropped = h.events().iter().find_map(|e| match e {
             TransportEvent::Dropped {
@@ -4117,7 +4136,11 @@ mod tests {
             TransportEvent::DecodeFailed { reason, .. } => Some(reason),
             _ => None,
         });
-        assert_eq!(reason, Some("bad number"), "분류 낱말만 실린다");
+        assert_eq!(
+            reason,
+            Some("bad number"),
+            "only the classification word is carried"
+        );
     }
 
     #[tokio::test]
@@ -4138,7 +4161,7 @@ mod tests {
             },
             Arc::new(ImmediateHandshake),
         );
-        settle_until("연결", || h.peer.peer_state() == PeerState::Live).await;
+        settle_until("connection", || h.peer.peer_state() == PeerState::Live).await;
         let endpoint = h.net.accept().unwrap();
         h.drain();
         endpoint.push(Frame::Text("garbage".into()));
@@ -4146,7 +4169,7 @@ mod tests {
         assert_eq!(
             h.disconnect_cause(),
             Some(DisconnectCause::ReadFailed),
-            "읽은 것을 못 읽어 끊었다 — 읽는 쪽의 끝이다"
+            "cut because what was read could not be parsed — the reading side's end"
         );
     }
 
@@ -4155,7 +4178,10 @@ mod tests {
     async fn being_unreachable_burns_the_budget_and_then_gives_up() {
         let mut h = build(Policy::default(), Arc::new(ImmediateHandshake));
         h.net.fail_forever();
-        settle_until("첫 실패", || h.peer.peer_state() == PeerState::Backoff).await;
+        settle_until("first failure", || {
+            h.peer.peer_state() == PeerState::Backoff
+        })
+        .await;
 
         for delay in [500u64, 1000, 2000] {
             h.clock.advance(Duration::from_millis(delay));
@@ -4165,7 +4191,7 @@ mod tests {
             h.peer.peer_state(),
             PeerState::GaveUp(crate::machine::GaveUpReason::BudgetExhausted)
         );
-        assert_eq!(h.net.dials(), 4, "첫 시도 + 재시도 3회");
+        assert_eq!(h.net.dials(), 4, "first attempt + 3 retries");
         let kinds = h.kinds();
         assert_eq!(kinds.iter().filter(|k| **k == "ConnectFailed").count(), 4);
         assert!(kinds.contains(&"GaveUp"));
@@ -4174,12 +4200,12 @@ mod tests {
     #[tokio::test]
     async fn a_rejection_spends_no_budget_and_dials_only_once() {
         let mut h = build(Policy::default(), RejectingHandshake::new("version 3 != 4"));
-        settle_until("거절", || h.peer.peer_state().is_terminal()).await;
+        settle_until("reject", || h.peer.peer_state().is_terminal()).await;
         assert_eq!(
             h.peer.peer_state(),
             PeerState::GaveUp(crate::machine::GaveUpReason::Rejected)
         );
-        assert_eq!(h.net.dials(), 1, "붙었는데 거절 = 재시도하지 않는다");
+        assert_eq!(h.net.dials(), 1, "attached but rejected = no retry");
         let events = h.events();
         let reason = events.iter().find_map(|e| match e {
             TransportEvent::Rejected { reason, .. } => Some(reason.clone()),
@@ -4189,7 +4215,7 @@ mod tests {
         assert!(events.iter().any(|e| e.kind() == "GaveUp"));
         assert!(
             !events.iter().any(|e| e.kind() == "ConnectFailed"),
-            "예산을 쓴 적이 없으므로 시도 실패 사건도 없다"
+            "the budget was never used, so there is no attempt failure event either"
         );
     }
 
@@ -4197,20 +4223,20 @@ mod tests {
     #[tokio::test]
     async fn a_peer_that_closes_with_a_code_is_a_rejection_not_a_retry() {
         let mut h = build(Policy::default(), Arc::new(ListeningHandshake));
-        settle_until("핸드셰이크 대기", || {
+        settle_until("waiting for handshake", || {
             h.peer.peer_state() == PeerState::Handshaking
         })
         .await;
         let endpoint = h.net.accept().unwrap();
         endpoint.reject(Close::new(CloseCode::HANDSHAKE_REJECTED, "protocol 3 != 4"));
-        settle_until("거절 판정", || h.peer.peer_state().is_terminal()).await;
+        settle_until("reject decision", || h.peer.peer_state().is_terminal()).await;
 
         assert_eq!(
             h.peer.peer_state(),
             PeerState::GaveUp(crate::machine::GaveUpReason::Rejected),
-            "★코드를 읽지 못하면 여기가 BudgetExhausted 가 된다★"
+            "★if the code cannot be read, this becomes BudgetExhausted★"
         );
-        assert_eq!(h.net.dials(), 1, "거절은 예산을 안 쓴다");
+        assert_eq!(h.net.dials(), 1, "a reject does not use budget");
         let reported = h.events().into_iter().find_map(|e| match e {
             TransportEvent::Rejected { code, reason, .. } => Some((code, reason)),
             _ => None,
@@ -4224,13 +4250,16 @@ mod tests {
     #[tokio::test]
     async fn a_peer_that_closes_without_a_code_is_treated_as_unreachable() {
         let mut h = build(Policy::default(), Arc::new(ListeningHandshake));
-        settle_until("핸드셰이크 대기", || {
+        settle_until("waiting for handshake", || {
             h.peer.peer_state() == PeerState::Handshaking
         })
         .await;
         h.net.accept().unwrap().close();
-        settle_until("백오프", || h.peer.peer_state() == PeerState::Backoff).await;
-        assert!(h.kinds().contains(&"ConnectFailed"), "예산을 쓰는 쪽이다");
+        settle_until("backoff", || h.peer.peer_state() == PeerState::Backoff).await;
+        assert!(
+            h.kinds().contains(&"ConnectFailed"),
+            "it is the budget-using kind"
+        );
     }
 
     // ── Reject kinds (TRD 3 §3-0 ⑤ · D20 ①) — the kind decides the budget, and the close code carries the kind ──
@@ -4261,14 +4290,14 @@ mod tests {
             ),
         ] {
             let h = build(Policy::default(), handshake);
-            settle_until("첫 시도의 끝", || {
+            settle_until("end of the first attempt", || {
                 matches!(
                     h.peer.peer_state(),
                     PeerState::Backoff | PeerState::GaveUp(_)
                 )
             })
             .await;
-            let endpoint = h.net.accept().expect("통로가 열렸어야 한다");
+            let endpoint = h.net.accept().expect("the link must have opened");
             assert_eq!(sent_close(&endpoint), Some(expected), "{expected:?}");
         }
     }
@@ -4279,11 +4308,11 @@ mod tests {
             Policy::default(),
             RejectingHandshake::retryable("stale token"),
         );
-        settle_until("백오프", || h.peer.peer_state() == PeerState::Backoff).await;
+        settle_until("backoff", || h.peer.peer_state() == PeerState::Backoff).await;
         let events = h.events();
         assert!(
             !events.iter().any(|e| e.kind() == "Rejected"),
-            "다시 거는 거절은 종결 거절 사건을 안 낸다"
+            "a reject that redials does not emit a terminal reject event"
         );
         let cause = events.into_iter().find_map(|e| match e {
             TransportEvent::ConnectFailed { cause, .. } => Some(cause),
@@ -4298,17 +4327,17 @@ mod tests {
             })
         );
         for (delay, dials) in [(500u64, 2usize), (1000, 3), (2000, 4)] {
-            settle_until("백오프", || h.peer.peer_state() == PeerState::Backoff).await;
+            settle_until("backoff", || h.peer.peer_state() == PeerState::Backoff).await;
             h.clock.advance(Duration::from_millis(delay));
-            settle_until("다시 걸기", || h.net.dials() == dials).await;
+            settle_until("redial", || h.net.dials() == dials).await;
         }
-        settle_until("포기", || h.peer.peer_state().is_terminal()).await;
+        settle_until("give up", || h.peer.peer_state().is_terminal()).await;
         assert_eq!(
             h.peer.peer_state(),
             PeerState::GaveUp(crate::machine::GaveUpReason::BudgetExhausted),
-            "다시 거는 거절은 예산이 바닥나야 포기한다"
+            "a reject that redials gives up only when the budget runs out"
         );
-        assert_eq!(h.net.dials(), 4, "첫 시도 + 재시도 3회");
+        assert_eq!(h.net.dials(), 4, "first attempt + 3 retries");
     }
 
     #[tokio::test]
@@ -4320,7 +4349,7 @@ mod tests {
             CloseCode(CloseCode::CONSUMER_BASE + 7),
         ] {
             let mut h = build(Policy::default(), Arc::new(ListeningHandshake));
-            settle_until("핸드셰이크 대기", || {
+            settle_until("waiting for handshake", || {
                 h.peer.peer_state() == PeerState::Handshaking
             })
             .await;
@@ -4328,7 +4357,7 @@ mod tests {
                 .accept()
                 .unwrap()
                 .reject(Close::new(code, "try again"));
-            settle_until("백오프", || h.peer.peer_state() == PeerState::Backoff).await;
+            settle_until("backoff", || h.peer.peer_state() == PeerState::Backoff).await;
             assert_eq!(
                 connect_failure(&mut h),
                 Some(ConnectFailure::Rejected {
@@ -4339,14 +4368,14 @@ mod tests {
                 "{code:?}"
             );
             h.clock.advance(Duration::from_millis(500));
-            settle_until("다시 걸기", || h.net.dials() == 2).await;
+            settle_until("redial", || h.net.dials() == 2).await;
         }
     }
 
     #[tokio::test]
     async fn a_graceful_close_during_the_handshake_is_could_not_connect() {
         let mut h = build(Policy::default(), Arc::new(ListeningHandshake));
-        settle_until("핸드셰이크 대기", || {
+        settle_until("waiting for handshake", || {
             h.peer.peer_state() == PeerState::Handshaking
         })
         .await;
@@ -4354,7 +4383,7 @@ mod tests {
             .accept()
             .unwrap()
             .reject(Close::new(CloseCode(1000), "bye"));
-        settle_until("백오프", || h.peer.peer_state() == PeerState::Backoff).await;
+        settle_until("backoff", || h.peer.peer_state() == PeerState::Backoff).await;
         assert_eq!(
             connect_failure(&mut h),
             Some(ConnectFailure::Unreachable(LinkError::new(
@@ -4383,7 +4412,7 @@ mod tests {
             (CloseCode::HANDSHAKE_REJECTED, RejectKind::Terminal),
         ] {
             let mut h = build(Policy::default(), Arc::new(WaitsOutErrors));
-            settle_until("핸드셰이크 대기", || {
+            settle_until("waiting for handshake", || {
                 h.peer.peer_state() == PeerState::Handshaking
             })
             .await;
@@ -4393,10 +4422,10 @@ mod tests {
             assert_eq!(
                 h.peer.peer_state(),
                 PeerState::Handshaking,
-                "오류 프레임 하나로 판정하지 않는다"
+                "does not decide on a single error frame"
             );
             endpoint.reject(Close::new(code, "auth failed"));
-            settle_until("판정", || {
+            settle_until("decision", || {
                 matches!(
                     h.peer.peer_state(),
                     PeerState::Backoff | PeerState::GaveUp(_)
@@ -4419,7 +4448,7 @@ mod tests {
             CloseCode::HANDSHAKE_REJECTED,
             "daemon 0.4.0 != 0.4.1",
         ));
-        settle_until("포기", || h.peer.peer_state().is_terminal()).await;
+        settle_until("give up", || h.peer.peer_state().is_terminal()).await;
         assert_eq!(
             h.peer.peer_state(),
             PeerState::GaveUp(crate::machine::GaveUpReason::Rejected)
@@ -4438,25 +4467,25 @@ mod tests {
         );
         assert!(
             !events.iter().any(|e| e.kind() == "ConnectFailed"),
-            "예산을 쓴 적이 없으므로 시도 실패 사건도 없다"
+            "the budget was never used, so there is no attempt failure event either"
         );
         h.clock.advance(Duration::from_secs(60));
         settle().await;
-        assert_eq!(h.net.dials(), 1, "다시 걸지 않는다");
+        assert_eq!(h.net.dials(), 1, "does not redial");
     }
 
     #[tokio::test]
     async fn a_rejection_reason_from_the_peer_is_masked_before_it_surfaces() {
         let noisy = format!(
             "evil\u{1b}[31m\nline\u{202e}{}",
-            "가".repeat(crate::mask::REASON_MAX_BYTES)
+            "가".repeat(crate::mask::REASON_MAX_BYTES) // hangul-ok
         );
         for code in [
             CloseCode::HANDSHAKE_REJECTED,
             CloseCode::HANDSHAKE_RETRYABLE,
         ] {
             let mut h = build(Policy::default(), Arc::new(ListeningHandshake));
-            settle_until("핸드셰이크 대기", || {
+            settle_until("waiting for handshake", || {
                 h.peer.peer_state() == PeerState::Handshaking
             })
             .await;
@@ -4464,7 +4493,7 @@ mod tests {
                 .accept()
                 .unwrap()
                 .reject(Close::new(code, noisy.clone()));
-            settle_until("판정", || {
+            settle_until("decision", || {
                 matches!(
                     h.peer.peer_state(),
                     PeerState::Backoff | PeerState::GaveUp(_)
@@ -4482,7 +4511,7 @@ mod tests {
                     } => Some(reason),
                     _ => None,
                 })
-                .expect("거절 사건");
+                .expect("reject event");
             assert_eq!(reason, crate::mask_reason(&noisy), "{code:?}");
             assert!(reason.starts_with("evil[31mline"), "{code:?}: {reason}");
             assert!(reason.len() <= crate::mask::REASON_MAX_BYTES);
@@ -4503,7 +4532,7 @@ mod tests {
 
         h.net.allow();
         h.peer.reconnect_now();
-        settle_until("재연결", || h.peer.peer_state() == PeerState::Live).await;
+        settle_until("reconnect", || h.peer.peer_state() == PeerState::Live).await;
         assert!(h.kinds().contains(&"Connected"));
     }
 
@@ -4514,21 +4543,25 @@ mod tests {
             h.peer.reconnect_now();
         }
         settle_until(
-            "쌓인 신호를 접지 않으면 dial 이 폴링되기도 전에 매번 취소된다",
+            "without folding the piled-up signals, the dial is canceled every time before it is even polled",
             || h.net.dials() >= 2,
         )
         .await;
-        settle_until("재연결", || h.peer.peer_state() == PeerState::Live).await;
+        settle_until("reconnect", || h.peer.peer_state() == PeerState::Live).await;
     }
 
     #[tokio::test]
     async fn a_lost_link_comes_back_on_the_first_backoff_step() {
         let (h, endpoint) = live().await;
         endpoint.close();
-        settle_until("백오프", || h.peer.peer_state() == PeerState::Backoff).await;
+        settle_until("backoff", || h.peer.peer_state() == PeerState::Backoff).await;
         h.clock.advance(Duration::from_millis(500));
-        settle_until("재연결", || h.peer.peer_state() == PeerState::Live).await;
-        assert_eq!(h.peer.generation(), Generation(2), "세대가 하나 올랐다");
+        settle_until("reconnect", || h.peer.peer_state() == PeerState::Live).await;
+        assert_eq!(
+            h.peer.generation(),
+            Generation(2),
+            "the generation went up by one"
+        );
     }
 
     // ── drop_link_in ──
@@ -4626,7 +4659,7 @@ mod tests {
         assert_eq!(
             h.peer.peer_state(),
             PeerState::GaveUp(crate::machine::GaveUpReason::BudgetExhausted),
-            "★여기 못 닿으면 ADR-0180 결정 7 의 팝업이 영영 안 뜬다★"
+            "★if this is not reached, the popup of ADR-0180 decision 7 never shows★"
         );
     }
 
@@ -4638,12 +4671,12 @@ mod tests {
         endpoint.push(Frame::Keepalive);
         settle().await;
         endpoint.close();
-        settle_until("백오프", || h.peer.peer_state() == PeerState::Backoff).await;
+        settle_until("backoff", || h.peer.peer_state() == PeerState::Backoff).await;
         h.clock.advance(Duration::from_millis(500));
-        settle_until("재연결", || h.peer.peer_state() == PeerState::Live).await;
+        settle_until("reconnect", || h.peer.peer_state() == PeerState::Live).await;
     }
 
-    // ── 큐 ──
+    // ── Queue ──
     #[tokio::test]
     async fn requests_made_while_down_fail_without_waiting() {
         let (h, endpoint) = live().await;
@@ -4672,7 +4705,7 @@ mod tests {
             },
             Arc::new(ImmediateHandshake),
         );
-        settle_until("연결", || h.peer.peer_state() == PeerState::Live).await;
+        settle_until("connection", || h.peer.peer_state() == PeerState::Live).await;
         let endpoint = h.net.accept().unwrap();
         h.drain();
         endpoint.stall_writes(true);
@@ -4684,10 +4717,10 @@ mod tests {
             }
             settle().await;
         }
-        assert!(refused > 0, "유계 큐가 실제로 찼어야 한다");
+        assert!(refused > 0, "the bounded queue must actually have filled");
         assert!(
             endpoint.frames().is_empty(),
-            "막힌 동안에는 한 프레임도 안 나간다"
+            "not a single frame goes out while blocked"
         );
 
         endpoint.stall_writes(false);
@@ -4705,7 +4738,7 @@ mod tests {
             },
             Arc::new(ImmediateHandshake),
         );
-        settle_until("연결", || h.peer.peer_state() == PeerState::Live).await;
+        settle_until("connection", || h.peer.peer_state() == PeerState::Live).await;
         let endpoint = h.net.accept().unwrap();
         h.drain();
         endpoint.stall_writes(true);
@@ -4733,7 +4766,10 @@ mod tests {
         endpoint.stall_writes(true);
         h.peer.notify(TestOut::Notice("first".into())).unwrap();
         settle().await;
-        assert!(endpoint.frames().is_empty(), "감독이 첫 쓰기에서 멈췄다");
+        assert!(
+            endpoint.frames().is_empty(),
+            "the supervisor stopped at the first write"
+        );
 
         // These are places where things are dropped while still in the queue — the handle already took an `Ok`.
         for n in 0..3 {
@@ -4748,7 +4784,7 @@ mod tests {
         endpoint.stall_writes(false);
         settle().await;
         h.clock.advance(Duration::from_millis(500));
-        settle_until("재연결", || h.peer.peer_state() == PeerState::Live).await;
+        settle_until("reconnect", || h.peer.peer_state() == PeerState::Live).await;
 
         let dropped = h.events().iter().find_map(|e| match e {
             TransportEvent::Dropped {
@@ -4759,7 +4795,7 @@ mod tests {
         // 4 = the first one cut mid-write 1 + 3 left in the queue.
         assert!(
             matches!(dropped, Some((Direction::Outbound, 4))),
-            "핸들이 이미 Ok 를 받아 갔으므로 여기서 안 세면 조용한 유실이다: {dropped:?}"
+            "the handle already took Ok, so not counting here is a silent loss: {dropped:?}"
         );
     }
 
@@ -4767,7 +4803,7 @@ mod tests {
     #[tokio::test]
     async fn a_closed_consumer_ends_the_peer_instead_of_triggering_reconnects() {
         let mut h = build(Policy::default(), Arc::new(ImmediateHandshake));
-        settle_until("연결", || h.peer.peer_state() == PeerState::Live).await;
+        settle_until("connection", || h.peer.peer_state() == PeerState::Live).await;
         let endpoint = h.net.accept().unwrap();
         let dials_before = h.net.dials();
 
@@ -4777,11 +4813,11 @@ mod tests {
         drop(std::mem::replace(&mut h.inbound, mpsc::channel(1).1));
 
         endpoint.push(TestWire::encode_in(&TestIn::Notice("x".into())));
-        settle_until("종료", || h.peer.peer_state() == PeerState::Closed).await;
+        settle_until("shutdown", || h.peer.peer_state() == PeerState::Closed).await;
         assert_eq!(
             h.net.dials(),
             dials_before,
-            "소비자 부재는 재연결할 일이 아니다"
+            "a missing consumer is not a reason to reconnect"
         );
     }
 
@@ -4790,7 +4826,7 @@ mod tests {
     async fn a_peer_that_shuts_down_gracefully_is_not_a_rejection() {
         for code in [CloseCode(1000), CloseCode(1001), CloseCode::GOING_AWAY] {
             let mut h = build(Policy::default(), Arc::new(ListeningHandshake));
-            settle_until("핸드셰이크 대기", || {
+            settle_until("waiting for handshake", || {
                 h.peer.peer_state() == PeerState::Handshaking
             })
             .await;
@@ -4798,13 +4834,16 @@ mod tests {
                 .accept()
                 .unwrap()
                 .reject(Close::new(code, "shutting down"));
-            settle_until("판정", || h.peer.peer_state() != PeerState::Handshaking).await;
+            settle_until("decision", || h.peer.peer_state() != PeerState::Handshaking).await;
             assert_eq!(
                 h.peer.peer_state(),
                 PeerState::Backoff,
-                "★{code:?} 는 「나 이제 간다」이지 「너를 안 받는다」가 아니다 —                  거절로 읽으면 데몬이 곱게 종료할 때마다 재시도 없이 포기한다★"
+                "★{code:?} means 「I am leaving now」, not 「I do not accept you」 — reading it as a reject would give up without retry every time the daemon shuts down cleanly★"
             );
-            assert!(h.kinds().contains(&"ConnectFailed"), "예산을 쓰는 쪽이다");
+            assert!(
+                h.kinds().contains(&"ConnectFailed"),
+                "it is the budget-using kind"
+            );
         }
     }
 
@@ -4825,7 +4864,7 @@ mod tests {
         assert_eq!(
             h.disconnect_cause(),
             Some(DisconnectCause::Idle),
-            "★못 읽을 것만 보내는 상대를 끊는 밸브가 이것뿐이다★"
+            "★this is the only valve that cuts a peer sending only unreadable things★"
         );
     }
 
@@ -4845,13 +4884,13 @@ mod tests {
         settle().await;
         // ★On a blocked channel, the close of `drop_link` is stuck too★ — the loss report comes out at the next stage (the backoff wait),
         //   so if we do not release it, the assertion below meets it before the report has come out. The reason we do not cut with the clock is
-        //   that then even the backoff would pass and 「아직 안 붙었다」 (not yet attached) would break.
+        //   that then even the backoff would pass and 「not yet attached」 would break.
         endpoint.stall_writes(false);
         settle().await;
         assert_eq!(
             h.peer.peer_state(),
             PeerState::Backoff,
-            "아직 다시 붙지 않은 상태여야 이 테스트가 뜻을 갖는다"
+            "this test means something only while not yet reattached"
         );
         let dropped = h.events().iter().find_map(|e| match e {
             TransportEvent::Dropped {
@@ -4862,7 +4901,7 @@ mod tests {
         // 4 = the first one cut mid-write 1 + 3 left in the queue.
         assert!(
             matches!(dropped, Some((Direction::Outbound, 4))),
-            "★다시 붙을 때까지 기다리면 사용자가 「다시 연결」을 누를 때까지 아무 데도 안 나온다★: {dropped:?}"
+            "★waiting until reattached means nothing shows anywhere until the user presses 「reconnect」★: {dropped:?}"
         );
     }
 
@@ -4873,7 +4912,7 @@ mod tests {
     #[tokio::test]
     async fn a_queue_full_count_wakes_a_parked_supervisor() {
         let mut h = build(Policy::default(), RejectingHandshake::new("nope"));
-        settle_until("포기", || {
+        settle_until("give up", || {
             matches!(h.peer.peer_state(), PeerState::GaveUp(_))
         })
         .await;
@@ -4884,7 +4923,7 @@ mod tests {
         assert_eq!(
             outbound_dropped(&h.events()),
             1,
-            "★잠든 감독이 스스로 깨어 큐 포화 셈을 신고한다★"
+            "★a sleeping supervisor wakes on its own and reports the queue saturation count★"
         );
     }
 
@@ -4914,10 +4953,10 @@ mod tests {
     /// The two entry points for reply-less frames — notification and fanout.
     fn reply_less_pushes() -> [(&'static str, Push); 2] {
         [
-            ("알림", |p| p.notify(TestOut::Notice("in flight".into()))),
-            ("팬아웃", |p| {
-                p.send_frame(Frame::Text("in flight".into()))
+            ("notification", |p| {
+                p.notify(TestOut::Notice("in flight".into()))
             }),
+            ("fan-out", |p| p.send_frame(Frame::Text("in flight".into()))),
         ]
     }
 
@@ -4926,10 +4965,13 @@ mod tests {
         endpoint.stall_writes(true);
         push(&h.peer).unwrap();
         settle().await;
-        assert!(h.queue_drained(), "감독이 그것을 큐에서 꺼냈어야 한다");
+        assert!(
+            h.queue_drained(),
+            "the supervisor must have taken it out of the queue"
+        );
         assert!(
             endpoint.drain().is_empty(),
-            "감독이 그 쓰기 위에 서 있어야 한다"
+            "the supervisor must be stuck on that write"
         );
         h.drain();
     }
@@ -4940,17 +4982,17 @@ mod tests {
             let (mut h, endpoint) = live().await;
             park_in_flight(&mut h, &endpoint, push).await;
             h.peer.close();
-            settle_until("종료", || h.peer.peer_state() == PeerState::Closed).await;
+            settle_until("shutdown", || h.peer.peer_state() == PeerState::Closed).await;
             // Releases the stuck goodbye — if not released, it cannot get to `teardown`'s report.
             endpoint.stall_writes(false);
-            settle_until("감독이 끝났다", || h.supervisor_done()).await;
+            settle_until("the supervisor ended", || h.supervisor_done()).await;
             let events = h.events();
             assert_eq!(outbound_dropped(&events), 1, "{what}");
             let tail: Vec<&str> = events.iter().rev().take(2).map(|e| e.kind()).collect();
             assert_eq!(
                 tail,
                 vec!["Closed", "Dropped"],
-                "{what}: 정리의 유실 신고도 Closed 앞이다"
+                "{what}: the cleanup's loss report comes before Closed too"
             );
         }
     }
@@ -4962,12 +5004,9 @@ mod tests {
             park_in_flight(&mut h, &endpoint, push).await;
             h.peer.reconnect_now();
             // ★Release after control wins★ — if released first, the stuck write becomes ready together with control and may go out as is.
-            settle_until("제어가 이겼다", || {
-                h.peer.peer_state() == PeerState::Dialing
-            })
-            .await;
+            settle_until("control won", || h.peer.peer_state() == PeerState::Dialing).await;
             endpoint.stall_writes(false);
-            settle_until("다시 붙었다", || {
+            settle_until("reattached", || {
                 h.net.dials() == 2 && h.peer.peer_state() == PeerState::Live
             })
             .await;
@@ -4987,7 +5026,7 @@ mod tests {
             //   the disconnect cause comes out as the read end (`salvage_read_ahead`).
             endpoint.fail_writes();
             endpoint.stall_writes(false);
-            settle_until("백오프", || h.peer.peer_state() == PeerState::Backoff).await;
+            settle_until("backoff", || h.peer.peer_state() == PeerState::Backoff).await;
             settle().await;
             let events = h.events();
             assert!(
@@ -4998,7 +5037,7 @@ mod tests {
                         ..
                     }
                 )),
-                "{what}: 통로 오류 갈래를 재야 한다"
+                "{what}: must measure the link error branch"
             );
             assert_eq!(outbound_dropped(&events), 1, "{what}");
         }
@@ -5010,7 +5049,7 @@ mod tests {
             let (mut h, endpoint) = live().await;
             park_in_flight(&mut h, &endpoint, push).await;
             h.clock.advance(Policy::default().write_deadline);
-            settle_until("백오프", || h.peer.peer_state() == PeerState::Backoff).await;
+            settle_until("backoff", || h.peer.peer_state() == PeerState::Backoff).await;
             // Releases the stuck goodbye — the loss report comes out at the next stage (the backoff wait).
             endpoint.stall_writes(false);
             settle().await;
@@ -5023,7 +5062,7 @@ mod tests {
                         ..
                     }
                 )),
-                "{what}: 쓰기 시한 갈래를 재야 한다"
+                "{what}: must measure the write deadline branch"
             );
             assert_eq!(outbound_dropped(&events), 1, "{what}");
         }
@@ -5034,39 +5073,42 @@ mod tests {
         let (mut h, endpoint) = live().await;
         endpoint.stall_writes(true);
         // ★Poll once on the spot instead of starting a separate task★ — if started, at a moment when that task has not yet run
-        //   the 「큐에서 꺼냈다」 (taken out of the queue) below becomes true on an empty queue. The first poll does everything up to putting in the queue synchronously.
+        //   the 「taken out of the queue」 below becomes true on an empty queue. The first poll does everything up to putting in the queue synchronously.
         let peer = h.peer.clone();
         let mut waiting = Box::pin(peer.request(TestOut::Request {
             tag: 1,
             body: "x".into(),
         }));
         assert!(poll_immediate(&mut waiting).await.is_none());
-        assert!(!h.queue_drained(), "요청이 큐에 들어가 있어야 한다");
+        assert!(!h.queue_drained(), "the request must be in the queue");
         settle().await;
-        assert!(h.queue_drained(), "감독이 그것을 큐에서 꺼냈어야 한다");
-        // ★It must not have woken yet for 「쓰는 중」 (writing) to stand★ — a request rejected before writing also wakes below with the same error,
+        assert!(
+            h.queue_drained(),
+            "the supervisor must have taken it out of the queue"
+        );
+        // ★It must not have woken yet for 「writing」 to stand★ — a request rejected before writing also wakes below with the same error,
         //   so without this the last assertion holds regardless of the write.
         assert!(
             poll_immediate(&mut waiting).await.is_none(),
-            "쓰기 전에 끝났다"
+            "ended before writing"
         );
         assert!(
             endpoint.drain().is_empty(),
-            "감독이 그 쓰기 위에 서 있어야 한다"
+            "the supervisor must be stuck on that write"
         );
         h.drain();
         h.peer.close();
-        settle_until("종료", || h.peer.peer_state() == PeerState::Closed).await;
+        settle_until("shutdown", || h.peer.peer_state() == PeerState::Closed).await;
         endpoint.stall_writes(false);
-        settle_until("감독이 끝났다", || h.supervisor_done()).await;
+        settle_until("the supervisor ended", || h.supervisor_done()).await;
         let woken = poll_immediate(&mut waiting)
             .await
-            .expect("감독이 끝났는데 요청이 안 깨어났다");
+            .expect("the supervisor ended but the request did not wake");
         assert!(matches!(woken, Err(RequestError::Disconnected { .. })));
         assert_eq!(
             outbound_dropped(&h.events()),
             0,
-            "요청은 오류로 깨어나므로 유실로 또 세지 않는다"
+            "the request wakes with an error, so it is not counted again as a loss"
         );
     }
 
@@ -5076,26 +5118,26 @@ mod tests {
         endpoint.stall_writes(true);
         h.clock.advance(Policy::default().ping_interval);
         settle().await;
-        assert!(endpoint.drain().is_empty(), "ping 이 걸려 있어야 한다");
+        assert!(endpoint.drain().is_empty(), "a ping must be pending");
         h.drain();
         h.peer.close();
-        settle_until("종료", || h.peer.peer_state() == PeerState::Closed).await;
+        settle_until("shutdown", || h.peer.peer_state() == PeerState::Closed).await;
         endpoint.stall_writes(false);
-        settle_until("감독이 끝났다", || h.supervisor_done()).await;
+        settle_until("the supervisor ended", || h.supervisor_done()).await;
         assert_eq!(
             outbound_dropped(&h.events()),
             0,
-            "keepalive 는 소비자가 넣은 프레임이 아니다"
+            "keepalive is not a frame the consumer put in"
         );
     }
 
-    // ── 종료 ──
+    // ── Shutdown ──
     #[tokio::test]
     async fn closing_is_final() {
         let h = build(Policy::default(), Arc::new(ImmediateHandshake));
-        settle_until("연결", || h.peer.peer_state() == PeerState::Live).await;
+        settle_until("connection", || h.peer.peer_state() == PeerState::Live).await;
         h.peer.close();
-        settle_until("종료", || h.peer.peer_state() == PeerState::Closed).await;
+        settle_until("shutdown", || h.peer.peer_state() == PeerState::Closed).await;
         h.peer.reconnect_now();
         settle().await;
         assert_eq!(h.peer.peer_state(), PeerState::Closed);
@@ -5108,7 +5150,7 @@ mod tests {
         endpoint.stall_writes(true);
         let _ = h.peer.notify(TestOut::Notice("stuck".into()));
         settle().await;
-        assert!(endpoint.frames().is_empty(), "실제로 막혀 있어야 한다");
+        assert!(endpoint.frames().is_empty(), "must actually be blocked");
         h.clock.advance(Duration::from_secs(5));
         settle().await;
         assert_eq!(h.disconnect_cause(), Some(DisconnectCause::WriteDeadline));
@@ -5126,11 +5168,11 @@ mod tests {
         let _ = h.peer.notify(TestOut::Notice("stuck".into()));
         settle().await;
         h.peer.close();
-        settle_until("종료", || h.peer.peer_state() == PeerState::Closed).await;
+        settle_until("shutdown", || h.peer.peer_state() == PeerState::Closed).await;
 
         endpoint.stall_writes(false);
         let mut seen = Vec::new();
-        settle_until("걸려 있던 goodbye 가 나갔다", || {
+        settle_until("the pending goodbye went out", || {
             seen.extend(endpoint.drain());
             seen.iter()
                 .any(|m| matches!(m, ClientMsg::Close(c) if c.code == CloseCode::GOING_AWAY))
@@ -5138,10 +5180,10 @@ mod tests {
         .await;
         // ★This assertion is a property of the harness, not the [`LinkTx::send`] contract★ — `testing::MemTx` stops a blocked write
         //   before handing it over, so if cut nothing remains. On the WS adapter, the cut frame may go out ahead of the goodbye
-        //   (`ws.rs` 「통로 성질」 (channel properties)).
+        //   (`ws.rs` 「Link properties」).
         assert!(
             !seen.iter().any(|m| matches!(m, ClientMsg::Frame(_))),
-            "취소된 쓰기가 뒤늦게 나갔다: {seen:?}"
+            "a canceled write went out late: {seen:?}"
         );
     }
 
@@ -5159,7 +5201,7 @@ mod tests {
             let (h, endpoint) = live().await;
             h.peer.close();
             drop(h);
-            let what = format!("{round}번째 바퀴: goodbye 가 통로로 나갔다");
+            let what = format!("round {round}: goodbye went out on the link");
             let mut seen = Vec::new();
             settle_until(&what, || {
                 seen.extend(endpoint.drain());
@@ -5174,14 +5216,14 @@ mod tests {
     //
     // ★On a channel where the write is already blocked, the close is blocked too★ — the harness's `stall_writes` blocks all three of `send`·`ping`·`close`
     //   (`testing::MemoryEndpoint::stall_writes`), so the real socket's shape is measured here.
-    // ★Do not remove the line that pushes the clock★ — `drop_link` no longer cuts that wait with control (「알려진 한계」 (known limits) in
+    // ★Do not remove the line that pushes the clock★ — `drop_link` no longer cuts that wait with control (「known limits」 in
     //   the rustdoc there), so without it the supervisor stays standing on the stuck close and `settle_until` dies at the limit.
     #[tokio::test]
     async fn a_parked_closing_frame_is_cut_by_the_write_deadline_not_by_control() {
         let (h, endpoint) = live().await;
         endpoint.stall_writes(true);
         endpoint.fail("link died");
-        settle_until("통로가 죽어 백오프로 내려갔다", || {
+        settle_until("the link died and went down to backoff", || {
             h.peer.peer_state() == PeerState::Backoff
         })
         .await;
@@ -5190,20 +5232,20 @@ mod tests {
                 .drain()
                 .iter()
                 .any(|m| matches!(m, ClientMsg::Close(_))),
-            "★닫기가 실제로 걸려 있어야 이 테스트가 무언가를 잰다★ — 나갔으면 아래 단언은 공짜다"
+            "★this test measures something only if the close is actually pending★ — if it went out, the assertions below are free"
         );
         h.peer.close();
-        // ★This assertion measures the 「제어가 아니라」 (not by control) in the title★ — the assertions below are green even in the edition where the control arm
+        // ★This assertion measures the 「not by control」 in the title★ — the assertions below are green even in the edition where the control arm
         //   cut the stuck close. Before pushing the clock, it must not fold from the close request alone.
         settle().await;
         assert_ne!(
             h.peer.peer_state(),
             PeerState::Closed,
-            "시계를 밀기 전에 접혔다 — 걸린 닫기를 제어가 잘랐다"
+            "folded before the clock was advanced — control cut the pending close"
         );
         // What cuts the stuck close is this line. Control stays in the queue and is read after that.
         h.clock.advance(Duration::from_secs(5));
-        settle_until("걸린 닫기 뒤에도 제어가 살아 있다", || {
+        settle_until("control is alive even after the pending close", || {
             h.peer.peer_state() == PeerState::Closed
         })
         .await;
@@ -5212,7 +5254,7 @@ mod tests {
                 .drain()
                 .iter()
                 .any(|m| matches!(m, ClientMsg::Close(_))),
-            "혼잡해서 시한에 잘리면 닫기 코드는 못 나간다 — `lib.rs` 가 인정한 그 한계다"
+            "if congestion makes the deadline cut it, the close code cannot go out — the limit `lib.rs` acknowledges"
         );
     }
 
@@ -5231,7 +5273,7 @@ mod tests {
             let dials = h.net.dials();
             h.peer.reconnect_now();
             h.peer.reconnect_now();
-            settle_until("다시 붙었다", || {
+            settle_until("reattached", || {
                 h.net.dials() == dials + 1 && h.peer.peer_state() == PeerState::Live
             })
             .await;
@@ -5240,10 +5282,10 @@ mod tests {
                     .drain()
                     .iter()
                     .any(|m| matches!(m, ClientMsg::Close(c) if c.code == CloseCode::GOING_AWAY)),
-                "{round}번째 바퀴에서 goodbye 가 통로로 안 나갔다"
+                "in round {round}, goodbye did not go out on the link"
             );
             h.drain();
-            endpoint = h.net.accept().expect("새 통로");
+            endpoint = h.net.accept().expect("new link");
         }
     }
 
@@ -5290,8 +5332,11 @@ mod tests {
 
     async fn live_on_a_full_line() -> (Harness, Arc<MemoryEndpoint>) {
         let h = build_with(Policy::default(), Arc::new(ImmediateHandshake), 1);
-        settle_until("첫 연결", || h.peer.peer_state() == PeerState::Live).await;
-        let endpoint = h.net.accept().expect("통로가 열렸어야 한다");
+        settle_until("first connection", || {
+            h.peer.peer_state() == PeerState::Live
+        })
+        .await;
+        let endpoint = h.net.accept().expect("the link must have opened");
         (h, endpoint)
     }
 
@@ -5300,7 +5345,7 @@ mod tests {
         let (mut h, endpoint) = live_on_a_full_line().await;
         h.net.fail_forever();
         endpoint.close();
-        settle_until("백오프", || h.peer.peer_state() == PeerState::Backoff).await;
+        settle_until("backoff", || h.peer.peer_state() == PeerState::Backoff).await;
         for delay in [500u64, 1000, 2000] {
             h.clock.advance(Duration::from_millis(delay));
             settle().await;
@@ -5321,7 +5366,7 @@ mod tests {
                 "ConnectFailed",
                 "GaveUp",
             ],
-            "★받는 쪽이 밀려 있어도 생애 사건은 하나도 안 버려지고 낸 순서대로 온다★"
+            "★even if the receiver lags, not a single lifecycle event is dropped and they come in the order emitted★"
         );
     }
 
@@ -5334,14 +5379,14 @@ mod tests {
         assert_eq!(
             h.peer.peer_state(),
             PeerState::Live,
-            "★닫힘은 붙든 말 뒤에 줄 서 있다★ — 받는 쪽이 그 말을 꺼내기 전에는 감독이 닫힘을 읽지 않는다"
+            "★the close is queued behind the held message★ — the supervisor does not read the close before the receiver takes that message out"
         );
 
         let items = drain_until_quiet(&mut h).await;
         assert_eq!(
             labels(&items),
             vec!["Connected:1", "msg:last words", "Disconnected:1:PeerClosed"],
-            "★상대가 보내고 곧바로 닫아도 그 말은 안 버려지고 끊김보다 먼저 온다★"
+            "★even if the peer sends and closes right away, that message is not dropped and comes before the disconnect★"
         );
         assert_eq!(h.peer.peer_state(), PeerState::Backoff);
     }
@@ -5349,18 +5394,18 @@ mod tests {
     #[tokio::test]
     async fn held_items_keep_flowing_while_the_supervisor_is_mid_handshake() {
         let mut h = build_with(Policy::default(), Arc::new(ListeningHandshake), 1);
-        settle_until("핸드셰이크 대기", || {
+        settle_until("waiting for handshake", || {
             h.peer.peer_state() == PeerState::Handshaking
         })
         .await;
         let first = h.net.accept().unwrap();
         first.push(Frame::Text("welcome".into()));
-        settle_until("연결", || h.peer.peer_state() == PeerState::Live).await;
+        settle_until("connection", || h.peer.peer_state() == PeerState::Live).await;
         first.push(TestWire::encode_in(&TestIn::Notice("n0".into())));
         settle().await;
         // The peer's close lines up behind the held n0 and is not read (backpressure), so make it reconnect by control.
         h.peer.reconnect_now();
-        settle_until("둘째 핸드셰이크 대기", || {
+        settle_until("waiting for the second handshake", || {
             h.peer.peer_state() == PeerState::Handshaking
         })
         .await;
@@ -5370,13 +5415,13 @@ mod tests {
         assert_eq!(
             labels(&items),
             vec!["Connected:1", "msg:n0", "Disconnected:1:Explicit"],
-            "★핸드셰이크가 상대를 기다리는 동안에도 받는 쪽이 비우는 대로 붙든 것이 실린다★"
+            "★even while the handshake waits for the peer, held items are delivered as the receiver drains★"
         );
         assert_eq!(h.peer.peer_state(), PeerState::Handshaking);
         assert_eq!(
             h.net.dials(),
             2,
-            "싣는 동안 걸던 통로를 버리고 다시 걸지 않았다"
+            "did not abandon the dialing link and redial while delivering"
         );
     }
 
@@ -5390,10 +5435,10 @@ mod tests {
         assert_eq!(
             h.peer.held_bytes(),
             3 * "not|n0".len(),
-            "n0 은 순서 칸에, n1 · n2 는 앞잡이 줄에 있다 — 순서 칸이 붙든 동안 프레임 팔을 뺐다"
+            "n0 is in the ordering area, n1 · n2 in the read-ahead queue — the frame arm was removed while the ordering area holds"
         );
         h.peer.close();
-        settle_until("접힘", || h.peer.peer_state() == PeerState::Closed).await;
+        settle_until("folded", || h.peer.peer_state() == PeerState::Closed).await;
 
         let items = drain_until_quiet(&mut h).await;
         assert_eq!(
@@ -5406,16 +5451,16 @@ mod tests {
                 "Disconnected:1:Explicit",
                 "Closed:1:Explicit",
             ],
-            "★붙든 것을 다 실은 뒤 Closed 가 맨 끝이다★ — 앞잡이 줄의 n1 · n2 도 통로를 버리기 전에 건져 \
-             끊김 앞에 실린다"
+            "★Closed comes at the very end after all held items are delivered★ — n1 · n2 in the read-ahead queue are also rescued before abandoning the link \
+              and delivered before the disconnect"
         );
-        assert_eq!(h.peer.held_bytes(), 0, "꺼낸 몫은 셈에서 빠졌다");
+        assert_eq!(h.peer.held_bytes(), 0, "the share taken out left the count");
         assert!(
             matches!(
                 h.inbound.try_recv(),
                 Err(mpsc::error::TryRecvError::Disconnected)
             ),
-            "Closed 뒤에는 감독이 넣는 끝을 놓는다"
+            "after Closed, the supervisor releases the enqueue end"
         );
     }
 
@@ -5431,14 +5476,14 @@ mod tests {
         settle().await;
         assert!(
             matches!(endpoint.take(), Some(ClientMsg::Frame(_))),
-            "요청이 나가 답을 기다리는 중이어야 한다"
+            "the request must have gone out and be waiting for the answer"
         );
         endpoint.stall_writes(true);
         h.peer.close();
-        settle_until("접힘", || h.peer.peer_state() == PeerState::Closed).await;
+        settle_until("folded", || h.peer.peer_state() == PeerState::Closed).await;
         assert!(
             matches!(joined(asked).await, Err(RequestError::Disconnected { .. })),
-            "★받는 쪽이 안 비워도 대기 요청은 곧바로 깨어난다★"
+            "★waiting requests wake right away even if the receiver does not drain★"
         );
 
         let (reply, mut raced) = oneshot::channel();
@@ -5455,33 +5500,33 @@ mod tests {
                     reply,
                 },
             })
-            .unwrap_or_else(|_| panic!("나가는 큐에 자리가 있어야 한다"));
+            .unwrap_or_else(|_| panic!("the outbound queue must have room"));
         settle().await;
         assert!(
             matches!(raced.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
-            "감독이 막힌 닫기 위에 서 있어야 한다 — 이 요청은 정리의 몫이다"
+            "the supervisor must be stuck on a blocked close — this request is the cleanup's job"
         );
         endpoint.stall_writes(false);
         settle().await;
-        assert!(h.supervisor_done(), "정리가 나가는 큐를 닫았다");
+        assert!(h.supervisor_done(), "the cleanup closed the outbound queue");
         assert!(
             matches!(raced.try_recv(), Ok(Err(RequestError::Disconnected { .. }))),
-            "★정리에 걸린 요청은 순서 칸 비우기를 기다리지 않고 곧바로 끝난다★"
+            "★a request caught in the cleanup ends right away without waiting for the ordering area to drain★"
         );
         assert!(
             matches!(
                 joined(spawn_request(&h.peer, 8)).await,
                 Err(RequestError::Disconnected { .. })
             ),
-            "정리 중에 낸 요청도 곧바로 끝난다"
+            "a request issued during cleanup also ends right away"
         );
         assert!(
             h.peer.notify(TestOut::Notice("late".into())).is_err(),
-            "정리 중에 든 알림은 곧바로 거절된다"
+            "a notification put in during cleanup is refused right away"
         );
         assert!(
             !h.inbound.is_closed(),
-            "정리가 아직 순서 칸에서 기다린다 — 감독이 넣는 끝을 놓지 않았다"
+            "the cleanup is still waiting on the ordering area — the supervisor did not release the enqueue end"
         );
 
         let items = drain_until_quiet(&mut h).await;
@@ -5514,18 +5559,18 @@ mod tests {
             endpoint.push(TestWire::encode_in(&TestIn::Notice("held".into())));
             settle().await;
             h.peer.close();
-            settle_until("접힘", || h.peer.peer_state() == PeerState::Closed).await;
+            settle_until("folded", || h.peer.peer_state() == PeerState::Closed).await;
             h.clock.advance(waited);
             settle().await;
 
             let items = drain_until_quiet(&mut h).await;
-            assert_eq!(labels(&items), expected, "{waited:?} 기다린 뒤");
+            assert_eq!(labels(&items), expected, "after waiting {waited:?}");
             assert!(
                 matches!(
                     h.inbound.try_recv(),
                     Err(mpsc::error::TryRecvError::Disconnected)
                 ),
-                "{waited:?}: 감독이 끝났다"
+                "{waited:?}: the supervisor ended"
             );
         }
     }
@@ -5536,17 +5581,24 @@ mod tests {
         endpoint.push(TestWire::encode_in(&TestIn::Notice("held".into())));
         settle().await;
         h.peer.close();
-        settle_until("접힘", || h.peer.peer_state() == PeerState::Closed).await;
-        assert_eq!(h.clock.sleepers(), 1, "정리가 상한 시계를 걸고 기다린다");
+        settle_until("folded", || h.peer.peer_state() == PeerState::Closed).await;
+        assert_eq!(
+            h.clock.sleepers(),
+            1,
+            "the cleanup waits with the cap clock set"
+        );
 
         drop_the_consumer(&mut h);
         settle_until(
-            "받는 쪽이 사라지면 정리가 기다리지 않는다",
+            "if the receiver vanishes, the cleanup does not wait",
             || h.task.is_finished(),
         )
         .await;
-        assert_eq!(h.clock.sleepers(), 0, "상한 시계를 놓았다");
-        assert!(h.exited_cleanly().await, "감독이 패닉 없이 끝났다");
+        assert_eq!(h.clock.sleepers(), 0, "released the cap clock");
+        assert!(
+            h.exited_cleanly().await,
+            "the supervisor ended without panicking"
+        );
     }
 
     fn drop_the_consumer(h: &mut Harness) {
@@ -5562,17 +5614,17 @@ mod tests {
         let (mut h, endpoint) = live_on_a_full_line().await;
         // What is held is the disconnect event — if a notification were put before it, the close would line up behind it and not be read (backpressure).
         endpoint.close();
-        settle_until("백오프", || h.peer.peer_state() == PeerState::Backoff).await;
+        settle_until("backoff", || h.peer.peer_state() == PeerState::Backoff).await;
         assert_eq!(
             h.inbound.capacity(),
             0,
-            "줄이 차 있어 순서 칸이 붙들고 있다"
+            "the queue is full, so the ordering area is holding"
         );
 
         drop_the_consumer(&mut h);
-        settle_until("접힘", || h.peer.peer_state() == PeerState::Closed).await;
-        assert_eq!(h.net.dials(), 1, "다시 걸지 않았다");
-        settle_until("감독이 끝났다", || h.task.is_finished()).await;
+        settle_until("folded", || h.peer.peer_state() == PeerState::Closed).await;
+        assert_eq!(h.net.dials(), 1, "did not redial");
+        settle_until("the supervisor ended", || h.task.is_finished()).await;
         assert!(h.exited_cleanly().await);
     }
 
@@ -5581,7 +5633,7 @@ mod tests {
         let (mut h, endpoint) = live_on_a_full_line().await;
         h.net.fail_forever();
         endpoint.close();
-        settle_until("백오프", || h.peer.peer_state() == PeerState::Backoff).await;
+        settle_until("backoff", || h.peer.peer_state() == PeerState::Backoff).await;
         for delay in [500u64, 1000, 2000] {
             h.clock.advance(Duration::from_millis(delay));
             settle().await;
@@ -5590,47 +5642,47 @@ mod tests {
         assert_eq!(
             h.inbound.capacity(),
             0,
-            "줄이 차 있어 순서 칸이 붙들고 있다"
+            "the queue is full, so the ordering area is holding"
         );
 
         drop_the_consumer(&mut h);
-        settle_until("접힘", || h.peer.peer_state() == PeerState::Closed).await;
-        settle_until("감독이 끝났다", || h.task.is_finished()).await;
+        settle_until("folded", || h.peer.peer_state() == PeerState::Closed).await;
+        settle_until("the supervisor ended", || h.task.is_finished()).await;
         assert!(h.exited_cleanly().await);
     }
 
     #[tokio::test]
     async fn a_mid_handshake_peer_holding_items_folds_when_the_consumer_goes() {
         let mut h = build_with(Policy::default(), Arc::new(ListeningHandshake), 1);
-        settle_until("핸드셰이크 대기", || {
+        settle_until("waiting for handshake", || {
             h.peer.peer_state() == PeerState::Handshaking
         })
         .await;
         let first = h.net.accept().unwrap();
         first.push(Frame::Text("welcome".into()));
-        settle_until("연결", || h.peer.peer_state() == PeerState::Live).await;
+        settle_until("connection", || h.peer.peer_state() == PeerState::Live).await;
         first.push(TestWire::encode_in(&TestIn::Notice("n0".into())));
         settle().await;
         // The same line as in `held_items_keep_flowing_while_the_supervisor_is_mid_handshake` — make it reconnect by control.
         h.peer.reconnect_now();
-        settle_until("둘째 핸드셰이크 대기", || {
+        settle_until("waiting for the second handshake", || {
             h.peer.peer_state() == PeerState::Handshaking
         })
         .await;
         assert_eq!(
             h.inbound.capacity(),
             0,
-            "줄이 차 있어 순서 칸이 붙들고 있다"
+            "the queue is full, so the ordering area is holding"
         );
 
         drop_the_consumer(&mut h);
-        settle_until("접힘", || h.peer.peer_state() == PeerState::Closed).await;
+        settle_until("folded", || h.peer.peer_state() == PeerState::Closed).await;
         assert_eq!(
             h.peer.generation(),
             Generation(1),
-            "둘째 세대를 뽑지 않았다"
+            "did not draw a second generation"
         );
-        settle_until("감독이 끝났다", || h.task.is_finished()).await;
+        settle_until("the supervisor ended", || h.task.is_finished()).await;
         assert!(h.exited_cleanly().await);
     }
 
@@ -5648,7 +5700,7 @@ mod tests {
                 h.net.fail_forever();
             }
             endpoint.close();
-            settle_until("백오프", || h.peer.peer_state() == PeerState::Backoff).await;
+            settle_until("backoff", || h.peer.peer_state() == PeerState::Backoff).await;
             if gave_up {
                 for delay in [500u64, 1000, 2000] {
                     h.clock.advance(Duration::from_millis(delay));
@@ -5658,13 +5710,13 @@ mod tests {
             }
             assert!(
                 h.inbound.capacity() > 0,
-                "gave_up={gave_up}: 줄에 자리가 있다 — 순서 칸은 붙든 것이 없다"
+                "gave_up={gave_up}: the queue has room — the ordering area holds nothing"
             );
             let dials = h.net.dials();
             drop_the_consumer(&mut h);
-            settle_until("접힘", || h.peer.peer_state() == PeerState::Closed).await;
-            assert_eq!(h.net.dials(), dials, "gave_up={gave_up}: 다시 걸지 않았다");
-            settle_until("감독이 끝났다", || h.task.is_finished()).await;
+            settle_until("folded", || h.peer.peer_state() == PeerState::Closed).await;
+            assert_eq!(h.net.dials(), dials, "gave_up={gave_up}: did not redial");
+            settle_until("the supervisor ended", || h.task.is_finished()).await;
             assert!(h.exited_cleanly().await, "gave_up={gave_up}");
         }
     }
@@ -5672,15 +5724,19 @@ mod tests {
     #[tokio::test]
     async fn a_mid_handshake_peer_with_nothing_held_folds_when_the_consumer_goes() {
         let mut h = build(Policy::default(), Arc::new(ListeningHandshake));
-        settle_until("핸드셰이크 대기", || {
+        settle_until("waiting for handshake", || {
             h.peer.peer_state() == PeerState::Handshaking
         })
         .await;
         drop_the_consumer(&mut h);
-        settle_until("접힘", || h.peer.peer_state() == PeerState::Closed).await;
-        assert_eq!(h.net.dials(), 1, "다시 걸지 않았다");
-        assert_eq!(h.peer.generation(), Generation(0), "세대를 뽑지 않았다");
-        settle_until("감독이 끝났다", || h.task.is_finished()).await;
+        settle_until("folded", || h.peer.peer_state() == PeerState::Closed).await;
+        assert_eq!(h.net.dials(), 1, "did not redial");
+        assert_eq!(
+            h.peer.generation(),
+            Generation(0),
+            "did not draw a generation"
+        );
+        settle_until("the supervisor ended", || h.task.is_finished()).await;
         assert!(h.exited_cleanly().await);
     }
 
@@ -5688,11 +5744,10 @@ mod tests {
     async fn a_silent_live_peer_folds_without_another_frame_when_the_consumer_goes() {
         let (mut h, endpoint) = live().await;
         drop_the_consumer(&mut h);
-        settle_until("접힘", || h.peer.peer_state() == PeerState::Closed).await;
-        settle_until(
-            "감독이 끝났다 — 상한을 기다리지 않았다",
-            || h.task.is_finished(),
-        )
+        settle_until("folded", || h.peer.peer_state() == PeerState::Closed).await;
+        settle_until("the supervisor ended — did not wait for the cap", || {
+            h.task.is_finished()
+        })
         .await;
         assert_eq!(
             endpoint.drain(),
@@ -5700,22 +5755,26 @@ mod tests {
                 CloseCode::GOING_AWAY,
                 "closing"
             ))],
-            "★상대는 조용했고 우리가 보낸 것은 닫기뿐이다★"
+            "★the peer was quiet and all we sent was the close★"
         );
-        assert_eq!(h.net.dials(), 1, "다시 걸지 않았다");
+        assert_eq!(h.net.dials(), 1, "did not redial");
         assert!(h.exited_cleanly().await);
     }
 
-    // Even if the receiving side's disappearance and a 「지금 다시 붙어라」 (reconnect now) are ready together — whichever arm wakes first — it does not dial again.
+    // Even if the receiving side's disappearance and a 「reconnect now」 are ready together — whichever arm wakes first — it does not dial again.
     #[tokio::test]
     async fn a_reconnect_racing_the_consumers_exit_does_not_dial() {
         let (mut h, _endpoint) = live().await;
         drop_the_consumer(&mut h);
         h.peer.reconnect_now();
-        settle_until("접힘", || h.peer.peer_state() == PeerState::Closed).await;
-        assert_eq!(h.net.dials(), 1, "아무도 안 들을 데몬에 다시 걸지 않았다");
+        settle_until("folded", || h.peer.peer_state() == PeerState::Closed).await;
+        assert_eq!(
+            h.net.dials(),
+            1,
+            "did not redial a daemon nobody will listen to"
+        );
         assert_eq!(h.peer.generation(), Generation(1));
-        settle_until("감독이 끝났다", || h.task.is_finished()).await;
+        settle_until("the supervisor ended", || h.task.is_finished()).await;
         assert!(h.exited_cleanly().await);
     }
 
@@ -5732,12 +5791,12 @@ mod tests {
     async fn a_read_failure_and_a_write_failure_arrive_as_different_causes() {
         let cases: [(&str, Cut, DisconnectCause); 3] = [
             (
-                "읽기 오류",
+                "read error",
                 |_, e| e.fail("boom"),
                 DisconnectCause::ReadFailed,
             ),
             (
-                "알림 쓰기 실패",
+                "notification write failure",
                 |h, e| {
                     e.fail_writes();
                     h.peer.notify(TestOut::Notice("x".into())).unwrap();
@@ -5745,7 +5804,7 @@ mod tests {
                 DisconnectCause::WriteFailed,
             ),
             (
-                "keepalive 쓰기 실패",
+                "keepalive write failure",
                 |h, e| {
                     e.fail_writes();
                     h.clock.advance(Policy::default().ping_interval);
@@ -5756,7 +5815,7 @@ mod tests {
         for (what, cut, expected) in cases {
             let (mut h, endpoint) = live().await;
             cut(&h, &endpoint);
-            settle_until("백오프", || h.peer.peer_state() == PeerState::Backoff).await;
+            settle_until("backoff", || h.peer.peer_state() == PeerState::Backoff).await;
             assert_eq!(h.disconnect_cause(), Some(expected), "{what}");
         }
     }
@@ -5772,17 +5831,24 @@ mod tests {
         end: ReadEnd,
     ) -> (Harness, Arc<MemoryEndpoint>) {
         let h = build_with(policy, Arc::new(ImmediateHandshake), 1);
-        settle_until("첫 연결", || h.peer.peer_state() == PeerState::Live).await;
-        let endpoint = h.net.accept().expect("통로가 열렸어야 한다");
+        settle_until("first connection", || {
+            h.peer.peer_state() == PeerState::Live
+        })
+        .await;
+        let endpoint = h.net.accept().expect("the link must have opened");
         endpoint.push(TestWire::encode_in(&TestIn::Notice("held".into())));
         settle().await;
         end(&endpoint);
         settle().await;
-        assert_eq!(endpoint.unread(), 0, "그 끝은 앞잡이 줄에 들었다");
+        assert_eq!(
+            endpoint.unread(),
+            0,
+            "that end went into the read-ahead queue"
+        );
         assert_eq!(
             h.peer.peer_state(),
             PeerState::Live,
-            "프레임 팔을 뺀 감독은 그 끝을 아직 못 읽었다"
+            "the supervisor with the frame arm removed has not read that end yet"
         );
         (h, endpoint)
     }
@@ -5799,7 +5865,7 @@ mod tests {
 
     const LEAVES: [Leave; 4] = [
         (
-            "알림 쓰기 실패",
+            "notification write failure",
             Policy::default,
             &[|h, e| {
                 e.fail_writes();
@@ -5807,7 +5873,7 @@ mod tests {
             }],
         ),
         (
-            "keepalive 쓰기 실패",
+            "keepalive write failure",
             Policy::default,
             &[|h, e| {
                 e.fail_writes();
@@ -5816,7 +5882,7 @@ mod tests {
         ),
         // Release the stall after the deadline cuts the stuck write — the close that drops the channel must go out before entering backoff.
         (
-            "쓰기 시한",
+            "write deadline",
             Policy::default,
             &[
                 |h, e| {
@@ -5829,7 +5895,7 @@ mod tests {
         ),
         // One slot in the outbound queue — the second notification cannot get in and is counted, and the supervisor cuts at the start of the turn after writing the first (default policy).
         (
-            "나가는 큐 넘침",
+            "outbound queue overflow",
             || Policy {
                 outbound_queue: 1,
                 ..Policy::default()
@@ -5844,8 +5910,16 @@ mod tests {
     #[tokio::test]
     async fn a_read_end_already_read_ahead_outranks_our_own_reason_for_leaving() {
         let ends: [(&str, ReadEnd, &str); 2] = [
-            ("상대의 닫힘", |e| e.close(), "Disconnected:1:PeerClosed"),
-            ("읽기 오류", |e| e.fail("boom"), "Disconnected:1:ReadFailed"),
+            (
+                "the peer's close",
+                |e| e.close(),
+                "Disconnected:1:PeerClosed",
+            ),
+            (
+                "read error",
+                |e| e.fail("boom"),
+                "Disconnected:1:ReadFailed",
+            ),
         ];
         for (end_what, end, expected) in ends {
             for (leave_what, policy, steps) in LEAVES {
@@ -5854,12 +5928,12 @@ mod tests {
                     step(&h, &endpoint);
                     settle().await;
                 }
-                settle_until("백오프", || h.peer.peer_state() == PeerState::Backoff).await;
+                settle_until("backoff", || h.peer.peer_state() == PeerState::Backoff).await;
                 let items = drain_until_quiet(&mut h).await;
                 assert_eq!(
                     disconnects(&items),
                     vec![expected.to_string()],
-                    "{end_what} 뒤 {leave_what}: ★먼저 난 읽기 끝이 원인이다★"
+                    "{leave_what} after {end_what}: ★the read end that happened first is the cause★"
                 );
             }
         }
@@ -5869,14 +5943,14 @@ mod tests {
     #[tokio::test]
     async fn an_app_close_or_reconnect_stays_explicit_with_a_read_end_read_ahead() {
         let acts: [(&str, AppAct); 2] = [
-            ("닫기", |h| h.peer.close()),
-            ("다시 걸기", |h| h.peer.reconnect_now()),
+            ("close", |h| h.peer.close()),
+            ("redial", |h| h.peer.reconnect_now()),
         ];
         for (what, act) in acts {
             let (mut h, _endpoint) =
                 a_read_end_behind_a_held_line(Policy::default(), |e| e.close()).await;
             act(&h);
-            settle_until("접었거나 다시 걸었다", || {
+            settle_until("folded or redialed", || {
                 h.peer.peer_state() == PeerState::Closed || h.net.dials() == 2
             })
             .await;
@@ -5899,13 +5973,17 @@ mod tests {
             },
             Arc::new(ImmediateHandshake),
         );
-        settle_until("연결", || h.peer.peer_state() == PeerState::Live).await;
+        settle_until("connection", || h.peer.peer_state() == PeerState::Live).await;
         let endpoint = h.net.accept().unwrap();
         h.drain();
         endpoint.push(Frame::Text("garbage".into()));
         endpoint.close();
-        settle_until("백오프", || h.peer.peer_state() == PeerState::Backoff).await;
-        assert_eq!(endpoint.unread(), 0, "닫힘도 읽혀 앞잡이 줄에 들었다");
+        settle_until("backoff", || h.peer.peer_state() == PeerState::Backoff).await;
+        assert_eq!(
+            endpoint.unread(),
+            0,
+            "the close was read too and went into the read-ahead queue"
+        );
         assert_eq!(h.disconnect_cause(), Some(DisconnectCause::ReadFailed));
     }
 
@@ -5927,12 +6005,12 @@ mod tests {
         .await;
         endpoint.fail_writes();
         h.peer.notify(TestOut::Notice("x".into())).unwrap();
-        settle_until("백오프", || h.peer.peer_state() == PeerState::Backoff).await;
+        settle_until("backoff", || h.peer.peer_state() == PeerState::Backoff).await;
         let items = drain_until_quiet(&mut h).await;
         let seen = labels(&items);
         assert!(
             seen.contains(&"msg:after".to_string()),
-            "끊는 한 장 뒤에 이미 읽은 것도 넘겼다: {seen:?}"
+            "also handed over what was already read after the one that cuts: {seen:?}"
         );
         assert_eq!(disconnects(&items), vec!["Disconnected:1:ReadFailed"]);
     }
@@ -5951,7 +6029,7 @@ mod tests {
             },
             Arc::new(ImmediateHandshake),
         );
-        settle_until("연결", || h.peer.peer_state() == PeerState::Live).await;
+        settle_until("connection", || h.peer.peer_state() == PeerState::Live).await;
         let endpoint = h.net.accept().unwrap();
         // Stand it on a keepalive and fill the queue past half, then block the write and release the keepalive — the next turn drains the queue back to back
         //   and stands on the first write.
@@ -5961,7 +6039,7 @@ mod tests {
         for n in 0..3 {
             h.peer
                 .notify(TestOut::Notice(format!("n{n}")))
-                .expect("나가는 큐");
+                .expect("outbound queue");
         }
         endpoint.stall_writes(true);
         endpoint.stall_pings(false);
@@ -5970,24 +6048,24 @@ mod tests {
         assert_eq!(
             h.peer.inner.data_tx.capacity(),
             2,
-            "감독이 하나를 꺼내 쓰다 섰고 둘이 큐에 남았다"
+            "the supervisor took one out and stalled writing it, and two remain in the queue"
         );
 
         drop_the_consumer(&mut h);
-        settle_until("접힘 — 시계를 밀지 않았다", || {
+        settle_until("folded — the clock was not advanced", || {
             h.peer.peer_state() == PeerState::Closed
         })
         .await;
         // The close that drops the channel is caught by the write block — that one is a place we deliberately do not listen at, so release it (`drop_link`).
         endpoint.stall_writes(false);
-        settle_until("감독이 끝났다", || h.task.is_finished()).await;
+        settle_until("the supervisor ended", || h.task.is_finished()).await;
         assert_eq!(
             endpoint.drain(),
             vec![ClientMsg::Close(Close::new(
                 CloseCode::GOING_AWAY,
                 "closing"
             ))],
-            "★걸린 쓰기도 남은 둘도 안 나갔다★"
+            "★neither the pending write nor the remaining two went out★"
         );
         assert!(h.exited_cleanly().await);
     }
@@ -5998,14 +6076,14 @@ mod tests {
         endpoint.stall_pings(true);
         h.clock.advance(Policy::default().ping_interval);
         settle().await;
-        assert!(endpoint.drain().is_empty(), "keepalive 위에 서 있다");
+        assert!(endpoint.drain().is_empty(), "stuck on keepalive");
 
         drop_the_consumer(&mut h);
-        settle_until("접힘 — 시계를 밀지 않았다", || {
+        settle_until("folded — the clock was not advanced", || {
             h.peer.peer_state() == PeerState::Closed
         })
         .await;
-        settle_until("감독이 끝났다", || h.task.is_finished()).await;
+        settle_until("the supervisor ended", || h.task.is_finished()).await;
         assert_eq!(
             endpoint.drain(),
             vec![ClientMsg::Close(Close::new(
@@ -6054,7 +6132,10 @@ mod tests {
             Arc::new(ImmediateHandshake),
             1,
         );
-        settle_until("첫 연결", || h.peer.peer_state() == PeerState::Live).await;
+        settle_until("first connection", || {
+            h.peer.peer_state() == PeerState::Live
+        })
+        .await;
         let endpoint = h.net.accept().unwrap();
         for n in 0..20 {
             endpoint.push(TestWire::encode_in(&TestIn::Notice(format!("n{n:02}"))));
@@ -6066,23 +6147,27 @@ mod tests {
         assert_eq!(
             endpoint.unread(),
             20 - read,
-            "★순서 칸이 붙든 동안 프레임을 더 안 꺼내 통로가 밀린다★ — 순서 칸이 자라지 않는다"
+            "★while the ordering area holds, no more frames are taken out and the link backs up★ — the ordering area does not grow"
         );
         assert_eq!(h.peer.held_bytes(), read * "not|n00".len());
         assert_eq!(
             h.peer.peer_state(),
             PeerState::Live,
-            "밀린 것은 끊을 일이 아니다"
+            "backing up is not a reason to cut"
         );
 
         let items = drain_until_quiet(&mut h).await;
         assert_eq!(
             notices(&items),
             (0..20).map(|n| format!("n{n:02}")).collect::<Vec<_>>(),
-            "★배압 아래에서도 하나도 안 버려지고 온 순서대로 나온다★"
+            "★even under backpressure, nothing is dropped and items come out in arrival order★"
         );
         assert_eq!(endpoint.unread(), 0);
-        assert_eq!(h.peer.held_bytes(), 0, "꺼낸 몫은 셈에서 빠진다");
+        assert_eq!(
+            h.peer.held_bytes(),
+            0,
+            "the share taken out leaves the count"
+        );
     }
 
     #[tokio::test]
@@ -6094,7 +6179,10 @@ mod tests {
             4096,
             budget,
         );
-        settle_until("첫 연결", || h.peer.peer_state() == PeerState::Live).await;
+        settle_until("first connection", || {
+            h.peer.peer_state() == PeerState::Live
+        })
+        .await;
         let endpoint = h.net.accept().unwrap();
         h.drain();
         for tag in 0..5u8 {
@@ -6104,18 +6192,22 @@ mod tests {
         assert_eq!(
             endpoint.unread(),
             4,
-            "★빈 셈에는 예산보다 큰 한 장도 들어가고, 그 뒤로는 통로를 안 읽는다★(더하기 전 물높이)"
+            "★an empty count accepts even one item larger than the budget, and after that the link is not read★ (fill level before adding)"
         );
         assert_eq!(h.peer.held_bytes(), 150);
 
         let mut tags = Vec::new();
         for _ in 0..5 {
             let taken = h.drain();
-            assert_eq!(blob_tags(&taken).len(), 1, "한 번에 한 장씩만 읽힌다");
+            assert_eq!(
+                blob_tags(&taken).len(),
+                1,
+                "only one item is read at a time"
+            );
             tags.extend(blob_tags(&taken));
             settle().await;
         }
-        assert_eq!(tags, vec![0, 1, 2, 3, 4], "★손실 0 · 순서 그대로★");
+        assert_eq!(tags, vec![0, 1, 2, 3, 4], "★0 loss · order as is★");
         assert_eq!(endpoint.unread(), 0);
         assert_eq!(h.peer.held_bytes(), 0);
     }
@@ -6128,7 +6220,10 @@ mod tests {
         let budget = 1000;
         let message = budget - 1;
         let mut h = build_budgeted(Policy::default(), Arc::new(ImmediateHandshake), 1, budget);
-        settle_until("첫 연결", || h.peer.peer_state() == PeerState::Live).await;
+        settle_until("first connection", || {
+            h.peer.peer_state() == PeerState::Live
+        })
+        .await;
         let endpoint = h.net.accept().unwrap();
         let sent = 10u8;
         for tag in 0..sent {
@@ -6136,14 +6231,14 @@ mod tests {
             settle().await;
             assert!(
                 h.peer.held_bytes() <= budget + message,
-                "{tag}번째를 보낸 뒤 {} 바이트를 쥐었다 — 앞잡이 줄 · 순서 칸 · 줄의 합이 B + M 을 넘었다",
+                "held {} bytes after sending #{tag} — the sum of the read-ahead queue · ordering area · queue exceeded B + M",
                 h.peer.held_bytes()
             );
         }
         assert_eq!(
             h.peer.held_bytes(),
             2 * message,
-            "★스트림을 안 쓰는 감독은 예산 전부를 읽기 몫으로 쓴다★ — 그 밑에서 한 장 더 읽고 거기서 멈췄다"
+            "★a supervisor that does not use streams uses the whole budget as the read share★ — it read one more item below that and stopped there"
         );
         assert_eq!(endpoint.unread(), usize::from(sent) - 2);
 
@@ -6160,7 +6255,7 @@ mod tests {
         assert_eq!(
             tags,
             (0..sent).collect::<Vec<_>>(),
-            "★손실 0 · 순서 그대로★"
+            "★0 loss · order as is★"
         );
         assert_eq!(h.peer.held_bytes(), 0);
     }
@@ -6173,20 +6268,20 @@ mod tests {
         }
         endpoint.push(Frame::Keepalive);
         settle().await;
-        assert!(h.peer.held_bytes() > 0, "순서 칸이 붙들고 있다");
+        assert!(h.peer.held_bytes() > 0, "the ordering area is holding");
 
         for _ in 0..3 {
             h.clock.advance(Duration::from_secs(20));
             settle().await;
             assert!(
                 endpoint.drain().contains(&ClientMsg::Ping),
-                "★붙든 동안에도 우리 ping 은 나간다★ — 안 나가면 상대가 우리를 침묵으로 끊는다"
+                "★our pings go out even while holding★ — otherwise the peer cuts us for silence"
             );
         }
         assert_eq!(h.peer.peer_state(), PeerState::Live);
 
         h.peer.close();
-        settle_until("붙든 채로도 닫기가 들린다", || {
+        settle_until("the close is heard even while holding", || {
             h.peer.peer_state() == PeerState::Closed
         })
         .await;
@@ -6204,7 +6299,7 @@ mod tests {
         assert_eq!(
             h.peer.peer_state(),
             PeerState::Live,
-            "{what}: ★막은 것은 우리 쪽이다★ — 붙든 시간을 상대의 침묵으로 세면 안 된다"
+            "{what}: ★we are the ones who blocked★ — the holding time must not count as the peer's silence"
         );
 
         drain_until_quiet(&mut h).await;
@@ -6213,14 +6308,14 @@ mod tests {
         assert_eq!(
             h.peer.peer_state(),
             PeerState::Live,
-            "{what}: ★풀린 순간이 `last_rx` 다★ — 그 앞의 마지막 수신부터 세면 곧바로 끊긴다"
+            "{what}: ★the moment of release is `last_rx`★ — counting from the last receipt before it would cut right away"
         );
         h.clock.advance(Duration::from_secs(1));
         settle().await;
         assert_eq!(
             h.disconnect_cause(),
             Some(DisconnectCause::Idle),
-            "{what}: 풀린 뒤에는 침묵 판정이 다시 돈다"
+            "{what}: after release, the silence decision runs again"
         );
     }
 
@@ -6229,7 +6324,7 @@ mod tests {
         let (h, endpoint) = live_on_a_full_line().await;
         endpoint.push(TestWire::encode_in(&TestIn::Notice("held".into())));
         settle().await;
-        idle_restarts_from_the_release(h, "순서 칸").await;
+        idle_restarts_from_the_release(h, "ordering area").await;
     }
 
     #[tokio::test]
@@ -6241,7 +6336,10 @@ mod tests {
             4096,
             budget,
         );
-        settle_until("첫 연결", || h.peer.peer_state() == PeerState::Live).await;
+        settle_until("first connection", || {
+            h.peer.peer_state() == PeerState::Live
+        })
+        .await;
         let endpoint = h.net.accept().unwrap();
         h.drain();
         // ★Do not put a liveness check after it★ — if that were read right at release and rewound `last_rx`, the release's rewind
@@ -6250,13 +6348,13 @@ mod tests {
         settle().await;
         assert!(
             h.peer.held_bytes() >= budget,
-            "줄에 든 한 장이 예산을 넘겼다"
+            "one item in the queue exceeded the budget"
         );
-        idle_restarts_from_the_release(h, "바이트 예산").await;
+        idle_restarts_from_the_release(h, "byte budget").await;
     }
 
     // ★Make the release slip into a timer turn (`Turn::Timer`) that is followed by a progress check★ — `on_timer` skipped the silence decision
-    //   by the 「붙듦」 (held) at its start, but if the wake-up time were re-measured by the backpressure at that place, it would be set by the stale `last_rx`'s silence deadline (already
+    //   by the 「held」 at its start, but if the wake-up time were re-measured by the backpressure at that place, it would be set by the stale `last_rx`'s silence deadline (already
     //   passed) and the progress check (`debug_assert`) would panic the supervisor.
     //   To get to that turn, the ping time must pass while the supervisor is outside `select` — we stand it on a blocked notification write. When that write
     //   is released the supervisor goes through to that turn's ping without yielding, so we block only the ping and let the receiving side drain inside it.
@@ -6269,11 +6367,14 @@ mod tests {
             4096,
             budget,
         );
-        settle_until("첫 연결", || h.peer.peer_state() == PeerState::Live).await;
+        settle_until("first connection", || {
+            h.peer.peer_state() == PeerState::Live
+        })
+        .await;
         let endpoint = h.net.accept().unwrap();
         endpoint.push(blob(0, 2 * budget));
         settle().await;
-        assert!(h.peer.held_bytes() >= budget, "예산만으로 붙든다");
+        assert!(h.peer.held_bytes() >= budget, "holds by the budget alone");
         // Passes the silence deadline (50 s) — it does not cut because it is held, and the ping goes out every 20 s.
         for _ in 0..2 {
             h.clock.advance(Duration::from_secs(20));
@@ -6292,13 +6393,16 @@ mod tests {
         endpoint.stall_pings(true);
         endpoint.stall_writes(false);
         settle().await;
-        assert!(!h.task.is_finished(), "타이머 바퀴의 ping 에서 기다린다");
+        assert!(
+            !h.task.is_finished(),
+            "waits at the ping of the timer round"
+        );
         h.drain();
         endpoint.stall_pings(false);
         settle().await;
         assert!(
             !h.task.is_finished(),
-            "★붙든 채 들어간 타이머 바퀴 안에서 풀려도 진도 확인이 안 터진다★"
+            "★even if released inside a timer round entered while holding, the progress check does not blow up★"
         );
         assert_eq!(h.peer.peer_state(), PeerState::Live);
         assert!(endpoint.drain().contains(&ClientMsg::Ping));
@@ -6309,7 +6413,10 @@ mod tests {
     /// A stream piece whose payload is exactly `len` bytes (key 1 · incarnation 1).
     fn sized_chunk(seq: u64, len: usize) -> Frame {
         let head = format!("chk|1|1|{seq}|");
-        assert!(len >= head.len(), "{len} 바이트로는 머리도 못 싣는다");
+        assert!(
+            len >= head.len(),
+            "{len} bytes cannot even carry the header"
+        );
         Frame::Text(format!("{head}{}", "x".repeat(len - head.len())))
     }
 
@@ -6341,7 +6448,10 @@ mod tests {
             inbound_cap,
             budget,
         );
-        settle_until("첫 연결", || h.peer.peer_state() == PeerState::Live).await;
+        settle_until("first connection", || {
+            h.peer.peer_state() == PeerState::Live
+        })
+        .await;
         let endpoint = h.net.accept().unwrap();
         endpoint.push(TestWire::chunk(1, 1, 1));
         assert_eq!(chunk_seqs(&drain_until_quiet(&mut h).await), vec![1]);
@@ -6361,12 +6471,12 @@ mod tests {
         assert_eq!(
             endpoint.frames(),
             vec![Frame::Text("res|1|1".into())],
-            "구멍을 보고 재요청을 냈다"
+            "saw the gap and issued a re-request"
         );
         assert_eq!(
             h.peer.window_bytes(),
             window_cap,
-            "붙든 조각은 창 몫에 선다"
+            "held pieces stand in the window share"
         );
 
         endpoint.push(TestWire::chunk(1, 1, 2));
@@ -6375,16 +6485,20 @@ mod tests {
         assert_eq!(
             endpoint.unread(),
             0,
-            "★붙든 조각이 창 상한만큼이어도 재생분은 읽힌다★"
+            "★even if held pieces reach the window cap, the replay is read★"
         );
         let items = h.drain();
         assert_eq!(
             chunk_seqs(&items),
             vec![2, 3],
-            "★구멍이 메워져 순서대로 온다★"
+            "★the gap is filled and items come in order★"
         );
-        assert_eq!(truncations(&items), Vec::<u64>::new(), "잘림이 아니다");
-        assert_eq!(h.peer.window_bytes(), 0, "답이 와 붙든 것을 버렸다");
+        assert_eq!(truncations(&items), Vec::<u64>::new(), "not a truncation");
+        assert_eq!(
+            h.peer.window_bytes(),
+            0,
+            "the answer came and the held items were discarded"
+        );
     }
 
     // ★The receiving side stops after the window opens★ — fill line length 1 with one notification so the hole event stands in the ordering area, and meanwhile the frame
@@ -6401,7 +6515,7 @@ mod tests {
         settle().await;
         assert!(
             h.peer.held_bytes() > h.peer.window_bytes(),
-            "재생분이 앞잡이 줄에 있다"
+            "the replay is in the read-ahead queue"
         );
 
         // Passes the window deadline (2 s) and the ping time (20 s) too, letting the timer run once while held.
@@ -6411,7 +6525,7 @@ mod tests {
         settle().await;
         assert!(
             endpoint.drain().contains(&ClientMsg::Ping),
-            "붙든 채 타이머가 돌았다"
+            "the timer ran while holding"
         );
         assert_eq!(h.peer.peer_state(), PeerState::Live);
 
@@ -6419,12 +6533,12 @@ mod tests {
         assert_eq!(
             truncations(&items),
             Vec::<u64>::new(),
-            "★막아 둔 것은 우리 쪽이다★ — 붙든 시간을 창 시한으로 세면 메울 수 있던 구멍을 잘림으로 접는다"
+            "★we are the ones who blocked★ — counting the holding time against the window deadline folds a fillable gap into a truncation"
         );
         assert_eq!(
             chunk_seqs(&items),
             vec![2, 3],
-            "★풀린 뒤 재생분이 구멍을 메운다★"
+            "★after release, the replay fills the gap★"
         );
     }
 
@@ -6442,19 +6556,19 @@ mod tests {
         assert_eq!(
             (h.peer.held_bytes(), h.peer.window_bytes()),
             (60, 0),
-            "★창에서 나온 조각의 몫은 읽기 문으로 돌아간다★ — 창 몫에 남으면 받는 쪽이 느린 것만으로 다음 구멍을 \
-             못 붙든다"
+            "★the share of pieces coming out of the window returns to the read gate★ — if it stayed in the window share, a slow receiver alone would keep the next gap \
+              from being held"
         );
         let items = h.drain();
         assert_eq!(
             truncations(&items),
             vec![3],
-            "★창 상한을 넘기면 말없이 버리지 않고 잘림으로 신고한다★ — 붙든 첫 번호가 하한이다"
+            "★exceeding the window cap is reported as a truncation, not silently dropped★ — the first held number is the lower bound"
         );
         assert_eq!(
             chunk_seqs(&items),
             vec![3, 4],
-            "붙든 것을 순서대로 내보낸다"
+            "emits the held items in order"
         );
         assert_eq!(h.peer.held_bytes(), 0);
     }
@@ -6469,7 +6583,7 @@ mod tests {
         assert_eq!(
             (h.peer.held_bytes(), h.peer.window_bytes()),
             (held, held),
-            "★창이 붙든 조각도 감독이 쥔 바이트다★"
+            "★pieces held by the window are bytes the supervisor holds too★"
         );
 
         let answer = TestWire::chunk(1, 1, 2).payload_len();
@@ -6478,7 +6592,7 @@ mod tests {
         assert_eq!(
             (h.peer.held_bytes(), h.peer.window_bytes()),
             (answer, 0),
-            "답이 와 창이 닫히면 붙든 몫이 빠지고 올라간 답만 남는다"
+            "when the answer comes and the window closes, the held share leaves and only the forwarded answer remains"
         );
         h.drain();
         assert_eq!(h.peer.held_bytes(), 0);
@@ -6496,7 +6610,7 @@ mod tests {
         assert_eq!(
             h.peer.held_bytes(),
             3 * "not|n0".len(),
-            "n0 은 순서 칸에, n1 · n2 는 앞잡이 줄에 있다"
+            "n0 is in the ordering area, n1 · n2 in the read-ahead queue"
         );
         assert_eq!(endpoint.unread(), 0);
     }
@@ -6513,7 +6627,10 @@ mod tests {
             Arc::new(ImmediateHandshake),
             1,
         );
-        settle_until("첫 연결", || h.peer.peer_state() == PeerState::Live).await;
+        settle_until("first connection", || {
+            h.peer.peer_state() == PeerState::Live
+        })
+        .await;
         let endpoint = h.net.accept().unwrap();
         for n in 0..5 {
             endpoint.push(TestWire::encode_in(&TestIn::Notice(format!("n{n}"))));
@@ -6522,10 +6639,10 @@ mod tests {
         assert_eq!(
             endpoint.unread(),
             2,
-            "n0 은 순서 칸에, n1 · n2 는 앞잡이 줄에"
+            "n0 in the ordering area, n1 · n2 in the read-ahead queue"
         );
         h.peer.reconnect_now();
-        settle_until("새 통로", || h.net.dials() == 2).await;
+        settle_until("new link", || h.net.dials() == 2).await;
 
         let items = drain_until_quiet(&mut h).await;
         assert_eq!(
@@ -6538,12 +6655,12 @@ mod tests {
                 "Disconnected:1:Explicit",
                 "Connected:2",
             ],
-            "★다시 걸어도 이미 읽은 것은 버리지 않고 옛 세대로 끊김 앞에 싣는다★"
+            "★even when redialing, what was already read is not dropped but delivered with the old generation before the disconnect★"
         );
         assert_eq!(
             endpoint.unread(),
             2,
-            "n3 · n4 는 옛 통로에 남았다 — 읽고서 버린 것은 없다"
+            "n3 · n4 remained on the old link — nothing was read and then dropped"
         );
         assert_eq!(h.peer.held_bytes(), 0);
     }
@@ -6571,7 +6688,7 @@ mod tests {
                 "Disconnected:1:WriteDeadline",
                 "Dropped",
             ],
-            "★쓰기가 실패해도 이미 읽은 것은 끊김 앞에 온다★ — 못 나간 알림의 신고는 백오프가 낸다"
+            "★even if a write fails, what was already read comes before the disconnect★ — the report of the notification that could not go out is emitted by the backoff"
         );
     }
 
@@ -6585,27 +6702,34 @@ mod tests {
             4096,
             budget,
         );
-        settle_until("첫 연결", || h.peer.peer_state() == PeerState::Live).await;
+        settle_until("first connection", || {
+            h.peer.peer_state() == PeerState::Live
+        })
+        .await;
         let first = h.net.accept().unwrap();
         first.push(blob(0, 2 * budget));
         settle().await;
-        assert_eq!(h.peer.held_bytes(), 2 * budget, "줄에 남겨 둔다");
+        assert_eq!(h.peer.held_bytes(), 2 * budget, "leaves it in the queue");
 
         h.peer.reconnect_now();
-        settle_until("다시 붙음", || h.net.dials() == 2).await;
-        settle_until("운영", || h.peer.peer_state() == PeerState::Live).await;
+        settle_until("reattached", || h.net.dials() == 2).await;
+        settle_until("operating", || h.peer.peer_state() == PeerState::Live).await;
         let second = h.net.accept().unwrap();
         second.push(blob(1, 10));
         settle().await;
         assert_eq!(
             second.unread(),
             1,
-            "★옛 통로의 몫이 읽기 몫 이상이면 새 통로를 안 읽는다★"
+            "★if the old link's share is at least the read share, the new link is not read★"
         );
 
         let items = drain_until_quiet(&mut h).await;
         assert_eq!(blob_tags(&items), vec![0, 1]);
-        assert_eq!(second.unread(), 0, "옛 몫이 빠지자 새 통로를 읽었다");
+        assert_eq!(
+            second.unread(),
+            0,
+            "once the old share left, the new link was read"
+        );
         assert_eq!(h.peer.held_bytes(), 0);
     }
 
@@ -6619,7 +6743,7 @@ mod tests {
         endpoint.push(TestWire::reply(7));
         settle().await;
         assert_eq!(endpoint.unread(), 0);
-        assert!(!asked.is_finished(), "답장은 앞잡이 줄에 있다");
+        assert!(!asked.is_finished(), "the reply is in the read-ahead queue");
 
         h.peer.reconnect_now();
         assert_eq!(
@@ -6628,7 +6752,7 @@ mod tests {
                 tag: 7,
                 body: "ok".into(),
             }),
-            "★이미 읽은 답장은 끊김으로 실패하지 않는다★"
+            "★a reply already read does not fail because of the disconnect★"
         );
         drain_until_quiet(&mut h).await;
     }
@@ -6651,7 +6775,7 @@ mod tests {
             settle().await;
             assert!(
                 h.peer.held_bytes() <= budget + message,
-                "{} 바이트를 쥐었다 — 셈 전체가 B + M 을 넘었다",
+                "held {} bytes — the whole count exceeded B + M",
                 h.peer.held_bytes()
             );
             assert!(h.peer.window_bytes() <= split(budget).1);
@@ -6660,7 +6784,7 @@ mod tests {
         let items = drain_until_quiet(&mut h).await;
         assert_eq!(chunk_seqs(&items), vec![3, 4, 5, 6]);
         assert_eq!(truncations(&items), vec![3]);
-        assert_eq!(blob_tags(&items), vec![0, 1, 2], "★손실 0 · 순서 그대로★");
+        assert_eq!(blob_tags(&items), vec![0, 1, 2], "★0 loss · order as is★");
         assert_eq!(h.peer.held_bytes(), 0);
     }
 
@@ -6676,7 +6800,10 @@ mod tests {
                 4096,
                 budget,
             );
-            settle_until("첫 연결", || h.peer.peer_state() == PeerState::Live).await;
+            settle_until("first connection", || {
+                h.peer.peer_state() == PeerState::Live
+            })
+            .await;
             let endpoint = h.net.accept().unwrap();
             if streams {
                 endpoint.push(TestWire::chunk(1, 1, 1));
@@ -6689,12 +6816,12 @@ mod tests {
             assert_eq!(
                 endpoint.unread(),
                 usize::from(streams),
-                "스트림 조각을 봤나 = {streams}"
+                "saw stream pieces = {streams}"
             );
             assert_eq!(
                 blob_tags(&drain_until_quiet(&mut h).await),
                 vec![0, 1, 2],
-                "★손실 0 · 순서 그대로★"
+                "★0 loss · order as is★"
             );
         }
     }
@@ -6718,7 +6845,7 @@ mod tests {
         assert_eq!(
             chunk_seqs(&items),
             vec![3, 5, 6],
-            "★늘 오름차순 · 겹침 없음★"
+            "★always ascending · no overlap★"
         );
     }
 
@@ -6742,7 +6869,7 @@ mod tests {
         assert_eq!(
             endpoint.unread(),
             2,
-            "쓰기에 선 사이 읽기 문이 닫혀 재생분이 통로에 남았다"
+            "while stuck on the write, the read gate closed and the replay stayed on the link"
         );
         let resume_timeout = Policy::default().resume_timeout;
         let stalled = resume_timeout + Duration::from_secs(1);
@@ -6755,12 +6882,12 @@ mod tests {
         assert_eq!(
             truncations(&items),
             Vec::<u64>::new(),
-            "★붙듦은 시작된 때부터 센다★ — 알아챈 때부터 세면 쓰기를 기다린 시간이 창 시한을 다 먹는다"
+            "★holding counts from when it started★ — counting from when it was noticed lets the time waiting on the write eat up the window deadline"
         );
         assert_eq!(
             chunk_seqs(&items),
             vec![2, 3],
-            "★풀린 뒤 재생분이 구멍을 메운다★"
+            "★after release, the replay fills the gap★"
         );
         assert_eq!(blob_tags(&items), vec![0]);
         assert_eq!(h.peer.peer_state(), PeerState::Live);
@@ -6805,7 +6932,10 @@ mod tests {
             2,
             BYTE_BUDGET,
         );
-        settle_until("첫 연결", || h.peer.peer_state() == PeerState::Live).await;
+        settle_until("first connection", || {
+            h.peer.peer_state() == PeerState::Live
+        })
+        .await;
         let endpoint = h.net.accept().unwrap();
         endpoint.push(TestWire::chunk(1, 1, 1));
         assert_eq!(chunk_seqs(&drain_until_quiet(&mut h).await), vec![1]);
@@ -6826,7 +6956,7 @@ mod tests {
         assert_eq!(
             labels(&h.drain()),
             vec!["msg:fill0", "msg:fill1"],
-            "쓰기에 선 사이 받는 쪽이 줄을 비웠다 — 구멍 사건은 아직 순서 칸에 있다"
+            "while stuck on the write, the receiver drained the queue — the gap event is still in the ordering area"
         );
         let stalled = Policy::default().resume_timeout + Duration::from_secs(1);
         assert!(stalled < Policy::default().write_deadline);
@@ -6862,7 +6992,7 @@ mod tests {
         assert_eq!(
             endpoint.unread(),
             2,
-            "쓰기에 선 사이 읽기 문이 닫혀 재생분이 통로에 남았다"
+            "while stuck on the write, the read gate closed and the replay stayed on the link"
         );
         let stalled = Policy::default().resume_timeout + Duration::from_secs(1);
         assert!(stalled < Policy::default().write_deadline);
@@ -6873,7 +7003,7 @@ mod tests {
         assert_eq!(
             endpoint.unread(),
             0,
-            "받는 쪽이 비워 읽기 문이 다시 열렸다 — 쓰기는 아직 서 있다"
+            "the receiver drained and the read gate opened again — the write is still stuck"
         );
         endpoint.stall_writes(false);
 
@@ -6881,9 +7011,9 @@ mod tests {
         assert_eq!(
             truncations(&items),
             Vec::<u64>::new(),
-            "★끝내 못 본 붙듦도 창 시한에서 뺀다★"
+            "★a hold that was never seen is subtracted from the window deadline too★"
         );
-        assert_eq!(chunk_seqs(&items), vec![2, 3], "★재생분이 구멍을 메운다★");
+        assert_eq!(chunk_seqs(&items), vec![2, 3], "★the replay fills the gap★");
         assert_eq!(blob_tags(&items), vec![1]);
         assert_eq!(h.peer.peer_state(), PeerState::Live);
     }
@@ -6924,7 +7054,9 @@ mod tests {
             };
             let _ = sup.streams.observe_capped(&mark, held, now, false);
         }
-        sup.streams.next_resume_deadline().expect("창이 열렸다")
+        sup.streams
+            .next_resume_deadline()
+            .expect("the window opened")
     }
 
     /// Closes the read gate for `secs` seconds and then opens it — budget 100 · streams unused, so it closes at 100 bytes.
@@ -6947,9 +7079,13 @@ mod tests {
         assert_eq!(
             sup.streams.next_resume_deadline(),
             Some(deadline + Duration::from_secs(5)),
-            "★두 구간을 다 민다★ — 그 사이 열려 있던 1 s 는 안 민다"
+            "★pushes both sections★ — the 1 s open in between is not pushed"
         );
-        assert_eq!(sup.last_rx, clock.now(), "못 본 붙듦이 풀린 것도 풀림이다");
+        assert_eq!(
+            sup.last_rx,
+            clock.now(),
+            "the release of an unseen hold is a release too"
+        );
     }
 
     // ★If an unseen span straddles the ordering area's hold, treat it as held from that first span★ — if we looked only at when the ordering area started holding,
@@ -6979,7 +7115,7 @@ mod tests {
         assert_eq!(
             sup.streams.next_resume_deadline(),
             Some(deadline + Duration::from_secs(4)),
-            "읽기 문이 닫힌 때(1 s)부터 풀림을 알아챈 때(5 s)까지다"
+            "from when the read gate closed (1 s) to when the release was noticed (5 s)"
         );
     }
 
@@ -7003,7 +7139,7 @@ mod tests {
         assert_eq!(
             sup.streams.next_resume_deadline(),
             Some(deadline + Duration::from_secs(4)),
-            "못 본 2 s + 지금 붙듦(4 s 에 닫혀 6 s 에 알아챘다) 2 s — 그 사이 열린 1 s 는 안 민다"
+            "the unseen 2 s + the current hold (closed at 4 s, noticed at 6 s) 2 s — the 1 s open in between is not pushed"
         );
     }
 
@@ -7027,7 +7163,7 @@ mod tests {
         assert_eq!(
             sup.streams.next_resume_deadline(),
             Some(deadline + Duration::from_secs(4)),
-            "붙듦이 시작된 1 s 부터 풀림을 알아챈 5 s 까지 한 번만"
+            "only once, from 1 s when the hold started to 5 s when the release was noticed"
         );
     }
 
@@ -7043,7 +7179,10 @@ mod tests {
             Arc::new(ImmediateHandshake),
             1,
         );
-        settle_until("첫 연결", || h.peer.peer_state() == PeerState::Live).await;
+        settle_until("first connection", || {
+            h.peer.peer_state() == PeerState::Live
+        })
+        .await;
         let endpoint = h.net.accept().unwrap();
         endpoint.push(TestWire::encode_in(&TestIn::Notice("n0".into())));
         endpoint.push(Frame::Text("garbage".into()));
@@ -7052,10 +7191,10 @@ mod tests {
         assert_eq!(
             endpoint.unread(),
             0,
-            "n0 은 순서 칸에, 나머지는 앞잡이 줄에"
+            "n0 in the ordering area, the rest in the read-ahead queue"
         );
         h.peer.reconnect_now();
-        settle_until("새 통로", || h.net.dials() == 2).await;
+        settle_until("new link", || h.net.dials() == 2).await;
 
         let items = drain_until_quiet(&mut h).await;
         assert_eq!(
@@ -7077,14 +7216,14 @@ mod tests {
         endpoint.push(TestWire::chunk(1, 1, 3));
         settle().await;
         h.peer.reconnect_now();
-        settle_until("다시 붙음", || h.net.dials() == 2).await;
-        settle_until("운영", || h.peer.peer_state() == PeerState::Live).await;
+        settle_until("reattached", || h.net.dials() == 2).await;
+        settle_until("operating", || h.peer.peer_state() == PeerState::Live).await;
         let second = h.net.accept().unwrap();
         settle().await;
         assert_eq!(
             second.frames(),
             vec![Frame::Text("res|1|1".into())],
-            "창이 살아남아 새 통로에서 다시 청했다"
+            "the window survived and requested again on the new link"
         );
 
         h.clock.advance(Policy::default().resume_timeout);
@@ -7097,11 +7236,15 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(truncations(&items), vec![3], "둘째 통로에서 창이 닫혔다");
+        assert_eq!(
+            truncations(&items),
+            vec![3],
+            "the window closed on the second link"
+        );
         assert_eq!(
             held,
             vec![(3, 1)],
-            "★실어 온 연결의 세대다★ — 창이 닫힌 연결(2)의 세대를 찍으면 `Arrival::generation` 계약이 깨진다"
+            "★it is the generation of the connection that carried it★ — stamping the generation of the connection where the window closed (2) breaks the `Arrival::generation` contract"
         );
     }
 
@@ -7112,7 +7255,7 @@ mod tests {
         endpoint.push(TestWire::chunk(1, 1, 3));
         settle().await;
         h.peer.close();
-        settle_until("접힘", || h.peer.peer_state() == PeerState::Closed).await;
+        settle_until("folded", || h.peer.peer_state() == PeerState::Closed).await;
 
         let items = drain_until_quiet(&mut h).await;
         let seen: Vec<String> = items
@@ -7132,18 +7275,22 @@ mod tests {
                 "Closed:1:Explicit",
             ]
         );
-        assert_eq!(truncations(&items), vec![3], "붙든 첫 번호가 하한이다");
+        assert_eq!(
+            truncations(&items),
+            vec![3],
+            "the first held number is the lower bound"
+        );
         assert_eq!(h.peer.held_bytes(), 0);
     }
 
     // ── 3-0 U3: pre-close flush ──
     //
-    // ★Put the close code outside the crate's reserved range★ — if it equals the default close (`GOING_AWAY` · "closing"), then 「준 닫기를 실었다」 (loaded the close we were given)
+    // ★Put the close code outside the crate's reserved range★ — if it equals the default close (`GOING_AWAY` · "closing"), then 「loaded the close we were given」
     //   cannot be measured.
 
     const BYE: CloseCode = CloseCode(CloseCode::CONSUMER_BASE);
 
-    /// What went out on the channel in a readable form — a frame as its body, a close as `close:코드:문구`.
+    /// What went out on the link in a readable form — a frame as its body, a close as `close:code:reason`.
     fn wire_labels(msgs: &[ClientMsg]) -> Vec<String> {
         msgs.iter()
             .map(|msg| match msg {
@@ -7172,7 +7319,7 @@ mod tests {
     fn notify_all(peer: &Peer<TestWire>, n: usize) {
         for i in 0..n {
             peer.notify(TestOut::Notice(format!("n{i}")))
-                .expect("나가는 큐");
+                .expect("outbound queue");
         }
     }
 
@@ -7181,7 +7328,7 @@ mod tests {
         let (mut h, endpoint) = live().await;
         notify_all(&h.peer, 5);
         let done = h.peer.close_after_flush(BYE, "bye");
-        settle_until("감독이 끝났다", || h.task.is_finished()).await;
+        settle_until("the supervisor ended", || h.task.is_finished()).await;
 
         assert_eq!(
             wire_labels(&endpoint.drain()),
@@ -7193,17 +7340,17 @@ mod tests {
                 "not|n4",
                 "close:4100:bye"
             ],
-            "★앞서 받아 둔 다섯이 다 나간 뒤 준 닫기가 나간다★"
+            "★the given close goes out after the five accepted earlier have all gone out★"
         );
         assert_eq!(
             poll_immediate(done).await,
             Some(()),
-            "끝남 future 가 풀렸다"
+            "the finished future resolved"
         );
         assert_eq!(
             labels(&drain_until_quiet(&mut h).await),
             vec!["Disconnected:1:Explicit", "Closed:1:Explicit"],
-            "다 나갔으니 유실 신고가 없다"
+            "everything went out, so there is no loss report"
         );
         assert!(h.exited_cleanly().await);
     }
@@ -7220,7 +7367,7 @@ mod tests {
         let done = h.peer.close_after_flush(BYE, "bye");
         tokio::pin!(done);
         settle().await;
-        assert!(endpoint.drain().is_empty(), "첫 쓰기가 막혀 있다");
+        assert!(endpoint.drain().is_empty(), "the first write is blocked");
 
         let flush = Policy::default().flush_timeout;
         h.clock.advance(flush - Duration::from_millis(1));
@@ -7228,27 +7375,31 @@ mod tests {
         assert_eq!(
             h.peer.peer_state(),
             PeerState::Live,
-            "시한 전에는 안 접는다"
+            "does not fold before the deadline"
         );
         assert_eq!(poll_immediate(done.as_mut()).await, None);
 
         h.clock.advance(Duration::from_millis(1));
         settle_until(
-            "시한에 감독이 끝났다 — 막힌 쓰기를 풀지 않았다",
+            "the supervisor ended at the deadline — the blocked write was not released",
             || h.task.is_finished(),
         )
         .await;
         assert_eq!(poll_immediate(done.as_mut()).await, Some(()));
         assert!(
             endpoint.drain().is_empty(),
-            "★닫기 프레임도 같은 시한 안이다★ — 남은 몫이 0 이라 막힌 통로에서는 못 나간다"
+            "★the close frame is within the same deadline too★ — the remaining share is 0, so it cannot go out on a blocked link"
         );
         let items = drain_until_quiet(&mut h).await;
         assert_eq!(
             labels(&items),
             vec!["Disconnected:1:Explicit", "Dropped", "Closed:1:Explicit"]
         );
-        assert_eq!(dropped_out(&items), 3, "쓰다 잘린 하나 + 못 쓴 둘을 센다");
+        assert_eq!(
+            dropped_out(&items),
+            3,
+            "counts the one cut mid-write + the two not written"
+        );
         assert!(h.exited_cleanly().await);
     }
 
@@ -7259,7 +7410,7 @@ mod tests {
         let (mut h, endpoint) = live_on_a_full_line().await;
         endpoint.push(TestWire::encode_in(&TestIn::Notice("held".into())));
         settle().await;
-        assert!(h.peer.held_bytes() > 0, "순서 칸이 붙들고 있다");
+        assert!(h.peer.held_bytes() > 0, "the ordering area is holding");
         endpoint.stall_writes(true);
         notify_all(&h.peer, 1);
         let done = h.peer.close_after_flush(BYE, "bye");
@@ -7267,7 +7418,7 @@ mod tests {
         settle().await;
 
         h.clock.advance(Policy::default().flush_timeout);
-        settle_until("시한에 접혔다", || {
+        settle_until("folded at the deadline", || {
             h.peer.peer_state() == PeerState::Closed
         })
         .await;
@@ -7275,7 +7426,7 @@ mod tests {
         assert_eq!(
             poll_immediate(done.as_mut()).await,
             None,
-            "정리가 붙든 것을 받는 쪽에 싣기를 기다린다"
+            "the cleanup waits to deliver the held items to the receiver"
         );
 
         let items = drain_until_quiet(&mut h).await;
@@ -7289,7 +7440,7 @@ mod tests {
                 "Closed:1:Explicit",
             ]
         );
-        settle_until("받는 쪽이 비우자 감독이 끝났다", || {
+        settle_until("once the receiver drained, the supervisor ended", || {
             h.task.is_finished()
         })
         .await;
@@ -7309,20 +7460,19 @@ mod tests {
             settle().await;
             endpoint.stall_writes(false);
             h.clock.advance(Policy::default().flush_timeout);
-            settle_until(
-                &format!("{round}번째 바퀴: 감독이 끝났다"),
-                || h.task.is_finished(),
-            )
+            settle_until(&format!("round {round}: the supervisor ended"), || {
+                h.task.is_finished()
+            })
             .await;
             let sent = wire_labels(&endpoint.drain());
             assert!(
                 sent == ["not|n0", "close:4100:bye"] || sent == ["close:4100:bye"],
-                "{round}번째 바퀴: {sent:?}"
+                "round {round}: {sent:?}"
             );
             assert_eq!(poll_immediate(done).await, Some(()));
             assert!(
                 h.exited_cleanly().await,
-                "{round}번째 바퀴: 감독이 패닉했다(진도 확인)"
+                "round {round}: the supervisor panicked (progress check)"
             );
         }
     }
@@ -7341,7 +7491,7 @@ mod tests {
                 },
                 Arc::new(ImmediateHandshake),
             );
-            settle_until("연결", || h.peer.peer_state() == PeerState::Live).await;
+            settle_until("connection", || h.peer.peer_state() == PeerState::Live).await;
             let endpoint = h.net.accept().unwrap();
             endpoint.stall_pings(true);
             h.clock.advance(Policy::default().ping_interval);
@@ -7356,20 +7506,19 @@ mod tests {
             assert_eq!(
                 h.peer.inner.data_tx.capacity(),
                 1,
-                "{round}번째 바퀴: 감독이 묶음으로 n0 을 꺼내 쓰다 섰다"
+                "round {round}: the supervisor took n0 out as a batch and stalled writing it"
             );
 
             endpoint.stall_writes(false);
             h.clock.advance(Policy::default().flush_timeout);
-            settle_until(
-                &format!("{round}번째 바퀴: 감독이 끝났다"),
-                || h.task.is_finished(),
-            )
+            settle_until(&format!("round {round}: the supervisor ended"), || {
+                h.task.is_finished()
+            })
             .await;
             let sent = wire_labels(&endpoint.drain());
             assert!(
                 sent == ["not|n0", "close:4100:bye"] || sent == ["close:4100:bye"],
-                "{round}번째 바퀴: ★시한 뒤에 시작한 쓰기가 없다★ — {sent:?}"
+                "round {round}: ★no write started after the deadline★ — {sent:?}"
             );
             assert_eq!(poll_immediate(done).await, Some(()));
             assert!(h.exited_cleanly().await);
@@ -7383,7 +7532,10 @@ mod tests {
         endpoint.stall_writes(true);
         notify_all(&h.peer, 1);
         settle().await;
-        assert!(h.queue_drained(), "감독이 n0 을 꺼내 쓰다 섰다");
+        assert!(
+            h.queue_drained(),
+            "the supervisor took n0 out and stalled writing it"
+        );
         let done = h.peer.close_after_flush(BYE, "bye");
         let after_marker = h.peer.inner.data_tx.capacity();
         assert_eq!(h.peer.peer_state(), PeerState::Live);
@@ -7405,7 +7557,10 @@ mod tests {
         h.peer.reconnect_now();
         let asked = spawn_request(&h.peer, 7);
         settle().await;
-        assert!(asked.is_finished(), "요청은 큐에 안 들고 곧바로 끝났다");
+        assert!(
+            asked.is_finished(),
+            "the request did not enter the queue and ended right away"
+        );
         assert!(matches!(
             joined(asked).await,
             Err(RequestError::Disconnected {
@@ -7417,20 +7572,20 @@ mod tests {
         assert_eq!(
             h.peer.inner.data_tx.capacity(),
             after_marker,
-            "표지 뒤로 아무것도 안 들었다"
+            "nothing went in after the marker"
         );
         assert_eq!(
             h.peer.refused_count(),
             0,
-            "앱이 닫겠다고 한 뒤라 세지 않는다"
+            "not counted since it is after the app said it would close"
         );
 
         endpoint.stall_writes(false);
-        settle_until("감독이 끝났다", || h.task.is_finished()).await;
+        settle_until("the supervisor ended", || h.task.is_finished()).await;
         assert_eq!(
             wire_labels(&endpoint.drain()),
             vec!["not|n0", "close:4100:bye"],
-            "★다시 걸기도 안 들었다★ — 표지 앞 것이 나가고 준 닫기로 끝났다"
+            "★the redial did not go in either★ — what was before the marker went out and it ended with the given close"
         );
         assert_eq!(h.net.dials(), 1);
         assert_eq!(
@@ -7453,7 +7608,7 @@ mod tests {
                 },
                 Arc::new(ImmediateHandshake),
             );
-            settle_until("연결", || h.peer.peer_state() == PeerState::Live).await;
+            settle_until("connection", || h.peer.peer_state() == PeerState::Live).await;
             let endpoint = h.net.accept().unwrap();
             h.drain();
             endpoint.stall_writes(true);
@@ -7461,10 +7616,10 @@ mod tests {
             settle().await;
             h.peer.notify(TestOut::Notice("n1".into())).unwrap();
             h.peer.notify(TestOut::Notice("n2".into())).unwrap();
-            assert_eq!(h.peer.inner.data_tx.capacity(), 0, "큐가 찼다");
+            assert_eq!(h.peer.inner.data_tx.capacity(), 0, "the queue is full");
 
             let done = h.peer.close_after_flush(BYE, "bye");
-            settle_until("시계를 밀지 않고 곧바로 접혔다", || {
+            settle_until("folded right away without advancing the clock", || {
                 h.peer.peer_state() == PeerState::Closed
             })
             .await;
@@ -7474,23 +7629,26 @@ mod tests {
             } else {
                 h.clock.advance(Policy::default().flush_timeout);
             }
-            settle_until(
-                &format!("{round}번째 바퀴: 감독이 끝났다"),
-                || h.task.is_finished(),
-            )
+            settle_until(&format!("round {round}: the supervisor ended"), || {
+                h.task.is_finished()
+            })
             .await;
             let expected: &[&str] = if unstall { &["close:4100:bye"] } else { &[] };
             assert_eq!(
                 wire_labels(&endpoint.drain()),
                 expected,
-                "{round}번째 바퀴: 큐에 든 것은 안 쓰고, 닫기는 준 것이거나 시한에 잘렸다"
+                "round {round}: what is in the queue is not written, and the close is the given one or was cut by the deadline"
             );
             let items = drain_until_quiet(&mut h).await;
             assert_eq!(
                 labels(&items),
                 vec!["Disconnected:1:Explicit", "Dropped", "Closed:1:Explicit"]
             );
-            assert_eq!(dropped_out(&items), 3, "표지는 유실로 세지 않는다");
+            assert_eq!(
+                dropped_out(&items),
+                3,
+                "the marker is not counted as a loss"
+            );
             assert_eq!(poll_immediate(done).await, Some(()));
         }
     }
@@ -7513,21 +7671,21 @@ mod tests {
         let done = h.peer.close_after_flush(BYE, "bye");
         tokio::time::timeout(Duration::from_secs(5), done)
             .await
-            .expect("끝남 future 가 안 풀렸다");
+            .expect("the finished future did not resolve");
 
         assert_eq!(
             wire_labels(&endpoint.drain()),
             vec!["not|n0", "not|n1", "not|n2", "close:4100:bye"]
         );
         assert_eq!(
-            consumer.await.expect("비우는 task"),
+            consumer.await.expect("draining task"),
             vec![
                 "Connected:1",
                 "msg:held",
                 "Disconnected:1:Explicit",
                 "Closed:1:Explicit",
             ],
-            "끝(`None`)까지 비웠다"
+            "drained to the end (`None`)"
         );
     }
 
@@ -7540,16 +7698,16 @@ mod tests {
         settle().await;
 
         drop_the_consumer(&mut h);
-        settle_until("시계를 밀지 않고 접혔다", || {
+        settle_until("folded without advancing the clock", || {
             h.peer.peer_state() == PeerState::Closed
         })
         .await;
         endpoint.stall_writes(false);
-        settle_until("감독이 끝났다", || h.task.is_finished()).await;
+        settle_until("the supervisor ended", || h.task.is_finished()).await;
         assert_eq!(
             wire_labels(&endpoint.drain()),
             vec!["close:4100:bye"],
-            "★받아 둔 셋은 버려졌다★(crate 헤더 「받는 쪽 불변식」 5)"
+            "★the three accepted were dropped★ (crate header 「Receiver-side invariants」 5)"
         );
         assert_eq!(poll_immediate(done).await, Some(()));
         assert!(h.exited_cleanly().await);
@@ -7565,19 +7723,19 @@ mod tests {
 
         endpoint.fail_writes();
         endpoint.stall_writes(false);
-        settle_until("백오프를 기다리지 않고 접혔다", || {
+        settle_until("folded without waiting for the backoff", || {
             h.peer.peer_state() == PeerState::Closed
         })
         .await;
         h.clock.advance(Policy::default().reconnect.cap);
         settle().await;
-        assert_eq!(h.net.dials(), 1, "다시 걸지 않았다");
-        settle_until("감독이 끝났다", || h.task.is_finished()).await;
+        assert_eq!(h.net.dials(), 1, "did not redial");
+        settle_until("the supervisor ended", || h.task.is_finished()).await;
         let items = drain_until_quiet(&mut h).await;
         assert_eq!(
             labels(&items),
             vec!["Disconnected:1:WriteFailed", "Dropped", "Closed:1:Explicit"],
-            "끊김은 그 까닭 그대로 싣는다"
+            "the disconnect carries its reason as is"
         );
         assert_eq!(dropped_out(&items), 3);
         assert_eq!(poll_immediate(done).await, Some(()));
@@ -7586,12 +7744,12 @@ mod tests {
     #[tokio::test]
     async fn a_flush_asked_mid_handshake_abandons_the_attempt() {
         let mut h = build(Policy::default(), Arc::new(ListeningHandshake));
-        settle_until("핸드셰이크 중", || {
+        settle_until("during handshake", || {
             h.peer.peer_state() == PeerState::Handshaking
         })
         .await;
         let done = h.peer.close_after_flush(BYE, "bye");
-        settle_until("핸드셰이크를 기다리지 않고 끝났다", || {
+        settle_until("ended without waiting for the handshake", || {
             h.task.is_finished()
         })
         .await;
@@ -7603,10 +7761,10 @@ mod tests {
     #[tokio::test]
     async fn a_flush_asked_after_giving_up_closes_at_once() {
         let mut h = build(Policy::default(), RejectingHandshake::new("no"));
-        settle_until("포기", || h.peer.peer_state().is_terminal()).await;
+        settle_until("give up", || h.peer.peer_state().is_terminal()).await;
         h.drain();
         let done = h.peer.close_after_flush(BYE, "bye");
-        settle_until("포기 대기에서 곧바로 끝났다", || {
+        settle_until("ended right away from waiting to give up", || {
             h.task.is_finished()
         })
         .await;
@@ -7624,7 +7782,7 @@ mod tests {
             .inner
             .goodbye
             .set(Close::new(BYE, "bye"))
-            .expect("처음 적는다");
+            .expect("writes the first");
         h.peer
             .inner
             .data_tx
@@ -7634,8 +7792,11 @@ mod tests {
                     _keep_ctl: h.peer.inner.ctl_tx.clone(),
                 },
             })
-            .unwrap_or_else(|_| panic!("나가는 큐에 자리가 있어야 한다"));
-        settle_until("옛 세대의 표지로 닫혔다", || h.task.is_finished()).await;
+            .unwrap_or_else(|_| panic!("the outbound queue must have room"));
+        settle_until("closed by the marker of the old generation", || {
+            h.task.is_finished()
+        })
+        .await;
         assert_eq!(wire_labels(&endpoint.drain()), vec!["close:4100:bye"]);
         assert_eq!(
             labels(&drain_until_quiet(&mut h).await),
@@ -7650,18 +7811,17 @@ mod tests {
         for round in 0..16 {
             let mut h = build(Policy::default(), Arc::new(ImmediateHandshake));
             let done = h.peer.close_after_flush(BYE, "bye");
-            settle_until(
-                &format!("{round}번째 바퀴: 감독이 끝났다"),
-                || h.task.is_finished(),
-            )
+            settle_until(&format!("round {round}: the supervisor ended"), || {
+                h.task.is_finished()
+            })
             .await;
-            assert_eq!(h.net.dials(), 0, "{round}번째 바퀴");
+            assert_eq!(h.net.dials(), 0, "round {round}");
             assert_eq!(h.kinds(), vec!["Closed"]);
             assert_eq!(poll_immediate(done).await, Some(()));
         }
     }
 
-    // ★The drain continues even if all handles are released★ — if all are released, the control channel closes and the supervisor reads it as 「닫아라」 (close). While the marker
+    // ★The drain continues even if all handles are released★ — if all are released, the control channel closes and the supervisor reads it as 「close」. While the marker
     //   holds that channel, it does not close.
     #[tokio::test]
     async fn dropping_every_handle_mid_flush_still_writes_what_was_accepted() {
@@ -7680,7 +7840,7 @@ mod tests {
         settle().await;
 
         endpoint.stall_writes(false);
-        settle_until("감독이 끝났다", || task.is_finished()).await;
+        settle_until("the supervisor ended", || task.is_finished()).await;
         assert_eq!(
             wire_labels(&endpoint.drain()),
             vec!["not|n0", "not|n1", "not|n2", "close:4100:bye"]
@@ -7697,12 +7857,12 @@ mod tests {
         let done = h.peer.close_after_flush(BYE, "bye");
         settle().await;
         h.peer.close();
-        settle_until("곧바로 접혔다", || {
+        settle_until("folded right away", || {
             h.peer.peer_state() == PeerState::Closed
         })
         .await;
         endpoint.stall_writes(false);
-        settle_until("감독이 끝났다", || h.task.is_finished()).await;
+        settle_until("the supervisor ended", || h.task.is_finished()).await;
         assert_eq!(wire_labels(&endpoint.drain()), vec!["close:4100:bye"]);
         assert_eq!(poll_immediate(done).await, Some(()));
     }
@@ -7710,9 +7870,9 @@ mod tests {
     #[tokio::test]
     async fn the_end_future_resolves_at_once_when_the_supervisor_is_already_gone() {
         let mut h = build(Policy::default(), Arc::new(ImmediateHandshake));
-        settle_until("연결", || h.peer.peer_state() == PeerState::Live).await;
+        settle_until("connection", || h.peer.peer_state() == PeerState::Live).await;
         drop_the_consumer(&mut h);
-        settle_until("감독이 끝났다", || h.task.is_finished()).await;
+        settle_until("the supervisor ended", || h.task.is_finished()).await;
         assert_eq!(
             poll_immediate(h.peer.close_after_flush(BYE, "bye")).await,
             Some(())
@@ -7728,8 +7888,12 @@ mod tests {
         endpoint.stall_writes(true);
         h.peer.reconnect_now();
         settle().await;
-        assert_eq!(h.net.dials(), 1, "막힌 닫기에 서 있어 아직 다시 안 걸었다");
-        assert!(endpoint.drain().is_empty(), "닫기가 막혀 있다");
+        assert_eq!(
+            h.net.dials(),
+            1,
+            "stuck on the blocked close, so it has not redialed yet"
+        );
+        assert!(endpoint.drain().is_empty(), "the close is blocked");
         let done = h.peer.close_after_flush(BYE, "bye");
         tokio::pin!(done);
         settle().await;
@@ -7738,15 +7902,22 @@ mod tests {
         assert!(flush < Policy::default().write_deadline);
         h.clock.advance(flush - Duration::from_millis(1));
         settle().await;
-        assert_eq!(poll_immediate(done.as_mut()).await, None, "시한 전이다");
+        assert_eq!(
+            poll_immediate(done.as_mut()).await,
+            None,
+            "before the deadline"
+        );
         h.clock.advance(Duration::from_millis(1));
-        settle_until("비우기의 시한에 감독이 끝났다", || {
+        settle_until("the supervisor ended at the drain's deadline", || {
             h.task.is_finished()
         })
         .await;
         assert_eq!(poll_immediate(done.as_mut()).await, Some(()));
-        assert_eq!(h.net.dials(), 1, "다시 걸지 않았다");
-        assert!(endpoint.drain().is_empty(), "막힌 닫기는 시한에 잘렸다");
+        assert_eq!(h.net.dials(), 1, "did not redial");
+        assert!(
+            endpoint.drain().is_empty(),
+            "the blocked close was cut at the deadline"
+        );
         assert_eq!(
             labels(&drain_until_quiet(&mut h).await),
             vec!["Disconnected:1:Explicit", "Closed:1:Explicit"]
@@ -7771,7 +7942,7 @@ mod tests {
                 settle().await;
                 assert!(
                     endpoint.drain().is_empty(),
-                    "{round}: 감독이 n0 을 쓰다 섰다"
+                    "{round}: the supervisor stalled writing n0"
                 );
             }
             h.peer.reconnect_now();
@@ -7781,21 +7952,20 @@ mod tests {
             }
             settle().await;
             endpoint.stall_writes(false);
-            settle_until(
-                &format!("{round}번째 바퀴: 감독이 끝났다"),
-                || h.task.is_finished(),
-            )
+            settle_until(&format!("round {round}: the supervisor ended"), || {
+                h.task.is_finished()
+            })
             .await;
             assert_eq!(
                 wire_labels(&endpoint.drain()),
                 vec!["not|n0", "not|n1", "close:4100:bye"],
-                "{round}번째 바퀴: ★다시 걸기가 비우기를 자르지 않았다★"
+                "round {round}: ★the redial did not cut the drain★"
             );
-            assert_eq!(h.net.dials(), 1, "{round}번째 바퀴");
+            assert_eq!(h.net.dials(), 1, "round {round}");
             assert_eq!(
                 labels(&drain_until_quiet(&mut h).await),
                 vec!["Disconnected:1:Explicit", "Closed:1:Explicit"],
-                "{round}번째 바퀴: 다 나갔으니 유실이 없다"
+                "round {round}: everything went out, so there is no loss"
             );
             assert_eq!(poll_immediate(done).await, Some(()));
             assert!(h.exited_cleanly().await);
@@ -7822,7 +7992,7 @@ mod tests {
                 ..Policy::default()
             };
             let mut h = build(policy, Arc::new(ImmediateHandshake));
-            settle_until("연결", || h.peer.peer_state() == PeerState::Live).await;
+            settle_until("connection", || h.peer.peer_state() == PeerState::Live).await;
             let endpoint = h.net.accept().unwrap();
             h.drain();
             endpoint.stall_writes(true);
@@ -7832,7 +8002,7 @@ mod tests {
             endpoint.close();
             settle().await;
             h.clock.advance(write_deadline);
-            settle_until("통로를 버리러 갔다", || {
+            settle_until("went to abandon the link", || {
                 h.peer.peer_state() != PeerState::Live
             })
             .await;
@@ -7840,27 +8010,31 @@ mod tests {
             assert_eq!(
                 h.peer.peer_state(),
                 PeerState::Closed,
-                "예산 {max_attempts}: ★Backoff · GaveUp 을 거치지 않았다★"
+                "budget {max_attempts}: ★did not go through Backoff · GaveUp★"
             );
             assert!(
                 !h.task.is_finished() && endpoint.drain().is_empty(),
-                "예산 {max_attempts}: 통로를 버리는 닫기가 아직 막혀 있다 — 그 사이 상태를 본 것이다"
+                "budget {max_attempts}: the close that abandons the link is still blocked — the state was observed in between"
             );
 
             endpoint.stall_writes(false);
-            settle_until("감독이 끝났다", || h.task.is_finished()).await;
+            settle_until("the supervisor ended", || h.task.is_finished()).await;
             assert_eq!(
                 wire_labels(&endpoint.drain()),
                 vec![format!("close:{}:closing", CloseCode::GOING_AWAY.0)],
-                "예산 {max_attempts}: 준 닫기가 아니라 끊김 까닭의 코드다"
+                "budget {max_attempts}: it is the code of the disconnect reason, not the given close"
             );
             let items = drain_until_quiet(&mut h).await;
             assert_eq!(
                 labels(&items),
                 vec!["Disconnected:1:PeerClosed", "Dropped", "Closed:1:Explicit"],
-                "예산 {max_attempts}: GaveUp · ConnectFailed 가 없다"
+                "budget {max_attempts}: no GaveUp · ConnectFailed"
             );
-            assert_eq!(dropped_out(&items), 2, "쓰다 잘린 하나 + 못 쓴 하나");
+            assert_eq!(
+                dropped_out(&items),
+                2,
+                "one cut mid-write + one not written"
+            );
             assert_eq!(h.net.dials(), 1);
             assert_eq!(poll_immediate(done).await, Some(()));
             assert!(h.exited_cleanly().await);
@@ -7880,31 +8054,31 @@ mod tests {
             ..Policy::default()
         };
         let mut h = build(policy, Arc::new(ImmediateHandshake));
-        settle_until("연결", || h.peer.peer_state() == PeerState::Live).await;
+        settle_until("connection", || h.peer.peer_state() == PeerState::Live).await;
         let endpoint = h.net.accept().unwrap();
         h.drain();
         endpoint.stall_writes(true);
         notify_all(&h.peer, 1);
         settle().await;
         h.clock.advance(Policy::default().write_deadline);
-        settle_until("포기를 정했다", || {
+        settle_until("decided to give up", || {
             h.peer.peer_state() == PeerState::GaveUp(crate::machine::GaveUpReason::BudgetExhausted)
         })
         .await;
         settle().await;
         assert!(
             !h.task.is_finished() && endpoint.drain().is_empty(),
-            "통로를 버리는 닫기가 막혀 있다"
+            "the close that abandons the link is blocked"
         );
 
         let done = h.peer.close_after_flush(BYE, "bye");
         settle().await;
         endpoint.stall_writes(false);
-        settle_until("감독이 끝났다", || h.task.is_finished()).await;
+        settle_until("the supervisor ended", || h.task.is_finished()).await;
         assert_eq!(
             wire_labels(&endpoint.drain()),
             vec![format!("close:{}:closing", CloseCode::WRITE_DEADLINE.0)],
-            "끊김 까닭의 코드다"
+            "it is the code of the disconnect reason"
         );
         let items = drain_until_quiet(&mut h).await;
         assert_eq!(
@@ -7914,10 +8088,10 @@ mod tests {
                 "Dropped",
                 "Closed:1:Explicit"
             ],
-            "★GaveUp 이 없다★"
+            "★no GaveUp★"
         );
         assert_eq!(dropped_out(&items), 1);
-        assert_eq!(h.net.dials(), 1, "다시 걸지 않았다");
+        assert_eq!(h.net.dials(), 1, "did not redial");
         assert_eq!(poll_immediate(done).await, Some(()));
         assert!(h.exited_cleanly().await);
     }
@@ -7928,18 +8102,18 @@ mod tests {
         let (h, endpoint) = live().await;
         endpoint.stall_writes(true);
         h.peer.close();
-        settle_until("접혔다", || h.peer.peer_state() == PeerState::Closed).await;
+        settle_until("folded", || h.peer.peer_state() == PeerState::Closed).await;
         let flush = Policy::default().flush_timeout;
         let write = Policy::default().write_deadline;
         assert!(flush < write);
         h.clock.advance(flush);
         settle().await;
-        assert!(!h.task.is_finished(), "비우기의 시한으로 자르지 않았다");
+        assert!(!h.task.is_finished(), "not cut by the drain's deadline");
         h.clock.advance(write - flush - Duration::from_millis(1));
         settle().await;
-        assert!(!h.task.is_finished(), "쓰기 시한 전이다");
+        assert!(!h.task.is_finished(), "before the write deadline");
         h.clock.advance(Duration::from_millis(1));
-        settle_until("쓰기 시한에 닫기를 잘랐다", || {
+        settle_until("the close was cut at the write deadline", || {
             h.task.is_finished()
         })
         .await;
@@ -7958,7 +8132,7 @@ mod tests {
         settle().await;
         let done = h.peer.close_after_flush(BYE, "bye");
         endpoint.stall_writes(false);
-        settle_until("감독이 끝났다", || h.task.is_finished()).await;
+        settle_until("the supervisor ended", || h.task.is_finished()).await;
         assert_eq!(
             wire_labels(&endpoint.drain()),
             vec!["req|7|body7", "req|8|body8", "close:4100:bye"]
@@ -7992,7 +8166,7 @@ mod tests {
         assert_eq!(
             h.peer.inner.data_tx.capacity(),
             queued,
-            "둘째 표지는 안 들었다"
+            "the second marker did not go in"
         );
         tokio::pin!(first);
         tokio::pin!(second);
@@ -8000,15 +8174,15 @@ mod tests {
         assert_eq!(
             poll_immediate(second.as_mut()).await,
             None,
-            "둘째도 곧바로 풀리지 않고 같은 끝을 기다린다"
+            "the second does not resolve right away either and waits for the same end"
         );
 
         endpoint.stall_writes(false);
-        settle_until("감독이 끝났다", || h.task.is_finished()).await;
+        settle_until("the supervisor ended", || h.task.is_finished()).await;
         assert_eq!(
             wire_labels(&endpoint.drain()),
             vec!["not|n0", "close:4100:bye"],
-            "처음 닫기가 그대로다"
+            "the first close stays"
         );
         assert_eq!(poll_immediate(first.as_mut()).await, Some(()));
         assert_eq!(poll_immediate(second.as_mut()).await, Some(()));

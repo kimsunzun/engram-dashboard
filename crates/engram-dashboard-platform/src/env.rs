@@ -60,10 +60,10 @@ mod tests {
 
     #[test]
     fn sibling_exe_is_the_named_exe_in_the_running_exe_folder() {
-        let running = std::env::current_exe().expect("지금 실행 파일 경로");
+        let running = std::env::current_exe().expect("current executable path");
         let want = running
             .parent()
-            .expect("지금 실행 파일의 폴더")
+            .expect("current executable's folder")
             .join(exe_file_name("engram"));
         assert_eq!(sibling_exe("engram"), Some(want));
     }

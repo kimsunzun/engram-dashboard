@@ -38,7 +38,7 @@ pub struct CommandSpec {
     /// The **type name** of the argument struct (the declaration macro fills it with `stringify!`).
     ///
     /// ★It is the only material for derived-artifact coverage★ — a TS binding comes out as one file per type, so if the
-    /// file name can be derived from the declaration, 「선언은 늘었는데 export 는 안 늘었다」 (declarations grew but exports did not) is caught **without a hand-kept list**.
+    /// file name can be derived from the declaration, 「declarations grew but exports did not」 is caught **without a hand-kept list**.
     /// A hand-written list is disarmed by the very edit that adds declarations also fixing it (the failure mode TRD §5 measured in `src-tauri/
     /// bindings/`).
     pub args_type: &'static str,
@@ -56,7 +56,7 @@ pub struct CommandSpec {
 ///
 /// ★Why the declaration is not made to write them by hand★: these two are produced by **the table**, not by the command body —
 /// argument deserialization failure (`INVALID_ARGUMENT`) · handler panic and return serialization failure (`INTERNAL`).
-/// If written by hand, a declaration that omits them falsely advertises 「이 오류는 안 난다」 (this error does not occur).
+/// If written by hand, a declaration that omits them falsely advertises 「this error does not occur」.
 pub const COMMON_ERRORS: &[ErrorCode] = &[ErrorCode::InvalidArgument, ErrorCode::Internal];
 
 impl CommandSpec {
@@ -123,7 +123,7 @@ pub(crate) fn find_unique<'a>(
     let first = matches.next()?;
     if matches.next().is_some() {
         panic!(
-            "command declared more than once: {name} — 두 선언이 같은 이름을 쥐면 어느 계약이 이기는지 알 수 없다"
+            "command declared more than once: {name} — when two declarations hold the same name, it is unknown which contract wins"
         );
     }
     Some(first)
@@ -186,20 +186,20 @@ pub fn spec_item_json(spec: &CommandSpec) -> String {
 /// **advertisement and reality diverge** (the macro has no means of trimming the string. It applies to both field names and **enum variants** —
 /// a variant is also emitted with `stringify!` and serde uses the name with `r#` removed) ② the schema text itself is not
 /// JSON ③ an agent-reference field (`#[agent_ref]`) is marked and `errors` does not list `NOT_FOUND` · `CONFLICT` — if the daemon
-/// cannot resolve that field it answers with those two codes instead of this command (ADR-0308), so a declaration that omits them falsely advertises 「이 오류는 안 난다」 (this error does not occur).
+/// cannot resolve that field it answers with those two codes instead of this command (ADR-0308), so a declaration that omits them falsely advertises 「this error does not occur」.
 /// ★It walks the **whole** schema★: a struct declared inside a block is unfolded inline into the parent schema, so
 /// looking only at the top would mean fields of nested types are never checked.
 pub fn lint_spec(spec: &CommandSpec) -> Result<(), String> {
     for (label, text) in [("args", spec.args_schema), ("ok", spec.ok_schema)] {
         let parsed: serde_json::Value = serde_json::from_str(text)
-            .map_err(|e| format!("{}: {label} 스키마가 JSON 이 아니다 — {e}", spec.name))?;
+            .map_err(|e| format!("{}: {label} schema is not JSON — {e}", spec.name))?;
         lint_node(spec.name, label, "", &parsed)?;
     }
     if !spec.agent_args.is_empty() {
         for code in [ErrorCode::NotFound, ErrorCode::Conflict] {
             if !spec.errors.contains(&code) {
                 return Err(format!(
-                    "{}: 에이전트 참조 칸({})을 표시했는데 errors 에 {} 가 없다 — 데몬이 그 칸을 못 풀면 이 명령 대신 그 코드로 답한다(ADR-0308)",
+                    "{}: agent reference fields ({}) are marked but errors has no {} — if the daemon cannot resolve that field, it answers with that code instead of this command (ADR-0308)",
                     spec.name,
                     spec.agent_args.join(", "),
                     code.as_str()
@@ -221,7 +221,7 @@ fn lint_node(
         if path.is_empty() {
             String::new()
         } else {
-            format!(" (`{path}` 안)")
+            format!(" (in `{path}`)")
         }
     };
     match node {
@@ -233,7 +233,7 @@ fn lint_node(
                     };
                     if name.contains('#') {
                         return Err(format!(
-                            "{command}: {label} enum 값 `{name}`{} — raw identifier 는 wire 이름(`{}`)과 스키마 이름이 갈린다. 다른 이름을 쓸 것.",
+                            "{command}: {label} enum value `{name}`{} — a raw identifier makes the wire name (`{}`) and the schema name diverge. Use a different name.",
                             at(path),
                             name.trim_start_matches("r#")
                         ));
@@ -244,7 +244,7 @@ fn lint_node(
                 for key in props.keys() {
                     if key.contains('#') {
                         return Err(format!(
-                            "{command}: {label} 필드 `{key}`{} — raw identifier 는 wire 이름(`{}`)과 스키마 이름이 갈린다. 다른 이름을 쓸 것.",
+                            "{command}: {label} field `{key}`{} — a raw identifier makes the wire name (`{}`) and the schema name diverge. Use a different name.",
                             at(path),
                             key.trim_start_matches("r#")
                         ));
@@ -256,13 +256,13 @@ fn lint_node(
                         for entry in required {
                             let Some(name) = entry.as_str() else {
                                 return Err(format!(
-                                    "{command}: {label} required{} 에 문자열 아닌 항목 `{entry}` 가 실렸다",
+                                    "{command}: {label} required{} carries a non-string entry `{entry}`",
                                     at(path)
                                 ));
                             };
                             if !props.contains_key(name) {
                                 return Err(format!(
-                                    "{command}: {label} required{} 에 없는 필드 `{name}` 가 실렸다",
+                                    "{command}: {label} required{} carries a nonexistent field `{name}`",
                                     at(path)
                                 ));
                             }
@@ -270,7 +270,7 @@ fn lint_node(
                     }
                     Some(other) => {
                         return Err(format!(
-                            "{command}: {label} required{} 가 배열이 아니다 — `{other}`",
+                            "{command}: {label} required{} is not an array — `{other}`",
                             at(path)
                         ))
                     }
@@ -339,7 +339,7 @@ mod tests {
             name: "fixture.lint",
             effect: Effect::Read,
             since: 1,
-            summary: "린트 픽스처",
+            summary: "lint fixture",
             args_schema,
             ok_schema: "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
             errors: &[],
@@ -354,7 +354,7 @@ mod tests {
         lint_spec(&spec(
             "{\"type\":\"object\",\"properties\":{\"target\":{\"type\":\"string\"}},\"required\":[\"target\"]}",
         ))
-        .expect("깨끗한 선언");
+        .expect("clean declaration");
     }
 
     #[test]
@@ -373,12 +373,9 @@ mod tests {
         let err = lint_spec(&spec(
             "{\"type\":\"object\",\"properties\":{\"row\":{\"type\":\"object\",\"properties\":{\"r#type\":{\"type\":\"string\"}},\"required\":[]}},\"required\":[\"row\"]}",
         ))
-        .expect_err("중첩 raw identifier");
+        .expect_err("nested raw identifier");
         assert!(err.contains("r#type"), "{err}");
-        assert!(
-            err.contains("properties.row"),
-            "어디인지 말해야 한다: {err}"
-        );
+        assert!(err.contains("properties.row"), "must say where: {err}");
     }
 
     #[test]
@@ -386,7 +383,7 @@ mod tests {
         let err = lint_spec(&spec(
             "{\"type\":\"object\",\"properties\":{\"rows\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"r#type\":{\"type\":\"string\"}},\"required\":[]}}},\"required\":[\"rows\"]}",
         ))
-        .expect_err("배열 원소 안의 raw identifier");
+        .expect_err("raw identifier inside an array element");
         assert!(err.contains("items"), "{err}");
     }
 
@@ -395,7 +392,7 @@ mod tests {
         let err = lint_spec(&spec(
             "{\"type\":\"object\",\"properties\":{\"row\":{\"anyOf\":[{\"type\":\"object\",\"properties\":{\"r#type\":{\"type\":\"string\"}},\"required\":[]},{\"type\":\"null\"}]}},\"required\":[]}",
         ))
-        .expect_err("anyOf 갈래 안의 raw identifier");
+        .expect_err("raw identifier inside an anyOf branch");
         assert!(err.contains("anyOf"), "{err}");
     }
 
@@ -404,7 +401,7 @@ mod tests {
         let err = lint_spec(&spec(
             "{\"type\":\"object\",\"properties\":{\"row\":{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[\"gone\"]}},\"required\":[\"row\"]}",
         ))
-        .expect_err("없는 필드가 required 에");
+        .expect_err("a nonexistent field in required");
         assert!(err.contains("gone"), "{err}");
     }
 
@@ -413,8 +410,8 @@ mod tests {
         let err = lint_spec(&spec(
             "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[7]}",
         ))
-        .expect_err("문자열 아닌 required 항목");
-        assert!(err.contains("문자열"), "{err}");
+        .expect_err("non-string required entry");
+        assert!(err.contains("non-string"), "{err}");
     }
 
     #[test]
@@ -422,7 +419,7 @@ mod tests {
         lint_spec(&spec(
             "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":\"id\"}",
         ))
-        .expect_err("배열 아닌 required");
+        .expect_err("required that is not an array");
     }
 
     /// ★If there is a marked field, the daemon's two rejection codes must be declared★ (ADR-0308) — even if only one is missing, it names that code.
@@ -435,22 +432,22 @@ mod tests {
             ..spec(schema)
         };
 
-        let err = lint_spec(&marked(&[])).expect_err("둘 다 없다");
+        let err = lint_spec(&marked(&[])).expect_err("both missing");
         assert!(
             err.contains("slot_of") && err.contains("NOT_FOUND"),
             "{err}"
         );
-        let err = lint_spec(&marked(&[ErrorCode::NotFound])).expect_err("CONFLICT 가 없다");
+        let err = lint_spec(&marked(&[ErrorCode::NotFound])).expect_err("CONFLICT missing");
         assert!(err.contains("CONFLICT"), "{err}");
-        let err = lint_spec(&marked(&[ErrorCode::Conflict])).expect_err("NOT_FOUND 가 없다");
+        let err = lint_spec(&marked(&[ErrorCode::Conflict])).expect_err("NOT_FOUND missing");
         assert!(err.contains("NOT_FOUND"), "{err}");
-        lint_spec(&marked(&[ErrorCode::Conflict, ErrorCode::NotFound])).expect("둘 다 있다");
-        lint_spec(&spec(schema)).expect("표시 없는 선언은 이 규칙에 안 걸린다");
+        lint_spec(&marked(&[ErrorCode::Conflict, ErrorCode::NotFound])).expect("both present");
+        lint_spec(&spec(schema)).expect("a declaration without marks is not caught by this rule");
     }
 
     #[test]
     fn a_schema_that_is_not_json_is_refused() {
-        lint_spec(&spec("{not json")).expect_err("깨진 스키마");
+        lint_spec(&spec("{not json")).expect_err("broken schema");
     }
 
     /// ★An enum variant can also use a raw identifier★ — the values are a string array, so walking only field names would never
@@ -460,12 +457,9 @@ mod tests {
         let err = lint_spec(&spec(
             "{\"type\":\"object\",\"properties\":{\"kind\":{\"enum\":[\"Fast\",\"r#type\"]}},\"required\":[\"kind\"]}",
         ))
-        .expect_err("enum 값의 raw identifier");
+        .expect_err("raw identifier of an enum value");
         assert!(err.contains("r#type"), "{err}");
-        assert!(
-            err.contains("properties.kind"),
-            "어디인지 말해야 한다: {err}"
-        );
+        assert!(err.contains("properties.kind"), "must say where: {err}");
     }
 
     /// ★The file states the partial-schema dialect★ — if it did not, a consumer would read the meaning of `{"type":"integer"}` differently
@@ -476,7 +470,7 @@ mod tests {
             name: "fixture.one",
             effect: Effect::Read,
             since: 1,
-            summary: "하나",
+            summary: "one",
             args_schema: "{\"type\":\"object\",\"properties\":{}}",
             ok_schema: "{\"type\":\"object\",\"properties\":{}}",
             errors: &[],
@@ -486,7 +480,8 @@ mod tests {
         };
 
         let body = catalog_json(1, &[&ONE]);
-        let parsed: serde_json::Value = serde_json::from_str(&body).expect("파생 파일은 JSON");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&body).expect("the derived file is JSON");
 
         assert_eq!(parsed["$schema"], SCHEMA_DIALECT);
         assert_eq!(parsed["catalogVersion"], 1);

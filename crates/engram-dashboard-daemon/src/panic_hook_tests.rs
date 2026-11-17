@@ -247,7 +247,7 @@ fn run_child(scenario: Scenario) -> Ran {
 }
 
 fn assert_reason_logged(ran: &Ran, scenario: Scenario) {
-    let reason = format!("스레드 panic: {}", scenario.message());
+    let reason = format!("thread panicked: {}", scenario.message());
     assert!(
         ran.log.contains(&reason),
         "로그에 사유 줄 「{reason}」이 없다\n{}",

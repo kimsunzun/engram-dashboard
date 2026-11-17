@@ -3,7 +3,7 @@
 //! [`crate::Registry::new`] takes the registry defaults and [`crate::Registry::add_with_policy`] takes the per-peer
 //! overrides.
 //!
-//! ★Where a value was chosen without grounds, write 「미검」 (unverified) at that spot★ — if not written, the next session
+//! ★Where a value was chosen without grounds, write 「unverified」 at that spot★ — if not written, the next session
 //! reads a guess as a measurement. The unverified ones: `request_timeout` · `write_deadline` · `reconnect.jitter` · `inbound_queue` ·
 //! `frame_buffer` · `retired_tags` · `max_streams` · `resume_timeout` · `live_dwell` · `flush_timeout`.
 //! The rest preserve current code values.
@@ -81,7 +81,7 @@ impl ReconnectPolicy {
     /// is pressed to one side. Since the purpose of jitter is to scatter simultaneous retries, we judged this better than allowing the cap to be exceeded.
     pub fn delay(&self, attempt: u32, r: f64) -> Duration {
         // ★If the cap is smaller than the floor, **lower the floor**★ — the old edition quietly discarded the cap with `cap.max(base)`
-        //   so `base=10s, cap=1s` returned 10 seconds (ten times the declared cap). If the name is 「상한」 (cap),
+        //   so `base=10s, cap=1s` returned 10 seconds (ten times the declared cap). If the name is 「cap」,
         //   not exceeding it is less surprising. `check()` rejects this combination outright.
         let floor = MIN_BACKOFF.as_secs_f64();
         let cap = sane_secs(self.cap.as_secs_f64(), 10.0).max(floor);
@@ -114,7 +114,7 @@ impl ReconnectPolicy {
         };
         let jittered = capped * (1.0 + jitter * (2.0 * nudge - 1.0));
         if jittered.is_finite() {
-            // ★There must be a floor★ — 「0이 아니다」 (not zero) is not enough: a 1ns backoff is a dial busy loop.
+            // ★There must be a floor★ — 「not zero」 is not enough: a 1ns backoff is a dial busy loop.
             Duration::from_secs_f64(jittered.clamp(floor, cap))
         } else {
             Duration::from_secs_f64(cap)
@@ -156,7 +156,7 @@ pub struct Policy {
     ///
     /// Without it, a peer that is cut as soon as it attaches repeats reconnecting every 500ms **forever** and
     /// never reaches [`crate::GaveUpReason::BudgetExhausted`], and then the popup of ADR-0180 decision 7
-    /// **does not appear** in exactly the state of 「사용자가 행동하지 않으면 영영 복구되지 않는」 (never recovers unless the user acts).
+    /// **does not appear** in exactly the state of 「never recovers unless the user acts」.
     /// ★Unverified — the real reconnect time has never been measured★. Today's shell has no such concept at all (reset on success).
     pub live_dwell: Duration,
     pub reconnect: ReconnectPolicy,
@@ -166,8 +166,7 @@ pub struct Policy {
     /// raise one, a line of this length is set up (even raising the same name tag again is a new line). The total held is the sum of the live receiver-end
     /// lengths (including old receiver ends whose old supervisor has not finished teardown) and ★this value measures only count★ — bytes are measured by each supervisor's crate-internal
     /// budget (16 MiB — one count covers the read-ahead queue · the ordering area · this line · the resume window. Only a supervisor that has received a stream piece even once
-    /// splits it half and half into read share · window cap, and for one that has not, the read share is the whole budget) (`lib.rs` 「알려진
-    /// 한계」 (known limits)). When full, that handle's supervisor holds in its own ordering area and stops that peer's reading — it does not drop (backpressure).
+    /// splits it half and half into read share · window cap, and for one that has not, the read share is the whole budget) (`lib.rs` 「known limits」). When full, that handle's supervisor holds in its own ordering area and stops that peer's reading — it does not drop (backpressure).
     /// ★Unverified — there is no counterpart today★ (the shell goes straight to a Tauri Channel so this queue itself does not exist). That is, this crate
     /// **creates one new failure mode** (TRD §12-12).
     pub inbound_queue: usize,
@@ -187,17 +186,17 @@ pub struct Policy {
     pub max_streams: usize,
     /// The upper limit on waiting for the answer (= piece number `after+1`) after asking for a resume.
     ///
-    /// ★This value separates 「상대가 못 준다」 (the peer cannot give it) from 「아직 안 왔다」 (it has not come yet)★ — an out-of-order piece arriving in between
+    /// ★This value separates 「the peer cannot give it」 from 「it has not come yet」★ — an out-of-order piece arriving in between
     /// may be one the peer had already sent before receiving the re-request, so we drop it and wait for the answer. Only after exceeding this deadline do we raise
     /// [`crate::TransportEvent::StreamTruncated`]. ★While that peer's reading is stopped by backpressure, this clock
-    /// stops★ — even if the answer comes in that time we cannot read it (`lib.rs` 「받는 쪽 불변식」 (receiver invariants) 2). ★Unverified★.
+    /// stops★ — even if the answer comes in that time we cannot read it (`lib.rs` 「Receiver-side invariants」 2). ★Unverified★.
     pub resume_timeout: Duration,
     /// The upper limit on the number of pieces one stream **holds back** while waiting for a re-request's answer.
     ///
     /// They are held to keep order so dropping is not allowed, but without a limit the peer pushes our memory
     /// with this buffer. When full, the window is closed on the spot and what was held is sent out in order. In bytes, each supervisor's crate-internal window cap
     /// (8 MiB — half of the byte budget · the sum of held pieces across all streams) also measures, and when exceeded it closes the same way — if it is a new hole,
-    /// it does not open the window and goes straight to a truncation (`lib.rs` 「알려진 한계」 (known limits)). ★Unverified★.
+    /// it does not open the window and goes straight to a truncation (`lib.rs` 「known limits」). ★Unverified★.
     pub resume_buffer: usize,
     /// The deadline that one [`crate::Peer::close_after_flush`] uses — from when the supervisor notices that close it covers the writes before the marker ·
     /// keepalive · close frame **all together**. If exceeded, it closes without writing the rest.
@@ -343,11 +342,11 @@ mod tests {
             reconnect: policy,
             ..Policy::default()
         };
-        assert!(p.check().is_err(), "check 가 이 조합을 받아 주면 안 된다");
+        assert!(p.check().is_err(), "check must not accept this combination");
         for attempt in [0u32, 1, 5] {
             assert!(
                 policy.delay(attempt, 0.0) <= policy.cap,
-                "★선언한 상한을 조용히 버리면 안 된다★"
+                "★a declared cap must not be silently dropped★"
             );
         }
     }
@@ -368,7 +367,7 @@ mod tests {
         for attempt in [0u32, 1, 5] {
             assert!(
                 policy.delay(attempt, 0.0) >= MIN_BACKOFF,
-                "1ns 백오프는 대기가 아니라 dial 열루프다"
+                "a 1ns backoff is not a wait but a hot dial loop"
             );
         }
     }

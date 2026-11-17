@@ -19,7 +19,9 @@ fn losing_the_subscriber_install_creates_and_prunes_nothing() {
     }
 
     // A subscriber installed first by someone else.
-    tracing_subscriber::fmt().try_init().expect("선점해야");
+    tracing_subscriber::fmt()
+        .try_init()
+        .expect("must claim first");
 
     let got = init_logging_with_file(&logs, LogKind::Daemon);
 
@@ -31,8 +33,11 @@ fn losing_the_subscriber_install_creates_and_prunes_nothing() {
     left.sort();
     println!("returned={got:?}\nfiles={left:#?}");
 
-    assert!(got.is_none(), "설치에 졌으면 경로를 광고하면 안 된다");
-    assert_eq!(left.len(), 15, "새 파일도 삭제도 없어야: {left:?}");
+    assert!(
+        got.is_none(),
+        "if it lost the install, it must not advertise the path"
+    );
+    assert_eq!(left.len(), 15, "no new file and no deletion: {left:?}");
 
     let _ = std::fs::remove_dir_all(&data_dir);
 }

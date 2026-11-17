@@ -64,8 +64,7 @@ impl std::error::Error for LinkError {}
 
 /// What was read up from the link.
 ///
-/// ★The heart of the contract is that [`LinkRead::Closed`] carries the close code★ — without this field the receiver cannot tell 「상대가 나를
-/// 거절했다」 (the peer rejected me) from 「상대가 그냥 사라졌다」 (the peer just vanished), and then ADR-0180 decision 5 (a terminal rejection does not spend the reconnect
+/// ★The heart of the contract is that [`LinkRead::Closed`] carries the close code★ — without this field the receiver cannot tell 「the peer rejected me」 from 「the peer just vanished」, and then ADR-0180 decision 5 (a terminal rejection does not spend the reconnect
 /// budget) **does not hold in code**. A terminal rejection gives the same result on retry so it must not burn budget, and
 /// the material for that decision — is it a rejection, and of which kind ([`RejectKind::of`]) — is this code.
 pub enum LinkRead {
@@ -77,11 +76,11 @@ pub enum LinkRead {
     /// `ResetWithoutClosingHandshake` error). ★The in-memory harness bears the same shape too★ — if an endpoint is
     /// simply dropped, `testing::MemRx` produces channel exhaustion as an error. Once only that side raised `Closed(None)`, and
     /// **tests that mimic death by dropping an endpoint were green only in the harness** — do not revert this.
-    /// Even so, do not branch on `Closed(None)` as a signal of 「조용히 죽었다」 (quietly died) — it is 「코드 없이 닫겠다고 **말했다**」 (**said** it would close without a code),
+    /// Even so, do not branch on `Closed(None)` as a signal of 「quietly died」 — it is 「**said** it would close without a code」,
     /// and that differs from vanishing without a word.
     ///
     /// ★After [`LinkRx::recv`] has failed once, this branch does not come out★ — without that contract the sentence above
-    /// would become the conditional 「첫 읽기에서만」 (only on the first read) (the reason is in that rustdoc).
+    /// would become the conditional 「only on the first read」 (the reason is in that rustdoc).
     Closed(Option<Close>),
 }
 
@@ -102,7 +101,7 @@ pub enum DialFailure {
     /// The link did not open → spend budget and dial again.
     Unreachable(LinkError),
     /// ★The dialer already knows the peer would not accept even if it dialed★ (e.g. the version in the local daemon info differs) → goes by the same path as
-    /// 「붙었는데 거절」 (connected but rejected) without a link — it lands on [`crate::GaveUpReason::Rejected`] without budget and does not dial again. ★It is always
+    /// 「connected but rejected」 without a link — it lands on [`crate::GaveUpReason::Rejected`] without budget and does not dial again. ★It is always
     /// read as [`RejectKind::Terminal`]★ — if the failure is one you want retried, return [`DialFailure::Unreachable`].
     ///
     /// `code` = the rejection code the dialer chose — it is carried as is in [`crate::TransportEvent::Rejected`] and becomes the material from which the consumer
@@ -159,7 +158,7 @@ pub trait LinkTx: Send + 'static {
     /// sends the close. During the handshake it drops without a close — when the deadline cuts it (including the frame just before a rejection)
     /// `handshake_once` drops the handshake future as a whole, and if control wins, `shake_hands` does. So
     /// the implementation must tolerate **a `close` after a cancelled `send`**, and the remainder of the cut frame may go out
-    /// before that close (the WS adapter does — `src/ws.rs` 「통로 성질」 (link properties)).
+    /// before that close (the WS adapter does — `src/ws.rs` 「link properties」).
     fn send(&mut self, frame: Frame) -> BoxFuture<'_, Result<(), LinkError>>;
 
     /// Asks whether it is alive. ★This crate decides "when" and only the implementation knows "how"★ — so where the
@@ -175,7 +174,7 @@ pub trait LinkTx: Send + 'static {
     /// ★That **number** is not in this file★ — it differs per transport, and copying it here would make two canonical sources. For WS the value is
     /// the adapter's `MAX_CLOSE_REASON_BYTES` (`src/ws.rs`) and that constant's rustdoc gives the basis (RFC 6455 §5.5).
     /// The reason truncating beats not truncating is that **the receiving side cuts a close frame over the cap with a read
-    /// error**, so 「붙었는데 거절」 (connected but rejected) arrives as 「못 붙었다」 (could not connect) and burns reconnect budget too.
+    /// error**, so 「connected but rejected」 arrives as 「could not connect」 and burns reconnect budget too.
     /// Do not put decision material in the message — branch only on [`Close::code`].
     fn close(&mut self, close: Close) -> BoxFuture<'_, ()>;
 }
@@ -188,9 +187,9 @@ pub trait LinkRx: Send + 'static {
     ///
     /// ★A link that has produced `Err` once keeps producing `Err`★ — after a failure the implementation does **not** produce
     /// [`LinkRead::Closed`]. The reason this, rather than forbidding further reads after a failure, was made the contract is that a ban
-    /// gives no signal when not kept, and breaking it makes 「상대가 닫았다고 말했다」 (the peer said it closed) false (the transport
+    /// gives no signal when not kept, and breaking it makes 「the peer said it closed」 false (the transport
     /// layer usually signals exhaustion with its own end-of-stream marker — the WS adapter rustdoc gives the actual example).
-    /// So on this contract [`LinkRead::Closed`] means 「상대가 말했다」 (the peer said so) **unconditionally**.
+    /// So on this contract [`LinkRead::Closed`] means 「the peer said so」 **unconditionally**.
     fn recv(&mut self) -> BoxFuture<'_, Result<LinkRead, LinkError>>;
 }
 
@@ -259,7 +258,7 @@ impl fmt::Debug for LinkInfo {
 ///
 /// ★The two ends are not taken out of the crate★ — only the place that puts it on as an accepted peer ([`crate::Registry::attach`]) uses them. The one exception is a test
 /// scaffold — `testing::accepted_ends` behind the feature `test-support` hands both ends to a real-socket test, and a production build has
-/// no such path. If dropped, the two ends drop together (the 「양 끝이 둘 다」 (both ends) duty of [`LinkTx`] holds here by itself).
+/// no such path. If dropped, the two ends drop together (the 「both ends」 duty of [`LinkTx`] holds here by itself).
 ///
 /// ★The permit is an upgrade-wait permit★ — the transport takes it the moment it receives the link (TCP accept) and releases it only after the receiving side takes the next permit (auth wait)
 /// (TRD 3 §3-1 · §5 14). So links sitting in the ready queue while the consumer is not calling `accept` are counted too. The auth-wait
@@ -371,7 +370,7 @@ impl fmt::Debug for PermitPool {
 }
 
 /// One permit of a [`PermitPool`] — it returns when dropped.
-#[must_use = "떨어뜨리는 순간 칸이 돌아간다 — 세는 대상의 수명에 묶어 둔다"]
+#[must_use = "the permit returns the moment it is dropped — keep it tied to the lifetime of what is counted"]
 pub struct ConnPermit {
     count: Arc<PermitCount>,
 }
@@ -427,7 +426,7 @@ impl RejectKind {
     /// Reads the code the peer carried when it closed during the handshake. `None` = not a rejection (could not connect — spends budget).
     ///
     /// ★The normal-exit family is not a rejection★ — RFC 6455's `1000` (Normal) · `1001` (Going Away) and
-    /// [`CloseCode::GOING_AWAY`] mean 「나 이제 간다」 (I am leaving now). Read as a rejection, every time the daemon exits cleanly the dialer
+    /// [`CloseCode::GOING_AWAY`] mean 「I am leaving now」. Read as a rejection, every time the daemon exits cleanly the dialer
     /// gives up without a single retry. ★Only [`CloseCode::HANDSHAKE_REJECTED`] is [`RejectKind::Terminal`]★ — the rest
     /// were deliberately chosen and sent by the peer so they are taken as rejections, but giving up on an unknown code would not clear until the user steps in, so it
     /// dials again (spends budget — it does not dial endlessly).
@@ -466,8 +465,7 @@ pub enum HandshakeStep {
     /// On to the operating phase.
     Done,
     /// ★Connected but rejected★ — sends `last` and closes with the code of `kind` ([`RejectKind::close_code`]). But if `last` cannot
-    /// go out within the handshake deadline, the close is skipped and only the link is discarded (crate header 「닫기 코드가 상대에게 닿는 자리는
-    /// 좁다」 (the place where close codes reach the peer is narrow)). If this rejecting side is a peer we dialed, it goes by `kind` — [`RejectKind::Terminal`] gives up without budget (ADR-0180
+    /// go out within the handshake deadline, the close is skipped and only the link is discarded (crate header 「The place where a close code reaches the peer is narrow」). If this rejecting side is a peer we dialed, it goes by `kind` — [`RejectKind::Terminal`] gives up without budget (ADR-0180
     /// decision 5) · [`RejectKind::Retryable`] spends budget and dials again.
     ///
     /// ★`reason` is bounded★ — since it goes out as the text of the close frame, it hits the transport's cap and is **truncated** on overflow
@@ -645,16 +643,16 @@ mod tests {
     #[test]
     fn a_permit_pool_never_hands_out_more_than_its_limit_and_takes_back_on_drop() {
         let pool = PermitPool::new(2);
-        let a = pool.try_take().expect("첫 칸");
-        let b = pool.try_take().expect("둘째 칸");
-        assert!(pool.try_take().is_none(), "상한을 넘겼다");
+        let a = pool.try_take().expect("first permit");
+        let b = pool.try_take().expect("second permit");
+        assert!(pool.try_take().is_none(), "exceeded the cap");
         assert_eq!(pool.in_use(), 2);
         drop(a);
         assert_eq!(pool.in_use(), 1);
         let c = pool
             .clone()
             .try_take()
-            .expect("돌아온 칸 — clone 은 같은 묶음이다");
+            .expect("permit returned — a clone is the same bundle");
         assert!(pool.try_take().is_none());
         drop((b, c));
         assert_eq!(pool.in_use(), 0);

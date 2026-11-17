@@ -1,6 +1,6 @@
 //! Scaffolding shared by the three real-socket tests.
 //!
-//! ★Every wait on the dialing side is 「알림 + 상한」 (notification + cap)★ — there is no place that measures with `sleep`. The notification is the real
+//! ★Every wait on the dialing side is 「notification + cap」★ — there is no place that measures with `sleep`. The notification is the real
 //! synchronization point, and if no notification comes, [`PATIENCE`] turns the hang into a loud failure on the spot.
 //!
 //! ★Waits without a cap remain only on the **receiving side** spawned as a task★ — waiting for a guest is the job of that task,
@@ -8,7 +8,7 @@
 //! carries every decision and has a cap, so it panics first, and the receiving-side task is reaped by `abort()` or runtime shutdown.
 //! ★The dialing side has no exceptions★ — the one thing that decides where to draw the line when adding a new wait is **who decides**:
 //! every wait on the side that carries the decision gets a cap, and only a task whose job is itself to wait for a guest
-//! goes without. ★Do not count that place as 「몇 번째 테스트」 (the Nth test)★ — a sentence that counts silently
+//! goes without. ★Do not count that place as 「the Nth test」★ — a sentence that counts silently
 //! goes stale each time a test is added.
 //!
 //! ★The in-memory harness's `settle`/`settle_until` cannot be used here★ — that side builds settling from cooperative yielding
@@ -46,7 +46,7 @@ pub fn accept_policy() -> AcceptPolicy {
 
 /// Loopback on port 0 — the number the kernel picked is read back from the listener.
 pub fn loopback() -> SocketAddr {
-    "127.0.0.1:0".parse().expect("주소 문법")
+    "127.0.0.1:0".parse().expect("address syntax")
 }
 
 /// A listener opened with [`accept_policy`]. Refusal reports are dropped — measuring those is `ws_accept.rs`'s job.
@@ -70,7 +70,7 @@ pub async fn accept_link(
 /// The cap on real-socket, real-time waits. It is generous for a local loopback round trip, and if it was exceeded something hung.
 ///
 /// ★No test may use this value as a **policy window**★ — raising it because of a slow runner can happen at any time, and
-/// then 「이 값이 keepalive 주기보다 작아서 성립하던 판정」 (a decision that held because this value was smaller than the keepalive interval) silently flips. The supervisor test in
+/// then 「a decision that held because this value was smaller than the keepalive interval」 silently flips. The supervisor test in
 /// `ws_write_deadline.rs`, which had that shape, narrows its own window by separately asserting the event arrival time against the wall clock —
 /// new tests do the same.
 pub const PATIENCE: Duration = Duration::from_secs(10);
@@ -105,11 +105,11 @@ pub async fn wait_state(
     match settled {
         Ok(Some(found)) => found,
         Ok(None) => panic!(
-            "{what} 을 기다리는 동안 감독이 사라졌다 (마지막 {:?})",
+            "the supervisor vanished while waiting for {what} (last {:?})",
             peer.peer_state()
         ),
         Err(_) => panic!(
-            "{PATIENCE:?} 안에 {what} 이 되지 않았다 (지금 {:?})",
+            "{what} did not happen within {PATIENCE:?} (now {:?})",
             peer.peer_state()
         ),
     }
@@ -134,7 +134,7 @@ pub async fn wait_incoming<T>(
     .await;
     match seen {
         Ok(Some(value)) => value,
-        Ok(None) => panic!("{what} 을 보기 전에 수신단이 끝났다"),
-        Err(_) => panic!("{PATIENCE:?} 안에 {what} 이 올라오지 않았다"),
+        Ok(None) => panic!("the inbox ended before seeing {what}"),
+        Err(_) => panic!("{what} did not come up within {PATIENCE:?}"),
     }
 }

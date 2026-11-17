@@ -2,6 +2,6 @@
 import type { UsageWindow } from "./UsageWindow";
 
 /**
- * 모델별 주간 창 하나. `label` = 벤더가 준 표시용 이름.
+ * One per-model weekly window. `label` = the display name the vendor gave.
  */
 export type UsageScopedWindow = { label: string, window: UsageWindow, };

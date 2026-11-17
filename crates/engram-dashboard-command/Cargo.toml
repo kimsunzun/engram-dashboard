@@ -2,7 +2,7 @@
 name = "engram-dashboard-command"
 version = "0.1.0"
 edition = "2021"
-description = "Engram Dashboard 명령 버스 도구 — 봉투·오류·선언 매크로·표·라우팅. 워크스페이스 crate 의존 0, 명령 0개."
+description = "Engram Dashboard command bus tool — envelope·errors·declaration macro·table·routing. 0 workspace crate dependencies, 0 commands."
 
 # ★test-support (ADR-0012)★: feature flag that opens the minimal executor the harness uses (`testing::block_on`). Default OFF —
 #   no test-only executor is left in production builds. Consumer crates enable it only in dev-dependencies (same shape as agent's

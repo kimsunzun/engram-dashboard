@@ -6,7 +6,7 @@
 //!   carry **the registry's id as is** (ADR-0309 decision 3 — no name → id round trip). The same profile has the same id even when launched again,
 //!   so it is the same member across re-spawns, and the address (`@all`) and the response notation are names (ADR-0101).
 //!
-//! ★The fact that the two words read **different list pools** is the decision itself (load-bearing — ADR-0121 §impact)★: making them
+//! ★The fact that the two words read **different list pools** is the decision itself (load-bearing — ADR-0121 §Impact)★: making them
 //!   see the same pool would turn "all" into a false name again (the sending LLM believes "everyone was told" while missing a sleeping peer)
 //!   and `@here` would lose its reason to exist. So the contract suite below asserts the source separation of the two words as an axis.
 //!
@@ -20,7 +20,7 @@
 //!   groups will be **redesigned** when real demand stands up (folder groups are the first candidate) — no storage structure for groups
 //!   is laid down in advance.
 //!
-//! ★The resolution seam is kept (the *direction* of ADR-0104 decision 1 survives, only the sources shrink)★: the `GroupSource` extension point is left so a future source (folder `@폴더명`)
+//! ★The resolution seam is kept (the *direction* of ADR-0104 decision 1 survives, only the sources shrink)★: the `GroupSource` extension point is left so a future source (folder `@folder-name`)
 //!   can be added without touching the messaging pipeline. The v1 implementation is
 //!   `BuiltinGroups` (= `@all`·`@here`) alone. **No over-build** — folder/hierarchy implementations are not built now.
 //!
@@ -39,7 +39,7 @@ pub const ALL_GROUP: &str = "@all";
 /// Built-in word `@here` — **everyone alive right now** **− sender** (spec §4 · ADR-0121 decision 1).
 ///
 /// ★Basis for the word choice★: Slack uses the same distinction (`@channel` = everyone / `@here` = currently active) — the LLM driving the agent
-///   likely already knows that convention (ADR-0121 §rationale).
+///   likely already knows that convention (ADR-0121 §Rationale).
 pub const HERE_GROUP: &str = "@here";
 
 /// One member of the expansion — the id the registry gave and the name at that moment.
@@ -57,7 +57,7 @@ pub struct GroupMember {
 ///
 /// ★Why two pools and not one slice (load-bearing — so source knowledge does not leak into the pipeline)★: "which word
 ///   reads which pool" is **knowledge of the source**. If the upper layer picked a different slice per word and passed it in,
-///   the pipeline would have to know `@all`/`@here`, and then a future source (folder `@폴더명`) could not pick its own pool
+///   the pipeline would have to know `@all`/`@here`, and then a future source (folder `@folder-name`) could not pick its own pool
 ///   (ADR-0104 "it is a violation if source knowledge leaks into the pipeline"). So **both** pools are passed and the source chooses.
 /// ★Sender exclusion arrives already applied by the caller★ (spec §4 — the sender is removed from the expansion. That the source of truth is the spec and not ADR-0111
 ///   is load-bearing: decision 4 of 0111 lacks that phrase, so looking only there you would miss it).
@@ -76,7 +76,7 @@ pub struct MemberPools<'a> {
 pub enum GroupError {
     /// `@` namespace convention violation — normalization failed.
     InvalidName { name: String },
-    /// An `@이름` that is not a built-in word — a nonexistent address → `GROUP_NOT_FOUND` (the whole send unit is bounced, ADR-0114 decision 3).
+    /// An `@name` that is not a built-in word — a nonexistent address → `GROUP_NOT_FOUND` (the whole send unit is bounced, ADR-0114 decision 3).
     NotFound { name: String },
 }
 
@@ -137,7 +137,7 @@ impl GroupSource for BuiltinGroups {
 /// ★`GroupSource` contract suite — a safety net for durability under source swaps (user instruction 2026-07-26)★
 ///
 /// ★Why it exists (load-bearing — this module's reason to exist)★: `GroupSource` is a seam laid down **on the premise that it will be swapped in the future**
-///   (ADR-0104 decision 1 — once folders become daemon-owned, an `@폴더명` source is added). The worst case is that the new implementation
+///   (ADR-0104 decision 1 — once folders become daemon-owned, an `@folder-name` source is added). The worst case is that the new implementation
 ///   quietly takes on a different meaning: `@all` comes out sorted, **`@here` reads sleeping names too**,
 ///   an empty snapshot is folded into an error, or the `@` convention turns lenient — all of these **compile and leave existing tests green**
 ///   while only the broadcast meaning flips. So there is a reusable suite that asserts the resolution semantics **against the trait**, not the
@@ -197,27 +197,27 @@ pub mod contract {
             assert_eq!(
                 src.resolve(ALL_GROUP, pools),
                 Ok(all_expected),
-                "axis1-all-verbatim: @all 은 live + dormant 를 그대로 이어 붙여야 한다(잠든 이름 포함·정렬·dedup·필터 금지 — spec §4 · ADR-0121 결정 1)"
+                "axis1-all-verbatim: @all must join live + dormant as is (asleep names included · no sorting·dedup·filtering — spec §4 · ADR-0121 decision 1)"
             );
             assert_eq!(
                 src.resolve(HERE_GROUP, pools),
                 Ok(live.clone()),
-                "axis1b-here-live-only: @here 는 live 스냅샷만 그대로여야 한다(잠든 이름이 끼면 '지금 여기' 가 아니다 — ADR-0121 결정 1)"
+                "axis1b-here-live-only: @here must be the live snapshot only, as is (with asleep names in it, it is not 'here now' — ADR-0121 decision 1)"
             );
             assert_ne!(
                 src.resolve(ALL_GROUP, pools),
                 src.resolve(HERE_GROUP, pools),
-                "axis1c-vocab-split: 잠든 이름이 있으면 @all 과 @here 는 **다른 명단**이어야 한다 — 같은 소스를 보면 'all' 이 다시 거짓 이름이 된다(ADR-0121 §영향)"
+                "axis1c-vocab-split: when there are asleep names, @all and @here must be **different lists** — looking at the same source makes 'all' a false name again (ADR-0121 §Impact)"
             );
             assert_eq!(
                 src.resolve(ALL_GROUP, empty),
                 Ok(Vec::new()),
-                "axis2-all-empty-ok: 명부가 빈 @all 은 빈 목록(에러 아님) — GROUP_EMPTY 는 명시 지목까지 합친 최종 집합으로 상위가 판정한다(ADR-0114 결정 3)"
+                "axis2-all-empty-ok: @all with an empty registry is an empty list (not an error) — GROUP_EMPTY is decided upstream on the final set including explicit targets (ADR-0114 decision 3)"
             );
             assert_eq!(
                 src.resolve(HERE_GROUP, empty),
                 Ok(Vec::new()),
-                "axis2c-here-empty-ok: 산 수신자 0명인 @here 도 빈 목록(에러 아님 — 같은 근거)"
+                "axis2c-here-empty-ok: @here with 0 live recipients is an empty list too (not an error — same basis)"
             );
         } else {
             for builtin in [ALL_GROUP, HERE_GROUP] {
@@ -226,7 +226,7 @@ pub mod contract {
                         src.resolve(builtin, pools),
                         Err(GroupError::NotFound { .. })
                     ),
-                    "axis2b-builtin-not-owned: 내장 어휘({builtin})를 소유하지 않는 소스는 그걸 제 것인 양 해석하면 안 된다(소스 순회에서 방송 의미 가로채기 금지)"
+                    "axis2b-builtin-not-owned: a source that does not own the built-in word ({builtin}) must not resolve it as if it were its own (no hijacking of broadcast meaning in source iteration)"
                 );
             }
         }
@@ -237,14 +237,14 @@ pub mod contract {
             Err(GroupError::NotFound {
                 name: fx.unknown.clone()
             }),
-            "axis3-unknown-notfound: 모르는 주소는 NotFound 이고 name 은 정규화된 이름을 실어야 한다(상위가 hint 에 되쓴다)"
+            "axis3-unknown-notfound: an unknown address is NotFound and name must carry the normalized name (upstream writes it back into the hint)"
         );
 
         // ── 4. `@` namespace convention ───────────────────────────────────────────────────────
         for bad in ["", "@", "  @  ", "@@x", "@@", "@a@b", "plain-name"] {
             assert!(
                 matches!(src.resolve(bad, pools), Err(GroupError::InvalidName { .. })),
-                "axis4-namespace-strict: '{bad}' 은 @ 네임스페이스 규약 위반이라 InvalidName 이어야 한다(조용한 보정 금지)"
+                "axis4-namespace-strict: '{bad}' violates the @ namespace convention, so it must be InvalidName (no silent correction)"
             );
         }
 
@@ -253,14 +253,14 @@ pub mod contract {
         assert_eq!(
             src.resolve(&fx.unknown, pools),
             src.resolve(&fx.unknown, pools),
-            "axis5-deterministic: 해석은 결정적이어야 한다(순수 — 시계·내부 가변 상태 금지)"
+            "axis5-deterministic: resolution must be deterministic (pure — no clock·internal mutable state)"
         );
         if fx.handles_builtins {
             for builtin in [ALL_GROUP, HERE_GROUP] {
                 assert_eq!(
                     src.resolve(builtin, pools),
                     src.resolve(builtin, pools),
-                    "axis5-deterministic-builtin: 내장 어휘({builtin}) 해석도 결정적이어야 한다"
+                    "axis5-deterministic-builtin: resolving the built-in word ({builtin}) must be deterministic too"
                 );
             }
         }
@@ -293,7 +293,7 @@ mod tests {
         assert_eq!(
             BuiltinGroups.resolve("@here", pools(&live, &dormant)),
             Ok(live.clone()),
-            "@here 는 산 명단만 본다(잠든 멤버 불포함 — ADR-0121 결정 1)"
+            "@here sees only the live list (asleep members not included — ADR-0121 decision 1)"
         );
     }
 
@@ -306,7 +306,7 @@ mod tests {
         assert_eq!(
             BuiltinGroups.resolve("@all", pools(&live, &dormant)),
             Ok(expected),
-            "풀은 verbatim 이다 — 동명 쌍둥이도 id 가 달라 둘 다 남는다(ADR-0309 · TRD S29 §4 X1)"
+            "the pool is verbatim — same-named twins have different ids, so both remain (ADR-0309 · TRD S29 §4 X1)"
         );
     }
 
@@ -330,7 +330,7 @@ mod tests {
             Err(GroupError::NotFound {
                 name: "@coders".to_string()
             }),
-            "사용자 정의 그룹은 제거됐다(ADR-0111 결정 4) — 내장 어휘 외의 @주소는 전부 주소 공간 오류"
+            "user-defined groups were removed (ADR-0111 decision 4) — every @address other than the built-in words is an address space error"
         );
     }
 
@@ -342,13 +342,13 @@ mod tests {
                     normalize_group_name(bad),
                     Err(GroupError::InvalidName { .. })
                 ),
-                "'{bad}' 은 규약 위반이어야 한다"
+                "'{bad}' must be a convention violation"
             );
         }
         assert_eq!(
             normalize_group_name(" @all ").unwrap(),
             "@all",
-            "trim 만 한다"
+            "only trims"
         );
     }
 

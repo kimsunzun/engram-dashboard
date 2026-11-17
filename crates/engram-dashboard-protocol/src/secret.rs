@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 ///   into logs · errors is the caller's job.
 /// - ★`==` is not constant-time★ — it is for tests · same-value comparison. The auth decision uses a separate constant-time comparison.
 /// - ★This is not the log redaction layer that ADR-0138 rejected★: it does not filter log output; the type itself
-///   hides the value so that the sentences we write cannot print it (the implementation of the adopted discipline 「우리가 쓰는 문장에 자격증명을 넣지 않는다」
-///   (we do not put credentials in the sentences we write)). So that rejection stands as is.
+///   hides the value so that the sentences we write cannot print it (the implementation of the adopted discipline 「we do not put credentials in the
+///   sentences we write」). So that rejection stands as is.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Secret(String);
@@ -72,7 +72,7 @@ mod tests {
         assert_eq!(
             format!("{short:?}"),
             format!("{long:?}"),
-            "길이도 새지 않는다"
+            "the length does not leak either"
         );
         assert_eq!(format!("{short}"), format!("{long}"));
     }

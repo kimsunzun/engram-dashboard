@@ -87,7 +87,7 @@ impl CloseCode {
 /// frame in and the peer cannot see the code. [`CloseCode::HANDSHAKE_REJECTED`] is not guaranteed either — when the dialing side's handshake
 /// rejects, it pushes the close in only within the remaining handshake deadline, and if the last frame before the rejection could not get out, no close is
 /// sent at all (details = crate header
-/// 「닫기 코드가 상대에게 닿는 자리는 좁다」 (the place where close codes reach the peer is narrow)).
+/// 「The place where a close code reaches the peer is narrow」).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Close {
     pub code: CloseCode,
@@ -136,7 +136,7 @@ mod tests {
 
     #[test]
     fn debug_shows_the_arm_and_byte_length_but_never_the_body() {
-        let secret = r#"{"auth":"tok-SECRET-토큰"}"#;
+        let secret = r#"{"auth":"tok-SECRET-토큰"}"#; // hangul-ok
         let cases = [
             (
                 Frame::Text(secret.into()),

@@ -28,7 +28,7 @@ import {
 } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
-import { PLACEHOLDER_ERROR_MESSAGE } from '../../api/wsFrame'
+import { LEGACY_PLACEHOLDER_ERROR_MESSAGE, PLACEHOLDER_ERROR_MESSAGE } from '../../api/wsFrame'
 import { t } from '../../i18n'
 import {
   normalizeToolCategory,
@@ -203,7 +203,9 @@ function toolIconFor(name: string): LucideIcon {
 
 /** An error row's body — the dropped-output placeholder (a fixed marker text) in the UI language, any other message as it came. */
 function errorMessageText(message: string): string {
-  return message === PLACEHOLDER_ERROR_MESSAGE ? t('chat.droppedOutput') : message
+  return message === PLACEHOLDER_ERROR_MESSAGE || message === LEGACY_PLACEHOLDER_ERROR_MESSAGE
+    ? t('chat.droppedOutput')
+    : message
 }
 
 /** Icons are size-3.5 (≈14px) to match our font scale. */

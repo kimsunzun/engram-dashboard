@@ -1,4 +1,4 @@
-//! Stream lifecycle management — ★pure layer★. Generation comparison · sequence-number dedup · hole detection · the 「유효 하한」 (valid floor).
+//! Stream lifecycle management — ★pure layer★. Generation comparison · sequence-number dedup · hole detection · the 「valid floor」.
 //!
 //! ★This file has no tokio, no socket, and no workspace crate★ — the gate measures that (canonical =
 //! the `lib.rs` header). Time is received **as an argument** (the same idiom as `machine.rs`).
@@ -7,15 +7,14 @@
 //!
 //! ## Why a re-request and its answer must be paired (do not revive)
 //!
-//! **Edition 1** held 「재요청을 냈다」 (a re-request was sent) as just one true/false. Then, at the moment a piece the peer had already
+//! **Edition 1** held 「a re-request was sent」 as just one true/false. Then, at the moment a piece the peer had already
 //! sent before receiving the re-request (pipelining — our output hot path does exactly that) arrived, it read it as
-//! 「재요청에 대한 답이 또 구멍이다」 (the answer to the re-request is a hole again) and folded into a truncation, and after that all the replay the peer actually sent
-//! became 「지나간 번호」 (a number already passed) and was dropped.
+//! 「the answer to the re-request is a hole again」 and folded into a truncation, and after that all the replay the peer actually sent
+//! became 「a number already passed」 and was dropped.
 //!
 //! **Edition 2** **dropped** that piece. That was worse — ★a daemon whose rewind buffer overflowed by definition
 //! cannot give `after+1`★ (that is the **main path** of truncation). In that case, until the window closed, what arrived
-//! vanished with neither event nor delivery, and the `oldest_valid` raised after that was a **number late by the window length**. That is, 「버리고 값도
-//! 틀리게 신고」 (drop it and report the wrong value too).
+//! vanished with neither event nor delivery, and the `oldest_valid` raised after that was a **number late by the window length**. That is, 「drop it and report the wrong value too」.
 //!
 //! **Now** it is held. An out-of-order piece that arrives while waiting for the re-request's answer goes into a **bounded buffer**, and
 //! when the window closes (deadline exceeded · buffer saturated · stream evicted · the caller's teardown) it is **sent out in order** and its first number is raised as
@@ -120,7 +119,7 @@ struct Track<M> {
 }
 
 impl<M> Track<M> {
-    /// Takes out what was held — `(번호 순서대로, 첫 번호, 끝 번호)`.
+    /// Takes out what was held — `(in number order, first number, last number)`.
     ///
     /// ★Progress is pushed to the last number★ — the held numbers may be sparse (a piece after the hole came backwards · only part of the replay
     /// came) and there is no guarantee that the piece that made the window close is the largest of them. If pushed to less than that, a number already sent out
@@ -138,7 +137,7 @@ impl<M> Track<M> {
     }
 }
 
-/// Holds 「마지막 세대 · 마지막 순번 · 내보낸 재요청」 (the last generation · the last sequence number · the re-request sent out) for each stream.
+/// Holds 「the last generation · the last sequence number · the re-request sent out」 for each stream.
 ///
 /// ★It is not erased even when the connection is cut★ — when it re-attaches, that last sequence number is the resume point, so if erased,
 /// a reconnect would always receive from the start. Pending re-requests and held pieces also survive
@@ -177,8 +176,7 @@ impl<K: Eq + Hash + Clone, M> Streams<K, M> {
         self.observe_capped(mark, msg, now, false)
     }
 
-    /// The edition of [`Streams::observe`] with the caller's hold limit added. `over_cap` = 「이 조각까지 붙들면 부르는 쪽이
-    /// 재는 상한(구동 층에서는 바이트)을 넘는다」 (if held up to this piece, it exceeds the limit the caller measures (bytes in the driving layer)) — if true, we treat it as no room to hold. If a window is open,
+    /// The edition of [`Streams::observe`] with the caller's hold limit added. `over_cap` = 「if held up to this piece, it exceeds the limit the caller measures (bytes in the driving layer)」 — if true, we treat it as no room to hold. If a window is open,
     /// it closes with the same truncation as when `resume_buffer` of [`Self::new`] is full, and for a hole that would open a new window, it does not open the window and continues from this
     /// piece, reporting what came before it as a truncation ([`Verdict::Truncated`] — no re-request is sent).
     pub fn observe_capped(
@@ -258,8 +256,8 @@ impl<K: Eq + Hash + Clone, M> Streams<K, M> {
             return Verdict::Held { awaiting_after };
         }
         let (flushed, oldest, newest) = track.drain_held();
-        let oldest_valid = oldest.expect("붙든 것이 하나는 있다");
-        track.last_seq = newest.expect("붙든 것이 하나는 있다");
+        let oldest_valid = oldest.expect("there is at least one held item");
+        track.last_seq = newest.expect("there is at least one held item");
         Verdict::Truncated {
             oldest_valid,
             flushed,
@@ -336,7 +334,7 @@ impl<K: Eq + Hash + Clone, M> Streams<K, M> {
 
     fn touch(&mut self, key: &K) {
         if let Some(pos) = self.order.iter().position(|k| k == key) {
-            let k = self.order.remove(pos).expect("position 이 준 자리");
+            let k = self.order.remove(pos).expect("the spot position gave");
             self.order.push_back(k);
         }
     }
@@ -370,7 +368,7 @@ impl<K: Eq + Hash + Clone, M> Streams<K, M> {
         );
     }
 
-    /// All re-requests that have not yet got an answer — `(스트림, 그 번호 뒤부터)`.
+    /// All re-requests that have not yet got an answer — `(stream, from after that number)`.
     ///
     /// ★If these are not sent out again after a reconnect, the hole stays forever★.
     pub fn pending_resumes(&self) -> Vec<(K, u64)> {
@@ -499,7 +497,11 @@ mod tests {
                 resume_from: 1,
             }
         );
-        assert_eq!(s.last_seq(&1), Some(1), "구멍 조각은 진도를 밀지 않는다");
+        assert_eq!(
+            s.last_seq(&1),
+            Some(1),
+            "a gap piece does not advance progress"
+        );
     }
 
     #[test]
@@ -547,7 +549,7 @@ mod tests {
                 oldest_valid: 5,
                 flushed: vec![5, 6, 9],
             },
-            "★버린 뒤에 늦은 번호를 하한이라 신고하면 안 된다★"
+            "★after dropping, it must not report a late number as the lower bound★"
         );
         assert_eq!(s.last_seq(&1), Some(9));
     }
@@ -563,7 +565,7 @@ mod tests {
             flushed,
         } = see(&mut s, 1, 7, 8, t0 + RESUME_TIMEOUT)
         else {
-            panic!("창이 닫혀야 한다");
+            panic!("the window must close");
         };
         assert_eq!(flushed.first().copied(), Some(oldest_valid));
     }
@@ -582,7 +584,7 @@ mod tests {
                 oldest_valid: 5,
                 flushed: vec![5, 6, 7],
             },
-            "붙드는 양에 상한이 없으면 상대가 우리 메모리를 민다"
+            "without a cap on the amount held, the peer pushes our memory"
         );
     }
 
@@ -604,7 +606,7 @@ mod tests {
                 oldest_valid: 5,
                 flushed: vec![5],
             }],
-            "★조각이 더 안 오면 아무도 이 창을 못 닫는다 — 그게 평범한 경우다★"
+            "★if no more pieces come, nobody can close this window — that is the ordinary case★"
         );
         assert!(s.pending_resumes().is_empty());
         assert_eq!(s.last_seq(&1), Some(5));
@@ -690,7 +692,7 @@ mod tests {
                 oldest_valid: 5,
                 flushed: vec![5, 6],
             },
-            "★개수 상한이 찬 것과 같은 길이다★ — 붙든 것을 순서대로 내보내고 그 첫 번호를 하한으로 올린다"
+            "★the same path as the count cap filling up★ — emits the held items in order and raises their first number as the lower bound"
         );
         assert!(s.pending_resumes().is_empty());
         assert_eq!(s.last_seq(&1), Some(6));
@@ -707,9 +709,9 @@ mod tests {
                 oldest_valid: 5,
                 flushed: vec![5],
             },
-            "★붙들 자리가 없으면 재요청 없이 이 조각부터 이어 간다★ — 그 앞은 잘림으로 신고된다"
+            "★with no room to hold, it continues from this piece without a re-request★ — what came before is reported as a truncation"
         );
-        assert!(s.pending_resumes().is_empty(), "창을 열지 않았다");
+        assert!(s.pending_resumes().is_empty(), "did not open the window");
         assert_eq!(see(&mut s, 1, 7, 6, t0), Verdict::Deliver(6));
     }
 
@@ -724,7 +726,7 @@ mod tests {
         assert_eq!(s.next_resume_deadline(), Some(t0 + paused + RESUME_TIMEOUT));
         assert!(
             s.expire_resumes(t0 + RESUME_TIMEOUT).is_empty(),
-            "★민 만큼 늦게 닫힌다★ — 그동안 답을 못 읽은 것은 상대 탓이 아니다"
+            "★it closes as much later as it was pushed★ — not reading answers in the meantime is not the peer's fault"
         );
         assert_eq!(s.expire_resumes(t0 + paused + RESUME_TIMEOUT).len(), 1);
     }
@@ -735,12 +737,16 @@ mod tests {
         let t0 = Instant::now();
         see(&mut s, 1, 7, 1, t0);
         see(&mut s, 1, 7, 5, t0);
-        *s.held_mut(&1, 5).expect("붙들고 있다") = 50;
-        assert_eq!(s.held_mut(&1, 6), None, "안 붙든 번호");
-        assert_eq!(s.held_mut(&2, 5), None, "모르는 스트림");
+        *s.held_mut(&1, 5).expect("holding") = 50;
+        assert_eq!(s.held_mut(&1, 6), None, "unheld number");
+        assert_eq!(s.held_mut(&2, 5), None, "unknown stream");
         let collapsed = s.expire_resumes(t0 + RESUME_TIMEOUT);
-        assert_eq!(collapsed[0].flushed, vec![50], "고친 것이 그대로 나간다");
-        assert_eq!(s.held_mut(&1, 5), None, "창이 닫히면 없다");
+        assert_eq!(
+            collapsed[0].flushed,
+            vec![50],
+            "the fixed one goes out as is"
+        );
+        assert_eq!(s.held_mut(&1, 5), None, "none once the window closes");
     }
 
     // ── When the window closes, progress goes to the last number of what was held ──
@@ -774,13 +780,13 @@ mod tests {
             flushed,
         } = s.observe_capped(&mark(1, 7, 3), 3, t0, true)
         else {
-            panic!("상한을 넘겨 창이 닫혀야 한다");
+            panic!("the cap was exceeded, so the window must close");
         };
         assert_eq!((oldest_valid, flushed.clone()), (3, vec![3, 5]));
         assert_eq!(
             delivered_after(&mut s, flushed, [2, 3, 4, 5, 6], t0),
             vec![3, 5, 6],
-            "★늘 오름차순 · 겹침 없음★ — 진도를 3 에 두면 재생분 4 · 5 가 5 뒤에 다시 올라간다"
+            "★always ascending · no overlap★ — leaving progress at 3 would send the replayed 4 · 5 up again after 5"
         );
     }
 
@@ -796,7 +802,7 @@ mod tests {
             flushed,
         } = s.observe_capped(&mark(1, 7, 3), 3, t0, true)
         else {
-            panic!("상한을 넘겨 창이 닫혀야 한다");
+            panic!("the cap was exceeded, so the window must close");
         };
         assert_eq!((oldest_valid, flushed.clone()), (3, vec![3, 4, 5]));
         assert_eq!(
@@ -812,7 +818,7 @@ mod tests {
         see(&mut s, 1, 7, 1, t0);
         see(&mut s, 1, 7, 5, t0);
         let Verdict::Truncated { flushed, .. } = see(&mut s, 1, 7, 3, t0) else {
-            panic!("개수 상한이 차 창이 닫혀야 한다");
+            panic!("the count cap is full, so the window must close");
         };
         assert_eq!(
             delivered_after(&mut s, flushed, [4, 5, 6], t0),
@@ -832,7 +838,7 @@ mod tests {
         assert_eq!(
             delivered_after(&mut s, flushed, [4, 5, 6], t0 + RESUME_TIMEOUT),
             vec![3, 5, 6],
-            "★첫 번호 + 붙든 수 − 1 은 끝 번호가 아니다★ — {{3, 5}} 면 4 가 되어 5 를 한 번 더 올린다"
+            "★first number + held count − 1 is not the last number★ — for {{3, 5}} it becomes 4 and sends 5 up once more"
         );
     }
 
@@ -854,7 +860,7 @@ mod tests {
         assert_eq!(
             closed,
             vec![(1, 4, vec![4, 6]), (3, 9, vec![9])],
-            "★시한 전이어도 열린 창은 다 접힌다★ — 창이 없는 스트림은 건너뛴다"
+            "★every open window folds even before the deadline★ — streams without a window are skipped"
         );
         assert!(s.pending_resumes().is_empty());
         assert_eq!(s.last_seq(&1), Some(6));
@@ -954,7 +960,7 @@ mod tests {
         // Keep using 1 — the most active stream must not become the first victim.
         see(&mut s, 1, 1, 2, t0);
         see(&mut s, 3, 1, 1, t0);
-        assert_eq!(s.last_seq(&1), Some(2), "★가장 활발한 스트림이 살아남는다★");
+        assert_eq!(s.last_seq(&1), Some(2), "★the most active stream survives★");
         assert_eq!(s.last_seq(&2), None);
         assert_eq!(s.last_seq(&3), Some(1));
     }
@@ -978,7 +984,7 @@ mod tests {
                 flushed: vec![5],
                 oldest_valid: Some(5),
             }],
-            "★붙들고 있던 조각이 축출과 함께 조용히 사라지면 안 된다★"
+            "★held pieces must not silently vanish with the eviction★"
         );
     }
 

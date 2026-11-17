@@ -1,4 +1,4 @@
-//! Lookup of the target of `cmd.exe /c <대상>` — the Windows branch of [`super::MissingProgramCheck`]. It looks by the same rules as cmd (working folder →
+//! Lookup of the target of `cmd.exe /c <target>` — the Windows branch of [`super::MissingProgramCheck`]. It looks by the same rules as cmd (working folder →
 //! `PATH`, extension = `PATHEXT`), and a lookup for the same target runs once at a time across the whole process ([`LookupGate`]).
 // ADR-0266
 
@@ -27,7 +27,7 @@ const CMD_BUILTINS: &[&str] = &[
     "rmdir", "set", "setlocal", "shift", "start", "time", "title", "type", "ver", "verify", "vol",
 ];
 
-/// The target of `cmd.exe … /c <대상> …` — only when it is a one-word program name (`None` for spaces, cmd special characters or an internal command).
+/// The target of `cmd.exe … /c <target> …` — only when it is a one-word program name (`None` for spaces, cmd special characters or an internal command).
 fn cmd_target<'a>(program: &str, args: &'a [String]) -> Option<&'a str> {
     if !is_cmd_shell(program) {
         return None;
@@ -61,7 +61,7 @@ fn child_env(env_set: &[(String, String)], env_remove: &[String], key: &str) -> 
     std::env::var_os(key)
 }
 
-/// Lookup of the target of `cmd.exe /c <대상>` — the env the child received (`PATH` · `PATHEXT`) and the working folder are captured at startup.
+/// Lookup of the target of `cmd.exe /c <target>` — the env the child received (`PATH` · `PATHEXT`) and the working folder are captured at startup.
 #[derive(Clone)]
 pub(super) struct CmdLookup {
     target: String,
@@ -95,7 +95,7 @@ impl CmdLookup {
         })
     }
 
-    /// ★Remote entries are skipped★ ([`is_remote`]) — a program that exists only in a skipped entry is decided 「없다」 (missing). We chose that over
+    /// ★Remote entries are skipped★ ([`is_remote`]) — a program that exists only in a skipped entry is decided 「missing」. We chose that over
     ///   a slow remote entry holding up the decision (it is wrong **only when the program in that entry failed**).
     fn resolve(&self, deadline: Instant) -> TargetLookup {
         let pathext = self
@@ -170,8 +170,8 @@ pub(super) static LOOKUPS_IN_FLIGHT: LookupGate = LookupGate::new();
 /// ASCII case is ignored (Windows names are case-insensitive — non-ASCII is not folded).
 ///
 /// ★Do not merge it into a one-per-process marker★ — decisions run side by side (the agent usage query decides separately per vendor).
-///   If both targets are missing, two shells fail together within a few ms, and the later decision is blocked by the earlier lookup and becomes 「모른다」 (unknown) instead of
-///   「없다」 (missing).
+///   If both targets are missing, two shells fail together within a few ms, and the later decision is blocked by the earlier lookup and becomes 「unknown」 instead of
+///   「missing」.
 pub(super) struct LookupGate(Mutex<BTreeSet<String>>);
 
 impl LookupGate {
@@ -180,7 +180,7 @@ impl LookupGate {
     }
 
     /// Did it claim the slot for `target` — false if one is already running. ★If the lock is poisoned (an earlier panic), it counts as running★ —
-    /// it does not spread the panic and leaves the decision 「모른다」 (unknown). The poison is not cleared — afterwards decisions on this list are always 「모른다」 (unknown).
+    /// it does not spread the panic and leaves the decision 「unknown」. The poison is not cleared — afterwards decisions on this list are always 「unknown」.
     fn claim(&self, target: &str) -> bool {
         match self.0.lock() {
             Ok(mut running) => running.insert(target.to_ascii_lowercase()),
@@ -195,7 +195,7 @@ impl LookupGate {
             .remove(&target.to_ascii_lowercase());
     }
 
-    /// Each test gets its own list — so tests running in parallel do not see each other's lookups as 「도는 중」 (running) (production has one list).
+    /// Each test gets its own list — so tests running in parallel do not see each other's lookups as 「running」 (production has one list).
     #[cfg(test)]
     pub(super) fn own() -> &'static Self {
         Box::leak(Box::new(Self::new()))
@@ -219,7 +219,7 @@ impl Drop for InFlight {
 ///
 /// ★While a lookup for `target` is running, it does not launch a new one but is [`TargetLookup::Busy`] right away★ ([`LookupGate`]) — if failed lookups
 ///   repeat while a thread left past the deadline is stuck, one stuck thread would pile up per lookup. The decision in between
-///   is 「모른다」 (unknown), so it does not fold into 「없다」 (missing).
+///   is 「unknown」, so it does not fold into 「missing」.
 fn run_bounded(
     deadline: Instant,
     gate: &'static LookupGate,
@@ -240,7 +240,7 @@ fn run_bounded(
             move || {
                 let release = InFlight { gate, target };
                 let found = resolve();
-                // Free it before sending the result — so that even if the receiver makes the next decision right away it does not look like 「아직 도는 중」 (still running).
+                // Free it before sending the result — so that even if the receiver makes the next decision right away it does not look like 「still running」.
                 drop(release);
                 let _ = tx.send(found);
             }
@@ -259,7 +259,7 @@ fn remaining(deadline: Instant) -> Option<Duration> {
         .filter(|left| !left.is_zero())
 }
 
-/// A location that may be remote — UNC (`\\서버\공유` · `\\?\UNC\…`) and non-drive device namespaces (`\\.\…` · `\\?\…`).
+/// A location that may be remote — UNC (`\\server\share` · `\\?\UNC\…`) and non-drive device namespaces (`\\.\…` · `\\?\…`).
 /// ★A network drive connected by drive letter cannot be told apart★ — the API that tells them apart (`GetDriveTypeW`) lives in the `windows` feature
 ///   (`Win32_Storage_FileSystem`), which this crate does not turn on. If such an entry blocks, the deadline of [`CmdLookup::run_within`] cuts it.
 fn is_remote(path: &Path) -> bool {
@@ -294,7 +294,7 @@ mod tests {
                 "engram-platform-{label}-{}",
                 uuid::Uuid::new_v4().simple()
             ));
-            std::fs::create_dir_all(&path).expect("시험 임시 루트");
+            std::fs::create_dir_all(&path).expect("test temp root");
             Self(path)
         }
 
@@ -316,7 +316,10 @@ mod tests {
     fn eventually(what: &str, mut check: impl FnMut() -> bool) {
         let until = Instant::now() + Duration::from_secs(5);
         while !check() {
-            assert!(Instant::now() < until, "5초 안에 안 됐다: {what}");
+            assert!(
+                Instant::now() < until,
+                "did not happen within 5 seconds: {what}"
+            );
             thread::sleep(Duration::from_millis(20));
         }
     }
@@ -329,15 +332,15 @@ mod tests {
         };
         assert_eq!(target(&["/c", "tool", "--a"]).as_deref(), Some("tool"));
         assert_eq!(target(&["/d", "/C", "tool"]).as_deref(), Some("tool"));
-        assert_eq!(target(&["/c", "echo", "hi"]), None, "내부 명령");
-        assert_eq!(target(&["/c", "EXIT"]), None, "내부 명령(대소문자)");
-        assert_eq!(target(&["/c", "set /p L="]), None, "한 낱말이 아니다");
-        assert_eq!(target(&["/c", "a&b"]), None, "cmd 특수 문자");
+        assert_eq!(target(&["/c", "echo", "hi"]), None, "internal command");
+        assert_eq!(target(&["/c", "EXIT"]), None, "internal command (case)");
+        assert_eq!(target(&["/c", "set /p L="]), None, "not one word");
+        assert_eq!(target(&["/c", "a&b"]), None, "cmd special character");
         assert_eq!(target(&["/k", "tool"]), None);
         assert_eq!(
             cmd_target("other.exe", &cmd_c_args("tool")),
             None,
-            "cmd 가 아니다"
+            "not cmd"
         );
     }
 
@@ -353,7 +356,7 @@ mod tests {
             .collect();
         let env_remove: Vec<String> = env_remove.iter().map(|k| (*k).to_owned()).collect();
         CmdLookup::from_command("cmd.exe", &cmd_c_args(target), &env_set, &env_remove, cwd)
-            .expect("한 낱말 대상")
+            .expect("one-word target")
             .resolve(far())
     }
 
@@ -377,12 +380,12 @@ mod tests {
         assert_eq!(
             lookup("engram-probe-tool.cmd", &cwd, &path, &[]),
             TargetLookup::Found,
-            "확장자까지 준 이름"
+            "name given with its extension"
         );
         assert_eq!(
             lookup("engram-local-tool", &cwd, &path, &[]),
             TargetLookup::Found,
-            "작업 폴더 먼저"
+            "working folder first"
         );
         assert_eq!(
             lookup(
@@ -392,24 +395,24 @@ mod tests {
                 &[]
             ),
             TargetLookup::Missing,
-            "PATHEXT 밖의 확장자"
+            "extension outside PATHEXT"
         );
         assert_eq!(
             lookup("engram-probe-tool", &cwd, &[], &["path"]),
             TargetLookup::Missing,
-            "벗긴 PATH"
+            "stripped PATH"
         );
         let absolute = bin.join("engram-probe-tool.cmd");
         assert_eq!(
             lookup(&absolute.to_string_lossy(), &cwd, &[], &["path"]),
             TargetLookup::Found,
-            "경로로 준 대상"
+            "target given as a path"
         );
         // Relative entries are relative to the child's working folder, not this process's.
         assert_eq!(
             lookup("engram-probe-tool", root.path(), &[("PATH", "bin")], &[]),
             TargetLookup::Found,
-            "상대 PATH 칸"
+            "relative PATH entry"
         );
     }
 
@@ -478,16 +481,16 @@ mod tests {
                 &[]
             ),
             TargetLookup::Missing,
-            "건너뛴 칸은 찾은 셈 치지 않는다"
+            "a skipped entry does not count as found"
         );
         assert!(
             started.elapsed() < Duration::from_secs(2),
-            "원격 칸을 건너뛰지 않았다: {:?}",
+            "did not skip the remote entry: {:?}",
             started.elapsed()
         );
     }
 
-    /// Past the deadline it is 「모른다」 (unknown) — not 「없다」 (missing).
+    /// Past the deadline it is 「unknown」 — not 「missing」.
     #[test]
     fn a_lookup_out_of_time_is_unknown() {
         let root = TempRoot::new("probe-lookup-late");
@@ -501,7 +504,7 @@ mod tests {
             &[],
             root.path(),
         )
-        .expect("한 낱말 대상");
+        .expect("one-word target");
         let gate = LookupGate::own();
         assert_eq!(
             lookup.run_within(Instant::now(), gate),
@@ -512,7 +515,7 @@ mod tests {
     }
 
     /// ★A lookup for the same target runs once at a time★ — while a lookup stuck past the deadline remains, a decision on the same target (ASCII case
-    /// ignored) does not look anew and is 「모른다」 (unknown). Other targets are still looked up in the meantime.
+    /// ignored) does not look anew and is 「unknown」. Other targets are still looked up in the meantime.
     #[test]
     fn a_lookup_still_in_flight_keeps_a_second_one_for_the_same_target_from_starting() {
         let gate = LookupGate::own();
@@ -529,7 +532,7 @@ mod tests {
         assert_eq!(
             first,
             TargetLookup::Unknown,
-            "막힌 찾기는 마감에서 「모른다」다"
+            "a blocked lookup is 「unknown」 at the deadline"
         );
 
         let ran = Arc::new(AtomicBool::new(false));
@@ -543,23 +546,23 @@ mod tests {
         assert_eq!(second, TargetLookup::Busy);
         assert!(
             !ran.load(Ordering::SeqCst),
-            "같은 대상의 앞선 찾기가 도는데 새로 찾았다"
+            "looked anew although an earlier lookup of the same target is running"
         );
         assert_eq!(
             run_bounded(far(), gate, "engram-other-tool", || TargetLookup::Missing),
             TargetLookup::Missing,
-            "다른 대상은 막히지 않는다"
+            "other targets are not blocked"
         );
 
         drop(release_tx);
-        eventually("막힌 찾기가 풀린 뒤의 다음 찾기", || {
+        eventually("the next lookup after the blocked lookup clears", || {
             run_bounded(far(), gate, "engram-tool", || TargetLookup::Missing)
                 == TargetLookup::Missing
         });
     }
 
-    /// ★Different targets are looked up at the same time★ — even if two decisions overlap with both targets missing, both reach 「없다」 (missing). If each lookup
-    /// waited until the other was done running, one being blocked would make the other 「모른다」 (unknown) at the deadline too.
+    /// ★Different targets are looked up at the same time★ — even if two decisions overlap with both targets missing, both reach 「missing」. If each lookup
+    /// waited until the other was done running, one being blocked would make the other 「unknown」 at the deadline too.
     #[test]
     fn lookups_for_different_targets_run_side_by_side() {
         let gate = LookupGate::own();
@@ -575,17 +578,20 @@ mod tests {
             })
         };
         let (first, second) = (judge("engram-tool-a"), judge("engram-tool-b"));
-        assert_eq!(first.join().expect("첫 판정"), TargetLookup::Missing);
-        assert_eq!(second.join().expect("둘째 판정"), TargetLookup::Missing);
+        assert_eq!(first.join().expect("first decision"), TargetLookup::Missing);
+        assert_eq!(
+            second.join().expect("second decision"),
+            TargetLookup::Missing
+        );
     }
 
-    /// A poisoned list counts as 「도는 중」 (running) — it does not panic, does not look, and is 「모른다」 (unknown).
+    /// A poisoned list counts as 「running」 — it does not panic, does not look, and is 「unknown」.
     #[test]
     fn a_poisoned_gate_means_unknown_without_a_panic() {
         let gate = LookupGate::own();
         let _ = thread::spawn(move || {
             let _held = gate.0.lock();
-            panic!("명단을 쥔 채 패닉한다");
+            panic!("panics while holding the list");
         })
         .join();
         assert!(gate.0.is_poisoned());
@@ -598,6 +604,6 @@ mod tests {
             })
         };
         assert_eq!(found, TargetLookup::Busy);
-        assert!(!ran.load(Ordering::SeqCst), "독에 걸린 명단에서 찾았다");
+        assert!(!ran.load(Ordering::SeqCst), "looked up in a poisoned list");
     }
 }

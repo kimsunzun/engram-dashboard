@@ -2,11 +2,11 @@
 
 export type Preset = { id: string, 
 /**
- * 정규화된 cwd.
+ * Normalized cwd.
  */
 cwd: string, 
 /**
- * 사용자 지정 표시명 override(ADR-0061 리치화). `Some` → 그대로 표시, `None` → cwd basename 파생
- * (기존 동작 불변).
+ * User-specified display name override (ADR-0061 enrichment). `Some` → shown as is, `None` → derived from the cwd basename
+ * (existing behavior unchanged).
  */
 name: string | null, };

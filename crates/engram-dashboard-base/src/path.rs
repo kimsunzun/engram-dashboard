@@ -73,7 +73,7 @@ mod tests {
 
     #[test]
     fn non_ascii_characters_survive_unquoting() {
-        assert_eq!(normalize_spelling(r#""C:\작업\폴더""#), "C:/작업/폴더");
+        assert_eq!(normalize_spelling(r#""C:\작업\폴더""#), "C:/작업/폴더"); // hangul-ok
         assert_eq!(normalize_spelling("'D:\\\u{1F600}'"), "D:/\u{1F600}");
     }
 }

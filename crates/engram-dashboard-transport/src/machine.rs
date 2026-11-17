@@ -3,7 +3,7 @@
 //! Input = (current time, event) · output = list of actions. ★No future, no runtime, no I/O★ — so the backoff schedule and
 //! the budget decision are measured **without really waiting**. The gate keeps that purity (canonical = `lib.rs` header).
 //!
-//! ★This file is this crate's only 「나중에 리팩터 안 하게」 (so we never refactor later) device★ — within one crate the compiler does not enforce sans-IO purity,
+//! ★This file is this crate's only 「so we never refactor later」 device★ — within one crate the compiler does not enforce sans-IO purity,
 //! so it holds only by convention, and this repo already has a precedent that fills that weakness
 //! (the purity gate of `src-tauri/src/daemon_client/replay_flight.rs`, ADR-0175 decision 3).
 //!
@@ -20,8 +20,7 @@ use crate::policy::Policy;
 /// Connection generation. Monotonically increasing and never reused. It is +1 every time it enters the operating phase.
 ///
 /// ★It does not rewind even if the same label is put on the registry again★ — [`Machine::new`] takes a **floor value**, and the registry
-/// passes the old supervisor's last generation as that floor. Otherwise the consumer's ordinary defense (「최대 세대 미만은
-/// 무시」 (ignore anything below the max generation)) **throws away the new connection wholesale**.
+/// passes the old supervisor's last generation as that floor. Otherwise the consumer's ordinary defense (「ignore anything below the max generation」) **throws away the new connection wholesale**.
 ///
 /// ★It differs from the stream's incarnation marker ([`crate::StreamMark::generation`], u32)★ — this one is **which of our connections
 /// this is**, while that one is **which incarnation of the peer's stream this is**. The width and the comparison rule differ
@@ -52,8 +51,7 @@ impl PeerState {
     }
 }
 
-/// Why it gave up. ★This is the input from which the shell decides popup eligibility★ (ADR-0180 decision 2) — both are 「사용자가 행동하지
-/// 않으면 영영 복구되지 않는 상태」 (a state that never recovers unless the user acts) and so qualify, but what the user can do on the spot differs, so the screen
+/// Why it gave up. ★This is the input from which the shell decides popup eligibility★ (ADR-0180 decision 2) — both are 「a state that never recovers unless the user acts」 and so qualify, but what the user can do on the spot differs, so the screen
 /// shape splits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GaveUpReason {
@@ -64,7 +62,7 @@ pub enum GaveUpReason {
     BudgetExhausted,
 }
 
-/// Why it disconnected. ★Today's code has no such distinction — everything is one lump of 「끊김」 (disconnected)★.
+/// Why it disconnected. ★Today's code has no such distinction — everything is one lump of 「disconnected」★.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DisconnectCause {
     /// The peer exited normally.
@@ -98,7 +96,7 @@ impl DisconnectCause {
     }
 }
 
-/// Why a connection could not stand. ★What splits the budget is not the branch but 「종결 거절인가」 (is it a terminal rejection)★ (ADR-0180 decision 5 · TRD 3 §3-0 ⑤) —
+/// Why a connection could not stand. ★What splits the budget is not the branch but 「is it a terminal rejection」★ (ADR-0180 decision 5 · TRD 3 §3-0 ⑤) —
 /// only an [`RejectKind::Terminal`] rejection spends no budget and gives up at the first rejection; the rest spend budget and dial again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectFailure {
@@ -109,8 +107,7 @@ pub enum ConnectFailure {
     /// that crossed the link (for the dialer's [`crate::DialFailure::Refused`], the code it chose).
     ///
     /// ★`reason` may be text the peer gave — neither decide on it nor use it as popup text★ (TRD 3 §3-0 ⑤ · §5 19). The screen
-    /// text is the consumer's fixed message chosen by `code`, and this text is for details · logs. When carrying it onto an LLM surface, mark it as 「상대가 준
-    /// 데이터」 (data the peer gave). This text carried by an event that passed through the machine has gone through [`mask_reason`].
+    /// text is the consumer's fixed message chosen by `code`, and this text is for details · logs. When carrying it onto an LLM surface, mark it as 「data the peer gave」. This text carried by an event that passed through the machine has gone through [`mask_reason`].
     Rejected {
         kind: RejectKind,
         code: CloseCode,
@@ -150,7 +147,7 @@ pub enum Input {
     LinkLost(DisconnectCause),
     /// The backoff wait ended.
     BackoffElapsed,
-    /// ★「지금 다시 해라」 (do it again now)★ — resets the budget and tries at once (ADR-0180 decision 7).
+    /// ★「do it again now」★ — resets the budget and tries at once (ADR-0180 decision 7).
     ReconnectNow,
     /// Explicit exit.
     Close,
@@ -221,7 +218,7 @@ pub struct Machine {
     /// a peer that disconnects as soon as it connects repeats forever and never reaches [`GaveUpReason::BudgetExhausted`] (no popup
     /// appears), and if it is not refilled, there is a place where it gives up **without ever having retried** — the shape where the daemon takes 4 seconds to
     /// restart and burns the whole budget during that time, and then one disconnect 10 seconds after connecting makes it give up at once.
-    /// That state is not 「사용자가 행동하지 않으면 영영 복구되지 않는」 (never recovers unless the user acts); it is one that **connects if tried just once more**,
+    /// That state is not 「never recovers unless the user acts」; it is one that **connects if tried just once more**,
     /// so it has no popup eligibility (ADR-0180 decision 2).
     flaps: u32,
     policy: Policy,
@@ -340,7 +337,7 @@ impl Machine {
             },
             Input::Connected(generation) => match self.state {
                 PeerState::Handshaking => {
-                    // ★If it connected, the 「못 붙는다」 (cannot connect) budget fills again★ — what that axis measures is reachability,
+                    // ★If it connected, the 「cannot connect」 budget fills again★ — what that axis measures is reachability,
                     //   and it was just reached. Catching a peer that disconnects as soon as it connects is the `flaps` axis below.
                     self.retries = 0;
                     self.live_since = Some(now);
@@ -358,7 +355,7 @@ impl Machine {
                 PeerState::Live => {
                     let generation = Generation(self.generation);
                     match self.live_since.take() {
-                        // One long-lasting connection clears the 「금세 끊긴다」 (soon disconnects) record.
+                        // One long-lasting connection clears the 「drops quickly」 record.
                         Some(since)
                             if now.saturating_duration_since(since) >= self.policy.live_dwell =>
                         {
@@ -427,8 +424,7 @@ impl Machine {
     /// Sets the next attempt or declares the budget exhausted. If there is a `cause`, it raises `ConnectFailed` too.
     fn schedule_retry(&mut self, now: Instant, cause: Option<ConnectFailure>) -> Vec<Action> {
         let of = self.policy.reconnect.max_attempts;
-        // ★If either of the two axes runs out, it gives up★ — `retries` measures 「못 붙는다」 (cannot connect), `flaps` measures 「붙어도 안
-        //   버틴다」 (connects but does not last). Either is a state that does not clear unless the user steps in.
+        // ★If either of the two axes runs out, it gives up★ — `retries` measures 「cannot connect」, `flaps` measures 「connects but does not last」. Either is a state that does not clear unless the user steps in.
         if self.retries >= of || self.flaps >= of {
             self.state = PeerState::GaveUp(GaveUpReason::BudgetExhausted);
             let mut acts = Vec::new();
@@ -625,7 +621,7 @@ mod tests {
         assert_eq!(
             reported,
             Some((3, 3, None)),
-            "예산이 끝나도 왜 못 붙었는지가 버려지면 안 된다"
+            "even when the budget runs out, why it could not attach must not be dropped"
         );
     }
 
@@ -643,7 +639,7 @@ mod tests {
             }),
         );
         assert_eq!(m.state(), PeerState::GaveUp(GaveUpReason::Rejected));
-        assert_eq!(m.attempt(), 0, "거절은 예산을 안 쓴다");
+        assert_eq!(m.attempt(), 0, "a reject does not use budget");
         assert!(waits(&acts, t0).is_empty());
         let evs = events(&acts);
         assert!(evs.iter().any(
@@ -672,7 +668,7 @@ mod tests {
         m.on(t0, Input::Dialed);
         let acts = m.on(t0, Input::ConnectFailed(retryable("stale token")));
         assert_eq!(m.state(), PeerState::Backoff);
-        assert_eq!(m.attempt(), 1, "예산을 쓴다");
+        assert_eq!(m.attempt(), 1, "uses budget");
         assert_eq!(waits(&acts, t0), vec![Duration::from_millis(500)]);
         let evs = events(&acts);
         assert!(
@@ -680,7 +676,7 @@ mod tests {
                 e,
                 MachineEvent::Rejected { .. } | MachineEvent::GaveUp { .. }
             )),
-            "다시 거는 거절은 포기하지 않는다: {evs:?}"
+            "a reject that redials does not give up: {evs:?}"
         );
         assert!(evs.iter().any(|e| matches!(
             e,
@@ -747,7 +743,7 @@ mod tests {
                     } => Some(reason.clone()),
                     _ => None,
                 })
-                .expect("거절 문구를 실은 사건")
+                .expect("an event carrying the reject wording")
         };
         for kind in [RejectKind::Terminal, RejectKind::Retryable] {
             assert_eq!(reason_of(kind), mask_reason(&noisy), "{kind:?}");
@@ -820,7 +816,7 @@ mod tests {
         assert_eq!(
             acts.first(),
             Some(&Action::FailPending(DisconnectCause::Idle)),
-            "대기자를 먼저 깨운다"
+            "wakes the waiters first"
         );
         assert!(acts.contains(&Action::DropLink {
             code: CloseCode::KEEPALIVE_TIMEOUT
@@ -835,7 +831,7 @@ mod tests {
         assert_eq!(waits(&acts, t0), vec![Duration::from_millis(500)]);
     }
 
-    // ── N8: the budget fills by 「버텼다」 (it lasted), not by 「붙었다」 (it connected) ──
+    // ── N8: the budget fills by 「it lasted」, not by 「it connected」 ──
     #[test]
     fn a_connection_that_holds_for_the_dwell_refills_the_budget() {
         let (mut m, t0) = machine();
@@ -844,14 +840,18 @@ mod tests {
         m.on(t0, Input::BackoffElapsed);
         m.on(t0, Input::Dialed);
         connect(&mut m, t0);
-        assert_eq!(m.attempt(), 0, "★붙었으면 「못 붙는다」 예산은 다시 찬다★");
+        assert_eq!(
+            m.attempt(),
+            0,
+            "★once attached, the 「cannot connect」 budget refills★"
+        );
 
         let held = t0 + Policy::default().live_dwell;
         let acts = m.on(held, Input::LinkLost(DisconnectCause::PeerClosed));
         assert_eq!(
             m.flaps(),
             0,
-            "오래 버틴 연결은 「금세 끊긴다」 기록을 지운다"
+            "a connection that lasted long clears the 「drops quickly」 record"
         );
         assert_eq!(waits(&acts, held), vec![Duration::from_millis(500)]);
     }
@@ -873,7 +873,7 @@ mod tests {
                 assert_eq!(
                     m.state(),
                     PeerState::Backoff,
-                    "★포기하기 전에 재시도를 해 봐야 한다★"
+                    "★must try retrying before giving up★"
                 );
                 m.on(now, Input::BackoffElapsed);
             }
@@ -881,7 +881,7 @@ mod tests {
         assert_eq!(
             m.state(),
             PeerState::GaveUp(GaveUpReason::BudgetExhausted),
-            "★여기 못 닿으면 ADR-0180 결정 7 의 팝업이 영영 안 뜬다★"
+            "★if this is not reached, the popup of ADR-0180 decision 7 never shows★"
         );
     }
 
@@ -891,7 +891,7 @@ mod tests {
         let (mut m, t0) = machine();
         let mut now = t0;
         m.on(now, Input::Start);
-        // The daemon restart is long and burns the whole 「못 붙는다」 (cannot connect) budget.
+        // The daemon restart is long and burns the whole 「cannot connect」 budget.
         for _ in 0..3 {
             m.on(now, Input::ConnectFailed(unreachable()));
             assert_eq!(m.state(), PeerState::Backoff);
@@ -902,7 +902,11 @@ mod tests {
         m.on(now, Input::Dialed);
         connect(&mut m, now);
         assert_eq!(m.state(), PeerState::Live);
-        assert_eq!(m.attempt(), 0, "붙었으면 「못 붙는다」 예산은 다시 찬다");
+        assert_eq!(
+            m.attempt(),
+            0,
+            "once attached, the 「cannot connect」 budget refills"
+        );
 
         // It fails to fill dwell (30s) and disconnects once.
         now += Duration::from_secs(10);
@@ -910,7 +914,7 @@ mod tests {
         assert_eq!(
             m.state(),
             PeerState::Backoff,
-            "★한 번만 더 걸면 붙는 상태다 — 여기서 포기하면 팝업 자격이 없는 상태에 팝업이 뜬다★"
+            "★one more dial would attach — giving up here would show the popup in a state not entitled to it★"
         );
         assert_eq!(waits(&acts, now), vec![Duration::from_millis(500)]);
     }
@@ -925,7 +929,11 @@ mod tests {
         connect(&mut m, t0);
         let brief = t0 + Duration::from_secs(1);
         m.on(brief, Input::LinkLost(DisconnectCause::PeerClosed));
-        assert_eq!(m.flaps(), 1, "1초짜리 연결은 「금세 끊긴다」로 센다");
+        assert_eq!(
+            m.flaps(),
+            1,
+            "a 1-second connection counts as 「drops quickly」"
+        );
     }
 
     // ── C1: whichever branch drops the connection, wake the waiters ──
@@ -951,7 +959,7 @@ mod tests {
             let acts = m.on(t0, input.clone());
             assert!(
                 acts.iter().any(|a| matches!(a, Action::FailPending(_))),
-                "{input:?} 가 대기자를 버려 둔다"
+                "{input:?} leaves the waiters abandoned"
             );
         }
     }
@@ -964,7 +972,7 @@ mod tests {
         assert_eq!(
             acts.first(),
             Some(&Action::FailPending(DisconnectCause::Explicit)),
-            "대기자 깨우기가 통로 닫기보다 앞이라야 사유가 최신이다"
+            "waking the waiters must come before closing the link for the reason to be current"
         );
         assert!(events(&acts).iter().any(|e| matches!(
             e,
@@ -981,7 +989,11 @@ mod tests {
     fn the_machine_adopts_the_generation_it_is_handed() {
         let t0 = Instant::now();
         let mut m = Machine::new(policy(), 0, t0, 40);
-        assert_eq!(m.generation(), Generation(40), "바닥값이 첫 보고값이다");
+        assert_eq!(
+            m.generation(),
+            Generation(40),
+            "the floor value is the first reported value"
+        );
         m.on(t0, Input::Start);
         m.on(t0, Input::Dialed);
         let acts = m.on(t0, Input::Connected(Generation(41)));
@@ -991,7 +1003,7 @@ mod tests {
             vec![&MachineEvent::Connected {
                 generation: Generation(41)
             }],
-            "★기계가 스스로 +1 하면 같은 이름표의 두 감독이 같은 번호를 낸다★"
+            "★if the machine did +1 on its own, two supervisors with the same label would emit the same number★"
         );
     }
 

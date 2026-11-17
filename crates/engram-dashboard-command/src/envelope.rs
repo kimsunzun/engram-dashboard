@@ -30,7 +30,7 @@ impl fmt::Display for RequestId {
 
 /// The **runtime** owner identifier obtained through registration.
 ///
-/// ★This is not the declared tier★ — the 「주인」 (owner) is the crate where the declaration lives, and this token points at which connection that owner
+/// ★This is not the declared tier★ — the 「owner」 is the crate where the declaration lives, and this token points at which connection that owner
 /// is attached to right now. Reading the two as the same thing turns the registry back into a build list (TRD §3-7 prohibition clause).
 #[derive(
     Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
@@ -58,13 +58,13 @@ impl fmt::Display for OwnerToken {
 /// ★The missing direction field is intentional★ — **the connection it was written to is the direction**. As a field, the same envelope would have two
 /// truths (the field value / the actual connection), and the moment they disagree, routing splits (TRD §3-2).
 /// ★`name` is the outer cover, `args` is the inside★ — the daemon reads only the outer cover to do per-command authorization and observation, and does not parse the inside
-/// (the core of ADR-0081 「데몬 opaque」 (daemon opaque) is `args`).
+/// (the core of ADR-0081 「daemon opaque」 is `args`).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CommandEnvelope {
     pub name: String,
     pub request_id: RequestId,
     /// ★This is the **destination** owner token — not the sender★. The previous hop overwrites it with the answer from its own registry
-    /// (`route`), so the receiving hop uses this value to check 「누구 앞으로 온 것인가」 (who was this addressed to) against its own registry and sort it
+    /// (`route`), so the receiving hop uses this value to check 「who was this addressed to」 against its own registry and sort it
     /// (the two-stage delivery of TRD §3-8). ★Do not read it as an identity★ — it does not point at the caller, so the material
     /// for authorization (TRD §4-⑧) is `name` and **the connection that envelope came from**.
     pub owner: OwnerToken,
@@ -110,18 +110,18 @@ mod tests {
         let id = RequestId::new();
 
         let ok = CommandReply::ok(id, serde_json::json!({ "agent_id": "a" }));
-        let text = serde_json::to_string(&ok).expect("직렬화");
+        let text = serde_json::to_string(&ok).expect("serialize");
         assert_eq!(
-            serde_json::from_str::<CommandReply>(&text).expect("복호"),
+            serde_json::from_str::<CommandReply>(&text).expect("decode"),
             ok
         );
 
         let err = CommandReply::err(id, CommandError::of(ErrorCode::NotFound, "no agent 'x'"));
-        let text = serde_json::to_string(&err).expect("직렬화");
-        let decoded: CommandReply = serde_json::from_str(&text).expect("복호");
+        let text = serde_json::to_string(&err).expect("serialize");
+        let decoded: CommandReply = serde_json::from_str(&text).expect("decode");
         assert_eq!(decoded, err);
         assert_eq!(
-            decoded.outcome.expect_err("오류 답장").code(),
+            decoded.outcome.expect_err("error reply").code(),
             ErrorCode::NotFound
         );
     }

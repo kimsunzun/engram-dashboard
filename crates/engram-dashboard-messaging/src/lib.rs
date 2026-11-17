@@ -40,8 +40,7 @@ pub mod service;
 ///   holds as is.
 pub type PeerId = uuid::Uuid;
 
-/// Deterministic id for tests — the same name always gives the same id. It makes an agent relaunched under the same name read as 「같은 에이전트의
-/// 새 화신」 (a new incarnation of the same agent) (ADR-0309 — the mail key is the id). Same-name entities that must be different do not use this.
+/// Deterministic id for tests — the same name always gives the same id. It makes an agent relaunched under the same name read as 「a new incarnation of the same agent」 (ADR-0309 — the mail key is the id). Same-name entities that must be different do not use this.
 /// It is an FNV-1a 128 using only std — bringing in the uuid `v5` feature would change the dependency ceiling (ADR-0110).
 #[cfg(test)]
 pub(crate) fn tid(name: &str) -> PeerId {

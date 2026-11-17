@@ -86,12 +86,12 @@ mod tests {
 
     /// It answers only when an interactive desktop is in front — on a CI runner or lock screen `None` may be the correct answer, so it is run by hand.
     #[test]
-    #[ignore = "대화형 데스크톱에서 손으로"]
+    #[ignore = "by hand on an interactive desktop"]
     fn cursor_and_button_answer_on_an_interactive_desktop() {
         assert!(cursor_pos().is_some());
         assert!(
             !primary_button_down(),
-            "시험 중에는 주 버튼을 누르지 않는다"
+            "do not press the primary button during the test"
         );
     }
 }

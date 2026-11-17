@@ -109,7 +109,7 @@ pub struct SendMeta {
     pub request: bool,
     /// The deadline notation exactly as the sender wrote it (`"10m"`). The value of the envelope `reply-by` attribute. Meaningful only for `request`.
     pub reply_by_raw: Option<String>,
-    /// The parsed deadline — the ledger fixes the absolute deadline as `발송시각 + 이것` (send time + this). If raw is Some, this must be Some.
+    /// The parsed deadline — the ledger fixes the absolute deadline as `send time + this`. If raw is Some, this must be Some.
     pub reply_by: Option<Duration>,
     pub reply_to: Option<String>,
     /// ★The value of the envelope `to` attribute (spec §1 — redefined from "group label" by ADR-0111)★. If `Some`, that string becomes
@@ -200,7 +200,7 @@ pub enum FailCode {
     /// That recipient's mailbox (message lane, 100 items) is full — **immediately, with no reclaim attempt** (ADR-0114 decision 1).
     MailboxFull,
     /// That recipient's reply contract cannot be opened (open contract limit 512, ADR-0108). **No delivery to that recipient either** —
-    ///   tracking replies is the essence of a request, so delivery without tracking violates the contract (ADR-0114 impact section).
+    ///   tracking replies is the essence of a request, so delivery without tracking violates the contract (ADR-0114 Impact section).
     RequestCapacity,
     /// ★The recipient profile was deleted while the item waited parked, so it was closed as undelivered (ADR-0116 decision 3)★.
     ///
@@ -235,7 +235,7 @@ impl FailCode {
 ///   they come down to the service (the entrance-agnostic single validation point).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SendReject {
-    /// An `@주소` (an @address) other than `@all` (or an `@` rule violation) → `GROUP_NOT_FOUND`. Even with a mixed `to` it is a **whole bounce**
+    /// An `@address` other than `@all` (or an `@` rule violation) → `GROUP_NOT_FOUND`. Even with a mixed `to` it is a **whole bounce**
     ///   (nothing goes to the alive recipients either — so a typo does not slip through half-succeeded).
     GroupNotFound { name: String },
     /// The **final recipient set** (expansion ∪ explicit targets) is empty → `GROUP_EMPTY` (ADR-0114 decision 3 — judged on the set after
@@ -267,7 +267,7 @@ pub struct ProfileDeletedOutcome {
 ///   "actually plugged in the envelope bytes". The host adapter copies its own write result into this shape.
 ///
 /// ★Why not take the host type directly★: that would make this crate know the host crate (agent), breaking full mutual
-///   ignorance. All four fields are pure scalars, so the boundary conversion costs a single copy (ADR-0110 rationale).
+///   ignorance. All four fields are pure scalars, so the boundary conversion costs a single copy (ADR-0110 Rationale).
 /// ★Meaning (observation correlation — ADR-0088)★: `msg_uuid` is the replay-dedup key the recipient session assigned to this user turn,
 ///   and `epoch` is the generation of the incarnation that **executed** the write (not a resolution-time snapshot — that asymmetry
 ///   lets a mid-flight epoch race be asserted from the record alone).
@@ -287,10 +287,10 @@ pub struct InjectReceipt {
 ///   the service asks the host's control plane: ① the envelope format to use now ② recording a delivery observation record.
 ///
 /// ★Why only these two (measured basis)★: before the split the service held the daemon's whole `ControlRegistry`, but the actual
-///   calls were only `envelope_format()` and `record_delivery()` (ADR-0110 rationale). With the port trimmed to the surface actually used,
+///   calls were only `envelope_format()` and `record_delivery()` (ADR-0110 Rationale). With the port trimmed to the surface actually used,
 ///   a future host (a standalone mail service with no agent manager at all) has only two things to implement.
 /// ★fail-open property★: both methods are **optional features** — the format has a default (Xml) and observation is a no-op
-///   in the production daemon. Delivery goes through even if the implementation does nothing (ADR-0110 impact §"turn observation and envelope
+///   in the production daemon. Delivery goes through even if the implementation does nothing (ADR-0110 Impact §"turn observation and envelope
 ///   format are optional").
 /// ★Out-of-lock call contract★: the same as `DeliveryPort` — it is called only **with the messaging lock released**.
 // ADR-0110
@@ -569,7 +569,7 @@ impl MessagingService {
         self
     }
 
-    /// ★The **single query point** of "is this recipient in a turn right now" (ADR-0121 §impact invariant · load-bearing)★.
+    /// ★The **single query point** of "is this recipient in a turn right now" (ADR-0121 §Impact invariant · load-bearing)★.
     ///
     /// The idle gate applies **only to backends whose turn boundary can be observed** (ADR-0116 decision 7). It bundles the class decision
     /// (`turn_signal`) and the actual busy lookup **inside one function**, making it impossible for decision points to use different predicates —
@@ -601,7 +601,7 @@ impl MessagingService {
     ///   - `body`: the **unwrapped** body (envelope assembly is wrap_message at injection time — the single wrap point).
     ///
     /// ★Return★: N per-recipient result rows (`results[]`, spec §6) or a **send-level bounce** (`SendReject` — only address-space
-    ///   errors and id collisions. Zero side effects). **Even if every recipient fails it is `Ok(전 행 failed)` (all rows failed)** — it is not escalated to a whole bounce
+    ///   errors and id collisions. Zero side effects). **Even if every recipient fails it is `Ok(all rows failed)`** — it is not escalated to a whole bounce
     ///   (a single missing recipient is no exception either: the answer is one `failed` row, not an `error` — spec §5 partial progress).
     ///
     /// ★Response vocabulary★: if the drain **actually injected this letter, `delivered`**; if it could not confirm, `pending`
@@ -612,7 +612,7 @@ impl MessagingService {
     ///   With one pass, the first recipient's parked item would fix an **incomplete `to`**, and the envelope would diverge from later deliveries.
     ///
     /// ★Reply contract (spec §3 · ADR-0111 decision 5)★: if `meta.request`, a contract is opened **for each accepted recipient** (key =
-    ///   `(msg_id, 수신자 id)` (msg_id, recipient id) — an asleep recipient too uses its profile id · ADR-0309). That open decision finishes **before enqueue**
+    ///   `(msg_id, recipient id)` — an asleep recipient too uses its profile id · ADR-0309). That open decision finishes **before enqueue**
     ///   — deferring it would deliver a request with no tracking (spec §3 item 5).
     ///   If `meta.reply_to`, once the send is accepted the contract is closed by strict matching on the replier basis (delivery is unaffected even if this fails).
     // ADR-0111 (multi-recipient fan-out · absence bounce · partial progress)
@@ -635,20 +635,20 @@ impl MessagingService {
         //   must not diverge per entrance (entrance-agnostic); instead a debug build blows up a wiring mistake.
         debug_assert!(
             !(meta.request && meta.reply_to.is_some()),
-            "ingress가 유일 검증자 — request와 reply_to는 상호배타(spec §6)"
+            "ingress is the only validator — request and reply_to are mutually exclusive (spec §6)"
         );
         debug_assert_eq!(
             meta.reply_by.is_some(),
             meta.reply_by_raw.is_some(),
-            "reply_by 는 파싱값과 표기 원본을 쌍으로 나른다(SendMeta)"
+            "reply_by carries the parsed value and the original notation as a pair (SendMeta)"
         );
         debug_assert!(
             meta.to_attr.is_none(),
-            "봉투 to 는 전 수신자 수용 판정 뒤 handle_send 가 1회 확정한다(spec §1)"
+            "the envelope to is fixed once by handle_send after the acceptance decision of every recipient (spec §1)"
         );
         debug_assert!(
             !to.is_empty(),
-            "빈 수신자 목록은 입구가 INVALID_SEND_ARGS 로 반려한다(spec §6)"
+            "an empty recipient list is bounced by the entrance with INVALID_SEND_ARGS (spec §6)"
         );
 
         // 1) One decision-source snapshot (outside the lock).
@@ -678,7 +678,7 @@ impl MessagingService {
             //   ★The remaining window: "the same fresh id drawn concurrently" — the **decision that rejected full reservation**★ This check catches only
             //   collisions with ids already in the ledger. A window remains where two sends draw the same value at once and both pass, but
             //   ① probability = an identical value within a microsecond window in a 36^8 (2.8×10^12) space ② damage = history record aliasing
-            //   (delivery/contract keys are `(msg_id, 수신자)` (msg_id, recipient), so with different recipients they do not overwrite each other) ③ the probability of a bug in
+            //   (delivery/contract keys are `(msg_id, recipient)`, so with different recipients they do not overwrite each other) ③ the probability of a bug in
             //   reservation lifecycle wiring is far larger than that. So only the check is done, with no reservation.
             if st.ledger.msg_id_in_use(msg_id) {
                 return Err(SendReject::IdCollision);
@@ -737,7 +737,7 @@ impl MessagingService {
                                 Some(rc),
                             ))
                         }
-                        // Recipients were already de-duplicated in the resolution step, so a duplicate `(id, 수신자)` (id, recipient) is unreachable.
+                        // Recipients were already de-duplicated in the resolution step, so a duplicate `(id, recipient)` is unreachable.
                         OpenOutcome::DuplicateId => duplicate_contracts.push(r.name().to_string()),
                         OpenOutcome::Full => {
                             st.ledger.record_with_expected(
@@ -828,7 +828,7 @@ impl MessagingService {
                         contract,
                         ..
                     } => (*recipient_id, contract.take()),
-                    _ => unreachable!("park_targets 는 Park 만 담는다"),
+                    _ => unreachable!("park_targets holds only Park"),
                 };
                 let r = &addressing.recipients[i];
                 match park_into(
@@ -888,7 +888,7 @@ impl MessagingService {
                 tracing::error!(
                     msg_id = %msg_id,
                     recipient = %name,
-                    "회신 계약 키 (msg_id, 수신자) 중복 — 수신자 중복 제거가 어긋났다는 배선 결함 신호(ADR-0111 결정 5)"
+                    "reply contract key (msg_id, recipient) duplicated — a wiring defect signal that recipient de-duplication went wrong (ADR-0111 decision 5)"
                 );
             }
 
@@ -954,7 +954,7 @@ impl MessagingService {
                     planned_msg_id = %r.request_id,
                     to = %r.recipient,
                     new_msg_id = %msg_id,
-                    "은퇴 예정 표시했던 계약이 커밋 시점에 이미 없었다 — 은퇴는 일어나지 않았다(상한 압력이 한 번 덜 풀렸다)"
+                    "a contract marked for retirement was already gone at commit time — no retirement happened (cap pressure was relieved one time less)"
                 );
             }
 
@@ -992,7 +992,7 @@ impl MessagingService {
                     }
                     (None, ReplyDisposition::NoOp) => tracing::debug!(
                         in_reply_to,
-                        "회신이 일시 사유(보관함 가득·동명)로 실패 — 계약은 **오픈 유지**(무동작). 재시도가 정상 경로로 닫는다(spec §3 항목 7-④)"
+                        "reply failed for a temporary reason (mailbox full · same name) — the contract **stays open** (no-op). A retry closes it on the normal path (spec §3 item 7-④)"
                     ),
                     // ★An accepted row exists but the in-lock close did not happen = a wiring defect★: every accept branch goes through
                     //   `close_in_lock`, so it is unreachable. It is not passed over silently but recorded (the outcome would be a deadline
@@ -1000,7 +1000,7 @@ impl MessagingService {
                     (None, ReplyDisposition::Accepted) => tracing::error!(
                         in_reply_to,
                         replier = %sender_name,
-                        "회신이 수용됐는데 계약 닫기가 임계구역에서 일어나지 않았다 — 수용 갈래 배선 누락(리뷰 fix D2)"
+                        "the reply was accepted but closing the contract did not happen in the critical section — accept-branch wiring missing (review fix D2)"
                     ),
                 }
             }
@@ -1049,22 +1049,22 @@ impl MessagingService {
             ReplyFailOutcome::Failed => tracing::info!(
                 in_reply_to,
                 replier = %replier_name,
-                "회신이 도달 불가 확정(요청자 이름이 어디에도 없음) — 계약을 reply_failed 로 실패 종결(오픈 목록·기한 스윕·512 계수에서 제거, 이력 잔존 — ADR-0116 결정 2)"
+                "reply confirmed unreachable (the requester name exists nowhere) — contract terminated as failed with reply_failed (removed from the open list · deadline sweep · 512 count, history kept — ADR-0116 decision 2)"
             ),
             ReplyFailOutcome::NoMatch => tracing::debug!(
                 in_reply_to,
                 replier = %replier_name,
-                "reply_to 가 이 회신자의 오픈 계약을 가리키지 않음 — 종결할 계약 없음(정상 경로, spec §3 항목 7-②)"
+                "reply_to does not point to an open contract of this replier — no contract to terminate (normal path, spec §3 item 7-②)"
             ),
             ReplyFailOutcome::AlreadyClosed => tracing::debug!(
                 in_reply_to,
                 replier = %replier_name,
-                "이미 종결된 계약 — 되돌리지 않는다(no-op, spec §3 항목 7-③/7-④)"
+                "contract already terminated — not reverted (no-op, spec §3 items 7-③/7-④)"
             ),
             ReplyFailOutcome::GuardHeld => tracing::debug!(
                 in_reply_to,
                 replier = %replier_name,
-                "잠정·은퇴 예정 표시 계약이라 실패 종결을 적용하지 않음 — 수명은 그 가드 소유(ADR-0118 결정 3, 무동작)"
+                "contract marked provisional·retiring, so failure termination is not applied — its lifetime is owned by that guard (ADR-0118 decision 3, no-op)"
             ),
         }
     }
@@ -1085,7 +1085,7 @@ impl MessagingService {
     /// ★The cleanup also sweeps by id — so there is no name-axis gate (ADR-0309 decision 6)★: targets ① (parked items addressed to that id) and
     ///   ② (open contracts where that id is the requester) are both found by id. The share of a **different** agent with the same name (a live duplicate · an agent that
     ///   newly took the old name) has a different key and is not touched, and the share accumulated under a pre-rename name is caught without omission. Formerly
-    ///   contracts were deleted by name and 「그 이름을 쥔 산 세션이 있나」 (is there a live session holding that name) was asked as a second gate (review fix N1). ★Do not
+    ///   contracts were deleted by name and 「is there a live session holding that name」 was asked as a second gate (review fix N1). ★Do not
     ///   revive that gate★: if a live duplicate exists, even the deleted profile's share is skipped wholesale and left to drain away via TTL.
     /// ★Two things it does★: ① close **all parked items** addressed to that profile id as `failed` + `RECIPIENT_DELETED` (ledger terminal +
     ///   lookup hint — it disappears only from the queue and the history stays, so the sender sees the reason via `eg_messages{id}`. The "never
@@ -1106,7 +1106,7 @@ impl MessagingService {
             tracing::debug!(
                 deleted = %name,
                 profile = %profile_id,
-                "프로필 삭제 정리 건너뜀 — 그 프로필의 세션이 아직 살아 있다(트리 항목만 지운 상태). 파킹분·계약은 그대로 두고 idle 전이 시 정상 배달된다(spec §5)"
+                "profile deletion cleanup skipped — that profile's session is still alive (only the tree item was removed). Parked items·contracts are left as is and delivered normally on the idle transition (spec §5)"
             );
             return ProfileDeletedOutcome {
                 skipped_live: true,
@@ -1147,7 +1147,7 @@ impl MessagingService {
             tracing::error!(
                 deleted = %name,
                 count = illegal,
-                "삭제 정리: 큐에 있던 항목의 장부 상태가 pending 이 아니었다 — 큐↔장부 회계 어긋남(배선 결함 신호)"
+                "deletion cleanup: the ledger state of a queued item was not pending — queue↔ledger accounting mismatch (wiring defect signal)"
             );
         }
         if !purged.is_empty() || !contracts.failed.is_empty() {
@@ -1156,14 +1156,14 @@ impl MessagingService {
                 parked_failed = purged.len(),
                 contracts_failed = contracts.failed.len(),
                 guard_held = contracts.guard_held,
-                "프로필 삭제 정리 — 파킹분을 RECIPIENT_DELETED 로 종결하고 그 프로필이 요청자인 오픈 계약을 reply_failed 로 종결(ADR-0116 결정 3 · ADR-0309 결정 6)"
+                "profile deletion cleanup — terminated parked items with RECIPIENT_DELETED and terminated open contracts whose requester is that profile with reply_failed (ADR-0116 decision 3 · ADR-0309 decision 6)"
             );
         }
         if contracts.guard_held > 0 {
             tracing::debug!(
                 deleted = %name,
                 held = contracts.guard_held,
-                "삭제 정리: 잠정·은퇴 예정 표시 계약은 건드리지 않았다(수명 = 가드 소유, ADR-0118 결정 3). 재발화 없음 — 잔여는 TTL 소관(spec §5)"
+                "deletion cleanup: contracts marked provisional·retiring were not touched (lifetime = owned by the guard, ADR-0118 decision 3). No re-firing — the remainder is TTL's job (spec §5)"
             );
         }
         ProfileDeletedOutcome {
@@ -1236,7 +1236,7 @@ impl MessagingService {
         let _ = self.drain_queue(recipient, None);
     }
 
-    /// ★One injection code — this function is that one (invariant · ADR-0125 §impact · load-bearing)★: injects the parked items
+    /// ★One injection code — this function is that one (invariant · ADR-0125 §Impact · load-bearing)★: injects the parked items
     ///   addressed to a recipient id **in a bulk, oldest first**.
     ///   ★Making a send-only injection code separately violates this decision★ — that is the "two paths" defect 0124/0125 removed, and
     ///   the moment it revives, ordering devices like seat reservation and the joining decision become necessary again.
@@ -1424,7 +1424,7 @@ impl MessagingService {
         let Some((flight, batch)) = drained_or_deferred else {
             tracing::debug!(
                 recipient = %recipient,
-                "드레인 유예: 같은 수신자 앞 배치가 아직 주입 중(in-flight) — 드레인 없이 물러남, 정산 시 재-도어벨(round-7 · ADR-0125)"
+                "drain deferred: a previous batch to the same recipient is still being injected (in-flight) — backing off without draining, doorbell again at settlement (round-7 · ADR-0125)"
             );
             return report;
         };
@@ -1443,14 +1443,14 @@ impl MessagingService {
             tracing::debug!(
                 recipient = %recipient,
                 parked = target_deferred,
-                "드레인 유예(타깃 축): 이 세션의 앞 배치가 아직 타깃을 쥐고 있음 — 배치 되돌림, 정산 시 재-도어벨"
+                "drain deferred (target axis): a previous batch of this session still holds the target — batch put back, doorbell again at settlement"
             );
         }
         if no_target_kept > 0 {
             tracing::debug!(
                 recipient = %recipient,
                 keeping = no_target_kept,
-                "flush skip: 그 id 의 에이전트가 지금 로스터에 없다(잠듦·죽음) — 파킹 유지, 같은 id 가 다시 뜨면 등장 flush 가 연다(ADR-0309)"
+                "flush skip: no agent with that id is in the roster now (asleep·dead) — kept parked, the appearance flush opens it when the same id comes up again (ADR-0309)"
             );
         }
         if let Some((epoch, parked)) = busy_skipped {
@@ -1458,7 +1458,7 @@ impl MessagingService {
                 recipient = %recipient,
                 epoch,
                 parked,
-                "flush skip: 수신자가 턴 진행 중 — 배치 미시작(파킹 유지, 턴 종료 통지가 재시도)"
+                "flush skip: the recipient is in a turn — batch not started (kept parked, the turn-end notice retries)"
             );
         }
 
@@ -1544,7 +1544,7 @@ impl MessagingService {
                         tracing::warn!(
                             recipient = %recipient,
                             remaining = remaining_count,
-                            "메시지 드레인 중 inject 실패/거부 — 남은 배치 재파킹(무손실 restore_ordered, ADR-0103/0104): {e}"
+                            "inject failed/refused during message drain — re-parking the rest of the batch (lossless restore_ordered, ADR-0103/0104): {e}"
                         );
                         report.caller_inject_error = Some(e);
                         break;
@@ -1636,7 +1636,7 @@ impl MessagingService {
             tracing::error!(
                 msg_id = %msg_id,
                 recipient_id = %recipient_id,
-                "정산되지 않은 계약 예약을 sweep 이 회수 — 발송 경로에 커밋/롤백 누락이 있다(훅 없는 시험 빌드면 그 스레드의 패닉일 수도 — F1 보증 계층)"
+                "sweep reclaimed an unsettled contract reservation — the send path is missing a commit/rollback (in a test build without the hook it may be that thread's panic — F1 guarantee layer)"
             );
         }
 
@@ -1666,7 +1666,7 @@ impl MessagingService {
             return;
         }
         for d in due {
-            // The spec §1 notice template (a Korean-language contract — changing the wording diverges from the priming and acceptance criteria).
+            // The spec §1 notice template (English since ADR-0383; the S18 spec §1 example keeps the old wording).
             //   The deadline notation uses **the sender's original** as is (fix 6 — so it does not diverge from the envelope `reply-by`).
             // ★The `[engram]` prefix = a mark of the sender origin (user request 2026-07-26)★: the structural signal that `<notice>` has no `from`
             //   alone can leave the receiving LLM missing "who sent this" (when it did not read the priming or the envelope is
@@ -1674,7 +1674,7 @@ impl MessagingService {
             //   reads even without the priming. ★It is not a parsing contract★: it is a label for human/LLM readability, and machine decisions still use the tag shape
             //   (`<notice>` · no `from`) as canonical (the code never reads this prefix back).
             let body = format!(
-                "[engram] 요청 {} 기한({}) 초과 — {} 회신 없음",
+                "[engram] request {} deadline ({}) exceeded — no reply from {}",
                 d.request_id, d.reply_by_raw, d.recipient
             );
             self.deliver_notice(&d, &body);
@@ -1711,7 +1711,7 @@ impl MessagingService {
         if closed_since_collection {
             tracing::debug!(
                 request_id = %due.request_id,
-                "기한 초과 통지 취소 — 산출 후 파킹 전에 회신이 도착해 계약이 닫힘(spec §3)"
+                "deadline notice cancelled — a reply arrived after computation and before parking, closing the contract (spec §3)"
             );
             return;
         }
@@ -1722,7 +1722,7 @@ impl MessagingService {
                 collided = %collided,
                 replacement = %drawn.id,
                 still_colliding = drawn.still_colliding,
-                "notice id 충돌 — 새 id 로 1회 재시도(ADR-0103 · 사실상 불가한 경로라 난수/장부 배선을 의심할 것)"
+                "notice id collision — retrying once with a new id (ADR-0103 · a practically impossible path, so suspect the random/ledger wiring)"
             );
         }
         let notice_id = drawn.id;
@@ -1813,7 +1813,7 @@ impl MessagingService {
             msg_id = %msg_id,
             entrance = ?entrance,
             bytes = wrapped.len(),
-            "메시징 배달(delivered, ADR-0103/0104)"
+            "messaging delivered (delivered, ADR-0103/0104)"
         );
     }
 
@@ -1850,7 +1850,7 @@ impl MessagingService {
             to = %target.id,
             to_name = %target.name,
             msg_id = %msg_id,
-            "메시징 주입 실패 — 파킹으로 전환(무손실): {err}"
+            "messaging inject failed — switching to parking (lossless): {err}"
         );
     }
 
@@ -1966,7 +1966,7 @@ impl MessagingService {
         st.mailbox.len(recipient)
     }
 
-    /// The sum of all recipient queue items — for asserting 「어느 큐에도 안 들어갔다」 (it did not go into any queue) (a failure row did not create a ghost queue).
+    /// The sum of all recipient queue items — for asserting 「it did not go into any queue」 (a failure row did not create a ghost queue).
     #[cfg(any(test, feature = "test-harness"))]
     pub fn parked_total_for_test(&self) -> usize {
         let st = self.state.lock().expect("messaging state poisoned");
@@ -2257,7 +2257,7 @@ struct DrainReport {
     ///   TTL. The conditions and scope are canonical in the residual item of `deferred_by_target`, and the production daemon has no such
     ///   branch (the hook ends it — ADR-0292).
     retreated: bool,
-    /// If it was deferred by the idle gate, `Some(그 바쁨 사유)` (Some of that busy reason) (a backend with a turn signal is busy — in a turn · waiting for user input ·
+    /// If it was deferred by the idle gate, `Some(busy reason)` (a backend with a turn signal is busy — in a turn · waiting for user input ·
     ///   stopped after an error), otherwise `None`. The value is used by `pending_hint` to choose the hint wording (ADR-0231).
     gated: Option<BusyReason>,
     /// ★Injection failure reason★ — both the basis for the no-own-doorbell decision and the source of the response reason wording.
@@ -2415,20 +2415,20 @@ impl Drop for Reservation<'_> {
                 tracing::error!(
                     msg_id = %self.msg_id,
                     recipient_id = %self.recipient_id,
-                    "정산되지 않은 계약 예약을 Drop 에서 롤백 — 호출 경로에 커밋/롤백 누락이 있다(H1)"
+                    "rolled back an unsettled contract reservation in Drop — the call path is missing a commit/rollback (H1)"
                 );
             }
             Err(_) => tracing::error!(
                 msg_id = %self.msg_id,
                 recipient_id = %self.recipient_id,
-                "정산되지 않은 계약 예약을 롤백하지 못함(락 보유 중이거나 poison) — 잠정 계약과 은퇴 표시가 남는다(H1)"
+                "could not roll back an unsettled contract reservation (lock held or poison) — the provisional contract and the retirement mark remain (H1)"
             ),
         }
         // ★Blow up **after** the rollback★: reversing the order lets the panic block recovery so the test cannot observe "is the state intact when settlement is forgotten"
         //   (and in release there is no debug_assert, leaving only recovery — the same code path).
         debug_assert!(
             std::thread::panicking(),
-            "회신 계약 예약이 정산 없이 소멸했다 — commit/rollback 중 하나를 반드시 거쳐야 한다(H1)"
+            "a reply contract reservation vanished without settlement — it must go through either commit or rollback (H1)"
         );
     }
 }
@@ -2547,12 +2547,12 @@ struct Addressing {
 /// ★Row order = deterministic (pinned by tests — spec §5)★: ① the **explicit tokens in the order written** in the input, ② then
 ///   the `@`address **expansion results in name lexicographic order**. Dedup **keeps the one that appeared first** (explicit targets
 ///   always precede expansion results, so an overlapping recipient's row position follows its explicit position).
-/// ★`@`address error = whole send-level bounce (ADR-0114 decision 3)★: an `@이름` (an @name) other than `@all`, or a rule violation, is
+/// ★`@`address error = whole send-level bounce (ADR-0114 decision 3)★: an `@name` other than `@all`, or a rule violation, is
 ///   `GROUP_NOT_FOUND` (even with a mixed `to`, nothing goes to the remaining recipients). **If the final set is empty**
 ///   `GROUP_EMPTY` — decided not per element but by the result of expansion ∪ explicit targets.
 /// ★Sender exclusion in expansion (spec §4 — **the canonical source is the spec, not ADR-0111**)★: both vocabularies mean "everyone but me".
 ///   ADR-0111 decision 4 has no such wording, so do not look for it there — omit it and the sender receives their own broadcast.
-///   **A direct-target self-send is delivered as is** (the exclusion applies only to expansion), so `["@all", "<자기이름>"]` (the sender's own name) sends
+///   **A direct-target self-send is delivered as is** (the exclusion applies only to expansion), so `["@all", "<own-name>"]` (the sender's own name) sends
 ///   1 row to oneself.
 // ADR-0111 (group = a resolution macro · joining multiple recipients)
 // ADR-0114 (@address error layer · GROUP_EMPTY = the final set)
@@ -2948,7 +2948,7 @@ struct RetirementLog {
     phantom: Vec<RetiredContract>,
 }
 
-/// ★Test observation surface for retirement metering (F5)★ — the `(계약 msg_id, 수신자 id)` (contract msg_id, recipient id) that `log_contract_retirements` actually reported.
+/// ★Test observation surface for retirement metering (F5)★ — the `(contract msg_id, recipient id)` that `log_contract_retirements` actually reported.
 ///
 /// Without a log-capture harness (tracing subscriber) it looks only at **whether the call happened**. What is observed is not the log wording but
 /// **whether that call remains after the outcome loop** (the M1 regression axis).
@@ -2997,7 +2997,7 @@ fn log_contract_retirements(new_msg_id: &str, retired: &[RetiredContract]) {
             to_id = %r.recipient_id,
             age_secs = r.age.as_secs(),
             new_msg_id = %new_msg_id,
-            "미회신 계약 상한 압력 — 가장 오래된 은퇴 가능 계약을 내보내고 새 request 수용(ADR-0108)"
+            "unreplied contract cap pressure — evicting the oldest retirable contract and accepting the new request (ADR-0108)"
         );
     }
 }
@@ -3081,17 +3081,17 @@ fn log_reply_close(outcome: ReplyOutcome, in_reply_to: &str, replier_name: &str)
         ReplyOutcome::ClosedHistoryAnomaly { from } => tracing::warn!(
             in_reply_to,
             history_status = ?from,
-            "회신으로 계약은 닫혔으나 이력이 Replied 로 전이 못 함(불법 간선) — 계약 정본은 추적, 이력만 미반영(ADR-0103)"
+            "the reply closed the contract but the history could not transition to Replied (illegal edge) — the contract's source of truth is the tracking entry; only the history is not updated (ADR-0103)"
         ),
         ReplyOutcome::NoMatch => tracing::debug!(
             in_reply_to,
             replier = %replier_name,
-            "reply_to 가 이 회신자의 오픈된 request 를 가리키지 않음 — 메시지는 정상 배달, 닫힌 계약 없음(spec §3 항목 7-②. 계약은 회신자 id 로만 고른다 — ADR-0309)"
+            "reply_to does not point to an open request of this replier — message delivered normally, no contract closed (spec §3 item 7-②. Contracts are picked only by replier id — ADR-0309)"
         ),
         ReplyOutcome::AlreadyClosed => tracing::debug!(
             in_reply_to,
             replier = %replier_name,
-            "이미 닫힌 계약에 대한 추가 회신 — 메시지는 정상 배달, no-op(spec §3 항목 7-③)"
+            "an additional reply to an already closed contract — message delivered normally, no-op (spec §3 item 7-③)"
         ),
     }
 }
@@ -3138,7 +3138,7 @@ fn log_evicted_transitions(evicted: &[EvictedTransition]) {
             msg_id = %e.msg_id,
             recipient = %e.recipient,
             intended_status = ?e.intended,
-            "record evicted before terminal transition — 종점(만료/회수)은 실제로 일어났으나 이력 링버퍼에서 이미 밀려나 장부에 남길 레코드가 없음(ledger HISTORY_CAPACITY)"
+            "record evicted before terminal transition — the terminal (expiry/reclaim) really happened but the record was already pushed out of the history ring buffer, so there is nothing to leave in the ledger (ledger HISTORY_CAPACITY)"
         );
     }
 }
@@ -3224,7 +3224,7 @@ impl ParkSideEffects {
                 recipient,
                 retired = self.retired_expired.len(),
                 msg_ids = ?self.retired_expired,
-                "park retire: 회수 시점에 이미 TTL(mailbox PARK_TTL) 초과 — sweep(60s 주기)이 아직 안 걷었을 뿐이라 장부 어휘는 skipped 가 아니라 expired(spec §5 · F3)"
+                "park retire: TTL (mailbox PARK_TTL) already exceeded at reclaim time — the sweep (60s period) just has not collected it yet, so the ledger word is expired, not skipped (spec §5 · F3)"
             );
         }
         if !self.retired_notices.is_empty() {
@@ -3232,7 +3232,7 @@ impl ParkSideEffects {
                 recipient,
                 retired = self.retired_notices.len(),
                 msg_ids = ?self.retired_notices,
-                "park retire: notice 레인 상한(mailbox NOTICE_CAP) 초과 — 가장 오래된 통지를 회수하고 장부 skipped(신규 통지는 항상 수용 — round-6)"
+                "park retire: notice lane cap (mailbox NOTICE_CAP) exceeded — reclaiming the oldest notice and ledger skipped (new notices are always accepted — round-6)"
             );
         }
         log_evicted_transitions(&self.evicted);
@@ -3630,7 +3630,7 @@ mod tests {
                 live_ids: StdMutex::new(Vec::new()),
             }
         }
-        /// Puts `tid(이름)` (tid of the name) as the id per name — launching `live` with the same name means that agent woke up.
+        /// Puts `tid(name)` as the id per name — launching `live` with the same name means that agent woke up.
         fn set_dormant(&self, names: &[&str]) {
             *self.dormant.lock().unwrap() = names
                 .iter()
@@ -3841,14 +3841,16 @@ mod tests {
                     meta,
                 )
                 .map_err(SendFail::Reject)?;
-            assert_eq!(rows.len(), 1, "단일 수신자 발송은 행이 정확히 1개다");
+            assert_eq!(rows.len(), 1, "a single-recipient send has exactly 1 row");
             let row = &rows[0];
             match row.status {
                 SendStatus::Delivered => Ok(SendOutcome::Delivered),
                 SendStatus::Pending => Ok(SendOutcome::Parked {
                     hint: row.hint.clone().unwrap_or_default(),
                 }),
-                SendStatus::Failed => Err(SendFail::Row(row.code.expect("실패 행은 code 필수"))),
+                SendStatus::Failed => Err(SendFail::Row(
+                    row.code.expect("a failure row requires code"),
+                )),
             }
         }
     }
@@ -3876,11 +3878,11 @@ mod tests {
             // It first goes through **the same wiring guard** as the production entry point (so the bypass path does not loosen that contract).
             debug_assert!(
                 !(meta.request && meta.reply_to.is_some()),
-                "ingress가 유일 검증자 — request와 reply_to는 상호배타(spec §6)"
+                "ingress is the only validator — request and reply_to are mutually exclusive (spec §6)"
             );
             debug_assert!(
                 meta.to_attr.is_none(),
-                "봉투 to 는 전 수신자 수용 판정 뒤 handle_send 가 1회 확정한다(spec §1)"
+                "the envelope to is fixed once by handle_send after the acceptance decision of every recipient (spec §1)"
             );
             // ★Look at the roster **first** (load-bearing)★: if it ran the production path and then looked at the failure row and reverted, the ledger terminal row (`failed`)
             //   left by that bounce would overlap with the queue item and a lookup would return 2 rows. Only when absence is certain
@@ -3990,7 +3992,7 @@ mod tests {
         live_with_id(tid(name), name)
     }
 
-    /// A live agent — random id. For same-name twins · 「같은 이름의 다른 에이전트」 (a different agent with the same name) scenarios.
+    /// A live agent — random id. For same-name twins · 「a different agent with the same name」 scenarios.
     fn live_distinct(name: &str) -> (PeerId, LiveAgent) {
         live_with_id(PeerId::new_v4(), name)
     }
@@ -4149,12 +4151,12 @@ mod tests {
         assert_eq!(
             svc.ledger_statuses("m1"),
             vec![DeliveryStatus::Delivered],
-            "즉시 주입 = delivered(ADR-0104)"
+            "immediate inject = delivered (ADR-0104)"
         );
         assert_eq!(
             port.injected_bodies(),
             vec![r#"<message from="bob">hi</message>"#.to_string()],
-            "주입 = 현재 포맷(xml) 봉투"
+            "inject = envelope in the current format (xml)"
         );
     }
 
@@ -4174,15 +4176,15 @@ mod tests {
                 Entrance::Cli,
                 &SendMeta::default(),
             )
-            .expect("파킹은 반려 아님");
+            .expect("parking is not a bounce");
         assert!(
             matches!(out, SendOutcome::Parked { .. }),
-            "inject 실패 → 파킹"
+            "inject failure → parking"
         );
         assert_eq!(
             svc.ledger_statuses("m1"),
             vec![DeliveryStatus::Pending],
-            "inject 실패도 pending 장부(유실 금지)"
+            "an inject failure is a pending ledger entry too (no loss)"
         );
         assert_eq!(svc.parked_len(tid("alice")), 1);
     }
@@ -4202,38 +4204,39 @@ mod tests {
         port.set_roster(vec![me, tui]);
         port.fail_at(&[0]);
 
-        let out =
-            send_body(&svc, "m1", from, "alice", &["tui"], "묵은 편지").expect("파킹은 반려 아님");
+        let out = send_body(&svc, "m1", from, "alice", &["tui"], "old letter")
+            .expect("parking is not a bounce");
         assert_eq!(
             (out[0].status, out[0].code),
             (SendStatus::Pending, None),
-            "주입 실패 → 파킹(실패 행도, 조용한 유실도 아니다): {out:?}"
+            "inject failure → parking (neither a failure row nor a silent loss): {out:?}"
         );
         assert_eq!(svc.parked_len(tid("tui")), 1);
         assert_eq!(
             svc.ledger_statuses("m1"),
             vec![DeliveryStatus::Pending],
-            "장부도 pending 으로 남아야(유실 금지)"
+            "the ledger must stay pending too (no loss)"
         );
 
-        let second = send_body(&svc, "m2", from, "alice", &["tui"], "새 편지").expect("행 응답");
+        let second =
+            send_body(&svc, "m2", from, "alice", &["tui"], "new letter").expect("row response");
         assert_eq!(
             second[0].status,
             SendStatus::Delivered,
-            "적재 후 드레인이 묵은 것과 함께 냈다 = delivered(직발송이 아니라 큐를 거친 결과다): {second:?}"
+            "the drain after queueing sent it together with the old one = delivered (the result of going through the queue, not a direct send): {second:?}"
         );
         assert_eq!(
             port.injected_bodies(),
             vec![
-                r#"<message from="alice">묵은 편지</message>"#.to_string(),
-                r#"<message from="alice">새 편지</message>"#.to_string()
+                r#"<message from="alice">old letter</message>"#.to_string(),
+                r#"<message from="alice">new letter</message>"#.to_string()
             ],
-            "묵은 것(m1) → 새것(m2) 순으로 한 배치에 나갔다(오래된 순 — 뒤이은 발송의 드레인이 열었다)"
+            "went out in one batch in the order old (m1) → new (m2) (oldest first — the drain of the following send opened it)"
         );
         assert_eq!(
             svc.parked_len(tid("tui")),
             0,
-            "고립 없음 — 배치가 큐를 비웠다"
+            "nothing stranded — the batch emptied the queue"
         );
         assert_eq!(
             (svc.ledger_statuses("m1"), svc.ledger_statuses("m2")),
@@ -4241,7 +4244,7 @@ mod tests {
                 vec![DeliveryStatus::Delivered],
                 vec![DeliveryStatus::Delivered]
             ),
-            "둘 다 실제 주입 시점에 delivered"
+            "both delivered at the actual inject time"
         );
     }
 
@@ -4259,18 +4262,18 @@ mod tests {
         port.set_roster(vec![me, recv]);
         gate.set_busy(recv_id, 0);
 
-        for (id, body) in [("m1", "하나"), ("m2", "둘"), ("m3", "셋")] {
-            let out = send_body(&svc, id, from, "alice", &["recv"], body).expect("행 응답");
+        for (id, body) in [("m1", "one"), ("m2", "two"), ("m3", "three")] {
+            let out = send_body(&svc, id, from, "alice", &["recv"], body).expect("row response");
             assert_eq!(
                 out[0].status,
                 SendStatus::Pending,
-                "{id} 는 적재되고 드레인이 게이트에 걸린다: {out:?}"
+                "{id} is queued and the drain is caught by the gate: {out:?}"
             );
         }
         assert_eq!(
             svc.parked_msg_ids(tid("recv")),
             vec!["m1", "m2", "m3"],
-            "적재 순서 = 큐 순서(오래된 순)"
+            "queueing order = queue order (oldest first)"
         );
 
         gate.clear();
@@ -4279,13 +4282,13 @@ mod tests {
 
         assert_eq!(
             port.injected_bodies(),
-            vec![r#"<message from="alice">하나</message>"#.to_string()],
-            "실패 지점에서 배치가 끊긴다 — 그 뒤 항목은 쓰이지 않았다"
+            vec![r#"<message from="alice">one</message>"#.to_string()],
+            "the batch stops at the failure point — the items after it were not written"
         );
         assert_eq!(
             svc.parked_msg_ids(tid("recv")),
             vec!["m2", "m3"],
-            "실패 지점 이후는 나이 순서를 지킨 채 큐로 되돌아온다(TTL 연장 없음)"
+            "everything after the failure point returns to the queue keeping its age order (no TTL extension)"
         );
         assert_eq!(
             (
@@ -4298,13 +4301,13 @@ mod tests {
                 vec![DeliveryStatus::Pending],
                 vec![DeliveryStatus::Pending]
             ),
-            "앞부분은 delivered 로 남고(되돌리지 않는다) 나머지는 pending 유지"
+            "the front part stays delivered (not reverted) and the rest stays pending"
         );
     }
 
     #[test]
     fn an_overlapping_drain_retreats_with_pending_and_the_letter_still_goes_out_in_order() {
-        // ★spec §7 ⑦ · ADR-0125 §impact unverified ②★ — seat reservation was abolished, but the two properties it sealed remain:
+        // ★spec §7 ⑦ · ADR-0125 §Impact unverified ②★ — seat reservation was abolished, but the two properties it sealed remain:
         //   **no order inversion** and **no isolation (`parked_len == 0`)**.
         // The interleaving that reproduces it (the drain runs inside the send call, so this is a routine case):
         //   ① m1 enqueues, enters its own drain and stops inside inject (the batch is in-flight)
@@ -4328,43 +4331,51 @@ mod tests {
             if idx != 0 || !std::mem::replace(&mut *armed_h.lock().unwrap(), false) {
                 return;
             }
-            let second =
-                send_body(&svc_h, "m2", from, "alice", &["tui"], "새 편지").expect("행 응답");
+            let second = send_body(&svc_h, "m2", from, "alice", &["tui"], "new letter")
+                .expect("row response");
             *observed_h.lock().unwrap() = Some(second[0].clone());
         }));
         port.fail_at(&[0]);
 
-        let first =
-            send_body(&svc, "m1", from, "alice", &["tui"], "묵은 편지").expect("파킹은 반려 아님");
+        let first = send_body(&svc, "m1", from, "alice", &["tui"], "old letter")
+            .expect("parking is not a bounce");
         assert_eq!(first[0].status, SendStatus::Pending, "{first:?}");
-        let loser = observed.lock().unwrap().clone().expect("동시 발송 행");
+        let loser = observed
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("concurrent send row");
         assert_eq!(
             loser.status,
             SendStatus::Pending,
-            "겹친 드레인에서 물러난 쪽은 **보수적으로** pending 을 답한다(자기 편지의 주입 여부를 모른다)"
+            "the side that backed off from an overlapping drain answers pending **conservatively** (it does not know whether its letter was injected)"
         );
         assert!(
             loser.hint.unwrap_or_default().contains("at the same time"),
-            "그 pending 은 ㉯(확인 불가)여야 — ㉮(큐에 남음) 사유로 답하면 '안 갔다' 로 오독된다(spec §6)"
+            "that pending must be ㉯ (cannot confirm) — answering with the ㉮ (left in the queue) reason is misread as 'did not go' (spec §6)"
         );
         // Getting here without a manual flush is because the receipt holder echoes the backed-off side's doorbell
         //   (spec §7 ④ ㉡ — which occasion emitted it is exactly this assertion).
         assert_eq!(
             port.injected_bodies(),
             vec![
-                r#"<message from="alice">묵은 편지</message>"#.to_string(),
-                r#"<message from="alice">새 편지</message>"#.to_string()
+                r#"<message from="alice">old letter</message>"#.to_string(),
+                r#"<message from="alice">new letter</message>"#.to_string()
             ],
-            "배달 순서 = 적재 순서(m1 → m2). 겹침 가드가 없으면 m2 가 m1 을 앞지른다"
+            "delivery order = queueing order (m1 → m2). Without the overlap guard, m2 overtakes m1"
         );
-        assert_eq!(svc.parked_len(tid("tui")), 0, "고립 없음 — 큐가 비워졌다");
+        assert_eq!(
+            svc.parked_len(tid("tui")),
+            0,
+            "nothing stranded — the queue was emptied"
+        );
         assert_eq!(
             (svc.ledger_statuses("m1"), svc.ledger_statuses("m2")),
             (
                 vec![DeliveryStatus::Delivered],
                 vec![DeliveryStatus::Delivered]
             ),
-            "응답이 pending 이어도 장부는 실제 주입 시점에 delivered 다(두 축은 다르다 — spec §6)"
+            "even if the response is pending, the ledger is delivered at the actual inject time (the two axes differ — spec §6)"
         );
     }
 
@@ -4396,7 +4407,7 @@ mod tests {
                         .map(|n| {
                             let tag = format!("t{k}-{n}");
                             let out = send_body(&svc_h, &tag, from, "alice", &["tui"], &tag)
-                                .expect("행 응답");
+                                .expect("row response");
                             out[0].status
                         })
                         .collect::<Vec<_>>()
@@ -4405,37 +4416,40 @@ mod tests {
             .collect();
         let statuses: Vec<SendStatus> = handles
             .into_iter()
-            .flat_map(|h| h.join().expect("발신 스레드"))
+            .flat_map(|h| h.join().expect("sender thread"))
             .collect();
 
         assert!(
             statuses
                 .iter()
                 .all(|s| matches!(s, SendStatus::Delivered | SendStatus::Pending)),
-            "경합은 실패 행을 만들지 않는다(신원 축은 경합과 무관): {statuses:?}"
+            "a race does not create failure rows (the identity axis is unrelated to races): {statuses:?}"
         );
         assert_eq!(
             svc.parked_len(tid("tui")),
             0,
-            "고립 없음 — 큐가 끝내 비워졌다"
+            "nothing stranded — the queue was emptied in the end"
         );
 
         let bodies = port.injected_bodies();
         assert_eq!(
             bodies.len(),
             SENDERS * PER_SENDER,
-            "유실 0 · 중복 0 — 모든 편지가 정확히 한 번 나갔다"
+            "0 lost · 0 duplicated — every letter went out exactly once"
         );
         let order: Vec<(usize, usize)> = bodies
             .iter()
             .map(|b| {
-                let start = b.find('>').expect("여는 태그") + 1;
-                let end = b.rfind('<').expect("닫는 태그");
+                let start = b.find('>').expect("opening tag") + 1;
+                let end = b.rfind('<').expect("closing tag");
                 let (k, n) = b[start..end]
                     .trim_start_matches('t')
                     .split_once('-')
-                    .expect("태그 표기");
-                (k.parse().expect("발신자"), n.parse().expect("순번"))
+                    .expect("tag notation");
+                (
+                    k.parse().expect("sender"),
+                    n.parse().expect("sequence number"),
+                )
             })
             .collect();
         for k in 0..SENDERS {
@@ -4444,17 +4458,21 @@ mod tests {
                 .filter(|(s, _)| *s == k)
                 .map(|(_, n)| *n)
                 .collect();
-            assert_eq!(seen.len(), PER_SENDER, "발신자 {k} 의 편지가 전부 나가야");
+            assert_eq!(
+                seen.len(),
+                PER_SENDER,
+                "all of sender {k}'s letters must go out"
+            );
             assert!(
                 seen.windows(2).all(|w| w[0] < w[1]),
-                "발신자 {k} 가 적재한 순서가 배달에서 뒤집혔다 — 배치가 큐 앞머리를 건너뛰었다: {seen:?}"
+                "the order sender {k} queued was reversed in delivery — the batch skipped the head of the queue: {seen:?}"
             );
         }
     }
 
     #[test]
     fn the_cap_gate_applies_to_a_live_idle_recipient_too() {
-        // ★ADR-0125 §impact · spec §5 — wider surface of cap application★: **since every send passes the enqueue gate**, even a live
+        // ★ADR-0125 §Impact · spec §5 — wider surface of cap application★: **since every send passes the enqueue gate**, even a live
         //   recipient can get `MAILBOX_FULL` — **a design consequence, not a regression**. Do not revive the old contract ("with an empty queue +
         //   idle, even the 101st is injected immediately and is not a cap violation").
         // ★The narrow span is pinned too so it is not read as "it increases overall" (spec §5 correction)★: if the recipient is idle,
@@ -4467,42 +4485,44 @@ mod tests {
 
         // ① An idle recipient — the drain empties the queue every time.
         for i in 0..200 {
-            let out = send(&svc, &format!("idle{i}"), from, "boss", &["recv"]).expect("행 응답");
+            let out =
+                send(&svc, &format!("idle{i}"), from, "boss", &["recv"]).expect("row response");
             assert_eq!(
                 out[0].status,
                 SendStatus::Delivered,
-                "유휴 수신자에겐 cap 이 물리지 않는다(#{i}): {out:?}"
+                "the cap does not apply to an idle recipient (#{i}): {out:?}"
             );
         }
         assert_eq!(
             svc.parked_len(tid("recv")),
             0,
-            "큐가 비어 있으니 cap 분모도 0"
+            "the queue is empty, so the cap denominator is 0 too"
         );
 
         // ② Only in the span where the drain cannot run (in a turn) does the queue fill up to the cap.
         gate.set_busy(r_id, 0);
         for i in 0..100 {
-            let out = send(&svc, &format!("busy{i}"), from, "boss", &["recv"]).expect("행 응답");
+            let out =
+                send(&svc, &format!("busy{i}"), from, "boss", &["recv"]).expect("row response");
             assert_eq!(
                 out[0].status,
                 SendStatus::Pending,
-                "턴 중 = 큐에 남는다(#{i})"
+                "in a turn = stays in the queue (#{i})"
             );
         }
         assert_eq!(svc.parked_len(tid("recv")), 100);
 
         // ③ The next send is caught by the cap gate **even though the recipient is live**.
-        let over = send(&svc, "over", from, "boss", &["recv"]).expect("행 응답");
+        let over = send(&svc, "over", from, "boss", &["recv"]).expect("row response");
         assert_eq!(
             (over[0].status, over[0].code),
             (SendStatus::Failed, Some(FailCode::MailboxFull)),
-            "산 수신자도 cap 게이트를 지난다(직발송 우회 폐지 — ADR-0125): {over:?}"
+            "a live recipient also passes the cap gate (direct-send bypass removed — ADR-0125): {over:?}"
         );
         assert_eq!(
             svc.parked_len(tid("recv")),
             100,
-            "반려분은 큐에 안 들어간다"
+            "bounced items do not enter the queue"
         );
         assert_eq!(svc.ledger_statuses("over"), vec![DeliveryStatus::Failed]);
     }
@@ -4532,12 +4552,12 @@ mod tests {
         }));
         port.fail_at(&[0]);
 
-        send_body(&svc, "m1", from, "alice", &["tui"], "묵은 편지").expect("파킹");
+        send_body(&svc, "m1", from, "alice", &["tui"], "old letter").expect("park");
 
         assert_eq!(
             port.injected_bodies(),
-            vec![r#"<message from="alice">묵은 편지</message>"#.to_string()],
-            "물러났던 flush 가 정산 후 되울려져 재파킹분을 집어야 한다"
+            vec![r#"<message from="alice">old letter</message>"#.to_string()],
+            "the flush that backed off must be rung again after settlement and pick up the re-parked items"
         );
         assert_eq!(svc.parked_len(tid("tui")), 0);
         assert_eq!(svc.ledger_statuses("m1"), vec![DeliveryStatus::Delivered]);
@@ -4567,7 +4587,7 @@ mod tests {
                     ident(),
                     "s",
                     "tui",
-                    "덤",
+                    "extra",
                     Entrance::Mcp,
                     &SendMeta::default(),
                 )
@@ -4575,19 +4595,19 @@ mod tests {
             svc_h.flush_for(tui_id);
         }));
 
-        send_body(&svc, "m1", from, "alice", &["tui"], "내 편지").expect("행 응답");
+        send_body(&svc, "m1", from, "alice", &["tui"], "my letter").expect("row response");
 
         assert_eq!(
             svc.parked_len(tid("tui")),
             0,
-            "성공 갈래도 유예 표식을 갚아야 — 안 갚으면 m0 이 다음 사건까지 큐에 묶인다"
+            "the success branch must also pay back the deferral mark — otherwise m0 stays stuck in the queue until the next event"
         );
         assert_eq!(svc.ledger_statuses("m0"), vec![DeliveryStatus::Delivered]);
     }
 
     #[test]
     fn the_flush_gate_asks_the_same_predicate_the_send_path_asks() {
-        // ★ADR-0121 §impact — the gate predicate is defined in one place only★: if the send side decides "no gate for this class" and
+        // ★ADR-0121 §Impact — the gate predicate is defined in one place only★: if the send side decides "no gate for this class" and
         //   the flush side backs off on the gate, then because of the order guarantee **no one opens** the letter that joined the queue (delivery
         //   stops). So here it is sealed that the two sides call the same predicate (`gate_busy_reason`).
         // ★Assert with the gate set to busy★: the class with no turn signal must **not look at** that value —
@@ -4600,7 +4620,7 @@ mod tests {
         gate.set_busy(tui_id, 0);
 
         port.fail_at(&[0]);
-        let out = send(&svc, "m1", from, "alice", &["tui"]).expect("행 응답");
+        let out = send(&svc, "m1", from, "alice", &["tui"]).expect("row response");
         assert_eq!(out[0].status, SendStatus::Pending, "{out:?}");
         assert_eq!(svc.parked_len(tid("tui")), 1);
 
@@ -4609,7 +4629,7 @@ mod tests {
         assert_eq!(
             svc.ledger_statuses("m1"),
             vec![DeliveryStatus::Delivered],
-            "턴 신호 없는 수신자의 배치는 게이트가 busy 라 해도 나간다(발송측과 같은 술어)"
+            "the batch of a recipient without a turn signal goes out even if the gate says busy (the same predicate as the send side)"
         );
         assert_eq!(svc.parked_len(tid("tui")), 0);
     }
@@ -4642,11 +4662,11 @@ mod tests {
                 r#"<message from="sndr">body1</message>"#.to_string(),
                 r#"<message from="sndr">body2</message>"#.to_string(),
             ],
-            "flush = 오래된 순 개별 봉투 일괄 주입(ADR-0104)"
+            "flush = bulk inject of individual envelopes, oldest first (ADR-0104)"
         );
         assert_eq!(svc.ledger_statuses("m0"), vec![DeliveryStatus::Delivered]);
         assert_eq!(svc.ledger_statuses("m2"), vec![DeliveryStatus::Delivered]);
-        assert_eq!(svc.parked_len(tid("late")), 0, "flush 후 큐 비움");
+        assert_eq!(svc.parked_len(tid("late")), 0, "queue empty after flush");
     }
 
     #[test]
@@ -4672,7 +4692,7 @@ mod tests {
         assert_eq!(
             port.injected_bodies(),
             vec![r#"<message from="s">b0</message>"#.to_string()],
-            "실패 전(b0)만 주입"
+            "only the one before the failure (b0) injected"
         );
         assert_eq!(
             svc.ledger_statuses("m0"),
@@ -4682,17 +4702,17 @@ mod tests {
         assert_eq!(
             svc.parked_len(tid("late")),
             2,
-            "실패분+미시도분 재파킹(무손실)"
+            "failed + unattempted items re-parked (lossless)"
         );
         assert_eq!(
             svc.ledger_statuses("m1"),
             vec![DeliveryStatus::Pending],
-            "b1 재파킹 pending"
+            "b1 re-parked pending"
         );
         assert_eq!(
             svc.ledger_statuses("m2"),
             vec![DeliveryStatus::Pending],
-            "b2 재파킹 pending"
+            "b2 re-parked pending"
         );
         port.fail_at(&[]);
         svc.flush_for(late_id);
@@ -4703,9 +4723,9 @@ mod tests {
                 r#"<message from="s">b1</message>"#.to_string(),
                 r#"<message from="s">b2</message>"#.to_string(),
             ],
-            "재파킹분 재-flush 도 오래된 순 보존(b1→b2)"
+            "re-flush of re-parked items also keeps oldest-first (b1→b2)"
         );
-        assert_eq!(svc.parked_len(tid("late")), 0, "재-flush 후 큐 비움");
+        assert_eq!(svc.parked_len(tid("late")), 0, "queue empty after re-flush");
     }
 
     #[test]
@@ -4758,7 +4778,7 @@ mod tests {
         assert_eq!(
             port.injected_bodies(),
             vec![r#"<message from="s">b0</message>"#.to_string()],
-            "실패 전(b0)만 주입"
+            "only the one before the failure (b0) injected"
         );
         // ★Zero loss — but it does not exceed the cap either (expected value corrected in F1: 102 → 99)★. The old expected value was "the concurrent park
         //   fills in all the way to the cap (100) and the 2 re-parked items sit on top of it", and that is exactly the hole that grew the queue every cycle
@@ -4767,21 +4787,21 @@ mod tests {
         assert_eq!(
             svc.parked_len(tid("late")),
             MAILBOX_CAP_FOR_TEST - 1,
-            "재파킹분(b1,b2)은 유실되지 않고, 합계는 cap 을 넘지 않는다(97 동시 park + 2 재파킹)"
+            "the re-parked items (b1,b2) are not lost, and the total does not exceed the cap (97 concurrent park + 2 re-parked)"
         );
         assert!(
             svc.ledger_statuses("c99").is_empty(),
-            "in-flight 때문에 반려된 동시 발송은 장부에도 안 남는다(반려 = 저장 자체를 안 함)"
+            "a concurrent send bounced because of in-flight does not remain in the ledger either (bounce = not stored at all)"
         );
         assert_eq!(
             svc.ledger_statuses("m1"),
             vec![DeliveryStatus::Pending],
-            "b1 재파킹 pending(유령 아님)"
+            "b1 re-parked pending (not a ghost)"
         );
         assert_eq!(
             svc.ledger_statuses("m2"),
             vec![DeliveryStatus::Pending],
-            "b2 재파킹 pending(유령 아님)"
+            "b2 re-parked pending (not a ghost)"
         );
         // ★Order★
         port.set_on_inject(Arc::new(|_| {}));
@@ -4791,14 +4811,14 @@ mod tests {
         assert_eq!(bodies[0], r#"<message from="s">b0</message>"#);
         assert_eq!(
             bodies[1], r#"<message from="s">b1</message>"#,
-            "재파킹분이 동시 park 신규분보다 앞서야(FIFO 역전 방지)"
+            "re-parked items must come before new concurrent park items (prevents FIFO inversion)"
         );
         assert_eq!(bodies[2], r#"<message from="s">b2</message>"#);
         assert_eq!(
             bodies[3], r#"<message from="s">c0</message>"#,
-            "동시 park 신규분은 재파킹분 뒤"
+            "new concurrent park items come after the re-parked items"
         );
-        assert_eq!(svc.parked_len(tid("late")), 0, "재-flush 후 큐 비움");
+        assert_eq!(svc.parked_len(tid("late")), 0, "queue empty after re-flush");
     }
 
     /// A mirror of mailbox's private `MAILBOX_CAP` — the values must be fixed together.
@@ -4821,7 +4841,7 @@ mod tests {
                 Entrance::Mcp,
                 &SendMeta::default(),
             )
-            .expect("cap 이내 파킹");
+            .expect("parking within the cap");
         }
         assert_eq!(svc.parked_len(tid("full")), 100);
         let rej = svc
@@ -4834,13 +4854,17 @@ mod tests {
                 Entrance::Mcp,
                 &SendMeta::default(),
             )
-            .expect_err("cap 초과는 반려");
+            .expect_err("exceeding the cap is bounced");
         assert_eq!(rej, SendFail::Row(FailCode::MailboxFull));
-        assert_eq!(svc.parked_len(tid("full")), 100, "반려된 건 큐에 안 들어감");
+        assert_eq!(
+            svc.parked_len(tid("full")),
+            100,
+            "a bounced one does not enter the queue"
+        );
         // It is made visible to the sender at once as a bounce, so it is not left in the ledger.
         assert!(
             svc.ledger_statuses("over").is_empty(),
-            "cap 반려는 ledger 미기록"
+            "a cap bounce is not recorded in the ledger"
         );
     }
 
@@ -4865,9 +4889,13 @@ mod tests {
         assert_eq!(
             svc.ledger_statuses("m1"),
             vec![DeliveryStatus::Expired],
-            "sweep = pending→expired 장부 전이"
+            "sweep = pending→expired ledger transition"
         );
-        assert_eq!(svc.parked_len(tid("ghost")), 0, "만료분 큐에서 제거");
+        assert_eq!(
+            svc.parked_len(tid("ghost")),
+            0,
+            "expired items removed from the queue"
+        );
     }
 
     #[test]
@@ -4899,11 +4927,11 @@ mod tests {
         assert_eq!(
             svc.parked_len(tid("gone")),
             1,
-            "execution 시점 부재 → flush skip(파킹 유지)"
+            "absent at execution time → flush skip (kept parked)"
         );
         assert!(
             port.injected_bodies().is_empty(),
-            "죽은 대상엔 주입 안 함(finding 2)"
+            "no inject to a dead target (finding 2)"
         );
     }
 
@@ -4931,7 +4959,11 @@ mod tests {
         port.set_roster(vec![LiveAgent { epoch: 1, ..old }]);
         svc.flush_for(id);
 
-        assert_eq!(svc.parked_len(id), 0, "새 화신 배달로 큐 비움");
+        assert_eq!(
+            svc.parked_len(id),
+            0,
+            "queue emptied by delivery to the new incarnation"
+        );
         assert_eq!(svc.ledger_statuses("m1"), vec![DeliveryStatus::Delivered]);
         assert_eq!(port.injected_targets(), vec![id]);
         assert_eq!(
@@ -4959,7 +4991,11 @@ mod tests {
         assert_eq!(d.from.peer_id, from.peer_id);
         assert_eq!(d.from.epoch, 3);
         assert!(matches!(d.entrance, Entrance::Mcp));
-        assert_eq!(d.meta, SendMeta::default(), "통보는 계약 메타가 비어야");
+        assert_eq!(
+            d.meta,
+            SendMeta::default(),
+            "a notice must have empty contract meta"
+        );
     }
 
     #[test]
@@ -4977,22 +5013,30 @@ mod tests {
             to_attr: None,
         };
         let p = ParkPayload {
-            sender_name: "발신자-한글".to_string(),
+            sender_name: "발신자-한글".to_string(), // hangul-ok
             from,
             entrance: Entrance::Daemon,
-            body: "본문\n둘째 줄".to_string(),
+            body: "본문\n둘째 줄".to_string(), // hangul-ok
             meta: meta.clone(),
         };
         let d = ParkPayload::decode(&p.encode());
         assert_eq!(
-            d.sender_name, "발신자-한글",
-            "멀티바이트 sender 경계(바이트 길이 접두)"
+            d.sender_name,
+            "발신자-한글", // hangul-ok
+            "multi-byte sender boundary (byte-length prefix)"
         );
-        assert_eq!(d.body, "본문\n둘째 줄");
+        assert_eq!(d.body, "본문\n둘째 줄"); // hangul-ok
         assert!(matches!(d.entrance, Entrance::Daemon));
-        assert!(d.meta.request, "request 플래그 복원");
-        assert_eq!(d.meta.reply_by_raw.as_deref(), Some("10m"), "표기 복원");
-        assert_eq!(d.meta.reply_by, None, "파싱값은 의도적으로 미복원");
+        assert!(d.meta.request, "request flag restored");
+        assert_eq!(
+            d.meta.reply_by_raw.as_deref(),
+            Some("10m"),
+            "notation restored"
+        );
+        assert_eq!(
+            d.meta.reply_by, None,
+            "the parsed value is intentionally not restored"
+        );
         assert_eq!(d.meta.reply_to, None);
 
         let reply = ParkPayload {
@@ -5033,25 +5077,29 @@ mod tests {
                 Entrance::Mcp,
                 &SendMeta::default(),
             )
-            .expect("busy 파킹은 반려 아님");
+            .expect("busy parking is not a bounce");
         match out {
             SendOutcome::Parked { hint } => {
                 assert!(
                     hint.contains("mid-turn"),
-                    "hint 가 busy 사유를 알린다: {hint}"
+                    "the hint states the busy reason: {hint}"
                 )
             }
-            other => panic!("busy 수신자는 파킹이어야: {other:?}"),
+            other => panic!("a busy recipient must be parked: {other:?}"),
         }
         assert_eq!(
             svc.ledger_statuses("m1"),
             vec![DeliveryStatus::Pending],
-            "busy 파킹 = pending 장부(delivered 는 실제 주입 시점에만 — ADR-0104)"
+            "busy parking = pending ledger (delivered only at the actual inject time — ADR-0104)"
         );
-        assert_eq!(svc.parked_len(tid("alice")), 1, "그 id 큐에 대기");
+        assert_eq!(
+            svc.parked_len(tid("alice")),
+            1,
+            "waiting in that id's queue"
+        );
         assert!(
             port.injected_bodies().is_empty(),
-            "턴 중에는 stdin 에 밀지 않는다(CLI 큐 우회 금지)"
+            "does not push to stdin during a turn (no bypassing the CLI queue)"
         );
     }
 
@@ -5086,14 +5134,14 @@ mod tests {
                 Entrance::Mcp,
                 &SendMeta::default(),
             )
-            .expect("busy 파킹은 반려 아님");
+            .expect("busy parking is not a bounce");
         assert!(
             port.injected_bodies().is_empty(),
-            "바쁜 수신자에게 밀지 않는다"
+            "does not push to a busy recipient"
         );
         match out {
             SendOutcome::Parked { hint } => hint,
-            other => panic!("busy 수신자는 파킹이어야: {other:?}"),
+            other => panic!("a busy recipient must be parked: {other:?}"),
         }
     }
 
@@ -5164,7 +5212,11 @@ mod tests {
             port.injected_bodies(),
             vec![r#"<message from="bob">hi</message>"#.to_string()]
         );
-        assert_eq!(svc.parked_len(tid("alice")), 0, "드레인이 큐를 비웠다");
+        assert_eq!(
+            svc.parked_len(tid("alice")),
+            0,
+            "the drain emptied the queue"
+        );
     }
 
     #[test]
@@ -5187,7 +5239,7 @@ mod tests {
         assert_eq!(
             out,
             SendOutcome::Delivered,
-            "미관측 (id, epoch) 는 idle 폴백 → 즉시 주입"
+            "unobserved (id, epoch) falls back to idle → immediate inject"
         );
     }
 
@@ -5212,7 +5264,7 @@ mod tests {
             assert!(matches!(out, SendOutcome::Parked { .. }));
         }
         assert_eq!(svc.parked_len(tid("recv")), 3);
-        assert!(port.injected_bodies().is_empty(), "턴 중엔 주입 0");
+        assert!(port.injected_bodies().is_empty(), "0 injects during a turn");
 
         gate.clear();
         svc.flush_for_agent(recv_id);
@@ -5223,7 +5275,7 @@ mod tests {
                 r#"<message from="s">b1</message>"#.to_string(),
                 r#"<message from="s">b2</message>"#.to_string(),
             ],
-            "idle 진입 시 오래된 순 개별 봉투 일괄 주입(ADR-0104)"
+            "bulk inject of individual envelopes, oldest first, on entering idle (ADR-0104)"
         );
         assert_eq!(svc.ledger_statuses("m0"), vec![DeliveryStatus::Delivered]);
         assert_eq!(svc.ledger_statuses("m2"), vec![DeliveryStatus::Delivered]);
@@ -5252,15 +5304,19 @@ mod tests {
             .expect("park");
         assert!(
             matches!(out, SendOutcome::Parked { .. }),
-            "발신 응답은 파킹(pending) — self-heal 은 그 뒤의 배달"
+            "the send response is parking (pending) — self-heal is the delivery after that"
         );
-        assert_eq!(gate.call_count(), 2, "확인 + park 후 재확인 = 2회");
+        assert_eq!(gate.call_count(), 2, "check + recheck after park = 2 times");
         assert_eq!(
             svc.ledger_statuses("m1"),
             vec![DeliveryStatus::Delivered],
-            "park 직후 idle 이면 self-heal flush 로 즉시 배달(pending→delivered)"
+            "if idle right after park, delivered immediately by the self-heal flush (pending→delivered)"
         );
-        assert_eq!(svc.parked_len(tid("recv")), 0, "self-heal flush 로 큐 비움");
+        assert_eq!(
+            svc.parked_len(tid("recv")),
+            0,
+            "queue emptied by the self-heal flush"
+        );
         assert_eq!(
             port.injected_bodies(),
             vec![r#"<message from="s">hi</message>"#.to_string()]
@@ -5283,7 +5339,7 @@ mod tests {
             &SendMeta::default(),
         )
         .expect("park");
-        assert_eq!(svc.parked_len(tid("recv")), 1, "여전히 busy → 파킹 유지");
+        assert_eq!(svc.parked_len(tid("recv")), 1, "still busy → kept parked");
         assert_eq!(svc.ledger_statuses("m1"), vec![DeliveryStatus::Pending]);
         assert!(port.injected_bodies().is_empty());
     }
@@ -5311,13 +5367,13 @@ mod tests {
         svc.flush_for(recv_id);
         assert!(
             port.injected_bodies().is_empty(),
-            "턴 중 flush 는 배치를 시작하지 않는다(pre-drain 게이트)"
+            "a flush during a turn does not start a batch (pre-drain gate)"
         );
-        assert_eq!(svc.parked_len(tid("recv")), 3, "파킹 유지");
+        assert_eq!(svc.parked_len(tid("recv")), 3, "kept parked");
         assert_eq!(
             gate.call_count() - calls_before,
             1,
-            "게이트 조회는 배치당 1회(pre-drain)"
+            "the gate is queried once per batch (pre-drain)"
         );
         gate.clear();
         let calls_before = gate.call_count();
@@ -5325,12 +5381,12 @@ mod tests {
         assert_eq!(
             port.injected_bodies().len(),
             3,
-            "idle 이면 배치 완주(mid-batch 재검사 없음 — 드리블 금지)"
+            "if idle, the batch runs to completion (no mid-batch recheck — no dribbling)"
         );
         assert_eq!(
             gate.call_count() - calls_before,
             1,
-            "3건 배치에도 게이트 조회는 1회뿐"
+            "even a 3-item batch queries the gate only once"
         );
         assert_eq!(svc.parked_len(tid("recv")), 0);
     }
@@ -5358,7 +5414,7 @@ mod tests {
         assert_eq!(
             svc.parked_len(tid("recv")),
             2,
-            "스킵은 큐를 건드리지 않는다"
+            "a skip does not touch the queue"
         );
         assert_eq!(svc.ledger_statuses("m0"), vec![DeliveryStatus::Pending]);
         gate.clear();
@@ -5393,13 +5449,13 @@ mod tests {
             )
             .expect("park");
         assert!(matches!(out, SendOutcome::Parked { .. }));
-        assert_eq!(svc.parked_len(id_a), 1, "큐 키 = 지목한 id");
-        assert_eq!(svc.parked_len(id_b), 0, "쌍둥이 B 의 큐는 비어 있다");
+        assert_eq!(svc.parked_len(id_a), 1, "queue key = the targeted id");
+        assert_eq!(svc.parked_len(id_b), 0, "twin B's queue is empty");
 
         svc.flush_for_agent(id_b);
         assert!(
             port.injected_bodies().is_empty(),
-            "B 의 턴 종료는 A 의 편지를 내지 않는다"
+            "B's turn end does not release A's letter"
         );
 
         gate.clear();
@@ -5411,7 +5467,7 @@ mod tests {
         assert_eq!(
             port.injected_targets(),
             vec![id_a],
-            "지목한 그 에이전트에 배달"
+            "delivered to that targeted agent"
         );
         assert_eq!(svc.ledger_statuses("m1"), vec![DeliveryStatus::Delivered]);
         assert_eq!(svc.parked_len(id_a), 0);
@@ -5446,14 +5502,18 @@ mod tests {
         svc.flush_for(x_id);
         assert!(
             port.injected_bodies().is_empty(),
-            "X 가 없는 동안 동명 Y 는 X 의 편지를 받지 않는다(B2)"
+            "while X is absent, same-named Y does not receive X's letter (B2)"
         );
-        assert_eq!(svc.parked_len(x_id), 1, "X 의 큐에 그대로");
+        assert_eq!(svc.parked_len(x_id), 1, "stays in X's queue");
         assert_eq!(svc.ledger_statuses("m1"), vec![DeliveryStatus::Pending]);
 
         port.set_roster(vec![y, LiveAgent { epoch: 1, ..x }]);
         svc.flush_for(x_id);
-        assert_eq!(port.injected_targets(), vec![x_id], "다시 뜬 X 가 받는다");
+        assert_eq!(
+            port.injected_targets(),
+            vec![x_id],
+            "X, back up, receives it"
+        );
         assert_eq!(svc.ledger_statuses("m1"), vec![DeliveryStatus::Delivered]);
     }
 
@@ -5491,7 +5551,7 @@ mod tests {
         assert_eq!(
             out,
             SendOutcome::Delivered,
-            "적재 후 그 호출의 드레인이 묵은 것과 함께 냈다 = delivered: {out:?}"
+            "after queueing, that call's drain sent it together with the old one = delivered: {out:?}"
         );
         assert_eq!(
             port.injected_bodies(),
@@ -5500,7 +5560,7 @@ mod tests {
                 r#"<message from="s">b1</message>"#.to_string(),
                 r#"<message from="s">b2</message>"#.to_string(),
             ],
-            "수신자가 보는 순서 = 적재 순서(새 발송이 큐를 앞지르지 않는다)"
+            "the order the recipient sees = queueing order (a new send does not overtake the queue)"
         );
         assert_eq!(svc.parked_len(tid("recv")), 0);
     }
@@ -5524,14 +5584,18 @@ mod tests {
         assert_eq!(
             out,
             SendOutcome::Delivered,
-            "빈 큐 + idle 이어도 적재를 거치고, 같은 호출의 드레인이 내면 delivered"
+            "even with an empty queue + idle it goes through queueing, and if the same call's drain sends it, delivered"
         );
         assert_eq!(port.injected_bodies().len(), 1);
-        assert_eq!(svc.parked_len(tid("recv")), 0, "드레인이 그 항목을 비웠다");
+        assert_eq!(
+            svc.parked_len(tid("recv")),
+            0,
+            "the drain emptied that item"
+        );
         assert_eq!(
             svc.in_flight_len(tid("recv")),
             0,
-            "영수증 정산 누락 없음 — 남으면 그 수신자 레인이 영구 봉쇄된다"
+            "no missed receipt settlement — if one remains, that recipient lane is blocked forever"
         );
     }
 
@@ -5562,31 +5626,35 @@ mod tests {
             ));
         }));
 
-        let out = send(&svc, "m1", from, "alice", &["recv"]).expect("행 응답");
+        let out = send(&svc, "m1", from, "alice", &["recv"]).expect("row response");
         assert_eq!(
             out[0].status,
             SendStatus::Delivered,
-            "전제: 빈 큐 + idle 갈래여야 이 반사실이 의미를 갖는다: {out:?}"
+            "premise: this counterfactual means something only on the empty queue + idle branch: {out:?}"
         );
 
-        let (in_flight, queued, statuses) = seen.lock().unwrap().clone().expect("hook 이 돌았다");
+        let (in_flight, queued, statuses) = seen.lock().unwrap().clone().expect("the hook ran");
         assert_eq!(
             in_flight, 1,
-            "★직발송 갈래가 되살아나면 여기가 0 이 된다★ — 주입 중인 편지는 큐에서 빠져 나온 몫으로 회계에 잡혀 있어야 한다"
+            "★if the direct-send branch revives, this becomes 0★ — a letter being injected must be accounted for as a share taken out of the queue"
         );
         assert_eq!(
             queued, 0,
-            "빠져 나왔으니 큐엔 없다(①이 '아직 안 뺐다' 가 아님을 고정)"
+            "it was taken out, so it is not in the queue (pins that ① is not 'not taken out yet')"
         );
         assert_eq!(
             statuses,
             vec![DeliveryStatus::Pending],
-            "★적재가 락 안에서 남긴 행★ — 직발송이면 이 시점에 행이 아예 없거나 이미 delivered 다"
+            "★the row queueing left inside the lock★ — with a direct send, at this point there would be no row at all or it would already be delivered"
         );
 
         assert_eq!(svc.ledger_statuses("m1"), vec![DeliveryStatus::Delivered]);
         assert_eq!(svc.parked_len(tid("recv")), 0);
-        assert_eq!(svc.in_flight_len(tid("recv")), 0, "영수증 정산 누락 없음");
+        assert_eq!(
+            svc.in_flight_len(tid("recv")),
+            0,
+            "no missed receipt settlement"
+        );
     }
 
     // ── round-7 high → ADR-0125: does not overtake an in-progress batch ──────────────────────────────────
@@ -5640,7 +5708,7 @@ mod tests {
                 outcome.lock().unwrap().as_ref(),
                 Some(SendOutcome::Parked { .. })
             ),
-            "주입 중인 배치가 있으면 새 발송은 꼬리에 적재되고 그 드레인은 물러난다(응답 pending): {:?}",
+            "if a batch is being injected, a new send is queued at the tail and its drain backs off (response pending): {:?}",
             outcome.lock().unwrap()
         );
         assert_eq!(
@@ -5650,14 +5718,18 @@ mod tests {
                 r#"<message from="s">b1</message>"#.to_string(),
                 r#"<message from="s">b2</message>"#.to_string(),
             ],
-            "수신자가 보는 순서 = 적재 순서(새 발송이 진행 중인 배치를 앞지르지 않는다)"
+            "the order the recipient sees = queueing order (a new send does not overtake the batch in progress)"
         );
         assert_eq!(
             svc.parked_len(tid("recv")),
             0,
-            "물러났던 몫도 결국 배달된다(고립 없음)"
+            "the share that backed off is eventually delivered too (nothing stranded)"
         );
-        assert_eq!(svc.in_flight_len(tid("recv")), 0, "영수증 정산 누수 없음");
+        assert_eq!(
+            svc.in_flight_len(tid("recv")),
+            0,
+            "no receipt settlement leak"
+        );
         assert_eq!(svc.ledger_statuses("m2"), vec![DeliveryStatus::Delivered]);
     }
 
@@ -5712,7 +5784,7 @@ mod tests {
         let (overlapped_injects, bells_at_hook) = *probe.lock().unwrap();
         assert_eq!(
             overlapped_injects, 0,
-            "겹친 flush 는 드레인도 주입도 하지 않는다(유예)"
+            "an overlapping flush neither drains nor injects (deferral)"
         );
         assert_eq!(
             port.injected_bodies(),
@@ -5720,25 +5792,29 @@ mod tests {
                 r#"<message from="s">b0</message>"#.to_string(),
                 r#"<message from="s">b1</message>"#.to_string(),
             ],
-            "이 조립엔 도어벨 소비자가 없으므로 합류분은 아직 큐에 있다"
+            "this assembly has no doorbell consumer, so the joined items are still in the queue"
         );
         assert_eq!(
             svc.parked_msg_ids(tid("recv")),
             vec!["m2".to_string()],
-            "유예분이 사라지지 않는다(무손실)"
+            "deferred items do not vanish (lossless)"
         );
-        assert_eq!(svc.in_flight_len(tid("recv")), 0, "영수증 정산 누수 없음");
+        assert_eq!(
+            svc.in_flight_len(tid("recv")),
+            0,
+            "no receipt settlement leak"
+        );
         assert_eq!(
             bell.seen().len(),
             bells_at_hook + 1,
-            "정산을 마치며 유예된 flush 를 정확히 1회 되울린다(lost wakeup 금지)"
+            "finishing settlement rings the deferred flush again exactly once (no lost wakeup)"
         );
         // ★Here there is **only one** id that deferred, so the echo is also 1 (the same value as in the single-slot days)★ — that the marker is
         //   a set is enforced not by this test but by the stale-id test below (round-8).
         assert_eq!(
             bell.seen().last().copied(),
             Some(recv_id),
-            "되울림 대상 = 유예한 쪽이 열려던 큐의 도어벨 id"
+            "re-ring target = the doorbell id of the queue the deferring side was about to open"
         );
         svc.flush_for(recv_id);
         assert_eq!(
@@ -5771,13 +5847,13 @@ mod tests {
         assert_eq!(
             bell.seen(),
             vec![recv_id],
-            "도어벨 요청 1건(무조건 enqueue)"
+            "1 doorbell request (unconditional enqueue)"
         );
         assert!(
             port.injected_bodies().is_empty(),
-            "발신 스레드에서 주입하지 않는다(소비는 flush lane)"
+            "does not inject on the sender thread (consumption is the flush lane)"
         );
-        assert_eq!(svc.parked_len(tid("recv")), 1, "파킹 유지");
+        assert_eq!(svc.parked_len(tid("recv")), 1, "kept parked");
         gate.clear();
         svc.flush_for_agent(recv_id);
         assert_eq!(svc.ledger_statuses("m1"), vec![DeliveryStatus::Delivered]);
@@ -5802,7 +5878,7 @@ mod tests {
             &SendMeta::default(),
         )
         .expect("park");
-        assert_eq!(svc.parked_len(id), 1, "그 에이전트 id 큐에 파킹");
+        assert_eq!(svc.parked_len(id), 1, "parked in that agent id's queue");
 
         port.set_roster(vec![LiveAgent {
             id,
@@ -5816,10 +5892,10 @@ mod tests {
         assert_eq!(
             port.injected_bodies(),
             vec![r#"<message from="s">hi</message>"#.to_string()],
-            "개명 뒤 턴 종료 flush 가 그 id 큐를 연다"
+            "after a rename, the turn-end flush opens that id's queue"
         );
         assert_eq!(port.injected_targets(), vec![id]);
-        assert_eq!(svc.parked_len(id), 0, "큐 비움");
+        assert_eq!(svc.parked_len(id), 0, "queue empty");
         assert_eq!(svc.ledger_statuses("m1"), vec![DeliveryStatus::Delivered]);
     }
 
@@ -5832,13 +5908,13 @@ mod tests {
         let x_id = PeerId::new_v4();
         port.set_roster(vec![me.clone()]);
         port.set_dormant_agents(&[(x_id, "a")]);
-        let out = send_body(&svc, "m1", from, "alice", &["a"], "hi").expect("행 응답");
+        let out = send_body(&svc, "m1", from, "alice", &["a"], "hi").expect("row response");
         assert_eq!(
             out[0].status,
             SendStatus::Pending,
-            "잠든 수신자 → 파킹: {out:?}"
+            "asleep recipient → parking: {out:?}"
         );
-        assert_eq!(svc.parked_len(x_id), 1, "큐 키 = 잠든 X 의 id");
+        assert_eq!(svc.parked_len(x_id), 1, "queue key = the id of asleep X");
 
         // Rename to b while asleep → wake up as b and appearance flush.
         port.set_dormant_agents(&[]);
@@ -5849,7 +5925,7 @@ mod tests {
         assert_eq!(
             port.injected_bodies(),
             vec![r#"<message from="alice">hi</message>"#.to_string()],
-            "개명한 X 가 받는다(B1)"
+            "the renamed X receives it (B1)"
         );
         assert_eq!(svc.parked_len(x_id), 0);
         assert_eq!(svc.ledger_statuses("m1"), vec![DeliveryStatus::Delivered]);
@@ -5864,11 +5940,11 @@ mod tests {
         let x_id = PeerId::new_v4();
         port.set_roster(vec![me.clone()]);
         port.set_dormant_agents(&[(x_id, "a")]);
-        let out = send_body(&svc, "m1", from, "alice", &["a"], "hi").expect("행 응답");
+        let out = send_body(&svc, "m1", from, "alice", &["a"], "hi").expect("row response");
         assert_eq!(
             out[0].status,
             SendStatus::Pending,
-            "잠든 수신자 → 파킹: {out:?}"
+            "asleep recipient → parking: {out:?}"
         );
 
         port.set_dormant_agents(&[(x_id, "b")]);
@@ -5879,16 +5955,20 @@ mod tests {
         svc.flush_for(x_id);
         assert!(
             port.injected_bodies().is_empty(),
-            "옛 이름을 새로 가진 Y 는 X 의 편지를 받지 않는다(B2)"
+            "Y, who newly has the old name, does not receive X's letter (B2)"
         );
-        assert_eq!(svc.parked_len(x_id), 1, "X 의 큐에 그대로");
+        assert_eq!(svc.parked_len(x_id), 1, "stays in X's queue");
         assert_eq!(svc.parked_len(y_id), 0);
         assert_eq!(svc.ledger_statuses("m1"), vec![DeliveryStatus::Pending]);
 
         port.set_dormant_agents(&[]);
         port.set_roster(vec![me, y, live_with_id(x_id, "b").1]);
         svc.flush_for(x_id);
-        assert_eq!(port.injected_targets(), vec![x_id], "X 가 깨면 X 가 받는다");
+        assert_eq!(
+            port.injected_targets(),
+            vec![x_id],
+            "when X wakes, X receives it"
+        );
         assert_eq!(svc.ledger_statuses("m1"), vec![DeliveryStatus::Delivered]);
     }
 
@@ -5919,7 +5999,7 @@ mod tests {
         assert_eq!(
             svc.parked_msg_ids(id_a),
             vec!["m0", "m2"],
-            "지목한 id 의 큐에만 쌓인다"
+            "accumulates only in the targeted id's queue"
         );
         assert_eq!(svc.parked_msg_ids(id_b), vec!["m1", "m3"]);
 
@@ -5930,17 +6010,17 @@ mod tests {
         svc.flush_for(id_a);
         assert!(
             port.injected_bodies().is_empty(),
-            "A 의 배치가 첫 항목에서 끊겼다"
+            "A's batch stopped at the first item"
         );
         assert_eq!(
             svc.parked_msg_ids(id_a),
             vec!["m0", "m2"],
-            "실패분은 오래된 순 그대로 A 큐로 돌아온다"
+            "failed items return to A's queue, oldest first as they were"
         );
         assert_eq!(
             svc.parked_msg_ids(id_b),
             vec!["m1", "m3"],
-            "A 의 실패가 B 큐를 건드리지 않는다"
+            "A's failure does not touch B's queue"
         );
 
         port.fail_at(&[]);
@@ -5951,14 +6031,18 @@ mod tests {
                 r#"<message from="s">body-m0</message>"#.to_string(),
                 r#"<message from="s">body-m2</message>"#.to_string(),
             ],
-            "B 가 바빠도 A 몫은 나간다"
+            "A's share goes out even if B is busy"
         );
         assert_eq!(port.injected_targets(), vec![id_a, id_a]);
         assert_eq!(svc.ledger_statuses("m1"), vec![DeliveryStatus::Pending]);
         assert_eq!(svc.ledger_statuses("m3"), vec![DeliveryStatus::Pending]);
 
         svc.flush_for(id_b);
-        assert_eq!(port.injected_bodies().len(), 2, "턴 중인 B 에는 안 든다");
+        assert_eq!(
+            port.injected_bodies().len(),
+            2,
+            "does not go into B, which is in a turn"
+        );
 
         gate.clear();
         svc.flush_for(id_b);
@@ -5968,7 +6052,7 @@ mod tests {
                 r#"<message from="s">body-m1</message>"#.to_string(),
                 r#"<message from="s">body-m3</message>"#.to_string(),
             ],
-            "B 몫도 오래된 순"
+            "B's share is oldest-first too"
         );
         assert_eq!(port.injected_targets()[2..], [id_b, id_b]);
         assert_eq!(svc.parked_total_for_test(), 0);
@@ -6014,28 +6098,28 @@ mod tests {
             &SendMeta::default(),
         )
         .expect("park");
-        assert_eq!(svc.parked_len(tid("recv")), 1, "busy 라 파킹");
+        assert_eq!(svc.parked_len(tid("recv")), 1, "parked because busy");
         assert!(
             port.injected_bodies().is_empty(),
-            "턴 중이므로 주입 없음(정상)"
+            "no inject since in a turn (normal)"
         );
 
         assert_eq!(
             gate.sweep_stale_busy(t0 + BUSY_MAX_TURN + Duration::from_secs(1)),
             1,
-            "상한 초과 잔해를 깨운다"
+            "wakes the leftovers past the cap"
         );
         assert_eq!(
             notifier.seen.lock().unwrap().clone(),
             vec![id],
-            "깨워야 대기 메일이 나간다(판정만 뒤집으면 다음 트리거가 없다)"
+            "waiting mail goes out only if woken (flipping only the decision leaves no next trigger)"
         );
         // In production the flush lane consumes that doorbell — here the consumption is performed directly.
         svc.flush_for_agent(id);
         assert_eq!(
             port.injected_bodies(),
             vec![r#"<message from="s">hi</message>"#.to_string()],
-            "상한 sweep 이후 배달됨(TTL blackhole 해소)"
+            "delivered after the cap sweep (TTL blackhole resolved)"
         );
         assert_eq!(svc.ledger_statuses("m1"), vec![DeliveryStatus::Delivered]);
     }
@@ -6074,24 +6158,28 @@ mod tests {
             &SendMeta::default(),
         )
         .expect("park");
-        assert_eq!(svc.parked_len(tid("recv")), 1, "목록·멈춤이라 파킹");
+        assert_eq!(
+            svc.parked_len(tid("recv")),
+            1,
+            "parked because of the list·stop"
+        );
 
         assert_eq!(
             gate.sweep_stale_busy(t0 + BUSY_MAX_TURN + Duration::from_secs(1)),
             0,
-            "상한은 목록·멈춤을 깨우지 않는다"
+            "the cap does not wake the list·stop"
         );
         svc.flush_for_agent(id);
         assert!(
             port.injected_bodies().is_empty(),
-            "목록이 남은 동안 안 든다"
+            "does not go in while the list remains"
         );
 
         facts.set_inputs_pending(id, 0, false, t0);
         svc.flush_for_agent(id);
         assert!(
             port.injected_bodies().is_empty(),
-            "목록이 비어도 오류 뒤 멈춤이면 안 든다"
+            "even with an empty list, does not go in if stopped after an error"
         );
 
         facts.set_last_end_failed(id, 0, false, t0);
@@ -6099,7 +6187,7 @@ mod tests {
         assert_eq!(
             port.injected_bodies(),
             vec![r#"<message from="s">hi</message>"#.to_string()],
-            "풀린 뒤의 초인종이 파킹을 흘린다"
+            "the doorbell after release lets the parked items flow"
         );
     }
 
@@ -6109,7 +6197,7 @@ mod tests {
         let (recv_id, recv) = live("recv");
         port.set_roster(vec![recv]);
         svc.flush_for_agent(recv_id);
-        assert!(port.injected_bodies().is_empty(), "파킹 없으면 no-op");
+        assert!(port.injected_bodies().is_empty(), "no-op without parking");
         port.set_roster(vec![]);
         svc.park_absent_for_test(
             "m1",
@@ -6149,7 +6237,7 @@ mod tests {
         assert_eq!(
             svc.parked_len(tid("ghost")),
             1,
-            "미존재 id flush 는 무해한 no-op"
+            "flushing a nonexistent id is a harmless no-op"
         );
         assert!(port.injected_bodies().is_empty());
     }
@@ -6185,7 +6273,7 @@ mod tests {
             reply_from(tid("alice")),
             "alice",
             "ghost",
-            "해줘",
+            "do it",
             Entrance::Mcp,
             &req_meta("60m", 3600),
         )
@@ -6194,9 +6282,9 @@ mod tests {
         assert_eq!(
             port.injected_bodies(),
             vec![
-                "<notice>[engram] 요청 m-60m 기한(60m) 초과 — ghost 회신 없음</notice>".to_string()
+                "<notice>[engram] request m-60m deadline (60m) exceeded — no reply from ghost</notice>".to_string()
             ],
-            "봉투에 쓴 표기 그대로(1h 로 정규화 금지)"
+            "the notation written in the envelope as is (no normalizing to 1h)"
         );
     }
 
@@ -6212,7 +6300,7 @@ mod tests {
                 ident(),
                 "qa-alpha",
                 "alice",
-                "코드 짜고 회신해",
+                "write the code and reply",
                 Entrance::Mcp,
                 &req_meta("10m", 600),
             )
@@ -6222,15 +6310,15 @@ mod tests {
             port.injected_bodies(),
             vec![concat!(
                 r#"<message from="qa-alpha" id="m-req1" type="request" reply-by="10m">"#,
-                "코드 짜고 회신해</message>"
+                "write the code and reply</message>"
             )
             .to_string()],
-            "request 봉투 골든(속성 순서·kebab-case)"
+            "request envelope golden (attribute order·kebab-case)"
         );
         assert_eq!(
             svc.open_request_count(),
             1,
-            "배달된 request 는 계약이 열린다"
+            "a delivered request opens a contract"
         );
         assert_eq!(
             svc.ledger_statuses("m-req1"),
@@ -6250,7 +6338,7 @@ mod tests {
                 ident(),
                 "qa-alpha",
                 "bob",
-                "하고 알려줘",
+                "do it and let me know",
                 Entrance::Mcp,
                 &req_meta("1h", 3600),
             )
@@ -6259,7 +6347,7 @@ mod tests {
         assert_eq!(
             svc.open_request_count(),
             1,
-            "파킹된 request 도 계약이 열린다"
+            "a parked request opens a contract too"
         );
         assert_eq!(svc.ledger_statuses("m-req2"), vec![DeliveryStatus::Pending]);
 
@@ -6270,10 +6358,10 @@ mod tests {
             port.injected_bodies(),
             vec![concat!(
                 r#"<message from="qa-alpha" id="m-req2" type="request" reply-by="1h">"#,
-                "하고 알려줘</message>"
+                "do it and let me know</message>"
             )
             .to_string()],
-            "파킹→flush 배달도 같은 request 봉투(C3 ParkPayload meta 보존)"
+            "park→flush delivery is the same request envelope too (C3 ParkPayload meta preserved)"
         );
         assert_eq!(
             svc.ledger_statuses("m-req2"),
@@ -6293,14 +6381,17 @@ mod tests {
             ident(),
             "qa-bravo",
             "alice",
-            "다 짰음",
+            "all written",
             Entrance::Mcp,
             &reply_meta("m-7f3k"),
         )
         .expect("delivered");
         assert_eq!(
             port.injected_bodies(),
-            vec![r#"<message from="qa-bravo" in-reply-to="m-7f3k">다 짰음</message>"#.to_string()],
+            vec![
+                r#"<message from="qa-bravo" in-reply-to="m-7f3k">all written</message>"#
+                    .to_string()
+            ],
         );
 
         let (svc2, port2) = super::tests::svc();
@@ -6310,7 +6401,7 @@ mod tests {
             ident(),
             "qa-bravo",
             "carol",
-            "늦은 회신",
+            "late reply",
             Entrance::Cli,
             &reply_meta("m-7f3k"),
         )
@@ -6321,9 +6412,9 @@ mod tests {
         assert_eq!(
             port2.injected_bodies(),
             vec![
-                r#"<message from="qa-bravo" in-reply-to="m-7f3k">늦은 회신</message>"#.to_string()
+                r#"<message from="qa-bravo" in-reply-to="m-7f3k">late reply</message>"#.to_string()
             ],
-            "파킹→flush 회신도 in-reply-to 를 유지"
+            "a park→flush reply keeps in-reply-to too"
         );
     }
 
@@ -6346,7 +6437,11 @@ mod tests {
             port.injected_bodies(),
             vec![r#"<message from="s">hi</message>"#.to_string()]
         );
-        assert_eq!(svc.open_request_count(), 0, "통보는 계약을 열지 않는다");
+        assert_eq!(
+            svc.open_request_count(),
+            0,
+            "a notice does not open a contract"
+        );
     }
 
     #[test]
@@ -6360,7 +6455,7 @@ mod tests {
             ident(),
             "alice",
             "bob",
-            "해줘",
+            "do it",
             Entrance::Mcp,
             &req_meta("10m", 600),
         )
@@ -6372,7 +6467,7 @@ mod tests {
             reply_from(b_id),
             "bob",
             "alice",
-            "했음",
+            "done",
             Entrance::Mcp,
             &reply_meta("m-req"),
         )
@@ -6380,12 +6475,12 @@ mod tests {
         assert_eq!(
             svc.open_request_count(),
             0,
-            "정확한 id 회신은 계약을 닫는다"
+            "a reply with the exact id closes the contract"
         );
         assert_eq!(
             svc.ledger_statuses("m-req"),
             vec![DeliveryStatus::Replied],
-            "원본 레코드가 Replied 로 전이"
+            "the original record transitions to Replied"
         );
     }
 
@@ -6402,7 +6497,7 @@ mod tests {
             ident(),
             "alice",
             "bob",
-            "해줘",
+            "do it",
             Entrance::Mcp,
             &req_meta("10m", 600),
         )
@@ -6414,22 +6509,26 @@ mod tests {
                 ident(),
                 "bob",
                 "alice",
-                "엉뚱한 id 로 회신",
+                "reply with a wrong id",
                 Entrance::Mcp,
                 &reply_meta("m-nope"),
             )
-            .expect("회신은 정상 배달돼야");
+            .expect("the reply must be delivered normally");
         assert_eq!(out, SendOutcome::Delivered);
-        assert_eq!(svc.open_request_count(), 1, "틀린 id 는 계약을 못 닫는다");
+        assert_eq!(
+            svc.open_request_count(),
+            1,
+            "a wrong id cannot close the contract"
+        );
         assert_eq!(
             svc.ledger_statuses("m-req"),
             vec![DeliveryStatus::Delivered],
-            "원본은 여전히 미회신"
+            "the original is still unreplied"
         );
         assert_eq!(
             port.injected_bodies().len(),
             2,
-            "request + 회신 둘 다 실제로 주입됐다"
+            "both the request + the reply were actually injected"
         );
     }
 
@@ -6444,7 +6543,7 @@ mod tests {
             ident(),
             "alice",
             "bob",
-            "해줘",
+            "do it",
             Entrance::Mcp,
             &req_meta("10m", 600),
         )
@@ -6454,7 +6553,7 @@ mod tests {
             reply_from(b_id),
             "bob",
             "alice",
-            "1차",
+            "first",
             Entrance::Mcp,
             &reply_meta("m-req"),
         )
@@ -6464,13 +6563,13 @@ mod tests {
             reply_from(b_id),
             "bob",
             "alice",
-            "2차",
+            "second",
             Entrance::Mcp,
             &reply_meta("m-req"),
         )
-        .expect("2차 회신도 배달돼야");
+        .expect("the second reply must be delivered too");
         assert_eq!(svc.open_request_count(), 0);
-        assert_eq!(port.injected_bodies().len(), 3, "3건 모두 주입");
+        assert_eq!(port.injected_bodies().len(), 3, "all 3 injected");
     }
 
     #[test]
@@ -6483,7 +6582,7 @@ mod tests {
             ident(),
             "alice",
             "ghost",
-            "해줘",
+            "do it",
             Entrance::Mcp,
             &req_meta("10m", 600),
         )
@@ -6494,16 +6593,16 @@ mod tests {
             reply_from(tid("ghost")),
             "ghost",
             "alice",
-            "했음",
+            "done",
             Entrance::Mcp,
             &reply_meta("m-req"),
         )
         .expect("delivered");
-        assert_eq!(svc.open_request_count(), 0, "계약은 닫힌다");
+        assert_eq!(svc.open_request_count(), 0, "the contract closes");
         assert_eq!(
             svc.ledger_statuses("m-req"),
             vec![DeliveryStatus::Pending],
-            "이력은 미주입 상태 유지(불법 간선 — anomaly 로 관측만)"
+            "the history stays not-injected (illegal edge — observed only as an anomaly)"
         );
     }
 
@@ -6518,25 +6617,28 @@ mod tests {
             reply_from(tid("alice")),
             "alice",
             "qa-bravo",
-            "해줘",
+            "do it",
             Entrance::Mcp,
             &req_meta("10m", 600),
         )
-        .expect("수신자 부재 → 파킹(계약은 열림)");
-        assert!(port.injected_bodies().is_empty(), "부재라 아직 주입 없음");
+        .expect("recipient absent → parking (the contract opens)");
+        assert!(
+            port.injected_bodies().is_empty(),
+            "absent, so no inject yet"
+        );
 
         svc.sweep(Instant::now() + Duration::from_secs(601));
         assert_eq!(
             port.injected_bodies(),
             vec![
-                "<notice>[engram] 요청 m-7f3k 기한(10m) 초과 — qa-bravo 회신 없음</notice>"
+                "<notice>[engram] request m-7f3k deadline (10m) exceeded — no reply from qa-bravo</notice>"
                     .to_string()
             ],
-            "notice 골든(from 속성 없음 = 회신 대상 아님)"
+            "notice golden (no from attribute = not something to reply to)"
         );
 
         svc.sweep(Instant::now() + Duration::from_secs(1200));
-        assert_eq!(port.injected_bodies().len(), 1, "notice 는 정확히 1회");
+        assert_eq!(port.injected_bodies().len(), 1, "the notice exactly once");
     }
 
     #[test]
@@ -6550,7 +6652,7 @@ mod tests {
             ident(),
             "alice",
             "bob",
-            "해줘",
+            "do it",
             Entrance::Mcp,
             &req_meta("1m", 60),
         )
@@ -6560,7 +6662,7 @@ mod tests {
             reply_from(b_id),
             "bob",
             "alice",
-            "했음",
+            "done",
             Entrance::Mcp,
             &reply_meta("m-req"),
         )
@@ -6569,7 +6671,7 @@ mod tests {
         assert_eq!(
             port.injected_bodies().len(),
             2,
-            "회신된 계약엔 notice 가 없다(request + reply 2건뿐)"
+            "a replied contract has no notice (only request + reply, 2 items)"
         );
     }
 
@@ -6590,7 +6692,7 @@ mod tests {
             ident(),
             "alice",
             "ghost",
-            "해줘",
+            "do it",
             Entrance::Mcp,
             &meta,
         )
@@ -6598,9 +6700,9 @@ mod tests {
         svc.sweep(Instant::now() + Duration::from_secs(100_000));
         assert!(
             port.injected_bodies().is_empty(),
-            "기한 없는 request 는 타임아웃 없음"
+            "a request without a deadline has no timeout"
         );
-        assert_eq!(svc.open_request_count(), 1, "계약은 열린 채 유지");
+        assert_eq!(svc.open_request_count(), 1, "the contract stays open");
     }
 
     #[test]
@@ -6617,7 +6719,7 @@ mod tests {
                 Entrance::Mcp,
                 &SendMeta::default(),
             )
-            .expect("cap 이내");
+            .expect("within the cap");
         }
         assert_eq!(
             svc.park_absent_for_test(
@@ -6630,7 +6732,7 @@ mod tests {
                 &SendMeta::default()
             ),
             Err(SendFail::Row(FailCode::MailboxFull)),
-            "message 는 cap 에서 반려(대조군)"
+            "a message is bounced at the cap (control group)"
         );
 
         svc.park_absent_for_test(
@@ -6638,7 +6740,7 @@ mod tests {
             reply_from(tid("alice")),
             "alice",
             "bob",
-            "해줘",
+            "do it",
             Entrance::Mcp,
             &req_meta("1m", 60),
         )
@@ -6648,7 +6750,7 @@ mod tests {
         assert_eq!(
             svc.parked_len(tid("alice")),
             101,
-            "message 백로그가 통지를 막지 않는다(100 message + 1 notice — 레인이 다르다)"
+            "a message backlog does not block notices (100 messages + 1 notice — different lanes)"
         );
         let noticed: Vec<_> = svc
             .ledger_snapshot()
@@ -6658,10 +6760,14 @@ mod tests {
         assert_eq!(
             noticed.len(),
             1,
-            "notice 도 장부에 남는다(조용한 유실 금지)"
+            "a notice remains in the ledger too (no silent loss)"
         );
-        assert_eq!(noticed[0].2, "alice", "notice 수신자 = 요청 발신자");
-        assert_eq!(noticed[0].3, DeliveryStatus::Pending, "파킹이므로 pending");
+        assert_eq!(noticed[0].2, "alice", "notice recipient = request sender");
+        assert_eq!(
+            noticed[0].3,
+            DeliveryStatus::Pending,
+            "pending since parked"
+        );
     }
 
     #[test]
@@ -6676,7 +6782,7 @@ mod tests {
                 reply_from(tid("alice")),
                 "alice",
                 "bob",
-                "해줘",
+                "do it",
                 Entrance::Mcp,
                 &req_meta("1m", 60),
             )
@@ -6687,7 +6793,7 @@ mod tests {
         assert_eq!(
             svc.parked_len(tid("alice")),
             NOTICE_CAP_FOR_TEST,
-            "통지는 자기 레인 상한에서 멈춘다(옛 구현 = cap+1 — 무계)"
+            "notices stop at their own lane cap (old implementation = cap+1 — unbounded)"
         );
         let noticed: Vec<_> = svc
             .ledger_snapshot()
@@ -6697,18 +6803,18 @@ mod tests {
         assert_eq!(
             noticed.len(),
             NOTICE_CAP_FOR_TEST + 1,
-            "밀려난 통지도 장부에 남는다(조용한 유실 0 — 반려가 아니라 회수)"
+            "a pushed-out notice remains in the ledger too (0 silent loss — reclaim, not bounce)"
         );
         assert_eq!(
             noticed[0].3,
             DeliveryStatus::Skipped,
-            "가장 오래된 통지가 회수돼 skipped(신규 통지는 절대 반려되지 않는다)"
+            "the oldest notice is reclaimed as skipped (new notices are never bounced)"
         );
         assert!(
             noticed[1..]
                 .iter()
                 .all(|(_, _, _, s)| *s == DeliveryStatus::Pending),
-            "나머지는 큐에 남아 pending"
+            "the rest stay in the queue as pending"
         );
     }
 
@@ -6721,7 +6827,7 @@ mod tests {
             reply_from(tid("alice")),
             "alice",
             "bob",
-            "해줘",
+            "do it",
             Entrance::Mcp,
             &req_meta("1m", 60),
         )
@@ -6729,7 +6835,7 @@ mod tests {
         svc.sweep(Instant::now() + Duration::from_secs(61));
         assert!(
             port.injected_bodies().is_empty(),
-            "발신자도 부재 → notice 파킹"
+            "sender absent too → notice parked"
         );
 
         let (alice_id, alice) = live("alice");
@@ -6737,8 +6843,11 @@ mod tests {
         svc.flush_for(alice_id);
         assert_eq!(
             port.injected_bodies(),
-            vec!["<notice>[engram] 요청 m-9x 기한(1m) 초과 — bob 회신 없음</notice>".to_string()],
-            "flush 배달도 notice 태그(from 없음)"
+            vec![
+                "<notice>[engram] request m-9x deadline (1m) exceeded — no reply from bob</notice>"
+                    .to_string()
+            ],
+            "flush delivery is a notice tag too (no from)"
         );
         let noticed: Vec<_> = svc
             .ledger_snapshot()
@@ -6748,7 +6857,7 @@ mod tests {
         assert_eq!(
             noticed[0].3,
             DeliveryStatus::Delivered,
-            "실제 주입 시점 delivered"
+            "delivered at the actual inject time"
         );
     }
 
@@ -6764,7 +6873,7 @@ mod tests {
             reply_from(tid("alice")),
             "alice",
             "ghost",
-            "해줘",
+            "do it",
             Entrance::Mcp,
             &req_meta("1m", 60),
         )
@@ -6772,16 +6881,20 @@ mod tests {
         svc.sweep(Instant::now() + Duration::from_secs(61));
         assert!(
             port.injected_bodies().is_empty(),
-            "발신자가 턴 중이면 notice 도 주입하지 않는다"
+            "if the sender is in a turn, the notice is not injected either"
         );
-        assert_eq!(svc.parked_len(tid("alice")), 1, "notice 가 alice 앞에 파킹");
+        assert_eq!(
+            svc.parked_len(tid("alice")),
+            1,
+            "the notice parked addressed to alice"
+        );
 
         gate.clear();
         svc.flush_for(alice_id);
         assert_eq!(
             port.injected_bodies(),
-            vec!["<notice>[engram] 요청 m-b1 기한(1m) 초과 — ghost 회신 없음</notice>".to_string()],
-            "턴 종료 flush 로 배달"
+            vec!["<notice>[engram] request m-b1 deadline (1m) exceeded — no reply from ghost</notice>".to_string()],
+            "delivered by the turn-end flush"
         );
     }
 
@@ -6808,11 +6921,11 @@ mod tests {
             },
             "alice",
             "ghost",
-            "해줘",
+            "do it",
             Entrance::Mcp,
             &req_meta("1m", 60),
         )
-        .expect("parked(수신자 부재)");
+        .expect("parked (recipient absent)");
 
         let renamed = LiveAgent {
             id: alice_id,
@@ -6827,12 +6940,16 @@ mod tests {
         assert_eq!(
             port.injected_bodies(),
             vec![
-                "<notice>[engram] 요청 m-req 기한(1m) 초과 — ghost 회신 없음</notice>".to_string()
+                "<notice>[engram] request m-req deadline (1m) exceeded — no reply from ghost</notice>".to_string()
             ],
-            "개명한 발신자에게도 배달돼야(큐 키 = 발신자 id)"
+            "must be delivered to a renamed sender too (queue key = sender id)"
         );
         assert_eq!(port.injected_targets(), vec![alice_id]);
-        assert_eq!(svc.parked_len(alice_id), 0, "큐가 비었다 = 실제로 나갔다");
+        assert_eq!(
+            svc.parked_len(alice_id),
+            0,
+            "the queue is empty = it actually went out"
+        );
     }
 
     /// ★The sweep does not read the roster (ADR-0309 · protects the sweep task)★: a notice parks in the sender id's queue and presses the doorbell by that id,
@@ -6849,7 +6966,7 @@ mod tests {
                 *from,
                 &format!("sender{i}"),
                 "ghost",
-                "해줘",
+                "do it",
                 Entrance::Mcp,
                 &req_meta("1m", 60),
             )
@@ -6863,23 +6980,26 @@ mod tests {
         assert_eq!(
             port.roster_call_count() - before,
             0,
-            "sweep 은 due 수와 무관하게 로스터를 읽지 않는다"
+            "the sweep does not read the roster regardless of the due count"
         );
         let mut rung = bell.take();
         rung.sort();
         let mut expected: Vec<PeerId> = senders.iter().map(|s| s.peer_id).collect();
         expected.sort();
-        assert_eq!(rung, expected, "통지마다 그 발신자 id 로 도어벨 한 번");
+        assert_eq!(
+            rung, expected,
+            "one doorbell with that sender id per notice"
+        );
         for s in &senders {
             assert_eq!(
                 svc.parked_len(s.peer_id),
                 1,
-                "notice 는 발신자 id 큐에 파킹"
+                "the notice is parked in the sender id's queue"
             );
         }
         assert!(
             port.injected_bodies().is_empty(),
-            "sweep 은 주입하지 않는다"
+            "the sweep does not inject"
         );
 
         // The lane consumes that doorbell.
@@ -6887,7 +7007,7 @@ mod tests {
         svc.flush_for_agent(senders[0].peer_id);
         assert_eq!(
             port.injected_bodies(),
-            vec!["<notice>[engram] 요청 m-r0 기한(1m) 초과 — ghost 회신 없음</notice>".to_string()],
+            vec!["<notice>[engram] request m-r0 deadline (1m) exceeded — no reply from ghost</notice>".to_string()],
         );
     }
 
@@ -6904,7 +7024,7 @@ mod tests {
                 ident(),
                 sender,
                 "bob",
-                "해줘",
+                "do it",
                 Entrance::Mcp,
                 &req_meta("1m", 60),
             )
@@ -6918,11 +7038,11 @@ mod tests {
                 reply_from(tid("bob")),
                 "bob",
                 "carol",
-                "했음",
+                "done",
                 Entrance::Mcp,
                 &reply_meta("m-req1"),
             )
-            .expect("parked(carol 부재)");
+            .expect("parked (carol absent)");
         }));
 
         svc.sweep(Instant::now() + Duration::from_secs(61));
@@ -6935,14 +7055,14 @@ mod tests {
         assert_eq!(
             notice_recipients,
             vec!["alice".to_string()],
-            "회신이 먼저 닿은 m-req1 의 통지는 취소, 앞선 m-req0 통지는 그대로"
+            "the notice of m-req1, whose reply arrived first, is cancelled; the earlier m-req0 notice stays"
         );
         assert_eq!(
             svc.contract_outcome_for_test("m-req1", tid("bob")),
             Some("replied"),
-            "m-req1 은 회신으로 닫혔다"
+            "m-req1 was closed by the reply"
         );
-        assert_eq!(svc.open_request_count(), 1, "m-req0 만 열려 있다");
+        assert_eq!(svc.open_request_count(), 1, "only m-req0 is open");
     }
 
     #[test]
@@ -6974,7 +7094,7 @@ mod tests {
                 &SendMeta::default()
             ),
             Err(SendFail::Reject(SendReject::IdCollision)),
-            "통보도 id 충돌이면 반려"
+            "a notice is bounced on an id collision too"
         );
         assert_eq!(
             svc.park_absent_for_test(
@@ -6987,19 +7107,23 @@ mod tests {
                 &reply_meta("m-other"),
             ),
             Err(SendFail::Reject(SendReject::IdCollision)),
-            "회신도 id 충돌이면 반려"
+            "a reply is bounced on an id collision too"
         );
-        assert_eq!(svc.ledger_snapshot().len(), before, "장부 레코드 증가 없음");
+        assert_eq!(
+            svc.ledger_snapshot().len(),
+            before,
+            "no ledger record increase"
+        );
         assert_eq!(
             port.injected_bodies().len(),
             injected_before,
-            "주입 없음(부작용 0)"
+            "no inject (0 side effects)"
         );
     }
 
     #[test]
     #[cfg(debug_assertions)]
-    #[should_panic(expected = "ingress가 유일 검증자")]
+    #[should_panic(expected = "ingress is the only validator")]
     fn mutually_exclusive_contract_fields_trip_the_debug_assert() {
         // ★fix 11★: this function is pub so another assembly can call it directly — a wiring that violates mutual exclusion blows up
         //   at once in debug (the production bounce wording is canonical in ingress, so validation is not duplicated).
@@ -7026,13 +7150,13 @@ mod tests {
                 epoch: 3,
             },
             entrance: Entrance::Mcp,
-            body: "안녕\n둘째 줄".to_string(),
+            body: "hi\nsecond line".to_string(),
             meta: req_meta("10m", 600),
         };
         let encoded = good.encode();
         // Control: a normal payload.
         let ok = ParkPayload::decode(&encoded);
-        assert_eq!(ok.body, "안녕\n둘째 줄");
+        assert_eq!(ok.body, "hi\nsecond line");
         assert_eq!(ok.sender_name, "qa");
         assert!(ok.meta.request);
 
@@ -7046,19 +7170,19 @@ mod tests {
         // v2 layout: ver·sender_len·rb_len·rt_len·grp_len·uuid·epoch·entrance·flags 9 lines + the rest.
         for corrupt in [
             // No header at all.
-            "그냥 본문".to_string(),
+            "just a body".to_string(),
             // The version tag is an unknown value (format drift).
             unknown_version,
             // A length field is not a number.
             "2\nx\n0\n0\n0\n00000000-0000-0000-0000-000000000000\n0\nmcp\n-\nbody".to_string(),
             // The sum of lengths is larger than the remaining string (truncation).
             "2\n99\n0\n0\n0\n00000000-0000-0000-0000-000000000000\n0\nmcp\n-\nshort".to_string(),
-            // ★Cut in the middle of a char boundary★: '한' is 3 bytes but sender_len=1 so it splits in the middle of the character.
-            "2\n1\n0\n0\n0\n00000000-0000-0000-0000-000000000000\n0\nmcp\n-\n한글".to_string(),
+            // ★Cut in the middle of a char boundary★: the first Hangul syllable U+D55C is 3 bytes in UTF-8 but sender_len=1 so it splits in the middle of the character.
+            "2\n1\n0\n0\n0\n00000000-0000-0000-0000-000000000000\n0\nmcp\n-\n한글".to_string(), // hangul-ok
             // A case where the reply_to length makes the boundary misaligned (the second cut point).
-            "2\n0\n1\n0\n0\n00000000-0000-0000-0000-000000000000\n0\nmcp\n-\n한글".to_string(),
+            "2\n0\n1\n0\n0\n00000000-0000-0000-0000-000000000000\n0\nmcp\n-\n한글".to_string(), // hangul-ok
             // ★The group label cut point (C4 — the fourth cut point)★.
-            "2\n0\n0\n0\n1\n00000000-0000-0000-0000-000000000000\n0\nmcp\n-\n한글".to_string(),
+            "2\n0\n0\n0\n1\n00000000-0000-0000-0000-000000000000\n0\nmcp\n-\n한글".to_string(), // hangul-ok
             // Too few header lines.
             "2\n0\n0\n0\n".to_string(),
             // ★An out-of-vocabulary entrance (fix 3)★.
@@ -7075,9 +7199,12 @@ mod tests {
             let p = ParkPayload::decode(&corrupt);
             assert_eq!(
                 p.body, corrupt,
-                "깨진 payload 는 전체를 body 로 폴백(조용한 유실 금지): {corrupt:?}"
+                "a broken payload falls back to the whole as body (no silent loss): {corrupt:?}"
             );
-            assert!(!p.meta.request, "폴백은 계약 속성을 주장하지 않는다");
+            assert!(
+                !p.meta.request,
+                "the fallback does not claim contract attributes"
+            );
         }
     }
 
@@ -7085,7 +7212,7 @@ mod tests {
     fn one_corrupt_parked_item_does_not_abort_the_flush_batch() {
         let (svc, port) = svc();
         port.set_roster(vec![]);
-        for (id, body) in [("m-a", "첫째"), ("m-b", "둘째"), ("m-c", "셋째")] {
+        for (id, body) in [("m-a", "first"), ("m-b", "second"), ("m-c", "third")] {
             svc.park_absent_for_test(
                 id,
                 ident(),
@@ -7104,11 +7231,11 @@ mod tests {
         svc.flush_for(bob_id);
 
         let bodies = port.injected_bodies();
-        assert_eq!(bodies.len(), 3, "깨진 항목 하나가 배치를 끊지 않는다");
-        assert!(bodies[0].contains("첫째") && bodies[2].contains("셋째"));
+        assert_eq!(bodies.len(), 3, "one broken item does not cut the batch");
+        assert!(bodies[0].contains("first") && bodies[2].contains("third"));
         assert!(
             bodies[1].contains("CORRUPT"),
-            "깨진 항목은 폴백 봉투로라도 나간다(조용한 유실 금지): {}",
+            "a broken item goes out even as a fallback envelope (no silent loss): {}",
             bodies[1]
         );
     }
@@ -7133,26 +7260,32 @@ mod tests {
         // ① The first draw collides. (`pop()` takes from the back, so the list is in the reverse of draw order.)
         let mut two = vec!["m-fresh".to_string(), "m-taken".to_string()];
         let drawn = svc.draw_daemon_msg_id_with(|| two.pop().expect("draw"));
-        assert_eq!(drawn.id, "m-fresh", "충돌한 id 는 버리고 새 id 를 쓴다");
+        assert_eq!(
+            drawn.id, "m-fresh",
+            "the colliding id is discarded and a new id is used"
+        );
         assert_eq!(
             drawn.collided.as_deref(),
             Some("m-taken"),
-            "충돌한 쪽이 조사 단서 — 로그가 그 값을 찍는다"
+            "the colliding one is the investigation clue — the log prints that value"
         );
         assert!(!drawn.still_colliding);
 
         // ② The second one collides too.
         let mut both = vec!["m-taken".to_string(), "m-taken".to_string()];
         let drawn = svc.draw_daemon_msg_id_with(|| both.pop().expect("draw"));
-        assert_eq!(drawn.id, "m-taken", "통지 유실보다 관측상 오염이 낫다");
+        assert_eq!(
+            drawn.id, "m-taken",
+            "observational pollution is better than losing a notice"
+        );
         assert!(
             drawn.still_colliding,
-            "재-draw 마저 충돌하면 신호(로그 대상)"
+            "if even the re-draw collides, a signal (log target)"
         );
 
         // ③ Control: no collision.
         let mut once = vec!["m-new".to_string()];
-        let drawn = svc.draw_daemon_msg_id_with(|| once.pop().expect("draw 는 1회뿐이어야"));
+        let drawn = svc.draw_daemon_msg_id_with(|| once.pop().expect("draw must happen only once"));
         assert_eq!(drawn.id, "m-new");
         assert!(drawn.collided.is_none());
     }
@@ -7169,10 +7302,10 @@ mod tests {
         port.set_roster(vec![boss]);
         fill_open_request_cap_evictable(&svc, boss_from);
         let cap = svc.occupied_slots_for_test();
-        assert!(cap > 0, "상한까지 채워졌다");
+        assert!(cap > 0, "filled up to the cap");
         assert!(
             svc.msg_id_in_use_for_test("cap0"),
-            "전제: 희생자가 될 픽스처 계약이 존재한다"
+            "premise: a fixture contract to become the victim exists"
         );
 
         // After the reservation (retirement mark) · before commit — while this guard is alive is the provisional window.
@@ -7182,7 +7315,7 @@ mod tests {
         assert_eq!(
             svc.open_request_count(),
             cap + 1,
-            "잠정 창: 표시된 희생자와 새 계약이 동시에 추적에 있어야"
+            "provisional window: the marked victim and the new contract must be tracked at the same time"
         );
         let mut two = vec!["m-fresh".to_string(), "cap0".to_string()];
         let drawn = svc.draw_daemon_msg_id_with(|| two.pop().expect("draw"));
@@ -7197,15 +7330,15 @@ mod tests {
         assert_eq!(
             svc.open_request_count(),
             cap,
-            "커밋(결말 확정) 뒤에는 희생자가 물리 제거돼 상한으로 돌아온다"
+            "after commit (outcome settled), the victim is physically removed and it returns to the cap"
         );
         assert!(
             in_use,
-            "잠정 은퇴 중인 cap0 은 발급 검사에서 '사용 중' 이어야(H3)"
+            "cap0, provisionally retiring, must be 'in use' in the issuance check (H3)"
         );
         assert_eq!(
             drawn_id, "m-fresh",
-            "그래서 발급 경로가 그 id 를 버리고 새 id 로 갈아탄다"
+            "so the issuance path discards that id and switches to a new id"
         );
     }
 
@@ -7234,8 +7367,12 @@ mod tests {
             &req_meta("10m", 600),
         );
         assert_eq!(again, Err(SendFail::Reject(SendReject::IdCollision)));
-        assert_eq!(svc.ledger_snapshot().len(), before, "장부 레코드 증가 없음");
-        assert_eq!(svc.parked_len(tid("bob")), 1, "파킹 증가 없음");
+        assert_eq!(
+            svc.ledger_snapshot().len(),
+            before,
+            "no ledger record increase"
+        );
+        assert_eq!(svc.parked_len(tid("bob")), 1, "no parking increase");
         assert!(port.injected_bodies().is_empty());
     }
 
@@ -7253,13 +7390,13 @@ mod tests {
             from,
             "alice",
             "bob",
-            "해줘",
+            "do it",
             Entrance::Mcp,
             &req_meta("10m", 600),
         )
         .expect("request");
-        let view = svc.message_state("m-req", t0).expect("조회");
-        assert!(view.awaiting_reply, "회신 전엔 대기 중");
+        let view = svc.message_state("m-req", t0).expect("query");
+        assert!(view.awaiting_reply, "waiting before the reply");
         assert_eq!(view.rows.len(), 1);
         assert_eq!(view.rows[0].status, "delivered");
 
@@ -7271,13 +7408,16 @@ mod tests {
             bob_from,
             "bob",
             "alice",
-            "했음",
+            "done",
             Entrance::Mcp,
             &reply_meta("m-req"),
         )
-        .expect("회신");
-        let view = svc.message_state("m-req", t0).expect("조회");
-        assert!(!view.awaiting_reply, "회신 도착 후엔 대기 해제");
+        .expect("reply");
+        let view = svc.message_state("m-req", t0).expect("query");
+        assert!(
+            !view.awaiting_reply,
+            "no longer waiting after the reply arrives"
+        );
         assert_eq!(view.rows[0].status, "replied");
     }
 
@@ -7297,18 +7437,18 @@ mod tests {
             Entrance::Mcp,
             &SendMeta::default(),
         )
-        .expect("발송");
+        .expect("send");
         let view = svc
             .message_state("m1", t0 + Duration::from_secs(90))
-            .expect("조회");
+            .expect("query");
         assert!(
             (85..=95).contains(&view.rows[0].age_secs),
-            "발송 경과 ≈ 90초: {}",
+            "elapsed since send ≈ 90 seconds: {}",
             view.rows[0].age_secs
         );
         let view = svc
             .message_state("m1", t0 - Duration::from_secs(10))
-            .expect("조회");
+            .expect("query");
         assert_eq!(view.rows[0].age_secs, 0);
     }
 
@@ -7331,13 +7471,13 @@ mod tests {
             Entrance::Mcp,
             &SendMeta::default(),
         )
-        .expect("파킹");
+        .expect("park");
         svc.park_absent_for_test(
             "m-out",
             alice_from,
             "alice",
             "bob",
-            "해줘",
+            "do it",
             Entrance::Mcp,
             &req_meta("10m", 600),
         )
@@ -7348,22 +7488,22 @@ mod tests {
             carol_from,
             "carol",
             "alice",
-            "이거 해줘",
+            "do this",
             Entrance::Mcp,
             &req_meta("30m", 1800),
         )
-        .expect("수신 request");
+        .expect("received request");
         port.set_roster(vec![bob_agent]);
         svc.park_absent_for_test(
             "m-other",
             carol_from,
             "carol",
             "bob",
-            "너 해라",
+            "you do it",
             Entrance::Mcp,
             &req_meta("10m", 600),
         )
-        .expect("남의 request");
+        .expect("someone else's request");
 
         let items = svc.open_items_for(alice_from.peer_id, t0);
         let tags: Vec<(&str, &str)> = items
@@ -7377,10 +7517,14 @@ mod tests {
                 ("outbound_pending", "m-park"),
                 ("reply_owed_by_me", "m-in"),
             ],
-            "세 방향이 태그로 구분되고 남의 계약은 빠진다: {items:?}"
+            "the three directions are told apart by tag and others' contracts are left out: {items:?}"
         );
-        assert_eq!(items[0].reply_by.as_deref(), Some("10m"), "기한 표기 원본");
-        assert_eq!(items[2].from, "carol", "내가 답할 상대");
+        assert_eq!(
+            items[0].reply_by.as_deref(),
+            Some("10m"),
+            "original deadline notation"
+        );
+        assert_eq!(items[2].from, "carol", "the one I must answer");
         assert!(items.iter().all(|i| !i.timed_out));
         let bob_items = svc.open_items_for(bob_from.peer_id, t0);
         let bob_tags: Vec<(&str, &str)> = bob_items
@@ -7393,7 +7537,7 @@ mod tests {
                 ("reply_owed_by_me", "m-other"),
                 ("reply_owed_by_me", "m-out"),
             ],
-            "bob 은 자기가 답할 두 건만: {bob_items:?}"
+            "bob only the two he must answer: {bob_items:?}"
         );
     }
 
@@ -7432,19 +7576,23 @@ mod tests {
             bob_from,
             "bob",
             "alice",
-            "됨",
+            "done",
             Entrance::Mcp,
             &reply_meta("m-a"),
         )
-        .expect("회신");
+        .expect("reply");
         svc.sweep(t0 + Duration::from_secs(601));
 
         let items = svc.open_items_for(alice_from.peer_id, t0 + Duration::from_secs(601));
         let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
-        assert_eq!(ids, vec!["m-b"], "회신 온 계약만 빠진다: {items:?}");
+        assert_eq!(
+            ids,
+            vec!["m-b"],
+            "only the replied contract is left out: {items:?}"
+        );
         assert!(
             items[0].timed_out,
-            "기한 초과 사실은 플래그로 보이되 목록에는 남는다"
+            "the deadline-exceeded fact shows as a flag but it stays in the list"
         );
     }
 
@@ -7462,7 +7610,7 @@ mod tests {
             boss_from,
             "boss",
             &twin_a.id.to_string(),
-            "해줘",
+            "do it",
             Entrance::Mcp,
             &req_meta("10m", 600),
         )
@@ -7475,12 +7623,12 @@ mod tests {
                 .map(|i| (i.direction.as_str(), i.id.as_str()))
                 .collect::<Vec<_>>(),
             vec![("reply_owed_by_me", "m-req")],
-            "지목된 쌍둥이 A 는 의무를 진다: {a_items:?}"
+            "targeted twin A bears the duty: {a_items:?}"
         );
         let b_items = svc.open_items_for(twin_b_from.peer_id, t0);
         assert!(
             b_items.is_empty(),
-            "받은 적 없는 쌍둥이 B 에게 의무가 붙으면 안 된다(B1): {b_items:?}"
+            "twin B, who never received it, must not get the duty (B1): {b_items:?}"
         );
         let boss_items = svc.open_items_for(boss_from.peer_id, t0);
         assert_eq!(
@@ -7510,8 +7658,12 @@ mod tests {
             Entrance::Mcp,
             &SendMeta::default(),
         )
-        .expect("파킹");
-        assert_eq!(svc.parked_len(tid("bob")), 1, "전제: 잠든 bob 앞 파킹");
+        .expect("park");
+        assert_eq!(
+            svc.parked_len(tid("bob")),
+            1,
+            "premise: parked addressed to asleep bob"
+        );
 
         // alice renames — same id, new name. The old name was taken by another agent.
         let (_, renamed) = live_with_id(alice_from.peer_id, "alice2");
@@ -7529,11 +7681,11 @@ mod tests {
                 ))
                 .collect::<Vec<_>>(),
             vec![("outbound_pending", "m-out", "alice", "bob")],
-            "개명 전에 보낸 대기분이 남고 행은 보낼 때 이름이다: {items:?}"
+            "the waiting item sent before the rename remains and the row has the name at send time: {items:?}"
         );
         assert!(
             svc.open_items_for(other_id, Instant::now()).is_empty(),
-            "옛 이름을 새로 가진 다른 에이전트에게는 보이지 않는다"
+            "not visible to another agent that newly has the old name"
         );
     }
 
@@ -7552,11 +7704,11 @@ mod tests {
             .into_iter()
             .filter(|i| i.direction == Direction::AwaitingTheirReply)
             .last()
-            .expect("채운 계약이 있다");
+            .expect("there are filled contracts");
         svc.close_contract_for_test(&last.id, tid(&last.to));
         assert!(
             svc.occupied_slots_for_test() > 0,
-            "전제: 상한 근처까지 채워졌다"
+            "premise: filled up near the cap"
         );
     }
 
@@ -7598,13 +7750,16 @@ mod tests {
             if svc.occupied_slots_for_test() == before {
                 break;
             }
-            assert!(i < 100_000, "상한이 관측되지 않는다 — 픽스처 전제 붕괴");
+            assert!(
+                i < 100_000,
+                "the cap is not observed — fixture premise collapsed"
+            );
         }
     }
 
     /// ★The reply duty stays with the agent (id) that received the request — even if a different agent with the same name comes up, neither the letter nor the duty
     ///   moves (ADR-0309 decisions 1 · 5 · 7)★. Reviving a device that re-stamps the duty onto the landing side or a branch that finds the recipient by name
-    ///   lets B take over A's duty and A sees 「답할 게 없다」 (there is nothing to answer).
+    ///   lets B take over A's duty and A sees 「there is nothing to answer」.
     #[test]
     fn the_reply_obligation_stays_with_the_addressed_agent_not_a_namesake() {
         let (svc, port, gate) = svc_gated();
@@ -7619,12 +7774,12 @@ mod tests {
             boss_from,
             "boss",
             &a_agent.id.to_string(),
-            "해줘",
+            "do it",
             Entrance::Mcp,
             &req_meta("10m", 600),
         )
-        .expect("busy 수신자 → 파킹된 request");
-        assert_eq!(svc.parked_len(a_agent.id), 1, "전제: 파킹");
+        .expect("busy recipient → parked request");
+        assert_eq!(svc.parked_len(a_agent.id), 1, "premise: parked");
 
         let (b_from, b_agent) = live_sender_distinct("worker");
         port.set_roster(vec![boss, b_agent.clone()]);
@@ -7632,14 +7787,14 @@ mod tests {
         svc.flush_for(b_agent.id);
         assert!(
             port.injected_bodies().is_empty(),
-            "동명 B 는 A 앞 편지를 받지 않는다(B2)"
+            "same-named B does not receive a letter addressed to A (B2)"
         );
-        assert_eq!(svc.parked_len(a_agent.id), 1, "A 의 큐에 그대로");
+        assert_eq!(svc.parked_len(a_agent.id), 1, "stays in A's queue");
 
         let b_items = svc.open_items_for(b_from.peer_id, t0);
         assert!(
             b_items.is_empty(),
-            "요청을 받은 적 없는 동명 B 에게 의무가 붙으면 안 된다: {b_items:?}"
+            "same-named B, who never received the request, must not get the duty: {b_items:?}"
         );
         let a_items = svc.open_items_for(a_from.peer_id, t0);
         assert_eq!(
@@ -7648,22 +7803,22 @@ mod tests {
                 .map(|i| (i.direction.as_str(), i.id.as_str()))
                 .collect::<Vec<_>>(),
             vec![("reply_owed_by_me", "m-req")],
-            "의무는 지목된 A 의 id 에 남는다: {a_items:?}"
+            "the duty stays on targeted A's id: {a_items:?}"
         );
         svc.handle_send(
             "m-rep",
             b_from,
             "worker",
             &["boss".to_string()],
-            "했음",
+            "done",
             Entrance::Mcp,
             &reply_meta("m-req"),
         )
-        .expect("행 응답");
+        .expect("row response");
         assert_eq!(
             svc.contract_outcome_for_test("m-req", a_agent.id),
             Some("awaiting_reply"),
-            "B 의 회신은 A 의 계약을 닫지 못한다"
+            "B's reply cannot close A's contract"
         );
         let boss_items = svc.open_items_for(boss_from.peer_id, t0);
         assert_eq!(
@@ -7675,7 +7830,7 @@ mod tests {
                 ("awaiting_their_reply", "m-req"),
                 ("outbound_pending", "m-req"),
             ],
-            "boss 는 회신을 기다리고, 편지는 A 가 아직 안 받아 대기분으로도 보인다: {boss_items:?}"
+            "boss waits for the reply, and the letter, not yet received by A, also shows as waiting: {boss_items:?}"
         );
     }
 
@@ -7697,13 +7852,17 @@ mod tests {
             boss_from,
             "boss",
             &a_agent.id.to_string(),
-            "해줘",
+            "do it",
             Entrance::Mcp,
             &req_meta("10m", 600),
         )
-        .expect("busy 수신자 → 파킹된 request");
-        assert_eq!(svc.parked_len(tid("worker")), 1, "전제: 그 id 큐에 파킹");
-        assert_eq!(svc.open_request_count(), 1, "전제: 계약 1건 열림");
+        .expect("busy recipient → parked request");
+        assert_eq!(
+            svc.parked_len(tid("worker")),
+            1,
+            "premise: parked in that id's queue"
+        );
+        assert_eq!(svc.open_request_count(), 1, "premise: 1 contract open");
 
         // A new incarnation of the same agent (same id).
         let b_agent = LiveAgent {
@@ -7726,11 +7885,11 @@ mod tests {
                     reply_from(b_id),
                     "worker",
                     &["boss".to_string()],
-                    "다 했다",
+                    "all done",
                     Entrance::Mcp,
                     &reply_meta("m-req"),
                 )
-                .expect("회신 발송은 성공해야");
+                .expect("the reply send must succeed");
             }));
         }
         svc.flush_for(b_id);
@@ -7739,43 +7898,43 @@ mod tests {
         assert_eq!(
             bodies.len(),
             2,
-            "flush 배달 1 + 회신 1(전제 — 회신이 실제로 나갔다): {bodies:?}"
+            "1 flush delivery + 1 reply (premise — the reply actually went out): {bodies:?}"
         );
         // The reply is recorded before the outer write, so the order assertion is by presence, not by index.
         assert!(
             bodies.iter().any(|b| b.contains(r#"in-reply-to="m-req""#)),
-            "회신 봉투가 실제로 나갔어야: {bodies:?}"
+            "the reply envelope must have actually gone out: {bodies:?}"
         );
         assert!(
             bodies.iter().any(|b| b.contains(r#"type="request""#)),
-            "파킹돼 있던 request 도 배달됐어야: {bodies:?}"
+            "the parked request must have been delivered too: {bodies:?}"
         );
 
         assert_eq!(
             svc.open_request_count(),
             0,
-            "주입 도중 도착한 회신이 계약을 닫았어야"
+            "the reply that arrived during the inject must have closed the contract"
         );
         assert!(
             svc.open_items_for(b_id, t0).is_empty(),
-            "회신한 쪽에 남은 의무도 없다"
+            "the replying side has no remaining duty either"
         );
         assert!(
             svc.open_items_for(boss_from.peer_id, t0).is_empty(),
-            "발신자도 더 기다리지 않는다"
+            "the sender no longer waits either"
         );
 
         svc.sweep(t0 + Duration::from_secs(700));
         assert_eq!(
             port.injected_bodies().len(),
             2,
-            "닫힌 계약엔 기한 통지가 없다: {:?}",
+            "a closed contract has no deadline notice: {:?}",
             port.injected_bodies()
         );
         assert_eq!(
             svc.parked_len(tid("boss")),
             0,
-            "통지가 파킹으로 새지도 않는다"
+            "the notice does not leak into parking either"
         );
         let _ = a_from;
     }
@@ -7796,11 +7955,11 @@ mod tests {
             Entrance::Mcp,
             &SendMeta::default(),
         )
-        .expect("발송");
-        let view = svc.message_state("m1", t0).expect("조회");
+        .expect("send");
+        let view = svc.message_state("m1", t0).expect("query");
         assert!(
             !view.may_be_truncated,
-            "evict 전이면 rows 가 전부라고 단언할 수 있다"
+            "before evict, rows can be asserted to be everything"
         );
     }
 
@@ -7819,10 +7978,10 @@ mod tests {
             Entrance::Mcp,
             &SendMeta::default(),
         )
-        .expect("배달 완료");
+        .expect("delivery complete");
         assert!(
             svc.open_items_for(from.peer_id, Instant::now()).is_empty(),
-            "배달된 통보는 미결이 아니다"
+            "a delivered notice is not outstanding"
         );
     }
 
@@ -7876,7 +8035,8 @@ mod tests {
         let (from, me) = live_sender("alice");
         port.set_roster(vec![me]);
 
-        let out = send(&svc, "m1", from, "alice", &["ghost"]).expect("행 응답(전체 반려 아님)");
+        let out =
+            send(&svc, "m1", from, "alice", &["ghost"]).expect("row response (not a whole bounce)");
         assert_eq!(
             rows(&out),
             vec![(
@@ -7884,28 +8044,38 @@ mod tests {
                 SendStatus::Failed,
                 Some(FailCode::RecipientNotFound)
             )],
-            "부재 1인 발송의 답은 error 가 아니라 failed 행 1개다(경로 1벌 — spec §5)"
+            "the answer to a send to 1 absent recipient is 1 failed row, not an error (one path — spec §5)"
         );
-        assert!(out[0].hint.is_some(), "실패 행엔 code + hint 필수(spec §6)");
+        assert!(
+            out[0].hint.is_some(),
+            "a failure row requires code + hint (spec §6)"
+        );
 
-        assert_eq!(svc.parked_total_for_test(), 0, "파킹 큐에 안 실린다");
+        assert_eq!(
+            svc.parked_total_for_test(),
+            0,
+            "not put in the parking queue"
+        );
         assert!(
             svc.ledger_statuses("m1")
                 .iter()
                 .all(|s| *s != DeliveryStatus::Pending),
-            "장부에 pending 상태 레코드가 없어야(파킹한 적 없음)"
+            "the ledger must have no pending record (never parked)"
         );
         assert_eq!(
             svc.ledger_statuses("m1"),
             vec![DeliveryStatus::Failed],
-            "종점 `failed` 행 1개만 남는다"
+            "only 1 terminal `failed` row remains"
         );
 
         let view = svc
             .message_state("m1", Instant::now())
-            .expect("실패 행도 조회된다");
+            .expect("a failure row can be queried too");
         assert_eq!(view.rows.len(), out.len());
-        assert!(!view.may_be_truncated, "기대 행수와 남은 행수가 같다");
+        assert!(
+            !view.may_be_truncated,
+            "the expected row count equals the remaining row count"
+        );
         assert_eq!(view.rows[0].status, "failed");
     }
 
@@ -7922,7 +8092,7 @@ mod tests {
         assert_eq!(
             rows(&via_all),
             rows(&via_names),
-            "`@all` 펼침 결과와 직접 지목이 **같은 결말**이어야(경로 1벌 — ADR-0111 결정 4)"
+            "the `@all` expansion result and direct targeting must have **the same outcome** (one path — ADR-0111 decision 4)"
         );
         assert_eq!(
             rows(&via_all)
@@ -7940,7 +8110,7 @@ mod tests {
         assert_eq!(
             port.roster_calls() - before,
             1,
-            "수신자 수와 무관하게 로스터 조회는 발송당 1회(ADR-0111 결정 2)"
+            "the roster is queried once per send regardless of the recipient count (ADR-0111 decision 2)"
         );
     }
 
@@ -7953,31 +8123,32 @@ mod tests {
         assert_eq!(
             send(&svc, "m1", from, "alice", &["@all"]),
             Err(SendReject::GroupEmpty),
-            "발신자만 살아 있으면 @all 은 최종 집합 0명 → 전체 반려"
+            "if only the sender is alive, @all has a final set of 0 → whole bounce"
         );
         assert!(
             svc.ledger_snapshot().is_empty(),
-            "전체 반려는 부작용 0(장부 레코드 없음)"
+            "a whole bounce has 0 side effects (no ledger record)"
         );
 
-        let out = send(&svc, "m2", from, "alice", &["@all", "alice"]).expect("반려 아님");
+        let out = send(&svc, "m2", from, "alice", &["@all", "alice"]).expect("not a bounce");
         assert_eq!(
             rows(&out),
             vec![("alice".to_string(), SendStatus::Delivered, None)],
-            "직접 지목 자기발송은 살아남는다(제외는 **펼침에만** 적용 — spec §4)"
+            "a directly targeted self-send survives (the exclusion applies **only to expansion** — spec §4)"
         );
 
         port.set_dormant(&["sleepy"]);
-        let all = send(&svc, "m3", from, "alice", &["@all"]).expect("잠든 이름이 있으면 반려 아님");
+        let all = send(&svc, "m3", from, "alice", &["@all"])
+            .expect("not a bounce if there is an asleep name");
         assert_eq!(
             rows(&all),
             vec![("sleepy".to_string(), SendStatus::Pending, None)],
-            "@all 은 잠든 이름을 펼쳐 파킹한다(발신자는 여전히 제외): {all:?}"
+            "@all expands asleep names and parks them (the sender is still excluded): {all:?}"
         );
         assert_eq!(
             send(&svc, "m4", from, "alice", &["@here"]),
             Err(SendReject::GroupEmpty),
-            "@here 는 잠든 이름을 보지 않으므로 여전히 전체 반려"
+            "@here does not see asleep names, so still a whole bounce"
         );
     }
 
@@ -7989,24 +8160,24 @@ mod tests {
         port.set_roster(vec![me, bob]);
         port.set_dormant(&["sleepy"]);
 
-        let out = send(&svc, "m1", from, "alice", &["sleepy", "@all"]).expect("반려 아님");
+        let out = send(&svc, "m1", from, "alice", &["sleepy", "@all"]).expect("not a bounce");
         assert_eq!(
             rows(&out),
             vec![
                 ("sleepy".to_string(), SendStatus::Pending, None),
                 ("bob".to_string(), SendStatus::Delivered, None),
             ],
-            "잠든 이름은 명시 지목 자리에 **1행**만 남는다(펼침분은 흡수): {out:?}"
+            "an asleep name leaves **1 row** only, at the explicit targeting spot (the expanded part is absorbed): {out:?}"
         );
         assert_eq!(
             svc.parked_len(tid("sleepy")),
             1,
-            "파킹도 1건이어야(이중 배달 금지)"
+            "parking must be 1 item too (no double delivery)"
         );
         assert_eq!(
             svc.ledger_statuses("m1"),
             vec![DeliveryStatus::Pending, DeliveryStatus::Delivered],
-            "장부 행수 = 응답 행수(2행)"
+            "ledger row count = response row count (2 rows)"
         );
     }
 
@@ -8029,7 +8200,7 @@ mod tests {
                 ("dup".to_string(), SendStatus::Delivered, None),
                 ("zed".to_string(), SendStatus::Delivered, None),
             ],
-            "쌍둥이는 각자 행 · 둘 다 배달"
+            "twins each get a row · both delivered"
         );
         assert_eq!(port.injected_targets(), vec![d1, d2, z]);
     }
@@ -8047,14 +8218,18 @@ mod tests {
         assert_eq!(
             out.iter().map(|r| r.to.as_str()).collect::<Vec<_>>(),
             vec!["zed", "bob", "carol"],
-            "명시 토큰(zed) 먼저 → 그 뒤 펼침 결과 사전순(bob, carol). zed 는 한 줄뿐"
+            "the explicit token (zed) first → then the expansion results alphabetically (bob, carol). zed is only one line"
         );
         assert_eq!(
             out.len(),
             3,
-            "@all 에 이미 든 이름을 겹쳐 적어도 행이 늘지 않는다"
+            "writing a name already in @all again does not add rows"
         );
-        assert_eq!(port.injected_bodies().len(), 3, "겹친 수신자에게 배달 1회");
+        assert_eq!(
+            port.injected_bodies().len(),
+            3,
+            "1 delivery to an overlapping recipient"
+        );
     }
 
     #[test]
@@ -8064,26 +8239,35 @@ mod tests {
         let (_b, bob) = live("bob");
         port.set_roster(vec![me, bob]);
 
-        let out = send(&svc, "m1", from, "alice", &["없는이름", "bob"]).expect("부분 진행");
+        let out = send(&svc, "m1", from, "alice", &["nonexistent-name", "bob"])
+            .expect("partial progress");
         assert_eq!(
             rows(&out),
             vec![
                 (
-                    "없는이름".to_string(),
+                    "nonexistent-name".to_string(),
                     SendStatus::Failed,
                     Some(FailCode::RecipientNotFound)
                 ),
                 ("bob".to_string(), SendStatus::Delivered, None),
             ]
         );
-        assert_eq!(port.injected_bodies().len(), 1, "산 수신자에겐 그대로 간다");
+        assert_eq!(
+            port.injected_bodies().len(),
+            1,
+            "goes to the live recipient as is"
+        );
 
         let before = port.injected_bodies().len();
         assert!(matches!(
             send(&svc, "m2", from, "alice", &["@typo", "bob"]),
             Err(SendReject::GroupNotFound { .. })
         ));
-        assert_eq!(port.injected_bodies().len(), before, "전체 반려는 배달 0");
+        assert_eq!(
+            port.injected_bodies().len(),
+            before,
+            "a whole bounce has 0 deliveries"
+        );
     }
 
     #[test]
@@ -8105,7 +8289,7 @@ mod tests {
                 Entrance::Mcp,
                 &SendMeta::default(),
             )
-            .expect("부분 진행은 Ok");
+            .expect("partial progress is Ok");
         assert_eq!(
             rows(&out),
             vec![
@@ -8122,7 +8306,7 @@ mod tests {
         let all_failed = send(&svc, "m2", from, "alice", &["ghost1", "ghost2"]).expect("Ok shape");
         assert!(
             all_failed.iter().all(|r| r.status == SendStatus::Failed),
-            "전 행 failed"
+            "all rows failed"
         );
         assert_eq!(all_failed.len(), 2);
     }
@@ -8137,13 +8321,14 @@ mod tests {
         gate.set_busy(f_id, 0);
 
         for i in 0..100 {
-            let out = send(&svc, &format!("f{i}"), from, "alice", &["full"]).expect("cap 이내");
-            assert_eq!(out[0].status, SendStatus::Pending, "{i}번째");
+            let out =
+                send(&svc, &format!("f{i}"), from, "alice", &["full"]).expect("within the cap");
+            assert_eq!(out[0].status, SendStatus::Pending, "#{i}");
         }
         assert_eq!(svc.parked_len(tid("full")), 100);
         let oldest_before = svc.parked_msg_ids(tid("full"))[0].clone();
 
-        let out = send(&svc, "over", from, "alice", &["full", "carol"]).expect("부분 진행");
+        let out = send(&svc, "over", from, "alice", &["full", "carol"]).expect("partial progress");
         assert_eq!(
             rows(&out),
             vec![
@@ -8154,18 +8339,18 @@ mod tests {
                 ),
                 ("carol".to_string(), SendStatus::Delivered, None),
             ],
-            "가득 찬 한 수신자가 나머지 배달을 막지 않는다(전체 반려 승격 없음)"
+            "one full recipient does not block the rest of the delivery (no escalation to a whole bounce)"
         );
-        assert_eq!(svc.parked_len(tid("full")), 100, "큐 길이 불변");
+        assert_eq!(svc.parked_len(tid("full")), 100, "queue length unchanged");
         assert_eq!(
             svc.parked_msg_ids(tid("full"))[0],
             oldest_before,
-            "가장 오래된 항목이 그대로 있다 = **회수 시도 없음**(ADR-0114 결정 1)"
+            "the oldest item is still there = **no reclaim attempt** (ADR-0114 decision 1)"
         );
         assert_eq!(
             svc.ledger_statuses("over"),
             vec![DeliveryStatus::Failed, DeliveryStatus::Delivered],
-            "실패 수신자도 장부 종점 행을 남긴다"
+            "a failed recipient leaves a terminal ledger row too"
         );
     }
 
@@ -8183,13 +8368,13 @@ mod tests {
                 from,
                 "alice",
                 &["bob".to_string(), "carol".to_string()],
-                "해줘",
+                "do it",
                 Entrance::Mcp,
                 &req_meta("10m", 600),
             )
             .expect("ok");
         assert!(out.iter().all(|r| r.status == SendStatus::Delivered));
-        assert_eq!(svc.open_request_count(), 2, "수신자마다 계약 1건");
+        assert_eq!(svc.open_request_count(), 2, "1 contract per recipient");
 
         let bob_from = SenderIdentity {
             peer_id: b_id,
@@ -8200,15 +8385,15 @@ mod tests {
             bob_from,
             "bob",
             &["alice".to_string()],
-            "했음",
+            "done",
             Entrance::Mcp,
             &reply_meta("m-req"),
         )
-        .expect("회신 배달");
+        .expect("reply delivery");
         assert_eq!(
             svc.open_request_count(),
             1,
-            "전체회신 없음 — carol 계약은 그대로 열려 있다"
+            "no reply-all — carol's contract stays open"
         );
 
         svc.sweep(Instant::now() + Duration::from_secs(601));
@@ -8217,7 +8402,11 @@ mod tests {
             .into_iter()
             .filter(|(_, from, _, _)| from == NOTICE_SENDER_LABEL)
             .collect();
-        assert_eq!(notices.len(), 1, "회신한 계약엔 통지가 없다: {notices:?}");
+        assert_eq!(
+            notices.len(),
+            1,
+            "a replied contract has no notice: {notices:?}"
+        );
         let _ = c_id;
     }
 
@@ -8236,7 +8425,7 @@ mod tests {
                 from,
                 "alice",
                 &["@all".to_string(), "ghost".to_string()],
-                "전원 대기",
+                "everyone stand by",
                 Entrance::Mcp,
                 &SendMeta::default(),
             )
@@ -8255,8 +8444,8 @@ mod tests {
         );
         assert_eq!(
             port.injected_bodies(),
-            vec![r#"<message from="alice" to="@all">전원 대기</message>"#.to_string()],
-            "수용 2인 → to 노출 · @주소는 펼치지 않고 토큰 그대로 · 실패 토큰 제외"
+            vec![r#"<message from="alice" to="@all">everyone stand by</message>"#.to_string()],
+            "2 accepted → to exposed · @addresses kept as tokens without expanding · failed tokens excluded"
         );
 
         gate.clear();
@@ -8264,12 +8453,12 @@ mod tests {
         assert_eq!(
             port.injected_bodies().len(),
             2,
-            "파킹분이 flush 로 배달됐다"
+            "the parked item was delivered by the flush"
         );
         assert_eq!(
             port.injected_bodies()[1],
-            r#"<message from="alice" to="@all">전원 대기</message>"#,
-            "발송 순간 표기 그대로(park payload 가 동결값을 flush 까지 나른다)"
+            r#"<message from="alice" to="@all">everyone stand by</message>"#,
+            "the notation at send time as is (the park payload carries the frozen value up to the flush)"
         );
 
         drop(svc);
@@ -8281,7 +8470,7 @@ mod tests {
         assert_eq!(
             port2.injected_bodies(),
             vec![r#"<message from="alice">body</message>"#.to_string()],
-            "수용 1인 → to 속성 생략"
+            "1 accepted → to attribute omitted"
         );
     }
 
@@ -8296,7 +8485,7 @@ mod tests {
         send(&svc, "m1", from, "alice", &["@all", "carol"]).expect("ok");
         assert!(
             port.injected_bodies()[0].contains(r#"to="@all,carol""#),
-            "발신자가 쓴 순서 그대로(@all 먼저, 그 다음 명시 이름): {:?}",
+            "in the order the sender wrote (@all first, then the explicit name): {:?}",
             port.injected_bodies()
         );
     }
@@ -8311,7 +8500,7 @@ mod tests {
         port.set_roster(vec![me, recv]);
         gate.set_busy(r_id, 0);
         for i in 0..100 {
-            send(&svc, &format!("p{i}"), from, "alice", &["recv"]).expect("cap 이내 파킹");
+            send(&svc, &format!("p{i}"), from, "alice", &["recv"]).expect("parking within the cap");
         }
         assert_eq!(svc.parked_len(tid("recv")), 100);
 
@@ -8332,7 +8521,7 @@ mod tests {
                     Entrance::Mcp,
                     &SendMeta::default(),
                 )
-                .expect("행 응답");
+                .expect("row response");
             seen_h.lock().unwrap().push(out[0].status);
         }));
         svc.flush_for(r_id);
@@ -8340,12 +8529,12 @@ mod tests {
         assert_eq!(
             during.lock().unwrap().as_slice(),
             &[SendStatus::Failed],
-            "배치가 나가 있는 동안의 신규 유입은 분모(큐 + in-flight)에 걸려 반려된다(F1)"
+            "new inflow while a batch is out is caught by the denominator (queue + in-flight) and bounced (F1)"
         );
         assert_eq!(
             svc.ledger_statuses("concurrent"),
             vec![DeliveryStatus::Failed],
-            "반려도 실패 행으로 장부에 남는다(ADR-0111 — 옛 '반려는 장부 미기록' 과 반전)"
+            "a bounce also remains in the ledger as a failure row (ADR-0111 — the reverse of the old 'bounces are not recorded in the ledger')"
         );
     }
 
@@ -8357,7 +8546,7 @@ mod tests {
         port.set_roster(vec![me, recv]);
         gate.set_busy(r_id, 0);
         for i in 0..2 {
-            send(&svc, &format!("p{i}"), from, "alice", &["recv"]).expect("파킹");
+            send(&svc, &format!("p{i}"), from, "alice", &["recv"]).expect("park");
         }
         gate.clear();
         bell.take(); // The parking doorbell is out of interest here — only the deferral/retake axis is looked at.
@@ -8373,11 +8562,11 @@ mod tests {
         assert_eq!(
             port.injected_bodies().len(),
             2,
-            "겹쳐 돌지 않으므로 배치는 한 번만, 그러나 전부 나간다"
+            "no overlapping runs, so the batch runs only once, yet everything goes out"
         );
         assert!(
             bell.take().contains(&r_id),
-            "유예된 깨우기는 정산 시 **되울려야** 한다(lost wakeup 금지)"
+            "a deferred wake-up **must be rung again** at settlement (no lost wakeup)"
         );
     }
 
@@ -8399,11 +8588,11 @@ mod tests {
             boss_from,
             "boss",
             &["worker".to_string()],
-            "해줘",
+            "do it",
             Entrance::Mcp,
             &req_meta("10m", 600),
         )
-        .expect("배달");
+        .expect("delivery");
         assert_eq!(svc.open_request_count(), 1);
         let slots_before = svc.occupied_slots_for_test();
 
@@ -8424,35 +8613,35 @@ mod tests {
                 worker_from,
                 "worker",
                 &["boss".to_string()],
-                "했음",
+                "done",
                 Entrance::Mcp,
                 &reply_meta("m-req"),
             )
-            .expect("행 응답");
+            .expect("row response");
         assert_eq!(
             rows_out[0].code,
             Some(FailCode::RecipientNotFound),
-            "없는 요청자에게는 회신이 가지 않는다"
+            "a reply does not go to a nonexistent requester"
         );
         assert_eq!(
             svc.open_request_count(),
             0,
-            "도달 불가 확정 회신은 계약을 reply_failed 로 **종결**한다(ADR-0116 결정 2)"
+            "a reply confirmed unreachable **terminates** the contract as reply_failed (ADR-0116 decision 2)"
         );
         assert_eq!(
             svc.contract_outcome_for_test("m-req", tid("worker")),
             Some("reply_failed"),
-            "종점 어휘는 replied 가 아니다 — 회신이 성립했다고 주장하지 않는다(spec §6 축 구분)"
+            "the terminal word is not replied — it does not claim the reply went through (spec §6 axis distinction)"
         );
         assert_eq!(
             svc.occupied_slots_for_test(),
             slots_before - 1,
-            "512 계수에서 빠진다(ADR-0118 결정 4 — 좀비가 상한을 먹지 않게)"
+            "left out of the 512 count (ADR-0118 decision 4 — so zombies do not eat the cap)"
         );
         let owed = svc.open_items_for(w_id, Instant::now());
         assert!(
             !owed.iter().any(|i| i.id == "m-req"),
-            "종결된 계약은 미결 목록에 없어야: {owed:?}"
+            "a terminated contract must not be in the outstanding list: {owed:?}"
         );
         assert_eq!(
             svc.ledger_statuses("m-req"),
@@ -8463,7 +8652,7 @@ mod tests {
             !svc.ledger_snapshot()
                 .iter()
                 .any(|(_, from, _, _)| from == NOTICE_SENDER_LABEL),
-            "종결된 계약엔 기한 초과 통지가 나가지 않아야"
+            "no deadline-exceeded notice must go out for a terminated contract"
         );
     }
 
@@ -8480,15 +8669,15 @@ mod tests {
             boss_from,
             "boss",
             &["worker".to_string()],
-            "해줘",
+            "do it",
             Entrance::Mcp,
             &req_meta("10m", 600),
         )
-        .expect("배달");
+        .expect("delivery");
 
         gate.set_busy(boss_id, 0);
         for i in 0..100 {
-            send(&svc, &format!("fill{i}"), boss_from, "boss", &["boss"]).expect("파킹");
+            send(&svc, &format!("fill{i}"), boss_from, "boss", &["boss"]).expect("park");
         }
         let worker_from = SenderIdentity {
             peer_id: w_id,
@@ -8500,20 +8689,20 @@ mod tests {
                 worker_from,
                 "worker",
                 &["boss".to_string()],
-                "했음",
+                "done",
                 Entrance::Mcp,
                 &reply_meta("m-req"),
             )
-            .expect("행 응답");
+            .expect("row response");
         assert_eq!(
             rows_out[0].code,
             Some(FailCode::MailboxFull),
-            "보관함이 가득이라 이 회신은 실패 행이다"
+            "the mailbox is full, so this reply is a failure row"
         );
         assert_eq!(
             svc.contract_outcome_for_test("m-req", tid("worker")),
             Some("awaiting_reply"),
-            "일시 사유 실패는 **무동작** — 계약은 오픈 유지(ADR-0118 결정 2)"
+            "a failure for a temporary reason is a **no-op** — the contract stays open (ADR-0118 decision 2)"
         );
 
         svc.flush_for(boss_id);
@@ -8525,20 +8714,20 @@ mod tests {
                 worker_from,
                 "worker",
                 &["boss".to_string()],
-                "했음(재시도)",
+                "done (retry)",
                 Entrance::Mcp,
                 &reply_meta("m-req"),
             )
-            .expect("행 응답");
+            .expect("row response");
         assert_eq!(
             retry[0].status,
             SendStatus::Delivered,
-            "재시도는 배달된다: {retry:?}"
+            "the retry is delivered: {retry:?}"
         );
         assert_eq!(
             svc.contract_outcome_for_test("m-req", tid("worker")),
             Some("replied"),
-            "재시도 성공이 정상 경로로 계약을 닫는다(오픈 유지의 존재 이유)"
+            "a successful retry closes the contract on the normal path (the reason for staying open)"
         );
     }
 
@@ -8553,11 +8742,11 @@ mod tests {
             boss_from,
             "boss",
             &["worker".to_string()],
-            "해줘",
+            "do it",
             Entrance::Mcp,
             &req_meta("10m", 600),
         )
-        .expect("배달");
+        .expect("delivery");
 
         let (_b2, boss_twin) = live_distinct("boss");
         let (_w2, worker_again) = live("worker");
@@ -8572,25 +8761,25 @@ mod tests {
                 worker_from,
                 "worker",
                 &["boss".to_string()],
-                "했음",
+                "done",
                 Entrance::Mcp,
                 &reply_meta("m-req"),
             )
-            .expect("행 응답");
+            .expect("row response");
         assert_eq!(
             rows_out[0].code,
             Some(FailCode::RecipientAmbiguous),
-            "동명 요청자에게는 배달할 수 없다: {rows_out:?}"
+            "cannot deliver to a same-named requester: {rows_out:?}"
         );
         assert_eq!(
             svc.contract_outcome_for_test("m-req", tid("worker")),
             Some("awaiting_reply"),
-            "동명 실패는 **무동작** — 계약 오픈 유지(사용자가 이름을 정리하면 재시도가 닫는다)"
+            "a same-name failure is a **no-op** — the contract stays open (once the user sorts out the names, a retry closes it)"
         );
         assert_eq!(
             svc.open_request_count(),
             1,
-            "512 계수에서 빠지지 않는다(종결이 아니다)"
+            "not left out of the 512 count (not a termination)"
         );
     }
 
@@ -8604,7 +8793,10 @@ mod tests {
 
         let res = reserve_marked_contract(&svc, from, "m-phantom");
         let (vid, vto) = {
-            let r = res.retired.as_ref().expect("전제: 희생자가 표시됐다");
+            let r = res
+                .retired
+                .as_ref()
+                .expect("premise: the victim was marked");
             (r.request_id.clone(), r.recipient_id)
         };
 
@@ -8626,7 +8818,10 @@ mod tests {
                     now,
                 );
                 i += 1;
-                assert!(i < 100_000, "링 회전이 관측되지 않는다 — 픽스처 전제 붕괴");
+                assert!(
+                    i < 100_000,
+                    "the ring rotation is not observed — fixture premise collapsed"
+                );
             }
             // ② Close and ③ one more row → the purge on the evict path cleans up that contract that is "finished and has no history".
             st.ledger.close_for_test(&vid, vto, now);
@@ -8643,7 +8838,7 @@ mod tests {
         }
         assert!(
             !svc.contract_tracked_for_test(&vid, vto),
-            "전제: 희생자가 커밋 전에 사라졌다(purge) — 이 전제가 깨지면 아래 단언이 무의미하다"
+            "premise: the victim vanished before commit (purge) — if this premise breaks, the assertions below are meaningless"
         );
 
         let mut log = RetirementLog::default();
@@ -8653,21 +8848,25 @@ mod tests {
         }
         assert!(
             log.real.is_empty(),
-            "커밋이 실제로 제거한 게 없으면 은퇴로 세지 않는다: {:?}",
+            "if the commit actually removed nothing, it is not counted as a retirement: {:?}",
             log.real
         );
-        assert_eq!(log.phantom.len(), 1, "대신 이상(유령 계획)으로 남는다");
+        assert_eq!(
+            log.phantom.len(),
+            1,
+            "it remains as an anomaly (ghost plan) instead"
+        );
         log_contract_retirements("m-phantom", &log.real);
         let reports = retirement_reports::drain();
         assert!(
             reports.is_empty(),
-            "커밋이 실제로 제거한 게 없으면 은퇴 보고도 없어야(유령 은퇴 금지): {reports:?}"
+            "if the commit actually removed nothing, there must be no retirement report either (no ghost retirement): {reports:?}"
         );
         assert!(
             svc.contract_tracked_for_test("m-phantom", tid("ghost-worker")),
-            "예약 자신의 계약은 살아 있어야"
+            "the reservation's own contract must be alive"
         );
-        assert_eq!(svc.marked_retirements_for_test(), 0, "표시가 남지 않는다");
+        assert_eq!(svc.marked_retirements_for_test(), 0, "no mark remains");
     }
 
     #[test]
@@ -8686,28 +8885,32 @@ mod tests {
                 from,
                 "boss",
                 &["worker".to_string()],
-                "해줘",
+                "do it",
                 Entrance::Mcp,
                 &SendMeta {
                     request: true,
                     ..SendMeta::default()
                 },
             )
-            .expect("행 응답");
-        assert_eq!(out[0].status, SendStatus::Delivered, "전제: 즉시 배달 갈래");
+            .expect("row response");
+        assert_eq!(
+            out[0].status,
+            SendStatus::Delivered,
+            "premise: the immediate delivery branch"
+        );
         let reports = retirement_reports::drain();
         assert_eq!(
             reports.len(),
             1,
-            "은퇴 1건은 정확히 1줄로 보고돼야 — 계측이 결말 루프 앞에 있으면 0줄이다: {reports:?}"
+            "1 retirement must be reported in exactly 1 line — if the metering is before the outcome loop, it is 0 lines: {reports:?}"
         );
         assert!(
             !reports[0].0.is_empty() && reports[0].0 != "m-retire",
-            "보고는 **내보낸 옛 계약**을 지목해야(새 발송이 아니라): {reports:?}"
+            "the report must point at **the old contract that was evicted** (not the new send): {reports:?}"
         );
         assert!(
             !svc.contract_tracked_for_test(&reports[0].0, reports[0].1),
-            "보고된 계약은 실제로 사라졌어야(일어나지 않은 일을 보고하면 안 된다)"
+            "the reported contract must have actually vanished (must not report something that did not happen)"
         );
 
         // ② A send that ended in failure (fill the limit with **non-retirable** ones and end with RequestCapacity — it must start with a new service so
@@ -8724,19 +8927,19 @@ mod tests {
                 from,
                 "boss",
                 &["worker".to_string()],
-                "해줘",
+                "do it",
                 Entrance::Mcp,
                 &req_meta("10m", 600),
             )
-            .expect("행 응답");
+            .expect("row response");
         assert_eq!(
             out2[0].code,
             Some(FailCode::RequestCapacity),
-            "전제: 상한 포화로 실패 행: {out2:?}"
+            "premise: failure row due to cap saturation: {out2:?}"
         );
         assert!(
             retirement_reports::drain().is_empty(),
-            "일어나지 않은 은퇴를 보고하면 운영자가 유령 은퇴를 쫓는다"
+            "reporting a retirement that did not happen sends the operator chasing a ghost retirement"
         );
     }
 
@@ -8751,12 +8954,16 @@ mod tests {
             // Fills only the worker queue to the cap — it is a notification so it is unrelated to the contract axis.
             gate.set_busy(t_id, 0);
             for i in 0..100 {
-                send(&svc, &format!("filler{i}"), from, "boss", &["worker"]).expect("파킹");
+                send(&svc, &format!("filler{i}"), from, "boss", &["worker"]).expect("park");
             }
             fill_open_request_cap_evictable(&svc, from);
             let occupied_before = svc.occupied_slots_for_test();
             let tracking_before = svc.tracking_len_for_test();
-            assert_eq!(svc.marked_retirements_for_test(), 0, "전제: 남은 표시 없음");
+            assert_eq!(
+                svc.marked_retirements_for_test(),
+                0,
+                "premise: no mark remains"
+            );
             let _ = retirement_reports::drain();
 
             let out = svc
@@ -8765,53 +8972,53 @@ mod tests {
                     from,
                     "boss",
                     &["lead".to_string(), "worker".to_string()],
-                    "해줘",
+                    "do it",
                     Entrance::Mcp,
                     &req_meta("10m", 600),
                 )
-                .expect("행 응답");
-            let worker_row = out.iter().find(|r| r.to == "worker").expect("worker 행");
+                .expect("row response");
+            let worker_row = out.iter().find(|r| r.to == "worker").expect("worker row");
             assert_eq!(
                 worker_row.code,
                 Some(FailCode::MailboxFull),
-                "보관함이 가득한 수신자는 cap 게이트에서 실패 행으로 끝나야: {out:?}"
+                "a recipient with a full mailbox must end as a failure row at the cap gate: {out:?}"
             );
-            let lead_row = out.iter().find(|r| r.to == "lead").expect("lead 행");
+            let lead_row = out.iter().find(|r| r.to == "lead").expect("lead row");
             assert_eq!(
                 lead_row.status,
                 SendStatus::Delivered,
-                "전제: 앞 수신자는 정상 수용돼 자기 희생자를 실제로 은퇴시킨다: {out:?}"
+                "premise: the earlier recipient is accepted normally and actually retires its own victim: {out:?}"
             );
             assert_eq!(
                 svc.marked_retirements_for_test(),
                 0,
-                "실패로 끝난 request 는 **아무도 은퇴시키지 않는다** — 표시가 남으면 안 된다"
+                "a request that ended in failure **retires nobody** — no mark may remain"
             );
             assert_eq!(
                 svc.occupied_slots_for_test(),
                 occupied_before,
-                "cap 분모가 그대로여야(성공분은 −희생자 +신규로 상쇄) — 실패분 표시가 남으면 분모가 영구히 준다"
+                "the cap denominator must be unchanged (the success offsets −victim +new) — if the failure's mark remains, the denominator shrinks forever"
             );
             assert_eq!(
                 svc.tracking_len_for_test(),
                 tracking_before,
-                "잠정 계약도 남지 않아야 — 남으면 추적이 무계로 자란다"
+                "no provisional contract may remain either — if one does, tracking grows unbounded"
             );
             assert!(!svc.contract_tracked_for_test("m-late", tid("worker")));
             assert!(
                 svc.contract_tracked_for_test("m-late", tid("lead")),
-                "실패한 수신자의 롤백이 같은 발송의 성공한 수신자 계약까지 걷어가면 안 된다"
+                "a failed recipient's rollback must not take away the contract of a successful recipient of the same send"
             );
             let reports = retirement_reports::drain();
             assert_eq!(
                 reports.len(),
                 1,
-                "은퇴는 수용된 수신자 몫 1건뿐: {reports:?}"
+                "only 1 retirement, for the accepted recipient: {reports:?}"
             );
             assert_ne!(
                 reports[0].1,
                 tid("worker"),
-                "실패 행은 은퇴의 주체가 아니다"
+                "a failure row is not the subject of a retirement"
             );
         }
 
@@ -8822,7 +9029,7 @@ mod tests {
         port.set_roster(vec![me, full]);
         gate.set_busy(f_id, 0);
         for i in 0..100 {
-            send(&svc, &format!("p{i}"), from, "boss", &["full"]).expect("파킹");
+            send(&svc, &format!("p{i}"), from, "boss", &["full"]).expect("park");
         }
         fill_open_request_cap_evictable(&svc, from);
         let occupied_before = svc.occupied_slots_for_test();
@@ -8832,16 +9039,16 @@ mod tests {
                 from,
                 "boss",
                 &["full".to_string()],
-                "해줘",
+                "do it",
                 Entrance::Mcp,
                 &req_meta("10m", 600),
             )
-            .expect("행 응답");
+            .expect("row response");
         assert_eq!(out[0].code, Some(FailCode::MailboxFull));
         assert_eq!(
             svc.marked_retirements_for_test(),
             0,
-            "pass A 실패도 은퇴를 성립시키지 않는다"
+            "a pass A failure does not establish a retirement either"
         );
         assert_eq!(svc.occupied_slots_for_test(), occupied_before);
     }
@@ -8869,7 +9076,7 @@ mod tests {
                 ..SendMeta::default()
             },
         )
-        .expect("여유 1자리를 은퇴 가능 계약으로 메운다");
+        .expect("fills the 1 spare spot with a retirable contract");
 
         let out = svc
             .handle_send(
@@ -8877,33 +9084,33 @@ mod tests {
                 from,
                 "boss",
                 &["w1".to_string(), "w2".to_string()],
-                "해줘",
+                "do it",
                 Entrance::Mcp,
                 &SendMeta {
                     request: true,
                     ..SendMeta::default()
                 },
             )
-            .expect("행 응답");
+            .expect("row response");
         assert_eq!(out.len(), 2);
         assert_eq!(
             out[0].status,
             SendStatus::Delivered,
-            "첫 수신자는 여유 희생자를 얻어 접수된다: {out:?}"
+            "the first recipient gets the spare victim and is accepted: {out:?}"
         );
         assert!(
             svc.contract_tracked_for_test("m-two", tid("w1")),
-            "★핵심★: 첫 수신자의 계약이 살아 있어야 한다 — 같은 발송의 두 번째 수신자가 잡아먹으면 안 된다"
+            "★key★: the first recipient's contract must be alive — the second recipient of the same send must not eat it"
         );
         match out[1].status {
             SendStatus::Failed => assert_eq!(
                 out[1].code,
                 Some(FailCode::RequestCapacity),
-                "두 번째 수신자의 실패 사유는 상한뿐(자기 발송을 먹지 못하므로): {out:?}"
+                "the second recipient's failure reason is only the cap (since it cannot eat its own send): {out:?}"
             ),
             _ => assert!(
                 svc.contract_tracked_for_test("m-two", tid("w2")),
-                "접수된 수신자는 자기 계약을 가져야: {out:?}"
+                "an accepted recipient must have its own contract: {out:?}"
             ),
         }
         // Cross-check by sender attribution — number of accepted recipients == number of contracts opened by this send (attribution instead of the total).
@@ -8918,7 +9125,7 @@ mod tests {
             .count();
         assert_eq!(
             mine, admitted,
-            "접수된 수신자마다 계약이 하나씩 있어야(자기잠식이면 모자란다)"
+            "each accepted recipient must have one contract (self-cannibalization would leave it short)"
         );
     }
 
@@ -8943,9 +9150,9 @@ mod tests {
                 Instant::now(),
             ) {
                 OpenOutcome::OpenedAfterMarking(rc) => Some(rc),
-                other => panic!("전제: 상한 압력으로 표시가 붙어야 — {other:?}"),
+                other => panic!("premise: a mark must be attached by cap pressure — {other:?}"),
             };
-            assert_eq!(st.ledger.marked_retirement_count_for_test(), 1, "표시 1건");
+            assert_eq!(st.ledger.marked_retirement_count_for_test(), 1, "1 mark");
             let res = open_reservation(&mut st, &svc, "m-drop", tid("ghost-worker"), retired);
             drop(st); // Release the lock so that Drop's try_lock succeeds.
             let hook = std::panic::take_hook();
@@ -8956,18 +9163,18 @@ mod tests {
             std::panic::set_hook(hook);
             assert!(
                 hit.is_err(),
-                "정산 없이 소멸하면 debug 빌드에서 즉시 터져야(H1 — 잊은 갈래를 테스트가 잡는다)"
+                "vanishing without settlement must blow up immediately in a debug build (H1 — the test catches the forgotten branch)"
             );
         }
 
         assert!(
             !svc.contract_tracked_for_test("m-drop", tid("ghost-worker")),
-            "Drop 이 잠정 계약을 제거해야"
+            "Drop must remove the provisional contract"
         );
         assert_eq!(
             svc.marked_retirements_for_test(),
             0,
-            "Drop 이 희생자 표시도 풀어야 — 남으면 cap 분모가 영구히 줄어든다"
+            "Drop must release the victim mark too — if it remains, the cap denominator shrinks forever"
         );
         assert_eq!(svc.occupied_slots_for_test(), occupied_before);
         assert_eq!(svc.tracking_len_for_test(), tracking_before);
@@ -8995,7 +9202,7 @@ mod tests {
                 ..SendMeta::default()
             },
         )
-        .expect("여유 1자리를 은퇴 가능 계약으로 메운다");
+        .expect("fills the 1 spare spot with a retirable contract");
 
         let out = svc
             .handle_send(
@@ -9003,43 +9210,43 @@ mod tests {
                 from,
                 "boss",
                 &["w1".to_string(), "w2".to_string()],
-                "해줘",
+                "do it",
                 Entrance::Mcp,
                 &SendMeta {
                     request: true,
                     ..SendMeta::default()
                 },
             )
-            .expect("행 응답");
+            .expect("row response");
         assert_eq!(out.len(), 2);
         assert_eq!(
             out[0].status,
             SendStatus::Pending,
-            "전제: 첫 수신자는 턴 중이라 파킹된다(이 갈래를 태우는 게 이 테스트의 목적): {out:?}"
+            "premise: the first recipient is in a turn, so it is parked (running this branch is the purpose of this test): {out:?}"
         );
-        assert_eq!(svc.parked_len(tid("w1")), 1, "실제로 큐에 실렸다");
+        assert_eq!(svc.parked_len(tid("w1")), 1, "actually put in the queue");
         assert!(
             svc.contract_tracked_for_test("m-park", tid("w1")),
-            "★핵심★: 파킹된 수신자의 계약이 살아 있어야 — 같은 발송의 두 번째 수신자가 잡아먹으면 안 된다"
+            "★key★: the parked recipient's contract must be alive — the second recipient of the same send must not eat it"
         );
         assert!(
             !svc.contract_tracked_for_test("spare", tid("spare-victim")),
-            "파킹 갈래도 **커밋**으로 정산돼 표시된 희생자를 물리 제거해야(롤백/미정산이면 표시가 남아 cap 분모가 영구히 준다)"
+            "the parking branch must also settle with a **commit** and physically remove the marked victim (with rollback/no settlement the mark remains and the cap denominator shrinks forever)"
         );
         assert_eq!(
             svc.marked_retirements_for_test(),
             0,
-            "정산이 끝나면 표시가 남아 있을 수 없다"
+            "once settlement is done, no mark can remain"
         );
         match out[1].status {
             SendStatus::Failed => assert_eq!(
                 out[1].code,
                 Some(FailCode::RequestCapacity),
-                "두 번째 수신자의 실패 사유는 상한뿐(자기 발송을 먹지 못하므로): {out:?}"
+                "the second recipient's failure reason is only the cap (since it cannot eat its own send): {out:?}"
             ),
             _ => assert!(
                 svc.contract_tracked_for_test("m-park", tid("w2")),
-                "접수된 수신자는 자기 계약을 가져야: {out:?}"
+                "an accepted recipient must have its own contract: {out:?}"
             ),
         }
         let admitted = out
@@ -9053,7 +9260,7 @@ mod tests {
             .count();
         assert_eq!(
             mine, admitted,
-            "접수된 수신자마다 계약이 하나씩 — 파킹된 계약이 잠정으로 남으면 여기서 모자란다"
+            "one contract per accepted recipient — if the parked contract stays provisional, it comes up short here"
         );
     }
 
@@ -9077,9 +9284,9 @@ mod tests {
             Instant::now(),
         ) {
             OpenOutcome::OpenedAfterMarking(rc) => Some(rc),
-            other => panic!("전제: 상한 압력으로 표시가 붙어야 — {other:?}"),
+            other => panic!("premise: a mark must be attached by cap pressure — {other:?}"),
         };
-        assert_eq!(st.ledger.marked_retirement_count_for_test(), 1, "표시 1건");
+        assert_eq!(st.ledger.marked_retirement_count_for_test(), 1, "1 mark");
         let res = open_reservation(&mut st, svc, msg_id, tid("ghost-worker"), retired);
         drop(st);
         res
@@ -9119,20 +9326,20 @@ mod tests {
                 from,
                 "boss",
                 &["worker".to_string()],
-                "해줘",
+                "do it",
                 Entrance::Mcp,
                 &req_meta("10m", 600),
             )
-            .expect("행 응답");
+            .expect("row response");
         assert_eq!(
             out[0].status,
             SendStatus::Delivered,
-            "전제: 주입 갈래를 탔다: {out:?}"
+            "premise: took the inject branch: {out:?}"
         );
 
         assert!(
             svc.contract_tracked_for_test("m-slow", tid("worker")),
-            "소유자가 살아 있는 예약을 sweep 이 회수하면 안 된다(R1)"
+            "the sweep must not reclaim a reservation whose owner is alive (R1)"
         );
         let sender_side: Vec<String> = svc
             .open_items_for(from.peer_id, Instant::now())
@@ -9143,7 +9350,7 @@ mod tests {
         assert_eq!(
             sender_side,
             vec!["awaiting_their_reply".to_string()],
-            "발신자는 회신을 기다려야: {sender_side:?}"
+            "the sender must wait for the reply: {sender_side:?}"
         );
         let recipient_side: Vec<String> = svc
             .open_items_for(w_id, Instant::now())
@@ -9154,16 +9361,20 @@ mod tests {
         assert_eq!(
             recipient_side,
             vec!["reply_owed_by_me".to_string()],
-            "수신자는 답할 의무를 봐야: {recipient_side:?}"
+            "the recipient must see the duty to answer: {recipient_side:?}"
         );
 
         let reports = retirement_reports::drain();
-        assert_eq!(reports.len(), 1, "은퇴 1건 = 보고 1줄: {reports:?}");
-        assert_eq!(svc.marked_retirements_for_test(), 0, "표시가 남지 않는다");
+        assert_eq!(
+            reports.len(),
+            1,
+            "1 retirement = 1 report line: {reports:?}"
+        );
+        assert_eq!(svc.marked_retirements_for_test(), 0, "no mark remains");
         assert_eq!(
             svc.occupied_slots_for_test(),
             occupied_before,
-            "cap 산술도 그대로(은퇴 1 − 신규 1)"
+            "the cap arithmetic is unchanged too (1 retired − 1 new)"
         );
 
         svc.handle_send(
@@ -9171,28 +9382,28 @@ mod tests {
             reply_from(w_id),
             "worker",
             &["boss".to_string()],
-            "다 했다",
+            "all done",
             Entrance::Mcp,
             &reply_meta("m-slow"),
         )
-        .expect("회신 발송");
+        .expect("reply send");
         // The observation surface of closing = **the outstanding lookup** (the tracking item itself remains until cleaned up together with the history).
         assert!(
             svc.open_items_for(from.peer_id, Instant::now())
                 .iter()
                 .all(|i| i.id != "m-slow"),
-            "회신이 계약을 닫아야 — 발신자의 미결에서 사라진다(옛 구멍에선 NoMatch 라 영원히 남았다)"
+            "the reply must close the contract — it disappears from the sender's outstanding items (with the old hole it was NoMatch and stayed forever)"
         );
         assert!(
             svc.open_items_for(w_id, Instant::now())
                 .iter()
                 .all(|i| i.id != "m-slow"),
-            "회신자의 의무도 사라져야"
+            "the replier's duty must disappear too"
         );
         assert_eq!(
             svc.ledger_statuses("m-slow"),
             vec![DeliveryStatus::Replied],
-            "이력도 `Replied` 로 닫혀야 — 프로브가 본 영구 `Delivered`(감사 기록의 거짓말)의 반증"
+            "the history must close as `Replied` too — the refutation of the permanent `Delivered` the probe saw (a lie in the audit record)"
         );
     }
 
@@ -9214,33 +9425,36 @@ mod tests {
             let svc2 = svc.clone();
             std::thread::spawn(move || {
                 let _st = svc2.state.lock().expect("lock");
-                locked_tx.send(()).expect("신호");
-                release_rx.recv().expect("해제 신호");
+                locked_tx.send(()).expect("signal");
+                release_rx.recv().expect("release signal");
             })
         };
-        locked_rx.recv().expect("락 점유 확인");
+        locked_rx.recv().expect("lock held confirmed");
         let hit = catch_quietly(|| drop(guard));
         if cfg!(debug_assertions) {
-            assert!(hit.is_err(), "정산 누락은 debug 에서 red 여야(H1)");
+            assert!(
+                hit.is_err(),
+                "a missed settlement must be red in debug (H1)"
+            );
         }
-        release_tx.send(()).expect("해제");
+        release_tx.send(()).expect("release");
         holder.join().expect("holder");
 
         assert!(
             svc.contract_tracked_for_test("m-locked", tid("ghost-worker")),
-            "try_lock 이 실패했으니 Drop 은 아무 것도 못 했다 — 이 전제가 깨지면 아래 보증 단언이 무의미해진다"
+            "try_lock failed, so Drop could do nothing — if this premise breaks, the guarantee assertions below become meaningless"
         );
-        assert_eq!(svc.marked_retirements_for_test(), 1, "표시도 남아 있다");
+        assert_eq!(svc.marked_retirements_for_test(), 1, "the mark remains too");
 
         svc.sweep(Instant::now() + Duration::from_secs(30));
         assert!(
             !svc.contract_tracked_for_test("m-locked", tid("ghost-worker")),
-            "sweep 이 잠정 계약을 회수해야(F1 보증 계층)"
+            "the sweep must reclaim the provisional contract (F1 guarantee layer)"
         );
         assert_eq!(
             svc.marked_retirements_for_test(),
             0,
-            "희생자 표시도 풀려야 — 남으면 cap 분모가 영구히 준다"
+            "the victim mark must be released too — if it remains, the cap denominator shrinks forever"
         );
         assert_eq!(svc.occupied_slots_for_test(), occupied_before);
         assert_eq!(svc.tracking_len_for_test(), tracking_before);
@@ -9261,17 +9475,17 @@ mod tests {
             panic!("boom");
         });
         let payload = *hit
-            .expect_err("패닉이 전파돼야")
+            .expect_err("the panic must propagate")
             .downcast::<&str>()
-            .expect("페이로드는 원래 패닉 그대로");
+            .expect("the payload is the original panic as is");
         assert_eq!(
             payload, "boom",
-            "Drop 이 원래 패닉을 자기 패닉으로 갈아치우면 원인이 사라진다"
+            "if Drop replaced the original panic with its own panic, the cause would vanish"
         );
 
         assert!(
             !svc.contract_tracked_for_test("m-unwind", tid("ghost-worker")),
-            "언와인딩 중에도 롤백은 최선 노력으로 수행된다"
+            "even during unwinding, the rollback is performed on a best-effort basis"
         );
         assert_eq!(svc.marked_retirements_for_test(), 0);
         assert_eq!(svc.occupied_slots_for_test(), occupied_before);
@@ -9291,11 +9505,11 @@ mod tests {
             boss_from,
             "boss",
             &["worker".to_string()],
-            "해줘",
+            "do it",
             Entrance::Mcp,
             &req_meta("10m", 600),
         )
-        .expect("배달");
+        .expect("delivery");
         assert_eq!(svc.open_request_count(), 1);
 
         gate.set_busy(boss_id, 0);
@@ -9305,27 +9519,27 @@ mod tests {
                 reply_from(w_id),
                 "worker",
                 &["boss".to_string()],
-                "했음",
+                "done",
                 Entrance::Mcp,
                 &reply_meta("m-req"),
             )
-            .expect("행 응답");
+            .expect("row response");
         assert_eq!(
             rows_out[0].status,
             SendStatus::Pending,
-            "턴 중 요청자에게는 파킹된다: {rows_out:?}"
+            "parked for a requester in a turn: {rows_out:?}"
         );
         assert_eq!(
             svc.open_request_count(),
             0,
-            "★파킹된 회신도 계약을 닫는다(M5)★ — 접수됐으므로 곧 배달된다"
+            "★a parked reply closes the contract too (M5)★ — it was accepted, so it will be delivered soon"
         );
         svc.sweep(Instant::now() + Duration::from_secs(601));
         assert!(
             !svc.ledger_snapshot()
                 .iter()
                 .any(|(_, from, _, _)| from == NOTICE_SENDER_LABEL),
-            "닫힌 계약엔 거짓 기한 통지가 없다"
+            "a closed contract has no false deadline notice"
         );
     }
 
@@ -9360,7 +9574,7 @@ mod tests {
         assert_eq!(
             build_to_attr(&addr, &[true, true]),
             "bob,carol",
-            "같은 값을 두 번 적으면 수신 LLM 이 인원수를 오독한다(M4)"
+            "writing the same value twice makes the receiving LLM misread the head count (M4)"
         );
 
         // ③ M6: the expansion of an `@` token is **all failures**.
@@ -9371,7 +9585,7 @@ mod tests {
         assert_eq!(
             build_to_attr(&addr, &[true, false]),
             "carol",
-            "펼침이 전부 실패한 @토큰은 이 발송에 아무 것도 기여하지 않았다(M6)"
+            "an @token whose expansion entirely failed contributed nothing to this send (M6)"
         );
 
         // ④ It stays if even one is accepted (A5 — including absorption).
@@ -9382,7 +9596,7 @@ mod tests {
         assert_eq!(
             build_to_attr(&addr, &[true, true]),
             "bob,carol,@all",
-            "펼침이 앞선 명시 지목에 완전히 흡수돼도 실패는 아니다(A5)"
+            "even if the expansion is entirely absorbed by an earlier explicit target, it is not a failure (A5)"
         );
 
         // ⑤ M4 (group axis): the same label is not written twice.
@@ -9415,10 +9629,10 @@ mod tests {
         let (_c, carol) = live("carol");
         port.set_roster(vec![me, bob, carol]);
         let out = send(&svc, "m1", from, "alice", &["bob", "bob", "carol"]).expect("ok");
-        assert_eq!(out.len(), 2, "표기 중복은 행을 만들지 않는다");
+        assert_eq!(out.len(), 2, "a duplicated notation does not create rows");
         assert!(
             port.injected_bodies()[0].contains(r#"to="bob,carol""#),
-            "봉투 to 도 중복 없이: {:?}",
+            "the envelope to without duplicates too: {:?}",
             port.injected_bodies()
         );
     }
@@ -9440,12 +9654,12 @@ mod tests {
                 (id1.clone(), SendStatus::Delivered, None),
                 (id2.clone(), SendStatus::Delivered, None),
             ],
-            "토큰마다 자기 행 · 둘 다 배달: {out:?}"
+            "each token its own row · both delivered: {out:?}"
         );
         assert_eq!(
             port.injected_targets(),
             vec![d1, d2],
-            "쌍둥이 각자에게 한 통씩"
+            "one letter to each twin"
         );
 
         // ② A name + two exact ids (3 tokens) — the name row is ambiguous by the name resolution rule as is, and the id rows are each delivered.
@@ -9494,9 +9708,9 @@ mod tests {
                 (id1.clone(), SendStatus::Delivered, None),
                 (id2.clone(), SendStatus::Delivered, None),
             ],
-            "반복 토큰은 접히고 행은 쌍둥이마다 하나: {out:?}"
+            "repeated tokens fold and there is one row per twin: {out:?}"
         );
-        // Ledger transitions are found by `(msg_id, 받는 이 id)` (msg_id, receiving id) — if two rows used one key, one would remain in pending.
+        // Ledger transitions are found by `(msg_id, receiving id)` — if two rows used one key, one would remain in pending.
         assert_eq!(
             svc.ledger_statuses("m1"),
             vec![DeliveryStatus::Delivered, DeliveryStatus::Delivered]
@@ -9504,7 +9718,7 @@ mod tests {
         assert_eq!(
             port.injected_targets(),
             vec![d1, d2],
-            "배달은 쌍둥이마다 한 통"
+            "delivery is one letter per twin"
         );
     }
 
@@ -9523,7 +9737,7 @@ mod tests {
                 SendStatus::Failed,
                 Some(FailCode::RecipientNotFound)
             )],
-            "없는 이름의 반복은 실패 행 하나: {out:?}"
+            "a repeated nonexistent name is one failure row: {out:?}"
         );
         assert_eq!(svc.ledger_statuses("m1"), vec![DeliveryStatus::Failed]);
 
@@ -9540,13 +9754,10 @@ mod tests {
                 SendStatus::Failed,
                 Some(FailCode::RecipientAmbiguous)
             )],
-            "모호한 이름의 반복은 실패 행 하나: {out2:?}"
+            "a repeated ambiguous name is one failure row: {out2:?}"
         );
         assert_eq!(svc2.ledger_statuses("m2"), vec![DeliveryStatus::Failed]);
-        assert!(
-            port2.injected_targets().is_empty(),
-            "아무에게도 주입하지 않는다"
-        );
+        assert!(port2.injected_targets().is_empty(), "injects to no one");
     }
 
     /// ★The id first, then the name (the same order as the control entrance `resolve_in`)★ — a UUID-shaped name cannot hijack
@@ -9576,7 +9787,7 @@ mod tests {
         assert_eq!(
             port.injected_targets(),
             vec![bob_id, named_id],
-            "bob 의 id 는 bob 에게(이름이 같은 impostor 가 아니라) · 명부에 없는 UUID 는 그 이름의 주인에게"
+            "bob's id to bob (not to an impostor with the same name) · a UUID not in the registry to the owner of that name"
         );
     }
 
@@ -9595,11 +9806,11 @@ mod tests {
                 from,
                 "boss",
                 &["worker".to_string()],
-                "해줘",
+                "do it",
                 Entrance::Mcp,
                 &req_meta("10m", 600),
             )
-            .expect("행 응답(전체 반려 아님 — 행 실패)");
+            .expect("row response (not a whole bounce — a row failure)");
         assert_eq!(
             rows(&out),
             vec![(
@@ -9611,14 +9822,14 @@ mod tests {
         assert_eq!(
             port.injected_bodies().len(),
             injected_before,
-            "계약을 못 연 수신자에겐 **배달도 하지 않는다**(추적 없는 request 금지)"
+            "a recipient whose contract could not be opened **is not delivered to either** (no untracked request)"
         );
         assert_eq!(
             svc.ledger_statuses("m-over"),
             vec![DeliveryStatus::Failed],
-            "장부에 delivered 가 아니라 종점 failed 만 남는다"
+            "only a terminal failed remains in the ledger, not delivered"
         );
-        assert_eq!(svc.parked_len(tid("worker")), 0, "파킹도 없다");
+        assert_eq!(svc.parked_len(tid("worker")), 0, "no parking either");
     }
 
     #[test]
@@ -9630,10 +9841,10 @@ mod tests {
         port.set_roster(vec![me, bob, carol]);
 
         let out = send(&svc, "m1", from, "alice", &["bob", "carol", "@all"]).expect("ok");
-        assert_eq!(out.len(), 2, "행은 흡수돼 2개");
+        assert_eq!(out.len(), 2, "rows absorbed to 2");
         assert!(
             port.injected_bodies()[0].contains(r#"to="bob,carol,@all""#),
-            "흡수된 @all 토큰도 입력 표기 순으로 남아야: {:?}",
+            "an absorbed @all token must also remain in input notation order: {:?}",
             port.injected_bodies()
         );
     }
@@ -9682,15 +9893,18 @@ mod tests {
             assert_eq!(
                 svc.can_admit_for_test(tid("recv")),
                 true,
-                "{i}번째 예측: 아직 여유"
+                "prediction #{i}: still room"
             );
-            send(&svc, &format!("p{i}"), from, "alice", &["recv"]).expect("파킹");
+            send(&svc, &format!("p{i}"), from, "alice", &["recv"]).expect("park");
         }
-        assert!(!svc.can_admit_for_test(tid("recv")), "cap 도달 예측");
+        assert!(
+            !svc.can_admit_for_test(tid("recv")),
+            "cap reached prediction"
+        );
         assert_eq!(
-            send(&svc, "over", from, "alice", &["recv"]).expect("행")[0].code,
+            send(&svc, "over", from, "alice", &["recv"]).expect("row")[0].code,
             Some(FailCode::MailboxFull),
-            "실제 park 도 반려 — 예측과 일치"
+            "the actual park is bounced too — matches the prediction"
         );
 
         gate.clear();
@@ -9712,7 +9926,7 @@ mod tests {
                     Entrance::Mcp,
                     &SendMeta::default(),
                 )
-                .expect("행")[0]
+                .expect("row")[0]
                 .code
                 .is_none();
             seen_h.lock().unwrap().push((predicted, actual));
@@ -9722,7 +9936,7 @@ mod tests {
         assert_eq!(obs.len(), 1);
         assert_eq!(
             obs[0].0, obs[0].1,
-            "in-flight 창에서도 예측 == 실제(분모가 갈리면 여기서 터진다)"
+            "prediction == actual in the in-flight window too (if the denominators diverge, it blows up here)"
         );
     }
 
@@ -9737,26 +9951,30 @@ mod tests {
         port.set_roster(vec![me]);
         port.set_dormant(&["sleepy"]);
 
-        let out = send(&svc, "m-dorm", from, "alice", &["sleepy"]).expect("반려 아님");
+        let out = send(&svc, "m-dorm", from, "alice", &["sleepy"]).expect("not a bounce");
         assert_eq!(
             (out[0].status, out[0].code),
             (SendStatus::Pending, None),
-            "잠듦은 수용(파킹)이다 — 실패 행이 아니다: {out:?}"
+            "asleep is acceptance (parking) — not a failure row: {out:?}"
         );
         assert!(
             out[0].hint.as_deref().unwrap_or("").contains("saved agent"),
-            "힌트가 '저장된 에이전트라 복원 시 배달' 을 말해야: {:?}",
+            "the hint must say 'a saved agent, delivered on restore': {:?}",
             out[0].hint
         );
         assert_eq!(
             svc.ledger_statuses("m-dorm"),
             vec![DeliveryStatus::Pending],
-            "파킹 레코드가 장부에 남는다(조용한 유실 금지)"
+            "the parking record remains in the ledger (no silent loss)"
         );
-        assert_eq!(svc.parked_len(tid("sleepy")), 1, "그 id 큐에 파킹된다");
+        assert_eq!(
+            svc.parked_len(tid("sleepy")),
+            1,
+            "parked in that id's queue"
+        );
         assert!(
             port.injected_bodies().is_empty(),
-            "잠든 상대에게 주입을 시도하지 않는다(wake 미발동)"
+            "does not try to inject into an asleep counterpart (no wake triggered)"
         );
 
         let (late_id, late) = live("sleepy");
@@ -9766,7 +9984,7 @@ mod tests {
         assert_eq!(
             port.injected_bodies(),
             vec![r#"<message from="alice">body</message>"#.to_string()],
-            "복원 시 flush 로 배달된다"
+            "delivered by flush on restore"
         );
         assert_eq!(
             svc.ledger_statuses("m-dorm"),
@@ -9783,26 +10001,26 @@ mod tests {
         port.set_roster(vec![me, bob]);
         port.set_dormant(&["sleepy"]);
 
-        let here = send(&svc, "m-here", from, "alice", &["@here"]).expect("반려 아님");
+        let here = send(&svc, "m-here", from, "alice", &["@here"]).expect("not a bounce");
         assert_eq!(
             here.iter().map(|r| r.to.clone()).collect::<Vec<_>>(),
             vec!["bob".to_string()],
-            "@here 펼침에 잠든 이름이 끼면 안 된다: {here:?}"
+            "an asleep name must not be in the @here expansion: {here:?}"
         );
         assert_eq!(
             svc.parked_len(tid("sleepy")),
             0,
-            "@here 는 잠든 큐를 만들지 않는다"
+            "@here does not create asleep queues"
         );
 
-        let mixed = send(&svc, "m-mix", from, "alice", &["sleepy", "@here"]).expect("반려 아님");
+        let mixed = send(&svc, "m-mix", from, "alice", &["sleepy", "@here"]).expect("not a bounce");
         assert_eq!(
             rows(&mixed),
             vec![
                 ("sleepy".to_string(), SendStatus::Pending, None),
                 ("bob".to_string(), SendStatus::Delivered, None),
             ],
-            "잠든 행은 pending, 산 행은 배달: {mixed:?}"
+            "the asleep row is pending, the live row delivered: {mixed:?}"
         );
     }
 
@@ -9814,19 +10032,19 @@ mod tests {
         port.set_roster(vec![me, bob]);
         port.set_dormant(&["sleepy"]);
 
-        let all = send(&svc, "m-all", from, "alice", &["@all"]).expect("반려 아님");
+        let all = send(&svc, "m-all", from, "alice", &["@all"]).expect("not a bounce");
         assert_eq!(
             rows(&all),
             vec![
                 ("bob".to_string(), SendStatus::Delivered, None),
                 ("sleepy".to_string(), SendStatus::Pending, None),
             ],
-            "산 멤버는 배달, 잠든 멤버는 파킹(수용): {all:?}"
+            "live members delivered, asleep members parked (accepted): {all:?}"
         );
         assert_eq!(
             svc.parked_len(tid("sleepy")),
             1,
-            "잠든 몫은 그 id 큐에 쌓인다"
+            "the asleep share accumulates in that id's queue"
         );
 
         let (late_id, late) = live("sleepy");
@@ -9836,7 +10054,7 @@ mod tests {
         assert_eq!(
             svc.ledger_statuses("m-all"),
             vec![DeliveryStatus::Delivered, DeliveryStatus::Delivered],
-            "잠든 몫도 등장하면 배달된다"
+            "the asleep share is delivered too when it appears"
         );
     }
 
@@ -9852,7 +10070,7 @@ mod tests {
         let sleeper = PeerId::new_v4();
         port.set_dormant_agents(&[(sleeper, "alice"), (tid("sleepy"), "sleepy")]);
 
-        let all = send(&svc, "m-all", from, "alice", &["@all"]).expect("반려 아님");
+        let all = send(&svc, "m-all", from, "alice", &["@all"]).expect("not a bounce");
         assert_eq!(
             rows(&all),
             vec![
@@ -9861,11 +10079,15 @@ mod tests {
                 ("bob".to_string(), SendStatus::Delivered, None),
                 ("sleepy".to_string(), SendStatus::Pending, None),
             ],
-            "산 쌍둥이는 배달 · 잠든 동명은 그 id 로 파킹 · 발신자 행은 없다: {all:?}"
+            "the live twin delivered · the asleep same-named one parked under that id · no sender row: {all:?}"
         );
-        assert_eq!(svc.parked_len(sleeper), 1, "잠든 동명 몫은 그 id 큐에");
+        assert_eq!(
+            svc.parked_len(sleeper),
+            1,
+            "the asleep same-named share in that id's queue"
+        );
 
-        let here = send(&svc, "m-here", from, "alice", &["@here"]).expect("반려 아님");
+        let here = send(&svc, "m-here", from, "alice", &["@here"]).expect("not a bounce");
         assert_eq!(
             rows(&here),
             vec![
@@ -9878,12 +10100,12 @@ mod tests {
         assert_eq!(
             port.injected_targets(),
             vec![twin_id, bob_id, twin_id, bob_id],
-            "발신자 stdin 에는 아무것도 쓰이지 않는다"
+            "nothing is written to the sender's stdin"
         );
         assert_eq!(
             svc.parked_len(from.peer_id),
             0,
-            "발신자 id 앞으로 파킹도 생기지 않는다"
+            "no parking addressed to the sender id either"
         );
     }
 
@@ -9900,13 +10122,17 @@ mod tests {
                 from,
                 "alice",
                 &["sleepy".to_string()],
-                "해줘",
+                "do it",
                 Entrance::Mcp,
                 &req_meta("1m", 60),
             )
-            .expect("반려 아님");
+            .expect("not a bounce");
         assert_eq!(out[0].status, SendStatus::Pending);
-        assert_eq!(svc.open_request_count(), 1, "잠듦 파킹도 계약을 연다");
+        assert_eq!(
+            svc.open_request_count(),
+            1,
+            "asleep parking opens a contract too"
+        );
         assert_eq!(
             svc.contract_outcome_for_test("m-req", tid("sleepy")),
             Some("awaiting_reply")
@@ -9917,7 +10143,7 @@ mod tests {
             svc.ledger_snapshot()
                 .iter()
                 .any(|(_, f, to, _)| f == NOTICE_SENDER_LABEL && to == "alice"),
-            "잠듦 계약도 기한 통지가 나가야: {:?}",
+            "an asleep contract must get a deadline notice too: {:?}",
             svc.ledger_snapshot()
         );
     }
@@ -9930,21 +10156,25 @@ mod tests {
         let (t1, t2) = (PeerId::new_v4(), PeerId::new_v4());
         port.set_dormant_agents(&[(t1, "twin"), (t2, "twin")]);
 
-        let out = send(&svc, "m1", from, "alice", &["twin"]).expect("행 응답");
+        let out = send(&svc, "m1", from, "alice", &["twin"]).expect("row response");
         assert_eq!(
             (out[0].status, out[0].code),
             (SendStatus::Failed, Some(FailCode::RecipientAmbiguous)),
-            "잠듦 층 동명은 파킹이 아니라 실패 행: {out:?}"
+            "a same name in the asleep layer is a failure row, not parking: {out:?}"
         );
-        assert_eq!(svc.parked_total_for_test(), 0, "조용히 받는 경로가 없어야");
+        assert_eq!(
+            svc.parked_total_for_test(),
+            0,
+            "there must be no path that silently accepts"
+        );
         assert_eq!(
             svc.ledger_statuses("m1"),
             vec![DeliveryStatus::Failed],
-            "실패 행도 장부 종점으로 남는다"
+            "a failure row remains as a ledger terminal too"
         );
 
         // `@all` expands by id, not by name — it parks for each of the two profiles (ADR-0309 · TRD S29 §4 X1).
-        let all = send(&svc, "m2", from, "alice", &["@all"]).expect("행 응답");
+        let all = send(&svc, "m2", from, "alice", &["@all"]).expect("row response");
         assert_eq!(
             rows(&all),
             vec![
@@ -9966,17 +10196,17 @@ mod tests {
         let sleeper = PeerId::new_v4();
         port.set_dormant_agents(&[(sleeper, "dup")]);
 
-        let out = send(&svc, "m1", from, "alice", &["dup"]).expect("행 응답");
+        let out = send(&svc, "m1", from, "alice", &["dup"]).expect("row response");
         assert_eq!(
             out[0].status,
             SendStatus::Delivered,
-            "산 쪽이 이긴다: {out:?}"
+            "the live one wins: {out:?}"
         );
         assert_eq!(port.injected_bodies().len(), 1);
         assert_eq!(svc.parked_total_for_test(), 0);
 
         // That is only a rule of name targeting — `@all` expands by id so an asleep same-name also gets its share (ADR-0309 · TRD S29 §4 X1).
-        let all = send(&svc, "m2", from, "alice", &["@all"]).expect("행 응답");
+        let all = send(&svc, "m2", from, "alice", &["@all"]).expect("row response");
         assert_eq!(
             rows(&all),
             vec![
@@ -9998,7 +10228,7 @@ mod tests {
         port.set_dormant(&["sleepy"]);
         let token = tid("sleepy").to_string();
 
-        let out = send(&svc, "m1", from, "alice", &[&token]).expect("행 응답");
+        let out = send(&svc, "m1", from, "alice", &[&token]).expect("row response");
         assert_eq!(
             rows(&out),
             vec![(token.clone(), SendStatus::Pending, None)],
@@ -10008,7 +10238,7 @@ mod tests {
         assert_eq!(
             svc.ledger_endpoint_keys("m1"),
             vec!["sleepy".to_string()],
-            "장부의 받는 이 = 명부 이름"
+            "the ledger's recipient = the registry name"
         );
 
         let (late_id, late) = live("sleepy");
@@ -10050,7 +10280,7 @@ mod tests {
                 "alice",
                 &[&live_token, &dormant_token, "bob"],
             )
-            .expect("행 응답");
+            .expect("row response");
             assert_eq!(
                 rows(&out),
                 vec![
@@ -10078,46 +10308,50 @@ mod tests {
                 from,
                 "alice",
                 &["tui".to_string()],
-                "해줘",
+                "do it",
                 Entrance::Mcp,
                 &req_meta("10m", 600),
             )
-            .expect("행 응답");
+            .expect("row response");
         assert_eq!(
             (out[0].status, out[0].code),
             (SendStatus::Delivered, None),
-            "턴 신호가 없어도 배달 대상이다(게이트 없이 즉시 주입): {out:?}"
+            "a delivery target even without a turn signal (immediate inject without the gate): {out:?}"
         );
-        assert_eq!(port.injected_bodies().len(), 1, "실제로 주입됐다");
-        assert_eq!(svc.parked_len(tid("tui")), 0, "busy 파킹이 없는 부류다");
+        assert_eq!(port.injected_bodies().len(), 1, "actually injected");
+        assert_eq!(
+            svc.parked_len(tid("tui")),
+            0,
+            "a kind that has no busy parking"
+        );
         assert_eq!(
             svc.ledger_statuses("m1"),
             vec![DeliveryStatus::Delivered],
-            "delivered = 실제 주입 시점"
+            "delivered = the actual inject time"
         );
         assert_eq!(
             svc.contract_outcome_for_test("m1", tid("tui")),
             Some("awaiting_reply"),
-            "배달됐으므로 계약도 정상 오픈"
+            "delivered, so the contract opens normally too"
         );
 
-        let second = send(&svc, "m2", from, "alice", &["tui"]).expect("행 응답");
+        let second = send(&svc, "m2", from, "alice", &["tui"]).expect("row response");
         assert_eq!(second[0].status, SendStatus::Delivered);
-        assert_eq!(port.injected_bodies().len(), 2, "둘 다 주입된다");
+        assert_eq!(port.injected_bodies().len(), 2, "both are injected");
 
-        let all = send(&svc, "m3", from, "alice", &["@all"]).expect("행 응답");
+        let all = send(&svc, "m3", from, "alice", &["@all"]).expect("row response");
         assert_eq!(
             all.iter().map(|r| r.to.clone()).collect::<Vec<_>>(),
             vec!["tui".to_string()],
-            "@all 은 턴 신호 없는 산 세션도 펼친다: {all:?}"
+            "@all also expands live sessions without a turn signal: {all:?}"
         );
 
         port.set_roster(vec![me]);
-        let gone = send(&svc, "m4", from, "alice", &["tui"]).expect("행 응답");
+        let gone = send(&svc, "m4", from, "alice", &["tui"]).expect("row response");
         assert_eq!(
             gone[0].code,
             Some(FailCode::RecipientNotFound),
-            "로스터·프로필에 없으면 그때는 없음 코드다: {gone:?}"
+            "if it is in neither the roster nor the profiles, then it is the not-found code: {gone:?}"
         );
     }
 
@@ -10130,11 +10364,11 @@ mod tests {
         port.set_roster(vec![me, dup1, dup2]);
         port.set_dormant_agents(&[(PeerId::new_v4(), "twin"), (PeerId::new_v4(), "twin")]);
 
-        let live_row = send(&svc, "m1", from, "alice", &["dup"]).expect("행")[0]
+        let live_row = send(&svc, "m1", from, "alice", &["dup"]).expect("row")[0]
             .hint
             .clone()
             .unwrap_or_default();
-        let dormant_row = send(&svc, "m2", from, "alice", &["twin"]).expect("행")[0]
+        let dormant_row = send(&svc, "m2", from, "alice", &["twin"]).expect("row")[0]
             .hint
             .clone()
             .unwrap_or_default();
@@ -10143,11 +10377,11 @@ mod tests {
                 hint.contains("not supported")
                     && hint.contains("do NOT resend")
                     && hint.contains("tell the user"),
-                "{layer} 힌트가 사용자 에스컬레이션을 말해야: {hint}"
+                "the {layer} hint must speak of user escalation: {hint}"
             );
             assert!(
                 !hint.contains("exact agent id") && !hint.contains("exact id"),
-                "{layer} 힌트에 exact-id 재발송 안내가 남아 있다: {hint}"
+                "the {layer} hint still has exact-id resend guidance: {hint}"
             );
         }
     }
@@ -10164,11 +10398,11 @@ mod tests {
             boss_from,
             "boss",
             &["worker".to_string()],
-            "해줘",
+            "do it",
             Entrance::Mcp,
             &req_meta("10m", 600),
         )
-        .expect("배달");
+        .expect("delivery");
 
         port.set_roster(vec![worker.clone()]);
         port.set_dormant(&["boss"]);
@@ -10182,34 +10416,34 @@ mod tests {
                 worker_from,
                 "worker",
                 &["boss".to_string()],
-                "했음",
+                "done",
                 Entrance::Mcp,
                 &reply_meta("m-req"),
             )
-            .expect("행 응답");
+            .expect("row response");
         assert_eq!(
             rep[0].status,
             SendStatus::Pending,
-            "잠든 요청자에게 회신은 파킹된다: {rep:?}"
+            "the reply to an asleep requester is parked: {rep:?}"
         );
         assert_eq!(
             svc.contract_outcome_for_test("m-req", tid("worker")),
             Some("replied"),
-            "파킹도 수용이다 — 꽂으면 계약 완료(ADR-0116 결정 2)"
+            "parking is acceptance too — once stuck in, the contract is complete (ADR-0116 decision 2)"
         );
 
         port.set_dormant(&[]);
         let cleanup = svc.handle_profile_deleted(boss_from.peer_id, "boss");
-        assert_eq!(cleanup.failed_parked, 1, "파킹된 회신이 종결된다");
+        assert_eq!(cleanup.failed_parked, 1, "the parked reply is terminated");
         assert_eq!(
             svc.ledger_statuses("m-rep"),
             vec![DeliveryStatus::Failed],
-            "배달 축은 사실대로 실패를 적는다"
+            "the delivery axis records the failure truthfully"
         );
         assert_eq!(
             svc.contract_outcome_for_test("m-req", tid("worker")),
             Some("replied"),
-            "★되돌리지 않는다★ — 계약은 replied 로 남는다(ADR-0116 결정 2 · 종점 되돌림 금지)"
+            "★not reverted★ — the contract stays replied (ADR-0116 decision 2 · no reverting terminals)"
         );
     }
 
@@ -10230,34 +10464,37 @@ mod tests {
             gone_from,
             "gone",
             &["worker".to_string()],
-            "해줘",
+            "do it",
             Entrance::Mcp,
             &req_meta("10m", 600),
         )
-        .expect("배달");
+        .expect("delivery");
         svc.handle_send(
             "m-in",
             worker_from,
             "worker",
             &["gone".to_string()],
-            "해줘",
+            "do it",
             Entrance::Mcp,
             &req_meta("10m", 600),
         )
-        .expect("반려 아님");
+        .expect("not a bounce");
         assert_eq!(svc.parked_len(tid("gone")), 1);
 
         port.set_dormant(&[]);
         let out = svc.handle_profile_deleted(gone_from.peer_id, "gone");
         assert!(!out.skipped_live);
-        assert_eq!(out.failed_parked, 1, "파킹분 종결");
-        assert_eq!(out.failed_contracts, 1, "요청자 쪽 계약만 종결");
-        assert_eq!(svc.parked_len(tid("gone")), 0, "대기열에서 사라진다");
+        assert_eq!(out.failed_parked, 1, "parked items terminated");
+        assert_eq!(
+            out.failed_contracts, 1,
+            "only the requester-side contract terminated"
+        );
+        assert_eq!(svc.parked_len(tid("gone")), 0, "disappears from the queue");
 
         assert_eq!(svc.ledger_statuses("m-in"), vec![DeliveryStatus::Failed]);
         let view = svc
             .message_state("m-in", Instant::now())
-            .expect("조회 가능");
+            .expect("queryable");
         assert_eq!(view.rows[0].code, Some("RECIPIENT_DELETED"));
         assert!(
             view.rows[0]
@@ -10265,19 +10502,19 @@ mod tests {
                 .as_deref()
                 .unwrap_or("")
                 .contains("do not resend automatically"),
-            "조회 힌트가 다음 행동을 말해야: {:?}",
+            "the query hint must state the next action: {:?}",
             view.rows[0].hint
         );
 
         assert_eq!(
             svc.contract_outcome_for_test("m-out", tid("worker")),
             Some("reply_failed"),
-            "그 이름이 요청자인 계약은 실패 종결"
+            "contracts whose requester is that name are terminated as failed"
         );
         assert_eq!(
             svc.contract_outcome_for_test("m-in", tid("gone")),
             Some("awaiting_reply"),
-            "회신자 쪽이 삭제된 계약은 유지(기한 통지 경로 존속)"
+            "contracts whose replier side was deleted are kept (the deadline notice path survives)"
         );
     }
 
@@ -10293,11 +10530,11 @@ mod tests {
             from,
             "alice",
             &["recv".to_string()],
-            "해줘",
+            "do it",
             Entrance::Mcp,
             &req_meta("10m", 600),
         )
-        .expect("파킹");
+        .expect("park");
         assert_eq!(svc.parked_len(tid("recv")), 1);
 
         port.set_roster(vec![
@@ -10311,13 +10548,16 @@ mod tests {
         ]);
         port.set_live_ids(&[r_id]);
         let out = svc.handle_profile_deleted(r_id, "recv");
-        assert!(out.skipped_live, "그 프로필의 세션이 살아 있으면 건너뛴다");
+        assert!(
+            out.skipped_live,
+            "skipped if that profile's session is alive"
+        );
         assert_eq!(out.failed_parked, 0);
-        assert_eq!(svc.parked_len(tid("recv")), 1, "파킹분 보존");
+        assert_eq!(svc.parked_len(tid("recv")), 1, "parked items preserved");
         assert_eq!(
             svc.contract_outcome_for_test("m-req", tid("recv")),
             Some("awaiting_reply"),
-            "계약 오픈 유지"
+            "contract stays open"
         );
 
         gate.clear();
@@ -10342,15 +10582,15 @@ mod tests {
                 from,
                 "alice",
                 &["tui".to_string()],
-                "해줘",
+                "do it",
                 Entrance::Mcp,
                 &req_meta("10m", 600),
             )
-            .expect("행 응답");
+            .expect("row response");
         assert_eq!(
             out[0].status,
             SendStatus::Pending,
-            "주입 실패는 파킹으로 흡수된다(조용한 유실 금지): {out:?}"
+            "an inject failure is absorbed into parking (no silent loss): {out:?}"
         );
         assert_eq!(svc.parked_len(tid("tui")), 1);
 
@@ -10358,13 +10598,13 @@ mod tests {
         let cleaned = svc.handle_profile_deleted(tui_id, "tui");
         assert!(
             cleaned.skipped_live,
-            "턴 신호가 없어도 산 세션이다 — 게이트가 놓치면 배달될 메일이 죽는다"
+            "a live session even without a turn signal — if the gate misses it, mail that would be delivered dies"
         );
-        assert_eq!(svc.parked_len(tid("tui")), 1, "파킹분 보존");
+        assert_eq!(svc.parked_len(tid("tui")), 1, "parked items preserved");
         assert_eq!(
             svc.contract_outcome_for_test("m-req", tid("tui")),
             Some("awaiting_reply"),
-            "계약 오픈 유지"
+            "contract stays open"
         );
     }
 
@@ -10387,11 +10627,11 @@ mod tests {
             },
             "boss",
             &["alice".to_string()],
-            "해줘",
+            "do it",
             Entrance::Mcp,
             &req_meta("10m", 600),
         )
-        .expect("배달");
+        .expect("delivery");
         port.set_roster(vec![alice.clone()]);
         port.set_dormant_agents(&[(p, "boss")]);
         svc.handle_send(
@@ -10399,12 +10639,16 @@ mod tests {
             alice_from,
             "alice",
             &["boss".to_string()],
-            "잠든 P 에게",
+            "to asleep P",
             Entrance::Mcp,
             &SendMeta::default(),
         )
-        .expect("파킹");
-        assert_eq!(svc.parked_len(p), 1, "전제: 잠든 P 앞 파킹");
+        .expect("park");
+        assert_eq!(
+            svc.parked_len(p),
+            1,
+            "premise: parked addressed to asleep P"
+        );
 
         // A different agent Q with the same name is up (the live layer beats the asleep layer) — Q also places a request, and parking
         //   piles up for the busy Q as well.
@@ -10418,34 +10662,40 @@ mod tests {
             },
             "boss",
             &["alice".to_string()],
-            "해줘",
+            "do it",
             Entrance::Mcp,
             &req_meta("10m", 600),
         )
-        .expect("배달");
+        .expect("delivery");
         gate.set_busy(q, 0);
         svc.handle_send(
             "m-to-q",
             alice_from,
             "alice",
             &["boss".to_string()],
-            "산 Q 에게",
+            "to live Q",
             Entrance::Mcp,
             &SendMeta::default(),
         )
-        .expect("파킹");
-        assert_eq!(svc.parked_len(q), 1, "전제: 바쁜 Q 앞 파킹");
+        .expect("park");
+        assert_eq!(svc.parked_len(q), 1, "premise: parked addressed to busy Q");
 
         // Delete P — the name passed in is the same as the live same-name's name.
         port.set_dormant_agents(&[]);
         port.set_live_ids(&[q]);
         let out = svc.handle_profile_deleted(p, "boss");
 
-        assert!(!out.skipped_live, "산 동명은 정리를 막지 않는다: {out:?}");
-        assert_eq!(out.failed_parked, 1, "P 앞 파킹분만 종결: {out:?}");
+        assert!(
+            !out.skipped_live,
+            "a live same-named one does not block the cleanup: {out:?}"
+        );
+        assert_eq!(
+            out.failed_parked, 1,
+            "only items parked for P terminated: {out:?}"
+        );
         assert_eq!(
             out.failed_contracts, 1,
-            "P 가 요청자인 계약만 종결: {out:?}"
+            "only contracts whose requester is P terminated: {out:?}"
         );
         assert_eq!(svc.parked_len(p), 0);
         assert_eq!(svc.ledger_statuses("m-to-p"), vec![DeliveryStatus::Failed]);
@@ -10454,16 +10704,20 @@ mod tests {
             Some("reply_failed")
         );
 
-        assert_eq!(svc.parked_len(q), 1, "산 동명의 파킹분은 그대로");
+        assert_eq!(
+            svc.parked_len(q),
+            1,
+            "the live same-named one's parked items stay"
+        );
         assert_eq!(
             svc.ledger_statuses("m-to-q"),
             vec![DeliveryStatus::Pending],
-            "★거짓 사유 금지★ — 삭제되지 않은 Q 의 메일이 RECIPIENT_DELETED 로 죽으면 안 된다"
+            "★no false reasons★ — mail of Q, which was not deleted, must not die as RECIPIENT_DELETED"
         );
         assert_eq!(
             svc.contract_outcome_for_test("m-q-req", tid("alice")),
             Some("awaiting_reply"),
-            "산 동명이 요청자인 오픈 계약은 유지된다(ADR-0118 결정 2)"
+            "open contracts whose requester is the live same-named one are kept (ADR-0118 decision 2)"
         );
 
         gate.clear();
@@ -10494,11 +10748,11 @@ mod tests {
             },
             "a",
             &["carol".to_string()],
-            "해줘",
+            "do it",
             Entrance::Mcp,
             &req_meta("10m", 600),
         )
-        .expect("배달");
+        .expect("delivery");
         port.set_roster(vec![carol.clone()]);
         port.set_dormant_agents(&[(x, "a")]);
         svc.handle_send(
@@ -10506,12 +10760,16 @@ mod tests {
             carol_from,
             "carol",
             &["a".to_string()],
-            "잠든 X 에게",
+            "to asleep X",
             Entrance::Mcp,
             &SendMeta::default(),
         )
-        .expect("파킹");
-        assert_eq!(svc.parked_len(x), 1, "전제: 잠든 X 앞 파킹");
+        .expect("park");
+        assert_eq!(
+            svc.parked_len(x),
+            1,
+            "premise: parked addressed to asleep X"
+        );
 
         // X renames to b while asleep, and a different agent Y is up as a — Y also places a request and parking piles up for the busy Y.
         let (y, y_live) = live_distinct("a");
@@ -10525,23 +10783,23 @@ mod tests {
             },
             "a",
             &["carol".to_string()],
-            "해줘",
+            "do it",
             Entrance::Mcp,
             &req_meta("10m", 600),
         )
-        .expect("배달");
+        .expect("delivery");
         gate.set_busy(y, 0);
         svc.handle_send(
             "m-to-y",
             carol_from,
             "carol",
             &["a".to_string()],
-            "산 Y 에게",
+            "to live Y",
             Entrance::Mcp,
             &SendMeta::default(),
         )
-        .expect("파킹");
-        assert_eq!(svc.parked_len(y), 1, "전제: 바쁜 Y 앞 파킹");
+        .expect("park");
+        assert_eq!(svc.parked_len(y), 1, "premise: parked addressed to busy Y");
 
         // Delete X — the name passed in is the pre-removal name b.
         port.set_dormant_agents(&[]);
@@ -10551,15 +10809,21 @@ mod tests {
         assert!(!out.skipped_live, "{out:?}");
         assert_eq!(
             out.failed_parked, 1,
-            "옛 이름 앞으로 쌓인 X 의 파킹분: {out:?}"
+            "X's parked items accumulated under the old name: {out:?}"
         );
-        assert_eq!(out.failed_contracts, 1, "옛 이름으로 연 X 의 계약: {out:?}");
+        assert_eq!(
+            out.failed_contracts, 1,
+            "X's contract opened under the old name: {out:?}"
+        );
         assert_eq!(svc.parked_len(x), 0);
         let view = svc
             .message_state("m-to-x", Instant::now())
-            .expect("조회 가능");
+            .expect("queryable");
         assert_eq!(view.rows[0].code, Some("RECIPIENT_DELETED"));
-        assert_eq!(view.rows[0].to, "a", "행은 보낼 때 이름을 보인다(결정 4)");
+        assert_eq!(
+            view.rows[0].to, "a",
+            "the row shows the name at send time (decision 4)"
+        );
         assert_eq!(
             svc.contract_outcome_for_test("m-x-req", tid("carol")),
             Some("reply_failed")
@@ -10568,13 +10832,13 @@ mod tests {
         assert_eq!(
             svc.parked_len(y),
             1,
-            "옛 이름의 새 주인 Y 의 파킹분은 그대로"
+            "the parked items of Y, the new owner of the old name, stay"
         );
         assert_eq!(svc.ledger_statuses("m-to-y"), vec![DeliveryStatus::Pending]);
         assert_eq!(
             svc.contract_outcome_for_test("m-y-req", tid("carol")),
             Some("awaiting_reply"),
-            "Y 가 요청자인 오픈 계약은 유지된다"
+            "open contracts whose requester is Y are kept"
         );
 
         gate.clear();
@@ -10596,11 +10860,11 @@ mod tests {
             boss_from,
             "boss",
             &["worker".to_string()],
-            "해줘",
+            "do it",
             Entrance::Mcp,
             &req_meta("10m", 600),
         )
-        .expect("배달");
+        .expect("delivery");
 
         port.set_roster(vec![worker]);
         port.set_dormant(&["boss"]);
@@ -10622,30 +10886,37 @@ mod tests {
                 },
                 "worker",
                 &["boss".to_string()],
-                "했음",
+                "done",
                 Entrance::Mcp,
                 &reply_meta("m-req"),
             )
-            .expect("행 응답");
-        assert_eq!(rep[0].status, SendStatus::Pending, "회신이 파킹 수용됐다");
+            .expect("row response");
+        assert_eq!(
+            rep[0].status,
+            SendStatus::Pending,
+            "the reply was accepted by parking"
+        );
         assert_eq!(
             *in_lock.lock().unwrap(),
             vec![Some("replied")],
-            "★수용을 기록한 그 락 안에서 이미 닫혀 있어야 한다★ — 여기가 `awaiting_reply` 면 닫기가 다른 락으로 빠졌다는 뜻이고, 그 창에 삭제 정리가 끼면 '수용됐는데 회신 실패' 가 된다(리뷰 fix D2)"
+            "★it must already be closed within the very lock that recorded the acceptance★ — if this is `awaiting_reply`, the close slipped into another lock, and if a deletion cleanup gets into that window it becomes 'accepted but reply failed' (review fix D2)"
         );
         assert_eq!(
             svc.contract_outcome_for_test("m-req", tid("worker")),
             Some("replied"),
-            "수용 = 완료 — 계약은 그 임계구역에서 닫혔다"
+            "accepted = complete — the contract closed in that critical section"
         );
 
         port.set_dormant(&[]);
         let cleaned = svc.handle_profile_deleted(boss_from.peer_id, "boss");
-        assert_eq!(cleaned.failed_parked, 1, "파킹된 회신은 사실대로 실패 종결");
+        assert_eq!(
+            cleaned.failed_parked, 1,
+            "the parked reply is truthfully terminated as failed"
+        );
         assert_eq!(
             svc.contract_outcome_for_test("m-req", tid("worker")),
             Some("replied"),
-            "계약 축은 되돌리지 않는다(ADR-0116 결정 2)"
+            "the contract axis is not reverted (ADR-0116 decision 2)"
         );
     }
 
@@ -10660,11 +10931,11 @@ mod tests {
             boss_from,
             "boss",
             &["worker".to_string()],
-            "해줘",
+            "do it",
             Entrance::Mcp,
             &req_meta("10m", 600),
         )
-        .expect("배달");
+        .expect("delivery");
 
         let in_lock = Arc::new(StdMutex::new(Vec::<Option<&'static str>>::new()));
         let seen = in_lock.clone();
@@ -10683,25 +10954,25 @@ mod tests {
                 },
                 "worker",
                 &["boss".to_string()],
-                "했음",
+                "done",
                 Entrance::Mcp,
                 &reply_meta("m-req"),
             )
-            .expect("행 응답");
+            .expect("row response");
         assert_eq!(
             rep[0].status,
             SendStatus::Delivered,
-            "그 호출의 드레인이 냈으므로 delivered(경로는 적재-후-드레인)"
+            "that call's drain sent it, so delivered (the path is queue-then-drain)"
         );
         assert_eq!(
             *in_lock.lock().unwrap(),
             vec![Some("replied")],
-            "★적재 락 안에서 이미 닫혀 있어야 한다★ — `awaiting_reply` 로 관측되면 닫기가 그 락 밖으로 빠졌다는 뜻이다(리뷰 fix D2 · ADR-0125로 확정 지점이 하나가 됐다)"
+            "★it must already be closed within the queueing lock★ — if observed as `awaiting_reply`, the close slipped outside that lock (review fix D2 · ADR-0125 made the settlement point a single one)"
         );
     }
 
     /// ★A contract addressed to an asleep recipient holds that profile id from the moment it opens (ADR-0309 decision 1 · TRD S29 B5)★ — so even if it renames
-    ///   while asleep and wakes with the new name, 「내가 답할 의무」 (my duty to answer) remains, and that reply closes the contract.
+    ///   while asleep and wakes with the new name, 「my duty to answer」 remains, and that reply closes the contract.
     #[test]
     fn a_dormant_contract_carries_the_profile_id_from_the_moment_it_opens() {
         let (svc, port) = svc();
@@ -10715,15 +10986,15 @@ mod tests {
             from,
             "alice",
             &["sleepy".to_string()],
-            "해줘",
+            "do it",
             Entrance::Mcp,
             &req_meta("10m", 600),
         )
-        .expect("파킹");
+        .expect("park");
         assert_eq!(
             svc.contract_outcome_for_test("m-req", sleepy_id),
             Some("awaiting_reply"),
-            "잠든 수신자 앞 계약의 키 = 그 프로필 id"
+            "the key of a contract addressed to an asleep recipient = that profile id"
         );
 
         let (_, renamed) = live_with_id(sleepy_id, "renamed");
@@ -10736,7 +11007,7 @@ mod tests {
                 .map(|i| (i.direction.as_str(), i.id.as_str()))
                 .collect::<Vec<_>>(),
             vec![("reply_owed_by_me", "m-req")],
-            "개명해도 의무는 그 id 에 남는다: {items:?}"
+            "the duty stays on that id even after a rename: {items:?}"
         );
         let rep = svc
             .handle_send(
@@ -10744,16 +11015,16 @@ mod tests {
                 reply_from(sleepy_id),
                 "renamed",
                 &["alice".to_string()],
-                "했음",
+                "done",
                 Entrance::Mcp,
                 &reply_meta("m-req"),
             )
-            .expect("행 응답");
+            .expect("row response");
         assert_eq!(rep[0].status, SendStatus::Delivered, "{rep:?}");
         assert_eq!(
             svc.contract_outcome_for_test("m-req", sleepy_id),
             Some("replied"),
-            "개명 뒤 회신도 그 계약을 닫는다"
+            "a reply after the rename also closes that contract"
         );
     }
 
@@ -10768,11 +11039,11 @@ mod tests {
             boss_from,
             "boss",
             &["twin".to_string()],
-            "해줘",
+            "do it",
             Entrance::Mcp,
             &req_meta("10m", 600),
         )
-        .expect("파킹");
+        .expect("park");
         assert_eq!(
             svc.contract_outcome_for_test("m-req", tid("twin")),
             Some("awaiting_reply")
@@ -10791,20 +11062,20 @@ mod tests {
                 },
                 "twin",
                 &["boss".to_string()],
-                "했음",
+                "done",
                 Entrance::Mcp,
                 &reply_meta("m-req"),
             )
-            .expect("행 응답");
+            .expect("row response");
         assert_eq!(
             rep[0].status,
             SendStatus::Delivered,
-            "회신 **배달**은 막지 않는다(계약 쪽만 무동작 — spec §3 항목 7-②): {rep:?}"
+            "reply **delivery** is not blocked (only the contract side is a no-op — spec §3 item 7-②): {rep:?}"
         );
         assert_eq!(
             svc.contract_outcome_for_test("m-req", tid("twin")),
             Some("awaiting_reply"),
-            "받은 적 없는 동명은 계약을 닫지 못한다(이름 폴백 대조 없음 — ADR-0309 결정 7)"
+            "a same-named one that never received it cannot close the contract (no name fallback matching — ADR-0309 decision 7)"
         );
 
         // ★Even if only one agent has that name, a different agent cannot close it (ADR-0309 decision 5)★ — reviving the name fallback would close it here.
@@ -10815,15 +11086,15 @@ mod tests {
             reply_from(other),
             "twin",
             &["boss".to_string()],
-            "했음",
+            "done",
             Entrance::Mcp,
             &reply_meta("m-req"),
         )
-        .expect("행 응답");
+        .expect("row response");
         assert_eq!(
             svc.contract_outcome_for_test("m-req", tid("twin")),
             Some("awaiting_reply"),
-            "같은 이름의 다른 에이전트는 의무의 주체가 아니다"
+            "another agent with the same name is not the subject of the duty"
         );
 
         let (solo, solo_agent) = live("twin");
@@ -10836,15 +11107,15 @@ mod tests {
             },
             "twin",
             &["boss".to_string()],
-            "했음",
+            "done",
             Entrance::Mcp,
             &reply_meta("m-req"),
         )
-        .expect("행 응답");
+        .expect("row response");
         assert_eq!(
             svc.contract_outcome_for_test("m-req", tid("twin")),
             Some("replied"),
-            "잠들어 있던 바로 그 에이전트(같은 id)가 깨어나 답하면 닫힌다"
+            "closed when the very agent that was asleep (same id) wakes and answers"
         );
     }
 
@@ -10859,7 +11130,7 @@ mod tests {
             (FailCode::RequestCapacity, "REQUEST_CAPACITY"),
             (FailCode::RecipientDeleted, "RECIPIENT_DELETED"),
         ] {
-            assert_eq!(code.as_str(), wire, "{code:?} 의 wire 문자열이 바뀌었다");
+            assert_eq!(code.as_str(), wire, "the wire string of {code:?} changed");
             // Lets the compiler catch a missing variant (when a new code comes, this match breaks).
             match code {
                 FailCode::RecipientNotFound

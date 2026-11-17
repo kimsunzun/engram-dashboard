@@ -37,7 +37,7 @@ pub const GROUP_GONE: io::ErrorKind = io::ErrorKind::NotConnected;
 /// The strong owner of a group — while this is alive the group exists. Dropping it on Windows closes the Job handle and the OS ends the remaining
 /// members (`KILL_ON_JOB_CLOSE`) — but if a [`GroupRef`] is in a call at that moment, the handle closes when that call ends.
 ///
-/// ★Not `Clone`★ — what the type enforces goes only as far as 「한 무리의 강한 주인은 하나」 (one strong owner per group). Who that owner is (the launch
+/// ★Not `Clone`★ — what the type enforces goes only as far as 「one strong owner per group」. Who that owner is (the launch
 /// path, the tree handle) is kept by the arrangement (ADR-0275 decision 11). Outward it hands out only the weak handle from [`Self::downgrade`].
 ///
 /// Outside Windows it ties nothing together — `new`, `adopt` and `terminate` are `Ok`, `active_processes` is
@@ -122,7 +122,7 @@ impl GroupOwner {
     }
 }
 
-/// The weak handle of a group — member list, pinning one member (facts, ending), join-notification port, 「사라졌나」 (is it gone).
+/// The weak handle of a group — member list, pinning one member (facts, ending), join-notification port, 「is it gone」.
 ///
 /// ★It holds the group weakly★ — holding it strongly would leave the Job handle unclosed even after the owner is gone, delaying `KILL_ON_JOB_CLOSE`.
 /// It is upgraded only for the duration of each call ([`Self::is_gone`] does not even upgrade) — the longest window is while [`Self::watch_births`]
@@ -148,7 +148,7 @@ impl GroupRef {
     }
 
     /// The complete list of member PIDs (including the root, including members of nested groups; the order has no meaning). If the owner is gone,
-    /// `Ok(빈 목록)` (empty list); if the list does not become complete within the retry limit, `Err` — so a missing member is not read as 「무리 밖」 (outside the group).
+    /// `Ok(empty list)`; if the list does not become complete within the retry limit, `Err` — so a missing member is not read as 「outside the group」.
     ///
     /// ★A member that has just ended may linger briefly★ — it may leave the list later than the ending (the wait on the pinned handle returning)
     /// (CI measurement 2026-10-01). Whether it is alive is judged not by the list but by the pinned handle ([`PinnedMember::exited`]).
@@ -409,15 +409,12 @@ fn facts_from(os: &windows::MemberFacts) -> MemberFacts {
 
 #[cfg(windows)]
 fn group_gone() -> io::Error {
-    io::Error::new(GROUP_GONE, "무리의 주인이 이미 사라졌다")
+    io::Error::new(GROUP_GONE, "the group's owner is already gone")
 }
 
 #[cfg(not(windows))]
 fn no_group_here() -> io::Error {
-    io::Error::new(
-        io::ErrorKind::Unsupported,
-        "이 OS 에는 프로세스 무리가 없다",
-    )
+    io::Error::new(io::ErrorKind::Unsupported, "this OS has no process groups")
 }
 
 #[cfg(test)]
@@ -432,11 +429,11 @@ mod tests {
     fn a_group_without_a_live_job_lists_nothing_and_owns_nobody() {
         let group = GroupRef::gone();
         assert!(group.is_gone());
-        assert_eq!(group.member_pids().expect("명단"), Vec::<u32>::new());
+        assert_eq!(group.member_pids().expect("list"), Vec::<u32>::new());
         for kill in [false, true] {
             assert!(group
                 .pin_member(std::process::id(), kill)
-                .expect("붙들기")
+                .expect("pin")
                 .is_none());
         }
 
@@ -450,18 +447,23 @@ mod tests {
             started = true;
             Ok(())
         });
-        assert_eq!(watched.expect_err("무리가 없는데 붙었다").kind(), refused);
-        assert!(!started, "무리가 없는데 꺼낼 쪽을 띄웠다");
+        assert_eq!(
+            watched
+                .expect_err("attached although there is no group")
+                .kind(),
+            refused
+        );
+        assert!(!started, "launched the taker although there is no group");
         assert_eq!(
             group
                 .unwatch_births()
-                .expect_err("무리가 없는데 뗐다")
+                .expect_err("detached although there is no group")
                 .kind(),
             refused
         );
     }
 
-    // ── real processes (Windows) — each test launches only a few, one after another: do not launch them in a burst (local parallel limit `--test-threads=4` — `.claude/skill-bindings/qa.md` 「모듈별 명령」) ──
+    // ── real processes (Windows) — each test launches only a few, one after another: do not launch them in a burst (local parallel limit `--test-threads=4` — `.claude/skill-bindings/qa.md` 「모듈별 명령」) ── // hangul-ok
 
     #[cfg(windows)]
     use std::io::Write;
@@ -484,10 +486,10 @@ mod tests {
 
     #[cfg(windows)]
     fn new_group() -> (GroupOwner, GroupRef) {
-        let owner = GroupOwner::new().expect("무리 만들기");
+        let owner = GroupOwner::new().expect("create group");
         let group = owner
             .downgrade()
-            .expect("Windows 주인은 약한 손잡이를 낸다");
+            .expect("the Windows owner hands out a weak handle");
         (owner, group)
     }
 
@@ -495,8 +497,8 @@ mod tests {
     /// end is held.
     #[cfg(windows)]
     fn open_gate_keeping_stdin(child: &mut Child) -> ChildStdin {
-        let mut stdin = child.stdin.take().expect("stdin 파이프");
-        stdin.write_all(b"go\r\n").expect("문 열기");
+        let mut stdin = child.stdin.take().expect("stdin pipe");
+        stdin.write_all(b"go\r\n").expect("open the gate");
         stdin
     }
 
@@ -511,31 +513,31 @@ mod tests {
             .stderr(Stdio::null())
             .creation_flags(DETACHED_PROCESS.0)
             .spawn()
-            .expect("ping.exe 기동")
+            .expect("launch ping.exe")
     }
 
     #[cfg(windows)]
     fn pin_ours(group: &GroupRef, pid: u32, kill: bool) -> PinnedMember {
         group
             .pin_member(pid, kill)
-            .expect("붙들기")
-            .unwrap_or_else(|| panic!("PID {pid} 가 우리 무리의 멤버가 아니다"))
+            .expect("pin")
+            .unwrap_or_else(|| panic!("PID {pid} is not a member of our group"))
     }
 
     /// Has the pinned member's parent ended — the recorded parent number cannot be pinned in our group · the pinned parent has ended · a process born later than the member
-    /// holds that number. ★This assumes the parent was born in our group★ — a live parent outside the group also reads as 「끝남」 (ended).
+    /// holds that number. ★This assumes the parent was born in our group★ — a live parent outside the group also reads as 「ended」.
     /// If it cannot be pinned (access denied etc.), it does not count as ended.
     #[cfg(windows)]
     fn parent_is_dead(group: &GroupRef, member: &PinnedMember) -> bool {
         let child = member.facts();
         assert!(
             child.ppid != 0 && child.create != 0,
-            "부모 번호나 생성 시각을 못 읽었다: {child:?}"
+            "could not read the parent number or creation time: {child:?}"
         );
         match group.pin_member(child.ppid, false) {
             Ok(None) => true,
             Ok(Some(parent)) => {
-                parent.exited().expect("끝났나") || parent.facts().create > child.create
+                parent.exited().expect("has it ended") || parent.facts().create > child.create
             }
             Err(_) => false,
         }
@@ -559,7 +561,7 @@ mod tests {
                     pid,
                 )
             }
-            .expect("지켜볼 핸들");
+            .expect("handle to watch");
             Self(handle)
         }
 
@@ -597,7 +599,7 @@ mod tests {
         assert!(group.is_gone());
         assert!(group
             .pin_member(std::process::id(), false)
-            .expect("붙들기")
+            .expect("pin")
             .is_none());
     }
 
@@ -608,10 +610,10 @@ mod tests {
     fn a_pinned_member_is_terminated_with_the_given_code() {
         let (job, group) = new_group();
         let mut root = spawn_gated_cmd("ping -n 30 127.0.0.1", CREATE_NO_WINDOW.0);
-        job.adopt(root.id()).expect("무리 편입");
+        job.adopt(root.id()).expect("join the group");
         open_gate(&mut root);
 
-        let ping = wait_until("무리 안의 ping", || {
+        let ping = wait_until("ping inside the group", || {
             group
                 .member_pids()
                 .ok()?
@@ -620,23 +622,23 @@ mod tests {
         });
         let watch = Watch::open(ping);
         let member = pin_ours(&group, ping, true);
-        assert!(!member.exited().expect("끝났나"));
+        assert!(!member.exited().expect("has it ended"));
 
         let raw = member.terminate_raw(EXIT_CODE);
         assert_eq!(
-            member.classify(raw).expect("끝내기"),
+            member.classify(raw).expect("end"),
             MemberOutcome::Terminated
         );
         assert!(
             member
                 .wait_exit(Duration::from_secs(5))
-                .expect("끝나기 대기"),
-            "5 초 안에 안 끝났다"
+                .expect("wait for exit"),
+            "did not end within 5 seconds"
         );
-        assert!(member.exited().expect("끝났나"));
+        assert!(member.exited().expect("has it ended"));
         assert_eq!(watch.exit_code_within(Duration::ZERO), Some(EXIT_CODE));
         drop(watch);
-        wait_until("명단에서 빠진 ping", || {
+        wait_until("ping gone from the list", || {
             (!group.member_pids().ok()?.contains(&ping)).then_some(())
         });
         drop(member);
@@ -648,54 +650,61 @@ mod tests {
     #[test]
     fn a_process_in_another_job_is_not_ours() {
         let (_ours, group) = new_group();
-        let other = GroupOwner::new().expect("남의 무리");
+        let other = GroupOwner::new().expect("someone else's group");
         let mut stranger = spawn_lone_ping();
-        other.adopt(stranger.id()).expect("남의 무리 편입");
+        other
+            .adopt(stranger.id())
+            .expect("join someone else's group");
 
         for kill in [false, true] {
             assert!(
                 group
                     .pin_member(stranger.id(), kill)
-                    .expect("붙들기")
+                    .expect("pin")
                     .is_none(),
-                "남의 무리 멤버를 붙들었다(끝내기 권한 {kill})"
+                "pinned a member of someone else's group (termination right {kill})"
             );
         }
-        assert!(stranger.try_wait().expect("상태").is_none(), "남이 죽었다");
+        assert!(
+            stranger.try_wait().expect("status").is_none(),
+            "someone else died"
+        );
 
         let _ = stranger.kill();
         let _ = stranger.wait();
     }
 
     /// ③ Nested variant — even if our group is nested under a parent Job P, a process that sits only in P is someone else's, not ours. If NULL is passed
-    /// as the Job argument (「아무 Job 에나 들었나」 (is it in any Job at all)), this goes red here.
+    /// as the Job argument (「is it in any Job at all」), this goes red here.
     #[cfg(windows)]
     #[test]
     fn a_process_only_in_the_enclosing_job_is_not_ours() {
-        let parent = GroupOwner::new().expect("부모 무리");
+        let parent = GroupOwner::new().expect("parent group");
         let (ours, group) = new_group();
         let mut member = spawn_lone_ping();
-        parent.adopt(member.id()).expect("부모 무리 편입");
+        parent.adopt(member.id()).expect("join the parent group");
         ours.adopt(member.id())
-            .expect("우리 무리 편입 — 부모 아래로 중첩");
+            .expect("join our group — nested under the parent");
         let mut stranger = spawn_lone_ping();
-        parent.adopt(stranger.id()).expect("부모 무리에만 편입");
+        parent
+            .adopt(stranger.id())
+            .expect("join only the parent group");
 
         assert!(
-            group
-                .pin_member(member.id(), true)
-                .expect("붙들기")
-                .is_some(),
-            "중첩이 안 섰다 — 우리 멤버를 못 붙들었다"
+            group.pin_member(member.id(), true).expect("pin").is_some(),
+            "nesting did not happen — could not pin our member"
         );
         assert!(
             group
                 .pin_member(stranger.id(), true)
-                .expect("붙들기")
+                .expect("pin")
                 .is_none(),
-            "부모 무리에만 든 남을 붙들었다"
+            "pinned someone else that is only in the parent group"
         );
-        assert!(stranger.try_wait().expect("상태").is_none(), "남이 죽었다");
+        assert!(
+            stranger.try_wait().expect("status").is_none(),
+            "someone else died"
+        );
 
         for child in [&mut member, &mut stranger] {
             let _ = child.kill();
@@ -710,14 +719,14 @@ mod tests {
     fn a_port_through_the_group_reports_the_members_already_in() {
         let (job, group) = new_group();
         let mut ping = spawn_lone_ping();
-        job.adopt(ping.id()).expect("무리 편입");
+        job.adopt(ping.id()).expect("join the group");
 
-        let refused = group.watch_births(|_| Err(io::Error::other("기동 실패 흉내")));
+        let refused = group.watch_births(|_| Err(io::Error::other("mimicked launch failure")));
         assert_eq!(
             refused
-                .expect_err("start 의 실패가 그대로 와야 한다")
+                .expect_err("start's failure must come through as is")
                 .to_string(),
-            "기동 실패 흉내"
+            "mimicked launch failure"
         );
 
         let mut held = None;
@@ -726,18 +735,18 @@ mod tests {
                 held = Some(port);
                 Ok(())
             })
-            .expect("붙이기");
-        let port = held.expect("start 가 포트를 받았다");
+            .expect("attach");
+        let port = held.expect("start received the port");
         let deadline = Instant::now() + Duration::from_secs(10);
-        while port.next(Duration::from_millis(100)).expect("꺼내기")
+        while port.next(Duration::from_millis(100)).expect("take out")
             != PortOutcome::Joined(ping.id())
         {
             assert!(
                 Instant::now() < deadline,
-                "10 초 안에 ping 의 되알림을 못 봤다"
+                "did not see ping's echoed notification within 10 seconds"
             );
         }
-        group.unwatch_births().expect("떼기");
+        group.unwatch_births().expect("detach");
 
         let _ = ping.kill();
         let _ = ping.wait();
@@ -766,9 +775,9 @@ mod tests {
             0,
         );
         let parent_pid = parent.id();
-        job.adopt(parent_pid).expect("무리 편입");
+        job.adopt(parent_pid).expect("join the group");
         let gate = open_gate_keeping_stdin(&mut parent);
-        let (child_pid, child) = wait_until("P 가 띄운 ping", || {
+        let (child_pid, child) = wait_until("the ping P launched", || {
             group
                 .member_pids()
                 .ok()?
@@ -779,16 +788,16 @@ mod tests {
                     (member.facts().ppid == parent_pid).then_some((pid, member))
                 })
         });
-        wait_until("ping 의 첫 줄", || {
+        wait_until("ping's first line", || {
             (std::fs::metadata(&ready).ok()?.len() > 0).then_some(())
         });
         assert!(
-            parent.try_wait().expect("상태").is_none(),
-            "P 가 탐침 전에 끝났다"
+            parent.try_wait().expect("status").is_none(),
+            "P ended before the probe"
         );
         assert!(
             !parent_is_dead(&group, &child),
-            "산 P 가 끝남으로 읽힌다 — 아래 단언이 뜻이 없다"
+            "live P reads as ended — the assertions below mean nothing"
         );
         let _ = parent.kill();
         let _ = parent.wait();
@@ -797,25 +806,22 @@ mod tests {
 
         // Right after the wait returns, P may still be in the list (`member_pids` docs) — it waits only for it to drop out. It does not wait for
         // completeness: that must hold on every call.
-        let members = wait_until(
-            "명단에서 빠진 P(끝났지만 핸들이 붙든 것)",
-            || {
-                let members = group
-                    .member_pids()
-                    .expect("끝났지만 핸들이 붙든 멤버가 있어도 명단은 완전해야 한다");
-                (!members.contains(&parent_pid)).then_some(members)
-            },
-        );
+        let members = wait_until("P gone from the list (ended but held by a handle)", || {
+            let members = group.member_pids().expect(
+                "the list must be complete even with a member that ended but is held by a handle",
+            );
+            (!members.contains(&parent_pid)).then_some(members)
+        });
         assert!(
             members.contains(&child_pid),
-            "산 C 가 명단에 없다: {members:?}"
+            "live C is not in the list: {members:?}"
         );
         assert!(
             parent_is_dead(&group, &child),
-            "C 의 부모가 끝남으로 안 읽힌다"
+            "C's parent does not read as ended"
         );
         drop(parent);
-        job.terminate(1).expect("무리 끝내기");
+        job.terminate(1).expect("end the group");
         let _ = child.wait_exit(Duration::from_secs(5));
         let _ = std::fs::remove_file(&ready);
     }
@@ -824,13 +830,13 @@ mod tests {
     /// ★It measures group inheritance only — it does not reproduce the hang★. The `bash` on `PATH` may be WSL, so the path is hard-coded.
     #[cfg(windows)]
     #[test]
-    #[ignore = "Git Bash(C:\\Program Files\\Git\\usr\\bin\\bash.exe) 가 있어야 한다"]
+    #[ignore = "needs Git Bash (C:\\Program Files\\Git\\usr\\bin\\bash.exe)"]
     fn an_orphaned_msys_fork_child_stays_in_our_job_and_ends() {
         use std::os::windows::process::CommandExt;
         const BASH: &str = r"C:\Program Files\Git\usr\bin\bash.exe";
         assert!(
             std::path::Path::new(BASH).exists(),
-            "{BASH} 가 없다 — PATH 의 bash 로 대신하지 않는다"
+            "{BASH} is missing — the bash on PATH is not used instead"
         );
         let (job, group) = new_group();
         // Call `sleep` by absolute path — `usr\bin\bash.exe`, started without the Git launcher (`Git\bin\bash.exe`), has no `/usr/bin` in `PATH`,
@@ -842,17 +848,17 @@ mod tests {
             .stderr(Stdio::null())
             .creation_flags(CREATE_NO_WINDOW.0)
             .spawn()
-            .expect("bash 기동");
-        job.adopt(bash.id()).expect("무리 편입");
+            .expect("launch bash");
+        job.adopt(bash.id()).expect("join the group");
         open_gate(&mut bash);
-        let status = bash.wait().expect("bash 종료");
+        let status = bash.wait().expect("bash exit");
         assert!(
             status.success(),
-            "bash 가 {status:?} 로 끝났다 — 스크립트가 안 돌았다"
+            "bash ended with {status:?} — the script did not run"
         );
         drop(bash);
 
-        let orphans = wait_until("부모가 끝난 MSYS 프로세스", || {
+        let orphans = wait_until("MSYS processes whose parent ended", || {
             let found: Vec<(u32, PinnedMember)> = group
                 .member_pids()
                 .ok()?
@@ -872,14 +878,14 @@ mod tests {
             let watch = Watch::open(pid);
             let raw = orphan.terminate_raw(EXIT_CODE);
             assert_eq!(
-                orphan.classify(raw).expect("끝내기"),
+                orphan.classify(raw).expect("end"),
                 MemberOutcome::Terminated
             );
             assert_eq!(
                 watch.exit_code_within(Duration::from_secs(5)),
                 Some(EXIT_CODE)
             );
-            assert!(orphan.exited().expect("끝났나"));
+            assert!(orphan.exited().expect("has it ended"));
         }
     }
 }

@@ -1,6 +1,6 @@
 //! Harness only — lives behind the feature flag `test-support` (ADR-0012, precedent = `engram-dashboard-command`).
 //!
-//! ★This is the real thing behind 「백오프·keepalive·쓰기 시한을 **실제로 기다리지 않는다**」 (never actually waiting for backoff, keepalive or write deadlines)★
+//! ★This is the real thing behind 「never **actually waits** for backoff, keepalive or write deadlines」★
 //! (ADR-0177 decision 8): [`ManualClock`] stands in for time, [`MemoryNetwork`] and [`MemoryListener`] for the transport.
 //! ★Their far ends differ★ — the far end of [`MemoryNetwork`] is a script the test drives by hand ([`MemoryEndpoint`]),
 //! and the far end of [`MemoryListener`] is a real [`LinkTx`]/[`LinkRx`] pair ([`Accepted`]), so it joins two supervisors to each other.
@@ -35,7 +35,7 @@ use crate::link::{
 use crate::stream::StreamMark;
 use crate::wire::{DecodeClass, Wire};
 
-// ── 시간 ──────────────────────────────────────────────────────────────────────
+// ── Time ──────────────────────────────────────────────────────────────────────
 
 struct ManualState {
     now: Instant,
@@ -141,8 +141,8 @@ fn assert_single_threaded() {
     assert_eq!(
         flavor,
         tokio::runtime::RuntimeFlavor::CurrentThread,
-        "engram-dashboard-transport 의 하네스는 current_thread 런타임 전용이다 \
-         (#[tokio::test] 기본값). multi_thread 아래에서는 settle() 이 아무것도 보장하지 않는다"
+        "engram-dashboard-transport's harness is for the current_thread runtime only \
+          (the #[tokio::test] default). Under multi_thread, settle() guarantees nothing"
     );
 }
 
@@ -158,7 +158,7 @@ pub async fn settle() {
 }
 
 /// Yields until the condition holds. ★Past the limit it panics on the spot★ — the reason this function exists is to avoid
-/// disguising 「안 끝났다」 (not finished yet) as 「단언이 틀렸다」 (the assertion is wrong).
+/// disguising 「not finished yet」 as 「the assertion is wrong」.
 pub async fn settle_until(what: &str, mut done: impl FnMut() -> bool) {
     assert_single_threaded();
     for _ in 0..SETTLE_YIELDS {
@@ -168,11 +168,11 @@ pub async fn settle_until(what: &str, mut done: impl FnMut() -> bool) {
         tokio::task::yield_now().await;
     }
     if !done() {
-        panic!("{SETTLE_YIELDS}번 양보하고도 정착하지 않았다: {what}");
+        panic!("did not settle even after yielding {SETTLE_YIELDS} times: {what}");
     }
 }
 
-// ── 전송 ──────────────────────────────────────────────────────────────────────
+// ── Transport ──────────────────────────────────────────────────────────────────────
 
 /// What the client sent down the link. Besides frames, **keepalive and close** are also observed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -246,18 +246,17 @@ impl MemoryEndpoint {
         }
     }
 
-    /// ★Says it closes **without** a code★ — this is `LinkRead::Closed(None)`, and by contract it too means 「상대가 닫았다고
-    /// 말했다」 (the peer said it closed). (Vanishing without a word is the [`MemoryEndpoint::fail`] side = `Err`.) The client learns of the close but
+    /// ★Says it closes **without** a code★ — this is `LinkRead::Closed(None)`, and by contract it too means 「the peer said it closed」. (Vanishing without a word is the [`MemoryEndpoint::fail`] side = `Err`.) The client learns of the close but
     /// gets no reason.
     ///
     /// ★**Simply dropping this link** (dropping the endpoint) is not this branch★ — that is vanishing
-    /// without a word, so `MemRx` reports it as a read error (same shape as a real socket). To make 「닫았다고 말했다」 (said it closed), call this or
+    /// without a word, so `MemRx` reports it as a read error (same shape as a real socket). To make 「said it closed」, call this or
     /// [`MemoryEndpoint::reject`].
     pub fn close(&self) {
         self.send(ServerMsg::Closed(None));
     }
 
-    /// ★Closes with a code and a message★ — the only path where the client can recognize 「붙었는데 거절당했다」 (connected but rejected).
+    /// ★Closes with a code and a message★ — the only path where the client can recognize 「connected but rejected」.
     pub fn reject(&self, close: Close) {
         self.send(ServerMsg::Closed(Some(close)));
     }
@@ -282,7 +281,7 @@ impl MemoryEndpoint {
     /// stalls here, the later steps (backoff wait, loss report) never start. There are two ways to release it: turn this
     /// off, or push the clock `write_deadline` further so the deadline cuts that close.
     ///
-    /// ★The 「상대가 안 읽을 때」 (when the peer does not read) case, which needs a kernel buffer to measure, cannot be measured with this★ — that belongs to a real socket,
+    /// ★The 「when the peer does not read」 case, which needs a kernel buffer to measure, cannot be measured with this★ — that belongs to a real socket,
     /// and what is measured here is **our side's deadline and queue logic**.
     pub fn stall_writes(&self, on: bool) {
         let _ = self.stall_tx.send(on);
@@ -294,8 +293,8 @@ impl MemoryEndpoint {
     }
 
     /// When on, **only** the client's `ping` stalls — it stacks with [`MemoryEndpoint::stall_writes`] and really wakes up when off.
-    /// ★This shape does not exist on a real socket★ (ping goes out the same link) — it is here only to build 「앞선 쓰기는 끝났고 그 직후 타이머 바퀴의 ping 에서 선다」 (the earlier write
-    /// finished, then it stops at the ping of the timer turn right after). One handle cannot tell the two apart: the moment the stall is released the supervisor
+    /// ★This shape does not exist on a real socket★ (ping goes out the same link) — it is here only to build 「the earlier write
+    /// finished, then it stops at the ping of the timer turn right after」. One handle cannot tell the two apart: the moment the stall is released the supervisor
     /// pushes on to the next write without yielding.
     pub fn stall_pings(&self, on: bool) {
         let _ = self.ping_stall_tx.send(on);
@@ -338,8 +337,8 @@ impl LinkTx for MemTx {
 
     /// ★Close goes out over the **same link** as `send`/`ping`, so it is blocked together with them★ — on a real socket the close frame
     /// queues behind the rest of the truncated frame, and that is where the supervisor's `drop_link` spends
-    /// `write_deadline`. ★Do not delete this `wait_writable`★ — while it was missing the harness could not express 「이미 막힌 쓰기 뒤에 닫기가 걸린다」
-    /// (a close queued behind an already blocked write), so the defect that `drop_link` cannot hear control meanwhile
+    /// `write_deadline`. ★Do not delete this `wait_writable`★ — while it was missing the harness could not express 「a close queued behind an already blocked write」,
+    /// so the defect that `drop_link` cannot hear control meanwhile
     /// stayed unexamined (2026-09-07).
     fn close(&mut self, close: Close) -> BoxFuture<'_, ()> {
         Box::pin(async move {
@@ -374,7 +373,7 @@ impl LinkRx for MemRx {
                 Some(ServerMsg::Closed(close)) => Ok(LinkRead::Closed(close)),
                 // ★Channel exhausted = vanished without a word★ — on a real socket the same event (a socket dropped without a close handshake)
                 //   is a read error, so it is an error here too. The old version that raised it as `Ok(Closed(None))`
-                //   made the [`crate::LinkRead::Closed`] contract (「상대가 **말했다**」 (the peer said so)) false in the harness alone,
+                //   made the [`crate::LinkRead::Closed`] contract (「the peer **said** so」) false in the harness alone,
                 //   so a test that simulated death by dropping the endpoint was green as `PeerClosed` while on a real socket it
                 //   went to a link read error (now `ReadFailed`).
                 None => {
@@ -457,7 +456,7 @@ impl MemoryNetwork {
         self.inner.lock().unwrap().dials
     }
 
-    /// The far side of the oldest link that has 「아직 안 가져간」 (not yet been taken).
+    /// The far side of the oldest link that has 「not yet been taken」.
     pub fn accept(&self) -> Option<Arc<MemoryEndpoint>> {
         self.inner.lock().unwrap().opened.pop_front()
     }
@@ -548,7 +547,7 @@ struct EndState {
     /// The number of live halves (2 at the start). 0 = this end has been dropped entirely.
     halves: AtomicUsize,
     /// This end's incoming queue — where the handle puts in a failure. ★A weak handle★ — if strong, a test holding the handle would keep the queue from draining even after the peer
-    /// vanishes, so this end could not see 「말 없이 사라졌다」 (vanished without a word) (a read error).
+    /// vanishes, so this end could not see 「vanished without a word」 (a read error).
     inbound: mpsc::WeakUnboundedSender<PipeMsg>,
 }
 
@@ -653,8 +652,7 @@ struct MemLinkRx {
     me: Arc<EndState>,
     peer: Arc<EndState>,
     from_peer: mpsc::UnboundedReceiver<PipeMsg>,
-    /// Where the reply to a received Ping is sent back — on a real socket too the reply comes from the reading side (`ws.rs` 「들어온 Ping 에 대한 자동
-    /// Pong」 (automatic Pong for an incoming Ping)). ★So if this end does not read, the peer's Ping gets no reply★.
+    /// Where the reply to a received Ping is sent back — on a real socket too the reply comes from the reading side (`ws.rs` 「automatic Pong for an incoming Ping」). ★So if this end does not read, the peer's Ping gets no reply★.
     to_peer: mpsc::UnboundedSender<PipeMsg>,
     /// The real thing behind the [`LinkRx::recv`] contract (no close is emitted after a failure) — same as `MemRx`.
     failed: bool,
@@ -1260,7 +1258,7 @@ mod tests {
 
         let parked = tokio::spawn(async move { tx.send(Frame::Text("payload".into())).await });
         settle().await;
-        assert!(!parked.is_finished(), "막혀 있어야 한다");
+        assert!(!parked.is_finished(), "must be blocked");
         assert!(endpoint.frames().is_empty());
 
         // ★It is this side, not the sleeping task, that releases the stall★ — the only means of waking the other side is the waker.
@@ -1268,8 +1266,8 @@ mod tests {
         // ★Bounded wait★ — if it falls back to an unwakeable stall it must fail cleanly instead of hanging.
         tokio::time::timeout(Duration::from_secs(5), parked)
             .await
-            .expect("멈춤을 풀었는데도 쓰기가 안 깨어났다")
-            .expect("쓰기 태스크가 패닉했다")
+            .expect("the write did not wake even after the stall was released")
+            .expect("the write task panicked")
             .unwrap();
         assert_eq!(endpoint.frames(), vec![Frame::Text("payload".into())]);
     }
@@ -1286,7 +1284,7 @@ mod tests {
         settle().await;
         assert!(
             !parked.is_finished(),
-            "★닫기도 막혀야 한다★ — 안 막히면 하네스가 실소켓의 모양을 표현하지 못한다"
+            "★the close must be blocked too★ — otherwise the harness cannot express the shape of a real socket"
         );
         assert!(endpoint.drain().is_empty());
 
@@ -1294,8 +1292,8 @@ mod tests {
         // ★Bounded wait★ — if it falls back to an unwakeable stall it must fail cleanly instead of hanging.
         tokio::time::timeout(Duration::from_secs(5), parked)
             .await
-            .expect("멈춤을 풀었는데도 닫기가 안 깨어났다")
-            .expect("닫기 태스크가 패닉했다");
+            .expect("the close did not wake even after the stall was released")
+            .expect("the close task panicked");
         assert!(matches!(
             endpoint.drain().as_slice(),
             [ClientMsg::Close(c)] if c.code == crate::frame::CloseCode::GOING_AWAY
@@ -1338,9 +1336,9 @@ mod tests {
 
     // ── H3: if it does not settle, it fails loudly ──
     #[tokio::test]
-    #[should_panic(expected = "정착하지 않았다")]
+    #[should_panic(expected = "did not settle")]
     async fn settle_until_says_so_instead_of_failing_somewhere_else() {
-        settle_until("절대 참이 안 되는 조건", || false).await;
+        settle_until("a condition that is never true", || false).await;
     }
 
     #[tokio::test]
@@ -1351,7 +1349,7 @@ mod tests {
             tokio::task::yield_now().await;
             *setter.lock().unwrap() = true;
         });
-        settle_until("깃발", || *flag.lock().unwrap()).await;
+        settle_until("flag", || *flag.lock().unwrap()).await;
         assert!(*flag.lock().unwrap());
     }
 
@@ -1362,7 +1360,11 @@ mod tests {
         let never_polled = net.dial(&Address::new("mem://x"));
         drop(never_polled);
         assert_eq!(net.open_endpoints(), 0);
-        assert_eq!(net.dials(), 0, "폴링조차 안 된 dial 은 시도가 아니다");
+        assert_eq!(
+            net.dials(),
+            0,
+            "a dial that was not even polled is not an attempt"
+        );
     }
 
     #[tokio::test]
@@ -1373,10 +1375,10 @@ mod tests {
         assert_eq!(net.dials(), 1);
     }
 
-    // ── H5: the harness also carries the 「실패 뒤에는 닫기를 내지 않는다」 (no close is emitted after a failure) latch ──
+    // ── H5: the harness also carries the 「no close is emitted after a failure」 latch ──
     //
     // ★The point is **queueing a close after a failure**★ — without the latch the second read raises the close left in the queue
-    //   as 「상대가 말했다」 (the peer said so), and the [`crate::LinkRead::Closed`] contract becomes false in the harness alone.
+    //   as 「the peer said so」, and the [`crate::LinkRead::Closed`] contract becomes false in the harness alone.
     //   Counterpart on the real adapter side = `tests/ws_reject.rs`
     //   `a_read_after_a_failed_read_is_still_an_error_never_a_spoken_close`.
     #[tokio::test]
@@ -1386,10 +1388,10 @@ mod tests {
         let endpoint = net.accept().unwrap();
         endpoint.fail("boom");
         endpoint.close();
-        assert!(rx.recv().await.is_err(), "첫 읽기는 실패다");
+        assert!(rx.recv().await.is_err(), "the first read is a failure");
         match rx.recv().await {
             Err(_) => {}
-            Ok(other) => panic!("실패 뒤에 닫기가 나왔다: {other:?}"),
+            Ok(other) => panic!("a close came out after the failure: {other:?}"),
         }
     }
 
@@ -1407,7 +1409,7 @@ mod tests {
         drop(endpoint);
         match rx.recv().await {
             Err(_) => {}
-            Ok(other) => panic!("말 없이 사라진 통로가 닫기로 올라왔다: {other:?}"),
+            Ok(other) => panic!("a link that vanished silently came up as a close: {other:?}"),
         }
     }
 
@@ -1467,19 +1469,22 @@ mod tests {
         drop(b_rx);
         a.tx.send(Frame::Text("into the void".into()))
             .await
-            .expect("상대 끝의 쓰는 반쪽이 살아 있으면 통로는 열려 있다");
+            .expect("if the writing half of the peer's end is alive, the link is open");
         assert!(
             poll_immediate(a.rx.recv()).await.is_none(),
-            "아직 안 닫혔다"
+            "not closed yet"
         );
         assert!(!b_control.dropped());
         drop(b_tx);
         assert!(b_control.dropped());
         assert!(
             a.rx.recv().await.is_err(),
-            "말 없이 사라진 끝은 읽기 오류다"
+            "an end that vanished silently is a read error"
         );
-        assert!(a.rx.recv().await.is_err(), "실패 뒤에도 오류다");
+        assert!(
+            a.rx.recv().await.is_err(),
+            "still an error after the failure"
+        );
         assert!(a.tx.send(Frame::Text("x".into())).await.is_err());
     }
 
@@ -1489,7 +1494,7 @@ mod tests {
         a.tx.ping().await.unwrap();
         assert!(
             poll_immediate(a.rx.recv()).await.is_none(),
-            "상대가 읽기 전에는 대답이 없다"
+            "no answer before the peer reads"
         );
         assert!(matches!(
             b.rx.recv().await.unwrap(),
@@ -1511,13 +1516,13 @@ mod tests {
         let mut tx = a.tx;
         let parked = tokio::spawn(async move { tx.send(Frame::Text("late".into())).await });
         settle().await;
-        assert!(!parked.is_finished(), "막혀 있어야 한다");
+        assert!(!parked.is_finished(), "must be blocked");
         assert_eq!(b.control.unread(), 0);
         a.control.stall_writes(false);
         tokio::time::timeout(Duration::from_secs(5), parked)
             .await
-            .expect("멈춤을 풀었는데도 쓰기가 안 깨어났다")
-            .expect("쓰기 태스크가 패닉했다")
+            .expect("the write did not wake even after the stall was released")
+            .expect("the write task panicked")
             .unwrap();
         assert!(
             matches!(b.rx.recv().await.unwrap(), LinkRead::Frame(Frame::Text(t)) if t == "late")
@@ -1532,20 +1537,20 @@ mod tests {
         let mut tx = a.tx;
         let parked = tokio::spawn(async move { tx.ping().await });
         settle().await;
-        assert!(!parked.is_finished(), "ping 멈춤에서 서 있어야 한다");
+        assert!(!parked.is_finished(), "must be stuck at the ping stall");
         a.control.stall_writes(true);
         a.control.stall_pings(false);
         settle().await;
         assert!(
             !parked.is_finished(),
-            "쓰기 멈춤이 걸려 있는데 ping 이 나갔다"
+            "a ping went out while a write stall was in place"
         );
         assert_eq!(b.control.unread(), 0);
         a.control.stall_writes(false);
         tokio::time::timeout(Duration::from_secs(5), parked)
             .await
-            .expect("두 멈춤을 다 풀었는데도 ping 이 안 깨어났다")
-            .expect("ping 태스크가 패닉했다")
+            .expect("the ping did not wake even after both stalls were released")
+            .expect("the ping task panicked")
             .unwrap();
         assert!(matches!(
             b.rx.recv().await.unwrap(),
@@ -1560,13 +1565,13 @@ mod tests {
         a.control.fail_reads("boom");
         assert!(
             matches!(a.rx.recv().await.unwrap(), LinkRead::Frame(_)),
-            "이미 들어온 것이 먼저다"
+            "what already came in comes first"
         );
         assert_eq!(a.rx.recv().await.unwrap_err().message, "boom");
         assert!(a.rx.recv().await.is_err());
         a.tx.send(Frame::Text("writes still go".into()))
             .await
-            .expect("읽기 실패는 쓰기를 안 끊는다");
+            .expect("a read failure does not cut writing");
         assert!(matches!(b.rx.recv().await.unwrap(), LinkRead::Frame(_)));
 
         b.control.fail_writes();
@@ -1576,14 +1581,14 @@ mod tests {
         assert_eq!(
             a.control.unread(),
             0,
-            "쓰기가 끊긴 끝의 닫기는 아무것도 안 보낸다"
+            "closing an end whose writing was cut sends nothing"
         );
         a.tx.send(Frame::Text("still readable".into()))
             .await
             .unwrap();
         assert!(
             matches!(b.rx.recv().await.unwrap(), LinkRead::Frame(_)),
-            "쓰기 실패는 읽기를 안 끊는다"
+            "a write failure does not cut reading"
         );
     }
 
@@ -1611,11 +1616,11 @@ mod tests {
         );
         let (peer, mut inbox) =
             registry.add(PeerId::new("d"), mem_addr(), Arc::new(HelloHandshake));
-        settle_until("걸기가 준비 큐에 닿았다", || {
+        settle_until("the dial reached the ready queue", || {
             listener.queued() == 1
         })
         .await;
-        let mut accepted = listener.accept().await.expect("받은 통로");
+        let mut accepted = listener.accept().await.expect("accepted link");
         assert_eq!(accepted.info().remote.as_deref(), Some("mem:1"));
         assert!(matches!(
             accepted.rx.recv().await.unwrap(),
@@ -1626,7 +1631,7 @@ mod tests {
             .send(Frame::Text(HelloHandshake::WELCOME.into()))
             .await
             .unwrap();
-        settle_until("운영 진입", || peer.peer_state() == PeerState::Live).await;
+        settle_until("operation entered", || peer.peer_state() == PeerState::Live).await;
         assert!(matches!(
             inbox.recv().await,
             Some(Incoming::Event(TransportEvent::Connected { .. }))
@@ -1648,9 +1653,9 @@ mod tests {
         accepted.tx.send(TestWire::reply(7)).await.unwrap();
         let got = tokio::time::timeout(Duration::from_secs(5), reply)
             .await
-            .expect("답장이 안 왔다")
-            .expect("요청 태스크가 패닉했다")
-            .expect("요청이 실패했다");
+            .expect("the reply did not come")
+            .expect("the request task panicked")
+            .expect("the request failed");
         assert_eq!(
             got,
             TestIn::Reply {
@@ -1668,7 +1673,7 @@ mod tests {
         let mut waiting = listener.accept();
         assert!(
             poll_immediate(&mut waiting).await.is_none(),
-            "아직 아무도 안 걸었다"
+            "nobody has dialed yet"
         );
         let (mut tx, _rx) = connector.dial(&mem_addr()).await.unwrap();
         tx.send(Frame::Text("first words".into())).await.unwrap();
@@ -1676,7 +1681,7 @@ mod tests {
         assert_eq!(
             listener.queued(),
             1,
-            "버린 accept 가 통로를 가져가지 않았다"
+            "the abandoned accept did not take the link"
         );
         let mut accepted = listener.accept().await.unwrap();
         assert_eq!(accepted.info().remote.as_deref(), Some("mem:1"));
@@ -1691,16 +1696,20 @@ mod tests {
         let (_clock, listener, connector) = listener(4);
         let permits = listener.permits();
         let (mut tx, mut rx) = connector.dial(&mem_addr()).await.unwrap();
-        assert_eq!(permits.in_use(), 1, "준비 큐에 앉은 통로가 칸을 쥔다");
+        assert_eq!(
+            permits.in_use(),
+            1,
+            "a link sitting in the ready queue holds a permit"
+        );
         drop(listener);
         assert_eq!(permits.in_use(), 0);
         assert!(
             connector.link(1).unwrap().acceptor.dropped(),
-            "안 받아 간 먼 끝이 닫혔다"
+            "the far end that was not taken was closed"
         );
         assert!(
             rx.recv().await.is_err(),
-            "거는 쪽은 통로 손실(읽기 오류)로 본다"
+            "the dialing side sees it as link loss (read error)"
         );
         assert!(tx.send(Frame::Text("x".into())).await.is_err());
         assert!(
@@ -1708,7 +1717,7 @@ mod tests {
                 connector.dial(&mem_addr()).await,
                 Err(DialFailure::Unreachable(_))
             ),
-            "청취기가 없으면 못 붙는다"
+            "cannot attach without a listener"
         );
         assert_eq!((connector.dials(), connector.links()), (2, 1));
     }
@@ -1723,19 +1732,19 @@ mod tests {
             Policy::default(),
         );
         let (peer, _inbox) = registry.add(PeerId::new("d"), mem_addr(), Arc::new(HelloHandshake));
-        settle_until("핸드셰이크 진입", || {
+        settle_until("handshake entered", || {
             peer.peer_state() == PeerState::Handshaking
         })
         .await;
         assert_eq!(listener.queued(), 1);
         drop(listener);
-        settle_until("통로 손실로 물러남", || {
+        settle_until("backed off due to link loss", || {
             peer.peer_state() == PeerState::Backoff
         })
         .await;
         clock.advance(Duration::from_secs(11));
-        settle_until("다시 걸었다", || connector.dials() == 2).await;
-        assert_eq!(connector.links(), 1, "닿은 통로는 처음 하나뿐이다");
+        settle_until("redialed", || connector.dials() == 2).await;
+        assert_eq!(connector.links(), 1, "only the first link arrived");
     }
 
     // The auth deadline is measured from the end of the upgrade (TRD 3 §5 3) — if stamped at the moment it was taken, the time sitting in the ready queue drops out of the deadline.
@@ -1760,10 +1769,14 @@ mod tests {
             Err(DialFailure::Unreachable(e)) if e.message == "upgrade permits full"
         ));
         let accepted = listener.accept().await.unwrap();
-        assert_eq!(permits.in_use(), 1, "받아 가도 칸은 그 통로와 함께 간다");
+        assert_eq!(
+            permits.in_use(),
+            1,
+            "even when taken, the permit goes with that link"
+        );
         assert!(
             connector.dial(&mem_addr()).await.is_err(),
-            "아직 칸이 안 돌아왔다"
+            "the permit has not returned yet"
         );
         drop(accepted);
         assert_eq!(permits.in_use(), 0);
@@ -1779,10 +1792,10 @@ mod tests {
         drop((connector, other));
         assert!(
             listener.accept().await.is_ok(),
-            "닿아 있던 것은 먼저 내준다"
+            "what had already arrived is handed out first"
         );
         assert!(listener.accept().await.is_err());
-        assert!(listener.accept().await.is_err(), "종결은 계속 종결이다");
+        assert!(listener.accept().await.is_err(), "terminal stays terminal");
     }
 
     #[tokio::test]
@@ -1840,7 +1853,7 @@ mod tests {
         });
         let landed = done
             .recv_timeout(Duration::from_secs(5))
-            .expect("걸기가 교착했다 — 시계를 장부 자물쇠 안에서 읽었다");
+            .expect("the dial deadlocked — the clock was read inside the ledger lock");
         assert_eq!(landed, Some(true));
         assert_eq!(clock.reads.load(Ordering::Acquire), 1);
         assert_eq!(listener.queued(), 1);

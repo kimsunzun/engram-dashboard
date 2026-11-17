@@ -2,14 +2,14 @@
 name = "engram-dashboard-cli"
 version = "0.4.0"
 edition = "2021"
-description = "Engram Dashboard 제어 평면 CLI(engram.exe) — 스폰된 에이전트가 데몬 제어 라우트에 손조립 HTTP 로 붙는 인증 + 배송 클라이언트. bin 전용(ADR-0273 · ADR-0285)."
+description = "Engram Dashboard control plane CLI (engram.exe) — an auth + delivery client through which spawned agents attach to the daemon control routes with hand-assembled HTTP. bin only (ADR-0273 · ADR-0285)."
 
 # ADR-0273
 # ADR-0086 step 2 · ADR-0132: control-plane CLI. A minimal client that a spawned agent calls from its shell —
 # reads env (ENGRAM_TOKEN/ENGRAM_CONTROL_URL) and POSTs to the daemon control route. Minimal dependencies (hand-assembled HTTP over std TcpStream
 # ). ★bin name = the agent's `CLI_EXE_NAME`★ — grant · priming · PATH resolution are aligned to this name
 # (ADR-0094). If the name is changed here that constant must change with it, and if they drift apart mail silently stops.
-# The path stays `src/bin/engram.rs` — the ADRs point to this file by that path, and the ADR-0273 「영향」 section decided to read that path as
+# The path stays `src/bin/engram.rs` — the ADRs point to this file by that path, and the ADR-0273 「Impact」 section decided to read that path as
 # this package's file of the same name. No lib target is created — there is no consumer to call it, and creating one would make
 # a one-file lib (ADR-0175 decision 6).
 [[bin]]
@@ -19,8 +19,8 @@ path = "src/bin/engram.rs"
 # ★Do not depend on the daemon package★ — if it did, the daemon graph (tokio · axum · rmcp · net …) would be dragged into the engram.exe build
 #   and the reason this package stands apart would vanish (ADR-0273).
 [dependencies]
-# The CLI vocabulary · help-contract constants in agent `types.rs` (ADR-0273 「맥락」 · ADR-0285). The price is that agent's operational dependencies are
-#   built along with it (ADR-0273 「영향」 — moving the vocabulary out of agent would reduce that, but that decision keeps the vocabulary in agent).
+# The CLI vocabulary · help-contract constants in agent `types.rs` (ADR-0273 「Context」 · ADR-0285). The price is that agent's operational dependencies are
+#   built along with it (ADR-0273 「Impact」 — moving the vocabulary out of agent would reduce that, but that decision keeps the vocabulary in agent).
 engram-dashboard-agent = { path = "../engram-dashboard-agent" }
 engram-dashboard-command = { path = "../engram-dashboard-command" }
 serde_json = "1"

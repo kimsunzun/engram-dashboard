@@ -46,11 +46,11 @@ Each unit runs in its own git worktree based on the topic branch at the time the
 
 | Unit | Files | ~Lines |
 |---|---|---:|
-| U1 | crates `protocol`, `base`, `command`, `platform`, `transport`, `messaging`, `cli` (incl. marker in `placeholder.rs` + `src/api/wsFrame.ts` mirror + `wsFrame.test.ts`) | 5.7k |
+| U1 | crates `protocol`, `base`, `command`, `platform`, `transport`, `messaging`, `cli` (incl. marker in `placeholder.rs` + `src/api/wsFrame.ts` mirror + `wsFrame.test.ts`; the old-marker accept in `StructuredTextView.tsx` + its test moved here from U5 after review) | 5.7k |
 | U2 | `crates/engram-dashboard-agent/**` (src incl. codex backend, tests, examples, `Cargo.toml`, bindings, `commands.schema.json`) — split in two coders by directory (`src/backend/codex/**` vs the rest) only for editing, tested and committed together | 14k |
 | U3 | `crates/engram-dashboard-daemon/**` | 8.8k |
 | U4 | `src-tauri/**` (keeps the Korean column of `ui_text.rs` and Rust tests asserting it, marked; rewords the `link/errors.rs` head claim that the texts stay byte-identical to the old shell texts) | 6.3k |
-| U5 | `src/**` except U1's `src/api/wsFrame.ts` and `src/api/wsFrame.test.ts` (in `ko.ts` only comments); `index.html`, `vite.config.*`, `vitest.config.*`, `tsconfig*.json`, `package.json`; marker dual-accept in `StructuredTextView.tsx` with its test run over both markers | 5.9k |
+| U5 | `src/**` except U1's `src/api/wsFrame.ts` and `src/api/wsFrame.test.ts` (in `ko.ts` only comments); `index.html`, `vite.config.*`, `vitest.config.*`, `tsconfig*.json`, `package.json`; (the marker dual-accept in `StructuredTextView.tsx` landed with U1 after its review) | 5.9k |
 | U6 | `scripts/**`, `.github/**`, `launch/**`, `_wip/**` (translate text dumps too), other root files not in U5; `check-hangul.mjs` (scans `git ls-files -z` by default, or explicit paths / a root given as arguments) + its test under `src/` (vitest only collects `src/**`; planted Hangul built from `\u` escapes) | 1.0k |
 | W1 | docs: `docs/process/step-log.md`, `docs/tracking.md`, `docs/todo/**` | |
 | W2a | docs: `docs/process/S21-codex-backend/**`, `docs/process/S21-crate-boundaries/**` (md only) | |

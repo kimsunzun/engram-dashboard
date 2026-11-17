@@ -12,7 +12,7 @@ import {
   type ToolCategory,
   type ToolItem,
 } from './structuredAccumulator'
-import { PLACEHOLDER_ERROR_MESSAGE } from '../../api/wsFrame'
+import { LEGACY_PLACEHOLDER_ERROR_MESSAGE, PLACEHOLDER_ERROR_MESSAGE } from '../../api/wsFrame'
 import { setLanguage, t } from '../../i18n'
 import { useToolGroupStore } from '../../store/toolGroupStore'
 
@@ -1024,8 +1024,13 @@ describe('error row — the dropped-output placeholder', () => {
     })
   })
 
-  it('shows chat.droppedOutput instead of the marker text, and follows a language switch', () => {
-    const items: StructuredItem[] = [{ kind: 'error', message: PLACEHOLDER_ERROR_MESSAGE, itemId: 0 }]
+  // ADR-0383: the pre-S38 Korean marker (an old daemon still running) is recognised too. Its text equals `ko` `chat.droppedOutput`,
+  // so only the `en` assertions tell "marker recognised" from "raw text shown".
+  it.each([
+    ['the current marker', PLACEHOLDER_ERROR_MESSAGE],
+    ['the legacy marker', LEGACY_PLACEHOLDER_ERROR_MESSAGE],
+  ])('shows chat.droppedOutput instead of %s, and follows a language switch', (_label, marker) => {
+    const items: StructuredItem[] = [{ kind: 'error', message: marker, itemId: 0 }]
     const { rerender } = render(<StructuredTextView items={items} />)
     expect(screen.getByText(t('chat.droppedOutput'))).toBeTruthy()
     expect(screen.getByText('오류')).toBeTruthy()
@@ -1036,7 +1041,7 @@ describe('error row — the dropped-output placeholder', () => {
     rerender(<StructuredTextView items={items} />)
 
     expect(screen.getByText('This output could not be delivered.')).toBeTruthy()
-    expect(screen.queryByText(PLACEHOLDER_ERROR_MESSAGE)).toBeNull()
+    expect(screen.queryByText(marker)).toBeNull()
     expect(screen.getByText('Error')).toBeTruthy()
   })
 

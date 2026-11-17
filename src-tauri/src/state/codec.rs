@@ -3,8 +3,8 @@
 //! 판정 하나다 — 이 모듈의 몫은 [`STATE_SPEC`](버전 키 · 판 · 상한 · 머리 모양 검사)과 창 해석이다.
 //!
 //! 읽기는 세 층으로 접는다:
-//! - **통째로 못 쓴다**([`Unusable`]) — 손상(JSON 이 아니다 · 객체가 아니다 · `version` 꼴이 틀리다 · 머리
-//!   (`saved_at_ms` · `clean_exit` · `resolved_crash_copy` · `windows` 배열)를 못 읽는다 · 원문의 상한 초과 ·
+//! - **통째로 못 쓴다**([`Unusable`]) — 손상(`not JSON` · `not a JSON object` · `` `version` is not an integer of 1 or more `` · 머리
+//!   (`saved_at_ms` · `clean_exit` · `resolved_crash_copy` · `windows` 배열)를 못 읽는다 · `exceeded the {cap} byte cap` ·
 //!   UTF-8 아님) 이거나 이 셸보다 새 `version` 이다. `version` 이 없으면 1 판이다.
 //! - **그 창만 건너뛴다** — 모르는 `kind` · 못 읽는 창 칸(탭 칸 포함).
 //! - **그 탭만 건너뛴다** — 못 읽는 탭(모르는 노드 종류 · 객체가 아닌 슬롯 내용 등).
@@ -45,7 +45,7 @@ pub const STATE_SPEC: file::Spec = file::Spec {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Unusable {
-    /// 손상 — base `file` 판정의 사유 문구 그대로(상한 초과 · UTF-8 아님 · JSON 아님 · 객체 아님 · `version` 꼴 ·
+    /// 손상 — base `file` 판정의 사유 문구 그대로(`exceeded the {cap} byte cap` · UTF-8 아님 · `not JSON` · `not a JSON object` · `` `version` is not an integer of 1 or more `` ·
     /// 머리를 못 읽는다).
     #[error("{0}")]
     Corrupt(String),
@@ -994,8 +994,8 @@ mod tests {
 
     #[test]
     fn not_json_is_unusable() {
-        assert!(corrupt_reason("{BROKEN").contains("JSON 이 아니다"));
-        assert!(corrupt_reason("").contains("JSON 이 아니다"));
+        assert!(corrupt_reason("{BROKEN").contains("not JSON"));
+        assert!(corrupt_reason("").contains("not JSON"));
     }
 
     #[test]
@@ -1105,7 +1105,7 @@ mod tests {
 
         let too_deep = nested_splits(121);
         let written = serde_json::to_string_pretty(&too_deep).unwrap();
-        assert!(corrupt_reason(&written).contains("JSON 이 아니다"));
+        assert!(corrupt_reason(&written).contains("not JSON"));
         assert!(matches!(
             encode(&too_deep),
             Err(EncodeError::Unparsable { .. })

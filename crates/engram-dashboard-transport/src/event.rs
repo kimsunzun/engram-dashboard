@@ -4,8 +4,8 @@
 //! decision (ADR-0177 decision 9): a signal not put into the stream the consumer **already reads** is the same as nonexistent if not heard.
 //! The price = a consumer that wants only packets also uses one more layer of `match`.
 //!
-//! ★This list is the crate boundary★ (ADR-0182 「영향」 (Consequences)) — **agent errors and command failures are not here.** The upper layer
-//! knows about them, and merging several sources is done later by the screen. If even one entry comes in on the grounds of 「이것도 같이 올리면 편하다」 (it would be convenient to raise this too),
+//! ★This list is the crate boundary★ (ADR-0182 「Impact」) — **agent errors and command failures are not here.** The upper layer
+//! knows about them, and merging several sources is done later by the screen. If even one entry comes in on the grounds of 「it would be convenient to raise this too」,
 //! that boundary breaks on the spot.
 
 use std::fmt;
@@ -57,20 +57,20 @@ impl fmt::Display for PeerId {
 /// From which direction it was discarded.
 ///
 /// ★There is no receiver-side branch★ — even when the upward line is full, the supervisor holds items in its own ordering area instead of discarding them
-/// (`peer.rs` header 「순서 칸」 (ordering area) · TRD 3 §3-0 ②).
+/// (`peer.rs` header 「ordering area」 · TRD 3 §3-0 ②).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     /// Could not send out what was meant to go to the peer. It includes not only queue saturation but also what was discarded because of a disconnect, and among those are
     /// notifications and fan-outs **cut off mid-write** (a request in the same situation is not included here; it wakes with an error).
     ///
-    /// ★It is not 「확실히 잃었다」 (certainly lost) but 「쓰기가 `Ok` 로 끝나는 것을 못 봤다」 (did not see the write end in Ok) — the count can be inflated★. The place where it is inflated is
+    /// ★It is not 「certainly lost」 but 「did not see the write end in Ok」 — the count can be inflated★. The place where it is inflated is
     /// a frame cut off mid-write — it may already have been in the adapter buffer, and on the WS adapter, the close
-    /// sent when the link is discarded may push it out first (source reading — `ws.rs` 「통로 성질」 (link properties)). Under the same congestion that close
+    /// sent when the link is discarded may push it out first (source reading — `ws.rs` 「link properties」). Under the same congestion that close
     /// can also be cut by the write deadline.
     ///
     /// A frame that [`crate::Registry::broadcast`] could not put in is counted once by that peer's supervisor (queue saturation · not in the operating phase).
     /// But a frame that could not be put in because the peer was not in the operating phase after the app called [`crate::Peer::close`] is not counted (`lib.rs`
-    /// 「알려진 한계」 (known limits)) — a frame put into a peer still operating after close was called, where the queue then filled, is counted.
+    /// 「known limits」) — a frame put into a peer still operating after close was called, where the queue then filled, is counted.
     ///
     /// ★It also includes what was not written because the bound generation was not the current one just before the write★ (TRD 3 §3-0 ③ — [`crate::Peer::notify_in`])
     /// — the connection was operating when it was queued, but it reconnected before the write. That report may come after the next connection's
@@ -162,7 +162,7 @@ where
 ///
 /// The `generation` of the stream family is an **incarnation marker** (u32), a different thing from [`Generation`] (connection generation) —
 /// the names are the same and easy to confuse, so it is quicker to remember that they are told apart by width.
-/// ★`#[non_exhaustive]`★ — TRD §7 pinned it down as 「항목은 늘어난다」 (items grow) and this crate aims at reuse.
+/// ★`#[non_exhaustive]`★ — TRD §7 pinned it down as 「items grow」 and this crate aims at reuse.
 /// If it is not set now, the moment one more branch is added, every consumer's `match` breaks.
 #[non_exhaustive]
 pub enum TransportEvent<W: Wire> {
@@ -170,7 +170,7 @@ pub enum TransportEvent<W: Wire> {
         peer: PeerId,
         generation: Generation,
     },
-    /// ★Today's code has no such `cause` distinction — everything is one lump of 「끊김」 (disconnected)★.
+    /// ★Today's code has no such `cause` distinction — everything is one lump of 「disconnected」★.
     Disconnected {
         peer: PeerId,
         generation: Generation,

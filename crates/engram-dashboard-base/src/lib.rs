@@ -1,11 +1,10 @@
 //! # engram-dashboard-base — the bottom foundation layer, a leaf crate (zero domain knowledge)
 //!
 //! It is the bottom foundation layer of the dependency graph — general helpers and foundation infrastructure go into **purpose-named modules**
-//! (ADR-0269 decisions 1 · 9). There are nine tenants now: [`file`](mod@file) (read decisions for data files (version · corruption) · 「덮어도
-//! 되나」 (may we overwrite?) write decisions · capped reads · atomic writes · atomic copies · corrupt copies · sweeping leftover temp files — the OS-dependent part is
+//! (ADR-0269 decisions 1 · 9). There are nine tenants now: [`file`](mod@file) (read decisions for data files (version · corruption) · 「may we overwrite?」 write decisions · capped reads · atomic writes · atomic copies · corrupt copies · sweeping leftover temp files — the OS-dependent part is
 //! passed in by the caller) · [`logging`](tracing global
 //! init + a file log for one process run) · [`text`](bytes → lowercase hex) · [`time`](wall-clock epoch milliseconds ·
-//! the 「지금 읽기」 (read now) clock seam) · [`path`](normalizing the spelling of hand-typed paths) · [`sync`](reclaiming lock poisoning — without a warning,
+//! the 「read now」 clock seam) · [`path`](normalizing the spelling of hand-typed paths) · [`sync`](reclaiming lock poisoning — without a warning,
 //! keeping the poison mark) · `testing`(test waiting — polls until a condition holds) · [`writable`](can a folder really be written to —
 //! write probe · one retry for a folder that vanished mid-check) · [`panic`](mod@panic)(panic containment mark — containment · mark off ·
 //! hook body that ends the process when outside the mark). Each module (header and public function docs) is the source of truth for its responsibility.
@@ -16,8 +15,7 @@
 //!
 //! ## Three tenancy conditions (if even one is unmet, it does not belong here)
 //!
-//! 1. **Used or copied in several places right now** (ADR-0269 decision 7 — replaces ADR-0175's 「소비자 crate 둘
-//!    이상」 (at least two consumer crates)). The standard is not set in advance but judged by present use — the main session judges and
+//! 1. **Used or copied in several places right now** (ADR-0269 decision 7 — replaces ADR-0175's 「at least two consumer crates」). The standard is not set in advance but judged by present use — the main session judges and
 //!    reports without asking the user. Something with only one copy is a module inside that consumer.
 //! 2. **Zero domain knowledge.** It does not know the agent runtime · wire contract · daemon lifecycle management even as types. So this crate
 //!    depends on no workspace crate at all (the gate below is that wall).
@@ -26,19 +24,18 @@
 //!
 //! ★OS-dependent **production** code does not belong here even if it meets all three★ — it is for the OS-layer crate
 //! `engram-dashboard-platform` (ADR-0266 decisions 2 · 4). So this crate does not depend on `windows`.
-//! Test OS branches (`#[cfg(windows)]` tests) are outside this rule (ADR-0266 「근거」 (rationale)).
+//! Test OS branches (`#[cfg(windows)]` tests) are outside this rule (ADR-0266 「Rationale」).
 //!
 //! ★**It is not split into small purpose-specific crates, and the name stays base**★ (ADR-0269 decision 1) — it is divided into
-//! purpose-named modules inside. The judgment is that, sitting at the bottom with little entanglement, splitting later costs little, and what now backs that 「엮인 데가
-//! 적다」 (little entanglement) is gate ③ below. ADR-0175's clause 「셋째 입주자를 받기 전에 「거부한 대안」을
-//! 다시 연다」 (reopen the rejected alternative before accepting a third tenant) is replaced by this decision — the debate is not raised again each time tenants grow.
+//! purpose-named modules inside. The judgment is that, sitting at the bottom with little entanglement, splitting later costs little, and what now backs that 「little entanglement」 is gate ③ below. ADR-0175's clause 「reopen the 「rejected alternative」 before accepting a third tenant」
+//! is replaced by this decision — the debate is not raised again each time tenants grow.
 //!
 //! ## Isolation gates (invariant) — three, each on a different axis
 //!
 //! **① Workspace dependency ceiling** (the wall of tenancy condition ② — the compiler does not enforce leaf-ness):
 //! `cargo tree -p engram-dashboard-base --depth 1 --prefix none -e normal,dev,build --target all`
 //! `--all-features | rg "^engram-dashboard" | sort -u` → **exactly 1 line = itself**.
-//! ★Do not replace this with a grep over manifest text★ — rename · the `[dependencies.<이름>]` table form ·
+//! ★Do not replace this with a grep over manifest text★ — rename · the `[dependencies.<name>]` table form ·
 //! `[build-dependencies]` · inactive targets · `optional` all slip through in normal Cargo syntax.
 //! Do not trim the flags either (the shape leaks that much — same reasoning as the messaging · command ceiling gates).
 //!

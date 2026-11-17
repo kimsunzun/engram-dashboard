@@ -16,7 +16,7 @@ pub struct RosterEntry {
 
 /// The two answers when asked about one name.
 ///
-/// ★There is no answer 「주인이 자리 비움」 (the owner is away)★ — the disconnected owner's registration vanishes from the registry, so that name gets the same answer as a name
+/// ★There is no answer 「the owner is away」★ — the disconnected owner's registration vanishes from the registry, so that name gets the same answer as a name
 /// **never seen before** (what ADR-0150 accepted — the reason for leaving no trace is in [`Roster`]).
 /// If that distinction is ever really needed, it is solved not by reviving the trace but by putting the connection list in the response.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,7 +25,7 @@ pub enum OwnerLookup {
     Unknown,
 }
 
-/// An endpoint that asks only one thing, 「이 이름의 주인은 누구인가」 (who is the owner of this name) — all that [`crate::route`] needs from the registry.
+/// An endpoint that asks only one thing, 「who is the owner of this name」 — all that [`crate::route`] needs from the registry.
 ///
 /// ★This is what keeps delivery from holding the registry **for the whole round trip**★: for the assembly code holding the shared registry to
 /// pass a reference to `route`, it would have to hold the lock until the reply arrives, and meanwhile registration, connection cleanup and every other delivery all stop
@@ -40,7 +40,7 @@ impl OwnerLookupSource for Roster {
     }
 }
 
-/// ★Does not consult the build list★ — only when the registry is filled by runtime registration alone is 「지금 부를 수 있는가」 (can it be called now) a fact
+/// ★Does not consult the build list★ — only when the registry is filled by runtime registration alone is 「can it be called now」 a fact
 /// (TRD §3-7 prohibition clause).
 ///
 /// ★When an owner disconnects, its entries vanish — leaving neither a trace nor a marker★ ([`Roster::disconnect`])
@@ -48,7 +48,7 @@ impl OwnerLookupSource for Roster {
 /// Do not revert to a form that leaves a trace. The owner token is new per connection (`OwnerToken`), so if the same client
 /// reconnects it is a stranger to the registry, and so traces are not overwritten but **pile up**. With neither expiry nor a reclaim path,
 /// once [`Roster::MAX_NAMES`] is reached every registration carrying a name not already in the registry is rejected, and — those names go out as
-/// `UNKNOWN_COMMAND` (= 「재시도 말고 다시 발견하라」 (do not retry, rediscover), TRD §4-②) — nothing but a daemon restart clears it
+/// `UNKNOWN_COMMAND` (= 「do not retry, rediscover」, TRD §4-②) — nothing but a daemon restart clears it
 /// (ADR-0150 decision 3).
 /// ★But that alone does not bound the size★ — a name is a **string** the registration packet carried (not a build constant),
 /// so a single attached owner can send any number of names. That axis is closed by count and length caps
@@ -115,7 +115,7 @@ impl Roster {
     }
 
     /// All at once on attach — it is that owner's **entire set**. A reconnect resend takes the same path, so an old name this owner did not
-    /// carry this time comes down from the registry (per-owner last-wins, ADR-0081 「RegisterRole 재전송」 (RegisterRole resend)).
+    /// carry this time comes down from the registry (per-owner last-wins, ADR-0081 「RegisterRole resend」).
     /// So calling it with an empty list leaves that owner's place completely empty.
     ///
     /// ★If the cap is exceeded, **not one name is entered** and `INVALID_ARGUMENT` is returned★ — if we cut off only the overflow
@@ -160,15 +160,15 @@ impl Roster {
     /// (the other half of the axis ADR-0150 decision 3 closed for disconnects).
     /// ★`removed` erases **only names it holds itself**★ — the same rule as [`Roster::disconnect`]. If a late diff from a past
     /// owner erased the registration of the owner that just attached, a live command would disappear (reconnect overlap). Another
-    /// owner's name or a nonexistent name passes silently — a diff means 「내 몫을 이렇게 바꿔라」 (change my share like this), not
+    /// owner's name or a nonexistent name passes silently — a diff means 「change my share like this」, not
     /// a claim about someone else's state.
     /// ★`added` cannot take a name held by another — this is where it parts from [`Roster::register`]★.
     /// Registration's last-wins is tied to **the moment of attaching** (TRD §3-7 clause 1), so it reads as a handover, but a diff is by definition
-    /// 「붙어 있는 동안」 (while attached), so it has no such anchor. If an anchorless overwrite were allowed, a late diff from a dead connection would
+    /// 「while attached」, so it has no such anchor. If an anchorless overwrite were allowed, a late diff from a dead connection would
     /// **overwrite with its own token** the registration of the shell that just attached, so lookups would answer the dead owner as `Available`, and the live shell would have no
     /// occasion to register again (registration happens only once on attaching), so that state would be frozen in place.
     /// ★Why it is rejected rather than passed silently★ (another owner's name in `removed` passes silently): not
-    /// erasing another's name means 「내 몫」 (my share) as the diff stated it is already so, so nothing is lost, but if `added` were silently
+    /// erasing another's name means 「my share」 as the diff stated it is already so, so nothing is lost, but if `added` were silently
     /// ignored, the caller would **be told success** while believing that name comes to itself. The rejection is `CONFLICT`
     /// — it answers not that the packet is wrong (`INVALID_ARGUMENT`) but that the **state** of the registry is not so.
     /// ★A diff from a disconnected owner is **not blocked here**★ — the same reason as [`Roster::register`], and the net
@@ -177,7 +177,7 @@ impl Roster {
     /// we do not fix an application order. Whichever order is picked, the caller cannot know the result: adding then removing means that **even after receiving success**
     /// the name is not in the registry and goes out as `UNKNOWN_COMMAND` (the cap rejection of [`Roster::register`] blocks
     /// that very accident —
-    /// 「주인은 성공으로 알고 일부 이름이 조용히 없는 상태가 된다」 (the owner takes it as success and some names silently end up missing)), and removing then adding means the instruction to take it down is silently
+    /// 「the owner takes it as success and some names silently end up missing」), and removing then adding means the instruction to take it down is silently
     /// ignored. **A success report that diverges from actual state is worse than picking the wrong order** — the caller has no means to tell a silent
     /// deletion from a successful registration. No clause fixes an order in ADR-0150 or in TRD §3-7 clause 3, so
     /// we do not fill that gap arbitrarily here.
@@ -219,7 +219,7 @@ impl Roster {
     }
 
     /// Whether one name is carried in both lists — checked **before the registry is touched** (the same contract as [`Roster::check_room_for`]).
-    /// The reason for rejecting and 「적용 순서를 정하지 않는다」 (we do not fix an application order) are in the [`Roster::update`] comment.
+    /// The reason for rejecting and 「we do not fix an application order」 are in the [`Roster::update`] comment.
     ///
     /// ★It does not look at the registry — so it takes no `self`★: the subject of the decision is **one packet**, and that is also why its code is
     /// `INVALID_ARGUMENT` (sending the same round trip again gives the same answer). Its sibling
@@ -270,18 +270,16 @@ impl Roster {
     ///
     /// ★The per-owner cap measures that owner's **cumulative** total, not one packet★: if only the packet were measured, one owner sending
     /// non-overlapping 512-name diffs one after another would fill the whole registry by itself. Then the real shell's registration would be blocked by the overall
-    /// cap and `tab.*` and `window.*` would all go out as `UNKNOWN_COMMAND`, a code that means 「재시도가
-    /// 무의미하니 이름을 다시 발견하라」 (retrying is pointless, rediscover the name) (TRD §4-②), so the caller would give up on a command that really exists for good.
+    /// cap and `tab.*` and `window.*` would all go out as `UNKNOWN_COMMAND`, a code that means 「retrying is pointless, rediscover the name」 (TRD §4-②), so the caller would give up on a command that really exists for good.
     /// So it is blocked here so that the overall cap does not become a **shared resource with no per-owner share**. The names carried in this packet
     /// are overwrites and do not take new slots, so they are not counted twice.
     /// ★This cap is a different axis from the rejected TTL★ — what was rejected there was **time**, so the answer to the same question varied
     /// with the clock (ADR-0156 alternative C · ADR-0150 alternative F). A count cap does not change the answer for a name in the registry.
     /// ★The decision comes before the change, so this **over-measures** (left knowingly)★: names that will come down in this round trip are still
     /// in the registry, so they are counted too — [`Roster::register`]'s own names about to be replaced and `removed`
-    /// of [`Roster::update`] are such cases. The cost is only that 「몫이 꽉 찬 주인은 이름 전량을 한 패킷에 갈아치우지 못한다」 (an owner whose share is full cannot replace its entire name set in one packet), and sending
+    /// of [`Roster::update`] are such cases. The cost is only that 「an owner whose share is full cannot replace its entire name set in one packet」, and sending
     /// one empty full registration empties its own place completely and opens that path. It is not an axis along which the registry grows, so
-    /// we did not fix it precisely — measuring exactly would require the cap decision to model the result of the change, and then this function's contract 「명부를 건드리기
-    /// 전에 판정한다」 (decide before touching the registry) would blur.
+    /// we did not fix it precisely — measuring exactly would require the cap decision to model the result of the change, and then this function's contract 「decide before touching the registry」 would blur.
     ///
     /// Names and `help` are strings the registration packet carried, so length is measured too — one exaggerated `help` eats the registry memory
     /// whole for as long as that owner is attached.
@@ -442,16 +440,16 @@ mod tests {
         let mut roster = Roster::new();
         roster
             .register(&old, vec![decl("tab.create")])
-            .expect("상한 안");
+            .expect("within the cap");
         roster
             .register(&new, vec![decl("tab.create")])
-            .expect("상한 안");
+            .expect("within the cap");
 
         roster.disconnect(&old);
         assert_eq!(
             roster.lookup("tab.create"),
             OwnerLookup::Available(new.clone()),
-            "방금 등록한 주인이 답해야 한다"
+            "the owner just registered must answer"
         );
 
         roster.disconnect(&new);
@@ -465,10 +463,10 @@ mod tests {
         let mut roster = Roster::new();
         roster
             .register(&first, vec![decl("tab.create")])
-            .expect("상한 안");
+            .expect("within the cap");
         roster
             .register(&second, vec![decl("tab.create")])
-            .expect("상한 안");
+            .expect("within the cap");
 
         assert_eq!(roster.lookup("tab.create"), OwnerLookup::Available(second));
     }
@@ -482,11 +480,11 @@ mod tests {
             let owner = OwnerToken::new(format!("shell-conn-{connection}"));
             roster
                 .register(&owner, vec![decl("tab.create"), decl("tab.close")])
-                .expect("상한 안");
+                .expect("within the cap");
             roster.disconnect(&owner);
         }
 
-        assert!(roster.is_empty(), "쌓이는 것이 없다");
+        assert!(roster.is_empty(), "nothing accumulates");
         assert_eq!(roster.entries().count(), 0);
         assert_eq!(roster.lookup("tab.create"), OwnerLookup::Unknown);
     }
@@ -499,7 +497,7 @@ mod tests {
         let mut roster = Roster::new();
         roster
             .register(&first, vec![decl("tab.create")])
-            .expect("상한 안");
+            .expect("within the cap");
         roster
             .register(
                 &second,
@@ -509,10 +507,10 @@ mod tests {
                     agent_args: Vec::new(),
                 }],
             )
-            .expect("상한 안");
+            .expect("within the cap");
 
         assert_eq!(roster.len(), 1);
-        let entry = roster.entries().next().expect("한 항목");
+        let entry = roster.entries().next().expect("one item");
         assert_eq!(entry.help, "{\"name\":\"tab.create\",\"since\":2}");
         assert_eq!(entry.owner, second);
     }
@@ -535,44 +533,51 @@ mod tests {
 
         let err = roster
             .register(&owner, decls("flood", Roster::MAX_NAMES_PER_OWNER + 1))
-            .expect_err("상한을 넘는다");
+            .expect_err("exceeds the cap");
 
         assert_eq!(err.code(), crate::ErrorCode::InvalidArgument);
-        assert!(roster.is_empty(), "실패한 등록은 명부를 건드리지 않는다");
+        assert!(
+            roster.is_empty(),
+            "a failed registration does not touch the registry"
+        );
         roster
             .register(&owner, decls("fits", Roster::MAX_NAMES_PER_OWNER))
-            .expect("상한 자체는 통과한다");
+            .expect("the cap itself passes");
         assert_eq!(roster.len(), Roster::MAX_NAMES_PER_OWNER);
     }
 
     /// ★The cap decision comes before the change, so it also counts the owner's own names this packet will push out★
     ///
-    /// It is an over-measure and left knowingly (basis = `check_room_for`). We pin down together that the cost is limited to 「몫이 꽉 찬 주인은 이름 전량을 한
-    /// 패킷에 갈아치우지 못한다」 (an owner whose share is full cannot replace its entire name set in one packet), and that **one empty full registration opens that path**.
+    /// It is an over-measure and left knowingly (basis = `check_room_for`). We pin down together that the cost is limited to 「an owner whose share is full cannot replace its entire name set in one packet」, and that **one empty full registration opens that path**.
     #[test]
     fn a_full_owners_disjoint_snapshot_is_measured_before_the_old_names_come_down() {
         let owner = OwnerToken::new("shell-1");
         let mut roster = Roster::new();
         roster
             .register(&owner, decls("wave0", Roster::MAX_NAMES_PER_OWNER))
-            .expect("첫 스냅샷은 상한 안");
+            .expect("the first snapshot is within the cap");
 
         let err = roster
             .register(&owner, decls("wave1", Roster::MAX_NAMES_PER_OWNER))
-            .expect_err("겹치지 않는 두 번째 스냅샷은 누적으로 상한을 넘는다");
+            .expect_err("a second, non-overlapping snapshot exceeds the cap cumulatively");
 
         assert_eq!(err.code(), crate::ErrorCode::InvalidArgument);
         assert_eq!(
             roster.len(),
             Roster::MAX_NAMES_PER_OWNER,
-            "실패한 등록은 명부를 건드리지 않는다"
+            "a failed registration does not touch the registry"
         );
 
-        roster.register(&owner, vec![]).expect("빈 전량 등록");
-        assert!(roster.is_empty(), "전량 선언이 비면 자기 자리도 빈다");
+        roster
+            .register(&owner, vec![])
+            .expect("empty full registration");
+        assert!(
+            roster.is_empty(),
+            "when the full declaration is empty, its own spot empties too"
+        );
         roster
             .register(&owner, decls("wave1", Roster::MAX_NAMES_PER_OWNER))
-            .expect("자리가 비면 새 전량이 들어온다");
+            .expect("once the spot is empty, a new full set comes in");
         assert_eq!(roster.len(), Roster::MAX_NAMES_PER_OWNER);
     }
 
@@ -583,12 +588,12 @@ mod tests {
         let mut roster = Roster::new();
         roster
             .register(&owner, decls("wave0", Roster::MAX_NAMES_PER_OWNER))
-            .expect("상한 안");
+            .expect("within the cap");
         roster.disconnect(&owner);
 
         roster
             .register(&owner, decls("wave1", Roster::MAX_NAMES_PER_OWNER))
-            .expect("자리를 쥐고 있는 것이 없다");
+            .expect("nothing is holding the spot");
 
         assert_eq!(roster.len(), Roster::MAX_NAMES_PER_OWNER);
         assert_eq!(roster.lookup("wave0.0"), OwnerLookup::Unknown);
@@ -608,7 +613,7 @@ mod tests {
         };
         roster
             .register(&owner, vec![at_cap])
-            .expect("상한 자체는 통과한다");
+            .expect("the cap itself passes");
         assert_eq!(roster.len(), 1);
 
         let long_name = CommandDecl {
@@ -618,7 +623,7 @@ mod tests {
         };
         let err = roster
             .register(&owner, vec![long_name])
-            .expect_err("이름이 상한을 넘는다");
+            .expect_err("the name exceeds the cap");
         assert_eq!(err.code(), crate::ErrorCode::InvalidArgument);
 
         let long_help = CommandDecl {
@@ -628,10 +633,14 @@ mod tests {
         };
         let err = roster
             .register(&owner, vec![decl("tab.close"), long_help])
-            .expect_err("help 가 상한을 넘는다");
+            .expect_err("help exceeds the cap");
         assert_eq!(err.code(), crate::ErrorCode::InvalidArgument);
 
-        assert_eq!(roster.len(), 1, "실패한 등록은 명부를 건드리지 않는다");
+        assert_eq!(
+            roster.len(),
+            1,
+            "a failed registration does not touch the registry"
+        );
         assert_eq!(roster.lookup("tab.close"), OwnerLookup::Unknown);
     }
 
@@ -654,11 +663,11 @@ mod tests {
                 &owner,
                 vec![marked("slot.focus", &["agent", "after"]), decl("tab.close")],
             )
-            .expect("상한 안");
+            .expect("within the cap");
 
         assert_eq!(roster.agent_args("slot.focus"), ["agent", "after"]);
-        assert!(roster.agent_args("tab.close").is_empty(), "표시 없음");
-        assert!(roster.agent_args("never.seen").is_empty(), "모르는 이름");
+        assert!(roster.agent_args("tab.close").is_empty(), "no marks");
+        assert!(roster.agent_args("never.seen").is_empty(), "unknown name");
 
         roster
             .update(
@@ -669,27 +678,27 @@ mod tests {
                 ],
                 vec!["tab.close".to_string()],
             )
-            .expect("자기 이름의 차분");
+            .expect("diff of its own name");
         assert_eq!(
             roster.agent_args("slot.focus"),
             ["target"],
-            "차분이 표시를 갈아 끼운다"
+            "the diff swaps the marks"
         );
         assert_eq!(roster.agent_args("tab.move"), ["agent"]);
 
         roster
             .register(&owner, vec![decl("slot.focus")])
-            .expect("전량 재등록");
+            .expect("full re-registration");
         assert!(
             roster.agent_args("slot.focus").is_empty(),
-            "재등록이 표시를 뺐으면 빠진다"
+            "if the re-registration dropped the marks, they are gone"
         );
-        assert!(roster.agent_args("tab.move").is_empty(), "내려간 이름");
+        assert!(roster.agent_args("tab.move").is_empty(), "removed name");
 
         roster.disconnect(&owner);
         assert!(
             roster.agent_args("slot.focus").is_empty(),
-            "끊긴 주인의 표시는 안 남는다"
+            "a disconnected owner's marks do not remain"
         );
     }
 
@@ -710,7 +719,7 @@ mod tests {
                     ..decl("slot.focus")
                 }],
             )
-            .expect("상한 자체는 통과한다");
+            .expect("the cap itself passes");
 
         let too_many: Vec<&str> = vec!["a"; Roster::MAX_AGENT_ARGS + 1];
         let err = roster
@@ -718,7 +727,7 @@ mod tests {
                 &owner,
                 vec![decl("tab.close"), marked("tab.move", &too_many)],
             )
-            .expect_err("칸 수가 상한을 넘는다");
+            .expect_err("the field count exceeds the cap");
         assert_eq!(err.code(), crate::ErrorCode::InvalidArgument);
 
         let too_long = "a".repeat(Roster::MAX_NAME_BYTES + 1);
@@ -728,13 +737,13 @@ mod tests {
                 vec![marked("tab.move", &[too_long.as_str()])],
                 vec![],
             )
-            .expect_err("칸 이름이 상한을 넘는다");
+            .expect_err("the field name exceeds the cap");
         assert_eq!(err.code(), crate::ErrorCode::InvalidArgument);
 
         assert_eq!(
             roster.len(),
             1,
-            "실패한 등록 · 차분은 명부를 건드리지 않는다"
+            "a failed registration · diff does not touch the registry"
         );
         assert_eq!(
             roster.agent_args("slot.focus").len(),
@@ -754,21 +763,21 @@ mod tests {
                     &owner,
                     decls(&format!("owner{i}"), Roster::MAX_NAMES_PER_OWNER),
                 )
-                .expect("전체 상한 안");
+                .expect("within the total cap");
         }
         assert_eq!(roster.len(), Roster::MAX_NAMES);
 
         let newcomer = OwnerToken::new("shell-late");
         let err = roster
             .register(&newcomer, vec![decl("one.more")])
-            .expect_err("전체 상한을 넘는다");
+            .expect_err("exceeds the total cap");
         assert_eq!(err.code(), crate::ErrorCode::InvalidArgument);
-        assert_eq!(roster.len(), Roster::MAX_NAMES, "명부는 그대로다");
+        assert_eq!(roster.len(), Roster::MAX_NAMES, "the registry is unchanged");
 
         // ★A name that already exists does not take a new slot★ — re-registration must pass even in a full registry.
         roster
             .register(&newcomer, vec![decl("owner0.0")])
-            .expect("덮어쓰기는 크기를 안 늘린다");
+            .expect("an overwrite does not increase the size");
         assert_eq!(roster.len(), Roster::MAX_NAMES);
     }
 
@@ -779,14 +788,14 @@ mod tests {
         let mut roster = Roster::new();
         let repeated = vec![decl("tab.create"); Roster::MAX_NAMES_PER_OWNER + 8];
 
-        roster.register(&owner, repeated).expect("이름은 하나다");
+        roster.register(&owner, repeated).expect("it is one name");
 
         assert_eq!(roster.len(), 1);
     }
 
     /// ★The registration side of the vanished line of defense — the registry does not block a disconnected owner's late **registration** either★
     ///
-    /// Registration is a 「붙는 순간의 전량 선언」 (entire-set declaration at the moment of attaching), so inheriting even a live owner's names is legitimate (handover), but the registry has
+    /// Registration is an 「entire-set declaration at the moment of attaching」, so inheriting even a live owner's names is legitimate (handover), but the registry has
     /// no memory that the owner has already disconnected, so a dead connection's late registration cannot be told apart from a genuine handover.
     /// So if this packet passes, that name becomes `Available` under a **nonexistent owner**, and that connection has no further
     /// cleanup coming, so it stays frozen for the whole daemon lifetime (delivery goes out over a cut link). The blocking net is in the side that knows connection lifetime,
@@ -798,20 +807,20 @@ mod tests {
         let mut roster = Roster::new();
         roster
             .register(&old, vec![decl("tab.create")])
-            .expect("상한 안");
+            .expect("within the cap");
         roster.disconnect(&old);
         roster
             .register(&new, vec![decl("tab.create")])
-            .expect("산 주인이 그 이름을 새로 얹는다");
+            .expect("a live owner puts that name anew");
 
         roster
             .register(&old, vec![decl("tab.create")])
-            .expect("명부에는 반려할 근거가 없다");
+            .expect("the registry has no basis to bounce it");
 
         assert_eq!(
             roster.lookup("tab.create"),
             OwnerLookup::Available(old),
-            "없는 주인 앞으로 선다 — 이것을 막는 곳은 데몬 하나뿐이다"
+            "it stands addressed to a nonexistent owner — the daemon is the only place that prevents this"
         );
     }
 
@@ -826,7 +835,7 @@ mod tests {
         let mut roster = Roster::new();
         roster
             .register(&owner, vec![decl("tab.create"), decl("tab.close")])
-            .expect("상한 안");
+            .expect("within the cap");
 
         roster
             .update(
@@ -834,16 +843,20 @@ mod tests {
                 vec![decl("tab.split")],
                 vec!["tab.close".to_string()],
             )
-            .expect("상한 안");
+            .expect("within the cap");
 
         assert_eq!(
             roster.lookup("tab.create"),
             OwnerLookup::Available(owner.clone()),
-            "차분에 안 실린 이름은 그대로다"
+            "names not carried in the diff are unchanged"
         );
         assert_eq!(roster.lookup("tab.split"), OwnerLookup::Available(owner));
         assert_eq!(roster.lookup("tab.close"), OwnerLookup::Unknown);
-        assert_eq!(roster.len(), 2, "내린 이름은 자리째 사라진다");
+        assert_eq!(
+            roster.len(),
+            2,
+            "a removed name vanishes along with its spot"
+        );
     }
 
     /// ★A diff's `removed` empties the place★ — if left as a trace, an attached owner could keep changing names and permanently fill its own share
@@ -854,7 +867,7 @@ mod tests {
         let mut roster = Roster::new();
         roster
             .register(&owner, decls("wave", Roster::MAX_NAMES_PER_OWNER))
-            .expect("몫을 꽉 채운다");
+            .expect("fills the share completely");
 
         for round in 0..8 {
             roster
@@ -863,16 +876,16 @@ mod tests {
                     vec![],
                     vec![format!("wave.{}", Roster::MAX_NAMES_PER_OWNER - 1 - round)],
                 )
-                .expect("내리는 것은 언제나 통과한다");
+                .expect("removing always passes");
             roster
                 .update(&owner, vec![decl(&format!("swap.{round}"))], vec![])
-                .expect("자리가 비었으므로 더할 수 있다");
+                .expect("the spot is empty, so it can be added");
         }
 
         assert_eq!(
             roster.len(),
             Roster::MAX_NAMES_PER_OWNER,
-            "바꿔 끼워도 크기는 그대로다"
+            "swapping keeps the size the same"
         );
     }
 
@@ -887,19 +900,19 @@ mod tests {
         let mut roster = Roster::new();
         roster
             .register(&old, vec![decl("tab.create")])
-            .expect("상한 안");
+            .expect("within the cap");
         roster
             .register(&new, vec![decl("tab.create")])
-            .expect("상한 안");
+            .expect("within the cap");
 
         roster
             .update(&old, vec![], vec!["tab.create".to_string()])
-            .expect("상한 안");
+            .expect("within the cap");
 
         assert_eq!(
             roster.lookup("tab.create"),
             OwnerLookup::Available(new),
-            "방금 등록한 주인이 답해야 한다"
+            "the owner just registered must answer"
         );
     }
 
@@ -915,20 +928,20 @@ mod tests {
         let mut roster = Roster::new();
         roster
             .register(&old, vec![decl("tab.create")])
-            .expect("상한 안");
+            .expect("within the cap");
         roster
             .register(&new, vec![decl("tab.create")])
-            .expect("상한 안");
+            .expect("within the cap");
 
         let err = roster
             .update(&old, vec![decl("tab.create")], vec![])
-            .expect_err("산 남의 등록은 못 가져간다");
+            .expect_err("cannot take a live other's registration");
 
         assert_eq!(err.code(), crate::ErrorCode::Conflict);
         assert_eq!(
             roster.lookup("tab.create"),
             OwnerLookup::Available(new),
-            "방금 등록한 주인이 답해야 한다"
+            "the owner just registered must answer"
         );
     }
 
@@ -936,7 +949,7 @@ mod tests {
     ///
     /// If an application order is picked, the caller cannot know the result whichever way: adding then removing means that **even after receiving success**
     /// the name is not in the registry and goes out as `UNKNOWN_COMMAND` (exactly the accident `register` blocks at the cap —
-    /// 「주인은 성공으로 알고 일부 이름이 조용히 없는 상태가 된다」 (the owner takes it as success and some names silently end up missing)), and removing then adding means the instruction to take it down is
+    /// 「the owner takes it as success and some names silently end up missing」), and removing then adding means the instruction to take it down is
     /// silently ignored. No clause fixes an order in ADR-0150 or in TRD §3-7 clause 3, so rejection is the answer.
     #[test]
     fn an_update_carrying_one_name_in_both_lists_is_refused_whole() {
@@ -944,7 +957,7 @@ mod tests {
         let mut roster = Roster::new();
         roster
             .register(&owner, vec![decl("tab.create")])
-            .expect("상한 안");
+            .expect("within the cap");
 
         // A name already held — under the old application order it was added then erased and **vanished along with a success**.
         let err = roster
@@ -953,27 +966,27 @@ mod tests {
                 vec![decl("tab.create")],
                 vec!["tab.create".to_string()],
             )
-            .expect_err("같은 이름이 양쪽에 실렸다");
+            .expect_err("the same name was carried on both sides");
         assert_eq!(err.code(), crate::ErrorCode::InvalidArgument);
         assert!(
             err.message().contains("tab.create"),
-            "어느 이름이 걸렸는지 문구가 말해야 한다: {}",
+            "the message must say which name was caught: {}",
             err.message()
         );
         assert_eq!(
             roster.lookup("tab.create"),
             OwnerLookup::Available(owner.clone()),
-            "반려는 명부를 건드리지 않는다"
+            "a bounce does not touch the registry"
         );
 
-        // A new name — here 「넣었다가 지운다」 (add then erase) would not create a name that never existed from the start either, but the decision is the same.
+        // A new name — here 「add then erase」 would not create a name that never existed from the start either, but the decision is the same.
         let err = roster
             .update(
                 &owner,
                 vec![decl("tab.split")],
                 vec!["tab.split".to_string()],
             )
-            .expect_err("같은 이름이 양쪽에 실렸다");
+            .expect_err("the same name was carried on both sides");
         assert_eq!(err.code(), crate::ErrorCode::InvalidArgument);
         assert_eq!(roster.lookup("tab.split"), OwnerLookup::Unknown);
         assert_eq!(roster.len(), 1);
@@ -989,26 +1002,26 @@ mod tests {
         let mut roster = Roster::new();
         roster
             .register(&owner, vec![decl("tab.create"), decl("tab.close")])
-            .expect("상한 안");
+            .expect("within the cap");
         roster
             .register(&other, vec![decl("window.focus")])
-            .expect("상한 안");
+            .expect("within the cap");
 
         let removed = roster.disconnect(&owner);
 
         assert_eq!(
             removed,
             vec!["tab.close".to_string(), "tab.create".to_string()],
-            "자기가 쥔 이름만 실린다"
+            "only names it holds are carried"
         );
         assert!(
             roster.disconnect(&owner).is_empty(),
-            "두 번째 정리에는 지울 것이 없다"
+            "the second cleanup has nothing to erase"
         );
         assert_eq!(
             roster.lookup("window.focus"),
             OwnerLookup::Available(other),
-            "남의 등록은 그대로다"
+            "others' registrations are unchanged"
         );
     }
 
@@ -1021,16 +1034,16 @@ mod tests {
         let mut roster = Roster::new();
         roster
             .register(&old, vec![decl("tab.create")])
-            .expect("상한 안");
+            .expect("within the cap");
         roster.disconnect(&old);
         roster
             .register(&new, vec![decl("tab.close")])
-            .expect("상한 안");
+            .expect("within the cap");
         assert_eq!(roster.lookup("tab.create"), OwnerLookup::Unknown);
 
         roster
             .update(&new, vec![decl("tab.create")], vec![])
-            .expect("주인 없는 이름은 가져갈 수 있다");
+            .expect("a name without an owner can be taken");
 
         assert_eq!(roster.lookup("tab.create"), OwnerLookup::Available(new));
     }
@@ -1042,11 +1055,11 @@ mod tests {
         let mut roster = Roster::new();
         roster
             .register(&owner, decls("wave0", Roster::MAX_NAMES_PER_OWNER))
-            .expect("상한 안");
+            .expect("within the cap");
 
         let err = roster
             .update(&owner, vec![decl("one.more")], vec![])
-            .expect_err("이미 쥔 이름이 몫을 다 쓰고 있다");
+            .expect_err("the names already held use up the share");
 
         assert_eq!(err.code(), crate::ErrorCode::InvalidArgument);
         assert_eq!(roster.len(), Roster::MAX_NAMES_PER_OWNER);
@@ -1062,16 +1075,16 @@ mod tests {
         let mut roster = Roster::new();
         roster
             .register(&owner, vec![decl("tab.create"), decl("tab.close")])
-            .expect("상한 안");
+            .expect("within the cap");
 
         roster.disconnect(&owner);
 
-        assert!(roster.is_empty(), "항목이 남지 않는다");
+        assert!(roster.is_empty(), "no item remains");
         assert_eq!(roster.entries().count(), 0);
         assert_eq!(
             roster.lookup("tab.create"),
             OwnerLookup::Unknown,
-            "모르는 이름과 같은 답이다"
+            "the same answer as an unknown name"
         );
     }
 
@@ -1083,15 +1096,19 @@ mod tests {
         let mut roster = Roster::new();
         roster
             .register(&old, vec![decl("tab.create"), decl("tab.close")])
-            .expect("상한 안");
+            .expect("within the cap");
         roster.disconnect(&old);
 
         roster
             .register(&new, vec![decl("tab.create")])
-            .expect("상한 안");
+            .expect("within the cap");
 
-        assert_eq!(roster.len(), 1, "옛 연결의 나머지 이름은 남지 않는다");
-        assert_eq!(roster.entries().next().expect("한 항목").owner, new);
+        assert_eq!(
+            roster.len(),
+            1,
+            "the rest of the old connection's names do not remain"
+        );
+        assert_eq!(roster.entries().next().expect("one item").owner, new);
         assert_eq!(roster.lookup("tab.close"), OwnerLookup::Unknown);
     }
 
@@ -1109,17 +1126,17 @@ mod tests {
         let mut roster = Roster::new();
         roster
             .register(&owner, vec![decl("tab.create")])
-            .expect("상한 안");
+            .expect("within the cap");
         roster.disconnect(&owner);
 
         roster
             .update(&owner, vec![decl("tab.split")], vec![])
-            .expect("명부에는 반려할 근거가 없다");
+            .expect("the registry has no basis to bounce it");
 
         assert_eq!(
             roster.lookup("tab.split"),
             OwnerLookup::Available(owner),
-            "없는 주인 앞으로 선다 — 이것을 막는 곳은 데몬 하나뿐이다"
+            "it stands addressed to a nonexistent owner — the daemon is the only place that prevents this"
         );
     }
 
@@ -1129,10 +1146,10 @@ mod tests {
         let mut roster = Roster::new();
         roster
             .register(&owner, vec![decl("tab.create"), decl("tab.legacy")])
-            .expect("상한 안");
+            .expect("within the cap");
         roster
             .register(&owner, vec![decl("tab.create")])
-            .expect("상한 안");
+            .expect("within the cap");
 
         assert_eq!(
             roster.lookup("tab.create"),

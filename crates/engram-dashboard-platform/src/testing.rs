@@ -24,12 +24,12 @@ pub fn spawn_gated_cmd(line: &str, flags: u32) -> Child {
         .stderr(Stdio::null())
         .creation_flags(flags)
         .spawn()
-        .expect("cmd.exe 기동")
+        .expect("launch cmd.exe")
 }
 
 /// Opens the gate of [`spawn_gated_cmd`] — writes one line to stdin and closes that end. It panics if stdin has already been taken.
 pub fn open_gate(child: &mut Child) {
-    let mut stdin = child.stdin.take().expect("stdin 파이프");
+    let mut stdin = child.stdin.take().expect("stdin pipe");
     let _ = stdin.write_all(b"go\r\n");
 }
 
@@ -43,7 +43,10 @@ pub fn wait_until<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
         if let Some(found) = probe() {
             return found;
         }
-        assert!(Instant::now() < deadline, "10 초 안에 {what} 를 못 봤다");
+        assert!(
+            Instant::now() < deadline,
+            "did not see {what} within 10 seconds"
+        );
         std::thread::sleep(Duration::from_millis(20));
     }
 }

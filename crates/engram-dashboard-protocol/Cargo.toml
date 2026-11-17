@@ -2,13 +2,13 @@
 name = "engram-dashboard-protocol"
 version = "0.1.0"
 edition = "2021"
-description = "Engram Dashboard 경계 계약 — 클↔데몬 wire 프로토콜. Tauri import 금지(linchpin)."
+description = "Engram Dashboard boundary contract — client↔daemon wire protocol. No Tauri imports (linchpin)."
 
 [dependencies]
-# ★No workspace crate goes here★ — ADR-0272 「영향」 invariant; the wall is the `ci.yml` step `protocol gate 1`.
+# ★No workspace crate goes here★ — ADR-0272 「impact」 invariant; the wall is the `ci.yml` step `protocol gate 1`.
 serde = { version = "1", features = ["derive"] }
-# discovery::DaemonInfo parse/serialize(daemon.json 공유 계약) · `raw_value` = 명령 칸 원문(ADR-0272 결정 3)
+# discovery::DaemonInfo parse/serialize (daemon.json shared contract) · `raw_value` = raw text of command fields (ADR-0272 decision 3)
 serde_json = { version = "1", features = ["raw_value"] }
-serde_bytes = "0.11"   # OutputChunk::TerminalBytes — Vec<u8> 를 number[] 아닌 바이트로(JSON 경로용)
+serde_bytes = "0.11"   # OutputChunk::TerminalBytes — Vec<u8> as bytes, not number[] (for the JSON path)
 uuid = { version = "1", features = ["v4", "serde"] }
-ts-rs = { version = "10", features = ["uuid-impl"] }   # Rust→TS 타입 생성(결정 #2). uuid→string 매핑.
+ts-rs = { version = "10", features = ["uuid-impl"] }   # Rust→TS type generation (decision #2). uuid→string mapping.

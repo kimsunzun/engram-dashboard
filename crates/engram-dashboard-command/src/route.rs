@@ -14,8 +14,8 @@ use crate::{
 /// Folds a panic in the synchronous body into an error reply.
 ///
 /// ★Without it, the request ends with no reply★: if a handler panic unwinds as is, no `CommandReply` is made and
-/// the caller hangs until the deadline — a violation of 「한 `request_id` 에 답장은 정확히 하나」 (exactly one reply per request id) (TRD §4-⑤).
-/// ★It is not reached in production processes★: in the daemon and shell the hook ends any panic outside the 「가두는 중」 (containing) marker before it unwinds
+/// the caller hangs until the deadline — a violation of 「exactly one reply per request id」 (TRD §4-⑤).
+/// ★It is not reached in production processes★: in the daemon and shell the hook ends any panic outside the 「containing」 marker before it unwinds
 /// (ADR-0292), and nowhere runs a command body inside the marker (ADR-0293). So this net only
 /// has effect in test builds without the hook — the shell and daemon tests of that build rely on it, so it is not removed.
 pub(crate) fn guard_panic<T>(
@@ -46,8 +46,8 @@ fn handler_panicked(detail: String) -> CommandError {
 
 /// The outcome of a panic during delivery — ★it is not `INTERNAL`★.
 ///
-/// The envelope may already have gone on the wire, so **this hop's certainty is 「불명」** (unknown) (TRD §4-④). If we answer with `INTERNAL` (= `retry:
-/// never`), the caller reads it as 「여기서 확실히 실패했다」 (definitely failed here) and calls again with a new id, and then an operation the peer
+/// The envelope may already have gone on the wire, so **this hop's certainty is 「unknown」** (TRD §4-④). If we answer with `INTERNAL` (= `retry:
+/// never`), the caller reads it as 「definitely failed here」 and calls again with a new id, and then an operation the peer
 /// had already applied can be applied twice. `OUTCOME_UNKNOWN` makes it ask again **with the same id only**.
 // ADR-0159
 fn forwarding_unknown(detail: String) -> CommandError {
@@ -81,7 +81,7 @@ where
                 let fold = this
                     .on_panic
                     .take()
-                    .expect("Ready 를 낸 future 는 다시 폴링되지 않는다");
+                    .expect("a future that returned Ready is not polled again");
                 Poll::Ready(fold(panic_detail(&payload)))
             }
         }
@@ -102,7 +102,7 @@ where
 /// does not hold that declaration and so cannot screen, and putting it here kills additive evolution for the reason above. Who
 /// plugs that hole remains a wiring decision of the entry adapter **pair** (typing side · owner side) —
 /// that fork is written in the pass-through list of [`CommandTable::check_args`].
-/// On the outgoing envelope the owner token the registry answered is **overwritten in** — the receiving hop must be able to check 「누구 앞으로 온 것인가」 (who was this addressed to)
+/// On the outgoing envelope the owner token the registry answered is **overwritten in** — the receiving hop must be able to check 「who was this addressed to」
 /// against its own registry for the middle hop to sort it in two-stage delivery (TRD §3-8).
 /// ★The deadline is not set here — it belongs to the assembly code★: the deadline is **set by the caller** (TRD §4-⑥), and
 /// the routing-table entry of the first receiving daemon must hold the same `deadline` so the table does not leak even if the caller disappears. That table
@@ -182,7 +182,7 @@ pub async fn route(
             }
             reply
         }
-        // ★A disconnected owner's name vanishes from the registry, so there is no 「주인 부재」 (owner absent) branch here★ — that name gets the same answer as a name that
+        // ★A disconnected owner's name vanishes from the registry, so there is no 「owner absent」 branch here★ — that name gets the same answer as a name that
         //   was never registered (the loss of distinction ADR-0150 accepted).
         OwnerLookup::Unknown => CommandReply::err(
             request_id,
@@ -255,7 +255,7 @@ mod tests {
                 "agent.list",
                 blocking_handler(|_: NoArgs| Ok(json!({ "local": true }))),
             )
-            .expect("선언된 이름");
+            .expect("declared name");
         table
     }
 
@@ -272,7 +272,7 @@ mod tests {
         assert_eq!(reply.outcome, Ok(json!({ "local": true })));
         assert!(
             link.sent.lock().unwrap().is_empty(),
-            "표에 있으면 안 보낸다"
+            "if it is in the table, it is not sent"
         );
     }
 
@@ -290,7 +290,7 @@ mod tests {
                     agent_args: Vec::new(),
                 }],
             )
-            .expect("한 이름은 상한 안이다");
+            .expect("one name is within the cap");
         let link = FakeLink::default();
         let env = envelope("tab.create");
         let request_id = env.request_id;
@@ -300,8 +300,14 @@ mod tests {
         assert_eq!(reply.outcome, Ok(json!({ "forwarded": true })));
         let sent = link.sent.lock().unwrap();
         assert_eq!(sent.len(), 1);
-        assert_eq!(sent[0].owner, owner, "명부가 답한 주인이 겉봉에 실린다");
-        assert_eq!(sent[0].request_id, request_id, "id 는 전 구간 동일");
+        assert_eq!(
+            sent[0].owner, owner,
+            "the owner the registry answered is carried on the outer envelope"
+        );
+        assert_eq!(
+            sent[0].request_id, request_id,
+            "the id is the same across the whole path"
+        );
     }
 
     /// ★A disconnected owner's name and a name never seen before get **the same answer**★
@@ -323,14 +329,17 @@ mod tests {
                     agent_args: Vec::new(),
                 }],
             )
-            .expect("한 이름은 상한 안이다");
+            .expect("one name is within the cap");
         roster.disconnect(&owner);
         let link = FakeLink::default();
 
         let gone = block_on(route(&table, &roster, &link, envelope("tab.create")));
         let never = block_on(route(&table, &roster, &link, envelope("never.registered")));
 
-        for (reply, what) in [(gone, "끊긴 주인의 이름"), (never, "모르는 이름")] {
+        for (reply, what) in [
+            (gone, "name of a disconnected owner"),
+            (never, "unknown name"),
+        ] {
             let err = reply.outcome.expect_err(what);
             assert_eq!(err.code(), ErrorCode::UnknownCommand, "{what}");
             assert_eq!(err.retry(), crate::RetryMode::Never, "{what}");
@@ -338,7 +347,7 @@ mod tests {
 
         assert!(
             link.sent.lock().unwrap().is_empty(),
-            "주인이 없으면 아무 데도 보내지 않는다"
+            "with no owner, it sends nowhere"
         );
     }
 
@@ -350,7 +359,7 @@ mod tests {
         let reply = block_on(route(&table, &Roster::new(), &link, envelope("tab.create")));
 
         assert_eq!(
-            reply.outcome.expect_err("빈 명부").code(),
+            reply.outcome.expect_err("empty registry").code(),
             ErrorCode::UnknownCommand
         );
     }
@@ -365,13 +374,13 @@ mod tests {
                     Err::<serde_json::Value, _>(CommandError::not_found("no agent"))
                 }),
             )
-            .expect("선언된 이름");
+            .expect("declared name");
         let link = FakeLink::default();
 
         let reply = block_on(route(&table, &Roster::new(), &link, envelope("agent.list")));
 
         assert_eq!(
-            reply.outcome.expect_err("핸들러 실패").code(),
+            reply.outcome.expect_err("handler failure").code(),
             ErrorCode::NotFound
         );
     }
@@ -379,7 +388,7 @@ mod tests {
     /// ★This aims at `route`'s own net★ — if it used the handler's inner net (`blocking_handler`), this test would pass even if the outer
     /// net disappeared (the inner one folds first). So we run each of the two entry points through a **handler with no net**:
     /// the case where `call` blows up and the case where the future's first poll blows up.
-    /// Without the net, this test dies with a panic, not a hang (both are faces of 「답장 없음」 (no reply)).
+    /// Without the net, this test dies with a panic, not a hang (both are faces of 「no reply」).
     #[test]
     fn a_panic_in_an_unguarded_handler_still_produces_exactly_one_reply() {
         struct PanicOnCall;
@@ -404,7 +413,7 @@ mod tests {
             (Arc::new(PanicOnPoll) as Arc<dyn CommandHandler>, "running"),
         ] {
             let mut table = CommandTable::new(DECLARED);
-            table.insert("agent.list", handler).expect("선언된 이름");
+            table.insert("agent.list", handler).expect("declared name");
             let link = FakeLink::default();
             let env = envelope("agent.list");
             let request_id = env.request_id;
@@ -414,11 +423,11 @@ mod tests {
             });
 
             assert_eq!(reply.request_id, request_id);
-            let err = reply.outcome.expect_err("패닉은 오류 답장이 된다");
+            let err = reply.outcome.expect_err("a panic becomes an error reply");
             assert_eq!(err.code(), ErrorCode::Internal);
             assert!(
                 err.message().contains(&format!("blew up while {reason}")),
-                "사유가 실린다: {}",
+                "the reason is carried: {}",
                 err.message()
             );
         }
@@ -427,7 +436,7 @@ mod tests {
     /// ★There must be no asymmetry in the net★ — if only local execution is covered and delivery is left empty, at the moment the link blows up the request ends
     /// with no reply (the caller hangs until the deadline — TRD §4-⑤). Here too we run each of the two entry points.
     /// ★The answer is `OUTCOME_UNKNOWN`, not `INTERNAL`★ — the envelope may already have gone on the wire so this hop's
-    /// certainty is 「불명」 (unknown), and only then does retry happen **with the same id only** (TRD §4-④).
+    /// certainty is 「unknown」, and only then does retry happen **with the same id only** (TRD §4-④).
     #[test]
     fn a_panic_while_forwarding_still_produces_exactly_one_reply() {
         struct PanicOnSend;
@@ -462,7 +471,7 @@ mod tests {
                     agent_args: Vec::new(),
                 }],
             )
-            .expect("한 이름은 상한 안이다");
+            .expect("one name is within the cap");
 
         for (link, reason) in [
             (&PanicOnSend as &dyn CommandLink, "being called"),
@@ -476,16 +485,16 @@ mod tests {
             });
 
             assert_eq!(reply.request_id, request_id);
-            let err = reply.outcome.expect_err("패닉은 오류 답장이 된다");
+            let err = reply.outcome.expect_err("a panic becomes an error reply");
             assert_eq!(err.code(), ErrorCode::OutcomeUnknown);
             assert_eq!(
                 err.retry(),
                 crate::RetryMode::SameRequestId,
-                "새 id 로 다시 부르면 두 번 적용될 수 있다"
+                "calling again with a new id could apply it twice"
             );
             assert!(
                 err.message().contains(&format!("blew up while {reason}")),
-                "사유가 실린다: {}",
+                "the reason is carried: {}",
                 err.message()
             );
         }
@@ -516,7 +525,7 @@ mod tests {
                     agent_args: Vec::new(),
                 }],
             )
-            .expect("한 이름은 상한 안이다");
+            .expect("one name is within the cap");
         let env = envelope("tab.create");
         let request_id = env.request_id;
 
@@ -524,7 +533,7 @@ mod tests {
 
         assert_eq!(reply.request_id, request_id);
         assert_eq!(
-            reply.outcome.expect_err("상관 깨짐").code(),
+            reply.outcome.expect_err("correlation broken").code(),
             ErrorCode::OutcomeUnknown
         );
     }
@@ -568,7 +577,7 @@ mod tests {
                     agent_args: Vec::new(),
                 }],
             )
-            .expect("한 이름은 상한 안이다");
+            .expect("one name is within the cap");
         let roster = Arc::new(Mutex::new(roster));
         let link = LockProbingLink {
             roster: Arc::clone(&roster),
@@ -586,7 +595,7 @@ mod tests {
         assert_eq!(
             *link.free_while_sending.lock().expect("probe poisoned"),
             Some(true),
-            "왕복이 도는 동안에도 명부는 잠겨 있지 않다"
+            "the registry is not locked even while the round trip runs"
         );
     }
 
@@ -599,6 +608,6 @@ mod tests {
             assert!(clone.contains("agent.list"));
         })
         .join()
-        .expect("스레드");
+        .expect("thread");
     }
 }

@@ -12,7 +12,7 @@
 //! ## Why this file has this shape
 //!
 //! - ★The key is pushing frames **repeatedly**★ — making one frame big does not stop it.
-//!   The canonical source of the evidence (measured) is the `src/ws.rs` header 「통로 성질」 and the numbers are not copied here. Socket buffer options also
+//!   The canonical source of the evidence (measured) is the `src/ws.rs` header 「Link properties」 and the numbers are not copied here. Socket buffer options also
 //!   do not change the result, so this file uses `WsDialer` and `WsListener` as they are.
 //! - ★Why the supervisor test pushes `ping_interval` and `idle_timeout` out of the window★ — when not pushed
 //!   (2s/5s) the source of the pass was **not the flood but the keepalive write at t=4s**, and that deadline expiry
@@ -21,7 +21,7 @@
 //!   ★But that property is not left to two policy-value lines alone★ — the supervisor test directly measures the event arrival time against the wall clock,
 //!   so even if those two lines are deleted or [`common::PATIENCE`] is raised, the coin flip does not quietly return.
 //! - ★It runs serially★ — libtest runs the tests of one binary concurrently, and this file deliberately has a test that
-//!   saturates loopback together with a test that asserts 「어떤 쓰기도 시한에 안 걸렸다」 (no write hit the deadline). If they overlap on the same kernel
+//!   saturates loopback together with a test that asserts 「no write hit the deadline」. If they overlap on the same kernel
 //!   stack, someone else's load can turn that assertion red (a real risk on a small runner).
 #![cfg(all(feature = "ws", feature = "test-support"))]
 
@@ -51,7 +51,7 @@ const FRAME_BUDGET: usize = 64;
 /// The write deadline.
 ///
 /// ★A stalled write **never** finishes unless the peer reads, so a large value does not blur the positive signal★ —
-/// what this value guards against is the opposite side, the false positive 「멀쩡한 쓰기가 느려서 걸리는」 (a healthy write is slow and hits it).
+/// what this value guards against is the opposite side, the false positive 「a healthy write is slow and hits it」.
 const DEADLINE: Duration = Duration::from_secs(2);
 
 /// The cap over the whole flood.
@@ -78,11 +78,11 @@ const PARKED_BLOBS: usize = 16;
 /// The threshold is the cap this suite gave the dialing side ([`common::MAX_MESSAGE`]).
 const OVER_LIMIT: usize = common::MAX_MESSAGE + 1;
 
-/// Runs only one test of this binary at a time — the reason is 「직렬로 돈다」 in the file header.
+/// Runs only one test of this binary at a time — the reason is 「It runs serially」 in the file header.
 static SOCKET_LOCK: Mutex<()> = Mutex::const_new(());
 
 /// How many in this file are running right now. ★If the lock is deleted this exceeds 1 and that spot turns red★ — if seriality is left
-/// to structure alone, the next session may read the lock as an 「불필요한 장치」 (unnecessary device) and remove it, and nobody would know.
+/// to structure alone, the next session may read the lock as an 「unnecessary device」 and remove it, and nobody would know.
 static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 
 struct OneAtATime {
@@ -102,7 +102,7 @@ async fn one_at_a_time() -> OneAtATime {
     assert_eq!(
         IN_FLIGHT.fetch_add(1, Ordering::AcqRel) + 1,
         1,
-        "이 파일의 테스트가 겹쳐 돌았다 — 서로의 loopback 부하가 시한 판정에 섞인다"
+        "this file's tests ran overlapping — each other's loopback load mixes into the deadline decision"
     );
     held
 }
@@ -122,7 +122,7 @@ async fn flood_until_cut(tx: &mut Box<dyn LinkTx>) -> Option<usize> {
             .await
             {
                 Ok(Ok(())) => {}
-                Ok(Err(err)) => panic!("{nth}번째에서 시한이 아니라 통로 오류가 났다: {err}"),
+                Ok(Err(err)) => panic!("at #{nth} a link error happened, not the deadline: {err}"),
                 Err(Elapsed) => return Some(nth),
             }
         }
@@ -131,8 +131,8 @@ async fn flood_until_cut(tx: &mut Box<dyn LinkTx>) -> Option<usize> {
     match tokio::time::timeout(FLOOD_CAP, flood).await {
         Ok(cut) => cut,
         Err(_) => panic!(
-            "{FLOOD_CAP:?} 안에 시한도 예산({FRAME_BUDGET}개 × {FRAME} 바이트)도 안 걸렸다 — 통로가 \
-             멈추지도 비지도 않고 느리게 흐르고 있다"
+            "within {FLOOD_CAP:?} neither the deadline nor the budget ({FRAME_BUDGET} × {FRAME} bytes) was hit — the link is \
+              neither stalled nor drained, but flowing slowly"
         ),
     }
 }
@@ -154,7 +154,7 @@ async fn connected_pair(
         tokio::join!(common::accept_link(listener), dialer.dial(&addr))
     })
     .await
-    .expect("핸드셰이크 상한 — TCP 는 붙었는데 WS 업그레이드가 안 끝난 것이 첫 가설이다");
+    .expect("handshake cap — the first hypothesis is that TCP attached but the WS upgrade did not finish");
     (accepted.expect("accept"), dialed.expect("dial"))
 }
 
@@ -170,13 +170,13 @@ async fn writes_into_a_peer_that_never_reads_are_cut_by_the_deadline() {
     let cut = flood_until_cut(&mut tx).await;
     assert!(
         cut.is_some(),
-        "안 읽는 상대에게 {FRAME_BUDGET}개 × {FRAME} 바이트가 그대로 들어갔다"
+        "{FRAME_BUDGET} × {FRAME} bytes went straight in to a peer that does not read"
     );
 }
 
 #[tokio::test]
 async fn the_same_writes_into_a_peer_that_reads_are_never_cut() {
-    // ★This is the opposite side of the test above★ — without it an implementation of 「이만한 쓰기는 무조건 시한에 걸린다」 (a write this size always hits the deadline) passes too.
+    // ★This is the opposite side of the test above★ — without it an implementation of 「a write this size always hits the deadline」 passes too.
     //   Frame count, size and deadline are all the same and the only difference is whether the peer reads.
     let _one_at_a_time = one_at_a_time().await;
     let mut listener = common::listen();
@@ -191,7 +191,7 @@ async fn the_same_writes_into_a_peer_that_reads_are_never_cut() {
             //   and that is the premise of this assertion.
             match server_rx.recv().await {
                 Ok(LinkRead::Frame(Frame::Binary(bytes))) => seen += bytes.len(),
-                other => panic!("읽어 주는 쪽에 바이너리 프레임 대신 {other:?} 가 왔다 (여기까지 {seen} 바이트)"),
+                other => panic!("{other:?} came to the reading side instead of a binary frame ({seen} bytes so far)"),
             }
         }
         seen
@@ -200,13 +200,17 @@ async fn the_same_writes_into_a_peer_that_reads_are_never_cut() {
     let cut = flood_until_cut(&mut tx).await;
     assert_eq!(
         cut, None,
-        "읽어 주는 상대에게 보내는 쓰기가 시한에 걸렸다 (프레임 {cut:?})"
+        "a write to a reading peer hit the deadline (frame {cut:?})"
     );
     let seen = tokio::time::timeout(common::PATIENCE, drain)
         .await
-        .expect("받는 쪽 상한")
-        .expect("받는 쪽 태스크");
-    assert_eq!(seen, FRAME_BUDGET * FRAME, "보낸 만큼 건너오지 않았다");
+        .expect("receiving-side cap")
+        .expect("receiving-side task");
+    assert_eq!(
+        seen,
+        FRAME_BUDGET * FRAME,
+        "not as much crossed as was sent"
+    );
 }
 
 #[tokio::test]
@@ -231,21 +235,21 @@ async fn the_supervisor_names_the_write_deadline_when_it_drops_a_parked_link() {
     // ★After receiving, never poll it★ — same reason as the test above.
     let _never_read = tokio::time::timeout(common::PATIENCE, listener.accept())
         .await
-        .expect("수락 상한")
+        .expect("accept cap")
         .expect("accept");
-    common::wait_state(&peer, "운영 단계", |state| state.is_live()).await;
+    common::wait_state(&peer, "operating phase", |state| state.is_live()).await;
 
     let flooded = Instant::now();
     for nth in 0..PARKED_BLOBS {
         peer.notify(TestOut::Blob(vec![0u8; FRAME]))
-            .unwrap_or_else(|err| panic!("{nth}번째가 나가는 큐에 못 들었다: {err:?}"));
+            .unwrap_or_else(|err| panic!("#{nth} could not enter the outbound queue: {err:?}"));
     }
 
     let cause = common::wait_incoming(
         &mut inbox,
         &format!(
-            "Disconnected 사건(첫 가설 = {PARKED_BLOBS}개 × {FRAME} 바이트에서는 커널이 더는 멈추지 \
-             않는다)"
+            "Disconnected event (first hypothesis = at {PARKED_BLOBS} × {FRAME} bytes the kernel no longer \
+              stalls)"
         ),
         |msg| match msg.as_event() {
             Some(TransportEvent::Disconnected { cause, .. }) => Some(*cause),
@@ -257,7 +261,7 @@ async fn the_supervisor_names_the_write_deadline_when_it_drops_a_parked_link() {
     assert_eq!(
         cause,
         DisconnectCause::WriteDeadline,
-        "멈춘 쓰기를 다른 사유로 끊었다"
+        "cut the stalled write for another reason"
     );
     // ★The reason name alone cannot tell whether the source was the flood or the keepalive write at t=period★ — if that distinction is left
     //   to the two policy lines above alone, neither the person who deletes those lines nor the person who raises
@@ -265,14 +269,14 @@ async fn the_supervisor_names_the_write_deadline_when_it_drops_a_parked_link() {
     //   far earlier than that period (with a 3x margin).
     assert!(
         waited * 3 < SUPERVISOR_PING_INTERVAL,
-        "WriteDeadline 이 {waited:?} 만에 왔다 — keepalive 주기({SUPERVISOR_PING_INTERVAL:?})에 가까우면 \
-         사유의 출처가 flood 가 아니라 그 주기의 쓰기일 수 있다"
+        "WriteDeadline came after {waited:?} — if it is close to the keepalive period ({SUPERVISOR_PING_INTERVAL:?}), \
+          the source of the reason may be that period's write, not the flood"
     );
 }
 
 #[tokio::test]
 async fn an_oversized_frame_is_reported_as_a_write_failure_instead_of_killing_the_supervisor() {
-    // ★What is measured is 「값으로 실패하나」 (does it fail as a value)★ — if this spot panics, the supervisor task dies inside it, and nobody holds that
+    // ★What is measured is 「does it fail as a value」★ — if this spot panics, the supervisor task dies inside it, and nobody holds that
     //   `JoinHandle`, so there is **no place to observe the panic**: the emitted state freezes at `Live`
     //   forever and neither a disconnect event nor a reconnect happens. So what this test measures is whether the event **comes**.
     let _one_at_a_time = one_at_a_time().await;
@@ -290,14 +294,14 @@ async fn an_oversized_frame_is_reported_as_a_write_failure_instead_of_killing_th
 
     let registry = common::registry(Arc::new(common::dialer()), Policy::default());
     let (peer, mut inbox) = registry.add(PeerId::new("d1"), addr, Arc::new(ImmediateHandshake));
-    common::wait_state(&peer, "운영 단계", |state| state.is_live()).await;
+    common::wait_state(&peer, "operating phase", |state| state.is_live()).await;
 
     peer.notify(TestOut::Blob(vec![0u8; OVER_LIMIT]))
-        .expect("나가는 큐");
+        .expect("outbound queue");
 
     let cause = common::wait_incoming(
         &mut inbox,
-        "Disconnected 사건(첫 가설 = 그 쓰기가 값 대신 패닉으로 실패해 감독이 죽었다)",
+        "Disconnected event (first hypothesis = that write failed with a panic instead of a value and the supervisor died)",
         |msg| match msg.as_event() {
             Some(TransportEvent::Disconnected { cause, .. }) => Some(*cause),
             _ => None,
@@ -307,20 +311,24 @@ async fn an_oversized_frame_is_reported_as_a_write_failure_instead_of_killing_th
     assert_eq!(
         cause,
         DisconnectCause::WriteFailed,
-        "상한을 넘은 프레임을 다른 사유로 끊었다"
+        "cut a frame over the cap for another reason"
     );
 
     // ★The evidence that the supervisor is alive is the next link★ — a dead supervisor does not reconnect.
     let generation = common::wait_incoming(
         &mut inbox,
-        "재연결의 Connected 사건(첫 가설 = 감독이 그 쓰기에서 죽었다)",
+        "the reconnect's Connected event (first hypothesis = the supervisor died on that write)",
         |msg| match msg.as_event() {
             Some(TransportEvent::Connected { generation, .. }) => Some(*generation),
             _ => None,
         },
     )
     .await;
-    assert_eq!(generation, Generation(2), "끊김 뒤 다음 통로가 안 붙었다");
+    assert_eq!(
+        generation,
+        Generation(2),
+        "the next link did not attach after the disconnect"
+    );
 
     server.abort();
 }

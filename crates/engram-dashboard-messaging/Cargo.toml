@@ -2,7 +2,7 @@
 name = "engram-dashboard-messaging"
 version = "0.1.0"
 edition = "2021"
-description = "Engram Dashboard 메시징 커널 — 메일박스·장부·그룹·발송 오케스트레이션·busy 게이트·봉투. 워크스페이스 crate 무의존(ADR-0110 완전 상호무지)."
+description = "Engram Dashboard messaging kernel — mailbox·ledger·groups·send orchestration·busy gate·envelope. No workspace crate dependencies (ADR-0110 complete mutual ignorance)."
 
 [lib]
 name = "engram_dashboard_messaging"
