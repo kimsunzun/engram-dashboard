@@ -10,6 +10,7 @@
 
 | ID | 제목(짧게) | 구역 | 상태 |
 |---|---|---|---|
+| T-112 | Launch skips missing items and an unusable library root with a notice (ADR-0374) | 메인 | Decided, not started — separate task after S25 step 9a (user 2026-11-17) |
 | T-105 | Launch folder wait as an advanced setting (once file-based settings loading exists) | 메인 | Deferred by the user (2026-11-11 — ADR-0360 decision 6) |
 | T-110 | Launch waiting cue — ADR-0181 decision 5 never built; launch waits grow to 88 s in S25 step 8 | 메인 | Deferred by the user to the UI work (2026-11-15) |
 | T-109 | The S25 library screen as a plugin-shaped extension (public surfaces only); a plugin system later | 메인 | 트리거 대기 — S25 client stage (steps 11–13 TRD) · user 2026-11-14 |
@@ -100,6 +101,11 @@
 | T-16 | 프론트 종료 판정 · 세대 필터 | 사소한 기능·정리 | 잔존 · T-32 선결 |
 
 ## 메인
+
+### T-112. Launch skips missing items and an unusable library root with a notice (ADR-0374)
+- **Status:** decided by the user 2026-11-17, not started — its own task after S25 step 9a (9a only notes it in its TRD §6 and K1).
+- **What:** missing instructions, skills, settings, presets and folder entries (block ①) and an unusable library root with library presets attached (block ④) stop blocking a launch; each is named in the launch reply notices, the log and to the launched agent. Settings included (no per-kind exception — accepted risk: a skipped settings file can drop a permission limit).
+- **Open for that task's TRD:** broken items (block ②) stay out of scope unless decided; the notice code and wording (ADR-0357); how the agent is told; a convention check for "a referenced file is missing" was not run.
 
 ### T-110. Launch waiting cue — ADR-0181 decision 5 never built
 - **Status:** deferred — user 2026-11-15 「일단 나중에 UI할때 함께하고」; the requirement itself: 「뭐가됐건 기다리면 뭔가 기다리는 사인이 있어야되는데 이건 관용으로 확인하고 맞추면 될듯?」 — match the convention.
