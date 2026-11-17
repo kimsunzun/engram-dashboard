@@ -29,7 +29,7 @@ Inventory (lines containing Hangul, outside hold):
   - `src/i18n/ko.ts` and the Korean column of `src-tauri/src/ui_text.rs`.
   - Frontend tests that assert Korean UI text (vitest runs in `ko` on purpose, `src/i18n/vitest.setup.ts`) — their assertion values stay; their test names and messages become English.
   - Fixtures that exercise Korean input or rendering (IME, Hangul width, bilingual word filters), recorded transcripts (`fixtures/*.jsonl`).
-  - In docs: user quotes in 「」, fenced code blocks and backtick spans quoted verbatim (S33 rules), ADR lint tokens (`- 상태:` and its vocabulary, `- 관련:`, the five ADR section headings) and the ADR index in `docs/decisions/README.md` — parsed and written by `adr.mjs` of the held `engram-adr` skill; the S33 glossary (`docs/process/S33-english-translation/glossary.md`); Korean HTML reports under `docs/` (the user reads them).
+  - In docs: user quotes in 「」, fenced code blocks and backtick spans quoted verbatim (S33 rules), ADR lint tokens (`- 상태:` and its vocabulary incl. the `부분 폐기 by` stamp, `- 관련:`, the five ADR section headings, `## 인덱스`) and the ADR index in `docs/decisions/README.md` — parsed and written by `adr.mjs` of the held `engram-adr` skill; the S33 glossary (`docs/process/S33-english-translation/glossary.md`); Korean HTML reports under `docs/` (the user reads them).
   - Rust tests that assert the Korean column of `ui_text.rs`.
 - Hold (user, 2026-11-18: 「engram help 그냥 놔두고, 너 스킬같은것도 놔두고 … 일단은 보류」): `prompts/engram-help.md`, `prompts/agent-priming.md`, `CLAUDE.md`, everything under `.claude/`.
 - Non-goals:
@@ -44,7 +44,7 @@ Inventory (lines containing Hangul, outside hold):
 - R3. Error text is English wherever it is built, including errors the shell builds and the frontend shows (connection band, agent list error lines, chat error body). The screen keeps showing them inside its translated head, as S35 already does — in Korean mode the head is Korean and the cause English (the default accepted with the plan, 2026-11-18).
 - R4. LLM-facing text in code is English; the generated command catalog (`commands.schema.json`, ts bindings) is regenerated from it.
 - R5. The placeholder marker (`PLACEHOLDER_ERROR_MESSAGE` and its mirror in `src/api/wsFrame.ts`) changes on both sides together; the screen still shows its translated text, also for the old Korean marker from a pre-S38 daemon still running.
-- R6. Tests that match product text change in the same commit as that text; no test is dropped (test count per test file before/after).
+- R6. Tests that match product text change in the same commit as that text (across packages too — TRD §3); no test is dropped (test count per test file before/after).
 - R7. Translation keeps meaning: negation, conditions, invariants, ADR anchors, identifiers, paths, links, numbers unchanged. Terms follow `docs/process/S33-english-translation/glossary.md` (new terms are added there).
 - R8. A check fails CI when Hangul appears in code or config outside the keep list, and can run locally. Docs are not checked (translated once here).
 
