@@ -1,7 +1,7 @@
 # ADR-0373: UI language runtime: lookup-only i18next with our own interpolation, no translated text kept or used as a key, the shell layout holds the language and bumps on change, the init script owns the per-window language memory
 
 - 상태: 확정 (2026-11-17, 근거: S35 TRD edition 2.3, PRD+TRD deep review PASS on f7868b2a — main-agent design decisions)
-- 관련: ADR-0372 (English source, Korean selectable, live switch) · ADR-0349 (i18next behind `t()`) · ADR-0301 (shell builds tab names; a write that changes an effective name bumps the version) · ADR-0265 (shell settings, theme pushed live) · `docs/process/S35-i18next-backend/trd.md` · `docs/reference/structure/i18n.md`
+- 관련: ADR-0372 (English source, Korean selectable, live switch) · ADR-0349 (i18next behind `t()`) · ADR-0301 (shell builds tab names; a write that changes an effective name bumps the version) · ADR-0265 (shell settings, theme pushed live) · `docs/process/S35-i18next-backend/trd.md` · `docs/reference/structure/i18n.md` · Amends ADR-0065 (container descriptor gets a required id and a lazy title)
 
 ## 맥락
 ADR-0372 makes the UI language switchable at run time with no restart, in every window, the tray, the refusal dialog, shell-made tab names and OS window titles. The S35 design review (2026-11-17) found the places where a live switch silently fails: translated text captured once or used as an identity, layout notifications dropped as not newer, a shell-wide language racing between hooks and tests, and a boot path that never read the setting.
