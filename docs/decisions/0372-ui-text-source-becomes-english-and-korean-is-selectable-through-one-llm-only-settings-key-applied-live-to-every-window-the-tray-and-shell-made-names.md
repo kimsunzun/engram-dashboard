@@ -1,7 +1,7 @@
 # ADR-0372: UI text source becomes English and Korean is selectable through one LLM-only settings key, applied live to every window, the tray and shell-made names
 
 - 상태: 확정 (2026-11-17, 근거: user decisions 2026-11-08 「화면 원본 언어도 영어로 하고 한국어 보이는걸 나중에」 and 2026-11-17 「디폴트 영어 선택 한국으로」 · 「언어를 고르는 설정이 있긴한데 llm 명령으로만 일단 하자고」)
-- 관련: Amends ADR-0349 (ko.ts as the source, Korean only, Rust strings excluded) · ADR-0069 (UI strings centralized) · ADR-0055 (LLM controls everything through the existing surfaces) · `docs/process/S35-i18next-backend/prd.md` · `docs/reference/structure/i18n.md`
+- 관련: Amends ADR-0349 (ko.ts as the source, Korean only, Rust strings excluded, interpolation options, call sites unchanged, init before titles) · ADR-0069 (UI strings centralized) · ADR-0055 (LLM controls everything through the existing surfaces) · `docs/process/S35-i18next-backend/prd.md` · `docs/reference/structure/i18n.md`
 
 ## 맥락
 ADR-0349 put i18next behind `t()` with `ko.ts` as the only, typed source, Korean only, and left the Rust shell's visible strings out. The user then set the app's base language: the UI is English by default, Korean is available on request, and internal text (logs, errors, LLM-facing text) becomes English-only in a separate topic. There is no settings screen; settings are changed through the LLM settings commands (`settings.get` / `settings.set` / `settings.reset` / `settings.schema`). User-visible text also comes from the shell: tray labels, the native refusal dialog, auto tab names and OS window titles (`src-tauri/src/layout/tab_name.rs`).
