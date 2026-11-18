@@ -49,7 +49,7 @@ use crate::store::ContentTag;
 use crate::RefreshReport;
 
 /// The code of a preset reference whose target is not in the catalog (`args` = `{path}` — the target as the preset
-/// spells it).
+/// spells it). Agent-preset edits reuse it for an unknown agent with `args` = `{agent}`.
 // TRD S25 step-7 B8
 pub const NOT_FOUND: &str = "not-found";
 
@@ -333,8 +333,9 @@ impl Gate {
     /// A change (TRD S25 step-7 §6 writer 5): its own ticket, then `f` under the write lock with the catalog, the root
     /// and the sequence (a removal draws its number there, so it is later than every read noted before). `f` writes
     /// per item and returns the touched keys; their derived data is recomputed and the change generation is raised
-    /// before the write lock is released. `f` may read the profile registry and do the change's own disk IO — nothing
-    /// else outward (ADR-0324 decision 1). The change's disk effect must be finished inside `f` (or before the call).
+    /// before the write lock is released. `f` may read the profile registry, call the profile-edit port (its impl never
+    /// calls back into the library — ADR-0380) and do the change's own disk IO — nothing else outward (ADR-0324
+    /// decision 1). The change's disk effect must be finished inside `f` (or before the call).
     pub(crate) fn change<R>(
         &self,
         f: impl FnOnce(&mut Catalog, Option<&Path>, &dyn Fn() -> u64) -> (R, Vec<PathKey>),
@@ -397,8 +398,9 @@ impl Gate {
     ///
     /// Unlike [`Gate::change_root`] it does not clear the catalog: it relies on the invariant that while no root is
     /// published the catalog is empty — a scan, the list safety net and a launch overlay read under a root, and a merge
-    /// noted before this publish is dropped by the raised root generation. Every change body must keep refusing when no
-    /// root is published, or it could leave an item this publish would carry into the new root.
+    /// noted before this publish is dropped by the raised root generation. No change body may insert a catalog item
+    /// while no root is published (an agent-preset edit runs with no root but writes no item), or it could leave an
+    /// item this publish would carry into the new root.
     // ADR-0382
     pub(crate) fn publish_root_unwalked(&self, new_root: PathBuf) -> Result<(), String> {
         let _turn = self.take_turn(Kind::Root { walks: false });

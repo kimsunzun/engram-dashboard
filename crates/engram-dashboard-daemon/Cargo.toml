@@ -91,8 +91,9 @@ engram-dashboard-transport = { path = "../engram-dashboard-transport", features 
 #   it does not declare its own commands, so `ts-rs` is not added (only the declaring crate emits bindings).
 engram-dashboard-command = { path = "../engram-dashboard-command" }
 # ADR-0311 decision 2: the preset library — the daemon builds `LibraryService` from the crate's parts and its own values,
-#   plugs it in as the manager's launch-kit source (`lib.rs` `build_library_service` · `build_daemon_wiring_with_store`)
-#   and sweeps the launch folder at boot (`launch::sweep_launch_dir`); it calls nothing else in the crate. The harness
+#   plugs it in as the manager's launch-kit source (`lib.rs` `build_library_service` · `build_daemon_wiring_with_store`),
+#   sweeps the launch folder at boot (`launch::sweep_launch_dir`), loads the root setting and runs the first start and
+#   boot scan, and plugs the manager as the profile-edit port (`plug_profile_edit`). The harness
 #   bin `roundtrip-smoke` builds its service through the same `build_library_service` over `--builtin-dir` and
 #   reads the loaded built-in priming (`builtin::file_of`, `LibraryService::builtin_priming_text` — ADR-0370).
 engram-dashboard-asset-library = { path = "../engram-dashboard-asset-library" }

@@ -477,16 +477,7 @@ impl LibraryService {
             base,
             mut resolution,
         } = pending;
-        let asks: Vec<(PathBuf, Need)> = resolution
-            .folder_paths()
-            .into_iter()
-            .map(|path| (path, Need::Required))
-            .collect();
-        let statuses = self.io.stat_all(&self.io.begin_read(), &asks);
-        resolution.attach_folder_status(&statuses);
-        if let Some(root) = &base.root {
-            self.mark_links(root, &mut resolution);
-        }
+        self.settle_resolution(&mut resolution, base.root.as_deref());
         self.complete_view(base, resolution)
     }
 
@@ -1789,7 +1780,7 @@ fn rows_mut(view: &mut PresetView) -> impl Iterator<Item = &mut PresetRow> {
 
 /// The list an item of `kind` goes into; a broken file goes where its claimed kind goes. `None` = it can be listed
 /// nowhere (a `SKILL.md`, or a broken file with no known kind).
-fn list_of(kind: &ItemKind) -> Option<ListName> {
+pub(crate) fn list_of(kind: &ItemKind) -> Option<ListName> {
     match kind {
         ItemKind::Preset
         | ItemKind::Broken {
@@ -1872,7 +1863,7 @@ fn row_state(
 }
 
 /// A reference spelling, or why not: `item-path-invalid` (`args` = `{path, why}`).
-fn parse_ref(text: &str) -> Result<AssetRef, Reason> {
+pub(crate) fn parse_ref(text: &str) -> Result<AssetRef, Reason> {
     AssetRef::parse(text).map_err(|why| Reason {
         code: ITEM_PATH_INVALID.to_owned(),
         args: json!({ "path": escape_controls(text), "why": why.to_string() }),
@@ -1881,7 +1872,7 @@ fn parse_ref(text: &str) -> Result<AssetRef, Reason> {
 }
 
 /// A skip with `code`: `args` = `{backend}` for a tag code (given `backend`), else `{path}`.
-fn skip(item: &str, code: &str, backend: Option<&str>) -> Skipped {
+pub(crate) fn skip(item: &str, code: &str, backend: Option<&str>) -> Skipped {
     let args = match (code, backend) {
         (BACKEND_TAG_NOT_ALLOWED | BACKEND_TAG_UNKNOWN, Some(word)) => {
             json!({ "path": escape_controls(item), "backend": escape_controls(word) })

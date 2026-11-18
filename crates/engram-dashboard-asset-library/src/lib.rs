@@ -69,18 +69,29 @@
 //! stat'ed before it, outside every lock. A preset item carries `rev`, the SHA-256 of the bytes it was made from
 //! (ADR-0378), so `preset.get` reads no preset file. The rules are in the `edit.rs` header.
 //!
+//! ## Agent-preset view and edits
+//!
+//! `agent_edit.rs` holds the `agent.presets` view and the attachment edits. An edit never mutates the profile
+//! registry: inside one [`LibraryService::change_at`] it reads the agent, judges the request against the catalog and
+//! writes through the profile-edit port, which the daemon plugs in once ([`LibraryService::plug_profile_edit`] — a
+//! weak cell); an empty or dead cell refuses `profile-edit-unavailable` (ADR-0380). The rules are in the
+//! `agent_edit.rs` header.
+//!
 //! ## Refusals
 //!
 //! A body refuses with [`LibraryRefusal`]: a [`RefusalClass`] plus an agent `launch::Reason`, or the profile store's
-//! own error passed through. The command layer maps the class onto the bus code (ADR-0379); every refusal that
-//! applied nothing must map onto a code that does not keep the request id.
+//! own error passed through. The command layer maps the class onto the bus code (ADR-0379); a refusal that applied
+//! nothing maps onto a code that does not keep the request id, except the two `INTERNAL` cases of ADR-0379 decision 5
+//! (`profile-edit-unavailable` and a profile-store write failure).
 // ADR-0311
 // ADR-0324
 // ADR-0378
 // ADR-0379
+// ADR-0380
 // ADR-0381
 // ADR-0382
 
+pub mod agent_edit;
 pub mod backends;
 pub mod builtin;
 pub mod catalog;
@@ -99,13 +110,14 @@ pub mod validate;
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::SystemTime;
 
 use engram_dashboard_agent::launch::{backend_word, escape_controls, BlockReason, Reason};
 use engram_dashboard_agent::profile::{
     AgentCommand, AgentOutputFormat, AgentProfile, ProfileRegistry, StoreError,
 };
+use engram_dashboard_agent::profile_edit::ProfileEditPort;
 use engram_dashboard_agent::types::AgentId;
 use engram_dashboard_base::sync::lock;
 use engram_dashboard_platform::fs::{normalize_folder, path_key, same_path, PathKey};
@@ -248,6 +260,10 @@ pub struct LibraryService {
     config: ConfigFile,
     /// Serializes `set_root` and the first start (module header).
     root_change: Mutex<()>,
+    /// The profile-edit port, plugged in once by the daemon ([`LibraryService::plug_profile_edit`]); weak, so the
+    /// manager, which holds this service as its launch-kit source, makes no cycle.
+    // ADR-0380
+    profile_edit: OnceLock<Weak<dyn ProfileEditPort>>,
     /// How many root-change takes found it held — tests observe a waiter.
     #[cfg(test)]
     root_change_blocked: std::sync::atomic::AtomicUsize,
@@ -434,8 +450,19 @@ impl LibraryService {
             builtins,
             config,
             root_change: Mutex::new(()),
+            profile_edit: OnceLock::new(),
             #[cfg(test)]
             root_change_blocked: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// Plugs in the profile-edit port the agent-preset bodies write through (`agent_edit.rs`) — the daemon's manager,
+    /// right after it is built and before any command can reach the service. Set once: a second plug is ignored and
+    /// logged. Until it is plugged, or once its manager is gone, those bodies refuse `profile-edit-unavailable`.
+    // ADR-0380
+    pub fn plug_profile_edit(&self, port: Weak<dyn ProfileEditPort>) {
+        if self.profile_edit.set(port).is_err() {
+            tracing::warn!("profile-edit port already plugged; second plug ignored");
         }
     }
 
@@ -467,10 +494,11 @@ impl LibraryService {
             .and_then(|(_, resolution)| resolution)
     }
 
-    /// What each agent gets (`agent.presets`, tree ⛔): one first-scan entrance, the root stat (when a library preset
-    /// is attached), one read lock for all of them, then the folder stats — all on one read-computation budget, each
-    /// distinct folder stat'ed once; then, with no lock, a link probe for each ① `not-found` library row. `None` = no
-    /// such agent, or its backend has no settings check (it takes no preset — B13).
+    /// What each agent gets (tree ⛔; `agent.presets` resolves the one profile it read the same way): one first-scan
+    /// entrance, the root stat (when a library preset is attached), one read lock for all of them, then the folder
+    /// stats — all on one read-computation budget, each distinct folder stat'ed once; then, with no lock, a link probe
+    /// for each ① `not-found` library row. `None` = no such agent, or its backend has no settings check (it takes no
+    /// preset — B13).
     pub fn resolve_agents(&self, ids: &[AgentId]) -> Vec<(AgentId, Option<Resolution>)> {
         let found: Vec<(AgentId, Option<Want>)> =
             ids.iter().map(|&id| (id, self.agent_want(id))).collect();
@@ -594,6 +622,21 @@ impl LibraryService {
             FolderStatus::Missing => Err("missing".to_owned()),
             FolderStatus::NotADirectory => Err("not a folder".to_owned()),
             FolderStatus::Unreadable(why) => Err(why),
+        }
+    }
+
+    /// Finishes a resolution built under a library lock, outside every lock: its folders stat'ed on a fresh read budget,
+    /// then the link probes of its `not-found` rows under `root`.
+    pub(crate) fn settle_resolution(&self, resolution: &mut Resolution, root: Option<&Path>) {
+        let asks: Vec<(PathBuf, Need)> = resolution
+            .folder_paths()
+            .into_iter()
+            .map(|path| (path, Need::Required))
+            .collect();
+        let statuses = self.io.stat_all(&self.io.begin_read(), &asks);
+        resolution.attach_folder_status(&statuses);
+        if let Some(root) = root {
+            self.mark_links(root, resolution);
         }
     }
 

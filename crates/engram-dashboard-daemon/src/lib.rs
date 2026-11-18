@@ -32,7 +32,7 @@ mod test_doubles;
 pub mod usage_service;
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use engram_dashboard_agent::launch::{LaunchPorts, StdLaunchFs};
 use engram_dashboard_agent::manager::AgentManager;
@@ -183,9 +183,9 @@ struct DaemonWiring {
     registry: ConnRegistry,
     /// The service the `manager`'s status sink chain feeds — the connection layer subscribes and ⟳s on the same one.
     usage: Arc<UsageService>,
-    /// The library service plugged in as `manager`'s launch-kit source — the same one, for the library commands.
-    /// `None` = the Noop kits (the test server). Production reads it only for the first-start step and the boot scan
-    /// ([`build_daemon_wiring`]).
+    /// The library service plugged in as `manager`'s launch-kit source — the same one, for the library commands —
+    /// with `manager` plugged into it as its profile-edit port. `None` = the Noop kits (the test server). Production
+    /// reads it only for the first-start step and the boot scan ([`build_daemon_wiring`]).
     // ADR-0311
     library: Option<Arc<LibraryService>>,
 }
@@ -397,8 +397,15 @@ fn build_daemon_wiring_with_store(
         }
         None => (manager, None),
     };
+    let manager = Arc::new(manager);
+    // ADR-0380: the manager goes into the service as its profile-edit port right here, before any command table can
+    //   reach the service; weak, as the manager already holds the service as its launch-kit source.
+    if let Some(library) = &library {
+        let port: Weak<AgentManager> = Arc::downgrade(&manager);
+        library.plug_profile_edit(port);
+    }
     DaemonWiring {
-        manager: Arc::new(manager),
+        manager,
         registry,
         usage,
         library,
@@ -1233,6 +1240,36 @@ mod tests {
         }
     }
 
+    /// ★The manager is plugged into the library as its profile-edit port before any command table is set★
+    /// (ADR-0380): the assembly plugs it right after it wraps the manager, and `run` builds the wiring before it sets
+    /// the command table. Plugged after the table, an early agent-preset command would answer
+    /// `profile-edit-unavailable`; no runtime test orders the two, only this one.
+    #[test]
+    fn the_profile_edit_port_is_plugged_before_the_command_table_is_set() {
+        let assembly = body_of("fn build_daemon_wiring_with_store(");
+        let wrapped = assembly
+            .find("Arc::new(manager)")
+            .expect("the assembly wraps the manager");
+        let plugged = assembly
+            .find(".plug_profile_edit(")
+            .expect("the assembly plugs the profile-edit port");
+        assert!(
+            wrapped < plugged,
+            "the port is plugged before the manager is wrapped"
+        );
+        let run = body_of("pub async fn run(");
+        let wiring = run
+            .find("build_daemon_wiring(")
+            .expect("`run` builds the wiring");
+        let table = run
+            .find("command_table_slot.set(")
+            .expect("`run` sets the command table");
+        assert!(
+            wiring < table,
+            "the command table is set before the wiring is built"
+        );
+    }
+
     /// The debug launch-block hook is gone with the real kits (its env vars included).
     #[test]
     fn the_debug_launch_block_hook_is_gone() {
@@ -1387,6 +1424,54 @@ mod tests {
             (first.root, first.daemon_id),
             "the next start reads both back"
         );
+    }
+
+    /// ★The production library writes agent attachments through the very manager the wiring keeps★ (ADR-0380): with
+    /// the cell empty the body would refuse `profile-edit-unavailable`, and a port over another registry would leave the
+    /// wiring's roster unmoved. A Default-slot detach needs no library root.
+    #[test]
+    fn the_production_wiring_plugs_the_manager_as_the_profile_edit_port() {
+        use engram_dashboard_agent::profile::{AgentCommand, AgentOutputFormat, AgentProfile};
+
+        let temp = std::env::temp_dir().join(format!("engram-wiring-{}", uuid::Uuid::new_v4()));
+        let layout = DataLayout::new(&temp);
+        let work = temp.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let wiring = production_wiring(&layout);
+        let library = wiring
+            .library
+            .as_ref()
+            .expect("production plugs the library");
+        wait_boot_scan(library);
+        let created = wiring
+            .manager
+            .try_create_agent(AgentProfile::new(
+                "port".into(),
+                AgentCommand::Claude {
+                    extra_args: Vec::new(),
+                    output_format: AgentOutputFormat::StreamJson,
+                },
+                work,
+                Vec::new(),
+                false,
+            ))
+            .expect("create the agent");
+        let before = wiring
+            .manager
+            .agent_snapshot(created.id)
+            .map(|p| p.default_preset);
+        let detached =
+            library.detach_preset(created.id, &["engram:/default".to_owned()], true, None);
+        let after = wiring
+            .manager
+            .agent_snapshot(created.id)
+            .map(|p| p.default_preset);
+        wiring.manager.shutdown_all();
+        let _ = std::fs::remove_dir_all(&temp);
+
+        let view = detached.expect("the detach goes through the plugged port");
+        assert!(!view.default_preset);
+        assert_eq!((before, after), (Some(true), Some(false)));
     }
 
     /// Waits (at most 10 s, then fails) until the boot scan `build_daemon_wiring` started has applied the first scan —
