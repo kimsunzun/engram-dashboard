@@ -29,7 +29,7 @@ Full text before the simplification (investigation records · reverted attempts 
 | T-11 | Per-child permission scope (R7) | Main | Deferred — remote stage |
 | T-9 | claude process pooling | Main | Deferred |
 | T-6 | cwd workspace validation | Main | Deferred — operations stage |
-| T-114 | Platform test `escape_reads_up_when_nobody_holds_it` reads the live Esc key state | Bug | Open — skipped in S38 QA (user decision) |
+| T-114 | Platform test `escape_reads_up_when_nobody_holds_it` reads the live Esc key state | Bug | Kept as is (user decision) — fails only while Esc is held; rerun it |
 | T-113 | Agent tree rename input may remount on every keystroke (suspected, pre-existing) | Bug | Open — not reproduced; found by S35 review |
 | T-78 | In-app codex terminal on codex 0.163.0 — alt-screen · mouse tracking (S21 TRD §6-F) | Bug | Open — user decision on the default |
 | T-52 | Graceful daemon stop returned `Timeout` | Bug | Closed by S21 3-2 U5a (`b85c0aaa`) — real-daemon stop test passes with `outcome=Closed`; remove once master has it |
@@ -202,10 +202,9 @@ Full text before the simplification (investigation records · reverted attempts 
 ## Bug
 
 ### T-114. Platform test `escape_reads_up_when_nobody_holds_it` reads the live Esc key state
-- **Status:** open — found in S38 QA (2026-11-18); predates S38.
+- **Status:** kept as is (user decision, 2026-11-18) — found in S38 QA; predates S38.
 - **Symptom:** `crates/engram-dashboard-platform/src/input.rs` `input::portable_tests::escape_reads_up_when_nobody_holds_it` asserts `!escape_down()`, which reads `GetAsyncKeyState(VK_ESCAPE)` — the physical key right now. It failed once in a local full regression on an interactive desktop and passed minutes later on the same tree (likely a user keypress; not proven). CI is not affected (no one types there).
-- **Interim:** the S38 QA run skipped it (user: a QA run must not ask the user to stop using the keyboard).
-- **What is needed:** make the test independent of the live keyboard (inject the key-state reader, or move the live read behind `#[ignore]` and test the decision logic with a fake), then drop the skip.
+- **Decision:** leave the test unchanged; the user just does not press Esc during a local run. If it fails locally, rerun that test alone before treating it as a regression. A QA run must not ask the user to stop using the keyboard.
 
 ### T-113. Agent tree rename input may remount on every keystroke (suspected, pre-existing)
 - **Status:** open — not reproduced on screen (S35 code review, 2026-11-17). Predates S35.
