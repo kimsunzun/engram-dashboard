@@ -83,7 +83,7 @@ describe('ConnectionNotice — what the band says', () => {
 
   it('band ① shows the head and the start cause', () => {
     render(<ConnectionNotice />)
-    emit('down', PLAIN, 'cannot write to the data folder (C:\\x) — unzip it to a writable location')
+    emit('down', PLAIN, 'cannot write to the data folder (C:\\x): Access is denied. (os error 5) — please extract to a writable location')
     const alert = screen.getByRole('alert')
     expect(alert.getAttribute('data-band')).toBe('not_connected')
     expect(alert.textContent).toContain('데몬에 연결하지 못했습니다.')
@@ -230,7 +230,7 @@ describe('ConnectionNotice', () => {
   // ★F3 regression guard★: a recurrence of the same cause after a fix and a connection is the common case.
   it('shows the same band again after a connection', () => {
     render(<ConnectionNotice />)
-    const same = 'cannot write to the data folder (C:\\x) — unzip it to a writable location'
+    const same = 'cannot write to the data folder (C:\\x): Access is denied. (os error 5) — please extract to a writable location'
     emit('down', PLAIN, same)
     fireEvent.click(screen.getByLabelText('알림 닫기'))
     expect(screen.queryByRole('alert')).toBeNull()

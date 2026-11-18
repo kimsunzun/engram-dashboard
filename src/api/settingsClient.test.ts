@@ -244,9 +244,9 @@ describe('settingsClient — writes pass through', () => {
     const f = fakeIpc()
     const client = createSettingsClient(f.ipc)
     f.ipc.invoke = async () => {
-      throw 'settings writes are not open yet'
+      throw 'settings writes are not open yet (before shell setup)'
     }
-    await expect(client.set('a', '1px')).rejects.toBe('settings writes are not open yet')
+    await expect(client.set('a', '1px')).rejects.toBe('settings writes are not open yet (before shell setup)')
   })
 })
 

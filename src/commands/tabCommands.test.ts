@@ -34,9 +34,9 @@ function shellWith(...windows: WindowTabsPayload[]): void {
   vi.mocked(invoke).mockImplementation(async (cmd: string, args?: unknown) => {
     if (cmd !== 'list_tabs') return undefined
     const arg = String((args as { window: string }).window).trim()
-    if (/^\d+$/.test(arg)) throw 'window numbers are not accepted as a window argument — numbers get reused'
+    if (/^\d+$/.test(arg)) throw 'a window number is not accepted as a window argument — numbers are reused. Find that number\'s window_id in the details of window.list and pass it, or pass the window (label) of a layout.get row'
     const hit = windows.find(w => w.label === arg || w.window_id === arg)
-    if (!hit) throw `no window: ${arg}`
+    if (!hit) throw `window not found: ${arg}`
     return hit
   })
 }
@@ -147,13 +147,13 @@ describe('tabCommands routing (window resolution)', () => {
 
   it('tab.close (window number · view omitted) → throws the shell refusal (does not close)', async () => {
     shellWith(payload('main', 'main', 1, ['mv'], 'mv'), payload(POPUP, POPUP_ID, 2, ['pv'], 'pv'))
-    await expect(run('tab.close', { window: '2' })).rejects.toThrow(/^\[tab\.close\] window numbers/)
+    await expect(run('tab.close', { window: '2' })).rejects.toThrow(/^\[tab\.close\] a window number/)
     expect(closeTabSpy).not.toHaveBeenCalled()
   })
 
   it('tab.close (unknown window · view omitted) → throws the shell refusal', async () => {
     shellWith(payload('main', 'main', 1, ['mv'], 'mv'))
-    await expect(run('tab.close', { window: 'slot-popup-9' })).rejects.toThrow(/no window: slot-popup-9/)
+    await expect(run('tab.close', { window: 'slot-popup-9' })).rejects.toThrow(/window not found: slot-popup-9/)
     expect(closeTabSpy).not.toHaveBeenCalled()
   })
 
@@ -254,18 +254,18 @@ describe('tabCommands routing (window resolution)', () => {
   it.each(['window.minimize', 'window.maximize', 'window.unmaximize', 'window.raise', 'window.hideAll', 'window.showAll'])(
     '%s: a shell refusal (string) is thrown as an Error carrying the command name',
     async id => {
-      controlWindowSpy.mockRejectedValueOnce('window numbers are not accepted as a window argument')
+      controlWindowSpy.mockRejectedValueOnce('a window number is not accepted as a window argument')
       const err = await Promise.resolve(run(id, { window: POPUP_ID })).catch((e: unknown) => e)
       expect(err).toBeInstanceOf(Error)
-      expect((err as Error).message).toBe(`[${id}] window numbers are not accepted as a window argument`)
+      expect((err as Error).message).toBe(`[${id}] a window number is not accepted as a window argument`)
     },
   )
 
   it('a shell refusal (string) of window.close is also thrown as an Error carrying the command name', async () => {
-    controlWindowSpy.mockRejectedValueOnce('no window: w-9')
+    controlWindowSpy.mockRejectedValueOnce('window not found: w-9')
     const err = await Promise.resolve(run('window.close', { window: 'w-9', if_empty: true })).catch((e: unknown) => e)
     expect(err).toBeInstanceOf(Error)
-    expect((err as Error).message).toBe('[window.close] no window: w-9')
+    expect((err as Error).message).toBe('[window.close] window not found: w-9')
   })
 
   // ── An empty window argument is not folded into this window ──
@@ -480,13 +480,13 @@ describe('tab.next (Ctrl+Tab cycling)', () => {
 
   it('window number → throws the shell refusal (does not move)', async () => {
     shellWith(payload('main', 'main', 1, ['a', 'b'], 'a'), payload(POPUP, POPUP_ID, 2, ['p', 'q'], 'p'))
-    await expect(run('tab.next', { window: '2' })).rejects.toThrow(/^\[tab\.next\] window numbers/)
+    await expect(run('tab.next', { window: '2' })).rejects.toThrow(/^\[tab\.next\] a window number/)
     expect(switchTabSpy).not.toHaveBeenCalled()
   })
 
   it('unknown window → throws the shell refusal', async () => {
     shellWith(payload('main', 'main', 1, ['a', 'b'], 'a'))
-    await expect(run('tab.next', { window: 'slot-popup-9' })).rejects.toThrow(/no window: slot-popup-9/)
+    await expect(run('tab.next', { window: 'slot-popup-9' })).rejects.toThrow(/window not found: slot-popup-9/)
     expect(switchTabSpy).not.toHaveBeenCalled()
   })
 })

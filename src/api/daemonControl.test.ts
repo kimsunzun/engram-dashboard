@@ -37,10 +37,10 @@ describe('DaemonDaemonControl (daemon mode)', () => {
   it('start failure → carries the reason on the connection state surface and throws it as is', async () => {
     const report = vi.fn(() => undefined)
     const ctrl = new DaemonDaemonControl(fakeClient('down', { reportConnectionError: report }))
-    invokeMock.mockRejectedValueOnce('cannot write to the data folder (C:\\x) — unzip it to a writable location')
+    invokeMock.mockRejectedValueOnce('cannot write to the data folder (C:\\x): Access is denied. (os error 5) — please extract to a writable location')
     await expect(ctrl.start()).rejects.toBeDefined()
     expect(report).toHaveBeenCalledWith(
-      'cannot write to the data folder (C:\\x) — unzip it to a writable location',
+      'cannot write to the data folder (C:\\x): Access is denied. (os error 5) — please extract to a writable location',
     )
   })
 

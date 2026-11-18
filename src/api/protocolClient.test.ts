@@ -1112,7 +1112,7 @@ describe('the connection failure reason is carried on the connection state surfa
     expect(seen).toEqual(['down']) // once right at registration
     expect(c.connectionError).toBeNull()
 
-    c.reportConnectionError('cannot write to the data folder (C:\\x) — unzip it to a writable location')
+    c.reportConnectionError('cannot write to the data folder (C:\\x): Access is denied. (os error 5) — please extract to a writable location')
 
     // The state string stays 'down', but it must be notified again for the screen to draw the reason.
     expect(seen).toEqual(['down', 'down'])
