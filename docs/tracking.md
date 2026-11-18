@@ -10,6 +10,7 @@ Full text before the simplification (investigation records · reverted attempts 
 
 | ID | Title (short) | Area | Status |
 |---|---|---|---|
+| T-115 | Agent input layer — urgent vs deferred system inputs (deferred ones ride the next input, no extra turn) | Main | Not started — separate topic (user 2026-11-19) |
 | T-86 | Tray 「데몬 켜기」 reconnects but slots keep the daemon-down icon | Main | Deferred to the multi-daemon topic with the tray work (user 2026-11-10) |
 | T-85 | A new window starts a daemon the user stopped (boot start in every window) | Main | Deferred to the multi-daemon topic (user 2026-11-10) |
 | T-84 | Update system — replace a version-mismatched daemon | Main | Not started — deferred by the user (ADR-0356) |
@@ -73,6 +74,13 @@ Full text before the simplification (investigation records · reverted attempts 
 | T-16 | Frontend exit decision · generation filter | Minor feature · cleanup | Remaining · T-32 is a prerequisite |
 
 ## Main
+
+### T-115. Agent input layer — urgent vs deferred system inputs
+- **Status:** separate topic, not started — user 2026-11-19: 「별도의 주제로 진행하면 될듯」 … 「일단은 그냥 가자. 지금처럼.」 S37 keeps today's behaviour (daemon notices are parked in the notice lane and injected at the idle gate, ADR-0104 — this wakes an idle agent and costs a turn).
+- **Problem:** a separate system input to an idle agent starts a new turn: the whole conversation is re-read (prompt-cache read cost ∝ context) plus the agent's output. Non-urgent inputs (a late outcome of an "unconfirmed" remote send, held mail finally delivered, peer link down/up, …) should not pay that.
+- **Direction (user):** every input has a type; deferred ones are stored at the **input layer** (not in messaging) and prepended to the agent's next input; if anything urgent is pending, flush the whole pile at once. Concern: deferred items are invisible on screen until flushed.
+- **Open:** PTY (terminal) mode types into the agent's terminal while a human may be typing; JSON (stdio) mode lets us compose the input — the piggyback may be JSON-only. Which existing notices (e.g. reply-deadline overdue) become deferred.
+- **Conventions to start from:** iOS interruption levels (passive / active / time-sensitive); Android notification channel importance; Claude Code attaches extra context to the next user turn instead of a new turn; Reason Network injects into a running Codex turn via hooks (PostToolUse `additionalContext`).
 
 ### T-86. Tray 「데몬 켜기」 reconnects but slots keep the daemon-down icon
 - **Status:** deferred to the multi-daemon topic, together with the tray work — user 2026-11-10: 「어차피 멀티데몬할때 트레이도 개선해야되니 나중에 다시 오픈하자」.
