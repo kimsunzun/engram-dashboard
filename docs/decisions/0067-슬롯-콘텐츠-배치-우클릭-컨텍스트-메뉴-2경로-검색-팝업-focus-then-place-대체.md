@@ -7,7 +7,7 @@
 
 ADR-0066 Decision 2 set placement as **focus-then-place** ("click a slot = focus → double-click a tree agent → assign to the focused slot"). After implementing and verifying Decision 1 (click-to-focus), designing the actual placement flow exposed a fundamental flaw:
 
-**The agent tree is also inside a slot, so the moment you click the tree to pick an agent, that click steals focus to the tree slot** (click-to-focus = clicking anywhere in a slot focuses that slot). So "place in the focused slot" points at the tree slot itself and placement breaks (focus-steal). This breaks the premise of focus-then-place (that the target focus is preserved while operating the tree). Only right-click ("열기") (open) does not steal focus, so it was the only thing that worked.
+**The agent tree is also inside a slot, so the moment you click the tree to pick an agent, that click steals focus to the tree slot** (click-to-focus = clicking anywhere in a slot focuses that slot). So "place in the focused slot" points at the tree slot itself and placement breaks (focus-steal). This breaks the premise of focus-then-place (that the target focus is preserved while operating the tree). Only right-click ("Open") does not steal focus, so it was the only thing that worked.
 
 Because this is a major redesign of the §5 placement control surface, we built the basis with `/research medium` (OSS survey → option set), and the user chose the direction.
 
@@ -15,9 +15,9 @@ Because this is a major redesign of the §5 placement control surface, we built 
 
 Placement is done by **a right-click context menu with 2 paths + a search popup**. Right-click does not move focus, so focus-steal is blocked at the root.
 
-1. **Path 1 (slot → agent):** slot right-click → "에이전트 모니터링" (monitor agent) → **search popup** (command-palette style — a search box + a filtered list of running agents) → on selection, `assign_agent` to **the slot that was right-clicked**. Target = the right-clicked slot (explicit).
-2. **Path 2 (agent → slot):** tree agent right-click → "열기" (the existing `openInFocusedSlot`) is kept — it is a right-click, so the focus slot set by the preceding left-click is preserved.
-3. **Spawn = the tree's responsibility:** remove "생성" (create) (`slot.createAgentHere`) from the slot content-fill menu. Creating a new agent happens only in the tree (double-click a reserved profile + `agentlist.createAgent` in the agent_list slot menu).
+1. **Path 1 (slot → agent):** slot right-click → "Monitor agent" → **search popup** (command-palette style — a search box + a filtered list of running agents) → on selection, `assign_agent` to **the slot that was right-clicked**. Target = the right-clicked slot (explicit).
+2. **Path 2 (agent → slot):** tree agent right-click → "Open" (the existing `openInFocusedSlot`) is kept — it is a right-click, so the focus slot set by the preceding left-click is preserved.
+3. **Spawn = the tree's responsibility:** remove "Create" (`slot.createAgentHere`) from the slot content-fill menu. Creating a new agent happens only in the tree (double-click a reserved profile + `agentlist.createAgent` in the agent_list slot menu).
 4. **Drag-and-drop = later.** Added later as mouse sugar on top of the same assign.
 5. **§5 single control surface:** the placement core = a single `assign_agent` (view/slot/agent) — a human right-click, the popup and the LLM all move the same command. Opening and selecting in the popup are also registered in the command registry.
 

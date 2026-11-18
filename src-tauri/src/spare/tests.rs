@@ -1,5 +1,4 @@
-//! Prewarmed window state machine tests (TRD S21-slot-docking §8-1 ⑫) — measured with a fake first-paint gate · number issuer · commit port · build.
-//! Deadlines are injected — no test waits the real 1 s (only the deadline tests, a few ms).
+//! Prewarmed window state machine tests (TRD S21-slot-docking §8-1 ⑫) — measured with a fake first-paint gate · number issuer · commit port · build. Deadlines are injected — no test waits the real 1 s (only the deadline tests, a few ms).
 
 use super::*;
 
@@ -15,8 +14,7 @@ use crate::layout::geometry::Insets;
 use crate::layout::manager::ViewId;
 use crate::layout::CanvasPx;
 
-// A wait upper bound a correct test never reaches — if the wake-up is missing, it turns red after waiting this long. ★The wake is measured with `LONG / 2`★ —
-//   a condition variable deadline on Windows releases a few ms early, so `< LONG` let even a mutant without the wake-up pass (measured 2026-10-21).
+// A wait upper bound a correct test never reaches — a missing wake-up turns red after waiting this long. The wake is measured with `LONG / 2`: a condition variable deadline on Windows releases a few ms early, so `< LONG` let even a mutant without the wake-up pass (measured 2026-10-21).
 const LONG: Duration = Duration::from_secs(10);
 const SAFETY: Duration = Duration::from_millis(7);
 
@@ -44,7 +42,11 @@ struct FakeGate {
 
 impl FakeGate {
     fn pool_locked(&self) -> bool {
-        let spare = self.spare.get().and_then(Weak::upgrade).expect("풀이 산다");
+        let spare = self
+            .spare
+            .get()
+            .and_then(Weak::upgrade)
+            .expect("the pool is alive");
         let locked = spare.pool.try_lock().is_err();
         locked
     }
@@ -70,7 +72,10 @@ impl FakeGate {
 
 impl PaintGate for FakeGate {
     fn hold_unarmed(&self, label: &str) {
-        assert!(self.pool_locked(), "올림은 맡김과 같은 풀 락 안에서 건다");
+        assert!(
+            self.pool_locked(),
+            "the raise is set inside the same pool lock as the entrust"
+        );
         self.held
             .lock()
             .unwrap()
@@ -85,7 +90,7 @@ impl PaintGate for FakeGate {
     fn cancel(&self, label: &str) {
         assert!(
             self.pool_locked(),
-            "올림은 상태가 바뀌는 풀 락 안에서 거둔다"
+            "the raise is withdrawn inside the pool lock where the state changes"
         );
         self.held.lock().unwrap().remove(label);
         self.calls
@@ -101,7 +106,7 @@ impl PaintGate for FakeGate {
         activate: bool,
         _opened: Option<Instant>,
     ) -> bool {
-        assert!(!self.pool_locked(), "③ 은 풀 락 밖이다");
+        assert!(!self.pool_locked(), "③ is outside the pool lock");
         let held = match self.held.lock().unwrap().get_mut(label) {
             Some(entry) => {
                 *entry = Some((generation, activate));
@@ -168,14 +173,20 @@ impl FakePort {
     }
 
     fn outside_locks(&self, what: &str) {
-        assert!(self.spare.pool.try_lock().is_ok(), "{what} — 풀 락 밖");
-        assert!(self.layout.0.try_lock().is_ok(), "{what} — 레이아웃 락 밖");
+        assert!(
+            self.spare.pool.try_lock().is_ok(),
+            "{what} — outside the pool lock"
+        );
+        assert!(
+            self.layout.0.try_lock().is_ok(),
+            "{what} — outside the layout lock"
+        );
     }
 }
 
 impl CommitPort for FakePort {
     fn adopted(&self, label: &str, generation: u32) {
-        self.outside_locks("채택 사건");
+        self.outside_locks("adoption event");
         self.calls.lock().unwrap().push(PortCall::Adopted {
             label: label.to_owned(),
             generation,
@@ -183,7 +194,7 @@ impl CommitPort for FakePort {
     }
 
     fn reveal_deadline(&self, label: &str, after: Duration) {
-        self.outside_locks("안전 시한");
+        self.outside_locks("safety deadline");
         self.calls.lock().unwrap().push(PortCall::Deadline {
             label: label.to_owned(),
             after,
@@ -191,7 +202,7 @@ impl CommitPort for FakePort {
     }
 
     fn destroy(&self, label: &str) -> Result<(), String> {
-        self.outside_locks("닫기");
+        self.outside_locks("close");
         self.calls
             .lock()
             .unwrap()
@@ -229,13 +240,13 @@ fn fresh() -> (Arc<SpareState>, Arc<FakeGate>) {
 fn built(spare: &SpareState, labels: &Labels) -> String {
     match spare.build(labels, |_| Ok(())) {
         SpareBuild::Built { label } => label,
-        other => panic!("지어야 한다: {other:?}"),
+        other => panic!("must build: {other:?}"),
     }
 }
 
 fn claimed(spare: &SpareState, labels: &Labels) -> SpareClaim {
     built(spare, labels);
-    spare.claim().claim.expect("지어진 창을 맡긴다")
+    spare.claim().claim.expect("hands over the built window")
 }
 
 // Puts the new window entry of the handed-over window into the model (what dropping · popout does before commit).
@@ -288,7 +299,7 @@ impl HeldBuild {
                 })
             })
         };
-        let label = entered.recv_timeout(LONG).expect("짓기 단계에 들었다");
+        let label = entered.recv_timeout(LONG).expect("entered the build step");
         Self { go, done, label }
     }
 
@@ -306,7 +317,7 @@ fn claim_in_background(spare: &Arc<SpareState>) -> thread::JoinHandle<ClaimReply
 fn wait_for_waiters(spare: &SpareState, n: u32) {
     let until = Instant::now() + LONG;
     while spare.pool().waiting() != n {
-        assert!(Instant::now() < until, "맡기기 {n} 개가 서지 않았다");
+        assert!(Instant::now() < until, "{n} entrusts did not stand");
         thread::yield_now();
     }
 }
@@ -319,7 +330,7 @@ fn a_built_spare_is_handed_out_once_with_a_receive_only_hold() {
     let label = built(&spare, &Labels::default());
     assert!(
         gate.calls().is_empty(),
-        "맡기지 않은 예열 창에는 올림이 없다"
+        "no raise for a prewarmed window that was not handed over"
     );
     let reply = spare.claim();
     assert_eq!(
@@ -329,7 +340,10 @@ fn a_built_spare_is_handed_out_once_with_a_receive_only_hold() {
     assert!(!reply.build);
     assert_eq!(reply.waited, None);
     assert_eq!(gate.calls(), [GateCall::Hold(label.clone())]);
-    assert!(spare.is_spare(&label), "확정 전에는 풀의 창이다");
+    assert!(
+        spare.is_spare(&label),
+        "before confirmation it is a pool window"
+    );
     let second = spare.claim();
     assert_eq!((second.claim, second.build), (None, false));
 }
@@ -363,7 +377,7 @@ fn a_claim_waits_for_a_building_spare_and_takes_it() {
     assert!(spare.is_spare(&label));
     let claimer = claim_in_background(&spare);
     wait_for_waiters(&spare, 1);
-    assert!(gate.calls().is_empty(), "짓는 중인 창에는 올림이 없다");
+    assert!(gate.calls().is_empty(), "no raise for a window being built");
     assert_eq!(
         building.finish(),
         SpareBuild::Built {
@@ -384,12 +398,15 @@ fn a_claim_gives_up_on_a_building_spare_at_the_wait_limit() {
     assert_eq!(
         (reply.claim, reply.build),
         (None, false),
-        "짓기가 이미 돈다"
+        "the build is already running"
     );
     assert!(reply.waited.unwrap() >= Duration::from_millis(20));
     assert_eq!(spare.pool().waiting(), 0);
     assert!(matches!(building.finish(), SpareBuild::Built { .. }));
-    assert!(spare.claim().claim.is_some(), "지어진 뒤에는 맡긴다");
+    assert!(
+        spare.claim().claim.is_some(),
+        "after being built it is handed over"
+    );
 }
 
 #[test]
@@ -405,25 +422,25 @@ fn two_claims_waiting_on_one_build_get_it_exactly_once() {
     assert_eq!(replies.iter().filter(|r| r.claim.is_some()).count(), 1);
     assert!(
         replies.iter().all(|r| !r.build),
-        "남은 쪽은 맡긴 창을 만나 짓지 않는다"
+        "the remaining side meets the handed-over window and does not build"
     );
-    assert_eq!(gate.calls().len(), 1, "올림도 하나");
+    assert_eq!(gate.calls().len(), 1, "one raise too");
 }
 
 #[test]
 fn a_failed_build_wakes_a_waiting_claim_before_the_limit() {
     let (spare, _) = fresh();
     let labels = Arc::new(Labels::default());
-    let building = HeldBuild::start(&spare, &labels, Err("짓기 실패".to_owned()));
+    let building = HeldBuild::start(&spare, &labels, Err("build failure".to_owned()));
     let claimer = claim_in_background(&spare);
     wait_for_waiters(&spare, 1);
     assert!(matches!(building.finish(), SpareBuild::Failed { .. }));
     let reply = claimer.join().unwrap();
     assert_eq!(reply.claim, None);
-    assert!(reply.build, "비었으니 다시 짓는다(I16)");
+    assert!(reply.build, "it is empty, so rebuild (I16)");
     assert!(
         reply.waited.unwrap() < LONG / 2,
-        "시한이 아니라 깨우기로 끝났다"
+        "ended by a wake-up, not by the deadline"
     );
 }
 
@@ -434,12 +451,12 @@ fn a_building_spare_lost_while_a_claim_waits_wakes_it_before_the_limit() {
     let building = HeldBuild::start(&spare, &labels, Ok(()));
     let claimer = claim_in_background(&spare);
     wait_for_waiters(&spare, 1);
-    assert!(spare.on_destroyed(&building.label), "다시 짓는다");
+    assert!(spare.on_destroyed(&building.label), "rebuilds");
     let reply = claimer.join().unwrap();
     assert_eq!(reply.claim, None);
     assert!(
         reply.waited.unwrap() < LONG / 2,
-        "시한이 아니라 깨우기로 끝났다"
+        "ended by a wake-up, not by the deadline"
     );
     let label = building.label.clone();
     assert_eq!(building.finish(), SpareBuild::Vanished { label });
@@ -457,13 +474,12 @@ fn exiting_wakes_a_waiting_claim() {
     assert_eq!((reply.claim, reply.build), (None, false));
     assert!(
         reply.waited.unwrap() < LONG / 2,
-        "시한이 아니라 깨우기로 끝났다"
+        "ended by a wake-up, not by the deadline"
     );
     building.finish();
 }
 
-// The awaited build A vanishes or fails, and another build B took the place before the woken handover took the lock again (being built ·
-//   built). That gap is pinned with the pool lock — the woken handover looks at the field again only after this lock is released.
+// The awaited build A vanishes or fails and another build B took the place before the woken handover re-took the lock (being built · built). That gap is pinned with the pool lock — the woken handover looks at the field again only after this lock is released.
 #[test]
 fn a_claim_whose_awaited_build_ended_does_not_follow_its_replacement() {
     for (ending, replacement_built) in [
@@ -495,12 +511,12 @@ fn a_claim_whose_awaited_build_ended_does_not_follow_its_replacement() {
             spare.changed.notify_all();
         }
         let reply = claimer.join().unwrap();
-        let case = format!("{ending} · B 지어짐 = {replacement_built}");
-        assert_eq!(reply.claim, None, "{case} — B 를 맡지 않는다");
-        assert!(!reply.build, "{case} — B 가 이미 칸에 있다");
+        let case = format!("{ending} · B built = {replacement_built}");
+        assert_eq!(reply.claim, None, "{case} — does not take B");
+        assert!(!reply.build, "{case} — B is already in the field");
         assert!(
             reply.waited.unwrap() < LONG / 2,
-            "{case} — B 를 따라 기다리지 않는다"
+            "{case} — does not wait on B"
         );
         a.finish();
     }
@@ -521,7 +537,7 @@ fn a_building_spare_dropped_for_a_listen_failure_wakes_a_waiting_claim() {
     assert_eq!(reply.claim, None);
     assert!(
         reply.waited.unwrap() < LONG / 2,
-        "시한이 아니라 깨우기로 끝났다"
+        "ended by a wake-up, not by the deadline"
     );
     building.finish();
 }
@@ -534,13 +550,17 @@ fn one_build_at_a_time_and_a_refused_build_takes_no_number() {
     let labels = Arc::new(Labels::default());
     let building = HeldBuild::start(&spare, &labels, Ok(()));
     assert_eq!(
-        spare.build(&*labels, |_| panic!("거절된 짓기는 짓지 않는다")),
+        spare.build(&*labels, |_| panic!("a refused build does not build")),
         SpareBuild::Refused(NoBuild::Occupied)
     );
-    assert_eq!(labels.issued(), 1, "거절된 짓기는 번호를 받지 않는다");
+    assert_eq!(
+        labels.issued(),
+        1,
+        "a refused build does not receive a number"
+    );
     building.finish();
     assert_eq!(
-        spare.build(&*labels, |_| panic!("지어진 창이 있다")),
+        spare.build(&*labels, |_| panic!("a built window exists")),
         SpareBuild::Refused(NoBuild::Occupied)
     );
     assert_eq!(labels.issued(), 1);
@@ -578,10 +598,10 @@ fn a_second_claim_after_commit_step_one_neither_takes_nor_builds() {
     assert_eq!(
         (reply.claim, reply.build),
         (None, false),
-        "보임을 기다린다(I25)"
+        "waits to be shown (I25)"
     );
     assert_eq!(
-        spare.build(&labels, |_| panic!("보임 완료가 짓는다")),
+        spare.build(&labels, |_| panic!("the show completion builds")),
         SpareBuild::Refused(NoBuild::AwaitingReveal)
     );
     assert_eq!(labels.issued(), 1);
@@ -601,11 +621,14 @@ fn the_rebuild_after_a_reveal_happens_once_per_label() {
         let labels = Labels::default();
         let claim = claimed(&spare, &labels);
         adopt(&spare, &claim);
-        assert!(run_first(&spare, &claim.label), "{first} 이 먼저 와 짓는다");
+        assert!(
+            run_first(&spare, &claim.label),
+            "{first} comes first and builds"
+        );
         for (later, run_later) in done {
             assert!(
                 !run_later(&spare, &claim.label),
-                "{first} 뒤의 {later} 는 무동작"
+                "{later} after {first} is a no-op"
             );
         }
         assert_eq!(spare.reveal_generation(&claim.label), None);
@@ -623,14 +646,17 @@ fn a_reveal_build_and_an_empty_claim_build_overlapping_make_one_spare() {
     let claim = claimed(&spare, &labels);
     adopt(&spare, &claim);
     assert!(spare.on_shown(&claim.label));
-    assert!(spare.claim().build, "비었고 보임 기다림도 없다");
+    assert!(
+        spare.claim().build,
+        "it is empty and there is no wait to be shown either"
+    );
     let first = HeldBuild::start(&spare, &labels, Ok(()));
     assert_eq!(
-        spare.build(&*labels, |_| panic!("하나만 선다")),
+        spare.build(&*labels, |_| panic!("only one stands")),
         SpareBuild::Refused(NoBuild::Occupied)
     );
     first.finish();
-    assert_eq!(labels.issued(), 2, "맡긴 창 하나 + 다시 지은 하나");
+    assert_eq!(labels.issued(), 2, "one handed-over window + one rebuilt");
 }
 
 #[test]
@@ -671,8 +697,8 @@ fn a_release_with_the_current_ticket_returns_the_spare_hidden_and_claimable() {
     let first = claimed(&spare, &Labels::default());
     assert!(spare.release(&first));
     assert!(matches!(spare.pool().slot(), Slot::Built { label, .. } if *label == first.label));
-    assert!(spare.is_spare(&first.label), "숨긴 채 풀에 남는다");
-    let second = spare.claim().claim.expect("다시 맡긴다");
+    assert!(spare.is_spare(&first.label), "stays in the pool hidden");
+    let second = spare.claim().claim.expect("hands over again");
     assert_eq!(second.label, first.label);
     assert_ne!(second.generation, first.generation);
     assert_eq!(
@@ -685,7 +711,7 @@ fn a_release_with_the_current_ticket_returns_the_spare_hidden_and_claimable() {
     );
     assert!(
         gate.is_held(&first.label),
-        "앞 되물림의 거둠이 다시 맡긴 올림을 지우지 않는다"
+        "the earlier hand-back's withdrawal does not erase the re-handed-over raise"
     );
 }
 
@@ -694,17 +720,17 @@ fn a_late_release_or_commit_from_an_older_ticket_is_ignored() {
     let (spare, gate) = fresh();
     let a = claimed(&spare, &Labels::default());
     assert!(spare.release(&a));
-    let b = spare.claim().claim.expect("B 가 다시 맡는다");
+    let b = spare.claim().claim.expect("B takes it again");
     let (layout, _) = model_with(&a.label);
     let port = FakePort::new(&spare, &layout);
     let calls_before = gate.calls();
-    assert!(!spare.release(&a), "A 의 늦은 되물림");
+    assert!(!spare.release(&a), "A's late hand-back");
     assert_eq!(
         spare.commit(&layout, &a, &port),
         CommitOutcome::Stale,
-        "A 의 늦은 확정"
+        "A's late confirmation"
     );
-    assert_eq!(gate.calls(), calls_before, "B 의 올림을 건드리지 않는다");
+    assert_eq!(gate.calls(), calls_before, "does not touch B's raise");
     assert!(gate.is_held(&b.label));
     assert!(port.calls().is_empty());
     assert!(matches!(
@@ -744,7 +770,7 @@ fn a_claimed_label_is_opened_in_place_and_a_lost_one_is_refused() {
     assert_eq!(spare.opening(&claim.label, true), Opening::Claimed);
     assert!(
         spare.on_destroyed(&claim.label),
-        "맡긴 창이 사라지면 다시 짓는다"
+        "rebuilds when the handed-over window vanishes"
     );
     assert_eq!(
         gate.calls().last(),
@@ -753,7 +779,7 @@ fn a_claimed_label_is_opened_in_place_and_a_lost_one_is_refused() {
     assert_eq!(
         spare.opening(&claim.label, true),
         Opening::Unavailable,
-        "사라진 맡긴 창의 label 로 새로 짓지 않는다"
+        "does not build anew under the label of the vanished handed-over window"
     );
 }
 
@@ -783,7 +809,7 @@ fn commit_carries_the_measures_then_reveals_then_announces_outside_both_locks() 
     assert_eq!(
         model_measures(&layout, view),
         None,
-        "확정 전 보고는 풀에 적힌다"
+        "a report before confirmation is recorded in the pool"
     );
     let claim = spare.claim().claim.unwrap();
     let port = FakePort::new(&spare, &layout);
@@ -817,7 +843,7 @@ fn commit_carries_the_measures_then_reveals_then_announces_outside_both_locks() 
             },
         ]
     );
-    assert!(!spare.is_spare(&label), "이제 모델 창이다");
+    assert!(!spare.is_spare(&label), "it is a model window now");
     assert_eq!(spare.reveal_generation(&label), Some(claim.generation));
 }
 
@@ -847,7 +873,7 @@ fn a_report_during_the_commit_lands_on_top_and_one_before_it_is_carried() {
     assert_eq!(
         mgr.px_context(view).unwrap(),
         Some((CanvasPx { w: 800, h: 600 }, metrics(50))),
-        "확정 전에 닿은 보고 = 확정이 옮긴 값"
+        "a report that arrived before confirmation = the value the confirmation carried over"
     );
     drop(mgr);
     // End the report thread first so that the outside-the-lock check of ③ does not wrongly take that thread's lock.
@@ -856,7 +882,7 @@ fn a_report_during_the_commit_lands_on_top_and_one_before_it_is_carried() {
     assert_eq!(
         model_measures(&layout, view),
         Some((CanvasPx { w: 1024, h: 768 }, metrics(60))),
-        "확정 도중 닿은 보고가 옛 값에 덮이지 않는다"
+        "a report that arrived during confirmation is not overwritten by the old value"
     );
 }
 
@@ -874,21 +900,18 @@ fn commit_for_a_label_gone_from_the_model_closes_it_outside_both_locks() {
         Some(&GateCall::Cancel(claim.label.clone()))
     );
     assert_eq!(spare.awaiting_reveal(), None);
-    assert!(!spare.release(&claim), "돌려받지 않는다");
+    assert!(!spare.release(&claim), "not taken back");
     assert!(
         spare.is_spare(&claim.label),
-        "그 Destroyed 가 뺄 때까지 풀의 창이다"
+        "it is a pool window until that Destroyed removes it"
     );
     let reply = spare.claim();
     assert_eq!(
         (reply.claim, reply.build),
         (None, false),
-        "그동안 아무도 맡지 못한다"
+        "nobody can take it meanwhile"
     );
-    assert!(
-        spare.on_destroyed(&claim.label),
-        "그 Destroyed 가 다시 짓는다"
-    );
+    assert!(spare.on_destroyed(&claim.label), "that Destroyed rebuilds");
     assert!(matches!(
         spare.build(&labels, |_| Ok(())),
         SpareBuild::Built { .. }
@@ -897,7 +920,7 @@ fn commit_for_a_label_gone_from_the_model_closes_it_outside_both_locks() {
 
 #[test]
 fn a_close_that_fails_is_tried_once_more_and_a_second_failure_frees_the_slot() {
-    let fail = || Err::<(), _>("못 닫음".to_owned());
+    let fail = || Err::<(), _>("could not close".to_owned());
     for (results, outcome, still_spare) in [
         (vec![fail(), Ok(())], CommitOutcome::Closed, true),
         (vec![fail(), fail()], CommitOutcome::CloseFailed, false),
@@ -918,7 +941,7 @@ fn a_close_that_fails_is_tried_once_more_and_a_second_failure_frees_the_slot() {
         assert_eq!(
             spare.claim().build,
             !still_spare,
-            "비었으면 다음 맡기기가 짓는다"
+            "if empty, the next entrust builds"
         );
     }
 }
@@ -941,13 +964,13 @@ fn a_hide_between_claim_and_reveal_keeps_the_window_hidden() {
         assert_eq!(
             step.finish(&spare, &FakePort::new(&spare, &layout)),
             CommitOutcome::Adopted { revealed: false },
-            "① 뒤 숨기기 = {hide_after_step_one}"
+            "hide after ① = {hide_after_step_one}"
         );
-        assert_eq!(gate.raised(&claim.label), None, "올리지 않았다");
+        assert_eq!(gate.raised(&claim.label), None, "not raised");
         assert_eq!(
             spare.reveal_generation(&claim.label),
             Some(claim.generation),
-            "안전 시한이 다시 짓기를 띄운다"
+            "the safety deadline raises a rebuild"
         );
     }
 }
@@ -985,9 +1008,12 @@ fn a_window_that_failed_to_listen_leaves_the_pool_without_an_immediate_rebuild()
     assert!(!spare.is_spare(&label));
     assert!(
         !spare.on_destroyed(&label),
-        "먼저 뺐으므로 그 Destroyed 는 짓지 않는다"
+        "removed first, so that Destroyed does not build"
     );
-    assert!(spare.claim().build, "다음 맡기기의 빈 갈래가 짓는다");
+    assert!(
+        spare.claim().build,
+        "the empty branch of the next entrust builds"
+    );
 }
 
 #[test]
@@ -1007,7 +1033,7 @@ fn three_listen_failures_in_a_row_turn_the_pool_off() {
     let reply = spare.claim();
     assert_eq!((reply.claim, reply.build), (None, false));
     assert_eq!(
-        spare.build(&labels, |_| panic!("꺼졌다")),
+        spare.build(&labels, |_| panic!("turned off")),
         SpareBuild::Refused(NoBuild::Disabled)
     );
     assert_eq!(labels.issued(), 3);
@@ -1042,7 +1068,7 @@ fn a_window_that_listens_resets_the_failure_count() {
     built(&spare, &labels);
     assert!(
         spare.claim().claim.is_some(),
-        "셈이 0 에서 다시 세어 꺼지지 않았다"
+        "the count restarted from 0, so it was not turned off"
     );
 }
 
@@ -1072,7 +1098,7 @@ fn a_window_outside_the_pool_is_not_counted() {
     assert!(spare.claim().claim.is_some());
 }
 
-// The listening result first looks at whether it is the field's window — if a 「들었다」 (it listened) of a window outside the pool resets the count, consecutive failures never turn the pool off.
+// The listening result first looks at whether it is the field's window — if a 「it listened」 of a window outside the pool resets the count, consecutive failures never turn the pool off.
 #[test]
 fn a_listen_success_from_a_window_outside_the_pool_does_not_reset_the_count() {
     let (spare, _) = fresh();
@@ -1128,12 +1154,14 @@ fn reply(role: WindowRole, generation: Option<u32>, close: bool) -> RoleAnswer {
 fn a_pool_window_that_could_not_listen_is_unknown_and_closed_without_asking_the_model() {
     let (spare, _) = fresh();
     let label = built(&spare, &Labels::default());
-    let answer = spare.answer_role(&label, false, || panic!("뺀 창은 모델을 묻지 않는다"));
+    let answer = spare.answer_role(&label, false, || {
+        panic!("a removed window does not consult the model")
+    });
     assert_eq!(answer, reply(WindowRole::Unknown, None, true));
     assert!(!spare.is_spare(&label));
     assert!(
         !spare.on_destroyed(&label),
-        "그 닫기의 Destroyed 는 짓지 않는다"
+        "that close's Destroyed does not build"
     );
 }
 
@@ -1154,7 +1182,9 @@ fn a_pool_window_that_listens_stays_spare() {
     let (spare, _) = fresh();
     let label = built(&spare, &Labels::default());
     assert_eq!(
-        spare.answer_role(&label, true, || panic!("풀의 창은 모델을 묻지 않는다")),
+        spare.answer_role(&label, true, || panic!(
+            "a pool window does not consult the model"
+        )),
         reply(WindowRole::Spare, None, false)
     );
     assert!(spare.is_spare(&label));
@@ -1181,7 +1211,7 @@ fn a_model_window_is_model_whether_or_not_it_listens() {
     built(&spare, &labels);
     assert!(
         spare.claim().claim.is_some(),
-        "풀 밖 창은 실패로 세지 않는다"
+        "a window outside the pool is not counted as a failure"
     );
 }
 
@@ -1208,7 +1238,10 @@ fn an_adopted_window_awaiting_its_reveal_gets_its_adoption_number() {
 fn the_role_answer_asks_the_model_with_the_pool_unlocked() {
     let (spare, _) = fresh();
     let answer = spare.answer_role("main", true, || {
-        assert!(spare.pool.try_lock().is_ok(), "풀 락을 쥔 채 묻지 않는다");
+        assert!(
+            spare.pool.try_lock().is_ok(),
+            "does not ask while holding the pool lock"
+        );
         true
     });
     assert_eq!(answer, reply(WindowRole::Model, None, false));
@@ -1251,7 +1284,10 @@ fn a_spare_lost_in_any_state_is_rebuilt_unless_exiting() {
         building.finish();
     }
     let (spare, _) = fresh();
-    assert!(!spare.on_destroyed("main"), "풀과 무관한 창");
+    assert!(
+        !spare.on_destroyed("main"),
+        "a window unrelated to the pool"
+    );
 }
 
 // ── window role · receiving measurements ──
@@ -1270,7 +1306,7 @@ fn a_pool_window_is_spare_without_asking_the_model() {
     let (spare, _) = fresh();
     let label = built(&spare, &Labels::default());
     let role = spare.window_role(&label, || {
-        panic!("풀의 창은 모델을 묻지 않는다");
+        panic!("a pool window does not consult the model");
     });
     assert_eq!(role, WindowRole::Spare);
 }
@@ -1289,7 +1325,10 @@ fn a_window_outside_the_pool_is_model_or_unknown() {
 fn the_model_question_runs_with_the_pool_unlocked() {
     let (spare, _) = fresh();
     let role = spare.window_role("main", || {
-        assert!(spare.pool.try_lock().is_ok(), "풀 락을 쥔 채 묻지 않는다");
+        assert!(
+            spare.pool.try_lock().is_ok(),
+            "does not ask while holding the pool lock"
+        );
         true
     });
     assert_eq!(role, WindowRole::Model);

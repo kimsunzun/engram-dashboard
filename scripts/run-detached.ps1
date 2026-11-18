@@ -7,25 +7,25 @@
 # ★Avoiding the crash is not this script's reason — the old comment that said so was a misdiagnosis★ (corrected 2026-08-19).
 #   The terminal crash (`0xc00000fd`) that took the session down with it was `wezterm-gui`'s own bug (there was no cycle guard in
 #   process-tree recursion) and detached running did not prevent it — it died even during tests run detached (measured).
-#   Cause and evidence record = git history (the old qa binding 「분리 실행」). How to use = `.claude/skill-bindings/qa.md` 「분리 실행」.
+#   Cause and evidence record = git history (the old qa binding 「분리 실행」). How to use = `.claude/skill-bindings/qa.md` 「분리 실행」. # hangul-ok
 #
 # ★How it differs from `launch-detached.ps1`★: that one takes **only an exe path** to launch an app, and its `PID=` is the **app's** pid.
 #   This script takes a **command line** to run builds·tests, and `PID=` is the pid of the **wrapper cmd** (both are WMI paths).
 #   The uses are split, so do not merge them.
 #
 # Usage: run-detached.ps1 -Command "cargo test -p foo" -WorkDir <repo root> -LogFile <path>
-# Returns: `PID=<n>` · `LOG=<경로>` · `BAT=<래퍼경로>`.
-# Completion decision: a `__EXIT=<종료코드>` line is appended at the end of the log — only when that marker appears is it done.
-#   ★Do not decide by process absence★ — but the reason is **not** 「래퍼 cmd 가 자식보다 먼저 사라진다」 (the wrapper cmd vanishes before its child) (that reason was discarded · 2026-09-22).
+# Returns: `PID=<n>` · `LOG=<path>` · `BAT=<wrapper path>`.
+# Completion decision: a `__EXIT=<exit code>` line is appended at the end of the log — only when that marker appears is it done.
+#   ★Do not decide by process absence★ — but the reason is **not** 「the wrapper cmd vanishes before its child」 (that reason was discarded · 2026-09-22).
 #     The wrapper leaving before the child has never once been observed — when the marker was printed, it was always **after** the command's own output.
 #     Two living reasons:
 #     ① ★**Absence carries no result at all**★ — there is a measured counterexample. If the target is a batch file and `call` is not attached, **the body runs to the end
 #        and the process vanishes, but only the `__EXIT` line is missing** (measured 2026-09-22: `probe.cmd` · `npm --version` both with normal output, 0 marker lines).
-#        Looking only at absence, that reads as 「끝났다」 (it is done), and that is a false PASS that reads an empty log as a pass. **Only the marker carries the exit code.**
-#     ② **PIDs are reused** — once the number is handed to someone else, 「아직 있다」 (it is still there) is not an answer about that command either
-#        (a decision standing on the same property = `docs/reference/structure/agent-backend.md` 「세션 id 회수」).
+#        Looking only at absence, that reads as 「it is done」, and that is a false PASS that reads an empty log as a pass. **Only the marker carries the exit code.**
+#     ② **PIDs are reused** — once the number is handed to someone else, 「it is still there」 is not an answer about that command either
+#        (a decision standing on the same property = `docs/reference/structure/agent-backend.md` 「Session id recovery」).
 #   ★The caller does not attach `call` by hand★ — whether to attach it is decided by this script looking at what the target really is
-#     (reason = the comment block below 「`call` 은 **대상이 배치 파일일 때만** 붙인다」 (call is attached **only when the target is a batch file**). ★Do not point to it by variable name★ —
+#     (reason = the comment block below 「`call` is attached **only when the target is a batch file**」. ★Do not point to it by variable name★ —
 #      the old pointer pointed to `$batBody`, but that variable was far below that block, so the place to look was off).
 #     Attaching it by hand skips that decision and breaks `^` in the arguments (if the first token is `call` the real thing is not expanded, so nothing gets appended — measured).
 
@@ -89,7 +89,7 @@ function Resolve-CmdTarget([string]$token, [string]$searchCwd) {
 # ★Attach `call` **only when the target is a batch file (`.cmd` · `.bat`)** — not unconditionally★ (measured 2026-09-22).
 #   ┌ Side where it must be attached: if a batch file calls another batch file without `call`, **control is handed over and never returns** (cmd rule).
 #   │  Then the `echo __EXIT=` line below is never executed at all, so **the marker is not printed** — a caller that decides completion by the marker
-#   │  reads that as 「아직 안 끝났다」 (not finished yet) and waits forever, or reads an empty log as 「통과」 (pass) (a quiet false PASS).
+#   │  reads that as 「not finished yet」 and waits forever, or reads an empty log as 「pass」 (a quiet false PASS).
 #   │  ★This trap catches even things that look like exes, such as `npm` · `npx`★ — on Windows their real forms are `npm.cmd` · `npx.cmd`.
 #   │  Measured: both `probe.cmd` (exit 7) and `npm --version` run only the body without `call` with 0 marker lines · with it they give `__EXIT=7` · `__EXIT=0`.
 #   └ Side where it must not be attached: ★`call` **parses the line once more** and doubles `^` inside quotes★. Measured —
@@ -99,9 +99,9 @@ function Resolve-CmdTarget([string]$token, [string]$searchCwd) {
 #      A broken regex bites nothing, emits 0 lines, and passes quietly — the very false PASS this script exists to remove.
 #   ★So the target's real form is resolved **beforehand on the PowerShell side**★ — what the caller gives is usually a bare name (`npm`), so whether it is `.cmd` or `.exe`
 #     depends on the PATHEXT resolution result, and once inside the batch file there is no means to ask it. `Resolve-CmdTarget` above produces that answer.
-#   ★The default being 「안 붙임」 (do not attach) is because the two misjudgments cost differently★ — failing to recognize a batch file gets caught **loudly, as the marker disappears**, but
+#   ★The default being 「do not attach」 is because the two misjudgments cost differently★ — failing to recognize a batch file gets caught **loudly, as the marker disappears**, but
 #     mistaking an exe for a batch file **quietly breaks the regex.** So attach only when **confirmed** as `.cmd` · `.bat`.
-#   ★Do not go back to 「무조건 붙여도 안전하다」 (it is safe to attach unconditionally)★ — that old conclusion came from measuring only exit codes · arguments after `--` · quotes and **not measuring `^`**.
+#   ★Do not go back to 「it is safe to attach unconditionally」★ — that old conclusion came from measuring only exit codes · arguments after `--` · quotes and **not measuring `^`**.
 #   ★**`%` is something this branch cannot fix — a limitation that remains unfixed**★ (measured 2026-09-22): because the wrapper is a batch file, **even without `call`**
 #     `%VAR%` in the body is expanded and a lone `%` is eaten (`"x%USERNAME%y"` → `x<user>y` · `"50% done C:\pct%NOPE%path"` → `50\pctpath`,
 #     the same with or without `call`). What `call` adds is only one more parsing pass, so it eats even `%%`, which survives one pass (`"50%% done"` → without it
@@ -129,7 +129,7 @@ Set-Content -LiteralPath $bat -Value $batBody -Encoding ASCII
 if (Test-Path -LiteralPath $LogFile) { Remove-Item -LiteralPath $LogFile -Force }
 
 $launch = 'cmd.exe /c ""' + $bat + '" > "' + $LogFile + '" 2>&1"'
-# ★Launch the wrapper console 「활성화 없이 최소화」 (minimized without activation) (`ShowWindow = 7` = SW_SHOWMINNOACTIVE)★ — if created without a show setting, the
+# ★Launch the wrapper console 「minimized without activation」 (`ShowWindow = 7` = SW_SHOWMINNOACTIVE)★ — if created without a show setting, the
 #   new console comes up as a normal window and steals focus (on machines where the default terminal is delegated to Windows Terminal, that new window comes to
 #   the front). With 7, conhost does not delegate and only brings up its own window minimized, so the foreground window does not change (measured 2026-09-25).
 #   Console children (cargo · rustc · test binaries · node) share this console, so they do not open a window separately.

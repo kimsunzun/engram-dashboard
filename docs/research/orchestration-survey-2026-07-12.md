@@ -97,7 +97,7 @@
 Three entry directions on top of engram's existing assets (§7). Each = the minimal increment · rejected alternatives · prerequisites.
 
 ### Option 1 — Supervision first (minimal increment): runtime auto-restart (recommended starting point)
-- **What:** turn the reserved fields (`RestartPolicy::OnCrash`/`restart_count`/`failed_reason`) into real behavior. After the reaper's `KeepDisableAutoRestore` disposition, if OnCrash then restart after backoff (borrow OTP intensity/period + transient). The unfulfilled part of ADR-0019 §후속2.
+- **What:** turn the reserved fields (`RestartPolicy::OnCrash`/`restart_count`/`failed_reason`) into real behavior. After the reaper's `KeepDisableAutoRestore` disposition, if OnCrash then restart after backoff (borrow OTP intensity/period + transient). The unfulfilled part of ADR-0019 §Follow-up 2.
 - **Borrow:** OTP restart types · the meltdown threshold · ractor-supervisor `backoff_fn`. **To build new:** an auto-restart task (the ladder resume→fresh→Failed already exists), a meltdown counter, a `SetRestartPolicy` command (§5).
 - **Rejected alternatives:** adopting Ractor directly (OS-process mismatch → ADR-0001 complexity) · Actix (thin supervision).
 - **Prerequisite:** none (the core is in a stable state). **The smallest and easiest to reverse.**
@@ -149,5 +149,5 @@ Three entry directions on top of engram's existing assets (§7). Each = the mini
 
 ## 9. Follow-up (material → decision path)
 - The user picks a §6 option direction → update that direction's TRD + ADR-0014 to **confirmed** (or a follow-up ADR) and record the rejected alternatives (§6) in the ADR.
-- Option 1 (supervision) is the minimal increment and independent, so it is the pilot candidate. If chosen, implement ADR-0019 §후속2 (OnCrash) with `/implement`.
+- Option 1 (supervision) is the minimal increment and independent, so it is the pilot candidate. If chosen, implement ADR-0019 §Follow-up 2 (OnCrash) with `/implement`.
 - Of the uncovered items (§8), tmux/zellij and OS process supervisors are worth a short supplementary survey before starting Option 1.

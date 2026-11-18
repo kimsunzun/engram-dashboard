@@ -5,40 +5,40 @@ import type { SlotSpatial } from "./SlotSpatial";
 import type { SplitRect } from "./SplitRect";
 
 /**
- * `get_view` 응답 + `layout:updated` 페이로드.
+ * The `get_view` response + the `layout:updated` payload.
  */
 export type ViewSnapshot = { view_id: string, layout: LayoutNode, focused_slot_id: string | null, 
 /**
- * 이 판이 모르는 내용(더 새 판이 저장한 슬롯 종류)을 쥔 슬롯 id, 트리 전위 순. 그 슬롯의 `content` 는
- * `empty` 로 실리지만 비어 있지 않다 — 빈 슬롯 판정(자동 배치·여는 대상 고르기)은 이 목록의 슬롯을 점유로
- * 본다. 원문은 셸만 쥔다. 그 슬롯에 내용을 놓거나(`empty` 포함) 슬롯을 닫으면 목록에서 빠진다.
+ * Slot ids holding content this version does not know (a slot kind saved by a newer version), in tree preorder. The `content` of those slots is
+ * carried as `empty` but they are not empty — the empty-slot decision (auto placement · choosing the target to open) treats the slots in this list as
+ * occupied. Only the shell holds the raw text. Putting content there (including `empty`) or closing the slot removes it from this list.
  */
 foreign_slots: Array<string>, 
 /**
- * ★슬롯 공간 타깃 파생(ADR-0068)★: 각 말단 슬롯의 방향 이웃(up/down/left/right) + 순서(ordinal).
- * 논리 도면(split 방향·ratio)에서 산출한다 — 픽셀·getBoundingClientRect 무관(백엔드 권위 ADR-0035).
- * ordinal 순으로 담긴다. 정규화 좌표는 이 필드가 아니라 `slot_rects` 가 싣는다(ADR-0227 — ADR-0068 결정 3 개정).
+ * ★Slot spatial target derivation (ADR-0068)★: the directional neighbours (up/down/left/right) + order (ordinal) of each leaf slot.
+ * Computed from the logical plan (split direction · ratio) — independent of pixels · getBoundingClientRect (backend authority, ADR-0035).
+ * Held in ordinal order. Normalized coordinates are carried not by this field but by `slot_rects` (ADR-0227 — amends ADR-0068 decision 3).
  */
 slot_spatial: Array<SlotSpatial>, 
 /**
- * 각 말단 슬롯의 사각형 — 뷰 기준 정규화 [0,1] 경계 꼴 `x0,y0,x1,y1`(픽셀 아님). 맞닿는 경계 값은 비트
- * 단위로 같다. 트리 전위 순(노드 → a 서브트리 → b 서브트리)으로 담긴다 — `slot_spatial` 의 ordinal
- * 순과 다르므로 짝을 찾을 땐 `slot_id` 로 맞춘다.
+ * The rectangle of each leaf slot — normalized [0,1] boundary form `x0,y0,x1,y1` relative to the view (not pixels). Shared boundary values are equal
+ * bit for bit. Held in tree preorder (node → a subtree → b subtree) — different from the ordinal order of `slot_spatial`,
+ * so match pairs by `slot_id`.
  */
 slot_rects: Array<SlotRect>, 
 /**
- * 각 분할 노드의 상자(두 자식을 합친 영역, `slot_rects` 와 같은 경계 꼴) + 분할 경계 `at`
- * (`dir` 이 `left_right` 면 x 축 값, `top_bottom` 이면 y 축 값). 트리 전위 순으로 담긴다.
+ * The box of each split node (the area joining its two children, the same boundary form as `slot_rects`) + the split boundary `at`
+ * (the x-axis value if `dir` is `left_right`, the y-axis value if `top_bottom`). Held in tree preorder.
  */
 split_rects: Array<SplitRect>, 
 /**
- * 분할 비율(a 쪽 몫)의 셸 한계 — 셸은 비율을 `[ratio_min, ratio_max]` 로 잘라 읽고, `slot_rects`·
- * `split_rects` 는 그렇게 자른 비율로 계산한 값이다. 화면은 이 두 값을 쓰고 한계 상수를 따로 두지 않는다.
+ * The shell limits of the split ratio (a side's share) — the shell reads ratios clamped to `[ratio_min, ratio_max]`, and `slot_rects` ·
+ * `split_rects` are values computed with the ratio clamped that way. The screen uses these two values and keeps no limit constants of its own.
  */
 ratio_min: number, ratio_max: number, 
 /**
- * 변경마다 +1(ViewManager.version).
- * ts-rs u64 기본 매핑=bigint 이나 serde_json 은 number 로 직렬화(런타임=JS number) → 타입도 number 로 고정
- * (불일치 시 프론트 race 가드 `snap.version > pulled` 에서 bigint↔number 혼용 에러, FIX-1). 카운터라 2^53 비현실적.
+ * +1 per change (ViewManager.version).
+ * The ts-rs u64 default mapping is bigint, but serde_json serializes it as a number (runtime = JS number) → the type is also fixed to number
+ * (on a mismatch the frontend race guard `snap.version > pulled` raises a bigint/number mixing error, FIX-1). As a counter, 2^53 is unrealistic.
  */
 version: number, };

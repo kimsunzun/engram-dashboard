@@ -5,37 +5,37 @@ import type { UsageVendorState } from "./UsageVendorState";
 import type { UsageWindow } from "./UsageWindow";
 
 /**
- * 한 벤더·계정의 사용량 상태 — 데몬이 그 벤더를 구독한 연결에 보내는 한 장
+ * The usage state of one vendor·account — one sheet the daemon sends to connections that subscribed to that vendor
  * ([`AgentEvent::UsageLimitsUpdated`](crate::AgentEvent::UsageLimitsUpdated)).
  *
- * ★시간 칸 규칙★: 절대 시각은 [`UsageWindow::resets_at`](서버가 준 epoch 초) 하나뿐이다. 나머지 시간
- *   칸(`age_secs`·`next_attempt_in_secs`·`retry_in_secs`)은 **이 한 장을 뜬 순간 기준 상대 초**라, 받는 쪽은
- *   받은 순간부터 흐른 만큼 더해 읽는다 — 양쪽 벽시계가 어긋나거나 되감겨도 흔들리지 않게.
- * ★상태 문구는 받는 쪽이 번역 키로 만든다★ — 상태는 코드 + 수로 나른다. 예외 = `detail`(분류 낱말 `kind`·
- *   상류 원문 `upstream` 은 번역 없이 그대로 보인다).
- * ★`null` 창·`null` 수는 「모른다」이지 0 이 아니다★ — 0% 로 그리면 안 된다.
+ * ★Time field rule★: the only absolute time is [`UsageWindow::resets_at`] (epoch seconds the server gave). The other time
+ *   fields (`age_secs`·`next_attempt_in_secs`·`retry_in_secs`) are **relative seconds as of the moment this sheet was taken**, so the receiver
+ *   reads them by adding the time elapsed since receipt — so they do not wobble even if the two wall clocks disagree or rewind.
+ * ★The status text is built by the receiver with translation keys★ — status travels as code + numbers. The exception = `detail` (the classification word `kind`·
+ *   the upstream original `upstream` are shown as is without translation).
+ * ★A `null` window·`null` number means 「unknown」, not 0★ — must not be drawn as 0%.
  */
 export type UsageLimitSnapshot = { vendor: AgentBackendKind, 
 /**
- * 같은 벤더 안의 계정 — 지금은 늘 `"default"`(데몬 env 의 기본 로그인).
+ * The account within the same vendor — always `"default"` for now (the default login of the daemon env).
  */
 account_key: string, five_hour: UsageWindow | null, weekly: UsageWindow | null, 
 /**
- * 모델별 주간 창. 빈 배열 = 없음.
+ * Per-model weekly windows. Empty array = none.
  */
 model_scoped: Array<UsageScopedWindow>, plan: string | null, 
 /**
- * 조회가 아직 진행 중이다 — 이 한 장의 값은 그 조회 전의 것이고, 결과는 조회가 끝나면 구독한 연결에 새
- * 한 장으로 간다.
+ * The query is still in progress — this sheet's values are from before that query, and the result goes to subscribed connections as a new
+ * sheet when the query ends.
  */
 in_flight: boolean, 
 /**
- * `Ready` 가 아니어도 위 값들은 유효하다 — 실패는 마지막으로 알던 값을 지우지 않는다.
- * 예외는 `Unavailable` 이다 — 값을 싣지 않는다.
+ * The values above are valid even when not `Ready` — a failure does not erase the last known values.
+ * The exception is `Unavailable` — it carries no values.
  */
 state: UsageVendorState, 
 /**
- * 이 칸(벤더·계정)의 단조 번호 — 무엇이든 바뀌면 +1. 받는 쪽은 같은 연결(소켓) 안에서 칸마다 최댓값만
- * 남기고 더 작은 것은 버린다. 새 소켓이 서면 그 기억을 잊는다 — 데몬이 재시작하면 0 부터 다시 센다.
+ * A monotonic number for this area (vendor·account) — +1 whenever anything changes. The receiver keeps only the maximum per area within the same connection (socket)
+ * and drops smaller ones. When a new socket comes up it forgets that memory — when the daemon restarts it counts again from 0.
  */
 revision: number, };

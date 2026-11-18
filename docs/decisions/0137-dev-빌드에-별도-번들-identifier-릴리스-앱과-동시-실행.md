@@ -1,7 +1,7 @@
 # ADR-0137: A separate bundle identifier for the dev build — running alongside the release app
 
-- 상태: 확정 (2026-08-16, grounds: measured + plugin source check 2.4.2/2.4.3) · 부분 폐기 by ADR-0283 (the WebView2 data folder cost statement in 영향)
-- 관련: ADR-0134(single-instance scope) · ADR-0135(lock file = connection key) · `src-tauri/tauri.dev.conf.json` · `scripts/tauri-cli.mjs` · step-log S21 · Amended by ADR-0283 (the WebView2 data folder cost statement in 영향)
+- 상태: 확정 (2026-08-16, grounds: measured + plugin source check 2.4.2/2.4.3) · 부분 폐기 by ADR-0283 (the description of the WebView2 data folder cost in the impact)
+- 관련: ADR-0134(single-instance scope) · ADR-0135(lock file = connection key) · `src-tauri/tauri.dev.conf.json` · `scripts/tauri-cli.mjs` · step-log S21 · Amended by ADR-0283 (the description of the WebView2 data folder cost in the impact)
 
 ## 맥락
 

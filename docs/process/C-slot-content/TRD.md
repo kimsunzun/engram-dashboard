@@ -5,7 +5,7 @@
 
 ## 1. Scope
 - **In:** replace `agent_id: Option<String>` of `LayoutNode::Slot` with `content: SlotContent` (`Empty | Agent { agent_id: String }`). End to end through the backend, wire and frontend render branch. Behavior is **exactly the same** (empty = Empty, assigned = Agent).
-- **Out (follow-up):** the actual `FileTree`/`ControlPanel` variants + renderer + placement command, capability table, version/Unknown/migration on persistence. (Requirements recorded in ADR-0060 "영향/불변식".)
+- **Out (follow-up):** the actual `FileTree`/`ControlPanel` variants + renderer + placement command, capability table, version/Unknown/migration on persistence. (Requirements recorded in ADR-0060 "Impact / Invariants".)
 
 ## 2. Change points (based on the Explore map — re-check file:line at the start of work)
 

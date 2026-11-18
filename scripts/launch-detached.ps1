@@ -12,7 +12,7 @@
 #
 # ★Avoiding the crash is not this script's reason — the old comment that said so was a misdiagnosis★ (corrected 2026-08-19).
 #   The `0xc00000fd` in `wezterm-gui` was that terminal's own bug (no cycle guard in its process-tree recursion), and
-#   an injected security-software DLL was not the cause. Cause and evidence record = git history (the old qa binding 「분리 실행」).
+#   an injected security-software DLL was not the cause. Cause and evidence record = git history (the old qa binding 「분리 실행」). # hangul-ok
 #
 # Usage: launch-detached.ps1 -Exe <path> [-WorkDir <path>] [-LogFile <path>] [-EnvVars "K=V","K2=V2"]
 # The wrapper console always comes up minimized and inactive (exception = the ShowWindow=7 comment below). This script cannot decide the app window's first show state (see the `$appLine` comment below).
@@ -22,10 +22,10 @@
 #   `std::process::exit(0)` in `platform_impl/windows.rs` of tauri-plugin-single-instance 2.4.2). Then the foreground window
 #   changes, and the 20-second polling below catches the pid of that new instance that is about to vanish, or emits `LAUNCH_FAILED`.
 #   Debug is the same — the dev identifier `com.engram.dashboard.dev` is the same for all worktrees (`src-tauri/tauri.dev.conf.json`), so
-#   if another worktree's debug app is running, this worktree's debug launch is handed over to that app in the same way (observed 2026-09-24 — the `/qa` feedback item 「다른 워크트리의 dev 앱」).
+#   if another worktree's debug app is running, this worktree's debug launch is handed over to that app in the same way (observed 2026-09-24 — the `/qa` feedback item 「다른 워크트리의 dev 앱」). # hangul-ok
 # Returns: the pid of the started process (last line of standard output "PID=<n>")
 # Log: if `-LogFile` is given, that path is used (a relative path is made absolute against `-WorkDir` — see the comment below).
-#   If omitted, `%TEMP%\detached-<exe이름>-<이번 실행 태그>.log` — **a new file every run** (see the comment below).
+#   If omitted, `%TEMP%\detached-<exe name>-<this run's tag>.log` — **a new file every run** (see the comment below).
 #   The actual path is reported with the `LOG=` line on success and the `LAUNCH_FAILED` line on failure.
 # Failure: `LAUNCH_FAILED (...)` + exit code 1.
 
@@ -126,7 +126,7 @@ Set-Content -LiteralPath $bat -Value $lines -Encoding ASCII
 $newPid = $null
 $launchError = $null
 try {
-  # ★Launch the wrapper cmd console 「활성화 없이 최소화」 (minimized without activation) (`ShowWindow = 7` = SW_SHOWMINNOACTIVE)★ —
+  # ★Launch the wrapper cmd console 「minimized without activation」 (`ShowWindow = 7` = SW_SHOWMINNOACTIVE)★ —
   #   the taskbar button stays and the foreground window does not change. With this value conhost does not delegate to the default terminal either (measured 2026-09-25).
   #   ★Do not change it to 0 (SW_HIDE)★ — keeping the taskbar button is the requirement (user decision 2026-09-25).
   #   The exception where 7 takes the foreground when there is no foreground window, and the alternatives reviewed and discarded = the ShowWindow=7 comment in `run-detached.ps1`.

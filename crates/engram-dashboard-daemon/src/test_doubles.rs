@@ -62,9 +62,12 @@ impl RecordingFanout {
         assert_eq!(
             texts.len(),
             1,
-            "팬아웃은 사실 1건당 정확히 1회여야(중복·누락 송신 회귀): {texts:?}"
+            "the fanout must send exactly once per fact (duplicate/missing send regression): {texts:?}"
         );
-        texts.into_iter().next().expect("길이 1 을 위에서 확정")
+        texts
+            .into_iter()
+            .next()
+            .expect("length 1 is established above")
     }
 }
 

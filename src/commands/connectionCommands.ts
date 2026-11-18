@@ -24,7 +24,7 @@ export interface ConnectionStatusReply {
 
 export interface ConnectionCommandDeps {
   client: AgentClient
-  /** `DaemonControl.start()` — the band's 「다시 연결」. */
+  /** `DaemonControl.start()` — the band's 「Reconnect」. */
   start: () => Promise<unknown>
   /** `shutdownDaemon` — the shell's one stop path. */
   shutdown: () => Promise<DaemonShutdownReply>

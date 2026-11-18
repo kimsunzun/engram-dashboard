@@ -1,191 +1,181 @@
-//! # engram-dashboard-platform — OS 층, 잎 crate (워크스페이스 의존 0 · 도메인 지식 0)
+//! # engram-dashboard-platform — OS layer, leaf crate (0 workspace dependencies, 0 domain knowledge)
 //!
-//! OS 에 따라 달라지는 **운영** 코드를 이 crate 하나에 모은다(ADR-0266 결정 1). 여기 들일지는 OS 의존
-//! 여부 하나로 판정한다 — 소비자 수가 아니다(결정 2). 부르는 쪽은 이 crate 의 함수와 핸들 타입만 부르고,
-//! OS 분기(`#[cfg(windows)]` · `cfg!(windows)` · `#[cfg(unix)]` 따위)는 이 crate 안에만 둔다. 시험 · 시험
-//! 하네스 bin · `examples/` 의 OS 분기는 그쪽에 남는다 — 운영 빌드에 들어가지 않는다(ADR-0266 「근거」).
-//! 이 불변식의 기계 게이트는 아래 ④(`cfg` 위치) · ⑤(OS crate 의존) · ⑥(`std::os` 경로)다. 다른 crate 에 `cfg`
-//! 운영 OS 분기는 없다(ADR-0291 이 ADR-0275 결정 15 의 시한부 예외를 닫았다). `cfg` 없이 런타임에 OS 규칙을
-//! 쓰는 자리는 이 셈에 들지 않는다(④ 의 한계).
+//! Gathers **production** code that differs per OS into this one crate (ADR-0266 decision 1). Whether something belongs here is decided by
+//!   one thing — whether it depends on the OS, not by the number of consumers
+//! (decision 2). Callers use only this crate's functions and handle types; OS branches (`#[cfg(windows)]`, `cfg!(windows)`,
+//!   `#[cfg(unix)]`) live only inside it. OS branches of tests, test harness bins and `examples/`
+//! stay there (ADR-0266 「Rationale」). Machine gates of this invariant: ④ (`cfg` location), ⑤ (OS crate dependencies), ⑥ (`std::os` paths)
+//!   below. No other crate has a production `cfg` OS branch (ADR-0291 closed
+//! ADR-0275 decision 15's time-limited exception); runtime OS rules without `cfg` are outside ④.
 //!
-//! There are ten residents today — [`process`](PID liveness · process start time and its three-way verdict ·
-//! the process table · child PID enumeration · the identity list under one root · ending one process tree —
-//! Windows `taskkill` · whether one identity still runs and ending it only if it does — one handle) · [`group`](the strong owner of a process group · weak handles · held members · the
-//! join-notification port — Windows Job Object) · [`file_holders`](the processes that have this file open
-//! now — Restart Manager) · [`fs`](opening while denying others' writes · classifying that failure — sharing
-//! violation · access denied · the verdict and retry for a failure caused by someone holding it briefly ·
-//! folder sync) · [`spawn`](spawning without a window · spawning as a tree root with a kill handle for that
-//! tree — Windows = spawn suspended, put in the group, then resume · the "program not found" verdict of a
-//! failed shell · spawning outside this process's Job — Windows = WMI) · [`shell`](the interactive default
-//! shell · wrapping a CLI in a console shell) · [`env`](home directory · executable file name · the path of
-//! an executable next to the current one · environment variable name comparison) · [`window`](window
-//! identity · placement and z-order in one call · restoring placement · the topmost window under the
-//! cursor — the tab-drop end verdict · window diagnostic facts · whether the foreground window belongs to
-//! this process · whether that window is the foreground window · title bar chrome shape · the snap layout
-//! overlay — behind feature `snap-overlay`) · [`input`](cursor position · primary button · Esc state) ·
-//! [`pty`](whether closing a pseudo-terminal waits for its output to be read). The module headers and
-//! public function docs are the source of truth for those responsibilities.
+//! Residents: [`process`] (PID liveness, start time and its three-way verdict, process table, child PIDs, identity list under a root,
+//!   ending a process tree — Windows `taskkill`, ending one identity only if it still runs) ·
+//! [`group`] (strong owner of a process group, weak handles, held members, join-notification port — Windows Job Object) · [`file_holders`]
+//!   (processes holding a file open — Restart Manager) · [`fs`] (opening while denying
+//! others' writes, classifying that failure, verdict and retry for a brief-holder failure, folder sync) · [`spawn`] (windowless spawn,
+//!   tree-root spawn with a kill handle — Windows = suspended, put in the group, resume;
+//! "program not found" verdict; spawning outside this process's Job — WMI) · [`shell`] (interactive default shell, wrapping a CLI in a
+//!   console shell) · [`env`] (home dir, executable name/sibling path, env var name
+//! comparison) · [`window`] (identity, placement and z-order, restoring placement, topmost window under the cursor, diagnostics,
+//!   foreground checks, title bar chrome, snap overlay behind feature `snap-overlay`) ·
+//! [`input`] (cursor position, primary button, Esc state) · [`pty`] (whether closing a pseudo-terminal waits for its output to be read).
+//!   Module headers and public docs are the source of truth.
 //!
-//! Functions that take a window accept `raw-window-handle`'s `HasWindowHandle`, and the variant matching
-//! happens here too (TRD S21-slot-docking revision 6.3 §8 · B10 · revision 7 §5-1).
+//! Functions that take a window accept `raw-window-handle`'s `HasWindowHandle`; variant matching happens here too (TRD S21-slot-docking
+//!   revision 6.3 §8, B10, revision 7 §5-1).
 //!
-//! ★`testing`(실프로세스 시험 도우미) · `group::GroupRef::gone`(주인이 처음부터 없는 손잡이) ·
-//! `spawn::wmi_create_raw`(WMI 띄우기의 원시 호출 — 진단 시험 몫)는 cargo 기능 `test-support` 뒤다★
-//! (TRD 1-3 §3-8 · 이름은 base 의 ADR-0275 결정 5 와 같다) — 선언이 `#[cfg(any(test, feature = "test-support"))]` 라 이 crate 자기 시험과 그 기능을 dev 의존으로 켠 소비자 시험만
-//! 본다. 그 기능이 데몬 · 셸 · CLI 의 운영 의존 그래프에 없다는 것은 CI 게이트 ③ 이 잰다(0줄 기대와 짝인 1줄
-//! 이상 기대) — 아래 격리 게이트 ①② 와 별개인 시험 기능 누수 게이트이고, 명령 · 기대값의 정본은 `.github/workflows/ci.yml` 이다.
+//! ★`testing` (real-process helpers), `group::GroupRef::gone` and `spawn::wmi_create_raw` (diagnostic) are behind cargo feature
+//!   `test-support`★ (TRD 1-3 §3-8; same name as base's ADR-0275 decision 5): declared
+//! `#[cfg(any(test, feature = "test-support"))]`. CI gate ③ (a 1-or-more-lines expectation paired with a 0-lines expectation) measures
+//!   that the feature is not in the daemon/shell/CLI production graph; commands and
+//! expected values are canonical in `.github/workflows/ci.yml`.
 //!
-//! ★`window::snap`(스냅 레이아웃 오버레이)은 cargo 기능 `snap-overlay` 뒤다 · 기본 꺼짐★(TRD S26-window-chrome §8-4 · 사용자
-//! 결정 Q1 2026-10-24) — 켜는 것은 셸 기능 `snap-overlay` 하나뿐이고, 그 기능이 셸 운영 그래프에 없다는 것(0줄 기대와 짝인
-//! 1줄 이상 기대)과 켠 빌드가 컴파일된다는 것은 CI 가 잰다. 이 crate 의 cargo 기능은 이 둘뿐이다 — ADR-0275 결정 13 의
-//! 「`test-support` 하나」를 넓힌다. 둘 다 코드만 여닫고 `windows` 바인딩을 켜지 않는다(아래 「의존」).
+//! ★`window::snap` (snap layout overlay) is behind cargo feature `snap-overlay`, off by default★ (TRD S26-window-chrome §8-4, user
+//!   decision Q1): only the shell feature `snap-overlay` turns it on; CI measures that it
+//! is not in the shell production graph and that the build with it on compiles. This crate has only these two features (widening ADR-0275
+//!   decision 13's "one `test-support`"); both only open/close code and do not turn on
+//! `windows` bindings.
 //!
-//! ## 들이는 규칙
+//! ## Rules for taking things in
 //!
-//! 1. **도메인 지식 0**(ADR-0266 결정 3). 「홈 디렉터리 찾기」는 여기지만 `.claude` 경로 · codex 홈의 하위
-//!    폴더 · 락 파일 이름 같은 백엔드 지식은 부르는 쪽에 남는다. 그래서 공개 함수는 도메인 타입을 받지 않고
-//!    원시 값(프로그램 · 인자 · PID · 경로)을 받으며, 도메인 값(종료 코드 같은 상수)도 인자로 받는다
-//!    (ADR-0275 결정 12).
-//! 2. **인터페이스 = 함수 + 핸들 타입, 컴파일 시점 분기**(ADR-0266 결정 5). OS 를 고르는 트레이트 객체를
-//!    두지 않는다. 시험용 가짜가 필요하면 **부르는 쪽이** 작은 트레이트를 둔다 — 그래서 이 crate 의 공개
-//!    API 에는 시험 seam 트레이트가 없다.
-//! 3. **Windows 밖 갈래는 자리채움이다**(ADR-0266 결정 7). 이 crate 가 다른 OS 구현을 새로 만들지 않는다 —
-//!    옮겨 올 때 있던 갈래(빈 답이든 `bash` · `HOME` 같은 한 줄이든)가 한 자리에 모여 보일 뿐이다. ★`#[cfg]`
-//!    로 가른 그 갈래는 여기서도 컴파일 검증을 받지 않는다★ — 개발 · CI 가 Windows 뿐이다(ADR-0230 현황).
-//!    `cfg!(windows)` 로 가른 갈래(`env::env_key_eq` · `fs` 의 실패 분류 셋)는 양쪽 다 타입 검사를 받지만 그
-//!    밖의 OS 에서 돌려 본 적은 없다.
-//! 4. **로그는 결과를 돌려줄 길이 없는 경로(`Drop`)에서만 찍는다**(TRD 1-3 §3-7 —
-//!    `docs/process/S21-crate-boundaries/trd-1-3-platform-crate.md`). 나머지 실패는 값으로 돌려주고 부르는
-//!    쪽이 자기 문구로 찍는다 — 도메인 낱말을 이 crate 의 로그로 가져오지 않는다(규칙 1). 찍을 때는
-//!    `tracing` facade 를 직접 부른다(ADR-0266 결정 9 · ADR-0268) — 로그 때문에 base 를 끌지 않는다.
+//! 1. **0 domain knowledge** (ADR-0266 decision 3): "find the home directory" belongs here, but backend knowledge (`.claude` paths, codex
+//!   home subfolders, lock file names) stays with the caller. Public functions take raw
+//!    values (program, arguments, PID, path), and domain values such as exit codes arrive as arguments (ADR-0275 decision 12).
+//! 2. **Interface = functions + handle types, compile-time branching** (ADR-0266 decision 5): no trait object picking the OS; a test fake
+//!   is **the caller's** small trait, so this API has no test seam traits.
+//! 3. **Branches outside Windows are placeholders** (ADR-0266 decision 7): no new implementations for other OSes — the branches that
+//!   existed when moved (an empty answer, a `bash`/`HOME` one-liner) are just gathered.
+//!    ★`#[cfg]`-split branches get no compile verification here★ (development and CI are Windows only — ADR-0230). `cfg!(windows)`
+//!   branches (`env::env_key_eq`, the three `fs` failure classifications) are type-checked on
+//!    both sides but never run on another OS.
+//! 4. **Logs are printed only on paths with no way to return a result (`Drop`)** (TRD 1-3 §3-7 —
+//!   `docs/process/S21-crate-boundaries/trd-1-3-platform-crate.md`). Other failures return as values and the caller words them
+//!    (no domain words in this crate's logs — rule 1). Printing calls the `tracing` facade directly (ADR-0266 decision 9, ADR-0268); base
+//!   is not pulled in.
 //!
-//! ## 의존 (불변)
+//! ## Dependencies (invariant)
 //!
-//! - **워크스페이스 crate 의존 0 — base 도 아니다**(ADR-0266 「거부한 대안」 둘째 · ADR-0268). 아래 게이트
-//!   ①이 그 벽이다 — 컴파일러는 잎 성질을 강제하지 않는다.
-//! - **운영 의존의 서드파티는 `windows`(Windows 대상만) · `tracing` facade · `raw-window-handle` 만 들인다**(TRD 1-3
-//!   §0 ① · TRD S21-slot-docking 6.3판 §8 · B10 · 7판 §5-1) — 시험 전용 dev 의존은 이 규칙 밖이다. `windows` 는 의존 하나에 쓰는 바인딩
-//!   feature 의 합집합을 켜고, 기능별 cargo feature 로 쪼개지 않는다(ADR-0275 결정 13). `tracing` 은 규칙 4 의 경로가
-//!   찍는 데만 쓴다. `raw-window-handle` 은 창을 받는 함수의 인자 트레이트(`HasWindowHandle`) 하나 몫이다 — 의존이
-//!   없는 잎 crate 이고 OS crate 가 아니다(게이트 ⑤ 목록 밖).
-//! - ★**async 런타임(`tokio` 등)을 들이지 않는다**★ — 동기 crate 도 OS 층을 부른다(지금 agent). 여기 든
-//!   런타임은 그 동기 소비자로 조용히 번지고, 아래 게이트 ⑦ 이 그것을 빨갛게 만든다.
+//! - **0 workspace crate dependencies — not even base** (ADR-0266 「Rejected alternatives」 second, ADR-0268). Gate ① is that wall; the
+//!   compiler does not enforce the leaf property.
+//! - **Production third parties: `windows` (Windows targets only), the `tracing` facade, `raw-window-handle`** (TRD 1-3 §0 ①, TRD
+//!   S21-slot-docking 6.3 §8 · B10 · 7 §5-1); dev dependencies are outside this rule. `windows` turns on the
+//!   union of binding features and is not split per cargo feature (ADR-0275 decision 13). `tracing` only for rule 4 paths.
+//!   `raw-window-handle` only as the argument trait (`HasWindowHandle`); a no-dependency leaf, not an OS
+//!   crate (outside gate ⑤'s list).
+//! - ★**No async runtime (`tokio` etc.)**★ — sync crates (agent, now) call this layer too, and a runtime here would silently spread to
+//!   them; gate ⑦ turns red.
 //!
-//! ## 격리 게이트(불변) — ①② 는 각각 다른 축이다(시험 기능 누수 게이트 ③ 은 위 `testing` 단락 · 불변식
-//! 게이트 ④~⑥ 과 async 반입 게이트 ⑦ 은 맨 아래)
+//! ## Isolation gates (invariant) — ①② are separate axes (③ is in the `testing` paragraph above; ④–⑥ and ⑦ are at the bottom)
 //!
-//! **① 워크스페이스 의존 상한**(위 「의존」 첫 항의 벽):
-//! `cargo tree -p engram-dashboard-platform --depth 1 --prefix none -e normal,dev,build --target all`
-//! `--all-features | rg "^engram-dashboard" | sort -u` → **정확히 1줄 = 자기 자신**.
-//! 서드파티는 이름 접두가 달라 세지 않는다. ★매니페스트 텍스트를 grep 으로 바꾸지 말 것★ — rename ·
-//! `[dependencies.<이름>]` 테이블 형 · `[build-dependencies]` · 비활성 target · `optional` 이 전부 정상 Cargo
-//! 문법으로 빠져나간다. 플래그도 줄이지 않는다(base · command · messaging · transport 상한 게이트와 같은 근거).
-//! ★남는 구멍 둘★ — 멤버를 `engram-dashboard` **이름 접두**로 식별하기 때문이다(ADR-0151 「개명 함정」).
-//! (a) 그 접두가 없는 워크스페이스 멤버를 의존하면 이 게이트를 그냥 통과한다. (b) 이 crate 가 그 접두를
-//! 떼면 이 게이트는 빨개지지만(`-p` 가 죽거나 자기 줄이 접두를 잃는다), **다른** crate 의 상한 게이트
-//! (base · messaging · command · transport)와 메시징 이름 정규식은 이 crate 로 가는 간선을 못 보게 된다 —
-//! 금지된 base → platform 간선(ADR-0175 입주 조건 ② — ADR-0266 결정 8 이 다시 적는다)이 그대로
-//! 빠져나간다.
+//! **① Workspace dependency cap**: `cargo tree -p engram-dashboard-platform --depth 1 --prefix none -e normal,dev,build --target all
+//!   --all-features | rg "^engram-dashboard" | sort -u` → **exactly 1 line = itself**.
+//! ★Do not replace it with a manifest-text grep★ (rename, `[dependencies.<name>]` form, `[build-dependencies]`, inactive targets,
+//!   `optional` all slip out) and do not reduce the flags (same basis as the base · command ·
+//! messaging · transport cap gates). ★Two holes★ (members are identified by the name prefix `engram-dashboard`, ADR-0151 「rename trap」):
+//!   (a) a workspace member without that prefix passes; (b) if this crate dropped the
+//! prefix, this gate would go red but the **other** crates' cap gates and the messaging name regex would stop seeing edges to this crate —
+//!   the forbidden base → platform edge (ADR-0175 tenancy condition ②, restated by
+//! ADR-0266 decision 8) would slip out.
 //!
-//! **② Tauri import 0**(ADR-0003):
-//! `rg "^\s*use tauri" crates/engram-dashboard-platform/src/` → **0줄**. 돌리기 전에
-//! `test -d crates/engram-dashboard-platform/src` 로 경로부터 본다 — 경로가 없어도 rg 의 매치는 0이라
-//! 통과로 읽힌다.
-//! ★①이 이 축을 덮는다고 읽지 말 것★ — ①은 워크스페이스 멤버만 세므로 서드파티 `tauri` 는 그대로
-//! 통과한다. ADR-0003 의 불변식이 걸리는 축은 crate 이름이 아니라 **어느 바이너리에 링크되나** 이고,
-//! OS 층은 창도 webview 도 없는 headless 데몬까지 모든 바이너리의 바닥에 깔리는 자리다. 패턴이 import
-//! 라인 앵커인 것은 이 헤더가 자기 자신에 걸리지 않게 하기 위해서다.
+//! **② Tauri import 0** (ADR-0003): `rg "^\s*use tauri" crates/engram-dashboard-platform/src/` → **0 lines**; first check `test -d
+//!   crates/engram-dashboard-platform/src` (a missing path also matches 0). ★① does not cover
+//! this★: it counts only workspace members, so third-party `tauri` passes. ADR-0003's invariant is about **which binary it links into**,
+//!   and the OS layer sits under every binary, even the headless daemon. The pattern is
+//! anchored to the import line so this header does not catch itself.
 //!
-//! **④ OS 분기는 이 crate 안에만**(맨 위 불변식 · TRD 1-3 §4-4 — 게이트 꼴은 ADR-0266 「영향」이 메인 판단으로
-//! 남겼고, ④~⑥ 의 꼴과 거부한 대안은 ADR-0278 이 기록한다): 이 crate 밖에서 OS `cfg` 술어를 쓰는 `.rs`
-//! 파일 목록이 고정 명단과 **정확히** 같아야 한다.
-//! - **어디에 있나** — 정규식(`os_cfg_re`) · 파일 찾기 함수(`os_cfg_files`) · 명단(heredoc)은
-//!   `.github/workflows/ci.yml` 의 `platform gate 4` 스텝 하나에만 있고 로컬 대체(`.claude/skill-bindings/qa-verify.md`
-//!   「gates 잡」)는 그 스텝을 그대로 돈다 — 그 셋은 여기도 다른 문서도 베끼지 않는다. 대상 = `crates` ·
-//!   `src-tauri` 의 `.rs` 에서 이 crate 를 뺀 것(`src-tauri/tests/` · `build.rs` 까지 — TRD §4-4 의 `src-tauri/src`
-//!   보다 넓고, 재 보면 명단은 같았다). 돌리기 전에 세 경로(`crates` · `src-tauri` · 이 crate `src`)가 있는지
-//!   본다 — 없으면 rg 가 사유 없이 죽는다.
-//! - **matcher = PCRE2 문법 정규식 하나(`rg -P -U -l` — rg 에 PCRE2 가 없으면 게이트가 그 사유로 FAIL 한다)**.
-//!   `(?(DEFINE)…)` 로 낱말 단위(주석 · 문자열 — byte · C 접두 포함 · raw 문자열 `[bc]?r#*"…"#*` · 이름 · 그 밖의
-//!   한 글자)를 정해 두고:
-//!   - 술어 **밖**에서는 주석 · 문자열 · raw 문자열 · 문자 리터럴을 `(*SKIP)(*FAIL)` 로 건너뛰어 그 안의 `cfg(` 를
-//!     안 문다. ★문자열 안 `\` 뒤 줄바꿈(줄 이음)을 받는 갈래를 빼지 말 것★ — 빠지면 그 뒤 따옴표 짝이 뒤집혀
-//!     실제 `#[cfg(windows)]` 를 놓친다(discovery 에서 실측).
-//!   - `cfg!(…)` · `cfg(…)` · `cfg_attr(…)` 의 술어를 낱말 단위로 **괄호 짝을 맞춰**(재귀) 읽고, 그 안 어느 깊이에든
-//!     OS 술어 낱말이 **주석 · 문자열 밖에** 있으면 문다 — 맨 `windows` · `unix`, 또는 `target_os` ·
-//!     `target_family` · `target_env` · `target_vendor` 뒤에 공백 · 줄바꿈 · 주석만 끼고 오는 `=`.
-//!   - 그래서 `feature = "windows"` · 술어 안 주석의 OS 낱말 · `cfg!(test) && windows()` 의 괄호 밖 낱말 · 속성 값
-//!     `windows_subsystem = "windows"` 는 안 걸리고, 몇 겹이든 묶인 술어 · 여러 줄 속성 · 값에 `[` `;` `)` 가 든
-//!     문자열 · raw 문자열 · `target_os /* … */ =` · 줄이 갈린 `target_os` 와 `=` 는 걸린다.
-//!   - Windows 의 rg 는 경로를 `\` 로 찍으므로 `/` 로 맞춘 뒤 정렬해 명단과 대조한다.
-//! - **명단에 드는 부류** = 시험 분기뿐인 파일(`#[cfg(test)]` 모듈 · `#[cfg(all(test, …))]` 항목 아래) ·
-//!   `tests/` · 시험 하네스 bin · `examples/`.
-//! - **판정은 양방향이다** — 명단 밖 파일이 걸리면(운영 분기면 이 crate 로 옮기고, 시험 · 하네스면 명단에
-//!   더한다) 빨개지고, 명단의 파일이 안 걸려도(분기를 걷었거나 옮겼다 — 명단에서 뺀다) 빨개진다. 뒤쪽을
-//!   실패로 두는 것은 명단이 낡지 않게 하려는 것이다.
-//! - **짝** — 같은 matcher 가 이 crate 안에서는 1 파일 이상을 물어야 한다. 명단이 다 비는 날 정규식이
-//!   망가지면(이스케이프 · 따옴표) 대조가 「둘 다 빈 목록」으로 눈먼다.
-//! - ★**한계 — 보증으로 읽지 말 것**★:
-//!   - **잡는 것은 명단 밖의 새 파일뿐이다** — 명단에 이미 있는 파일 안에 운영 분기를 더하면 못 잡는다
-//!     (리뷰 몫).
-//!   - `cfg` 없이 런타임에 OS 를 가르는 자리를 못 본다 — 환경변수 고르기 · 늘 대소문자를 접는 환경변수 이름
-//!     비교 같은 것이고, 그 규칙의 자리는 이 crate 의 `env` 다.
-//!   - 어휘 분석은 정규식 근사다 — 중첩 블록 주석(`/* /* */ */`)처럼 다루지 않는 꼴이 오면 그 뒤를 잘못 읽어
-//!     `cfg` 를 놓칠 수 있다. 술어 안에서 이름 바로 뒤에 `"` · `#` 가 붙는 꼴(리터럴 접두가 아닌데)은 낱말로
-//!     못 읽어 그 술어를 통째로 놓친다 — 올바른 Rust 의 `cfg` 술어에는 그런 꼴이 없다.
-//!   - `cfg` 라는 이름의 함수 · 메서드 호출도 술어로 읽는다 — 인자에 OS 낱말이 있으면 오탐(파일이 명단에 들
-//!     뿐이라 안전한 쪽).
-//!   - ★**드문 꼴은 일부러 쫓지 않는다 — 흔한 꼴만 막는 러프한 게이트다**★(사용자 결정 2026-10-06 — 문자열
-//!     수준이면 된다). 못 무는 꼴(실측): `cfg_select!`(술어를 `cfg(` 철자 없이 쓴다) · `cfg_aliases`(build
-//!     script 가 만든 별칭 `#[cfg(win)]` — 별칭을 정의하는 쪽도 `cfg(` 철자가 없다) · `cfg` 와 `(` 사이의 주석
-//!     (`cfg /* … */ (windows)`) · `cfg!{…}` · `cfg![…]`. `cfg_if!` 는 안의 `#[cfg(…)]` 철자로 문다. 19겹 이상
-//!     중첩한 술어는 PCRE2 한도에 걸려 rg 가 오류로 끝나 게이트가 FAIL 한다 — 무음 통과는 아니다(로컬 rg
-//!     14.1.1 · PCRE2 10.45 실측 — 한도는 rg 빌드마다 다를 수 있다). 이 꼴들을 잡으려고 정규식을 키우지 않는다.
+//! **④ OS branches only inside this crate** (TRD 1-3 §4-4; ADR-0278 records the shape of ④–⑥ and rejected alternatives): the list of `.rs`
+//!   files outside this crate that use OS `cfg` predicates must be **exactly** a fixed list.
+//! - **Where** — the regex (`os_cfg_re`), file finder (`os_cfg_files`) and list (heredoc) live only in the `platform gate 4` step of
+//!   `.github/workflows/ci.yml`, and the local substitute (`.claude/skill-bindings/qa-verify.md`
+// hangul-ok-begin
+//!   「gates 잡」) runs that step as is — those three are not copied here or into other docs. Target = the `.rs` files of `crates` ·
+// hangul-ok-end
+//!   `src-tauri` minus this crate (including `src-tauri/tests/` and `build.rs` — wider than TRD §4-4's `src-tauri/src`; measuring showed
+//!   the same list). Check that the three paths exist first — rg dies without a reason otherwise.
+//! - **matcher = one PCRE2 regex (`rg -P -U -l`; no PCRE2 in rg = the gate FAILs)** built from lexical units via `(?(DEFINE)…)`. Outside a
+//!   predicate it skips comments, strings (byte/C prefixes, raw strings), char literals with `(*SKIP)(*FAIL)`;
+//!   ★do not remove the branch accepting a newline after `\` inside a string (line continuation)★ — without it the quote pairing flips and
+//!   a real `#[cfg(windows)]` is missed (measured). It reads `cfg!`/`cfg`/`cfg_attr` predicates by
+//!   **matching parentheses** recursively and bites an OS word outside comments/strings at any depth: bare `windows`/`unix`, or `=` after
+//!   `target_os`/`target_family`/`target_env`/`target_vendor`. Not caught: `feature = "windows"`, OS words in
+//!   comments inside a predicate, `windows_subsystem = "windows"`. rg on Windows prints `\` paths; they are normalized to `/` and sorted
+//!   before comparing with the list.
+//! - **The list holds** files with only test branches (`#[cfg(test)]` modules, `#[cfg(all(test, …))]` items), `tests/`, test harness bins,
+//!   `examples/`. **Two-way decision** — red if a file outside the list is caught (move a production
+//!   branch here; list a test/harness) and red if a listed file is not caught (the branch moved — delist it, keeping the list from going stale).
+//! - **Pair** — the same matcher must bite 1+ files inside this crate; otherwise a broken regex would read as "both lists empty".
+//! - ★**Limits — a rough gate for common shapes, not a guarantee** (decided: string level is enough)★: only new files outside the list are
+//!   caught (a production branch added inside a listed file is review's job); runtime OS splits without
+//!   `cfg` (home: `env`) are unseen; lexical analysis is an approximation (nested block comments hide a later `cfg`; a predicate where
+//!   `"`/`#` sticks to a name cannot be read); calls to functions named `cfg` are false positives that only list
+//!   the file. Unbitten (measured): `cfg_select!`, `cfg_aliases`, a comment between `cfg` and `(`, `cfg!{…}`, `cfg![…]`; `cfg_if!` is
+//!   bitten by its inner `#[cfg(…)]`. Nesting 19+ levels hits the PCRE2 limit — rg errors and the gate FAILs (not a
+//!   silent pass; measured with rg 14.1.1 · PCRE2 10.45 — the limit may differ per rg build). Do not grow the regex.
 //!
-//! **⑤ OS crate 운영 의존은 이 crate 에만**(사용자 결정 2026-10-06 — 위 「의존」 둘째 항의 다른 멤버 쪽 벽):
-//! 워크스페이스 멤버 중 OS crate 를 **운영 의존**(normal · build — 대상 OS 무관)으로 **직접** 가진 것이 이 crate
-//! 하나여야 한다.
-//! - **어디에 있나** — OS crate 목록(`os_dep_re`) · 판정 함수(`os_dep_gate`)는 `.github/workflows/ci.yml` 의
-//!   `platform gate 5` 스텝 하나에만 있고, 로컬 대체(qa-verify 「gates 잡」)는 그 스텝을 그대로 돈다. 목록은 손으로 적은 명시
-//!   목록이다(cargo-deny 식) — 여기 베끼지 않는다.
-//! - **읽는 것** = `cargo tree --workspace --no-dedupe --depth 1 --prefix depth -e normal,build --target all
-//!   --all-features` 의 뿌리(멤버)와 그 바로 아래 의존. 멤버를 손으로 적지 않아 새 멤버도 보이고, 해석된
-//!   그래프라 rename(패키지 이름으로 찍힌다) · `[target.'cfg(…)'.dependencies]` · `[build-dependencies]` ·
-//!   `optional` 을 다 본다(rename 을 단 대상 조건 의존과 build 의존은 결함 주입으로 실측).
-//!   ★`--no-dedupe` 를 빼지 말 것★ — 빼면 다른 멤버의 의존으로 먼저 찍힌 멤버가 뿌리 자리에서 `(*)` 로 접혀
-//!   자기 의존이 하나도 안 보인다(실측 — 이 crate 의 `windows` 까지).
-//! - **dev 의존은 세지 않는다** — 시험 · `examples/` 몫이다(agent 의 `windows` dev = `examples/spike*.rs`).
-//! - **짝** — 이 crate 가 1 개 이상 가져야 한다(지금 `windows`). 목록 정규식이나 `cargo tree` 출력 꼴이
-//!   망가지면(`--no-dedupe` 를 빼는 것 포함) 판정이 「위반 0」으로 눈먼다.
-//! - ★**한계**★ — 직접 의존만 본다: 다른 멤버가 OS API 를 감싼 서드파티(목록 밖)를 들이거나 목록에 없는 OS
-//!   crate(`-sys` 형제 · `windows-core` 따위)를 직접 들이면 못 본다. 목록을 넓힐지는 그런 crate 가 들어올 때
-//!   정한다.
+//! **⑤ Production OS crate dependencies only in this crate**: among workspace members, only this crate may have an OS crate **directly**
+//!   as a production dependency (normal, build — any target OS).
+//! - **Where it is** — the OS crate list (`os_dep_re`) · the decision function (`os_dep_gate`) are only in the `platform gate 5` step of
+// hangul-ok-begin
+//!   `.github/workflows/ci.yml`, and the local substitute (qa-verify 「gates 잡」) runs that step as is. The list is a hand-written explicit
+// hangul-ok-end
+//!   list — not copied here.
+//! - **What it reads** = the roots of `cargo tree --workspace --no-dedupe --depth 1 --prefix depth -e normal,build --target all
+//!   --all-features` and their direct dependencies. Members are not hand-written, so new members are
+//!   seen; the resolved graph covers rename (printed as the package name), `[target.'cfg(…)'.dependencies]`, `[build-dependencies]`,
+//!   `optional` (measured by fault injection). ★Do not remove `--no-dedupe`★ — a member
+//!   already printed as another member's dependency folds into `(*)` at its root and shows none of its own (measured — down to this
+//!   crate's `windows`).
+//! - **dev dependencies are not counted** (tests, `examples/`; agent's `windows` dev = `examples/spike*.rs`).
+//! - **Pair** — this crate must have 1+ (`windows` now); a broken list regex or `cargo tree` output shape (including dropping
+//!   `--no-dedupe`) would read as "0 violations".
+//! - ★**Limits**★ — only direct dependencies: a third party wrapping OS APIs (outside the list) or an unlisted OS crate (`-sys` siblings,
+//!   `windows-core`) taken in by another member is unseen; widen the list when such a crate appears.
 //!
-//! **⑥ `std::os` 의 OS 모듈은 이 crate 안에서만**(사용자 결정 2026-10-06 — 러프한 문자열 게이트): 이 crate
-//! 밖에서 `std::os::windows` · `std::os::unix` 를 쓰는 `.rs` 파일 목록이 고정 명단과 **정확히** 같아야 한다.
-//! `std` 의 일반 API(`std::fs` · `std::process` 따위)는 OS 에 맞게 알아서 바뀌므로 대상이 아니다.
-//! - **어디에 있나** — 정규식(`std_os_re`) · 판정 함수(`std_os_gate` — 대상 범위 · 짝 · 대조 전부) ·
-//!   명단(heredoc)은 `ci.yml` 의 `platform gate 6` 스텝 하나에만 있고, 로컬 대체(qa-verify 「gates 잡」)는 그
-//!   스텝을 그대로 돈다. 대상 경로 · 경로 확인 ·
-//!   경로 구분자 맞춤 · 명단에 드는 부류(시험 분기뿐인 파일 · `tests/` · 시험 하네스 bin · `examples/`) ·
-//!   양방향 판정 · 짝(이 crate 안에서 1 파일 이상)은 ④ 와 같다.
-//! - **matcher** = 줄 머리부터 「아직 `//` 를 안 만났다」(`^(?:[^/]|/[^/])*?`) 뒤의 `std::os::windows` ·
-//!   `std::os::unix`(마디 사이 `::` 앞뒤 공백 허용 · rg 기본 엔진 — PCRE2 가 필요 없다). `//` · `///` · `//!`
-//!   주석은 안 걸리고, `use` 줄과 완전 경로 호출(`::std::os::unix::…::f(…)` 포함) · 공백형(rustfmt 가 손대지
-//!   않는 매크로 본문 등에 남는다)은 걸린다.
-//! - ★**한계**★:
-//!   - 명단에 이미 든 파일 안의 새 운영 쓰임은 못 잡는다(④ 와 같다 — 리뷰 몫).
-//!   - 별칭 · 여러 항목 묶음(`use std::os as o;` · `use std::os::{unix::…, windows::…};` ·
-//!     `use std::{io, os::windows::…};` — 한 항목 묶음은 rustfmt 가 풀어 써 걸린다)과 다른 OS
-//!     모듈(`std::os::linux` · `std::os::macos` · `std::os::fd` 따위)은 못 본다.
-//!   - 블록 주석 · 문자열 안의 그 경로는 걸린다(오탐 — 안전한 쪽). 같은 줄에서 그 경로 앞 문자열에 `//` 가
-//!     있으면 놓친다.
+//! **⑥ OS modules of `std::os` only inside this crate** (a rough string gate): the `.rs` files outside this crate that use
+//!   `std::os::windows`/`std::os::unix` must be **exactly** a fixed list. `std`'s general APIs
+//! (`std::fs`, `std::process`) adapt on their own and are not targets.
+//! - **Where** — the regex (`std_os_re`), decision function (`std_os_gate`: target range, pair, comparison) and
+// hangul-ok-begin
+//!   the list (heredoc) are only in the `platform gate 6` step of `ci.yml`, and the local substitute (qa-verify 「gates 잡」) runs that
+// hangul-ok-end
+//!   step as is. Target paths, path check, separator normalization, list kinds, two-way decision and pair are the same as ④.
+//! - **matcher** = `std::os::windows`/`std::os::unix` after "not yet met `//`" from the line head (`^(?:[^/]|/[^/])*?`), whitespace
+//!   allowed around `::` (rg's default engine — no PCRE2). `//`, `///`, `//!` comments are not
+//!   caught; `use` lines, full-path calls (`::std::os::unix::…::f(…)`) and the whitespace form (macro bodies rustfmt does not touch) are.
+//! - ★**Limits**★: ① new production uses inside a listed file are review's job (as ④) ② unseen: aliases and multi-item groups (`use
+//!   std::os as o;`, `use std::os::{unix::…, windows::…};`, `use std::{io, os::windows::…};` —
+//!   a single-item group is written out by rustfmt and caught) and other OS modules (`std::os::linux`/`macos`/`fd`) ③ the path inside
+//!   block comments/strings is caught (safe-side false positive); if a string before the path on the
+//!   same line has `//`, it is missed.
 //!
-//! **⑦ 동기 crate 로의 async 런타임 반입 0**(위 「의존」 셋째 항의 벽 · ADR-0282): 정상 그래프(`cargo tree
-//! --locked -e normal --prefix none --target all`)에서 `^(tokio|mio|tokio-tungstenite|futures-util) ` 에 맞는 줄을
-//! 센다.
-//! - **어디에 있나** — 명령 · 판정의 정본은 `.github/workflows/ci.yml` 의 `platform gate 7` 스텝이다. 이 헤더도
-//!   패턴을 적으므로, 패턴을 고치면 둘을 함께 고친다.
+//! **⑦ 0 async runtime imports into sync crates** (the wall of the third Dependencies item, ADR-0282): in the normal graph (`cargo tree
+//!   --locked -e normal --prefix none --target all`) count lines matching
+//! `^(tokio|mio|tokio-tungstenite|futures-util) `.
+//! - **Where** — the canonical command and decision are the `platform gate 7` step of `.github/workflows/ci.yml`; this header writes the
+//!   pattern too, so fix both together.
+//! - **Two targets** — ① agent → 0 lines: a sync crate carrying this crate, base and command as production dependencies; measuring agent
+//!   (not this crate alone) also catches a runtime agent pulls in by another path
+//!   ② cli → 0 lines: the sync CLI (`engram-dashboard-cli`) left the daemon package to avoid tokio (ADR-0273); it does not call this crate
+//!   directly but shares the function and decision, so it also covers the CLI's own
+//!   third-party dependencies (serde_json today).
+//! - **Pair** — transport → at least 1 line (its tokio dependency is unconditional); a broken pattern or changed `cargo tree` form would
+//!   pass both 0 expectations blind.
+//! - ★**Do not remove the `^…␣` anchor (trailing space included)**★: with `--prefix none` the crate name starts the line; without it the
+//!   agent side bites `termios` (via portable-pty) and the 0 expectation breaks (measured).
+//! - ★**Limits**★ — only the normal graph (dev/build runtimes not counted); whether to add a new sync crate is decided when it appears;
+//!   async runtimes outside the name list (`async-std`, `smol`) are unseen.
+//!
+//! **Not done — again when porting to macOS** (decided): `cargo check` for other OS targets (the portability axis — catches unconditional
+//!   OS code; CI is Windows only), clippy `disallowed-*`, Dylint custom lints,
+//! cargo-deny; ④–⑥ do not replace these. Research = `docs/research/os-boundary-enforcement-2026-10-06.md`, decision = ADR-0278 decision 4.
+//!
+//! ★No generated files★: neither serde nor ts-rs, so no `bindings/` directory; do not add this crate to CI's ts-rs sync gate path list.
+//!
+//! **⑦ 0 async runtime imports into sync crates** (the wall of the third item of 「Dependencies」 above · ADR-0282): in the normal graph
+//!   (`cargo tree
+//! --locked -e normal --prefix none --target all`), count the lines matching `^(tokio|mio|tokio-tungstenite|futures-util) `.
+//! - **Where it is** — the canonical command · decision is the `platform gate 7` step of `.github/workflows/ci.yml`. This header
+//!   writes the pattern too, so when the pattern is fixed, fix both together.
 //! - **Two targets** — ① agent → 0 lines: a synchronous crate without tokio that carries this crate · base · command
 //!   as production dependencies. A runtime in this crate would actually spread there, so the gate measures agent rather
 //!   than this crate alone (a runtime agent pulls in by another path is caught too). ② cli → 0 lines: the synchronous
@@ -194,22 +184,23 @@
 //!   covers it covers the CLI's own direct third-party dependencies (serde_json today).
 //! - **Pair** — transport → at least 1 line (its tokio dependency is unconditional). If the pattern breaks or the
 //!   `cargo tree` output form changes, the two 0 expectations pass blind.
-//! - ★**패턴의 `^…␣` 앵커(뒤 공백 포함)를 빼지 말 것**★ — `--prefix none` 이라 crate 이름이 줄 맨 앞에 와서
-//!   앵커가 정확하다. 떼면 agent 쪽이 `termios`(portable-pty 경유)를 물어 0 기대가 깨진다(실측).
-//! - ★**한계**★ — 정상 그래프만 본다(dev · build 의존의 런타임은 세지 않는다). 대상 밖의 동기 crate 가 새로
-//!   생기면 그 crate 를 대상에 더할지는 그때 정한다. 이름 목록 밖의 async 런타임(`async-std` · `smol` 따위)은
-//!   못 본다.
+//! - ★**Do not remove the `^…␣` anchor of the pattern (including the trailing space)**★ — with `--prefix none` the crate name comes at the
+//!   very start of the line, so
+//!   the anchor is exact. Without it, the agent side bites `termios` (via portable-pty) and the 0 expectation breaks (measured).
+//! - ★**Limits**★ — it sees only the normal graph (runtimes of dev · build dependencies are not counted). When a new sync crate outside
+//!   the targets
+//!   appears, whether to add it to the targets is decided then. Async runtimes outside the name list (`async-std` · `smol` and the like)
+//!   are not seen.
 //!
-//! **하지 않는 것 — macOS 이식 때 다시**(사용자 결정 2026-10-06): 다른 OS 타깃의 `cargo check`(이식성 축 —
-//! 조건 없이 쓴 OS 전용 코드를 잡는다. CI 가 Windows 뿐이라 지금은 그런 코드가 통과한다) · clippy
-//! `disallowed-*` · Dylint 커스텀 lint · cargo-deny. ④~⑥ 은 이것들을 대신하지 않는다. 조사 =
-//! `docs/research/os-boundary-enforcement-2026-10-06.md` · 결정 = ADR-0278 결정 4.
+//! **Not done — again when porting to macOS** (user decision 2026-10-06): `cargo check` for other OS targets (the portability axis —
+//! catches OS-specific code used unconditionally. CI is Windows only, so such code passes now) · clippy
+//! `disallowed-*` · Dylint custom lints · cargo-deny. ④–⑥ do not replace these. Research =
+//! `docs/research/os-boundary-enforcement-2026-10-06.md` · decision = ADR-0278 decision 4.
 //!
-//! ★이 crate 는 생성물을 만들지 않는다★ — serde 도 ts-rs 도 없으므로 `bindings/` 디렉터리가 없다. CI 의
-//! ts-rs sync 게이트 경로 목록에 넣지 말 것.
+//! ★This crate produces no generated files★ — it has neither serde nor ts-rs, so there is no `bindings/` directory. Do not put it into
+//! CI's ts-rs sync gate path list.
 
-// ADR-0266
-// ADR-0275
+// ADR-0266, ADR-0275, ADR-0278
 // ADR-0278
 pub mod env;
 pub mod file_holders;

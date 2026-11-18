@@ -1,7 +1,5 @@
-// TRD S21-slot-docking §4-2 「크기」: the size computation carried by the source dragstart — new window inner size (R22 · Chrome `CalculateDraggedWindowSize`) ·
-//   the dragged tab's original size (R7 — material for the target's attach share) · the point `grab` where the cursor will be in the new window. Unit = logical (DIP) px = CSS px. Pure.
-// ★A mirror of the shell `src-tauri/src/layout/drag_size.rs`★ — the default of the LLM command (T-65) · the validation at drop use the shell version. The two read the `drag_size` table of the golden
-//   `bands_golden.json` together (`dragSize.test.ts`). The margin numbers are the one generated set `DOCK_CONSTANTS`.
+// TRD S21-slot-docking §4-2 "size": sizes carried by the source dragstart — new window inner size (R22 · Chrome `CalculateDraggedWindowSize`) · the dragged tab's original size (R7 — material for the target's attach share) · the point `grab` where the cursor will be in the new window. Unit = logical (DIP) px = CSS px. Pure.
+// ★Mirror of the shell `src-tauri/src/layout/drag_size.rs`★ — the LLM command default (T-65) · the drop validation use the shell version; both read the `drag_size` table of the golden `bands_golden.json` (`dragSize.test.ts`). Margin numbers come from the generated `DOCK_CONSTANTS`.
 
 import type { Insets } from '../../../../src-tauri/bindings/Insets'
 import { DOCK_CONSTANTS } from '../../../../src-tauri/bindings/DockConstants'
@@ -23,8 +21,7 @@ export interface SourceWindow {
   /** Work area of that window's monitor (`screen.availWidth` · `availHeight` — the limit of the outer size). */
   work: SizeCss
   /**
-   * Chrome of the new window (it comes up in normal state) = viewport − tab canvas + the title row height difference (normal − the source's current — if the source is maximized it is not 0 · TRD
-   * S26-window-chrome §7-6). The caller adds that difference and passes it in (`rowGrowth` of `useTabDragSource`).
+   * Chrome of the new window (it comes up in normal state) = viewport − tab canvas + the title row height difference (normal − the source's current; non-zero if the source is maximized — TRD S26-window-chrome §7-6). The caller adds that difference (`rowGrowth` of `useTabDragSource`).
    */
   chrome: SizeCss
   /** A single-tab popout — that window is moved without a new window (Q34). */
@@ -39,9 +36,7 @@ export interface DragSizes {
 }
 
 /**
- * Shell `dragged_size` — from `restored`: ① a side larger than the work area `work` becomes `max(0, work − 2 × MAXIMIZED_INSET_DIP)` ② if the source is maximized
- * (`maximized` = that size), each side is at least half of it. ★② comes last so it wins (C5)★ — do not change the order. The three sizes must be on the same side
- * (all outer · all inner).
+ * Shell `dragged_size` — from `restored`: ① a side larger than the work area `work` becomes `max(0, work − 2 × MAXIMIZED_INSET_DIP)` ② if the source is maximized (`maximized` = that size), each side is at least half of it. ★② comes last so it wins (C5)★ — do not reorder. The three sizes must be on the same side (all outer · all inner).
  */
 // ADR-0295
 export function draggedSize(restored: SizeCss, maximized: SizeCss | null, work: SizeCss): SizeCss {
@@ -56,9 +51,7 @@ export function draggedSize(restored: SizeCss, maximized: SizeCss | null, work: 
 }
 
 /**
- * Shell `drag_sizes` — for a window with two or more tabs: `size` = `draggedSize` converted to an inner size (restore size · if none, the current size / work area −
- * frame / if maximized, its inner size) · `original` = `size` − chrome. For a single-tab popout: no `size` · `original` = (restore size if maximized ·
- * otherwise the current size) − chrome.
+ * Shell `drag_sizes` — with two or more tabs: `size` = `draggedSize` converted to an inner size (restore size · else current size / work area − frame / maximized: its inner size), `original` = `size` − chrome. Single-tab popout: no `size`; `original` = (restore size if maximized, else current size) − chrome.
  */
 export function dragSizes(s: SourceWindow): DragSizes {
   const canvas = (v: SizeCss): SizeCss => ({ w: fmax(v.w - s.chrome.w, 0), h: fmax(v.h - s.chrome.h, 0) })
@@ -79,8 +72,7 @@ export interface GrabInput {
   /** Left of the tab drag area (left of the first tab). */
   stripLeft: number
   /**
-   * Width the heads can use in the new window's tab bar (`available` of `layout.ts`) — `null` = unknown (standard width). With two or more tabs, computed from the new window width;
-   * for a maximized single-tab popout, from the restored window width (TRD §3-5).
+   * Width the heads can use in the new window's tab bar (`available` of `layout.ts`) — `null` = unknown (standard width). Two or more tabs: from the new window width; maximized single-tab popout: from the restored window width (TRD §3-5).
    */
   headRoom: number | null
   single: boolean
@@ -88,12 +80,9 @@ export interface GrabInput {
 }
 
 /**
- * The point where the cursor will be in the new window viewport (`DropTo.new_window.grab` · Chrome `GetTabOffsetForDetachedWindow`) = (tab bar left + r × W1, pressed y) —
- * r = the width ratio of the pressed point inside the head · W1 = the width of a single-tab head in the new window's tab bar. A non-maximized single-tab popout is the pressed point as is (that tab is
- * already the first tab and W1 = the current head width — the shell `Reuse` moves the window by the amount it was dragged · Q34).
+ * The point where the cursor will be in the new window viewport (`DropTo.new_window.grab` · Chrome `GetTabOffsetForDetachedWindow`) = (tab bar left + r × W1, pressed y) — r = the width ratio of the pressed point inside the head, W1 = the single-tab head width in the new window's tab bar. A non-maximized single-tab popout is the pressed point as is (already the first tab, W1 = current head width — the shell `Reuse` moves the window by the drag amount · Q34).
  */
-// The left · vertical position of the new window's tab bar is taken as the same as the source tab bar — the new window is a popout, so if main is the source, that chrome may differ ([untested] ·
-//   if off, the new window comes up shifted from the cursor by that amount).
+// The new window's tab bar left · vertical position is taken as the source tab bar's — the new window is a popout, so with main as source that chrome may differ ([untested]; if off the new window comes up shifted from the cursor by that amount).
 export function dragGrab(g: GrabInput): PointCss {
   if (g.single && !g.maximized) return { x: g.pressed.x, y: g.pressed.y }
   const width = g.head.x1 - g.head.x0

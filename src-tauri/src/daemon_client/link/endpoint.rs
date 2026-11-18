@@ -1,13 +1,7 @@
 //! Where a daemon is and which credential it takes (TRD S21 trd-3 §3-6 — the seam that replaced the old `DaemonDiscovery`).
-//!
-//! - [`EndpointSource::ensure`] may spawn a daemon; [`EndpointSource::current`] never does. Only the first connection
-//!   calls `ensure`, outside `Registry::add`; every dial calls `current` (`link::dialer`) — so a reconnect cannot wake a
-//!   daemon by construction (ADR-0021).
-//! - `current` returns why there is no usable endpoint instead of `None`, because the dialer treats the reasons
-//!   differently (D25 ① · D20 ①): only a sharing violation falls back to the last-known address, a version mismatch is
-//!   a terminal refusal, everything else is one failed attempt.
-// ADR-0021
-// ADR-0310
+//! - [`EndpointSource::ensure`] may spawn a daemon; [`EndpointSource::current`] never does. Only the first connection calls `ensure`, outside `Registry::add`; every dial calls `current` (`link::dialer`) — so a reconnect cannot wake a daemon by construction (ADR-0021).
+//! - `current` returns why there is no usable endpoint instead of `None`, because the dialer treats the reasons differently (D25 ① · D20 ①): only a sharing violation falls back to the last-known address, a version mismatch is a terminal refusal, everything else is one failed attempt.
+// ADR-0021 · ADR-0310
 
 use std::io;
 use std::path::PathBuf;
@@ -23,30 +17,22 @@ use crate::discovery::{
     check_acceptable, AcceptCheck, DataLayout, DiscoveryError, PidLiveness, RealLiveness,
 };
 
-/// One daemon's dial target and credential.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Endpoint {
     pub key: DaemonKey,
-    /// The transport address the inner dialer understands (`ws://host:port` for the local daemon).
     pub address: Address,
     pub credential: Secret,
 }
 
-/// What [`EndpointSource::current`] found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Current {
-    /// A live daemon that speaks our protocol version.
     Live(Endpoint),
-    /// Another process holds the endpoint record without sharing it (a virus scanner · an indexer — Windows sharing
-    /// violation). The owner that wrote it is likely still alive, so the last-known endpoint is worth one dial.
+    /// Another process holds the endpoint record without sharing it (virus scanner · indexer — Windows sharing violation). The owner that wrote it is likely still alive, so the last-known endpoint is worth one dial.
     Busy,
-    /// No endpoint record — no live daemon.
     Absent,
-    /// A record that cannot be used: empty · broken · a dead pid · access denied · any other read error. The text is
-    /// a local diagnostic and quotes no file content.
+    /// A record that cannot be used: empty · broken · a dead pid · access denied · any other read error. The text is a local diagnostic and quotes no file content.
     Unusable(String),
-    /// A live daemon on another protocol version. Dialing it can only be refused. `pid` / `start_time` = the record's
-    /// identity of that daemon (`start_time` 0 = the record carries none).
+    /// A live daemon on another protocol version — dialing it can only be refused. `pid` / `start_time` = that daemon's identity from the record (`start_time` 0 = none).
     VersionMismatch {
         daemon: u32,
         pid: u32,
@@ -54,18 +40,12 @@ pub enum Current {
     },
 }
 
-/// See the module doc. `current` runs blocking file I/O — async callers run it on the blocking pool.
 pub trait EndpointSource: Send + Sync {
-    /// Find a live daemon, spawning one if there is none. Blocks up to `timeout` (spawn polling).
     fn ensure(&self, timeout: Duration) -> Result<Endpoint, String>;
-    /// Read where the daemon is now. ★Never spawns★.
     fn current(&self) -> Current;
 }
 
-/// The local daemon of one data folder (`daemon.json`).
-///
-/// It reads the file itself instead of through `discovery::FileReader`, which turns the read error into text and
-/// loses the `io::Error` that tells a sharing violation apart (D25 ①).
+/// The local daemon of one data folder (`daemon.json`). It reads the file itself instead of through `discovery::FileReader`, which turns the read error into text and loses the `io::Error` that tells a sharing violation apart (D25 ①).
 pub struct LocalEndpointSource {
     key: DaemonKey,
     data_dir: PathBuf,
@@ -294,8 +274,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let src = source(dir.path(), false);
 
-        // Windows `ERROR_SHARING_VIOLATION` (32). The platform predicate decides — on an OS without share modes the
-        //   same raw code is just another read error.
+        // Windows `ERROR_SHARING_VIOLATION` (32). The platform predicate decides — on an OS without share modes the same raw code is just another read error.
         let sharing = io::Error::from_raw_os_error(32);
         let expected = if engram_dashboard_platform::fs::is_sharing_violation(&sharing) {
             Current::Busy

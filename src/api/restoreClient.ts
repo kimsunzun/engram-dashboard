@@ -1,12 +1,6 @@
-// The endpoint that attaches the state of the crash-copy 「복원할까요?」 (restore?) prompt to the main window — holds the last pulled `restore_status` and passes it on to subscribers
-// (the restore modal · the state file notice). The only answer is the shell command `restore_answer` (TRD S21-storage §6-7).
-//
-// ★Calls invoke/listen directly★: the owner of restore state is the shell, not the daemon, so agentClient should not carry it —
-// the same exception as `settingsClient.ts`. The two are cut at `RestoreIpc` so tests plug in a fake (ADR-0012). The LLM path is already covered by the bus
-// `restore.status` / `restore.answer`, so no new global handle is added — even if that side answers, `restore:changed`
-// arrives and this window follows.
-//
-// ★main window only★: the shell emits `restore:changed` to main only. The main route (`AppLayout`) installs it.
+// Attaches the crash-copy "restore?" prompt state to the main window — holds the last pulled `restore_status` and passes it to subscribers (the restore modal · the state file notice). The only answer is the shell command `restore_answer` (TRD S21-storage §6-7).
+// ★Calls invoke/listen directly★: the shell owns restore state, not the daemon (same exception as `settingsClient.ts`); the two are cut at `RestoreIpc` so tests plug in a fake (ADR-0012). The LLM path is the bus `restore.status` / `restore.answer`, so no new global handle — when that side answers, `restore:changed` arrives and this window follows.
+// ★Main window only★: the shell emits `restore:changed` to main only; the main route (`AppLayout`) installs it.
 
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
@@ -21,8 +15,7 @@ import { retryAsync, RetryCancelledError } from '../util/retryInvoke'
 export type { AnswerReply, CrashCopyStatus, RestoreStatusView, StateFileStatus }
 
 /**
- * The restore state this window holds — of the shell's `RestoreStatusView`, the two fields used only for notices (`saves` · `state_file`) are loose.
- * `undefined` = the payload lacked that field or it held an unknown value (shell and frontend editions out of step) — what that field says is unknown.
+ * The restore state this window holds — of the shell's `RestoreStatusView`, the two notice-only fields (`saves` · `state_file`) are loose: `undefined` = the payload lacked the field or held an unknown value (shell and frontend editions out of step).
  */
 export type RestoreView = Omit<RestoreStatusView, 'saves' | 'state_file'> & {
   saves: boolean | undefined
@@ -48,8 +41,7 @@ export interface RestoreClient {
   /** Called whenever the state changes. Returns = unsubscribe (`useSyncExternalStore` shape). */
   subscribe(listener: () => void): () => void
   /**
-   * Sends the answer and resolves **after** pulling the state again, whether it succeeded or failed — that state decides the closing.
-   * A rejection rejects with the shell's error string. Do not tell kinds apart by string — the state after a failure is carried by `status()`.
+   * Sends the answer and resolves **after** pulling the state again, success or failure — that state decides the closing. A rejection carries the shell's error string; do not tell kinds apart by string — the state after a failure is in `status()`.
    */
   answer(accept: boolean): Promise<AnswerReply>
   /** Subscribe to notices → first pull. Returns = disposer. */
@@ -66,8 +58,7 @@ const STATE_FILE: readonly string[] = [
 ] satisfies StateFileStatus[]
 
 /**
- * If `crash_copy` cannot be read, `null` — a safety net so main is not blocked by an unknown value. The two notice-only fields stay `undefined`
- * even if unreadable and the payload is kept alive — dropping it would stop even the asking modal from showing. What is lost is that one notice.
+ * `null` if `crash_copy` cannot be read — a net so main is not blocked by an unknown value. The two notice-only fields stay `undefined` when unreadable and the payload is kept — dropping it would stop even the asking modal; only that one notice is lost.
  */
 function viewOf(raw: unknown): RestoreView | null {
   if (raw === null || typeof raw !== 'object') return null
@@ -106,25 +97,22 @@ export function createRestoreClient(ipc: RestoreIpc): RestoreClient {
         attempts,
         isCancelled,
         onRetry: (err, attempt) => {
-          console.warn(`[restore] ${CMD_RESTORE_STATUS} 재시도 #${attempt}:`, err)
+          console.warn(`[restore] retrying ${CMD_RESTORE_STATUS} #${attempt}:`, err)
         },
       },
     )
-    // Do not paint the answer of an install that was taken down (the pre-remount · pre-unmount edition) — a retry cannot withdraw a pending request, so it may resolve even after
-    //   dispose.
+    // Do not paint the answer of a taken-down install (pre-remount · pre-unmount edition) — a retry cannot withdraw a pending request, so it may resolve after dispose.
     if (isCancelled?.()) return
-    // ★The later-issued pull wins★ — we pull on every notice, so answers can arrive in a different order than issued, and the earlier-issued one's answer is a
-    //   staler state. Painting in arrival order would revive an already closed modal with the old `awaiting`.
+    // ★The later-issued pull wins★: pulls happen on every notice, so answers can arrive out of issue order and the earlier-issued answer is staler; painting in arrival order would revive a closed modal with the old `awaiting`.
     if (seq < applied) return
     const view = viewOf(raw)
-    // ★Treat an unreadable payload as a failed pull — do not discard it silently★: discarding makes the boot pull end as if it had received, so it does not pull
-    //   again, and the modal never shows even though the shell is asking. Throwing keeps the boot re-pull running until it gets a valid payload.
-    if (!view) throw new Error(`${CMD_RESTORE_STATUS}: 모양이 계약과 다르다 — ${JSON.stringify(raw)}`)
+    // ★An unreadable payload is a failed pull, never silently discarded★: discarding would end the boot pull as if received, so no re-pull and the modal never shows though the shell is asking; throwing keeps the boot re-pull running until a valid payload.
+    if (!view) throw new Error(`${CMD_RESTORE_STATUS}: the shape differs from the contract — ${JSON.stringify(raw)}`)
     // We pull again on every notice, so the same payload comes every time while editions are out of step — leave it once per field.
     const unknown = (['saves', 'state_file'] as const).filter(k => view[k] === undefined && !warned.has(k))
     if (unknown.length > 0) {
       for (const k of unknown) warned.add(k)
-      console.warn(`[restore] ${CMD_RESTORE_STATUS}: ${unknown.join(' · ')} 칸이 없거나 모르는 값이다 — 그 알림 없이 쓴다`, raw)
+      console.warn(`[restore] ${CMD_RESTORE_STATUS}: field ${unknown.join(' · ')} is missing or has an unknown value — using it without that notice`, raw)
     }
     applied = seq
     current = view
@@ -146,7 +134,7 @@ export function createRestoreClient(ipc: RestoreIpc): RestoreClient {
         return await ipc.invoke<AnswerReply>(CMD_RESTORE_ANSWER, { accept })
       } finally {
         await pull().catch(e => {
-          console.error(`[restore] 답 뒤 ${CMD_RESTORE_STATUS} 최종 실패:`, e)
+          console.error(`[restore] ${CMD_RESTORE_STATUS} after the answer finally failed:`, e)
         })
       }
     },
@@ -162,19 +150,17 @@ export function createRestoreClient(ipc: RestoreIpc): RestoreClient {
       const refresh = (where: string): void => {
         pull(isCancelled).catch(e => {
           if (e instanceof RetryCancelledError) return
-          console.error(`[restore] ${where}: ${CMD_RESTORE_STATUS} 최종 실패:`, e)
+          console.error(`[restore] ${where}: ${CMD_RESTORE_STATUS} finally failed:`, e)
         })
       }
 
-      // ★The boot pull is not released until received★ — if it is never received the state stays `null`, so even if the shell is `awaiting` the modal does not show and
-      //   main opens as is. Notices come only when the state **changes**, so waiting for one may mean it never comes.
-      //   After the bounded retry, call once per attempt and log only the first time.
+      // ★The boot pull is not released until received★: if never received the state stays `null`, so a shell that is `awaiting` still shows no modal and main opens as is. Notices come only on a state **change**, so waiting for one may mean forever; after the bounded retry, call once per attempt and log only the first time.
       const bootPull = (): void => {
         bootFloor = issued
         pull(isCancelled).catch(e => {
           if (e instanceof RetryCancelledError || disposed) return
           console.error(
-            `[restore] 부팅 ${CMD_RESTORE_STATUS} 최종 실패 — ${BOOT_REPULL_INTERVAL_MS}ms 마다 다시 당긴다:`,
+            `[restore] boot ${CMD_RESTORE_STATUS} finally failed — pulling again every ${BOOT_REPULL_INTERVAL_MS}ms:`,
             e,
           )
           scheduleRepull()
@@ -192,11 +178,8 @@ export function createRestoreClient(ipc: RestoreIpc): RestoreClient {
       }
 
       void (async () => {
-        // ★Pull **after** the subscription registration finishes — do not fire them side by side★ (reason = the same clause in `theme/uiSettings.ts`).
-        //   Reversed, the answers between the pull and the registration (`answered` · reverted) are missed and the modal stays on the old state.
-        // ★Known residual — if `listen()` never resolves without rejecting, the pull never goes out either★ (retry covers only rejections ·
-        //   the same residual as `settingsClient.ts`). Then the state stays `null`, the modal does not show, and the boot re-pull below
-        //   does not start either.
+        // ★Pull **after** the subscription registration finishes — not side by side★ (same clause as `theme/uiSettings.ts`): reversed, answers between the pull and the registration (`answered` · reverted) are missed and the modal stays on the old state.
+        // ★Known residual★: if `listen()` never resolves without rejecting, the pull never goes out either (retry covers only rejections — same as `settingsClient.ts`); the state stays `null` and the boot re-pull below does not start.
         try {
           const off = await retryAsync(
             () =>
@@ -208,7 +191,7 @@ export function createRestoreClient(ipc: RestoreIpc): RestoreClient {
             {
               isCancelled,
               onRetry: (err, attempt) => {
-                console.warn(`[restore] ${EVT_RESTORE_CHANGED} 구독 재시도 #${attempt}:`, err)
+                console.warn(`[restore] retrying the ${EVT_RESTORE_CHANGED} subscription #${attempt}:`, err)
               },
             },
           )
@@ -221,7 +204,7 @@ export function createRestoreClient(ipc: RestoreIpc): RestoreClient {
           if (e instanceof RetryCancelledError) return
           // Issue the pull even if the subscription died — even if we cannot follow answers sent over the bus, we must know whether it is asking now.
           console.error(
-            `[restore] ${EVT_RESTORE_CHANGED} 구독 실패 — 이 창은 이후 복원 상태 변경을 못 받는다:`,
+            `[restore] subscribing to ${EVT_RESTORE_CHANGED} failed — this window will not receive later restore state changes:`,
             e,
           )
         }
@@ -241,8 +224,7 @@ export function createRestoreClient(ipc: RestoreIpc): RestoreClient {
 }
 
 const tauriIpc: RestoreIpc = {
-  // ★`target` = own label★ — the default target `Any` of `listen()` also receives notices addressed to another window
-  //   (the same clause in `theme/uiSettings.ts`).
+  // ★`target` = own label★: the default `Any` of `listen()` also receives notices addressed to another window (same clause as `theme/uiSettings.ts`).
   listen: (event, handler) =>
     listen<unknown>(event, e => handler(e.payload), { target: getCurrentWindow().label }),
   invoke: <T>(cmd: string, args?: Record<string, unknown>) => invoke<T>(cmd, args),

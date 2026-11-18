@@ -6,6 +6,6 @@ import type { UsageWindowRow } from "./UsageWindowRow";
 
 export type UsageRefreshOk = { backend: AgentBackend, account_key: string, plan?: string | null, windows: Array<UsageWindowRow>, in_flight: boolean, served: UsageServedWord, state: UsageStateWord, next_attempt_in_secs?: bigint | null, retry_in_secs?: bigint | null, detail_kind?: string | null, detail_code?: bigint | null, 
 /**
- * 상류 원문 — ★`Debug` 가 원문을 찍는다, `{:?}` 로 로그에 싣지 말 것★(`UsageVendorRow.upstream` 의 doc).
+ * Upstream original text — ★`Debug` prints the original; do not put it into logs with `{:?}`★ (the doc of `UsageVendorRow.upstream`).
  */
 upstream?: string | null, };

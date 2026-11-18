@@ -35,7 +35,6 @@ pub(super) fn split(
     }
 }
 
-// Halving chain — b is always the next level (same shape as the `layout::dock` tests).
 pub(super) fn half_chain(dir: SplitDir, depth: u128, base: u128) -> LayoutNode {
     let mut node = slot(base);
     for i in 1..=depth {
@@ -64,7 +63,7 @@ fn frame_of(frames: &[(Uuid, PxRect)], n: u128) -> PxRect {
     frames
         .iter()
         .find(|(s, _)| *s == id(n))
-        .expect("칸 있어야")
+        .expect("the area must exist")
         .1
 }
 
@@ -90,13 +89,15 @@ fn targets<'a>(
     }
 }
 
-// Band picked at a point — (area number · 0 if outside, side).
 fn picked(w: &WindowTargets, p: PointCss) -> Option<(u128, DockSide)> {
     let all = effective_bands(w);
     let near = bands_at(w, p);
     let a = choose(&all, p).map(|i| &all[i]);
     let b = choose(&near, p).map(|i| &near[i]);
-    assert_eq!(a, b, "{p:?}: 전부에서 고른 것 = 점 밑 칸만으로 고른 것");
+    assert_eq!(
+        a, b,
+        "{p:?}: picked from all = picked from only the areas under the point"
+    );
     a.map(|h| match h.anchor {
         DockAnchor::Outer => (0, h.side),
         DockAnchor::Slot(s) => (s.as_u128(), h.side),
@@ -122,14 +123,22 @@ fn the_zone_is_the_drag_area_widened_15_up_and_down_only() {
 fn the_zone_is_half_open_on_both_axes() {
     let z = strip_zone(AREA);
     for (p, inside, why) in [
-        (pt(4.0, 10.0), true, "끌기 영역 왼쪽 변"),
-        (pt(3.999, 10.0), false, "첫 탭 왼쪽 앞"),
-        (pt(503.999, 10.0), true, "끌기 영역 마지막"),
-        (pt(504.0, 10.0), false, "끌기 영역 오른쪽 변 = `+` 자리"),
-        (pt(200.0, -15.0), true, "위 15 의 첫 줄"),
-        (pt(200.0, -15.001), false, "위 15 밖"),
-        (pt(200.0, 42.999), true, "아래 15 의 마지막"),
-        (pt(200.0, 43.0), false, "아래 15 = 떼기"),
+        (pt(4.0, 10.0), true, "left edge of the drag area"),
+        (
+            pt(3.999, 10.0),
+            false,
+            "just before the left of the first tab",
+        ),
+        (pt(503.999, 10.0), true, "end of the drag area"),
+        (
+            pt(504.0, 10.0),
+            false,
+            "right edge of the drag area = the `+` place",
+        ),
+        (pt(200.0, -15.0), true, "first line of the 15 above"),
+        (pt(200.0, -15.001), false, "outside the 15 above"),
+        (pt(200.0, 42.999), true, "last of the 15 below"),
+        (pt(200.0, 43.0), false, "15 below = detach"),
         (pt(f64::NAN, 10.0), false, "NaN"),
     ] {
         assert_eq!(contains(&z, p), inside, "{why}");
@@ -161,7 +170,7 @@ fn the_band_is_ten_percent_rounded_half_away_from_zero_over_a_12_px_floor() {
         (8, 8),    // If the area is narrower than the minimum thickness, the whole area
         (0, 0),
     ] {
-        assert_eq!(band_thickness(len), want, "칸 길이 {len}");
+        assert_eq!(band_thickness(len), want, "area length {len}");
     }
 }
 
@@ -169,7 +178,7 @@ fn the_band_is_ten_percent_rounded_half_away_from_zero_over_a_12_px_floor() {
 fn the_band_thickness_is_exact_integer_rounding_for_every_length() {
     for len in 0..=20_000u32 {
         let want = ((len + 5) / 10).max(BAND_MIN_PX).min(len);
-        assert_eq!(band_thickness(len), want, "칸 길이 {len}");
+        assert_eq!(band_thickness(len), want, "area length {len}");
     }
 }
 
@@ -247,13 +256,17 @@ fn outer_strips_are_20_px_and_shrink_to_a_tiny_canvas() {
 #[test]
 fn subtracting_keeps_exactly_the_uncovered_pixels() {
     let r = px(10, 10, 30, 30);
-    assert_eq!(subtract(r, px(40, 40, 50, 50)), vec![r], "안 겹침");
-    assert_eq!(subtract(r, px(30, 10, 40, 30)), vec![r], "변만 맞닿음");
-    assert!(subtract(r, px(0, 0, 100, 100)).is_empty(), "다 덮임");
+    assert_eq!(subtract(r, px(40, 40, 50, 50)), vec![r], "no overlap");
+    assert_eq!(
+        subtract(r, px(30, 10, 40, 30)),
+        vec![r],
+        "only the edges touch"
+    );
+    assert!(subtract(r, px(0, 0, 100, 100)).is_empty(), "fully covered");
     assert_eq!(
         subtract(r, px(0, 0, 100, 15)),
         vec![px(10, 15, 30, 30)],
-        "위 몫"
+        "top part"
     );
     assert_eq!(
         subtract(r, px(15, 15, 25, 25)),
@@ -263,13 +276,12 @@ fn subtracting_keeps_exactly_the_uncovered_pixels() {
             px(10, 15, 15, 25),
             px(25, 15, 30, 25),
         ],
-        "가운데 구멍"
+        "hole in the middle"
     );
     assert!(
         subtract(px(5, 5, 5, 9), px(0, 0, 1, 1)).is_empty(),
-        "빈 사각형"
+        "empty rectangle"
     );
-    // Gathering the pieces again gives the same pixel count as r − cut.
     for cut in [px(0, 12, 40, 20), px(20, 0, 25, 100), px(12, 12, 13, 13)] {
         let area: u32 = subtract(r, cut)
             .iter()
@@ -293,7 +305,7 @@ fn frame_at_finds_the_slot_under_a_point_and_nothing_outside() {
     assert_eq!(
         frame_at(&layout, CANVAS, pt(600.0, 10.0)),
         Some((id(2), px(600, 0, 1200, 800))),
-        "경계는 오른쪽 칸"
+        "the boundary belongs to the right area"
     );
     assert_eq!(frame_at(&layout, CANVAS, pt(1200.0, 10.0)), None);
     assert_eq!(frame_at(&layout, CANVAS, pt(10.0, -1.0)), None);
@@ -331,97 +343,129 @@ fn picking_on_a_left_right_split_follows_the_band_order_and_half_open_edges() {
     let w = targets(&layout, &incoming, dip(400.0, 300.0));
     use DockSide::{Bottom, Left, Right, Top};
     for (p, want, why) in [
-        (pt(10.0, 400.0), Some((0, Left)), "바깥 왼쪽"),
-        (pt(1190.0, 400.0), Some((0, Right)), "바깥 오른쪽"),
+        (pt(10.0, 400.0), Some((0, Left)), "outer left"),
+        (pt(1190.0, 400.0), Some((0, Right)), "outer right"),
         (
             pt(900.0, 10.0),
             Some((0, Top)),
-            "바깥 위 — 탭바 구역 오른쪽",
+            "outer top — right of the tab bar zone",
         ),
-        (pt(600.0, 790.0), Some((0, Bottom)), "바깥 아래"),
+        (pt(600.0, 790.0), Some((0, Bottom)), "outer bottom"),
         (
             pt(16.0, 784.0),
             Some((0, Left)),
-            "바깥 모서리 동률 = 왼쪽 먼저",
+            "outer corner tie = left first",
         ),
         (
             pt(1190.0, 15.0),
             Some((0, Right)),
-            "바깥 모서리 — 가까운 변(오른쪽)",
+            "outer corner — nearer edge (right)",
         ),
         (
             pt(1185.0, 795.0),
             Some((0, Bottom)),
-            "바깥 모서리 — 가까운 변(아래)",
+            "outer corner — nearer edge (bottom)",
         ),
-        (pt(19.9, 400.0), Some((0, Left)), "바깥 왼쪽 띠 마지막"),
-        (pt(300.0, 14.9), None, "탭바 구역 안 — 띠가 아니다"),
+        (
+            pt(19.9, 400.0),
+            Some((0, Left)),
+            "end of the outer left band",
+        ),
+        (
+            pt(300.0, 14.9),
+            None,
+            "inside the tab bar zone — not a band",
+        ),
         (
             pt(300.0, 15.0),
             Some((0, Top)),
-            "탭바 구역 바로 아래 = 바깥 위 띠(AC44)",
+            "just below the tab bar zone = outer top band (AC44)",
         ),
-        (pt(900.0, 19.9), Some((0, Top)), "바깥 위 띠 마지막"),
+        (pt(900.0, 19.9), Some((0, Top)), "end of the outer top band"),
         (
             pt(900.0, 20.0),
             Some((2, Top)),
-            "바깥 위 띠 바로 아래 = 칸 위 띠",
+            "just below the outer top band = area top band",
         ),
         (
             pt(20.0, 400.0),
             Some((1, Left)),
-            "바깥 왼쪽 띠 바로 오른쪽 = 칸 왼쪽 띠",
+            "just right of the outer left band = area left band",
         ),
         (
             pt(1179.9, 400.0),
             Some((2, Right)),
-            "바깥 오른쪽 띠 바로 앞 = 칸 오른쪽 띠",
+            "just before the outer right band = area right band",
         ),
         (
             pt(1180.0, 400.0),
             Some((0, Right)),
-            "바깥 오른쪽 띠 첫 픽셀",
+            "first pixel of the outer right band",
         ),
-        (pt(900.0, 780.0), Some((0, Bottom)), "바깥 아래 띠 첫 픽셀"),
+        (
+            pt(900.0, 780.0),
+            Some((0, Bottom)),
+            "first pixel of the outer bottom band",
+        ),
         (
             pt(900.0, 779.9),
             Some((2, Bottom)),
-            "바깥 아래 띠 바로 위 = 칸 아래 띠",
+            "just above the outer bottom band = area bottom band",
         ),
-        (pt(300.0, 400.0), None, "칸 1 가운데"),
-        (pt(900.0, 400.0), None, "칸 2 가운데"),
-        (pt(600.0, 400.0), Some((2, Left)), "맞닿은 변 = 오른쪽 칸"),
+        (pt(300.0, 400.0), None, "center of area 1"),
+        (pt(900.0, 400.0), None, "center of area 2"),
+        (
+            pt(600.0, 400.0),
+            Some((2, Left)),
+            "shared edge = the right area",
+        ),
         (
             pt(599.9, 400.0),
             Some((1, Right)),
-            "맞닿은 변 바로 앞 = 왼쪽 칸",
+            "just before the shared edge = the left area",
         ),
-        (pt(79.9, 400.0), Some((1, Left)), "왼쪽 띠 마지막"),
-        (pt(80.0, 400.0), None, "왼쪽 띠 오른쪽 변은 밖"),
-        (pt(540.0, 400.0), Some((1, Right)), "오른쪽 띠 첫 픽셀"),
-        (pt(539.9, 400.0), None, "오른쪽 띠 바로 앞"),
-        (pt(300.0, 99.9), Some((1, Top)), "위 띠 마지막"),
-        (pt(300.0, 100.0), None, "위 띠 아래 변은 밖"),
-        (pt(300.0, 700.0), Some((1, Bottom)), "아래 띠 첫 픽셀"),
-        (pt(300.0, 699.9), None, "아래 띠 바로 위"),
+        (pt(79.9, 400.0), Some((1, Left)), "end of the left band"),
+        (
+            pt(80.0, 400.0),
+            None,
+            "the right edge of the left band is outside",
+        ),
+        (
+            pt(540.0, 400.0),
+            Some((1, Right)),
+            "first pixel of the right band",
+        ),
+        (pt(539.9, 400.0), None, "just before the right band"),
+        (pt(300.0, 99.9), Some((1, Top)), "end of the top band"),
+        (
+            pt(300.0, 100.0),
+            None,
+            "the bottom edge of the top band is outside",
+        ),
+        (
+            pt(300.0, 700.0),
+            Some((1, Bottom)),
+            "first pixel of the bottom band",
+        ),
+        (pt(300.0, 699.9), None, "just above the bottom band"),
         (
             pt(650.0, 60.0),
             Some((2, Top)),
-            "칸 모서리 — 정규화 거리(위 0.5 < 왼쪽 0.83)",
+            "area corner — normalized distance (top 0.5 < left 0.83)",
         ),
         (
             pt(610.0, 90.0),
             Some((2, Left)),
-            "칸 모서리 — 정규화 거리(왼쪽 0.17 < 위 0.88)",
+            "area corner — normalized distance (left 0.17 < top 0.88)",
         ),
         (
             pt(630.0, 60.0),
             Some((2, Left)),
-            "칸 모서리 동률(30/60 = 40/80) = 왼쪽 먼저",
+            "area corner tie (30/60 = 40/80) = left first",
         ),
-        (pt(1200.0, 400.0), None, "캔버스 오른쪽 변 밖"),
-        (pt(600.0, 800.0), None, "캔버스 아래 변 밖"),
-        (pt(-0.1, 400.0), None, "캔버스 왼쪽 밖"),
+        (pt(1200.0, 400.0), None, "outside the canvas right edge"),
+        (pt(600.0, 800.0), None, "outside the canvas bottom edge"),
+        (pt(-0.1, 400.0), None, "outside the canvas left"),
     ] {
         assert_eq!(picked(&w, p), want, "{why} {p:?}");
     }
@@ -451,7 +495,7 @@ fn a_point_on_an_area_is_chosen_there_and_only_there() {
                 Some(i) => assert!(inside.contains(&i), "{p:?}"),
                 None => assert!(
                     inside.is_empty(),
-                    "{p:?}: 띠 영역 {inside:?} 위인데 안 골림"
+                    "{p:?}: over the band area {inside:?} yet not picked"
                 ),
             }
         }
@@ -551,7 +595,7 @@ fn the_centre_diagonals_are_where_neighbouring_slot_bands_meet() {
         for y in (0..800).step_by(7) {
             for x in (0..1200).step_by(3) {
                 let p = pt(f64::from(x) + 0.5, f64::from(y) + 0.5);
-                let (slot_id, frame) = frame_at(layout, CANVAS, p).expect("캔버스 안");
+                let (slot_id, frame) = frame_at(layout, CANVAS, p).expect("inside the canvas");
                 let room = band_frame(frame, CANVAS, &outer);
                 let c = slot_centre(frame, room);
                 let in_zone = p.x >= ZONE.x0 && p.x < ZONE.x1 && p.y < ZONE.y1;
@@ -561,14 +605,14 @@ fn the_centre_diagonals_are_where_neighbouring_slot_bands_meet() {
                         assert_eq!(b.anchor, DockAnchor::Slot(slot_id), "{p:?}");
                         assert!(
                             convex_holds(&side_zone(room, c, b.side), p),
-                            "{p:?}: {:?} 띠인데 그 구역 밖 — 띠 틀 {room:?} · 가운데 {c:?}",
+                            "{p:?}: a {:?} band but outside that zone — band frame {room:?} · center {c:?}",
                             b.side
                         );
                     }
                     None if in_zone => {}
                     None => assert!(
                         c.x0 <= p.x && p.x <= c.x1 && c.y0 <= p.y && p.y <= c.y1,
-                        "{p:?}: 어느 띠도 아닌데 가운데 {c:?} 밖"
+                        "{p:?}: in no band yet outside the center {c:?}"
                     ),
                 }
             }
@@ -578,7 +622,7 @@ fn the_centre_diagonals_are_where_neighbouring_slot_bands_meet() {
 
 #[test]
 fn an_edge_slot_keeps_a_reachable_edge_band_inside_the_outer_band() {
-    // Canvas 882 × 544 · top/bottom halving [left/right halving (A · B), C] — 「다」 (C) = (0,272)–(882,544) · top/bottom bands 27. If the bottom band
+    // Canvas 882 × 544 · top/bottom halving [left/right halving (A · B), C] — 「C」 = (0,272)–(882,544) · top/bottom bands 27. If the bottom band
     // attaches to the area frame side, y 517..544 overlaps the outer bottom band (the last 20) — it stands inside the band frame (y 497..524) and remains.
     let canvas = CanvasPx { w: 882, h: 544 };
     let layout = split(
@@ -598,7 +642,7 @@ fn an_edge_slot_keeps_a_reachable_edge_band_inside_the_outer_band() {
     let bottom = all
         .iter()
         .find(|b| b.anchor == DockAnchor::Slot(id(3)) && b.side == DockSide::Bottom)
-        .expect("「다」 아래 띠");
+        .expect("「C」 bottom band");
     assert_eq!(bottom.band, px(20, 497, 862, 524));
     assert_eq!(bottom.areas, vec![px(20, 497, 862, 524)]);
     let pick = |x, y| {
@@ -618,25 +662,24 @@ fn an_edge_slot_keeps_a_reachable_edge_band_inside_the_outer_band() {
     assert_eq!(
         pick(441.0, 497.0),
         Some((slot3, DockSide::Bottom)),
-        "아래 띠 첫 줄"
+        "first line of the bottom band"
     );
     assert_eq!(
         pick(441.0, 523.9),
         Some((slot3, DockSide::Bottom)),
-        "아래 띠 마지막"
+        "end of the bottom band"
     );
     assert_eq!(
         pick(441.0, 524.0),
         Some((DockAnchor::Outer, DockSide::Bottom)),
-        "마지막 20 = 바깥 아래 띠"
+        "last 20 = outer bottom band"
     );
     assert_eq!(
         pick(441.0, 543.9),
         Some((DockAnchor::Outer, DockSide::Bottom))
     );
-    assert_eq!(pick(441.0, 496.9), None, "아래 띠 바로 위");
-    assert_eq!(pick(441.0, 408.0), None, "「다」 가운데");
-    // Bottom side of the drawn center = top side of the bottom band.
+    assert_eq!(pick(441.0, 496.9), None, "just above the bottom band");
+    assert_eq!(pick(441.0, 408.0), None, "center of 「C」");
     let room = band_frame(px(0, 272, 882, 544), canvas, &outer_sides(&all));
     assert_eq!(slot_centre(px(0, 272, 882, 544), room).y1, 497.0);
 }
@@ -655,17 +698,16 @@ fn zone_lines_follow_the_slot_under_the_point_and_hide_on_the_outer_band() {
             slot: px(20, 20, 600, 780),
             centre: rect(80.0, 100.0, 540.0, 700.0),
         }),
-        "칸 가운데 — 선은 그리고 고른 띠는 없다"
+        "area center — the lines are drawn but no band is picked"
     );
     assert_eq!(choose(&all, pt(300.0, 400.0)), None);
     assert_eq!(
         zones(900.0, 64.0).map(|z| z.slot),
         Some(px(600, 20, 1180, 780)),
-        "칸 2 위 띠 — 그 칸의 선"
+        "area 2 top band — that area's lines"
     );
-    assert_eq!(zones(10.0, 400.0), None, "바깥 띠 — 레이아웃 틀만");
-    assert_eq!(zones(1200.0, 400.0), None, "캔버스 밖");
-    // The same holds with a list that counts only the point's bands.
+    assert_eq!(zones(10.0, 400.0), None, "outer band — layout frame only");
+    assert_eq!(zones(1200.0, 400.0), None, "outside the canvas");
     for (x, y) in [(300.0, 400.0), (900.0, 64.0), (10.0, 400.0)] {
         let p = pt(x, y);
         assert_eq!(slot_zones(&w, &bands_at(&w, p), p), zones(x, y), "{p:?}");
@@ -707,13 +749,17 @@ fn an_edge_slots_zone_lines_start_from_its_band_frame() {
         ..targets(&layout, &incoming, dip(400.0, 300.0))
     };
     let all = effective_bands(&w);
-    let i = choose(&all, pt(441.0, 510.0)).expect("칸 3 아래 띠");
+    let i = choose(&all, pt(441.0, 510.0)).expect("area 3 bottom band");
     assert_eq!(
         (all[i].anchor, all[i].side, all[i].share),
         (DockAnchor::Slot(id(3)), DockSide::Bottom, 0.5),
-        "min(원래 높이 300, 칸 높이 272 ÷ 2) ÷ 272"
+        "min(original height 300, area height 272 ÷ 2) ÷ 272"
     );
-    assert_eq!(all[i].landing, px(0, 408, 882, 544), "칸 3 아래 반");
+    assert_eq!(
+        all[i].landing,
+        px(0, 408, 882, 544),
+        "bottom half of area 3"
+    );
     assert_eq!(
         slot_zones(&w, &all, pt(441.0, 510.0)),
         Some(SlotZones {
@@ -721,7 +767,11 @@ fn an_edge_slots_zone_lines_start_from_its_band_frame() {
             centre: rect(108.0, 299.0, 774.0, 497.0),
         })
     );
-    assert_eq!(slot_zones(&w, &all, pt(441.0, 530.0)), None, "바깥 아래 띠");
+    assert_eq!(
+        slot_zones(&w, &all, pt(441.0, 530.0)),
+        None,
+        "outer bottom band"
+    );
 }
 
 #[test]
@@ -766,7 +816,7 @@ fn a_band_that_would_leave_a_zero_area_slot_is_not_there() {
     }
     assert!(
         !sides.contains(&(DockAnchor::Slot(id(1)), DockSide::Right)),
-        "전제: 오른쪽은 막힘"
+        "precondition: the right is blocked"
     );
     assert!(sides.contains(&(DockAnchor::Slot(id(1)), DockSide::Top)));
     // Pointing at the area's right band position picks nothing — dropping opens a new window (R8 · AC15).
@@ -805,32 +855,36 @@ fn a_small_slot_still_gets_a_minimum_band_it_can_dock_to() {
     let band = all
         .iter()
         .find(|b| b.anchor == DockAnchor::Slot(id(2)) && b.side == DockSide::Left)
-        .expect("작은 칸의 왼쪽 띠");
-    assert_eq!(band.band, px(1150, 20, 1162, 780), "위아래는 바깥 띠 안쪽");
+        .expect("left band of the small area");
+    assert_eq!(
+        band.band,
+        px(1150, 20, 1162, 780),
+        "top and bottom are inside the outer band"
+    );
     assert_eq!(band.landing.x1 - band.landing.x0, 25);
     assert_eq!(picked(&w, pt(1155.0, 400.0)), Some((2, DockSide::Left)));
 }
 
 #[test]
 fn a_top_row_slot_gives_way_to_the_zone_then_the_outer_top_band() {
-    // AC36 — moving up over the top-row area 「가」 (area 1 · height 400 → top band 40).
+    // AC36 — moving up over the top-row area 「A」 (area 1 · height 400 → top band 40).
     let layout = split(100, SplitDir::TopBottom, 0.5, slot(1), slot(2));
     let incoming = slot(9);
     let w = targets(&layout, &incoming, dip(300.0, 300.0));
     assert_eq!(
         picked(&w, pt(300.0, 10.0)),
         None,
-        "탭바 구역(탭바 판정은 이 함수 앞)"
+        "tab bar zone (the tab bar decision comes before this function)"
     );
     assert_eq!(
         picked(&w, pt(300.0, 17.0)),
         Some((0, DockSide::Top)),
-        "바깥 위 띠의 유효 부분"
+        "effective part of the outer top band"
     );
     assert_eq!(
         picked(&w, pt(300.0, 20.0)),
         Some((1, DockSide::Top)),
-        "「가」 위 띠 = 바깥 위 띠 바로 아래부터"
+        "top band of 「A」 = from just below the outer top band"
     );
     assert_eq!(picked(&w, pt(300.0, 59.9)), Some((1, DockSide::Top)));
     assert_eq!(picked(&w, pt(300.0, 60.0)), None);
@@ -842,20 +896,20 @@ fn a_top_row_slot_gives_way_to_the_zone_then_the_outer_top_band() {
     assert_eq!(
         top.areas,
         vec![top.band],
-        "띠 틀 안이라 탭바 구역 · 바깥 띠와 겹치지 않는다"
+        "inside the band frame, so it does not overlap the tab bar zone or the outer band"
     );
 }
 
 #[test]
 fn a_low_top_row_slot_keeps_its_top_band_just_inside_the_outer_band() {
-    // 「가」 height 100 → top band 12 — attached to the area frame side it would be fully covered by the outer top band (20), but it stands below that (y 20..32).
+    // 「A」 height 100 → top band 12 — attached to the area frame side it would be fully covered by the outer top band (20), but it stands below that (y 20..32).
     let layout = split(100, SplitDir::TopBottom, 0.125, slot(1), slot(2));
     let incoming = slot(9);
     let w = targets(&layout, &incoming, dip(300.0, 300.0));
     let top = effective_bands(&w)
         .into_iter()
         .find(|b| b.anchor == DockAnchor::Slot(id(1)) && b.side == DockSide::Top)
-        .expect("「가」 위 띠");
+        .expect("top band of 「A」");
     assert_eq!(top.areas, vec![px(20, 20, 1180, 32)]);
     assert_eq!(picked(&w, pt(900.0, 19.9)), Some((0, DockSide::Top)));
     assert_eq!(picked(&w, pt(900.0, 20.0)), Some((1, DockSide::Top)));
@@ -878,12 +932,12 @@ pub(super) fn blocked_outer_top_layout(incoming: &LayoutNode, original: SizeCss)
         })
         .take_while(|l| layout_geometry::compute(l).slots.iter().all(has_area))
         .find(|l| docked_tree(l, DockAnchor::Outer, DockSide::Top, incoming, share).is_err())
-        .expect("바깥 위가 막히는 깊이가 있다")
+        .expect("there is a depth at which the outer top is blocked")
 }
 
 #[test]
 fn a_blocked_outer_top_band_does_not_cover_the_slot_band_beneath() {
-    // End of AC36 — still, the top band of 「가」 is effective from just below the tab bar zone and gets picked.
+    // End of AC36 — still, the top band of 「A」 is effective from just below the tab bar zone and gets picked.
     let incoming = slot(9);
     let original = dip(300.0, 300.0);
     let layout = blocked_outer_top_layout(&incoming, original);
@@ -895,14 +949,18 @@ fn a_blocked_outer_top_band_does_not_cover_the_slot_band_beneath() {
     let top = all
         .iter()
         .find(|b| b.anchor == DockAnchor::Slot(id(1)) && b.side == DockSide::Top)
-        .expect("「가」 위 띠는 막히지 않았다");
-    assert_eq!(top.band, px(20, 0, 1180, 40), "막힌 위 변은 밀지 않는다");
+        .expect("the top band of 「A」 was not blocked");
+    assert_eq!(
+        top.band,
+        px(20, 0, 1180, 40),
+        "a blocked top edge does not push"
+    );
     assert!(top.areas.contains(&px(20, 15, 1180, 40)), "{:?}", top.areas);
     assert_eq!(picked(&w, pt(300.0, 20.0)), Some((1, DockSide::Top)));
     assert_eq!(
         picked(&w, pt(300.0, 14.0)),
         None,
-        "탭바 구역은 그대로 빠진다"
+        "the tab bar zone is still excluded"
     );
 }
 
@@ -1003,7 +1061,7 @@ fn ac44_the_outer_top_landing_is_the_original_height_capped_at_half() {
             .into_iter()
             .find(|b| b.anchor == DockAnchor::Outer && b.side == DockSide::Top)
             .unwrap();
-        assert_eq!(top.landing, px(0, 0, 1200, want), "원래 높이 {h}");
+        assert_eq!(top.landing, px(0, 0, 1200, want), "original height {h}");
     }
 }
 
@@ -1023,70 +1081,70 @@ fn the_share_is_the_original_length_capped_at_half_the_target() {
     let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
     for (why, original, side, target, want) in [
         (
-            "AC2 — 칸 1200 에 원래 400",
+            "AC2 — original 400 in an area of 1200",
             dip(400.0, 300.0),
             DockSide::Right,
             px(0, 0, 1200, 800),
             400.0,
         ),
         (
-            "AC2 — 칸 600 에 원래 400 = 절반",
+            "AC2 — original 400 in an area of 600 = half",
             dip(400.0, 300.0),
             DockSide::Right,
             px(600, 0, 1200, 800),
             300.0,
         ),
         (
-            "AC39 — 600 에 200",
+            "AC39 — 200 in 600",
             dip(200.0, 999.0),
             DockSide::Right,
             px(0, 0, 600, 800),
             200.0,
         ),
         (
-            "AC39 — 600 에 300",
+            "AC39 — 300 in 600",
             dip(300.0, 999.0),
             DockSide::Right,
             px(0, 0, 600, 800),
             300.0,
         ),
         (
-            "AC39 — 600 에 400",
+            "AC39 — 400 in 600",
             dip(400.0, 999.0),
             DockSide::Left,
             px(0, 0, 600, 800),
             300.0,
         ),
         (
-            "AC39 — 작은 칸 50 에 200",
+            "AC39 — 200 in a small area of 50",
             dip(200.0, 999.0),
             DockSide::Right,
             px(0, 0, 50, 800),
             25.0,
         ),
         (
-            "AC39 — 작은 칸 50 에 20",
+            "AC39 — 20 in a small area of 50",
             dip(20.0, 999.0),
             DockSide::Left,
             px(0, 0, 50, 800),
             20.0,
         ),
         (
-            "AC44 — 바깥 위 띠 · 높이 300 · 레이아웃 높이 800",
+            "AC44 — outer top band · height 300 · layout height 800",
             dip(999.0, 300.0),
             DockSide::Top,
             px(0, 0, 1200, 800),
             300.0,
         ),
         (
-            "AC44 — 레이아웃 높이 500 이면 절반 250",
+            "AC44 — with layout height 500 it is half, 250",
             dip(999.0, 300.0),
             DockSide::Top,
             px(0, 0, 1200, 500),
             250.0,
         ),
         (
-            "아래 = 높이",
+            "bottom = height",
             dip(999.0, 120.0),
             DockSide::Bottom,
             px(0, 100, 400, 700),
@@ -1146,7 +1204,7 @@ fn the_share_is_finite_and_in_range_for_every_input() {
                 let s = attach_share(dip(l, l), side, t);
                 assert!(
                     s.is_finite() && (tree::RATIO_MIN..=ATTACH_SHARE_MAX).contains(&s),
-                    "L {l} · 칸 {t:?} · {side:?} → {s}"
+                    "L {l} · area {t:?} · {side:?} → {s}"
                 );
             }
         }
@@ -1159,12 +1217,12 @@ fn edge_inputs_go_to_the_documented_ends() {
     assert_eq!(
         attach_share(dip(100.0, 100.0), DockSide::Left, px(0, 0, 0, 400)),
         ATTACH_SHARE_MAX,
-        "칸 0"
+        "area 0"
     );
     assert_eq!(
         attach_share(dip(f64::NAN, 0.0), DockSide::Left, t),
         ATTACH_SHARE_MAX,
-        "NaN — 크기를 모른다"
+        "NaN — the size is unknown"
     );
     assert_eq!(
         attach_share(dip(f64::INFINITY, 0.0), DockSide::Left, t),
@@ -1179,7 +1237,7 @@ fn edge_inputs_go_to_the_documented_ends() {
     assert_eq!(
         attach_share(dip(-1.0, 0.0), DockSide::Left, t),
         tree::RATIO_MIN,
-        "음수"
+        "negative"
     );
     assert_eq!(
         attach_share(dip(f64::NEG_INFINITY, 0.0), DockSide::Left, t),
@@ -1224,7 +1282,7 @@ fn dock_constants_path() -> PathBuf {
 }
 
 fn render_dock_constants() -> String {
-    let values = serde_json::to_string_pretty(&current_constants()).expect("직렬화");
+    let values = serde_json::to_string_pretty(&current_constants()).expect("serialization");
     format!(
         "// This file was generated by the test `export_bindings_dock_constants` \
          (src-tauri/src/layout/bands/tests.rs). Do not edit this file manually.\n\
@@ -1234,41 +1292,43 @@ fn render_dock_constants() -> String {
     )
 }
 
-// The name must start with `export_bindings_` — in the same group as the ts-rs export, it rewrites the file every time the shell `lib_unit` runs, and the CI
-// generated-output sync gate catches any mismatch with the committed copy. It is not exported with the ts-rs `TS` derive because a value (`as const`) is needed.
+// The name must start with `export_bindings_`: in the same group as the ts-rs export it rewrites the file every time the shell `lib_unit` runs, and the CI generated-output sync gate catches any mismatch with the committed copy. Not exported with the ts-rs `TS` derive because a value (`as const`) is needed.
 #[test]
 fn export_bindings_dock_constants() {
     let path = dock_constants_path();
     let text = render_dock_constants();
-    assert_eq!(text, render_dock_constants(), "두 번 뜨면 같은 바이트");
-    std::fs::write(&path, &text).expect("DockConstants.ts 쓰기");
-    let written = std::fs::read_to_string(&path).expect("DockConstants.ts 읽기");
+    assert_eq!(
+        text,
+        render_dock_constants(),
+        "two renderings give the same bytes"
+    );
+    std::fs::write(&path, &text).expect("write DockConstants.ts");
+    let written = std::fs::read_to_string(&path).expect("read DockConstants.ts");
     // If another export (such as the ts-rs `DockConstants` type) overwrites the same path, the signature here breaks — there is a race with parallel tests,
     // so it is not always caught (the real safety net = the CI generated-output sync gate).
     assert!(
         written.contains("export const DOCK_CONSTANTS")
             && written.contains("typeof DOCK_CONSTANTS"),
-        "내용 서명이 없다 — 다른 생성기가 같은 파일을 쓴다:\n{written}"
+        "no content signature — another generator writes the same file:\n{written}"
     );
     assert_eq!(written, text);
     let json = written
         .split_once(CONSTANTS_HEAD)
         .and_then(|(_, rest)| rest.split_once(CONSTANTS_TAIL))
         .map(|(json, _)| json)
-        .expect("DOCK_CONSTANTS 몸");
-    let read: serde_json::Value = serde_json::from_str(json).expect("DOCK_CONSTANTS 몸은 JSON");
+        .expect("DOCK_CONSTANTS body");
+    let read: serde_json::Value =
+        serde_json::from_str(json).expect("the DOCK_CONSTANTS body is JSON");
     assert_eq!(
         read,
         serde_json::to_value(current_constants()).unwrap(),
-        "생성물 값 = 지금 pub const"
+        "generated value = the current pub const"
     );
-    assert_eq!(read["OUTER_BAND_PX"], 20, "키 이름 = Rust 상수 이름");
+    assert_eq!(read["OUTER_BAND_PX"], 20, "key name = Rust constant name");
     assert_eq!(read["SIDE_ORDER"][0], "Left");
 }
 
-// NTFS is case-insensitive, this repository has `core.ignorecase=true` and the CI runner is Windows too — two generated files that differ only in case
-// overwrite each other (TRD §4-5 rule). Reading the directory and comparing would always pass, since the overlapping two are already one file, so we look at the git index.
-// `--others` is there to include new generated files that are not committed yet.
+// NTFS is case-insensitive, this repository has `core.ignorecase=true` and the CI runner is Windows too — two generated files differing only in case overwrite each other (TRD §4-5 rule). Reading the directory would always pass since the overlapping two are already one file, so the git index is read; `--others` includes new uncommitted generated files.
 #[test]
 fn generated_bindings_never_differ_only_by_case() {
     // The shell test's cwd is `src-tauri/`, so the path is relative to that (`bindings`) — `src-tauri/bindings` would become an empty list.
@@ -1285,17 +1345,17 @@ fn generated_bindings_never_differ_only_by_case() {
             "bindings",
         ])
         .output()
-        .expect("git 실행");
+        .expect("run git");
     assert!(
         out.status.success(),
-        "git ls-files 실패: {}",
+        "git ls-files failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let listed = String::from_utf8(out.stdout).expect("UTF-8 경로");
+    let listed = String::from_utf8(out.stdout).expect("UTF-8 path");
     let files: Vec<&str> = listed.split('\0').filter(|f| !f.is_empty()).collect();
     assert!(
         files.contains(&"bindings/DockConstants.ts"),
-        "빈 목록 · 엉뚱한 경로의 눈먼 통과를 막는 짝 — 목록 {} 개",
+        "the counterpart that blocks a blind pass on an empty list or a wrong path — {} entries in the list",
         files.len()
     );
     let mut by_fold: BTreeMap<String, Vec<&str>> = BTreeMap::new();
@@ -1303,5 +1363,8 @@ fn generated_bindings_never_differ_only_by_case() {
         by_fold.entry(f.to_lowercase()).or_default().push(f);
     }
     let clashes: Vec<&Vec<&str>> = by_fold.values().filter(|v| v.len() > 1).collect();
-    assert!(clashes.is_empty(), "대소문자만 다른 생성물: {clashes:?}");
+    assert!(
+        clashes.is_empty(),
+        "generated files differing only in case: {clashes:?}"
+    );
 }

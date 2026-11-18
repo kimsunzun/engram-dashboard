@@ -2,18 +2,18 @@
 import type { QueuedInputCancel } from "./QueuedInputCancel";
 
 /**
- * 대기 입력 목록의 한 줄([`AgentEvent::QueuedInputs`] 의 원소) — 버스 `agent.listQueuedInputs` 행과 같은 모양·낱말.
+ * One row of the queued input list (an element of [`AgentEvent::QueuedInputs`]) — the same shape · words as the bus `agent.listQueuedInputs` row.
  *
- * `state` = `queued` | `sent` | `unconfirmed` | `cancelling`. `sent` = 통로가 벤더에 넘긴 대기 행(환원 상태 — 재부착
- *   대조는 넘김 표지가 선 행으로 읽는다 · 취소 대기 행의 표지는 `cancelling` 에 묻힌다).
- *   ★`unconfirmed` 는 명부의 환원 상태가 아니다★ — 조회 순간
- *   통로가 수락 모름으로 쥔 항목을 덧댄 표지라 `as_of_seq` 와 한 원자가 아니고, 재부착 대조는 `queued` 로 읽는다.
- * ★낱말 칸을 enum 으로 올리지 않는다★ — 낱말이 늘 때 구셸이 응답 전체를 못 읽는 대신 그 행만 모르는 낱말로
- *   받는다(버스 행도 문자열이다).
- * `cancel` = `cancelling` 행에만 실린다(그 밖은 `null`).
+ * `state` = `queued` | `sent` | `unconfirmed` | `cancelling`. `sent` = a queued row the link handed to the vendor (reduced state — the reattach
+ *   reconciliation reads it as a row with the handover mark set · the mark of a cancel-pending row is buried in `cancelling`).
+ *   ★`unconfirmed` is not a reduced state of the registry★ — it is a mark patched onto an item the link held as acceptance-unknown
+ *   at query time, so it is not one atom with `as_of_seq`, and the reattach reconciliation reads it as `queued`.
+ * ★The word field is not raised to an enum★ — when words grow, an old shell receives just that row with an unknown word
+ *   instead of failing to read the whole response (the bus row is a string too).
+ * `cancel` = carried only on `cancelling` rows (`null` otherwise).
  */
 export type QueuedInputRow = { 
 /**
- * [`AgentCommand::CancelQueuedInput`] 의 `input_id` 로 그대로 쓴다.
+ * Used as is as the `input_id` of [`AgentCommand::CancelQueuedInput`].
  */
 id: string, text: string, state: string, cancel: QueuedInputCancel | null, };

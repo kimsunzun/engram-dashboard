@@ -7,7 +7,7 @@
 
 ## Motivation (why we investigated)
 
-During S14 daemon_client tracing backfill QA, we found that the existing stress test `toctou_stress_reconnect_no_stale_down_clobber` **fails intermittently** (~1/20 even at baseline T2). Direct diagnosis: the guard (`lifecycle::publish_if_current` — atomizing the `generation==my_gen` comparison + `watch::send` as one critical section under a `std::sync::Mutex`) is correct, and it was a false positive: **the test depends on magic timing of server hold (5ms) vs assert sleep (3ms), and misjudges the current task's legitimate Down as a stale clobber**. We investigated following the user's instruction "매직넘버로 때우지 말고 OSS 사례로 풀라" (do not patch it with a magic number; solve it with OSS precedents).
+During S14 daemon_client tracing backfill QA, we found that the existing stress test `toctou_stress_reconnect_no_stale_down_clobber` **fails intermittently** (~1/20 even at baseline T2). Direct diagnosis: the guard (`lifecycle::publish_if_current` — atomizing the `generation==my_gen` comparison + `watch::send` as one critical section under a `std::sync::Mutex`) is correct, and it was a false positive: **the test depends on magic timing of server hold (5ms) vs assert sleep (3ms), and misjudges the current task's legitimate Down as a stale clobber**. We investigated following the user's instruction 「매직넘버로 때우지 말고 OSS 사례로 풀라」 (do not patch it with a magic number; solve it with OSS precedents).
 
 ## Findings (confidence · source)
 

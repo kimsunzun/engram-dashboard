@@ -1,24 +1,8 @@
-//! `state.json` 의 영속 모양 — 메모리 타입(`layout::ViewManager` 의 창 항목)과 따로 둔다(TRD S21-storage §6-1 ·
-//! §6-2).
-//!
-//! 탭 하나([`TabEntry`])는 이름 칸을 빼면 `layout::View` 와, 분할 트리([`PersistedNode`])는 `layout::LayoutNode` 와
-//! **같은 JSON** 이다 — 그 둘을 그대로 쓰지 않는 이유는 슬롯 내용 칸([`PersistedContent`])과 이름 칸이다. 이름 칸은
-//! 파일에서 글자(`name` — 보이는 이름) + 불(`named`)이고 메모리에서 `layout::TabName` 이라, [`super::convert`] 가 풀어
-//! 옮긴다(TRD S26-window-chrome §3-3 — 글자로 적어 옛 빌드도 그 이름을 보인다). 한쪽에 칸을 더하면 다른 쪽도 같이
-//! 고친다(시험이 이름 칸 밖을 맞댄다).
-//!
-//! 읽기의 관용(창 · 탭만 건너뛰기)은 [`super::codec`] 이 진다 — 그래서 파일 · 창 · 탭 묶음(`StateFile` ·
-//! `WindowEntry` · `WindowKind` · `TabStrip`)은 직렬화만 derive 하고, 읽기는 그쪽이 조각마다 한다.
-//!
-//! ★칸 더하기 규칙★ — 빠져도 읽히는 선택 칸을 더하는 것은 `version` 을 올리지 않는다. 옛 빌드가 다시 저장하면
-//! 그 칸은 사라진다(내림은 지원하지 않는다 — TRD §12 R3). 잃으면 안 되는 변경이면 `version` 을 올린다 — ★단 앞
-//! 버전을 읽는 리더와 함께만 올린다★: 코덱은 `version == STATE_VERSION` 인 파일만 받아(`codec::STATE_SPEC` 의
-//! 모양 검사) 리더 없이 올리면 새 빌드가 앞 버전 파일을 손상으로 접어 저장된 화면 전체를 잃는다(TRD §6-1).
-//!
-//! ★이름 바꾸기 규칙★ — 영속 모양이 따르는 serde 이름(칸 · 변형 — 여기 타입과 그대로 재사용하는 `SplitDir` ·
-//! `SlotContent`)을 바꾸면 읽는 쪽에 옛 이름을 `#[serde(alias = "옛 이름")]` 로 남긴다(옛 이름 탭은 건너뛰고 ·
-//! 모르는 내용이 되고 · `#[serde(default)]` 칸은 말없이 기본값으로 돌아간다). ★꼬리표 키 자체(`tag = "type"` 의
-//! `type`)는 alias 가 덮지 않는다★ — 바꾸지 않거나, 두 키를 다 읽는 리더와 함께 바꾼다(TRD §6-1).
+//! The persisted shape of `state.json` — kept separate from the memory types (the window entries of `layout::ViewManager`) (TRD S21-storage §6-1 · §6-2).
+//! One tab ([`TabEntry`]) is the same JSON as `layout::View` apart from the name field, and the split tree ([`PersistedNode`]) as `layout::LayoutNode` — those two are not used as is because of the slot content field ([`PersistedContent`]) and the name field. The name field is text (`name` — the visible name) + a bool (`named`) in the file and `layout::TabName` in memory, unpacked and moved by [`super::convert`] (TRD S26-window-chrome §3-3 — written as text so old builds also show that name). A field added on one side must be fixed on the other too (the tests hold everything outside the name field against each other).
+//! Read leniency (skipping only windows · tabs) is [`super::codec`]'s: the file · window · tab groups (`StateFile` · `WindowEntry` · `WindowKind` · `TabStrip`) derive only serialization, and that side reads them piece by piece.
+//! Field addition rule: adding an optional field that still reads when missing does not bump `version`; if an old build saves again the field disappears (downgrade unsupported — TRD §12 R3). If the change must not be lost, bump `version` — only together with a reader for the previous version: the codec accepts only `version == STATE_VERSION` files (the shape check of `codec::STATE_SPEC`), so bumping without a reader makes the new build fold previous-version files as corrupt and lose the whole saved screen (TRD §6-1).
+//! Rename rule: when changing the serde names the persisted shape follows (fields · variants — including `SplitDir` · `SlotContent` reused as is), keep the old name on the reading side as `#[serde(alias = "old name")]` (otherwise tabs with the old name are skipped · become unknown content · `#[serde(default)]` fields silently return to default). `alias` does not cover the tag key itself (`type` of `tag = "type"`) — do not change it, or change it together with a reader reading both keys (TRD §6-1).
 
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -28,45 +12,36 @@ use uuid::Uuid;
 use crate::layout::{SlotContent, SplitDir};
 use crate::theme::UiTheme;
 
-/// 이 셸이 읽고 쓰는 형식 번호 — 이보다 큰 파일은 통째로 못 쓴다([`super::codec::Unusable::NewerVersion`]).
 pub const STATE_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct StateFile {
     pub version: u32,
-    /// 이 스냅숏을 뜬 시각 — 유닉스 시각 ms.
     pub saved_at_ms: u64,
-    /// 실행 표식 — `false` = 이 파일을 쓴 실행이 정상 종료를 적지 못했다(TRD §6-1 · §6-6).
+    /// Run marker: `false` = the run that wrote the file did not record a normal exit (TRD §6-1 · §6-6).
     pub clean_exit: bool,
-    /// 답한 크래시 사본의 신원([`super::codec::crash_copy_hash`]). `None` 이면 칸 자체를 쓰지 않는다 — 실을
-    /// 때는 답한 뒤부터 그 사본을 지울 때까지뿐이다(TRD §6-4).
+    /// The identity of the answered crash copy ([`super::codec::crash_copy_hash`]). `None` = the field is not written — carried only from the answer until that copy is removed (TRD §6-4).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolved_crash_copy: Option<String>,
     pub windows: Vec<WindowEntry>,
 }
 
-/// 창 하나. `id` = 영속 신원 — `main` 고정, 팝아웃은 창이 처음 생길 때 뽑은 UUID 다. runtime
-/// label 이 아니다(TRD §6-3).
-///
-/// 같은 `id` 의 중복 · main 부재 같은 모양 검사는 여기서 하지 않는다 — 복원 쪽(`from_persisted`)이 다시 세운다.
+/// One window. `id` = the persisted identity — fixed `main`, and for a popout the UUID drawn when the window was first created; not the runtime label (TRD §6-3). Shape checks (duplicate `id`s · a missing main) are not done here — the restore side (`from_persisted`) re-establishes them.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct WindowEntry {
     pub id: String,
-    /// 창 번호(TRD S26-window-chrome §3-3). 쓰기는 늘 값이다(main 도 1). 읽기는 `1..=MAX_SAVED_NUMBER` 정수만
-    /// `Some` 으로 받고 그 밖은 `None` 으로 접는다 — 창은 살린다(`codec`). main 의 값은 복원이 보지 않는다(D3).
+    /// Window number (TRD S26-window-chrome §3-3). A write is always a value (main is 1 too). A read takes only integers in `1..=MAX_SAVED_NUMBER` as `Some` and folds the rest to `None` — the window is kept (`codec`). Restore does not look at main's value (D3).
     pub number: Option<u32>,
     #[serde(flatten)]
     pub kind: WindowKind,
-    /// `None` = 전역 테마를 따른다(파일에는 `null`).
     #[serde(serialize_with = "theme_wire")]
     pub theme: Option<UiTheme>,
-    /// `None` = 이 창의 보통 자리를 본 적이 없다(파일에는 `null`) — 복원은 기본 자리로 연다.
+    /// `None` = this window's normal position was never seen (`null` in the file); restore opens it at the default position.
     pub bounds: Option<Bounds>,
     pub maximized: bool,
 }
 
-/// 파일에서는 `"kind"` 문자열과 탭 칸(`active_tab` · `tabs`)이 창 항목에 평평하게 놓인다. 이 판이 모르는 `kind`
-/// (ADR-0225 가 걷은 트리 창의 `"tree"` 포함)는 읽기가 그 창만 건너뛴다(`codec`).
+/// In the file the `"kind"` string and the tab fields (`active_tab` · `tabs`) lie flat in the window entry. A `kind` this version does not know (including `"tree"` of the tree window ADR-0225 removed) makes the read skip only that window (`codec`).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WindowKind {
@@ -76,13 +51,12 @@ pub enum WindowKind {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct TabStrip {
-    /// `tabs` 에 없을 수 있다 — 그 탭을 못 읽어 건너뛰었을 때. 고치는 것은 복원 쪽이다(TRD §6-2).
+    /// TRD §6-2
     pub active_tab: Uuid,
     pub tabs: Vec<TabEntry>,
 }
 
-/// 마지막 보통(최소화도 최대화도 아닌) 위치 · 크기 — `x` · `y` = 물리 픽셀 바깥 위치, `w` · `h` = 그 창의 배율로
-/// 나눈 논리 안쪽 크기(TRD §6-3).
+/// The last normal (neither minimized nor maximized) position · size — `x` · `y` = physical pixel outer position, `w` · `h` = the logical inner size divided by that window's scale (TRD §6-3).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Bounds {
     pub x: f64,
@@ -94,12 +68,9 @@ pub struct Bounds {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TabEntry {
     pub id: Uuid,
-    /// 쓰기 = 그 순간의 보이는 이름(정한 이름 · 아니면 자동 이름). 읽기는 `named == Some(true)` 일 때만 이 글자를 탭
-    /// 이름으로 쓴다(TRD S26-window-chrome §3-3) — 자동 탭의 글자는 지난 실행의 그 순간 값일 뿐이고, `Some(false)` 면
-    /// 에이전트 이름 장부의 시드로만 쓰인다(§4-3 · `convert::agent_name_seed`).
+    /// Write = the visible name at that moment (the set name, else the auto name). A read uses this text as the tab name only when `named == Some(true)` (TRD S26-window-chrome §3-3) — an auto tab's text is just the last run's value at that moment, and with `Some(false)` it only seeds the agent name ledger (§4-3 · `convert::agent_name_seed`).
     pub name: String,
-    /// 이름을 정했나. 쓰기는 늘 값이다. 읽기는 칸 없음 · `null` · 불이 아닌 값을 `None` 으로 접는다 — 그 값 때문에
-    /// 탭을 건너뛰지 않는다. `None` · `Some(false)` = 자동 이름(D16).
+    /// Whether the name was set. A write is always a value. A read folds an absent field · `null` · a non-bool to `None` — the tab is not skipped over it. `None` · `Some(false)` = auto name (D16).
     #[serde(default, deserialize_with = "lenient_bool")]
     pub named: Option<bool>,
     pub focused_slot_id: Option<Uuid>,
@@ -122,15 +93,10 @@ pub enum PersistedNode {
     },
 }
 
-/// 슬롯 내용 — 이 빌드가 아는 것은 [`SlotContent`], 못 읽는 것(새 빌드가 쓴 종류 · 칸 모양이 바뀐 아는 종류)은
-/// **원문 객체**다. 원문은 다시 쓸 때 손대지 않고 나간다 — 이 빌드가 저장해도 새 빌드가 쓴 슬롯이 지워지지
-/// 않는다.
-///
-/// - ★지키는 것은 JSON 값이지 바이트가 아니다★ — 다시 쓰면 키가 정렬되고, 64비트를 넘는 정수와 왕복이 안 되는
-///   실수는 바뀔 수 있다(serde_json `Map` 이 정렬 지도이고 `arbitrary_precision` 을 켜지 않았다).
-/// - ★아는 종류에 붙은 모르는 칸은 `Known` 으로 읽히고 다시 쓸 때 사라진다★ — `SlotContent` 의 serde 가 모르는
-///   칸을 무시한다.
-/// - 객체가 아닌 값은 어느 쪽도 아니다 — 읽기 실패이고, 그 슬롯을 품은 탭을 못 읽는다.
+/// Slot content — what this build knows is a [`SlotContent`]; what it cannot read (a kind a newer build wrote · a known kind whose field shape changed) is the raw object, written back untouched so even this build's save does not erase a slot a newer build wrote.
+/// - What is kept is the JSON value, not the bytes: rewriting sorts the keys, and integers over 64 bits and non-round-tripping floats may change (serde_json `Map` is a sorted map and `arbitrary_precision` is not enabled).
+/// - Unknown fields attached to a known kind are read as `Known` and vanish when written again (the serde of `SlotContent` ignores unknown fields).
+/// - A non-object value is neither — a read failure, and the tab holding that slot cannot be read.
 // ADR-0060
 #[derive(Debug, Clone, PartialEq)]
 pub enum PersistedContent {
@@ -154,7 +120,7 @@ impl<'de> Deserialize<'de> for PersistedContent {
             Ok(known) if raw.is_object() => Ok(PersistedContent::Known(known)),
             _ => match raw {
                 Value::Object(raw) => Ok(PersistedContent::Unknown(raw)),
-                _ => Err(D::Error::custom("슬롯 내용이 JSON 객체가 아니다")),
+                _ => Err(D::Error::custom("slot content is not a JSON object")),
             },
         }
     }
@@ -196,9 +162,7 @@ mod tests {
         }
     }
 
-    // ★`View` · `LayoutNode` · `SlotContent` 에 칸이나 변형이 늘면 이 둘이 컴파일을 깨뜨린다★ — 늘린 것에 이름을
-    // 붙이고 그 이름을 아래 시험의 기대 목록과 맞대기 재료에 싣는다. 선택 칸은 `Some` 인 재료로도 싣는다 —
-    // `skip_serializing_if` 로 숨는 칸은 `None` 만으로는 맞대지 못한다.
+    // If fields or variants grow in `View` · `LayoutNode` · `SlotContent` these two break the compile — name what was added and put it in the test's expected list below and the comparison material. Optional fields are also put in with `Some` material: a field hidden by `skip_serializing_if` cannot be compared with `None` alone.
     fn view_shapes(view: &View, seen: &mut BTreeSet<&'static str>) {
         let View {
             id: _,
@@ -276,7 +240,7 @@ mod tests {
             },
             View {
                 id: Uuid::new_v4(),
-                name: TabName::Named("탭 둘".to_string()),
+                name: TabName::Named("Tab two".to_string()),
                 layout: slot(SlotContent::Empty),
                 focused_slot_id: None,
             },
@@ -287,15 +251,14 @@ mod tests {
             view_shapes(view, &mut seen);
             let mut wire = serde_json::to_value(view).unwrap();
             assert!(wire.as_object_mut().unwrap().remove("name").is_some());
-            // 이름 칸은 `convert` 가 옮긴다(TRD S26-window-chrome §3-3) — 파일 쪽 꼴(글자 + 불)을 꽂아 읽고 이름 칸 밖이
-            // 그대로 되나오는지 본다.
+            // The name field is moved by `convert` (TRD S26-window-chrome §3-3) — plug in the file-side form (text + bool), read it, and check that everything outside the name field comes back as is.
             let mut file = wire.clone();
-            file["name"] = json!("보이는 이름");
+            file["name"] = json!("Visible name");
             file["named"] = json!(true);
             let tab = TabEntry::deserialize(file).unwrap();
             let mut back = serde_json::to_value(&tab).unwrap();
             let fields = back.as_object_mut().unwrap();
-            assert_eq!(fields.remove("name"), Some(json!("보이는 이름")));
+            assert_eq!(fields.remove("name"), Some(json!("Visible name")));
             assert_eq!(fields.remove("named"), Some(json!(true)));
             assert_eq!(back, wire);
         }

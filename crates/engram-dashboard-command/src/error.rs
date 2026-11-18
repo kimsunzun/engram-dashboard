@@ -1,14 +1,12 @@
-//! 타입드 오류 모델 — 홉을 건너도 뜻이 유지되는 **하나의** 오류 어휘(TRD §4-⑦).
+//! Typed error model — **one** error vocabulary whose meaning holds across hops (TRD §4-⑦).
 
 use std::fmt;
 
-/// 어휘를 **한 표에서** 찍는다 — 변형 · wire 문자열 · [`ErrorCode::ALL`] 멤버십 · 재시도 지시가 같은
-/// 줄에서 함께 난다.
+/// Stamps the vocabulary **from one table** — variant · wire string · [`ErrorCode::ALL`] membership · retry directive come out together.
 ///
-/// ★목록이 둘이면 코드를 하나 더하는 편집이 한쪽만 고친다★: 손으로 적은 `as_str` 옆에서는 컴파일러가
-/// 새 변형의 `as_str` 갈래만 요구하고 `ALL` 등재는 요구하지 않아, 새 코드가 **제 이름으로 나가고
-/// `INTERNAL` 로 돌아오는** 비대칭이 조용히 선다(왕복 테스트가 `ALL` 을 돌므로 그것도 못 본다).
-/// 여기서는 세 칸을 다 적지 않으면 규칙에 안 맞아 **컴파일이 멈춘다.**
+/// ★With two lists, adding a code fixes only one side★: the compiler demands only the new `as_str` arm, not the `ALL` entry, so a new code
+///   **goes out under its own name and comes back as `INTERNAL`**
+/// (the round-trip test iterates `ALL`, so it cannot see it either). Here, omitting any of the three fields **stops compilation.**
 macro_rules! error_codes {
     (
         $(#[$enum_meta:meta])*
@@ -23,7 +21,7 @@ macro_rules! error_codes {
         }
 
         impl $name {
-            /// 어휘 전량 — 위 표가 그대로 난다.
+            /// The full vocabulary — exactly the table above.
             const ALL: &'static [Self] = &[ $( Self::$variant, )+ ];
 
             pub const fn as_str(self) -> &'static str {
@@ -32,18 +30,17 @@ macro_rules! error_codes {
                 }
             }
 
-            /// 모르는 코드에 `None` — 호출자가 「낮출지」를 스스로 정하게 한다.
+            /// `None` for an unknown code — lets the caller decide for itself 「whether to downgrade」.
             pub fn from_wire(code: &str) -> Option<Self> {
                 Self::ALL.iter().copied().find(|c| c.as_str() == code)
             }
 
-            /// 코드가 정하는 재시도 지시.
+            /// The retry directive the code decides.
             ///
-            /// ★한 자리에 모아 두는 이유★: 「재시도해도 되나」는 **확실성**의 함수인데(TRD §4-④),
-            /// 호출처마다 손으로 붙이면 같은 코드가 자리마다 다른 지시를 달고 나간다 — 그러면 호출자는
-            /// 코드가 아니라 운에 따라 재시도 여부를 정하게 된다.
-            /// ★표의 세 번째 칸인 이유★: 밖에 두면 포괄 갈래(`_ => Never`)가 서고, 그러면 새 코드가
-            /// **아무 결정 없이** 「재시도 금지」를 달고 나간다.
+            /// ★Gathered in one place★: "may it be retried" is a function of **certainty** (TRD §4-④); hand-attached directives would
+            ///   differ per call site for the same code.
+            /// ★The table's third field★: kept outside, a catch-all arm (`_ => Never`) appears and a new code goes out as "no retry"
+            ///   **without any decision**.
             // ADR-0159
             pub const fn default_retry(self) -> RetryMode {
                 match self {
@@ -55,22 +52,22 @@ macro_rules! error_codes {
 }
 
 error_codes! {
-    /// 전송·라우팅 계층 + 공통 오류 코드.
+    /// Transport·routing layer + common error codes.
     ///
-    /// ★wire 표현은 문자열이고 디코더는 **모르는 코드를 받아들인다**★ — 모르는 코드는 [`ErrorCode::Internal`]
-    /// 로 낮춘다([`CommandError`] 의 역직렬화가 `retry` 도 [`RetryMode::Never`] 로 낮춘다). 닫힌 열거형으로
-    /// 디코드하면 코드가 하나 느는 additive 확장이 옛 클라이언트를 깨뜨린다.
-    /// ★코드 추가는 additive, 뜻 변경은 금지★(TRD §4-③).
+    /// Transport·routing layer + common error codes.
+    ///
+    /// ★The wire form is a string and the decoder **accepts unknown codes**★ — downgraded to [`ErrorCode::Internal`] (and [`CommandError`]
+    ///   deserialization downgrades `retry` to [`RetryMode::Never`]);
+    /// a closed enum would break old clients on every added code. ★Adding codes is additive, changing meaning is forbidden★ (TRD §4-③).
     // ADR-0155
     pub enum ErrorCode {
         InvalidArgument => "INVALID_ARGUMENT" retry Never,
         UnknownCommand => "UNKNOWN_COMMAND" retry Never,
-        /// ★이 코드를 내는 생산 경로가 지금 없다 — 어휘에만 남아 있다★: 끊긴 주인의 이름은 명부에서
-        /// 사라지므로([`crate::Roster::disconnect`] · ADR-0150 결정 3) 배달은 「주인 부재」 대신
-        /// `UNKNOWN_COMMAND` 로 답한다.
-        /// 떼지 않은 이유: 이 어휘는 wire 문자열이고 **모르는 코드는 `INTERNAL`·`retry: never` 로
-        /// 낮춰진다**(위 헤더) — 떼면 이 코드를 실어 보내는 상대의 답장이 「조건이 바뀐 뒤 재시도」라는
-        /// 지시를 잃고 영구 실패로 읽힌다. 뜻 변경도 금지다(TRD §4-③).
+        /// ★No production path emits this code now — it remains only in the vocabulary★: a disconnected owner's name disappears from the
+        ///   registry ([`crate::Roster::disconnect`] · ADR-0150 decision 3),
+        /// so delivery answers `UNKNOWN_COMMAND`. Not removed: unknown codes are downgraded to `INTERNAL`·`retry: never` (header above),
+        ///   so a counterpart still sending it would lose "retry after
+        /// the condition changes"; changing its meaning is forbidden too (TRD §4-③).
         OwnerUnavailable => "OWNER_UNAVAILABLE" retry AfterCondition,
         OutcomeUnknown => "OUTCOME_UNKNOWN" retry SameRequestId,
         Timeout => "TIMEOUT" retry SameRequestId,
@@ -91,10 +88,10 @@ impl fmt::Display for ErrorCode {
     }
 }
 
-/// 재시도 지시.
+/// Retry directive.
 ///
-/// ★`SameRequestId` 는 「안전하게 재실행해도 된다」가 아니다★ — 적용 여부가 **불명**이라 **같은 id 로만**
-/// 다시 물어야 한다는 뜻이다(새 id 로 재시도하면 같은 조작이 두 번 적용될 수 있다 — TRD §4-⑥).
+/// ★`SameRequestId` is not "safe to re-execute"★ — whether it was applied is **unknown**, so ask again **only with the same id** (a new id
+///   could apply the operation twice — TRD §4-⑥).
 // ADR-0159
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RetryMode {
@@ -125,56 +122,56 @@ impl fmt::Display for RetryMode {
     }
 }
 
-/// 실패 하나 — 코드(기계) + 문구(사람) + 재시도 지시.
+/// One failure — code (machine) + message (human) + retry directive. Wire shape = `{"code":"NOT_FOUND","message":"…","retry":"never"}`.
 ///
-/// ★`message` 로 기계 분기하지 말 것★: 분기 재료는 `code` 하나다. 지금 CLI 가 하는 문자열 패턴매칭이
-/// 이 계약이 없어서 생긴 것이고, 그 취약함을 여기서 끝낸다(TRD §4-⑦).
-/// wire 형태 = `{"code":"NOT_FOUND","message":"…","retry":"never"}`.
+/// ★Do not machine-branch on `message`★: the only branching material is `code` (the CLI's string matching existed only because this
+///   contract did not; TRD §4-⑦).
 ///
-/// ★동등성은 **뜻**이 정한다 — 세 칸뿐이다★: 아래 `received` 는 중계용 사본이라 비교에 끼지 않는다.
-/// 끼면 「미지 코드를 낮춰 읽은 값」과 「같은 뜻으로 직접 만든 값」이 다르다고 나와, 계약(TRD §4-⑦ 의
-/// 평평한 세 칸)이 말하는 같음과 코드가 말하는 같음이 갈린다.
+/// ★Equality is decided by **meaning** — three fields only★: `received` is a relay copy and takes no part, else a value read by
+///   downgrading an unknown code and a value built directly with the same meaning
+/// would differ, diverging from the contract's sameness (the flat three fields of TRD §4-⑦).
 ///
-/// ★세 칸은 비공개다 — 쓰기는 setter 로만 한다★: 원문 사본을 쥔 값에 칸을 직접 갈아 끼우면 재직렬화가
-/// 그 원문을 내보내 **쓴 값이 조용히 무시된다**(중계 홉이 위험한 재시도를 끊으려고 `retry` 를 내려도
-/// 다음 홉은 원문 지시를 그대로 읽는다 — TRD §4-④·§4-⑦). setter 는 그 경로를 없앤다:
-/// **쓴 값은 언제나 그대로 나간다.**
+/// ★The three fields are private — writes go only through setters★: swapping a field directly on a value holding the raw copy would make
+///   reserialization emit the raw text and **silently ignore the written value**
+/// (a relay hop that lowers `retry` to cut a dangerous retry would be undone at the next hop — TRD §4-④·§4-⑦). **A written value always
+///   goes out as is.**
 #[derive(Debug, Clone)]
 pub struct CommandError {
     code: ErrorCode,
     message: String,
     retry: RetryMode,
-    /// 받은 원문 중 **타입드 세 칸이 못 나르는 것**만. 직접 만든 오류는 `None` 이다.
+    /// Only what **the three typed fields cannot carry** out of the received raw text. An error built directly is `None`.
     ///
-    /// ★수용이 파괴여선 안 된다★: 미지 코드를 `INTERNAL` 로 낮춰 읽는 것(§4-⑦)과 그것을 **다시 내보낼 때
-    ///   원문을 지우는 것**은 다른 일이다. 중계 홉이 낮춘 값으로 재직렬화하면 최종 호출자는 주인이 보낸
-    ///   코드를 영영 못 본다. 같은 이유로 계약 밖 필드도 그대로 들고 간다.
-    ///   ★단 `null` 과 부재는 **함께** 정규화된다★ — 세 칸 중 하나가 `null` 로 실려 오면 부재로 읽고
-    ///   나갈 때도 싣지 않는다(둘 다 「값 없음」이라 다시 디코드하면 같은 값이 나온다). 계약 밖 필드는
-    ///   그 정규화를 받지 않고 `null` 인 채로 실려 나간다 — 뜻을 모르는 칸이라 접을 근거가 없다.
-    /// 이 칸이 비공개라 구조체 리터럴로는 못 만든다 — 생성자를 쓴다.
+    /// ★Accepting must not be destroying★: reading an unknown code downgraded to `INTERNAL` (§4-⑦) must not **erase the raw text on
+    ///   re-emission**, or a relay hop's reserialization hides the owner's code from the final caller.
+    ///   Fields outside the contract are carried as is for the same reason.
+    ///   ★`null` and absence are normalized **together**★ — one of the three fields arriving as `null` is read as absent and not carried
+    ///   out (both mean "no value"; re-decoding gives the same value).
+    ///   Fields outside the contract get no such normalization and go out as `null` — their meaning is unknown, so there is no basis to
+    ///   fold them.
+    /// This field is private, so it cannot be built with a struct literal — use the constructors.
     received: Option<Box<ReceivedError>>,
 }
 
-/// 받은 `code` 칸이 타입드 칸으로 복원되지 않는 두 얼굴 — 아는 코드는 여기 담지 않는다.
+/// The two faces of a received `code` field that do not restore into the typed field — known codes are not stored here.
 #[derive(Debug, Clone)]
 enum ReceivedCode {
-    /// 그 칸이 **없었거나 `null` 이었다** — 나갈 때도 싣지 않는다(없던 코드를 지어내지 않는다).
+    /// That field was **absent or `null`** — not carried on the way out either (no inventing a code that was not there).
     Absent,
-    /// 모르는 코드 문자열 — 낮춰 읽되 나갈 때는 받은 그대로 싣는다.
+    /// An unknown code string — read downgraded, but carried as received on the way out.
     Unknown(String),
 }
 
-/// 디코드가 붙잡아 두는 원문 조각 — [`CommandError`] 의 세 칸으로 복원할 수 없는 것만 담는다.
+/// The raw fragments the decode holds on to — only what cannot be restored into the three fields of [`CommandError`].
 #[derive(Debug, Clone)]
 struct ReceivedError {
-    /// 아는 코드였으면 `None`(타입드 칸이 그대로 나른다). 두 예외는 [`ReceivedCode`].
+    /// `None` if it was a known code (the typed field carries it as is). The two exceptions are [`ReceivedCode`].
     code: Option<ReceivedCode>,
-    /// 받은 `retry` 원문. ★`None` = 그 필드가 **없었거나 `null` 이었다**★ — 나갈 때도 싣지 않는다.
+    /// The received raw `retry`. ★`None` = that field was **absent or `null`**★ — not carried on the way out either.
     retry: Option<String>,
-    /// `message` 칸이 실려 있었나(`null` 은 부재로 센다). 빈 문구를 지어내지 않으려고 부재를 기억한다.
+    /// Whether the `message` field was carried (`null` counts as absent). Absence is remembered so as not to invent an empty message.
     message_present: bool,
-    /// 계약 밖 필드 — additive 확장(§4-③)이 중계 홉에서 증발하지 않게 그대로 나른다.
+    /// Fields outside the contract — carried as is so the additive extension (§4-③) does not evaporate at a relay hop.
     extra: serde_json::Map<String, serde_json::Value>,
 }
 
@@ -187,7 +184,7 @@ impl PartialEq for CommandError {
 impl Eq for CommandError {}
 
 impl CommandError {
-    /// 재시도 지시를 코드에서 파생한다 — 대부분의 호출처가 써야 하는 형태.
+    /// Derives the retry directive from the code — the form most call sites should use.
     pub fn of(code: ErrorCode, message: impl Into<String>) -> Self {
         Self {
             code,
@@ -197,7 +194,7 @@ impl CommandError {
         }
     }
 
-    /// 파생값과 다른 지시를 실어야 할 때만 쓴다.
+    /// Use only when a directive different from the derived value must be carried.
     pub fn with_retry(code: ErrorCode, message: impl Into<String>, retry: RetryMode) -> Self {
         Self {
             code,
@@ -219,42 +216,40 @@ impl CommandError {
         self.retry
     }
 
-    /// 코드를 갈아 끼운다 — **원문 사본을 버린다.**
+    /// Swaps the code — **discards the raw copy.**
     ///
-    /// ★버리는 것이 요점이다★: 사본을 든 채로 코드만 바꾸면 미지 코드를 받은 값에서 재직렬화가 원문을
-    /// 내보내 쓴 값이 무시된다. 함께 버려지는 것은 계약 밖 필드와 받은 `retry` 원문인데, 둘 다 **바뀌기
-    /// 전 코드의 부속**이라 새 코드 옆에 두면 서로 어긋난다.
-    /// 중계만 할 값이면 부르지 말 것 — 그대로 두어야 원문이 최종 호출자까지 간다.
+    /// ★Discarding is the point★: keeping the copy would make reserialization emit the raw text for a value that received an unknown code,
+    ///   ignoring the written value; the fields outside the contract and the received raw `retry`
+    /// are **accessories of the old code** and would disagree with the new one.
+    /// Do not call it on a value that is only relayed — the raw text must reach the final caller.
     pub fn set_code(&mut self, code: ErrorCode) {
         self.code = code;
         self.received = None;
     }
 
-    /// 재시도 지시를 갈아 끼운다 — **원문 사본을 버린다**([`CommandError::set_code`] 와 같은 이유).
+    /// Swaps the retry directive — **discards the raw copy** (same reason as [`CommandError::set_code`]).
     ///
-    /// ★남의 오류를 중계하면서 지시만 내리려는 것이면 이걸 쓰지 말 것★ —
-    /// [`CommandError::set_retry_for_relay`] 가 그 자리다. 여기 부르면 받은 코드와 계약 밖 필드가 함께
-    /// 사라진다.
+    /// ★Do not use this to only lower the directive while relaying someone else's error★ — use [`CommandError::set_retry_for_relay`]; this
+    ///   erases the received code and the fields outside the contract.
     pub fn set_retry(&mut self, retry: RetryMode) {
         self.retry = retry;
         self.received = None;
     }
 
-    /// 재시도 지시만 갈아 끼우고 **원문 사본은 살린다** — ★중계 홉 전용★.
+    /// Swaps only the retry directive and **keeps the raw copy** — ★relay hops only★.
     ///
-    /// [`CommandError::set_retry`] 와 갈리는 지점 하나: 그쪽은 사본을 통째로 버려 **받은 코드와 계약 밖
-    /// 필드까지 함께 지운다.** 코드를 바꿀 때는 그게 맞다(바뀐 코드 옆에서 옛 부속은 어긋난다). 그러나
-    /// **지시만** 내리는 홉에는 틀리다 — 어휘는 그대로인데 어휘를 담은 칸이 사라져, 「수용이 파괴여선 안
-    /// 된다」는 [`CommandError::received`] 의 취지가 바로 그 홉에서 깨진다.
+    /// Where it parts from [`CommandError::set_retry`]: that discards the copy and **erases the received code and the fields outside the
+    ///   contract**, right when changing the code but wrong for a hop that **only** lowers the directive
+    /// (it breaks [`CommandError::received`]'s "accepting must not be destroying" right at that hop).
     ///
-    /// 그래서 사본의 `retry` 칸만 새 지시로 덮는다. 그 칸이 나갈 때 실리는 값의 출처이므로
-    /// ([`CommandError::wire_retry`]) **나가는 지시는 실제로 이 값이 되고**, `code` · `message` 유무 ·
-    /// 계약 밖 필드는 받은 그대로 최종 호출자까지 간다.
-    /// ★받은 오류에 `retry` 칸이 **없었어도** 채운다★ — 안 채우면 그 칸이 빠진 채 나가고, 받는 쪽이
-    /// 코드에서 파생해 버려 내린 지시가 무효가 된다.
+    /// It overwrites only the copy's `retry` field — the source of the outgoing value ([`CommandError::wire_retry`]) — so **the outgoing
+    ///   directive really becomes this value** while `code` · message presence · the fields outside the contract
+    /// reach the final caller as received.
+    /// ★It fills it even if the received error **had no** `retry` field★ — otherwise the field goes out missing and the receiver derives
+    ///   it from the code, voiding the lowered directive.
     ///
-    /// ★쓰는 자리★: 자기 정책상 지시를 낮춰야 하지만 **답을 지은 것은 남**인 홉
-    /// (`engram-dashboard-daemon` 의 `command_delivery::send_reply` 가 그 하나다).
+    /// ★Where it is used★: a hop that must lower the directive by its own policy while **someone else made the answer**
+    ///   (`command_delivery::send_reply` of `engram-dashboard-daemon`).
     pub fn set_retry_for_relay(&mut self, retry: RetryMode) {
         self.retry = retry;
         if let Some(received) = self.received.as_deref_mut() {
@@ -262,17 +257,15 @@ impl CommandError {
         }
     }
 
-    /// 문구를 갈아 끼운다 — 사본은 그대로 둔다.
-    ///
-    /// 문구는 재직렬화가 **언제나 이 칸에서** 읽으므로(원문 문구를 따로 들지 않는다) 사본을 버릴 이유가
-    /// 없다. 그래서 홉이 문맥을 덧붙여도 받은 코드·계약 밖 필드가 살아서 최종 호출자까지 간다.
+    /// Swaps the message — leaves the copy as is: reserialization **always reads** the message from this field (no separate raw message),
+    ///   so a hop appending context keeps the received code·fields outside the contract.
     pub fn set_message(&mut self, message: impl Into<String>) {
         self.message = message.into();
     }
 
-    /// 나갈 때 실리는 코드 문자열 — 미지 코드를 받았으면 **받은 그대로**이고, `code` 칸이 **없이**
-    /// (또는 `null` 로) 온 오류에는 `None`(나갈 때도 그 칸이 없다).
-    /// [`CommandError::set_code`] 로 갈아 끼운 뒤에는 그 타입드 값이 나간다.
+    /// The code string carried on the way out — **as received** if an unknown code was received, `None` for an error that came **without**
+    ///   a `code` field (or `null`; absent on the way out too).
+    /// After [`CommandError::set_code`], the typed value goes out.
     pub fn wire_code(&self) -> Option<&str> {
         match self.received.as_deref().map(|r| &r.code) {
             Some(Some(ReceivedCode::Absent)) => None,
@@ -281,9 +274,9 @@ impl CommandError {
         }
     }
 
-    /// 나갈 때 실리는 재시도 문자열 — 미지 지시를 받았으면 **받은 그대로**이고, `retry` 칸이 **없이**
-    /// (또는 `null` 로) 온 오류에는 `None`(나갈 때도 그 칸이 없다).
-    /// [`CommandError::set_retry`] 로 갈아 끼운 뒤에는 그 타입드 값이 나간다.
+    /// The retry string carried on the way out — **as received** if an unknown directive was received, `None` for an error that came
+    ///   **without** a `retry` field (or `null`; absent on the way out too).
+    /// After [`CommandError::set_retry`], the typed value goes out.
     pub fn wire_retry(&self) -> Option<&str> {
         match self.received.as_deref() {
             Some(received) => received.retry.as_deref(),
@@ -321,13 +314,14 @@ struct WireError<'a> {
 
 #[derive(serde::Deserialize)]
 struct RawError {
-    /// ★필수로 두지 않는다★ — 코드 없는(또는 `null` 인) 오류 하나가 디코드를 실패시키면 그것을 실은
-    /// [`crate::CommandReply`] 가 통째로 못 읽히고 **상관 키까지 사라진다**. 그러면 호출자는 결말 대신
-    /// 마감시각을 보게 되는데, 상대는 이미 답을 보냈다(TRD §4-⑤·§4-⑥).
+    /// ★Not made required★ — one error without a code (or `null`) failing decode would make the whole [`crate::CommandReply`] unreadable
+    ///   and **lose even the correlation key**;
+    /// the caller would see the deadline instead of the outcome already sent (TRD §4-⑤·§4-⑥).
     code: Option<String>,
     message: Option<String>,
     retry: Option<String>,
-    /// 계약 밖 필드를 버리지 않고 모은다 — `deny_unknown_fields` 는 additive 확장을 깨므로 달지 않는다.
+    /// Collects fields outside the contract instead of discarding them — `deny_unknown_fields` is not attached because it breaks additive
+    ///   extension.
     #[serde(flatten)]
     extra: serde_json::Map<String, serde_json::Value>,
 }
@@ -367,15 +361,15 @@ impl<'de> serde::Deserialize<'de> for CommandError {
         let raw = RawError::deserialize(d)?;
         let known_code = raw.code.as_deref().and_then(ErrorCode::from_wire);
         let known_retry = raw.retry.as_deref().and_then(RetryMode::from_wire);
-        // 낮춘 해석: 모르는 코드는 INTERNAL + never(§4-⑦), 모르는 지시는 코드의 파생값.
-        //   코드가 **없는** 것도 같은 자리로 접는다 — 아는 코드가 아니면 뜻을 모르는 것은 매한가지다.
+        // Downgraded reading: an unknown code is INTERNAL + never (§4-⑦), an unknown directive is the code's derived value; a **missing**
+        //   code folds here too (not a known code, meaning unknown).
         let code = known_code.unwrap_or(ErrorCode::Internal);
         let retry = match known_code {
             Some(_) => known_retry.unwrap_or_else(|| code.default_retry()),
             None => RetryMode::Never,
         };
-        // 세 칸이 받은 것을 그대로 복원할 수 있으면 사본을 안 든다 — 들 이유가 없을 때 들면 위 doc 의
-        //   「손으로 갈아 끼우지 말 것」이 흔한 값에까지 번진다.
+        // If the three fields restore what was received as is, no copy is held — holding one needlessly would spread the "do not swap by
+        //   hand" rule to common values.
         let expressible = known_code.is_some()
             && known_retry.is_some()
             && raw.message.is_some()
@@ -406,26 +400,25 @@ mod tests {
     use super::*;
     use crate::{CommandReply, RequestId};
 
-    /// ★어휘가 늘 때 나가는 이름과 들어오는 이름이 함께 늘어야 한다★ — 한쪽만 늘면 새 코드가 제 이름으로
-    /// 나가고 `INTERNAL` 로 돌아와, 코드를 더한 그 편집이 스스로를 무장 해제한다.
+    /// ★When the vocabulary grows, outgoing and incoming names must grow together★ — a code that grows on one side only goes out under its
+    ///   own name and comes back as `INTERNAL`.
     ///
-    /// 목록 어긋남 자체는 이제 표(`error_codes!`)가 막는다 — 여기 남는 위험은 **두 변형이 같은 wire
-    /// 문자열을 쓰는 것**이고, 그러면 뒤 줄이 앞 줄의 이름으로 돌아온다(`from_wire` 는 표를 훑어 먼저
-    /// 맞는 것을 낸다).
+    /// The table (`error_codes!`) now prevents list mismatch; the remaining risk is **two variants sharing one wire string** — `from_wire`
+    ///   returns the first match, so the later line comes back under the earlier name.
     #[test]
     fn every_code_in_the_alphabet_round_trips_through_its_wire_string() {
         for code in ErrorCode::ALL {
             assert_eq!(
                 ErrorCode::from_wire(code.as_str()),
                 Some(*code),
-                "{} 가 돌아오지 않는다",
+                "{} does not come back",
                 code.as_str()
             );
         }
     }
 
-    /// ★코드가 없어도 답장 전체는 읽혀야 한다★ — 여기서 디코드가 실패하면 [`CommandReply`] 가 통째로
-    /// 깨져 **상관 키까지 잃고**, 호출자는 이미 도착한 결말 대신 마감시각을 본다(TRD §4-⑤).
+    /// ★The whole reply must read even without a code★ — a decode failure here breaks [`CommandReply`] entirely and **loses the
+    ///   correlation key** (TRD §4-⑤).
     #[test]
     fn a_reply_whose_code_is_null_still_decodes_and_keeps_its_request_id() {
         let id = RequestId::new();
@@ -434,29 +427,33 @@ mod tests {
         );
 
         let decoded: CommandReply =
-            serde_json::from_str(&wire).expect("code 가 null 이어도 디코드된다");
+            serde_json::from_str(&wire).expect("decodes even when code is null");
 
-        assert_eq!(decoded.request_id, id, "상관 키가 살아남는다");
-        let err = decoded.outcome.expect_err("오류 답장");
+        assert_eq!(decoded.request_id, id, "the correlation key survives");
+        let err = decoded.outcome.expect_err("error reply");
         assert_eq!(err.code(), ErrorCode::Internal);
         assert_eq!(err.retry(), RetryMode::Never);
-        assert_eq!(err.wire_code(), None, "없던 코드를 지어내지 않는다");
         assert_eq!(
-            serde_json::to_string(&err).expect("재직렬화"),
+            err.wire_code(),
+            None,
+            "no inventing a code that was not there"
+        );
+        assert_eq!(
+            serde_json::to_string(&err).expect("reserialize"),
             r#"{"message":"the owner fell over"}"#
         );
     }
 
-    /// 칸이 아예 없는 경우도 `null` 과 같이 접힌다 — 둘 다 「값 없음」이다(아래 정규화 규칙과 같은 축).
+    /// A case with no field at all folds the same as `null` — both are 「no value」 (the same axis as the normalization rule below).
     #[test]
     fn an_error_with_no_code_field_decodes_as_internal_and_stays_codeless() {
         let decoded: CommandError =
-            serde_json::from_str(r#"{"message":"x","retry":"never"}"#).expect("디코드");
+            serde_json::from_str(r#"{"message":"x","retry":"never"}"#).expect("decode");
 
         assert_eq!(decoded.code(), ErrorCode::Internal);
         assert_eq!(decoded.retry(), RetryMode::Never);
         assert_eq!(
-            serde_json::to_string(&decoded).expect("재직렬화"),
+            serde_json::to_string(&decoded).expect("reserialize"),
             r#"{"message":"x","retry":"never"}"#
         );
     }
@@ -465,41 +462,40 @@ mod tests {
     fn unknown_wire_code_degrades_to_internal_never() {
         let e: CommandError =
             serde_json::from_str(r#"{"code":"FROM_THE_FUTURE","message":"x","retry":"whenever"}"#)
-                .expect("모르는 코드도 디코드된다");
+                .expect("unknown codes decode too");
         assert_eq!(e.code(), ErrorCode::Internal);
         assert_eq!(e.retry(), RetryMode::Never);
     }
 
-    /// ★수용이 파괴여선 안 된다★ — 중계 홉이 미지 코드를 지우면 최종 호출자는 원본을 못 본다.
+    /// ★Accepting must not be destroying★ — a relay hop erasing an unknown code hides the original from the final caller.
     ///
-    /// 바이트 비교가 성립하는 것은 입력이 이미 `code`·`message`·`retry` 순서일 때다 — 재직렬화는 그 순서로
-    /// 찍고 계약 밖 필드를 뒤에 붙이므로, 다른 순서로 온 원문은 **같은 뜻의 다른 바이트**로 나간다.
+    /// Byte comparison holds only when the input is already in `code`·`message`·`retry` order — reserialization stamps that order and
+    ///   appends fields outside the contract after, so other orders go out as **different bytes, same meaning**.
     #[test]
     fn an_unknown_code_and_its_retry_text_survive_a_relay_hop() {
         let wire = r#"{"code":"FROM_THE_FUTURE","message":"x","retry":"whenever"}"#;
-        let decoded: CommandError = serde_json::from_str(wire).expect("디코드");
-        assert_eq!(serde_json::to_string(&decoded).expect("재직렬화"), wire);
+        let decoded: CommandError = serde_json::from_str(wire).expect("decode");
+        assert_eq!(serde_json::to_string(&decoded).expect("reserialize"), wire);
         assert_eq!(decoded.wire_code(), Some("FROM_THE_FUTURE"));
     }
 
     #[test]
     fn an_unknown_retry_alone_keeps_the_known_code_and_the_original_text() {
         let wire = r#"{"code":"TIMEOUT","message":"x","retry":"tomorrow"}"#;
-        let decoded: CommandError = serde_json::from_str(wire).expect("디코드");
+        let decoded: CommandError = serde_json::from_str(wire).expect("decode");
         assert_eq!(decoded.code(), ErrorCode::Timeout);
         assert_eq!(decoded.retry(), RetryMode::SameRequestId);
-        assert_eq!(serde_json::to_string(&decoded).expect("재직렬화"), wire);
+        assert_eq!(serde_json::to_string(&decoded).expect("reserialize"), wire);
     }
 
-    /// ★`OWNER_UNAVAILABLE` 을 예로 쓰는 것은 지금 의도다★ — 이 코드를 내는 생산 경로가 없어졌으므로
-    /// (ADR-0150) 이 테스트와 아래 [`retry_is_derived_from_code`] 가 그 코드를 어휘에 붙들어 두는 유일한
-    /// 사용처다. 남겨 두는 이유는 변형 주석에 있다.
+    /// ★`OWNER_UNAVAILABLE` as the example is intended★ — its emitting path is gone (ADR-0150), so this test and
+    ///   [`retry_is_derived_from_code`] are the only uses keeping that code in the vocabulary (reason: the variant comment).
     #[test]
     fn known_code_keeps_wire_retry() {
         let e: CommandError = serde_json::from_str(
             r#"{"code":"OWNER_UNAVAILABLE","message":"tab.create","retry":"after-condition"}"#,
         )
-        .expect("디코드");
+        .expect("decode");
         assert_eq!(e.code(), ErrorCode::OwnerUnavailable);
         assert_eq!(e.retry(), RetryMode::AfterCondition);
     }
@@ -523,148 +519,148 @@ mod tests {
     #[test]
     fn round_trips_through_wire() {
         let e = CommandError::of(ErrorCode::NotFound, "no agent 'x'");
-        let text = serde_json::to_string(&e).expect("직렬화");
+        let text = serde_json::to_string(&e).expect("serialize");
         assert_eq!(
             text,
             r#"{"code":"NOT_FOUND","message":"no agent 'x'","retry":"never"}"#
         );
         assert_eq!(
-            serde_json::from_str::<CommandError>(&text).expect("복호"),
+            serde_json::from_str::<CommandError>(&text).expect("decode"),
             e
         );
     }
 
-    /// ★없던 칸을 지어내지 않는다★ — `retry` 없이 온 오류를 중계하면서 `""` 를 채우면 다음 홉은
-    /// 계약에 없는 값을 받고, 그 값은 아무 지시도 아니다.
+    /// ★No inventing a field that was not there★ — filling `""` for a missing `retry` would hand the next hop a value that is no directive.
     #[test]
     fn an_absent_retry_stays_absent_across_a_relay_hop() {
         let wire = r#"{"code":"TIMEOUT","message":"x"}"#;
-        let decoded: CommandError = serde_json::from_str(wire).expect("디코드");
+        let decoded: CommandError = serde_json::from_str(wire).expect("decode");
 
         assert_eq!(
             decoded.retry(),
             RetryMode::SameRequestId,
-            "코드에서 파생한다"
+            "derived from the code"
         );
         assert_eq!(decoded.wire_retry(), None);
-        assert_eq!(serde_json::to_string(&decoded).expect("재직렬화"), wire);
+        assert_eq!(serde_json::to_string(&decoded).expect("reserialize"), wire);
     }
 
     #[test]
     fn an_absent_message_stays_absent_across_a_relay_hop() {
         let wire = r#"{"code":"TIMEOUT","retry":"same-request-id"}"#;
-        let decoded: CommandError = serde_json::from_str(wire).expect("디코드");
+        let decoded: CommandError = serde_json::from_str(wire).expect("decode");
 
         assert!(decoded.message().is_empty());
-        assert_eq!(serde_json::to_string(&decoded).expect("재직렬화"), wire);
+        assert_eq!(serde_json::to_string(&decoded).expect("reserialize"), wire);
     }
 
-    /// 홉이 문구를 채워 넣으면 그건 실려 나간다 — 부재 보존은 「안 채웠을 때」의 규칙이다.
+    /// If a hop fills in the message, it is carried out — preserving absence is the rule for 「when not filled」.
     #[test]
     fn a_message_added_by_a_hop_is_serialized() {
         let mut decoded: CommandError =
-            serde_json::from_str(r#"{"code":"TIMEOUT"}"#).expect("디코드");
+            serde_json::from_str(r#"{"code":"TIMEOUT"}"#).expect("decode");
         decoded.set_message("took too long");
 
         assert_eq!(
-            serde_json::to_string(&decoded).expect("재직렬화"),
+            serde_json::to_string(&decoded).expect("reserialize"),
             r#"{"code":"TIMEOUT","message":"took too long"}"#
         );
     }
 
-    /// ★문구를 덧붙여도 받은 원문은 산다★ — 사본을 버리는 것은 코드·재시도 쪽 규칙이다.
+    /// ★The received raw text survives even when a message is appended★ — discarding the copy is the rule on the code·retry side.
     #[test]
     fn a_message_written_by_a_hop_keeps_the_relayed_code_and_extras() {
         let mut decoded: CommandError = serde_json::from_str(
             r#"{"code":"FROM_THE_FUTURE","message":"x","retry":"whenever","details":{"agent":"alpha"}}"#,
         )
-        .expect("디코드");
+        .expect("decode");
         decoded.set_message("relayed through the shell");
 
         assert_eq!(decoded.wire_code(), Some("FROM_THE_FUTURE"));
         assert_eq!(
-            serde_json::to_string(&decoded).expect("재직렬화"),
+            serde_json::to_string(&decoded).expect("reserialize"),
             r#"{"code":"FROM_THE_FUTURE","message":"relayed through the shell","retry":"whenever","details":{"agent":"alpha"}}"#
         );
     }
 
-    /// ★쓴 값은 그대로 나간다★ — 위험한 재시도 루프를 끊으려고 `retry` 를 내린 홉의 지시가 재직렬화에서
-    /// 원문으로 되돌아가면, 다음 홉은 끊으라는 지시를 못 보고 계속 재시도한다(TRD §4-④).
+    /// ★A written value goes out as is★ — if a hop's lowered `retry` reverted to the raw text on reserialization, the next hop would keep
+    ///   retrying (TRD §4-④).
     #[test]
     fn writing_a_typed_field_is_what_goes_out_even_on_a_relayed_error() {
         let wire =
             r#"{"code":"NOT_FOUND","message":"x","retry":"after-condition","details":{"tab":1}}"#;
 
-        let mut stop: CommandError = serde_json::from_str(wire).expect("디코드");
+        let mut stop: CommandError = serde_json::from_str(wire).expect("decode");
         stop.set_retry(RetryMode::Never);
         assert_eq!(stop.wire_retry(), Some("never"));
         assert_eq!(
-            serde_json::to_string(&stop).expect("재직렬화"),
+            serde_json::to_string(&stop).expect("reserialize"),
             r#"{"code":"NOT_FOUND","message":"x","retry":"never"}"#
         );
 
         let mut recoded: CommandError =
             serde_json::from_str(r#"{"code":"FROM_THE_FUTURE","message":"x","retry":"whenever"}"#)
-                .expect("디코드");
+                .expect("decode");
         recoded.set_code(ErrorCode::Timeout);
         assert_eq!(recoded.wire_code(), Some("TIMEOUT"));
         assert_eq!(
-            serde_json::to_string(&recoded).expect("재직렬화"),
+            serde_json::to_string(&recoded).expect("reserialize"),
             r#"{"code":"TIMEOUT","message":"x","retry":"never"}"#
         );
     }
 
-    /// ★`null` 과 부재는 함께 접힌다★ — 접힌 형태를 다시 디코드하면 같은 값이 나오므로 잃는 뜻이 없다.
-    /// 계약 밖 필드는 그 정규화를 받지 않는다(뜻을 모르는 칸이라 접을 근거가 없다).
+    /// ★`null` and absence fold together★ — re-decoding the folded form gives the same value; fields outside the contract are not folded
+    ///   (meaning unknown).
     #[test]
     fn an_explicit_null_in_a_typed_field_is_canonicalized_to_absence() {
         let decoded: CommandError =
             serde_json::from_str(r#"{"code":"TIMEOUT","message":null,"retry":null,"hint":null}"#)
-                .expect("디코드");
+                .expect("decode");
 
         assert!(decoded.message().is_empty());
         assert_eq!(
             decoded.retry(),
             RetryMode::SameRequestId,
-            "코드에서 파생한다"
+            "derived from the code"
         );
         assert_eq!(decoded.wire_retry(), None);
         assert_eq!(
-            serde_json::to_string(&decoded).expect("재직렬화"),
+            serde_json::to_string(&decoded).expect("reserialize"),
             r#"{"code":"TIMEOUT","hint":null}"#
         );
     }
 
-    /// ★계약 밖 필드는 additive 확장이다(§4-③)★ — 중계 홉이 지우면 최종 호출자가 못 본다.
+    /// ★Fields outside the contract are additive extension (§4-③)★ — if a relay hop erases them, the final caller cannot see them.
     #[test]
     fn unknown_extra_fields_survive_a_relay_hop() {
         let wire =
             r#"{"code":"NOT_FOUND","message":"x","retry":"never","details":{"agent":"alpha"}}"#;
-        let decoded: CommandError = serde_json::from_str(wire).expect("디코드");
+        let decoded: CommandError = serde_json::from_str(wire).expect("decode");
 
         assert_eq!(decoded.code(), ErrorCode::NotFound);
-        assert_eq!(serde_json::to_string(&decoded).expect("재직렬화"), wire);
+        assert_eq!(serde_json::to_string(&decoded).expect("reserialize"), wire);
     }
 
-    /// ★같음은 세 칸이 정한다★ — 낮춰 읽은 값과 같은 뜻으로 만든 값이 다르다고 나오면 계약(§4-⑦)과
-    /// 코드가 서로 다른 같음을 말하게 된다.
+    /// ★Sameness is decided by the three fields★ — if a downgraded value and a value built with the same meaning came out different, the
+    ///   contract (§4-⑦) and
+    /// the code would speak of different sameness.
     #[test]
     fn equality_is_the_three_contract_fields_not_the_relay_copy() {
         let downgraded: CommandError =
             serde_json::from_str(r#"{"code":"FROM_THE_FUTURE","message":"x","retry":"whenever"}"#)
-                .expect("디코드");
+                .expect("decode");
         let built = CommandError::of(ErrorCode::Internal, "x");
 
         assert_eq!(downgraded, built);
         assert_ne!(
-            serde_json::to_string(&downgraded).expect("직렬화"),
-            serde_json::to_string(&built).expect("직렬화"),
-            "같은 뜻이어도 나가는 바이트는 다르다 — 원문을 들고 있기 때문이다"
+            serde_json::to_string(&downgraded).expect("serialize"),
+            serde_json::to_string(&built).expect("serialize"),
+            "the outgoing bytes differ even with the same meaning — because it holds the raw text"
         );
 
         let other_message: CommandError =
             serde_json::from_str(r#"{"code":"NOT_FOUND","message":"y","retry":"never"}"#)
-                .expect("디코드");
+                .expect("decode");
         assert_ne!(other_message, CommandError::not_found("x"));
     }
 }

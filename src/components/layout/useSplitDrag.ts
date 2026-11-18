@@ -1,8 +1,5 @@
-// ADR-0227: divider-drag wiring — attaches gesture token issuing, `set_split_ratio` commit, the post-commit pull timer
-//   and the allowed range to the preview state (`splitPreview.ts`) and hands it out as `Splitter` props. The source of truth for the
-//   reconcile rules is `reducePreview` (TRD §2f). Two decisions are added here — on release, do not commit if another drag has
-//   already taken the preview; tie the preview and the commit's reply and pull to the view that started them.
-// It is not put on the frontend command registry (`window.__engramCmd`) — the LLM path is the single bus command `split.setRatio`.
+// ADR-0227: divider-drag wiring — attaches gesture token issuing, the `set_split_ratio` commit, the post-commit pull timer and the allowed range to the preview state (`splitPreview.ts`) and hands it out as `Splitter` props. Reconcile rules live in `reducePreview` (TRD §2f). Two decisions added here: on release, do not commit if another drag has taken the preview; tie the preview and the commit's reply and pull to the view that started them.
+// Not on the frontend command registry (`window.__engramCmd`) — the LLM path is the bus command `split.setRatio`.
 
 import {
   useCallback,
@@ -35,9 +32,7 @@ import { getCanvasReport, subscribeCanvasReport, type CanvasPx } from './windowC
 
 /**
  * Inputs are all this view's cache (`CachedView`) as is — the shell snapshot is the authority.
- * ★`slotRects` and `splitRects` must be passed as the cache's arrays as they are (MUST) — never pass a sorted or copied array.★
- *   A changed array reference is treated as a new snapshot and reconciled, and the guarantee 「바뀌지 않은 사각형·배열은 입력과 같은 참조」 (unchanged rects and arrays keep the
- *   input's reference) in the result also holds only if input references are stable. If you need drawing order (id order), sort this hook's *result*.
+ * ★Pass `slotRects` and `splitRects` as the cache's arrays as they are (MUST), never sorted or copied★: a changed array reference is treated as a new snapshot and reconciled, and the result's guarantee "unchanged rects and arrays keep the input's reference" holds only if input references are stable. For drawing order (id order), sort this hook's *result*.
  */
 export interface UseSplitDragArgs {
   viewId: string
@@ -55,10 +50,7 @@ export interface UseSplitDragResult {
   /** Rects to draw — values with the preview remap applied. Unchanged rects and arrays are the same references as the input. */
   slotRects: SlotRect[]
   splitRects: SplitRect[]
-  /**
-   * `split` = one item of `splitRects` above (the remapped value). Spread it as is onto `<Splitter key={split.split_id} …/>`.
-   * `range` is null (locked) if the snapshot has no such split id.
-   */
+  /** `split` = one item of `splitRects` above (the remapped value); spread it onto `<Splitter key={split.split_id} …/>`. `range` is null (locked) if the snapshot has no such split id. */
   splitterProps(split: SplitRect): SplitterProps
 }
 
@@ -87,15 +79,12 @@ function reduceScoped(s: Scoped, a: ScopedAction): Scoped {
 const initScoped = (viewId: string): Scoped => ({ viewId, preview: null })
 
 /**
- * Divider drag of one view — there is one preview per view.
- * - On release it calls `set_split_ratio` once. But if, meanwhile, a new drag of another divider took the preview (two pointers),
- *   the release does not commit — the value on screen already belongs to that drag, so sending would commit a value that was never shown.
+ * Divider drag of one view — one preview per view.
+ * - On release it calls `set_split_ratio` once — unless a new drag of another divider (two pointers) took the preview meanwhile: the value on screen then belongs to that drag, and sending would commit a value never shown.
  * - A double-click sends 0.5 with no preview.
  * - If no snapshot of that version arrives within `COMMIT_PULL_DELAY_MS` after `Applied`, it pulls `get_view` once.
- * - Axis length of the allowed range = the integer canvas this window reported to the shell (before a report, the root size rounded)
- *   × the snapshot split box width. It is the same input as the shell px clamp, so the committed value is not clipped again in the shell.
- * - If `viewId` changes on the same instance, the preview and any gesture in progress are discarded. The reply and pull of a commit
- *   started in the old view never reach the new view.
+ * - Axis length of the allowed range = the integer canvas this window reported to the shell (before a report, the root size rounded) × the snapshot split box width — the same input as the shell px clamp, so the committed value is not clipped again.
+ * - If `viewId` changes on the same instance, the preview and any gesture in progress are discarded; the reply and pull of an old view's commit never reach the new view.
  */
 export function useSplitDrag(args: UseSplitDragArgs): UseSplitDragResult {
   const { viewId, slotRects, splitRects, ratioMin, ratioMax, version, rootRef } = args
@@ -103,8 +92,7 @@ export function useSplitDrag(args: UseSplitDragArgs): UseSplitDragResult {
   const [scoped, dispatch] = useReducer(reduceScoped, viewId, initScoped)
   // Even in the render where the view has just changed (before the reset effect below), the old view's preview is not drawn.
   const preview = scoped.viewId === viewId ? scoped.preview : null
-  // The value of the sent actions folded right away = the state React will eventually draw (same pure function, same order). Being ahead of
-  //   render is the point — at release it decides 「미리보기가 아직 이 제스처의 것인가」 (does this gesture still own the preview?) without waiting for a render.
+  // Folds sent actions right away = the state React will eventually draw (same pure function, same order). Being ahead of render lets release decide "does this gesture still own the preview?" without waiting for a render.
   // ★Never call `dispatch` directly; always go through `send`★ — bypassing it even once silently throws off that ownership decision.
   const latest = useRef<Scoped>(scoped)
   const send = useCallback((a: ScopedAction) => {
@@ -116,12 +104,10 @@ export function useSplitDrag(args: UseSplitDragArgs): UseSplitDragResult {
   }, [])
 
   const nextToken = useRef(0)
-  // split id → the in-progress gesture token of that divider. It must be held per divider so that overlapping drags of two pointers or an unmount cancel
-  //   do not touch someone else's preview.
+  // split id → in-progress gesture token of that divider; held per divider so overlapping drags of two pointers or an unmount cancel do not touch someone else's preview.
   const gestures = useRef(new Map<string, number>())
 
-  // Used only to decide whether to cancel the pull. The commit reply is not blocked by it — when only the effects are cut but the state lives
-  //   (`<Activity mode="hidden">`), discarding the reply would trap the preview in `commit`.
+  // Only decides whether to cancel the pull; the commit reply is not blocked by it — with effects cut but state alive (`<Activity mode="hidden">`), discarding the reply would trap the preview in `commit`.
   const mounted = useRef(false)
   useEffect(() => {
     mounted.current = true
@@ -139,7 +125,7 @@ export function useSplitDrag(args: UseSplitDragArgs): UseSplitDragResult {
 
   // Cache version read when the reply arrives — it must include snapshots adopted since, not the value at release time.
   const cachedVersion = useRef(version)
-  // Why a layout effect: it reconciles before paint so a stale preview is not drawn for one frame on top of a new snapshot.
+  // Layout effect: reconciles before paint so a stale preview is not drawn for a frame over a new snapshot.
   useLayoutEffect(() => {
     cachedVersion.current = version
     const cur = latest.current
@@ -256,7 +242,7 @@ export function useSplitDrag(args: UseSplitDragArgs): UseSplitDragResult {
                   cachedVersion: cachedVersion.current,
                 }),
               err => {
-                console.error(`[useSplitDrag] set_split_ratio(${splitId}, ${ratio}) 실패:`, err)
+                console.error(`[useSplitDrag] set_split_ratio(${splitId}, ${ratio}) failed:`, err)
                 toView({ type: 'failure', token })
               },
             )
@@ -265,7 +251,7 @@ export function useSplitDrag(args: UseSplitDragArgs): UseSplitDragResult {
           useViewStore
             .getState()
             .setSplitRatio(viewId, splitId, 0.5)
-            .catch(err => console.error(`[useSplitDrag] set_split_ratio(${splitId}, 0.5) 실패:`, err))
+            .catch(err => console.error(`[useSplitDrag] set_split_ratio(${splitId}, 0.5) failed:`, err))
         },
       }
     },
@@ -275,18 +261,17 @@ export function useSplitDrag(args: UseSplitDragArgs): UseSplitDragResult {
   return { slotRects: display.slotRects, splitRects: display.splitRects, splitterProps }
 }
 
-// Same shape as the tab cache pull in `WindowLayout.tsx` — adopts into the cache after bounded retries. When cancelled (unmount, view switch)
-//   it stops retrying and does not put a reply already in flight into the cache either. What is adopted is filtered once more by the cache's version guard.
+// Same shape as the tab cache pull in `WindowLayout.tsx` — bounded retries then adopt into the cache; on cancel (unmount, view switch) it stops retrying and drops an in-flight reply. What is adopted is filtered again by the cache's version guard.
 function pullView(viewId: string, isCancelled: () => boolean): void {
   void retryAsync(() => invoke<ViewSnapshot>('get_view', { viewId }), {
     isCancelled,
-    onRetry: (err, attempt) => console.warn(`[useSplitDrag] get_view(${viewId}) 재시도 ${attempt}:`, err),
+    onRetry: (err, attempt) => console.warn(`[useSplitDrag] get_view(${viewId}) retry ${attempt}:`, err),
   })
     .then(snap => {
       if (!isCancelled()) useViewStore.getState().applyLayoutUpdated(snap)
     })
     .catch(err => {
       if (err instanceof RetryCancelledError) return
-      console.error(`[useSplitDrag] get_view(${viewId}) 최종 실패(재시도 소진):`, err)
+      console.error(`[useSplitDrag] get_view(${viewId}) final failure (retries exhausted):`, err)
     })
 }

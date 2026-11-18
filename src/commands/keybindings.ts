@@ -4,7 +4,7 @@ import { fireAndForget } from './dispatch'
 import { getCommand } from './registry'
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ★LOAD-BEARING focus guard (ADR-0055 · CLAUDE.md 「LLM-우선 제어」)★
+// ★LOAD-BEARING focus guard (ADR-0055 · CLAUDE.md 「LLM-우선 제어」)★ // hangul-ok
 //   The global keydown must not intercept shortcuts while the user is typing. ★If this guard has a hole, shortcuts
 //   intercept terminal/input typing★ — e.g. the regression where pressing 't' in the terminal changes the theme.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -18,11 +18,10 @@ export function isEditableTarget(target: EventTarget | null): boolean {
   // ★contenteditable is decided by isContentEditable alone★ (FIX-A, load-bearing): HTMLElement.isContentEditable returns the
   //   *effective* editability per the HTML spec — it reports true for contenteditable="" / "true" / "plaintext-only"
   //   and also for editability inherited from an ancestor, and conversely sees a contenteditable="false" island as exactly false even
-  //   under an editable ancestor. We used to add a closest('[contenteditable]:not([="false"])') fallback here,
-  //   but closest passes the "false" boundary and matches the editable ancestor above it → creating a bug that swallows shortcuts even over a non-editable island (e.g. a
-  //   contenteditable="false" button inside an editable div). isContentEditable already
-  //   handles inheritance, so the fallback is redundant and a bug source → removed. An Element that is not an HTMLElement (SVG, etc.) lacks this property, so it is
-  //   undefined→falsy, and since SVG is not an HTML-contenteditable target, that is the right answer.
+  //   under an editable ancestor. Do not add a closest('[contenteditable]:not([="false"])') fallback: closest passes the "false" boundary
+  //   and matches the editable ancestor above it, swallowing shortcuts even over a non-editable island (e.g. a contenteditable="false"
+  //   button inside an editable div). isContentEditable already handles inheritance. An Element that is not an HTMLElement (SVG, etc.)
+  //   lacks this property, so it is undefined→falsy, which is right since SVG is not an HTML-contenteditable target.
   if ((el as HTMLElement).isContentEditable) return true
 
   // Inside the xterm.js terminal — shortcuts must not swallow terminal key input (load-bearing).

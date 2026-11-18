@@ -15,7 +15,7 @@ import { t } from '../../i18n'
 
 function messageOf(stateFile: StateFileStatus | undefined, saves: boolean | undefined): string | null {
   switch (stateFile) {
-    // Guard ⅰ (unreadable · newer edition) is also `saves:false`, but these two wordings already carry 「저장하지 않는다」 (does not save) — we do not
+    // Guard ⅰ (unreadable · newer edition) is also `saves:false`, but these two wordings already carry 「does not save」 — we do not
     //   raise the guard ⅱ wording on top of them.
     case 'unreadable':
       return t('restore.stateFileUnreadable')

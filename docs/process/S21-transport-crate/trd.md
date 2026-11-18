@@ -554,7 +554,7 @@ CI adds one line `cargo test --locked -p engram-dashboard-transport --all-featur
 
 | What we do not do | Why |
 |---|---|
-| **Screen · log window** | ADR-0182 decision 2. *"올리는 것까지 해야지. 화면 만드는 건 나중에 view에서."* ★Since we only raise and there is no screen, the user-visible change is 0 — that is the intent★ |
+| **Screen · log window** | ADR-0182 decision 2. *「올리는 것까지 해야지. 화면 만드는 건 나중에 view에서.」* ★Since we only raise and there is no screen, the user-visible change is 0 — that is the intent★ |
 | **Moving the shell onto this crate** | Attach order ②. This scope is only ① |
 | **Filling `Registry` with N and using it** | Attach order ③. **The API is N now, but the shell actually holding several is later** |
 | **Application on the daemon side** | Attach order ④ |

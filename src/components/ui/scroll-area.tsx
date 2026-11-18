@@ -1,28 +1,28 @@
-//! ScrollArea — 앱 전역 오버레이 스크롤 영역 seam (ADR-0053).
+//! ScrollArea — the app-wide overlay scroll area seam (ADR-0053).
 //!
-//! ★역할★: Radix ScrollArea(@radix-ui/react-scroll-area) primitive 를 얇게 감싼 **교체점**. 프론트의
-//!   모든 스크롤 표면(채팅·트리·프리셋·팝업 목록·DOM 관측기 등)은 raw `overflow:auto` 대신 이 seam 을
-//!   지난다 — 스크롤바 룩/거동을 한 곳(이 컴포넌트 + theme.css --scrollbar-* 토큰)에서 바꾸면 전 화면에
-//!   전파된다(단일 출처). 컴포넌트·스토어는 이 seam 에만 의존하고 Radix Root/Viewport 를 직접 다루지
-//!   않는다(§5 손발/두뇌 분리 — 스크롤바 구현을 나중에 통째로 갈아끼워도 소비자 코드는 불변). 직접
-//!   Radix Root 노출 금지(ADR-0053 결정).
+//! ★Role★: a **swap point** thinly wrapping the Radix ScrollArea (@radix-ui/react-scroll-area) primitive. Every frontend
+//!   scroll surface (chat, tree, presets, popup lists, DOM observer, etc.) goes through this seam instead of raw `overflow:auto` —
+//!   changing scrollbar look/behavior in one place (this component + the theme.css --scrollbar-* tokens) propagates to all
+//!   screens (single source). Components and stores depend only on this seam and do not handle Radix Root/Viewport
+//!   directly (§5 hands/brain separation — even if the scrollbar implementation is swapped wholesale later the consumer code is unchanged). Directly
+//!   exposing the Radix Root is forbidden (ADR-0053 decision).
 //!
-//!   ★예외 = xterm★: TerminalSlot 의 xterm 은 자체 `.xterm-viewport` 스크롤바를 소유해 이 React 컴포넌트로
-//!   감쌀 수 없다 → 대신 index.css 의 전역 규칙이 같은 --scrollbar-* 토큰으로 스타일해 시각 통일한다
-//!   (컴포넌트 vs CSS 두 경로가 같은 토큰을 참조 = 단일 출처 유지).
+//!   ★Exception = xterm★: TerminalSlot's xterm owns its own `.xterm-viewport` scrollbar and cannot be wrapped by this React component
+//!   → instead a global rule in index.css styles it with the same --scrollbar-* tokens for visual unity
+//!   (the component and CSS paths reference the same tokens = single source preserved).
 //!
-//! ★불변식(변경 금지 — 근거 ADR-0053)★:
-//!   - TRUE overlay: 네이티브 스크롤바 숨김(Radix viewport 가 `::-webkit-scrollbar` 제거) + custom
-//!     scrollbar 가 콘텐츠 위에 absolute 로 떠 gutter 0(콘텐츠 폭 불변).
-//!   - 스크롤 중에만 등장(type="scroll") · 스크롤 멈춤 후 scrollHideDelay(500ms) 뒤 숨김. hover 에는
-//!     반응하지 않는다(ADR-0053 사용자 결정 — 전체 화면 hover 로 스크롤바가 너무 일찍 보이는 문제 해소).
-//!   - ★스크롤 대상 = ScrollArea.Viewport(Root 아님)★: 실제 overflow/scrollTop 은 viewport DOM 노드다.
-//!     RichSlot/DomSlot 의 스크롤 따라가기(ADR-0242 — 붙어 있을 때만 바닥으로 쓴다)가 이 노드를 재고 써야
-//!     하므로 ref 를 Viewport 로 forward 한다. Root 로 겨누면 스크롤이 동작하지 않는다(회귀 주의).
-//!   - ★children 의 absolute 오버레이는 Root 에 붙는다★: Root 만 positioned(relative)이고 Viewport 와 그 안쪽
-//!     콘텐츠 래퍼는 positioned 가 아니어야 한다. 그래야 children 이 얹은 `absolute inset-0` 막이 스크롤되지
-//!     않고 이 영역만 정확히 덮는다 — RichSlot 의 이력 대기 로딩 막이 여기에 기댄다(ADR-0226). Viewport 에
-//!     position 을 주면 그 막이 콘텐츠와 함께 스크롤되고, 래퍼에 주면 콘텐츠 높이로 줄어든다.
+//! ★Invariants (do not change — basis ADR-0053)★:
+//!   - TRUE overlay: native scrollbar hidden (the Radix viewport removes `::-webkit-scrollbar`) + the custom
+//!     scrollbar floats absolute over the content with gutter 0 (content width unchanged).
+//!   - Appears only while scrolling (type="scroll") · hides after scrollHideDelay (500ms) once scrolling stops. It does not react to
+//!     hover (ADR-0053 user decision — resolves the scrollbar showing too early from whole-screen hover).
+//!   - ★Scroll target = ScrollArea.Viewport (not Root)★: the real overflow/scrollTop is the viewport DOM node.
+//!     RichSlot/DomSlot's scroll-follow (ADR-0242 — writes to the bottom only while attached) must measure and write this node,
+//!     so the ref is forwarded to the Viewport. Aiming at the Root makes scrolling not work (regression warning).
+//!   - ★children's absolute overlay attaches to the Root★: only the Root is positioned (relative), and the Viewport and the content
+//!     wrapper inside it must not be positioned. That way an `absolute inset-0` veil that children lay on does not scroll
+//!     and covers exactly this area — RichSlot's history-wait loading veil relies on this (ADR-0226). Giving the Viewport
+//!     a position makes the veil scroll with the content, and giving it to the wrapper shrinks it to the content height.
 
 import { forwardRef, type ReactNode } from 'react'
 import * as RadixScrollArea from '@radix-ui/react-scroll-area'
@@ -31,11 +31,11 @@ import { cn } from '@/lib/utils'
 import './scroll-area.css'
 
 /**
- * 스크롤이 멈춘 뒤 스크롤바를 숨기기까지의 린거(lingering) — ADR-0053 요구 (4) "~0.5s 후 숨김".
+  * Lingering before the scrollbar hides after scrolling stops — ADR-0053 requirement (4) "hide after ~0.5s".
  *
- * ★공개하는 이유 = 두 번째 구현체가 같은 값을 베끼지 않게★: xterm 은 이 컴포넌트로 감쌀 수 없어
- *   가시성 규칙을 CSS + `nativeScrollActivity` 로 따로 구현하는데(ADR-0053 "예외 = xterm"), 숨김 지연을
- *   그쪽에 숫자로 다시 적으면 한쪽만 바뀌어 두 표면의 룰이 조용히 갈린다. 여기가 단일 출처다.
+  * ★Why it is public = so a second implementation does not copy the same value★: xterm cannot be wrapped by this component and
+  *   implements the visibility rule separately with CSS + `nativeScrollActivity` (ADR-0053 "exception = xterm"), and writing the hide delay again as
+  *   a number there would let only one side change and silently diverge the two surfaces' rules. This is the single source.
  */
 export const SCROLL_HIDE_DELAY_MS = 500
 
@@ -45,14 +45,14 @@ export interface ScrollAreaProps {
   viewportClassName?: string
   style?: React.CSSProperties
   viewportStyle?: React.CSSProperties
-  /** horizontal 목록/코드뷰가 나오면 여기로 확장(단일 seam 유지). */
+  /** When a horizontal list/code view appears, extend here (keep the single seam). */
   orientation?: 'vertical' | 'horizontal'
-  /** cdp eval·테스트에서 마운트 여부·대상 확인용 마커. */
+  /** Marker to check mount presence and target in cdp eval and tests. */
   'data-testid'?: string
 }
 
-// ADR-0053: ref 는 Viewport(실제 스크롤 노드)로 forward 한다 — RichSlot/DomSlot 이 이 ref 에 스크롤
-//   따라가기(ADR-0242)를 꽂는다(위 헤더 불변식).
+// ADR-0053: the ref is forwarded to the Viewport (the real scroll node) — RichSlot/DomSlot plug scroll-follow (ADR-0242)
+//   into this ref (header invariants above).
 export const ScrollArea = forwardRef<HTMLDivElement, ScrollAreaProps>(function ScrollArea(
   { children, className, viewportClassName, style, viewportStyle, orientation = 'vertical', ...rest },
   viewportRef,
@@ -60,8 +60,7 @@ export const ScrollArea = forwardRef<HTMLDivElement, ScrollAreaProps>(function S
   return (
     <RadixScrollArea.Root
       type="scroll"
-      // ★scrollHideDelay★: 500ms 린거(lingering) — 스크롤을 끝낸 직후 바로 사라지면 어색하므로 잠깐
-      //   남긴다(hover 표시 지연과 무관 — 구 CSS animation-delay 제거됨).
+      // ★scrollHideDelay★: 500ms lingering — vanishing right after scrolling ends feels abrupt, so it is left briefly
       scrollHideDelay={SCROLL_HIDE_DELAY_MS}
       className={cn('relative overflow-hidden', className)}
       style={style}
@@ -69,8 +68,8 @@ export const ScrollArea = forwardRef<HTMLDivElement, ScrollAreaProps>(function S
     >
       <RadixScrollArea.Viewport
         ref={viewportRef}
-        // ★h-full w-full 필수★: Radix Viewport 는 부모(Root) 높이를 받아야 내부 콘텐츠가 넘칠 때 스크롤이
-        //   생긴다. Root 는 flex 자식으로 높이를 받고(min-h-0 flex-1) Viewport 가 그걸 채운다.
+        // ★h-full w-full required★: the Radix Viewport must receive the parent (Root) height for scrolling to appear when the inner content overflows.
+        //   The Root gets height as a flex child (min-h-0 flex-1) and the Viewport fills it.
         className={cn('h-full w-full', viewportClassName)}
         style={viewportStyle}
       >
@@ -78,8 +77,7 @@ export const ScrollArea = forwardRef<HTMLDivElement, ScrollAreaProps>(function S
       </RadixScrollArea.Viewport>
       <RadixScrollArea.Scrollbar
         orientation={orientation}
-        // type="scroll" 이므로 Radix 가 스크롤 중에만 마운트하고 scrollHideDelay 뒤 언마운트한다
-        //   — hover 기반 show-delay animation 는 제거됨.
+        // With type="scroll" Radix mounts it only while scrolling and unmounts it after scrollHideDelay
         className="engram-scrollbar"
       >
         <RadixScrollArea.Thumb className="engram-scrollbar-thumb" />

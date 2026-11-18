@@ -37,14 +37,14 @@ pub struct CommandSpec {
     pub errors: &'static [ErrorCode],
     /// The **type name** of the argument struct (the declaration macro fills it with `stringify!`).
     ///
-    /// ★It is the only material for derived-artifact coverage★ — a TS binding comes out as one file per type, so if the
-    /// file name can be derived from the declaration, 「선언은 늘었는데 export 는 안 늘었다」 (declarations grew but exports did not) is caught **without a hand-kept list**.
-    /// A hand-written list is disarmed by the very edit that adds declarations also fixing it (the failure mode TRD §5 measured in `src-tauri/
-    /// bindings/`).
+    /// ★The only material for derived-artifact coverage★ — a TS binding is one file per type, so deriving the file name from the
+    ///   declaration catches "declarations grew but exports did not" **without a hand-kept list**
+    /// (a hand list is disarmed by the very edit that adds declarations — the failure TRD §5 measured in `src-tauri/bindings/`).
     pub args_type: &'static str,
     /// The type name of the return struct — same use as [`CommandSpec::args_type`].
     pub ok_type: &'static str,
-    /// Names of the argument fields that point at an agent (declaration order) — the declaration macro fills them from the `#[agent_ref]` marking.
+    /// Names of the argument fields that point at an agent (declaration order) — the declaration macro fills them from the `#[agent_ref]`
+    ///   marking.
     ///
     /// Carried in the registration packet's [`CommandDecl::agent_args`], the daemon turns the name in those fields into an agent id
     /// before relaying (ADR-0308). The fields are only the top-level argument's `String` and `Option<String>` (the macro blocks anything else).
@@ -54,9 +54,9 @@ pub struct CommandSpec {
 
 /// Errors the table adds automatically to **every command**.
 ///
-/// ★Why the declaration is not made to write them by hand★: these two are produced by **the table**, not by the command body —
-/// argument deserialization failure (`INVALID_ARGUMENT`) · handler panic and return serialization failure (`INTERNAL`).
-/// If written by hand, a declaration that omits them falsely advertises 「이 오류는 안 난다」 (this error does not occur).
+/// ★Why the declaration is not made to write them by hand★: **the table** produces them, not the command body — argument deserialization
+///   failure (`INVALID_ARGUMENT`) · handler panic and return serialization failure (`INTERNAL`);
+/// a hand-written list that omits them falsely advertises "this error does not occur".
 pub const COMMON_ERRORS: &[ErrorCode] = &[ErrorCode::InvalidArgument, ErrorCode::Internal];
 
 impl CommandSpec {
@@ -74,7 +74,8 @@ impl CommandSpec {
 
 /// A linker collection item — made only by the declaration macro.
 ///
-/// Why it carries a **reference**, not a value: the same declaration is visible in two places, `<ArgsType>::SPEC` (the in-crate list) and this collection (the whole
+/// Why it carries a **reference**, not a value: the same declaration is visible in two places, `<ArgsType>::SPEC` (the in-crate list) and
+///   this collection (the whole
 /// binary), and if the value were copied, the two copies could silently diverge.
 #[doc(hidden)]
 pub struct LinkedSpec(pub &'static CommandSpec);
@@ -89,11 +90,9 @@ pub fn command_specs() -> impl Iterator<Item = &'static CommandSpec> {
     inventory::iter::<LinkedSpec>.into_iter().map(|e| e.0)
 }
 
-/// ★If there are two of the same name, it **panics** — it does not silently pick one★.
-///
-/// If two declarations hold the same name, it is unknown which contract (argument shape · error set) wins, and the schema advertised in that state
-/// is half false. A duplicate is **a value decided by the build** and does not change at runtime, so it is right to surface it
-/// immediately on the first lookup. For a duplicate-free pre-check see [`duplicate_command_names`].
+/// ★If there are two of the same name, it **panics** — it does not silently pick one★: it is unknown which contract (argument shape ·
+///   error set) wins and the advertised schema would be half false.
+/// A duplicate is **decided by the build**, so surface it on the first lookup. For a duplicate-free pre-check see [`duplicate_command_names`].
 pub fn spec_of(name: &str) -> Option<&'static CommandSpec> {
     find_unique(command_specs(), name)
 }
@@ -123,7 +122,7 @@ pub(crate) fn find_unique<'a>(
     let first = matches.next()?;
     if matches.next().is_some() {
         panic!(
-            "command declared more than once: {name} — 두 선언이 같은 이름을 쥐면 어느 계약이 이기는지 알 수 없다"
+            "command declared more than once: {name} — when two declarations hold the same name, it is unknown which contract wins"
         );
     }
     Some(first)
@@ -131,18 +130,18 @@ pub(crate) fn find_unique<'a>(
 
 /// The unit registration carries (TRD §3-1 · §3-7).
 ///
-/// `help` = **the JSON text of one derived schema entry serialized whole** ([`spec_item_json`]).
-/// Not just the `args_schema` field — `ok` must be carried too so the return shape of lookup commands is discovered together (ADR-0156).
-/// ★To the receiving side (the daemon) this value is an opaque string★ — parsing, validating or branching on it is a violation, which is why we do not
-/// lift the data type above `String` (TRD §3-7 hard constraint).
+/// `help` = **the JSON text of one derived schema entry serialized whole** ([`spec_item_json`]) — `ok` is carried too so lookup commands'
+///   return shape is discovered (ADR-0156).
+/// ★To the receiving side (the daemon) this value is an opaque string★ — parsing, validating or branching on it is a violation, hence the
+///   data type is not lifted above `String` (TRD §3-7 hard constraint).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CommandDecl {
     pub name: String,
     pub help: String,
-    /// Names of the argument fields that point at an agent — before relaying, the daemon turns only the **string value** of these fields from name →
-    /// agent id with its own resolver, and does not relay if it does not resolve (ADR-0308). What the field means in that command (slot
-    /// pointer · tab pointer) the daemon does not know — `help` is still opaque.
-    /// Empty list = no fields to convert. An old packet without this field is also read in that sense (`default`).
+    /// Names of the argument fields that point at an agent — before relaying, the daemon turns only the **string value** of these fields
+    ///   from name → agent id with its own resolver and does not relay if it does not resolve (ADR-0308).
+    /// What the field means in that command the daemon does not know — `help` is still opaque. Empty list = no fields to convert (also
+    ///   what an old packet without this field reads as, `default`).
     // ADR-0308
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agent_args: Vec<String>,
@@ -150,7 +149,8 @@ pub struct CommandDecl {
 
 /// One schema entry — an element of the derived file and the `help` of the registration packet.
 ///
-/// ★This is where the two paths are made to use **the same single source**★: even if the disk file is not refreshed, the shape registered in the registry
+/// ★This is where the two paths are made to use **the same single source**★: even if the disk file is not refreshed, the shape registered
+///   in the registry
 /// always matches the binary (TRD §2-4 ②).
 pub fn spec_item_json(spec: &CommandSpec) -> String {
     let mut out = String::new();
@@ -181,25 +181,23 @@ pub fn spec_item_json(spec: &CommandSpec) -> String {
 
 /// Checks whether a declaration is **a shape that can be advertised** — called by the declaration crate's tests.
 ///
-/// ★It checks only what the macro cannot catch★: the alphabet is closed at compile time, but three things are not caught then —
-/// ① a raw identifier (`r#type`) is emitted into the schema with the `r#` attached, but the wire name serde uses is `type`, so
-/// **advertisement and reality diverge** (the macro has no means of trimming the string. It applies to both field names and **enum variants** —
-/// a variant is also emitted with `stringify!` and serde uses the name with `r#` removed) ② the schema text itself is not
-/// JSON ③ an agent-reference field (`#[agent_ref]`) is marked and `errors` does not list `NOT_FOUND` · `CONFLICT` — if the daemon
-/// cannot resolve that field it answers with those two codes instead of this command (ADR-0308), so a declaration that omits them falsely advertises 「이 오류는 안 난다」 (this error does not occur).
-/// ★It walks the **whole** schema★: a struct declared inside a block is unfolded inline into the parent schema, so
-/// looking only at the top would mean fields of nested types are never checked.
+/// ★Checks only what the macro cannot catch★: the alphabet is closed at compile time, but not ① a raw identifier (`r#type`) — emitted into
+///   the schema with `r#` while serde uses `type`, so **advertisement and reality diverge**
+/// (applies to field names and **enum variants** alike) ② the schema text itself not being JSON ③ an agent-reference field
+///   (`#[agent_ref]`) marked while `errors` lacks `NOT_FOUND` · `CONFLICT` — if the daemon cannot resolve that field
+/// it answers with those codes instead of this command (ADR-0308), so omitting them falsely advertises "this error does not occur".
+/// ★It walks the **whole** schema★: a struct declared in a block is unfolded inline, so checking only the top would skip nested fields.
 pub fn lint_spec(spec: &CommandSpec) -> Result<(), String> {
     for (label, text) in [("args", spec.args_schema), ("ok", spec.ok_schema)] {
         let parsed: serde_json::Value = serde_json::from_str(text)
-            .map_err(|e| format!("{}: {label} 스키마가 JSON 이 아니다 — {e}", spec.name))?;
+            .map_err(|e| format!("{}: {label} schema is not JSON — {e}", spec.name))?;
         lint_node(spec.name, label, "", &parsed)?;
     }
     if !spec.agent_args.is_empty() {
         for code in [ErrorCode::NotFound, ErrorCode::Conflict] {
             if !spec.errors.contains(&code) {
                 return Err(format!(
-                    "{}: 에이전트 참조 칸({})을 표시했는데 errors 에 {} 가 없다 — 데몬이 그 칸을 못 풀면 이 명령 대신 그 코드로 답한다(ADR-0308)",
+                    "{}: agent reference fields ({}) are marked but errors has no {} — if the daemon cannot resolve that field, it answers with that code instead of this command (ADR-0308)",
                     spec.name,
                     spec.agent_args.join(", "),
                     code.as_str()
@@ -221,7 +219,7 @@ fn lint_node(
         if path.is_empty() {
             String::new()
         } else {
-            format!(" (`{path}` 안)")
+            format!(" (in `{path}`)")
         }
     };
     match node {
@@ -233,7 +231,7 @@ fn lint_node(
                     };
                     if name.contains('#') {
                         return Err(format!(
-                            "{command}: {label} enum 값 `{name}`{} — raw identifier 는 wire 이름(`{}`)과 스키마 이름이 갈린다. 다른 이름을 쓸 것.",
+                            "{command}: {label} enum value `{name}`{} — a raw identifier makes the wire name (`{}`) and the schema name diverge. Use a different name.",
                             at(path),
                             name.trim_start_matches("r#")
                         ));
@@ -244,7 +242,7 @@ fn lint_node(
                 for key in props.keys() {
                     if key.contains('#') {
                         return Err(format!(
-                            "{command}: {label} 필드 `{key}`{} — raw identifier 는 wire 이름(`{}`)과 스키마 이름이 갈린다. 다른 이름을 쓸 것.",
+                            "{command}: {label} field `{key}`{} — a raw identifier makes the wire name (`{}`) and the schema name diverge. Use a different name.",
                             at(path),
                             key.trim_start_matches("r#")
                         ));
@@ -256,13 +254,13 @@ fn lint_node(
                         for entry in required {
                             let Some(name) = entry.as_str() else {
                                 return Err(format!(
-                                    "{command}: {label} required{} 에 문자열 아닌 항목 `{entry}` 가 실렸다",
+                                    "{command}: {label} required{} carries a non-string entry `{entry}`",
                                     at(path)
                                 ));
                             };
                             if !props.contains_key(name) {
                                 return Err(format!(
-                                    "{command}: {label} required{} 에 없는 필드 `{name}` 가 실렸다",
+                                    "{command}: {label} required{} carries a nonexistent field `{name}`",
                                     at(path)
                                 ));
                             }
@@ -270,7 +268,7 @@ fn lint_node(
                     }
                     Some(other) => {
                         return Err(format!(
-                            "{command}: {label} required{} 가 배열이 아니다 — `{other}`",
+                            "{command}: {label} required{} is not an array — `{other}`",
                             at(path)
                         ))
                     }
@@ -300,10 +298,9 @@ fn join(path: &str, segment: &str) -> String {
 
 /// The **partial-schema dialect** the derived file states.
 ///
-/// ★This file itself is not a schema★ — this field states **which edition (draft)** of JSON Schema the `args` and `ok` of
-/// each entry below are. If it did not, a consumer could not know whether `{"type":"integer"}` includes `1.0`
-/// (before draft 6 it did not), and the rule by which the table fits arguments stands exactly on that property
-/// ([`crate::CommandTable::call`]).
+/// ★This file itself is not a schema★ — this field states **which draft** of JSON Schema the `args` and `ok` of each entry are; otherwise
+///   a consumer could not know whether `{"type":"integer"}` includes `1.0`
+/// (not before draft 6), and the table's argument-fitting rule ([`crate::CommandTable::call`]) stands on that property.
 const SCHEMA_DIALECT: &str = "https://json-schema.org/draft/2020-12/schema";
 
 /// The body of one crate's derived schema file (TRD §2-4 ②) — its elements are **byte-identical** to [`spec_item_json`].
@@ -339,7 +336,7 @@ mod tests {
             name: "fixture.lint",
             effect: Effect::Read,
             since: 1,
-            summary: "린트 픽스처",
+            summary: "lint fixture",
             args_schema,
             ok_schema: "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
             errors: &[],
@@ -354,7 +351,7 @@ mod tests {
         lint_spec(&spec(
             "{\"type\":\"object\",\"properties\":{\"target\":{\"type\":\"string\"}},\"required\":[\"target\"]}",
         ))
-        .expect("깨끗한 선언");
+        .expect("clean declaration");
     }
 
     #[test]
@@ -366,19 +363,16 @@ mod tests {
         assert!(err.contains("r#type"), "{err}");
     }
 
-    /// ★A nested struct is unfolded inline into the parent schema★ — looking only at the top, this field is never checked, and
-    /// the advertised name (`r#type`) and the wire name (`type`) go out diverged.
+    /// ★A nested struct is unfolded inline into the parent schema★ — checking only the top would never reach this field, and the
+    ///   advertised name (`r#type`) and wire name (`type`) go out diverged.
     #[test]
     fn a_raw_identifier_inside_a_nested_object_is_refused() {
         let err = lint_spec(&spec(
             "{\"type\":\"object\",\"properties\":{\"row\":{\"type\":\"object\",\"properties\":{\"r#type\":{\"type\":\"string\"}},\"required\":[]}},\"required\":[\"row\"]}",
         ))
-        .expect_err("중첩 raw identifier");
+        .expect_err("nested raw identifier");
         assert!(err.contains("r#type"), "{err}");
-        assert!(
-            err.contains("properties.row"),
-            "어디인지 말해야 한다: {err}"
-        );
+        assert!(err.contains("properties.row"), "must say where: {err}");
     }
 
     #[test]
@@ -386,7 +380,7 @@ mod tests {
         let err = lint_spec(&spec(
             "{\"type\":\"object\",\"properties\":{\"rows\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"r#type\":{\"type\":\"string\"}},\"required\":[]}}},\"required\":[\"rows\"]}",
         ))
-        .expect_err("배열 원소 안의 raw identifier");
+        .expect_err("raw identifier inside an array element");
         assert!(err.contains("items"), "{err}");
     }
 
@@ -395,7 +389,7 @@ mod tests {
         let err = lint_spec(&spec(
             "{\"type\":\"object\",\"properties\":{\"row\":{\"anyOf\":[{\"type\":\"object\",\"properties\":{\"r#type\":{\"type\":\"string\"}},\"required\":[]},{\"type\":\"null\"}]}},\"required\":[]}",
         ))
-        .expect_err("anyOf 갈래 안의 raw identifier");
+        .expect_err("raw identifier inside an anyOf branch");
         assert!(err.contains("anyOf"), "{err}");
     }
 
@@ -404,7 +398,7 @@ mod tests {
         let err = lint_spec(&spec(
             "{\"type\":\"object\",\"properties\":{\"row\":{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[\"gone\"]}},\"required\":[\"row\"]}",
         ))
-        .expect_err("없는 필드가 required 에");
+        .expect_err("a nonexistent field in required");
         assert!(err.contains("gone"), "{err}");
     }
 
@@ -413,8 +407,8 @@ mod tests {
         let err = lint_spec(&spec(
             "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[7]}",
         ))
-        .expect_err("문자열 아닌 required 항목");
-        assert!(err.contains("문자열"), "{err}");
+        .expect_err("non-string required entry");
+        assert!(err.contains("non-string"), "{err}");
     }
 
     #[test]
@@ -422,10 +416,11 @@ mod tests {
         lint_spec(&spec(
             "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":\"id\"}",
         ))
-        .expect_err("배열 아닌 required");
+        .expect_err("required that is not an array");
     }
 
-    /// ★If there is a marked field, the daemon's two rejection codes must be declared★ (ADR-0308) — even if only one is missing, it names that code.
+    /// ★If there is a marked field, the daemon's two rejection codes must be declared★ (ADR-0308) — even if only one is missing, it names
+    ///   that code.
     #[test]
     fn an_agent_reference_arg_without_not_found_and_conflict_is_refused() {
         let schema = "{\"type\":\"object\",\"properties\":{\"slot_of\":{\"type\":\"string\"}},\"required\":[]}";
@@ -435,37 +430,34 @@ mod tests {
             ..spec(schema)
         };
 
-        let err = lint_spec(&marked(&[])).expect_err("둘 다 없다");
+        let err = lint_spec(&marked(&[])).expect_err("both missing");
         assert!(
             err.contains("slot_of") && err.contains("NOT_FOUND"),
             "{err}"
         );
-        let err = lint_spec(&marked(&[ErrorCode::NotFound])).expect_err("CONFLICT 가 없다");
+        let err = lint_spec(&marked(&[ErrorCode::NotFound])).expect_err("CONFLICT missing");
         assert!(err.contains("CONFLICT"), "{err}");
-        let err = lint_spec(&marked(&[ErrorCode::Conflict])).expect_err("NOT_FOUND 가 없다");
+        let err = lint_spec(&marked(&[ErrorCode::Conflict])).expect_err("NOT_FOUND missing");
         assert!(err.contains("NOT_FOUND"), "{err}");
-        lint_spec(&marked(&[ErrorCode::Conflict, ErrorCode::NotFound])).expect("둘 다 있다");
-        lint_spec(&spec(schema)).expect("표시 없는 선언은 이 규칙에 안 걸린다");
+        lint_spec(&marked(&[ErrorCode::Conflict, ErrorCode::NotFound])).expect("both present");
+        lint_spec(&spec(schema)).expect("a declaration without marks is not caught by this rule");
     }
 
     #[test]
     fn a_schema_that_is_not_json_is_refused() {
-        lint_spec(&spec("{not json")).expect_err("깨진 스키마");
+        lint_spec(&spec("{not json")).expect_err("broken schema");
     }
 
-    /// ★An enum variant can also use a raw identifier★ — the values are a string array, so walking only field names would never
-    /// check it, and the advertisement is `"r#type"` while what serde accepts becomes `"type"`.
+    /// ★An enum variant can also use a raw identifier★ — values are a string array, so walking only field names would miss it (advertised
+    ///   `"r#type"`, serde accepts `"type"`).
     #[test]
     fn a_raw_identifier_enum_variant_is_refused() {
         let err = lint_spec(&spec(
             "{\"type\":\"object\",\"properties\":{\"kind\":{\"enum\":[\"Fast\",\"r#type\"]}},\"required\":[\"kind\"]}",
         ))
-        .expect_err("enum 값의 raw identifier");
+        .expect_err("raw identifier of an enum value");
         assert!(err.contains("r#type"), "{err}");
-        assert!(
-            err.contains("properties.kind"),
-            "어디인지 말해야 한다: {err}"
-        );
+        assert!(err.contains("properties.kind"), "must say where: {err}");
     }
 
     /// ★The file states the partial-schema dialect★ — if it did not, a consumer would read the meaning of `{"type":"integer"}` differently
@@ -476,7 +468,7 @@ mod tests {
             name: "fixture.one",
             effect: Effect::Read,
             since: 1,
-            summary: "하나",
+            summary: "one",
             args_schema: "{\"type\":\"object\",\"properties\":{}}",
             ok_schema: "{\"type\":\"object\",\"properties\":{}}",
             errors: &[],
@@ -486,7 +478,8 @@ mod tests {
         };
 
         let body = catalog_json(1, &[&ONE]);
-        let parsed: serde_json::Value = serde_json::from_str(&body).expect("파생 파일은 JSON");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&body).expect("the derived file is JSON");
 
         assert_eq!(parsed["$schema"], SCHEMA_DIALECT);
         assert_eq!(parsed["catalogVersion"], 1);

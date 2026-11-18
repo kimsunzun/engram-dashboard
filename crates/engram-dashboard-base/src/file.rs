@@ -1,23 +1,24 @@
 //! Shared rules for data files — read decisions ([`parse`] · [`classify`] · [`load`]) · write decisions ([`Loaded::write_policy`] ·
-//! [`judge`] · [`check_cap`]) · capped reads ([`read_capped`] · [`read_file_capped`]) · atomic writes ([`write_atomic`] ·
-//! [`write_atomic_unless`]) · atomic copies ([`copy_atomic`] · [`copy_aside`]) · sweeping leftover temp files ([`sweep_temps`]).
+//!   [`judge`] · [`check_cap`]) · capped reads ([`read_capped`] · [`read_file_capped`]) ·
+//! atomic writes ([`write_atomic`] · [`write_atomic_unless`]) · atomic copies ([`copy_atomic`] · [`copy_aside`]) · sweeping leftover temp
+//!   files ([`sweep_temps`]).
 //!
-//! It knows no file names · locations · schemas · version key names — each owner (store) owns those, and the part that
-//! belongs to the read rules is handed over as a [`Spec`]. The only names decided here sit next to the target: the temp file `<이름>.tmp<pid>.<번호>` · the set-aside copy
-//! `<이름>.corrupt`. ★Only here are the code that makes that shape (`temp_path` · [`copy_aside`]) and the code that reads it (`temp_owner`)★ — if the shape
-//! changes, fix all three together (the tests read back the names they made and compare).
+//! It knows no file names · locations · schemas · version key names — each owner (store) owns those and hands the read-rule part over as a
+//!   [`Spec`]. The only names decided here sit next to the target: the temp file `<name>.tmp<pid>.<n>`
+//! and the set-aside copy `<name>.corrupt`. ★The code that makes that shape (`temp_path` · [`copy_aside`]) and the code that reads it
+//!   (`temp_owner`) live only here★ — change all three together (tests read back the names they made).
 //!
-//! ★「덮어도 되나」 (may we overwrite?) is decided again for every write, right before it, from the current file★ — the decision rule is one [`Loaded::write_policy`] table,
-//! and the owner drives the order (read → decide → set aside → write). A file written by a newer version and a file that failed to read are neither overwritten nor set
-//! aside. The owner's shape check ([`Spec::shape`]) runs inside [`parse`], so a file with a broken shape is corrupt on any decision
-//! path.
+//! ★"May we overwrite?" is decided again for every write, right before it, from the current file★ — one [`Loaded::write_policy`] table;
+//!   the owner drives the order (read → decide → set aside → write). A file written by a newer version and a file that
+//! failed to read are neither overwritten nor set aside. The owner's shape check ([`Spec::shape`]) runs inside [`parse`], so a broken
+//!   shape is corrupt on any decision path.
 //!
 //! Folders: writes and copies create missing folders down to the target folder and sync that folder after the rename. Reads and decisions
-//! create nothing.
+//!   create nothing.
 //!
-//! ★The OS-dependent part is passed in by the caller as [`OsHooks`]★ — this crate cannot call an OS-layer crate (tenancy
-//! condition ②). Lock retry has one path: the rename, the open and read in [`read_file_capped`], and the source open in [`copy_atomic`]
-//! all go through [`OsHooks::retry`]. A read failure in the middle of a copy is not retried.
+//! ★The OS-dependent part is passed in by the caller as [`OsHooks`]★ — this crate cannot call an OS-layer crate (tenancy condition ②).
+//!   Lock retry has one path: the rename, the open and read in [`read_file_capped`], and the source open in
+//! [`copy_atomic`] all go through [`OsHooks::retry`]; a read failure in the middle of a copy is not retried.
 //!
 //! It emits no logs — it returns values and the caller prints them in its own wording.
 // ADR-0291
@@ -28,31 +29,35 @@ use std::time::Duration;
 
 use serde_json::{Map, Value};
 
-/// Two OS-dependent hooks — the caller passes through the OS-layer crate's (`engram-dashboard-platform`'s `fs`) ones. The production
-/// value is a constant per crate (two owners have reads with a different budget — ADR-0291 R14).
+/// Two OS-dependent hooks — the caller passes the OS-layer crate's (`engram-dashboard-platform`'s `fs`) ones. The production value is a
+///   constant per crate (two owners have reads with a different budget — ADR-0291 R14).
 ///
-/// They are fn pointers so that the production value can be a `const` — stateful test fakes (attempt counting · lock injection · not sleeping ·
-/// sync recording) are not passed through this.
+/// fn pointers so the production value can be a `const`; stateful test fakes (attempt counting · lock injection · not sleeping · sync
+///   recording) are not passed through this.
 // ADR-0291
 #[derive(Clone, Copy)]
 pub struct OsHooks {
     /// Retrying a briefly held file — calls `attempt` until the lock clears or the budget runs out and returns the last result.
     /// Success and non-lock errors are returned at once (a missing file `NotFound` · unusable content `InvalidData` are not
-    /// retried). Production = `fs::retry_busy` (budget = [`BUSY_RETRIES`] · [`BUSY_PAUSE`] — the long load budget an owner sets separately is the exception · R14).
+    /// retried). Production = `fs::retry_busy` (budget = [`BUSY_RETRIES`] · [`BUSY_PAUSE`] — the long load budget an owner sets separately
+    ///   is the exception · R14).
     pub retry: fn(&mut dyn FnMut() -> io::Result<()>) -> io::Result<()>,
-    /// Folder sync that makes a rename inside a folder durable on disk — production = `fs::sync_dir`. Called once on that folder only after an atomic write or copy
+    /// Folder sync that makes a rename inside a folder durable on disk — production = `fs::sync_dir`. Called once on that folder only
+    ///   after an atomic write or copy
     /// has swapped in by rename, and the result is not looked at (the write succeeds even if it fails).
     pub sync_dir: fn(&Path) -> io::Result<()>,
 }
 
-/// Lock budget for data files — the number of retries after the first attempt and the wait between them. The production [`OsHooks::retry`] uses these values (the long load budget an owner sets separately is the exception · ADR-0291 R14).
+/// Lock budget for data files — the number of retries after the first attempt and the wait between them. The production [`OsHooks::retry`]
+///   uses these values (the long load budget an owner sets separately is the exception · ADR-0291 R14).
 /// In the worst case it takes about 100 ms more, and a lock held longer than that fails as is.
 // ADR-0265 decision 4: if rename hits a lock, retry briefly.
 // ADR-0291: which failure is a lock and the retry loop are one OS-layer policy — this holds only the budget.
 pub const BUSY_RETRIES: u32 = 5;
 pub const BUSY_PAUSE: Duration = Duration::from_millis(20);
 
-/// The closure shape of [`OsHooks::retry`] — public functions unpack the production fn pointer into this shape and pass it, and this module's tests pass a fake
+/// The closure shape of [`OsHooks::retry`] — public functions unpack the production fn pointer into this shape and pass it, and this
+///   module's tests pass a fake
 /// that holds state. [`SyncDirHook`] is the same.
 type RetryHook<'a> = &'a mut dyn FnMut(&mut dyn FnMut() -> io::Result<()>) -> io::Result<()>;
 /// The closure shape of [`OsHooks::sync_dir`].
@@ -71,11 +76,12 @@ pub struct Spec {
     /// Read cap = write cap (bytes — the raw text on disk as is, BOM included). Raw text over it is corrupt and is not written either
     /// ([`check_cap`]).
     pub cap: u64,
-    /// The owner's shape check — can that owner read a document that passed the version gate (version `1..=current`)? `Err(사유)` = corrupt
+    /// The owner's shape check — can that owner read a document that passed the version gate (version `1..=current`)? `Err(reason)` = corrupt
     /// (the reason goes into [`Parsed::Unusable`] as is — the owner decides whether to carry the value).
     ///
     /// [`parse`] calls it, so no decision path skips the shape. ★If there is no reader for an earlier version (`< current`), return
-    /// `Err` here to make it corrupt★ — the version gate may well let that version through. It is not called for a newer version ([`Parsed::Newer`]).
+    /// `Err` here to make it corrupt★ — the version gate may well let that version through. It is not called for a newer version
+    ///   ([`Parsed::Newer`]).
     /// An owner that does not check shape uses [`any_shape`].
     pub shape: fn(version: u64, doc: &Map<String, Value>) -> Result<(), String>,
 }
@@ -102,22 +108,24 @@ pub enum Parsed {
 /// Decides one raw text — in the order cap · stripping one leading BOM · JSON object · version gate · [`Spec::shape`].
 ///
 /// - No version key means version 1.
-/// - A version value is accepted only if it is an integer-valued number of 1 or more (`1` · `1.0`) — 0 · negative · fractional · string · outside `u64` is corrupt.
+/// - A version value is accepted only if it is an integer-valued number of 1 or more (`1` · `1.0`) — 0 · negative · fractional · string ·
+///   outside `u64` is corrupt.
 /// - Larger than `current` is [`Parsed::Newer`] — it ends before the shape check.
 ///
 /// The cap is measured again here even if [`read_file_capped`] already cut it — whichever way the owner's IO seam
 /// read, the same definition of corrupt holds.
-// ADR-0291 R1~R5 · R7: no version = 1 · newer version handled separately · integer-valued numbers only · one BOM ignored · shape failure = corrupt.
+// ADR-0291 R1~R5 · R7: no version = 1 · newer version handled separately · integer-valued numbers only · one BOM ignored · shape failure =
+//   corrupt.
 pub fn parse(text: &str, spec: &Spec) -> Parsed {
     if text.len() as u64 > spec.cap {
-        return Parsed::Unusable(format!("{} 바이트 상한을 넘었다", spec.cap));
+        return Parsed::Unusable(format!("exceeded the {} byte cap", spec.cap));
     }
     // Notepad · PowerShell add a BOM when saving as UTF-8 — so that a hand-edited file does not become unusable for that reason alone.
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let doc = match serde_json::from_str::<Value>(text) {
         Ok(Value::Object(doc)) => doc,
-        Ok(_) => return Parsed::Unusable("JSON 객체가 아니다".to_string()),
-        Err(e) => return Parsed::Unusable(format!("JSON 이 아니다: {e}")),
+        Ok(_) => return Parsed::Unusable("not a JSON object".to_string()),
+        Err(e) => return Parsed::Unusable(format!("not JSON: {e}")),
     };
     let version = match doc.get(spec.version_key) {
         None => 1,
@@ -125,7 +133,7 @@ pub fn parse(text: &str, spec: &Spec) -> Parsed {
             Some(version) if version >= 1 => version,
             _ => {
                 return Parsed::Unusable(format!(
-                    "`{}` 가 1 이상의 정수가 아니다",
+                    "`{}` is not an integer of 1 or more",
                     spec.version_key
                 ))
             }
@@ -140,11 +148,12 @@ pub fn parse(text: &str, spec: &Spec) -> Parsed {
     Parsed::Usable { version, doc }
 }
 
-/// Integer-valued numbers only — a float with an integer value (`1.0`) is accepted too (JSON tools sometimes rewrite numbers as floats). Negative · fractional ·
+/// Integer-valued numbers only — a float with an integer value (`1.0`) is accepted too (JSON tools sometimes rewrite numbers as floats).
+///   Negative · fractional ·
 /// outside the `u64` range · non-number values give `None`.
 fn version_number(raw: &Value) -> Option<u64> {
     // 2^64 — the same value as `u64::MAX as f64`, so it is itself out of range. `as u64` clamps out-of-range to u64::MAX and
-    //   invents a nonexistent 「새 판」 (newer version), so filter it out before casting.
+    //   invents a nonexistent 「newer version」, so filter it out before casting.
     const U64_END: f64 = 18_446_744_073_709_551_616.0;
     raw.as_u64().or_else(|| {
         let float = raw.as_f64()?;
@@ -161,7 +170,8 @@ fn version_number(raw: &Value) -> Option<u64> {
 pub enum Loaded {
     Missing,
     Parsed(Parsed),
-    /// Not the content — the read itself failed (after the lock budget · permissions · other IO). ★Not mixed with corrupt★ — a perfectly fine file that is
+    /// Not the content — the read itself failed (after the lock budget · permissions · other IO). ★Not mixed with corrupt★ — a perfectly
+    ///   fine file that is
     /// briefly locked is neither set aside nor overwritten.
     Failed(io::Error),
 }
@@ -169,7 +179,8 @@ pub enum Loaded {
 /// Turns a read result into a decision — `NotFound` = [`Loaded::Missing`] · `InvalidData` (over the cap · not UTF-8 —
 /// the contract of [`read_capped`]) = corrupt · any other error = [`Loaded::Failed`] · raw text = [`parse`].
 ///
-/// An owner that reads through its own IO seam (the trait that takes test fakes) feeds that read result in here. An owner that reads directly by path uses
+/// An owner that reads through its own IO seam (the trait that takes test fakes) feeds that read result in here. An owner that reads
+///   directly by path uses
 /// [`load`].
 pub fn classify(read: io::Result<String>, spec: &Spec) -> Loaded {
     match read {
@@ -194,7 +205,8 @@ pub fn load(path: &Path, spec: &Spec, os: OsHooks) -> Loaded {
 pub enum Claim {
     /// The load decision was writable, or this run has written to that file at least once.
     Adopted,
-    /// The load decision was missing or corrupt and nothing has been written yet — a usable file that appeared in between is not ours, so it is set
+    /// The load decision was missing or corrupt and nothing has been written yet — a usable file that appeared in between is not ours, so
+    ///   it is set
     /// aside before overwriting.
     NotYet,
 }
@@ -214,7 +226,8 @@ pub enum WritePolicy {
 pub enum Refused {
     /// A file written by a version newer than this build.
     Newer { found: u64 },
-    /// The current file could not be read ([`Loaded::Failed`]) — what it holds is unknown, so it is not overwritten. An owner that needs that error
+    /// The current file could not be read ([`Loaded::Failed`]) — what it holds is unknown, so it is not overwritten. An owner that needs
+    ///   that error
     /// holds the [`Loaded`] via [`load`] instead of [`judge`] and calls [`Loaded::write_policy`].
     ReadFailed,
 }
@@ -230,8 +243,10 @@ impl Loaded {
     /// | newer version | refuse | refuse |
     /// | read failure | refuse | refuse |
     ///
-    /// ★The decision is made for every write, right before it, by reading the current file again★ — holding the load-time decision would overwrite a file that
-    /// turned into a newer version during the run, and holding 「손상이라 떠 두고 쓴다」 (corrupt, so set aside and write) would set aside our healthy file on every write after the first and
+    /// ★The decision is made for every write, right before it, by reading the current file again★ — holding the load-time decision would
+    ///   overwrite a file that
+    /// turned into a newer version during the run, and holding 「corrupt, so set aside and write」 would set aside our healthy file on every
+    ///   write after the first and
     /// delete the real corrupt copy.
     // ADR-0291 R2 · R8 · R16
     pub fn write_policy(&self, claim: Claim) -> WritePolicy {
@@ -264,7 +279,7 @@ pub fn check_cap(len: usize, spec: &Spec) -> io::Result<()> {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
-                "쓸 원문({len} 바이트)이 읽기 상한 {} 바이트를 넘는다",
+                "the text to write ({len} bytes) exceeds the read cap of {} bytes",
                 spec.cap
             ),
         ));
@@ -274,7 +289,8 @@ pub fn check_cap(len: usize, spec: &Spec) -> io::Result<()> {
 
 // ── Read · write machinery ──
 
-/// Runs `attempt` through `retry` and takes its value out — the hook does not know the value type, so the value is received separately here. If the hook
+/// Runs `attempt` through `retry` and takes its value out — the hook does not know the value type, so the value is received separately
+///   here. If the hook
 /// returns `Ok` but there is no value (the attempt was never called), it is `ErrorKind::Other`, not a panic.
 fn retrying<T>(retry: RetryHook, mut attempt: impl FnMut() -> io::Result<T>) -> io::Result<T> {
     let mut value = None;
@@ -282,27 +298,25 @@ fn retrying<T>(retry: RetryHook, mut attempt: impl FnMut() -> io::Result<T>) -> 
         value = Some(attempt()?);
         Ok(())
     })?;
-    value.ok_or_else(|| io::Error::other("다시 하기가 시도를 한 번도 부르지 않았다"))
+    value.ok_or_else(|| io::Error::other("the retry never called the attempt"))
 }
 
-/// ★Reads only up to the cap — does not measure after reading★.
+/// ★Reads only up to the cap — does not measure after reading★: reading everything first would exhaust memory before the cap check (the
+///   file is written by outside agents · people, so its size is not ours to control), and neither the default fold nor a warning could run.
 ///
-/// If it read everything first and then measured the length, memory would run out before the cap check arrived (the file is written by outside agents · people,
-/// so its size is not in our hands). Then neither the default fold nor a warning could run and the process would die.
-///
-/// Over the cap and not UTF-8 are **both `ErrorKind::InvalidData`** — in both cases the raw text could not be fetched. Other kinds
-/// are IO failures of the read itself, and what tells them apart is [`classify`] — if the content is unusable it is corrupt, if it is an IO failure it is left
-/// alone. There is no lock retry — whoever opens the file uses [`read_file_capped`] if needed.
+/// Over the cap and not UTF-8 are **both `ErrorKind::InvalidData`** (the raw text could not be fetched); other kinds are IO failures of
+///   the read itself — [`classify`] tells them apart (unusable content = corrupt, IO failure = left alone).
+/// No lock retry — use [`read_file_capped`] if needed.
 pub fn read_capped(source: impl io::Read, cap: u64) -> io::Result<String> {
     use std::io::Read;
 
     let mut buf = Vec::new();
-    // cap + 1 = the smallest amount that can tell 「넘었나」 (did it go over?). Even if it went over, the amount read stops here.
+    // cap + 1 = the smallest amount that can tell 「did it go over?」. Even if it went over, the amount read stops here.
     source.take(cap + 1).read_to_end(&mut buf)?;
     if buf.len() as u64 > cap {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("{cap} 바이트 상한을 넘었다"),
+            format!("exceeded the {cap} byte cap"),
         ));
     }
     String::from_utf8(buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
@@ -338,7 +352,8 @@ pub enum WriteOutcome {
 /// Writes to a temp file in the same folder and **swaps it in by rename** — dying mid-write leaves no half file. On failure the temp
 /// file is removed and the target is unchanged. If rename hits a lock, it retries via [`OsHooks::retry`].
 ///
-/// If the target folder is missing, it creates the missing folders above it too — created folders stay even if the write fails. After the swap it
+/// If the target folder is missing, it creates the missing folders above it too — created folders stay even if the write fails. After the
+///   swap it
 /// syncs that folder with [`OsHooks::sync_dir`] (the result is not looked at).
 ///
 /// For calls writing the same path concurrently, the one that renames later remains — which is later is not decided. If order
@@ -349,7 +364,7 @@ pub fn write_atomic(path: &Path, bytes: &[u8], os: OsHooks) -> io::Result<()> {
     write_atomic_unless(path, bytes, os, || false).map(drop)
 }
 
-/// [`write_atomic`] plus 「rename 직전에 물을 것」 (what to ask right before rename) — asks `skip` **before the first rename and before every
+/// [`write_atomic`] plus 「what to ask right before rename」 — asks `skip` **before the first rename and before every
 /// rename of a lock retry**, and if `true`, [`WriteOutcome::Skipped`].
 ///
 /// ★A marker set right after `skip` returned `false` cannot stop that rename★ — the gap between asking and the rename is not
@@ -391,7 +406,8 @@ fn write_atomic_with(
 /// Atomically copies `from` to `to` — it streams, so it does not load everything into memory and has no size cap. An existing `to`
 /// is overwritten. On failure the temp file is removed and `to` is unchanged.
 ///
-/// If opening `from` or rename hits a lock, it retries via [`OsHooks::retry`]. If the open never succeeds, that error comes before either the temp file or the folder of `to` is
+/// If opening `from` or rename hits a lock, it retries via [`OsHooks::retry`]. If the open never succeeds, that error comes before either
+///   the temp file or the folder of `to` is
 /// created. Folder creation · sync are the same as for [`write_atomic`].
 // ADR-0274
 // ADR-0291 R10 · R11
@@ -407,7 +423,8 @@ fn copy_atomic_with(
     retry: RetryHook,
     sync_dir: SyncDirHook,
 ) -> io::Result<()> {
-    // Does not use `std::fs::copy` — it carries over the source's permissions (the Windows read-only attribute · Unix permission bits), so a read-only
+    // Does not use `std::fs::copy` — it carries over the source's permissions (the Windows read-only attribute · Unix permission bits), so
+    //   a read-only
     //   source makes a read-only copy too, and the write handle for `sync_all` cannot be opened.
     let mut source = retrying(&mut *retry, || std::fs::File::open(from))?;
     replace_with(
@@ -421,10 +438,11 @@ fn copy_atomic_with(
     .map(drop)
 }
 
-/// Sets aside an unusable file with [`copy_atomic`] at the neighboring name `<이름>.corrupt` — the original stays in place.
+/// Sets aside an unusable file with [`copy_atomic`] at the neighboring name `<name>.corrupt` — the original stays in place.
 /// Return value = the copy's location. On `Err`, a copy set aside earlier stays as it was.
 ///
-/// ★There is only one name, so it overwrites a copy set aside earlier★ — the same practice as Chromium (`Preferences.bad`) · Firefox (`Invalidprefs.js`)
+/// ★There is only one name, so it overwrites a copy set aside earlier★ — the same practice as Chromium (`Preferences.bad`) · Firefox
+///   (`Invalidprefs.js`)
 /// (TRD S21-storage §10 F21). Copies do not pile up, so no size cap is set.
 // ADR-0274
 pub fn copy_aside(path: &Path, os: OsHooks) -> io::Result<PathBuf> {
@@ -433,19 +451,17 @@ pub fn copy_aside(path: &Path, os: OsHooks) -> io::Result<PathBuf> {
     Ok(to)
 }
 
-/// Fills a temp file in the same folder with `stage`, `sync_all`s it, then **swaps `path` in by rename**. `skip` is asked
-/// before every rename ([`write_atomic_unless`]).
+/// Fills a temp file in the same folder with `stage`, `sync_all`s it, then **swaps `path` in by rename**. `skip` is asked before every
+///   rename ([`write_atomic_unless`]).
 ///
-/// ★The temp file is made in the same folder★ — rename works as a swap only within the same volume. The name is `temp_path` —
-/// if two calls shared a temp name, the later create would empty the earlier temp file, and the earlier rename would swap that half file in
-/// as `Ok`.
+/// ★The temp file is made in the same folder★ — rename is a swap only within one volume. The name is `temp_path`: two calls sharing a temp
+///   name would let the later create empty the earlier temp file and the earlier rename swap that half file in as `Ok`.
 ///
-/// If not `Written` (failure · skipped), the temp file is removed and `path` is left as is — if not removed, garbage piles up in the data
-/// folder. If `Written`, `sync_dir` that folder — rename changes an entry of the folder, so the file's `sync_all`
-/// alone does not guarantee that the change lands on disk (POSIX).
+/// If not `Written` (failure · skipped) the temp file is removed and `path` is left as is (else garbage piles up in the data folder). If
+///   `Written`, `sync_dir` that folder — rename changes a folder entry, and the file's `sync_all` alone does not guarantee that lands on
+///   disk (POSIX).
 ///
-/// ★If rename fails on a lock, retry with `retry`★ — when an antivirus · indexer briefly holds the target file, rename on Windows
-/// fails that way.
+/// ★If rename fails on a lock, retry with `retry`★ — an antivirus · indexer briefly holding the target makes Windows rename fail that way.
 ///
 /// `rename` · `retry` · `sync_dir` are test seams — production is `std::fs::rename` · the caller's [`OsHooks`].
 // ADR-0265 decision 4: if rename hits a lock, retry briefly.
@@ -467,7 +483,7 @@ fn replace_with(
         let mut file = std::fs::File::create(&tmp)?;
         stage(&mut file)?;
         // ★flush is not enough★ — it only empties the process buffer. The content that rename will point to must actually be
-        //   on disk for 「반쪽이 안 남는다」 (no half file is left) to hold.
+        //   on disk for 「no half file is left」 to hold.
         file.sync_all()
     })();
     let outcome = staged.and_then(|()| {
@@ -486,7 +502,8 @@ fn replace_with(
     outcome
 }
 
-/// The folder that holds `path` — a path given as a bare name without a folder (`a.json`) is the current folder (`.`). If an empty path is passed, folder sync
+/// The folder that holds `path` — a path given as a bare name without a folder (`a.json`) is the current folder (`.`). If an empty path is
+///   passed, folder sync
 /// cannot open that folder.
 fn folder_of(path: &Path) -> &Path {
     match path.parent() {
@@ -498,7 +515,8 @@ fn folder_of(path: &Path) -> &Path {
 const TEMP_MARK: &str = ".tmp";
 const ASIDE_SUFFIX: &str = ".corrupt";
 
-/// The temp name next to `path`, `<이름>.tmp<pid>.<번호>` — the pid tells apart other processes looking at the same folder, and the number (one more each time it is
+/// The temp name next to `path`, `<name>.tmp<pid>.<n>` — the pid tells apart other processes looking at the same folder, and the number
+///   (one more each time it is
 /// called within the process) tells apart other calls of the same process.
 fn temp_path(path: &Path) -> io::Result<PathBuf> {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -509,9 +527,9 @@ fn temp_path(path: &Path) -> io::Result<PathBuf> {
 /// If `file_name` is a temp name of `target` (the `temp_path` shape), its pid. The pid · number must be the decimal exactly
 /// as `temp_path` writes it (not `+` · leading zeros · out of range).
 ///
-/// ★A `<target>.tmp<pid>` without a number (the shape before the number was added) is not treated as a temp name★ — the target of the current sweep
-/// has never been written in that shape, so we cannot assert such a name is ours, and a file that may be someone else's is not deleted.
-/// If a target written in the old shape is to be swept, look at this rule first.
+/// ★A `<target>.tmp<pid>` without a number (the shape before the number was added) is not a temp name★ — current sweep targets were never
+///   written in that shape, so we cannot assert it is ours and must not delete a file that may be someone else's.
+/// To sweep a target written in the old shape, look at this rule first.
 fn temp_owner(file_name: &str, target: &str) -> Option<u32> {
     let rest = file_name.strip_prefix(target)?.strip_prefix(TEMP_MARK)?;
     let (pid, n) = rest.split_once('.')?;
@@ -526,13 +544,15 @@ fn exact_decimal<T: std::str::FromStr + ToString>(digits: &str) -> Option<T> {
         .filter(|value| value.to_string() == digits)
 }
 
-/// In `dir`, for each of `targets` (file names), deletes the leftover temp files — the atomic write's `<대상>.tmp<pid>.<번호>` and the set-aside's
-/// `<대상>.corrupt.tmp<pid>.<번호>` — whose pid is this process or that `is_alive` said is dead.
+/// In `dir`, for each of `targets` (file names), deletes the leftover temp files — the atomic write's `<target>.tmp<pid>.<n>` and the
+///   set-aside's
+/// `<target>.corrupt.tmp<pid>.<n>` — whose pid is this process or that `is_alive` said is dead.
 ///
 /// - Those of a live other pid are kept — another process using the same folder may be writing right now.
 /// - ★Those of our own pid are deleted too★ — call it only when no call writing the same target is in this process.
 ///
-/// Return value = the files it tried to delete and their results (success if already gone in the meantime). An empty list if the folder is missing. `Err` = the folder
+/// Return value = the files it tried to delete and their results (success if already gone in the meantime). An empty list if the folder is
+///   missing. `Err` = the folder
 /// could not be read.
 pub fn sweep_temps(
     dir: &Path,
@@ -571,18 +591,18 @@ pub fn sweep_temps(
     Ok(swept)
 }
 
-/// The `<path 이름><suffix>` in the same folder as `path`.
+/// The `<path name><suffix>` in the same folder as `path`.
 fn sibling(path: &Path, suffix: &str) -> io::Result<PathBuf> {
     let invalid = |what: &str| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("{what} 를 못 고르는 경로"),
+            format!("a path whose {what} cannot be picked"),
         )
     };
-    let dir = path.parent().ok_or_else(|| invalid("부모 폴더"))?;
+    let dir = path.parent().ok_or_else(|| invalid("parent folder"))?;
     let mut name = path
         .file_name()
-        .ok_or_else(|| invalid("파일 이름"))?
+        .ok_or_else(|| invalid("file name"))?
         .to_os_string();
     name.push(suffix);
     Ok(dir.join(name))
@@ -602,7 +622,8 @@ mod tests {
     };
 
     /// A fake that imitates the shape of the production retry — on a lock (here `PermissionDenied`) it retries up to [`BUSY_RETRIES`] times,
-    /// but does not sleep and only counts the waits in `pauses`. Which error is a lock is, in production, up to the hook passed in (OS layer), so what
+    /// but does not sleep and only counts the waits in `pauses`. Which error is a lock is, in production, up to the hook passed in (OS
+    ///   layer), so what
     /// this module's tests measure is whether that error goes to the hook unchanged.
     fn counting_retry(
         pauses: &mut u32,
@@ -634,7 +655,7 @@ mod tests {
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .expect("시계")
+                .expect("clock")
                 .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
@@ -745,14 +766,15 @@ mod tests {
         let cap = 32u64;
         assert!(
             read_capped(io::Cursor::new(vec![b'x'; cap as usize]), cap).is_ok(),
-            "상한 자체는 통과다"
+            "the cap itself passes"
         );
         let over = read_capped(io::Cursor::new(vec![b'x'; cap as usize + 1]), cap)
-            .expect_err("상한 초과는 반려다");
+            .expect_err("exceeding the cap is refused");
         assert_eq!(over.kind(), io::ErrorKind::InvalidData);
     }
 
-    /// A source that counts the bytes it hands out — looking only at the result, 「다 읽고 나서 반려」 (read it all, then reject) and 「끊어 읽고 반려」 (cut the read, then reject) are both
+    /// A source that counts the bytes it hands out — looking only at the result, 「read it all, then reject」 and 「cut the read, then
+    ///   reject」 are both
     /// `InvalidData` and cannot be told apart.
     struct Counting<'a, R> {
         inner: R,
@@ -777,13 +799,13 @@ mod tests {
             produced: &produced,
         };
 
-        let refused = read_capped(reader, cap).expect_err("상한 초과는 반려다");
+        let refused = read_capped(reader, cap).expect_err("exceeding the cap is refused");
         assert_eq!(refused.kind(), io::ErrorKind::InvalidData);
 
         let read = produced.get();
         assert!(
             read <= cap + 1,
-            "상한을 넘겨 {read} 바이트를 읽었다(허용 {}) — 끊지 않으면 원문 전체가 메모리에 올라온다",
+            "read {read} bytes past the cap (allowed {}) — without cutting, the whole text gets into memory",
             cap + 1
         );
     }
@@ -791,7 +813,7 @@ mod tests {
     #[test]
     fn non_utf8_content_is_invalid_data_like_an_oversized_one() {
         let refused = read_capped(io::Cursor::new(vec![0xff, 0xfe, 0x00]), 64)
-            .expect_err("UTF-8 아님은 반려다");
+            .expect_err("non-UTF-8 is refused");
         assert_eq!(refused.kind(), io::ErrorKind::InvalidData);
     }
 
@@ -853,7 +875,7 @@ mod tests {
                 Err(denied())
             },
             &mut counting_retry(&mut pauses),
-            &mut |_| panic!("건너뛴 쓰기는 폴더를 동기화하지 않는다"),
+            &mut |_| panic!("a skipped write does not sync the folder"),
         )
         .unwrap();
 
@@ -875,13 +897,13 @@ mod tests {
             &path,
             |file| file.write_all(b"new"),
             || false,
-            |_, _| Err(io::Error::other("가짜 rename 실패")),
+            |_, _| Err(io::Error::other("fake rename failure")),
             &mut counting_retry(&mut pauses),
-            &mut |_| panic!("실패한 쓰기는 폴더를 동기화하지 않는다"),
+            &mut |_| panic!("a failed write does not sync the folder"),
         );
 
         assert_eq!(outcome.unwrap_err().kind(), io::ErrorKind::Other);
-        assert_eq!(pauses, 0, "잠김이 아니면 기다리지 않는다");
+        assert_eq!(pauses, 0, "no waiting unless it is locked");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "old");
         assert_eq!(names_in(&dir), vec!["state.json".to_string()]);
         std::fs::remove_dir_all(&dir).ok();
@@ -895,11 +917,11 @@ mod tests {
 
         let outcome = replace_with(
             &path,
-            |_| Err(io::Error::other("가짜 쓰기 실패")),
-            || panic!("채우기가 실패하면 묻지 않는다"),
-            |_, _| panic!("채우기가 실패하면 rename 하지 않는다"),
-            &mut |_| panic!("채우기가 실패하면 다시 하기에 들지 않는다"),
-            &mut |_| panic!("채우기가 실패하면 폴더를 동기화하지 않는다"),
+            |_| Err(io::Error::other("fake write failure")),
+            || panic!("if filling fails, it does not ask"),
+            |_, _| panic!("if filling fails, it does not rename"),
+            &mut |_| panic!("if filling fails, it does not enter the retry"),
+            &mut |_| panic!("if filling fails, it does not sync the folder"),
         );
 
         assert_eq!(outcome.unwrap_err().kind(), io::ErrorKind::Other);
@@ -917,7 +939,7 @@ mod tests {
         assert_ne!(first, second);
         let prefix = format!("state.json.tmp{}.", std::process::id());
         for temp in [&first, &second] {
-            assert_eq!(temp.parent(), path.parent(), "같은 폴더");
+            assert_eq!(temp.parent(), path.parent(), "same folder");
             let name = temp.file_name().unwrap().to_string_lossy().into_owned();
             assert!(name.starts_with(&prefix), "{name}");
         }
@@ -1007,7 +1029,7 @@ mod tests {
         assert_eq!(names_in(&dir), expected_kept);
         assert!(
             !asked.borrow().contains(&me),
-            "자기 pid 는 살았는지 묻지 않고 지운다"
+            "its own pid is deleted without asking whether it is alive"
         );
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1016,7 +1038,7 @@ mod tests {
     fn sweeping_a_missing_folder_is_an_empty_sweep() {
         let dir = temp_dir("sweep-missing");
         let swept = sweep_temps(&dir.join("none"), &["state.json"], |_| {
-            panic!("지울 후보가 없으면 묻지 않는다")
+            panic!("with no candidates to delete, it does not ask")
         })
         .unwrap();
         assert!(swept.is_empty());
@@ -1071,7 +1093,7 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "{broken",
-            "원본은 그 자리에"
+            "the original stays in place"
         );
 
         std::fs::write(&path, "{BROKEN").unwrap();
@@ -1108,7 +1130,7 @@ mod tests {
         std::fs::OpenOptions::new()
             .write(true)
             .open(&to)
-            .expect("사본은 쓸 수 있다 — 다음 떠 두기가 덮는다");
+            .expect("the copy is writable — the next set-aside overwrites it");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1157,7 +1179,7 @@ mod tests {
         assert_eq!(
             synced,
             vec![(dir.clone(), "new".to_string())],
-            "갈아끼운 뒤 그 폴더를 한 번"
+            "that folder once after the swap"
         );
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1171,7 +1193,7 @@ mod tests {
             &path,
             b"new",
             &mut |attempt| attempt(),
-            &mut |_| Err(io::Error::other("가짜 동기화 실패")),
+            &mut |_| Err(io::Error::other("fake sync failure")),
             &|| false,
         )
         .unwrap();
@@ -1213,7 +1235,7 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
         assert!(
             !dir.join("aside").exists(),
-            "원본을 못 열면 아무것도 만들지 않는다"
+            "if the original cannot be opened, nothing is created"
         );
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1246,13 +1268,13 @@ mod tests {
     fn items_shape(_: u64, doc: &Map<String, Value>) -> Result<(), String> {
         match doc.get("items") {
             Some(Value::Array(_)) => Ok(()),
-            _ => Err("`items` 가 배열이 아니다".to_string()),
+            _ => Err("`items` is not an array".to_string()),
         }
     }
 
     fn usable_doc(version: u64, json: &str) -> Parsed {
         let Value::Object(doc) = serde_json::from_str(json).unwrap() else {
-            panic!("객체가 아니다: {json}")
+            panic!("not an object: {json}")
         };
         Parsed::Usable { version, doc }
     }
@@ -1263,14 +1285,14 @@ mod tests {
         assert_eq!(
             parse(r#"{"v":1,"a":1}"#, &SPEC),
             usable_doc(1, r#"{"v":1,"a":1}"#),
-            "버전 키도 문서에 남는다"
+            "the version key stays in the document too"
         );
     }
 
     #[test]
     fn a_newer_version_is_newer_without_consulting_the_shape() {
         let spec = Spec {
-            shape: |_, _| panic!("새 판은 모양을 보지 않는다"),
+            shape: |_, _| panic!("a newer version does not check the shape"),
             ..SPEC
         };
         assert_eq!(parse(r#"{"v":2}"#, &spec), Parsed::Newer { found: 2 });
@@ -1290,7 +1312,7 @@ mod tests {
             if version == 2 {
                 Ok(())
             } else {
-                Err(format!("{version} 판을 읽을 리더가 없다"))
+                Err(format!("no reader for version {version}"))
             }
         }
         let no_reader = Spec {
@@ -1302,12 +1324,12 @@ mod tests {
 
         assert_eq!(
             parse(r#"{"v":1}"#, &no_reader),
-            Parsed::Unusable("1 판을 읽을 리더가 없다".to_string())
+            Parsed::Unusable("no reader for version 1".to_string())
         );
         assert_eq!(
             parse("{}", &no_reader),
-            Parsed::Unusable("1 판을 읽을 리더가 없다".to_string()),
-            "버전 키가 없으면 1 판이라 앞 판이다"
+            Parsed::Unusable("no reader for version 1".to_string()),
+            "without a version key it is version 1, an older version"
         );
         assert_eq!(parse(r#"{"v":2}"#, &no_reader), usable_doc(2, r#"{"v":2}"#));
         assert_eq!(
@@ -1381,7 +1403,7 @@ mod tests {
         ));
         assert!(matches!(
             classify(
-                Err(io::Error::new(io::ErrorKind::InvalidData, "상한")),
+                Err(io::Error::new(io::ErrorKind::InvalidData, "cap")),
                 &SPEC
             ),
             Loaded::Parsed(Parsed::Unusable(_))
@@ -1414,7 +1436,7 @@ mod tests {
                 load(&path, &SPEC, ONCE),
                 Loaded::Parsed(Parsed::Unusable(_))
             ),
-            "상한 초과"
+            "cap exceeded"
         );
         std::fs::write(&path, [0xff, 0xfe, 0x00]).unwrap();
         assert!(
@@ -1422,7 +1444,7 @@ mod tests {
                 load(&path, &SPEC, ONCE),
                 Loaded::Parsed(Parsed::Unusable(_))
             ),
-            "UTF-8 아님"
+            "not UTF-8"
         );
 
         let absent = dir.join("none").join("settings.json");
@@ -1433,7 +1455,7 @@ mod tests {
         );
         assert!(
             !dir.join("none").exists(),
-            "적재 · 판정은 폴더를 만들지 않는다"
+            "loading · deciding does not create the folder"
         );
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1444,7 +1466,7 @@ mod tests {
         let path = dir.join("agents.json");
         let text = r#"{"v":1,"items":"x"}"#;
         std::fs::write(&path, text).unwrap();
-        let broken = Parsed::Unusable("`items` 가 배열이 아니다".to_string());
+        let broken = Parsed::Unusable("`items` is not an array".to_string());
 
         assert_eq!(parse(text, &ITEMS), broken);
         assert!(matches!(
@@ -1478,26 +1500,41 @@ mod tests {
         let refused_newer = WritePolicy::Refuse(Refused::Newer { found: 3 });
         let refused_read = WritePolicy::Refuse(Refused::ReadFailed);
         let cases = [
-            ("없음", Claim::Adopted, Loaded::Missing, WritePolicy::Write),
-            ("없음", Claim::NotYet, Loaded::Missing, WritePolicy::Write),
-            ("쓸 수 있음", Claim::Adopted, usable(), WritePolicy::Write),
             (
-                "쓸 수 있음",
+                "missing",
+                Claim::Adopted,
+                Loaded::Missing,
+                WritePolicy::Write,
+            ),
+            (
+                "missing",
+                Claim::NotYet,
+                Loaded::Missing,
+                WritePolicy::Write,
+            ),
+            ("usable", Claim::Adopted, usable(), WritePolicy::Write),
+            (
+                "usable",
                 Claim::NotYet,
                 usable(),
                 WritePolicy::CopyAsideFirst,
             ),
             (
-                "손상",
+                "corrupt",
                 Claim::Adopted,
                 broken(),
                 WritePolicy::CopyAsideFirst,
             ),
-            ("손상", Claim::NotYet, broken(), WritePolicy::CopyAsideFirst),
-            ("새 판", Claim::Adopted, newer(), refused_newer),
-            ("새 판", Claim::NotYet, newer(), refused_newer),
-            ("읽기 실패", Claim::Adopted, failed(), refused_read),
-            ("읽기 실패", Claim::NotYet, failed(), refused_read),
+            (
+                "corrupt",
+                Claim::NotYet,
+                broken(),
+                WritePolicy::CopyAsideFirst,
+            ),
+            ("newer version", Claim::Adopted, newer(), refused_newer),
+            ("newer version", Claim::NotYet, newer(), refused_newer),
+            ("read failed", Claim::Adopted, failed(), refused_read),
+            ("read failed", Claim::NotYet, failed(), refused_read),
         ];
         for (file, claim, loaded, expected) in cases {
             assert_eq!(loaded.write_policy(claim), expected, "{file} · {claim:?}");

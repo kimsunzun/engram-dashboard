@@ -9,10 +9,10 @@ To make text flow character by character in claude JSON, the spawn arguments mus
 The `TextDelta` branch of the frontend accumulator only appends to the last text item and has no duplicate removal (`structuredAccumulator.ts:130-141`). The streamed deltas and the completed body gather into the same text item, so unless someone discards the completed body, **every claude answer becomes two copies**. The TRD wrote this rule as load-bearing and raised it as an ADR candidate (end of TRD §5-5).
 
 ## 결정
-Notation — **[고름]** = an internal implementation with no user-visible effect, so the TRD picked it.
+Notation — **[Picked]** = an internal implementation with no user-visible effect, so the TRD picked it.
 
 1. **Spawn argument** — in the StreamJson branch, `--include-partial-messages` after `--verbose`. The terminal branch is unchanged.
-2. **Duplicate removal is the translator's job — it discards the completed text of a streamed block.** `ClaudeStreamDecoder` gets one field `PartialMessage { id: Option<String>, open: Option<u64>, streamed: BTreeSet<u64> }` [고름 — the same lifetime as the line buffer (one incarnation)]. `consume_line` takes an argument `partial: Option<&mut PartialMessage>` — `Some` for live, `None` for resumption.
+2. **Duplicate removal is the translator's job — it discards the completed text of a streamed block.** `ClaudeStreamDecoder` gets one field `PartialMessage { id: Option<String>, open: Option<u64>, streamed: BTreeSet<u64> }` [Picked — the same lifetime as the line buffer (one incarnation)]. `consume_line` takes an argument `partial: Option<&mut PartialMessage>` — `Some` for live, `None` for resumption.
 
    | Line | Rule |
    |---|---|
@@ -26,10 +26,10 @@ Notation — **[고름]** = an internal implementation with no user-visible effe
    | Completed `assistant` line | If `message.id == partial.id`, and `open = Some(k)`, and `streamed ∋ k`, **only the `text` blocks** of that line are not emitted. The other blocks and every other case (an un-streamed block · id mismatch · no `partial`) are as today |
    | `result` | Clears the state after today's translation |
 
-   [고름] We take 「(메시지 id, 블록 번호)」 (message id, block number) as the open block — a completed line has no block number, but the contract says 「그 블록의 `content_block_stop` 보다 먼저」 (before that block's content_block_stop), so the block that is open at the moment the completed line arrives is that line's block. An empty block (stops without a completed line) takes no slot. If the vendor changes the order (completed after the stop), `open` is empty and **we emit the full text as today — we overlap rather than lose** (we err to the visible side).
+   [Picked] We take 「(메시지 id, 블록 번호)」 (message id, block number) as the open block — a completed line has no block number, but the contract says 「그 블록의 `content_block_stop` 보다 먼저」 (before that block's content_block_stop), so the block that is open at the moment the completed line arrives is that line's block. An empty block (stops without a completed line) takes no slot. If the vendor changes the order (completed after the stop), `open` is empty and **we emit the full text as today — we overlap rather than lose** (we err to the visible side).
 3. **The turn end is the single `result` line as it is.** We do not emit stream side lines (`message_delta` · `message_stop` etc.) as `Structured`.
 4. **By default we do not merge** (the same as codex — research §4-4). ★But if a numeric threshold is crossed, we merge inside B1★: if the number of streamed deltas in one turn of the B1 sampling's long answer (≥ 2,000 characters) **exceeds 10 % of `REPLAY_MAX_EVENTS` (4096 — `output_core.rs:1291`) (≈ 410)**, then inside the event list that one `decode()` call returns, adjacent `TextDelta` with the same `message_id` are joined into one (backend only · seq is assigned at emit time, so no holes appear). The decision is **based on real pump chunks** — because adjacent merging shrinks only when several lines come in one pump read (not based on fixture chunks · TRD §12 round-1 low 3). The decision number goes into the B1 return.
-5. **The resumption record (transcript) skips `stream_event` lines entirely** [고름] — today's `_ => {}` (`:1003`). Whether or not the record has those lines, the completed `assistant` line emits the full text, so it is one copy.
+5. **The resumption record (transcript) skips `stream_event` lines entirely** [Picked] — today's `_ => {}` (`:1003`). Whether or not the record has those lines, the completed `assistant` line emits the full text, so it is one copy.
 6. **The wire type and the frontend do not change** — streamed text also uses the same `TextDelta` vocabulary.
 
 ## 거부한 대안
@@ -37,7 +37,7 @@ Notation — **[고름]** = an internal implementation with no user-visible effe
 - **Tail comparison** (paseo) — 「상태가 더 많고 중복 모서리」 (more state and duplicate edges) (research §4-4 · TRD §10). The peer comparison is in research §4-3.
 - **Unconditional merging** — we build it only when the numeric threshold (decision 4) is crossed.
 - **Move `message_stop` to the turn end** — a turn would end at every tool call (research §4-4 trap · TRD §5-3).
-- **Set up fresh translator state for every resumption record** (the way the instruction said) [고름] — decision 5 is simpler and does not rely on the record's shape (TRD §5-4).
+- **Set up fresh translator state for every resumption record** (the way the instruction said) [Picked] — decision 5 is simpler and does not rely on the record's shape (TRD §5-4).
 
 ## 근거
 - **Vendor contract (certain)** — one completed message for every non-empty block, before that block's `content_block_stop` (research §4-2 — claude 2.1.280 measured + official docs).

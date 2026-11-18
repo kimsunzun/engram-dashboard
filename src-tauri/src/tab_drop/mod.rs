@@ -1,17 +1,10 @@
-//! The shell's share of tab drop (Tauri 0) — the ledger [`DropBook`] and processing [`handle`] of the drop command `tab_drop`, the
-//! computation [`frame_insets`] of the window fact `window:frame` and emit-only-on-change [`push_frame`]. The Tauri wrapper · port adapters = `commands::tab_drop`. Decisions are in the pure
-//! module [`plan`], wire types in [`wire`].
-//!
-//! ★Drag commands come only after the drag has ended (ADR-0296 · ADR-0297)★ — at most two per drag. Window facts
-//! flow independent of dragging. Do not add here a path that sends the drag's decisions · geometry · state to the shell while dragging — that boundary synchronization is the root of the defect ADR-0296
-//! removed.
-//!
-//! - ★The drop does not compare against the state it saw★ — the model finds again, by id, what the drop pointed at in the current state, applies it
-//!   matched to the current state if it exists and rejects if not (rules = [`plan::plan`]).
-//! - The model is written only through one `layout::apply::dock_tab`, the same as human · LLM commands (ADR-0081 · CLAUDE.md 「LLM-우선 제어」).
-//!   This command is not put on the bus command table — the LLM command for the same action, T-65 `tab.dock`, stands on the same function.
-//! - ★Lock discipline★ — the locks of the ledger · window-fact table are leaves. While holding one, do not take the layout lock · emit · call a window. The result notification
-//!   ([`DropShell::done`]) · focus are called after all locks are released.
+//! The shell's share of tab drop (Tauri 0): the ledger [`DropBook`] and processing [`handle`] of the drop command `tab_drop`, the window fact `window:frame` computation [`frame_insets`] and emit-only-on-change [`push_frame`]. Tauri wrapper · port adapters = `commands::tab_drop`; decisions are in the pure module [`plan`], wire types in [`wire`].
+//! Drag commands come only after the drag has ended (ADR-0296 · ADR-0297) — at most two per drag; window facts flow independent of dragging. Do not add a path sending the drag's decisions · geometry · state to the shell while dragging — that boundary synchronization is the root of the defect ADR-0296 removed.
+//! - The drop does not compare against the state it saw: the model finds again, by id, what the drop pointed at in the current state, applies it matched to the current state if it exists and rejects if not (rules = [`plan::plan`]).
+// hangul-ok-begin
+//! - The model is written only through one `layout::apply::dock_tab`, the same as human · LLM commands (ADR-0081 · CLAUDE.md 「LLM-우선 제어」); this command is not on the bus command table — the LLM command for the same action, T-65 `tab.dock`, stands on the same function.
+// hangul-ok-end
+//! - Lock discipline: the ledger · window-fact table locks are leaves; while holding one, take no layout lock, emit or call a window. The result notification ([`DropShell::done`]) · focus are called after all locks are released.
 // ADR-0296 · ADR-0297
 // TRD S21-slot-docking §3
 
@@ -38,12 +31,9 @@ use crate::layout::{
     LabelSource, LayoutEvents, LayoutState, SubscriptionSync, WindowAttrs, WindowHost,
 };
 
-/// The number of drags the ledger remembers — when it overflows, it forgets the oldest of the finished records first. Records in progress (a new window in progress · its rejection notification
-/// in progress) may hold a parked `drop`, so they are not forgotten. The two commands of one drag arrive back to back, so a forgotten drag is assumed not to come
-/// again.
+/// Number of drags the ledger remembers — on overflow the oldest finished records are forgotten first. Records in progress (new window in progress · its rejection notification in progress) may hold a parked `drop` and are never forgotten. The two commands of one drag arrive back to back, so a forgotten drag is assumed not to come again.
 const BOOK_CAP: usize = 64;
 
-/// Where the command came from — `Drop` = a drop in our webview (tab bar · seam · `new_window{drop}`) · `DragEnd` = the source's dragend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Arrival {
     Drop,
@@ -69,7 +59,6 @@ impl Arrival {
     }
 }
 
-// One drop command that has been through the decision — it holds together what processing uses, so the ledger can park it.
 #[derive(Debug)]
 struct Handling {
     drop: TabDrop,
@@ -79,67 +68,50 @@ struct Handling {
     plan: Plan,
 }
 
-// The branch the ledger records per drag.
 #[derive(Debug)]
 enum Mark {
-    // The drop was processed (applied · rejected · ignored, all of them · including a parked drop that was chosen to be processed next).
     Drop,
-    // drag_end did not write the model — a new window that had no parked drop after cancel · ignore · reject notification.
     Quiet,
-    // The new window of drag_end is in progress — it parks the first drop that arrives meanwhile.
     Placing(Option<Box<Handling>>),
-    // The new window of drag_end was rejected with no parked drop and is emitting its `done{Rejected}` — like `Placing` it parks the first drop,
-    //   and after the notification `close` hands it over. If it were received and processed before the notification, that drop's `done` could go before the rejection.
+    // The new window of drag_end was rejected with no parked drop and is emitting its `done{Rejected}` — like `Placing` it parks the first drop, and after the notification `close` hands it over. Processed before the notification, that drop's `done` could go before the rejection.
     Rejecting(Option<Box<Handling>>),
-    // The new window of drag_end was created.
     Placed,
 }
 
 impl Mark {
-    // A record that may hold a parked drop — not forgotten even if the ledger overflows.
     fn in_flight(&self) -> bool {
         matches!(self, Mark::Placing(_) | Mark::Rejecting(_))
     }
 }
 
-// The answer of [`DropBook::admit`].
 #[derive(Debug)]
 enum Admit {
     Run(Handling),
-    // The drag_end new window of the same drag is in progress (including its rejection notification in progress), so it was parked — if that new window is rejected, that processing continues
-    //   with it.
+    // The same drag's drag_end new window is in progress (or emitting its rejection notification), so the drop was parked — if that new window is rejected, that processing continues with it.
     Parked,
     Duplicate,
 }
 
-// The answer of [`DropBook::settle`].
 #[derive(Debug)]
 enum Settle {
-    // Not the record of a new window in progress — nothing to do.
     Untracked,
-    // The new window stood — if there was a parked drop, that (it is discarded).
     Placed(Option<Box<Handling>>),
-    // The new window was rejected and there is a parked drop — this processing does not emit its own `done` and continues with that one.
     Superseded(Box<Handling>),
-    // The new window was rejected with nothing parked — the record is `Rejecting`. This processing emits `done{Rejected}` and then calls `close`.
     Rejecting,
 }
 
-/// Recent drag ids and their processing branches — whatever order the `drag_end` · `drop` of one drag arrive in, the model is written at most once and
-/// `drop` wins. The decision · recording are inside one lock and that lock is a leaf (held only inside `admit` · `settle` · `close`).
+/// Recent drag ids and their processing branches — in whatever order a drag's `drag_end` · `drop` arrive the model is written at most once and `drop` wins. Decision · recording are inside one lock, a leaf (held only inside `admit` · `settle` · `close`).
 #[derive(Debug, Default)]
 pub struct DropBook {
     seen: Mutex<VecDeque<(Uuid, Mark)>>,
-    // Has it emitted the warn that records in progress alone grew it past the limit — emitted only once per ledger.
     overflow_warned: AtomicBool,
 }
 
 impl DropBook {
-    // - A drag seen for the first time → process it.
-    // - A `drop` but the earlier record is a `drag_end` that did not write the model (cancel · ignore · a rejected new window) → process it (record becomes `drop`).
-    // - A `drop` but the same drag's `drag_end` new window is in progress or in its rejection notification → park it (only the first · handing it over is by
-    //   `settle` · `close`).
-    // - Anything else → `duplicate`: two `drop`s of the same drag · a `drag_end` after a `drop` · a `drop` after a `drag_end` that created a new window.
+    // - A drag seen for the first time → process.
+    // - A `drop` whose earlier record is a `drag_end` that did not write the model (cancel · ignore · rejected new window) → process (record becomes `drop`).
+    // - A `drop` while the same drag's `drag_end` new window is in progress or in its rejection notification → park (only the first; hand-over by `settle` · `close`).
+    // - Anything else → `duplicate`: two `drop`s of one drag · a `drag_end` after a `drop` · a `drop` after a `drag_end` that created a new window.
     // TRD S21-slot-docking §3-4
     fn admit(&self, h: Handling) -> Admit {
         let drag = h.drop.drag;
@@ -173,15 +145,13 @@ impl DropBook {
             tracing::warn!(
                 module = "dock",
                 cap = BOOK_CAP,
-                "놓기 장부 — 상한의 기록이 모두 진행 중이라 잊지 않고 늘린다(이 장부에서 한 번만 알린다)"
+                "drop ledger — every record at the cap is in progress, so it grows instead of forgetting (announced once per ledger)"
             );
         }
         Admit::Run(h)
     }
 
-    // Record the result of the `drag_end` new window in progress. If applied, record it as 「새 창을 만든 `drag_end`」 (the drag_end that created a new window) and return the parked `drop`
-    //   (discarded — a later `drop` is also `duplicate`). If rejected and something was parked, that one is continued, so the record is `drop`; if nothing was, leave it as
-    //   `Rejecting` so a `drop` that arrives while the rejection notification is emitted is also parked (`close` hands it over).
+    // Record the result of the in-progress `drag_end` new window. Applied → record "the `drag_end` that created a new window" and return the parked `drop` (discarded — a later `drop` is also `duplicate`). Rejected with something parked → that one continues, record `drop`; nothing parked → leave `Rejecting` so a `drop` arriving while the rejection notification is emitted is parked too (`close` hands it over).
     // TRD S21-slot-docking §3-4
     fn settle(&self, drag: Uuid, outcome: DropOutcome) -> Settle {
         let mut seen = sync::lock(&self.seen);
@@ -208,9 +178,7 @@ impl DropBook {
         }
     }
 
-    // Called after emitting the rejection notification — ends `Rejecting`. If a `drop` was parked in the meantime, record `drop` and return
-    //   it (continued processing — its `done` comes after the rejection). If none, lower it to a `drag_end` that did not write the model, so a `drop` that arrives later
-    //   wins. If it is not `Rejecting`, it is a no-op (`None`).
+    // Called after emitting the rejection notification — ends `Rejecting`. A `drop` parked meanwhile is recorded as `drop` and returned (continued; its `done` follows the rejection). If none, lower to a `drag_end` that did not write the model so a later `drop` wins. Not `Rejecting` → no-op (`None`).
     // TRD S21-slot-docking §3-4
     fn close(&self, drag: Uuid) -> Option<Box<Handling>> {
         let mut seen = sync::lock(&self.seen);
@@ -227,8 +195,7 @@ impl DropBook {
     }
 }
 
-// Forget finished records from the oldest as many as exceed the limit — the record just inserted (the very last) and records in progress are not forgotten.
-//   `true` if it grew because there was nothing to forget.
+// Forget finished records from the oldest as many as exceed the limit — the just-inserted (last) record and in-progress ones are not forgotten; `true` if it grew because nothing could be forgotten.
 fn evict(seen: &mut VecDeque<(Uuid, Mark)>) -> bool {
     while seen.len() > BOOK_CAP {
         let older = seen.len() - 1;
@@ -240,16 +207,12 @@ fn evict(seen: &mut VecDeque<(Uuid, Mark)>) -> bool {
     false
 }
 
-/// The shell that processing reaches from outside the layout — both are called ★only after all locks are released★.
 pub trait DropShell: Send + Sync {
-    /// Give focus to the window that holds the moved tab — only when a drop on the tab bar · seam was applied (a new window is opened active). Usually the window dropped
-    ///   on, and if the seam's target tab went to another window in the meantime, that window.
+    /// Give focus to the window holding the moved tab — only when a drop on the tab bar · seam was applied (a new window opens active). Usually the window dropped on; if the seam's target tab went to another window meanwhile, that window.
     fn focus(&self, label: &str);
-    /// Emit the event `tab_drop:done` only to the source window (`source` = the command's `from`) — if that window does not exist (closed empty, etc.), skip it.
     fn done(&self, source: &str, done: &TabDropDone);
 }
 
-/// The ports [`handle`] uses — the first five are exactly those of `layout::apply::dock_tab`.
 pub struct DropPorts<'a> {
     pub state: &'a LayoutState,
     pub subs: &'a dyn SubscriptionSync,
@@ -259,19 +222,9 @@ pub struct DropPorts<'a> {
     pub shell: &'a dyn DropShell,
 }
 
-/// Process one drop command — decision ([`plan::plan`]) → ledger → apply (one `dock_tab`) → focus → result notification → one log line.
-/// The input (`input`) and the source window frame (`frame`) are read by the caller before this, in that order (input first). `caller` = the window that called the command ·
-/// `top_class` = the window class when the topmost is another app's window (for the log).
-///
-/// Receiving the same drag again is `Duplicate` with no notification. A `drop` that arrives while the same drag's `drag_end` new window is in progress (including while its rejection notification
-/// is being emitted) is also answered `Duplicate`, but the ledger parks it — if that new window is rejected, that processing continues the parked `drop`
-/// by the same path as an ordinary `drop` (its result goes only by `done`), and if the new window stands, the parked drop is discarded. If something was already parked at the rejection decision,
-/// that `drag_end` processing does not emit its own `done` (log only · `superseded`) — the `done` for that drag that the source receives is
-/// that `drop`'s alone. If it was parked after the rejection notification, that `done` follows the rejection. Otherwise it emits `done` once per
-/// result — for an apply it comes after `dock_tab`'s model notification. A rejection leaves the model as is, and the `kind` of `Rejected{kind}` = the word in the parentheses of the docking error text.
-/// Cancel · ignore do not write the model.
-///
-/// ★Do not call `new_window` from the main thread · a synchronous command★ — the new-window build deadlocks (`dock_tab` docs).
+/// Process one drop command — decision ([`plan::plan`]) → ledger → apply (one `dock_tab`) → focus → result notification → one log line. The caller reads `input` and the source window frame `frame` before this, input first. `caller` = the window that called the command; `top_class` = the window class when the topmost is another app's window (for the log).
+/// The same drag again is `Duplicate` with no notification. A `drop` arriving while the same drag's `drag_end` new window is in progress (including while its rejection notification is emitted) is also answered `Duplicate`, but the ledger parks it: if that new window is rejected the processing continues the parked `drop` by the ordinary `drop` path (its result goes only by `done`); if the new window stands the parked drop is discarded. If something was parked at the rejection decision, that `drag_end` processing emits no `done` of its own (log only · `superseded`) — the `done` the source receives is that `drop`'s alone; if parked after the rejection notification, that `done` follows the rejection. Otherwise it emits `done` once per result — for an apply after `dock_tab`'s model notification. A rejection leaves the model as is, and `Rejected{kind}`'s `kind` = the word in the parentheses of the docking error text. Cancel · ignore do not write the model.
+/// Do not call `new_window` from the main thread or a synchronous command — the new-window build deadlocks (`dock_tab` docs).
 // TRD S21-slot-docking §3-2 · §3-4
 pub fn handle(
     book: &DropBook,
@@ -301,7 +254,7 @@ pub fn handle(
                 by = arrival.name(),
                 %view,
                 caller,
-                "놓기 — 같은 끌기의 새 창이 진행 중이라 맡겨 둔다(그 새 창이 거절되면 이어 처리)"
+                "drop — a new window of the same drag is in progress, so it is parked (continued if that new window is rejected)"
             );
             return TabDropReply::Duplicate;
         }
@@ -312,23 +265,19 @@ pub fn handle(
                 by = arrival.name(),
                 %view,
                 caller,
-                "놓기 — 같은 끌기를 이미 처리해 버린다"
+                "drop — the same drag was already handled; discarding"
             );
             return TabDropReply::Duplicate;
         }
     };
     let (reply, parked) = run(book, ports, item);
     if let Some(parked) = parked {
-        // The call of the parked `drop` was already answered `Duplicate` — this processing's answer has nowhere to go.
         let _ = run(book, ports, *parked);
     }
     reply
 }
 
-// One received processing — apply → focus → result notification → log. If this processing is a rejected `drag_end` new window and the ledger has a parked `drop`, it returns
-//   that (to be continued). If something was already parked at the rejection decision, this processing does not emit its own notification — if the rejection
-//   `done` went first, the source would undo the swapped drawing and the dragged tab would flash (TRD §2-4 ①). If nothing was parked, after emitting the rejection notification
-//   `close` returns what was parked in the meantime — its `done` comes after the rejection.
+// One received processing — apply → focus → result notification → log. If it is a rejected `drag_end` new window and the ledger has a parked `drop`, it returns that to continue. With something parked at the rejection decision it emits no notification of its own — a rejection `done` going first would make the source undo the swapped drawing and flash the dragged tab (TRD §2-4 ①); with nothing parked it emits the rejection notification then `close` returns what was parked meanwhile (its `done` follows the rejection).
 fn run(
     book: &DropBook,
     ports: &DropPorts<'_>,
@@ -406,7 +355,6 @@ fn run(
     }
     let replay = match settled {
         Settle::Superseded(parked) => Some(parked),
-        // Close only after emitting the rejection notification — so that the `done` of a `drop` that arrived in the meantime does not go before the rejection.
         Settle::Rejecting => book.close(drop.drag),
         Settle::Placed(Some(parked)) => {
             tracing::debug!(
@@ -414,7 +362,7 @@ fn run(
                 drag = %parked.drop.drag,
                 view = %parked.drop.view,
                 caller = %parked.caller,
-                "놓기 — 같은 끌기의 새 창이 섰다 — 맡겨 둔 drop 을 버린다"
+                "drop — a new window of the same drag stood up — discarding the parked drop"
             );
             None
         }
@@ -434,8 +382,7 @@ fn run(
     (reply, replay)
 }
 
-// Where the dropped new window came from — a prewarmed window handed over · a newly built window · the source window moved with no new window. The prewarm meaning is not layered on
-//   top of reuse (TRD S21-slot-docking §3-2 ⑦ · §3-9 「로그」).
+// Where the dropped new window came from — a handed-over prewarmed window · a newly built window · the source window moved with no new window. Prewarm is not layered over reuse (TRD S21-slot-docking §3-2 ⑦ · §3-9 「log」).
 // ADR-0299
 fn new_window_via(out: &DockOutcome) -> &'static str {
     if out.reused {
@@ -503,11 +450,11 @@ fn log_handled(
         why,
         superseded = superseded.then_some(true),
         via,
-        "놓기 처리"
+        "drop handled"
     );
 }
 
-// The word in the last parentheses of the docking error text — text = reason + ` (종류)` (`DockError` docs). Parentheses inside the reason come before it.
+// The word in the last parentheses of the docking error text — text = reason + ` (kind)` (`DockError` docs). Parentheses inside the reason come before it.
 fn kind_of(e: &DockError) -> String {
     let text = e.to_string();
     text.rsplit_once('(')
@@ -518,7 +465,6 @@ fn kind_of(e: &DockError) -> String {
 
 // ── Window fact `window:frame` (TRD S21-slot-docking §3-8) ──────────────────────────
 
-/// The OS geometry of one window — the origin and size of the outer and inner (physical px — exactly the four Tauri getters) and that window's scale factor.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FrameGeom {
     pub outer_pos: (i32, i32),
@@ -528,8 +474,7 @@ pub struct FrameGeom {
     pub scale: f64,
 }
 
-/// Window frame = outer rectangle − inner rectangle (per side · CSS px — divided by that window's scale factor). The `insets` of `window:frame` and the `inset_dip`
-/// of the new-window placement ([`source_frame`]) are computed with this one. `None` if the scale factor is not a finite positive number.
+/// Window frame = outer rectangle − inner rectangle (per side · CSS px, divided by that window's scale factor). `window:frame`'s `insets` and the new-window placement's `inset_dip` ([`source_frame`]) use this. `None` if the scale factor is not a finite positive number.
 // TRD S21-slot-docking §3-5 · §3-8
 pub fn frame_insets(g: &FrameGeom) -> Option<Insets> {
     if !(g.scale.is_finite() && g.scale > 0.0) {
@@ -554,7 +499,6 @@ const NO_INSETS: Insets = Insets {
     l: 0.0,
 };
 
-/// The source window's frame — if the geometry could not be read, frame 0 · scale factor 1 (the new window is merely off by the title-bar height).
 pub fn source_frame(geom: Option<&FrameGeom>) -> SourceFrame {
     match geom.and_then(|g| frame_insets(g).map(|insets| (insets, g.scale))) {
         Some((insets, scale)) => SourceFrame { insets, scale },
@@ -565,7 +509,6 @@ pub fn source_frame(geom: Option<&FrameGeom>) -> SourceFrame {
     }
 }
 
-/// One window fact — the restored size · maximize are the model's (`WindowAttrs`) values, and the front window · chrome shape are the values read as is.
 pub fn window_frame(seen: &FrameSeen, insets: Insets) -> WindowFrame {
     WindowFrame {
         restored: seen.attrs.bounds.map(|b| SizeCss { w: b.w(), h: b.h() }),
@@ -576,8 +519,7 @@ pub fn window_frame(seen: &FrameSeen, insets: Insets) -> WindowFrame {
     }
 }
 
-/// One window as read now — `minimized` · `geom` are getters (read holding no lock), `attrs` is that window's model value,
-/// `focused` is the value of that window's focus event or the OS foreground-window decision, `caption` is an OS constant (TRD S26-window-chrome §6-5).
+/// One window as read now — `minimized` · `geom` are getters (read holding no lock), `attrs` is that window's model value, `focused` is that window's focus event value or the OS foreground-window decision, `caption` is an OS constant (TRD S26-window-chrome §6-5).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FrameSeen {
     pub minimized: bool,
@@ -587,8 +529,7 @@ pub struct FrameSeen {
     pub caption: CaptionChrome,
 }
 
-/// The last `window:frame` emitted per window — so it is emitted only when the value changes. The lock is a leaf. A closed window's entry is deleted when that window vanishes with
-/// [`FrameBook::forget`].
+/// The last `window:frame` emitted per window — emitted only when the value changes. Leaf lock. A closed window's entry is deleted by [`FrameBook::forget`].
 #[derive(Debug, Default)]
 pub struct FrameBook {
     last: Mutex<HashMap<String, WindowFrame>>,
@@ -599,17 +540,13 @@ impl FrameBook {
         sync::lock(&self.last).get(label).copied()
     }
 
-    /// Forget that window's last value — called after the window vanishes. A restored popout is reopened with its saved label, so if left, the
-    /// first value of that window would not go out when it equals the old window's value.
+    /// Forget that window's last value after it vanishes — a restored popout reopens with its saved label, and a left entry would suppress the first value when it equals the old window's.
     pub fn forget(&self, label: &str) {
         sync::lock(&self.last).remove(label);
     }
 }
 
-/// Called after the placement-recording path (`Moved` · `Resized` · the window port's `record_placement`) wrote to the model · by that window's focus event (`Focused`) —
-/// only when that window's value (including the front window) differs from the last emitted one, it calls `emit` once, after releasing the table lock. While minimized ·
-/// if the geometry could not be read, it neither emits nor records (a getter while minimized gives an off-screen value). The burst of `Moved` while moving a window by its title bar
-/// has the same value, so it is not emitted.
+/// Called after the placement-recording path (`Moved` · `Resized` · the window port's `record_placement`) wrote to the model, and by that window's focus event (`Focused`): only when that window's value (the front window included) differs from the last emitted, it calls `emit` once after releasing the table lock. While minimized or when the geometry could not be read it neither emits nor records (a getter while minimized gives an off-screen value). The burst of `Moved` while dragging a title bar has the same value and is not emitted.
 // TRD S21-slot-docking §3-8 · TRD S26-window-chrome §6-5
 pub fn push_frame(book: &FrameBook, label: &str, seen: FrameSeen, emit: impl FnOnce(&WindowFrame)) {
     if seen.minimized {
@@ -632,8 +569,7 @@ pub fn push_frame(book: &FrameBook, label: &str, seen: FrameSeen, emit: impl FnO
     }
 }
 
-/// The answer of `window_frame`, pulled at mount — the restored size · maximize are model values, and the frame is the value computed with the current getters. While minimized ·
-/// if the geometry could not be read, it carries the last frame emitted for that window (0 if none). It is not recorded in the table.
+/// The answer of `window_frame`, pulled at mount — restored size · maximize are model values, the frame is computed with the current getters. While minimized or when geometry could not be read it carries the last frame emitted for that window (0 if none). Not recorded in the table.
 pub fn pull_frame(book: &FrameBook, label: &str, seen: FrameSeen) -> WindowFrame {
     let fresh = if seen.minimized {
         None
@@ -678,11 +614,9 @@ mod tests {
         // (receiving window, body)
         dones: Mutex<Vec<(String, TabDropDone)>>,
         open_fails: bool,
-        // The spot to push in the same drag's drop · the ledger · that drop — causes a race in the middle of processing the new-window drag_end.
+        // Where to push in the same drag's drop (with the ledger and that drop) — a race in the middle of processing the new-window drag_end.
         racing: Mutex<Option<(RaceAt, Arc<DropBook>, TabDrop)>>,
-        // The answer of the drop that arrived that way.
         racing_replies: Mutex<Vec<TabDropReply>>,
-        // The prewarmed window the window port will hand over once.
         spare: Mutex<Option<SpareClaim>>,
     }
 
@@ -715,7 +649,7 @@ mod tests {
         fn outside(&self, who: &str) {
             assert!(
                 self.state.0.try_lock().is_ok(),
-                "{who} 는 레이아웃 락을 놓은 뒤에 불려야 한다"
+                "{who} must be called after the layout lock is released"
             );
         }
 
@@ -727,7 +661,6 @@ mod tests {
             self.state.0.lock().unwrap()
         }
 
-        // If the spot to push in is `at`, process the parked drop now (only once).
         fn race(&self, at: RaceAt) {
             let racing = {
                 let mut slot = self.racing.lock().unwrap();
@@ -789,7 +722,7 @@ mod tests {
             self.note(format!("open:{label}"));
             self.race(RaceAt::Open);
             if self.open_fails {
-                Err("창을 못 만듦".into())
+                Err("could not create the window".into())
             } else {
                 Ok(())
             }
@@ -839,12 +772,9 @@ mod tests {
         }
     }
 
-    // The spot that pushes in the same drag's drop in the middle of processing the new-window drag_end.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum RaceAt {
-        // While opening the new window — before recording its result in the ledger.
         Open,
-        // While emitting the first `done` to the source — if rejected, the ledger is `Rejecting` and it is before `close`.
         Done,
     }
 
@@ -853,7 +783,6 @@ mod tests {
     struct Logs(Arc<Mutex<Vec<Vec<(String, String)>>>>);
 
     impl Logs {
-        // The `name` field of each 「놓기 처리」 line — `None` if absent.
         fn handled(&self, name: &str) -> Vec<Option<String>> {
             let field = |line: &[(String, String)], name: &str| {
                 line.iter().find(|(n, _)| n == name).map(|(_, v)| v.clone())
@@ -862,7 +791,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .iter()
-                .filter(|line| field(line, "message").as_deref() == Some("놓기 처리"))
+                .filter(|line| field(line, "message").as_deref() == Some("drop handled"))
                 .map(|line| field(line, name))
                 .collect()
         }
@@ -871,7 +800,6 @@ mod tests {
     struct Fields<'a>(&'a mut Vec<(String, String)>);
 
     impl tracing::field::Visit for Fields<'_> {
-        // String fields without quotes — written with Debug, quotes would be attached like `"fresh"`.
         fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
             self.0.push((field.name().to_owned(), value.to_owned()));
         }
@@ -942,7 +870,6 @@ mod tests {
         }
     }
 
-    // An answer that it moved to in-model window `window` — the identity is read from that window's entry.
     fn applied(rig: &Rig, window: &str, reused: bool) -> TabDropReply {
         let mgr = rig.mgr();
         let w = &mgr.windows[window];
@@ -1016,18 +943,18 @@ mod tests {
         assert_eq!(
             admit(&book, id(1), Arrival::Drop, plan_dock()),
             "duplicate",
-            "같은 끌기의 drop 둘"
+            "two drops of the same drag"
         );
         assert_eq!(
             admit(&book, id(1), Arrival::DragEnd, Plan::Cancel),
             "duplicate",
-            "drop 뒤 drag_end"
+            "drag_end after drop"
         );
         assert_eq!(admit(&book, id(2), Arrival::DragEnd, Plan::Cancel), "run");
         assert_eq!(
             admit(&book, id(2), Arrival::DragEnd, Plan::Cancel),
             "duplicate",
-            "같은 drag_end 두 번 배달"
+            "the same drag_end delivered twice"
         );
     }
 
@@ -1039,12 +966,12 @@ mod tests {
             assert_eq!(
                 admit(&book, id(1), Arrival::Drop, plan_dock()),
                 "run",
-                "{quiet:?} 뒤 drop"
+                "drop after {quiet:?}"
             );
             assert_eq!(
                 admit(&book, id(1), Arrival::Drop, plan_dock()),
                 "duplicate",
-                "기록이 drop 으로 바뀌었다"
+                "the record turned into a drop"
             );
         }
     }
@@ -1058,25 +985,28 @@ mod tests {
         assert_eq!(
             admit(&book, id(1), Arrival::Drop, plan_dock()),
             "duplicate",
-            "맡는 것은 첫 drop 하나"
+            "only the first drop is parked"
         );
         assert_eq!(settle(&book, id(1), DropOutcome::Applied), "placed+parked");
         assert_eq!(admit(&book, id(1), Arrival::Drop, plan_dock()), "duplicate");
         assert_eq!(
             settle(&book, id(1), DropOutcome::Rejected),
             "untracked",
-            "끝난 새 창은 다시 settle 되지 않는다"
+            "a finished new window is not settled again"
         );
 
         // There is a parked drop but the new window was rejected — that one stands in for the rejection, so a later drop is duplicate.
         assert_eq!(admit(&book, id(3), Arrival::DragEnd, plan_dock()), "run");
         assert_eq!(admit(&book, id(3), Arrival::Drop, plan_dock()), "parked");
         let Settle::Superseded(parked) = book.settle(id(3), DropOutcome::Rejected) else {
-            panic!("맡은 drop 이 거절을 대신한다");
+            panic!("the parked drop stands in for the rejection");
         };
         assert_eq!(parked.drop.drag, id(3));
         assert_eq!(admit(&book, id(3), Arrival::Drop, plan_dock()), "duplicate");
-        assert!(book.close(id(3)).is_none(), "대신한 거절은 닫을 것이 없다");
+        assert!(
+            book.close(id(3)).is_none(),
+            "a rejection that was stood in for has nothing to close"
+        );
     }
 
     #[test]
@@ -1088,24 +1018,24 @@ mod tests {
         assert_eq!(
             admit(&book, id(1), Arrival::DragEnd, Plan::Cancel),
             "duplicate",
-            "같은 drag_end 두 번 배달"
+            "the same drag_end delivered twice"
         );
         assert_eq!(admit(&book, id(1), Arrival::Drop, plan_dock()), "parked");
         assert_eq!(
             admit(&book, id(1), Arrival::Drop, plan_dock()),
             "duplicate",
-            "맡는 것은 첫 drop 하나"
+            "only the first drop is parked"
         );
-        let parked = book.close(id(1)).expect("맡은 drop");
+        let parked = book.close(id(1)).expect("the parked drop");
         assert_eq!(parked.drop.drag, id(1));
         assert_eq!(
             admit(&book, id(1), Arrival::Drop, plan_dock()),
             "duplicate",
-            "넘긴 drop 을 이어 처리한다"
+            "continues handling the handed-over drop"
         );
         assert!(
             book.close(id(1)).is_none(),
-            "닫힌 기록은 다시 닫히지 않는다"
+            "a closed record is not closed again"
         );
 
         // F6 — if it closes with nothing parked, a later drop wins.
@@ -1137,7 +1067,7 @@ mod tests {
         assert_eq!(
             admit(&book, id(0), Arrival::Drop, plan_dock()),
             "run",
-            "65 번째가 가장 오래된 것을 밀어냈다"
+            "the 65th pushed out the oldest one"
         );
         assert_eq!(admit(&book, id(2), Arrival::Drop, plan_dock()), "duplicate");
     }
@@ -1156,17 +1086,17 @@ mod tests {
         assert_eq!(
             admit(&book, id(1000), Arrival::Drop, plan_dock()),
             "parked",
-            "진행 중인 새 창은 잊지 않았다"
+            "a new window in progress was not forgotten"
         );
         assert_eq!(
             admit(&book, id(1001), Arrival::Drop, plan_dock()),
             "parked",
-            "거절 알림 중인 새 창도"
+            "a new window in rejection notification too"
         );
         assert_eq!(
             admit(&book, id(0), Arrival::Drop, plan_dock()),
             "run",
-            "끝난 기록 중 가장 오래된 것이 밀려났다"
+            "the oldest of the finished records was pushed out"
         );
         assert_eq!(admit(&book, id(2), Arrival::Drop, plan_dock()), "duplicate");
         assert!(!book.overflow_warned.load(Ordering::Relaxed));
@@ -1181,7 +1111,7 @@ mod tests {
         assert_eq!(
             book.seen.lock().unwrap().len(),
             BOOK_CAP + 1,
-            "모두 진행 중이면 늘린다"
+            "grows if all are in progress"
         );
         assert!(book.overflow_warned.load(Ordering::Relaxed));
         assert_eq!(admit(&book, id(0), Arrival::Drop, plan_dock()), "parked");
@@ -1193,7 +1123,7 @@ mod tests {
         assert_eq!(
             book.seen.lock().unwrap().len(),
             BOOK_CAP,
-            "끝난 뒤 다음 기록이 상한으로 되돌린다"
+            "after finishing, the next record returns it to the cap"
         );
     }
 
@@ -1231,7 +1161,9 @@ mod tests {
             (DockError::WindowExists("w".into()), "WindowExists"),
             (DockError::SlotIdOverlap, "SlotIdOverlap"),
             (
-                DockError::WindowOpen("창 옮기기 Position 실패 — 접근 거부 (os error 5)".into()),
+                DockError::WindowOpen(
+                    "moving the window Position failed — access denied (os error 5)".into(),
+                ),
                 "WindowOpen",
             ),
         ];
@@ -1258,11 +1190,15 @@ mod tests {
                 kind: "TabNotFound".into(),
                 reason: DockError::TabNotFound(gone).to_string(),
             },
-            "끄는 탭이 그사이 사라졌다"
+            "the dragged tab vanished in the meantime"
         );
         assert_eq!(rig.mgr().version, before);
         assert_eq!(rig.mgr().list_tabs(MAIN).unwrap().tabs.len(), 2);
-        assert_eq!(rig.take_log(), ["done:Rejected"], "알림 · 포커스 없음");
+        assert_eq!(
+            rig.take_log(),
+            ["done:Rejected"],
+            "no notification · no focus"
+        );
     }
 
     #[test]
@@ -1300,7 +1236,7 @@ mod tests {
         assert_eq!(
             rig.take_log(),
             ["done:Canceled", "done:Ignored", "done:Ignored"],
-            "모델 · 창 · 구독 어느 포트도 불리지 않는다"
+            "none of the model, window or subscription ports is called"
         );
     }
 
@@ -1321,7 +1257,7 @@ mod tests {
                 number: Some(1),
                 reused: false
             },
-            "기존 창(탭바)도 그 창의 신원을 싣는다"
+            "an existing window (tab bar) carries that window's identity too"
         );
         assert_eq!(rig.mgr().list_tabs(MAIN).unwrap().tabs[1].id, a);
         let log = rig.take_log();
@@ -1333,16 +1269,22 @@ mod tests {
         let notified = log
             .iter()
             .rposition(|s| s == "layout" || s.starts_with("tabs:"))
-            .expect("모델 알림");
-        let focus = log.iter().position(|s| s == "focus:main").expect("포커스");
-        assert!(notified < focus, "모델 알림 → 포커스 → done: {log:?}");
+            .expect("model notification");
+        let focus = log.iter().position(|s| s == "focus:main").expect("focus");
+        assert!(
+            notified < focus,
+            "model notification → focus → done: {log:?}"
+        );
         assert_eq!(log.iter().filter(|s| s.starts_with("done:")).count(), 1);
 
         assert_eq!(
             rig.handle(&book, reorder, MAIN, &released(TopAt::Unknown)),
             TabDropReply::Duplicate
         );
-        assert!(rig.take_log().is_empty(), "중복은 알림도 없다");
+        assert!(
+            rig.take_log().is_empty(),
+            "a duplicate has no notification either"
+        );
     }
 
     #[test]
@@ -1400,7 +1342,7 @@ mod tests {
         assert_eq!(
             rig.outcomes(),
             [DropOutcome::Rejected, DropOutcome::Applied],
-            "거절 알림 · close 뒤에 닿은 drop 은 보통 drop 처럼 이긴다"
+            "a drop that arrives after the rejection notification · close wins like a normal drop"
         );
     }
 
@@ -1429,7 +1371,7 @@ mod tests {
         assert_eq!(
             dones.iter().map(|(to, _)| to.as_str()).collect::<Vec<_>>(),
             [MAIN],
-            "done 은 부른 창이 아니라 출처 창(from)에만 간다"
+            "done goes only to the source window (from), not to the calling window"
         );
     }
 
@@ -1470,7 +1412,7 @@ mod tests {
         let log = rig.take_log();
         assert!(log.contains(&format!("focus:{popup}")), "{log:?}");
         assert!(!log.contains(&"focus:main".to_owned()), "{log:?}");
-        assert_eq!(rig.mgr().owner_of(a), None, "a 는 b 에 붙어 사라졌다");
+        assert_eq!(rig.mgr().owner_of(a), None, "a attached to b and vanished");
     }
 
     // ── ⑩ The drop of the same drag as an in-progress drag_end new window ──────────────────────────────
@@ -1493,7 +1435,7 @@ mod tests {
         assert_eq!(
             *rig.racing_replies.lock().unwrap(),
             [TabDropReply::Duplicate],
-            "새 창이 진행 중인 동안 닿은 drop 은 맡기고 곧바로 답한다"
+            "a drop that arrives while a new window is in progress is parked and answered right away"
         );
         (a, b, book, ended)
     }
@@ -1514,7 +1456,7 @@ mod tests {
         assert_eq!(
             rig.handle(book, again, MAIN, &released(TopAt::Unknown)),
             TabDropReply::Duplicate,
-            "이어 처리한 drop 뒤의 같은 끌기 drop"
+            "a drop of the same drag after the continued drop"
         );
         assert!(rig.take_log().is_empty());
     }
@@ -1533,19 +1475,19 @@ mod tests {
             matches!(&ended, TabDropReply::Rejected { kind, .. } if kind == "WindowOpen"),
             "{ended:?}"
         );
-        assert_eq!(main_tabs(&rig), [b, a], "맡겨 둔 drop 이 적용됐다");
+        assert_eq!(main_tabs(&rig), [b, a], "the parked drop was applied");
         assert_eq!(
             rig.outcomes(),
             [DropOutcome::Applied],
-            "거절된 drag_end 는 done 을 내지 않는다 — 출처가 받는 done 은 drop 의 것 하나"
+            "a rejected drag_end emits no done — the done the source receives is the drop's alone"
         );
         assert_eq!(
             logs.handled("superseded"),
             [Some("true".to_owned()), None],
-            "drag_end 처리 줄은 남기되 자리를 내줬다고 적는다"
+            "the drag_end handling line is kept but records that it yielded its place"
         );
         let log = rig.take_log();
-        let focus = log.iter().position(|s| s == "focus:main").expect("포커스");
+        let focus = log.iter().position(|s| s == "focus:main").expect("focus");
         let applied = log.iter().position(|s| s == "done:Applied").unwrap();
         assert!(focus < applied, "{log:?}");
         assert_drag_is_over(&rig, &book, a);
@@ -1568,17 +1510,17 @@ mod tests {
         assert_eq!(
             main_tabs(&rig),
             [b, a],
-            "거절 알림 뒤 맡겨 둔 drop 이 적용됐다"
+            "after the rejection notification the parked drop was applied"
         );
         assert_eq!(
             rig.outcomes(),
             [DropOutcome::Rejected, DropOutcome::Applied],
-            "거절 done 이 먼저 · 그 끌기의 마지막 done 은 drop 의 것"
+            "the rejection done comes first · the drag's last done is the drop's"
         );
         assert_eq!(logs.handled("superseded"), [None, None]);
         let log = rig.take_log();
         let rejected = log.iter().position(|s| s == "done:Rejected").unwrap();
-        let focus = log.iter().position(|s| s == "focus:main").expect("포커스");
+        let focus = log.iter().position(|s| s == "focus:main").expect("focus");
         let applied = log.iter().position(|s| s == "done:Applied").unwrap();
         assert!(rejected < focus && focus < applied, "{log:?}");
         assert_drag_is_over(&rig, &book, a);
@@ -1606,15 +1548,15 @@ mod tests {
                 .collect()
         };
         assert_eq!(ids(&window), [a]);
-        assert_eq!(ids(MAIN), [b], "맡겨 둔 drop 은 모델을 쓰지 않았다");
+        assert_eq!(ids(MAIN), [b], "the parked drop did not use the model");
         assert_eq!(
             rig.outcomes(),
             [DropOutcome::Applied],
-            "맡겨 둔 drop 은 알림도 없다"
+            "the parked drop has no notification either"
         );
     }
 
-    // ── ⑦ `via` of the drop-processing line (TRD §3-2 ⑦ · §3-9 「로그」 · ADR-0299) ─────────────────────────
+    // ── ⑦ `via` of the drop-processing line (TRD §3-2 ⑦ · §3-9 「log」 · ADR-0299) ─────────────────────────
 
     // The `via` field of one processing and its answer — drag `view` from the `from` window to the desktop (new window).
     fn new_window_drop_via(rig: &Rig, view: Uuid, from: &str) -> (Option<String>, TabDropReply) {
@@ -1627,7 +1569,10 @@ mod tests {
                 &released(TopAt::Foreign),
             )
         });
-        let [via] = logs.handled("via").try_into().expect("놓기 처리 줄 하나");
+        let [via] = logs
+            .handled("via")
+            .try_into()
+            .expect("one drop-handled line");
         (via, reply)
     }
 
@@ -1652,19 +1597,19 @@ mod tests {
         assert_eq!(
             reply,
             applied(&prewarmed, spare, false),
-            "맡긴 창의 label 로 연다"
+            "opens with the handed-over window's label"
         );
         let log = prewarmed.take_log();
         let at = |entry: &str| log.iter().position(|s| s == entry).expect(entry);
         let notified = log
             .iter()
             .rposition(|s| s == "layout" || s.starts_with("tabs:"))
-            .expect("모델 알림");
+            .expect("model notification");
         assert!(
             at("claim:slot-popup-9") < at("open:slot-popup-9")
                 && at("open:slot-popup-9") < notified
                 && notified < at("committed:slot-popup-9"),
-            "맡기기 → 열기 → 알림 → 확정: {log:?}"
+            "entrust → open → notify → confirm: {log:?}"
         );
 
         let reused = Rig::new();
@@ -1687,7 +1632,11 @@ mod tests {
                 &released(TopAt::Unknown),
             )
         });
-        assert_eq!(logs.handled("via"), [None], "새 창이 아닌 놓기에는 없다");
+        assert_eq!(
+            logs.handled("via"),
+            [None],
+            "absent for a drop that is not a new window"
+        );
     }
 
     // The answer of a new-window drop carries the persistent id · number of the window that holds the moved tab — in all cases: a newly built window · a prewarmed window handed over · a reused source window
@@ -1714,18 +1663,18 @@ mod tests {
                 panic!("{spare:?}: {reply:?}");
             };
             if let Some(label) = spare {
-                assert_eq!(window, label, "맡긴 창");
+                assert_eq!(window, label, "handed-over window");
             }
             assert_eq!(rig.mgr().owner_of(a), Some(window), "{spare:?}");
             assert!(Uuid::parse_str(window_id).is_ok(), "{window_id}");
-            assert_eq!(*number, 2, "{spare:?}: main 다음 첫 번호");
+            assert_eq!(*number, 2, "{spare:?}: first number after main");
             assert_eq!(reply, applied(&rig, window, false), "{spare:?}");
         }
 
         let rig = Rig::new();
         let lone = rig.mgr().create_window("slot-popup-5").unwrap();
         let (_, reply) = new_window_drop_via(&rig, lone, "slot-popup-5");
-        assert_eq!(reply, applied(&rig, "slot-popup-5", true), "재사용");
+        assert_eq!(reply, applied(&rig, "slot-popup-5", true), "reuse");
     }
 
     // ── ⑥ `window:frame` ───────────────────────────────────────────────────────
@@ -1847,7 +1796,7 @@ mod tests {
         assert_eq!(
             pull_frame(&book, MAIN, focused(true)).caption,
             CAPTION,
-            "당기기도 크롬 모양을 싣는다"
+            "a pull carries the chrome shape too"
         );
     }
 
@@ -1872,7 +1821,7 @@ mod tests {
         assert_eq!(
             pull_frame(&book, "slot-popup-1", seen(false, None)).insets,
             NO_INSETS,
-            "잊은 창의 당기기는 틀 0 이다"
+            "a pull of a forgotten window has frame 0"
         );
     }
 
@@ -1902,11 +1851,18 @@ mod tests {
         let mut sent = Vec::new();
         for label in [MAIN, "slot-popup-1"] {
             push_frame(&book, label, seen(false, Some(GEOM)), |_| {
-                assert!(book.last.try_lock().is_ok(), "표 락을 놓은 뒤에 낸다");
+                assert!(
+                    book.last.try_lock().is_ok(),
+                    "emitted after the table lock is released"
+                );
                 sent.push(label);
             });
         }
-        assert_eq!(sent, [MAIN, "slot-popup-1"], "창마다 따로 센다");
+        assert_eq!(
+            sent,
+            [MAIN, "slot-popup-1"],
+            "counted separately per window"
+        );
     }
 
     #[test]

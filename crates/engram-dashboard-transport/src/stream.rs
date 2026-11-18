@@ -1,35 +1,19 @@
-//! Stream lifecycle management — ★pure layer★. Generation comparison · sequence-number dedup · hole detection · the 「유효 하한」 (valid floor).
-//!
-//! ★This file has no tokio, no socket, and no workspace crate★ — the gate measures that (canonical =
-//! the `lib.rs` header). Time is received **as an argument** (the same idiom as `machine.rs`).
-//!
-//! ★It looks only at the incoming side★ — the outgoing stream (where the daemon stamps sequence numbers) is outside this crate.
+//! Stream lifecycle — ★pure layer★: generation comparison · sequence-number dedup · hole detection · the 「valid floor」. ★No tokio, socket or workspace crate★ (gate: `lib.rs` header); time arrives **as
+//! an argument** (as `machine.rs`). ★Incoming side only★ — the outgoing stream (the daemon stamping sequence numbers) is outside this crate.
 //!
 //! ## Why a re-request and its answer must be paired (do not revive)
 //!
-//! **Edition 1** held 「재요청을 냈다」 (a re-request was sent) as just one true/false. Then, at the moment a piece the peer had already
-//! sent before receiving the re-request (pipelining — our output hot path does exactly that) arrived, it read it as
-//! 「재요청에 대한 답이 또 구멍이다」 (the answer to the re-request is a hole again) and folded into a truncation, and after that all the replay the peer actually sent
-//! became 「지나간 번호」 (a number already passed) and was dropped.
-//!
-//! **Edition 2** **dropped** that piece. That was worse — ★a daemon whose rewind buffer overflowed by definition
-//! cannot give `after+1`★ (that is the **main path** of truncation). In that case, until the window closed, what arrived
-//! vanished with neither event nor delivery, and the `oldest_valid` raised after that was a **number late by the window length**. That is, 「버리고 값도
-//! 틀리게 신고」 (drop it and report the wrong value too).
-//!
-//! **Now** it is held. An out-of-order piece that arrives while waiting for the re-request's answer goes into a **bounded buffer**, and
-//! when the window closes (deadline exceeded · buffer saturated · stream evicted · the caller's teardown) it is **sent out in order** and its first number is raised as
-//! `oldest_valid`. So that value is true — because we really deliver from that number.
-//! If the answer comes properly (= `after+1` arrives), what was held is dropped: the peer's replay carries that span again.
+//! **Edition 1** held 「a re-request was sent」 as one bool: a piece the peer had already sent before receiving the re-request (pipelining — our output hot path does this) was read as 「the answer is a
+//! hole again」, folded into a truncation, and all the real replay afterwards was dropped as a past number. **Edition 2** **dropped** that piece — worse: ★a daemon whose rewind buffer overflowed
+//! cannot give `after+1` by definition★ (the **main path** of truncation), so until the window closed arrivals vanished without event or delivery and the raised `oldest_valid` was **late by the window
+//! length**. **Now** an out-of-order piece arriving while awaiting the answer goes into a **bounded buffer**; when the window closes (deadline · buffer saturated · eviction · teardown) it is **sent out in
+//! order** and its first number is raised as `oldest_valid`, which is true because we deliver from it. If the answer arrives (= `after+1`), what was held is dropped — the replay carries that span again.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::hash::Hash;
 use std::time::{Duration, Instant};
 
-/// The marker of one stream piece.
-///
-/// ★`generation` is an **incarnation marker** and is different from [`crate::Generation`] (connection generation)★ — comparison is
-/// **match/mismatch only** and does not derive "newer" from magnitude (ADR-0163). The width differs too (u32 vs u64).
+/// The marker of one stream piece. ★`generation` is an **incarnation marker**, not [`crate::Generation`]★ — **match/mismatch only**, never "newer" from magnitude (ADR-0163); width differs too (u32 vs u64).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamMark<K> {
     pub key: K,
@@ -37,23 +21,20 @@ pub struct StreamMark<K> {
     pub seq: u64,
 }
 
-/// The decision made after seeing one piece.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict<M> {
     /// It continues — send it up as is.
     Deliver(M),
     /// A sequence number already passed (or a number already held) — dropped.
     Duplicate,
-    /// The incarnation changed — reset the sequence comparison and send up. `discarded` = the number of pieces that were held under the old incarnation
-    /// and dropped (those numbers have no meaning in the new incarnation).
+    /// The incarnation changed — reset the sequence comparison and send up. `discarded` = pieces held under the old incarnation and dropped (their numbers mean nothing now).
     GenerationChanged {
         from: u32,
         to: u32,
         msg: M,
         discarded: usize,
     },
-    /// A hole. ★This piece is **held**★ — sending terminal bytes up out of order desyncs the ANSI parser state
-    /// and breaks the screen. Ask again from after `resume_from`.
+    /// A hole. ★This piece is **held**★ — sending terminal bytes out of order desyncs the ANSI parser and breaks the screen. Ask again from after `resume_from`.
     Gap {
         expected: u64,
         got: u64,
@@ -61,9 +42,7 @@ pub enum Verdict<M> {
     },
     /// Arrived while waiting for the answer to an already sent re-request — held. **Not a loss.**
     Held { awaiting_after: u64 },
-    /// The window closed — send out what was held in order and continue.
-    ///
-    /// ★`oldest_valid` is the first number of `flushed`★ — it is true because we really deliver from that number.
+    /// The window closed — send out what was held in order and continue. ★`oldest_valid` is the first number of `flushed`★ (true: we deliver from it).
     Truncated { oldest_valid: u64, flushed: Vec<M> },
 }
 
@@ -79,7 +58,6 @@ impl<M> Verdict<M> {
     }
 }
 
-/// The result of folding one re-request whose deadline passed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Truncation<K, M> {
     pub key: K,
@@ -88,9 +66,7 @@ pub struct Truncation<K, M> {
     pub flushed: Vec<M>,
 }
 
-/// One stream forgotten to make room.
-///
-/// ★It does not vanish silently★ — the pieces it was holding come out as `flushed`, and the caller reports it as an event.
+/// One stream forgotten to make room. ★Not silent★ — held pieces come out as `flushed` and the caller reports an event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Evicted<K, M> {
     pub key: K,
@@ -101,7 +77,6 @@ pub struct Evicted<K, M> {
     pub oldest_valid: Option<u64>,
 }
 
-/// One re-request that was sent out.
 #[derive(Debug)]
 struct Resume<M> {
     /// Asked for everything **after** this number. The first piece of the answer is `after + 1`.
@@ -120,11 +95,8 @@ struct Track<M> {
 }
 
 impl<M> Track<M> {
-    /// Takes out what was held — `(번호 순서대로, 첫 번호, 끝 번호)`.
-    ///
-    /// ★Progress is pushed to the last number★ — the held numbers may be sparse (a piece after the hole came backwards · only part of the replay
-    /// came) and there is no guarantee that the piece that made the window close is the largest of them. If pushed to less than that, a number already sent out
-    /// comes again as replay and is delivered once more against the order.
+    /// Takes out what was held — `(in number order, first number, last number)`. ★Progress is pushed to the last number★ — held numbers may be sparse and the piece that closed the window is
+    /// not guaranteed the largest; pushing less would deliver an already sent number again as replay, against the order.
     fn drain_held(&mut self) -> (Vec<M>, Option<u64>, Option<u64>) {
         match self.resume.take() {
             Some(resume) => {
@@ -138,21 +110,13 @@ impl<M> Track<M> {
     }
 }
 
-/// Holds 「마지막 세대 · 마지막 순번 · 내보낸 재요청」 (the last generation · the last sequence number · the re-request sent out) for each stream.
-///
-/// ★It is not erased even when the connection is cut★ — when it re-attaches, that last sequence number is the resume point, so if erased,
-/// a reconnect would always receive from the start. Pending re-requests and held pieces also survive
-/// and go out again through [`Streams::pending_resumes`].
-///
-/// ★It is the only collection whose size the peer decides★ — so there are two limits: the number of streams (`max_streams`) and
-/// the number of pieces held per stream (`resume_buffer`). The caller may put on a further limit in its own unit (the driving layer uses bytes)
-/// ([`Streams::observe_capped`]).
+/// Per stream: 「last generation · last sequence number · the re-request sent out」. ★Not erased when the connection is cut★ — the last sequence number is the resume point (erased, every reconnect
+/// would receive from the start); pending re-requests and held pieces survive and are re-sent via [`Streams::pending_resumes`]. ★The only collection whose size the peer decides★ — so two limits:
+/// streams (`max_streams`) and pieces held per stream (`resume_buffer`); the caller may add its own unit (the driving layer: bytes — [`Streams::observe_capped`]).
 #[derive(Debug)]
 pub struct Streams<K, M> {
     seen: HashMap<K, Track<M>>,
-    /// ★Recently-used order★ — the back is the most recent. Eviction is done from the front (LRU).
-    ///
-    /// If kept in registration order, the **longest-living = most active** stream would become the first victim.
+    /// ★Recently-used order★, back = most recent; evict from the front (LRU). Registration order would make the **longest-living = most active** stream the first victim.
     order: VecDeque<K>,
     max_streams: usize,
     resume_buffer: usize,
@@ -172,15 +136,13 @@ impl<K: Eq + Hash + Clone, M> Streams<K, M> {
         }
     }
 
-    /// Looks at one piece. The decision is [`Verdict`] and the caller carries out event emission · re-request · delivery.
     pub fn observe(&mut self, mark: &StreamMark<K>, msg: M, now: Instant) -> Verdict<M> {
         self.observe_capped(mark, msg, now, false)
     }
 
-    /// The edition of [`Streams::observe`] with the caller's hold limit added. `over_cap` = 「이 조각까지 붙들면 부르는 쪽이
-    /// 재는 상한(구동 층에서는 바이트)을 넘는다」 (if held up to this piece, it exceeds the limit the caller measures (bytes in the driving layer)) — if true, we treat it as no room to hold. If a window is open,
-    /// it closes with the same truncation as when `resume_buffer` of [`Self::new`] is full, and for a hole that would open a new window, it does not open the window and continues from this
-    /// piece, reporting what came before it as a truncation ([`Verdict::Truncated`] — no re-request is sent).
+    /// [`Streams::observe`] with the caller's hold limit. `over_cap` = 「holding up to this piece would exceed the caller's limit (bytes in the driving layer)」 → treated as no room: an open window closes
+    /// with the same truncation as a full `resume_buffer`, and a hole that would open a window opens none and continues from this piece, reporting what came before as a truncation
+    /// ([`Verdict::Truncated`] — no re-request).
     pub fn observe_capped(
         &mut self,
         mark: &StreamMark<K>,
@@ -216,15 +178,13 @@ impl<K: Eq + Hash + Clone, M> Streams<K, M> {
 
         if mark.seq == track.last_seq + 1 {
             track.last_seq = mark.seq;
-            // ★The answer came★ — what was held is dropped. The peer's replay carries that span again so it is not a loss,
-            //   and if sent out here, the same piece would instead be delivered twice.
+            // ★The answer came★ — what was held is dropped: the peer's replay carries that span again (not a loss), and sending it here would deliver the piece twice.
             track.resume = None;
             return Verdict::Deliver(msg);
         }
 
         let Some(resume) = track.resume.as_mut() else {
-            // ★If there is no room to hold from the start, do not open the window★ — if opened, this one frame stays over the caller's limit
-            //   until the window closes.
+            // ★No room to hold from the start → do not open the window★ — opened, this one frame would stay over the caller's limit until the window closes.
             if over_cap {
                 track.last_seq = mark.seq;
                 return Verdict::Truncated {
@@ -258,18 +218,16 @@ impl<K: Eq + Hash + Clone, M> Streams<K, M> {
             return Verdict::Held { awaiting_after };
         }
         let (flushed, oldest, newest) = track.drain_held();
-        let oldest_valid = oldest.expect("붙든 것이 하나는 있다");
-        track.last_seq = newest.expect("붙든 것이 하나는 있다");
+        let oldest_valid = oldest.expect("there is at least one held item");
+        track.last_seq = newest.expect("there is at least one held item");
         Verdict::Truncated {
             oldest_valid,
             flushed,
         }
     }
 
-    /// ★The path that runs even without arrivals★ — folds re-requests whose deadline passed.
-    ///
-    /// Without this, if the stream goes quiet after a hole (the ordinary situation where the turn ended), the re-request stays pending **forever**
-    /// and held pieces never go out either. [`Streams::next_resume_deadline`] tells that time.
+    /// ★The path that runs even without arrivals★ — folds re-requests whose deadline passed; without it a stream going quiet after a hole (the ordinary case) keeps the re-request pending **forever**
+    /// and held pieces never go out. [`Streams::next_resume_deadline`] gives that time.
     pub fn expire_resumes(&mut self, now: Instant) -> Vec<Truncation<K, M>> {
         let timeout = self.resume_timeout;
         let due: Vec<K> = self
@@ -288,8 +246,7 @@ impl<K: Eq + Hash + Clone, M> Streams<K, M> {
             .collect()
     }
 
-    /// Folds every open window regardless of deadline — the caller calls it just before dropping this ledger (teardown in the driving layer).
-    /// If not called, held pieces vanish with the ledger with neither delivery nor truncation report.
+    /// Folds every open window regardless of deadline — call just before dropping the ledger (driving-layer teardown); otherwise held pieces vanish without delivery or truncation report.
     pub fn close_resumes(&mut self) -> Vec<Truncation<K, M>> {
         let open: Vec<K> = self
             .order
@@ -329,14 +286,13 @@ impl<K: Eq + Hash + Clone, M> Streams<K, M> {
             .min()
     }
 
-    /// Collects the streams forgotten to make room.
     pub fn drain_evicted(&mut self) -> Vec<Evicted<K, M>> {
         std::mem::take(&mut self.evicted)
     }
 
     fn touch(&mut self, key: &K) {
         if let Some(pos) = self.order.iter().position(|k| k == key) {
-            let k = self.order.remove(pos).expect("position 이 준 자리");
+            let k = self.order.remove(pos).expect("the spot position gave");
             self.order.push_back(k);
         }
     }
@@ -370,9 +326,7 @@ impl<K: Eq + Hash + Clone, M> Streams<K, M> {
         );
     }
 
-    /// All re-requests that have not yet got an answer — `(스트림, 그 번호 뒤부터)`.
-    ///
-    /// ★If these are not sent out again after a reconnect, the hole stays forever★.
+    /// All unanswered re-requests — `(stream, after number)`. ★Not re-sent after a reconnect, the hole stays forever★.
     pub fn pending_resumes(&self) -> Vec<(K, u64)> {
         self.order
             .iter()
@@ -392,9 +346,8 @@ impl<K: Eq + Hash + Clone, M> Streams<K, M> {
         }
     }
 
-    /// Pushes back the requested time of pending re-requests by `by` — called when the caller could not read answers in the meantime (backpressure
-    /// in the driving layer) so as to subtract that time from the deadline. If not pushed, the deadline runs out while we had blocked, and a hole that could have been filled
-    /// is folded into a truncation.
+    /// Pushes pending re-requests' requested time back by `by` — for time the caller could not read answers (driving-layer backpressure); unpushed, the deadline would run out while we blocked and a
+    /// fillable hole would fold into a truncation.
     pub fn shift_resumes(&mut self, by: Duration) {
         for track in self.seen.values_mut() {
             if let Some(resume) = track.resume.as_mut() {
@@ -403,8 +356,7 @@ impl<K: Eq + Hash + Clone, M> Streams<K, M> {
         }
     }
 
-    /// One piece being held. Used when the caller replaces its own marker on a piece it just held (the driving layer counts
-    /// that piece's byte share as the window share — `budget.rs`).
+    /// One held piece — lets the caller replace its own marker on a piece it just held (the driving layer counts its byte share as the window share — `budget.rs`).
     pub fn held_mut(&mut self, key: &K, seq: u64) -> Option<&mut M> {
         self.seen.get_mut(key)?.resume.as_mut()?.held.get_mut(&seq)
     }
@@ -453,7 +405,6 @@ mod tests {
         }
     }
 
-    /// The piece's payload is set to its own sequence number — the delivery order can be asserted as is.
     fn see(s: &mut Streams<u8, u64>, key: u8, gen: u32, seq: u64, now: Instant) -> Verdict<u64> {
         s.observe(&mark(key, gen, seq), seq, now)
     }
@@ -499,7 +450,11 @@ mod tests {
                 resume_from: 1,
             }
         );
-        assert_eq!(s.last_seq(&1), Some(1), "구멍 조각은 진도를 밀지 않는다");
+        assert_eq!(
+            s.last_seq(&1),
+            Some(1),
+            "a gap piece does not advance progress"
+        );
     }
 
     #[test]
@@ -547,7 +502,7 @@ mod tests {
                 oldest_valid: 5,
                 flushed: vec![5, 6, 9],
             },
-            "★버린 뒤에 늦은 번호를 하한이라 신고하면 안 된다★"
+            "★after dropping, it must not report a late number as the lower bound★"
         );
         assert_eq!(s.last_seq(&1), Some(9));
     }
@@ -563,7 +518,7 @@ mod tests {
             flushed,
         } = see(&mut s, 1, 7, 8, t0 + RESUME_TIMEOUT)
         else {
-            panic!("창이 닫혀야 한다");
+            panic!("the window must close");
         };
         assert_eq!(flushed.first().copied(), Some(oldest_valid));
     }
@@ -582,7 +537,7 @@ mod tests {
                 oldest_valid: 5,
                 flushed: vec![5, 6, 7],
             },
-            "붙드는 양에 상한이 없으면 상대가 우리 메모리를 민다"
+            "without a cap on the amount held, the peer pushes our memory"
         );
     }
 
@@ -604,7 +559,7 @@ mod tests {
                 oldest_valid: 5,
                 flushed: vec![5],
             }],
-            "★조각이 더 안 오면 아무도 이 창을 못 닫는다 — 그게 평범한 경우다★"
+            "★if no more pieces come, nobody can close this window — that is the ordinary case★"
         );
         assert!(s.pending_resumes().is_empty());
         assert_eq!(s.last_seq(&1), Some(5));
@@ -690,7 +645,7 @@ mod tests {
                 oldest_valid: 5,
                 flushed: vec![5, 6],
             },
-            "★개수 상한이 찬 것과 같은 길이다★ — 붙든 것을 순서대로 내보내고 그 첫 번호를 하한으로 올린다"
+            "★the same path as the count cap filling up★ — emits the held items in order and raises their first number as the lower bound"
         );
         assert!(s.pending_resumes().is_empty());
         assert_eq!(s.last_seq(&1), Some(6));
@@ -707,9 +662,9 @@ mod tests {
                 oldest_valid: 5,
                 flushed: vec![5],
             },
-            "★붙들 자리가 없으면 재요청 없이 이 조각부터 이어 간다★ — 그 앞은 잘림으로 신고된다"
+            "★with no room to hold, it continues from this piece without a re-request★ — what came before is reported as a truncation"
         );
-        assert!(s.pending_resumes().is_empty(), "창을 열지 않았다");
+        assert!(s.pending_resumes().is_empty(), "did not open the window");
         assert_eq!(see(&mut s, 1, 7, 6, t0), Verdict::Deliver(6));
     }
 
@@ -724,7 +679,7 @@ mod tests {
         assert_eq!(s.next_resume_deadline(), Some(t0 + paused + RESUME_TIMEOUT));
         assert!(
             s.expire_resumes(t0 + RESUME_TIMEOUT).is_empty(),
-            "★민 만큼 늦게 닫힌다★ — 그동안 답을 못 읽은 것은 상대 탓이 아니다"
+            "★it closes as much later as it was pushed★ — not reading answers in the meantime is not the peer's fault"
         );
         assert_eq!(s.expire_resumes(t0 + paused + RESUME_TIMEOUT).len(), 1);
     }
@@ -735,19 +690,22 @@ mod tests {
         let t0 = Instant::now();
         see(&mut s, 1, 7, 1, t0);
         see(&mut s, 1, 7, 5, t0);
-        *s.held_mut(&1, 5).expect("붙들고 있다") = 50;
-        assert_eq!(s.held_mut(&1, 6), None, "안 붙든 번호");
-        assert_eq!(s.held_mut(&2, 5), None, "모르는 스트림");
+        *s.held_mut(&1, 5).expect("holding") = 50;
+        assert_eq!(s.held_mut(&1, 6), None, "unheld number");
+        assert_eq!(s.held_mut(&2, 5), None, "unknown stream");
         let collapsed = s.expire_resumes(t0 + RESUME_TIMEOUT);
-        assert_eq!(collapsed[0].flushed, vec![50], "고친 것이 그대로 나간다");
-        assert_eq!(s.held_mut(&1, 5), None, "창이 닫히면 없다");
+        assert_eq!(
+            collapsed[0].flushed,
+            vec![50],
+            "the fixed one goes out as is"
+        );
+        assert_eq!(s.held_mut(&1, 5), None, "none once the window closes");
     }
 
     // ── When the window closes, progress goes to the last number of what was held ──
     //
-    // ★There is no guarantee that the piece that made the window close is the largest number among those held★ — if progress is set to that piece's number, a number already sent out
-    //   comes again as replay and is delivered once more against the order. The rule is the same on every closing path (byte limit · count limit · deadline ·
-    //   teardown).
+    // ★The piece that closed the window is not guaranteed the largest held number★ — progress set to it would deliver an already sent number again as replay; same on every closing path (byte limit ·
+    //   count limit · deadline · teardown).
 
     /// After the window closes, the peer sends the rest of the replay (`replay`) — all the numbers that actually go up (including what was sent out at closing).
     fn delivered_after(
@@ -774,13 +732,13 @@ mod tests {
             flushed,
         } = s.observe_capped(&mark(1, 7, 3), 3, t0, true)
         else {
-            panic!("상한을 넘겨 창이 닫혀야 한다");
+            panic!("the cap was exceeded, so the window must close");
         };
         assert_eq!((oldest_valid, flushed.clone()), (3, vec![3, 5]));
         assert_eq!(
             delivered_after(&mut s, flushed, [2, 3, 4, 5, 6], t0),
             vec![3, 5, 6],
-            "★늘 오름차순 · 겹침 없음★ — 진도를 3 에 두면 재생분 4 · 5 가 5 뒤에 다시 올라간다"
+            "★always ascending · no overlap★ — leaving progress at 3 would send the replayed 4 · 5 up again after 5"
         );
     }
 
@@ -796,7 +754,7 @@ mod tests {
             flushed,
         } = s.observe_capped(&mark(1, 7, 3), 3, t0, true)
         else {
-            panic!("상한을 넘겨 창이 닫혀야 한다");
+            panic!("the cap was exceeded, so the window must close");
         };
         assert_eq!((oldest_valid, flushed.clone()), (3, vec![3, 4, 5]));
         assert_eq!(
@@ -812,7 +770,7 @@ mod tests {
         see(&mut s, 1, 7, 1, t0);
         see(&mut s, 1, 7, 5, t0);
         let Verdict::Truncated { flushed, .. } = see(&mut s, 1, 7, 3, t0) else {
-            panic!("개수 상한이 차 창이 닫혀야 한다");
+            panic!("the count cap is full, so the window must close");
         };
         assert_eq!(
             delivered_after(&mut s, flushed, [4, 5, 6], t0),
@@ -832,7 +790,7 @@ mod tests {
         assert_eq!(
             delivered_after(&mut s, flushed, [4, 5, 6], t0 + RESUME_TIMEOUT),
             vec![3, 5, 6],
-            "★첫 번호 + 붙든 수 − 1 은 끝 번호가 아니다★ — {{3, 5}} 면 4 가 되어 5 를 한 번 더 올린다"
+            "★first number + held count − 1 is not the last number★ — for {{3, 5}} it becomes 4 and sends 5 up once more"
         );
     }
 
@@ -854,7 +812,7 @@ mod tests {
         assert_eq!(
             closed,
             vec![(1, 4, vec![4, 6]), (3, 9, vec![9])],
-            "★시한 전이어도 열린 창은 다 접힌다★ — 창이 없는 스트림은 건너뛴다"
+            "★every open window folds even before the deadline★ — streams without a window are skipped"
         );
         assert!(s.pending_resumes().is_empty());
         assert_eq!(s.last_seq(&1), Some(6));
@@ -868,7 +826,7 @@ mod tests {
         see(&mut s, 1, 7, 5, t0);
         assert_eq!(see(&mut s, 1, 7, 2, t0), Verdict::Deliver(2));
         assert!(s.pending_resumes().is_empty());
-        // The 5 that was held is carried again by the peer's replay — if sent out here, it is delivered twice.
+        // The held 5 is carried again by the peer's replay — sending it here would deliver it twice.
         assert_eq!(see(&mut s, 1, 7, 3, t0), Verdict::Deliver(3));
     }
 
@@ -954,7 +912,7 @@ mod tests {
         // Keep using 1 — the most active stream must not become the first victim.
         see(&mut s, 1, 1, 2, t0);
         see(&mut s, 3, 1, 1, t0);
-        assert_eq!(s.last_seq(&1), Some(2), "★가장 활발한 스트림이 살아남는다★");
+        assert_eq!(s.last_seq(&1), Some(2), "★the most active stream survives★");
         assert_eq!(s.last_seq(&2), None);
         assert_eq!(s.last_seq(&3), Some(1));
     }
@@ -978,7 +936,7 @@ mod tests {
                 flushed: vec![5],
                 oldest_valid: Some(5),
             }],
-            "★붙들고 있던 조각이 축출과 함께 조용히 사라지면 안 된다★"
+            "★held pieces must not silently vanish with the eviction★"
         );
     }
 

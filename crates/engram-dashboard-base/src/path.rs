@@ -3,13 +3,12 @@
 
 /// Normalizes **only the spelling** of a hand-typed path — strips one layer of wrapping quotes and turns `\` into `/`.
 ///
-/// ★This is not an existence check★ — it does not look at the filesystem. It does not fix a nonexistent path and leaves relative paths as they are.
-/// ★Quotes are **not stripped if the pair is empty inside**★ — stripping would turn a value that was not empty into an empty value, so the caller's
-/// value vanishes after passing the empty-value check it placed before this function.
-/// ★Only one layer is stripped★ — two layers mean the caller wrapped by mistake twice, and silently swallowing even that would make us guess which one is
-/// the real path.
-/// ★`\` → `/` runs regardless of OS★ — on POSIX `\` is a character allowed in file names, so it
-/// changes that name.
+/// ★Not an existence check★ — it does not look at the filesystem, fix a nonexistent path, or touch relative paths.
+/// ★Quotes are **not stripped if the pair is empty inside**★ — stripping would turn a non-empty value into an empty one, which vanishes
+///   after the caller's empty-value check.
+/// ★Only one layer is stripped★ — two layers mean the caller wrapped twice by mistake; swallowing that too would make us guess which is
+///   the real path.
+/// ★`\` → `/` runs regardless of OS★ — on POSIX `\` is a legal file name character, so it changes that name.
 /// TODO(ADR-0230): look again when porting to macOS.
 pub fn normalize_spelling(raw: &str) -> String {
     let unquoted = match raw.chars().next() {
@@ -73,7 +72,7 @@ mod tests {
 
     #[test]
     fn non_ascii_characters_survive_unquoting() {
-        assert_eq!(normalize_spelling(r#""C:\작업\폴더""#), "C:/작업/폴더");
+        assert_eq!(normalize_spelling(r#""C:\작업\폴더""#), "C:/작업/폴더"); // hangul-ok
         assert_eq!(normalize_spelling("'D:\\\u{1F600}'"), "D:/\u{1F600}");
     }
 }

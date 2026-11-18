@@ -1,10 +1,10 @@
-// usageStore — 사용량 값 받기(TRD S21 usage-limit-slot §4 「프론트 값 받기」·「프론트 스토어·방송」 행).
+// usageStore — receiving usage values (TRD S21 usage-limit-slot §4 rows 「frontend value receipt」·「frontend store · broadcast」).
 //
-// 세 층을 잰다:
-//   ① `merge` 의 규칙(revision · socketEpoch) — 스토어 단독.
-//   ② pull · ⟳ — 모의 agentClient(스토어가 `agentClient` 말고는 아무것도 안 부르는지 · `invoke` 0).
-//   ③ eventBus 잇기 — 잇기와 pull 의 순서(기록형 모의) · 실 ProtocolClient 를 거친 끊김·Ack(값·revision 불변).
-// label 거름(자기 창에 온 방송만)은 carrier 몫이라 `api/tauriTransport.test.ts` 가 잰다.
+// Measures three layers:
+//   ① the rules of `merge` (revision · socketEpoch) — the store alone.
+//   ② pull · ⟳ — a mock agentClient (whether the store calls nothing but `agentClient` · 0 `invoke`).
+//   ③ eventBus hookup — the order of hookup and pull (recording mock) · disconnect·Ack through the real ProtocolClient (value · revision unchanged).
+// The label filter (only broadcasts addressed to its own window) is the carrier's job, so `api/tauriTransport.test.ts` measures it.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -22,7 +22,7 @@ vi.mock('@tauri-apps/api/core', () => ({
   },
 }))
 
-// agentClient = 테스트가 심는 객체. 접근한 이름을 모아 「사용량 경로가 부르는 표면」을 단언한다.
+// agentClient = an object the test plants. The accessed names are gathered to assert 「the surface the usage path calls」.
 const holder = vi.hoisted(() => ({
   client: null as unknown as Record<string, unknown>,
   accessed: new Set<string>(),
@@ -40,7 +40,7 @@ vi.mock('../api/clientFactory', () => ({
   ),
 }))
 
-// eventBus 의 레이아웃 구독·부팅 pull 은 이 시험과 무관하다(Tauri 를 부른다).
+// The layout subscription and boot pull of eventBus are unrelated to this test (they call Tauri).
 vi.mock('./viewStore', () => ({
   subscribeViewEvents: () => ({ dispose: () => {}, ready: Promise.resolve() }),
   initMainWindowFromBackend: async () => {},
@@ -95,9 +95,9 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
-// ── ① merge — revision(같은 소켓) ─────────────────────────────────────────────────────
+// ── ① merge — revision (same socket) ─────────────────────────────────────────────────────
 describe('merge — revision', () => {
-  it('더 작은 revision 은 버리고 더 큰 것은 받는다', () => {
+  it('drops a smaller revision and takes a larger one', () => {
     store().merge(snap('claude', 5), 1)
     store().merge(snap('claude', 3), 1)
     expect(revisionOf('claude')).toBe(5)
@@ -107,7 +107,7 @@ describe('merge — revision', () => {
     expect(usedOf('claude')).toBe(7)
   })
 
-  it('같은 revision 은 늦게 닿은 사본을 받는다 — 상대 시간 기준(receivedAt)이 새로 선다', () => {
+  it('for the same revision it takes the copy that arrived late — the relative time basis (receivedAt) is set anew', () => {
     const now = vi.spyOn(performance, 'now').mockReturnValue(1_000)
     store().merge(snap('claude', 5, 40, 30), 1)
     now.mockReturnValue(2_000)
@@ -117,7 +117,7 @@ describe('merge — revision', () => {
     expect(held.snapshot.five_hour?.age_secs).toBe(2)
   })
 
-  it('회사끼리 revision 은 독립이다', () => {
+  it('revisions are independent between vendors', () => {
     store().merge(snap('claude', 10), 1)
     store().merge(snap('codex', 1), 1)
     expect(revisionOf('codex')).toBe(1)
@@ -127,7 +127,7 @@ describe('merge — revision', () => {
     expect(revisionOf('codex')).toBe(2)
   })
 
-  it('켜고 끔을 모른다 — 받은 회사는 전부 든다(거름은 그리는 쪽)', () => {
+  it('does not know on/off — every vendor received goes in (filtering is the drawing side\'s job)', () => {
     store().merge(snap('codex', 1), 1)
     store().merge(snap('claude', 1), 1)
     expect(Object.keys(store().vendors).sort()).toEqual(['claude', 'codex'])
@@ -136,14 +136,14 @@ describe('merge — revision', () => {
 
 // ── ① merge — socketEpoch(ADR-0195) ────────────────────────────────────────────────────
 describe('merge — socketEpoch', () => {
-  it('더 큰 표식 → revision 을 전부 잊고 작은 revision 을 받는다(연결 상태 전이 없이 — 세대 승계) · 값은 유지', () => {
+  it('a larger marker → forgets all revisions and takes a smaller revision (without a connection state transition — generation succession) · the value stays', () => {
     store().merge(snap('claude', 50), 1)
     store().merge(snap('codex', 9), 1)
     store().merge(snap('claude', 1, 77), 2)
     expect(store().socketEpoch).toBe(2)
     expect(revisionOf('claude')).toBe(1)
     expect(usedOf('claude')).toBe(77)
-    // 새 소켓에서 아직 안 온 회사: 값은 그대로, revision 만 잊었다 → 새 소켓의 revision 1 도 받는다.
+    // A vendor that has not come yet on the new socket: the value stays, only the revision is forgotten → revision 1 of the new socket is taken too.
     expect(usedOf('codex')).toBe(9)
     expect(revisionOf('codex')).toBeNull()
     store().merge(snap('codex', 1, 3), 2)
@@ -151,14 +151,14 @@ describe('merge — socketEpoch', () => {
     expect(usedOf('codex')).toBe(3)
   })
 
-  it('더 작은 표식 → 버린다(밀려난 소켓의 것)', () => {
+  it('a smaller marker → dropped (from a pushed-out socket)', () => {
     store().merge(snap('claude', 4), 3)
     store().merge(snap('claude', 100), 2)
     expect(store().socketEpoch).toBe(3)
     expect(revisionOf('claude')).toBe(4)
   })
 
-  it('표식 0 → 들고 있는 표식을 바꾸지 않고 revision 규칙만 탄다', () => {
+  it('marker 0 → the held marker is not changed and only the revision rule applies', () => {
     store().merge(snap('claude', 5), 4)
     store().merge(snap('claude', 9), 0)
     expect(store().socketEpoch).toBe(4)
@@ -167,7 +167,7 @@ describe('merge — socketEpoch', () => {
     expect(revisionOf('claude')).toBe(9)
   })
 
-  it('표식 0 pull 반환(셸에 소켓 없음 — 빈 목록) → 표식·값 불변', async () => {
+  it('a pull return with marker 0 (the shell has no socket — empty list) → marker and value unchanged', async () => {
     store().merge(snap('claude', 5), 4)
     const before = store().vendors
     holder.client = { getUsageSnapshot: vi.fn(async () => ({ socketEpoch: 0, snapshots: [] })) }
@@ -179,7 +179,7 @@ describe('merge — socketEpoch', () => {
 
 // ── ② pull ────────────────────────────────────────────────────────────────────────────
 describe('pull', () => {
-  it('반환 스냅숏은 반환된 표식과 함께 merge 를 지난다', async () => {
+  it('the returned snapshots go through merge with the returned marker', async () => {
     holder.client = {
       getUsageSnapshot: vi.fn(async () => ({ socketEpoch: 3, snapshots: [snap('claude', 2), snap('codex', 5)] })),
     }
@@ -189,18 +189,18 @@ describe('pull', () => {
     expect(revisionOf('codex')).toBe(5)
   })
 
-  it('방송 뒤에 늦게 돌아온 pull 반환(더 작은 revision)은 버린다', async () => {
+  it('a pull return that came back late after a broadcast (smaller revision) is dropped', async () => {
     const reply = deferred<UsageSnapshotPull>()
     holder.client = { getUsageSnapshot: vi.fn(() => reply.promise) }
     const pulling = store().pull()
-    store().merge(snap('claude', 8), 3) // pull 이 도는 사이 닿은 방송
+    store().merge(snap('claude', 8), 3) // a broadcast that arrived while the pull was running
     reply.resolve({ socketEpoch: 3, snapshots: [snap('claude', 6)] })
     await pulling
     expect(revisionOf('claude')).toBe(8)
     expect(usedOf('claude')).toBe(8)
   })
 
-  it('실패 → 유계 재시도 · 소진해도 throw 하지 않고 들고 있는 값을 둔다', async () => {
+  it('failure → bounded retries · even when exhausted it does not throw and keeps the held value', async () => {
     vi.useFakeTimers()
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     store().merge(snap('claude', 5), 2)
@@ -217,7 +217,7 @@ describe('pull', () => {
     expect(store().socketEpoch).toBe(2)
   })
 
-  it('일시 실패 뒤 성공하면 그 반환을 받는다', async () => {
+  it('when it succeeds after a transient failure, it takes that return', async () => {
     vi.useFakeTimers()
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     const getUsageSnapshot = vi
@@ -235,7 +235,7 @@ describe('pull', () => {
 
 // ── ② refresh(⟳) ─────────────────────────────────────────────────────────────────────
 describe('refresh(⟳)', () => {
-  it('refreshUsageLimits(vendor) 를 부르고 도는 동안만 pending', async () => {
+  it('calls refreshUsageLimits(vendor) and is pending only while it runs', async () => {
     const answer = deferred<void>()
     const refreshUsageLimits = vi.fn(() => answer.promise)
     holder.client = { refreshUsageLimits }
@@ -248,7 +248,7 @@ describe('refresh(⟳)', () => {
     expect(store().pending.codex).toBe(0)
   })
 
-  it('겹친 ⟳ 둘 — 둘 다 끝나야 pending 이 풀린다', async () => {
+  it('two overlapping ⟳ — pending clears only when both finish', async () => {
     const a = deferred<void>()
     const b = deferred<void>()
     holder.client = { refreshUsageLimits: vi.fn().mockReturnValueOnce(a.promise).mockReturnValueOnce(b.promise) }
@@ -262,14 +262,14 @@ describe('refresh(⟳)', () => {
     expect(store().pending.claude).toBe(0)
   })
 
-  it('실패해도 throw 하지 않고 pending 을 푼다', async () => {
+  it('does not throw even on failure and clears pending', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     holder.client = { refreshUsageLimits: vi.fn(async () => Promise.reject(new Error('connection lost'))) }
     await expect(store().refresh('claude')).resolves.toBeUndefined()
     expect(store().pending.claude).toBe(0)
   })
 
-  it('스토어는 agentClient 의 사용량 두 메서드만 부른다 — invoke 0', async () => {
+  it("the store calls only agentClient's two usage methods — 0 invoke", async () => {
     holder.client = {
       getUsageSnapshot: vi.fn(async () => ({ socketEpoch: 1, snapshots: [snap('claude', 1)] })),
       refreshUsageLimits: vi.fn(async () => {}),
@@ -282,9 +282,9 @@ describe('refresh(⟳)', () => {
   })
 })
 
-// ── ③ eventBus 잇기 ──────────────────────────────────────────────────────────────────
-// initEventBus 는 모듈 전역에 한 번만 도는 약속을 쥐므로 시험마다 모듈을 새로 읽는다(스토어도 함께 새로 선다).
-describe('eventBus — 방송 잇기 먼저, pull 나중', () => {
+// ── ③ eventBus hookup ──────────────────────────────────────────────────────────────────
+// initEventBus holds a promise that runs only once module-wide, so each test reads the module anew (the store is set up anew too).
+describe('eventBus — broadcast hookup first, pull later', () => {
   type UsageCb = (snapshot: UsageLimitSnapshot, socketEpoch: number) => void
 
   async function freshModules() {
@@ -329,7 +329,7 @@ describe('eventBus — 방송 잇기 먼저, pull 나중', () => {
     delete (globalThis as Record<string, unknown>).__engramCmd
   })
 
-  it('잇기가 선 뒤에 pull 한 번', async () => {
+  it('one pull after the hookup is set', async () => {
     const { initEventBus } = await freshModules()
     const rec = recordingClient()
     holder.client = rec.client
@@ -338,17 +338,17 @@ describe('eventBus — 방송 잇기 먼저, pull 나중', () => {
     expect(rec.log).toEqual(['listen', 'pull(listening)'])
   })
 
-  it('잇기 전에 마운트된 슬롯이 pull 했어도 잇기 직후 pull 이 한 번 더', async () => {
+  it('even if a slot mounted before the hookup pulled, one more pull right after the hookup', async () => {
     const { initEventBus, useUsageStore: usage } = await freshModules()
     const rec = recordingClient()
     holder.client = rec.client
-    await usage.getState().pull() // 부팅 중 먼저 마운트된 사용량 슬롯
+    await usage.getState().pull() // a usage slot mounted first during boot
     await initEventBus()
     await flush()
     expect(rec.log).toEqual(['pull(not listening)', 'listen', 'pull(listening)'])
   })
 
-  it('잇기 뒤의 마운트 → pull 정확히 한 번 · 그 pull 보다 방송 리스너가 먼저', async () => {
+  it('a mount after the hookup → exactly one pull · the broadcast listener comes before that pull', async () => {
     const { initEventBus, useUsageStore: usage } = await freshModules()
     const rec = recordingClient()
     holder.client = rec.client
@@ -359,7 +359,7 @@ describe('eventBus — 방송 잇기 먼저, pull 나중', () => {
     expect(rec.log).toEqual(['pull(listening)'])
   })
 
-  it('방송 → merge 로 스토어에 든다 · pull 반환도 같은 merge 를 지난다', async () => {
+  it('broadcast → into the store through merge · the pull return goes through the same merge', async () => {
     const { initEventBus, useUsageStore: usage } = await freshModules()
     const rec = recordingClient({ socketEpoch: 2, snapshots: [snap('codex', 4)] })
     holder.client = rec.client
@@ -367,12 +367,12 @@ describe('eventBus — 방송 잇기 먼저, pull 나중', () => {
     await flush()
     expect(usage.getState().vendors.codex?.revision).toBe(4)
     rec.broadcast(snap('claude', 3), 2)
-    rec.broadcast(snap('codex', 2), 2) // 더 작은 revision — 버림
+    rec.broadcast(snap('codex', 2), 2) // a smaller revision — dropped
     expect(usage.getState().vendors.claude?.revision).toBe(3)
     expect(usage.getState().vendors.codex?.revision).toBe(4)
   })
 
-  it('관심 보고 표면이 없다 — 잇기·pull·⟳·방송 어디서도 invoke 0 · 사용량 표면은 셋뿐', async () => {
+  it('there is no interest report surface — 0 invoke anywhere in hookup · pull · ⟳ · broadcast · only three usage surfaces', async () => {
     const { initEventBus, useUsageStore: usage } = await freshModules()
     const rec = recordingClient()
     holder.client = rec.client
@@ -386,7 +386,7 @@ describe('eventBus — 방송 잇기 먼저, pull 나중', () => {
     expect(usageSurface).toEqual(['getUsageSnapshot', 'onUsageLimitsUpdated', 'refreshUsageLimits'])
   })
 
-  // 재연결 pull — 부팅 pull 이 재시도를 다 쓰고 실패했거나, 끊긴 동안 놓친 방송을 메운다(메인 결정 2026-09-29).
+  // Reconnect pull — fills the case where the boot pull used up its retries and failed, or broadcasts were missed while disconnected.
   function reconnectableClient(reply: UsageSnapshotPull = { socketEpoch: 1, snapshots: [] }) {
     const rec = recordingClient(reply)
     let stateCb: ((s: ConnectionState) => void) | null = null
@@ -404,7 +404,7 @@ describe('eventBus — 방송 잇기 먼저, pull 나중', () => {
     return { ...rec, client, setState: (s: ConnectionState) => stateCb?.(s) }
   }
 
-  it('connected 로 재전이 → pull 한 번 더(방송 리스너가 선 채) · 첫 connected · 끊김 전이는 더하지 않는다', async () => {
+  it('re-transition to connected → one more pull (with the broadcast listener set) · the first connected · disconnect transitions do not add one', async () => {
     const { initEventBus } = await freshModules()
     const rec = reconnectableClient()
     holder.client = rec.client
@@ -419,7 +419,7 @@ describe('eventBus — 방송 잇기 먼저, pull 나중', () => {
     expect(rec.log).toEqual(['listen', 'pull(listening)', 'pull(listening)'])
   })
 
-  it('재연결 pull 의 반환도 merge 를 지난다 — 끊긴 동안 놓친 값이 든다', async () => {
+  it('the reconnect pull return goes through merge too — values missed while disconnected come in', async () => {
     const { initEventBus, useUsageStore: usage } = await freshModules()
     const reply: UsageSnapshotPull = { socketEpoch: 1, snapshots: [] }
     const rec = reconnectableClient(reply)
@@ -436,7 +436,7 @@ describe('eventBus — 방송 잇기 먼저, pull 나중', () => {
     expect(usage.getState().socketEpoch).toBe(2)
   })
 
-  // ── 실 ProtocolClient 를 거쳐 — 끊김 전이 · Ack ──
+  // ── through the real ProtocolClient — disconnect transition · Ack ──
   class FakeTransport implements Transport {
     private _state: ConnectionState = 'connected'
     private stateCbs = new Set<(s: ConnectionState) => void>()
@@ -498,7 +498,7 @@ describe('eventBus — 방송 잇기 먼저, pull 나중', () => {
     return { ...modules, transport }
   }
 
-  it('⟳ 답 Ack → pending 만 푼다(값 · revision · socketEpoch 그대로)', async () => {
+  it('⟳ answer Ack → only clears pending (value · revision · socketEpoch unchanged)', async () => {
     const { useUsageStore: usage, transport } = await wiredToProtocolClient()
     transport.usage(snap('claude', 5), 2)
     const vendorsBefore = usage.getState().vendors
@@ -515,19 +515,19 @@ describe('eventBus — 방송 잇기 먼저, pull 나중', () => {
     expect(usage.getState().socketEpoch).toBe(2)
   })
 
-  it('끊김 전이 → pending 만 푼다 · 늦게 닿은 전이는 revision 을 잊지 않는다(같은 표식의 늦은 옛 사본 버림)', async () => {
+  it('disconnect transition → only clears pending · a transition arriving late does not forget the revision (a late old copy with the same marker is dropped)', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     const { useUsageStore: usage, transport } = await wiredToProtocolClient()
     transport.usage(snap('claude', 50), 1)
-    transport.usage(snap('claude', 3), 2) // 새 소켓 표식의 payload rev N=3
+    transport.usage(snap('claude', 3), 2) // payload rev N=3 with the new socket marker
     const refreshing = usage.getState().refresh('claude')
     await flush()
-    transport.setState('reconnecting') // 그 뒤 늦게 닿은 앞선 끊김의 전이
+    transport.setState('reconnecting') // the transition of an earlier disconnect arriving late after that
     await refreshing
     expect(usage.getState().pending.claude).toBe(0)
     expect(usage.getState().vendors.claude?.revision).toBe(3)
     expect(usage.getState().vendors.claude?.snapshot.five_hour?.used_pct).toBe(3)
-    transport.usage(snap('claude', 2), 2) // 같은 표식의 늦게 닿은 rev < N
+    transport.usage(snap('claude', 2), 2) // rev < N with the same marker, arriving late
     expect(usage.getState().vendors.claude?.revision).toBe(3)
     expect(usage.getState().socketEpoch).toBe(2)
   })

@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "usage-links",
-  "description": "사용량 슬롯의 「사용량 페이지 ↗」 링크 — opener:allow-open-url 을 두 주소(Claude·Codex 사용량 설정 페이지)로만 좁힌다(TRD S21 usage-limit-slot §1-7). 창은 main 과 팝아웃(slot-popup-*) — 슬롯을 담는 창은 그 둘뿐이다. 두 주소 목록은 이 파일 하나에만 둔다(default.json·popup.json 에 opener 권한을 따로 두지 않는다).",
+  "description": "The 「usage page ↗」 link of the usage slot — narrows opener:allow-open-url to two addresses only (the Claude and Codex usage settings pages) (TRD S21 usage-limit-slot §1-7). The windows are main and pop-outs (slot-popup-*) — those two are the only windows that hold a slot. The list of the two addresses lives in this file only (default.json and popup.json carry no separate opener permission).",
   "windows": ["main", "slot-popup-*"],
   "permissions": [
     {

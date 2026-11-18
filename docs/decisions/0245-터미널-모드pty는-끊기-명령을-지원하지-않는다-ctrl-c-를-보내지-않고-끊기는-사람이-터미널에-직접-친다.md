@@ -15,16 +15,16 @@ So calling it twice can end a terminal-mode agent, which conflicts with the comm
 No UI uses the PTY interrupt — interrupting exists only in the JSON chat pane (ADR-0237), and the terminal pane sends a person's keys to the PTY as they are.
 
 ## 결정
-Notation — **[사용자]** = a decision the user answered · **[메인]** = an orchestrator decision.
+Notation — **[User]** = a decision the user answered · **[Main]** = an orchestrator decision.
 
 The main agent put up A 「터미널 모드는 끊기 명령을 거절한다」 and B 「Ctrl-C 를 두고 끝날 위험을 문서화한다」. The user's original words (2026-09-28): 「터미널모드는 지가 알아서 하잖아. 아예 기능에서 빼야지」 · 「아니 내말은 ctrl c를 빼라는거지 터미널모드에서는 알아서 하라고해.」 — the second statement narrowed the first's 「기능에서 빼」 to **Ctrl-C injection**. The keys a person types directly into the terminal are unchanged.
 
-1. **Remove Ctrl-C injection from the PTY channel — interrupting in terminal mode is left to the terminal** [사용자]. The Esc · Ctrl-C a person types are handled by the terminal itself, and the dashboard neither intercepts those keys nor sends them on the person's behalf (the terminal pane as it is today).
-2. **The corresponding handling** [메인]: the PTY channel's `interrupt()` = `Unsupported` → the bus `agent.interrupt` answers CONFLICT · capability `control.interrupt = false` · the WS `Interrupt` message answers with an error.
+1. **Remove Ctrl-C injection from the PTY channel — interrupting in terminal mode is left to the terminal** [User]. The Esc · Ctrl-C a person types are handled by the terminal itself, and the dashboard neither intercepts those keys nor sends them on the person's behalf (the terminal pane as it is today).
+2. **The corresponding handling** [Main]: the PTY channel's `interrupt()` = `Unsupported` → the bus `agent.interrupt` answers CONFLICT · capability `control.interrupt = false` · the WS `Interrupt` message answers with an error.
 
 ## 거부한 대안
-- **Keep Ctrl-C and document the risk of quitting (B)** [사용자 — chose removal].
-- **Send Esc instead of Ctrl-C** [메인] — what Esc means in a TUI depends on its state (interrupt · clear the input draft · double-Esc rewind). The command cannot know that state. And a person already sends the key directly.
+- **Keep Ctrl-C and document the risk of quitting (B)** [User — chose removal].
+- **Send Esc instead of Ctrl-C** [Main] — what Esc means in a TUI depends on its state (interrupt · clear the input draft · double-Esc rewind). The command cannot know that state. And a person already sends the key directly.
 
 ## 근거
 - **User decision ⑭ (2026-09-28)** — the original words are at the head of 「결정」. Record = TRD §11 ⑭.

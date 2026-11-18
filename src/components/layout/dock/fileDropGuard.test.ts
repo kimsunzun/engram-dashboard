@@ -27,9 +27,9 @@ afterEach(() => {
   remove?.()
 })
 
-describe('파일 막기 — 탐색을 부르는 끌기(파일 · URL)만', () => {
+describe('file block — only drags that trigger navigation (file · URL)', () => {
   it.each(['Files', 'text/uri-list'])(
-    '%s 끌기 = dragenter · dragover preventDefault + dropEffect none · drop preventDefault · 끊지 않는다',
+    '%s drag = dragenter · dragover preventDefault + dropEffect none · drop preventDefault · does not cut',
     type => {
       const winSeen: string[] = []
       const spy = (e: Event): void => {
@@ -57,7 +57,7 @@ describe('파일 막기 — 탐색을 부르는 끌기(파일 · URL)만', () =>
     },
   )
 
-  it('글자 끌기는 건드리지 않는다 — 입력창에 글자를 끌어 놓는 기본 동작이 선다', () => {
+  it('a text drag is not touched — the default action of dropping text into an input box stands', () => {
     const enter = drag('dragenter', ['text/plain', 'text/html'])
     const over = drag('dragover', ['text/plain', 'text/html'])
     const drop = drag('drop', ['text/plain', 'text/html'])
@@ -68,7 +68,7 @@ describe('파일 막기 — 탐색을 부르는 끌기(파일 · URL)만', () =>
     expect(drop.e.defaultPrevented).toBe(false)
   })
 
-  it('떼면 더 막지 않는다', () => {
+  it('if released it blocks no more', () => {
     remove?.()
     remove = null
     const over = drag('dragover', ['Files'])

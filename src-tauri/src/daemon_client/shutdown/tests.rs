@@ -1,9 +1,4 @@
-//! The stop path on a client over memory networks and one manual clock (TRD S21 trd-3-2-u5 §5): the test side plays the
-//! daemon on the stop network, scripts `daemon.json` and the target process, and watches the shell's link through its
-//! endpoint source.
-//!
-//! Waits poll with real sleeps up to a bound: `daemon.json` is read on the blocking pool, which the transport's `settle`
-//! does not wait for.
+//! The stop path on a client over memory networks and one manual clock (TRD S21 trd-3-2-u5 §5): the test side plays the daemon on the stop network, scripts `daemon.json` and the target process, and watches the shell's link through its endpoint source. Waits poll with real sleeps up to a bound: `daemon.json` is read on the blocking pool, which the transport's `settle` does not wait for.
 
 use super::*;
 
@@ -43,7 +38,6 @@ impl Record {
         })
     }
 
-    /// Holds the next read: returns "it started" and the release.
     fn hold_next(&self) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
         let (entered_tx, entered_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
@@ -241,7 +235,6 @@ impl Stage {
         tokio::spawn(async move { client.stop_daemon(plan, StopOrigin::Tray).await })
     }
 
-    /// [`Self::stop`] with why the flight ended so.
     fn stop_with_reason(&self, plan: StopPlan) -> JoinHandle<StopResult> {
         let client = self.client.clone();
         tokio::spawn(async move {
@@ -341,7 +334,6 @@ async fn connected_link(s: &Stage) -> Arc<MemoryEndpoint> {
     link
 }
 
-/// A few real milliseconds for the runtime — for "this did not happen" checks.
 async fn let_it_run() {
     for _ in 0..50 {
         tokio::time::sleep(Duration::from_millis(1)).await;

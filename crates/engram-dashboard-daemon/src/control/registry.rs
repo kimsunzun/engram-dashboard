@@ -1,15 +1,8 @@
 //! Control channel token registry (ADR-0086) — issue, validate and discard a bearer token per (AgentId, epoch).
 //!
-//! ★Role★: at spawn the daemon issues a 256-bit token per (AgentId, epoch), and when the spawned claude agent
-//!   presents that token in the mcp-config Authorization header, it is verified here and the identity ((AgentId, epoch)) is
-//!   returned. Incarnation swap (re-activation = a different marker) · kill · terminal discard the old token → a stale-epoch token is
-//!   no longer valid (401). `from` (the sender identity) is always derived from this token — the token, not the payload,
-//!   is the single source of identity (ADR-0086 §invariant "from is derived only from the token", blocks impersonation).
+//! ★Role★: at spawn the daemon issues a 256-bit token per (AgentId, epoch); when the spawned claude agent presents it in the mcp-config Authorization header, it is verified here and the identity ((AgentId, epoch)) is returned. A new incarnation (re-activation = a different marker) · kill · terminal discards the old token, so a stale-epoch token gets 401. `from` (the sender identity) is always derived from this token, never from the payload (ADR-0086 §invariant, blocks impersonation).
 //!
-//! ★Security★: the token string is not logged (tracing records only AgentId/epoch). For the reverse token↔identity lookup
-//!   there is a map keyed by the token string, but Debug is not derived (prevents log leaks).
-//!
-//! tauri import 0 (daemon crate).
+//! ★Security★: the token string is never logged (tracing records only AgentId/epoch). The reverse token↔identity map is keyed by the token string, so Debug is not derived.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -26,32 +19,23 @@ pub struct BoundIdentity {
     pub epoch: u32,
 }
 
-/// Everything tied to one token — identity + the mail permission **fixed at issue time** (the material for ADR-0133 decision 3's decision).
+/// Everything tied to one token — identity + the mail permission fixed at issue time (ADR-0133 decision 3).
 ///
-/// ★Why fix it at issue time (why not look it up per request)★: the mail channel is split only by backend capability and
-///   **has no runtime switching or fallback** (ADR-0128 decision 1) — so the value at issue time is the truth. The token is
-///   newly made per (AgentId, epoch), so re-activation fixes it again with the new value. Mail is a high-traffic
-///   path (that is why ADR-0128 chose MCP), so there is also no reason to query the manager on every request.
-/// ★Identity and permission go in one value, but **equality is compared by identity only**★: what session pinning compares is
-///   `identity`, and it does not compare this struct whole — if the permission bit got into the equality decision, an authorization problem would
-///   masquerade as a session-hijack false positive (403).
+/// ★Why fix it at issue time, not per request★: the mail channel is split only by backend capability with no runtime switching or fallback (ADR-0128 decision 1), so the value at issue time is the truth. The token is newly made per (AgentId, epoch), so re-activation fixes it again; mail is high-traffic, so no per-request manager query either.
+/// ★Equality is compared by identity only★: session pinning compares `identity`, not this struct — a permission bit in the equality decision would make an authorization problem masquerade as a session-hijack false positive (403).
 // ADR-0133
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TokenBinding {
     pub identity: BoundIdentity,
-    /// Can the **HTTP/CLI mail entrance** (`/control/send`·`/control/messages`) be used with this credential.
+    /// Can the HTTP/CLI mail entrance (`/control/send`·`/control/messages`) be used with this credential.
     ///
-    /// ★Narrower than the name — it is not "can it use mail"★: a `false` credential (= an MCP-capable backend spawn)
-    ///   **writes mail normally** through `eg_send` on `/mcp`. The design is that the channel is split only by backend capability and
-    ///   has no runtime fallback (ADR-0128 decision 1), and this value is used only to
-    ///   close the entrance that should be closed under that design. Reading this field as
-    ///   "mail permission" in general and layering the check onto the MCP tool path as well would overturn that decision.
+    /// ★Narrower than the name — not "can it use mail"★: a `false` credential (an MCP-capable backend spawn) writes mail normally through `eg_send` on `/mcp`. The channel is split only by backend capability with no runtime fallback (ADR-0128 decision 1); this value only closes the entrance that should be closed. Layering the check onto the MCP tool path would overturn that decision.
     // ADR-0133
     // ADR-0128
     pub mail_allowed: bool,
 }
 
-/// This impl is the **only point** on the boundary that connects the two identity types (the entrance passes it as `cmd.from.into()`).
+/// The only point on the boundary that connects the two identity types (the entrance passes it as `cmd.from.into()`).
 // ADR-0110
 impl From<BoundIdentity> for engram_dashboard_messaging::SenderIdentity {
     fn from(b: BoundIdentity) -> Self {
@@ -62,45 +46,22 @@ impl From<BoundIdentity> for engram_dashboard_messaging::SenderIdentity {
     }
 }
 
-/// Owned by the daemon, one instance (shared via Arc). Internal RwLock — reads (validate, on every tool call) are far more frequent than
-/// writes (issue/revoke, at spawn and exit).
+/// Owned by the daemon, one instance (shared via Arc). Internal RwLock — reads (validate, every tool call) far outnumber writes (issue/revoke, at spawn and exit).
 ///
-/// ★ADR-0088 delivery observation slot★: `delivery_observer` is an **optional in-process sink** that
-///   receives the delivery-boundary observation records of the control channel relay. Why it lives here = the registry is the only shared object already
-///   threaded as an `Arc` through every control-plane path including `handle_send`, so hanging the observation sink here lets an in-proc harness
-///   install observation without touching the `handle_send` signature and its call sites (minimal footprint).
-///   The production daemon leaves this slot empty (observer=None) → only the existing tracing path remains and overhead is 0. A harness
-///   installs it with `set_delivery_observer` and retrieves records directly **without scraping a detached daemon's logs**
-///   (ADR-0088 HARD CONSTRAINT · in the vein of ADR-0012 in-process harness).
+/// ★ADR-0088 delivery observation slot★: `delivery_observer` is an optional in-process sink for the control channel relay's delivery-boundary observation records. It lives here because the registry is the one shared object already threaded as an `Arc` through every control-plane path including `handle_send`, so an in-proc harness installs observation without touching the `handle_send` signature. Production leaves it empty (observer=None): only the tracing path remains, overhead 0. A harness installs it with `set_delivery_observer` and reads records directly instead of scraping a detached daemon's logs (ADR-0088 HARD CONSTRAINT · ADR-0012).
 #[derive(Default)]
 pub struct ControlRegistry {
     inner: RwLock<Inner>,
-    /// ★Envelope format global state (ADR-0096)★ — **one daemon-global state** that switches the A→B message envelope between colon/xml
-    ///   (not per recipient / per metadata presence — ADR-0096 decision 1). Why it lives here = the registry is the only shared object already
-    ///   threaded as an `Arc` through `handle_send` (the MCP and CLI entrances) and WS dispatch, so hanging this
-    ///   state here lets the two envelope assembly paths read the same value without newly wiring a separate state owner.
-    ///   ★Owner = daemon (ADR-0029)★: the registry lives in the daemon process that owns AgentManager — src-tauri
-    ///   (the client shell) does not own this state and only forwards the invoke command to the daemon.
-    ///   ★AtomicU8 (no lock needed)★: it is a simple scalar toggle so RwLock is overkill — **0=Xml (default)·1=Colon**. Since `Default`
-    ///   is 0, the initial value is consistently Xml (ADR-0103 — default flipped by the S18 envelope XML unification). ★Why the value mapping was
-    ///   reversed★: `#[derive(Default)]` AtomicU8=0 had to be hung on the new default Xml, so Xml is assigned 0 and Colon 1
-    ///   (the default = Xml holds from the derived Default alone, with no separate seed). ★Memory-only★: reset to 0 (Xml) on daemon restart
-    ///   (persistence is backlog — ADR-0096 decision 4). read = on every relay (Acquire), write = the set_envelope_format
-    ///   command (rare, Release) — the Release/Acquire pair makes sure the first message after the switch sees the new format
-    ///   (FIX-4). It is a single scalar so there is no tearing, but cross-thread visibility is established explicitly.
+    /// ★Envelope format global state (ADR-0096)★ — one daemon-global state switching the A→B message envelope between colon/xml (not per recipient / per metadata presence — ADR-0096 decision 1). It lives here because the registry is the one shared object already threaded as an `Arc` through `handle_send` (MCP and CLI entrances) and WS dispatch, so both envelope assembly paths read the same value.
+    ///   ★Owner = daemon (ADR-0029)★: src-tauri (the client shell) does not own this state and only forwards the invoke command.
+    ///   ★AtomicU8, no lock★: a scalar toggle — 0=Xml (default)·1=Colon, so the derived `Default` gives Xml with no separate seed (ADR-0103). ★Memory-only★: reset to Xml on daemon restart (persistence is backlog — ADR-0096 decision 4). Read on every relay (Acquire), written by the rare set_envelope_format command (Release) — the pair makes the first message after a switch see the new format (FIX-4).
     // ADR-0103
     // ADR-0096
     envelope_format: AtomicU8,
-    /// RwLock: installs are rare (once at test setup) and lookups happen on every relay but are short.
+    /// RwLock: installs are rare (test setup), lookups on every relay are short.
     delivery_observer: RwLock<Option<Arc<dyn DeliveryObserver>>>,
-    /// ★mid-send yield-seam hook (ADR-0088 Stage 1 — test-harness only)★: a test hook that fires at the **latest point** of the
-    ///   resolve↔write gap in `handle_send` (just before injecting the recipient). It is for deterministically reproducing a mid-flight
-    ///   epoch race — if inside the hook the same AgentId is swapped and injected as a new-epoch incarnation, resolve saw the
-    ///   old incarnation but write lands on the new incarnation. ★ADR-0086 §F5 marks the race as
-    ///   design-accepted★ (mail targets the **logical agent**, so landing on the new incarnation is the correct behavior)
-    ///   — this seam is meant to **deterministically observe** that behavior, not to pin the epoch.
-    ///   Production build = feature OFF → this field itself does not exist (the hook firing code is not even compiled,
-    ///   handle_send behavior is byte-identical). RwLock: installs are rare and lookups short (same shape as observer).
+    /// ★Mid-send yield-seam hook (ADR-0088 Stage 1 — test-harness only)★: fires at the latest point of the resolve↔write gap in `handle_send` (just before injecting the recipient), to deterministically reproduce a mid-flight epoch race — if the hook swaps the same AgentId in as a new-epoch incarnation, resolve saw the old incarnation but write lands on the new one. ★ADR-0086 §F5 marks that race design-accepted★ (mail targets the logical agent); this seam observes that behavior, not pins the epoch.
+    ///   Production build = feature OFF → the field does not exist and handle_send is byte-identical. RwLock: same shape as observer.
     // ADR-0088
     #[cfg(feature = "test-harness")]
     mid_send_hook: RwLock<Option<Arc<dyn Fn() + Send + Sync>>>,
@@ -118,19 +79,16 @@ impl ControlRegistry {
         Self::default()
     }
 
-    /// **Remove that AgentId's previous-epoch token** (rotation = discard — one AgentId = one live token).
-    /// The token is made by the caller (provision) with a CSPRNG and handed over — this registry does no random number generation and owns
-    /// only the mapping (separation of generation and mapping concerns).
+    /// Removes that AgentId's previous-epoch token (rotation = discard — one AgentId = one live token).
+    /// The caller (provision) makes the token with a CSPRNG and hands it over — this registry owns only the mapping.
     ///
-    /// `mail_allowed` = whether mail requests will be accepted with this credential (ADR-0133). The decision itself belongs to the caller
-    ///   (`DaemonControlChannel::provision`) alone — here the received value is only recorded (no derivation: if two places
-    ///   decide, they diverge).
-    /// ★Lock order (ADR-0006)★: the write lock is taken only inside this function, and no external call is made (pure map manipulation).
+    /// `mail_allowed` = whether mail requests are accepted with this credential (ADR-0133). The decision belongs to `DaemonControlChannel::provision` alone; here the value is only recorded (two deciders would diverge).
+    /// ★Lock order (ADR-0006)★: the write lock is taken only inside this function, with no external call.
     pub fn issue(&self, id: AgentId, epoch: u32, token: String, mail_allowed: bool) {
         let mut inner = self.inner.write().expect("control registry poisoned");
         if let Some(old) = inner.agent_to_token.remove(&id) {
             inner.token_to_binding.remove(&old);
-            // The session binding attached with the old token is also stale now — erase it together.
+            // The session binding attached with the old token is stale too — erase it together.
             inner
                 .session_to_identity
                 .retain(|_, ident| ident.agent_id != id);
@@ -146,13 +104,12 @@ impl ControlRegistry {
             },
         );
         inner.agent_to_token.insert(id, token);
-        tracing::info!(agent = %id, epoch, mail_allowed, "제어 채널 토큰 발급(ADR-0086)");
+        tracing::info!(agent = %id, epoch, mail_allowed, "control channel token issued (ADR-0086)");
     }
 
     /// None if absent or discarded — the caller (auth middleware) returns 401.
     ///
-    /// ★Identity and mail permission come out together **in one lookup**★: if the two are looked up separately, a discard or reissue between them
-    ///   can produce "identity is A but permission is B", and that combination has no defined answer.
+    /// ★Identity and mail permission come out in one lookup★: separate lookups could straddle a discard or reissue and give "identity A, permission B", which has no defined answer.
     pub fn validate(&self, token: &str) -> Option<TokenBinding> {
         self.inner
             .read()
@@ -162,10 +119,9 @@ impl ControlRegistry {
             .copied()
     }
 
-    /// For sender liveness "observation" (not a gate — it does not block delivery and only records, user decision 2026-07-19).
+    /// Sender liveness "observation" (not a gate — it only records, never blocks delivery).
     ///
-    /// false = the token was discarded/replaced by kill/rotate. At relay time the original token string no longer remains, so
-    ///   we trace back through agent_to_token → token_to_binding and check that the epoch matches.
+    /// false = the token was discarded/replaced by kill/rotate. At relay time the original token string is gone, so trace agent_to_token → token_to_binding and check the epoch matches.
     pub fn is_identity_live(&self, identity: BoundIdentity) -> bool {
         let inner = self.inner.read().expect("control registry poisoned");
         inner
@@ -176,25 +132,11 @@ impl ControlRegistry {
             .unwrap_or(false)
     }
 
-    /// The identity passed in must be **one the middleware already verified** (ADR-0086). Called when the auth middleware finds
-    /// Mcp-Session-Id in the initialize response. Afterwards it becomes the target of identity checks for requests coming in on that session,
-    /// acceptance observation and revoke cleanup.
+    /// The identity passed in must be one the middleware already verified (ADR-0086). Called when the auth middleware finds Mcp-Session-Id in the initialize response; afterwards it is the target of identity checks for requests on that session, acceptance observation and revoke cleanup.
     ///
-    /// ★no-overwrite + exact-token recheck (FIX 7 + round-2 F2)★: the session↔identity is fixed **only once, at initialize**
-    ///   (identity pinning). If a binding already exists it is not overwritten — that way the middleware can detect and reject a
-    ///   **cross-token takeover** where session S is opened with token A and later a request is sent to the same session with token B
-    ///   (if the binding were overwritten with B, the hijack would look successful). Also, just before binding, it rechecks **whether the very token string used for
-    ///   verification is still this agent's current credential** (`agent_to_token[agent] == validated_token`) —
-    ///   if a revoke (token evict) or a reissue (a new token for the same agent) slips in between validate→bind, the binding is skipped and
-    ///   it signals failure (returns None).
-    /// ★Why recheck the **exact token** rather than the identity (round-2 F2)★: earlier it only checked whether the identity of the live token that `agent_to_token[agent]`
-    ///   points to equals `identity` (id and epoch match). That relies on the **remote invariant** "the incarnation marker always
-    ///   differs on every re-activation (ADR-0007)" and is safe only on the assumption that reissuing the same (id,epoch) is impossible.
-    ///   To make the check **local**, it takes the verified token string itself and directly compares whether that string
-    ///   is still the current credential — then even if that remote invariant breaks (even if a token is reissued with the same id·epoch),
-    ///   an initialize that arrives with a stale token is not bound.
-    ///   Returns: Some(identity) if newly bound, None if one already exists (duplicate init) or the token is dead or was replaced
-    ///   (the caller handles accordingly — a duplicate is harmless, death/replacement is unauthorized).
+    /// ★No-overwrite + exact-token recheck (FIX 7)★: session↔identity is fixed only once, at initialize (identity pinning). An existing binding is never overwritten, so the middleware can detect and reject a cross-token takeover (session S opened with token A, later used with token B). Just before binding it also rechecks that the very token string used for verification is still this agent's current credential (`agent_to_token[agent] == validated_token`) — a revoke or reissue slipping in between validate→bind makes it skip the binding and return None.
+    /// ★Why recheck the exact token, not the identity★: checking only that the identity of the live token matches (id and epoch) relies on the remote invariant "the incarnation marker differs on every re-activation (ADR-0007)". Comparing the verified token string directly keeps the check local — even if that invariant breaks (a token reissued with the same id·epoch), an initialize arriving with a stale token is not bound.
+    /// Returns Some(identity) if newly bound; None if a binding exists (duplicate init, harmless) or the token is dead or replaced (unauthorized).
     pub fn bind_session_if_absent(
         &self,
         session_id: &str,
@@ -219,7 +161,7 @@ impl ControlRegistry {
         tracing::info!(
             agent = %identity.agent_id,
             epoch = identity.epoch,
-            "제어 채널 세션 바인딩(ADR-0086, pinned)"
+            "control channel session bound (ADR-0086, pinned)"
         );
         Some(identity)
     }
@@ -233,30 +175,23 @@ impl ControlRegistry {
             .copied()
     }
 
-    /// Called by the middleware when the client folds the session with DELETE (FIX 8). Separately from revoke-time cleanup,
-    /// it keeps session_to_identity from growing without bound on the normal teardown path (repeated initialize→DELETE does not
-    /// pile up entries). No-op if absent.
+    /// Called by the middleware when the client closes the session with DELETE (FIX 8). Keeps session_to_identity from growing without bound on the normal teardown path. No-op if absent.
     pub fn unbind_session(&self, session_id: &str) {
         let mut inner = self.inner.write().expect("control registry poisoned");
         if inner.session_to_identity.remove(session_id).is_some() {
-            // It is a header value the caller chose, so sanitize it when putting it in a log — this module's log field discipline has its authority in
-            //   `connection_core::sanitize_for_log` (`control::agent::preview` is for **response
-            //   wording** only and lets control characters through).
+            // A header value chosen by the caller, so sanitize it for the log — the log field discipline is `connection_core::sanitize_for_log` (`control::agent::preview` is for response wording only and lets control characters through).
             tracing::info!(
                 session = %crate::connection_core::sanitize_for_log(session_id),
-                "제어 채널 세션 바인딩 해제(DELETE, ADR-0086)"
+                "control channel session unbound (DELETE, ADR-0086)"
             );
         }
     }
 
-    /// Discard the (AgentId, epoch) token + remove that identity's session binding. Called from terminal (reaper) / kill.
+    /// Discards the (AgentId, epoch) token + removes that identity's session binding. Called from terminal (reaper) / kill.
     ///
-    /// ★epoch-guard★: discard **only when the requested marker matches the marker of the currently live token**. This keeps a stale terminal from
-    ///   erasing a live token newly issued by re-activation (new incarnation = a different marker) (extends the spirit of ADR-0007/0084 to the token registry).
-    ///   If they do not match it is a no-op (a new token has already taken the place in the meantime).
-    ///   ★Do not change it to a greater/less comparison★: the marker is a random number drawn per incarnation so order has no meaning (`AgentProfile::epoch`).
-    /// ★idempotent★: if already absent (double revoke — kill up front + reaper) it is a no-op. So it is safe even if kill_agent and the reaper
-    ///   both call it.
+    /// ★Epoch-guard★: discard only when the requested marker matches the live token's marker, so a stale terminal cannot erase a live token newly issued by re-activation (ADR-0007/0084 spirit). On mismatch it is a no-op.
+    ///   ★Do not change it to a greater/less comparison★: the marker is a random number drawn per incarnation, so order has no meaning (`AgentProfile::epoch`).
+    /// ★Idempotent★: already absent (kill up front + reaper) is a no-op, so kill_agent and the reaper may both call it.
     pub fn revoke(&self, id: AgentId, epoch: u32) {
         let mut inner = self.inner.write().expect("control registry poisoned");
         match inner.agent_to_token.get(&id) {
@@ -274,11 +209,10 @@ impl ControlRegistry {
         inner
             .session_to_identity
             .retain(|_, ident| !(ident.agent_id == id && ident.epoch == epoch));
-        tracing::info!(agent = %id, epoch, "제어 채널 토큰 폐기(ADR-0086)");
+        tracing::info!(agent = %id, epoch, "control channel token revoked (ADR-0086)");
     }
 
-    /// For observation (ADR-0086 acceptance) — integration tests (a separate crate) use it too, so it is exposed publicly rather than hidden behind cfg(test)
-    /// (a pure query, safe).
+    /// Exposed publicly (not cfg(test)) because integration tests in a separate crate use it for observation (ADR-0086 acceptance); a pure query.
     pub fn live_token_count(&self) -> usize {
         self.inner
             .read()
@@ -287,7 +221,7 @@ impl ControlRegistry {
             .len()
     }
 
-    /// For observation (acceptance) — integration tests assert "after the agent connected the daemon held the session" with this value.
+    /// For observation — integration tests assert "after the agent connected the daemon held the session".
     pub fn bound_session_count(&self) -> usize {
         self.inner
             .read()
@@ -303,21 +237,12 @@ impl ControlRegistry {
             .expect("delivery observer poisoned") = Some(observer);
     }
 
-    /// Emit a delivery observation record (ADR-0088) — `handle_send` calls it on every relay success/failure.
-    /// ★Lock discipline (ADR-0006)★: clone the observer Arc, release the lock at once, then call `observe` outside the lock
-    /// (no external call is made while holding the lock).
+    /// Emits a delivery observation record (ADR-0088) — `handle_send` calls it on every relay success/failure.
+    /// ★Lock discipline (ADR-0006)★: clone the observer Arc, release the lock, then call `observe` outside the lock.
     ///
-    /// ★Observation never disturbs delivery or ACK (FIX-2 — immediate push invariant)★: if the user-supplied `observe`
-    ///   panics, that panic rides up through `handle_send` and after the relay (the bytes are already written) the ACK cannot be
-    ///   sent, and the sender may retry causing **duplicate delivery** — delivery semantics must not change just
-    ///   because observation was turned on. So the `observe` call is isolated with `catch_unwind`, the panic is swallowed
-    ///   here (only a warn is left), and record_delivery always returns normally. It is caught after the clone and outside the lock, not while holding the RwLock,
-    ///   so poison does not propagate either (consistent with the lock discipline).
+    /// ★Observation never disturbs delivery or ACK (FIX-2)★: a panic in the user-supplied `observe` would ride up through `handle_send` after the bytes are already written, the ACK could not be sent, and the sender may retry causing duplicate delivery. So `observe` is isolated with `catch_unwind`, the panic swallowed with a warn, and record_delivery always returns normally. The catch is after the clone and outside the lock, so poison does not propagate either.
     ///
-    /// ★In a production process this catch_unwind is not reached (FIX-R2-3 · ADR-0292)★: this call is outside the containment mark so
-    ///   on a panic the hook ends the process before unwinding, so this isolation is **limited to hook-less test builds**. It is
-    ///   harmless now: production installs no observer (observer=None) so the `if let Some(sink)` below short-circuits before
-    ///   catch_unwind. If a production observer is ever attached, the fact that its panic would terminate the daemon must be reconsidered.
+    /// ★In a production process this catch_unwind is not reached (FIX-R2-3 · ADR-0292)★: the call is outside the containment mark, so the hook ends the process on a panic before unwinding; the isolation is limited to hook-less test builds. Harmless now: production installs no observer, so `if let Some(sink)` short-circuits. If a production observer is ever attached, reconsider that its panic would terminate the daemon.
     pub fn record_delivery(&self, obs: DeliveryObservation) {
         let sink = self
             .delivery_observer
@@ -325,15 +250,14 @@ impl ControlRegistry {
             .expect("delivery observer poisoned")
             .clone();
         if let Some(sink) = sink {
-            // AssertUnwindSafe: on a panic obs is consumed and gone and we only leave a log (we do not observe a shared invariant
-            //   left broken — neither sink nor obs is reused after the catch).
+            // AssertUnwindSafe: on a panic obs is consumed and we only log; neither sink nor obs is reused after the catch.
             let msg_id = obs.msg_id.clone();
             let result =
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || sink.observe(obs)));
             if result.is_err() {
                 tracing::warn!(
                     msg_id = %msg_id,
-                    "ADR-0088: DeliveryObserver.observe 가 panic — 격리 삼킴(배달/ACK 는 영향 없음). 관측 싱크 버그."
+                    "ADR-0088: DeliveryObserver.observe panicked — isolated and swallowed (delivery/ACK unaffected). An observation sink bug."
                 );
             }
         }
@@ -341,9 +265,7 @@ impl ControlRegistry {
 
     // ── Envelope format global state (ADR-0096·0103) ──────────────────────────────────────────
 
-    /// ★Defense against unknown values (fold-unknown = Xml)★: storage is only done by set_envelope_format so it is always 0/1, but
-    ///   defensively it folds **only 1 (Colon) to Colon and everything else to Xml** — default-safe = since the production normal value is xml,
-    ///   fold-unknown is made consistent with Xml (the derived Default 0 also goes to Xml via this branch).
+    /// ★Defense against unknown values (fold-unknown = Xml)★: storage is only by set_envelope_format so it is always 0/1, but defensively only 1 maps to Colon and everything else to Xml — the production normal value is xml (the derived Default 0 goes to Xml via this branch).
     // ADR-0103
     pub fn envelope_format(&self) -> EnvelopeFormat {
         match self.envelope_format.load(Ordering::Acquire) {
@@ -358,23 +280,19 @@ impl ControlRegistry {
             EnvelopeFormat::Colon => 1u8,
         };
         self.envelope_format.store(v, Ordering::Release);
-        tracing::info!(?format, "봉투 포맷 전역 상태 전환(ADR-0096)");
+        tracing::info!(?format, "envelope format global state switched (ADR-0096)");
     }
 
     #[cfg(feature = "test-harness")]
     pub fn set_mid_send_hook(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
-        // ★Lock discipline (spirit of ADR-0006)★: plug in the new hook and drop the old hook Arc **outside the lock**. If dropped while holding
-        //   the lock, the old hook's destructor (a captured Drop) deadlocks when it re-enters the registry, and if it panics the lock
-        //   is poisoned — foreign code (including Drop) is not run under the lock. `_old` is dropped at the end of this function after leaving
-        //   the guard scope (after the lock is released).
+        // ★Lock discipline (spirit of ADR-0006)★: plug in the new hook and drop the old hook Arc outside the lock — dropped under the lock, the old hook's destructor (a captured Drop) deadlocks on re-entering the registry or poisons the lock if it panics. `_old` drops at function end, after the guard scope.
         let _old = {
             let mut guard = self.mid_send_hook.write().expect("mid-send hook poisoned");
             std::mem::replace(&mut *guard, hook)
         };
     }
 
-    /// ★Lock discipline (ADR-0006)★: clone the hook Arc under a short read lock, release the lock at once, and
-    ///   call it **outside the lock** — foreign code (the hook) is never called while holding the registry lock.
+    /// ★Lock discipline (ADR-0006)★: clone the hook Arc under a short read lock, release it, and call the hook outside the lock — foreign code is never called while holding the registry lock.
     #[cfg(feature = "test-harness")]
     pub fn fire_mid_send_hook(&self) {
         let hook = self
@@ -392,10 +310,9 @@ impl ControlRegistry {
 mod tests {
     use super::*;
 
-    /// Mail permission is not the concern of the tests that use this helper — set it to the side where mail is open (the value of a non-MCP spawn).
-    ///   Tests that look at that axis call `issue` directly.
+    /// Mail permission is not the concern of tests using this helper — set to the mail-open side (a non-MCP spawn). Tests on that axis call `issue` directly.
     fn tok(reg: &ControlRegistry, id: AgentId, epoch: u32) -> String {
-        // Deterministic test token (real provision uses a CSPRNG). Only uniqueness is kept.
+        // Deterministic test token (real provision uses a CSPRNG); only uniqueness is kept.
         let t = format!("tok-{id}-{epoch}");
         reg.issue(id, epoch, t.clone(), true);
         t
@@ -421,9 +338,7 @@ mod tests {
         assert_eq!(bound.identity.epoch, 0);
     }
 
-    /// ★Mail permission is fixed into the credential and **fixed again on rotation** (ADR-0133 decision 2)★: if re-activation
-    ///   changes the channel, the new token comes out carrying the new decision — if the old decision remained, an agent respawned on a different backend
-    ///   would run with the old permission.
+    /// ★Mail permission is fixed into the credential and fixed again on rotation (ADR-0133 decision 2)★: if re-activation changes the channel, the new token carries the new decision — keeping the old one would run an agent respawned on a different backend with the old permission.
     #[test]
     fn issue_records_the_mail_verdict_and_rotation_replaces_it() {
         let reg = ControlRegistry::new();
@@ -431,13 +346,13 @@ mod tests {
         reg.issue(id, 0, "mail-off".to_string(), false);
         assert!(
             !reg.validate("mail-off").expect("valid").mail_allowed,
-            "발급 시 false 면 검증도 false"
+            "false at issue means validation is false too"
         );
         reg.issue(id, 1, "mail-on".to_string(), true);
         assert!(reg.validate("mail-on").expect("valid").mail_allowed);
         assert!(
             reg.validate("mail-off").is_none(),
-            "회전으로 옛 토큰(과 그 판정)은 폐기"
+            "rotation discards the old token (and its decision)"
         );
     }
 
@@ -457,19 +372,22 @@ mod tests {
             agent_id: id,
             epoch: 0,
         };
-        assert!(reg.is_identity_live(ident0), "발급 직후 신원은 live");
+        assert!(
+            reg.is_identity_live(ident0),
+            "the identity is live right after issue"
+        );
 
         tok(&reg, id, 1);
         assert!(
             !reg.is_identity_live(ident0),
-            "회전 후 옛 epoch 신원은 dead(F3)"
+            "after rotation the old epoch identity is dead (F3)"
         );
         assert!(
             reg.is_identity_live(BoundIdentity {
                 agent_id: id,
                 epoch: 1
             }),
-            "새 epoch 신원은 live"
+            "the new epoch identity is live"
         );
 
         reg.revoke(id, 1);
@@ -478,7 +396,7 @@ mod tests {
                 agent_id: id,
                 epoch: 1
             }),
-            "revoke 후 신원은 dead(F3)"
+            "after revoke the identity is dead (F3)"
         );
 
         assert!(
@@ -486,7 +404,7 @@ mod tests {
                 agent_id: AgentId::new_v4(),
                 epoch: 0
             }),
-            "미발급 신원은 dead"
+            "an unissued identity is dead"
         );
     }
 
@@ -498,11 +416,11 @@ mod tests {
         let new = tok(&reg, id, 1);
         assert!(
             reg.validate(&old).is_none(),
-            "회전된 구 epoch 토큰은 폐기(stale) — validate None"
+            "a rotated old epoch token is discarded (stale) — validate None"
         );
-        let bound = reg.validate(&new).expect("새 토큰 유효");
+        let bound = reg.validate(&new).expect("the new token is valid");
         assert_eq!(bound.identity.epoch, 1);
-        assert_eq!(reg.live_token_count(), 1, "한 AgentId = 산 토큰 1개");
+        assert_eq!(reg.live_token_count(), 1, "one AgentId = one live token");
     }
 
     #[test]
@@ -511,7 +429,10 @@ mod tests {
         let id = AgentId::new_v4();
         let t = tok(&reg, id, 3);
         reg.revoke(id, 3);
-        assert!(reg.validate(&t).is_none(), "kill revoke 후 토큰 무효");
+        assert!(
+            reg.validate(&t).is_none(),
+            "the token is invalid after kill revoke"
+        );
         assert_eq!(reg.live_token_count(), 0);
     }
 
@@ -534,7 +455,7 @@ mod tests {
         reg.revoke(id, 0); // delayed stale terminal
         assert!(
             reg.validate(&live).is_some(),
-            "stale epoch 0 revoke 가 산 epoch 1 토큰을 지우면 안 됨(epoch-guard)"
+            "a stale epoch 0 revoke must not delete the live epoch 1 token (epoch-guard)"
         );
     }
 
@@ -550,7 +471,7 @@ mod tests {
         assert_eq!(
             reg.bind_session_if_absent("sess-abc", ident, &t),
             Some(ident),
-            "첫 바인딩은 성공"
+            "the first binding succeeds"
         );
         assert_eq!(reg.identity_for_session("sess-abc"), Some(ident));
         assert!(reg.identity_for_session("other").is_none());
@@ -558,7 +479,7 @@ mod tests {
 
     #[test]
     fn bind_if_absent_no_overwrite_pins_identity() {
-        // ★identity pinning (FIX 7)★ — the registry-side foundation for preventing cross-token takeover.
+        // ★Identity pinning (FIX 7)★ — registry-side foundation against cross-token takeover.
         let reg = ControlRegistry::new();
         let a = AgentId::new_v4();
         let b = AgentId::new_v4();
@@ -579,12 +500,12 @@ mod tests {
         assert_eq!(
             reg.bind_session_if_absent("sess", ident_b, &tb),
             None,
-            "이미 바인딩된 세션은 덮어쓰지 않는다(pinning)"
+            "an already bound session is not overwritten (pinning)"
         );
         assert_eq!(
             reg.identity_for_session("sess"),
             Some(ident_a),
-            "기존 신원 A 가 유지돼야"
+            "the existing identity A must stay"
         );
     }
 
@@ -601,15 +522,14 @@ mod tests {
         assert_eq!(
             reg.bind_session_if_absent("sess", ident, &t),
             None,
-            "죽은 토큰의 세션은 바인딩되지 않아야(exact-token recheck)"
+            "a dead token's session must not be bound (exact-token recheck)"
         );
         assert!(reg.identity_for_session("sess").is_none());
     }
 
     #[test]
     fn bind_if_absent_rejects_stale_token_after_same_agent_reissue() {
-        // ★round-2 F2 regression★: issue can be called again with the same (id,epoch), so it reproduces even without bumping the epoch here
-        //   — this is the key that proves "safe even if the epoch-always-bumps remote invariant breaks".
+        // ★F2 regression★: issue can be called again with the same (id,epoch), so this reproduces without bumping the epoch — proving it is safe even if the epoch-always-bumps invariant breaks.
         let reg = ControlRegistry::new();
         let id = AgentId::new_v4();
         let stale = tok(&reg, id, 0); // Initial issue — assume it was validated with this token.
@@ -622,12 +542,12 @@ mod tests {
         assert_ne!(
             current_token(&reg, id),
             stale,
-            "재발급으로 현재 토큰이 바뀜"
+            "reissue changed the current token"
         );
         assert_eq!(
             reg.bind_session_if_absent("sess", ident, &stale),
             None,
-            "재발급된 뒤 stale 토큰의 세션은 바인딩되지 않아야(exact-token F2)"
+            "after reissue a stale token's session must not be bound (exact-token F2)"
         );
         assert!(reg.identity_for_session("sess").is_none());
         // Control group.
@@ -635,7 +555,7 @@ mod tests {
         assert_eq!(
             reg.bind_session_if_absent("sess", ident, &cur),
             Some(ident),
-            "현재 크레덴셜 토큰으로는 바인딩 성공"
+            "binding with the current credential token succeeds"
         );
     }
 
@@ -654,7 +574,7 @@ mod tests {
         );
         assert_eq!(reg.bound_session_count(), 1);
         reg.unbind_session("sess-del");
-        assert_eq!(reg.bound_session_count(), 0, "DELETE 후 바인딩 제거");
+        assert_eq!(reg.bound_session_count(), 0, "binding removed after DELETE");
         reg.unbind_session("sess-del"); // no-op if absent (double safety)
     }
 
@@ -674,7 +594,7 @@ mod tests {
         reg.revoke(id, 0);
         assert!(
             reg.identity_for_session("sess-x").is_none(),
-            "revoke 는 세션 바인딩도 지운다"
+            "revoke deletes the session binding too"
         );
         assert_eq!(reg.bound_session_count(), 0);
     }
@@ -686,19 +606,19 @@ mod tests {
         assert_eq!(
             reg.envelope_format(),
             EnvelopeFormat::Xml,
-            "새 registry 기본 봉투 포맷은 xml 이어야(ADR-0103 flip)"
+            "a new registry's default envelope format must be xml (ADR-0103 flip)"
         );
         reg.set_envelope_format(EnvelopeFormat::Colon);
         assert_eq!(
             reg.envelope_format(),
             EnvelopeFormat::Colon,
-            "set(Colon) 후 colon 으로 읽혀야(잔존 스위치)"
+            "after set(Colon) it must read as colon (residual switch)"
         );
         reg.set_envelope_format(EnvelopeFormat::Xml);
         assert_eq!(
             reg.envelope_format(),
             EnvelopeFormat::Xml,
-            "set(Xml) 후 xml 로 복귀"
+            "after set(Xml) it returns to xml"
         );
     }
 

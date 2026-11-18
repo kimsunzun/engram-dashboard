@@ -3,7 +3,7 @@
 //   the registry is not the state authority).
 //
 // ★Do not attach `help` — do not put it on the bus★ (ADR-0167): expanded state is frontend state that exists separately per window. The window the bus envelope
-//   goes to is chosen by the shell, so a window that does not own that slot may receive it, and that window answers a live slot with 「없다」 (not found).
+//   goes to is chosen by the shell, so a window that does not own that slot may receive it, and that window answers a live slot with 「not found」.
 //   The canonical source of the routing reason = the head comment of `renderModeCommands.ts`.
 
 import { t } from '../i18n'
@@ -19,21 +19,21 @@ register({
   run: args => {
     const cmd = 'chat.toolGroup.setExpanded'
     const slotId = args?.slotId
-    if (typeof slotId !== 'string' || slotId.length === 0) throw new Error(`[${cmd}] slotId 필요`)
+    if (typeof slotId !== 'string' || slotId.length === 0) throw new Error(`[${cmd}] slotId required`)
     const groupKey = args?.groupKey
     if (typeof groupKey !== 'string' || !isToolGroupKey(groupKey)) {
       // Only the shape is checked — a mistake of passing a backend call id without the prefix is caught, but a key whose shape fits and has no group drawn (the id of a call
       //   that is not a group head, etc.) is recorded as is and answers success. Whether the key is drawn is known only by this window's render.
       throw new Error(
-        `[${cmd}] groupKey 는 묶음의 data-tool-group 값(tool:… 또는 item:…)이어야 한다 — 받은 값: ${JSON.stringify(groupKey)}`,
+        `[${cmd}] groupKey must be the group's data-tool-group value (tool:… or item:…) — got: ${JSON.stringify(groupKey)}`,
       )
     }
     const expanded = args?.expanded
     if (typeof expanded !== 'boolean') {
-      throw new Error(`[${cmd}] expanded 는 true|false 여야 한다 — 받은 값: ${JSON.stringify(expanded)}`)
+      throw new Error(`[${cmd}] expanded must be true|false — got: ${JSON.stringify(expanded)}`)
     }
     if (!useToolGroupStore.getState().setOpen(slotId, groupKey, expanded)) {
-      throw new Error(`[${cmd}] 이 창에 지금 마운트된 슬롯 '${slotId}' 의 대화 뷰가 없다`)
+      throw new Error(`[${cmd}] this window has no conversation view of slot '${slotId}' mounted now`)
     }
     return { expanded }
   },

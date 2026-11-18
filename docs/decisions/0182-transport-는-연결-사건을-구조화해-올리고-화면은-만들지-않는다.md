@@ -12,7 +12,7 @@ And deciding this scope late is expensive. The event points sit **inside the con
 ## 결정
 
 1. ★**`transport` raises events to the upper layer as structure**★ — **connected/disconnected · why it was refused · which retry attempt this is · how many were lost and where.** It is **structure**, not log strings.
-2. ★**The screen (a log window) is out of scope this time.**★ The view builds it later. User statement: *"올리는 것까지 해야지. 화면 만드는 건 나중에 view에서 얼마든지 할 수 있으니."*
+2. ★**The screen (a log window) is out of scope this time.**★ The view builds it later. User statement: *「올리는 것까지 해야지. 화면 만드는 건 나중에 view에서 얼마든지 할 수 있으니.」 ("We should at least do the putting-it-up part. Building the screen can be done later in the view as much as we like.")*
 3. ★**`transport` raises only what it knows itself.**★ **Agent errors and command failures are things the upper layer knows, so they are not raised.** Later the screen **merges several sources.**
 
 ## 거부한 대안

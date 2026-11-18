@@ -1,17 +1,11 @@
 //! Daemon MCP Streamable HTTP server — the entrance of the control channel that spawned claude agents attach to via mcp-config.
 //!
-//! ★Owns★: nests the rmcp `StreamableHttpService` (a Tower service) at axum `/mcp` and puts bearer auth
-//!   middleware in front of it. The CLI plain-text routes ride the same server, port and middleware — the **canonical
-//!   list of those is `ControlRoute`** and it is not recounted here (a list kept here goes stale when a route is added).
-//!   Tool surface = `engram_ping` · `eg_send` · `eg_messages`.
-//!   ★Control verbs are not exposed as MCP tools★ (ADR-0132 decision = CLI) — tool schemas are permanently
-//!   resident in every agent context, while control is low-frequency. So `/control/agent` has no matching `#[tool]`.
+//! Nests the rmcp `StreamableHttpService` (a Tower service) at axum `/mcp` behind bearer auth middleware. The CLI plain-text routes ride the same server, port and
+//! middleware — their canonical list is `ControlRoute` (not recounted here). Tool surface = `engram_ping` · `eg_send` · `eg_messages`.
+//! Control verbs are not MCP tools (ADR-0132 decision = CLI): tool schemas are resident in every agent context while control is low-frequency, so `/control/agent` has no `#[tool]`.
 //!
-//! ★OAuth metadata is not advertised (load-bearing, #59467)★: StreamableHttpService does not create
-//!   `.well-known/*` routes, and we do not add any. When a server advertises OAuth metadata, claude ignores the static Authorization
-//!   header (claude-code #59467); with no advertising route, the static Bearer is sent as is (ADR-0086 §rationale).
-//!
-//! tauri import 0 (daemon crate).
+//! OAuth metadata is not advertised (load-bearing, #59467): StreamableHttpService creates no `.well-known/*` routes and we add none — when a server advertises
+//! OAuth metadata, claude ignores the static Authorization header (claude-code #59467); without it the static Bearer is sent as is (ADR-0086 §rationale).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -36,82 +30,54 @@ use engram_dashboard_messaging::envelope::Entrance; // ADR-0110: the entrance la
 
 use super::ingress::{handle_messages, handle_send, ControlCommand, SendContract};
 use super::registry::{BoundIdentity, ControlRegistry};
-// ★Caller strings that go into log fields pass through this function — not the neighboring `agent::preview`★:
-//   the canonical account of that split is the [`super::agent::preview`] doc (「로그에 쓰지 말 것」, do not use in logs) and the [`sanitize_for_log`] doc.
+// Caller strings going into log fields pass through this function, not `agent::preview`: the split is canonical in the [`super::agent::preview`] and [`sanitize_for_log`] docs.
 use crate::connection_core::sanitize_for_log;
 
-/// The axum path the MCP server is mounted at. The mcp-config url also points at this path (`http://127.0.0.1:<port>/mcp`).
+/// The axum path the MCP server is mounted at; the mcp-config url points at it (`http://127.0.0.1:<port>/mcp`).
 ///
-/// ★keep-in-sync(M5)★: `ControlEndpoint.url` is the MCP route with this path attached. When CLI entrance injection derives the CLI
-///   base URL (ENGRAM_CONTROL_URL), it **strips this literal suffix ("/mcp") as a string** —
-///   `crates/engram-dashboard-agent/src/backend/mod.rs` (strip_suffix("/mcp") in `inject_cli_entrance`).
-///   If this value changes, the strip literal there must change too — the build does not enforce it, and if they drift the base derivation
-///   goes wrong and the CLI silently gets a 404.
-///   ★That place is now **shared by all backends**★ — on a mismatch the CLI of codex spawns dies too, not only claude's.
+/// keep-in-sync (M5): `ControlEndpoint.url` is this path attached to the MCP route, and CLI entrance injection derives the CLI base URL (ENGRAM_CONTROL_URL) by stripping this
+/// literal suffix as a string — `crates/engram-dashboard-agent/src/backend/mod.rs` (strip_suffix("/mcp") in `inject_cli_entrance`), shared by all backends.
+/// Changing this value requires changing that literal; the build does not enforce it, and on drift the base derivation goes wrong and the CLI silently gets a 404 (codex spawns too, not only claude).
 const MCP_PATH: &str = "/mcp";
 
-/// CLI entrance (ADR-0086 step 2) — the plain JSON route that `engram mail send` POSTs to. The CLI assembles this path onto the base URL
-/// (ENGRAM_CONTROL_URL).
+/// CLI entrance (ADR-0086 step 2) — the plain JSON route `engram mail send` POSTs to; the CLI assembles this path onto the base URL (ENGRAM_CONTROL_URL).
 const CONTROL_SEND_PATH: &str = "/control/send";
 
-/// CLI query entrance (D · canonical surface = ADR-0132) — the route that `engram mail status <id>` / `engram mail pending`
-/// POST to.
-/// ★Why POST (not GET)★: it must go through the same bearer middleware, and the middleware cuts a **GET without a session id with 400**
-///   (session operation rule — bearer_auth step 1.5). The query uses no session, so it takes the same session-less
-///   POST form as send (auth rules are not split per path, which would create two disciplines).
+/// CLI query entrance (D · canonical surface = ADR-0132) — `engram mail status <id>` / `engram mail pending` POST here.
+/// POST, not GET: it must pass the same bearer middleware, which cuts a GET without a session id with 400 (bearer_auth step 1.5). The query uses no session, so it takes the session-less POST form as send; auth rules are not split per path.
 const CONTROL_MESSAGES_PATH: &str = "/control/messages";
 
-/// CLI control entrance (ADR-0132 decision 6) — the route that `engram agent <동사>` POSTs to. The verb comes in the
-/// **body** (`{verb: …}`), not the path: the CLI's HTTP client is a single POST hand-assembled with std only, so adding a
-/// path per verb would make that client carry a path table, and the route constants would grow with the verb count.
-/// ★Auth is the same middleware as `/control/send`★ — it is a session-less POST, so the discipline in the `CONTROL_MESSAGES_PATH` comment above
-///   applies as is (auth rules are not split per path, which would create two disciplines).
-/// ★Control is open to everyone (ADR-0132 decision 5)★ — a spawned agent reaches this route regardless of backend.
-///   Only mail is split by credential (`ControlRoute::is_mail`).
+/// CLI control entrance (ADR-0132 decision 6) — `engram agent <verb>` POSTs here. The verb is in the body (`{verb: …}`), not the path: the CLI's HTTP client is one std-only POST, and a path per verb would need a path table in it.
+/// Auth is the same middleware as `/control/send` (session-less POST; see `CONTROL_MESSAGES_PATH`).
+/// Control is open to everyone (ADR-0132 decision 5): a spawned agent reaches it regardless of backend; only mail is split by credential (`ControlRoute::is_mail`).
 const CONTROL_AGENT_PATH: &str = "/control/agent";
 
-/// CLI discovery entrance — gives the daemon's own table and the attached clients' registry as **one list** (`control::catalog`).
-/// ★Read-only★ — it changes no state.
-/// ★Why POST (not GET)★: exactly the discipline in the `CONTROL_MESSAGES_PATH` comment above (the middleware cuts a session-less GET
-///   with 400). Auth rules are not split per path, which would create two disciplines.
-/// ★Credentials with mail blocked can reach it★ — discovery is the control plane, and even a backend that cannot write letters needs to know
-///   what it can call (`ControlRoute::is_mail`).
-/// ★Why `pub(super)`★: the recovery hint in the neighboring `catalog` puts this path in its wording, and its test runs this constant through
-///   a comparison — it is the only way to stop the wording from pointing at an address that does not exist.
+/// CLI discovery entrance — the daemon's own table and the attached clients' registry as one list (`control::catalog`). Read-only.
+/// POST for the reason in `CONTROL_MESSAGES_PATH`. Credentials with mail blocked can reach it: discovery is control plane, and a backend that cannot write letters still needs to know what it can call (`ControlRoute::is_mail`).
+/// `pub(super)`: the recovery hint in `catalog` puts this path in its wording and its test compares this constant, the only way to stop the wording pointing at a nonexistent address.
 pub(super) const CONTROL_COMMANDS_PATH: &str = "/control/commands";
 
-/// CLI generic call entrance — calls a command by its **full name** (`{name, args}`).
+/// CLI generic call entrance — calls a command by its full name (`{name, args}`).
 ///
-/// ★Not an alias of `/control/agent`★: that one carries the name of one family and bears that family's vocabulary (`{verb}`) and
-///   per-family recovery hints. If one address had two meanings, the closed route enumeration would lose its power to force classification.
-/// ★The check is **the same function** as the sibling's★ (`commands::call_daemon_command`) — not building a second entrance
-///   without the check was the only hard constraint kept when adding this route.
+/// Not an alias of `/control/agent` (that bears one family's `{verb}` vocabulary and per-family hints); one address with two meanings would weaken the closed route enumeration's forced classification.
+/// The check is the same function as the sibling's (`commands::call_daemon_command`) — a second entrance without the check was the one hard constraint when adding this route.
 const CONTROL_CALL_PATH: &str = "/control/call";
 
-/// CLI help screen entrance — `engram help [낱말]` POSTs one screen word and the daemon produces the screen
-/// (`control::help`). ★The path is not written out again here★ — the CLI and this server see one agent constant (the
-/// five siblings are still matched by hand).
-/// ★Credentials with mail blocked can reach it★ — reading a mail screen is not mail, and the screen is the same for everyone
-///   (`ControlRoute::is_mail`).
+/// CLI help screen entrance — `engram help [word]` POSTs one screen word and the daemon produces the screen (`control::help`).
+/// The path is not written out again here — the CLI and this server see one agent constant. Credentials with mail blocked can reach it: reading a mail screen is not mail, and the screen is the same for everyone (`ControlRoute::is_mail`).
 // ADR-0285
 const CONTROL_HELP_PATH: &str = engram_dashboard_agent::types::CLI_HELP_ROUTE;
 
-/// Namespace prefix of control-plane paths — **the basis for folding a path with no classification into fail-closed**.
+/// Namespace prefix of control-plane paths — the basis for folding an unclassified path into fail-closed.
 ///
-/// ★Compare on a **path segment boundary** (a bare `starts_with` is forbidden)★: a string-prefix check alone would also fold names unrelated to this namespace such as `/controlfoo` and
-///   `/control-x`, and a future route at that spot would be rejected for no reason. The targets are only `/control` itself and
-///   everything under `/control/`.
+/// Compare on a path segment boundary (bare `starts_with` is forbidden): a string prefix would also fold `/controlfoo` and `/control-x`, rejecting a future route there for no reason. Targets: `/control` itself and everything under `/control/`.
 // ADR-0133
 const CONTROL_PATH_PREFIX: &str = "/control";
 
-/// All the CLI plain-text routes the daemon opens (the `/mcp` nest is owned by rmcp, so it is not here).
+/// All the CLI plain-text routes the daemon opens (the `/mcp` nest is owned by rmcp).
 ///
-/// ★The **single list** for router assembly and mail classification★: `start_mcp_server_with_help` walks this list and adds the routes.
-///   A route that enters the list is forced to be classified **at compile time** by the exhaustive match in `is_mail` below.
-/// ★A control path outside the list is folded into mail (`mail_gated_path`)★ — the compiler cannot stop the mistake of hand-adding a `.route()`
-///   after the iteration, but for a path created that way **a missing classification means rejection**, so it is not
-///   silently opened. So keeping the `.route()` call site to this one iteration is still the rule, but when that rule is broken,
-///   the default is the safe side.
+/// The single list for router assembly and mail classification: `start_mcp_server_with_help` walks it, and a route entering it is forced to be classified at compile time by the exhaustive match in `is_mail`.
+/// A control path outside the list folds into mail (`mail_gated_path`): the compiler cannot stop a hand-added `.route()` after the iteration, but a missing classification means rejection, not silent opening. Keep the `.route()` call site to this one iteration; when broken, the default is the safe side.
 // ADR-0133
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ControlRoute {
@@ -144,28 +110,20 @@ impl ControlRoute {
         }
     }
 
-    /// Whether this route is **mail** — the axis the mail allow/deny rejection (ADR-0133 decision 3) hangs on.
+    /// Whether this route is mail — the axis the mail allow/deny rejection (ADR-0133 decision 3) hangs on.
     ///
-    /// ★Do not add a `_` arm★: the moment a catch-all exists, a new route is silently classified as "not mail"
-    /// (= everyone passes). That mistake gives no signal at runtime.
-    ///
-    /// ★What this exhaustive match forces is **routes** only★ — `/control/call` selects a command by the **name in the
-    ///   body**, not by the path, so this axis cannot close that one. What closes that axis is [`mail_by_name`], and
-    ///   the call route invokes it in its own place.
-    ///   ★Do not revert on the grounds 「오늘 데몬 표가 `agent.*` 만 쥐고 있어 도달 불가」 ("today the daemon table holds only agent.*, so it is unreachable") — that sentence is now
-    ///   false★: the reachable set is the daemon table **∪ the registry** (ADR-0160), and the registry's names are set by the dashboard
-    ///   (`src-tauri/src/layout/commands.rs`). The person who names those will never read this comment, so it is not an
-    ///   axis that can be left to prose.
+    /// Do not add a `_` arm: a catch-all would silently classify a new route as "not mail" (= everyone passes), with no runtime signal.
+    /// The exhaustive match forces routes only — `/control/call` selects a command by the name in the body, so this axis cannot close it; [`mail_by_name`] does, invoked in the call route.
+    /// Do not revert on the grounds "today the daemon table holds only `agent.*`, so it is unreachable" — false: the reachable set is the daemon table ∪ the registry (ADR-0160), whose names the dashboard sets
+    /// (`src-tauri/src/layout/commands.rs`); whoever names them will never read this comment, so it cannot be left to prose.
     // ADR-0133
     // ADR-0160
     const fn is_mail(self) -> bool {
         match self {
             Self::Send | Self::Messages => true,
-            // Control plane — discovery and calls are not mail. Even a credential that cannot write letters needs to know what it can
-            //   call, and must be able to call it (ADR-0132 decision 5 — control is open to everyone).
+            // Control plane — discovery and calls are not mail: a credential that cannot write letters still needs to know what it can call and be able to call it (ADR-0132 decision 5).
             Self::Agent | Self::Commands | Self::Call => false,
-            // Reading a screen is not mail — even a credential with mail blocked must read the mail screen to learn that channel's
-            //   contract (ADR-0220 decision 4 — the screen is the same for everyone).
+            // Reading a screen is not mail — a mail-blocked credential must read the mail screen to learn that channel's contract (ADR-0220 decision 4).
             // ADR-0285
             Self::Help => false,
         }
@@ -179,12 +137,9 @@ impl ControlRoute {
 
 /// Whether the mail-rejection gate applies to this request path (ADR-0133 decision 3).
 ///
-/// ★A missing classification folds into **rejection** (fail-closed)★: a route in the list follows its own classification, and a control path
-///   **outside** the list (`/control…`) is treated as mail. The very purpose of this gate is rejection, so when someone adds a route and
-///   forgets the classification, the default must be "blocked" — the other way round, that mistake would open an
-///   entrance at runtime with no signal at all.
-/// ★`/mcp` and paths outside control are not targets★: MCP is that credential's **own channel** (ADR-0128 decision 1),
-///   and the rest are paths this server does not open in the first place.
+/// A missing classification folds into rejection (fail-closed): a listed route follows its own classification, a control path outside the list (`/control…`) is treated as mail. The gate's purpose is rejection, so a forgotten classification
+/// must default to "blocked" — otherwise it opens an entrance at runtime with no signal.
+/// `/mcp` and paths outside control are not targets: MCP is that credential's own channel (ADR-0128 decision 1), and the rest this server does not open.
 // ADR-0133
 fn mail_gated_path(path: &str) -> bool {
     match ControlRoute::from_path(path) {
@@ -198,33 +153,23 @@ fn mail_gated_path(path: &str) -> bool {
     }
 }
 
-/// The bounce code for when this credential **cannot use this HTTP/CLI mail entrance** (ADR-0133 decision 3).
+/// The bounce code for a credential that cannot use this HTTP/CLI mail entrance (ADR-0133 decision 3).
 ///
-/// ★Read the scope the name claims narrowly — it is not "mail forbidden"★: a spawn that gets this code (= an MCP-capable
-///   backend) **writes mail normally** through `eg_send` on `/mcp`. The design is that the channel is split only by backend capability
-///   with no runtime switching (ADR-0128 decision 1), and this gate closes **the entrance that must stay
-///   closed** in that design. Do not read "can bypass via MCP" as "a hole in the gate" from the name alone.
+/// Read the name's scope narrowly — it is not "mail forbidden": a spawn getting this code (an MCP-capable backend) writes mail normally through `eg_send` on `/mcp`. The channel is split only by backend capability with no runtime switching
+/// (ADR-0128 decision 1), and this gate closes the entrance that must stay closed in that design; "can bypass via MCP" is not a hole.
 const MAIL_NOT_ALLOWED_CODE: &str = "MAIL_NOT_ALLOWED";
 
-/// ★Do not announce an alternative channel (ADR-0133 decision 3)★: the moment this says "use this instead", the gate that the two priming files
-///   sealed so they never even mention each other's channel (the real gate of ADR-0128) is bypassed through this response path.
-///   So the wording goes only as far as "this credential cannot write mail" and carries no name of the other channel or tool.
-///   It tells only that retrying is pointless, which prevents infinite retries.
+/// Do not announce an alternative channel (ADR-0133 decision 3): saying "use this instead" would bypass the gate the two priming files sealed by never mentioning each other's channel (the real gate of ADR-0128).
+/// So the wording says only "this credential cannot write mail", names no other channel or tool, and tells that retrying is pointless (preventing infinite retries).
 const MAIL_NOT_ALLOWED_HINT: &str =
     "This credential is not allowed to use mail. Retrying will not change that.";
 
-/// Whether this **command name** is mail — the mail axis for a route that selects a command by body, not path (`/control/call`).
+/// Whether this command name is mail — the mail axis for a route selecting a command by body (`/control/call`).
 ///
-/// ★Why close it with one name★: the set that route can reach is the daemon's own table **∪ the registry** (ADR-0160), and
-/// the registry-side names are set outside this crate (the dashboard adds its own commands). So this axis includes names that **cannot be known even by
-/// reading all the code here**, and 「오늘은 그런 이름이 없다」 ("there is no such name today") cannot be the grounds.
-/// ★The family separator belongs to the command-name convention (`<계열>.<동사>`)★ — if the family is `mail`, it is mail. Do not
-/// use a prefix comparison: `mailbox.x` is not in the mail family but a prefix check catches it. The canonical source of that convention is the command table, and the reason this string
-/// was not lifted into a shared constant is that the CLI also carries its own (`engram-dashboard-cli/src/bin/engram.rs`) — before
-/// making a third copy, where to put that constant must be decided first.
-/// ★Today no name makes this decision true (measured)★ — the daemon table has only `agent.*`, and the names the dashboard adds
-/// have no `mail.*` either. So this is not plugging a hole but a **guardrail**: whichever side `mail.*` comes in from,
-/// this line is already standing that day.
+/// The reachable set is the daemon table ∪ the registry (ADR-0160), whose names are set outside this crate (the dashboard adds its own), so this axis includes names unknowable from this code and "no such name today" cannot be the grounds.
+/// The family separator is the command-name convention (`<family>.<verb>`): family `mail` = mail. No prefix comparison — `mailbox.x` is not mail but a prefix check catches it. The convention's source is the command table; it is not a shared
+/// constant because the CLI carries its own copy too (`engram-dashboard-cli/src/bin/engram.rs`) — decide where a constant lives before making a third copy.
+/// Today no name makes this true (measured: the daemon table has only `agent.*`, the dashboard names no `mail.*`), so this is a guardrail, not a hole-plug: whichever side `mail.*` comes from, this line stands that day.
 // ADR-0133
 // ADR-0160
 fn mail_by_name(name: &str) -> bool {
@@ -232,10 +177,8 @@ fn mail_by_name(name: &str) -> bool {
         .is_some_and(|(group, _)| group == engram_dashboard_agent::types::CLI_GROUP_MAIL)
 }
 
-/// ★Late-injection slot for the manager (breaking the cycle)★: daemon startup brings the MCP server up **first** (because it must create the DaemonControlChannel that
-/// issues mcp-config with that URL) and wires the AgentManager afterwards — so at server start
-/// the manager does not exist yet. So the server is handed an empty slot, filled with `set` right after the manager is assembled.
-/// Request handling (send) runs after the accept loop, so it is always filled by then (set completes before any agent attaches).
+/// Late-injection slot for the manager (breaking the cycle): daemon startup brings the MCP server up first (it must create the DaemonControlChannel issuing mcp-config with that URL) and wires the AgentManager afterwards, so the server gets
+/// an empty slot, filled with `set` right after the manager is assembled. Request handling (send) runs after the accept loop, so it is always filled by then.
 #[derive(Default)]
 pub struct ManagerSlot {
     inner: std::sync::OnceLock<Arc<AgentManager>>,
@@ -253,8 +196,7 @@ impl ManagerSlot {
     }
 }
 
-/// ★Late-injection slot for MessagingService (breaking the cycle — C1)★: same shape as ManagerSlot. MessagingService
-/// wraps AgentManager (DeliveryPort), so it can only be created **after** the manager is assembled.
+/// Late-injection slot for MessagingService (C1): same shape as ManagerSlot; MessagingService wraps AgentManager (DeliveryPort), so it can only be created after the manager.
 #[derive(Default)]
 pub struct MessagingSlot {
     inner: std::sync::OnceLock<Arc<engram_dashboard_messaging::service::MessagingService>>,
@@ -267,7 +209,7 @@ impl MessagingSlot {
     pub fn set(&self, svc: Arc<engram_dashboard_messaging::service::MessagingService>) {
         let _ = self.inner.set(svc);
     }
-    /// It also calls the flush lane of messaging_host (`run_flush_lane`), so it is exposed inside the crate.
+    /// Also called by messaging_host's flush lane (`run_flush_lane`), so it is exposed inside the crate.
     pub(crate) fn get(
         &self,
     ) -> Option<&Arc<engram_dashboard_messaging::service::MessagingService>> {
@@ -275,11 +217,9 @@ impl MessagingSlot {
     }
 }
 
-/// ★Late-injection slot for the registry-notification fan-out (ADR-0132)★: same shape as ManagerSlot. The fan-out is
-/// derived from the connection registry, and that registry is assembled **after** the MCP server (lib.rs `run()` 5c → 6).
+/// Late-injection slot for the registry-notification fan-out (ADR-0132): same shape as ManagerSlot; the fan-out derives from the connection registry, assembled after the MCP server (lib.rs `run()` 5c → 6).
 ///
-/// ★In some assemblies it is normal for this to be empty★: smoke bins and isolation harnesses have no clients to attach. If it is
-///   empty in a production daemon, a registry changed by a control verb is not reflected on screen (see `agent::RosterBroadcast`).
+/// Empty is normal in some assemblies (smoke bins and harnesses have no clients to attach); empty in a production daemon means a registry changed by a control verb is not reflected on screen (`agent::RosterBroadcast`).
 #[derive(Default)]
 pub struct RosterBroadcastSlot {
     inner: std::sync::OnceLock<Arc<dyn super::agent::RosterBroadcast>>,
@@ -292,17 +232,14 @@ impl RosterBroadcastSlot {
     pub fn set(&self, broadcast: Arc<dyn super::agent::RosterBroadcast>) {
         let _ = self.inner.set(broadcast);
     }
-    /// The command table's notification adapter reads it too — that side looks at it **on every call** (`commands` module).
+    /// The command table's notification adapter reads it too — on every call (`commands` module).
     pub(crate) fn get(&self) -> Option<&Arc<dyn super::agent::RosterBroadcast>> {
         self.inner.get()
     }
 }
 
-/// ★Late-injection slot for the daemon command table (ADR-0155)★: same shape as ManagerSlot. The table holds the manager, so it is only created
-/// **after** the manager is assembled, yet the slot that will hold that manager must exist before the MCP server.
-///
-/// ★Even if the table comes late, registry notification is not late★ — what the table holds is not the fan-out value but the slot above
-/// (`commands::make_daemon_table`).
+/// Late-injection slot for the daemon command table (ADR-0155): same shape as ManagerSlot; the table holds the manager so it is created after it, yet the slot holding that manager must exist before the MCP server.
+/// A late table does not make registry notification late: the table holds the fan-out slot above, not its value (`commands::make_daemon_table`).
 #[derive(Default)]
 pub struct CommandTableSlot {
     inner: std::sync::OnceLock<Arc<super::commands::DaemonTable>>,
@@ -315,8 +252,7 @@ impl CommandTableSlot {
     pub fn set(&self, table: Arc<super::commands::DaemonTable>) {
         let _ = self.inner.set(table);
     }
-    /// The `/control/agent` adapter reads it on every request — if empty, that route returns 503 (it is a wiring-order fault, not
-    ///   a request-format or auth problem, so it is not 4xx).
+    /// The `/control/agent` adapter reads it on every request; empty → 503 (a wiring-order fault, not a request-format or auth problem, so not 4xx).
     pub(crate) fn get(&self) -> Option<&Arc<super::commands::DaemonTable>> {
         self.inner.get()
     }
@@ -325,15 +261,11 @@ impl CommandTableSlot {
 /// MCP session identification header name (rmcp/spec standard, lowercase).
 const SESSION_ID_HEADER: &str = "mcp-session-id";
 
-/// ★The `eg_send` MCP tool name = **single source (ADR-0094)**★. The `#[tool]` method name below is the tool name rmcp
-///   exposes in `tools/list`, and this const is the **canonical source** of that name — the ADR-0094 send-permission
-///   grant uses it as the tool when building the `mcp__{server}__{tool}` pattern (DaemonControlChannel.provision).
-///   Knowledge of claude grammar (`mcp__..`) lives only in backend/claude/ — this const provides just the name (ADR-0004/0094).
+/// The `eg_send` MCP tool name = single source (ADR-0094). The `#[tool]` method name below is the name rmcp exposes in `tools/list`; this const is its canonical source — the ADR-0094 send-permission grant uses it
+/// to build the `mcp__{server}__{tool}` pattern (DaemonControlChannel.provision). Knowledge of claude grammar (`mcp__..`) lives only in backend/claude/ (ADR-0004/0094).
 pub const SEND_MESSAGE_TOOL: &str = "eg_send";
 
-/// ★The `eg_messages` MCP tool name (D · spec §6)★ — same discipline as `SEND_MESSAGE_TOOL`.
-///   ★Not a grant target (intentional)★: the ADR-0094 decision is that pre-authorization covers **only the send entrance**
-///   (control/mod.rs `build_grants`), so the query tool is not put in the grant list.
+/// The `eg_messages` MCP tool name (D · spec §6) — same discipline as `SEND_MESSAGE_TOOL`. Not a grant target (intentional): ADR-0094 pre-authorizes only the send entrance (control/mod.rs `build_grants`).
 pub const MESSAGES_TOOL: &str = "eg_messages";
 
 pub struct McpServerHandle {
@@ -341,9 +273,7 @@ pub struct McpServerHandle {
     pub url: String,
     /// Shutdown signal — cancelling it cleans up the accept loop + active sessions.
     cancel: CancellationToken,
-    /// The axum::serve task handle (awaited by join on shutdown — prevents test leaks). ★Option★: in a type with Drop,
-    ///   it is taken out with take so `shutdown(self)` can move the handle and await it (a type with the Drop trait cannot
-    ///   have a field partially moved out — round-2 F5).
+    /// The axum::serve task handle (awaited on shutdown — prevents test leaks). `Option` so that in a type with Drop it is taken with `take` and `shutdown(self)` can move and await it (a Drop type cannot have a field partially moved out — round-2 F5).
     serve_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -357,25 +287,19 @@ impl McpServerHandle {
 }
 
 impl Drop for McpServerHandle {
-    /// ★drop-on-error airtight (round-2 F5)★: if the handle is simply dropped without `shutdown().await` (e.g. a **later** startup step such as the
-    ///   daemon.json write fails after the MCP server starts, and an error return drops this handle),
-    ///   the detached serve task may not receive the cancel signal and keep running. Firing the cancel
-    ///   token in Drop makes sure the serve task (graceful_shutdown observes the cancel) exits
-    ///   however the drop happens. On the normal shutdown path `shutdown()` has already cancelled, so the cancel here
-    ///   is an idempotent no-op.
+    /// drop-on-error airtight (round-2 F5): if the handle is dropped without `shutdown().await` (e.g. a later startup step such as the daemon.json write fails and an error return drops it), the detached serve task may keep running.
+    /// Firing the cancel token in Drop makes the serve task (graceful_shutdown observes cancel) exit however the drop happens; after a normal `shutdown()` it is an idempotent no-op.
     fn drop(&mut self) {
         self.cancel.cancel();
     }
 }
 
-/// ★Identity verification = middleware (FIX 12)★: the auth middleware verifies identity and plants it in the request extensions (BoundIdentity),
-///   and session↔identity binding, pinning and cleanup are all done by the middleware (registry access via State) — the handler only reads
-///   the identity from extensions.
+/// Identity verification = middleware (FIX 12): the auth middleware verifies identity and plants it in the request extensions (BoundIdentity), and session↔identity binding, pinning and cleanup are all done there (registry via State) — the handler only reads the identity.
 #[derive(Clone)]
 pub struct EngramMcpHandler {
     tool_router: ToolRouter<Self>,
     manager: Arc<ManagerSlot>,
-    /// The **same Arc** shared with the middleware — a second registry is not created.
+    /// The same Arc shared with the middleware — no second registry.
     registry: Arc<ControlRegistry>,
     messaging: Arc<MessagingSlot>,
 }
@@ -395,7 +319,7 @@ impl EngramMcpHandler {
         }
     }
 
-    /// When a connected agent calls this tool, it proves that the session binding works end to end (acceptance observation point).
+    /// Calling this tool proves the session binding works end to end (acceptance observation point).
     #[tool(description = "Diagnostic ping — returns pong and the caller's bound agent identity")]
     async fn engram_ping(
         &self,
@@ -419,19 +343,16 @@ impl EngramMcpHandler {
         }
     }
 
-    /// ★★This method name (`eg_send`) must equal the `SEND_MESSAGE_TOOL` constant (ADR-0094 single
-    ///   source)★★. The rmcp `#[tool]` macro uses the **method name** as is as the `tools/list` tool name (2.2.0
-    ///   tool.rs: `name = attribute.name.unwrap_or_else(|| fn_ident.to_string())`, and the macro attr accepts only a String
-    ///   **literal**, so a const cannot be injected — verified), so there is no way to attach the const that is the canonical name here at compile time.
-    ///   The runtime test `tools_list_exposes_send_message_tool` ties the two places together.
-    ///   ⚠️ To rename this method, change the `SEND_MESSAGE_TOOL` const too — otherwise the grant points at a tool
-    ///   that does not exist, the send entrance is silently blocked, and only the test catches it.
+    /// This method name (`eg_send`) must equal the `SEND_MESSAGE_TOOL` constant (ADR-0094 single source). The rmcp `#[tool]` macro uses the method name as the `tools/list` name (2.2.0
+    /// tool.rs: `name = attribute.name.unwrap_or_else(|| fn_ident.to_string())`) and accepts only a String literal, so a const cannot be injected (verified); the runtime test
+    /// `tools_list_exposes_send_message_tool` ties the two together.
+    /// To rename it, change the `SEND_MESSAGE_TOOL` const too — otherwise the grant points at a nonexistent tool and the send entrance is silently blocked, caught only by the test.
     // ADR-0086 / ADR-0094 (single-source coupling)
     #[tool(
-        description = "팀원 에이전트에게 메시지를 보내고, 받은 요청에 답한다. 이것은 `engram` 중개의 \
-        도구이고 하네스에 내장된 `SendMessage` 가 아니다 — 그쪽은 이 팀에서 막혀 있어 부르면 권한 \
-        거절로 끝난다.\n\
-        인자는 각 필드 설명이 가지고, 결과를 읽는 법과 그 밖의 규칙은 `engram help mail` 이 가진다."
+        description = "Sends a message to a teammate agent and answers requests it received. This is a tool of the \
+        `engram` broker, not the harness's built-in `SendMessage` — that one is blocked in this team, and calling it ends in a permission \
+        refusal.\n\
+        The arguments are described by each field's description; how to read the result and the other rules are in `engram help mail`."
     )]
     async fn eg_send(
         &self,
@@ -450,12 +371,10 @@ impl EngramMcpHandler {
         };
 
         let Some(manager) = self.manager.get() else {
-            // ★F6 instrumentation (error, M4)★: a branch absent from the normal flow — the manager slot is not filled yet (wiring-order fault).
-            //   There is no safe fallback (the message cannot be delivered) → error, not warn (logging-conventions: error =
-            //   "a human must see this" = a wiring defect). It signals a defect that requires fixing the daemon wiring order.
+            // F6 instrumentation (error, M4): the manager slot is not filled yet (wiring-order fault). No safe fallback (the message cannot be delivered) → error, not warn (logging-conventions: error = a human must see this = a wiring defect).
             tracing::error!(
                 entrance = "mcp",
-                "제어 채널 send 불가 — manager 슬롯 미설정(배선 순서 이상, ADR-0086 F6)"
+                "control channel send unavailable — manager slot not set (wiring order anomaly, ADR-0086 F6)"
             );
             return Err(ErrorData::internal_error(
                 "control channel not ready (manager not wired)",
@@ -465,7 +384,7 @@ impl EngramMcpHandler {
         let Some(messaging) = self.messaging.get() else {
             tracing::error!(
                 entrance = "mcp",
-                "제어 채널 send 불가 — messaging 슬롯 미설정(배선 순서 이상, C1)"
+                "control channel send unavailable — messaging slot not set (wiring order anomaly, C1)"
             );
             return Err(ErrorData::internal_error(
                 "control channel not ready (messaging not wired)",
@@ -489,25 +408,15 @@ impl EngramMcpHandler {
                 reply_to,
             },
         };
-        // ★Blocking boundary (C4 review fix D · load-bearing)★: `inject` inside `handle_send` is a **blocking write**
-        //   to the child's stdin. For a group broadcast, one request bears that write **serially** once per member, so calling it directly from this
-        //   async handler lets one blocked pipe hold a whole tokio worker thread and cause head-of-line blocking for **other requests**
-        //   stacked on that thread (runtime workers number only as many as cores). So it is moved to the blocking
-        //   pool — a single send does the same write, so it gets the same treatment (paths are not split, which would
-        //   create two disciplines).
-        //   ★Same discipline as the flush lane★: taking the batch write off the request-handling thread (service.rs FlushTrigger).
+        // Blocking boundary (C4 review fix D · load-bearing): `inject` inside `handle_send` is a blocking write to the child's stdin, borne serially once per member of a group broadcast. Called directly from this async handler, one blocked
+        //   pipe would hold a whole tokio worker (workers = cores) and head-of-line block other requests on it. So it goes to the blocking pool — a single send does the same write and gets the same treatment (no two disciplines),
+        //   as the flush lane (service.rs FlushTrigger).
         //
-        // ★The price = **at-least-once delivery** (round-3 fix 7 · intended design, needs documenting)★: a `spawn_blocking`
-        //   closure **cannot be aborted**. If the caller cancels the request midway (HTTP connection drop · MCP client exit ·
-        //   timeout), this `.await` disappears but **the blocking task runs to the end** — so delivery and the ledger commit
-        //   still happen and **only the response** is lost. If the sender retries, the daemon sees it as a new send with a new `msg_id`
-        //   (there is no idempotency key), so the same content is delivered/broadcast once more.
-        //   ★Why leave it this way★: the opposite choice (cancel delivery on cancel) is impossible — bytes already written to the child's stdin
-        //   cannot be taken back, and "check for cancellation before writing" is yet another TOCTOU. So we choose **duplicate > loss**:
-        //   a duplicate is a visible fact the receiving LLM can read and judge, while a loss is a silent failure nobody knows about
-        //   (the same direction as ADR-0103 "no silent loss").
-        //   ★Future extension point★: accept a sender-chosen **idempotency key** (the same value on retry) and fold duplicate sends in the ledger.
-        //   For now `msg_id` is daemon-generated, so it cannot play that role (a new value on every retry).
+        // The price = at-least-once delivery (round-3 fix 7, intended): a `spawn_blocking` closure cannot be aborted. If the caller cancels midway (HTTP drop · MCP client exit · timeout), this `.await` disappears but the blocking task runs to the end,
+        //   so delivery and the ledger commit still happen and only the response is lost; a retry is a new send with a new `msg_id` (no idempotency key), delivering the same content again.
+        //   The opposite (cancel delivery on cancel) is impossible — bytes already written to child stdin cannot be taken back, and "check cancellation before writing" is another TOCTOU. So duplicate > loss: a duplicate is a visible
+        //   fact the receiving LLM can judge, a loss is silent (the direction of ADR-0103 "no silent loss").
+        //   Future: accept a sender-chosen idempotency key (same value on retry) and fold duplicates in the ledger; `msg_id` is daemon-generated and cannot play that role.
         let (manager, registry, messaging) =
             (manager.clone(), self.registry.clone(), messaging.clone());
         let result = tokio::task::spawn_blocking(move || {
@@ -515,7 +424,10 @@ impl EngramMcpHandler {
         })
         .await
         .map_err(|e| {
-            tracing::error!(entrance = "mcp", "제어 채널 send 태스크 실패(패닉): {e}");
+            tracing::error!(
+                entrance = "mcp",
+                "control channel send task failed (panic): {e}"
+            );
             ErrorData::internal_error("send task failed", None)
         })?;
         let json = serde_json::to_string(&result.to_json()).unwrap_or_default();
@@ -523,7 +435,7 @@ impl EngramMcpHandler {
     }
 
     #[tool(
-        description = "Engram 중개에 메시지 상태를 묻는다. 행을 읽는 법은 `engram help mail` 이 가진다."
+        description = "Asks the Engram broker about message states. How to read the rows is in `engram help mail`."
     )]
     async fn eg_messages(
         &self,
@@ -543,7 +455,7 @@ impl EngramMcpHandler {
         let (Some(manager), Some(messaging)) = (self.manager.get(), self.messaging.get()) else {
             tracing::error!(
                 entrance = "mcp",
-                "messages 조회 불가 — manager/messaging 슬롯 미설정(배선 순서 이상)"
+                "messages query unavailable — manager/messaging slot not set (wiring order anomaly)"
             );
             return Err(ErrorData::internal_error("control channel not ready", None));
         };
@@ -641,25 +553,17 @@ impl ServerHandler for EngramMcpHandler {
     }
 }
 
-/// Bearer auth middleware (ADR-0086) — verifies the token **before** the MCP handshake and pins session↔identity.
+/// Bearer auth middleware (ADR-0086) — verifies the token before the MCP handshake and pins session↔identity.
 ///
 /// Check order:
-///   1. `Bearer <token>` in Authorization → registry.validate. On failure 401 (inner not called = no handshake created).
-///   1.2. Mail allow/deny (ADR-0133 decision 3) — if the request **path** is a mail route but this credential's mail is blocked,
-///      bounce it here. `/mcp` and control routes are not caught by this check (`ControlRoute::is_mail`).
-///   1.5. Mcp-Session-Id format/required-ness → 400. This check guarantees the binding check's "a session op always
-///      resolves to a binding" below (not relying on rmcp's internal 4xx behavior).
-///   2. Session binding check (FIX 7 + round-2 F1) — match = pass / identity mismatch = **403** / no binding = **404**.
-///      initialize is skipped because it has no session id yet (the session is created in the response). On DELETE, after identity
-///      is confirmed, the session binding is pruned (FIX 8/F6).
-///   3. Plant the verified identity in the request extensions and pass to inner (StreamableHttpService) → rmcp passes it
-///      to the tool as `http::request::Parts` (the official custom-extension pattern).
-///   4. If the response has a new Mcp-Session-Id (initialize succeeded), pin the identity to the session **only once** with `bind_session_if_absent`.
-///      A failure (duplicate/dead) skips the binding (a duplicate is harmless, a dead one gets 401/403 on the next request).
+///   1. `Bearer <token>` in Authorization → registry.validate; failure 401 (inner not called = no handshake created).
+///   1.2. Mail allow/deny (ADR-0133 decision 3) — a mail route with a mail-blocked credential is bounced here; `/mcp` and control routes are not caught (`ControlRoute::is_mail`).
+///   1.5. Mcp-Session-Id format/required-ness → 400; this guarantees step 2's "a session op always resolves to a binding" without relying on rmcp's internal 4xx behavior.
+///   2. Session binding check (FIX 7 + round-2 F1) — match = pass / identity mismatch = 403 / no binding = 404. initialize is skipped (no session id yet; the session is created in the response). On DELETE, after identity is confirmed, the binding is pruned (FIX 8/F6).
+///   3. Plant the verified identity in the request extensions and pass to inner (StreamableHttpService); rmcp passes it to the tool as `http::request::Parts` (the official custom-extension pattern).
+///   4. If the response has a new Mcp-Session-Id (initialize succeeded), pin the identity once with `bind_session_if_absent`; a failure (duplicate/dead) skips the binding (a duplicate is harmless, a dead one gets 401/403 next).
 ///
-/// ★Why 401/403 in the middleware (before the handshake)★: rmcp has no built-in auth (the official auth pattern = axum
-///   middleware). Deferring verification into the handshake would let even a wrong token create a session — blocking here guarantees "rejection comes before any
-///   MCP session state change" (acceptance).
+/// 401/403 live in the middleware (before the handshake): rmcp has no built-in auth (the official pattern = axum middleware), and deferring verification into the handshake would let even a wrong token create a session — blocking here guarantees rejection precedes any MCP session state change.
 async fn bearer_auth<B>(
     State(registry): State<Arc<ControlRegistry>>,
     request: Request<B>,
@@ -669,9 +573,7 @@ where
     B: Send + 'static,
     Request<B>: Into<Request<axum::body::Body>>,
 {
-    // ★The strictness of the "Bearer " prefix is intentional (FIX 13)★: this header is a value the daemon **authored directly** in mcp-config
-    //   (claude sends it as is), so its format is fixed — there is no reason for lenient parsing such as case variants or extra whitespace
-    //   (it is not a general-purpose server). Only the exact `"Bearer "` prefix is allowed.
+    // The strict "Bearer " prefix is intentional (FIX 13): the daemon authored this header itself in mcp-config (claude sends it as is), so its format is fixed — no lenient parsing of case variants or extra whitespace.
     let token = request
         .headers()
         .get(http::header::AUTHORIZATION)
@@ -687,36 +589,24 @@ where
     };
     let identity = binding.identity;
 
-    // ★Mail rejection is here, not in the handler (ADR-0133 decision 3)★: this middleware wraps the **whole** router, so
-    //   even when mail routes grow they are covered in one place — with a check per handler, a new handler would miss the check.
-    //   The decision input is a single fact about the credential fixed at issue time, so neither a manager lookup nor body parsing is needed.
-    // ★This is the only enforcement point★: nothing on the agent side blocks mail — the CLI sends a sensible
-    //   mail call as is. Remove this check and mail is open.
-    // ★What it blocks is only this HTTP/CLI mail surface★: an MCP-capable agent keeps writing mail through `eg_send` on `/mcp`
-    //   (ADR-0128 decision 1 — the channel is split only by capability). This rejection is not "mail forbidden" but "this entrance is not
-    //   your channel".
-    // ★Why warn (not info)★: the default log level is warn, so with info an operator chasing "why can't this agent send
-    //   letters" would find **no trace at all**. The re-review trigger of ADR-0133 (observing the behavior of an agent that got only rejections)
-    //   also fires only if this line is visible. It is set to the same level as the sibling rejections (401/403/404/400).
-    // ★This surface has **two** mail axes — this line is the path axis★: a route that selects a command by body is not
-    //   classified by path, so it makes the same decision and the same log in its own place (the name axis in `control_call_handler`).
+    // Mail rejection is here, not in the handler (ADR-0133 decision 3): this middleware wraps the whole router, so growing mail routes are covered in one place (a per-handler check would be missed by a new handler). The decision input is one fact fixed at credential issue time — no manager lookup or body parsing.
+    // This is the only enforcement point: nothing on the agent side blocks mail (the CLI sends a sensible mail call as is). Remove this check and mail is open.
+    // It blocks only this HTTP/CLI mail surface: an MCP-capable agent keeps writing mail through `eg_send` on `/mcp` (ADR-0128 decision 1). The rejection is "this entrance is not your channel", not "mail forbidden".
+    // warn, not info: the default log level is warn, so with info an operator chasing "why can't this agent send letters" would find no trace, and the ADR-0133 re-review trigger (observing an agent that got only rejections) fires only if this line is visible; same level as the sibling rejections (401/403/404/400).
+    // This surface has two mail axes — this is the path axis; a route selecting a command by body makes the same decision and log in its own place (the name axis in `control_call_handler`).
     // ADR-0133
     if !binding.mail_allowed && mail_gated_path(request.uri().path()) {
         tracing::warn!(
             agent = %identity.agent_id,
             epoch = identity.epoch,
-            "우편 요청 거절 — 이 자격증명은 CLI/HTTP 우편 입구의 것이 아니다(ADR-0133)"
+            "mail request refused — this credential is not for the CLI/HTTP mail entrance (ADR-0133)"
         );
         return mail_not_allowed();
     }
 
-    // ★The existing session id the request carries (if any)★ — follow-up requests after initialize (tools/call · GET · DELETE)
-    //   carry Mcp-Session-Id as a header. Identity pinning is checked with this value (the initial initialize has none).
-    // ★malformed ≠ absent (Codex LOW)★: if the header is **present but** to_str() fails (non-UTF-8, etc.), it must not be folded to None —
-    //   folding to None makes a session-carrying request be mistaken for "sessionless", so it skips the binding check below and
-    //   passes through to inner (rmcp) (boundary bypass). Present-but-malformed is a client error, so it is cut with 400 before
-    //   reaching the binding check (not an identity/auth problem, so 400 rather than 401/403, with an empty body). Only a header that is truly
-    //   **absent** is treated as "sessionless" (the initialize path).
+    // The existing session id the request carries (if any): follow-ups after initialize (tools/call · GET · DELETE) carry Mcp-Session-Id; identity pinning is checked with it (initialize has none).
+    // malformed ≠ absent (Codex LOW): a header present but failing to_str() (non-UTF-8) must not fold to None — a session-carrying request would be mistaken for sessionless, skip the binding check and reach rmcp (boundary bypass). Present-but-malformed is
+    //   a client error, cut with 400 (empty body; not an identity/auth problem) before the binding check. Only a truly absent header is "sessionless" (the initialize path).
     let method = request.method().clone();
     let req_session_id = match request.headers().get(SESSION_ID_HEADER) {
         None => None,
@@ -724,22 +614,19 @@ where
             Ok(s) => Some(s.to_string()),
             Err(_) => {
                 tracing::warn!(
-                    "제어 채널 malformed Mcp-Session-Id 헤더 거부(400, ADR-0086 Codex LOW)"
+                    "control channel malformed Mcp-Session-Id header refused (400, ADR-0086 Codex LOW)"
                 );
                 return bad_request();
             }
         },
     };
 
-    // ★Session operations (GET/DELETE) must resolve to a session binding (security lens)★: GET (SSE stream) and DELETE
-    //   (teardown) are **operations on an existing session**, so they must carry a session id. A GET/DELETE without a session id
-    //   cannot end in a binding, so it is not passed to inner but cut here with 400 (the "no inner reach without a
-    //   binding" boundary integrity is guaranteed in the middleware, not by relying on rmcp's internal 4xx behavior). A POST without a session id is
-    //   the exception — that is the initialize path (the session is created in the response, so having no session id yet is normal).
+    // Session operations (GET/DELETE) must resolve to a session binding (security lens): GET (SSE stream) and DELETE (teardown) act on an existing session and must carry a session id; without one they cannot end in a binding, so they are cut here with 400 instead of
+    //   relying on rmcp's internal 4xx ("no inner reach without a binding"). A POST without a session id is the initialize path (the session is created in the response).
     if req_session_id.is_none() && (method == Method::GET || method == Method::DELETE) {
         tracing::warn!(
             method = %method,
-            "제어 채널 세션 operation 무-세션id 거부(400, ADR-0086 — session op 는 바인딩으로 resolve 돼야)"
+            "control channel session operation without session id refused (400, ADR-0086 — session ops must resolve through the binding)"
         );
         return bad_request();
     }
@@ -748,39 +635,26 @@ where
         match registry.identity_for_session(sid) {
             Some(bound) if bound == identity => {}
             Some(_) => {
-                // The session id is also a caller-chosen header value, so it goes through [`sanitize_for_log`] (the same forgery axis).
-                //   The HTTP parser already filters CR/LF, but tabs and non-ASCII obs-text pass and the length is not
-                //   ours either — here we decide the width as well.
+                // The session id is also a caller-chosen header value, so it goes through [`sanitize_for_log`] (same forgery axis): the HTTP parser filters CR/LF but tabs and non-ASCII obs-text pass and the length is not ours — decide the width here too.
                 tracing::warn!(
                     session = %sanitize_for_log(sid),
-                    "제어 채널 cross-token 세션 탈취 거부(403, ADR-0086 FIX 7)"
+                    "control channel cross-token session takeover refused (403, ADR-0086 FIX 7)"
                 );
                 return forbidden();
             }
-            // ★orphaned-session rejection (round-2 F1)★: a session id is carried but the daemon has **no** binding.
-            //   It used to pass this through to inner (rmcp) and let rmcp return 404, but that path has a fatal window:
-            //   agent A opens session S and is bound, then a revoke (kill) prunes **only the binding**, while the rmcp-side
-            //   session S may still be alive. If agent B with a valid token then presents S, the middleware
-            //   passes it through as is and B attaches to A's orphaned session worker (session hijack). Now **every request
-            //   carrying a session id without a binding is rejected**, closing that window — a session alive on the rmcp side but unknown to the daemon
-            //   becomes an unreachable orphan. This also makes the DELETE-prune order fail-safe.
-            //   A truly-unknown id got rmcp's 404 before too, so the status code a normal client sees
-            //   does not change (no impact on the happy path).
+            // Orphaned-session rejection (round-2 F1): a session id is carried but the daemon has no binding. It used to pass to rmcp for a 404, but that has a fatal window: agent A opens session S and is bound, a revoke (kill) prunes only the binding while
+            //   rmcp's session S may live; agent B with a valid token presenting S would attach to A's orphaned session worker (session hijack). Now every request carrying a session id without a binding is rejected, so a session alive in rmcp but unknown to the daemon is an
+            //   unreachable orphan (also making the DELETE-prune order fail-safe). A truly unknown id got rmcp's 404 before too, so a normal client sees no change.
             None => {
                 tracing::warn!(
                     session = %sanitize_for_log(sid),
-                    "제어 채널 orphaned/unknown 세션 거부(404, ADR-0086 F1)"
+                    "control channel orphaned/unknown session refused (404, ADR-0086 F1)"
                 );
                 return not_found();
             }
         }
-        // ★unbind-before-inner order choice (round-2 F6)★: the daemon binding is removed **before** inner (rmcp) actually
-        //   closes the session. With F1 (reject session-carrying requests without a binding) in place, this order
-        //   is fail-safe: even if the inner close fails for some reason after the unbind and the rmcp-side session remains, the daemon
-        //   binding is already gone, so by F1 that session becomes an **unreachable orphan** —
-        //   i.e. the state "binding removed but session worker alive" does not open a security window. Conversely,
-        //   with unbind-after-close the prune hangs on the close succeeding, and if the close fails the binding remains, risking
-        //   unbounded growth and stale bindings. It is also not an arbitrary prune, since it runs after the identity check (the match above).
+        // unbind-before-inner order (round-2 F6): the daemon binding is removed before inner (rmcp) closes the session. With F1 in place this is fail-safe: if the inner close fails after the unbind, the leftover rmcp session is an unreachable orphan, no security window.
+        //   Unbind-after-close would hang the prune on the close succeeding and risk unbounded growth and stale bindings on failure. It runs after the identity check (the match above), so it is not an arbitrary prune.
         if method == Method::DELETE {
             registry.unbind_session(sid);
         }
@@ -788,15 +662,13 @@ where
 
     let mut request: Request<axum::body::Body> = request.into();
     request.extensions_mut().insert(identity);
-    // ★The permission bit is carried **separately** from the identity★: `BoundIdentity` is the identity key for session pinning, so if permission is mixed in,
-    //   an authorization problem is disguised as a false session-hijack alarm (see that type's doc). Even so, there is one place
-    //   where the handler must see this bit — the mail axis of a route that selects a command by body ([`mail_by_name`]) cannot be closed by the route classification above.
+    // The permission bit is carried separately from the identity: `BoundIdentity` is the session-pinning key, and mixing permission in would disguise an authorization problem as a false session-hijack alarm (see that type's doc).
+    //   The handler must still see this bit in one place — the mail axis of a body-selected route ([`mail_by_name`]) cannot be closed by route classification.
     request.extensions_mut().insert(binding);
 
     let response = next.run(request).await;
 
-    // ★Pass along the same token string used for validation (FIX 7 + round-2 F2)★: bind compares locally whether that token is still this agent's
-    //   current credential, filtering out a revoke/re-issue in the validate→bind window.
+    // Pass the same token string used for validation (FIX 7 + round-2 F2): bind compares locally whether that token is still this agent's current credential, filtering a revoke/re-issue in the validate→bind window.
     if let Some(session_id) = response
         .headers()
         .get(SESSION_ID_HEADER)
@@ -807,7 +679,7 @@ where
     response
 }
 
-/// 401 response (empty body). WWW-Authenticate is deliberately not included (it is a static Bearer, so no challenge is needed).
+/// 401 response (empty body). WWW-Authenticate is deliberately omitted (static Bearer, no challenge needed).
 fn unauthorized() -> Response {
     Response::builder()
         .status(StatusCode::UNAUTHORIZED)
@@ -815,8 +687,7 @@ fn unauthorized() -> Response {
         .expect("valid 401 response")
 }
 
-/// 403 response (empty body) — rejects cross-token session hijack (FIX 7). The token itself is valid (hence not 401) but has no
-/// permission to access this session (a session pinned to another identity).
+/// 403 response (empty body) — rejects cross-token session hijack (FIX 7): the token is valid (hence not 401) but not permitted this session (pinned to another identity).
 fn forbidden() -> Response {
     Response::builder()
         .status(StatusCode::FORBIDDEN)
@@ -824,9 +695,7 @@ fn forbidden() -> Response {
         .expect("valid 403 response")
 }
 
-/// 404 response (empty body) — rejects an orphaned/unknown session (round-2 F1). A request carrying a session id that has no daemon binding.
-/// The token is valid, but this session does not exist from the daemon's authorization view (it is not established that it belongs to another identity
-/// either, so 404 rather than 403). The body is left empty so no session or identity information leaks.
+/// 404 response (empty body) — rejects an orphaned/unknown session (round-2 F1): a request carrying a session id with no daemon binding. The token is valid but the session does not exist from the daemon's authorization view (not established to belong to another identity, so not 403); the body is empty so no session or identity information leaks.
 fn not_found() -> Response {
     Response::builder()
         .status(StatusCode::NOT_FOUND)
@@ -836,11 +705,8 @@ fn not_found() -> Response {
 
 /// Mail rejection response (ADR-0133 decision 3).
 ///
-/// ★Why 200 + a bounce envelope (not an empty 403)★: the contract of mail routes is "always 200 + JSON", and the CLI decides by
-///   **exit code**, not stdout shape — this envelope is a verified bounce shape, so it folds as is into the existing three-way split's
-///   **failure (1)** (no new class of outcome is created). With an empty 403 the CLI would print only a blank line
-///   and the caller would have no way to know why it failed.
-/// ★The body wording is canonical in `MAIL_NOT_ALLOWED_HINT`★ — it does not announce an alternative channel.
+/// 200 + a bounce envelope, not an empty 403: mail routes' contract is "always 200 + JSON" and the CLI decides by exit code, not stdout shape — this verified bounce shape folds into the existing three-way split's failure (1) (no new outcome class);
+/// an empty 403 would print only a blank line. Body wording is canonical in `MAIL_NOT_ALLOWED_HINT` (it does not announce an alternative channel).
 // ADR-0133
 fn mail_not_allowed() -> Response {
     (
@@ -854,8 +720,7 @@ fn mail_not_allowed() -> Response {
         .into_response()
 }
 
-/// 400 response (empty body) — client request-format error (ADR-0086). It is a request-format problem, not an identity/auth problem,
-/// so 400 rather than 401/403/404. The body is left empty so no information leaks.
+/// 400 response (empty body) — a request-format error (ADR-0086), not identity/auth, hence not 401/403/404; empty so no information leaks.
 fn bad_request() -> Response {
     Response::builder()
         .status(StatusCode::BAD_REQUEST)
@@ -865,8 +730,7 @@ fn bad_request() -> Response {
 
 // ── CLI entrance (/control/send) ────────────────────────────────────────────────────────
 
-/// `/control/send` request body. `{to, body, request?, reply_by?, reply_to?}` — no from field (identity only from the token).
-/// The C3 args are all optional, so it is **wire-compatible** with the old `{to, body}` body (omitted = notice).
+/// `/control/send` request body `{to, body, request?, reply_by?, reply_to?}` — no from (identity only from the token). The C3 args are optional, so wire-compatible with the old `{to, body}` (omitted = notice).
 #[derive(Debug, serde::Deserialize)]
 struct SendRequest {
     /// Recipients — one string (a comma list is allowed) or an array.
@@ -880,9 +744,7 @@ struct SendRequest {
     reply_to: Option<String>,
 }
 
-/// ★Recipient tokenization of the CLI entrance (pure function — review C3)★: in a shell the only way to express a list in `engram mail send --to a,b` is
-/// a comma, so it is split once **at this entrance only**. That the splitting rule **differs per entrance is intended** (the MCP-side rule is
-/// in the `ToField` comment).
+/// Recipient tokenization of the CLI entrance (pure function — review C3): `engram mail send --to a,b` can only express a list as a comma, so it is split once at this entrance only. The splitting rule differs per entrance on purpose (MCP side: `ToField` comment).
 fn cli_recipient_tokens(to: ToField) -> Vec<String> {
     to.into_tokens()
         .into_iter()
@@ -890,7 +752,7 @@ fn cli_recipient_tokens(to: ToField) -> Vec<String> {
         .collect()
 }
 
-/// `/control/send` route State — shares the **same Arc** as the MCP factory (a second registry is not created).
+/// `/control/send` route State — the same Arc as the MCP factory (no second registry).
 #[derive(Clone)]
 struct ControlSendState {
     manager: Arc<ManagerSlot>,
@@ -898,14 +760,14 @@ struct ControlSendState {
     messaging: Arc<MessagingSlot>,
 }
 
-/// Always 200 + JSON body (success and corrective errors both ride on an open request — the CLI parses the JSON to decide the exit code).
+/// Always 200 + JSON body (success and corrective errors both ride an open request — the CLI parses the JSON for the exit code).
 async fn control_send_handler(
     axum::extract::State(state): axum::extract::State<ControlSendState>,
     identity: Option<axum::Extension<BoundIdentity>>,
     body: Option<Json<SendRequest>>,
 ) -> Response {
     let Some(axum::Extension(from)) = identity else {
-        // The middleware did not plant an identity = an auth-path fault. Defensive 401 (unreachable in the normal flow).
+        // The middleware planted no identity = an auth-path fault; defensive 401 (unreachable normally).
         return unauthorized();
     };
     let Some(Json(req)) = body else {
@@ -914,14 +776,14 @@ async fn control_send_handler(
     let Some(manager) = state.manager.get() else {
         tracing::error!(
             entrance = "cli",
-            "제어 채널 send 불가 — manager 슬롯 미설정(배선 순서 이상, ADR-0086 F6)"
+            "control channel send unavailable — manager slot not set (wiring order anomaly, ADR-0086 F6)"
         );
         return service_unavailable();
     };
     let Some(messaging) = state.messaging.get() else {
         tracing::error!(
             entrance = "cli",
-            "제어 채널 send 불가 — messaging 슬롯 미설정(배선 순서 이상, C1)"
+            "control channel send unavailable — messaging slot not set (wiring order anomaly, C1)"
         );
         return service_unavailable();
     };
@@ -942,10 +804,8 @@ async fn control_send_handler(
     })
     .await
     else {
-        // JoinError = blocking task panic (absent from the normal flow). The "always 200 + JSON" contract is the contract for **when the handler
-        //   produced an answer**, so this path, which has no answer at all, is split off to 500 so the CLI does not
-        //   misread it as success (no new wire error code is invented — the spec §6 vocabulary is fixed).
-        tracing::error!(entrance = "cli", "제어 채널 send 태스크 실패(패닉)");
+        // JoinError = blocking task panic (absent normally). "Always 200 + JSON" covers when the handler produced an answer; with no answer at all this goes to 500 so the CLI does not misread it as success (no new wire error code — spec §6 vocabulary is fixed).
+        tracing::error!(entrance = "cli", "control channel send task failed (panic)");
         return Response::builder()
             .status(StatusCode::INTERNAL_SERVER_ERROR)
             .body(axum::body::Body::empty())
@@ -954,17 +814,14 @@ async fn control_send_handler(
     Json(result.to_json()).into_response()
 }
 
-/// `/control/messages` request body (D) — `{id?}`. No identity field (derived from the token — the same invariant as send).
+/// `/control/messages` request body (D) — `{id?}`. No identity field (derived from the token, as send).
 #[derive(Debug, Default, serde::Deserialize)]
 struct MessagesRequest {
     #[serde(default)]
     id: Option<String>,
 }
 
-/// ★Empty body allowed★: `pending` (the no-argument query) has no field to send. The CLI sends `{}`, but even if there is no body at all or
-///   it fails to parse, it is **folded into a no-argument query** — a query has no side effects, so leniency is safe, and a 400 here would
-///   keep the CLI from telling "no argument given" from "request broken", so self-correction would spin in vain (send is the opposite, 400 —
-///   it has required fields and has side effects).
+/// Empty body allowed: `pending` (the no-argument query) has no field. A missing or unparsable body folds into a no-argument query — a query has no side effects so leniency is safe, and a 400 would keep the CLI from telling "no argument" from "request broken" (send is the opposite: required fields and side effects → 400).
 async fn control_messages_handler(
     axum::extract::State(state): axum::extract::State<ControlSendState>,
     identity: Option<axum::Extension<BoundIdentity>>,
@@ -976,7 +833,7 @@ async fn control_messages_handler(
     let (Some(manager), Some(messaging)) = (state.manager.get(), state.messaging.get()) else {
         tracing::error!(
             entrance = "cli",
-            "messages 조회 불가 — manager/messaging 슬롯 미설정(배선 순서 이상)"
+            "messages query unavailable — manager/messaging slot not set (wiring order anomaly)"
         );
         return service_unavailable();
     };
@@ -989,23 +846,16 @@ async fn control_messages_handler(
 
 /// `/control/agent` route State — only one command-table slot (ADR-0155).
 ///
-/// ★It does not hold the manager or fan-out slots★: **the table** holds both (`commands::make_daemon_table`). Holding
-///   them again here would create a second path to the same real object, and if notifications go out from two places, the split of per-verb
-///   notification counts (wake-up 0 · change 1) breaks. It does not hold registry or messaging either — control verbs use identity only
-///   for authorization and have no sender derivation.
+/// It does not hold the manager or fan-out slots: the table holds both (`commands::make_daemon_table`); holding them again would create a second path to the same object and break per-verb notification counts (wake-up 0 · change 1) if notifications go out from two places. No registry or messaging either — control verbs use identity only for authorization (no sender derivation).
 #[derive(Clone)]
 struct ControlAgentState {
     commands: Arc<CommandTableSlot>,
 }
 
-/// Always 200 + JSON body (success and bounce alike) — the same contract as `/control/messages`, so the CLI's query decider
-/// is used as is.
+/// Always 200 + JSON body (success and bounce alike) — the same contract as `/control/messages`, so the CLI's query decider applies as is.
 ///
-/// ★Identity is used only for authorization★: "me" does not appear in control verbs (no sender derivation). Still, the **existence** of the
-///   identity the middleware planted is required — a call without a token must not reach here (defensive 401).
-/// ★Blocking boundary★: `handle_agent` below is blocking (see its function doc — resume polling ~3 s + profile disk
-///   save). Calling it directly from an async handler ties up one tokio worker thread for that time and blocks **other requests**
-///   stacked on the same thread (the same reason the send route moved the child stdin write to the blocking pool).
+/// Identity is used only for authorization ("me" does not appear in control verbs), but its existence is required — a call without a token must not reach here (defensive 401).
+/// Blocking boundary: `handle_agent` is blocking (resume polling ~3 s + profile disk save); calling it from an async handler would tie up a tokio worker and block other requests on that thread (same reason send moved the child stdin write to the blocking pool).
 async fn control_agent_handler(
     axum::extract::State(state): axum::extract::State<ControlAgentState>,
     identity: Option<axum::Extension<BoundIdentity>>,
@@ -1014,10 +864,7 @@ async fn control_agent_handler(
     if identity.is_none() {
         return unauthorized();
     }
-    // ★Why the `Json<…>` extractor is not used★: when deserialization fails, that extractor returns an **empty 400** —
-    //   mistyped values, duplicate keys, non-object bodies and broken JSON all land there, and the caller (an LLM) retries without knowing
-    //   what to fix. Deserializing directly lets serde's reason ride in the envelope as is,
-    //   and then this route returns an empty body only for auth failure and size overrun.
+    // Why not the `Json<…>` extractor: on deserialization failure it returns an empty 400 (mistyped values, duplicate keys, non-object bodies, broken JSON), and the caller (an LLM) retries without knowing what to fix. Deserializing directly lets serde's reason ride in the envelope; the route returns an empty body only for auth failure and size overrun.
     let req: super::agent::AgentRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => {
@@ -1031,7 +878,7 @@ async fn control_agent_handler(
     let Some(table) = state.commands.get() else {
         tracing::error!(
             entrance = "cli",
-            "제어 동사 처리 불가 — 명령 표 슬롯 미설정(배선 순서 이상, ADR-0155)"
+            "control verb processing unavailable — command table slot not set (wiring order anomaly, ADR-0155)"
         );
         return service_unavailable();
     };
@@ -1039,10 +886,8 @@ async fn control_agent_handler(
     let Ok(result) =
         tokio::task::spawn_blocking(move || super::agent::handle_agent(&table, req)).await
     else {
-        // JoinError = blocking task panic. There is no answer at all, so it is outside the "always 200 + JSON" contract — it is split off to 500
-        //   so the CLI does not misread it as success (the same discipline as the send route). ★That this contract holds **only in
-        //   hook-less test builds** is canonical in the `internal_error` comment★.
-        tracing::error!(entrance = "cli", "제어 동사 태스크 실패(패닉)");
+        // JoinError = blocking task panic: no answer at all, outside "always 200 + JSON" → 500 so the CLI does not misread it as success (as the send route). That this holds only in hook-less test builds is canonical in the `internal_error` comment.
+        tracing::error!(entrance = "cli", "control verb task failed (panic)");
         return internal_error();
     };
     Json(result.to_json()).into_response()
@@ -1050,38 +895,24 @@ async fn control_agent_handler(
 
 // ── CLI discovery and generic call entrance (/control/commands · /control/call) ──────────────────────
 
-/// State of the two catalog routes — holds as is the **two sources** that discovery merges (`control::catalog::merge`).
+/// State of the two catalog routes — holds the two sources discovery merges (`control::catalog::merge`).
 ///
-/// ★The registry is a **handle**, not a slot★: the table (`CommandTableSlot`) comes into being after the manager and needs late injection, but
-///   the registry is a shared `Clone` handle that the assembly creates **before** the server (`lib.rs` run() · accept loop). Adding
-///   one more late-injection slot would add the branch 「비어 있으면 반쪽 목록」 ("if empty, a half list") for no reason.
-/// ★Do not create a second registry★ — what is held here must be **the one copy** that connections add their registrations to. If it holds a copy,
-///   discovery returns an empty list forever, and that symptom has no error and no log.
+/// The registry is a handle, not a slot: the table (`CommandTableSlot`) comes after the manager and needs late injection, but the registry is a shared `Clone` handle the assembly creates before the server (`lib.rs` run() · accept loop); another late-injection slot would add a pointless "if empty, half list" branch.
+/// Do not create a second registry: what is held must be the one copy connections register into, or discovery returns an empty list forever with no error and no log.
 #[derive(Clone)]
 struct ControlCatalogState {
     commands: Arc<CommandTableSlot>,
-    /// Holds the registry + the seat table + the first-stage table as one value — ★it must be **the one copy** the socket entrance holds★
-    /// (ADR-0160). If it holds a copy, discovery returns an empty list and the relay uses its own seat table.
+    /// Holds the registry + the seat table + the first-stage table as one value — it must be the one copy the socket entrance holds (ADR-0160); a copy gives an empty discovery list and a relay with its own seat table.
     bus: crate::command_delivery::CommandBus,
 }
 
-/// Discovery list — success and bounce are both 200 + JSON, and only the case with no answer at all is 500 (the scope of that branch is in the
-/// [`internal_error`] comment). ★An empty table slot is not 503★: in the same state the WS list gives
-/// 「명부 절반」 (half the registry), so a 503 here would have two surfaces say different things about the same state (the canonical account of that choice =
-/// `catalog::handle_list` doc).
+/// Discovery list — success and bounce are both 200 + JSON; only no answer at all is 500 (scope: [`internal_error`] comment). An empty table slot is not 503: in the same state the WS list gives "half the roster", so a 503 would make two surfaces say different things (canonical: `catalog::handle_list` doc).
 ///
-/// ★What `spawn_blocking` fixed and what it did not — do not assume★
-///   - **Fixed = executor hazard.** `CommandRoster::entries` takes a blocking mutex, so calling it from an async worker
-///     **parks** that worker instead of yielding. Now the blocking pool bears that wait. It also matches the treatment of the sibling
-///     (`control_agent_handler`) — there is no reason to take the same lock on a worker on only one side.
-///   - **Not fixed = lock hold time.** `entries` still clones the entire registry (cap 4096 ×
-///     help 4 KiB) **while holding** the mutex, and that mutex is shared by command delivery (`OwnerLookupSource::lookup`) and connection cleanup.
-///     So a child running this route **still contends with delivery** — what changed is **who waits**, not how long
-///     the lock is held. That cloning discipline is owned by the registry module, so it cannot be reduced here (the
-///     「알려진 비용」 (known cost) in the `command_roster` header).
-/// ★`decls()` rebuilds `help` on every call (the tools crate's `CommandTable::decls`) — leave it as is★:
-///   the daemon's own table has only 5 entries today, so this response's cost is dominated by the registry side, and memoization is owned by that crate,
-///   so it is not a place to touch here. If the table grows, measure it over there.
+/// What `spawn_blocking` fixed and did not — do not assume:
+///   - Fixed = executor hazard. `CommandRoster::entries` takes a blocking mutex, which parks an async worker instead of yielding; the blocking pool now bears the wait, matching the sibling (`control_agent_handler`).
+///   - Not fixed = lock hold time. `entries` still clones the whole registry (cap 4096 × help 4 KiB) while holding the mutex shared with command delivery (`OwnerLookupSource::lookup`) and connection cleanup, so this route still contends with delivery — what changed is who waits.
+///     The cloning discipline is the registry module's (the "known cost" in the `command_roster` header).
+/// `decls()` rebuilds `help` on every call (tools crate `CommandTable::decls`) — leave it: the own table has 5 entries, the cost is dominated by the registry side, and memoization belongs to that crate; if the table grows, measure there.
 async fn control_commands_handler(
     axum::extract::State(state): axum::extract::State<ControlCatalogState>,
     identity: Option<axum::Extension<BoundIdentity>>,
@@ -1100,22 +931,16 @@ async fn control_commands_handler(
     })
     .await
     else {
-        tracing::error!(entrance = "cli", "발견 목록 태스크 실패(패닉)");
+        tracing::error!(entrance = "cli", "discovery list task failed (panic)");
         return internal_error();
     };
     Json(result.into_json()).into_response()
 }
 
-/// Full-name call — always 200 + JSON (success and bounce alike), the same contract as `/control/agent`.
+/// Full-name call — always 200 + JSON (success and bounce alike), the same contract as `/control/agent`; the `Json<…>` extractor and `spawn_blocking` reasoning is canonical in `control_agent_handler` (same table, same function, same treatment).
 ///
-/// ★The reasons for not using the `Json<…>` extractor and for the `spawn_blocking` boundary are both the same as the sibling's (`control_agent_handler`)★ —
-///   that comment is canonical. The two routes run the same table through the same function, so the treatment must be the same.
-///
-/// ★This route **may be delayed until the deadline** (ADR-0160 impact section)★: another party's name is relayed to its owner, and if the owner
-///   does not answer, the delivery deadline (`CommandDeliveries::DEFAULT_DEADLINE`) yields `TIMEOUT`. The daemon's own names
-///   finish on the spot as before, so they do not bear this delay.
-/// ★`request_id` **may be sent by the caller**★ (ADR-0161 decision 1) — if not sent, the decider issues one
-///   (`catalog::handle_call`). That split is not recreated here.
+/// This route may be delayed until the deadline (ADR-0160 impact section): another party's name is relayed to its owner and an unanswering owner yields `TIMEOUT` at `CommandDeliveries::DEFAULT_DEADLINE`; the daemon's own names finish on the spot.
+/// `request_id` may be sent by the caller (ADR-0161 decision 1); otherwise the decider issues one (`catalog::handle_call`) — that split is not recreated here.
 async fn control_call_handler(
     axum::extract::State(state): axum::extract::State<ControlCatalogState>,
     binding: Option<axum::Extension<super::registry::TokenBinding>>,
@@ -1135,35 +960,25 @@ async fn control_call_handler(
             .into_response()
         }
     };
-    // ★The mail axis is closed **by name**★ — this route selects a command by body, not path, so the middleware's
-    //   route classification does not reach here (that classification doc · [`mail_by_name`]). It decides before taking anything needed for execution,
-    //   and before telling which source the name belongs to — the answer must be the same whether it is the daemon table or the registry.
-    // ★The rejection is logged at the **same level and with the same fields** as the sibling★ (the path-axis gate in `bearer_auth`): without that, a credential
-    //   with mail blocked **groping around by name would leave no trace on the server at all**, and the ADR-0133 re-review
-    //   trigger (observing the behavior of an agent that got only rejections) would lose its material on this axis too.
-    // ★The name goes through [`sanitize_for_log`] — do not use `agent::preview`★: this line is printed **before validation**,
-    //   so the name is a completely arbitrary string, and that function only truncates length and lets control characters through. One
-    //   newline splits a log line in two and the second line looks like an entry we printed (a forged entry — that function's doc describes this
-    //   failure mode). Being `warn`, it really lands in the file at the default level, which is what makes this axis real.
+    // The mail axis is closed by name: this route selects a command by body, so the middleware's route classification does not reach here ([`mail_by_name`]). It decides before taking anything needed for execution and before telling which source the name belongs to — daemon table and registry must answer the same.
+    // The rejection is logged at the same level and fields as the sibling (path-axis gate in `bearer_auth`): otherwise a mail-blocked credential groping by name would leave no server trace, and the ADR-0133 re-review trigger would lose its material on this axis.
+    // The name goes through [`sanitize_for_log`], not `agent::preview`: printed before validation it is an arbitrary string, and `preview` only truncates and lets control characters through — one newline forges a second log entry; as `warn` it really lands in the file at the default level.
     // ADR-0133
     if !binding.mail_allowed && mail_by_name(&req.name) {
         tracing::warn!(
             agent = %caller.agent_id,
             epoch = caller.epoch,
             command = %sanitize_for_log(&req.name),
-            "우편 요청 거절 — 이 자격증명은 CLI/HTTP 우편 입구의 것이 아니다(이름 축, ADR-0133)"
+            "mail request refused — this credential is not for the CLI/HTTP mail entrance (name axis, ADR-0133)"
         );
         return mail_not_allowed();
     }
-    // ★This check is a **wiring alarm**, not a routing authority★: the authority is the single `bus.locals()` below (so that decision and
-    //   delivery see the same fact — that paragraph in `catalog::handle_call`), and what this line guards is only this route's contract that
-    //   「표를 늦게 꽂는 조립에서 이름을 보기도 전에 크게 드러난다」 (in an assembly that plugs the table in late, it surfaces loudly before the name is even looked at) (the canonical account of that treatment =
-    //   the two-route comparison test in `tests/control_agent.rs`). ★The assembly must pass this slot and the bus's first-stage table as the **same
-    //   one copy** for this alarm to point at the real state★ — the production assembly does so (`lib.rs`).
+    // This check is a wiring alarm, not a routing authority: the authority is the single `bus.locals()` below (decision and delivery see the same fact — `catalog::handle_call`); this line only surfaces loudly, before the name is looked at, an assembly plugging the table in late
+    //   (canonical: the two-route comparison test in `tests/control_agent.rs`). The assembly must pass this slot and the bus's first-stage table as the same one copy for the alarm to point at the real state — the production assembly does (`lib.rs`).
     if state.commands.get().is_none() {
         tracing::error!(
             entrance = "cli",
-            "전체 이름 호출 불가 — 명령 표 슬롯 미설정(배선 순서 이상, ADR-0155)"
+            "full-name call unavailable — command table slot not set (wiring order anomaly, ADR-0155)"
         );
         return service_unavailable();
     }
@@ -1175,7 +990,7 @@ async fn control_call_handler(
     })
     .await
     else {
-        tracing::error!(entrance = "cli", "전체 이름 호출 태스크 실패(패닉)");
+        tracing::error!(entrance = "cli", "full-name call task failed (panic)");
         return internal_error();
     };
     let result = match outcome {
@@ -1185,41 +1000,24 @@ async fn control_call_handler(
             args,
             request_id,
         } => {
-            // ★Record who ordered the command★: a relayed name actually moves the dashboard's windows, tabs and slots
-            //   (the layout commands in `src-tauri`), so it must be able to answer 「내 창을 누가 닫았나」 (who closed my window?). The material for that
-            //   **has already arrived** at this gate (`BoundIdentity`), but until now it was used only for the existence check and thrown away.
-            //   ★The key is not logged★ — the identity is derived from the key but is not itself a credential
-            //   (logging convention 「보안」, security).
-            // ★Why warn (not info)★: what this line holds is a **fact that cannot be recreated anywhere after the event has passed**
-            //   — **which credential** ordered a user-visible change. The result of the operation remains on screen and in
-            //   state queries, but the owner is recorded nowhere, so even raising the level later never reveals the owner of an operation
-            //   that already happened. And this route has decided to treat 「에이전트가 사람 화면을 움직였다」 (an agent moved the human's screen) not as everyday noise
-            //   but as **an event to be seen** — the same judgment is already embedded in this file's sibling gate
-            //   (the `warn` clause of the mail rejection — `bearer_auth`).
-            //   ★Do not use 「기본 레벨이 warn 이라 info 는 안 찍힌다」 (the default level is warn, so info is not printed) as the reason★ — the logging convention
-            //   explicitly forbids that argument (raising the level of a normal notice because of the default filter). The two sentences above are the reason.
-            //   ★So one relay produces this one warn line★ — the success line on the outcome side stays at `info` (that comment).
-            //   ★Writing this exception into the logging convention doc has not been done yet (open — outside this round's scope).★
-            //   The arrival rate is within this gate's natural cap (connections per request · `MAX_RELAYED_IN_FLIGHT`).
-            // ★The entrance label uses the constant★ — this call goes through `CommandBus::invoke`, so it must equal the label that side
-            //   records. `"cli"` belongs to **direct execution that does not go through relay** (that constant's doc), so it is not this one's.
-            // ★The name goes through [`sanitize_for_log`]★ — the reason is the same as the mail-rejection line above (a caller-chosen
-            //   string goes into the log as `warn`). The delivery side uses the same function (the first line of
-            //   `command_delivery::deliver`) — so that one value is not written in different shapes in two layers.
-            // ★The wording does not say 「중계했다」 (relayed) — this line is **before** the round trip★: the `invoke` after this, if it hit the concurrency
-            //   cap, runs nothing and bounces (`MAX_RELAYED_IN_FLIGHT`), so writing 「중계한다」 (relaying) would
-            //   leave a line recording something that did not happen on that branch. It states only the fact, and the paired lines give the outcome —
-            //   `CommandBus::invoke` emits one success/failure line, and the cap rejection emits one line from `RelaySlot::admit`
-            //   (all three carry the same `entrance` · `request_id`, tying them into one round trip).
-            // ★Even so, do not defer this line until **after** the round trip★: attribution cannot be recreated anywhere once the event has passed
-            //   (reason above), so if the daemon dies mid-round-trip, a deferred line is never written at all.
+            // Record who ordered the command: a relayed name moves the dashboard's windows, tabs and slots (layout commands in `src-tauri`), so "who closed my window?" must be answerable. The material (`BoundIdentity`) already arrives at this gate but was only used for the existence check.
+            // The key is not logged — the identity derives from the key but is not a credential (logging convention 「Security」).
+            // warn, not info: this line holds a fact that cannot be recreated after the event — which credential ordered a user-visible change; the result stays on screen but the owner is recorded nowhere, so raising the level later never reveals it. This route treats "an agent moved the human's screen" as an event to be seen,
+            //   the same judgment as the mail-rejection `warn` in `bearer_auth`. Do not use "the default level is warn, so info is not printed" as the reason — the logging convention forbids that argument. One relay produces this one warn line; the success line on the outcome side stays `info`.
+            //   Writing this exception into the logging convention doc is not done yet (open — outside this round).
+            //   Arrival rate is within this gate's natural cap (connections per request · `MAX_RELAYED_IN_FLIGHT`).
+            // The entrance label uses the constant: this call goes through `CommandBus::invoke`, so it must equal the label that side records; `"cli"` belongs to direct execution that does not go through relay (that constant's doc).
+            // The name goes through [`sanitize_for_log`] (same reason as the mail-rejection line; the delivery side uses it too — first line of `command_delivery::deliver` — so one value is not written in two shapes).
+            // The wording does not say "relayed" — this line is before the round trip: `invoke` after it may hit the concurrency cap (`MAX_RELAYED_IN_FLIGHT`) and run nothing, so "relaying" would record something that did not happen. The paired lines give the outcome
+            //   (`CommandBus::invoke` one success/failure line; the cap rejection one line from `RelaySlot::admit`; all share `entrance` · `request_id`, tying one round trip).
+            // Do not defer this line until after the round trip: attribution cannot be recreated once the event has passed, and a daemon dying mid-round-trip would never write it.
             tracing::warn!(
                 entrance = crate::command_delivery::ENTRANCE_CONTROL,
                 agent = %caller.agent_id,
                 epoch = caller.epoch,
                 command = %sanitize_for_log(&name),
                 %request_id,
-                "에이전트가 남의 명령을 불렀다 — 이 데몬이 그 주인 앞으로 접수했다"
+                "an agent called someone else's command — this daemon accepted it addressed to that owner"
             );
             let reply = bus.invoke(request_id, name, args).await;
             super::catalog::relayed(reply)
@@ -1230,13 +1028,10 @@ async fn control_call_handler(
 
 // ── CLI help screen entrance (/control/help) ───────────────────────────────────────────────
 
-/// help screen — success and bounce are both 200 + JSON, and only the case with no answer at all is 500 (the scope of that branch is in the
-/// [`internal_error`] comment). The body contract · failure policy are owned by `control::help`.
+/// help screen — success and bounce are both 200 + JSON; only no answer at all is 500 (scope: [`internal_error`] comment). Body contract · failure policy: `control::help`.
 ///
-/// ★Identity is required only to exist★: the screen is the same no matter who asks, so identity is not used to choose the screen. A call without a token must not
-///   reach here, so only a defensive 401 is placed (same as the sibling `control_agent_handler`).
-/// ★Read inside `spawn_blocking`★: the source reads the body file on every request (no cache), so reading it
-///   on an async worker would block other requests stacked on that worker during the disk wait.
+/// Identity is required only to exist: the screen is the same for everyone and identity does not choose it; a call without a token must not reach here (defensive 401, as `control_agent_handler`).
+/// Read inside `spawn_blocking`: the source reads the body file on every request (no cache), and reading on an async worker would block other requests there during the disk wait.
 // ADR-0285
 async fn control_help_handler(
     axum::extract::State(help): axum::extract::State<Arc<super::help::HelpSource>>,
@@ -1247,19 +1042,16 @@ async fn control_help_handler(
         return unauthorized();
     }
     let Ok(result) = tokio::task::spawn_blocking(move || help.answer(&body)).await else {
-        tracing::error!(entrance = "cli", "help 화면 태스크 실패(패닉)");
+        tracing::error!(entrance = "cli", "help screen task failed (panic)");
         return internal_error();
     };
     Json(result.into_json()).into_response()
 }
 
-/// 500 response (empty body) — the case where the blocking task panics and there is **no answer at all**.
+/// 500 response (empty body) — the blocking task panicked and there is no answer at all.
 ///
-/// ★This branch cannot be reached in a production process (known scope)★: a panic in a blocking task is not a `JoinError` but
-///   **process termination** (hook — ADR-0292). The command execution that task drives is outside the containment marker (ADR-0293). So
-///   "panic → 500" is a contract that holds only in hook-less test builds,
-///   and in production this spot guards nothing. It is still not deleted because the branch is real in that build, and without it
-///   a request with no answer would hang in that build.
+/// Unreachable in a production process (known scope): a blocking-task panic is process termination, not a `JoinError` (hook — ADR-0292), and the command execution the task drives is outside the containment marker (ADR-0293). So "panic → 500" holds only in hook-less test builds and guards nothing in production;
+/// it stays because the branch is real in that build, where a request with no answer would otherwise hang.
 fn internal_error() -> Response {
     Response::builder()
         .status(StatusCode::INTERNAL_SERVER_ERROR)
@@ -1267,7 +1059,7 @@ fn internal_error() -> Response {
         .expect("valid 500 response")
 }
 
-/// 503 response (empty body) — slot not set (wiring-order fault). Not a request-format or auth problem, so it is not 4xx.
+/// 503 response (empty body) — slot not set (wiring-order fault), not a request-format or auth problem, so not 4xx.
 fn service_unavailable() -> Response {
     Response::builder()
         .status(StatusCode::SERVICE_UNAVAILABLE)
@@ -1275,11 +1067,9 @@ fn service_unavailable() -> Response {
         .expect("valid 503 response")
 }
 
-/// The variant brought up without a help source — `/control/help` answers every request with `INTERNAL` (`help source not configured on this
-/// server`) and leaves one warn line at startup. The meaning of the args is the same as [`start_mcp_server_with_help`].
+/// The variant brought up without a help source — `/control/help` answers every request with `INTERNAL` (`help source not configured on this server`) and leaves one startup warn. Args as in [`start_mcp_server_with_help`].
 ///
-/// ★This is for tests · harnesses that do not call help — if the production assembly (`lib.rs`) calls this variant, help is always a bounce★.
-///   The name was left to say 「help 없음」 (no help) so that such a call stands out in review.
+/// For tests · harnesses not calling help — if the production assembly (`lib.rs`) calls this variant, help is always a bounce; the name says "no help" so such a call stands out in review.
 // ADR-0285
 pub async fn start_mcp_server_without_help(
     registry: Arc<ControlRegistry>,
@@ -1299,26 +1089,19 @@ pub async fn start_mcp_server_without_help(
     .await
 }
 
-/// The registry must be the **same Arc** shared by the auth middleware (verification) and provision (issuing).
+/// The registry must be the same Arc shared by the auth middleware (verification) and provision (issuing).
 ///
-/// ★Local only + DNS rebinding defense★: bind is 127.0.0.1:0 (OS-assigned port). StreamableHttpServerConfig
-///   allows only local Hosts with the default allowed_hosts=[localhost,127.0.0.1,::1] (rmcp default). stateful_mode=true (default),
-///   so the session is kept by Mcp-Session-Id.
+/// Local only + DNS rebinding defense: bind is 127.0.0.1:0 (OS-assigned port); StreamableHttpServerConfig allows only local Hosts with the default allowed_hosts=[localhost,127.0.0.1,::1] (rmcp default); stateful_mode=true (default), so the session is kept by Mcp-Session-Id.
 pub async fn start_mcp_server_with_help(
     registry: Arc<ControlRegistry>,
     manager: Arc<ManagerSlot>,
     messaging: Arc<MessagingSlot>,
-    // ★The fan-out slot does not come here★: only the command table reads it (`commands::make_daemon_table`),
-    //   and if the server held a second copy, **nobody would tell you even if the assembly passed two different slots** — the symptom is the tree showing
-    //   the old registry forever, with no error and no log. Taking it out of the args removes that fork.
+    // The fan-out slot does not come here: only the command table reads it (`commands::make_daemon_table`); a second copy held by the server would hide an assembly passing two different slots — the tree showing the old registry forever, no error, no log.
     commands: Arc<CommandTableSlot>,
-    // ★The command bus comes **by value**★: it is a shared `Clone` handle and the assembly can create it before this server
-    //   (`lib.rs` was changed to do so), so no late-injection slot is needed. Half of the discovery list and the relay
-    //   delivery come from here, so the assembly must pass **the one copy the accept loop holds** — if it creates and passes a new one,
-    //   discovery always yields only the daemon's own names and the relay uses its own seat table (ADR-0160).
+    // The command bus comes by value: a shared `Clone` handle the assembly can create before this server (`lib.rs`), so no late-injection slot. Half of discovery and the relay delivery come from here, so the assembly must pass the one copy the accept loop holds —
+    //   a new one would make discovery show only the daemon's own names and the relay use its own seat table (ADR-0160).
     bus: crate::command_delivery::CommandBus,
-    // ★The help source is built by the assembly★ — if the server built it inside from the install location, a test could not
-    //   inject a known body, and the screen would be tied to the test exe's location · `CARGO_TARGET_DIR`.
+    // The help source is built by the assembly: built inside from the install location, a test could not inject a known body and the screen would be tied to the test exe's location · `CARGO_TARGET_DIR`.
     // ADR-0285
     help: super::help::HelpSource,
 ) -> std::io::Result<McpServerHandle> {
@@ -1346,14 +1129,10 @@ pub async fn start_mcp_server_with_help(
         config,
     );
 
-    // ★nest_service★: StreamableHttpService is a Tower service, so it sits on the axum router as is.
-    // ★Body limit = RequestBodyLimitLayer (round-2 F4)★: request bodies on the local control channel are small — a limit is stated explicitly so
-    //   malicious/runaway bodies cannot swallow memory. axum `DefaultBodyLimit` applies only to **extractors** (Json/Bytes, etc.),
-    //   and rmcp `StreamableHttpService` consumes the raw body directly (not via an extractor), so that limit does not
-    //   work. `RequestBodyLimitLayer` wraps the body itself and enforces the limit on every downstream consumer (including rmcp),
-    //   cutting with 413 on overrun. 1MB is enough for initialize/tools/call and send POST payloads.
-    // ★Layer order★: below, the stack is body-limit → auth → route from outer to inner (in an axum layer, the one written later is
-    //   outer). Putting body-limit outermost applies the limit before whichever of auth or inner reads the body.
+    // nest_service: StreamableHttpService is a Tower service and sits on the axum router as is.
+    // Body limit = RequestBodyLimitLayer (round-2 F4): bodies on the local control channel are small; the limit is stated explicitly so malicious/runaway bodies cannot swallow memory. axum `DefaultBodyLimit` applies only to extractors (Json/Bytes),
+    //   while rmcp `StreamableHttpService` consumes the raw body directly, so it does not work; `RequestBodyLimitLayer` wraps the body itself and cuts with 413 on overrun, covering rmcp too. 1MB suffices for initialize/tools/call and send POSTs.
+    // Layer order: body-limit → auth → route from outer to inner (in axum the later-written layer is outer), so the limit applies before auth or inner reads the body.
     const MAX_BODY_BYTES: usize = 1024 * 1024;
     let send_state = ControlSendState {
         manager: manager.clone(),
@@ -1367,9 +1146,7 @@ pub async fn start_mcp_server_with_help(
     let agent_state = ControlAgentState { commands };
     help.log_startup();
     let help = Arc::new(help);
-    // ★Add routes by walking the list (`ControlRoute::ALL`) — do not revert to a builder chain★: a new route must
-    //   enter the list to be served, and once it does, the exhaustive match in `is_mail` forces mail classification
-    //   at compile time (ADR-0133). A chain bypasses that enforcement.
+    // Add routes by walking the list (`ControlRoute::ALL`) — do not revert to a builder chain: a new route must enter the list to be served, and then the exhaustive match in `is_mail` forces mail classification at compile time (ADR-0133); a chain bypasses it.
     let mut app = axum::Router::new().nest_service(MCP_PATH, mcp_service);
     for route in ControlRoute::ALL {
         app = match route {
@@ -1415,14 +1192,14 @@ pub async fn start_mcp_server_with_help(
             serve_cancel.cancelled().await;
         });
         if let Err(e) = graceful.await {
-            tracing::warn!("MCP axum serve 종료: {e}");
+            tracing::warn!("MCP axum serve ended: {e}");
         }
     });
 
     tracing::info!(
         port = addr.port(),
         path = MCP_PATH,
-        "MCP 서버 시작(ADR-0086)"
+        "MCP server started (ADR-0086)"
     );
     Ok(McpServerHandle {
         url,
@@ -1437,9 +1214,7 @@ mod tests {
 
     // ── ADR-0133: route classification — a new route does not silently leak as "not mail" ──────────────────
 
-    /// ★This function is the body of this test★: adding a variant **breaks compilation** here, forcing the classification to be written by hand.
-    ///   The point is to state it **separately** from `ControlRoute::is_mail`, so it does not call that — if the two diverge,
-    ///   the assertions below go red.
+    /// This function is the body of this test: adding a variant breaks compilation here, forcing the classification to be written by hand. It is stated separately from `ControlRoute::is_mail` and does not call it — if the two diverge the assertions go red.
     fn expected_is_mail(route: ControlRoute) -> bool {
         match route {
             ControlRoute::Send => true,
@@ -1457,13 +1232,13 @@ mod tests {
             assert_eq!(
                 route.is_mail(),
                 expected_is_mail(route),
-                "{route:?}({}) 의 우편 분류가 갈렸다",
+                "the mail classification of {route:?}({}) diverged",
                 route.path()
             );
             assert_eq!(
                 ControlRoute::from_path(route.path()),
                 Some(route),
-                "명단에 있으면 경로로 되찾을 수 있어야: {route:?}"
+                "if it is on the list, it must be recoverable by path: {route:?}"
             );
         }
         // The router is assembled by walking this list — if the length shrinks, a route has silently disappeared.
@@ -1471,7 +1246,7 @@ mod tests {
         assert_eq!(
             ControlRoute::ALL.iter().filter(|r| r.is_mail()).count(),
             2,
-            "우편 라우트는 발송·조회 둘 — 제어 평면이 늘어도 이 수는 안 는다"
+            "mail routes are two, send and query — this number does not grow even if the control plane grows"
         );
     }
 
@@ -1481,13 +1256,12 @@ mod tests {
         for path in [MCP_PATH, "/mcp/", "/mcp/whatever", "/", "/health"] {
             assert!(
                 !mail_gated_path(path),
-                "제어 평면 밖 경로에 우편 게이트가 걸리면 안 된다: {path}"
+                "a mail gate must not apply to a path outside the control plane: {path}"
             );
         }
     }
 
-    /// ★A control path with a missing classification folds toward rejection★: if this direction were reversed, the mistake of forgetting to register in the list when adding a route
-    ///   would **open a mail entrance with no signal at all**.
+    /// A control path with a missing classification folds toward rejection: reversed, forgetting to register a new route would open a mail entrance with no signal.
     #[test]
     fn an_unclassified_control_path_folds_to_the_mail_gate() {
         for path in [
@@ -1499,11 +1273,11 @@ mod tests {
             assert_eq!(
                 ControlRoute::from_path(path),
                 None,
-                "전제: 명단 밖 경로여야 이 단언이 의미를 가진다({path})"
+                "premise: this assertion means something only for a path outside the list ({path})"
             );
             assert!(
                 mail_gated_path(path),
-                "명단 밖 제어 경로는 우편으로 접혀야(fail-closed): {path}"
+                "a control path outside the list must fold into mail (fail-closed): {path}"
             );
         }
         // A route in the list follows its own classification as is (the folding does not overwrite the classification).
@@ -1513,13 +1287,15 @@ mod tests {
             CONTROL_CALL_PATH,
             CONTROL_HELP_PATH,
         ] {
-            assert!(!mail_gated_path(open), "제어 평면은 전원 개방: {open}");
+            assert!(
+                !mail_gated_path(open),
+                "the control plane is open to everyone: {open}"
+            );
         }
         for route in ControlRoute::ALL {
             assert_eq!(mail_gated_path(route.path()), route.is_mail(), "{route:?}");
         }
-        // ★Segment boundary★: if paths that merely look similar but are not in this namespace were folded, a future
-        //   route at that spot would be rejected for no reason (the failure mode of a bare string-prefix comparison).
+        // Segment boundary: folding merely similar paths would reject a future route there for no reason (the failure mode of a bare string-prefix comparison).
         for path in [
             "/controlfoo",
             "/control-x",
@@ -1528,33 +1304,31 @@ mod tests {
         ] {
             assert!(
                 !mail_gated_path(path),
-                "제어 네임스페이스 밖 이름을 접으면 안 된다: {path}"
+                "a name outside the control namespace must not be folded: {path}"
             );
         }
     }
 
-    /// ★The rejection response does not announce an alternative channel (ADR-0133 decision 3)★: announcing the other channel here would let the mutual-exclusion seal of
-    ///   the two priming files be bypassed through this path.
+    /// The rejection response does not announce an alternative channel (ADR-0133 decision 3): doing so would let the mutual-exclusion seal of the two priming files be bypassed through this path.
     ///
-    /// ★Read the body made by the real constructor (`mail_not_allowed`) — do not reassemble the same JSON here★:
-    ///   if a copy were inspected, this test would stay green even if the constructor added a field or changed the wording.
+    /// Read the body from the real constructor (`mail_not_allowed`), not a reassembled copy: a copy would stay green if the constructor added a field or changed the wording.
     #[tokio::test]
     async fn the_mail_rejection_names_no_other_channel() {
         let resp = mail_not_allowed();
         assert_eq!(
             resp.status(),
             StatusCode::OK,
-            "우편 라우트의 '항상 200 + JSON' 계약을 따른다(CLI 는 exit code 로 판정)"
+            "follows the mail route's 'always 200 + JSON' contract (the CLI decides by exit code)"
         );
         let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
             .await
-            .expect("거절 body");
+            .expect("refusal body");
         let body = String::from_utf8(bytes.to_vec()).expect("UTF-8 body");
         let lowered = body.to_lowercase();
         for forbidden in [SEND_MESSAGE_TOOL, MESSAGES_TOOL, "mcp", "tool", "server"] {
             assert!(
                 !lowered.contains(&forbidden.to_lowercase()),
-                "거절 응답이 상대 채널을 가리키면 안 된다({forbidden}): {body}"
+                "the refusal response must not point at the other channel ({forbidden}): {body}"
             );
         }
         // The bounce shape folds as is into the CLI's existing three-way split (no new class of outcome is created).
@@ -1568,16 +1342,13 @@ mod tests {
 
     use crate::log_capture::capture_loud_async as capture_loud;
 
-    /// ★A caller string that goes verbatim into a log line printed **before** validation becomes log forgery★
+    /// A caller string going verbatim into a log line printed before validation becomes log forgery.
     ///
-    /// This route's mail rejection leaves a `warn` having only looked at the name and verified nothing — so
-    /// that name is a completely arbitrary string. One newline splits a log line in two and the second line looks like an entry we printed,
-    /// and since the default level is warn, that line **really lands in the production log file**.
-    /// ★What is measured is not 「함수를 불렀나」 (was the function called) but 「그 필드에 원문이 갔나」 (did the verbatim text reach that field)★ — so it runs the real handler
-    /// and reads the field text of the log event. Reverting to a length-only truncating function (`agent::preview`) turns this red.
+    /// This route's mail rejection leaves a `warn` having verified nothing, so the name is arbitrary; one newline forges a second entry and, the default level being warn, it really lands in the production log file.
+    /// Measured is "did the verbatim text reach that field", not "was the function called": it runs the real handler and reads the log event's field text; reverting to a length-only function (`agent::preview`) turns this red.
     #[test]
     fn a_control_character_in_the_called_name_never_reaches_the_log_field_verbatim() {
-        // A newline + a forged entry + **a tail tag that must be pushed out of the width** (two properties measured with one value).
+        // A newline + a forged entry + a tail tag that must be pushed out of the width (two properties with one value).
         let forged = "mail.probe\n2026-08-19T00:00:00Z  WARN forged entry padded out past the field width TAILMARK";
         let lines = capture_loud(async move {
             let (bus, sweeper) = crate::command_delivery::CommandBus::without_commands();
@@ -1599,25 +1370,31 @@ mod tests {
                 axum::body::Bytes::from(body),
             )
             .await;
-            assert_eq!(resp.status(), StatusCode::OK, "우편 거절은 200 + 반려 봉투");
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "a mail refusal is 200 + a bounce envelope"
+            );
             sweeper.stop().await;
         });
 
         let logged = lines
             .iter()
             .find(|line| line.contains("command="))
-            .unwrap_or_else(|| panic!("거절 줄이 남아야 한다(계측 의무): {lines:?}"));
+            .unwrap_or_else(|| {
+                panic!("the refusal line must remain (instrumentation duty): {lines:?}")
+            });
         assert!(
             !logged.contains('\n'),
-            "로그 필드가 줄을 쪼갤 수 있으면 위조 항목이 생긴다: {logged:?}"
+            "if a log field can split the line, forged entries appear: {logged:?}"
         );
         assert!(
             logged.contains("\\n"),
-            "제어문자는 escape 된 모양으로 남아야(값을 지우는 것이 아니다): {logged:?}"
+            "control characters must remain in escaped form (not erasing the value): {logged:?}"
         );
         assert!(
             !logged.contains("TAILMARK"),
-            "로그 한 줄의 폭을 상대가 정하게 하면 안 된다(폭 상한): {logged:?}"
+            "the width of one log line must not be decided by the other party (width cap): {logged:?}"
         );
     }
 
@@ -1648,11 +1425,11 @@ mod tests {
         let s = serde_json::to_string(&schema).expect("serialize schema");
         assert!(
             s.contains("\"to\"") && s.contains("\"body\""),
-            "스키마에 to/body: {s}"
+            "schema has to/body: {s}"
         );
         assert!(
             !s.contains("\"from\""),
-            "eg_send 스키마에 from 필드가 없어야: {s}"
+            "the eg_send schema must not have a from field: {s}"
         );
     }
 
@@ -1685,9 +1462,9 @@ mod tests {
 
     #[test]
     fn to_field_deserializes_both_string_and_array_shapes() {
-        let one: ToField = serde_json::from_str(r#""bob""#).expect("string 형태");
+        let one: ToField = serde_json::from_str(r#""bob""#).expect("string form");
         assert_eq!(one.into_tokens(), vec!["bob".to_string()]);
-        let many: ToField = serde_json::from_str(r#"["bob","@all"]"#).expect("array 형태");
+        let many: ToField = serde_json::from_str(r#"["bob","@all"]"#).expect("array form");
         assert_eq!(
             many.into_tokens(),
             vec!["bob".to_string(), "@all".to_string()]
@@ -1699,32 +1476,19 @@ mod tests {
         let router = EngramMcpHandler::tool_router();
         assert!(
             router.has_route(SEND_MESSAGE_TOOL),
-            "라우터에 '{SEND_MESSAGE_TOOL}' 툴이 등록돼 있어야(const ↔ #[tool] 메서드명 일치 강제)"
+            "the '{SEND_MESSAGE_TOOL}' tool must be registered in the router (enforces const ↔ #[tool] method name match)"
         );
     }
 
-    /// ★The pin moved over (the front half of `control/priming.rs::production_priming_files_pin_taught_channels`)★:
-    ///   it used to check whether the priming file carries the word `send_message` — because at that time that was the
-    ///   **only teaching surface** for MCP-capable spawns. As priming shrank to a one-line pointer, that surface
-    ///   moved to this description (ADR-0126 decision 1's "an entrance teaches only one" is unchanged), so the pin came along too.
+    /// The pin moved over (front half of `control/priming.rs::production_priming_files_pin_taught_channels`): it checked that the priming file carries `send_message`, then the only teaching surface for MCP-capable spawns; as priming shrank to a one-line pointer
+    /// that surface moved to this description (ADR-0126 decision 1, an entrance teaches only one), and the pin came along.
     ///
-    /// ★The name alone is not enough★: what `tools_list_exposes_send_message_tool` checks is only the routing name,
-    ///   so it stays green even if the description is empty. If the description disappears, all the agent keeps is the name and the JSON schema,
-    ///   and it runs **without learning how to call it from anywhere** — priming no longer backs that spot,
-    ///   so this is the one place that catches that silence.
-    ///
-    /// ★The **tool-argument spelling** of the reply contract (snake_case) is checked here too (ADR-0103 decision 2/3)★: envelope recognition
-    ///   (including `<notice>`) is owned by the `engram help mail` screen (`control/help.rs`), and this side owns only its own entrance's
-    ///   argument spelling. Splitting one contract per surface is the shape of ADR-0126 decision 1.
-    ///
-    /// ★The two assertions below existed only in the old instructions and were revived on this surface — do not delete them★:
-    ///   ① do not infer the other party's state from `pending`; query with `eg_messages` (one of the two ADR-0211 decision 2 named
-    ///      explicitly. An explanation that pins the cause on a single one flatly violates that prohibition).
-    ///   ② tell it apart from the similarly named harness built-in `SendMessage` (ADR-0106 — deny is blocked structurally, but
-    ///      if the agent does not know that a misfire ends in a permission denial, it reports to the owner **on its own judgment that the mail
-    ///      channel is broken**. ★The old reason 「지시서가 시킨 채널 고장 보고」 (the channel-failure report the instructions ordered) is no longer true★ — the four
-    ///      behavior-rule lines that ordered that report were withdrawn from priming (`control/priming.rs` comment), and priming now
-    ///      says nothing about this misfire. So this description is the only guidance surface).
+    /// The name alone is not enough: `tools_list_exposes_send_message_tool` checks only the routing name and stays green with an empty description, leaving the agent with a name and JSON schema and nowhere to learn how to call it — this is the one place that catches that silence.
+    /// The tool-argument spelling of the reply contract (snake_case) is checked here too (ADR-0103 decision 2/3): envelope recognition (including `<notice>`) belongs to the `engram help mail` screen (`control/help.rs`), this side owns only its own entrance's spelling (one contract per surface, ADR-0126 decision 1).
+    /// Do not delete the two assertions below — they existed only in the old instructions and were revived here:
+    ///   1. do not infer the other party's state from `pending`; query with `eg_messages` (ADR-0211 decision 2; an explanation pinning the cause on a single one violates that prohibition).
+    ///   2. tell it apart from the similarly named harness built-in `SendMessage` (ADR-0106 — deny is blocked structurally, but an agent not knowing a misfire ends in a permission denial would report on its own judgment that the mail channel is broken). The old reason "the channel-failure report the instructions ordered" is
+    ///      no longer true (those four behavior-rule lines were withdrawn from priming — `control/priming.rs` comment); this description is now the only guidance surface.
     // ADR-0103
     // ADR-0106
     // ADR-0126
@@ -1736,17 +1500,12 @@ mod tests {
         let tool = tools
             .iter()
             .find(|t| t.name == SEND_MESSAGE_TOOL)
-            .unwrap_or_else(|| panic!("tools/list 에 '{SEND_MESSAGE_TOOL}' 이 있어야"));
+            .unwrap_or_else(|| panic!("tools/list must have '{SEND_MESSAGE_TOOL}'"));
         let desc = tool.description.as_deref().unwrap_or_else(|| {
-            panic!("'{SEND_MESSAGE_TOOL}' 에 설명문이 있어야(이게 교육 표면이다)")
+            panic!("'{SEND_MESSAGE_TOOL}' must have a description (this is the teaching surface)")
         });
-        // ★The home of the argument contract moved (2026-09-23)★: the description used to re-explain things one line per field; that was withdrawn
-        //   and left to the **per-field descriptions of the input schema** — it was a duplicate carrying the same contract in two copies, and the schema side is more
-        //   detailed and attached at the very place where the model fills in arguments. The contract did not disappear but gathered into one home,
-        //   so this pin looks at that home too. If the schema is empty, the agent receives only field names and cannot learn their meaning.
-        // ★Check whether **meaning was carried**, not field names★: schemars prints field names into `properties` as they are even if
-        //   all doc comments are erased. Looking at names alone cannot catch the failure condition above, 「스키마가 비면 에이전트는 칸 이름만 받고 뜻을 못
-        //   배운다」 (if the schema is empty, the agent receives only field names and cannot learn their meaning) (an adversarial review caught it — 2026-09-23).
+        // The home of the argument contract moved (2026-09-23): the description no longer re-explains per field (a duplicate of the schema's per-field descriptions, which are more detailed and sit where the model fills in arguments), so this pin looks at that home too; with an empty schema the agent receives only field names.
+        // Check that meaning was carried, not field names: schemars prints field names into `properties` even with all doc comments erased, so names alone cannot catch that failure (caught by an adversarial review — 2026-09-23).
         fn carries_description(v: &serde_json::Value) -> bool {
             match v {
                 serde_json::Value::Object(m) => {
@@ -1763,54 +1522,54 @@ mod tests {
             .input_schema
             .get("properties")
             .and_then(|v| v.as_object())
-            .expect("입력 스키마에 properties 가 있어야");
+            .expect("the input schema must have properties");
         for arg in ["to", "body", "reply_to", "reply_by"] {
-            let slot = props
-                .get(arg)
-                .unwrap_or_else(|| panic!("입력 스키마가 {arg} 칸을 실어야: {props:?}"));
+            let slot = props.get(arg).unwrap_or_else(|| {
+                panic!("the input schema must carry the {arg} field: {props:?}")
+            });
             assert!(
                 carries_description(slot),
-                "{arg} 칸에 설명이 실려야(인자 계약의 집이 여기다 — 설명문에서 걷어낸 것을 스키마가 진다): {slot}"
+                "the {arg} field must carry a description (the home of the argument contract is here — the schema carries what was stripped from the description): {slot}"
             );
         }
-        // ★The ① above (do not infer the other party's state from `pending`; query) moved to the `help mail` screen★ —
-        //   ADR-0211 decision 2 remains valid, and what moved is the surface, not the contract. The pin in that place is owned by
-        //   `the_mail_screen_teaches_the_reply_contract` in `control/help.rs`. Here we check only **whether it points at** that screen —
-        //   if the pointer breaks, the whole out-of-argument contract loses its place to go.
+        // The ① above (do not infer the other party's state from `pending`; query) moved to the `help mail` screen — ADR-0211 decision 2 still holds, only the surface moved; its pin is `the_mail_screen_teaches_the_reply_contract` in `control/help.rs`.
+        //   Here we check only that it points at that screen — if the pointer breaks, the whole out-of-argument contract loses its place to go.
         assert!(
             desc.contains("engram help mail"),
-            "설명문이 나머지 규칙을 어디서 읽는지 가리켜야: {desc}"
+            "the description must point to where the remaining rules are read: {desc}"
         );
         assert!(
             desc.contains("SendMessage"),
-            "이름이 닮은 하네스 내장 툴과 자기를 갈라 가르쳐야(오발이 권한 거부로 끝난다는 것을 모르면 \
-             허위 '채널 고장' 보고가 올라간다 — ADR-0106): {desc}"
+            "it must teach itself apart from the similarly named harness built-in tool (if it does not know a misfire ends in a permission refusal, \
+             a false 'channel broken' report goes up — ADR-0106): {desc}"
         );
     }
 
     #[test]
     fn tools_list_exposes_the_query_tools() {
-        // If the const ↔ #[tool] method name drift apart, the tool name priming teaches and the actually exposed name diverge, and the query
-        //   entrance silently ceases to exist.
+        // If the const ↔ #[tool] method name drift, the tool name priming teaches and the exposed name diverge and the query entrance silently ceases to exist.
         let router = EngramMcpHandler::tool_router();
-        assert!(router.has_route(MESSAGES_TOOL), "'{MESSAGES_TOOL}' 툴 등록");
+        assert!(
+            router.has_route(MESSAGES_TOOL),
+            "'{MESSAGES_TOOL}' tool registered"
+        );
     }
 
     #[test]
     fn query_tool_schemas_build_and_carry_no_identity_field() {
         let m =
             serde_json::to_string(&schemars::schema_for!(MessagesArgs)).expect("messages schema");
-        assert!(m.contains("\"id\""), "messages 스키마에 id: {m}");
+        assert!(m.contains("\"id\""), "messages schema has id: {m}");
         assert!(
             !m.contains("\"from\"") && !m.contains("required"),
-            "messages 인자는 전부 선택 + from 없음: {m}"
+            "messages arguments are all optional + no from: {m}"
         );
     }
 
     #[tokio::test]
     async fn server_starts_and_reports_local_url() {
         let reg = Arc::new(ControlRegistry::new());
-        // ★The sweeper must be held★ — if it is dropped, the seat table closes on the spot and every round trip after that is bounced.
+        // The sweeper must be held — if dropped, the seat table closes at once and every round trip after is bounced.
         let (relay_bus, _relay_sweeper) = crate::command_delivery::CommandBus::without_commands();
         let handle = start_mcp_server_without_help(
             reg,
@@ -1823,7 +1582,7 @@ mod tests {
         .expect("start mcp server");
         assert!(
             handle.url.starts_with("http://127.0.0.1:") && handle.url.ends_with("/mcp"),
-            "로컬 엔드포인트 URL: {}",
+            "local endpoint URL: {}",
             handle.url
         );
         handle.shutdown().await;
@@ -1833,7 +1592,7 @@ mod tests {
     #[tokio::test]
     async fn dropping_handle_cancels_serve_task() {
         let reg = Arc::new(ControlRegistry::new());
-        // ★The sweeper must be held★ — if it is dropped, the seat table closes on the spot and every round trip after that is bounced.
+        // The sweeper must be held — if dropped, the seat table closes at once and every round trip after is bounced.
         let (relay_bus, _relay_sweeper) = crate::command_delivery::CommandBus::without_commands();
         let handle = start_mcp_server_without_help(
             reg,
@@ -1845,11 +1604,11 @@ mod tests {
         .await
         .expect("start mcp server");
         let watch = handle.cancel.clone();
-        assert!(!watch.is_cancelled(), "start 직후엔 cancel 안 됨");
+        assert!(!watch.is_cancelled(), "not cancelled right after start");
         drop(handle);
         assert!(
             watch.is_cancelled(),
-            "핸들 drop 시 cancel 토큰이 발화돼 detached serve 태스크가 종료돼야(F5)"
+            "on handle drop the cancel token must fire and the detached serve task must end (F5)"
         );
     }
 }

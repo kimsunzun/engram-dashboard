@@ -1,16 +1,10 @@
-//! Round trips that share one request id on the shell's daemon link — the transport's M1 rule (transport TRD §4-1)
-//! seen through the shell's wire (`link::wire::ShellWire`) and its caller texts (`link::errors`). No daemon, no Tauri:
-//! the daemon's side is a memory link.
-//!
+//! Round trips that share one request id on the shell's daemon link — the transport's M1 rule (transport TRD §4-1) seen through the shell's wire (`link::wire::ShellWire`) and its caller texts (`link::errors`). No daemon, no Tauri: the daemon's side is a memory link.
 //! Run: `cargo test -p engram-dashboard --test daemon_client_pending` (no child process, so no `-- --test-threads=4` —
-//! the rule is `.claude/skill-bindings/qa.md` 「모듈별 명령」). CI runs this target in its own step
+// hangul-ok-begin
+//! rule: `.claude/skill-bindings/qa.md` 「모듈별 명령」). CI runs this target in its own step
+// hangul-ok-end
 //! (`.github/workflows/ci.yml`).
-//!
-//! ## ★What it guards — an overlapping request id fails both and kills nothing★
-//! The request id of `AgentCommand::Command { envelope }` is the outside caller's (the webview forwards it through
-//! `forward_daemon_command`), so two round trips can share one. A reply cannot tell them apart, so the transport fails
-//! both: the older waiter reads [`PENDING_SUPERSEDED`], the newer one a send failure, and the id is retired. The link
-//! stays up — a crash here once cut every command until a restart (debug GUI measurement 2026-08-18).
+//! What it guards — an overlapping request id fails both and kills nothing: the request id of `AgentCommand::Command { envelope }` is the outside caller's (the webview forwards it through `forward_daemon_command`), so two round trips can share one. A reply cannot tell them apart, so the transport fails both — the older waiter reads [`PENDING_SUPERSEDED`], the newer a send failure — and retires the id. The link stays up; a crash here once cut every command until a restart (debug GUI measurement 2026-08-18).
 
 use std::sync::Arc;
 
@@ -27,8 +21,7 @@ use engram_dashboard_transport::{
 };
 use tokio::task::JoinHandle;
 
-/// A live connection on the shell wire — `endpoint` is the daemon's side; the other fields keep the link alive (a
-/// dropped inbox ends the peer).
+/// A live connection on the shell wire — `endpoint` is the daemon's side; the other fields keep the link alive (a dropped inbox ends the peer).
 struct Link {
     peer: Peer<ShellWire>,
     endpoint: Arc<MemoryEndpoint>,
@@ -72,7 +65,6 @@ fn ack(request_id: RequestId) -> Frame {
     Frame::Text(serde_json::to_string(&AgentEvent::Ack { request_id }).unwrap())
 }
 
-/// A round trip on its own task — as the shell's callers make it.
 fn round_trip(link: &Link, cmd: AgentCommand) -> JoinHandle<Result<ShellIn, RequestError>> {
     let peer = link.peer.clone();
     tokio::spawn(async move { peer.request(cmd).await })
@@ -84,7 +76,6 @@ async fn joined<T>(what: &str, task: JoinHandle<T>) -> T {
     task.await.expect("the task ran to its end")
 }
 
-/// The text the shell's caller gets for a failed round trip.
 fn caller_text(result: Result<ShellIn, RequestError>) -> String {
     match result {
         Ok(reply) => panic!("expected a failure, got {reply:?}"),
@@ -96,8 +87,7 @@ fn is_ack(result: &Result<ShellIn, RequestError>, rid: RequestId) -> bool {
     matches!(result, Ok(ShellIn::Event(AgentEvent::Ack { request_id })) if *request_id == rid)
 }
 
-/// ★Core regression★ — two round trips on one request id: the older reads the superseded text, the newer a send
-/// failure, and the link takes the next round trip.
+/// Core regression: two round trips on one request id — the older reads the superseded text, the newer a send failure, and the link takes the next round trip.
 #[tokio::test]
 async fn a_duplicate_request_id_fails_both_round_trips_and_the_link_lives() {
     let link = live().await;

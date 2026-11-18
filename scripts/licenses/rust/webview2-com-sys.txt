@@ -1,6 +1,6 @@
-// webview2-com-sys 0.38.2 의 crates.io 패키지에는 라이선스 본문 파일이 없다 — 상류 저장소의 파일을 손대지 않고 옮겼다.
-// 출처: https://github.com/wravery/webview2-rs/blob/b74dc5e2b394044bea5191052868ce7a106c202c/LICENSE
-//   커밋 = 그 버전 .cargo_vcs_info.json 의 sha1
+// The crates.io package of webview2-com-sys 0.38.2 has no license text file — the file from the upstream repository was moved over unchanged.
+// Source: https://github.com/wravery/webview2-rs/blob/b74dc5e2b394044bea5191052868ce7a106c202c/LICENSE
+//   commit = the sha1 in that version's .cargo_vcs_info.json
 // crate: webview2-com-sys 0.38.2
 MIT License
 

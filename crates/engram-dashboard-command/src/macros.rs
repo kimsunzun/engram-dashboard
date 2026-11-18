@@ -1,13 +1,13 @@
-//! 선언 매크로 — 이름 · 인자 모양 · 반환 · 오류를 한 자리에 적고 파생물을 자동으로 만든다(TRD §2-2).
+//! Declaration macro — writes name · argument shape · return · errors in one spot and builds the derivatives automatically (TRD §2-2).
 //!
-//! 매크로가 만드는 것 넷: ① 인자·반환 struct(직렬화 derive 포함) ② `CommandSpec` 정적 항목(링커 수집)
-//! ③ JSON Schema 텍스트 ④ 선언 crate 의 `CATALOG_VERSION`.
+//! Builds: ① argument·return structs (with serialization derives) ② `CommandSpec` static items (linker collection) ③ JSON Schema text ④
+//!   the declaring crate's `CATALOG_VERSION`.
 //!
-//! ★스키마 텍스트는 **컴파일 타임 리터럴**이어야 한다★ — 링커 수집 항목은 const 로 평가되므로
-//! `&'static str` 밖의 자료형을 쓸 수 없다. 그래서 타입→스키마 사전을 블록마다 `macro_rules!` 로 찍고
-//! `concat!` 이 사용처에서 그것을 펼쳐 리터럴로 접는다(`concat!` 은 인자 안의 매크로를 먼저 편다).
+//! ★The schema text must be a **compile-time literal**★ — linker-collected items are const-evaluated, so only `&'static str` is possible.
+//!   The type→schema dictionary is stamped per block
+//! with `macro_rules!` and `concat!` folds it into a literal at the use site (`concat!` expands macros in its arguments first).
 
-/// 명령을 **생산자 모듈 옆**에서 선언한다.
+/// Declares commands **next to the producer module**.
 ///
 /// ```ignore
 /// declare_commands! {
@@ -15,7 +15,7 @@
 ///
 ///     struct AgentRow { id: String, name: String, parent: Option<String> }
 ///
-///     /// 에이전트를 띄운다(잠든 것 깨우기 포함).
+///     /// Launches an agent (including waking a sleeping one).
 ///     #[effect(Write)] #[since(1)]
 ///     "agent.spawn" => args AgentSpawnArgs {
 ///         target: Option<String>,
@@ -26,71 +26,68 @@
 /// }
 /// ```
 ///
-/// ## 만들어지는 것 (호출한 모듈 안에)
+/// ## What gets built (inside the calling module)
 ///
-/// - `CATALOG_VERSION: u32` — 이 crate 의 어휘 세대. **선언이 바뀌면 손으로 올린다**(§4-①).
-/// - `COMMAND_SPECS: &[&CommandSpec]` — 이 블록이 선언한 전량. [`crate::CommandTable::new`] 이 받는
-///   「자기 crate 선언 집합」이다.
-/// - 인자·반환 struct 와 블록 안 선언 타입(serde + ts-rs derive).
-/// - `<인자타입>::SPEC` 과 그 링커 수집 항목.
+/// - `CATALOG_VERSION: u32` — this crate's vocabulary generation. **Raise it by hand when a declaration changes** (§4-①).
+/// - `COMMAND_SPECS: &[&CommandSpec]` — everything this block declared. It is the 「own crate's declaration set」
+///   [`crate::CommandTable::new`] receives.
+/// - argument·return structs and types declared inside the block (serde + ts-rs derive).
+/// - `<ArgsType>::SPEC` and its linker-collected item.
 ///
-/// ## 허용 타입 알파벳 (그 밖은 컴파일 에러)
+/// ## Allowed type alphabet (anything else is a compile error)
 ///
-/// | 쓰는 법 | JSON 에서의 뜻 | 필드 생략 |
+/// | How to write | Meaning in JSON | Field omission |
 /// |---|---|---|
-/// | `String`·`bool`·정수·실수 | 그 원시 타입 | **불가**(required) |
-/// | `Vec<T>` | 배열 | **불가**(required) |
-/// | `Option<T>`·`Option<Vec<T>>` | 값 또는 `null` | 가능(optional) |
-/// | `Option<Option<T>>` | 값 또는 `null` — ★**부재·`null`·값 셋을 가른다**★ | **불가**(required) |
-/// | 이 블록에서 선언한 struct/enum | 인라인으로 펼쳐진 객체 / 문자열 열거 | **불가**(required) |
+/// | `String`·`bool`·integers·floats | that primitive type | **not allowed** (required) |
+/// | `Vec<T>` | array | **not allowed** (required) |
+/// | `Option<T>`·`Option<Vec<T>>` | a value or `null` | allowed (optional) |
+/// | `Option<Option<T>>` | a value or `null` — ★**tells apart absent·`null`·value**★ | **not allowed** (required) |
+/// | a struct/enum declared in this block | an inline-expanded object / string enumeration | **not allowed** (required) |
 ///
-/// ## 에이전트 참조 칸 — `#[agent_ref]` (ADR-0308)
+/// ## Agent reference field — `#[agent_ref]` (ADR-0308)
 ///
-/// 인자 struct 의 꼭대기 `String`·`Option<String>` 칸에 doc 주석 **뒤**로 단다:
+/// Put it on a top-level `String`·`Option<String>` field of the argument struct, **after** the doc comment:
 ///
 /// ```ignore
 ///     "slot.focus" => args SlotFocusArgs {
-///         /// 고를 에이전트 — 이름이나 id.
+///         /// The agent to pick — a name or an id.
 ///         #[agent_ref]
 ///         agent: Option<String>,
 ///     } -> ok SlotFocusOk { } errors [NOT_FOUND];
 /// ```
 ///
-/// 표시한 칸 이름이 [`crate::CommandSpec::agent_args`] → 등록 패킷의 `agent_args` 로 실리고, 데몬이 남의 명령을
-/// 중계하기 전에 그 칸의 문자열을 자기 해석기로 에이전트 id 로 바꾼다 — 받는 쪽 핸들러는 그 칸에서 **id 만** 본다.
-/// 다른 타입 · 블록 안 선언 타입의 칸에 달면 컴파일 에러다. 스키마 · TS 바인딩은 표시와 무관하게 같다.
+/// The marked field names are carried through [`crate::CommandSpec::agent_args`] → `agent_args` of the registration packet; before
+///   relaying someone else's command the daemon turns that field's string
+/// into an agent id with its own resolver, so the receiving handler sees **only the id**. Putting it on another type or a type declared in
+///   the block is a compile error. Schema · TS bindings ignore the mark.
 ///
-/// ★`Option<Option<T>>` 가 있는 이유★: `null` 이 **적극적 지시**인 자리(예: 부모를 떼라)에서 평범한
-/// `Option<T>` 은 「안 줬다」와 「null 을 줬다」를 같은 값으로 접는다 — 오타 필드 하나가 조용히 그 지시로
-/// 실행된다. 바깥은 **실렸나**, 안쪽은 **값이 있나**를 뜻하고, 부재는 역직렬화 단계에서 반려된다.
+/// ★Why `Option<Option<T>>` exists★: where `null` is an **active instruction** (e.g. detach the parent), plain `Option<T>` folds "not
+///   given" and "given null" — one typo'd field silently runs as that instruction.
+/// The outer means **was it carried**, the inner **is there a value**; absence is bounced at deserialization.
 ///
-/// 정수는 Rust 타입의 범위가 `minimum`/`maximum` 으로 함께 실린다 — **64비트도 싣는다.**
+/// Integers carry the Rust type's range as `minimum`/`maximum` too — **64-bit is carried as well.**
 ///
-/// ★알려진 부정확(64비트만)★: 수치를 배정도 실수로 파싱하는 검증기에서는 `2^64`·`±2^63` 부근의 경계가
-/// 가장 가까운 double 로 반올림돼 **한 칸 헐거워진다**. 그래도 싣는 이유는 **안 싣는 쪽이 더 넓게
-/// 틀리기** 때문이다 — 상한이 없으면 `18446744073709551616` 이 광고상 허용인데 역직렬화는 반려하고,
-/// `i64` 는 하한마저 없어진다. 정확한 거절은 어느 쪽이든 역직렬화가 한다.
-/// `usize`·`isize` 는 **64비트 타깃 기준**으로 싣는다(이 저장소의 타깃).
+/// ★Known imprecision (64-bit only)★: validators parsing numbers as doubles round the bounds near `2^64`·`±2^63` and **loosen by one
+///   step**. They are carried anyway because **omitting them is wrong more widely**
+/// (`18446744073709551616` advertised as allowed, `i64` losing its lower bound); exact refusal is done by deserialization. `usize`·`isize`
+///   are carried **on a 64-bit target basis**.
 ///
-/// ## 제약
+/// ## Constraints
 ///
-/// - **모듈 하나에 블록 하나** — 타입→스키마 사전 매크로의 이름이 고정이라 같은 모듈에 두 블록이면
-///   뒤 정의가 앞을 가린다.
-/// - **재귀 타입 불가**(`struct Node { child: Node }`) — 스키마가 인라인 전개라 끝나지 않는다. 중첩
-///   여덟 겹에서 컴파일 에러로 멈춘다.
-/// - **raw identifier 필드 금지**(`r#type`) — serde 가 쓰는 wire 이름(`type`)과 스키마에 찍히는 이름
-///   (`r#type`)이 갈리는데 매크로가 문자열을 다듬을 수단이 없다. [`crate::lint_spec`] 이 잡는다.
-/// - 소비 crate 는 `serde`(derive) 와 `ts-rs` 를 의존해야 하고, `Option<Option<T>>` 를 쓰면
-///   `engram_dashboard_command` 라는 이름으로 이 crate 를 의존해야 한다(serde 의 `deserialize_with` 가
-///   경로를 **문자열**로 받아 `$crate` 를 못 쓴다).
+/// - **One block per module** — the type→schema dictionary macro name is fixed; with two blocks the later shadows the earlier.
+/// - **No recursive types** — the schema is inline expansion; it stops with a compile error at eight levels of nesting.
+/// - **No raw identifier fields** (`r#type`) — serde's wire name (`type`) and the schema's (`r#type`) diverge and the macro cannot trim
+///   strings. [`crate::lint_spec`] catches it.
+/// - The consuming crate must depend on `serde` (derive) and `ts-rs`, and for `Option<Option<T>>` on this crate under the name
+///   `engram_dashboard_command` (serde's `deserialize_with` takes the path as a **string**, so `$crate` is unusable).
 ///
-/// ## 하지 않는 것
+/// ## What it does not do
 ///
-/// - **핸들러를 만들지 않는다.** 실물은 `make_table(deps)` 가 조립 때 주입한다(규칙 T-1).
-/// - **필드 주석을 스키마에 싣지 않는다** — 리터럴 안에 다시 문자열을 끼우면 따옴표를 이스케이프할
-///   방법이 매크로에 없다. 명령 단위 설명(`summary`)만 실린다(런타임 직렬화라 안전하다).
-/// - **공통 오류를 적게 하지 않는다** — `INVALID_ARGUMENT`·`INTERNAL` 은 표가 내는 것이라
-///   [`crate::CommandSpec::advertised_errors`] 가 자동으로 얹는다.
+/// - **It does not build handlers.** The real ones are injected by `make_table(deps)` at assembly (rule T-1).
+/// - **It does not carry field comments into the schema** — the macro cannot escape quotes when nesting strings in the literal. Only the
+///   per-command `summary` is carried (runtime serialization).
+/// - **It does not make you write common errors** — `INVALID_ARGUMENT`·`INTERNAL` come from the table via
+///   [`crate::CommandSpec::advertised_errors`].
 // ADR-0155
 #[macro_export]
 macro_rules! declare_commands {
@@ -98,7 +95,7 @@ macro_rules! declare_commands {
         catalog_version: $version:literal;
         $($body:tt)*
     ) => {
-        /// 이 crate 의 명령 어휘 세대(TRD §4-①). 봉투의 `proto_ver` 로 실린다.
+        /// This crate's command vocabulary generation (TRD §4-①). Carried as the envelope's `proto_ver`.
         pub const CATALOG_VERSION: u32 = $version;
 
         $crate::__engram_declare!(@types [] $($body)*);
@@ -108,7 +105,7 @@ macro_rules! declare_commands {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __engram_declare {
-    // ── 1단계: 블록 안 타입 선언을 먼저 모은다(사전을 찍으려면 전량이 있어야 한다) ──────────────
+    // ── Step 1: collect the type declarations inside the block first (stamping the dictionary needs all of them) ──────────────
     (@types [$($seen:tt)*] $(#[doc = $doc:literal])* struct $name:ident { $($fields:tt)* } $($rest:tt)*) => {
         $crate::__engram_declare!(@types [$($seen)* (struct $name [$($fields)*] [$($doc)*])] $($rest)*);
     };
@@ -119,20 +116,20 @@ macro_rules! __engram_declare {
         $crate::__engram_declare!(@emit [$($seen)*] $($rest)*);
     };
 
-    // ── 2단계: 타입 정의 + 타입→스키마 사전 + 명령들 ─────────────────────────────────────────
+    // ── Step 2: type definitions + type→schema dictionary + commands ─────────────────────────────────────────
     (@emit [$( ($kind:ident $tname:ident [$($tbody:tt)*] [$($tdoc:literal)*]) )*] $($commands:tt)*) => {
         $( $crate::__engram_declare!(@typedef $kind $tname [$($tbody)*] [$($tdoc)*]); )*
 
-        /// 이 블록의 타입→JSON Schema 사전. `concat!` 이 사용처에서 편다.
-        /// 첫 인자는 중첩 깊이(`[+ + …]` 한 덩이) — 재귀 타입이 무한히 펼쳐지지 않게 여덟 겹에서 멈춘다.
-        /// ★여기 안에서는 `$(...)*` 반복을 쓸 수 없다★ — 바깥 매크로가 그것을 자기 반복으로 읽어 터진다.
-        /// 그래서 깊이는 **덩이 하나**로 받아 그대로 넘기고, 증가는 바깥(`@type_schema`)이 한다.
+        /// This block's type→JSON Schema dictionary; `concat!` expands it at the use site. The first argument is the nesting depth (one
+        ///   `[+ + …]` lump) — it stops at eight levels so recursive types do not expand forever.
+        /// ★`$(...)*` repetition cannot be used inside★ — the outer macro reads it as its own repetition and blows up; so the depth is
+        ///   passed on **as one lump** and incremented outside (`@type_schema`).
         macro_rules! __engram_command_schema_of {
             ([+ + + + + + + +] $deep:ident) => {
                 compile_error!(concat!(
                     "declare_commands!: `", stringify!($deep),
-                    "` 에서 타입 중첩이 여덟 겹을 넘었다 — 재귀 struct/enum 은 알파벳 밖이다",
-                    "(스키마가 인라인 전개라 끝나지 않는다)."
+                    "` exceeded eight levels of type nesting — recursive struct/enum is outside the alphabet",
+                    " (the schema is inline expansion, so it never ends)."
                 ))
             };
             $( ($d:tt $tname) => {
@@ -143,7 +140,7 @@ macro_rules! __engram_declare {
             ($d:tt u8) => { "{\"type\":\"integer\",\"minimum\":0,\"maximum\":255}" };
             ($d:tt u16) => { "{\"type\":\"integer\",\"minimum\":0,\"maximum\":65535}" };
             ($d:tt u32) => { "{\"type\":\"integer\",\"minimum\":0,\"maximum\":4294967295}" };
-            // 64비트 경계는 double 파서에서 반올림된다(위 doc) — 그래도 없는 것보다 좁다.
+            // 64-bit bounds get rounded in a double parser (doc above) — still narrower than having none.
             ($d:tt u64) => {
                 "{\"type\":\"integer\",\"minimum\":0,\"maximum\":18446744073709551615}"
             };
@@ -165,9 +162,9 @@ macro_rules! __engram_declare {
             ($d:tt f64) => { "{\"type\":\"number\"}" };
             ($d:tt $other:ident) => {
                 compile_error!(concat!(
-                    "declare_commands!: 허용 타입 밖의 필드 타입 `", stringify!($other),
-                    "` — String·bool·정수·실수·Option<T>·Vec<T>·Option<Option<T>>·",
-                    "이 블록에서 선언한 struct/enum 만 쓴다."
+                    "declare_commands!: field type outside the allowed types `", stringify!($other),
+                    "` — use only String·bool·integers·floats·Option<T>·Vec<T>·Option<Option<T>>·",
+                    "struct/enum declared in this block."
                 ))
             };
         }
@@ -175,7 +172,7 @@ macro_rules! __engram_declare {
         $crate::__engram_declare!(@commands [] $($commands)*);
     };
 
-    // ── 타입 정의 ───────────────────────────────────────────────────────────────────────────
+    // ── Type definitions ───────────────────────────────────────────────────────────────────────────
     (@typedef struct $name:ident [$($fields:tt)*] [$($doc:literal)*]) => {
         $crate::__engram_declare!(@struct_def $name [$($doc)*] [] $($fields)* ,);
     };
@@ -185,7 +182,7 @@ macro_rules! __engram_declare {
         pub enum $name { $($variants)* }
     };
 
-    // struct 본체 — 필드를 하나씩 옮겨 적는다(끝에 붙인 `,` 가 종결 신호).
+    // struct body — copies the fields one by one (the trailing `,` is the termination signal).
     (@struct_def $name:ident [$($doc:literal)*] [$($out:tt)*]) => {
         $( #[doc = $doc] )*
         #[derive(Debug, Clone, PartialEq, ::serde::Serialize, ::serde::Deserialize, ::ts_rs::TS)]
@@ -194,18 +191,16 @@ macro_rules! __engram_declare {
     (@struct_def $name:ident [$($doc:literal)*] [$($out:tt)*] ,) => {
         $crate::__engram_declare!(@struct_def $name [$($doc)*] [$($out)*]);
     };
-    // 바깥 Option = 실렸나 · 안쪽 = 값이 있나. `transmitted` 가 그 둘을 가른다.
-    // ★`#[serde(default)]` 를 달지 않는 것이 이 필드의 계약 그 자체다★ — 달면 부재가 조용히 바깥 `None`
-    //   으로 접혀 **역직렬화를 통과하고**, 스키마가 required 라고 광고한 것을 핸들러 손검사에만 맡기게
-    //   된다(그 검사를 안 쓴 다음 명령이 광고를 어긴다). `deserialize_with` + default 없음 = 필드가
-    //   빠지면 serde 가 `missing field` 로 반려한다.
-    // ★`skip_serializing_if` 는 남긴다★ — 바깥이 `None` 인 값(코드가 직접 만든 경우)을 그대로 실으면
-    //   `null` 이 되어 「루트로 떼라」는 지시로 되읽힌다. 빼고 내보내야 상대가 반려한다.
-    // ★ts-rs 는 이 속성을 못 읽고 무시한다("failed to parse" 경고 — 실측)★: 무시되는 편이 맞다.
-    //   `skip_serializing_if` 를 읽으면 TS 칸이 `field?:` 가 되는데 그건 「부재 허용」이라 이 칸의 계약과
-    //   정반대다. 그래서 TS 는 필수 + nullable 로 나온다(`string | null | null` — TS 에서 `string | null`
-    //   과 같은 타입이다. 매크로가 `#[ts(as = …)]` 로 다듬을 수 없다 — 그 속성은 리터럴 문자열을 받는데
-    //   `macro_rules!` 는 타입 이름을 문자열 안에 끼워 넣지 못한다).
+    // Outer Option = was it carried · inner = is there a value. `transmitted` tells the two apart.
+    // ★Not attaching `#[serde(default)]` is this field's contract★ — with it, absence silently folds into the outer `None` and **passes
+    //   deserialization**, leaving what the schema advertised as required to the handler's manual check.
+    //   `deserialize_with` + no default = serde bounces a missing field with `missing field`.
+    // ★`skip_serializing_if` stays★ — an outer `None` built directly would otherwise go out as `null` and be read back as "detach to
+    //   root"; it must be left out for the counterpart to bounce it.
+    // ★ts-rs cannot read this attribute and ignores it ("failed to parse" warning)★ — right: reading `skip_serializing_if` would make the
+    //   TS field `field?:` ("absence allowed"), the opposite of this contract.
+    //   So the TS is required + nullable (`string | null | null` = `string | null`; `#[ts(as = …)]` cannot trim it — it takes a literal
+    //   string and `macro_rules!` cannot put a type name in one).
     (@struct_def $name:ident [$($doc:literal)*] [$($out:tt)*]
         $(#[doc = $fdoc:literal])* $field:ident : Option < Option < $ty:ident >> , $($rest:tt)*) => {
         $crate::__engram_declare!(@struct_def $name [$($doc)*]
@@ -214,7 +209,7 @@ macro_rules! __engram_declare {
                      skip_serializing_if = "Option::is_none")]
              pub $field : Option<Option<$ty>>,] $($rest)*);
     };
-    // `Option<Vec<T>>` 의 닫는 꺾쇠 둘은 `>>` 한 토큰으로 렉싱된다 — 매크로가 쪼갤 수 없어 그대로 받는다.
+    // The two closing angle brackets of `Option<Vec<T>>` are lexed as one `>>` token — the macro cannot split it, so it takes it as is.
     (@struct_def $name:ident [$($doc:literal)*] [$($out:tt)*]
         $(#[doc = $fdoc:literal])* $field:ident : Option < Vec < $ty:ident >> , $($rest:tt)*) => {
         $crate::__engram_declare!(@struct_def $name [$($doc)*]
@@ -238,8 +233,8 @@ macro_rules! __engram_declare {
             [$($out)* $(#[doc = $fdoc])* pub $field : $ty,] $($rest)*);
     };
 
-    // ── 스키마 텍스트 ───────────────────────────────────────────────────────────────────────
-    // 깊이 증가는 여기서 한다 — 사전 매크로 안에서는 반복을 쓸 수 없기 때문이다(위 사전 doc).
+    // ── Schema text ───────────────────────────────────────────────────────────────────────
+    // The depth increment is done here — because repetition cannot be used inside the dictionary macro (dictionary doc above).
     (@type_schema [$($d:tt)*] struct [$($fields:tt)*]) => {
         $crate::__engram_declare!(@obj [$($d)* +] "" "" [] [] $($fields)* ,)
     };
@@ -247,8 +242,8 @@ macro_rules! __engram_declare {
         $crate::__engram_declare!(@enum_schema "" [] $($variants)* ,)
     };
 
-    // `required` 는 **생략 가능한 필드만 뺀다** — 스키마가 「없어도 된다」고 광고했는데 역직렬화가
-    //   실패하면 그 광고를 보고 인자를 채우는 호출자(LLM)에게 거짓말을 한 것이다(ADR-0156).
+    // `required` **leaves out only the omittable fields** — if the schema advertised 「may be absent」 and deserialization
+    //   then failed, it would have lied to the caller (LLM) that fills arguments by that advertisement (ADR-0156).
     (@obj [$($d:tt)*] $psep:literal $rsep:literal [$($props:tt)*] [$($req:tt)*]) => {
         concat!("{\"type\":\"object\",\"properties\":{", $($props)* "},\"required\":[", $($req)* "]}")
     };
@@ -301,9 +296,9 @@ macro_rules! __engram_declare {
         $crate::__engram_declare!(@enum_schema "," [$($acc)* $sep, "\"", stringify!($variant), "\"",] $($rest)*)
     };
 
-    // ── 명령들 ──────────────────────────────────────────────────────────────────────────────
+    // ── Commands ──────────────────────────────────────────────────────────────────────────────
     (@commands [$($declared:ident)*]) => {
-        /// 이 블록이 선언한 전량 — `CommandTable::new` 이 받는 「자기 crate 선언 집합」.
+        /// Everything this block declared — the 「own crate's declaration set」 `CommandTable::new` receives.
         pub const COMMAND_SPECS: &[&$crate::CommandSpec] = &[ $( &$declared::SPEC, )* ];
     };
     (@commands [$($declared:ident)*]
@@ -315,7 +310,8 @@ macro_rules! __engram_declare {
                       errors [ $($code:ident),* $(,)? ] ;
         $($rest:tt)*
     ) => {
-        // 인자 칸의 `#[agent_ref]` 표시를 먼저 걷어 낸다 — 걷힌 칸 목록과 나머지 선언이 `@command` 로 간다.
+        // Strip the `#[agent_ref]` marks of the argument fields first — the list of stripped fields and the remaining declaration go to
+        //   `@command`.
         $crate::__engram_declare!(@agent_refs
             [ [$($summary)*] $effect $since $name $args $ok [$($ofields)*] [$($code)*] ]
             [] [] $($afields)* ,);
@@ -323,11 +319,11 @@ macro_rules! __engram_declare {
         $crate::__engram_declare!(@commands [$($declared)* $args] $($rest)*);
     };
 
-    // ── 에이전트 참조 표시(ADR-0308) ─────────────────────────────────────────────────────────
-    // 칸 하나씩 옮겨 적으며 `#[agent_ref]` 를 떼고 그 칸 이름을 모은다(끝에 붙인 `,` 가 종결 신호).
-    // ★표시는 doc 주석 **뒤**에 단다★ — 앞에 달면 아래 어느 갈래에도 안 맞아 컴파일 에러다.
-    // ★인자 struct 의 꼭대기 칸에서만 걷는다★ — 블록 안 선언 타입(`@struct_def`·`@obj` 가 직접 받는다)에 단
-    //   표시는 갈래가 없어 컴파일 에러다. 데몬은 인자 객체의 꼭대기 칸만 바꾸므로 중첩 칸 표시는 효과가 없다.
+    // ── Agent reference marks (ADR-0308) ─────────────────────────────────────────────────────────
+    // Copy the fields one by one, removing `#[agent_ref]` and collecting those field names (the trailing `,` is the termination signal).
+    // ★The mark goes **after** the doc comment★ — before it, no arm matches (compile error).
+    // ★Stripped only from top-level fields of the argument struct★ — a mark on a type declared in the block (taken by
+    //   `@struct_def`·`@obj`) has no arm (compile error); the daemon only changes top-level fields, so a nested mark has no effect.
     (@agent_refs $cmd:tt [$($clean:tt)*] [$($refs:ident)*]) => {
         $crate::__engram_declare!(@command $cmd [$($clean)*] [$($refs)*]);
     };
@@ -344,11 +340,11 @@ macro_rules! __engram_declare {
         $crate::__engram_declare!(@agent_refs $cmd
             [$($clean)* $(#[doc = $fdoc])* $field : Option<String> ,] [$($refs)* $field] $($rest)*);
     };
-    // 데몬은 **문자열 값**만 바꾼다 — 다른 모양에 단 표시는 아무 일도 안 하므로 조용히 받지 않는다.
+    // The daemon changes only **string values** — a mark on another shape does nothing, so it is not accepted silently.
     (@agent_refs $cmd:tt [$($clean:tt)*] [$($refs:ident)*]
         $(#[doc = $fdoc:literal])* #[agent_ref] $field:ident : $($rest:tt)*) => {
         compile_error!(concat!(
-            "declare_commands!: `#[agent_ref]` 는 `String`·`Option<String>` 칸에만 단다 — `",
+            "declare_commands!: `#[agent_ref]` goes only on `String`·`Option<String>` fields — `",
             stringify!($field), "`"
         ));
     };
@@ -378,7 +374,7 @@ macro_rules! __engram_declare {
             [$($clean)* $(#[doc = $fdoc])* $field : $ty ,] [$($refs)*] $($rest)*);
     };
 
-    // 명령 하나 — 표시를 걷어 낸 인자 칸과 걷힌 칸 이름을 받는다.
+    // One command — receives the argument fields with marks stripped and the stripped field names.
     (@command [ [$($summary:literal)*] $effect:ident $since:literal $name:literal $args:ident $ok:ident
                 [$($ofields:tt)*] [$($code:ident)*] ]
         [$($afields:tt)*] [$($refs:ident)*]) => {
@@ -386,7 +382,7 @@ macro_rules! __engram_declare {
         $crate::__engram_declare!(@struct_def $ok [] [] $($ofields)* ,);
 
         impl $args {
-            /// 이 명령의 정적 계약. ★핸들러는 여기 없다★ — 실물은 `make_table(deps)` 가 준다(T-1).
+            /// This command's static contract. ★The handler is not here★ — the real one is given by `make_table(deps)` (T-1).
             pub const SPEC: $crate::CommandSpec = $crate::CommandSpec {
                 name: $name,
                 effect: $crate::Effect::$effect,
@@ -395,8 +391,8 @@ macro_rules! __engram_declare {
                 args_schema: $crate::__engram_declare!(@obj [] "" "" [] [] $($afields)* ,),
                 ok_schema: $crate::__engram_declare!(@obj [] "" "" [] [] $($ofields)* ,),
                 errors: &[ $( $crate::__engram_declare!(@code $code) ),* ],
-                // 파생물(TS 바인딩) 커버리지 테스트가 선언에서 파일 이름을 끌어내는 재료 —
-                //   손 목록이면 선언을 늘리는 그 편집이 함께 고쳐 무장 해제된다(`CommandSpec::args_type`).
+                // Material from which the derivative (TS binding) coverage test derives file names from the declaration —
+                //   with a hand list, the very edit that adds a declaration would fix it too and disarm it (`CommandSpec::args_type`).
                 args_type: stringify!($args),
                 ok_type: stringify!($ok),
                 agent_args: &[ $( stringify!($refs) ),* ],
@@ -406,7 +402,7 @@ macro_rules! __engram_declare {
         $crate::inventory::submit! { $crate::LinkedSpec(&$args::SPEC) }
     };
 
-    // 오류 코드 표기(SCREAMING) → 어휘. 목록 밖 코드는 여기서 컴파일 에러가 된다.
+    // Error code notation (SCREAMING) → vocabulary. A code outside the list becomes a compile error here.
     (@code INVALID_ARGUMENT) => { $crate::ErrorCode::InvalidArgument };
     (@code UNKNOWN_COMMAND) => { $crate::ErrorCode::UnknownCommand };
     (@code OWNER_UNAVAILABLE) => { $crate::ErrorCode::OwnerUnavailable };
@@ -422,10 +418,10 @@ macro_rules! __engram_declare {
     (@code INTERNAL) => { $crate::ErrorCode::Internal };
 }
 
-/// `Option<Option<T>>` 필드의 역직렬화 — **실렸나**(바깥)와 **값이 있나**(안쪽)를 가른다.
+/// Deserialization of an `Option<Option<T>>` field — tells apart **was it carried** (outer) and **is there a value** (inner).
 ///
-/// serde 는 `Option` 필드가 빠지면 자동으로 `None` 을 넣으므로, 이 함수 없이는 「필드 부재」와
-/// 「`null` 을 명시했다」가 같은 값이 된다. 선언 매크로가 `deserialize_with` 로 이것을 단다.
+/// serde puts `None` for a missing `Option` field, so without this function "absent" and "explicit `null`" become the same value. The
+///   declaration macro attaches it with `deserialize_with`.
 pub fn transmitted<'de, D, T>(de: D) -> Result<Option<Option<T>>, D::Error>
 where
     D: serde::Deserializer<'de>,

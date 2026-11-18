@@ -1,4 +1,4 @@
-//! Webview pull of the usage slot — returns one copy of the shell cache (TRD S21 usage-limit-slot §1-7 「웹뷰가 값을 받는 길」 ②).
+//! Webview pull of the usage slot — returns one copy of the shell cache (TRD S21 usage-limit-slot §1-7 「how the webview gets the value」 ②).
 //! There is no daemon round trip. Interest is not touched — the shell computes interest from the layout.
 
 use std::sync::Arc;

@@ -4,23 +4,23 @@ import type { AgentOutputFormat } from "./AgentOutputFormat";
 
 export type AgentNewArgs = { 
 /**
- * 작업 폴더. ★`preset` 과 상호배타이고 **둘 중 정확히 하나**가 있어야 한다★.
+ * Working folder. ★Mutually exclusive with `preset`, and **exactly one of the two** must be present★.
  */
 cwd?: string | null, 
 /**
- * 등록된 경로 북마크(프리셋)의 id. cwd 와 상호배타.
+ * The id of a registered path bookmark (preset). Mutually exclusive with cwd.
  */
 preset?: string | null, name?: string | null, 
 /**
- * 미지정 = StreamJson.
+ * Unspecified = StreamJson.
  */
 output_format?: AgentOutputFormat | null, 
 /**
- * 어느 백엔드를 돌릴 것인가 — ★**필수다. 미지정은 반려**★(2026-09-08).
+ * Which backend to run — ★**required. Unspecified is rejected**★ (2026-09-08).
  *
- * 예전엔 미지정이 `Claude` 였다. 백엔드가 둘이 된 뒤로 그 조용한 기본값은 **고르지 않은
- * 것**과 **claude 를 고른 것**을 같은 값으로 접는다 — 스폰 패킷에서 같은 이유로 이미 걷어낸
- * 모양이고(`protocol` 의 `AgentBackendKind` doc · 데몬의 `MISSING_BACKEND`), 이 문만 남겨
- * 두면 그 결정이 입구마다 갈린다.
+ * Unspecified used to mean `Claude`. Since there came to be two backends, that silent default folds **not choosing**
+ * and **choosing claude** into the same value — it is the shape already removed from the spawn packet for the same reason
+ * (the `AgentBackendKind` doc of `protocol` · the daemon's `MISSING_BACKEND`), and leaving only this door
+ * would split that decision per entry.
  */
 backend: AgentBackend, };

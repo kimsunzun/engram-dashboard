@@ -1,21 +1,15 @@
-//! StdioTransport — the `AgentTransport` implementation for a pipe (stdin/stdout/stderr) child process.
+//! StdioTransport — the `AgentTransport` implementation for a pipe (stdin/stdout/stderr) child: a **plain pipe process with no PTY**
+//!   (unlike PtyTransport's ConPTY). Claude json mode (`-p --output-format stream-json`) is spawned here (ADR-0044);
+//! terminal mode stays PtyTransport. Only the transport is swapped in the same AgentSession assembly. Zero tauri imports, zero unsafe.
 //!
-//! Unlike PtyTransport (ConPTY interactive), it is a **plain pipe process with no PTY**. Claude json mode
-//! (`-p --output-format stream-json`, headless) is spawned by this transport (ADR-0044). Terminal mode stays
-//! PtyTransport. In the same AgentSession assembly, only the transport is swapped.
+//! ★No-refinement invariant (ADR-0044/0045)★: this layer does not know the schema of stdout bytes — without a decoder it passes
+//!   `OutputEvent::TerminalBytes` through (carrier variant), with one it only applies the injected decoder; parsing is the backend
+//!   decoder's job. The interrupt line and its after-write callback ([`InterruptOut`]) are only handed to the input queue, and the group
+//!   handle and retire mark (`StdioTransport::process_group`) only handed out.
 //!
-//! ★No-refinement invariant (ADR-0044/0045)★: the transport layer does not know the schema of stdout bytes — with no decoder
-//!   it passes them through as `OutputEvent::TerminalBytes` (reusing the carrier variant), and with one it only applies the injected
-//!   decoder. Parsing is the backend decoder's job — not this layer's, not the frontend's.
-//!   The interrupt line and what to call after that line goes out ([`InterruptOut`]) are also only handed to the input queue, and the group handle and retire mark
-//!   (`StdioTransport::process_group`) are only handed out — the backend knows how they are used.
-//!
-//! ★Key difference from PTY — no watcher needed★: with ConPTY, if the master is alive the reader gets no EOF even when the child exits by itself,
-//!   so PtyTransport has a watcher thread to detect natural exit. **With a pipe,
-//!   the read wakes with EOF (Ok(0)) once the child (and the child tree) closes all write handles** — natural exit and
-//!   kill alike wake the pump the same way, so there is no separate watcher (simpler by that much).
-//!
-//! tauri import 0. unsafe 0.
+//! ★Difference from PTY — no watcher needed★: ConPTY gives the reader no EOF while the master lives even if the child exits (hence
+//!   PtyTransport's watcher); **with a pipe the read wakes with EOF (Ok(0)) once the child tree closes all write handles** — natural
+//!   exit and kill wake the pump alike.
 
 use std::io::{Read, Write};
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout};
@@ -37,65 +31,61 @@ use crate::types::{
     TerminalReason, TransportCaps,
 };
 
-/// What the interrupt-line function gives — one set of lines to write to stdin, and what the writer calls after that line actually goes out to the pipe (contract =
-/// [`OnWritten`] — if it cannot go out it is not called and is discarded). The path only hands both to the input queue.
+/// What the interrupt-line function gives — stdin lines plus what the writer calls after they actually go out to the pipe (contract =
+///   [`OnWritten`]; discarded uncalled if they cannot go out). The path only hands both to the input queue.
 pub struct InterruptOut {
     pub bytes: Vec<u8>,
     pub on_written: Option<OnWritten>,
 }
 
-/// A backend function that makes one set of stdin lines meaning 「지금 도는 턴을 멈춰 달라」 (stop the turn now running). The path does not know the meaning of those bytes (dumb pipe).
+/// A backend function that makes the stdin lines meaning 「stop the turn now running」; the path does not know the bytes' meaning (dumb pipe).
 ///
-/// `None` = 「지금은 끊을 턴이 없다」 (there is no turn to interrupt now) — the decision is the backend's, and the path passes it on as `Unsupported` as is. A pipe has
-/// no interrupt means of the path's own like Ctrl-C, so interrupting is knowledge of whoever makes this line.
+/// `None` = 「no turn to interrupt now」 — the backend's decision, passed on as `Unsupported`. A pipe has no Ctrl-C-like means of its own,
+///   so interrupting is the line-maker's knowledge.
 // ADR-0238
 pub type InterruptLine = Arc<dyn Fn() -> Option<InterruptOut> + Send + Sync>;
 
 pub struct StdioTransport {
-    /// Shared by pump (try_wait) and shutdown (kill+wait). std Child caches the exit status after wait, so
-    /// even if shutdown reaps first, the pump's try_wait retrieves the same status (double wait is harmless).
+    /// Shared by pump (try_wait) and shutdown (kill+wait). std Child caches the exit status after wait, so a double wait is harmless.
     child: Arc<Mutex<Child>>,
-    /// ★Shared by the writer thread and `shutdown()` — unlike the PTY side, which goes with ownership★. If this handle were
-    ///   handed to the writer, the `try_lock` cleanup of `shutdown()` step 4 would have nowhere to reach. So
-    ///   it is shared, but ★the only one that now holds this lock with a blocking `write_all` is the writer thread★ and `shutdown()`
-    ///   still uses only `try_lock` (why the order invariant of that function remains valid).
+    /// ★Shared by the writer thread and `shutdown()` — unlike PTY's ownership★: handing it to the writer would leave `shutdown()` step 4's
+    ///   `try_lock` cleanup nothing to reach. ★Only the writer thread holds this lock across a blocking `write_all`★, and `shutdown()`
+    ///   uses only `try_lock`
+    ///   (why that function's order invariant holds).
     stdin: Arc<Mutex<Option<ChildStdin>>>,
-    /// Input not yet sent out. `send_input` puts it here and returns **immediately** (module = `transport::input_queue`).
+    /// Input not yet sent. `send_input` puts it here and returns **immediately** (`transport::input_queue`).
     input: Arc<InputQueue>,
-    /// take in start() and move to the pump thread. None means already started.
     stdout: Mutex<Option<ChildStdout>>,
-    /// take in start() and move to the drain thread.
     stderr: Mutex<Option<ChildStderr>>,
-    /// shutdown (kill) progress signal. If set (Release), the pump transitions to Killed at exit (the pump reads with Acquire).
     shutdown: Arc<AtomicBool>,
-    /// Retire mark — set by [`AgentTransport::begin_retire`] and the first line of `shutdown()`, and no one lowers it. This path does
-    /// not read it, and only hands it out as a read-only copy carried in [`Self::process_group`] — the path does not know what it is used for. It is an `Arc` because
-    /// the handed-out copy may outlive the path (the field is held jointly).
+    /// Retire mark — set by [`AgentTransport::begin_retire`] and the first line of `shutdown()`; nobody lowers it. This path does not read
+    ///   it, only hands out a read-only copy via [`Self::process_group`]. An `Arc` because the handed-out copy may outlive the path.
     retiring: Arc<AtomicBool>,
-    /// Whether the output this pipe carries is a structured stream (NDJSON). ★An injected value (ADR-0044/0030/0191)★:
-    /// "is it structured" is decided not by the pipe but by the output format of that program (backend knowledge), so the backend that makes this path
-    /// injects it as an `open` argument (no hardcoding — false for plain-text stdio). capabilities() reports it as is.
+    /// Whether the output this pipe carries is a structured stream (NDJSON). ★Injected (ADR-0044/0030/0191)★: it is the program's output
+    ///   format (backend knowledge), not the pipe's, so the backend that makes this path passes it to `open` (no hardcoding — false for
+    ///   plain-text stdio);
+    /// capabilities() reports it as is.
     structured: bool,
-    /// Output-refining decoder (ADR-0004/0044). The backend that makes this path injects it in structured mode (if none,
-    /// bytes pass straight through = the plain-text · terminal path). Taken in start() and moved to the pump thread (= None means already started).
+    /// Output-refining decoder (ADR-0004/0044), injected by the backend in structured mode (none → bytes pass through = plain-text ·
+    ///   terminal). Taken in start() and moved to the pump thread (None = already started).
     decoder: Mutex<Option<Box<dyn OutputDecoder>>>,
-    /// Interrupt-line function. `None` = the backend that made this path did not give a way to interrupt — `interrupt()` is always `Unsupported` and
-    /// the capability is false as well.
+    /// Interrupt-line function. `None` = the backend gave no way to interrupt — `interrupt()` is always `Unsupported` and the capability
+    ///   is false.
     // ADR-0238
     interrupt: Option<InterruptLine>,
-    /// Owner of the process group this path spawned — there is only one, and only the weak handle of [`Self::process_group`] is handed outside, so
-    /// when the path goes away the group closes too (`KILL_ON_JOB_CLOSE`). ★Keep it as the last field★ — fields are dropped in declaration order, so that
-    /// closing moment is fixed by this position. Whether moving it earlier is safe has not been measured, and no test guards this placement.
+    /// Owner of the process group this path spawned — the only one; only the weak handle of [`Self::process_group`] goes outside, so the
+    ///   group closes with the path (`KILL_ON_JOB_CLOSE`). ★Keep it the last field★ — fields drop in declaration order, fixing that
+    ///   moment. Moving it
+    /// earlier is unmeasured and no test guards this placement.
     group: GroupOwner,
 }
 
 impl StdioTransport {
-    /// **Does not spawn the pump yet** (in start). Also returns child_pid (for attaching claude session tracking
-    /// — used by the caller). Matches the signature of PtyTransport::open, except there is no cols/rows.
+    /// **Does not spawn the pump yet** (in start). Also returns child_pid (for claude session tracking by the caller). Same signature as
+    ///   PtyTransport::open minus cols/rows.
     ///
-    /// ★Why `decoder` is taken as an open argument, not a start argument★: decoder injection is specific to StdioTransport,
-    /// so it does not touch the shared `AgentTransport::start` signature (if it did, Pty/Api would also have to take a
-    /// meaningless None argument — minimizing the ripple).
+    /// ★`decoder` is an open argument, not a start argument★: injection is specific to StdioTransport, and a start argument would force
+    ///   Pty/Api to take a meaningless None through the shared `AgentTransport::start`.
     pub fn open(
         spec: &CommandSpec,
         structured: bool,
@@ -127,8 +117,8 @@ impl StdioTransport {
         Ok((transport, child_pid))
     }
 
-    /// A weak handle to the process group this path spawned — it also carries a read-only copy of the retire mark. The path does not know what
-    /// it is used for (ADR-0044 「바보 파이프」). `None` = this OS has no means of binding a group (outside Windows).
+    /// A weak handle to the process group this path spawned, with a read-only copy of the retire mark; the path does not know what they
+    ///   are for (ADR-0044 「dumb pipe」). `None` = this OS cannot bind a group (outside Windows).
     // ADR-0262
     pub(crate) fn process_group(&self) -> Option<ProcessGroup> {
         self.group
@@ -136,8 +126,8 @@ impl StdioTransport {
             .map(|group| ProcessGroup::new(group, RetiringSignal::of(&self.retiring)))
     }
 
-    /// Plugs in the interrupt-line function — once plugged in, the capability `control.interrupt` becomes true (meaning 「끊을 수 있는 통로다」 (this is a path that can interrupt), not 「지금 턴이 있다」 (a turn exists now)).
-    /// It is not an `open` argument so that callers without injection (plain-text stdio · tests) keep standing as they do today.
+    /// Plugs in the interrupt-line function — then capability `control.interrupt` is true (「this path can interrupt」, not 「a turn exists
+    ///   now」). Not an `open` argument, so callers without injection (plain-text stdio · tests) stay as they are.
     // ADR-0238
     pub fn with_interrupt(mut self, line: InterruptLine) -> Self {
         self.interrupt = Some(line);
@@ -145,14 +135,13 @@ impl StdioTransport {
     }
 }
 
-/// One actual write by the writer thread. ★If `shutdown()` has already taken the handle away, it falls through to `BrokenPipe` and
-/// [`input_queue::drain`] closes the queue★ — that combination shuts off the branch of 「kill 뒤에 남은 입력이 조용히 쌓이는」 (input left after kill silently piling up).
+/// One actual write by the writer thread. ★If `shutdown()` already took the handle, it falls through to `BrokenPipe` and
+///   [`input_queue::drain`] closes the queue★ — shutting off 「input after kill silently piling up」.
 fn write_stdin(stdin: &Mutex<Option<ChildStdin>>, bytes: &[u8]) -> std::io::Result<()> {
-    // ★The only place that does a blocking `write_all` under this lock★ — the basis for `shutdown()` using `try_lock`
-    //   (the order invariant of that function) points here.
+    // ★The only blocking `write_all` under this lock★ — the basis for `shutdown()`'s `try_lock` (that function's order invariant).
     let mut guard = sync::lock(stdin);
     let stdin = guard.as_mut().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::BrokenPipe, "stdin 이 이미 닫혔다")
+        std::io::Error::new(std::io::ErrorKind::BrokenPipe, "stdin is already closed")
     })?;
     stdin.write_all(bytes)?;
     stdin.flush()
@@ -163,11 +152,12 @@ struct WriterStop(Arc<InputQueue>);
 
 impl Drop for WriterStop {
     fn drop(&mut self) {
-        self.0.close("stdio 스트림이 끝났다 — 더 보낼 곳이 없다");
+        self.0
+            .close("the stdio stream ended — nowhere left to send");
     }
 }
 
-/// If the pump thread panics anywhere, that agent would be silently stopped forever, so it is made visible as Failed (§5).
+/// A pump panic anywhere would otherwise stop that agent silently forever, so it is made visible as Failed (§5).
 fn resolve_pump_reason(result: Result<TerminalReason, Caught>) -> TerminalReason {
     match result {
         Ok(reason) => reason,
@@ -176,7 +166,6 @@ fn resolve_pump_reason(result: Result<TerminalReason, Caught>) -> TerminalReason
 }
 
 impl AgentTransport for StdioTransport {
-    /// If stdout was already taken (re-call), do nothing (idempotence defense).
     fn start(&self, core: Arc<OutputCore>) {
         let agent_id = core.id();
 
@@ -185,39 +174,36 @@ impl AgentTransport for StdioTransport {
             None => return,
         };
 
-        // ── stderr drain thread ──
         if let Some(stderr) = self.stderr.lock().expect("stderr poisoned").take() {
             drain_stderr(stderr, &core, "engram-stdio-stderr", "stdio");
         }
 
         // ── input writer thread ──
-        // ★No one joins it · it cannot delay the kill causality★ — the canonical reason is the same place in `pty.rs`.
-        //   One fact only in this stdio version: this thread may hang inside `write_stdin` holding the stdin lock,
-        //   and the order in which `shutdown()` does **kill first** resolves that into an error (the order invariant of that function).
-        // ★The re-call branch that could not take `stdout` does not reach here★ — it already returned above.
-        //   So the writer is also spawned exactly once.
+        // ★Nobody joins it · it cannot delay the kill causality★ — canonical reason: the same place in `pty.rs`. Stdio-specific: it may
+        //   hang in `write_stdin` holding the stdin lock, which `shutdown()`'s **kill first** order resolves into an error (that
+        //   function's order invariant).
+        // ★The re-call branch that could not take `stdout` does not reach here★ (it returned above), so the writer is spawned exactly once.
         {
             let queue = self.input.clone();
             let stdin = self.stdin.clone();
             let spawn_result = std::thread::Builder::new()
                 .name("engram-stdio-writer".into())
                 .spawn(move || {
-                    // ★Without attribution (`agent = …`) this warning cannot become a trace★ — the canonical reason is
-                    //   the doc of `input_queue::drain`. The same field as the spawn-failure branch below.
+                    // ★Without attribution (`agent = …`) this warning cannot become a trace★ — canonical reason: `input_queue::drain` doc;
+                    //   same field as the spawn-failure branch below.
                     input_queue::drain(&queue, "stdio", agent_id, |bytes| {
                         write_stdin(&stdin, bytes)
                     });
                 });
             if let Err(e) = spawn_result {
-                // Without a writer, `send_input` returns `Ok` while the bytes never go out — a silent
-                //   loss, so close the queue and refuse honestly from that moment.
-                let reason = format!("stdio 입력 라이터 스레드 기동 실패: {e}");
+                // Without a writer `send_input` would return `Ok` while bytes never go out — a silent loss; close the queue and refuse
+                //   honestly from then.
+                let reason = format!("failed to start the stdio input writer thread: {e}");
                 tracing::warn!(agent = %agent_id, "{reason}");
                 self.input.close(&reason);
             }
         }
 
-        // ── pump thread (stdout→core) ──
         let (done_tx, done_rx) = mpsc::channel();
         let pump_core = core.clone();
         let child = self.child.clone();
@@ -260,19 +246,15 @@ impl AgentTransport for StdioTransport {
                     }
                 }
 
-                // ★Flush after break and before finish — but skipped on the kill/shutdown path (FIX-2)★:
-                //   the decoder may hold in its buffer a residual tail line that ended without a newline. If it is a natural EOF
-                //   (the child wrote out all of stdout and exited normally), this tail may be complete data that actually arrived to the end,
-                //   so it is spat out before finish to prevent loss.
-                //   ★But if the stream was **cut midway** by shutdown (kill), do not flush★:
-                //   that tail is a piece truncated because we killed the process, so it is not a "complete line".
-                //   This cuts off at the source any chance that the flush (= one consume_line) reads that truncated piece by accident as parseable JSON and
-                //   emits a fake event (e.g. a partial result → MessageDone).
-                //   Complete lines that actually arrived and ended with a newline were already all emitted by the decode inside the loop, so
-                //   skipping loses no real data (what remains in the buffer is only an unterminated tail).
-                //   ★Why branch on the shutdown flag★: at the read level, natural EOF and kill are both
-                //   Ok(0) and cannot be told apart, but a kill always goes through shutdown.store(Release), so
-                //   reading it here with Acquire tells them apart for certain (the same signal source as the reason computation below).
+                // ★Flush after break and before finish — skipped on the kill/shutdown path (FIX-2)★: the decoder may hold an unterminated
+                //   tail line. On a natural EOF (the child wrote all stdout and exited) that tail may be complete data, so it is flushed
+                //   before finish.
+                //   ★If shutdown (kill) **cut the stream**, do not flush★: the tail is a piece truncated by our kill, and the flush (= one
+                //   consume_line) could read it as parseable JSON and emit a fake event (e.g. a partial result → MessageDone). Complete
+                //   newline-terminated lines
+                //   were already emitted in the loop, so skipping loses no real data.
+                //   ★Why branch on the shutdown flag★: natural EOF and kill are both Ok(0) at the read level, but a kill always goes
+                //   through shutdown.store(Release), so an Acquire read tells them apart (same signal as the reason computation below).
                 if !shutdown.load(Ordering::Acquire) {
                     if let Some(dec) = decoder.as_mut() {
                         for ev in dec.flush() {
@@ -303,19 +285,16 @@ impl AgentTransport for StdioTransport {
             // ADR-0292: finish is outside the containment mark — do not move it into the closure (reason = the same place in `pty.rs`).
             pump_core.finish(reason);
 
-            // G-1: completion signal (received by core.join_pump's recv_timeout). Ignore it even if the receiver is gone.
             let _ = done_tx.send(());
         });
 
         core.attach_pump(handle, done_rx);
     }
 
-    /// In json mode these bytes are already a stream-json user-turn line the backend wrapped
-    /// (`{"type":"user",…}\n`) — the transport does not know that shape
-    /// (AgentSession wraps it with InputEncoder and hands it over as Raw, ADR-0044 isolation).
-    /// Puts it in the queue and returns **immediately** — the OS write is the job of the dedicated writer thread.
-    ///
-    /// ★The canonical source of the contract · the bound · 「받아 둔 뒤의 실패」 (failure after accepting) is the header of the [`crate::transport::input_queue`] module★.
+    /// In json mode these bytes are already a stream-json user-turn line the backend wrapped (`{"type":"user",…}\n`) — the transport does
+    ///   not know that shape (AgentSession wraps it with InputEncoder and hands it over as Raw, ADR-0044).
+    /// Puts it in the queue and returns **immediately** — the OS write is the writer thread's job. ★Contract · bound · 「failure after
+    ///   accepting」: the [`crate::transport::input_queue`] module header★.
     fn send_input(&self, input: InputEvent) -> Result<(), PtyError> {
         let InputEvent::Raw(bytes) = input;
         self.input.push(bytes)
@@ -327,25 +306,25 @@ impl AgentTransport for StdioTransport {
 
     fn resize(&self, _cols: u16, _rows: u16) -> Result<(), PtyError> {
         Err(PtyError::Unsupported(
-            "StdioTransport::resize (파이프는 터미널 크기 없음)".into(),
+            "StdioTransport::resize (a pipe has no terminal size)".into(),
         ))
     }
 
-    /// Puts the line given by the injected function into the input queue — the same writer thread as for user lines writes it **whole**, so lines do not mix.
-    /// ★It does not take the input lock (`input_order`)★ — an interrupt is not bound to an input id, so there is no order for that lock to protect, and so
-    ///   there is no new edge in the lock order. `Ok` means 「받았다」 (received), as with [`Self::send_input`], and not 「턴이 멈췄다」 (the turn has stopped).
+    /// Puts the injected function's line into the input queue — the same writer thread writes it **whole**, so lines do not mix.
+    /// ★Does not take the input lock (`input_order`)★ — an interrupt is not bound to an input id, so that lock has no order to protect
+    ///   here and the lock order gets no new edge. `Ok` = 「received」 as in [`Self::send_input`], not 「the turn has stopped」.
     // ADR-0238
     fn interrupt(&self) -> Result<(), PtyError> {
         let Some(line) = &self.interrupt else {
             return Err(PtyError::Unsupported(
-                "StdioTransport::interrupt (이 통로엔 끊기 줄이 없다 — 파이프엔 Ctrl-C 가 없다)"
+                "StdioTransport::interrupt (this link has no interrupt line — a pipe has no Ctrl-C)"
                     .into(),
             ));
         };
         match line() {
             Some(InterruptOut { bytes, on_written }) => self.input.push_with(bytes, on_written),
             None => Err(PtyError::Unsupported(
-                "StdioTransport::interrupt (끊을 턴이 없다)".into(),
+                "StdioTransport::interrupt (no turn to interrupt)".into(),
             )),
         }
     }
@@ -356,34 +335,28 @@ impl AgentTransport for StdioTransport {
 
     /// The pipe version of the ADR-0001 2 verbs.
     ///
-    /// ★Kill causality (pipe version)★: PtyTransport wakes the pump via master drop→ConPTY close→reader EOF, but
-    ///   with a pipe the reader wakes with EOF only when **the child tree has closed all stdout write handles**. So
-    ///   killing the whole tree with child.kill + Job terminate (down to the grandchild claude) and closing the write handles is
-    ///   the core of the causality (if only cmd.exe is killed and claude stays alive, the write handles do not close and no EOF comes).
+    /// ★Kill causality (pipe)★: PtyTransport wakes the pump via master drop→ConPTY close→reader EOF; with a pipe EOF comes only when **the
+    ///   child tree has closed all stdout write handles**, so child.kill + Job terminate (down to the grandchild claude) is the core
+    ///   (killing only cmd.exe with claude alive leaves the handles open and no EOF).
     ///
-    /// ★Order invariant — stdin close must never come before kill (deadlock, FIX 1)★:
-    ///   ★It once read 「send_input 은 …」 (send_input is …) here — only the holder of that lock changed, and the danger is the same★.
-    ///   Now what holds that lock is the **writer thread** (`write_stdin`, throughout the blocking `write_all`). If the child
-    ///   does not read stdin (pipe backpressure), that write_all blocks forever and never releases the lock. If we then try to close it with
-    ///   `stdin.lock()` **before** the kill, we can never get that lock, so we cannot even reach the kill → the pump
-    ///   cannot wake → core.join_pump hangs forever (the ADR-0001 causality stops). So **kill + Job
-    ///   terminate come first**: killing the child breaks the pipe, so the blocked write_all is released with an error and the
-    ///   lock is freed. Only after that is stdin cleaned up best-effort with try_lock (a blocking lock is never allowed).
-    /// ※graceful-exit-via-stdin-close is not needed — we kill here anyway.
+    /// ★Order invariant — stdin close must never come before kill (deadlock, FIX 1)★: the lock is now held by the **writer thread**
+    ///   (`write_stdin`, across the blocking `write_all`). A child not reading stdin (pipe backpressure) blocks that write_all forever, so
+    ///   `stdin.lock()` **before** the kill could never get the lock and never reach the kill → the pump cannot wake → core.join_pump
+    ///   hangs (ADR-0001 stops). So **kill + Job terminate come first** — the broken pipe releases the blocked write_all with an
+    ///   error and frees the lock — and only then is stdin cleaned best-effort with try_lock (never a blocking lock).
     // ADR-0001
     fn shutdown(&self) {
-        // 0. Retire mark first of all — there are ending paths that do not go through `begin_retire`, so the window where a reader of the mark overlaps the
-        //    termination below is kept narrowest here too. The order invariant below is untouched (it is a single atomic write).
+        // 0. Retire mark first — some ending paths skip `begin_retire`, so this keeps the window where a mark reader overlaps the
+        //   termination below narrowest; the order invariant is untouched (one atomic write).
         self.retiring.store(true, Ordering::Release);
 
         // 1. shutdown signal — the pump transitions to Killed on exit.
         self.shutdown.store(true, Ordering::Release);
 
-        // 1b. Close the input queue — the writer thread sees this and ends. ★What we take here is **only the queue's lock**, so
-        //     it cannot hang★: a writer hanging on the stdin lock has already released the queue lock (`InputQueue::close` doc).
-        //     So this one line does not touch the order invariant below (kill first) — it is a different lock.
-        //     ★Cost = input not yet sent out disappears★.
-        self.input.close("에이전트를 종료했다");
+        // 1b. Close the input queue — the writer sees it and ends. ★Only the queue's lock is taken, so it cannot hang★ (a writer hanging
+        //   on the stdin lock has released the queue lock — `InputQueue::close` doc); a different lock from the order invariant's (kill first).
+        //     ★Cost: input not yet sent disappears★.
+        self.input.close("the agent was terminated");
 
         // 2. wait is reap (prevents zombies). The second call is Err since it is already dead — ignored (idempotent).
         {
@@ -392,12 +365,12 @@ impl AgentTransport for StdioTransport {
             let _ = child.wait();
         }
 
-        // 3. End the whole group → down to the grandchild (claude under cmd). On an OS with no group (outside Windows) it is a no-op, and child.kill
-        //    kills the direct child (claude, no shim), which closes the write handles.
+        // 3. End the whole group → down to the grandchild (claude under cmd). Without a group (outside Windows) it is a no-op, and
+        //   child.kill kills the direct child (claude, no shim), closing the write handles.
         let _ = self.group.terminate(1);
 
-        // 4. If try_lock cannot be obtained (the instant write_all has not yet been released), just skip. The uncleaned ChildStdin is
-        //    reclaimed by the OS on transport drop, so no leak (the pipe was already broken by the kill).
+        // 4. If try_lock fails (write_all not yet released), skip; the uncleaned ChildStdin is reclaimed on transport drop (the pipe is
+        //   already broken by the kill).
         if let Ok(mut guard) = self.stdin.try_lock() {
             let _ = guard.take();
         }
@@ -440,9 +413,12 @@ mod tests {
         match resolve_pump_reason(result) {
             TerminalReason::Error(msg) => {
                 assert!(msg.starts_with("pump panicked:"), "Error prefix: {msg}");
-                assert!(msg.contains("boom in stdio pump"), "원 메시지 보존: {msg}");
+                assert!(
+                    msg.contains("boom in stdio pump"),
+                    "original message preserved: {msg}"
+                );
             }
-            other => panic!("panic 은 Error 로 매핑돼야: {other:?}"),
+            other => panic!("a panic must map to Error: {other:?}"),
         }
     }
 
@@ -458,8 +434,7 @@ mod tests {
     }
 
     // ── caps honesty (FIX 2): structured is reported as the injected value (not hardcoded) + resize/interrupt false ──
-    // To verify only capabilities() without a real process we need an instance → spawn a harmless child with open
-    // (echo, exits immediately), check only caps, and clean up with shutdown.
+    // To verify only capabilities() without a real process we need an instance → spawn a harmless child with open (echo), check caps, shutdown.
     #[cfg(windows)]
     #[test]
     fn capabilities_structured_reflects_injected_value_and_no_resize_interrupt() {
@@ -473,20 +448,23 @@ mod tests {
         let (plain, _pid) = StdioTransport::open(&spec, false, None).expect("open plain");
         assert!(
             !plain.capabilities().output.structured,
-            "평문 stdio 주입 → structured=false(파이프가 아니라 mode 가 결정)"
+            "plain stdio injected → structured=false (decided by mode, not by the pipe)"
         );
         plain.shutdown();
 
         let (json, _pid) = StdioTransport::open(&spec, true, None).expect("open json");
         let caps = json.capabilities();
-        assert!(caps.output.structured, "json 캐리어 주입 → structured=true");
-        assert!(!caps.output.terminal_bytes, "터미널 바이트 아님");
-        assert!(!caps.control.resize, "파이프 resize 불가");
+        assert!(
+            caps.output.structured,
+            "json carrier injected → structured=true"
+        );
+        assert!(!caps.output.terminal_bytes, "not terminal bytes");
+        assert!(!caps.control.resize, "a pipe cannot resize");
         assert!(
             !caps.control.interrupt,
-            "끊기 줄을 주입하지 않은 통로 = 끊기 능력 없음"
+            "a link with no interrupt line injected = no interrupt capability"
         );
-        assert!(caps.input.raw, "stdin raw 쓰기 가능");
+        assert!(caps.input.raw, "stdin raw write possible");
         assert!(matches!(json.interrupt(), Err(PtyError::Unsupported(_))));
         assert!(matches!(json.resize(80, 24), Err(PtyError::Unsupported(_))));
         json.shutdown();
@@ -514,7 +492,8 @@ mod tests {
         transport.shutdown();
     }
 
-    // ── Interrupt line injection (ADR-0238): if the function is `Some`, that one set of lines goes into the queue with what to call · if `None`, `Unsupported` with the queue unchanged ──
+    // ── Interrupt line injection (ADR-0238): if the function is `Some`, that one set of lines goes into the queue with what to call · if
+    //   `None`, `Unsupported` with the queue unchanged ──
     // Do not call `start()` — only without a writer can we take what is in the queue as is and measure it.
     #[cfg(windows)]
     #[test]
@@ -541,7 +520,7 @@ mod tests {
         let transport = transport.with_interrupt(line);
         assert!(
             transport.capabilities().control.interrupt,
-            "주입이 있으면 능력은 참 — 지금 턴이 있나와 무관하다"
+            "with an injection the capability is true — regardless of whether there is a turn now"
         );
 
         assert!(matches!(
@@ -551,27 +530,33 @@ mod tests {
         assert_eq!(
             transport.input.queued_bytes(),
             0,
-            "거절한 끊기는 큐를 건드리지 않는다"
+            "a refused interrupt does not touch the queue"
         );
 
         turn_open.store(true, Ordering::SeqCst);
-        transport.interrupt().expect("턴이 열려 있으면 줄을 받는다");
+        transport
+            .interrupt()
+            .expect("with a turn open it accepts the line");
         assert_eq!(transport.input.queued_bytes(), b"{\"stop\":1}\n".len());
-        let (bytes, on_written) = transport.input.pop().expect("큐에 든 끊기 줄");
+        let (bytes, on_written) = transport
+            .input
+            .pop()
+            .expect("the interrupt line in the queue");
         assert_eq!(bytes, b"{\"stop\":1}\n".to_vec());
-        on_written.expect("줄과 함께 준 부를 것이 큐까지 따라온다")();
+        on_written.expect("the callback given with the line follows it into the queue")();
         assert!(fired.load(Ordering::SeqCst));
         turn_open.store(false, Ordering::SeqCst);
         assert!(
             transport.capabilities().control.interrupt,
-            "능력은 문 값을 따라 흔들리지 않는다"
+            "the capability does not sway with the gate value"
         );
         transport.shutdown();
     }
 
     // ── Retire mark: `begin_retire` and `shutdown` each set it · the read-only mark the group handle handed out also sees it and
     //    stays up even after the path is gone · a notice does not reap resources ──
-    // The mark is OS-independent, so it runs on all OSes — only the path is set up with a harmless child that ends soon. The group handle exists only on
+    // The mark is OS-independent, so it runs on all OSes — only the path is set up with a harmless child that ends soon. The group handle
+    //   exists only on
     // the Windows path.
     #[test]
     fn begin_retire_and_shutdown_each_raise_the_retiring_flag() {
@@ -591,22 +576,22 @@ mod tests {
         assert_eq!(
             handed.is_some(),
             cfg!(windows),
-            "무리 손잡이는 Windows 통로에만 있다"
+            "the group handle exists only on the Windows link"
         );
         assert!(
             !announced.retiring.load(Ordering::Acquire),
-            "갓 연 통로가 이미 물러나는 중이다"
+            "a freshly opened link is already retreating"
         );
         assert!(!handed.as_ref().is_some_and(|signal| signal.is_set()));
         announced.begin_retire();
         assert!(announced.retiring.load(Ordering::Acquire));
         assert!(
             handed.as_ref().is_none_or(|signal| signal.is_set()),
-            "내준 표시가 예고를 못 본다"
+            "the handed-out marker does not see the notice"
         );
         announced
             .send_input(InputEvent::Raw(b"still-open\n".to_vec()))
-            .expect("예고가 입력 큐를 닫았다 — 거두기는 shutdown 몫이다");
+            .expect("the notice closed the input queue — collecting is shutdown's job");
         announced.shutdown();
 
         let (shut, _pid) = StdioTransport::open(&spec, true, None).expect("open");
@@ -616,25 +601,20 @@ mod tests {
         shut.shutdown();
         assert!(
             shut.retiring.load(Ordering::Acquire),
-            "예고 없이 온 종료가 물러남 표시를 세우지 않는다"
+            "an exit that came without a notice does not set the retreat marker"
         );
         drop(shut);
         assert!(
             handed.as_ref().is_none_or(|signal| signal.is_set()),
-            "예고 없이 온 종료를 내준 표시가 못 본다 — 통로가 사라진 뒤에도 선 채여야 한다"
+            "the handed-out marker does not see an exit that came without a notice — it must stay set even after the link is gone"
         );
     }
 
     // ── FIX 1 regression + writer thread regression ──
-    // Measures (two):
-    //   (A) ★The caller does not hang★ — a `send_input` arriving **in the very state** where the writer is blocked by pipe backpressure
-    //       returns immediately. This is the property this round established, and without it the daemon's
-    //       per-connection dispatch consumer would stall entirely on one clogged agent.
-    //   (B) FIX 1 as is — in that blocked state `shutdown` completes without deadlock. If the bug (= stdin close before
-    //       kill) were there, it could never get that lock and would hang, and the deadline below catches it.
-    // ★Where it differs from the old shape★: before, a thread the test spawned itself blocked inside `send_input`. Now
-    //   what blocks is the **production writer thread**, so `start()` must be called — if not, there is no writer and
-    //   nothing blocks, and both (A) and (B) pass vacuously.
+    // Measures: (A) ★the caller does not hang★ — a `send_input` arriving while the writer is blocked by pipe backpressure returns
+    //   immediately (else the daemon's per-connection dispatch consumer stalls on one clogged agent). (B) FIX 1 — in that
+    //   blocked state `shutdown` completes without deadlock (a stdin-close-before-kill bug would never get the lock; the deadline catches it).
+    // ★`start()` must be called★: what blocks is the **production writer thread**; without it nothing blocks and (A) and (B) pass vacuously.
     #[cfg(windows)]
     #[test]
     fn writer_blocks_but_send_input_returns_and_shutdown_completes() {
@@ -648,8 +628,8 @@ mod tests {
             fn agent_list_updated(&self, _a: Vec<AgentInfo>) {}
         }
 
-        // ping -n 30 = stays alive for ~30s and does not read stdin (a handy sleep). A small amount of stdout is
-        // under the pipe buffer, so the child does not block on stdout either → stdin stays unconsumed.
+        // ping -n 30 = alive ~30 s and does not read stdin (a handy sleep); its small stdout is under the pipe buffer, so stdin stays
+        //   unconsumed.
         let spec = CommandSpec {
             program: "cmd.exe".into(),
             args: vec![
@@ -672,27 +652,24 @@ mod tests {
         ));
         transport.start(core.clone());
 
-        // 1MiB = far beyond the pipe buffer · under the queue cap (2MiB). The writer bites into this and blocks.
         transport
             .send_input(InputEvent::Raw(vec![b'x'; 1024 * 1024]))
-            .expect("상한 아래라 받아야 한다");
+            .expect("below the cap, so it must be accepted");
 
-        // Yield briefly (generously) so the writer surely enters write_all and takes the stdin lock.
         std::thread::sleep(Duration::from_millis(500));
 
-        // (A) The call arriving in that blocked state returns **immediately**. With the old shape it would have waited here for the stdin lock,
-        //     hanging until the child died (~30s).
+        // (A) A call arriving in that blocked state returns **immediately** (the old shape would have waited for the stdin lock until the
+        //   child died, ~30 s).
         let probe_start = Instant::now();
         transport
             .send_input(InputEvent::Raw(b"probe\n".to_vec()))
-            .expect("큐에 자리가 있으므로 받아야 한다");
+            .expect("there is room in the queue, so it must be accepted");
         let probe_elapsed = probe_start.elapsed();
         assert!(
             probe_elapsed < Duration::from_secs(2),
-            "라이터가 막힌 동안 send_input 이 {probe_elapsed:?} 매달렸다 — 호출자 분리 회귀"
+            "send_input hung for {probe_elapsed:?} while the writer was blocked — caller separation regression"
         );
 
-        // (B) FIX 1 — in the same state shutdown completes without deadlock.
         let killer = transport.clone();
         let start = Instant::now();
         let shutdown_thread = std::thread::spawn(move || killer.shutdown());
@@ -701,7 +678,7 @@ mod tests {
         while !shutdown_thread.is_finished() {
             assert!(
                 Instant::now() < deadline,
-                "shutdown 이 10s 안에 완료되지 않음 — stdin 락 데드락 회귀(FIX 1)"
+                "shutdown did not complete within 10s — stdin lock deadlock regression (FIX 1)"
             );
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -713,25 +690,25 @@ mod tests {
                 transport.send_input(InputEvent::Raw(b"late\n".to_vec())),
                 Err(PtyError::WriteFailed(_))
             ),
-            "shutdown 뒤의 send_input 은 거절돼야 한다"
+            "send_input after shutdown must be refused"
         );
 
         core.join_pump(Duration::from_secs(5));
     }
 
-    // ── Group handle (ADR-0262): while the path lives the members are visible, and once the path is gone the list is empty and no one can hold it ──
-    // Only drops, with no `shutdown()` — shutdown ends the Job whole, so the list is empty even if the handle is strong. With drop
-    // alone, the Job handle closes (`KILL_ON_JOB_CLOSE`) and the group ends only if the handle is weak; if strong, ping stays in the list. A held
-    // member must not hold the Job either for the group to end — so the path is dropped while the root and ping members are held.
-    // Since `start()` is not called the path has no threads, so nothing is left hanging after the drop.
-    // cmd does not spawn ping until it receives one line of stdin — so that ping does not leak out before `open` puts it into the Job.
+    // ── Group handle (ADR-0262): while the path lives the members are visible; once it is gone the list is empty and no one can hold it ──
+    // Only drops, no `shutdown()` (shutdown ends the Job whole, emptying the list even with a strong handle). With drop alone the Job
+    //   handle closes (`KILL_ON_JOB_CLOSE`) and the group ends only if the handle is weak; a held member must not hold the Job either — so
+    //   the path
+    // is dropped while the root and ping members are held. No `start()`, so no threads linger. cmd does not spawn ping until it gets one
+    //   stdin line, so ping cannot leak out before `open` puts it into the Job.
     #[cfg(windows)]
     #[test]
     fn the_process_group_sees_the_root_and_empties_once_the_transport_is_gone() {
         use std::time::{Duration, Instant};
 
-        // ping takes ~9 seconds to end by itself — if it ends within the 5-second wait below, that is the doing of the Job close. Output goes to `NUL`, so
-        //   it also blocks the route where the pipe closes as the path goes away and ping dies from a write failure.
+        // ping takes ~9 s to end by itself — ending within the 5 s wait below is the Job close's doing. Output goes to `NUL`, which also
+        //   blocks the route where the pipe closes with the path and ping dies of a write failure.
         let spec = CommandSpec {
             program: "cmd.exe".into(),
             args: [
@@ -754,35 +731,36 @@ mod tests {
             cwd: std::path::PathBuf::from("."),
         };
         let (transport, pid) = StdioTransport::open(&spec, true, None).expect("open");
-        let root_pid = pid.expect("자식 PID");
+        let root_pid = pid.expect("child PID");
         let group = transport
             .process_group()
-            .expect("Windows 통로는 무리를 내준다");
+            .expect("the Windows link hands out a group");
         let root = group
             .pin(root_pid, false)
-            .expect("붙들기")
-            .expect("뿌리는 우리 멤버다");
+            .expect("hold on")
+            .expect("the root is our member");
 
-        // The console host attaches when cmd starts — snapshot the list and open the gate well after that, and the member that was not in that list = ping
+        // The console host attaches when cmd starts — snapshot the list and open the gate well after that, and the member that was not in
+        //   that list = ping
         //   is told apart that way (we do not compare times).
         std::thread::sleep(Duration::from_millis(100));
-        let before_gate = group.member_pids().expect("문 앞 명단");
+        let before_gate = group.member_pids().expect("list before the gate");
         assert!(
             before_gate.contains(&root_pid),
-            "뿌리가 명단에 없다: {before_gate:?}"
+            "the root is not in the list: {before_gate:?}"
         );
         {
             let mut stdin = transport.stdin.lock().unwrap_or_else(|p| p.into_inner());
-            let stdin = stdin.as_mut().expect("stdin 파이프");
-            stdin.write_all(b"go\r\n").expect("문 열기");
-            stdin.flush().expect("문 열기");
+            let stdin = stdin.as_mut().expect("stdin pipe");
+            stdin.write_all(b"go\r\n").expect("open the gate");
+            stdin.flush().expect("open the gate");
         }
         let deadline = Instant::now() + Duration::from_secs(10);
         let ping = loop {
-            let members = group.member_pids().expect("명단");
+            let members = group.member_pids().expect("list");
             assert!(
                 members.contains(&root_pid),
-                "뿌리가 명단에 없다: {members:?}"
+                "the root is not in the list: {members:?}"
             );
             let born_after_gate = members
                 .into_iter()
@@ -793,29 +771,29 @@ mod tests {
             }
             assert!(
                 Instant::now() < deadline,
-                "10 초 안에 Job 안의 ping 을 못 봤다"
+                "did not see ping inside the Job within 10 seconds"
             );
             std::thread::sleep(Duration::from_millis(20));
         };
-        assert!(!root.exited().expect("끝났나") && !ping.exited().expect("끝났나"));
+        assert!(!root.exited().expect("exited?") && !ping.exited().expect("exited?"));
 
         drop(transport);
         assert_eq!(
-            group.member_pids().expect("명단"),
+            group.member_pids().expect("list"),
             Vec::<u32>::new(),
-            "통로가 사라졌는데 명단이 남았다 — 손잡이가 Job 을 붙들고 있다"
+            "the link is gone but the list remains — the handle is holding on to the Job"
         );
         assert!(
-            group.pin(root_pid, false).expect("붙들기").is_none(),
-            "통로가 사라졌는데 뿌리를 붙들었다"
+            group.pin(root_pid, false).expect("hold on").is_none(),
+            "the link is gone but it held on to the root"
         );
 
         let deadline = Instant::now() + Duration::from_secs(5);
         for member in [&root, &ping] {
             let left = deadline.saturating_duration_since(Instant::now());
             assert!(
-                member.wait_exit(left).expect("끝나기 대기"),
-                "통로를 버린 뒤 5 초가 지나도 뿌리나 ping 이 살아 있다 — Job 이 안 닫혔다: {:?}",
+                member.wait_exit(left).expect("wait for exit"),
+                "5 seconds after dropping the link the root or ping is still alive — the Job did not close: {:?}",
                 member.facts()
             );
         }

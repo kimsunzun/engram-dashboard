@@ -2,6 +2,6 @@
 
 export type AgentCancelQueuedInputArgs = { target: string, 
 /**
- * ★필수다★ — 「없으면 가장 최근」 같은 기본값을 두지 않는다(TRD §5-6).
+ * ★Required★ — no default like 「the most recent if absent」 (TRD §5-6).
  */
 input_id: string, };

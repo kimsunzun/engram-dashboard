@@ -1,4 +1,4 @@
-// 창 크롬 — OS 창 제목(TRD S26-window-chrome §4-4).
+// Window chrome — the OS window title (TRD S26-window-chrome §4-4).
 mod chrome;
 pub mod commands;
 pub mod daemon_client;
@@ -11,28 +11,24 @@ pub mod output_router;
 pub mod settings;
 pub mod spare;
 pub mod state;
-// 탭 놓기의 셸 몫 — 끌기가 끝난 뒤의 놓기 명령 하나 · 창 사실(ADR-0296).
+// The shell's part of tab drop — the one drop command after a drag ends · window facts (ADR-0296).
 pub mod tab_drop;
 pub mod theme;
 mod tray;
 // The shell-made UI text in both UI languages, and applying a `ui.language` change to it (ADR-0373).
 mod ui_language;
 pub mod ui_text;
-// ADR-0155: 웹뷰가 주인인 명령의 셸쪽 다리(등록 대리 + 2단 배달의 마지막 홉).
+// ADR-0155: the shell-side leg of commands owned by the webview (registration proxy + the last hop of the two-stage delivery).
 pub mod view_commands;
 mod webview_env;
 
-// ADR-0029: embedded(in-process 호스팅) 제거 → daemon-only. 앱(src-tauri)은 데몬의 상주 클라이언트
-// 셸이다(창/트레이/로컬 제어 command + 데몬 discovery). 에이전트는 데몬이 호스팅한다.
-// 그래서 옛 in-proc 배선(AgentManager/ConnectionCore/embedded
-// carrier/AppState/TauriStatusSink/모드 시스템)은 전부 제거됐다.
+// ADR-0029: the app is the daemon's resident client shell (window/tray/local control commands + daemon discovery); the daemon hosts the agents.
 use tauri::Manager;
 
-/// main 창을 못 만든 시작(setup ⑧)의 프로세스 종료 코드.
+/// The process exit code of a start that could not create the main window (setup ⑧).
 const STARTUP_FAILED_EXIT_CODE: i32 = 1;
 
-// 데몬 에이전트 목록 → 탭 자동 이름 장부(TRD S26-window-chrome §4-3) — 연결 태스크가 프론트 알림 뒤에 부른다. 레이아웃은
-//   사람 클릭 · 버스와 같은 인스턴스여야 한다(ADR-0035 레이아웃 권위는 하나).
+// Daemon agent list → the tab auto-name ledger; the connection task calls it after the frontend notice. The layout must be the same instance as human clicks and the bus (ADR-0035: one layout authority). (TRD S26-window-chrome §4-3)
 struct LayoutAgentNames {
     layout: crate::layout::LayoutState,
     app: tauri::AppHandle,
@@ -49,7 +45,9 @@ impl crate::daemon_client::AgentNamesSink for LayoutAgentNames {
             &crate::commands::layout::TauriEvents { app: &self.app },
             &names,
         ) {
-            tracing::warn!("에이전트 이름 장부를 고치지 못했다(탭 이름은 다음 목록에서): {e}");
+            tracing::warn!(
+                "could not update the agent name ledger (tab names follow from the next list): {e}"
+            );
         }
     }
 }
@@ -58,21 +56,19 @@ impl crate::daemon_client::AgentNamesSink for LayoutAgentNames {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // ★무엇보다 먼저★ — 셸은 아무것도 가두지 않으므로 이 뒤의 모든 패닉이 사유 줄을 남기고 셸을 끝낸다. 파일
-    //   로그는 그 뒤 부팅 플러그인(`state/boot_plugin.rs` ⓪)이 연다 — 그 앞의 패닉은 사유 줄이 파일에 남지 않는다
-    //   (std 기본 훅의 stderr 뿐이고 릴리즈엔 콘솔이 없다).
+    // ★Before anything else★: every panic after this leaves a reason line and ends the shell. The file log is opened later by the boot plugin (`state/boot_plugin.rs` ⓪), so an earlier panic leaves no line in the file (only the std default hook's stderr; release builds have no console).
     // ADR-0292
     engram_dashboard_base::panic::install_hook();
 
-    // ADR-0029: 부팅 기동(autostart 등록 인자에 --hidden 포함)은 창 없이 트레이만 상주시킨다.
+    // ADR-0029: a boot launch (autostart registration arguments include --hidden) keeps only the tray resident, without a window.
     let hidden = std::env::args().any(|a| a == "--hidden");
 
-    // ── 화면 상태(TRD S21-storage §6) — 부팅 단계 플러그인 · 사용자 setup · 종료가 같은 인스턴스를 본다 ──
+    // ── Screen state (TRD S21-storage §6) — the boot-stage plugin · user setup · exit see the same instance ──
     let layout = crate::layout::LayoutState::new();
     let labels = std::sync::Arc::new(crate::commands::popout::PopupCounter::default());
     let state_session = std::sync::Arc::new(crate::state::boot_plugin::StateSession::default());
     let restore = std::sync::Arc::new(crate::state::restore::RestoreService::new());
-    // 크래시 사본에 답하는 단일 경로(TRD S21-storage §6-7) — 사람(Tauri 껍데기)과 LLM(버스)이 같은 인스턴스를 본다.
+    // The single path that answers the crash copy (TRD S21-storage §6-7) — humans (the Tauri wrapper) and LLMs (the bus) see the same instance.
     let restore_coordinator = std::sync::Arc::new(crate::state::restore::RestoreCoordinator::new(
         restore.clone(),
         layout.clone(),
@@ -81,26 +77,19 @@ pub fn run() {
     ));
 
     // ── Shell settings load — before the boot stage plugin, which reads the UI language (ADR-0373) ──
-    // ★여기서는 읽기만 한다★ — 적재는 파일·폴더를 만들지도 고치지도 않고, 쓰기는 setup 의 `enable_writes`
-    //   뒤에만 열린다. 단일 인스턴스 관문(아래 플러그인)은 build 안에서 판정되므로, 여기서 디스크를 바꾸면 곧
-    //   종료될 두 번째 인스턴스도 그것을 바꾼다.
+    // ★Only reads here★: loading creates or changes no files or folders; writes open after setup's `enable_writes`. The single-instance gate decides inside build, so changing the disk here would let a second instance that is about to exit change it too.
     let settings = std::sync::Arc::new(crate::settings::SettingsService::load_from_dir(
         &crate::discovery::DataLayout::resolve().shell_config_dir(),
     ));
 
     let mut builder = tauri::Builder::default();
-    // single-instance 플러그인은 가장 먼저 등록(플러그인 규약). ADR-0029: 앱은 데몬 클라 전역 단일 —
-    // 무조건 등록.
-    // ★"전역 단일"의 범위 = 번들 identifier★: 플러그인은 Windows 뮤텍스 이름을 `{identifier}-sim` 으로
-    //   만든다(tauri-plugin-single-instance 2.4.2 `platform_impl/windows.rs:67`). 그래서 identifier 를
-    //   공유하는 두 빌드는 서로를 죽인다 — dev 빌드는 `src-tauri/tauri.dev.conf.json` 오버레이로
-    //   identifier 를 갈라 릴리즈와 공존한다. ★두 identifier 를 통일하지 말 것★(사유 = 그 파일 주석).
-    // 두 번째 실행 = 사람이 앱을 다시 실행했다 — 트레이 누름과 같은 「누름」 갈래다(TRD S26-window-chrome §6-2).
+    // The single-instance plugin is registered first (plugin convention), always (ADR-0029).
+    // ★"Global single" = the bundle identifier★: the plugin names the Windows mutex `{identifier}-sim` (tauri-plugin-single-instance 2.4.2 `platform_impl/windows.rs:67`), so two builds sharing the identifier kill each other. The dev build splits the identifier through the `src-tauri/tauri.dev.conf.json` overlay and coexists with the release. ★Do not unify the two identifiers★.
+    // A second run is a person running the app again — the same "press" branch as a tray press. (TRD S26-window-chrome §6-2)
     builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
         crate::tray::actions::show_main_ui(app, crate::layout::window_ctl::Activation::TrayClick);
     }));
-    // ★단일 인스턴스 바로 뒤에 둔다★ — 로그 초기화 · 셸 실행 잠금 · 상태 파일 판정 · 모델 채우기를 관문 뒤 · 어느
-    //   창보다 앞에서 한다(TRD S21-storage §6-5 · 정본 = 그 모듈 머리).
+    // ★Right after the single instance★: log init, shell run lock, state file decision and model fill happen after the gate and before any window (canonical = that module's head). (TRD S21-storage §6-5)
     builder = builder.plugin(crate::state::boot_plugin::init(
         crate::state::boot_plugin::Boot {
             layout: layout.clone(),
@@ -111,67 +100,47 @@ pub fn run() {
         },
     ));
     builder = builder.plugin(tauri_plugin_opener::init());
-    // 네이티브 폴더 선택 다이얼로그(프리셋 경로 추가) — 프론트 PresetPalette 우클릭 "추가"가
-    //   open({directory:true}) 로 호출한다. 권한은 default.json 의 dialog:allow-open 으로 최소 부여.
-    // ★폴더 선택만의 플러그인이 아니다★ — 명령 거절 박스(`daemon_client/refusal.rs`)가 Rust API 로 쓴다(권한
-    //   불필요 — IPC 를 안 거친다). 그 `dialog()` 는 이 등록이 없으면 패닉하므로, 폴더 선택을 걷더라도 이 줄은
-    //   걷지 말 것.
+    // Native folder picker (adding a preset path) — the frontend PresetPalette "Add" calls it via `open({directory:true})`; permission is `dialog:allow-open` in default.json.
+    // ★Not a plugin only for folder picking★: the command refusal box (`daemon_client/refusal.rs`) uses it through the Rust API, and `dialog()` panics without this registration — do not remove it even if folder picking goes.
     builder = builder.plugin(tauri_plugin_dialog::init());
 
-    // ★플러그인 등록 ≠ 활성화★: 기본 OFF, set_autostart command/트레이 토글로만 enable(레지스트리 Run 기록).
-    // LaunchAgent 는 macOS 전용 인자라 Windows 무관(Windows 는 레지스트리 Run 키 사용).
+    // ★Plugin registration ≠ activation★: default OFF, enabled only via the set_autostart command / tray toggle (writes the registry Run entry).
     builder = builder.plugin(tauri_plugin_autostart::init(
         tauri_plugin_autostart::MacosLauncher::LaunchAgent,
         Some(vec!["--hidden"]),
     ));
 
-    // ADR-0102: ★LayoutState 는 반드시 pre-build(빌더)에서 manage 한다★ — setup() 이 아니라 여기서.
-    //   창의 웹뷰는 만들어지자마자 JS 를 로드해 invoke('list_tabs', {window:"main"}) 를 쏜다. 그때 상태가
-    //   미등록이면 command 가 Err 로 떨어지고, main 은 이벤트 복구 경로가 없어(window:tabs-updated 는 탭
-    //   변형 시에만 발화) 로딩 플레이스홀더에 영구 고착된다 — 상태 등록이 setup() 안이고 설정 창을 Tauri 가
-    //   setup() 앞에서 만들던 배치에서 실제로 난 고착이다. 정적 창은 이제 setup() 안(부팅 단계 ⑧)에서 만들지만,
-    //   빌더에서 등록하면 setup() 안의 순서와 무관하게 어느 창보다 먼저 상태가 있다. LayoutState::new() 는
-    //   결정적(app handle·런타임 불필요 — ViewManager::new() 가 기본 View 1개를 동기 생성)이라 빌더에서 등록
-    //   가능. ★setup 으로 옮기지 말 것★ — 옮기면 창을 만드는 자리보다 앞인지를 손으로 지켜야 한다.
-    //   대조: DaemonClient 는 tokio 런타임이 필요해 setup 에 남는다(창을 만드는 ⑧ 보다 앞에서 등록한다).
-    //   그 안의 모델은 부팅 단계 플러그인이 창보다 먼저 판정한 모델로 갈아끼운다(TRD S21-storage §6-5 ⑥).
+    // ADR-0102: ★LayoutState must be managed pre-build (in the builder), not in setup()★. A webview loads JS as soon as its window exists and invokes `list_tabs`; with the state unregistered the command fails and main has no recovery path (`window:tabs-updated` fires only on tab changes), so it sticks on the loading placeholder forever (this happened when registration was in setup() and Tauri created the settings window before setup()). Registered in the builder, the state exists before any window regardless of order inside setup(). `LayoutState::new()` needs no app handle or runtime, so this is possible.
+    //   ★Do not move it to setup★. DaemonClient needs the tokio runtime, so it stays in setup (registered before ⑧, which creates windows).
+    //   The model inside is swapped for the one the boot-stage plugin decided before the windows (⑥). (TRD S21-storage §6-5 ⑥)
     let setup_layout = layout.clone();
     builder = builder.manage(layout);
     builder = builder.manage(labels.clone());
     builder = builder.manage(crate::state::placement::DeferredMaximize::default());
-    // 복원 상태도 같은 이유다(ADR-0102) — 창의 첫 `restore_status` 당기기가 부팅 단계 ⑥ 이 정한 값을 본다(TRD
-    //   S21-storage §6-5 ⑥ · I5).
+    // The restore status, for the same reason (ADR-0102): a window's first `restore_status` pull sees the value boot stage ⑥ decided.
     builder = builder.manage(restore);
-    // 조율자도 같은 이유로 여기서 manage 한다(ADR-0102). 창 포트 · 알림 · 구독 원천은 `AppHandle` 이 있어야
-    //   서므로 setup 끝에 꽂는다 — 그 전의 수락은 `INTERNAL`(사본 그대로 · 다시 답할 수 있다)이고 거절은 포트 없이
-    //   선다(`RestoreCoordinator` 문서). 데몬 클라이언트는 구독 원천이 커밋 때마다 찾는다.
+    // The coordinator, for the same reason (ADR-0102). The window port, notices and subscription source need an `AppHandle`, so they are plugged in at the end of setup; an accept before that is `INTERNAL` (copy kept, can answer again) and a refusal stands without the port (`RestoreCoordinator` docs).
     let setup_restore = restore_coordinator.clone();
     builder = builder.manage(restore_coordinator);
-    // 숨긴 채 지은 창을 첫 화면 알림까지 기다리는 명부 — 창을 만드는 어느 자리보다 먼저 있어야 한다(없으면 곧바로 보인다).
-    //   예열 창 풀이 그 손잡이를 쥐므로 풀보다 먼저 만든다(앱 손잡이는 setup 첫머리에 꽂는다).
+    // Windows built hidden that wait for the first-paint notice; must exist before any window is created (otherwise they show right away) and before the prewarm pool, which holds its handle (the app handle is plugged in at the start of setup).
     let first_paint = std::sync::Arc::new(crate::first_paint::FirstPaintGate::default());
     let spare_paint_gate =
         std::sync::Arc::new(crate::first_paint::SparePaintGate::new(first_paint.clone()));
     let setup_spare_paint_gate = spare_paint_gate.clone();
     builder = builder.manage(first_paint);
-    // 예열 창 상태(예열 창 풀 · 종료 표지 — TRD S21-slot-docking §3-9)도 같은 이유다(ADR-0102) — 웹뷰의 첫 측정
-    //   보고 둘(캔버스 · UI 치수) · `window_role` 이 이 상태를 본다.
+    // The prewarm window state (pool · exit marker), for the same reason (ADR-0102): the webview's first measurement reports and `window_role` see it. (TRD S21-slot-docking §3-9)
     builder = builder.manage(std::sync::Arc::new(crate::spare::SpareState::new(
         crate::spare::SpareSeams::new(spare_paint_gate),
     )));
-    // 탭 놓기 장부 · 창마다 마지막으로 낸 창 사실(ADR-0296 · TRD S21-slot-docking §3-4 · §3-8)도 같은 이유다
-    //   (ADR-0102) — 웹뷰의 마운트 때 `window_frame` 당기기와 창의 첫 자리 기록이 이 상태를 본다.
+    // The tab drop ledger and the window facts last emitted per window (ADR-0296), for the same reason (ADR-0102): the webview's `window_frame` pull on mount and the first position record see them. (TRD S21-slot-docking §3-4 · §3-8)
     builder = builder.manage(std::sync::Arc::new(crate::tab_drop::DropBook::default()));
     builder = builder.manage(std::sync::Arc::new(crate::tab_drop::FrameBook::default()));
-    // 창마다 마지막으로 입힌 OS 제목의 판(TRD S26-window-chrome §4-4) — 탭 알림이 오는 어느 길보다 먼저 있어야 한다(없는
-    //   동안 온 제목은 입히지 않고 지나간다).
+    // The OS title version last applied per window — must exist before any tab notice arrives (titles arriving while it is absent are passed over unapplied). (TRD S26-window-chrome §4-4)
     builder = builder.manage(crate::chrome::ChromeState::default());
 
-    // ── 셸 설정 + 유효 테마(TRD S21-storage §5-3 · §5-6) ─────────────────────────────
-    // ★위 LayoutState 와 같은 이유로 빌더에서 manage 한다(ADR-0102)★ — 웹뷰의 첫 `get_ui_settings` ·
-    //   `settings_get` 때 상태가 없으면 그 창은 기본값으로 굳는다.
-    // ★셸에 하나★ — 밀기 순서를 지키는 락이 이 안에 있다(사람 경로·LLM 경로가 같은 인스턴스를 본다). 창 테마는 위
-    //   화면 상태 모델에서 읽는다(TRD S21-storage §5-6).
+    // ── Shell settings + effective theme (TRD S21-storage §5-3 · §5-6) ─────────────────────────────
+    // ★Managed in the builder for the same reason as LayoutState (ADR-0102)★: without the state at the webview's first `get_ui_settings` / `settings_get`, that window freezes on the defaults.
+    // ★One per shell★: the lock that keeps the push order is inside it (human and LLM paths share the instance). The window theme is read from the screen state model above. (TRD S21-storage §5-6)
     let themes = std::sync::Arc::new(crate::theme::EffectiveThemes::new(
         settings.clone(),
         setup_layout.clone(),
@@ -182,66 +151,60 @@ pub fn run() {
         crate::ui_language::LanguageHook::default(),
     ));
 
-    // ── 웹뷰 환경(TRD S21-storage §4) — 창을 만드는 코드가 전부 이 인스턴스에서 폴더 · 인자를 받는다 ──
-    // ★빌더에서 manage 한다(위 LayoutState 와 같은 까닭 — ADR-0102)★ — 팝아웃을 만드는 invoke 보다 먼저 있어야 한다.
+    // ── Webview environment (TRD S21-storage §4) — all code that creates windows gets folders · arguments from this instance ──
+    // ★Managed in the builder (same reason as LayoutState above — ADR-0102)★ — it must exist before the invoke that creates a popout.
     let webview_env = std::sync::Arc::new(crate::webview_env::WebviewEnv::resolve());
     let setup_webview_env = webview_env.clone();
     builder = builder.manage(webview_env);
 
     let exit_session = state_session.clone();
-    // 시작이 실패했다는 표지 — setup ⑧ 이 세우고 종료 사건이 읽는다(아래 `run`).
+    // The marker that the start failed — setup ⑧ sets it and the exit event reads it (`run` below).
     let startup_failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let setup_startup_failed = startup_failed.clone();
     builder
         .setup(move |app| {
-            // 로그는 부팅 단계 플러그인이 이미 열었다(TRD S21-storage §6-5 ⓪).
+            // The log was already opened by the boot-stage plugin.
 
-            // 예열 창 풀의 첫 화면 문 손잡이가 확정 ③ 의 보이기를 메인 스레드로 넘길 앱 손잡이 — 창을 만드는 어느
-            //   자리(⑧ · 예열 창 짓기)보다 앞.
+            // The app handle the prewarm pool's first-paint door uses to hand confirm ③'s show to the main thread — before any window is created (⑧, prewarm build). (TRD S21-storage §6-5)
             setup_spare_paint_gate.attach(app.handle().clone());
 
-            // ── 웹뷰 폴더 결정(TRD S21-storage §4 · M4) — 창을 만드는 어느 자리보다 앞 ─────────────────
-            // 단일 인스턴스 관문 뒤라 쓰기 확인(프로브)을 해도 된다.
+            // ── Webview folder decision — before any window is created ─────────────────
+            // After the single-instance gate, so a write check (probe) is fine. (TRD S21-storage §4)
             setup_webview_env.chosen_dir();
 
-            // ── 부팅 단계 ⑦: 기록기 시작(가드면 띄우지 않는다 — §6-5 ③) ─────────────────────
+            // ── Boot stage ⑦: start the writer (not started under a guard — §6-5 ③) ─────────────────────
             state_session.start_saver();
 
-            // 단일 인스턴스 관문을 지난 뒤라 디스크를 바꿔도 된다(빌더 쪽 적재 주석). 로거가 선 뒤라 적재가
-            //   모아 둔 로그(못 쓰는 `settings.json` · 접힌 값)도 여기서 나간다.
+            // Past the single-instance gate, so changing the disk is fine. The logger is up, so the logs loading collected (unwritable `settings.json`, folded values) go out here.
             settings.enable_writes();
 
-            // 창 테마 손잡이 — 명령 표 · 부팅 밀기 · 복원 조율자가 같은 것을 쥔다(TRD S21-storage §5-6).
+            // The window theme handle — the command table, boot push and restore coordinator hold the same one. (TRD S21-storage §5-6)
             let theme_control =
                 crate::commands::settings::theme_control(app.handle().clone(), themes.clone());
 
-            // ── ADR-0026 2단계: 네이티브 트레이 배선 ─────────────────────────────────────
-            // ADR-0029: 앱은 항상 트레이를 갖는 daemon 클라이언트라 무조건 호출(모드 게이트 없음).
-            // ADR-0028: 데몬 생사 push 의 단일 소유 상태. build_tray 의 초기 refresh 가 publish 를
-            // 타려면(중복차단·억제창 판정) state 가 먼저 manage 되어 있어야 한다 → build_tray 전에 등록.
+            // ── ADR-0026 step 2: native tray wiring ─────────────────────────────────────
+            // ADR-0029: the app always has a tray (no mode gate).
+            // ADR-0028: the single owned state of the daemon liveness push; it is managed first so build_tray's initial refresh goes through publish (duplicate blocking, suppression window).
             app.manage(tray::actions::LivenessState::default());
 
-            // ── 출력 평면(ADR-0046 — 무상태 통과): OutputRouter + window Channel registry ──
-            // ★단일 공유 Arc 2벌★: router·registry — 동일 인스턴스를 본다.
-            // ★미러 버퍼(buffer_store) 제거★ — remount/새 창은 데몬 ring 전량 재replay(뷰 주도, ADR-0046).
+            // ── Output plane (ADR-0046 — stateless pass-through): OutputRouter + window Channel registry ──
+            // ★Two shared Arcs★: router and registry, the same instance on both sides.
+            // ★No mirror buffer★: remount or a new window re-replays the daemon ring in full (view-driven, ADR-0046).
             let router = std::sync::Arc::new(crate::output_router::OutputRouter::new());
             let registry: crate::output_channel::WindowChannelRegistry = Default::default();
             app.manage(router.clone());
             app.manage(registry.clone());
 
-            // ── 웹뷰 몫 명령의 다리(ADR-0155, TRD §6 Step 4) ─────────────────────────────
-            // ★DaemonClient 보다 먼저 만든다★ — 표를 꽂을 때 함께 넘겨야 하고(등록 패킷이 두 층을 한 방에
-            //   싣는다), 부팅 보고를 받는 invoke 핸들러도 같은 실물을 봐야 한다. 같은 Arc 를 양쪽에 준다.
+            // ── The leg of webview-owned commands (ADR-0155) ──
+            // ★Created before DaemonClient★: it is passed along when the table is plugged in (the registration packet carries both layers at once), and the invoke handler receiving the boot report must see the same object. (TRD §6)
             let view_commands = std::sync::Arc::new(crate::view_commands::ViewCommandBridge::new(
                 std::sync::Arc::new(crate::view_commands::TauriViewDispatch(app.handle().clone())),
             ));
             app.manage(view_commands.clone());
 
-            // ── DaemonClient(데몬 WS 연결 단일 권위) 등록 ──────────
-            // 전용 멀티스레드 런타임을 소유하는 클라이언트(setup 은 tokio 컨텍스트 밖이라
-            // Handle::current() 대신 전용 런타임 — DaemonClient::new_real_with_owned_runtime).
-            // ★app-startup connect 는 T6/connect 로 이연★ — 여기선 cmd 평면만
-            // 배선하고, 실제 연결 수립(connect/ensure)은 프론트/부팅 시퀀스가 부른다.
+            // ── DaemonClient (single authority of the daemon WS connection) registration ──────────
+            // A client owning a dedicated multithreaded runtime (setup is outside a tokio context — `DaemonClient::new_real_with_owned_runtime`).
+            // ★App-startup connect is deferred to T6/connect★: only the cmd plane is wired here; the frontend/boot sequence calls connect/ensure.
             match crate::daemon_client::DaemonClient::new_real_with_owned_runtime(
                 router.clone(),
                 registry.clone(),
@@ -253,12 +216,9 @@ pub fn run() {
             ) {
                 Ok(client) => {
                     let client = std::sync::Arc::new(client);
-                    // ── 명령 표를 그 클라이언트에 꽂는다(ADR-0155 결정 4·5) ──
-                    // ★순서가 계약이다★: 표의 스폰 포트가 이 클라이언트를 쥐므로 클라이언트가 먼저 서야 하고,
-                    //   연결은 아직 안 섰으므로(위 주석 — connect 는 프론트/부팅 시퀀스가 부른다) 첫 봉투보다
-                    //   표가 먼저 꽂힌다. 여기서 빠뜨리면 데몬이 배달한 명령이 「표 없음」 오류로 되돌아간다.
-                    // ★사람 클릭과 **같은** 상태·라우터·발급기를 넘긴다★ — 다른 인스턴스면 LLM 이 만든 창이
-                    //   사람이 보는 목록에 없다(ADR-0035 레이아웃 권위는 하나).
+                    // ── Plug the command table into that client (ADR-0155 decisions 4·5) ──
+                    // ★The order is the contract★: the table's spawn port holds this client, so the client must be up first; and the connection is not up yet, so the table is plugged in before the first envelope. If missed, commands the daemon delivered come back with a "no table" error.
+                    // ★Passes the **same** state · router · issuer as human clicks★, or a window an LLM created would not be in the list a person sees (ADR-0035).
                     match app.try_state::<crate::layout::LayoutState>() {
                         Some(state) => client.install_command_table(
                             crate::layout::commands::make_table(
@@ -276,22 +236,20 @@ pub fn run() {
                             crate::layout::commands::CATALOG_VERSION,
                             view_commands.clone(),
                         ),
-                        // LayoutState 는 빌더에서 manage 되므로(위 ADR-0102) 여기 닿지 않는다 — 닿았다면 그
-                        //   pre-build 등록이 사라진 것이라 조용히 넘기지 않는다.
+                        // Not reached while LayoutState is managed in the builder (ADR-0102); if it is, that registration is gone, so do not pass over it silently.
                         None => tracing::error!(
-                            "LayoutState 미등록 — 레이아웃 명령 표를 꽂지 못했다(데몬이 배달한 명령이 실패한다)"
+                            "LayoutState not registered — could not plug in the layout command table (commands the daemon delivers will fail)"
                         ),
                     }
                     app.manage(client);
                 }
                 Err(e) => {
-                    tracing::warn!("DaemonClient 런타임 생성 실패(데몬 명령 불가, 앱 계속): {e}")
+                    tracing::warn!("failed to create the DaemonClient runtime (no daemon commands, app continues): {e}")
                 }
             }
 
-            // ── 부팅 단계 ⑧ ⑨: 정적 창(main)을 저장된 자리로 만들기 · 복원한 팝아웃 창 · 테마 한 번 ──
-            // (TRD S21-storage §4 · §6-5) 여기서 첫 창이 생긴다(설정의 `"create": false`). `--hidden` 이면 main 은
-            //   첫 화면에도 보이지 않고, 팝아웃은 아래 숨기기가 첫 화면 기다림을 거둬 숨긴 채 둔다(사용자 결정 F13).
+            // ── Boot stages ⑧ ⑨: create the static window (main) at the saved position · restored popout windows · theme once ──
+            // The first window is created here (`"create": false` in the config). With `--hidden`, main is not shown even at first paint, and popouts are kept hidden by the hide below withdrawing their first-paint wait (F13). (TRD S21-storage §4 · §6-5)
             if crate::state::placement::restore_windows(
                 app.handle(),
                 &setup_webview_env,
@@ -302,26 +260,21 @@ pub fn run() {
             .is_err()
             {
                 // ADR-0283
-                // main 을 못 만들면 앱을 끝낸다(사용자 결정 2026-10-07) — 패닉이 아니라 종료 요청이라 종료 사건
-                //   (`RunEvent::Exit` — 아래 `run`)이 기록기 `Final` 과 셸 실행 잠금 놓기를 하고, 세운 표지로 종료
-                //   코드를 정한다. 요청은 이 setup 이 돌아간 뒤 이벤트 루프가 처리하므로 setup 을 여기서 끝낸다 — 남은
-                //   단계(⑩ · 복원 포트 · 트레이)는 곧 끝날 앱에 소용없다.
+                // If main cannot be created the app ends: an exit request, not a panic, so the exit event (`RunEvent::Exit`, `run` below) does the writer `Final` and the shell run lock release, and the set marker decides the exit code. Setup ends here since the remaining stages are of no use to an app about to end.
                 setup_startup_failed.store(true, std::sync::atomic::Ordering::SeqCst);
                 app.handle().exit(STARTUP_FAILED_EXIT_CODE);
                 return Ok(());
             }
-            // 지은 창마다 OS 제목을 한 번 입힌다(TRD S26-window-chrome §4-4 ③) — ⑨ 가 못 연 팝아웃을 모델에서 지운 뒤라
-            //   남은 창만 알린다. 이것이 없으면 다음 탭 변경까지 창 제목이 지을 때의 「Engram」에 머문다.
+            // Apply the OS title once to each built window, after ⑨ removed the popouts it could not open from the model. Without it the title stays at the build-time "Engram" until the next tab change. (TRD S26-window-chrome §4-4 ③)
             if let Err(e) = crate::layout::apply::sync_titles(
                 &setup_layout,
                 &crate::commands::layout::TauriEvents { app: app.handle() },
             ) {
-                tracing::warn!("부팅 뒤 창 제목을 입히지 못했다(다음 탭 변경 때 입는다): {e}");
+                tracing::warn!("could not apply the window titles after boot (applied on the next tab change): {e}");
             }
 
-            // ── 부팅 단계 ⑩: 파생 표(라우터 · 사용량 관심)를 마지막 창 묶음으로 한 번 다시 계산한다 ──
-            // 부팅 단계 플러그인은 이 클라이언트보다 먼저 돌아 부를 수 없었고, ⑨ 가 못 연 팝아웃을 모델에서 지운
-            //   뒤여야 한다. 안 하면 복원한 슬롯의 에이전트 출력이 다음 레이아웃 변경까지 어느 창에도 안 간다.
+            // ── Boot stage ⑩: recompute the derived tables (router · usage interest) once with the final window set ──
+            // The boot-stage plugin runs before this client and could not call it, and it must follow ⑨ (popout removal). Without it, agent output of restored slots goes to no window until the next layout change.
             if let Some(client) = app.try_state::<std::sync::Arc<crate::daemon_client::DaemonClient>>() {
                 match setup_layout.0.lock() {
                     Ok(mgr) => crate::layout::SubscriptionSync::resync(
@@ -332,14 +285,12 @@ pub fn run() {
                         &mgr,
                     ),
                     Err(_) => {
-                        tracing::error!("레이아웃 락에 독이 들어 부팅 뒤 구독 재계산을 못 했다")
+                        tracing::error!("the layout lock is poisoned, so the post-boot subscription recompute could not run")
                     }
                 }
             }
-            // ── 복원 조율자 포트(TRD S21-storage §6-7) ──────────────────────────────────────────
-            // ★⑨ · ⑩ 뒤에 꽂는다★ — ⑨(`open_restored_popouts`)는 모델의 팝아웃마다 창을 만드는 부팅 전용 길이라,
-            //   그보다 먼저 수락이 커밋되면 수락이 이미 만든 창의 label 로 다시 만들려다 실패해 그 팝아웃을 모델에서
-            //   지우고 OS 창은 고아로 남긴다(`state::placement` 의 그 함수 문서).
+            // ── Restore coordinator port (TRD S21-storage §6-7) ──────────────────────────────────────────
+            // ★Plugged in after ⑨ · ⑩★: ⑨ (`open_restored_popouts`) is boot-only; an accept committed before it would fail recreating the window the accept already created, remove that popout from the model and orphan the OS window (docs in `state::placement`).
             setup_restore.attach(crate::state::restore::RestorePorts {
                 windows: std::sync::Arc::new(crate::state::placement::TauriRestoreWindows::new(
                     app.handle().clone(),
@@ -352,53 +303,37 @@ pub fn run() {
                 }),
                 themes: theme_control,
             });
-            // TODO(T6/connect): 부팅 시 DaemonClient.ensure()/connect() 호출로 자동 연결 수립.
+            // TODO(T6/connect): set up the connection automatically at boot via DaemonClient.ensure()/connect().
             if let Err(e) = tray::build_tray(app) {
-                tracing::warn!("트레이 생성 실패(앱은 계속): {e}");
+                tracing::warn!("failed to create the tray (the app continues): {e}");
             }
-            // ADR-0028: 데몬 생사 주기(회색 고착 해소 — 외부 변화도 트레이/emit 에 반영).
-            // build_tray 가 초기 아이콘을 확정한 뒤 변화만 push 한다(첫 관측은 push 안 함).
+            // ADR-0028: daemon liveness cycle (external changes reach the tray and emit too); after build_tray settles the initial icon it pushes only changes.
             tray::spawn_daemon_observer(&app.handle().clone());
 
-            // ── 예비 창(TRD S21-slot-docking §3-9 「부팅」) — 미리 하나 지어 숨긴 채 기다리게 한다 ──
-            // ★작업 스레드에서 짓는다★ — 이 setup 이 돌아간 뒤 이벤트 루프가 창을 만든다. 예비 창은 짓기 전에
-            //   풀에 적으므로 아래 `--hidden` 숨기기 · 트레이가 그 창을 보지 않는다. main(⑧)을 만든 뒤라 첫 창이 바뀌지
-            //   않는다.
-            // ADR-0295 · ADR-0299
+            // ── Spare window — build one in advance and keep it waiting hidden ──
+            // ★Built on a worker thread★: the event loop creates windows after this setup returns. The spare is written to the pool before it is built so the `--hidden` hide and the tray below do not see it, and it comes after main (⑧) so the first window does not change.
+            // ADR-0295 · ADR-0299 (TRD S21-slot-docking §3-9)
             crate::commands::spare::spawn_spare_build(app.handle());
 
-            // `--hidden` — main 은 첫 화면에 보이도록 올리지 않았다(⑧). 여기서는 ⑨ 가 첫 화면에 보이도록 올린 팝아웃의
-            //   올림을 거두고(F13 — 거두지 않으면 첫 화면 알림 · 시한이 main 은 트레이에 둔 채 팝아웃만 보인다) 그 창을
-            //   사용량 관심에서 뺀다 — 숨기기 경로는 하나다(ADR-0229). 첫 화면의 보이기는 보일지를 메인 스레드에서
-            //   보이기 바로 앞에 정하고(`first_paint`) 이 setup 도 메인 스레드라, 그 보이기는 여기서 거둔 뒤에야 돌아
-            //   거둔 창을 보이지 않는다.
+            // `--hidden`: main was not raised at first paint (⑧); here the raise ⑨ gave the popouts is withdrawn (F13 — otherwise the first-paint notice or deadline shows only the popouts while main stays in the tray) and those windows leave the usage interest — one hide path (ADR-0229). The first-paint show decides on the main thread right before showing and this setup is on the main thread too, so it runs only after this withdrawal.
             if hidden {
                 crate::tray::actions::hide_main_ui(app.handle());
             }
             Ok(())
         })
-        // ADR-0026 2단계: main X(WM_CLOSE)=hide(창만 숨기고 트레이 상주) — 진짜 종료는 트레이
-        // 종료 항목(app.exit(0))뿐.
-        // tauri.conf.json 이 첫 창 label 을 "main" 으로 명시한다.
-        // 주의: CloseRequested 는 Rust 측 이벤트 관찰이라 JS capability(core:window:allow-close) 불필요.
+        // ADR-0026: main X (WM_CLOSE) = hide (stays in the tray); the real exit is only the tray's exit item (`app.exit(0)`). CloseRequested is a Rust-side event, so the JS capability `core:window:allow-close` is not needed.
         .on_window_event(move |window, event| {
             match event {
                 tauri::WindowEvent::CloseRequested { api, .. } => {
                     let label = window.label();
-                    // ADR-0229: 숨기기 경로는 하나다 — 여기서 창을 따로 숨기면 입구마다 숨기는 창이 갈린다.
+                    // ADR-0229: there is one hide path — hiding the window separately here would split which windows each entry hides.
                     if label == crate::layout::MAIN_WINDOW_LABEL {
                         api.prevent_close();
                         crate::tray::actions::hide_main_ui(window.app_handle());
                     } else if crate::commands::popout::is_popup_label(label) {
-                        // 팝아웃은 닫기 요청에서 모델을 먼저 지우고 label 에 묘비를 단다 — 닫히는 창으로 붙는 확정을
-                        //   막는다(TRD S21-slot-docking 5.8판 §1-2 「닫히는 창」). ★전제 = 팝아웃의 닫기 요청은 되돌려지지
-                        //   않는다★: 닫기 취소는 위 main 갈래뿐이고, 프론트에 닫기 요청 리스너가 없으며, 런타임은 이
-                        //   콜백이 돌아오자마자 창을 닫는다(tauri-runtime-wry 2.11.3 `on_close_requested` →
-                        //   `on_window_close`). 리스너나 닫기 취소가 하나라도 생기면 지운 창이 살아남는다 — 그때는
-                        //   「닫는 중 표시 + 막히면 해제」로 바꾼다. 점검(매 `/engram-qa` · 저장소 루트에서): `rg -i "close.?requested" src/`
-                        //   → 0줄 · `rg "prevent[_]close" src-tauri/src/` → 1줄(위 main 갈래).
+                        // A popout removes the model first on a close request and puts a tombstone on the label, blocking a confirm that would attach to a closing window. ★Premise: a popout's close request is never reverted★ — cancelling happens only in the main branch above, the frontend has no close-request listener, and the runtime closes the window as soon as this callback returns (tauri-runtime-wry 2.11.3 `on_close_requested` → `on_window_close`). If a listener or close cancel appears, the removed window survives; then change to "closing mark + release if blocked". Check (every `/engram-qa`, repo root): `rg -i "close.?requested" src/` → 0 lines · `rg "prevent[_]close" src-tauri/src/` → 1 line (the main branch above). (TRD S21-slot-docking 5.8th edition §1-2)
                         let app = window.app_handle();
-                        // 하나라도 없으면(초기화 실패 극단 케이스) 건너뛴다 — 아래 `Destroyed` 갈래와 같다.
+                        // If one is missing (extreme init failure), skip — same as the `Destroyed` branch below.
                         if let (Some(state), Some(router), Some(client)) = (
                             app.try_state::<crate::layout::LayoutState>(),
                             app.try_state::<std::sync::Arc<crate::output_router::OutputRouter>>(),
@@ -410,24 +345,17 @@ pub fn run() {
                         }
                     }
                 }
-                // ★팝업 창 Destroyed 정리(수명/누수 임계)★: 팝업이 실제로 소멸하면(정상 close 또는 프로그램
-                //   destroy), main 은 대상 아님(위에서 hide 만 하니 애초에 Destroyed 안 남). 강제 프로세스 kill 은
-                //   모든 state 를 통째로 죽여 이 경로가 안 타지만(수용) 정상 close·프로그램 destroy 는 여기서 확실히
-                //   정리한다.
-                //   (ADR-0046: 일반 라우팅 메커니즘 정리.)
+                // ★Popup window Destroyed cleanup (lifetime/leak critical)★: runs when a popup is actually destroyed (normal close or program destroy); main is never a target (it is only hidden above). A forced process kill takes all state with it, so this path is not taken (accepted). ADR-0046.
                 tauri::WindowEvent::Destroyed => {
                     let label = window.label().to_string();
-                    // 아래 팝아웃 · 상태 조건 밖이다 — 그 조건이 걸러도 이 창의 제목 장부 항목은 남지 않는다(TRD
-                    //   S26-window-chrome §4-4).
+                    // Outside the popout/state conditions below, so even if those filter the window out its title ledger entry does not remain (TRD S26-window-chrome §4-4).
                     crate::chrome::forget(window.app_handle(), &label);
                     if crate::commands::popout::is_popup_label(&label) {
                         let app = window.app_handle();
                         crate::state::placement::forget_deferred_maximize(app, &label);
                         crate::first_paint::cancel_hold(app, &label);
                         crate::commands::tab_drop::forget_window_frame(app, &label);
-                        // 창 번호는 정리가 묘비 · 구독 정리와 한 락 안에서 푼다. 하나라도 없으면(초기화 실패 극단
-                        //   케이스) 정리는 건너뛰고(앱은 계속) 번호만 푼다 — 안 풀면 번호가 실행 끝까지 잡힌다(TRD
-                        //   S26-window-chrome §4-1).
+                        // The cleanup frees the window number inside one lock with the tombstone and subscription cleanup. If one is missing (extreme init failure) the cleanup is skipped and only the number is freed, or it would stay taken until the run ends (TRD S26-window-chrome §4-1).
                         if let (Some(state), Some(router), Some(registry), Some(client)) = (
                             app.try_state::<crate::layout::LayoutState>(),
                             app.try_state::<std::sync::Arc<crate::output_router::OutputRouter>>(),
@@ -441,27 +369,21 @@ pub fn run() {
                             crate::layout::release_window_number(&state, &label);
                         }
                     }
-                    // 예열 창 풀(TRD S21-slot-docking §3-9 「다시 짓기」) — 풀의 창이면 빼고 다시 짓고, 보임을 기다리던 채택
-                    //   창이면 그 다시 짓기 완료다(맡긴 창 보이기 · 안전 시한과 같은 완료 — label 마다 한 번).
+                    // Prewarm pool: a pool window is removed and rebuilt, and an adopted window waiting to be shown completes that rebuild (same completion as the handed-over show and the safety deadline — once per label). (TRD S21-slot-docking §3-9)
                     crate::commands::spare::on_spare_window_destroyed(window.app_handle(), &label);
                 }
-                // 창 자리 기록(TRD S21-storage §6-3) — 사건 값 대신 게터를 다시 읽는다(최소화 · 최대화 여부가 같이
-                //   필요하다). 예비 창 풀의 창은 모델 밖이라 적지 않는다(TRD S21-slot-docking §3-9 「숨어 있기」).
-                // ADR-0295
+                // Window position record — reads the getters again instead of the event value (minimized/maximized are needed too). Spare-pool windows are outside the model and not written.
+                // ADR-0295 (TRD S21-storage §6-3; TRD S21-slot-docking §3-9)
                 tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
                     if !crate::commands::spare::is_spare_window(window.app_handle(), window.label()) {
                         crate::state::placement::record(window);
                     }
-                    // 최대화 · 최소화에서 보통 크기로 돌아온 창에 적어 둔 OS 최소 크기를 입힌다(TRD S26-window-chrome §7-7
-                    //   — 최대화 · 최소화 동안은 입히지 않는다 · 까닭 = `crate::chrome` 장부 머리). 예열 창도 보고하므로
-                    //   빼지 않는다.
+                    // Applies the recorded OS minimum size to a window that returned to normal size from maximized/minimized (not applied while maximized/minimized; reason = the head of the `crate::chrome` ledger). Prewarm windows report too, so they are not excluded. (TRD S26-window-chrome §7-7)
                     if matches!(event, tauri::WindowEvent::Resized(_)) {
                         crate::chrome::on_resized(window);
                     }
                 }
-                // 창 사실의 앞 창 칸(제목 줄 흐림 — TRD S26-window-chrome §6-5) — 그 창의 칸은 사건의 값으로 민다. 다른 우리
-                //   창이 앞으로 오면 그 창의 `Focused(true)` 와 옛 창의 `Focused(false)` 가 둘 다 와 각자 민다. 모델 밖 창
-                //   (예열 창)은 미는 쪽이 건너뛴다.
+                // The foreground field of the window facts (title bar dimming): pushed with the event's value. When another of our windows comes to the front, both its `Focused(true)` and the old one's `Focused(false)` arrive and each pushes. Windows outside the model (prewarm) are skipped by the pushing side. (TRD S26-window-chrome §6-5)
                 tauri::WindowEvent::Focused(focused) => {
                     crate::commands::tab_drop::push_window_focus(window, *focused);
                 }
@@ -488,7 +410,7 @@ pub fn run() {
             commands::create_tab,
             commands::create_window,
             commands::switch_tab,
-            // 탭 끌기의 원래 선택 되돌리기(웹뷰 → 셸 · TRD S21-slot-docking §4-6) — 버스 명령이 아니다.
+            // Restoring the original selection of a tab drag (webview → shell) — not a bus command. (TRD S21-slot-docking §4-6)
             commands::switch_tab_if,
             commands::close_tab,
             commands::split_slot,
@@ -504,39 +426,35 @@ pub fn run() {
             commands::list_tabs,
             commands::list_windows,
             commands::resolve_spatial,
-            // 측정 보고(웹뷰 → 셸) — 버스 명령이 아니다(ADR-0227).
+            // Measurement reports (webview → shell) — not bus commands (ADR-0227).
             commands::report_window_canvas,
             commands::report_ui_metrics,
-            // 첫 화면 알림(웹뷰 → 셸) — 버스 명령이 아니다(`first_paint`).
+            // First-paint notice (webview → shell) — not a bus command (`first_paint`).
             commands::webview_painted,
-            // 부른 창의 역할(예비 창 풀 · TRD S21-slot-docking §3-9) — 웹뷰 안 배선이라 버스 명령이 아니다.
+            // The calling window's role (spare pool) — wiring inside the webview, not a bus command. (TRD S21-slot-docking §3-9)
             commands::window_role,
-            // 탭 놓기 · 창 사실(웹뷰 → 셸 · ADR-0296) — 버스 명령이 아니다(마우스 놓기의 끝 · 웹뷰 안 배선 — TRD
-            //   S21-slot-docking §3-6). 같은 동작의 LLM 명령은 T-65 `tab.dock`.
+            // Tab drop · window facts (webview → shell, ADR-0296) — not bus commands (end of a mouse drop, wiring inside the webview — TRD S21-slot-docking §3-6). The LLM command for the same action is T-65 `tab.dock`.
             commands::tab_drop::tab_drop,
             commands::tab_drop::window_frame,
-            // 창 상태(사람 길 — 웹 단추 · 레지스트리) — 버스 `window.*` 와 같은 서비스(TRD S26-window-chrome §6-4).
-            //   ★창 닫기 전용 invoke 를 따로 두지 않는다★ — main 의 닫기는 모든 창 숨기기라(§5-4) 닫기 길이 둘이면 그 판정이
-            //   갈린다.
+            // Window state (human path — web buttons · registry) — the same service as the bus `window.*`. ★No separate window-close-only invoke★: main's close is hiding all windows (§5-4), so two close paths would split that decision. (TRD S26-window-chrome §6-4)
             commands::window_ctl::window_control,
-            // 최소 창 크기 보고(웹뷰 → 셸) — 측정 보고라 버스 명령이 아니다(ADR-0227 · TRD S26-window-chrome §7-7).
+            // Minimum window size report (webview → shell) — a measurement report, not a bus command (ADR-0227). (TRD S26-window-chrome §7-7)
             commands::window_ctl::report_window_min_width,
-            // 최대화 단추 사각형 보고(웹뷰 → 셸) — 스냅 레이아웃 오버레이를 그 자리에 놓는다. 측정 보고라 버스 명령이 아니다
-            //   (ADR-0227). ★셸 기능 `snap-overlay` 뒤(기본 꺼짐 · TRD S26-window-chrome §8-4)★.
+            // Maximize button rectangle report (webview → shell) — places the snap layout overlay there; a measurement report, not a bus command (ADR-0227). ★Behind the shell feature `snap-overlay` (default off)★. (TRD S26-window-chrome §8-4)
             #[cfg(feature = "snap-overlay")]
             commands::snap_overlay::report_max_button_rect,
-            // 부팅 조회 — 미는 쪽(`window.setTheme` · `theme.default` 쓰기 · 부팅 · 복원 수락)은 따로 있다
-            //   (`commands/settings.rs` 「창별 테마를 읽는 자리가 둘인 이유」).
+            // Boot query — the pushing side (`window.setTheme` · writing `theme.default` · boot · restore accept) is separate
+            //   (`commands/settings.rs` 「why there are two places that read the per-window theme」).
             commands::get_ui_settings,
-            // 셸 설정 — 버스 `settings.*` 와 같은 서비스(ADR-0081 결정 3).
+            // Shell settings — the same service as the bus `settings.*` (ADR-0081 decision 3).
             commands::settings_get,
             commands::settings_set,
             commands::settings_reset,
             commands::settings_schema,
-            // 크래시 사본 — 버스 `restore.*` 와 같은 조율자(TRD S21-storage §6-7).
+            // Crash copy — the same coordinator as the bus `restore.*`. (TRD S21-storage §6-7)
             commands::restore_status,
             commands::restore_answer,
-            // 웹뷰 몫 명령(ADR-0155) — 부팅 보고와 결말 회수 한 쌍(`commands/view_bus.rs`).
+            // Webview-owned commands (ADR-0155) — the pair of boot report and outcome collection (`commands/view_bus.rs`).
             commands::report_view_commands,
             commands::report_command_outcome,
             commands::agent_spawn,
@@ -551,24 +469,16 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        // ADR-0029: 앱은 in-proc 에이전트를 호스팅하지 않으므로 종료 때 거둘 manager 가 없다(데몬이 자기 에이전트
-        // graceful 을 담당). 여기서 하는 일은 화면 상태의 정상 종료 쓰기와 셸 실행 잠금 놓기(TRD S21-storage §6-6),
-        // 그리고 시작이 실패했으면 종료 코드 정하기다 — 트레이의 종료 항목(`app.exit(0)`)도 이 사건을 낸다.
+        // ADR-0029: no in-proc agents, so nothing to reap at exit (the daemon handles its own agents). Here: the normal exit write of the screen state, releasing the shell run lock, and deciding the exit code if the start failed — the tray's exit item (`app.exit(0)`) also emits this event. (TRD S21-storage §6-6)
         .run(move |handle, event| {
-            // 끝나는 중에는 사라진 예비 창을 다시 짓지 않는다(TRD S21-slot-docking §3-9 「다시 짓기」). 종료를
-            //   막는 코드가 없어(`rg "prevent[_]exit" src-tauri/src/` → 0줄) 요청이 곧 종료다 — 막는 길이 생기면 이 표지를
-            //   `Exit` 로만 옮긴다.
+            // While exiting, a vanished spare window is not rebuilt. Nothing blocks exit (`rg "prevent[_]exit" src-tauri/src/` → 0 lines), so a request is the exit — if a blocking path appears, move this marker to `Exit` only. (TRD S21-slot-docking §3-9)
             if let tauri::RunEvent::ExitRequested { .. } = event {
                 crate::commands::spare::on_app_exiting(handle);
             }
             if let tauri::RunEvent::Exit = event {
                 crate::commands::spare::on_app_exiting(handle);
                 exit_session.shutdown();
-                // 종료 요청의 코드는 프로세스 종료 코드로 나가지 않는다 — tauri-runtime-wry 2.11.3 은 요청을
-                //   `ControlFlow::Exit`(tao 0.35 = 코드 0)로 끝낸다. 그래서 여기서 직접 끝낸다. 플러그인의 종료 처리
-                //   (단일 인스턴스 뮤텍스 놓기)는 이 콜백보다 먼저 돌았고, 건너뛰는 것은 이 뒤 Tauri 의
-                //   `cleanup_before_exit`(트레이 아이콘 지우기 · 창 숨기기) 하나다 — 이 길은 트레이를 만들기 전에 setup 을
-                //   끝내고 main 도 없어 지울 것이 없다(tauri 2.11.3 `app.rs` 의 `make_run_event_loop_callback`).
+                // An exit request's code does not become the process exit code (tauri-runtime-wry 2.11.3 ends it with `ControlFlow::Exit`, tao 0.35 = code 0), so exit directly here. Plugins' exit handling (releasing the single-instance mutex) ran before this callback; the only thing skipped is Tauri's later `cleanup_before_exit` (tray icon removal, hiding windows), and this path ends setup before creating the tray and has no main, so there is nothing to remove.
                 if startup_failed.load(std::sync::atomic::Ordering::SeqCst) {
                     std::process::exit(STARTUP_FAILED_EXIT_CODE);
                 }

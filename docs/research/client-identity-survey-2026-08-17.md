@@ -1,6 +1,6 @@
 # Slice B investigation — entry validation and storage of client-made identifiers
 
-- 상태: **medium tier · adversarial review done = MATERIALLY-FLAWED → corrected edition (2nd edition)**
+- Status: **medium tier · adversarial review done = MATERIALLY-FLAWED → corrected edition (2nd edition)**
 - Three collection tracks (3 lead lightweight workers) · grounding = 7 external checks by main · adversarial review = one other-family run (effort high, web_search ON) → of 11 findings, **8 adopted, each with a refuting source**
 - Date: 2026-08-17
 - Confidence legend: **certain** (grounding-supported + independently cross-confirmed) · **likely** (supported, single source) · **uncertain/on hold** (unsupported or source silent)

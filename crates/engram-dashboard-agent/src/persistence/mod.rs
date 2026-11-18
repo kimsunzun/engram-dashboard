@@ -1,19 +1,17 @@
-//! 프로필 · 프리셋 영속화 — `agents.json` · `presets.json` 의 저장소. 두 파일이 이 모듈의 내부 저장소 하나를
-//! 부른다(같은 규칙 · 같은 구현).
+//! Profile and preset persistence — the store for `agents.json` and `presets.json`. Both files use this module's one internal store
+//! (same rules, same implementation).
 //!
-//! 규칙은 base `file` 의 데이터 파일 규칙이다(ADR-0291):
-//! - 쓰기는 원자적이다(같은 폴더 임시 → rename) — 크래시가 나도 반쪽 파일이 남지 않는다.
-//! - ★「덮어도 되나」는 저장마다 그 직전에 지금 파일을 다시 읽어 판정한다★ — 새 판이 쓴 파일 · 못 읽는 파일은
-//!   덮지도 떠 두지도 않고 그 저장을 거절한다. 손상 파일은 덮기 전에 `<이름>.corrupt` 로 떠 두고, 떠 두기가
-//!   실패하면 그 저장도 실패한다(원본 그대로). 적재는 파일을 바꾸지 않는다.
-//! - ★적재 판정이 거절(새 판 · 못 읽음)이면 이 실행 내내 저장하지 않는다★ — 메모리 명부가 그 파일에서 오지
-//!   않았으므로, 나중에 파일이 읽히게 돼 재판정이 「쓸 수 있음」이라 답해도 그 위에 빈 명부를 쓰면 명부 전체를
-//!   잃는다.
+//! The rules are base `file`'s data-file rules (ADR-0291):
+//! - Writes are atomic (temp in the same folder → rename) — no half file on a crash.
+//! - ★「may it be overwritten」 is decided on every save by re-reading the current file right before it★ — a file from a newer edition or an
+//!   unreadable file is neither overwritten nor copied aside, and that save is refused. A damaged file is copied aside to `<name>.corrupt`
+//!   before overwriting; if the copy-aside fails, that save fails too (original left as is). Loading does not change the file.
+//! - ★A load-time refusal (newer edition · unreadable) means nothing is saved for the whole run★ — the in-memory registry did not come
+//!   from that file, so even if the file later becomes readable, writing an empty registry over it would lose the whole registry.
 //!
-//! ★저장을 직렬화하는 것은 부르는 쪽이다★ — 레지스트리가 자기 맵 락을 쥔 채 저장하고(ADR-0071) 운영에서
-//! 저장소를 부르는 것은 레지스트리 하나뿐이다. 이 모듈이 쥐는 락은 잎 하나(저장소 상태 칸)이고 쥔 채 IO · 로그 ·
-//! 밖 호출을 하지 않는다 — 락 순서 = `래치 → expected 칸 → profiles|presets → 저장소 상태 칸`.
-// ADR-0291
+//! ★Serializing saves is the caller's job★ — the registry saves while holding its own map lock (ADR-0071) and is the only production caller.
+//! This module holds one leaf lock (the store-state field) and does no IO, logging or outside calls under it — lock order =
+//! `latch → expected field → profiles|presets → store-state field`.
 
 use std::fs;
 use std::io;
@@ -36,7 +34,7 @@ use crate::profile::{AgentProfile, ProfileStore, Refusal, StoreError, StoreStatu
 pub mod presets;
 pub use presets::{FilePresetStore, PRESETS_FILE};
 
-/// 프로필 저장소의 파일 이름 — 저장 거절 · 실패를 호출자에게 알리는 문구가 이 이름을 댄다.
+/// File name of the profile store — the text that tells the caller of a save refusal or failure names this file.
 pub const AGENTS_FILE: &str = "agents.json";
 
 const PROFILES: FileKind = FileKind {
@@ -46,13 +44,13 @@ const PROFILES: FileKind = FileKind {
     spec: file::Spec {
         version_key: "schema_version",
         current: 1,
-        // ADR-0291 R6: 실측(이 PC 1,747 B)의 약 만 배 — 정상이면 안 닿고 쓰레기 파일로부터 메모리를 지키는 선.
+        // ADR-0291 R6: about ten thousand times the measured size (1,747 B on this PC) — never reached in normal use, a line that protects
+        //   memory from garbage files.
         cap: 16 * 1024 * 1024,
         shape: profiles_shape,
     },
 };
 
-/// 쓰기 쪽 디스크 표현 — 버전 키를 늘 싣는다(읽기는 [`read_list`] 가 목록 칸만 본다).
 #[derive(Serialize)]
 struct ProfilesFile<'a> {
     schema_version: u64,
@@ -96,8 +94,7 @@ fn profiles_shape(version: u64, doc: &Map<String, Value>) -> Result<(), String> 
     list_shape::<AgentProfile>(&PROFILES, version, doc)
 }
 
-/// env에 자격증명으로 보이는 키가 있으면 경고(보안). persist를 막지는 않되 평문 저장 위험을
-/// 로그로 알린다. 이상적으론 시크릿 제외 목록이지만, 우선 가시화부터.
+/// Warns if env has keys that look like credentials (security). Does not block persisting; the log tells about the plaintext storage risk.
 fn warn_if_secret(profiles: &[AgentProfile]) {
     const NEEDLES: [&str; 4] = ["KEY", "TOKEN", "SECRET", "PASSWORD"];
     for p in profiles {
@@ -107,25 +104,24 @@ fn warn_if_secret(profiles: &[AgentProfile]) {
                 tracing::warn!(
                     agent = %p.id,
                     env_key = %k,
-                    "프로필 env에 자격증명으로 보이는 키 — agents.json에 평문 저장됨. 자격증명은 env에 넣지 말 것."
+                    "profile env has a key that looks like a credential — stored in plaintext in agents.json. Do not put credentials in env."
                 );
             }
         }
     }
 }
 
-// ── OS 몫 ────────────────────────────────────────────────────────────────────────
+// ── OS share ────────────────────────────────────────────────────────────────────────
 
-/// 저장 · 저장 직전 재판정 · 떠 두기 — 데이터 파일 예산(base `file` 의 상수).
 const DATA_HOOKS: OsHooks = OsHooks {
     retry: retry_data,
     sync_dir,
 };
 
-/// 적재 읽기 — 따로 긴 예산을 쓴다.
-// ADR-0291 R14 (D7): 거기서 남은 잠김은 이 실행 내내 읽기 전용이 되므로(R17) 잠깐 쥐기 하나가 실행 전체를 묶지
-//   않게 길게 둔다. 위 끝은 셸의 데몬 찾기 마감(5 초 — 실패면 재시도 없이 `Down`)이 정한다: 적재는 접속 정보
-//   발행 앞이라 두 파일 합 최악 약 2 초면 기동의 나머지 몫이 남는다.
+/// Load read — uses a separate long budget.
+// ADR-0291 R14 (D7): a lock still held there makes this run read-only for its whole duration (R17), so it is kept long so that one brief
+//   hold does not bind the whole run. The upper end is the shell's daemon-discovery deadline (5 s — on failure `Down` without retry):
+//   loading comes before the connection info is published, and a worst case of ~2 s for both files leaves the rest of startup its share.
 const LOAD_HOOKS: OsHooks = OsHooks {
     retry: retry_load,
     sync_dir,
@@ -153,47 +149,42 @@ fn retry_load(attempt: &mut dyn FnMut() -> io::Result<()>) -> io::Result<()> {
     )
 }
 
-// ── 공통 저장소 ──────────────────────────────────────────────────────────────────
+// ── Common store ──────────────────────────────────────────────────────────────────
 
-/// 파일 하나의 몫 — 주인 모듈이 상수로 둔다.
 #[derive(Clone, Copy)]
 struct FileKind {
-    /// 파일 이름 — 로그의 `file` 칸이기도 하다.
     name: &'static str,
-    /// 옛 빌드가 쓰던 고정 임시 이름. `file::sweep_temps` 는 번호 없는 이름을 남의 것일 수 있다고 보고 두므로
-    /// 이 이름은 저장소가 직접 지운다(ADR-0291 R12).
+    /// The fixed temp name old builds used. `file::sweep_temps` leaves unnumbered names alone as possibly someone else's, so the store
+    ///   removes it itself (ADR-0291 R12).
     legacy_tmp: &'static str,
-    /// 목록을 싣는 최상위 칸.
     list_key: &'static str,
     spec: file::Spec,
 }
 
-/// `agents.json` · `presets.json` 공통 저장소 — 상태 셋은 [`StoreStatus`] 다.
 struct FileStore {
     dir: PathBuf,
     kind: FileKind,
-    /// 저장소 상태 칸 — 잎 락. 읽고 쓰는 순간만 쥔다(판정 · 디스크 IO · 로그 중에는 쥐지 않는다).
+    /// The store-state field — a leaf lock. Held only at the moment of reading and writing (not held during decisions, disk IO or logging).
     // ADR-0291 R12
     state: Mutex<StoreState>,
 }
 
 struct StoreState {
-    /// 첫 [`FileStore::load`] 가 돌았나 — 적재 거절과 그 `Claim` 은 그때만 선다.
     loaded: bool,
-    /// 적재 판정의 거절 — 이 실행 내내 남는다(R17).
+    /// The refusal of the load decision — stays for the whole run (R17).
     load_refusal: Option<Refusal>,
-    /// 마지막 저장의 재판정 거절 — 다음 재판정이 받아들이면 쓰기 전에 지운다(D6 — 그 뒤의 쓰기 실패는 거절이
-    /// 아니다). 같은 까닭이 이어지면 로그를 낮춘다(R15).
+    /// The re-decision refusal of the last save — erased before writing when the next re-decision accepts (D6 — a later write failure is not a
+    /// refusal). While the same reason continues, the log level is lowered (R15).
     last_refusal: Option<Refusal>,
-    /// 첫 적재 전 · 적재가 없음 · 손상이었고 아직 한 번도 안 썼으면 `NotYet`(D14).
+    /// `NotYet` before the first load, or if the load found nothing or damage and nothing has been written yet (D14).
     claim: Claim,
 }
 
-/// 첫 적재가 상태 칸에 남길 것.
+/// What the first load leaves in the state field.
 enum LoadVerdict {
-    /// 명부가 그 파일에서 왔다.
+    /// The registry came from that file.
     Adopted,
-    /// 없음 · 손상 — 명부가 그 파일에서 오지 않았다.
+    /// Missing · damaged — the registry did not come from that file.
     NotAdopted,
     Refused(Refusal),
 }
@@ -216,35 +207,37 @@ impl FileStore {
         self.dir.join(self.kind.name)
     }
 
-    /// 파일을 읽어 목록을 돌려준다 — 없음 · 손상 · 거절이면 빈 목록. 파일은 바꾸지 않는다.
+    /// Reads the file and returns the list — an empty list if missing, damaged or refused. Does not change the file.
     ///
-    /// ★적재 거절과 `Claim` 은 첫 호출에서만 선다★ — 뒤 호출은 읽어 돌려주기만 하고, 그 전에 성공한 쓰기가 올린
-    /// `Claim` 을 내리지도 않는다. 첫 호출은 남은 임시 파일도 쓴다 — 이 프로세스 것도 지우므로 같은 파일을 쓰는
-    /// 중인 저장이 없을 때(레지스트리를 만들 때) 불려야 한다.
+    /// ★The load refusal and `Claim` are set only on the first call★ — later calls only read, and do not lower a `Claim` raised by an
+    /// earlier successful write. The first call also sweeps leftover temp files (this process's too), so call it when no save of the same
+    ///   file is in progress (registry creation).
     fn load<T: DeserializeOwned>(&self) -> Vec<T> {
         let first = !std::mem::replace(&mut sync::lock(&self.state).loaded, true);
         if first {
-            // 한 프로세스에서 한 경로의 저장소는 하나라고 가정한다(운영 = 데몬 조립이 경로마다 하나를 만든다).
-            //   같은 경로에 둘째 저장소를 만들면 그 첫 적재가 첫째 저장소의 쓰는 중인 임시 파일(이 pid 의
-            //   번호 꼴)을 지울 수 있다.
+            // Assumes one store per path in a process (production: the daemon assembly creates one per path). A second store on the same
+            //   path could have its first load remove the temp file the first store is writing (this pid's numbered form).
             self.sweep_temps();
         }
         let name = self.kind.name;
         let (items, verdict) = match file::load(&self.path(), &self.kind.spec, LOAD_HOOKS) {
             Loaded::Missing => {
-                tracing::debug!(file = name, "파일이 없다 — 빈 목록으로 시작한다");
+                tracing::debug!(
+                    file = name,
+                    "the file does not exist — starting with an empty list"
+                );
                 (Vec::new(), LoadVerdict::NotAdopted)
             }
             Loaded::Parsed(Parsed::Usable { doc, .. }) => match read_list(&doc, self.kind.list_key)
             {
                 Ok(items) => (items, LoadVerdict::Adopted),
-                // 모양 검사가 같은 함수를 이미 지났다 — 여기 오면 둘이 어긋난 것이라 그 파일을 우리 것으로 잡지
-                //   않는다(첫 저장이 덮기 전에 떠 둔다).
+                // The shape check already passed the same function — getting here means the two disagree, so the file is not claimed as ours
+                //   (copied aside before the first save overwrites it).
                 Err(reason) => {
                     tracing::error!(
                         file = name,
                         %reason,
-                        "모양 검사를 지난 파일의 목록을 못 읽었다 — 빈 목록으로 시작한다"
+                        "could not read the list of a file that passed the shape check — starting with an empty list"
                     );
                     (Vec::new(), LoadVerdict::NotAdopted)
                 }
@@ -253,11 +246,11 @@ impl FileStore {
                 tracing::error!(
                     file = name,
                     %reason,
-                    "파일이 손상됐다 — 빈 목록으로 시작하고, 첫 저장이 덮기 전에 .corrupt 로 떠 둔다"
+                    "the file is damaged — starting with an empty list; it is copied aside to .corrupt before the first save overwrites it"
                 );
                 (Vec::new(), LoadVerdict::NotAdopted)
             }
-            // 읽기 전용은 첫 적재만 세운다 — 뒤 적재는 읽어 보기일 뿐이라 그 문구를 내지 않는다.
+            // Only the first load sets read-only — later loads are just reads, so they do not emit that text.
             Loaded::Parsed(Parsed::Newer { found }) => {
                 let current = self.kind.spec.current;
                 if first {
@@ -265,15 +258,15 @@ impl FileStore {
                         file = name,
                         found,
                         current,
-                        "이 데몬보다 새 판이 쓴 파일이다 — 읽지도 덮지도 않는다. 빈 목록으로 시작하고 이 실행 \
-                         동안 저장하지 않는다(데몬을 다시 띄워야 풀린다)"
+                        "the file was written by a newer edition than this daemon — not read and not overwritten. Starting with an empty list and not saving during this \
+                         run (restarting the daemon clears it)"
                     );
                 } else {
                     tracing::debug!(
                         file = name,
                         found,
                         current,
-                        "새 판이 쓴 파일이라 읽지 않았다"
+                        "not read because the file was written by a newer edition"
                     );
                 }
                 (Vec::new(), LoadVerdict::Refused(Refusal::Newer { found }))
@@ -283,11 +276,11 @@ impl FileStore {
                     tracing::error!(
                         file = name,
                         %error,
-                        "파일을 못 읽었다 — 덮지 않는다. 빈 목록으로 시작하고 이 실행 동안 저장하지 않는다\
-                         (데몬을 다시 띄워야 풀린다)"
+                        "could not read the file — not overwriting. Starting with an empty list and not saving during this run \
+                         (restarting the daemon clears it)"
                     );
                 } else {
-                    tracing::debug!(file = name, %error, "파일을 못 읽었다");
+                    tracing::debug!(file = name, %error, "could not read the file");
                 }
                 (Vec::new(), LoadVerdict::Refused(Refusal::Unreadable))
             }
@@ -303,9 +296,9 @@ impl FileStore {
         items
     }
 
-    /// 쓰기 직전에 지금 파일을 다시 판정하고 쓴다. 적재 거절이면 [`StoreError::ReadOnly`] · 재판정 거절이면
-    /// [`StoreError::Refused`](쓰지 않는다) · 직렬화 · 상한 · 떠 두기 · 쓰기 실패면 [`StoreError::Io`](파일 그대로).
-    /// 로그는 여기서 낸다.
+    /// Re-decides the current file right before writing, then writes. [`StoreError::ReadOnly`] on a load refusal · [`StoreError::Refused`]
+    /// on a re-decision refusal (no write) · [`StoreError::Io`] on a serialization, cap, copy-aside or write failure (file left as is).
+    ///   Logs are emitted here.
     // ADR-0291 R8 · R15 · R16 · R17
     fn save(&self, count: usize, payload: &impl Serialize) -> Result<(), StoreError> {
         let name = self.kind.name;
@@ -317,23 +310,23 @@ impl FileStore {
             tracing::debug!(
                 file = name,
                 %refusal,
-                "적재 때 거절된 파일이라 저장하지 않는다(데몬을 다시 띄워야 풀린다)"
+                "not saving because the file was refused at load (restarting the daemon clears it)"
             );
             return Err(StoreError::ReadOnly(refusal));
         }
 
         let failed = |what: &str, error: io::Error| {
-            tracing::error!(file = name, %error, "{what} — 저장하지 않았다(파일은 그대로다)");
+            tracing::error!(file = name, %error, "{what} — not saved (the file is left as is)");
             StoreError::Io(error)
         };
         let bytes = serde_json::to_vec_pretty(payload).map_err(|e| {
             failed(
-                "직렬화에 실패했다",
+                "serialization failed",
                 io::Error::new(io::ErrorKind::InvalidData, e),
             )
         })?;
         file::check_cap(bytes.len(), &self.kind.spec)
-            .map_err(|e| failed("쓸 원문이 읽기 상한을 넘는다", e))?;
+            .map_err(|e| failed("the text to write exceeds the read cap", e))?;
 
         let path = self.path();
         let current = file::load(&path, &self.kind.spec, DATA_HOOKS);
@@ -341,46 +334,46 @@ impl FileStore {
         if let WritePolicy::Refuse(refused) = policy {
             return Err(self.refused(refused, &current));
         }
-        // ★재판정이 받아들였으면 거절 표시를 쓰기 전에 푼다★ — 뒤의 떠 두기 · 쓰기 실패는 거절이 아니라 `Io` 라,
-        //   쓰기 성공에서만 풀면 그 실패 동안 `agent.list` 가 이미 풀린 거절(`Refusing`)을 계속 보인다(D6).
+        // ★If the re-decision accepted, the refusal marker is cleared before writing★ — a later copy-aside or write failure is `Io`, not a
+        //   refusal; clearing only on write success would leave `agent.list` showing a stale `Refusing` during that failure (D6).
         self.accepted();
         if policy == WritePolicy::CopyAsideFirst {
             let what = match current {
                 Loaded::Parsed(Parsed::Usable { .. }) => {
-                    "이 실행이 아직 쓰지 않은 동안 놓인 쓸 만한 파일"
+                    "a usable file placed while this run had not written yet"
                 }
-                _ => "손상된 파일",
+                _ => "the damaged file",
             };
             match file::copy_aside(&path, DATA_HOOKS) {
                 Ok(to) => tracing::warn!(
                     file = name,
                     to = %to.display(),
-                    "{what}을 덮기 전에 떠 뒀다"
+                    "copied aside {what} before overwriting"
                 ),
-                Err(error) => return Err(failed(&format!("{what}을 떠 두지 못했다"), error)),
+                Err(error) => return Err(failed(&format!("could not copy aside {what}"), error)),
             }
         }
 
         file::write_atomic(&path, &bytes, DATA_HOOKS)
-            .map_err(|e| failed("파일을 쓰지 못했다", e))?;
+            .map_err(|e| failed("could not write the file", e))?;
         sync::lock(&self.state).claim = Claim::Adopted;
-        tracing::debug!(file = name, count, "저장했다");
+        tracing::debug!(file = name, count, "saved");
         Ok(())
     }
 
-    /// 재판정이 받아들였다 — 앞선 재판정 거절을 지우고, 있었으면 풀렸다고 한 번 남긴다(R15).
+    /// The re-decision accepted — erases the earlier re-decision refusal, and if there was one, records once that it cleared (R15).
     fn accepted(&self) {
         let cleared = sync::lock(&self.state).last_refusal.take();
         if let Some(refusal) = cleared {
             tracing::info!(
                 file = self.kind.name,
                 %refusal,
-                "앞서 거절하던 파일을 이번 재판정이 받아들였다 — 이제 쓴다"
+                "this re-decision accepted the file that was refused earlier — writing now"
             );
         }
     }
 
-    /// 재판정 거절을 상태 칸에 남기고 로그를 낸다 — 같은 까닭이 이어지는 동안은 debug(R15).
+    // ADR-0291 R15
     fn refused(&self, refused: Refused, current: &Loaded) -> StoreError {
         let name = self.kind.name;
         let refusal = match refused {
@@ -389,18 +382,18 @@ impl FileStore {
         };
         let repeated = sync::lock(&self.state).last_refusal.replace(refusal) == Some(refusal);
         if repeated {
-            tracing::debug!(file = name, %refusal, "또 저장을 거절했다 — 덮지 않는다");
+            tracing::debug!(file = name, %refusal, "refused the save again — not overwriting");
         } else if let Loaded::Failed(error) = current {
             tracing::error!(
                 file = name,
                 %error,
-                "지금 파일을 못 읽어 덮지 않는다 — 이 저장을 거절한다(다음 저장이 다시 판정한다)"
+                "cannot read the current file, so not overwriting — refusing this save (the next save decides again)"
             );
         } else {
             tracing::error!(
                 file = name,
                 %refusal,
-                "지금 파일을 덮을 수 없다 — 이 저장을 거절한다(다음 저장이 다시 판정한다)"
+                "cannot overwrite the current file — refusing this save (the next save decides again)"
             );
         }
         StoreError::Refused(refusal)
@@ -424,13 +417,13 @@ impl FileStore {
                         Ok(()) => tracing::debug!(
                             file = name,
                             path = %path.display(),
-                            "남은 임시 파일을 지웠다"
+                            "removed a leftover temp file"
                         ),
                         Err(error) => tracing::warn!(
                             file = name,
                             path = %path.display(),
                             %error,
-                            "남은 임시 파일을 못 지웠다"
+                            "could not remove a leftover temp file"
                         ),
                     }
                 }
@@ -438,7 +431,7 @@ impl FileStore {
             Err(error) => tracing::warn!(
                 file = name,
                 %error,
-                "남은 임시 파일을 찾지 못했다 — 치우지 않고 진행한다"
+                "could not find leftover temp files — proceeding without cleanup"
             ),
         }
         let legacy = self.dir.join(self.kind.legacy_tmp);
@@ -446,54 +439,54 @@ impl FileStore {
             Ok(()) => tracing::debug!(
                 file = name,
                 path = %legacy.display(),
-                "옛 고정 임시 파일을 지웠다"
+                "removed the old fixed temp file"
             ),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => tracing::warn!(
                 file = name,
                 path = %legacy.display(),
                 %error,
-                "옛 고정 임시 파일을 못 지웠다"
+                "could not remove the old fixed temp file"
             ),
         }
     }
 }
 
-/// 주인의 모양 검사(`Spec::shape`) — 적재가 같은 [`read_list`] 로 값을 얻으므로 둘의 손상 정의가 갈리지 않는다.
+/// The owner's shape check (`Spec::shape`) — loading gets the value through the same [`read_list`], so the two definitions of damage
+///   cannot diverge.
 // ADR-0291 R7 (D1)
 fn list_shape<T: DeserializeOwned>(
     kind: &FileKind,
     version: u64,
     doc: &Map<String, Value>,
 ) -> Result<(), String> {
-    // 앞 판을 읽는 리더가 없다 — 판을 올리면 그 판 리더와 함께 이 줄을 고친다(R3).
+    // There is no reader for earlier editions — when the edition is raised, fix this line together with that edition's reader (R3).
     if version != kind.spec.current {
         return Err(format!(
-            "{} {version} 을 읽는 리더가 없다(이 빌드는 {})",
+            "no reader for {} {version} (this build is {})",
             kind.spec.version_key, kind.spec.current
         ));
     }
     read_list::<T>(doc, kind.list_key).map(drop)
 }
 
-/// 목록 칸(`key`)을 읽는다. 버전 키는 필수가 아니다 — 판은 `file::parse` 가 이미 봤다(키 없음 = 1 판).
+/// Reads the list field (`key`). The version key is not required — `file::parse` has already looked at the edition (no key = edition 1).
 fn read_list<T: DeserializeOwned>(doc: &Map<String, Value>, key: &str) -> Result<Vec<T>, String> {
     let Some(list) = doc.get(key) else {
-        return Err(format!("`{key}` 칸이 없다"));
+        return Err(format!("the `{key}` field is missing"));
     };
     let Some(items) = list.as_array() else {
-        return Err(format!("`{key}` 칸이 배열이 아니다"));
+        return Err(format!("the `{key}` field is not an array"));
     };
     items
         .iter()
         .enumerate()
         .map(|(index, item)| {
             T::deserialize(item).map_err(|e| {
-                // serde_json 오류 문구는 싣지 않는다 — 「invalid type: string "…"」처럼 칸 값을 옮겨 적어, 이
-                //   사유가 로그로 나가면 프로필 env 같은 값이 샌다. 줄 · 칸은 값 트리에서 읽어 늘 0 이라 항목
-                //   번호를 대신 싣는다.
+                // The serde_json error text is not carried — it copies field values (「invalid type: string "…"」), so logging it would leak
+                //   values like the profile env. Line and column are always 0 (read from the value tree), so the item number is carried instead.
                 format!(
-                    "`{key}` 의 {index} 번 항목을 읽지 못했다(분류 {:?})",
+                    "could not read item {index} of `{key}` (category {:?})",
                     e.classify()
                 )
             })
@@ -539,11 +532,10 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// ★앞 릴리스로 되돌아간 바이너리가 이 파일을 읽을 수 있어야 한다★: 그 구조체는 `epoch` 를 **필수**
-    /// 필드로 선언했으므로 키가 없으면 `missing field` 로 파싱이 깨지고, 그 릴리스의 persistence 는 파일을
-    /// `.corrupt-<ts>` 로 치우고 빈 목록으로 시작한 뒤 다음 save 가 그 빈 목록을 덮어써 프로필·세션 id·트리
-    /// 부모가 통째로 사라진다.
-    /// 실리는 값은 산 표식이 아니라 고정 `0`(옛 카운터의 "재spawn 없음" 상태 — `AgentProfile::epoch` 주석).
+    /// ★A binary reverted to the previous release must be able to read this file★: that struct declares `epoch` as **required**, so
+    /// without the key parsing fails with `missing field`, that release moves the file to `.corrupt-<ts>` and starts empty, and the next
+    /// save overwrites it — profiles, session ids and tree parents disappear wholesale. The value carried is a fixed `0` (the old
+    ///   counter's "no respawn" state — see the `AgentProfile::epoch` comment), not the live marker.
     #[test]
     fn agents_json_carries_a_zero_epoch_key_for_older_readers() {
         let dir = temp_dir("epoch-key");
@@ -552,18 +544,18 @@ mod tests {
         p.epoch = 0xDEAD_BEEF;
         store.save(&[p]).unwrap();
 
-        let raw = fs::read(dir.join(PROFILES.name)).expect("agents.json 읽기");
-        let v: serde_json::Value = serde_json::from_slice(&raw).expect("JSON 파싱");
+        let raw = fs::read(dir.join(PROFILES.name)).expect("read agents.json");
+        let v: serde_json::Value = serde_json::from_slice(&raw).expect("JSON parse");
         assert_eq!(
             v["profiles"][0].get("epoch"),
             Some(&serde_json::json!(0)),
-            "옛 리더가 필수로 읽는 키가 0 으로 실려 있어야 한다: {v}"
+            "the key that old readers read as required must be carried as 0: {v}"
         );
 
         assert_eq!(
             store.load()[0].epoch,
             0,
-            "다시 읽어도 표식은 파일에서 오지 않는다(다음 spawn 이 새로 발급)"
+            "even on re-reading, the marker does not come from the file (the next spawn issues a new one)"
         );
         let _ = fs::remove_dir_all(&dir);
     }
@@ -576,7 +568,7 @@ mod tests {
         assert_eq!(store.status(), StoreStatus::Writable);
     }
 
-    // ── 손상 · 새 판 · 읽기 실패 ──
+    // ── Damaged · newer edition · read failure ──
 
     fn file_text(profiles: &[AgentProfile]) -> String {
         serde_json::to_string_pretty(&ProfilesFile {
@@ -609,7 +601,7 @@ mod tests {
         assert_eq!(
             read(&dir, PROFILES.name),
             "{ not valid json",
-            "적재는 파일을 바꾸지 않는다"
+            "loading does not change the file"
         );
         assert!(!dir.join(aside_name()).exists());
         assert_eq!(store.status(), StoreStatus::Writable);
@@ -621,8 +613,8 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// ★적재 판정을 들고 있지 않는다★ — 들고 있으면 첫 저장 뒤 우리 정상 파일을 저장마다 떠 두어 진짜 손상
-    /// 사본을 지운다.
+    /// ★Does not keep holding the load decision★ — otherwise, after the first save, every save would copy aside our healthy file and erase
+    ///   the real damaged copy.
     #[test]
     fn after_the_first_save_the_file_is_not_copied_aside_again() {
         let dir = temp_dir("corrupt-once");
@@ -636,7 +628,7 @@ mod tests {
         assert_eq!(
             read(&dir, &aside_name()),
             "{ not valid json",
-            "둘째 저장이 우리 파일을 떠 두어 손상 사본을 덮었다"
+            "the second save copied aside our file and overwrote the damaged copy"
         );
         let _ = fs::remove_dir_all(&dir);
     }
@@ -652,7 +644,7 @@ mod tests {
         let store = FileProfileStore::new(dir.clone());
         assert!(
             store.load().is_empty(),
-            "항목 하나가 못 쓰면 파일 전체가 손상이다"
+            "if one item cannot be read, the whole file is damaged"
         );
         store.save(&[sample()]).unwrap();
         assert_eq!(read(&dir, &aside_name()), text);
@@ -676,10 +668,10 @@ mod tests {
         assert_eq!(read(&dir, PROFILES.name), newer);
         assert!(
             !dir.join(aside_name()).exists(),
-            "새 판 파일은 떠 두지도 않는다"
+            "a newer-edition file is not even copied aside"
         );
 
-        // 메모리 명부가 그 파일에서 오지 않았다 — 파일이 쓸 만해져도 이 실행은 그 위에 쓰지 않는다.
+        // The in-memory registry did not come from that file — even if the file becomes usable, this run does not write over it.
         let ours = file_text(&[sample()]);
         put(&dir, PROFILES.name, &ours);
         assert!(store.save(&[]).is_err());
@@ -689,12 +681,11 @@ mod tests {
         assert_eq!(
             FileProfileStore::new(dir.clone()).load().len(),
             1,
-            "다시 띄우면 풀린다"
+            "cleared by restarting"
         );
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// 파일 자리에 폴더를 두어 읽기를 실패시킨다(Windows = 접근 거부 → 적재 예산 동안 다시 하고 그대로 실패).
     #[test]
     fn an_unreadable_file_keeps_the_store_read_only_even_after_it_goes_away() {
         let dir = temp_dir("unreadable");
@@ -712,7 +703,7 @@ mod tests {
         ));
         assert!(
             !dir.join(PROFILES.name).exists(),
-            "없어진 뒤에도 빈 명부를 쓰면 안 된다"
+            "even after it is gone, an empty registry must not be written"
         );
         let _ = fs::remove_dir_all(&dir);
     }
@@ -742,8 +733,8 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// ★재판정이 받아들인 뒤의 쓰기 실패는 거절이 아니다★ — 거절 표시는 그 재판정에서 풀리고, `Io` 동안
-    ///   `Refusing` 으로 남지 않는다(D6). 떠 둘 자리에 폴더를 두어 손상 파일의 떠 두기를 실패시킨다.
+    /// ★A write failure after the re-decision accepted is not a refusal★ — the marker is cleared at that re-decision and does not stay
+    ///   `Refusing` during `Io` (D6). A folder placed at the copy-aside location makes the damaged file's copy-aside fail.
     // ADR-0291 R17 (D6)
     #[test]
     fn an_io_failure_after_an_accepting_rejudge_does_not_leave_the_store_refusing() {
@@ -763,7 +754,11 @@ mod tests {
         fs::create_dir_all(dir.join(aside_name())).unwrap();
         assert!(matches!(store.save(&[sample()]), Err(StoreError::Io(_))));
         assert_eq!(store.status(), StoreStatus::Writable);
-        assert_eq!(read(&dir, PROFILES.name), "{broken", "파일은 그대로다");
+        assert_eq!(
+            read(&dir, PROFILES.name),
+            "{broken",
+            "the file is left as is"
+        );
 
         fs::remove_dir(dir.join(aside_name())).unwrap();
         store.save(&[sample()]).unwrap();
@@ -771,7 +766,8 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// 적재 때 없던 파일을 실행 중에 누가 되살려 두었으면 첫 저장이 덮기 전에 떠 둔다 — 한 번만.
+    /// If someone restored a file that was missing at load while the run was going, the first save copies it aside before overwriting —
+    ///   only once.
     #[test]
     fn a_usable_file_placed_after_a_missing_load_is_copied_aside_once() {
         let dir = temp_dir("not-yet");
@@ -787,12 +783,12 @@ mod tests {
         store.save(&[sample()]).unwrap();
         assert!(
             !dir.join(aside_name()).exists(),
-            "한 번 쓴 뒤의 파일은 우리 것이다"
+            "the file after one write is ours"
         );
         let _ = fs::remove_dir_all(&dir);
     }
 
-    // ── 읽기 규칙 ──
+    // ── Read rules ──
 
     #[test]
     fn a_bom_prefixed_file_loads() {
@@ -820,7 +816,7 @@ mod tests {
         store.save(&[p]).unwrap();
         assert!(
             !dir.join(aside_name()).exists(),
-            "적재한 파일은 우리 것이라 떠 두지 않는다"
+            "a loaded file is ours, so it is not copied aside"
         );
         let _ = fs::remove_dir_all(&dir);
     }
@@ -837,7 +833,6 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// 모양 실패 사유가 로그로 나간다 — 칸 값(프로필 env 같은 것)을 옮겨 적으면 안 된다.
     #[test]
     fn a_shape_failure_reason_does_not_echo_field_values() {
         let mut doc: Value = serde_json::from_str(&file_text(&[sample()])).unwrap();
@@ -845,13 +840,13 @@ mod tests {
         match file::parse(&doc.to_string(), &PROFILES.spec) {
             Parsed::Unusable(reason) => {
                 assert!(!reason.contains("TOP-SECRET"), "{reason}");
-                assert!(reason.contains("0 번 항목"), "{reason}");
+                assert!(reason.contains("item 0"), "{reason}");
             }
-            other => panic!("손상이어야 한다: {other:?}"),
+            other => panic!("must be damaged: {other:?}"),
         }
     }
 
-    // ── 기동 쓸기 ──
+    // ── Startup sweep ──
 
     #[test]
     fn the_first_load_sweeps_the_old_fixed_temp_and_our_own_numbered_temps() {
@@ -868,22 +863,22 @@ mod tests {
         assert!(!dir.join(&own).exists());
         assert!(
             dir.join("agents.json.tmpx").exists(),
-            "우리 꼴이 아닌 이름은 둔다"
+            "names not in our form are left alone"
         );
 
-        // 뒤 적재는 쓸지 않는다 — 그 사이 진행 중인 저장의 임시 파일을 지우면 그 rename 이 실패한다.
+        // Later loads do not sweep — removing the temp file of a save in progress in between would make its rename fail.
         put(&dir, &own, "in flight");
         store.load();
         assert!(dir.join(&own).exists());
         let _ = fs::remove_dir_all(&dir);
     }
 
-    // ── 운영 OS 몫 ──
+    // ── Production OS share ──
 
-    /// ★아무것도 안 하는 다시 하기를 넘겨도 컴파일은 선다★ — 그 실수를 이 시험이 잡는다.
+    /// ★Passing a retry that does nothing still compiles★ — this test catches that mistake.
     #[test]
     fn both_os_hooks_really_retry_a_locked_attempt() {
-        for (label, hooks) in [("데이터", DATA_HOOKS), ("적재 읽기", LOAD_HOOKS)] {
+        for (label, hooks) in [("data", DATA_HOOKS), ("load read", LOAD_HOOKS)] {
             let mut attempts = 0;
             let outcome = (hooks.retry)(&mut || {
                 attempts += 1;
@@ -898,7 +893,7 @@ mod tests {
         }
     }
 
-    /// 같은 예산을 둘에 넘기는 실수를 잡는다 — 잠김이 안 풀리면 각자의 예산만큼 다시 하고 포기한다.
+    /// Catches the mistake of passing the same budget to both — if the lock is not released, each retries for its own budget and gives up.
     #[test]
     fn the_load_read_hook_waits_longer_than_the_data_hook() {
         let attempts_until_given_up = |hooks: OsHooks| {

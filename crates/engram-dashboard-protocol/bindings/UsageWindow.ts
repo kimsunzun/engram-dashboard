@@ -2,20 +2,20 @@
 
 export type UsageWindow = { 
 /**
- * **쓴** 양의 백분율 0–100(남은 양이 아니다). 생산자는 소수 넷째 자리로 반올림해 싣는다(agent
- * `usage/normalize.rs` 의 `PCT_SCALE`) — 받는 쪽은 남은 양을 보정 없이 `floor(100 − used_pct)` 로 보여 주므로,
- * 이진 부동소수 꼬리(0.55 × 100 = 55.00000000000001)가 정수 경계를 넘지 않는 것이 그 반올림에 기댄다.
+ * Percentage 0–100 of the amount **used** (not remaining). The producer rounds it to the fourth decimal place before carrying it (agent
+ * `PCT_SCALE` in `usage/normalize.rs`) — the receiver shows the remaining amount as `floor(100 − used_pct)` without correction, so
+ * keeping the binary floating-point tail (0.55 × 100 = 55.00000000000001) from crossing an integer boundary relies on that rounding.
  */
 used_pct: number | null, 
 /**
- * 리셋 시각, epoch 초.
+ * Reset time, epoch seconds.
  */
 resets_at: number | null, 
 /**
- * 이 값을 관측한 뒤 흐른 초.
+ * Seconds elapsed since this value was observed.
  */
 age_secs: number, 
 /**
- * 데몬이 리셋 경과를 확인했다 — 한 번 서면 이 창에 새 값이 올 때까지 유지된다(벽시계가 되감겨도).
+ * The daemon confirmed the reset elapsed — once set, it stays until a new value comes for this window (even if the wall clock rewinds).
  */
 expired: boolean, };

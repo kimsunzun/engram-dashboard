@@ -6,39 +6,39 @@ import type { UsageWindowRow } from "./UsageWindowRow";
 
 export type UsageVendorRow = { backend: AgentBackend, 
 /**
- * 같은 백엔드 안의 계정 — 지금은 늘 `"default"`(데몬의 기본 로그인).
+ * The account within the same backend — always `"default"` for now (the daemon's default login).
  */
 account_key: string, plan?: string | null, 
 /**
- * 벤더가 준 창만 — 5시간 · 주간 · 모델별 주간 차례. 사용률을 모르는 창(`used_pct: null`)도 싣는다.
+ * Only the windows the vendor gave — in the order 5-hour · weekly · per-model weekly. Windows with unknown utilization (`used_pct: null`) are carried too.
  */
 windows: Array<UsageWindowRow>, 
 /**
- * 조회가 아직 진행 중이다 — 이 행의 값은 그 조회 전의 것이다.
+ * The query is still in progress — the values of this row are from before that query.
  */
 in_flight: boolean, served: UsageServedWord, state: UsageStateWord, 
 /**
- * `Failed` 만 싣는다 — 다음 자동 조회까지 남은 초(이미 지났으면 0).
+ * Carried only for `Failed` — seconds left until the next automatic query (0 if already passed).
  */
 next_attempt_in_secs?: bigint | null, 
 /**
- * `Rejected` 만 싣는다 — 이 초가 지나기 전엔 강제 새로고침도 조회를 내보내지 않는다.
+ * Carried only for `Rejected` — until these seconds pass, even a forced refresh sends no query.
  */
 retry_in_secs?: bigint | null, 
 /**
- * 비정상 상태의 분류 낱말(예 `timeout`·`rpc_error`) — 번역하지 않는 문자열이다. `null` = 원인을 모른다.
+ * The category word of an abnormal state (e.g. `timeout`·`rpc_error`) — an untranslated string. `null` = the cause is unknown.
  */
 detail_kind?: string | null, 
 /**
- * 상류가 준 수(Codex JSON-RPC `error.code`).
+ * The number upstream gave (Codex JSON-RPC `error.code`).
  */
 detail_code?: bigint | null, 
 /**
- * 상류 원문(비밀 가림 · 공백류 제어는 공백 · 200자) — UI 와 이 행에만 가고 로그에는 안 간다.
+ * The upstream original text (secrets masked · whitespace-class controls become spaces · 200 chars) — it goes only to the UI and this row, not to logs.
  *
- * ★이 타입의 `Debug` 는 원문을 그대로 찍는다 — 행 통째로든 이 칸이든 `{:?}`·tracing `?` 필드로 로그에
- *   싣지 말 것★. 선언 매크로가 `Debug` 를 늘 derive 하고 타입마다 끌 문이 없어, 가린 `Debug`(agent
- *   `usage::UpstreamText` · protocol `UsageStateDetail`)처럼 손으로 쓸 수 없다. 로그로 가는 길은 마감 뒤 결과
- *   로그 하나이고 거기서는 JSON 사본에서 이 이름의 키를 걷어 낸다(daemon `command_delivery::log_late_local`).
+ * ★The `Debug` of this type prints the original as is — do not put it into logs with `{:?}` or a tracing `?` field, whether the whole row or this
+ *   field★. The declaration macro always derives `Debug` and there is no door to turn it off per type, so it cannot be hand-written like the masked `Debug` (agent
+ *   `usage::UpstreamText` · protocol `UsageStateDetail`). The way to the log is the one result log after the deadline,
+ *   and there the key of this name is stripped from the JSON copy (daemon `command_delivery::log_late_local`).
  */
 upstream?: string | null, };

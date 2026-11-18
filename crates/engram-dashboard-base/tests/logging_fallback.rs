@@ -25,29 +25,34 @@ fn daemon_failure_reason_survives_when_the_data_dir_cannot_hold_logs() {
 
     // ★Put a file where the log subfolder goes★ = a state where `create_dir_all` must fail (a way to deterministically
     //   reproduce the same result as a read-only volume · no permission).
-    std::fs::write(data_dir.join("logs"), "이 자리는 파일이다").expect("막기");
+    std::fs::write(data_dir.join("logs"), "this spot is a file").expect("block");
     // This process has not started any thread yet (only one test) — it is safe only here.
     std::env::set_var("TMP", &temp_home);
     std::env::set_var("TEMP", &temp_home);
 
     let path = init_logging_with_file(&data_dir.join("logs"), LogKind::Daemon)
-        .expect("폴백으로라도 열려야");
+        .expect("must open, even via the fallback");
     // The very line the daemon emits right after (= the reason for giving up startup).
-    tracing::error!("데이터 폴더를 준비하지 못해 데몬을 시작할 수 없음: (재현)");
+    tracing::error!(
+        "cannot start the daemon because the data folder could not be prepared: (repro)"
+    );
 
     assert!(
         path.starts_with(&temp_home),
-        "임시 폴더로 물러나야: {}",
+        "must fall back to the temp folder: {}",
         path.display()
     );
-    let body = std::fs::read_to_string(&path).expect("로그 읽기");
+    let body = std::fs::read_to_string(&path).expect("read log");
     println!("--- {} ---\n{body}", path.display());
 
-    assert!(body.contains("==== engram daemon"), "머리글: {body}");
-    assert!(body.contains("대신"), "폴백 사유가 파일에 남아야: {body}");
+    assert!(body.contains("==== engram daemon"), "header: {body}");
     assert!(
-        body.contains("데몬을 시작할 수 없음"),
-        "기동 실패 사유가 파일에 남아야: {body}"
+        body.contains("instead"),
+        "the fallback reason must remain in the file: {body}"
+    );
+    assert!(
+        body.contains("cannot start the daemon"),
+        "the startup failure reason must remain in the file: {body}"
     );
 
     let _ = std::fs::remove_dir_all(&root);

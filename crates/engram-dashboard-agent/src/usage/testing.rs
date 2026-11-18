@@ -1,12 +1,12 @@
-//! Query test double — a fake [`ProbeSpawner`] that moves by script, and a test temp root. Used by the unit tests of vendor queriers
-//! to measure conversation · deadline · kill without a real CLI.
+//! Query test double — a fake [`ProbeSpawner`] driven by script, and a test temp root. Used by vendor-querier unit tests to measure
+//! conversation · deadline · kill without a real CLI.
 //!
 //! ```ignore
 //! let root = TempRoot::new("vendor-probe");
 //! let spawner = ScriptedSpawner::new(
 //!     ChildScript::new()
 //!         .line(r#"{"type":"system"}"#)
-//!         // 조회기가 쓴 줄(요청 id 가 든)을 보고 응답을 만든다.
+//!         // Builds the response by looking at the line the prober wrote (which carries the request id).
 //!         .reply(|written| response_for(&written[0])),
 //! );
 //! let env = ProbeEnv {
@@ -14,21 +14,20 @@
 //!     deadline: Instant::now() + Duration::from_secs(5),
 //!     scratch_root: root.path(),
 //! };
-//! let obs = PROBE.query(&env).expect("조회");
+//! let obs = PROBE.query(&env).expect("query");
 //! assert!(!spawner.commands()[0].args.iter().any(|a| a == "--forbidden"));
 //! assert!(spawner.stdin_closed() && spawner.child_dropped());
 //! ```
 //!
-//! The meaning of the script — it follows the same rules as the real [`super::OsProbeSpawner`]:
-//!   - An action whose deadline has already passed is immediately `Timeout` and is recorded as a 「마감 kill」 (deadline kill). Once cut, everything is `Timeout`.
-//!   - 「막힘」 (hang) (`hang_after_lines` · `block_writes` · `never_exit`) **really sleeps until the deadline** — so a test that measures a hang
-//!     supplies a short deadline (hundreds of ms). ★If the deadline is farther than [`FAKE_HANG_MAX`] it panics★ — the querier
-//!     made a far deadline itself instead of passing `env.deadline`, and left alone the test would hang.
-//!   - A write is always accepted and recorded unless it is a hang or a failure (`fail_writes`) (the test inspects the content with
-//!     [`ScriptedSpawner::written`]). A write after `close_stdin` is `Io`. The script goes on even after stdin is closed — 「닫으면 끝나는 자식」 (a child that ends when closed) is the script's
-//!     default (immediate EOF · exit), and 「닫아도 안 끝나는 자식」 (a child that does not end even when closed) is written as a hang.
-//!   - A `spawn` whose deadline has already passed does not use the script and is `Timeout` (the command is recorded).
-//!   - There is one child — a second `spawn` panics (one child per query).
+//! Script semantics — the same rules as the real [`super::OsProbeSpawner`]:
+//!   - An action past its deadline is immediately `Timeout` and recorded as a 「deadline kill」; once cut, everything is `Timeout`.
+//!   - 「hang」 (`hang_after_lines` · `block_writes` · `never_exit`) **really sleeps until the deadline**, so hang tests supply a short deadline.
+//!     ★A deadline farther than [`FAKE_HANG_MAX`] panics★ — the querier made its own far deadline instead of passing `env.deadline`.
+//!   - A write is accepted and recorded unless hang or failure (`fail_writes`) (inspect with [`ScriptedSpawner::written`]); after
+//!     `close_stdin` it is `Io`. The script continues after stdin closes — 「ends when closed」 is the default (immediate EOF · exit), 「does
+//!     not end when closed」 is a hang.
+//!   - A `spawn` past its deadline skips the script and is `Timeout` (the command is recorded).
+//!   - One child — a second `spawn` panics.
 
 use std::collections::VecDeque;
 use std::fs;
@@ -41,10 +40,9 @@ use uuid::Uuid;
 
 use super::{ExitInfo, ProbeChild, ProbeCommand, ProbeError, ProbeSpawner};
 
-/// The longest time a fake child can sleep as a 「막힘」 (hang).
+/// The longest time a fake child can sleep as a 「hang」.
 pub(crate) const FAKE_HANG_MAX: Duration = Duration::from_secs(5);
 
-/// A temp folder made fresh for each test. Deleted on drop.
 pub(crate) struct TempRoot {
     path: PathBuf,
 }
@@ -53,7 +51,7 @@ impl TempRoot {
     pub(crate) fn new(label: &str) -> Self {
         let path =
             std::env::temp_dir().join(format!("engram-usage-{label}-{}", Uuid::new_v4().simple()));
-        fs::create_dir_all(&path).expect("시험 임시 루트");
+        fs::create_dir_all(&path).expect("test scratch root");
         Self { path }
     }
 
@@ -113,13 +111,13 @@ impl ChildScript {
         }
     }
 
-    /// One line that `read_line` will return in turn.
     pub(crate) fn line(mut self, line: impl Into<String>) -> Self {
         self.stdout.push_back(Out::Line(line.into()));
         self
     }
 
-    /// A line made at the moment it is read — it receives all the lines the querier has written by then (when the request id has to be echoed back).
+    /// A line made at the moment it is read — it receives all the lines the querier has written by then (when the request id has to be
+    ///   echoed back).
     pub(crate) fn reply(mut self, make: impl FnOnce(&[String]) -> String + Send + 'static) -> Self {
         self.stdout.push_back(Out::Reply(Box::new(make)));
         self
@@ -148,7 +146,7 @@ impl ChildScript {
         self
     }
 
-    /// As if the wrapping shell ended with 「그런 명령 없음」 (no such command) ([`ExitInfo::looks_not_installed`]).
+    /// As if the wrapping shell ended with 「no such command」 ([`ExitInfo::looks_not_installed`]).
     pub(crate) fn exit_not_installed(mut self) -> Self {
         self.exit = Exit::Now(ExitInfo::new(Some(9009), true));
         self
@@ -180,7 +178,6 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// A fake spawner that hands out one child per the script and records the commands received · lines written · cuts.
 pub(crate) struct ScriptedSpawner {
     script: Mutex<Option<Result<ChildScript, ProbeError>>>,
     record: Arc<Mutex<Record>>,
@@ -203,17 +200,14 @@ impl ScriptedSpawner {
         }
     }
 
-    /// The startup specs received (all so far).
     pub(crate) fn commands(&self) -> Vec<ProbeCommand> {
         lock(&self.record).commands.clone()
     }
 
-    /// The lines the querier wrote with `write_line` (without newlines, in the order written).
     pub(crate) fn written(&self) -> Vec<String> {
         lock(&self.record).written.clone()
     }
 
-    /// Whether the querier closed stdin (`close_stdin`).
     pub(crate) fn stdin_closed(&self) -> bool {
         lock(&self.record).stdin_closed
     }
@@ -223,12 +217,11 @@ impl ScriptedSpawner {
         lock(&self.record).cut_at_deadline
     }
 
-    /// Whether the querier called the wait for exit that carries the 「프로그램 없음」 (program missing) decision (`wait_exit`) — `wait_exit_code` is not counted.
+    /// Whether the querier called the wait for exit that carries the 「program missing」 decision (`wait_exit`) — `wait_exit_code` is not counted.
     pub(crate) fn exit_judged(&self) -> bool {
         lock(&self.record).exit_judged
     }
 
-    /// Whether the child was dropped (= the tree kill + wait for exit ran).
     pub(crate) fn child_dropped(&self) -> bool {
         lock(&self.record).dropped
     }
@@ -246,7 +239,7 @@ impl ProbeSpawner for ScriptedSpawner {
         }
         let script = lock(&self.script)
             .take()
-            .expect("가짜 스포너: 대본의 자식은 하나다 — 조회 한 번에 spawn 을 두 번 불렀다");
+            .expect("fake spawner: the script has one child — spawn was called twice in one query");
         let script = script?;
         Ok(Box::new(ScriptedChild {
             script,
@@ -263,7 +256,6 @@ struct ScriptedChild {
 }
 
 impl ScriptedChild {
-    /// The common part of the deadline rule — if `Some`, it ends right away with that error.
     fn gate(&mut self, deadline: Instant) -> Option<ProbeError> {
         if self.cut {
             return Some(ProbeError::Timeout);
@@ -294,7 +286,7 @@ impl ScriptedChild {
         let left = deadline.saturating_duration_since(Instant::now());
         assert!(
             left <= FAKE_HANG_MAX,
-            "가짜 자식: 막힘을 마감({left:?} 뒤)까지 자야 하는데 너무 멀다 — 조회기가 env.deadline 을 안 넘긴 것 같다"
+            "fake child: should sleep through the block until the deadline (after {left:?}) but it is too far — the prober does not seem to pass env.deadline"
         );
         thread::sleep(left);
         self.cut()
@@ -307,10 +299,10 @@ impl ProbeChild for ScriptedChild {
             return Err(err);
         }
         if lock(&self.record).stdin_closed {
-            return Err(ProbeError::Io("stdin 이 닫혔다".to_owned()));
+            return Err(ProbeError::Io("stdin was closed".to_owned()));
         }
         if self.script.fail_writes {
-            return Err(ProbeError::Io("stdin 쓰기 실패".to_owned()));
+            return Err(ProbeError::Io("stdin write failed".to_owned()));
         }
         if self.script.block_writes {
             return Err(self.hang(deadline));
@@ -389,13 +381,13 @@ mod tests {
                 .exit_code(3)
                 .stderr_tail(&["warn"]),
         );
-        let mut child = spawner.spawn(&command(), far()).expect("기동");
+        let mut child = spawner.spawn(&command(), far()).expect("start");
         assert_eq!(child.read_line(far()), Ok(Some("hello".into())));
-        child.write_line("req-1", far()).expect("쓰기");
+        child.write_line("req-1", far()).expect("write");
         assert_eq!(child.read_line(far()), Ok(Some("echo:req-1".into())));
         assert_eq!(child.read_line(far()), Ok(None));
         assert_eq!(child.read_line(far()), Ok(None));
-        let exit = child.wait_exit(far()).expect("종료");
+        let exit = child.wait_exit(far()).expect("exit");
         assert_eq!(exit.code(), Some(3));
         assert!(!exit.looks_not_installed());
         assert_eq!(child.stderr_tail(), vec!["warn".to_owned()]);
@@ -411,13 +403,13 @@ mod tests {
     #[test]
     fn a_silent_child_is_cut_at_the_deadline_and_stays_cut() {
         let spawner = ScriptedSpawner::new(ChildScript::new().hang_after_lines());
-        let mut child = spawner.spawn(&command(), far()).expect("기동");
+        let mut child = spawner.spawn(&command(), far()).expect("start");
         let started = Instant::now();
         assert_eq!(
             child.read_line(Instant::now() + SHORT),
             Err(ProbeError::Timeout)
         );
-        assert!(started.elapsed() >= SHORT, "마감 전에 돌아왔다");
+        assert!(started.elapsed() >= SHORT, "returned before the deadline");
         assert!(spawner.cut_at_deadline());
         assert_eq!(child.write_line("x", far()), Err(ProbeError::Timeout));
         assert_eq!(child.wait_exit(far()), Err(ProbeError::Timeout));
@@ -426,7 +418,7 @@ mod tests {
     #[test]
     fn blocked_writes_and_a_child_that_never_exits_hit_the_deadline() {
         let spawner = ScriptedSpawner::new(ChildScript::new().block_writes());
-        let mut child = spawner.spawn(&command(), far()).expect("기동");
+        let mut child = spawner.spawn(&command(), far()).expect("start");
         assert_eq!(
             child.write_line("x", Instant::now() + SHORT),
             Err(ProbeError::Timeout)
@@ -435,7 +427,7 @@ mod tests {
         assert!(spawner.cut_at_deadline());
 
         let spawner = ScriptedSpawner::new(ChildScript::new().never_exit());
-        let mut child = spawner.spawn(&command(), far()).expect("기동");
+        let mut child = spawner.spawn(&command(), far()).expect("start");
         assert_eq!(child.read_line(far()), Ok(None));
         assert_eq!(
             child.wait_exit(Instant::now() + SHORT),
@@ -447,7 +439,7 @@ mod tests {
     #[test]
     fn a_passed_deadline_cuts_at_once() {
         let spawner = ScriptedSpawner::new(ChildScript::new().line("never read"));
-        let mut child = spawner.spawn(&command(), far()).expect("기동");
+        let mut child = spawner.spawn(&command(), far()).expect("start");
         assert_eq!(child.read_line(Instant::now()), Err(ProbeError::Timeout));
         assert!(spawner.cut_at_deadline());
     }
@@ -455,8 +447,8 @@ mod tests {
     #[test]
     fn not_installed_and_spawn_failures_are_scriptable() {
         let spawner = ScriptedSpawner::new(ChildScript::new().exit_not_installed());
-        let mut child = spawner.spawn(&command(), far()).expect("기동");
-        assert!(child.wait_exit(far()).expect("종료").looks_not_installed());
+        let mut child = spawner.spawn(&command(), far()).expect("start");
+        assert!(child.wait_exit(far()).expect("exit").looks_not_installed());
 
         let spawner = ScriptedSpawner::failing(ProbeError::NotInstalled);
         assert!(matches!(
@@ -466,7 +458,7 @@ mod tests {
         assert_eq!(
             spawner.commands().len(),
             1,
-            "실패한 spawn 의 명령도 기록한다"
+            "the command of a failed spawn is also recorded"
         );
     }
 
@@ -480,17 +472,19 @@ mod tests {
         assert_eq!(spawner.commands().len(), 1);
         assert!(
             !spawner.cut_at_deadline(),
-            "띄운 자식이 없으니 끊은 것도 없다"
+            "no child was launched, so nothing was cut off either"
         );
-        let mut child = spawner.spawn(&command(), far()).expect("대본은 그대로다");
+        let mut child = spawner
+            .spawn(&command(), far())
+            .expect("the script is unchanged");
         assert_eq!(child.read_line(far()), Ok(Some("hello".into())));
     }
 
     #[test]
     fn closing_stdin_is_recorded_and_refuses_later_writes() {
         let spawner = ScriptedSpawner::new(ChildScript::new());
-        let mut child = spawner.spawn(&command(), far()).expect("기동");
-        child.write_line("before", far()).expect("쓰기");
+        let mut child = spawner.spawn(&command(), far()).expect("start");
+        child.write_line("before", far()).expect("write");
         child.close_stdin();
         assert!(spawner.stdin_closed());
         assert!(matches!(
@@ -503,23 +497,26 @@ mod tests {
     #[test]
     fn failing_writes_and_the_judging_wait_are_scriptable() {
         let spawner = ScriptedSpawner::new(ChildScript::new().fail_writes().exit_code(4));
-        let mut child = spawner.spawn(&command(), far()).expect("기동");
+        let mut child = spawner.spawn(&command(), far()).expect("start");
         assert!(matches!(
             child.write_line("x", far()),
             Err(ProbeError::Io(_))
         ));
         assert!(spawner.written().is_empty());
         assert_eq!(child.wait_exit_code(far()), Ok(Some(4)));
-        assert!(!spawner.exit_judged(), "판정 없는 대기는 세지 않는다");
-        child.wait_exit(far()).expect("종료");
+        assert!(
+            !spawner.exit_judged(),
+            "a wait without a decision is not counted"
+        );
+        child.wait_exit(far()).expect("exit");
         assert!(spawner.exit_judged());
     }
 
     #[test]
-    #[should_panic(expected = "너무 멀다")]
+    #[should_panic(expected = "too far")]
     fn a_far_deadline_on_a_hang_panics_instead_of_stalling_the_test() {
         let spawner = ScriptedSpawner::new(ChildScript::new().hang_after_lines());
-        let mut child = spawner.spawn(&command(), far()).expect("기동");
+        let mut child = spawner.spawn(&command(), far()).expect("start");
         let _ = child.read_line(far());
     }
 }

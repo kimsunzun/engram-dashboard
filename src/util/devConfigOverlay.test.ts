@@ -1,22 +1,9 @@
-// ADR-0137: regression net for the dev overlay helper (`scripts/dev-config-json.mjs`) — the value that makes the dev identifier get
-//   stamped on the debug shell is made here. If this helper loosens, a value with only a sound structure (`{}`) passes and tauri
-//   uses the release identifier as is, and when a release app is running the dev app dies with no window.
-//
-// ★Placement exception — this is the single home of that rationale (including the share of the sibling `launcherWiring.test.ts`. Do not duplicate
-//   it there)★: an exception to the colocation convention (`vitest.config.ts` comment: "tests sit next to the source *.test.ts"). Both files
-//   have their targets in `scripts/`·`.claude/`, so there is no source in `src/` to put them next to. But the vitest include is
-//   only `src/**/*.test.ts(x)`, so if placed next to the target `npm test` would not pick them up at all, and widening include is outside the scope of this
-//   change. So we chose not "the place that breaks the convention" but **the only place that gets picked up** —
-//   it means the colocation convention cannot accommodate these two tests, and there is no sidecar source.
-// What this file looks at is only the helper's **value decision**. The call-site wiring (whether the launcher · gate really build by that path) is seen by
-//   `launcherWiring.test.ts`, and whether the injection became invalid at runtime is seen by the comparison of post-build artifacts in `scripts/build-client-shell.mjs`.
-//   The three are separate axes, so merging them into one leaves the other two empty.
+// ADR-0137: regression net for the dev overlay helper (`scripts/dev-config-json.mjs`) — it makes the value that stamps the dev identifier on the debug shell. If this helper loosens, a structurally sound but empty value (`{}`) passes, tauri uses the release identifier, and with a release app running the dev app dies with no window.
+// ★Placement exception — the single home of this rationale (including the sibling `launcherWiring.test.ts`; do not duplicate it there)★: an exception to the colocation convention (`vitest.config.ts`: "tests sit next to the source *.test.ts"). Both targets live in `scripts/`·`.claude/`, so there is no source in `src/` to sit next to; but vitest's include is only `src/**/*.test.ts(x)`, so a test next to its target would not run in `npm test`, and widening include is out of scope. So these are in **the only place that gets picked up**.
+// This file sees only the helper's **value decision**. Call-site wiring (whether the launcher · gate really build by that path) is `launcherWiring.test.ts`; runtime validity of the injection is the post-build artifact comparison in `scripts/build-client-shell.mjs`. Three separate axes — merging them leaves the other two empty.
 import { describe, expect, it } from 'vitest'
 
-// Only this file uses Node standard modules. The frontend tsconfig is DOM-only (no @types/node), so only the needed symbols are
-//   declared ambient **at this file's scope** (the same way as `src/store/chatStyleStore.test.ts` — to avoid creating a dependency on global
-//   @types/node). Why we do not use whole-file suppression (`@ts-nocheck`) = that would also turn off the type checking of
-//   the assertions below.
+// Only this file uses Node standard modules. The frontend tsconfig is DOM-only (no @types/node), so only the needed symbols are declared ambient **at this file's scope** (as `src/store/chatStyleStore.test.ts`). No whole-file `@ts-nocheck` — it would also turn off type checking of the assertions below.
 declare function require(id: string): {
   mkdtempSync(prefix: string): string
   writeFileSync(path: string, data: string, enc: string): void
@@ -35,10 +22,7 @@ const { createRequire } = require('node:module')
 
 const ROOT = process.cwd()
 
-// ★The helper is brought in with the plain Node loader (do not revert to `import`/`await import`)★: those two pass through vite and
-//   transform the helper as well, and inside a transformed module `import.meta.url` is `http:` so the helper dies in
-//   `fileURLToPath` while loading (measured). Node 22.12+ supports require of ESM without top-level await, and
-//   this repo is on Node 24. The reference point being cwd rather than `import.meta.url` is for the same reason (vitest root).
+// ★Bring the helper in with the plain Node loader (never `import`/`await import`)★: those pass through vite and transform the helper too, making `import.meta.url` `http:` so the helper dies in `fileURLToPath` while loading (measured). Node 22.12+ supports require of ESM without top-level await (this repo is on Node 24). cwd, not `import.meta.url`, is the reference point for the same reason (vitest root).
 const nodeRequire = createRequire(join(ROOT, 'package.json'))
 const { stripJsonComments, readDevConfig } = nodeRequire(
   join(ROOT, 'scripts', 'dev-config-json.mjs'),
@@ -76,7 +60,7 @@ describe('stripJsonComments', () => {
   })
 
   it('drops a comment whose body itself contains `//`', () => {
-    const src = ['{', '  // 실측: https://example.test/a//b · `windows.rs:67`', '  "a": 1', '}'].join(
+    const src = ['{', '  // measured: https://example.test/a//b · `windows.rs:67`', '  "a": 1', '}'].join(
       '\n',
     )
     expect(JSON.parse(stripJsonComments(src))).toEqual({ a: 1 })

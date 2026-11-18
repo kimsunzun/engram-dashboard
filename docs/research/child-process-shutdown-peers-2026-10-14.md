@@ -114,7 +114,7 @@ Adversarial review (codex · high · level 2) = **FIX**, 4 applied: the native l
 - #65478 is a report about an npm global install. The Windows replacement method of a native install is not in official material.
 - We found no report dedicated to update contention between concurrent instances.
 
-## 적대 리뷰 (adversarial review)
+## Adversarial review
 
 Cross-family reviewer (codex · effort high · level 2 · web_search) decision = **FIX**. All 6 findings applied.
 

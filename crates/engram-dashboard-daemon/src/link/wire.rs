@@ -1,4 +1,4 @@
-//! The daemon ↔ shell packet vocabulary as a transport [`Wire`] — raw pass-through (TRD S21 trd-3 §3-3 「DaemonWire 모양」).
+//! The daemon ↔ shell packet vocabulary as a transport [`Wire`] — raw pass-through (TRD S21 trd-3 §3-3 「DaemonWire shape」).
 //!
 //! - In = [`RawIn`] · Out = [`RawOut`] — text and binary frames byte for byte. Decoding stays in the upper layer
 //!   (`agent_conn` reads the command JSON), so this wire never fails to decode and keeps three behaviours a decoding

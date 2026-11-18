@@ -1,16 +1,8 @@
-//! Run lifetime of screen state — the boot stage plugin (TRD S21-storage §6-5 ⓪–⑥) · starting the recorder (⑦) · attaching the answer to the disk
-//! (§6-7 ⑤) · normal shutdown (§6-6). The field the four share is [`StateSession`], and the recorder's snapshot source is [`LiveSource`].
-//!
-//! - ★Register the plugin ([`init`]) right after the single-instance plugin★ — plugin setup runs inside `build()` in registration
-//!   order, and the single-instance plugin ends the second instance there (§6-5 facts ① · ③). Only after that may the disk
-//!   be changed, and the settings window (main) is created later than that, so the model a window first pulls is the decided model.
-//! - ★setup does not return `Err`★ — with `Err` the build stops and the app does not come up at all (N7 · D8). Failures are logged and it continues.
-//! - ★The restore service state is decided in one place, ⑥ (I5)★ — no window exists yet, so the first `restore_status` pull of every window sees the decided
-//!   value. If decided in the user setup, one has to keep by hand that it is earlier than the place that creates windows (⑧ —
-//!   `state::placement::restore_windows`).
-//! - ★The shell run lock is released explicitly by [`StateSession::shutdown`]★ — when the event loop ends it immediately calls
-//!   `process::exit` (tao `platform_impl/windows/event_loop.rs` `run`). Neither managed state nor this field is dropped, so
-//!   if we relied on that, the lock would be released only when the OS withdraws the handle and a waiting new instance would be blocked that much longer (`Drop` in `lock.rs`).
+//! Run lifetime of screen state — the boot stage plugin (TRD S21-storage §6-5 ⓪–⑥) · starting the recorder (⑦) · attaching the answer to disk (§6-7 ⑤) · normal shutdown (§6-6). The field the four share is [`StateSession`]; the recorder's snapshot source is [`LiveSource`].
+//! - Register the plugin ([`init`]) right after the single-instance plugin: plugin setup runs inside `build()` in registration order and the single-instance plugin ends the second instance there (§6-5 facts ① · ③); only after that may the disk be changed, and the settings window (main) is created later, so the model a window first pulls is the decided one.
+//! - setup does not return `Err` — with `Err` the build stops and the app does not come up (N7 · D8); failures are logged and it continues.
+//! - The restore service state is decided in one place, ⑥ (I5): no window exists yet, so every window's first `restore_status` pull sees the decided value. Decided in the user setup, one would have to keep by hand that it precedes the window-creating step (⑧ — `state::placement::restore_windows`).
+//! - The shell run lock is released explicitly by [`StateSession::shutdown`]: when the event loop ends it calls `process::exit` at once (tao `platform_impl/windows/event_loop.rs` `run`), dropping neither managed state nor this field — relying on that would release the lock only when the OS withdraws the handle and a waiting new instance would block that much longer (`Drop` in `lock.rs`).
 
 use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -40,13 +32,12 @@ use crate::ui_text::Lang;
 
 const PLUGIN_NAME: &str = "engram-state-boot";
 
-/// What the boot stage fills — passes the same instance that is managed in the builder (ADR-0102 — it exists before the first invoke).
+/// What the boot stage fills — the same instances managed in the builder, so they exist before the first invoke (ADR-0102).
 pub struct Boot {
     pub layout: LayoutState,
-    /// Labels of restored popouts — it must be the same issuer as the runtime popouts so labels do not overlap (§6-3).
+    /// Must be the same issuer as runtime popouts so labels do not overlap (§6-3).
     pub labels: Arc<dyn LabelSource>,
     pub session: Arc<StateSession>,
-    /// ⑥ decides the state. The notification is inserted by plugin setup before the boot stage — it announces from the decision of ⑥.
     pub restore: Arc<RestoreService>,
     /// The loaded settings — the boot model takes the effective `ui.language` before anything reads a name from it.
     pub settings: Arc<SettingsService>,
@@ -63,8 +54,7 @@ pub fn init<R: Runtime>(boot: Boot) -> TauriPlugin<R> {
         .build()
 }
 
-/// When the restore state changes, emits [`EVT_RESTORE_CHANGED`] to the main window. ⑥ has no window, so there is no receiver — the window sees the decided value
-/// with its first `restore_status` pull (I5).
+/// Emits [`EVT_RESTORE_CHANGED`] to the main window when the restore state changes. ⑥ has no window, so no receiver — the window sees the decided value with its first `restore_status` pull (I5).
 struct TauriRestoreNotifier<R: Runtime> {
     app: AppHandle<R>,
 }
@@ -79,7 +69,7 @@ impl<R: Runtime> RestoreNotifier for TauriRestoreNotifier<R> {
                 module = "state",
                 ?status,
                 error = %e,
-                "복원 상태 변경을 main 창에 알리지 못했다"
+                "could not notify the main window of the restore status change"
             );
         }
     }
@@ -88,20 +78,17 @@ impl<R: Runtime> RestoreNotifier for TauriRestoreNotifier<R> {
 impl Boot {
     fn run(self) {
         let paths = DataLayout::resolve();
-        // ⓪ Writes to a **different file** from the daemon (`app-*.log`) — if two processes share one file, lines get mixed. The folder is the same data folder as the daemon,
-        //   so when chasing a startup failure the two logs gather in one place.
+        // ⓪ Writes to a different file from the daemon (`app-*.log`) — two processes sharing one file mix lines. The folder is the same data folder as the daemon, so a startup failure's two logs gather in one place.
         let log_file = logging::init_logging_with_file(&paths.logs_dir(), logging::LogKind::App);
-        // If the primary folder cannot be used, the log path can fall under `%TEMP%`, so apart from the return value there is no means to know where it is writing
-        //   (same reason as "decide the data folder" in the daemon's `run()`).
+        // If the primary folder is unusable the log path can fall under `%TEMP%`, so apart from the return value nothing tells where it writes (same reason as "decide the data folder" in the daemon's `run()`).
         tracing::info!(
             data_dir = %paths.root().display(),
             log_file = ?log_file,
-            "앱 로그 파일 결정"
+            "app log file decided"
         );
         self.run_steps(&paths.shell_run_dir(), &paths.shell_state_dir());
     }
 
-    /// Boot stage ①–⑥. It does not start the recorder — it leaves the material to start it in [`StateSession`] and ⑦ takes it out.
     fn run_steps(&self, run_dir: &Path, state_dir: &Path) {
         self.session.hold_lock(lock::acquire(run_dir));
 
@@ -117,8 +104,7 @@ impl Boot {
                 restored.layout
             }
         };
-        // Before the run marker (it saves the names) and the swap — so a restart in Korean shows Korean names and titles from the
-        //   first frame. Nobody has seen this model, so the windows it reports need no notification.
+        // Before the run marker (it saves the names) and the swap — so a restart in Korean shows Korean names and titles from the first frame. Nobody has seen this model, so the windows it reports need no notification.
         // ADR-0373
         model.set_language(Lang::from_settings(&self.settings));
         let marker = boot::write_run_marker(
@@ -130,7 +116,7 @@ impl Boot {
         let claim = boot::saver_claim(&plan, marker);
 
         let revision = {
-            // Nobody takes this lock before the boot stage, so it cannot be poisoned — even if it were, the model is swapped as a whole.
+            // Nobody takes this lock before the boot stage, so it cannot be poisoned; even if it were, the model is swapped whole.
             let mut layout = sync::lock(&self.layout.0);
             *layout = model;
             StateRevision::of(&layout)
@@ -144,8 +130,7 @@ impl Boot {
             guard,
             ..
         } = plan;
-        // Guard contract (§6-5 ③) — this run saves ≡ not a guard. If it is a guard, there is no recorder so the answer is not attached to the disk —
-        //   the source of guard ⅱ is the in-memory text that the decision carried (L2).
+        // Guard contract (§6-5 ③): this run saves ≡ not a guard. A guard has no recorder, so the answer is not attached to disk — guard ⅱ's source is the in-memory text the decision carried (L2).
         let saves = guard.is_none();
         let ask = crash_copy.is_some();
         self.restore.set_boot(
@@ -172,14 +157,13 @@ impl Boot {
             state_file = state_file.as_wire(),
             marker = ?marker,
             saver = saver.is_some(),
-            "부팅 단계 — 모델 · 복원 상태를 정했다"
+            "boot stage — model · restore status decided"
         );
         self.session.cell().saver_start = saver;
     }
 }
 
-// TRD S21-storage §6-5 — read from the plan after the decision (③) · action (④) · run marker (⑤ — carries a guard if the re-decision just before the write
-//   rejects) are finished.
+// TRD S21-storage §6-5 — read from the plan after the decision (③) · action (④) · run marker (⑤ — carries a guard if the re-decision just before the write rejects) are finished.
 fn state_file_status(plan: &BootPlan) -> StateFileStatus {
     match plan.guard {
         Some(Guard::StateUnreadable(_)) => return StateFileStatus::Unreadable,
@@ -197,70 +181,55 @@ fn state_file_status(plan: &BootPlan) -> StateFileStatus {
 pub(super) fn report_restore_warning(warning: &RestoreWarning) {
     match warning {
         RestoreWarning::Internal(_) => {
-            tracing::error!(module = "state", %warning, "화면 상태 복원")
+            tracing::error!(module = "state", %warning, "screen state restore")
         }
-        _ => tracing::warn!(module = "state", %warning, "화면 상태 복원"),
+        _ => tracing::warn!(module = "state", %warning, "screen state restore"),
     }
 }
 
-/// The field shared by the boot stage · user setup · `RunEvent::Exit`. The lock is a leaf — while holding it, it takes or waits for no other lock
-/// (the wait of `settled` stands after releasing the field lock).
+/// The field shared by the boot stage · user setup · `RunEvent::Exit`. The lock is a leaf — while holding it, take or wait for no other lock (`settled`'s wait stands after releasing it).
 #[derive(Default)]
 pub struct StateSession {
     cell: Mutex<SessionCell>,
-    /// Wakes when starting (`starting`) ends (loaded · could not start · shutdown) — the answer waits for that end
-    /// ([`StateSession::resolve_crash_copy`]).
+    /// Wakes when starting (`starting`) ends (loaded · could not start · shutdown) — the answer waits for that end ([`StateSession::resolve_crash_copy`]).
     settled: Condvar,
 }
 
 #[derive(Default)]
 struct SessionCell {
     lock: Option<StateLock>,
-    /// Set by boot stage ⑥ and taken out by ⑦ ([`StateSession::start_saver`]). `None` = guard (N3 — this run does not save) ·
-    /// already taken out.
+    /// Set by boot stage ⑥ and taken out by ⑦ ([`StateSession::start_saver`]). `None` = guard (N3 — this run does not save) · already taken out.
     saver_start: Option<PendingSaver>,
-    /// The recorder's closed flag between taking out the material and loading it into the field — in between, [`StateSession::shutdown`] sets this before releasing the shell run
-    /// lock. If not set, a recorder not yet loaded would write after the lock is released and
-    /// overwrite the file of a new instance that passed the gate in the meantime.
+    /// The recorder's closed flag between taking out the material and loading it into the field — [`StateSession::shutdown`] sets it before releasing the shell run lock; unset, a not-yet-loaded recorder would write after the lock is released and overwrite the file of a new instance that passed the gate meanwhile.
     starting: Option<CloseFlag>,
     saver: Option<SaverHandle>,
-    /// [`StateSession::shutdown`] has already run.
     closed: bool,
 }
 
 struct PendingSaver {
     source: LiveSource,
     files: saver::Fs,
-    /// Change number of the model that the run marker (⑤) carried.
     revision: StateRevision,
-    /// The hash of the answered copy that the run marker (⑤) carried — the recorder carries it on and deletes again.
     carry_resolved: Option<String>,
-    /// Has this run already claimed `state.json` (`boot::saver_claim`) — the axis of the recorder's re-decision just before saving.
     claim: Claim,
 }
 
-// The answer of [`StateSession::published_saver`].
 enum Published {
     Ready(SaverHandle),
-    /// Guard · could not start · already ended.
     Absent,
-    /// The deadline passed while another thread was still starting.
     StillStarting,
 }
 
-/// The answer of [`StateSession::resolve_crash_copy`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolveResult {
-    /// The `state.json` carrying that hash was published within the deadline — it does not carry the success or failure of deleting the copy.
     Durable,
-    /// Not attached to the disk — no recorder (guard · could not start · already ended · another starting thread could not load it within the
-    /// deadline) · write failure · closed · deadline exceeded.
+    /// Not attached to disk — no recorder (guard · could not start · already ended · another starting thread could not load it within the deadline) · write failure · closed · deadline exceeded.
     NotDurable,
 }
 
 impl StateSession {
     fn cell(&self) -> MutexGuard<'_, SessionCell> {
-        // The field is only four `Option`s and one flag, so there is no half-changed state — a shutdown path that cannot release the lock is worse.
+        // Only four `Option`s and one flag, so no half-changed state; a shutdown path that cannot release the lock would be worse.
         sync::lock(&self.cell)
     }
 
@@ -268,8 +237,7 @@ impl StateSession {
         self.cell().lock = lock;
     }
 
-    /// Boot stage ⑦ — if it was a guard or already started (including the case where an answer that came before ⑦ started it first —
-    /// [`Self::resolve_crash_copy`]), it does nothing.
+    /// Boot stage ⑦ — does nothing if it was a guard or already started (including an answer that came before ⑦ and started it first — [`Self::resolve_crash_copy`]).
     pub fn start_saver(&self) {
         let Some((pending, closed)) = self.take_pending() else {
             return;
@@ -289,14 +257,13 @@ impl StateSession {
                 tracing::error!(
                     module = "state",
                     error = %e,
-                    "기록기 스레드를 띄우지 못했다 — 이 실행은 화면 상태를 더 저장하지 않는다"
+                    "could not start the writer thread — this run saves no more screen state"
                 );
             }
         }
     }
 
-    // Takes out the material to start and sets that recorder's closed flag in the field as 「띄우는 중」 (starting) — the one who took it out must always
-    // finish with [`Self::publish_saver`] or [`Self::end_start`] (if not finished, the answer waits until the deadline).
+    // Takes out the material to start and sets that recorder's closed flag in the field as 「starting」 — the taker must always finish with [`Self::publish_saver`] or [`Self::end_start`] (else the answer waits until the deadline).
     fn take_pending(&self) -> Option<(PendingSaver, CloseFlag)> {
         let mut cell = self.cell();
         let pending = cell.saver_start.take()?;
@@ -305,7 +272,6 @@ impl StateSession {
         Some((pending, closed))
     }
 
-    // Withdraws 「띄우는 중」 (starting) and wakes the waiting answers — `then` runs inside the field lock (only assign fields).
     fn end_start<T>(&self, then: impl FnOnce(&mut SessionCell) -> T) -> T {
         let out = {
             let mut cell = self.cell();
@@ -316,8 +282,7 @@ impl StateSession {
         out
     }
 
-    // Loads the started recorder into the field — if [`Self::shutdown`] ran during starting (outside the lock), it does not load (shutdown has already closed that
-    // recorder — `starting`).
+    // Loads the started recorder into the field — if [`Self::shutdown`] ran during starting (outside the lock) it is not loaded (shutdown already closed that recorder via `starting`).
     fn publish_saver(&self, handle: SaverHandle) {
         let published = self.end_start(|cell| {
             if cell.closed {
@@ -331,22 +296,14 @@ impl StateSession {
             handle.close();
             tracing::info!(
                 module = "state",
-                "기록기를 띄우는 사이 종료가 돌아 그 기록기를 닫는다 — 아무것도 쓰지 않는다"
+                "the exit ran while the writer was starting, so that writer is closed — nothing is written"
             );
         }
     }
 
     /// Passes the answered copy's hash to the recorder (`Resolve`) and waits until the deadline ([`saver::REPLY_DEADLINE`]) (TRD §6-7 ⑤).
-    ///
-    /// ★If the recorder does not exist yet, it first calls ⑦ ([`Self::start_saver`])★ — so that even if the answer comes before ⑦, it does not become
-    /// `NotDurable` with a recorder about to come up (it does not happen in today's boot order — windows are created in ⑧ after ⑦). After a guard · already started ·
-    /// shutdown, that call does nothing.
-    ///
-    /// ★If another thread (⑦ · another answer) is starting, it waits until loaded or failed★ — that wait and the `Resolve` answer wait
-    /// share one deadline. If it did not wait, it would look at that moment as if there were no recorder and the answer would not attach to the disk.
-    ///
-    /// ★It waits holding no lock — the caller also does not call it holding the layout lock★: the recorder takes
-    /// that lock to take a snapshot (`saver::SnapshotSource`). If held, the answer always exceeds the deadline.
+    /// If the recorder does not exist yet it first calls ⑦ ([`Self::start_saver`]), so an answer before ⑦ does not become `NotDurable` with a recorder about to come up (not today's boot order — windows are created in ⑧ after ⑦); after a guard · already started · shutdown that call does nothing. If another thread (⑦ · another answer) is starting it waits until loaded or failed, sharing one deadline with the `Resolve` wait — else it would see no recorder and the answer would not attach to disk.
+    /// Waits holding no lock, and the caller must not hold the layout lock: the recorder takes it to snapshot (`saver::SnapshotSource`), so held, the answer always exceeds the deadline.
     pub fn resolve_crash_copy(&self, hash: String) -> ResolveResult {
         self.resolve_within(hash, saver::REPLY_DEADLINE)
     }
@@ -363,7 +320,7 @@ impl StateSession {
                 tracing::info!(
                     module = "state",
                     hash = %hash,
-                    "기록기가 없어 답을 디스크에 붙이지 않는다"
+                    "there is no writer, so the answer is not attached to disk"
                 );
                 return ResolveResult::NotDurable;
             }
@@ -371,7 +328,7 @@ impl StateSession {
                 tracing::warn!(
                     module = "state",
                     hash = %hash,
-                    "기록기가 마감 안에 뜨지 않아 답을 디스크에 붙이지 않는다"
+                    "the writer did not start within the deadline, so the answer is not attached to disk"
                 );
                 return ResolveResult::NotDurable;
             }
@@ -384,15 +341,14 @@ impl StateSession {
                     module = "state",
                     hash = %hash,
                     ?outcome,
-                    "답을 마감 안에 디스크에 붙이지 못했다"
+                    "could not attach the answer to disk within the deadline"
                 );
                 ResolveResult::NotDurable
             }
         }
     }
 
-    // If it is starting, waits for its end (loaded · could not start · shutdown) until `until` and returns the recorder that was loaded. The field lock is released
-    // while waiting — the one starting must take that lock to load. The caller leaves the log (one line per branch).
+    // If starting, waits for its end (loaded · could not start · shutdown) until `until` and returns the recorder that was loaded. The field lock is released while waiting — the starter must take it to load. The caller leaves the log (one line per branch).
     fn published_saver(&self, until: Instant) -> Published {
         let mut cell = self.cell();
         while cell.starting.is_some() && !cell.closed {
@@ -408,11 +364,7 @@ impl StateSession {
         }
     }
 
-    /// `RunEvent::Exit` — waits for the normal shutdown write (`Final`) until the deadline ([`saver::REPLY_DEADLINE`]) and then releases the shell run
-    /// lock (§6-6). If there is no recorder (guard · could not start), it only releases the lock (N7). A second call does nothing.
-    ///
-    /// ★Called on the main thread — it waits holding no lock★: the recorder takes the layout lock to take a snapshot
-    /// (`saver::SnapshotSource`).
+    /// `RunEvent::Exit` — waits for the normal shutdown write (`Final`) until the deadline ([`saver::REPLY_DEADLINE`]) and then releases the shell run lock (§6-6); with no recorder (guard · could not start) it only releases the lock (N7). A second call does nothing. Called on the main thread, waiting holding no lock: the recorder takes the layout lock to snapshot (`saver::SnapshotSource`).
     pub fn shutdown(&self) {
         let (saver, lock) = {
             let mut cell = self.cell();
@@ -420,8 +372,7 @@ impl StateSession {
                 return;
             }
             cell.saver_start = None;
-            // Before releasing the lock — a recorder that is starting is not loaded yet, so the `Final` below does not reach it (field head
-            //   `starting`).
+            // Before releasing the lock — a recorder that is starting is not loaded yet, so the `Final` below does not reach it (field head `starting`).
             if let Some(starting) = cell.starting.take() {
                 starting.close();
             }
@@ -430,22 +381,23 @@ impl StateSession {
         self.settled.notify_all();
         match saver.map(|saver| saver.finish(saver::REPLY_DEADLINE)) {
             Some(RequestOutcome::Done(SaveOutcome::Written)) => {
-                tracing::info!(module = "state", "정상 종료를 적었다")
+                tracing::info!(module = "state", "recorded the normal exit")
             }
-            // What exceeded the deadline was already warned by `finish`.
             Some(RequestOutcome::TimedOut) => {}
             Some(outcome) => tracing::warn!(
                 module = "state",
                 ?outcome,
-                "정상 종료를 적지 못했다 — 다음 부팅은 비정상 종료로 읽는다"
+                "could not record the normal exit — the next boot reads it as an abnormal exit"
             ),
-            None => tracing::info!(module = "state", "기록기가 없어 정상 종료 쓰기 없이 끝난다"),
+            None => tracing::info!(
+                module = "state",
+                "no writer, so it ends without the normal exit write"
+            ),
         }
         drop(lock);
     }
 }
 
-/// The recorder's snapshot source — the layout model. Window getters are not called (position · size read the values written in the model).
 pub struct LiveSource {
     layout: LayoutState,
 }
@@ -460,7 +412,6 @@ impl saver::SnapshotSource for LiveSource {
     type Revision = StateRevision;
 
     fn revision(&self) -> StateRevision {
-        // Reading the number is harmless even on a half-changed model — not using a poisoned model is done by `snapshot`.
         let layout = sync::lock(&self.layout.0);
         StateRevision::of(&layout)
     }
@@ -471,7 +422,7 @@ impl saver::SnapshotSource for LiveSource {
             .layout
             .0
             .lock()
-            .map_err(|_| "레이아웃 락에 독이 들었다".to_string())?;
+            .map_err(|_| "the layout lock is poisoned".to_string())?;
         Ok(to_persisted(&layout))
     }
 }
@@ -501,10 +452,10 @@ mod tests {
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .expect("시계")
+                .expect("clock")
                 .as_nanos()
         ));
-        std::fs::create_dir_all(&dir).expect("임시 폴더");
+        std::fs::create_dir_all(&dir).expect("temp folder");
         dir
     }
 
@@ -519,17 +470,17 @@ mod tests {
 
     fn read_state(dir: &Path) -> StateFile {
         let text = std::fs::read_to_string(dir.join(STATE_FILE)).expect("state.json");
-        codec::decode(&text).expect("상태 파일").0
+        codec::decode(&text).expect("state file").0
     }
 
     fn lock_is_free(run_dir: &Path) -> bool {
         let file = OpenOptions::new()
             .write(true)
             .open(run_dir.join(LOCK_FILE))
-            .expect("잠금 파일");
+            .expect("lock file");
         let free = file.try_lock().is_ok();
         if free {
-            file.unlock().expect("잡은 잠금을 푼다");
+            file.unlock().expect("release the held lock");
         }
         free
     }
@@ -569,11 +520,10 @@ mod tests {
         notices
     }
 
-    /// A screen with one tab name changed — the `state.json` text left by the previous run and that tab.
     fn previous_run(clean_exit: bool, resolved: Option<String>) -> (String, uuid::Uuid) {
         let mut previous = ViewManager::new();
         let view = previous.windows[MAIN_WINDOW_LABEL].active;
-        previous.rename_tab(view, "지난 탭".into()).unwrap();
+        previous.rename_tab(view, "Last tab".into()).unwrap();
         let text = codec::encode(&StateFile {
             version: STATE_VERSION,
             saved_at_ms: 1,
@@ -591,14 +541,14 @@ mod tests {
     fn revision_moves_with_layout_and_attrs() {
         let (source, layout) = source();
         let start = source.revision();
-        assert_eq!(source.revision(), start, "바뀐 것이 없으면 같다");
+        assert_eq!(source.revision(), start, "the same when nothing changed");
 
         let view = main_view(&layout);
         layout
             .0
             .lock()
             .unwrap()
-            .rename_tab(view, "새 이름".into())
+            .rename_tab(view, "New name".into())
             .unwrap();
         let after_layout = source.revision();
         assert_ne!(after_layout.layout, start.layout);
@@ -622,7 +572,7 @@ mod tests {
             .0
             .lock()
             .unwrap()
-            .rename_tab(view, "저장할 탭".into())
+            .rename_tab(view, "Tab to save".into())
             .unwrap();
         layout
             .0
@@ -631,7 +581,7 @@ mod tests {
             .set_window_theme(MAIN_WINDOW_LABEL, Some(UiTheme::EInk))
             .unwrap();
 
-        let windows = source.snapshot().expect("스냅숏");
+        let windows = source.snapshot().expect("snapshot");
         let expected = to_persisted(&layout.0.lock().unwrap());
         assert_eq!(windows, expected);
     }
@@ -641,7 +591,7 @@ mod tests {
         let (source, layout) = source();
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _guard = layout.0.lock().unwrap();
-            panic!("독");
+            panic!("poison");
         }));
         assert!(layout.0.is_poisoned());
 
@@ -658,7 +608,7 @@ mod tests {
         let saved_tab = {
             let mut previous = ViewManager::new();
             let view = previous.windows[MAIN_WINDOW_LABEL].active;
-            previous.rename_tab(view, "지난 탭".into()).unwrap();
+            previous.rename_tab(view, "Last tab".into()).unwrap();
             previous.create_window("slot-popup-7").unwrap();
             previous
                 .set_window_theme(MAIN_WINDOW_LABEL, Some(UiTheme::Dark))
@@ -683,15 +633,18 @@ mod tests {
         assert_eq!(
             notices.seen(),
             [CrashCopyStatus::None],
-            "⑥ 이 한 번 정한다(I5)"
+            "⑥ decides once (I5)"
         );
         {
             let mgr = layout.0.lock().unwrap();
-            assert_eq!(mgr.views[&saved_tab].name, TabName::Named("지난 탭".into()));
-            assert_eq!(mgr.windows.len(), 2, "main + 복원한 팝아웃");
+            assert_eq!(
+                mgr.views[&saved_tab].name,
+                TabName::Named("Last tab".into())
+            );
+            assert_eq!(mgr.windows.len(), 2, "main + the restored popout");
             assert!(
                 mgr.windows.contains_key(&popup_label(1)),
-                "팝아웃은 이 실행의 발급기에서 새 label 을 받는다"
+                "the popout receives a new label from this run's issuer"
             );
             assert_eq!(
                 mgr.window_attrs(MAIN_WINDOW_LABEL).unwrap().theme,
@@ -699,14 +652,14 @@ mod tests {
             );
         }
         let marker = read_state(&state_dir);
-        assert!(!marker.clean_exit, "실행 표식");
-        assert_eq!(marker.windows.len(), 2, "main · 팝아웃");
-        assert!(!lock_is_free(&run_dir), "잠금은 종료까지 쥔다");
+        assert!(!marker.clean_exit, "run marker");
+        assert_eq!(marker.windows.len(), 2, "main · popout");
+        assert!(!lock_is_free(&run_dir), "the lock is held until exit");
 
         session.start_saver();
         session.shutdown();
-        assert!(read_state(&state_dir).clean_exit, "정상 종료 쓰기");
-        assert!(lock_is_free(&run_dir), "종료가 잠금을 놓는다");
+        assert!(read_state(&state_dir).clean_exit, "normal exit write");
+        assert!(lock_is_free(&run_dir), "the exit releases the lock");
         session.shutdown();
     }
 
@@ -721,15 +674,15 @@ mod tests {
         assert_eq!(
             boot.restore.status().state_file,
             StateFileStatus::Ok,
-            "없는 파일은 ok"
+            "a missing file is ok"
         );
-        assert!(boot.restore.status().saves, "가드가 아니다 — 저장한다");
+        assert!(boot.restore.status().saves, "not a guard — it saves");
         let marker = read_state(&state_dir);
         assert!(!marker.clean_exit);
         assert_eq!(
             marker.windows,
             to_persisted(&layout.0.lock().unwrap()),
-            "표식이 담은 것이 메모리 모델이다"
+            "what the marker holds is the memory model"
         );
     }
 
@@ -747,10 +700,10 @@ mod tests {
         let mgr = layout.0.lock().unwrap();
         assert_eq!(mgr.language(), Lang::Ko);
         let tabs = mgr.list_tabs(MAIN_WINDOW_LABEL).unwrap();
-        assert_eq!(tabs.tabs[0].name, "빈 칸");
+        assert_eq!(tabs.tabs[0].name, "빈 칸"); // hangul-ok: the Korean UI table
         assert_eq!(
             crate::layout::apply::WindowTabsPayload::from(tabs).title,
-            "빈 칸 - Engram:1"
+            "빈 칸 - Engram:1" // hangul-ok: the Korean UI table
         );
         assert_eq!(
             read_state(&state_dir).windows,
@@ -779,7 +732,7 @@ mod tests {
     fn an_unreadable_state_file_guards_the_run_and_never_starts_a_saver() {
         let run_dir = temp_dir("run");
         let state_dir = temp_dir("state");
-        // A folder is neither 「없음」 (none) nor 「못 쓸 파일」 (unusable file) but a read IO failure (I3) — guard.
+        // A folder is neither 「none」 nor 「unusable file」 but a read IO failure (I3) — guard.
         std::fs::create_dir(state_dir.join(STATE_FILE)).unwrap();
         let layout = LayoutState::new();
         let (boot, session) = boot(&layout);
@@ -789,22 +742,22 @@ mod tests {
         assert_eq!(
             boot.restore.status().state_file,
             StateFileStatus::Unreadable,
-            "가드 ⅰ — 사본이 없어도 ⑥ 이 정한다"
+            "guard ⅰ — ⑥ decides even without a copy"
         );
-        assert!(!boot.restore.status().saves, "가드 ⅰ — 저장하지 않는다");
-        assert!(session.cell().saver_start.is_none(), "기록기 재료가 없다");
+        assert!(!boot.restore.status().saves, "guard ⅰ — does not save");
+        assert!(session.cell().saver_start.is_none(), "no writer material");
         assert!(
             state_dir.join(STATE_FILE).is_dir(),
-            "실행 표식을 쓰지 않는다"
+            "does not write the run marker"
         );
         session.start_saver();
-        assert!(
-            session.cell().saver.is_none(),
-            "⑦ 은 아무것도 띄우지 않는다"
-        );
+        assert!(session.cell().saver.is_none(), "⑦ starts nothing");
 
         session.shutdown();
-        assert!(lock_is_free(&run_dir), "가드여도 종료가 잠금을 놓는다");
+        assert!(
+            lock_is_free(&run_dir),
+            "even with a guard the exit releases the lock"
+        );
         assert!(state_dir.join(STATE_FILE).is_dir());
     }
 
@@ -819,8 +772,8 @@ mod tests {
         boot.run_steps(&run_dir, &state_dir);
 
         assert_eq!(boot.restore.status().state_file, StateFileStatus::Newer);
-        assert!(!boot.restore.status().saves, "가드 — 저장하지 않는다");
-        assert!(session.cell().saver_start.is_none(), "기록기 재료가 없다");
+        assert!(!boot.restore.status().saves, "guard — does not save");
+        assert!(session.cell().saver_start.is_none(), "no writer material");
         session.shutdown();
         assert_eq!(
             std::fs::read_to_string(state_dir.join(STATE_FILE)).unwrap(),
@@ -828,7 +781,7 @@ mod tests {
         );
         assert!(
             !state_dir.join("state.json.corrupt").exists(),
-            "떠 두지 않는다"
+            "not copied aside"
         );
     }
 
@@ -847,12 +800,12 @@ mod tests {
         );
         assert!(
             boot.restore.status().saves,
-            "못 쓸 파일은 가드가 아니다 — 저장한다"
+            "an unusable file is not a guard — it saves"
         );
         assert_eq!(
             notices.seen(),
             [CrashCopyStatus::None],
-            "사본이 없어도 ⑥ 이 정한다"
+            "⑥ decides even without a copy"
         );
         assert_eq!(
             std::fs::read_to_string(state_dir.join("state.json.corrupt")).unwrap(),
@@ -879,11 +832,11 @@ mod tests {
         );
         assert!(
             boot.restore.status().saves,
-            "떠 두기 실패도 가드가 아니다(D8)"
+            "a copy-aside failure is not a guard either (D8)"
         );
         assert!(
             !read_state(&state_dir).clean_exit,
-            "실행 표식이 원본을 갈아끼웠다(D8)"
+            "the run marker replaced the original (D8)"
         );
         session.shutdown();
     }
@@ -899,8 +852,8 @@ mod tests {
             state_aside,
             claim: Claim::NotYet,
         };
-        let unreadable = || Some(Guard::StateUnreadable("잠김".into()));
-        let not_written = || Some(Guard::CrashCopyNotWritten("새 판의 사본".into()));
+        let unreadable = || Some(Guard::StateUnreadable("locked".into()));
+        let not_written = || Some(Guard::CrashCopyNotWritten("a newer version's copy".into()));
         for (guard, aside, expected) in [
             (None, None, StateFileStatus::Ok),
             (unreadable(), None, StateFileStatus::Unreadable),
@@ -943,22 +896,22 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(state_dir.join(CRASH_COPY_FILE)).unwrap(),
             raw,
-            "사본 = 앞 실행의 state.json 원문"
+            "copy = the previous run's state.json raw text"
         );
         assert_eq!(
             notices.seen(),
             [CrashCopyStatus::Awaiting],
-            "⑥ 이 한 번 정한다(I5)"
+            "⑥ decides once (I5)"
         );
-        assert_eq!(boot.restore.status().windows, Some(1), "main 만");
+        assert_eq!(boot.restore.status().windows, Some(1), "main only");
         let status = boot.restore.status();
-        assert!(status.saves, "가드가 아니다 — 이 실행이 저장한다");
-        assert_eq!(status.durable, Some(true), "묻는 동안은 saves 와 같다");
+        assert!(status.saves, "not a guard — this run saves");
+        assert_eq!(status.durable, Some(true), "while asking it equals saves");
         assert!(
             !layout.0.lock().unwrap().views.contains_key(&saved_tab),
-            "묻는 동안은 기본 화면"
+            "the default screen while asking"
         );
-        assert!(!read_state(&state_dir).clean_exit, "실행 표식");
+        assert!(!read_state(&state_dir).clean_exit, "run marker");
         {
             let ticket = boot.restore.begin_answer().unwrap();
             assert_eq!(ticket.copy().text, raw);
@@ -972,7 +925,7 @@ mod tests {
         );
         assert!(
             !state_dir.join(CRASH_COPY_FILE).exists(),
-            "답을 디스크에 붙인 뒤 사본을 지운다"
+            "after attaching the answer to disk the copy is removed"
         );
         assert_eq!(read_state(&state_dir).resolved_crash_copy, Some(hash));
         session.shutdown();
@@ -999,7 +952,7 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(state_dir.join(CRASH_COPY_FILE)).unwrap(),
             raw,
-            "정상 종료는 사본을 지우지 않는다(D6)"
+            "a normal exit does not remove the copy (D6)"
         );
         assert_eq!(boot.restore.status().crash_copy, CrashCopyStatus::Awaiting);
         session.shutdown();
@@ -1011,36 +964,39 @@ mod tests {
         let state_dir = temp_dir("state");
         let (raw, _) = previous_run(false, None);
         std::fs::write(state_dir.join(STATE_FILE), &raw).unwrap();
-        // A folder is neither 「없음」 (none) nor 「못 쓸 파일」 (unusable file) but a read IO failure (I3) — it is not known whether it may be overwritten.
+        // A folder is neither 「none」 nor 「unusable file」 but a read IO failure (I3) — it is not known whether it may be overwritten.
         std::fs::create_dir(state_dir.join(CRASH_COPY_FILE)).unwrap();
 
         let (boot, session) = boot(&LayoutState::new());
         boot.run_steps(&run_dir, &state_dir);
 
         let status = boot.restore.status();
-        assert!(!status.saves, "가드 ⅱ — 이 실행은 저장하지 않는다");
-        assert_eq!(status.durable, Some(false), "묻는 동안은 saves 와 같다");
+        assert!(!status.saves, "guard ⅱ — this run does not save");
+        assert_eq!(status.durable, Some(false), "while asking it equals saves");
         assert_eq!(
             status.state_file,
             StateFileStatus::Ok,
-            "가드 ⅱ 는 state_file 에 싣지 않는다"
+            "guard ⅱ is not put into state_file"
         );
         {
-            let ticket = boot.restore.begin_answer().expect("가드 ⅱ 여도 묻는다");
+            let ticket = boot
+                .restore
+                .begin_answer()
+                .expect("asks even under guard ⅱ");
             assert_eq!(
                 ticket.copy().text,
                 raw,
-                "복원 원천 = 메모리의 state.json 원문(L2)"
+                "restore source = the state.json raw text in memory (L2)"
             );
         }
         assert!(
             session.cell().saver_start.is_none(),
-            "가드 — 기록기 재료가 없다"
+            "guard — no writer material"
         );
         assert_eq!(
             std::fs::read_to_string(state_dir.join(STATE_FILE)).unwrap(),
             raw,
-            "디스크의 state.json 바이트 그대로"
+            "the state.json bytes on disk as is"
         );
         session.start_saver();
         assert_eq!(
@@ -1070,9 +1026,9 @@ mod tests {
         boot.run_steps(&run_dir, &state_dir);
         session.start_saver();
 
-        let reply = coordinator.answer(false).expect("거절");
+        let reply = coordinator.answer(false).expect("decline");
 
-        assert!(!reply.durable, "기록기가 없다");
+        assert!(!reply.durable, "no writer");
         assert_eq!(
             boot.restore.status(),
             RestoreStatusView {
@@ -1094,7 +1050,7 @@ mod tests {
         let state_dir = temp_dir("state");
         let (raw, _) = previous_run(false, None);
         std::fs::write(state_dir.join(CRASH_COPY_FILE), &raw).unwrap();
-        // A folder is neither 「없음」 (none) nor 「못 쓸 파일」 (unusable file) but a read IO failure (I3) — guard ⅰ.
+        // A folder is neither 「none」 nor 「unusable file」 but a read IO failure (I3) — guard ⅰ.
         std::fs::create_dir(state_dir.join(STATE_FILE)).unwrap();
 
         let (boot, session) = boot(&LayoutState::new());
@@ -1109,7 +1065,7 @@ mod tests {
         let ticket = boot.restore.begin_answer().unwrap();
         boot.restore.finish_answer(ticket, AnswerEnd::Answered);
         let answered = boot.restore.status();
-        assert!(!answered.saves, "답한 뒤에도 그대로");
+        assert!(!answered.saves, "unchanged even after answering");
         assert_eq!(answered.state_file, StateFileStatus::Unreadable);
         session.shutdown();
     }
@@ -1147,7 +1103,7 @@ mod tests {
 
         let (boot, session) = boot(&LayoutState::new());
         boot.run_steps(&run_dir, &state_dir);
-        assert!(session.cell().saver.is_none(), "⑦ 전");
+        assert!(session.cell().saver.is_none(), "before ⑦");
 
         let hash = codec::crash_copy_hash(&raw);
         assert_eq!(
@@ -1158,14 +1114,14 @@ mod tests {
         assert_eq!(read_state(&state_dir).resolved_crash_copy, Some(hash));
         assert!(
             session.cell().saver_start.is_none(),
-            "⑦ 의 재료를 답이 썼다"
+            "the answer used ⑦'s material"
         );
 
         session.start_saver();
         session.shutdown();
         assert!(
             read_state(&state_dir).clean_exit,
-            "답이 띄운 기록기가 정상 종료를 적는다"
+            "the writer the answer started records the normal exit"
         );
         assert!(lock_is_free(&run_dir));
     }
@@ -1204,16 +1160,19 @@ mod tests {
         let handle = spawn_pending(&session);
         let witness = handle.clone();
         session.shutdown();
-        assert!(lock_is_free(&run_dir), "종료가 잠금을 놓았다");
+        assert!(lock_is_free(&run_dir), "the exit released the lock");
         // Look before loading — now that the lock is released it must already be closed (shutdown set it before the lock).
         assert_eq!(
             witness.resolve(codec::crash_copy_hash(&raw), saver::REPLY_DEADLINE),
             RequestOutcome::Done(SaveOutcome::Skipped),
-            "잠금을 놓은 뒤 실리지 않은 기록기가 쓰지 않는다"
+            "a writer not loaded after the lock was released does not write"
         );
         session.publish_saver(handle);
 
-        assert!(session.cell().saver.is_none(), "닫힌 세션에 싣지 않는다");
+        assert!(
+            session.cell().saver.is_none(),
+            "not loaded into a closed session"
+        );
         assert!(session.cell().starting.is_none());
         assert_eq!(
             session.resolve_crash_copy(codec::crash_copy_hash(&raw)),
@@ -1222,14 +1181,16 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(state_dir.join(STATE_FILE)).unwrap(),
             marker,
-            "종료 뒤 state.json 은 그대로"
+            "state.json unchanged after the exit"
         );
-        assert!(state_dir.join(CRASH_COPY_FILE).exists(), "사본도 그대로");
+        assert!(
+            state_dir.join(CRASH_COPY_FILE).exists(),
+            "the copy unchanged too"
+        );
     }
 
-    /// The front half of `start_saver` — takes out the material, sets 「띄우는 중」 (starting) and starts (does not load).
     fn spawn_pending(session: &StateSession) -> SaverHandle {
-        let (pending, closed) = session.take_pending().expect("기록기 재료");
+        let (pending, closed) = session.take_pending().expect("writer material");
         saver::spawn(
             pending.source,
             pending.files,
@@ -1239,10 +1200,9 @@ mod tests {
             pending.claim,
             closed,
         )
-        .expect("기록기 스레드")
+        .expect("writer thread")
     }
 
-    /// Runs a boot with a crash copy up to ⑥ — its session · lock folder · state folder · copy hash.
     fn booted_with_copy() -> (Arc<StateSession>, PathBuf, PathBuf, String) {
         let run_dir = temp_dir("run");
         let state_dir = temp_dir("state");
@@ -1258,7 +1218,7 @@ mod tests {
         let (session, run_dir, state_dir, hash) = booted_with_copy();
         let marker = std::fs::read_to_string(state_dir.join(STATE_FILE)).unwrap();
 
-        let (pending, closed) = session.take_pending().expect("기록기 재료");
+        let (pending, closed) = session.take_pending().expect("writer material");
         session.shutdown();
         assert!(lock_is_free(&run_dir));
         let handle = saver::spawn(
@@ -1270,12 +1230,12 @@ mod tests {
             pending.claim,
             closed,
         )
-        .expect("기록기 스레드");
+        .expect("writer thread");
 
         assert_eq!(
             handle.resolve(hash, saver::REPLY_DEADLINE),
             RequestOutcome::Done(SaveOutcome::Skipped),
-            "잠금을 놓은 뒤에 뜬 기록기는 처음부터 닫혀 있다"
+            "a writer started after the lock was released is closed from the start"
         );
         session.publish_saver(handle);
         assert_eq!(
@@ -1297,7 +1257,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(150));
         assert!(
             !answer.is_finished(),
-            "띄우는 중이면 기록기가 없다고 끝내지 않고 기다린다"
+            "while starting, it does not end saying there is no writer but waits"
         );
         session.publish_saver(handle);
 
@@ -1340,7 +1300,10 @@ mod tests {
 
         let (result, waited) = answer.join().unwrap();
         assert_eq!(result, ResolveResult::NotDurable);
-        assert!(waited < saver::REPLY_DEADLINE, "마감까지 서 있지 않는다");
+        assert!(
+            waited < saver::REPLY_DEADLINE,
+            "does not stand until the deadline"
+        );
         session.publish_saver(handle);
     }
 
@@ -1434,15 +1397,21 @@ mod tests {
         boot.run_steps(&run_dir, &state_dir);
         session.start_saver();
 
-        let reply = coordinator.answer(true).expect("수락");
+        let reply = coordinator.answer(true).expect("accept");
 
-        assert!(reply.durable, "답을 실은 쓰기가 마감 안에 발행됐다");
+        assert!(
+            reply.durable,
+            "the write carrying the answer was issued within the deadline"
+        );
         assert_eq!(reply.restored_windows, 1);
         assert!(
             layout.0.lock().unwrap().views.contains_key(&saved_tab),
-            "사본의 화면"
+            "the copy's screen"
         );
-        assert!(!state_dir.join(CRASH_COPY_FILE).exists(), "사본을 지운다");
+        assert!(
+            !state_dir.join(CRASH_COPY_FILE).exists(),
+            "the copy is removed"
+        );
         let written = read_state(&state_dir);
         assert_eq!(
             written.resolved_crash_copy,
@@ -1451,7 +1420,7 @@ mod tests {
         assert_eq!(
             written.windows,
             to_persisted(&layout.0.lock().unwrap()),
-            "답을 붙인 쓰기가 수락한 화면을 담는다"
+            "the write with the answer attached holds the accepted screen"
         );
         session.shutdown();
         assert!(lock_is_free(&run_dir));

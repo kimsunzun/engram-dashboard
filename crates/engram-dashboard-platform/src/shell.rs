@@ -9,23 +9,18 @@ pub fn default_shell() -> &'static str {
     "bash"
 }
 
-/// Turns one CLI program into the `(program, args)` to launch — Windows = `("cmd.exe", ["/c", program, args…])`,
-/// elsewhere = as received.
-///
-/// **Why wrap:** a CLI that npm installs on Windows is an extensionless shim (+ `.cmd`), so `CreateProcessW` (ConPTY also
-/// uses it) cannot launch it directly (error 193 — it does neither PATHEXT nor shell interpretation). Wrapping it as `cmd.exe /c <prog> …`
-/// lets cmd resolve the `<prog>.cmd` shim and launch the real process. `cmd /c` ends together with its target, so
-/// the 「띄운 자식 = 그 CLI」 (launched child = that CLI) lifetime is kept (killing the whole tree is done by the Job Object).
-///
-/// - **CLI (shim) only** — do not use it for an executable that can be launched directly (`cmd.exe` itself and the like).
-/// - **Known limitation — arguments are not escaped by cmd rules.** On Windows the arguments are carried as is on the
-///   command line of `cmd.exe`, and an argument containing cmd metacharacters (`%NAME%` — expanded as an environment variable even inside quotes · `& ^ | < >`)
-///   or the `"` and `\` that cmd counts as quotes may reach it changed, as cmd interprets them. The decision not to fix it and its
-///   rationale are authoritatively in the comment 「알려진 한계 — `%VAR%` 가 든 경로는 shim 을
-///   지나며 치환된다」 inside `build_spec` in agent `backend/codex/mod.rs`. Mitigation is placed by the caller per value — e.g. daemon `control/priming.rs`'s
-///   `CMD_UNSAFE_CHARS` · `path_is_cli_safe` · codex's `developer_instructions_override` · `mcp_attachment`
-///   rejection · passing claude `--settings` as a file path instead of inline JSON.
-/// - A process launched with this command is, on Windows, the `cmd.exe` wrapper rather than that CLI — the CLI itself is a descendant under it.
+/// Turns one CLI program into the `(program, args)` to launch — Windows = `("cmd.exe", ["/c", program, args…])`, elsewhere = as received.
+/// **Why wrap:** an npm-installed CLI on Windows is an extensionless shim (+ `.cmd`), which `CreateProcessW` (ConPTY uses it too) cannot
+///   launch directly (error 193 — no PATHEXT or shell interpretation); `cmd.exe /c <prog> …` lets cmd resolve the
+/// `<prog>.cmd` shim. `cmd /c` ends with its target, so "launched child = that CLI" lifetime holds (killing the whole tree is the Job Object's).
+/// - **CLI (shim) only** — not for an executable launchable directly (`cmd.exe` itself and the like).
+/// - **Known limitation — arguments are not escaped by cmd rules.** On Windows arguments ride as is on `cmd.exe`'s command line, so an
+///   argument with cmd metacharacters (`%NAME%` — expanded even inside quotes · `& ^ | < >`) or the `"` and `\` cmd
+///   counts as quotes may arrive changed. The decision not to fix it and its rationale are canonical in the 「Known limit — a path
+///   containing `%VAR%` gets substituted while passing the shim」 comment in `build_spec` of agent `backend/codex/mod.rs`.
+///   The caller mitigates per value — e.g. daemon `control/priming.rs`'s `CMD_UNSAFE_CHARS` · `path_is_cli_safe`, codex's
+///   `developer_instructions_override` · `mcp_attachment` rejection, claude `--settings` as a file path instead of inline JSON.
+/// - A process launched with this command is, on Windows, the `cmd.exe` wrapper, not the CLI — the CLI is a descendant under it.
 // ADR-0230
 pub fn console_command(program: &str, args: Vec<String>) -> (String, Vec<String>) {
     #[cfg(windows)]
@@ -46,8 +41,8 @@ pub fn console_command(program: &str, args: Vec<String>) -> (String, Vec<String>
 mod tests {
     use super::*;
 
-    /// ★Arguments are carried in order without changing a single character★ — arguments with spaces or cmd metacharacters also get no quotes or escapes
-    /// added (it measures the 「이스케이프하지 않는다」 (does not escape) in the doc above).
+    /// ★Arguments ride in order without changing a character★ — arguments with spaces or cmd metacharacters get no quotes or escapes added
+    ///   (measures the "does not escape" above).
     #[test]
     fn console_command_wraps_only_on_windows_and_keeps_args_verbatim() {
         let args = vec![

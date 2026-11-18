@@ -1,5 +1,5 @@
 // ADR-0242: slot id → scroll-follow handle — a module map inside this window (webview). The in-window command
-//   (`commands/scrollCommands.ts`) finds the handle here. Do not create a new global handle (CLAUDE.md 「LLM-우선 제어」).
+//   (`commands/scrollCommands.ts`) finds the handle here. Do not create a new global handle (CLAUDE.md 「LLM-우선 제어」). // hangul-ok
 
 /** One slot's scroll-follow handle — the hook (`useScrollFollow`) makes it, the slot and commands call it. */
 export interface FollowHandle {

@@ -24,8 +24,8 @@ const MULTIBLOCK = [
   '',
 ].join('\n')
 
-describe('Markdown 렌더(단일 ReactMarkdown, 멀티블록)', () => {
-  it('heading → <h2>, GFM 표 → <table>(<td>), 펜스 코드 → 하이라이트된 <pre>/<code> 로 파싱된다', () => {
+describe('Markdown render (single ReactMarkdown, multi-block)', () => {
+  it('heading → <h2>, GFM table → <table>(<td>), fenced code → parsed as highlighted <pre>/<code>', () => {
     const { container } = render(<Markdown markdown={MULTIBLOCK} />)
 
     const h2 = container.querySelector('h2')
@@ -52,7 +52,7 @@ describe('Markdown 렌더(단일 ReactMarkdown, 멀티블록)', () => {
     expect(text).not.toContain('```')
   })
 
-  it('단순 콘텐츠(문단 + 불릿 리스트 + bold)도 올바르게 렌더된다', () => {
+  it('simple content (paragraph + bullet list + bold) also renders correctly', () => {
     const simple = ['A **bold** word.', '', '- first', '- second', ''].join('\n')
     const { container } = render(<Markdown markdown={simple} />)
     expect(container.querySelector('strong')?.textContent).toBe('bold')
@@ -64,10 +64,10 @@ describe('Markdown 렌더(단일 ReactMarkdown, 멀티블록)', () => {
 
 // To keep literal invisible chars out of the source, ZWSP is built explicitly with String.fromCharCode(0x200b).
 const ZWSP = String.fromCharCode(0x200b)
-const ZW_MULTIBLOCK = `### 테스트\n\n| A | B |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n\n${ZWSP}\`\`\`js\nconsole.log(9)\n${ZWSP}\`\`\`\n`
+const ZW_MULTIBLOCK = `### 테스트\n\n| A | B |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |\n\n${ZWSP}\`\`\`js\nconsole.log(9)\n${ZWSP}\`\`\`\n` // hangul-ok
 
-describe('Markdown zero-width 방어(stripZeroWidth — ``` 앞 U+200B 로 인한 펜스 붕괴)', () => {
-  it('펜스 앞 U+200B 가 있어도 heading → <h3>, 표 → <table>, 펜스 코드 → <pre>/<code> 로 렌더된다', () => {
+describe('Markdown zero-width defense (stripZeroWidth — fence collapse caused by U+200B before ```)', () => {
+  it('even with U+200B before the fence, heading → <h3>, table → <table>, fenced code → rendered as <pre>/<code>', () => {
     // Guarantees the test uses the real bug input.
     expect(ZW_MULTIBLOCK.split(ZWSP).length - 1).toBe(2)
 
@@ -98,8 +98,8 @@ describe('Markdown zero-width 방어(stripZeroWidth — ``` 앞 U+200B 로 인�
   })
 })
 
-describe('Markdown KaTeX 수식(remark-math + rehype-katex)', () => {
-  it('$$x^2$$ 블록 수식이 .katex 요소로 렌더된다', () => {
+describe('Markdown KaTeX math (remark-math + rehype-katex)', () => {
+  it('the $$x^2$$ block math renders as a .katex element', () => {
     const { container } = render(<Markdown markdown={'$$x^2$$'} />)
     expect(container.querySelector('.katex')).toBeTruthy()
   })

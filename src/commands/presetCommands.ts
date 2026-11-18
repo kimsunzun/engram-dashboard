@@ -1,7 +1,5 @@
-// ADR-0061 / ADR-0055: agentClient 프리셋 메서드(ProtocolClient seam, ADR-0011)에 라우팅만 한다(새 상태
-//   경로 0 — store 반영은 PresetListUpdated broadcast 가 담당).
-//
-// ★ADR-0064 슬롯 메뉴 기여 co-location★: 콘텐츠(프리셋) 지식이 한 모듈에 응집(공통은 '*'이 소유).
+// ADR-0061 / ADR-0055: only routes to the agentClient preset methods (ProtocolClient seam, ADR-0011) — zero new state paths; the store update is the PresetListUpdated broadcast's job.
+// ★ADR-0064 slot menu contribution co-location★: content (preset) knowledge lives in one module (the common part is owned by '*').
 
 import { open } from '@tauri-apps/plugin-dialog'
 
@@ -14,7 +12,7 @@ register({
   id: 'preset.list',
   title: () => t('preset.list'),
   category: 'preset',
-  // store 미러 교체는 안 한다(조회 표면).
+  // Does not replace the store mirror (a query surface).
   run: () => agentClient.listPresets(),
 })
 
@@ -22,11 +20,11 @@ register({
   id: 'preset.create',
   title: () => t('preset.create'),
   category: 'preset',
-  // 이름은 안 넘긴다 — 백엔드가 {id,cwd}만 저장하고 표시명은 프론트가 cwd basename 으로 파생한다(ADR-0061).
+  // The name is not passed — the backend stores only {id,cwd} and the frontend derives the display name from the cwd basename (ADR-0061).
   run: (args) => {
     const cwd = args?.cwd as string | undefined
     if (!cwd || !cwd.trim()) {
-      throw new Error(`[preset.create] cwd 가 비어 있음: ${String(cwd)}`)
+      throw new Error(`[preset.create] cwd is empty: ${String(cwd)}`)
     }
     return agentClient.createPreset(cwd.trim())
   },
@@ -36,11 +34,11 @@ register({
   id: 'preset.delete',
   title: () => t('preset.delete'),
   category: 'preset',
-  // 없는 id 는 백엔드 no-op(Ack) — 프론트에서 존재 검증 안 함(ADR-0061).
+  // An unknown id is a backend no-op (Ack) — the frontend does not check existence (ADR-0061).
   run: (args) => {
     const id = args?.id as string | undefined
     if (!id || !id.trim()) {
-      throw new Error(`[preset.delete] id 가 비어 있음: ${String(id)}`)
+      throw new Error(`[preset.delete] id is empty: ${String(id)}`)
     }
     return agentClient.deletePreset(id.trim())
   },
@@ -50,14 +48,11 @@ register({
   id: 'preset.rename',
   title: () => t('preset.rename'),
   category: 'preset',
-  // ADR-0061 리치화(§5 LLM 제어): 프리셋 표시명 override set/clear.
-  //   - name 문자열 → override 저장. name 이 null/빈문자열/미지정 → override 해제(cwd basename 파생 복귀).
-  //   반영은 PresetListUpdated broadcast(낙관 갱신 X). 없는 id 는 백엔드 no-op(Ack). 이것이 rename 을
-  //   프론트 전용이 아니라 백엔드 저장으로 두는 이유 — LLM 이 같은 표면(command)으로 표시명을 바꿀 수 있다.
+  // ADR-0061 enrichment (§5 LLM control): set/clear the preset display-name override — name string → store it; null/empty/unspecified → clear it (back to the cwd basename derivation). Reflected through the PresetListUpdated broadcast (no optimistic update); an unknown id is a backend no-op (Ack). Rename is a backend save rather than frontend-only so the LLM changes the display name through the same command surface.
   run: (args) => {
     const id = args?.id as string | undefined
     if (!id || !id.trim()) {
-      throw new Error(`[preset.rename] id 가 비어 있음: ${String(id)}`)
+      throw new Error(`[preset.rename] id is empty: ${String(id)}`)
     }
     const raw = args?.name
     const name = typeof raw === 'string' && raw.trim().length > 0 ? raw.trim() : null
@@ -69,16 +64,14 @@ register({
   id: 'preset.add',
   title: () => t('preset.add'),
   category: 'preset',
-  // ★네이티브 폴더 다이얼로그 → createPreset★(ADR-0061 / ADR-0064): 옛 PresetPalette 의 pane "추가" 메뉴
-  //   로직을 command 로 승격한다. store 반영은 PresetListUpdated broadcast(낙관 갱신 X). 다이얼로그는
-  //   네이티브 창(webview 밖)이라 cdp 검증 불가 — open→createPreset 배선만 단위테스트.
+  // ★Native folder dialog → createPreset★ (ADR-0061 / ADR-0064): the old PresetPalette pane "Add" menu logic promoted to a command; the store update is the PresetListUpdated broadcast (no optimistic update). The dialog is a native window outside the webview, so cdp cannot check it — only the open→createPreset wiring is unit tested.
   run: async () => {
     const picked = await open({ directory: true, multiple: false, title: t('dialog.pickPresetPath') })
     const cwd = typeof picked === 'string' ? picked : null
-    if (!cwd) return // 취소 — no-op
+    if (!cwd) return // cancelled — no-op
     return agentClient.createPreset(cwd)
   },
 })
 
-// ADR-0064: group='content' — 공통 slot-ops 위에 렌더.
+// ADR-0064: group='content' — rendered above the common slot-ops.
 registerSlotMenu('preset_palette', [{ commandId: 'preset.add', group: 'content', order: 10 }])

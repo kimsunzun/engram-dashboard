@@ -1,6 +1,6 @@
 //
-// 전략: viewStore.getState() 의 액션들을 hoisted spy 로 주입(command 는 getState().split(...) 로 부른다).
-//   agentClient·plugin-dialog 도 stub. registry/slotMenu 는 실제 모듈(등록 부수효과를 관측).
+// Strategy: the actions of viewStore.getState() are injected as hoisted spies (the command calls getState().split(...)).
+//   agentClient·plugin-dialog are stubbed too. registry/slotMenu are the real modules (the registration side effect is observed).
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -48,9 +48,9 @@ beforeEach(() => {
 })
 afterEach(() => vi.restoreAllMocks())
 
-describe('공통 슬롯 ops(slotCommands) 라우팅', () => {
-  // ★라벨↔command↔방향 결선(ADR-0140)★: `가로 분할`(slot.split.topBottom) → 위/아래. 라벨 렌더 층은
-  //   ViewLayoutRenderer.test 가 잡고, 여기선 command id → 방향값을 고정한다.
+describe('common slot ops (slotCommands) routing', () => {
+  // ★Label↔command↔direction wiring (ADR-0140)★: `Split horizontally` (slot.split.topBottom) → top/bottom. The label render layer is
+  //   caught by ViewLayoutRenderer.test; here the command id → direction value is pinned.
   it('slot.split.topBottom → split(viewId, slotId, top_bottom)', () => {
     run('slot.split.topBottom', CTX)
     expect(vs.split).toHaveBeenCalledWith('v1', 's1', 'top_bottom')
@@ -71,7 +71,7 @@ describe('공통 슬롯 ops(slotCommands) 라우팅', () => {
     run('slot.close', CTX)
     expect(vs.closeSlot).toHaveBeenCalledWith('v1', 's1')
   })
-  it('viewId/slotId 누락 → throw(side-effect 전 loud fail)', () => {
+  it('viewId/slotId missing → throw (loud fail before side effects)', () => {
     expect(() => run('slot.split.topBottom', { slotId: 's1' })).toThrow(/viewId/)
     expect(() => run('slot.close', { viewId: 'v1' })).toThrow(/slotId/)
     expect(vs.split).not.toHaveBeenCalled()
@@ -79,8 +79,8 @@ describe('공통 슬롯 ops(slotCommands) 라우팅', () => {
   })
 })
 
-describe("'*' 공통 기여(모든 슬롯)", () => {
-  it('공통 5항목이 slot-ops 그룹으로 어느 콘텐츠에도 붙는다', () => {
+describe("'*' common contributions (every slot)", () => {
+  it('the 5 common items attach to any content as the slot-ops group', () => {
     const ids = buildSlotMenu('agent').map(i => i.id)
     for (const id of ['slot.split.topBottom', 'slot.split.leftRight', 'slot.popout', 'slot.empty', 'slot.close']) {
       expect(ids).toContain(id)
@@ -88,7 +88,7 @@ describe("'*' 공통 기여(모든 슬롯)", () => {
   })
 })
 
-describe('코어 콘텐츠(slotContentCommands) 라우팅', () => {
+describe('core content (slotContentCommands) routing', () => {
   it('slot.fill.agentList → setSlotContent(…,{type:agent_list})', () => {
     run('slot.fill.agentList', CTX)
     expect(vs.setSlotContent).toHaveBeenCalledWith('v1', 's1', { type: 'agent_list' })
@@ -97,12 +97,12 @@ describe('코어 콘텐츠(slotContentCommands) 라우팅', () => {
     run('slot.fill.presetPalette', CTX)
     expect(vs.setSlotContent).toHaveBeenCalledWith('v1', 's1', { type: 'preset_palette' })
   })
-  it('slot.fill.usage → setSlotContent(…,{type:usage, 두 회사 켬})', () => {
+  it('slot.fill.usage → setSlotContent(…,{type:usage, both vendors on})', () => {
     run('slot.fill.usage', CTX)
     expect(vs.setSlotContent).toHaveBeenCalledWith('v1', 's1', { type: 'usage', show_claude: true, show_codex: true })
   })
 
-  it('slot.createAgentHere: 다이얼로그 고른 cwd → spawnAgent → assignAgent(viewId, slotId, id)', async () => {
+  it('slot.createAgentHere: cwd picked in the dialog → spawnAgent → assignAgent(viewId, slotId, id)', async () => {
     dialogMock.open.mockResolvedValue('C:/picked')
     clientMock.spawnAgent.mockResolvedValueOnce({ id: 'brand-new' })
     await run('slot.createAgentHere', CTX)
@@ -110,7 +110,7 @@ describe('코어 콘텐츠(slotContentCommands) 라우팅', () => {
     expect(clientMock.spawnAgent).toHaveBeenCalledWith('C:/picked', 'claude')
     expect(vs.assignAgent).toHaveBeenCalledWith('v1', 's1', 'brand-new')
   })
-  it('slot.createAgentHere: 다이얼로그 취소(null) → spawn/assign 없음(no-op)', async () => {
+  it('slot.createAgentHere: dialog cancelled (null) → no spawn/assign (no-op)', async () => {
     dialogMock.open.mockResolvedValue(null)
     await run('slot.createAgentHere', CTX)
     expect(clientMock.spawnAgent).not.toHaveBeenCalled()
@@ -121,12 +121,12 @@ describe('코어 콘텐츠(slotContentCommands) 라우팅', () => {
     run('agent.kill', { agentId: 'a9' })
     expect(clientMock.killAgent).toHaveBeenCalledWith('a9')
   })
-  it('agent.kill: agentId 누락 → throw', () => {
+  it('agent.kill: agentId missing → throw', () => {
     expect(() => run('agent.kill', {})).toThrow(/agentId/)
     expect(clientMock.killAgent).not.toHaveBeenCalled()
   })
 
-  it('empty 콘텐츠 메뉴 최상위 = 에이전트 모니터링 → 새 콘텐츠(컨테이너) → 가로/세로 분할 → 팝업 분리 → 닫기 (ADR-0067/0065 트림 · ADR-0228)', () => {
+  it('empty content menu top level = Monitor agent → New content (container) → horizontal/vertical split → pop out → close (ADR-0067/0065 trim · ADR-0228)', () => {
     const items = buildSlotMenu('empty')
     expect(items.map(i => i.id)).toEqual([
       'slot.assignRunningAgent',
@@ -136,7 +136,7 @@ describe('코어 콘텐츠(slotContentCommands) 라우팅', () => {
       'slot.popout',
       'slot.close',
     ])
-    // ADR-0067: "생성" 은 뺀다 — 스폰은 트리 소관.
+    // ADR-0067: "Create" is left out — spawning belongs to the tree.
     expect(items[1].children?.map(c => c.id)).toEqual([
       'slot.fill.agentList',
       'slot.fill.presetPalette',
@@ -146,13 +146,13 @@ describe('코어 콘텐츠(slotContentCommands) 라우팅', () => {
     expect(items.map(i => i.id)).not.toContain('slot.empty')
   })
 
-  it('§5 불변: 접힌 slot.fill.* 도 registry 로 여전히 직접 실행 가능', () => {
+  it('§5 unchanged: the folded slot.fill.* are still directly runnable through the registry', () => {
     run('slot.fill.agentList', CTX)
     run('slot.fill.presetPalette', CTX)
     expect(vs.setSlotContent).toHaveBeenCalledWith('v1', 's1', { type: 'agent_list' })
     expect(vs.setSlotContent).toHaveBeenCalledWith('v1', 's1', { type: 'preset_palette' })
   })
-  it('agent 콘텐츠 메뉴 = 에이전트 모니터링(order 5) → 종료(order 10) 순 (ADR-0067)', () => {
+  it('agent content menu = Monitor agent (order 5) → Kill (order 10), in that order (ADR-0067)', () => {
     const items = buildSlotMenu('agent')
     expect(items[0].id).toBe('slot.assignRunningAgent')
     expect(items[1].id).toBe('agent.kill')

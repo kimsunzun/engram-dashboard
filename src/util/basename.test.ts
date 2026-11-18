@@ -1,36 +1,36 @@
-// ADR-0061: cwd basename 파생 규칙. PresetPalette·AgentList 표시명 단일 출처.
+// ADR-0061: the cwd basename derivation rule. The single source of PresetPalette · AgentList display names.
 
 import { describe, expect, it } from 'vitest'
 
 import { setLanguage, t } from '../i18n'
 import { basename, PATH_NAME_PLACEHOLDER } from './basename'
 
-describe('basename (cwd 표시명 파생)', () => {
-  it('POSIX 경로 basename', () => {
+describe('basename (cwd display name derivation)', () => {
+  it('POSIX path basename', () => {
     expect(basename('/home/me/project')).toBe('project')
   })
-  it('Windows 경로 basename', () => {
+  it('Windows path basename', () => {
     expect(basename('C:\\work\\engram')).toBe('engram')
   })
-  it('후행 구분자 무시', () => {
+  it('ignores a trailing separator', () => {
     expect(basename('C:/proj/')).toBe('proj')
     expect(basename('/a/b/c/')).toBe('c')
   })
-  it('세그먼트 없음(루트 등) → cwd 원본 fallback', () => {
+  it('no segments (root etc.) → fallback to the raw cwd', () => {
     expect(basename('/')).toBe('/')
     expect(basename('projectonly')).toBe('projectonly')
   })
-  it('drive-root(C:\\ / C:/) → raw cwd 유지("C:" 붕괴 금지)', () => {
+  it('drive-root (C:\\ / C:/) → keeps the raw cwd (no collapse to "C:")', () => {
     expect(basename('C:\\')).toBe('C:\\')
     expect(basename('C:/')).toBe('C:/')
     expect(basename('C:')).toBe('C:')
   })
-  it('빈/공백-only cwd → placeholder(비어있지 않은 안정적 문자열)', () => {
+  it('empty/blank-only cwd → placeholder (a stable non-empty string)', () => {
     expect(basename('')).toBe(t(PATH_NAME_PLACEHOLDER))
     expect(basename('   ')).toBe(t(PATH_NAME_PLACEHOLDER))
     expect(basename('').trim().length).toBeGreaterThan(0)
   })
-  it('UNC share 는 마지막 세그먼트 파생', () => {
+  it('a UNC share derives from the last segment', () => {
     expect(basename('\\\\server\\share')).toBe('share')
     expect(basename('\\\\server\\share\\')).toBe('share')
   })

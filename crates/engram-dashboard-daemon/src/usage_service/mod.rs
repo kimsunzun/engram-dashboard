@@ -1,21 +1,12 @@
 //! Usage limit service — vendor-neutral.
 //!
-//! ★Vendor names · key lists · policy (cooldown · deadline) are not put here★ — all of it is received from the probers handed in (real =
-//! `engram_dashboard_agent::backend::usage_probes()`). If a vendor match or vendor literal appears in this module it is a
-//! violation of 「백엔드 확장」 (backend extension).
+//! ★Vendor names · key lists · policy (cooldown · deadline) do not belong here★ — all of it comes from the probers handed in (real = `engram_dashboard_agent::backend::usage_probes()`). A vendor match or literal in this module violates 「backend extension」.
 //!
-//! [`UsageService`] holds the book ([`book::UsageBook`]) · the subscription registry ([`watch::UsageWatch`]) · the clock · the encoder · the probers · the scheduler
-//! wake sender, and drives pickup application · subscription replacement · requests · query launching · emission (TRD §1-4).
-//! ★Lock order = registry → book · the book is a leaf★ — while holding the book, it does not touch the registry · outlets · encoder · wake · joiner wake ·
-//!   starting a query thread.
-//! ★Emission is 「적용 먼저, 대상 열거 나중」 (apply first, enumerate targets later)★ — after the book lock is released, take the targets from the registry, and
-//!   carry them without any lock ([`watch::deliver`]). Paired with 「등록 먼저, 스냅숏 나중」 (register first, snapshot later) of subscription replacement, overlapping replacement and emission make that connection
-//!   receive at least the book's value (TRD §3 #57).
-//! ★The order of arrival at one connection is not guaranteed across paths★ — sending is outside the lock, so one sheet from two paths (pickup · replacement · query · scheduler)
-//!   can be swapped so a smaller revision arrives late or the same sheet arrives twice. The design leans on the receiving side keeping only the larger revision
-//!   per cell (TRD §1-7 · §1-8).
-//! ★A query rides one set of endings regardless of who started it★ — whether a request or the scheduler started it, [`ProbeGuard`]
-//!   closes it, and a joined request waits for that end. The query thread holds the service only as a `Weak`.
+//! [`UsageService`] holds the book ([`book::UsageBook`]) · the subscription registry ([`watch::UsageWatch`]) · the clock · the encoder · the probers · the scheduler wake sender, and drives pickup application · subscription replacement · requests · query launching · emission (TRD §1-4).
+//! ★Lock order = registry → book · the book is a leaf★ — while holding the book, do not touch the registry · outlets · encoder · wake · joiner wake · query thread start.
+//! ★Emission is 「apply first, enumerate targets later」★ — after the book lock is released, take targets from the roster and carry them without any lock ([`watch::deliver`]). Paired with 「register first, snapshot later」 of subscription replacement, overlapping replacement and emission make that connection receive at least the book's value (TRD §3 #57).
+//! ★Arrival order at one connection is not guaranteed across paths★ — sending is outside the lock, so a smaller revision can arrive late or the same sheet twice. The receiving side keeps only the larger revision per cell (TRD §1-7 · §1-8).
+//! ★A query ends the same way regardless of who started it★ — [`ProbeGuard`] closes it and a joined request waits for that end. The query thread holds the service only as a `Weak`.
 // ADR-0004
 // ADR-0006
 
@@ -47,19 +38,17 @@ use book::{Coalesce, Judgment, Now, RequestKind, TickPlan, UsageBook};
 use clock::UsageClock;
 use watch::{deliver, Replaced, UsageEncoder, UsageOutlet, UsageWatch};
 
-/// The cap on how long a request waits for a query end (§3 #16) — under the bus deadline of 7 seconds and the shell reply cap of 30 seconds. If exceeded it answers with cache + `in_flight`
-/// and the query continues.
+/// The cap on how long a request waits for a query end (§3 #16) — under the bus deadline of 7 seconds and the shell reply cap of 30 seconds. If exceeded it answers with cache + `in_flight` and the query continues.
 pub const REPLY_WAIT_MAX: Duration = Duration::from_secs(5);
 
-/// Is the request's answer a value that came from the query that request waited on.
+/// Whether the request's answer came from the query that request waited on.
 ///
-/// ★Used only inside the daemon — the wire snapshot does not carry it★: the wire snapshot flows only to broadcasts and the shell cache (the ⟳ answer is
-///   `Ack`) and there it is always `Cached` so it carries no meaning (TRD §3 #50·#81). The place that carries it is the bus row.
+/// ★Used only inside the daemon — the wire snapshot does not carry it★: the wire snapshot flows only to broadcasts and the shell cache, where it is always `Cached` (TRD §3 #50·#81). The bus row carries it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UsageServed {
     /// The value was obtained from a successful query that this request waited on (or a later one).
     Fresh,
-    /// No new value was received during this request (no query made · failure · wait cap exceeded) — it is the value the service was holding.
+    /// No new value was received during this request (no query · failure · wait cap exceeded) — the value the service was holding.
     Cached,
 }
 
@@ -72,13 +61,11 @@ pub struct UsageAnswer {
 
 /// The handle that launches a query thread — real = [`OsProbeThreads`].
 pub trait ProbeThreads: Send + Sync {
-    /// Runs `run` once on a new thread and returns at once (does not wait). `Err` = could not launch — the caller
-    /// closes the query as a failure on the spot. Whether `run` is dropped or held (run later), the query is closed only once.
+    /// Runs `run` once on a new thread and returns at once. `Err` = could not launch — the caller closes the query as a failure on the spot. Whether `run` is dropped or held for later, the query is closed only once.
     fn spawn(&self, run: Box<dyn FnOnce() + Send>) -> io::Result<()>;
 }
 
-/// A detached std thread named `usage-probe` — not the tokio blocking pool, so runtime drop does not wait, and the child is reaped by the Job together with
-/// the daemon (§3 #39).
+/// A detached std thread named `usage-probe` — not the tokio blocking pool, so runtime drop does not wait, and the child is reaped by the Job with the daemon (§3 #39).
 pub struct OsProbeThreads;
 
 impl ProbeThreads for OsProbeThreads {
@@ -92,41 +79,35 @@ impl ProbeThreads for OsProbeThreads {
 
 /// What [`UsageService::new`] takes — the assembly gives the real ones.
 pub struct UsageParts {
-    /// Cell = one default account per prober (key and policy come from the prober · if two have the same key the first wins · a key that cannot be turned into a wire vendor
-    /// has no cell — [`UsageBook::new`]).
+    /// One default account cell per prober (key and policy from the prober · duplicate key: first wins · a key that cannot become a wire vendor has no cell — [`UsageBook::new`]).
     pub probes: Vec<&'static dyn UsageProbe>,
     pub spawner: Arc<dyn ProbeSpawner>,
-    /// The parent folder in which a temp folder is made per query ([`ProbeEnv::scratch_root`]) — a daemon-only folder.
+    /// Parent folder in which a temp folder is made per query ([`ProbeEnv::scratch_root`]) — daemon-only.
     pub scratch_root: PathBuf,
     pub threads: Arc<dyn ProbeThreads>,
     pub clock: Arc<dyn UsageClock>,
     pub encoder: Arc<dyn UsageEncoder>,
 }
 
-/// What one book lock holds together — the book and each cell's query end record. Joiner registration (request decision) and query end application (completion guard)
-/// stand in turn inside the same lock, so which query's end a joined request is waiting for never goes out of step.
+/// What one book lock holds together — the book and each cell's query end record. Joiner registration and query end application stand in turn inside the same lock, so a joined request never waits for the wrong query's end.
 struct Desk {
     book: UsageBook,
     runs: HashMap<UsageKey, Runs>,
 }
 
-/// One cell's query end record — each cell has at most one query in flight (the book's `in_flight`), so the in-flight query is always
-/// the `finished + 1`-th end.
+/// One cell's query end record — at most one query is in flight per cell, so the in-flight query is always the `finished + 1`-th end.
 #[derive(Default)]
 struct Runs {
     finished: u64,
-    /// The number of the last successful end (0 = none) — if there was a success after the end waited for, that request's answer is `Fresh`.
+    /// Number of the last successful end (0 = none) — a success after the end waited for makes the answer `Fresh`.
     last_ok: u64,
-    /// A bus request waiting for an in-flight query — the completion guard takes it out and wakes it (if the receiving side has already left it is discarded).
+    /// A bus request waiting for an in-flight query — the completion guard takes it out and wakes it (discarded if the receiver already left).
     blocking: Vec<SyncSender<()>>,
 }
 
 /// One per daemon.
 ///
-/// ★Only two requests wait ([`UsageService::request`]·[`UsageService::request_blocking`])★ — everything else is
-///   non-blocking: the only locks taken are short in-memory sections of the book and registry, sending is the outlet's
-///   `try_send` · waking is a channel `try_send` · queries are on detached threads. So it is called directly from the pump thread (pickup) and the connection task (subscription
-///   replacement).
+/// ★Only two requests wait ([`UsageService::request`]·[`UsageService::request_blocking`])★ — everything else is non-blocking (short in-memory locks, `try_send` outlets and wakes, detached query threads), so it is called directly from the pump thread (pickup) and the connection task (subscription replacement).
 pub struct UsageService {
     /// Book lock — a leaf.
     desk: Mutex<Desk>,
@@ -135,15 +116,14 @@ pub struct UsageService {
     spawner: Arc<dyn ProbeSpawner>,
     scratch_root: PathBuf,
     threads: Arc<dyn ProbeThreads>,
-    /// The number of finished queries per cell — async joiners wait on it. The value follows [`Runs::finished`] and does not shrink.
+    /// Finished queries per cell — async joiners wait on it. Follows [`Runs::finished`], never shrinks.
     finished: HashMap<UsageKey, tokio::sync::watch::Sender<u64>>,
     clock: Arc<dyn UsageClock>,
     encoder: Arc<dyn UsageEncoder>,
-    /// Scheduler wake — capacity 1. ★No copy is given outside (query thread etc.)★ — if given, even after the service is gone the receiver
-    /// cannot see `Disconnected` and the scheduler does not end.
+    /// Scheduler wake — capacity 1. ★No copy goes outside (query thread etc.)★ — otherwise the receiver never sees `Disconnected` after the service is gone and the scheduler does not end.
     wake: SyncSender<()>,
     reply_wait: Duration,
-    /// A self-reference passed to the completion guard — only weakly, so the query thread does not hold the service.
+    /// Self-reference for the completion guard — weak, so the query thread does not hold the service.
     me: Weak<Self>,
 }
 
@@ -154,9 +134,7 @@ enum Opened {
 }
 
 impl UsageService {
-    /// The receiver returned together is the scheduler thread's share (handed to [`schedule::spawn_scheduler`]) — at most one wake (`()`)
-    /// is pending, and when the service is dropped it becomes `Disconnected`. Even if there is no receiver (discarded) the service runs as is —
-    /// only the wake goes into the void.
+    /// The returned receiver is the scheduler thread's share (for [`schedule::spawn_scheduler`]) — at most one wake is pending, and it becomes `Disconnected` when the service is dropped. Without a receiver the service still runs; wakes go into the void.
     pub fn new(parts: UsageParts) -> (Arc<Self>, Receiver<()>) {
         Self::build(parts, REPLY_WAIT_MAX)
     }
@@ -199,13 +177,12 @@ impl UsageService {
         (service, wakes)
     }
 
-    /// One pickup observation — the pump thread calls it on the spot (does not pile them up). If nothing changed there is neither emission nor wake.
-    /// If the book has no cell for the vendor it does nothing.
+    /// One pickup observation — called on the spot by the pump thread. No change means neither emission nor wake; a vendor with no cell does nothing.
     pub fn observe(&self, obs: &UsageObservation) {
         let key = account_key(obs.vendor);
         let (applied, coalesce) = {
             let mut desk = self.desk();
-            // The time is read inside the book lock — so the application order and time order of the two pump threads do not go out of step.
+            // Time is read inside the book lock so the application order and time order of two pump threads stay consistent.
             let now = self.now();
             let applied = desk.book.apply_passive(obs, now);
             let coalesce = if applied.changed {
@@ -224,13 +201,9 @@ impl UsageService {
         }
     }
 
-    /// `UsageSubscribe` — replaces that connection's whole subscription set (empty set = unsubscribe). Replacements of one connection are called in arrival order.
+    /// `UsageSubscribe` — replaces that connection's whole subscription set (empty = unsubscribe). One connection's replacements are called in arrival order.
     ///
-    /// Order: ① time evaluation for each vendor in the requested set — if anything was stamped (latch · refusal end), one sheet to **all current** subscribers of that vendor
-    /// ② registry replacement — for each newly added vendor, the first sheet only to this connection ③ scheduler wake (the first sheet does not repay the debt,
-    /// and the automatic query deadline of a newly added vendor may already have passed). A replacement that arrives late after the drop is discarded — the cell is not revived and
-    /// nothing is sent to that connection (the latch emission of ① goes to the vendor's other subscribers). A vendor with no cell in the book
-    /// is held only in the registry set and has no sheet.
+    /// Order: ① time evaluation for each requested vendor — anything stamped (latch · refusal end) goes as one sheet to all current subscribers of that vendor ② registry replacement — for each newly added vendor, the first sheet only to this connection ③ scheduler wake (the first sheet does not repay the debt, and a newly added vendor's automatic query deadline may have passed). A replacement arriving after the drop is discarded — the cell is not revived and nothing is sent to that connection. A vendor with no cell in the book is held only in the registry set and has no sheet.
     pub fn replace_subscription(&self, conn: ConnId, vendors: BTreeSet<UsageVendorKey>) {
         let latched: Vec<(UsageVendorKey, UsageLimitSnapshot)> = {
             let mut desk = self.desk();
@@ -252,7 +225,7 @@ impl UsageService {
             self.publish(*vendor, sheet);
         }
 
-        // Called inside the registry lock (registry → book) — it does only the book's in-memory work.
+        // Called inside the registry lock (registry → book) — only the book's in-memory work.
         let replaced = self.watch.replace(conn, vendors, |added| {
             let mut desk = self.desk();
             let now = self.now();
@@ -270,7 +243,7 @@ impl UsageService {
             target,
         }) = replaced
         else {
-            tracing::debug!(conn, "끊긴 연결의 사용량 구독 교체가 늦게 왔다 — 버린다");
+            tracing::debug!(conn, "a usage subscription replacement for a disconnected connection arrived late — discarding it");
             return;
         };
         for sheet in &first_sheets {
@@ -279,26 +252,21 @@ impl UsageService {
         self.wake_scheduler();
     }
 
-    /// A connection attached (`on_connect`) — the registry cell with an empty set ([`UsageWatch::attach`]).
+    /// A connection attached (`on_connect`) — registry cell with an empty set ([`UsageWatch::attach`]).
     pub fn attach(&self, conn: ConnId, outlet: impl UsageOutlet + 'static) {
         self.watch.attach(conn, outlet);
     }
 
-    /// A connection dropped (`on_disconnect`) — erase the registry cell and withdraw its outlet **before returning** ([`UsageWatch::detach`]).
-    /// Return = there was a cell.
+    /// A connection dropped (`on_disconnect`) — erase its registry cell and withdraw its outlet before returning ([`UsageWatch::detach`]). Returns whether there was a cell.
     pub fn detach(&self, conn: ConnId) -> bool {
         self.watch.detach(conn)
     }
 
-    /// One request of ⟳ (connection task) (§1-4 request table) — `None` = a vendor with no cell.
+    /// One ⟳ request (connection task) (§1-4 request table) — `None` = a vendor with no cell.
     ///
-    /// Stamp the time evaluation before the decision (latch · refusal end — if stamped, one sheet to all subscribers) and answer in the table's row order:
-    /// - Cache · refusal → one sheet right now (`Cached`). ★A refusal is the same branch whether visible or not★ — if the sheet's state is
-    ///   a visible refusal it is `Rejected{retry_in_secs}`, and while a value has come and shows as `Ready` it is a quiet cache (§3 #88 ⓑ).
-    /// - Start → emit one 「갱신 중」 (refreshing) sheet to all subscribers, then launch the query · join → attach to the in-flight query. Both wait for that
-    ///   query's end up to `REPLY_WAIT_MAX` and then answer one sheet of the moment — if a query succeeded after the end waited for, it is
-    ///   `Fresh`, otherwise `Cached` (failure → failure state · cap exceeded → `in_flight = true` and the query continues — when it ends
-    ///   it reaches subscribers by broadcast).
+    /// Stamp the time evaluation before the decision (latch · refusal end — stamped means one sheet to all subscribers), then answer by the table's row:
+    /// - Cache · refusal → one sheet now (`Cached`). ★A refusal is the same branch whether visible or not★ — a visibly refused sheet is `Rejected{retry_in_secs}`; once a value has come and shows `Ready` it is a quiet cache (§3 #88 ⓑ).
+    /// - Start → emit one 「refreshing」 sheet to all subscribers, then launch the query · join → attach to the in-flight query. Both wait up to `REPLY_WAIT_MAX` for that query's end, then answer one sheet of the moment — `Fresh` if a query succeeded after the end waited for, else `Cached` (failure → failure state · cap exceeded → `in_flight = true` and the query continues, reaching subscribers by broadcast when it ends).
     pub async fn request(&self, vendor: UsageVendorKey, kind: RequestKind) -> Option<UsageAnswer> {
         let key = account_key(vendor);
         let target = match self.open(&key, kind, None)? {
@@ -308,7 +276,7 @@ impl UsageService {
         // Receiving after the decision does not miss the end — `wait_for` looks from the current value.
         if let Some(done) = self.finished.get(&key) {
             let mut finished = done.subscribe();
-            // Whether the cap is exceeded or the end comes, answer with the book now — the answer for exceeding carries `in_flight`.
+            // Whether the cap is exceeded or the end comes, answer with the book now — an overrun answer carries `in_flight`.
             let _ =
                 tokio::time::timeout(self.reply_wait, finished.wait_for(|&seen| seen >= target))
                     .await;
@@ -316,10 +284,9 @@ impl UsageService {
         self.close(&key, target)
     }
 
-    /// One request from the bus (`usage.*` — blocking pool thread) — the decision and answer are the same as [`UsageService::request`].
+    /// One request from the bus (`usage.*` — blocking pool thread) — decision and answer as [`UsageService::request`].
     ///
-    /// The wait is the std channel's `recv_timeout` — ★the tokio timer is not used★: if the runtime takes down the time driver during shutdown,
-    ///   the timer poll can panic, and that panic is outside the containment mark so it ends the daemon (hook · ADR-0292 · §3 #17).
+    /// The wait is the std channel's `recv_timeout` — ★no tokio timer★: if the runtime takes down the time driver during shutdown, the timer poll can panic outside the containment mark and end the daemon (hook · ADR-0292 · §3 #17).
     pub fn request_blocking(
         &self,
         vendor: UsageVendorKey,
@@ -331,13 +298,12 @@ impl UsageService {
             Opened::Answer(answer) => return Some(answer),
             Opened::Wait(target) => target,
         };
-        // Whether woken or the cap is exceeded, answer with the book now — the answer for exceeding carries `in_flight`.
+        // Whether woken or the cap is exceeded, answer with the book now — an overrun answer carries `in_flight`.
         let _ = woken.recv_timeout(self.reply_wait);
         self.close(&key, target)
     }
 
-    /// The front share of a request — inside the book lock do time evaluation · decision · (if waiting) joiner registration, and after releasing the lock emission → query launch →
-    /// wake. `joined` = the wake sender of a bus request (registered only when waiting).
+    /// Front share of a request — inside the book lock: time evaluation · decision · joiner registration (only when waiting); after releasing it: emission → query launch → wake. `joined` = the wake sender of a bus request.
     fn open(
         &self,
         key: &UsageKey,
@@ -388,7 +354,7 @@ impl UsageService {
         Some(opened)
     }
 
-    /// The back share of a request — take one sheet of the moment (if a latch stood in between, stamp it and also emit to all subscribers). `target` = the end number waited for.
+    /// Back share of a request — take one sheet of the moment (a latch standing in between is stamped and also emitted to all subscribers). `target` = the end number waited for.
     fn close(&self, key: &UsageKey, target: u64) -> Option<UsageAnswer> {
         let (answer, latched) = {
             let mut guard = self.desk();
@@ -421,12 +387,9 @@ impl UsageService {
         Some(answer)
     }
 
-    /// Carry the plan of one scheduler pass — emit the sheets to all subscribers, then launch the queries started (§1-4 path table ·
-    /// the 「갱신 중」 (refreshing) sheet is already in `plan.publish`). Returned value = `plan.sleep`.
+    /// Carry out one scheduler pass's plan — emit the sheets to all subscribers, then launch the started queries (§1-4 path table; the 「refreshing」 sheet is already in `plan.publish`). Returns `plan.sleep`.
     ///
-    /// ★Called after the book lock that took the plan is released★ — calling while holding the lock is a deadlock (emission takes the registry, and the guard of a query that failed to launch
-    ///   takes the book). The plan's query already had `in_flight` set by the book so it must be launched here (if not launched that cell stays
-    ///   in flight forever).
+    /// ★Call after the book lock that took the plan is released★ — holding it is a deadlock (emission takes the registry, and the guard of a query that failed to launch takes the book). The plan's query already has `in_flight` set, so it must be launched here or that cell stays in flight forever.
     fn carry_out(&self, plan: TickPlan) -> Duration {
         let TickPlan {
             start,
@@ -442,26 +405,22 @@ impl UsageService {
         sleep
     }
 
-    /// Launch one query for which the book already set `in_flight` — after [`Judgment::Start`] · [`TickPlan::start`], called with that book lock
-    /// released. Non-blocking.
+    /// Launch one query for which the book already set `in_flight` — after [`Judgment::Start`] · [`TickPlan::start`], with the book lock released. Non-blocking.
     ///
-    /// ★The end comes exactly once★ — the completion guard is made **before** launching and put in a cell, and the job takes it out of the cell
-    ///   when it starts running. If the thread cannot be launched it is taken out here (closed as launch failure) · if the query panics it is dropped by unwinding (a hook-less
-    ///   test build. In a production process it is an out-of-mark panic so the hook ends it · ADR-0292). The guard is single so whichever side takes it out, closing happens once. The query returns at the latest within deadline + `KILL_WAIT` + temp
-    ///   folder deletion retry (about 0.2 seconds) (the contract of [`UsageProbe::query`]).
+    /// ★The end comes exactly once★ — the completion guard is made before launching and put in a cell; the job takes it out when it starts running. If the thread cannot be launched it is taken out here (closed as launch failure); if the query panics it is dropped by unwinding (hook-less test build — in production an out-of-mark panic is ended by the hook, ADR-0292). The guard is single, so closing happens once whichever side takes it. The query returns within deadline + `KILL_WAIT` + temp folder deletion retry (about 0.2 seconds) (contract of [`UsageProbe::query`]).
     fn start_probe(&self, key: UsageKey) {
         let vendor = key.vendor;
         let mut guard = ProbeGuard::new(self.me.clone(), key);
         let Some(probe) = self.probe_for(vendor) else {
-            // A cell stands only from a prober so this is a branch that does not come — if it comes, it is closed rather than left in flight.
+            // A cell stands only from a prober, so this branch should not come — if it does, close rather than leave in flight.
             tracing::warn!(
                 vendor = vendor.as_str(),
-                "조회기가 없는 칸의 조회가 시작됐다 — 곧바로 닫는다"
+                "a query started for a cell with no prober — closing it at once"
             );
             guard.outcome = Err(ProbeError::Unsupported.into());
             return;
         };
-        // Do not lean on the thread side dropping a job that failed to launch — until `Ok` comes the guard can be taken out from this side.
+        // Do not lean on the thread side dropping a job that failed to launch — until `Ok` the guard can be taken out from this side.
         let slot = Arc::new(Mutex::new(Some(guard)));
         let handed = slot.clone();
         let spawner = self.spawner.clone();
@@ -470,8 +429,9 @@ impl UsageService {
             let Some(mut guard) = take_guard(&handed) else {
                 return;
             };
-            guard.outcome = Err(ProbeError::Io("사용량 조회가 답 없이 끝났다".to_owned()).into());
-            // If the deadline overflows it is the deadline now — the prober returns at once with `Timeout` (does not panic).
+            guard.outcome =
+                Err(ProbeError::Io("the usage query ended without an answer".to_owned()).into());
+            // An overflowing deadline becomes "now" — the prober returns at once with `Timeout` (no panic).
             let deadline = Instant::now()
                 .checked_add(probe.policy().timeout)
                 .unwrap_or_else(Instant::now);
@@ -487,14 +447,12 @@ impl UsageService {
             tracing::warn!(
                 vendor = vendor.as_str(),
                 error = %e,
-                "사용량 조회 스레드를 못 띄웠다 — 조회를 실패로 닫았다"
+                "could not launch the usage query thread — closed the query as failed"
             );
         }
     }
 
-    /// Close one query — only [`ProbeGuard`] calls it (§1-4 「조회 끝」 (query end)). Inside the book lock: apply the result · end number · one sheet ·
-    /// take out joiners → outside the lock: emit → wake scheduler → wake joiners. Emission happens even if nothing changed (`in_flight` was
-    /// released).
+    /// Close one query — only [`ProbeGuard`] calls it (§1-4 「query end」). Inside the book lock: apply the result · end number · one sheet · take out joiners; outside: emit → wake scheduler → wake joiners. Emission happens even if nothing changed (`in_flight` was released).
     fn finish_probe(&self, key: &UsageKey, outcome: Result<UsageObservation, ProbeFailure>) {
         let ok = outcome.is_ok();
         let (sheet, finished, joiners) = {
@@ -515,7 +473,7 @@ impl UsageService {
         }
         self.wake_scheduler();
         if let Some(done) = self.finished.get(key) {
-            // So that the value is not rewound even if the notifications of the two ends are swapped outside the lock — keep only the larger one.
+            // Keep only the larger end number so the value is not rewound if two ends' notifications swap outside the lock.
             done.send_if_modified(|seen| {
                 let newer = finished > *seen;
                 if newer {
@@ -536,8 +494,7 @@ impl UsageService {
     }
 
     fn wake_scheduler(&self) {
-        // `Full` = one wake is already pending so it means the same · `Disconnected` = there is no scheduler to receive. Either way
-        //   it does not block the waking side (including the pump thread).
+        // `Full` = a wake is already pending · `Disconnected` = no scheduler to receive. Either way the waking side (including the pump thread) does not block.
         let _ = self.wake.try_send(());
     }
 
@@ -553,22 +510,18 @@ impl UsageService {
     }
 
     fn desk(&self) -> MutexGuard<'_, Desk> {
-        // Tolerates poison — a panic here ends the daemon in a production process. The book's methods do not panic, and a panic holding this lock
-        //   is outside the containment mark (the pump side is inside mark-off) so in a production process the hook ends it before unwinding, so poison
-        //   arises only in hook-less test builds (ADR-0292).
+        // Tolerates poison — a panic here would end the daemon in production. Book methods do not panic, and a panic holding this lock is outside the containment mark (the pump side is mark-off), so in production the hook ends the process before unwinding; poison arises only in hook-less test builds (ADR-0292).
         sync::lock(&self.desk)
     }
 }
 
-/// A guard that carries the end of one query — wherever it is dropped (query finished · query panicked and unwound · thread could not be launched so the caller
-/// took it out) it closes once with [`UsageService::finish_probe`]. If the service is already gone (upgrade fails) the result is discarded.
+/// Carries the end of one query — wherever it is dropped (query finished · panicked and unwound · thread could not launch so the caller took it out) it closes once with [`UsageService::finish_probe`]. If the service is gone (upgrade fails) the result is discarded.
 ///
-/// ★Holds the service only as a `Weak`★ — if a blocked query held the service, service drop → scheduler end (wake `Disconnected`) would
-///   be pushed back to the query deadline.
+/// ★Holds the service only as a `Weak`★ — a blocked query holding the service would delay service drop → scheduler end (wake `Disconnected`) to the query deadline.
 struct ProbeGuard {
     service: Weak<UsageService>,
     key: UsageKey,
-    /// The result to apply when dropped — if dropped before the query answered, it is that spot's default failure.
+    /// The result to apply on drop — if dropped before the query answered, that spot's default failure.
     outcome: Result<UsageObservation, ProbeFailure>,
 }
 
@@ -577,7 +530,9 @@ impl ProbeGuard {
         Self {
             service,
             key,
-            outcome: Err(ProbeError::Spawn("사용량 조회 스레드를 띄우지 못했다".to_owned()).into()),
+            outcome: Err(
+                ProbeError::Spawn("could not launch the usage query thread".to_owned()).into(),
+            ),
         }
     }
 }
@@ -589,7 +544,7 @@ impl Drop for ProbeGuard {
         let Some(service) = self.service.upgrade() else {
             tracing::debug!(
                 vendor = self.key.vendor.as_str(),
-                "사용량 서비스가 먼저 사라졌다 — 조회 결과를 버린다"
+                "the usage service went away first — discarding the query result"
             );
             return;
         };
@@ -601,7 +556,7 @@ fn take_guard(slot: &Mutex<Option<ProbeGuard>>) -> Option<ProbeGuard> {
     sync::lock(slot).take()
 }
 
-/// A vendor's default account cell — the account word is always the default for now (`UsageAccountKey`).
+/// A vendor's default account cell (the account word is always the default for now — `UsageAccountKey`).
 fn account_key(vendor: UsageVendorKey) -> UsageKey {
     UsageKey {
         vendor,
@@ -628,12 +583,12 @@ mod tests {
 
     const H: i64 = 3_600;
     pub(super) const T0: i64 = 1_900_000_000;
-    /// The request wait of a test that must wait for a wake — if the wake disappears, that test is exposed at this cap.
+    /// Request wait for tests that must wait for a wake — a vanished wake is exposed at this cap.
     const LONG_WAIT: Duration = Duration::from_secs(10);
-    /// The cap on every wait on the test side — so a deadlock or a lost wake fails instead of hanging.
+    /// Cap on every test-side wait — a deadlock or lost wake fails instead of hanging.
     const BOUND: Duration = Duration::from_secs(10);
 
-    // Make cells only from prober keys — do not put vendor literals in tests either.
+    // Cells only from prober keys — no vendor literals in tests either.
     fn vendor(i: usize) -> UsageVendorKey {
         usage_probes()[i].key()
     }
@@ -652,8 +607,7 @@ mod tests {
         Panic,
     }
 
-    /// Fake prober — blocks on each query until it receives one script. If the sending side ([`Rig`]) disappears it ends as a timeout.
-    /// Key and policy come from the real prober. A prober is `'static` so one leaks per test.
+    /// Fake prober — blocks on each query until it receives one script; ends as a timeout if the sending side ([`Rig`]) disappears. Key and policy come from the real prober. A prober is `'static`, so one leaks per test.
     struct FakeProbe {
         key: UsageVendorKey,
         policy: UsagePolicy,
@@ -679,13 +633,13 @@ mod tests {
                 .recv();
             match next {
                 Ok(Scripted::Answer(result)) => result,
-                Ok(Scripted::Panic) => panic!("시험 — 조회기 패닉"),
+                Ok(Scripted::Panic) => panic!("test — prober panic"),
                 Err(_) => Err(ProbeError::Timeout.into()),
             }
         }
     }
 
-    /// The fake prober launches no child — it is a failure if called.
+    /// The fake prober launches no child — calling it is a failure.
     struct NoChildren;
 
     impl ProbeSpawner for NoChildren {
@@ -694,20 +648,21 @@ mod tests {
             _cmd: &ProbeCommand,
             _deadline: Instant,
         ) -> Result<Box<dyn ProbeChild>, ProbeError> {
-            Err(ProbeError::Spawn("시험 — 자식을 띄우지 않는다".to_owned()))
+            Err(ProbeError::Spawn(
+                "test — does not spawn a child".to_owned(),
+            ))
         }
     }
 
     #[derive(Default)]
     struct ThreadCounts {
         spawned: AtomicUsize,
-        /// The number of jobs finished — finished = even the completion guard was dropped.
+        /// Jobs finished — including the completion guard being dropped.
         ended: AtomicUsize,
         panicked: AtomicUsize,
     }
 
-    /// Query thread stand-in — if `refuse`, it does not launch and **holds** the job it received (`kept`) and returns `Err`. It measures that the
-    /// service does not lean on a job that failed to launch being dropped, and the test can run the held job late.
+    /// Query thread stand-in — if `refuse`, it does not launch, holds the received job (`kept`) and returns `Err`. Measures that the service does not lean on a failed-to-launch job being dropped; the test can run the held job late.
     #[derive(Default)]
     struct TestThreads {
         refuse: AtomicBool,
@@ -719,7 +674,7 @@ mod tests {
         fn spawn(&self, run: Box<dyn FnOnce() + Send>) -> io::Result<()> {
             if self.refuse.load(Ordering::SeqCst) {
                 self.kept.lock().unwrap().push(run);
-                return Err(io::Error::other("시험 — 스레드를 못 띄운다"));
+                return Err(io::Error::other("test — cannot launch the thread"));
             }
             self.counts.spawned.fetch_add(1, Ordering::SeqCst);
             let counts = self.counts.clone();
@@ -742,7 +697,7 @@ mod tests {
         threads: Arc<TestThreads>,
     }
 
-    /// Cells = the first `count` real probers (fakes that borrow only key and policy).
+    /// Cells = the first `count` real probers (fakes borrowing only key and policy).
     fn rig_full(clock: Arc<dyn UsageClock>, count: usize, reply_wait: Duration) -> Rig {
         let (probes, scripts): (Vec<&'static FakeProbe>, Vec<_>) = usage_probes()[..count]
             .iter()
@@ -793,7 +748,7 @@ mod tests {
     }
 
     impl Rig {
-        /// Attach and even subscribe — the first sheet and wake are left empty.
+        /// Attach and subscribe — first sheet and wake left empty.
         pub(super) fn subscriber(&self, conn: ConnId, indices: &[usize]) -> Arc<Log> {
             let (outlet, log) = recording();
             self.service.attach(conn, outlet);
@@ -808,7 +763,11 @@ mod tests {
         }
 
         fn revision(&self, i: usize) -> u64 {
-            self.service.desk().book.revision(&key(i)).expect("아는 키")
+            self.service
+                .desk()
+                .book
+                .revision(&key(i))
+                .expect("known key")
         }
 
         fn wire(&self, i: usize) -> AgentBackendKind {
@@ -821,18 +780,18 @@ mod tests {
                 .desk()
                 .book
                 .snapshot(&key(i), now)
-                .expect("아는 키")
+                .expect("known key")
         }
 
         pub(super) fn answer(&self, i: usize, scripted: Scripted) {
-            self.scripts[i].send(scripted).expect("가짜 조회기");
+            self.scripts[i].send(scripted).expect("fake prober");
         }
 
         pub(super) fn queries(&self, i: usize) -> usize {
             self.probes[i].queries.load(Ordering::SeqCst)
         }
 
-        /// The number of requests waiting for that cell's in-flight query — bus + async.
+        /// Requests waiting for that cell's in-flight query — bus + async.
         pub(super) fn joiners(&self, i: usize) -> usize {
             let blocking = self.service.desk().runs[&key(i)].blocking.len();
             blocking + self.service.finished[&key(i)].receiver_count()
@@ -843,7 +802,7 @@ mod tests {
                 .desk()
                 .book
                 .in_flight(&key(i))
-                .expect("아는 키")
+                .expect("known key")
         }
     }
 
@@ -904,7 +863,11 @@ mod tests {
         assert_eq!((b.count(), c.count()), (0, 0));
 
         rig.service.observe(&five(0, 40.0, far_reset()));
-        assert_eq!(a.count(), 1, "같은 값을 다시 주웠다 — 바뀜이 아니다");
+        assert_eq!(
+            a.count(),
+            1,
+            "picked up the same value again — not a change"
+        );
     }
 
     #[test]
@@ -925,8 +888,12 @@ mod tests {
 
         clock.advance_both(Duration::from_millis(500));
         rig.service.observe(&five(0, 41.0, far_reset()));
-        assert_eq!(a.count(), 1, "1초 안의 두 번째 바뀜은 합친다");
-        assert_eq!(rig.drain_wakes(), 1, "끝 발행은 스케줄러가 낸다");
+        assert_eq!(a.count(), 1, "a second change within 1 second is merged");
+        assert_eq!(
+            rig.drain_wakes(),
+            1,
+            "the closing emit is done by the scheduler"
+        );
     }
 
     #[test]
@@ -947,7 +914,7 @@ mod tests {
         assert_eq!(
             (a.count(), rig.drain_wakes()),
             (1, 0),
-            "한 창만 새로 섰다 — 다음 자동 조회는 그대로"
+            "only one window was newly set — the next automatic query stays"
         );
 
         clock.advance_both(Duration::from_secs(2));
@@ -957,7 +924,7 @@ mod tests {
         assert_eq!(
             (a.count(), rig.drain_wakes()),
             (2, 1),
-            "두 창이 새로 서 쿨타임 기점이 옮겨졌다(D12)"
+            "two windows were newly set, so the cooldown origin moved (D12)"
         );
         assert_ne!(rig.service.desk().book.next_auto(&key(0), now), before);
     }
@@ -968,16 +935,19 @@ mod tests {
         let a = rig.subscriber(1, &[0]);
         let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _held = rig.service.desk.lock().unwrap();
-            panic!("시험 — 책 락을 쥔 채 패닉");
+            panic!("test — panics while holding the book lock");
         }));
         assert!(panicked.is_err());
-        assert!(rig.service.desk.is_poisoned(), "시험이 poison 갈래를 탔다");
+        assert!(
+            rig.service.desk.is_poisoned(),
+            "the test took the poison branch"
+        );
 
         rig.service.observe(&five(0, 40.0, far_reset()));
         assert_eq!(last_pct(&a), Some(40.0));
     }
 
-    // If the query start (a debt to repay at once) has not been emitted yet, a pickup within 1 second emits that too at once.
+    // If the query start (a debt to repay at once) has not been emitted yet, a pickup within 1 second emits that too.
     #[test]
     fn a_passive_right_after_an_unpublished_probe_start_publishes_at_once() {
         let (rig, clock) = rig();
@@ -1002,8 +972,12 @@ mod tests {
         rig.service.attach(1, outlet);
         rig.service.replace_subscription(1, set(&[0, 1]));
         let got = frames(&log);
-        assert_eq!(got.len(), 1, "칸이 있는 벤더만 첫 한 장");
-        assert_eq!(&*got[0].json, words(&set(&[0, 1])), "집합은 요청 그대로");
+        assert_eq!(
+            got.len(),
+            1,
+            "a first sheet only for vendors that have a cell"
+        );
+        assert_eq!(&*got[0].json, words(&set(&[0, 1])), "the set as requested");
         rig.drain_wakes();
 
         rig.service.observe(&five(1, 40.0, far_reset()));
@@ -1026,12 +1000,20 @@ mod tests {
         rig.service.replace_subscription(2, set(&[0]));
 
         let latched = frames(&a);
-        assert_eq!(latched.len(), 2, "기존 구독자에게 래치 한 장");
+        assert_eq!(
+            latched.len(),
+            2,
+            "one latch sheet to the existing subscriber"
+        );
         let sheet = &latched[1].snapshot;
-        assert!(sheet.five_hour.as_ref().expect("창").expired);
+        assert!(sheet.five_hour.as_ref().expect("window").expired);
         assert_eq!(sheet.revision, rig.revision(0));
         let first = frames(&b);
-        assert_eq!(first.len(), 1, "새 구독자는 첫 한 장만");
+        assert_eq!(
+            first.len(),
+            1,
+            "the new subscriber gets only the first sheet"
+        );
         assert_eq!(first[0].snapshot, *sheet);
         assert_eq!(rig.drain_wakes(), 1);
 
@@ -1040,7 +1022,7 @@ mod tests {
         assert_eq!(
             (a.count(), b.count()),
             (2, 1),
-            "같은 집합 교체 — 한 장도 없다"
+            "replacement with the same set — not a single sheet"
         );
     }
 
@@ -1056,7 +1038,7 @@ mod tests {
         rig.service.replace_subscription(2, set(&[0, 1]));
         assert_eq!(a.count(), 1);
         let first = frames(&b);
-        assert_eq!(first.len(), 2, "새로 든 벤더마다 한 장");
+        assert_eq!(first.len(), 2, "one sheet per newly added vendor");
         assert!(first.iter().all(|f| &*f.json == words(&set(&[0, 1]))));
         assert_eq!(rig.drain_wakes(), 1);
     }
@@ -1073,7 +1055,7 @@ mod tests {
 
         rig.service.replace_subscription(1, set(&[0]));
         assert_eq!(log.count(), 0);
-        assert_eq!(Arc::strong_count(&log), 1, "출구가 되살아나지 않았다");
+        assert_eq!(Arc::strong_count(&log), 1, "the outlet did not come back");
         assert!(rig.service.watch.union().is_empty());
         assert_eq!(rig.drain_wakes(), 0);
         assert_eq!(rig.encoder.calls(), 0);
@@ -1091,9 +1073,9 @@ mod tests {
 
         rig.service.replace_subscription(1, set(&[0]));
         let got = frames(&other);
-        assert_eq!(got.len(), 2, "줍기 한 장 + 래치 한 장");
-        assert!(got[1].snapshot.five_hour.as_ref().expect("창").expired);
-        assert_eq!(gone.count(), 0, "끊긴 연결에는 아무것도 없다");
+        assert_eq!(got.len(), 2, "one pickup sheet + one latch sheet");
+        assert!(got[1].snapshot.five_hour.as_ref().expect("window").expired);
+        assert_eq!(gone.count(), 0, "nothing for the disconnected connection");
     }
 
     #[test]
@@ -1116,9 +1098,9 @@ mod tests {
                 (rig.wire(0), words(&set(&[0]))),
                 (rig.wire(1), words(&set(&[0, 1]))),
             ],
-            "래치(교체 전 집합) 다음 첫 한 장(교체 뒤 집합)"
+            "latch (set before replacement) then the first sheet (set after replacement)"
         );
-        assert!(got[0].snapshot.five_hour.as_ref().expect("창").expired);
+        assert!(got[0].snapshot.five_hour.as_ref().expect("window").expired);
     }
 
     // ── Locks ──
@@ -1134,7 +1116,7 @@ mod tests {
             if self.calls.fetch_add(1, Ordering::SeqCst) > 0 {
                 return;
             }
-            let service = self.service.get().and_then(Weak::upgrade).expect("서비스");
+            let service = self.service.get().and_then(Weak::upgrade).expect("service");
             service.observe(&five(0, 77.0, far_reset()));
             service.replace_subscription(1, set(&[0, 1]));
             service.detach(1);
@@ -1145,12 +1127,12 @@ mod tests {
 
     #[test]
     fn an_outlet_may_call_back_into_the_service() {
-        // Run on another thread so a deadlock fails instead of hanging.
+        // Another thread, so a deadlock fails instead of hanging.
         let (done_tx, done_rx) = mpsc::channel();
         std::thread::spawn(move || {
             let (rig, _clock) = rig();
             let slot = Arc::new(OnceLock::new());
-            slot.set(Arc::downgrade(&rig.service)).expect("한 번");
+            slot.set(Arc::downgrade(&rig.service)).expect("once");
             let calls = Arc::new(AtomicUsize::new(0));
             rig.service.attach(
                 1,
@@ -1165,15 +1147,17 @@ mod tests {
         });
         let (calls, union) = done_rx
             .recv_timeout(Duration::from_secs(10))
-            .expect("교착 없이 끝난다");
+            .expect("ends without deadlock");
         assert!(calls >= 1);
-        assert!(union.is_empty(), "출구 안에서 부른 해제가 칸을 지웠다");
+        assert!(
+            union.is_empty(),
+            "the detach called inside the outlet cleared the entry"
+        );
     }
 
     // ── Concurrency ──
 
-    /// A clock whose monotonic time flows 2 seconds on every read — on every change the coalescing window is already closed so it goes out at once (this test has no scheduler to
-    /// emit the end emission). The wall clock is stopped so no latch stands.
+    /// A clock whose monotonic time flows 2 seconds per read — every change finds the coalescing window closed and goes out at once (no scheduler here to emit the end emission). The wall clock is stopped so no latch stands.
     struct Ticking(AtomicU64);
 
     impl UsageClock for Ticking {
@@ -1186,10 +1170,7 @@ mod tests {
         }
     }
 
-    /// One round in which two connections change subscriptions while two pickups change two vendors — the overlap differs per round and the amount of work is fixed.
-    /// Connection 0 changes the fixed amount, empties, and subscribes again after the round ends. Connection 1 changes the fixed amount then empties,
-    /// and subscribes again **at the same moment** as pickup 0's last two changes — whether the last value arrives by emission or by the first sheet is
-    /// decided by that overlap (the spot where the two passes of TRD §3 #57 interlock). What it returns = one line per mismatched cell.
+    /// One round: two connections change subscriptions while two pickups change two vendors; overlap differs per round, the amount of work is fixed. Connection 0 changes the fixed amount, empties, and resubscribes after the round. Connection 1 changes the fixed amount, empties, and resubscribes at the same moment as pickup 0's last two changes — whether the last value arrives by emission or by the first sheet depends on that overlap (where the two passes of TRD §3 #57 interlock). Returns one line per mismatched cell.
     fn race_trial(trial: usize) -> Vec<String> {
         const OBSERVERS: usize = 2;
         const OBSERVATIONS: usize = 16;
@@ -1241,7 +1222,7 @@ mod tests {
                     service.observe(&five(n % 2, pct, far_reset()));
                 }
                 if observer == 0 {
-                    // The preceding values are all below 100 so it is always a change.
+                    // Preceding values are all below 100, so it is always a change.
                     endgame.wait();
                     for i in 0..2 {
                         service.observe(&five(i, 100.0, far_reset()));
@@ -1250,7 +1231,7 @@ mod tests {
             }));
         }
         for thread in threads {
-            thread.join().expect("시험 스레드");
+            thread.join().expect("test thread");
         }
         rig.service.replace_subscription(0, set(&[0, 1]));
 
@@ -1265,7 +1246,7 @@ mod tests {
                     .max();
                 if last == 0 || highest != Some(last) {
                     misses.push(format!(
-                        "판 {trial} · 연결 {conn} · 벤더 {i}: 받은 최고 {highest:?} · 책 {last}"
+                        "trial {trial} · connection {conn} · vendor {i}: highest received {highest:?} · book {last}"
                     ));
                 }
             }
@@ -1273,12 +1254,11 @@ mod tests {
         misses
     }
 
-    /// Per round the highest revision that connection received = the book's last revision. In correct code it holds regardless of overlap — the clock
-    /// flows 2 seconds on every read so every change goes out at once, and the wall clock is stopped so there is no latch.
+    /// Per round, the highest revision a connection received = the book's last revision; holds in correct code regardless of overlap (clock flows 2 seconds per read, wall clock stopped).
     #[test]
     fn racing_replaces_and_observations_leave_each_subscriber_at_the_final_revision() {
         const TRIALS: usize = 2_000;
-        // Run on another thread so that if the lock order breaks and deadlocks it fails instead of hanging.
+        // Another thread, so a lock-order deadlock fails instead of hanging.
         let (done_tx, done_rx) = mpsc::channel();
         std::thread::spawn(move || {
             let misses: Vec<String> = (0..TRIALS).flat_map(race_trial).collect();
@@ -1286,18 +1266,18 @@ mod tests {
         });
         let misses = done_rx
             .recv_timeout(Duration::from_secs(120))
-            .expect("시험 스레드가 끝나지 않았다(교착 또는 패닉)");
+            .expect("the test thread did not end (deadlock or panic)");
         let total = misses.len();
         assert!(
             misses.is_empty(),
-            "{total}건 어긋남 — 처음: {:?}",
+            "{total} mismatches — first: {:?}",
             misses.first()
         );
     }
 
     // ── Requests · queries ──
 
-    /// The request wait of a test that measures the wait cap.
+    /// Request wait for tests that measure the wait cap.
     const SHORT_WAIT: Duration = Duration::from_millis(200);
 
     pub(super) fn active(i: usize, pct: f64) -> UsageObservation {
@@ -1311,16 +1291,16 @@ mod tests {
         Scripted::Answer(Ok(obs))
     }
 
-    /// Look while resting briefly until the condition stands — fails if [`BOUND`] is exceeded.
+    /// Poll while resting briefly until the condition holds — fails past [`BOUND`].
     pub(super) fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
         let deadline = Instant::now() + BOUND;
         while !ready() {
-            assert!(Instant::now() < deadline, "{what} — 기다림 상한");
+            assert!(Instant::now() < deadline, "{what} — wait cap");
             std::thread::sleep(Duration::from_millis(5));
         }
     }
 
-    /// A bus request on another thread — the cap of the receiving side ([`answered`]) turns a hang into a failure.
+    /// A bus request on another thread — the receiving side's cap ([`answered`]) turns a hang into a failure.
     pub(super) fn bus_request(
         service: &Arc<UsageService>,
         i: usize,
@@ -1336,8 +1316,8 @@ mod tests {
 
     pub(super) fn answered(rx: &Receiver<Option<UsageAnswer>>) -> UsageAnswer {
         rx.recv_timeout(BOUND)
-            .expect("요청이 상한 안에 끝난다")
-            .expect("아는 벤더")
+            .expect("the request ends within the cap")
+            .expect("known vendor")
     }
 
     pub(super) fn pct(sheet: &UsageLimitSnapshot) -> Option<f64> {
@@ -1365,38 +1345,42 @@ mod tests {
         let answer = rig
             .service
             .request_blocking(vendor(0), RequestKind::Refresh)
-            .expect("아는 벤더");
+            .expect("known vendor");
         assert!(
             started.elapsed() < LONG_WAIT,
-            "닫힌 조회의 합류자는 곧바로 깬다"
+            "joiners of a closed query wake at once"
         );
         assert_eq!(answer.served, UsageServed::Cached);
         assert!(!answer.snapshot.in_flight);
         assert_eq!(failed_kind(&answer.snapshot).as_deref(), Some("spawn"));
-        assert!(!rig.in_flight(0), "진행 중으로 남지 않는다");
+        assert!(!rig.in_flight(0), "does not stay in progress");
         assert_eq!(rig.queries(0), 0);
 
         let got = frames(&log);
-        assert_eq!(got.len(), 2, "시작 한 장 + 끝 한 장");
+        assert_eq!(got.len(), 2, "one start sheet + one end sheet");
         assert!(got[0].snapshot.in_flight);
         assert!(!got[1].snapshot.in_flight);
         assert_eq!(got[1].snapshot.revision, answer.snapshot.revision);
 
         let kept: Vec<_> = rig.threads.kept.lock().unwrap().drain(..).collect();
-        assert_eq!(kept.len(), 1, "못 띄운 일은 대역이 쥐고 있었다");
+        assert_eq!(
+            kept.len(),
+            1,
+            "the stand-in held the job it could not launch"
+        );
         for job in kept {
             job();
         }
-        assert_eq!(log.count(), 2, "뒤늦게 돈 일은 아무것도 안 한다");
+        assert_eq!(log.count(), 2, "the job that ran late does nothing");
         assert_eq!(rig.queries(0), 0);
-        assert_eq!(rig.service.desk().runs[&key(0)].finished, 1, "닫힘은 한 번");
+        assert_eq!(rig.service.desk().runs[&key(0)].finished, 1, "closed once");
     }
 
     #[test]
     fn concurrent_requests_join_one_probe_and_all_get_its_answer() {
         let (rig, _clock) = rig();
         let first = bus_request(&rig.service, 0, RequestKind::Refresh);
-        wait_until("조회가 떴다", || rig.queries(0) == 1);
+        wait_until("the query started", || rig.queries(0) == 1);
 
         let buses: Vec<_> = [RequestKind::Get, RequestKind::Refresh, RequestKind::Get]
             .into_iter()
@@ -1406,7 +1390,7 @@ mod tests {
             .worker_threads(2)
             .enable_time()
             .build()
-            .expect("런타임");
+            .expect("runtime");
         let tasks: Vec<_> = [RequestKind::Refresh, RequestKind::Get]
             .into_iter()
             .map(|kind| {
@@ -1414,9 +1398,7 @@ mod tests {
                 runtime.spawn(async move { service.request(vendor(0), kind).await })
             })
             .collect();
-        wait_until("여섯 요청이 모두 합류했다", || {
-            rig.joiners(0) == 6
-        });
+        wait_until("all six requests joined", || rig.joiners(0) == 6);
 
         rig.answer(0, ok(active(0, 33.0)));
         let mut answers = vec![answered(&first)];
@@ -1424,9 +1406,9 @@ mod tests {
         for task in tasks {
             let answer = runtime
                 .block_on(async { tokio::time::timeout(BOUND, task).await })
-                .expect("상한 안에 끝난다")
-                .expect("요청 태스크")
-                .expect("아는 벤더");
+                .expect("ends within the cap")
+                .expect("request task")
+                .expect("known vendor");
             answers.push(answer);
         }
         assert_eq!(
@@ -1435,7 +1417,7 @@ mod tests {
                 rig.threads.counts.spawned.load(Ordering::SeqCst)
             ),
             (1, 1),
-            "조회 하나"
+            "one query"
         );
         for answer in &answers {
             assert_eq!(answer.served, UsageServed::Fresh);
@@ -1455,30 +1437,30 @@ mod tests {
         let answer = rig
             .service
             .request_blocking(vendor(0), RequestKind::Refresh)
-            .expect("아는 벤더");
+            .expect("known vendor");
         assert!(started.elapsed() >= SHORT_WAIT);
         assert!(started.elapsed() < LONG_WAIT);
         assert_eq!(answer.served, UsageServed::Cached);
-        assert!(answer.snapshot.in_flight, "조회는 계속된다");
+        assert!(answer.snapshot.in_flight, "the query continues");
 
         // async has the same cap — it joins an in-flight query, waits, and gives up.
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()
-            .expect("런타임");
+            .expect("runtime");
         let answer = runtime
             .block_on(rig.service.request(vendor(0), RequestKind::Get))
-            .expect("아는 벤더");
+            .expect("known vendor");
         assert_eq!(answer.served, UsageServed::Cached);
         assert!(answer.snapshot.in_flight);
         assert_eq!(rig.queries(0), 1);
 
         rig.answer(0, ok(active(0, 55.0)));
-        wait_until("조회 끝이 구독자에게 닿는다", || {
+        wait_until("the query end reaches the subscriber", || {
             last_pct(&log) == Some(55.0)
         });
         assert!(!rig.in_flight(0));
-        assert!(!frames(&log).last().expect("한 장").snapshot.in_flight);
+        assert!(!frames(&log).last().expect("one sheet").snapshot.in_flight);
     }
 
     #[test]
@@ -1486,7 +1468,7 @@ mod tests {
         let (rig, _clock) = rig();
         assert!(rig.service.desk().book.begin_probe(&key(0)));
         rig.service.start_probe(key(0));
-        wait_until("조회가 떴다", || rig.queries(0) == 1);
+        wait_until("the query started", || rig.queries(0) == 1);
 
         let Rig {
             service,
@@ -1499,16 +1481,16 @@ mod tests {
         drop(service);
         assert!(
             weak.upgrade().is_none(),
-            "조회 스레드는 서비스를 붙들지 않는다"
+            "the query thread does not hold on to the service"
         );
         wakes.try_iter().count();
         assert!(
             matches!(wakes.try_recv(), Err(TryRecvError::Disconnected)),
-            "막힌 조회가 도는 중에도 스케줄러가 서비스의 끝을 본다"
+            "the scheduler sees the end of the service even while a blocked query is running"
         );
 
-        scripts[0].send(ok(active(0, 10.0))).expect("가짜 조회기");
-        wait_until("조회 스레드가 끝났다", || {
+        scripts[0].send(ok(active(0, 10.0))).expect("fake prober");
+        wait_until("the query thread ended", || {
             threads.counts.ended.load(Ordering::SeqCst) == 1
         });
         assert_eq!(threads.counts.panicked.load(Ordering::SeqCst), 0);
@@ -1526,12 +1508,12 @@ mod tests {
             }
             .into())),
         );
-        wait_until("거절로 끝난 조회", || ended(&rig) == 1);
+        wait_until("a query that ended in refusal", || ended(&rig) == 1);
 
         let seen = rig
             .service
             .request_blocking(vendor(0), RequestKind::Refresh)
-            .expect("아는 벤더");
+            .expect("known vendor");
         assert!(matches!(
             seen.snapshot.state,
             UsageVendorState::Rejected { .. }
@@ -1542,10 +1524,10 @@ mod tests {
         let hidden = rig
             .service
             .request_blocking(vendor(0), RequestKind::Refresh)
-            .expect("아는 벤더");
+            .expect("known vendor");
         assert!(
             matches!(hidden.snapshot.state, UsageVendorState::Ready),
-            "값이 와서 거절이 안 보인다"
+            "a value came, so the refusal is not visible"
         );
         assert_eq!(hidden.served, UsageServed::Cached);
         assert!(!hidden.snapshot.in_flight);
@@ -1553,7 +1535,7 @@ mod tests {
         assert_eq!(
             rig.threads.counts.spawned.load(Ordering::SeqCst),
             1,
-            "거절한 조회 뒤로 조회가 안 나갔다"
+            "no query went out after the refused query"
         );
     }
 
@@ -1563,7 +1545,7 @@ mod tests {
         let log = rig.subscriber(1, &[0]);
         let other = rig.subscriber(2, &[1]);
         let pending = bus_request(&rig.service, 0, RequestKind::Refresh);
-        wait_until("「갱신 중」 한 장", || log.count() == 1);
+        wait_until("one 「refreshing」 sheet", || log.count() == 1);
         let start = frames(&log)[0].snapshot.clone();
         assert!(start.in_flight);
         assert_eq!(pct(&start), None);
@@ -1572,13 +1554,21 @@ mod tests {
         let answer = answered(&pending);
         assert_eq!(answer.served, UsageServed::Fresh);
         let got = frames(&log);
-        assert_eq!(got.len(), 2, "끝 한 장은 합류자가 깨기 전에 나갔다");
+        assert_eq!(
+            got.len(),
+            2,
+            "the end sheet went out before the joiner woke"
+        );
         let end = &got[1].snapshot;
         assert!(!end.in_flight);
         assert!(end.revision > start.revision);
         assert_eq!(pct(end), Some(61.0));
         assert!(answer.snapshot.revision >= end.revision);
-        assert_eq!(other.count(), 0, "다른 벤더의 구독자에겐 없다");
+        assert_eq!(
+            other.count(),
+            0,
+            "nothing for subscribers of another vendor"
+        );
     }
 
     #[test]
@@ -1589,7 +1579,7 @@ mod tests {
         assert_eq!(answer.served, UsageServed::Cached);
         assert!(!answer.snapshot.in_flight);
         assert_eq!(failed_kind(&answer.snapshot).as_deref(), Some("io"));
-        wait_until("조회 스레드가 풀렸다", || ended(&rig) == 1);
+        wait_until("the query thread was released", || ended(&rig) == 1);
         assert_eq!(rig.threads.counts.panicked.load(Ordering::SeqCst), 1);
     }
 
@@ -1600,7 +1590,7 @@ mod tests {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()
-            .expect("런타임");
+            .expect("runtime");
         let dropped = runtime.block_on(async {
             tokio::time::timeout(
                 Duration::from_millis(50),
@@ -1608,12 +1598,15 @@ mod tests {
             )
             .await
         });
-        assert!(dropped.is_err(), "요청은 끝을 기다리던 중에 버려졌다");
+        assert!(
+            dropped.is_err(),
+            "the request was dropped while waiting for the end"
+        );
         assert!(rig.in_flight(0));
-        assert_eq!(rig.joiners(0), 0, "버려진 요청은 기다림을 놓았다");
+        assert_eq!(rig.joiners(0), 0, "the dropped request let go of the wait");
 
         rig.answer(0, ok(active(0, 8.0)));
-        wait_until("끝 한 장", || last_pct(&log) == Some(8.0));
+        wait_until("the end sheet", || last_pct(&log) == Some(8.0));
         assert!(!rig.in_flight(0));
     }
 
@@ -1621,12 +1614,12 @@ mod tests {
     fn a_stuck_probe_does_not_hold_up_another_vendor() {
         let (rig, _clock) = rig();
         let stuck = bus_request(&rig.service, 0, RequestKind::Refresh);
-        wait_until("조회가 떴다", || rig.queries(0) == 1);
+        wait_until("the query started", || rig.queries(0) == 1);
 
         rig.answer(1, ok(active(1, 12.0)));
         let answer = answered(&bus_request(&rig.service, 1, RequestKind::Refresh));
         assert_eq!(answer.served, UsageServed::Fresh);
-        assert!(rig.in_flight(0), "앞 벤더는 아직 막혀 있다");
+        assert!(rig.in_flight(0), "the earlier vendor is still blocked");
 
         rig.answer(0, ok(active(0, 1.0)));
         assert_eq!(answered(&stuck).served, UsageServed::Fresh);
@@ -1636,7 +1629,7 @@ mod tests {
     fn a_tick_plan_publishes_its_sheets_then_starts_its_probes() {
         let (rig, _clock) = rig();
         let log = rig.subscriber(1, &[0]);
-        // A query that could not be launched is closed at once inside `carry_out` and emits an end sheet — the order of the two sheets is the order of emission and launch.
+        // A query that could not be launched is closed at once inside `carry_out` and emits an end sheet — the two sheets' order is the emission-then-launch order.
         rig.threads.refuse.store(true, Ordering::SeqCst);
         let plan = {
             let now = rig.service.now();
@@ -1645,7 +1638,7 @@ mod tests {
         assert_eq!(
             plan.start,
             [key(0)],
-            "기준점이 없는 구독된 칸 — 곧바로 조회"
+            "a subscribed cell with no reference point — query at once"
         );
         assert_eq!(plan.publish.len(), 1);
         let sleep = plan.sleep;
@@ -1653,13 +1646,19 @@ mod tests {
 
         let got = frames(&log);
         assert_eq!(got.len(), 2);
-        assert!(got[0].snapshot.in_flight, "계획의 「갱신 중」 한 장이 먼저");
-        assert!(!got[1].snapshot.in_flight, "기동(여기선 곧 닫힘)이 나중");
+        assert!(
+            got[0].snapshot.in_flight,
+            "the plan's 「refreshing」 sheet comes first"
+        );
+        assert!(
+            !got[1].snapshot.in_flight,
+            "the launch (closed at once here) comes later"
+        );
         assert!(got[0].snapshot.revision < got[1].snapshot.revision);
         assert!(!rig.in_flight(0));
     }
 
-    /// ★⟳ has no minimum interval (user decision 2026-09-29)★ — a second ⟳ with the clock not moved even one tick also queries.
+    /// ★⟳ has no minimum interval (user decision)★ — a second ⟳ with the clock not moved even one tick also queries.
     #[test]
     fn a_refresh_right_after_a_finished_probe_starts_a_new_probe() {
         let (rig, _clock) = rig();
@@ -1668,7 +1667,7 @@ mod tests {
         let first = rig
             .service
             .request_blocking(vendor(0), RequestKind::Refresh)
-            .expect("아는 벤더");
+            .expect("known vendor");
         assert_eq!(first.served, UsageServed::Fresh);
         assert!(!rig.in_flight(0));
 
@@ -1676,11 +1675,11 @@ mod tests {
         let second = rig
             .service
             .request_blocking(vendor(0), RequestKind::Refresh)
-            .expect("아는 벤더");
+            .expect("known vendor");
         assert_eq!(rig.queries(0), 2);
         assert_eq!(second.served, UsageServed::Fresh);
         assert_eq!(pct(&second.snapshot), Some(31.0));
-        assert_eq!(last_pct(&log), Some(31.0), "구독자에게도 닿았다");
+        assert_eq!(last_pct(&log), Some(31.0), "it reached the subscriber too");
     }
 
     #[test]
@@ -1690,21 +1689,25 @@ mod tests {
         let first = rig
             .service
             .request_blocking(vendor(0), RequestKind::Refresh)
-            .expect("아는 벤더");
+            .expect("known vendor");
         assert_eq!(first.served, UsageServed::Fresh);
 
         rig.answer(0, Scripted::Answer(Err(ProbeError::Timeout.into())));
         let second = rig
             .service
             .request_blocking(vendor(0), RequestKind::Refresh)
-            .expect("아는 벤더");
-        assert_eq!(rig.queries(0), 2, "끝난 직후의 ⟳ 도 새 조회를 띄운다");
+            .expect("known vendor");
+        assert_eq!(
+            rig.queries(0),
+            2,
+            "a ⟳ right after the end launches a new query too"
+        );
         assert_eq!(
             second.served,
             UsageServed::Cached,
-            "기다린 조회가 실패했다 — 앞의 성공은 이 요청의 새 값이 아니다"
+            "the waited query failed — the earlier success is not a new value for this request"
         );
-        assert_eq!(pct(&second.snapshot), Some(30.0), "값은 유지");
+        assert_eq!(pct(&second.snapshot), Some(30.0), "the value is kept");
         assert_eq!(failed_kind(&second.snapshot).as_deref(), Some("timeout"));
     }
 
@@ -1712,24 +1715,23 @@ mod tests {
     fn a_joiner_that_gives_up_after_an_earlier_success_answers_cached() {
         let clock = Arc::new(ManualUsageClock::new(Duration::from_secs(100), T0));
         let rig = rig_full(clock, 2, SHORT_WAIT);
-        // The preceding success is launched and ended without a request — so it does not get caught in the short wait.
+        // The preceding success is launched and ended without a request, so it is not caught by the short wait.
         assert!(rig.service.desk().book.begin_probe(&key(0)));
         rig.service.start_probe(key(0));
         rig.answer(0, ok(active(0, 30.0)));
-        wait_until("앞 조회 끝", || ended(&rig) == 1);
+        wait_until("the earlier query ended", || ended(&rig) == 1);
         assert_eq!(rig.service.desk().runs[&key(0)].last_ok, 1);
 
         let answer = rig
             .service
             .request_blocking(vendor(0), RequestKind::Refresh)
-            .expect("아는 벤더");
-        assert!(answer.snapshot.in_flight, "상한에 포기했다");
+            .expect("known vendor");
+        assert!(answer.snapshot.in_flight, "gave up at the cap");
         assert_eq!(answer.served, UsageServed::Cached);
         assert_eq!(pct(&answer.snapshot), Some(30.0));
     }
 
-    /// An outlet that, after being armed, reports it stopped at the end sheet received (not `in_flight`) and stays inside `send` until `release` comes.
-    /// There is no time cap — it is freed when the `release` sender disappears because the test failed.
+    /// An outlet that, once armed, stops at the end sheet received (not `in_flight`) and stays inside `send` until `release` comes. No time cap — freed when the `release` sender disappears on test failure.
     struct Parking {
         armed: Arc<AtomicBool>,
         parked: mpsc::Sender<()>,
@@ -1751,7 +1753,7 @@ mod tests {
     #[test]
     fn joiners_wake_only_after_the_end_sheet_is_published() {
         let clock = Arc::new(ManualUsageClock::new(Duration::from_secs(100), T0));
-        // Make the joiner's wait more generous than the test-side cap — removes the branch that answers with a wait overrun while stopped.
+        // Make the joiner's wait more generous than the test-side cap — removes the branch answering with a wait overrun while stopped.
         let rig = rig_full(clock, 2, BOUND * 6);
         let armed = Arc::new(AtomicBool::new(false));
         let (parked_tx, parked) = mpsc::channel();
@@ -1768,35 +1770,35 @@ mod tests {
         armed.store(true, Ordering::SeqCst);
 
         let pending = bus_request(&rig.service, 0, RequestKind::Refresh);
-        wait_until("조회가 떴다", || rig.queries(0) == 1);
-        // One bus joiner the test holds directly — sees whether the wake came without timing (the query is in flight waiting for a script).
+        wait_until("the query started", || rig.queries(0) == 1);
+        // One bus joiner the test holds directly — sees whether the wake came without timing (the query is in flight awaiting a script).
         let (joined, woken) = mpsc::sync_channel(1);
         rig.service
             .desk()
             .runs
             .get_mut(&key(0))
-            .expect("칸")
+            .expect("entry")
             .blocking
             .push(joined);
 
         rig.answer(0, ok(active(0, 5.0)));
         parked
             .recv_timeout(BOUND)
-            .expect("끝 한 장이 출구 안에서 멈췄다");
-        // While stopped — if the wake was ahead of the emission it has already arrived.
+            .expect("the end sheet stopped inside the outlet");
+        // While stopped — if the wake was ahead of the emission, it has already arrived.
         assert!(
             matches!(woken.try_recv(), Err(TryRecvError::Empty)),
-            "발행이 끝나기 전에 버스 합류자를 깨웠다"
+            "woke the bus joiner before the emit finished"
         );
         assert_eq!(
             *rig.service.finished[&key(0)].borrow(),
             0,
-            "발행이 끝나기 전에 async 합류자를 깨웠다"
+            "woke the async joiner before the emit finished"
         );
         assert!(matches!(pending.try_recv(), Err(TryRecvError::Empty)));
 
-        release.send(()).expect("출구");
-        woken.recv_timeout(BOUND).expect("발행 뒤에 깬다");
+        release.send(()).expect("outlet");
+        woken.recv_timeout(BOUND).expect("wakes after the emit");
         assert_eq!(answered(&pending).served, UsageServed::Fresh);
     }
 }

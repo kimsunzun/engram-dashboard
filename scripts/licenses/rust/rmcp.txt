@@ -1,7 +1,7 @@
-// rmcp 2.2.0 의 crates.io 패키지에는 라이선스 본문 파일이 없다 — 상류 저장소의 파일을 손대지 않고 옮겼다.
-// 출처: https://github.com/modelcontextprotocol/rust-sdk/blob/519577601db3823616dbd7c4eb84ed569d8e17d4/LICENSE
-//   커밋 = 그 버전 .cargo_vcs_info.json 의 sha1. Cargo.toml 은 Apache-2.0 이지만 이 파일은 MIT → Apache-2.0 이전 중이라
-//   동의하지 않은 기여는 MIT 로 남는다고 밝히고 MIT 본문(저작권자 줄 포함)도 싣는다 — 표준 Apache 본문만으로는 그 MIT 몫이 빠진다.
+// The crates.io package of rmcp 2.2.0 has no license text file — the file from the upstream repository was moved over unchanged.
+// Source: https://github.com/modelcontextprotocol/rust-sdk/blob/519577601db3823616dbd7c4eb84ed569d8e17d4/LICENSE
+//   commit = the sha1 in that version's .cargo_vcs_info.json. Cargo.toml says Apache-2.0, but this file is mid-migration from MIT → Apache-2.0, so
+//   it states that contributions not agreed to the move stay MIT and also carries the MIT text (with the copyright holder line) — the standard Apache text alone would drop that MIT part.
 // crate: rmcp 2.2.0
 The MCP project is undergoing a licensing transition from the MIT License to the Apache License, Version 2.0 ("Apache-2.0"). All new code and specification contributions to the project are licensed under Apache-2.0. Documentation contributions (excluding specifications) are licensed under CC-BY-4.0.
 

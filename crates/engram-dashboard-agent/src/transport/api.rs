@@ -30,20 +30,18 @@ impl AgentTransport for ApiTransport {
 
     fn send_input(&self, _input: InputEvent) -> Result<(), PtyError> {
         Err(PtyError::Unsupported(
-            "ApiTransport::send_input (껍데기)".into(),
+            "ApiTransport::send_input (stub)".into(),
         ))
     }
 
     /// An HTTP stream has no concept of terminal size.
     fn resize(&self, _cols: u16, _rows: u16) -> Result<(), PtyError> {
-        Err(PtyError::Unsupported(
-            "ApiTransport::resize (껍데기)".into(),
-        ))
+        Err(PtyError::Unsupported("ApiTransport::resize (stub)".into()))
     }
 
     fn interrupt(&self) -> Result<(), PtyError> {
         Err(PtyError::Unsupported(
-            "ApiTransport::interrupt (껍데기)".into(),
+            "ApiTransport::interrupt (stub)".into(),
         ))
     }
 

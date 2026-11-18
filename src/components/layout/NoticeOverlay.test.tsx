@@ -1,6 +1,6 @@
 // NoticeOverlay — the layer that covers the layout with notices (ADR-0276 · ADR-0277).
 //
-// jsdom cannot measure size — assert 「밀지 않는다 · 줄만큼만 덮는다」 (does not push · covers only as much as its rows) by the computed position and structure.
+// jsdom cannot measure size — assert 「does not push · covers only as much as its rows」 by the computed position and structure.
 
 import { cleanup, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -17,7 +17,7 @@ const overlay = () => screen.getByTestId('notice-overlay')
 const stack = () => screen.getByTestId('notice-stack')
 
 describe('NoticeOverlay', () => {
-  it('계산된 위치가 absolute 이고 기준 칸의 맨 위 · 좌우 끝에 붙으며 z 40 이다', () => {
+  it('the computed position is absolute and attaches to the top of the reference area · left and right ends, and z is 40', () => {
     render(
       <NoticeOverlay>
         <div role="status">a</div>
@@ -30,7 +30,7 @@ describe('NoticeOverlay', () => {
     expect(overlay().contains(screen.getByRole('status'))).toBe(true)
   })
 
-  it('줄만큼만 덮는다 — 높이 · 아래 끝을 정하지 않는다', () => {
+  it('it covers only as much as the rows — height · bottom end are not set', () => {
     render(
       <NoticeOverlay>
         <div role="status">a</div>
@@ -41,7 +41,7 @@ describe('NoticeOverlay', () => {
     expect(overlay().className).not.toMatch(/\binset-0\b|\bbottom-0\b|\bh-full\b|\bh-screen\b/)
   })
 
-  it('알림이 하나도 안 그려지면 층에 내용이 없다', () => {
+  it('if no notice is drawn the layer has no content', () => {
     render(
       <NoticeOverlay>
         <Nothing />
@@ -52,7 +52,7 @@ describe('NoticeOverlay', () => {
     expect(stack().textContent).toBe('')
   })
 
-  it('넘치면 스크롤한다 — 스크롤 노드에 높이 상한과 세로 스크롤', () => {
+  it('if it overflows it scrolls — the scroll node has a height cap and vertical scroll', () => {
     render(
       <NoticeOverlay>
         <div role="status">a</div>
@@ -65,7 +65,7 @@ describe('NoticeOverlay', () => {
     expect(viewport?.contains(stack())).toBe(true)
   })
 
-  it('여럿이면 준 차례대로 쌓고, 줄 사이를 1px 틈의 앱 바탕으로 가른다', () => {
+  it('with several it stacks in the given order and separates rows with a 1px gap of the app background', () => {
     render(
       <NoticeOverlay>
         <div role="alert">first</div>

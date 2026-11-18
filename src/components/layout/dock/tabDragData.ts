@@ -1,24 +1,20 @@
-// TRD S21-slot-docking §4-2 「실음」: OS drag data of the tab drag — one value per type string. This file owns building (source dragstart) · reading (target
-//   dragenter · drop). Pure (no DOM · Tauri).
-// ★All a target can see during dragover is `types`★ (`getData` only at drop — spike measurement) — so the original size needed by the preview (R4) and the dragged tab shape needed by
-//   band validity (R8) are carried in fields of the type string. A path through the shell · a channel between windows was rejected (ADR-0296 ·
-//   TRD §4-2). Whether a type string field cannot cross OLE between windows is untested (M3 — if it leaks, the target reads it as no size · no shape).
-// ★The type string is built in lowercase and compared in lowercase★ — Chromium lowercases the format of `setData`.
-// ★Carry only this one format★ — if `text/plain` · a URL is carried, another app receives it and text enters that app (the clause of the old HTML5 drag `TabBar`).
+// TRD S21-slot-docking §4-2 "carrying": OS drag data of the tab drag — one value per type string. Owns building (source dragstart) · reading (target dragenter · drop). Pure (no DOM · Tauri).
+// ★A target sees only `types` during dragover★ (`getData` only at drop — spike measurement), so the original size for the preview (R4) and the dragged tab shape for band validity (R8) ride in type string fields. A path through the shell · a channel between windows was rejected (ADR-0296 · TRD §4-2). Whether type string fields survive OLE between windows is untested (M3 — if they leak, the target reads no size · no shape).
+// ★The type string is built and compared in lowercase★ — Chromium lowercases the `setData` format.
+// ★Carry only this one format★ — a `text/plain` · URL would be received by another app as text.
 
 import type { LayoutNode, SplitDir } from '../../../api/layoutTypes'
 import type { PointCss } from '../../../../src-tauri/bindings/PointCss'
 import type { SizeCss } from '../../../../src-tauri/bindings/SizeCss'
 
-/** Head of our tab drag type string — `;키=값` fields are attached after it. */
+/** Head of our tab drag type string — `;key=value` fields are attached after it. */
 export const TAB_MIME = 'application/x-engram-tab'
 
 /** Version of the value — if it is not this, the reader sees it as not our drag value. */
 const VALUE_VERSION = 1
 
 /**
- * Value of the drag data (JSON) — read only at drop. Meaning is the same-named fields of `TabDrop` · `DropTo.new_window` (`size` = new window inner
- * size · `null` = single-tab popout · `grab` = the point where the cursor will be in the new window viewport).
+ * Value of the drag data (JSON), read only at drop. Same-named fields as `TabDrop` · `DropTo.new_window` (`size` = new window inner size, `null` = single-tab popout; `grab` = where the cursor will be in the new window viewport).
  */
 export interface TabDragValue {
   v: typeof VALUE_VERSION
@@ -40,8 +36,7 @@ export interface TabDragTypeInput {
 }
 
 /**
- * Our drag the target read from `types`. If a field is missing or broken, only that field is `null` — the target treats no original size = half the area (the cap),
- * no shape = one area (TRD §4-2 · §4-5).
+ * Our drag as read from `types`. A missing or broken field is only that field `null` — no original size = half the area (the cap), no shape = one area (TRD §4-2 · §4-5).
  */
 export interface TabDragHead {
   /** The type string exactly as carried in `dataTransfer.types` — the key for `getData` at drop. */
@@ -65,8 +60,7 @@ export function buildTabDragType(input: TabDragTypeInput): string {
 }
 
 /**
- * Find our drag in `types` — the first type that is our head and whose `app` field equals `app` (case ignored). If none, `null` (a file ·
- * link · tree row · tab drag of another build).
+ * Find our drag in `types` — the first type with our head whose `app` field equals `app` (case ignored); `null` otherwise (a file · link · tree row · tab drag of another build).
  */
 export function readTabDragType(types: readonly string[], app: string): TabDragHead | null {
   const want = app.toLowerCase()
@@ -100,8 +94,7 @@ function sizeOf(w: string | undefined, h: string | undefined): SizeCss | null {
 
 // ── shape ───────────────────────────────────────────────────────────────────────
 
-// Pre-order — area = `l` · split = `h<비율>_` (left-right) · `v<비율>_` (top-bottom) followed by two children (a → b). Ratio = JS `String(n)` — f64 is read back
-//   as is, is lowercase and has no `;` · `=`, so it fits in a type string field as is.
+// Pre-order — area = `l` · split = `h<ratio>_` (left-right) · `v<ratio>_` (top-bottom) then two children (a → b). Ratio = JS `String(n)` (f64 read back as is, lowercase, no `;` · `=`), so it fits a type string field.
 const DIR_CODE: Record<SplitDir, string> = { left_right: 'h', top_bottom: 'v' }
 
 /** Shape of the layout only (no slot id · no content) — the value of the type string `shape` field. */
@@ -114,8 +107,7 @@ export function shapeOf(layout: LayoutNode): string {
 const NUMBER_TEXT = /^-?(?:\d+(?:\.\d+)?|\.\d+)(?:e[+-]?\d+)?$/
 
 /**
- * Answer of `shapeOf` → layout tree. Ids are built and attached in pre-order (area = `shape-slot-<k>` · split = `shape-split-<k>`) · area content is
- * `empty`. `null` if it does not fit the grammar or a ratio is not a finite number.
+ * `shapeOf` answer → layout tree. Ids are built in pre-order (area = `shape-slot-<k>` · split = `shape-split-<k>`), area content `empty`. `null` if the grammar does not fit or a ratio is not finite.
  */
 export function parseShape(text: string): LayoutNode | null {
   let at = 0

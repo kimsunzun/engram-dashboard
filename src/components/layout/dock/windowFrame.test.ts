@@ -64,7 +64,7 @@ describe('windowFrame', () => {
   })
   afterEach(() => warn.mockRestore())
 
-  it('구독 등록이 끝난 뒤에 당긴다 · 답이 값이 된다', async () => {
+  it('pulls after subscription registration ends · the answer becomes the value', async () => {
     const f = fakeIpc()
     const src = createWindowFrame(f.ipc)
     src.install()
@@ -79,7 +79,7 @@ describe('windowFrame', () => {
     expect(src.current()).toEqual(PULLED)
   })
 
-  it('사건이 마지막 값을 바꾼다 · 당기기 뒤에 온 사건은 늦게 닿은 답이 덮지 않는다', async () => {
+  it('an event changes the last value · an answer arriving late does not overwrite an event that came after the pull', async () => {
     const f = fakeIpc()
     const src = createWindowFrame(f.ipc)
     src.install()
@@ -93,7 +93,7 @@ describe('windowFrame', () => {
     expect(src.current()).toEqual({ ...PUSHED, maximized: false, restored: null })
   })
 
-  it('모양이 계약과 다른 몸은 버린다(사건 · 답)', async () => {
+  it('a body whose shape differs from the contract is dropped (event · answer)', async () => {
     const f = fakeIpc()
     const src = createWindowFrame(f.ipc)
     src.install()
@@ -117,7 +117,7 @@ describe('windowFrame', () => {
     expect(warn).toHaveBeenCalledTimes(8)
   })
 
-  it('떼면 등록을 풀고 그 뒤 값을 바꾸지 않는다 · 등록 전에 떼면 늦은 등록을 곧바로 푼다', async () => {
+  it('on detach it releases the registration and does not pass on later events', async () => {
     const f = fakeIpc()
     const src = createWindowFrame(f.ipc)
     const off = src.install()
@@ -139,7 +139,7 @@ describe('windowFrame', () => {
     expect(g.ipc.invoke).not.toHaveBeenCalled()
   })
 
-  it('구독자는 받은 값(답 · 사건)마다 불리고 버린 몸에는 안 불린다 · 그 사이 current 는 같은 참조 · 떼면 안 불린다', async () => {
+  it('subscribers are called for every received value (answer · event) and not for a dropped body · current is the same reference meanwhile · not called after detach', async () => {
     const f = fakeIpc()
     const src = createWindowFrame(f.ipc)
     const seen: (WindowFrame | null)[] = []
@@ -161,7 +161,7 @@ describe('windowFrame', () => {
     expect(seen).toHaveLength(2)
   })
 
-  it('Tauri 어댑터 — 자기 창 label 을 타깃으로 듣고 `window_frame` 을 당긴다', async () => {
+  it('Tauri adapter — listens with its own window label as the target and pulls `window_frame`', async () => {
     const off = windowFrame.install()
     await flush()
     expect(listenMock).toHaveBeenCalledWith(EVT_WINDOW_FRAME, expect.any(Function), { target: 'slot-popup-3' })

@@ -6,7 +6,7 @@ import { succession } from './succession'
 
 const TABS = ['t0', 't1', 't2', 't3']
 
-describe('succession — 오른쪽 이웃 → 왼쪽', () => {
+describe('succession — right neighbour → left', () => {
   // [n, removed position, tab to succeed]
   const table: Array<[number, number, string | null]> = [
     [1, 0, null],
@@ -20,12 +20,12 @@ describe('succession — 오른쪽 이웃 → 왼쪽', () => {
     [4, 2, 't3'],
     [4, 3, 't2'],
   ]
-  it.each(table)('n=%i · 빠지는 자리 %i → %s', (n, removed, heir) => {
+  it.each(table)('n=%i · removed index %i → %s', (n, removed, heir) => {
     const tabs = TABS.slice(0, n)
     expect(succession(tabs, tabs[removed])).toBe(heir)
   })
 
-  it('목록에 없으면 · 빈 목록이면 null', () => {
+  it('if not in the list · if the list is empty null', () => {
     expect(succession(['a'], 'zzz')).toBeNull()
     expect(succession([], 'a')).toBeNull()
   })

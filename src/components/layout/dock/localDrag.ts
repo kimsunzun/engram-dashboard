@@ -1,10 +1,6 @@
-// TRD S21-slot-docking §4-2 · §4-3: the state between hooks of the tab drag, one per webview (JS context) — holds only what the drag source (`tabStrip/useTabDragSource`) and
-//   the root receiver (`dock/useWindowDrop`) exchange **within the same webview**. Nothing crosses between windows — all another window
-//   knows is the type string of the drag data (ADR-0296 · TRD §2-2).
-// One writer per field: `outgoing` = the source (set at dragstart and withdrawn when swap redraw is released) · `sourceStrip` = the source window's root
-//   dragover (only the first value is placed by the source dragstart — `setSourceStrip` below) · `targetMarker` = another window's root dragover (drawn by `TabBar`) ·
-//   in-place drop mark = written by the root drop and taken by the source dragend · tab bar geometry = registered by `TabBar` and read by the root.
-// ★A drag is not an LLM command★ (TRD §3-6) — it is human input and its measurement, so it is not put on a global handle · bus.
+// TRD S21-slot-docking §4-2 · §4-3: the per-webview (JS context) state between tab drag hooks — only what the drag source (`tabStrip/useTabDragSource`) and the root receiver (`dock/useWindowDrop`) exchange **within the same webview**; nothing crosses windows — another window knows only the drag data's type string (ADR-0296 · TRD §2-2).
+// One writer per field: `outgoing` = the source (set at dragstart, withdrawn when swap redraw is released) · `sourceStrip` = the source window's root dragover (only the first value is placed by the source dragstart — `setSourceStrip`) · `targetMarker` = another window's root dragover (drawn by `TabBar`) · in-place drop mark = written by the root drop, taken by the source dragend · tab bar geometry = registered by `TabBar`, read by the root.
+// ★A drag is not an LLM command★ (TRD §3-6) — human input and its measurement, not on a global handle · bus.
 
 import { useSyncExternalStore } from 'react'
 
@@ -23,9 +19,7 @@ export interface OutgoingDrag {
 }
 
 /**
- * Decision on the source window's own tab bar (the `strip` answer of `judge`) — tab bar coordinates (0 = `StripGeometry.left`). `index` = position in the list without the dragged tab ·
- * `left` = left of the dragged head (`draggedLeft`) · `x` = cursor x of that dragover (material for the order threshold `moveDue` — `left` is
- * clipped at the end of the drag area and cannot be recovered from the cursor).
+ * Decision on the source window's own tab bar (the `strip` answer of `judge`) — tab bar coordinates (0 = `StripGeometry.left`). `index` = position in the list without the dragged tab, `left` = left of the dragged head (`draggedLeft`), `x` = cursor x of that dragover (material for the order threshold `moveDue` — `left` is clipped at the drag area end and cannot be recovered from the cursor).
  */
 export interface SourceStripMove {
   index: number
@@ -34,8 +28,7 @@ export interface SourceStripMove {
 }
 
 /**
- * Decision material for this webview's tab bar — exactly the order `TabBar` is drawing now (during a drag = the order carrying the confirmed order move). Coordinates = viewport
- * CSS px. The position to drop on the source window's own tab bar is `tabs.indexOf(끄는 탭)` (the confirmed position — not the raw answer of `judge`).
+ * Decision material for this webview's tab bar — exactly the order `TabBar` draws now (during a drag, the order carrying the confirmed order move). Coordinates = viewport CSS px. The drop position on the source window's own tab bar is `tabs.indexOf(dragged tab)` (the confirmed position, not `judge`'s raw answer).
  */
 export interface StripGeometry {
   /** Tab bar coordinate 0 = the viewport x of the left of the tab drag area (left of the first tab). */
@@ -45,8 +38,7 @@ export interface StripGeometry {
   /** `available` of `dragAreaWidth` — the measured value (`null` = could not be measured). */
   available: number | null
   /**
-   * Tab bar zone = `STRIP_ZONE_PX` (`bands.stripZone`) above and below the base rectangle (left of the first tab ~ right end of `+` × the title row if the tab bar is inside the title row · otherwise the tab bar row — `tabStrip/measure.ts`
-   * `stripZoneArea`) — viewport coordinates.
+   * Tab bar zone = `STRIP_ZONE_PX` (`bands.stripZone`) above and below the base rectangle (first tab left ~ `+` right end × the title row if the tab bar is inside it, otherwise the tab bar row — `tabStrip/measure.ts` `stripZoneArea`) — viewport coordinates.
    */
   zoneViewport: RectCss
   /** Tab ids in `bounds.tabs` order. */
@@ -64,8 +56,7 @@ export interface LocalDrag {
   getOutgoing(): OutgoingDrag | null
   setOutgoing(d: OutgoingDrag | null): void
   /**
-   * On every source window root dragover, record that decision — the `strip` answer if inside its own tab bar zone · `null` if outside (including a dragleave leaving the window).
-   * The source dragstart places the first value of 「누른 점 = 구역 안」 — so `null` always means 「구역을 떠남」.
+   * Record the decision on every source window root dragover — the `strip` answer inside its own tab bar zone, `null` outside (including a dragleave leaving the window). The source dragstart places the first value ("press point = inside the zone"), so `null` always means "left the zone".
    */
   setSourceStrip(m: SourceStripMove | null): void
   getSourceStrip(): SourceStripMove | null

@@ -1,4 +1,4 @@
-// store 는 실제 useAgentStore 를 setState 로 seed — onPresetListUpdated → setPresets 반영과 동일 경로.
+// The store seeds the real useAgentStore with setState — the same path as onPresetListUpdated → setPresets reflection.
 
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -16,8 +16,7 @@ vi.mock('../../api/clientFactory', () => ({
   },
   getAgentClient: vi.fn(),
 }))
-// refreshPresets = delete/rename 성공 후 권위 목록 재적용 안전망(broadcast 유실 대비) — 호출을 검증한다.
-//   eventBus 실모듈 로드(agentClient/registry 등 부작용)를 피하려 mock 한다.
+// refreshPresets = the safety net re-applying the authoritative list after delete/rename succeed (against a lost broadcast) — the call is verified; mocked to avoid loading the real eventBus module (agentClient/registry side effects).
 const refreshPresetsMock = vi.hoisted(() => vi.fn(async () => undefined))
 vi.mock('../../store/eventBus', () => ({ refreshPresets: refreshPresetsMock }))
 
@@ -32,7 +31,7 @@ beforeEach(() => {
   clientMock.deletePreset.mockClear()
   clientMock.renamePreset.mockClear()
   refreshPresetsMock.mockClear()
-  // 기본은 「목록 받음」 — 미수신 구간은 그 시험이 플래그를 직접 내린다.
+  // Default is 「list received」 — a test for the not-received span lowers the flag itself.
   useAgentStore.setState({ presets: [], presetsLoaded: true })
 })
 
@@ -51,53 +50,53 @@ function preset(id: string, cwd: string, name: string | null = null): Preset {
 
 const withCwd = (cwd: string) => ({ cwd, name: null })
 
-describe('presetDisplayName (name override ?? basename 파생 — ADR-0061 리치화)', () => {
-  it('name override 있으면 그대로(basename 파생 무시)', () => {
+describe('presetDisplayName (name override ?? basename derivation — ADR-0061 enrichment)', () => {
+  it('with a name override it is used as is (basename derivation ignored)', () => {
     expect(presetDisplayName({ cwd: '/home/me/project', name: '내 프리셋' })).toBe('내 프리셋')
     expect(presetDisplayName({ cwd: 'C:\\work\\engram', name: '작업' })).toBe('작업')
   })
-  it('name=null → cwd basename 파생(POSIX)', () => {
+  it('name=null → cwd basename derivation (POSIX)', () => {
     expect(presetDisplayName(withCwd('/home/me/project'))).toBe('project')
   })
-  it('name=null → cwd basename 파생(Windows)', () => {
+  it('name=null → cwd basename derivation (Windows)', () => {
     expect(presetDisplayName(withCwd('C:\\work\\engram'))).toBe('engram')
   })
-  it('후행 구분자 무시(trailing separator)', () => {
+  it('trailing separator ignored', () => {
     expect(presetDisplayName(withCwd('C:/proj/'))).toBe('proj')
     expect(presetDisplayName(withCwd('/a/b/c/'))).toBe('c')
   })
-  it('세그먼트 없음(루트 등) → cwd 원본 fallback', () => {
+  it('no segment (root etc.) → falls back to the raw cwd', () => {
     expect(presetDisplayName(withCwd('/'))).toBe('/')
     expect(presetDisplayName(withCwd('projectonly'))).toBe('projectonly')
   })
-  it('drive-root(C:\\ / C:/) → raw cwd 유지("C:" 로 붕괴 금지)', () => {
+  it('drive-root (C:\\ / C:/) → raw cwd kept (must not collapse to "C:")', () => {
     expect(presetDisplayName(withCwd('C:\\'))).toBe('C:\\')
     expect(presetDisplayName(withCwd('C:/'))).toBe('C:/')
-    expect(presetDisplayName(withCwd('C:'))).toBe('C:') // 구분자 없는 drive-only 도 misleading 세그먼트 방지
+    expect(presetDisplayName(withCwd('C:'))).toBe('C:') // even a separator-less drive-only avoids a misleading segment
   })
-  it('빈/공백-only cwd(name=null) → blank 라벨 방지 placeholder(비어있지 않은 안정적 문자열)', () => {
-    // 라벨은 이 반환값 하나로만 그려지므로 blank 면 행이 빈 칸으로 보인다 → placeholder 로 degrade.
+  it('empty/whitespace-only cwd (name=null) → a placeholder preventing a blank label (a non-empty stable string)', () => {
+    // The label is drawn from this return value alone, so if blank the row looks like an empty cell → degrade to a placeholder.
     const emptyLabel = presetDisplayName(withCwd(''))
     expect(emptyLabel.trim().length).toBeGreaterThan(0)
     expect(emptyLabel).toBe('(경로 없음)')
     expect(presetDisplayName(withCwd('   ')).trim().length).toBeGreaterThan(0)
     expect(presetDisplayName(withCwd('   '))).toBe('(경로 없음)')
   })
-  it('root-like 경로(/, UNC) → 잘못된 세그먼트로 붕괴하지 않음', () => {
+  it('root-like paths (/, UNC) → do not collapse into a wrong segment', () => {
     expect(presetDisplayName(withCwd('/'))).toBe('/')
-    // UNC share 는 마지막 세그먼트가 의미 있으므로 basename 파생 허용.
+    // A UNC share has a meaningful last segment so basename derivation is allowed.
     expect(presetDisplayName(withCwd('\\\\server\\share'))).toBe('share')
     expect(presetDisplayName(withCwd('\\\\server\\share\\'))).toBe('share')
   })
 })
 
-describe('PresetPalette 렌더', () => {
-  it('빈 목록 → 안내 문구', () => {
+describe('PresetPalette render', () => {
+  it('empty list → notice text', () => {
     render(<PresetPalette />)
     expect(screen.getByText(/프리셋 없음/)).toBeTruthy()
   })
 
-  it('첫 목록 수신 전 → 빈 목록 안내를 그리지 않고, 빈 목록을 받으면 그때 그린다', () => {
+  it('before the first list is received → the empty-list notice is not drawn, and when an empty list is received it is drawn then', () => {
     useAgentStore.setState({ presetsLoaded: false })
     render(<PresetPalette />)
     expect(screen.queryByText(/프리셋 없음/)).toBeNull()
@@ -105,7 +104,7 @@ describe('PresetPalette 렌더', () => {
     expect(screen.getByText(/프리셋 없음/)).toBeTruthy()
   })
 
-  it('store.presets 를 행으로 렌더 + 표시명 = cwd basename(name override 없음)', () => {
+  it('store.presets render as rows + display name = cwd basename (no name override)', () => {
     seedPresets(preset('pr1', 'C:/work/engram'), preset('pr2', '/home/me/proj'))
     render(<PresetPalette />)
     expect(screen.getByText('engram')).toBeTruthy()
@@ -114,14 +113,14 @@ describe('PresetPalette 렌더', () => {
     expect(document.querySelector('[data-preset-id="pr2"]')).toBeTruthy()
   })
 
-  it('name override 있는 프리셋 → basename 대신 override 표시(ADR-0061 리치화)', () => {
+  it('a preset with a name override → the override is shown instead of basename (ADR-0061 enrichment)', () => {
     seedPresets(preset('pr1', 'C:/work/engram', '내 작업'))
     render(<PresetPalette />)
     expect(screen.getByText('내 작업')).toBeTruthy()
     expect(screen.queryByText('engram')).toBeNull()
   })
 
-  it('빈 cwd 프리셋 행도 blank 라벨을 그리지 않는다(placeholder 표시)', () => {
+  it('a preset row with an empty cwd also draws no blank label (placeholder shown)', () => {
     seedPresets(preset('pr-empty', ''))
     render(<PresetPalette />)
     const nameEl = document.querySelector('[data-preset-id="pr-empty"] [data-preset-name]') as HTMLElement
@@ -129,22 +128,22 @@ describe('PresetPalette 렌더', () => {
     expect((nameEl.textContent ?? '').trim().length).toBeGreaterThan(0)
   })
 
-  it('탑바 텍스트 입력·추가 버튼은 제거됨(통합 슬롯 메뉴로 대체)', () => {
+  it('the top-bar text input and add button are removed (replaced by the unified slot menu)', () => {
     render(<PresetPalette />)
     expect(document.querySelector('[data-preset-input]')).toBeNull()
     expect(document.querySelector('[data-preset-add]')).toBeNull()
   })
 
-  it('★pane 우클릭 자체 메뉴 없음(ADR-0064)★ — 우클릭해도 옛 "추가" 메뉴가 뜨지 않는다(통합 메뉴로 이전)', () => {
+  it('★no own pane right-click menu (ADR-0064)★ — right-clicking does not bring up the old "add" menu (moved to the unified menu)', () => {
     render(<PresetPalette />)
     const pane = document.querySelector('[data-preset-palette]') as HTMLElement
     fireEvent.contextMenu(pane)
-    // "추가" 커버리지는 통합 슬롯 메뉴의 preset.add command 쪽(presetCommands.test) 담당.
+    // "add" coverage belongs to the preset.add command of the unified slot menu (presetCommands.test).
     expect(document.querySelector('[data-preset-menu-add]')).toBeNull()
     expect(clientMock.createPreset).not.toHaveBeenCalled()
   })
 
-  it('행 우클릭 메뉴 "삭제" → deletePreset(id) 호출(삭제는 이제 메뉴 안, ADR-0061)', () => {
+  it('row right-click menu "delete" → calls deletePreset(id) (delete is now inside the menu, ADR-0061)', () => {
     seedPresets(preset('pr1', 'C:/work/engram'))
     render(<PresetPalette />)
     expect(document.querySelector('[data-preset-delete="pr1"]')).toBeNull()
@@ -153,7 +152,7 @@ describe('PresetPalette 렌더', () => {
     expect(clientMock.deletePreset).toHaveBeenCalledWith('pr1')
   })
 
-  it('행 메뉴는 열린 동안만 오버레이 표지를 단다(ADR-0237) — 문서 Esc 가 닫으면 함께 사라진다', () => {
+  it('the row menu carries the overlay marker only while open (ADR-0237) — it disappears with it when a document Esc closes it', () => {
     seedPresets(preset('pr1', 'C:/work/engram'))
     render(<PresetPalette />)
     expect(document.querySelector(OVERLAY_SELECTOR)).toBeNull()
@@ -163,7 +162,7 @@ describe('PresetPalette 렌더', () => {
     expect(document.querySelector(OVERLAY_SELECTOR)).toBeNull()
   })
 
-  it('행 우클릭 메뉴 "이름 변경" → 인라인 입력 → Enter 확정 → renamePreset(id, trimmed)', () => {
+  it('row right-click menu "rename" → inline input → Enter commit → renamePreset(id, trimmed)', () => {
     seedPresets(preset('pr1', 'C:/work/engram'))
     render(<PresetPalette />)
     fireEvent.contextMenu(document.querySelector('[data-preset-id="pr1"]') as HTMLElement)
@@ -175,7 +174,7 @@ describe('PresetPalette 렌더', () => {
     expect(clientMock.renamePreset).toHaveBeenCalledWith('pr1', '새 이름')
   })
 
-  it('이름 변경 Esc → renamePreset 미발화(revert)', () => {
+  it('rename Esc → renamePreset not fired (revert)', () => {
     seedPresets(preset('pr1', 'C:/work/engram'))
     render(<PresetPalette />)
     fireEvent.contextMenu(document.querySelector('[data-preset-id="pr1"]') as HTMLElement)
@@ -184,7 +183,7 @@ describe('PresetPalette 렌더', () => {
     fireEvent.change(input, { target: { value: '바뀐이름' } })
     fireEvent.keyDown(input, { key: 'Escape' })
     expect(clientMock.renamePreset).not.toHaveBeenCalled()
-    expect(document.querySelector('[data-preset-rename-input="pr1"]')).toBeNull() // 편집 종료
+    expect(document.querySelector('[data-preset-rename-input="pr1"]')).toBeNull() // edit ended
   })
 
   // ADR-0373 `draftStart` (the same rule as TabBar's seed): the baseline is the name the edit started from.
@@ -202,19 +201,18 @@ describe('PresetPalette 렌더', () => {
     expect(clientMock.renamePreset).not.toHaveBeenCalled()
   })
 
-  it('이름 변경 미변경(현재 표시명과 동일) → renamePreset 미발화', () => {
+  it('rename unchanged (same as the current display name) → renamePreset not fired', () => {
     seedPresets(preset('pr1', 'C:/work/engram', '고정'))
     render(<PresetPalette />)
     fireEvent.contextMenu(document.querySelector('[data-preset-id="pr1"]') as HTMLElement)
     fireEvent.click(screen.getByText('이름 변경'))
     const input = document.querySelector('[data-preset-rename-input="pr1"]') as HTMLInputElement
-    fireEvent.keyDown(input, { key: 'Enter' }) // draft = 시드된 '고정' 그대로
+    fireEvent.keyDown(input, { key: 'Enter' }) // draft = the seeded fixed name as is
     expect(clientMock.renamePreset).not.toHaveBeenCalled()
   })
 
-  // Tauri `drag.js` 는 창 끌 자리 누름의 기본 동작(포커스 옮김)을 막는다. 그 흉내 = 먼저 건 document 거품 단계 듣는 쪽 — 뒤
-  //   듣기도 끊는다(jsdom 은 누름으로 포커스를 옮기지 않으니 기본 동작 쪽은 이미 같다).
-  it('이름 변경 중 창 끌 자리(제목 줄) 누름 → 포커스 잃음과 같이 확정한다 · 끌 자리 밖 누름은 편집을 둔다', () => {
+  // Tauri `drag.js` blocks the default action (focus move) of pressing the window-drag area. Imitated by a listener registered earlier on the document bubble phase that also cuts later listeners (jsdom moves no focus on a press).
+  it('pressing the window-drag area (title row) during rename → commits like losing focus · pressing outside the drag area keeps the edit', () => {
     const grab = document.createElement('div')
     grab.setAttribute('data-tauri-drag-region', '')
     document.body.appendChild(grab)
@@ -246,17 +244,16 @@ describe('PresetPalette 렌더', () => {
     }
   })
 
-  it('스타일 = 변수-only(하드코딩 색 없음) — 루트 background 가 var(...) 참조', () => {
+  it('style = variables only (no hard-coded color) — the root background is a var(...) reference', () => {
     render(<PresetPalette />)
     const root = document.querySelector('[data-preset-palette]') as HTMLElement
-    // e-ink 테마 준수 — 하드코딩 색 리터럴이면 위반.
+    // Compliant with the e-ink theme — a hard-coded color literal is a violation.
     expect(root.style.background).toContain('var(')
   })
 
-  // ── 증상4 회귀 안전망(프리셋 트윈): 한 프리셋 rename 이 형제 행을 떨어뜨리지 않는다 ──────────
-  //   AgentList 와 동형 — 낙관 갱신 없이 store.presets 전체를 그대로 두므로 형제 행이 사라지면 안 되고,
-  //   rename/delete 성공은 refreshPresets(권위 목록 재적용 안전망)로 이어져야 한다(broadcast 유실 대비 대칭).
-  it('3프리셋 중 하나 rename → 나머지 2행 유지 + refreshPresets 호출', async () => {
+  // ── Symptom 4 regression safety net (preset twin): renaming one preset does not drop sibling rows ──
+  //   Same as AgentList — store.presets is left whole (no optimistic update) so sibling rows must not vanish, and rename/delete success must continue to refreshPresets (authoritative-list re-apply — symmetric against a lost broadcast).
+  it('rename one of 3 presets → the other 2 rows stay + refreshPresets is called', async () => {
     seedPresets(preset('pr1', 'C:/a'), preset('pr2', 'C:/b'), preset('pr3', 'C:/c'))
     render(<PresetPalette />)
     expect(document.querySelectorAll('[data-preset-id]').length).toBe(3)
@@ -278,7 +275,7 @@ describe('PresetPalette 렌더', () => {
     expect(refreshPresetsMock).toHaveBeenCalledTimes(1)
   })
 
-  it('delete 성공 → refreshPresets(권위 목록 재적용 안전망) 호출', async () => {
+  it('delete success → refreshPresets (authoritative-list re-apply safety net) is called', async () => {
     seedPresets(preset('pr1', 'C:/a'))
     render(<PresetPalette />)
     fireEvent.contextMenu(document.querySelector('[data-preset-id="pr1"]') as HTMLElement)

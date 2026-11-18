@@ -38,7 +38,7 @@ afterEach(() => {
 })
 
 describe('reportFirstPaint', () => {
-  it('보이는 페이지 — 프레임 둘 뒤에 한 번 보낸다 · 다시 불러도(StrictMode effect 두 번) 더 보내지 않는다', () => {
+  it('visible page — sends once after two frames · calling again (StrictMode effect twice) sends no more', () => {
     setVisibility('visible')
     reportFirstPaint(null)
     reportFirstPaint(null)
@@ -52,7 +52,7 @@ describe('reportFirstPaint', () => {
     expect(invoke).toHaveBeenCalledTimes(1)
   })
 
-  it('보이는 페이지인데 프레임이 오지 않으면 상한 뒤에 한 번 보낸다 · 늦게 온 프레임은 더 보내지 않는다', () => {
+  it('visible page but no frame comes — sends once after the cap · a late frame sends no more', () => {
     useFakeTimeouts()
     try {
       setVisibility('visible')
@@ -69,7 +69,7 @@ describe('reportFirstPaint', () => {
     }
   })
 
-  it('보이는 페이지 — 프레임 둘로 이미 보냈으면 상한이 와도 더 보내지 않는다', () => {
+  it('visible page — if already sent by two frames, the cap coming sends no more', () => {
     useFakeTimeouts()
     try {
       setVisibility('visible')
@@ -84,7 +84,7 @@ describe('reportFirstPaint', () => {
     }
   })
 
-  it('숨은 페이지(셸이 내용을 숨긴 웹뷰) — 프레임을 기다리지 않고 곧바로 한 번 보낸다', () => {
+  it('hidden page (a webview whose content the shell hid) — sends once right away without waiting for frames', () => {
     setVisibility('hidden')
     reportFirstPaint(null)
     reportFirstPaint(null)
@@ -92,10 +92,10 @@ describe('reportFirstPaint', () => {
     expect(frames).toHaveLength(0)
   })
 
-  it('실패는 던지지 않고 경고로만 남긴다', async () => {
+  it('a failure does not throw and is left only as a warning', async () => {
     setVisibility('hidden')
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    invoke.mockRejectedValueOnce(new Error('셸 밖'))
+    invoke.mockRejectedValueOnce(new Error('outside the shell'))
     expect(() => reportFirstPaint(null)).not.toThrow()
     await vi.waitFor(() => expect(warn).toHaveBeenCalled())
     warn.mockRestore()
@@ -103,7 +103,7 @@ describe('reportFirstPaint', () => {
 
   // ── Adoption number (TRD S21-slot-docking §3-9 I26) — the shell door of the adopting window accepts only notices carrying that number ──
 
-  it('이미 보낸 페이지도 새 채택 번호로 부르면 한 번 더 보내고 그 알림이 번호를 싣는다 · 같은 번호 · null 로는 더 보내지 않는다', () => {
+  it('a page that already sent sends once more when called with a new adoption number and that notice carries the number · not again with the same number or null', () => {
     setVisibility('hidden')
     reportFirstPaint(null)
     reportFirstPaint(4)
@@ -115,7 +115,7 @@ describe('reportFirstPaint', () => {
     ])
   })
 
-  it('번호 0 도 번호다', () => {
+  it('number 0 is a number too', () => {
     setVisibility('hidden')
     reportFirstPaint(null)
     reportFirstPaint(0)
@@ -126,14 +126,14 @@ describe('reportFirstPaint', () => {
     ])
   })
 
-  it('처음부터 번호로 부르면(채택 뒤 마운트) 그 번호로 한 번 · 그 뒤 null 로는 보내지 않는다', () => {
+  it('called with a number from the start (mount after adoption) → once with that number · not with null after that', () => {
     setVisibility('hidden')
     reportFirstPaint(7)
     reportFirstPaint(null)
     expect(invoke.mock.calls).toEqual([['webview_painted', { generation: 7 }]])
   })
 
-  it('보이는 페이지 — 앞 알림이 프레임을 기다리는 중 번호가 오면 둘 다 보내고 뒤 알림이 번호를 싣는다', () => {
+  it('visible page — if a number comes while the earlier notice is waiting for frames, both are sent and the later notice carries the number', () => {
     setVisibility('visible')
     reportFirstPaint(null)
     reportFirstPaint(2)

@@ -1,10 +1,10 @@
-// ★Display name = profile.display_name (ADR-0061 — same source as the tree)★: formerly cwd basename was the only source, but
-//   with tree rename (ADR-0061) a display name override came to exist on the profile. If it is not the same as the tree, an agent renamed to "ABC"
+// ★Display name = profile.display_name (ADR-0061 — same source as the tree)★: a tree rename puts a display name override on the profile.
+//   If it is not the same as the tree, an agent renamed to "ABC"
 //   shows in the popup as the cwd basename (e.g. "Filter Library"), diverging from the tree, and agents with the same cwd get
 //   confused. ★profile.name is not used★ — in this app's profiles name is the cwd string so the full path would show (the tree too uses only
 //   display_name ?? basename). display_name and the profile are not in the AgentInfo wire and come only from AgentProfile.
 //
-// ★"실행중"★ (running): Exiting/Exited/Killed/Failed are not monitoring targets and are excluded (the purpose is live observation).
+// ★"running"★ (running): Exiting/Exited/Killed/Failed are not monitoring targets and are excluded (the purpose is live observation).
 
 import type { AgentInfo, AgentProfile } from '../../api/types'
 import { basename } from '../../util/basename'

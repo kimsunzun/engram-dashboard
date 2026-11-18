@@ -2,7 +2,7 @@
 
 - Status: done (2026-11-07). Tier: light (one source-reading collector; main re-read the Docker, kubectl and Tailscale message strings in the original sources via `gh api`). Decision (user, 2026-11-07): the failed-`ensure` text follows the convention — cause + a short question hint ("— is the daemon running?"); applied in 3-2 U4a. The multi-daemon "no daemon chosen" state is left to the multi-daemon PRD.
 - Question: when a client's daemon is not running, what does the client say (cause only, or cause + next step), does the client start the daemon itself, and do multi-endpoint clients have a real "nothing selected / not connected" state?
-- Why asked: the U4a production switch changed the `ensure` failure text from "daemon down — connect(명시 시작) 필요 (ADR-0021: ensure 는 respawn 안 함)" to "daemon websocket 접속 실패: no daemon endpoint record — no live daemon". The user also noted that multi-daemon will need a "no connection chosen" state.
+- Why asked: the U4a production switch changed the `ensure` failure text from 「daemon down — connect(명시 시작) 필요 (ADR-0021: ensure 는 respawn 안 함)」 to 「daemon websocket 접속 실패: no daemon endpoint record — no live daemon」. The user also noted that multi-daemon will need a "no connection chosen" state.
 - Collector notes (raw table with file:line): copied below; scope = Docker CLI, kubectl, Tailscale CLI, tmux only.
 
 ## Conclusion (first)

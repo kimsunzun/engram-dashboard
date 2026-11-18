@@ -2,6 +2,6 @@
 
 export type AgentRenameOk = { agent_id: string, 
 /**
- * 확정된 이름 — 요청한 이름과 다를 수 있다(명부 유일성 접미사).
+ * The settled name — may differ from the requested name (roster uniqueness suffix).
  */
 name: string, outcome: string, };

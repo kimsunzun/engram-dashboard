@@ -1,4 +1,4 @@
-// settingsClient — subscribe first · apply by `rev` per key · writes pass through (ADR-0265 · TRD S21-storage §8 「프론트 설정」).
+// settingsClient — subscribe first · apply by `rev` per key · writes pass through (ADR-0265 · TRD S21-storage §8 「frontend settings」).
 
 import { describe, expect, it, vi } from 'vitest'
 
@@ -36,7 +36,7 @@ function fakeIpc() {
       invokeArgs.push([cmd, args])
       if (cmd === 'settings_get') return (await getAnswer.promise) as T
       if (writeAnswers.has(cmd)) return writeAnswers.get(cmd) as T
-      throw new Error(`예상 밖 명령 ${cmd}`)
+      throw new Error(`unexpected command ${cmd}`)
     },
   }
 
@@ -49,7 +49,7 @@ function fakeIpc() {
     openListen: () => listenGate.resolve(),
     answerGet: (v: unknown) => getAnswer.resolve(v),
     push: (payload: unknown) => {
-      if (!handler) throw new Error('리스너가 아직 없다')
+      if (!handler) throw new Error('no listener yet')
       handler(payload)
     },
     hasHandler: () => handler !== undefined,
@@ -74,8 +74,8 @@ function recorder() {
   return { seen, listener }
 }
 
-describe('settingsClient — 구독 먼저, 당기기 나중', () => {
-  it('listen 등록이 끝나기 전에는 settings_get 을 내지 않는다', async () => {
+describe('settingsClient — subscribe first, pull later', () => {
+  it('does not issue settings_get before listen registration finishes', async () => {
     const f = fakeIpc()
     const client = createSettingsClient(f.ipc)
     client.install()
@@ -88,8 +88,8 @@ describe('settingsClient — 구독 먼저, 당기기 나중', () => {
   })
 })
 
-describe('settingsClient — 키마다 rev', () => {
-  it('처음 보는 키는 rev 0 답이어도 적용한다', async () => {
+describe('settingsClient — rev per key', () => {
+  it('applies a key seen for the first time even with a rev 0 answer', async () => {
     const f = fakeIpc()
     const client = createSettingsClient(f.ipc)
     const r = recorder()
@@ -104,7 +104,7 @@ describe('settingsClient — 키마다 rev', () => {
     expect(r.seen).toEqual([[{ key: 'chat.style.fontSize', value: '13px' }]])
   })
 
-  it('그 키에 적용한 rev 이하의 알림은 버리고, 더 큰 rev 만 적용한다', async () => {
+  it('drops notices at or below the rev applied to that key, and applies only a larger rev', async () => {
     const f = fakeIpc()
     const client = createSettingsClient(f.ipc)
     client.install()
@@ -120,7 +120,7 @@ describe('settingsClient — 키마다 rev', () => {
     expect(client.get('a')).toBe('newer')
   })
 
-  it('rev 는 키마다 따로다 — 다른 키의 큰 rev 가 이 키의 작은 rev 를 막지 않는다', async () => {
+  it("rev is separate per key — a large rev of another key does not block this key's small rev", async () => {
     const f = fakeIpc()
     const client = createSettingsClient(f.ipc)
     client.install()
@@ -132,7 +132,7 @@ describe('settingsClient — 키마다 rev', () => {
     expect(client.get('b')).toBe('b3')
   })
 
-  it('새 알림 뒤에 온 당기기 답은 그 키를 덮지 않지만, 답의 다른 키는 적용한다', async () => {
+  it('a pull answer that came after a new notice does not overwrite that key, but applies the other keys of the answer', async () => {
     const f = fakeIpc()
     const client = createSettingsClient(f.ipc)
     client.install()
@@ -147,7 +147,7 @@ describe('settingsClient — 키마다 rev', () => {
     expect(client.get('b')).toBe('b2')
   })
 
-  it('모양이 계약과 다른 짐은 버린다', async () => {
+  it('drops a payload whose shape differs from the contract', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const f = fakeIpc()
     const client = createSettingsClient(f.ipc)
@@ -164,8 +164,8 @@ describe('settingsClient — 키마다 rev', () => {
   })
 })
 
-describe('settingsClient — 구독자', () => {
-  it('구독하자마자 지금까지의 값을 받고, 그 뒤로는 값이 달라진 키만 받는다', async () => {
+describe('settingsClient — subscribers', () => {
+  it('gets the values so far right on subscribing, and after that only the keys whose values changed', async () => {
     const f = fakeIpc()
     const client = createSettingsClient(f.ipc)
     client.install()
@@ -186,8 +186,8 @@ describe('settingsClient — 구독자', () => {
   })
 })
 
-describe('settingsClient — 쓰기 통과', () => {
-  it('set 은 settings_set {key,value} 로 가고, 바뀐 답은 같은 규칙으로 적용한다', async () => {
+describe('settingsClient — writes pass through', () => {
+  it('set goes as settings_set {key,value}, and a changed answer is applied by the same rule', async () => {
     const f = fakeIpc()
     f.writeAnswers.set('settings_set', { rev: 4, key: 'a', value: '15px', changed: true })
     const client = createSettingsClient(f.ipc)
@@ -198,7 +198,7 @@ describe('settingsClient — 쓰기 통과', () => {
     expect(client.get('a')).toBe('15px')
   })
 
-  it('changed:false 답도 더 큰 rev 면 놓친 알림 탓에 낡은 값을 바로잡는다', async () => {
+  it('even a changed:false answer corrects a stale value caused by a missed notice when its rev is larger', async () => {
     const f = fakeIpc()
     const client = createSettingsClient(f.ipc)
     client.install()
@@ -212,7 +212,7 @@ describe('settingsClient — 쓰기 통과', () => {
     expect(client.get('a')).toBe('new')
   })
 
-  it('changed:false 답이라도 그 키에 적용한 rev 이하면 덮지 않는다', async () => {
+  it('even a changed:false answer does not overwrite at or below the rev applied to that key', async () => {
     const f = fakeIpc()
     const client = createSettingsClient(f.ipc)
     client.install()
@@ -225,7 +225,7 @@ describe('settingsClient — 쓰기 통과', () => {
     expect(client.get('a')).toBe('newer')
   })
 
-  it('reset 은 settings_reset {key} 로 가고, changed 항목을 적용한다', async () => {
+  it('reset goes as settings_reset {key}, and applies the changed entries', async () => {
     const f = fakeIpc()
     f.writeAnswers.set('settings_reset', {
       rev: 8,
@@ -240,18 +240,18 @@ describe('settingsClient — 쓰기 통과', () => {
     expect(client.get('chat.style.b')).toBeUndefined()
   })
 
-  it('셸의 거절(쓰기 미개방 등)은 부른 쪽으로 그대로 reject 한다', async () => {
+  it('a shell refusal (writes not open yet etc.) is rejected to the caller as is', async () => {
     const f = fakeIpc()
     const client = createSettingsClient(f.ipc)
     f.ipc.invoke = async () => {
-      throw '설정 쓰기가 아직 열리지 않았다'
+      throw 'settings writes are not open yet (before shell setup)'
     }
-    await expect(client.set('a', '1px')).rejects.toBe('설정 쓰기가 아직 열리지 않았다')
+    await expect(client.set('a', '1px')).rejects.toBe('settings writes are not open yet (before shell setup)')
   })
 })
 
-describe('settingsClient — 수명', () => {
-  it('dispose 는 unlisten 을 부르고, 그 뒤 알림 · 당기기 답을 칠하지 않는다', async () => {
+describe('settingsClient — lifetime', () => {
+  it('dispose calls unlisten, and after that notices and pull answers do not paint', async () => {
     const f = fakeIpc()
     const client = createSettingsClient(f.ipc)
     const dispose = client.install()
@@ -267,7 +267,7 @@ describe('settingsClient — 수명', () => {
     expect(client.get('b')).toBeUndefined()
   })
 
-  it('등록이 끝나기 전에 dispose 되면 등록을 받자마자 풀고 당기지 않는다', async () => {
+  it('when disposed before registration finishes, it releases the registration as soon as it arrives and does not pull', async () => {
     const f = fakeIpc()
     const client = createSettingsClient(f.ipc)
     const dispose = client.install()

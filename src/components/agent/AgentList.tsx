@@ -1,22 +1,13 @@
-//! ★react-arborist 부활(ADR-0072)★: 평면 목록에서 트리로 복귀 — parent_id 로 자식을 부모 밑에 중첩(1단).
-//!   드래그로 onMove →
-//!   reparentProfile command(§5 — 사람 드래그·LLM 호출이 같은 핸들). 낙관 갱신 없음: 백엔드 broadcast 가
-//!   목록을 새로 그린다(rename 과 동형). 행 클릭·더블클릭·우클릭 메뉴·인라인 rename·in-flight 가드는 평면
-//!   목록과 동일 로직을 NodeRenderer 안에서 그대로 쓴다(리그레션 금지).
+//! ★react-arborist revival (ADR-0072)★: children nest under their parent via parent_id (one level). Drag calls onMove → reparentProfile (§5 — human drag and LLM calls share the handle). No optimistic update: the backend broadcast
+//!   redraws the list (same as rename). Row click, double-click, right-click menu, inline rename and the in-flight guard behave as in the flat list, inside NodeRenderer.
 //!
-//! ★상태 = 색이 아니라 모양(아이콘)★(ADR-0062): e-ink(흑백)에서도 상태가 구분되도록 색 리터럴 대신
-//! statusGlyphIcon 으로 모양을 고른다. ◐(입력대기)는 어휘로만 정의(백엔드 신호 없어 절대 점등 안 함).
+//! ★State = shape, not color (icon)★ (ADR-0062): state stays distinguishable on e-ink (monochrome) by choosing the shape via statusGlyphIcon, not color literals. ◐ (awaiting input) is vocabulary only (no backend signal, never lit).
 //!
-//! ★표시명 = display_name override ?? cwd basename(프론트 파생, ADR-0061 리치화)★: 프로필 표시명 override
-//! (display_name)가 있으면 그대로, 없으면 cwd 의 마지막 세그먼트를 쓴다(공용 basename 유틸 — PresetPalette
-//! 표시명과 단일 출처). cwd 미노출(요구: name 만, cwd 표시 안 함).
+//! ★Display name = display_name override ?? cwd basename (frontend-derived, ADR-0061)★ (shared basename util — single source with PresetPalette). cwd is not shown (name only).
 //!
-//! ★행(ROW) 우클릭 메뉴만 소유(ADR-0064)★: 옛 pane 배경 메뉴("에이전트 생성" 프리셋 픽커) + pane
-//! stopPropagation 은 제거됐다 — pane 배경 우클릭은 상위 통합 슬롯 메뉴로 버블(agent_list 전용
-//! "에이전트 생성" = agentlist.createAgent command + 공통 슬롯 ops). 행 우클릭만 stopPropagation 으로
-//! 가로채 item-targeted 메뉴(활성화/열기/종료/이름변경/삭제)를 띄운다(VS Code view/item/context 결).
-//! 조작은 agentClient / viewStore(백엔드 권위 invoke→emit)로만 흐른다 — raw invoke/ptyApi 없음(ADR-0011).
-//! 재시작은 대응 command 부재 → "준비 중" 비활성.
+//! ★Owns only the ROW right-click menu (ADR-0064)★: a pane-background right-click bubbles to the parent unified slot menu (agent_list "create agent" = agentlist.createAgent command + common slot ops); only a row right-click is intercepted
+//! with stopPropagation to show the item-targeted menu (activate/open/kill/rename/delete). Actions flow only through agentClient / viewStore (backend-authoritative invoke→emit) — no raw invoke/ptyApi (ADR-0011).
+//! Restart has no matching command → disabled as "coming soon".
 
 import { useEffect, useRef, useState } from 'react'
 import { Tree, type NodeRendererProps } from 'react-arborist'
@@ -32,14 +23,13 @@ import { isFailureBlocked, rowGlyphColor, rowGlyphIcon, rowPhase } from './statu
 import { failureLine } from './failureKinds'
 import { useBlurOnDragRegionPress } from '../layout/titleRow/dragRegion'
 import { t } from '../../i18n'
-// 「답을 기다리는 중」기호의 회전(클래스 `engram-glyph-spin`). 키프레임은 스타일시트가 소유한다.
+// Rotation of the "waiting for an answer" glyph (class `engram-glyph-spin`). The stylesheet owns the keyframes.
 import './agentGlyph.css'
 
-// 상태 매핑의 SSOT 는 statusGlyph.ts 한 곳이다(react-arborist 를 끌고 오는 이 모듈 없이 headless 로 재려고
-//   분리했다). 여기 re-export 는 `from './AgentList'` 를 쓰는 기존 importer 를 위한 통로일 뿐이다.
+// The SSOT for the status mapping is statusGlyph.ts alone (split out so it can be measured headless without pulling in react-arborist); this re-export is only for existing `from './AgentList'` importers.
 export { statusGlyphColor, statusGlyphIcon } from './statusGlyph'
 
-/** 행 우클릭 메뉴 — react-arborist 가상화로 row 가 unmount 될 수 있어 NodeApi 대신 primitive snapshot 만 든다. */
+/** Row right-click menu — react-arborist virtualization can unmount rows, so it holds only a primitive snapshot, not a NodeApi. */
 type RowMenu = {
   x: number
   y: number
@@ -47,10 +37,7 @@ type RowMenu = {
   kind: 'running' | 'reserved'
 }
 
-/**
- * A row's action failure, untranslated — the message is made where it is shown (`rowErrorText`), so it follows a language
- * switch (ADR-0373). `err` is the raw error as text.
- */
+/** A row's action failure, untranslated — the message is made where shown (`rowErrorText`) so it follows a language switch (ADR-0373). `err` is the raw error as text. */
 type RowError =
   | { key: 'agent.openFailedNoSlot' | 'agent.openFailedNoEmptySlot' }
   | {
@@ -68,61 +55,52 @@ function rowErrorText(error: RowError): string {
   return 'err' in error ? t(error.key, { err: error.err }) : t(error.key)
 }
 
-/** react-arborist 행 높이·들여쓰기(px). */
+/** react-arborist row height and indent (px). */
 const ROW_HEIGHT = 28
 const INDENT = 12
 
 export default function AgentList() {
   const rowMenuRef = useRef<HTMLDivElement>(null)
   const [rowMenu, setRowMenu] = useState<RowMenu | null>(null)
-  // ★react-arborist(react-window)는 명시 width/height 를 요구★(가상화 스크롤). ResizeObserver 로 컨테이너
-  //   실측을 추적하되, jsdom(테스트)엔 ResizeObserver 가 없어 콜백이 안 돌 수 있으므로 초기값을 비-0 으로
-  //   둬 트리가 첫 렌더부터 행을 그린다(옛 AgentTree 동형 — 테스트가 data-agent-row 를 관측).
+  // ★react-arborist (react-window) requires explicit width/height★: track the container's measured size with ResizeObserver; jsdom has no ResizeObserver, so the initial value is non-zero and rows draw from the first render (tests observe data-agent-row).
   const treeContainerRef = useRef<HTMLDivElement>(null)
   const [dimensions, setDimensions] = useState({ width: 240, height: 400 })
-  // ★ref = 권위적 double-fire 가드, state(busyIds) = 시각(disabled/opacity)★ (PresetPalette 패턴 동형):
-  //   useState 가드만으로는 re-render commit 전 두 번째 호출이 stale closure 로 busyIds 를 아직 비어있게 읽어
-  //   둘 다 통과하는 창이 있다(빠른 더블클릭). ref 는 동기 mutable 이라 같은 tick 두 번째 호출도 즉시 차단한다.
-  //   그래서 busyRef 가 실제 중복 발화를 막고, busyIds(state)는 순수 시각 표시(disabled/opacity)로만 병행한다.
+  // ★ref = authoritative double-fire guard, state (busyIds) = visuals (disabled/opacity)★: a useState guard alone lets a fast double-click pass twice before the re-render commits (stale closure with busyIds empty);
+  //   a ref is synchronously mutable and blocks the same-tick second call.
   const busyRef = useRef<Set<string>>(new Set())
   const [busyIds, setBusyIds] = useState<Set<string>>(new Set())
-  // 액션 실패 메시지 — 토스트/StatusBar 가 없어 행 옆 인라인 표시(AgentTree MAJOR-3 패턴).
+  // Action failure message — there is no toast/StatusBar, so it shows inline next to the row.
   const [errorById, setErrorById] = useState<Record<string, RowError>>({})
-  // ★활성화가 거절당한 행★ — 「마지막 실패」기록의 *대역*이 아니라 이 화면이 직접 받은 답이다.
-  //   백엔드는 세션이 생기는 순간 status 를 낙관적으로 Running 으로 올리고 프로세스가 죽어 관측될
-  //   때까지 그대로 둔다 → 거절을 이미 손에 쥔 뒤에도 몇 초간 초록이 남았다(실측 2026-08-24).
-  //   그래서 기록(lastFailure)이 도착하기를 기다리지 않고 이 집합이 즉시 금지 표식을 세운다.
-  //   ★errorById 와 합치지 않는 이유★: 그건 아무 액션(종료·열기·이름변경) 실패나 담는 통이라,
-  //   섞으면 이름 변경 한 번 실패한 행이 "못 여는 항목"으로 뒤바뀐다. 활성화 경로만 여기 적는다.
+  // ★Rows whose activation was refused★ — the answer this screen received directly, not a stand-in for the "last failure" record: the backend optimistically raises status to Running once a session exists and leaves it until the process death is observed,
+  //   so green stayed for seconds after the refusal was in hand; this set raises the forbidden marker immediately.
+  //   ★Not merged with errorById★: that one holds any action's failure (kill/open/rename), so merging would make a row whose rename failed an "unopenable" item. Only the activation path writes here.
   const [activationRejectedIds, setActivationRejectedIds] = useState<Set<string>>(new Set())
 
-  // ★인라인 편집 로컬 상태(프론트 전용 — 백엔드 권위 이름과 별개의 임시 draft, TabBar 패턴)★:
-  //   확정(Enter/blur) 시에만 renameProfile.
+  // ★Inline-edit local state (frontend-only draft, separate from the backend-authoritative name)★:
+  //   renameProfile only on commit (Enter/blur).
   const [editingId, setEditingId] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
   // ADR-0373: the name the edit started from — the "unchanged" check compares with this, not with a name derived again at
   //   commit, which can change under the edit (a language switch turns a blank-path name into another language's word).
   const [draftStart, setDraftStart] = useState('')
-  // ★안정 ref★: 편집 진입 시점에만 정확히 1회 select() — 인라인 콜백 ref 는 매 렌더 재부착돼 타이핑을 깬다(TabBar FIX 1).
+  // ★Stable ref★: select() exactly once on entering edit — an inline callback ref re-attaches every render and breaks typing.
   const inputRef = useRef<HTMLInputElement>(null)
   useEffect(() => {
     if (editingId !== null) inputRef.current?.select()
   }, [editingId])
-  // 창 끌 자리(제목 줄) 누름에도 편집이 끝난다 — 확정은 onBlur 그대로.
+  // Pressing the window-drag area (title row) also ends the edit — commit stays on onBlur.
   useBlurOnDragRegionPress(editingId !== null, inputRef)
 
   const agents = useAgentStore(s => s.agents)
   const profiles = useAgentStore(s => s.profiles)
   const selectedAgentId = useAgentStore(s => s.selectedAgentId)
   const setSelectedAgent = useAgentStore(s => s.setSelectedAgent)
-  // ★둘 다 받기 전엔 트리 영역에 아무것도 그리지 않는다★: 빈 배열은 「아직 못 받음」과 「정말 비었음」을 못 가른다 —
-  //   새 창에서 목록이 오기 전 빈 목록 안내가 잠깐 보였다(사용자 실측 2026-10-19). 한쪽만으로 그려도 틀린 중간
-  //   화면이다 — 실행중 행의 표시명 · 부모 묶음은 프로필에서 오고, 명부 없이는 실행중이 예약으로 보인다.
-  //   데몬 연결 실패는 이 칸이 아니라 창 위 연결 실패 알림(`ConnectionNotice`)이 알린다(ADR-0148 의 두 플래그).
+  // ★Draw nothing in the tree area until both have arrived★: an empty array cannot tell "not received yet" from "really empty" (a new window briefly showed the empty-list notice). Drawing from only one is wrong — display name and parent grouping come
+  //   from profiles, and without the roster a running agent looks reserved. A daemon connection failure is shown by the window-level `ConnectionNotice` (the two flags of ADR-0148).
   const listLoaded = useAgentStore(s => s.agentsLoaded && s.profilesLoaded)
 
   const forest: AgentTreeNode[] = mergeTreeNodes(profiles, agents)
-  // 트리 존재/부재·메뉴 stale 판정용 평탄화(1단이라 루트 + 각 children). react-arborist 는 forest 를 직접 순회.
+  // Flattened for tree presence/absence and menu staleness checks (one level, so roots + each children). react-arborist walks the forest directly.
   const flatRows: AgentTreeNode[] = forest.flatMap(n => [n, ...n.children])
 
   useEffect(() => {
@@ -130,22 +108,22 @@ export default function AgentList() {
     if (!el || typeof ResizeObserver === 'undefined') return
     const ro = new ResizeObserver(entries => {
       const { width, height } = entries[0].contentRect
-      // 0 은 무시(레이아웃 전/언마운트 순간) — 마지막 유효 크기 유지.
+      // Ignore 0 (before layout / at unmount) — keep the last valid size.
       if (width > 0 && height > 0) setDimensions({ width: Math.floor(width), height: Math.floor(height) })
     })
     ro.observe(el)
     return () => ro.disconnect()
   }, [])
 
-  // 행 메뉴 바깥 클릭으로 닫기(자기 ref 밖 mousedown 이면 닫는다). 항목 클릭의 mousedown 이 먼저 메뉴를 닫아
-  //   onClick 이 무산되는 것을 막기 위해 자기 컨테이너 내부 클릭은 예외(SlotContextMenu 가드 동형).
+  // Close on outside click of the row menu (mousedown outside its own ref closes it). Clicks inside the container are exempt so an
+  //   item's mousedown does not close the menu first and swallow onClick (same guard as SlotContextMenu).
   useEffect(() => {
     if (!rowMenu) return
     const h = (e: MouseEvent) => {
       const t = e.target as Node
       if (rowMenuRef.current && !rowMenuRef.current.contains(t)) setRowMenu(null)
     }
-    // 캡처 단계 — 창 끌 자리 누름은 거품 단계에 닿지 않는다(`layout/titleRow/dragRegion.ts`).
+    // Capture phase — pressing the window-drag area never reaches the bubble phase (`layout/titleRow/dragRegion.ts`).
     document.addEventListener('mousedown', h, true)
     return () => document.removeEventListener('mousedown', h, true)
   }, [rowMenu])
@@ -159,9 +137,7 @@ export default function AgentList() {
     return () => document.removeEventListener('keydown', h)
   }, [rowMenu])
 
-  // ★타깃 사라지면 메뉴 닫기★: rowMenu 상태는 대상 행보다 오래 산다 — 목록이 바뀌어(kill/deleteProfile/
-  //   마지막 에이전트 제거로 empty 전이) 대상 agentId 가 트리에서 빠져도 rowMenu 는 그대로 남는다. 대상이
-  //   flatRows 에서 사라지면 즉시 null 로 리셋해 떠난 agentId 를 겨눈 메뉴가 절대 렌더되지 않게 한다.
+  // ★Close the menu when the target disappears★: rowMenu outlives its row (kill/deleteProfile/last agent removed → empty transition); once the target leaves flatRows reset to null so a menu aimed at a departed agentId is never rendered.
   useEffect(() => {
     if (rowMenu && !flatRows.some(r => r.id === rowMenu.agentId)) setRowMenu(null)
   }, [rowMenu, flatRows])
@@ -184,7 +160,7 @@ export default function AgentList() {
     setActivationRejectedIds(prev => (prev.has(id) ? prev : new Set(prev).add(id)))
   const clearActivationRejected = (id: string) =>
     setActivationRejectedIds(prev => {
-      if (!prev.has(id)) return prev // 참조 유지 = 불필요한 재렌더 없음.
+      if (!prev.has(id)) return prev // keep the reference = no needless re-render.
       const next = new Set(prev)
       next.delete(id)
       return next
@@ -198,14 +174,12 @@ export default function AgentList() {
       return next
     })
 
-  // 예약 노드 활성화(spawnProfile) — AgentTree 와 동일 restore UX(리그레션 금지).
-  // ★행이 말하는 것을 답에 맞춘다★: 더블클릭 → 답이 올 때까지 `pending`(스피너) → 거절이면 즉시
-  //   `rejected`(금지 표식), 성공이면 표식을 걷고 평소 상태 기호로 돌아간다. 초록은 활성화가 실제로
-  //   성공한 뒤에만 나온다.
+  // Activate a reserved node (spawnProfile) — same restore UX as AgentTree.
+  // ★Make the row say what the answer says★: double-click → `pending` (spinner) until the answer arrives → on refusal `rejected` (forbidden marker) at once, on success drop the marker and return to the usual status glyph. Green only after activation actually succeeded.
   const activateReserved = (agentId: string) => {
     if (!beginInFlight(agentId)) return
     clearError(agentId)
-    // 재시도 시작 = 지난 거절은 더 이상 지금의 사실이 아니다(스피너가 그 자리를 받는다).
+    // Retry start = the last refusal is no longer the current fact (the spinner takes its place).
     clearActivationRejected(agentId)
     agentClient
       .spawnProfile(agentId, false)
@@ -213,16 +187,14 @@ export default function AgentList() {
       .catch(e => {
         console.error('[spawnProfile]', e)
         setError(agentId, { key: 'agent.activateFailed', err: String(e) })
-        // 「실패」배지를 띄우는 바로 그 자리 — 기호도 같은 순간에 갈린다(둘이 어긋나던 것이 결함이었다).
+        // The very spot that raises the "failed" badge — the glyph switches at the same moment (the two disagreeing was the defect).
         markActivationRejected(agentId)
       })
       .finally(() => endInFlight(agentId))
   }
 
-  // "열기" = 이 에이전트를 이 창 활성 뷰의 대상 슬롯에 배정(기존 assign 경로 재사용 — AgentTree 와 동일).
-  //   ★대상 슬롯 = selectOpenTarget(순수 함수)★: 기본은 포커스 슬롯이지만, 포커스가 제어 슬롯(트리/팔레트)·모르는
-  //   내용 슬롯이거나 focus=null 인 엣지 상태에선 그것을 덮어쓰지 않고 첫 빈 슬롯으로 폴백한다(제어 슬롯 포커스 제외 —
-  //   LayoutLeaf click-to-focus 게이트의 안전망). 빈 슬롯도 없으면 배정 안 함(실패 토스트 — 클로버 금지).
+  // "Open" = assign this agent to the target slot of this window's active view (reuses the existing assign path — same as AgentTree).
+  //   ★Target slot = selectOpenTarget (pure function)★: the focused slot by default; when focus is on a control slot (tree/palette), an unknown content slot, or focus=null it falls back to the first empty slot instead of overwriting (safety net for the LayoutLeaf click-to-focus gate); with no empty slot nothing is assigned (never clobber).
   const openInFocusedSlot = (agentId: string) => {
     if (!beginInFlight(agentId)) return
     const vs = useViewStore.getState()
@@ -230,7 +202,7 @@ export default function AgentList() {
     const view = selectView(vs, viewId)
     if (!viewId || !view) {
       setError(agentId, { key: 'agent.openFailedNoSlot' })
-      endInFlight(agentId) // 조기 반환에도 lock 해제(영구 잠금 방지)
+      endInFlight(agentId) // release the lock on early return too (prevents a permanent lock)
       return
     }
     const slotId = selectOpenTarget(view.layout, view.focusedSlotId, view.foreignSlots)
@@ -261,8 +233,7 @@ export default function AgentList() {
       .finally(() => endInFlight(agentId))
   }
 
-  // 예약 취소(삭제) — 예약 프로필을 데몬에서 제거(agentClient.deleteProfile). 다른 UI 로는 stale 예약 프로필을
-  //   지울 수 없어 이 항목이 유일 경로(AgentTree reserved-row 의 "예약 취소" 리그레션 복원).
+  // Cancel reservation (delete) — remove the reserved profile from the daemon (agentClient.deleteProfile); no other UI can delete a stale reserved profile.
   const cancelReserved = (agentId: string) => {
     if (!beginInFlight(agentId)) return
     clearError(agentId)
@@ -276,10 +247,8 @@ export default function AgentList() {
       .finally(() => endInFlight(agentId))
   }
 
-  // ★드래그 재부모화(ADR-0072 §5 — 사람 드래그·LLM 호출이 같은 reparentProfile 핸들)★: react-arborist onMove
-  //   가 dropParentId(null=루트) 를 준다. 낙관 갱신 없음 — 백엔드 ReparentProfile → ProfileListUpdated
-  //   broadcast 가 forest 를 새로 그린다(rename 동형). invalid move(cycle/self/2단/존재하지 않는 parent)는
-  //   백엔드가 Error 로 거부 → 트리는 옛 배치 유지 + 인라인 에러. 동기 가드로 연타 중복 발화 차단.
+  // ★Drag reparent (ADR-0072 §5 — human drag and LLM calls share reparentProfile)★: react-arborist onMove gives dropParentId (null=root). No optimistic update — ReparentProfile → ProfileListUpdated redraws the forest. An invalid move (cycle/self/2-level/nonexistent parent)
+  //   is rejected by the backend with Error → the tree keeps the old layout + inline error. A sync guard blocks duplicate fires from rapid clicks.
   const reparent = (childId: string, parentId: string | null) => {
     const node = flatRows.find(r => r.id === childId)
     const currentParentId = forest.find(root => root.children.some(c => c.id === childId))?.id ?? null
@@ -296,11 +265,10 @@ export default function AgentList() {
       .finally(() => endInFlight(childId))
   }
 
-  // Display name = display_name override ?? cwd basename (ADR-0061 enrichment — tree rename), the same precedence as
-  //   PresetPalette. Starting a rename seeds the draft and `draftStart` with it.
+  // Display name = display_name override ?? cwd basename (ADR-0061), same precedence as PresetPalette. Starting a rename seeds the draft and `draftStart` with it.
   const displayNameOf = (node: AgentTreeNode): string => node.displayName ?? basename(node.cwd)
 
-  // 행 메뉴는 호출부에서 닫는다.
+  // The row menu is closed by the caller.
   const beginEdit = (node: AgentTreeNode) => {
     const name = displayNameOf(node)
     setEditingId(node.id)
@@ -308,13 +276,9 @@ export default function AgentList() {
     setDraftStart(name)
   }
   const cancelEdit = () => setEditingId(null)
-  // ★멱등★: editingId 가 이 행이 아니면 즉시 return — Enter 가 언마운트→blur→commitEdit 재발화를 막는다(TabBar 동형).
-  //   동기 중복 발화 차단은 beginInFlight(busyRef).
-  // ★성공 시 refreshProfiles() — spawnProfile/deleteProfile 과 대칭★: 표시명 반영은 원칙적으로 백엔드
-  //   RenameProfile → ProfileListUpdated broadcast 로 온다(낙관 갱신 X). 그러나 rename 만 이 refetch 안전망이
-  //   없으면 broadcast 를 놓쳤을 때(재연결 창·이벤트 유실) 이 창만 stale 표시명으로 남는다 — activateReserved/
-  //   cancelReserved 는 이미 성공 시 refreshProfiles 로 권위 목록을 다시 끌어와 대칭을 맞춘다. rename 도 같은
-  //   안전망을 달아 세 경로를 일관되게 만든다(broadcast 가 정상 도달하면 같은 전체 목록 재적용이라 무해·멱등).
+  // ★Idempotent★: if editingId is not this row, return at once — stops Enter from re-firing commitEdit via unmount→blur (same as TabBar). Sync duplicate-fire blocking is beginInFlight(busyRef).
+  // ★refreshProfiles() on success — symmetric with spawnProfile/deleteProfile★: the display name normally arrives via RenameProfile → ProfileListUpdated (no optimistic update), but a missed broadcast (reconnect window, lost event) would leave only this window stale;
+  //   activateReserved/cancelReserved already re-pull the authoritative list on success. A normal broadcast re-applies the same full list — harmless and idempotent.
   const commitEdit = (node: AgentTreeNode) => {
     if (editingId !== node.id) return
     const trimmed = draft.trim()
@@ -365,19 +329,18 @@ export default function AgentList() {
             disabled: busyIds.has(rowMenu.agentId),
             action: () => killAgentGuarded(rowMenu.agentId),
           },
-          // ad-hoc(프로필 없는 running)도 항목을 열되, 백엔드가 no-profile 이면 Error 를 인라인 표시한다(날조 아님).
+          // ad-hoc (running without a profile) also opens the item, but if the backend says no-profile it shows the Error inline (not fabricated).
           {
             id: 'rename',
             label: t('agent.rowRename'),
             disabled: busyIds.has(rowMenu.agentId) || !menuNode,
             action: () => menuNode && beginEdit(menuNode),
           },
-          // ★준비 중(백엔드 command 없음)★: 재시작 전용 command 가 protocolClient 에 없다(kill→re-spawn 조합뿐).
-          //   날조 금지 — 실제 command 가 생기면 배선한다(ADR-0011).
+          // ★Coming soon (no backend command)★: protocolClient has no dedicated restart command (only kill→re-spawn). Do not fabricate — wire it when a real command exists (ADR-0011).
           { id: 'restart', label: t('agent.rowRestart'), disabled: true, action: () => {} },
         ]
 
-  // NodeRenderer — 컴포넌트 안에 두어 select/busy/error/편집 핸들러를 클로저로 접근(옛 AgentTree 동형).
+  // NodeRenderer — kept inside the component so the select/busy/error/edit handlers are reached by closure.
   const NodeRenderer = ({ node, style, dragHandle }: NodeRendererProps<AgentTreeNode>) => {
     const data = node.data
     const isReserved = data.kind === 'reserved'
@@ -385,20 +348,16 @@ export default function AgentList() {
     const rowError = errorById[data.id]
     const err = rowError === undefined ? undefined : rowErrorText(rowError)
     const hasChildren = data.children.length > 0
-    // ADR-0173: 문구는 종류 표에서만 나온다(컴포넌트에 박지 않는다).
+    // ADR-0173: wording comes only from the kind table (not hard-coded in the component).
     const failureTitle = isFailureBlocked(data.status, data.lastFailure)
       ? failureLine(data.lastFailure)
       : null
-    // ★한 판정(phase)이 기호·색·hover 를 함께 몬다★(ADR-0173 의 성질을 시연 층으로 이어받는다):
-    //   답을 기다리는 동안(`pending`)은 상태 기호를 그리지 않고, 활성화가 거절당한 뒤(`rejected`)는
-    //   기록이나 프로세스 사망 관측을 기다리지 않고 금지 표식으로 간다. 그 밖은 옛 두 축 그대로.
-    //   ★in-flight 채널을 하나로 둔다★: `isBusy` 는 이 행에 건 요청 전부(활성화·종료·열기·이름변경·
-    //   이동)를 담는 기존 표식이고, 그 구간엔 어느 것이든 행의 상태가 답을 기다리는 중이다 —
-    //   두 번째 장부를 만들면 그것과 opacity/cursor 가 갈라진다.
+    // ★One verdict (phase) drives glyph, color and hover together★ (ADR-0173's property in the presentation layer): while waiting for an answer (`pending`) no status glyph is drawn; after activation is refused (`rejected`) it goes to the forbidden marker
+    //   without waiting for the record or the observed process death. ★Keep a single in-flight channel★: `isBusy` is the existing marker for every request on this row (activate, kill, open, rename, move) — a second ledger could diverge from opacity/cursor.
     const phase = rowPhase(isBusy, activationRejectedIds.has(data.id))
     const glyph = rowGlyphIcon(phase, data.status, data.lastFailure)
-    // hover 도 같은 phase 를 따른다 — 기다리는 중에 옛 실패 문구가 뜨면 기호와 말이 어긋난다.
-    //   거절 직후엔 `err`(활성화 실패 인라인)이 이미 맨 앞이라 사유가 그대로 나온다.
+    // Hover follows the same phase — an old failure text appearing while waiting would make glyph and words disagree.
+    //   Right after a refusal `err` (inline activation failure) is already first, so the reason shows as is.
     const rowTitle =
       phase === 'pending'
         ? t('agent.glyphPending')
@@ -407,25 +366,20 @@ export default function AgentList() {
       <div
         ref={dragHandle}
         data-agent-row={data.id}
-        // ★선택 상태의 기계 판독 채널★: 배경색만으로는 CDP·LLM 셀렉터가 선택을 못 읽고(`docs/tracking.md` T-77
-        //   의 「트리 선택 상태」 갭), 색만 바뀌는 회귀를 테스트가 못 잡는다.
-        //   ★`aria-selected` 를 여기 달지 말 것★: 이 div 에는 role 이 없어 ARIA 상 무효이고, react-arborist 가
-        //   *부모* 행에 이미 `role="treeitem" + aria-selected` 를 건다 — 둘이 갈리면 AT 는 바깥 값을 읽어
-        //   오히려 틀린 상태를 읽는다(리뷰 지적 2026-08-23). 기계 판독은 아래 data 속성이 진다.
+        // ★Machine-readable channel for selection state★: background color alone is unreadable to CDP/LLM selectors (the "tree selection state" gap of `docs/tracking.md` T-77) and tests miss a color-only regression.
+        //   ★Do not put `aria-selected` here★: this div has no role so it is invalid ARIA, and react-arborist already sets `role="treeitem" + aria-selected` on the parent row — if the two differ AT reads the outer value and the wrong state.
         data-selected={selectedAgentId === data.id ? 'true' : 'false'}
         style={{
-          ...style, // react-arborist 가상화 위치/높이(top/height). 들여쓰기는 아래 paddingLeft 로 level 반영.
+          ...style, // react-arborist virtualization position/height (top/height). Indent is reflected by paddingLeft below per level.
           display: 'flex',
           alignItems: 'center',
           gap: '6px',
-          // 토글이 없는 leaf 도 부모와 글리프 정렬이 맞게 토글 폭만큼 고정 확보.
+          // Fix the toggle width so a leaf without a toggle still aligns its glyph with its parent.
           paddingLeft: `${12 + node.level * INDENT}px`,
           paddingRight: '12px',
           cursor: isBusy ? 'wait' : 'pointer',
-          // ★`--surface-elevated` 를 쓰지 말 것★: light(#ffffff)·e-ink(#f0f0f0) 에서 이 패널 배경
-          //   (`--bg-secondary` = #fff · #f0f0f0)과 값이 같아 선택 표시가 통째로 사라진다(dark 만
-          //   #141414 vs #262626 로 갈려서 화면 대조로는 안 잡힌다 — 실측 2026-08-23).
-          //   `--text` 를 섞는 이유 = 그 토큰은 정의상 배경과 대비되므로 세 테마 모두에서 차이가 남는다.
+          // ★Do not use `--surface-elevated`★: in light (#ffffff) and e-ink (#f0f0f0) it equals this panel background (`--bg-secondary`), so the selection mark vanishes (only dark differs, so a visual check misses it).
+          //   Mixing in `--text` works because that token contrasts with the background by definition, so a difference remains in all three themes.
           background:
             selectedAgentId === data.id
               ? 'color-mix(in srgb, var(--text) 12%, var(--bg-secondary))'
@@ -438,29 +392,24 @@ export default function AgentList() {
           userSelect: 'none',
         }}
         onClick={() => setSelectedAgent(data.id)}
-        // 실행중 행 → no-op(AgentTree 동작 유지).
+        // Running row → no-op (keeps AgentTree behavior).
         onDoubleClick={() => {
           if (data.kind === 'reserved') activateReserved(data.id)
         }}
-        // ★인라인 편집 키(Enter 확정 / Escape 취소)는 입력이 아니라 이 행 div 에서 처리★: react-window
-        //   가상화 안에서 조건부로 mount 되는 <input> 의 onKeyDown 은 React 19 이벤트 위임이 2번째 이후
-        //   재-mount 되는 root 에 keydown 리스너를 붙이지 못해 synthetic 이 안 뜬다(react-window+jsdom 상호작용
-        //   — click/blur/change 는 정상, keydown 만). 항상 렌더되는 이 행 div 에 핸들러를 두면 초기 mount 부터
-        //   keydown 이 등록돼 안정적으로 동작한다(input 키는 버블로 여기 올라옴). 편집 중일 때만 stopPropagation
-        //   으로 react-arborist 키 네비게이션·전역 키바인딩 누수를 막는다(TabBar 버블 차단과 동형).
+        // ★Inline-edit keys (Enter commit / Escape cancel) are handled on this row div, not the input★: inside react-window virtualization a conditionally mounted <input>'s onKeyDown does not fire synthetic events — React 19 event delegation fails to attach a keydown
+        //   listener to the re-mounted root from the 2nd time on (a react-window+jsdom interaction; click/blur/change are fine). This always-rendered row div registers keydown from the initial mount; input keys bubble here. Only while editing does stopPropagation
+        //   stop react-arborist key navigation and global keybindings from leaking (same as the TabBar bubble block).
         onKeyDown={e => {
           if (editingId !== data.id) return
           e.stopPropagation()
           if (e.key === 'Enter') commitEdit(data)
           else if (e.key === 'Escape') cancelEdit()
         }}
-        // ★기호가 갈린 행은 hover 도 같이 갈린다(ADR-0173 — 사유는 마우스를 올렸을 때 한 줄)★: 기호와
-        //   같은 판정(`isFailureBlocked`)을 써서 둘이 어긋나지 않게 한다. 액션 실패 인라인 메시지(err)는
-        //   방금 누른 조작의 결과라 그게 더 앞선다.
+        // ★A row whose glyph diverged diverges on hover too (ADR-0173 — the reason is one line on mouse-over)★: same verdict as the glyph (`isFailureBlocked`) so they cannot disagree; the inline action-failure message (err) is the just-pressed control's result and takes precedence.
         title={rowTitle}
         onContextMenu={e => {
           e.preventDefault()
-          e.stopPropagation() // ★행 메뉴가 이긴다(ADR-0064)★: 상위 통합 슬롯 메뉴가 안 뜨게 여기서 멈춘다.
+          e.stopPropagation() // ★the row menu wins (ADR-0064)★: stop here so the parent unified slot menu does not appear.
           setSelectedAgent(data.id)
           setRowMenu({ x: e.clientX, y: e.clientY, agentId: data.id, kind: data.kind })
         }}
@@ -483,46 +432,34 @@ export default function AgentList() {
         >
           {hasChildren ? (node.isOpen ? '▾' : '▸') : ''}
         </span>
-        {/* 상태 = 아이콘 모양(1차 신호). ADR-0062 (색 개정 — e-ink 분리로 색 허용): 활성(Running)은 green
-            (--status-running theme var)으로 *부가* 채색, 그 외는 muted. e-ink 블록이 이 변수를 중립화 →
-            e-ink 에선 모양만 남는다. 색 리터럴은 컴포넌트에 두지 않고 변수로만(ADR-0062 §44).
-            ★색은 span 의 CSS color 가 소유한다★: 아이콘의 stroke·fill 이 둘 다 currentColor 라 그것을
-            따른다 — lucide 의 `color` prop 은 stroke 만 잡아서 채운 원의 fill 이 안 따라온다.
-            data-agent-glyph-shape = DOM 관측 표면: 텍스트 글리프 시절 textContent 가 나르던 상태 판독을
-            아이콘 전환으로 잃지 않게 남긴다(svg 는 글자를 남기지 않는다).
-            ★ADR-0173: 이 자리엔 축이 둘 얹힌다★ — 마지막 실패가 있고 안 떠 있는 행은 상태 모양 대신
-            금지 표식(shape=`blocked`)이 **갈아끼워지고** 색·hover 도 같은 판정을 따라간다. 기호를 둘
-            나란히 두지 않는 것이 그 결정의 요지라, 여기에 두 번째 <span> 을 늘리지 말 것. */}
-        {/* ★role+aria-label 이 있어야 상태가 들린다★: lucide 는 접근성 prop 이 없으면 svg 에 자동으로
-            aria-hidden 을 붙여(node_modules/lucide-react) 아이콘이 접근성 트리에서 통째로 사라진다 —
-            문자 글리프 시절엔 textContent 가 그 역할을 했다. 이게 없으면 Running 행과 Exited 행의
-            읽히는 이름이 완전히 같아진다(리뷰 지적 2026-08-23). */}
+        {/* State = icon shape (primary signal). ADR-0062: active (Running) gets *supplementary* green (--status-running theme var), others muted; the e-ink block neutralizes the variable → only the shape remains. No color literals in the component, variables only (ADR-0062 §44).
+            ★Color is owned by the span's CSS color★: the icon's stroke and fill are both currentColor so they follow it — lucide's `color` prop sets only stroke, so a filled circle's fill would not follow.
+            data-agent-glyph-shape = DOM observation surface: keeps the state readout textContent carried in the text-glyph days (an svg leaves no text).
+            ★ADR-0173: two axes ride this spot★ — a row with a last failure that is not up gets the forbidden marker (shape=`blocked`) **swapped in** instead of the state shape, and color/hover follow the same verdict. Not placing
+            two glyphs side by side is the point of that decision, so do not add a second <span> here. */}
+        {/* ★role+aria-label are needed for the state to be heard★: without accessibility props lucide adds aria-hidden to the svg (node_modules/lucide-react) and the icon vanishes from the accessibility tree — without this a Running row and an Exited row
+            would have the same readable name. */}
         <span
           data-agent-glyph="1"
           data-agent-glyph-shape={glyph.shape}
-          // 회전은 스타일시트가 소유한다(agentGlyph.css) — 기다리는 동안에만 붙는다.
+          // Rotation is owned by the stylesheet (agentGlyph.css) — attached only while waiting.
           className={phase === 'pending' ? 'engram-glyph-spin' : undefined}
           role="img"
-          // ★들리는 이름은 상태 어휘 그대로 둔다★: 마지막 실패의 사유는 행 `title`(hover)이 한 줄로
-          //   나르고 그 문구의 유일한 출처는 종류 표다(failureKinds). 여기에 사유를 한 번 더 얹으면
-          //   같은 문장이 두 표면에서 갈릴 수 있고, 그렇다고 새 문구를 지어내는 것은 날조다.
-          //   기계 판독(테스트·CDP·LLM)은 위 `data-agent-glyph-shape` 가 `blocked` 로 진다.
-          //   ★단 기다리는 동안은 예외★: 그 구간의 `status` 는 아직 답이 아니라 낙관값이라(더블클릭
-          //   직후부터 `Running` 이다) 그대로 읽히면 화면에서 걷어낸 거짓말이 소리로 되살아난다.
+          // ★The heard name stays the state vocabulary as is★: the last failure's reason is carried on one line by the row `title` (hover), whose sole wording source is the kind table (failureKinds); repeating it here could diverge across two surfaces.
+          //   Machine reading (tests, CDP, LLM) is carried by `data-agent-glyph-shape` above as `blocked`. ★Exception while waiting★: `status` is then an optimistic value (`Running` right after the double-click), and reading it as is would revive by sound a lie already removed from the screen.
           aria-label={phase === 'pending' ? t('agent.glyphPending') : data.status}
           aria-busy={phase === 'pending' ? true : undefined}
           style={{
             display: 'flex',
             alignItems: 'center',
-            // ADR-0173: 마지막 실패가 있고 안 떠 있으면 기호·색이 함께 금지 표식으로 갈린다 —
-            //   위 `glyph` 와 같은 판정을 타야 둘이 어긋나지 않는다(시연 층도 같은 phase 를 받는다).
+            // ADR-0173: with a last failure and not up, glyph and color switch together to the forbidden marker — same verdict as `glyph` above.
             color: rowGlyphColor(phase, data.status, data.lastFailure),
             flexShrink: 0,
           }}
         >
           <glyph.Icon size={12} fill={glyph.fill} />
         </span>
-        {/* cwd 는 노출 안 함(title 로만). */}
+        {/* cwd is not shown (title only). */}
         {editingId === data.id ? (
           <input
             data-agent-rename-input={data.id}
@@ -530,8 +467,7 @@ export default function AgentList() {
             autoFocus
             ref={inputRef}
             onChange={e => setDraft(e.target.value)}
-            // ★Enter/Escape 라우팅은 행 div onKeyDown 이 소유★(위 주석 — react-window+React19 keydown 위임
-            //   회피). 여기선 라우팅하지 않고, 키는 버블로 행 div 에 올라간다. blur 확정만 입력이 직접 소유.
+            // ★Enter/Escape routing is owned by the row div onKeyDown★ (comment above — avoids react-window+React19 keydown delegation); keys bubble up there. Only blur commit is owned by the input.
             onBlur={() => commitEdit(data)}
             onClick={e => e.stopPropagation()}
             onDoubleClick={e => e.stopPropagation()}
@@ -551,7 +487,7 @@ export default function AgentList() {
         ) : (
           <span
             data-agent-name="1"
-            // flex:1+minWidth:0 = 행 폭을 채워 ellipsis 가 제대로 걸리게. paddingRight 2px = italic overhang 여유.
+            // flex:1+minWidth:0 = fill the row width so ellipsis applies properly. paddingRight 2px = room for italic overhang.
             style={{
               flex: 1,
               minWidth: 0,
@@ -574,11 +510,8 @@ export default function AgentList() {
   }
 
   return (
-    // ★구조 = 라벨(고정) 바깥 + 트리만 아래 영역★(PresetPalette/AgentMonitoringPicker 동형, ADR-0053):
-    //   라벨은 스크롤 밖 flex 형제로 올려 상단 고정. react-arborist(react-window)는 자기 가상화 스크롤을
-    //   소유하므로 ScrollArea 로 감싸지 않는다(스크롤 소유 충돌 회피 — 옛 flat 목록과 다른 점).
-    //   ★pane 배경 마커 = 이 바깥 flex 컨테이너(data-agent-list)★: pane 배경 우클릭은 상위 통합 슬롯 메뉴로
-    //   버블(ADR-0064 — 옛 자체 배경 메뉴/stopPropagation 제거). 행 우클릭만 행 핸들러가 stopPropagation.
+    // ★Structure = label (fixed) outside + only the tree in the area below★ (same as PresetPalette/AgentMonitoringPicker, ADR-0053): the label is a flex sibling outside the scroll so it stays fixed. react-arborist (react-window) owns its virtualized scroll,
+    //   so it is not wrapped in ScrollArea (scroll-ownership conflict). ★Pane-background marker = this outer flex container (data-agent-list)★: a pane-background right-click bubbles to the parent unified slot menu (ADR-0064); only a row right-click is stopPropagation'd by the row handler.
     <div
       data-agent-list="1"
       data-testid="agent-list"
@@ -591,7 +524,7 @@ export default function AgentList() {
         background: 'var(--bg-secondary)',
       }}
     >
-      {/* 슬롯 콘텐츠 라벨 = 사용자 요청. */}
+      {/* Slot content label = user request. */}
       <div
         data-slot-label="agent-list"
         style={{
@@ -607,11 +540,11 @@ export default function AgentList() {
       >
         {t('agent.treeLabel')}
       </div>
-      {/* ★크기를 재는 칸은 늘 마운트한다★: 위 ResizeObserver effect 는 마운트 때 한 번만 붙는다 — 이 칸을 갈래 안에
-          두면 미수신 · 빈 상태로 뜬 창에서는 끝내 안 붙어 트리가 초기값 크기에 머문다. */}
+      {/* ★The measuring area is always mounted★: the ResizeObserver effect above attaches only once at mount — inside a branch
+          it never attaches in a window that came up unreceived / empty, and the tree stays at the initial size. */}
       <div ref={treeContainerRef} style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
         {!listLoaded ? null : flatRows.length === 0 ? (
-          // ★빈 목록 = 트리 대신 센터링 div★: react-arborist 를 마운트하지 않는다 — 빈 상태엔 스크롤/가상화 표면 없음.
+          // ★Empty list = a centering div instead of the tree★: react-arborist is not mounted — an empty state has no scroll/virtualization surface.
           <div
             style={{
               height: '100%',
@@ -636,24 +569,16 @@ export default function AgentList() {
               rowHeight={ROW_HEIGHT}
               indent={INDENT}
               openByDefault
-              // ★rename 은 우클릭→인라인 input 자체 구현★: react-arborist 내장 edit(onRename) 대신 우리 draft
-              //   상태를 쓰므로 내장 편집은 끈다(중복 편집 UI 방지). 선택 다중선택도 불필요 → 단일선택 유지.
+              // ★rename is our own right-click→inline input★: our draft state replaces react-arborist's built-in edit (onRename), so the built-in is off (no duplicate edit UI); multi-select is not needed → single select kept.
               disableEdit
               disableMultiSelection
-              // ★드래그 불가 = 프로필 없는 노드(ADR-0072 드롭 가드)★: ad-hoc(SpawnByCwd, 프로필 없는 running)은
-              //   reparent 대상 프로필이 없어 백엔드가 no-profile 을 Error 로 거부한다 → 애초에 드래그를 막아
-              //   불필요한 실패 커맨드·에러 토스트를 없앤다(reserved·프로필 있는 running 은 드래그 가능).
+              // ★Not draggable = a node without a profile (ADR-0072 drop guard)★: ad-hoc (SpawnByCwd) has no profile to reparent and the backend rejects no-profile with Error — block the drag up front (reserved and running-with-profile are draggable).
               disableDrag={(data: AgentTreeNode) => !data.hasProfile}
-              // ★1단 상한 + 프로필 유무 + 부모-불변 UI 가드(ADR-0072 · review FIX)★: UI 에서 막는 3가지 —
-              //   ① 부모가 루트 아닌 곳(=자식 밑)으로의 드롭, 또는 이미 자식을 가진 노드를 남의 밑으로 드롭(둘 다
-              //      2단이 됨). leaf 도 children:[] 라 react-arborist 가 isInternal 로 봐 중앙 드롭이 걸리므로 필요.
-              //   ② 프로필 없는 노드(ad-hoc)를 부모로 하는 드롭 — 그 위엔 자식 못 붙임(reparent 대상 프로필 부재).
-              //   ③ 현재 부모와 동일한 부모로의 드롭(루트↔루트 reorder 포함) — 백엔드 정렬은 created_at 기반이라
-              //      reorder 미지원이다. react-arborist 는 same-parent reorder 를 유효 드롭(커서 표시)으로 주지만
-              //      드롭해도 아무 일 없어 혼란 → 유효 드롭처럼 보이지 않게 비활성(onMove 도 이미 no-op 억제).
-              //   ★루트 드롭 정규화★: canDrop 은 루트 드롭 때 parentNode 를 내부 루트 pseudo-node(isRoot,
-              //     level=-1, data={id:ROOT_ID})로 준다(null 이 아님). 그래서 ②·③ 은 실 부모(isRoot 아님)에만
-              //     적용하고, 루트-대상 비교는 dropParentId(루트=null)로 정규화해 판정한다.
+              // ★One-level cap + has-profile + parent-invariant UI guard (ADR-0072)★ — three things blocked in the UI:
+              //   ① a drop onto a non-root parent (= under a child), or dropping a node that already has children under another node (both make two levels). A leaf also has children:[], so react-arborist sees it as isInternal and the center drop applies.
+              //   ② a drop with a profile-less node (ad-hoc) as parent — nothing can attach there.
+              //   ③ a drop onto the same parent as now (including root↔root reorder) — backend ordering is created_at based, so reorder is unsupported; react-arborist shows same-parent reorder as a valid drop but nothing happens, so disable it (onMove is already a no-op).
+              //   ★Root-drop normalization★: on a root drop canDrop gives parentNode as the internal root pseudo-node (isRoot, level=-1, data={id:ROOT_ID}), not null; so ② and ③ apply only to a real parent (not isRoot), and root-target comparison is judged by dropParentId (root=null).
               disableDrop={({ parentNode, dragNodes }) => {
                 const isRootDrop = parentNode == null || parentNode.isRoot
                 const dropParentId = isRootDrop ? null : parentNode.id
@@ -666,9 +591,9 @@ export default function AgentList() {
                   currentParentId === dropParentId
                 )
               }}
-              // ★드래그 재부모화 = onMove(§5)★. dropParentId(null=루트)로 reparentProfile 발화(낙관 갱신 X).
+              // ★Drag reparent = onMove (§5)★. Fires reparentProfile with dropParentId (null=root) (no optimistic update).
               onMove={({ dragIds, parentId }) => {
-                // disableMultiSelection 으로 단일 드래그 전제 — [0]만 처리(다중선택 재활성 시 이 라인 재검토).
+                // single drag assumed via disableMultiSelection — only [0] handled (revisit this line if multi-select is re-enabled).
                 if (dragIds.length !== 1) return
                 const childId = dragIds[0]
                 if (childId) reparent(childId, parentId)
@@ -680,11 +605,11 @@ export default function AgentList() {
         )}
       </div>
 
-      {/* ── 행 우클릭 메뉴 ─────────────────────────────────────────────── */}
+      {/* ── Row right-click menu ───────────────────────────────────────── */}
       {rowMenu && (
         <div
           ref={rowMenuRef}
-          // ADR-0237: 이 Esc 는 메뉴를 닫는 키다 — 열린 동안 채팅 칸의 Esc 가 턴을 끊지 않게 하는 표지(`interruptKey.ts`).
+          // ADR-0237: this Esc closes the menu — while open, a marker so the chat area's Esc does not interrupt the turn (`interruptKey.ts`).
           data-engram-overlay="1"
           style={MENU_STYLE(rowMenu.x, rowMenu.y)}
         >
@@ -713,7 +638,7 @@ export default function AgentList() {
   )
 }
 
-// 메뉴 공통 스타일(SlotContextMenu·AgentTree 인라인 메뉴와 동형 — 변수-only).
+// Menu common style (same as the SlotContextMenu and AgentTree inline menus — variables only).
 function MENU_STYLE(x: number, y: number): React.CSSProperties {
   return {
     position: 'fixed',

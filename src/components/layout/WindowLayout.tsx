@@ -1,19 +1,13 @@
-// ★One path for main · popup (D-2 "same code path")★: the main window (wrapped by AppLayout as chrome) and the popup window (thinly wrapped
-// by PopoutPage) both mount this (each with its own label). The old split "AppLayout = global active render vs
-// PopoutPage = fixed view render" (a D-2 violation) is removed.
+// ★One path for main · popup (D-2 "same code path")★: the main window (wrapped by AppLayout as chrome) and the popup window (thinly wrapped by PopoutPage) both mount this, each with its own label.
 //
-// ★keep-alive (ADR-0056)★: mount *all* of windows[label].tabs and show only the active tab (hidden tabs
-// display:none — xterm instance · buffer kept, switch instant · lossless). The WebglAddon seat only for visible slots
-// (hidden tabs leave the screen and are invisible by CSS, but the instance stays alive and keeps accumulating output — the backend routes to every tab).
+// ★keep-alive (ADR-0056)★: mount *all* of windows[label].tabs and show only the active tab (hidden tabs display:none — xterm instance · buffer kept, switch instant · lossless). The WebglAddon seat goes only to visible slots
+// (hidden tabs are invisible by CSS but the instance stays alive and keeps accumulating output — the backend routes to every tab).
 //
-// ★Tab drag (TRD S21-slot-docking §4-3 · §4-4)★: this window's root receives our tab drag (`dock/useWindowDrop` — decision · guide · drop
-// command) and draws that guide on the layer over the canvas (`DockOverlayView`). The tab bar's drag appearance belongs to `TabBar`, and the canvas shown
-// while dragging in this window (R15 remaining tab) is decided by the source side `useShownTab` — keep-alive `display` follows it. File · URL drops are
-// blocked by `dock/fileDropGuard.ts`.
+// ★Tab drag (TRD S21-slot-docking §4-3 · §4-4)★: this window's root receives our tab drag (`dock/useWindowDrop` — decision · guide · drop command) and draws the guide on the layer over the canvas (`DockOverlayView`). The tab bar's drag appearance belongs to `TabBar`;
+// the canvas shown while dragging in this window (R15 remaining tab) is decided by the source side `useShownTab` — keep-alive `display` follows it. File · URL drops are blocked by `dock/fileDropGuard.ts`.
 //
-// ★Waiting mode (prewarmed window — ADR-0299 · TRD S21-slot-docking §3-9)★: a window of the spare window pool (hidden spare window) is outside the tab model. That window
-// draws only the title row (empty tab bar — no number badge · window buttons) + an empty canvas (empty frame), does not pull in tabs, and turns off 0-tab self-close. Measuring
-// reports (canvas · metrics) are still sent. The mode is decided by `spareMode.ts`.
+// ★Waiting mode (prewarmed window — ADR-0299 · TRD S21-slot-docking §3-9)★: a window of the spare window pool (hidden spare window) is outside the tab model. It draws only the title row (empty tab bar — no number badge · window buttons) + an empty canvas (empty frame),
+// does not pull in tabs, and turns off 0-tab self-close. Measuring reports (canvas · metrics) are still sent. The mode is decided by `spareMode.ts`.
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { listen } from '@tauri-apps/api/event'
@@ -52,10 +46,8 @@ interface WindowLayoutProps {
   /** This window's label (main·slot-popup-N). */
   label: string
   /**
-   * Notice layer (`NoticeOverlay`) — covers the top of the area just under the title row. ★It does not cover the title row★ — if the window buttons · draggable area are
-   * covered by a notice, the window can be neither moved nor closed (user decision 2026-10-26 · T-66 · TRD S26-window-chrome §12-2). The loading · boot
-   * failure screens use the same place — ★whichever screen, put it at the same place in the tree★: if the place changes, React remounts the layer and the memory of closing with ✕
-   * (`ConnectionNotice` · `StateFileNotice` — what ADR-0277 said not to withdraw) is lost.
+   * Notice layer (`NoticeOverlay`) — covers the top of the area just under the title row. ★It does not cover the title row★: notices over the window buttons · draggable area would leave the window neither movable nor closable (TRD S26-window-chrome §12-2). The loading · boot failure screens use the same place —
+   * ★whichever screen, put it at the same place in the tree★: a changed place remounts the layer and loses the memory of closing with ✕ (`ConnectionNotice` · `StateFileNotice` — what ADR-0277 said not to withdraw).
    */
   // ADR-0306 — notice band position
   notices?: ReactNode
@@ -89,9 +81,7 @@ export default function WindowLayout({ label, notices }: WindowLayoutProps) {
   const guide = useWindowDrop({ label, canvas: canvasOf })
   const titleRowRef = useRef<HTMLDivElement>(null)
 
-  // ADR-0102: surfacing the final boot pull failure — if this window's state (win) is still not filled after retries are exhausted, it would be stuck forever on the loading
-  //   placeholder (main has no event recovery path), so instead of a quiet console.warn this flag renders
-  //   a visible error state. If win is filled by an emit in the meantime (race), the render below takes the normal path.
+  // ADR-0102: surfacing the final boot pull failure — if this window's state (win) is still not filled after retries are exhausted it would be stuck on the loading placeholder forever (main has no event recovery path), so this flag renders a visible error state instead of a quiet console.warn. If win is filled by an emit meanwhile (race), the normal path renders.
   const [bootFailed, setBootFailed] = useState(false)
 
   // `null` = not known yet (before the `window_role` answer) — tab pull-in · self-close run only when `normal`.
@@ -100,12 +90,9 @@ export default function WindowLayout({ label, notices }: WindowLayoutProps) {
   // The adoption number this page received (`spare:adopted` · `window_role` answer — TRD S21-slot-docking §3-9 I26). `0` is also a number.
   const [adoption, setAdoption] = useState<number | null>(null)
   const adoptionRef = useRef<number | null>(null)
-  // The moment the empty frame is withdrawn relies on the order in which the shell announces the adopted window's tabs before lifting the wait — the assumption is that prewarmed window adoption (ADR-0299 · TRD
-  //   S21-slot-docking §3-9 「`committed`」) announces in that order.
-  // A new adoption number lowers the boot failure in the same render — a prewarmed page whose `window_role` failed and which pulled its own label, unknown to the model, in normal mode
-  //   is already `bootFailed`, and since the mode stays `normal` the number must change for the pull to run again (deps
-  //   below). Rendering separately would announce the failure text screen with the new number in between, and the shell would show that screen. If the same number arrives repeatedly (the answer and
-  //   the event both carry it), it is not lowered — the pull does not rerun and it stays on the loading background.
+  // The moment the empty frame is withdrawn relies on the shell announcing the adopted window's tabs before lifting the wait — prewarmed window adoption (ADR-0299 · TRD S21-slot-docking §3-9 「`committed`」) announces in that order.
+  // A new adoption number lowers the boot failure in the same render — a prewarmed page whose `window_role` failed and pulled its own label, unknown to the model, in normal mode is already `bootFailed`, and since the mode stays `normal` the number must change for the pull to run again (deps below).
+  //   Rendering separately would announce the failure text screen with the new number in between and the shell would show that screen. The same number arriving repeatedly (answer and event both carry it) is not lowered — the pull does not rerun and it stays on the loading background.
   // ADR-0299
   useEffect(
     () =>
@@ -122,17 +109,14 @@ export default function WindowLayout({ label, notices }: WindowLayoutProps) {
   )
   const spare = mode === 'spare'
   const normal = mode === 'normal'
-  // An adopted prewarmed window (`spare:adopted`) stays an empty frame until it receives its tabs — switching to the 「로딩」 screen (background only) makes the tab bar
-  //   disappear and mount again. A prewarmed window comes up waiting under a new label, so at mount the store has no entry for that window — therefore
-  //   `win` present = the tabs received at adoption.
+  // An adopted prewarmed window (`spare:adopted`) stays an empty frame until it receives its tabs — switching to the 「loading」 screen (background only) would make the tab bar disappear and mount again. A prewarmed window comes up under a new label, so at mount the store has no entry for it: `win` present = the tabs received at adoption.
   const framed = spare || (wasSpare && win === undefined && !bootFailed)
 
   useEffect(() => installFileDropGuard(), [])
 
   // ── Normal mode: initial pull of own window's tab state + window:tabs-updated listen (own label only) ────────────────
-  // ★Subscribe first, pull later★ (same shape as F-listen): subscribe first so an emit arriving before listen registration completes
-  // is not missed, then pull. If a newer emit overwrites the pull, the version guard of applyWindowTabsUpdated prevents the reversal.
-  // When taken in from waiting mode (`spare:adopted`) it comes back in here and pulls the adopted tabs — if already in normal mode, a new adoption number reruns it.
+  // ★Subscribe first, pull later★ (same shape as F-listen): an emit arriving before listen registration completes is not missed, then pull; if a newer emit overwrites the pull, applyWindowTabsUpdated's version guard prevents the reversal.
+  // When taken in from waiting mode (`spare:adopted`) it comes back in here and pulls the adopted tabs — already in normal mode, a new adoption number reruns it.
   // ADR-0295
   // ADR-0299
   useEffect(() => {
@@ -140,10 +124,7 @@ export default function WindowLayout({ label, notices }: WindowLayoutProps) {
     let disposed = false
     let unlisten: (() => void) | null = null
 
-    // ADR-0102 (FIX-2): wrap ★the whole boot path★ in one try — in the old structure the listen() await was outside this try,
-    //   so if listener registration rejected during boot, the async IIFE died as unhandled and the list_tabs pull itself
-    //   never even started, so bootFailed was never set (loading placeholder stuck forever — no signal). A listen() failure is also
-    //   surfaced as bootFailed like a pull failure, keeping the "no silent permanent stuck" invariant (ADR-0102).
+    // ADR-0102 (FIX-2): wrap ★the whole boot path★ in one try — formerly the listen() await was outside it, so a listener registration rejection during boot killed the async IIFE as unhandled and the list_tabs pull never started, bootFailed never set (loading stuck forever). A listen() failure now surfaces as bootFailed like a pull failure — the "no silent permanent stuck" invariant.
     void (async () => {
       try {
         const off = await listen<WindowTabsPayload>('window:tabs-updated', e => {
@@ -155,14 +136,13 @@ export default function WindowLayout({ label, notices }: WindowLayoutProps) {
           return
         }
         unlisten = off
-        // ADR-0102: wrap the initial pull in bounded retry — main has no event recovery path (window:tabs-updated fires only on
-        //   tab mutation), so if this pull is one-shot, an early failure = stuck forever.
+        // ADR-0102: bounded retry for the initial pull — main has no event recovery path (window:tabs-updated fires only on tab mutation), so a one-shot early failure = stuck forever.
         const payload = await retryAsync(
           () => invoke<WindowTabsPayload>('list_tabs', { window: label }),
           {
             isCancelled: () => disposed,
             onRetry: (err, attempt) =>
-              console.warn(`[WindowLayout] list_tabs(${label}) 재시도 ${attempt}:`, err),
+              console.warn(`[WindowLayout] list_tabs(${label}) retry ${attempt}:`, err),
           },
         )
         if (!disposed) {
@@ -171,7 +151,7 @@ export default function WindowLayout({ label, notices }: WindowLayoutProps) {
         }
       } catch (err) {
         if (err instanceof RetryCancelledError) return
-        console.error(`[WindowLayout] 부팅 실패(listen 등록 or list_tabs 재시도 소진, ${label}):`, err)
+        console.error(`[WindowLayout] boot failed (listen registration or list_tabs retries exhausted, ${label}):`, err)
         if (!disposed) setBootFailed(true)
       }
     })()
@@ -189,15 +169,10 @@ export default function WindowLayout({ label, notices }: WindowLayoutProps) {
   // Visible canvas — while dragging in this window, if outside the tab bar zone, the remaining tab (R15 · the model is unchanged — TRD S21-slot-docking §4-2).
   const shown = useShownTab(label, tabIds, active)
 
-  // The shell builds this window hidden and shows it on the first-screen notice (`theme/firstPaint.ts`) — send that notice after the first screen (title row + the active tab's
-  //   layout · boot failure text) is committed. The earlier screens (background only · the active tab's 「View 로딩」) are visible only when the notice
-  //   does not arrive and the shell deadline shows the window.
-  // The empty frame is not a first screen — a waiting window stays hidden until it is handed over, and an adopted window notifies with the adoption number after drawing its tabs
-  //   (TRD S21-slot-docking §3-9 I26). The number is in deps so that it notifies again even if `firstScreen` stays true across adoption (lowering the boot failure
-  //   and applying the tabs happen in one render) — without it, an adopted window would always be shown only by the shell deadline.
-  // The notice comes after the title row's minimum window size report (`titleRow/minSizeReport.ts`) finishes — so the window is widened before the shell shows it (TRD
-  //   S26-window-chrome §7-7). The wait has an upper bound. If deps change while waiting, that notice is discarded — if an old adoption number goes out after the new
-  //   number, it is sent once more.
+  // The shell builds this window hidden and shows it on the first-screen notice (`theme/firstPaint.ts`) — send it after the first screen (title row + the active tab's layout · boot failure text) is committed; earlier screens (background only · the active tab's 「View loading」) are visible only when the notice does not arrive and the shell deadline shows the window.
+  // The empty frame is not a first screen — a waiting window stays hidden until handed over, and an adopted window notifies with the adoption number after drawing its tabs (TRD S21-slot-docking §3-9 I26). The number is in deps so it notifies again even if `firstScreen` stays true across adoption (lowering the boot failure and applying tabs happen in one render) —
+  //   without it an adopted window would always be shown only by the shell deadline.
+  // The notice comes after the title row's minimum window size report (`titleRow/minSizeReport.ts`) finishes, so the window is widened before the shell shows it (TRD S26-window-chrome §7-7). The wait has an upper bound; if deps change while waiting, that notice is discarded — an old adoption number going out after the new one is sent once more.
   // ADR-0299
   const activeLaidOut = useViewStore(s => active === null || selectView(s, active) !== null)
   const firstScreen = bootFailed || (!framed && tabs !== undefined && activeLaidOut)
@@ -213,33 +188,26 @@ export default function WindowLayout({ label, notices }: WindowLayoutProps) {
   }, [firstScreen, adoption])
 
   // ── keep-alive: fill the cache with the layouts of all this window's tabs (hidden tabs stay rendered, ADR-0056) ───────────
-  // layout:updated is already reflected in the cache by the eventBus global subscription (per-view version guard), so here only "tabs
-  // never received yet" get an initial pull.
+  // layout:updated is already reflected in the cache by the eventBus global subscription (per-view version guard), so here only "tabs never received yet" get an initial pull.
   const tabIdsKey = tabs ? tabs.map(t => t.id).join(',') : ''
-  // ★S4-F2: deps is only the tab set (tabIdsKey)★ — if win (the whole object) is put in deps, the win reference changes on every switch that changes only active,
-  //   so the effect reruns and cancels · reissues the in-flight get_view (wasted pulls on every tab switch).
-  //   Narrow it to the single tabIdsKey so it reruns only when the tab list actually changes (add/close). The tab id array is recovered
-  //   from tabIdsKey (avoiding the win reference by a direct store lookup) and iterated.
+  // ★deps is only the tab set (tabIdsKey)★ — putting win (the whole object) in deps changes the reference on every switch that changes only active, rerunning the effect and cancelling · reissuing the in-flight get_view (wasted pulls on every tab switch). Narrowed to tabIdsKey it reruns only when the tab list changes (add/close); the id array is recovered from tabIdsKey (a direct store lookup avoids the win reference).
   useEffect(() => {
     if (tabIdsKey === '') return
     let cancelled = false
     for (const tabId of tabIdsKey.split(',')) {
       if (useViewStore.getState().layouts[tabId]) continue
-      // ADR-0102 (FIX-3): this pull is also wrapped in bounded retry — the old one-shot only did console.warn on a transient failure,
-      //   and tabIdsKey stays the same so there is no rerun trigger, and that tab's canvas stays stuck on "View 로딩 중" until an unrelated layout:updated
-      //   arrives. Retry recovers from momentary unreadiness by itself. ★Separate from the window-wide bootFailed★: the final failure
-      //   of a single (usually hidden) tab is not an app-wide stuck state, so it is only left as console.error.
+      // ADR-0102 (FIX-3): this pull is also wrapped in bounded retry — the old one-shot only did console.warn on a transient failure, and tabIdsKey stays the same so nothing reruns, leaving that tab's canvas stuck on "View loading" until an unrelated layout:updated arrives. ★Separate from the window-wide bootFailed★: one (usually hidden) tab's final failure is not an app-wide stuck state, so it is only left as console.error.
       void retryAsync(() => invoke<ViewSnapshot>('get_view', { viewId: tabId }), {
         isCancelled: () => cancelled,
         onRetry: (err, attempt) =>
-          console.warn(`[WindowLayout] get_view(${tabId}) 재시도 ${attempt}:`, err),
+          console.warn(`[WindowLayout] get_view(${tabId}) retry ${attempt}:`, err),
       })
         .then(snap => {
           if (!cancelled) applyLayoutUpdated(snap)
         })
         .catch(err => {
           if (err instanceof RetryCancelledError) return
-          console.error(`[WindowLayout] get_view(${tabId}) 최종 실패(재시도 소진):`, err)
+          console.error(`[WindowLayout] get_view(${tabId}) final failure (retries exhausted):`, err)
         })
     }
     return () => {
@@ -248,19 +216,11 @@ export default function WindowLayout({ label, notices }: WindowLayoutProps) {
   }, [tabIdsKey, applyLayoutUpdated])
 
   // ── 0-tab self-close = ★defensive idempotent fallback★ (S4-F3, §5-2/G2) ─────────────────────────────────
-  // ★This path is dead in the normal flow★: when the last tab of a popup is closed, the shell close_tab classifies it as WindowClosed and
-  //   *directly destroys* the OS window (`layout/apply.rs` `close_tab` — the WindowClosed branch sets the emit to (None,None) so
-  //   window:tabs-updated{tabs:[]} is not sent to the frontend). That is, the main path of a normal close is the shell destroy, and the frontend
-  //   never receives the tabs:[] signal.
-  // Why this branch is kept anyway (do not remove): if a window:tabs-updated with 0 tabs reaches the frontend by some abnormal path (defense),
-  //   it asks the shell to close its own window once and cleans up the stranded window (main never reaches 0 because the backend forces an empty tab to be
-  //   kept). ★Re-entry guard (closingRef)★: after asking, no-op until tabs come back.
-  // ★Close is decided by the shell — the web does not close through the window API★ (TRD S26-window-chrome §5-5 · AC10 · the popout permissions have no window close):
-  //   `window.close { if_empty }` does not close if that window is back in the model (a tab came in meanwhile). That decision
-  //   looks up by the persistent id, so only the id received while tabs existed is passed (§5-5) — a 0-tab window is already out of the model. If there is no id
-  //   received (this screen has never seen that window's tabs), it does not ask.
-  // ★Only in normal mode★ — 0 tabs is normal for a waiting window (TRD S21-slot-docking §3-9). A 0-tab that arrives while the mode is unknown is looked at again after the mode is
-  //   decided.
+  // ★This path is dead in the normal flow★: when a popup's last tab is closed, the shell close_tab classifies it as WindowClosed and *directly destroys* the OS window (`layout/apply.rs` `close_tab` — the WindowClosed branch sets the emit to (None,None), so window:tabs-updated{tabs:[]} is never sent to the frontend).
+  // Why this branch is kept anyway (do not remove): if a window:tabs-updated with 0 tabs reaches the frontend by some abnormal path, it asks the shell to close its own window once and cleans up the stranded window (main never reaches 0 because the backend forces an empty tab to be kept). ★Re-entry guard (closingRef)★: after asking, no-op until tabs come back.
+  // ★Close is decided by the shell — the web does not close through the window API★ (TRD S26-window-chrome §5-5 · AC10 · the popout permissions have no window close): `window.close { if_empty }` does not close if that window is back in the model (a tab came in meanwhile).
+  //   That decision looks up by the persistent id, so only the id received while tabs existed is passed (§5-5) — a 0-tab window is already out of the model; with no id received (this screen never saw that window's tabs) it does not ask.
+  // ★Only in normal mode★ — 0 tabs is normal for a waiting window (TRD S21-slot-docking §3-9); a 0-tab that arrives while the mode is unknown is looked at again after the mode is decided.
   // ADR-0295
   useEffect(() => {
     if (!normal || !win) return
@@ -272,18 +232,16 @@ export default function WindowLayout({ label, notices }: WindowLayoutProps) {
     if (closingRef.current) return
     const windowId = windowIdRef.current
     if (!windowId) {
-      console.warn(`[WindowLayout] 0탭 자가닫힘 — ${label} 이 탭을 가진 때의 window_id 가 없어 청하지 않는다`)
+      console.warn(`[WindowLayout] 0-tab self-close — no window_id from when ${label} held a tab, so not requesting`)
       return
     }
     closingRef.current = true
     fireAndForget('window.close', { window: windowId, if_empty: true })
   }, [win, normal, label])
 
-  // ★The frame is the same on every screen — title row → area (first = notice layer) → screen content★. With the OS frame removed, the loading · boot failure screens also need a title row (window
-  //   buttons · draggable area) so the window can be moved and closed. The notice layer must be at the same place on every screen so the memory of closing with ✕ remains (`notices` doc).
-  // Screens before receiving tabs: right after boot before the pull, or no valid label found (dev reload stale popup, §3-3/G3) · boot failure (ADR-0102).
-  //   Loading draws only the background — drawing text · an indicator would flash once in front of the tab screen when the shell shows the window by the deadline (user requirement
-  //   2026-10-19: a window's first screen is the theme background followed directly by the real content). The area of this screen is not a canvas — it does not report size.
+  // ★The frame is the same on every screen — title row → area (first = notice layer) → screen content★. With the OS frame removed, the loading · boot failure screens also need a title row (window buttons · draggable area) so the window can be moved and closed; the notice layer must sit at the same place on every screen so the memory of closing with ✕ remains (`notices` doc).
+  // Screens before receiving tabs: right after boot before the pull, no valid label found (dev reload stale popup, §3-3/G3), or boot failure (ADR-0102). Loading draws only the background — text · an indicator would flash once in front of the tab screen when the shell shows the window by the deadline (a window's first screen is the theme background followed directly by the real content).
+  //   This screen's area is not a canvas — it does not report size.
   let content: ReactNode
   if (!tabs) {
     content = bootFailed ? (
@@ -312,8 +270,7 @@ export default function WindowLayout({ label, notices }: WindowLayoutProps) {
             <TabCanvas viewId={tab.id} />
           </div>
         ))}
-        {/* Drag guide — always mounted and cleared with `null` (taking it down would lose the disappear fade). This layer is the same box as the canvas, so guide coordinates =
-            canvas CSS px (same origin as the decision). */}
+        {/* Drag guide — always mounted and cleared with `null` (taking it down would lose the disappear fade). This layer is the same box as the canvas, so guide coordinates = canvas CSS px (same origin as the decision). */}
         <div data-testid="dock-overlay-layer" style={OVERLAY_LAYER}>
           <DockOverlayView guide={guide} />
         </div>
@@ -350,7 +307,7 @@ export default function WindowLayout({ label, notices }: WindowLayoutProps) {
         {notices}
         {content}
       </div>
-      {/* ADR-0067: agent monitoring search popup — one mounted per window. The slot right-click "에이전트 모니터링"
+      {/* ADR-0067: agent monitoring search popup — one mounted per window. The slot right-click "agent monitoring"
           (slot.assignRunningAgent) opens it through monitoringPickerStore, and on-select flows to assign_agent (§5).
           When closed (target=null) nothing is rendered.
           key={openId}: the key changes on every open() for a fresh remount → query/activeIndex are
@@ -360,8 +317,7 @@ export default function WindowLayout({ label, notices }: WindowLayoutProps) {
   )
 }
 
-// The tab bar position of the screen before tabs are received — like the tab bar it takes the remaining width, puts the window buttons at the right end, and makes that area a draggable area. Window
-//   facts (maximized · front window) are received like the tab bar too — so that this screen's row height · maximize button follow the window state.
+// The tab bar position of the screen before tabs are received — like the tab bar it takes the remaining width, puts the window buttons at the right end, and is a draggable area. Window facts (maximized · front window) are received like the tab bar's, so this screen's row height · maximize button follow the window state.
 function TabBarStandIn({ pullFrame }: { pullFrame: boolean }) {
   useEffect(() => (pullFrame ? windowFrame.install() : undefined), [pullFrame])
   return <div data-testid="tab-bar-standin" aria-hidden {...dragProps()} style={TAB_BAR_STAND_IN} />
@@ -378,8 +334,7 @@ const TAB_BAR_STAND_IN: React.CSSProperties = {
 
 const FILL: React.CSSProperties = { position: 'absolute', inset: 0 }
 
-// The z of the drag guide layer = above the split bars · focus ring (z 20) in an area · below the connection guide (z 40) · menu (1000 and up). The canvas box and the tab canvas
-//   layer do not create a stacking context, so z inside them and this layer compare in the same context.
+// The z of the drag guide layer = above the split bars · focus ring (z 20) in an area · below the connection guide (z 40) · menu (1000 and up). The canvas box and the tab canvas layer create no stacking context, so z inside them and this layer compare in the same context.
 const OVERLAY_LAYER: React.CSSProperties = { position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 30 }
 
 /** Observation state owned by the hook instance. */
@@ -390,11 +345,8 @@ interface CanvasObserverState {
   measured: CanvasPx | null
 }
 
-// ADR-0227: measure the tab content area (window canvas) size and report to the shell only when it changes. The tabs share this area, so there is one
-//   per window. Boot · popout creation · webview reload are all new mounts, so the first measurement is the report. What to send and when (one at a time
-//   · merging · retry) is decided by `windowCanvasReport.ts`.
-// Why a callback ref: the measured div is rendered only after win arrives (early return), so it does not yet exist in the effect at mount.
-//   Why the reference is fixed: a new function on every render makes React detach and reattach, and the debounce · retry would be lost every time.
+// ADR-0227: measure the tab content area (window canvas) size and report to the shell only when it changes; the tabs share this area, so one per window. Boot · popout creation · webview reload are all new mounts, so the first measurement is the report. What to send and when (one at a time · merging · retry) is decided by `windowCanvasReport.ts`.
+// Why a callback ref: the measured div is rendered only after win arrives (early return), so it does not yet exist in the effect at mount. Why the reference is fixed: a new function on every render makes React detach and reattach, losing the debounce · retry every time.
 function useWindowCanvasReport(): (el: HTMLDivElement | null) => void {
   const obsRef = useRef<CanvasObserverState>({ ro: null, timer: null, measured: null })
 
@@ -435,8 +387,7 @@ function detachCanvasObserver(obs: CanvasObserverState): void {
   obs.measured = null
 }
 
-// The empty canvas of waiting mode — draws only one area frame. There are no tabs so no leaf is mounted, so the area frame metrics (`report_ui_metrics`)
-//   are sent from here — when a spare window is adopted, the shell copies these metrics into the model (TRD S21-slot-docking §3-9 `committed`).
+// The empty canvas of waiting mode — draws only one area frame. No tabs, so no leaf is mounted; the area frame metrics (`report_ui_metrics`) are sent from here — when a spare window is adopted the shell copies them into the model (TRD S21-slot-docking §3-9 `committed`).
 // ADR-0295
 function SpareCanvas() {
   const borderRef = useRef<HTMLDivElement>(null)
@@ -452,10 +403,7 @@ function SpareCanvas() {
   )
 }
 
-/**
- * Pass its own view down with viewIdOverride so the inner SlotContextMenu actions use this tab's coordinates
- * (unaware of per-window active — §3-4).
- */
+/** Pass its own view down with viewIdOverride so the inner SlotContextMenu actions use this tab's coordinates (unaware of per-window active — §3-4). */
 function TabCanvas({ viewId }: { viewId: string }) {
   const cached = useViewStore(s => selectView(s, viewId))
   if (!cached) {

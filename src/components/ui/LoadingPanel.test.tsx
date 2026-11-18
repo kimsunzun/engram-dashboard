@@ -10,7 +10,7 @@ import { LoadingPanel } from './LoadingPanel'
 afterEach(() => cleanup())
 
 describe('LoadingPanel', () => {
-  it('상태 역할 + 화면 밖 이름 = common.loading, 보이는 텍스트는 없다', () => {
+  it('status role + off-screen name = common.loading, there is no visible text', () => {
     render(<LoadingPanel />)
     const panel = screen.getByRole('status')
     expect(panel.getAttribute('aria-label')).toBe(t('common.loading'))
@@ -23,21 +23,21 @@ describe('LoadingPanel', () => {
     expect(icon?.getAttribute('aria-hidden')).toBe('true')
   })
 
-  it('label 을 주면 보이게 그리되 aria 이름은 그대로다', () => {
+  it('if label is given it is drawn visibly but the aria name stays as is', () => {
     render(<LoadingPanel label="이력을 불러오는 중" />)
     const panel = screen.getByRole('status')
     expect(panel.textContent).toBe('이력을 불러오는 중')
     expect(panel.getAttribute('aria-label')).toBe(t('common.loading'))
   })
 
-  it.each([false, true, ''])('그리지 않는 label(%j)에는 빈 텍스트 칸을 세우지 않는다', (label) => {
+  it.each([false, true, ''])('does not set up an empty text cell for a label that is not drawn (%j)', (label) => {
     render(<LoadingPanel label={label} />)
     const panel = screen.getByRole('status')
     expect(panel.children).toHaveLength(1) // Icon only
     expect(panel.firstElementChild?.tagName.toLowerCase()).toBe('svg')
   })
 
-  it('className 이 붙는다(자리·배경은 부르는 쪽이 정한다)', () => {
+  it('if className is attached the place · background is decided by the caller', () => {
     render(<LoadingPanel className="absolute inset-0" />)
     expect(screen.getByRole('status').className).toContain('absolute inset-0')
   })

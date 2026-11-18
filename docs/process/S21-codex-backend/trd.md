@@ -435,7 +435,7 @@ Three reasons:
 
 The reason is that **the precedent is already broken**. Today the 6 tests that launch real claude drop out by themselves through a runtime guard (`skip_no_claude`, `crates/engram-dashboard-daemon/tests/control_send.rs:85-98`) rather than `#[ignore]`, and **that guard does not work on the CI runner.** A workflow comment records that failure directly (`.github/workflows/ci.yml:117-125`):
 
-> 그 가드는 ① spawn 호출 성공 ② 5초 내 목록 등장 만 보는데, claude 부재 시에도 프로세스는 일단 떠서 목록에 잠깐 잡히고 곧 죽는다 → 가드 통과 후 "잠듦" 상태에서 단언이 깨진다.
+> That guard only checks ① the spawn call succeeded ② it appears in the list within 5 s, but even when claude is absent the process starts first, is briefly caught in the list, and then dies soon → after the guard passes, the assertion breaks in the "asleep" state.
 
 So CI ends up maintaining a **`--skip` list with the 6 fn names pinned verbatim** (`.github/workflows/ci.yml:126-135`). ★**codex suffers that failure even more**★: on Windows `codex` is launched wrapped as `cmd.exe /c codex` (§4-10), so even without codex **`cmd.exe` always launches successfully.** "Did the spawn succeed" can never tell whether the binary exists.
 
@@ -629,7 +629,7 @@ Adding one more variant makes the following collapse as **a compile error or an 
 
 ★A code comment **has already predicted** this failure★, `agent/src/commands.rs:45-49`:
 
-> 넓히는 것은 「변형 하나 더」가 아니라 **디스크 호환을 깨는 이주**다 … 새 빌드가 새 kind를 쓴 프로필을 저장하고 나면 옛 빌드는 그 파일을 **한 덩이로** 파싱하다 실패해 `.corrupt`로 밀어내고 **빈 명부로 뜬다** — 그 빌드에서 에이전트가 전부 사라진다.
+> Widening is not 「변형 하나 더」 (one more variant) but a **migration that breaks disk compatibility** … once a new build saves a profile that uses the new kind, an old build parses that file **as a whole**, fails, pushes it out to `.corrupt`, and **comes up with an empty registry** — every agent disappears from that build.
 
 **★Yet no test pins that scenario★**: the workspace has 0 tests that reproduce `unknown variant` (measured). What exists is only broken JSON syntax (`corrupt_is_preserved_and_empty`, `persistence/mod.rs:232-247`) and a schema version mismatch (`version_mismatch_keeps_file`, `:249-263`). **Whichever approach is chosen, write that regression test with it.**
 

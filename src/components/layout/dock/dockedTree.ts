@@ -1,10 +1,6 @@
-// TRD S21-slot-docking §4-5: a mirror of the shell `layout::dock::{docked_tree, incoming_rect}` · `layout::geometry::{compute, boundary, px_edge,
-//   frame_px}` — during a drag the drag does not align its decision with the shell (ADR-0296 · ADR-0297), so the web counts band validity (R8) · preview (R4)
-//   alone. Pure.
-// ★Do the same f64 operations as the shell in the same order★ — boundaries copy the parent value and the only newly computed value is one split boundary (shell `geometry.rs`
-//   head invariant). That way the preview is bit-for-bit the same as the area the shell draws after the drop, and the zero-area decision of a deep chain stands at the same area as the shell.
-//   The two versions are tied by the golden `src-tauri/src/layout/bands_golden.json` (`bands.test.ts` · `judge.test.ts`).
-// Ratio limits are received as snapshot `ratio_min` · `ratio_max` (ADR-0227 — the screen keeps no constants of its own).
+// TRD S21-slot-docking §4-5: mirror of the shell `layout::dock::{docked_tree, incoming_rect}` · `layout::geometry::{compute, boundary, px_edge, frame_px}` — the drag does not align its decision with the shell (ADR-0296 · ADR-0297), so the web counts band validity (R8) · preview (R4) alone. Pure.
+// ★Do the same f64 operations as the shell in the same order★ — boundaries copy the parent value and the only newly computed value is one split boundary (shell `geometry.rs` head invariant), so the preview is bit-for-bit the area the shell draws after the drop and a deep chain's zero-area decision stands at the same area. Tied by the golden `src-tauri/src/layout/bands_golden.json` (`bands.test.ts` · `judge.test.ts`).
+// Ratio limits come as snapshot `ratio_min` · `ratio_max` (ADR-0227 — no constants of its own).
 
 import type { LayoutNode, SlotRect } from '../../../api/layoutTypes'
 import type { DockSide } from '../../../../src-tauri/bindings/DockSide'
@@ -105,14 +101,11 @@ export function slotIds(node: LayoutNode): string[] {
   return node.type === 'slot' ? [node.id] : [...slotIds(node.a), ...slotIds(node.b)]
 }
 
-// Id of the enclosing split — this resulting tree is used only for geometry and not sent to the shell (the shell picks new ids with its own `docked_tree` at drop ·
-//   ADR-0223). Geometry does not read split ids.
+// Id of the enclosing split — this tree is used only for geometry and not sent to the shell (the shell picks new ids with its own `docked_tree` at drop · ADR-0223); geometry does not read split ids.
 const WRAP_SPLIT_ID = 'docked-wrap'
 
 /**
- * Shell `layout::dock::docked_tree` — the result of wrapping `anchor` of `target` in a new split and inserting `incoming` at the `side` with share `share`.
- * The input is not touched. Error order = reference area missing → area ids of the two trees overlap → a **new** zero-area area appears in the result (original position — the target area is
- * the area that had area in the `target` geometry · the inserted area in the `incoming`-alone geometry) (R8).
+ * Shell `layout::dock::docked_tree` — wraps `anchor` of `target` in a new split and inserts `incoming` at `side` with share `share`; the input is not touched. Error order = reference area missing → area ids of the two trees overlap → a **new** zero-area area in the result (target area = the one that had area in the `target` geometry · inserted area = in the `incoming`-alone geometry) (R8).
  */
 export function dockedTree(
   target: LayoutNode,
@@ -157,8 +150,7 @@ export function dockedTree(
 }
 
 /**
- * Shell `layout::dock::incoming_rect` — the bounding normalized rectangle of the `ids` areas in result geometry `result` (it only picks boundary values — bit-for-bit the same as the inserted
- * subtree box). `null` if `ids` is empty or any id is not in `result`.
+ * Shell `layout::dock::incoming_rect` — bounding normalized rectangle of the `ids` areas in `result` (only picks boundary values — bit-for-bit the inserted subtree box). `null` if `ids` is empty or any id is not in `result`.
  */
 export function incomingRect(result: readonly SlotRect[], ids: readonly string[]): RectF64 | null {
   let out: RectF64 | null = null

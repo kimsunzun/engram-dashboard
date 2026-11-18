@@ -1,6 +1,6 @@
-// sse-stream 0.2.4 의 crates.io 패키지에는 라이선스 본문 파일이 없다 — 상류 저장소의 파일을 손대지 않고 옮겼다.
-// 출처: https://github.com/4t145/sse-stream/blob/9b95874ca02cc337b9f86b54915ba6c6b27821d0/LICENSE-MIT
-//   그 버전 커밋(92dcf45b · 2026-07-07)에는 라이선스 파일이 없고, 메인테이너가 뒤에 더했다(9b95874c · 2026-07-22 「fix: add license files」) — 그 파일을 쓴다(Cargo.toml 의 MIT OR Apache-2.0 중 MIT)
+// The crates.io package of sse-stream 0.2.4 has no license text file — the file from the upstream repository was moved over unchanged.
+// Source: https://github.com/4t145/sse-stream/blob/9b95874ca02cc337b9f86b54915ba6c6b27821d0/LICENSE-MIT
+//   that version's commit (92dcf45b · 2026-07-07) has no license file, and the maintainer added it later (9b95874c · 2026-07-22 「fix: add license files」) — that file is used (MIT of Cargo.toml's MIT OR Apache-2.0)
 // crate: sse-stream 0.2.4
 MIT License
 

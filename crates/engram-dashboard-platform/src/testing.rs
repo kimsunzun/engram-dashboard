@@ -1,18 +1,16 @@
-//! Real-process test helpers — shared by this crate's tests and the calling crates' tests that turn on the `test-support` feature as a dev dependency
-//! (TRD 1-3 §3-8 — `docs/process/S21-crate-boundaries/trd-1-3-platform-crate.md`). They all exchange
-//! only OS-level values (`Child` · PID · start time · probe).
-//!
-//! There is no helper that builds a group handle — the handle the calling crate's tests use is that crate's adapter type, so it cannot be
-//! built here. The group itself is built with [`crate::group::GroupOwner`].
+//! Real-process test helpers — shared by this crate's tests and the calling crates' tests that turn on the `test-support` feature as a dev
+//!   dependency (TRD 1-3 §3-8 — `docs/process/S21-crate-boundaries/trd-1-3-platform-crate.md`). They exchange only
+//! OS-level values (`Child`, PID, start time, probe). No helper builds a group handle — the calling crate's tests use that crate's adapter
+//!   type; the group itself is built with [`crate::group::GroupOwner`].
 // ADR-0275
 
 use std::io::Write;
 use std::process::Child;
 use std::time::{Duration, Instant};
 
-/// `cmd.exe /d /c <line>` — but it does not start `line` until it receives one line on stdin. If it is put in the group in between,
-/// everything `line` launches is born inside the group. [`open_gate`] gives that one line. `flags` = the creation flags as is.
-/// It panics if launching fails.
+/// `cmd.exe /d /c <line>` — but it does not start `line` until it receives one line on stdin, so if it is put in the group meanwhile
+///   everything `line` launches is born inside the group. [`open_gate`] gives that line. `flags` = the creation flags as is.
+/// Panics if launching fails.
 #[cfg(windows)]
 pub fn spawn_gated_cmd(line: &str, flags: u32) -> Child {
     use std::os::windows::process::CommandExt;
@@ -24,26 +22,27 @@ pub fn spawn_gated_cmd(line: &str, flags: u32) -> Child {
         .stderr(Stdio::null())
         .creation_flags(flags)
         .spawn()
-        .expect("cmd.exe 기동")
+        .expect("launch cmd.exe")
 }
 
 /// Opens the gate of [`spawn_gated_cmd`] — writes one line to stdin and closes that end. It panics if stdin has already been taken.
 pub fn open_gate(child: &mut Child) {
-    let mut stdin = child.stdin.take().expect("stdin 파이프");
+    let mut stdin = child.stdin.take().expect("stdin pipe");
     let _ = stdin.write_all(b"go\r\n");
 }
 
-/// Asks every 20 ms until `probe` gives `Some` — if it does not see one within 10 seconds it panics with `what` in the message.
-///
-/// It is a different function from base's `testing::wait_until` (deadline · condition → `bool`) — this crate does not depend on base, so they are not
-/// merged (ADR-0266 · ADR-0268).
+/// Asks every 20 ms until `probe` gives `Some` — panics with `what` in the message if none within 10 seconds. Different from base's
+///   `testing::wait_until` (deadline · condition → `bool`) — this crate does not depend on base, so they are not merged (ADR-0266, ADR-0268).
 pub fn wait_until<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if let Some(found) = probe() {
             return found;
         }
-        assert!(Instant::now() < deadline, "10 초 안에 {what} 를 못 봤다");
+        assert!(
+            Instant::now() < deadline,
+            "did not see {what} within 10 seconds"
+        );
         std::thread::sleep(Duration::from_millis(20));
     }
 }

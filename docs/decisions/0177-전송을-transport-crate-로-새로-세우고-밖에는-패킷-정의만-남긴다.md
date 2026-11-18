@@ -14,14 +14,14 @@ User requirements (2026-09-03~04):
 - **Direction (server/client) is not a separate layer; it is a capability you choose.**
 - What comes from outside is **only the packet definitions**, and the rest must handle the networking by itself.
 - **The client must connect to multiple daemons**, and **the daemon must also accept multiple clients** such as PC and mobile.
-- Way of working = **create a separate crate → verify it independently → attach it in a suitable scope and test** (적당한 범위로 붙이며 테스트).
+- Way of working = **create a separate crate → verify it independently → attach it in a suitable scope and test**.
 
 ## 결정
 
 1. **The new crate's name = `transport`** (user decision 2026-09-04 — *"it feels intuitive"*). ★**We do not tear apart the existing `net` in this work**★ — we build the new one, **verify it independently**, and then attach it in a dedicated folder for each of the daemon and the shell. In the end `transport` takes over the networking role.
 2. **Narrow the scope to the three engram components (daemon · shell · mobile)** (user decision — *"don't think too generic"*). If we aim at any project whatsoever, **we cannot decide and everything becomes an option.** Narrowing to three lets us **fix the defaults** — those three are already server, client and mobile, so the structure comes out generic anyway.
 3. **What goes inside the crate**:
-   - Frame boundary · request/response correlation (★**generic over the tag type (태그 타입에 제네릭) — the crate does not know its name**★) · role distinction (request/response/notification/stream)
+   - Frame boundary · request/response correlation (★**generic over the tag type — the crate does not know its name**★) · role distinction (request/response/notification/stream)
    - Stream lifecycle management = identifier · generation · sequence number · resume · dedup · **gap detection**
    - Connection establishment · **opaque handshake frames** (any number of rounds) · **bidirectional keepalive** · **write deadline** · **backoff + jitter reconnection**
    - **A registry of N peers + a supervisor per peer** · **origin marker** on inbound · **exposing the generation boundary**
@@ -31,7 +31,7 @@ User requirements (2026-09-03~04):
 6. **Slow consumer = when the queue fills, drop that connection** (current behavior kept). But ★**the policy is not nailed down inside the crate; the outside chooses it**★.
 7. **Build it so that both transport and time can be swapped.** The verification harness (decision 8) requires this, and later TLS and other transports hook in here.
 8. **Verification harness** = all logic runs **fully in memory with injected time** (backoff · keepalive · write deadline are verified **without actually waiting**). Only a few real sockets are used — ① does the WS adapter actually connect ② **does the write deadline actually cut when the peer does not read**. ★The latter cannot be measured in memory because it needs a kernel buffer to measure★. Ports are requested as 0. **It runs as is in CI.**
-9. **Loss signal**: truncation is given not as true/false but as ★**「지금 유효한 가장 오래된 번호」**★. And it is carried up not on the console but in **the stream the upper layer reads**. In addition, we put in a **sequence-gap check**, and on a gap we **re-request from that point** (그 지점부터 재요청) — we do not stop at detection only.
+9. **Loss signal**: truncation is given not as true/false but as ★**「지금 유효한 가장 오래된 번호」**★. And it is carried up not on the console but in **the stream the upper layer reads**. In addition, we put in a **sequence-gap check**, and on a gap we **re-request from that point** — we do not stop at detection only.
 
 ## 거부한 대안
 

@@ -1,21 +1,22 @@
-//! **Selection rules** for cleaning up leftovers after a claude interrupt — pick the candidates to kill in one round of a pass ([`candidates`]) and decide one candidate
-//! by the AND of four rules ([`select`]). Hook command lines and taskkill markers are in [`is_hook_command`] · [`taskkill_names`].
+//! **Selection rules** for cleaning up leftovers after a claude interrupt: candidates of one pass round ([`candidates`]) and the four-rule
+//!   AND per candidate
+//! ([`select`]). Hook command shape · taskkill markers: [`is_hook_command`] · [`taskkill_names`].
 //!
-//! ★The rules are pure★ — no OS calls, no locks, no threads, and they compile on every OS (ADR-0012 · ADR-0230). They look only at facts
-//!   already read through held handles ([`ProcessFacts`]); 「끝났나」 (has it exited) is injected through [`Chain::exited`].
-//! ★Narrowing only★ — if any one cannot be trusted (a link not found · an empty field · a query error · outside the expected shape), the decision is not to kill. No marker
-//!   ever widens the candidates — if claude changes how it wraps hooks or how it interrupts, all of them miss (the safe side).
+//! ★The rules are pure★ — no OS calls, locks or threads; they compile on every OS (ADR-0012 · ADR-0230) and read only facts already read
+//!   through held handles
+//!   ([`ProcessFacts`]); 「has it exited」 is injected through [`Chain::exited`].
+//! ★Narrowing only★ — anything untrustworthy (link not found · empty field · query error · unexpected shape) means do not kill. No marker
+//!   ever widens the candidates;
+//!   if claude changes how it wraps hooks or interrupts, everything misses (the safe side).
 //!
-//! The births the rules see are collected by the **birth record** ([`Recorder`]) — a thread listening for the group's join notifications, while recording is on, grabs
-//! and holds each one on arrival. [`BirthWatch`] starts the port and that thread once per incarnation. The group is seen only through a neutral handle; there is no OS
-//! branch here.
-//!
-//! An interrupt episode is set up by [`GateCell`] (one per incarnation — the turn-open gate + the episode; the interrupt-line function and the decoder hold it together),
-//! and the worker times N seconds after the line is written — if there is still no turn end by then, one cleanup pass ([`run_pass`]) selects and kills, round by round.
-//! Without a cleaner ([`Cleaner`]) it only opens and closes the gate.
-//! ★The gate lock is a leaf★ — while held it only reads fields · monotonic time · atomics (record number · retirement flag), and does no logging · thread start ·
-//!   allocation or free · OS calls · other locks (the one exception is the single kill call in the kill commit). What was taken out is
-//!   dropped after release. Never held together with the record lock.
+//! Births come from the **birth record** ([`Recorder`], fed by a listener thread; [`BirthWatch`] starts port and thread once per
+//!   incarnation). [`GateCell`] (turn-open
+//! gate + interrupt episode, one per incarnation) lets a worker run one pass ([`run_pass`]) N seconds after the interrupt line if no turn
+//!   end came; without a
+//! [`Cleaner`] it only opens and closes the gate.
+//! ★The gate lock is a leaf★ — while held: fields · monotonic time · atomics only; no logging · thread start · allocation or free · OS
+//!   calls · other locks (one
+//!   exception: the single kill call in the kill commit). What was taken out is dropped after release. Never held together with the record lock.
 //! Spec = `docs/process/S21-chat-ux/trd-t40.md` §3-2 · §3-3 · §3-4 · §3-5 · §3-7.
 // ADR-0262
 
@@ -38,13 +39,14 @@ use crate::transport::process_group::{
 use crate::transport::stdio::InterruptOut;
 use crate::types::AgentId;
 
-/// Cap on the ancestor walk — the number of links from D(A₁) up to the top T. Measured chains are four or fewer (p3t3); more than that is treated as a broken chain.
+/// Cap on the ancestor walk — the number of links from D(A₁) up to the top T. Measured chains are four or fewer (p3t3); more than that is
+///   treated as a broken chain.
 pub(super) const ANCESTOR_MAX: usize = 16;
 
 /// One link the selection looks at — a held process's number and the facts read through its handle.
 ///
-/// - `seq` = sequence number in the birth record (the order join notifications were taken out) · `None` = snapshot member.
-/// - `killable` = was kill access held too — if `false` the chain still connects through it, but it cannot be a candidate.
+/// - `seq` = order of the birth record · `None` = snapshot member.
+/// - `killable` = if `false` the chain still connects through it but it cannot be a candidate.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Link<'a> {
     pub pid: u32,
@@ -53,11 +55,10 @@ pub(super) struct Link<'a> {
     pub killable: bool,
 }
 
-/// A view over one record — the snapshot plus the births of the same record are all of the 「알려진 고리」 (known links).
+/// A view over one record — the snapshot plus its births are all the 「known links」.
 ///
-/// - `root_pid` = the root of the path (`cmd /c`) — the link whose recorded parent is this number is taken to be claude. `0` = unknown.
-/// - The order of `births` has no meaning — `seq` decides the order.
-/// - `exited` = has one known link exited now. `Err` is a query failure, and the selection reads it as 「모름」 (unknown).
+/// - `root_pid` = root of the path (`cmd /c`); the link whose recorded parent is this number is taken to be claude. `0` = unknown.
+/// - `exited` = has a known link exited now; `Err` is read as 「unknown」.
 pub(super) struct Chain<'a> {
     pub root_pid: u32,
     pub snapshot: &'a [Link<'a>],
@@ -65,10 +66,9 @@ pub(super) struct Chain<'a> {
     pub exited: &'a dyn Fn(&Link<'_>) -> io::Result<bool>,
 }
 
-/// The decision of [`select`] — everything except `Cleanup` means 「끝내지 않는다」 (do not kill), and the names pair with the log reasons (TRD §3-4 · §3-8).
+/// The decision of [`select`] — everything except `Cleanup` means 「do not kill」; names pair with the log reasons (TRD §3-4 · §3-8).
 ///
-/// - `Cleanup.chain` = numbers from candidate C up to the top T (C first · T last · claude is left out).
-/// - `AncestorAlive.pid` = the first live ancestor.
+/// - `Cleanup.chain` = numbers from candidate C up to the top T (C first, T last; claude excluded).
 /// - `Unknown` = empty field · exit query error · root number unknown.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Verdict {
@@ -83,11 +83,9 @@ pub(super) enum Verdict {
     Unknown,
 }
 
-/// Candidates of one round of a pass — among this record's births, those whose number is not in the write list `w` · for which kill access was held ·
-/// whose (number, creation) is not in the snapshot · and that have not exited (dropped if the exit query is `Err`), in ascending `seq` order.
-///
-/// `w` is compared by number only and does not depend on order — if the sort is off, candidates still do not grow. A link without `seq` is
-/// not a birth and is left out.
+/// Candidates of one pass round — births whose number is not in the write list `w` (compared by number only), with kill access held, not
+///   in the snapshot,
+/// and not exited (dropped if the exit query is `Err`), in ascending `seq` order. A link without `seq` is not a birth.
 pub(super) fn candidates<'a>(view: &Chain<'a>, w: &[u32]) -> Vec<&'a Link<'a>> {
     let mut out: Vec<&'a Link<'a>> = view
         .births
@@ -107,11 +105,12 @@ pub(super) fn candidates<'a>(view: &Chain<'a>, w: &[u32]) -> Vec<&'a Link<'a>> {
     out
 }
 
-/// Decide one candidate C by the AND of four rules — return the one decision of the first rule that catches it.
+/// Decide one candidate C by the AND of four rules — the first rule that catches it gives the decision.
 ///
-/// 1. Parent D is a known link and has exited. 2. C is a hook copy of D (same executable, and the command line is the same or D is a hook command).
-/// 3. Every ancestor from D up to just before claude is a known link and has exited (per link, parent creation ≤ child creation · claude is not
-///    judged). 4. The top T is a hook runner, and in this record a `taskkill /PID <T> /T /F` launched by claude was born after T.
+/// 1. Parent D is a known link and has exited. 2. C is a hook copy of D (same executable; same command line, or D is a hook command).
+/// 3. Every ancestor from D up to just before claude is a known link and has exited (parent creation ≤ child creation per link). 4. The
+///   top T is a hook runner,
+///    and this record has a `taskkill /PID <T> /T /F` launched by claude, born after T.
 ///
 /// `exited` is called only for D and the ancestors up to just before claude.
 // ADR-0262
@@ -169,10 +168,10 @@ pub(super) fn select(c: &Link<'_>, view: &Chain<'_>) -> Verdict {
     }
 }
 
-/// Is it a hook command shape — the command line is 「첫 토큰 · `-c` · 큰따옴표로 감싼 인자 S」 (first token, the -c flag, a double-quoted argument S) and S starts with `bash ` and
-/// does not contain `shell-snapshots`. This is the shape in which claude 2.1.284 wraps `.sh` hooks (291 hooks vs 6 Bash tool · 0 ambiguous).
-///
-/// False if S has a line break — the measured comparison (the regex in `r4sim.py`) did not accept such an S, and accepting one would widen.
+/// Is it a hook command shape — 「first token, the -c flag, a double-quoted argument S」 where S starts with `bash ` and does not contain
+///   `shell-snapshots`
+/// (how claude 2.1.284 wraps `.sh` hooks: 291 hooks vs 6 Bash tool · 0 ambiguous). False if S has a line break — the measured regex did
+///   not accept it.
 pub(super) fn is_hook_command(f: &ProcessFacts) -> bool {
     let Some(rest) = after_program(&f.cmdline) else {
         return false;
@@ -196,9 +195,10 @@ pub(super) fn is_hook_command(f: &ProcessFacts) -> bool {
         && !s.contains(|ch: char| ch == '\r' || ch == '\n')
 }
 
-/// The `n` of a `taskkill /PID n /T /F` launched by claude — only when the parent is `claude`, the executable name is `taskkill.exe` (case
-/// insensitive), and the arguments after the program are exactly `/PID` · a decimal number · `/T` · `/F`. Case variants · `/PID:n` · reordering · extra
-/// arguments · leading zeros · `0` are all `None` — all 218 taskkills in the source spike table have this shape, and nothing else is accepted.
+/// The `n` of a `taskkill /PID n /T /F` launched by claude — parent `claude`, executable `taskkill.exe` (case-insensitive), arguments
+///   exactly `/PID` · decimal number
+/// · `/T` · `/F`. Case variants · `/PID:n` · reordering · extra arguments · leading zeros · `0` are `None` (all 218 spike taskkills have
+///   this shape).
 pub(super) fn taskkill_names(f: &ProcessFacts, claude: u32) -> Option<u32> {
     if f.ppid != claude || !image_is(&f.image, "taskkill.exe") {
         return None;
@@ -219,10 +219,10 @@ pub(super) fn taskkill_names(f: &ProcessFacts, claude: u32) -> Option<u32> {
     n.parse().ok()
 }
 
-/// Find the recorded parent among the known links — those whose number is `child.ppid`, whose creation is not 0 and is at most the child's creation;
-/// the one with the latest creation wins. A held number is not reused, so there should be at most one such link, but if there are two or more, pick the
-/// last owner that could have held that number when the child was born. If two are equal even in creation (a re-notification of a snapshot member), the snapshot one wins.
-/// Parent number 0 · own number · child creation 0 are unknown.
+/// Find the recorded parent among the known links: number = `child.ppid`, creation not 0 and ≤ the child's; the latest creation wins (a
+///   held number is not reused,
+/// so normally at most one matches). Equal creation (a snapshot member re-notified): the snapshot one wins. Parent number 0 · own number ·
+///   child creation 0 are unknown.
 fn parent_of<'a>(view: &Chain<'a>, child_pid: u32, child: &ProcessFacts) -> Option<&'a Link<'a>> {
     if child.ppid == 0 || child.ppid == child_pid || child.create == 0 {
         return None;
@@ -277,7 +277,8 @@ fn ancestors<'a>(
     }
 }
 
-/// The rest of the command line after skipping the first token (the program) — the first token is either double-quoted or a run without spaces, and
+/// The rest of the command line after skipping the first token (the program) — the first token is either double-quoted or a run without
+///   spaces, and
 /// at least one space must follow it.
 fn after_program(cmdline: &str) -> Option<&str> {
     let rest = if let Some(quoted) = cmdline.strip_prefix('"') {
@@ -305,7 +306,8 @@ fn image_is(image: &str, name: &str) -> bool {
 
 // ── Birth record · listening for join notifications ──────────────────────────────────────────
 
-/// Cap on births put into one record — those over it are not put in and [`Recorder::full`] is raised (that link stays unknown, on the miss side).
+/// Cap on births put into one record — those over it are not put in and [`Recorder::full`] is raised (that link stays unknown, on the miss
+///   side).
 pub(super) const BIRTH_MAX: usize = 512;
 
 /// How long the listener thread waits for one notification — at each interval it checks whether the group is gone · retiring.
@@ -314,12 +316,12 @@ const LISTEN_WAIT: Duration = Duration::from_millis(500);
 /// The FILETIME scale (100 ns) from 1601-01-01 to 1970-01-01.
 const UNIX_EPOCH_FILETIME: u64 = 116_444_736_000_000_000;
 
-/// One process held right when its join notification arrived while the record was on — while held, its number is not reused, and
-/// its facts remain after it exits. Dropping the last `Arc` closes the handle — drop it outside the record lock.
+/// One process held right when its join notification arrived while the record was on — its number is not reused while held, and its facts
+///   remain after it exits.
+/// Dropping the last `Arc` closes the handle — drop it outside the record lock.
 ///
-/// - `seq` = sequence number assigned in this incarnation — the order join notifications were taken out (not creation order).
-/// - `facts` = a copy of the facts read when `pin` held it.
-/// - `killable` = was kill access held too — if `false` the chain still connects through it, but it cannot be a candidate.
+/// - `seq` = order notifications were taken out in this incarnation (not creation order).
+/// - `facts` = facts read when `pin` held it.
 pub(super) struct Birth {
     pub pid: u32,
     pub seq: u64,
@@ -339,18 +341,19 @@ impl Birth {
     }
 }
 
-/// The birth record turned on and off by an interrupt episode — one per incarnation, the opener · listener thread · pass hold it through the same `Arc`.
+/// The birth record turned on and off by an interrupt episode — one per incarnation, shared by the opener · listener thread · pass.
 ///
-/// - Records are told apart by number: [`Self::start`] turns on a new number, and only whoever holds that number turns it off ([`Self::stop`]) and copies
-///   ([`Self::copy`]). The active number (`0` = off) is read without a lock through [`Self::active`].
-/// - [`Self::port_failed`] = the join-notification port became unusable through a real OS failure — once raised it never comes down for the incarnation.
+/// - Records are told apart by number: [`Self::start`] turns on a new number; only whoever holds it turns it off ([`Self::stop`]) and
+///   copies it ([`Self::copy`]).
+///   The active number (`0` = off) is read lock-free through [`Self::active`].
+/// - [`Self::port_failed`] = the join-notification port failed for real — once raised it stays for the incarnation.
 ///
-/// ★The record lock is a leaf★ — while held it only does fields · `Vec` · `Arc` clone · take-out, and no OS calls · handle closing (the last drop of
-/// `Arc<Birth>`) · logging · other locks. Never held together with the gate lock. So a taken-out record is handed back, and the
-/// receiver drops it after the lock is released. A poisoned lock is used as it is.
+/// ★The record lock is a leaf★ — while held: fields · `Vec` · `Arc` clone · take-out only; no OS calls · handle closing (the last drop of
+///   `Arc<Birth>`) · logging ·
+/// other locks. Never held together with the gate lock; a taken-out record is dropped after release. A poisoned lock is used as it is.
 // ADR-0262
 pub(super) struct Recorder {
-    /// Write only inside the lock — the 「같은 기록인가」 (is it the same record) decision and the insert · take-out form one section.
+    /// Write only inside the lock — the 「is it the same record」 decision and the insert · take-out form one section.
     active: AtomicU64,
     port_failed: AtomicBool,
     inner: Mutex<RecInner>,
@@ -363,7 +366,6 @@ struct RecInner {
     full: bool,
 }
 
-/// A birth held by the listener thread — before it is put into the record.
 struct Caught {
     pid: u32,
     facts: ProcessFacts,
@@ -371,7 +373,6 @@ struct Caught {
     killable: bool,
 }
 
-/// The answer of [`Recorder::admit`] — what could not be put in is handed back (the caller drops it outside the lock).
 enum Admit {
     Recorded {
         seq: u64,
@@ -405,7 +406,8 @@ impl Recorder {
         sync::lock(&self.inner)
     }
 
-    /// Turn on a new record and give its number (not `0`) — lower the overflow flag, and take out and return what was left in the previous record (the
+    /// Turn on a new record and give its number (not `0`) — lower the overflow flag, and take out and return what was left in the previous
+    ///   record (the
     /// receiver drops it).
     pub(super) fn start(&self) -> (u64, Vec<Arc<Birth>>) {
         let mut inner = self.lock();
@@ -419,7 +421,8 @@ impl Recorder {
         (r, std::mem::take(&mut inner.births))
     }
 
-    /// Turn off only when `r` is on, and take out and return that record (the receiver drops it). Otherwise change nothing and return an empty one.
+    /// Turn off only when `r` is on, and take out and return that record (the receiver drops it). Otherwise change nothing and return an
+    ///   empty one.
     pub(super) fn stop(&self, r: u64) -> Vec<Arc<Birth>> {
         if r == 0 {
             return Vec::new();
@@ -436,7 +439,6 @@ impl Recorder {
         self.active.load(Ordering::Acquire)
     }
 
-    /// If `r` is on, return a clone of what has been put in so far — otherwise an empty one.
     pub(super) fn copy(&self, r: u64) -> Vec<Arc<Birth>> {
         if r == 0 {
             return Vec::new();
@@ -502,7 +504,8 @@ impl Recorder {
     }
 }
 
-/// Log attribution — carries the agent id if the spawn has a control channel, and always the root PID (ADR-0217 — a spawn without a control channel
+/// Log attribution — carries the agent id if the spawn has a control channel, and always the root PID (ADR-0217 — a spawn without a
+///   control channel
 /// has no id, so it is linked by the root).
 #[derive(Debug, Clone, Copy)]
 pub(super) struct LogTag {
@@ -562,8 +565,9 @@ impl Group for ProcessGroup {
     }
 }
 
-/// Acquire one incarnation's join-notification port — only the first caller creates the port, starts the listener thread and attaches the group; later callers read
-/// that result. This is what keeps a second `watch_births` from reaching the group (it does not rely on the OS refusing).
+/// Acquire one incarnation's join-notification port — only the first caller creates the port, starts the listener thread and attaches the
+///   group; later callers
+/// read that result (a second `watch_births` never reaches the group; not reliant on the OS refusing).
 // ADR-0262
 pub(super) struct BirthWatch {
     acquired: OnceLock<Result<(), ()>>,
@@ -576,12 +580,13 @@ impl BirthWatch {
         }
     }
 
-    /// Can births be recorded — `Ok` = the listener thread is running and the group is attached to the port. `Err` = the port is unusable (that episode is
-    /// `Failed(port)`): acquisition failed · the group is already gone · the listener thread latched a failure ([`Recorder::port_failed`]).
+    /// Can births be recorded — `Ok` = listener thread running and group attached. `Err` = port unusable (that episode is `Failed(port)`):
+    ///   acquisition failed · group
+    /// already gone · listener thread latched a failure ([`Recorder::port_failed`]).
     ///
-    /// It is `Ok` even after the listener thread ended because the group vanished · retired — on ending it turned off the record that was on, and a record turned on after that
-    /// receives no births (the miss side). The first call holds the Job strongly during attach but does not block — `spawn` only
-    /// starts the listener thread (only the first call uses it).
+    /// Still `Ok` after the listener ended because the group vanished or retired — a record turned on later receives no births (the miss
+    ///   side). The first call holds
+    /// the Job strongly during attach but does not block.
     fn ensure_with<G: Group>(
         &self,
         group: &Arc<G>,
@@ -599,7 +604,6 @@ impl BirthWatch {
     }
 }
 
-/// How far port acquisition got — used only to tell failures apart.
 #[derive(Clone, Copy)]
 enum Stage {
     BeforeStart,
@@ -607,10 +611,9 @@ enum Stage {
     Started,
 }
 
-/// Port → start the listener thread → (only when the start is `Ok`) attach — `watch_births` enforces this order. So when notifications can
-/// start to pile up, a thread to drain them is already running. Whether it attached is told to the running thread.
-///
-/// Only a real OS failure is latched — if the group is already gone or this OS has no group, only that episode fails.
+/// Port → start the listener thread → (only when the start is `Ok`) attach — so a draining thread already runs when notifications can
+///   start to pile up.
+/// Only a real OS failure is latched; a group already gone or an OS without groups fails only that episode.
 fn acquire<G: Group>(
     group: &Arc<G>,
     recorder: &Arc<Recorder>,
@@ -634,7 +637,8 @@ fn acquire<G: Group>(
         };
         spawned
     });
-    // If there is no running thread (failure before start · start failed), there is no receiver so the send fails — there is just nobody to tell.
+    // If there is no running thread (failure before start · start failed), there is no receiver so the send fails — there is just nobody
+    //   to tell.
     let _ = attached_tx.send(watched.is_ok());
     let Err(e) = watched else {
         return Ok(());
@@ -644,24 +648,24 @@ fn acquire<G: Group>(
             tracing::debug!(
                 agent = tag.agent(),
                 root_pid = tag.root_pid,
-                "무리가 없어 가입 알림 포트를 만들지 않았다: {e}"
+                "no group, so the join notification port was not created: {e}"
             );
             return Err(());
         }
         Stage::BeforeStart => tracing::warn!(
             agent = tag.agent(),
             root_pid = tag.root_pid,
-            "가입 알림 포트를 만들지 못했다 — 이 화신은 끊기 잔여물을 정리하지 않는다: {e}"
+            "could not create the join notification port — this incarnation does not clean up interrupt leftovers: {e}"
         ),
         Stage::StartFailed => tracing::warn!(
             agent = tag.agent(),
             root_pid = tag.root_pid,
-            "가입 알림 듣는 스레드를 띄우지 못해 포트를 붙이지 않았다 — 이 화신은 끊기 잔여물을 정리하지 않는다: {e}"
+            "could not start the thread listening for join notifications, so the port was not attached — this incarnation does not clean up interrupt leftovers: {e}"
         ),
         Stage::Started => tracing::warn!(
             agent = tag.agent(),
             root_pid = tag.root_pid,
-            "무리를 가입 알림 포트에 붙이지 못했다 — 듣는 스레드는 끝나고 이 화신은 끊기 잔여물을 정리하지 않는다: {e}"
+            "could not attach the group to the join notification port — the listening thread ends and this incarnation does not clean up interrupt leftovers: {e}"
         ),
     }
     recorder.fail_port();
@@ -677,14 +681,12 @@ struct Listener<G> {
     tag: LogTag,
 }
 
-/// The normal reasons listening ends.
 #[derive(Clone, Copy)]
 enum End {
     Gone,
     Retiring,
 }
 
-/// One failure — latches the port.
 enum Failure {
     Take(io::Error),
     Panic(String),
@@ -693,23 +695,25 @@ enum Failure {
 impl fmt::Display for Failure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Failure::Take(e) => write!(f, "꺼내기 {e}"),
-            Failure::Panic(message) => write!(f, "패닉 {message}"),
+            Failure::Take(e) => write!(f, "take {e}"),
+            Failure::Panic(message) => write!(f, "panic {message}"),
         }
     }
 }
 
-/// Listener thread body — runs for the incarnation's lifetime. Only join notifications that arrive while the record is on are held and put in right away; the rest are dropped.
+/// Listener thread body — runs for the incarnation's lifetime; join notifications arriving while the record is on are held and put in
+///   right away, the rest dropped.
 ///
-/// - Start: first receive the opener's 「붙었나」 (did it attach). `false` = it never attached → nothing to detach, so it just ends. If the sender is
-///   gone (the opener panicked after attaching and before sending), it may have attached, so it runs as usual.
-/// - End: at each notification · timeout, check whether the group is gone · retiring → turn off the record that was on and end (when retiring, detach first).
-/// - Failure mode: take-out error · panic in a round → latch the port, turn off the record that was on, and detach → if detached, end · if not, do not end and only
-///   take out and discard until the end above comes (if nobody drains an attached port, the kernel queue grows). If even taking out fails meanwhile, it cannot
-///   drain, so it ends.
+/// - Start: first receive the opener's 「did it attach」; `false` → nothing to detach, end. A gone sender (opener panicked after attaching)
+///   → run as usual.
+/// - End: at each notification · timeout, group gone · retiring → turn off the record that was on and end (retiring: detach first).
+/// - Failure: take-out error · panic in a round → latch the port, turn off the record, detach → detached: end; not: keep taking out and
+///   discarding until the end
+///   above (an undrained attached port grows the kernel queue); if taking out fails too, end.
 ///
-/// ★Each round is wrapped in `catch_unwind`, but this thread is outside the containment marker★ — in the production process a panic is ended by the hook, so
-/// the body is written not to panic (no unwrap · no indexing · poison tolerated). The wrapping is a safety net for test builds without the hook.
+/// ★Each round is wrapped in `catch_unwind`, but this thread is outside the containment marker★ — the production hook ends a panic, so the
+///   body must not
+/// panic (no unwrap · no indexing · poison tolerated); the wrapper is a safety net for test builds without the hook.
 // ADR-0262
 // ADR-0292
 fn listen<G: Group>(l: Listener<G>) {
@@ -736,7 +740,7 @@ fn listen<G: Group>(l: Listener<G>) {
             tracing::debug!(
                 agent = l.tag.agent(),
                 root_pid = l.tag.root_pid,
-                "떼지 못한 가입 알림 포트를 비우다 실패해 듣기를 끝낸다: {failure}"
+                "failed to drain the join notification port that could not be detached, ending the listening: {failure}"
             );
             return;
         }
@@ -769,7 +773,8 @@ impl<G: Group> Listener<G> {
         Ok(None)
     }
 
-    /// If the record is on, hold it right away (outside the lock) — the notification's number must be opened and held for it to be both alive and not reused. Then
+    /// If the record is on, hold it right away (outside the lock) — the notification's number must be opened and held for it to be both
+    ///   alive and not reused. Then
     /// put it in only if it is the same record, and drop what could not be put in after the record lock is released.
     fn record(&self, pid: u32, attached_at: Instant) {
         let r = self.recorder.active();
@@ -796,7 +801,7 @@ impl<G: Group> Listener<G> {
                 killable,
                 born_ago_us,
                 since_attach_ms = millis(attached_at.elapsed()),
-                "가입한 프로세스를 붙들어 탄생 기록에 넣었다"
+                "held a joined process and put it in the birth record"
             ),
             Admit::Full { caught, first } => {
                 drop(caught);
@@ -805,7 +810,7 @@ impl<G: Group> Listener<G> {
                         agent = self.tag.agent(),
                         root_pid = self.tag.root_pid,
                         limit = BIRTH_MAX,
-                        "탄생 기록이 상한에 닿아 더 넣지 않는다 — 넘친 고리는 알려지지 않는다"
+                        "the birth record reached its cap, no more are added — overflowing links are not known"
                     );
                 }
             }
@@ -825,7 +830,7 @@ impl<G: Group> Listener<G> {
                     agent = self.tag.agent(),
                     root_pid = self.tag.root_pid,
                     pid,
-                    "끝내기 권한이 거절돼 고리로만 붙들었다: {refused}"
+                    "kill access was refused, so it is held only as a link: {refused}"
                 );
                 Some((pin, false))
             }
@@ -835,14 +840,15 @@ impl<G: Group> Listener<G> {
                     agent = self.tag.agent(),
                     root_pid = self.tag.root_pid,
                     pid,
-                    "가입한 프로세스를 붙들지 못했다: {e}"
+                    "could not hold a joined process: {e}"
                 );
                 None
             }
         }
     }
 
-    /// Normal end — turn off the record that was on. A retiring group is still attached, so detach before releasing the port (the rule of `Births`).
+    /// Normal end — turn off the record that was on. A retiring group is still attached, so detach before releasing the port (the rule of
+    ///   `Births`).
     fn finish(&self, end: End) {
         drop(self.recorder.stop(self.recorder.active()));
         let reason = match end {
@@ -853,7 +859,7 @@ impl<G: Group> Listener<G> {
                     tracing::debug!(
                         agent = self.tag.agent(),
                         root_pid = self.tag.root_pid,
-                        "물러나는 무리에서 가입 알림 포트를 못 뗐다: {e}"
+                        "could not detach the join notification port from the retreating group: {e}"
                     );
                 }
                 "retiring"
@@ -863,38 +869,40 @@ impl<G: Group> Listener<G> {
             agent = self.tag.agent(),
             root_pid = self.tag.root_pid,
             reason,
-            "가입 알림 듣기를 끝낸다"
+            "ending the join notification listening"
         );
     }
 
-    /// Failure mode — latch the port, turn off the record that was on, and detach. True = detached (a group already gone also counts as detached).
+    /// Failure mode — latch the port, turn off the record that was on, and detach. True = detached (a group already gone also counts as
+    ///   detached).
     fn fail(&self, failure: Failure) -> bool {
         self.recorder.fail_port();
         drop(self.recorder.stop(self.recorder.active()));
         let (detached, port) = match self.group.unwatch_births() {
-            Ok(()) => (true, "뗐다".to_owned()),
-            Err(e) if e.kind() == GROUP_GONE => (true, "무리가 이미 없다".to_owned()),
-            Err(e) => (false, format!("못 떼어 비우기만 한다({e})")),
+            Ok(()) => (true, "detached".to_owned()),
+            Err(e) if e.kind() == GROUP_GONE => (true, "the group is already gone".to_owned()),
+            Err(e) => (false, format!("could not detach, only draining ({e})")),
         };
         match failure {
             Failure::Take(e) => tracing::warn!(
                 agent = self.tag.agent(),
                 root_pid = self.tag.root_pid,
                 detached,
-                "가입 알림을 꺼내지 못해 탄생 기록을 멈췄다 — 이 화신은 끊기 잔여물을 정리하지 않는다 · 포트: {port}: {e}"
+                "could not take a join notification, so the birth record stopped — this incarnation does not clean up interrupt leftovers · port: {port}: {e}"
             ),
             Failure::Panic(message) => tracing::error!(
                 agent = self.tag.agent(),
                 root_pid = self.tag.root_pid,
                 detached,
-                "가입 알림 듣기가 패닉해 탄생 기록을 멈췄다 — 이 화신은 끊기 잔여물을 정리하지 않는다 · 포트: {port}: {message}"
+                "the join notification listening panicked, so the birth record stopped — this incarnation does not clean up interrupt leftovers · port: {port}: {message}"
             ),
         }
         detached
     }
 }
 
-/// Time from creation until now (µs) — used only for the 「가입 → 엶」 (join → open) delay field in the log (selection does not look at the wall clock — TRD §3-6). If creation could not be
+/// Time from creation until now (µs) — used only for the 「join → open」 delay field in the log (selection does not look at the wall clock —
+///   TRD §3-6). If creation could not be
 /// read or the clock is before it, `None`.
 fn born_ago_us(create: u64) -> Option<u64> {
     if create == 0 {
@@ -917,15 +925,15 @@ fn micros(d: Duration) -> u64 {
 
 // ── Interrupt gate · episode · worker ───────────────────────────────────────────────────────
 
-/// If this long passes with no turn end after the most recently written interrupt line, open a pass; the check after a pass that killed anything is also this interval. Basis
-/// (spike 2026-09-29): `result` of an interrupt that does not stall ≤ 1394 ms · longest life of a normal process born after an interrupt 1171 ms ·
-/// what was alive at interrupt +3 s was only stall leftovers, in 11/11 trials.
+/// If this long passes with no turn end after the most recent interrupt line, open a pass (also the check interval after a pass that
+///   killed anything).
+/// Basis (spike 2026-09-29, 11/11): non-stalling interrupt `result` ≤ 1394 ms · longest normal process born after an interrupt 1171 ms ·
+///   what lived at +3 s was stall leftovers.
 // ADR-0257
 // ADR-0262
 pub(super) const INTERRUPT_LEFTOVER_GRACE: Duration = Duration::from_secs(3);
 
-/// Exit code of a process this cleanup killed — lets a post-mortem recognize what this cleanup killed from the exit code alone. Chosen so it does not collide with the path's
-/// `shutdown()` group-wide kill (1).
+/// Exit code of a process this cleanup killed — a post-mortem can tell it from the path's `shutdown()` group-wide kill (1).
 // ADR-0262
 // ADR-0275
 const LEFTOVER_EXIT_CODE: u32 = 0x7440;
@@ -936,8 +944,8 @@ pub(super) const PIN_MAX: usize = 256;
 /// Number of root children accepted in a snapshot — console host · claude (Q2 — inference). Over it is `Failed(shape)`.
 const ROOT_CHILDREN_MAX: usize = 2;
 
-/// Cap on the rounds one pass goes through to kill — the longest measured pass is 2 rounds (p3bg: owner → its fork), and one round is left as margin.
-/// If kill candidates still remain after that, it does not kill and warns `rounds_exhausted`.
+/// Cap on rounds per pass — the longest measured pass is 2 (p3bg: owner → its fork), plus one margin. Remaining candidates are not killed;
+///   warns `rounds_exhausted`.
 // ADR-0262
 pub(super) const PASS_ROUNDS: u32 = 3;
 
@@ -948,7 +956,7 @@ pub(super) const KILL_CONFIRM: Duration = Duration::from_millis(200);
 const WORKER_THREAD: &str = "engram-claude-leftover";
 const LISTENER_THREAD: &str = "engram-claude-births";
 
-/// The monotonic clock · waiting · thread start the cleaner reads — the real thing = [`SystemClock`]. The worker and the listener thread are started through this.
+/// Monotonic clock · waiting · thread start the cleaner reads — real = [`SystemClock`]; the worker and listener are started through it.
 ///
 /// ★[`now`](Clock::now) is also called inside the gate lock★ — it takes or waits on no other lock.
 // ADR-0262
@@ -974,9 +982,8 @@ impl LeftoverClock for SystemClock {
 
 /// Phase of the episode.
 ///
-/// - `Waiting` = waiting for a pass (if written, for the most recent interrupt + N) · `Cleaning` = the worker is running a pass.
-/// - `Spent.at` = when a pass that killed anything ended — if it is still the same episode at `at + N`, warn and `Done` (decision 2 — do no more).
-/// - `Done` = no more passes.
+/// - `Waiting` = waiting for a pass (written: most recent interrupt + N) · `Cleaning` = the worker runs a pass · `Done` = no more passes.
+/// - `Spent.at` = when a pass that killed anything ended — still the same episode at `at + N` → warn and `Done`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
     Waiting,
@@ -1000,7 +1007,6 @@ enum SnapCause {
 }
 
 impl SnapCause {
-    /// Value of the log field `cause`.
     fn label(self) -> &'static str {
         match self {
             SnapCause::List => "list",
@@ -1070,12 +1076,11 @@ impl fmt::Debug for SnapState {
     }
 }
 
-/// One interrupt episode — starts with the interrupt that set up a new episode, and ends with turn end · new input · swap · retirement · pass end.
+/// One interrupt episode — starts with the interrupt that set up a new episode, ends with turn end · new input · swap · retirement · pass end.
 ///
-/// - `first_mono` = when set up · `last_mono` = the most recent interrupt (the later of accepted time · written time) — the basis of N.
-/// - `written` = this episode's line was written and the write list `w` (sorted) of that moment was obtained — before that there is no pass.
-/// - `rec` = the record number this episode turned on · `0` = released.
-/// - `killed_any` = any pass killed at least one.
+/// - `last_mono` = the most recent interrupt (later of accepted · written time) — the basis of N.
+/// - `written` = the line was written and the write list `w` (sorted) obtained — no pass before that.
+/// - `rec` = record number this episode turned on · `0` = released.
 #[derive(Debug)]
 struct Episode {
     gen: u64,
@@ -1094,7 +1099,6 @@ impl Episode {
         matches!(self.phase, Phase::Waiting | Phase::Cleaning)
     }
 
-    /// Hand out the snapshot and record — the episode stays in place.
     fn release(&mut self) -> Released {
         let snap = match std::mem::replace(&mut self.snap, SnapState::Released) {
             SnapState::Taken(snap) => Some(snap),
@@ -1107,7 +1111,6 @@ impl Episode {
         }
     }
 
-    /// Everything the episode taken out of the state holds.
     fn into_released(mut self) -> Released {
         let mut released = self.release();
         released.w = self.w.take();
@@ -1132,13 +1135,12 @@ struct Mark {
     next_gen: u64,
 }
 
-/// State inside the lock of [`GateCell`]. Transitions are pure — time · atomic values come in as arguments, no OS calls, no allocation or free,
-/// no panics. What was taken out is returned and the caller drops it after releasing the lock.
+/// State inside the lock of [`GateCell`]. Transitions are pure — time · atomics come in as arguments; no OS calls, allocation or free,
+///   panics. What was taken out is
+/// returned and the caller drops it after releasing the lock.
 ///
-/// - `open` = a turn that can be interrupted is open — the only user is the decoder.
-/// - `closes` · `delivers` = counts of turn ends · new inputs.
-/// - `opening` = one opener is between the two sections.
-/// - `worker` = a worker is up for this incarnation (including while starting).
+/// - `open` = a turn that can be interrupted is open (only the decoder uses it) · `closes` · `delivers` = counts of turn ends · new inputs.
+/// - `opening` = one opener is between the two sections · `worker` = a worker is up (including while starting).
 #[derive(Debug, Default)]
 struct GateState {
     open: bool,
@@ -1150,7 +1152,6 @@ struct GateState {
     worker: bool,
 }
 
-/// Answer of section ①.
 #[derive(Debug)]
 enum Begin {
     /// The gate is closed — no line.
@@ -1163,7 +1164,6 @@ enum Begin {
     Open(Mark),
 }
 
-/// Answer of section ②. A snapshot that could not be set up is handed back.
 enum Settle {
     /// The turn closed between the two sections — no line.
     NoLine(SnapState),
@@ -1214,7 +1214,6 @@ enum WriteNote {
     Stale,
 }
 
-/// One step of the worker.
 enum Step {
     /// The worker ends (`worker` was already lowered). `retired` = the episode cleared because the group is retiring.
     Exit {
@@ -1229,10 +1228,10 @@ enum Step {
     },
 }
 
-/// Input of one pass — taken in the lock section that switches to `Cleaning`. The `Arc` held is dropped outside the lock after the pass ends.
+/// Input of one pass — taken in the lock section that switches to `Cleaning`; the held `Arc` is dropped outside the lock after the pass.
 ///
-/// - `rec` = this episode's record number — the pass copies that record (empty if `active` differs).
-/// - `w` = write list of the first write (sorted).
+/// - `rec` = this episode's record number — the pass copies that record (empty if `active` differs) · `w` = write list of the first write
+///   (sorted).
 struct Ticket {
     gen: u64,
     first_mono: Instant,
@@ -1241,7 +1240,6 @@ struct Ticket {
     snap: SnapState,
 }
 
-/// Decision of one kill-commit section.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Commit {
     Go,
@@ -1268,7 +1266,8 @@ impl GateState {
         self.episode.take()
     }
 
-    /// Section ①. The pass running when appending to a live episode stops at the next kill commit, and waits again for the most recent interrupt + N.
+    /// Section ①. The pass running when appending to a live episode stops at the next kill commit, and waits again for the most recent
+    ///   interrupt + N.
     fn begin_interrupt(&mut self, now: Instant) -> Begin {
         if !self.open {
             return Begin::Closed;
@@ -1332,7 +1331,8 @@ impl GateState {
         Settle::Opened { gen, old }
     }
 
-    /// Write confirmation — if it is a live episode of the same generation, pull the most recent interrupt forward; the first write counts as written only when there is a list `w`.
+    /// Write confirmation — if it is a live episode of the same generation, pull the most recent interrupt forward; the first write counts
+    ///   as written only when there is a list `w`.
     /// Other `w` are returned. If the written episode has no worker, give the job of starting one.
     fn note_written(&mut self, gen: u64, w: Option<Arc<[u32]>>, now: Instant) -> Noted {
         let worker = self.worker;
@@ -1400,7 +1400,7 @@ impl GateState {
                             snap: ep.snap.clone(),
                         });
                     }
-                    // A spot where 「쓰였으면 명단이 있다」 (if written, a list exists) broke — there is no list to set up a pass.
+                    // A spot where 「if written, a list exists」 broke — there is no list to set up a pass.
                     ep.phase = Phase::Done;
                     ep.release()
                 }
@@ -1409,7 +1409,8 @@ impl GateState {
                     ep.release()
                 }
             },
-            // Only the worker sets `Cleaning`, and the end of that pass always clears it, so it is not reached without a future defect. Even if it were, an episode
+            // Only the worker sets `Cleaning`, and the end of that pass always clears it, so it is not reached without a future defect.
+            //   Even if it were, an episode
             // completes only one pass, so it does not run again.
             Phase::Cleaning => {
                 ep.phase = Phase::Done;
@@ -1434,7 +1435,8 @@ impl GateState {
         }
     }
 
-    /// Recheck of the kill commit — no marker · same generation · written · still `Cleaning` (no interrupt · turn end · new input during the pass) ·
+    /// Recheck of the kill commit — no marker · same generation · written · still `Cleaning` (no interrupt · turn end · new input during
+    ///   the pass) ·
     /// most recent interrupt + N ≤ now.
     fn still_due(&self, gen: u64, now: Instant, retiring: bool) -> bool {
         !retiring
@@ -1459,14 +1461,14 @@ impl GateState {
         }
     }
 
-    /// The kill call was accepted in the kill commit.
     fn note_kill(&mut self, gen: u64) {
         if let Some(ep) = self.episode.as_mut().filter(|ep| ep.gen == gen) {
             ep.killed_any = true;
         }
     }
 
-    /// Pass end — only if the same generation is still `Cleaning`, close it out as `Spent` (killed something)/`Done` and hand out the snapshot · record.
+    /// Pass end — only if the same generation is still `Cleaning`, close it out as `Spent` (killed something)/`Done` and hand out the
+    ///   snapshot · record.
     /// If an interrupt mid-pass returned it to `Waiting`, keep holding and wait for the next pass.
     fn finish_pass(&mut self, gen: u64, killed: bool, now: Instant) -> Released {
         let Some(ep) = self.episode.as_mut().filter(|ep| ep.gen == gen) else {
@@ -1486,8 +1488,9 @@ impl GateState {
         released
     }
 
-    /// The worker is gone (start failure · panic) — whatever the generation, bring the current episode down to `Done`. Because an episode another interrupt set up in the meantime
-    /// also believed 「일꾼이 떠 있다」 (a worker is up) and nobody started one. Do not immediately start again.
+    /// The worker is gone (start failure · panic) — whatever the generation, bring the current episode down to `Done`. Because an episode
+    ///   another interrupt set up in the meantime
+    /// also believed 「a worker is up」 and nobody started one. Do not immediately start again.
     fn abandon(&mut self) -> Released {
         self.worker = false;
         match self.episode.as_mut() {
@@ -1500,7 +1503,8 @@ impl GateState {
     }
 }
 
-/// One incarnation's cleaner — group handle · birth record · port acquisition · clock · root · retirement flag · log attribution. If it cannot be assembled,
+/// One incarnation's cleaner — group handle · birth record · port acquisition · clock · root · retirement flag · log attribution. If it
+///   cannot be assembled,
 /// it is not created (then [`GateCell`] only opens and closes the gate).
 // ADR-0262
 pub(super) struct Cleaner<G: Group = ProcessGroup> {
@@ -1511,7 +1515,6 @@ pub(super) struct Cleaner<G: Group = ProcessGroup> {
     root_pid: u32,
     retiring: RetiringSignal,
     tag: LogTag,
-    /// The write-list failure was logged as warn — once per incarnation.
     unlisted_warned: AtomicBool,
 }
 
@@ -1547,7 +1550,6 @@ impl<G: Group> Cleaner<G> {
         }
     }
 
-    /// Acquire port · listener thread (first time only) — the listener thread is also started through the clock.
     fn ensure_port(&self) -> Result<(), ()> {
         self.watch
             .ensure_with(&self.group, &self.recorder, &self.tag, |body| {
@@ -1556,8 +1558,9 @@ impl<G: Group> Cleaner<G> {
     }
 }
 
-/// Snapshot of a new episode [selection] — for each member of the complete list, hold it with query access only and read its facts. Non-root members that could not be held
-/// (exited · outside the group · refused) are left out — they are unknown links, so what is below them is missed. Called outside both locks.
+/// Snapshot of a new episode — hold every member of the complete list with query access only and read its facts. Non-root members that
+///   could not be held
+/// (exited · outside the group · refused) are left out as unknown links, so what is below them misses. Called outside both locks.
 // ADR-0262
 fn take_snapshot<G: Group>(group: &G, root_pid: u32) -> SnapState {
     let Ok(pids) = group.member_pids() else {
@@ -1595,7 +1598,6 @@ fn take_snapshot<G: Group>(group: &G, root_pid: u32) -> SnapState {
     SnapState::Taken(Arc::new(Snapshot { root, others }))
 }
 
-/// Why the write list could not be taken.
 enum Unlisted {
     List(io::Error),
     /// The list is empty — the path is gone.
@@ -1605,13 +1607,14 @@ enum Unlisted {
 impl fmt::Display for Unlisted {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Unlisted::List(e) => write!(f, "명단 {e}"),
-            Unlisted::Gone => f.write_str("무리가 없다"),
+            Unlisted::List(e) => write!(f, "list {e}"),
+            Unlisted::Gone => f.write_str("no group"),
         }
     }
 }
 
-/// Write list W — complete member numbers right after the line was written (sorted). Called with no lock (the handle upgrades the Job only for that call).
+/// Write list W — complete member numbers right after the line was written (sorted). Called with no lock (the handle upgrades the Job only
+///   for that call).
 /// Candidates must be outside W, so if W cannot be taken, no pass is set up for that write.
 fn write_list<G: Group>(group: &G) -> Result<Arc<[u32]>, Unlisted> {
     let mut pids = group.member_pids().map_err(Unlisted::List)?;
@@ -1622,14 +1625,14 @@ fn write_list<G: Group>(group: &G) -> Result<Arc<[u32]>, Unlisted> {
     Ok(pids.into())
 }
 
-/// Turn-open gate + interrupt episode — one per incarnation, held by the same `Arc` by the interrupt-line function · decoder · write confirmation · worker.
+/// Turn-open gate + interrupt episode — one per incarnation, held by the same `Arc` by the interrupt-line function · decoder · write
+///   confirmation · worker.
 // ADR-0262
 pub(super) struct GateCell<G: Group = ProcessGroup> {
     state: Mutex<GateState>,
     cleaner: Option<Arc<Cleaner<G>>>,
 }
 
-/// What the Debug of [`GateCell`] copies from the lock.
 #[derive(Debug, Clone, Copy)]
 struct Seen {
     open: bool,
@@ -1652,9 +1655,8 @@ impl Seen {
 
 impl<G: Group> fmt::Debug for GateCell<G> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // The write happens after the lock is released — the formatter may write straight to a file · console. It does not wait either: so that even if a defect
-        // printing this while holding the lock appears, it does not stall waiting for itself.
-        // ADR-0275: do not use base `sync` — it has only the waiting `lock`. Only the poisoned branch is recovered here.
+        // Write after the lock is released — the formatter may write to a file · console and must not wait on this lock.
+        // ADR-0275: not base `sync` (only a waiting `lock`); only the poisoned branch is recovered here.
         let seen = match self.state.try_lock() {
             Ok(state) => Some(Seen::of(&state)),
             Err(TryLockError::Poisoned(state)) => Some(Seen::of(&state.into_inner())),
@@ -1672,11 +1674,12 @@ impl<G: Group> fmt::Debug for GateCell<G> {
     }
 }
 
-/// Opener guard — set up after becoming the opener in section ①. On every exit that did not set up a new episode (panic · no line · line only),
-/// take the gate lock, lower `opening` (only if section ② has not been reached) and turn off the record that was on **after** releasing it.
+/// Opener guard — set up after becoming the opener in section ①. On every exit that set up no new episode (panic · no line · line only):
+///   take the gate lock, lower
+/// `opening` (only if section ② was not reached) and turn off the record that was on **after** releasing it.
 ///
-/// ★After section ② do not touch `opening`★ — ② already lowered it, and another interrupt may have become the opener since (clearing
-/// that flag would make two openers). The record is turned off by number, so if a new record was turned on meanwhile, nothing is done.
+/// ★After section ② do not touch `opening`★ — ② already lowered it and another interrupt may be the opener now (clearing it would make two
+///   openers).
 struct Opener<'a, G: Group> {
     cell: &'a GateCell<G>,
     recorder: &'a Recorder,
@@ -1714,11 +1717,13 @@ impl<G: Group> GateCell<G> {
         self.lock().open
     }
 
-    /// Body of the interrupt-line function — `None` (no line) if the gate is closed. If it gives a line, `on_written` exists only when this interrupt set up an episode or appended to a live
-    /// episode (another interrupt is opening · record · input · generation changed between the two sections → line only).
+    /// Body of the interrupt-line function — `None` (no line) if the gate is closed. `on_written` exists only when this interrupt set up
+    ///   an episode or appended to a live
+    /// one (another opener · record · input · generation changed between the two sections → line only).
     ///
-    /// There is one opener: acquire the port outside the lock → turn on the record → take the snapshot. ★Turn the record on before the snapshot★ —
-    /// what is born in between is either recorded (after the listing) or in the snapshot (before the listing).
+    /// One opener: acquire the port outside the lock → turn on the record → take the snapshot. ★Turn the record on before the snapshot★ —
+    ///   what is born in between is
+    /// either recorded (after the listing) or in the snapshot (before it).
     // ADR-0262
     pub(super) fn interrupt(self: &Arc<Self>, bytes: Vec<u8>) -> Option<InterruptOut> {
         let Some(cleaner) = self.cleaner.as_ref() else {
@@ -1745,7 +1750,7 @@ impl<G: Group> GateCell<G> {
                 tracing::debug!(
                     agent = cleaner.tag.agent(),
                     root_pid = cleaner.tag.root_pid,
-                    "다른 끊기가 에피소드를 여는 중이라 끊기 줄만 준다"
+                    "another interrupt is opening an episode, so only the interrupt line is given"
                 );
                 return Some(InterruptOut {
                     bytes,
@@ -1795,7 +1800,7 @@ impl<G: Group> GateCell<G> {
                     snapshot,
                     members,
                     births = cleaner.recorder.len(),
-                    "끊기 에피소드를 열었다"
+                    "opened an interrupt episode"
                 );
                 Some(InterruptOut {
                     bytes,
@@ -1808,7 +1813,7 @@ impl<G: Group> GateCell<G> {
                 tracing::debug!(
                     agent = cleaner.tag.agent(),
                     root_pid = cleaner.tag.root_pid,
-                    "에피소드를 여는 사이 턴이 닫혀 끊기 줄을 주지 않는다"
+                    "the turn closed while the episode was being opened, so the interrupt line is not given"
                 );
                 None
             }
@@ -1819,17 +1824,17 @@ impl<G: Group> GateCell<G> {
                     tracing::warn!(
                         agent = cleaner.tag.agent(),
                         root_pid = cleaner.tag.root_pid,
-                        "여는 이가 하나인데 에피소드를 세우는 자리에 산 에피소드가 있다 — 줄만 준다"
+                        "there is one opener, yet a live episode sits where the episode is set up — only the line is given"
                     );
                 } else {
                     tracing::debug!(
                         agent = cleaner.tag.agent(),
                         root_pid = cleaner.tag.root_pid,
                         reason = why.label(),
-                        "stale — 에피소드를 여는 사이 기록 · 입력이 바뀌어 끊기 줄만 준다"
+                        "stale — the record or input changed while the episode was being opened, so only the interrupt line is given"
                     );
                 }
-                debug_assert!(why != Stale::Live, "여는 이가 둘이었다");
+                debug_assert!(why != Stale::Live, "there were two openers");
                 Some(InterruptOut {
                     bytes,
                     on_written: None,
@@ -1838,13 +1843,11 @@ impl<G: Group> GateCell<G> {
         }
     }
 
-    /// To be called by the writer after the line is written — takes the write list and records it under that generation.
     fn on_written(self: &Arc<Self>, gen: u64) -> OnWritten {
         let cell = Arc::clone(self);
         Box::new(move || cell.written(gen))
     }
 
-    /// Write confirmation — called by the writer thread with no lock. The list is taken outside the gate lock, and an unused list is also dropped outside.
     fn written(self: &Arc<Self>, gen: u64) {
         let Some(cleaner) = self.cleaner.as_ref() else {
             return;
@@ -1869,7 +1872,7 @@ impl<G: Group> GateCell<G> {
                 gen,
                 w_len,
                 w_us,
-                "끊기 줄이 쓰여 쓰기 명단을 찍었다"
+                "the interrupt line was written and the write list was captured"
             ),
             (WriteNote::Unlisted, Some(e)) => {
                 if cleaner.unlisted_warned.swap(true, Ordering::AcqRel) {
@@ -1877,14 +1880,14 @@ impl<G: Group> GateCell<G> {
                         agent = cleaner.tag.agent(),
                         root_pid = cleaner.tag.root_pid,
                         gen,
-                        "끊기 줄이 쓰였지만 쓰기 명단을 못 찍었다: {e}"
+                        "the interrupt line was written but the write list could not be captured: {e}"
                     );
                 } else {
                     tracing::warn!(
                         agent = cleaner.tag.agent(),
                         root_pid = cleaner.tag.root_pid,
                         gen,
-                        "끊기 줄이 쓰였지만 쓰기 명단을 못 찍어 이 끊기는 잔여물을 정리하지 않는다: {e}"
+                        "the interrupt line was written but the write list could not be captured, so this interrupt does not clean up leftovers: {e}"
                     );
                 }
             }
@@ -1895,7 +1898,6 @@ impl<G: Group> GateCell<G> {
         }
     }
 
-    /// Start the worker — if it fails, bring the current episode down to `Done` and release what is held.
     fn spawn_worker(self: &Arc<Self>, cleaner: &Arc<Cleaner<G>>) {
         let cell = Arc::clone(self);
         let worker_cleaner = Arc::clone(cleaner);
@@ -1909,12 +1911,11 @@ impl<G: Group> GateCell<G> {
             tracing::warn!(
                 agent = cleaner.tag.agent(),
                 root_pid = cleaner.tag.root_pid,
-                "잔여물 정리 일꾼을 띄우지 못해 이 끊기는 정리하지 않는다: {e}"
+                "could not start the leftover cleanup worker, so this interrupt does not clean up: {e}"
             );
         }
     }
 
-    /// When the decoder sees a turn open — if already open, change nothing.
     pub(super) fn open_turn(&self) {
         self.lock().open_turn();
     }
@@ -1931,14 +1932,13 @@ impl<G: Group> GateCell<G> {
                     agent = cleaner.tag.agent(),
                     root_pid = cleaner.tag.root_pid,
                     gen = ep.gen,
-                    "delivered — 새 입력이 닿아 끊기 에피소드를 버렸다"
+                    "delivered — new input arrived, so the interrupt episode was dropped"
                 );
             }
         }
         self.release(ep.into_released());
     }
 
-    /// When the decoder sees a turn end — closing the gate and dropping the episode in one section.
     pub(super) fn close_turn(&self) {
         let dropped = self.lock().close_turn();
         if let Some(ep) = dropped {
@@ -1967,11 +1967,11 @@ impl<G: Group> GateCell<G> {
     }
 }
 
-/// Worker body — walks until there is no episode · it was not written · it becomes `Done` or retires. It holds only the gate and the cleaner.
+/// Worker body — walks until there is no episode · it was not written · it becomes `Done` or retires.
 ///
-/// ★The panic guard stands only in test builds without the hook — this thread is outside the containment marker, so in the production process the hook ends it★.
-/// So the body is written not to panic (no unwrap · no indexing · poison tolerated). On unwind, bring the current episode down to `Done` and release what is
-/// held — so no written episode is left without a worker.
+/// ★The panic guard stands only in test builds without the hook — this thread is outside the containment marker★; the body must not panic
+///   (no unwrap · no indexing ·
+/// poison tolerated). On unwind, bring the current episode to `Done` and release what is held, so no written episode is left without a worker.
 // ADR-0262
 // ADR-0292
 fn run_worker<G: Group>(cell: &Arc<GateCell<G>>, cleaner: &Arc<Cleaner<G>>) {
@@ -1996,13 +1996,12 @@ impl<G: Group> Drop for WorkerGuard<'_, G> {
             tracing::error!(
                 agent = cleaner.tag.agent(),
                 root_pid = cleaner.tag.root_pid,
-                "잔여물 정리 일꾼이 패닉해 이 끊기는 정리하지 않는다"
+                "the leftover cleanup worker panicked, so this interrupt does not clean up"
             );
         }
     }
 }
 
-/// One step of the worker — true if it keeps walking.
 fn worker_turn<G: Group>(cell: &Arc<GateCell<G>>, cleaner: &Arc<Cleaner<G>>) -> bool {
     let step = {
         let mut state = cell.lock();
@@ -2017,7 +2016,7 @@ fn worker_turn<G: Group>(cell: &Arc<GateCell<G>>, cleaner: &Arc<Cleaner<G>>) -> 
                 tracing::debug!(
                     agent = cleaner.tag.agent(),
                     root_pid = cleaner.tag.root_pid,
-                    "retiring — 물러나는 무리라 끊기 에피소드를 치우고 정리 일꾼이 끝난다"
+                    "retiring — the group is retreating, so the interrupt episode is cleared and the cleanup worker ends"
                 );
             }
             false
@@ -2031,7 +2030,7 @@ fn worker_turn<G: Group>(cell: &Arc<GateCell<G>>, cleaner: &Arc<Cleaner<G>>) -> 
                 agent = cleaner.tag.agent(),
                 root_pid = cleaner.tag.root_pid,
                 waited_ms = millis(waited),
-                "잔여물을 끝낸 판 뒤에도 턴 끝이 없다 — 더 하지 않는다"
+                "still no turn end after the pass that ended leftovers — not doing more"
             );
             true
         }
@@ -2042,7 +2041,6 @@ fn worker_turn<G: Group>(cell: &Arc<GateCell<G>>, cleaner: &Arc<Cleaner<G>>) -> 
     }
 }
 
-/// Why the pass stopped before reaching a round with nothing new to kill.
 #[derive(Debug)]
 enum PassStop {
     /// Pass steps 1–3 did not hold, or the recheck before kill · retirement in the commit · root exit was seen.
@@ -2074,7 +2072,8 @@ impl fmt::Debug for Killed {
     }
 }
 
-/// Number of candidates dropped per rule — those of the last round selected. A candidate dropped while alive is counted again in the next round, so rounds are not
+/// Number of candidates dropped per rule — those of the last round selected. A candidate dropped while alive is counted again in the next
+///   round, so rounds are not
 /// added together.
 #[derive(Debug, Default, Clone, Copy)]
 struct Excluded {
@@ -2107,13 +2106,12 @@ impl Excluded {
 
 /// Result of one pass — read by the log.
 ///
-/// - `stop` = if `None`, it ran up to a round with no new `Cleanup` to kill.
-/// - `rounds` = number of rounds that reached the commit (the last empty round is not counted).
-/// - `terminated` = kill calls that were accepted · `confirmed` = among them, the number whose exit was confirmed within that round's deadline (a round in which the pass
-///   stopped midway does not confirm).
-/// - `candidates` = number of candidates in the first round · `births` = size of the last copied record · `full` = whether that record
-///   overflowed in the first round.
-/// - `cleanups` = number that reached the kill call from the commit · `failed` = kill errors among them · `gone` = number that exited by themselves meanwhile.
+/// - `stop` = `None` if it ran up to a round with no new `Cleanup` · `rounds` = rounds that reached the commit (the last empty one is not
+///   counted).
+/// - `terminated` = kill calls accepted · `confirmed` = of those, exits confirmed within the round's deadline (a pass stopped midway does
+///   not confirm).
+/// - `candidates` · `full` = first round's candidate count and whether its record overflowed · `births` = size of the last copied record.
+/// - `cleanups` = reached the kill call · `failed` = kill errors · `gone` = exited by themselves meanwhile.
 #[derive(Debug, Default)]
 struct PassReport {
     stop: Option<PassStop>,
@@ -2130,15 +2128,16 @@ struct PassReport {
     gone: usize,
 }
 
-/// One cleanup pass (TRD §3-3 「판의 차례」 (rounds of a pass) · §3-4 「판의 순서」 (steps of a pass)) — if steps 1–3 hold, it goes through the rounds. If any one does not hold,
-/// nothing is killed.
+/// One cleanup pass (TRD §3-3 「rounds of a pass」 · §3-4 「steps of a pass」) — if steps 1–3 hold it goes through the rounds; otherwise
+///   nothing is killed.
 ///
-/// One round = copy the record → candidates · rules → kill commit of the `Cleanup` items in ascending `seq` order → confirm the ones killed in that round within one deadline
-/// ([`KILL_CONFIRM`]). What was killed shows up in the next round as an exited known link, and the copies it parented become candidates.
-/// It stops at a round with no new `Cleanup` to kill — a candidate that reached the commit in one pass is not selected again (so that one that did not
-/// exit within the deadline or whose kill failed, and shows up as alive in the next round, is not killed repeatedly).
+/// One round = copy the record → candidates · rules → kill commit of the `Cleanup` items in ascending `seq` order → confirm within one
+///   deadline ([`KILL_CONFIRM`]).
+/// What was killed shows up next round as an exited known link and its copies become candidates. Stops at a round with no new `Cleanup`: a
+///   candidate that reached the
+/// commit is never selected again (one that did not exit in time or whose kill failed is not killed repeatedly).
 ///
-/// Always closes with the pass end, and the log · the copied record · `ticket` are dropped outside both locks.
+/// Always closes with the pass end; the log · copied record · `ticket` are dropped outside both locks.
 // ADR-0262
 fn run_pass<G: Group>(
     cell: &Arc<GateCell<G>>,
@@ -2168,7 +2167,6 @@ fn run_pass<G: Group>(
     report
 }
 
-/// The rounds of a pass — true if at least one kill call was accepted.
 fn kill_rounds<G: Group>(
     cell: &GateCell<G>,
     cleaner: &Cleaner<G>,
@@ -2217,8 +2215,9 @@ fn kill_rounds<G: Group>(
                 report.stop = Some(PassStop::NotReady(why));
                 break;
             }
-            // ★Kill commit — only the recheck and one kill call are inside the lock★ (TRD §3-3 「자물쇠 규칙」 (lock rules) ⓑ). Deciding · logging ·
-            //   dropping handles come after release. The marker is read once more here — the remaining overlap is the single kill right after this read.
+            // ★Kill commit — only the recheck and one kill call are inside the lock★ (TRD §3-3 「lock rules」 ⓑ); deciding · logging ·
+            //   dropping handles come after.
+            //   The marker is read once more here; the remaining overlap is the single kill right after this read.
             // ADR-0262
             let committed = {
                 let mut state = cell.lock();
@@ -2264,7 +2263,7 @@ fn kill_rounds<G: Group>(
                         root_pid = cleaner.tag.root_pid,
                         pid = birth.pid,
                         round,
-                        "끊기 잔여물 하나를 끝내지 못했다: {e}"
+                        "could not end one interrupt leftover: {e}"
                     );
                 }
             }
@@ -2279,7 +2278,8 @@ fn kill_rounds<G: Group>(
     killed_any
 }
 
-/// Selection of one round — gives the `Cleanup` items of this pass that have not yet gone to the commit, in ascending `seq` order. Writes the first round's candidate count and
+/// Selection of one round — gives the `Cleanup` items of this pass that have not yet gone to the commit, in ascending `seq` order. Writes
+///   the first round's candidate count and
 /// the per-rule dropped counts into the report.
 fn pick(
     snapshot: &Snapshot,
@@ -2321,7 +2321,8 @@ fn pick(
     picks
 }
 
-/// Has one known link exited now — asked through the handle holding that link (a birth is found by `seq`, a snapshot member by (number, creation)). If not found, unknown (`Err`) —
+/// Has one known link exited now — asked through the handle holding that link (a birth is found by `seq`, a snapshot member by (number,
+///   creation)). If not found, unknown (`Err`) —
 /// which the selection reads on the side of not killing.
 fn link_exited(snapshot: &Snapshot, births: &[Arc<Birth>], link: &Link<'_>) -> io::Result<bool> {
     let pin = match link.seq {
@@ -2337,7 +2338,6 @@ fn link_exited(snapshot: &Snapshot, births: &[Arc<Birth>], link: &Link<'_>) -> i
     }
 }
 
-/// Pass step 5 — before every kill, look again at the marker · held root outside the lock.
 fn recheck(snapshot: &Snapshot, retiring: &RetiringSignal) -> Result<(), NotReady> {
     if retiring.is_set() {
         return Err(NotReady::Retiring);
@@ -2345,7 +2345,8 @@ fn recheck(snapshot: &Snapshot, retiring: &RetiringSignal) -> Result<(), NotRead
     root_alive(snapshot)
 }
 
-/// Confirm the exits of what one round killed — one deadline is shared (the later ones wait as much less as the earlier ones waited). Gives the number whose exit was
+/// Confirm the exits of what one round killed — one deadline is shared (the later ones wait as much less as the earlier ones waited).
+///   Gives the number whose exit was
 /// confirmed within the deadline.
 fn confirm(clock: &dyn LeftoverClock, killed: &[&Birth]) -> usize {
     if killed.is_empty() {
@@ -2362,7 +2363,8 @@ fn confirm(clock: &dyn LeftoverClock, killed: &[&Birth]) -> usize {
         .count()
 }
 
-/// The pass's log (TRD §3-8) — after releasing the lock. If it killed anything, leave one cleaned warn; the stop reason goes at that reason's level;
+/// The pass's log (TRD §3-8) — after releasing the lock. If it killed anything, leave one cleaned warn; the stop reason goes at that
+///   reason's level;
 /// a pass that ran through without killing anything gets one could-not-kill warn.
 fn log_pass<G: Group>(cleaner: &Cleaner<G>, report: &PassReport, waited: Duration) {
     let (agent, root_pid) = (cleaner.tag.agent(), cleaner.tag.root_pid);
@@ -2387,17 +2389,17 @@ fn log_pass<G: Group>(cleaner: &Cleaner<G>, report: &PassReport, waited: Duratio
             not_hook = x.not_hook,
             no_taskkill = x.no_taskkill,
             unknown = x.unknown,
-            "끊기 뒤 턴 끝이 없어 우리 Job 안의 훅 잔여물을 끝냈다"
+            "no turn end after the interrupt, so the hook leftovers inside our Job were ended"
         );
     }
-    const NOTHING: &str = "끊기 뒤 턴 끝이 없는데 잔여물을 끝내지 않았다";
+    const NOTHING: &str = "no turn end after the interrupt, yet no leftover was ended";
     match &report.stop {
         Some(PassStop::NotReady(NotReady::Retiring)) => tracing::debug!(
             agent,
             root_pid,
             reason = "retiring",
             killed,
-            "잔여물 정리 — 물러나는 무리라 판을 멈췄다"
+            "leftover cleanup — the group is retreating, so the pass stopped"
         ),
         Some(PassStop::NotReady(NotReady::Snapshot(cause))) => tracing::warn!(
             agent,
@@ -2405,21 +2407,21 @@ fn log_pass<G: Group>(cleaner: &Cleaner<G>, report: &PassReport, waited: Duratio
             waited_ms,
             reason = "snapshot_failed",
             cause = cause.label(),
-            "{NOTHING} — 스냅숏이 서지 않았다"
+            "{NOTHING} — the snapshot was not set up"
         ),
         Some(PassStop::NotReady(NotReady::Released)) => tracing::warn!(
             agent,
             root_pid,
             waited_ms,
             reason = "released",
-            "{NOTHING} — 스냅숏을 이미 놓았다"
+            "{NOTHING} — the snapshot was already released"
         ),
         Some(PassStop::NotReady(NotReady::RootGone)) => tracing::debug!(
             agent,
             root_pid,
             reason = "root_gone",
             killed,
-            "잔여물 정리 — 뿌리가 끝나 판을 멈췄다"
+            "leftover cleanup — the root ended, so the pass stopped"
         ),
         Some(PassStop::NotReady(NotReady::RootUnknown(e))) => tracing::warn!(
             agent,
@@ -2427,21 +2429,21 @@ fn log_pass<G: Group>(cleaner: &Cleaner<G>, report: &PassReport, waited: Duratio
             waited_ms,
             reason = "root_unknown",
             killed,
-            "뿌리가 끝났는지 몰라 잔여물 정리 판을 멈췄다: {e}"
+            "not knowing whether the root ended, the leftover cleanup pass stopped: {e}"
         ),
         Some(PassStop::Superseded) => tracing::debug!(
             agent,
             root_pid,
             reason = "superseded",
             killed,
-            "잔여물 정리 — 판 도중 턴 끝 · 새 끊기 · 새 입력이 와 남은 후보와 다음 차례를 버렸다"
+            "leftover cleanup — a turn end, a new interrupt or new input came during the pass, so the remaining candidates and the next round were dropped"
         ),
         Some(PassStop::RecordGone) => tracing::debug!(
             agent,
             root_pid,
             reason = "record_gone",
             killed,
-            "잔여물 정리 — 판 도중 탄생 기록이 꺼져 판을 멈췄다"
+            "leftover cleanup — the birth record was turned off during the pass, so the pass stopped"
         ),
         Some(PassStop::RoundsExhausted) => tracing::warn!(
             agent,
@@ -2450,7 +2452,7 @@ fn log_pass<G: Group>(cleaner: &Cleaner<G>, report: &PassReport, waited: Duratio
             reason = "rounds_exhausted",
             rounds = report.rounds,
             killed,
-            "잔여물 정리가 차례 상한에 닿아 남은 후보를 끝내지 않았다"
+            "leftover cleanup reached the round cap, so the remaining candidates were not ended"
         ),
         None if killed > 0 => {}
         None if report.candidates == 0 => tracing::warn!(
@@ -2460,7 +2462,7 @@ fn log_pass<G: Group>(cleaner: &Cleaner<G>, report: &PassReport, waited: Duratio
             reason = "no_new_member",
             births = report.births,
             full = report.full,
-            "{NOTHING} — 쓰기 명단 뒤에 태어난 산 프로세스가 없다"
+            "{NOTHING} — no live process was born after the write list"
         ),
         None if report.cleanups == 0 => tracing::warn!(
             agent,
@@ -2476,7 +2478,7 @@ fn log_pass<G: Group>(cleaner: &Cleaner<G>, report: &PassReport, waited: Duratio
             not_hook = x.not_hook,
             no_taskkill = x.no_taskkill,
             unknown = x.unknown,
-            "{NOTHING} — 후보가 모두 규칙에서 빠졌다"
+            "{NOTHING} — every candidate was excluded by the rules"
         ),
         None => tracing::warn!(
             agent,
@@ -2485,7 +2487,7 @@ fn log_pass<G: Group>(cleaner: &Cleaner<G>, report: &PassReport, waited: Duratio
             reason = "all_failed",
             failed = report.failed,
             gone = report.gone,
-            "{NOTHING} — 고른 잔여물을 하나도 끝내지 못했다"
+            "{NOTHING} — could not end any of the chosen leftovers"
         ),
     }
 }
@@ -2505,9 +2507,10 @@ enum NotReady {
     RootUnknown(io::Error),
 }
 
-/// Pass steps 1–3 — no marker → the port is not latched as failed (`port_failed`) · the snapshot was set up and that record is still on
-/// (`active` = the number now on) → the held root is alive. If the port is latched, new members may have been missed, so it is `snapshot_failed(port)` instead of
-/// 「새 멤버 없음」 (no new members). The root exit query is an OS call, so it is called outside both locks.
+/// Pass steps 1–3 — no marker → port not latched (`port_failed`) · snapshot set up and that record still on (`active` = number now on) →
+///   held root alive.
+/// A latched port may have missed members, so it is `snapshot_failed(port)`, not 「no new members」. The root exit query is an OS call:
+///   outside both locks.
 fn precheck(
     ticket: &Ticket,
     active: u64,
@@ -2542,9 +2545,9 @@ fn root_alive(snapshot: &Snapshot) -> Result<(), NotReady> {
 mod tests {
     use super::*;
 
-    // Source of the real values = `.claude/handoff/attachments/20260930-t40-provenance-spike/procs/*.procs.tsv` (provenance spike ·
-    //   claude 2.1.284). Numbers · executables · command lines are as in the table, and times are rounded to ms measured from when that pass's interrupt line was written (first taskkill − 5 ms ·
-    //   p3bg uses the basis of the TRD §3-0 table). The tails of command lines that are unrelated to the rules (claude arguments etc.) are shortened.
+    // Real values from `.claude/handoff/attachments/20260930-t40-provenance-spike/procs/*.procs.tsv` (claude 2.1.284); times are ms from
+    //   the interrupt line write
+    //   (first taskkill − 5 ms · p3bg: TRD §3-0 table basis). Command-line tails unrelated to the rules are shortened.
 
     const CMD: &str = r"C:\Windows\System32\cmd.exe";
     const CONHOST: &str = r"C:\Windows\System32\conhost.exe";
@@ -2639,12 +2642,12 @@ mod tests {
         facts: ProcessFacts,
     }
 
-    /// A fake world modeled on the table — what was alive at the time the line was written (0 ms) is the snapshot, those with 0 < creation ≤ pass are the birth record (in creation order
+    /// A fake world modeled on the table — what was alive at the time the line was written (0 ms) is the snapshot, those with 0 < creation
+    ///   ≤ pass are the birth record (in creation order
     /// `seq`), and the write list W is the numbers of those alive at 0 ms.
     pub(super) struct World {
         root: u32,
         procs: Vec<Proc>,
-        /// A number whose exit query is `Err`.
         failing: Vec<u32>,
     }
 
@@ -2690,7 +2693,7 @@ mod tests {
             self.procs
                 .iter_mut()
                 .find(|p| p.pid == pid && p.born_ms == born_ms)
-                .expect("세계에 있는 프로세스")
+                .expect("a process that is in the world")
         }
 
         fn lose(&mut self, pid: u32, born_ms: i64) -> &mut Self {
@@ -2741,17 +2744,18 @@ mod tests {
 
         fn exited(&self, link: &Link<'_>, killed: &[u32]) -> io::Result<bool> {
             if self.failing.contains(&link.pid) {
-                return Err(io::Error::new(io::ErrorKind::Other, "가짜 조회 실패"));
+                return Err(io::Error::new(io::ErrorKind::Other, "fake query failure"));
             }
             let p = self
                 .procs
                 .iter()
                 .find(|p| p.pid == link.pid && p.facts.create == link.facts.create)
-                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "세계에 없는 고리"))?;
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::NotFound, "a link not in the world")
+                })?;
             Ok(killed.contains(&p.pid) || p.exit_ms.is_some_and(|e| e <= PASS_MS))
         }
 
-        /// Decide the `pid` of the birth record (the last one if the same number occurs several times) at pass time — `killed` is the numbers killed in earlier rounds.
         fn judge(&self, pid: u32, killed: &[u32]) -> Verdict {
             let (snapshot, births) = self.links();
             let view = Chain {
@@ -2764,11 +2768,10 @@ mod tests {
                 .iter()
                 .rev()
                 .find(|l| l.pid == pid)
-                .expect("후보는 탄생 기록에 있다");
+                .expect("the candidate is in the birth record");
             select(c, &view)
         }
 
-        /// One pass round — pick candidates and give, in order, the numbers that came out as `Cleanup`.
         fn round(&self, killed: &[u32]) -> Vec<u32> {
             let (snapshot, births) = self.links();
             let view = Chain {
@@ -2784,7 +2787,6 @@ mod tests {
                 .collect()
         }
 
-        /// The shape that the pass tests (`gate_tests`) carry into the group · record — the snapshot · births are the same as [`Self::links`].
         pub(super) fn staged(&self) -> Staged {
             let state = |p: &Proc| {
                 (
@@ -2815,8 +2817,7 @@ mod tests {
 
     /// [`World::staged`] — number · facts · whether it had exited at pass time.
     ///
-    /// - `listing` = the listing when the line was written (= write list W) — includes those whose notification was missed.
-    /// - `births` = in creation order (the insertion order is `seq`).
+    /// - `listing` = the listing when the line was written (= write list W), including those whose notification was missed.
     pub(super) struct Staged {
         pub(super) root: u32,
         pub(super) listing: Vec<u32>,
@@ -2887,9 +2888,9 @@ mod tests {
         w
     }
 
-    /// 09-30 p3bg — the runner · wrapper shell · owner are all births, and the owner is a script exec'd by the wrapper shell (its command line differs from the wrapper shell's)
-    /// and parents fork 24776, which was alive at pass time. Of the births after the interrupt in the same pass (taskkill · its conhost · the `sleep` of the Bash tool loop ·
-    /// `cat` of another hook), the ones alive at pass time are included.
+    /// 09-30 p3bg — runner · wrapper shell · owner are all births; the owner is a script exec'd by the wrapper shell (command line
+    ///   differs) and parents fork 24776,
+    /// alive at pass time; the other births alive at pass time (taskkill · conhost · Bash-loop `sleep` · another hook's `cat`) are included.
     pub(super) fn p3bg() -> World {
         let mut w = World::hosted(37152, 34960, 40848);
         w.add(35688, 40848, 74, Some(1722), BIN_BASH, launcher(HANDOFF))
@@ -2988,15 +2989,19 @@ mod tests {
         assert_eq!(
             w.judge(29864, &[]),
             Verdict::ParentAlive,
-            "다른 훅의 taskkill"
+            "another hook's taskkill"
         );
         assert_eq!(
             w.judge(39424, &[]),
             Verdict::ParentAlive,
-            "taskkill 의 conhost"
+            "taskkill's conhost"
         );
-        assert_eq!(w.judge(9032, &[]), Verdict::NotHookCopy, "반복의 sleep");
-        assert_eq!(w.judge(30144, &[]), Verdict::NotHookCopy, "훅이 띄운 cat");
+        assert_eq!(w.judge(9032, &[]), Verdict::NotHookCopy, "the loop's sleep");
+        assert_eq!(
+            w.judge(30144, &[]),
+            Verdict::NotHookCopy,
+            "cat launched by the hook"
+        );
     }
 
     // ── taskkill markers ─────────────────────────────────────────────────────────────
@@ -3190,27 +3195,35 @@ mod tests {
     fn liveness_errors_and_empty_fields_are_unknown() {
         let mut w = p1();
         w.failing.push(36088);
-        assert_eq!(w.judge(38108, &[]), Verdict::Unknown, "D 의 끝남 조회 실패");
+        assert_eq!(
+            w.judge(38108, &[]),
+            Verdict::Unknown,
+            "D's exit query failed"
+        );
 
         let mut w = p1();
         w.failing.push(22700);
         assert_eq!(
             w.judge(38108, &[]),
             Verdict::Unknown,
-            "조상의 끝남 조회 실패"
+            "an ancestor's exit query failed"
         );
 
         let mut w = p1();
         w.proc_mut(38108, 298).facts.cmdline.clear();
-        assert_eq!(w.judge(38108, &[]), Verdict::Unknown, "후보 명령줄 빈 칸");
+        assert_eq!(
+            w.judge(38108, &[]),
+            Verdict::Unknown,
+            "candidate command line empty"
+        );
 
         let mut w = p1();
         w.proc_mut(36088, -56).facts.image.clear();
-        assert_eq!(w.judge(38108, &[]), Verdict::Unknown, "D 실행 파일 빈 칸");
+        assert_eq!(w.judge(38108, &[]), Verdict::Unknown, "D executable empty");
 
         let mut w = p1();
         w.root = 0;
-        assert_eq!(w.judge(38108, &[]), Verdict::Unknown, "뿌리 번호 모름");
+        assert_eq!(w.judge(38108, &[]), Verdict::Unknown, "root pid unknown");
     }
 
     #[test]
@@ -3231,7 +3244,7 @@ mod tests {
     // ── Finding the parent ─────────────────────────────────────────────────────────
 
     fn never(_: &Link<'_>) -> io::Result<bool> {
-        Err(io::Error::new(io::ErrorKind::Other, "부르지 않는다"))
+        Err(io::Error::new(io::ErrorKind::Other, "not called"))
     }
 
     #[test]
@@ -3252,12 +3265,16 @@ mod tests {
             parent_of(&view, 20, &child).map(|l| l.facts.create)
         };
         assert_eq!(parent(350), Some(300));
-        assert_eq!(parent(300), Some(300), "같은 생성은 부모가 될 수 있다");
+        assert_eq!(
+            parent(300),
+            Some(300),
+            "the same creation can be the parent"
+        );
         assert_eq!(parent(200), Some(100));
         assert_eq!(parent(50), None);
 
         let child = facts(10, 350, USR_BASH, "x");
-        assert!(parent_of(&view, 10, &child).is_none(), "자기 번호");
+        assert!(parent_of(&view, 10, &child).is_none(), "its own pid");
     }
 
     #[test]
@@ -3308,7 +3325,7 @@ mod tests {
         ];
         let exited = |l: &Link<'_>| match l.pid {
             64 => Ok(true),
-            65 => Err(io::Error::new(io::ErrorKind::Other, "조회 실패")),
+            65 => Err(io::Error::new(io::ErrorKind::Other, "query failure")),
             _ => Ok(false),
         };
         let view = Chain {
@@ -3403,12 +3420,16 @@ mod tests {
         for cmdline in rejected {
             assert_eq!(tk(TASKKILL, 40848, cmdline), None, "{cmdline}");
         }
-        assert_eq!(tk(CMD, 40848, &taskkill(35688)), None, "다른 실행 파일");
-        assert_eq!(tk("", 40848, &taskkill(35688)), None, "실행 파일 빈 칸");
+        assert_eq!(
+            tk(CMD, 40848, &taskkill(35688)),
+            None,
+            "a different executable"
+        );
+        assert_eq!(tk("", 40848, &taskkill(35688)), None, "executable empty");
         assert_eq!(
             tk(TASKKILL, 40849, &taskkill(35688)),
             None,
-            "부모가 claude 가 아님"
+            "the parent is not claude"
         );
     }
 }
@@ -3453,7 +3474,7 @@ mod birth_tests {
     fn recorded(recorder: &Recorder, r: u64, c: Caught) -> u64 {
         match recorder.admit(r, c) {
             Admit::Recorded { seq } => seq,
-            _ => panic!("넣어야 할 탄생이 안 들어갔다"),
+            _ => panic!("a birth that should have gone in did not"),
         }
     }
 
@@ -3481,7 +3502,8 @@ mod birth_tests {
         Fail,
     }
 
-    /// A port the test feeds notifications to one at a time — each time it enters take-out, it tells the test the Job's strong count at that moment.
+    /// A port the test feeds notifications to one at a time — each time it enters take-out, it tells the test the Job's strong count at
+    ///   that moment.
     struct FakePort {
         feed: Mutex<mpsc::Receiver<Feed>>,
         waiting: Sender<usize>,
@@ -3499,7 +3521,7 @@ mod birth_tests {
                 .recv_timeout(PATIENCE);
             match fed {
                 Ok(Feed::Event(event)) => Ok(event),
-                Ok(Feed::Fail) => Err(io::Error::other("꺼내기 실패 흉내")),
+                Ok(Feed::Fail) => Err(io::Error::other("imitated take failure")),
                 // There is no one to feed — it loops on timeouts like the real one (resting a little so it does not spin).
                 Err(_) => {
                     thread::sleep(Duration::from_millis(10));
@@ -3553,7 +3575,7 @@ mod birth_tests {
                 None => Ok(None),
                 Some(Answer::Ours(facts)) => Ok(Some(Box::new(FakePin::new(facts, &self.probe)))),
                 Some(Answer::Denied) => Err(io::Error::from(io::ErrorKind::PermissionDenied)),
-                Some(Answer::Panic) => panic!("붙들기 패닉 흉내"),
+                Some(Answer::Panic) => panic!("imitated hold panic"),
             }
         }
 
@@ -3563,20 +3585,20 @@ mod birth_tests {
         ) -> io::Result<()> {
             let refused = *self.refuse_watch.lock().unwrap();
             if let Some(kind) = refused {
-                return Err(io::Error::new(kind, "무리 없음 흉내"));
+                return Err(io::Error::new(kind, "imitated missing group"));
             }
             let port = self
                 .port
                 .lock()
                 .unwrap()
                 .take()
-                .expect("포트는 한 번만 만든다");
+                .expect("the port is created only once");
             push(&self.calls, Call::Port);
             let shared: Arc<dyn Births> = Arc::clone(&port) as Arc<dyn Births>;
             start(shared)?;
             push(&self.calls, Call::Attach);
             let attached = if self.attach_fails.load(Ordering::SeqCst) {
-                Err(io::Error::other("붙이기 실패 흉내"))
+                Err(io::Error::other("imitated attach failure"))
             } else {
                 Ok(())
             };
@@ -3587,9 +3609,9 @@ mod birth_tests {
         fn unwatch_births(&self) -> io::Result<()> {
             push(&self.calls, Call::Unwatch);
             if self.job.strong_count() == 0 {
-                Err(io::Error::new(GROUP_GONE, "무리 없음 흉내"))
+                Err(io::Error::new(GROUP_GONE, "imitated missing group"))
             } else if self.unwatch_fails.load(Ordering::SeqCst) {
-                Err(io::Error::other("떼기 실패 흉내"))
+                Err(io::Error::other("imitated detach failure"))
             } else {
                 Ok(())
             }
@@ -3606,7 +3628,8 @@ mod birth_tests {
 
     // ── Pass ────────────────────────────────────────────────────────────────────────────
 
-    /// A set of fake group · port · record · port acquisition. The listener thread runs one round per notification the test feeds, and the test reads the state after seeing that
+    /// A set of fake group · port · record · port acquisition. The listener thread runs one round per notification the test feeds, and the
+    ///   test reads the state after seeing that
     /// thread enter the next take-out — the two never run overlapped.
     struct Rig {
         job: Option<Arc<()>>,
@@ -3687,11 +3710,10 @@ mod birth_tests {
             move |body| {
                 push(&calls, Call::Spawn);
                 drop(body);
-                Err(io::Error::other("기동 실패 흉내"))
+                Err(io::Error::other("imitated start failure"))
             }
         }
 
-        /// Port acquisition — also collects this thread's logs.
         fn ensure(
             &self,
             spawn: impl FnOnce(Box<dyn FnOnce() + Send>) -> io::Result<()>,
@@ -3712,34 +3734,34 @@ mod birth_tests {
         fn wait_next(&self) -> usize {
             self.waits
                 .recv_timeout(PATIENCE)
-                .expect("듣는 스레드가 꺼내기로 돌아오지 않았다")
+                .expect("the listening thread did not come back to take")
         }
 
-        /// Feed one notification and wait for its handling to finish.
         fn feed(&self, event: PortEvent) -> usize {
-            self.feed.send(Feed::Event(event)).expect("먹이기");
+            self.feed.send(Feed::Event(event)).expect("feed");
             self.wait_next()
         }
 
         /// Feed one take-out error, and wait for the thread to enter the next take-out without ending.
         fn fail_take(&self) {
-            self.feed.send(Feed::Fail).expect("먹이기");
+            self.feed.send(Feed::Fail).expect("feed");
             self.wait_next();
         }
 
-        /// Feed and wait for the listener thread to end.
         fn feed_last(&self, feed: Feed) {
-            self.feed.send(feed).expect("먹이기");
+            self.feed.send(feed).expect("feed");
             self.ended();
         }
 
         fn ended(&self) {
             self.done
                 .recv_timeout(PATIENCE)
-                .expect("듣는 스레드가 끝나지 않았다");
+                .expect("the listening thread did not end");
             let handle = self.thread.lock().unwrap().take();
             if let Some(handle) = handle {
-                handle.join().expect("듣는 스레드가 패닉으로 죽었다");
+                handle
+                    .join()
+                    .expect("the listening thread died with a panic");
             }
         }
 
@@ -3791,8 +3813,6 @@ mod birth_tests {
 
     // ── Birth record ─────────────────────────────────────────────────────────────────────
 
-    /// Holds only those whose (number, creation) is new, once each, in ascending `seq` order; the same number with a different creation is held separately. What could not be put in is
-    /// handed back and dropped outside the lock.
     #[test]
     fn a_record_takes_each_pid_create_pair_once_in_seq_order() {
         let recorder = Arc::new(Recorder::new());
@@ -3808,7 +3828,7 @@ mod birth_tests {
         assert!(first < second);
         match recorder.admit(r, caught(10, 100, &probe)) {
             Admit::Known(again) => drop(again),
-            _ => panic!("같은 (번호, 생성)이 두 번 들었다"),
+            _ => panic!("the same (pid, creation) went in twice"),
         }
         assert_eq!(probe.drops(), 1);
 
@@ -3825,7 +3845,8 @@ mod birth_tests {
         assert_eq!(probe.held_drops(), 0);
     }
 
-    /// Those over the cap are not put in and `full` is raised (only the first overflow is `first`). A new record lowers `full` and hands back the remaining record,
+    /// Those over the cap are not put in and `full` is raised (only the first overflow is `first`). A new record lowers `full` and hands
+    ///   back the remaining record,
     /// and when the receiver drops it — outside the lock — the handles close.
     #[test]
     fn a_full_record_refuses_past_the_cap_and_a_new_record_clears_it() {
@@ -3842,7 +3863,7 @@ mod birth_tests {
                     assert_eq!(first, expect_first);
                     drop(caught);
                 }
-                _ => panic!("상한을 넘었는데 들었다"),
+                _ => panic!("went in past the cap"),
             }
         }
         assert!(recorder.full());
@@ -3859,7 +3880,6 @@ mod birth_tests {
         assert_eq!(probe.held_drops(), 0);
     }
 
-    /// Only the record that is on can be copied · turned off · put into — if it is off or another record is on, give an empty one and change nothing.
     #[test]
     fn only_the_running_record_is_copied_stopped_or_admitted() {
         let recorder = Arc::new(Recorder::new());
@@ -3875,7 +3895,7 @@ mod birth_tests {
         assert_eq!(recorder.active(), r);
         match recorder.admit(old, caught(2, 1, &probe)) {
             Admit::Stale(late) => drop(late),
-            _ => panic!("꺼진 기록에 들었다"),
+            _ => panic!("went into a record that was off"),
         }
         recorded(&recorder, r, caught(3, 1, &probe));
         assert_eq!(recorder.copy(r).len(), 1);
@@ -3888,20 +3908,19 @@ mod birth_tests {
         assert!(recorder.copy(r).is_empty());
         match recorder.admit(r, caught(4, 1, &probe)) {
             Admit::Stale(late) => drop(late),
-            _ => panic!("끈 기록에 들었다"),
+            _ => panic!("went into a record that was turned off"),
         }
         drop(stopped);
         assert_eq!(probe.held_drops(), 0);
     }
 
-    /// Turning on · putting in · copying · turning off work even if the record lock is poisoned.
     #[test]
     fn a_poisoned_record_lock_still_records() {
         let recorder = Arc::new(Recorder::new());
         let probe = Probe::new(&recorder);
         let poisoned = panic::catch_unwind(AssertUnwindSafe(|| {
             let _held = recorder.inner.lock();
-            panic!("독 흉내");
+            panic!("imitated poison");
         }));
         assert!(poisoned.is_err());
         assert!(recorder.inner.is_poisoned());
@@ -3917,7 +3936,8 @@ mod birth_tests {
 
     // ── Listener thread ──────────────────────────────────────────────────────────────────
 
-    /// Only joins while the record is on are held right away with kill access and put in — while it is off, it does not even hold; those outside the group · exited ·
+    /// Only joins while the record is on are held right away with kill access and put in — while it is off, it does not even hold; those
+    ///   outside the group · exited ·
     /// other notifications are dropped. Holding is outside the record lock, and on entering take-out the Job is not held strongly.
     #[test]
     fn the_listener_pins_joined_members_with_the_kill_right_only_while_recording() {
@@ -3926,7 +3946,7 @@ mod birth_tests {
         rig.listening();
 
         assert_eq!(rig.feed(PortEvent::Joined(10)), 1);
-        assert!(rig.pins().is_empty(), "꺼진 동안 붙들었다");
+        assert!(rig.pins().is_empty(), "held while off");
 
         let (r, _) = rig.recorder.start();
         for event in [
@@ -3938,7 +3958,7 @@ mod birth_tests {
             assert_eq!(
                 rig.feed(event),
                 1,
-                "꺼내기에 들어설 때 Job 을 강하게 쥐었다"
+                "held the Job strongly when entering take"
             );
         }
         assert_eq!(rig.pins(), [Call::Pin(10, true), Call::Pin(11, true)]);
@@ -3954,7 +3974,8 @@ mod birth_tests {
         assert_eq!(rig.probe.held_drops(), 0);
     }
 
-    /// If kill access is refused, hold again with query access only and put it in only as a link — it cannot be a candidate but it keeps the chain connected. If even that cannot be
+    /// If kill access is refused, hold again with query access only and put it in only as a link — it cannot be a candidate but it keeps
+    ///   the chain connected. If even that cannot be
     /// held, drop it.
     #[test]
     fn a_member_refused_the_kill_right_is_kept_as_a_chain_link_only() {
@@ -4004,11 +4025,10 @@ mod birth_tests {
             exited: &alive,
         };
         let picked: Vec<u32> = candidates(&view, &[]).iter().map(|l| l.pid).collect();
-        assert_eq!(picked, [30], "고리 전용이 후보가 됐다");
+        assert_eq!(picked, [30], "a link-only entry became a candidate");
         assert_eq!(parent_of(&view, 30, &child).map(|l| l.pid), Some(20));
     }
 
-    /// When the group disappears, turn off the record that was on (dropped after release) and end — there is no group, so no detach. Not latched.
     #[test]
     fn the_listener_releases_the_record_and_ends_once_the_group_is_gone() {
         let mut rig = Rig::new();
@@ -4027,14 +4047,13 @@ mod birth_tests {
         assert!(!rig.calls().contains(&Call::Unwatch));
         assert!(
             rig.port.upgrade().is_none(),
-            "끝난 스레드가 포트를 쥐고 있다"
+            "the ended thread is holding the port"
         );
         assert!(!rig.recorder.port_failed());
         assert_eq!(rig.ensure(rig.spawner()), Ok(()));
         assert_eq!(rig.count(Level::WARN) + rig.count(Level::ERROR), 0);
     }
 
-    /// On retirement, turn off the record that was on, and release the port **after** detaching it from the group that is still attached.
     #[test]
     fn a_retiring_group_is_detached_before_the_port_is_let_go() {
         let rig = Rig::new();
@@ -4051,7 +4070,6 @@ mod birth_tests {
         assert!(!rig.recorder.port_failed());
     }
 
-    /// Take-out error → latch · turn off the record that was on · detach → end. One warn, and the next episode's acquisition sees the latched field and fails.
     #[test]
     fn a_failed_take_latches_the_port_stops_the_record_and_detaches() {
         let rig = Rig::new();
@@ -4071,10 +4089,11 @@ mod birth_tests {
 
         assert_eq!(rig.ensure(rig.spawner()), Err(()));
         let ports = rig.calls().iter().filter(|c| **c == Call::Port).count();
-        assert_eq!(ports, 1, "포트를 두 번 만들었다");
+        assert_eq!(ports, 1, "created the port twice");
     }
 
-    /// If even detaching fails in the failure mode, it does not end and only takes out and discards (it does not put into a record turned on later either) — it ends when the group
+    /// If even detaching fails in the failure mode, it does not end and only takes out and discards (it does not put into a record turned
+    ///   on later either) — it ends when the group
     /// disappears.
     #[test]
     fn a_failed_detach_drains_without_recording_until_the_group_is_gone() {
@@ -4090,7 +4109,7 @@ mod birth_tests {
 
         let (r, _) = rig.recorder.start();
         rig.feed(PortEvent::Joined(10));
-        assert!(rig.pins().is_empty(), "비우기만 하는 중에 붙들었다");
+        assert!(rig.pins().is_empty(), "held while only draining");
         assert_eq!(rig.recorder.len(), 0);
         assert_eq!(rig.recorder.active(), r);
 
@@ -4103,7 +4122,6 @@ mod birth_tests {
         assert_eq!(rig.count(Level::WARN), 1);
     }
 
-    /// A panic in the round body is also latched and detached like a take-out error, then ends — logged as error because it is a panic.
     #[test]
     fn a_panicking_round_latches_the_port_like_a_failed_take() {
         let rig = Rig::new();
@@ -4119,12 +4137,11 @@ mod birth_tests {
         assert_eq!(rig.count(Level::WARN), 0);
     }
 
-    /// If the opener disappears before sending 「붙었나」 (did it attach) (it may have attached), the thread runs as usual.
     #[test]
     fn a_lost_attached_sender_keeps_the_listener_running() {
         let mut rig = Rig::new();
         rig.answer(10, true, Answer::Ours(facts(5, 100)));
-        let port = rig.group.port.lock().unwrap().take().expect("포트");
+        let port = rig.group.port.lock().unwrap().take().expect("port");
         let (attached_tx, attached) = mpsc::sync_channel::<bool>(1);
         drop(attached_tx);
         let listener = Listener {
@@ -4134,7 +4151,7 @@ mod birth_tests {
             recorder: Arc::clone(&rig.recorder),
             tag: LogTag::new(None, ROOT),
         };
-        (rig.spawner())(Box::new(move || listen(listener))).expect("기동");
+        (rig.spawner())(Box::new(move || listen(listener))).expect("start");
         rig.wait_next();
 
         let (r, _) = rig.recorder.start();
@@ -4148,8 +4165,6 @@ mod birth_tests {
 
     // ── Port acquisition ─────────────────────────────────────────────────────────────────
 
-    /// The order is port → start the listener thread → attach, and the thread enters take-out after receiving 「붙었다」 (attached). A second acquisition only
-    /// reads the result.
     #[test]
     fn the_port_comes_first_then_the_listener_then_the_attach() {
         let rig = Rig::new();
@@ -4163,8 +4178,6 @@ mod birth_tests {
         assert_eq!(rig.count(Level::WARN), 0);
     }
 
-    /// If the listener thread cannot be started, it latches without attaching — nobody holds the port. A second acquisition also fails and does not create it
-    /// again.
     #[test]
     fn a_listener_that_fails_to_start_is_never_attached_and_latches() {
         let rig = Rig::new();
@@ -4177,7 +4190,6 @@ mod birth_tests {
         assert_eq!(rig.calls(), [Call::Port, Call::Spawn, Call::PortDrop]);
     }
 
-    /// If attaching fails, it latches, and the running thread receives 「안 붙었다」 (did not attach) and ends without taking out or detaching.
     #[test]
     fn a_failed_attach_latches_and_the_listener_ends_without_detaching() {
         let rig = Rig::new();
@@ -4185,7 +4197,10 @@ mod birth_tests {
         assert_eq!(rig.ensure(rig.spawner()), Err(()));
         rig.ended();
 
-        assert!(rig.waits.try_recv().is_err(), "붙지 않은 포트에서 꺼냈다");
+        assert!(
+            rig.waits.try_recv().is_err(),
+            "took from a port that was not attached"
+        );
         assert_eq!(
             rig.calls(),
             [Call::Port, Call::Spawn, Call::Attach, Call::PortDrop]
@@ -4194,7 +4209,6 @@ mod birth_tests {
         assert_eq!(rig.count(Level::WARN), 1);
     }
 
-    /// If the group is already gone or this OS has no group, only that episode fails — not latched (it is not an OS failure).
     #[test]
     fn a_missing_group_fails_the_episode_without_latching() {
         for kind in [GROUP_GONE, io::ErrorKind::Unsupported] {
@@ -4209,8 +4223,6 @@ mod birth_tests {
 
     // ── Real processes (Windows) ───────────────────────────────────────────────────────────
 
-    /// With the real handle · port · thread — a ping born inside the Job after the record is on is held with kill access and kept together with its facts,
-    /// and when the Job disappears the listener thread turns off the record that was on and ends. Three: cmd · its console host · ping.
     #[cfg(windows)]
     #[test]
     fn a_birth_in_the_job_is_recorded_with_its_facts_through_the_real_port() {
@@ -4221,7 +4233,7 @@ mod birth_tests {
         let (job, group) = new_group();
         let group = Arc::new(group);
         let mut x = spawn_gated_cmd("ping -n 30 127.0.0.1", CREATE_NO_WINDOW);
-        job.adopt(x.id()).expect("Job 편입");
+        job.adopt(x.id()).expect("adopt into Job");
         let recorder = Arc::new(Recorder::new());
         let watch = BirthWatch::new();
         assert_eq!(
@@ -4233,33 +4245,35 @@ mod birth_tests {
         let (r, _) = recorder.start();
         open_gate(&mut x);
 
-        let ping = wait_until("기록된 ping", || {
+        let ping = wait_until("recorded ping", || {
             recorder
                 .copy(r)
                 .into_iter()
                 .find(|b| b.facts.image.to_ascii_lowercase().ends_with("\\ping.exe"))
         });
-        assert_eq!(ping.facts.ppid, x.id(), "부모: {:?}", ping.facts);
+        assert_eq!(ping.facts.ppid, x.id(), "parent: {:?}", ping.facts);
         assert_ne!(ping.facts.create, 0);
         assert!(
             ping.facts.cmdline.contains("ping"),
-            "명령줄: {:?}",
+            "command line: {:?}",
             ping.facts
         );
         assert!(ping.killable);
-        assert!(!ping.pin.exited().expect("끝났나"));
+        assert!(!ping.pin.exited().expect("exited?"));
         drop(ping);
         drop(recorder.stop(r));
 
-        job.terminate(1).expect("Job 끝내기");
+        job.terminate(1).expect("end the Job");
         let _ = x.wait();
-        // Turn the record on **before** releasing the Job — the listener thread turns off only the record that was on when it saw the group disappear. If it is turned on after releasing,
+        // Turn the record on **before** releasing the Job — the listener thread turns off only the record that was on when it saw the
+        //   group disappear. If it is turned on after releasing,
         // a thread that woke in between may end without a record on, and nobody is left to turn off a record turned on later.
         let (after, _) = recorder.start();
         drop(job);
-        wait_until("무리가 사라져 듣는 스레드가 끈 기록", || {
-            (recorder.active() != after).then_some(())
-        });
+        wait_until(
+            "a record the listening thread turned off because the group disappeared",
+            || (recorder.active() != after).then_some(()),
+        );
         assert_eq!(recorder.active(), 0);
         assert!(!recorder.port_failed());
     }
@@ -4277,10 +4291,8 @@ mod test_support {
 
     use tracing::Level;
 
-    /// Value of the exit field of [`FakePin`].
     pub(super) const ALIVE: u8 = 0;
     pub(super) const EXITED: u8 = 1;
-    /// The exit query is `Err`.
     pub(super) const FAILING: u8 = 2;
 
     /// [`FakePin`]'s imitation of kill.
@@ -4305,9 +4317,9 @@ mod test_support {
 
     type Hook = Arc<dyn Fn() + Send + Sync>;
 
-    /// Counts whether the record lock or the gate lock was held when dropping a held item · asking the group. Tests are ordered so they do not run overlapped with other threads,
-    /// so if one was held, it was held by the calling thread itself. Records the held item's calls, inserts the test's job into the exit query,
-    /// and advances the test clock by the time that waiting · killing uses.
+    /// Counts whether the record or gate lock was held when dropping a held item · asking the group (tests do not overlap other threads,
+    ///   so a held lock was held by
+    /// the calling thread). Records held-item calls, inserts the test's job into the exit query, advances the test clock.
     pub(super) struct Probe {
         recorder: Weak<Recorder>,
         gate: OnceLock<Box<dyn Fn() -> bool + Send + Sync>>,
@@ -4337,7 +4349,6 @@ mod test_support {
             })
         }
 
-        /// Advance the test clock by the time waiting · killing used.
         pub(super) fn drive(&self, advance: impl Fn(Duration) + Send + Sync + 'static) {
             let _ = self.clock.set(Box::new(advance));
         }
@@ -4346,7 +4357,8 @@ mod test_support {
             *self.terminate_cost.lock().unwrap() = d;
         }
 
-        /// A job to run at every exit query of the held item with `pid` — if called inside a lock, it is counted rather than run (so as not to hang on the same lock).
+        /// A job to run at every exit query of the held item with `pid` — if called inside a lock, it is counted rather than run (so as
+        ///   not to hang on the same lock).
         pub(super) fn on_exited(&self, pid: u32, hook: impl Fn() + Send + Sync + 'static) {
             self.hooks.lock().unwrap().insert(pid, Arc::new(hook));
         }
@@ -4363,7 +4375,6 @@ mod test_support {
             self.calls.lock().unwrap().clone()
         }
 
-        /// Time actually waited on live items — in call order.
         pub(super) fn waits(&self) -> Vec<Duration> {
             self.waits.lock().unwrap().clone()
         }
@@ -4387,7 +4398,6 @@ mod test_support {
             self.hooks.lock().unwrap().get(&pid).cloned()
         }
 
-        /// Also looks at the gate lock.
         pub(super) fn watch_gate<G: Group>(&self, cell: &Arc<GateCell<G>>) {
             let cell = Arc::downgrade(cell);
             let _ = self.gate.set(Box::new(move || {
@@ -4423,7 +4433,8 @@ mod test_support {
         }
     }
 
-    /// Imitation of a held process — exit is decided by the field, and on drop it records whether the two locks were held. Kill is decided by `kill`
+    /// Imitation of a held process — exit is decided by the field, and on drop it records whether the two locks were held. Kill is decided
+    ///   by `kill`
     /// (default = refused). `pid` is only a label for the call record (default 0).
     pub(super) struct FakePin {
         facts: ProcessFacts,
@@ -4466,7 +4477,7 @@ mod test_support {
             match self.exit.load(Ordering::SeqCst) {
                 ALIVE => Ok(false),
                 EXITED => Ok(true),
-                _ => Err(io::Error::other("끝남 조회 실패 흉내")),
+                _ => Err(io::Error::other("imitated exit query failure")),
             }
         }
     }
@@ -4499,7 +4510,7 @@ mod test_support {
             let cost = *self.probe.terminate_cost.lock().unwrap();
             self.probe.spend(cost);
             if exit_code != LEFTOVER_EXIT_CODE {
-                return Err(io::Error::other(format!("종료 코드 {exit_code:#x}")));
+                return Err(io::Error::other(format!("exit code {exit_code:#x}")));
             }
             match self.kill {
                 Kill::Refuse => Err(io::Error::from(io::ErrorKind::PermissionDenied)),
@@ -4606,7 +4617,8 @@ mod gate_tests {
 
     // ── Fakes ──────────────────────────────────────────────────────────────────────────
 
-    /// A clock driven by the test — sleep advances time by that amount (and records it), start piles up the body (the test decides whether to run it).
+    /// A clock driven by the test — sleep advances time by that amount (and records it), start piles up the body (the test decides whether
+    ///   to run it).
     struct FakeClock {
         base: Instant,
         nanos: AtomicU64,
@@ -4631,11 +4643,10 @@ mod gate_tests {
         }
 
         fn advance(&self, d: Duration) {
-            let nanos = u64::try_from(d.as_nanos()).expect("시험 시각");
+            let nanos = u64::try_from(d.as_nanos()).expect("test time");
             self.nanos.fetch_add(nanos, Ordering::SeqCst);
         }
 
-        /// Monotonic time `d` after the start of the test.
         fn at(&self, d: Duration) -> Instant {
             self.base + d
         }
@@ -4672,7 +4683,7 @@ mod gate_tests {
         fn sleep(&self, d: Duration) {
             self.sleeps.lock().unwrap().push(d);
             if self.panic_in_sleep.load(Ordering::SeqCst) {
-                panic!("잠 패닉 흉내");
+                panic!("imitated sleep panic");
             }
             self.advance(d);
         }
@@ -4680,7 +4691,7 @@ mod gate_tests {
         fn spawn(&self, name: &str, body: Box<dyn FnOnce() + Send>) -> io::Result<()> {
             if name == WORKER_THREAD {
                 if self.refuse_worker.load(Ordering::SeqCst) {
-                    return Err(io::Error::other("기동 실패 흉내"));
+                    return Err(io::Error::other("imitated start failure"));
                 }
                 if !self.keep_workers.load(Ordering::SeqCst) {
                     drop(body);
@@ -4699,7 +4710,8 @@ mod gate_tests {
         Panic,
     }
 
-    /// The group of the gate tests — the listing · hold answers are decided by the test, and one test job is inserted when the listing is asked (imitates events between the two sections ·
+    /// The group of the gate tests — the listing · hold answers are decided by the test, and one test job is inserted when the listing is
+    ///   asked (imitates events between the two sections ·
     /// between write and listing).
     struct GateGroup {
         /// `None` = listing failure.
@@ -4740,7 +4752,7 @@ mod gate_tests {
                 }
             }
             let listing = self.listing.lock().unwrap().clone();
-            listing.ok_or_else(|| io::Error::other("명단 실패 흉내"))
+            listing.ok_or_else(|| io::Error::other("imitated list failure"))
         }
 
         fn pin(&self, pid: u32, _kill: bool) -> io::Result<Option<Box<dyn Pinned>>> {
@@ -4755,7 +4767,7 @@ mod gate_tests {
                     FakePin::with_exit(facts, &self.probe, self.exit_of(pid)).named(pid),
                 ))),
                 Some(Answer::Denied) => Err(io::Error::from(io::ErrorKind::PermissionDenied)),
-                Some(Answer::Panic) => panic!("붙들기 패닉 흉내"),
+                Some(Answer::Panic) => panic!("imitated hold panic"),
             }
         }
 
@@ -4766,7 +4778,7 @@ mod gate_tests {
             self.watches.fetch_add(1, Ordering::SeqCst);
             let refused = *self.refuse_watch.lock().unwrap();
             if let Some(kind) = refused {
-                return Err(io::Error::new(kind, "포트 거절 흉내"));
+                return Err(io::Error::new(kind, "imitated port refusal"));
             }
             start(Arc::new(IdlePort))
         }
@@ -4794,7 +4806,8 @@ mod gate_tests {
 
     // ── Pass ────────────────────────────────────────────────────────────────────────────
 
-    /// A group holding the root (`cmd /c`) · console host · claude, and its gate — the gate is closed. The listener thread · worker body only pile up on the clock
+    /// A group holding the root (`cmd /c`) · console host · claude, and its gate — the gate is closed. The listener thread · worker body
+    ///   only pile up on the clock
     /// and do not run unless the test runs them (the test puts births directly into the record).
     struct GateRig {
         root: u32,
@@ -4887,9 +4900,9 @@ mod gate_tests {
 
         /// An interrupt that receives write confirmation — both the line and the thing to call must be present.
         fn esc_with_check(&self) -> InterruptOut {
-            let out = self.esc().expect("끊기 줄");
+            let out = self.esc().expect("interrupt line");
             assert_eq!(out.bytes, LINE);
-            assert!(out.on_written.is_some(), "쓰기 확인이 없다");
+            assert!(out.on_written.is_some(), "no write confirmation");
             out
         }
 
@@ -4923,7 +4936,7 @@ mod gate_tests {
         }
 
         fn episode<R>(&self, f: impl FnOnce(&Episode) -> R) -> R {
-            self.state(|st| f(st.episode.as_ref().expect("에피소드")))
+            self.state(|st| f(st.episode.as_ref().expect("episode")))
         }
 
         fn has_episode(&self) -> bool {
@@ -4968,7 +4981,8 @@ mod gate_tests {
             admit_into(&self.recorder, &self.probe, rec, pid, facts, exit);
         }
 
-        /// Load world `w` up to just before the pass — interrupt · write · births (the order of `births` is `seq` · the imitation of kill is `kills`, others are
+        /// Load world `w` up to just before the pass — interrupt · write · births (the order of `births` is `seq` · the imitation of kill
+        ///   is `kills`, others are
         /// [`Kill::Exit`]) · load the exits at pass time and advance N. The exit field is one per number ([`GateGroup::exit_of`]).
         fn staged(w: &Staged, kills: &[(u32, Kill)]) -> Self {
             let answers = w
@@ -5014,7 +5028,7 @@ mod gate_tests {
                 state.next_step(self.clock.now(), self.cleaner.retiring.is_set())
             };
             let Step::Pass(ticket) = step else {
-                panic!("판이 서야 한다");
+                panic!("a pass must stand");
             };
             self.logged(|| run_pass(&self.cell, &self.cleaner, ticket))
         }
@@ -5046,11 +5060,11 @@ mod gate_tests {
             let mut outside_since_last = true;
             for (pid, call, held) in self.probe.calls() {
                 if call == PinCall::Terminate {
-                    assert!(held, "자물쇠 밖에서 끝냈다: {pid}");
-                    assert!(outside_since_last, "한 구간에서 둘을 끝냈다: {pid}");
+                    assert!(held, "ended outside the lock: {pid}");
+                    assert!(outside_since_last, "ended two in one section: {pid}");
                     outside_since_last = false;
                 } else {
-                    assert!(!held, "자물쇠 안에서 {call:?}: {pid}");
+                    assert!(!held, "{call:?} inside the lock: {pid}");
                     outside_since_last = true;
                 }
             }
@@ -5083,35 +5097,43 @@ mod gate_tests {
             self.state(|st| {
                 if let Some(ep) = &st.episode {
                     if ep.is_live() {
-                        assert!(st.open, "산 에피소드인데 문이 닫혔다: {ep:?}");
+                        assert!(st.open, "a live episode but the gate is closed: {ep:?}");
                     }
                     if ep.written {
-                        assert!(ep.w.is_some(), "쓰였는데 쓰기 명단이 없다: {ep:?}");
+                        assert!(ep.w.is_some(), "written but no write list: {ep:?}");
                     }
                     if (ep.written && ep.is_live()) || matches!(ep.phase, Phase::Spent { .. }) {
-                        assert!(st.worker, "일꾼 없이 {ep:?}");
+                        assert!(st.worker, "{ep:?} without a worker");
                     }
                     if matches!(ep.snap, SnapState::Taken(_)) || ep.rec != 0 {
                         assert!(
                             ep.is_live(),
-                            "끝난 에피소드가 스냅숏 · 기록을 쥐었다: {ep:?}"
+                            "an ended episode held the snapshot or the record: {ep:?}"
                         );
                     }
                     assert!(ep.last_mono >= ep.first_mono);
                 }
-                assert!(!st.opening, "여는 이가 없는데 opening 이 섰다");
+                assert!(!st.opening, "opening is set with no opener");
                 if active != 0 {
                     assert!(
                         st.episode
                             .as_ref()
                             .is_some_and(|ep| ep.is_live() && ep.rec == active),
-                        "켜진 기록 {active} 을 쥔 산 에피소드가 없다: {:?}",
+                        "no live episode holds the active record {active}: {:?}",
                         st.episode
                     );
                 }
             });
-            assert_eq!(self.probe.held_drops(), 0, "자물쇠 안에서 핸들을 닫았다");
-            assert_eq!(self.probe.held_calls(), 0, "자물쇠 안에서 무리에게 물었다");
+            assert_eq!(
+                self.probe.held_drops(),
+                0,
+                "closed a handle inside the lock"
+            );
+            assert_eq!(
+                self.probe.held_calls(),
+                0,
+                "asked the group inside the lock"
+            );
         }
     }
 
@@ -5151,7 +5173,7 @@ mod gate_tests {
         };
         match recorder.admit(rec, caught) {
             Admit::Recorded { .. } => {}
-            _ => panic!("탄생이 기록에 안 들었다"),
+            _ => panic!("the birth did not go into the record"),
         }
     }
 
@@ -5178,7 +5200,7 @@ mod gate_tests {
         let cell = GateCell::<GateGroup>::new(None);
         assert!(cell.interrupt(LINE.to_vec()).is_none());
         cell.open_turn();
-        let out = cell.interrupt(LINE.to_vec()).expect("열린 문");
+        let out = cell.interrupt(LINE.to_vec()).expect("open gate");
         assert_eq!(out.bytes, LINE);
         assert!(out.on_written.is_none());
         cell.deliver();
@@ -5217,7 +5239,7 @@ mod gate_tests {
         assert_eq!(
             at_snapshot.load(Ordering::SeqCst),
             rec,
-            "스냅숏 때 기록이 꺼져 있었다"
+            "the record was off at snapshot time"
         );
         rig.episode(|ep| {
             assert_eq!(ep.gen, 0);
@@ -5229,7 +5251,7 @@ mod gate_tests {
                 (rig.clock.at(ms(0)), rig.clock.at(ms(0)))
             );
             let SnapState::Taken(snap) = &ep.snap else {
-                panic!("스냅숏: {:?}", ep.snap);
+                panic!("snapshot: {:?}", ep.snap);
             };
             let links = snap.links();
             let pids: Vec<u32> = links.iter().map(|l| l.pid).collect();
@@ -5243,14 +5265,15 @@ mod gate_tests {
         assert_eq!(
             rig.clock.spawned(WORKER_THREAD),
             0,
-            "쓰이기 전에 일꾼을 띄웠다"
+            "started the worker before it was written"
         );
         assert!(!rig.worker());
-        assert!(rig.logged_text("끊기 에피소드를 열었다"));
+        assert!(rig.logged_text("opened an interrupt episode"));
         rig.check();
     }
 
-    /// A later interrupt of a live episode appends — write confirmation is received with the same generation, and the listing · record on · port are not made again. A running
+    /// A later interrupt of a live episode appends — write confirmation is received with the same generation, and the listing · record on
+    ///   · port are not made again. A running
     /// pass (`Cleaning`) returns to `Waiting` and the most recent interrupt is pulled forward.
     #[test]
     fn a_later_interrupt_continues_the_live_episode_without_listing_or_recording() {
@@ -5263,7 +5286,7 @@ mod gate_tests {
             assert_eq!(ep.gen, 0);
             assert_eq!(ep.last_mono, rig.clock.at(ms(500)));
         });
-        rig.cell.lock().episode.as_mut().expect("에피소드").phase = Phase::Cleaning;
+        rig.cell.lock().episode.as_mut().expect("episode").phase = Phase::Cleaning;
         rig.clock.advance(ms(100));
         rig.esc_with_check();
         rig.episode(|ep| {
@@ -5276,7 +5299,8 @@ mod gate_tests {
         rig.check();
     }
 
-    /// If the turn closes between the two sections, there is no line — turn off the record, drop the snapshot taken outside the lock, and lower `opening`.
+    /// If the turn closes between the two sections, there is no line — turn off the record, drop the snapshot taken outside the lock, and
+    ///   lower `opening`.
     #[test]
     fn a_turn_end_between_the_sections_gives_no_line() {
         let rig = GateRig::new();
@@ -5300,7 +5324,8 @@ mod gate_tests {
         rig.check();
     }
 
-    /// If new input arrives between the two sections or the record turned on is turned off (the listener thread ended), only the line is given without an episode — turning off the record · dropping the snapshot
+    /// If new input arrives between the two sections or the record turned on is turned off (the listener thread ended), only the line is
+    ///   given without an episode — turning off the record · dropping the snapshot
     /// are outside the lock.
     #[test]
     fn new_input_or_a_lost_record_between_the_sections_gives_the_line_only() {
@@ -5314,11 +5339,11 @@ mod gate_tests {
                 let recorder = Arc::clone(&rig.recorder);
                 rig.on_list(move || drop(recorder.stop(recorder.active())));
             }
-            let out = rig.esc().expect("줄만");
+            let out = rig.esc().expect("line only");
             assert_eq!(out.bytes, LINE);
             assert!(
                 out.on_written.is_none(),
-                "{reason}: 에피소드 없는 줄에 쓰기 확인"
+                "{reason}: write confirmation on a line without an episode"
             );
             assert!(!rig.has_episode(), "{reason}");
             assert_eq!(rig.recorder.active(), 0, "{reason}");
@@ -5328,7 +5353,8 @@ mod gate_tests {
         }
     }
 
-    /// If two Esc interleave, the second sees the opener and receives only a line (record · listing · port 0). The third Esc after the opener's ② appends
+    /// If two Esc interleave, the second sees the opener and receives only a line (record · listing · port 0). The third Esc after the
+    ///   opener's ② appends
     /// to the live episode.
     #[test]
     fn a_second_escape_while_opening_gets_the_line_only() {
@@ -5345,7 +5371,7 @@ mod gate_tests {
         assert_eq!(rig.group.lists.load(Ordering::SeqCst), 1);
         assert_eq!(rig.group.watches.load(Ordering::SeqCst), 1);
         assert_eq!(rig.next_rec(), 1);
-        assert!(rig.logged_text("여는 중"));
+        assert!(rig.logged_text("is opening"));
 
         rig.esc_with_check();
         rig.episode(|ep| assert_eq!(ep.gen, 0));
@@ -5354,7 +5380,8 @@ mod gate_tests {
         rig.check();
     }
 
-    /// Opener guard — even if it panics during the snapshot, it lowers `opening` and turns off the record after releasing, and also drops a half-taken snapshot outside the lock.
+    /// Opener guard — even if it panics during the snapshot, it lowers `opening` and turns off the record after releasing, and also drops
+    ///   a half-taken snapshot outside the lock.
     /// The next interrupt opens again.
     #[test]
     fn the_opener_guard_cleans_up_after_a_panic() {
@@ -5365,7 +5392,11 @@ mod gate_tests {
         assert!(caught.is_err());
         assert!(!rig.has_episode());
         assert_eq!(rig.recorder.active(), 0);
-        assert_eq!(rig.probe.drops(), 2, "찍다 만 스냅숏(claude · 뿌리)");
+        assert_eq!(
+            rig.probe.drops(),
+            2,
+            "a half-captured snapshot (claude · root)"
+        );
         rig.check();
 
         rig.answer(CONHOST, Answer::Ours(facts(ROOT, 20)));
@@ -5374,7 +5405,8 @@ mod gate_tests {
         rig.check();
     }
 
-    /// If there is a live episode in section ② (a branch not reached because there is one opener), only the line is given and that episode is left as it is. Even if the generation
+    /// If there is a live episode in section ② (a branch not reached because there is one opener), only the line is given and that episode
+    ///   is left as it is. Even if the generation
     /// changed, it is line only.
     #[test]
     fn the_second_section_never_replaces_a_live_episode_or_a_newer_generation() {
@@ -5384,14 +5416,14 @@ mod gate_tests {
             ..GateState::default()
         };
         let Begin::Open(mark) = st.begin_interrupt(t) else {
-            panic!("여는 이가 돼야 한다");
+            panic!("must become the opener");
         };
         st.episode = Some(written_episode(7, t, 3));
         match st.settle_interrupt(mark, 5, 5, SnapState::Failed(SnapCause::List), t) {
             Settle::LineOnly {
                 why: Stale::Live, ..
             } => {}
-            _ => panic!("산 에피소드를 갈아 끼웠다"),
+            _ => panic!("replaced a live episode"),
         }
         assert!(!st.opening);
         assert_eq!(st.episode.as_ref().map(|ep| ep.gen), Some(7));
@@ -5401,7 +5433,7 @@ mod gate_tests {
             ..GateState::default()
         };
         let Begin::Open(mark) = st.begin_interrupt(t) else {
-            panic!("여는 이가 돼야 한다");
+            panic!("must become the opener");
         };
         st.next_gen = 9;
         assert!(matches!(
@@ -5416,8 +5448,10 @@ mod gate_tests {
 
     // ── Snapshot ────────────────────────────────────────────────────────────────────────
 
-    /// If the snapshot is not set up, the episode opens with that reason (the record is turned on) — listing failure · no root · root not held · cap
-    /// exceeded (nothing is held) · three root children · no port (the listing is not even asked) · port latched. What was held is dropped outside the lock.
+    /// If the snapshot is not set up, the episode opens with that reason (the record is turned on) — listing failure · no root · root not
+    ///   held · cap
+    /// exceeded (nothing is held) · three root children · no port (the listing is not even asked) · port latched. What was held is dropped
+    ///   outside the lock.
     #[test]
     fn a_snapshot_that_cannot_stand_fails_with_its_cause() {
         type Setup = fn(&GateRig);
@@ -5486,7 +5520,7 @@ mod gate_tests {
             assert_eq!(
                 rig.probe.drops(),
                 drops,
-                "{name}: 붙든 것은 스냅숏을 세우지 못한 채 버린다"
+                "{name}: what was held is dropped without setting up the snapshot"
             );
             rig.check();
         }
@@ -5505,7 +5539,8 @@ mod gate_tests {
 
     // ── Write confirmation · write list W ───────────────────────────────────────────────────────
 
-    /// First write — take the list once outside the lock and sort it, pull the most recent interrupt to the write time, and start the worker. A later
+    /// First write — take the list once outside the lock and sort it, pull the most recent interrupt to the write time, and start the
+    ///   worker. A later
     /// interrupt's write only pulls the time, and its list is handed back and dropped (no more workers are started).
     #[test]
     fn the_first_write_takes_the_write_list_and_asks_for_one_worker() {
@@ -5553,7 +5588,7 @@ mod gate_tests {
         assert_eq!(noted.note, WriteNote::Again);
         assert!(noted.back.is_some_and(|back| Arc::ptr_eq(&back, &later)));
         assert!(!noted.spawn);
-        let ep = st.episode.as_ref().expect("에피소드");
+        let ep = st.episode.as_ref().expect("episode");
         assert_eq!(ep.w.as_deref(), Some(&[ROOT][..]));
         assert_eq!(ep.last_mono, t + ms(10));
 
@@ -5563,8 +5598,10 @@ mod gate_tests {
         assert_eq!(st.episode.as_ref().map(|ep| ep.last_mono), Some(t + ms(10)));
     }
 
-    /// If the write list cannot be taken (list failure) or the group is gone (empty list), it does not count as written — no worker and no pass. warn is
-    /// once per incarnation. If a later write of the same episode gets the list, it counts as written from then (candidates are only the births after that list).
+    /// If the write list cannot be taken (list failure) or the group is gone (empty list), it does not count as written — no worker and no
+    ///   pass. warn is
+    /// once per incarnation. If a later write of the same episode gets the list, it counts as written from then (candidates are only the
+    ///   births after that list).
     #[test]
     fn an_unlisted_write_never_counts_as_written() {
         let rig = GateRig::new();
@@ -5582,7 +5619,7 @@ mod gate_tests {
         let again = rig.esc_with_check();
         rig.write(again);
         rig.episode(|ep| assert!(!ep.written));
-        assert_eq!(rig.count(Level::WARN), 1, "warn 은 한 번");
+        assert_eq!(rig.count(Level::WARN), 1, "warn once");
         rig.check();
 
         rig.listing(Some(vec![ROOT, CONHOST, CLAUDE]));
@@ -5617,12 +5654,12 @@ mod gate_tests {
         rig.check();
     }
 
-    /// Candidates are only the births that joined after the write list W — it does not depend on when notifications piled up.
+    /// Candidates are only births that joined after the write list W — independent of when notifications piled up.
     ///
-    /// - X: joined before the write and alive → in W (even if the port delivers that join late, after W) → not a candidate.
+    /// - X: joined before the write, alive → in W (even if the port delivers the join late) → not a candidate.
     /// - Z: joined between the write and W → in W → left out (miss window).
-    /// - P′: a birth after the write reuses a number that was in W → compared by number only, so left out (miss).
-    /// - Q: joined before the write and exited before W → outside W but exited, so link only.
+    /// - P′: a birth after the write reuses a number in W → compared by number only → left out (miss).
+    /// - Q: joined before the write, exited before W → outside W but exited → link only.
     /// - Y: joined after W → candidate.
     #[test]
     fn only_births_after_the_write_list_are_candidates() {
@@ -5657,11 +5694,11 @@ mod gate_tests {
 
         let step = rig.cell.lock().next_step(rig.clock.now(), false);
         let Step::Pass(ticket) = step else {
-            panic!("판이 서야 한다");
+            panic!("a pass must stand");
         };
         assert_eq!(&*ticket.w, &[ROOT, CONHOST, CLAUDE, X, Z, P][..]);
         let snapshot =
-            precheck(&ticket, rig.recorder.active(), false, false).expect("판의 순서 1–3");
+            precheck(&ticket, rig.recorder.active(), false, false).expect("steps 1–3 of the pass");
         let births = rig.recorder.copy(ticket.rec);
         let snapshot_links = snapshot.links();
         let birth_links: Vec<Link<'_>> = births.iter().map(|b| b.link()).collect();
@@ -5691,7 +5728,8 @@ mod gate_tests {
 
     // ── Worker · pass end ──────────────────────────────────────────────────────────────────
 
-    /// The worker sleeps until the most recent write + N and runs one pass — the pass end closes it out as `Done`, and after the snapshot · record are released outside the lock
+    /// The worker sleeps until the most recent write + N and runs one pass — the pass end closes it out as `Done`, and after the snapshot
+    ///   · record are released outside the lock
     /// the worker ends.
     #[test]
     fn the_worker_sleeps_until_n_after_the_last_write_then_ends_the_pass_once() {
@@ -5749,7 +5787,7 @@ mod gate_tests {
             ..GateState::default()
         };
         let Step::Pass(ticket) = st.next_step(t + N, false) else {
-            panic!("판");
+            panic!("pass");
         };
         assert!(matches!(
             st.begin_interrupt(t + N + ms(5)),
@@ -5757,14 +5795,15 @@ mod gate_tests {
         ));
         let released = st.finish_pass(ticket.gen, true, t + N + ms(9));
         assert_eq!(released.rec, 0);
-        let ep = st.episode.as_ref().expect("에피소드");
+        let ep = st.episode.as_ref().expect("episode");
         assert_eq!((ep.phase, ep.rec), (Phase::Waiting, 6));
         assert!(ep.killed_any);
         // Waits for N again.
         assert!(matches!(st.next_step(t + N + ms(10), false), Step::Sleep(d) if d == N - ms(5)));
     }
 
-    /// A pass that killed anything is `Spent` — if it is still the same episode after N, warn once (`StillHung`) and `Done`, and the worker ends.
+    /// A pass that killed anything is `Spent` — if it is still the same episode after N, warn once (`StillHung`) and `Done`, and the
+    ///   worker ends.
     /// A pass that killed nothing goes straight to `Done`.
     #[test]
     fn a_pass_that_killed_waits_n_then_reports_once_and_ends() {
@@ -5776,7 +5815,7 @@ mod gate_tests {
             ..GateState::default()
         };
         let Step::Pass(ticket) = st.next_step(t + N, false) else {
-            panic!("판");
+            panic!("pass");
         };
         let at = t + N + ms(300);
         let released = st.finish_pass(ticket.gen, true, at);
@@ -5807,14 +5846,15 @@ mod gate_tests {
             ..GateState::default()
         };
         let Step::Pass(ticket) = st.next_step(t + N, false) else {
-            panic!("판");
+            panic!("pass");
         };
         let _ = st.finish_pass(ticket.gen, false, t + N);
         assert!(st.episode.as_ref().is_some_and(|ep| !ep.killed_any));
         assert_eq!(st.episode.as_ref().map(|ep| ep.phase), Some(Phase::Done));
     }
 
-    /// The recheck of the kill commit holds only for the same generation · written `Cleaning` · when N has passed. If the marker is set, `Retiring`. The killed mark is
+    /// The recheck of the kill commit holds only for the same generation · written `Cleaning` · when N has passed. If the marker is set,
+    ///   `Retiring`. The killed mark is
     /// only for the same generation.
     #[test]
     fn the_commit_check_goes_only_for_the_same_due_cleaning_episode() {
@@ -5836,9 +5876,9 @@ mod gate_tests {
         assert_eq!(st.commit_check(4, t + N, false), Commit::Superseded);
         assert_eq!(st.commit_check(3, t + N, true), Commit::Retiring);
         st.note_kill(4);
-        assert!(!st.episode.as_ref().expect("에피소드").killed_any);
+        assert!(!st.episode.as_ref().expect("episode").killed_any);
         st.note_kill(3);
-        assert!(st.episode.as_ref().expect("에피소드").killed_any);
+        assert!(st.episode.as_ref().expect("episode").killed_any);
         let _ = st.close_turn();
         assert_eq!(st.commit_check(3, t + N, false), Commit::Superseded);
     }
@@ -5860,7 +5900,8 @@ mod gate_tests {
         rig.check();
     }
 
-    /// If the worker cannot be started, bring the episode down to `Done` and release the record · snapshot (warn). The next interrupt opens a new episode.
+    /// If the worker cannot be started, bring the episode down to `Done` and release the record · snapshot (warn). The next interrupt
+    ///   opens a new episode.
     #[test]
     fn a_worker_that_fails_to_spawn_drops_the_episode() {
         let rig = GateRig::new();
@@ -5909,7 +5950,8 @@ mod gate_tests {
         rig.check();
     }
 
-    /// For an unwritten episode the worker simply ends (the episode stays as it is) and comes up again when that episode is written. A turn end · new
+    /// For an unwritten episode the worker simply ends (the episode stays as it is) and comes up again when that episode is written. A
+    ///   turn end · new
     /// input drops the episode and releases the record · snapshot outside the lock — a sleeping worker wakes and ends quietly.
     #[test]
     fn decoder_hooks_drop_the_episode_and_the_worker_follows() {
@@ -5926,7 +5968,7 @@ mod gate_tests {
         rig.check();
 
         rig.esc_with_check();
-        assert!(!rig.turn(), "쓰이지 않은 에피소드에서 일꾼이 남았다");
+        assert!(!rig.turn(), "a worker remained on an unwritten episode");
         rig.episode(|ep| assert!(ep.is_live() && !ep.written));
         assert_ne!(rig.recorder.active(), 0);
         rig.check();
@@ -5963,7 +6005,7 @@ mod gate_tests {
         rig.clock.advance(N);
         let step = rig.cell.lock().next_step(rig.clock.now(), false);
         let Step::Pass(ticket) = step else {
-            panic!("판");
+            panic!("pass");
         };
         let active = rig.recorder.active();
         assert!(precheck(&ticket, active, false, false).is_ok());
@@ -6001,7 +6043,7 @@ mod gate_tests {
         failed.clock.advance(N);
         let step = failed.cell.lock().next_step(failed.clock.now(), false);
         let Step::Pass(ticket) = step else {
-            panic!("판");
+            panic!("pass");
         };
         assert!(matches!(
             precheck(&ticket, failed.recorder.active(), false, false),
@@ -6020,7 +6062,7 @@ mod gate_tests {
         rig.clock.advance(N);
         let step = rig.cell.lock().next_step(rig.clock.now(), false);
         let Step::Pass(ticket) = step else {
-            panic!("판");
+            panic!("pass");
         };
         let active = rig.recorder.active();
         assert!(precheck(&ticket, active, false, rig.recorder.port_failed()).is_ok());
@@ -6044,7 +6086,8 @@ mod gate_tests {
         report.terminated.iter().map(|k| (k.pid, k.round)).collect()
     }
 
-    /// The three measured shapes each kill one owner in one round and confirm it, then stop at the second round with nothing new to kill — the pass is closed out as `Spent`
+    /// The three measured shapes each kill one owner in one round and confirm it, then stop at the second round with nothing new to kill —
+    ///   the pass is closed out as `Spent`
     /// and only one cleaned warn remains.
     #[test]
     fn measured_shapes_end_their_owner_in_one_round() {
@@ -6067,7 +6110,7 @@ mod gate_tests {
             assert_eq!(rig.terminates(), [owner], "{name}");
             assert!(
                 rig.probe.waits().is_empty(),
-                "{name}: 끝난 것은 기다리지 않는다"
+                "{name}: what has ended is not waited for"
             );
             assert!(
                 matches!(rig.episode(|ep| ep.phase), Phase::Spent { .. }),
@@ -6079,7 +6122,8 @@ mod gate_tests {
         }
     }
 
-    /// p3bg — if round 1 kills owner 32228 and confirms it, in round 2 it shows up as an exited link and fork 24776 becomes a candidate. In round 3
+    /// p3bg — if round 1 kills owner 32228 and confirms it, in round 2 it shows up as an exited link and fork 24776 becomes a candidate.
+    ///   In round 3
     /// there is nothing new to kill. Other births alive at pass time (taskkill · conhost · sleep · cat) are not touched.
     #[test]
     fn p3bg_ends_the_owner_then_its_fork_in_the_next_round() {
@@ -6109,7 +6153,7 @@ mod gate_tests {
             w.births
                 .iter()
                 .position(|(p, _, _)| *p == pid)
-                .expect("탄생")
+                .expect("birth")
         };
         let (a, b) = (at(38108), at(38200));
         w.births.swap(a, b);
@@ -6134,7 +6178,7 @@ mod gate_tests {
         assert_eq!(pids_rounds(&report), [(38108, 1), (38200, 1)]);
         assert_eq!((report.rounds, report.confirmed), (1, 0));
         assert_eq!(rig.terminates(), [38108, 38200]);
-        assert_eq!(rig.cleaned_line().expect("정리함")["unconfirmed"], "2");
+        assert_eq!(rig.cleaned_line().expect("cleaned")["unconfirmed"], "2");
         rig.assert_lock_sections();
     }
 
@@ -6146,9 +6190,12 @@ mod gate_tests {
         assert_eq!(pids_rounds(&report), [(32228, 1)]);
         assert_eq!(rig.terminates(), [32228]);
         assert_eq!(rig.probe.waits(), [KILL_CONFIRM]);
-        assert_eq!(report.excluded.parent_alive, 5, "24776 의 부모가 산다");
+        assert_eq!(
+            report.excluded.parent_alive, 5,
+            "the parent of 24776 is alive"
+        );
         assert!(report.stop.is_none(), "{:?}", report.stop);
-        assert_eq!(rig.cleaned_line().expect("정리함")["unconfirmed"], "1");
+        assert_eq!(rig.cleaned_line().expect("cleaned")["unconfirmed"], "1");
         rig.assert_lock_sections();
     }
 
@@ -6165,7 +6212,7 @@ mod gate_tests {
             .line_with_reason("rounds_exhausted")
             .expect("rounds_exhausted");
         assert_eq!((level, fields["rounds"].as_str()), (Level::WARN, "3"));
-        assert_eq!(rig.count(Level::WARN), 2, "정리함 + rounds_exhausted");
+        assert_eq!(rig.count(Level::WARN), 2, "cleaned + rounds_exhausted");
         rig.assert_lock_sections();
     }
 
@@ -6177,7 +6224,8 @@ mod gate_tests {
         Retire,
     }
 
-    /// If a turn end · new interrupt · new input · retirement comes between selection and commit (the recheck before the second candidate), the commit is refused, and the remaining candidates and
+    /// If a turn end · new interrupt · new input · retirement comes between selection and commit (the recheck before the second
+    ///   candidate), the commit is refused, and the remaining candidates and
     /// the next round are dropped (debug). What was killed earlier remains in the cleaned log.
     #[test]
     fn a_refused_commit_drops_the_rest_of_the_pass() {
@@ -6268,7 +6316,8 @@ mod gate_tests {
         rig.assert_lock_sections();
     }
 
-    /// Each kill error is warned one by one, and a pass that could not kill any of what it selected warns `all_failed` — one that exited by itself meanwhile
+    /// Each kill error is warned one by one, and a pass that could not kill any of what it selected warns `all_failed` — one that exited
+    ///   by itself meanwhile
     /// (`Gone`) also does not count as killed. A failed one is not killed again within one pass.
     #[test]
     fn a_pass_that_ends_nothing_it_picked_is_all_failed() {
@@ -6277,7 +6326,7 @@ mod gate_tests {
         assert!(report.terminated.is_empty());
         assert_eq!((report.cleanups, report.failed, report.gone), (1, 1, 0));
         assert_eq!(rig.terminates(), [38108]);
-        assert!(rig.logged_text("하나를 끝내지 못했다"));
+        assert!(rig.logged_text("could not end one"));
         let (level, fields) = rig.line_with_reason("all_failed").expect("all_failed");
         assert_eq!((level, fields["failed"].as_str()), (Level::WARN, "1"));
         assert_eq!(rig.count(Level::WARN), 2);
@@ -6295,7 +6344,8 @@ mod gate_tests {
         rig.assert_lock_sections();
     }
 
-    /// Could not kill — if the first round has no candidates, warn `no_new_member` (`births` · `full`); if all candidates drop out by the rules, warn
+    /// Could not kill — if the first round has no candidates, warn `no_new_member` (`births` · `full`); if all candidates drop out by the
+    ///   rules, warn
     /// `parent_rule` (per-rule counts); if the snapshot was not set up, warn `snapshot_failed` (`cause`).
     #[test]
     fn a_pass_without_a_cleanup_says_why() {
@@ -6355,7 +6405,7 @@ mod gate_tests {
         let rig = GateRig::staged(&p3bg().staged(), &[]);
         rig.probe.set_terminate_cost(Duration::from_micros(150));
         rig.pass();
-        let line = rig.cleaned_line().expect("정리함");
+        let line = rig.cleaned_line().expect("cleaned");
         for key in [
             "agent",
             "root_pid",
@@ -6374,7 +6424,10 @@ mod gate_tests {
             "no_taskkill",
             "unknown",
         ] {
-            assert!(line.contains_key(key), "{key} 칸이 없다: {line:?}");
+            assert!(
+                line.contains_key(key),
+                "the {key} field is missing: {line:?}"
+            );
         }
         assert_eq!(line["agent"], AgentId::from_u128(0x7440).to_string());
         assert_eq!(line["root_pid"], "37152");
@@ -6402,7 +6455,7 @@ mod gate_tests {
         assert!(rig.turn());
         assert_eq!(rig.clock.sleeps(), [N]);
         assert!(rig.turn());
-        assert!(rig.logged_text("더 하지 않는다"));
+        assert!(rig.logged_text("not doing more"));
         assert!(!rig.turn());
         assert_eq!(rig.count(Level::WARN), 2);
         assert_eq!(rig.recorder.active(), 0);
@@ -6436,7 +6489,8 @@ mod gate_tests {
         }
     }
 
-    /// After every arbitrary transition sequence (interrupt · event between two sections · write confirmation · dropped confirmation · three decoder calls · time · worker step · list failure · listener
+    /// After every arbitrary transition sequence (interrupt · event between two sections · write confirmation · dropped confirmation ·
+    ///   three decoder calls · time · worker step · list failure · listener
     /// thread end · worker start failure · retirement) the TRD §3-2 invariants and the lock rules hold. It is deterministic (fixed seed).
     #[test]
     fn random_transition_sequences_keep_every_invariant() {
@@ -6551,8 +6605,9 @@ mod gate_tests {
             assert_eq!(rig.recorder.active(), 0);
             assert!(!rig.has_episode());
         }
-        let seen =
-            format!("판 {passes} · 에피소드 {opened} · 줄만 {line_only} · 줄 없음 {no_line}");
+        let seen = format!(
+            "passes {passes} · episodes {opened} · line only {line_only} · no line {no_line}"
+        );
         assert!(
             passes > 40 && opened > 500 && line_only > 50 && no_line > 50,
             "{seen}"
@@ -6560,9 +6615,11 @@ mod gate_tests {
     }
 }
 
-/// Connects the real group · port · listener thread · write confirmation · worker · pass in one line (TRD §5 real process 12). Each test starts four or fewer
-/// (including the console host). ★The kill path is not measured★ — under the claude hook runner shape the copies exceed four, so the pure
-/// tests (spike shapes) measure it. Here we check that the pass's reason is left in the log and nothing is killed.
+/// Connects the real group · port · listener thread · write confirmation · worker · pass in one line (TRD §5 real process 12); each test
+///   starts four or fewer
+/// (including the console host). ★The kill path is not measured★ — under the real hook runner shape copies exceed four, so the pure
+///   spike-shape tests measure it.
+/// Here: the pass's reason is left in the log and nothing is killed.
 #[cfg(all(test, windows))]
 mod real_tests {
     use super::test_support::{Capture, Line};
@@ -6577,7 +6634,8 @@ mod real_tests {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const LINE: &[u8] = b"{\"type\":\"control_request\"}\n";
 
-    /// Sleeps do not wait and advance monotonic time by that amount — the worker passes N immediately. The worker body is piled up and the test thread
+    /// Sleeps do not wait and advance monotonic time by that amount — the worker passes N immediately. The worker body is piled up and the
+    ///   test thread
     /// runs it (to capture the pass's log). The listener thread is started for real.
     #[derive(Default)]
     struct SkipClock {
@@ -6593,7 +6651,7 @@ mod real_tests {
 
     impl LeftoverClock for SkipClock {
         fn sleep(&self, d: Duration) {
-            let ns = u64::try_from(d.as_nanos()).expect("시험 잠");
+            let ns = u64::try_from(d.as_nanos()).expect("test sleep");
             self.skipped_ns.fetch_add(ns, Ordering::SeqCst);
         }
 
@@ -6627,15 +6685,15 @@ mod real_tests {
     /// Returns = that episode's record number.
     fn interrupt_and_write(cell: &Arc<GateCell>, cleaner: &Cleaner, clock: &SkipClock) -> u64 {
         cell.open_turn();
-        let out = cell.interrupt(LINE.to_vec()).expect("끊기 줄");
+        let out = cell.interrupt(LINE.to_vec()).expect("interrupt line");
         let rec = cleaner.recorder.active();
-        assert_ne!(rec, 0, "기록이 켜지지 않았다");
-        let on_written = out.on_written.expect("쓰기 확인");
+        assert_ne!(rec, 0, "the record did not turn on");
+        let on_written = out.on_written.expect("write confirmation");
         on_written();
         assert_eq!(
             clock.workers.lock().unwrap().len(),
             1,
-            "쓰인 끊기가 일꾼을 부르지 않았다"
+            "the written interrupt did not call the worker"
         );
         rec
     }
@@ -6657,20 +6715,24 @@ mod real_tests {
             !lines
                 .iter()
                 .any(|(_, fields)| fields.contains_key("terminated")),
-            "무언가를 끝냈다: {lines:?}"
+            "ended something: {lines:?}"
         );
         let mut reasons = lines
             .iter()
             .filter(|(_, fields)| fields.contains_key("reason"));
-        let (_, fields) = reasons.next().expect("판의 사유 줄");
-        assert!(reasons.next().is_none(), "사유 줄이 둘이다: {lines:?}");
+        let (_, fields) = reasons.next().expect("the pass's reason line");
+        assert!(
+            reasons.next().is_none(),
+            "there are two reason lines: {lines:?}"
+        );
         fields.clone()
     }
 
     /// Wait until R in the windowless console starts the console host — before the gate opens, that is R's only child. That host
-    /// is sometimes born after R enters the Job (measured), so if not waited for, it slips in as a live birth after the write list (parent R alive).
+    /// is sometimes born after R enters the Job (measured), so if not waited for, it slips in as a live birth after the write list (parent
+    ///   R alive).
     fn console_host_born(r: &std::process::Child) {
-        wait_until("R 의 콘솔 호스트", || {
+        wait_until("R's console host", || {
             (!engram_dashboard_platform::process::child_pids(r.id()).is_empty()).then_some(())
         });
     }
@@ -6681,19 +6743,20 @@ mod real_tests {
     fn a_ping_left_by_an_exited_cmd_is_not_a_hook_copy_and_survives() {
         let (job, group) = new_group();
         let group = Arc::new(group);
-        // R = gate → B → waits for a second line (so the root is alive at pass time). B = launches P in the background, waits for one line, then exits.
+        // R = gate → B → waits for a second line (so the root is alive at pass time). B = launches P in the background, waits for one
+        //   line, then exits.
         let mut r = spawn_gated_cmd(
             r#"cmd /d /c "start "" /b ping -n 30 127.0.0.1 >nul & set /p _=" & set /p _="#,
             CREATE_NO_WINDOW,
         );
-        job.adopt(r.id()).expect("Job 편입");
+        job.adopt(r.id()).expect("adopt into Job");
         console_host_born(&r);
         let (clock, cleaner, cell) = cleaner_for(&group, r.id());
         let rec = interrupt_and_write(&cell, &cleaner, &clock);
 
-        let mut stdin = r.stdin.take().expect("stdin 파이프");
-        stdin.write_all(b"go\r\n").expect("R 의 문");
-        let (b, p) = wait_until("기록된 B · P", || {
+        let mut stdin = r.stdin.take().expect("stdin pipe");
+        stdin.write_all(b"go\r\n").expect("R's gate");
+        let (b, p) = wait_until("recorded B · P", || {
             let births = cleaner.recorder.copy(rec);
             let b = births
                 .iter()
@@ -6706,8 +6769,8 @@ mod real_tests {
             Some((b, p))
         });
         assert!(b.killable && p.killable);
-        stdin.write_all(b"b\r\n").expect("B 의 줄");
-        wait_until("끝난 B", || {
+        stdin.write_all(b"b\r\n").expect("B's line");
+        wait_until("ended B", || {
             matches!(b.pin.exited(), Ok(true)).then_some(())
         });
 
@@ -6715,24 +6778,25 @@ mod real_tests {
         assert_eq!(pass["reason"], "parent_rule", "{pass:?}");
         assert_eq!(pass["not_hook_copy"], "1", "{pass:?}");
         assert_eq!(pass["parent_alive"], "0", "{pass:?}");
-        assert!(!p.pin.exited().expect("끝났나"), "P 가 끝났다");
+        assert!(!p.pin.exited().expect("exited?"), "P ended");
 
         drop((b, p));
-        job.terminate(1).expect("Job 끝내기");
+        job.terminate(1).expect("end the Job");
         drop(stdin);
         let _ = r.wait();
     }
 
-    /// Only things born before the interrupt exist — they are in the write list, so there is no candidate (even if they enter the record by re-notification on attach). Three: R · its console
+    /// Only things born before the interrupt exist — they are in the write list, so there is no candidate (even if they enter the record
+    ///   by re-notification on attach). Three: R · its console
     /// host · ping.
     #[test]
     fn births_before_the_interrupt_leave_no_new_member() {
         let (job, group) = new_group();
         let group = Arc::new(group);
         let mut r = spawn_gated_cmd("ping -n 30 127.0.0.1 >nul", CREATE_NO_WINDOW);
-        job.adopt(r.id()).expect("Job 편입");
+        job.adopt(r.id()).expect("adopt into Job");
         open_gate(&mut r);
-        wait_until("명단의 ping", || {
+        wait_until("ping in the list", || {
             group
                 .member_pids()
                 .ok()?
@@ -6745,7 +6809,7 @@ mod real_tests {
         let pass = the_pass_line(&run_workers(&clock));
         assert_eq!(pass["reason"], "no_new_member", "{pass:?}");
 
-        job.terminate(1).expect("Job 끝내기");
+        job.terminate(1).expect("end the Job");
         let _ = r.wait();
     }
 
@@ -6755,13 +6819,13 @@ mod real_tests {
         let (job, group) = new_group();
         let group = Arc::new(group);
         let mut r = spawn_gated_cmd("ping -n 30 127.0.0.1 >nul", CREATE_NO_WINDOW);
-        job.adopt(r.id()).expect("Job 편입");
+        job.adopt(r.id()).expect("adopt into Job");
         console_host_born(&r);
         let (clock, cleaner, cell) = cleaner_for(&group, r.id());
         let rec = interrupt_and_write(&cell, &cleaner, &clock);
 
         open_gate(&mut r);
-        let p = wait_until("기록된 ping", || {
+        let p = wait_until("recorded ping", || {
             cleaner
                 .recorder
                 .copy(rec)
@@ -6773,10 +6837,10 @@ mod real_tests {
         assert_eq!(pass["reason"], "parent_rule", "{pass:?}");
         assert_eq!(pass["parent_alive"], "1", "{pass:?}");
         assert_eq!(pass["not_hook_copy"], "0", "{pass:?}");
-        assert!(!p.pin.exited().expect("끝났나"), "P 가 끝났다");
+        assert!(!p.pin.exited().expect("exited?"), "P ended");
 
         drop(p);
-        job.terminate(1).expect("Job 끝내기");
+        job.terminate(1).expect("end the Job");
         let _ = r.wait();
     }
 }

@@ -1,20 +1,8 @@
-// ADR-0067: 에이전트 모니터링 검색 팝업(command-palette식) — 우클릭한 slot 에 실행중 에이전트를 배정한다.
-//
-// ★역할★: slot 우클릭 "에이전트 모니터링"(slot.assignRunningAgent command)이 monitoringPickerStore.open
-//   (viewId, slotId)로 타깃을 실어 이 팝업을 연다. 검색창 + 실행중 에이전트 필터 목록을 그리고, 고르면
-//   그 slot 에 assign 한다. 팝업 자체는 배치 상태를 갖지 않는다 — on-select 가 viewStore.assignAgent 로
-//   흘려 §5 단일 제어 표면(assign_agent)을 지난다(별도 배치 상태 금지, ADR-0067 불변식).
-//
-// ★배치 타깃 = 우클릭한 slot(명시)★: 타깃 좌표는 store 에 담긴 (viewId, slotId) — 포커스에 의존하지 않는다
-//   (focus-steal 원천 차단). 우클릭/팝업 열기는 focused_slot_id 를 건드리지 않는다(ADR-0067 포커스 불변식).
-//
-// ★낙관 갱신 X(ADR-0035)★: assignAgent 는 invoke(assign_agent) 만 부르고 화면은 layout:updated emit 으로만
-//   반영된다 — 팝업은 assign 을 흘린 뒤 즉시 닫고, 실제 slot 콘텐츠 교체는 백엔드 권위 emit 이 그린다.
-//
-// ★창별 단일 마운트★: WindowLayout 이 창마다 하나 마운트하고, target 이 null 이면 아무것도 렌더하지 않는다
-//   (닫힘). SlotContextMenu 의 fixed 오버레이 패턴과 동형 — 변수-only 스타일(테마 준수, 색 리터럴 0).
-//
-// ★스타일 = 변수-only★: 색·폰트는 전부 CSS 변수(PresetPalette/AgentList 와 동일 규율 — e-ink 대비).
+// ADR-0067: agent-monitoring search popup (command-palette style) — assigns a running agent to the right-clicked slot.
+// ★Role★: slot right-click "agent monitoring" (slot.assignRunningAgent) opens this popup, with monitoringPickerStore.open(viewId, slotId) carrying the target; it draws a search box + running-agent filter list, and picking one assigns it. No placement state of its own — on-select flows through viewStore.assignAgent (assign_agent), the §5 single control surface (ADR-0067 invariant).
+// ★Target = the right-clicked slot (explicit)★: the (viewId, slotId) in the store, independent of focus (focus-steal blocked at the source); opening does not touch focused_slot_id (ADR-0067 focus invariant).
+// ★No optimistic update (ADR-0035)★: assignAgent only invokes assign_agent; the popup closes right after sending and the slot swap is drawn by the backend-authoritative layout:updated emit.
+// ★Single mount per window★: WindowLayout mounts one and it renders nothing when target is null (same fixed-overlay pattern as SlotContextMenu). ★Style = variables only★ (same discipline as PresetPalette/AgentList — e-ink contrast, zero color literals).
 
 import { useEffect, useRef, useState } from 'react'
 
@@ -29,31 +17,28 @@ export default function AgentMonitoringPicker() {
   const target = useMonitoringPickerStore(s => s.target)
   const close = useMonitoringPickerStore(s => s.close)
   const agents = useAgentStore(s => s.agents)
-  // ADR-0061: 표시명은 트리와 동일하게 프로필의 display_name 에서 파생한다(filterMonitoringCandidates 가 조인).
-  //   agents 와 같은 store(useAgentStore)에서 profiles 를 가져온다 — 트리(mergeTreeNodes)와 단일 출처.
+  // ADR-0061: the display name derives from the profile's display_name like the tree (filterMonitoringCandidates joins); profiles come from the same store as agents (single source with mergeTreeNodes).
   const profiles = useAgentStore(s => s.profiles)
 
   const [query, setQuery] = useState('')
-  // 키보드 선택 하이라이트(Enter 로 배정) — 목록 인덱스. 검색어 변경 시 0 으로 리셋.
+  // Keyboard-selection highlight (Enter to assign) — a list index. Reset to 0 when the query changes.
   const [activeIndex, setActiveIndex] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
 
   const candidates = filterMonitoringCandidates(agents, profiles, query)
 
-  // 마운트 직후 검색창 자동 포커스. key={openId} 로 open() 마다 fresh remount 되므로(ADR-0067 — monitoringPickerStore.openId)
-  // query/activeIndex 리셋은 useState 초기값이 담당한다 — 여기선 포커스만.
+  // Auto-focus the search box after mount. key={openId} makes every open() a fresh remount (monitoringPickerStore.openId), so useState initial values reset query/activeIndex — only focus here.
   useEffect(() => {
     if (!target) return
-    // requestAnimationFrame 없이도 ref 는 이 시점 확정.
+    // The ref is settled at this point even without requestAnimationFrame.
     inputRef.current?.focus()
   }, [target])
 
-  // 검색어가 바뀌면 하이라이트를 첫 항목으로(범위 밖 인덱스가 남지 않게).
   useEffect(() => {
     setActiveIndex(0)
   }, [query])
 
-  // Esc 로 닫기 — 열려 있을 때만 리스너 부착(누수 방지). 입력창 keydown 과 별개(백드롭 밖 전역 Esc 도 잡음).
+  // Close on Esc — attach the listener only while open (prevents leaks). Separate from the input keydown (also catches a global Esc outside the backdrop).
   useEffect(() => {
     if (!target) return
     const h = (e: KeyboardEvent) => {
@@ -63,21 +48,17 @@ export default function AgentMonitoringPicker() {
     return () => document.removeEventListener('keydown', h)
   }, [target, close])
 
-  // 닫힘 상태 = 아무것도 렌더하지 않음(SlotContextMenu 의 조건부 마운트와 동형).
   if (!target) return null
 
-  // ADR-0067: on-select 배치 = viewStore.assignAgent(우클릭한 slot 좌표) → invoke(assign_agent) → emit.
-  //   §5 단일 제어 표면을 지난다(별도 배치 상태 없음). 낙관 갱신 X — 화면은 emit 으로만. 실패는 콘솔 경고
-  //   (토스트 없음 — AgentList openInFocusedSlot 과 동형 처리). 성공·실패 무관 팝업은 닫는다.
+  // ADR-0067: on-select placement = viewStore.assignAgent (right-clicked slot coordinates) → invoke(assign_agent) → emit; no optimistic update. Failure is a console warning (no toast, like AgentList openInFocusedSlot); the popup closes either way.
   const selectAgent = (agentId: string) => {
     void useViewStore
       .getState()
       .assignAgent(target.viewId, target.slotId, agentId)
-      .catch(e => console.error('[AgentMonitoringPicker] assignAgent 실패:', e))
+      .catch(e => console.error('[AgentMonitoringPicker] assignAgent failed:', e))
     close()
   }
 
-  // 입력창에 포커스가 있어도 동작하도록 input onKeyDown 에 건다.
   const onInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'ArrowDown') {
       e.preventDefault()
@@ -90,15 +71,14 @@ export default function AgentMonitoringPicker() {
       const chosen = candidates[activeIndex]
       if (chosen) selectAgent(chosen.id)
     }
-    // Escape 는 위 전역 리스너가 처리.
+    // Escape is handled by the global listener above.
   }
 
   return (
-    // 백드롭 — 클릭 시 닫기(팝업 본체 클릭은 stopPropagation 으로 통과). fixed 전체 덮기 + 반투명(변수 없이
-    //   rgba 는 오버레이 관용 — 색조가 아니라 명도 딤이라 테마 무관). zIndex 는 SlotContextMenu(1000/1001) 위.
+    // Backdrop — click closes (the popup body stops propagation). Fixed full cover + translucent rgba (a lightness dim, theme-independent, so no variable). zIndex above SlotContextMenu (1000/1001).
     <div
       data-monitoring-picker-backdrop="1"
-      // ADR-0237: 이 Esc 는 팝업을 닫는 키다 — 열린 동안 채팅 칸의 Esc 가 턴을 끊지 않게 하는 표지(`interruptKey.ts`).
+      // ADR-0237: this Esc closes the popup — while open, a marker so the chat area's Esc does not interrupt the turn (`interruptKey.ts`).
       data-engram-overlay="1"
       onClick={close}
       style={{
@@ -130,7 +110,7 @@ export default function AgentMonitoringPicker() {
           overflow: 'hidden',
         }}
       >
-        {/* 라벨 — 이 팝업의 목적(우클릭한 slot 에 실행중 에이전트 배정). */}
+        {/* Label — assign a running agent to the right-clicked slot */}
         <div
           style={{
             padding: '6px 10px',
@@ -145,7 +125,7 @@ export default function AgentMonitoringPicker() {
           {t('agent.monitoringLabel')}
         </div>
 
-        {/* 검색창 — 자동 포커스(위 effect). 표시명·cwd 부분일치. */}
+        {/* Search box — auto-focus (effect above) */}
         <input
           ref={inputRef}
           data-monitoring-picker-search="1"
@@ -167,8 +147,7 @@ export default function AgentMonitoringPicker() {
           }}
         />
 
-        {/* 후보 목록 — 실행중 필터 + 검색어 좁힘. 공용 ScrollArea seam(ADR-0053)으로
-            스크롤(raw overflow:auto → 오버레이 스크롤바). 평면 목록(가상화 없음)이라 Viewport 로 감싸도 무해. */}
+        {/* Candidate list — running filter + query narrowing. Flat list scrolled through the shared ScrollArea seam (ADR-0053). */}
         <ScrollArea style={{ flex: 1, minHeight: 0 }}>
           {candidates.length === 0 ? (
             <div
@@ -191,7 +170,7 @@ export default function AgentMonitoringPicker() {
                   padding: '6px 10px',
                   cursor: 'pointer',
                   borderBottom: '1px solid var(--border)',
-                  // 색 리터럴 없이 accent mix.
+                  // accent mix without color literals.
                   background:
                     i === activeIndex ? 'color-mix(in srgb, var(--accent) 20%, transparent)' : 'transparent',
                 }}

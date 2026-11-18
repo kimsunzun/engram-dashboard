@@ -8,7 +8,7 @@ Purpose: split a slot into an independent window. The last part of Phase 3. + re
 
 Problem: a new WebviewWindow does not share zustand → if PopupPage looks up agentId through slotStore, it is always null (an empty terminal).
 Fix: **pass it through the URL query**.
-- SlotContextMenu '팝업으로 분리' (split out as popup): add `?agentId=<id>` to the `WebviewWindow` open URL.
+- SlotContextMenu 'Split out as popup': add `?agentId=<id>` to the `WebviewWindow` open URL.
 - PopupPage: use `new URLSearchParams(location.search).get('agentId')` first (drop the slotStore dependency).
 
 ## 2. PopupPage.tsx (§6 pattern as written)

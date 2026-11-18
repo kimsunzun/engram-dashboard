@@ -23,23 +23,23 @@ const F = false
 
 const CASES: Case[] = [
   // ── before measuring ──
-  { name: '재지 못함(null) = 제한 없음 → 모두 S · 숨김 없음', available: null, n: 3, active: 1, widths: [S, S, S], visible: [T, T, T] },
-  { name: '유한하지 않은 수도 재지 못함', available: Number.NaN, n: 2, active: 0, widths: [S, S], visible: [T, T] },
+  { name: 'unmeasurable (null) = no limit → all S · no hiding', available: null, n: 3, active: 1, widths: [S, S, S], visible: [T, T, T] },
+  { name: 'a non-finite number is also unmeasurable', available: Number.NaN, n: 2, active: 0, widths: [S, S], visible: [T, T] },
 
   // ── stage A (available ≥ n·A) ──
-  { name: '모두 S — 딱 n·S', available: 3 * S, n: 3, active: 0, widths: [S, S, S], visible: [T, T, T] },
-  { name: '모두 S — 남는 px 를 나누지 않는다', available: 1000, n: 3, active: 0, widths: [S, S, S], visible: [T, T, T] },
-  { name: 'A 와 S 사이 고른 폭 · 남는 1 px 은 맨 왼쪽', available: 400, n: 3, active: 2, widths: [134, 133, 133], visible: [T, T, T] },
-  { name: '남는 2 px 은 왼쪽부터 하나씩', available: 302, n: 4, active: 0, widths: [76, 76, 75, 75], visible: [T, T, T, T] },
-  { name: '넘김점 그대로(n·A) = 모두 A', available: 3 * A, n: 3, active: 1, widths: [A, A, A], visible: [T, T, T] },
-  { name: '넘김점 바로 위 = 모두 A + 남는 1 px', available: 3 * A + 1, n: 3, active: 1, widths: [A + 1, A, A], visible: [T, T, T] },
-  { name: '머리 하나 · 활성 — S 보다 좁으면 그 폭 그대로', available: 100, n: 1, active: 0, widths: [100], visible: [T] },
-  { name: '머리 하나 · 활성 없음도 단계 A', available: 100, n: 1, active: -1, widths: [100], visible: [T] },
+  { name: 'all S — exactly n·S', available: 3 * S, n: 3, active: 0, widths: [S, S, S], visible: [T, T, T] },
+  { name: 'all S — leftover px are not divided', available: 1000, n: 3, active: 0, widths: [S, S, S], visible: [T, T, T] },
+  { name: 'even width between A and S · the leftover 1 px goes to the leftmost', available: 400, n: 3, active: 2, widths: [134, 133, 133], visible: [T, T, T] },
+  { name: 'the leftover 2 px one each from the left', available: 302, n: 4, active: 0, widths: [76, 76, 75, 75], visible: [T, T, T, T] },
+  { name: 'exactly at the switch point (n·A) = all A', available: 3 * A, n: 3, active: 1, widths: [A, A, A], visible: [T, T, T] },
+  { name: 'just above the switch point = all A + the leftover 1 px', available: 3 * A + 1, n: 3, active: 1, widths: [A + 1, A, A], visible: [T, T, T] },
+  { name: 'one head · active — if narrower than S that width as is', available: 100, n: 1, active: 0, widths: [100], visible: [T] },
+  { name: 'one head · no active is also stage A', available: 100, n: 1, active: -1, widths: [100], visible: [T] },
 
   // ── stage B (available < n·A) ──
-  { name: '넘김점 바로 아래 — 활성 A 고정 · 비활성만 준다', available: 3 * A - 1, n: 3, active: 1, widths: [A, A, A - 1], visible: [T, T, T] },
+  { name: 'just below the switch point — active fixed at A · only inactive ones shrink', available: 3 * A - 1, n: 3, active: 1, widths: [A, A, A - 1], visible: [T, T, T] },
   {
-    name: '남는 px 은 활성을 건너뛰고 비활성만 왼쪽부터(TabAcceptsExtraSpace — 활성 최소 = 넘김점)',
+    name: 'leftover px skip the active and go only to inactive ones from the left (TabAcceptsExtraSpace — active minimum = switch point)',
     available: A + 3 * I + 2,
     n: 4,
     active: 0,
@@ -47,28 +47,28 @@ const CASES: Case[] = [
     visible: [T, T, T, T],
   },
   {
-    name: '활성이 맨 왼쪽이 아니어도 — 그 앞 비활성은 받고 활성은 건너뛴다',
+    name: 'even if the active is not leftmost — inactive ones before it receive and the active is skipped',
     available: A + 3 * I + 2,
     n: 4,
     active: 1,
     widths: [I + 1, A, I + 1, I],
     visible: [T, T, T, T],
   },
-  { name: '활성 없음 — 모두 받으므로 맨 왼쪽이 받는다', available: 141, n: 4, active: -1, widths: [36, 35, 35, 35], visible: [T, T, T, T] },
+  { name: 'no active — all receive so the leftmost gets it', available: 141, n: 4, active: -1, widths: [36, 35, 35, 35], visible: [T, T, T, T] },
   {
-    name: 'f 가 0 으로 묶임(available < A + (n−1)·I) — 넘친 만큼 꼬리 숨김 · 남는 px 없음',
+    name: 'f clamped to 0 (available < A + (n−1)·I) — the overflowed tail is hidden · no leftover px',
     available: 130,
     n: 4,
     active: 0,
     widths: [A, I, I, I],
     visible: [T, T, T, F],
   },
-  { name: '활성 없음 — 모두 비활성 최소 I 기준', available: 140, n: 4, active: -1, widths: [I + 3, I + 3, I + 3, I + 3], visible: [T, T, T, T] },
-  { name: '머리 하나 · 비활성 — I 와 A 사이', available: 35, n: 1, active: -1, widths: [35], visible: [T] },
+  { name: 'no active — all based on the inactive minimum I', available: 140, n: 4, active: -1, widths: [I + 3, I + 3, I + 3, I + 3], visible: [T, T, T, T] },
+  { name: 'one head · inactive — between I and A', available: 35, n: 1, active: -1, widths: [35], visible: [T] },
 
   // ── hiding (ShouldTabBeVisible) ──
   {
-    name: '안정 집합 — 활성이 뒤면 들어가는 머리도 「오른 끝 + (활성 − 이 폭)」이 넘으면 숨김 · 끝 너머 활성도 숨김',
+    name: 'stable set — if the active is later, even a head that fits is hidden if 「right end + (active − this width)」 overflows · an active beyond the end also hides',
     available: 135,
     n: 5,
     active: 4,
@@ -76,7 +76,7 @@ const CASES: Case[] = [
     visible: [T, T, T, F, F],
   },
   {
-    name: '안정 집합 — 활성이 앞이어도 같은 보이는 집합',
+    name: 'stable set — the same visible set even if the active is earlier',
     available: 135,
     n: 5,
     active: 0,
@@ -84,7 +84,7 @@ const CASES: Case[] = [
     visible: [T, T, T, F, F],
   },
   {
-    name: '활성이 그 자리면 규칙이 걸리지 않고 오른 끝만 본다',
+    name: 'if the active is at that place the rule does not apply and only the right end is looked at',
     available: 135,
     n: 5,
     active: 3,
@@ -92,7 +92,7 @@ const CASES: Case[] = [
     visible: [T, T, T, F, F],
   },
   {
-    name: '활성 없음 — 안정 집합 규칙이 걸리지 않아 하나 더 보인다',
+    name: 'no active — the stable-set rule does not apply so one more shows',
     available: 135,
     n: 5,
     active: -1,
@@ -100,25 +100,25 @@ const CASES: Case[] = [
     visible: [T, T, T, T, F],
   },
   {
-    name: '끝 너머의 활성만 숨고 앞은 다 보인다',
+    name: 'only the active beyond the end hides and the earlier ones all show',
     available: 150,
     n: 5,
     active: 4,
     widths: [I, I, I, I, A],
     visible: [T, T, T, T, F],
   },
-  { name: '머리 하나 · 활성 · A 보다 좁음 = 숨김', available: 30, n: 1, active: 0, widths: [A], visible: [F] },
-  { name: '머리 하나 · 비활성 · I 보다 좁음 = 숨김', available: 30, n: 1, active: -1, widths: [I], visible: [F] },
-  { name: '음수 폭 = 다 숨김', available: -10, n: 2, active: 0, widths: [A, I], visible: [F, F] },
+  { name: 'one head · active · narrower than A = hidden', available: 30, n: 1, active: 0, widths: [A], visible: [F] },
+  { name: 'one head · inactive · narrower than I = hidden', available: 30, n: 1, active: -1, widths: [I], visible: [F] },
+  { name: 'negative width = all hidden', available: -10, n: 2, active: 0, widths: [A, I], visible: [F, F] },
 
   // ── edges ──
-  { name: '머리 없음', available: 500, n: 0, active: -1, widths: [], visible: [] },
-  { name: '머리 없음 · 음수 폭', available: -5, n: 0, active: -1, widths: [], visible: [] },
-  { name: '소수 폭은 내린다', available: 400.9, n: 3, active: 0, widths: [134, 133, 133], visible: [T, T, T] },
-  { name: '범위 밖 활성 = 활성 없음', available: 135, n: 5, active: 5, widths: [I, I, I, I, I], visible: [T, T, T, T, F] },
+  { name: 'no heads', available: 500, n: 0, active: -1, widths: [], visible: [] },
+  { name: 'no heads · negative width', available: -5, n: 0, active: -1, widths: [], visible: [] },
+  { name: 'a fractional width rounds down', available: 400.9, n: 3, active: 0, widths: [134, 133, 133], visible: [T, T, T] },
+  { name: 'an out-of-range active = no active', available: 135, n: 5, active: 5, widths: [I, I, I, I, I], visible: [T, T, T, T, F] },
 ]
 
-describe('tabStripLayout — 표', () => {
+describe('tabStripLayout — table', () => {
   for (const c of CASES) {
     it(c.name, () => {
       expect(tabStripLayout(c.available, c.n, c.active)).toEqual({ widths: c.widths, visible: c.visible })
@@ -126,7 +126,7 @@ describe('tabStripLayout — 표', () => {
   }
 })
 
-describe('tabStripLayout — 불변식(머리 1–9 · 활성 전부 · 폭 0–1600 전수)', () => {
+describe('tabStripLayout — invariants (heads 1–9 · every active · width 0–1600 exhaustive)', () => {
   // Collect only the mismatched inputs and assert once — calling expect per field would be hundreds of thousands of calls and slow.
   const violations = (bad: (available: number, n: number, active: number) => boolean): string[] => {
     const out: string[] = []
@@ -140,7 +140,7 @@ describe('tabStripLayout — 불변식(머리 1–9 · 활성 전부 · 폭 0–
     return out
   }
 
-  it('숨김은 늘 꼬리다 — 보이는 것 = 앞쪽 k 개', () => {
+  it('hiding is always the tail — visible = the front k', () => {
     const bad = violations((available, n, active) => {
       const { visible } = tabStripLayout(available, n, active)
       const k = visible.indexOf(false)
@@ -149,7 +149,7 @@ describe('tabStripLayout — 불변식(머리 1–9 · 활성 전부 · 폭 0–
     expect(bad).toEqual([])
   })
 
-  it('보이는 머리는 available 안에 든다', () => {
+  it('visible heads fit within available', () => {
     const bad = violations((available, n, active) => {
       const { widths, visible } = tabStripLayout(available, n, active)
       return widths.filter((_, i) => visible[i]).reduce((s, w) => s + w, 0) > available
@@ -157,7 +157,7 @@ describe('tabStripLayout — 불변식(머리 1–9 · 활성 전부 · 폭 0–
     expect(bad).toEqual([])
   })
 
-  it('넘치지 않고 모두 S 도 아니면 폭 합 = available(남는 px 를 다 나눈다)', () => {
+  it('if not overflowing and not all S then width sum = available (the leftover px are all divided)', () => {
     const bad = violations((available, n, active) => {
       const minimum = active >= 0 ? A + (n - 1) * I : n * I
       if (available < minimum || available >= n * S) return false
@@ -166,7 +166,7 @@ describe('tabStripLayout — 불변식(머리 1–9 · 활성 전부 · 폭 0–
     expect(bad).toEqual([])
   })
 
-  it('단계 B(available < n·A)의 활성은 정확히 A — 남는 px 를 받지 않는다', () => {
+  it('the active of stage B (available < n·A) is exactly A — it does not receive leftover px', () => {
     const bad = violations((available, n, active) => {
       if (active < 0 || available >= n * A) return false
       return tabStripLayout(available, n, active).widths[active] !== A
@@ -174,7 +174,7 @@ describe('tabStripLayout — 불변식(머리 1–9 · 활성 전부 · 폭 0–
     expect(bad).toEqual([])
   })
 
-  it('받는 머리(단계 A = 모두 · 단계 B = 비활성)끼리는 왼쪽이 넓거나 같고 차이는 많아야 1 px', () => {
+  it('among receiving heads (stage A = all · stage B = inactive) the left is wider or equal and the difference is at most 1 px', () => {
     const bad = violations((available, n, active) => {
       const { widths } = tabStripLayout(available, n, active)
       const takers = widths.filter((_, i) => available >= n * A || i !== active)
@@ -183,7 +183,7 @@ describe('tabStripLayout — 불변식(머리 1–9 · 활성 전부 · 폭 0–
     expect(bad).toEqual([])
   })
 
-  it('활성은 A 이상 · 비활성은 I 이상 · 누구도 S 를 넘지 않는다', () => {
+  it('active is A or more · inactive is I or more · none exceeds S', () => {
     const bad = violations((available, n, active) =>
       tabStripLayout(available, n, active).widths.some((w, i) => w < (i === active ? A : I) || w > S),
     )
@@ -191,7 +191,7 @@ describe('tabStripLayout — 불변식(머리 1–9 · 활성 전부 · 폭 0–
   })
 })
 
-describe('tabStripLayout — 폭 상한(닫기 모드의 고정 폭) · 보임은 잰 폭으로', () => {
+describe('tabStripLayout — width cap (frozen width of closing mode) · visibility by measured width', () => {
   interface CapCase {
     name: string
     available: number | null
@@ -203,7 +203,7 @@ describe('tabStripLayout — 폭 상한(닫기 모드의 고정 폭) · 보임�
   }
   const CAP_CASES: CapCase[] = [
     {
-      name: '상한이 좁으면 폭은 상한으로 · 보임은 잰 폭 135 로(상한 80 으로 재면 둘째부터 숨는다)',
+      name: 'if the cap is narrow the width is the cap · visibility by the measured width 135 (measured with cap 80 the second onward would hide)',
       available: 135,
       n: 5,
       active: 0,
@@ -211,9 +211,9 @@ describe('tabStripLayout — 폭 상한(닫기 모드의 고정 폭) · 보임�
       widths: [A, I, I, I, I],
       visible: [T, T, T, F, F],
     },
-    { name: '닫기 모드 재현 — 고정 103 · 머리 넷', available: 135, n: 4, active: 0, cap: 103, widths: [A, I, I, I], visible: [T, T, T, F] },
-    { name: '닫기 모드 재현 — 고정 71 · 머리 둘', available: 135, n: 2, active: 0, cap: 71, widths: [A, I], visible: [T, T] },
-    { name: '재지 못함 + 상한 — 폭은 상한으로 · 숨김 없음', available: null, n: 3, active: 0, cap: 200, widths: [67, 67, 66], visible: [T, T, T] },
+    { name: 'closing mode reproduction — frozen 103 · four heads', available: 135, n: 4, active: 0, cap: 103, widths: [A, I, I, I], visible: [T, T, T, F] },
+    { name: 'closing mode reproduction — frozen 71 · two heads', available: 135, n: 2, active: 0, cap: 71, widths: [A, I], visible: [T, T] },
+    { name: 'unmeasurable + cap — width is the cap · no hiding', available: null, n: 3, active: 0, cap: 200, widths: [67, 67, 66], visible: [T, T, T] },
   ]
   for (const c of CAP_CASES) {
     it(c.name, () => {
@@ -221,13 +221,13 @@ describe('tabStripLayout — 폭 상한(닫기 모드의 고정 폭) · 보임�
     })
   }
 
-  it('상한이 잰 폭 이상 · null · 유한하지 않으면 상한 없음과 같다', () => {
+  it('if the cap is at least the measured width · null · non-finite it equals no cap', () => {
     for (const cap of [400, 1000, null, undefined, Number.NaN]) {
       expect(tabStripLayout(400, 3, 2, cap)).toEqual(tabStripLayout(400, 3, 2))
     }
   })
 
-  it('불변식 — 폭 = min(잰 폭, 상한) 의 폭 · 숨김은 꼬리 · 보이는 머리는 잰 폭 안(머리 1–6 · 폭 0–400 · 상한 0–400 / 7)', () => {
+  it('invariant — width = the width of min(measured width, cap) · hiding is the tail · visible heads within the measured width (heads 1–6 · width 0–400 · cap 0–400 / 7)', () => {
     const bad: string[] = []
     for (let n = 1; n <= 6; n += 1) {
       for (let active = -1; active < n; active += 1) {
@@ -237,9 +237,9 @@ describe('tabStripLayout — 폭 상한(닫기 모드의 고정 폭) · 보임�
             const ref = tabStripLayout(Math.min(available, cap), n, active).widths
             const k = visible.indexOf(false)
             const shown = widths.filter((_, i) => visible[i]).reduce((s, w) => s + w, 0)
-            if (widths.some((w, i) => w !== ref[i])) bad.push(`폭 ${available}/${cap}/${n}/${active}`)
-            if (k >= 0 && visible.slice(k).some(v => v)) bad.push(`꼬리 ${available}/${cap}/${n}/${active}`)
-            if (shown > available) bad.push(`넘침 ${available}/${cap}/${n}/${active}`)
+            if (widths.some((w, i) => w !== ref[i])) bad.push(`width ${available}/${cap}/${n}/${active}`)
+            if (k >= 0 && visible.slice(k).some(v => v)) bad.push(`tail ${available}/${cap}/${n}/${active}`)
+            if (shown > available) bad.push(`overflow ${available}/${cap}/${n}/${active}`)
           }
         }
       }

@@ -1,4 +1,4 @@
-// ADR-0231: drawing rules of the queued-input list — no head line · all open items (including cancel-pending) · 3 + 「외 N개」 (N more; click to expand) ·
+// ADR-0231: drawing rules of the queued-input list — no head line · all open items (including cancel-pending) · 3 + 「N more; click to expand」 ·
 //   full text in tooltip · ✕ on items not yet handed over (a button reachable with Tab) · ✕ locked while waiting for a cancel reply · no ✕ on handed-over items and
 //   on items whose reply said it could not be removed ·
 //   ✕ only dispatches the command and never hides itself.
@@ -39,13 +39,13 @@ beforeEach(() => dispatchMock.fireAndForget.mockClear())
 afterEach(() => cleanup())
 
 describe('QueuedInputList(ADR-0231)', () => {
-  it('항목이 없으면 아무것도 그리지 않는다', () => {
+  it('draws nothing if there are no items', () => {
     const { container } = render(<QueuedInputList agentId={AGENT} entries={[]} />)
     expect(container.firstChild).toBeNull()
   })
 
   // ADR-0231 · ADR-0235 — ✕ removes the row only after the registry confirms it was removed (it does not hide in advance).
-  it('취소 대기도 그린다 — 답을 기다리는 동안 ✕ 가 잠긴다', () => {
+  it('cancel-pending is also drawn — while waiting for the answer ✕ is locked', () => {
     render(<QueuedInputList agentId={AGENT} entries={[waiting('A'), cancelling('B'), waiting('C')]} />)
     expect(shownIds()).toEqual(['A', 'B', 'C'])
     expect(removeButton('B')?.disabled).toBe(true)
@@ -55,7 +55,7 @@ describe('QueuedInputList(ADR-0231)', () => {
     expect(dispatchMock.fireAndForget).not.toHaveBeenCalled()
   })
 
-  it('못 뺐다는 답이 온 행은 넘긴 행처럼 선다 — 글이 이미 넘어갔으니 ✕ 가 없다', () => {
+  it('a row that got a could-not-remove answer stands like a handed-over row — the text already went over so there is no ✕', () => {
     render(<QueuedInputList agentId={AGENT} entries={[cancelling('B', 'not_removed'), waiting('C')]} />)
     expect(shownIds()).toEqual(['B', 'C'])
     expect(removeButton('B')).toBeNull()
@@ -63,7 +63,7 @@ describe('QueuedInputList(ADR-0231)', () => {
     expect(document.querySelector('[data-queued-input="B"]')?.getAttribute('data-queued-state')).toBe('sent')
   })
 
-  it('넘긴 행은 ✕ 가 없다 — 취소 대기였어도(✕ 가 넘기기와 겹쳤다) 「보냄」으로 선다', () => {
+  it('a handed-over row has no ✕ — even if it was cancel-pending (✕ overlapped the handover) it stands as 「sent」', () => {
     render(
       <QueuedInputList
         agentId={AGENT}
@@ -78,20 +78,20 @@ describe('QueuedInputList(ADR-0231)', () => {
     expect(screen.getAllByRole('button', { name: t('chat.queuedRemove') })).toHaveLength(1)
   })
 
-  it('머리줄이 없다 — 항목 줄과 ✕ 말고 다른 글이 없다', () => {
+  it('there is no head line — apart from item lines and ✕ there is no other text', () => {
     render(<QueuedInputList agentId={AGENT} entries={[waiting('A', 'hello')]} />)
     const list = document.querySelector('[data-queued-inputs="1"]') as HTMLElement
     expect(list.textContent).toBe('hello')
     expect(list.querySelector('h1,h2,h3,h4,h5,h6,header')).toBeNull()
   })
 
-  it('3개까지는 접지 않는다', () => {
+  it('up to 3 are not folded', () => {
     render(<QueuedInputList agentId={AGENT} entries={[waiting('A'), waiting('B'), waiting('C')]} />)
     expect(shownIds()).toEqual(['A', 'B', 'C'])
     expect(moreButton()).toBeNull()
   })
 
-  it('3개를 넘으면 가장 오래된 3개 + 「외 N개」 — 누르면 펼친다', () => {
+  it('over 3 shows the oldest 3 + 「N more」 — pressing expands', () => {
     const entries = ['A', 'B', 'C', 'D', 'E'].map((id) => waiting(id))
     render(<QueuedInputList agentId={AGENT} entries={entries} />)
     expect(shownIds()).toEqual(['A', 'B', 'C'])
@@ -102,7 +102,7 @@ describe('QueuedInputList(ADR-0231)', () => {
     expect(moreButton()).toBeNull()
   })
 
-  it('접힘 모양은 props 기본값으로 조정한다(개수 · 보이는 쪽 · 처음부터 펼침)', () => {
+  it('the folded shape is adjusted by prop defaults (count · visible side · expanded from the start)', () => {
     const entries = ['A', 'B', 'C', 'D'].map((id) => waiting(id))
     render(<QueuedInputList agentId={AGENT} entries={entries} collapsedCount={1} collapsedSide="newest" />)
     expect(shownIds()).toEqual(['D'])
@@ -112,7 +112,7 @@ describe('QueuedInputList(ADR-0231)', () => {
     expect(shownIds()).toEqual(['A', 'B', 'C', 'D'])
   })
 
-  it('한 줄로 잘리고 툴팁에 전문이 실린다', () => {
+  it('cut to one line and the full text goes in the tooltip', () => {
     const long = '아주 긴 글 '.repeat(40)
     render(<QueuedInputList agentId={AGENT} entries={[waiting('A', long)]} />)
     const text = document.querySelector('[data-queued-input="A"] span') as HTMLElement
@@ -121,7 +121,7 @@ describe('QueuedInputList(ADR-0231)', () => {
     expect(text.getAttribute('title')).toBe(long)
   })
 
-  it('✕ 는 모든 항목에 있고, Tab 으로 닿는 버튼이며 툴팁은 「목록에서 빼기」', () => {
+  it('✕ is on every item, is a button reached by Tab, and the tooltip is 「remove from list」', () => {
     render(<QueuedInputList agentId={AGENT} entries={[waiting('A'), waiting('B')]} />)
     const buttons = screen.getAllByRole('button', { name: t('chat.queuedRemove') })
     expect(buttons).toHaveLength(2)
@@ -132,7 +132,7 @@ describe('QueuedInputList(ADR-0231)', () => {
     }
   })
 
-  it('✕ 는 inputId 와 함께 agent.cancelQueuedInput 을 디스패치할 뿐 스스로 감추지 않는다', () => {
+  it('✕ only dispatches agent.cancelQueuedInput with inputId and does not hide itself', () => {
     render(<QueuedInputList agentId={AGENT} entries={[waiting('A'), waiting('B')]} />)
     fireEvent.click(screen.getAllByRole('button', { name: t('chat.queuedRemove') })[1])
     expect(dispatchMock.fireAndForget).toHaveBeenCalledTimes(1)
@@ -144,7 +144,7 @@ describe('QueuedInputList(ADR-0231)', () => {
   })
 
   // ADR-0237: even if the pressed button locks or disappears, focus does not drop to the document — the area's Esc must reach the area root.
-  it('✕ · 「외 N개」 를 누르면 버튼이 쥔 포커스가 칸 컨테이너(tabindex -1)로 옮겨 간다', () => {
+  it('pressing ✕ · 「N more」 moves the focus the button held to the area container (tabindex -1)', () => {
     const entries = ['A', 'B', 'C', 'D'].map((id) => waiting(id))
     render(
       <div data-testid="slot" tabIndex={-1}>

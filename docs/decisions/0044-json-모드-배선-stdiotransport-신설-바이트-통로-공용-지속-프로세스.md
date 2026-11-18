@@ -25,7 +25,7 @@ The strategy "**mode = swapping the transport; the channel stays unrefined to th
 - **Measurement spike (2026-07-02):** claude 2.1.170 `--help` — both `--output-format`/`--input-format` state "only works with --print". `--input-format stream-json` = multi-turn on a persistent process via stdin JSON lines (official headless docs: "without relaunching the claude binary"). The `--replay-user-messages` input-echo flag exists.
 - **Backend seam mapping:** keeping the channel dumb shrinks the change to assembly (SEAM 1) · caps (SEAM 5) · renderer branching (SEAM 10) + the new StdioTransport — in contrast to the typed wire option (all of SEAM 1~10).
 - **Lab verification:** the `src/lab/richslot/` parser (`parse.ts`) and 5 layouts already work with a measured fixture (stream-json capture) — proving the frontend can own parsing.
-- User approval: "일단 이 배선으로 ㄱ" (the 2026-07-02 session).
+- User approval: 「일단 이 배선으로 ㄱ」 ("let's go with this wiring for now") (the 2026-07-02 session).
 
 ## 영향 / 불변식
 - **The channel stays unrefined (invariant)** — `OutputCore` · codec · daemon · frontend transport do not interpret the byte content even in JSON mode. JSON knowledge exists only on the producing side (claude), the wrapping side (`backend/claude.rs`), and the drawing side (the RichSlot parser). If violated (inserting JSON parsing into the channel), the swappable principle (ADR-0002) and seam isolation break. **(→ amended by ADR-0045: 'the channel stays unrefined' now applies only to the transport layer. OutputCore/buffer/codec/daemon carry the typed `OutputEvent` as a payload-generic, and parsing is owned by `backend/claude.rs` (the frontend RichSlot parser is removed). The swappable principle is kept through payload polymorphism.)**

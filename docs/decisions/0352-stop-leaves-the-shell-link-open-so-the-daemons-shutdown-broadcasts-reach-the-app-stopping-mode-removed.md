@@ -1,7 +1,7 @@
 # ADR-0352: Stop leaves the shell link open so the daemon's shutdown broadcasts reach the app; stopping mode removed
 
-- 상태: 확정 (2026-11-10, 근거: 사용자 결정 2026-11-10 「일단 땜질은 버리고」 · 「연결 안되는건 그냥 다시 연결하면 되잖아. 데이터적으로 중요한 문제 없으면 상관이없을것같은데」 + 회귀 관찰(트레이 데몬 끄기 뒤 에이전트 트리가 실행 중으로 남음))
-- 관련: Amends ADR-0350 (결정 3의 stopping mode) · ADR-0021 (reconnect loop stays attach-only) · ADR-0026 (app exit stop) · `src-tauri/src/daemon_client/shutdown.rs` · `src-tauri/src/daemon_client/connection.rs` · `crates/engram-dashboard-daemon/src/link/server.rs`
+- 상태: 확정 (2026-11-10, basis: user decision 2026-11-10 「일단 땜질은 버리고」 · 「연결 안되는건 그냥 다시 연결하면 되잖아. 데이터적으로 중요한 문제 없으면 상관이없을것같은데」 + regression observation (after the tray stops the daemon, the agent tree stays as running))
+- 관련: Amends ADR-0350 (the stopping mode of decision 3) · ADR-0021 (reconnect loop stays attach-only) · ADR-0026 (app exit stop) · `src-tauri/src/daemon_client/shutdown.rs` · `src-tauri/src/daemon_client/connection.rs` · `crates/engram-dashboard-daemon/src/link/server.rs`
 
 ## 맥락
 ADR-0350 decision 3 made the shell's stop close its own link first and hold a "stopping mode" for the flight: no redials, attach-only `ensure` answering not-connected, explicit connect and tray 「데몬 켜기」 waiting the flight out, and routing holding the shown band. Landed in 3-2 U5a (`b85c0aaa`).

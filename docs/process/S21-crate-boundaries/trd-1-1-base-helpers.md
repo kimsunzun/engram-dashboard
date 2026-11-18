@@ -154,7 +154,7 @@
 | transport `clock.rs:20` `Clock` | `now()` + `sleep -> BoxFuture<'static, ()>` | `Send + Sync + 'static` · `Arc<dyn Clock>` | `SystemClock` (tokio sleep) | `testing::ManualClock` (:99 — wakes the sleepers in deadline order · oneshot) |
 | daemon `usage_service/clock.rs:9` `UsageClock` | `mono() -> Duration` (holds the origin) + `wall() -> i64` (signed epoch seconds) | `Send + Sync + 'static` | `OsUsageClock` | `ManualUsageClock` (pushes the two axes separately) · `usage_service/mod.rs:1251` · `schedule.rs:370` |
 | ★agent `backend/claude/leftover.rs:953` `LeftoverClock`★ | `mono_now() -> Instant` + blocking `sleep` + thread `spawn` | `Send + Sync` · `pub(super)` | `SystemClock` (:961) | `FakeClock` (:4664 — atomic integer · sleep pushes it) · `SkipClock` (:6586 — **real time** + the skipped share) |
-| ★agent `backend/codex/thread_lock.rs:261` `CaptureClock`★ | `child_alive()` + blocking `sleep` — **there is no now-read (지금 읽기)** | none | `ChildClock` | `FakeClock` (:895) |
+| ★agent `backend/codex/thread_lock.rs:261` `CaptureClock`★ | `child_alive()` + blocking `sleep` — **there is no now-read** | none | `ChildClock` | `FakeClock` (:895) |
 
 - `LeftoverClock` is the 「지금 읽기」 seam — the fifth one that ADR-0269 decision 3 did not count. `mono_now` is called at 22 sites (`rg -n "mono_now\(" crates/engram-dashboard-agent/src | wc -l`). 「★문 자물쇠 안에서도 부른다★ — 다른 자물쇠를 잡거나 기다리지 않는다」 is baked into that contract (:954) — it is the same as the leftover cleanup clause of the CLAUDE.md 「핵심 불변식」 lock order. → **Decision C2=(a)** — merge in supertrait form (U6).
 - `CaptureClock` does not read time — there is nothing to merge (worker judgment, not a question).
@@ -237,7 +237,7 @@
 
 - The 「9개 파일(agent 7 · daemon 2)」 in ADR-0269 is right — it is the first nine of the 11 copies above.
 - **Five variants with a different contract (proposed to stay in place):** agent `platform/windows.rs:746` (returns `Option<T>` · panics after 10 s) · `transport/input_queue.rs:620` (5 s · panic) · `backend/codex/mod.rs:1251` (60 s · before panicking, writes first to stderr, which does not go through capture — the measured reason is in the comment) · daemon `usage_service/mod.rs:1417` (cap `BOUND` · panic) · agent `usage/process.rs:1056` `eventually` (5 s · panic). They are a label + panic + each one's own polling (5 ms etc.), so folding them into `assert!(wait_until(..), "{what}")` would change the polling.
-- **Feature flag precedents:** `test-support` (command · transport — opens the harness helper module (하네스 도우미 모듈을 연다)) · `test-harness` (agent · daemon · messaging — opens a seam inside operational code (운영 코드 안의 seam 을 연다)). Both are turned on only as a dev-dependency, and the workspace is `resolver = "2"` (`Cargo.toml:9`), so features from the dev graph are not merged into operational builds. → **Decision N1=(b)** — base means the same thing, so `test-support`.
+- **Feature flag precedents:** `test-support` (command · transport — opens the harness helper module) · `test-harness` (agent · daemon · messaging — opens a seam inside operational code). Both are turned on only as a dev-dependency, and the workspace is `resolver = "2"` (`Cargo.toml:9`), so features from the dev graph are not merged into operational builds. → **Decision N1=(b)** — base means the same thing, so `test-support`.
 - **Command to check the operational graph (measured — base has no features now, so only `feature "default"` appears):** `cargo tree --locked -p engram-dashboard-daemon -e normal,features -i engram-dashboard-base --target all`. Running `-e normal,dev,features -p engram-dashboard-agent -i engram-dashboard-command` in the same form shows `feature "test-support"` only on the dev side (measured — the existing precedents split that way).
 
 ---
@@ -352,7 +352,7 @@ pub fn wait_until(timeout: Duration, cond: impl FnMut() -> bool) -> bool
 
 ---
 
-## 4. Decisions (결정) (2026-10-04)
+## 4. Decisions (2026-10-04)
 
 > **Source (common to all eleven): user delegation (2026-10-04 「알아서 진행해」) → recommendation adopted.** We picked the worker recommendations of edition 4 §4 as they were — after cross-checking following the delegation, all eleven are the same text as the edition-4 recommendations. The parts that conflict with the confirmed ADR-0269 are amended in ADR-0275 (§4-2). The rejected options are material for ADR-0275 「거부한 대안」. The long per-option discussion was in edition 4 (before commit); this edition carries only the conclusions.
 
@@ -417,7 +417,7 @@ pub fn wait_until(timeout: Duration, cond: impl FnMut() -> bool) -> bool
 - Rejected (b) `normalize_typed_path` — the target shows in the name, but it conflicts with the wording of the two ADRs.
 - Rejected (c) `tidy_typed_path` — same.
 
-**Consequences of the tied items (묶인 것의 귀결):** C5=(b) · T1=(b) → transport does not depend on base, and only `ws.rs` changes to std (no G3). C1=(a) · C4=(a) → base `ManualClock` is an atomic-integer form that satisfies `Send + Sync`. S2=(e) → shell `output_channel.rs` stays in place and no disposition of the mixed locks is needed · 7 in-place sites instead of an exclusion rule (§3-5).
+**Consequences of the tied items:** C5=(b) · T1=(b) → transport does not depend on base, and only `ws.rs` changes to std (no G3). C1=(a) · C4=(a) → base `ManualClock` is an atomic-integer form that satisfies `Send + Sync`. S2=(e) → shell `output_channel.rs` stays in place and no disposition of the mixed locks is needed · 7 in-place sites instead of an exclusion rule (§3-5).
 
 ### 4-2. Amendments written into ADR-0275 (Amends ADR-0269 · ADR-0268)
 

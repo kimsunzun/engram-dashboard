@@ -1,7 +1,7 @@
 # ADR-0340: Full regression runs locally before commit, CI is a post-push check
 
-- 상태: 확정 (2026-11-03, 근거: 사용자 결정 2026-11-02 + doc review full 3 rounds on the qa binding batch)
-- 관련: Amends ADR-0131 (영향 로컬/CI 분담의 전체 회귀는 CI) · `.claude/skill-bindings/qa.md` 「전체 회귀 = 로컬」(canonical) · `.claude/skill-bindings/qa-verify.md` 「전체 회귀 — CI 세 잡 로컬 실행」 · CLAUDE.md 「브랜치·커밋」
+- 상태: 확정 (2026-11-03, basis: user decision 2026-11-02 + doc review full 3 rounds on the qa binding batch)
+- 관련: Amends ADR-0131 (the full regression in the impact item on the local/CI split goes to CI) · `.claude/skill-bindings/qa.md` 「전체 회귀 = 로컬」(canonical) · `.claude/skill-bindings/qa-verify.md` 「전체 회귀 — CI 세 잡 로컬 실행」 · CLAUDE.md 「브랜치·커밋」
 
 ## 맥락
 
@@ -20,7 +20,7 @@ The qa binding batch review then flagged that ADR-0131 still said the opposite. 
 
 ## 거부한 대안
 
-- **Keep the ADR-0131 split (full regression = CI)** — the user rejected it directly (2026-11-02, quote above). 약함 · 사용자 직접 기각.
+- **Keep the ADR-0131 split (full regression = CI)** — the user rejected it directly (2026-11-02, quote above). Weak · rejected directly by the user.
 - **Edit the ADR-0131 line in place** — ADR bodies are not rewritten to change a decision. A partial supersede keeps the other ADR-0131 clauses live and leaves a two-way link plus a status stamp.
 
 ## 근거

@@ -30,7 +30,7 @@ afterEach(() => {
 })
 
 describe('clientFactory (daemon-only)', () => {
-  it('getAgentClient → ProtocolClient over Ws(lazy connect 라 명령 전 down)', async () => {
+  it('getAgentClient → ProtocolClient over Ws (lazy connect, so down before a command)', async () => {
     const factory = await import('./clientFactory')
     const { ProtocolClient } = await import('./protocolClient')
     const client = factory.getAgentClient()
@@ -38,7 +38,7 @@ describe('clientFactory (daemon-only)', () => {
     expect(client.connectionState).toBe('down')
   })
 
-  it('getAgentClient 는 싱글톤(두 번 호출 동일 인스턴스) + window.__ENGRAM_AGENT__ 노출', async () => {
+  it('getAgentClient is a singleton (two calls give the same instance) + exposes window.__ENGRAM_AGENT__', async () => {
     const factory = await import('./clientFactory')
     const a = factory.getAgentClient()
     const b = factory.getAgentClient()
@@ -46,7 +46,7 @@ describe('clientFactory (daemon-only)', () => {
     expect((window as Win).__ENGRAM_AGENT__).toBe(a)
   })
 
-  it('인스턴스화만으로 invoke(discover) 호출 안 함 — lazy connect', async () => {
+  it('instantiation alone does not call invoke(discover) — lazy connect', async () => {
     const core = await import('@tauri-apps/api/core')
     const factory = await import('./clientFactory')
     const client = factory.getAgentClient()
@@ -55,7 +55,7 @@ describe('clientFactory (daemon-only)', () => {
   })
 
   // ── ADR-0021: DaemonControl exposure (always the real implementation) ──────────────────────────────────
-  it('getDaemonControl → DaemonDaemonControl(실제) + window.__ENGRAM_DAEMON__ 노출', async () => {
+  it('getDaemonControl → DaemonDaemonControl (real) + exposes window.__ENGRAM_DAEMON__', async () => {
     const factory = await import('./clientFactory')
     const { DaemonDaemonControl } = await import('./daemonControl')
     const ctrl = factory.getDaemonControl()

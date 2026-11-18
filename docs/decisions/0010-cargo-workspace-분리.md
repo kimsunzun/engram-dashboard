@@ -1,7 +1,7 @@
 # ADR-0010: Split into a 3-crate Cargo workspace
 
 - 상태: 확정 (S12 phase 1)
-- 관련: CLAUDE.md 백엔드 모듈 맵·빌드 명령 · root `Cargo.toml`
+- 관련: CLAUDE.md backend module map·build commands · root `Cargo.toml`
 
 ## 맥락
 To daemonize (S12), the core logic must not be tied to `src-tauri` (= the tauri bin). The daemon server bin must depend only on the core, without tauri.

@@ -74,7 +74,7 @@ export const bandsGolden = JSON.parse(goldenSource) as BandsGolden
 /** One golden window → input of `windowBands` (counterpart of shell golden `Eval::new`). */
 export function bandsInputOf(c: GoldenBandsCase): BandsInput {
   const incoming = parseShape(c.shape)
-  if (incoming === null) throw new Error(`${c.name}: 모양 ${c.shape} 이 읽히지 않는다`)
+  if (incoming === null) throw new Error(`${c.name}: shape ${c.shape} cannot be read`)
   return {
     canvas: c.canvas,
     layout: c.layout,
@@ -92,6 +92,6 @@ export function goldenAnchor(a: DropAnchor): string {
 
 export function goldenCase(name: string): GoldenBandsCase {
   const c = bandsGolden.bands.find(b => b.name === name)
-  if (c === undefined) throw new Error(`골든에 창 「${name}」 이 없다`)
+  if (c === undefined) throw new Error(`golden has no window 「${name}」`)
   return c
 }

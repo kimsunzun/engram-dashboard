@@ -1,5 +1,5 @@
 // Wait indicator row test — an always-present fixed-height row · the indicator only while streaming · identity of elapsed seconds (user decision 2026-10-01 ·
-//   ADR-0244 「중단하는 중」 (interrupting)).
+//   ADR-0244 「interrupting」).
 
 import { act, cleanup, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -14,8 +14,8 @@ afterEach(() => {
 
 const strip = (c: HTMLElement) => c.querySelector('[data-wait-strip="1"]') as HTMLElement
 
-describe('WaitStrip — 자리', () => {
-  it('streaming 이 아니어도 줄은 서 있고 비어 있다 — 높이는 변수 하나로 고정', () => {
+describe('WaitStrip — place', () => {
+  it('even when not streaming the line stands and is empty — the height is fixed by one variable', () => {
     const { container, rerender } = render(<WaitStrip streaming={false} interrupting={false} />)
     const node = strip(container)
     expect(node).not.toBeNull()
@@ -32,7 +32,7 @@ describe('WaitStrip — 자리', () => {
     expect(node.childElementCount).toBe(0)
   })
 
-  it('라벨은 오른쪽 칸 — 대기 글 뒤에 서고, 대기 표시가 켜지고 꺼져도 같은 노드다', () => {
+  it('the label is the right cell — it stands after the waiting text, and is the same node even when the waiting indicator turns on and off', () => {
     const label = <span data-test-label="1">agent</span>
     const { container, rerender } = render(<WaitStrip streaming={false} interrupting={false} label={label} />)
     const node = container.querySelector('[data-test-label="1"]') as HTMLElement
@@ -47,9 +47,9 @@ describe('WaitStrip — 자리', () => {
   })
 })
 
-// ── ADR-0244: 「중단하는 중」 (interrupting) after sending an interrupt ──────────────────────────────────────
-describe('WaitStrip — 중단하는 중(ADR-0244)', () => {
-  it('interrupting 이면 Wait 대신 CircleStop + 「중단하는 중…」 을 그린다', () => {
+// ── ADR-0244: 「interrupting」 after sending an interrupt ──────────────────────────────────────
+describe('WaitStrip — interrupting (ADR-0244)', () => {
+  it('if interrupting it draws CircleStop + 「interrupting…」 instead of Wait', () => {
     const { container } = render(<WaitStrip streaming interrupting />)
     const row = container.querySelector('[data-wait-interrupting="1"]') as HTMLElement
     expect(row).not.toBeNull()
@@ -58,15 +58,15 @@ describe('WaitStrip — 중단하는 중(ADR-0244)', () => {
     expect(screen.queryByText(t('chat.wait'))).toBeNull()
   })
 
-  it('streaming 이 아니면 interrupting 이어도 아무것도 그리지 않는다', () => {
+  it('if not streaming it draws nothing even if interrupting', () => {
     const { container } = render(<WaitStrip streaming={false} interrupting />)
     expect(container.querySelector('[data-wait-interrupting="1"]')).toBeNull()
     expect(screen.queryByText(t('chat.interrupting'))).toBeNull()
   })
 })
 
-describe('WaitStrip — 경과 초', () => {
-  it('중단하는 중을 오가도 다시 마운트되지 않는다 — 경과 초가 이어진다', () => {
+describe('WaitStrip — elapsed seconds', () => {
+  it('it is not remounted when moving in and out of interrupting — the elapsed seconds continue', () => {
     vi.useFakeTimers()
     const { rerender } = render(<WaitStrip streaming interrupting={false} />)
     act(() => vi.advanceTimersByTime(3000))
@@ -79,7 +79,7 @@ describe('WaitStrip — 경과 초', () => {
     expect(screen.getByText('5s')).toBeTruthy()
   })
 
-  it('streaming 이 꺼졌다 다시 켜지면(새 턴) 0 부터 센다', () => {
+  it('if streaming goes off and on again (a new turn) it counts from 0', () => {
     vi.useFakeTimers()
     const { rerender } = render(<WaitStrip streaming interrupting={false} />)
     act(() => vi.advanceTimersByTime(4000))

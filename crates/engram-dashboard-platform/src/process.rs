@@ -1,28 +1,25 @@
-//! PID liveness · process start time (creation time) query and its three outcomes (known, gone, unreadable) ·
-//! one process table (pid, ppid) · child PID enumeration · the list of identities of live processes under one root ([`subtree`]) ·
-//! killing one process tree ([`kill_tree`]) · whether one identity is still running ([`presence`]) and ending it only if it is
-//! ([`terminate_if_same`]).
+//! PID liveness · process start time (creation time) query and its three outcomes (known, gone, unreadable) · one process table (pid,
+//!   ppid) · child PID enumeration · identities of live processes under one root
+//! ([`subtree`]) · killing one process tree ([`kill_tree`]) · whether one identity is still running ([`presence`]) and ending it only if
+//!   it is ([`terminate_if_same`]).
 //!
-//! The place that decides "is that PID still that process" exists in several crates — e.g. `daemon` (stale
-//! decision for the portfile) · the shell (daemon discovery in the `discovery` module) · `daemon` (records its own start time in daemon.json) · `agent` (identity
-//! decision for the codex child). All of them look at this module instead of keeping a copy of the decision logic — the source of truth for the callers is
-//! `rg "engram_dashboard_platform::process" crates src-tauri`. ★Do not move it back into the agent runtime★ — consumers
-//! outside the agent would end up depending on the whole runtime because of these functions (the state ADR-0175 §Context measured).
+//! "Is that PID still that process" is decided in several crates (`daemon` portfile stale decision and its own start time in daemon.json,
+//!   the shell's `discovery`, `agent`'s codex child identity); all look here instead of keeping a copy
+//! — callers: `rg "engram_dashboard_platform::process" crates src-tauri`. ★Do not move it back into the agent runtime★ — consumers outside
+//!   agent would depend on the whole runtime (the state ADR-0175 §Context measured).
 //!
-//! ★Why look at creation time too★: the OS reuses PIDs. If the daemon dies and another
-//! process gets the same PID, "PID alive" alone gives a false-live (a wrong process mistaken for the daemon).
-//! So it decides with "PID alive AND the PID's current creation time == the recorded value", which
+//! ★Why creation time too★: the OS reuses PIDs; if the daemon dies and another process gets its PID, "PID alive" alone is a false-live. So
+//!   the decision is "PID alive AND its current creation time == the recorded value", which
 //! tells PID reuse apart directly.
 
 // ADR-0266
 
-/// The result of asking one PID's start time — 「못 읽었다」 (could not read) is not lumped into a single branch.
-///
-/// - `Known` = the creation time of the process with that PID. The scale is the same as [`process_creation_time`]. ★Even if it has ended, if someone still holds that
-///   handle (the process object remains) it is `Known`★ — it does not mean 「살아 있다」 (alive).
-/// - `Gone` = there is no process object with that number now (only when the open failure is 87).
-/// - `Unknown` = we do not know whether it exists — it could not be opened for lack of rights or another reason, or the time query failed.
-///   PID 0 and an OS without this means also land here.
+/// The result of asking one PID's start time — "could not read" is not lumped into one branch.
+/// - `Known` = the creation time of the process with that PID (scale of [`process_creation_time`]). ★Even if it ended, while someone holds
+///   the handle (the process object remains) it is `Known`★ — not "alive".
+/// - `Gone` = no process object with that number now (only when the open failure is 87).
+/// - `Unknown` = existence unknown — could not open (rights or other reason) or the time query failed; PID 0 and an OS without this means
+///   land here too.
 // ADR-0257
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessStart {
@@ -31,7 +28,7 @@ pub enum ProcessStart {
     Unknown,
 }
 
-/// `Gone` stands only on a certain absence signal — the decision of the open failure is the same single one as in `pid_alive` (only 87 is absence).
+/// `Gone` stands only on a certain absence signal — the same single open-failure decision as `pid_alive` (only 87 is absence).
 // ADR-0257
 #[cfg(windows)]
 pub fn process_start(pid: u32) -> ProcessStart {
@@ -40,7 +37,7 @@ pub fn process_start(pid: u32) -> ProcessStart {
         GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     };
 
-    // The System Idle Process is alive but `OpenProcess` fails with 87, the same as absence — opening it would read as `Gone`.
+    // The System Idle Process is alive but `OpenProcess` fails with 87 like absence — opening it would read as `Gone`.
     if pid == 0 {
         return ProcessStart::Unknown;
     }
@@ -70,8 +67,8 @@ pub fn process_start(pid: u32) -> ProcessStart {
     ProcessStart::Known(((creation.dwHighDateTime as u64) << 32) | (creation.dwLowDateTime as u64))
 }
 
-/// u64 = the high/low 32 bits of GetProcessTimes lpCreationTime (FILETIME — count of 100-nanosecond intervals since 1601-01-01 UTC)
-/// joined into one value. Invariant for the same process, different for a reused PID.
+/// u64 = the high/low 32 bits of GetProcessTimes lpCreationTime (FILETIME — 100 ns intervals since 1601-01-01 UTC) joined. Invariant for
+///   one process, different for a reused PID.
 pub fn process_creation_time(pid: u32) -> Option<u64> {
     match process_start(pid) {
         ProcessStart::Known(start) => Some(start),
@@ -85,32 +82,26 @@ pub fn current_process_start_time() -> Option<u64> {
     process_creation_time(std::process::id())
 }
 
-/// A windows-rs `OpenProcess` failure is a `windows::core::Error`, and its `.code().0` is
-/// an HRESULT wrapped by `HRESULT_FROM_WIN32` (e.g. INVALID_PARAMETER=0x80070057,
-/// ACCESS_DENIED=0x80070005). The low 16 bits of a FACILITY_WIN32 (0x7) HRESULT are the original win32
-/// code, so it is recovered with `hr & 0xFFFF`. (If the facility is not win32 a meaningless value comes out, but
-/// OpenProcess failures are in practice win32 facility, so the caller's classification absorbs it into the conservative default.)
+/// A windows-rs `OpenProcess` failure is a `windows::core::Error` whose `.code().0` is an `HRESULT_FROM_WIN32` HRESULT
+///   (INVALID_PARAMETER=0x80070057, ACCESS_DENIED=0x80070005); the low 16 bits of a FACILITY_WIN32 (0x7)
+/// HRESULT are the win32 code, recovered with `hr & 0xFFFF` (a non-win32 facility gives a meaningless value, but OpenProcess failures are
+///   win32 in practice and the caller's classification absorbs it into the conservative default).
 #[cfg(windows)]
 fn win32_from_hresult(hr: i32) -> u32 {
     (hr as u32) & 0xFFFF
 }
 
-/// ★Why branch per code (false-live bug context)★: previously every OpenProcess failure was
-/// treated as live (`Err(_) => true`). As a result "no such process" (ERROR_INVALID_PARAMETER) was also
-/// misjudged as alive → the app tried to attach to a dead daemon and got stuck on 'reconnecting' (actually happened in the previous session). Absence and lack of rights
-/// must be told apart:
-///   - ERROR_INVALID_PARAMETER(87) = there is no process with that PID at all → dead(false).
-///   - ERROR_ACCESS_DENIED(5) = the process exists but we lack the right to open it → live(true).
-///   - any other failure = cause unknown → conservatively live(true) (safer than a false alarm: judging a live process
-///     dead would throw away a perfectly good daemon).
-///
-/// ★Why absence is narrowed to 87 alone (intentional asymmetry)★: there is no MS documentation guarantee that a dead PID's OpenProcess failure is always 87
-/// (e.g. a just-terminated zombie or a permission boundary may give other codes, ERROR_NOT_FOUND(1168) etc.).
-/// Adding dead codes by guesswork risks misjudging a live daemon as dead (false-dead), so it is narrowed to "only the certain absence
-/// signal (87) is dead, the rest safely live". Absence codes left out remain false-live, but that is only a partial reproduction of the
-/// old bug and creates no new false-dead, and the creation-time comparison in the upper `pid_alive_with_start_time` is a second line of defense,
-/// so it does not reach a permanent deadlock. If measurement confirms more absence codes,
-/// add them then (no adding by guesswork — spec poisoning).
+/// ★Why branch per code (false-live bug)★: every OpenProcess failure used to count as live (`Err(_) => true`), so "no such process"
+///   (ERROR_INVALID_PARAMETER) read as alive → the app tried to attach to a dead daemon and stuck on
+/// 'reconnecting'. Tell absence from lack of rights:
+///   - ERROR_INVALID_PARAMETER(87) = no process with that PID → dead(false).
+///   - ERROR_ACCESS_DENIED(5) = exists but we lack the right to open → live(true).
+///   - any other failure = cause unknown → conservatively live(true) (judging a live daemon dead would throw it away).
+/// ★Absence is narrowed to 87 alone (intentional asymmetry)★: MS does not guarantee a dead PID's OpenProcess failure is always 87 (a
+///   just-terminated zombie or permission boundary may give ERROR_NOT_FOUND(1168) etc.); guessing more
+/// dead codes risks a false-dead. Unlisted absence codes stay false-live — a partial reproduction of the old bug, no new false-dead, and
+///   the creation-time comparison in `pid_alive_with_start_time` is a second defense, so no permanent
+/// deadlock. Add codes only after measurement (no guesswork — spec poisoning).
 #[cfg(windows)]
 fn alive_from_open_error(win32_code: u32) -> bool {
     // Literals identical to the windows crate's ERROR_INVALID_PARAMETER.0 / ERROR_ACCESS_DENIED.0.
@@ -123,7 +114,7 @@ fn alive_from_open_error(win32_code: u32) -> bool {
     }
 }
 
-/// The sibling that ignores creation time — used only as the conservative fallback when start_time is unknown (0).
+/// The sibling that ignores creation time — only the conservative fallback when start_time is unknown (0).
 #[cfg(windows)]
 pub fn pid_alive(pid: u32) -> bool {
     use windows::Win32::Foundation::CloseHandle;
@@ -158,22 +149,19 @@ pub fn pid_alive(pid: u32) -> bool {
 pub enum Presence {
     /// Running: the creation time matches (or none was given) and the exit code is still `STILL_ACTIVE`.
     Alive,
-    /// Not that running process any more: the open failed with 87 (no process with that number), the creation time
-    /// differs from a nonzero `start_time` (the number was reused), or the process has exited although someone still
-    /// holds its object.
+    /// Not that running process any more: open failed with 87, the creation time differs from a nonzero `start_time` (number reused), or
+    ///   the process exited though someone holds its object.
     Gone,
-    /// Cannot tell — any other open failure (access denied · …) or a failed query. ★Never read it as gone★. PID 0 and an
-    /// OS without this means land here too.
+    /// Cannot tell — any other open failure (access denied …) or a failed query. ★Never read it as gone★. PID 0 and an OS without this
+    ///   means land here too.
     Unknown,
 }
 
-/// Is `pid` still the running process born at `start_time` (the scale of [`process_creation_time`]) — decided on **one
-/// handle**: open, creation time, exit code. `start_time == 0` (unknown) skips the creation-time comparison, so only
-/// 87 or the exit code can say gone.
-///
-/// ★An exited process whose object someone still holds is gone here★ — [`process_start`] still reads its creation
-/// time (`Known`). Known residue: a process that exited with code 259 (`STILL_ACTIVE`) reads as running — the OS gives
-/// no other signal on this handle.
+/// Is `pid` still the running process born at `start_time` (scale of [`process_creation_time`]) — decided on **one handle**: open,
+///   creation time, exit code. `start_time == 0` (unknown) skips the creation-time comparison,
+/// so only 87 or the exit code can say gone. ★An exited process whose object someone holds is gone here★ — [`process_start`] still reads
+///   its creation time (`Known`). Known residue: a process that exited with code 259
+/// (`STILL_ACTIVE`) reads as running — the OS gives no other signal on this handle.
 // TRD S21 trd-3-2-u5 R4
 #[cfg(windows)]
 pub fn presence(pid: u32, start_time: u64) -> Presence {
@@ -233,14 +221,11 @@ pub fn presence(pid: u32, start_time: u64) -> Presence {
     answer
 }
 
-/// PID liveness decision (including the start-time comparison). true = alive (the very process we are looking for).
-///
-/// Decision rules (M2 PID-reuse defense) — on [`presence`]:
-///   - pid==0 → death (false). The system idle process cannot be our daemon.
-///   - [`Presence::Alive`] → live · [`Presence::Gone`] → dead — an exited process whose object is still held is dead.
-///   - [`Presence::Unknown`] → live only when expected_start==0 (unknown, old daemon.json compatibility): the creation
-///     time cannot be compared, so **decide conservatively** — do not recklessly label an old file stale. With a nonzero
-///     expected_start an unreadable process is dead.
+/// PID liveness decision (including the start-time comparison). true = alive (the very process we are looking for). Rules (M2 PID-reuse
+///   defense) on [`presence`]: pid==0 → dead (the idle process cannot be our daemon);
+/// [`Presence::Alive`] → live; [`Presence::Gone`] → dead (an exited process whose object is held is dead); [`Presence::Unknown`] → live
+///   only when expected_start==0 (unknown; old daemon.json compatibility —
+/// the creation time cannot be compared, so **decide conservatively**, do not label an old file stale), dead with a nonzero expected_start.
 #[cfg(windows)]
 pub fn pid_alive_with_start_time(pid: u32, expected_start: u64) -> bool {
     if pid == 0 {
@@ -253,13 +238,11 @@ pub fn pid_alive_with_start_time(pid: u32, expected_start: u64) -> bool {
     }
 }
 
-/// ★Why it is needed★: the AgentInfo/WS protocol does not expose the PTY child's PID (by design the hands/brain
-/// are separated — the frontend need not know PIDs). But the real-process isolation test (kill the daemon .exe → the PTY child
-/// dies with it) must confirm by PID "whether the child process the daemon launched actually died". The only way to learn that PID
-/// from outside is enumerating the OS process tree.
-///
-/// best-effort: on a snapshot/walk failure, an empty Vec. The OS sometimes does not update ppid immediately
-/// (when the parent dies ppid may be stale), so it is trusted only for the purpose of "direct children of a live parent".
+/// ★Why it is needed★: the AgentInfo/WS protocol does not expose the PTY child's PID (hands/brain separation), but the real-process
+///   isolation test (kill the daemon .exe → the PTY child dies with it) must confirm by PID that the
+/// launched child died; the only way to learn it from outside is enumerating the OS process tree. best-effort: an empty Vec on
+///   snapshot/walk failure. The OS sometimes does not update ppid at once (stale after the parent dies), so
+/// it is trusted only as "direct children of a live parent".
 pub fn child_pids(parent: u32) -> Vec<u32> {
     if parent == 0 {
         return Vec::new();
@@ -272,10 +255,9 @@ pub fn child_pids(parent: u32) -> Vec<u32> {
         .collect()
 }
 
-/// `(pid, ppid)` of all processes currently running — **one** Toolhelp snapshot.
-///
-/// `None` = the list could not be read to the end (snapshot creation, first entry, an error during the walk that is not 「끝」 (end)). ★It does not return a truncated
-/// list★ — a missing line would read to the caller as 「그 프로세스가 없다」 (that process does not exist). The ppid caveat is the same as for [`child_pids`].
+/// `(pid, ppid)` of all processes currently running — **one** Toolhelp snapshot. `None` = the list could not be read to the end (snapshot
+///   creation, first entry, a walk error that is not "end"). ★It never returns a truncated
+/// list★ — a missing line would read as "that process does not exist". The ppid caveat is as [`child_pids`].
 // ADR-0257
 #[cfg(windows)]
 pub fn process_parent_table() -> Option<Vec<(u32, u32)>> {
@@ -314,8 +296,8 @@ pub fn process_parent_table() -> Option<Vec<(u32, u32)>> {
     table
 }
 
-/// Is a single failure of `Process32NextW` the end of the list. windows-rs wraps that failure as `HRESULT_FROM_WIN32(GetLastError())`
-/// and the end is the single `ERROR_NO_MORE_FILES`(18) — anything else means the list was cut off midway.
+/// Is a single failure of `Process32NextW` the end of the list. windows-rs wraps it as `HRESULT_FROM_WIN32(GetLastError())` and the end is
+///   the single `ERROR_NO_MORE_FILES`(18) — anything else means the list was cut off midway.
 #[cfg(any(windows, test))]
 fn list_ended(hr: i32) -> bool {
     const HRESULT_FROM_ERROR_NO_MORE_FILES: i32 = 0x8007_0012_u32 as i32;
@@ -324,11 +306,10 @@ fn list_ended(hr: i32) -> bool {
 
 // ── identity list under a root ──────────────────────────────────────────────────────────
 
-/// The identity of one process — one process under a root as returned by [`subtree`].
-///
-/// ★The two fields are there to be compared **together**★ — the OS reuses PIDs, so matching on PID alone takes someone else's process
-/// for that process (ADR-0218 decision 2). So this type has no helper that takes out only `pid`.
-/// [`crate::file_holders::Holder`] has the same shape but means 「한 파일을 연 프로세스」 (a process that has a file open), so the two differ — do not merge them.
+/// The identity of one process — one process under a root as returned by [`subtree`]. ★The two fields are compared **together**★ — the OS
+///   reuses PIDs, so a PID-only match takes someone else's process for that one
+/// (ADR-0218 decision 2); this type has no helper taking out only `pid`. [`crate::file_holders::Holder`] has the same shape but means "a
+///   process that has a file open" — do not merge them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProcessIdentity {
     pub pid: u32,
@@ -337,37 +318,26 @@ pub struct ProcessIdentity {
 }
 
 /// The identities of `root` and all **live** descendants under it.
-///
-/// - ★If `root`'s start time differs from `root_start_time`, it is an **empty list**★ — that PID is no longer the
-///   process the caller knows (it died or was reused). Walking without confirming the root's identity would return someone else's process tree
-///   as that root's tree.
-/// - **Descendants' start times are read and filled in now** — because there is no value known beforehand. So the identity returned is always
-///   that of 「이 순간 그 PID 인 프로세스」 (the process that holds that PID at this moment), and even if the PID is reused between enumeration and comparison, the start time differs and
-///   it is filtered out.
-/// - ★**An entry born before its parent is not a descendant — discard it**★. This is the only **semantic** rule of this function.
-///   The ppid in [`child_pids`] stays as it was even after the parent dies (the caveat in that doc). So if the parent that spawned some process
-///   dies and that PID is reused by the root or one of its descendants, the orphan left behind is enumerated as a child of the reused PID.
-///   That orphan was born **before** the reuse — that is, **before** the process that now holds that PID — so this comparison filters all of
-///   that path. The case where the root itself dies and the number passes on again is stopped by the first item (root identity check).
-///   ★The same time (`==`) passes★ — a parent and child started within one FILETIME tick can really exist, and blocking
-///   there would lose a legitimate child. What is blocked is only one **born earlier**.
-/// - ★**There are three cases this rule cannot filter — do not read it as 「닫혀 있다」 (closed)**★ (the caller decides whether to accept them):
-///   1. **PID reuse between enumeration and start-time read** — if the owner of a number `child_pids` gave dies before the read
-///      and the number passes on, the start time read is the new owner's. Enumeration and query are separate syscalls, so there is no means of
-///      fixing it atomically (the window is microseconds).
-///   2. **The same tick (`==`)** — the one passed above.
-///   3. **Explicit parent assignment** — on Windows a process can be created with its parent pinned via `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS`.
-///      Someone else's process born that way can be born **after** the root and still carry the root's PID as ppid, so
-///      it gets past this comparison.
-/// - An entry whose start time cannot be read is **left out, and its subtree is not descended into either** — with half the identity missing the comparison collapses to
-///   PID alone, and using that entry as a parent leaves no basis to apply the order rule above, so that whole branch would be unverified.
-/// - If `root_start_time` is 0 (unknown), it is an empty list. Same reason.
-/// - **best-effort**: if enumeration fails it returns that much less and raises no error — a short list does not confirm 「그 아래에는
-///   없다」 (there is nothing under it).
-/// - ★There is no depth limit — instead **an identity already seen is not descended into again**★. ppid is not updated by the OS
-///   immediately, so shapes that look like cycles can appear, and without a visited mark this function would never finish.
-///   ★The mark's key is the **identity**, not the PID★ — if marked by PID alone, a reused PID would be skipped as 「이미 봤다」 (already seen),
-///   and a **different** process using the same number would go entirely unseen.
+/// - ★If `root`'s start time differs from `root_start_time`, the result is an **empty list**★ — that PID is no longer the process the
+///   caller knows (died or reused); walking without confirming the root would return someone else's tree.
+/// - **Descendants' start times are read now** (no value known beforehand), so the identity returned is always "the process holding that
+///   PID at this moment"; a PID reused between enumeration and comparison differs in start time and is filtered.
+/// - ★**An entry born before its parent is not a descendant — discard it**★ (the only **semantic** rule). The ppid in [`child_pids`] stays
+///   after the parent dies, so if the parent dies and that PID is reused by the root or a descendant,
+///   the orphan is enumerated as a child of the reused PID; it was born **before** the process now holding the PID, so this comparison
+///   filters it. The root itself dying and the number passing on again is stopped by the first item.
+///   ★The same time (`==`) passes★ — a parent and child within one FILETIME tick can really exist; only one **born earlier** is blocked.
+/// - ★**Three cases this rule cannot filter — not "closed"**★ (the caller decides whether to accept them): 1. **PID reuse between
+///   enumeration and start-time read** (separate syscalls, no atomic fix; microsecond window)
+///   2. **the same tick (`==`)** 3. **explicit parent assignment** — `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS` lets someone else's process be
+///   born **after** the root yet carry the root's PID as ppid.
+/// - An entry whose start time cannot be read is **left out and not descended into** — with half the identity missing the comparison
+///   collapses to PID alone and the order rule has no basis, so the branch would be unverified.
+/// - `root_start_time == 0` (unknown) → empty list (same reason). **best-effort**: on enumeration failure it returns less and raises no
+///   error — a short list does not confirm "nothing under it".
+/// - ★No depth limit — **an identity already seen is not descended into again**★: ppid is not updated at once so cycle-looking shapes
+///   appear, and without a visited mark it would never finish. ★The mark's key is the **identity**, not the PID★ —
+///   keyed by PID, a reused PID would be skipped as "already seen" and a **different** process with that number would go unseen.
 pub fn subtree(root: u32, root_start_time: u64) -> Vec<ProcessIdentity> {
     if root == 0 || root_start_time == 0 {
         return Vec::new();
@@ -395,12 +365,10 @@ pub fn subtree(root: u32, root_start_time: u64) -> Vec<ProcessIdentity> {
     )
 }
 
-/// **Only the rules** of [`subtree`] — the OS is behind `children` (ADR-0012). The reasons for the two rules (discard one born before its
-/// parent · do not descend again into an **identity** already seen) are written authoritatively in the doc of [`subtree`] and are not repeated
-/// here.
-///
-/// `children` gives its entries **with those whose identity could not be read already filtered out** — that filtering is outside this rule because
-/// an entry without an identity has no order criterion to apply in the first place.
+/// **Only the rules** of [`subtree`] — the OS is behind `children` (ADR-0012); the reasons for the two rules (discard one born before its
+///   parent, do not descend again into a seen **identity**) are in the [`subtree`] doc.
+/// `children` gives entries **with unreadable identities already filtered out** — an entry without an identity has no order criterion, so
+///   that filtering is outside this rule.
 fn walk(
     root: ProcessIdentity,
     children: &dyn Fn(u32) -> Vec<ProcessIdentity>,
@@ -424,13 +392,11 @@ fn walk(
     out
 }
 
-/// Forcibly ends `pid` and all its descendants — Windows = `taskkill /PID <pid> /F /T`. It only hands off the ending and does not wait.
-/// The exit code of taskkill is not looked at — it answers even for an already-ended process with a non-zero code (128). So
-/// `Ok` means not 「끝났다」 (it ended) but 「taskkill 을 돌렸다」 (taskkill was run).
-///
-/// `Err` = taskkill could not be launched (kind `Other` · the reason is in the message). Outside Windows = `Unsupported` — this
-/// means is absent. ★On Windows `Unsupported` does not occur★ — the caller uses that one kind to tell apart 「이 OS 에서는 못
-/// 한다」 (cannot do this on this OS).
+/// Forcibly ends `pid` and all its descendants — Windows = `taskkill /PID <pid> /F /T`; it only hands off the ending and does not wait.
+///   The taskkill exit code is not looked at (an already-ended process answers non-zero, 128), so
+/// `Ok` means "taskkill was run", not "it ended". `Err` = taskkill could not be launched (kind `Other`, reason in the message). Outside
+///   Windows = `Unsupported` — the caller uses that kind to tell "cannot do this on this OS";
+/// ★on Windows `Unsupported` does not occur★.
 // ADR-0266
 pub fn kill_tree(pid: u32) -> std::io::Result<()> {
     #[cfg(windows)]
@@ -443,7 +409,7 @@ pub fn kill_tree(pid: u32) -> std::io::Result<()> {
         crate::spawn::hide_console_window(&mut cmd);
         cmd.status()
             .map(drop)
-            .map_err(|e| std::io::Error::other(format!("taskkill 실행 실패: {e}")))
+            .map_err(|e| std::io::Error::other(format!("failed to run taskkill: {e}")))
     }
     #[cfg(not(windows))]
     {
@@ -452,13 +418,12 @@ pub fn kill_tree(pid: u32) -> std::io::Result<()> {
     }
 }
 
-/// Ends that PID if it is still the very process born at `start_time` (the process creation FILETIME — the same scale as [`process_creation_time`])
-/// and is still running. The start-time check · liveness check · ending are done through the **same handle** — while the handle is
-/// held that PID does not pass to someone else, so there is no way to kill a wrong process after checking. It does not touch descendants.
-///
-/// `Ok(true)` = the ending was handed off (it does not wait) · `Ok(false)` = it is not that process (absent · start time differs · already
-/// ended) · `Err` = it could not open, read or end (including access denied · ending by itself between the check and the ending) — it was not killed.
-/// Outside Windows = `Err` of kind `Unsupported` — this means is absent ([`kill_tree`] has the same rule).
+/// Ends that PID if it is still the very process born at `start_time` (creation FILETIME, scale of [`process_creation_time`]) and still
+///   running. Start-time check, liveness check and ending go through the **same handle** — while it is
+/// held the PID cannot pass to someone else, so a wrong process cannot be killed after checking. Descendants are not touched. `Ok(true)` =
+///   ending handed off (no wait) · `Ok(false)` = not that process (absent, start time differs,
+/// already ended) · `Err` = could not open, read or end (access denied, ending by itself between check and ending) — not killed. Outside
+///   Windows = `Err` of kind `Unsupported` (as [`kill_tree`]).
 // ADR-0343
 #[cfg(windows)]
 pub fn terminate_if_same(pid: u32, start_time: u64) -> std::io::Result<bool> {
@@ -497,10 +462,10 @@ pub fn terminate_if_same(pid: u32, start_time: u64) -> std::io::Result<bool> {
     let handle = match unsafe { OpenProcess(access, false, pid) } {
         Ok(h) => h,
         Err(e) if e.code() == HRESULT::from_win32(ERROR_INVALID_PARAMETER.0) => return Ok(false),
-        Err(e) => return Err(std::io::Error::other(format!("PID {pid} 열기: {e}"))),
+        Err(e) => return Err(std::io::Error::other(format!("open PID {pid}: {e}"))),
     };
     let outcome = decide(handle, start_time)
-        .map_err(|e| std::io::Error::other(format!("PID {pid} 확인 · 끝내기: {e}")));
+        .map_err(|e| std::io::Error::other(format!("check · end PID {pid}: {e}")));
     // SAFETY: closes the handle opened above, once.
     unsafe {
         let _ = CloseHandle(handle);
@@ -563,10 +528,10 @@ mod tests {
     #[test]
     fn current_process_is_alive_with_matching_start_time() {
         let pid = std::process::id();
-        let start = current_process_start_time().expect("자기 creation time 조회 가능");
-        assert!(start != 0, "creation time 은 0 이 아니어야 함");
-        assert!(pid_alive_with_start_time(pid, start), "자기 자신은 live");
-        assert!(pid_alive(pid), "자기 자신은 OpenProcess 로도 live");
+        let start = current_process_start_time().expect("own creation time can be queried");
+        assert!(start != 0, "creation time must not be 0");
+        assert!(pid_alive_with_start_time(pid, start), "self is live");
+        assert!(pid_alive(pid), "self is live through OpenProcess too");
     }
 
     #[cfg(windows)]
@@ -577,7 +542,7 @@ mod tests {
         let wrong = real.wrapping_add(1);
         assert!(
             !pid_alive_with_start_time(pid, wrong),
-            "creation time 불일치면 dead(PID 재사용 방어)"
+            "dead on creation time mismatch (PID reuse defense)"
         );
     }
 
@@ -613,7 +578,7 @@ mod tests {
         let _ = child.wait();
         assert!(
             found,
-            "spawn 한 자식 PID({child_pid}) 가 child_pids({me}) 에 나타나야"
+            "the spawned child PID ({child_pid}) must appear in child_pids({me})"
         );
     }
 
@@ -622,9 +587,18 @@ mod tests {
     #[test]
     fn only_no_more_files_ends_the_list() {
         assert!(list_ended(0x8007_0012_u32 as i32));
-        assert!(!list_ended(0x8007_0005_u32 as i32), "ACCESS_DENIED = 잘림");
-        assert!(!list_ended(0x8007_0018_u32 as i32), "BAD_LENGTH = 잘림");
-        assert!(!list_ended(0), "GetLastError 가 비어 있던 실패 = 잘림");
+        assert!(
+            !list_ended(0x8007_0005_u32 as i32),
+            "ACCESS_DENIED = truncated"
+        );
+        assert!(
+            !list_ended(0x8007_0018_u32 as i32),
+            "BAD_LENGTH = truncated"
+        );
+        assert!(
+            !list_ended(0),
+            "a failure with an empty GetLastError = truncated"
+        );
     }
 
     #[cfg(windows)]
@@ -654,7 +628,7 @@ mod tests {
 
         let mut found = false;
         for _ in 0..50 {
-            let table = process_parent_table().expect("스냅숏 한 장");
+            let table = process_parent_table().expect("one snapshot");
             if table.contains(&row) {
                 found = true;
                 break;
@@ -663,7 +637,10 @@ mod tests {
         }
         let _ = child.kill();
         let _ = child.wait();
-        assert!(found, "띄운 자식의 줄 {row:?} 이 표에 없다");
+        assert!(
+            found,
+            "the launched child's row {row:?} is not in the table"
+        );
     }
 
     #[cfg(windows)]
@@ -679,7 +656,7 @@ mod tests {
         let pid = child.id();
         // Our handle pins the process object, so it can be read even after it has ended.
         let ProcessStart::Known(start) = process_start(pid) else {
-            panic!("쥔 자식의 시작시각을 못 읽었다");
+            panic!("could not read the held child's start time");
         };
         let _ = child.wait();
         drop(child);
@@ -697,18 +674,18 @@ mod tests {
             ProcessStart::Gone => {}
             // The number has already passed to someone else — the old identity has disappeared all the same (PID reuse cannot be prevented).
             ProcessStart::Known(other) if other != start => {}
-            other => panic!("끝난 PID {pid} 가 {other:?} 로 읽혔다"),
+            other => panic!("ended PID {pid} read as {other:?}"),
         }
     }
 
-    /// TRD S21 trd-3-2-u5 R4: a process that exited while we still hold its object is not alive — its creation time
-    /// still reads, so a creation-time check alone called it live.
+    /// TRD S21 trd-3-2-u5 R4: a process that exited while we still hold its object is not alive — its creation time still reads, so a
+    ///   creation-time check alone called it live.
     #[cfg(windows)]
     #[test]
     fn an_exited_process_whose_object_is_held_is_gone() {
         let mut child = crate::testing::spawn_gated_cmd("rem", 0);
         let pid = child.id();
-        let start = process_creation_time(pid).expect("시작시각");
+        let start = process_creation_time(pid).expect("start time");
         assert_eq!(presence(pid, start), Presence::Alive);
         assert_eq!(presence(pid, 0), Presence::Alive);
         assert!(pid_alive_with_start_time(pid, start));
@@ -747,13 +724,13 @@ mod tests {
         );
     }
 
-    /// It does not kill with an identity whose start time differs and kills only with the same identity — after the ending even the same identity is 「그 프로세스가 아니다」 (not that process).
+    /// A different start time does not kill; only the same identity kills — after the ending even the same identity is "not that process".
     #[cfg(windows)]
     #[test]
     fn terminate_if_same_ends_only_the_matching_identity() {
         let mut child = crate::testing::spawn_gated_cmd("rem", 0);
         let pid = child.id();
-        let start = process_creation_time(pid).expect("시작시각");
+        let start = process_creation_time(pid).expect("start time");
 
         let other = terminate_if_same(pid, start + 1);
         let alive_after_other = pid_alive(pid);
@@ -763,7 +740,10 @@ mod tests {
         let after_exit = terminate_if_same(pid, start);
 
         assert!(matches!(other, Ok(false)), "{other:?}");
-        assert!(alive_after_other, "시작시각이 다른 신원으로 껐다");
+        assert!(
+            alive_after_other,
+            "killed it with an identity whose start time differs"
+        );
         assert!(matches!(same, Ok(true)), "{same:?}");
         assert!(matches!(after_exit, Ok(false)), "{after_exit:?}");
     }
@@ -774,7 +754,7 @@ mod tests {
         let pid = std::process::id();
         assert!(
             pid_alive_with_start_time(pid, 0),
-            "미상이면 PID 생존으로 보수 판정"
+            "if unknown, conservatively decided by PID liveness"
         );
     }
 
@@ -783,10 +763,13 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn alive_from_open_error_classifies_codes() {
-        assert!(!alive_from_open_error(87), "부재 → dead");
-        assert!(alive_from_open_error(5), "권한부족이나 존재 → live");
-        assert!(alive_from_open_error(0), "불명 → 보수적 live");
-        assert!(alive_from_open_error(1234), "불명 → 보수적 live");
+        assert!(!alive_from_open_error(87), "absent → dead");
+        assert!(
+            alive_from_open_error(5),
+            "insufficient permission but exists → live"
+        );
+        assert!(alive_from_open_error(0), "unknown → conservatively live");
+        assert!(alive_from_open_error(1234), "unknown → conservatively live");
     }
 
     #[cfg(windows)]
@@ -819,9 +802,8 @@ mod tests {
 
     // ── order rule (G1) ────────────────────────────────────────────────────────────
 
-    /// ★What this entry protects = 「남의 고아가 재사용된 PID 를 타고 나무에 들어오지 않는다」 (someone else's orphan does not enter the tree riding a reused PID)★.
-    /// That orphan was up **before** the parent that now holds that PID, so its start time is earlier — that is the only
-    /// distinguishing mark.
+    /// ★Protects "someone else's orphan does not enter the tree riding a reused PID"★: that orphan was up **before** the parent now
+    ///   holding the PID, so its earlier start time is the only distinguishing mark.
     #[test]
     fn a_child_that_predates_its_parent_is_not_ours() {
         let stranger = id(777, ROOT.start_time - 1);
@@ -829,7 +811,7 @@ mod tests {
         assert_eq!(
             got,
             vec![ROOT],
-            "부모보다 먼저 태어난 항목이 들어왔다: {got:?}"
+            "an item born before its parent came in: {got:?}"
         );
     }
 
@@ -842,7 +824,11 @@ mod tests {
             ROOT,
             &table(&[(ROOT.pid, vec![stranger]), (stranger.pid, vec![grandchild])]),
         );
-        assert_eq!(got, vec![ROOT], "끊긴 가지 아래가 새 들어왔다: {got:?}");
+        assert_eq!(
+            got,
+            vec![ROOT],
+            "something below a cut branch came in: {got:?}"
+        );
     }
 
     /// A child that came up on the same tick is normal — what is blocked is only one born **earlier**.
@@ -866,7 +852,7 @@ mod tests {
 
     // ── visited mark (G2) ────────────────────────────────────────────────────────────
 
-    /// ★If the mark is keyed by PID, a reused number is skipped as 「이미 봤다」 (already seen) and a **different** process vanishes entirely★.
+    /// ★Keyed by PID, a reused number is skipped as "already seen" and a **different** process vanishes entirely★.
     #[test]
     fn a_recycled_pid_is_a_different_process_not_a_repeat() {
         let first = id(4816, ROOT.start_time + 1);
@@ -877,7 +863,7 @@ mod tests {
         );
         assert!(
             got.contains(&recycled),
-            "같은 번호의 다른 프로세스가 표시에 먹혔다: {got:?}"
+            "another process with the same number was swallowed by the mark: {got:?}"
         );
     }
 
@@ -898,7 +884,7 @@ mod tests {
         assert!(subtree(0, 1).is_empty());
         assert!(
             subtree(std::process::id(), 0).is_empty(),
-            "시작시각 미상이면 남는 것이 PID 단독 대조다"
+            "if the start time is unknown, what remains is a PID-only match"
         );
     }
 
@@ -906,15 +892,15 @@ mod tests {
     #[test]
     fn a_wrong_start_time_disowns_the_root() {
         let me = std::process::id();
-        let start = process_creation_time(me).expect("자기 creation time 조회 가능");
+        let start = process_creation_time(me).expect("own creation time can be queried");
         assert!(
             subtree(me, start.wrapping_add(1)).is_empty(),
-            "시작시각이 어긋난 PID 를 그 뿌리로 봤다"
+            "took a PID with a mismatched start time as that root"
         );
     }
 
-    /// It measures with a real tree (`cmd.exe` → `ping`) that not only the root itself but **descendants enter the list** — if the grandchild
-    /// is not caught it is no better than comparing the root alone.
+    /// Measures with a real tree (`cmd.exe` → `ping`) that **descendants enter the list**, not just the root — a grandchild not caught is
+    ///   no better than comparing the root alone.
     #[cfg(windows)]
     #[test]
     fn the_subtree_reaches_past_the_root() {
@@ -923,9 +909,9 @@ mod tests {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
-            .expect("cmd.exe 기동");
+            .expect("launch cmd.exe");
         let root = child.id();
-        let start = process_creation_time(root).expect("자식 creation time 조회 가능");
+        let start = process_creation_time(root).expect("child creation time can be queried");
 
         // Wait briefly for the grandchild (`ping`) to come up — cmd comes up first and launches it afterward.
         let mut found = Vec::new();
@@ -942,15 +928,15 @@ mod tests {
 
         assert!(
             found.iter().any(|p| p.pid == root),
-            "뿌리 자신이 목록에 없다: {found:?}"
+            "the root itself is not in the list: {found:?}"
         );
         assert!(
             found.len() > 1,
-            "후손이 하나도 안 잡혔다 — 뿌리 PID 만 돌려준 셈이다: {found:?}"
+            "not a single descendant was caught — as if it returned only the root PID: {found:?}"
         );
         assert!(
             found.iter().all(|p| p.start_time != 0),
-            "신원의 절반이 빈 항목이 섞였다: {found:?}"
+            "an item with half of its identity empty is mixed in: {found:?}"
         );
     }
 }

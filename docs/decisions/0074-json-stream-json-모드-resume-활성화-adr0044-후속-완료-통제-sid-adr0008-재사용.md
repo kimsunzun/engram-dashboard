@@ -9,7 +9,7 @@ ADR-0044 left json (stream-json) resume outside the MVP (as a follow-up), fixed 
 
 ## 결정
 
-In json mode too, build_spec splits the session flag by mode, the same as the terminal branch (Fresh→`--session-id`, Resume→`--resume <sid>`), and caps are resume=true for both modes. It reuses the controlled-sid (ADR-0008) infrastructure as is — no new json-specific machinery. The default output_format of the tree's "에이전트 생성" (create agent) is also switched to StreamJson along with this (safe since resume is guaranteed).
+In json mode too, build_spec splits the session flag by mode, the same as the terminal branch (Fresh→`--session-id`, Resume→`--resume <sid>`), and caps are resume=true for both modes. It reuses the controlled-sid (ADR-0008) infrastructure as is — no new json-specific machinery. The default output_format of the tree's "Create agent" is also switched to StreamJson along with this (safe since resume is guaranteed).
 
 ## 거부한 대안
 

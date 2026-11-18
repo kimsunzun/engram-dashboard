@@ -7,18 +7,18 @@ import { minWindowSize } from './metrics'
 
 describe('minWindowSize', () => {
   it.each([
-    ['한 자리(글자 폭 + 양옆 8 이 최소 28 보다 좁다)', 23, 286],
-    ['두 자리', 30.5, 289],
-    ['세 자리', 37, 295],
-  ])('번호 표식 %s — 표식 폭 %s → 폭 %s · 높이 64', (_name, markerW, width) => {
+    ['one digit (text width + 8 on each side is narrower than the minimum 28)', 23, 286],
+    ['two digits', 30.5, 289],
+    ['three digits', 37, 295],
+  ])('number marker %s — marker width %s → width %s · height 64', (_name, markerW, width) => {
     expect(minWindowSize({ leadingInset: 0, markerW, buttons: true })).toEqual({ width, height: 64 })
   })
 
-  it('재지 못한 표식(0 폭)도 최소 28 로 친다', () => {
+  it('an unmeasured marker (0 width) also counts as the minimum 28', () => {
     expect(minWindowSize({ leadingInset: 0, markerW: 0, buttons: true }).width).toBe(286)
   })
 
-  it('대기 모드(표식 · 단추 없음) = 120 · 단추를 OS 가 그리면 단추 몫을 빼고 · 왼 여백은 더한다', () => {
+  it('waiting mode (no marker · button) = 120 · if the OS draws the buttons the button share is subtracted · the left margin is added', () => {
     expect(minWindowSize({ leadingInset: 0, markerW: null, buttons: false })).toEqual({ width: 120, height: 64 })
     expect(minWindowSize({ leadingInset: 0, markerW: 28, buttons: false }).width).toBe(148)
     expect(minWindowSize({ leadingInset: 80, markerW: 28, buttons: true }).width).toBe(366)

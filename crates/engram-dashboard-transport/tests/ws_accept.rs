@@ -1,12 +1,9 @@
 //! Real socket ④ — does the receiving side's accept policy hold in a real upgrade (TRD 3 §5 1 · 2 · 12 · 14 · 15 · 16 · 18 · 3-0 U7).
 //!
-//! ★Only what cannot be measured in memory is placed here★ — the header decision table · the loopback decision · loss in the report queue are measured by the `ws.rs` unit tests without a
-//! socket. What is measured here is whether those decisions hold in a **real HTTP upgrade** (does the 403 reach the peer · does a refusal
-//! come out as a report), whether the deadline really closes the TCP, whether the size cap went into the real tungstenite settings (both directions), whether the permit count is right in the real accept
-//! order, and whether an accepted link put on the registry carries requests both ways.
-//!
-//! ★Part of the dialing side is not this crate's★ — our [`WsDialer`] adds no Origin, does not change Host, and blocks the outgoing
-//! size itself, so the places that build those headers and sizes call `tokio-tungstenite` directly or write to TCP by hand.
+//! ★Only what memory cannot measure lives here★ — the header decision table · loopback decision · report-queue loss are `ws.rs` unit tests. Here: do those decisions hold in a **real HTTP upgrade** (403 reaches the peer ·
+//! a refusal comes out as a report), does the deadline really close the TCP, does the size cap reach the real tungstenite settings (both directions), is the permit count right in real accept order, does an accepted link on
+//! the registry carry requests both ways. ★Part of the dialing side is not this crate's★ — our [`WsDialer`] adds no Origin, keeps Host, and blocks outgoing size itself, so those headers and sizes are built with
+//! `tokio-tungstenite` directly or by hand on TCP.
 #![cfg(all(feature = "ws", feature = "test-support"))]
 
 // This suite does not use the `TestWire` scaffolding (`registry` · `wait_*` · `listen` · `accept_link`) — the other three do.
@@ -37,22 +34,25 @@ use engram_dashboard_transport::{
     RejectKind, StreamMark, SystemClock, Wire,
 };
 
-// ── 발판 ──
+// ── Scaffolding ──
 
 fn bind(policy: AcceptPolicy) -> (WsListener, AcceptRefusals) {
     WsListener::bind(common::loopback(), policy, Arc::new(SystemClock)).expect("bind")
 }
 
-/// The next refusal report. Panics: when [`common::PATIENCE`] is exceeded · when the listener disappears.
 async fn next_refusal(refusals: &mut AcceptRefusals, what: &str) -> AcceptRefusal {
     tokio::time::timeout(common::PATIENCE, refusals.recv())
         .await
-        .unwrap_or_else(|_| panic!("{:?} 안에 {what} 보고가 안 왔다", common::PATIENCE))
-        .unwrap_or_else(|| panic!("{what} 보고 전에 수신단이 끝났다"))
+        .unwrap_or_else(|_| {
+            panic!(
+                "the {what} report did not come within {:?}",
+                common::PATIENCE
+            )
+        })
+        .unwrap_or_else(|| panic!("the inbox ended before the {what} report"))
 }
 
-/// Re-checks briefly until the condition holds — ★used only where waiting for a count that has no notification (permits · ready queue)★. Not used to measure
-/// time (`common` header). Panics: when [`common::PATIENCE`] is exceeded.
+/// Re-checks briefly until the condition holds — ★only where waiting for a count with no notification (permits · ready queue)★; not for measuring time (`common` header). Panics: [`common::PATIENCE`] exceeded.
 async fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
     let waited = tokio::time::timeout(common::PATIENCE, async {
         while !ready() {
@@ -62,52 +62,51 @@ async fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
     .await;
     assert!(
         waited.is_ok(),
-        "{:?} 안에 {what} 이 되지 않았다",
+        "{what} did not happen within {:?}",
         common::PATIENCE
     );
 }
 
-/// An upgrade with headers attached by hand — a header of the same name is replaced (Host too).
 async fn raw_upgrade(
     listener: &WsListener,
     headers: &[(header::HeaderName, &str)],
 ) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>, WsError> {
     let mut request = format!("ws://{}/", listener.local_addr())
         .into_client_request()
-        .expect("요청");
+        .expect("request");
     for (name, value) in headers {
-        request
-            .headers_mut()
-            .insert(name.clone(), HeaderValue::from_str(value).expect("머리 값"));
+        request.headers_mut().insert(
+            name.clone(),
+            HeaderValue::from_str(value).expect("head value"),
+        );
     }
     tokio::time::timeout(common::PATIENCE, tokio_tungstenite::connect_async(request))
         .await
-        .expect("업그레이드 상한")
+        .expect("upgrade cap")
         .map(|(ws, _response)| ws)
 }
 
 fn status(result: Result<WebSocketStream<MaybeTlsStream<TcpStream>>, WsError>) -> StatusCode {
     match result {
         Err(WsError::Http(response)) => response.status(),
-        Err(other) => panic!("HTTP 거절이 아닌 실패: {other}"),
-        Ok(_) => panic!("업그레이드가 받아들여졌다"),
+        Err(other) => panic!("a failure that is not an HTTP reject: {other}"),
+        Ok(_) => panic!("the upgrade was accepted"),
     }
 }
 
 async fn accept(listener: &mut WsListener) -> Accepted {
     tokio::time::timeout(common::PATIENCE, listener.accept())
         .await
-        .expect("수락 상한")
-        .expect("수락")
+        .expect("accept cap")
+        .expect("accept")
 }
 
-/// Whether the peer closed — 0 bytes (FIN) or an error (RST) means closed. Panics: not closed within [`common::PATIENCE`].
 async fn closed_by_peer(stream: &mut TcpStream, what: &str) {
     let mut buf = [0u8; 64];
     match tokio::time::timeout(common::PATIENCE, stream.read(&mut buf)).await {
         Ok(Ok(0)) | Ok(Err(_)) => {}
-        Ok(Ok(n)) => panic!("{what}: 닫는 대신 {n} 바이트가 왔다"),
-        Err(_) => panic!("{:?} 안에 {what} 이 닫히지 않았다", common::PATIENCE),
+        Ok(Ok(n)) => panic!("{what}: {n} bytes came instead of a close"),
+        Err(_) => panic!("{what} did not close within {:?}", common::PATIENCE),
     }
 }
 
@@ -118,12 +117,16 @@ async fn a_listener_opens_only_on_loopback() {
     let (listener, _refusals) = bind(common::accept_policy());
     let local = listener.local_addr();
     assert!(local.ip().is_loopback(), "{local}");
-    assert_ne!(local.port(), 0, "커널이 고른 번호를 되읽어야 한다");
+    assert_ne!(
+        local.port(),
+        0,
+        "must read back the number the kernel chose"
+    );
 
     let anywhere: SocketAddr = "0.0.0.0:0".parse().unwrap();
     let refused = WsListener::bind(anywhere, common::accept_policy(), Arc::new(SystemClock))
         .err()
-        .expect("모든 주소에 평문 ws:// 를 열었다");
+        .expect("opened plaintext ws:// on all addresses");
     assert!(refused.message.contains("loopback"), "{refused}");
 }
 
@@ -136,26 +139,34 @@ async fn an_origin_outside_the_list_gets_403_and_a_report_while_listed_or_absent
         ..common::accept_policy()
     });
 
-    raw_upgrade(&listener, &[]).await.expect("Origin 없음");
+    raw_upgrade(&listener, &[]).await.expect("no Origin");
     assert_eq!(accept(&mut listener).await.info().origin, None);
 
     raw_upgrade(&listener, &[(header::ORIGIN, "http://localhost:1420")])
         .await
-        .expect("목록에 든 Origin");
+        .expect("an Origin in the list");
     assert_eq!(
         accept(&mut listener).await.info().origin.as_deref(),
         Some("http://localhost:1420"),
-        "받은 Origin 이 소비자에게 안 건너왔다"
+        "the received Origin did not cross to the consumer"
     );
 
     let refused = raw_upgrade(&listener, &[(header::ORIGIN, "http://evil.example")]).await;
     assert_eq!(status(refused), StatusCode::FORBIDDEN);
-    let report = next_refusal(&mut refusals, "Origin 거절").await;
+    let report = next_refusal(&mut refusals, "Origin reject").await;
     assert_eq!(report.kind, RefusalKind::OriginRejected);
     assert_eq!(report.origin.as_deref(), Some("http://evil.example"));
     assert!(report.remote.is_some());
-    assert_eq!(listener.queued(), 0, "거절한 통로가 준비 큐에 앉았다");
-    assert_eq!(listener.permits_in_use(), 0, "거절한 통로가 칸을 쥐고 있다");
+    assert_eq!(
+        listener.queued(),
+        0,
+        "a rejected link sat in the ready queue"
+    );
+    assert_eq!(
+        listener.permits_in_use(),
+        0,
+        "a rejected link holds a permit"
+    );
 }
 
 #[tokio::test]
@@ -165,7 +176,7 @@ async fn the_release_value_refuses_any_origin() {
     let refused = raw_upgrade(&listener, &[(header::ORIGIN, "http://tauri.localhost")]).await;
     assert_eq!(status(refused), StatusCode::FORBIDDEN);
     assert_eq!(
-        next_refusal(&mut refusals, "Origin 거절").await.kind,
+        next_refusal(&mut refusals, "Origin reject").await.kind,
         RefusalKind::OriginRejected
     );
 }
@@ -179,7 +190,7 @@ async fn a_host_other_than_a_loopback_name_on_this_port_gets_403() {
 
     raw_upgrade(&listener, &[(header::HOST, &format!("localhost:{port}"))])
         .await
-        .expect("받는 이름");
+        .expect("receiving name");
     accept(&mut listener).await;
 
     for bad in [
@@ -188,7 +199,7 @@ async fn a_host_other_than_a_loopback_name_on_this_port_gets_403() {
     ] {
         let refused = raw_upgrade(&listener, &[(header::HOST, &bad)]).await;
         assert_eq!(status(refused), StatusCode::FORBIDDEN, "{bad}");
-        let report = next_refusal(&mut refusals, "Host 거절").await;
+        let report = next_refusal(&mut refusals, "Host reject").await;
         assert_eq!(report.kind, RefusalKind::HostRejected, "{bad}");
         assert_eq!(report.host.as_deref(), Some(bad.as_str()));
     }
@@ -196,7 +207,7 @@ async fn a_host_other_than_a_loopback_name_on_this_port_gets_403() {
 
 #[tokio::test]
 async fn an_upgrade_without_a_host_header_is_accepted() {
-    // D9 — if there is no Host it is accepted. tungstenite's dialing side builds no request without a Host, so it is written to TCP by hand.
+    // D9 — no Host is accepted. tungstenite's dialing side builds no request without a Host, so it is written to TCP by hand.
     let (mut listener, _refusals) = bind(common::accept_policy());
     let mut tcp = TcpStream::connect(listener.local_addr())
         .await
@@ -206,18 +217,18 @@ async fn an_upgrade_without_a_host_header_is_accepted() {
           Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
     )
     .await
-    .expect("요청 쓰기");
+    .expect("request write");
     let mut head = Vec::new();
     let mut buf = [0u8; 512];
     tokio::time::timeout(common::PATIENCE, async {
         while !head.windows(4).any(|w| w == b"\r\n\r\n") {
-            let n = tcp.read(&mut buf).await.expect("응답 읽기");
-            assert_ne!(n, 0, "응답 전에 닫혔다");
+            let n = tcp.read(&mut buf).await.expect("response read");
+            assert_ne!(n, 0, "closed before the response");
             head.extend_from_slice(&buf[..n]);
         }
     })
     .await
-    .expect("응답 상한");
+    .expect("response cap");
     assert!(
         head.starts_with(b"HTTP/1.1 101"),
         "{}",
@@ -237,46 +248,46 @@ async fn a_silent_tcp_peer_is_closed_at_the_deadline_without_holding_up_other_ac
     });
     let addr = listener.dial_address();
 
-    // Opens only TCP and sends nothing.
     let opened = Instant::now();
     let mut silent = TcpStream::connect(listener.local_addr())
         .await
         .expect("TCP");
-    wait_until("침묵한 상대가 칸을 쥠", || {
+    wait_until("the silent peer holds a permit", || {
         listener.permits_in_use() == 1
     })
     .await;
 
-    // ★The second accept stands even with a stalled peer★ — if the upgrade were waited on at the accept spot, this would block until the deadline.
+    // ★The second accept stands even with a stalled peer★ — waiting for the upgrade at the accept spot would block until the deadline.
     let dialer = common::dialer();
     let (accepted, dialed) = tokio::time::timeout(common::PATIENCE, async {
         tokio::join!(listener.accept(), dialer.dial(&addr))
     })
     .await
-    .expect("둘째 수락 상한");
-    accepted.expect("둘째 수락");
-    dialed.expect("둘째 걸기");
+    .expect("second accept cap");
+    accepted.expect("second accept");
+    dialed.expect("second dial");
     let mut probe = [0u8; 1];
     assert!(
         matches!(silent.try_read(&mut probe), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
-        "둘째 수락이 끝났을 때 침묵한 상대가 이미 닫혀 있었다 — 시한보다 늦게 수락한 것이다"
+        "when the second accept finished, the silent peer was already closed — it was accepted later than the deadline"
     );
 
-    closed_by_peer(&mut silent, "침묵한 상대").await;
+    closed_by_peer(&mut silent, "silent peer").await;
     let waited = opened.elapsed();
     assert!(
         waited >= deadline - Duration::from_millis(100),
-        "시한({deadline:?}) 전에 닫혔다({waited:?}) — 시한이 아닌 다른 까닭이다"
+        "closed ({waited:?}) before the deadline ({deadline:?}) — the reason is something other than the deadline"
     );
-    let report = next_refusal(&mut refusals, "업그레이드 시한").await;
+    let report = next_refusal(&mut refusals, "upgrade deadline").await;
     assert_eq!(report.kind, RefusalKind::UpgradeTimeout);
     assert_eq!(
         report.remote.as_deref(),
         Some(silent.local_addr().unwrap().to_string().as_str())
     );
-    wait_until("시한에 걸린 상대가 칸을 놓음", || {
-        listener.permits_in_use() == 0
-    })
+    wait_until(
+        "the peer caught by the deadline releases the permit",
+        || listener.permits_in_use() == 0,
+    )
     .await;
 }
 
@@ -290,31 +301,31 @@ async fn a_message_over_the_limit_breaks_the_link_into_the_listener() {
         max_message_bytes: LIMIT,
         ..common::accept_policy()
     });
-    // ★The dialing side is tungstenite defaults★ — our dialing side blocks a frame over the cap itself, so it never reaches the receiving side.
-    let mut client = raw_upgrade(&listener, &[]).await.expect("업그레이드");
+    // ★The dialing side is tungstenite defaults★ — our dialer blocks a frame over the cap itself, so it never reaches the receiver.
+    let mut client = raw_upgrade(&listener, &[]).await.expect("upgrade");
     let (mut server_tx, mut server_rx) = accepted_ends(accept(&mut listener).await);
 
     client
         .send(Message::Binary(vec![1u8; LIMIT].into()))
         .await
-        .expect("상한 그대로");
+        .expect("exactly the cap");
     match tokio::time::timeout(common::PATIENCE, server_rx.recv()).await {
         Ok(Ok(LinkRead::Frame(Frame::Binary(bytes)))) => assert_eq!(bytes.len(), LIMIT),
-        other => panic!("상한 그대로가 건너오지 않았다: {other:?}"),
+        other => panic!("exactly the cap did not cross: {other:?}"),
     }
     client
         .send(Message::Binary(vec![1u8; LIMIT + 1].into()))
         .await
-        .expect("보내는 쪽은 안 막는다");
+        .expect("the sending side is not blocked");
     let over = tokio::time::timeout(common::PATIENCE, server_rx.recv())
         .await
-        .expect("읽기 상한")
-        .expect_err("상한 + 1 을 받아들였다");
+        .expect("read cap")
+        .expect_err("accepted cap + 1");
     assert!(over.message.contains("too long"), "{over}");
 
     // Outgoing side — a frame over the same value fails as a value before reaching the socket.
     let refused = server_tx.send(Frame::Binary(vec![0u8; LIMIT + 1])).await;
-    assert!(refused.is_err(), "받는 쪽 끝이 상한 + 1 을 내보냈다");
+    assert!(refused.is_err(), "the receiving end emitted cap + 1");
 }
 
 #[tokio::test]
@@ -323,32 +334,30 @@ async fn a_message_over_the_limit_breaks_the_link_into_the_dialer() {
     let raw = TcpListener::bind(common::loopback()).await.expect("bind");
     let addr = Address::new(format!("ws://{}/", raw.local_addr().expect("local_addr")));
     let server = tokio::spawn(async move {
-        let (tcp, _) = raw.accept().await.expect("TCP 수락");
-        let mut ws = tokio_tungstenite::accept_async(tcp)
-            .await
-            .expect("업그레이드");
+        let (tcp, _) = raw.accept().await.expect("TCP accept");
+        let mut ws = tokio_tungstenite::accept_async(tcp).await.expect("upgrade");
         ws.send(Message::Binary(vec![2u8; LIMIT].into()))
             .await
-            .expect("상한 그대로");
+            .expect("exactly the cap");
         ws.send(Message::Binary(vec![2u8; LIMIT + 1].into()))
             .await
-            .expect("보내는 쪽은 안 막는다");
-        // Held until the dialing side cuts — if released first, we cannot tell whether the cut was due to size.
+            .expect("the sending side is not blocked");
+        // Held until the dialing side cuts — released first, we could not tell whether the cut was due to size.
         while ws.next().await.is_some() {}
     });
 
     let (_tx, mut rx) = tokio::time::timeout(common::PATIENCE, WsDialer::new(LIMIT).dial(&addr))
         .await
-        .expect("걸기 상한")
-        .expect("걸기");
+        .expect("dial cap")
+        .expect("dial");
     match tokio::time::timeout(common::PATIENCE, rx.recv()).await {
         Ok(Ok(LinkRead::Frame(Frame::Binary(bytes)))) => assert_eq!(bytes.len(), LIMIT),
-        other => panic!("상한 그대로가 건너오지 않았다: {other:?}"),
+        other => panic!("exactly the cap did not cross: {other:?}"),
     }
     let over = tokio::time::timeout(common::PATIENCE, rx.recv())
         .await
-        .expect("읽기 상한")
-        .expect_err("상한 + 1 을 받아들였다");
+        .expect("read cap")
+        .expect_err("accepted cap + 1");
     assert!(over.message.contains("too long"), "{over}");
     server.abort();
 }
@@ -359,14 +368,14 @@ async fn a_message_over_the_limit_breaks_the_link_into_the_dialer() {
 async fn held_dial(dialer: &WsDialer, addr: &Address) -> (Box<dyn LinkTx>, Box<dyn LinkRx>) {
     tokio::time::timeout(common::PATIENCE, dialer.dial(addr))
         .await
-        .expect("걸기 상한")
-        .expect("걸기")
+        .expect("dial cap")
+        .expect("dial")
 }
 
 async fn dial(dialer: &WsDialer, addr: &Address) -> Result<(), DialFailure> {
     tokio::time::timeout(common::PATIENCE, dialer.dial(addr))
         .await
-        .expect("걸기 상한")
+        .expect("dial cap")
         .map(drop)
 }
 
@@ -374,33 +383,39 @@ async fn dial(dialer: &WsDialer, addr: &Address) -> Result<(), DialFailure> {
 async fn full_upgrade_slots_close_new_tcp_at_once_and_a_failed_peer_frees_its_slot() {
     let (mut listener, mut refusals) = bind(AcceptPolicy {
         max_pending_upgrades: 2,
-        // So that the silent peer is not caught by the deadline during the test — the permit must be released by the peer's cut, not by the deadline.
+        // The silent peer must not be caught by the deadline during the test — the permit must be released by the peer's cut, not the deadline.
         upgrade_timeout: Duration::from_secs(60),
         ..common::accept_policy()
     });
     let at = listener.local_addr();
     let first = TcpStream::connect(at).await.expect("TCP 1");
     let _second = TcpStream::connect(at).await.expect("TCP 2");
-    wait_until("칸 둘이 참", || listener.permits_in_use() == 2).await;
+    wait_until("two permits taken", || listener.permits_in_use() == 2).await;
 
     let mut third = TcpStream::connect(at).await.expect("TCP 3");
-    closed_by_peer(&mut third, "칸이 없을 때 온 셋째").await;
-    let report = next_refusal(&mut refusals, "칸 넘침").await;
+    closed_by_peer(&mut third, "the third that came when there was no permit").await;
+    let report = next_refusal(&mut refusals, "permit overflow").await;
     assert_eq!(report.kind, RefusalKind::SlotsFull);
     assert_eq!(
         report.remote.as_deref(),
         Some(third.local_addr().unwrap().to_string().as_str()),
-        "넘친 **새것을** 닫아야 한다"
+        "must close the **new one** that overflowed"
     );
-    assert_eq!(listener.permits_in_use(), 2, "있던 상대의 칸이 흔들렸다");
+    assert_eq!(
+        listener.permits_in_use(),
+        2,
+        "the existing peer's permit wobbled"
+    );
 
     // A peer that cuts during the upgrade releases its permit right away.
     drop(first);
     assert_eq!(
-        next_refusal(&mut refusals, "업그레이드 중 끊김").await.kind,
+        next_refusal(&mut refusals, "disconnect during upgrade")
+            .await
+            .kind,
         RefusalKind::UpgradeFailed
     );
-    wait_until("끊은 상대가 칸을 놓음", || {
+    wait_until("the disconnected peer releases the permit", || {
         listener.permits_in_use() == 1
     })
     .await;
@@ -410,9 +425,9 @@ async fn full_upgrade_slots_close_new_tcp_at_once_and_a_failed_peer_frees_its_sl
         tokio::join!(listener.accept(), dialer.dial(&addr))
     })
     .await
-    .expect("수락 상한");
-    accepted.expect("빈 칸으로 수락");
-    dialed.expect("빈 칸으로 걸기");
+    .expect("accept cap");
+    accepted.expect("accept with an empty permit");
+    dialed.expect("dial with an empty permit");
 }
 
 #[tokio::test]
@@ -429,32 +444,32 @@ async fn the_ready_queue_is_bounded_by_the_slots_until_the_accepted_link_is_let_
         held_dial(&dialer, &addr).await,
         held_dial(&dialer, &addr).await,
     ];
-    wait_until("준비 큐에 둘", || listener.queued() == 2).await;
+    wait_until("two in the ready queue", || listener.queued() == 2).await;
     assert_eq!(listener.permits_in_use(), 2);
     assert!(
         dial(&dialer, &addr).await.is_err(),
-        "준비 큐가 칸을 넘어 찼다"
+        "the ready queue filled beyond the permits"
     );
     assert_eq!(
-        next_refusal(&mut refusals, "칸 넘침").await.kind,
+        next_refusal(&mut refusals, "permit overflow").await.kind,
         RefusalKind::SlotsFull
     );
 
-    // ★Even if taken away, the permit is held until it is put on the registry★ — it is released only once the receiving side's next stage takes hold of it (TRD 3 §5 14).
+    // ★Even taken away, the permit is held until the link is put on the registry★ — released only once the receiving side's next stage holds it (TRD 3 §5 14).
     let taken = accept(&mut listener).await;
     assert_eq!(listener.queued(), 1);
     assert!(
         dial(&dialer, &addr).await.is_err(),
-        "받아 간 통로가 칸을 놓았다"
+        "the taken link released the permit"
     );
     assert_eq!(
-        next_refusal(&mut refusals, "칸 넘침").await.kind,
+        next_refusal(&mut refusals, "permit overflow").await.kind,
         RefusalKind::SlotsFull
     );
 
     drop(taken);
     let _third = held_dial(&dialer, &addr).await;
-    wait_until("준비 큐에 다시 둘", || listener.queued() == 2).await;
+    wait_until("two in the ready queue again", || listener.queued() == 2).await;
     drop(held);
 }
 
@@ -470,21 +485,24 @@ async fn unread_refusal_reports_are_dropped_and_counted_without_stalling_accepts
         let refused = raw_upgrade(&listener, &[(header::ORIGIN, "http://evil.example")]).await;
         assert_eq!(status(refused), StatusCode::FORBIDDEN);
     }
-    wait_until("버린 보고 둘", || refusals.dropped() == 2).await;
+    wait_until("two dropped reports", || refusals.dropped() == 2).await;
     // ★Accepting stands even when reports are blocked★.
-    raw_upgrade(&listener, &[]).await.expect("업그레이드");
+    raw_upgrade(&listener, &[]).await.expect("upgrade");
     accept(&mut listener).await;
 
     assert_eq!(
         refusals.try_recv().map(|r| r.kind),
         Some(RefusalKind::OriginRejected)
     );
-    assert!(refusals.try_recv().is_none(), "줄 칸보다 많이 남았다");
+    assert!(
+        refusals.try_recv().is_none(),
+        "more remained than the queue slots"
+    );
 }
 
 // ── Putting an accepted link on the registry (§3-1 ① — end to end) ──
 
-/// A vocabulary both sides speak — `TestWire` is the dialing side's vocabulary, so the receiving side cannot read requests.
+/// A vocabulary both sides speak — `TestWire` is the dialing side's, so the receiving side could not read requests.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Msg {
     Ask { tag: u64, body: String },
@@ -594,7 +612,7 @@ async fn wait_live(peer: &Peer<BothWays>, what: &str) {
     assert_eq!(
         live,
         Ok(true),
-        "{what} 이 운영 단계에 안 들었다 (지금 {:?})",
+        "{what} did not enter the operating phase (now {:?})",
         peer.peer_state()
     );
 }
@@ -619,19 +637,19 @@ async fn ask_across(
                         tag: *tag,
                         body: format!("re: {body}"),
                     })
-                    .expect("답 보내기");
+                    .expect("send answer");
                 return body.clone();
             }
         }
-        panic!("물음을 읽기 전에 수신단이 끝났다");
+        panic!("the inbox ended before reading the question");
     };
     let (reply, asked) =
         tokio::time::timeout(common::PATIENCE, async { tokio::join!(ask, answer) })
             .await
-            .expect("왕복 상한");
-    assert_eq!(asked, body, "물음이 그대로 건너가지 않았다");
+            .expect("round trip cap");
+    assert_eq!(asked, body, "the question did not cross as is");
     assert_eq!(
-        reply.expect("답"),
+        reply.expect("answer"),
         Msg::Answer {
             tag,
             body: format!("re: {body}")
@@ -641,7 +659,7 @@ async fn ask_across(
 
 #[tokio::test]
 async fn an_accepted_socket_attaches_to_a_registry_and_requests_flow_both_ways() {
-    // ★The listener and the receiving registry use the same clock★ — `upgraded_at` and the auth deadline must be on the same clock (`WsListener::bind`).
+    // ★The listener and the receiving registry use one clock★ — `upgraded_at` and the auth deadline must share it (`WsListener::bind`).
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let (mut listener, _refusals) =
         WsListener::bind(common::loopback(), common::accept_policy(), clock.clone()).expect("bind");
@@ -664,7 +682,7 @@ async fn an_accepted_socket_attaches_to_a_registry_and_requests_flow_both_ways()
         Arc::new(HelloHandshake),
     );
     let accepted = accept(&mut listener).await;
-    let remote = accepted.info().remote.clone().expect("원격 주소");
+    let remote = accepted.info().remote.clone().expect("remote address");
     assert!(
         remote
             .parse::<SocketAddr>()
@@ -677,10 +695,10 @@ async fn an_accepted_socket_attaches_to_a_registry_and_requests_flow_both_ways()
     let (client, mut client_inbox) =
         accepting.attach(PeerId::new("conn-1"), accepted, Arc::new(Welcome));
 
-    wait_live(&daemon, "거는 쪽").await;
-    wait_live(&client, "받는 쪽").await;
+    wait_live(&daemon, "dialing side").await;
+    wait_live(&client, "receiving side").await;
     // Entering the operating phase releases the upgrade permit.
-    wait_until("받은 상대가 칸을 놓음", || {
+    wait_until("the accepted peer releases the permit", || {
         listener.permits_in_use() == 0
     })
     .await;
