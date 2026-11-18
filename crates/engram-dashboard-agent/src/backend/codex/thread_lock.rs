@@ -262,6 +262,7 @@ impl CaptureClock for ChildClock {
 /// One set of inputs for running recovery in this spawn. ★Its existence means 「all conditions to run are met」★ — [`plan_capture`] returns
 ///   `None` otherwise, so [`run_capture`] holds no conditional.
 pub(crate) struct CapturePlan {
+    /// The lock folder this **child** uses — not ours (the [`plan_capture`] contract).
     pub(crate) lock_dir: PathBuf,
     pub(crate) child_pid: u32,
     pub(crate) child_start_time: u64,

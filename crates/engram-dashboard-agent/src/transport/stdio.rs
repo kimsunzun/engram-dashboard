@@ -157,6 +157,7 @@ impl Drop for WriterStop {
     }
 }
 
+/// A pump panic anywhere would otherwise stop that agent silently forever, so it is made visible as Failed (§5).
 fn resolve_pump_reason(result: Result<TerminalReason, Caught>) -> TerminalReason {
     match result {
         Ok(reason) => reason,

@@ -1946,6 +1946,7 @@ impl<G: Group> GateCell<G> {
         }
     }
 
+    /// Pass end (TRD §3-3).
     fn end_pass(&self, cleaner: &Cleaner<G>, gen: u64, killed: bool) {
         let released = {
             let mut state = self.lock();
@@ -2491,6 +2492,7 @@ fn log_pass<G: Group>(cleaner: &Cleaner<G>, report: &PassReport, waited: Duratio
     }
 }
 
+/// Why pass steps 1–3 (TRD §3-4) did not hold.
 #[derive(Debug)]
 enum NotReady {
     /// The group is retiring (debug `retiring`).

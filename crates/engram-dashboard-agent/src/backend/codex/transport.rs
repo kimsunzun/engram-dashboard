@@ -271,10 +271,10 @@ struct State {
     steer_due: bool,
     /// Halt after error — our turn ended abnormally ([`TurnClose`]). ★While it stands Idle opens no turn★ ([`State::idle_opening`]); neither
     ///   held user text nor mail goes out on its own (TRD §5-5 「halt after error」 · user decision N11).
-    /// Set in [`State::close_turn_items`]; lifted when user text comes in ([`State::push_pending`]) or the link closes ([`ReaderExit`]).
-    ///   An interruption does not set it; it does not stand on a below-floor incarnation. It blocks only turns the link opens itself (mail
-    ///   enters through the kernel's `last_end_failed`). ★A field outside [`TurnState`]★ — as `Active` it would make the attribution gate
-    ///   count a late echo as our turn.
+    /// Set in [`State::close_turn_items`]; lifted when user text comes in ([`State::push_pending`]) or the link closes ([`ReaderExit`]) —
+    ///   not by the list emptying through ✕ or time. An interruption does not set it; it does not stand on a below-floor incarnation. It
+    ///   blocks only turns the link opens itself (mail enters through the kernel's `last_end_failed`). ★A field outside [`TurnState`]★ — as
+    ///   `Active` it would make the attribution gate count a late echo as our turn (TRD §5-5 「echo the vendor sent」 condition ①).
     // ADR-0231
     // ADR-0235: lifted when user text comes in.
     halted: bool,
