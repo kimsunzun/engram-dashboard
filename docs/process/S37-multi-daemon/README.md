@@ -8,5 +8,5 @@ Engram daemons on the user's own PCs (same LAN, or home ↔ office across NAT) l
 
 ## Documents
 
-- `prd.md` — draft 1, awaiting user approval (D1–D7 open).
-- `trd.md` — draft 1 (assumes the PRD ★ defaults), before PRD+TRD review.
+- `prd.md` — draft 2, D1–D7 decided.
+- `trd.md` — draft 2, all decisions taken (D1–D7, X1–X6); before PRD+TRD review.

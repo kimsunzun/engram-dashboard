@@ -1,6 +1,6 @@
 # S37 PRD — daemon↔daemon agent mail between the user's own PCs
 
-- Status: draft 2 · 2026-11-18 · awaiting user approval (D2 decided 2026-11-18; D1, D3–D7 open).
+- Status: draft 2 · 2026-11-19 · decisions D1–D7 all taken by the user; PRD approval is asked together with the PRD+TRD review.
 - Research: `../../research/multi-daemon-federation-direction-2026-11-11.md` (GPT draft vs code, peers, Syncthing / hcom / Reason Network source reads) · `../../research/multi-daemon-iroh-link-plan-2026-11-11.md` (iroh vs alternatives, seam fit, weight, build plan).
 
 ## 1. What · why
