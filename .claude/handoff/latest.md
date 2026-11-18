@@ -1,73 +1,59 @@
-# Handoff: S38 merged; next = prune comments in U1 (leaf crates) and U2 (agent crate), most important first
+# Handoff: S37 multi-daemon — every PRD/TRD decision taken; next = reference docs for touched topics, then PRD+TRD review
 
-## Read first
-
-- S38 is done and on master (`204bec50` S38 merge, `2558d4da` follow-up merge). The user decided to also prune the comments of the U1/U2 crates (translated in S38 but never pruned): 「그냥 나머지도 전체 진행하되 핸드오프 하는게 좋겠지? 중요한 순서대로 하면됨」. This was S38's declared follow-up (TRD §2: "Pruning U1–U2 comments is a follow-up if the U3–U5 result is good").
-- Cost is the user's main concern. Binding rules from the user: at most 2 workers at once; work in chunks and give feedback between them; reviews are targeted, not full; no Codex check for comment-only work; workers never spawn sub-agents/forks (put that line in every brief). Do not ask the user to avoid the keyboard during QA.
-- Estimate given to the user: ~28k comment lines (U1 ~11.8k + agent ~16.5k), expected −35~45%; about 45 on a scale where this session's whole S38 work (translation+prune+review+QA, worker cache reads ~330M) = 100. Not measured.
-- Engram feedback rows of this session are recorded and committed (rule: no push) — nothing to do there.
+## Know first
+- Mode: autonomous. The user is learning networking as we go: explain big picture first, short, plain words, no invented labels; gloss work labels (S37, U1, D3, T-115 …) on first use (CLAUDE.md). Concrete data-flow / timeline explanations land; abstract ones do not.
+- New process rules (commits 03d9ef22 · 54916d0c/cb360c75 · e297b42b/7b280a51 · 29e66b90/31dfb6c8, all on this branch): HTML only on request; step-log frozen; topic number from folder/commit max + 1; TRD = decisions and boundaries only; finished TRDs are not read; **existing topics without a reference md that this work changes must get one written from current code before that step's coding, and it goes into the PRD+TRD review** (implement binding 「레퍼런스」); decisions later work relies on → ADR before coding.
+- Before PRD+TRD review the binding requires a chat summary of the TRD and the user's answer to 「이대로 리뷰로 갈까요?」 (autonomous mode too). Not asked yet.
+- Untracked `.claude/explain/` (two old explainer HTMLs from this session's research phase) — leave or delete; not part of S37.
+- The scratchpad of earlier days is gone (session restart); everything needed is in the repo.
 
 ## One-line state · next first action
+S37 PRD and TRD are at draft 2 with all decisions taken (PRD D1–D7, TRD X1–X6); no code yet.
+**Next first action:** write reference docs from current code for the existing topics S37 changes — transport crate, messaging kernel, daemon link/command table (only `agent-backend.md` exists under `docs/reference/structure/`) — as a docs-only commit; then show the TRD chat summary and ask 「이대로 리뷰로 갈까요?」; then `/engram-review` PRD+TRD (reference docs included); then U0 ADRs (five, listed in TRD §5) before coding.
 
-- State: nothing running. wt2 on `v0.5.0/chore/english-internal-text` (merged). `core.hooksPath` is now the relative `scripts/git-hooks` (user-approved), so qa mutation runs in the work tree. All S38 worktrees removed.
-- Next first action: open `docs/handbook/branch-commit.md` and cut a new branch from master for this follow-up (suggested `v0.5.0/chore/prune-comments-leaf-agent`, commit label `S38` as its declared follow-up — confirm against the handbook's numbering rule), then create worktree(s) with `git worktree add` (never Agent `isolation: "worktree"`) and start chunk 1 of the agent crate.
+## Repo state (measured 2026-11-19 02:27)
+- Branch `v0.5.0/feat/multi-daemon` @ `4d74922b`, pushed (in sync with origin). 19 commits ahead of `origin/master`, 0 behind (origin/master merged at `d97082f9`; S35 i18n merge `87dbc7bb`).
+- Untracked: `.claude/explain/` only. This handoff commit comes after these numbers.
+- `v0.5.0/chore/misc` holds the four process commits not yet on master; their content is already on this branch (cherry-picks).
 
-## Plan (most important first)
+## Verification state
+- Docs only so far — nothing to build or test. Research reports were cross-family reviewed (codex FIX applied twice). The PRD/TRD have **not** been reviewed.
+- Spot checks done in code during decisions: `eg_send` has `request` + `reply_by` (daemon `control/mcp_server.rs`); notices are parked in the mailbox notice lane and injected at the idle gate (messaging `mailbox.rs`, ADR-0104); Syncthing `LoadOrGenerateCertificate` regenerates on any load failure; Reason Network `load_key` errors on a corrupt key.
+- Unverified (U1/U5 will measure): iroh direct-path preference in practice, Windows Firewall prompt for a WMI-launched daemon, mDNS on corporate LANs, exact iroh ID text format.
 
-Order = most read / largest first:
-1. `crates/engram-dashboard-agent` — 16,545 `//` comment lines (largest, read most). Watch: 37 ts-rs bindings in `crates/engram-dashboard-agent/bindings/` + `commands.schema.json` — `///` docs on ts-export types and on command declarations feed generated files and LLM-facing schema; leave those untouched (the U4 prune broke 11 bindings this way and had to restore them).
-2. `crates/engram-dashboard-transport` — 3,520.
-3. `crates/engram-dashboard-messaging` — 3,079.
-4. `crates/engram-dashboard-platform` — 1,402.
-5. `crates/engram-dashboard-protocol` — 1,058 (wire contract; keep contract docs).
-6. `crates/engram-dashboard-command` — 1,039.
-7. `crates/engram-dashboard-cli` — 1,037.
-8. `crates/engram-dashboard-base` — 667.
-Skip files with <15 comment lines. Build each crate's queue largest-first.
-
-Per crate: Sonnet prune worker (`worker-scout-sonnet`) in chunks of ~12–15 files → main samples 2 before→after per file and gives feedback → continue; hand the worker over via its progress file at ~400–500k context. Then one targeted review (`worker-reviewer`, `.s38-review/light-review-brief.md`) per crate group. After every chunk: comment-stripped token compare + `cargo check -p <crate> --tests`; at the end `cargo fmt -p <crate>` then `node scripts/check-hangul.mjs` (fmt can move a trailing `hangul-ok` off its literal) and the crate's tests per `.claude/skill-bindings/qa.md` 「모듈별 명령」. Finally `/engram-qa` (Rust source row → full regression; lanes per the table) → push → CI green → `--no-ff` merge (handbook procedure) — the user authorised merging when done (「다 되면 알아서 머지해」, given for S38; re-confirm only if anything is off).
-
-Briefs to reuse (git-excluded, in wt2 `.s38-review/`): `prune-brief.md` (has the calibrated "Standard": rewrite blocks line by line, cut origins/dates/review labels/restatements, keep rules/why/external facts/do-not-revive/contracts, ★ on load-bearing lines, KEEP `ADR-NNNN`, `TRD S<n> §…`, `FIX <n>`), `light-review-brief.md` (risky deleted comments with English+Korean keywords on word boundaries, changed strings; no forks). Update the brief headers for the new branch/worktree paths and add "run `cargo fmt -p` and report `--check`".
-
-## Also pending (small)
-
-- tracking T-114 (Esc-key test) says "fix"; user decided to leave the test as is (「esc 테스트는 그냥 놔두고, esc만 안누르면 되는거잖아」) → in this follow-up's branch, remove T-114 or change it to "kept as is — QA skips it if a key was pressed".
-
-## Repo state (measured 2026-11-18 16:48)
-
-- wt2: branch `v0.5.0/chore/english-internal-text`, HEAD `c9f0818e` (previous handoff commit, not pushed; 1 ahead of origin) — this handoff's commit comes after this text. Tracked tree clean. master `2558d4da` = origin/master.
-
-## Verification
-
-- S38 QA (tree `4b9bdad9`): full regression PASS, claude/codex/shell real-daemon lanes PASS, Job lane known failure only, mutation PASS, GUI smoke/AC3/AC4 PASS. CI green on `4b9bdad9` and `042b480d`. Master CI for `204bec50`/`2558d4da` not read.
-- Nothing of the follow-up is started or verified.
-
-## Failed approaches (do not repeat)
-
-- "Prune while translating" got translation only; "when unsure, keep" made prune workers timid — use the calibrated Standard and an example block from the start.
-- Long single workers grew to 500–800k context (one cost 56M cache reads) — hand over earlier.
-- Cutting `(TRD …)` tails conflicted with the project binding → restored 166 refs. Read bindings before calibrating.
-- Shortening `///` on ts-rs types changed generated bindings — leave them.
-- A reviewer worker spawned forks past the cap — every brief says "no sub-agents or forks".
-- `git cherry-pick -n` leaves sequencer state → `git cherry-pick --quit`.
-- Orphan Codex broker processes (`app-server-broker.mjs … --cwd <worktree>`) can lock a worktree folder; the user had to `taskkill /F` them (auto mode refused it for main).
+## Do-not / lessons
+- Do not present iroh-handled behaviour as user choices (the user rejected "options" for path priority — it is automatic, direct first). Do not say "our server": Engram runs none; users may host `iroh-relay` + `iroh-dns-server`.
+- Do not claim a unit has "no decisions" without checking the TRD dependency table (the brief writer caught that U1/U2 carry D4/D6/X1/D1/D7/X5).
+- A separate system input to an idle agent costs a whole turn (cache read ∝ context + output) — the user cares; see T-115.
 
 ## Resume command
-
-`git -C I:/Engram/apps/engram-dashboard-wt2 log --oneline -2 master && git -C I:/Engram/apps/engram-dashboard-wt2 worktree list`
+`git -C I:/Engram/apps/engram-dashboard log --oneline -3 && git -C I:/Engram/apps/engram-dashboard status -sb | head -3`
 
 ## Decisions
-
-User decisions (this part of the session):
-- U1/U2 prune · 상황: ~28k comment lines, estimate ~45 of this session's work, Claude recommended not now or agent-only · 선택지 skip ★ / agent only / all · 고른 것 「그냥 나머지도 전체 진행하되 핸드오프 하는게 좋겠지? 중요한 순서대로 하면됨」 · 갈림 · 조건: 「중요한 순서대로」.
-- (묻지 않음) Esc test · 고른 것 「esc 테스트는 그냥 놔두고, esc만 안누르면 되는거잖아」 · —.
-- (묻지 않음) worktree cleanup and hooks path · 고른 것 「워크트리 정리는 그냥 하면 되는거 아님? git 훅경로도」 · — (done: worktrees recycled after the user killed two Codex brokers; hooksPath set relative).
-- Earlier S38 decisions (worker cap 2, chunked feedback, reduced reviews, keep TRD refs for now, Korean HTML reports stay) — see `history/20261118-155133-s38-merged-to-master.md`.
-
-Claude decisions: order = agent first, then transport, messaging, platform, protocol, command, cli, base (size × read frequency); skip files <15 comment lines; leave ts-rs/schema `///` docs; ★ not restored where already gone.
+User-decided:
+- Multi-daemon direction · 상황: GPT federation draft vs our ADR-0179/0310 two relationships · 선택지 daemon↔daemon mail first ★ / shell→N daemons first / both · 고른 것 「난 그냥 데몬간 통신만 생각하고」 + 「그 순서로 하면 된다는거지? 괜히 구조 바꾸고 하는건 없는거고」 · 같음 · 조건: lay the permission field and per-relationship ALPN now so (a) is additive.
+- Link library · 상황: user wants no external account/install · 선택지 iroh ★ / TLS+pinning over user VPN / Tailscale / libp2p · 고른 것 「로그인을 해야된다고? 그럼 우리게 아니잖아」 → iroh after an alternatives survey (「없으면 이걸 하되」) · 갈림 (Claude first recommended TLS over VPN; feedback logged in engram-research `1bd4dc7`).
+- Helper servers (D4) · 상황: n0 free servers may change · 선택지 n0 default + user-hosted server URL or off + per-PC address, all paths tried, direct wins ★ / n0 only / none · 고른 것 「우리서버는 없어. 상대방이 알아서 서버 구축하는건 있고」 · 같음.
+- Pairing (D1) · 선택지 paste ID both sides ★ / accept prompt / one-time code / invite link · 고른 것 「1먼저 해.」 · 같음 · 근거: 「결국 2,3,4는 1이 되야 가능한거 아냐?」.
+- Remote addressing (D2) · 상황: LLM rules must not hard-code which PC an agent lives on · 선택지 `name@pc` only ★ / bare names via shared directory + `name@pc` · 고른 것 「한마디로 에이전트 목록 동기화가 되야된다는거네 모든 pc에」 → 「반영해봐」 · 갈림.
+- Other PC off (D3) · 선택지 fail at once ★ / outbox now · 고른 것 「다음 단위로 해야될것같은데? 이득에 비해서 얻는게 적다」 · 같음 · 조건: a send cut off by a link drop still gets system feedback → late-outcome notice via the existing notice lane (「일단은 그냥 가자. 지금처럼」).
+- Inbound limits (D5) · 선택지 Reason Network values ★ / other / none · 고른 것 「resason network 에 맞춰서 두던지. 그리고 설정값으로 빼둘 수 있도록」 · 같음 · 조건: one injected limits value, setting-ready (no settings module yet).
+- LAN discovery (D6) · 선택지 on ★ / off · 고른 것 「손해 없음 켬으로해」 · 같음.
+- When it runs (D7) · 선택지 only with ≥1 trusted PC ★ / always · 고른 것 「pc 하나 이상 등록한 뒤부터」 · 같음.
+- Default port (X1) · 선택지 fixed default, configurable ★ / random · 고른 것 「디폴트 선택을 고정포트로 할거냐잖아. 다음」 · 같음.
+- PC list place (X2) · 선택지 new slot ★ / dialog / none in v1 · 고른 것 「새로운 슬롯이 있어야지」 · 같음 · 조건: slots are plugins, daemon does behaviour, client presents → T-116.
+- Held-mail receipt (X3) · 선택지 none ★ / notice · 고른 것 「송수신 우편 옵션일때만 보내는거잖아」 → none (requests already get reply/overdue) · 같음.
+- Cross-PC reply deadlines (X4) · 선택지 receiver-side ★ / both sides · 고른 것 요지: rarely used, keep simplest (「거의 사용되지 않을것 같은데」) · 같음.
+- Corrupt key (X5) · 선택지 auto new + backup + warning ★ / stop · 고른 것 「UI 쪽에 메세지 안내하고 유저가 ok 하면 백업만들고 새로 만들면」 · 갈림 (stop + user-OK regenerate).
+- Directory copies (X6) · 선택지 memory ★ / file · 고른 것 「메모리에만」 · 같음.
+- Input layer (T-115) · (묻지 않음) urgent vs deferred system inputs · 고른 것 「별도의 주제로 진행하면 될듯」, direction: typed inputs, flush all if any urgent; worry about invisibility; PTY vs JSON difference.
+- Multi-user sharing of one PC's agents · 고른 것 「툴콜이 안되는거아냐? 애초에 좀 더 생각해보긴 해야됨」 → parked (Consumer Terms + tool location), plan doc §6.
+Claude-decided: S37 number via the handbook (max 36 + 1); branch `v0.5.0/feat/multi-daemon`; merged origin/master twice (conflicts: CLAUDE.md 「언어」 took master's i18n lines minus the step-log mention; implement binding kept this branch's copy — master's copy still has the superseded 「사용자용 HTML — 멀티데몬 주제부터」 section, not fixed on master); iroh types stay inside a transport `iroh` feature; PeerWire lives in the daemon; ledger keys stay agent UUIDs; `peer.*` = first daemon-declared command table; U4 strings follow S35 i18n (en.ts source).
+Open: PRD approval + 「이대로 리뷰로 갈까요?」 (ask after the reference docs); `.claude/explain/` cleanup.
 
 ## References
-
-- `history/20261118-155133-s38-merged-to-master.md` (full S38 close-out).
-- wt2 `.s38-review/`: `prune-brief.md`, `light-review-brief.md`, `review-fix-brief.md`.
-- `docs/handbook/branch-commit.md`, `.claude/skill-bindings/qa.md`, `~/.claude/skills/engram-code-conventions/references/conventions.md` §주석.
+- `docs/process/S37-multi-daemon/` — README, prd.md (draft 2), trd.md (draft 2: §3 data shapes, §4 flows incl. §4-7 directory sync, §5 T1–T22 + five U0 ADRs, §6 test plan, §7 units U0–U5, §8 X1–X6, §9 plan vs code), spec-brief.html (big-picture, made on request; predates D3–X6 wording).
+- Research: `docs/research/multi-daemon-federation-direction-2026-11-11.md`, `docs/research/multi-daemon-iroh-link-plan-2026-11-11.md`.
+- Reference clones: `I:\Engram_Workspace\opensource\reason-network` (closest precedent: `src/net.rs`, `src/daemon/mail.rs`, `src/daemon/directory.rs`, `src/team.rs`), `syncthing`, `hcom`.
+- Tracking: T-115 (agent input layer), T-116 (slots as plugins), T-85 · T-86 (shell → N daemons stage).
+- Bindings: `.claude/skill-bindings/implement.md` 「레퍼런스」「TRD」, `review.md`, `qa.md`.
