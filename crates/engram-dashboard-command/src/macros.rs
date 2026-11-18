@@ -1,11 +1,11 @@
 //! Declaration macro — writes name · argument shape · return · errors in one spot and builds the derivatives automatically (TRD §2-2).
 //!
-//! Four things the macro builds: ① argument·return structs (including serialization derives) ② `CommandSpec` static items (linker collection)
-//! ③ JSON Schema text ④ the declaring crate's `CATALOG_VERSION`.
+//! Builds: ① argument·return structs (with serialization derives) ② `CommandSpec` static items (linker collection) ③ JSON Schema text ④
+//!   the declaring crate's `CATALOG_VERSION`.
 //!
-//! ★The schema text must be a **compile-time literal**★ — linker-collected items are evaluated as const, so
-//! no data type other than `&'static str` can be used. So the type→schema dictionary is stamped per block with `macro_rules!`, and
-//! `concat!` expands it at the use site and folds it into a literal (`concat!` expands macros inside its arguments first).
+//! ★The schema text must be a **compile-time literal**★ — linker-collected items are const-evaluated, so only `&'static str` is possible.
+//!   The type→schema dictionary is stamped per block
+//! with `macro_rules!` and `concat!` folds it into a literal at the use site (`concat!` expands macros in its arguments first).
 
 /// Declares commands **next to the producer module**.
 ///
@@ -56,41 +56,38 @@
 ///     } -> ok SlotFocusOk { } errors [NOT_FOUND];
 /// ```
 ///
-/// The marked field names are carried through [`crate::CommandSpec::agent_args`] → `agent_args` of the registration packet, and before relaying someone else's command
-/// the daemon turns that field's string into an agent id with its own resolver — the receiving handler sees **only the id** in that field.
-/// Putting it on a field of another type · a type declared in the block is a compile error. The schema · TS bindings are the same regardless of the mark.
+/// The marked field names are carried through [`crate::CommandSpec::agent_args`] → `agent_args` of the registration packet; before
+///   relaying someone else's command the daemon turns that field's string
+/// into an agent id with its own resolver, so the receiving handler sees **only the id**. Putting it on another type or a type declared in
+///   the block is a compile error. Schema · TS bindings ignore the mark.
 ///
-/// ★Why `Option<Option<T>>` exists★: where `null` is an **active instruction** (e.g. detach the parent), a plain
-/// `Option<T>` folds 「not given」 and 「given null」 into the same value — one typo'd field silently runs as that
-/// instruction. The outer means **was it carried**, the inner **is there a value**, and absence is bounced at the deserialization stage.
+/// ★Why `Option<Option<T>>` exists★: where `null` is an **active instruction** (e.g. detach the parent), plain `Option<T>` folds "not
+///   given" and "given null" — one typo'd field silently runs as that instruction.
+/// The outer means **was it carried**, the inner **is there a value**; absence is bounced at deserialization.
 ///
 /// Integers carry the Rust type's range as `minimum`/`maximum` too — **64-bit is carried as well.**
 ///
-/// ★Known imprecision (64-bit only)★: in validators that parse numbers as double-precision floats, the bounds near `2^64`·`±2^63`
-/// are rounded to the nearest double and **loosen by one step**. They are still carried because **not carrying them is wrong
-/// more widely** — without an upper bound, `18446744073709551616` is advertised as allowed while deserialization bounces it, and
-/// `i64` loses even its lower bound. Either way, the exact refusal is done by deserialization.
-/// `usize`·`isize` are carried **on a 64-bit target basis** (this repository's target).
+/// ★Known imprecision (64-bit only)★: validators parsing numbers as doubles round the bounds near `2^64`·`±2^63` and **loosen by one
+///   step**. They are carried anyway because **omitting them is wrong more widely**
+/// (`18446744073709551616` advertised as allowed, `i64` losing its lower bound); exact refusal is done by deserialization. `usize`·`isize`
+///   are carried **on a 64-bit target basis**.
 ///
 /// ## Constraints
 ///
-/// - **One block per module** — the name of the type→schema dictionary macro is fixed, so with two blocks in the same module
-///   the later definition shadows the earlier.
-/// - **No recursive types** (`struct Node { child: Node }`) — the schema is inline expansion, so it never ends. It stops with a compile error
-///   at eight levels of nesting.
-/// - **No raw identifier fields** (`r#type`) — the wire name serde uses (`type`) and the name stamped into the schema
-///   (`r#type`) diverge, and the macro has no means to trim strings. [`crate::lint_spec`] catches it.
-/// - The consuming crate must depend on `serde` (derive) and `ts-rs`, and if it uses `Option<Option<T>>` it must
-///   depend on this crate under the name `engram_dashboard_command` (serde's `deserialize_with` takes the
-///   path as a **string**, so it cannot use `$crate`).
+/// - **One block per module** — the type→schema dictionary macro name is fixed; with two blocks the later shadows the earlier.
+/// - **No recursive types** — the schema is inline expansion; it stops with a compile error at eight levels of nesting.
+/// - **No raw identifier fields** (`r#type`) — serde's wire name (`type`) and the schema's (`r#type`) diverge and the macro cannot trim
+///   strings. [`crate::lint_spec`] catches it.
+/// - The consuming crate must depend on `serde` (derive) and `ts-rs`, and for `Option<Option<T>>` on this crate under the name
+///   `engram_dashboard_command` (serde's `deserialize_with` takes the path as a **string**, so `$crate` is unusable).
 ///
 /// ## What it does not do
 ///
 /// - **It does not build handlers.** The real ones are injected by `make_table(deps)` at assembly (rule T-1).
-/// - **It does not carry field comments into the schema** — the macro has no way to escape quotes when nesting strings inside the
-///   literal again. Only the per-command description (`summary`) is carried (runtime serialization, so it is safe).
-/// - **It does not make you write common errors** — `INVALID_ARGUMENT`·`INTERNAL` are emitted by the table, so
-///   [`crate::CommandSpec::advertised_errors`] adds them automatically.
+/// - **It does not carry field comments into the schema** — the macro cannot escape quotes when nesting strings in the literal. Only the
+///   per-command `summary` is carried (runtime serialization).
+/// - **It does not make you write common errors** — `INVALID_ARGUMENT`·`INTERNAL` come from the table via
+///   [`crate::CommandSpec::advertised_errors`].
 // ADR-0155
 #[macro_export]
 macro_rules! declare_commands {
@@ -123,10 +120,10 @@ macro_rules! __engram_declare {
     (@emit [$( ($kind:ident $tname:ident [$($tbody:tt)*] [$($tdoc:literal)*]) )*] $($commands:tt)*) => {
         $( $crate::__engram_declare!(@typedef $kind $tname [$($tbody)*] [$($tdoc)*]); )*
 
-        /// This block's type→JSON Schema dictionary. `concat!` expands it at the use site.
-        /// The first argument is the nesting depth (one `[+ + …]` lump) — it stops at eight levels so recursive types do not expand forever.
-        /// ★`$(...)*` repetition cannot be used inside here★ — the outer macro reads it as its own repetition and blows up.
-        /// So the depth is received as **one lump** and passed on as is, and the increment is done outside (`@type_schema`).
+        /// This block's type→JSON Schema dictionary; `concat!` expands it at the use site. The first argument is the nesting depth (one
+        ///   `[+ + …]` lump) — it stops at eight levels so recursive types do not expand forever.
+        /// ★`$(...)*` repetition cannot be used inside★ — the outer macro reads it as its own repetition and blows up; so the depth is
+        ///   passed on **as one lump** and incremented outside (`@type_schema`).
         macro_rules! __engram_command_schema_of {
             ([+ + + + + + + +] $deep:ident) => {
                 compile_error!(concat!(
@@ -195,17 +192,15 @@ macro_rules! __engram_declare {
         $crate::__engram_declare!(@struct_def $name [$($doc)*] [$($out)*]);
     };
     // Outer Option = was it carried · inner = is there a value. `transmitted` tells the two apart.
-    // ★Not attaching `#[serde(default)]` is the very contract of this field★ — with it, absence silently folds into the outer `None`
-    //   and **passes deserialization**, leaving what the schema advertised as required to the handler's manual check only
-    //   (the next command that does not write that check violates the advertisement). `deserialize_with` + no default = when the field
-    //   is missing, serde bounces it with `missing field`.
-    // ★`skip_serializing_if` stays★ — carrying a value whose outer is `None` (when code built it directly) as is would make it
-    //   `null` and be read back as the instruction 「detach to root」. It must be left out on the way out for the counterpart to bounce it.
-    // ★ts-rs cannot read this attribute and ignores it ("failed to parse" warning — measured)★: being ignored is right.
-    //   If it read `skip_serializing_if`, the TS field would become `field?:`, which is 「absence allowed」, the exact opposite of this field's
-    //   contract. So the TS comes out required + nullable (`string | null | null` — the same type as `string | null`
-    //   in TS. The macro cannot trim it with `#[ts(as = …)]` — that attribute takes a literal string, and
-    //   `macro_rules!` cannot put a type name inside a string).
+    // ★Not attaching `#[serde(default)]` is this field's contract★ — with it, absence silently folds into the outer `None` and **passes
+    //   deserialization**, leaving what the schema advertised as required to the handler's manual check.
+    //   `deserialize_with` + no default = serde bounces a missing field with `missing field`.
+    // ★`skip_serializing_if` stays★ — an outer `None` built directly would otherwise go out as `null` and be read back as "detach to
+    //   root"; it must be left out for the counterpart to bounce it.
+    // ★ts-rs cannot read this attribute and ignores it ("failed to parse" warning)★ — right: reading `skip_serializing_if` would make the
+    //   TS field `field?:` ("absence allowed"), the opposite of this contract.
+    //   So the TS is required + nullable (`string | null | null` = `string | null`; `#[ts(as = …)]` cannot trim it — it takes a literal
+    //   string and `macro_rules!` cannot put a type name in one).
     (@struct_def $name:ident [$($doc:literal)*] [$($out:tt)*]
         $(#[doc = $fdoc:literal])* $field:ident : Option < Option < $ty:ident >> , $($rest:tt)*) => {
         $crate::__engram_declare!(@struct_def $name [$($doc)*]
@@ -315,7 +310,8 @@ macro_rules! __engram_declare {
                       errors [ $($code:ident),* $(,)? ] ;
         $($rest:tt)*
     ) => {
-        // Strip the `#[agent_ref]` marks of the argument fields first — the list of stripped fields and the remaining declaration go to `@command`.
+        // Strip the `#[agent_ref]` marks of the argument fields first — the list of stripped fields and the remaining declaration go to
+        //   `@command`.
         $crate::__engram_declare!(@agent_refs
             [ [$($summary)*] $effect $since $name $args $ok [$($ofields)*] [$($code)*] ]
             [] [] $($afields)* ,);
@@ -325,9 +321,9 @@ macro_rules! __engram_declare {
 
     // ── Agent reference marks (ADR-0308) ─────────────────────────────────────────────────────────
     // Copy the fields one by one, removing `#[agent_ref]` and collecting those field names (the trailing `,` is the termination signal).
-    // ★The mark goes **after** the doc comment★ — put before it, it matches none of the arms below and is a compile error.
-    // ★Stripped only from the top-level fields of the argument struct★ — a mark on a type declared in the block (taken directly by `@struct_def`·`@obj`)
-    //   has no arm and is a compile error. The daemon changes only the top-level fields of the argument object, so a mark on a nested field has no effect.
+    // ★The mark goes **after** the doc comment★ — before it, no arm matches (compile error).
+    // ★Stripped only from top-level fields of the argument struct★ — a mark on a type declared in the block (taken by
+    //   `@struct_def`·`@obj`) has no arm (compile error); the daemon only changes top-level fields, so a nested mark has no effect.
     (@agent_refs $cmd:tt [$($clean:tt)*] [$($refs:ident)*]) => {
         $crate::__engram_declare!(@command $cmd [$($clean)*] [$($refs)*]);
     };
@@ -424,8 +420,8 @@ macro_rules! __engram_declare {
 
 /// Deserialization of an `Option<Option<T>>` field — tells apart **was it carried** (outer) and **is there a value** (inner).
 ///
-/// serde automatically puts `None` when an `Option` field is missing, so without this function 「field absent」 and
-/// 「explicitly gave `null`」 become the same value. The declaration macro attaches this with `deserialize_with`.
+/// serde puts `None` for a missing `Option` field, so without this function "absent" and "explicit `null`" become the same value. The
+///   declaration macro attaches it with `deserialize_with`.
 pub fn transmitted<'de, D, T>(de: D) -> Result<Option<Option<T>>, D::Error>
 where
     D: serde::Deserializer<'de>,
