@@ -68,7 +68,7 @@ b7757646d9e53cdeef956b06e9f7e5c3b8afea91 # S33: docs(i18n): translate daemon mcp
 ea329f44374e56f30964fbd7a6b0f70106e61cbe # S33: docs(i18n): translate transport crate code comments to English (batch t2c2: budget, event, frame, lib, link, machine, mask)
 51f422014c959f96ec923b687502e8cf585929b1 # S33: docs(i18n): translate net, protocol, base, cli and transport manifest code comments to English (batch t2c1)
 9a0e73a66316f30d4eb28d0f458b78ec80e2c850 # S33: docs(i18n): translate transport tests, scripts and shell daemon-client code comments to English (batch t2c4)
-274dd68f38667e507dcec364881ef81c878f3e6f # S33: docs(i18n): translate transport peer, pending, policy, registry and stream code comments to English (batch t2c3); 앞잡이 줄 = read-ahead queue
+274dd68f38667e507dcec364881ef81c878f3e6f # S33: docs(i18n): translate transport peer, pending, policy, registry and stream code comments to English (batch t2c3); 앞잡이 줄 = read-ahead queue  # hangul-ok
 c22aab42901bfd7f538db81354580dab50f90522 # S33: docs(i18n): translate shell daemon-client, discovery, state, frontend and config code comments to English (batch t2c5)
 dc9eb33fc0ab5235858b8cab6afc0b583e18adc6 # S33: docs(i18n): translate ADR-0129, 0177, 0178, 0180, 0181, 0272, 0310 to English; glossary - transport queue terms
 f613b0f8ecfc733d25433d6716e47497c2c0c931 # S33: docs(i18n): translate S21 crate-boundaries trd-3-transport to English; glossary - ordering area, sent field

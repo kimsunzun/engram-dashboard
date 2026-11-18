@@ -1,6 +1,6 @@
-// unic-ucd-ident 0.9.0 의 crates.io 패키지에는 라이선스 본문 파일이 없다 — 상류 저장소의 두 파일을 손대지 않고 이어 붙였다.
-// 출처: https://github.com/open-i18n/rust-unic/blob/8a6ce83063d90b91ae2ce59eddb803edd393fca9/COPYRIGHT.md (저작권자 줄 — LICENSE-MIT 에는 없다)
-//   + https://github.com/open-i18n/rust-unic/blob/8a6ce83063d90b91ae2ce59eddb803edd393fca9/LICENSE-MIT (커밋 = 그 버전 .cargo_vcs_info.json 의 sha1)
+// The crates.io package of unic-ucd-ident 0.9.0 has no license text file — the two files from the upstream repository were joined unchanged.
+// Source: https://github.com/open-i18n/rust-unic/blob/8a6ce83063d90b91ae2ce59eddb803edd393fca9/COPYRIGHT.md (the copyright holder line — LICENSE-MIT does not have it)
+//   + https://github.com/open-i18n/rust-unic/blob/8a6ce83063d90b91ae2ce59eddb803edd393fca9/LICENSE-MIT (commit = the sha1 in that version's .cargo_vcs_info.json)
 // crate: unic-ucd-ident 0.9.0
 * Copyright 2011-2015 The Rust Project developers.
 * Copyright 2013-2016 The rust-url developers.

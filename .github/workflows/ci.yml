@@ -1,58 +1,58 @@
-# 이 워크플로를 고치기 전에 ADR-0131(`docs/decisions/0131-*`)을 읽는다.
+# Read ADR-0131 (`docs/decisions/0131-*`) before changing this workflow.
 name: CI
 
 on:
   push:
     # ★All branches★ — narrowing this leaves those branches with no gate at all, and CI green is the
     # integration check before every merge (`docs/handbook/branch-commit.md`; qa's full regression runs
-    # locally — `.claude/skill-bindings/qa.md` 「전체 회귀 = 로컬」). Public repo, so runner cost is 0.
+    # locally — `.claude/skill-bindings/qa.md` 「전체 회귀 = 로컬」). Public repo, so runner cost is 0. # hangul-ok
     # ★This is about the branch axis only★ — on the path axis, `paths` below drops doc paths only. On any
     # branch, a push that changes even one non-doc file runs everything.
     branches:
       - '**'
-    # 버전 태그 push = 릴리즈 트리거(맨 아래 release-build → release-publish 2단). 태그 push 에서는
-    # 검증 3잡도 함께 도는데 이건 중복 낭비가 아니라 게이트다 — release-build 가
-    # `needs: [backend, gates, frontend]` 로 그 결과에 매달린다.
-    # 태그는 아무 커밋에나 달 수 있어(master 를 거치지 않은 커밋·CI 가 빨간 커밋 포함)
-    # "이 커밋은 master 에서 이미 초록이었다"를 전제할 수 없다. 3잡에 `if` 를 달아 태그에서 건너뛰면
-    # 그 전제를 CI 가 확인 없이 믿게 되고, 검증된 적 없는 커밋에서 배포물이 나갈 수 있다.
+    # A version tag push = the release trigger (release-build → release-publish, two stages, at the very bottom). On a tag push
+    # the 3 verification jobs run too, and that is not wasteful duplication but a gate — release-build
+    # hangs on their result via `needs: [backend, gates, frontend]`.
+    # A tag can be put on any commit (including a commit that never went through master or one where CI is red),
+    # so "this commit was already green on master" cannot be assumed. Putting an `if` on the 3 jobs to skip them on tags
+    # would make CI trust that assumption without checking, and artifacts could ship from a commit that was never verified.
     tags:
       - 'v*'
-    # ADR-0232: 바뀐 파일이 **전부** 아래에서 빠진 경로 안이면 이 워크플로를 띄우지 않는다. 목록의 정본은
-    # 여기다 — 다른 문서에 베끼지 않는다.
-    # ★제외 목록(denylist)이다★ — 첫 줄 `'**'` 가 전부를 넣고(경로 필터가 없을 때의 기본 동작과 같다) `!` 줄이
-    # 빼므로, 모르는 경로는 전부 "돈다"로 떨어진다. 포함 목록은 한 항목을 빠뜨리면 그 경로에서 게이트가
-    # **조용히 사라지고**, 제외 목록은 빠뜨려도 **한 번 더 돌 뿐**이다. CI 에 닿는 경로는 흩어져 있고 이름만으로는
-    # 안 보인다(`prompts/` · `rust-toolchain.toml` · `vitest.config.ts` 같은 것).
-    # `paths-ignore` 가 아니라 `paths` 인 것은 되살리기 때문이다 — 문서는 제외만 할 때 `paths-ignore`, 포함과
-    # 제외를 섞을 때 `!` 를 붙인 `paths` 를 권하고, 한 이벤트에 둘을 함께 둘 수 없다(GitHub 문서 "Workflow
-    # syntax" — `paths`/`paths-ignore` 절).
-    # ★순서가 뜻이다 — 뒤에 맞는 패턴이 앞의 판정을 뒤집는다★. 그래서 되살리는 줄은 **맨 끝**에 둔다 — 그 뒤에
-    # `!` 줄을 더하면 도로 빠진다.
-    # ★제외를 더하기 전에 그 경로 아래를 CI·빌드 스크립트·코드·테스트가 읽는지부터 본다 — 읽는 파일이 있으면
-    # 끝에서 그 파일을 되살린다★. 빠진 경로만 바뀐 push 는 어떤 게이트도 보지 않는다.
-    # ★`**/*.md` 로 넓히지 말 것★ — `prompts/engram-help.md` 는 데몬이 실행 중에 읽어 help 화면으로 내고
-    # 데몬 시험이 그 파일을 읽으며(`crates/engram-dashboard-daemon/src/control/help.rs`), `prompts/` 의 두 파일은
-    # 배포판에 실린다(`scripts/build-release.ps1:50` manifest). 둘 다 확장자로는 문서와 구분되지 않는다.
-    # 태그 push 에는 경로 필터가 평가되지 않는다(같은 절) — 위 `v*` 릴리즈 트리거는 이 목록과 무관하게 돈다.
-    # `workflow_dispatch` 에는 경로 필터가 없다.
-    # 받아들인 예외(같은 절): diff 가 3,000 파일을 넘고 필터에 맞는 파일이 앞 3,000 개 안에 없으면 돌지 않는다.
-    # ★이 워크플로의 체크를 branch protection·ruleset 의 필수 체크로 걸면 문서만 바꾼 브랜치의 PR 이 머지를
-    # 못 한다★ — 경로 필터로 건너뛴 워크플로의 체크는 "Pending" 으로 남는다(GitHub 문서 "Troubleshooting
-    # required status checks" — skipped but required 절). 필수 체크를 걸게 되면 ADR-0232 를 다시 연다.
+    # ADR-0232: if the changed files are **all** inside the paths excluded below, this workflow is not started. The canonical list
+    # is here — do not copy it into other documents.
+    # ★It is an exclusion list (denylist)★ — the first line `'**'` puts everything in (the same as the default behavior with no path filter) and the `!` lines
+    # take things out, so any unknown path falls to "runs". With an inclusion list, missing one item makes the gate on that path
+    # **quietly disappear**; with an exclusion list, missing one only **runs it once more**. The paths that reach CI are scattered and cannot be
+    # seen from their names alone (things like `prompts/` · `rust-toolchain.toml` · `vitest.config.ts`).
+    # It is `paths` rather than `paths-ignore` because of the reviving line — the docs recommend `paths-ignore` when only excluding, and `paths` with `!` when mixing
+    # inclusion and exclusion, and the two cannot sit together on one event (GitHub docs "Workflow
+    # syntax" — the `paths`/`paths-ignore` section).
+    # ★Order is meaning — a later matching pattern overturns the earlier decision★. So the reviving line sits **at the very end** — adding
+    # a `!` line after it takes it back out.
+    # ★Before adding an exclusion, first check whether CI · build scripts · code · tests read anything under that path — if a file is read,
+    # revive that file at the end★. A push that changes only excluded paths is seen by no gate.
+    # ★Do not widen this to `**/*.md`★ — `prompts/engram-help.md` is read by the daemon at run time and served as the help screen,
+    # and daemon tests read that file (`crates/engram-dashboard-daemon/src/control/help.rs`); the two files in `prompts/`
+    # ship in the release (`scripts/build-release.ps1:50` manifest). Neither can be told apart from docs by extension.
+    # Path filters are not evaluated on tag pushes (same section) — the `v*` release trigger above runs regardless of this list.
+    # `workflow_dispatch` has no path filter.
+    # Accepted exception (same section): if the diff exceeds 3,000 files and no file matching the filter is among the first 3,000, it does not run.
+    # ★If this workflow's checks are made required checks in branch protection or a ruleset, PRs from branches that change only docs
+    # cannot merge★ — the check of a workflow skipped by a path filter stays "Pending" (GitHub docs "Troubleshooting
+    # required status checks" — the skipped but required section). If required checks are ever set, reopen ADR-0232.
     paths:
       - '**'
       - '!docs/**'
       - '!CLAUDE.md'
       - '!README.md'
       - '!.claude/**'
-      - '.claude/skill-bindings/qa.md' # frontend 잡의 `npm test` 가 읽는다(`src/util/launcherWiring.test.ts:76`)
+      - '.claude/skill-bindings/qa.md' # read by the frontend job's `npm test` (`src/util/launcherWiring.test.ts:76`)
   pull_request:
     branches:
       - master
-    # 위 push 의 `paths` 와 같은 목록이다 — 순서까지(ADR-0232). 한쪽만 고치면 push 와 PR 이 서로 다른 변경에서
-    # 돈다. PR 은 이번 push 가 아니라 PR 전체의 변경(토픽 브랜치가 base 와 마지막으로 맞춰진 커밋부터의
-    # three-dot diff)으로 판정된다(GitHub 문서 "Workflow syntax" — Git diff comparisons 절).
+    # The same list as `paths` of push above — down to the order (ADR-0232). Changing only one side makes push and PR run on
+    # different changes. A PR is decided by the change of the whole PR, not of this push (the three-dot diff from the commit where
+    # the topic branch was last synced with base) (GitHub docs "Workflow syntax" — the Git diff comparisons section).
     paths:
       - '**'
       - '!docs/**'
@@ -62,43 +62,43 @@ on:
       - '.claude/skill-bindings/qa.md'
   workflow_dispatch:
 
-# 같은 ref 에 새 push 가 실행을 띄우면 앞 실행을 취소한다(뒤진 결과로 판정하지 않기 위해).
-# ★단 태그 실행은 예외★ — 이 워크플로에는 이제 되돌릴 수 없는 외부 부작용(릴리즈 생성 + 에셋 업로드)을
-# 가진 잡(release-publish)이 있다. 실행 중 취소는 잡을 죽이므로 "릴리즈는 생겼는데 에셋이 없거나 잘린"
-# 상태를 남기고, 재시도는 'release already exists' 로 죽는다(자동 회복 없음).
-# job-level concurrency 로는 이걸 막을 수 없다 — 워크플로 레벨 취소는 **런 전체**를 죽이고, 그 안의 잡은
-# 자기 그룹이 무엇이든 함께 죽는다. 그래서 취소 여부 자체를 여기서 ref 종류로 가른다.
-# 검증 3잡의 브랜치·PR 동작은 종전과 동일(true)하다 — 그들이 태그에서 도는 것 자체가 이번에 생긴 일이라
-# 이 예외로 바뀌는 기존 동작이 없다.
+# When a new push on the same ref starts a run, the earlier run is cancelled (so we do not decide on a stale result).
+# ★Except tag runs★ — this workflow now has a job (release-publish) with irreversible external side effects (creating a release + uploading assets).
+# Cancelling mid-run kills the job, so it leaves a "release created but assets missing or truncated"
+# state, and a retry dies with 'release already exists' (no automatic recovery).
+# Job-level concurrency cannot prevent this — a workflow-level cancel kills **the whole run**, and the jobs in it
+# die with it whatever their group is. So whether to cancel at all is split here by ref kind.
+# The branch and PR behavior of the 3 verification jobs is the same as before (true) — that they run on tags at all is new with this change, so
+# no existing behavior changes through this exception.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
-# 워크플로 기본값은 읽기 전용이다. job-level permissions 는 최상위를 상속이 아니라 **치환**하므로,
-# 잡마다 선언한 값이 그 잡의 전부다. 현재 선언 상태:
-#   backend · gates · frontend  — 선언 없음 → 최상위 그대로 contents: read
-#   release-build               — contents: read 를 **명시** 선언(읽기 전용임을 눈에 보이게)
-#   release-publish             — contents: write ★워크플로 전체에서 쓰기 토큰을 쥔 유일한 잡★
-# 이 기본값을 write 로 넓히면 검증 3잡과 release-build 까지 쓰기 토큰을 쥐게 된다 — 넓히지 말 것.
-# 각 job 의 checkout 은 persist-credentials: false 로 토큰을 작업본에 남기지 않는다
-# — 검증 대상 코드가 같은 러너에서 돌기 때문.
+# The workflow default is read-only. Job-level permissions **replace** the top level rather than inherit it, so
+# the value declared per job is all that job has. Current declarations:
+#   backend · gates · frontend  — no declaration → the top level as is, contents: read
+#   release-build               — **explicitly** declares contents: read (so it is visibly read-only)
+#   release-publish             — contents: write ★the only job in the whole workflow that holds a write token★
+# Widening this default to write gives the 3 verification jobs and release-build a write token too — do not widen it.
+# Each job's checkout uses persist-credentials: false so the token is not left in the working copy
+# — because the code under verification runs on the same runner.
 permissions:
   contents: read
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  # 서드파티 고지 생성기(scripts/gen-third-party-licenses.mjs)가 부르는 cargo-about — gates · release-build 두 잡이 같은
-  # 핀으로 깐다(값을 두 번 적지 않으려고 여기 둔다). SHA-256 = GitHub 릴리스의 x86_64-pc-windows-msvc.tar.gz 에셋 값이고
-  # 같은 릴리스의 .sha256 파일과 같다(2026-10-15 확인). 버전을 올리면 생성기의 CARGO_ABOUT_VERSION 도 함께 — 어긋나면
-  # 생성기가 버전 단언에서 실패한다. `CARGO_` 로 시작하는 이름을 피한 것은 cargo 설정 환경변수 이름공간이라서다.
+  # cargo-about, called by the third-party notice generator (scripts/gen-third-party-licenses.mjs) — the gates and release-build jobs install it with the same
+  # pin (kept here so the value is not written twice). SHA-256 = the value of the x86_64-pc-windows-msvc.tar.gz asset of the GitHub release, and
+  # equals the .sha256 file of the same release (checked 2026-10-15). When raising the version, raise the generator's CARGO_ABOUT_VERSION too — if they diverge,
+  # the generator fails on its version assertion. The names avoid the `CARGO_` prefix because that is cargo's configuration environment variable namespace.
   PIN_CARGO_ABOUT_VERSION: '0.9.2'
   PIN_CARGO_ABOUT_SHA256: '1c03e5890238562497c2d89a3b75b02560af349c1fc3e713d3284f532a5cd748'
 
 jobs:
-  # ── 백엔드 회귀 ──────────────────────────────────────────────────────────────
-  # windows-latest 단독인 이유: Job Object 코드가 `#[cfg(windows)]` 이고 PTY 픽스처가 cmd.exe/
-  # powershell.exe 라 리눅스는 이 워크스페이스에서 검증된 적이 없다.
+  # ── Backend regression ──────────────────────────────────────────────────────────────
+  # Why windows-latest alone: the Job Object code is `#[cfg(windows)]` and the PTY fixtures are cmd.exe/
+  # powershell.exe, so Linux has never been verified in this workspace.
   backend:
     name: backend (cargo test + build)
     runs-on: windows-latest
@@ -114,11 +114,11 @@ jobs:
           rustc --version
           cargo --version
           cargo fmt --version
-          # 기대값을 YAML 에 적지 않고 rust-toolchain.toml 에서 읽는다 — 두 곳에 적으면 어긋난다.
-          # 단언이 없으면 그 파일이 지워지거나 RUSTUP_TOOLCHAIN 이 끼어들 때 러너 기본 stable 로
-          # 조용히 내려앉은 채 초록으로 남는다.
+          # The expected value is read from rust-toolchain.toml rather than written into the YAML — writing it in two places lets them diverge.
+          # Without the assertion, if that file is deleted or RUSTUP_TOOLCHAIN cuts in, it would quietly
+          # settle on the runner's default stable and stay green.
           expected=$(sed -nE 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' rust-toolchain.toml)
-          if [ -z "$expected" ]; then echo "FAIL — rust-toolchain.toml 에서 channel 을 읽지 못했다"; exit 1; fi
+          if [ -z "$expected" ]; then echo "FAIL — could not read channel from rust-toolchain.toml"; exit 1; fi
           actual=$(rustc --version | awk '{print $2}')
           if [ "$actual" != "$expected" ]; then
             echo "FAIL — pinned '$expected' but active rustc is '$actual'"
@@ -130,49 +130,49 @@ jobs:
         with:
           key: backend
 
-      # `--locked` 는 아래 전부에 붙인다: 커밋된 Cargo.lock 이 낡았을 때 조용히 재해석하지 않고 실패한다.
+      # `--locked` goes on everything below: when the committed Cargo.lock is stale, it fails instead of quietly re-resolving.
       #
-      # ★2026-08-24: `--exclude engram-dashboard` 를 뗐다 — 셸 패키지도 이 회귀에 든다★
-      # 제외를 떠받치던 사유 둘이 다 죽었다. 옛①(그 lib 테스트 타깃이 0xc0000139/ENTRYPOINT_NOT_FOUND
-      #   로 즉사)은 ADR-0174 의 세 다리(`[lib] test = false` + `[[test]] lib_unit` + build.rs 의
-      #   `rustc-link-arg-tests`)로 해소됐고, 옛②(그 단위 스위트의 알려진 실패 32 건 — daemon_client 의
-      #   app:None 단락)는 전부 고쳐졌다. 사유가 죽은 제외를 남겨 두면 이 줄이 **워크스페이스 회귀라는
-      #   이름으로 멤버 하나를 조용히 건너뛴다** — `src-tauri/` 에 새 테스트 타깃이 생겨도 누가 아래에
-      #   스텝을 손으로 더할 때까지 아무 데서도 안 돈다(`daemon_client_pending`·`daemon_client_replay` 가
-      #   실제로 그랬다). 그 침묵이 이 패키지의 217 건을 몇 달간 가려 둔 부류다.
+      # ★2026-08-24: `--exclude engram-dashboard` was removed — the shell package is in this regression too★
+      # Both reasons that held up the exclusion are dead. Old ① (its lib test target died instantly with 0xc0000139/ENTRYPOINT_NOT_FOUND)
+      #   was resolved by ADR-0174's three legs (`[lib] test = false` + `[[test]] lib_unit` + build.rs's
+      #   `rustc-link-arg-tests`), and old ② (the 32 known failures of that unit suite — daemon_client's
+      #   app:None short-circuit) were all fixed. Leaving an exclusion whose reason is dead makes this line **quietly skip a member
+      #   in the name of a workspace regression** — even if a new test target appears in `src-tauri/`, it runs nowhere until someone adds a
+      #   step below by hand (that really happened to `daemon_client_pending`·`daemon_client_replay`). That silence is the
+      #   kind that hid this package's 217 tests for months.
       #
-      # ★아래 다섯 스텝과 테스트 집합이 겹친다 — 알고 남긴 중복이다★ 잡는 축이 서로 다르다:
-      #   이 줄  : cargo 의 **기본 타깃 선택**을 쓴다. 그래서 세 다리 ①(`[lib] test = false`)을 지우면
-      #            죽는 내장 lib 테스트 타깃이 기본 선택으로 되돌아와 **여기서** 0xC0000139 로 죽는다.
-      #            아래 `--test lib_unit` 은 그 타깃을 아예 안 고르므로 ①이 사라져도 초록이다.
-      #   아래 줄: `--test <이름>` 은 타깃이 **없으면 cargo 가 실패**한다. 그래서 세 다리 ②
-      #            (`[[test]] lib_unit`)를 지우면 아래 스텝이 "no test target named `lib_unit`" 로 죽는다.
-      #            이 줄은 그걸 못 잡는다 — 사라진 타깃은 실패가 아니라 **침묵**이다(스위트가 통째로
-      #            증발한 채 초록). 세 다리 ③(링크 인자)은 양쪽 다 잡는다.
-      #   ★실패 이름★: 아래 줄들은 스텝 이름이 곧 어느 스위트인지를 짚는다. 단 이 줄이 **먼저** 돌므로
-      #            셸 패키지가 깨지면 여기서 먼저 빨개지고 아래 스텝은 돌지 않는다 — 그때 어느 타깃인지는
-      #            스텝 이름이 아니라 cargo 출력의 테스트 바이너리 이름에서 읽는다. 스텝 이름이 짚어 주는
-      #            이점은 그만큼 줄었고, 그래도 나머지 멤버 전부에는 그대로 남는다.
-      #   중복 비용: 셸 패키지 테스트가 이 잡에서 두 번 돈다. 전부 인메모리 하네스·소켓뿐이라(자식 프로세스
-      #            0) 초 단위고, 컴파일 산출물은 같은 잡의 target/ 을 공유한다.
-      #   ★기본 선택이라 새로 링크되는 것이 하나 있다 — `[[bin]]` 의 유닛테스트 하네스★
-      #            (`src/main.rs`, `#[cfg(test)]` 0 건이라 도는 테스트는 0 이다). 아래 다섯 스텝 중
-      #            어느 것도 이걸 짓지 않으므로 이 줄이 처음 짓는다. **kind=bin 이라 embed-resource 의
-      #            `rustc-link-arg-bins` 를 받아 manifest 가 붙는다고 본다 — 즉 0xC0000139 축 밖이다.**
-      #            ★단 이건 cargo 의 링크 인자 적용 규칙에서 따라 나온 추론이지 이 조합의 실측이 아니다★
-      #            (실측된 것은 lib 내장 타깃이 `-tests` 를 못 받는다는 반대쪽 사실 — ADR-0174).
-      #            여기서 0xC0000139 가 나오면 그 추론이 틀린 것이니 `[[bin]] test = false` 로 끈다.
+      # ★The test set overlaps with the five steps below — a duplication kept on purpose★ The axes they catch differ:
+      #   this line  : uses cargo's **default target selection**. So if leg ① (`[lib] test = false`) is deleted,
+      #            the dying built-in lib test target comes back into the default selection and dies **here** with 0xC0000139.
+      #            `--test lib_unit` below never selects that target, so it stays green even when ① is gone.
+      #   lines below: with `--test <name>`, **cargo fails if the target is absent**. So if leg ②
+      #            (`[[test]] lib_unit`) is deleted, the step below dies with "no test target named `lib_unit`".
+      #            This line cannot catch that — a vanished target is not a failure but **silence** (green with the whole suite
+      #            evaporated). Leg ③ (the link argument) is caught by both.
+      #   ★Failure name★: the lines below point, by step name, at which suite it is. But this line runs **first**, so
+      #            when the shell package breaks it turns red here first and the steps below do not run — then which target it is
+      #            is read not from the step name but from the test binary name in cargo's output. The benefit of the step name pointing
+      #            at it shrank by that much, and it still remains as is for all the other members.
+      #   Duplication cost: the shell package tests run twice in this job. They are all in-memory harnesses and sockets (zero child
+      #            processes), so seconds, and the compile artifacts share the same job's target/.
+      #   ★Because of the default selection, one thing gets newly linked — the unit test harness of `[[bin]]`★
+      #            (`src/main.rs`, with 0 `#[cfg(test)]`, so 0 tests run). None of the five steps below
+      #            builds this, so this line builds it first. **Being kind=bin, it is taken to receive embed-resource's
+      #            `rustc-link-arg-bins` and get the manifest attached — i.e. outside the 0xC0000139 axis.**
+      #            ★But this is an inference from cargo's rules for applying link arguments, not a measurement of this combination★
+      #            (what was measured is the opposite fact that the lib built-in target does not receive `-tests` — ADR-0174).
+      #            If 0xC0000139 shows up here, that inference was wrong, so turn it off with `[[bin]] test = false`.
       #
-      # ★아래 --skip 6건 = CI 레인 한정 제외(실 claude 바이너리 의존 축)★
-      # 이 6건은 수신자로 **실 claude** 를 띄워 턴 신호·중계를 관측한다. 러너에는 claude 가 없다.
-      # 스폰 실패 가드(`spawn_json_agent` → `require_claude`)가 있지만 러너에서는 못 막는다:
-      # 그 가드는 ① spawn 호출 성공 ② 5초 내 목록 등장 만 보는데, claude 부재 시에도 프로세스는
-      # 일단 떠서 목록에 잠깐 잡히고 곧 죽는다 → 가드 통과 후 "잠듦" 상태에서 단언이 깨진다.
-      # 어느 건이 터지는지는 러너 타이밍에 따라 달라진다(run 31168638281 = c2_live,
-      # 31169137744 = mcp_send_message — 같은 코드에 다른 실패). 그래서 개별이 아니라 축 단위로 뺀다.
-      # ★이 축의 CI 커버리지는 0 이고 그것을 받아들였다★ — 로컬(claude 있음)에서만 검증된다. 그래서
-      # 로컬에서는 관측 실패가 통과가 아니라 실패다(사용자 결정 2026-10-02 · T-46) — 단 c1 은 `#[ignore]`.
-      # claude 부재는 위 가드가 못 잡고(스폰은 성공한다) 뒤의 단언이 실패한다.
+      # ★The 6 --skip below = exclusions limited to the CI lane (the axis that depends on the real claude binary)★
+      # These 6 launch **the real claude** as the recipient and observe turn signals and relaying. The runner has no claude.
+      # There is a spawn-failure guard (`spawn_json_agent` → `require_claude`), but it cannot stop this on the runner:
+      # that guard only checks ① the spawn call succeeded ② it appears in the list within 5 seconds, and even when claude is absent the process
+      # starts at first, is briefly caught in the list and soon dies → after passing the guard, the assertion breaks in the "asleep" state.
+      # Which one blows up depends on runner timing (run 31168638281 = c2_live,
+      # 31169137744 = mcp_send_message — different failures on the same code). So they are excluded per axis, not individually.
+      # ★The CI coverage of this axis is 0, and that was accepted★ — it is verified only locally (where claude exists). So
+      # locally an observation failure is a failure, not a pass (user decision 2026-10-02 · T-46) — except c1, which is `#[ignore]`.
+      # The guard above does not catch claude's absence (the spawn succeeds); the later assertion fails.
       - name: cargo test --workspace
         shell: bash
         run: |
@@ -184,113 +184,113 @@ jobs:
             --skip control_send_revoked_sender_still_delivers_observation \
             --skip mcp_send_message_tool_happy_and_error
 
-      # 아래 다섯 스텝 = 셸 패키지(`engram-dashboard`)의 테스트 타깃을 **하나씩** 집는다 —
-      #   통합 4종(`src-tauri/tests/`) + 단위 스위트 1종(`lib_unit` = `[[test]] path = "src/lib.rs"`).
-      #   ★`src-tauri/tests/stop_smoke.rs` 에는 스텝을 세우지 않는다★ — 시험 셋이 전부 `#[ignore]` 라 여기서 돌
-      #   것이 없고, 컴파일은 위 워크스페이스 회귀가 덮는다(실행은 로컬 실 데몬 레인 — qa 바인딩 「로컬 레인」).
-      # ★2026-08-24: 이제 이 스위트들의 유일한 실행 경로가 아니다★ — 위 워크스페이스 회귀가 이 패키지를
-      #   함께 돈다(제외 해제 · 겹침을 남긴 사유의 정본 = 그 스텝 주석). 이 다섯 줄이 남아 있는 값어치는
-      #   둘이다: ① 실패가 **어느 스위트**에서 났는지를 스텝 이름이 짚는다(「실패 보고 시 게이트 명칭」).
-      #   ② `--test lib_unit` 은 **타깃 부재를 실패로** 만든다 — 위 줄이 구조적으로 못 잡는 축이다.
-      # 통합 타깃(`src-tauri/tests/`)은 engram_dashboard_lib 를 rlib 으로 소비해 정상 기립한다
-      #   (실측 2026-08-17 — Wry 사슬이 링크에서 빠진다. ADR-0174 「근거」).
-      # ★맨 아래 `cargo build --locked` 가 이걸 대신하지 않는다★ — build 는 테스트 타깃을 컴파일하지
-      #   않는다(컴파일 커버리지 자체는 이제 위 워크스페이스 회귀도 함께 준다 — 그래도 이 줄들이 지는
-      #   ①②는 그쪽에 없다).
-      # ★`--test <이름>` 을 `--lib` 이나 `--all-targets` 로 바꾸지 말 것★ — 그 둘은 **여전히 즉사한다**.
-      #   `[lib] test = false` 는 **기본 선택**에서만 빼므로 명시로 부르면 manifest 를 못 받는 내장 lib
-      #   테스트 타깃이 그대로 골라져 0xC0000139 로 죽는다(ADR-0174 「영향/불변식」 · 실측 2026-08-24).
-      # ★`-p` 단독·`--tests` 로 넓히지도 말 것★ — 이쪽은 즉사하지 않는다(둘 다 기본 선택을 따라 그 내장
-      #   타깃을 안 고른다). 넓히면 안 되는 이유는 위 ① 하나다: 다섯 타깃이 한 스텝에 뭉치면 어느 타깃이
-      #   깨졌는지가 판정에서 섞인다. (옛 사유 "`lib_unit` 의 알려진 실패를 통째로 끌어온다" 는 그 실패가
-      #   전부 고쳐지며 죽었다 — 결론만 남기고 사유를 갈아 끼웠다.)
+      # The five steps below = pick the shell package's (`engram-dashboard`) test targets **one by one** —
+      #   4 integration targets (`src-tauri/tests/`) + 1 unit suite (`lib_unit` = `[[test]] path = "src/lib.rs"`).
+      #   ★No step for `src-tauri/tests/stop_smoke.rs`★ — its tests are all `#[ignore]`, so there is nothing to
+      #   run here, and the workspace regression above covers compiling it (running it is the local real-daemon lane — qa binding 「로컬 레인」). # hangul-ok
+      # ★2026-08-24: these are no longer the only run path of these suites★ — the workspace regression above runs this package
+      #   too (exclusion lifted · the canonical reason for keeping the overlap = that step's comment). These five lines still earn their place
+      #   in two ways: ① the step name points at **which suite** a failure came from (「gate names in failure reports」).
+      #   ② `--test lib_unit` makes **an absent target a failure** — an axis the line above structurally cannot catch.
+      # The integration targets (`src-tauri/tests/`) consume engram_dashboard_lib as an rlib and start up normally
+      #   (measured 2026-08-17 — the Wry chain drops out of the link. ADR-0174 「Rationale」).
+      # ★`cargo build --locked` at the very bottom does not replace this★ — build does not compile test targets
+      #   (compile coverage itself now also comes from the workspace regression above — still, the ①② these lines
+      #   carry are not there).
+      # ★Do not change `--test <name>` to `--lib` or `--all-targets`★ — those two **still die instantly**.
+      #   `[lib] test = false` removes it only from the **default selection**, so naming it explicitly selects the built-in lib
+      #   test target that cannot receive the manifest, and it dies with 0xC0000139 (ADR-0174 「Impact/Invariants」 · measured 2026-08-24).
+      # ★Do not widen to `-p` alone or `--tests` either★ — these do not die instantly (both follow the default selection and do not pick
+      #   that built-in target). The one reason not to widen is ① above: if the five targets are lumped into one step, which target
+      #   broke gets mixed up in the decision. (The old reason "it drags in `lib_unit`'s known failures wholesale" died when those failures
+      #   were all fixed — only the conclusion was kept and the reason swapped.)
       # No `-- --test-threads=4` — CI never uses that flag (the local/CI command-line split is intentional:
-      #   qa binding 「전체 회귀 = 로컬」), and this suite only uses in-memory fake ports, so it spawns no
+      #   qa binding 「전체 회귀 = 로컬」), and this suite only uses in-memory fake ports, so it spawns no # hangul-ok
       #   child process anyway.
-      # 검증 레인(ADR-0131 결정 2)에 둔다 — 릴리즈 잡이 아니다. release-build 는 태그에서만 돌고
-      #   `needs: [backend, …]` 로 이 잡에 매달리므로, 여기 두면 배포 앞 게이트로도 함께 선다.
+      # It sits in the verification lane (ADR-0131 decision 2) — not a release job. release-build runs only on tags and
+      #   hangs on this job via `needs: [backend, …]`, so placing it here also makes it stand as a gate before shipping.
       - name: cargo test -p engram-dashboard --test layout_apply
         shell: bash
         run: cargo test --locked -p engram-dashboard --test layout_apply
 
-      # 같은 패키지의 또 다른 **통합** 타깃(`src-tauri/tests/layout_commands.rs`) — 스텝을 따로 가르는
-      # 사유는 위 layout_apply 블록이 정본이다(실패한 스위트를 스텝 이름이 짚는다 · 대상 선택은 타깃
-      # 단위). layout_apply 는 적용 서비스 자체를 재고, 이쪽은 창·탭·슬롯
-      # 명령 선언(`layout::commands`) + 인바운드 수신기(데몬 명령을 적용 서비스로 라우팅하는 계층)를 잰다.
-      # `-- --test-threads=4` 는 붙이지 않는다 — 역시 인메모리 fake 포트뿐이라 자식 프로세스가 없다.
+      # Another **integration** target of the same package (`src-tauri/tests/layout_commands.rs`) — the canonical reason for a separate
+      # step is the layout_apply block above (the step name points at the failed suite · target selection is per
+      # target). layout_apply measures the apply service itself; this one measures the window · tab · slot
+      # command declarations (`layout::commands`) + the inbound receiver (the layer that routes daemon commands to the apply service).
+      # No `-- --test-threads=4` — again only in-memory fake ports, so no child processes.
       - name: cargo test -p engram-dashboard --test layout_commands
         shell: bash
         run: cargo test --locked -p engram-dashboard --test layout_commands
 
-      # 같은 패키지의 셋째 **통합** 타깃(`src-tauri/tests/daemon_client_pending.rs`) — 스텝을 따로 가르는
-      # 사유는 위 layout_apply 블록이 정본이다(실패한 스위트를 스텝 이름이 짚는다).
-      # 재는 것은 데몬 클라이언트의 pending 슬롯 승계다: 바깥
-      # 호출자가 정한 request_id 가 겹쳐도 연결 태스크가 죽지 않고 옛 대기자가 오류로 깨어난다
-      # (옛 `debug_assert!(false)` 회귀 = 셸↔데몬 영구 단절).
-      # `-- --test-threads=4` 는 붙이지 않는다 — 소켓·자식 프로세스가 하나도 없다.
+      # The third **integration** target of the same package (`src-tauri/tests/daemon_client_pending.rs`) — the canonical reason for a separate
+      # step is the layout_apply block above (the step name points at the failed suite).
+      # What it measures is the daemon client's pending-slot succession: even when a request_id chosen by an outside
+      # caller collides, the connection task does not die and the old waiter wakes with an error
+      # (the old `debug_assert!(false)` regression = a permanent shell↔daemon disconnect).
+      # No `-- --test-threads=4` — there is not a single socket or child process.
       - name: cargo test -p engram-dashboard --test daemon_client_pending
         shell: bash
         run: cargo test --locked -p engram-dashboard --test daemon_client_pending
 
-      # 같은 패키지의 넷째 **통합** 타깃(`src-tauri/tests/daemon_client_replay.rs`) — 스텝을 따로 가르는
-      # 사유는 위 layout_apply 블록이 정본이다(실패한 스위트를 스텝 이름이 짚는다).
-      # 재는 것은 replay single-flight 의 거절 배선이다:
-      # 데몬이 Subscribe 를 거절하면 슬롯이 풀리고 병합된 다음 세대의 Subscribe 가 실제로 만들어진다
-      # (안 풀리면 그 에이전트의 출력이 모든 창에서 영구 두절 — 실측 2026-08-19).
-      # `-- --test-threads=4` 는 붙이지 않는다 — 소켓·자식 프로세스가 하나도 없다.
+      # The fourth **integration** target of the same package (`src-tauri/tests/daemon_client_replay.rs`) — the canonical reason for a separate
+      # step is the layout_apply block above (the step name points at the failed suite).
+      # What it measures is the refusal wiring of replay single-flight:
+      # when the daemon refuses a Subscribe, the slot is released and the merged next generation's Subscribe is actually made
+      # (if it is not released, that agent's output is cut off permanently in every window — measured 2026-08-19).
+      # No `-- --test-threads=4` — there is not a single socket or child process.
       - name: cargo test -p engram-dashboard --test daemon_client_replay
         shell: bash
         run: cargo test --locked -p engram-dashboard --test daemon_client_replay
 
-      # 같은 패키지의 다섯째 타깃 — 위 넷과 달리 통합이 아니라 **단위** 스위트다
-      # (`[[test]] name = "lib_unit"`, `path = "src/lib.rs"` → `src/**` 의 `#[cfg(test)]` 전부).
-      # ★2026-08-24: 이름 필터(`-- export_bindings_`)를 뗐다 — 스위트 전체가 돈다★
-      #   필터가 있던 사유(나머지에 알려진 실패 32 건 — daemon_client 의 app:None 단락이라는 선재 하네스
-      #   부패. 제품 결함 아님)는 그 32 건이 전부 고쳐지며 죽었다. **판정 = 실패 0 이어야 PASS다.**
-      #   ★기대 건수를 여기 박지 말 것★ — 테스트가 하나 늘 때마다 낡는다(이 자리에 있던 "217 건"·"8 건"이
-      #   실제로 그렇게 낡았다). 판정에 필요한 것은 실패 0 뿐이다.
+      # The fifth target of the same package — unlike the four above, not integration but a **unit** suite
+      # (`[[test]] name = "lib_unit"`, `path = "src/lib.rs"` → all `#[cfg(test)]` in `src/**`).
+      # ★2026-08-24: the name filter (`-- export_bindings_`) was removed — the whole suite runs★
+      #   The reason for the filter (32 known failures in the rest — a pre-existing harness rot, daemon_client's app:None short-circuit.
+      #   Not a product defect) died when those 32 were all fixed. **Decision = PASS only with 0 failures.**
+      #   ★Do not hard-code an expected count here★ — it goes stale every time a test is added (the "217 tests" · "8 tests" that sat here
+      #   really went stale that way). All the decision needs is 0 failures.
       #
-      # ★이 스텝이 지키는 것은 테스트 실행만이 아니다 — 그 스위트를 서게 하는 다리 셋 중 ②를
-      #   워크플로 전체에서 여기서만 잡는다★
-      #   이 패키지의 lib 내장 유닛테스트 타깃은 manifest 리소스를 못 받아 로더 단계에서 0xC0000139
-      #   (ENTRYPOINT_NOT_FOUND) 로 즉사했다. 지금 도는 이유는 셋이 함께 서 있어서다:
-      #     ① `src-tauri/Cargo.toml` 의 `[lib] test = false`
-      #     ② `src-tauri/Cargo.toml` 의 `[[test]] name = "lib_unit"` (kind=test 라야 `-tests` 가 닿는다)
-      #     ③ `src-tauri/build.rs` 의 `cargo:rustc-link-arg-tests=<OUT_DIR 의 리소스 .lib>`
-      #   하나만 빠져도 **조용히** 무너진다. 누가 무엇을 잡는지가 갈린다:
-      #     ② 부재 → 이 스텝이 "no test target named `lib_unit`" 로 실패한다. ★위 워크스페이스 회귀는
-      #        이걸 못 잡는다★ — 그쪽엔 스위트가 통째로 증발한 채 초록으로 남는다(침묵 ≠ 실패).
-      #     ① 부재 → 죽는 내장 타깃이 **기본 선택**으로 돌아와 위 워크스페이스 회귀가 0xC0000139 로
-      #        죽는다. 반대로 이 스텝은 그 타깃을 아예 안 고르므로 초록으로 남는다.
-      #     ③ 부재 → 테스트 exe 가 뜨기도 전에 죽는다(양쪽 다 빨개진다).
-      #   위 통합 타깃 4 종은 이 축을 못 본다 — 그쪽은 원래부터 `-tests` 인자를 받고 있었고, 그래서
-      #   ②③이 사라져도 멀쩡히 초록이다.
+      # ★What this step guards is not just running tests — of the three legs that make that suite stand, ②
+      #   is caught only here in the whole workflow★
+      #   This package's built-in lib unit test target could not receive the manifest resource and died instantly at the loader stage with 0xC0000139
+      #   (ENTRYPOINT_NOT_FOUND). The reason it runs now is that three stand together:
+      #     ① `[lib] test = false` in `src-tauri/Cargo.toml`
+      #     ② `[[test]] name = "lib_unit"` in `src-tauri/Cargo.toml` (only kind=test gets `-tests`)
+      #     ③ `cargo:rustc-link-arg-tests=<the resource .lib in OUT_DIR>` in `src-tauri/build.rs`
+      #   If even one is missing it collapses **quietly**. Who catches what differs:
+      #     ② absent → this step fails with "no test target named `lib_unit`". ★The workspace regression above
+      #        cannot catch this★ — there the whole suite evaporates and it stays green (silence ≠ failure).
+      #     ① absent → the dying built-in target comes back into the **default selection** and the workspace regression above dies with
+      #        0xC0000139. Conversely this step never selects that target, so it stays green.
+      #     ③ absent → the test exe dies before it even starts (both turn red).
+      #   The 4 integration targets above cannot see this axis — they were receiving the `-tests` argument from the start, so
+      #   they stay green even when ②③ disappear.
       #
-      # 이 스위트가 `src-tauri/bindings/*.ts` 를 다시 굽는다(ts-rs derive 가 `#[ts(export)]` 타입마다
-      #   만드는 `export_bindings_*` 가 그 안에 있다) — 그래서 이 스텝은 아래 'Gate: ts-rs bindings …'
-      #   보다 반드시 **앞**에 있어야 한다. 바인딩 **대조**는 여기서 하지 않는다: 그 게이트 한 곳이 세
-      #   디렉터리를 모아서 본다(agent 와 같은 모양 — 재생성 스텝 따로, diff 게이트 하나).
-      # `-- --test-threads=4` 는 붙이지 않는다 — 이 스위트는 인메모리 하네스·소켓뿐이라 자식 프로세스가 없다.
+      # This suite re-bakes `src-tauri/bindings/*.ts` (the `export_bindings_*` that the ts-rs derive makes for each `#[ts(export)]` type
+      #   live in it) — so this step must come **before** 'Gate: ts-rs bindings …'
+      #   below. Binding **comparison** is not done here: that one gate gathers the three
+      #   directories and checks them (the same shape as agent — a separate regeneration step, one diff gate).
+      # No `-- --test-threads=4` — this suite is only in-memory harnesses and sockets, so no child processes.
       - name: cargo test -p engram-dashboard --test lib_unit
         shell: bash
         run: cargo test --locked -p engram-dashboard --test lib_unit
 
-      # 아래 crate 단독 스텝들은 워크스페이스 회귀와 테스트 집합이 겹치지만, 검증 대상이 다르다 —
-      # "이 crate 가 단독 feature 집합으로도 선다"는 격리 하네스 주장(ADR-0012)을 지킨다.
-      # feature 합집합은 cargo 호출 1회 단위라 `--workspace` 는 이 축을 볼 수 없다.
+      # The crate-alone steps below overlap with the workspace regression in their test set, but what they verify differs —
+      # they guard the isolated-harness claim (ADR-0012) that "this crate stands with its own feature set too".
+      # The feature union is per single cargo invocation, so `--workspace` cannot see this axis.
 
-      # ADR-0175 결정 1: 바닥 crate(`base` — 범용 도우미 · 로깅, ADR-0269). 워크스페이스 crate 의존 0 이 존재
-      # 이유라 이 crate 도 위와 같은 단독 기립 축으로 확인한다.
-      # `-- --test-threads=4` 는 붙이지 않는다 — 이 crate 엔 자식 프로세스를 띄우는 시험이 없다(실 `cmd.exe` 를
-      #   띄우던 PID 헬퍼 시험은 헬퍼와 함께 아래 `platform` 으로 나갔다 — ADR-0266). 로컬 명령에도 안 붙는다.
+      # ADR-0175 decision 1: the bottom crate (`base` — generic helpers · logging, ADR-0269). Zero workspace crate dependencies is its reason
+      # for being, so this crate is also checked on the same stand-alone axis as above.
+      # No `-- --test-threads=4` — this crate has no test that spawns a child process (the PID helper test that spawned a real `cmd.exe`
+      #   moved out to `platform` below along with the helper — ADR-0266). The local command does not add it either.
       - name: cargo test -p engram-dashboard-base
         shell: bash
         run: cargo test --locked -p engram-dashboard-base
 
-      # ADR-0266: OS 층 crate(`platform`). 워크스페이스 crate 의존 0(base 도 아니다)이 불변식이라 이 crate 도
-      #   위와 같은 단독 기립 축으로 확인한다 — 불변식 · 게이트의 정본은 그 crate lib.rs 헤더다.
+      # ADR-0266: the OS layer crate (`platform`). Zero workspace crate dependencies (not even base) is its invariant, so this crate is also
+      #   checked on the same stand-alone axis as above — the canonical invariants · gates are that crate's lib.rs header.
       # No `-- --test-threads=4` — the `process` tests (`child_pids_finds_spawned_child` etc.) do spawn a real
-      #   `cmd.exe`, but CI never uses that flag (qa binding 「전체 회귀 = 로컬」 — the condition the flag
+      #   `cmd.exe`, but CI never uses that flag (qa binding 「전체 회귀 = 로컬」 — the condition the flag # hangul-ok
       #   targets does not exist on the runner). The local command does add it.
       - name: cargo test -p engram-dashboard-platform
         shell: bash
@@ -300,20 +300,20 @@ jobs:
         shell: bash
         run: cargo test --locked -p engram-dashboard-agent
 
-      # 제어 평면 CLI(`engram-dashboard-cli` — engram.exe 를 뽑는 bin 전용 패키지). 이 스텝이 지키는 것은 둘이다:
-      #   ① `-p` 로 따로 지어 데몬과의 기능 합집합 없이 서는가 — 데몬 그래프를 끌지 않으려고 따로 선 패키지다(ADR-0273).
-      #   ② 배송 파일명 가드(`the_built_binary_file_name_matches_the_shared_constant` · ADR-0094)가 든 `engram_cli`
-      #      타깃이 사라지면 `--test engram_cli` 가 「no test target」으로 죽는다. 위 워크스페이스 회귀에서는 사라진
-      #      타깃이 실패가 아니라 침묵이다(셸 `--test lib_unit` 스텝과 같은 값어치).
-      # No `-- --test-threads=4` — CI never uses that flag (qa binding 「전체 회귀 = 로컬」). The local
+      # The control-plane CLI (`engram-dashboard-cli` — a bin-only package that produces engram.exe). This step guards two things:
+      #   ① does it stand when built separately with `-p`, with no feature union with the daemon — it is a separate package so it does not drag in the daemon graph (ADR-0273).
+      #   ② if the `engram_cli` target holding the shipped file name guard (`the_built_binary_file_name_matches_the_shared_constant` · ADR-0094)
+      #      vanishes, `--test engram_cli` dies with 「no test target」. In the workspace regression above a vanished
+      #      target is not a failure but silence (the same value as the shell's `--test lib_unit` step).
+      # No `-- --test-threads=4` — CI never uses that flag (qa binding 「전체 회귀 = 로컬」). The local # hangul-ok
       #   command does add it (`engram_cli` spawns the real engram.exe).
       # ADR-0285
       - name: cargo test -p engram-dashboard-cli --bins --test engram_cli
         shell: bash
         run: cargo test --locked -p engram-dashboard-cli --bins --test engram_cli
 
-      # ADR-0134: 명령 버스 도구 crate(신설) — 워크스페이스 crate 의존 0 이 존재 이유라 이 crate 도
-      # 위와 같은 단독 기립 축으로 확인한다(TRD S20 §6 Step 1).
+      # ADR-0134: the command bus tool crate (new) — zero workspace crate dependencies is its reason for being, so this crate is also
+      # checked on the same stand-alone axis as above (TRD S20 §6 Step 1).
       - name: cargo test -p engram-dashboard-command
         shell: bash
         run: cargo test --locked -p engram-dashboard-command
@@ -322,38 +322,38 @@ jobs:
         shell: bash
         run: cargo test --locked -p engram-dashboard-protocol
 
-      # 위 스텝은 바인딩을 **재생성만** 한다 — ts_export.rs 에 단언이 하나도 없어서, 그것만으로는
-      # wire 계약과 커밋된 .ts 의 어긋남이 초록으로 지나간다. 실제 소비자는 frontend job 의 tsc 인데
-      # 그쪽은 다른 러너에서 **커밋된** .ts 를 본다. 재생성 결과가 커밋본과 다르면 여기서 잡는다.
-      # ★줄바꿈 잡음으로는 안 터진다★: index blob 이 LF 이고 git 이 비교 전에 작업본을 같은 방식으로
-      #   정규화하므로 CRLF 차이만으로는 diff 가 나지 않는다(autocrlf=true 인 Windows 에서 재생성 후
-      #   `git diff --exit-code` → 0 실측). 잡음이 보이는 것은 `git status` 쪽이지 `git diff` 가 아니다.
-      # agent/bindings/ 도 같은 게이트에 든다(ADR-0134): 위 `cargo test -p engram-dashboard-agent` 가
-      #   `agent.*` 선언에서 .ts 와 commands.schema.json 을 재생성하므로, 선언을 고치고 생성물을 안 밀면
-      #   여기서 걸린다. **생성 지점이 crate 마다로 흩어졌으므로 이 경로 목록도 함께 늘어난다.**
-      # ★`git diff` 는 untracked 파일을 보지 않는다★: 처음 생성되는 .ts 는 아직 커밋된 적이 없어
-      #   비교 대상 자체가 없고, 그러면 매치 없이 초록으로 지나간다(`SlotContent.ts` 사건 —
-      #   `docs/process/S20-command-bus/trd.md` §5). `git add -N`(intent-to-add)로 두 바인딩
-      #   디렉터리를 인덱스에 **내용 없이** 등록해 두면, 그 다음 `git diff` 가 신규 파일도 "전체가
-      #   추가된 diff"로 봐서 잡는다. 빈 blob 등록일 뿐 실제 스테이징이 아니므로 이후 커밋 내용에는
-      #   영향이 없다.
-      # 셋째 생성물 디렉터리 `src-tauri/bindings/` 도 2026-08-24 부터 이 게이트에 든다 —
-      #   위 "생성 지점이 crate 마다로 흩어졌으므로 이 경로 목록도 함께 늘어난다" 가 가리키던 그 항목이다.
-      #   그것을 굽는 `export_bindings_*` 는 셸 패키지의 **단위** 스위트 타깃(`lib_unit`) 안에 살고,
-      #   이 잡에서 **두 번** 구워진다 — 워크스페이스 회귀(그 패키지 제외가 풀렸다)와 `--test lib_unit`
-      #   스텝. ★이 게이트는 재생성을 하지 않고 대조만 한다★ — 그래서 요구는 하나뿐이다: 굽는 스텝이
-      #   이 게이트보다 **앞**일 것(지금 둘 다 앞이다).
-      # ★이 디렉터리를 목록에서 빼지 말 것★ — 편입 전까지 여기는 대조 없이 표류했고, 편입한 변경이
-      #   실제로 drift 를 재생성해 냈다.
-      # ★`-f` 를 빼지 말 것★: `git add` 는 무시된 경로를 조용히 건너뛰므로, 어느 crate 의 `.gitignore` 에
-      #   `*.ts` 나 `bindings/` 같은 넓은 줄이 생기면 그 생성물이 인덱스에 안 올라가고 diff 가 깨끗해져
-      #   **게이트가 소리 없이 해제된다**(지금은 세 디렉터리 다 무시 대상이 아니다 — 실측 2026-08-24).
+      # The step above only **regenerates** the bindings — ts_export.rs has not a single assertion, so by itself
+      # a divergence between the wire contract and the committed .ts passes green. The real consumer is the frontend job's tsc, and
+      # that looks at the **committed** .ts on another runner. If the regenerated result differs from the committed one, it is caught here.
+      # ★It does not blow up on line-ending noise★: the index blob is LF and git normalizes the working copy the same way before comparing,
+      #   so a CRLF difference alone produces no diff (measured on Windows with autocrlf=true: regenerate, then
+      #   `git diff --exit-code` → 0). The noise shows in `git status`, not in `git diff`.
+      # agent/bindings/ is in the same gate too (ADR-0134): the `cargo test -p engram-dashboard-agent` above
+      #   regenerates the .ts and commands.schema.json from the `agent.*` declarations, so changing a declaration without pushing the generated files
+      #   gets caught here. **The generation points are scattered per crate, so this path list grows along with them.**
+      # ★`git diff` does not look at untracked files★: a .ts generated for the first time has never been committed, so there is
+      #   nothing to compare against, and it then passes green with no match (the `SlotContent.ts` incident —
+      #   `docs/process/S20-command-bus/trd.md` §5). Registering the two binding
+      #   directories in the index **without content** with `git add -N` (intent-to-add) makes the next `git diff` see new files as "a diff
+      #   adding the whole file" and catch them. It only registers empty blobs and is not real staging, so it does not affect
+      #   later commit contents.
+      # The third generated directory `src-tauri/bindings/` is also in this gate since 2026-08-24 —
+      #   it is the item that "the generation points are scattered per crate, so this path list grows along with them" above pointed at.
+      #   The `export_bindings_*` that bake it live in the shell package's **unit** suite target (`lib_unit`), and
+      #   are baked **twice** in this job — the workspace regression (that package's exclusion was lifted) and the `--test lib_unit`
+      #   step. ★This gate does not regenerate, it only compares★ — so there is just one requirement: the baking steps
+      #   come **before** this gate (both do now).
+      # ★Do not drop this directory from the list★ — until it was added it drifted here with no comparison, and the change that added it
+      #   actually regenerated a drift.
+      # ★Do not drop `-f`★: `git add` quietly skips ignored paths, so if a broad line like `*.ts` or `bindings/` appears in some crate's
+      #   `.gitignore`, that generated output does not get into the index, the diff comes out clean, and
+      #   **the gate is silently disabled** (right now none of the three directories is ignored — measured 2026-08-24).
       - name: 'Gate: ts-rs bindings are in sync with the wire contract'
         shell: bash
         run: |
           git add -N -f -- crates/engram-dashboard-protocol/bindings/ crates/engram-dashboard-agent/bindings/ src-tauri/bindings/
           if ! git diff --exit-code -- crates/engram-dashboard-protocol/bindings/ crates/engram-dashboard-agent/bindings/ src-tauri/bindings/; then
-            echo "FAIL — 재생성된 바인딩이 커밋본과 다르다(선언 ↔ 생성물 drift, 신규 미커밋 파일 포함). 위 diff 를 반영해 커밋할 것."
+            echo "FAIL — the regenerated bindings differ from the committed ones (declaration ↔ generated drift, including new uncommitted files). Commit the diff above."
             exit 1
           fi
           echo "PASS — bindings in sync"
@@ -362,13 +362,13 @@ jobs:
         shell: bash
         run: cargo test --locked -p engram-dashboard-messaging
 
-      # ADR-0177: 재사용 전송 lib(`transport` — 신설). 워크스페이스 crate 의존 0 이 존재 이유라
-      #   위 crate 들과 같은 단독 기립 축으로 확인한다 — 기대값의 정본은 그 crate lib.rs 헤더
-      #   「격리 게이트」의 게이트 ④이고 아래 세 스텝(4a·4b·4d)은 부르기만 한다. 4c 는 같은 헤더의
-      #   게이트 ⑤(실소켓 스위트가 비지 않았나)를 부른다.
-      # ★feature 목록을 손으로 박아 `--all-features` 를 대체하지 말 것★ — `--all-features` 쪽이 `ws`
-      #   어댑터의 optional 서드파티와 실소켓 테스트까지 컴파일한다. 그게 의도다.
-      # No `-- --test-threads=4` — CI never uses that flag (qa binding 「전체 회귀 = 로컬」 — the
+      # ADR-0177: the reusable transport lib (`transport` — new). Zero workspace crate dependencies is its reason for being, so
+      #   it is checked on the same stand-alone axis as the crates above — the canonical expected values are gate ④ of that crate's lib.rs header
+      #   「Isolation gates」, and the three steps below (4a·4b·4d) only call it. 4c calls gate ⑤ of the same header
+      #   (is the real-socket suite non-empty).
+      # ★Do not replace `--all-features` with a hand-written feature list★ — `--all-features` also compiles the `ws`
+      #   adapter's optional third parties and the real-socket tests. That is the intent.
+      # No `-- --test-threads=4` — CI never uses that flag (qa binding 「전체 회귀 = 로컬」 — the # hangul-ok
       #   security-software condition it targets does not exist on the runner, and lowering it only slows
       #   CI). The local command does not add it for this crate either — it spawns no child process.
       - name: 'transport gate 4a: cargo test -p engram-dashboard-transport (features off)'
@@ -379,20 +379,20 @@ jobs:
         shell: bash
         run: cargo test --locked -p engram-dashboard-transport --all-features
 
-      # ★위 4a/4b 는 「명령이 성공했나」만 본다 — 스위트가 통째로 비어도 그대로 초록이다★. `tests/` 의
-      #   실소켓 파일 넷은 각각 파일 수준 `#![cfg(all(feature = "ws", feature = "test-support"))]` 뒤에
-      #   살아서, 그 조건이 거짓이 되면(feature 이름 오타·개명·다른 feature 로 접기) 네 바이너리가
-      #   **테스트 0개로 컴파일되고 통과한다.** 그래서 이 스텝은 종료코드를 믿지 않고 **기대하는 것의
-      #   이름과 최소 개수를 CI 가 직접 말한다**(선례 = ts-rs 바인딩 게이트가 vacuous 였던 사건,
-      #   ADR-0131 「적대 리뷰가 적출한 것」 1). 기대값의 정본 = 그 crate lib.rs 헤더의 게이트 ⑤.
-      # `-- --list` 는 하네스가 자기 목록만 찍고 아무것도 돌리지 않는다 — `: test` 로 끝나는 줄 하나가
-      #   테스트 하나다(`: bench` 는 벤치라 안 센다). 패턴 끝의 `\s*` 는 줄끝 CR 방어다.
-      # ★기대값은 「1개 이상」이고 실수를 올리지 않는다★ — 테스트를 더하거나 합칠 때마다 빨개지면 개수의
-      #   정본이 둘이 된다. 이 게이트가 겨냥하는 실패는 **0개**다.
-      # ★잡는 것 / 못 잡는 것★ — 잡는다: 타깃 소실(`--test <이름>` 이 0 아닌 종료코드로 죽는다) · 파일
-      #   수준 cfg 가 거짓(목록이 0줄) · 파일 삭제. 못 잡는다: 남은 테스트가 **무엇을 재나**(본문이 빈
-      #   `#[tokio::test]` 도 1개로 센다) · 개별 테스트의 `#[ignore]`(목록에는 그대로 오른다) · 스위트
-      #   **안쪽**에서 개별 테스트에 걸린 `#[cfg]`.
+      # ★4a/4b above only check 「did the command succeed」 — even if the suite is completely empty it stays green★. The four
+      #   real-socket files in `tests/` each live behind a file-level `#![cfg(all(feature = "ws", feature = "test-support"))]`,
+      #   so when that condition turns false (feature name typo · rename · folding into another feature), the four binaries
+      #   **compile with 0 tests and pass.** So this step does not trust the exit code; **CI itself states the names and the
+      #   minimum count of what it expects** (precedent = the incident where the ts-rs binding gate was vacuous,
+      #   ADR-0131 「Rationale — what the adversarial review found」 1). The canonical expected values = gate ⑤ of that crate's lib.rs header.
+      # With `-- --list` the harness only prints its own list and runs nothing — one line ending in `: test` is
+      #   one test (`: bench` is a bench, not counted). The `\s*` at the end of the pattern guards against a CR at line end.
+      # ★The expected value is 「1 or more」 and the actual count is not raised★ — if it turned red every time tests were added or merged,
+      #   the count would have two canonical sources. The failure this gate targets is **0**.
+      # ★What it catches / does not catch★ — catches: a lost target (`--test <name>` dies with a nonzero exit code) · file-
+      #   level cfg false (0 lines in the list) · file deletion. Does not catch: **what** the remaining tests measure (an empty-bodied
+      #   `#[tokio::test]` counts as 1 too) · `#[ignore]` on individual tests (they still appear in the list) · a `#[cfg]` on individual tests
+      #   **inside** a suite.
       - name: 'transport gate 4c: socket suites are not hollowed out (named targets + non-empty)'
         shell: bash
         run: |
@@ -402,7 +402,7 @@ jobs:
             rc=$?
             set -e
             if [ "$rc" -ne 0 ]; then
-              echo "FAIL — cargo test --test $t exited $rc (타깃이 사라졌나·개명했나)"
+              echo "FAIL — cargo test --test $t exited $rc (did the target vanish or get renamed?)"
               printf '%s\n' "$out"
               exit 1
             fi
@@ -414,24 +414,24 @@ jobs:
             if [ "$rgrc" -eq 1 ]; then n=0; fi
             echo "$t: $n test(s) listed"
             if [ "$n" -lt 1 ]; then
-              echo "FAIL — $t 이 테스트 0개로 컴파일됐다 — 파일 수준 cfg(feature ws + test-support)가 거짓이다"
+              echo "FAIL — $t compiled with 0 tests — the file-level cfg (feature ws + test-support) is false"
               printf '%s\n' "$out"
               exit 1
             fi
           done
-          echo "PASS — 네 실소켓 스위트가 각각 1개 이상 등재됐다"
+          echo "PASS — the four real-socket suites each listed 1 or more tests"
 
-      # 기대값·근거의 정본 = 그 crate lib.rs 헤더 「격리 게이트」의 게이트 ④ 셋째 줄.
+      # The canonical expected values and rationale = the third line of gate ④ in 「Isolation gates」 of that crate's lib.rs header.
       - name: 'transport gate 4d: cargo check -p engram-dashboard-transport --features ws (consumer combo)'
         shell: bash
         run: cargo check --locked -p engram-dashboard-transport --features ws
 
-      # TRD S26-window-chrome §8-4(사용자 결정 Q1 2026-10-24): 스냅 레이아웃 오버레이는 기본 꺼진 cargo 기능 `snap-overlay` 뒤에
-      #   남겨 둔 코드다(셸 기능이 platform 의 같은 이름을 켠다). 어느 운영 빌드도 켜지 않아 이 스텝이 없으면 아무도 컴파일하지
-      #   않고 썩는다 — 켠 빌드를 여기서 컴파일한다. 셸 = `cargo check`(lib · bin — invoke 어댑터 · 등록 · 창 사실 칸).
-      #   platform = 컴파일에 더해 오버레이의 실 창 시험(`window::snap` — 화면 밖 숨긴 창 · 기능 뒤라 위 platform 스텝은 안 돈다)을
-      #   돌린다. 이름 거르기가 0 건이면(모듈 · 기능 이름이 바뀌어 시험이 빠지면) 종료코드는 0 이라, 「1 건 이상 ok」를 직접 센다
-      #   (transport gate 4c 와 같은 까닭). 켠 빌드의 화면 동작(배율 · 창마다 · 포커스)은 켜는 날 잰다(TRD §14 W8).
+      # TRD S26-window-chrome §8-4 (user decision Q1 2026-10-24): the snap layout overlay is code kept behind the cargo feature `snap-overlay`,
+      #   off by default (the shell feature turns on platform's feature of the same name). No production build turns it on, so without this step nobody
+      #   compiles it and it rots — the feature-on build is compiled here. Shell = `cargo check` (lib · bin — the invoke adapter · registration · window facts field).
+      #   platform = besides compiling, runs the overlay's real-window tests (`window::snap` — an off-screen hidden window · behind the feature, so the platform step above does not run them).
+      #   If the name filter matches 0 (the tests drop out because a module or feature name changed), the exit code is 0, so 「1 or more ok」 is counted directly
+      #   (the same reason as transport gate 4c). The feature-on build's on-screen behavior (scaling · per window · focus) is measured on the day it is turned on (TRD §14 W8).
       - name: 'snap-overlay gate 1: the feature-on build compiles (shell) and its overlay tests pass (platform)'
         shell: bash
         run: |
@@ -446,16 +446,16 @@ jobs:
           n=$(printf '%s\n' "$out" | grep -cE '^test window::snap::[A-Za-z0-9_:]+ \.\.\. ok[[:space:]]*$')
           set -e
           echo "window::snap: $n test(s) ok"
-          if [ "$n" -lt 1 ]; then echo "FAIL — window::snap 시험이 하나도 돌지 않았다(모듈 · 기능 이름이 바뀌었나)"; exit 1; fi
+          if [ "$n" -lt 1 ]; then echo "FAIL — not a single window::snap test ran (did a module or feature name change?)"; exit 1; fi
           echo "PASS"
 
-      # 워크스페이스 전체 빌드(회귀 명령이 제외한 src-tauri 까지 여기서 컴파일된다).
+      # Full workspace build (src-tauri, which the regression command excluded, is compiled here too).
       - name: cargo build
         shell: bash
         run: cargo build --locked
 
-  # ── 포맷 + 격리 게이트 ───────────────────────────────────────────────────────
-  # 컴파일이 없어 백엔드 잡과 병렬로 빠르게 끝난다(cargo tree 게이트는 의존 해석만 한다).
+  # ── Format + isolation gates ───────────────────────────────────────────────────────
+  # No compiling, so it finishes fast in parallel with the backend job (the cargo tree gates only resolve dependencies).
   gates:
     name: fmt + isolation gates
     runs-on: windows-latest
@@ -472,7 +472,7 @@ jobs:
           cargo --version
           cargo fmt --version
           expected=$(sed -nE 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' rust-toolchain.toml)
-          if [ -z "$expected" ]; then echo "FAIL — rust-toolchain.toml 에서 channel 을 읽지 못했다"; exit 1; fi
+          if [ -z "$expected" ]; then echo "FAIL — could not read channel from rust-toolchain.toml"; exit 1; fi
           actual=$(rustc --version | awk '{print $2}')
           if [ "$actual" != "$expected" ]; then
             echo "FAIL — pinned '$expected' but active rustc is '$actual'"
@@ -484,16 +484,16 @@ jobs:
         with:
           key: gates
 
-      # windows-latest 러너에 ripgrep 이 있는지는 이미지 문서가 보장하지 않는다 → 버전을 박아 직접 깐다.
-      # 게이트 판정이 정규식 동작에 달려 있으므로 러너 이미지가 무엇을 들고 있든 같은 rg 로 돈다.
-      # GITHUB_PATH 는 기존 PATH 앞에 붙으므로 러너에 rg 가 이미 있어도 이쪽이 이긴다.
+      # Whether the windows-latest runner has ripgrep is not guaranteed by the image docs → pin the version and install it directly.
+      # The gate decisions depend on regex behavior, so they run with the same rg whatever the runner image carries.
+      # GITHUB_PATH is prepended to the existing PATH, so this one wins even if the runner already has rg.
       - name: Install ripgrep (pinned 14.1.1, checksum-verified)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $ver = '14.1.1'
-          # 릴리스가 배포하는 공식 .sha256 값. 전송 중 손상과 asset 사후 교체를 잡는다.
-          # (같은 릴리스에서 온 값이라 릴리스 자체가 오염된 경우까지 막지는 못한다 — 그건 별개 문제.)
+          # The official .sha256 value distributed with the release. Catches corruption in transit and after-the-fact asset replacement.
+          # (Since it comes from the same release, it cannot protect against the release itself being compromised — that is a separate problem.)
           $sha = 'd0f534024c42afd6cb4d38907c25cd2b249b79bbe6cc1dbee8e3e37c2b6e25a1'
           $url = "https://github.com/BurntSushi/ripgrep/releases/download/$ver/ripgrep-$ver-x86_64-pc-windows-msvc.zip"
           $zip = "$env:RUNNER_TEMP\rg.zip"
@@ -504,12 +504,12 @@ jobs:
           $exe = Get-ChildItem "$env:RUNNER_TEMP\rg" -Recurse -Filter rg.exe | Select-Object -First 1
           if (-not $exe) { throw "rg.exe not found in the extracted archive" }
           $exe.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
-          # 아래 검증 스텝이 쓸 기대값 — 버전 문자열을 YAML 에 두 번 적지 않으려고 여기서 넘긴다.
+          # The expected value for the verification step below — passed from here so the version string is not written twice in the YAML.
           "RG_EXPECTED_VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      # 버전까지 확인하는 이유: 위 설치가 실패했는데 러너 이미지에 우연히 다른 rg 가 있으면, 단순
-      # `rg --version` 은 통과해 버려 게이트가 핀되지 않은 rg 로 도는 것을 못 잡는다.
-      # 정확히 일치를 보는 이유: 부분 일치로 두면 14.1.10 같은 상위 버전이 14.1.1 로 통과한다.
+      # Why the version is checked too: if the install above failed and the runner image happens to have another rg, a plain
+      # `rg --version` would pass, and we could not catch the gate running with an unpinned rg.
+      # Why an exact match: with a partial match, a higher version like 14.1.10 passes as 14.1.1.
       - name: Verify ripgrep is the pinned build
         shell: bash
         run: |
@@ -521,21 +521,21 @@ jobs:
           fi
           echo "PASS — ripgrep $actual"
 
-      # cargo fmt 는 의존을 해석하지 않으므로 --locked 를 붙이지 않는다(cargo-fmt 가 받지 않는 플래그다).
+      # cargo fmt does not resolve dependencies, so no --locked (a flag cargo-fmt does not accept).
       - name: cargo fmt --check
         shell: bash
         run: cargo fmt --check
 
-      # ★아래 grep 게이트 전부의 공통 함정 — 종료코드 반전★
-      # rg 는 "매치를 찾으면 0, 못 찾으면 1, 오류면 2 이상" 으로 끝난다. 그런데 이 게이트들이 통과인
-      # 조건은 **매치 0** 이다. 즉 rg 의 종료코드를 그대로 스텝 성공으로 쓰면 판정이 정확히 뒤집힌다.
-      # 또 `|| true` 나 `if rg …; then` 로 넘기면 rc=2(경로 오타·rg 부재 등)가 "매치 없음" 과 같은
-      # 갈래로 들어가 게이트가 조용히 항상 통과한다. 그래서 세 갈래(0 / 1 / 2+)를 명시적으로 가른다.
-      # `set +e` 가 필요한 이유: Actions 의 bash 는 `set -e` 로 도는데 `hits=$(rg …)` 는 rg 의 종료코드를
-      # 그대로 물려받아, 매치가 없는 **정상 통과** 경로에서 스텝이 먼저 죽는다.
+      # ★The common trap of all grep gates below — the exit code is inverted★
+      # rg ends with "0 if it finds a match, 1 if not, 2 or more on error". But the passing condition of these gates
+      # is **0 matches**. So using rg's exit code as the step's success directly inverts the decision exactly.
+      # And letting it through with `|| true` or `if rg …; then` puts rc=2 (path typo · rg absent etc.) into the same
+      # branch as "no match", and the gate quietly always passes. So the three branches (0 / 1 / 2+) are split explicitly.
+      # Why `set +e` is needed: Actions' bash runs with `set -e`, and `hits=$(rg …)` inherits rg's exit code
+      # as is, so on the **normal pass** path with no match, the step dies first.
 
-      # 옛 게이트명은 'Gate: core isolation — no `use tauri` in core' 였다(crate 개명 ADR-0175 전).
-      #   ADR-0003 의 코어 격리 불변식 그대로이고 대상 crate 이름만 `core` → `agent` 로 바뀌었다.
+      # The old gate name was 'Gate: core isolation — no `use tauri` in core' (before the crate rename ADR-0175).
+      #   It is ADR-0003's core isolation invariant as is; only the target crate name changed from `core` → `agent`.
       - name: 'Gate: agent crate isolation — no `use tauri` in the agent crate'
         shell: bash
         run: |
@@ -549,11 +549,11 @@ jobs:
             *) echo "FAIL — rg errored (exit $rc)"; exit 1 ;;
           esac
 
-      # ADR-0134: 신규 crate 이름(`command`)이 알파벳에 없으면 메시징이 도구 crate 를 써도 안 잡힌다.
-      #   ADR-0175 의 `base` · ADR-0266 의 `platform` · ADR-0177 의 `transport` 도 같은 이유로
-      #   알파벳에 넣는다. ★새 워크스페이스 crate 가 생길 때마다 여기 이름을 더하고, 지운 crate 는 뺀다★(손으로
-      #   박은 알파벳이 이 정규식의 가장 큰 구멍이고, 아래 상한 게이트가 그 구멍을 덮는다).
-      #   단 lib 타깃이 없는 bin 전용 멤버(`engram-dashboard-cli`)는 더하지 않는다 — 부를 수 있는 crate 가 아니다(ADR-0285). 그런 멤버에 lib 를 세우는 날 여기 이름을 더한다.
+      # ADR-0134: if a new crate name (`command`) is not in the alternation, messaging using the tool crate goes uncaught.
+      #   ADR-0175's `base` · ADR-0266's `platform` · ADR-0177's `transport` are put in the alternation for the same reason.
+      #   ★Every time a new workspace crate appears, add its name here, and remove deleted crates★ (the hand-written
+      #   alternation is this regex's biggest hole, and the ceiling gate below covers that hole).
+      #   But a bin-only member with no lib target (`engram-dashboard-cli`) is not added — it is not a crate that can be called (ADR-0285). The day such a member gets a lib, add its name here.
       - name: 'Gate: messaging kernel isolation — no workspace crate refs'
         shell: bash
         run: |
@@ -567,20 +567,20 @@ jobs:
             *) echo "FAIL — rg errored (exit $rc)"; exit 1 ;;
           esac
 
-      # 위 게이트는 소스의 심볼 경로만 본다 — 매니페스트 텍스트 정규식으로 이 구멍을 닫으려 했으나
-      # (이전 버전: `rg 'package\s*=\s*"engram-dashboard-' Cargo.toml`) 교차 리뷰에서 같은 종류의
-      # 구멍이 두 곳 더 확인됐다. **매니페스트도 결국 텍스트라 정규식이 못 보는 정상 TOML 문법이
-      # 항상 남는다** — 그래서 매니페스트 재작성 대신 다른 계기로 옮긴다:
-      # 텍스트가 아니라 **해석된 의존 그래프**(`cargo tree`)를 읽으면 아래 문법 형태 자체가 무의미해진다.
-      #   ① quoting — TOML literal string 은 작은따옴표도 유효하다: `package = 'engram-dashboard-command'`.
-      #      정규식은 큰따옴표만 봤으므로 그대로 빠져나간다.
-      #   ② build-dependencies — `build.rs` 전용 워크스페이스 crate 는 `[build-dependencies]` 테이블에
-      #      들어가고 rename 없이도 매니페스트 정규식(rename 이 없으면 `package =` 키 자체가 안 생긴다)과
-      #      위 소스 정규식(스캔 범위가 `src/` 뿐이라 크레이트 루트의 `build.rs` 는 안 본다) 양쪽을 다
-      #      빠져나간다.
-      # `-e normal,dev,build --target all --all-features` 를 줄이지 말 것 — 줄이면 그만큼
-      # (rename·비활성 target·optional 이 새어나간다) 형태가 샌다. 기존 소스 정규식 게이트는 그대로
-      # 둔다 — 이건 additive.
+      # The gate above only looks at symbol paths in source — we tried to close this hole with a regex over manifest text, but
+      # (previous version: `rg 'package\s*=\s*"engram-dashboard-' Cargo.toml`) cross review found two more holes of the same
+      # kind. **A manifest is text in the end too, so there always remain valid TOML syntaxes a regex cannot see**
+      # — so instead of rewriting the manifest regex, we move to a different instrument:
+      # reading the **resolved dependency graph** (`cargo tree`) instead of text makes the syntactic forms below meaningless.
+      #   ① quoting — a TOML literal string with single quotes is valid too: `package = 'engram-dashboard-command'`.
+      #      The regex only looked at double quotes, so it slipped through as is.
+      #   ② build-dependencies — a workspace crate used only by `build.rs` goes in the `[build-dependencies]` table
+      #      and, even without a rename, slips past both the manifest regex (without a rename the `package =` key itself never appears) and
+      #      the source regex above (its scan scope is only `src/`, so it does not look at the crate root's `build.rs`)
+      #      at once.
+      # Do not cut down `-e normal,dev,build --target all --all-features` — cutting it lets that much
+      # (rename · inactive target · optional) of the forms leak. The existing source regex gate stays
+      # as is — this is additive.
       - name: 'Gate: messaging kernel isolation — direct workspace deps ceiling (exactly 1 = self)'
         shell: bash
         run: |
@@ -597,15 +597,15 @@ jobs:
           if [ -z "$out" ]; then n=0; else n=$(printf '%s\n' "$out" | wc -l | tr -d '[:space:]'); fi
           echo "found $n direct workspace dep(s):"
           printf '%s\n' "$out"
-          if [ "$n" -ne 1 ]; then echo "FAIL — expected exactly 1(자기 자신) — 워크스페이스 crate 의존이 반입됐다"; exit 1; fi
+          if [ "$n" -ne 1 ]; then echo "FAIL — expected exactly 1 (itself) — a workspace crate dependency was brought in"; exit 1; fi
           echo "PASS"
 
-      # ADR-0134: 도구 crate(`command`)의 존재 이유 자체가 "워크스페이스 crate 의존 0" 이다
-      # (`crates/engram-dashboard-command/src/lib.rs` 헤더 불변식 1). 그 헤더가 적어 둔 게이트
-      # (`rg "path\s*=" Cargo.toml`) 는 위 messaging 게이트가 방금 폐기한 매니페스트 정규식과 같은
-      # 구멍(quoting·build-dependencies)을 처음부터 안고 있어, 텍스트 정규식으로 세웠다가 나중에 또
-      # 교체하지 않고 처음부터 해석된 그래프로 본다. 위 messaging 상한 게이트와 같은 계기 — 자세한 이유는 그 게이트
-      # 주석 참조.
+      # ADR-0134: the very reason the tool crate (`command`) exists is "zero workspace crate dependencies"
+      # (invariant 1 of the `crates/engram-dashboard-command/src/lib.rs` header). The gate that header wrote down
+      # (`rg "path\s*=" Cargo.toml`) carries from the start the same holes (quoting · build-dependencies) as the manifest regex the messaging gate above
+      # just discarded, so instead of setting it up as a text regex and replacing it again later, it looks at the resolved graph from the start. The same
+      # instrument as the messaging ceiling gate above — for the detailed reason see that gate's
+      # comment.
       - name: 'Gate: command tool crate — direct workspace deps ceiling (exactly 1 = self)'
         shell: bash
         run: |
@@ -622,14 +622,14 @@ jobs:
           if [ -z "$out" ]; then n=0; else n=$(printf '%s\n' "$out" | wc -l | tr -d '[:space:]'); fi
           echo "found $n direct workspace dep(s):"
           printf '%s\n' "$out"
-          if [ "$n" -ne 1 ]; then echo "FAIL — expected exactly 1(자기 자신) — 워크스페이스 crate 의존이 반입됐다"; exit 1; fi
+          if [ "$n" -ne 1 ]; then echo "FAIL — expected exactly 1 (itself) — a workspace crate dependency was brought in"; exit 1; fi
           echo "PASS"
 
-      # ADR-0175 결정 1: 바닥 crate(`base`)의 입주 조건 ②는 "도메인 지식 0" 이고, 그 실물이 워크스페이스
-      # crate 의존 0 이다(그 crate lib.rs 헤더가 정본). 여기가 그 벽이다 — 컴파일러는 잎을 강제하지 않는다.
-      # 위 두 게이트와 같은 형태·같은 플래그다(줄이면 rename·비활성 target·optional 이 샌다).
-      # ★소스 정규식 게이트를 따로 두지 않는 이유★: `base` 는 남을 안 부르는 것이 불변식이라 상한 게이트
-      #   하나로 충분하다(메시징처럼 "부르는 이름 알파벳" 을 손으로 관리할 필요가 없다).
+      # ADR-0175 decision 1: the bottom crate's (`base`) entry condition ② is "zero domain knowledge", and its concrete form is zero workspace
+      # crate dependencies (that crate's lib.rs header is canonical). This is that wall — the compiler does not enforce a leaf.
+      # The same form and the same flags as the two gates above (cutting them lets rename · inactive target · optional leak).
+      # ★Why there is no separate source regex gate★: `base` not calling others is the invariant, so one ceiling gate
+      #   is enough (no need to hand-manage an "alternation of names it calls" as messaging does).
       - name: 'Gate: base leaf crate — direct workspace deps ceiling (exactly 1 = self)'
         shell: bash
         run: |
@@ -646,18 +646,18 @@ jobs:
           if [ -z "$out" ]; then n=0; else n=$(printf '%s\n' "$out" | wc -l | tr -d '[:space:]'); fi
           echo "found $n direct workspace dep(s):"
           printf '%s\n' "$out"
-          if [ "$n" -ne 1 ]; then echo "FAIL — expected exactly 1(자기 자신) — 워크스페이스 crate 의존이 반입됐다"; exit 1; fi
+          if [ "$n" -ne 1 ]; then echo "FAIL — expected exactly 1 (itself) — a workspace crate dependency was brought in"; exit 1; fi
           echo "PASS"
 
-      # ADR-0003 의 격리 불변식이 걸리는 축은 crate 이름이 아니라 **어느 바이너리에 링크되나** 다.
-      #   `base` 는 headless 데몬에 링크되므로, 여기서 Tauri 를 부르는 순간 창도 webview 도 없는 그
-      #   바이너리가 전송 방식에 묶인다 — ADR-0003 이 막으려던 바로 그 실패다.
-      # ★"잎 crate 라 안전하다" 로 이 스텝을 지우지 말 것★: 잎 성질은 **워크스페이스 crate** 축의 말이고,
-      #   바로 위 상한 게이트도 `rg "^engram-dashboard"` 로 워크스페이스 멤버만 센다. 서드파티인 `tauri` 는
-      #   그 게이트를 그대로 통과한다 — 두 게이트는 서로 다른 축이다.
-      # base 입주자는 agent 게이트의 스캔 범위(`crates/engram-dashboard-agent/src/`) 밖에 산다(ADR-0175
-      #   결정 1). 이 스텝이 없으면 어느 게이트도 그 입주자를 안 본다 — `logging::init_logging_with_file` 이
-      #   "이벤트 하나만 쏘면 편한" 대표 자리다.
+      # The axis ADR-0003's isolation invariant hangs on is not the crate name but **which binary it links into**.
+      #   `base` links into the headless daemon, so the moment it calls Tauri here, that binary with no window and no webview
+      #   gets tied to a transport method — exactly the failure ADR-0003 meant to prevent.
+      # ★Do not delete this step because "it is a leaf crate, so it is safe"★: being a leaf is a statement about the **workspace crate** axis,
+      #   and the ceiling gate right above also counts only workspace members with `rg "^engram-dashboard"`. The third-party `tauri`
+      #   passes that gate as is — the two gates are different axes.
+      # base's tenants live outside the agent gate's scan scope (`crates/engram-dashboard-agent/src/`) (ADR-0175
+      #   decision 1). Without this step no gate looks at those tenants — `logging::init_logging_with_file` is
+      #   the typical place where "just firing one event would be handy".
       - name: 'Gate: base crate isolation — no `use tauri` in the base crate'
         shell: bash
         run: |
@@ -671,17 +671,17 @@ jobs:
             *) echo "FAIL — rg errored (exit $rc)"; exit 1 ;;
           esac
 
-      # ADR-0175 결정 1 의 입주 조건 ③(입주자끼리 서로 참조하지 않을 것)의 벽. ①②와 달리 이 조건에는
-      #   기계 검증이 없었다 — ②는 위 상한 게이트가, ①은 사람이 본다.
-      # ★왜 지켜야 하나★: 입주자가 서로 엮이면 그건 한 덩어리이고, 한 덩어리를 바닥에 두면 그 전체가 모든
-      #   소비자에게 딸려 간다 — ADR-0151 「거부한 대안」 E 의 `bevy_core` 선례(ADR-0269 「거부한 대안」 1 이
-      #   다시 잰다)가 실패한 시작점이 정확히 여기다.
-      # ★`crate::` 단독으로 넓히지 말 것★: 그건 평범한 Rust 라 게이트가 아니라 잡음이 된다. 모듈 **이름**을
-      #   박아 두는 대가로 입주자가 늘면 여기 이름을 더해야 한다(메시징 정규식과 같은 종류의 구멍).
-      # ★`::` 앞뒤 `\s*` 를 걷지 말 것★: 공백형(`super:: sync` · `crate :: time`)을 잡는다 — 근거는 아래
-      #   `replay_flight` 순수성 게이트 주석.
-      # ★알려진 한계★: `logging` 이 나중에 하위 모듈을 가지면 그 안의 `crate::logging::…` 자기 참조가
-      #   오탐된다. 그때는 상대 경로(`super::`)로 부르거나 이 게이트를 다시 판정한다.
+      # The wall for entry condition ③ of ADR-0175 decision 1 (tenants must not reference each other). Unlike ①②, this condition
+      #   had no machine check — ② is checked by the ceiling gate above, ① by people.
+      # ★Why it must hold★: if tenants get tangled with each other they are one lump, and putting one lump at the bottom drags the whole of it
+      #   along to every consumer — the point where ADR-0151 「Rejected alternatives」 E's `bevy_core` precedent (re-measured by ADR-0269
+      #   「Rejected alternatives」 1) started to fail is exactly here.
+      # ★Do not widen it to `crate::` alone★: that is plain Rust, so it becomes noise rather than a gate. The price of hard-coding the module **names**
+      #   is that when tenants are added, their names must be added here (the same kind of hole as the messaging regex).
+      # ★Do not remove the `\s*` around `::`★: it catches the spaced forms (`super:: sync` · `crate :: time`) — the rationale is in the
+      #   `replay_flight` purity gate comment below.
+      # ★Known limit★: if `logging` later gets submodules, a self-reference `crate::logging::…` inside them is
+      #   a false positive. Then call it by a relative path (`super::`) or re-decide this gate.
       - name: 'Gate: base leaf crate — tenants must not reference each other'
         shell: bash
         run: |
@@ -695,15 +695,15 @@ jobs:
             *) echo "FAIL — rg errored (exit $rc)"; exit 1 ;;
           esac
 
-      # ADR-0269 결정 5 · ADR-0275 결정 5: base 의 시험 기능 `test-support`(`testing` 모듈과 그 뒤의 시험 도우미를 연다)는
-      #   소비 crate 의 `[dev-dependencies]` 에서만 켠다. 워크스페이스가 `resolver = "2"` 라 dev 그래프의
-      #   기능은 운영 빌드로 합쳐지지 않는다 — 이 스텝은 누가 `[dependencies]` 쪽에 그 기능을 켜는 것을 잡는다.
-      #   운영 바이너리를 내는 셋(데몬 · 셸 · CLI — CLI 그래프에는 agent 를 거쳐 base 가 있다)의 정상 · build 그래프를
-      #   해석된 그래프로 읽는다(매니페스트 grep 이 아니다).
-      # ★짝 검사(agent dev 그래프 → 1줄 이상)를 지우지 말 것★: 기능 이름이 바뀌면 0 기대 셋은 매치할 낱말을
-      #   잃고 조용히 통과한다 — 짝이 그 눈먼 통과를 빨갛게 만든다(transport lib.rs 헤더 게이트 ⑤ 와 같은 근거).
-      # ★한계★: 해석된 그래프를 읽을 뿐이라 `--all-targets` 를 한 호출로 짓는 빌드의 기능 합집합은 못 본다
-      #   (daemon `Cargo.toml` 「운영 빌드 주의」 — 배포 바이너리를 그렇게 짓지 않는 것이 규칙이다).
+      # ADR-0269 decision 5 · ADR-0275 decision 5: base's test feature `test-support` (opens the `testing` module and the test helpers behind it) is
+      #   turned on only in the consuming crate's `[dev-dependencies]`. The workspace uses `resolver = "2"`, so dev-graph
+      #   features are not merged into the production build — this step catches someone turning that feature on on the `[dependencies]` side.
+      #   It reads the normal · build graphs of the three that produce production binaries (daemon · shell · CLI — the CLI graph has base through agent)
+      #   as resolved graphs (not a manifest grep).
+      # ★Do not delete the pair check (agent dev graph → 1 or more lines)★: if the feature name changes, the three 0-expectations lose the word
+      #   to match and quietly pass — the pair turns that blind pass red (the same rationale as gate ⑤ of the transport lib.rs header).
+      # ★Limit★: it only reads the resolved graph, so it cannot see the feature union of a build that builds `--all-targets` in one call
+      #   (daemon `Cargo.toml` 「Production build caution」 — the rule is not to build shipped binaries that way).
       - name: 'Gate: base test-support stays out of release graphs (daemon · shell · cli = 0, agent dev >= 1)'
         shell: bash
         run: |
@@ -719,7 +719,7 @@ jobs:
             set -e
             case "$rgrc" in
               1) echo "PASS — $pkg normal graph: 0 matches" ;;
-              0) echo "FAIL — $pkg 운영 그래프에 base test-support 가 켜졌다:"; printf '%s\n' "$tree"; exit 1 ;;
+              0) echo "FAIL — base test-support is on in the $pkg production graph:"; printf '%s\n' "$tree"; exit 1 ;;
               *) echo "FAIL — rg errored (exit $rgrc)"; exit 1 ;;
             esac
           done
@@ -735,10 +735,10 @@ jobs:
           if [ "$rgrc" -gt 1 ]; then echo "FAIL — rg errored (exit $rgrc)"; exit 1; fi
           if [ -z "$hits" ]; then n=0; else n=$(printf '%s\n' "$hits" | wc -l | tr -d '[:space:]'); fi
           echo "agent dev graph: $n match(es)"
-          if [ "$n" -lt 1 ]; then echo "FAIL — expected >= 1 — 기능 이름이 바뀌었나(그러면 위 0 기대 셋이 눈먼 채 통과한다)"; printf '%s\n' "$tree"; exit 1; fi
+          if [ "$n" -lt 1 ]; then echo "FAIL — expected >= 1 — did the feature name change? (then the 0-expectations above pass blind)"; printf '%s\n' "$tree"; exit 1; fi
           echo "PASS"
 
-      # ADR-0272 「영향」 invariant: protocol's manifest names no workspace crate (TRD S21 trd-3 3-1 U5).
+      # ADR-0272 「Impact」 invariant: protocol's manifest names no workspace crate (TRD S21 trd-3 3-1 U5).
       #   A type another crate owns enters a packet as a protocol copy or a raw JSON slot (ADR-0272 decisions 1-3),
       #   never as a dependency edge.
       # Same form and flags as the messaging · command · base · transport ceiling gates — shortening them lets
@@ -763,14 +763,14 @@ jobs:
           if [ "$n" -ne 1 ]; then echo "FAIL — expected exactly 1 (self) — a workspace crate dependency was pulled in"; exit 1; fi
           echo "PASS"
 
-      # ADR-0266 「영향」: OS 층 crate(`platform`)의 격리 게이트 ① · ②. 기대값 · 근거 · 「지우지 말 것」의 정본은
-      #   `crates/engram-dashboard-platform/src/lib.rs` 헤더의 「격리 게이트」 절이고 여기는 부르기만 한다.
-      #   (③ 시험 기능 누수 게이트는 그 아래 스텝이 따로 진다.)
-      # ★①②가 각각 다른 축이라 하나로 줄이지 말 것★ — ①은 워크스페이스 멤버만 세므로 서드파티 `tauri` 를
-      #   그냥 통과시킨다(그 축이 ②).
-      # 형태 · 플래그는 messaging · command · base · transport 상한 게이트와 같다. ①에 경로 사전점검이 없는
-      #   까닭도 transport 게이트 1 과 같다 — 패키지가 사라지거나 개명하면 `cargo tree -p` 가 0 이 아닌
-      #   종료코드로 죽어 첫 분기가 잡는다.
+      # ADR-0266 「Impact」: isolation gates ① · ② of the OS layer crate (`platform`). The canonical expected values · rationale · 「do not delete」 are
+      #   the 「Isolation gates」 section of the `crates/engram-dashboard-platform/src/lib.rs` header, and this only calls them.
+      #   (③, the test feature leak gate, is carried separately by the step below.)
+      # ★①② are different axes, so do not merge them into one★ — ① counts only workspace members, so it lets the third-party `tauri`
+      #   straight through (that axis is ②).
+      # Form · flags are the same as the messaging · command · base · transport ceiling gates. The reason ① has no path pre-check
+      #   is also the same as transport gate 1 — if the package vanishes or is renamed, `cargo tree -p` dies with a nonzero
+      #   exit code and the first branch catches it.
       - name: 'platform gate 1: direct workspace deps ceiling (exactly 1 = self)'
         shell: bash
         run: |
@@ -787,17 +787,17 @@ jobs:
           if [ -z "$out" ]; then n=0; else n=$(printf '%s\n' "$out" | wc -l | tr -d '[:space:]'); fi
           echo "found $n direct workspace dep(s):"
           printf '%s\n' "$out"
-          if [ "$n" -ne 1 ]; then echo "FAIL — expected exactly 1(자기 자신) — 워크스페이스 crate 의존이 반입됐다"; exit 1; fi
+          if [ "$n" -ne 1 ]; then echo "FAIL — expected exactly 1 (itself) — a workspace crate dependency was brought in"; exit 1; fi
           echo "PASS"
 
-      # ★`test -d` 를 지우지 말 것★ — crate 를 옮기거나 개명하면 rg 는 매치 0 을 뱉고 0 = PASS 라 벽이
-      #   조용히 사라진다(rc=2 갈래도 같은 것을 잡지만 사유를 못 찍는다 — transport 게이트 2 와 같다).
+      # ★Do not delete `test -d`★ — if the crate is moved or renamed, rg reports 0 matches and 0 = PASS, so the wall
+      #   quietly disappears (the rc=2 branch catches the same thing but cannot print the reason — the same as transport gate 2).
       - name: 'platform gate 2: no `use tauri` in the platform crate'
         shell: bash
         run: |
           set +e
           d=crates/engram-dashboard-platform/src
-          if [ ! -d "$d" ]; then echo "FAIL — 게이트 대상 디렉터리가 없다: $d (개명했나·이사했나)"; exit 1; fi
+          if [ ! -d "$d" ]; then echo "FAIL — gate target directory is missing: $d (renamed or moved?)"; exit 1; fi
           hits=$(rg "^\s*use tauri" "$d/")
           rc=$?
           set -e
@@ -807,20 +807,20 @@ jobs:
             *) echo "FAIL — rg errored (exit $rc)"; exit 1 ;;
           esac
 
-      # TRD 1-3 §3-8 · §4-2 ③(ADR-0266 「영향」 · base 시험 기능 스텝(ADR-0275 결정 5)과 같은 축): platform 의 시험 기능
-      #   `test-support`(`testing` 모듈 · `group::GroupRef::gone` · `spawn::wmi_create_raw` — 시험 도우미를 부르는 쪽 시험에 연다)는 소비 crate(agent · 셸)의
-      #   `[dev-dependencies]` 에서만 켠다. 워크스페이스가 `resolver = "2"` 라 dev 그래프의 기능은 운영 빌드로
-      #   합쳐지지 않는다 — 이 스텝은 누가 `[dependencies]` 쪽에 그 기능을 켜는 것을 잡는다. 운영 바이너리를
-      #   내는 셋(데몬 · 셸 · CLI — CLI 그래프에는 agent 를 거쳐 platform 이 있다)의 정상 · build 그래프를 해석된
-      #   그래프로 읽는다(매니페스트 grep 이 아니다). 셸은 platform 을 운영 의존으로 직접 지고(데몬 찾기 · 띄우기 ·
-      #   끄기 · 화면 상태의 앞 창 판정 `window` · 임시 파일 주인 생존 판정) 그 기능은 dev 줄에서만 켠다 — 데몬도
-      #   dev-dependency 로 물지만 `-e` 에 `dev` 가 없어 dev 간선은 세지 않는다.
-      # ★꼴은 TRD 1-3 §4-2 의 명령이 아니라 착지한 base 스텝을 따른다★ — `-e` 의 `build` 와 짝의 crate 이름
-      #   한정은 base 게이트가 리뷰 지적으로 더한 것이다(5fb25ab — build 의존을 못 봤다). 낡은 쪽은 TRD 다.
-      # ★짝 검사(agent dev 그래프 → 1줄 이상)를 지우지 말 것★: 기능 이름이 바뀌면 0 기대 셋은 매치할 낱말을
-      #   잃고 조용히 통과한다 — 짝이 그 눈먼 통과를 빨갛게 만든다(base 시험 기능 스텝과 같은 근거).
-      # ★한계★: base 시험 기능 스텝과 같다 — 해석된 그래프를 읽을 뿐이라 `--all-targets` 를 한 호출로 짓는
-      #   빌드의 기능 합집합은 못 본다(daemon `Cargo.toml` 「운영 빌드 주의」).
+      # TRD 1-3 §3-8 · §4-2 ③ (ADR-0266 「Impact」 · the same axis as the base test feature step (ADR-0275 decision 5)): platform's test feature
+      #   `test-support` (`testing` module · `group::GroupRef::gone` · `spawn::wmi_create_raw` — opened to the tests that call the test helpers) is turned on only in the consuming crates' (agent · shell)
+      #   `[dev-dependencies]`. The workspace uses `resolver = "2"`, so dev-graph features are not merged into the production
+      #   build — this step catches someone turning that feature on on the `[dependencies]` side. It reads the normal · build graphs of the three that
+      #   produce production binaries (daemon · shell · CLI — the CLI graph has platform through agent) as resolved
+      #   graphs (not a manifest grep). The shell carries platform directly as a production dependency (finding · launching ·
+      #   stopping the daemon · the front-window decision of the screen state `window` · the temp file owner liveness decision) and turns that feature on only on the dev line — the daemon also
+      #   takes it as a dev-dependency, but `-e` has no `dev`, so dev edges are not counted.
+      # ★The form follows the landed base step, not the command of TRD 1-3 §4-2★ — the `build` in `-e` and qualifying the pair by crate
+      #   name were added to the base gate from a review finding (5fb25ab — it did not see build dependencies). The stale side is the TRD.
+      # ★Do not delete the pair check (agent dev graph → 1 or more lines)★: if the feature name changes, the three 0-expectations lose the word
+      #   to match and quietly pass — the pair turns that blind pass red (the same rationale as the base test feature step).
+      # ★Limit★: the same as the base test feature step — it only reads the resolved graph, so it cannot see the feature union of a build that
+      #   builds `--all-targets` in one call (daemon `Cargo.toml` 「Production build caution」).
       - name: 'platform gate 3: test-support stays out of release graphs (daemon · shell · cli = 0, agent dev >= 1)'
         shell: bash
         run: |
@@ -836,7 +836,7 @@ jobs:
             set -e
             case "$rgrc" in
               1) echo "PASS — $pkg normal graph: 0 matches" ;;
-              0) echo "FAIL — $pkg 운영 그래프에 platform test-support 가 켜졌다:"; printf '%s\n' "$tree"; exit 1 ;;
+              0) echo "FAIL — platform test-support is on in the $pkg production graph:"; printf '%s\n' "$tree"; exit 1 ;;
               *) echo "FAIL — rg errored (exit $rgrc)"; exit 1 ;;
             esac
           done
@@ -852,18 +852,18 @@ jobs:
           if [ "$rgrc" -gt 1 ]; then echo "FAIL — rg errored (exit $rgrc)"; exit 1; fi
           if [ -z "$hits" ]; then n=0; else n=$(printf '%s\n' "$hits" | wc -l | tr -d '[:space:]'); fi
           echo "agent dev graph: $n match(es)"
-          if [ "$n" -lt 1 ]; then echo "FAIL — expected >= 1 — 기능 이름이 바뀌었나(그러면 위 0 기대 셋이 눈먼 채 통과한다)"; printf '%s\n' "$tree"; exit 1; fi
+          if [ "$n" -lt 1 ]; then echo "FAIL — expected >= 1 — did the feature name change? (then the 0-expectations above pass blind)"; printf '%s\n' "$tree"; exit 1; fi
           echo "PASS"
 
-      # TRD S26-window-chrome §8-4(사용자 결정 Q1 2026-10-24): 스냅 레이아웃 오버레이 기능 `snap-overlay` 는 기본 꺼짐이고 운영
-      #   빌드가 켜지 않는다. 셸(`engram-dashboard`)의 정상 · build 그래프에 platform 의 그 기능이 0 줄이어야 PASS — 누가 셸
-      #   `[features] default` 에 넣거나 platform 의존 줄에 그 기능을 적으면 빨갛다. 해석된 그래프를 읽는다(매니페스트 grep 이 아니다).
-      # ★꼴은 platform gate 3 을 따른다★ — TRD 의 `-e normal,features` 에 `build` 를 더하고 짝을 crate 이름으로 한정했다(그
-      #   스텝 주석의 까닭과 같다).
-      # ★짝(같은 명령에 `--features snap-overlay` → 1 줄 이상)을 지우지 말 것★ — 기능 이름이 바뀌거나 셸 기능이 platform 기능을
-      #   켜지 않게 되면 0 기대 줄이 매치할 낱말을 잃고 눈먼 채 통과한다.
-      # ★한계★ — 셸 그래프만 본다(그 기능을 켜는 길은 셸 기능 하나다 — 데몬 · CLI 는 platform 의 그 기능을 켜지 않는다). 해석된
-      #   그래프라 `--all-features` 로 짓는 빌드는 못 본다 — 배포 빌드(`scripts/build-release.ps1`)는 그렇게 짓지 않는다.
+      # TRD S26-window-chrome §8-4 (user decision Q1 2026-10-24): the snap layout overlay feature `snap-overlay` is off by default and no production
+      #   build turns it on. PASS only if the shell's (`engram-dashboard`) normal · build graph has 0 lines of platform's feature — if someone puts it in the shell's
+      #   `[features] default` or writes the feature on the platform dependency line, it turns red. It reads the resolved graph (not a manifest grep).
+      # ★The form follows platform gate 3★ — it adds `build` to the TRD's `-e normal,features` and qualifies the pair by crate name (the
+      #   same reason as in that step's comment).
+      # ★Do not delete the pair (the same command with `--features snap-overlay` → 1 or more lines)★ — if the feature name changes or the shell feature stops
+      #   turning on the platform feature, the 0-expectation line loses the word to match and passes blind.
+      # ★Limit★ — it looks only at the shell graph (the only way to turn that feature on is the one shell feature — the daemon · CLI do not turn on platform's feature). Being a resolved
+      #   graph, it cannot see a build built with `--all-features` — the release build (`scripts/build-release.ps1`) does not build that way.
       - name: 'snap-overlay gate 2: the feature stays out of the shell release graph (shell = 0, shell --features snap-overlay >= 1)'
         shell: bash
         run: |
@@ -878,7 +878,7 @@ jobs:
           set -e
           case "$rgrc" in
             1) echo "PASS — shell normal graph: 0 matches" ;;
-            0) echo "FAIL — 셸 운영 그래프에 snap-overlay 가 켜졌다:"; printf '%s\n' "$tree"; exit 1 ;;
+            0) echo "FAIL — snap-overlay is on in the shell production graph:"; printf '%s\n' "$tree"; exit 1 ;;
             *) echo "FAIL — rg errored (exit $rgrc)"; exit 1 ;;
           esac
           set +e
@@ -893,22 +893,22 @@ jobs:
           if [ "$rgrc" -gt 1 ]; then echo "FAIL — rg errored (exit $rgrc)"; exit 1; fi
           if [ -z "$hits" ]; then n=0; else n=$(printf '%s\n' "$hits" | wc -l | tr -d '[:space:]'); fi
           echo "shell --features snap-overlay graph: $n match(es)"
-          if [ "$n" -lt 1 ]; then echo "FAIL — expected >= 1 — 기능 이름이 바뀌었나(그러면 위 0 기대 줄이 눈먼 채 통과한다)"; printf '%s\n' "$tree"; exit 1; fi
+          if [ "$n" -lt 1 ]; then echo "FAIL — expected >= 1 — did the feature name change? (then the 0-expectation line above passes blind)"; printf '%s\n' "$tree"; exit 1; fi
           echo "PASS"
 
-      # ADR-0270 「영향」 불변식 「셸(`src-tauri`)은 agent crate 를 운영 의존하지 않는다」의 기계 벽(TRD 2-1 D6).
-      #   셸(`engram-dashboard`)의 정상 · build 그래프에 `engram-dashboard-agent` 가 0 줄이어야 PASS(짝: 데몬의 같은
-      #   그래프에 1 줄 이상). 해석된 그래프를 읽는다 — 매니페스트 grep 이 아니라서 다른 의존이 agent 를 끌어오는
-      #   전이 경로까지 잡는다. ★판정 함수(`shell_agent_gate`)는 여기 하나에만 둔다★ — 로컬 대체(`.claude/skill-bindings/qa-verify.md` 「gates 잡」)는 이 스텝을 그대로 돈다.
+      # The machine wall (TRD 2-1 D6) for the ADR-0270 「Impact」 invariant 「the shell (`src-tauri`) does not take the agent crate as a production dependency」.
+      #   PASS only if the shell's (`engram-dashboard`) normal · build graph has 0 lines of `engram-dashboard-agent` (pair: 1 or more lines in the daemon's same
+      #   graph). It reads the resolved graph — not a manifest grep, so it also catches transitive paths where another dependency drags agent
+      #   in. ★The decision function (`shell_agent_gate`) lives only here★ — the local substitute (`.claude/skill-bindings/qa-verify.md` 「gates 잡」) runs this step as is. # hangul-ok
       # ★Do not switch to `cargo tree -i engram-dashboard-agent`★ — `-i` exits 101 when the target is absent from the
       #   package's whole resolve (dev included) and prints "nothing to print" with rc=0 when it is reachable only
       #   through dev edges (measured 2026-11-04 — see `shell gate 5`), so its outcome depends on edges this step does
       #   not judge. Print the whole graph and look for the line instead.
-      # ★`-e` 에 `dev` 를 넣지 말 것★ — 셸 → (dev) 데몬 → agent 는 일부러 남아 있다(셸 통합 시험이 데몬을 쓴다 ·
-      #   ADR-0286). 넣으면 그 간선으로 늘 빨갛다.
-      # ★짝(데몬 → 1 줄 이상)을 지우지 말 것★ — agent 를 개명하거나 접두를 바꾸거나 패턴에 오타가 나면 0 기대 줄이
-      #   매치할 이름을 잃고 눈먼 채 통과한다. 셸 패키지를 개명하면 `cargo tree -p` 가 죽어 FAIL 이다.
-      # ★`^…␣` 앵커(뒤 공백)를 빼지 말 것★ — 빼면 같은 접두의 다른 이름이 걸린다(platform 게이트 ⑦ 과 같다).
+      # ★Do not put `dev` in `-e`★ — shell → (dev) daemon → agent remains on purpose (shell integration tests use the daemon ·
+      #   ADR-0286). Putting it in makes it always red through that edge.
+      # ★Do not delete the pair (daemon → 1 or more lines)★ — if agent is renamed, its prefix changes or the pattern gets a typo, the 0-expectation line
+      #   loses the name to match and passes blind. If the shell package is renamed, `cargo tree -p` dies and it is a FAIL.
+      # ★Do not drop the `^…␣` anchor (trailing space)★ — without it other names with the same prefix get caught (the same as platform gate ⑦).
       - name: 'shell gate 1: no agent crate in the shell release graph (shell = 0, daemon >= 1)'
         shell: bash
         run: |
@@ -917,49 +917,49 @@ jobs:
             tree=$(cargo tree --locked -p engram-dashboard -e normal,build --target all --all-features --prefix none) || { echo "FAIL — cargo tree -p engram-dashboard errored"; return 1; }
             rc=0; hits=$(printf '%s\n' "$tree" | rg '^engram-dashboard-agent ') || rc=$?
             [ "$rc" -le 1 ] || { echo "FAIL — rg errored (exit $rc)"; return 1; }
-            if [ -n "$hits" ]; then echo "FAIL — 셸 운영 그래프(normal · build)에 agent 가 있다(ADR-0270 — 셸은 agent 를 의존하지 않는다):"; printf '%s\n' "$hits"; return 1; fi
+            if [ -n "$hits" ]; then echo "FAIL — the shell production graph (normal · build) has agent (ADR-0270 — the shell does not depend on agent):"; printf '%s\n' "$hits"; return 1; fi
             echo "shell normal/build graph: 0 agent line(s)"
             tree=$(cargo tree --locked -p engram-dashboard-daemon -e normal,build --target all --all-features --prefix none) || { echo "FAIL — cargo tree -p engram-dashboard-daemon errored"; return 1; }
             rc=0; hits=$(printf '%s\n' "$tree" | rg '^engram-dashboard-agent ') || rc=$?
             [ "$rc" -le 1 ] || { echo "FAIL — rg errored (exit $rc)"; return 1; }
-            if [ -z "$hits" ]; then echo "FAIL — 짝: 데몬 운영 그래프에서도 agent 0 줄 — crate 이름이 바뀌었나 · 패턴이 망가졌나(그러면 위 0 기대가 눈먼 채 통과한다)"; return 1; fi
+            if [ -z "$hits" ]; then echo "FAIL — pair: 0 agent lines in the daemon production graph too — did the crate name change or is the pattern broken? (then the 0-expectation above passes blind)"; return 1; fi
             n=$(printf '%s\n' "$hits" | wc -l | tr -d '[:space:]')
             echo "daemon normal/build graph: $n agent line(s)"
-            echo "PASS — 셸 운영 그래프에 agent 없음(짝: 데몬 $n 줄)"
+            echo "PASS — no agent in the shell production graph (pair: daemon $n lines)"
           }
           shell_agent_gate
 
-      # D17(TRD S26-window-chrome §10-4 · 메인 결정 M15): `slot_label`(`src-tauri/src/layout/tab_name.rs`)이 `SlotContent` 의
-      #   모든 변형을 이름으로 다루고 와일드카드 · 묶음 이름 갈래를 두지 않아야 PASS — 슬롯 종류를 더하면 이름을 짓기
-      #   전에는 통과하지 못하게 하려는 것이다. 함수에 `#[deny(clippy::wildcard_enum_match_arm)]` 가 붙어 있지만 CI 가
-      #   clippy 를 돌리지 않아 그 attribute 만으로는 지켜지지 않는다 — 이 스텝이 벽이다.
-      #   ★판정 함수(`slot_label_gate`)는 여기 하나에만 둔다★ — 로컬 대체(`.claude/skill-bindings/qa-verify.md` 「gates 잡」)는 이 스텝을 그대로 돈다.
-      # ★양성 검사다 — 위반 꼴을 정규식으로 열거하지 않는다★(U1 리뷰 2): 열거하던 음성 정규식은 `Other =>` ·
-      #   `other | other =>` · `other @ &_ =>` · 범위를 자르는 0 열 `}` · 주석 글자에 차례로 샜다. 대신 둘을 잰다.
-      #   범위 = `slot_label` 본문(0 열 `pub fn slot_label` 줄부터 첫 0 열 `}` 줄까지)에서 `/* … */`(한 줄) · `//` 주석을
-      #   걷은 것.
-      #   ① 변형 덮기: `types.rs` 의 `pub enum SlotContent` 블록에서 뽑은 변형(4 칸 들여쓴 대문자 이름 줄)이 전부 본문에
-      #     `SlotContent::<변형>` 으로 나온다. 새 변형을 묶음 갈래가 받으면 문법과 상관없이 걸린다. 범위가 잘리면 잘린
-      #     자리가 어느 변형 갈래보다 앞일 때만 그 변형이 빠져 닫힌 쪽으로 실패한다 — 모든 변형 갈래 뒤에서 잘려 그 뒤에
-      #     숨은 묶음 갈래는 지금은 안 보이고, 다음 변형을 더할 때 ① 이 잡는다.
-      #   ② 갈래 모양: `match` 줄 들여쓰기 + 4 가 갈래 자리다. 그 자리 줄은 `=>` 를 많아야 하나 담고(한 줄에 둘째 갈래를
-      #     이어 쓰면 FAIL), `}` · `},` · `} => …`(여러 줄 구조 패턴의 끝) 말고는 앞의 `|` 를 떼고 `=>` 앞을 `|` 로 가른
-      #     모든 갈래가 `SlotContent::` 로 시작해야 한다(`=>` 가 없는 여러 줄 패턴의 앞줄도 · `=>` 앞이 빈 줄은 FAIL).
-      #     그 밖 자리의 `=>`(중첩 `match` · `=>` 만 내린 줄 · rustfmt 가 다음 줄로 내린 가드)도 FAIL 이다.
-      # ★짝 둘을 지우지 말 것★ — ① 0 열 `pub fn slot_label` 이 정확히 하나 · 그 앞에 `#[deny(…)]`(사이 `#[…]` · `//`
-      #   줄 허용) · 그 파일에 이 lint 를 끄는 `allow` · `expect` · `warn` 이 없음 · 그 파일 어디에도 rustfmt 건너뛰기
-      #   (`rustfmt::skip` · `rustfmt_skip` — `::` 앞뒤 공백형 포함)가 없음(② 가 기대는 rustfmt 꼴을 끄므로) ·
-      #   본문 끝을 찾음 · 주석 밖 `match` 가 있음.
-      #   ② 도우미 자기 시험 — 갈래 모양 위반 표본 19 개는 전부 걸리고 위반 아닌 표본 10 개는 하나도 안 걸리며,
-      #   가짜 enum(변형 3 · 문서 줄 · attribute 줄)과 한 변형(`Ag` — `AgList` 와 앞이 같다 · 주석에만 있다)이 빠진
-      #   가짜 본문에서 정확히 그 하나를 빠졌다고 한다. 수를 고정한다(배열이 비면 0 = 0 이다).
-      # 기대는 것 = rustfmt(`cargo fmt --check`)가 갈래를 줄마다 · 4 칸 들여쓰기로 놓는다는 것.
-      # ★남는 구멍★ — 여러 줄 블록 주석 · 매크로가 짓는 갈래 · 본문 안 문자열 속 `SlotContent::<변형>`(①을 속인다 —
-      #   그때도 ②와 컴파일러의 망라 검사가 남는다). 가드의 `||` · 구조 패턴 칸의 `|` · `crate::…` 경로 갈래는 위반으로
-      #   읽힌다(닫힌 쪽) — `slot_label` 에서는 쓰지 않는다(그 파일 머리).
-      # ★일부러 속이는 꼴 셋은 받아들였다 — 사용자 수락(U1 리뷰 3 다툼 · 커밋 `4cefce48`)★: 가짜 `match` 를 담은 원시 문자열 ·
-      #   ① 을 채우는 문자열 속 `SlotContent::<새 변형>` · 망라한 `match` 를 닿지 않게 두고 그 앞에서 묶음 갈래를 가진
-      #   도우미로 일찍 돌아가기. 셋 다 코드 리뷰가 볼 몫으로 남긴다.
+      # D17 (TRD S26-window-chrome §10-4 · main decision M15): PASS only if `slot_label` (`src-tauri/src/layout/tab_name.rs`) handles every variant of `SlotContent`
+      #   by name and has no wildcard · catch-all name arm — the point is that adding a slot kind cannot pass before it is given
+      #   a name. The function carries `#[deny(clippy::wildcard_enum_match_arm)]`, but CI does not
+      #   run clippy, so that attribute alone does not enforce it — this step is the wall.
+      #   ★The decision function (`slot_label_gate`) lives only here★ — the local substitute (`.claude/skill-bindings/qa-verify.md` 「gates 잡」) runs this step as is. # hangul-ok
+      # ★It is a positive check — it does not enumerate violation forms with regexes★ (U1 review 2): the negative regexes that enumerated them leaked in turn through `Other =>` ·
+      #   `other | other =>` · `other @ &_ =>` · a column-0 `}` that cuts the range · comment text. Instead it measures two things.
+      #   Range = the `slot_label` body (from the column-0 `pub fn slot_label` line to the first column-0 `}` line) with `/* … */` (one line) · `//` comments
+      #   stripped.
+      #   ① Variant coverage: the variants pulled from the `pub enum SlotContent` block of `types.rs` (lines with a capitalized name indented 4 spaces) all appear in the body
+      #     as `SlotContent::<variant>`. If a catch-all arm takes a new variant, it is caught regardless of syntax. If the range gets cut, only when the cut
+      #     falls before some variant arm does that variant go missing, failing on the closed side — a catch-all arm hidden after a cut that comes after all
+      #     variant arms is not visible now, and ① catches it when the next variant is added.
+      #   ② Arm shape: the `match` line's indentation + 4 is the arm position. A line at that position holds at most one `=>` (writing a second arm on the
+      #     same line is a FAIL), and except for `}` · `},` · `} => …` (the end of a multi-line structure pattern), after removing a leading `|`, every arm obtained by splitting the part before `=>` on `|`
+      #     must start with `SlotContent::` (also the first line of a multi-line pattern with no `=>` · a line with nothing before `=>` is a FAIL).
+      #     A `=>` at any other position (a nested `match` · a line holding only `=>` · a guard rustfmt moved to the next line) is a FAIL too.
+      # ★Do not delete the two pairs★ — ① exactly one column-0 `pub fn slot_label` · `#[deny(…)]` before it (`#[…]` · `//`
+      #   lines allowed in between) · no `allow` · `expect` · `warn` in that file that turns this lint off · no rustfmt skip anywhere in that file
+      #   (`rustfmt::skip` · `rustfmt_skip` — including spaced forms around `::`) (it turns off the rustfmt form ② relies on) ·
+      #   the body end is found · there is a `match` outside comments.
+      #   ② the helper self-test — all 19 arm-shape violation samples are caught and none of the 10 non-violation samples is,
+      #   and in a fake body missing one variant (`Ag` — same prefix as `AgList` · present only in a comment) of a fake enum (3 variants · a doc line · an attribute line)
+      #   it reports exactly that one as missing. The counts are fixed (if the array is empty, 0 = 0).
+      # What it relies on = rustfmt (`cargo fmt --check`) placing arms one per line · with 4-space indentation.
+      # ★Remaining holes★ — multi-line block comments · arms a macro builds · `SlotContent::<variant>` inside a string in the body (fools ① —
+      #   even then ② and the compiler's exhaustiveness check remain). A guard's `||` · a `|` in a structure pattern field · a `crate::…` path arm are read as
+      #   violations (the closed side) — not used in `slot_label` (that file's head).
+      # ★Three deliberately deceiving forms were accepted — user acceptance (U1 review 3 dispute · commit `4cefce48`)★: a raw string holding a fake `match` ·
+      #   `SlotContent::<new variant>` inside a string that fills ① · leaving an exhaustive `match` unreachable and returning early before it through a
+      #   helper with a catch-all arm. All three are left as code review's job.
       - name: 'shell gate 2: slot_label names every SlotContent variant with path-pattern arms only (D17)'
         shell: bash
         run: |
@@ -967,15 +967,15 @@ jobs:
             local t=src-tauri/src/layout/types.rs f=src-tauri/src/layout/tab_name.rs
             local n rc s e body variants missing hits x
             local -a bad good
-            command -v rg >/dev/null 2>&1 || { echo "FAIL — rg 가 PATH 에 없다(설치 스텝을 확인할 것)"; return 1; }
-            # 도우미 — 모두 stdin 을 읽는다.
+            command -v rg >/dev/null 2>&1 || { echo "FAIL — rg is not on PATH (check the install step)"; return 1; }
+            # Helpers — all read stdin.
             d17_strip() { sed -E -e 's#/\*([^*]|\*+[^*/])*\*+/##g' -e 's#//.*$##'; }
             d17_variants() {
               awk '/^pub enum SlotContent \{/ { f = 1; next }
                    f && /^\}/ { exit }
                    f && /^    [A-Z]/ { match($0, /^    [A-Za-z0-9_]+/); print substr($0, 5, RLENGTH - 4) }'
             }
-            # $1 = 주석을 걷은 본문 · stdin = 변형 이름 → 본문에 없는 변형
+            # $1 = the body with comments stripped · stdin = variant names → variants missing from the body
             d17_missing() {
               local v
               while IFS= read -r v; do
@@ -983,7 +983,7 @@ jobs:
                 rg -q "SlotContent::${v}\b" <<<"$1" || echo "$v"
               done
             }
-            # stdin = 주석을 걷은 본문 → 어긋난 줄을 「본문 줄 번호: 줄」로
+            # stdin = the body with comments stripped → mismatched lines as 「body line number: line」
             d17_shape() {
               awk '
                 { line = $0; sub(/\r$/, "", line) }
@@ -1010,13 +1010,13 @@ jobs:
                 line ~ /=>/ { print NR ": " line }
               '
             }
-            # 표본 한 갈래(갈래 자리 기준 들여쓰기)를 가짜 `match` 에 넣는다.
+            # Put one sample arm (indented relative to the arm position) into a fake `match`.
             d17_wrap() { printf '    match content {\n'; sed 's/^/        /' <<<"$1"; printf '    }\n'; }
 
-            [ -f "$t" ] || { echo "FAIL — 게이트 대상 파일이 없다: $t (개명했나 · 이사했나)"; return 1; }
-            [ -f "$f" ] || { echo "FAIL — 게이트 대상 파일이 없다: $f (개명했나 · 이사했나)"; return 1; }
+            [ -f "$t" ] || { echo "FAIL — gate target file is missing: $t (renamed or moved?)"; return 1; }
+            [ -f "$f" ] || { echo "FAIL — gate target file is missing: $f (renamed or moved?)"; return 1; }
 
-            # 짝 ② — 도우미 자기 시험
+            # Pair ② — helper self-test
             bad=('_ => a,' 'other => a,' 'Other => a,' '_other => a,' 'other | other => a,' 'x @ _ => a,'
               'SlotContent::Empty | _ => a,' '| _ => a,' 'other @ &_ => a,' '&_ => a,' '_ /* c */ => a,' '} | _ => a,'
               $'_ | SlotContent::Usage {\n    show_claude: _,\n} => a,' $'_\n| SlotContent::Empty => a,'
@@ -1029,46 +1029,46 @@ jobs:
               $'SlotContent::Empty\n| SlotContent::AgentList => a,' '| SlotContent::AgentList => a,'
               $'SlotContent::Empty => {\n    let x = 1;\n    x\n}' '// | _ => a,' 'SlotContent::Empty => a, // _ =>'
               'SlotContent::Empty /* _ | */ => a,')
-            [ "${#bad[@]}" = 19 ] && [ "${#good[@]}" = 10 ] || { echo "FAIL — 짝 ②: 표본 수가 ${#bad[@]} · ${#good[@]}(기대 19 · 10)"; return 1; }
+            [ "${#bad[@]}" = 19 ] && [ "${#good[@]}" = 10 ] || { echo "FAIL — pair ②: sample counts are ${#bad[@]} · ${#good[@]} (expected 19 · 10)"; return 1; }
             n=0; for x in "${bad[@]}"; do [ -n "$(d17_wrap "$x" | d17_strip | d17_shape)" ] && n=$((n + 1)); done
-            [ "$n" = 19 ] || { echo "FAIL — 짝 ②: 갈래 모양 위반 표본 19 개 중 $n 개만 걸렸다 — 도우미가 망가졌나"; return 1; }
+            [ "$n" = 19 ] || { echo "FAIL — pair ②: only $n of the 19 arm-shape violation samples were caught — is the helper broken?"; return 1; }
             n=0; for x in "${good[@]}"; do [ -z "$(d17_wrap "$x" | d17_strip | d17_shape)" ] && n=$((n + 1)); done
-            [ "$n" = 10 ] || { echo "FAIL — 짝 ②: 위반 아닌 표본 10 개 중 $n 개만 통과했다 — 도우미가 망가졌나"; return 1; }
-            x=$(d17_variants <<<$'pub enum SlotContent {\n    /// 문서 줄\n    Ag,\n    #[serde(default)]\n    AgList {\n        x: u8,\n    },\n    C(u8),\n}')
-            [ "$(printf '%s' "$x" | tr '\n' ' ')" = "Ag AgList C" ] || { echo "FAIL — 짝 ②: 가짜 enum 의 변형을 '$x' 로 읽었다(기대 Ag AgList C)"; return 1; }
+            [ "$n" = 10 ] || { echo "FAIL — pair ②: only $n of the 10 non-violation samples passed — is the helper broken?"; return 1; }
+            x=$(d17_variants <<<$'pub enum SlotContent {\n    /// doc line\n    Ag,\n    #[serde(default)]\n    AgList {\n        x: u8,\n    },\n    C(u8),\n}')
+            [ "$(printf '%s' "$x" | tr '\n' ' ')" = "Ag AgList C" ] || { echo "FAIL — pair ②: read the fake enum's variants as '$x' (expected Ag AgList C)"; return 1; }
             missing=$(d17_missing "$(d17_strip <<<$'    match c {\n        SlotContent::AgList { .. } => 1,\n        // SlotContent::Ag => 2,\n        SlotContent::C(_) => 3,\n    }')" <<<"$x")
-            [ "$missing" = "Ag" ] || { echo "FAIL — 짝 ②: 가짜 본문에서 빠진 변형을 '$missing' 로 읽었다(기대 Ag)"; return 1; }
+            [ "$missing" = "Ag" ] || { echo "FAIL — pair ②: read the variant missing from the fake body as '$missing' (expected Ag)"; return 1; }
 
-            # 짝 ① — 범위 · attribute
+            # Pair ① — range · attribute
             n=$(rg -c '^pub fn slot_label[<(]' "$f") || n=0
-            [ "$n" = 1 ] || { echo "FAIL — 짝 ①: $f 에 0 열 'pub fn slot_label' 이 $n 개(기대 1) — 개명 · 이사했나"; return 1; }
+            [ "$n" = 1 ] || { echo "FAIL — pair ①: $f has $n column-0 'pub fn slot_label' (expected 1) — renamed or moved?"; return 1; }
             n=$(rg -U --count-matches '#\[deny\(clippy::wildcard_enum_match_arm\)\]\s*(?:(?:#\[.*\]|//.*)\s*)*pub fn slot_label[<(]' "$f") || n=0
-            [ "$n" = 1 ] || { echo "FAIL — 짝 ①: 'pub fn slot_label' 앞에 '#[deny(clippy::wildcard_enum_match_arm)]' 가 없다(attribute 를 걷었나)"; return 1; }
+            [ "$n" = 1 ] || { echo "FAIL — pair ①: no '#[deny(clippy::wildcard_enum_match_arm)]' before 'pub fn slot_label' (was the attribute removed?)"; return 1; }
             rc=0; hits=$(rg -n '\b(?:allow|expect|warn)\s*\([^)]*(?:wildcard_enum_match_arm|clippy\s*::\s*restriction)' "$f") || rc=$?
             [ "$rc" -le 1 ] || { echo "FAIL — rg errored (exit $rc)"; return 1; }
-            [ -z "$hits" ] || { echo "FAIL — 짝 ①: $f 에 그 lint 를 끄는 attribute 가 있다:"; printf '%s\n' "$hits"; return 1; }
+            [ -z "$hits" ] || { echo "FAIL — pair ①: $f has an attribute that turns that lint off:"; printf '%s\n' "$hits"; return 1; }
             rc=0; hits=$(rg -n 'rustfmt\s*::\s*skip|rustfmt_skip' "$f") || rc=$?
             [ "$rc" -le 1 ] || { echo "FAIL — rg errored (exit $rc)"; return 1; }
-            [ -z "$hits" ] || { echo "FAIL — 짝 ①: $f 에 rustfmt 건너뛰기가 있다(② 가 기대는 rustfmt 꼴을 끈다):"; printf '%s\n' "$hits"; return 1; }
+            [ -z "$hits" ] || { echo "FAIL — pair ①: $f has a rustfmt skip (it turns off the rustfmt form ② relies on):"; printf '%s\n' "$hits"; return 1; }
             s=$(awk '/^pub fn slot_label[<(]/ { print NR; exit }' "$f")
             e=$(awk -v s="$s" 'NR > s && /^\}/ { print NR; exit }' "$f")
-            [ -n "$e" ] || { echo "FAIL — 짝 ①: $f:$s 의 slot_label 본문 끝(0 열 '}')을 못 찾았다"; return 1; }
+            [ -n "$e" ] || { echo "FAIL — pair ①: could not find the end (column-0 '}') of the slot_label body at $f:$s"; return 1; }
             body=$(sed -n "${s},${e}p" "$f" | d17_strip)
-            rg -q '\bmatch\b' <<<"$body" || { echo "FAIL — 짝 ①: slot_label 본문($f:$s-$e)의 주석 밖에 match 가 없다 — 다른 함수로 떼어 냈나"; return 1; }
+            rg -q '\bmatch\b' <<<"$body" || { echo "FAIL — pair ①: no match outside comments in the slot_label body ($f:$s-$e) — was it split out into another function?"; return 1; }
 
-            # ① 변형 덮기
+            # ① Variant coverage
             n=$(rg -c '^pub enum SlotContent \{' "$t") || n=0
-            [ "$n" = 1 ] || { echo "FAIL — $t 에 0 열 'pub enum SlotContent {' 가 $n 개(기대 1)"; return 1; }
+            [ "$n" = 1 ] || { echo "FAIL — $t has $n column-0 'pub enum SlotContent {' (expected 1)"; return 1; }
             variants=$(d17_variants <"$t")
-            [ -n "$variants" ] || { echo "FAIL — $t 의 SlotContent 에서 변형을 하나도 못 읽었다"; return 1; }
+            [ -n "$variants" ] || { echo "FAIL — could not read a single variant from SlotContent in $t"; return 1; }
             missing=$(d17_missing "$body" <<<"$variants")
-            [ -z "$missing" ] || { echo "FAIL — D17: slot_label 본문($f:$s-$e)이 이 변형을 'SlotContent::<변형>' 으로 다루지 않는다:"; printf '%s\n' "$missing"; return 1; }
+            [ -z "$missing" ] || { echo "FAIL — D17: the slot_label body ($f:$s-$e) does not handle these variants as 'SlotContent::<variant>':"; printf '%s\n' "$missing"; return 1; }
 
-            # ② 갈래 모양
+            # ② Arm shape
             hits=$(d17_shape <<<"$body")
-            [ -z "$hits" ] || { echo "FAIL — D17: slot_label 의 갈래가 'SlotContent::<변형>' 경로 패턴만 쓰지 않는다:"; printf '%s\n' "$hits" | awk -v o=$((s - 1)) -v f="$f" '{ k = index($0, ":"); print f ":" (substr($0, 1, k - 1) + o) substr($0, k) }'; return 1; }
+            [ -z "$hits" ] || { echo "FAIL — D17: slot_label's arms do not use only 'SlotContent::<variant>' path patterns:"; printf '%s\n' "$hits" | awk -v o=$((s - 1)) -v f="$f" '{ k = index($0, ":"); print f ":" (substr($0, 1, k - 1) + o) substr($0, k) }'; return 1; }
 
-            echo "PASS — slot_label($f:$s-$e)이 SlotContent 변형 $(printf '%s\n' "$variants" | wc -l | tr -d '[:space:]') 개를 전부 이름으로 다루고 갈래가 경로 패턴뿐이다(짝 ① ② 통과)"
+            echo "PASS — slot_label ($f:$s-$e) handles all $(printf '%s\n' "$variants" | wc -l | tr -d '[:space:]') SlotContent variants by name and its arms are path patterns only (pairs ① ② passed)"
           } # end slot_label_gate
           slot_label_gate
 
@@ -1197,12 +1197,12 @@ jobs:
           if [ "$n" -lt 1 ]; then echo "FAIL — pair: expected >= 1 through the transport — was the crate renamed or the output form changed? (then the 0 check above passes blind)"; exit 1; fi
           echo "PASS"
 
-      # ADR-0273: CLI 패키지(`engram-dashboard-cli`)의 직접 워크스페이스 의존이 정확히 agent · cli(자기) · command
-      #   여야 PASS. 해석된 그래프를 읽는다 — 꼴 · 플래그는 messaging · command · base · platform 상한 게이트와
-      #   같다(줄이면 rename · 비활성 target · optional 이 샌다).
-      # ★판정을 줄 수로 바꾸지 말 것 — 이름 집합 일치다★: 이 패키지가 따로 선 요점은 데몬 0 인데, 줄 수만 세면
-      #   command 자리에 데몬이 들어와도 셋이라 못 본다. 첫 칸(패키지 이름)을 정렬해 아래 heredoc 과 견준다.
-      # 멤버를 `engram-dashboard` 이름 접두로 식별하는 구멍(접두가 없는 멤버는 그냥 통과한다)은 다른 상한 게이트와 같다.
+      # ADR-0273: PASS only if the direct workspace dependencies of the CLI package (`engram-dashboard-cli`) are exactly agent · cli (itself) · command.
+      #   It reads the resolved graph — form · flags are the same as the messaging · command · base · platform ceiling gates
+      #   (cutting them lets rename · inactive target · optional leak).
+      # ★Do not change the decision to a line count — it is a name set match★: the point of this package standing apart is zero daemon, and counting only lines
+      #   would not notice the daemon taking command's place, since it would still be three. The first field (package name) is sorted and compared with the heredoc below.
+      # The hole of identifying members by the `engram-dashboard` name prefix (a member without the prefix just passes) is the same as in the other ceiling gates.
       # ADR-0285
       - name: 'cli gate 1: direct workspace deps — exactly agent · cli · command'
         shell: bash
@@ -1233,31 +1233,31 @@ jobs:
           fi
           echo "PASS"
 
-      # ADR-0266 불변식 「운영 OS 분기는 platform crate 안에만」 — platform 밖에서 OS cfg 술어를 쓰는 `.rs` 파일 목록이
-      #   아래 명단과 정확히 같아야 PASS(짝: 같은 matcher 가 platform 안에서는 1 파일 이상). ★명단(heredoc) · 정규식
-      #   (`os_cfg_re`) · 파일 찾기 함수(`os_cfg_files`)는 여기 하나에만 둔다★ — 로컬 대체(`.claude/skill-bindings/qa-verify.md` 「gates 잡」)는 이 스텝을 그대로 돈다.
-      #   matcher · 짝 · 범위 · 한계 · 명단을 고치는 법의 정본 = `crates/engram-dashboard-platform/src/lib.rs` 헤더 게이트 ④.
+      # ADR-0266 invariant 「production OS branching only inside the platform crate」 — PASS only if the list of `.rs` files outside platform that use OS cfg predicates
+      #   is exactly the list below (pair: the same matcher hits 1 or more files inside platform). ★The list (heredoc) · the regex
+      #   (`os_cfg_re`) · the file finder function (`os_cfg_files`) live only here★ — the local substitute (`.claude/skill-bindings/qa-verify.md` 「gates 잡」) runs this step as is. # hangul-ok
+      #   The canonical matcher · pair · scope · limits · how to change the list = gate ④ of the `crates/engram-dashboard-platform/src/lib.rs` header.
       - name: 'platform gate 4: OS cfg outside platform — exactly the fixed file list'
         shell: bash
         run: |
           os_cfg_re='(?(DEFINE)(?<CMT>//[^\n]*+|/\*(?s:.)*?\*/)(?<STR>[bc]?"(?:[^"\\]|\\(?s:.))*+")(?<RAW>[bc]?r(?<rh>#*+)"(?s:.)*?"\k<rh>)(?<ID>[A-Za-z_][A-Za-z0-9_]*+(?![#"]))(?<OS>\b(?:windows|unix)\b|\btarget_(?:os|family|env|vendor)(?:\s++|(?&CMT))*+=)(?<ATOM>(?&CMT)|(?&STR)|(?&RAW)|(?&ID)|[^()"/A-Za-z_]|/(?![/*]))(?<NOS>(?&CMT)|(?&STR)|(?&RAW)|(?!(?&OS))(?&ID)|[^()"/A-Za-z_]|/(?![/*]))(?<P>\((?:(?&ATOM)|(?&P))*+\))(?<Q>\((?:(?&NOS)|(?!(?&Q))(?&P))*+(?:(?&OS)|(?&Q))))(?://[^\n]*+|/\*(?s:.)*?\*/|\b[bc]?r(?<h>#*)"(?s:.)*?"\k<h>|"(?:[^"\\]|\\(?s:.))*+"|\x27(?:[^\x27\\\n]|\\[^\n]|\\x[0-9a-fA-F]{2}|\\u\{[0-9a-fA-F]{1,6}\})\x27)(*SKIP)(*FAIL)|\b(?:cfg!?|cfg_attr)\s*(?=(?&P))(?&Q)'
-          if ! rg --pcre2-version; then echo "FAIL — 이 rg 에는 PCRE2 가 없다(게이트 ④ 의 matcher 가 그것에 기댄다)"; exit 1; fi
+          if ! rg --pcre2-version; then echo "FAIL — this rg has no PCRE2 (gate ④'s matcher relies on it)"; exit 1; fi
           for d in crates src-tauri crates/engram-dashboard-platform/src; do
-            if [ ! -d "$d" ]; then echo "FAIL — 게이트 대상 디렉터리가 없다: $d (개명했나·이사했나)"; exit 1; fi
+            if [ ! -d "$d" ]; then echo "FAIL — gate target directory is missing: $d (renamed or moved?)"; exit 1; fi
           done
-          # 인자 = rg 경로 · glob. 출력 = OS cfg 술어를 쓰는 파일(정렬). rg 가 2 이상으로 죽으면 2 를 돌려준다.
+          # Arguments = rg paths · globs. Output = the files that use OS cfg predicates (sorted). If rg dies with 2 or more, it returns 2.
           os_cfg_files() {
             local out rc=0
             out=$(rg -P -U -l --color never "$os_cfg_re" "$@") || rc=$?
             [ "$rc" -le 1 ] || return 2
-            # Windows 의 rg 가 찍는 `\` 를 `/` 로 — `\134`(8진)인 것은 에이전트 셸 도구가 `\\` 를 `\` 로 접기 때문이다.
+            # Turn the `\` that rg prints on Windows into `/` — it is `\134` (octal) because the agent shell tool folds `\\` into `\`.
             printf '%s\n' "$out" | tr '\134' '/' | sed '/^$/d' | LC_ALL=C sort -u
           }
           own=$(os_cfg_files crates/engram-dashboard-platform/src -g '*.rs') || { echo "FAIL — rg errored"; exit 1; }
-          if [ -z "$own" ]; then echo "FAIL — 같은 matcher 가 platform 안에서 0 파일을 문다 — 정규식이 망가졌나(그러면 아래 대조가 눈먼다)"; exit 1; fi
+          if [ -z "$own" ]; then echo "FAIL — the same matcher hits 0 files inside platform — is the regex broken? (then the comparison below goes blind)"; exit 1; fi
           actual=$(os_cfg_files crates src-tauri -g '*.rs' -g '!crates/engram-dashboard-platform/**') || { echo "FAIL — rg errored"; exit 1; }
           expected=$(sed -e 's/[[:space:]]*#.*$//' -e '/^[[:space:]]*$/d' <<'OS_CFG_FILES' | LC_ALL=C sort
-          # 시험 분기뿐
+          # test branches only
           crates/engram-dashboard-agent/src/backend/claude/leftover.rs
           crates/engram-dashboard-agent/src/backend/claude/mod.rs
           crates/engram-dashboard-agent/src/backend/claude/usage_probe.rs
@@ -1278,7 +1278,7 @@ jobs:
           crates/engram-dashboard-daemon/src/messaging_host.rs
           crates/engram-dashboard-daemon/src/portfile.rs
           src-tauri/src/discovery/tests.rs
-          # 통합 시험(`tests/`)
+          # integration tests (`tests/`)
           crates/engram-dashboard-agent/tests/activation.rs
           crates/engram-dashboard-agent/tests/backend_contract.rs
           crates/engram-dashboard-agent/tests/canonical_name_wiring.rs
@@ -1289,7 +1289,7 @@ jobs:
           crates/engram-dashboard-agent/tests/submit_delivery_boundary.rs
           crates/engram-dashboard-daemon/tests/ws_e2e.rs
           src-tauri/tests/stop_smoke.rs
-          # 시험 하네스 bin · 예제
+          # test harness bins · examples
           crates/engram-dashboard-daemon/src/bin/roundtrip_smoke.rs
           crates/engram-dashboard-daemon/src/bin/saturation_pilot.rs
           crates/engram-dashboard-agent/examples/spike.rs
@@ -1298,21 +1298,21 @@ jobs:
           )
           if [ "$actual" = "$expected" ]; then
             n=$(printf '%s\n' "$actual" | wc -l | tr -d '[:space:]')
-            echo "PASS — platform 밖 OS cfg 파일 $n 개가 명단과 같다"
+            echo "PASS — the $n OS cfg files outside platform match the list"
             exit 0
           fi
-          echo "FAIL — platform 밖 OS cfg 파일이 명단과 다르다"
-          echo "명단 밖인데 걸린 파일(운영 분기면 platform 으로 옮긴다 · 시험 · 하네스면 명단에 더한다):"
+          echo "FAIL — the OS cfg files outside platform differ from the list"
+          echo "Files hit but not in the list (if production branching, move it to platform · if a test · harness, add it to the list):"
           LC_ALL=C comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual")
-          echo "명단에 있는데 안 걸린 파일(분기를 걷었거나 옮겼다 — 명단에서 뺀다):"
+          echo "Files in the list but not hit (the branch was removed or moved — remove it from the list):"
           LC_ALL=C comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual")
           exit 1
 
-      # ADR-0266 불변식의 의존 축 — 워크스페이스 멤버 중 아래 OS crate 를 **운영 의존**(normal · build · 대상 OS 무관)으로
-      #   **직접** 가진 것이 platform 하나여야 PASS(짝: platform 이 1 개 이상 가진다). dev 의존은 세지 않는다.
-      #   ★목록(`os_dep_re` — 손으로 적은 명시 목록) · 판정 함수(`os_dep_gate`)는 여기 하나에만 둔다★ —
-      #   로컬 대체(`.claude/skill-bindings/qa-verify.md` 「gates 잡」)는 이 스텝을 그대로 돈다. 짝 · 범위 · 한계의 정본 = `crates/engram-dashboard-platform/src/lib.rs`
-      #   헤더 게이트 ⑤.
+      # The dependency axis of the ADR-0266 invariant — PASS only if, among workspace members, the one that **directly** has the OS crates below as a **production dependency**
+      #   (normal · build · any target OS) is platform alone (pair: platform has 1 or more). dev dependencies are not counted.
+      #   ★The list (`os_dep_re` — a hand-written explicit list) · the decision function (`os_dep_gate`) live only here★ —
+      #   the local substitute (`.claude/skill-bindings/qa-verify.md` 「gates 잡」) runs this step as is. Canonical pair · scope · limits = the `crates/engram-dashboard-platform/src/lib.rs` # hangul-ok
+      #   header gate ⑤.
       - name: 'platform gate 5: OS crates as direct normal/build deps — platform only'
         shell: bash
         run: |
@@ -1324,91 +1324,91 @@ jobs:
             own=$(printf '%s\n' "$hits" | awk '$1 == "engram-dashboard-platform"')
             bad=$(printf '%s\n' "$hits" | awk 'NF && $1 != "engram-dashboard-platform"')
             printf 'found:\n%s\n' "$hits"
-            if [ -z "$own" ]; then echo "FAIL — 짝: platform 에서 0 개 — 목록 정규식이나 cargo tree 출력 꼴이 망가졌나(그러면 아래 판정이 눈먼다)"; return 1; fi
-            if [ -n "$bad" ]; then echo "FAIL — platform 밖 멤버가 OS crate 를 운영 의존으로 직접 가진다(그 OS 호출을 platform 으로 옮긴다):"; printf '%s\n' "$bad"; return 1; fi
-            echo "PASS — OS crate 운영 직접 의존은 platform 에만"
+            if [ -z "$own" ]; then echo "FAIL — pair: 0 in platform — is the list regex or the cargo tree output form broken? (then the decision below goes blind)"; return 1; fi
+            if [ -n "$bad" ]; then echo "FAIL — a member outside platform directly has an OS crate as a production dependency (move that OS call to platform):"; printf '%s\n' "$bad"; return 1; fi
+            echo "PASS — direct production OS crate dependencies only in platform"
           }
           os_dep_gate
 
-      # ADR-0266 불변식의 표준 라이브러리 축 — platform 밖에서 `std::os::windows` · `std::os::unix` 를 `//` 주석 밖에 쓰는
-      #   `.rs` 파일 목록이 아래 명단과 정확히 같아야 PASS(짝: 같은 matcher 가 platform 안에서는 1 파일 이상).
-      #   ★정규식(`std_os_re`) · 판정 함수(`std_os_gate` — 대상 범위 · 짝 · 대조 · 메시지 전부) · 명단(heredoc)은 여기
-      #   하나에만 둔다★ — 로컬 대체(`.claude/skill-bindings/qa-verify.md` 「gates 잡」)는 이 스텝을 그대로 돈다. 짝 · 범위 · 한계 · 명단을 고치는
-      #   법의 정본 = `crates/engram-dashboard-platform/src/lib.rs` 헤더 게이트 ⑥.
+      # The standard library axis of the ADR-0266 invariant — PASS only if the list of `.rs` files outside platform that use `std::os::windows` · `std::os::unix` outside `//` comments
+      #   is exactly the list below (pair: the same matcher hits 1 or more files inside platform).
+      #   ★The regex (`std_os_re`) · the decision function (`std_os_gate` — target scope · pair · comparison · messages, all of it) · the list (heredoc) live
+      #   only here★ — the local substitute (`.claude/skill-bindings/qa-verify.md` 「gates 잡」) runs this step as is. The canonical pair · scope · limits · how to change # hangul-ok
+      #   the list = gate ⑥ of the `crates/engram-dashboard-platform/src/lib.rs` header.
       - name: 'platform gate 6: std::os::windows/unix outside platform — exactly the fixed file list'
         shell: bash
         run: |
           std_os_re='^(?:[^/]|/[^/])*?\bstd\s*::\s*os\s*::\s*(?:windows|unix)\b'
-          # 인자 = 명단 원문(`#` 주석 · 빈 줄 · 들여쓰기를 받는다 — 4h 블록은 ci.yml 원문 그대로 넘긴다).
-          #   `\134` 는 게이트 ④ 의 `os_cfg_files` 와 같은 이유다.
+          # Argument = the list text as is (takes `#` comments · blank lines · indentation — the 4h block passes the ci.yml text as is).
+          #   `\134` is for the same reason as gate ④'s `os_cfg_files`.
           std_os_gate() {
             local d own actual expected n rc=0
             for d in crates src-tauri crates/engram-dashboard-platform/src; do
-              [ -d "$d" ] || { echo "FAIL — 게이트 대상 디렉터리가 없다: $d (개명했나·이사했나)"; return 1; }
+              [ -d "$d" ] || { echo "FAIL — gate target directory is missing: $d (renamed or moved?)"; return 1; }
             done
             expected=$(printf '%s\n' "$1" | sed -e 's/[[:space:]]*#.*$//' -e 's/^[[:space:]]*//' -e '/^$/d' | LC_ALL=C sort)
             own=$(rg -l --color never "$std_os_re" crates/engram-dashboard-platform/src -g '*.rs') || rc=$?
             [ "$rc" -le 1 ] || { echo "FAIL — rg errored (exit $rc)"; return 1; }
-            [ -n "$own" ] || { echo "FAIL — 짝: 같은 matcher 가 platform 안에서 0 파일을 문다 — 정규식이 망가졌나(그러면 아래 대조가 눈먼다)"; return 1; }
+            [ -n "$own" ] || { echo "FAIL — pair: the same matcher hits 0 files inside platform — is the regex broken? (then the comparison below goes blind)"; return 1; }
             rc=0
             actual=$(rg -l --color never "$std_os_re" crates src-tauri -g '*.rs' -g '!crates/engram-dashboard-platform/**') || rc=$?
             [ "$rc" -le 1 ] || { echo "FAIL — rg errored (exit $rc)"; return 1; }
             actual=$(printf '%s\n' "$actual" | tr '\134' '/' | sed '/^$/d' | LC_ALL=C sort -u)
             if [ "$actual" = "$expected" ]; then
               n=$(printf '%s\n' "$actual" | wc -l | tr -d '[:space:]')
-              echo "PASS — platform 밖 std::os 파일 $n 개가 명단과 같다"
+              echo "PASS — the $n std::os files outside platform match the list"
               return 0
             fi
-            echo "FAIL — platform 밖 std::os 파일이 명단과 다르다"
-            echo "명단 밖인데 걸린 파일(운영 코드면 platform 으로 옮긴다 · 시험 · 예제면 명단에 더한다):"
+            echo "FAIL — the std::os files outside platform differ from the list"
+            echo "Files hit but not in the list (if production code, move it to platform · if a test · example, add it to the list):"
             LC_ALL=C comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual")
-            echo "명단에 있는데 안 걸린 파일(쓰임을 걷었거나 옮겼다 — 명단에서 뺀다):"
+            echo "Files in the list but not hit (the use was removed or moved — remove it from the list):"
             LC_ALL=C comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual")
             return 1
           }
           list=$(cat <<'STD_OS_FILES'
-          # 시험 분기뿐(`#[cfg(test)]` 모듈 안)
+          # test branches only (inside `#[cfg(test)]` modules)
           crates/engram-dashboard-agent/src/backend/claude/usage_probe.rs
           crates/engram-dashboard-agent/src/usage/process.rs
           crates/engram-dashboard-agent/src/usage/scratch.rs
           crates/engram-dashboard-base/src/logging/mod.rs
           crates/engram-dashboard-daemon/src/instance.rs
-          # 예제
+          # examples
           crates/engram-dashboard-agent/examples/spike_breakaway.rs
           STD_OS_FILES
           )
           std_os_gate "$list"
 
-      # ADR-0175 결정 3 이 `replay_flight` 를 코어에서 셸 패키지 안으로 옮기며, 그 파일 헤더가 내세우던
-      #   순수성 주장(소켓·tokio·Tauri·protocol 의존 0)이 **어느 게이트의 스캔 범위에도 안 들어가게 됐다**
-      #   — 위 소스 정규식 게이트는 전부 `crates/…/src/` 로 스코프돼 있고 `src-tauri/src/` 를 보는 것은
-      #   하나도 없었다. 결정 1(`base` 신설)은 새 집에 게이트를 세웠는데 결정 3 은 세우지 않았다.
-      # ★형제 crate 게이트와 달리 컴파일러 backstop 이 없다★ — `agent`·`base` 는 `tauri` 를 Cargo.toml 에
-      #   아예 안 물어 위반이 컴파일 에러로 먼저 죽고 `use tauri` grep 은 값싼 조기 신호일 뿐이다. 반면
-      #   이 패키지는 `tauri`·`tokio`·`engram-dashboard-protocol` 을 전부 의존하므로 위반이 그냥 컴파일된다.
-      #   그래서 여기서는 이 정규식이 **유일한 벽**이고, `use` 줄만 보는 형태로는 인라인 완전경로
-      #   (`tokio::spawn(...)`) 한 줄에 그대로 뚫린다 — 그 형태를 함께 잡는 이유가 이것이다.
-      # ★접두 가드 `^(?:[^/]|/[^/])*?` = 「이 줄에서 아직 `//` 를 만나지 않았다」★ — 그래서 `//!`·`///`·꼬리
-      #   주석 안의 자기인용이 오탐되지 않는다(대상 파일의 헤더가 이 게이트를 인용한다). Rust regex 는
-      #   lookaround 가 없어 이 형태 말고는 「주석 밖」을 표현할 수단이 없다.
-      # ★`\b` + `::` 요구가 정당한 이웃을 가른다★ — 이 모듈은 `std::time::Instant` 를 쓴다(결정론 하네스의
-      #   주입점). `tokio::time::Instant` 만 잡고 std 쪽은 안 잡아야 해서 crate 뿌리 이름을 물었고, `\b` 가
-      #   `my_tauri::` 같은 부분일치를 막는다.
-      # ★`::` 앞뒤 `\s*` 를 걷지 말 것★ — Rust 는 경로 마디 사이 공백을 받는다(`tokio :: spawn`). 보통은 rustfmt
-      #   (`cargo fmt --check`)가 먼저 막지만, rustfmt 가 손대지 않는 매크로 본문 · `#[rustfmt::skip]` 구간의
-      #   공백형은 fmt 게이트를 지나 그대로 남는다. 줄을 넘는 경로는 여전히 못 본다.
-      # ★알려진 한계 = 블록 주석(`/* */`)★ — 그 안쪽은 접두 가드가 못 막는다. 대상 파일은 `//` 만 쓴다.
-      # ★알려진 한계 = `<이름>::` 꼴이 아닌 이름★ — 별칭(`use tokio as rt;` · `extern crate tokio as rt;`) · 끝 마디
-      #   import(`use std::net;`) · 여러 항목 묶음(`use std::{net::TcpStream, time::Instant};`)은 못 본다
+      # ADR-0175 decision 3 moved `replay_flight` from core into the shell package, and with that the purity claim its file header made
+      #   (zero dependencies on sockets · tokio · Tauri · protocol) **ended up in no gate's scan scope**
+      #   — the source regex gates above are all scoped to `crates/…/src/`, and not one looked at
+      #   `src-tauri/src/`. Decision 1 (the new `base`) set up a gate at the new home, but decision 3 did not.
+      # ★Unlike the sibling crate gates, there is no compiler backstop★ — `agent` · `base` do not take `tauri` in their Cargo.toml
+      #   at all, so a violation dies first as a compile error and the `use tauri` grep is only a cheap early signal. In contrast,
+      #   this package depends on `tauri` · `tokio` · `engram-dashboard-protocol`, all of them, so a violation just compiles.
+      #   So here this regex is **the only wall**, and a form that only looks at `use` lines is pierced by a single line of an inline full path
+      #   (`tokio::spawn(...)`) — that is why it catches that form too.
+      # ★The prefix guard `^(?:[^/]|/[^/])*?` = 「no `//` met yet on this line」★ — so self-quotes inside `//!` · `///` · trailing
+      #   comments are not false positives (the target file's header quotes this gate). Rust regex
+      #   has no lookaround, so apart from this form there is no means to express 「outside comments」.
+      # ★Requiring `\b` + `::` tells legitimate neighbors apart★ — this module uses `std::time::Instant` (the deterministic harness's
+      #   injection point). It must catch only `tokio::time::Instant` and not the std one, so it matches the crate root name, and `\b`
+      #   blocks partial matches like `my_tauri::`.
+      # ★Do not remove the `\s*` around `::`★ — Rust accepts spaces between path segments (`tokio :: spawn`). Usually rustfmt
+      #   (`cargo fmt --check`) blocks it first, but spaced forms in macro bodies rustfmt does not touch · `#[rustfmt::skip]` regions
+      #   pass the fmt gate and remain as is. Paths spanning lines are still not seen.
+      # ★Known limit = block comments (`/* */`)★ — the prefix guard cannot block what is inside them. The target file uses only `//`.
+      # ★Known limit = names not in the `<name>::` form★ — aliases (`use tokio as rt;` · `extern crate tokio as rt;`) · last-segment
+      #   imports (`use std::net;`) · multi-item groups (`use std::{net::TcpStream, time::Instant};`) are not seen
       #   (`docs/todo/observed-only.md`).
-      # ★`test -f` 를 지우지 말 것★ — 파일이 또 이사하면 rg 는 매치 0 을 뱉고 0 = PASS 라 벽이 조용히
-      #   사라진다(rc=2 갈래도 같은 것을 잡지만 사유를 못 찍는다). `-d` 가 아니라 `-f` 다 — 대상이 파일이다.
+      # ★Do not delete `test -f`★ — if the file moves again, rg reports 0 matches and 0 = PASS, so the wall quietly
+      #   disappears (the rc=2 branch catches the same thing but cannot print the reason). It is `-f`, not `-d` — the target is a file.
       - name: 'Gate: replay_flight purity — no transport/wire ingress'
         shell: bash
         run: |
           set +e
           f=src-tauri/src/daemon_client/replay_flight.rs
-          if [ ! -f "$f" ]; then echo "FAIL — 게이트 대상 파일이 없다: $f (또 이사했나)"; exit 1; fi
+          if [ ! -f "$f" ]; then echo "FAIL — gate target file is missing: $f (moved again?)"; exit 1; fi
           hits=$(rg "^(?:[^/]|/[^/])*?\b(tauri|tokio|engram_dashboard_[a-z_]+|std\s*::\s*net)\s*::" "$f")
           rc=$?
           set -e
@@ -1418,20 +1418,20 @@ jobs:
             *) echo "FAIL — rg errored (exit $rc)"; exit 1 ;;
           esac
 
-      # ADR-0177: 재사용 전송 lib(`transport` — 신설)의 격리 게이트 셋. 기대값·근거·「지우지 말 것」의
-      #   정본은 `crates/engram-dashboard-transport/src/lib.rs` 헤더의 「격리 게이트」 절이고 여기는
-      #   부르기만 한다 — 기대값을 이 워크플로에 다시 해설해 두 번째 정본을 만들지 않는다.
-      #   그 헤더의 게이트 ④(세 feature 조합이 각각 컴파일된다)와 ⑤(실소켓 스위트가 비지 않았나)는
-      #   컴파일이 필요해 backend 잡에 있다(`transport gate 4a`/`4b`/`4c`/`4d`).
-      # ★셋이 각각 다른 축이라 하나로 줄이지 말 것★ — ①은 워크스페이스 멤버만 세므로 서드파티 `tauri` 를
-      #   그냥 통과시키고(그 축이 ②), ③은 crate **안쪽** 층 경계라 ①②가 아예 안 본다.
-      # 종료코드 반전·`set +e` 함정은 이 잡 위쪽 공통 주석 그대로다.
+      # ADR-0177: the three isolation gates of the reusable transport lib (`transport` — new). The canonical expected values · rationale · 「do not delete」
+      #   are the 「Isolation gates」 section of the `crates/engram-dashboard-transport/src/lib.rs` header, and this only
+      #   calls them — the expected values are not explained again in this workflow, which would make a second canonical source.
+      #   That header's gate ④ (the three feature combinations each compile) and ⑤ (is the real-socket suite non-empty)
+      #   need compiling, so they are in the backend job (`transport gate 4a`/`4b`/`4c`/`4d`).
+      # ★The three are different axes, so do not merge them into one★ — ① counts only workspace members, so it lets the third-party `tauri`
+      #   straight through (that axis is ②), and ③ is a layer boundary **inside** the crate, which ①② do not look at at all.
+      # The exit code inversion · `set +e` traps are exactly as in the common comment near the top of this job.
 
-      # 형태·플래그는 messaging·command·base 상한 게이트와 같다(줄이면 rename·`[dependencies.<이름>]`
-      #   테이블 형·`[build-dependencies]`·비활성 target·optional 이 전부 정상 Cargo 문법으로 샌다).
-      # ★이 게이트에만 경로 존재 사전점검이 없다 — 필요가 없어서다★: rg 가 읽는 것은 파일이 아니라
-      #   cargo tree 의 stdout 이고, 패키지가 사라지거나 개명하면 `cargo tree -p` 자체가 0 이 아닌
-      #   종료코드로 죽어 아래 첫 분기가 잡는다. 아래 ②③은 경로를 직접 훑으므로 사전점검이 있다.
+      # Form · flags are the same as the messaging · command · base ceiling gates (cutting them lets rename · the `[dependencies.<name>]`
+      #   table form · `[build-dependencies]` · inactive target · optional all leak through as valid Cargo syntax).
+      # ★Only this gate has no path existence pre-check — because it has no need★: what rg reads is not a file but
+      #   cargo tree's stdout, and if the package vanishes or is renamed, `cargo tree -p` itself dies with a nonzero
+      #   exit code and the first branch below catches it. ②③ below scan paths directly, so they have a pre-check.
       - name: 'transport gate 1: direct workspace deps ceiling (exactly 1 = self)'
         shell: bash
         run: |
@@ -1448,19 +1448,19 @@ jobs:
           if [ -z "$out" ]; then n=0; else n=$(printf '%s\n' "$out" | wc -l | tr -d '[:space:]'); fi
           echo "found $n direct workspace dep(s):"
           printf '%s\n' "$out"
-          if [ "$n" -ne 1 ]; then echo "FAIL — expected exactly 1(자기 자신) — 워크스페이스 crate 의존이 반입됐다"; exit 1; fi
+          if [ "$n" -ne 1 ]; then echo "FAIL — expected exactly 1 (itself) — a workspace crate dependency was brought in"; exit 1; fi
           echo "PASS"
 
-      # ADR-0003 의 격리 불변식. ★위 ①이 이 축을 덮는다고 읽지 말 것★ — ①은 `rg "^engram-dashboard"` 로
-      #   워크스페이스 멤버만 세므로 서드파티 `tauri` 는 그 게이트를 그대로 통과한다.
-      # ★`test -d` 를 지우지 말 것★ — crate 를 옮기거나 개명하면 rg 는 매치 0 을 뱉고 0 = PASS 라 벽이
-      #   조용히 사라진다(rc=2 갈래도 같은 것을 잡지만 사유를 못 찍는다).
+      # ADR-0003's isolation invariant. ★Do not read ① above as covering this axis★ — ① counts only workspace members with
+      #   `rg "^engram-dashboard"`, so the third-party `tauri` passes that gate as is.
+      # ★Do not delete `test -d`★ — if the crate is moved or renamed, rg reports 0 matches and 0 = PASS, so the wall
+      #   quietly disappears (the rc=2 branch catches the same thing but cannot print the reason).
       - name: 'transport gate 2: no `use tauri` in the transport crate'
         shell: bash
         run: |
           set +e
           d=crates/engram-dashboard-transport/src
-          if [ ! -d "$d" ]; then echo "FAIL — 게이트 대상 디렉터리가 없다: $d (개명했나·이사했나)"; exit 1; fi
+          if [ ! -d "$d" ]; then echo "FAIL — gate target directory is missing: $d (renamed or moved?)"; exit 1; fi
           hits=$(rg "^\s*use tauri" "$d/")
           rc=$?
           set -e
@@ -1470,21 +1470,21 @@ jobs:
             *) echo "FAIL — rg errored (exit $rc)"; exit 1 ;;
           esac
 
-      # 순수 층(`pending.rs`·`stream.rs`·`machine.rs`)이 런타임·소켓·워크스페이스 crate 를 안 무는 벽.
-      # ★같은 crate 안이라 컴파일러 backstop 이 없다★ — `tokio` 한 줄이 그냥 컴파일되므로 이 정규식이
-      #   유일한 벽이다. 형태의 근거는 위 `replay_flight` 순수성 게이트 주석과 같다(접두
-      #   `^(?:[^/]|/[^/])*?` = 「아직 `//` 를 안 만났다」 → 주석 밖만 잡아 헤더 자기인용이 오탐되지 않고 ·
-      #   `use` 줄만 앵커하면 인라인 완전경로 `tokio::spawn(…)` 한 줄에 뚫리며 · `\b`+`::` 가 정당한 이웃
-      #   `std::time::Instant` 를 가르고 · `::` 앞뒤 `\s*` 가 공백형 `tokio :: spawn` 을 잡는다).
-      # ★파일이 사라져도 매치는 0 = PASS 라 세 파일의 존재를 먼저 본다★(`-d` 가 아니라 `-f` — 대상이 파일이다).
-      # ★`$files` 를 따옴표로 감싸지 말 것★ — 세 경로로 갈라져 rg 인자가 돼야 한다(경로에 공백이 없다).
+      # The wall keeping the pure layer (`pending.rs` · `stream.rs` · `machine.rs`) from taking the runtime · sockets · workspace crates.
+      # ★Inside the same crate, so there is no compiler backstop★ — a single `tokio` line just compiles, so this regex is
+      #   the only wall. The rationale for the form is the same as the `replay_flight` purity gate comment above (the prefix
+      #   `^(?:[^/]|/[^/])*?` = 「no `//` met yet」 → catches only outside comments, so header self-quotes are not false positives ·
+      #   anchoring only `use` lines is pierced by a single line of an inline full path `tokio::spawn(…)` · `\b`+`::` tells apart the legitimate neighbor
+      #   `std::time::Instant` · the `\s*` around `::` catches the spaced form `tokio :: spawn`).
+      # ★Even if a file vanishes the match is 0 = PASS, so the existence of the three files is checked first★ (`-f`, not `-d` — the targets are files).
+      # ★Do not quote `$files`★ — it must split into three paths and become rg arguments (the paths have no spaces).
       - name: 'transport gate 3: pure layer isolation (pending/stream/machine)'
         shell: bash
         run: |
           set +e
           files='crates/engram-dashboard-transport/src/pending.rs crates/engram-dashboard-transport/src/stream.rs crates/engram-dashboard-transport/src/machine.rs'
           for f in $files; do
-            if [ ! -f "$f" ]; then echo "FAIL — 게이트 대상 파일이 없다: $f (개명했나·이사했나)"; exit 1; fi
+            if [ ! -f "$f" ]; then echo "FAIL — gate target file is missing: $f (renamed or moved?)"; exit 1; fi
           done
           hits=$(rg "^(?:[^/]|/[^/])*?\b(tokio|futures_util|futures|engram_dashboard_[a-z_]+|std\s*::\s*net)\s*::" $files)
           rc=$?
@@ -1559,7 +1559,7 @@ jobs:
       - name: 'platform gate 7: no async-runtime ingress (agent · cli = 0, transport >= 1)'
         shell: bash
         run: |
-          # $1 = 기대(zero = 0줄 · some = 1줄 이상) · 나머지 = `cargo tree` 의 대상 인자.
+          # $1 = expectation (zero = 0 lines · some = 1 or more lines) · the rest = the target arguments of `cargo tree`.
           async_ingress() {
             local want=$1 tree hits n rc=0
             shift
@@ -1571,7 +1571,7 @@ jobs:
               zero:1) echo "PASS — 0 matches" ;;
               zero:0) echo "FAIL — async runtime leaked:"; printf '%s\n' "$hits"; return 1 ;;
               some:0) n=$(printf '%s\n' "$hits" | wc -l | tr -d '[:space:]'); echo "PASS — $n matches"; printf '%s\n' "$hits" ;;
-              some:1) echo "FAIL — 짝: 0 matches — 패턴이나 cargo tree 출력 꼴이 망가졌나(그러면 0 기대 줄이 눈먼다)"; return 1 ;;
+              some:1) echo "FAIL — pair: 0 matches — is the pattern or the cargo tree output form broken? (then the 0-expectation lines go blind)"; return 1 ;;
               *) echo "FAIL — rg errored (exit $rc)"; return 1 ;;
             esac
           }
@@ -1579,13 +1579,13 @@ jobs:
           async_ingress zero -p engram-dashboard-cli
           async_ingress some -p engram-dashboard-transport
 
-      # ── 서드파티 고지 — release-build 가 부르는 것과 같은 생성기를 push 마다 돌리고 결과는 버린다 ──
-      # 허용 밖 라이선스 · 본문 없는 패키지 · 목록에 없는 synthesized crate 같은 실패가 태그를 찍은 뒤 release-build 에서
-      # 처음 터지지 않게 여기서 먼저 잡는다(실패 조건의 정본 = scripts/gen-third-party-licenses.mjs 헤더와 본문).
-      # 이 잡에 두는 이유: 툴체인 단언 · 레지스트리 캐시가 이미 있고, 위 cargo tree 게이트들이 crate 소스를 받아 둔 뒤라
-      #   cargo-about 이 다시 받을 것이 없다. 새 잡을 세우지 않으므로 release-build 의 needs 도 그대로다(이 잡이 이미 든다).
-      #   생성기가 npm 운영 의존도 읽어 node_modules 가 필요하다 — setup-node + npm ci 를 이 잡에도 둔다.
-      # 설치 스텝은 release-build 의 같은 이름 스텝과 같은 몸이다 — 하나를 고치면 둘 다 고친다(핀 값은 최상위 env).
+      # ── Third-party notice — run the same generator release-build calls on every push and discard the result ──
+      # Failures such as a license outside the allowlist · a package without text · a synthesized crate not in the list are caught here first so they do not
+      # first blow up in release-build after a tag is cut (the canonical failure conditions = the header and body of scripts/gen-third-party-licenses.mjs).
+      # Why in this job: the toolchain assertion · registry cache are already here, and the cargo tree gates above have already fetched the crate sources, so
+      #   cargo-about has nothing to fetch again. No new job is set up, so release-build's needs stay as is (this job is already in it).
+      #   The generator also reads the npm production dependencies and needs node_modules — so setup-node + npm ci are in this job too.
+      # The install step has the same body as release-build's step of the same name — change one, change both (the pinned values are in the top-level env).
       - name: Install cargo-about (pinned, checksum-verified)
         shell: pwsh
         run: |
@@ -1599,12 +1599,12 @@ jobs:
           if ($actual -ne $sha) { throw "cargo-about archive checksum mismatch: expected $sha, got $actual" }
           $dest = "$env:RUNNER_TEMP\cargo-about"
           New-Item -ItemType Directory -Force -Path $dest | Out-Null
-          # Windows 내장 bsdtar 를 경로로 집는다 — PATH 의 GNU tar(Git)가 잡히면 `D:\…` 를 원격 호스트로 읽고 실패한다.
+          # Pick the Windows built-in bsdtar by path — if the GNU tar (Git) on PATH gets picked, it reads `D:\…` as a remote host and fails.
           & "$env:SystemRoot\System32\tar.exe" -xzf $archive -C $dest
           if ($LASTEXITCODE -ne 0) { throw "tar exited $LASTEXITCODE" }
           $exe = Get-ChildItem $dest -Recurse -Filter cargo-about.exe | Select-Object -First 1
           if (-not $exe) { throw "cargo-about.exe not found in the extracted archive" }
-          # GITHUB_PATH 는 기존 PATH 앞에 붙으므로 러너에 다른 cargo-about 이 있어도 이쪽이 이긴다. 버전 단언은 생성기가 한다.
+          # GITHUB_PATH is prepended to the existing PATH, so this one wins even if the runner has another cargo-about. The version assertion is done by the generator.
           $exe.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -1621,7 +1621,7 @@ jobs:
         shell: bash
         run: node scripts/gen-third-party-licenses.mjs "$RUNNER_TEMP/THIRD_PARTY_LICENSES.txt"
 
-  # ── 프론트 ───────────────────────────────────────────────────────────────────
+  # ── Frontend ───────────────────────────────────────────────────────────────────
   frontend:
     name: frontend (vitest + tsc)
     runs-on: windows-latest
@@ -1644,145 +1644,145 @@ jobs:
         shell: bash
         run: npm test
 
-      # 별도 typecheck 스크립트가 없어 tsc 를 직접 부른다.
+      # There is no separate typecheck script, so tsc is called directly.
       - name: npx tsc --noEmit
         shell: bash
         run: npx tsc --noEmit
 
-  # ── 릴리즈 (버전 태그 전용) — 빌드 잡과 발행 잡을 가른다 ──────────────────────
-  # ★두 잡으로 가르는 이유(공급망)★
-  # 패키징은 `npm ci` 와 tauri 빌드로 수백 개 전이 의존성의 코드를 러너에서 실행한다. 그중 하나가
-  # `GITHUB_PATH` 에 가짜 `gh` 를 앞세우면, **같은 잡에서** 나중에 부르는 `gh` 는 그 가짜다 — 스텝 단위
-  # `env:` 로 토큰을 좁혀도 소용없다. 공격 대상은 "누가 env 를 읽을 수 있나"가 아니라 "`gh` 가 무엇으로
-  # 해석되나"이기 때문이다. 그래서 쓰기 토큰은 서드파티 코드가 한 줄도 돌지 않는 잡에만 둔다.
-  #   release-build   : contents=read  · 서드파티 코드가 도는 곳 · 결과를 아티팩트로만 넘긴다
-  #   release-publish : contents=write · 아티팩트 다운로드 + gh 호출뿐 · npm/cargo/패키징 스크립트 없음
-  # ★release-publish 에 스텝을 늘리지 말 것★ — 스텝 하나가 곧 서드파티 코드가 다시 기어들 자리다.
+  # ── Release (version tags only) — the build job and the publish job are split ──────────────────────
+  # ★Why it is split into two jobs (supply chain)★
+  # Packaging runs the code of hundreds of transitive dependencies on the runner through `npm ci` and the tauri build. If one of them
+  # puts a fake `gh` in front of `GITHUB_PATH`, the `gh` called later **in the same job** is that fake — narrowing the token with step-level
+  # `env:` does not help. That is because the attack target is not "who can read env" but "what `gh`
+  # resolves to". So the write token is placed only in a job where not a single line of third-party code runs.
+  #   release-build   : contents=read  · where third-party code runs · passes the result on only as an artifact
+  #   release-publish : contents=write · only artifact download + gh calls · no npm/cargo/packaging scripts
+  # ★Do not add steps to release-publish★ — each step is a place where third-party code can crawl back in.
   #
-  # ★`ref_type == 'tag'` 만으로는 부족★ — 위 `tags: ['v*']` 글롭은 **push 에만** 걸린다.
-  # workflow_dispatch 는 아무 ref 나 겨눌 수 있어서, 태그 조건만 보면 `backup/comments-pass-20260731`
-  # 같은 비-버전 태그를 겨눈 수동 실행이 그대로 **공개 GitHub Release** 를 만들어 버린다.
-  # 그래서 push 글롭과 같은 조건을 직접 재현한다: v 로 시작 + `/` 없음(GitHub 글롭의 `*` 는 `/` 를 넘지
-  # 않는다). 조건을 **두 잡 모두**에 건다 — build 가 skip 되면 needs 로 publish 도 skip 되므로 build 쪽만
-  # 으로도 닫히지만, 실제로 릴리즈를 만드는 잡이 스스로도 같은 조건을 들고 있게 한다.
+  # ★`ref_type == 'tag'` alone is not enough★ — the `tags: ['v*']` glob above applies **only to push**.
+  # workflow_dispatch can target any ref, so looking only at the tag condition, a manual run aimed at a non-version tag like
+  # `backup/comments-pass-20260731` would go ahead and create a **public GitHub Release**.
+  # So the same condition as the push glob is reproduced directly: starts with v + no `/` (`*` in a GitHub glob does not cross `/`).
+  # The condition is put on **both jobs** — if build is skipped, publish is skipped too through needs, so the build side alone
+  # would close it, but the job that actually creates the release carries the same condition itself too.
   #
-  # 패키징 로직을 여기서 다시 짜지 않는다. ADR-0100 co-location 불변식과 "무엇을 배송하는가"의 단일
-  # 출처는 scripts/build-release.ps1 의 manifest 이고, 이 잡은 그 스크립트를 부르고 결과를 zip 으로
-  # 옮길 뿐이다. 기대 파일 목록을 이 YAML 에 적으면 출처가 둘이 되어 반드시 어긋난다.
+  # The packaging logic is not rewritten here. The single source of the ADR-0100 co-location invariant and "what ships"
+  # is the manifest of scripts/build-release.ps1, and this job only calls that script and moves the result into a zip.
+  # Writing the expected file list in this YAML would make two sources, and they would surely diverge.
   release-build:
     name: release build (package + zip)
     if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v') && !contains(github.ref_name, '/')
     needs: [backend, gates, frontend]
     runs-on: windows-latest
-    # 최적화 빌드는 디버그 테스트 잡보다 훨씬 오래 걸린다. 컴파일 캐시를 쓰지 않아(아래) 매번 cold 로 돈다.
+    # The optimized build takes much longer than the debug test jobs. It uses no compile cache (below), so it runs cold every time.
     timeout-minutes: 90
-    # 이 잡은 읽기만 한다. 쓰기 토큰은 release-publish 에만 있다(위 분리 이유 참조).
+    # This job only reads. The write token exists only in release-publish (see the reason for the split above).
     permissions:
       contents: read
     env:
-      # 태그 문자열을 run 본문에 `${{ }}` 로 직접 보간하지 않는다(스크립트 인젝션 표면) — env 로 넘긴다.
-      # 버전은 태그가 곧 정답이다. 여기서 버전을 계산·가공하지 않는다.
+      # The tag string is not interpolated into the run body directly with `${{ }}` (a script injection surface) — it is passed via env.
+      # The tag is the version, period. The version is not computed or processed here.
       TAG: ${{ github.ref_name }}
-    # ★이 잡이 발행 잡으로 넘기는 값은 이것 하나뿐이다★ — 파일 이름조차 넘기지 않는다.
-    # 이름을 넘기면 빌드 잡이 통제하는 문자열이 쓰기 토큰 잡의 `gh` 인자로 들어간다(글롭을 품은 이름 +
-    # 짝 맞는 파일들로 다른 에셋을 올리게 유도할 수 있다). 발행 잡은 TAG 에서 스스로 이름을 만든다.
+    # ★The only value this job passes to the publish job is this one★ — not even the file name is passed.
+    # Passing a name would put a string the build job controls into a `gh` argument of the write-token job (a name holding a glob +
+    # matching files could lure it into uploading other assets). The publish job builds the name itself from TAG.
     outputs:
       built_commit: ${{ steps.built.outputs.commit }}
     steps:
-      # ★가장 먼저 돈다(checkout 보다도 앞)★ — 태그 이름이 경로·파일명으로 안전한지부터 본다.
-      # 아래 스텝들이 태그 문자열을 조립 폴더 이름과 zip 파일 이름에 그대로 박기 때문이다. 특히 `/` 가
-      # 들어가면 조립 경로가 한 단계 더 파여(`…\engram-dashboard-v1\beta`) `Split-Path -Leaf` 가 `beta` 만
-      # 집어, zip 이름도 co-location 폴더 이름도 버전을 잃는다. 그리고 아래 zip 게이트는 그걸 못 잡는다 —
-      # 게이트의 기대 루트명이 **같은 오염된 경로에서 파생**되므로 사이좋게 통과한다(구조적 사각).
-      # `if` 의 `/` 차단과 중복이지만, 이건 값 자체를 보는 마지막 방어선이고 빌드 앞에서 몇 초에 끝난다.
-      # 버전 **형식**을 강제하지 않는 이유: 태그가 곧 버전이라 형식은 이 잡이 정할 문제가 아니다.
-      # 여기서 보는 것은 "경로·파일명으로 쓸 수 있는가" 하나뿐이다.
+      # ★Runs first of all (even before checkout)★ — it first checks that the tag name is safe as a path and file name.
+      # Because the steps below put the tag string as is into the staging folder name and the zip file name. In particular, if a `/`
+      # gets in, the staging path digs one level deeper (`…\engram-dashboard-v1\beta`) and `Split-Path -Leaf` picks only `beta`,
+      # so both the zip name and the co-location folder name lose the version. And the zip gate below cannot catch it —
+      # the gate's expected root name is **derived from the same contaminated path**, so they pass together in harmony (a structural blind spot).
+      # It duplicates the `/` block in `if`, but this is the last line of defense that looks at the value itself, and it finishes in a few seconds before the build.
+      # Why the version **format** is not enforced: the tag is the version, so the format is not this job's question.
+      # The only thing checked here is "can it be used as a path and file name".
       - name: 'Gate: tag name is safe as a path and file name'
         shell: bash
         run: |
           echo "TAG=$TAG"
-          # 허용 문자만 통과(allowlist). 여기 없는 것은 전부 거부되므로 / \ : * ? " < > | 와 공백·제어문자가
-          # 자동으로 걸린다. 선두 v 도 함께 단언한다.
-          # ★이 allowlist 는 글롭 차단으로도 load-bearing 이다 — 느슨하게 풀지 말 것★
-          # 아래 스텝의 PowerShell 파라미터 3개가 값을 **와일드카드 패턴으로 해석**한다:
-          # `Compress-Archive -Path`, 그리고 zip 게이트의 `Get-ChildItem -Path` 2회.
-          # 지금 안전한 유일한 이유가 allowlist 에 * ? [ ] 가 없어서다. 여기에 그 문자들을 들이면
-          # 조립 폴더 경로가 조용히 패턴 매칭으로 바뀌어(엉뚱한 폴더를 담거나 빈 결과를 내고)
-          # 게이트의 기대값마저 같은 패턴에서 파생되므로 사이좋게 통과한다.
+          # Only allowed characters pass (allowlist). Everything not listed here is rejected, so / \ : * ? " < > | and spaces · control characters
+          # are caught automatically. The leading v is asserted too.
+          # ★This allowlist is load-bearing as a glob block too — do not loosen it★
+          # 3 PowerShell parameters in the steps below **interpret the value as a wildcard pattern**:
+          # `Compress-Archive -Path`, and the zip gate's `Get-ChildItem -Path` twice.
+          # The only reason it is safe now is that the allowlist has no * ? [ ]. Letting those characters in here
+          # quietly turns the staging folder path into pattern matching (packing the wrong folder or producing an empty result),
+          # and since even the gate's expected value is derived from the same pattern, they pass together in harmony.
           if [[ ! "$TAG" =~ ^v[0-9A-Za-z._+-]+$ ]]; then
-            echo "FAIL — 태그에 경로·파일명으로 안전하지 않은 문자가 있다(허용: v 로 시작 + 영숫자 . _ + -)"
+            echo "FAIL — the tag has characters that are not safe in a path or file name (allowed: starts with v + alphanumerics . _ + -)"
             exit 1
           fi
-          # allowlist 를 통과하지만 여전히 위험한 두 형태를 따로 막는다.
+          # Separately block the two forms that pass the allowlist but are still dangerous.
           case "$TAG" in
-            *..*) echo "FAIL — 태그에 '..' 이 있다(경로 상위 이동)"; exit 1 ;;
-            *.)   echo "FAIL — 태그가 '.' 로 끝난다(Windows 가 파일명 끝 점을 잘라낸다)"; exit 1 ;;
+            *..*) echo "FAIL — the tag has '..' (moves up the path)"; exit 1 ;;
+            *.)   echo "FAIL — the tag ends with '.' (Windows trims a trailing dot from file names)"; exit 1 ;;
           esac
-          # 경로 길이 상한 여유분. RUNNER_TEMP + 조립 폴더 + prompts/agent-priming.md 가 MAX_PATH 를
-          # 넘지 않게 하는 안전 한도지 버전 형식 규칙이 아니다.
-          if [ "${#TAG}" -gt 64 ]; then echo "FAIL — 태그가 64자를 넘는다(${#TAG})"; exit 1; fi
+          # Headroom for the path length limit. It is a safety limit so that RUNNER_TEMP + the staging folder + prompts/agent-priming.md do not exceed
+          # MAX_PATH, not a version format rule.
+          if [ "${#TAG}" -gt 64 ]; then echo "FAIL — the tag is longer than 64 characters (${#TAG})"; exit 1; fi
           echo "PASS — tag name is usable as a path/file name"
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
 
-      # checkout 직후, 서드파티 코드가 한 줄이라도 돌기 **전에** 기록한다. 이 값이 발행 잡으로 건너가
-      # "그때 원격 태그가 아직 이 커밋을 가리키나"를 판정하는 기준이 된다.
-      # HEAD 를 읽는 이유: checkout 은 github.sha 를 체크아웃하는데 annotated 태그면 그 값이 태그
-      # 오브젝트일 수 있고, 실제로 컴파일되는 것은 언제나 peel 된 커밋이다. 여기서 읽으면 그 애매함이 없다.
+      # Recorded right after checkout, **before** even one line of third-party code runs. This value crosses over to the publish job
+      # and becomes the reference for deciding "does the remote tag still point at this commit at that time".
+      # Why HEAD is read: checkout checks out github.sha, but for an annotated tag that value can be the tag
+      # object, and what actually gets compiled is always the peeled commit. Reading it here removes that ambiguity.
       - name: Record the commit that is actually being built
         id: built
         shell: bash
         run: |
           sha=$(git rev-parse HEAD)
-          if [ -z "$sha" ]; then echo "FAIL — git rev-parse HEAD 가 비었다"; exit 1; fi
+          if [ -z "$sha" ]; then echo "FAIL — git rev-parse HEAD came back empty"; exit 1; fi
           echo "commit=$sha" >> "$GITHUB_OUTPUT"
           echo "built commit = $sha"
 
-      # ★검증만 한다 — 버전 필드를 절대 고쳐 쓰지 않는다★(사용자 결정).
-      # 빌드 중에 버전을 써넣으면 레포 내용과 배포물의 대응이 깨져서, 나중에 그 태그를 체크아웃해도
-      # 나간 물건을 재현할 수 없다. 사람이 버전 올리는 커밋을 먼저 만들고 그 커밋에 태그를 단다.
-      # 비싼 빌드 앞에 둔다 — 여기서 걸리면 몇 초 만에 끝난다.
+      # ★It only verifies — it never rewrites the version fields★ (user decision).
+      # Writing the version in during the build breaks the correspondence between the repo contents and the shipped artifact, so even checking out that tag later
+      # cannot reproduce what shipped. A person first makes the commit that raises the version, and puts the tag on that commit.
+      # It sits before the expensive build — if it trips here, it ends in a few seconds.
       #
-      # ── 무엇을 보나 (6건) ──
-      #   1. src-tauri/tauri.conf.json — Tauri 제품 버전. 설정에 있으면 이 값이 이긴다.
-      #   2. src-tauri/Cargo.toml — ★tauri.conf.json 의 version 이 **없을 때의 폴백**이라 그 자체로
-      #      load-bearing 이다★. 실측(tauri-utils 2.9.3 `src/config.rs` `Config::version` 문서):
+      # ── What it checks (6 items) ──
+      #   1. src-tauri/tauri.conf.json — the Tauri product version. If present in the config, this value wins.
+      #   2. src-tauri/Cargo.toml — ★it is **the fallback when tauri.conf.json has no version**, so it is
+      #      load-bearing in itself★. Measured (tauri-utils 2.9.3 `src/config.rs` `Config::version` docs):
       #      "a semver version number or a path to a `package.json` file … If removed the version number
-      #      from `Cargo.toml` is used." → 암묵 폴백은 Cargo.toml 이다. 1이 있다고 이걸 중복으로 보고
-      #      지우지 말 것 — 1을 지우는 순간 이게 제품 버전이 된다.
-      #   3. crates/engram-dashboard-daemon/Cargo.toml — daemon.exe 를 만드는 crate.
-      #      코드가 실제로 읽는다: agent_conn.rs 가 env!("CARGO_PKG_VERSION") 로 hello 이벤트에 실어
-      #      보낸다 → 어긋나면 에이전트에게 거짓 버전이 나간다.
-      #   4. crates/engram-dashboard-cli/Cargo.toml — engram.exe 를 만드는 패키지(ADR-0285). 코드는 지금 버전을
-      #      읽지 않지만 단독 배송물이 있어 아래 「일부러 뺀 것」의 라이브러리 기준에 들지 않는다 — 나중에
-      #      `engram --version` 같은 것이 생기면 거짓 버전을 막는다.
-      #      ★빠뜨리면 태그를 push 한 뒤에야 드러나 그 태그를 버린다★ — 이 스텝은 태그에서만 돈다.
-      #   5. package.json — ★산출물에 닿지 않는다★. 어디서도 import 되지 않고, Tauri 가 여기를 읽는 것은
-      #      tauri.conf.json 의 version 을 **package.json 경로 문자열로 명시**했을 때뿐이다(위 실측 인용).
-      #      그럼에도 거는 이유는 배포 경로가 아니라 자기기술 일관성 — 레포 루트가 스스로를 다른 버전이라
-      #      말하면 사람이 잘못된 답을 얻는다. 이건 배송 결함이 아니라 문서 결함이라 등급이 다르다.
-      #   6. package-lock.json (루트 `version` 만) — npm 이 package.json 에서 받아쓰는 거울값.
-      #      `npm ci` 의 정합성 검사는 의존성 스펙만 보고 이 필드는 안 본다 → 버전만 올리고 install 을
-      #      안 하면 조용히 어긋난 채 남는다. 루트 키만 단언한다(들여쓰기 2칸 = 루트, 구조적으로 유일).
-      #      packages[""].version 이라는 사본이 하나 더 있지만 따로 안 본다 — npm 이 둘을 항상 같이 쓰므로
-      #      현실의 drift 는 "lock 을 아예 갱신 안 함"이고 그건 루트 단언이 그대로 잡는다.
-      # ── 일부러 뺀 것 ──
-      #   - 라이브러리 crate(agent·base·command·messaging·net·platform·protocol·transport)의 crate 버전: 단독 배송물이 없는
-      #     내부 semver. 정적 링크돼 사용자에게 보이지 않는다. 첫 비-0.1.0 태그부터 제품 버전과 갈리는데
-      #     그건 의도된 결과다.
-      #   - PROTOCOL_VERSION(protocol crate, 현재 3): wire 계약 버전이라 릴리즈가 아니라 계약이 바뀔 때
-      #     움직인다. 릴리즈 버전에 묶으면 의미를 잃는다.
-      #   - Cargo.lock: 여기 없어도 된다. 버전만 올리고 lock 을 갱신 안 하면 backend 잡의 `--locked` 가
-      #     먼저 죽고, release-build 는 그 잡을 needs 하므로 애초에 시작하지 못한다.
+      #      from `Cargo.toml` is used." → the implicit fallback is Cargo.toml. Do not see this as a duplicate of 1
+      #      and delete it — the moment 1 is deleted, this becomes the product version.
+      #   3. crates/engram-dashboard-daemon/Cargo.toml — the crate that produces daemon.exe.
+      #      The code actually reads it: agent_conn.rs puts it into the hello event via env!("CARGO_PKG_VERSION") and
+      #      sends it → if it diverges, a false version goes out to agents.
+      #   4. crates/engram-dashboard-cli/Cargo.toml — the package that produces engram.exe (ADR-0285). The code does not read the version
+      #      now, but it has a stand-alone shipped artifact, so it does not fall under the library criterion of 「deliberately left out」 below — it prevents a false version
+      #      once something like `engram --version` appears later.
+      #      ★If it is missed, it only shows up after the tag is pushed, and that tag is thrown away★ — this step runs only on tags.
+      #   5. package.json — ★it does not reach the artifact★. It is imported nowhere, and Tauri reads it only when
+      #      tauri.conf.json's version **names a package.json path string explicitly** (the measured quote above).
+      #      It is still checked not for the shipping path but for self-description consistency — if the repo root calls itself a different version,
+      #      people get the wrong answer. This is not a shipping defect but a documentation defect, so its grade differs.
+      #   6. package-lock.json (only the root `version`) — the mirror value npm copies from package.json.
+      #      The consistency check of `npm ci` looks only at dependency specs, not at this field → if only the version is raised and install is
+      #      not run, it quietly stays diverged. Only the root key is asserted (2-space indent = root, structurally unique).
+      #      There is one more copy, packages[""].version, but it is not checked separately — npm always writes the two together, so
+      #      the real-world drift is "the lock was not updated at all", and the root assertion catches that as is.
+      # ── Deliberately left out ──
+      #   - The crate versions of the library crates (agent·base·command·messaging·net·platform·protocol·transport): internal semver with no stand-alone
+      #     shipped artifact. Statically linked and invisible to users. From the first non-0.1.0 tag they diverge from the product version, and
+      #     that is the intended result.
+      #   - PROTOCOL_VERSION (protocol crate, currently 3): a wire contract version, so it moves when the contract changes, not
+      #     on a release. Tying it to the release version loses its meaning.
+      #   - Cargo.lock: not needed here. If only the version is raised and the lock is not updated, the backend job's `--locked`
+      #     dies first, and release-build needs that job, so it never even starts.
       - name: 'Gate: product versions match the tag'
         shell: bash
         run: |
           expected="${TAG#v}"
           echo "expected product version = $expected  (from tag $TAG)"
           fail=0
-          # [package] 섹션 안의 version 만 읽는다 — 의존성 테이블의 version 과 섞이지 않게.
+          # Read only the version inside the [package] section — so it is not mixed up with the version of dependency tables.
           cargo_version() {
             awk '
               /^[[:space:]]*\[/ { inpkg = ($0 ~ /^[[:space:]]*\[package\][[:space:]]*$/); next }
@@ -1791,15 +1791,15 @@ jobs:
               }
             ' "$1"
           }
-          # 들여쓰기 2칸에 앵커한다 = JSON 최상위 키. package-lock.json 은 `"version"` 이 여러 번
-          # 나오는데(packages[""] · 모든 의존성) 루트만 2칸이라 이 앵커가 정확히 하나를 고른다.
-          # 앵커를 `[[:space:]]*` 로 느슨하게 두면 의존성 버전을 집어 엉뚱한 값을 단언하게 된다.
+          # Anchor at a 2-space indent = a top-level JSON key. In package-lock.json `"version"` appears many
+          # times (packages[""] · every dependency), but only the root is at 2 spaces, so this anchor picks exactly one.
+          # Loosening the anchor to `[[:space:]]*` would pick a dependency version and assert a wrong value.
           json_root_version() {
             sed -nE 's/^  "version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$1" | head -1
           }
           check() {
-            if [ ! -f "$1" ]; then echo "  FAIL $1 — 파일이 없다(경로가 바뀌었나)"; fail=1; return; fi
-            if [ -z "$2" ]; then echo "  FAIL $1 — version 필드를 읽지 못했다(형식이 바뀌었나)"; fail=1; return; fi
+            if [ ! -f "$1" ]; then echo "  FAIL $1 — the file is missing (did the path change?)"; fail=1; return; fi
+            if [ -z "$2" ]; then echo "  FAIL $1 — could not read the version field (did the format change?)"; fail=1; return; fi
             if [ "$2" != "$expected" ]; then echo "  FAIL $1 — expected '$expected', found '$2'"; fail=1; return; fi
             echo "  OK   $1 — $2"
           }
@@ -1810,12 +1810,12 @@ jobs:
           check package.json                              "$(json_root_version package.json)"
           check package-lock.json                         "$(json_root_version package-lock.json)"
           if [ "$fail" -ne 0 ]; then
-            echo "FAIL — 태그가 말하는 버전과 제품이 보고할 버전이 다르다."
-            echo "  CI 는 버전을 고쳐 쓰지 않는다(레포 내용 ↔ 배포물 대응 유지). 위에서 FAIL 난 파일의"
-            echo "  version 을 '$expected' 로 올린 커밋을 만들고, 그 커밋에 태그를 달아 다시 돌릴 것."
+            echo "FAIL — the version the tag states differs from the version the product will report."
+            echo "  CI does not rewrite versions (keeps repo contents ↔ shipped artifact in correspondence). Make a commit that raises the"
+            echo "  version of the files that FAILed above to '$expected', put the tag on that commit and run again."
             exit 1
           fi
-          echo "PASS — 제품 버전 선언 6건 전부 $expected"
+          echo "PASS — all 6 product version declarations are $expected"
 
       - name: Resolve and assert pinned toolchain
         shell: bash
@@ -1823,7 +1823,7 @@ jobs:
           rustc --version
           cargo --version
           expected=$(sed -nE 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' rust-toolchain.toml)
-          if [ -z "$expected" ]; then echo "FAIL — rust-toolchain.toml 에서 channel 을 읽지 못했다"; exit 1; fi
+          if [ -z "$expected" ]; then echo "FAIL — could not read channel from rust-toolchain.toml"; exit 1; fi
           actual=$(rustc --version | awk '{print $2}')
           if [ "$actual" != "$expected" ]; then
             echo "FAIL — pinned '$expected' but active rustc is '$actual'"
@@ -1831,8 +1831,8 @@ jobs:
           fi
           echo "PASS — toolchain $actual matches rust-toolchain.toml"
 
-      # build-release.ps1 의 (0) 단계(서드파티 고지 생성)가 부른다. 받아서 펴기만 하고 여기서는 실행하지 않는다.
-      # gates 잡의 같은 이름 스텝과 같은 몸이다 — 하나를 고치면 둘 다 고친다(핀 값은 최상위 env).
+      # Called by stage (0) of build-release.ps1 (third-party notice generation). It is only downloaded and unpacked here, not run.
+      # The same body as the gates job's step of the same name — change one, change both (the pinned values are in the top-level env).
       # ADR-0294
       - name: Install cargo-about (pinned, checksum-verified)
         shell: pwsh
@@ -1847,28 +1847,28 @@ jobs:
           if ($actual -ne $sha) { throw "cargo-about archive checksum mismatch: expected $sha, got $actual" }
           $dest = "$env:RUNNER_TEMP\cargo-about"
           New-Item -ItemType Directory -Force -Path $dest | Out-Null
-          # Windows 내장 bsdtar 를 경로로 집는다 — PATH 의 GNU tar(Git)가 잡히면 `D:\…` 를 원격 호스트로 읽고 실패한다.
+          # Pick the Windows built-in bsdtar by path — if the GNU tar (Git) on PATH gets picked, it reads `D:\…` as a remote host and fails.
           & "$env:SystemRoot\System32\tar.exe" -xzf $archive -C $dest
           if ($LASTEXITCODE -ne 0) { throw "tar exited $LASTEXITCODE" }
           $exe = Get-ChildItem $dest -Recurse -Filter cargo-about.exe | Select-Object -First 1
           if (-not $exe) { throw "cargo-about.exe not found in the extracted archive" }
-          # GITHUB_PATH 는 기존 PATH 앞에 붙으므로 러너에 다른 cargo-about 이 있어도 이쪽이 이긴다. 버전 단언은 생성기가 한다.
+          # GITHUB_PATH is prepended to the existing PATH, so this one wins even if the runner has another cargo-about. The version assertion is done by the generator.
           $exe.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
 
-      # ★rust-cache 를 일부러 쓰지 않는다★ — 컴파일 산출물(target/)은 아무것도 복원하지 않고 매번
-      # cold 로 굽는다. 캐시는 검증 잡처럼 자주 도는 레인에서 값이 나오는 것이고, 태그당 한 번 도는
-      # 이 잡에서는 절약분보다 "복원된 오브젝트가 배포 바이너리에 섞였는가"를 사람이 배제할 수 없게
-      # 되는 비용이 크다.
-      # ★단 아래 setup-node 의 `cache: npm` 은 켠다 — 이건 target/ 캐시와 성질이 다르다.★
-      # 복원 대상이 `~/.npm`(패키지 tarball 캐시)뿐이고 node_modules 가 아니다. `npm ci` 는 node_modules 를
-      # 통째로 지우고 package-lock.json 의 integrity 해시로 tarball 을 검증하므로, 캐시에서 온 것이
-      # 락파일과 다르면 설치가 실패한다. 즉 "cold" 주장은 컴파일 산출물 축에 한정된다.
+      # ★rust-cache is deliberately not used★ — nothing of the compile artifacts (target/) is restored, and it bakes
+      # cold every time. A cache pays off in lanes that run often like the verification jobs, and in this job that runs once per tag
+      # the cost of people being unable to rule out "did a restored object get mixed into the shipped binary" outweighs
+      # the savings.
+      # ★But setup-node's `cache: npm` below is on — that is different in nature from a target/ cache.★
+      # What it restores is only `~/.npm` (the package tarball cache), not node_modules. `npm ci` deletes node_modules
+      # wholesale and verifies tarballs with the integrity hashes of package-lock.json, so if something from the cache
+      # differs from the lockfile, the install fails. That is, the "cold" claim is limited to the compile artifact axis.
 
-      # build-release.ps1 은 `npm run tauri -- build --no-bundle` 을 부르고, 그 tauri build 가
-      # tauri.conf.json 의 beforeBuildCommand(`npm run build`)로 프론트를 굽는다 → node_modules 가
-      # 반드시 있어야 한다(@tauri-apps/cli · vite · tsc 전부 여기서 온다). 그보다 앞선 단계 (0)의 고지 생성기도
-      # node_modules 의 generate-license-file 을 부르고 운영 의존 목록을 읽는다.
-      # ※여기부터가 서드파티 코드가 도는 구간이다 — 위 게이트·커밋 기록은 전부 이 앞에서 끝났다.
+      # build-release.ps1 calls `npm run tauri -- build --no-bundle`, and that tauri build
+      # bakes the frontend through tauri.conf.json's beforeBuildCommand (`npm run build`) → node_modules
+      # must exist (@tauri-apps/cli · vite · tsc all come from it). The notice generator of the earlier stage (0) also
+      # calls generate-license-file in node_modules and reads the production dependency list.
+      # ※From here on is the section where third-party code runs — the gates · commit record above all finished before this.
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '24'
@@ -1878,19 +1878,19 @@ jobs:
         shell: bash
         run: npm ci
 
-      # ★별도 `npm run build` 스텝을 두지 않는다★ — 두면 프론트를 두 번 굽고, 더 나쁘게는 "dist/ 는
-      # 이 스텝이 만든다"는 오해를 남긴다. 실제로는 tauri build 가 beforeBuildCommand 로 직접 굽고
-      # 그 산출물을 exe 에 embed 하며(그래야 프로덕션 컨텍스트가 된다), 스크립트가 직후
-      # dist/index.html 부재를 tripwire 로 잡는다. 굽는 주체는 tauri CLI 다.
+      # ★No separate `npm run build` step★ — it would bake the frontend twice, and worse, leave the misunderstanding that "dist/
+      # is made by this step". In reality tauri build bakes it directly through beforeBuildCommand and
+      # embeds that output in the exe (that is what makes it a production context), and the script catches the absence of
+      # dist/index.html right after as a tripwire. The one that bakes it is the tauri CLI.
       #
-      # 호출형은 launch\빌드.bat 과 동일하다(-NoProfile -File + 절대 -OutDir). 같은 세션에서 `&` 로
-      # 부르지 않고 자식 프로세스로 띄우는 이유: 스크립트가 실패를 `exit 1` 로 알리는데, 같은 세션
-      # 호출에서는 그게 $LASTEXITCODE 로만 남아 넘어갈 여지가 있다. 자식 프로세스면 종료코드가 곧
-      # 프로세스 종료코드다. $ErrorActionPreference 는 네이티브 종료코드를 잡지 않으므로 명시 확인도 둔다.
+      # The invocation is the same as launch\빌드.bat (-NoProfile -File + an absolute -OutDir). Why it is launched as a child process rather than
+      # called with `&` in the same session: the script reports failure with `exit 1`, and in a same-session
+      # call that remains only in $LASTEXITCODE and could slip through. In a child process the exit code is the
+      # process exit code. $ErrorActionPreference does not catch native exit codes, so there is an explicit check too.
       #
-      # -OutDir 를 주는 이유: 조립 폴더 이름이 곧 zip 의 루트 폴더 이름이 된다. 버전이 박힌 폴더로
-      # 조립해 두면 사용자가 압축을 풀었을 때 3 exe + prompts/ 가 한 폴더에 함께 떨어진다
-      # (= ADR-0100 co-location 이 사용자 손에서 깨지지 않는다).
+      # Why -OutDir is given: the staging folder name becomes the zip's root folder name. Staging into a folder with the version in its name
+      # means that when users unzip it, the 3 exes + prompts/ land together in one folder
+      # (= ADR-0100 co-location does not break in the user's hands).
       - name: Package portable release (scripts/build-release.ps1)
         shell: pwsh
         run: |
@@ -1898,12 +1898,12 @@ jobs:
           $stage = Join-Path $env:RUNNER_TEMP "engram-dashboard-${env:TAG}"
           & pwsh -NoProfile -File "scripts/build-release.ps1" -OutDir $stage
           if ($LASTEXITCODE -ne 0) { throw "build-release.ps1 exited $LASTEXITCODE" }
-          if (-not (Test-Path $stage)) { throw "조립 폴더가 없다: $stage" }
+          if (-not (Test-Path $stage)) { throw "staging folder is missing: $stage" }
           "STAGE_DIR=$stage" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      # 파일명에 버전을 박는다(태그 그대로). 릴리즈 페이지에서 에셋만 보고 어느 버전인지 알아야 한다.
-      # 이름은 여기서 한 번만 만들고 발행 잡에는 job output 으로 넘긴다 — 양쪽에서 각자 조립하면
-      # 규칙이 두 곳에 생겨 어긋난다.
+      # The version goes into the file name (the tag as is). On the release page, one must tell the version from the asset alone.
+      # The name is made only once here and passed to the publish job as a job output — if each side assembled it,
+      # the rule would live in two places and diverge.
       - name: Zip the packaged folder
         id: zip
         shell: pwsh
@@ -1912,59 +1912,59 @@ jobs:
           $artifactName = "engram-dashboard-${env:TAG}-windows-x64"
           $zipName = "$artifactName.zip"
           $zip = Join-Path $env:RUNNER_TEMP $zipName
-          # -Path 에 와일드카드 없이 폴더 자체를 주면 그 폴더가 zip 의 루트 엔트리가 된다.
+          # Giving -Path the folder itself without a wildcard makes that folder the zip's root entry.
           Compress-Archive -Path $env:STAGE_DIR -DestinationPath $zip -CompressionLevel Optimal
           "ZIP_PATH=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          # upload-artifact 는 경로를 glob 으로 해석한다. Windows 에서 역슬래시가 구분자로 처리되긴 하지만
-          # 이 판단에 90분짜리 빌드의 회수 여부를 걸 이유가 없어, 그 스텝에는 슬래시 형태를 따로 넘긴다.
+          # upload-artifact interprets the path as a glob. Backslashes are treated as separators on Windows, but
+          # there is no reason to stake whether a 90-minute build is recovered on that judgment, so that step gets the slash form separately.
           "ZIP_PATH_POSIX=$($zip -replace '\\', '/')" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          # 같은 잡 안의 upload-artifact 만 쓴다(신뢰 경계를 넘지 않는다). 발행 잡은 이 값을 받지 않고
-          # TAG 에서 같은 규칙으로 스스로 만든다 — 두 곳이 어긋나면 download-artifact 가 아티팩트를
-          # 못 찾아 시끄럽게 죽는다(조용한 drift 대신 tripwire).
+          # Used only by upload-artifact in the same job (does not cross the trust boundary). The publish job does not receive this value and
+          # builds it itself from TAG with the same rule — if the two diverge, download-artifact cannot find the artifact
+          # and dies loudly (a tripwire instead of a quiet drift).
           "artifact_name=$artifactName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
-      # manifest 자체(부족/여분/co-location)는 build-release.ps1 의 tripwire 가 이미 본다 — 여기서
-      # 다시 세지 않는다. 이 게이트가 맡는 건 그 다음 경계 하나다: **압축이 그 집합을 그대로 옮겼는가.**
-      # 기대값을 YAML 에 적지 않고 조립 폴더에서 읽는 이유도 같다(단일 출처는 스크립트의 manifest).
-      # Expand-Archive 가 손상 zip 에서 죽으므로 아카이브 판독 가능성까지 같이 확인된다.
+      # The manifest itself (missing/extra/co-location) is already checked by build-release.ps1's tripwire — it is not
+      # counted again here. This gate takes the one boundary after that: **did the compression carry that set over as is.**
+      # It reads the expected value from the staging folder rather than writing it in the YAML for the same reason (the single source is the script's manifest).
+      # Expand-Archive dies on a corrupt zip, so the archive's readability is checked along the way.
       - name: 'Gate: the zip carries exactly the packaged file set'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $stage = $env:STAGE_DIR
           $zip   = $env:ZIP_PATH
-          if (-not (Test-Path $zip)) { throw "zip 이 만들어지지 않았다: $zip" }
+          if (-not (Test-Path $zip)) { throw "the zip was not created: $zip" }
           $expected = @(Get-ChildItem -Recurse -File -Force -Path $stage |
             ForEach-Object { $_.FullName.Substring($stage.Length + 1) } | Sort-Object)
-          # "빈 것을 조용히 배송" 차단. 스크립트 tripwire 상 도달 불가여야 하지만, 그 가정이 깨지는
-          # 날에는 빈 zip 이 릴리즈에 붙는 게 최악이라 여기서 한 번 더 막는다.
-          if ($expected.Count -eq 0) { throw "조립 폴더가 비었다 — 배송할 것이 없다: $stage" }
+          # Blocks "quietly shipping something empty". By the script's tripwire this should be unreachable, but on the day that assumption
+          # breaks, an empty zip attached to a release is the worst case, so it is blocked once more here.
+          if ($expected.Count -eq 0) { throw "the staging folder is empty — nothing to ship: $stage" }
           $verifyRoot = Join-Path $env:RUNNER_TEMP 'zip-verify'
           if (Test-Path $verifyRoot) { Remove-Item -Recurse -Force $verifyRoot }
           Expand-Archive -Path $zip -DestinationPath $verifyRoot
           $rootName = Split-Path -Leaf $stage
           $unpacked = Join-Path $verifyRoot $rootName
-          if (-not (Test-Path $unpacked)) { throw "zip 루트 폴더가 '$rootName' 이 아니다" }
+          if (-not (Test-Path $unpacked)) { throw "the zip root folder is not '$rootName'" }
           $actual = @(Get-ChildItem -Recurse -File -Force -Path $unpacked |
             ForEach-Object { $_.FullName.Substring($unpacked.Length + 1) } | Sort-Object)
-          # -cne(대소문자 구분) — PowerShell 기본 비교는 대소문자를 무시해서, 이름의 케이스가 바뀐 채
-          # 압축된 경우를 그냥 통과시킨다. 케이스 변화는 무언가가 이름을 다시 썼다는 신호라 잡아야 한다.
+          # -cne (case-sensitive) — PowerShell's default comparison ignores case, so it would let through a case where the name was
+          # compressed with its case changed. A case change is a sign that something rewrote the name, so it must be caught.
           if (($expected -join '|') -cne ($actual -join '|')) {
             Write-Host 'expected:'; $expected | ForEach-Object { Write-Host "  $_" }
             Write-Host 'actual:';   $actual   | ForEach-Object { Write-Host "  $_" }
-            throw 'zip 내용이 조립 폴더와 다르다 — 부분 배송 차단'
+            throw 'the zip contents differ from the staging folder — blocking a partial shipment'
           }
           Write-Host "PASS — $($actual.Count) file(s) under $rootName/"
           $actual | ForEach-Object { Write-Host "  $_" }
 
-      # 검증된 zip 을 아티팩트로 올린다. 이게 발행 잡으로 넘기는 **유일한** 통로다(러너가 다르므로
-      # 파일이 저절로 건너가지 않는다). 덤으로 회복 레인이기도 하다 — 발행이 실패해도 90분 빌드가
-      # 통째로 버려지지 않고, 사람이 내려받아 손으로 붙일 수 있다.
-      # `overwrite: true` — "Re-run all jobs" 로 같은 런에서 다시 돌면 앞 시도의 아티팩트가 남아 있어
-      #   기본값(false)이면 마지막 스텝에서 죽는다. 같은 런·같은 태그의 재생성물이라 교체가 맞는 의미다.
-      # `if-no-files-found: error` — 경로가 비면 조용히 warn 하고 넘어가지 않는다.
-      # `archive` 는 기본값(zip 으로 감쌈)을 그대로 쓴다 — 그래야 download-artifact 가 알아서 풀어
-      #   `<zip_name>` 파일 하나를 그대로 내려놓는 가장 검증된 조합이 된다.
+      # Uploads the verified zip as an artifact. This is the **only** channel to the publish job (the runners differ, so
+      # files do not cross over by themselves). As a bonus it is also a recovery lane — even if publishing fails, the 90-minute build
+      # is not thrown away wholesale, and a person can download it and attach it by hand.
+      # `overwrite: true` — when it runs again in the same run via "Re-run all jobs", the previous attempt's artifact remains, so
+      #   with the default (false) it dies at the last step. It is a regenerated artifact of the same run · same tag, so replacing it is the right meaning.
+      # `if-no-files-found: error` — if the path is empty, it does not quietly warn and move on.
+      # `archive` uses the default (wrapping in a zip) as is — that makes download-artifact unpack it by itself and
+      #   lay down the single `<zip_name>` file as is, the most proven combination.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ steps.zip.outputs.artifact_name }}
@@ -1972,73 +1972,73 @@ jobs:
           if-no-files-found: error
           overwrite: true
 
-  # ── 릴리즈 발행 — 쓰기 토큰을 쥔 유일한 잡 ──────────────────────────────────
-  # 여기서는 서드파티 코드를 돌리지 않는다: npm·cargo·build-release.ps1 전부 금지. 스텝은
-  # ① 태그↔커밋 게이트 ② 아티팩트 다운로드 ③ gh release create 셋뿐이고, 늘리지 말 것.
-  # 게이트를 다운로드보다 **앞**에 두는 이유: 게이트는 아티팩트가 필요 없다(gh api + env 만 본다).
-  #   순서를 뒤집으면 "발행해도 되는가"를 정하기 전에 쓰기 토큰 잡이 빌드 잡이 만든 아카이브를 먼저
-  #   풀게 된다. 공짜로 없앨 수 있는 순서 의존이므로 없앤다.
-  # ubuntu-latest 인 이유: 여기엔 Windows 여야 할 일이 하나도 없다(바이트를 옮기고 gh 를 부를 뿐).
-  #   부팅이 빠르고 토큰을 쥔 잡의 표면이 그만큼 작아진다. Windows 전용 작업이 생기면 그때 옮길 것.
+  # ── Release publish — the only job holding a write token ──────────────────────────────────
+  # No third-party code runs here: npm · cargo · build-release.ps1 are all forbidden. The steps are only three:
+  # ① the tag↔commit gate ② the artifact download ③ gh release create — do not add more.
+  # Why the gate sits **before** the download: the gate needs no artifact (it looks only at gh api + env).
+  #   Reversing the order would make the write-token job unpack the archive the build job made before deciding
+  #   "may it be published". It is an order dependency that can be removed for free, so it is removed.
+  # Why ubuntu-latest: nothing here needs Windows (it just moves bytes and calls gh).
+  #   It boots fast and the surface of the token-holding job shrinks by that much. If Windows-only work appears, move it then.
   #
-  # ★이 워크플로가 **막지 못하는 것** (다음 읽는 사람에게: 여기가 경계다)★
-  #   1. 산출물 무결성. 잡 분리는 **쓰기 토큰 탈취**를 막을 뿐, 손상된 빌드 의존성이 트로이 목마
-  #      바이너리를 zip 에 넣는 것은 못 막는다. 그러면 이 잡은 그걸 성실히 발행한다.
-  #      재현 가능 빌드·코드 서명·의존성 감사는 이 워크플로 범위 밖이다.
-  #   2. 빌드 프로버넌스 증명(actions/attest-build-provenance) 미도입 — 아래 발행 스텝 주석 참조.
-  #   3. 아래 게이트와 `gh release create` 사이의 TOCTOU(약 1초). 창을 90분에서 1초로 줄였을 뿐
-  #      없앤 것이 아니다. 이 도구 조합으로는 더 줄일 수 없다.
-  #   4. 발행 재시도 없음(비멱등). 의도적이다 — 조용한 덮어쓰기보다 시끄러운 실패가 낫다.
+  # ★What this workflow **cannot prevent** (to the next reader: this is the boundary)★
+  #   1. Artifact integrity. The job split only prevents **write token theft**; it cannot stop a compromised build dependency from putting a trojan
+  #      binary into the zip. Then this job faithfully publishes it.
+  #      Reproducible builds · code signing · dependency audits are outside this workflow's scope.
+  #   2. Build provenance attestation (actions/attest-build-provenance) is not adopted — see the publish step comment below.
+  #   3. The TOCTOU between the gate below and `gh release create` (about 1 second). It only narrowed the window from 90 minutes to 1 second,
+  #      it did not remove it. It cannot be narrowed further with this tool combination.
+  #   4. No publish retry (non-idempotent). Intentional — a loud failure is better than a quiet overwrite.
   release-publish:
     name: release publish (GitHub Release)
     if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v') && !contains(github.ref_name, '/')
     needs: release-build
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # 최상위 contents: read 를 넓히지 않고 이 잡에만 write 를 준다(job-level 은 최상위를 상속이 아니라
-    # 치환한다) — 릴리즈 생성·에셋 업로드에 필요한 최소 권한. 워크플로에서 쓰기 토큰은 여기뿐이다.
+    # The top-level contents: read is not widened; only this job gets write (job-level replaces the top level rather than
+    # inheriting it) — the minimum permission needed to create a release and upload assets. This is the only write token in the workflow.
     permissions:
       contents: write
-    # 워크플로 레벨 그룹과 별개로 이 잡만의 그룹을 둔다(cancel-in-progress: false) — 같은 태그를 겨눈
-    # 두 실행이 동시에 릴리즈를 만들지 못하게 직렬화한다. 워크플로 그룹은 `CI-<github.ref>` 이고
-    # github.ref 는 항상 `refs/` 로 시작하므로 `CI-release-publish-<github.ref>` 와는 어떤 ref 로도
-    # 같아질 수 없다. 빌드 잡에는 걸지 않는다 — 되돌릴 수 없는 부작용은 여기에만 있다.
+    # Separate from the workflow-level group, this job has its own group (cancel-in-progress: false) — it serializes two runs aimed at the same tag
+    # so they cannot create a release at the same time. The workflow group is `CI-<github.ref>`, and
+    # github.ref always starts with `refs/`, so it can never equal `CI-release-publish-<github.ref>` for any
+    # ref. It is not put on the build job — the irreversible side effects are only here.
     concurrency:
       group: ${{ github.workflow }}-release-publish-${{ github.ref }}
       cancel-in-progress: false
     env:
       TAG: ${{ github.ref_name }}
-      # ★이름을 빌드 잡에서 받지 않고 여기서 만든다★ — 빌드 잡이 통제하는 문자열이 쓰기 토큰 잡의
-      # `gh` 파일 인자로 들어가면, 글롭을 품은 이름 + 짝 맞는 파일들로 다른/여러 에셋을 올리게 유도할 수
-      # 있다. github.ref_name 은 빌드 잡이 건드릴 수 없다. 규칙은 release-build 의 zip 스텝과 같아야 하고,
-      # 어긋나면 아래 download-artifact 가 아티팩트를 못 찾아 죽는다(조용한 drift 대신 tripwire).
+      # ★The name is made here, not received from the build job★ — if a string the build job controls goes into a `gh` file argument of the write-token job,
+      # a name holding a glob + matching files could lure it into uploading other/multiple assets.
+      # github.ref_name cannot be touched by the build job. The rule must match release-build's zip step, and
+      # if they diverge, download-artifact below cannot find the artifact and dies (a tripwire instead of a quiet drift).
       ARTIFACT_NAME: engram-dashboard-${{ github.ref_name }}-windows-x64
       BUILT_COMMIT: ${{ needs.release-build.outputs.built_commit }}
-      # 런 컨텍스트 값(GitHub 이 런 생성 시점에 박는다). 아래 게이트의 (3)에서 쓴다.
+      # A run context value (GitHub stamps it when the run is created). Used in (3) of the gate below.
       RUN_SHA: ${{ github.sha }}
     steps:
-      # ★이 게이트가 실제로 지키는 것: "빌드가 도는 동안 태그가 움직였는가"★
-      # checkout 과 발행 사이에 90분 가까운 창이 있고, 그동안 "태그를 엉뚱한 커밋에 달았다"는 흔한 복구
-      # (태그 삭제 후 재push)가 일어날 수 있다. 그러면 릴리즈는 커밋 B 를 가리키는데 에셋은 커밋 A 에서
-      # 나온 물건이 된다. 이걸 보는 곳이 여기 말고는 없다. 값지고 실제로 일어나는 사고다.
+      # ★What this gate actually guards: "did the tag move while the build was running"★
+      # There is a window of nearly 90 minutes between checkout and publishing, and in it the common recovery for "the tag was put on the wrong commit"
+      # (delete the tag, then push again) can happen. Then the release points at commit B, but the asset is something built from
+      # commit A. There is no place other than here that checks this. It is a valuable, real-world accident.
       #
-      # ★이 게이트가 지키지 **못하는** 것 — 산출물 무결성★ (오해 방지를 위해 명시)
-      #   - BUILT_COMMIT 은 **빌드 전 HEAD** 를 증언할 뿐 패키징된 트리를 증언하지 않는다. npm 라이프사이클
-      #     스크립트가 패키징 전에 소스를 고쳐도 이 게이트는 전부 통과한다.
-      #   - 두 참조(원격 태그·github.sha) 모두 빌드 잡 **안에서도 읽을 수 있다**. 정보 비대칭이 없으므로
-      #     손상된 빌드 잡의 최적 거짓말 — "진짜 태그 커밋을 정직하게 보고하고 바이트만 바꿔치기" — 은
-      #     두 검사를 모두 통과한다. 이 게이트는 신뢰의 근거가 아니라 사고 탐지기다.
-      #   - 아래 (3)의 github.sha 비교가 보태는 신호는 **결합 케이스 하나뿐**이다: 태그가 움직였고
-      #     동시에 빌드 잡이 새 태그 커밋에 맞춰 거짓 보고한 경우. 독립적인 2차 검증이 아니다.
-      # 복구를 시도하지 않는다 — 태그를 옮기거나 다시 붙이는 일은 사람이 판단할 몫이다.
+      # ★What this gate **cannot** guard — artifact integrity★ (stated explicitly to prevent misunderstanding)
+      #   - BUILT_COMMIT only testifies to **HEAD before the build**, not to the packaged tree. Even if an npm lifecycle
+      #     script changes the source before packaging, this gate passes everything.
+      #   - Both references (the remote tag · github.sha) **can be read inside the build job too**. There is no information asymmetry, so
+      #     a compromised build job's best lie — "honestly report the real tag commit and swap only the bytes" —
+      #     passes both checks. This gate is not a basis for trust but an accident detector.
+      #   - The signal the github.sha comparison in (3) below adds is **only one combined case**: the tag moved and
+      #     at the same time the build job lied to match the new tag commit. It is not an independent second verification.
+      # It does not attempt recovery — moving or reattaching the tag is for a person to decide.
       - name: 'Gate: the remote tag still points at the commit that was built'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [ -z "$BUILT_COMMIT" ]; then echo "FAIL — 빌드 잡이 커밋 SHA 를 넘기지 않았다"; exit 1; fi
-          # (1) 지금 이 순간의 원격 태그를 푼다. 경량 태그면 object 가 곧 커밋, annotated 면 태그
-          #     오브젝트라 한 번 더 푼다(peel). 두 API 모두 실패하면 assignment 가 죽어 스텝이 실패한다.
+          if [ -z "$BUILT_COMMIT" ]; then echo "FAIL — the build job did not pass the commit SHA"; exit 1; fi
+          # (1) Resolve the remote tag as of this very moment. For a lightweight tag the object is the commit; for an annotated one it is a tag
+          #     object, so resolve once more (peel). If both APIs fail, the assignment dies and the step fails.
           line=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq '.object.type + " " + .object.sha')
           obj_type=${line%% *}
           obj_sha=${line##* }
@@ -2048,52 +2048,52 @@ jobs:
               line2=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$obj_sha" --jq '.object.type + " " + .object.sha')
               t2=${line2%% *}
               s2=${line2##* }
-              if [ "$t2" != "commit" ]; then echo "FAIL — annotated 태그가 커밋을 가리키지 않는다(type=$t2)"; exit 1; fi
+              if [ "$t2" != "commit" ]; then echo "FAIL — the annotated tag does not point at a commit (type=$t2)"; exit 1; fi
               remote_commit="$s2"
               ;;
-            *) echo "FAIL — 예상 밖의 태그 오브젝트 타입: '$obj_type'"; exit 1 ;;
+            *) echo "FAIL — unexpected tag object type: '$obj_type'"; exit 1 ;;
           esac
           echo "tag $TAG -> $obj_type $obj_sha -> commit $remote_commit"
           echo "built commit (release-build) = $BUILT_COMMIT"
-          # (2) 본 게이트 — 빌드 이후 태그가 움직였나.
+          # (2) The main gate — did the tag move after the build.
           if [ "$remote_commit" != "$BUILT_COMMIT" ]; then
-            echo "FAIL — 태그가 빌드 시점 이후 다른 커밋으로 옮겨졌다. 이 에셋은 그 태그의 물건이 아니다."
+            echo "FAIL — the tag was moved to another commit after the build. This asset is not that tag's artifact."
             echo "  built   : $BUILT_COMMIT"
             echo "  tag now : $remote_commit"
-            echo "  자동 복구하지 않는다. 태그를 원래 커밋으로 되돌리거나, 올바른 커밋에 새 버전 태그를"
-            echo "  달아 처음부터 다시 돌릴 것."
+            echo "  No automatic recovery. Move the tag back to the original commit, or put a new version tag on the right commit"
+            echo "  and run again from the start."
             exit 1
           fi
-          # (3) 결합 케이스 탐지(위 주석 참조 — 독립 검증이 아니다). 경량 태그면 github.sha 가 커밋과
-          #     같고 annotated 면 태그 오브젝트일 수 있어 두 형태를 모두 인정한다 — 어느 쪽인지는 실제
-          #     태그를 push 하기 전에는 확정할 수 없다(미검증 지점).
+          # (3) Combined-case detection (see the comment above — not an independent verification). For a lightweight tag github.sha equals the commit,
+          #     and for an annotated one it can be the tag object, so both forms are accepted — which one it is cannot be settled
+          #     before actually pushing a tag (an unverified point).
           if [ "$RUN_SHA" != "$BUILT_COMMIT" ] && [ "$RUN_SHA" != "$obj_sha" ]; then
-            echo "FAIL — 빌드 잡이 보고한 커밋이 이 런의 ref 값과 이어지지 않는다."
+            echo "FAIL — the commit the build job reported does not connect to this run's ref value."
             echo "  github.sha : $RUN_SHA"
             echo "  built      : $BUILT_COMMIT"
             echo "  tag object : $obj_sha"
             exit 1
           fi
-          echo "PASS — 원격 태그가 여전히 빌드된 커밋을 가리킨다"
+          echo "PASS — the remote tag still points at the built commit"
 
-      # 이름은 위 env 의 ARTIFACT_NAME(= TAG 파생)만 쓴다. 빌드 잡이 다른 이름으로 올렸다면 여기서
-      # 못 찾고 죽는다 — 그게 의도한 tripwire 다.
+      # The name uses only ARTIFACT_NAME from the env above (= derived from TAG). If the build job uploaded under another name, it cannot find it
+      # here and dies — that is the intended tripwire.
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ${{ env.ARTIFACT_NAME }}
           path: dist-release
 
-      # 새 서드파티 action 을 들이지 않는다 — gh CLI 는 GitHub-hosted 러너 이미지에 기본 탑재라
-      # 업로드용 릴리즈 action 을 추가하면 핀 관리 대상(공급망 표면)만 하나 늘어난다.
-      # --verify-tag: 원격에 그 태그가 없으면 릴리즈를 만들지 않고 실패한다.
-      # 같은 태그의 릴리즈가 이미 있으면 gh 가 실패한다 — 조용한 덮어쓰기 대신 시끄럽게 죽는 쪽을 택한다
-      # (비멱등. 재시도가 필요하면 사람이 판단해서 지우고 다시 돌린다).
+      # No new third-party action is brought in — the gh CLI comes preinstalled on GitHub-hosted runner images, so
+      # adding a release action for uploading only adds one more thing to pin (supply chain surface).
+      # --verify-tag: if the remote does not have that tag, it fails without creating the release.
+      # If a release for the same tag already exists, gh fails — dying loudly is chosen over a quiet overwrite
+      # (non-idempotent. If a retry is needed, a person decides, deletes it and runs again).
       #
-      # ★provenance attestation(actions/attest-build-provenance)은 일부러 넣지 않았다★
-      # 그게 닫는 것은 "이 파일이 이 레포의 CI 에서 나왔는가"이지 "빌드 의존성이 깨끗했는가"가 아니라,
-      # 위에 적은 산출물 무결성 갭을 닫지 못한다. 반면 값이 나오는 배치(빌드 잡)는 서드파티 코드가 도는
-      # 바로 그 잡에 id-token: write + attestations: write 를 줘야 해서, 이 워크플로가 잡을 둘로 가른
-      # 이유를 정면으로 되돌린다. 그래서 안 넣는다 — 대신 그 갭을 위 잡 헤더에 명시해 뒀다.
+      # ★provenance attestation (actions/attest-build-provenance) was deliberately not added★
+      # What it closes is "did this file come from this repo's CI", not "were the build dependencies clean", so
+      # it does not close the artifact integrity gap written above. Meanwhile the placement where it pays off (the build job) would need
+      # id-token: write + attestations: write given to the very job where third-party code runs, which directly reverses the reason this workflow
+      # split the jobs in two. So it is not added — instead that gap is stated in the job header above.
       - name: Create the GitHub Release and attach the zip
         shell: bash
         env:
@@ -2101,32 +2101,32 @@ jobs:
         run: |
           zip_name="${ARTIFACT_NAME}.zip"
           expected="dist-release/$zip_name"
-          # 내려받은 것이 **정확히 파일 하나**이고 그 이름이 기대와 정확히 같아야 한다.
-          # 개수를 먼저 보는 이유: 기대 이름의 파일 + 곁다리 파일들이 함께 온 경우를 이름 검사만으로는
-          # 못 잡는다. 여러 개면 무엇을 올릴지 사람이 다시 판단해야 하므로 여기서 멈춘다.
+          # What was downloaded must be **exactly one file** and its name must equal the expected one exactly.
+          # Why the count is checked first: a case where a file with the expected name came along with extra files cannot be caught
+          # by the name check alone. If there are several, a person has to decide again what to upload, so it stops here.
           n=$(find dist-release -type f | wc -l | tr -d '[:space:]')
           if [ "$n" -ne 1 ]; then
-            echo "FAIL — 내려받은 파일이 정확히 1개가 아니다(n=$n). 받은 것:"
+            echo "FAIL — the download is not exactly 1 file (n=$n). Received:"
             find dist-release
             exit 1
           fi
           got=$(find dist-release -type f)
           if [ "$got" != "$expected" ]; then
-            echo "FAIL — 내려받은 파일 이름이 기대와 다르다"
+            echo "FAIL — the downloaded file name differs from the expected one"
             echo "  expected: $expected"
             echo "  found   : $got"
             exit 1
           fi
-          # 프리릴리즈 판정은 태그 하나로 한다(새 설정을 만들지 않는다). semver 상 프리릴리즈 표식은
-          # build metadata(+) **앞**의 하이픈이다 → v1.0.0-rc1 은 프리릴리즈, v1.0.0+build5 는 아니다.
-          # 이걸 안 하면 gh 가 rc 태그를 정식 릴리즈로 올리고 GitHub 이 그걸 Latest 로 표시한다
-          # (기본 다운로드 대상이 되고, 되돌리려면 사람이 UI 에서 손봐야 한다 — 재실행으로는 안 고쳐진다).
+          # The prerelease decision is made by the tag alone (no new setting is created). In semver the prerelease marker is
+          # the hyphen **before** the build metadata (+) → v1.0.0-rc1 is a prerelease, v1.0.0+build5 is not.
+          # Without this, gh would publish an rc tag as a full release and GitHub would mark it Latest
+          # (it becomes the default download, and undoing it needs a person to fix it in the UI — a rerun does not fix it).
           core="${TAG#v}"
           core="${core%%+*}"
           gh_extra=()
           case "$core" in
             *-*) gh_extra+=(--prerelease); echo "prerelease tag ($TAG) -> --prerelease" ;;
-            *)   echo "stable tag ($TAG) -> GitHub 이 Latest 로 표시한다" ;;
+            *)   echo "stable tag ($TAG) -> GitHub marks it Latest" ;;
           esac
           gh release create "$TAG" "$expected" \
             --repo "$GITHUB_REPOSITORY" \

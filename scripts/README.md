@@ -22,7 +22,7 @@ Builds and tests are run the same way, outside the process tree through [`run-de
 
 | Script | What it does |
 |---|---|
-| `node scripts/gen-third-party-licenses.mjs <출력 파일>` | Generates the `THIRD_PARTY_LICENSES.txt` that goes into the release zip. Settings are in [`licenses/`](licenses/) |
+| `node scripts/gen-third-party-licenses.mjs <output file>` | Generates the `THIRD_PARTY_LICENSES.txt` that goes into the release zip. Settings are in [`licenses/`](licenses/) |
 
 You will rarely need to run it by hand — `build-release.ps1` runs it before the long build on every release build and writes it into the cargo output directory, and CI runs the same generator on every push and only looks at failures. So **a local release build also needs cargo-about** — the required tool, version, and install command are in the script header. When the notice fails, it is usually the settings in [`licenses/`](licenses/) that need fixing, and the failure message says what to fix.
 

@@ -72,24 +72,24 @@ if (match) {
   } catch (e) {
     // The SyntaxError that new RegExp(pattern) throws on an invalid CDP_MATCH — handled as the header promises (message +
     // target list + exit 1). So it does not leak out as a raw stack trace.
-    console.error(`CDP_MATCH="${match}" 정규식 무효: ${e.message}. 사용 가능한 타깃:`);
+    console.error(`CDP_MATCH="${match}" is an invalid regex: ${e.message}. Available targets:`);
     console.error(JSON.stringify(list.map(t => ({ type: t.type, title: t.title, url: t.url })), null, 2));
     process.exit(1);
   }
   if (matches.length === 0) {
-    console.error(`CDP_MATCH="${match}" 매치 없음. 사용 가능한 타깃:`);
+    console.error(`CDP_MATCH="${match}" matched nothing. Available targets:`);
     console.error(JSON.stringify(list.map(t => ({ type: t.type, title: t.title, url: t.url })), null, 2));
     process.exit(1);
   }
   if (matches.length > 1) {
-    console.error(`CDP_MATCH="${match}" ${matches.length}건 매치 — 첫 번째 선택:`);
+    console.error(`CDP_MATCH="${match}" matched ${matches.length} — picking the first:`);
     console.error(JSON.stringify(matches.map(t => ({ title: t.title, url: t.url })), null, 2));
   }
   target = matches[0];
 } else {
   target = pickMain(list);
 }
-if (!target) { console.error('대상 페이지 없음'); process.exit(1); }
+if (!target) { console.error('no target page'); process.exit(1); }
 const c = await cdp(target.webSocketDebuggerUrl);
 
 if (cmd === 'shot') {
