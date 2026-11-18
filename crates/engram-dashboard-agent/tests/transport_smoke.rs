@@ -1,6 +1,6 @@
-//! ② Isolated integration test — directly assert-verifies the PtyTransport + OutputCore new path without a manager.
+//! ② Isolated integration test — asserts the PtyTransport + OutputCore new path directly, without a manager.
 //!
-//! Spawns a real PTY (default shell). Light and with no global contention, so default (runs automatically).
+//! A real PTY (default shell); light, no global contention, so it runs by default.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -131,10 +131,10 @@ fn transport_open_input_resize_shutdown() {
 // Input queue (no ADR assigned — `transport::input_queue`) — regression net on the PTY side
 // ═══════════════════════════════════════════════════════════════════════════════════════════
 
-/// ★Proves★: **FIFO is preserved** even through the queue — three lines put in separately arrive at the child in that order and
-///   are echoed in that order. A regression where the writer scrambles the queue or merges chunks is caught by the subsequence assertion below.
-/// ★Why the assertion is set as a "subsequence"★: a PTY spits out prompts · ANSI mixed in, so an exact match would depend on the shell.
-///   We look only at whether the three markers appear **in this order** — that is all of the property being measured (order).
+/// ★Proves★: **FIFO is preserved** through the queue — three separately-put lines reach the child and echo in that order. A writer that
+///   scrambles the queue or merges chunks is caught by the subsequence assertion.
+/// ★Why a "subsequence"★: a PTY mixes prompts · ANSI in, so exact match would depend on the shell; only whether the three markers appear
+///   **in order** is the measured property.
 #[test]
 fn pty_input_queue_preserves_fifo_order() {
     let spec = CommandSpec {
@@ -189,12 +189,11 @@ fn pty_input_queue_preserves_fifo_order() {
     core.join_pump(Duration::from_secs(5));
 }
 
-/// ★Proves★: exceeding the bound is **refused** with `Err` (not discarded), and input after `shutdown` is refused too —
-///   that is, there is no place for bytes to silently pile up after the writer is gone.
-/// ★The refusal after `shutdown` is the observation window of the writer's termination★ — no one joins that thread (that is
-///   the basis for it not delaying the kill causality), so there is no way to see its death directly. Instead we observe from outside the very
-///   signal that ends that thread (the queue closing). That the loop itself ends on that signal is measured by
-///   `close_terminates_the_drain_loop` in `transport::input_queue`.
+/// ★Proves★: exceeding the bound is **refused** with `Err` (not discarded), and input after `shutdown` is refused too — no place for bytes
+///   to silently pile up after the writer is gone.
+/// ★The refusal after `shutdown` is the observation window of the writer's termination★ — nobody joins that thread (so it does not delay
+///   the kill causality) and its death cannot be seen directly; we observe from outside the signal that ends it (the queue closing). That
+///   the loop ends on that signal is measured by `close_terminates_the_drain_loop` in `transport::input_queue`.
 #[test]
 fn pty_input_queue_refuses_overflow_and_writes_after_shutdown() {
     use engram_dashboard_agent::transport::input_queue::INPUT_QUEUE_MAX_BYTES;
@@ -215,8 +214,8 @@ fn pty_input_queue_refuses_overflow_and_writes_after_shutdown() {
     ));
     let transport: Box<dyn AgentTransport> = Box::new(transport);
 
-    // ★Measured before `start()`★ — with no writer the queue is not drained, so the bound decision is deterministic (once the writer
-    //   runs, the boundary wobbles by how much was drained). Also measures the fact that the queue accepts even before `start()`.
+    // ★Measured before `start()`★ — with no writer the queue is not drained, so the bound decision is deterministic (a running writer
+    //   wobbles the boundary by how much it drained). Also measures that the queue accepts before `start()`.
     let err = transport
         .send_input(InputEvent::Raw(vec![b'z'; INPUT_QUEUE_MAX_BYTES + 1]))
         .expect_err("exceeding the cap must be refused");

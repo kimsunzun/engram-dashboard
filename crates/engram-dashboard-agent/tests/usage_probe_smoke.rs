@@ -1,14 +1,13 @@
-//! Real-CLI smoke of the usage querier — sends a query to the installed, logged-in claude · codex through **the production path as is**: registry
-//! (`usage_probe_for`) → [`UsageProbe::query`] → real [`OsProbeSpawner`] (Windows = `cmd.exe /c <cli> …`), deadline =
-//! the deadline of the querier policy (the same as what the receiving side makes).
+//! Real-CLI smoke of the usage querier — queries the installed, logged-in claude · codex through **the production path as is**: registry
+//! (`usage_probe_for`) → [`UsageProbe::query`] → real [`OsProbeSpawner`] (Windows = `cmd.exe /c <cli> …`), deadline = the querier policy's.
 //!
-//! ★All are `#[ignore]`★ — they use a logged-in CLI and the account's query limit (a CI runner has neither). Locally only:
+//! ★All are `#[ignore]`★ — they need a logged-in CLI and the account's query limit (CI has neither). Locally only:
 //!   `cargo test -p engram-dashboard-agent --test usage_probe_smoke -- --ignored --nocapture --test-threads=1`
-//!   `--test-threads=1` = do not send queries overlapping (so the query limit is not used all at once).
-//! ★What is printed is only a masked summary★ — window numbers · reset times · plan · model names · the shape of lines (keys and types). env values · tokens · string
-//!   values are not printed. Exception = the upstream phrase of the logout test (an empty config folder has no account information — token shapes · paths are masked).
-//! ★Do not gate the file by OS★ — the OS branching of the query command is inside the querier. Only the pickup-shape collection (`…_passive_parser`)
-//!   launches the CLI outside the querier, so it calls the same wrapping as production ([`console_command`]) as is.
+//!   (`--test-threads=1`: no overlapping queries.)
+//! ★Only a masked summary is printed★ — window numbers · reset times · plan · model names · line shapes (keys and types); no env values ·
+//!   tokens · string values. Exception = the logout test's upstream phrase (token shapes · paths masked).
+//! ★Do not gate the file by OS★ — the OS branching is inside the querier. Only the pickup-shape collection (`…_passive_parser`) launches the CLI
+//!   outside the querier, with production's wrapping ([`console_command`]).
 // ADR-0230
 
 use std::fs;
@@ -64,17 +63,17 @@ fn codex_rate_limits_read_answers_through_the_operating_command() {
     assert_eq!(obs.vendor.as_str(), "codex");
 }
 
-/// An empty config folder = no login. We do not assert the classification — the aim is collecting the response shape (TRD §6 #4). The contracts measured are
-/// two: it returns within the deadline · if it returns as success it is 「no limit information」.
-/// ★Measured (claude 2.1.280 · 2026-09-27) = it is a success response, not an error★ — `rate_limits: null` ·
-/// `subscription_type: null` · `rate_limits_available: false` (`true` on the logged-in side). There was no upstream error phrase.
+/// An empty config folder = no login. The classification is not asserted — the aim is the response shape (TRD §6 #4). Measured contracts:
+/// returns within the deadline · a success return means 「no limit information」.
+/// ★Measured (claude 2.1.280 · 2026-09-27) = a success response, not an error★ — `rate_limits: null` · `subscription_type: null` ·
+/// `rate_limits_available: false`. No upstream error phrase.
 #[test]
 #[ignore = "uses the real claude CLI"]
 fn claude_logged_out_answer_shape() {
     let root = TempTree::fresh("claude-logged-out");
     let config = TempTree::fresh("claude-empty-config");
     let config_dir = config.path().to_str().expect("Unicode path").to_owned();
-    // Also strip the login keys and API-key paths that the daemon env leaves — if they remain, it queries still logged in even with an empty config folder.
+    // Also strip the login keys and API-key paths the daemon env leaves — otherwise it is still logged in with an empty config folder.
     let login_env = [
         "CLAUDE_CODE_OAUTH_TOKEN",
         "ANTHROPIC_API_KEY",
@@ -98,7 +97,8 @@ fn claude_logged_out_answer_shape() {
     run.report_upstream_text();
     let entries = config.entries();
     eprintln!("[logged-out] config dir entries after the run: {entries:?}");
-    // Killing right after the answer left lock · temp files of the config file the CLI was writing — checks whether the query gives the child a grace period to finish.
+    // Killing right after the answer left lock · temp files of the config file the CLI was writing — checks the query gives the child a
+    //   grace period.
     let leftovers: Vec<&String> = entries
         .iter()
         .filter(|name| {
@@ -119,8 +119,8 @@ fn claude_logged_out_answer_shape() {
     }
 }
 
-/// TRD §6 #18 — the development build's data folder is inside the repository, so the CLI can climb up from its working folder and read the repository's
-/// `.claude/settings.json`·CLAUDE.md. We measure that the query still stands.
+/// TRD §6 #18 — a development build's data folder is inside the repository, so the CLI can climb from its working folder to the repository's
+/// `.claude/settings.json`·CLAUDE.md. Measures that the query still stands.
 #[test]
 #[ignore = "uses the real claude CLI · login · the account's query limits"]
 fn claude_get_usage_answers_with_the_scratch_root_inside_the_repo() {
@@ -131,9 +131,9 @@ fn claude_get_usage_answers_with_the_scratch_root_inside_the_repo() {
         .expect("the claude query must succeed even from a working folder inside the repository");
 }
 
-/// Measuring the grace after the answer (`FINISH_GRACE`) — runs the querier's conversation with the production command as is, but only the wait after
-/// receiving the answer and closing stdin is extended to [`EXIT_WINDOW`], to measure how long claude takes to end **by itself** (if it does not end within the window, it is cut then). In the meantime
-/// the global config file (`.claude.json`) is looked at only for modification time and the presence of a lock file — the content is not read.
+/// Measures the grace after the answer (`FINISH_GRACE`): the querier's conversation with the production command, but only the wait after
+/// the answer and stdin close is extended to [`EXIT_WINDOW`], to see how long claude takes to end **by itself**. The global config file
+/// (`.claude.json`) is looked at only for modification time and lock-file presence (content not read).
 #[test]
 #[ignore = "uses the real claude CLI · login · the account's query limits"]
 fn claude_exit_after_stdin_close_measurement() {
@@ -198,8 +198,8 @@ fn claude_exit_after_stdin_close_measurement() {
 /// Upper bound on waiting for claude to end by itself after stdin is closed (far longer than the production grace period).
 const EXIT_WINDOW: Duration = Duration::from_secs(10);
 
-/// claude's global config file — inside `CLAUDE_CONFIG_DIR` if set, otherwise `.claude.json` in the home folder (the querier leaves that
-/// env). ★Unverified★: the CLI's path rule was not checked against the source — if the file does not exist the time cannot be measured.
+/// claude's global config file — in `CLAUDE_CONFIG_DIR` if set, else `.claude.json` in the home folder. ★Unverified★: the CLI's path rule
+/// was not checked against the source — a missing file means no time can be measured.
 fn claude_global_config() -> (Option<PathBuf>, &'static str) {
     let (dir, source) = match std::env::var_os("CLAUDE_CONFIG_DIR") {
         Some(dir) => (Some(PathBuf::from(dir)), "CLAUDE_CONFIG_DIR"),
@@ -245,7 +245,7 @@ struct PatientLog {
     at_exit: Option<ConfigMark>,
 }
 
-/// Wraps the real spawner and extends only the deadline after stdin is closed to [`EXIT_WINDOW`] — everything else is the querier's conversation as is.
+/// Wraps the real spawner and extends only the post-stdin-close deadline to [`EXIT_WINDOW`] — the rest is the querier's conversation as is.
 struct PatientSpawner {
     config: Option<PathBuf>,
     log: Arc<Mutex<PatientLog>>,
@@ -415,7 +415,7 @@ fn codex_turn_rate_limits_updated_through_the_passive_parser() {
         output_format: AgentOutputFormat::StreamJson,
     })
     .expect("app-server decoder");
-    // In the production path the wait ticket takes the response to our request and passes the remaining lines to the translator — response lines are not fed.
+    // In the production path the wait ticket takes our response and passes the remaining lines to the translator — response lines are not fed.
     for line in lines.iter().filter(|line| !is_rpc_response(line)) {
         decoder.decode(format!("{line}\n").as_bytes());
     }
@@ -549,8 +549,8 @@ fn error_kind(err: &ProbeFailure) -> String {
 
 // ── Recording layer — wraps the real spawner and holds the lines · exit status ─────────────────
 
-/// The upstream original text the querier puts out is only the value of one named field (the masked original-text field) — collecting the shape of response lines is done only in
-/// this layer. The child is still spawned by the real [`OsProbeSpawner`].
+/// The only upstream original text the querier emits is one named field (the masked original-text field) — response-line shape collection
+/// happens only in this layer. The child is still spawned by the real [`OsProbeSpawner`].
 struct Recorder {
     tweaks: Tweaks,
     log: Arc<Mutex<ChildLog>>,
@@ -658,8 +658,8 @@ impl Drop for RecordingChild {
 
 // ── Real turn for pickup-shape collection ─────────────────────────────────────
 
-/// The same rule as what the querier strips from the daemon env — keys starting with `CLAUDE` other than the two default logins.
-/// If the parent is a claude session, that session's marker env changes the behavior of the child CLI.
+/// Same rule as the querier's daemon-env strip — keys starting with `CLAUDE` other than the two default logins (a parent claude session's
+/// marker env changes the child CLI's behavior).
 fn claude_env_to_strip() -> Vec<String> {
     std::env::vars_os()
         .filter_map(|(key, _)| key.into_string().ok())
@@ -727,8 +727,8 @@ fn claude_turn_lines(scratch: &Path, deadline: Instant) -> Result<Vec<String>, P
 
 /// All stdout lines of one app-server turn — handshake → thread → turn → `turn/completed`.
 ///
-/// ★The thread's working folder = the repository root★ — if it is a folder seen for the first time, codex writes that folder into its own config file as trusted
-/// (the codex policy comment in `commands.rs` — measured 0.155.1). Using a fresh temp folder every time piles deleted paths into the user's config.
+/// ★The thread's working folder = the repository root★ — codex writes a first-seen folder into its config as trusted (codex policy comment in
+/// `commands.rs` — measured 0.155.1); a fresh temp folder each time would pile deleted paths into the user's config.
 fn codex_turn_lines(scratch: &Path, deadline: Instant) -> Result<Vec<String>, ProbeError> {
     let (program, args) =
         console_command("codex", vec!["app-server".to_owned(), "--stdio".to_owned()]);
@@ -776,7 +776,7 @@ fn codex_turn_lines(scratch: &Path, deadline: Instant) -> Result<Vec<String>, Pr
     Ok(lines)
 }
 
-/// Reads up to the line that is `done` (including that line). A server **request** (id + method) is answered with a refusal — if we do not answer, the other side stalls.
+/// Reads up to the `done` line (inclusive). A server **request** (id + method) gets a refusal — unanswered, the other side stalls.
 fn read_until(
     child: &mut dyn ProbeChild,
     lines: &mut Vec<String>,
@@ -804,7 +804,7 @@ fn read_until(
     }
 }
 
-/// Picks up lines that arrive late after the end signal for [`TURN_TAIL`] more. If the deadline is exceeded the child is cut — here that is the end.
+/// Picks up lines arriving late after the end signal for [`TURN_TAIL`]. Exceeding the deadline cuts the child — here that is the end.
 fn read_tail(child: &mut dyn ProbeChild, lines: &mut Vec<String>) {
     let until = Instant::now() + TURN_TAIL;
     while let Ok(Some(line)) = child.read_line(until) {
@@ -853,7 +853,6 @@ fn window_text(window: Option<&WindowObs>) -> String {
     )
 }
 
-/// epoch seconds → `YYYY-MM-DDTHH:MM:SSZ (+time left)`. Calendar conversion = the Gregorian day-count formula (proleptic).
 fn iso_utc(secs: i64) -> String {
     let days = secs.div_euclid(86_400);
     let rem = secs.rem_euclid(86_400);
@@ -919,13 +918,12 @@ fn is_rpc_response(line: &str) -> bool {
         .is_ok_and(|v| v.get("id").is_some() && v.get("method").is_none())
 }
 
-/// The answer line of a query — claude `control_response` · codex response · error.
 fn is_answer_line(line: &str) -> bool {
     let kind = kind_of(line);
     kind.starts_with("control_response") || is_rpc_response(line)
 }
 
-/// The shape of a line with values removed. Booleans are visible, string values show only identifying words (list below) and the rest `str`, numbers `num`.
+/// A line's shape with values removed — booleans visible, string values only identifying words (list below) else `str`, numbers `num`.
 fn shape_of_line(line: &str) -> String {
     match serde_json::from_str::<Value>(line) {
         Ok(value) => shape(&value, None),
@@ -971,7 +969,6 @@ fn shape(value: &Value, key: Option<&str>) -> String {
     }
 }
 
-/// Numeric fields of `rate_limit_info` — only those with no account information.
 fn rate_limit_info_values(line: &str) -> String {
     let Ok(value) = serde_json::from_str::<Value>(line) else {
         return "non-json".to_owned();
@@ -1009,7 +1006,6 @@ fn codex_limit_id(line: &str) -> String {
     }
 }
 
-/// Masks token shapes · user paths and truncates before printing an upstream phrase.
 fn redact(text: &str) -> String {
     let mut out = engram_dashboard_base::logging::mask_secrets(text);
     for (dir, label) in [
@@ -1040,7 +1036,6 @@ fn repo_root() -> PathBuf {
         .expect("repository root")
 }
 
-/// One folder the test made — deleted whole on drop.
 struct TempTree {
     path: PathBuf,
 }
@@ -1053,7 +1048,6 @@ impl TempTree {
         )))
     }
 
-    /// If a same folder left by a previous run exists, delete it and make it anew.
     fn at(path: PathBuf) -> Self {
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).expect("test folder");

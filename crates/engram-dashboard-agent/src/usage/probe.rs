@@ -1,9 +1,8 @@
-//! The vendor-neutral seam of active query (probe) — the querier ([`UsageProbe`]) and the handle it uses to handle a child process
-//! ([`ProbeSpawner`]·[`ProbeChild`]).
+//! The vendor-neutral seam of active query (probe) — the querier ([`UsageProbe`]) and the child handle ([`ProbeSpawner`]·[`ProbeChild`]).
 //!
-//! ★Vendor knowledge (command · arguments · env · conversation shape · cooldown · deadline values) is not here★ — the `usage_probe.rs` of each vendor backend
-//!   carries it by implementing [`UsageProbe`]. This module fixes only the shape 「talks line by line with one short-lived child and finishes within one deadline」.
-//!   The real spawner is [`super::OsProbeSpawner`], the test double is `usage::testing`.
+//! ★Vendor knowledge (command · args · env · conversation shape · cooldown · deadline) is not here★ — each vendor's `usage_probe.rs`
+//!   implements [`UsageProbe`]. This module fixes only 「line-by-line talk with one short-lived child within one deadline」.
+//!   Real spawner: [`super::OsProbeSpawner`]; test double: `usage::testing`.
 // ADR-0004
 
 use std::fmt;
@@ -15,23 +14,19 @@ use super::{UsageDetail, UsageObservation, UsageVendorKey};
 /// The query policy of one vendor — the values are decided by each vendor backend (the receiving side has no vendor policy).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UsagePolicy {
-    /// Minimum interval between automatic queries.
     pub cooldown: Duration,
     /// Deadline of one whole query (start · write · read · wait for exit). The receiving side makes [`ProbeEnv::deadline`] from this.
     pub timeout: Duration,
 }
 
-/// Classification of a query failure — the receiving side folds it into a visible state. The querier wraps this in [`ProbeFailure`] and returns it.
+/// Classification of a query failure — the receiving side folds it into a visible state; the querier wraps it in [`ProbeFailure`].
 ///
-/// ★String fields go to logs — what may be put in = only sentences we wrote and OS error messages★: not credentials · tokens · env values,
-///   and not text the upstream gave (error messages · account identifiers carried in responses · stderr) either. The upstream original text
-///   lives only in the dedicated field [`UsageDetail::upstream`] — the trimming rules and destinations are in [`super::UpstreamText`].
+/// ★String fields go to logs — only sentences we wrote and OS error messages★: no credentials · tokens · env values, and no upstream
+///   text (error messages · account identifiers · stderr). Upstream text lives only in [`UsageDetail::upstream`] ([`super::UpstreamText`]).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ProbeError {
-    /// The program to query is not on this PC.
     #[error("not installed")]
     NotInstalled,
-    /// Not logged in, or authentication was refused.
     #[error("unauthenticated")]
     Unauthenticated,
     /// Upstream refused the query as over the limit. `retry_after` = the wait upstream told us (unknown if absent).
@@ -46,10 +41,8 @@ pub enum ProbeError {
     /// Could not spawn the child (the case where the program is missing is [`ProbeError::NotInstalled`]).
     #[error("spawn failed: {0}")]
     Spawn(String),
-    /// Pipe · file I/O failed.
     #[error("io error: {0}")]
     Io(String),
-    /// The response shape is broken.
     #[error("parse error: {0}")]
     Parse(String),
     /// Upstream gave an error that fits none of the classifications above.
@@ -58,8 +51,8 @@ pub enum ProbeError {
 }
 
 impl ProbeError {
-    /// Classification word — the share of [`UsageDetail::kind`] for neutral failures. ★Goes out over the wire and the screen shows it without translation★ — changing the spelling
-    /// changes the visible word.
+    /// Classification word — [`UsageDetail::kind`] for neutral failures. ★Goes over the wire, shown untranslated★ — a respelling changes
+    ///   the visible word.
     pub const fn kind_word(&self) -> &'static str {
         match self {
             Self::NotInstalled => "not_installed",
@@ -77,9 +70,9 @@ impl ProbeError {
 
 /// The failure of one query — the classification ([`ProbeError`]) and its grounds ([`UsageDetail`]).
 ///
-/// - `detail: None` = the grounds are the classification alone — the receiving side fills it with [`ProbeError::kind_word`]. A failure that came up through `?` at the seam,
-///   like the spawner · scratch folder, has this shape (`From<ProbeError>`).
-/// - ★`Display` = the classification phrase + `detail.kind` only — the upstream original text is not printed★. `Debug` also prints the character count instead of the original text.
+/// - `detail: None` = classification alone — the receiving side fills [`ProbeError::kind_word`] (a `?` failure at the seam, via
+///   `From<ProbeError>`).
+/// - ★`Display` = classification phrase + `detail.kind` only — upstream text is not printed★; `Debug` prints its character count.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProbeFailure {
     pub error: ProbeError,
@@ -123,21 +116,19 @@ pub trait UsageProbe: Send + Sync {
     /// One query. ★blocking★ — the caller calls it on a dedicated thread.
     ///
     /// - The result's `source` is [`super::UsageSource::Active`], and `vendor` is [`UsageProbe::key`].
-    /// - ★Call [`ProbeEnv::require_time_left`] first, and pass `env.deadline` unchanged to startup and to every action of
-    ///   the child★ — then this call returns within at most `deadline + KILL_WAIT` ([`super::KILL_WAIT`]) + the short
-    ///   retry of deleting the scratch folder (the drop of [`super::ScratchDir`] — about 0.2 s) (the last share = the child drop's wait for exit and the
-    ///   folder deletion after it). Do not make a longer deadline yourself.
+    /// - ★Call [`ProbeEnv::require_time_left`] first and pass `env.deadline` unchanged to startup and every child action★ — then this returns
+    ///   within `deadline + KILL_WAIT` ([`super::KILL_WAIT`]) + the scratch-folder delete retry (~0.2 s). Do not make a longer deadline.
     /// - Once the answer is received, end the child with [`finish_after_answer`].
     /// - Do not panic on external data — a query is outside the containment mark, so a panic means daemon exit (ADR-0292).
     fn query(&self, env: &ProbeEnv<'_>) -> Result<UsageObservation, ProbeFailure>;
 }
 
-/// What the receiving side passes for one query.
 pub struct ProbeEnv<'a> {
     pub spawner: &'a dyn ProbeSpawner,
     /// The deadline of one whole query — the querier passes it unchanged to startup and to each action of the child.
     pub deadline: Instant,
-    /// The parent folder in which a scratch folder is made per query ([`super::ScratchDir::create`]). A dedicated folder owned by the receiving side.
+    /// The parent folder in which a scratch folder is made per query ([`super::ScratchDir::create`]). A dedicated folder owned by the
+    ///   receiving side.
     pub scratch_root: &'a Path,
 }
 
@@ -151,10 +142,7 @@ impl ProbeEnv<'_> {
     }
 }
 
-/// Startup spec of one child.
-///
-/// Why it is kept apart from the agent's `CommandSpec` = that one only adds env. A query must strip the inherited env
-/// ([`ProbeCommand::env_remove`]).
+/// Startup spec of one child. Kept apart from `CommandSpec` because a query must strip the inherited env ([`ProbeCommand::env_remove`]).
 #[derive(Clone, PartialEq, Eq)]
 pub struct ProbeCommand {
     pub program: String,
@@ -185,10 +173,10 @@ impl fmt::Debug for ProbeCommand {
 pub trait ProbeSpawner: Send + Sync {
     /// Spawns one child with three pipes open.
     ///
-    /// - If the deadline has already passed, do not spawn and return [`ProbeError::Timeout`].
-    /// - If startup itself fails as 「no such program」, [`ProbeError::NotInstalled`] (POSIX etc.). ★A command wrapped in a shell
-    ///   (Windows `cmd.exe /c <prog>`) starts successfully★ — that the wrapped target is missing arrives as the exit status
-    ///   ([`ExitInfo::looks_not_installed`]). We do not look for it before spawning.
+    /// - Deadline already passed → do not spawn, [`ProbeError::Timeout`].
+    /// - Startup failing as 「no such program」 → [`ProbeError::NotInstalled`] (POSIX etc.). ★A shell-wrapped command (Windows `cmd.exe /c
+    ///   <prog>`) starts successfully★ — a missing target arrives as the exit status ([`ExitInfo::looks_not_installed`]); no lookup before
+    ///   spawning.
     fn spawn(
         &self,
         cmd: &ProbeCommand,
@@ -198,10 +186,10 @@ pub trait ProbeSpawner: Send + Sync {
 
 /// One child that is up.
 ///
-/// ★All three actions are under the same rule of deadline★: if not finished by the deadline (or if already past), the child is cut **tree and all**
-///   and it is [`ProbeError::Timeout`]. Once cut by the deadline, every action is immediately `Timeout`.
-/// ★drop = tree kill + bounded wait for exit ([`super::KILL_WAIT`])★ — once the querier has the answer it ends the child with [`finish_after_answer`]
-///   (that end is the drop). The scratch folder must be declared **before** the child so the drop order (child → folder) becomes 「delete after killing」.
+/// ★All three actions share the deadline★: past it, the child is cut **tree and all** and it is [`ProbeError::Timeout`]; every later
+///   action is `Timeout`.
+/// ★drop = tree kill + bounded wait ([`super::KILL_WAIT`])★ — the querier ends the child with [`finish_after_answer`] (that end is the drop).
+///   Declare the scratch folder **before** the child so the drop order (child → folder) is 「delete after killing」.
 pub trait ProbeChild: Send {
     /// Appends `\n` to the end of `line` and writes it to stdin. stdin stays open until [`ProbeChild::close_stdin`] or drop.
     fn write_line(&mut self, line: &str, deadline: Instant) -> Result<(), ProbeError>;
@@ -209,30 +197,27 @@ pub trait ProbeChild: Send {
     /// Closes stdin (the child sees EOF). If already closed, does nothing. A later `write_line` is `Err(Io)`.
     fn close_stdin(&mut self);
 
-    /// One line of stdout (with the trailing `\n` · `\r\n` stripped). `None` = stdout EOF (and `None` continues afterward).
-    /// Bytes that are not UTF-8 are replaced by the replacement character. One line that hit the bound without a newline (a line over the bound · a piece that exactly
-    /// fills the bound without a newline) is `Err(Io)` and the stream continues with the next line.
+    /// One line of stdout (trailing `\n` · `\r\n` stripped). `None` = stdout EOF (stays `None`). Non-UTF-8 bytes become the replacement
+    /// character. A line that hit the bound without a newline is `Err(Io)`; the stream continues with the next line.
     fn read_line(&mut self, deadline: Instant) -> Result<Option<String>, ProbeError>;
 
-    /// Waits for the child (the directly spawned process) to end. A child still alive after stdout closes is also cut at the deadline.
-    /// ★Call it after seeing stdout EOF★ — if you wait with unread output, the child may be blocked on output and not end until the deadline.
-    /// The 「program missing」 decision ([`ExitInfo::looks_not_installed`]) also runs inside this under the same deadline — if the answer has already
-    /// been received, use [`ProbeChild::wait_exit_code`], which makes no decision.
+    /// Waits for the directly spawned process to end; a child still alive after stdout closes is cut at the deadline.
+    /// ★Call it after seeing stdout EOF★ — with unread output the child may block on output until the deadline.
+    /// Also runs the 「program missing」 decision ([`ExitInfo::looks_not_installed`]) under the same deadline — after the answer use
+    /// [`ProbeChild::wait_exit_code`], which makes no decision.
     fn wait_exit(&mut self, deadline: Instant) -> Result<ExitInfo, ProbeError>;
 
-    /// Same as [`ProbeChild::wait_exit`] but makes no 「program missing」 decision (`None` = ended without a code). The decision
-    /// may run a file-system search (the spawner's share), so the wait for exit after the answer ([`finish_after_answer`]) uses this.
+    /// Same as [`ProbeChild::wait_exit`] without the 「program missing」 decision (`None` = ended without a code); the decision may run a
+    /// file-system search, so the wait after the answer ([`finish_after_answer`]) uses this.
     fn wait_exit_code(&mut self, deadline: Instant) -> Result<Option<i32>, ProbeError>;
 
-    /// The last few lines of stderr — token shapes masked and each line truncated. The spawner does not put this content in logs.
+    /// The last few stderr lines — token shapes masked, each line truncated. The spawner does not log this.
     ///
-    /// ★Only token shapes are masked★ — things like account identifiers · paths may remain as is. Whether to log it is decided by the querier that
-    ///   knows it, and it is not put into [`ProbeError`] strings. Right after the child just ended, the last line may
-    ///   not have come in yet.
+    /// ★Only token shapes are masked★ — account identifiers · paths may remain. Whether to log it is the querier's call; it never goes into
+    ///   [`ProbeError`] strings. Right after the child ended, the last line may not have arrived yet.
     fn stderr_tail(&self) -> Vec<String>;
 }
 
-/// The child's exit status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExitInfo {
     code: Option<i32>,
@@ -240,7 +225,8 @@ pub struct ExitInfo {
 }
 
 impl ExitInfo {
-    /// `not_installed` = whether the spawner decided this exit means 「the program it tried to spawn is missing」 (the OS rules are the spawner's share).
+    /// `not_installed` = whether the spawner decided this exit means 「the program it tried to spawn is missing」 (the OS rules are the
+    ///   spawner's share).
     pub const fn new(code: Option<i32>, not_installed: bool) -> Self {
         Self {
             code,
@@ -253,20 +239,19 @@ impl ExitInfo {
         self.code
     }
 
-    /// Whether the wrapping shell ended with 「no such command」 — after the querier sees stdout EOF with no response, if this is true it folds to
-    /// [`ProbeError::NotInstalled`]. ★False does not mean it is installed★ — the spawner may not have finished the decision within the
-    /// deadline, or an earlier decision on the same target may still be running so it did not decide anew (the decision rule = the spawner's
-    /// share).
+    /// Whether the wrapping shell ended with 「no such command」 — true after stdout EOF with no response → [`ProbeError::NotInstalled`].
+    /// ★False does not mean installed★ — the decision may not have finished within the deadline, or an earlier one on the same target may
+    ///   still run.
     pub const fn looks_not_installed(&self) -> bool {
         self.not_installed
     }
 }
 
-/// Ends the child after the answer is received — closes stdin, drains the remaining stdout and waits for it to end by itself up to [`FINISH_GRACE`] (not past the
-/// deadline), then drops it (tree kill). Even if the wait hits the deadline it is not a query failure — the answer has already been received.
+/// Ends the child after the answer — closes stdin, drains stdout, waits up to [`FINISH_GRACE`] (not past the deadline) for it to end by itself,
+/// then drops it (tree kill). Hitting the deadline here is not a query failure — the answer is already received.
 ///
-/// Why not kill right away = to let the CLI finish its own file writes — killing right after the answer was measured to leave
-/// locks · temp files in the config folder (vendor and measurement record are in the comment of the calling querier).
+/// Why not kill right away: killing right after the answer was measured to leave locks · temp files in the CLI's config folder
+/// (vendor and record: the calling querier's comment).
 pub fn finish_after_answer(mut child: Box<dyn ProbeChild>, deadline: Instant) {
     let grace = deadline.min(Instant::now() + FINISH_GRACE);
     child.close_stdin();
@@ -288,8 +273,8 @@ pub fn finish_after_answer(mut child: Box<dyn ProbeChild>, deadline: Instant) {
     }
 }
 
-/// The grace bound of [`finish_after_answer`] — a value covering the time the query CLI takes to end by itself after stdin EOF (measured max about 1.1 s,
-/// during which it writes its own config file). If exceeded, the whole tree is cut. Vendor and measurement record are in the comment of the calling querier.
+/// The grace bound of [`finish_after_answer`] — covers the CLI's self-exit after stdin EOF (measured max ~1.1 s, while it writes its
+/// config file). If exceeded, the whole tree is cut. Vendor and record: the calling querier's comment.
 pub(crate) const FINISH_GRACE: Duration = Duration::from_secs(2);
 
 #[cfg(test)]
@@ -326,7 +311,8 @@ mod tests {
         assert!(spawner.child_dropped());
     }
 
-    /// ★After the answer is received, do not call the 「program missing」 decision★ — even for a non-zero exit (the decision is where a search would run).
+    /// ★After the answer is received, do not call the 「program missing」 decision★ — even for a non-zero exit (the decision is where a
+    ///   search would run).
     #[test]
     fn finish_never_asks_for_the_not_installed_judgment() {
         let spawner = ScriptedSpawner::new(ChildScript::new().exit_code(1));
@@ -388,7 +374,6 @@ mod tests {
         assert_eq!(env(far()).require_time_left(), Ok(()));
     }
 
-    /// The classification word goes out over the wire — if changed, the word on screen changes.
     #[test]
     fn kind_words_are_the_wire_words() {
         let cases = [

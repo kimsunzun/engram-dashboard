@@ -1,7 +1,8 @@
-//! The grounds of an abnormal result (query failure · 「no limit information」) — [`UsageDetail`] and [`UpstreamText`], which carries the upstream original text (ADR-0255).
+//! The grounds of an abnormal result (query failure · 「no limit information」) — [`UsageDetail`] and [`UpstreamText`], which carries the
+//!   upstream original text (ADR-0255).
 //!
-//! ★The destinations of the upstream original text are only the screen and the LLM read path — it is not put in logs (logs may be shared)★. That wall
-//!   stands on the shape of [`UpstreamText`]: the constructor masks, replaces and truncates, and there is no `Debug` · `Display` that prints the original text.
+//! ★The upstream original text goes only to the screen and the LLM read path — never to logs (logs may be shared)★. The wall is the shape
+//!   of [`UpstreamText`]: the constructor masks, replaces and truncates, and no `Debug` · `Display` prints the original.
 
 use std::fmt;
 
@@ -12,13 +13,13 @@ use super::text::is_unprintable;
 /// Character-count bound of one piece of [`UpstreamText`] (TRD §1-4 「failure tracking」).
 const UPSTREAM_MAX_CHARS: usize = 200;
 
-/// The grounds of an abnormal result — not mixed: our classification = `kind` · the upstream number = `code` · the upstream text = `upstream`.
+/// The grounds of an abnormal result, kept unmixed: our classification = `kind` · the upstream number = `code` · the upstream text = `upstream`.
 ///
-/// - `kind` = classification word. It goes out over the wire and the screen shows it without translation. The producer decides — a neutral failure is
-///   [`super::ProbeError::kind_word`], the classification of a vendor response is each vendor's query code.
-/// - `code` = the error number the upstream gave (`None` = it gave none).
-/// - `upstream` = the original text the upstream gave. ★Carry only the value of a named field★ — do not carry the response line · stderr whole (other
-///   fields of the response carry the account identifier).
+/// - `kind` = classification word; goes over the wire and is shown untranslated. The producer decides — a neutral failure is
+///   [`super::ProbeError::kind_word`], a vendor response's classification is each vendor's query code.
+/// - `code` = the error number upstream gave (`None` = none).
+/// - `upstream` = the original text upstream gave. ★Carry only a named field's value★ — never the whole response line · stderr (other
+///   response fields carry the account identifier).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageDetail {
     pub kind: &'static str,
@@ -26,23 +27,24 @@ pub struct UsageDetail {
     pub upstream: Option<UpstreamText>,
 }
 
-/// One piece of original text the upstream gave — [`UpstreamText::new`] masks token shapes, replaces characters that must not be shown as is on screen (control characters ·
-/// bidirectional / zero-width format characters — the same decision as the display field of `usage::text`) with a blank or U+FFFD, then
-/// truncates to 200 characters (by character).
+/// One piece of upstream original text — [`UpstreamText::new`] masks token shapes, replaces characters not to be shown as is (control
+/// characters · bidirectional / zero-width format characters — the same decision as `usage::text`'s display field) with a blank or U+FFFD,
+///   then truncates to 200 characters.
 ///
-/// ★`Debug` prints only the character count and there is no `Display`★ — even if a log prints it with `{:?}` · `{}`, the original text does not go out. The only
-///   way to take the original text out is [`UpstreamText::as_str`]. Do not add a `Display` · `Serialize` · `Debug` that emits the original text.
-/// ★What is masked is only the token shape★ — things like account identifiers · paths may remain.
-/// ★Replacing instead of dropping is intended★ — the display field drops such values whole, but the original-text field must stay traceable by the user.
+/// ★`Debug` prints only the character count and there is no `Display`★ — a log printing it with `{:?}` · `{}` leaks nothing. The only way out is
+///   [`UpstreamText::as_str`]. Do not add a `Display` · `Serialize` · `Debug` that emits the original.
+/// ★Only the token shape is masked★ — account identifiers · paths may remain.
+/// ★Replacing instead of dropping is intended★ — the display field drops such values whole, but the original-text field must stay
+///   traceable by the user.
 #[derive(Clone, PartialEq, Eq)]
 pub struct UpstreamText(String);
 
 impl UpstreamText {
-    /// Order = mask → replace → truncate. ★Masking comes first★ — the mask pattern must see the original token shape, and if truncated first, a token straddling the boundary
-    /// falls short of the pattern's minimum length and survives. Replacement swaps one character for one character, so the 200-character bound is the character
-    /// count after replacement.
-    /// Replacement = whitespace-class control characters (`\t`·`\n`·`\r`·`\x0B`·`\x0C`·U+0085·U+2028·U+2029) become one blank, and any other
-    /// character that must not be visible becomes U+FFFD — so that a multi-line phrase reads as one line.
+    /// Order = mask → replace → truncate. ★Masking first★ — the mask pattern must see the original token shape; truncating first would let
+    /// a boundary-straddling token fall below the pattern's minimum length and survive. Replacement is one character for one, so the
+    /// 200-character bound holds after it. Replacement = whitespace-class control characters
+    /// (`\t`·`\n`·`\r`·`\x0B`·`\x0C`·U+0085·U+2028·U+2029) become one blank and any other invisible character becomes U+FFFD — a
+    ///   multi-line phrase reads as one line.
     pub fn new(text: &str) -> Self {
         Self(
             mask_secrets(text)
@@ -57,8 +59,8 @@ impl UpstreamText {
         )
     }
 
-    /// `None` if empty or whitespace only (whitespace decision = [`str::trim`]), otherwise [`UpstreamText::new`] — used by the place that carries
-    /// a field value the upstream gave as is. If it is certain to be non-empty, like a sentence built by joining field values, use `new`.
+    /// `None` if empty or whitespace only ([`str::trim`]), otherwise [`UpstreamText::new`] — for carrying an upstream field value as is.
+    /// For a surely non-empty built sentence use `new`.
     pub fn non_blank(text: &str) -> Option<Self> {
         (!text.trim().is_empty()).then(|| Self::new(text))
     }
@@ -122,7 +124,6 @@ mod tests {
         );
     }
 
-    /// Whitespace-class control characters become a blank — a multi-line phrase reads as one line.
     #[test]
     fn whitespace_controls_become_plain_spaces() {
         let breaks = "\t\n\r\u{0B}\u{0C}\u{85}\u{2028}\u{2029}";
@@ -136,8 +137,8 @@ mod tests {
         );
     }
 
-    /// ★The `\s+` of the Bearer pattern also catches a token after a tab · newline★ (base `mask_secrets`) — if replacement ran before masking
-    /// and turned whitespace-class characters into U+FFFD, this token would survive.
+    /// ★The Bearer pattern's `\s+` also catches a token after a tab · newline★ (base `mask_secrets`) — replacement before masking would
+    /// turn those into U+FFFD and let the token survive.
     #[test]
     fn a_bearer_token_after_a_tab_or_newline_is_masked() {
         assert_eq!(

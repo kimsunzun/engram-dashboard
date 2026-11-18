@@ -1,24 +1,23 @@
 //! The normalization a producer (each vendor's interpreter) applies before putting an external value into a [`super::WindowObs`] field.
 //!
-//! ★All of them are total functions — a value that cannot be accepted becomes `None` and does not panic★: a panic on the usage-query side is outside the containment
-//!   mark, so it ends the daemon, and a panic in the pump interpreter ends that agent as `Failed` (ADR-0292) — an external response whose shape
-//!   changed must not do that. The caller empties **only the field** that got `None` and does not discard the whole window · observation.
+//! ★All are total functions — an unacceptable value becomes `None`, never a panic★: a panic on the usage-query side is outside the
+//!   containment mark and ends the daemon, and one in the pump interpreter ends that agent as `Failed` (ADR-0292) — a changed external
+//!   response shape must not do that. The caller empties **only the field** that got `None`, not the whole window · observation.
 
 use serde_json::Value;
 
-/// Number of decimal places carried in the usage-rate field (10^4 = fourth place).
+/// Decimal places carried in the usage-rate field (10^4 = fourth place).
 ///
-/// ★Do not drop the rounding★: multiplying a 0–1 value by 100 attaches binary floating-point error (0.55 × 100 =
-///   55.00000000000001). The receiver shows the remaining amount `floor(100 − used)`, so that error would
-///   make 44 (true value 45). With the fourth place, the precision vendors give (around two decimal places) is fully kept.
+/// ★Do not drop the rounding★: 0–1 × 100 attaches binary floating-point error (0.55 × 100 = 55.00000000000001), and the receiver shows
+///   `floor(100 − used)`, which would give 44 instead of 45. The fourth place fully keeps vendors' precision (about two decimal places).
 const PCT_SCALE: f64 = 10_000.0;
 
-/// Upper bound of epoch seconds accepted as a reset time — 9999-12-31T23:59:59Z. A range that can be written with an ISO 8601 four-digit year and
-/// does not overflow when moved to the receiving side (an ms-unit clock).
+/// Upper bound of epoch seconds accepted as a reset time — 9999-12-31T23:59:59Z: writable with an ISO 8601 four-digit year and no overflow
+/// on the receiving side (an ms-unit clock).
 const MAX_EPOCH_SECS: i64 = 253_402_300_799;
 
-/// Usage rate already in 0–100 units → field value. Non-finite (NaN · ±inf) → `None` · outside [0, 100] → clamped · rounded to the fourth decimal place
-/// (grounds = [`PCT_SCALE`]).
+/// Usage rate already in 0–100 units → field value. Non-finite (NaN · ±inf) → `None` · outside [0, 100] → clamped · rounded to the fourth
+/// decimal place (grounds = [`PCT_SCALE`]).
 pub fn used_pct_from_percent(percent: f64) -> Option<f64> {
     if !percent.is_finite() {
         return None;
@@ -28,9 +27,9 @@ pub fn used_pct_from_percent(percent: f64) -> Option<f64> {
     Some(if rounded == 0.0 { 0.0 } else { rounded })
 }
 
-/// Usage rate in 0–1 units → field value (after ×100, the same rule as [`used_pct_from_percent`]).
-/// ★A finite huge value can become infinity at ×100★ — the non-finite check is done **before** multiplying, so that value is
-///   clamped to 100, not `None` (to 0 on the negative side).
+/// Usage rate in 0–1 units → field value (after ×100, same rule as [`used_pct_from_percent`]).
+/// ★A finite huge value can become infinity at ×100★ — the non-finite check runs **before** multiplying, so it clamps to 100 (0 on the
+///   negative side), not `None`.
 pub fn used_pct_from_fraction(fraction: f64) -> Option<f64> {
     if !fraction.is_finite() {
         return None;
@@ -44,15 +43,15 @@ pub fn used_pct_from_fraction(fraction: f64) -> Option<f64> {
 }
 
 /// epoch seconds → reset-time field value. 1970 and below (0 · negative) and above [`MAX_EPOCH_SECS`] → `None`.
-/// ★Not accepting 0 is intended★ — a real reset cannot be in 1970, and 0 is commonly used as a 「no value」 placeholder.
-///   If accepted, the receiver would draw that window as 「already reset」.
+/// ★Not accepting 0 is intended★ — a real reset cannot be in 1970 and 0 is a common 「no value」 placeholder; accepted, the receiver would
+///   draw 「already reset」.
 pub fn resets_at_from_epoch_secs(secs: i64) -> Option<i64> {
     (1..=MAX_EPOCH_SECS).contains(&secs).then_some(secs)
 }
 
-/// JSON value → reset-time field value. Accepts **only integer JSON numbers** (range in [`resets_at_from_epoch_secs`]).
-/// ★A number with a decimal point is `None`★ — we do not do float → integer conversion on external values. All vendor
-///   shapes confirmed today are integers. A string · `null` · any other type is also `None`.
+/// JSON value → reset-time field value. Accepts **only integer JSON numbers** (range: [`resets_at_from_epoch_secs`]).
+/// ★A number with a decimal point is `None`★ — no float → integer conversion on external values (all vendor shapes confirmed today are
+///   integers). A string · `null` · any other type is `None` too.
 pub fn resets_at_from_json(value: &Value) -> Option<i64> {
     let secs = match value.as_i64() {
         Some(secs) => secs,
@@ -67,7 +66,6 @@ mod tests {
 
     // ── Usage rate ──
 
-    /// Without this rounding, the receiver's floor makes 45 look like 44 (grounds of `PCT_SCALE`).
     #[test]
     fn fraction_rounding_removes_binary_float_residue() {
         assert_eq!(

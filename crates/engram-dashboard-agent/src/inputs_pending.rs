@@ -1,12 +1,12 @@
 //! inputs_pending — a **pending-list table** per (agent, epoch): "this incarnation's user pending list is not empty".
 //!
-//! ★A leaf table of the same shape as the turn-observation table (`turn`), and it is separate because the place that uses it differs★: the places that use
-//!   the turn-observation table's `in_turn` must be only two points, the classifier and cleanup (ADR-0127 「the third caller」). This fact is
-//!   written by the core inside the emit that reduced the registry, so we do not add a field to that table.
-//! ★Reader = mail busyness (daemon adapter)★ — while this value is true, mail does not go in, and ★there is no fail-open cap★
-//!   (user decision N8 — an intended exception to ADR-0104's 「going late < not going」).
-//! ★Lock = this one table, a leaf★: we do not call outward while holding it (ADR-0006). Entries are keyed by `AgentId` and the epoch is held
-//!   as the value — the grounds are the same as the `turn` module header.
+//! ★A leaf table shaped like the turn-observation table (`turn`), separate because its users differ★: the turn table's `in_turn` must have
+//!   only two users, the classifier and cleanup (ADR-0127 「the third caller」); this fact is written by the core inside the emit that
+//!   reduced the registry, so no field is added there.
+//! ★Reader = mail busyness (daemon adapter)★ — while true, mail does not go in, and ★there is no fail-open cap★ (user decision N8 — an
+//!   intended exception to ADR-0104's 「going late < not going」).
+//! ★Lock = this one table, a leaf★: nothing is called outward while holding it (ADR-0006). Entries are keyed by `AgentId`, the epoch is
+//!   the value (same grounds as the `turn` module header).
 // ADR-0231
 // ADR-0006
 
@@ -17,7 +17,6 @@ use engram_dashboard_base::sync;
 
 use crate::types::AgentId;
 
-/// The pending-list table — owned one per `AgentManager`.
 pub struct InputsPendingTable {
     entries: Mutex<HashMap<AgentId, Entry>>,
 }
@@ -25,7 +24,6 @@ pub struct InputsPendingTable {
 struct Entry {
     epoch: u32,
     pending: bool,
-    /// The output seq that last updated this entry (comparable only within the same epoch).
     last_seq: u64,
 }
 
@@ -48,7 +46,7 @@ impl InputsPendingTable {
     }
 
     /// This incarnation takes this id's place — it unconditionally replaces any existing entry and starts at "list empty".
-    /// ★Call it before the session becomes observable★ (owner = `AgentManager::spawn_session`, the same place as the turn-observation registration).
+    /// ★Call it before the session becomes observable★ (owner = `AgentManager::spawn_session`, same place as the turn-observation registration).
     pub fn register(&self, id: AgentId, epoch: u32) {
         self.lock().insert(
             id,
@@ -60,12 +58,12 @@ impl InputsPendingTable {
         );
     }
 
-    /// Record the list going empty↔full. `seq` = the output seq of the list event that produced that value.
+    /// Record the list going empty↔full. `seq` = the output seq of the list event that produced the value.
     ///
-    /// ★Drop writes with a smaller seq★: 「became empty」 is written deferred outside the replay lock, so it must not overwrite a later
-    ///   「became full」 that another thread wrote inside the lock in between.
-    /// ★Drop it if the marker differs or the entry is missing (unlike the turn-observation table)★: this fact has no cap, so if a write that arrives
-    ///   late after cleanup revives the entry, there is no trigger to erase it. That is why the verb that creates an entry is `register` alone.
+    /// ★Drop writes with a smaller seq★: 「became empty」 is written deferred outside the replay lock and must not overwrite a later 「became
+    ///   full」 another thread wrote inside the lock meanwhile.
+    /// ★Drop it if the marker differs or the entry is missing (unlike the turn table)★: this fact has no cap, so a write arriving after
+    ///   cleanup would revive the entry with no trigger to erase it — hence `register` alone creates entries.
     pub fn set(&self, id: AgentId, epoch: u32, seq: u64, pending: bool) {
         let mut g = self.lock();
         let Some(e) = g.get_mut(&id) else {

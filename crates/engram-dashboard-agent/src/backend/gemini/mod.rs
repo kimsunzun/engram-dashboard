@@ -1,12 +1,10 @@
 //! GeminiBackend — CommandSpec production stub for the Gemini CLI only.
 //!
-//! ★The rule this folder sets = gemini knowledge lives only in here (ADR-0004)★. The canonical grounds, gates and what the gates
-//! cannot see are in the `backend/claude/mod.rs` header and are not repeated here — read it with the names swapped.
-//! The only surface going out is the one [`crate::backend::AgentBackend`] implementation.
+//! ★The rule this folder sets = gemini knowledge lives only here (ADR-0004)★. Grounds, gates and what the gates cannot see: the
+//! `backend/claude/mod.rs` header (read it with names swapped). The only surface out is the one [`crate::backend::AgentBackend`] implementation.
 //!
-//! AgentCommand has no Gemini variant, so backend_for dispatch does not route to this backend.
-//! This file is a stub to secure the structure; adding the AgentCommand::Gemini variant and
-//! the backend_for match are settled in a separate task after the CLI spike is done.
+//! AgentCommand has no Gemini variant, so backend_for does not route here; the variant and the backend_for match are settled after the CLI
+//!   spike.
 //!
 //! tauri import 0.
 
@@ -20,23 +18,19 @@ use crate::types::{BackendCaps, CommandSpec, ControlEndpoint, ModelCaps, Session
 
 /// Gemini executable name. Resolved through PATH.
 ///
-/// ※ best-guess: needs confirmation that the real binary name of the Google Gemini CLI is "gemini".
-/// Settle it in the CLI spike with `which gemini` / `gemini --help`.
-/// It may be the Google AI Studio CLI or the `gemini-cli` package name.
+/// ※ best-guess: confirm "gemini" is the real binary name (could be the Google AI Studio CLI or the `gemini-cli` package) in the CLI spike
+/// (`which gemini` / `gemini --help`).
 const GEMINI_PROGRAM: &str = "gemini";
 
 pub struct GeminiBackend;
 
 impl AgentBackend for GeminiBackend {
-    /// ★The two axes below have never been measured, and this backend is **unreachable** today★ — `AgentCommand` has no gemini
-    /// variant, so there is no way for `backend_for` to come to this implementation (which is why the declaration table in
-    /// `tests/backend_contract.rs` has no row for it either). The values are best-guesses from before the CLI spike, and the task that brings in the variant replaces
-    /// them with measurements.
-    /// ★Having no unit tests **for these two methods only** is intended★: calling them would mean feeding another backend's command
-    ///   (a pair `backend_for` cannot make), and **these two do not even read that command** (`_command`), so an assertion written that way
-    ///   would only re-read a constant. ★`build_spec` in the same file is different★ — it actually
-    ///   matches the command and moves the arguments, so even a synthetic sample measures something, and that is why it has tests (its limits are in the
-    ///   `tests::spec` comment below).
+    /// ★The two axes below were never measured, and this backend is **unreachable** today★ — `AgentCommand` has no gemini variant, so
+    /// `backend_for` cannot reach it (hence no row in `tests/backend_contract.rs`'s declaration table). The values are pre-spike
+    ///   best-guesses; the variant's task replaces them with measurements.
+    /// ★No unit tests **for these two methods only** is intended★: calling them needs another backend's command (a pair `backend_for`
+    ///   cannot make), and they ignore it (`_command`), so an assertion would re-read a constant. ★`build_spec` differs★ — it matches the
+    ///   command and moves the arguments, so even a synthetic sample measures something (limits: the `tests::spec` comment).
     fn assigns_session_id(&self, _command: &AgentCommand) -> bool {
         // best-guess: true, assuming the Gemini CLI also has a conversation-session concept.
         // Change to false if it is a sessionless CLI.
@@ -49,16 +43,14 @@ impl AgentBackend for GeminiBackend {
     }
 
     fn supports_control_channel(&self) -> bool {
-        // Conservative stub (ADR-0086 F3) — whether the Gemini CLI supports MCP is unknown since the CLI spike has not happened.
-        //   false in the same spirit as the capabilities stub being all false (an unmeasured backend does not claim to consume
-        //   the control channel). Replace with measured values after the spike.
+        // Conservative stub (ADR-0086 F3) — Gemini CLI MCP support is unknown before the CLI spike; false like the all-false capabilities
+        //   stub (an unmeasured backend does not claim to consume the control channel). Replace after the spike.
         false
     }
 
     fn accepts_mcp_config(&self) -> bool {
-        // Conservative stub (ADR-0099) — an unmeasured backend does not claim MCP-capable → false (non-MCP spawn).
-        //   Gemini's real MCP config support is replaced with measured values after the CLI spike (ADR-0004 backend knowledge).
-        // ADR-0099
+        // Conservative stub (ADR-0099) — an unmeasured backend does not claim MCP-capable → false (non-MCP spawn). Replace with measured
+        // values after the CLI spike (ADR-0004). ADR-0099
         false
     }
 
@@ -72,8 +64,8 @@ impl AgentBackend for GeminiBackend {
         cwd: PathBuf,
         env: Vec<(String, String)>,
         // ADR-0086: stub — control channel injection is implemented when the variant is settled after the CLI spike (ignored for now).
-        // TODO(ADR-0094): translate ControlEndpoint.grants to gemini permission flags
-        //   (claude uses --allowedTools mcp__{s}__{t} / Bash({e}:*)+PowerShell({e}:*); the gemini dialect is settled after the CLI spike).
+        // TODO(ADR-0094): translate ControlEndpoint.grants to gemini permission flags (claude uses --allowedTools mcp__{s}__{t} /
+        //   Bash({e}:*)+PowerShell({e}:*); the gemini dialect is settled after the CLI spike).
         _control: Option<ControlEndpoint>,
     ) -> CommandSpec {
         let mut args: Vec<String> = Vec::new();
@@ -144,13 +136,10 @@ impl AgentBackend for GeminiBackend {
 mod tests {
     use super::*;
 
-    /// ★The sample is synthetic — `backend_for` cannot give this backend a claude command★ (there is no gemini variant at all,
-    /// so **no** command reaches here). Still, the entries using this helper measure something:
-    /// `build_spec` actually matches the command, moves `extra_args` and assembles the session flags, so the assertions below
-    /// measure **that assembly**.
-    /// ★What is **not** measured = whether that assembly matches the real gemini★ — the program name and `--session`/`--resume` are all
-    ///   best-guesses, and the real CLI has never been launched (exactly as the stub declaration in the file header says). The task that brings in the variant
-    ///   turns the sample into a real command and replaces the values with measurements.
+    /// ★The sample is synthetic — `backend_for` cannot give this backend a claude command★ (no gemini variant). Entries using it still
+    /// measure **the assembly**: `build_spec` matches the command, moves `extra_args` and assembles the session flags.
+    /// ★**Not** measured = whether that assembly matches the real gemini★ — program name and `--session`/`--resume` are best-guesses and
+    ///   the real CLI was never launched. The variant's task turns the sample into a real command and replaces the values with measurements.
     fn spec(mode: SpawnMode, sid: Option<Uuid>) -> CommandSpec {
         GeminiBackend.build_spec(
             &AgentCommand::Claude {
@@ -188,8 +177,8 @@ mod tests {
         assert_eq!(s.args, vec!["--resume".to_string(), sid.to_string()]);
     }
 
-    /// The canonical account of why the sample is synthetic and its limits is the [`spec`] comment above — this entry alone does not use `spec`
-    /// because it has to pass cwd and env directly.
+    /// Why the sample is synthetic, and its limits: the [`spec`] comment above — this entry alone does not use `spec` because it passes
+    ///   cwd and env directly.
     #[test]
     fn cwd_and_env_are_forwarded() {
         let cwd = PathBuf::from("C:/workspace");

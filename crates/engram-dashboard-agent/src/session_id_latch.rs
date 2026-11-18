@@ -1,35 +1,29 @@
 //! The session id **first-submission latch** — one per incarnation.
 //!
-//! Calls the commit port once at the first moment **both** of two inputs have happened. The order does not matter.
-//! - [`SessionIdLatch::offer`] — this incarnation's session id became known (the backend · path receives it through [`SessionIdLatch::offer_sink`]).
-//! - [`SessionIdLatch::note_submission`] — this incarnation's first user turn is **right before going out** to the peer.
-//!   ★The mode where the path carries the turn (codex JSON) is an exception★: the session does not count it, and the moment the peer **first
-//!   echoes** the user message the path calls it through [`SessionIdLatch::first_turn_sink`] — that mode's commit happens **after**
-//!   the first turn (if it dies after sending and before the echo there is no persistence and the next activation is a new conversation — an accepted outcome).
+//! Calls the commit port once at the first moment **both** inputs have happened (order irrelevant).
+//! - [`SessionIdLatch::offer`] — this incarnation's session id became known (backend · path hand it over via [`SessionIdLatch::offer_sink`]).
+//! - [`SessionIdLatch::note_submission`] — this incarnation's first user turn is **right before going out**.
+//!   ★Exception: the mode where the path carries the turn (codex JSON)★ — the session does not count it; the path calls
+//!   [`SessionIdLatch::first_turn_sink`] when the peer **first echoes** the user message, so that mode commits **after** the first turn (a
+//!   death between send and echo persists nothing and the next activation is a new conversation — accepted).
 //!
-//! If the incarnation ends without a submission, the port is never called — 「a stored id exists ⟺ there is a conversation to resume」
-//! stands here.
+//! If the incarnation ends without a submission the port is never called — 「a stored id exists ⟺ there is a conversation to resume」.
 //!
 //! ## Invariants
-//! - ★The port is called at most once per incarnation. Once the call has started (whether it ends in success · refusal · panic), it is not
-//!   called again★. That is why `committed` is set **before** the port call. The port has no return so the result does not
-//!   come back to the latch, and the same input gives the same answer so there is nothing to retry.
-//! - offer is at most once per incarnation (the contract of the record port [`SessionIdSink`]). A second offer outside the contract is dropped whenever it
-//!   comes — even before commit the first value wins.
-//! - ★The fast-path marker (`settled`) is set **only after** the first commit has **returned** — do not set it as 「a submission happened」★:
-//!   when two submitters are on different threads (mail flush · a connection's user input), the second would slip onto the fast
-//!   path before the first's commit finishes and the first turn would go out before persistence. Every submission before settled takes the mutex and queues
-//!   behind the commit in progress.
-//! - The only external call made while holding the latch mutex is the commit port (logs are also written after releasing). Lock order =
-//!   `latch → the port's expected field → profiles → the store-state field` one-way — a caller that takes the latch calls it holding
-//!   no other lock.
-//! - ★There is no `catch_unwind`★: every place that calls the latch is outside the containment marker (the codex reader's first-turn port
-//!   call turns the marker off), so in the production process a port panic is ended by the hook — it would be code that never gets reached even if we caught it (ADR-0292). If the port panics
-//!   in a test build without the hook, the mutex is poisoned, and the following call takes back the poisoned guard as is
-//!   (`sync::lock`), sees `committed`, and passes — it does not call the port again.
+//! - ★The port is called at most once per incarnation; once started (success · refusal · panic) never again★ — so `committed` is set
+//!   **before** the port call. The port has no return and the same input gives the same answer, so nothing retries.
+//! - offer is at most once per incarnation ([`SessionIdSink`] contract); a second offer is dropped whenever it comes — the first value wins.
+//! - ★`settled` (fast-path marker) is set **only after** the first commit has **returned** — not as 「a submission happened」★: with two
+//!   submitters on different threads (mail flush · a connection's user input) the second would take the fast path before the first commit
+//!   finishes and its turn would go out before persistence. Every submission before settled takes the mutex and queues behind the commit.
+//! - The only external call under the latch mutex is the commit port (logs after release). Lock order = `latch → the port's expected field →
+//!   profiles → store-state field`; a caller taking the latch holds no other lock.
+//! - ★No `catch_unwind`★: every caller is outside the containment marker (the codex reader's first-turn call turns it off), so in
+//!   production the hook ends a port panic and a catch would be unreachable (ADR-0292). Without the hook the mutex is poisoned and the
+//!   next call takes the poisoned guard (`sync::lock`), sees `committed`, and passes without calling the port.
 //!
-//! It knows nothing of backend · transport · profile — uuid resolution and tracking 「the value this incarnation saw at start」 belong inside the commit port
-//! (the assembly point).
+//! It knows nothing of backend · transport · profile — uuid resolution and tracking 「the value this incarnation saw at start」 belong in
+//! the commit port (the assembly point).
 // ADR-0226
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -41,7 +35,6 @@ use crate::backend::{FirstTurnSink, SessionIdSink};
 use crate::types::AgentId;
 
 pub(crate) struct SessionIdLatch {
-    /// For log fields only.
     agent: AgentId,
     /// For log fields only — the incarnation guard is carried by the commit port.
     epoch: u32,
@@ -52,7 +45,6 @@ pub(crate) struct SessionIdLatch {
 
 #[derive(Default)]
 struct LatchState {
-    /// An id that was received but whose commit is held because there is no submission yet.
     pending: Option<String>,
     submitted: bool,
     committed: bool,
@@ -75,17 +67,16 @@ impl SessionIdLatch {
         })
     }
 
-    /// The record port handed to the backend · path — calling it is [`SessionIdLatch::offer`].
     pub(crate) fn offer_sink(self: &Arc<Self>) -> SessionIdSink {
         let latch = Arc::clone(self);
         Arc::new(move |raw: &str| latch.offer(raw))
     }
 
-    /// The first-turn port handed to the path in the mode where the path carries the turn — calling it is [`SessionIdLatch::note_submission`].
+    /// The first-turn port for the mode where the path carries the turn — calling it is [`SessionIdLatch::note_submission`].
     ///
-    /// In that mode the session does not count submissions. Counting at the time of sending a first input that can be withdrawn with ✕ would persist an id with no conversation.
-    ///   The path calls this port at the echo of the peer's first user message.
-    // ADR-0226 · ADR-0231 · ADR-0233: user decision — the id is persisted when it becomes real (the conversation has a turn = the first echo).
+    /// The session does not count submissions there: counting a first input that can still be withdrawn with ✕ would persist an id with no
+    ///   conversation. The path calls this at the echo of the peer's first user message.
+    // ADR-0226 · ADR-0231 · ADR-0233: the id is persisted when it becomes real (the conversation has a turn = the first echo).
     pub(crate) fn first_turn_sink(self: &Arc<Self>) -> FirstTurnSink {
         let latch = Arc::clone(self);
         Arc::new(move || latch.note_submission())
@@ -104,9 +95,8 @@ impl SessionIdLatch {
         };
         drop(state);
         match outcome {
-            // ★Do not delete this line★: after persistence the commit port's reflection log remains, but for a 0-turn incarnation nothing other than this line
-            //   announces 「the id has arrived」 — it is the event that field diagnosis and GUI measurement wait for.
-            //   The id value is not put in.
+            // ★Do not delete this line★: the commit port's reflection log remains after persistence, but for a 0-turn incarnation nothing else
+            //   announces 「the id has arrived」 — field diagnosis and GUI measurement wait on it. The id value is not put in.
             OfferOutcome::Held => tracing::info!(
                 agent = %self.agent,
                 epoch = self.epoch,
@@ -121,10 +111,10 @@ impl SessionIdLatch {
         }
     }
 
-    /// Call it **right before** the first turn goes out. If the id has already been received, it commits on the spot, and returns after commit has returned —
-    /// the caller must send the turn **after** this call returns for 「persist before the first turn」 to hold.
-    /// ★In the mode where the path carries the turn it is called **after** the first echo ([`Self::first_turn_sink`])★ — that mode has
-    ///   no 「persist before the first turn」.
+    /// Call it **right before** the first turn goes out. If the id is already received it commits on the spot and returns after the commit
+    /// returns — the caller must send the turn **after** this returns for 「persist before the first turn」.
+    /// ★The path-carries-the-turn mode calls it **after** the first echo ([`Self::first_turn_sink`])★ and has no 「persist before the first
+    ///   turn」.
     pub(crate) fn note_submission(&self) {
         if self.settled.load(Ordering::Acquire) {
             return;
@@ -160,9 +150,8 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    /// The cap put on every wait of an item that uses threads — ★it prevents hanging, it is not a correctness threshold★. A correct
-    /// latch finishes within milliseconds, so reaching this value happens only in the regression case where it never returns, and then it makes the test
-    /// fail instead of hanging.
+    /// The cap on every wait of a threaded item — ★it prevents hanging, it is not a correctness threshold★. A correct latch finishes
+    /// within milliseconds, so reaching it means the regression where it never returns, and then the test fails instead of hanging.
     const HANG_GUARD: Duration = Duration::from_secs(10);
 
     fn recording_port() -> (SessionIdSink, Arc<Mutex<Vec<String>>>) {
@@ -195,8 +184,8 @@ mod tests {
         assert_eq!(calls.lock().unwrap().as_slice(), ["sid-1"]);
     }
 
-    /// The first-turn port (`first_turn_sink`) is also the same submission input — the mode where the path carries the turn counts only with this (ADR-0226
-    ///   amendment). Even if called many times, commit is once.
+    /// The first-turn port (`first_turn_sink`) is the same submission input — the mode where the path carries the turn counts only with
+    ///   this (ADR-0226 amendment). Called many times, commit is once.
     #[test]
     fn the_first_turn_port_is_the_submission_input_and_commits_once() {
         let (port, calls) = recording_port();
@@ -296,8 +285,8 @@ mod tests {
         assert!(!latch.settled.load(Ordering::Acquire));
     }
 
-    /// ⑩ — the refusal branch of 「the port at most once per incarnation」. Even if the port returns writing nothing, to the latch it is indistinguishable from success
-    ///   (there is no return), and the fast path stands and it is not called again.
+    /// ⑩ — the refusal branch of 「the port at most once per incarnation」. A port that returns writing nothing is indistinguishable from
+    ///   success to the latch (no return): the fast path stands and the port is not called again.
     #[test]
     fn a_commit_that_records_nothing_still_settles_and_is_not_retried() {
         let calls = Arc::new(AtomicUsize::new(0));
@@ -317,9 +306,8 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
-    /// ⑨ — the panic branch of 「the port at most once per incarnation」. ★This is a branch of builds without the hook★ — in the production process the hook ends this
-    ///   panic so this branch itself does not exist (ADR-0292). Even if the mutex is poisoned, the following call does not stall and
-    ///   does not call the port again.
+    /// ⑨ — the panic branch of 「the port at most once per incarnation」. ★Exists only in builds without the hook★ (production ends this
+    ///   panic, ADR-0292). The poisoned mutex does not stall the next call, and the port is not called again.
     #[cfg(panic = "unwind")]
     #[test]
     fn a_commit_that_panics_is_never_called_again() {
@@ -371,8 +359,8 @@ mod tests {
                     done_tx.send(()).expect("test body");
                 })
             };
-            // Rotate the launch order per run — the thread that hit the barrier last tends to run first, so with a fixed
-            //   order the offer always stands at the same spot and rarely takes the 「offer first」 branch (measured).
+            // Rotate the launch order per run — the thread that hit the barrier last tends to run first, so a fixed order would rarely
+            //   take the 「offer first」 branch (measured).
             let mut acts: [fn(&SessionIdLatch); 3] = [
                 |l| l.offer("sid-1"),
                 |l| l.note_submission(),
@@ -396,12 +384,12 @@ mod tests {
         }
     }
 
-    /// ⑦ ★Regression net for the fast-path race★ — while a commit is in progress, another thread's submission must not return **before
-    ///   that commit returns**. If it returns, that thread's turn goes out before persistence.
+    /// ⑦ ★Regression net for the fast-path race★ — while a commit is in progress, another thread's submission must not return **before it
+    ///   returns**, else that turn goes out before persistence.
     ///
-    /// Hold the commit port with a channel. We watch for one span whether the second submitter does not return while held —
-    ///   ★that span is only a window to catch the regression★: a correct latch passes regardless of the span length, and a regression that sets the
-    ///   fast path by the submission marker returns within microseconds and gets caught.
+    /// Holds the commit port with a channel and watches one span that the second submitter does not return — ★the span is only a window to
+    ///   catch the regression★: a correct latch passes at any length, a regression setting the fast path by the submission marker returns
+    ///   within microseconds.
     #[test]
     fn a_submission_racing_an_in_flight_commit_waits_for_it_to_return() {
         let (entered_tx, entered_rx) = mpsc::channel::<()>();

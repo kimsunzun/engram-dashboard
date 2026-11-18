@@ -1,15 +1,14 @@
 //! Actually runs **the allowed type alphabet** of the declaration macro (an unconfirmed item of TRD §2-2 3).
 //!
-//! Covers here even the branches `agent.*` does not use (integers · floats · bool · enum · `Option<Vec<T>>`) — whether real use exceeds the alphabet
-//! cannot be known before declaring, and the moment it does, compilation must stop.
-//! ★The names declared here are not commands but harness fixtures★ (`fixture.*` — plugged into no table).
+//! Covers branches `agent.*` does not use (integers · floats · bool · enum · `Option<Vec<T>>`) — whether real use exceeds the alphabet is
+//! unknowable before declaring, and compilation must stop the moment it does.
+//! ★The names declared here are harness fixtures, not commands★ (`fixture.*` — plugged into no table).
 
 use engram_dashboard_command::declare_commands;
 
 declare_commands! {
     catalog_version: 7;
 
-    /// Nested struct — spread inline into the parent schema.
     struct Sample {
         flag: bool,
         count: u32,
@@ -23,7 +22,6 @@ declare_commands! {
         Slow,
     }
 
-    /// The whole alphabet.
     #[effect(Write)]
     #[since(3)]
     "fixture.alphabet" => args AlphabetArgs {
@@ -47,7 +45,6 @@ declare_commands! {
     #[effect(Write)]
     #[since(1)]
     "fixture.agentRefs" => args AgentRefsArgs {
-        /// The agent to choose — a name or id.
         #[agent_ref]
         target: String,
         label: String,
@@ -77,9 +74,9 @@ fn primitives_map_to_json_types() {
     assert_eq!(props["ratio"]["type"], "number");
 }
 
-/// ★Integer fields advertise their real range★ — without an upper bound, `18446744073709551616` would be allowed by the advertisement but
-/// rejected by deserialization (a lie to callers filling arguments by that value). The 64-bit boundary is rounded by one step in validators reading
-/// double precision, but that is narrower than 「none」.
+/// ★Integer fields advertise their real range★ — without an upper bound, `18446744073709551616` would pass the advertisement but fail
+/// deserialization (a lie to callers filling arguments by it). The 64-bit boundary is rounded by one step in validators reading double
+///   precision, still narrower than 「none」.
 #[test]
 fn integer_fields_advertise_their_range() {
     let schema = args_schema();
@@ -185,7 +182,6 @@ fn marked_fields_become_agent_args_in_declaration_order() {
     );
 }
 
-/// The marker is only a signal to the daemon — the advertised schema · Rust type · wire shape are the same as an unmarked field.
 #[test]
 fn the_mark_leaves_the_schema_and_the_type_alone() {
     let schema: serde_json::Value =

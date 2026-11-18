@@ -1,7 +1,7 @@
-//! ② Isolation integration test — asserts and verifies the whole AgentManager flow with a real shell spawn.
+//! ② Isolation integration test — asserts the whole AgentManager flow with a real shell spawn.
 //!
-//! Spawns a real OS process (default shell). It is a light single spawn without named-mutex/global contention,
-//! so it is left as default (runs automatically) — caught by `cargo test -p engram-dashboard-agent`.
+//! A real OS process (default shell), light single spawn without named-mutex/global contention, so it runs by default under `cargo test -p
+//!   engram-dashboard-agent`.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -57,7 +57,6 @@ impl RecordingSink {
 
 impl OutputSink for RecordingSink {
     fn send(&self, frame: OutputFrame<'_>) -> Result<(), SinkError> {
-        // S15 B5 payload-generic: collects only console bytes (this headless test does not deal with structured events).
         if let OutputPayload::Bytes(b) = frame.payload {
             self.output.lock().unwrap().extend_from_slice(b);
         }
@@ -79,7 +78,7 @@ impl StatusSink for RecordingSink {
 
 // ── FIX 6: control channel provision race guard — concurrent spawns of the same id do not trample each other ──────────
 //
-// Verifies in isolation only the agent's reservation (SpawnReservation) causality without a real DaemonControlChannel (ADR-0012 seam).
+// Verifies the agent's reservation (SpawnReservation) causality in isolation, without a real DaemonControlChannel (ADR-0012 seam).
 #[derive(Clone, Default)]
 struct CountingControl {
     live: Arc<Mutex<std::collections::HashSet<(AgentId, u32)>>>,
@@ -110,11 +109,11 @@ impl ControlChannel for CountingControl {
             config_path: None,
             send_exe: None,
             priming_file: None,
-            // ADR-0094: this test does not verify grant translation, so an empty list.
+            // ADR-0094
             grants: vec![],
-            // S18 D: the settings fragment is not this test's concern either (spawn causality isolation, not spec assembly).
             settings_file: None,
-            // ADR-0133: computing mail authorization is out of concern too — it only imitates the daemon's computation rule (the ingredients are two).
+            // ADR-0133: computing mail authorization is out of concern too — it only imitates the daemon's computation rule (the
+            //   ingredients are two).
             mail_allowed: needs.uses_mail && !needs.accepts_mcp_config,
         }))
     }
@@ -131,8 +130,8 @@ impl CountingControl {
 
 #[test]
 fn concurrent_same_id_spawn_does_not_clobber() {
-    // What is verified here is the exactly-one-wins causality of SpawnReservation itself — the provision race of control-channel-consuming
-    //   backends is not covered by this test, and the same guard covers it identically.
+    // Verified here = the exactly-one-wins causality of SpawnReservation itself; the provision race of control-channel-consuming backends
+    //   is not covered here (the same guard covers it).
     let control = CountingControl::default();
     let control_dyn: Arc<dyn ControlChannel> = Arc::new(control.clone());
     let status_dyn: Arc<dyn StatusSink> = Arc::new(RecordingSink::new());
@@ -159,7 +158,8 @@ fn concurrent_same_id_spawn_does_not_clobber() {
         control_dyn,
     ));
 
-    // A long-lived shell profile (same id) — so it can be observed before a spawn that succeeded exits immediately and the reaper erases the token.
+    // A long-lived shell profile (same id) — so it can be observed before a spawn that succeeded exits immediately and the reaper erases
+    //   the token.
     let profile = AgentProfile::new(
         "race".into(),
         AgentCommand::Shell {
@@ -182,9 +182,8 @@ fn concurrent_same_id_spawn_does_not_clobber() {
             let ok_count = ok_count.clone();
             s.spawn(move || {
                 barrier.wait();
-                // ★The axis counted is 「did it launch」 — not 「was it not an error」★: duplicate requests are now not errors but
-                //   outcomes (moot), so everyone gets Ok (ADR-0172). The side that made the incarnation is still only one, and
-                //   counting it is what this guard verifies.
+                // ★The counted axis is 「did it launch」, not 「was it not an error」★: duplicate requests are outcomes (moot), not errors, so
+                //   everyone gets Ok (ADR-0172). Only one side made the incarnation — counting it is what this guard verifies.
                 if manager
                     .spawn_agent(&profile, SpawnMode::Fresh)
                     .expect("a duplicate request is not an error")
@@ -223,9 +222,9 @@ fn concurrent_same_id_spawn_does_not_clobber() {
 }
 
 // ── round-2 F3: backend-conditional provisioning (agent seam) ──────────────────────────────
-// A backend that does not consume the control channel (shell) **does not call provision at all** — so even with a ControlChannel
-// that always fails injected, a shell spawn succeeds. Conversely a consuming backend (claude) fails closed (aborts the spawn) on a provision Err.
-// The two causalities are verified in isolation at the agent level (seam — no real DaemonControlChannel needed).
+// A backend that does not consume the control channel (shell) **never calls provision**, so a shell spawn succeeds even with an
+// always-failing ControlChannel. A consuming backend (claude) fails closed (aborts the spawn) on a provision Err. Both causalities are
+//   verified at the agent level (seam).
 #[derive(Clone, Default)]
 struct FailingControl {
     calls: Arc<std::sync::atomic::AtomicUsize>,
@@ -342,7 +341,6 @@ fn manager_spawn_write_resize_kill() {
     let status_sink = RecordingSink::new();
     let status_dyn: Arc<dyn StatusSink> = Arc::new(status_sink.clone());
 
-    // Session tracking disabled — it is shell, so there is no session file.
     let store = Arc::new(FileProfileStore::new(
         std::env::temp_dir().join(format!("engram-test-headless-{}", Uuid::new_v4())),
     ));

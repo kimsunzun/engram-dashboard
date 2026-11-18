@@ -1,20 +1,18 @@
 //! Integration test of canonical name **wiring** (ADR-0101 WYSIWYA — regression net of the production path).
 //!
-//! ★Why this file is separate (mutation probe D9-b)★: the derivation tests of `src/name.rs` call the helpers
-//!   **directly** — so they are all green even if production code **stops using** those helpers. In fact,
-//!   putting the following three mutations into `manager::resolve_canonical_name` still passed all existing agent and daemon suites:
+//! ★Why a separate file (mutation probe D9-b)★: `src/name.rs`'s derivation tests call the helpers **directly**, so they stay green even if
+//!   production **stops using** them. These three mutations in `manager::resolve_canonical_name` still passed every existing agent and
+//!   daemon suite:
 //!   ① `profile.cwd` instead of `session.cwd` ② `resolve_display_name` instead of the guarded `canonical_name_or_id_fallback`
-//!   ③ skipping the derivation and returning the stored `AgentProfile.name` field. ③ is the very bug ADR-0101 fixed
-//!   (using the stored name = often the full cwd string as the routing address → tree display ≠ routing address).
+//!   ③ skipping derivation and returning the stored `AgentProfile.name`. ③ is the very bug ADR-0101 fixed (stored name = often the full
+//!   cwd string as the routing address → tree display ≠ routing address).
 //!
-//! ★So the helpers are not called here★: a real session is spawned and only **the manager's public projections**
-//!   (the `AgentInfo.name` returned by `spawn_agent` · `list_agents()` · `canonical_name(id)`) are looked at. The cases are split so that the three mutations
-//!   are each caught in a different case.
+//! ★So the helpers are not called here★: a real session is spawned and only **the manager's public projections** (`AgentInfo.name` from
+//!   `spawn_agent` · `list_agents()` · `canonical_name(id)`) are looked at; cases are split so each mutation is caught by a different case.
 //!
-//! ★Relation to the asleep parking key (ADR-0116 decision 1)★: the name of an asleep profile is
-//!   derived by `AgentProfile::canonical_name_when_live()`, and that value **must equal the live name asserted here**
-//!   (if different, the parking key and the name after restore diverge and mail silently expires after the 24h TTL). So each case
-//!   also pins that the two derivations give **the same string** — if only one side changes, it breaks here.
+//! ★Relation to the asleep parking key (ADR-0116 decision 1)★: an asleep profile's name is derived by
+//!   `AgentProfile::canonical_name_when_live()` and **must equal the live name asserted here** (else the parking key and the post-restore
+//!   name diverge and mail silently expires after the 24h TTL). Each case also pins that the two derivations give **the same string**.
 //!
 //! Windows only — spawns cmd.exe.
 // ADR-0101 / ADR-0116
@@ -58,8 +56,8 @@ fn make_manager(tag: &str) -> AgentManager {
     AgentManager::new(sink, profiles, presets, tracker)
 }
 
-/// A harmless child that does not die immediately when spawned (interactive cmd.exe — shows a prompt under the PTY and waits).
-/// Name derivation is unrelated to process behavior, so only "a live session exists" is needed.
+/// A harmless child that does not die at once (interactive cmd.exe — a prompt under the PTY). Name derivation ignores process behavior;
+///   only "a live session exists" is needed.
 fn idle_shell(name: &str, cwd: PathBuf) -> AgentProfile {
     AgentProfile::new(
         name.to_string(),
@@ -73,7 +71,6 @@ fn idle_shell(name: &str, cwd: PathBuf) -> AgentProfile {
     )
 }
 
-/// Looking at only one would not catch another path diverging — so all three are looked at.
 fn projected_name(manager: &AgentManager, spawned: &AgentInfo) -> String {
     let listed = manager
         .list_agents()
@@ -94,8 +91,8 @@ fn projected_name(manager: &AgentManager, spawned: &AgentInfo) -> String {
 
 #[test]
 fn the_stored_profile_name_field_is_never_used_as_the_routing_address() {
-    // ★Regression net of the bug ADR-0101 fixed (mutation ③)★: `AgentProfile.name` is the original string received at CreateProfile,
-    //   so it is **often a path**. Using it as the name splits the tree display name (basename) from the routing address.
+    // ★Regression net of the bug ADR-0101 fixed (mutation ③)★: `AgentProfile.name` is the original string from CreateProfile, so it is
+    //   **often a path**; using it splits the tree display name (basename) from the routing address.
     let manager = make_manager("namefield");
     let cwd = std::env::temp_dir();
     let raw_name = "C:\\some\\raw\\name-field-must-not-be-the-address";
@@ -124,10 +121,9 @@ fn the_stored_profile_name_field_is_never_used_as_the_routing_address() {
 
 #[test]
 fn a_relative_cwd_derives_the_name_from_the_canonicalized_session_cwd() {
-    // ★Catching mutation ① (session.cwd → profile.cwd)★: the profile can hold a raw path (`"."`·`".."`·
-    //   symlinks · Windows paths with different case), and spawn canonicalizes it and uses it as session.cwd. The frontend tree
-    //   draws `basename(AgentInfo.cwd)` = basename(session.cwd), so deriving from profile.cwd would split the tree
-    //   display (`engram-dashboard-agent`) from the routing address (`"."`).
+    // ★Catching mutation ① (session.cwd → profile.cwd)★: the profile can hold a raw path (`"."`·`".."`· symlinks · differently-cased
+    //   Windows paths) that spawn canonicalizes into session.cwd. The tree draws `basename(AgentInfo.cwd)` = basename(session.cwd), so
+    //   deriving from profile.cwd would split the tree display (`engram-dashboard-agent`) from the routing address (`"."`).
     let manager = make_manager("relcwd");
     let profile = idle_shell("rel", PathBuf::from("."));
 
@@ -162,9 +158,9 @@ fn a_relative_cwd_derives_the_name_from_the_canonicalized_session_cwd() {
 
 #[test]
 fn a_blank_display_name_override_is_ignored_by_the_production_path() {
-    // ★Catching mutation ② (canonical_name_or_id_fallback → resolve_display_name)★: the latter uses an empty/whitespace-only
-    //   override **as the name as is** — if the address becomes a whitespace string, pointing becomes impossible and an empty entry is
-    //   drawn in the tree. The production path must use the helper with that guard.
+    // ★Catching mutation ② (canonical_name_or_id_fallback → resolve_display_name)★: the latter uses an empty/whitespace-only override **as
+    //   the name as is** — a whitespace address cannot be pointed at and draws an empty tree entry. The production path must use the
+    //   guarded helper.
     let manager = make_manager("blankoverride");
     let cwd = std::env::temp_dir();
     let mut profile = idle_shell("blank", cwd.clone());

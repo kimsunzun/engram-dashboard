@@ -1,8 +1,7 @@
 //! ShellBackend — produces the CommandSpec for arbitrary shell programs only.
 //!
-//! ★The rule this folder sets = shell knowledge lives only in here (ADR-0004)★. The canonical grounds, gates and what the gates
-//! cannot see are in the `backend/claude/mod.rs` header and are not repeated here — read it with the names swapped.
-//! The only surface going out is the one [`crate::backend::AgentBackend`] implementation.
+//! ★The rule this folder sets = shell knowledge lives only here (ADR-0004)★. Grounds, gates and what the gates cannot see: the
+//! `backend/claude/mod.rs` header (read it with names swapped). The only surface out is the one [`crate::backend::AgentBackend`] implementation.
 //!
 //! tauri import 0.
 
@@ -31,15 +30,14 @@ impl AgentBackend for ShellBackend {
     }
 
     fn accepts_mcp_config(&self) -> bool {
-        // provision is never called in the first place (false above), so this value is not actually consumed, but for contract completeness
-        //   it is honestly false.
+        // provision is never called (false above), so this value is not consumed; honestly false for contract completeness.
         // ADR-0099
         false
     }
 
-    /// ★A shell is not a reader of mail (user decision 2026-08-17)★ — an envelope that arrives at a shell is not read but
-    /// **executed as a command**. The body is LLM free text, so if `&`·`|`·`;` are mixed in, what follows is parsed as a separate
-    /// command. So it is left out of the recipient list (including `@all`) entirely — not a mitigation such as dropping the submit bytes.
+    /// ★A shell is not a reader of mail (user decision 2026-08-17)★ — an envelope reaching a shell is **executed as a command**, not read.
+    /// The body is LLM free text, so `&`·`|`·`;` would make what follows a separate command. So it is left out of the recipient list
+    ///   (including `@all`) entirely — not a mitigation such as dropping submit bytes.
     fn reads_messages(&self) -> bool {
         false
     }
@@ -67,8 +65,8 @@ impl AgentBackend for ShellBackend {
         }
     }
 
-    /// A general-purpose shell has no session-resume concept like `--resume` → resume=false. Previously the transport hardcoded resume=true
-    /// regardless of backend, so it was inaccurate for shell. cwd_env=true — a shell also runs in the cwd.
+    /// A general-purpose shell has no session-resume concept like `--resume` → resume=false (the transport once hardcoded true for every
+    /// backend, wrong for shell). cwd_env=true — a shell also runs in the cwd.
     fn capabilities(&self, _command: &AgentCommand) -> BackendCaps {
         BackendCaps {
             session: SessionCaps {

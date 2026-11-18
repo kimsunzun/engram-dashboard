@@ -1,31 +1,28 @@
 //! ★Canonical display name derivation (ADR-0101 WYSIWYA)★ — derives the last path segment (basename) of the cwd.
 //!
-//! ★Single source (backend)★: this is a Rust port of the frontend `src/util/basename.ts` with **exactly the same rules**.
-//!   The invariant "the visible name = the name used as the address" (WYSIWYA) holds only if the backend (routing · roster · envelope sender) and the frontend (tree · popup display)
-//!   derive the same string. If each copies it, the win/posix · root/drive-root/UNC edges
-//!   diverge, and a mismatch arises where the tree shows "engram" but routing expects a different string —
-//!   so the rule is pinned in one place and matched 1:1 with the frontend rule (sealed by the corresponding tests).
+//! ★Single source (backend)★: a Rust port of the frontend `src/util/basename.ts` with **exactly the same rules**. "The visible name = the
+//!   name used as the address" (WYSIWYA) holds only if backend (routing · roster · envelope sender) and frontend (tree · popup) derive the
+//!   same string; separate copies would diverge at win/posix · root/drive-root/UNC edges (tree shows "engram", routing expects another
+//!   string). Pinned in one place, matched 1:1 with the frontend rule (sealed by the corresponding tests).
 //!
-//! The edge behaviors below mirror `basename.ts` verbatim — if the frontend rule changes, change this side together.
+//! The edge behaviors below mirror `basename.ts` verbatim — if the frontend rule changes, change this side too.
 
-/// A stable placeholder for when the cwd is empty or has no segment to derive (prevents a blank label). Production callers go
-/// through [`canonical_name_or_id_fallback`], which turns it into the id prefix, so it never becomes a name. Not coupled to the
-/// frontend at run time — the frontend's blank-path label is the UI-language key `common.noPath`.
+/// A stable placeholder for an empty cwd or one with no derivable segment (prevents a blank label). Production callers go through
+/// [`canonical_name_or_id_fallback`], which turns it into the id prefix, so it never becomes a name. Not coupled to the frontend at run time
+/// (its blank-path label is the UI-language key `common.noPath`).
 pub const PATH_NAME_PLACEHOLDER: &str = "(no path)";
 
-/// ★The return value is never blank (empty / whitespace-only)★: the upper layer (display name) draws from this one value alone, so if it is blank
-///   it shows as an empty area. When there is neither a basename to derive nor a raw cwd, it degrades to the placeholder.
+/// ★The return value is never blank (empty / whitespace-only)★: the display name draws from this value alone, so blank would show an empty
+///   area. With neither a derivable basename nor a raw cwd, it degrades to the placeholder.
 ///
-/// Edge cases (when the basename is absent or misleading) are not derived and degrade to the raw cwd (same as the frontend):
+/// Edge cases (basename absent or misleading) degrade to the raw cwd, as in the frontend:
 ///   - empty/whitespace-only string → `PATH_NAME_PLACEHOLDER`
 ///   - drive-root `C:\` / `C:/` / `C:` → keep the original (collapsing to "C:" would mislead)
-///   - posix root `/` · UNC `\\server\share`, where after stripping the trailing separator there is no segment or it equals the original
-///     → return the raw cwd (prevents collapse into a wrong segment).
+///   - posix root `/` · UNC `\\server\share`, where stripping the trailing separator leaves no segment or the original → the raw cwd.
 pub fn cwd_basename(cwd: &str) -> String {
-    // ★Slight whitespace-set difference from JS trim (an accepted divergence)★: the whitespace recognized by Rust str::trim(White_Space) and
-    //   JS String.trim differs a little at U+FEFF · U+0085 and so on — a cwd made only of such exotic whitespace may fall to the placeholder on one side only and
-    //   diverge. But a real filesystem cwd is never such a string, so we do not chase a complete match of the JS
-    //   whitespace set (no effect on real paths).
+    // ★Slight whitespace-set difference from JS trim (accepted divergence)★: Rust str::trim(White_Space) and JS String.trim differ at
+    //   U+FEFF · U+0085 etc.; a cwd of only such whitespace may hit the placeholder on one side only. A real filesystem cwd is never such
+    //   a string, so no full match is chased.
     if cwd.trim().is_empty() {
         return PATH_NAME_PLACEHOLDER.to_string();
     }
@@ -34,10 +31,10 @@ pub fn cwd_basename(cwd: &str) -> String {
     if trimmed.is_empty() {
         return cwd.to_string();
     }
-    // The position of the last separator (the larger index of the two). Equivalent to the frontend `Math.max(lastIndexOf('/'), lastIndexOf('\\'))`.
+    // The position of the last separator (the larger index of the two). Equivalent to the frontend `Math.max(lastIndexOf('/'),
+    //   lastIndexOf('\\'))`.
     let idx = trimmed.rfind(['/', '\\']).map(|i| i as isize).unwrap_or(-1);
     let base = if idx >= 0 {
-        // idx is a valid byte boundary (separator = 1 ASCII byte), so slicing is safe.
         &trimmed[(idx as usize) + 1..]
     } else {
         trimmed
@@ -48,10 +45,9 @@ pub fn cwd_basename(cwd: &str) -> String {
     base.to_string()
 }
 
-/// ★Canonical display name derivation for an agent with a profile (ADR-0101)★ — if display_name (override) exists, it as is,
-///   otherwise the cwd basename. It is the **pure core of the chain shared by manager (agent_info) and daemon (sender_display_name)**.
-///   The id-prefix fallback for a missing profile (ad-hoc) is attached by each caller (so as not to pass the id here —
-///   this function stays a pure derivation in 1:1 correspondence with the frontend tree rule `display_name ?? basename(cwd)`).
+/// ★Canonical display name for an agent with a profile (ADR-0101)★ — display_name (override) as is if present, otherwise the cwd basename.
+///   The **pure core of the chain shared by manager (agent_info) and daemon (sender_display_name)**, 1:1 with the frontend tree rule
+///   `display_name ?? basename(cwd)`; the id-prefix fallback for a missing profile (ad-hoc) is attached by each caller.
 pub fn resolve_display_name(display_name: Option<&str>, cwd: &str) -> String {
     match display_name {
         Some(n) => n.to_string(),
@@ -59,12 +55,11 @@ pub fn resolve_display_name(display_name: Option<&str>, cwd: &str) -> String {
     }
 }
 
-/// ★Canonical name derivation when the profile is missing (ad-hoc / DeleteProfile on a live session) (ADR-0101)★ —
-///   derive from the session cwd basename without an override, and degrade to the first 8 chars of the id only when the cwd yields a placeholder/empty value.
-///   A shared core so manager and reaper use the **same fallback** (no logic duplication):
-///   the frontend tree draws even a live session whose profile vanished by basename(AgentInfo.cwd), so if the backend falls straight to
-///   the id-prefix, tree ≠ routing arises. That is why the cwd basename is tried first.
-///   A whitespace-only display_name is treated as no override.
+/// ★Canonical name when the profile is missing (ad-hoc / DeleteProfile on a live session) (ADR-0101)★ — the session cwd basename without
+///   an override, degrading to the first 8 chars of the id only when the cwd yields a placeholder/empty value. A shared core so manager
+///   and reaper use the **same fallback**. The cwd basename is tried first because the frontend tree draws even a profile-less live
+///   session by basename(AgentInfo.cwd) — falling straight to the id-prefix would make tree ≠ routing. A whitespace-only display_name
+///   counts as no override.
 pub fn canonical_name_or_id_fallback(
     display_name: Option<&str>,
     cwd: &str,
@@ -84,7 +79,6 @@ pub fn canonical_name_or_id_fallback(
     base
 }
 
-/// Is it a lone [letter]+colon like `C:`. Equivalent to the frontend regex `/^[A-Za-z]:$/`.
 fn is_drive_root(s: &str) -> bool {
     let bytes = s.as_bytes();
     bytes.len() == 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
@@ -94,8 +88,7 @@ fn is_drive_root(s: &str) -> bool {
 mod tests {
     use super::*;
 
-    // The cases below correspond 1:1 to the frontend `src/util/basename.test.ts` (WYSIWYA seal — if one side changes,
-    //   the corresponding case breaks and immediately shows that the two rules diverged).
+    // The cases below correspond 1:1 to the frontend `src/util/basename.test.ts` (WYSIWYA seal — a one-sided change breaks the matching case).
 
     #[test]
     fn posix_path_basename() {
@@ -143,7 +136,6 @@ mod tests {
 
     #[test]
     fn resolve_prefers_display_name_override() {
-        // Tree rename scenario.
         assert_eq!(
             resolve_display_name(Some("ABC"), "C:\\work\\Filter Library"),
             "ABC"
@@ -152,7 +144,6 @@ mod tests {
 
     #[test]
     fn resolve_falls_back_to_cwd_basename_when_no_override() {
-        // It is the cwd basename, not profile.name.
         assert_eq!(resolve_display_name(None, "C:\\work\\engram"), "engram");
         assert_eq!(resolve_display_name(None, "/home/me/project"), "project");
     }
@@ -175,8 +166,8 @@ mod tests {
 
     #[test]
     fn fallback_uses_session_cwd_basename_when_no_override() {
-        // ★Even with the profile missing, the tree draws basename(cwd), so it does not fall straight to the id-prefix★
-        //   — on a live session where only the profile vanished through DeleteProfile, tree == routing is kept.
+        // ★Even with the profile missing, the tree draws basename(cwd), so it does not fall straight to the id-prefix★ — tree == routing is kept
+        //   on a live session whose profile vanished through DeleteProfile.
         let id = uuid::Uuid::new_v4();
         assert_eq!(
             canonical_name_or_id_fallback(None, "C:\\work\\engram", id),

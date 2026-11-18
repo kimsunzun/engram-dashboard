@@ -1,14 +1,13 @@
 //! ④ A regression net at the **physical boundary** of the delivery verb (`AgentSession::submit_input_observed`).
 //!
-//! The two items in this file each measure one of the two contracts that introducing the queue broke. ★Both go through a **real OS pipe**, not a seam
-//! ★ — because what we want to measure is not "what was called" but **what the receiver read, and when**.
+//! The two items here each measure one contract the queue broke. ★Both go through a **real OS pipe**, not a seam★ — what we measure is not
+//! "what was called" but **what the receiver read, and when**.
 //!
-//! ★Why a seam cannot measure it (the place the existing item missed)★: the existing pacing regression item in `session.rs` records only
-//!   **whether** the injected sleeper was called. The defect after the queue appeared is not "it did not wait" but "it measured the wait **from the wrong
-//!   moment**", so an oracle that looks only at the call record lets that defect pass as is. Only by looking at the real read boundary
-//!   can they be told apart.
+//! ★Why a seam cannot measure it★: the `session.rs` pacing item records only **whether** the injected sleeper was called. The post-queue
+//!   defect is "the wait was measured **from the wrong moment**", which a call-record oracle lets pass; only the real read boundary tells
+//!   them apart.
 //!
-//! ★Windows only★: the child is powershell, so it compiles and runs only on Windows (a project premise).
+//! ★Windows only★: the child is powershell (a project premise).
 // ADR-0088 · ADR-0038
 #![cfg(windows)]
 
@@ -70,10 +69,9 @@ impl StatusSink for NoopStatusSink {
     fn agent_list_updated(&self, _a: Vec<AgentInfo>) {}
 }
 
-/// Stands up `AgentSession` on a real pipe child. ★encoder = `Raw`★ — so that `submit_sequence()` is
-/// `Some(b"\r")` and the **body/submit two-write** path this file measures actually runs.
-/// ★Leave pacing · sleeper at the production defaults★ (do not shorten with `with_submit_pacing`) — what we measure is
-/// the physical interval that wait creates.
+/// Stands up `AgentSession` on a real pipe child. ★encoder = `Raw`★ so `submit_sequence()` is `Some(b"\r")` and the **body/submit
+///   two-write** path runs.
+/// ★Pacing · sleeper stay at production defaults★ (no `with_submit_pacing`) — we measure the physical interval that wait creates.
 fn session_over(script: &str) -> (AgentSession, TextSink) {
     let spec = CommandSpec {
         program: "powershell.exe".into(),
@@ -120,26 +118,23 @@ fn session_over(script: &str) -> (AgentSession, TextSink) {
 // FINDING 2 — the submit interval must be measured from **after the body has actually gone out**
 // ═══════════════════════════════════════════════════════════════════════════════════════════
 
-/// ★Proves★: the submit byte (CR) arrives at the receiver with **its own read** — that is, it is not bundled into one chunk with the tail of the body. That is
-///   the very property `backend::SUBMIT_PACING` is meant to keep by measurement (without the interval the
-///   claude TUI reads CR as part of the pasted text and **does not start the turn** — ADR-0038).
+/// ★Proves★: the submit byte (CR) arrives with **its own read** — not bundled with the body's tail. That is the property
+///   `backend::SUBMIT_PACING` exists to keep (without the interval the claude TUI reads CR as pasted text and **does not start the turn**
+///   — ADR-0038).
 ///
-/// ★Oracle★: per `Read()` the child echoes one line `READ <byte count> <last byte>`. If the last line is
-///   `READ 1 13`, the CR was read alone. If any line has last byte 13 but length not 1, it was read
-///   together with the body, and = this defect.
+/// ★Oracle★: per `Read()` the child echoes `READ <byte count> <last byte>`. A last line `READ 1 13` = CR read alone; last byte 13 with
+///   length ≠ 1 = read together with the body = this defect.
 ///
-/// ★Why this item **actually fails on the pre-fix code**★: before the fix, the wait was measured from the **time it was put in the queue**.
-///   If draining the body takes longer than the wait (the child below is built that way), the body is still
-///   going out even after 500ms, so the writer writes the CR right after finishing the body → the CR rides in the same read as the tail of the body.
-///   After the fix, it first confirms the body's OS landing and then sleeps 500ms, so the pipe is empty and the CR stands alone.
+/// ★Fails on the pre-fix code★: the wait was measured from **queue time**; if draining the body outlasts the wait (this child is built
+///   so), the writer writes the CR right after the body and it rides in the same read as the tail. After the fix it confirms the body's OS
+///   landing first, then sleeps 500ms, so the pipe is empty and the CR stands alone.
 ///
-/// ★★This child shows that the reviewer's counterexample was right — the excuse 「the child does not read stdin, so it would not work anyway」
-///   does not hold★★: the child below **reads normally without rest.** Even so, the body is far larger than the pipe
-///   buffer, so draining takes several cycles, and the interval collapses to 0 in between.
+/// ★「The child does not read stdin anyway」 is no excuse★: this child **reads normally without rest**, yet the body far exceeds the pipe
+///   buffer, so draining takes several cycles and the interval collapses to 0 between them.
 #[test]
 fn submit_byte_lands_in_its_own_read_even_when_the_body_takes_many_write_cycles() {
-    // Reads 8KiB at a time, reports each read, then rests briefly — a "normal but slow receiver". Draining the body (512KiB+ below)
-    //   takes roughly 64 cycles, so it takes longer than SUBMIT_PACING (500ms).
+    // Reads 8KiB at a time, reports each read, then rests briefly — a "normal but slow receiver". Draining the body (512KiB+ below) takes
+    //   ~64 cycles, longer than SUBMIT_PACING (500ms).
     let script = "\
 $stdin=[Console]::OpenStandardInput();\
 $out=New-Object System.IO.StreamWriter([Console]::OpenStandardOutput());\
@@ -151,7 +146,7 @@ Start-Sleep -Milliseconds 10}";
     let (session, sink) = session_over(script);
 
     // ★Avoid multiples of 8192★: if it divides exactly, the body's last read ends exactly at the boundary and the CR may **by chance**
-    //   ride alone — then it passes even with the defect (the oracle goes blind).
+    //   ride alone — passing even with the defect (the oracle goes blind).
     const BODY: usize = 512 * 1024 + 777;
     let body = vec![b'x'; BODY];
 
@@ -208,7 +203,6 @@ Start-Sleep -Milliseconds 10}";
     session.kill(Duration::from_secs(5));
 }
 
-/// Only the last few lines, so a failure message does not cover the screen.
 fn tail(text: &str) -> String {
     let lines: Vec<&str> = text.lines().collect();
     let start = lines.len().saturating_sub(6);
@@ -221,17 +215,14 @@ fn tail(text: &str) -> String {
 
 /// ★Proves★: `submit_input_observed` does not emit `Ok` when the body actually could not go out.
 ///
-/// ★Why this was CRITICAL★: this verb's `Ok` becomes the delivery receipt as is (`InjectReceipt` →
-///   `DeliveryObservation`), and the ledger records it as "delivery succeeded". Reporting acceptance as landing makes
-///   the two cases ADR-0088 exists to tell apart **exactly flip** — the transmission actually failed, but the ledger
-///   says "delivered and the model ignored it". "The next call gives `Err`" cannot fix a record already written.
+/// ★Why CRITICAL★: this verb's `Ok` becomes the delivery receipt as is (`InjectReceipt` → `DeliveryObservation`) and the ledger records
+///   "delivery succeeded". Reporting acceptance as landing **flips** the two cases ADR-0088 exists to tell apart (transmission failed,
+///   ledger says "delivered and the model ignored it"), and a later `Err` cannot fix a written record.
 ///
-/// ★Why this item **actually fails on the pre-fix code**★: before the fix `submit_input_observed` returned `Ok(WriteOutcome)` as soon as the queue
-///   accepted. The child below dies after reading a little, so the writer's write fails and
-///   most of the body never goes out, yet a receipt was issued.
+/// ★Fails on the pre-fix code★: it returned `Ok(WriteOutcome)` as soon as the queue accepted; this child dies after reading a little, so
+///   the write fails and most of the body never goes out, yet a receipt was issued.
 ///
-/// ★Put a control group alongside★: for a healthy receiver it must still be `Ok` — without it, an implementation that passes by "failing everything"
-///   would satisfy this item.
+/// ★Control group alongside★: a healthy receiver must still be `Ok`, else an implementation that "fails everything" would pass.
 #[test]
 fn receipt_is_refused_when_the_body_never_reaches_the_child() {
     // Control group first — delivery holds for a child that keeps reading.

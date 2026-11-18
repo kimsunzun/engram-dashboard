@@ -1,8 +1,8 @@
 //! Presets — the single source of truth for the pre-spawn "cwd bookmark" list. (ADR-0061)
 //!
-//! Preset = the set of registered paths shown in the background right-click "create agent" picker. It **means something different** from a profile
-//! (agents.json — a spawned/reserved agent instance holding sid, epoch and restart policy): a preset is
-//! a path bookmark, not an instance, so it is split into a separate store (presets.json) (the alternative ADR-0061 rejected).
+//! Preset = a registered path shown in the background right-click "create agent" picker. It **means something different** from a profile
+//! (agents.json — a spawned/reserved agent instance holding sid, epoch and restart policy): a path bookmark, not an instance, hence a
+//!   separate store (presets.json) (the alternative ADR-0061 rejected).
 //!
 //! model/icon/inject fields are added when a real need appears (their absence now is intended).
 //!
@@ -21,10 +21,9 @@ pub type PresetId = Uuid;
 
 // ── Persistent presets ───────────────────────────────────────────────────────────────
 
-/// One preset — the unit stored in `presets.json`. (ADR-0061)
+/// One preset — the unit stored in `presets.json` (ADR-0061).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Preset {
-    /// Immutable key (the frontend mirror's update key).
     pub id: PresetId,
     /// Registered working directory (normalized). Without a name override, the name is derived from this path's basename (ADR-0061).
     pub cwd: PathBuf,
@@ -36,12 +35,11 @@ pub struct Preset {
 
 // ── Persistence abstraction ────────────────────────────────────────────────────────
 
-/// Preset persistence abstraction — implemented by the persistence module (mirror of FileProfileStore/ProfileStore).
-/// Trait injection lets headless tests plug in an in-memory store.
+/// Preset persistence abstraction — implemented by the persistence module (mirror of FileProfileStore/ProfileStore). Trait injection lets
+///   headless tests plug in an in-memory store.
 pub trait PresetStore: Send + Sync + 'static {
     /// Saves the whole snapshot atomically. The implementation logs the failure — the caller only branches the flow on `Err`.
     fn save(&self, presets: &[Preset]) -> Result<(), StoreError>;
-    /// Loaded once at boot. Empty list if missing, damaged or refused.
     fn load(&self) -> Vec<Preset>;
     /// Default = always usable (a store that never refuses).
     fn status(&self) -> StoreStatus {
@@ -51,24 +49,21 @@ pub trait PresetStore: Send + Sync + 'static {
 
 // ── PresetRegistry ─────────────────────────────────────────────────────────────
 
-/// The in-memory **single owner** of presets (mirror of ProfileRegistry). Every CRUD goes through here and
-/// is persisted to the store immediately on change.
+/// The in-memory **single owner** of presets (mirror of ProfileRegistry). Every CRUD goes through here and is persisted to the store
+///   immediately on change.
 ///
-/// Lock discipline (same as ProfileRegistry): disk IO (`store.save`) happens **while holding** the presets lock.
-/// ★Reason for the change (§5 concurrency consistency > lock-hold time)★: the old design only took a snapshot inside the lock and saved
-/// after releasing the lock. Then when two mutations overlapped, in the order "A snapshot → unlock → B snapshot → unlock → B save → A save"
-/// the in-memory state and broadcast were the latest (B) while the disk stayed stale (A), and the old value was loaded on restart
-/// (a persisted ≠ observed data consistency defect). Under §5, when an LLM/orchestrator calls rename/create/delete
-/// **programmatically, concurrently and in succession**, it actually hits this window that a human cannot open. So mutate+save are
-/// bound into one critical section, so that the last committed in-memory state is exactly the disk state.
-/// **No deadlock (unrelated to ADR-0006):** `store.save` takes only the store-state field (a leaf lock — it does no IO while held) and
-/// does not re-enter the registry → the lock order is `presets → store-state field` one-way, no cycle. The presets lock is also
-/// separate from the session (sessions/core/status) lock domain, so it does not tangle with the ADR-0006 order. The size of IO while holding the lock is
-/// the same as ProfileRegistry (re-decision right before saving · worst case = retrying while that file is locked — ADR-0291 · D4).
+/// Lock discipline (same as ProfileRegistry): disk IO (`store.save`) happens **while holding** the presets lock — mutate+save are one
+/// critical section, so the last committed in-memory state is exactly the disk state (§5 concurrency consistency > lock-hold time).
+/// Snapshot-then-unlock-then-save would let overlapping mutations leave memory and broadcast at B while the disk stays at A, and restart
+/// would load the old value; an LLM/orchestrator calling rename/create/delete programmatically in succession actually hits that window (§5).
+/// **No deadlock (unrelated to ADR-0006):** `store.save` takes only the store-state field (a leaf lock — no IO under it) and does not
+/// re-enter the registry → lock order `presets → store-state field` one-way. The presets lock is separate from the session lock domain (ADR-0006 order). IO
+/// size under the lock is the same as ProfileRegistry (re-decision right before saving · worst case = retrying while that file is locked —
+///   ADR-0291 · D4).
 ///
-/// Verbs starting with `try_` = changes with a caller — applied to a copy → saved → committed only on success, and on `Err` memory is
-/// left as is and the error returned (grounds = `ProfileRegistry` doc). ★Presets have no changes without a caller — so
-/// the dirty field of `ProfileRegistry` is not kept here either★.
+/// Verbs starting with `try_` = changes with a caller — applied to a copy → saved → committed only on success; on `Err` memory is left as
+/// is and the error returned (grounds = `ProfileRegistry` doc). ★Presets have no changes without a caller — so `ProfileRegistry`'s dirty
+///   field is not kept here★.
 // ADR-0291 R17
 pub struct PresetRegistry {
     presets: Mutex<HashMap<PresetId, Preset>>,
@@ -76,7 +71,6 @@ pub struct PresetRegistry {
 }
 
 impl PresetRegistry {
-    /// Initializes by loading the existing presets from the store.
     pub fn new(store: Arc<dyn PresetStore>) -> Self {
         let loaded = store.load();
         let map = loaded.into_iter().map(|p| (p.id, p)).collect();
@@ -86,10 +80,9 @@ impl PresetRegistry {
         }
     }
 
-    /// The common path for changes — applies to a copy and, **before releasing the lock**, saves that copy and commits only on success. Since commit and
-    /// persistence are one critical section, persisted == observed is guaranteed (grounds = the struct lock discipline, ADR-0071).
-    /// ★Every preset change has a caller (the WS preset set)★ — there is no internal entry that applies to memory even on a save `Err`,
-    ///   and so there is no dirty either.
+    /// The common path for changes — applies to a copy and, **before releasing the lock**, saves that copy and commits only on success.
+    /// Commit and persistence are one critical section, so persisted == observed (grounds = the struct lock discipline, ADR-0071).
+    /// ★Every preset change has a caller (the WS preset set)★ — no internal entry applies to memory on a save `Err`, hence no dirty.
     // ADR-0291 R17
     fn try_mutate<R>(
         &self,
@@ -110,7 +103,6 @@ impl PresetRegistry {
         self.store.status()
     }
 
-    /// Snapshot of all presets (read — no persist).
     pub fn list(&self) -> Vec<Preset> {
         self.presets
             .lock()
@@ -130,27 +122,27 @@ impl PresetRegistry {
         Ok(created)
     }
 
-    /// Deletes a preset (for an unknown id the map stays as is — saving is still attempted). Commits only if saving succeeds. ★Deleting a preset ≠ terminating
-    /// an agent★ (ADR-0061): agents already spawned from that preset are not touched here (separate lifetimes).
+    /// Deletes a preset (for an unknown id the map stays as is — saving is still attempted). Commits only if saving succeeds. ★Deleting a
+    /// preset ≠ terminating an agent★ (ADR-0061): agents already spawned from it are not touched (separate lifetimes).
     pub fn try_remove(&self, id: PresetId) -> Result<(), StoreError> {
         self.try_mutate(|m| {
             m.remove(&id);
         })
     }
 
-    /// Sets/clears the preset display name override (ADR-0061 enrichment). `Some(name)` → save the override, `None` → clear
-    /// (back to deriving from the cwd basename). `true` if it exists; for an unknown id the map stays as is and `false` (saving is still attempted). Commits only if
-    /// saving succeeds.
-    /// ★Normalization is the caller's (frontend's) responsibility★: trim, empty-string refusal and skipping unchanged are handled by the frontend right before confirming
-    /// (same shape as TabBar rename) — only an already-valid value or an explicit None comes here.
+    /// Sets/clears the preset display name override (ADR-0061 enrichment). `Some(name)` → save the override, `None` → clear (back to
+    /// deriving from the cwd basename). `true` if it exists; for an unknown id the map stays as is and `false` (saving is still
+    ///   attempted). Commits only if saving succeeds.
+    /// ★Normalization is the frontend's responsibility★: trim, empty-string refusal and skipping unchanged happen before confirming (same
+    /// shape as TabBar rename) — only an already-valid value or an explicit None comes here.
     pub fn try_rename(&self, id: PresetId, name: Option<String>) -> Result<bool, StoreError> {
         self.try_mutate(|m| rename_present(m, id, name))
     }
 }
 
 fn new_preset(cwd: PathBuf) -> Preset {
-    // ★Why normalize★: if the same folder is registered under a different notation (case, relative path, UNC), the frontend basename
-    //   derivation and duplicate decision waver — the notation is fixed with canonicalize before saving (same policy as profile spawn).
+    // ★Why normalize★: the same folder under a different notation (case, relative path, UNC) would waver the frontend basename derivation
+    //   and duplicate decision — the notation is fixed with canonicalize before saving (same policy as profile spawn).
     let cwd = dunce::canonicalize(&cwd).unwrap_or(cwd);
     Preset {
         id: Uuid::new_v4(),
@@ -303,9 +295,8 @@ mod tests {
         assert_eq!(disk[0].name, mem[0].name, "persisted == observed");
     }
 
-    /// Regression guard — in the old racy design (save outside the lock) each mutation saved its own snapshot outside the lock,
-    /// so A could overwrite the disk with a stale snapshot that did not see B's insert and **an entry could go missing**.
-    /// Widens the interleave window with repeated create+rename.
+    /// Regression guard — with the old save-outside-the-lock design, A could overwrite the disk with a stale snapshot that did not see B's
+    /// insert and **an entry could go missing**. Repeated create+rename widens the interleave window.
     #[test]
     fn concurrent_mutations_persisted_equals_final_map() {
         use std::thread;
@@ -328,7 +319,6 @@ mod tests {
             h.join().unwrap();
         }
 
-        // 4 threads × 50 creates = 200 entries.
         let mem = reg.list();
         let disk = store.load();
         assert_eq!(mem.len(), 200, "200 in-memory creates");
