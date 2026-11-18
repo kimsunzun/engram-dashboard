@@ -1,10 +1,5 @@
-//! Real socket ① — does the WS adapter really connect (TRD §9-1).
-//!
-//! ★Both ends are this crate's★ — the receiving side `ws::WsListener` · the dialing side `ws::WsDialer`. So this file
-//! calls neither another crate nor an external process.
-//!
-//! ★Requiring even `test-support` is intentional★ — the packet vocabulary (`TestWire`) and the two-step handshake live behind it.
-//! `--all-features` turns both on together, so gate ④ really runs this file.
+//! Real socket ① — does the WS adapter really connect (TRD §9-1). ★Both ends are this crate's★ (`ws::WsListener` · `ws::WsDialer`), so no other crate or external process is called. ★Requiring even `test-support` is intentional★ —
+//! the packet vocabulary (`TestWire`) and the two-step handshake live behind it; `--all-features` turns both on, so gate ④ really runs this file.
 #![cfg(all(feature = "ws", feature = "test-support"))]
 
 mod common;
@@ -24,11 +19,10 @@ use engram_dashboard_transport::{
 #[tokio::test]
 async fn a_real_socket_peer_shakes_hands_in_two_steps_and_round_trips_a_request() {
     let mut listener = common::listen();
-    // ★Do not hard-code a port★ — request number 0 and read back the number the kernel picked.
+    // ★Do not hard-code a port★ — request 0 and read back the kernel-picked number.
     assert_ne!(listener.local_addr().port(), 0);
     let addr = listener.dial_address();
 
-    // The receiving side: receives hello, returns welcome, then answers one request.
     let server = tokio::spawn(async move {
         let (mut tx, mut rx) = common::accept_link(&mut listener).await.expect("accept");
         let hello = rx.recv().await.expect("hello received");
@@ -88,18 +82,10 @@ async fn a_real_socket_peer_shakes_hands_in_two_steps_and_round_trips_a_request(
     }
 }
 
-/// Gives the address of a port nobody listens on **while holding it**. ★The caller holds the returned socket until the test
-/// ends★ — the moment it is released that number is freed and the properties below vanish with it.
-///
-/// ★Not calling `listen()` is the whole of this scaffolding★ (external fact) — with no listening socket, a
-/// connection arriving at that port is refused without even being established ([`refusal_of`] re-measures that every time), and since the bind is alive nobody else can take that
-/// number (measured 2026-09-07, Windows 11: an ordinary bind was refused with `AddrInUse` (10048),
-/// and even a forced bind with `SO_REUSEADDR` on was refused with `PermissionDenied` (10013)).
-///
-/// ★Do not go back to 「open and close right away」★ — after closing, if someone else takes that number, accepts TCP, and cuts during the upgrade,
-/// that failure too comes up as an `Unreachable` carrying the address we dialed and the message gets **`os error 10054`**
-/// attached (measured 2026-09-07, Windows 11: the same number whether the peer lets go with FIN or cuts with RST). That is, an assertion that looks only at `os
-/// error` passes that branch entirely green — which is why [`refusal_of`] pins down the number too.
+/// An address of a port nobody listens on, **held**. ★The caller holds the returned socket until the test ends★ — released, the number is freed and the properties vanish. ★Not calling `listen()` is the whole of this scaffolding★
+/// (external fact): with no listening socket a connection is refused without being established ([`refusal_of`] re-measures it each time), and the live bind stops anyone else taking the number (measured on Windows 11: an
+/// ordinary bind got `AddrInUse` (10048), a forced `SO_REUSEADDR` bind `PermissionDenied` (10013)). ★Do not go back to 「open and close right away」★ — someone else could take the number, accept TCP and cut during the upgrade;
+/// that too comes up `Unreachable` with **`os error 10054`** (same number for FIN or RST), so an assertion on `os error` alone would pass that branch — which is why [`refusal_of`] pins the number too.
 fn unlistened_port() -> (TcpSocket, SocketAddr) {
     let socket = TcpSocket::new_v4().expect("v4 socket");
     socket
@@ -110,14 +96,8 @@ fn unlistened_port() -> (TcpSocket, SocketAddr) {
     (socket, addr)
 }
 
-/// Measures the refusal that address gives **right now** in the form `os error N`. The measuring itself is the confirmation of 「nobody is listening」.
-///
-/// ★Why the number is measured every time rather than hard-coded in the source★ — the value differs per platform (Windows `WSAECONNREFUSED` 10061 ·
-/// Linux `ECONNREFUSED` 111 · macOS 61) and hard-coding would mean managing that list by hand.
-///
-/// ★It does not look at the message body★ (external fact) — the `Display` of `io::Error` appends `(os error N)` after the OS text, and
-/// that body is translated by the OS locale (measured: the Korean edition of Windows returns Korean text). The number is not
-/// translated, so the decision hangs only on it.
+/// Measures the refusal that address gives **right now** as `os error N` (the measuring confirms 「nobody is listening」). ★The number is measured each time, not hard-coded★ — it differs per platform (Windows 10061 · Linux 111 ·
+/// macOS 61). ★It does not look at the message body★ (external fact): `io::Error`'s `Display` appends `(os error N)` after the OS-locale text (the Korean Windows returns Korean), and only the number is untranslated.
 async fn refusal_of(addr: SocketAddr) -> String {
     let refused = TcpStream::connect(addr)
         .await
@@ -136,8 +116,7 @@ async fn refusal_of(addr: SocketAddr) -> String {
 
 #[tokio::test]
 async fn dialing_a_port_that_nobody_listens_on_is_unreachable_not_rejected() {
-    // ★This is where 「could not connect」 and 「connected but rejected」 are told apart★ — if they are not told apart, the contract that a refusal does not
-    //   spend the reconnect budget (ADR-0180 decision 5) cannot be confirmed on a real socket. The refusal side is measured by `ws_reject.rs`.
+    // ★This tells 「could not connect」 from 「connected but rejected」★ — undistinguished, 「a refusal does not spend the reconnect budget」 (ADR-0180 decision 5) cannot be confirmed on a real socket; the refusal side is `ws_reject.rs`.
     let (_held, closed_at) = unlistened_port();
     let closed = Address::new(format!("ws://{closed_at}/"));
 
@@ -145,11 +124,8 @@ async fn dialing_a_port_that_nobody_listens_on_is_unreachable_not_rejected() {
     let (peer, mut inbox) =
         registry.add(PeerId::new("d1"), closed.clone(), Arc::new(HelloHandshake));
 
-    // ★Extract the expected value directly from that port★ — by branch name alone 「the link was cut after being accepted」 · 「the address
-    //   syntax is wrong」 · 「the handshake hit the deadline」 are all the same `Unreachable`. The one stimulus this test means to produce is **the connection
-    //   not even being established**, and the OS number is the only evidence of that stimulus.
-    // ★Measure it **side by side** with the supervisor's dial★ — one refusal takes 2.0 seconds on loopback (measured 2026-09-07, Windows 11).
-    //   Measured in sequence that value would be added to this test twice, and side by side the two waits overlap and cost only one.
+    // ★Extract the expected value directly from that port★ — by branch name 「cut after accept」 · 「bad address syntax」 · 「handshake hit the deadline」 are all `Unreachable`; this test's stimulus is **the connection not being
+    //   established at all**, and the OS number is the only evidence. ★Measure it **side by side** with the supervisor's dial★ — one refusal takes 2.0 s on loopback (measured, Windows 11); in sequence it would be paid twice.
     let (refusal, cause) = tokio::join!(
         refusal_of(closed_at),
         common::wait_incoming(

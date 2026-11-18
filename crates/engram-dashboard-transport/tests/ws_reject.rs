@@ -1,22 +1,14 @@
 //! Real socket ③ — version-rejection round trip (TRD §9-1).
 //!
-//! ★What this file measures = **how a close that crossed a real socket is classified**★ — whether the close **code and
-//! message** the peer carried cross the socket and come up as [`LinkRead::Closed`], and whether that classification **burns the reconnect budget**
-//! (ADR-0180 decision 5). Without the former the latter has no material to decide on, so 「a terminal refusal does not spend the budget」 does not
-//! hold in code — exactly the place pinned down by the [`LinkRead`] rustdoc in `link.rs`. A stimulus is set up per branch:
-//! a close that is a terminal refusal · a close that is a redial refusal · a close that carries a code but is **not** a refusal · a peer that vanished without a word.
+//! ★Measures **how a close that crossed a real socket is classified**★ — whether the close **code and message** survive the socket and arrive as [`LinkRead::Closed`], and whether that classification **burns the
+//! reconnect budget** (ADR-0180 decision 5); without the former 「a terminal refusal does not spend the budget」 has no material to decide on and does not hold in code (the [`LinkRead`] rustdoc in `link.rs`). One stimulus per
+//! branch: a terminal-refusal close · a redial-refusal close · a code-carrying close that is **not** a refusal · a peer that vanished without a word.
 //!
-//! ★Do not count the suite size★ — a hand-written count silently goes stale each time a test is added, and a stale count is
-//! worse than none (the next reader believes it). What this file measures is said by the paragraph above.
+//! ★Do not count the suite size★ — a hand-written count goes stale with every added test. ★Why measure again though memory did★ — the harness's `reject()` hands the close over **as a value**; here a real WS close
+//! frame crosses the kernel, and whether code and message survive is an adapter property. ★This paragraph is the canonical source `lib.rs` 「Standalone verification」 names — do not delete it★.
 //!
-//! ★It was also measured in memory, but the reason to measure again here★ — the harness's `reject()` hands over the close **as a value**,
-//! while here a real WS close frame crosses the kernel. Whether the code and message survive that round trip is a property of the adapter.
-//! ★This paragraph is the canonical source that `lib.rs` 「Standalone verification」 points to by name — do not delete it★.
-//!
-//! ★Different arms gather under the one result of failing to connect★ — 「the peer spoke and cut」 and 「the read failed」 have the same
-//! classification ([`ConnectFailure::Unreachable`]), budget consumption and endpoint. So the place that asserts that result
-//! pins down **which arm ran** through the `LinkError` message — if not pinned, the decision stays green even if the stimulus disappears (close frame
-//! loss · RST · dependency change).
+//! ★Different arms gather under one failure-to-connect result★ — 「the peer spoke and cut」 and 「the read failed」 classify the same ([`ConnectFailure::Unreachable`]) with the same budget and endpoint, so the asserting
+//! place pins **which arm ran** via the `LinkError` message; unpinned, the decision stays green even if the stimulus disappears (close-frame loss · RST · dependency change).
 #![cfg(all(feature = "ws", feature = "test-support"))]
 
 mod common;
@@ -31,30 +23,21 @@ use engram_dashboard_transport::{
     Policy, ReconnectPolicy, RejectKind, TransportEvent,
 };
 
-/// ★The point of this file is that the peer really sends this string and the dialing side reads it back★.
 const REASON: &str = "version 3 != 4";
 
-/// The message the handshake attaches when the peer **spoke** and cut (`peer.rs`).
 const CLOSED_DURING_HANDSHAKE: &str = "peer closed during handshake";
 
-/// The prefix the adapter attaches when a read failed (`ws.rs`).
 const READ_ERROR_PREFIX: &str = "ws read:";
 
-/// The message the adapter's latch gives when a link that already failed is read again (`WsRx::recv` in `ws.rs`).
 const LATCHED_READ: &str = "ws read: link already failed";
 
-/// The policy used by the test that measures budget exhaustion.
-///
-/// ★It does not sit waiting in real time for the default backoff (500ms→1s→2s = 3.5 seconds)★ — the backoff **schedule** is the job of
-/// measuring in memory with the injected clock (the `policy.rs`·`peer.rs` unit suites), and what this file measures on a real socket is
-/// classification and budget consumption. `max_attempts = 1` is the **minimum** that reaches exhaustion with 「initial attempt + one retry = two links」,
-/// and the assertion 「more than one link」 below counts those two.
+/// The policy of the budget-exhaustion test. ★It does not wait in real time for the default backoff (500ms→1s→2s)★ — the **schedule** is measured in memory with the injected clock (`policy.rs` · `peer.rs`
+/// unit suites); here only classification and budget consumption. `max_attempts = 1` is the **minimum** reaching exhaustion (initial attempt + one retry = two links), which the 「more than one link」 assertion counts.
 fn spends_budget_without_waiting() -> Policy {
     Policy {
         reconnect: ReconnectPolicy {
             max_attempts: 1,
-            // ★[`MIN_BACKOFF`] is the floor of `delay()`★ — even if written shorter, that function folds it up
-            //   to here, so it cannot be made faster than this.
+            // ★[`MIN_BACKOFF`] is the floor of `delay()`★ — a shorter value is folded up to it, so it cannot go faster.
             base: MIN_BACKOFF,
             cap: MIN_BACKOFF,
             multiplier: 1.0,
@@ -70,8 +53,7 @@ async fn a_close_code_from_the_peer_is_a_rejection_that_spends_no_reconnect_budg
     let addr = listener.dial_address();
     let accepted = Arc::new(AtomicUsize::new(0));
 
-    // The receiving side: sees no frame at all and closes with code+message (= what the version rejection of ADR-0178 does).
-    // ★Counting the links that connected is the material for the budget decision★ — if a refusal burns the budget, a second link connects after the backoff.
+    // The receiving side sees no frame and closes with code+message (what ADR-0178's version rejection does). ★Counting connected links is the material for the budget decision★ — a refusal burning budget connects a second link after the backoff.
     let server = tokio::spawn({
         let accepted = accepted.clone();
         async move {
@@ -85,8 +67,7 @@ async fn a_close_code_from_the_peer_is_a_rejection_that_spends_no_reconnect_budg
         }
     });
 
-    // ★This is the only place in this file that uses the default policy★ — 「a refusal does not spend the budget」 is measured
-    //   only when there is a budget to spend. An implementation that burns it would connect a second link after 500ms, and the count below exceeds 1.
+    // ★The only test here using the default policy★ — 「a refusal does not spend the budget」 is measurable only with a budget to spend; an implementation burning it would connect a second link after 500ms and the count exceeds 1.
     let registry = common::registry(Arc::new(common::dialer()), Policy::default());
     let (peer, mut inbox) = registry.add(PeerId::new("d1"), addr, Arc::new(ListeningHandshake));
 
@@ -123,8 +104,7 @@ async fn a_close_code_from_the_peer_is_a_rejection_that_spends_no_reconnect_budg
 
 #[tokio::test]
 async fn a_retryable_close_code_from_the_peer_spends_budget_and_dials_again() {
-    // ★The kind is carried by the code★ (TRD 3 §3-0 ⑤) — does a redial refusal code cross the socket and read as the branch that spends the budget. With the test
-    //   above alone, an implementation of 「anything is terminal if a code is carried」 passes too.
+    // ★The kind is carried by the code★ (TRD 3 §3-0 ⑤) — does a redial-refusal code cross the socket and read as the budget-spending branch; the test above alone passes an implementation 「anything is terminal if a code is carried」.
     let mut listener = common::listen();
     let addr = listener.dial_address();
     let accepted = Arc::new(AtomicUsize::new(0));
@@ -189,13 +169,9 @@ async fn a_retryable_close_code_from_the_peer_spends_budget_and_dials_again() {
 
 #[tokio::test]
 async fn a_peer_that_vanishes_without_speaking_is_unreachable_and_does_spend_budget() {
-    // ★A silent exit is **not** a refusal★ — with the test above alone, an implementation of 「any close is a refusal」 passes too.
-    //
-    // ★The spot this branch pins down is not `RejectKind::of`★ — a WS peer that simply dropped the link comes up in tungstenite as
-    //   a **read error** (measured 2026-09-07: the `Ok(Err(err))` arm of `handshake_once` catches it), so it never passes through
-    //   [`LinkRead::Closed`] at all. The [`READ_ERROR_PREFIX`] assertion below holds that measurement, so if
-    //   a dependency starts reporting it as EOF, that spot turns red instead of this comment silently becoming false.
-    //   The opposite side on the `RejectKind::of` end is the `going_away` test below.
+    // ★A silent exit is **not** a refusal★ — the test above alone passes 「any close is a refusal」. ★The pinned spot is not `RejectKind::of`★: a WS peer that just dropped the link is a tungstenite **read error** (measured:
+    //   the `Ok(Err(err))` arm of `handshake_once`), never passing through [`LinkRead::Closed`]; the [`READ_ERROR_PREFIX`] assertion holds that measurement, so a dependency reporting EOF turns it red instead of this comment going
+    //   false. The `RejectKind::of` opposite is the `going_away` test below.
     let mut listener = common::listen();
     let addr = listener.dial_address();
     let accepted = Arc::new(AtomicUsize::new(0));
@@ -205,7 +181,6 @@ async fn a_peer_that_vanishes_without_speaking_is_unreachable_and_does_spend_bud
         async move {
             while let Ok(link) = listener.accept().await {
                 accepted.fetch_add(1, Ordering::AcqRel);
-                // Drops the link without a word.
                 drop(link);
             }
         }
@@ -214,8 +189,7 @@ async fn a_peer_that_vanishes_without_speaking_is_unreachable_and_does_spend_bud
     let registry = common::registry(Arc::new(common::dialer()), spends_budget_without_waiting());
     let (peer, mut inbox) = registry.add(PeerId::new("d1"), addr, Arc::new(ListeningHandshake));
 
-    // ★Also pick up the refusal event★ — if not picked up, a regression that 「reads this stimulus as a refusal」 is reported as exceeding the cap (10 seconds)
-    //   and the cause is disguised as 「the event never comes」.
+    // ★Also pick up the refusal event★ — unpicked, a regression 「reads this stimulus as a refusal」 shows as exceeding the cap (10 s) and the cause is disguised as 「the event never comes」.
     let picked =
         common::wait_incoming(
             &mut inbox,
@@ -266,9 +240,8 @@ async fn a_peer_that_vanishes_without_speaking_is_unreachable_and_does_spend_bud
 
 #[tokio::test]
 async fn a_graceful_going_away_is_not_a_rejection_and_does_spend_budget() {
-    // ★This is the opposite side of `RejectKind::of`★ — if the peer closed **carrying a code** but that code is 「normal exit」, it is not a refusal
-    //   and it spends the budget (if the daemon is restarting, the next attempt connects). Without this branch an implementation
-    //   of 「anything is a refusal if a code is carried」 passes the earlier branches as they are.
+    // ★The opposite of `RejectKind::of`★ — a close **carrying a code** that is 「normal exit」 is not a refusal and spends budget (a restarting daemon connects next time); without this branch 「anything with a code is a refusal」
+    //   passes the earlier branches.
     let mut listener = common::listen();
     let addr = listener.dial_address();
     let accepted = Arc::new(AtomicUsize::new(0));
@@ -284,9 +257,8 @@ async fn a_graceful_going_away_is_not_a_rejection_and_does_spend_budget() {
         }
     });
 
-    // ① ★Premise: this server's close code really crosses the socket★ — if not measured, ② below cannot be told apart from 「the frame was lost and the read-error arm ran」.
-    //    The two arms have the same classification, budget consumption and endpoint, so
-    //    ② is green either way, and then it is green even if the normal-exit exception of `RejectKind::of` is deleted.
+    // ① ★Premise: this server's close code really crosses the socket★ — unmeasured, ② cannot be told from 「the frame was lost and the read-error arm ran」 (same classification, budget and endpoint), and ② stays green even if
+    //    `RejectKind::of`'s normal-exit exception is deleted.
     let (probe_tx, mut probe_rx) =
         tokio::time::timeout(common::PATIENCE, common::dialer().dial(&addr))
             .await
@@ -318,8 +290,7 @@ async fn a_graceful_going_away_is_not_a_rejection_and_does_spend_budget() {
     let registry = common::registry(Arc::new(common::dialer()), spends_budget_without_waiting());
     let (peer, mut inbox) = registry.add(PeerId::new("d1"), addr, Arc::new(ListeningHandshake));
 
-    // ★Also pick up the refusal event★ — if not picked up, a regression that 「reads this stimulus as a refusal」 is reported as exceeding the cap (10 seconds)
-    //   and the cause is disguised as 「the event never comes」.
+    // ★Also pick up the refusal event★ — see the same comment above.
     let picked =
         common::wait_incoming(
             &mut inbox,
@@ -339,8 +310,7 @@ async fn a_graceful_going_away_is_not_a_rejection_and_does_spend_budget() {
     let ConnectFailure::Unreachable(err) = &cause else {
         panic!("read a normal close as a reject: {cause:?}");
     };
-    // ★What the message tells apart is 「spoke and was cut」 versus 「read error」★ — ① already measured that the code crosses,
-    //   so the only residue left here is 「an exit with no code gives the same message」, and in that case ① turns red first.
+    // ★The message separates 「spoke and was cut」 from 「read error」★ — ① already measured that the code crosses, so the residue is 「an exit with no code gives the same message」, where ① turns red first.
     assert_eq!(
         err.message, CLOSED_DURING_HANDSHAKE,
         "the read error arm ran, not the arm where the peer said goodbye and cut — it means the close frame ① measured was lost on the supervisor's \
@@ -372,14 +342,11 @@ async fn a_graceful_going_away_is_not_a_rejection_and_does_spend_budget() {
 
 #[tokio::test]
 async fn a_read_after_a_failed_read_is_still_an_error_never_a_spoken_close() {
-    // ★[`LinkRead::Closed`] means 「the peer **said** it closed」★ — if a close nobody spoke comes up under
-    //   that name, a consumer that branches on that value swaps 「rejected / left politely」 for 「cut off」.
-    //   `vanishes_without_speaking` above measures **the supervisor's classification** of that stimulus, and here we measure the floor
-    //   that classification sits on — the place in the adapter where reading happens **twice**.
+    // ★[`LinkRead::Closed`] means 「the peer **said** it closed」★ — a close nobody spoke under that name would make a consumer swap 「rejected / left politely」 for 「cut off」. `vanishes_without_speaking` measures the supervisor's
+    //   classification; here the floor under it — the adapter's **second** read.
     let mut listener = common::listen();
     let addr = listener.dial_address();
 
-    // The dialing side and the receiving side wait on each other, so the handshake finishes only when they are polled together.
     let dialer = common::dialer();
     let (accepted, dialed) = tokio::time::timeout(common::PATIENCE, async {
         tokio::join!(common::accept_link(&mut listener), dialer.dial(&addr))
@@ -389,7 +356,7 @@ async fn a_read_after_a_failed_read_is_still_an_error_never_a_spoken_close() {
     let server = accepted.expect("accept");
     let (_client_tx, mut client_rx) = dialed.expect("dial");
 
-    // ★It vanishes without a close frame★ — the socket closes only when both ends are released (`split_link` in `ws.rs`).
+    // ★Vanishes without a close frame★ — the socket closes only when both ends are released (`split_link` in `ws.rs`).
     drop(server);
 
     let first = tokio::time::timeout(common::PATIENCE, client_rx.recv())
@@ -400,8 +367,7 @@ async fn a_read_after_a_failed_read_is_still_an_error_never_a_spoken_close() {
         first.message.starts_with(READ_ERROR_PREFIX),
         "the first read is not the adapter's read error: {first}"
     );
-    // ★If the first failure is the latch message, then the latch fired first, not the stimulus★ — then the assertion below would measure itself,
-    //   so we separate them here.
+    // ★If the first failure is the latch message, the latch fired first, not the stimulus★ — then the assertion below would measure itself; separate them here.
     assert_ne!(
         first.message, LATCHED_READ,
         "the latch was set before the stimulus reached the link"

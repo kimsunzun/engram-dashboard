@@ -151,7 +151,6 @@ pub async fn settle_until(what: &str, mut done: impl FnMut() -> bool) {
     }
 }
 
-
 /// What the client sent down the link. Besides frames, **keepalive and close** are also observed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientMsg {

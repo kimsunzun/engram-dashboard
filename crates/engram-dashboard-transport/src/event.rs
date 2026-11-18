@@ -156,7 +156,10 @@ pub enum TransportEvent<W: Wire> {
         code: CloseCode,
         reason: String,
     },
-    GaveUp { peer: PeerId, reason: GaveUpReason },
+    GaveUp {
+        peer: PeerId,
+        reason: GaveUpReason,
+    },
     /// ★This supervisor's last event and the last item of its inbox ([`crate::Inbox`])★ — cleanup loads everything held in the ordering area, emits this last and releases the sending end, so
     /// the next `recv` is `None` (TRD 3 §3-0 ②). `generation` = this supervisor's last connection generation (the registry's floor if it never connected); `cause` = why it ended.
     /// ★A dialed peer ([`crate::Registry::add`]) is always [`DisconnectCause::Explicit`]★ (its only end is a close). ★An accepted peer ([`crate::Registry::attach`]) carries the real reason★ (it does not
@@ -211,7 +214,10 @@ pub enum TransportEvent<W: Wire> {
     },
     /// A reply came but **there is no waiting slot**. A late reply after expiry does not come here (quietly discarded by design — ADR-0181 decision 4); this is **a number we never asked for**: a consumer
     /// mistake (a reply-expecting command pushed through `notify`/`broadcast`) or a number the peer made up.
-    UnmatchedReply { peer: PeerId, tag: W::Tag },
+    UnmatchedReply {
+        peer: PeerId,
+        tag: W::Tag,
+    },
     /// Number of discarded items (what counts is defined per [`Direction`] branch); raised regardless of queue policy. ★Exists so as not to create silent loss★.
     Dropped {
         peer: PeerId,
@@ -225,7 +231,9 @@ pub enum TransportEvent<W: Wire> {
         reason: &'static str,
     },
     /// One `In` was reported as both a reply and a stream fragment — a signal of a [`Wire`] contract violation.
-    AmbiguousRole { peer: PeerId },
+    AmbiguousRole {
+        peer: PeerId,
+    },
 }
 
 impl<W: Wire> TransportEvent<W> {

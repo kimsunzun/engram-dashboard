@@ -1,18 +1,7 @@
-//! Scaffolding shared by the three real-socket tests.
-//!
-//! ★Every wait on the dialing side is 「notification + cap」★ — there is no place that measures with `sleep`. The notification is the real
-//! synchronization point, and if no notification comes, [`PATIENCE`] turns the hang into a loud failure on the spot.
-//!
-//! ★Waits without a cap remain only on the **receiving side** spawned as a task★ — waiting for a guest is the job of that task,
-//! so a cap carries no meaning there (the accept loop and the `drain` task are of that shape). The dialing side
-//! carries every decision and has a cap, so it panics first, and the receiving-side task is reaped by `abort()` or runtime shutdown.
-//! ★The dialing side has no exceptions★ — the one thing that decides where to draw the line when adding a new wait is **who decides**:
-//! every wait on the side that carries the decision gets a cap, and only a task whose job is itself to wait for a guest
-//! goes without. ★Do not count that place as 「the Nth test」★ — a sentence that counts silently
-//! goes stale each time a test is added.
-//!
-//! ★The in-memory harness's `settle`/`settle_until` cannot be used here★ — that side builds settling from cooperative yielding
-//! alone, and on a real socket in real time yielding does not wait for the kernel.
+//! Scaffolding shared by the real-socket tests. ★Every dialing-side wait is 「notification + cap」★ — nothing measures with `sleep`; the notification is the real synchronization point and [`PATIENCE`] turns a hang into a loud
+//! failure. ★Uncapped waits remain only on the **receiving side** spawned as a task★ (waiting for a guest is that task's job; the accept loop and `drain` task are that shape) — the dialing side carries every decision and panics
+//! first, and the receiving-side task is reaped by `abort()` or runtime shutdown. ★The dialing side has no exceptions★: when adding a wait ask **who decides** — the deciding side gets a cap; only a task whose job is to wait for a
+//! guest goes without. Do not describe that place as 「the Nth test」 (counts go stale). ★The in-memory `settle`/`settle_until` cannot be used here★ — they yield cooperatively, which does not wait for the kernel on a real socket.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -25,14 +14,11 @@ use engram_dashboard_transport::{
     Registry, SystemClock,
 };
 
-/// The byte cap of one message and one frame — the same as the production value (TRD 3 §5 15). The
-/// same value goes to the dialing side ([`dialer`]) and the receiving side ([`accept_policy`]).
+/// The byte cap of one message and one frame — the production value (TRD 3 §5 15); the same value goes to [`dialer`] and [`accept_policy`].
 pub const MAX_MESSAGE: usize = 16 << 20;
 
-/// The accept policy used by suites that do not measure accepting — values of the same shape as production (reject upgrades with an Origin · loopback Host ·
-/// 16 MiB). ★Because the crate has no value meaning allow-everything★, tests also run with real values.
-///
-/// ★The upgrade deadline is kept separate from [`PATIENCE`]★ — that constant is not used as a policy window (its rustdoc).
+/// The accept policy of suites not measuring accepting — production-shaped values (reject upgrades with an Origin · loopback Host · 16 MiB); ★the crate has no allow-everything value★, so tests use real ones.
+/// ★The upgrade deadline is separate from [`PATIENCE`]★ (that constant is not a policy window — its rustdoc).
 pub fn accept_policy() -> AcceptPolicy {
     AcceptPolicy {
         allowed_origins: Vec::new(),
@@ -44,12 +30,10 @@ pub fn accept_policy() -> AcceptPolicy {
     }
 }
 
-/// Loopback on port 0 — the number the kernel picked is read back from the listener.
 pub fn loopback() -> SocketAddr {
     "127.0.0.1:0".parse().expect("address syntax")
 }
 
-/// A listener opened with [`accept_policy`]. Refusal reports are dropped — measuring those is `ws_accept.rs`'s job.
 pub fn listen() -> WsListener {
     WsListener::bind(loopback(), accept_policy(), Arc::new(SystemClock))
         .expect("bind")
@@ -60,30 +44,22 @@ pub fn dialer() -> WsDialer {
     WsDialer::new(MAX_MESSAGE)
 }
 
-/// Both ends of an accepted link — used by tests that drive the receiving side by hand without a supervisor.
 pub async fn accept_link(
     listener: &mut WsListener,
 ) -> Result<(Box<dyn LinkTx>, Box<dyn LinkRx>), LinkError> {
     listener.accept().await.map(accepted_ends)
 }
 
-/// The cap on real-socket, real-time waits. It is generous for a local loopback round trip, and if it was exceeded something hung.
-///
-/// ★No test may use this value as a **policy window**★ — raising it because of a slow runner can happen at any time, and
-/// then 「a decision that held because this value was smaller than the keepalive interval」 silently flips. The supervisor test in
-/// `ws_write_deadline.rs`, which had that shape, narrows its own window by separately asserting the event arrival time against the wall clock —
-/// new tests do the same.
+/// The cap on real-socket, real-time waits — generous for a loopback round trip; exceeding it means something hung. ★No test may use it as a **policy window**★ — raising it for a slow runner would silently flip 「a decision that
+/// held because this value was smaller than the keepalive interval」; `ws_write_deadline.rs`'s supervisor test narrows its own window by asserting the event arrival time against the wall clock — new tests do the same.
 pub const PATIENCE: Duration = Duration::from_secs(10);
 
-/// One registry. ★The one that opens the link is chosen at the call site★ — a test that must set socket options brings its own
-/// [`Dialer`] (`ws_write_deadline.rs`).
+/// One registry. ★The dialer is chosen at the call site★ — a test setting socket options brings its own [`Dialer`] (`ws_write_deadline.rs`).
 pub fn registry(dialer: Arc<dyn Dialer>, policy: Policy) -> Registry<TestWire> {
     Registry::new(Arc::new(TestWire), dialer, Arc::new(SystemClock), policy)
 }
 
-/// Waits through watch notifications until the state satisfies `want`. Returns the state that satisfied it.
-///
-/// Panics: when [`PATIENCE`] is exceeded · when the supervisor disappears before that.
+/// Waits through watch notifications until the state satisfies `want`; returns it. Panics: [`PATIENCE`] exceeded · the supervisor disappears first.
 pub async fn wait_state(
     peer: &Peer<TestWire>,
     what: &str,
@@ -115,9 +91,7 @@ pub async fn wait_state(
     }
 }
 
-/// Reads from one handle's receiver up to the first item for which `pick` gives a value.
-///
-/// Panics: when [`PATIENCE`] is exceeded · when the receiver ends before that.
+/// Reads one handle's receiver up to the first item for which `pick` gives a value. Panics: [`PATIENCE`] exceeded · the receiver ends first.
 pub async fn wait_incoming<T>(
     inbox: &mut Inbox<TestWire>,
     what: &str,

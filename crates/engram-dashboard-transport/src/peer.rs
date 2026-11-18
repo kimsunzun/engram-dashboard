@@ -933,7 +933,7 @@ impl<W: Wire> Supervisor<W> {
                     }
                     PeerState::GaveUp(_) | PeerState::Idle => self.park().await,
                     other => {
-                // ★Do not kill the peer here★ — reaching this is our bug.
+                        // ★Do not kill the peer here★ — reaching this is our bug.
                         debug_assert!(false, "fell to {other:?} without a follow-up input");
                         Input::ReconnectNow
                     }
